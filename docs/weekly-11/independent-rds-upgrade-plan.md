@@ -100,7 +100,7 @@
 
 ### 2.4 迁移账本
 
-- 三库共享一本 `grape_t_schema_migrations`（管理库为基表、其余为视图），现有 **57** 条盖章。
+- 每库各有一本 `grape_t_schema_migrations`（均为本域基表，无跨库视图）：mgmt 记 mgmt 域条目，runtime / insight 各记本域条目。
 - 历史上已发生两起号段事故（本仓有守卫测试）：
   - `202611030001`（issue658_role_tags）曾被改写为别的号，导致「已发布迁移改名」红灯；
   - `202611160001` 曾被写成 role_tags，与已盖章的 `takeover-sessions-v1` 同号异名 → 迁移会被永久跳过。

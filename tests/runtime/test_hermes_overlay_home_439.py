@@ -146,6 +146,51 @@ class TestBuildOverlayHome:
         assert not os.path.islink(os.path.join(iso, "auth.json"))
 
 
+class TestPlatformCredsStripped:
+    """2026-11-18：overlay .env 不带 IM 平台「启用凭据」。
+
+    hermes 网关的逻辑是「env 里有平台凭据 ⇒ 自动启用该平台适配器」，于是每个 ACP 子 home
+    的网关都会去绑定同一个飞书 app_id，与宿主网关冲突（feishu_app_lock）→ 子网关 fatal
+    退出 → prompt 无人处理，IM 侧表现为「发消息完全没有回复」（task status=error text_len=0）。
+    """
+
+    def test_detector_matches_known_platform_keys(self):
+        assert hermes_acp._is_platform_enable_cred("FEISHU_APP_ID=cli_x")
+        assert hermes_acp._is_platform_enable_cred("export FEISHU_APP_SECRET=sec")
+        assert hermes_acp._is_platform_enable_cred("DINGTALK_CLIENT_ID=cid")
+        assert hermes_acp._is_platform_enable_cred("TELEGRAM_BOT_TOKEN=1:x")
+        # 平台的非启用键（不触发适配器）必须保留
+        assert not hermes_acp._is_platform_enable_cred("FEISHU_DOMAIN=feishu.cn")
+        assert not hermes_acp._is_platform_enable_cred("FEISHU_GROUP_POLICY=open")
+        assert not hermes_acp._is_platform_enable_cred("TOKEN=x")
+        assert not hermes_acp._is_platform_enable_cred("# FEISHU_APP_ID=cli_x")
+
+    def test_overlay_env_drops_platform_creds_keeps_rest(self, tmp_path):
+        src = tmp_path / "src_home"
+        src.mkdir()
+        (src / "config.yaml").write_text("tool_progress: old\n")
+        (src / ".env").write_text(
+            "OPENAI_API_KEY=sk-x\n"
+            "FEISHU_APP_ID=cli_a\n"
+            "FEISHU_APP_SECRET=sec\n"
+            "export DINGTALK_CLIENT_SECRET=dd\n"
+            "FEISHU_DOMAIN=feishu.cn\n"
+            "HERMES_HOME=/other/home\n")
+        iso = str(tmp_path / "iso")
+        os.makedirs(iso)
+
+        hermes_acp._build_overlay_home(iso, str(src))
+
+        body = (tmp_path / "iso" / ".env").read_text()
+        assert "OPENAI_API_KEY=sk-x" in body
+        assert "FEISHU_DOMAIN=feishu.cn" in body
+        assert "FEISHU_APP_ID" not in body
+        assert "FEISHU_APP_SECRET" not in body
+        assert "DINGTALK_CLIENT_SECRET" not in body
+        assert "/other/home" not in body          # 源 HERMES_HOME 被删
+        assert f"HERMES_HOME='{iso}'" in body      # 重新 pin 到 overlay
+
+
 class TestRemovePathReparsePoint:
     def test_junction_removed_with_rmdir_not_rmtree(self, tmp_path, monkeypatch):
         """Windows junction（reparse point，islink=False 但 isdir=True）删除必须

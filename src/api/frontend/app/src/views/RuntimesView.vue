@@ -67,6 +67,8 @@
       <!-- 筛选标签栏 -->
       <div class="rtv-filters">
         <span class="rtv-filter-lbl">筛选</span>
+        <!-- 分组标题（用户 2026-11-18 裁定：范围 / 类型 / 归属 三组各带标题，只改文案不改行为） -->
+        <span class="rtv-fgrp">{{ t('fgrp_range') }}</span>
         <!-- Issue #473：范围筛选（全部/仓库/个人） -->
         <span
           v-for="opt in RT_RANGE_OPTIONS"
@@ -75,6 +77,9 @@
           @click="setRange(opt.key)"
           >{{ t(opt.labelKey) }}</span
         >
+        <!-- 范围组 → 引擎类型组：竖线分隔（用户 2026-11-18 裁定） -->
+        <span v-if="availTypes.length" class="rtv-chip-sep"></span>
+        <span v-if="availTypes.length" class="rtv-fgrp">{{ t('fgrp_type') }}</span>
         <span
           v-for="ty in availTypes"
           :key="'t' + ty"
@@ -84,7 +89,10 @@
           ><span class="rtv-chip-dot" :style="{ background: ENGINE_DOT[ty] || '#999' }"></span
           >{{ ty }}</span
         >
-        <span v-if="availTypes.length" class="rtv-chip-sep"></span>
+        <!-- 类型组/范围组 → 归属组：竖线按归属组自身渲染条件挂，不能挂在 availTypes 上
+             （某些范围下没有已知类型档时，两根竖线会一起消失，两个「个人」就贴在一起了） -->
+        <span v-if="availScopes.length" class="rtv-chip-sep"></span>
+        <span v-if="availScopes.length" class="rtv-fgrp">{{ t('fgrp_scope') }}</span>
         <span
           v-for="s in availScopes"
           :key="'s' + s"
@@ -113,7 +121,7 @@
                 />
                 <span
                   class="rtv-tagpill"
-                  :style="{ background: SCENE_TAG_COLORS[s] || '#0b7a55' }"
+                  :style="{ '--tag': SCENE_TAG_COLORS[s] || 'var(--rtv-scn-default)' }"
                   >{{ sceneDisplayName(s) }}</span
                 >
               </label>
@@ -144,7 +152,7 @@
                   :style="{ accentColor: RT_TAG_COLORS[tg] || '#666' }"
                   @change="toggleMulti('tag', tg)"
                 />
-                <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] || '#666' }">{{
+                <span class="rtv-tagpill" :style="{ '--tag': RT_TAG_COLORS[tg] || 'var(--rtv-tg-all)' }">{{
                   rtTagLabel(tg)
                 }}</span>
               </label>
@@ -210,6 +218,12 @@
                 class="rtv-vstale"
                 :title="t('label.worker_version_stale_hint')"
                 >⬆ {{ t('label.worker_version_stale') }}</span
+              ><!-- B5：沙箱平台禁用徽标（红边框警示，不再新建沙箱） -->
+              <span
+                v-if="rt.is_sandbox && rt.platform_enabled === false"
+                class="rtv-pdisabled"
+                :title="t('label.platform_disabled_tip')"
+                >⏸ {{ t('label.platform_disabled') }}</span
               ><span
                 v-if="rt.spawn_fail_degraded"
                 class="rtv-degraded"
@@ -309,7 +323,7 @@
             v-for="d in sortedDevices"
             :key="d.credential_id + '-' + workerDisplayName(d)"
             class="rtv-wcard"
-            :style="cardLeftBorder(d.health, d)"
+            :style="workerCardBorder(d)"
           >
             <div class="rtv-wcard-head">
               <span :class="['rtv-hbadge', d.health || 'offline']"
@@ -322,15 +336,21 @@
                     : ' · ' + t('label.local_direct')
                 }}</span
               >
+              <span
+                v-if="platformDisabled(d)"
+                class="rtv-pdisabled"
+                :title="t('label.platform_disabled_tip')"
+                >⏸ {{ t('label.platform_disabled') }}</span
+              >
               <span :class="['rtv-sbadge', scopeKey(d)]">{{ scopeBadgeLabel(d) }}</span>
               <span class="rtv-wname">{{ workerDisplayName(d) }}</span>
               <span class="rtv-wip">{{ d.worker_ip || '' }}</span>
-              <button v-if="canManage(d)" class="bt bt-o bt-s rtv-wbtn" @click="openScopeSwitcher(d)">
+              <button v-if="canManage(d)" class="bt bt-o rtv-wbtn rtv-wbtn-scope" @click="openScopeSwitcher(d)">
                 {{ scopeShort(d.scope) }}
               </button>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-o bt-s rtv-wbtn"
+                class="bt bt-o rtv-wbtn"
                 @click="renameCredential(d.credential_id)"
               >
                 {{ t('action.rename') }}
@@ -354,11 +374,25 @@
               </div>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-r bt-s rtv-wbtn"
+                class="bt bt-r rtv-wbtn"
                 @click="revokeCredential(d.credential_id)"
               >
                 {{ t('action.revoke') }}
               </button>
+            </div>
+            <!-- B5：沙箱平台行（cred_type=sandbox）——平台名只读展示；进平台页走右侧「详情」按钮
+                 （2026-11-18 用户裁定：去掉带 ↗ 的平台链接，点详情按钮即可，避免同一行两个入口） -->
+            <div v-if="d.cred_type === 'sandbox' && d.platform" class="rtv-wcard-plat">
+              <span class="rtv-k">{{ t('label.sandbox_platform') }}</span>
+              <span class="rtv-plat-name">☁ {{ d.platform }}</span>
+              <span v-if="!d.provider_id" class="rtv-plat-unbound">{{ t('credential.platform_unbound') }}</span>
+              <button
+                v-if="!!d.provider_id"
+                class="bt bt-o bt-s rtv-plat-btn"
+                :title="t('credential.platform_detail_btn_tip')"
+                @click.stop="gotoProviderDetail(d.provider_id)"
+                >📋 {{ t('credential.platform_detail_btn') }}</button
+              >
             </div>
             <div class="rtv-wcard-engines">
               <span class="rtv-k">{{ t('label.hosted_engines') }}</span>
@@ -423,7 +457,7 @@
           <span v-if="engineDetail.alias" class="rtv-ename-s"
             >({{ engineDisplayName(engineDetail) }})</span
           >
-          <button class="bt bt-o bt-s rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
+          <button class="bt bt-o rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
             {{ t('action.edit_alias') }}
           </button>
           <span v-if="engineDetail.is_local" class="rtv-localpill">{{
@@ -535,7 +569,7 @@
               />
               <span
                 class="rtv-tagpill"
-                :style="{ background: SCENE_TAG_COLORS[s.name] || '#0b7a55' }"
+                :style="{ '--tag': SCENE_TAG_COLORS[s.name] || 'var(--rtv-scn-default)' }"
                 >{{ s.display_name }}</span
               >
             </label>
@@ -560,7 +594,7 @@
                 :style="{ accentColor: RT_TAG_COLORS[tg] }"
                 @change="onEdTagChange(tg)"
               />
-              <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] }">{{
+              <span class="rtv-tagpill" :style="{ '--tag': RT_TAG_COLORS[tg] }">{{
                 rtTagLabel(tg)
               }}</span>
               <span class="rtv-tagdesc">{{
@@ -677,7 +711,7 @@
             type="radio"
             :value="sc"
             name="scopeRadio"
-            :style="{ accentColor: 'var(--a-text)', width: '16px', height: '16px' }"
+            :style="{ accentColor: 'var(--a)', width: '16px', height: '16px' }"
           />
           <span>{{ scopeShort(sc) }}</span>
         </label>
@@ -731,7 +765,7 @@
                   height="22"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="var(--on-accent)"
+                  stroke="#2563eb"
                   stroke-width="2"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -858,10 +892,167 @@
               </template>
             </div>
           </div>
-          <!-- 选项二：AI Devspace -->
+          <!-- 选项二：生成沙箱凭据（沙箱平台 worker，B1 移植） -->
           <div class="rtv-sb-sec">
-            <div class="rtv-sb-opt" @click="toggleDevSection">
+            <div class="rtv-sb-opt" @click="toggleSbSection">
               <div class="rtv-sb-opt-ic">
+                <svg
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="var(--on-accent)"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+              </div>
+              <div class="rtv-sb-opt-body">
+                <div class="rtv-sb-opt-t">{{ t('credential.sandbox_gen_title') }}</div>
+                <div class="rtv-sb-opt-d">{{ t('credential.sandbox_hint') }}</div>
+              </div>
+              <svg
+                class="rtv-sb-chev"
+                :class="{ open: sbExpanded }"
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--t3)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </div>
+            <div v-if="sbExpanded" class="rtv-sb-area">
+              <template v-if="!sbCredResult">
+                <div class="rtv-credbox">
+                  <div class="rtv-cred-t">{{ t('credential.sandbox_gen_title') }}</div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.cred_name') }}</label>
+                    <input
+                      v-model="sbCredForm.name"
+                      class="rtv-cred-input"
+                      :placeholder="t('label.cred_name_placeholder')"
+                    />
+                  </div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.owner_user') }}</label>
+                    <input :value="currentUser" disabled class="rtv-cred-input rtv-cred-disabled" />
+                  </div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.scope') }}</label>
+                    <select v-model="sbCredForm.scope" class="rtv-cred-input">
+                      <option value="user">{{ t('scope.user') }}</option>
+                      <option value="repo">{{ t('scope.repo') }}</option>
+                      <option value="global">{{ t('scope.global') }}</option>
+                    </select>
+                  </div>
+                  <div v-if="sbCredForm.scope === 'repo'" class="rtv-cred-fld">
+                    <label>{{ t('label.repo_key') }}</label>
+                    <input
+                      v-model="sbCredForm.repoKey"
+                      class="rtv-cred-input"
+                      placeholder="owner/repo"
+                    />
+                  </div>
+                  <!-- 沙箱平台（后台注册表驱动，不硬编码） -->
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('credential.sandbox_platform') }}</label>
+                    <select v-model="sbCredForm.platform" class="rtv-cred-input">
+                      <option value="">{{ t('credential.sandbox_platform_placeholder') }}</option>
+                      <option v-for="p in sbPlatforms" :key="p.platform" :value="p.platform">
+                        {{ p.display_name || p.platform }}
+                      </option>
+                    </select>
+                  </div>
+                  <!-- 平台连接信息：装完 worker 启动时自动上报 Provider（端点/凭据/证书） -->
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('credential.sandbox_conn_title') }}</label>
+                    <label class="rtv-cred-lbl2">API URL <span class="rtv-req">{{ t('credential.sandbox_conn_required') }}</span></label>
+                    <input v-model="sbCredForm.endpoint" class="rtv-cred-input" placeholder="https://cube.example.com" />
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_endpoint_desc') }}</div>
+                    <label class="rtv-cred-lbl2">API Key</label>
+                    <input v-model="sbCredForm.apiKey" type="password" class="rtv-cred-input" autocomplete="new-password" :placeholder="t('credential.sandbox_key_ph')" />
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_key_desc') }}</div>
+                    <label class="rtv-cred-lbl2">{{ t('credential.sandbox_cert_label') }}</label>
+                    <textarea
+                      v-model="sbCredForm.certPem"
+                      class="rtv-cred-input"
+                      style="font-size: 11px; min-height: 56px; resize: vertical; font-family: inherit"
+                      placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                    ></textarea>
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_cert_desc') }}</div>
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_conn_desc') }}</div>
+                  </div>
+                  <div class="rtv-cred-btns">
+                    <button class="bt bt-p rtv-cred-gen" @click="doCreateSandboxCredential()">
+                      {{ t('action.generate') }}
+                    </button>
+                    <button class="bt bt-o" @click="sbExpanded = false">
+                      {{ t('action.cancel') }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+              <template v-else-if="sbCredResult.loading">
+                <div class="rtv-sb-loading">
+                  <div class="rtv-spinner"></div>
+                  <div>{{ t('toast.refreshing') }}</div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="rtv-credbox">
+                  <div class="rtv-cred-warn">
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="#d97706"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      style="flex-shrink: 0; margin-top: 1px"
+                    >
+                      <path
+                        d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                      />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                    <span>{{
+                      t('credential.sandbox_token_warning', {
+                        name: sbCredResult.name,
+                        scope: scopeLabel(sbCredResult.scope),
+                        platform: sbCredResult.platform,
+                      })
+                    }}</span>
+                  </div>
+                  <label class="rtv-cred-lbl">Token</label>
+                  <code class="rtv-cred-code">{{ sbCredResult.token }}</code>
+                  <div class="rtv-cred-sub">🐧 {{ t('credential.sandbox_install_hint') }}</div>
+                  <code class="rtv-cred-code sm">{{ sbCredResult.oneCmd }}</code>
+                  <button class="bt bt-p rtv-cred-fullbtn" @click="copyText(sbCredResult.oneCmd)">
+                    {{ t('action.copy_one_cmd') }}
+                  </button>
+                  <div class="rtv-cred-desc">{{ t('credential.sandbox_install_desc') }}</div>
+                  <button class="bt bt-o rtv-cred-fullbtn" @click="copyText(sbCredResult.token)">
+                    {{ t('action.copy_token') }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+          <!-- 选项三：AI Devspace -->
+          <div class="rtv-sb-sec">
+            <div class="rtv-sb-opt dev" @click="toggleDevSection">
+              <div class="rtv-sb-opt-ic dev">
                 <svg
                   width="22"
                   height="22"
@@ -1000,11 +1191,13 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 const G = globalThis
 
 // ═══ 常量（与老代码一致） ═══
+// 配色：Tailwind 600（亮色）/ 400（暗色）双档，全部走页面内 CSS 变量，
+// 药丸只用「基色 14% 淡底 + 基色实字」，一个公式吃两主题。
 const RUNTIME_COLOR = {
-  online: 'var(--g)',
-  recently_lost: 'var(--y)',
+  online: 'var(--rtv-ok)',
+  recently_lost: 'var(--rtv-warn)',
   offline: 'var(--t3)',
-  about_to_gc: 'var(--r)',
+  about_to_gc: 'var(--rtv-bad)',
 }
 const HEALTH_NAMES = {
   online: 'online',
@@ -1012,62 +1205,61 @@ const HEALTH_NAMES = {
   offline: 'offline',
   about_to_gc: 'about_to_gc',
 }
+// 徽章底色由 CSS 用 color-mix 现算（16% / 暗色 22%），这里只留一个基色给圆点用
 const HEALTH_BADGE = {
-  online: { color: 'var(--g)', bg: '#dcfce7' },
-  recently_lost: { color: 'var(--y)', bg: '#fef3c7' },
-  offline: { color: 'var(--t3)', bg: '#eef0f3' },
-  about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
+  online: { color: 'var(--rtv-ok)', bg: 'var(--rtv-ok)' },
+  recently_lost: { color: 'var(--rtv-warn)', bg: 'var(--rtv-warn)' },
+  offline: { color: 'var(--t3)', bg: 'var(--t3)' },
+  about_to_gc: { color: 'var(--rtv-bad)', bg: 'var(--rtv-bad)' },
 }
 const SCOPE_BADGE_CFG = {
-  global: { label: '全局', color: 'var(--a-text)', bg: '#e3edfd' },
-  repo: { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
-  user: { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
-  local: { label: '本机', color: '#0e7490', bg: '#cffafe' },
+  global: { label: '全局', color: 'var(--rtv-sc-global)', bg: 'var(--rtv-sc-global)' },
+  repo: { label: '仓库', color: 'var(--rtv-sc-repo)', bg: 'var(--rtv-sc-repo)' },
+  user: { label: '个人', color: 'var(--rtv-sc-user)', bg: 'var(--rtv-sc-user)' },
+  local: { label: '本机', color: 'var(--rtv-sc-local)', bg: 'var(--rtv-sc-local)' },
 }
 const SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const ENGINE_DOT = {
-  opencode: '#3b82f6',
-  hermes: '#8b5cf6',
-  codearts: '#f59e0b',
-  codex: '#10a37f',
-  aishell: '#0a8cd8',
+  opencode: 'var(--rtv-en-opencode)',
+  hermes: 'var(--rtv-en-hermes)',
+  codearts: 'var(--rtv-en-codearts)',
+  codex: 'var(--rtv-en-codex)',
+  aishell: 'var(--rtv-en-aishell)',
 }
-// 场景/引擎标签色：9~11px 白字药丸嵌在饱和色上，饱和度太高白字只有 2.1~3.7:1（看不清）。
-// 统一压深到白字 ≥4.6:1 的同色相档。
 const SCENE_TAG_COLORS = {
-  default: '#0b7a55',
-  'cloud-native': '#2563b0',
-  iac: '#9a6100',
-  'agent-dev': '#6d43c9',
-  'skill-dev': '#b02a6c',
-  'api-skill-dev': '#0b7f95',
-  'blog-publish': '#b52b2b',
+  default: 'var(--rtv-scn-default)',
+  'cloud-native': 'var(--rtv-scn-cloud-native)',
+  iac: 'var(--rtv-scn-iac)',
+  'agent-dev': 'var(--rtv-scn-agent-dev)',
+  'skill-dev': 'var(--rtv-scn-skill-dev)',
+  'api-skill-dev': 'var(--rtv-scn-api-skill-dev)',
+  'blog-publish': 'var(--rtv-scn-blog-publish)',
 }
 const RT_TAG_COLORS = {
-  all: '#4b4ec9',
-  vod: '#b02a6c',
-  issue: '#b52b2b',
-  coding: '#2563b0',
-  qa: '#6d43c9',
-  sre: '#9a6100',
+  all: 'var(--rtv-tg-all)',
+  vod: 'var(--rtv-tg-vod)',
+  issue: 'var(--rtv-tg-issue)',
+  coding: 'var(--rtv-tg-coding)',
+  qa: 'var(--rtv-tg-qa)',
+  sre: 'var(--rtv-tg-sre)',
 }
 const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
-  'cde.0000': '#6b7280',
-  'cde.0001': 'var(--a-text)',
-  'cde.0002': '#16a34a',
-  'cde.0003': 'var(--a-text)',
-  'cde.0004': '#16a34a',
-  'cde.0005': '#d97706',
-  'cde.0006': '#dc2626',
-  'cde.0007': '#d97706',
-  'cde.0008': '#d97706',
-  'cde.0009': '#9ca3af',
-  'cde.1001': '#dc2626',
-  'cde.1002': '#dc2626',
-  'cde.1003': '#dc2626',
-  'cde.1004': '#dc2626',
+  'cde.0000': '#64748b',
+  'cde.0001': 'var(--rtv-sc-global)',
+  'cde.0002': 'var(--rtv-ok)',
+  'cde.0003': 'var(--rtv-sc-global)',
+  'cde.0004': 'var(--rtv-ok)',
+  'cde.0005': 'var(--rtv-warn)',
+  'cde.0006': 'var(--rtv-bad)',
+  'cde.0007': 'var(--rtv-warn)',
+  'cde.0008': 'var(--rtv-warn)',
+  'cde.0009': '#94a3b8',
+  'cde.1001': 'var(--rtv-bad)',
+  'cde.1002': 'var(--rtv-bad)',
+  'cde.1003': 'var(--rtv-bad)',
+  'cde.1004': 'var(--rtv-bad)',
 }
 const BUSY_STATES = ['cde.0001', 'cde.0003', 'cde.0005', 'cde.0006', 'cde.0007', 'cde.0008']
 const PAGE_SIZE = 20
@@ -1186,6 +1378,15 @@ const API = () => G.API
 const app = () => G.app
 function t(key, vars) {
   return G.I18N.t('runtimes.' + key, vars)
+}
+// 后端 warnings 只回稳定 code（不回异常原文）：文案在前端本地化，
+// 未登记的 code 走兜底文案并把 code 带上，便于排查。
+const WARN_I18N = {
+  sandbox_provider_registration_failed: 'credential.warn_sandbox_provider_registration_failed',
+}
+function warnText(code) {
+  const key = WARN_I18N[code]
+  return key ? t(key) : t('credential.warn_unknown', { code: String(code) })
 }
 function tc(key) {
   const v = G.I18N.t('common.' + key)
@@ -1333,13 +1534,18 @@ function healthScoreHtml(rt) {
   )
 }
 function engineTagSummary(tags) {
-  if (!tags || !tags.length)
+  // 引擎卡片标签行只展示能力标签；engine:/scope:/scene: 为派生匹配行（卡片上已有
+  // 「引擎类型」「场景」「范围」行可读，口径同 DashboardView.plainTags），不重复显示
+  const shown = (tags || []).filter(function (x) {
+    return String(x || '').indexOf(':') < 0
+  })
+  if (!shown.length)
     return `<span style="color:var(--t3);font-size:10px">${t('empty.unassigned')}</span>`
-  return tags
-    .map(
-      (x) =>
-        `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
-    )
+  return shown
+    .map((x) => {
+      const color = RT_TAG_COLORS[x] || 'var(--rtv-tg-all)'
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;font-weight:600;color:${color};background:color-mix(in srgb, ${color} 14%, transparent);margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
+    })
     .join('')
 }
 function sceneTagSummary(tags) {
@@ -1348,20 +1554,38 @@ function sceneTagSummary(tags) {
   return tags
     .map((x) => {
       const dn = sceneDisplayName(x)
-      const color = SCENE_TAG_COLORS[x] || '#10b981'
-      return `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
+      const color = SCENE_TAG_COLORS[x] || 'var(--rtv-scn-default)'
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;font-weight:600;color:${color};background:color-mix(in srgb, ${color} 14%, transparent);margin:0 2px">${esc(dn)}</span>`
     })
     .join('')
 }
+function gotoProviderDetail(providerId) {
+  // B5：凭据卡「详情」→ #sandbox/provider/{id}（app.nav 触发视图切换+history）
+  if (G.app && G.app.nav) G.app.nav('sandbox', 'provider/' + providerId)
+}
+function platformDisabled(x) {
+  // B5：沙箱引擎卡看 is_sandbox，凭据卡看 cred_type（后端两路字段）
+  return !!((x.cred_type === 'sandbox' || x.is_sandbox) && x.platform_enabled === false)
+}
+const ABNORMAL_RING = 'var(--sh), 0 0 0 1px var(--r)'
 function cardLeftBorder(h, rt) {
   // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
   if (rt && isAbnormalEngine(rt)) {
     const red = abnormalBorderColor(rt)
-    if (red) return { borderLeft: '3px solid ' + red }
+    if (red) return { borderLeft: '3px solid ' + red, boxShadow: ABNORMAL_RING }
   }
-  return h === 'online'
-    ? { borderLeft: '1px solid var(--b)' }
-    : { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
+  // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
+  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626', boxShadow: ABNORMAL_RING }
+  // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
+  return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
+}
+// 旧页设备卡（Workers）：在线不出彩条只留 1px 中性描边；异常态取同一套左边条颜色，
+// 但设备卡旧页没有整卡红圈（legacy 只给引擎卡加 box-shadow 红环），这里把 boxShadow 剥掉。
+function workerCardBorder(d) {
+  const h = (d && d.health) || 'offline'
+  if (h === 'online') return { borderLeft: '1px solid var(--b)' }
+  const s = cardLeftBorder(h, d)
+  return { borderLeft: s.borderLeft }
 }
 function isOwner(d) {
   return !!(d.owner && grapeUsername && d.owner === grapeUsername)
@@ -1371,8 +1595,16 @@ function canManage(d) {
 }
 
 // ═══ 数据加载 ═══
+// Issue #1167（MR 1008 口径）：空数据只在「无任何激活筛选」时才算真·空组织。
+// 有筛选时保持主内容渲染（筛选栏 + ✕ 清除 + 列表区内联「暂无引擎」），
+// 否则整条筛选栏会被居中空态顶掉，用户只能 F5 才能撤销筛选。
 const isEmpty = computed(
-  () => loaded.value && !loadError.value && !runtimes.value.length && !devices.value.length
+  () =>
+    loaded.value &&
+    !loadError.value &&
+    !runtimes.value.length &&
+    !devices.value.length &&
+    !hasActiveFilters.value
 )
 function loadRuntimesData() {
   let qs = '?page=' + page.value + '&page_size=' + PAGE_SIZE
@@ -1607,9 +1839,9 @@ const availScopes = computed(() =>
 const availScenes = computed(() =>
   [...new Set(runtimes.value.flatMap((rt) => rt.scene_tags || []))].filter(Boolean)
 )
-const availTags = computed(() =>
-  [...new Set(runtimes.value.flatMap((rt) => rt.agent_tags || []))].filter(Boolean)
-)
+// 「角色标签」筛选下拉 = 固定角色档（与引擎详情弹窗 edTagOptions 同源）；
+// 数据派生的 agent_tags 里混着 engine:/scope:/scene: 冒号行，不能当角色档展示（用户 2026-11-18 裁定）
+const availTags = RT_TAG_OPTIONS
 // Issue #432: 共享过滤（统计与列表同口径）
 function filterEngines(list) {
   const q = (search.value || '').toLowerCase().trim()
@@ -2039,20 +2271,147 @@ function revokeCredential(cid) {
 function toggleCredSection() {
   credExpanded.value = !credExpanded.value
   devExpanded.value = false
+  sbExpanded.value = false
 }
 function toggleDevSection() {
   devExpanded.value = !devExpanded.value
   credExpanded.value = false
+  sbExpanded.value = false
+}
+// ═══ 生成沙箱凭据（选项二，B1 移植自 legacy runtimes.js toggleAddDeviceSandbox 族）═══
+const sbExpanded = ref(false)
+const sbCredForm = reactive({ name: '', scope: 'user', repoKey: '', platform: '', endpoint: '', apiKey: '', certPem: '' })
+const sbPlatforms = ref([])
+const sbPlatformsLoaded = ref(false)
+const sbCredResult = ref(null)
+function toggleSbSection() {
+  sbExpanded.value = !sbExpanded.value
+  credExpanded.value = false
+  devExpanded.value = false
+  if (sbExpanded.value && !sbPlatformsLoaded.value) loadSbPlatforms()
+}
+function loadSbPlatforms() {
+  // 平台列表从后端拉取（GET /settings/sandbox-platforms，注册表驱动，不硬编码）
+  API()
+    .get('/settings/sandbox-platforms')
+    .then(function (d) {
+      sbPlatforms.value = d.platforms || []
+      sbPlatformsLoaded.value = true
+    })
+    .catch(function () {
+      sbPlatformsLoaded.value = true
+    })
+}
+watch(
+  () => sbCredForm.scope,
+  function (v) {
+    // [F12 同款修复] 切到 repo 时实时回填当前仓库（仅空值时，不覆盖用户手输）
+    if (v === 'repo' && !sbCredForm.repoKey.trim()) {
+      sbCredForm.repoKey = (currentRepo() || {}).fullName || ''
+    }
+  }
+)
+function doCreateSandboxCredential() {
+  const name = sbCredForm.name
+  if (!name) {
+    app().showToast(t('credential.toast_name_required'))
+    return
+  }
+  const scope = sbCredForm.scope
+  const platform = sbCredForm.platform
+  if (!platform) {
+    app().showToast(t('credential.sandbox_toast_platform_required'))
+    return
+  }
+  const endpoint = (sbCredForm.endpoint || '').trim()
+  if (!endpoint) {
+    app().showToast(t('credential.sandbox_toast_endpoint_required'))
+    return
+  }
+  const repoKey = scope === 'repo' ? (sbCredForm.repoKey || '').trim() : ''
+  if (scope === 'repo' && !repoKey) {
+    app().showToast(t('credential.toast_repo_required'))
+    return
+  }
+  sbCredResult.value = { loading: true }
+  // [同机多实例 spec §4.2] 一键命令只有 --token/--server——凭据类型与平台经 whoami
+  // 按 token 派生（服务端是唯一事实源）。--server 用服务端权威地址：localStorage 5 分钟
+  // 缓存优先，未命中先问 /health 再渲染，失败/超时回退 origin（面板只渲染一次）。
+  API()
+    .post('/settings/runtime-credentials', {
+      name: name,
+      scope: scope,
+      repo_key: repoKey,
+      cred_type: 'sandbox',
+      platform: platform,
+      platform_endpoint: endpoint,
+      platform_api_key: (sbCredForm.apiKey || '').trim(),
+      platform_ssl_cert_pem: (sbCredForm.certPem || '').trim(),
+    })
+    .then(function (d) {
+      // 平台登记失败会在响应里带 warnings（历史上这条失败被静默吞掉）
+      const warns = (d && d.warnings) || []
+      const token = d.token || ''
+      let serverUrl = G.window.location.origin
+      let cachedOk = false
+      try {
+        const cached = JSON.parse(localStorage.getItem('grape_server_base') || 'null')
+        if (cached && cached.url && Date.now() - (cached.ts || 0) < 300000) {
+          serverUrl = cached.url
+          cachedOk = true
+        }
+      } catch (e) {}
+      const renderSb = function () {
+        const oneCmd =
+          'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl
+        sbCredResult.value = { name: name, scope: scope, platform: platform, token: token, oneCmd: oneCmd }
+        // showToast 会先移除已有 toast：成功提示在前、登记告警在后，
+        // 否则告警会被紧随其后的成功提示覆盖掉，用户永远看不到。
+        app().showToast(t('credential.toast_generated'))
+        if (warns.length) app().showToast(warnText(warns[0]))
+      }
+      if (cachedOk) {
+        renderSb()
+        return
+      }
+      API()
+        .get('/health')
+        .then(function (h) {
+          const base = (h && h.server_base_url) || ''
+          if (base) {
+            serverUrl = base
+            try {
+              localStorage.setItem('grape_server_base', JSON.stringify({ url: base, ts: Date.now() }))
+            } catch (e) {}
+          }
+        })
+        .catch(function () {})
+        .then(renderSb)
+    })
+    .catch(function (e) {
+      // 生成失败：恢复表单（reactive 表单仍持有用户输入，等价 legacy _restoreSandboxForm）
+      sbCredResult.value = null
+      app().showToast(t('credential.toast_gen_failed', { msg: e.message }))
+    })
 }
 function openAddDevicePanel() {
   addPanel.open = true
   stopDevspaceAuto()
   credExpanded.value = false
   devExpanded.value = false
+  sbExpanded.value = false
   credResult.value = null
   credForm.name = ''
   credForm.scope = 'user'
   credForm.repoKey = (currentRepo() || {}).fullName || ''
+  sbCredResult.value = null
+  sbCredForm.name = ''
+  sbCredForm.scope = 'user'
+  sbCredForm.platform = ''
+  sbCredForm.endpoint = ''
+  sbCredForm.apiKey = ''
+  sbCredForm.certPem = ''
+  sbCredForm.repoKey = (currentRepo() || {}).fullName || ''
 }
 function closeAddDevicePanel() {
   stopDevspaceAuto()
@@ -2148,10 +2507,10 @@ function stopDevspaceAuto() {
   devspaceAuto.value = false
 }
 function devStatusColor(st) {
-  return DEV_STATUS_COLORS[st] || '#8d97a8'
+  return DEV_STATUS_COLORS[st] || '#94a3b8'
 }
 function devStatusBg(st) {
-  return 'color-mix(in srgb, ' + devStatusColor(st) + ' 15%, transparent)'
+  return `color-mix(in srgb, ${DEV_STATUS_COLORS[st] || '#94a3b8'} 14%, transparent)`
 }
 function devStatusLabel(st) {
   return t('devspace.status.' + (st || 'unknown').replace(/\./g, '_'))
@@ -2382,7 +2741,215 @@ onBeforeUnmount(function () {
 
 <style scoped>
 .rtv {
+  /* 旧风格（origin/weekly-11 legacy 页）调色板/几何：本页自锁，不跟随 apple 主题 token */
+  --bg: #f5f6f8;
+  --c: #fff;
+  --b: #e3e6ee;
+  --t: #101724;
+  --t1: #101724;
+  --t2: #5b667b;
+  --t3: #8d97a8;
+  --a: #0071e3;
+  --ah: #0077ed;
+  --g: #1ca44c;
+  --y: #d49c0f;
+  --r: #dc2828;
+  --rd: 12px;
+  --r2: 18px;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --on-accent: #fff;
+  --chip-bg: #f5f6f8;
+  /* 配色：Tailwind 600 档（亮色）/ 400 档（暗色），色相语义固定
+     （green=健康、amber=警告、red=异常、blue=全局、violet=仓库/qa、pink=vod、cyan=本机）。
+     药丸 = 基色实字 + color-mix(基色 14%, transparent) 淡底；暗色底抬到 20%。 */
+  --rtv-ok: #059669;
+  --rtv-warn: #d97706;
+  --rtv-bad: #dc2626;
+  --rtv-sc-global: #2563eb;
+  --rtv-sc-repo: #7c3aed;
+  --rtv-sc-user: #059669;
+  --rtv-sc-local: #0891b2;
+  --rtv-en-opencode: #2563eb;
+  --rtv-en-hermes: #7c3aed;
+  --rtv-en-codearts: #d97706;
+  --rtv-en-codex: #059669;
+  --rtv-en-aishell: #0891b2;
+  --rtv-scn-default: #059669;
+  --rtv-scn-cloud-native: #2563eb;
+  --rtv-scn-iac: #d97706;
+  --rtv-scn-agent-dev: #7c3aed;
+  --rtv-scn-skill-dev: #db2777;
+  --rtv-scn-api-skill-dev: #0891b2;
+  --rtv-scn-blog-publish: #dc2626;
+  --rtv-tg-all: #4f46e5;
+  --rtv-tg-vod: #db2777;
+  --rtv-tg-issue: #ea580c;
+  --rtv-tg-coding: #2563eb;
+  --rtv-tg-qa: #7c3aed;
+  --rtv-tg-sre: #ca8a04;
   min-height: 100%;
+}
+/* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
+ * 本页 token 是自锁的（S-01），不自锁一套暗色值就会永远停在浅色。
+ * 取值与 legacy apple-theme 暗色档逐项对齐；键位与 bridge.css 同源——
+ * data-theme-mode="dark" 无条件深色，"auto" 才跟随系统偏好。 */
+:root[data-theme-mode='dark'] .rtv {
+  --bg: #000;
+  --c: #1c1c1e;
+  --b: #38383a;
+  --t: #f5f5f7;
+  --t1: #f5f5f7;
+  --t2: #aeaeb2;
+  --t3: #8e8e93;
+  --a: #0a84ff;
+  --ah: #409cff;
+  --g: #30d158;
+  --y: #ff9f0a;
+  --r: #ff453a;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --chip-bg: #2c2c2e;
+  --rtv-ok: #34d399;
+  --rtv-warn: #fbbf24;
+  --rtv-bad: #f87171;
+  --rtv-sc-global: #60a5fa;
+  --rtv-sc-repo: #a78bfa;
+  --rtv-sc-user: #34d399;
+  --rtv-sc-local: #22d3ee;
+  --rtv-en-opencode: #60a5fa;
+  --rtv-en-hermes: #a78bfa;
+  --rtv-en-codearts: #fbbf24;
+  --rtv-en-codex: #34d399;
+  --rtv-en-aishell: #22d3ee;
+  --rtv-scn-default: #34d399;
+  --rtv-scn-cloud-native: #60a5fa;
+  --rtv-scn-iac: #fbbf24;
+  --rtv-scn-agent-dev: #a78bfa;
+  --rtv-scn-skill-dev: #f472b6;
+  --rtv-scn-api-skill-dev: #22d3ee;
+  --rtv-scn-blog-publish: #f87171;
+  --rtv-tg-all: #818cf8;
+  --rtv-tg-vod: #f472b6;
+  --rtv-tg-issue: #fb923c;
+  --rtv-tg-coding: #60a5fa;
+  --rtv-tg-qa: #a78bfa;
+  --rtv-tg-sre: #facc15;
+}
+
+/* 暗色档：危险按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」。
+ * 徽章/药丸不再各写一套暗色特例：统一 color-mix(基色, 提亮字 / 透明底)，基色由 --rtv-* 提档。 */
+:root[data-theme-mode='dark'] .rtv .bt-r {
+  background: var(--c) !important;
+  color: #ff453a !important;
+  border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
+}
+:root[data-theme-mode='dark'] .rtv .bt-r:hover {
+  background: color-mix(in srgb, #ff453a 14%, transparent) !important;
+  border-color: #ff453a !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv .bt-r {
+    background: var(--c) !important;
+    color: #ff453a !important;
+    border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
+  }
+  :root[data-theme-mode='auto'] .rtv .bt-r:hover {
+    background: color-mix(in srgb, #ff453a 14%, transparent) !important;
+    border-color: #ff453a !important;
+  }
+}
+
+/* 暗色下「浅底 accent 药丸」8% 透明度在黑底上看不见，抬到 18%（tint 随手 --a 走） */
+:root[data-theme-mode='dark'] .rtv .bt-p {
+  background: color-mix(in srgb, var(--a) 18%, transparent) !important;
+  border-color: color-mix(in srgb, var(--a) 28%, transparent) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv {
+    --bg: #000;
+    --c: #1c1c1e;
+    --b: #38383a;
+    --t: #f5f5f7;
+    --t1: #f5f5f7;
+    --t2: #aeaeb2;
+    --t3: #8e8e93;
+    --a: #0a84ff;
+    --ah: #409cff;
+    --g: #30d158;
+    --y: #ff9f0a;
+    --r: #ff453a;
+    --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --chip-bg: #2c2c2e;
+    --rtv-ok: #34d399;
+    --rtv-warn: #fbbf24;
+    --rtv-bad: #f87171;
+    --rtv-sc-global: #60a5fa;
+    --rtv-sc-repo: #a78bfa;
+    --rtv-sc-user: #34d399;
+    --rtv-sc-local: #22d3ee;
+    --rtv-en-opencode: #60a5fa;
+    --rtv-en-hermes: #a78bfa;
+    --rtv-en-codearts: #fbbf24;
+    --rtv-en-codex: #34d399;
+    --rtv-en-aishell: #22d3ee;
+    --rtv-scn-default: #34d399;
+    --rtv-scn-cloud-native: #60a5fa;
+    --rtv-scn-iac: #fbbf24;
+    --rtv-scn-agent-dev: #a78bfa;
+    --rtv-scn-skill-dev: #f472b6;
+    --rtv-scn-api-skill-dev: #22d3ee;
+    --rtv-scn-blog-publish: #f87171;
+    --rtv-tg-all: #818cf8;
+    --rtv-tg-vod: #f472b6;
+    --rtv-tg-issue: #fb923c;
+    --rtv-tg-coding: #60a5fa;
+    --rtv-tg-qa: #a78bfa;
+    --rtv-tg-sre: #facc15;
+  }
+  :root[data-theme-mode='auto'] .rtv .bt-p {
+    background: color-mix(in srgb, var(--a) 18%, transparent) !important;
+    border-color: color-mix(in srgb, var(--a) 28%, transparent) !important;
+  }
+}
+/* 工具栏/卡片按钮：对齐 origin/weekly-11 的 apple 主题口径
+   （apple-theme.css §6 + §22a：药丸 980px、13px、8px 18px、min-height 36px；
+    .bt-p 浅蓝底蓝字、.bt-o 白底蓝字、.bt-r 实心红） */
+.rtv :is(.bt, .bt-p, .bt-o, .bt-g, .bt-r) {
+  border-radius: 980px !important;
+  font-size: 13px !important;
+  padding: 8px 18px !important;
+  font-weight: 500 !important;
+  line-height: 1.2 !important;
+  min-height: 36px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+.rtv .bt-p {
+  background: color-mix(in srgb, var(--a) 8%, transparent) !important;
+  color: var(--a) !important;
+  border: 1px solid color-mix(in srgb, var(--a) 12%, transparent) !important;
+}
+.rtv .bt-p:hover {
+  background: color-mix(in srgb, var(--a) 12%, transparent) !important;
+}
+.rtv .bt-o {
+  background: var(--c) !important;
+  color: var(--a) !important;
+  border: 1px solid var(--b) !important;
+}
+.rtv .bt-o:hover {
+  background: color-mix(in srgb, var(--a) 4%, transparent) !important;
+  border-color: var(--a) !important;
+}
+.rtv .bt-r {
+  background: var(--r) !important;
+  color: #fff !important;
+  border: none !important;
+}
+.rtv .bt-s {
+  padding: 5px 14px !important;
+  font-size: 12px !important;
+  min-height: 30px !important;
 }
 .rtv .loading,
 .rtv .error {
@@ -2397,76 +2964,64 @@ onBeforeUnmount(function () {
   align-items: center;
   flex-wrap: wrap;
 }
-/* 搜索：整组一个药丸（输入框无边框 + 图标按钮嵌在右端） */
 .rtv-searchgrp {
   display: flex;
   align-items: center;
   flex: 1;
   max-width: 300px;
-  border: 1px solid var(--b);
-  border-radius: 999px;
-  background: var(--bg);
-  overflow: hidden;
-  transition:
-    border-color 0.18s,
-    background 0.18s;
-}
-.rtv-searchgrp:focus-within {
-  border-color: var(--a-text);
-  background: var(--c);
 }
 .rtv-search {
   flex: 1;
-  padding: 7px 6px 7px 14px;
-  border: none;
-  border-radius: 0;
+  padding: 7px 12px 7px 14px;
+  border: 1px solid var(--b);
+  border-radius: 10px 0 0 10px;
   font-size: 13px;
-  background: transparent;
+  background: var(--bg);
   color: var(--t);
+  transition: border-color 0.2s;
   outline: none;
   min-width: 0;
 }
 .rtv-search:focus {
-  background: transparent;
+  border-color: var(--a);
+  background: var(--c);
 }
 .rtv-searchbtn {
-  border: none;
-  background: transparent;
+  padding: 7px 14px;
+  border: 1px solid var(--b);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  background: var(--bg);
   color: var(--t3);
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 3px;
+  font-size: 13px;
   cursor: pointer;
   flex-shrink: 0;
-  transition:
-    background 0.18s,
-    color 0.18s;
+  transition: all 0.15s;
 }
 .rtv-searchbtn:hover {
-  background: color-mix(in srgb, var(--a) 16%, transparent);
-  color: var(--a);
+  background: var(--a);
+  color: var(--on-accent);
 }
-/* 主操作：实心 accent + 白字（几何由 bridge.css 统一） */
 .rtv-addbtn {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  padding: 8px 18px;
   border: none;
-  background: var(--a);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
   color: var(--on-accent);
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.35);
+  transition: all 0.2s;
   font-family: inherit;
-  transition:
-    background 0.18s,
-    filter 0.18s;
 }
 .rtv-addbtn:hover {
-  background: var(--ah);
-  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.45);
 }
 /* 空态 */
 .rtv-empty {
@@ -2511,8 +3066,9 @@ onBeforeUnmount(function () {
   gap: 3px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #9a6100;
-  color: #fff;
+  --tag: var(--rtv-warn);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -2536,11 +3092,47 @@ onBeforeUnmount(function () {
 .rtv-readd:hover {
   filter: brightness(1.08);
 }
+/* B5：沙箱平台禁用徽标 */
+.rtv-pdisabled {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  --tag: var(--rtv-bad);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
+  border: 1px solid color-mix(in srgb, var(--tag) 32%, transparent);
+  font-weight: 700;
+}
+/* B5：凭据卡沙箱平台行 */
+.rtv-wcard-plat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--t2);
+}
+/* 平台名只读（进平台页走右侧「详情」按钮，不再做行内链接）。值色同其它字段：
+   次级文字色 + 500 字重；未绑定时追加的「未绑定」后缀再降一档。 */
+.rtv-plat-name {
+  color: var(--t2);
+  font-weight: 500;
+}
+.rtv-plat-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.rtv-plat-unbound {
+  color: var(--t3);
+}
+
 .rtv-vstale {
   font-size: 10px;
   font-weight: 600;
-  color: var(--y);
-  background: var(--chip-bg);
+  --tag: var(--rtv-warn);
+  color: var(--tag);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
   padding: 1px 8px;
   border-radius: 999px;
   margin-left: 4px;
@@ -2577,6 +3169,15 @@ onBeforeUnmount(function () {
   font-weight: 500;
   margin-right: 2px;
 }
+/* 分组标题（范围 / 类型 / 归属）：只做维度标注，不参与点击 */
+.rtv-fgrp {
+  font-size: 11px;
+  color: var(--t2);
+  font-weight: 600;
+  white-space: nowrap;
+  margin-right: 2px;
+  cursor: default;
+}
 .rtv-chip {
   display: inline-flex;
   align-items: center;
@@ -2592,7 +3193,7 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-chip.on {
-  border-color: var(--a-text);
+  border-color: var(--a);
   color: var(--on-accent);
   background: var(--a);
 }
@@ -2621,7 +3222,7 @@ onBeforeUnmount(function () {
   font-weight: 400;
 }
 .rtv-clear:hover {
-  color: var(--r);
+  color: #d32f2f;
 }
 .rtv-ddwrap {
   position: relative;
@@ -2652,14 +3253,14 @@ onBeforeUnmount(function () {
   background: var(--bg);
 }
 .rtv-tagpill {
-  /* 9px 中文在饱和色上肉眼糊成一片；11px + 600 + 深一档的底色 */
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  padding: 2px 8px;
+  font-size: 9px;
+  padding: 1px 8px;
   border-radius: 999px;
-  color: var(--on-accent);
+  font-weight: 600;
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
+
 /* 汇总 */
 .rtv-summary {
   display: flex;
@@ -2730,22 +3331,20 @@ onBeforeUnmount(function () {
   padding: 3px 10px;
   border-radius: 999px;
   white-space: nowrap;
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
 .rtv-hbadge.online {
-  color: var(--g);
-  background: color-mix(in srgb, var(--g) 15%, transparent);
+  --tag: var(--rtv-ok);
 }
 .rtv-hbadge.recently_lost {
-  color: var(--y);
-  background: color-mix(in srgb, var(--y) 16%, transparent);
+  --tag: var(--rtv-warn);
 }
 .rtv-hbadge.offline {
-  color: var(--t3);
-  background: var(--chip-bg);
+  --tag: var(--t3);
 }
 .rtv-hbadge.about_to_gc {
-  color: var(--r);
-  background: color-mix(in srgb, var(--r) 15%, transparent);
+  --tag: var(--rtv-bad);
 }
 .rtv-dot7 {
   width: 7px;
@@ -2753,6 +3352,7 @@ onBeforeUnmount(function () {
   border-radius: 50%;
   background: currentColor;
 }
+/* 范围徽标：旧页口径 = 浅色底 + 同色系深字（不是实心底白字） */
 .rtv-sbadge {
   display: inline-flex;
   align-items: center;
@@ -2762,19 +3362,20 @@ onBeforeUnmount(function () {
   padding: 1px 8px;
   white-space: nowrap;
   vertical-align: middle;
-  color: var(--on-accent);
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
 .rtv-sbadge.global {
-  background: #2f63d6;
+  --tag: var(--rtv-sc-global);
 }
 .rtv-sbadge.repo {
-  background: #7152c9;
+  --tag: var(--rtv-sc-repo);
 }
 .rtv-sbadge.user {
-  background: #157f3d;
+  --tag: var(--rtv-sc-user);
 }
 .rtv-sbadge.local {
-  background: #0b6276;
+  --tag: var(--rtv-sc-local);
 }
 .rtv-ename {
   display: inline-flex;
@@ -2883,11 +3484,6 @@ onBeforeUnmount(function () {
   color: var(--t3);
   font-size: 12px;
 }
-.rtv-wbtn {
-  font-size: 11px;
-  padding: 4px 10px;
-  border-radius: 4px;
-}
 .rtv-wcard-meta {
   display: flex;
   align-items: center;
@@ -2918,7 +3514,7 @@ onBeforeUnmount(function () {
 }
 .rtv-cli {
   cursor: pointer;
-  color: var(--a-text);
+  color: #235ec7;
   text-decoration: underline;
 }
 /* 分页 */
@@ -2931,10 +3527,9 @@ onBeforeUnmount(function () {
   flex-wrap: wrap;
 }
 .rtv-pager button {
-  padding: 4px 11px;
-  min-width: 28px;
+  padding: 4px 10px;
   border: 1px solid var(--b);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--c);
   color: var(--t);
   font-size: 12px;
@@ -2949,7 +3544,6 @@ onBeforeUnmount(function () {
 }
 .rtv-pager button:disabled {
   color: var(--t3);
-  opacity: 0.4;
   cursor: default;
 }
 .rtv-ellipsis {
@@ -2983,7 +3577,30 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 5px;
 }
+/* 暗色下 14% 淡底在近黑卡片上看不清，抬到 20%（同色系，不加饱和） */
+:root[data-theme-mode='dark'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
+  background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
+    background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+  }
+}
 /* 弹窗通用 */
+/* 弹窗材质：实心白底（亮色 #fff / 暗色 #1c1c1e），与卡片同材质。
+   全局 §23 会把这三个弹窗刷成 --glass-strong + 28px 模糊，暗色下透出页面渐变、
+   跟卡片不是一个材质，看着发虚；这里用 :root 前缀 + !important 压回实心底。 */
+:root .rtv-engdetail,
+:root .rtv-skilldetail,
+:root .rtv-scopemodal {
+  background: var(--c) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 1px solid var(--b) !important;
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.18),
+    0 2px 6px rgba(0, 0, 0, 0.06) !important;
+}
 .rtv-modal-ov {
   position: fixed;
   inset: 0;
@@ -3023,8 +3640,9 @@ onBeforeUnmount(function () {
 .rtv-localpill {
   font-size: 11px;
   font-weight: 600;
-  color: var(--t2);
-  background: var(--chip-bg);
+  --tag: var(--rtv-sc-local);
+  color: var(--tag);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
   border-radius: 999px;
   padding: 1px 8px;
 }
@@ -3073,6 +3691,11 @@ onBeforeUnmount(function () {
 .rtv-ed-taglbl input {
   width: 14px;
   height: 14px;
+}
+/* 引擎详情弹窗「场景标签/角色标签」药丸字号（用户 2026-11-18：9px 太小，放大一档） */
+.rtv-ed-tags .rtv-tagpill {
+  font-size: 12px;
+  padding: 2px 9px;
 }
 .rtv-tagdesc {
   color: var(--t3);
@@ -3206,8 +3829,8 @@ onBeforeUnmount(function () {
   color: var(--t);
 }
 .rtv-sm-item.on {
-  border-color: var(--a-text);
-  background: rgba(0, 113, 227, 0.06);
+  border-color: var(--a);
+  background: color-mix(in srgb, var(--a) 6%, transparent);
   font-weight: 600;
 }
 .rtv-sm-repo {
@@ -3265,7 +3888,7 @@ onBeforeUnmount(function () {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: var(--a);
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3290,22 +3913,18 @@ onBeforeUnmount(function () {
 .rtv-sb-close {
   width: 32px;
   height: 32px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: var(--chip-bg);
+  border-radius: 8px;
+  border: 1px solid var(--b);
+  background: var(--bg);
   cursor: pointer;
   color: var(--t2);
   font-size: 16px;
   flex-shrink: 0;
-  transition:
-    background 0.18s,
-    color 0.18s,
-    border-color 0.18s;
 }
 .rtv-sb-close:hover {
-  background: color-mix(in srgb, var(--r) 16%, transparent);
-  color: var(--r);
-  border-color: color-mix(in srgb, var(--r) 40%, transparent);
+  background: color-mix(in srgb, var(--rtv-bad) 14%, transparent);
+  color: var(--rtv-bad);
+  border-color: color-mix(in srgb, var(--rtv-bad) 32%, transparent);
 }
 .rtv-sb-body {
   padding: 24px;
@@ -3319,25 +3938,35 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 14px;
   padding: 16px 18px;
-  background: color-mix(in srgb, var(--a) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--a) 20%, transparent);
+  background: var(--bg);
+  border: 1px solid var(--b);
   border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s;
 }
 .rtv-sb-opt:hover {
-  border-color: color-mix(in srgb, var(--a) 50%, transparent);
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--a) 12%, transparent);
+  border-color: #3b82f6;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.08);
+}
+.rtv-sb-opt.dev {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.08), rgba(167, 139, 250, 0.08));
+  border-color: rgba(96, 165, 250, 0.2);
+}
+.rtv-sb-opt.dev:hover {
+  border-color: rgba(96, 165, 250, 0.5);
 }
 .rtv-sb-opt-ic {
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: var(--a);
+  background: #dbeafe;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+}
+.rtv-sb-opt-ic.dev {
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
 }
 .rtv-sb-opt-body {
   flex: 1;
@@ -3367,15 +3996,15 @@ onBeforeUnmount(function () {
 .rtv-sb-loading {
   padding: 32px;
   text-align: center;
-  color: var(--t3);
+  color: #a78bfa;
   font-size: 13px;
 }
 .rtv-spinner {
   display: inline-block;
   width: 24px;
   height: 24px;
-  border: 2.5px solid color-mix(in srgb, var(--a) 20%, transparent);
-  border-top-color: var(--a);
+  border: 2.5px solid rgba(59, 130, 246, 0.2);
+  border-top-color: #3b82f6;
   border-radius: 50%;
   animation: rtvSpin 0.8s linear infinite;
   margin-bottom: 12px;
@@ -3383,8 +4012,8 @@ onBeforeUnmount(function () {
 .rtv-spinner.purple {
   width: 20px;
   height: 20px;
-  border-color: color-mix(in srgb, var(--a) 20%, transparent);
-  border-top-color: var(--a);
+  border-color: rgba(167, 139, 250, 0.2);
+  border-top-color: #a78bfa;
 }
 @keyframes rtvSpin {
   to {
@@ -3427,7 +4056,7 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .rtv-cred-disabled {
-  background: var(--chip-bg);
+  background: #f1f5f9;
   color: var(--t2);
 }
 .rtv-cred-btns {
@@ -3444,11 +4073,11 @@ onBeforeUnmount(function () {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  background: color-mix(in srgb, var(--y) 16%, transparent);
+  background: color-mix(in srgb, var(--rtv-warn) 14%, transparent);
   border-radius: 8px;
   margin-bottom: 14px;
   font-size: 12px;
-  color: var(--y);
+  color: var(--rtv-warn);
   line-height: 1.5;
 }
 .rtv-cred-lbl {
@@ -3458,6 +4087,18 @@ onBeforeUnmount(function () {
   color: var(--t3);
   margin-bottom: 5px;
   text-transform: uppercase;
+}
+/* 沙箱凭据平台连接信息块内的小节标签（B1 移植） */
+.rtv-cred-lbl2 {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t1);
+  margin-bottom: 4px;
+}
+.rtv-req {
+  font-weight: 400;
+  color: #d97706;
 }
 .rtv-cred-code {
   display: block;
@@ -3502,53 +4143,36 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 10px;
   border-bottom: 1px solid var(--b);
-  background: color-mix(in srgb, var(--a) 14%, var(--c));
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
 }
 .rtv-dev-title {
   font-size: 14px;
   font-weight: 600;
   flex: 1;
-  color: var(--t);
+  color: var(--on-accent);
 }
 .rtv-dev-auto {
   font-size: 10px;
-  color: var(--t3);
+  color: rgba(255, 255, 255, 0.7);
 }
 .rtv-dev-create {
-  background: var(--a);
+  background: rgba(255, 255, 255, 0.2);
   color: var(--on-accent);
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 5px 12px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition:
-    background 0.18s,
-    filter 0.18s;
-}
-.rtv-dev-create:hover {
-  background: var(--ah);
-  filter: brightness(1.06);
 }
 .rtv-dev-refresh {
-  background: transparent;
-  color: var(--a);
-  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
-  border-radius: 999px;
-  padding: 5px 12px;
-  font-size: 14px;
-  line-height: 1.2;
-  cursor: pointer;
-  transition:
-    background 0.18s,
-    color 0.18s,
-    border-color 0.18s;
-}
-.rtv-dev-refresh:hover {
-  background: var(--a);
+  background: rgba(255, 255, 255, 0.12);
   color: var(--on-accent);
-  border-color: var(--a);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 14px;
+  cursor: pointer;
 }
 .rtv-dev-body {
   background: var(--bg);
@@ -3633,7 +4257,7 @@ onBeforeUnmount(function () {
 .rtv-dev-progfill {
   width: 40%;
   height: 100%;
-  background: var(--a);
+  background: linear-gradient(90deg, #60a5fa, #a78bfa);
   border-radius: 3px;
   animation: rtvDevPulse 2s ease-in-out infinite;
 }

@@ -400,13 +400,13 @@ const API = (() => {
     if (!_skipNavSignal) {
       var navSignal = window._navSignal;
       var tabSignal = window._tabSignal;
-      if (navSignal) {
-        if (navSignal.aborted) controller.abort();
-        else navSignal.addEventListener('abort', function() { controller.abort(); });
+      // 只跟随「活着的」取消信号：已 abort 的 signal 属于上一次导航，把它挂到新请求上会造成
+      // 每个请求立即 abort → 视图（如 #tasks）永久停在「加载中」，且重试也无法恢复。
+      if (navSignal && !navSignal.aborted) {
+        navSignal.addEventListener('abort', function() { controller.abort(); });
       }
-      if (tabSignal) {
-        if (tabSignal.aborted) controller.abort();
-        else tabSignal.addEventListener('abort', function() { controller.abort(); });
+      if (tabSignal && !tabSignal.aborted) {
+        tabSignal.addEventListener('abort', function() { controller.abort(); });
       }
     }
     opts = Object.assign({}, opts, { signal: controller.signal });
@@ -453,6 +453,9 @@ const API = (() => {
   }
   function _put(path, body, timeout) {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'PUT', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _put(path, body, timeout))));
+  }
+  function _patch(path, body, timeout) {
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'PATCH', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _patch(path, body, timeout))));
   }
   function _del(path, timeout) {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: h}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout))));
@@ -512,6 +515,7 @@ const API = (() => {
     get: _get,
     post: _post,
     put: _put,
+    patch: _patch,
     del: _del,
     deleteFeedback: deleteFeedback,  // Issue #177: 删除反馈封装
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用

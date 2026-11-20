@@ -26,7 +26,7 @@ def _hermes_installed():
 def _call_onboarding(discover_result, runtime_rows, username="alice", repo=""):
     """直接调用路由函数，mock get_meta_value / discover_backends / DB。"""
     import src.domains.mgmt.user.db as db_mod
-    import src.domains.runtime.agents.executor as executor_mod
+    import src.domains.runtime.engine.executor as executor_mod
     from src.domains.runtime.routes.runtime import runtime_engine_onboarding
 
     cursor = MagicMock()
@@ -90,7 +90,7 @@ class TestEngineOnboarding:
         import sqlite3, tempfile, os
         from src.domains.runtime.routes.runtime import runtime_engine_onboarding
         import src.domains.mgmt.user.db as db_mod
-        import src.domains.runtime.agents.executor as executor_mod
+        import src.domains.runtime.engine.executor as executor_mod
 
         tmp = tempfile.mktemp(suffix=".db")
         conn = sqlite3.connect(tmp)

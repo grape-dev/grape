@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grape.dev/contracts/a2a_handoff_response.schema.json",
   "title": "A2A structured handoff response",
-  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq.",
+  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq. Issue #2555: every skipped response (a blocked or rejected handoff) also carries ok=false, reason (why-skipped + next step) and detail (code-specific locator fields, possibly {}). Queued responses are not skipped responses: they set skipped=queued as a queue marker together with handoff_result=ok, and therefore do not carry ok/detail. Issue #2555 skip codes use human-readable Chinese reasons: task_cancelled (detail: issue_number/repository/status) | repo_mismatch (detail: issue_number/expected_repository/actual_repository; emitted only when this repo has no such DB row, another repo holds the number, and this repo's VCS also answers 404 — an unsynced new issue or an unknown VCS verdict never yields this code) | target_scene_not_found / target_scene_missing_node (detail: target_node) | not_in_scene (detail: agent) | pr_subscription_a2a_disabled / sre_subscribed (detail: issue_number). duplicate_handoff also uses a human-readable Chinese reason, but unlike the codes above its detail is {} and the prior event reference is carried in original_event (not detail.existing_seq). Pre-existing dedup/dispatch-guard codes keep their machine-readable reason format '<kind>[:<seq>]' for backward compatibility, and now also carry ok=false + detail: duplicate_a2a | downstream_running / duplicate_key / active_dispatch (detail: existing_seq, plus locator fields). Existing codes keep their meaning; new codes may be added, so skipped is intentionally not narrowed to an enum.",
   "type": "object",
   "properties": {
     "status": {"type": "string"},
@@ -13,9 +13,12 @@
     "idempotent": {"type": "boolean"},
     "existing_status": {"type": "string", "description": "Issue #2248: status of the existing event returned on an idempotency_key hit."},
     "replayable": {"type": "boolean", "description": "Issue #2248: true when the idempotency hit is a terminal event and may be replayed with force=true or a new round key."},
-    "skipped": {"type": "string"},
-    "queued": {"type": "boolean"},
-    "event": {"type": "object"}
+    "skipped": {"type": "string", "description": "Skip code; 'queued' is a queue marker for a queued (not skipped) handoff, see queued."},
+    "queued": {"type": "boolean", "description": "Issue #2555: true when the handoff was queued rather than skipped; queued responses carry handoff_result=ok and no ok/detail."},
+    "event": {"type": "object"},
+    "ok": {"type": "boolean", "description": "Issue #2555: false on every skipped response; existing ok paths keep their value."},
+    "reason": {"type": "string", "description": "Issue #2555: why the handoff was skipped + next step. Human-readable Chinese for the Issue #2555 skip codes; pre-existing dedup/dispatch-guard codes keep '<kind>[:<seq>]'. Never contains tokens, internal paths, scene ids or node lists for the Issue #2555 codes."},
+    "detail": {"type": "object", "additionalProperties": true, "description": "Issue #2555: code-specific locator fields; present (possibly {}) on every skipped (non-queued) response."}
   },
   "required": ["handoff_result", "source_seq"],
   "additionalProperties": true

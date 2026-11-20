@@ -541,7 +541,7 @@ class TestSyncOfficialScenes:
             # mock DB：fetchone 第一次返回已有场景行（is_active=0 表示 admin 禁用了），
             # old_hash 与 content_hash 不同→触发 UPDATE 路径
             mock_cursor = MagicMock()
-            mock_cursor.fetchone = MagicMock(side_effect=[(1, "0.9.0", "old_different_hash", 0), (0,)])
+            mock_cursor.fetchone = MagicMock(side_effect=[(1, "0.9.0", "old_different_hash", 0, ""), (0,)])
             mock_cursor.fetchall = MagicMock(return_value=[])
             mock_cursor.lastrowid = 1
             mock_db = MagicMock()

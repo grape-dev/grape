@@ -170,6 +170,18 @@ def _engine_label(runtime_id: int) -> str:
         return f"#{runtime_id}"
 
 
+def _engine_uid(runtime_id: int) -> str:
+    """Issue #868 前端 uid 消费：runtime_id → engine_uid（旧库缺列/行不存在降级 ''）。"""
+    if not runtime_id:
+        return ""
+    # agent_runtimes 归 runtime 域：SQL 在 runtime public 一份，这里只调原语（跨域读收口）
+    try:
+        from src.domains.runtime import public as runtime_public
+        return runtime_public.runtime_uid_of(int(runtime_id))
+    except Exception:
+        return ""
+
+
 def _task_item(row: Dict[str, Any], tokens: Dict[str, Dict[str, int]],
                logs: List[Dict[str, Any]], with_steps: bool) -> Dict[str, Any]:
     enq = _dt(row.get("created_at"))
@@ -187,6 +199,8 @@ def _task_item(row: Dict[str, Any], tokens: Dict[str, Dict[str, int]],
         "status": row.get("status") or "", "issue_id": row.get("issue_id") or "",
         "repo_key": row.get("repo_key") or "", "runtime_id": row.get("runtime_id") or 0,
         "engine": _engine_label(int(row.get("runtime_id") or 0)),
+        # Issue #868 前端 uid 消费：uid 优先展示、runtime_id 兜底（由前端回退）
+        "engine_uid": _engine_uid(int(row.get("runtime_id") or 0)),
         "enqueue_at": _iso(enq), "dispatch_at": _iso(disp), "terminal_at": _iso(term),
         "queue_wait_s": wait, "duration_s": dur,
         "event_seq": row.get("event_seq") or 0,

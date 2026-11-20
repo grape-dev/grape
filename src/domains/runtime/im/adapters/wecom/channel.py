@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -142,6 +143,13 @@ class WecomChannel(Channel):
         self.acked_frames: list[str] = []   # 测试观察哨
         self.messages_handled: list = []    # 测试观察哨
         self.parse_fail = 0
+        # 诊断计数器（只用于日志）：连接序号 + 本连接建立时刻（算存活时长）
+        self._conn_seq = 0
+        self._conn_started_at = 0.0
+        self._kicks_this_conn = 0
+        # 累计"会话接管"事件数（公开只读计数，供 Supervisor 并入 flap 归因桶，
+        # 见 engine/metrics.py FLAP_CAUSES 的 takeover；架构审查 A13 要求可观测）
+        self.takeover_count = 0
         self.subscribed = False
         self.bot_id = bot_id
 
@@ -183,6 +191,14 @@ class WecomChannel(Channel):
         seen: dict = {mid: None for mid in self._seen_loader(bot_id)}
         try:
             async with self._ws_connect(ws_url) as ws:
+                # ── 诊断（只日志，不改行为）：给每条连接编号并记建立时刻，
+                # 这样 disconnected_event 能算出「本连接存活多久才被踢」，
+                # 也能看出同一连接是否收到多次事件（分辨自踢 vs 外部抢占）。
+                self._conn_seq += 1
+                _seq = self._conn_seq
+                self._conn_started_at = time.monotonic()
+                self._kicks_this_conn = 0
+                log.info("[wecom:%s] ws#%d established", bot_id[:12], _seq)
                 self._transport.attach(ws)
                 # 读循环先起：订阅 ack / 发送 ack 都由它兑现（同一条连接）
                 read_task = asyncio.get_running_loop().create_task(
@@ -327,7 +343,22 @@ class WecomChannel(Channel):
             return
 
         if is_disconnect_event(payload):
-            # 同一机器人新连接订阅成功 → 服务端踢掉旧连接（多副本抢连接的显式信号）
+            # 平台通知「同一机器人有新连接订阅成功」。实测（2026-11-18，10 分钟日志观测）：
+            #   · 同一条连接从不重复收到（14 条连接，每条恰好 1 次）；
+            #   · 该事件到达后 socket **仍可用**（单连接探针保持 266s 正常）；
+            #   · 我们每重连一次就新开一条会话 → 顶掉上一条 → 又收到一次事件 → 再重连，
+            #     实测 10 分钟 14 次订阅/13 次被踢，自己把自己踢成死循环（企微点击回调全丢）。
+            # 口径：第一次只告警、继续用这条连接（真断线由 90s 读超时 / ping 失败兜底）；
+            # 同一条连接收到第二次 = 确实被别的新会话连续顶掉，才交给 Supervisor 重连。
+            self._kicks_this_conn += 1
+            self.takeover_count += 1
+            alive = time.monotonic() - (self._conn_started_at or time.monotonic())
+            log.warning("[wecom:%s] ws#%d disconnected_event after %.1fs "
+                        "(kicks_this_conn=%d)%s",
+                        bot_id[:12], self._conn_seq, alive, self._kicks_this_conn,
+                        "" if self._kicks_this_conn > 1 else " → keep socket")
+            if self._kicks_this_conn == 1:
+                return
             raise ChannelError(f"wecom connection kicked by new subscription (bot={bot_id[:12]})")
 
         if is_event_frame(payload):

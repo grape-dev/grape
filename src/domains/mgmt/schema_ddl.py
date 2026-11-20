@@ -225,6 +225,27 @@ CREATE TABLE IF NOT EXISTS skill_category (
 )
 """
 
+# Issue #2761：场景/技能统一分类字典（一级域 + 二级子类）。
+# 旧 scene_category / skill_category 保留不动，仅新字段 cat_l1_id / cat_l2_id 引用本表。
+_CATEGORY_DICT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_category_dict (
+    -- id 显式分配、非自增（A12）：一级 = 1000 + order_num，二级 = 一级 id * 100 + order_num。
+    -- 稳定可预测，种子与同步两侧都按同一规则算，无需 lastrowid 回查。
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL DEFAULT 0,
+    level       INTEGER NOT NULL DEFAULT 1,
+    name        TEXT NOT NULL,
+    slug        VARCHAR(64) NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    applies_to  VARCHAR(16) NOT NULL DEFAULT 'both',
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (parent_id, slug)
+)
+"""
+
 _SCENE_MARKET_DDL = """
 CREATE TABLE IF NOT EXISTS scene_market (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,6 +256,8 @@ CREATE TABLE IF NOT EXISTS scene_market (
     market_description TEXT DEFAULT '',
     icon        TEXT DEFAULT '',
     category_id INTEGER DEFAULT 1,
+    cat_l1_id   INTEGER DEFAULT 0,     -- Issue #2761：统一分类字典一级域
+    cat_l2_id   INTEGER DEFAULT 0,     -- Issue #2761：统一分类字典二级子类
     is_featured INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
     source      TEXT DEFAULT 'official',
@@ -435,7 +458,7 @@ _VERIFICATION_CODES_DDL = """
 CREATE TABLE IF NOT EXISTS verification_codes (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     email        VARCHAR(255) NOT NULL,
-    code_hash    VARCHAR(64) NOT NULL,
+    code_hash    VARCHAR(191) NOT NULL,   -- Issue #3469 I：存 "{kid}:{digest}"，64 装不下
     scene        VARCHAR(32) NOT NULL,
     ip           VARCHAR(64) DEFAULT '',
     attempts     INTEGER DEFAULT 0,
@@ -451,7 +474,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     seq          INTEGER NOT NULL UNIQUE,
     event_type   VARCHAR(64) NOT NULL,
     user_id      TEXT DEFAULT 0,
-    operator_id  INTEGER DEFAULT 0,
+    operator_id  TEXT DEFAULT '0',
     ip           VARCHAR(64) DEFAULT '',
     detail       TEXT DEFAULT '{}',
     prev_hash    VARCHAR(64) DEFAULT '',
@@ -671,4 +694,107 @@ CHANNEL_TABLE_DDL = (
     ("grape_t_channel_outbound_card", _CHANNEL_OUTBOUND_CARD_DDL),
     ("grape_t_channel_lease", _CHANNEL_LEASE_DDL),
     ("grape_t_channel_inbound_message", _CHANNEL_INBOUND_MESSAGE_DDL),
+)
+
+
+# ── 沙箱配置面 DDL（原在 runtime/agents/sandbox/schema.py，按 table_ownership 迁入）──────
+# 这 6 张表归 mgmt（配置面：白名单/路径/开关/模板/凭据/代理 token），
+# 但历史建表语句放在 runtime 的 ensure_sandbox_tables() 里，而该函数在
+# main.py 与 runtime/agent.py 都会被调用 —— 三库拓扑下四个进程各自把表建进自己的库。
+# 迁到 owner 域后，只有 mgmt 进程建表；runtime 侧改为按 should_skip 跳过。
+SANDBOX_CONFIG_DDL: tuple[tuple[str, str], ...] = (
+    ("grape_t_engine_sandbox_paths", """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
+    id TEXT PRIMARY KEY,
+    backend_name  TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    access        TEXT NOT NULL DEFAULT 'ro',
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(backend_name, path))"""),
+    ("grape_t_engine_sandbox_config", """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
+    id TEXT PRIMARY KEY,
+    runtime_id    INTEGER NOT NULL,
+    engine_name   TEXT NOT NULL,
+    sandbox_mode  TEXT NOT NULL DEFAULT 'required',
+    degrade_policy TEXT DEFAULT 'compatible',
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(runtime_id, engine_name))"""),
+    ("grape_t_engine_sandbox_whitelist", """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
+    id TEXT PRIMARY KEY,
+    backend_name  TEXT NOT NULL,
+    domain        TEXT NOT NULL,
+    method        TEXT NOT NULL CHECK(method IN ('GET','POST','PUT','DELETE','PATCH')),
+    path_prefix   TEXT NOT NULL DEFAULT '*',
+    scheme        TEXT NOT NULL DEFAULT 'https' CHECK(scheme IN ('http','https')),
+    port          INTEGER NOT NULL DEFAULT 443 CHECK(port BETWEEN 1 AND 65535),
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(backend_name, domain, method, scheme, port))"""),
+    ("grape_t_task_proxy_tokens", """CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
+    id TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    backend_name TEXT NOT NULL,
+    created_at   TEXT DEFAULT (datetime('now')),
+    expires_at   TEXT,
+    UNIQUE(task_id, backend_name))"""),
+    ("grape_t_user_llm_credentials", """CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
+    id TEXT PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    provider VARCHAR(64) NOT NULL,
+    api_key_enc TEXT NOT NULL,
+    base_url VARCHAR(512) DEFAULT '',
+    model VARCHAR(128) DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    key_version INTEGER DEFAULT 1,
+    engine_type VARCHAR(64) NOT NULL DEFAULT 'common',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, engine_type))"""),
+    ("grape_t_sandbox_templates", """CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
+    id TEXT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    provider VARCHAR(64) NOT NULL,
+    template_id VARCHAR(255) NOT NULL,
+    alias VARCHAR(255) DEFAULT '',
+    description VARCHAR(512) DEFAULT '',
+    engines VARCHAR(1024) DEFAULT '[]',
+    preinstalled VARCHAR(2048) DEFAULT '{}',
+    disk_size_mb INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    last_check_at VARCHAR(64) DEFAULT '',
+    last_check_status VARCHAR(32) DEFAULT '',
+    last_check_error VARCHAR(512) DEFAULT '',
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    created_by VARCHAR(64) DEFAULT '',
+    updated_by VARCHAR(64) DEFAULT '')"""),
+)
+
+
+OFFICIAL_SANDBOX_DOMAINS: tuple[tuple[str, str, str, str, int], ...] = (
+    ("opengw.clouddeveloper.club", "POST", "*", "https", 443),
+    ("api.deepseek.com", "POST", "*", "https", 443),
+    ("api.openai.com", "POST", "*", "https", 443),
+    ("api.anthropic.com", "POST", "*", "https", 443),
+    ("gitcode.com", "GET", "*", "https", 443),
+    ("gitcode.com", "POST", "*", "https", 443),
+    ("api.gitcode.com", "GET", "*", "https", 443),
+    ("api.gitcode.com", "POST", "*", "https", 443),
+    ("api.gitcode.com", "PUT", "*", "https", 443),
+    ("api.gitcode.com", "DELETE", "*", "https", 443),
+    ("api.gitcode.com", "PATCH", "*", "https", 443),
+    ("objects.gitcode.com", "GET", "*", "https", 443),
+    ("objects.gitcode.com", "PUT", "*", "https", 443),
+    ("objects.gitcode.com", "POST", "*", "https", 443),
+    ("obs.cn-north-4.myhuaweicloud.com", "GET", "*", "https", 443),
+    ("obs.cn-north-4.myhuaweicloud.com", "PUT", "*", "https", 443),
+    ("obs.cn-north-4.myhuaweicloud.com", "POST", "*", "https", 443),
+    ("obs.cn-north-4.myhuaweicloud.com", "DELETE", "*", "https", 443),
+    ("api.github.com", "GET", "*", "https", 443),
+    ("api.github.com", "POST", "*", "https", 443),
+    ("api.github.com", "PUT", "*", "https", 443),
+    ("api.github.com", "PATCH", "*", "https", 443),
+    ("api.github.com", "DELETE", "*", "https", 443),
 )

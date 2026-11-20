@@ -31,6 +31,10 @@ def _handlers() -> dict:
             p["rid"], p["tag"], int(p.get("priority", 50)), int(p.get("enabled", 1))),
         "engine_cap_delete": lambda p: rt.delete_engine_capability(p["rid"], p.get("tag")),
         "engine_cap_delete_all": lambda p: rt.delete_engine_capability(p["rid"]),
+        # Issue #3097：mgmt 删用户/合并账号的引擎引用对账重放（幂等）
+        "engine_refs_reconcile": lambda p: rt.reconcile_engine_references(
+            list(p.get("runtime_ids") or []), int(p.get("keep_id") or 0),
+            reason=str(p.get("reason") or "")),
     })
     try:
         from src.domains.mgmt import public as mg

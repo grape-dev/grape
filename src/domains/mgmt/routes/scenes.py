@@ -1,6 +1,7 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
 
 import json, os, re, threading, time
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request, Response
 
@@ -11,6 +12,7 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.oauth_token import with_oauth_token
 
 from src.kernel.config import log
+from src.kernel.tags import MAX_TAGS, encode_tags, prepare_tags, suggest_tags
 
 # 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
 from src.domains.runtime import public as _rt_scenes
@@ -64,7 +66,7 @@ def _branches_cache_invalidate(owner: str, repo: str):
     """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
     with _branches_cache_lock:
         try:
-            from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+            from src.domains.runtime.public import list_vcs_platforms as _lvp
             _pros = _lvp() or []
         except Exception:
             _pros = []
@@ -78,11 +80,15 @@ def _resolve_repo_key(repo: str) -> str:
     if ":" in repo:
         return rk
     try:
+        from src.kernel.repo_key import repo_key_candidates
+        # 2026-11-19：候选集必须在 db_lock **之前**算完。它内部要读平台卡
+        # （list_vcs_platforms → platform_card），而平台卡构建会走 DB 拿 db_lock；
+        # 「db_lock 里算候选集」与「平台卡构建里要 db_lock」反序 = 整进程 ABBA 死锁
+        # （2026-11-19 两次全站卡死）。锁内现在只剩一条纯 SELECT。
+        _rks = tuple(repo_key_candidates(repo))
         from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            from src.kernel.repo_key import repo_key_candidates
-            _rks = tuple(repo_key_candidates(repo))
             row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))}) LIMIT 1",
                             _rks).fetchone()
             if row:
@@ -107,7 +113,7 @@ def _scene_user_provider(user: dict) -> str:
     禁止平台名字面量（gitee/gitlab/华为等一律由卡目录派生）。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _catalog = list(list_vcs_platforms())
     except Exception:
         _catalog = []
@@ -133,7 +139,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
     from src.kernel.token_resolver import create_provider
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
     _card = get_platform_card(provider)
@@ -343,16 +349,220 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     return {"scenes": result, "total": _total}
 
 
-def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> str:
+class PinSceneRequest(BaseModel):
+    pinned: bool
+
+@router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
+def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
+              user: dict = Depends(require_no_session_token), repo: str = ""):
+    """设置/取消场景置顶（仓库共享，不区分用户）。
+
+    Issue #1735 复审（MR !1145 Critical-2 / Medium-1）：
+    - 必须带仓库上下文：repo_key 为空时直接 400，禁止落到 `repo_key=''` 的全局/官方行；
+    - 访问权无条件校验（不再以 repo_key 非空为前提）；
+    - 写操作落 audit_logs（scene_pin），可按 actor/target 追溯。
+    [rebase 并入 2026-11-12] 基线 #1735 端点（我方 c4 解算时误随重复块丢弃）。
+    """
+    from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
+    from src.api.deps import check_repo_access
+
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
+
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请指定仓库（--repo owner/repo）；置顶状态按仓库共享，不接受空仓库上下文"})
+    check_repo_access(user, repo_key)
+
+    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+
+    # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
+    set_scene_pinned(scene_id, repo_key, body.pinned)
+
+    from src.domains.mgmt.auth import audit as auth_audit
+    auth_audit.log_audit(
+        "scene_pin", operator_id=user.get("id") or 0,
+        ip=(request.client.host if request and request.client else ""),
+        detail={"scene_id": scene_id, "repo_key": repo_key, "pinned": bool(body.pinned)})
+    log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
+    return {"message": "置顶状态已更新", "scene_id": scene_id,
+            "is_pinned": 1 if body.pinned else 0}
+
+
+def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
+                         user_id: int = 0) -> dict:
+    """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
+
+    语义与原 with-pipeline 内联版完全一致：
+    - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
+      返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
+    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
+      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
+    - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
+
+    Issue #1208（L2 可见性徽标，复用入队校验查询同一把尺子）：
+    - selector 节点 0 命中（全库无引擎携带该标签，配置死）→ selector_dead_nodes（红点）
+    - selector 节点命中引擎当前全离线（瞬时死）→ selector_offline_nodes（黄点）
+    - all_offline 聚合含两类 selector 异常（既有消费方警告条不回归）
+    """
+    offline_nodes: list[str] = []
+    sre_unbound: bool = False
+    selector_dead_nodes: list[str] = []
+    selector_offline_nodes: list[str] = []
+    try:
+        from src.domains.runtime.public import (get_scene_pool_engine_ids as _gspei,
+                                               get_scene_engine_selector,
+                                               selector_candidate_engines)
+        for n in (cfg_nodes or []):
+            if not isinstance(n, dict):
+                continue
+            _tag = n.get("tag") or n.get("id") or ""
+            _eids = n.get("engine_runtime_ids") or []
+            _uids = n.get("engine_runtime_uids") or []
+            _sel = n.get("engine_selector") or {}
+            if not _tag:
+                continue
+            if n.get("enabled") is False:
+                continue
+            if (_sel.get("tags") or []) and not _eids and not _uids:
+                # selector 节点：复用入队候选集查询（同一把尺子），红/黄分层
+                try:
+                    _matched, _dropped = selector_candidate_engines(
+                        _sel, _tag, repo_key=repo_key, user_id=user_id)
+                    if _matched:
+                        pass  # 有健康命中 → 不标记
+                    elif any(d.get("reason") in ("offline", "stale") for d in _dropped):
+                        selector_offline_nodes.append(str(_tag))
+                    else:
+                        selector_dead_nodes.append(str(_tag))
+                except Exception:
+                    pass
+                continue
+            if not _eids and not _uids:
+                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
+                if _tag and str(_tag).lower() == "sre":
+                    sre_unbound = True
+                continue
+            try:
+                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
+                    offline_nodes.append(str(_tag))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"offline_nodes": offline_nodes,
+            "sre_unbound": sre_unbound,
+            "selector_dead_nodes": selector_dead_nodes,
+            "selector_offline_nodes": selector_offline_nodes,
+            "all_offline": bool(offline_nodes) or sre_unbound
+                           or bool(selector_dead_nodes) or bool(selector_offline_nodes)}
+
+
+@router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
+            summary="Scene engine online status",
+            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
+def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
+    """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
+
+    节点来源与 with-pipeline 一致：DB 场景（get_scenes）优先，查不到回退
+    get_pipeline_config（official 模板 / pipelines.json）。
+    场景不存在时返回 all_offline=False（不拦创建入口）。
+    """
+    from src.api.pipeline_config import get_pipeline_config
+    from src.kernel.repo_key import to_repo_key
+
+    # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
+    # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
+    repo_key = _resolve_scene_repo_key(repo, user)
+    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+    # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
+    # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
+    # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
+    # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
+    if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
+        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
+    cfg_nodes = cfg.get("nodes") or []
+    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key,
+                                  user_id=(user or {}).get("id", 0) or 0)
+    status["scene_id"] = scene_id
+    return status
+
+
+# ===== Issue #1208 v3：selector 命中预览（前端与后端判定同源同尺）=====
+class EngineSelectorPreviewBody(BaseModel):
+    tags: list[str] = []
+    agent_type: str = ""
+    repo: str = ""
+
+
+@router.post("/engine-selector-preview", operation_id="scenes_engine_selector_preview",
+             summary="Preview engine selector matches",
+             description="Issue #1208 v3: returns the authoritative hit/miss map for a selector by reusing selector_candidate_engines (same source as enqueue/claim), so the frontend preview never diverges from backend dispatch.")
+def engine_selector_preview(body: EngineSelectorPreviewBody,
+                            user: dict = Depends(require_no_session_token)):
+    """Selector 命中预览：直接复用 selector_candidate_engines 判定（同源同尺）。
+
+    返回 engines：{runtime_id(str): {hit, reason}}，reason ∈
+    selector/role/offline/stale/scope/capability（空 selector 时不做约束，由前端全命中处理）。
+    """
+    from src.domains.runtime.public import selector_candidate_engines
+    repo_key = _resolve_repo_key(body.repo) if body.repo else ""
+    matched, dropped = selector_candidate_engines(
+        {"tags": body.tags or []}, body.agent_type or "",
+        repo_key=repo_key, user_id=(user or {}).get("id", 0) or 0)
+    engines = {}
+    for m in matched:
+        engines[str(m["runtime_id"])] = {"hit": True, "reason": ""}
+    for d in dropped:
+        engines[str(d["runtime_id"])] = {"hit": False, "reason": d.get("reason", "")}
+    return {"matched": [m["runtime_id"] for m in matched],
+            "dropped": dropped, "engines": engines}
+
+
+# ===== Scene Market API（场景市场）=====
+
+def _scene_cat_icon(category_id: int, cat_map: dict | None = None) -> str:
+    """分类 emoji 兜底图标（Issue #2761 性能）。
+
+    列表页先用 ``list_scene_categories()`` 建一次 map 传进来，避免每行一次
+    ``scene_category`` 单条查询（N+1）；map 未命中（例如停用分类）再回落到
+    原单条查询，保持既有语义不变。
+    """
+    cat = None
+    if cat_map is not None and category_id:
+        try:
+            cat = cat_map.get(int(category_id))
+        except (TypeError, ValueError):
+            cat = None
+    if cat is None and category_id:
+        from src.domains.mgmt.user.db import get_scene_category
+        cat = get_scene_category(category_id)
+    return cat.get('icon', '⚙') if cat else '⚙'
+
+
+def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "",
+                        cat_map: dict | None = None) -> str:
     """解析场景图标为可访问的 URL 或 emoji。
     obs_icon_key 非空 → OBS 模式，动态生成签名 URL。
     icon 非空且是本地路径（/static/ 开头）→ 本地路径。
     icon 非空且是 emoji → 直接返回。
-    都为空或 OBS 失败 → 查 scene_category 表拿分类 emoji 图标兜底。
+    都为空或 OBS 失败 → 查 scene_category 表拿分类 emoji 图标兜底
+    （``cat_map`` 为该请求的预取分类表 id→分类 dict，省掉逐行查询）。
     """
     if obs_icon_key:
         try:
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 return storage.temporary_url(obs_icon_key)
@@ -361,14 +571,33 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
         # OBS 失败时先尝试 icon 字段（可能是有效的本地路径/emoji），再 emoji 兜底
         if icon:
             return icon
-        from src.domains.mgmt.user.db import get_scene_category
-        cat = get_scene_category(category_id)
-        return cat.get('icon', '⚙') if cat else '⚙'
+        return _scene_cat_icon(category_id, cat_map)
     if icon:
         return icon
-    from src.domains.mgmt.user.db import get_scene_category
-    cat = get_scene_category(category_id)
-    return cat.get('icon', '⚙') if cat else '⚙'
+    return _scene_cat_icon(category_id, cat_map)
+
+def _scene_category_payload(cat_l1_id: int = 0, cat_l2_id: int = 0) -> dict:
+    """分类路径 {l1, l2}（Issue #2761）。"""
+    from src.domains.mgmt.user.db import category_path
+    return category_path(int(cat_l1_id or 0), int(cat_l2_id or 0))
+
+
+def _scene_tag_suggestions(name: str = "", description: str = "") -> list[str]:
+    """规则型标签候选：仅返回真实命中项（最多 3 个）。"""
+    return suggest_tags(name, description, candidates=(
+        "开发", "运维", "测试", "部署", "自动化", "AI", "数据", "安全", "文档", "监控"))
+
+
+def _normalize_scene_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]:
+    """校验并归一化场景分类（Issue #2761）。
+
+    统一口径见 `_category.normalize_category_pair`（与技能写路径共用）：
+    - 一级/二级 ID 必须存在且层级正确（一级 level=1、二级 level=2）；
+    - 二级必须属于所给一级（只给二级时由 parent_id 反推一级）。
+    """
+    from src.domains.mgmt.routes._category import normalize_category_pair
+    return normalize_category_pair(cat_l1_id, cat_l2_id)
+
 
 def _parse_scene_skills(nodes_json: str) -> list[str]:
     """从 nodes_json 提取技能名称列表"""
@@ -380,9 +609,10 @@ def _parse_scene_skills(nodes_json: str) -> list[str]:
 
 @router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories", description="Scene categories ordered by order_num; only is_active=1.")
 def list_scene_categories(user: dict = Depends(require_no_session_token)):
-    """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
+    """场景分类列表：保持旧一级列表（旧分类 tab），并附统一分类树（Issue #2761）。"""
     from src.domains.mgmt.user.db import list_scene_categories as _list_cats
-    return {"categories": _list_cats()}
+    from src.domains.mgmt.user.db import list_category_tree
+    return {"categories": _list_cats(), "tree": list_category_tree("scene")}
 
 @router.get("/market", operation_id="scenes_market_list", summary="List scene market", description="Scene market list with search/category/sort/featured/paging/scope filters. limit>0 skips paging.")
 def list_scenes_market(user: dict = Depends(require_no_session_token),
@@ -390,14 +620,16 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                        scope: str = "", repo: str = "",
                        featured_only: int = 0, limit: int = 0,
                        page: int = Query(default=1, ge=1),
-                       page_size: int = Query(default=20, ge=1)):
+                       page_size: int = Query(default=20, ge=1),
+                       cat_l1_id: int = 0, cat_l2_id: int = 0):
     """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
     scope: official / repo，空=全部。
     repo: scope=repo 时按 repo_key 过滤（owner/repo 格式）。
     """
     from src.domains.mgmt.user.db import (list_scene_market, batch_scene_liked,
-                             batch_scene_repo_count)
+                             batch_scene_repo_count, list_category_dict,
+                             category_path_from_map, list_scene_categories)
     from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
@@ -415,7 +647,8 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                                featured_only=featured_only, limit=limit,
                                page=page, page_size=page_size,
                                scope=scope, repo_key=repo_key,
-                               user_id=user.get("id", 0))
+                               user_id=user.get("id", 0),
+                               cat_l1_id=cat_l1_id, cat_l2_id=cat_l2_id)
     if not scenes:
         return {"scenes": [], "total": total, "page": page, "page_size": page_size}
 
@@ -425,6 +658,15 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     # 批量查 repo_count
     repo_count_map = batch_scene_repo_count(scene_ids)
 
+    try:
+        _cat_map = {c["id"]: c for c in list_category_dict("scene")}
+    except Exception:
+        _cat_map = {}
+    # Issue #2761 性能：分类 emoji 兜底一次取全表，替代逐行 scene_category 单条查询（N+1）。
+    try:
+        _icon_map = {c["id"]: c for c in list_scene_categories()}
+    except Exception:
+        _icon_map = {}
     result = []
     for s in scenes:
         result.append({
@@ -433,8 +675,14 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "display_name": s["display_name"],
             "version": s["version"],
             "market_description": s["market_description"],
-            "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", "")),
+            "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", ""),
+                                        cat_map=_icon_map),
             "category_id": s["category_id"],
+            "cat_l1_id": s.get("cat_l1_id", 0),
+            "cat_l2_id": s.get("cat_l2_id", 0),
+            "category": category_path_from_map(
+                _cat_map, s.get("cat_l1_id", 0), s.get("cat_l2_id", 0)),
+            "tags": s.get("tags", [])[:MAX_TAGS],
             "is_featured": s["is_featured"],
             "like_count": s["like_count"],
             "liked_by_me": liked_map.get(s["id"], False),
@@ -473,6 +721,13 @@ def _pick_node_skill_id(node: dict, ref_map: dict) -> int:
         return int((ref_map or {}).get(node.get("skill", ""), 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+@router.get("/tag-suggest", operation_id="scenes_tag_suggest",
+            summary="Suggest scene tags", description="Rule-based tag candidates (max 3) for scene name/description.")
+def suggest_scene_tags(name: str = "", description: str = "",
+                       user: dict = Depends(require_no_session_token)):
+    return {"tags": _scene_tag_suggestions(name, description)}
 
 
 @router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
@@ -572,6 +827,10 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "icon": _resolve_scene_icon(scene["icon"], scene["category_id"], scene.get("obs_icon_key", "")),
         "category_id": scene["category_id"],
         "category_name": category_name,
+        "cat_l1_id": scene.get("cat_l1_id", 0),
+        "cat_l2_id": scene.get("cat_l2_id", 0),
+        "category": _scene_category_payload(scene.get("cat_l1_id", 0), scene.get("cat_l2_id", 0)),
+        "tags": (scene.get("tags") or [])[:MAX_TAGS],
         "is_featured": scene["is_featured"],
         "like_count": scene["like_count"],
         "liked_by_me": is_scene_liked(user.get("id", 0), market_id),
@@ -1084,7 +1343,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     """
     from src.domains.mgmt.user.db import db_lock, db
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+    from src.domains.runtime.public import list_vcs_platforms
 
     try:
         _provs = list(list_vcs_platforms())
@@ -1136,7 +1395,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1155,8 +1414,8 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
     _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
@@ -1211,7 +1470,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1223,8 +1482,8 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
 
@@ -1269,6 +1528,9 @@ class CreateMarketSceneRequest(BaseModel):
     obs_icon_key: str = ""
     file_id: int = 0  # uploaded_files 表 id（图标临时文件）
     category_id: int = 1
+    cat_l1_id: int = 0
+    cat_l2_id: int = 0
+    tags: Optional[list] = None
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
@@ -1283,7 +1545,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     from src.domains.mgmt.user.db import (create_scene_market, commit_uploaded_file,
                              delete_uploaded_file, get_uploaded_file)
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     if body.scope not in ("repo",):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 repo"})
@@ -1318,7 +1580,16 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # Issue #1564 R1：市场模板为全仓共享配置，保存即强制拒绝 user scope（含创建者本人）
     _validate_scene_skill_scope(body.nodes, repo_key)
 
+    # Issue #2761：一/二级分类必须存在且层级匹配（二级归属一级）
+    cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
+
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
+    tag_items, overflow = prepare_tags(body.tags)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
 
     try:
         market_id = create_scene_market(
@@ -1326,7 +1597,8 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
             scope=body.scope, repo_key=repo_key, source_user_id=user.get("id", 0),
             nodes_json=nodes_json, icon=body.icon, obs_icon_key=body.obs_icon_key,
             category_id=body.category_id, recommended_template=body.recommended_template,
-            created_by=user.get("username", ""),
+            created_by=user.get("username", ""), cat_l1_id=cat_l1_id,
+            cat_l2_id=cat_l2_id, tags=encode_tags(tag_items),
         )
     except Exception as e:
         err_upper = str(e).upper()
@@ -1352,7 +1624,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
 
     # 重建 scene_skill_ref（仓库场景也需要）
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name, repo_key)
     except Exception as e:
         log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
@@ -1368,6 +1640,10 @@ class UpdateMarketSceneRequest(BaseModel):
     obs_icon_key: str = ""
     file_id: int = 0  # 新上传的图标临时文件 id（0=未更换图标）
     category_id: int = 0
+    cat_l1_id: int = 0
+    cat_l2_id: int = 0
+    clear_category: bool = False  # Issue #2761：显式清空一/二级分类
+    tags: Optional[list] = None
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
@@ -1422,19 +1698,35 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
         ):
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
 
+    tags_json = None
+    if body.tags is not None:
+        tag_items, overflow = prepare_tags(body.tags)
+        if overflow:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+                "overflow": overflow})
+        tags_json = encode_tags(tag_items)
+
+    # Issue #2761：分类校验（存在 + 二级归属一级）；clear_category 显式清空
+    cat_l1_id, cat_l2_id = (0, 0)
+    if not body.clear_category and (body.cat_l1_id or body.cat_l2_id):
+        cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
+
     success = update_scene_market(
         market_id=market_id, name=body.name, display_name=body.display_name,
         description=body.description, nodes_json=nodes_json,
         icon=body.icon, obs_icon_key=body.obs_icon_key,
         category_id=body.category_id, recommended_template=body.recommended_template,
-        updated_by=user.get("username", ""),
+        updated_by=user.get("username", ""), cat_l1_id=cat_l1_id,
+        cat_l2_id=cat_l2_id, tags=tags_json, clear_category=body.clear_category,
     )
     if not success:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在或无更新"})
 
     # 重建 scene_skill_ref
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""),
                                   scene.get("repo_key", "") or "")
     except Exception as e:
@@ -1501,7 +1793,7 @@ async def upload_scene_icon(file: UploadFile = File(...),
     """
     import uuid as _uuid
     from src.domains.mgmt.user.db import insert_uploaded_file
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     # 校验格式
     allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"}
@@ -1554,7 +1846,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
     """将临时图标文件落定为正式文件（重命名 key + 更新 uploaded_files + 更新 scene_market icon 字段）。"""
     from src.domains.mgmt.user.db import (get_uploaded_file, commit_uploaded_file,
                              delete_uploaded_file)
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     from src.kernel.session_manager import db, db_lock
 
     file_rec = get_uploaded_file(file_id)
@@ -1601,7 +1893,7 @@ def _delete_scene_icon_file(file_key: str):
     """删除图标物理文件（OBS 或本地）。"""
     if not file_key:
         return
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     storage = get_storage()
     if storage:
@@ -1699,6 +1991,50 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
         ) if violations else "只读体检：未发现技能 scope 冲突。",
     }
 
+def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
+                            cache: dict | None = None) -> dict:
+    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
+
+    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
+    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
+    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
+    其它模块的私有判定函数。
+    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
+    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
+    """
+    from src.api.scene_skill_scope import evaluate
+    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
+                      cache=cache)
+    return {
+        "resolvable": bool(result["ok"]),
+        "scope_check": {
+            "ok": bool(result["ok"]),
+            "skill": result.get("skill") or "",
+            "actual_scope": result.get("actual_scope") or "",
+            "expected_scope": result.get("expected_scope") or "repo",
+            "reason": result.get("reason") or "",
+        },
+    }
+
+def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
+                                    scene_id: str = "") -> list:
+    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
+
+    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
+    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
+    """
+    result = []
+    _cache = {}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            result.append(node)
+            continue
+        item = dict(node)
+        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
+        result.append(item)
+    return result
+
+
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
@@ -1743,17 +2079,19 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
             "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
-
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging). Response contract: each skill item exposes (skill_id, scope, skill_name) which together form the unique selection key for frontend consumers — official/repo/user scoped skills may share the same skill_name, so skill_name alone MUST NOT be used as a selection/cache key.")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = Query(1, ge=1, description="页码，从 1 开始"),
                           page_size: int = Query(20, ge=1, le=200, description="每页条数，1-200")):
-    """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
+    """返回该 agent_type 可选的 skill 列表（职责过滤 + 搜索 + scope 过滤 + 分页）。
+
+    职责过滤口径：只返回 agent_type 相同的技能，以及 agent_type 为空的历史通用技能；
+    过滤在 owner 域（scene_skill_search）的 SQL 里做——原实现造了 where/params 却从未使用，
+    导致任意角色都能选到其它角色的技能（绑定后技能会跑在错误的节点里）。
+    """
     from src.kernel.session_manager import db, db_lock
     skills = []
-    where = ["agent_type=?", "is_active=1"]
-    params: list = [agent_type]
 
     # skill 可见范围：official + 个人 user skill + 当前仓库的 repo skill
     repo_key = ""
@@ -1770,7 +2108,8 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
             pass
     user_id = str(user.get("id", ""))
     total, _skill_rows = _rt_scenes.scene_skill_search(
-        user_id, repo_key, q=q or "", scope=scope or "", page=page, page_size=page_size)
+        user_id, repo_key, q=q or "", scope=scope or "", page=page, page_size=page_size,
+        agent_type=(agent_type or "").strip().lower())
     for r in _skill_rows:
         # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
         # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)
@@ -1791,6 +2130,10 @@ class SceneNodeInput(BaseModel):
     skip: list = []
     enabled: bool = True
     engine_runtime_ids: list = []
+    # Issue #1208：uid 池（D12 姊妹字段，与 ids 双非空拒绝）+ selector 标签池
+    # （三模式同 node 互斥，D7；保存端为权威校验点）
+    engine_runtime_uids: list = []
+    engine_selector: dict = {}
 
 class CreateSceneRequest(BaseModel):
     scene_id: str = ""
@@ -1826,8 +2169,8 @@ def _validate_scene_node_roles(nodes: list):
     Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
     tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
     """
-    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
-    _roles = set(KNOWN_AGENT_ROLES)
+    from src.domains.runtime.public import known_agent_roles
+    _roles = known_agent_roles()
     for node in nodes:
         _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
         if _id and _id not in _roles:
@@ -1836,8 +2179,25 @@ def _validate_scene_node_roles(nodes: list):
                 "message": f"节点角色非法：'{_id}'（节点 id 必须为角色名），"
                            f"合法角色：{', '.join(sorted(_roles))}"})
 
+def _selector_scene_values() -> list:
+    """Issue #1208：scene: 维度值域（动态查 scene_market 活跃行，空回退 default）。
+
+    值域动态非白名单（D17）：场景市场新增活跃场景名即时合法；查询失败降级
+    ["default"]（引擎侧 scene_tags 空回退同口径）。
+    """
+    try:
+        from src.kernel.bulk_read import reader
+        with reader() as c:
+            rows = c.execute("SELECT DISTINCT name FROM scene_market WHERE is_active=1").fetchall()
+        vals = sorted({str(r[0]).strip().lower() for r in rows if r and str(r[0] or "").strip()})
+        return vals + ["default"] if "default" not in vals else vals
+    except Exception as e:
+        log.warning(f"_selector_scene_values: scene_market lookup failed: {e}")
+        return ["default"]
+
+
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
-    """校验场景 nodes 的 engine_runtime_ids：
+    """校验场景 nodes 的引擎绑定（Issue #1208 扩展：三模式互斥 + selector L1）：
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
     3. 引擎必须有对应节点角色的能力标签（engine_capabilities.tag 或 'all' 通配，
@@ -1847,27 +2207,126 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     4. SRE 节点：引擎必须为个人级或仓库级（scope=user 且 owner_id==当前用户，或
        scope=repo 且归属当前仓库——repo 归属由下方通用校验覆盖）
        （sre-repo-worker-relax §1.2，取代 sre-personal-machine §3.7 Q2/Q3）
-    5. SRE 节点 enabled 且 engine_runtime_ids 为空 → 400（SRE 空 ≠ 广播，= 无引擎无法派发）
+    5. SRE 节点 enabled 且三模式绑定全空 → 400（SRE 空 ≠ 广播，= 无引擎无法派发）
+    6. Issue #1208 D7：三模式同 node 互斥——ids/uids 双非空 400；
+       selector 与 ids/uids 任一非空双非空 400（保存端双非空拒绝）
+    7. Issue #1208 D13 L1：selector 标签语法/值域硬阻断 400（未知前缀文案指引 label:；
+       engine/scope 固定值域；scene 动态查 scene_market 活跃行）
+    8. SRE 节点 selector 模式：tags 必须含 scope:user 或 scope:repo → 否则 400
+       （claim 侧没有 SRE 专属 scope 层，边界只由 selector 的 scope 标签承担；与前端
+       SRE 弹窗只给「个人/仓库」两档对齐）
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import from_repo_key
-    from src.domains.runtime.engine.engine_select import node_agent_role
+    from src.domains.runtime.public import node_agent_role, validate_selector_tags
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
         # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
         tag = node_agent_role(node)
         eids = node.get("engine_runtime_ids") or []
+        uids = [str(u or "").strip() for u in (node.get("engine_runtime_uids") or [])
+                if str(u or "").strip()]
+        selector = node.get("engine_selector") or {}
+        _sel_tags = (selector.get("tags") or []) if isinstance(selector, dict) else []
         if not tag:
             continue
-        # SRE 空 = 无引擎：启用状态下不允许保存（Q2/Q5 裁定）
-        if tag == "sre" and node.get("enabled") is not False and not eids:
+        # Issue #1208 D7：三模式互斥（保存端双非空拒绝，先于一切逐项校验）
+        # 迁移遗留双写归一（202611050002 升格保留 ids 整改）：uids 全部可解析且解析出的
+        # runtime_id 集合与 ids 一致 → 视为 T11 升格遗留双写，uids 为权威、忽略 ids 继续
+        # 校验（不 400）；集合不一致 / uid 不可解析 → 用户显式双轨，维持 400。
+        if eids and uids:
+            _legacy_dual = False
+            if not _sel_tags:
+                try:
+                    from src.kernel.engine_uid import is_uid_str as _is_uid
+                    from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid as _rid_of
+                    _uid_rids = set()
+                    for _u in uids:
+                        if not _is_uid(_u):
+                            break
+                        _r = _rid_of(_u.lower())
+                        if not _r:
+                            break
+                        _uid_rids.add(int(_r))
+                    else:
+                        try:
+                            _eid_set = {int(e) for e in eids}
+                        except (ValueError, TypeError):
+                            _eid_set = None
+                        _legacy_dual = _eid_set is not None and _uid_rids == _eid_set
+                except Exception as _le:
+                    log.warning(f"_validate_scene_engine_ids: legacy dual-write probe failed: {_le}")
+                    _legacy_dual = False
+            if _legacy_dual:
+                log.info(f"节点 {tag} 检测到 T11 升格遗留 ids/uids 双写（集合一致），"
+                         f"按 uids 权威归一后继续校验")
+                eids = []
+            else:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 的 engine_runtime_ids 与 engine_runtime_uids 不可同时非空"
+                               f"（三模式互斥，请二选一保存）"})
+        if _sel_tags and (eids or uids):
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"节点 {tag} 的 engine_selector 与引擎清单绑定不可同时非空"
+                           f"（按标签筛选 / 按引擎选择二选一，切换模式将清空另一模式）"})
+        # Issue #1208 D13 L1：selector 语法/值域硬阻断（合法值列表随 400 返回）
+        if _sel_tags:
+            _err = validate_selector_tags(_sel_tags, scene_values=_selector_scene_values())
+            if _err:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+        # SRE 空 = 无引擎：启用状态下不允许保存（Q2/Q5 裁定；selector 非空视为已绑定）
+        if tag == "sre" and node.get("enabled") is not False and not eids and not uids and not _sel_tags:
             raise HTTPException(status_code=400, detail={
                 "code": 400,
                 "message": "SRE Agent 不支持广播模式，请选择个人或仓库级机器（引擎列表不能为空）"})
-        if not eids:
+        # SRE 的 user/repo 边界在 claim 侧没有独立一层（_DEFAULT_ENGINE_ROLE_TAGS 空表、
+        # claim_by_tag 无 sre/scope 层、_selector_guard_blocks 只做标签 AND 匹配），实际边界
+        # 完全落在 selector 的 scope 标签上：不带 scope 的 selector 会被 global 档引擎认领。
+        # 保存端在此收紧，与前端 SRE 弹窗只给「个人/仓库」两档对齐（早于派发/认领，成本最低）。
+        if tag == "sre" and node.get("enabled") is not False and _sel_tags:
+            _sre_sel_scopes = {str(t or "").strip().lower() for t in _sel_tags}
+            if not (_sre_sel_scopes & {"scope:user", "scope:repo"}):
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": "SRE Agent 的引擎筛选必须包含 scope:user 或 scope:repo"
+                               "（SRE 禁止使用全局引擎，缺少 scope 标签的筛选会被全局引擎认领）"})
+        if not eids and not uids:
             continue
+        # Issue #646：绑定入口支持 uid（字符串）——先解析为 id（服务端校验），
+        # 无效 uid fail-fast 400（防手抄拼错静默丢失）；数字 id 维持原语义。
+        from src.kernel.engine_uid import is_uid_str
+        _resolved_eids = []
+        for eid in eids:
+            if isinstance(eid, str) and is_uid_str(eid.strip()):
+                from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+                _rid = get_runtime_id_by_engine_uid(eid.strip().lower())
+                if not _rid:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"节点 {tag} 绑定的引擎 uid 无效: {eid.strip()}（请从引擎详情面板复制有效 uid）"})
+                _resolved_eids.append(_rid)
+            else:
+                _resolved_eids.append(eid)
+        # Issue #1208：显式 uids 逐个校验存在性（fail-fast 同 ids 口径），
+        # 解析出的 runtime_id 并入 ids 同款校验循环（scope/SRE/能力校验不因 uid 形态绕过）
+        for u in uids:
+            if is_uid_str(u):
+                from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+                _uid_rid = get_runtime_id_by_engine_uid(u.lower())
+                if not _uid_rid:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"节点 {tag} 绑定的引擎 uid 无效: {u}（请从引擎详情面板复制有效 uid）"})
+                _resolved_eids.append(_uid_rid)
+            else:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 绑定的引擎 uid 无效: {u}（请从引擎详情面板复制有效 uid）"})
+        eids = _resolved_eids
         for eid in eids:
             try:
                 _eid = int(eid)
@@ -1908,6 +2367,40 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                     "code": 400,
                     "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
+
+def _upgrade_scene_nodes_uid(nodes: list):
+    """Issue #1208 D11 保存端透明升格：绑定值一律写 engine_runtime_uids 并清空 ids。
+
+    - selector 节点不动（三模式互斥，selector 为权威）；
+    - 全部 id 均可解析 uid → 写 uids + 清 ids（前端回读 uid 形态，单向过渡不回退）；
+    - 任一 id 悬空（引擎行不存在/uid 缺失）→ 保留原 ids 不猜不静默（与 T11 脚本
+      悬空跳过口径一致，悬空清理由 detach 链负责）。
+    纯内存变换（就地改 nodes），调用方在校验通过后、落库前调用。
+    """
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        eids = node.get("engine_runtime_ids") or []
+        uids = node.get("engine_runtime_uids") or []
+        if (node.get("engine_selector") or {}).get("tags"):
+            continue
+        if uids:
+            # T11 升格遗留双写归一：uids 为权威，清空 ids（uids 形态节点保存后落库归一）
+            if eids:
+                node["engine_runtime_ids"] = []
+            continue
+        try:
+            from src.domains.mgmt.user.db import get_engine_uid_by_runtime_id
+            resolved = [get_engine_uid_by_runtime_id(int(x)) for x in eids]
+        except (TypeError, ValueError):
+            continue
+        if not resolved or any(not u for u in resolved):
+            # 悬空 id：保留原 ids（不猜不静默；引擎缺失属 detach/清理链职责）
+            continue
+        node["engine_runtime_uids"] = [str(u).strip().lower() for u in resolved if u]
+        node["engine_runtime_ids"] = []
+
+
 @router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
@@ -1937,6 +2430,8 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
     _validate_scene_node_roles(nodes_json := [n.model_dump() for n in body.nodes])
     _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
+    # Issue #1208 D11：保存端透明升格（绑定值一律写 uids 清 ids，前端回读 uid 形态）
+    _upgrade_scene_nodes_uid(nodes_json)
 
     # Issue #1758: 保存即拦截——repo 级场景引用 user 技能一律拒绝（含创建者本人）→ 400
     _validate_scene_skill_scope(nodes_json, repo_key)
@@ -2007,7 +2502,7 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
     global+user+repo+local 四档；非个人组织按 org_id 隔离。
     """
-    from src.domains.runtime.engine.engine_select import query_engines
+    from src.domains.runtime.public import query_engines
     _filter_org = 0
     try:
         from src.domains.mgmt.user.org_db import is_org_personal
@@ -2308,6 +2803,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     _validate_scene_node_roles(nodes_json)
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
+    # Issue #1208 D11：保存端透明升格（绑定值一律写 uids 清 ids，前端回读 uid 形态）
+    _upgrade_scene_nodes_uid(nodes_json)
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     _pr_sub_on = body.pr_subscription_enabled
@@ -2465,7 +2962,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
-    from src.domains.runtime.engine.engine_select import node_agent_role
+    from src.domains.runtime.public import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -2551,7 +3048,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     except Exception:
                         runtime_id = 0
                     if not runtime_id:
-                        from src.domains.runtime.engine.engine_select import resolve_default_engine
+                        from src.domains.runtime.public import resolve_default_engine
                         runtime_id = resolve_default_engine(repo_key, agent_type) or 0
                 receipt.update({
                     "status": "applied",
@@ -3079,160 +3576,4 @@ def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
     return {"message": "场景访问地址已更新", "deploy_url": deploy_url}
 
 # ── Issue #501：单场景引擎在线状态（按需探测，从 with-pipeline 抽出） ──────────
-# 由 weekly-10 迁入（原实现 src/domains/mgmt/routes/scenes.py）。
-def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
-    """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
-
-    语义与原 with-pipeline 内联版完全一致：
-    - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
-      返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
-    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
-      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
-    - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
-    """
-    offline_nodes: list[str] = []
-    sre_unbound: bool = False
-    try:
-        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _gspei
-        for n in (cfg_nodes or []):
-            if not isinstance(n, dict):
-                continue
-            _tag = n.get("tag") or n.get("id") or ""
-            _eids = n.get("engine_runtime_ids") or []
-            if not _tag or not _eids:
-                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
-                if _tag and str(_tag).lower() == "sre":
-                    sre_unbound = True
-                continue
-            if n.get("enabled") is False:
-                continue
-            try:
-                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
-                    offline_nodes.append(str(_tag))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return {"offline_nodes": offline_nodes,
-            "sre_unbound": sre_unbound,
-            "all_offline": bool(offline_nodes) or sre_unbound}
-
-@router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
-            summary="Scene engine online status",
-            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
-def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
-    """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
-
-    节点来源与 with-pipeline 一致：DB 场景（get_scenes）优先，查不到回退
-    get_pipeline_config（official 模板 / pipelines.json）。
-    场景不存在时返回 all_offline=False（不拦创建入口）。
-    """
-    from src.api.pipeline_config import get_pipeline_config
-    from src.kernel.repo_key import to_repo_key
-
-    # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
-    # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
-    repo_key = _resolve_scene_repo_key(repo, user)
-    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
-    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
-    # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
-    # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
-    # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
-    # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
-    if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
-        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
-    cfg_nodes = cfg.get("nodes") or []
-    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
-    status["scene_id"] = scene_id
-    return status
-
-class PinSceneRequest(BaseModel):
-    pinned: bool
-
-@router.post("/{scene_id}/pin", operation_id="scenes_pin", summary="Pin scene", description="Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).")
-def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
-              user: dict = Depends(require_no_session_token), repo: str = ""):
-    """设置/取消场景置顶（仓库共享，不区分用户）。
-
-    Issue #1735 复审（MR !1145 Critical-2 / Medium-1）：
-    - 必须带仓库上下文：repo_key 为空时直接 400，禁止落到 `repo_key=''` 的全局/官方行；
-    - 访问权无条件校验（不再以 repo_key 非空为前提）；
-    - 写操作落 audit_logs（scene_pin），可按 actor/target 追溯。
-    """
-    from src.api.pipeline_config import set_scene_pinned, _query_scene_by_id
-    from src.api.deps import check_repo_access
-
-    repo_key = ""
-    if repo:
-        repo_key = _resolve_repo_key(repo)
-    else:
-        try:
-            _repo = app_current_repo()
-            if _repo:
-                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-        except Exception:
-            pass
-
-    if not repo_key:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "请指定仓库（--repo owner/repo）；置顶状态按仓库共享，不接受空仓库上下文"})
-    check_repo_access(user, repo_key)
-
-    existing = _query_scene_by_id(scene_id, repo_key=repo_key)
-    if not existing:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-
-    # 存在性已校验；MySQL 对「值未变」的 UPDATE 返回 changed=0，不能据此再判 404
-    set_scene_pinned(scene_id, repo_key, body.pinned)
-
-    from src.domains.mgmt.auth import audit as auth_audit
-    auth_audit.log_audit(
-        "scene_pin", operator_id=user.get("id") or 0,
-        ip=(request.client.host if request and request.client else ""),
-        detail={"scene_id": scene_id, "repo_key": repo_key, "pinned": bool(body.pinned)})
-    log.info(f"Scene pinned: id={scene_id} pinned={body.pinned} by user={user.get('id')}")
-    return {"message": "置顶状态已更新", "scene_id": scene_id,
-            "is_pinned": 1 if body.pinned else 0}
-
-def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
-                            cache: dict | None = None) -> dict:
-    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
-
-    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
-    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
-    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
-    其它模块的私有判定函数。
-    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
-    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
-    """
-    from src.api.scene_skill_scope import evaluate
-    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
-                      cache=cache)
-    return {
-        "resolvable": bool(result["ok"]),
-        "scope_check": {
-            "ok": bool(result["ok"]),
-            "skill": result.get("skill") or "",
-            "actual_scope": result.get("actual_scope") or "",
-            "expected_scope": result.get("expected_scope") or "repo",
-            "reason": result.get("reason") or "",
-        },
-    }
-
-def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
-                                    scene_id: str = "") -> list:
-    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
-
-    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
-    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
-    """
-    result = []
-    _cache = {}
-    for node in nodes or []:
-        if not isinstance(node, dict):
-            result.append(node)
-            continue
-        item = dict(node)
-        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
-        result.append(item)
-    return result
+# 由 weekly-10 迁入（原实现 src/api/routes/scenes.py）。

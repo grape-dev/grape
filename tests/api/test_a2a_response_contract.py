@@ -19,7 +19,7 @@ SRC = os.path.join(ROOT, "src", "domains", "runtime", "routes", "webhook.py")
 # （weekly 线合并后新增 _a2a_idempotent_hit_response / _queued_a2a_response 两个归一化出口）
 NORMALIZED_HELPERS = ("_a2a_guard_skip_response(", "_augment_a2a_dispatch_response(",
                       "_a2a_idempotent_hit_response(", "_queued_a2a_response(",
-                      "_duplicate_a2a_skip_response(")
+                      "_duplicate_a2a_skip_response(", "_a2a_skip_response(")
 
 # 端点里返回「别处构造好的响应体」的写法 → 保证字段的函数。
 INDIRECT = {

@@ -1,116 +1,57 @@
-"""bwrap 文件系统隔离包装（组件2）。
+"""沙箱门面——对外 API 导出 + 模块级 sandbox_manager。
 
-构造 bwrap 白名单式沙箱命令前缀，用于给 agent 子进程套文件系统锁：
-只挂「基础系统 + 引擎运行时 + 工位 cwd」，敏感路径（configs/、data/、.env、
-/root、~/.grape、WORKSPACE 其他仓库/issue）天然不可见。
+调用方只允许 from src.domains.runtime.agents.sandbox import sandbox_manager。
+禁止 import 内部路径（backends/isolation）。audit 从 common.audit 导入。
 
-默认由 GRAPE_AGENT_SANDBOX 环境变量控制（默认关）。回滚 = 关开关，无需删代码。
+模块级默认实例用 Null 默认值（轻量，不打开文件/不生成密钥）。
+生产环境必须显式构造覆盖：
 
-关键点：
-- `--die-with-parent`：grape 进程退出时沙箱内进程一并回收。
-- `--unshare-all`：隔离所有 namespace，仅 `--share-net` 保留网络（A2A/GitCode/OBS/云）。
-- `--chdir {cwd}` + `--bind {cwd} {cwd}`：保持 /proc/{pid}/cwd == cwd，_kill_stale_engine
-  的 readlink startswith 判活不受影响（§6 #10）。
-- `/tmp` 用 tmpfs 隔离；hermes 会话 overlay（~/.cache/hermes-acp-homes/{md5(cwd)[:12]}）
-  单独 rw-bind 回宿主机（§6 #12：不割断 state.db 续传）。
+    from src.domains.runtime.agents.sandbox import SandboxManager
+    from src.domains.runtime.agents.sandbox.audit import FileAuditLogger
 
-issue #500：本模块以包布局发布（sandbox/__init__.py）。部署环境曾有陈旧包产物
-（__init__ 无导出）遮蔽源码模块文件，导致 `cannot import name 'build_bwrap_cmd'`；
-包布局使部署按文件覆盖发布时必然覆写该 __init__，导出一劳永逸。
+    sandbox_manager = SandboxManager(audit=FileAuditLogger("/var/log/grape/sandbox-audit.jsonl"))
+
+不覆盖则线上无审计（NullAuditLogger）。
 """
-import os
-import shutil
-import hashlib
+from .api import Sandbox, SandboxProvider
+from .types import SandboxMode, AlertSeverity, WhitelistRule, CompiledRule
+from .errors import SandboxUnavailableError
+from .manager import SandboxManager
+from .alert import AlertEngine, NullAlertEngine, Alert
+from .redact import RedactEngine, NullRedactEngine, RedactResult
+from .whitelist import (
+    normalize_path, match_path_prefix, match_whitelist,
+    compile_rules, get_rules, invalidate_cache, load_rules_from_db,
+    RuleCache,
+)
 
-__all__ = ["sandbox_enabled", "build_bwrap_cmd"]
+sandbox_manager = SandboxManager()
+
+__all__ = [
+    "sandbox_manager", "SandboxManager",
+    "Sandbox", "SandboxProvider",
+    "SandboxMode", "SandboxUnavailableError",
+    "AlertSeverity", "AlertEngine", "NullAlertEngine", "Alert",
+    "RedactEngine", "NullRedactEngine", "RedactResult",
+    "WhitelistRule", "CompiledRule", "RuleCache",
+    "normalize_path", "match_path_prefix", "match_whitelist",
+    "compile_rules", "get_rules", "invalidate_cache",
+]
 
 
-def sandbox_enabled() -> bool:
-    """开关（运行时读 config，支持 env 灰度，不重启代码逻辑）。"""
-    try:
-        from src.kernel.config import GRAPE_AGENT_SANDBOX
-        return bool(GRAPE_AGENT_SANDBOX)
-    except Exception:
-        return False
+# ===== [沙箱迁移] 兼容层：src/agent/sandbox.py 模块被本包遮蔽 =====
+# main 谱系代码（executor.py / hermes_acp.py / hwcloud_acp.py）使用旧模块级 API：
+#   from src.domains.runtime.agents.sandbox import build_bwrap_cmd / sandbox_enabled
+# 包引入后同名模块不可再被 import（包优先），此处 re-export 保持兼容。
+# 旧分支最终态已全部迁移到 sandbox_manager.prepare(...) Sandbox 对象接口；
+# 本地 Popen 路径仍走 build_bwrap_cmd（bwrap 白名单锁，行为与 main 基线一致）。
+def sandbox_enabled() -> bool:  # noqa: F811
+    """bwrap 沙箱开关（兼容 re-export，实现见同目录 _compat_module.py）。"""
+    from src.domains.runtime.agents.sandbox._compat_module import sandbox_enabled as _f
+    return _f()
 
 
-def _bwrap_bin() -> str:
-    return shutil.which("bwrap") or ""
-
-
-def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
-    """构造 bwrap 包装命令前缀；返回 None 表示不包装（关 / 缺 bwrap / cwd 无效 / Windows）。
-
-    返回 [bwrap, ...opts, "--"] 前缀，调用方 append 原命令 argv（Popen 时用）。
-    backend_name 用于选择引擎专用白名单（opencode/codearts/hermes）。
-
-    Windows 降级：bwrap 依赖 Linux namespace/cgroup，Windows 无等价物 → 永远返回 None。
-    """
-    from src.domains.runtime.engine.os_adapter import is_windows
-    if is_windows():
-        return None
-    if not sandbox_enabled():
-        return None
-    bwrap = _bwrap_bin()
-    if not bwrap:
-        return None
-    if not cwd or not os.path.isdir(cwd):
-        return None
-
-    from src.kernel.config import (
-        BWRAP_RO_SYSTEM, BWRAP_RO_ENGINE_COMMON, BWRAP_RO_ENGINE, BWRAP_RW_ENGINE,
-    )
-
-    opts = [bwrap, "--die-with-parent", "--unshare-all", "--share-net"]
-
-    # 基础系统（ro）
-    for p in BWRAP_RO_SYSTEM:
-        if p and os.path.isdir(p):
-            opts += ["--ro-bind", p, p]
-
-    # 引擎运行时（ro）——common + 按 backend_name
-    _ro = [os.path.expanduser(x) for x in BWRAP_RO_ENGINE_COMMON]
-    _ro += [os.path.expanduser(x) for x in BWRAP_RO_ENGINE.get(backend_name, ())]
-    _seen = set()
-    for p in _ro:
-        if p and os.path.isdir(p) and p not in _seen:
-            _seen.add(p)
-            opts += ["--ro-bind", p, p]
-
-    # 引擎缓存（rw）
-    for x in BWRAP_RW_ENGINE.get(backend_name, ()):
-        p = os.path.expanduser(x)
-        if p and os.path.isdir(p):
-            opts += ["--bind", p, p]
-
-    # /tmp 隔离（tmpfs）；hermes 会话 overlay 单独 rw-bind（在 tmpfs 之上叠加）
-    # issue #238: hermes overlay 已从 /tmp 迁移到 ~/.cache/hermes-acp-homes
-    opts += ["--tmpfs", "/tmp"]
-    if backend_name == "hermes":
-        _h = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        _overlay = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes", _h)
-        os.makedirs(_overlay, exist_ok=True)
-        opts += ["--bind", _overlay, _overlay]
-
-    # /proc /dev
-    opts += ["--proc", "/proc", "--dev", "/dev"]
-
-    # git worktree bare mirror（codebase/）：coding/qa/sre 的 .git 是指向
-    # {...}/codebase/worktrees/{agent_type} 的指针文件，git commit/push 要读写
-    # codebase 的 objects/refs —— 必须 rw 挂载，否则沙箱内 git 报 not a git
-    # repository。cwd 形如 {...}/issues/{n}/{agent_type}，codebase 是其仓库根下的兄弟目录。
-    _issues_idx = cwd.find("/issues/")
-    if _issues_idx > 0:
-        _codebase = os.path.join(cwd[:_issues_idx], "codebase")
-        if os.path.isdir(_codebase):
-            opts += ["--bind", _codebase, _codebase]
-
-    # 工位 cwd（rw + chdir，保持 /proc/{pid}/cwd 不变）
-    opts += ["--bind", cwd, cwd]
-    opts += ["--chdir", cwd]
-
-    # hermes 需要写临时 overlay？ACP 只写 ~/.cache/hermes-acp-homes/{hash}（已 bind）。
-    # 其余引擎的 /tmp 临时文件落沙箱 tmpfs，任务结束丢弃（更干净）。
-
-    opts.append("--")
-    return opts
+def build_bwrap_cmd(cwd: str, backend_name: str = ""):  # noqa: F811
+    """构造 bwrap 包装命令前缀（兼容 re-export）。"""
+    from src.domains.runtime.agents.sandbox._compat_module import build_bwrap_cmd as _f
+    return _f(cwd, backend_name=backend_name)

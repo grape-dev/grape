@@ -140,22 +140,29 @@ async def start_mgmt_tasks(app) -> dict:
         except Exception as e:
             log.warning(f"Templates: startup check failed: {e}")
 
-        # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新
-        try:
-            from src.kernel.help_page_gen import generate as _generate_help_page
-            _n_help = _generate_help_page()
-            log.info(f"Help: help.html regenerated ({_n_help} sources)")
-        except Exception as e:
-            log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+        # help.html 生成物：内容由 help/（usage + api）渲染。
+        # 它是静态产物、不影响服务可用性，放后台跑——渲染耗时不该计入端口就绪时间。
+        async def _regen_help_bg():
+            try:
+                from src.kernel.help_page_gen import generate as _generate_help_page
+                _n_help = await asyncio.to_thread(_generate_help_page)
+                log.info(f"Help: help.html regenerated ({_n_help} sources)")
+            except Exception as e:
+                log.warning(f"Help: help.html generation failed (kept last generated file): {e}")
+        asyncio.create_task(_regen_help_bg())
 
         # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json
         # 4 进程拆分后由 mgmt 作为契约 owner 合并四进程 spec（tasks/patrol/pipeline-handoff
         # 迁到 worker/insight，不合并会让契约驱动的 `grape` CLI 丢掉整组命令）
-        try:
-            from src.api.openapi_merge import dump_contract
-            dump_contract(app)
-        except Exception as e:
-            log.warning(f"OpenAPI: contract dump failed: {e}")
+        # 契约落盘同理：合并四进程 spec + 写 JSON 只是产出文件，不影响本进程对外服务。
+        # 之前它在启动同步路径上，每次启动都让端口晚几秒可用。
+        async def _dump_contract_bg():
+            try:
+                from src.api.openapi_merge import dump_contract
+                await asyncio.to_thread(dump_contract, app)
+            except Exception as e:
+                log.warning(f"OpenAPI: contract dump failed: {e}")
+        asyncio.create_task(_dump_contract_bg())
 
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
         from src.kernel.config import BOT_LEASE_DISABLED

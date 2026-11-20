@@ -35,6 +35,45 @@ class RuntimeService(ABC):
         """A Issue 阶段状态——返回 issue_state 当前行。"""
 
     @abstractmethod
+    def list_credential_rows(self) -> list:
+        """runtime_credentials 全量行（只含密文/元数据列，解密由调用方负责）。"""
+
+    @abstractmethod
+    def list_engine_tags(self, runtime_id: int, enabled_only: bool = True) -> list:
+        """某引擎的能力标签列表。"""
+
+    @abstractmethod
+    def get_agent_session_row(self, repo_keys: list, agent_type: str, token_field: str) -> list:
+        """某类 Agent 在仓库集合内的会话行（列序由 owner 域固定）。"""
+
+    @abstractmethod
+    def get_event_status_counts(self, repo_keys: list, agent_type: str) -> list:
+        """某类 Agent 在仓库集合内的事件状态分布 [(status, count)]。"""
+
+    @abstractmethod
+    def search_events(self, repo_keys: list, agent_type: str, keyword: str = "",
+                      page: int = 1, page_size: int = 10) -> dict:
+        """事件历史搜索 → {"total": int, "rows": list}。"""
+
+    @abstractmethod
+    def get_credential_health_rows(self) -> list:
+        """全部未吊销凭据的 (name, status, last_seen_at)（DevStage 环境列表用）。"""
+
+    @abstractmethod
+    def get_inflight_task_count(self, repo_keys: list) -> int:
+        """这批仓库上的在制任务数（queued/dispatched/running 三态之和）。"""
+
+    @abstractmethod
+    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+        """A Issue 卡片状态（issue 单表优先，字段已归一）。
+
+        与 get_issue_state 的区别：后者只读 issue_state 过渡表；本方法读**权威** issue 单表，
+        返回前端卡片需要的字段集合（stage / owner_agent / a2a_seq / assignee / scene_* /
+        parent_issue_id / is_subtask_mode / allow_scene_override）。语义与
+        api.session_store.read_issue_state 的第一段完全一致，供其迁移到 provider 通道。
+        """
+
+    @abstractmethod
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         """A 用户操作推进 Issue 状态（Phase 5 细化事务边界）。"""
 
@@ -82,3 +121,28 @@ class RuntimeService(ABC):
     @abstractmethod
     def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
         """N12 任务聚合统计（替代洞察侧宽 SQL）。"""
+
+    # ---- Issue #3097：占位账号业务数据判定 / 引擎引用对账 ----
+
+    @abstractmethod
+    def user_business_table_counts(self, user_id: Any) -> dict:
+        """N14 某账号在本域的业务数据按表计数（mgmt 占位账号合并判定用）。
+
+        返回 ``{表名: {"count": int}}``；缺表/不可读返回 ``{"count": None, ...}``
+        （缺表语义由调用方决定：定稿为「视为无数据 + 结构化告警」）。
+        """
+
+    @abstractmethod
+    def reconcile_engine_references(self, runtime_ids: list, keep_id: int = 0,
+                                    reason: str = "") -> dict:
+        """N15 引擎行删除/去重前的运行态引用对账（跨域写，幂等可重放）。
+
+        对账语义见 ``runtime.engine.refs_reconcile``；mgmt 进程删用户/合并账号时调用。
+        """
+
+    @abstractmethod
+    def transfer_user_business_data(self, from_user_id: Any, to_user_id: Any) -> dict:
+        """N16 把某账号在本域的业务数据归属转到另一账号（占位账号自动合并，幂等）。
+
+        返回 ``{表名: 受影响行数}``；任一表失败抛异常（调用方据此回滚身份转移）。
+        """

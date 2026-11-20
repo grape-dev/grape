@@ -1,0 +1,50 @@
+{
+  "_comment": "CubeSandbox 平台 Provider 配置 + 模板定义。复制本文件为 cubesandbox-config.json（去掉 .example）并填入真实值。服务启动时自动导入 DB 并删除本地文件（避免明文密钥残留）。",
+  "_fields": {
+    "api_url": "CubeSandbox 平台 API 地址",
+    "api_key": "CubeSandbox 平台 API Key（从平台控制台获取）",
+    "ssl_cert_file": "CubeSandbox CA 证书 PEM 文件路径（如果平台用自签证书则需要，公网 HTTPS 可留空）",
+    "grape_server_url": "grape 主控服务地址（沙箱内 agent 回连用）",
+    "grape_cli_token": "grape 内部通信 token（和 grape 主控配置一致）",
+    "max_sandboxes": "该 Provider 最大并发沙箱数（默认 10）",
+    "templates": "模板列表——每个模板对应一个引擎类型，同引擎只能绑一个模板。template_id 从 CubeSandbox 平台控制台获取。"
+  },
+  "api_url": "<your-cubesandbox-api-url>",
+  "api_key": "<your-api-key>",
+  "ssl_cert_file": "<path-to-your-ca-cert.pem>",
+  "grape_server_url": "http://127.0.0.1:3000",
+  "grape_cli_token": "<grape-internal-token>",
+  "max_sandboxes": 10,
+  "templates": [
+    {
+      "_comment": "hermes 引擎模板——预装 hermes-agent + ACP + Python",
+      "name": "hermes-acp-预装",
+      "template_id": "<template-id-hermes>",
+      "alias": "hermes-acp",
+      "engine_type": "hermes",
+      "description": "20G + hermes-agent v0.20.0 + git 2.39.5 + ACP(agent-client-protocol 0.9.0) + Python 3.14 预装",
+      "preinstalled": {"hermes-agent": "0.20.0", "python": "3.14", "git": "2.39.5", "agent-client-protocol": "0.9.0"},
+      "disk_size_mb": 20480
+    },
+    {
+      "_comment": "opencode 引擎模板——预装 Node.js + opencode",
+      "name": "devkit-预装",
+      "template_id": "<template-id-opencode>",
+      "alias": "devkit",
+      "engine_type": "opencode",
+      "description": "node v20.19.0 + opencode 1.18.32(baseline) + git 2.39.5 预装",
+      "preinstalled": {"node": "20.19.0", "opencode": "1.18.32", "git": "2.39.5"},
+      "disk_size_mb": 20480
+    },
+    {
+      "_comment": "codearts 引擎模板——预装 codearts + Python",
+      "name": "codearts-预装",
+      "template_id": "<template-id-codearts>",
+      "alias": "codearts",
+      "engine_type": "codearts",
+      "description": "codearts 26.8.8 x86_64 + git 2.39.5 + Python 3.12.12 + models-cache.json 预装",
+      "preinstalled": {"codearts": "26.8.8", "python": "3.12.12", "git": "2.39.5"},
+      "disk_size_mb": 20480
+    }
+  ]
+}

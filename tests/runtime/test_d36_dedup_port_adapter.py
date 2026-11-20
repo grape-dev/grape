@@ -56,7 +56,7 @@ def test_s56_client_error_form_classifiable():
     from src.domains.runtime.vcs.api_client import VcsApiClient
     from src.domains.runtime.vcs.token_error import is_auth_error_exc
 
-    def _fake(url, method, data=None, headers=None):
+    def _fake(url, method, data=None, headers=None, **kw):
         return {"error": "HTTP 401"}
     with patch("src.domains.runtime.vcs.api_client.VcsApiClient._do_request", side_effect=_fake):
         c = VcsApiClient("github", "tok", "o", "r")

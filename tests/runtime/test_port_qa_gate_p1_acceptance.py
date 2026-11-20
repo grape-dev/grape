@@ -1,7 +1,7 @@
 """P1 验收：QA 门禁（#1739）落到 arch 布局后的行为契约。
 
 只驱动真实函数（classify_qa_conclusion / qa_gate_check / _review_pass /
-auto_finalize_issue_on_last_node），造数走真实表结构与 session_store 接口。
+finalize_issue_to_pending_review），造数走真实表结构与 session_store 接口。
 
 跑法（仓库根目录）：PYTHONPATH=. python -m pytest -q tests/runtime/test_port_qa_gate_p1_acceptance.py
 """
@@ -98,34 +98,31 @@ class TestQaGatePorted:
         info = qa_gate_check(REPO, NUM)
         assert info["blocked"] is False and info["conclusion"] == "pass", info
 
-    def test_review_pass_refuses_done_when_qa_failed(self):
-        """接线点 _review_pass：qa fail → noop:qa_failed，且 issue 不得 completed。"""
+    def test_review_pass_refuses_done_for_agents(self):
+        """人工闸：agent 的 target=done 一律拒绝（不论 QA 结论），issue 不得 completed。"""
         _reset(stage="pending_review")
         _seed_events(ALL_COMPLETED, qa_result=QA_FAIL_TEXT)
         from src.api.issues_center import _review_pass
         rc = _review_pass(REPO, NUM, target="done", evidence="agent says pass")
-        assert rc == "noop:qa_failed", rc
+        assert rc == "noop:agent_finalize_forbidden", rc
         row = _issue_row()
         assert (row[0] or "") != "completed", row
 
-    def test_complete_issue_done_reuses_gate_result(self):
-        """接线点 _complete_issue_done：传入 blocked 的 qa_info → 不落 completed。"""
-        _reset(stage="pending_review")
-        from src.api.issues_center import _complete_issue_done
-        blocked = {"blocked": True, "conclusion": "fail", "event_seq": 42}
-        assert _complete_issue_done(REPO, NUM, "e", qa_info=blocked) is False
-        assert (_issue_row()[0] or "") != "completed"
+    def test_complete_issue_done_removed_from_surface(self):
+        """人工闸：`_complete_issue_done` 已下线（无终态调用方），模块里不应再有它。"""
+        from src.api import issues_center as ic
+        assert not hasattr(ic, "_complete_issue_done")
 
     def test_auto_finalize_blocked_moves_to_pending_review(self):
-        """接线点 auto_finalize：#1739 拦截后必须落 pending_review（#1963 层 3）。
+        """接线点 finalize：#1739 拦截后必须落 pending_review（#1963 层 3）。
 
         前提：完成的 agent 必须是自己所在流水线的末节点（arch 默认场景末节点 = sre），
         否则会先返回 noop:not_last_node 到不了门禁。
         """
         _reset(stage="sre")
         _seed_events(ALL_COMPLETED, qa_result=QA_FAIL_TEXT)
-        from src.api.issues_center import auto_finalize_issue_on_last_node
-        rc = auto_finalize_issue_on_last_node(REPO, f"#{NUM}", "sre", source="port-p1")
+        from src.api.issues_center import finalize_issue_to_pending_review
+        rc = finalize_issue_to_pending_review(REPO, f"#{NUM}", "sre", source="port-p1")
         assert rc in ("qa_failed_blocked", "qa_failed_blocked_stage_error"), rc
         row = _issue_row()
         assert (row[0] or "") != "completed", row

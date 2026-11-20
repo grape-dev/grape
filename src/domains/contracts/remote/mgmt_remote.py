@@ -13,7 +13,18 @@ from src.domains.contracts.mgmt_service import MgmtService
 
 
 class MgmtServiceRemote(MgmtService):
-    """集群模式：通过 HTTP API 调用 Mgmt 进程的 /internal/* 端点。"""
+    """集群模式：通过 HTTP API 调用 Mgmt 进程的 /internal/* 端点。
+
+    **当前不投入使用**：``matrix_forces_lib("mgmt")`` 恒为 True，``get_service("mgmt")``
+    永远返回 MgmtServiceLocal，任何进程（mgmt / event / worker / runtime / insight）
+    都不会经由本类远程调用 mgmt。保留本类只是为了让 Provider 工厂保持 (Local, Remote)
+    成对注册的形态。
+
+    注意 base_url 仍是字面占位符 `${GRAPE_MGMT_URL}`（历史遗留，未接服务发现）——
+    这正好意味着即便有人直接实例化本类，也打不出一次成功的 /internal 调用。
+    真要恢复 mgmt 的远程调用，需要三件事一起做：解除矩阵守卫、把 base_url 接到
+    GSB 服务发现、并确认 mgmt 自身的 /internal 不会形成回环。
+    """
 
     def __init__(self):
         self.client = ServiceHttpClient("mgmt", base_url="${GRAPE_MGMT_URL}")

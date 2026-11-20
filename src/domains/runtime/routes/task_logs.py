@@ -99,7 +99,8 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         c.execute(
             """SELECT ar.name, ar.version, rc.name, rc.last_ip, rc.owner_name, t.prompt,
                       t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,
-                      rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec, t.runtime_id
+                      rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec, t.runtime_id,
+                      COALESCE(rc.credential_uid,'')
                FROM agent_tasks t
                LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id
                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
@@ -113,9 +114,15 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     created_at, started_at, completed_at, status, issue_id, event_seq, repo_key = row[6:13]
     cpu_pct, mem_pct, disk_pct, load_avg, spec = row[13:18] if len(row) > 17 else (0, 0, 0, "", "")
     runtime_id = row[18] if len(row) > 18 else 0
+    # [spec 2026-11-14 cred_uid8] 凭据稳定键前 8 位——沙箱 worker 的 systemd 服务名/安装目录单锚
+    # （install-worker.sh:112-113 sandbox-worker-<cred_uid8>）。credential_id 不下发（跨主控撞号，
+    # 且服务名不按 id 命名——spec 2026-11-14-eventview-cred-uid8-fix 拍板①）。
+    _cred_uid8 = ((row[19] or "") if len(row) > 19 else "")[:8]
+    # 云引擎四段名派生 provider（与 dashboard.py:1789 同口径，[沙箱迁移 i7]）；普通引擎为空
+    _sandbox_provider = (agent_name or "").split(":")[2] if (agent_name or "").count(":") >= 3 else ""
     # Issue #1255：执行模型（用量优先、配置模型回落，与事件详情同一取值函数，口径一致）
     try:
-        from src.domains.insight.observability.llm_usage import task_model_summary
+        from src.domains.insight.public import task_model_summary
         model_summary = task_model_summary(task_id, int(runtime_id or 0))
     except Exception:
         model_summary = {"model": "", "source": "unknown", "models": []}
@@ -144,6 +151,11 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
         "memory_percent": mem_pct or 0,
         "disk_percent": disk_pct or 0,
         "load_avg": load_avg or "",
+        # [spec 2026-11-14 cred_uid8] 沙箱 worker 服务名单锚（sandbox-worker-<cred_uid8>）+
+        # 云引擎四段名 provider（[沙箱迁移 i7]，与 dashboard agent_engines 同口径）。
+        # credential_id 不下发（spec 拍板①）；sandbox_id 本期不做（拍板②，🌐 位空置）。
+        "credential_uid8": _cred_uid8,
+        "sandbox_provider": _sandbox_provider,
         "wrote_files": list_wrote_files(task_id),
         "model": model_summary.get("model", ""),
         "model_source": model_summary.get("source", "unknown"),

@@ -719,12 +719,12 @@
                 v-for="e in engByScope[s]"
                 :key="e.id"
                 class="apv-pick-item"
-                :class="{ on: selectedEngines.has(e.id) }"
+                :class="{ on: selectedEngines.has(engineKey(e)) }"
               >
                 <input
                   type="checkbox"
-                  :checked="selectedEngines.has(e.id)"
-                  @change="toggleEngine(e.id)"
+                  :checked="selectedEngines.has(engineKey(e))"
+                  @change="toggleEngine(engineKey(e))"
                 />
                 <div class="apv-pick-body">
                   <div class="apv-pick-name">
@@ -751,12 +751,12 @@
             </template>
           </template>
           <!-- Issue #486：编辑态原绑定但已超出当前可见范围的引擎，仅可移除 -->
-          <template v-if="detachedEngineIds.length">
+          <template v-if="detachedEngineKeys.length">
             <div class="apv-pick-group apv-detached-g">
-              {{ tt('engine_picker.detached_group') }} ({{ detachedEngineIds.length }})
+              {{ tt('engine_picker.detached_group') }} ({{ detachedEngineKeys.length }})
             </div>
             <label
-              v-for="eid in detachedEngineIds"
+              v-for="eid in detachedEngineKeys"
               :key="'detached-' + eid"
               class="apv-pick-item apv-detached"
               :class="{ on: true }"
@@ -903,6 +903,7 @@
 </template>
 
 <script setup>
+import { providerFromRepoKey, repoKeyOf } from '../lib/repo-provider.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const G = globalThis
@@ -1112,7 +1113,7 @@ function loadTasks() {
     loaded.value = true
     return
   }
-  const repoKey = repo.repoKey || 'gitcode:' + (repo.fullName || '')
+  const repoKey = repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider })
   API()
     .get('/autopilot/tasks?repo_key=' + repoKey)
     .then(function (d) {
@@ -1635,8 +1636,12 @@ function describeCron(c) {
 const engineNamesText = computed(() => {
   const t = detail.value
   if (!t) return ''
-  if (t.engine_runtime_ids && t.engine_runtime_ids.length) {
-    return tt('detail.engine_count', { count: t.engine_runtime_ids.length })
+  // Issue #1011：展示 uid 优先，旧数据（uids 空）回落 ids 不报错
+  const engCount = t.engine_runtime_uids && t.engine_runtime_uids.length
+    ? t.engine_runtime_uids.length
+    : (t.engine_runtime_ids || []).length
+  if (engCount) {
+    return tt('detail.engine_count', { count: engCount })
   }
   return tt('detail.engine_unlimited')
 })
@@ -1977,8 +1982,11 @@ function showCreate(templateId) {
   // 加载分支列表（当前仓库）
   const repo = currentRepo()
   if (repo) {
-    const rk = (repo.repoKey || 'gitcode:' + repo.fullName).replace(/^(gitcode|github):/, '')
-    if (rk.split('/').length === 2) loadBranches('gitcode:' + rk, dlgBranches)
+    // 前缀必须跟随仓库实际平台；原来先剥常见前缀再硬拼 'gitcode:'，gitee/gitlab 仓会去错平台拉分支
+    const rkFull = repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider })
+    const prov = providerFromRepoKey(rkFull)
+    const rk = rkFull.slice(rkFull.indexOf(':') + 1)
+    if (prov && rk.split('/').length === 2) loadBranches(prov + ':' + rk, dlgBranches)
   }
 }
 function editTask(id) {
@@ -1997,7 +2005,11 @@ function editTask(id) {
       dlg.polishing = false
       dlg.submitting = false
       selectedEngines.clear()
-      ;(t.engine_runtime_ids || []).forEach((eid) => selectedEngines.add(eid))
+      // Issue #1011：引擎选择键 uid 优先——uid 模式任务直接用 uids；legacy 任务回落 ids
+      const engineKeys = t.engine_runtime_uids && t.engine_runtime_uids.length
+        ? t.engine_runtime_uids
+        : t.engine_runtime_ids || []
+      engineKeys.forEach((k) => selectedEngines.add(String(k)))
       selectedSkill.value = t.skill_name || ''
       dlgCustomFields.value = (t.custom_fields || []).map((f) => ({
         name: f.name || '',
@@ -2061,14 +2073,35 @@ function submitForm() {
   const repo = currentRepo()
   const body = {
     name: name,
-    repo_key: repo && repo.repoKey ? repo.repoKey : 'gitcode:' + (repo ? repo.fullName || '' : ''),
+    repo_key: (repo && (repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider }))) || '',
     instruction: instruction,
     skill_name: selectedSkill.value,
     cron: cron.value,
     max_retry: retry,
-    engine_runtime_ids: Array.from(selectedEngines),
+    // Issue #1011 姊妹字段升格：选中引擎全部有 uid → 提交 engine_runtime_uids（清空 ids）；
+    // 存在无 uid 引擎（未迁移）→ 回落 legacy ids 提交（两字段不同时非空）
+    engine_runtime_uids: [],
+    engine_runtime_ids: [],
     custom_fields: cf.fields,
     work_branch: wb,
+  }
+  {
+    const selKeys = Array.from(selectedEngines)
+    const uidSel = []
+    const idSel = []
+    selKeys.forEach(function (k) {
+      const e = engineByKey(k)
+      if (e && e.engine_uid) uidSel.push(String(e.engine_uid))
+      else if (/^\d+$/.test(String(k))) idSel.push(parseInt(k, 10))
+      else if (e) idSel.push(e.id)
+    })
+    if (selKeys.length && uidSel.length === selKeys.length) {
+      body.engine_runtime_uids = uidSel
+      body.engine_runtime_ids = []
+    } else {
+      body.engine_runtime_uids = []
+      body.engine_runtime_ids = idSel
+    }
   }
   if (!dlg.editingId) body.enabled = true
   dlg.submitting = true
@@ -2137,20 +2170,34 @@ function openEnginePicker() {
   engPicker.type = ''
   engPicker.scope = ''
 }
-function toggleEngine(id) {
-  if (selectedEngines.has(id)) {
-    selectedEngines.delete(id)
+// Issue #1011：选择键 uid 优先（无 uid 引擎回落 id）——字符串键统一存 Set
+function engineKey(e) {
+  return String((e && e.engine_uid) || (e && e.id) || '')
+}
+// Issue #1011：选择键 → 引擎行（uid 优先，id 兜底；键统一字符串比较）
+function engineByKey(key) {
+  const k = String(key)
+  for (let i = 0; i < engines.value.length; i++) {
+    const e = engines.value[i]
+    if (String(e.id) === k || String(e.engine_uid || '') === k) return e
+  }
+  return null
+}
+function toggleEngine(key) {
+  if (selectedEngines.has(key)) {
+    selectedEngines.delete(key)
     return
   }
   // Issue #486：已超出当前可见范围的引擎只允许取消，不允许重新选中
-  if (detachedEngineIds.value.indexOf(id) >= 0) return
-  selectedEngines.add(id)
+  if (detachedEngineKeys.value.indexOf(key) >= 0) return
+  selectedEngines.add(key)
 }
 // Issue #486：编辑态原绑定但不在当前可见列表里的引擎（仅可移除）
-const detachedEngineIds = computed(() => {
+// Issue #1011：双轨匹配——选中键按 uid 或 id 都算可见（防 uid 任务被误判 detached）
+const detachedEngineKeys = computed(() => {
   if (!enginesLoaded.value) return []
-  const visible = new Set(engines.value.map((e) => e.id))
-  return Array.from(selectedEngines).filter((eid) => !visible.has(eid))
+  const visible = new Set(engines.value.map((e) => engineKey(e)))
+  return Array.from(selectedEngines).filter((k) => !visible.has(k))
 })
 const engAvailTypes = computed(() => {
   const types = []

@@ -1,6 +1,6 @@
 # 表归属裁决记录（table_ownership.json 的出处与变更依据）
 
-唯一权威：`docs/weekly-11/table-owner.tsv`（P0 冻结的 101 张唯一基表）。
+唯一权威：`configs/table_ownership.json`（P0 冻结的 101 张唯一基表）。
 `configs/table_ownership.json` 由它派生，供 `src/kernel/table_ownership.py` 的 DDL 守卫使用：
 **进程只允许创建/修改自己域的表**，从而在拆库后阻止「每个进程各建一份全量表」。
 
@@ -12,7 +12,7 @@ manifest 曾经是从某个开发库的 `information_schema` 物理快照生成�
 1. `scripts/foreign_table_refs.py --check` 误报大量「跨域引用」（棘轮红）；
 2. 分库演练环境出现同一张表的多份基表（守卫允许 runtime 建 mgmt 域的表）。
 
-结论：**归属只能来自 `table-owner.tsv` 的裁决**，物理快照只能用来核对「表是否存在」，
+结论：**归属只能来自 `table_ownership.json` 的裁决**，物理快照只能用来核对「表是否存在」，
 不能用来推断「表归谁」。
 
 ## 判定口径（三条同时成立才改归属）
@@ -101,7 +101,7 @@ SQL 会打到错误的库，得到 `ERROR 1146 (table doesn't exist)`，而这�
 
 `configs/table_ownership.json` 现有 135 条，其中 P0 冻结清单的 101 条逐条对齐（0 冲突），
 另有 34 条为清单外条目（`admin_*` 11 条、`backup_*` 5 条、`sandbox_*` 3 条，其余为历史批次的
-辅助表），未在 `table-owner.tsv` 登记出处。
+辅助表），未在 `table_ownership.json` 登记出处。
 
 处置约定：这些条目只保留在 manifest 里供 DDL 守卫判定「不是本域表」，不得作为新建表的依据；
 后续批次应为其补 provenance（来源批次/是否废弃）或直接裁剪，禁止用 `information_schema`
@@ -109,7 +109,7 @@ SQL 会打到错误的库，得到 `ERROR 1146 (table doesn't exist)`，而这�
 
 ## 维护约定
 
-1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑
+1. 新增表或裁决变更：先改 `configs/table_ownership.json`，再同步本文件与 manifest，最后跑
    `python3 scripts/foreign_table_refs.py --owner-json configs/table_ownership.json --check`。
 2. **禁止**再用 `information_schema` 快照直接覆盖 manifest——那会把「历史建表位置」当成归属。
 3. 本文件是 `table_ownership.json` 里 `_comment` 指名的裁决记录，缺失时归属争议无从追溯。

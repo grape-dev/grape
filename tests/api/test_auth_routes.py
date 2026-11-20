@@ -177,7 +177,36 @@ class TestOAuthCallback:
              patch("src.kernel.config.is_user_allowed", return_value=False):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
-        assert "WHITELIST" in r.headers.get("location", "")
+        loc = r.headers.get("location", "")
+        assert "WHITELIST" in loc
+        # P0-1（Issue #3054）：跳转 URL 只放错误码，不夹带第三方 external_login
+        assert "whitelist_denied_user" not in loc, loc
+        # P0-3（Issue #3054）：只做一次编码 —— ':' 编码为 %3A，不能再套一层（%253A）
+        assert "WHITELIST%3Agitcode" in loc, loc
+        assert "%253A" not in loc, loc
+
+    def test_oauth_error_redirect_single_encoded_and_no_raw_percent(self):
+        """P0-3（Issue #3054）：_oauth_error_redirect 只经 urlencode 一次编码。
+
+        双重编码会让前端被迫二次 decode，遇裸 % 值就抛 URIError 中断 init。
+        """
+        from starlette.requests import Request
+        from src.domains.mgmt.routes.grape_auth import _oauth_error_redirect
+        scope = {
+            "type": "http", "method": "GET", "path": "/api/auth/callback/gitcode",
+            "headers": [(b"host", b"grape.test")], "query_string": b"",
+            "scheme": "http", "server": ("grape.test", 80), "client": ("127.0.0.1", 1),
+        }
+        req = Request(scope)
+        with patch("src.domains.mgmt.user.db.get_browser_callback_url", return_value=""):
+            resp = _oauth_error_redirect(req, "100%")
+            resp2 = _oauth_error_redirect(req, "WHITELIST:gitcode")
+        loc = resp.headers["location"]
+        assert "oauth_error=100%25" in loc, loc      # 单次编码
+        assert "100%2525" not in loc, loc            # 不是二次编码
+        loc2 = resp2.headers["location"]
+        assert "oauth_error=WHITELIST%3Agitcode" in loc2, loc2
+        assert "%253A" not in loc2, loc2
 
     def test_success_new_user_auto_create(self):
         """D35: 未绑定用户 → 自动创建账号 + 直接登录（不再跳关联页）。"""
@@ -188,12 +217,56 @@ class TestOAuthCallback:
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
-             patch("src.kernel.config.is_user_allowed", return_value=True):
+             patch("src.kernel.config.is_user_allowed", return_value=True), \
+             patch("src.domains.mgmt.auth.signup_policy.check_oauth_signup_allowed", return_value=True):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         # P0-3: 回调现在用 exchange_code 替代 URL token
         assert "exchange_code=" in r.headers["location"]
         _cleanup(uname, gid)
+
+    def test_auto_create_blocked_when_signup_closed(self):
+        """P3-6 主路径：注册关闭时 OAuth 自动建号必须被拒（原实现只挡了二选一页两分支）。
+
+        默认 allow_signup 未配置 = 关闭（signup_policy 的 fail-closed 口径），
+        因此 OAuth 首次登录不得静默建号；应带 signup_closed 错误码回跳。
+        """
+        uname = "oauth_closed_" + uuid.uuid4().hex[:6]
+        gid = _gid()
+        state = _save_state()
+        # get_meta_value 返回 "x"：渠道已配置（可进 callback），而 allow_signup 非
+        # true/1/yes → 注册关闭（signup_policy 的默认关闭口径）。
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
+             patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
+             patch("src.kernel.config.is_user_allowed", return_value=True):
+            r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
+        assert r.status_code == 302
+        assert "signup_closed" in r.headers["location"]
+        # 不得留下账号
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
+        assert get_grape_account_by_username(uname) is None
+        _cleanup(uname, gid)
+
+    def test_provider_mismatch_does_not_burn_state(self):
+        """P3-5 主路径：错平台回调不得消费合法 state（先 peek 再 DELETE）。
+
+        原实现 callback 走 validate_oauth_state(state) 默认 consume=True，
+        provider 比对在其后 → 一次串味/误点就烧掉合法 state（线上 state_invalid）。
+        """
+        from src.domains.mgmt.user import db as user_db
+
+        state = "test-state-" + uuid.uuid4().hex[:8]
+        user_db.save_oauth_state(state, "gitcode", {})
+        # 用 github 的 URL 打 gitcode 的 state
+        r = client.get("/api/auth/callback/github", params={"state": state, "code": "c"},
+                       follow_redirects=False)
+        assert r.status_code == 302
+        assert "provider_mismatch" in r.headers["location"]
+        # 关键：state 仍在（未被烧掉），可被正确平台继续使用
+        peek = user_db.validate_oauth_state(state, "gitcode", consume=False)
+        assert peek is not None, "provider mismatch 把合法 state 消费掉了"
 
     def test_success_existing_user_keeps_repo_selection(self):
         """已绑定用户 → 直接登录，first_login=0。"""

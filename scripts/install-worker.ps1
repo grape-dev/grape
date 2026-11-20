@@ -496,8 +496,9 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
 }
 
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
-# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
-$workerDeps = @("aiohttp", "bcrypt", "click", "httpx")
+# [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [worker] extra 同源——补 cubesandbox/
+# requests/cryptography（沙箱平台 SDK / 网络代理 / 凭据加密），与 install-worker.sh 对齐。
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography")
 $pyprojectFile = Join-Path $Dir "pyproject.toml"
 if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL
@@ -635,6 +636,33 @@ try {
     Log "Warning: failed to download start-worker.ps1: $_ (non-blocking, worker can be started manually)"
 }
 
+# ===== 5.5 预检：新代码能否启动（必须在停旧 worker 之前）=====
+# 2026-11-19 教训：Windows worker 升级到 h-6678e67005b5 时，新代码 __main__ 里
+# os.geteuid() 无平台守卫 → 启动即 AttributeError 秒退 → daemon 重试 10 次后退出 →
+# 「升级成功但设备离线」，且隐藏窗口下 stderr 丢失、事后无从定位。
+# 预检只跑启动路径（--self-check），不连服务端、不注册，失败即中止升级并保留旧 worker。
+Log "Pre-check: new code startup self-check..."
+if (-not (Test-Path $VenvPy)) { Fail "Pre-check failed: venv python missing ($VenvPy)" }
+Push-Location $Dir
+# Issue #429 同型：Stop 模式下原生命令的 2>&1 会把 stderr 行包装成终止性错误记录，
+# 预检这里会因此拿不到 $LASTEXITCODE（异常先抛出）。临时降级 EAP 执行后恢复，
+# 与 Invoke-PipQuiet 的口径一致，用 $LASTEXITCODE 判定真实成败。
+$prevPrecheckEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $precheckOut = & $VenvPy -m src.domains.runtime.engine.agent --self-check 2>&1
+    $precheckCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevPrecheckEAP
+    Pop-Location
+}
+if ($precheckCode -ne 0) {
+    Log "!!! Pre-check FAILED (exit $precheckCode) - aborting upgrade BEFORE stopping the old worker !!!"
+    $precheckOut | Select-Object -First 20 | ForEach-Object { Log "    $_" }
+    Fail "New worker code cannot start (pre-check exit $precheckCode); old worker left untouched"
+}
+Log "Pre-check OK: $($precheckOut | Select-Object -First 1)"
+
 # 停掉旧 daemon（start-worker.ps1 的 powershell 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
 # 按本安装目录的 start-worker.ps1 完整路径匹配，避免误杀同机其他 grape 安装的 daemon
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
@@ -660,11 +688,24 @@ Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Execution
 # 1. 进程存活检查（3s 后）
 # 2. 注册成功检查（最多等 30s，日志出现 "registered"）
 # 3. 任一失败 → restore_upgrade_backup 恢复旧代码重启
-Start-Sleep -Seconds 3
-
-$workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    Test-GrapeAgentProcess $_
-} | Select-Object -First 1
+# 进程存活检查：轮询最多 30s（不是固定 3s 只看一眼）。
+# Windows 上 python 冷启动 + 74MB 新文件被 Defender 实时扫描，首个进程常要 8~15s
+# 才出现；固定 3s 判活会把「正常启动中」误判成「起不来」→ 假回滚 + 装完实际没新版本。
+$workerProc = $null
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 1
+    if ($i -eq 3) {
+        # 第 3 秒起先看 daemon 是否还活着：daemon 已退出说明是硬失败，不必等满 30s
+        $daemonAlive = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -like "*$startScript*"
+        } | Select-Object -First 1
+        if (-not $daemonAlive) { Log "Worker daemon exited early (no powershell holding $startScript)" }
+    }
+    $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        Test-GrapeAgentProcess $_
+    } | Select-Object -First 1
+    if ($workerProc) { break }
+}
 
 if (-not $workerProc) {
     Log "New agent failed to start (process missing), rolling back..."

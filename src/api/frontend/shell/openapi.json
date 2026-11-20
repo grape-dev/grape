@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agentic DevOps API",
-    "version": "2.2.2"
+    "version": "2.2.0"
   },
   "paths": {
     "/api/auth/change-password": {
@@ -71,6 +71,26 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "No deliverable mailbox bound (EMAIL_UNBOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (CODE_SEND_FAILED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
               }
             }
           }
@@ -177,6 +197,36 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid email (EMAIL_FORMAT / EMAIL_SAME / EMAIL_TAKEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (CODE_SEND_FAILED / CHANGE_EMAIL_TOO_OFTEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Email service not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -226,6 +276,36 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Code or second factor rejected (CODE_INVALID / CODE_EXPIRED / NEED_SECOND_FACTOR / PASSWORD_INVALID / EMAIL_FORMAT / EMAIL_SAME)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Email already taken (EMAIL_TAKEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Email update failed (EMAIL_UPDATE_FAILED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
                 }
               }
             }
@@ -766,6 +846,38 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/auth/platform-links": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Current user's repo-platform relations (object model)",
+        "description": "Returns the caller's non-revoked user↔repo-platform relations read from grape_t_user_repo_platform_link, with the identities fallback marked as source=identities. Same payload the /auth/profile field carries.",
+        "operationId": "auth_platform_links",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/auth/logout": {
       "post": {
         "tags": [
@@ -837,6 +949,16 @@
               }
             }
           },
+          "400": {
+            "description": "Credential unavailable (needs_reauth)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -876,6 +998,16 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Credential unavailable (needs_reauth)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
               }
             }
           }
@@ -3439,7 +3571,7 @@
           "git-repo"
         ],
         "summary": "Get pull request",
-        "description": "Returns a single pull request.",
+        "description": "Returns a single pull request. Issue #2324: attaches merge_readiness, the shared combined merge judgement (mergeable && can_merge_check && approval_reviewers_required_passed) also used by the pre-merge check.",
         "operationId": "gitrepo_pulls_get",
         "parameters": [
           {
@@ -7927,6 +8059,16 @@
               "default": "",
               "title": "Range"
             }
+          },
+          {
+            "name": "sandbox_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Sandbox Type"
+            }
           }
         ],
         "responses": {
@@ -8462,7 +8604,7 @@
           "settings"
         ],
         "summary": "Revoke runtime credential",
-        "description": "Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.",
+        "description": "Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved grape_t_cloud_sandboxes records); provider/templates deleted in DB, grape_t_cloud_sandboxes rows preserved as orphaned.",
         "operationId": "settings_runtime_credential_revoke",
         "parameters": [
           {
@@ -8470,8 +8612,18 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
+              "type": "integer",
               "title": "Cid"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Confirm"
             }
           }
         ],
@@ -9117,6 +9269,1329 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/settings/sandbox-templates": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Create sandbox template",
+        "description": "v3：创建沙箱模板。权限按 Provider scope 校验（非 admin only）。写 provider_id + provider。",
+        "operationId": "settings_sandbox_template_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SandboxTemplateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-templates/{tpl_id}": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update sandbox template",
+        "description": "v3：更新沙箱模板。权限按 Provider scope 校验。",
+        "operationId": "settings_sandbox_template_update",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SandboxTemplateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Delete sandbox template",
+        "description": "v3：删除沙箱模板。权限按 Provider scope 校验。",
+        "operationId": "settings_sandbox_template_delete",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-providers": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List sandbox providers",
+        "description": "Lists system + current user's sandbox providers. api_key is masked. Supports search and pagination.",
+        "operationId": "settings_sandbox_providers",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Create a sandbox provider",
+        "description": "v3 §3.1.2：新增 Provider。不生成 credential（v3 生命周期独立）。",
+        "operationId": "settings_sandbox_provider_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-providers/{provider_id}": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update a sandbox provider",
+        "description": "v3 §3.1.3：更新 Provider。级别规则：全局(system)可降级为用户/仓库级；用户/仓库级不可升为全局。",
+        "operationId": "settings_sandbox_provider_update",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-providers/{provider_id}/toggle": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Toggle a sandbox provider",
+        "description": "v3 §3.1.5：启停 Provider。\n\n[沙箱凭据口径对齐 64a02adde] 沙箱凭据生成的 Provider（global 凭据 → scope=system），\n其 owner 判定走 _sb_cred_report_owner（凭据 owner_name=当前用户或 admin）——\n[删系统类别 2026-10-30] 权限单一条件：凭据 owner——系统预置类别已删除。",
+        "operationId": "settings_sandbox_provider_toggle",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-templates/{tpl_id}/toggle": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Toggle a sandbox template",
+        "description": "启停模板。enabled=0 的模板不参与 cloud_worker 引擎展开（引擎不注册）。\n\n与 Provider toggle 同款权限语义（system scope 拒改 / owner 校验）。",
+        "operationId": "settings_sandbox_template_toggle",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-providers/{provider_id}/health": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Health check a sandbox provider",
+        "description": "v3 §3.1.6：健康检查。通过 adapter.health_check。",
+        "operationId": "settings_sandbox_provider_health",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-templates/{tpl_id}/bind-engine": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Bind engine to template",
+        "description": "v3 §3.2.5：绑定引擎到模板。UNIQUE(provider_id, engine_type) DB 级保证。幂等。",
+        "operationId": "settings_bind_engine",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-templates/{tpl_id}/bind-engine/{engine_type}": {
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Unbind engine from template",
+        "description": "v3 §3.2.5：解绑引擎。",
+        "operationId": "settings_unbind_engine",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          },
+          {
+            "name": "engine_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Engine Type"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-providers/{provider_id}/scan-templates": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Scan platform templates and import new ones",
+        "description": "扫描 Provider 平台侧模板，自动导入未登记的有效模板。\n\n解耦设计：扫描能力由 adapter 的 list_templates(config) 提供\n（返回统一格式 [{template_id,name,status,description}]，不支持返回 None），\n本端点不感知任何具体平台 API。有效性 = status 为 ready/ok。\n已按 template_id 去重——DB 中已有的不重复导入。",
+        "operationId": "settings_sandbox_provider_scan_templates",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-templates/{tpl_id}/check": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Check template validity",
+        "description": "v3：手动触发模板校验。权限按 Provider scope 校验。",
+        "operationId": "settings_sandbox_template_check",
+        "parameters": [
+          {
+            "name": "tpl_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tpl Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-provider-configs": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List sandbox provider configs",
+        "description": "Lists all sandbox provider configs. api_key is masked (***).",
+        "operationId": "settings_provider_configs",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-provider-configs/{provider}": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Update sandbox provider config",
+        "description": "Updates a sandbox provider config. api_key is sent in plaintext and encrypted server-side. Sending api_key=null preserves the existing DB value.",
+        "operationId": "settings_provider_config_update",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-platforms": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List supported sandbox platforms",
+        "description": "Returns supported platform names and their extra_config fields. Driven by backend registry + Pydantic models, no hardcoding.",
+        "operationId": "settings_sandbox_platforms",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/sandbox-engines": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List supported sandbox engines",
+        "description": "Returns engine types supported by cloud sandbox orchestration (driven by ENGINE_REGISTRY, no hardcoding).",
+        "operationId": "settings_sandbox_engines",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-credentials/repo": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List repo LLM credentials",
+        "description": "列出仓库 LLM 凭据（不回明文——api_key 只报 has_key 布尔）。读权限=仓库可见即可。",
+        "operationId": "settings_repo_llm_credentials_list",
+        "parameters": [
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Create or update repo LLM credential",
+        "description": "新增/更新（repo_key+engine_type UPSERT）。api_key 留空=保留旧值。仅仓库管理员。",
+        "operationId": "settings_repo_llm_credential_upsert",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoLLMCredentialBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-credentials/repo/{cred_id}/toggle": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Toggle Repo Llm Credential",
+        "description": "启停。仅仓库管理员。",
+        "operationId": "settings_repo_llm_credential_toggle",
+        "parameters": [
+          {
+            "name": "cred_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cred Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-credentials/repo/{cred_id}": {
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Delete Repo Llm Credential",
+        "description": "删除。仅仓库管理员。",
+        "operationId": "settings_repo_llm_credential_delete",
+        "parameters": [
+          {
+            "name": "cred_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cred Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-credentials": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List LLM credentials",
+        "description": "List user's LLM credentials without plaintext keys.",
+        "operationId": "settings_llm_credentials",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Create LLM credential",
+        "description": "Save LLM API key (encrypted). One credential per engine_type per user.",
+        "operationId": "settings_llm_credential_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LLMCredentialBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-engine-types": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List available engine types for LLM credentials",
+        "description": "返回引擎类型列表（common + ENGINE_REGISTRY keys）。",
+        "operationId": "settings_llm_engine_types",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/settings/llm-credentials/{cred_id}": {
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Delete LLM credential",
+        "description": "删除 LLM 凭据。",
+        "operationId": "settings_llm_credential_delete",
+        "parameters": [
+          {
+            "name": "cred_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cred Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills": {
       "get": {
         "tags": [
@@ -9164,6 +10639,26 @@
               "type": "integer",
               "default": 0,
               "title": "Category Id"
+            }
+          },
+          {
+            "name": "cat_l1_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L1 Id"
+            }
+          },
+          {
+            "name": "cat_l2_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L2 Id"
             }
           },
           {
@@ -9476,6 +10971,70 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/skills/tag-suggest": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Suggest skill tags",
+        "description": "Rule-based tag candidates (max 3) for skill name/description.",
+        "operationId": "skills_tag_suggest",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Description"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills/search": {
       "get": {
         "tags": [
@@ -9727,6 +11286,301 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/skills/by-id/{skill_id}/versions": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Skill version history",
+        "description": "Returns the skill version history (latest first) for the detail page.",
+        "operationId": "skills_versions",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/files": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Skill package file tree",
+        "description": "Returns the skill package file list with sizes for the detail page resources tab.",
+        "operationId": "skills_files",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/related": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Related skills",
+        "description": "Related skills: shared tags first, falls back to same agent_type.",
+        "operationId": "skills_related",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/comments": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "List skill comments",
+        "description": "Paged user comments for a skill (newest first).",
+        "operationId": "skills_comments_list",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Post skill comment",
+        "description": "Posts a plain-text user comment (login required, max 1000 chars).",
+        "operationId": "skills_comments_create",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills/upload": {
       "post": {
         "tags": [
@@ -9804,6 +11658,71 @@
             "multipart/form-data": {
               "schema": {
                 "$ref": "#/components/schemas/Body_skills_update"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/{skill_id}": {
+      "patch": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Skill metadata edit without re-uploading the package",
+        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
+        "operationId": "skills_patch_meta",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
               }
             }
           }
@@ -10655,6 +12574,194 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/scenes/{scene_id}/pin": {
+      "post": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Pin scene",
+        "description": "Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).",
+        "operationId": "scenes_pin",
+        "parameters": [
+          {
+            "name": "scene_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scene Id"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinSceneRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/scenes/{scene_id}/engine-status": {
+      "get": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Scene engine online status",
+        "description": "On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.",
+        "operationId": "scenes_engine_status",
+        "parameters": [
+          {
+            "name": "scene_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scene Id"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/scenes/engine-selector-preview": {
+      "post": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Preview engine selector matches",
+        "description": "Issue #1208 v3: returns the authoritative hit/miss map for a selector by reusing selector_candidate_engines (same source as enqueue/claim), so the frontend preview never diverges from backend dispatch.",
+        "operationId": "scenes_engine_selector_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngineSelectorPreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/scenes/market/categories": {
       "get": {
         "tags": [
@@ -10787,6 +12894,26 @@
               "default": 20,
               "title": "Page Size"
             }
+          },
+          {
+            "name": "cat_l1_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L1 Id"
+            }
+          },
+          {
+            "name": "cat_l2_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L2 Id"
+            }
           }
         ],
         "responses": {
@@ -10851,6 +12978,70 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/scenes/tag-suggest": {
+      "get": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Suggest scene tags",
+        "description": "Rule-based tag candidates (max 3) for scene name/description.",
+        "operationId": "scenes_tag_suggest",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Description"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -12564,108 +14755,26 @@
         "x-token-scope": "user_only"
       }
     },
-    "/api/scenes/{scene_id}/engine-status": {
+    "/api/categories/tree": {
       "get": {
         "tags": [
-          "scenes"
+          "categories"
         ],
-        "summary": "Scene engine online status",
-        "description": "On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.",
-        "operationId": "scenes_engine_status",
+        "summary": "Category tree",
+        "description": "Unified one/two-level category dictionary (Issue #2761); scope=scene|skill filters applies_to. Only is_active=1.",
+        "operationId": "categories_tree",
         "parameters": [
           {
-            "name": "scene_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Scene Id"
-            }
-          },
-          {
-            "name": "repo",
+            "name": "scope",
             "in": "query",
             "required": false,
             "schema": {
               "type": "string",
               "default": "",
-              "title": "Repo"
+              "title": "Scope"
             }
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "apiKey": []
-          },
-          {
-            "privateKey": []
-          },
-          {
-            "accessToken": []
-          }
-        ],
-        "x-token-scope": "user_only"
-      }
-    },
-    "/api/scenes/{scene_id}/pin": {
-      "post": {
-        "tags": [
-          "scenes"
-        ],
-        "summary": "Pin scene",
-        "description": "Sets the repo-shared pinned state of a scene (pinned scenes sort first, ordered by pinned_at desc).",
-        "operationId": "scenes_pin",
-        "parameters": [
-          {
-            "name": "scene_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Scene Id"
-            }
-          },
-          {
-            "name": "repo",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Repo"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PinSceneRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -13584,6 +15693,69 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/terminal-disposition": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Dispose a folded issue whose carrier PR is terminal",
+        "description": "Issue #2816: manual disposition for a folded issue whose carrier PR is marked needs-human-terminal (CONFLICT_SCOPE=intersect). Actions: new_carrier (carrier_pr required; resumes processing/coding and force-dispatches), reassign (target_agent required; force-dispatches to that agent), close (converges the issue via confirm-done). Bypasses the terminal dispatch guard only for this manual action.",
+        "operationId": "issues_terminal_disposition",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueTerminalDispositionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/clarifications": {
       "get": {
         "tags": [
@@ -13769,7 +15941,7 @@
           "issues"
         ],
         "summary": "Agent decides review passed",
-        "description": "Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review），不再回显名义 status 冒充成功。Session-only (tk_)，repo 匹配，devops agent。",
+        "description": "Agent 判定用户已通过审核，只能推进、不能终态：target=processing → pending_review→processing（继续），末节点归一 pending_review；target=done 一律 400（需求完成只能由人工 confirm-done）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review/agent_finalize_forbidden）。Session-only (tk_)，repo 匹配，devops agent。",
         "operationId": "issues_review-pass",
         "parameters": [
           {
@@ -16003,6 +18175,205 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/runtime/cloud-sandboxes": {
+      "get": {
+        "tags": [
+          "runtime"
+        ],
+        "summary": "List cloud sandboxes",
+        "description": "Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.",
+        "operationId": "runtime_cloud_sandboxes",
+        "parameters": [
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Provider Id"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "State"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/runtime/cloud-sandboxes/{sandbox_id}": {
+      "delete": {
+        "tags": [
+          "runtime"
+        ],
+        "summary": "Kill cloud sandbox",
+        "description": "Force kill a cloud sandbox by sandbox_id.",
+        "operationId": "runtime_cloud_sandbox_kill",
+        "parameters": [
+          {
+            "name": "sandbox_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Sandbox Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/runtime/admin/sandbox/engines": {
+      "get": {
+        "tags": [
+          "runtime"
+        ],
+        "summary": "查询引擎维度沙箱开关",
+        "description": "[沙箱迁移] 查询沙箱开关配置（全局 + 引擎维度，2e13b015d）。",
+        "operationId": "runtime_sandbox_engines",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/takeover/sessions": {
       "post": {
         "tags": [
@@ -18145,6 +20516,759 @@
             }
           },
           "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/audit/{task_id}": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Query Sandbox Audit",
+        "operationId": "sandbox_audit_query",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/audit/{task_id}/alerts": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Query Sandbox Alerts",
+        "operationId": "sandbox_alerts_query",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/external-api-audit/{task_id}": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Query External Api Audit",
+        "operationId": "external_api_audit_query",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/whitelist": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "List Whitelist",
+        "operationId": "sandbox_whitelist_list",
+        "parameters": [
+          {
+            "name": "backend_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Backend Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Create Whitelist",
+        "operationId": "sandbox_whitelist_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__sandbox_admin__WhitelistBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/whitelist/{rule_id}": {
+      "put": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Update Whitelist",
+        "operationId": "sandbox_whitelist_update",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__sandbox_admin__WhitelistBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Delete Whitelist",
+        "operationId": "sandbox_whitelist_delete",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/paths": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "List Paths",
+        "operationId": "sandbox_paths_list",
+        "parameters": [
+          {
+            "name": "backend_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Backend Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Create Paths",
+        "operationId": "sandbox_paths_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathsBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/paths/{path_id}": {
+      "put": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Update Paths",
+        "operationId": "sandbox_paths_update",
+        "parameters": [
+          {
+            "name": "path_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathsBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Delete Paths",
+        "operationId": "sandbox_paths_delete",
+        "parameters": [
+          {
+            "name": "path_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/config": {
+      "get": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "List Config",
+        "operationId": "sandbox_config_list",
+        "parameters": [
+          {
+            "name": "runtime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Runtime Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/admin/sandbox/config/{config_id}": {
+      "put": {
+        "tags": [
+          "sandbox-admin"
+        ],
+        "summary": "Update Config",
+        "operationId": "sandbox_config_update",
+        "parameters": [
+          {
+            "name": "config_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Config Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__sandbox_admin__ConfigBody"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
@@ -21397,6 +24521,42 @@
             "type": "string",
             "title": "Category Id",
             "default": ""
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "type": "string",
+            "title": "Tags",
+            "default": ""
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "change_note": {
+            "type": "string",
+            "title": "Change Note",
+            "default": ""
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
           }
         },
         "type": "object",
@@ -21431,6 +24591,42 @@
             "type": "integer",
             "title": "Category Id",
             "default": 0
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "type": "string",
+            "title": "Tags",
+            "default": ""
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "change_note": {
+            "type": "string",
+            "title": "Change Note",
+            "default": ""
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
           }
         },
         "type": "object",
@@ -21467,6 +24663,28 @@
         ],
         "title": "Body_upload_md_api_community_upload_md_post"
       },
+      "BotBody": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "default": ""
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "BotBody",
+        "description": "平台 bot 写入体（D110）：username 空=不改；token 空=不改；token 留空无法清除，清除走 DELETE。"
+      },
       "BotTokenBody": {
         "properties": {
           "full_name": {
@@ -21499,19 +24717,29 @@
       "ChangeEmailBody": {
         "properties": {
           "new_email": {
-            "type": "string",
-            "title": "New Email"
+            "title": "New Email",
+            "type": "string"
           },
           "code": {
-            "type": "string",
-            "title": "Code"
+            "title": "Code",
+            "type": "string"
+          },
+          "password": {
+            "default": "",
+            "title": "Password",
+            "type": "string"
+          },
+          "old_email_code": {
+            "default": "",
+            "title": "Old Email Code",
+            "type": "string"
           }
         },
-        "type": "object",
         "required": [
           "new_email",
           "code"
         ],
+        "type": "object",
         "title": "ChangeEmailBody"
       },
       "ChangeEmailSendCodeBody": {
@@ -21544,6 +24772,22 @@
           "new_password"
         ],
         "title": "ChangePasswordBody"
+      },
+      "ChannelCredentialsBody": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "default": ""
+          },
+          "client_secret": {
+            "type": "string",
+            "title": "Client Secret",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ChannelCredentialsBody"
       },
       "ChatMessage": {
         "properties": {
@@ -21627,117 +24871,46 @@
         "type": "object",
         "title": "CompleteBody"
       },
-      "ConfigBody": {
+      "CompleteBodyV2": {
         "properties": {
-          "gitcode_api_token": {
+          "result_text": {
             "type": "string",
-            "title": "Gitcode Api Token",
+            "title": "Result Text",
             "default": ""
           },
-          "gitcode_oauth_client_id": {
-            "type": "string",
-            "title": "Gitcode Oauth Client Id",
-            "default": ""
-          },
-          "gitcode_oauth_client_secret": {
-            "type": "string",
-            "title": "Gitcode Oauth Client Secret",
-            "default": ""
-          },
-          "github_bot_token": {
-            "type": "string",
-            "title": "Github Bot Token",
-            "default": ""
-          },
-          "github_bot_username": {
-            "type": "string",
-            "title": "Github Bot Username",
-            "default": ""
-          },
-          "github_oauth_client_id": {
-            "type": "string",
-            "title": "Github Oauth Client Id",
-            "default": ""
-          },
-          "github_oauth_client_secret": {
-            "type": "string",
-            "title": "Github Oauth Client Secret",
-            "default": ""
-          },
-          "gitee_oauth_client_id": {
-            "type": "string",
-            "title": "Gitee Oauth Client Id",
-            "default": ""
-          },
-          "gitee_oauth_client_secret": {
-            "type": "string",
-            "title": "Gitee Oauth Client Secret",
-            "default": ""
-          },
-          "huawei_oauth_client_id": {
-            "type": "string",
-            "title": "Huawei Oauth Client Id",
-            "default": ""
-          },
-          "huawei_oauth_client_secret": {
-            "type": "string",
-            "title": "Huawei Oauth Client Secret",
-            "default": ""
-          },
-          "bot_usernames": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Bot Usernames",
-            "default": []
-          },
-          "webhook_url": {
-            "type": "string",
-            "title": "Webhook Url",
-            "default": ""
-          },
-          "gitcode_webhook_token": {
-            "type": "string",
-            "title": "Gitcode Webhook Token",
-            "default": ""
-          },
-          "runtime_task_timeout": {
+          "exit_code": {
             "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Runtime Task Timeout",
+            "title": "Exit Code",
             "default": 0
           },
-          "devstage_template_id": {
+          "session_id": {
             "type": "string",
-            "title": "Devstage Template Id",
+            "title": "Session Id",
             "default": ""
           },
-          "devstage_flavor_id": {
+          "work_dir": {
             "type": "string",
-            "title": "Devstage Flavor Id",
+            "title": "Work Dir",
             "default": ""
           },
-          "devstage_cores": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Devstage Cores",
-            "default": 0
-          },
-          "devstage_memory": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Devstage Memory",
-            "default": 0
-          },
-          "devstage_arch": {
+          "engine": {
             "type": "string",
-            "title": "Devstage Arch",
+            "title": "Engine",
+            "default": ""
+          },
+          "run_token": {
+            "type": "string",
+            "title": "Run Token",
+            "default": ""
+          },
+          "engine_uid": {
+            "type": "string",
+            "title": "Engine Uid",
             "default": ""
           }
         },
         "type": "object",
-        "title": "ConfigBody"
+        "title": "CompleteBodyV2"
       },
       "ConversationMessage": {
         "properties": {
@@ -21897,6 +25070,28 @@
             "type": "integer",
             "title": "Category Id",
             "default": 1
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
           },
           "recommended_template": {
             "type": "string",
@@ -22112,6 +25307,12 @@
             "items": {},
             "type": "array",
             "title": "Engine Runtime Ids",
+            "default": []
+          },
+          "engine_runtime_uids": {
+            "items": {},
+            "type": "array",
+            "title": "Engine Runtime Uids",
             "default": []
           },
           "custom_fields": {
@@ -22374,6 +25575,43 @@
         "type": "object",
         "title": "EditUserBody"
       },
+      "EnabledBody": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "EnabledBody"
+      },
+      "EngineSelectorPreviewBody": {
+        "properties": {
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags",
+            "default": []
+          },
+          "agent_type": {
+            "type": "string",
+            "title": "Agent Type",
+            "default": ""
+          },
+          "repo": {
+            "type": "string",
+            "title": "Repo",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "EngineSelectorPreviewBody"
+      },
       "EngineTagBody": {
         "properties": {
           "tag": {
@@ -22615,6 +25853,37 @@
         "type": "object",
         "title": "FailBody"
       },
+      "FailBodyV2": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "default": ""
+          },
+          "failure_reason": {
+            "type": "string",
+            "title": "Failure Reason",
+            "default": ""
+          },
+          "exit_code": {
+            "type": "integer",
+            "title": "Exit Code",
+            "default": -1
+          },
+          "run_token": {
+            "type": "string",
+            "title": "Run Token",
+            "default": ""
+          },
+          "engine_uid": {
+            "type": "string",
+            "title": "Engine Uid",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "FailBodyV2"
+      },
       "FinishBody": {
         "properties": {
           "outcome": {
@@ -22831,6 +26100,83 @@
         "type": "object",
         "title": "HeartbeatBody"
       },
+      "HeartbeatBodyV2": {
+        "properties": {
+          "runtime_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Runtime Ids",
+            "default": []
+          },
+          "cpu_percent": {
+            "type": "number",
+            "title": "Cpu Percent",
+            "default": 0.0
+          },
+          "memory_percent": {
+            "type": "number",
+            "title": "Memory Percent",
+            "default": 0.0
+          },
+          "disk_percent": {
+            "type": "number",
+            "title": "Disk Percent",
+            "default": 0.0
+          },
+          "tmp_percent": {
+            "type": "number",
+            "title": "Tmp Percent",
+            "default": 0.0
+          },
+          "bandwidth_percent": {
+            "type": "number",
+            "title": "Bandwidth Percent",
+            "default": 0.0
+          },
+          "bandwidth_mbps": {
+            "type": "number",
+            "title": "Bandwidth Mbps",
+            "default": 0.0
+          },
+          "load_avg": {
+            "type": "string",
+            "title": "Load Avg",
+            "default": ""
+          },
+          "spec": {
+            "type": "string",
+            "title": "Spec",
+            "default": ""
+          },
+          "log_lines": {
+            "items": {
+              "$ref": "#/components/schemas/LogLineBody"
+            },
+            "type": "array",
+            "title": "Log Lines",
+            "default": []
+          },
+          "probe_results": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Probe Results",
+            "default": {}
+          },
+          "engine_uids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Engine Uids",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "HeartbeatBodyV2",
+        "description": "v2 心跳 body：v1 字段 + engine_uids 数组（uid 优先解析，失效回退 runtime_ids）。"
+      },
       "InstallationStatusBody": {
         "properties": {
           "status": {
@@ -22877,6 +26223,32 @@
         },
         "type": "object",
         "title": "IssueHandoffBody"
+      },
+      "IssueTerminalDispositionBody": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action",
+            "default": ""
+          },
+          "carrier_pr": {
+            "type": "integer",
+            "title": "Carrier Pr",
+            "default": 0
+          },
+          "target_agent": {
+            "type": "string",
+            "title": "Target Agent",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "IssueTerminalDispositionBody"
       },
       "IssueUpdateBody": {
         "properties": {
@@ -23083,6 +26455,38 @@
         },
         "type": "object",
         "title": "KnowledgeUpdateBody"
+      },
+      "LLMCredentialBody": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "default": "custom"
+          },
+          "api_key": {
+            "type": "string",
+            "title": "Api Key",
+            "default": ""
+          },
+          "base_url": {
+            "type": "string",
+            "title": "Base Url",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "default": ""
+          },
+          "engine_type": {
+            "type": "string",
+            "title": "Engine Type",
+            "default": "common"
+          }
+        },
+        "type": "object",
+        "title": "LLMCredentialBody",
+        "description": "用户 LLM API key（加密存储）。"
       },
       "LabelCreateBody": {
         "properties": {
@@ -23626,6 +27030,30 @@
         "type": "object",
         "title": "PRUpdateBody"
       },
+      "PathsBody": {
+        "properties": {
+          "backend_name": {
+            "type": "string",
+            "title": "Backend Name"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "access": {
+            "type": "string",
+            "title": "Access",
+            "default": "ro"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backend_name",
+          "path"
+        ],
+        "title": "PathsBody",
+        "description": "文件系统路径 body。"
+      },
       "PinSceneRequest": {
         "properties": {
           "pinned": {
@@ -23654,6 +27082,32 @@
         },
         "type": "object",
         "title": "PolishBody"
+      },
+      "ProgressBodyV2": {
+        "properties": {
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "step": {
+            "type": "integer",
+            "title": "Step",
+            "default": 0
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "engine_uid": {
+            "type": "string",
+            "title": "Engine Uid",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ProgressBodyV2"
       },
       "RecoverOrphansBody": {
         "properties": {
@@ -23739,6 +27193,50 @@
         ],
         "title": "RepoAction"
       },
+      "RepoLLMCredentialBody": {
+        "properties": {
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key"
+          },
+          "engine_type": {
+            "type": "string",
+            "title": "Engine Type",
+            "default": "common"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "default": "custom"
+          },
+          "api_key": {
+            "type": "string",
+            "title": "Api Key",
+            "default": ""
+          },
+          "base_url": {
+            "type": "string",
+            "title": "Base Url",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "default": ""
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "repo_key"
+        ],
+        "title": "RepoLLMCredentialBody",
+        "description": "[repo-llm-credential] 仓库级 LLM 凭据（仓库资产，加密存储）。api_key 留空=保留旧值。"
+      },
       "RequestFinishBody": {
         "properties": {
           "summary": {
@@ -23804,11 +27302,53 @@
             "type": "boolean",
             "title": "Prefer Fallback",
             "default": false
+          },
+          "expected_task_id": {
+            "type": "string",
+            "title": "Expected Task Id",
+            "default": ""
+          },
+          "expected_event_seq": {
+            "type": "integer",
+            "title": "Expected Event Seq",
+            "default": 0
           }
         },
         "type": "object",
         "title": "RuntimeClaimBody",
         "description": "v3.0：worker 能力动态声明（零落库）——claim 每次携带"
+      },
+      "RuntimeClaimBodyV2": {
+        "properties": {
+          "supports_obs_url": {
+            "type": "boolean",
+            "title": "Supports Obs Url",
+            "default": false
+          },
+          "prefer_fallback": {
+            "type": "boolean",
+            "title": "Prefer Fallback",
+            "default": false
+          },
+          "expected_task_id": {
+            "type": "string",
+            "title": "Expected Task Id",
+            "default": ""
+          },
+          "expected_event_seq": {
+            "type": "integer",
+            "title": "Expected Event Seq",
+            "default": 0
+          },
+          "runtime_id": {
+            "type": "integer",
+            "title": "Runtime Id",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "RuntimeClaimBodyV2",
+        "description": "v2 claim body：v1 字段 + runtime_id 兜底锚（uid 失效时回退 id 认领）。"
       },
       "RuntimeCredBody": {
         "properties": {
@@ -23824,6 +27364,31 @@
           "repo_key": {
             "type": "string",
             "title": "Repo Key",
+            "default": ""
+          },
+          "cred_type": {
+            "type": "string",
+            "title": "Cred Type",
+            "default": "worker"
+          },
+          "platform": {
+            "type": "string",
+            "title": "Platform",
+            "default": ""
+          },
+          "platform_endpoint": {
+            "type": "string",
+            "title": "Platform Endpoint",
+            "default": ""
+          },
+          "platform_api_key": {
+            "type": "string",
+            "title": "Platform Api Key",
+            "default": ""
+          },
+          "platform_ssl_cert_pem": {
+            "type": "string",
+            "title": "Platform Ssl Cert Pem",
             "default": ""
           }
         },
@@ -23866,6 +27431,182 @@
         },
         "type": "object",
         "title": "RuntimeRegBody"
+      },
+      "SandboxProviderReportBody": {
+        "properties": {
+          "platform": {
+            "type": "string",
+            "title": "Platform",
+            "default": ""
+          },
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "default": ""
+          },
+          "api_key": {
+            "type": "string",
+            "title": "Api Key",
+            "default": ""
+          },
+          "ssl_cert": {
+            "type": "string",
+            "title": "Ssl Cert",
+            "default": ""
+          },
+          "device_name": {
+            "type": "string",
+            "title": "Device Name",
+            "default": ""
+          },
+          "templates": {
+            "items": {},
+            "type": "array",
+            "title": "Templates",
+            "default": []
+          },
+          "template_engines": {
+            "items": {},
+            "type": "array",
+            "title": "Template Engines",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "SandboxProviderReportBody",
+        "description": "「生成沙箱凭据」一键安装的 cloud_worker 启动上报体。\n\n对接效果与普通 worker 的 register 对称：沙箱 worker 启动时把\n平台端点、API key、SSL 证书、模板列表上报上来，服务端 UPSERT\nProvider + 登记模板——用户装完即见沙箱页有数据，无需手工配。"
+      },
+      "SandboxStatusBody": {
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "title": "Issue Id",
+            "default": ""
+          },
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "sandbox_id": {
+            "type": "string",
+            "title": "Sandbox Id",
+            "default": ""
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "default": ""
+          },
+          "state": {
+            "type": "string",
+            "title": "State",
+            "default": ""
+          },
+          "agent_installed": {
+            "type": "integer",
+            "title": "Agent Installed",
+            "default": 0
+          },
+          "template_id": {
+            "type": "string",
+            "title": "Template Id",
+            "default": ""
+          },
+          "template_name": {
+            "type": "string",
+            "title": "Template Name",
+            "default": ""
+          },
+          "engine_type": {
+            "type": "string",
+            "title": "Engine Type",
+            "default": ""
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "default": ""
+          },
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "SandboxStatusBody"
+      },
+      "SandboxTemplateBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "default": ""
+          },
+          "template_id": {
+            "type": "string",
+            "title": "Template Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "default": ""
+          },
+          "alias": {
+            "type": "string",
+            "title": "Alias",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "engines": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "title": "Engines",
+            "default": "[]"
+          },
+          "preinstalled": {
+            "type": "string",
+            "title": "Preinstalled",
+            "default": "{}"
+          },
+          "disk_size_mb": {
+            "type": "integer",
+            "title": "Disk Size Mb",
+            "default": 0
+          },
+          "enabled": {
+            "type": "integer",
+            "title": "Enabled",
+            "default": 1
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "template_id"
+        ],
+        "title": "SandboxTemplateBody",
+        "description": "沙箱模板创建/编辑 body。v3：加 provider_id，engines 废弃写空。\n\nengines 前端现为三态对象 {et: 'preinstalled'|'install'}（绑定走 bind-engine API），\n此字段接收但忽略（str|dict|list 皆可，防 422）。"
       },
       "SceneAdvancedOptionsRevealBody": {
         "properties": {
@@ -23951,6 +27692,18 @@
             "type": "array",
             "title": "Engine Runtime Ids",
             "default": []
+          },
+          "engine_runtime_uids": {
+            "items": {},
+            "type": "array",
+            "title": "Engine Runtime Uids",
+            "default": []
+          },
+          "engine_selector": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Engine Selector",
+            "default": {}
           }
         },
         "type": "object",
@@ -24381,6 +28134,33 @@
             "title": "Category Id",
             "default": 0
           },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
           "recommended_template": {
             "type": "string",
             "title": "Recommended Template",
@@ -24606,6 +28386,18 @@
             ],
             "title": "Engine Runtime Ids"
           },
+          "engine_runtime_uids": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine Runtime Uids"
+          },
           "enabled": {
             "anyOf": [
               {
@@ -24801,29 +28593,6 @@
         ],
         "title": "VerifyTokenBody"
       },
-      "WhitelistBody": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "title": "Type"
-          },
-          "value": {
-            "type": "string",
-            "title": "Value"
-          },
-          "remark": {
-            "type": "string",
-            "title": "Remark",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "type",
-          "value"
-        ],
-        "title": "WhitelistBody"
-      },
       "_IssueClarifyBody": {
         "properties": {
           "message": {
@@ -24916,6 +28685,141 @@
         "type": "object",
         "title": "_ReviewRejectBody"
       },
+      "src__domains__mgmt__admin__routes__ConfigBody": {
+        "properties": {
+          "gitcode_api_token": {
+            "type": "string",
+            "title": "Gitcode Api Token",
+            "default": ""
+          },
+          "gitcode_oauth_client_id": {
+            "type": "string",
+            "title": "Gitcode Oauth Client Id",
+            "default": ""
+          },
+          "gitcode_oauth_client_secret": {
+            "type": "string",
+            "title": "Gitcode Oauth Client Secret",
+            "default": ""
+          },
+          "github_bot_token": {
+            "type": "string",
+            "title": "Github Bot Token",
+            "default": ""
+          },
+          "github_bot_username": {
+            "type": "string",
+            "title": "Github Bot Username",
+            "default": ""
+          },
+          "github_oauth_client_id": {
+            "type": "string",
+            "title": "Github Oauth Client Id",
+            "default": ""
+          },
+          "github_oauth_client_secret": {
+            "type": "string",
+            "title": "Github Oauth Client Secret",
+            "default": ""
+          },
+          "gitee_oauth_client_id": {
+            "type": "string",
+            "title": "Gitee Oauth Client Id",
+            "default": ""
+          },
+          "gitee_oauth_client_secret": {
+            "type": "string",
+            "title": "Gitee Oauth Client Secret",
+            "default": ""
+          },
+          "huawei_oauth_client_id": {
+            "type": "string",
+            "title": "Huawei Oauth Client Id",
+            "default": ""
+          },
+          "huawei_oauth_client_secret": {
+            "type": "string",
+            "title": "Huawei Oauth Client Secret",
+            "default": ""
+          },
+          "bot_usernames": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Bot Usernames",
+            "default": []
+          },
+          "webhook_url": {
+            "type": "string",
+            "title": "Webhook Url",
+            "default": ""
+          },
+          "gitcode_webhook_token": {
+            "type": "string",
+            "title": "Gitcode Webhook Token",
+            "default": ""
+          },
+          "runtime_task_timeout": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Runtime Task Timeout",
+            "default": 0
+          },
+          "devstage_template_id": {
+            "type": "string",
+            "title": "Devstage Template Id",
+            "default": ""
+          },
+          "devstage_flavor_id": {
+            "type": "string",
+            "title": "Devstage Flavor Id",
+            "default": ""
+          },
+          "devstage_cores": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Devstage Cores",
+            "default": 0
+          },
+          "devstage_memory": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Devstage Memory",
+            "default": 0
+          },
+          "devstage_arch": {
+            "type": "string",
+            "title": "Devstage Arch",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ConfigBody"
+      },
+      "src__domains__mgmt__admin__routes__WhitelistBody": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "remark": {
+            "type": "string",
+            "title": "Remark",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "value"
+        ],
+        "title": "WhitelistBody"
+      },
       "src__domains__mgmt__routes__feedback__FeedbackBody": {
         "properties": {
           "category": {
@@ -24984,6 +28888,62 @@
         },
         "type": "object",
         "title": "StartBody"
+      },
+      "src__domains__mgmt__routes__sandbox_admin__ConfigBody": {
+        "properties": {
+          "sandbox_mode": {
+            "type": "string",
+            "title": "Sandbox Mode",
+            "default": "required"
+          },
+          "degrade_policy": {
+            "type": "string",
+            "title": "Degrade Policy",
+            "default": "compatible"
+          }
+        },
+        "type": "object",
+        "title": "ConfigBody",
+        "description": "沙箱配置 body。"
+      },
+      "src__domains__mgmt__routes__sandbox_admin__WhitelistBody": {
+        "properties": {
+          "backend_name": {
+            "type": "string",
+            "title": "Backend Name"
+          },
+          "domain": {
+            "type": "string",
+            "title": "Domain"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path_prefix": {
+            "type": "string",
+            "title": "Path Prefix",
+            "default": "*"
+          },
+          "scheme": {
+            "type": "string",
+            "title": "Scheme",
+            "default": "https"
+          },
+          "port": {
+            "type": "integer",
+            "title": "Port",
+            "default": 443
+          }
+        },
+        "type": "object",
+        "required": [
+          "backend_name",
+          "domain",
+          "method"
+        ],
+        "title": "WhitelistBody",
+        "description": "五维白名单规则 body。"
       },
       "src__domains__mgmt__routes__takeover__ProgressBody": {
         "properties": {
@@ -25131,29 +29091,6 @@
         },
         "type": "object",
         "title": "ProgressBody"
-      },
-      "FeedbackBody": {
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "title": "Seq"
-          },
-          "feedback_type": {
-            "type": "string",
-            "title": "Feedback Type",
-            "default": "create_issue"
-          },
-          "comment": {
-            "type": "string",
-            "title": "Comment",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "seq"
-        ],
-        "title": "FeedbackBody"
       }
     },
     "securitySchemes": {
@@ -25172,6 +29109,5 @@
         "name": "access_token"
       }
     }
-  },
-  "tags": []
+  }
 }

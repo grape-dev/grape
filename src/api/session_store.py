@@ -19,13 +19,25 @@ def get_agent_type_enable(agent_type: str) -> int:
     return 1
 
 
+def _session_row_read(repo_key: str, agent_type: str):
+    """Issue #868 (T10)：会话行读取——uid 版查询优先，旧库缺列降级 legacy 版（行尾补空 uid）。"""
+    try:
+        return rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+    except Exception:
+        try:
+            row = rt.read_one_any("devops_agent_session_row_legacy", (repo_key, agent_type))
+            return tuple(row) + ("",) if row is not None else None
+        except Exception:
+            return None
+
+
 def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
     """仓库级 Agent 是否启用：优先 devops_agent_session.enable，无会话回退 agent_type.enable。
 
     见 agent-enable-toggle-design.md §五 拦截语义。
     """
     try:
-        row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+        row = _session_row_read(repo_key, agent_type)
         if row and row[4] is not None:
             return bool(int(row[4]))
     except Exception:
@@ -42,12 +54,20 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     `issue_state` 仅作停写过渡期的兜底（存量未清理前的兼容）。
     """
     # 1. issue 单表（权威）
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    _num = _issue_num_or_ident(issue_id)
     if _num:
+        # 走 provider 通道（GSB）：同域 → Local 实例直接查；跨域且 GRAPE_PROVIDER_MODE=remote
+        # → Remote 实例打 /internal/issues/.../card（一次 HTTP hop，同机实测 +0.3~0.8ms）。
+        # 任何异常都回落到下面的 *_any 直连，迁移不引入新的失败模式。
+        try:
+            from src.kernel.gsb.provider import get_service as _get_service
+            _card = _get_service("runtime").get_issue_card(repo_key, _num)
+            if _card:
+                return _card
+        except Exception as _ge:  # noqa: BLE001
+            # 模块顶部已 import log，直接记；不要再套一层 try/except（那会多出一个静默 except，
+            # 棘轮会按口径漂移拦下）
+            log.debug(f"session_store.get_issue_stage: provider failed, fallback to _any: {_ge}")
         try:
             row = rt.read_one_any("issue_card_row", (repo_key, _num))
             if row:
@@ -85,10 +105,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
     - ensure_row=False：仅 UPDATE 已有行（默认，保持既有行为）。
     幂等：UPDATE 按 repo_key+issue_number，无行建档仅一次。
     """
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        return
+    _num = _issue_num_or_ident(issue_id)
     if not _num:
         return
     if not fields:
@@ -134,7 +151,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     _task_status = _STAGE_TO_TASK_STATUS.get(stage)
     if _task_status:
         try:
-            _issue_num = int(issue_id.lstrip("#"))
+            _issue_num = _issue_num_or_ident(issue_id)
             rt.exec_any("issue_status_sync", (_task_status, repo_key, _issue_num))
         except Exception as _e:
             log.warning(f"set_issue_stage: sync task.status failed: {_e}")
@@ -179,13 +196,14 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
     # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-        r = rt.read_one_any("issue_card_row", (repo_key, _num))
-        if r and r[5]:
-            return r[5], r[6] or 0
-    except Exception:
-        pass
+    _num = _issue_num_or_ident(issue_id)
+    if _num:
+        try:
+            r = rt.read_one_any("issue_card_row", (repo_key, _num))
+            if r and r[5]:
+                return r[5], r[6] or 0
+        except Exception:
+            pass
     # Issue #415: Issue 级场景为空 → 回退仓库默认场景（managed_repos.dev_scene），
     # 与 _resolve_scene_id / repogit / prompt_builder 的仓库默认场景语义一致；
     # 仓库未配置默认场景时保持 ("", 0)，由调用方决定走智能推荐。
@@ -221,13 +239,14 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-        r = rt.read_one_any("issue_card_row", (repo_key, _num))
-        if r and r[5]:
-            return r[5], r[6] or 0
-    except Exception:
-        pass
+    _num = _issue_num_or_ident(issue_id)
+    if _num:
+        try:
+            r = rt.read_one_any("issue_card_row", (repo_key, _num))
+            if r and r[5]:
+                return r[5], r[6] or 0
+        except Exception:
+            pass
     return "", 0
 
 
@@ -264,11 +283,7 @@ def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
 
 def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
     """读取 Issue 是否允许 VOD 覆盖场景。默认 False。Phase C3：读 issue 单表。"""
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    _num = _issue_num_or_ident(issue_id)
     if _num:
         try:
             row = rt.read_one_any("issue_card_row", (repo_key, _num))
@@ -324,13 +339,15 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
 
     返回最新在前，含绑定要素 / 生命周期状态 / 结果三分支 / 失败原因。
     """
-    rows = rt.read_all_any("issue_release_children", (repo_key, int(parent_issue_number)))
+    # Issue #3055：父单号同样走内核原生形态（数字→int，ident→str）
+    _parent = _issue_num_or_ident(parent_issue_number)
+    rows = rt.read_all_any("issue_release_children", (repo_key, _parent))
     out = []
     for r in rows:
         out.append({
             "issue_id": r[0],
             "sub_issue_number": r[1],
-            "parent_issue_number": int(parent_issue_number),
+            "parent_issue_number": _parent,
             "title": r[2] or "",
             "status": r[3] or "active",
             "stage": r[4] or "vod",
@@ -347,6 +364,21 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
     return out
 
 
+def _session_engine_uid_rt(runtime_id) -> str:
+    """Issue #868 (T10) 双写：runtime_id → engine_uid（任意拓扑具名查询；行不存在/未迁移返回 ''）。"""
+    try:
+        rid = int(runtime_id or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    if not rid:
+        return ""
+    try:
+        row = rt.read_one_any("agent_runtime_engine_uid_by_id", (rid,))
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def get_or_create_agent_session(repo_key: str, agent_type: str,
                                  backend: str = "", runtime_id: int = 0) -> dict:
     """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立（backend 无字面默认，见 engine-selection-design.md v2）。
@@ -354,12 +386,14 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
     Issue #400：显式传入 runtime_id（会话引擎指针）时，新建会话直接采用该指针，
     不再走 pick_engine / 按名解析——保证"会话引擎指针 == 实际执行引擎"
     （与 guard_issue_session_pointer 的指针语义对齐）。未传（0）时保持既有行为。
+
+    Issue #868 (T10)：新建/更新会话双写 engine_uid（runtime_id 的 uid 镜像）；
+    读取返回 engine_uid（uid 优先、runtime_id 兜底由消费方解析）；
+    旧库缺列（迁移未跑）自动降级 legacy SQL，不报错。
     """
     row = None
-    try:
-        row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
-    except Exception:
-        row = None
+    # Issue #868 (T10)：uid 版查询优先；旧库缺列降级 legacy 查询（行尾补空 uid 占位）
+    row = _session_row_read(repo_key, agent_type)
 
     if row:
         return {
@@ -368,6 +402,8 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
             "status": row[2] or "idle",
             "last_active_at": row[3] or "",
             "enable": bool(row[4]) if row[4] is not None else True,
+            # Issue #868 (T10)：engine_uid 读取轨道（named query 已扩第 6 列）
+            "engine_uid": (row[5] or "") if len(row) > 5 else "",
             "new": False,
             "repo_key": repo_key,
             "agent_type": agent_type,
@@ -384,18 +420,26 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
             from src.domains.mgmt.user.db import get_runtime_id_by_name, ensure_default_backend
             runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
     _enable = get_agent_type_enable(agent_type)
+    # Issue #868 (T10)：新建会话双写 engine_uid（runtime_id 的 uid 镜像，任意拓扑查询）
+    _sess_uid = _session_engine_uid_rt(runtime_id)
+    _uid_written: list = []
     try:
         rt.ensure_agent_session(sid, repo_key, agent_type, runtime_id, status="idle",
-                                enable=_enable, subscribe_events="[]")
+                                enable=_enable, subscribe_events="[]", engine_uid=_sess_uid,
+                                uid_written=_uid_written)
     except Exception as e:
         log.warning(f"Failed to create agent session: {e}")
+        # 旧库缺列降级：engine_uid 未落库则按空返回（与 legacy 读路径口径一致）
+        _ret_uid = _sess_uid if (_uid_written and _uid_written[0]) else ""
         return {"id": sid, "runtime_session_id": "", "status": "idle",
-                "last_active_at": now, "enable": bool(_enable), "new": True,
-                "repo_key": repo_key, "agent_type": agent_type}
+                "last_active_at": now, "enable": bool(_enable), "engine_uid": _ret_uid,
+                "new": True, "repo_key": repo_key, "agent_type": agent_type}
 
+    # 旧库缺列降级：engine_uid 未落库则按空返回（与 legacy 读路径口径一致）
+    _ret_uid_ok = _sess_uid if (_uid_written and _uid_written[0]) else ""
     return {"id": sid, "runtime_session_id": "", "status": "idle",
-            "last_active_at": now, "enable": bool(_enable), "new": True,
-            "repo_key": repo_key, "agent_type": agent_type}
+            "last_active_at": now, "enable": bool(_enable), "engine_uid": _ret_uid_ok,
+            "new": True, "repo_key": repo_key, "agent_type": agent_type}
 
 
 def upsert_agent_session(*, repo_key: str, agent_type: str,
@@ -414,9 +458,10 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     A2 收尾：IM 凭证不再落 devops_agent_session（im_* 三列改读 grape_t_channel_installation）。
     repo_gitcode_token 同样 None=保留（R25.9 回声治理：session 行只允许存用户显式配置的
     agent 专属 token，低级别 token 永不回填；清空走 unbind 的专门 SQL 路径）。
+    Issue #868 (T10)：runtime_id 更新时同步镜像 engine_uid（双写；旧库缺列降级跳过）。
     返回会话 id。
     """
-    row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+    row = _session_row_read(repo_key, agent_type)
     if row:
         sid = row[0]
         fields: dict = {"runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
@@ -427,6 +472,17 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
             fields["enable"] = enable
         if subscribe_events is not None:
             fields["subscribe_events"] = subscribe_events
+        # Issue #868 (T10)：uid 轨道镜像跟随 runtime_id（双写；旧库缺列降级跳过）
+        _mirror_uid = _session_engine_uid_rt(runtime_id)
+        if _mirror_uid:
+            rt.update_agent_session_fields(
+                sid, {k: v for k, v in fields.items()})
+            try:
+                rt.update_agent_session_fields(sid, {"engine_uid": _mirror_uid},
+                                               touch_last_active=False)
+            except Exception:
+                pass  # 旧库缺列降级：uid 镜像跳过，不影响主字段更新
+            return sid
         rt.update_agent_session_fields(sid, fields)
         return sid
     sid = str(uuid.uuid4())
@@ -434,7 +490,8 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     _sub = subscribe_events if subscribe_events is not None else "[]"
     rt.ensure_agent_session(sid, repo_key, agent_type, runtime_id, skill=skill,
                             skill_id=skill_id, repo_gitcode_token=repo_gitcode_token or "",
-                            status=status, enable=_enable, subscribe_events=_sub)
+                            status=status, enable=_enable, subscribe_events=_sub,
+                            engine_uid=_session_engine_uid_rt(runtime_id))
     return sid
 
 
@@ -684,7 +741,9 @@ def _issue_num_or_ident(issue_id) -> "int | str | None":
     _raw = str(issue_id or "").lstrip("#")
     if not _raw:
         return None
-    return int(_raw) if _raw.isdigit() else _raw
+    # Issue #3055：判定/强转统一走内核唯一入口（数字→int，ident→str）
+    from src.kernel.issue_ident import native_issue_number
+    return native_issue_number(_raw)
 
 
 def _scene_binding_active(repo_key: str, scene_id: str) -> bool:

@@ -119,6 +119,72 @@ def derive_knowledge_description(scope: str, agent_type: str = "",
     return ""
 
 # ===== 内存缓存（hash 比对——不用 TTL，全实例立即一致） =====
+_KNOWLEDGE_STATS = {
+    "cache_hits": 0, "cache_misses": 0, "cache_evictions": 0,
+    "truncated_files": 0, "truncated_batches": 0,
+}
+
+
+def knowledge_cache_stats() -> dict:
+    """Cache/truncation counters (Issue #2132 B2/B3, exposed via /health/realtime)."""
+    with _knowledge_cache_lock:
+        st = dict(_KNOWLEDGE_STATS)
+        st["cache_entries"] = len(_knowledge_cache)
+    st["cache_max"] = KNOWLEDGE_CACHE_MAX
+    st["max_files"] = knowledge_entry_limit()
+    st["read_concurrency"] = KNOWLEDGE_READ_CONCURRENCY
+    return st
+
+
+def knowledge_entry_limit(repo_key: str = "") -> int:
+    """Per-collection entry limit (B2, env KNOWLEDGE_MAX_FILES; per-repo override via
+    configs/knowledge-limits.json {"<repo_key>": N}). Wide default 1000."""
+    try:
+        limit = int(os.environ.get("KNOWLEDGE_MAX_FILES", "1000"))
+    except (TypeError, ValueError):
+        limit = 1000
+    if limit <= 0:
+        limit = 1000
+    if repo_key:
+        try:
+            import json as _json
+            _cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                "configs", "knowledge-limits.json")
+            with open(_cfg, encoding="utf-8") as _f:
+                _per = _json.load(_f)
+            _repo_v = int(_per.get(repo_key, 0) or 0)
+            if _repo_v > 0:
+                limit = _repo_v
+        except Exception:
+            pass
+    return limit
+
+
+KNOWLEDGE_READ_CONCURRENCY = max(1, int(os.environ.get("KNOWLEDGE_READ_CONCURRENCY", "4") or 4))
+
+
+def record_knowledge_truncation(dropped: int, repo_key: str = "") -> None:
+    """B2 observable truncation: count dropped files and batches, warn once per batch."""
+    if dropped <= 0:
+        return
+    with _knowledge_cache_lock:
+        _KNOWLEDGE_STATS["truncated_files"] += dropped
+        _KNOWLEDGE_STATS["truncated_batches"] += 1
+    log.warning(f"[knowledge] entry limit applied: dropped {dropped} file(s) "
+                f"(limit={knowledge_entry_limit(repo_key)}, see knowledge_cache_stats())")
+
+
+def truncate_entries(files: dict, repo_key: str = "") -> dict:
+    """B2 defensive cap: keep the first limit entries in insertion order (same
+    newest-first contract as the SQL id DESC ordering), truncation is counted."""
+    limit = knowledge_entry_limit(repo_key)
+    if limit and len(files) > limit:
+        kept = list(files.keys())[:limit]
+        record_knowledge_truncation(len(files) - len(kept))
+        return {k: files[k] for k in kept}
+    return files
+
+
 _knowledge_cache: dict[str, tuple[str, str]] = {}  # storage_key -> (content, content_hash)
 
 _knowledge_cache_lock = threading.Lock()
@@ -140,9 +206,13 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
         cached = _knowledge_cache.pop(storage_key, None)
         if cached and cached[1] == db_hash:
             _knowledge_cache[storage_key] = cached  # 重新插入到末尾（LRU）
+            _KNOWLEDGE_STATS["cache_hits"] += 1  # in-lock
             return cached[0]
     # 缓存 miss 或 hash 不一致 → 从存储拉
-    from src.domains.runtime.storage import get_storage
+    with _knowledge_cache_lock:
+        _KNOWLEDGE_STATS["cache_misses"] += 1
+    # A8：跨域读取经 runtime 公共门面（不直接触达 runtime.storage 内部模块）
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage is None:
         return None
@@ -158,6 +228,7 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
         _knowledge_cache[storage_key] = (content, db_hash)
         # LRU 淘汰：超过最大条数时淘汰最旧的
         if len(_knowledge_cache) > KNOWLEDGE_CACHE_MAX:
+            _KNOWLEDGE_STATS["cache_evictions"] += 1
             oldest_key = next(iter(_knowledge_cache))
             _knowledge_cache.pop(oldest_key, None)
     return content
@@ -174,7 +245,7 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
                 content = read_with_cache(obs_key, content_hash)
                 if content is not None:
                     return content
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 data = storage.read_bytes(obs_key)
@@ -485,7 +556,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     obs_key = ""
     content_hash = ""
     try:
-        from src.domains.runtime.storage import get_storage
+        from src.domains.runtime.public import get_storage
         storage = get_storage()
         if storage is not None:
             obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
@@ -724,6 +795,8 @@ def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 
     files = {}
     try:
         with db_lock:
+            # B2：上限在 SQL 侧生效（ORDER BY k.id DESC 最新优先 + LIMIT），
+            # 截断发生在下载/读取之前，OBS 读取量随上限收敛。
             rows = db.cursor().execute(
                 "SELECT DISTINCT k.id, k.obs_key, k.file_path, k.content_hash "
                 "FROM scene_knowledge_ref r "
@@ -735,8 +808,10 @@ def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 
                 "AND k.repo_key = ? "
                 "AND k.source = 'agent' "
                 "AND k.status = 'accepted' "
-                "AND k.archived = 0",
-                (scene_id, agent_type, issue_num, repo_key)
+                "AND k.archived = 0 "
+                "ORDER BY k.id DESC "
+                "LIMIT ?",
+                (scene_id, agent_type, issue_num, repo_key, knowledge_entry_limit(repo_key))
             ).fetchall()
 
         for kid, obs_key, file_path, content_hash in rows:
@@ -745,6 +820,7 @@ def agent_knowledge_files(repo_key: str, agent_type: str = "", issue_num: int = 
             content = read_entry_content(repo_key, obs_key or "", file_path or "", content_hash or "")
             if content:
                 files[file_path or ""] = {"content": content, "obs_key": obs_key or ""}
+        files = truncate_entries(files, repo_key)
     except Exception:
         # 向后兼容：ref 表不存在时回退到 read_knowledge 三级 scope（只查 agent 知识）
         for scope, content in read_knowledge(repo_key, agent_type=agent_type, issue_num=issue_num).items():
@@ -818,6 +894,7 @@ def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
     files = {}
     try:
         with db_lock:
+            # B2：上限在 SQL 侧生效（与 agent 侧同口径：id DESC + LIMIT）
             rows = db.cursor().execute(
                 "SELECT DISTINCT k.id, k.obs_key, k.file_path, k.content_hash "
                 "FROM scene_knowledge_ref r "
@@ -829,8 +906,10 @@ def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
                 "AND k.repo_key = ? "
                 "AND k.source = 'manual' "
                 "AND k.status = 'accepted' "
-                "AND k.archived = 0",
-                (scene_id, agent_type, issue_num, repo_key)
+                "AND k.archived = 0 "
+                "ORDER BY k.id DESC "
+                "LIMIT ?",
+                (scene_id, agent_type, issue_num, repo_key, knowledge_entry_limit(repo_key))
             ).fetchall()
         for kid, obs_key, file_path, content_hash in rows:
             if _is_credential_file(file_path):
@@ -849,6 +928,7 @@ def member_files_pi(repo_key: str, agent_type: str = "", issue_num: int = 0, sce
                 if rel.startswith("agent/"):
                     rel = "member/" + rel[len("agent/"):]
                 files[rel] = {"content": content, "obs_key": obs_key or ""}
+        files = truncate_entries(files, repo_key)
     except Exception:
         pass  # ref 表异常时 member 不注入（符合"没关联不注入"设计）
     return files
@@ -865,7 +945,7 @@ async def knowledge_sync_loop():
     """
     import asyncio, hashlib, time
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     from src.domains.mgmt.user.db import get_meta_value, set_meta_value
 
     storage = get_storage()
@@ -1014,7 +1094,7 @@ def _sync_baseline_files():
     """
     import hashlib as _hl
     from src.kernel.repo_key import parse_repo_key
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     storage = get_storage()
     if not storage:

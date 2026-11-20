@@ -13,7 +13,9 @@ import urllib.request as _ur
 import urllib.error as _ue
 import urllib.parse as _up
 
-from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+# 上游异常类型走 owner 域 public
+from src.domains.mgmt import public as _mgmt_pub
+UpstreamAPIError = _mgmt_pub.UpstreamAPIError
 
 API_BASE = "https://gitee.com/api/v5"
 
@@ -66,7 +68,7 @@ def request(method, url, token, body=None):
 
 def bot_token(repo_key):
     # S82：rc 单表唯一权威（bot 列→全局→用户降级，跳 session 级，平台通用）
-    from src.domains.mgmt.user.db import get_repo_bot_token
+    from src.domains.mgmt.public import get_repo_bot_token
     return get_repo_bot_token(repo_key=repo_key) or ""
 
 

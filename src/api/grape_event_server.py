@@ -10,6 +10,10 @@ import sys, os
 # Issue #455：主服务要求 Python >= 3.10。
 from src.api.version_check import ensure_python_version
 ensure_python_version()
+# 进程角色默认值（2026-11-16 实弹）：表归属守卫按角色判定 owner，缺角色会把本域 DDL
+# 整批当「别家域」跳过（平台四表 / meta 因此不建，PAT 关系写不进）。入口写死默认值，
+# 自定义启动方式未设 env 时也不会静默丢表。
+os.environ.setdefault("GRAPE_PROCESS_ROLE", "runtime")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -28,6 +32,17 @@ async def lifespan(app: FastAPI):
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
     from src.kernel.db_registry import assert_role_database
     assert_role_database("event")
+
+    # kernel 端口绑定：GSB 注册/心跳经 pipeline 端口调契约域原语，未绑定会抛
+    # PortNotBound（现象：GSB register failed: service=xxx err=PortNotBound）。
+    # mgmt 在 db_setup.init_database() 里绑；本 server 不走那条路径，必须自己绑，
+    # 且要在 GSB startup 之前。
+    try:
+        from src.api import contracts_wiring as _cw
+        _cw.bind_all()
+    except Exception as _bw_e:
+        log.warning(f"kernel ports bind failed（GSB 注册可能失败）: {_bw_e}")
+
 
     # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 event 启动）
     _gsb = getattr(app.state, "gsb", None)

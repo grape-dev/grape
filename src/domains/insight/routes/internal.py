@@ -35,6 +35,14 @@ async def log_latency(body: dict) -> dict:
     return _get_local("insight").log_api_latency(body)
 
 
+@router.post("/llm-usage/aggregate", operation_id="insight_llm_usage_aggregate", include_in_schema=False)
+async def aggregate_llm_usage(body: dict) -> dict:
+    """供 InsightServiceRemote.aggregate_llm_usage() 调用（engine_ids 走 body）。"""
+    from src.domains.insight.public import aggregate_llm_usage as _agg
+    rows = [list(r) for r in _agg([int(x) for x in (body.get("engine_ids") or []) if x])]
+    return {"rows": rows}
+
+
 @router.get("/metrics/{repo_key}", operation_id="insight_metrics_get", include_in_schema=False)
 async def get_metrics(repo_key: str, window: str = "1h") -> list:
     """供 InsightServiceRemote.query_metrics() 调用。"""

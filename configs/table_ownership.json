@@ -1,7 +1,7 @@
 {
-  "_comment": "表归属清单：唯一权威 = docs/weekly-11/table-owner.tsv（P0 冻结判决）；本文件由它派生，DDL 守卫据此阻止进程创建'别家'的表；多份基表的裁决与证据记录在 configs/table_ownership_notes.md",
+  "_comment": "表归属清单 —— 唯一权威。此文件是归属判断的唯一来源：运行期与检查器都读它（src/kernel/table_ownership.py::owner_map、scripts/check-arch.py 的 R8、scripts/foreign_table_refs.py、scripts/scan_pgconn.py）。原 docs/weekly-11/table-owner.tsv 已并入本文件并删除 —— 两份清单曾并行维护，漂移 19 张（本文件有、tsv 无），其中 grape_t_oauth_channels / devops_agent_runtime_binding / grape_t_category_dict 三张是生产代码正在使用的；因为 tsv 里查不到归属，跨域引用检查对它们无法判定、给出的是假绿灯。改归属只改这里，不要再引入第二份清单。",
   "schema_version": 1,
-  "generated_from": "docs/weekly-11/table-owner.tsv (P0 frozen, 101 unique base tables) + configs/table_ownership_notes.md adjudication",
+  "generated_from": "configs/table_ownership.json (P0 frozen, 101 unique base tables) + configs/table_ownership_notes.md adjudication",
   "tables": {
     "admin_accounts": "mgmt",
     "admin_agent_alert": "mgmt",
@@ -13,7 +13,6 @@
     "admin_permission_menus": "mgmt",
     "admin_role_menu_rel": "mgmt",
     "admin_roles": "mgmt",
-    "admin_user_role_rel": "mgmt",
     "admin_users": "mgmt",
     "agent_runtimes": "runtime",
     "agent_shared_knowledge": "mgmt",
@@ -32,7 +31,7 @@
     "chat_agent_session": "runtime",
     "chat_conversations": "runtime",
     "chat_messages": "runtime",
-    "cloud_sandboxes": "mgmt",
+    "grape_t_cloud_sandboxes": "runtime",
     "community_comments": "mgmt",
     "community_post_likes": "mgmt",
     "community_posts": "mgmt",
@@ -40,12 +39,12 @@
     "devops_agent_session": "runtime",
     "devops_pipeline_scene": "mgmt",
     "distributed_locks": "runtime",
-    "egress_admin_exception": "mgmt",
-    "egress_admin_policy": "mgmt",
+    "grape_t_egress_admin_exception": "mgmt",
+    "grape_t_egress_admin_policy": "mgmt",
     "engine_capabilities": "runtime",
-    "engine_sandbox_config": "mgmt",
-    "engine_sandbox_paths": "mgmt",
-    "engine_sandbox_whitelist": "mgmt",
+    "grape_t_engine_sandbox_config": "mgmt",
+    "grape_t_engine_sandbox_paths": "mgmt",
+    "grape_t_engine_sandbox_whitelist": "mgmt",
     "event_action_filter": "mgmt",
     "event_active_guard": "runtime",
     "event_route_config": "mgmt",
@@ -65,15 +64,19 @@
     "grape_t_channel_installation": "mgmt",
     "grape_t_channel_lease": "mgmt",
     "grape_t_channel_outbound_card": "mgmt",
+    "grape_t_channel_repo_link": "mgmt",
     "grape_t_channel_sender_identity": "mgmt",
     "grape_t_credential_reveal_log": "mgmt",
     "grape_t_credential_usage_log": "runtime",
     "grape_t_engine_lifecycle_audit": "runtime",
     "grape_t_merge_gate_log": "insight",
+    "grape_t_oauth_channels": "mgmt",
     "grape_t_patrol_findings": "mgmt",
     "grape_t_repo_credentials": "insight",
+    "grape_t_repo_platforms": "mgmt",
     "grape_t_schema_migrations": "mgmt",
     "grape_t_system_credentials": "runtime",
+    "grape_t_user_repo_platform_link": "mgmt",
     "gsb_service_registry": "mgmt",
     "issue": "runtime",
     "issue_agent_session": "runtime",
@@ -102,9 +105,8 @@
     "repo_platform_tokens": "mgmt",
     "runtime_credentials": "runtime",
     "runtime_health_scores": "runtime",
-    "sandbox_provider_config": "mgmt",
-    "sandbox_templates": "mgmt",
-    "sandbox_whitelist": "mgmt",
+    "grape_t_sandbox_provider_config": "mgmt",
+    "grape_t_sandbox_templates": "mgmt",
     "scene_category": "runtime",
     "scene_engine_detach_log": "runtime",
     "scene_knowledge_ref": "mgmt",
@@ -118,19 +120,31 @@
     "skill_likes": "mgmt",
     "takeover_sessions": "runtime",
     "task_messages": "runtime",
-    "task_proxy_tokens": "mgmt",
-    "template_usage": "mgmt",
+    "grape_t_task_proxy_tokens": "mgmt",
     "unified_user_mapping": "mgmt",
     "uploaded_files": "mgmt",
     "user_accounts": "mgmt",
     "user_credentials": "mgmt",
     "user_feedback": "mgmt",
-    "user_llm_credentials": "mgmt",
+    "grape_t_user_llm_credentials": "mgmt",
     "user_repos": "mgmt",
     "user_vm_repos": "mgmt",
     "user_vms": "mgmt",
     "verification_codes": "mgmt",
-    "vod_conversations": "runtime"
+    "vod_conversations": "runtime",
+    "grape_t_engine_template_binding": "mgmt",
+    "grape_t_engine_sandbox_toggle": "mgmt",
+    "grape_t_repo_llm_credentials": "mgmt",
+    "grape_t_category_dict": "mgmt",
+    "grape_t_external_identity_tombstones": "mgmt",
+    "backend_agents": "runtime",
+    "grape_t_guard_check": "insight",
+    "grape_t_guard_finding": "insight",
+    "gsb_provider_route": "mgmt",
+    "devops_pipeline_scene_uid_backup_1208": "mgmt",
+    "grape_t_skill_version": "runtime",
+    "grape_t_skill_file": "runtime",
+    "grape_t_skill_comment": "runtime"
   },
   "views": {
     "admin_accounts": [
@@ -265,9 +279,9 @@
       "insight",
       "mgmt"
     ],
-    "cloud_sandboxes": [
+    "grape_t_cloud_sandboxes": [
       "insight",
-      "runtime"
+      "mgmt"
     ],
     "community_comments": [
       "insight",
@@ -301,11 +315,11 @@
       "insight",
       "mgmt"
     ],
-    "egress_admin_exception": [
+    "grape_t_egress_admin_exception": [
       "insight",
       "runtime"
     ],
-    "egress_admin_policy": [
+    "grape_t_egress_admin_policy": [
       "insight",
       "runtime"
     ],
@@ -313,15 +327,15 @@
       "insight",
       "mgmt"
     ],
-    "engine_sandbox_config": [
+    "grape_t_engine_sandbox_config": [
       "insight",
       "runtime"
     ],
-    "engine_sandbox_paths": [
+    "grape_t_engine_sandbox_paths": [
       "insight",
       "runtime"
     ],
-    "engine_sandbox_whitelist": [
+    "grape_t_engine_sandbox_whitelist": [
       "insight",
       "runtime"
     ],
@@ -404,10 +418,10 @@
       "insight",
       "mgmt"
     ],
-    "grape_t_schema_migrations": [
-      "insight",
+    "grape_t_repo_platforms": [
       "runtime"
     ],
+    "_note_schema_migrations": "grape_t_schema_migrations 在 runtime/insight 是**本域基表**（per-domain ledger 例外），不是指向 mgmt 的视图：见 db_setup.run_domain_migrations()；切勿再按 views 段重建视图（同名视图会挡住 CREATE TABLE IF NOT EXISTS，该域迁移一条都跑不了）",
     "grape_t_system_credentials": [
       "mgmt"
     ],
@@ -523,11 +537,11 @@
       "insight",
       "mgmt"
     ],
-    "sandbox_provider_config": [
+    "grape_t_sandbox_provider_config": [
       "insight",
       "runtime"
     ],
-    "sandbox_templates": [
+    "grape_t_sandbox_templates": [
       "insight",
       "runtime"
     ],
@@ -583,7 +597,7 @@
       "insight",
       "mgmt"
     ],
-    "task_proxy_tokens": [
+    "grape_t_task_proxy_tokens": [
       "insight",
       "runtime"
     ],
@@ -615,7 +629,7 @@
       "insight",
       "runtime"
     ],
-    "user_llm_credentials": [
+    "grape_t_user_llm_credentials": [
       "insight",
       "runtime"
     ],
@@ -638,10 +652,22 @@
     "vod_conversations": [
       "insight",
       "mgmt"
+    ],
+    "grape_t_engine_template_binding": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_engine_sandbox_toggle": [
+      "insight",
+      "runtime"
+    ],
+    "grape_t_repo_llm_credentials": [
+      "insight",
+      "runtime"
     ]
   },
   "_not_in_current_schema": {
-    "_comment": "以下名字只出现在旧库 grape_dev_mgmt / 打包脚本的种子表清单里，docs/weekly-11/table-owner.tsv（权威）与当前代码均无它们：5 张是 2026-08-17 的历史备份快照，flyway_schema_history 是 Java 迁移遗留，credential_reveal_log 是 grape_t_credential_reveal_log 的旧名重复登记。2026-11-15 从 tables 里移除，避免三库缺口检查把它们报成『缺表』。",
+    "_comment": "以下名字【不算在用】，归属检查与三库缺口检查都跳过它们。两类来源：① 只出现在旧库 grape_dev_mgmt / 打包脚本的种子清单里，当前代码与 schema 都没有（5 张 2026-08-17 的历史备份快照、flyway_schema_history、credential_reveal_log 的旧名重复登记）；② 库里有表、但 src/ 与 scripts/ 全仓零引用（admin_user_role_rel / sandbox_whitelist / template_usage，2026-11-18 从 tables 段移入）。第二类如需恢复使用，把名字移回 tables 段并补上归属消费方即可。",
     "tables": {
       "credential_reveal_log": "mgmt",
       "backup_agent_runtimes_revoked_20260817": "mgmt",
@@ -649,7 +675,36 @@
       "backup_devops_agent_runtime_binding_20260827_234600": "mgmt",
       "backup_devops_agent_session_20260817": "mgmt",
       "backup_runtime_credentials_revoked_20260817": "mgmt",
-      "flyway_schema_history": "mgmt"
+      "flyway_schema_history": "mgmt",
+      "admin_user_role_rel": "mgmt",
+      "sandbox_whitelist": "mgmt",
+      "template_usage": "mgmt"
+    }
+  },
+  "_per_domain_tables": {
+    "_comment": "以下名字在每个域库里都有一份【本域自建】的表，不属于跨域引用，归属检查与跨域扫描都应跳过它们。grape_t_schema_migrations 是每域迁移台账（见 db_setup.run_domain_migrations）；grape_t_xwrite_log 是每域自己的跨域写审计日志（按库分片，不互相读）。",
+    "tables": [
+      "grape_t_schema_migrations",
+      "grape_t_xwrite_log"
+    ]
+  },
+  "_provenance": {
+    "_comment": "「库上有表、本仓代码零引用」的表为什么仍留在 tables 段 —— 逐条给出外部来源证据。判据不是「本仓 grep 命中」，而是「是否仍在被活跃写入」：零引用但持续写入说明写入方在本仓之外，移入 _not_in_current_schema 会让归属检查放过真实的跨域引用。",
+    "tables": {
+      "grape_t_guard_check": {
+        "owner": "insight",
+        "writer": "外部巡检守护（不在本仓代码内），按角色巡检进程/端口/健康码/库表一致性",
+        "evidence": "grape_stage_insight 实存 1412 行；checked_at 2026-11-17T11:18:38 ~ 2026-11-18T17:32:29（核对时刻 2 分钟前仍有写入）",
+        "columns_prove_runtime": "role/unit_active/unit_restarts/pid/port_listening/health_code/db_name/expected_tables/actual_tables/missing_tables/foreign_tables",
+        "decision": "保留在 tables 段：活跃写入、且巡检对象就是三库拓扑本身，属运行时观测面"
+      },
+      "grape_t_guard_finding": {
+        "owner": "insight",
+        "writer": "同上巡检守护的告警侧",
+        "evidence": "grape_stage_insight 实存 2621 行；checked_at 同区间，最新 2026-11-18T17:32:29",
+        "columns_prove_runtime": "kind/scope/severity/detail/metric_value",
+        "decision": "保留在 tables 段，理由同上"
+      }
     }
   }
 }

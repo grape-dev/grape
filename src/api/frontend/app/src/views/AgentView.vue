@@ -7,13 +7,9 @@
         <h2>{{ typeDisplay }}</h2>
         <div class="ag__desc">{{ typeDesc }}</div>
       </div>
-      <div class="ag__engine">
-        <template v-if="engineText">
-          <span v-if="engineDot" class="ag__engine-dot" :style="{ background: engineDot }"></span>
-          {{ t('agents.engine.label', { text: engineText }) }}
-        </template>
-        <span v-else class="ag__engine-none">{{ t('agents.engine.no_engine') }}</span>
-      </div>
+      <!-- 2026-11-19：头卡不再挂引擎 chip。它展示的是「该 agent 会话最近绑定的引擎」
+           （devops_agent_session → agent_runtimes），多仓库共用同一 agent 时会显示
+           别处会话留下的引擎，容易误读；引擎绑定/健康在「引擎」页与「事件」页各有完整入口。 -->
     </div>
 
     <!-- VOD IM 已绑定卡片（Issue #294） -->
@@ -214,21 +210,6 @@ const running = computed(function () {
 const totalEvents = computed(function () {
   return m.value.total_events || 0
 })
-const engineText = computed(function () {
-  return (
-    props.data.backend ||
-    (props.data.backends && props.data.backends.length ? props.data.backends.join(', ') : '')
-  )
-})
-const engineDot = computed(function () {
-  const dots = { opencode: '#6ea8fe', hermes: '#a78bfa', codearts: '#fbbf24', codex: '#34d399' }
-  const l = (engineText.value || '').toLowerCase()
-  if (l.includes('hermes')) return dots.hermes
-  if (l.includes('opencode')) return dots.opencode
-  if (l.includes('codearts')) return dots.codearts
-  if (l.includes('codex')) return dots.codex
-  return ''
-})
 const highlightId = computed(function () {
   return props.data.highlight_issue_id || ''
 })
@@ -400,25 +381,6 @@ onMounted(function () {
 .ag__desc {
   font-size: var(--f-caption);
   color: var(--c-text-2);
-}
-.ag__engine {
-  font-size: var(--f-caption);
-  color: var(--c-text-3);
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-.ag__engine-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.ag__engine-none {
-  color: var(--c-danger);
-  font-weight: 700;
 }
 .ag__imcard {
   background: var(--c-bg-elevated);

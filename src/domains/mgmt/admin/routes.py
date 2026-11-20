@@ -224,7 +224,7 @@ def verify_platform_token(body: VerifyTokenBody, admin: dict = Depends(require_a
     # D88/S115：卡派生判定（消基线二元白名单——D71 登记收口项）。下游
     # config_store.verify_token D30/S50 已卡驱动（任何已配平台可用），白名单
     # 是入口与下游能力脱节的最后一米。未知平台照旧 400 INVALID_PROVIDER。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if get_platform_card(body.provider) is None:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
     if not body.token:
@@ -608,16 +608,15 @@ def admin_obs_alert_rules(admin: dict = Depends(require_admin)):
 
     全局视图：**不按仓库过滤**（平台运营视角）。用户面只有 `level='user'` 的一部分。
     """
-    from src.domains.insight.observability import alerts as alerts_mod
-    from src.domains.insight.observability import alert_policy as policy
+    from src.domains.insight import public as _obs_public
     try:
-        rules = alerts_mod.list_rules()
+        rules = _obs_public.list_alert_rules()
     except Exception as e:
         log.warning(f"admin obs alert rules failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "load rules failed"})
     return {"rules": rules, "count": len(rules),
-            "severities": list(policy.SEVERITIES),
-            "aggregate_modes": list(policy.AGG_MODES),
+            "severities": _obs_public.alert_severities(),
+            "aggregate_modes": _obs_public.alert_aggregate_modes(),
             "global": True}
 
 
@@ -629,11 +628,11 @@ def admin_obs_alert_policy_put(rule_id: int, body: AlertPolicyBody,
 
     这是管理台 T-A1/T-A2 的唯一写入口——校验口径只在这里（不在管理台重复实现）。
     """
-    from src.domains.insight.observability import alerts as alerts_mod
+    from src.domains.insight import public as _obs_public
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     if not payload:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "no policy field"})
-    res = alerts_mod.set_rule_policy(rule_id, payload)
+    res = _obs_public.set_alert_rule_policy(rule_id, payload)
     if not res.get("ok"):
         not_found = res.get("errors") == ["rule not found"]
         raise HTTPException(status_code=404 if not_found else 400,
@@ -651,8 +650,8 @@ def admin_obs_alert_policy_put(rule_id: int, body: AlertPolicyBody,
             description="每个后台循环的运行/失败/连续失败/上次成功时间与上次错误（进程内快照）。"
                         "审计（2026-10-17）：循环失败不能只写日志，要能被 /metrics 与管理台看到。")
 def admin_obs_loops(_: dict = Depends(require_admin)):
-    from src.domains.insight.observability import loops as obs_loops
-    rows = obs_loops.snapshot()
+    from src.domains.insight import public as _obs_public
+    rows = _obs_public.obs_loop_snapshot()
     return {"loops": rows,
             "unhealthy": [r["loop"] for r in rows if not r.get("healthy")],
             "count": len(rows)}
@@ -668,9 +667,9 @@ def admin_obs_gaps(include_retired: bool = True, admin: dict = Depends(require_a
       但仍是死凭证，需要运维清理；列表里用 `beyond_retire_window` 标出
     - `never_reported=true` 表示从未上报过（没装成），不算缺失——列出仅供排查
     """
-    from src.domains.insight.observability import gap as gap_mod
+    from src.domains.insight import public as _obs_public
     try:
-        data = gap_mod.silent_targets(include_retired=bool(include_retired))
+        data = _obs_public.obs_silent_targets(include_retired=bool(include_retired))
     except Exception as e:
         log.warning(f"admin obs gaps failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "gaps failed"})
@@ -689,13 +688,13 @@ def admin_obs_events(sources: str = "", state: str = "", repo: str = "", limit: 
     差别只有三点：① 全局（不按可见范围过滤）② 含 `audit`（平台动作）③ 不返回平台级告警之外的
     平台指标事件（那些走 admin 健康中心）。
     """
-    from src.domains.insight.observability import events_view
+    from src.domains.insight import public as _obs_public
     _limit = max(1, min(int(limit or 200), 1000))
     want = [s.strip() for s in str(sources or "").split(",") if s.strip()]
     try:
-        data = events_view.unified_events(_GLOBAL_SCOPE_USER, sources=want, state=state,
-                                          repo=repo, limit=_limit, allow_audit=True,
-                                          global_scope=True, q=q, before=before)
+        data = _obs_public.unified_events(_GLOBAL_SCOPE_USER, sources=want, state=state,
+                                         repo=repo, limit=_limit, allow_audit=True,
+                                         global_scope=True, q=q, before=before)
     except Exception as e:
         log.warning(f"admin obs events failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "events failed"})
@@ -713,19 +712,19 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
     与用户面共用 `metric_rollup.series`，保证两端同一口径；差别是这里**全局**（含 `global` 维度）。
     """
     from datetime import datetime, timedelta, timezone
-    from src.domains.insight.observability import metric_rollup
+    from src.domains.insight import public as _obs_public
     res = (resolution or "minute").strip().lower()
-    if res not in (metric_rollup.RES_MINUTE, metric_rollup.RES_HOUR):
+    if res not in _obs_public.metric_resolutions():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "resolution must be minute|hour"})
     mets = [m.strip() for m in str(metric or "").split(",") if m.strip()]
-    bad = [m for m in mets if m not in metric_rollup.ALL_METRICS]
+    bad = [m for m in mets if m not in _obs_public.all_metrics()]
     if not mets or bad:
         raise HTTPException(status_code=400, detail={"code": 400,
                                                      "message": f"unknown metric: {bad or 'empty'}"})
     sc = (scope or "global").strip().lower()
     dims: List[str] = []
     if sc == "global":
-        dims = [metric_rollup.DIM_GLOBAL]
+        dims = [_obs_public.metric_global_dim()]
     elif sc == "repo":
         if not repo:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "repo required"})
@@ -738,7 +737,7 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
     span = max(1, min(int(hours or 24), 24 * 40))
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=span)
-    data = metric_rollup.series(mets, dims, start, now, res)
+    data = _obs_public.metric_series(mets, dims, start, now, res)
     return {"resolution": res, "hours": span, "scope": sc, "dim_keys": dims, "series": data,
             "global": True}
 
@@ -760,9 +759,9 @@ def _all_rollup_dims() -> List[str]:
             summary="SLO / error budget (platform, incl. engine availability)")
 def admin_obs_slo(repo: str = "", admin: dict = Depends(require_admin)):
     """SLO 列表（管理台）：平台视角、含引擎可用率；`repo` 给了就只看该仓（不校验可见性）。"""
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        return {"slos": slo_mod.list_summaries(global_scope=True, repo=repo),
+        return {"slos": _obs_public.list_slo_summaries(global_scope=True, repo=repo),
                 "global": True, "repo": str(repo or "")}
     except Exception as e:
         log.warning(f"admin obs slo failed: {e}")
@@ -772,8 +771,8 @@ def admin_obs_slo(repo: str = "", admin: dict = Depends(require_admin)):
 @router.get("/obs/slo/{slo_id}", operation_id="admin_obs_slo_detail",
             summary="One SLO with burn-down series (platform)")
 def admin_obs_slo_detail(slo_id: int, repo: str = "", admin: dict = Depends(require_admin)):
-    from src.domains.insight.observability import slo as slo_mod
-    data = slo_mod.detail(int(slo_id), global_scope=True, repo=repo)
+    from src.domains.insight import public as _obs_public
+    data = _obs_public.slo_detail(int(slo_id), global_scope=True, repo=repo)
     if not data:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
     return data
@@ -791,16 +790,16 @@ class SloUpdateBody(BaseModel):
 def admin_obs_slo_update(slo_id: int, body: SloUpdateBody,
                          admin: dict = Depends(require_admin)):
     """目标值由管理台统一设定（§6.7）。"""
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        ok = slo_mod.update_slo(int(slo_id),
-                                target=body.target, window_days=body.window_days,
-                                threshold_json=body.threshold_json, enabled=body.enabled)
+        ok = _obs_public.update_slo(int(slo_id),
+                                    target=body.target, window_days=body.window_days,
+                                    threshold_json=body.threshold_json, enabled=body.enabled)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
-    return {"ok": True, "slo": slo_mod.get_slo(int(slo_id))}
+    return {"ok": True, "slo": _obs_public.get_slo(int(slo_id))}
 
 
 class SloCreateBody(BaseModel):
@@ -815,15 +814,15 @@ class SloCreateBody(BaseModel):
 
 @router.post("/obs/slo", operation_id="admin_obs_slo_create", summary="Create an SLO (admin)")
 def admin_obs_slo_create(body: SloCreateBody, admin: dict = Depends(require_admin)):
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        sid = slo_mod.create_slo(body.name, body.sli_type, scope_type=body.scope_type,
-                                 scope_key=body.scope_key, target=body.target,
-                                 window_days=body.window_days, threshold_json=body.threshold_json,
-                                 created_by=str((admin or {}).get("username") or ""))
+        sid = _obs_public.create_slo(body.name, body.sli_type, scope_type=body.scope_type,
+                                     scope_key=body.scope_key, target=body.target,
+                                     window_days=body.window_days, threshold_json=body.threshold_json,
+                                     created_by=str((admin or {}).get("username") or ""))
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
-    return {"ok": True, "id": sid, "slo": slo_mod.get_slo(sid)}
+    return {"ok": True, "id": sid, "slo": _obs_public.get_slo(sid)}
 
 
 class VcsPlatformCardBody(BaseModel):
@@ -848,7 +847,7 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
     import dataclasses as _dc
     import json as _json
     from src.domains.mgmt.user.db import get_meta_value
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    from src.domains.runtime.public import get_platform_card, list_vcs_platforms
     # D19：探活数据按平台并入各卡（meta bot_token_health，per-provider 结构）
     _h, _checked_at = {}, ""
     try:
@@ -888,8 +887,8 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
             summary="Save vcs platform cards (validated by PlatformCard builder)")
 def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_admin)):
     import json as _json
-    from src.domains.runtime.vcs.platform_card import build_platform_card, PlatformCardError
-    from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+    from src.domains.runtime.public import build_platform_card, PlatformCardError
+    from src.domains.runtime.public import invalidate_platform_card_cache
 
     cleaned = {}
     errors = []
@@ -992,6 +991,34 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
 class AuthChannelsBody(BaseModel):
     providers: dict  # {provider: {name, type, auth_url, ..., client_id?, client_secret?}}
 
+def _channel_secret_set(provider: str) -> bool:
+    """表内 client_secret_enc 可解即视为「已配置」；表不可用/空值时回退 meta（过渡）。
+
+    Issue #3054 QA：原实现读 meta，而运行时凭据来自表 —— 两处不同源会出现
+    「页面显示已配置，实际登录用空 secret」。
+    """
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.domains.mgmt.auth.credential_crypto import decrypt
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            row = OAuthChannelRepo.get(s, provider)
+            blob = str(getattr(row, "client_secret_enc", "") or "") if row else ""
+        if blob:
+            try:
+                return bool(decrypt(blob))
+            except Exception:  # noqa: BLE001  密文坏掉 → 视为未配置（不回退明文）
+                return False
+    except Exception:  # noqa: BLE001  表不可用 → 回退 meta（过渡期）
+        pass
+    from src.domains.mgmt.user.db import get_meta_value
+
+    return bool(get_meta_value(f"oauth_{provider}_client_secret"))
+
+
 @router.get("/auth-channels", operation_id="admin_auth_channels_list",
             summary="List login channel cards (oauth login providers, creds masked)")
 def auth_channels_list(admin: dict = Depends(require_admin)):
@@ -1013,7 +1040,7 @@ def auth_channels_list(admin: dict = Depends(require_admin)):
             "configured": bool(_get_client_id(provider)),
             "card": full,
             "client_id": _get_client_id(provider) or "",
-            "client_secret_set": bool(get_meta_value(f"oauth_{provider}_client_secret")),
+            "client_secret_set": _channel_secret_set(provider),
         })
     return {"providers": out}
 
@@ -1021,7 +1048,7 @@ def auth_channels_list(admin: dict = Depends(require_admin)):
             summary="Save login channel cards (merge; client creds to meta keys)")
 def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admin)):
     from src.kernel.auth_sdk.channel_strategy import get_channel_strategy, ChannelAuthError
-    from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, invalidate_provider_cache
+    from src.domains.mgmt.auth.providers import builtin_channels, invalidate_provider_cache
     from src.domains.runtime import public as _rt
     from src.domains.mgmt.auth.audit import log_audit
 
@@ -1057,14 +1084,66 @@ def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admi
     # 合并式保存（零危害：不挤掉存量渠道——覆盖式写会杀掉 gitcode/github）。
     # 读→合并→写由 runtime public 在**同一事务**内完成：meta 归运行域，
     # 本文件不再持有 meta 的 SQL；同时消掉原「先读后写、中间放锁」的丢配置窗口。
+    # 基线 = 文件卡真源（configs/oauth-providers.json），不再引用代码内置表：
+    # 保存动作不得把"代码里的平台"写回 DB，否则解耦被管理面悄悄撤销。
     extra_meta = {}
+    # Issue #3054 QA：client_secret 只写 mgmt 域的表 grape_t_oauth_channels（owner=mgmt），
+    # meta（owner=runtime、经 runtime public 原语写）只留非敏感 client_id —— 不再把明文
+    # secret 复制进 meta。编辑留空（csec 为空）= 不修改。
+    from sqlalchemy.orm import Session as _Session
+
+    from src.domains.mgmt.auth.credential_crypto import encrypt as _cred_encrypt
+    from src.kernel.persistence.engine import get_engine
+    from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
     for provider, (cid, csec) in creds.items():
         extra_meta[f"oauth_{provider}_client_id"] = cid
-        extra_meta[f"oauth_{provider}_client_secret"] = csec
+        if not csec:
+            continue
+        try:
+            with _Session(get_engine()) as _s:
+                ok = OAuthChannelRepo.set_client_credentials(
+                    _s, provider, _cred_encrypt(cid or ""), _cred_encrypt(csec))
+                _s.commit()
+            if not ok:
+                # 渠道行尚未派生（表无该 provider）：回退 meta 保住凭据，记 warn 待迁移补齐
+                # 过渡口注记（QA 已确认属有意保留，不是遗漏）：
+                #   保留条件 —— 只有「grape_t_oauth_channels 无该 provider 行」或
+                #   「写加密表失败」两种情况下才回退，避免运维改渠道配置时把唯一凭据丢掉；
+                #   退出条件 —— 渠道行派生迁移补齐、且 set_client_credentials 连续成功一轮后，
+                #   删掉这两处 extra_meta 赋值，届时 meta 里只允许 client_id。
+                #   遗留风险（已知）—— 回退期间 meta 里是明文 secret，能读 meta 的进程都能看到；
+                #   每次回退都打 warning，监控侧按 "client_secret 回退 meta" 抓即可。
+                extra_meta[f"oauth_{provider}_client_secret"] = csec
+                log.warning(f"auth-channels: {provider} 表行缺失，client_secret 回退 meta 过渡")
+        except Exception as _e:  # noqa: BLE001  写表失败不得静默丢凭据
+            # 同上注记（过渡口）：写加密表失败也回退 meta，条件与退出条件一致
+            extra_meta[f"oauth_{provider}_client_secret"] = csec
+            log.warning(f"auth-channels: {provider} 凭据写表失败，回退 meta: {_e}")
     merged = _rt.merge_meta_json_any("oauth_providers_config", protocol_cards,
-                                     base=_DEFAULT_PROVIDERS, extra=extra_meta)
+                                     base=builtin_channels(), extra=extra_meta)
     invalidate_provider_cache()
     log_audit("admin_auth_channels_saved", operator_id=admin["id"],
               detail={"providers": sorted(protocol_cards.keys())})
     return {"message": "Login channel cards saved (merge, cache invalidated)",
             "providers": sorted(merged.keys())}
+
+
+# D109 平台对象式管理 API（与旧扁平 PUT /config 并存）
+# D109 管理面：六个聚合各一个路由文件，平铺 include（不设「平台对象」父容器）  # noqa: E402
+from src.domains.mgmt.admin import (  # noqa: E402
+    channel_repo_link_routes as _channel_repo_link_routes,
+    oauth_channel_routes as _oauth_channel_routes,
+    repo_platform_routes as _repo_platform_routes,
+    user_repo_platform_link_routes as _user_repo_platform_link_routes,
+    views_routes as _views_routes,
+)
+
+for _obj_router in (
+    _oauth_channel_routes,
+    _repo_platform_routes,
+    _channel_repo_link_routes,
+    _user_repo_platform_link_routes,
+    _views_routes,
+):
+    router.include_router(_obj_router.router)

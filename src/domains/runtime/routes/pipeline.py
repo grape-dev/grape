@@ -1,8 +1,10 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
+import time
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number, is_native_issue_ident  # Issue #3055
 
 
 class _OwnedCursor:
@@ -85,6 +87,40 @@ STAGE_STATUS_MAP = {
     "completed": 2,
     "failed": 3,
 }
+
+# Issue #2925 / 架构闸 A8 整改：标题兜底的实现（占位判定单一事实源、缓存三件套、
+# 窗口收敛编排、写回护栏）已下沉到 `src/domains/runtime/pipeline/title_backfill.py`；
+# 本层只保留调用与响应组装，不再持有编排逻辑。
+from src.domains.runtime.pipeline import title_backfill as _title_backfill
+from src.domains.runtime.pipeline.title_backfill import (  # noqa: F401  (兼容既有调用/测试)
+    _EVENT_TYPE_NAMES,
+    _PLACEHOLDER_PREFIXES,
+    _TITLE_MARKER_QUERY_CHUNK,
+    _TITLE_NEG_CACHE,
+    _TITLE_NEG_CACHE_MAX,
+    _TITLE_REAL_CACHE,
+    _TITLE_WRITEBACK_GUARD,
+    _is_placeholder_title,
+    _issue_number_of,
+    _title_marker_fresh,
+    _title_neg_cache_put,
+    _title_negative_ttl,
+    _title_real_cache_put,
+)
+
+
+def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
+                            issue_ids: list, events_by_issue: dict = None,
+                            window_size: int = 0) -> dict:
+    """兼容入口：实现在 `title_backfill.backfill_window_titles`（A8 分层整改）。
+
+    本层只做一件事——注入 routes 持有的 runtime DB 代理，保证调用点、测试注入点
+    （`pipeline._rt_db`）与既有契约都不变。
+    """
+    return _title_backfill.backfill_window_titles(
+        repo_key, repo_keys, title_map, issue_ids, events_by_issue, window_size,
+        db=_rt_db)
+
 
 
 def _get_latest_assignee(issue_events: list) -> str:
@@ -190,34 +226,25 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         title = title_map.get(issue_id, "")
     if not title:
         title = issue_events[0].get("title", "") or issue_id
-    # 如果 title_map 提供了标题且非占位符，直接使用（跳过 N+1 DB 查询）
-    _EVENT_TYPE_NAMES = {
-        "issue_opened", "issue_updated", "issue_comment", "issue_labeled",
-        "issue_closed", "push", "tag_created", "release_created",
-        "pull_request_opened", "pull_request_updated", "pull_request_merged",
-        "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
-        "deploy_start", "deploy_failure", "deploy_finish",
-        # Issue #329: cross-pipeline handoff event types
-        "assignee_changed", "cross_scene_handoff",
-    }
-    def _is_placeholder(t):
-        """判断 title 是否为占位符（事件类型名或 A2A 占位标题），不是 Issue 真实标题"""
-        return not t or t in _EVENT_TYPE_NAMES or t.startswith("A2A:") or t.startswith("A2A (订阅):") or t.startswith("PR 订阅 QA:")
+    # Issue #2925：占位判定收敛到模块级单一事实源（写回/兜底/验收同口径）
+    _is_placeholder = _is_placeholder_title
 
-    # title_map 已提供有效标题时跳过 DB 查询；否则回退到 DB 查询（兼容无 title_map 的调用）
-    if not title_map or _is_placeholder(title):
-        try:
-            from src.kernel.session_manager import db_lock as _dl
-            _db = _rt_db
-            _iss_num = int(str(issue_id).lstrip("#"))
-            with _dl:
-                _c = _db.cursor()
-                _c.execute("SELECT title FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
-                _t = _c.fetchone()
-                if _t and _t[0] and not _is_placeholder(_t[0]):
-                    title = _t[0]
-        except Exception:
-            pass
+    # title_map 已提供该 issue 的行时跳过 DB 查询（title_map 本身就来自 issue 表）；
+    # 仅当调用方未传 title_map / 缺该键时回退 DB（兼容无 title_map 的旧调用）。
+    if _is_placeholder(title) and (not title_map or issue_id not in title_map):
+        _iss_num = _issue_number_of(issue_id)
+        if _iss_num is not None:
+            try:
+                from src.kernel.session_manager import db_lock as _dl
+                _db = _rt_db
+                with _dl:
+                    _c = _db.cursor()
+                    _c.execute("SELECT title FROM issue WHERE repo_key=? AND issue_number=?", (repo_key, _iss_num))
+                    _t = _c.fetchone()
+                    if _t and _t[0] and not _is_placeholder(_t[0]):
+                        title = _t[0]
+            except Exception:
+                pass
     # events 表中找一条非占位符标题做兜底
     if _is_placeholder(title):
         for _e in issue_events:
@@ -268,27 +295,9 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             if not _is_placeholder(_et):
                 title = _et
                 break
-    # GitCode API 兜底：tasks/events/payload 都没真实标题 → 调 API 获取并回写 tasks 表
-    if _is_placeholder(title):
-        try:
-            _iss_num_api = int(str(issue_id).lstrip("#"))
-            from src.domains.runtime.pipeline.event_pipeline import _fetch_issue_title_via_api
-            _api_title = _fetch_issue_title_via_api(repo_key, issue_id)
-            if _api_title:
-                title = _api_title
-                # 回写 tasks 表（后续不再调 API）
-                try:
-                    from src.kernel.session_manager import db_lock as _dl2
-                    _db2 = _rt_db
-                    with _dl2:
-                        _c2 = _db2.cursor()
-                        _c2.execute("UPDATE issue SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
-                                    (_api_title, repo_key, _iss_num_api))
-                        _db2.commit()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    # 窗口外/取不到真实标题时保持占位：标题外呼已上移到 `get_pipeline` 的
+    # `_backfill_window_titles`（有界并发 + 负缓存），此处不再逐条串行外呼
+    # （Issue #2925：原实现 97 条 → 22~37s，且写回口径失配导致永不收敛）。
     # 统一计算节点状态（与任务详情页共享同一套逻辑）
     from src.api.pipeline_status import compute_node_statuses, STATUS_COMPLETED
 
@@ -324,6 +333,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                 # 仓库级场景被改名后显示真实名而非写死标签/原始 ID）。
                 "scene_id": _le.get("scene_id", "") or "",
                 "scene_name": _scene_label_for_event(_le.get("scene_id", "") or "", get_pipe_cfg, repo_key, pipe_cfg_cache),
+                # Issue #2432：失败节点名（不输出失败原因）
+                "failed_node": _le.get("failed_node", "") or "",
             }
         else:
             _latest_event = None
@@ -373,7 +384,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                     if actor:
                         _bots = bot_usernames if bot_usernames is not None else set()
                         if not _bots:
-                            from src.domains.mgmt.user.db import get_all_bot_usernames
+                            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
                             _bots = get_all_bot_usernames()
                         if actor in _bots:
                             from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name
@@ -421,9 +432,13 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     else:
         display_issue_id = issue_id
 
-    from src.api.pipeline_status import attach_stall_state
+    from src.api.pipeline_status import attach_stall_state, extract_failed_node
+    # Issue #2432：失败节点（供详细路线图直接展示失败状态 + 失败节点名）
+    _failed_node, _failed_node_name = extract_failed_node(_nodes, stage_statuses)
     _out = {
         "issue_id": display_issue_id,
+        "failed_node": _failed_node,
+        "failed_node_name": _failed_node_name,
         "raw_issue_id": issue_id,
         "title": title,
         "stages": stages,
@@ -506,7 +521,7 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
         c.execute(
             f"SELECT COUNT(*) FROM (SELECT e.issue_id FROM events e {_join} "
             f"WHERE e.repo_key IN ({_ph}){_exclude_clause}{_scene_clause} "
-            f"GROUP BY e.issue_id)",
+            f"GROUP BY e.issue_id) AS total_window",
 
             (*repo_keys, *_scene_params))
         total = c.fetchone()[0]
@@ -572,9 +587,12 @@ def get_pipeline(owner: str, repo: str,
             if _pushdown_ok and _win_ids:
                 _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
                 _params += list(_win_ids)
+            from src.domains.runtime.schema_probe import column_exists as _col_exists
+            _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
+                           else "'' AS failed_node")
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id, completed_at "
+                "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
                 f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
         except Exception as e:
@@ -587,7 +605,8 @@ def get_pipeline(owner: str, repo: str,
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
          "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key,
          "scene_id": r[11] if len(r) > 11 else "",
-         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else ""}
+         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else "",
+         "failed_node": (r[13] or "") if len(r) > 13 else ""}
         for r in rows
     ]
 
@@ -600,9 +619,9 @@ def get_pipeline(owner: str, repo: str,
     if issue_ids:
         _iss_nums = []
         for iid in issue_ids:
-            _n = str(iid).lstrip("#")
-            if _n.isdigit():
-                _iss_nums.append(int(_n))
+            # Issue #3055：ident 同样进入批量查询（原 isdigit 把 IK* 全部漏掉）
+            if is_native_issue_ident(iid):
+                _iss_nums.append(native_issue_number(iid))
         if _iss_nums:
             try:
                 with db_lock:
@@ -654,6 +673,24 @@ def get_pipeline(owner: str, repo: str,
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    # Issue #2925：窗口内占位标题「有界兜底」——只对当前页窗口内的 issue 外呼，
+    # token/客户端复用 + 有限并发 + 总 deadline；写回与占位判定同口径并落已尝试
+    # 标记。窗口外保持占位不触发外呼（由日志 skipped 计数显式标记未核实）。
+    try:
+        # 下推成功时 _win_ids 已是「最新事件倒序」的窗口；下推降级时 issue_ids 是
+        # events 去重顺序，需先按最新 seq 排序，保证兜底窗口与最终展示窗口一致。
+        if _pushdown_ok:
+            _window_src = _win_ids
+        else:
+            _seq_by_id = {iid: max((e.get("seq") or 0) for e in evts)
+                          for iid, evts in _events_by_issue.items()}
+            _window_src = sorted(issue_ids, key=lambda x: _seq_by_id.get(x, 0),
+                                 reverse=True)
+        _title_map = _backfill_window_titles(
+            repo_key, _repo_keys, _title_map, _window_src,
+            _events_by_issue, window_size=_need)
+    except Exception as e:
+        log.warning(f"[pipeline] title backfill skipped (degrade to placeholder): {e}")
     # Issue #2050：确认窗一次读取（否则逐行 patrol_runtime_config() → 每行 5 条 meta SELECT）
     _confirm_minutes = None
     try:

@@ -527,6 +527,28 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
 
 
+def _release_guard_reject(user: dict, *, operation: str, target_issue=None, title: str = "",
+                          body: str = "", related_issue_nums=None,
+                          allow_cross_issue: bool = False):
+    """Issue #2225：写操作落上游前校验 Issue 号一致性，不一致 409 中止（无线上写入）。"""
+    try:
+        from src.domains.runtime.vcs.release_guard import (
+            check_issue_consistency, resolve_session_task_issue)
+        task_issue = resolve_session_task_issue(user)
+        ok, message = check_issue_consistency(
+            task_issue=task_issue, target_issue=target_issue, title=title, body=body,
+            related_issue_nums=related_issue_nums,
+            allow_cross_issue=allow_cross_issue, operation=operation)
+    except Exception as _e:
+        # 断言自身异常 fail-open（不阻断正常交付），但留告警可定位。
+        log.warning(f"release guard skipped ({operation}): {_e}")
+        return
+    if not ok:
+        log.warning(f"release guard blocked {operation}: {message}")
+        raise HTTPException(status_code=409, detail={
+            "code": 409, "error_code": "ISSUE_ASSERT_MISMATCH", "message": message})
+
+
 # ===================== 仓库信息 / 传输支撑 ==============
 @router.get("/{owner}/{repo}", operation_id="gitrepo_repo", summary="Repository info (clone_url/default_branch)", description="Repository metadata from the Git provider: id/name/full_name/default_branch/html_url/clone_url/visibility.")
 def get_repo_info(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
@@ -953,10 +975,15 @@ def list_issues(owner: str, repo: str, state: str = Query("open"),
 
 
 @router.post("/{owner}/{repo}/issues", operation_id="gitrepo_issues_create", summary="Create issue", description="Creates an issue (title/body/assignee).")
-def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depends(get_current_user_or_api_key),
+def create_issue(owner: str, repo: str, body: IssueCreateBody,
+                 user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
     # Issue #372 §30: issue body 追加 grape-auto-comment 标记
     _body = body.body or ""
+    # Issue #2225 P2（QA 裁定 11-16）：新建 Issue 无目标号可比，但正文主语锚点仍可比对
+    # ——首个 `Issue #N` 与当前会话任务不一致（暂存被覆写）→ 409 且无线上写入；
+    # 无锚点放行，不阻断正常发布。
+    _release_guard_reject(user, operation="issues create", body=_body)
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     neutral = {"title": body.title, "body": _body, "assignee": body.assignee}
@@ -999,6 +1026,9 @@ def update_issue(owner: str, repo: str, number: int | str, body: IssueUpdateBody
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
     # 路径 B 场景 actor=用户 → webhook 事件 → 自循环检测标记层需能拦截
     _body = body.body or ""
+    # Issue #2225：发布前一致性断言——目标 Issue / 正文主语与当前会话任务不一致 → 409。
+    _release_guard_reject(user, operation=f"issues update #{number}", target_issue=number,
+                          body=_body)
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     # Issue #707：state 非法值前置校验 + 归一——本地 400 文案指向契约字段 `state`
@@ -1202,6 +1232,11 @@ def list_issue_comments(owner: str, repo: str, number: int | str, user: dict = D
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
 def create_issue_comment(owner: str, repo: str, number: int | str, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #2225 P1（QA 裁定 11-16）：评论正文落上游前过一致性断言——目标 Issue 或正文
+    # 主语锚点与当前会话任务不一致（暂存被覆写）→ 409 且无线上写入。讨论区 chat 会话
+    # 代发的用户真实回复不经断言（resolve 对 chat fail-open）。
+    _release_guard_reject(user, operation=f"issues comment #{number}", target_issue=number,
+                          body=body.body or "")
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
     # Issue #453 代发台账（S12 写入点1）：评论入账，webhook 回流按评论 ID 对账。
@@ -1234,13 +1269,17 @@ def list_pulls(owner: str, repo: str, state: str = Query("open"),
 
 
 @router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base). Provider-adapted: gitcode inner_issue_nums; github Closes #N body.")
-def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(get_current_user_or_api_key),
+def create_pull(owner: str, repo: str, body: PRCreateBody,
+                user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     # Issue #372 §30: PR body 追加 grape-auto-comment 标记（与 create_issue_comment 一致）
     _body = body.body or ""
+    related = list(body.related_issue_nums or [])
+    # Issue #2225：发布前一致性断言——PR 标题/正文主语/关联 Issue 与当前会话任务不一致 → 409。
+    _release_guard_reject(user, operation="pulls create", title=body.title or "",
+                          body=_body, related_issue_nums=related)
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
-    related = list(body.related_issue_nums or [])
     # Issue #728：自动关联走上下文过滤层——调用方未显式传 related_issue_nums 且
     # body 非空时，剥离代码块/行内反引号/引用块后提取 Issue 号（非语义语境的 #N
     # 不再被自动关联捕获；显式 related_issue_nums 优先，不受过滤影响）。
@@ -1295,7 +1334,35 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
         "prune_source_branch": body.prune_source_branch,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    _pull_url = _vcs_url(owner, repo, "/pulls", None, p)
+    _pull_tok = _repo_token(owner, repo, user, p)
+    try:
+        resp = _vcs_req(p, "POST", _pull_url, _pull_tok, payload)
+    except HTTPException as _he:
+        # bot 身份建 PR 被 403：典型原因是机器人账号只是“能推代码”（token scope / 协作者写权限），
+        # 但没有仓库成员身份，而 GitCode 建 PR 要求成员权限。实测同一 token 读仓库 200、
+        # 列 PR 200、push 分支成功，唯独 POST /pulls 403（2026-11-16 flask-blog #93）。
+        # 这种情形不该让整条任务白跑：代码已经推上去了，缺的只是一个 PR 壳。
+        # 回退用任务发起人身份再建一次 —— PR 作者会是人而不是 bot，但链路能闭合。
+        if _he.status_code != 403:
+            raise
+        _ut = ""
+        try:
+            _mod_fb = _provider_module(p)
+            if _mod_fb is not None:
+                _uname = str(user.get("username") or "")
+                _uid = user.get("id") or ""
+                if not _uname and has_user_id(_uid):
+                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    _uname = (get_grape_account_by_id(_uid) or {}).get("username", "")
+                _ut = _mod_fb.user_token(_uname, _uid) or ""
+        except Exception as _ue:  # noqa: BLE001
+            log.debug(f"create_pull: user-token fallback resolve failed: {_ue}")
+        if not _ut or _ut == _pull_tok:
+            log.warning(f"create_pull: bot token 403 for {owner}/{repo} and no user token to fall back to")
+            raise
+        log.warning(f"create_pull: bot token 403 for {owner}/{repo}, retrying as task initiator identity")
+        resp = _vcs_req(p, "POST", _pull_url, _ut, payload)
     # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
     # 多 Issue PR：每个 qa 失败的关联 Issue 都要标注，不能只标首个。
     if _qa_failures and _qa_rk:
@@ -1324,10 +1391,17 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     return resp
 
 
-@router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request.")
+@router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request. Issue #2324: attaches merge_readiness, the shared combined merge judgement (mergeable && can_merge_check && approval_reviewers_required_passed) also used by the pre-merge check.")
 def get_pull(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
              p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _repo_token(owner, repo, user, p))
+    _detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
+                       _repo_token(owner, repo, user, p))
+    # Issue #2324：QA 合并判定与自动合入前置检查共用同一实现（口径一致）。
+    if isinstance(_detail, dict):
+        from src.api.merge_readiness import evaluate_merge_readiness
+
+        _detail = {**_detail, "merge_readiness": evaluate_merge_readiness(_detail, p)}
+    return _detail
 
 
 @router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.")
@@ -1335,6 +1409,9 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: PR body 追加 grape-auto-comment 标记
     _body = body.body or ""
+    # Issue #2225：发布前一致性断言（PR 标题/正文主语与当前会话任务一致）。
+    _release_guard_reject(user, operation=f"pulls update #{number}", title=body.title or "",
+                          body=_body)
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）；空值过滤语义不变。
@@ -1457,7 +1534,10 @@ def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
                     _n = _it.get("number") if isinstance(_it, dict) else None
                     if isinstance(_n, int) and _n > 0:
                         _rel_nums.append(_n)
-        if _pr_body:
+        # Issue #2429：显式 issues 关联是本 PR 的权威 Issue 链；此时不再叠加 body
+        # 里的自然语言 #N，避免“同 Issue #214 / 参考 #178”这类交叉引用把其他
+        # Issue 的历史归档结论带入当前 PR 的合入门禁。无显式关联时才回退 body。
+        if _pr_body and not _rel_nums:
             _rel_nums.extend(extract_related_issue_nums(_pr_body))
         _rel_nums = list(dict.fromkeys(_rel_nums))  # 去重且保序
         if _rel_nums:
@@ -1584,6 +1664,29 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
     _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key,
                        pr_detail=_pr_detail, detail_loaded=True)
+    # Issue #2324：自动合入前置检查复用统一合并判定（mergeable && can_merge_check &&
+    # approval_reviewers_required_passed），任一不满足即 409 并列出缺失项，防 mergeable 误放行。
+    from src.api.merge_readiness import (
+        NOT_MERGEABLE,
+        PENDING_REVIEW,
+        UNKNOWN,
+        evaluate_merge_readiness,
+    )
+
+    _readiness = evaluate_merge_readiness(_pr_detail, p)
+    if _readiness.get("verdict") in (PENDING_REVIEW, NOT_MERGEABLE):
+        record_gate_log(_repo_key, number, "pre_merge_readiness", "blocked", _readiness)
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": f"merge blocked by merge readiness gate (Issue #2324): "
+                       f"{_readiness.get('summary')}",
+            "gate": {"phase": "pre_merge_readiness",
+                     "verdict": _readiness.get("verdict"),
+                     "missing": _readiness.get("missing", []),
+                     "warnings": _readiness.get("warnings", [])}})
+    if _readiness.get("verdict") == UNKNOWN:
+        log.warning(f"merge readiness unknown {owner}/{repo}#{number}: "
+                    f"{_readiness.get('warnings')}")
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
@@ -1672,6 +1775,11 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 R4.1: PR 评论同样追加标记
     _body = body.body or ""
+    # Issue #2225 P1（QA 裁定 11-16）：PR 评论正文落上游前过一致性断言——正文主语锚点是
+    # 其他 Issue（暂存被覆写）→ 409 且无线上写入。PR 号与任务 Issue 号属不同号段空间，
+    # 不做 target 比对：PR 号恒不等于任务 Issue 号，比对无判别力且会误杀全部正常 PR 评论；
+    # 伪造跨 Issue 正文由 body 主语锚点拦（与 pulls create/update 同口径）。
+    _release_guard_reject(user, operation=f"pulls comment #{number}", body=body.body or "")
     if "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     # Issue #585 Bug 1: GitHub POST /pulls/{n}/comments 是 inline review comment 端点
@@ -1929,4 +2037,3 @@ def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int | str, bod
 
 
 # ===================== Pull Requests =====================
-

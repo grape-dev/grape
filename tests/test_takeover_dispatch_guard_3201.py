@@ -533,7 +533,8 @@ def test_execute_task_stops_on_skipped_without_retry(monkeypatch):
     monkeypatch.setattr(sch, "_BASE_RETRY_DELAY", 0)
     monkeypatch.setattr(sch, "_MAX_RETRY_DELAY", 0)
 
-    task = {"id": 771, "name": "ap", "repo_key": REPO, "max_retry": 2, "cron": "* * * * *"}
+    task = {"id": 771, "name": "ap", "repo_key": REPO, "max_retry": 2, "cron": "* * * * *",
+            "instruction": "run takeover guard regression"}
     asyncio.run(sch._execute_task(task))
 
     assert len(created) == 1, f"skipped 不得重试，实际创建 {len(created)} 条 execution"

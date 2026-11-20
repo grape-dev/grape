@@ -418,7 +418,20 @@ function statusText(i) {
   const sc = nodeStatus(i)
   if (sc === 2) return t('pipeline.status_done')
   if (sc === 1) return t('pipeline.status_in_progress')
-  if (sc === 3) return t('pipeline.status_failed')
+  if (sc === 3) {
+    // Issue #2432: name the node that failed (no failure reason shown)
+    const st = (displayPipe.value.stages || [])[i] || {}
+    const ev = st.latest_event || {}
+    const name =
+      st.failed_node_name ||
+      ev.failed_node_name ||
+      st.name ||
+      st.tag ||
+      st.id ||
+      displayPipe.value.failed_node_name ||
+      ''
+    return name ? t('pipeline.status_failed') + ' · ' + name : t('pipeline.status_failed')
+  }
   if (sc === 4) return t('pipeline.status_cancelled') || '已取消'
   if (sc === 5) return t('pipeline.status_skipped') || '已跳过'
   return t('pipeline.status_pending')
@@ -854,7 +867,11 @@ onBeforeUnmount(function () {
   z-index: 0;
   animation: plRadar 3s linear infinite;
 }
-.pl__nd > *:not(.pl__nd-radar) {
+/* 雷达层之下的内容统一抬到 z-index:1（保证文字压在扫描带之上）。
+   注意必须**同时排除 .pl__nd-bar**：它是 position:absolute 的顶部色条，这条规则
+   一旦把它改成 relative，它就从「贴卡片顶边」掉进 flex 流、被 14px 内边距顶下来，
+   表现为每个职责卡片里的横线向下漂移（2026-11-16 修，引入于 8a928677f）。 */
+.pl__nd > *:not(.pl__nd-radar):not(.pl__nd-bar) {
   position: relative;
   z-index: 1;
 }

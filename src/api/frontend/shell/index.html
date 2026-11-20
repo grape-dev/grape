@@ -3,12 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Grape — Multi-Agent DevOps</title>
-<link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=1">
-<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=3">
-<link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
-<link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
+<title>Grape — AI Native DevOps</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/favicon-48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon-180.png">
+<link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
+<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=10">
+<!-- view 级样式合并产物：阻塞加载，避免首帧无样式（见 vite closeBundle）-->
+<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=57">
+<link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1"><link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
@@ -18,127 +21,37 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='44';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__ = '74';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
 <style>
 /* Default: show login overlay, hide workbench (sidebar+mainView) */
 .sb,.mn{display:none}
-/* Logged-in: hide login overlay, show workbench */
-[data-logged-in="1"] .auth-page{opacity:0;pointer-events:none}
+/* Logged-in: hide login overlay entirely (display:none, not opacity:0).
+   Chrome treats opacity:0 login form as a visible fillable form and pops the
+   password-autofill bubble on every shell page refresh (#fix 2026-11-17). */
+[data-logged-in="1"] .auth-page{display:none}
 [data-logged-in="1"] .sb{display:flex}
 /* i18n loading: hide [data-i18n] text until translations applied (prevents zh→en flash) */
 html.i18n-loading [data-i18n]{visibility:hidden}
 html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 [data-logged-in="1"] .mn{display:flex}
 </style>
-<script src="/static/js/i18n.js?v=20261113-1" defer></script>
+<script src="/static/js/i18n.js?v=20261117-1" defer></script>
 </head>
 <body>
 <div class="auth-page" id="loginView">
-<div class="auth-card">
-<img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
-<h1>Grape</h1>
-<p class="subtitle" data-i18n="app.login.register_sub">Multi-Agent DevOps</p>
-<!-- 登录表单 -->
-<form id="pwdLogin" onsubmit="event.preventDefault();app.pwdLogin()">
-  <div class="field-group">
-    <label class="field-label" for="loginUser" data-i18n="app.login.account_or_email">用户名或邮箱</label>
-    <div class="field-input-wrap">
-      <input class="field-input" id="loginUser" type="text"
-        placeholder="用户名或邮箱"
-        data-i18n-placeholder="app.login.account_or_email"
-        autocomplete="username" autocapitalize="none" autocorrect="off"
-        aria-describedby="loginUserErr"
-        oninput="app._clearLoginError('loginUser')"
-        onblur="app._blurValidateLogin('loginUser')">
-    </div>
-    <p class="field-error" id="loginUserErr" role="alert" aria-live="polite"></p>
-  </div>
-  <div class="field-group">
-    <label class="field-label" for="loginPass" data-i18n="app.login.password">密码</label>
-    <div class="field-input-wrap">
-      <input class="field-input" id="loginPass" type="password"
-        placeholder="密码"
-        data-i18n-placeholder="app.login.password"
-        autocomplete="current-password"
-        enterkeyhint="go"
-        aria-describedby="loginPassErr"
-        oninput="app._clearLoginError('loginPass')"
-        onblur="app._blurValidateLogin('loginPass')">
-      <button type="button" class="pwd-toggle" onclick="app._toggleLoginPwd(this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-      </button>
-    </div>
-    <p class="field-error" id="loginPassErr" role="alert" aria-live="polite"></p>
-  </div>
-  <button class="auth-btn" id="loginBtn" type="submit">
-    <span data-i18n="app.login.login_btn">登录</span>
-  </button>
-</form>
-<!-- 主链接 -->
-<div class="auth-links">
-  <a href="/register" data-i18n="app.login.register">注册账号</a>
-  <span class="dot" id="forgotDot" style="display:none">·</span>
-  <a href="/forgot" id="forgotLink" data-i18n="app.login.forgot_password" style="display:none">忘记密码</a>
-</div>
-<script>
-// 同步读取服务端注入的邮箱配置状态（零闪动）
-(function(){
-  var emailConfigured = (typeof window.__EMAIL_CONFIGURED__ !== 'undefined') ? window.__EMAIL_CONFIGURED__ : false;
-  if(emailConfigured){
-    var l=document.getElementById('forgotLink');var dot=document.getElementById('forgotDot');
-    if(l)l.style.display='';if(dot)dot.style.display='';
-  }
-})();
-</script>
-<!-- OAuth 分隔线 + 按钮（预渲染，避免 API 延时导致布局抖动） -->
-<div id="oauthSection" style="margin-top:20px">
-  <div style="margin:0 0 16px;text-align:center;position:relative">
-    <div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(255,255,255,0.08)"></div>
-    <span style="position:relative;background:transparent;padding:0 16px;font-size:11px;color:#6e6e73;letter-spacing:0.5px" data-i18n="app.login.or_oauth">或使用第三方登录</span>
-  </div>
-  <div style="display:flex;gap:10px" id="oauthBtns">
-    <button class="oauth-btn" style="--brand:#F54A36" onclick="app.oauthLogin('gitcode')">
-      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>
-      <span data-i18n="app.login.gitcode_login">GitCode</span>
-    </button>
-    <button class="oauth-btn" style="--brand:#1F2328" onclick="app.oauthLogin('github')">
-      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
-      <span data-i18n="app.login.github_login">GitHub</span>
-    </button>
-  </div>
-  <!-- 未配置常显说明（#535）：预置 DOM + CSS 按注入类首帧显示（注册页同模式，零闪动；
-       全部已配置时 CSS 隐藏，JS 按运行时权威状态再纠正）。data-i18n 随语言切换。
-       预置文案用中性兜底（不点名平台）——JS 到场后按真实未配置名单更新为精确文案，
-       首帧不会出现「点名了错误平台」的短暂不准确（全未配置时两名单一致无感）。 -->
-  <div id="oauthUnconfiguredHint" class="oauth-unconfigured-hint" style="display:none">
-    <span data-i18n="app.login.oauth_needs_config_generic">部分第三方登录需要管理员先配置 OAuth 后才能使用</span>
-    · <a href="/static/help.html#/developer/01-gitcode-integration" target="_blank" rel="noopener"><span data-i18n="app.login.oauth_view_config_help">查看配置帮助</span></a>
-  </div>
-</div>
-<!-- 次要链接 -->
-<div class="auth-links" style="margin-top:16px">
-  <a onclick="app.openBetaApply()" style="cursor:pointer;color:#6e6e73" data-i18n="app.login.beta_apply">申请内测</a>
-  <span class="dot">·</span>
-  <a href="/admin" style="cursor:pointer;color:#6e6e73;font-size:12px" data-i18n="app.login.admin">管理后台</a>
-</div>
-<!-- 语言切换 -->
-<div class="lang-switch" onclick="_toggleLoginLang()">
-<span id="langSwitchLabel">EN</span>
-</div>
-</div>
-</div>
+<!-- 登录卡片 = Vue 组件宿主：口径 v7（纯 logo 圆形第三方登录）由 src/views/LoginView.vue 渲染。
+     行为契约不变——表单 id（loginUser/loginPass/loginBtn/loginUserErr/loginPassErr）、
+     window.app.pwdLogin/_toggleLoginPwd/oauthLogin 与 I18N/API 全局仍由 shell/js/app.js 提供。 -->
+<div id="loginVueHost"></div>
 </div>
 <div class="sb-ov" id="sbOverlay" onclick="app.toggleSidebar(true)"></div>
 <div class="sb" id="sidebar">
 <div class="sb-h">
 <div class="logo-s" style="cursor:pointer" onclick="window.open('/','_blank')" data-i18n-title="app.back_to_website" title="返回官网"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape</h1></div>
-<div class="tagline">Multi-Agent DevOps</div>
+<div class="tagline">AI Native DevOps</div>
 </div>
 <div style="padding:0 12px;margin-top:8px;display:none">
 <div style="font-size:10px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.sidebar.organizations">组织</div>
@@ -324,37 +237,44 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /faro/collect 反代） -->
 <script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
 <script src="/static/js/faro.js?v=7" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
-<script src="/static/js/api.js?v=35" defer></script>
+<script src="/static/js/api.js?v=36" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
-<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=66"></script>
-<script type="module" src="/static-vue/viewjs/pipeline.js?v=52"></script>
-<script type="module" src="/static-vue/viewjs/agent-view.js?v=48"></script>
-<script type="module" src="/static-vue/viewjs/event-view.js?v=55"></script>
-<script type="module" src="/static-vue/viewjs/chat-view.js?v=58"></script>
-<script type="module" src="/static-vue/viewjs/im-channel.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/repos-view.js?v=54"></script>
-<script type="module" src="/static-vue/viewjs/issues-view.js?v=58"></script>
-<script type="module" src="/static-vue/viewjs/account-view.js?v=53"></script>
-<script type="module" src="/static-vue/viewjs/scene-market.js?v=53"></script>
-<script type="module" src="/static-vue/viewjs/skills-view.js?v=52"></script>
-<script type="module" src="/static-vue/viewjs/knowledge-view.js?v=48"></script>
-<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=55"></script>
-<script type="module" src="/static-vue/viewjs/observability-view.js?v=54"></script>
-<script type="module" src="/static-vue/viewjs/organizations.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/feedback-dialog.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/my-feedback.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/my-feedback-detail.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=51"></script>
+<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=86"></script>
+<script type="module" src="/static-vue/viewjs/pipeline.js?v=54"></script>
+<script type="module" src="/static-vue/viewjs/agent-view.js?v=51"></script>
+<script type="module" src="/static-vue/viewjs/event-view.js?v=60"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=61"></script>
+<script type="module" src="/static-vue/viewjs/im-channel.js?v=55"></script>
+<script type="module" src="/static-vue/viewjs/repos-view.js?v=64"></script>
+<script type="module" src="/static-vue/viewjs/issues-view.js?v=62"></script>
+<script type="module" src="/static-vue/viewjs/account-view.js?v=60"></script>
+<script type="module" src="/static-vue/viewjs/scene-market.js?v=59"></script>
+<script type="module" src="/static-vue/viewjs/skills-view.js?v=58"></script>
+<script type="module" src="/static-vue/viewjs/knowledge-view.js?v=49"></script>
+<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=83"></script>
+<script type="module" src="/static-vue/viewjs/observability-view.js?v=57"></script>
+<script type="module" src="/static-vue/viewjs/organizations.js?v=51"></script>
+<script type="module" src="/static-vue/viewjs/feedback-dialog.js?v=50"></script>
+<script type="module" src="/static-vue/viewjs/my-feedback.js?v=50"></script>
+<script type="module" src="/static-vue/viewjs/my-feedback-detail.js?v=50"></script>
+<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=55"></script>
+<script type="module" src="/static-vue/viewjs/sandbox-view.js?v=11"></script>
 <script src="/static/js/deeplink.js?v=1" defer></script><!-- 深链解析 /app/<owner>/<repo>/#tasks/N -->
-<script src="/static/js/app.js?v=266" defer></script>
+<script src="/static/js/platform-icons.js?v=2" defer></script><!-- 平台图标卡派生（D109 解耦：不写死 gitcode/github） -->
+<script src="/static/js/app.js?v=275" defer></script>
+<script type="module" src="/static-vue/viewjs/login-view.js?v=2"></script>
+<script type="module" src="/static-vue/viewjs/onboarding-view.js?v=9"></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>
 <div class="help-drawer" id="helpDrawer">
   <div class="help-drawer-hdr">
     <h2 data-i18n="app.help.drawer_title">📖 使用帮助 & FAQ</h2>
-    <button class="help-drawer-close" onclick="app.closeHelp()">✕</button>
+    <div class="help-drawer-hdr-actions">
+      <button class="help-drawer-close" id="helpNewTabBtn" onclick="app.openHelpNewTab()" data-i18n-title="app.help.open_new_tab" title="在新标签页打开">↗</button>
+      <button class="help-drawer-close" id="helpFullscreenBtn" onclick="app.toggleHelpFullscreen()" data-i18n-title="app.help.fullscreen" title="全屏">⛶</button>
+      <button class="help-drawer-close" onclick="app.closeHelp()" data-i18n-title="common.close" title="关闭">✕</button>
+    </div>
   </div>
   <div class="help-drawer-body">
     <div class="help-loading" data-i18n="app.help.loading">加载中...</div>

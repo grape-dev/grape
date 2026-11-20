@@ -244,7 +244,8 @@
     "anomaly": "异常任务",
     "errorlogs": "错误日志",
     "events": "事件",
-    "efficiency": "能效看板"
+    "efficiency": "能效看板",
+    "sandboxes": "沙箱"
   },
   "eff": {
     "total_issues": "提需求",
@@ -513,5 +514,28 @@
     "failed": "反馈提交失败，请稍后重试",
     "login_required": "请先登录后再提交反馈",
     "count": "{n}/{max}"
+  },
+  "sbx": {
+    "sbx_search_ph": "搜索 Event 号...",
+    "sbx_search_tip": "输入事件编号（精确）或完整任务 ID（t_ 开头）",
+    "sbx_all_platforms": "全部平台",
+    "sbx_all_states": "全部状态",
+    "sbx_search_btn": "查找",
+    "sbx_refresh": "刷新",
+    "sbx_empty": "暂无沙箱",
+    "sbx_col_platform": "平台",
+    "sbx_col_template": "模板",
+    "sbx_col_engine": "引擎",
+    "sbx_init_tip": "沙箱内引擎/环境是否初始化完成",
+    "sbx_col_init": "初始化",
+    "sbx_col_created_by": "创建人",
+    "sbx_col_created_at": "创建时间",
+    "sbx_col_last_refresh": "最后刷新",
+    "sbx_view_error_tip": "点击查看失败原因",
+    "sbx_error_title": "沙箱启动失败原因",
+    "sbx_no_error": "（无失败原因记录）",
+    "sbx_copy": "复制",
+    "sbx_close": "关闭",
+    "sbx_error_copied": "失败原因已复制"
   }
 }

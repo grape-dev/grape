@@ -8,7 +8,8 @@ import logging
 
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
-from src.domains.mgmt.user import db as user_db
+# 托管仓库列表走 owner 域 public（原 import mgmt.user.db 内部函数）
+from src.domains.mgmt import public as _mgmt_repos
 from src.domains.runtime import public as runtime_public
 
 log = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ def global_search(q: str = Query("", min_length=1),
     q_lower = q.lower()
 
     # 当前用户有权访问的仓库集合——事件搜索仅限这些仓库
-    managed = user_db.get_managed_repos(str(user.get("id") or ""))
+    managed = _mgmt_repos.managed_repos_for_user(str(user.get("id") or ""))
     user_repo_keys = {r["repo_key"] for r in managed}
 
     if type in ("all", "event"):

@@ -25,24 +25,9 @@ from src.domains.runtime import public as _rt
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-def _check_login_method_before_unbind(user_id: str, provider: str):
-    """P0-4: 手动令牌解绑前检查至少保留一种登录方式。
-
-    与 grape_auth.py 的 unbind_provider 保持一致：
-    - 有密码 → 允许解绑
-    - 无密码但有其他活跃绑定（identity_count > 1）→ 允许解绑
-    - 无密码且只有当前这一条绑定 → 拒绝解绑
-    """
-    from src.domains.mgmt.auth.grape_account_db import has_password, count_user_identities
-    if not has_password(user_id) and count_user_identities(user_id) <= 1:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": 400,
-                "message": "至少保留一种登录方式，请先设置 Grape 密码",
-                "need_set_password": True,
-            },
-        )
+# 稳定的 warning code（响应里只回 code，文案由前端按 code 本地化；
+# 具体异常原文只进服务端日志，避免内部信息直出与中文字面量硬编码）
+SANDBOX_PROVIDER_REGISTRATION_FAILED = "sandbox_provider_registration_failed"
 
 def _resolve_repo_key(owner_repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
@@ -66,25 +51,67 @@ def _resolve_repo_key(owner_repo: str) -> str:
 
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (VCS platform PATs from the platform-card catalog, plus huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
+    # 契约登记（2026-11-18，#3200）：legacy 键 gitcode.api_token_exists / github.token_exists
+    # 由"含 OAuth 令牌"改为"仅凭据域 PAT"；令牌来源改由 platform_auth.token_source /
+    # oauth_bound 表达。仓内消费方为零（前端已改用 <p>_pat.exists + platform_auth），
+    # 仓外脚本若按旧语义判断"PAT 已配置"需同步调整。
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
     from src.api.deps import get_user_token_for
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
+    from src.domains.runtime.public import list_vcs_platforms as _lvcs
     _vcs_platform_list = list(_lvcs())  # D102-P 统一：全平台走泛型 <p>_pat 存在性键
     # S63 守卫收口（LABEL_COLOR 同款契约开关派生）：存量专用字段平台（表单键
     # <p>_token，provider 模块声明 SETTINGS_TOKEN_FIELD_SUFFIX="token"）的 PAT
     # 存在性回退不按平台名比较——按开关派生在下方 _legacy_dedicated_pat 里
     # 现取（get_user_token_for 按平台卡派生 provider），未声明平台恒空。
-    from src.domains.runtime.vcs.providers import module_for as _vcs_module_for
+    from src.domains.runtime.public import module_for as _vcs_module_for
 
     def _legacy_dedicated_pat(p: str) -> str:
+        """**仅**凭据域里的 PAT（不再回落到 OAuth 登录令牌）。
+
+        2026-11-18 修口径：原实现走 `get_user_token_for`，它的解析序是
+        「PAT 凭据域 → external_identities OAuth」，于是**只做过 OAuth 绑定、
+        根本没配 PAT** 的账号，凭据页也显示 gitcode/github 的 PAT「已配置」；
+        而清除按钮只删凭据域（有 OAuth 时按 D105k 只清 PAT 供给），删完再查
+        依然是 true → 用户看到「PAT 清不掉」。PAT 与 OAuth 是两种凭据形态
+        （A2 对象模型：PAT=仓库执行凭据，身份=OAuth），存在性必须分开报。
+        """
         try:
             if getattr(_vcs_module_for(p), "SETTINGS_TOKEN_FIELD_SUFFIX", "") == "token":
-                # 数据驱动取数：统一走 get_user_token_for 泛型链（按 provider 查
-                # 凭据域——对 gitcode 同样成立，get_user_token 与其同链仅多刷新）。
-                return get_user_token_for(user["username"], user_id=user["id"], provider=p)
+                _cfg = user_db.get_credential(user["id"], p, kind="pat") or {}
+                return str(_cfg.get("token") or "")
         except Exception:
             pass
         return ""
+
+    def _pat_state(p: str) -> dict:
+        """单平台凭据形态快照：PAT 是否存在/是否损坏 + OAuth 身份是否在 + 令牌来源。"""
+        _diag: dict = {}
+        _cfg = {}
+        try:
+            _cfg = user_db.get_credential(user["id"], p, kind="pat", diagnostics=_diag) or {}
+        except Exception:
+            _cfg, _diag = {}, {}
+        _pat_tok = str(_cfg.get("token") or _cfg.get("api_token") or "")
+        _oauth = _identities.get(p) or {}
+        _oauth_bound = bool(_oauth)
+        _oauth_token = bool(_oauth.get("has_oauth_token"))
+        _source = "pat" if _pat_tok else ("oauth" if _oauth_token else "none")
+        out = {
+            "exists": bool(_pat_tok),
+            "login": str(_cfg.get("login") or ""),
+            "oauth_bound": _oauth_bound,
+            "oauth_login": str(_oauth.get("external_login") or ""),
+            "token_source": _source,
+        }
+        if isinstance(_cfg, dict) and "workflows_write" in _cfg:
+            out["workflows_write"] = _cfg["workflows_write"]
+        if _diag.get("credential_error"):
+            # PAT 行在但读不出来（密钥变更/记录损坏）：不能报"没配置"，否则用户
+            # 会去重新配一遍而不知道旧记录坏了（也会让"清不掉"更难解释）。
+            out["exists"] = False
+            out["broken"] = _diag["credential_error"]
+        return out
+
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
 
@@ -104,37 +131,56 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     except Exception:
         _global_token_status = {"gitcode_expired": False, "github_expired": False}
 
+    _pat_states = {_p: _pat_state(_p) for _p in _vcs_platform_list}
+    _gc_state = _pat_states.get("gitcode") or _pat_state("gitcode")
+    _gh_state = _pat_states.get("github") or _pat_state("github")
+
     return {
         # ── legacy 兼容键（勿删：前端与既有测试消费；新代码请用 <p>_pat 泛型键）──
+        # 2026-11-18：语义修正——这三个键以前把 OAuth 登录令牌也算成 PAT
+        # （get_user_token_for 会回落 external_identities），于是 OAuth 绑定过的账号在
+        # 凭据页显示"PAT 已配置"，点清除又清不掉（清除只删凭据域）。现在只报**真 PAT**，
+        # 另用 token_source / oauth_bound 表达"令牌由登录授权提供"。
         "gitcode": {
             "api_token_exists": bool(_legacy_dedicated_pat("gitcode")),
             "account": user["username"],
             "auto_filled": True,
             "token_expired": (_identities.get("gitcode", {}).get("status", 0) == 4),
+            **_gc_state,
         },
         "github": {
-            "token_exists": bool(get_user_token_for(user["username"], user_id=user["id"], provider="github")),
+            "token_exists": bool(_gh_state.get("exists")),
             "login": _identities.get("github", {}).get("external_login", ""),
             "token_expired": (_identities.get("github", {}).get("status", 0) == 4),
+            **_gh_state,
         },
         "global_bot_token_status": _global_token_status,
         # D102-P：泛型平台 PAT 存在性（gitee/gitlab 等平台卡驱动平台）——
         # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
+        # exists=False 但 broken≠空 = "配过、坏了"，前端要提示重配而不是当成没配。
         **{
             f"{_p}_pat": (
-                {"exists": True, "login": (_cred or {}).get("login", ""),
-                 **({"workflows_write": _cred["workflows_write"]}
-                    if isinstance(_cred, dict) and "workflows_write" in _cred else {})}
-                if (_cred := user_db.get_credential(user["id"], _p, kind="pat"))
-                # 存量专用字段平台（契约开关派生）：PAT 走专用字段（token 存 ei），
-                # 存在性对齐专用键——泛型 <p>_pat 凭据域未命中时回退
-                else (
-                    {"exists": True, "login": ""}
-                    if _legacy_dedicated_pat(_p)
-                    else {}
-                )
+                {
+                    "exists": st["exists"],
+                    "login": st["login"],
+                    **({"workflows_write": st["workflows_write"]} if "workflows_write" in st else {}),
+                    **({"broken": st["broken"]} if st.get("broken") else {}),
+                }
+                if (st["exists"] or st.get("broken") or st.get("oauth_bound"))
+                else {}
             )
-            for _p in _vcs_platform_list
+            for _p, st in _pat_states.items()
+        },
+        # 新增（2026-11-18）：令牌来源单列一眼可见——PAT 与"登录授权"是两种形态，
+        # 凭据页据此把"PAT 已配置"与"由 Gitee/GitCode 授权提供"分开显示。
+        "platform_auth": {
+            _p: {
+                "token_source": st["token_source"],
+                "oauth_bound": st["oauth_bound"],
+                "oauth_login": st["oauth_login"],
+                **({"pat_broken": st["broken"]} if st.get("broken") else {}),
+            }
+            for _p, st in _pat_states.items()
         },
         "huawei_cloud": {
             "ak_exists": bool(hw_cred.get("ak")),
@@ -399,7 +445,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
                     try:
                         # S99/D74：昵称写收敛 channel_directory（单一权威访问层）
-                        from src.domains.runtime.im.channel_directory import set_gitcode_nickname
+                        from src.domains.runtime.public import set_gitcode_nickname
                         set_gitcode_nickname(user["id"], _gc_user.get("name", ""))
                         log.info(f"unified_user_mapping synced: user_id={user['id']}, gitcode_user={gc_login}")
                     except Exception as _um_e:
@@ -436,7 +482,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 因此没有 409/转移票据；空值=清除 PAT 凭据（identity 解绑走既有解绑流程）。
     _platform_tokens = explicit.get("platform_tokens") or {}
     if _platform_tokens:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _known_platforms = set(list_vcs_platforms())
         from src.domains.mgmt.user.db import set_credential
         for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
@@ -519,14 +565,14 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # （与凭据域 D31 存储口径一致）；模块缺失/未声明时回退 <p>_pat 泛型口径。
     _scope_warnings = []
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+        from src.domains.runtime.public import list_vcs_platforms as _lvp
         _probe_platforms = _lvp()
     except Exception:
         # 卡目录不可用 → 不探测（不做平台名兜底：探测范围必须来自卡目录）
         _probe_platforms = []
     for _provider in _probe_platforms:
         try:
-            from src.domains.runtime.vcs.providers import module_for as _module_for
+            from src.domains.runtime.public import module_for as _module_for
             _suffix = getattr(_module_for(_provider), "SETTINGS_TOKEN_FIELD_SUFFIX", "pat")
         except Exception:
             _suffix = "pat"
@@ -537,7 +583,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 try:
                     # D43/S63：探测 URL/鉴权形态按平台卡派生（query_token→参数、其余→头）
                     import requests as _req
-                    from src.domains.runtime.vcs.platform_card import get_platform_card
+                    from src.domains.runtime.public import get_platform_card
                     _card = get_platform_card(_provider)
                     if _card is None:
                         raise RuntimeError(f"platform card missing: {_provider}")
@@ -849,8 +895,12 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
 @router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")
 def get_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_meta_value
+
+    # Issue #3054 P1-1：configured 与运行时同源（渠道表加密列），不再看 meta
+    from src.domains.mgmt.auth.providers import channel_configured
+
     return {
-        "gitcode_oauth_client_id": bool(get_meta_value("oauth_gitcode_client_id")),
+        "gitcode_oauth_client_id": channel_configured("gitcode"),
         "gitcode_oauth_redirect_uri": get_meta_value("oauth_gitcode_redirect_uri"),
     }
 
@@ -862,10 +912,17 @@ class OAuthConfig(BaseModel):
 @router.put("/oauth", operation_id="settings_oauth_update", summary="Update GitCode OAuth config", description="Updates the GitCode OAuth client config.")
 def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import set_meta_value
+
+    # Issue #3054 P1-1：client_id/secret 只落渠道表加密列，明文 secret 不写 meta
+    if body.gitcode_oauth_client_id or body.gitcode_oauth_client_secret:
+        from src.domains.mgmt.admin.config_store import save_oauth_credentials
+
+        save_oauth_credentials({
+            "gitcode_oauth_client_id": body.gitcode_oauth_client_id,
+            "gitcode_oauth_client_secret": body.gitcode_oauth_client_secret,
+        })
     if body.gitcode_oauth_client_id:
         set_meta_value("oauth_gitcode_client_id", body.gitcode_oauth_client_id)
-    if body.gitcode_oauth_client_secret:
-        set_meta_value("oauth_gitcode_client_secret", body.gitcode_oauth_client_secret)
     if body.gitcode_oauth_redirect_uri:
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
@@ -878,18 +935,27 @@ class GitHubOAuthConfig(BaseModel):
 @router.get("/oauth-github", operation_id="settings_oauth_github_get", summary="Get GitHub OAuth config", description="Returns GitHub OAuth configuration status (secret masked).")
 def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.auth.providers import channel_configured
+
     return {
-        "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
+        "github_oauth_client_id": channel_configured("github"),
         "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
     }
 
 @router.put("/oauth-github", operation_id="settings_oauth_github_update", summary="Update GitHub OAuth config", description="Updates the GitHub OAuth client config.")
 def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import set_meta_value
+
+    # Issue #3054 P1-1：同 /oauth —— 凭据只落渠道表加密列
+    if body.github_oauth_client_id or body.github_oauth_client_secret:
+        from src.domains.mgmt.admin.config_store import save_oauth_credentials
+
+        save_oauth_credentials({
+            "github_oauth_client_id": body.github_oauth_client_id,
+            "github_oauth_client_secret": body.github_oauth_client_secret,
+        })
     if body.github_oauth_client_id:
         set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
-    if body.github_oauth_client_secret:
-        set_meta_value("oauth_github_client_secret", body.github_oauth_client_secret)
     if body.github_oauth_redirect_uri:
         set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
     return {"message": "GitHub OAuth 配置已更新"}
@@ -930,7 +996,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     user=仅当前登录用户名下 user scope（含 owner=当前用户的本机引擎）。
     """
     from src.domains.mgmt.user import db as user_db
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
 
     uid = str(user.get("id") or "")
@@ -969,6 +1035,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         from src.domains.mgmt.user.org_db import is_org_personal
         _is_personal_org = is_org_personal(_org_id)
     _filter_org_id = "" if _is_personal_org else _org_id
+    # Issue #3167：可见性比较统一字符串口径（历史 integer org_id 行与 TEXT 用户
+    # org_id 同权），端点内预计算一次，避免逐行转换。
+    _org_self_key = _org_key(_org_id)
+    _org_filter_key = _org_key(_filter_org_id)
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
@@ -976,17 +1046,21 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 非个人组织：只显示 org_id 匹配的引擎（不含 global org_id=''）
         # 个人组织：只显示 org_id=''（全局/本机）和 org_id=自身个人组织的引擎，
         #           不显示其他非个人组织的引擎
-        rt_org_id = rt.get("org_id") or ""
+        # 注册链把无组织写成 int 0 → TEXT 列落 '0'（与本机引擎行的 '' 同语义）。
+        # Issue #3167：_org_key 统一归一（哨兵族 ''/'0'/'None'/0/None 一律折叠 ''），
+        # 不归一时个人组织视图把 '0' 当「别的组织」跳过 → 沙箱云引擎全部不可见
+        # （aw11 E-02 实测：个人组织视图下 13-18 行全被 org 过滤吃掉）。
+        rt_org_id = _org_key(rt)
         if _filter_org_id:
             # 非个人组织：严格 org_id 隔离
             # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
             # （与当前查看组织不同），但仓库级设备对仓库成员可见（#277 仓库隔离口径），
             # 可见性最终由 _visible_credential 的 repo_key in user_repos 判定收敛，不越权。
-            if rt_org_id != _filter_org_id:
+            if rt_org_id != _org_filter_key:
                 _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
                 if _cred_early.get("scope") != "repo":
                     continue
-        elif _is_personal_org and rt_org_id and rt_org_id != _org_id:
+        elif _is_personal_org and rt_org_id and rt_org_id != _org_self_key:
             # Issue #338：个人归属 worker 引擎（凭据 scope=user 且 owner=当前用户）
             # 不受凭据创建时绑定的 org_id 隔离——归属判断以 _visible_credential 为准
             # （与 dashboard 个人组织视图 "global + 自己的 user scope worker" 语义一致）
@@ -1021,7 +1095,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt["worker_name"] = cred["name"]
         # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name，
         # 前端读 rt.name 的所有位置一次生效；内部路由键（DB 行本身）不变
-        from src.domains.runtime.engine.instances import to_display
+        from src.domains.runtime.public import to_display
         rt["display_name"] = to_display(rt.get("display_name") or rt["name"])
         rt["name"] = to_display(rt["name"])
         rt["worker_ip"] = cred["last_ip"]
@@ -1043,6 +1117,37 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # Issue #2133：spawn_failed 时间窗降级 / 场景解绑恢复入口（前端 degraded 高亮 + 一键加回）
         rt["spawn_fail_degraded"] = bool(rt.get("spawn_fail_degraded_at"))
         rt["detached_from_scenes"] = bool(rt.get("detached_from_scenes_at"))
+        # [沙箱迁移 i7] 沙箱 worker 提供的引擎：附平台/模板（卡片与详情展示+筛选用）。
+        # 判定（三路取或）：① 凭据 cred_type='sandbox' ② runtime_info.platform 非空
+        # ③ 引擎名解析平台（四段制 {engine}:{template}:{platform}:{provider_id} 第3段 /
+        #    存量三段式 {engine}:{platform}:{provider_id} 第2段）。
+        _sb_cred = cred_map.get(cid) or {}
+        try:
+            import json as _json_sb
+            _ri = _json_sb.loads(rt.get("runtime_info") or "{}") if isinstance(rt.get("runtime_info"), str) else (rt.get("runtime_info") or {})
+        except Exception:
+            _ri = {}
+        _ri_platform = (_ri.get("platform") or "").strip() if isinstance(_ri, dict) else ""
+        _name_platform = ""
+        _name_parts = (rt.get("name") or "").split(":")
+        if _name_parts and _name_parts[0] in ("hermes", "opencode", "codearts", "codex", "aishell"):
+            if len(_name_parts) >= 4:
+                _name_platform = _name_parts[2]
+            elif len(_name_parts) == 3:
+                _name_platform = _name_parts[1]
+        if (_sb_cred.get("cred_type") or "worker") == "sandbox" or _ri_platform or _name_platform:
+            rt["is_sandbox"] = True
+            # [展示语义 i7 用户裁定] sandbox_platform = Provider 名（runtime_info.provider_name 优先）
+            _ri_provider = (_ri.get("provider_name") or "").strip() if isinstance(_ri, dict) else ""
+            rt["sandbox_platform"] = _ri_provider or _ri_platform or _name_platform or (_sb_cred.get("platform") or "")
+            rt["sandbox_platform_tech"] = _ri_platform or _name_platform or (_sb_cred.get("platform") or "")
+            rt["platform_enabled"] = _sb_cred.get("platform_enabled", None)
+            rt["sandbox_template"] = (_ri.get("template_name") or _ri.get("template_id") or "") if isinstance(_ri, dict) else ""
+        else:
+            rt["is_sandbox"] = False
+            rt["sandbox_platform"] = ""
+            rt["sandbox_platform_tech"] = ""
+            rt["sandbox_template"] = ""
         # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
         try:
             from src.kernel.worker_package import worker_code_version, normalize_worker_version
@@ -1058,7 +1163,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # Issue #498: 透出统一异常口径（health_abnormal/health_reason）与自愈留痕
         # （最近失败时间/衰减窗口有效失败数），前端两口径一致呈现、异常原因可见
         try:
-            from src.domains.runtime.engine.health_scorer import get_health_score
+            from src.domains.runtime.public import get_health_score
             _hd = get_health_score(rt["id"])
             rt["health_score"] = _hd.get("health_score")
             rt["health_total_tasks"] = _hd.get("total_tasks", 0)
@@ -1088,9 +1193,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     _devices_cached = cached
     if _filter_org_id:
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or "") == _filter_org_id
+                             if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                              or v.get("scope") == "repo"}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") == _filter_org_id
+        _devices_cached = [rt for rt in cached if _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1101,10 +1206,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or "") in ("", _org_id)
+                             if _org_unassigned(v) or _org_key(v) == _org_self_key
                              or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") in ("", _org_id)
+        _devices_cached = [rt for rt in cached if _org_key(rt) in ("", _org_self_key)
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
@@ -1200,13 +1305,20 @@ def _engine_type_of(rt: dict) -> str:
     n = (rt.get("instance_name") or rt.get("name") or "").lower()
     if not n:
         return ""
-    from src.domains.runtime.engine.instances import canonical_engine
+    from src.domains.runtime.public import canonical_engine
 
     c = canonical_engine(n)
     if c == "aishell-dsh":
         return "aishell-dsh"
     if c == "hwcloud":
         return "aishell"
+    # [云四段名] engine:template:platform:provider——canonical 已按首段解析出权威类型。
+    # 不得落入下方旧轨 includes 兜底：模板名段可含任意引擎词（hermes-git-a-ode），
+    # 旧序 hermes 先于 opencode → opencode:hermes-* 被误判为 hermes，引擎页
+    # hermes 筛选出现 opencode 云引擎（aw11 E-02 实测 2026-11-16；前端
+    # DashboardView.engEngineTypeOf 2026-11-12 已同族修复，此处对齐）。
+    if ":" in n:
+        return c
     if c != "opencode":
         return c
     # 旧轨兜底：名字中段包含引擎词的历史形态（与改造前 includes 判定一致）
@@ -1243,7 +1355,7 @@ def _runtime_health(rt: dict, now: float) -> str:
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
+    from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
     if rt.get("installed") and rt.get("healthy"):
@@ -1258,7 +1370,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     凭据 `status` 恒为 'active'（不表达在线），不能像 runtime 行那样按 `status='online'` 判定；
     在线 = 最近心跳在 _DEVICE_ONLINE_WINDOW 内；失联 <5min = 刚失联；>6d = 待回收；其余离线。
     """
-    from src.domains.runtime.engine.health import parse_dt
+    from src.domains.runtime.public import parse_dt
     ts = parse_dt(last_seen_at)
     if ts is None:
         return "offline"
@@ -1280,8 +1392,12 @@ def _creds_via_lib():
         return None
     try:
         from src.domains.runtime import public as _rt
-
-        return _rt if _rt.available() else None
+        if not _rt.available():
+            return None
+        # 注意：不能整体换成 provider 实例 —— 调用方用的是 public 原语名
+        # （list_active_credential_ids 等），provider 契约里没有这些方法，
+        # 换过去会 AttributeError 500。只对已命名的两个方法就近走 provider。
+        return _rt
     except Exception as _exc:  # noqa: BLE001
         log.warning(f"credentials via lib unavailable: {_exc}")
         return None
@@ -1292,9 +1408,14 @@ def _build_cred_map(db, db_lock) -> dict:
 
     只读取**密文/元数据列**（不涉及解密）；lib 模式下由 runtime 自己的连接取数。
     """
-    _rt = _creds_via_lib()
-    if _rt is not None:
-        rows = _rt.list_credential_rows()
+    _rt_lib = _creds_via_lib()
+    if _rt_lib is not None:
+        try:
+            from src.kernel.gsb.provider import get_service as _gs_cr
+            rows = _gs_cr("runtime").list_credential_rows()
+        except Exception as _ge_cr:  # noqa: BLE001
+            log.debug(f"settings: provider list_credential_rows failed, fallback: {_ge_cr}")
+            rows = _rt_lib.list_credential_rows()
     else:
         with db_lock:
             c = db.cursor()
@@ -1307,12 +1428,28 @@ def _build_cred_map(db, db_lock) -> dict:
                 rows = _rt.read_all_any("runtime_credentials_all")
     cred_map = {}
     for r in rows:
-        cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
+        cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec, ccred_type, cplatform = r
         cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                          "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                          "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
                          "repo_key": crepo_key or "", "org_id": corg_id or "",
-                         "spec": cspec or ""}
+                         "spec": cspec or "",
+                         "cred_type": ccred_type or "worker", "platform": cplatform or ""}
+
+    # [沙箱迁移 i7] 沙箱凭据关联的平台 id + 启用态（设备卡片禁用徽标 / 跳 Provider 详情用）
+    # grape_t_sandbox_provider_config 归 mgmt：mgmt 进程本地游标
+    try:
+        from src.kernel.bulk_read import reader
+        with reader() as c:
+            _prov_rows = c.execute(
+                "SELECT id, enabled, runtime_credential_id FROM grape_t_sandbox_provider_config "
+                "WHERE runtime_credential_id > 0").fetchall()
+        for _pid, _pen, _pcid in _prov_rows:
+            if _pcid in cred_map:
+                cred_map[_pcid]["provider_id"] = _pid
+                cred_map[_pcid]["platform_enabled"] = bool(_pen)
+    except Exception:
+        pass
     return cred_map
 
 def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):
@@ -1385,8 +1522,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                       两个端点均已查询，传入复用避免二次全量扫描）
       now: 当前时间戳
     """
-    from src.domains.runtime.engine.health import derive_runtime_health
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import derive_runtime_health
+    from src.domains.runtime.public import instance_name
     import json as _json
 
     devices = []
@@ -1414,7 +1551,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             # agent_runtimes 归运行域：具名查询（任意拓扑）
             _lr_rows = _rt.read_all_any("runtimes_by_credential_full", (cid,))
         # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
-        from src.domains.runtime.engine.instances import to_display as _td2
+        from src.domains.runtime.public import to_display as _td2
         runtimes = [
             {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
              "installed": bool(x[4]),
@@ -1429,7 +1566,12 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         _rtl = _runtime_lib_tags()
         for rt in runtimes:
             if _rtl is not None:
-                rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
+                try:
+                    from src.kernel.gsb.provider import get_service as _gs_et
+                    rt["agent_tags"] = _gs_et("runtime").list_engine_tags(rt["id"], enabled_only=True)
+                except Exception as _ge_et:  # noqa: BLE001
+                    log.debug(f"settings: provider list_engine_tags failed, fallback: {_ge_et}")
+                    rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
                 continue
             # engine_capabilities 归运行域：具名查询（任意拓扑）
             rt["agent_tags"] = [r[0] for r in
@@ -1447,6 +1589,9 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                         "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                         "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                         "owner": cred.get("owner_name", ""),
+                        "cred_type": cred.get("cred_type", "worker"), "platform": cred.get("platform", ""),
+                        "provider_id": cred.get("provider_id", "") or "",
+                        "platform_enabled": cred.get("platform_enabled", None),
                         "repo_key": from_repo_key(cred.get("repo_key", "")),
                         "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                         "worker_version": _dev_wv,
@@ -1460,7 +1605,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     except Exception:
         pass
     _device_by_name = {d.get("device_name", ""): d for d in devices}
-    from src.domains.runtime.engine.instances import engine_mounts_to_credential as _mounts_to
+    from src.domains.runtime.public import engine_mounts_to_credential as _mounts_to
 
     for rt in local_runtimes:
         if (rt.get("credential_id") or 0) != 0:
@@ -1473,7 +1618,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["health"] = _runtime_health(rt, now)
         _hn = rt.get("host_name") or _local_hostname or ""
         rt["instance_name"] = instance_name(rt["name"], _hn, 0)
-        from src.domains.runtime.engine.instances import to_display as _td
+        from src.domains.runtime.public import to_display as _td
         rt["name"] = _td(rt["name"])
         target_device = next((d for d in devices
                               if _mounts_to(0, rt.get("host_name"), d.get("device_name", ""))), None)
@@ -1529,7 +1674,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 @router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo. Issue #473: range param narrows the viewing scope - empty/all (default), repo (repo scope only), user (current user's user-scope + own local engines); invalid range values are rejected with 422.")
 def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 20,
                         scope: str = "", type: str = "", q: str = "", repo: str = "",
-                        range: RTRange = ""):
+                        range: RTRange = "", sandbox_type: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
@@ -1575,13 +1720,16 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     _org_id = user.get("org_id", "")
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = "" if _is_personal_org else _org_id
+    # Issue #3167：可见性比较统一字符串口径（与 get_agent_runtimes 同源缺陷同修）。
+    _org_self_key = _org_key(_org_id)
+    _org_filter_key = _org_key(_filter_org_id)
     if _filter_org_id:
         # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == _filter_org_id
+        _local_runtimes = [rt for rt in _local_runtimes if _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or "") == _filter_org_id
+                    if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                     or v.get("scope") == "repo"}
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1590,11 +1738,11 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == ""
-                           or (rt.get("org_id") or "") == _org_id
+        _local_runtimes = [rt for rt in _local_runtimes if _org_unassigned(rt)
+                           or _org_key(rt) == _org_self_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or "") in ("", _org_id)
+                    if _org_unassigned(v) or _org_key(v) == _org_self_key
                     or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
@@ -1643,6 +1791,17 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
             ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global")) == scope
         )]
 
+    # [沙箱迁移 i7] 平台筛选：sandbox_type=平台名只留该平台沙箱 worker；'non_sandbox' 归类所有非沙箱设备
+    _avail_sandbox_types = list(set(
+        (d.get("platform") or "") for d in devices if (d.get("cred_type") or "worker") == "sandbox" and d.get("platform")
+    ))
+    _has_non_sandbox = any((d.get("cred_type") or "worker") != "sandbox" for d in devices)
+    if sandbox_type:
+        if sandbox_type == "non_sandbox":
+            devices = [d for d in devices if (d.get("cred_type") or "worker") != "sandbox"]
+        else:
+            devices = [d for d in devices if (d.get("cred_type") or "worker") == "sandbox" and d.get("platform") == sandbox_type]
+
     # 分页切片（total 为筛选后总数）
     total = len(devices)
     # Issue #472 全局口径：统计栏数据源 = 筛选后整体搜索结果的健康分布（与分页解耦）
@@ -1653,10 +1812,12 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         paged_devices = devices[_offset:_offset + page_size]
         return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
                 "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-                "health_stats": health_stats}
+                "health_stats": health_stats,
+                "avail_sandbox_types": _avail_sandbox_types, "has_non_sandbox": _has_non_sandbox}
     return {"devices": devices, "total": total,
             "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-            "health_stats": health_stats}
+            "health_stats": health_stats,
+            "avail_sandbox_types": _avail_sandbox_types, "has_non_sandbox": _has_non_sandbox}
 
 def _device_engine_types(d: dict) -> list:
     """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
@@ -1716,7 +1877,7 @@ def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member
         raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放"})
-    from src.domains.runtime.engine.health_scorer import reset_health
+    from src.domains.runtime.public import reset_health
     data = reset_health(rid)
     if data is None:
         log.warning(f"health-reset failed for runtime={rid} operator={user.get('username') or user.get('id')}")
@@ -1746,7 +1907,7 @@ def readd_agent_runtime(rid: int, user: dict = Depends(require_org_member), repo
     # 仅仓库级/个人级 worker 设备的引擎可一键加回（I-c，QA 第2轮）。
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持一键加回，全局引擎不开放"})
-    from src.domains.runtime.engine.recovery import recover_engine
+    from src.domains.runtime.public import recover_engine
     out = recover_engine(rid, trigger="manual", force=True)
     if not out.get("recovered"):
         log.warning(f"engine readd failed runtime={rid} operator={user.get('username') or user.get('id')} "
@@ -1766,9 +1927,9 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
     这里接住返回 500 JSON 而非让异常冒泡导致 uvicorn 进程崩溃（→ 502）。
     """
-    from src.domains.runtime.engine.registry import discover_runtimes
-    from src.domains.runtime.engine.local_probe import probe_local_engines
-    from src.domains.runtime.engine.agent import _scan_local_skills
+    from src.domains.runtime.public import discover_runtimes
+    from src.domains.runtime.public import probe_local_engines
+    from src.domains.runtime.public import _scan_local_skills
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
     _hostname = engine_host()
@@ -1777,7 +1938,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
         results = probe_local_engines(discovered)
 
         # 扫描本机 local_skills 详情并注入
-        from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
+        from src.domains.runtime.public import _scan_local_skills_with_detail
         for r in results:
             _name = (r.get("name") or "").strip().lower()
             r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
@@ -1803,6 +1964,13 @@ class RuntimeCredBody(BaseModel):
     name: str
     scope: str = "user"       # user(个人)/repo(仓库)/global(全局)，默认个人
     repo_key: str = ""        # scope=repo 时必填（目标仓库全名，如 owner/repo）
+    cred_type: str = "worker" # worker(普通设备)/sandbox(沙箱 worker)——[沙箱迁移] i7 移植
+    platform: str = ""        # cred_type=sandbox 时必填（沙箱平台，如 cubesandbox/devbox）
+    # [endpoint 直接入库] 平台连接信息——生成时直接写入 Provider（endpoint/api_key 加密/证书 PEM），
+    # 一键命令不再携带 --platform-* 参数；worker 上报降级为模板补报，不覆盖这些字段
+    platform_endpoint: str = ""
+    platform_api_key: str = ""
+    platform_ssl_cert_pem: str = ""
 
 def _normalize_scope(scope: str) -> str:
     s = _SCOPE_ALIAS.get((scope or "").strip().lower())
@@ -1823,6 +1991,18 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
     scope = _normalize_scope(body.scope)
+    # [沙箱迁移] 凭据类型校验：sandbox 类型必须指定已注册的沙箱平台（后端注册表校验，不硬编码）
+    cred_type = (body.cred_type or "worker").strip().lower()
+    platform = (body.platform or "").strip().lower()
+    if cred_type not in ("worker", "sandbox"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效的凭据类型: {cred_type}（仅支持 worker/sandbox）"})
+    if cred_type == "sandbox":
+        from src.domains.runtime.public import get_cloud_registry
+        _cloud = get_cloud_registry()
+        if not platform or platform not in _cloud:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"沙箱凭据必须指定有效平台（当前支持: {', '.join(sorted(_cloud))}）"})
+    else:
+        platform = ""
     owner = user.get("username") or ""
     repo_key = ""
     if scope in ("repo", "user"):
@@ -1834,7 +2014,14 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     # 解析当前组织 org_id
     _org_id = user.get("org_id", "")
     _is_personal = is_org_personal(_org_id) if _org_id else True
-    _cred_org_id = "" if _is_personal else _org_id
+    # org_id 在 runtime_credentials 里是 int 列：MySQL STRICT_TRANS_TABLES 下把 '' 写进去
+    # 直接 1366 Incorrect integer value，表现为「添加设备」整条请求 500。
+    # 个人组织（绝大多数场景）无组织归属 → 归 0（与 agent_runtimes 的既有归一一致），
+    # 不写空串、也不写 None（该列 NOT NULL DEFAULT 0）。
+    try:
+        _cred_org_id = 0 if _is_personal else int(_org_id)
+    except (TypeError, ValueError):
+        _cred_org_id = 0
     token = "rta_" + secrets.token_urlsafe(32)
     # P3-5f-3：runtime_credentials 在 runtime 域；重名判定由原语以返回值上报
     # （若让唯一约束异常冒泡，意图会被判为可重试失败而无限重放）
@@ -1851,8 +2038,12 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         # 同步直连，**不进幂等意图队列**：token 明文只在本次响应里出现一次，
         # 若落成可重放意图，排水重放时会造出无主凭据（孤儿 token，无法对账）。
         try:
+            from src.kernel.sandbox_uid import new_provider_uid as _npuid_sb
             _cc_out.update(_rt_cc_ok.insert_runtime_credential(
-                _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id))
+                _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id,
+                cred_type=getattr(body, "cred_type", "worker") or "worker",
+                platform=getattr(body, "platform", "") or "",
+                credential_uid=_npuid_sb()))
             _cc_done = True
         except Exception as _e_cc:
             log.warning(f"create_runtime_credential via lib failed, fallback to local SQL: {_e_cc}")
@@ -1864,14 +2055,65 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     else:
         # runtime_credentials 归运行域：插入原语返回 {action, id}；唯一键冲突以 duplicate 返回（不抛）
         try:
+            from src.kernel.sandbox_uid import new_provider_uid as _npuid_sb2
             _cc_res = _rt.insert_runtime_credential(
                 hashlib.sha256(token.encode()).hexdigest(), name, scope,
-                repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id)
+                repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id,
+                cred_type=getattr(body, "cred_type", "worker") or "worker",
+                platform=getattr(body, "platform", "") or "",
+                credential_uid=_npuid_sb2())
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
         if _cc_res.get("action") == "duplicate":
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
         cred_id = int(_cc_res.get("id") or 0)
+    # [endpoint 直接入库] 沙箱凭据：同时在云沙箱 Provider 侧登记一条（幂等，按
+    # runtime_credential_id 一凭据一 Provider）——生成时即写入平台连接信息（i7 移植）
+    _sb_warnings: list[str] = []
+    if cred_type == "sandbox":
+        try:
+            _sb_scope = "system" if scope == "global" else "user"
+            _sb_uid = 0 if scope == "global" else (user.get("id") or 0)
+            _sb_repo = repo_key if scope == "repo" else ""
+            _sb_name = f"{platform}-{name}"
+            from src.kernel.crypto import encrypt as _enc_sb
+            _sb_endpoint = (body.platform_endpoint or "").strip().rstrip("/")
+            _sb_key_enc = _enc_sb(body.platform_api_key.strip()) if (body.platform_api_key or "").strip() else ""
+            _sb_extra = {"ssl_cert": body.platform_ssl_cert_pem} if body.platform_ssl_cert_pem else {}
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
+                    (cred_id,))
+                _row = c.fetchone()
+                if _row:
+                    _sb_pid = _row[0]
+                    c.execute(
+                        "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=? WHERE id=?",
+                        (_sb_endpoint, _sb_key_enc,
+                         json.dumps(_sb_extra, ensure_ascii=False), _sb_pid))
+                else:
+                    from src.kernel.sandbox_uid import new_provider_uid as _npuid, new_row_uid as _nru
+                    _sb_pid = _nru()
+                    c.execute(
+                        "INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, extra_config, "
+                        "enabled, max_sandboxes, updated_by, runtime_credential_id, provider_uid) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (_sb_pid, platform, _sb_endpoint, _sb_key_enc,
+                         json.dumps(_sb_extra, ensure_ascii=False), 1, 10, owner, cred_id,
+                         _npuid()))
+                db.commit()
+            log.info(f"sandbox credential created, provider registered: cred={cred_id} platform={platform} "
+                     f"provider_id={_sb_pid} endpoint={_sb_endpoint or '(empty)'}")
+        except Exception as _sb_e:
+            # 不再静默：凭据已建成，但平台登记失败会让凭据变成"有凭据无平台"的孤儿
+            # （设备卡片没有 provider_id → 详情按钮消失，且沙箱任务无法使用该平台）。
+            # 用 ERROR 记完整异常（含密钥/连接等内部细节只在日志里），响应只回稳定
+            # warning code，由前端按 code 本地化提示——避免原文直出泄露内部信息、
+            # 也不让英文界面吃中文句子。
+            log.error(f"sandbox credential provider registration failed: {_sb_e}")
+            _sb_warnings.append(SANDBOX_PROVIDER_REGISTRATION_FAILED)
+
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
     try:
@@ -1879,7 +2121,11 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         ensure_package_ready()
     except Exception as _e:
         log.warning(f"预构建 worker 安装包失败: {_e}")
-    return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner, "message": "token 仅展示一次，请立即保存"}
+    resp = {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner,
+            "cred_type": cred_type, "platform": platform, "message": "token 仅展示一次，请立即保存"}
+    if _sb_warnings:
+        resp["warnings"] = _sb_warnings
+    return resp
 
 @router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential", description="Renames a credential (worker name); globally unique, duplicates rejected. owner/scope unchanged.")
 def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
@@ -2046,21 +2292,84 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
     引擎绑定真实性同步：实现已抽至 engine_select.cleanup_scene_engine_bindings（与
     离线超阈值解绑共用），本函数保留为薄包装（调用点不变，行为等价）。
     """
-    from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings
+    from src.domains.runtime.public import cleanup_scene_engine_bindings
     cleanup_scene_engine_bindings(rid_list)
 
-@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")
-def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_token)):
+
+def _sb_revoke_cleanup(cid: int) -> dict:
+    """[沙箱凭据] 吊销级联：清理该凭据关联的沙箱 Provider（纯 DB，v3 收缩版）。
+
+    [沙箱迁移 i7 漏移植恢复 2026-11-11] —— i7 settings.py:2060 段，此前整段丢失
+    （§清单高危点位二次丢失）。2026-10-30 用户裁定（spec §8.1 终版）：不主动 kill
+    平台侧沙箱——沙箱有平台超时回收，主动杀使吊销依赖平台可达性，全部收缩掉。
+    运行中沙箱由吊销端点前置弹窗确认（409 + confirm=true），用户知情后自行决定。
+
+    级联（全本地 DB，无平台调用）：
+    1. 删 grape_t_engine_template_binding + grape_t_sandbox_templates（该 Provider 的）
+    2. 删 grape_t_sandbox_provider_config 行
+    3. grape_t_cloud_sandboxes 保留（用户裁定：系统识别到的运行沙箱记录是用户去平台
+       手动清理的对账依据）——仅 state 置 orphaned、provider 清零防悬空 JOIN
+    4. 孤儿 Provider 兜底（悬空 runtime_credential_id 的行，历史产物残留）
+    """
+    result = {"deleted_templates": 0, "provider_deleted": False, "orphan_providers": 0}
+    from src.kernel.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
+                (cid,))
+            prov = c.fetchone()
+            # [吊销文案分流] 关联 Provider 存在 = 沙箱凭据（普通 worker 凭据无 Provider 关联）
+            # ——吊销端点据此决定 toast 是否带"机器侧旧 worker 实例将自动退出"
+            result["cred_type"] = "sandbox" if prov else "worker"
+            if prov:
+                provider_id = prov[0]
+                c.execute("SELECT COUNT(*) FROM grape_t_sandbox_templates WHERE provider_id=?", (provider_id,))
+                result["deleted_templates"] = c.fetchone()[0] or 0
+                c.execute("DELETE FROM grape_t_engine_template_binding WHERE provider_id=?", (provider_id,))
+                c.execute("DELETE FROM grape_t_sandbox_templates WHERE provider_id=?", (provider_id,))
+                c.execute("DELETE FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+                # 沙箱记录保留：state 置 orphaned（凭据已删无人再更新），provider 清零防悬空。
+                # G-02：该表归 runtime，mgmt 不得直连——经 runtime public 原语执行
+                try:
+                    _rt.mark_cloud_sandboxes_orphaned_by_provider(provider_id)
+                except Exception as _se:
+                    log.warning(f"revoke-cleanup mark sandboxes orphaned failed: {_se}")
+                result["provider_deleted"] = True
+            # 孤儿 Provider 兜底：runtime_credential_id 悬空的行整体清理。
+            # G-02：runtime_credentials 归 runtime——存活 id 集经 public 具名查询取
+            _cred_ids = [int(r[0]) for r in (_rt.read_all_any("runtime_credential_all_ids", ()) or [])]
+            if _cred_ids:
+                _ph = ",".join("?" * len(_cred_ids))
+                c.execute(
+                    f"DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0 "
+                    f"AND runtime_credential_id NOT IN ({_ph})", tuple(_cred_ids))
+            else:
+                c.execute("DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0")
+            result["orphan_providers"] = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+            db.commit()
+        log.info(f"revoke-cleanup: cred={cid} provider={prov[0] if prov else 0} "
+                 f"templates={result['deleted_templates']} orphans={result['orphan_providers']}")
+    except Exception as e:
+        log.warning(f"revoke-cleanup for cred {cid} failed (non-blocking): {e}")
+    return result
+
+
+@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved grape_t_cloud_sandboxes records); provider/templates deleted in DB, grape_t_cloud_sandboxes rows preserved as orphaned.")
+def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depends(require_no_session_token)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
     2026-08-17 用户指示「吊销=删除」：删除后 token 即刻失效（_auth_credential
     查不到 → 401）、凭据名释放可复用（全局唯一键不再被 revoked 行占用）。
-    级联清理：
-    - agent_runtimes：该凭据注册的引擎行一并删除
+    级联清理（Issue #646 统一显式清理链 + 对账报告，RESTRICT FK 兜底防漏）：
+    - agent_runtimes：该凭据注册的引擎行一并删除（删除前先显式清理引用）
+    - agent_type_runtime_pool / engine_capabilities：引用行显式删除
     - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
-    - devops_pipeline_scene.nodes_json：清理 engine_runtime_ids 中对被删 runtime 的悬空引用（Issue #250）
-    历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
-    （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
+    - devops_agent_runtime_binding：绑定行删除
+    - devops_pipeline_scene.nodes_json：清理 engine_runtime_ids 悬空引用（Issue #250）
+    - 历史 agent_tasks：按快照语义保留 uid+名称，恢复走 /api/events/{seq}/redispatch
+      （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
     """
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -2074,6 +2383,30 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
             _row = _rt.read_one_any("runtime_credential_owner_name", (cid,))
         if not _row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        # [沙箱迁移 i7] cred_type 归运行域：具名查询取凭据形态（沙箱 409 门禁/吊销文案用）
+        _cred_type = "worker"
+        try:
+            _ct_row = _rt.read_one_any("runtime_credential_type_by_id", (cid,))
+            _cred_type = ((_ct_row[0] if _ct_row else "") or "worker").lower()
+        except Exception:
+            _cred_type = "worker"
+        # 前置门禁（仅沙箱凭据，spec §8.1 v3）：running 沙箱记录存在 → 409 弹窗
+        if _cred_type == "sandbox" and not confirm:
+            try:
+                # G-02：grape_t_cloud_sandboxes 归 runtime、sandbox_provider_config 归 mgmt。
+                # 原具名查询用子查询跨库读（必然失败），改为两步编排。
+                from src.domains.mgmt import public as _mg_pids
+                from src.domains.runtime import public as _rt_cnt
+                _pids = _mg_pids.sandbox_provider_ids_by_credential(cid)
+                _active = _rt_cnt.cloud_sandboxes_active_count(_pids)
+                if _active > 0:
+                    raise HTTPException(status_code=409, detail={
+                        "code": 409, "active_sandboxes": _active,
+                        "message": f"当前有 {_active} 个运行中的沙箱"})
+            except HTTPException:
+                raise
+            except Exception:
+                pass
         # 扫雷⑨-H2：仅凭据 owner 可吊销（对齐同文件 scope 端点的 owner 校验范式）
         _owner = _row[0] or ""
         if _owner != (user.get("username") or ""):
@@ -2087,7 +2420,7 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
             _purged = _rt_purge.purge_runtime_credential(str(cid))
             _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
             if _purged_rids:
-                from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _csb_purge
+                from src.domains.runtime.public import cleanup_scene_engine_bindings as _csb_purge
                 # commit=False：修掉"在调用方事务中途提前提交"的旧缺陷
                 _csb_purge(_purged_rids, commit=False)
             db.commit()
@@ -2103,6 +2436,8 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
             _cleanup_scene_engine_runtime_ids(_purged_rids)
         log.info(f"revoke {cid}: engines={_purged.get('engines')} "
                  f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+    # 沙箱链级联（纯 DB：模板/绑定/Provider 删除 + 沙箱记录置 orphaned + 孤儿兜底）
+    _sb_cleanup = _sb_revoke_cleanup(cid)
     return {"message": f"凭据 {cid} 已吊销并删除"}
 
 class ExecModeBody(BaseModel):
@@ -2110,12 +2445,12 @@ class ExecModeBody(BaseModel):
 
 @router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode", description="Returns the current execution mode.")
 def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import get_execution_mode
+    from src.domains.runtime.public import get_execution_mode
     return {"mode": get_execution_mode()}
 
 @router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
 def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+    from src.domains.runtime.public import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 @router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode", description="Sets the pipeline mode.")
@@ -2129,7 +2464,7 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_to
 
 @router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode", description="Sets the execution mode.")
 def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import set_execution_mode
+    from src.domains.runtime.public import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
@@ -2557,31 +2892,65 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     返回 {oauth_kept: bool}。
     """
     from src.domains.mgmt.auth.grape_account_db import (
-        get_user_identities, delete_external_identity, revoke_provider_credentials)
-    ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
+        get_user_identities, delete_external_identity)
+    from src.domains.platform.public import on_pat_deleted
+    # 破坏性写前必须 strict 读：「读失败」≠「没有绑定」——非 strict 读把异常吞成
+    # 空列表，会让下面的 has_oauth 判假 → 误删真正的 OAuth 身份行并清其 token
+    # （无密码账号就此变成 0 种登录方式）。读不出来就整体放弃，不做任何变更。
+    try:
+        idents = get_user_identities(user["id"], strict=True)
+    except Exception as _read_err:
+        log.warning(f"_cascade_pat_clear: identity read failed, abort without writes "
+                    f"(user={user['id']}, provider={provider}): {_read_err}")
+        raise HTTPException(status_code=500, detail={
+            "code": 500,
+            "message": "读取平台绑定失败，未做任何变更，请稍后重试",
+        })
+    ident = next((i for i in idents if i["provider"] == provider), None)
     has_oauth = bool(ident and ident.get("has_oauth_token"))
-    _check_login_method_before_unbind(user["id"], provider)
-    revoke_provider_credentials(user["id"], provider)
-    if not has_oauth:
-        delete_external_identity(user["id"], provider)
+    # 清 PAT 不是登录方式变更：有 OAuth 时身份行原样保留，无 OAuth 时删的是
+    # PAT 归属行（access_token 恒空）——两种形态都不减少可用登录方式，
+    # 因此这里不能套「至少保留一种登录方式」前置闸（会把本行本身数成最后
+    # 一种方式，无密码账号清 PAT 恒 400）。真正的登录保底在身份解绑路径
+    # （grape_auth.unbind_provider → UnbindGuard/KeepOnePredicate 原子裁决）。
+    # 清 PAT 只撤 PAT 凭据：revoke_provider_credentials 会连 kind='oauth' 一起删，
+    # 把该平台的 OAuth 刷新 fallback 一并清掉（与「清 PAT 就只清 PAT」不符；
+    # oauth 凭据行的撤销归身份解绑路径）。PAT 行可能是迁移前的 `<p>_pat`
+    # 复合键，delete_credential 内部已做新旧键双删。
+    from src.domains.mgmt.user.db import delete_credential as _delete_credential
+    _delete_credential(user["id"], provider, kind="pat")
+    if ident is not None and not has_oauth:
+        # 删的是 PAT 归属行而非登录凭据：keep-one 判据会把这一行数成最后
+        # 一种登录方式而恒拒绝（原子 UPDATE rowcount=0 → 静默不删），
+        # 变成「接口 200 但归属行残留」，故显式关闭。
+        delete_external_identity(user["id"], provider, require_keep_one=False)
         # D42：user_repos 缓存清理（仅平台级解绑；OAuth 共存时供给②接管，列表保留）
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
             with _sm_dl:
                 _c = _sm_db.cursor()
-                _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
-                           (user["id"], f"{provider}:%"))
+                _pfx = f"{provider}:"
+                _c.execute(
+                    "DELETE FROM user_repos WHERE user_id=? AND substr(repo_key, 1, ?) = ?",
+                    (user["id"], len(_pfx), _pfx))
                 _sm_db.commit()
         except Exception as _e:
             log.warning(f"_cascade_pat_clear: user_repos cleanup failed (user={user['id']}, "
                         f"provider={provider}): {_e}")
+    # D109：清 PAT 是"凭据来源消失"事件，必须让关系表同步（hook 内部现查其它来源：
+    # 有 OAuth 保有 → 关系行保留；无 OAuth → revoke）。此路径不经过 delete_credential，
+    # 漏掉这一步就会出现「PAT 清空、无 OAuth，但用户仍在项目页而进不了引导页」。
+    try:
+        on_pat_deleted(str(user["id"]), str(provider))
+    except Exception as _e:
+        log.warning(f"_cascade_pat_clear: platform-link hook skipped: {_e}")
     return {"oauth_kept": has_oauth}
 
 def _pr_web_path_of(provider: str) -> str:
     """provider 模块 PR_WEB_PATH 能力位（前端链接权威）。"""
     try:
-        from src.domains.runtime.vcs.providers import _MODULES
-        return getattr(_MODULES.get(provider), "PR_WEB_PATH", "pull") or "pull"
+        from src.domains.runtime.public import pr_web_path
+        return pr_web_path(provider)
     except Exception:
         return "pull"
 
@@ -2589,34 +2958,25 @@ def _pr_web_path_of(provider: str) -> str:
 @router.get("/vcs/platforms", operation_id="settings_vcs_platforms",
             summary="List visible vcs platforms (builtin + configured)")
 def list_vcs_platforms_public():
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
-    from src.domains.mgmt.user.db import get_meta_value
-    # D102-N 续（2026-11-08 用户裁定）：部署级平台隐藏名单——meta
-    # vcs_platforms_hidden（JSON 数组，provider 名单）。未启用的平台
-    # （实例：GitLab）不进目录 → 引导页/凭据页不渲染。缺省空=全可见。
-    try:
-        _hidden = set(json.loads(get_meta_value("vcs_platforms_hidden") or "[]"))
-        if not isinstance(_hidden, (set, list)):
-            _hidden = set()
-    except Exception:
-        _hidden = set()
-    # 平台可见性唯一口径（本函数）：部署级隐藏名单 vcs_platforms_hidden。
-    # 平台卡在册即可见（纯 PAT 部署不配 OAuth 也能绑定 gitee/gitlab）；
-    # 不再按 OAuth 配置做过 ∉ 默认双平台筛选——白名单会藏掉纯 PAT 平台的卡片。
+    # D109 读路径：平台目录以对象模型为权威（grape_t_repo_platforms + caps），
+    # 平台卡只是导入源（migrated 前/表未就绪时兜底）——见 kernel.platform_object.registry。
+    from src.domains.platform.public import platform_descriptors
+    # 平台可见性唯一口径（2026-11-15 方案甲）：平台行 `enabled`。
+    # 判据单一实现见 src/domains/platform/visibility.py（/repos/member 403 也用同一份）。
+    # meta.vcs_platforms_hidden 已退役（迁移 202611170021 把名单写成 enabled=0 并删键）。
+    from src.domains.platform.public import is_platform_visible
     out = []
-    for provider in list_vcs_platforms():
-        if provider in _hidden:
-            continue
-        card = get_platform_card(provider)
-        if card is None:
+    for row in platform_descriptors():
+        provider = str(row.get("provider") or "")
+        if not provider or not is_platform_visible(provider):
             continue
         out.append({
             "provider": provider,
-            "name": card.name,
-            "host": card.host,
-            "dialect": card.dialect,
-            "pat_create_url": f"https://{card.host}/profile/personal_access_tokens",
-            "brand_color": card.brand_color,  # 台阶2：品牌资产进卡（#RRGGBB，空=前端兜底）
+            "name": row.get("name") or provider,
+            "host": row.get("host") or "",
+            "dialect": row.get("dialect") or "",
+            "pat_create_url": row.get("pat_create_url") or "",
+            "brand_color": row.get("brand_color") or "",  # 空=前端兜底
             # 前端 PR/MR 链接路径段（provider 模块能力位，避免前端按平台名/方言猜）
             "pr_web_path": _pr_web_path_of(provider),
         })
@@ -2638,7 +2998,15 @@ def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
     try:
         # obs_llm_usage 归 insight：聚合走该域原语（任意拓扑；只取模型名字段）
         from src.domains.insight import public as _insight_public  # noqa: PLC0415
-        for eng_id, m_key, m_raw, cnt, last_used in _insight_public.aggregate_llm_usage(ids):
+        # 走 provider（GSB，mgmt → insight）；失败回落 insight 域原语
+        try:
+            from src.kernel.gsb.provider import get_service as _gs
+            _rows = _gs("insight").aggregate_llm_usage(ids)
+        except Exception as _ge:  # noqa: BLE001
+            from src.kernel.config import log as _lg
+            _lg.debug(f"settings: provider aggregate_llm_usage failed, fallback: {_ge}")
+            _rows = _insight_public.aggregate_llm_usage(ids)
+        for eng_id, m_key, m_raw, cnt, last_used in _rows:
                 model = str(m_key or m_raw or "").strip()
                 if not model:
                     continue
@@ -2660,7 +3028,7 @@ def _attach_engine_models(runtimes: list[dict]) -> None:
       服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
     仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
     """
-    from src.domains.runtime.engine.engine_model import detect_engine_model
+    from src.domains.runtime.public import detect_engine_model
     recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
     for rt in runtimes:
         rt["recent_models"] = recent.get(rt.get("id"), [])
@@ -2677,3 +3045,1330 @@ def _attach_engine_models(runtimes: list[dict]) -> None:
 _LEGACY_PAT_FIELD_PROVIDERS = {"gitcode", "github"}
 
 _RECENT_MODELS_TOP_N = 3
+# =============================================================================
+# ===== [沙箱迁移] 沙箱模板 / Provider 管理 API（自旧分支 settings.py 移植）=====
+# =============================================================================
+
+
+# ===== 沙箱模板管理（admin only） =====
+
+class SandboxTemplateBody(BaseModel):
+    """沙箱模板创建/编辑 body。v3：加 provider_id，engines 废弃写空。
+
+    engines 前端现为三态对象 {et: 'preinstalled'|'install'}（绑定走 bind-engine API），
+    此字段接收但忽略（str|dict|list 皆可，防 422）。
+    """
+    name: str
+    provider: str = ""
+    template_id: str
+    provider_id: str = ""
+    alias: str = ""
+    description: str = ""
+    engines: str | dict | list = "[]"
+    preinstalled: str = "{}"
+    disk_size_mb: int = 0
+    enabled: int = 1
+
+
+def _require_admin(user: dict):
+    """[沙箱迁移] 校验 admin 权限（适配 main：admin_accounts 而非 user_accounts.is_admin）。"""
+    from src.domains.mgmt.routes.sandbox_admin import _require_admin as _sa_admin
+    _sa_admin(user)
+
+
+
+def _org_key(v) -> str:
+    """org_id 归一为可比较字符串（Issue #3167）。
+
+    历史库 runtime_credentials / agent_runtimes 的 org_id 存在 integer 行（旧
+    insert 未做 TEXT 归一），直接参与可见性比较时两处翻车：
+      ① int 值调 .strip() 抛 AttributeError → 引擎/设备端点必现 500；
+      ② '2' == 2 恒 False（不报错）→ 本应可见的引擎/设备被静默过滤。
+    故统一在此归一：
+      - 未归属哨兵族（None/''/0/0.0/False/'0'/'None'，含空白形态）一律折叠为 ''；
+      - 真实归属值归一为去空白字符串（5 / '5' / ' 5 ' → '5'）。
+    接受行 dict（取 org_id 字段）或裸 org_id 值，供端点判定与 _org_unassigned 共用。
+    """
+    if isinstance(v, dict):
+        v = v.get("org_id")
+    if not v:
+        return ""
+    key = str(v).strip()
+    return "" if key in ("0", "None") else key
+
+
+def _org_unassigned(v) -> bool:
+    """org_id 未归属判定：''（D105 第三批哨兵）与历史脏值 '0'/'None'（旧 int 列
+    时代 insert 归一遗留）同权——可见性过滤必须把未归属凭据对个人组织放行，
+    否则 s3/s4 这类 global 凭据在个人组织视图下会整批消失（实测根因）。
+    Issue #3167：类型归一集中在 _org_key，历史 integer 行不再抛 .strip()。"""
+    return _org_key(v) == ""
+
+
+def _sb_cred_brief_map() -> dict:
+    """沙箱 Provider 端点族的凭据速查 map（G-02 收敛后的唯一 rc 读取口）。
+
+    runtime_credentials 归 runtime——mgmt 侧不得直连；经 runtime public 具名
+    查询取全量 brief（管理面小表，单请求一次）。返回 {cred_id: (name, scope,
+    owner_name, owner_id, repo_key)}；public 不可用（如单库测试拓扑异常）时降级
+    空 map，调用方按凭据缺失口径处理（与旧行为的 LEFT JOIN NULL 行对齐）。
+    """
+    try:
+        rows = _rt.read_all_any("sandbox_provider_cred_brief_map", ())
+        return {int(r[0]): ((r[1] or ""), (r[2] or ""), (r[3] or ""), (r[4] or ""), (r[5] or "")) for r in rows}
+    except Exception as e:
+        log.warning(f"sandbox cred brief map unavailable: {e}")
+        return {}
+
+
+def _sb_cred_report_owner(cred_id: int, user) -> bool:
+    """[沙箱凭据] 判定当前用户是否为「沙箱凭据上报 Provider」的管理者（i7 移植）：
+
+    该凭据的 owner_name 与当前用户一致（或 admin）。
+    凭据上报的 Provider 即使 scope=system（凭据选全局）也应可操作模板
+    （绑定引擎/编辑/启停/删除）——权限单一条件：凭据 owner（系统类别已删除）。
+    """
+    if (user.get("is_admin") or 0):
+        return True
+    try:
+        row = _rt.read_one_any("runtime_credential_owner_name_by_id", (cred_id,))
+        return bool(row and (row[0] or "") == (user.get("username") or ""))
+    except Exception:
+        return False
+
+
+@router.get("/sandbox-templates", operation_id="settings_sandbox_templates_list", summary="List sandbox templates")
+def list_sandbox_templates(request: Request, provider: str = "", provider_id: str = "", q: str = "", page: int = 1, page_size: int = 20):
+    """列出沙箱模板。支持 provider 筛选、搜索、分页。
+    
+    认证：rta_ runtime 凭据（cloud_worker）或 session token / API key（前端用户）
+    授权：rta_ 凭据任意 scope（global/user/repo——按自己 Provider 过滤模板）；
+    前端用户正常认证即可
+    
+    cloud_worker 拉取时 JOIN grape_t_sandbox_provider_config.enabled——跳过凭据已禁用的 provider 的模板。
+    这样 cloud_worker 不会注册无法创建沙箱的模板（provider 凭据被禁用 = 无 api_key 可用）。
+    前端用户查询时返回全部模板（管理界面需展示所有模板，包括禁用凭据的 provider 的模板）。
+    
+    搜索（q）：按 name / description 模糊匹配。
+    分页：page/page_size，page_size=0 时不分页（兼容 cloud_worker 旧逻辑）。
+    """
+    from src.api.deps import get_current_user_or_api_key, _extract_api_token
+    from src.kernel.auth_sdk.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX
+    from src.kernel.session_manager import db, db_lock
+    import hashlib
+    
+    token = _extract_api_token(request) if request else ""
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+    
+    # rta_ runtime 凭据——任意 scope 可读（user/repo 只见自己 Provider 的模板）
+    _is_cloud_worker = False
+    if token.startswith("rta_"):
+        _sha = hashlib.sha256(token.encode()).hexdigest()
+        row = _rt.read_one_any("runtime_credential_scope_by_token", (_sha,))
+        if not row:
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid runtime credential"})
+        # [scope 打通 2026-10-30 用户裁定] user/repo 沙箱凭据同权拉模板——不再 403 硬拦。
+        # 原 global-only 是历史设计(当时只有全局池 cloud_worker); 现在 user/repo 凭据
+        # 有自己的 Provider(生成凭据时登记), 走下方 _rt_cred_id 过滤天然只见自己的模板。
+        # BOLA: 引擎/任务链路(claim/heartbeat/BOLA 校验)本就 scope 感知, 无需此处拦截。
+        _is_cloud_worker = True
+        _rt_cred_id = row[0]  # [沙箱凭据] cloud_worker 的凭据 id——模板按 Provider 来源过滤
+    else:
+        # session token / API key / JWT —— 原有流程（user 用于后续 admin 校验，GET 不需要）
+        get_current_user_or_api_key(request)
+        _rt_cred_id = 0  # 非凭据链路，不过滤
+    # 搜索条件（cloud_worker 和前端用户共用）
+    q = (q or "").strip()
+    search_conditions = []
+    search_params = []
+    if q:
+        search_conditions.append("(name LIKE ? OR description LIKE ?)")
+        search_kw = f"%{q}%"
+        search_params.extend([search_kw, search_kw])
+    # v3：provider_id 筛选（优先于 provider 字符串）
+    if provider_id:
+        search_conditions.append("provider_id=?")
+        search_params.append(provider_id)
+    search_where = (" AND " + " AND ".join(search_conditions)) if search_conditions else ""
+    
+    use_paging = page_size and page_size > 0
+    total = 0
+    
+    from src.kernel.bulk_read import reader
+    with reader() as c:
+        if _is_cloud_worker:
+            # cloud_worker：JOIN grape_t_sandbox_provider_config——跳过凭据已禁用的 provider 的模板
+            # + 跳过模板自身 enabled=0 的行（禁用模板的引擎不应注册；provider_id 关联按 v3 语义，
+            #  旧 t.provider 字符串 JOIN 会跨实例误匹配同平台所有 Provider）
+            if provider_id:
+                # [删 provider 列] 字符串筛选改 provider_id(?provider_id 参数既有)
+                base_where = "WHERE t.provider_id=? AND (pc.enabled IS NULL OR pc.enabled=1) AND t.enabled=1"
+                base_params = [provider_id]
+            elif _is_cloud_worker and _rt_cred_id:
+                # [沙箱凭据] cloud_worker 只展开自己的 Provider（runtime_credential_id=自己）
+                # + 无凭据来源的 Provider（cred_id=0，key_file 时代老链路如 cube）——
+                # 否则同平台多 Provider 时每个 worker 都注册所有引擎（test-cube 误挂 cube 引擎根因）
+                # [删系统类别] cred_id=0 分支删除——Provider 只能由凭据生成（无凭据 Provider 不存在）
+                base_where = ("WHERE (pc.enabled IS NULL OR pc.enabled=1) AND t.enabled=1 "
+                              "AND pc.runtime_credential_id=?")
+                base_params = [_rt_cred_id]
+            else:
+                base_where = "WHERE (pc.enabled IS NULL OR pc.enabled=1) AND t.enabled=1"
+                base_params = []
+            full_where = base_where + search_where
+            full_params = base_params + search_params
+            
+            if use_paging:
+                c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_templates t LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id {full_where}", tuple(full_params))
+                total = c.fetchone()[0]
+                offset = (page - 1) * page_size
+                c.execute(
+                    f"SELECT t.* FROM grape_t_sandbox_templates t "
+                    f"LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id "
+                    f"{full_where} ORDER BY t.id LIMIT ? OFFSET ?",
+                    tuple(full_params + [int(page_size), int(offset)]))
+            else:
+                c.execute(
+                    f"SELECT t.* FROM grape_t_sandbox_templates t "
+                    f"LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id "
+                    f"{full_where} ORDER BY t.id",
+                    tuple(full_params))
+        else:
+            # 前端用户：返回全部模板（管理界面需展示所有模板）
+            if provider:
+                base_where = "WHERE provider=?"
+                base_params = [provider]
+            else:
+                base_where = ""
+                base_params = []
+            full_where = base_where + search_where if base_where else (search_where.replace(" AND ", "WHERE ", 1) if search_where else "")
+            full_params = base_params + search_params
+            
+            if use_paging:
+                c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_templates {full_where}", tuple(full_params))
+                total = c.fetchone()[0]
+                offset = (page - 1) * page_size
+                c.execute(
+                    f"SELECT * FROM grape_t_sandbox_templates {full_where} ORDER BY id LIMIT ? OFFSET ?",
+                    tuple(full_params + [int(page_size), int(offset)]))
+            else:
+                c.execute(
+                    f"SELECT * FROM grape_t_sandbox_templates {full_where} ORDER BY id",
+                    tuple(full_params))
+        cols = [d[0] for d in c.description]
+        rows = [dict(zip(cols, r)) for r in c.fetchall()]
+    # v3：补 platform/provider_name/scope（从 grape_t_sandbox_provider_config JOIN 取）
+    if rows:
+        _provider_ids = set(r.get("provider_id", 0) for r in rows if r.get("provider_id"))
+        if _provider_ids:
+            # [删 name 列] provider_name=凭据名——引擎名 provider 段跟随凭据名，凭据
+            # 改名 → 60s 内引擎名换新（rename-cleanup 兜底清旧行）。
+            # G-02：runtime_credentials 归 runtime——rc 列改自 brief map（mgmt 不直连）
+            with reader() as c:
+                _placeholders = ",".join("?" * len(_provider_ids))
+                c.execute(
+                    f"SELECT spc.id, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc "
+                    f"WHERE spc.id IN ({_placeholders})",
+                    tuple(_provider_ids))
+                _spc_rows = c.fetchall()
+            _brief = _sb_cred_brief_map()
+            _pc_map = {r[0]: {"provider_name": (_brief.get(int(r[2]), ("",))[0] if r[2] else ""),
+                              "platform": r[1] or "", "scope": (_brief.get(int(r[2]), ("", ""))[1] if r[2] else "system")}
+                       for r in _spc_rows}
+            for r in rows:
+                _pc = _pc_map.get(r.get("provider_id", 0), {})
+                r["platform"] = _pc.get("platform", "")
+                r["provider_name"] = _pc.get("provider_name", "")
+                r["scope"] = _pc.get("scope", "system")
+        # v3.1：engines 从 grape_t_engine_template_binding 取（模板行的 engines 列已废弃恒 '[]'）——
+        # 前端 Engines 列与 cloud_worker 引擎注册都消费这里
+        if rows:
+            with reader() as c:
+                c.execute("SELECT provider_id, engine_type, template_id FROM grape_t_engine_template_binding")
+                _bind_rows = c.fetchall()
+            _tpl_ids = set(r.get("id", 0) for r in rows)
+            _bind_map = {}
+            for _pid, _et, _tid in _bind_rows:
+                if _tid in _tpl_ids:
+                    _bind_map.setdefault(_tid, []).append(_et)
+            for r in rows:
+                _engines = _bind_map.get(r.get("id", 0), [])
+                r["engines"] = json.dumps(_engines) if _engines else "[]"
+    # [i5 契约 #2] template_uid/provider_uid 出口——旧库缺列降级 ''（迁移前启动的响应不塌）
+    for r in rows:
+        if "template_uid" not in r:
+            r["template_uid"] = ""
+        if "provider_uid" not in r:
+            r["provider_uid"] = ""
+    
+    if use_paging:
+        return {"templates": rows, "total": total, "page": page, "page_size": page_size}
+    return {"templates": rows}
+
+
+@router.post("/sandbox-templates", operation_id="settings_sandbox_template_create", summary="Create sandbox template")
+def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
+    """v3：创建沙箱模板。权限按 Provider scope 校验（非 admin only）。写 provider_id + provider。"""
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        # v3：校验 Provider 权限
+        # [d1e242cba 对账漏改修复 2026-10-30] 同 PUT 端点: 2 列 SELECT 访问 prow[2]
+        c.execute(
+            "SELECT platform, runtime_credential_id "
+            "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (body.provider_id,))
+        prow = c.fetchone()
+        if not prow:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
+        # [删系统类别 2026-10-30] 权限单一条件：凭据 owner（cred_id NOT NULL——无凭据 Provider 已不存在）
+        if not (prow[1] and _sb_cred_report_owner(prow[1], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        _brief = _sb_cred_brief_map()
+        _provider_name = (_brief.get(int(prow[1]), ("",))[0] if prow[1] else "") or body.provider or ""
+        from src.kernel.sandbox_uid import new_row_uid as _nru_tpl
+        tpl_id = _nru_tpl()
+        c.execute(
+            # [删 provider 列] INSERT 去掉该列
+            "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, description, "
+            "engines, preinstalled, disk_size_mb, enabled, created_at, updated_at, created_by, updated_by) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            # 新建模板默认 enabled=1（用户显式创建即生效；启用/禁用走操作栏 toggle）
+            (tpl_id, body.name, _provider_name, body.provider_id, body.template_id, body.alias, body.description,
+             "[]", body.preinstalled, body.disk_size_mb, 1,
+             _now, _now, user.get("username", ""), user.get("username", "")))
+        db.commit()
+    # 异步校验（不阻塞创建）
+    try:
+        _check_template_sync(tpl_id, _provider_name, body.template_id)
+    except Exception:
+        pass
+    return {"status": "created", "id": tpl_id}
+
+
+@router.put("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_update", summary="Update sandbox template")
+def update_sandbox_template(tpl_id: str, body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
+    """v3：更新沙箱模板。权限按 Provider scope 校验。"""
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        # v3：校验 Provider 权限
+        c.execute("SELECT provider_id, template_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
+        tpl_row = c.fetchone()
+        if not tpl_row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+        # template_id 不可变：与库内不一致时拒绝（防止 PUT 改绑到其他平台模板）
+        _cur_tid = tpl_row[1] or ""
+        if (body.template_id or "") != _cur_tid:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"template_id 不可修改（库内: {_cur_tid}，请求: {body.template_id}）。"
+                           f"如需更换请删除后重新登记"})
+        # [d1e242cba 对账漏改修复 2026-10-30] SELECT 2 列却访问 prow[2] → tuple index
+        # out of range(绑定引擎保存 PUT 500 根因, 模板 58/62 实证); name 列已删,
+        # provider 名改关联子查询取凭据名
+        c.execute(
+            "SELECT platform, runtime_credential_id "
+            "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (tpl_row[0] or body.provider_id,))
+        prow = c.fetchone()
+        # [删系统类别] 权限单一条件：凭据 owner
+        if prow and not (prow[1] and _sb_cred_report_owner(prow[1], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        _brief = _sb_cred_brief_map()
+        _provider_name = (_brief.get(int(prow[1]), ("",))[0] if (prow and prow[1]) else "") or body.provider or ""
+        # enabled 不随编辑更新（走操作栏 toggle；编辑表单已无该项）
+        c.execute(
+            # [删 provider 列] provider 列已删——UPDATE 去掉
+            "UPDATE grape_t_sandbox_templates SET name=?, template_id=?, alias=?, description=?, "
+            "preinstalled=?, disk_size_mb=?, updated_at=?, updated_by=? WHERE id=?",
+            (body.name, body.template_id, body.alias, body.description,
+             body.preinstalled, body.disk_size_mb,
+             _now, user.get("username", ""), tpl_id))
+        db.commit()
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+    try:
+        _check_template_sync(tpl_id, _provider_name, body.template_id)
+    except Exception:
+        pass
+    return {"status": "updated"}
+
+
+@router.delete("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_delete", summary="Delete sandbox template")
+def delete_sandbox_template(tpl_id: str, user: dict = Depends(require_no_session_token)):
+    """v3：删除沙箱模板。权限按 Provider scope 校验。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
+        tpl_row = c.fetchone()
+        if not tpl_row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (tpl_row[0],))
+        prow = c.fetchone()
+        # [删系统类别] 权限单一条件：凭据 owner
+        if prow and not (prow[0] and _sb_cred_report_owner(prow[0], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        c.execute("DELETE FROM grape_t_engine_template_binding WHERE template_id=?", (tpl_id,))
+        c.execute("DELETE FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
+        db.commit()
+    return {"status": "deleted"}
+
+
+@router.get("/sandbox-providers", operation_id="settings_sandbox_providers",
+            summary="List sandbox providers",
+            description="Lists system + current user's sandbox providers. api_key is masked. Supports search and pagination.")
+def list_sandbox_providers(q: str = "", page: int = 1, page_size: int = 20,
+                           user: dict = Depends(require_no_session_token)):
+    """v3 §3.1.1：列出 Provider（系统 + 当前用户）。api_key 脱敏。支持搜索和分页。"""
+    from src.kernel.session_manager import db, db_lock
+    q = (q or "").strip()
+    search_where = ""
+    use_paging = page_size and page_size > 0
+    from src.kernel.bulk_read import reader
+    # G-02：runtime_credentials 归 runtime——可见性/搜索/展示三用的 rc 列全部经 brief
+    # map 在 Python 侧合并（mgmt 不直连）；spc 本地全量取（管理面小表），过滤+分页
+    # 在内存完成，语义与旧 JOIN 逐条对齐：
+    #   可见 = 凭据缺失(cred_id=0) 或 (scope='global' 或 owner_name=当前用户)；
+    #   搜索 = 凭据名/endpoint/platform 之一 LIKE。
+    _brief = _sb_cred_brief_map()
+    _me = (user.get("username") or "")
+    with reader() as c:
+        c.execute(
+            "SELECT spc.id, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
+            "spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id "
+            "FROM grape_t_sandbox_provider_config spc ORDER BY spc.id")
+        _all_rows = c.fetchall()
+    def _vis(r):
+        cid = r[8] or 0
+        if not cid:
+            return True  # 旧 LEFT JOIN 凭据缺失行：可见（历史 key_file 形态）
+        b = _brief.get(int(cid))
+        if b is None:
+            return True  # 凭据已删（吊销保留孤儿）：旧 JOIN 行 rc.* 为 NULL → 可见
+        return b[1] == 'global' or b[2] == _me
+    def _match(r):
+        if not q:
+            return True
+        cid = r[8] or 0
+        b = _brief.get(int(cid)) if cid else None
+        name = (b[0] if b else "") or ""
+        return (q in name) or (q in (r[2] or "")) or (q in (r[1] or ""))
+    _filt = [r for r in _all_rows if _vis(r) and _match(r)]
+    total = len(_filt)
+    rows = []
+    if use_paging:
+        offset = (page - 1) * page_size
+        rows = _filt[offset:offset + int(page_size)]
+    result = []
+    for r in rows:
+        extra = json.loads(r[4]) if r[4] else {}
+        cid = r[8] or 0
+        b = _brief.get(int(cid)) if cid else None
+        result.append({
+            "id": r[0], "name": (b[0] if b else ""), "platform": r[1], "endpoint": r[2],
+            "api_key": "***" if r[3] else "", "extra_config": extra,
+            "enabled": r[5], "scope": (b[1] if b else ""), "user_id": (b[3] if b else ""),
+            "repo_key": (b[4] if b else ""), "max_sandboxes": r[6] or 10,
+            "updated_at": str(r[7]) if r[7] else "",
+            "runtime_credential_id": cid or 0,
+            "credential_name": (b[0] if b else ""),
+        })
+    return {"providers": result, "total": total, "page": page, "page_size": page_size}
+
+
+@router.post("/sandbox-providers", operation_id="settings_sandbox_provider_create",
+             summary="Create a sandbox provider")
+def create_sandbox_provider(body: dict, user: dict = Depends(require_no_session_token)):
+    """v3 §3.1.2：新增 Provider。不生成 credential（v3 生命周期独立）。"""
+    name = (body.get("name") or "").strip()
+    platform = _validate_platform((body.get("platform") or "").strip())
+    endpoint = (body.get("endpoint") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "name 不能为空"})
+    if not endpoint:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "endpoint 不能为空"})
+
+    api_key_plain = body.get("api_key") or ""
+    extra = body.get("extra_config") or {}
+    extra = _validate_extra_config(platform, extra)
+    extra_json = json.dumps(extra, ensure_ascii=False)
+    enabled = 1 if body.get("enabled", True) else 0
+    repo_key = (body.get("repo_key") or "").strip()
+    max_sandboxes = int(body.get("max_sandboxes", 10))
+    if max_sandboxes < 1 or max_sandboxes > 20:
+        max_sandboxes = 10
+    # 级别三选（scope_level）：user=用户级 / repo=仓库级 / global=全局
+    # 全局走 scope='system'（仅 admin 可建）；仓库级 scope='user'+repo_key；用户级 scope='user'
+    _scope_level = (body.get("scope_level") or "user").strip().lower()
+    if _scope_level not in ("user", "repo", "global"):
+        _scope_level = "user"
+    if _scope_level == "repo" and not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级 Provider 需要 repo_key"})
+    if _scope_level == "global":
+        try:
+            _require_admin(user)
+        except HTTPException:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仅管理员可创建全局 Provider"})
+
+    from src.kernel.crypto import encrypt
+    from src.kernel.session_manager import db, db_lock
+    api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
+    _uid = user.get("id", 0)
+    _scope = "system" if _scope_level == "global" else "user"
+
+    with db_lock:
+        c = db.cursor()
+        # [删 name 列] 唯一性由一凭据一 Provider 的 UPSERT 语义保证（创建入口=生成凭据）；手工端点的同名校验随列删除
+        # 校验数量上限
+        # [删系统类别 2026-10-30] 手工创建整体废弃——Provider 只能由「生成沙箱凭据」诞生
+        # （cred_id NOT NULL 约束下手工创建无法满足关联；WebUI 入口已删，API 同步关停）
+        raise HTTPException(status_code=410, detail={"code": 410, "message": "Provider 只能通过生成沙箱凭据创建（手工创建已废弃）"})
+
+
+@router.put("/sandbox-providers/{provider_id}", operation_id="settings_sandbox_provider_update",
+             summary="Update a sandbox provider")
+def update_sandbox_provider(provider_id: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """v3 §3.1.3：更新 Provider。级别规则：全局(system)可降级为用户/仓库级；用户/仓库级不可升为全局。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT api_key_enc, runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
+        _old_key, _sb_cred = row[0], (row[1] or 0)
+        # 级别变更规则（与生成凭据功能同款语义）：
+        # - 当前全局(system) → 可降级 user/repo（仅 admin 操作）
+        # - 当前用户级/仓库级(user) → 不可升为全局
+        # [删系统类别 2026-10-30] 权限单一条件：凭据 owner；级别(scope_level)参数废弃——
+        # 范围在凭据上改（重新生成凭据），平台编辑只管接入配置（endpoint/key/extra/上限/启停）
+        if not (_sb_cred and _sb_cred_report_owner(_sb_cred, user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+
+        endpoint = (body.get("endpoint") or "").strip()
+        if not endpoint:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "endpoint 不能为空"})
+
+        # platform 不可改，从 DB 取
+        c.execute("SELECT platform, extra_config FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+        _prow = c.fetchone()
+        platform = _prow[0]
+        # extra_config 语义（与 api_key 同款）：
+        # - 缺省（None）或空对象 {} → 保留 DB 旧值。前端编辑表单从平台 schema 动态组装
+        #   extra_config，schema 未定义的字段（如 proxy_node_ip）不在表单里——空对象是
+        #   常态，不能据此清空（曾两次清空 proxy_node_ip → 云沙箱 DNS 失败）
+        # - 非空 → 覆盖 + 校验
+        _body_extra = body.get("extra_config")
+        if _body_extra:
+            extra = _validate_extra_config(platform, _body_extra)
+        else:
+            try:
+                extra = json.loads(_prow[1] or "{}")
+            except Exception:
+                extra = {}
+            if not extra:
+                extra = {}
+        extra_json = json.dumps(extra, ensure_ascii=False)
+
+        from src.kernel.crypto import encrypt
+        api_key_plain = body.get("api_key")
+        if api_key_plain is not None:
+            api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
+        else:
+            api_key_enc = _old_key
+
+        # [范围由凭据承担] scope_level/repo_key 参数废弃——级别在凭据上改
+
+        enabled_val = body.get("enabled")
+        max_sandboxes = int(body.get("max_sandboxes", 10))
+        if max_sandboxes < 1 or max_sandboxes > 20:
+            max_sandboxes = 10
+
+        if enabled_val is not None:
+            c.execute(
+                f"UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, max_sandboxes=?, updated_by=? WHERE id=?",
+                [endpoint, api_key_enc, extra_json, 1 if enabled_val else 0, max_sandboxes, user["username"], provider_id])
+        else:
+            c.execute(
+                f"UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, max_sandboxes=?, updated_by=? WHERE id=?",
+                [endpoint, api_key_enc, extra_json, max_sandboxes, user["username"], provider_id])
+        db.commit()
+    log.info(f"provider updated: user={user['username']} id={provider_id}")
+    return {"message": "Provider 已更新"}
+
+
+@router.put("/sandbox-providers/{provider_id}/toggle", operation_id="settings_sandbox_provider_toggle",
+             summary="Toggle a sandbox provider")
+def toggle_sandbox_provider(provider_id: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """v3 §3.1.5：启停 Provider。
+
+    [沙箱凭据口径对齐 64a02adde] 沙箱凭据生成的 Provider（global 凭据 → scope=system），
+    其 owner 判定走 _sb_cred_report_owner（凭据 owner_name=当前用户或 admin）——
+    [删系统类别 2026-10-30] 权限单一条件：凭据 owner——系统预置类别已删除。
+    """
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
+        # [删系统类别] 权限单一条件：凭据 owner
+        _sb_cred = row[0] or 0
+        if not (_sb_cred and _sb_cred_report_owner(_sb_cred, user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        c.execute("UPDATE grape_t_sandbox_provider_config SET enabled=?, updated_by=? WHERE id=?",
+                  (1 if body.get("enabled") else 0, user["username"], provider_id))
+        db.commit()
+    return {"message": "Provider 已更新"}
+
+
+@router.put("/sandbox-templates/{tpl_id}/toggle", operation_id="settings_sandbox_template_toggle",
+            summary="Toggle a sandbox template")
+def toggle_sandbox_template(tpl_id: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """启停模板。enabled=0 的模板不参与 cloud_worker 引擎展开（引擎不注册）。
+
+    与 Provider toggle 同款权限语义（system scope 拒改 / owner 校验）。
+    """
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            # [db9d2fb7f 对账漏改修复 2026-10-30] pc.scope/pc.user_id 列已删——SELECT 只留
+            # 需要的两列, row 索引相应改(tpl_row[0]=provider_id, tpl_row[1]=cred_id)
+            "SELECT t.provider_id, pc.runtime_credential_id FROM grape_t_sandbox_templates t "
+            "LEFT JOIN grape_t_sandbox_provider_config pc ON pc.id = t.provider_id WHERE t.id=?",
+            (tpl_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+        # [删系统类别] 权限单一条件：凭据 owner
+        if row[1] and not _sb_cred_report_owner(row[1], user):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        if not row[1]:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无凭据 Provider（已废弃类别）"})
+        c.execute("UPDATE grape_t_sandbox_templates SET enabled=?, updated_at=?, updated_by=? WHERE id=?",
+                  (1 if body.get("enabled") else 0,
+                   datetime.now(timezone.utc).isoformat(), user["username"], tpl_id))
+        db.commit()
+    return {"message": "模板已更新"}
+
+
+@router.post("/sandbox-providers/{provider_id}/health", operation_id="settings_sandbox_provider_health",
+              summary="Health check a sandbox provider")
+def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_session_token)):
+    """v3 §3.1.6：健康检查。通过 adapter.health_check。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        # [d1e242cba 对账漏改修复 2026-10-30] 原 SELECT 含 scope/user_id/name 列(已删/
+        # 换), 访问 row[7] 越界(7 列数据) + scope 权限判断用 credential_id 值 → 500。
+        # 修: 7 列明确命名, 权限改凭据 owner 判定(同 bind-engine/_sb_cred_report_owner)。
+        c.execute("SELECT runtime_credential_id, "
+                  "platform, endpoint, api_key_enc, extra_config, max_sandboxes "
+                  "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
+        if not (row[0] and _sb_cred_report_owner(row[0], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+    _brief = _sb_cred_brief_map()
+    _cred_name = (_brief.get(int(row[0]), ("",))[0] if row[0] else "")
+
+    prov = {"runtime_credential_id": row[0], "name": _cred_name, "platform": row[1],
+            "endpoint": row[2], "api_key_enc": row[3], "extra_config": row[4],
+            "max_sandboxes": row[5] or 10}
+    _platform = prov["platform"]
+    from src.kernel.crypto import decrypt
+    _api_key = decrypt(prov["api_key_enc"]) if prov["api_key_enc"] else ""
+
+    from src.domains.runtime.public import get_adapter
+    adapter = get_adapter(_platform)
+    if not adapter:
+        return {"healthy": False, "reason": f"no adapter for platform '{_platform}'"}
+
+    _cfg = adapter.normalize_db_config({
+        "platform": _platform, "name": prov["name"], "endpoint": prov["endpoint"],
+        "api_key": _api_key, "extra_config": prov["extra_config"],
+        "max_sandboxes": prov["max_sandboxes"],
+    })
+    _healthy, _reason = adapter.health_check(_cfg)
+    return {"healthy": _healthy, "reason": _reason}
+
+
+@router.post("/sandbox-templates/{tpl_id}/bind-engine", operation_id="settings_bind_engine",
+             summary="Bind engine to template")
+def bind_engine(tpl_id: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """v3 §3.2.5：绑定引擎到模板。UNIQUE(provider_id, engine_type) DB 级保证。幂等。"""
+    engine_type = (body.get("engine_type") or "").strip()
+    if not engine_type:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "engine_type 不能为空"})
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+        provider_id = row[0]
+        # 权限校验：查 Provider scope
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+        prow = c.fetchone()
+        # [删系统类别] 权限单一条件：凭据 owner
+        if not (prow and prow[0] and _sb_cred_report_owner(prow[0], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        # [多模板共用引擎] 同 Provider 下同一引擎可绑多个模板（四段式引擎名区分）——
+        # R5 一引擎一模板的 409 冲突检测废除；UNIQUE(provider_id,engine_type,template_id)
+        # 保证同模板重复绑定幂等
+        from src.kernel.sandbox_uid import new_row_uid as _nru_bd
+        c.execute("INSERT OR IGNORE INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                  (_nru_bd(), provider_id, engine_type, tpl_id, _now, _now))
+        db.commit()
+    return {"message": "引擎已绑定"}
+
+
+@router.delete("/sandbox-templates/{tpl_id}/bind-engine/{engine_type}", operation_id="settings_unbind_engine",
+                summary="Unbind engine from template")
+def unbind_engine(tpl_id: str, engine_type: str, user: dict = Depends(require_no_session_token)):
+    """v3 §3.2.5：解绑引擎。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+        provider_id = row[0]
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
+        prow = c.fetchone()
+        # [删系统类别] 权限单一条件：凭据 owner
+        if not (prow and prow[0] and _sb_cred_report_owner(prow[0], user)):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+        # [多模板共用引擎] 精确解绑该 (引擎,模板)——不误删同引擎在其他模板上的绑定
+        c.execute("DELETE FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?", (provider_id, engine_type, tpl_id))
+        db.commit()
+    return {"message": "引擎已解绑"}
+
+@router.post("/sandbox-providers/{provider_id}/scan-templates", operation_id="settings_sandbox_provider_scan_templates",
+             summary="Scan platform templates and import new ones")
+def scan_sandbox_templates(provider_id: str, user: dict = Depends(require_no_session_token)):
+    """扫描 Provider 平台侧模板，自动导入未登记的有效模板。
+
+    解耦设计：扫描能力由 adapter 的 list_templates(config) 提供
+    （返回统一格式 [{template_id,name,status,description}]，不支持返回 None），
+    本端点不感知任何具体平台 API。有效性 = status 为 ready/ok。
+    已按 template_id 去重——DB 中已有的不重复导入。
+    """
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc WHERE spc.id=?",
+                  (provider_id,))
+        prow = c.fetchone()
+    if not prow:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
+    # [删系统类别] 权限单一条件：凭据 owner（扫描导入新增行归凭据 owner）
+    if not (prow[1] and _sb_cred_report_owner(prow[1], user)):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+
+    # 取 adapter 与配置（复用 health 的配置读取路径）
+    from src.domains.runtime.public import get_adapter
+    adapter = get_adapter(prow[0])
+    if adapter is None:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 无 adapter"})
+    _cfg = _provider_config_from_db(prow[0], provider_id) or {}
+    if not _cfg.get("api_url") and not _cfg.get("endpoint"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Provider 未配置 endpoint"})
+
+    # 能力探测：adapter 未实现 list_templates
+    if not hasattr(adapter, "list_templates"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 不支持模板扫描"})
+    try:
+        scanned = adapter.list_templates(_cfg)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"扫描失败: {e}"})
+    if scanned is None:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 不支持模板扫描"})
+
+    valid = [t for t in scanned
+             if t.get("template_id") and str(t.get("status", "")).lower() in ("ready", "ok")]
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    existing, added = [], []
+    with db_lock:
+        c = db.cursor()
+        for t in valid:
+            tid = t["template_id"]
+            c.execute("SELECT id, name FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?",
+                      (provider_id, tid))
+            row = c.fetchone()
+            if row:
+                existing.append({"template_id": tid, "name": row[1] or t.get("name", "")})
+                continue
+            _name = t.get("name") or tid
+            from src.kernel.sandbox_uid import new_row_uid as _nru_sc
+            c.execute(
+                "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, "
+                "description, preinstalled, disk_size_mb, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                # [删 provider 列 2026-10-30] provider 列已删——INSERT 同步去列
+                # 扫描导入默认 enabled=0：需用户在操作栏显式启用（防止误扫入直接生效）
+                (_nru_sc(), _name, provider_id, tid, "", t.get("description", ""), "{}", 0, 0, _now, _now))
+            added.append({"template_id": tid, "name": _name})
+        db.commit()
+    return {
+        "scanned": len(scanned),
+        "valid": len(valid),
+        "existing": len(existing),
+        "added": len(added),
+        "added_templates": added,
+        "existing_templates": existing,
+    }
+
+
+@router.post("/sandbox-templates/{tpl_id}/check", operation_id="settings_sandbox_template_check", summary="Check template validity")
+def check_sandbox_template(tpl_id: str, user: dict = Depends(require_no_session_token)):
+    """v3：手动触发模板校验。权限按 Provider scope 校验。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        # [provider 列语义修复 2026-10-30] templates.provider 列语义混用(历史存平台名,
+        # d1e242cba 后写入路径存凭据名)——registry 键是 platform, 统一经 provider_id
+        # JOIN spc.platform 取(唯一可靠键)。用户报告: s1 模板检查报
+        # 'provider s1 not in registry' 即此混用。
+        c.execute(
+            "SELECT t.template_id, t.provider_id, spc.platform, spc.runtime_credential_id "
+            "FROM grape_t_sandbox_templates t LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = t.provider_id "
+            "WHERE t.id=?", (tpl_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
+    if not (row[3] and _sb_cred_report_owner(row[3], user)):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+    result = _do_check_template(row[2], row[0], provider_id=row[1])
+    # 更新校验结果
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE grape_t_sandbox_templates SET last_check_at=?, last_check_status=?, last_check_error=? WHERE id=?",
+                  (_now, result["status"], result["error"], tpl_id))
+        db.commit()
+    return {"status": result["status"], "error": result["error"]}
+
+
+def _check_template_sync(tpl_id: str, provider: str, template_id: str):
+    """[provider 列语义修复 2026-10-30] 内部统一按 provider_id JOIN spc.platform
+    取 registry 键——传入 provider 参数仅保留签名兼容(其值可能是凭据名/平台名
+    混用, 不再使用)。"""
+    from src.kernel.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT spc.platform, t.provider_id FROM grape_t_sandbox_templates t "
+                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = t.provider_id WHERE t.id=?",
+                (tpl_id,))
+            _row = c.fetchone()
+        if not _row:
+            return
+        _do_check_template(_row[0], template_id, provider_id=_row[1])
+    except Exception:
+        pass
+
+
+def _provider_config_from_db(platform: str, provider_id: str | None = None) -> dict | None:
+    """从 grape_t_sandbox_provider_config 取配置，经 adapter 归一化。
+
+    health 端点同款逻辑；无记录/无 adapter 返回 None。
+    优先按 provider_id 精确取（模板校验场景），无 id 时回退 system scope 行。
+    """
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        if provider_id:
+            c.execute("SELECT spc.platform, spc.endpoint, spc.api_key_enc, spc.runtime_credential_id, "
+                      "extra_config, max_sandboxes "
+                      "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
+        else:
+            c.execute("SELECT spc.platform, spc.endpoint, spc.api_key_enc, spc.runtime_credential_id, "
+                      "extra_config, max_sandboxes "
+                      "FROM grape_t_sandbox_provider_config spc WHERE spc.platform=?", (platform,))
+        row = c.fetchone()
+    if not row:
+        return None
+    # G-02：runtime_credentials 归 runtime——凭据名经 brief map 取（mgmt 不直连）
+    _brief = _sb_cred_brief_map()
+    _cred_name = (_brief.get(int(row[3]), ("",))[0] if row[3] else "")
+    from src.kernel.crypto import decrypt
+    _api_key = decrypt(row[2]) if row[2] else ""
+    from src.domains.runtime.public import get_adapter
+    adapter = get_adapter(row[0])
+    if not adapter:
+        return None
+    return adapter.normalize_db_config({
+        "platform": row[0], "name": _cred_name, "endpoint": row[1],
+        "api_key": _api_key, "extra_config": row[4],
+        "max_sandboxes": row[5],
+    })
+
+
+def _do_check_template(provider: str, template_id: str, provider_id: str | None = None) -> dict:
+    """校验模板在平台侧是否可用。返回 {status, error}。"""
+    from src.domains.runtime.public import default_registry
+    registry = default_registry()
+    factory = registry.get(provider)
+    if not factory:
+        return {"status": "platform_unreachable", "error": f"provider {provider} not in registry"}
+    # 配置从 DB 取（config 文件导入后即删除，config=None 会落到空配置）
+    _cfg = _provider_config_from_db(provider, provider_id)
+    try:
+        provider_instance = factory(audit=None, credential=None, seccomp=None,
+                                    alert_engine=None, config=_cfg)
+        # create_sandbox_for_check 无 Provider 实现（历史死代码）——
+        # 改为真实生命周期：create_sandbox 拿实例 → _do_create 真实建箱
+        # → kill()（_do_connect + _do_kill）销毁。
+        # 任一环节异常 = 平台/模板不可用，走下方错误分支。
+        sandbox = provider_instance.create_sandbox(template_id=template_id)
+        if hasattr(sandbox, "_do_create"):
+            sandbox._do_create()  # 云沙箱：真实建箱（CubeSandbox/DevBox）
+        if sandbox:
+            for _attempt in range(3):
+                try:
+                    sandbox.kill()
+                    break
+                except Exception as _ke:
+                    if _attempt < 2:
+                        import time as _time
+                        _time.sleep(1)
+                    else:
+                        import logging as _log
+                        _log.getLogger("devops-bot").warning(f"_do_check_template: kill failed 3x for template {template_id}: {_ke}")
+            return {"status": "ok", "error": ""}
+        return {"status": "not_found", "error": "create returned None"}
+    except Exception as e:
+        err = str(e)
+        if "not found" in err.lower() or "404" in err.lower():
+            return {"status": "not_found", "error": err}
+        if "no more resource" in err.lower():
+            return {"status": "ok", "error": ""}
+        return {"status": "error", "error": err}
+
+
+# ====== Sandbox Provider 配置管理（设计文档 §1.3 + §1.5）======
+
+
+def _validate_extra_config(platform: str, extra: dict) -> dict:
+    """通过 adapter 校验 extra_config——必填+类型+白名单。
+    不合法时 adapter 抛 ValueError，此处捕获转 HTTPException 400。"""
+    from src.domains.runtime.public import get_adapter
+    adapter = get_adapter(platform)
+    if adapter:
+        try:
+            return adapter.validate_extra_config(extra or {})
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
+    return extra or {}
+
+
+@router.get("/sandbox-provider-configs", operation_id="settings_provider_configs",
+            summary="List sandbox provider configs",
+            description="Lists all sandbox provider configs. api_key is masked (***).")
+def list_provider_configs(user: dict = Depends(require_no_session_token)):
+    """列出所有 provider 配置（api_key 脱敏）。
+
+    GET 不需要 admin 权限——登录用户即可查看（api_key 已脱敏）。
+    """
+    from src.kernel.bulk_read import reader
+    with reader() as c:
+        # [provider 列已删 2026-11-06 修复] 列表 SQL 仍引用已物理删除的 provider 列
+        # （500 no such column: provider，E2E 校准实证）——改按 platform 展示 +
+        # LEFT JOIN 凭据名做展示名 + runtime_credential_id 供前端深链
+        c.execute(
+            "SELECT p.id, p.platform, p.endpoint, p.api_key_enc, p.extra_config, "
+            "p.enabled, p.updated_at, p.runtime_credential_id, p.provider_uid "
+            "FROM grape_t_sandbox_provider_config p "
+            "ORDER BY p.id"
+        )
+        rows = c.fetchall()
+    # G-02：runtime_credentials 归 runtime——凭据名经 brief map 合并（mgmt 不直连）
+    _brief = _sb_cred_brief_map()
+    result = []
+    for r in rows:
+        extra = json.loads(r[4]) if r[4] else {}
+        result.append({
+            "id": r[0],
+            "provider": r[1],
+            "name": (_brief.get(int(r[7]), ("",))[0] if r[7] else "") or "",
+            "endpoint": r[2],
+            "api_key": "***" if r[3] else "",
+            "extra_config": extra,
+            "enabled": r[5],
+            "updated_at": str(r[6]) if r[6] else "",
+            "runtime_credential_id": r[7] or 0,
+            "provider_uid": r[9] or "",
+        })
+    return {"configs": result}
+
+
+@router.put("/sandbox-provider-configs/{provider}", operation_id="settings_provider_config_update",
+            summary="Update sandbox provider config",
+            description="Updates a sandbox provider config. api_key is sent in plaintext and encrypted server-side. Sending api_key=null preserves the existing DB value.")
+def update_provider_config(provider: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """更新 provider 配置。api_key 明文传入，服务端加密存储。
+
+    - api_key 传 None（未传字段）→ 保留 DB 旧值（不覆盖）
+    - api_key 传非空字符串 → 加密覆盖
+    - api_key 传空字符串 → 清除（置空）
+    """
+    _require_admin(user)
+    from src.domains.runtime.public import get_cloud_platforms
+    if provider not in get_cloud_platforms():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {get_cloud_platforms()}"})
+
+    endpoint = (body.get("endpoint") or "").strip()
+    if not endpoint:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "endpoint 不能为空"})
+
+    extra = body.get("extra_config") or {}
+    extra = _validate_extra_config(provider, extra)
+    extra_json = json.dumps(extra, ensure_ascii=False)
+
+    from src.kernel.crypto import encrypt
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, api_key_enc FROM grape_t_sandbox_provider_config WHERE provider=?", (provider,))
+        row = c.fetchone()
+        # enabled 处理：传了值 → 覆盖；没传 → 保留 DB 旧值（UPDATE）/ 默认 1（INSERT）
+        enabled_val = body.get("enabled")
+        if row:
+            # api_key 处理：传了新值 → 加密覆盖；没传（None）→ 保留 DB 旧值
+            api_key_plain = body.get("api_key")
+            if api_key_plain is not None:
+                api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
+            else:
+                api_key_enc = row[1]  # 保留旧值
+            if enabled_val is not None:
+                c.execute(
+                    "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, updated_by=? WHERE id=?",
+                    (endpoint, api_key_enc, extra_json, 1 if enabled_val else 0, user["username"], row[0]),
+                )
+            else:
+                c.execute(
+                    "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
+                    (endpoint, api_key_enc, extra_json, user["username"], row[0]),
+                )
+        else:
+            # 新增行
+            api_key_plain = body.get("api_key") or ""
+            api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
+            from src.kernel.sandbox_uid import new_row_uid as _nru_pc
+            c.execute(
+                "INSERT INTO grape_t_sandbox_provider_config (id, endpoint, api_key_enc, extra_config, enabled, updated_by) "
+                "VALUES (?,?,?,?,?,?)",
+                (_nru_pc(), endpoint, api_key_enc, extra_json, 1 if enabled_val is None or enabled_val else 0, user["username"]),
+            )
+        db.commit()
+    log.info(f"provider config updated: user={user['username']} provider={provider}")
+    return {"provider": provider, "message": "配置已更新"}
+
+
+# ===== v3：Provider 插拔设计 API（cloud-sandbox-provider-pluggable-design.md §3）=====
+
+def _validate_platform(platform: str) -> str:
+    """从 adapter registry 动态获取支持的平台列表。"""
+    from src.domains.runtime.public import get_cloud_platforms
+    supported = get_cloud_platforms()
+    if platform not in supported:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {supported}"})
+    return platform
+
+
+@router.get("/sandbox-platforms", operation_id="settings_sandbox_platforms",
+            summary="List supported sandbox platforms",
+            description="Returns supported platform names and their extra_config fields. Driven by backend registry + Pydantic models, no hardcoding.")
+def list_sandbox_platforms(user: dict = Depends(require_no_session_token)):
+    """返回云沙箱平台列表 + 每个平台的 ui_schema。本地沙箱不在此列表中。
+    按 adapter.priority 排序（小的优先），前端默认选第一个。"""
+    from src.domains.runtime.public import get_all_adapters
+    cloud_adapters = sorted(
+        [a for a in get_all_adapters() if getattr(a, "is_cloud", True)],
+        key=lambda a: getattr(a, "priority", 100),
+    )
+    platforms = []
+    for adapter in cloud_adapters:
+        platforms.append({
+            "platform": adapter.platform,
+            "display_name": getattr(adapter, "display_name", adapter.platform),
+            "priority": getattr(adapter, "priority", 100),
+            "ui_schema": adapter.ui_schema().to_dict(),
+            # [USP] manifest 能力声明透传——前端按 capabilities 渲染按钮
+            # （无 list_templates 不显示"扫描"），替代点击后 400
+            "manifest": getattr(adapter, "MANIFEST", None),
+        })
+    return {"platforms": platforms}
+
+
+@router.get("/sandbox-engines", operation_id="settings_sandbox_engines",
+            summary="List supported sandbox engines",
+            description="Returns engine types supported by cloud sandbox orchestration (driven by ENGINE_REGISTRY, no hardcoding).")
+def list_sandbox_engines(user: dict = Depends(require_no_session_token)):
+    """返回云沙箱支持的引擎列表——数据源 ENGINE_REGISTRY（engine_strategies.py）。
+
+    与 /sandbox-platforms 对称；新增引擎只需在 ENGINE_REGISTRY 加条目，
+    本端点与前端零改动。
+
+    installable: Installer.install_cmd 非空 = 建箱时可自动安装（hermes/opencode）；
+    False = 无安装脚本，只能预装进镜像（codearts 模式）。
+    """
+    from src.domains.runtime.public import engine_plugins_info
+    return {"engines": engine_plugins_info()}
+
+
+# ===== [沙箱迁移] 用户 LLM 凭据管理（feat/devbox-sandbox-integration 迁移）=====
+# grape_t_user_llm_credentials 表的写入入口——沙箱 agent 引擎的模型凭据配置
+class LLMCredentialBody(BaseModel):
+    """用户 LLM API key（加密存储）。"""
+    provider: str = "custom"
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    engine_type: str = "common"  # 'common'=通用兜底, 'hermes'/'opencode'=引擎专属
+
+
+def _require_repo_llm_admin(repo_key: str, user: dict):
+    """[repo-llm-credential] 仓库 LLM 凭据编辑权限——口径复用仓库 Bot Token（FR-20.5）：
+    托管人(host_user_id) / user_repos.is_admin / 全局 admin。"""
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+    if user.get("role", "") == "admin":
+        return
+    # [U3 修复 2026-11-13] managed_repos.repo_key 带平台前缀（gitcode:owner/repo），
+    # 调用方传的是 URL 形态（owner/repo）——此前直查恒 miss → 仓库托管人自己也
+    # 403（E2E 实证账号是 host 仍被拒）。统一走 _resolve_repo_key 解析实际键。
+    repo_key = _resolve_repo_key(repo_key)
+    try:
+        with _sm_dl:
+            _c = _sm_db.cursor()
+            _c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=? AND host_user_id=?",
+                       (repo_key, user["id"]))
+            if _c.fetchone():
+                return
+            _c.execute("SELECT is_admin FROM user_repos WHERE user_id=? AND repo_key=? AND is_admin=1",
+                       (user["id"], repo_key))
+            if _c.fetchone():
+                return
+    except Exception:
+        pass
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限：仅仓库托管人/管理员可编辑 LLM 凭据"})
+
+
+class RepoLLMCredentialBody(BaseModel):
+    """[repo-llm-credential] 仓库级 LLM 凭据（仓库资产，加密存储）。api_key 留空=保留旧值。"""
+    repo_key: str
+    engine_type: str = "common"
+    provider: str = "custom"
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    enabled: bool = True
+
+
+@router.get("/llm-credentials/repo", operation_id="settings_repo_llm_credentials_list",
+            summary="List repo LLM credentials")
+def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_no_session_token)):
+    """列出仓库 LLM 凭据（不回明文——api_key 只报 has_key 布尔）。读权限=仓库可见即可。"""
+    from src.kernel.session_manager import db, db_lock
+    if not repo_key:
+        return {"credentials": []}
+    from src.kernel.bulk_read import reader
+    with reader() as c:
+        rows = c.execute("SELECT id, engine_type, provider, api_key_enc, base_url, model, enabled, updated_by, updated_at "
+                         "FROM grape_t_repo_llm_credentials WHERE repo_key=? ORDER BY id", (repo_key,)).fetchall()
+    return {"credentials": [
+        {"id": r[0], "engine_type": r[1], "provider": r[2], "has_key": bool(r[3]),
+         "base_url": r[4], "model": r[5], "enabled": bool(r[6]), "updated_by": r[7], "updated_at": r[8]}
+        for r in rows]}
+
+
+@router.post("/llm-credentials/repo", operation_id="settings_repo_llm_credential_upsert",
+             summary="Create or update repo LLM credential")
+def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends(require_no_session_token)):
+    """新增/更新（repo_key+engine_type UPSERT）。api_key 留空=保留旧值。仅仓库管理员。"""
+    from src.kernel.crypto import encrypt
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+    repo_key = (body.repo_key or "").strip()
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 不能为空"})
+    _require_repo_llm_admin(repo_key, user)
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
+        raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
+    VALID_PROVIDERS = {"openai", "azure", "deepseek", "zhipu", "moonshot", "qwen", "custom"}
+    if body.provider not in VALID_PROVIDERS:
+        raise HTTPException(400, detail={"code": 400, "message": f"unsupported provider: {body.provider}"})
+    _now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT id, api_key_enc FROM grape_t_repo_llm_credentials WHERE repo_key=? AND engine_type=?",
+                        (repo_key, body.engine_type)).fetchone()
+        # 留空不改：api_key 非空才 encrypt 覆盖；空则沿用旧值（首建必须提供）
+        if body.api_key.strip():
+            _enc = encrypt(body.api_key.strip())
+        elif row and row[1]:
+            _enc = row[1]
+        else:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "首次配置必须提供 API key"})
+        if row:
+            c.execute("UPDATE grape_t_repo_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, "
+                      "enabled=?, updated_by=?, updated_at=? WHERE id=?",
+                      (body.provider, _enc, body.base_url, body.model, 1 if body.enabled else 0,
+                       user["username"], _now, row[0]))
+            rid = row[0]
+        else:
+            from src.kernel.sandbox_uid import new_row_uid as _nru_rc
+            rid = _nru_rc()
+            c.execute("INSERT INTO grape_t_repo_llm_credentials (id, repo_key, engine_type, provider, api_key_enc, "
+                      "base_url, model, enabled, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (rid, repo_key, body.engine_type, body.provider, _enc, body.base_url, body.model,
+                       1 if body.enabled else 0, user["username"], _now))
+        db.commit()
+    return {"id": rid, "message": "仓库 LLM 凭据已保存"}
+
+
+@router.put("/llm-credentials/repo/{cred_id}/toggle", operation_id="settings_repo_llm_credential_toggle")
+def toggle_repo_llm_credential(cred_id: str, body: dict, user: dict = Depends(require_no_session_token)):
+    """启停。仅仓库管理员。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT repo_key FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        _require_repo_llm_admin(row[0], user)
+        c.execute("UPDATE grape_t_repo_llm_credentials SET enabled=? WHERE id=?",
+                  (1 if body.get("enabled") else 0, cred_id))
+        db.commit()
+    return {"message": "已更新"}
+
+
+@router.delete("/llm-credentials/repo/{cred_id}", operation_id="settings_repo_llm_credential_delete")
+def delete_repo_llm_credential(cred_id: str, user: dict = Depends(require_no_session_token)):
+    """删除。仅仓库管理员。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT repo_key FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+        _require_repo_llm_admin(row[0], user)
+        c.execute("DELETE FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,))
+        db.commit()
+    return {"message": "已删除"}
+
+
+@router.post("/llm-credentials", operation_id="settings_llm_credential_create", summary="Create LLM credential", description="Save LLM API key (encrypted). One credential per engine_type per user.")
+def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_no_session_token)):
+    """创建/更新 LLM 凭据（加密存储到 grape_t_user_llm_credentials 表）。"""
+    from src.kernel.crypto import encrypt
+    from src.kernel.session_manager import db, db_lock
+    from datetime import datetime, timezone
+
+    if not body.api_key.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API key 不能为空"})
+
+    # 白名单校验 engine_type（惰性导入防循环依赖）
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
+        raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
+
+    # provider 白名单——防止用户填不认识的 provider（如 anthropic），让错误在配置阶段暴露
+    VALID_PROVIDERS = {"openai", "azure", "deepseek", "zhipu", "moonshot", "qwen", "custom"}
+    if body.provider not in VALID_PROVIDERS:
+        raise HTTPException(400, detail={"code": 400, "message": f"unsupported provider: {body.provider}, must be one of: {', '.join(sorted(VALID_PROVIDERS))}"})
+
+    _now = datetime.now(timezone.utc).isoformat()
+    _enc = encrypt(body.api_key.strip())
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            # UPSERT：同 user + engine_type 覆盖
+            c.execute("SELECT id FROM grape_t_user_llm_credentials WHERE user_id=? AND engine_type=?", (user["id"], body.engine_type))
+            existing = c.fetchone()
+            if existing:
+                c.execute(
+                    "UPDATE grape_t_user_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, updated_at=? WHERE id=?",
+                    (body.provider, _enc, body.base_url, body.model, _now, existing[0])
+                )
+            else:
+                from src.kernel.sandbox_uid import new_row_uid as _nru_uc
+                c.execute(
+                    "INSERT INTO grape_t_user_llm_credentials (id, user_id, provider, api_key_enc, base_url, model, enabled, engine_type, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    (_nru_uc(), user["id"], body.provider, _enc, body.base_url, body.model, body.engine_type, _now, _now)
+                )
+            db.commit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"保存 LLM 凭据失败: {e}"})
+
+    log.info(f"LLM credential saved: user={user['username']} provider={body.provider} engine_type={body.engine_type}")
+    return {"status": "ok", "message": "LLM 凭据已保存（加密存储）"}
+
+
+@router.get("/llm-credentials", operation_id="settings_llm_credentials", summary="List LLM credentials", description="List user's LLM credentials without plaintext keys.")
+def list_llm_credentials(user: dict = Depends(require_no_session_token)):
+    """列出用户的 LLM 凭据（不含明文 key）。"""
+    from src.kernel.bulk_read import reader
+    with reader() as c:
+        c.execute(
+            "SELECT id, provider, base_url, model, enabled, engine_type, created_at, updated_at "
+            "FROM grape_t_user_llm_credentials WHERE user_id=? ORDER BY id",
+            (user["id"],)
+        )
+        rows = c.fetchall()
+    return {
+        "credentials": [
+            {
+                "id": r[0], "provider": r[1], "base_url": r[2] or "",
+                "model": r[3] or "", "enabled": r[4], "engine_type": r[5] or "common",
+                "created_at": r[6] or "", "updated_at": r[7] or "",
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/llm-engine-types", operation_id="settings_llm_engine_types", summary="List available engine types for LLM credentials")
+def list_llm_engine_types(user: dict = Depends(require_no_session_token)):
+    """返回引擎类型列表（common + ENGINE_REGISTRY keys）。"""
+    from src.domains.runtime.public import engine_types
+    types = [{"value": "common", "label": "通用（兜底）"}]
+    for engine in engine_types():
+        types.append({"value": engine, "label": engine})
+    return {"engine_types": types}
+
+
+@router.delete("/llm-credentials/{cred_id}", operation_id="settings_llm_credential_delete", summary="Delete LLM credential")
+def delete_llm_credential(cred_id: str, user: dict = Depends(require_no_session_token)):
+    """删除 LLM 凭据。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM grape_t_user_llm_credentials WHERE id=? AND user_id=?", (cred_id, user["id"]))
+        db.commit()
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "LLM 凭据不存在"})
+    return {"status": "deleted"}
+
+

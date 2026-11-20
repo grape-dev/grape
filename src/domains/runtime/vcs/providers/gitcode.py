@@ -11,31 +11,23 @@ def request(method, url, token, body=None):
     issue 创建容忍 JSON，但 labels 创建 400 "Required request parameter 'name'
     is not present"（Spring 形态，只认 form/query 参数）。与 api_client
     _request 的 form=True 既有口径对齐（JSON 会 400 "body不能为空"）。
-    GET 无 body 不受影响。_req 延迟导入：测试 monkeypatch src.domains.mgmt.user.repo_manager._req
-    才能拦到（from-import 旧引用会让 patch 失效、真 HTTP 出网——实测教训）。"""
-    from src.domains.mgmt.user import repo_manager as _rm
+    GET 无 body 不受影响。出网口走 mgmt 域 public 契约（gitcode_req / gitcode_req_form），
+    public 转发体在调用时按属性取 `repo_manager._req` / `._requests`，故测试
+    monkeypatch `src.domains.mgmt.user.repo_manager._req` 仍能拦到（from-import 旧引用
+    会让 patch 失效、真 HTTP 出网——实测教训）。"""
+    from src.domains.mgmt.public import gitcode_req, gitcode_req_form
     # form 必需端点（实测 400 实锤）：labels 创建对 JSON body 报
     # "Required request parameter 'name' is not present"（Spring form/query 形态）。
-    # 其余写端点上游容忍 JSON（issue create/milestone 实测 200）——维持 _req 通道
-    # （测试 monkeypatch src.domains.mgmt.user.repo_manager._req 的拦截契约保持有效）。
+    # 其余写端点上游容忍 JSON（issue create/milestone 实测 200）——维持 JSON 通道。
     if method == "GET" or body is None:
-        return _rm._req(method, url, token, None)
+        return gitcode_req(method, url, token, None)
     if method == "POST" and url.rstrip("/").endswith("/labels"):
-        headers = {"Content-Type": "application/x-www-form-urlencoded",
-                   "Accept": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        # 出网口走 repo_manager._requests（模块属性）：测试 monkeypatch
-        # repo_manager._req/_requests 可统一拦截，不出网。
-        resp = _rm._requests.request(method, url, data=body, headers=headers, timeout=30)
-        if resp.status_code >= 400:
-            raise _rm.UpstreamAPIError(method, url, resp.status_code, resp.text)
-        return resp.json() if resp.text.strip() else {}
-    return _rm._req(method, url, token, body)
+        return gitcode_req_form(method, url, token, body)
+    return gitcode_req(method, url, token, body)
 
 
 def bot_token(repo_key):
-    from src.domains.mgmt.user.db import get_gitcode_token
+    from src.domains.mgmt.public import get_gitcode_token
     return get_gitcode_token(repo_key=repo_key) or ""
 
 def user_token(username, user_id):

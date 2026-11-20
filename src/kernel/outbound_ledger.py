@@ -15,6 +15,7 @@ import threading
 import time
 
 from src.kernel.config import log
+from src.kernel.ports import pipeline as _pipeline
 
 # 进程内 TTL 集合：发送响应返回后、INSERT 落盘前 webhook 先到的竞态窗口（S12-3）
 _TTL_SECONDS = 300
@@ -74,8 +75,7 @@ def _ensure_table():
     from src.kernel.session_manager import db
     if _TABLE_READY_CONN is db:
         return
-    from src.domains.mgmt.public import ensure_outbound_ledger_table
-    ensure_outbound_ledger_table()
+    _pipeline.ensure_outbound_ledger_table()
     _TABLE_READY_CONN = db
 
 
@@ -93,8 +93,7 @@ def _cleanup_expired():
     try:
         from datetime import datetime, timedelta
         _cutoff = (datetime.now() - timedelta(days=_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-        from src.domains.mgmt.public import purge_outbound_ledger_before
-        purge_outbound_ledger_before(_cutoff)
+        _pipeline.purge_outbound_ledger_before(_cutoff)
     except Exception as e:
         log.warning(f"outbound_ledger cleanup failed: {e}")
 
@@ -118,8 +117,7 @@ def record_outbound(provider: str, repo_key: str, content_type: str, content_id:
         _TTL_SET[_ttl_key(provider, repo_key, content_type, _cid)] = time.time() + _TTL_SECONDS
     try:
         _ensure_table()
-        from src.domains.mgmt.public import record_outbound_ledger
-        record_outbound_ledger(
+        _pipeline.record_outbound_ledger(
             provider, repo_key, content_type, _cid,
             issue_number=str(issue_number or ""),
             actor_identity=actor_identity or "",
@@ -157,7 +155,12 @@ def is_our_outbound(provider: str, repo_key: str, content_type: str, content_id:
     if not provider or not repo_key or not _cid:
         return False
     _is_edit = content_type == "issue_edit"
-    _is_meta_like = content_type in ("issue_close", "issue_meta")
+    # issue / issue_opened 与 issue_close/issue_meta 同病：对账键是**issue 编号**，而编号是共享键 ——
+    # 我们在该 issue 下发过评论就会记一条同键台账，于是用户后来真正新建/重开该 issue 的
+    # issue_opened 被当成"自己创建的回流"直接跳过（2026-11-16 Issue #93 实证：用户提的 issue
+    # 被判 outbound_ledger_hit，事件失败且无法重派）。回流必然紧邻发送动作（毫秒到秒级），
+    # 所以这里也要求台账记录落在时效窗口内才命中，宁可漏拦迟到回声，不误拦用户新事件。
+    _is_meta_like = content_type in ("issue_close", "issue_meta", "issue", "issue_opened")
     now = time.time()
     # 1) TTL 集合（INSERT 未落盘的竞态窗口）——issue_edit 不走 TTL（编号非唯一键，
     #    TTL 命中无法区分"我们的编辑回声"与"用户编辑同号 issue"）
@@ -170,24 +173,23 @@ def is_our_outbound(provider: str, repo_key: str, content_type: str, content_id:
     # 2) 持久表（SQL 在 mgmt 域：outbound_content_ledger 归 mgmt）
     try:
         _ensure_table()
-        from src.domains.mgmt import public as _mgmt_public
         if _is_edit:
             # 编辑回声：ID（issue 编号）+ 指纹双命中才拦
             if not content_hash:
                 return False
-            return _mgmt_public.outbound_ledger_has_edit(
+            return _pipeline.outbound_ledger_has_edit(
                 provider, repo_key, content_type, _cid, content_hash)
         if _is_meta_like:
             # close/meta 回声（S30-G5）：编号命中 + 时效窗口双确认——
             # created_at 解析失败/为空按"不在窗口"处理（放行，零误杀）
             _cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - _META_WINDOW_SECONDS))
-            return _mgmt_public.outbound_ledger_has_within(
+            return _pipeline.outbound_ledger_has_within(
                 provider, repo_key, content_type, _cid, _cutoff)
-        if _mgmt_public.outbound_ledger_has_id(provider, repo_key, content_type, _cid):
+        if _pipeline.outbound_ledger_has_id(provider, repo_key, content_type, _cid):
             return True
         # ID 未命中时指纹仅作旁路核对信号（不参与拦截判定）
         if content_hash:
-            _row = _mgmt_public.outbound_ledger_row_by_hash(provider, content_hash, repo_key)
+            _row = _pipeline.outbound_ledger_row_by_hash(provider, content_hash, repo_key)
             if _row:
                 log.warning(f"outbound_ledger: content hash matches (provider={provider}, "
                             f"repo={repo_key}, ledger_id={_row[0]}) but event ID {_cid} not in ledger "

@@ -34,7 +34,7 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
               extra: dict | None = None) -> None:
     """IM 安装变更审计（F3/C3）：只记动作与标识，绝不记 secret/模板明文。"""
     try:
-        from src.domains.mgmt.auth import audit as auth_audit
+        from src.domains.mgmt.public import log_audit as auth_audit
         ip = ""
         try:
             ip = (request.client.host if request and request.client else "") or ""
@@ -44,7 +44,7 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
                   "channel_type": channel_type, "scope": scope}
         if extra:
             detail.update({k: v for k, v in extra.items() if v is not None})
-        auth_audit.log_audit("im_installation_change",
+        auth_audit("im_installation_change",
                              user_id=int(user.get("id") or 0),
                              operator_id=int(user.get("id") or 0),
                              ip=ip, detail=detail)

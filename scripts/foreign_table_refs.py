@@ -70,11 +70,16 @@ def load_owner(path: Path) -> dict[str, str]:
 
 
 def load_owner_json(path: Path) -> dict[str, str]:
-    """configs/table_ownership.json → {table: domain}（离线口径）。"""
+    """configs/table_ownership.json → {table: domain}（离线口径）。
+
+    _per_domain_tables 里的名字（每域各建一份，如 grape_t_schema_migrations /
+    grape_t_xwrite_log）不属于跨域引用，直接排除，否则每域自用自己的表会被算成违规。
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
+    per_domain = set(((data.get("_per_domain_tables") or {}).get("tables") or []))
     owner: dict[str, str] = {}
     for table, domain in (data.get("tables") or {}).items():
-        if domain in ("mgmt", "runtime", "insight"):
+        if domain in ("mgmt", "runtime", "insight") and table not in per_domain:
             owner[table] = domain
     return owner
 

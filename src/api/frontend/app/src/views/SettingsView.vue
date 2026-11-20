@@ -1,6 +1,20 @@
 <template>
   <div class="sv">
-    <div class="cd">
+    <!-- B4：子 Tab 栏（仓库接入 / LLM 凭据——仓库级沙箱平台模型凭据；#settings/llm 深链） -->
+    <div class="stabs sv__subtabs">
+      <a :class="{ ac: curTab === 'gitcode' }" @click="curTab = 'gitcode'">{{ t('settings.host.title') }}</a>
+      <a :class="{ ac: curTab === 'llm' }" @click="curTab = 'llm'">LLM 凭据</a>
+    </div>
+    <!-- llm 子页签 -->
+    <div v-if="curTab === 'llm'" class="cd">
+      <template v-if="!repo">
+        <div class="ts t2">{{ t('settings.host.select_repo_first') }}</div>
+      </template>
+      <template v-else>
+        <LlmCredManager mode="repo" :repo-key="repoKey" />
+      </template>
+    </div>
+    <div v-show="curTab === 'gitcode'" class="cd">
       <div class="cd-h">
         <h2>{{ t('settings.host.title') }}</h2>
       </div>
@@ -42,7 +56,7 @@
             <h2 class="sv__unhost-title">{{ t('settings.host.unhost_title') }}</h2>
           </div>
           <p class="tx t2 sv__unhost-warn">{{ t('settings.host.unhost_warning') }}</p>
-          <button class="bt sv__unhost-btn" @click="unhost">
+          <button class="bt bt-r sv__unhost-btn" @click="unhost">
             {{ t('settings.host.unhost_title') }}
           </button>
         </div>
@@ -84,12 +98,22 @@
 // Batch 14 (settings): equivalent of legacy settings.js renderSettings('gitcode') — the only live path.
 // Theme/lang/pipeline/api-keys code in settings.js was dead (UI moved to AccountView in batch 7);
 // i18n lang-switch rerender for 'settings' view calls renderSettings via the entry global.
-// initialTab prop is accepted for contract parity (entry passes it) but the only live tab is 'gitcode'.
+import { repoKeyOf } from '../lib/repo-provider.js'
+// initialTab prop: 'gitcode'(默认) | 'llm'（仓库级 LLM 凭据子页签，#settings/llm 深链入口）。
 import { computed, onMounted, ref } from 'vue'
+import LlmCredManager from './LlmCredManager.vue'
 
 const G = globalThis
 
+const props = defineProps({ initialTab: { type: String, default: 'gitcode' } })
 const repo = ref(null)
+// B4：子 Tab（gitcode 默认；#settings/llm 深链由 app.js renderSettings('llm') 注入）
+const curTab = ref(props.initialTab === 'llm' ? 'llm' : 'gitcode')
+const repoKey = computed(() => {
+  const r = repo.value
+  if (!r) return ''
+  return r.repoKey || r.repo_key || (r.fullName ? 'gitcode:' + r.fullName : '')
+})
 const loaded = ref(false)
 const error = ref('')
 const data = ref({})
@@ -283,7 +307,8 @@ function migrateRepo() {
     t('settings.host.migrate_confirm', { target: target }),
     function () {
       G.API.post('/repos/migrate', {
-        repo_key: 'gitcode:' + r.fullName,
+        // 前缀跟着仓库实际平台走（写死 gitcode 会把 gitee/gitlab 仓迁到错平台）
+        repo_key: r.repoKey || repoKeyOf({ full_name: r.fullName, provider: r.provider }),
         target_owner: target,
         target_repo: '',
       })
@@ -395,5 +420,8 @@ onMounted(() => {
   background: var(--r);
   border-color: var(--r);
   color: var(--on-accent);
+}
+.sv__subtabs {
+  margin-bottom: 12px;
 }
 </style>

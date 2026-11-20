@@ -35,6 +35,21 @@ async def list_events(repo_key: str, limit: int = 50) -> list:
     return _get_local("runtime").get_events(repo_key, limit)
 
 
+@router.post("/events/status-counts", operation_id="runtime_events_status_counts", include_in_schema=False)
+async def get_event_status_counts(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_event_status_counts() 调用。"""
+    return {"rows": _get_local("runtime").get_event_status_counts(
+        body.get("repo_keys") or [], body.get("agent_type") or "")}
+
+
+@router.post("/events/search", operation_id="runtime_events_search_internal", include_in_schema=False)
+async def search_events(body: dict) -> dict:
+    """供 RuntimeServiceRemote.search_events() 调用。"""
+    return _get_local("runtime").search_events(
+        body.get("repo_keys") or [], body.get("agent_type") or "",
+        body.get("keyword") or "", int(body.get("page") or 1), int(body.get("page_size") or 10))
+
+
 @router.get("/events/{seq}", operation_id="runtime_events_detail", include_in_schema=False)
 async def get_event(seq: int) -> dict:
     """供 RuntimeServiceRemote.get_event_detail() 调用。"""
@@ -51,6 +66,46 @@ async def list_runtimes() -> list:
 async def get_issue_state(repo_key: str, issue_number: int) -> dict:
     """供 RuntimeServiceRemote.get_issue_state() 调用。"""
     return _get_local("runtime").get_issue_state(repo_key, issue_number)
+
+@router.get("/credentials/rows", operation_id="runtime_credentials_rows", include_in_schema=False)
+async def list_credential_rows() -> dict:
+    """供 RuntimeServiceRemote.list_credential_rows() 调用。"""
+    return {"rows": _get_local("runtime").list_credential_rows()}
+
+
+@router.get("/engine-tags", operation_id="runtime_engine_tags", include_in_schema=False)
+async def list_engine_tags(runtime_id: int, enabled_only: int = 1) -> dict:
+    """供 RuntimeServiceRemote.list_engine_tags() 调用。"""
+    return {"tags": _get_local("runtime").list_engine_tags(int(runtime_id), bool(enabled_only))}
+
+
+@router.post("/agent-sessions/row", operation_id="runtime_agent_session_row", include_in_schema=False)
+async def get_agent_session_row(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_agent_session_row() 调用（repo_keys 走 body）。"""
+    return {"row": _get_local("runtime").get_agent_session_row(
+        body.get("repo_keys") or [], body.get("agent_type") or "", body.get("token_field") or "")}
+
+
+@router.get("/credentials/health", operation_id="runtime_credentials_health", include_in_schema=False)
+async def get_credential_health_rows() -> list:
+    """供 RuntimeServiceRemote.get_credential_health_rows() 调用。"""
+    return _get_local("runtime").get_credential_health_rows()
+
+
+@router.post("/tasks/inflight-count", operation_id="runtime_tasks_inflight_count", include_in_schema=False)
+async def get_inflight_task_count(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_inflight_task_count() 调用（repo_keys 走 body）。"""
+    return {"count": _get_local("runtime").get_inflight_task_count(body.get("repo_keys") or [])}
+
+
+@router.get("/issues/card", operation_id="runtime_issue_card_get", include_in_schema=False)
+async def get_issue_card(repo_key: str, issue_number: int) -> dict:
+    """供 RuntimeServiceRemote.get_issue_card() 调用（issue 单表权威卡片）。
+
+    repo_key 形如 ``gitcode:owner/repo``，含 ``:`` 和 ``/`` —— 放进路径参数会被
+    URL 切碎成多段导致 404（实测）。这里用 query 参数，与 get_chat_conversations 同款。
+    """
+    return _get_local("runtime").get_issue_card(repo_key, issue_number)
 
 
 @router.post("/issues/{repo_key}/{issue_number}/state", operation_id="runtime_issue_state_update", include_in_schema=False)
@@ -126,6 +181,32 @@ async def get_task_stats(body: dict) -> dict:
     body = body or {}
     return _get_local("runtime").get_task_stats(
         str(body.get("repo_key") or ""), str(body.get("since") or ""))
+
+
+@router.get("/business-table-counts", operation_id="runtime_business_table_counts",
+            include_in_schema=False)
+async def business_table_counts(user_id: str) -> dict:
+    """N14 某账号业务数据按表计数（供 RuntimeServiceRemote 调用；缺表 → count=None）。"""
+    return _get_local("runtime").user_business_table_counts(user_id)
+
+
+@router.post("/reconcile-engine-references", operation_id="runtime_reconcile_engine_refs",
+             include_in_schema=False)
+async def reconcile_engine_references(body: dict) -> dict:
+    """N15 引擎引用对账（跨域写；幂等可重放）。"""
+    body = body or {}
+    return _get_local("runtime").reconcile_engine_references(
+        list(body.get("runtime_ids") or []), int(body.get("keep_id") or 0),
+        str(body.get("reason") or ""))
+
+
+@router.post("/transfer-user-business-data", operation_id="runtime_transfer_user_data",
+             include_in_schema=False)
+async def transfer_user_business_data(body: dict) -> dict:
+    """N16 占位账号合并：本域业务数据归属转移（幂等）。"""
+    body = body or {}
+    return _get_local("runtime").transfer_user_business_data(
+        body.get("from_user_id"), body.get("to_user_id"))
 
 
 @router.post("/xwrite/apply", operation_id="runtime_xwrite_apply", include_in_schema=False)

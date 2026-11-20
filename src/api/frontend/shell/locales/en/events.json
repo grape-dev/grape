@@ -64,6 +64,7 @@
   "redispatch_cancel": "Cancel",
   "redispatch_confirm": "Confirm Dispatch",
   "redispatch_toast_success": "Redispatched, waiting for worker to re-execute",
+  "redispatch_token_stale": "Redispatched, but the task credential was not refreshed: the rerun cannot call the grape CLI (git-repo / issues / a2a). Rebuild the task and retry.",
   "redispatch_toast_failed": "Redispatch failed: {{msg}}",
   "log_title_realtime": "📜 Runtime Logs",
   "log_title_inline": "📜 Execution Logs",
@@ -119,5 +120,11 @@
   "fail_collapse": "Collapse",
   "diag_target": "Target stage",
   "diag_phase": "Failure phase",
-  "diag_ref_seq": "Ref seq"
+  "diag_ref_seq": "Ref seq",
+  "status_task_completed": "task completed",
+  "status_task_failed": "task failed",
+  "status_task_cancelled": "task cancelled",
+  "status_task_timeout": "task timed out",
+  "status_task_queued": "task queued",
+  "status_task_dispatched": "task dispatched"
 }

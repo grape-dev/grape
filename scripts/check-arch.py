@@ -12,7 +12,7 @@ Rules:
   R4  cross-domain imports (mgmt/runtime/insight)    (report-only; Phase 5
       must collapse them into src/domains/contracts)
   R5  no import cycles at module scope between
-      kernel/domains (hard; deferred in-function imports excluded)
+      kernel/domains (hard; includes deferred in-function imports)
   R6  kernel/domains must not import legacy top-level
       shim paths (src.config, src.api.jwt_utils, ...)             (hard)
   R7  removed legacy top-level paths must stay unimportable      (hard)
@@ -69,10 +69,12 @@ REMOVED_LEGACY_PREFIXES = (
 )
 
 # ── R8：kernel 不得写「域归属表」（三库独立化 P1 硬约束）────────────────────
-# 归属口径：docs/weekly-11/table-owner.tsv（102 张基表，三库实况）。
+# 归属口径：configs/table_ownership.json（102 张基表，三库实况）。
 # 棘轮：白名单按 (文件, 表) 登记**当前数量**；新增文件/表或数量上升 → 红。
 # 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
-R8_OWNER_TSV = os.path.join(REPO_ROOT, "docs", "weekly-11", "table-owner.tsv")
+# 归属唯一权威：configs/table_ownership.json（原 docs/weekly-11/table-owner.tsv 已并入本文件后删除 ——
+# 两份清单曾漂移 19 张，json 是超集且代码只读它）。
+R8_OWNER_JSON = os.path.join(REPO_ROOT, "configs", "table_ownership.json")
 R8_WHITELIST: dict[str, dict[str, int]] = {
     # src/kernel/repo_migrate.py 已清零（改名迁移按域下沉到 mgmt/runtime public）
     "src/kernel/session_manager.py": {
@@ -91,6 +93,12 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
     # src/kernel/outbound_ledger.py 已清零（代发台账的建表/索引引导与 6 条读写语句下沉
     # mgmt.public 的 ensure_outbound_ledger_table + outbound_ledger_* 原语）
+    # src/kernel/gsb/route_config.py —— 无法下沉，登记为长期例外：
+    #   gsb_provider_route 归 mgmt（与 gsb_service_registry 同库），但读写它的是 kernel 层的
+    #   路由配置缓存，任一进程都要按 owner 库直连（已用 owner_db("mgmt") 连对了库）。
+    #   要下沉到 mgmt.public 就得让 kernel import domains —— R1 明令禁止，因此这条
+    #   不是"待还的债"，是分层约束下的必然形态。2026-11-18 补登记该表时暴露。
+    "src/kernel/gsb/route_config.py": {"gsb_provider_route": 2},
 }
 
 _R8_WRITE_RE = re.compile(
@@ -99,16 +107,23 @@ _R8_WRITE_RE = re.compile(
 
 
 def load_r8_owner(path: str) -> dict[str, str]:
+    """读归属清单：.json 走 configs/table_ownership.json 的 tables 段，其它按两列 tsv。"""
     owner: dict[str, str] = {}
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip() or line.startswith("#"):
-                    continue
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 2:
-                    owner[parts[1].strip()] = parts[0].strip()
-    except OSError as exc:
+        if path.endswith(".json"):
+            import json as _json
+            data = _json.loads(open(path, encoding="utf-8").read())
+            _per = set(((data.get("_per_domain_tables") or {}).get("tables") or []))
+            owner = {k: v for k, v in (data.get("tables") or {}).items() if k not in _per}
+        else:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) >= 2:
+                        owner[parts[1].strip()] = parts[0].strip()
+    except (OSError, ValueError) as exc:
         # QA G4：清单缺失/不可读时此前静默 pass → scan_r8 返回空 → 报告里显示 R8 通过，
         # 实际这条检查根本没跑。必须显式说明「跳过」，否则门禁给出的是假绿灯。
         print(f"R8: SKIP —— 归属清单不可读（{path}: {exc}）；跨域基表直查检查本轮未执行")
@@ -117,10 +132,10 @@ def load_r8_owner(path: str) -> dict[str, str]:
 
 def scan_r8() -> list[tuple[str, str, str, int]]:
     """返回 [(relpath, table, owner_schema, count)]；owner tsv 缺失时返回空并跳过。"""
-    owner = load_r8_owner(R8_OWNER_TSV)
+    owner = load_r8_owner(R8_OWNER_JSON)
     if not owner:
         # 与 load_r8_owner 的 SKIP 提示配套：空清单 = 检查没跑，不能当成「无违规」。
-        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_TSV}），本轮未做跨域基表直查检查")
+        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_JSON}），本轮未做跨域基表直查检查")
         return []
     out = []
     for path in iter_py(os.path.join(SRC, "kernel")):
@@ -136,25 +151,23 @@ def scan_r8() -> list[tuple[str, str, str, int]]:
 
 
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
-# Pre-existing deferred (function-level) imports kept working during Phase 1;
-# each entry carries the phase that will remove it.
+# Whitelist for pre-existing violations, each carrying the phase that removes it.
+# NOTE: R1/R2/R4 have always scanned deferred (in-function) imports via imports_of()
+# `all_imports` — the old 'deferred excluded' claim in this header was wrong and caused
+# 132 kernel->domains defer-imports to be mistaken for a checker blind spot.
 WHITELIST: dict[str, dict[str, str]] = {
     # R1/R2: kernel historically reaches up for lazy reads; Phase 5 contracts
     # will invert these dependencies.
     "src/kernel/config.py": {
-        "R1": "deferred meta get/set via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred domain-agent routing lookup via src.api.routing; Phase 4/5",
     },
     "src/kernel/prompt_builder.py": {
-        "R1": "deferred reads from mgmt.user.db / runtime engine; Phase 5 contracts",
         "R2": "deferred reads from api session/event/issue stores; Phase 5 contracts",
     },
     "src/kernel/worker_package.py": {
-        "R1": "MANIFEST references domain code paths (packaging, not runtime import); Phase 5",
         "R2": "MANIFEST references src/api paths (packaging); Phase 5",
     },
     "src/kernel/token_resolver.py": {
-        "R1": "deferred token lookup via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred token resolution via src.api.deps; Phase 5",
     },
     "src/kernel/repo_migrate.py": {
@@ -162,67 +175,12 @@ WHITELIST: dict[str, dict[str, str]] = {
         # 于是 managed_repos/meta/skill/user_repos 的 R8 计数被静默丢掉，等于豁免了 4 张表的
         # 跨域直查。合并为一个键，两类豁免同时生效。
         "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
-        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
     },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
     "src/kernel/session_manager.py": {
-        "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
     },
-    "src/kernel/persistence/credential_usage_log.py": {
-        # 跨域基表直查已清零（foreign-refs 棘轮：grape_t_credential_usage_log 3 → 0）：
-        # 写语句与保留期清理都下沉到 runtime.public 的具名原语（insert_many / prune），
-        # kernel 只保留攒批、节流与后台 flush 线程调度 —— 因此这里的跨域依赖是
-        # 「调用 owner 原语」而不是「直接读写别人的表」，属允许形态。
-        "R1": {"targets": ["src.domains.runtime"],
-               "reason": "usage-log 表归 runtime 域；kernel 仅调度，SQL 由 runtime.public 持有"},
-    },
-    "src/kernel/repo_cleanup.py": {
-        "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
-    },
-    "src/kernel/lock.py": {
-        "R1": {"targets": ["src.domains.runtime"],
-              "reason": "deferred distributed-lock protocol via runtime.public "
-                        "(SQL moved to owner domain); due Phase 5 -> contracts"},
-    },
     "src/kernel/help_docs_sync.py": {
-        "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
         "R2": "deferred app/openapi imports for help page generation; Phase 5",
-    },
-    "src/kernel/gsb/registry.py": {
-        "R1": {"targets": ["src.domains.mgmt"],
-              "reason": "deferred GSB registry SQL via mgmt.public "
-                        "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
-    },
-    "src/kernel/outbound_ledger.py": {
-        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
-              "reason": "deferred outbound-ledger DDL/read-write primitives via mgmt.public "
-                        "(outbound_content_ledger is mgmt-owned); due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/jwt_utils.py": {
-        "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
-    },
-    "src/kernel/auth_sdk/auth_token.py": {
-        "R1": {"targets": ["src.domains.mgmt"],
-              "reason": "deferred token-table access via mgmt.public primitives "
-                        "(SQL already moved there); due Phase 5 -> contracts"},
-    },
-    # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
-    # Phase 5 inverts them through src/domains/contracts.
-    "src/kernel/repo_key.py": {
-        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred platform-card lookups; due Phase 5 -> contracts"},
-    },
-    "src/kernel/repo.py": {
-        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred platform-card lookup; due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/channel_strategy.py": {
-        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.mgmt.user"],
-              "reason": "deferred provider/strategy resolution; due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/provider_link.py": {
-        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred provider + vcs-card enumeration; due Phase 5 -> contracts"},
     },
     # R6: legacy shim imports due Phase 5 contracts. 两条旧 shim 条目（account_env / scenes）
     # 在实际导入清零后已删除——豁免面只保留仍存在的依赖，避免白名单漂移。
@@ -241,6 +199,13 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
         "R5": "pre-existing vcs provider registration cycle (harmless init order)",
+    },
+    "CYCLE:src.kernel.ports+src.kernel.ports._base": {
+        "R5": "kernel 端口包 __init__.py 只 re-export 自己的子模块（accounts/tokens/...）"
+              "与 _base 的公共符号；check-arch 对每个模块无条件补「父包边」(module -> 父包)，"
+              "与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边：子模块只 import "
+              "_base，_base 不 import 父包或任何兄弟端口，端口模块彼此也不互相 import。"
+              "与 IM 包同一口径的检查器误报。",
     },
     "CYCLE:src.domains.runtime.im.channel+src.domains.runtime.im.channel.capability+src.domains.runtime.im.channel.channel+src.domains.runtime.im.channel.message+src.domains.runtime.im.channel.registry+src.domains.runtime.im.channel.types": {
         "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",

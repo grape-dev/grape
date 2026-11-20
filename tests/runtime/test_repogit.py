@@ -190,7 +190,7 @@ class TestLinkedRepoTokenFromEnv:
     def test_env_token_preferred_over_local(self, monkeypatch):
         """env 有该仓 token → 优先使用，不再走本地 Repo.bot_token。"""
         monkeypatch.setattr(repogit, "ensure_issue_worktree",
-                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+                            lambda rk, ag, num, token="", work_branch="", task_id="", strict_override=None: (rk, token))
         local_called = {"n": 0}
 
         class _FakeRepo:
@@ -211,7 +211,7 @@ class TestLinkedRepoTokenFromEnv:
     def test_env_missing_key_falls_back_to_local(self, monkeypatch):
         """env 无该仓键 → 回退本地 Repo.bot_token（本地模式可用性保持）。"""
         monkeypatch.setattr(repogit, "ensure_issue_worktree",
-                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+                            lambda rk, ag, num, token="", work_branch="", task_id="", strict_override=None: (rk, token))
 
         class _FakeRepo:
             def __init__(self, rk):
@@ -229,7 +229,7 @@ class TestLinkedRepoTokenFromEnv:
     def test_both_missing_skips(self, monkeypatch):
         """env 与本地均无 token → 该仓 skip（维持降级语义，不抛异常）。"""
         monkeypatch.setattr(repogit, "ensure_issue_worktree",
-                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+                            lambda rk, ag, num, token="", work_branch="", task_id="", strict_override=None: (rk, token))
 
         class _FakeRepo:
             def __init__(self, rk):
@@ -246,7 +246,7 @@ class TestLinkedRepoTokenFromEnv:
     def test_env_json_invalid_falls_back(self, monkeypatch):
         """env JSON 损坏 → 视为无 env token，回退本地解析。"""
         monkeypatch.setattr(repogit, "ensure_issue_worktree",
-                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+                            lambda rk, ag, num, token="", work_branch="", task_id="", strict_override=None: (rk, token))
 
         class _FakeRepo:
             def __init__(self, rk):
@@ -283,7 +283,7 @@ class TestLinkedRepoTokenFromEnv:
     def test_default_env_reads_os_environ(self, monkeypatch):
         """env 参数缺省（None）→ 读 os.environ（本地直调/进程内兼容）。"""
         monkeypatch.setattr(repogit, "ensure_issue_worktree",
-                            lambda rk, ag, num, token="", work_branch="": (rk, token))
+                            lambda rk, ag, num, token="", work_branch="", task_id="", strict_override=None: (rk, token))
         monkeypatch.setenv("GRAPE_LINKED_REPO_TOKENS",
                            '{"gitcode:OPCTeam/HDBlogService": "tok_osenv"}')
 

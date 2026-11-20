@@ -239,14 +239,14 @@ async def notify_task(body: TaskNotifyBody, request: Request,
     _agent_type = _session.get("agent_type", "") or "issue"
 
     # repo 已托管（repo_key 带前缀）
-    from src.domains.mgmt.user.db import get_all_managed_repos
+    from src.domains.mgmt.public import get_all_managed_repos
     managed = {r["repo_key"] for r in get_all_managed_repos()}
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
 
     # 责任人若是 bot（grape_bot）→ 视为"接管"：关闭该 issue 用户 active/processing 任务（bot_takeover），
     # 不建 bot 任务。见 task-lifecycle-design.md §2.3/§3.1。
-    from src.domains.mgmt.user.db import get_all_bot_usernames
+    from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
     if body.assignee in get_all_bot_usernames():
         closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
         log.info(f"Task notify: bot_takeover assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} closed={closed} (task_id=0)")
@@ -337,7 +337,7 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
     - 终态幂等：completed/failed/cancelled 不再覆盖（返回现状）。
     - 完成后任务 + 事件置为成功，不经过 evaluate_agent_output 启发。
     """
-    from src.domains.mgmt.user import db as _user_db
+    from src.domains.mgmt import public as _user_db
 
     if user.get("auth_type") == "session_token":
         task_id = user.get("session_key") or ""
@@ -446,8 +446,8 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
         "repo_key": _repo,
     }
     # R16.2.2: 映射 error_code 到本地化文案
-    from src.domains.insight.routes.dashboard import _resolve_error_messages
-    task["errors"] = _resolve_error_messages(task["errors"])
+    from src.domains.insight.public import resolve_error_messages
+    task["errors"] = resolve_error_messages(task["errors"])
 
     # 关联需求（repo_key + issue_id 去 '#'）
     import re as _re
@@ -501,7 +501,7 @@ def _require_repo_access(user: dict, repo_key: str):
         if user.get("repo_key") != repo_key:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务（作用域不匹配）"})
         return
-    from src.domains.mgmt.user import db as _user_db
+    from src.domains.mgmt import public as _user_db
     _managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
     if repo_key not in _managed:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务"})

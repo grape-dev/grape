@@ -27,6 +27,13 @@ def _read_file(rel_path):
     with open(full, encoding="utf-8") as f:
         return f.read()
 
+_VIEWS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "app", "src", "views")
+
+def _read_view(name):
+    """读取 Vue 登录页源（2026-11-14 登录卡片从 index.html 迁入 LoginView.vue）。"""
+    with open(os.path.join(_VIEWS_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
 def _read_json(rel_path):
     """读取 locale JSON。"""
     full = os.path.join(_STATIC_DIR, rel_path)
@@ -189,15 +196,21 @@ class TestAllConfiguredNormal:
     """UC4: 全部已配置时无置灰、无说明行，登录走原流程。"""
 
     def test_uc4_no_hint_element_in_static_html(self):
-        """UC4/UC12: index.html 预置说明行但 display:none——CSS 按注入类首帧显示
-        （零闪动）；预置按钮不带 aria-disabled（aria 由 JS 按权威状态补）。"""
+        """UC4/UC12（Vue 登录页版）：说明行由 LoginView.vue 渲染，显隐交给 v-show
+        （首帧目录来自服务端注入，只有真实未配置才渲染点名文案）；
+        静态 index.html 只剩宿主容器，不再预置按钮/提示。"""
+        vue = _read_view("LoginView.vue")
+        assert 'id="oauthUnconfiguredHint"' in vue, \
+            "hint should live in the Vue login card"
+        assert 'v-show="unconfigured.length"' in vue, \
+            "hint must be rendered only when at least one channel is unconfigured"
+        assert ":aria-disabled=\"p.configured ? null : 'true'\"" in vue, \
+            "buttons must bind aria-disabled from the authoritative configured state"
         html = _read_file("index.html")
-        assert 'id="oauthUnconfiguredHint"' in html, \
-            "hint should be prerendered in static HTML (FOUC fix)"
-        assert 'style="display:none"' in html.split('id="oauthUnconfiguredHint"')[1][:80], \
-            "prerendered hint must start hidden until the injected class shows it"
-        assert 'aria-disabled' not in html, \
-            "prerendered buttons should not carry aria-disabled"
+        assert 'id="oauthUnconfiguredHint"' not in html, \
+            "static HTML must not keep a second (legacy) hint element"
+        assert 'id="oauthBtns"' not in html, \
+            "static HTML must not keep prerendered oauth buttons"
 
     def test_uc4_oauth_redirect_flow_untouched(self):
         """UC4: redirect_url 重定向逻辑保持原样。"""
@@ -208,13 +221,11 @@ class TestEmailNotConfiguredFriendlyHint:
     """UC9/UC10: 忘记密码页与账号页三入口的邮箱未配置提示——可行动指引 + 文档链接。"""
 
     def test_uc9_forgot_page_links_to_email_guide(self):
-        """UC9: 忘记密码页未配置提示带 help.html 邮件配置深链。"""
-        html = _read_file("forgot.html")
-        assert "04-storage-and-email" in html, \
-            "forgot page should deep-link to email setup guide"
-        # 提示文案与链接文字均挂 data-i18n（随语言切换，不残留）
-        assert 'data-i18n="app.login.forgot_email_not_configured"' in html
-        assert 'data-i18n="app.login.oauth_view_config_help"' in html
+        """UC9（Vue 版）: 未配置提示与 help.html 邮件配置深链在 ForgotView.vue 中。"""
+        vue = _read_view("ForgotView.vue")
+        assert "04-storage-and-email" in vue, "forgot page should deep-link to email setup guide"
+        assert 'data-i18n="app.login.forgot_email_not_configured"' in vue
+        assert 'data-i18n="app.login.oauth_view_config_help"' in vue
 
     @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_uc10_account_helper_uses_showtoast_link(self):
@@ -277,11 +288,14 @@ class TestEmailNotConfiguredFriendlyHint:
         assert "email_service_not_configured_card" in en
 
 class TestBindModalOauthTab:
-    """UC13: 已配置 OAuth 时，新手引导页的绑定弹窗应显示 OAuth + 手动令牌双页签。
+    """UC13: 引导页绑定弹窗的 OAuth 配置态来源（历史 UC13 口径已收敛）。
 
-    根因：_accountProvidersData 只在账号安全 tab 填充，引导页路径缓存为 null
+    2026-11-14 职责分离复核：账号绑定弹层**只走 OAuth**（不再有「手动令牌」页签，
+    见 tests/runtime/test_bind_context.py）；本类只保留「OAuth 配置态从哪来」的
+    数据源锁，历史断言针对已被 Vue 迁移删除的静态页模块。
+
+    根因（历史）：_accountProvidersData 只在账号安全 tab 填充，引导页路径缓存为 null
     时被保守猜成「未配置」——已配置场景也只有 token 一个页签。
-    修复两层：①引导页渲染时写入共享缓存；②弹窗缓存缺失时主动 fetch 权威状态。
     """
 
     @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
@@ -367,13 +381,13 @@ class TestFirstFrameNoFouc:
             "oauth-configured stays the all-configured anchor for hint visibility"
 
     def test_uc12c_prerendered_hint_is_neutral(self):
-        """UC12c: 预置说明用 generic key（不点名平台）——首帧不出现错误平台名单。"""
-        html = _read_file("index.html")
-        seg = html.split('id="oauthUnconfiguredHint"')[1][:400]
-        assert 'data-i18n="app.login.oauth_needs_config_generic"' in seg, \
-            "prerendered hint must use the neutral generic key"
-        assert "GitCode / GitHub" not in seg, \
-            "prerendered hint must not hardcode a platform list"
+        """UC12c（Vue 登录页版）：未配置名单为空时走 generic key（不点名平台），
+        名单由目录派生，Vue 源里不得硬编码平台串。"""
+        vue = _read_view("LoginView.vue")
+        assert "oauth_needs_config_generic" in vue, \
+            "hint must fall back to the neutral generic key"
+        assert "GitCode / GitHub" not in vue, \
+            "hint must not hardcode a platform list"
 
     def test_uc12c_generic_key_in_all_three_i18n_sources(self):
         """UC12c: generic key 在 zh/en locale + js/i18n.js 内置兜底三处同步。"""

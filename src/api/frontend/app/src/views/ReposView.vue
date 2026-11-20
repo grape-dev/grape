@@ -81,6 +81,15 @@
           <div class="error">{{ t('repos.load_failed') }}</div>
         </template>
         <template v-else>
+          <!-- 凭据坏了/过期时：后端按口径乙隐藏该平台仓库并回 hint（含"已隐藏其仓库"）；
+               * 页面必须把原因和修法显示出来，否则用户看到的就是凭空少一个平台的仓库 -->
+          <div v-if="projectsHint" class="rv-cred-hint">
+            <span class="rv-cred-hint-ic">⚠️</span>
+            <span class="rv-cred-hint-tx">{{ projectsHint }}</span>
+            <button v-if="projectsBroken.length" class="rv-cred-hint-btn" @click="goFixCredential">
+              {{ t('repos.cred.fix_btn') }}
+            </button>
+          </div>
           <div class="project-page">
             <div class="project-hero">
               <div class="project-hero-welcome">
@@ -94,12 +103,12 @@
               </div>
               <div class="project-stats">
                 <div class="project-stat">
-                  <b>{{ repos.length }}</b
-                  ><span>{{ t('repos.lobby.stat_projects') }}</span>
-                </div>
-                <div class="project-stat">
                   <b>{{ hostedCount }}</b
                   ><span>{{ t('repos.lobby.stat_hosted') }}</span>
+                </div>
+                <div class="project-stat">
+                  <b>{{ repos.length }}</b
+                  ><span>{{ t('repos.lobby.stat_visible') }}</span>
                 </div>
               </div>
             </div>
@@ -127,6 +136,13 @@
                       <line x1="5" y1="12" x2="19" y2="12" />
                     </svg>
                     <span>{{ t('repos.lobby.new_project_btn') }}</span>
+                  </button>
+                  <button
+                    class="project-refresh-btn"
+                    :title="onlyHosted ? t('repos.lobby.scope_hosted_title') : t('repos.lobby.scope_all_title')"
+                    @click="onlyHosted = !onlyHosted"
+                  >
+                    {{ onlyHosted ? t('repos.lobby.scope_hosted') : t('repos.lobby.scope_all') }}
                   </button>
                   <button
                     class="project-refresh-btn"
@@ -207,9 +223,9 @@
                   </div>
                 </div>
                 <div v-if="filteredRepos.length === 0" class="lobby-empty rv-empty">
-                  <div class="lobby-empty-ic">🔭</div>
-                  <h3>{{ t('repos.lobby.empty_title') }}</h3>
-                  <p>{{ t('repos.lobby.empty_desc') }}</p>
+                  <div class="lobby-empty-ic">{{ onlyHosted ? '📦' : '🔭' }}</div>
+                  <h3>{{ onlyHosted ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
+                  <p>{{ onlyHosted ? t('repos.lobby.empty_hosted_desc') : t('repos.lobby.empty_desc') }}</p>
                 </div>
                 <div v-if="pages > 1" class="project-pager">
                   <button :disabled="repoPage === 0" @click="goPage(-1)">‹</button>
@@ -371,6 +387,7 @@
 // Batch 14 (repos): legacy shell lobby — renderSelectionShell/renderRepoSelection/renderRepos equivalent.
 // platformIcon SVG generator kept identical (brand color inline). selectRepo stays a window global
 // (app.js/scene-market/templates cross-call). Templates tab renders the TemplatesView child.
+import { providerFromRepoKey } from '../lib/repo-provider.js'
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import TemplatesView from './TemplatesView.vue'
 
@@ -388,8 +405,13 @@ const activeTab = ref('projects')
 const repos = ref([])
 const projectsLoaded = ref(false)
 const projectsError = ref('')
+const projectsHint = ref('')
+const projectsBroken = ref([])
 const searchQuery = ref('')
 const repoPage = ref(0)
+// 项目大厅默认只列「已托管」：VCS 能看到的仓库动辄上百（组织仓库全在里面），
+// 混在一起看不出哪些真在本平台托管。切到「全部仓库」才会显示可托管的候选。
+const onlyHosted = ref(true)
 const platformFilter = ref('')
 const refreshing = ref(false)
 const wsLoaded = ref(false)
@@ -417,49 +439,28 @@ function tOr(key, fallback) {
 }
 
 // ── platform icon (identical SVG output as legacy repos.js) ──
-const PLATFORM_BRAND_COLOR = { gitcode: '#F54A36', github: '#1F2328' }
 function platformIcon(provider, size) {
-  size = size || 14
-  const s = 'vertical-align:-2px;flex-shrink:0'
-  const color = PLATFORM_BRAND_COLOR[provider] || 'var(--a)'
-  if (provider === 'github') {
-    return (
-      '<svg width="' +
-      size +
-      '" height="' +
-      size +
-      '" viewBox="0 0 1024 1024" fill="' +
-      color +
-      '" class="platform-icon" style="' +
-      s +
-      '"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
-    )
-  }
-  return (
-    '<svg width="' +
-    size +
-    '" height="' +
-    size +
-    '" viewBox="0 0 1024 1024" fill="' +
-    color +
-    '" class="platform-icon" style="' +
-    s +
-    '"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>'
-  )
+  // 单一真源：shell/js/platform-icons.js（不再本地维护只有 github/gitcode 的表）
+  return typeof window.platformIcon === 'function' ? window.platformIcon(provider, size) : ''
+}
+function repoProvider(r) {
+  const rk = (r && r.repo_key) || ''
+  const i = rk.indexOf(':')
+  return i > 0 ? rk.slice(0, i) : 'gitcode'
 }
 function platformIconHtml(r) {
-  const rk = r.repo_key || ''
-  return platformIcon(rk.indexOf('github:') === 0 ? 'github' : 'gitcode', 14)
+  return platformIcon(repoProvider(r), 14)
 }
 function platformName(r) {
-  const rk = r.repo_key || ''
-  return rk.indexOf('github:') === 0 ? 'GitHub' : 'GitCode'
+  const prov = repoProvider(r)
+  return typeof window.platformLabel === 'function' ? window.platformLabel(prov) : prov
 }
 function repoUrl(r) {
-  const rk = r.repo_key || ''
+  const prov = repoProvider(r)
   const fn = r.full_name || (r.owner ? r.owner + '/' + r.name : '')
-  if (rk.indexOf('github:') === 0) return 'https://github.com/' + fn
-  return 'https://gitcode.com/' + fn
+  // 域名走平台目录（platform-icons.js），未知平台兜底 gitcode
+  const dom = (typeof window.platformHost === 'function' ? window.platformHost(prov) : '') || 'gitcode.com'
+  return 'https://' + dom + '/' + fn
 }
 
 // ── user / platforms ──
@@ -474,7 +475,6 @@ const user = computed(() => {
 const userName = computed(() => user.value)
 const avatar = computed(() => (user.value || 'U')[0].toUpperCase())
 // 平台名册（与 arch-weekly-11 d2787875 同源：旧壳 _getAvailablePlatforms 的 cat 兜底）
-const PLATFORM_NAMES = { gitcode: 'GitCode', github: 'GitHub', gitee: 'Gitee', gitlab: 'GitLab' }
 const PLATFORM_ORDER = ['gitcode', 'github', 'gitee', 'gitlab']
 const platforms = computed(() => {
   const bindings = (() => {
@@ -506,13 +506,14 @@ const platforms = computed(() => {
   }
   return Object.keys(keys)
     .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
-    .map((k) => ({ key: k, name: PLATFORM_NAMES[k] || k }))
+    .map((k) => ({ key: k, name: (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k) }))
 })
 const hostedCount = computed(() => repos.value.filter((r) => r.is_hosted).length)
 
 // ── list / search / pager (identical sort+filter logic) ──
 const allRepos = computed(() => {
   let list = repos.value.slice()
+  if (onlyHosted.value) list = list.filter((r) => r.is_hosted)
   if (platformFilter.value) {
     list = list.filter((r) => {
       const rk = r.repo_key || ''
@@ -593,7 +594,8 @@ function switchTab(tab) {
   }
   activeTab.value = 'projects'
   localStorage.setItem('sidebarTab', 'projects')
-  if (!projectsLoaded.value && !props.initialRepos) loadProjects()
+  if (!projectsLoaded.value) loadProjects()
+  else if (!projectsHint.value) loadProjects({ silent: true })
 }
 function setAppLang(lg) {
   G._setAppLang(lg)
@@ -650,18 +652,48 @@ function openRepoUrl(r) {
 }
 
 // ── data load ──
-function loadProjects() {
-  projectsLoaded.value = false
+function loadProjects(opts) {
+  // silent：只补拉提示条/列表，不动已渲染的首屏（initialRepos 缓存种子路径用），避免闪烁
+  const silent = !!(opts && opts.silent)
+  if (!silent) projectsLoaded.value = false
   projectsError.value = ''
+  if (!silent) {
+    projectsHint.value = ''
+    projectsBroken.value = []
+  }
   G.API.get('/repos/member')
     .then((d) => {
       repos.value = d.repos || []
+      // 后端在"凭据坏了/过期/只读到缓存"时会带 hint + _credential_broken——
+      // 以前这里整块丢掉，用户只看到空列表或旧数据，没有任何解释（2026-11-18）。
+      projectsHint.value = d.hint || ''
+      projectsBroken.value = d._credential_broken || (d._reauth_provider ? [d._reauth_provider] : [])
       projectsLoaded.value = true
     })
     .catch((e) => {
       projectsLoaded.value = true
       projectsError.value = e.message
+      const det = (e && e.detail) || {}
+      if (det.needs_reauth) {
+        projectsError.value = ''
+        projectsHint.value = det.message || ''
+        projectsBroken.value = det.providers || (det.provider ? [det.provider] : [])
+      }
     })
+}
+// 「去修复凭据」：账号页的凭据 tab（resolveInitialTab 支持 #account-<tab> 形态）
+function goFixCredential() {
+  // shell 的 nav(view, param) 会把 hash 写成 '#account/<param>'；先设 hash 会被它覆盖，
+  // 所以把 tab 作为 param 传进去（AccountView 的 resolveInitialTab 兼容该形态）。
+  if (G.app && typeof G.app.nav === 'function') {
+    try {
+      G.app.nav('account', 'credentials')
+      return
+    } catch (e) {
+      /* 老壳没有 nav 时靠 hash 也能进 */
+    }
+  }
+  window.location.hash = '#account-credentials'
 }
 function refresh() {
   refreshing.value = true
@@ -670,6 +702,10 @@ function refresh() {
       repoPage.value = 0
       if (G.app._clearCachedReposData) G.app._clearCachedReposData()
       repos.value = (d && d.repos) || []
+      // 口径乙（2026-11-18）：/repos/sync 与 /repos/member 同口径——凭据失效平台的
+      // 仓库不返回，但必须把 hint 显示出来，禁止"同步成功"后悄悄少一个平台的仓库。
+      projectsHint.value = (d && d.hint) || ''
+      projectsBroken.value = (d && d._credential_broken) || (d && d._reauth_provider ? [d._reauth_provider] : [])
       refreshing.value = false
       G.app.showToast(t('repos.sync.refresh_success'))
     })
@@ -769,12 +805,8 @@ function hostAndSelect(r, event) {
   const owner = r.owner
   const name = r.name
   const repoKey = r.repo_key || ''
-  const provider =
-    String(repoKey || '').indexOf('github:') === 0
-      ? 'github'
-      : String(repoKey || '').indexOf('gitcode:') === 0
-        ? 'gitcode'
-        : ''
+  // 前缀即平台（任何在册平台都成立，不再二分 github/gitcode）
+  const provider = providerFromRepoKey(repoKey)
   const url = '/repos/host' + (provider ? '?provider=' + provider : '')
   const doHost = function () {
     G.API.post(url, { full_name: fullName })
@@ -989,6 +1021,9 @@ onMounted(() => {
   if (props.initialRepos) {
     repos.value = props.initialRepos
     projectsLoaded.value = true
+    // 2026-11-18：initialRepos 只是首屏种子；hint / _credential_broken 只存在于
+    // /repos/member 响应里，不补拉一次，"已隐藏其仓库"提示条在缓存恢复路径上永远不出现。
+    if (activeTab.value === 'projects') loadProjects({ silent: true })
   } else if (activeTab.value === 'projects') {
     loadProjects()
   } else if (activeTab.value === 'templates') {
@@ -1089,6 +1124,39 @@ defineExpose({
   margin: 0;
   border: none;
   background: none;
+}
+/* 凭据异常提示条：解释"为什么列表是空的/是旧的"，并提供一键去修复 */
+.rv-cred-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--y) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--y) 35%, transparent);
+  color: var(--t1);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.rv-cred-hint-ic {
+  flex: none;
+}
+.rv-cred-hint-tx {
+  flex: 1 1 auto;
+}
+.rv-cred-hint-btn {
+  flex: none;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--y) 60%, transparent);
+  background: transparent;
+  color: var(--a);
+  font-size: 12px;
+  cursor: pointer;
+}
+.rv-cred-hint-btn:hover {
+  background: color-mix(in srgb, var(--y) 16%, transparent);
 }
 .rv-content :deep(.template-card-item-name) {
   display: flex;

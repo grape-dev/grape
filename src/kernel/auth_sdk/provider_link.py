@@ -29,6 +29,11 @@ external_identities 实时读+刷新），**不做落库填充**——原 provis
 import threading
 from typing import Any, Callable
 
+# 能力端口：kernel 不 import src.domains；域实现在装配层 src/api/contracts_wiring.py 绑定。
+# 只在调用点解析（_oauth.x / _vcs_cards.x），不在模块级取符号——绑定顺序未知。
+from src.kernel.ports import oauth as _oauth
+from src.kernel.ports import vcs_cards as _vcs_cards
+
 _refresh_registry: "dict[str, Callable[[int], 'str | None']]" = {}
 _registry_guard = threading.Lock()
 
@@ -52,13 +57,11 @@ def oauth_fill_targets() -> "list[dict]":
     过期需重新授权，语义显式）。
     """
     try:
-        from src.domains.mgmt.auth.providers import list_providers
-        channels = set(list_providers() or [])
+        channels = set(_oauth.list_providers() or [])
     except Exception:
         channels = set()
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
-        platforms = set(list_vcs_platforms() or [])
+        platforms = set(_vcs_cards.list_vcs_platforms() or [])
     except Exception:
         platforms = set()
     return [

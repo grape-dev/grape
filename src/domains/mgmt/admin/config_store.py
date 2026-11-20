@@ -16,9 +16,12 @@ import os
 
 from src.kernel.config import log, CONFIG_DIR
 
-_GBT_PATH = os.path.join(CONFIG_DIR, "global-bot-token.json")
+# D110：种子文件 configs/global-bot-token.json（兼容名 platform-bots.json 也认），路径读取时解析
 
 _OAUTH_PATH = os.path.join(CONFIG_DIR, "oauth-providers.json")
+
+# 历史明文 secret 清理：每进程一次（幂等函数 purge_legacy_secret_copies）
+_PURGE_DONE = False
 
 # Bot 字段——写入 DB meta 表（Issue #345: DB 是唯一权威源）
 _BOT_FIELDS = [
@@ -60,7 +63,9 @@ _OAUTH_FIELD_MAP = {
 ALL_FIELDS = _BOT_FIELDS + list(_OAUTH_FIELD_MAP.keys())
 
 def get_config_path() -> str:
-    return _GBT_PATH
+    from src.kernel.config import bot_seed_path
+
+    return bot_seed_path()
 
 def load_config() -> dict:
     """Read global-bot-token.json; return empty dict if missing or corrupt.
@@ -69,8 +74,11 @@ def load_config() -> dict:
     Runtime code reads from DB meta table via unified entry functions.
     """
     try:
-        if os.path.exists(_GBT_PATH):
-            with open(_GBT_PATH, "r", encoding="utf-8") as f:
+        from src.kernel.config import bot_seed_path  # 本函数的局部 import（get_config_path 里那处不覆盖这里）
+
+        _seed_path = bot_seed_path()
+        if os.path.exists(_seed_path):
+            with open(_seed_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return data if isinstance(data, dict) else {}
     except Exception as e:
@@ -111,10 +119,23 @@ def read_public_config() -> dict:
             # 非敏感字段回显明文：webhook_url / github_bot_username
             if field in ("webhook_url", "github_bot_username"):
                 out[field] = val
-    # OAuth 字段从 meta 表读取
+    # OAuth 字段：与运行时同一取凭据入口（Issue #3054 P1-1：configured / 回显同源，
+    # 不再从 meta 判断——凭据迁表后 meta 可能为空或过期）
+    from src.domains.mgmt.auth.providers import channel_configured, list_providers
+    from src.domains.mgmt.auth.credential_source import provider_credentials
+
+    _cred_by_provider: dict[str, tuple[str, str]] = {}
+
+    def _creds(p: str) -> tuple[str, str]:
+        if p not in _cred_by_provider:
+            cid, sec = provider_credentials.pair(p)
+            # 密文不可解：配置页只显示"没有可用凭据"，原因已落
+            # credential_decrypt_failed 审计事件
+            _cred_by_provider[p] = (cid.value, sec.value)
+        return _cred_by_provider[p]
+
     for flat_field, (provider, cred_field) in _OAUTH_FIELD_MAP.items():
-        meta_key = f"oauth_{provider}_{cred_field}"
-        val = get_meta_value(meta_key) or ""
+        val = _creds(provider)[0 if cred_field == "client_id" else 1]
         if val:
             out[f"{flat_field}_present"] = True
             out[f"{flat_field}_tail"] = val[-4:] if len(val) >= 4 else val
@@ -122,11 +143,7 @@ def read_public_config() -> dict:
             if cred_field == "client_id":
                 out[flat_field] = val
     # oauth_status（动态从 provider 列表生成，不硬编码平台名）
-    from src.domains.mgmt.auth.providers import list_providers
-    out["oauth_status"] = {
-        p: bool(get_meta_value(f"oauth_{p}_client_id"))
-        for p in list_providers()
-    }
+    out["oauth_status"] = {p: channel_configured(p) for p in list_providers()}
     # allow_signup — 归一化为 "1"/"0"（兼容 meta 中可能存在的 "true"/"yes" 旧值）
     from src.domains.mgmt.auth.signup_policy import _is_allow_signup
     out["allow_signup"] = "1" if _is_allow_signup() else "0"
@@ -157,6 +174,8 @@ def read_public_config() -> dict:
     out["devstage_template_id_effective"] = get_devstage_template_id()
     out["devstage_flavor_effective"] = _fl_eff
     out["runtime_config_file"] = os.path.exists(RUNTIME_CONFIG_PATH)
+    # Issue #3054 P1-1：历史明文 secret 副本一次性清理（幂等、每进程一次）
+    _purge_once()
     return out
 
 def save_config(payload: dict) -> dict:
@@ -227,6 +246,9 @@ def save_config(payload: dict) -> dict:
                         set_meta_value(meta_key, _json.dumps(val))
                     else:
                         set_meta_value(meta_key, str(val) if val else "")
+        # D110：同一份 payload 同步到平台行（新真源；meta 保留为兼容期第 3 级来源）。
+        # 放在 db_lock 之外：平台行走 SQLAlchemy 会话，避免与 sqlite 线程锁叠锁。
+        _sync_platform_bot_rows(bot_payload)
         # Issue #345: 清除本实例缓存（当前实例立即生效，其他实例最多 60s TTL 后生效）
         from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
@@ -266,28 +288,301 @@ def save_config(payload: dict) -> dict:
                 ).start()
                 log.info(f"config_store: triggered global_bot_token_swap for {_provider}")
 
-    # 2. OAuth 字段 → oauth-providers.json + 同步 meta 表
+    # 2. OAuth 字段 → 渠道表加密列（唯一真源，Issue #3054 P1-1）
+    #    明文 secret 不再写 meta、不再写 configs/oauth-providers.json：
+    #    - 表 = 唯一存放点（client_id_enc / client_secret_enc，AES-GCM 密文）
+    #    - meta 只保留 client_id（非敏感，兼容回显/迁移源）
+    #    - json 只保留协议参数（client_id），secret 一律剥离
     oauth_payload = {k: v for k, v in payload.items() if k in _OAUTH_FIELD_MAP}
     if oauth_payload:
-        _save_oauth_providers(oauth_payload)
-        # 同步 meta 表
+        _table_written = save_oauth_credentials(oauth_payload)
+        # 同步 meta 表：只写非敏感字段；表不可写（迁移窗口）才把 secret 留 meta 兜底
         from src.domains.mgmt.user.db import set_meta_value
         for flat_field, (provider, cred_field) in _OAUTH_FIELD_MAP.items():
-            if flat_field in oauth_payload:
-                val = oauth_payload[flat_field]
-                if val:
+            if flat_field not in oauth_payload:
+                continue
+            val = oauth_payload[flat_field]
+            if not val:
+                continue
+            if cred_field == "client_secret":
+                if not _table_written.get(provider):
+                    # 老库渠道行不存在 / 表不可写：保留旧行为，否则本次 secret 无处可存
                     set_meta_value(f"oauth_{provider}_{cred_field}", val)
-        log.info("admin config_store: oauth-providers.json + meta updated")
+                    log.warning("admin config_store: oauth channel table unavailable, "
+                                "client_secret kept in meta (migration window, provider=%s)",
+                                provider)
+                continue
+            set_meta_value(f"oauth_{provider}_{cred_field}", val)
+        _save_oauth_providers(oauth_payload)
+        log.info("admin config_store: oauth credentials → channel table (encrypted); "
+                 "meta/configs carry no plaintext secret")
         # P2-2: 失效 Provider 内存缓存，下次请求时从 DB 重新加载
         from src.domains.mgmt.auth.providers import invalidate_provider_cache
         invalidate_provider_cache()
+        # 历史明文副本一次性清理（幂等）
+        purge_legacy_secret_copies()
+
+    # 3. D109：同步到平台对象表（表=运行时真源；fail-safe，不阻断旧保存路径）
+    from src.domains.platform.public import sync_from_admin_payload
+    sync_from_admin_payload(payload)
 
     return read_public_config()
 
-def _save_oauth_providers(oauth_payload: dict):
-    """把 ConfigBody 扁平 OAuth 字段写入 oauth-providers.json（嵌套结构）。
+def platform_bot_old_token(provider: str) -> str:
+    """读平台行当前 bot token 明文（解密；无值/失败返回空串）。仅供轮换比较用。"""
+    try:
+        from sqlalchemy.orm import Session
 
-    读取现有 oauth-providers.json，合并新字段，原子写回。
+        from src.domains.mgmt.user.db import _decrypt_repo_secret
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            enc = RepoPlatformRepo.get_bot_token_enc(s, provider)
+        return _decrypt_repo_secret(enc) if enc else ""
+    except Exception as e:
+        log.warning(f"platform_bot_old_token({provider}) failed: {e}")
+        return ""
+
+
+def trigger_platform_bot_swap(provider: str, old_token: str, new_token: str) -> None:
+    """D110 R1：平台 bot token 轮换必须传播到已托管仓库。
+
+    path A 托管把全局 bot token 同时写成仓库 webhook 验签 token（routes/repos.py:976/986），
+    不同步刷这批仓库 → 所有老仓库 webhook 立刻 403。异步 + 分布式锁（同 save_config 口径）。
+    """
+    if not (old_token and new_token) or old_token == new_token:
+        return
+    try:
+        import threading
+
+        threading.Thread(target=_global_bot_token_swap_wrapper,
+                         args=(provider, old_token, new_token), daemon=True).start()
+        log.info(f"config_store: triggered platform bot swap for {provider}")
+    except Exception as e:
+        log.warning(f"trigger_platform_bot_swap({provider}) failed: {e}")
+
+
+def _sync_platform_bot_rows(payload: dict) -> None:
+    """D110：把 admin 配置里的 bot 字段写进 grape_t_repo_platforms（一平台一个 bot）。
+
+    gitcode_api_token → (gitcode, token)；github_bot_token → (github, token)；
+    github_bot_username → (github, username)。bot_usernames 池已退役（一平台一 bot），忽略。
+    平台行不存在时跳过（行由配置导入建立），不在这里凭空建行。
+    """
+    _map = {
+        "gitcode_api_token": ("gitcode", "token"),
+        "github_bot_token": ("github", "token"),
+        "github_bot_username": ("github", "username"),
+    }
+    # provider → 承载 bot token 的扁平配置字段（轮换传播时反查，不再写 provider 字面量比较）
+    _token_field_by_provider = {p: f for f, (p, k) in _map.items() if k == "token"}
+    wanted: dict[str, dict] = {}
+    old_tokens: dict[str, str] = {}
+    for field, (provider, kind) in _map.items():
+        if field not in payload:
+            continue
+        val = payload.get(field)
+        if kind == "token":
+            if not val:
+                continue
+            try:
+                from src.domains.mgmt.auth.credential_crypto import encrypt
+                old_tokens[provider] = platform_bot_old_token(provider)
+                wanted.setdefault(provider, {})["token_enc"] = encrypt(str(val))
+            except Exception as e:
+                log.warning(f"_sync_platform_bot_rows: encrypt failed for {provider}: {e}")
+                continue
+        else:
+            wanted.setdefault(provider, {})["username"] = str(val or "")
+    if not wanted:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            for provider, fields in wanted.items():
+                RepoPlatformRepo.set_bot(s, provider, **fields)
+            s.commit()
+        log.info(f"admin config_store: platform bot rows synced {sorted(wanted)}")
+        # D110 R1：token 轮换传播（path A 仓库的 webhook 验签 token 同步刷新）
+        for provider, fields in wanted.items():
+            if "token_enc" not in fields:
+                continue
+            _new_plain = str(payload.get(_token_field_by_provider.get(provider, "")) or "")
+            trigger_platform_bot_swap(provider, old_tokens.get(provider, ""), _new_plain)
+    except Exception as e:
+        log.warning(f"_sync_platform_bot_rows failed: {e}")
+
+def save_oauth_credentials(oauth_payload: dict) -> "dict[str, bool]":
+    """把扁平 OAuth 凭据写进渠道表加密列——**唯一存放点**（Issue #3054 P1-1）。
+
+    返回 ``{provider: 是否已写表}``。明文字段在内存里加密后立刻落库，明文既不写
+    meta 也不写 configs/oauth-providers.json。渠道行不存在时返回 False（调用方决定
+    迁移窗口兜底），**绝不**静默把明文写去 meta 假装成功。
+
+    表归属：``grape_t_oauth_channels`` 是 mgmt 库的 D109 对象表（mgmt 域所有），
+    管理面（mgmt 进程）直连自己的表，不跨域。
+    """
+    from src.domains.mgmt.auth.credential_crypto import encrypt
+
+    wanted: dict[str, dict[str, str]] = {}
+    for flat_field, (provider, cred_field) in _OAUTH_FIELD_MAP.items():
+        val = str(oauth_payload.get(flat_field) or "")
+        if not val:
+            continue
+        col = "client_id_enc" if cred_field == "client_id" else "client_secret_enc"
+        wanted.setdefault(provider, {})[col] = encrypt(val)
+    if not wanted:
+        return {}
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+    from sqlalchemy.orm import Session
+
+    from src.kernel.persistence.engine import get_engine
+    from src.kernel.persistence.models_platform_object import OAuthChannelModel
+    from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    written: dict[str, bool] = {}
+    with Session(get_engine()) as s:
+        for provider, cols in wanted.items():
+            if OAuthChannelRepo.get(s, provider) is None:
+                written[provider] = False
+                log.warning("admin config_store: oauth 渠道 %s 不在对象表，凭据未落库", provider)
+                continue
+            s.execute(
+                update(OAuthChannelModel)
+                .where(OAuthChannelModel.provider == provider)
+                .values(**dict(cols, updated_at=now))
+            )
+            written[provider] = True
+        s.commit()
+    if any(written.values()):
+        from src.domains.platform.public import bump_epoch
+
+        bump_epoch()
+    return written
+
+
+def _purge_once() -> None:
+    """每进程只跑一次的历史明文 secret 清理（幂等；失败只告警，不影响配置读写）。"""
+    global _PURGE_DONE
+    if _PURGE_DONE:
+        return
+    _PURGE_DONE = True
+    try:
+        purge_legacy_secret_copies()
+    except Exception as e:
+        log.warning(f"admin config_store: purge_legacy_secret_copies failed: {e}")
+
+
+def purge_legacy_secret_copies() -> "dict[str, list[str]]":
+    """一次性清理历史明文 secret 副本（幂等，Issue #3054 P1-1）。
+
+    只清两份**历史副本**，且前提是对应渠道在表里已有可解密的密文（否则删了就没凭据）：
+    1. meta ``oauth_<p>_client_secret`` —— 明文；
+    2. ``configs/oauth-providers.json`` 里各渠道的 ``client_secret`` 键（其它键一律保留）。
+
+    另外清理 ``meta.oauth_providers_config`` 卡内遗留的 ``client_secret``。不删
+    client_id / redirect_uri / name 等任何其它字段。返回 {"meta": [...], "configs": [...]}
+    便于测试与日志核对。
+    """
+    from src.domains.mgmt.auth.credential_crypto import decrypt
+    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+
+    removed = {"meta": [], "configs": []}
+    providers = {p for p, _cf in _OAUTH_FIELD_MAP.values()}
+
+    # 表里哪几家的密文可解（只有这些才允许删历史明文）
+    backed: set[str] = set()
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            for provider in providers:
+                row = OAuthChannelRepo.get(s, provider)
+                blob = str(getattr(row, "client_secret_enc", "") or "") if row else ""
+                if not blob:
+                    continue
+                try:
+                    if decrypt(blob):
+                        backed.add(provider)
+                except Exception as e:
+                    log.warning("purge_legacy_secret_copies: 密文不可解，保留 meta 副本 "
+                                "(provider=%s): %s", provider, e)
+    except Exception as e:
+        log.warning("purge_legacy_secret_copies: 表探测失败，本轮不清理 meta: %s", e)
+        return removed
+
+    for provider in sorted(backed):
+        key = f"oauth_{provider}_client_secret"
+        if (get_meta_value(key) or "").strip():
+            set_meta_value(key, "")
+            removed["meta"].append(key)
+
+    # meta 里的渠道卡 JSON：剥离 client_secret（保留其它键）
+    try:
+        raw = get_meta_value("oauth_providers_config") or ""
+        if raw.strip():
+            cards = json.loads(raw)
+            dirty = False
+            if isinstance(cards, dict):
+                for provider, card in cards.items():
+                    # Issue #3054 QA：只有「表里已有可解密文」的渠道才允许剥明文副本；
+                    # 否则可能删掉唯一一份明文（表为空/不可解时）。
+                    if provider not in backed:
+                        continue
+                    if isinstance(card, dict) and card.pop("client_secret", None):
+                        dirty = True
+                        removed["meta"].append(f"oauth_providers_config.{provider}.client_secret")
+            if dirty:
+                set_meta_value("oauth_providers_config", json.dumps(cards, ensure_ascii=False))
+    except Exception as e:
+        log.warning("purge_legacy_secret_copies: oauth_providers_config 清理失败: %s", e)
+
+    # configs/oauth-providers.json：只剥 client_secret（其它键一律保留）
+    try:
+        if os.path.exists(_OAUTH_PATH):
+            with open(_OAUTH_PATH, encoding="utf-8") as f:
+                data = json.load(f) or {}
+            dirty = False
+            if isinstance(data, dict):
+                for provider, card in data.items():
+                    # 同上：只剥「表里已有可解密文」的渠道，避免删唯一明文副本。
+                    if provider not in backed:
+                        continue
+                    if isinstance(card, dict) and card.pop("client_secret", None) is not None:
+                        dirty = True
+                        removed["configs"].append(f"{provider}.client_secret")
+            if dirty:
+                tmp = _OAUTH_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, _OAUTH_PATH)
+    except Exception as e:
+        log.warning("purge_legacy_secret_copies: oauth-providers.json 清理失败: %s", e)
+
+    if removed["meta"] or removed["configs"]:
+        log.info("admin config_store: 历史明文 client_secret 已清理 meta=%s configs=%s",
+                 removed["meta"], removed["configs"])
+    return removed
+
+
+def _save_oauth_providers(oauth_payload: dict):
+    """把 ConfigBody 扁平 OAuth 字段写入 oauth-providers.json（协议参数，不含凭据）。
+
+    读取现有 json，合并新字段，原子写回。
+    Issue #3054 P1-1：**client_secret 永不写文件**（明文可被 git 托管，且加载时
+    本来就会被 importer 剥离——之前那条路径纯属"写一次明文垃圾"）。
     """
     existing = {}
     if os.path.exists(_OAUTH_PATH):
@@ -296,10 +591,13 @@ def _save_oauth_providers(oauth_payload: dict):
                 existing = json.load(f) or {}
         except Exception:
             pass
-    # 扁平 → 嵌套
+    # 扁平 → 嵌套（secret 跳过；顺带剥掉历史遗留的明文 secret 键）
     for flat_field, (provider, cred_field) in _OAUTH_FIELD_MAP.items():
-        if flat_field in oauth_payload:
-            if provider not in existing:
+        card = existing.get(provider)
+        if isinstance(card, dict):
+            card.pop("client_secret", None)
+        if flat_field in oauth_payload and cred_field != "client_secret":
+            if not isinstance(existing.get(provider), dict):
                 existing[provider] = {}
             existing[provider][cred_field] = oauth_payload[flat_field]
     # 原子写

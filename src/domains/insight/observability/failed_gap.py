@@ -13,7 +13,7 @@ listener 漏改路径由 #476 收口；update_event_status 增加终态 failed �
 
 边界：与可观测性其余接口一致，只统计调用者可见仓库（visible_repo_keys）。
 
-取数位置：events 归 runtime 域（`docs/weekly-11/table-owner.tsv`），本模块**不留 SQL**
+取数位置：events 归 runtime 域（`configs/table_ownership.json`），本模块**不留 SQL**
 ——统一走 runtime public 的任意拓扑原语（自有 DSN → db_registry；单库/测试拓扑 →
 进程主库）。原实现是「lib 有 DSN 时用具名查询、否则在本进程主库直发 4 条 events SQL」，
 三库拓扑下兜底那 4 条必 1146 并被吞成「全 0」，页面反而显示"没有无头失败"。

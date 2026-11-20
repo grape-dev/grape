@@ -32,7 +32,21 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 > CLI：`grape skills categories`（operation_id=`skills_categories`）。
 
-| 出参 | `{categories: [...]}`（Issue #179 skill-sync-category） |
+| 出参 | `{categories: [...], tree: [...]}`（`categories` 为 Issue #179 旧一级列表；`tree` 为 Issue #2761 统一分类树） |
+| 返回 | 200 |
+
+---
+
+## GET /api/skills/tag-suggest — 技能标签推荐
+
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `name` | string | 否 | 技能名称（关键词候选） |
+| `description` | string | 否 | 技能描述（关键词候选） |
+
+| 出参 | `{tags: [string]}`（规则型候选，最多 3 个） |
 | 返回 | 200 |
 
 ---
@@ -95,6 +109,72 @@
 | Path | `{skill_id}` |
 | 出参 | ZIP（application/zip） |
 | 返回 | 200 |
+
+---
+
+## GET /api/skills/by-id/{skill_id}/versions — 版本历史
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> operation_id=`skills_versions`（Issue #3168 详情页「版本历史」Tab）。
+
+| Path | `{skill_id}` |
+| Query | `page` / `page_size`（可选，分页，最新在前） |
+| 出参 | `{versions: [{id, skill_id, version, change_note, uploaded_at, uploaded_by}], total, page, page_size}` |
+| 返回 | 200；404 |
+
+---
+
+## GET /api/skills/by-id/{skill_id}/files — 包内文件清单
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> operation_id=`skills_files`（Issue #3168 详情页「资源」Tab）。
+
+| Path | `{skill_id}` |
+| 出参 | `{files: [{path, size}], file_count}`（官方技能从包内清单读取，用户技能解包枚举） |
+| 返回 | 200；404 |
+
+---
+
+## GET /api/skills/by-id/{skill_id}/related — 相关技能
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> operation_id=`skills_related`（Issue #3168 详情页「相关技能」Tab）。
+
+| Path | `{skill_id}` |
+| 出参 | `{related: [{id, skill_name, display_name, description, agent_type, summary, tags, like_count}]}`（共享标签优先，同 agent_type 兜底，最多 6 条；本人可见范围内过滤） |
+| 返回 | 200；404 |
+
+---
+
+## GET /api/skills/by-id/{skill_id}/comments — 评论列表
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> operation_id=`skills_comments_list`（Issue #3168 详情页「评论」Tab）。
+
+| Path | `{skill_id}` |
+| Query | `page`（默认 1）、`page_size`（默认 20，上限 50） |
+| 出参 | `{comments: [{id, user_id, user_name, content, created_at}], total, page, page_size}`（最新在前） |
+| 返回 | 200；404 |
+
+---
+
+## POST /api/skills/by-id/{skill_id}/comments — 发表评论
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403；需登录）
+> operation_id=`skills_comments_create`（Issue #3168 D11：纯文本评论，≤1000 字）。
+
+| Path | `{skill_id}` |
+| Body | `{content: string}`（必填，≤1000 字） |
+| 出参 | `{comment: {id, user_id, user_name, content, created_at}}` |
+| 返回 | 200；400（空/超长）；404 |
+
+---
+
+## PATCH /api/skills/{skill_id} — 免传包更新元信息
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> operation_id=`skills_patch_meta`（Issue #3202：tags/summary/description/category/agent_type
+> 原地更新，不产生新版本行；与 `POST /api/skills/by-id/{skill_id}/update`（需重传 ZIP 包）
+> 互补，权限口径一致：official 403、user 本人、repo 托管人）。
+
+| Path | `{skill_id}` |
+| Body | `{tags?, summary?, description?, category_id?, cat_l1_id?, cat_l2_id?, agent_type?, clear_category?, intro?}`（至少一项） |
+| 出参 | `{message, skill_id, summary, tags, agent_type, category_id, cat_l1_id, cat_l2_id, ...}`（updated_at 已刷新） |
+| 返回 | 200；400（无字段/非法值）；403；404 |
 
 ---
 

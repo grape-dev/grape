@@ -46,6 +46,9 @@ from src.kernel.gsb.client import (
     GsbRemoteTimeoutError,
     GsbRemoteUnreachableError,
 )
+# 能力端口：kernel 不 import src.domains；契约域 Provider 的注册实现由装配层
+# （src/api/contracts_wiring.py）绑定到 pipeline 端口，这里只在调用点解析。
+from src.kernel.ports import pipeline as _pipeline
 
 # Provider 注册表
 _PROVIDERS: dict[str, dict[str, Callable[[], Any] | None]] = {}
@@ -84,11 +87,13 @@ def register_provider(
 
 
 def _ensure_registered() -> None:
-    """首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。"""
-    if not _PROVIDERS:
-        from src.domains.contracts import ensure_providers_registered
+    """首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。
 
-        ensure_providers_registered()
+    注册动作（`ensure_providers_registered`）属契约域，经 pipeline 端口在调用点解析；
+    端口未绑定时 fail-fast 抛 PortNotBound，不再用域懒加载把故障推迟到别处。
+    """
+    if not _PROVIDERS:
+        _pipeline.ensure_providers_registered()
 
 
 # ---------------- 调用方进程域识别 + 禁止矩阵 ----------------
@@ -126,12 +131,19 @@ def caller_domain() -> str | None:
 
 
 def matrix_forces_lib(target_service: str) -> bool:
-    """禁止矩阵：``runtime|insight → mgmt`` 一律 lib（不依赖配置表）。
+    """禁止矩阵：**以 mgmt 为被调方的一律 lib**（任何调用方、不依赖配置表）。
 
-    该约束在三库三机目标态（各域独立主机）下保持同一形态；
-    ``mgmt → runtime|insight`` 方向允许 remote（按配置表）。
+    两个理由叠在一起：
+
+    1. 回环风险。mgmt 的 ``/internal/*`` 自己也会经 provider 往外调，
+       一旦 mgmt 被当作 remote 目标，就会出现 ``mgmt /internal/x → 远端 mgmt /internal/x``
+       这类同域回环（provider.py 的历史注释记录过直接 500/超时）。
+    2. 运维口径。mgmt 是管理态服务，跨进程调它意味着管理面无谓地依赖网络可用性；
+       保持 Local 让 mgmt 的读路径继续是"连自己的库"，不受兄弟机抖动影响。
+
+    ``mgmt → runtime|insight`` 方向仍允许 remote（按配置表 / 内置基线）。
     """
-    return caller_domain() in ("runtime", "insight") and target_service == "mgmt"
+    return target_service == "mgmt"
 
 
 # ---------------- 按方法路由决策 ----------------

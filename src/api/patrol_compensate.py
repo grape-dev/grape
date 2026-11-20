@@ -28,6 +28,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    native_issue_number, is_native_issue_ident,
+)  # Issue #3055
 
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
@@ -276,7 +279,11 @@ class ModeHandler(Handler):
         ctx.mode_payload = dict(st)
         # carried_context 一并恢复（在 issue 表，D15）
         try:
-            num = int(str(ctx.issue_id).lstrip("#"))
+            # Issue #3055：ident 保形（原 int() 对 gitee IK* 抛 ValueError → 静默丢上下文）
+            _raw_num = str(ctx.issue_id).lstrip("#")
+            if not is_native_issue_ident(_raw_num):
+                raise ValueError(f"invalid issue ident: {ctx.issue_id!r}")
+            num = native_issue_number(_raw_num)
             ctx.mode_payload["carried_context"] = get_carried_context(ctx.repo_key, num)
         except (ValueError, TypeError):
             ctx.mode_payload["carried_context"] = {}
@@ -404,6 +411,15 @@ class DispatchHandler(Handler):
             _set_finding(ctx.finding_id, "open", f"dispatch_error: {e}")
             ctx.verdict, ctx.action_meta = "dispatch_error", str(e)
             return False
+        # Issue #2816：终态载体守卫在 a2a 端点上短路（HTTP 200 + skipped 回执）时，
+        # 这次补发实际没发生。按「检测误报」收口（链路没断，是单据已终态），
+        # 不能落 compensated —— 否则统计把「没派发」算成「已补偿」。
+        _skip = self._terminal_skip_reason(res)
+        if _skip:
+            _set_finding(ctx.finding_id, "false_positive",
+                         f"terminal guard skip: {_skip}")
+            ctx.verdict, ctx.action_meta = "terminal_skip", f"guard skip: {_skip}"
+            return False
         ok, summary = self._summarize(res)
         if ok:
             # 评审八轮修正③：审计键退役——compensated:{task_id} 曾再写一行 meta
@@ -443,6 +459,26 @@ class DispatchHandler(Handler):
         _set_finding(ctx.finding_id, "open", f"dispatch_failed: {summary}")
         ctx.verdict, ctx.action_meta = "dispatch_failed", summary
         return False
+
+    @staticmethod
+    def _terminal_skip_reason(res) -> str:
+        """从派发回执里取「终态守卫跳过」原因（dict 或 JSONResponse 均支持）。"""
+        payload: dict = {}
+        if isinstance(res, dict):
+            payload = res
+        else:
+            try:
+                body = getattr(res, "body", b"") or b""
+                if isinstance(body, memoryview):
+                    body = body.tobytes()
+                import json as _json_local
+                payload = _json_local.loads(body.decode("utf-8", "replace")) if body else {}
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            return ""
+        val = payload.get("skipped")
+        return str(val) if val else ""
 
     @staticmethod
     def _is_permanent_failure(res) -> bool:

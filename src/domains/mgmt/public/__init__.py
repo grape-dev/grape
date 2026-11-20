@@ -13,6 +13,7 @@ import re
 from contextlib import contextmanager
 
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 from typing import Any
 
@@ -207,6 +208,7 @@ def mark_default_featured(names: list[str]) -> int:
 
 _SCENE_CONTENT_COLS = (
     "display_name", "version", "description", "market_description", "icon", "category_id",
+    "cat_l1_id", "cat_l2_id",
     "recommended_template", "nodes_json", "onboarding", "tags", "author", "content_hash",
     "obs_icon_key", "preset_custom_fields",
 )
@@ -387,14 +389,14 @@ def ensure_scene_knowledge_ref(knowledge_id: int, scene_id: str = "", agent_type
         c.execute("INSERT IGNORE INTO scene_knowledge_ref "
                   "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
                   "VALUES (%s, %s, %s, %s, 1, %s)",
-                  (int(knowledge_id), scene_id, agent_type, int(issue_num), created_by))
+                  (int(knowledge_id), scene_id, agent_type, native_issue_number(issue_num), created_by))
         return int(c.rowcount or 0)
 
 
 def delete_event_knowledge(repo_key: str, scope: str, agent_type: str, issue_num: int) -> dict[str, int]:
     """删除某事件的知识记录：先按 knowledge_id 删 ref，再删主表（顺序与原实现一致）。"""
     with db_registry.cursor("mgmt") as c:
-        params = (repo_key, scope, agent_type, int(issue_num))
+        params = (repo_key, scope, agent_type, native_issue_number(issue_num))
         c.execute("SELECT id FROM agent_shared_knowledge WHERE repo_key=%s AND scope=%s "
                   "AND agent_type=%s AND issue_num=%s", params)
         kids = [int(r[0]) for r in c.fetchall()]
@@ -437,15 +439,27 @@ def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "offi
     payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (payload or {}).items()}
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with db_registry.cursor("mgmt") as cur:
-        cur.execute("SELECT id, content_hash FROM scene_market "
+        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id FROM scene_market "
                     "WHERE name=%s AND source=%s LIMIT 1", (name, source))
         row = cur.fetchone()
         if row:
-            sid, old_hash = row[0], (row[1] or "")
+            sid, old_hash, old_tags = row[0], (row[1] or ""), (row[2] or "")
+            old_l1, old_l2 = (row[3] if len(row) > 3 else 0), (row[4] if len(row) > 4 else 0)
             if payload.get("content_hash") and payload.get("content_hash") == old_hash:
                 return {"action": "skipped", "id": sid, "changed": 0}
             if not cols:
                 return {"action": "skipped", "id": sid, "changed": 0}
+            if "tags" in payload:
+                # Issue #2761：同步写入只补 auto 标签，保留人工(manual)标签
+                from src.kernel.tags import encode_tags, merge_tags  # noqa: PLC0415
+                payload["tags"] = encode_tags(merge_tags(old_tags, payload["tags"]))
+            if "cat_l1_id" in payload:
+                # Issue #2761：一级未变且来源未给二级时保留旧二级（未命中不覆盖旧值）
+                from src.kernel.category import sync_category_target  # noqa: PLC0415
+                payload["cat_l1_id"], payload["cat_l2_id"] = sync_category_target(
+                    payload.get("cat_l1_id"), payload.get("cat_l2_id"), old_l1, old_l2)
+                if "cat_l2_id" not in cols:
+                    cols.append("cat_l2_id")
             sets = ", ".join(f"{c}=%s" for c in cols)
             cur.execute(f"UPDATE scene_market SET {sets}, updated_at=NOW() WHERE id=%s",
                         tuple(payload[c] for c in cols) + (sid,))
@@ -470,6 +484,29 @@ def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
     return row[0] if row else None
+
+
+def category_dict_rows(scope: str = "") -> list[dict[str, Any]]:
+    """统一分类字典（Issue #2761）：供 runtime 同步层按 slug 解析分类，不直接读 mgmt 表。"""
+    scope = (scope or "").strip().lower()
+    sql = ("SELECT id, parent_id, level, name, slug, applies_to FROM grape_t_category_dict "
+           "WHERE is_active=1")
+    params: list[Any] = []
+    if scope in ("scene", "skill"):
+        sql += " AND applies_to IN ('both', ?)"
+        params.append(scope)
+    sql += " ORDER BY level, parent_id, id"
+    with _any_cursor() as c:
+        c.execute(sql, tuple(params))
+        return [{"id": int(r[0]), "parent_id": int(r[1] or 0), "level": int(r[2] or 1),
+                 "name": r[3], "slug": r[4] or "", "applies_to": r[5] or "both"}
+                for r in (c.fetchall() or [])]
+
+
+def category_dict_active_map(scope: str = "") -> dict[str, dict[str, Any]]:
+    """slug → {id, level, parent_id}（同步层用）。"""
+    return {r["slug"]: {"id": r["id"], "level": r["level"], "parent_id": r["parent_id"]}
+            for r in category_dict_rows(scope) if r.get("slug")}
 
 
 def count_rows(table: str, where: str = "", params: tuple = ()) -> int:
@@ -711,6 +748,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "user_mapping_row_by_open_id", "feishu_open_id_by_platform_column",
            "clear_feishu_by_app", "clear_feishu_by_user", "set_gitcode_nickname_any",
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
+           "category_dict_rows", "category_dict_active_map",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            # P2 服务接口补齐（N6/N8/N9/N10）
            "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
@@ -766,6 +804,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "feedback_internal_sync_page", "feedback_apply_statuses",
            # 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑）
            "feedback_pending_conversions", "feedback_mark_converted",
+           "feedback_claim_row", "feedback_release_claim", "feedback_list_claims",
+           "feedback_mark_converted_from_claim",
            # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
            "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
@@ -1605,6 +1645,28 @@ def _any_tx():
 # 两条连接都能执行，调用方不需要（也不允许）再留兜底 SQL。
 
 _ANY_QUERIES: dict[str, str] = {
+    # D109 平台对象模型（四表归 mgmt 域）：runtime 读平台卡、写 bot 巡检状态都走本域
+    # 原语，不再各自用 ORM 直连自己的库（拆库后那是另一份空/陈旧副本）。
+    # 凭据列（bot_token_enc / client_*_enc）一律不出域。
+    "repo_platform_cards": (
+        "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
+        "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
+        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
+        "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
+    "repo_platform_cards_all": (
+        "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
+        "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
+        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
+        "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "FROM grape_t_repo_platforms ORDER BY provider"),
+    "repo_platform_bot_status_set": (
+        "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "
+        "WHERE provider=?"),
     # 平台身份（external_identities 归本域）：按平台 login 取账号 id（FR-21.2）。
     # 原调用方 runtime/im/feishu_async 是「mgmt_lib 优先 + 进程库兜底 SQL」双分支，
     # 兜底那句只在 lib 不可用时执行（单库/视图期），却正是跨域表引用的来源；且三库
@@ -1973,11 +2035,11 @@ _ANY_QUERIES: dict[str, str] = {
         "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?"),
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
         "FROM autopilot_tasks WHERE id=?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (
@@ -2154,6 +2216,21 @@ _ANY_QUERIES: dict[str, str] = {
     "feedback_mark_converted": (
         "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
         "WHERE id=? AND issue_url=''"),
+    # 占位（claim）：把空 issue_url 改成本次 worker 的占位值，单条条件 UPDATE 即领走该行。
+    # 多进程 / 多机（共享同一库）下只有一个能 rowcount=1，这就是跨进程去重的那道闸。
+    "feedback_claim_row": (
+        "UPDATE user_feedback SET issue_url=? "
+        "WHERE id=? AND COALESCE(issue_url,'')=''"),
+    # 占位回收（失败放回 / 过期清理）：只清掉当前的占位值，已转换行不受影响。
+    "feedback_release_claim": (
+        "UPDATE user_feedback SET issue_url='' WHERE id=? AND issue_url LIKE ?"),
+    # 列出当前所有占位行（前缀 LIKE），供过期回收逐个判定。
+    "feedback_list_claims": (
+        "SELECT id, issue_url FROM user_feedback WHERE issue_url LIKE ?"),
+    # 回写时同时接受「空」与「本次占位」：占位挡着自己回写会让建出来的单永远记不上。
+    "feedback_mark_converted_from_claim": (
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "WHERE id=? AND (issue_url='' OR issue_url LIKE ?)"),
     # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
     # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
     # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
@@ -2298,6 +2375,44 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+_PLATFORM_CARD_COLUMNS = (
+    "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
+    "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
+    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
+    "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
+    "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
+    "user_images_base", "brand_color",
+)
+
+
+def repo_platform_cards(enabled_only: bool = True) -> list[dict]:
+    """D109 平台卡行（grape_t_repo_platforms 归 mgmt 域；任意拓扑）。
+
+    runtime（vcs/platform_card）与 insight 需要平台方言/端点描述时走本原语：
+    - 拆库拓扑：`read_all_any` 走 mgmt 自有 DSN（lib），读到的才是平台卡真源；
+    - 单库/测试拓扑：回落进程主库，行为与拆库前一致。
+
+    返回列见 `_PLATFORM_CARD_COLUMNS`；**凭据列不出域**（bot_token_enc / client_*_enc
+    留在 mgmt，取 token 走凭据域原语）。
+    """
+    rows = read_all_any("repo_platform_cards" if enabled_only else "repo_platform_cards_all")
+    return [dict(zip(_PLATFORM_CARD_COLUMNS, tuple(r))) for r in rows]
+
+
+def mark_repo_platform_bot_status(provider: str, token_status: str,
+                                  checked_at: str = "") -> int:
+    """把 bot 巡检状态写回平台行（真源；D110 后 bot 归平台行）。
+
+    幂等：同值重复写只更新时间戳；`checked_at` 为空取当前 UTC。
+    任意拓扑走 `exec_any`（自有 DSN 直接写 mgmt 库；单库写进程主库）。
+    """
+    from datetime import datetime, timezone
+    now = (checked_at or "").strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return int(exec_any("repo_platform_bot_status_set",
+                        (str(token_status or ""), now, now, str(provider or ""))) or 0)
 
 
 def audit_recent_rows(limit: int, like: str = "") -> list[Any]:
@@ -2892,6 +3007,431 @@ def record_outbound_ledger(provider: str, repo_key: str, content_type: str, cont
               origin_channel, origin_task, content_hash, created_at))
 
 
+# ── 沙箱 provider / template 注册（worker 上报链）────────────────────────────
+# 这些表归 mgmt（管理面配置，多租户共享）。runtime 侧的 worker 上报只调下面这些
+# 原语，不再自己写 SQL；编排（加密、引擎白名单校验）仍留在 runtime。
+def sandbox_provider_by_credential(credential_id: int) -> tuple:
+    """按 runtime_credential_id 取 (id, api_key_enc, extra_config)；无行返回 ()。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, api_key_enc, extra_config FROM grape_t_sandbox_provider_config "
+                  "WHERE runtime_credential_id=%s", (credential_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def sandbox_provider_ids_by_credential(credential_id: int) -> list[str]:
+    """该凭据关联的 provider id 列表（吊销前的在制动静检查用）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=%s",
+                  (credential_id,))
+        return [str(r[0]) for r in c.fetchall()]
+
+
+def sandbox_providers_by_credential(credential_id: int) -> list[tuple]:
+    """(id, platform, endpoint, api_key_enc, extra_config, max_sandboxes) —— enabled 的 provider 行。
+
+    原 SQL 把它和 runtime_credentials LEFT JOIN 在一起（跨库）；凭据侧列由调用方本域再查。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, platform, endpoint, api_key_enc, extra_config, max_sandboxes "
+                  "FROM grape_t_sandbox_provider_config "
+                  "WHERE enabled=1 AND runtime_credential_id=%s", (credential_id,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def usernames_by_ids(user_ids) -> dict:
+    """{user_id: username} —— 沙箱列表把 created_by 还原成 owner 名（原 LEFT JOIN user_accounts）。"""
+    keys = [int(x) for x in (user_ids or []) if x]
+    if not keys:
+        return {}
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT id, username FROM grape_accounts WHERE id IN ({ph})", tuple(keys))
+        return {r[0]: (r[1] or "") for r in c.fetchall()}
+
+
+def sandbox_provider_credential_ids(provider_ids) -> dict:
+    """{provider_id: runtime_credential_id} —— 原 LEFT JOIN grape_t_sandbox_provider_config。"""
+    keys = [str(x) for x in (provider_ids or []) if x]
+    if not keys:
+        return {}
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT id, runtime_credential_id FROM grape_t_sandbox_provider_config "
+                  f"WHERE id IN ({ph})", tuple(keys))
+        return {r[0]: (r[1] or 0) for r in c.fetchall()}
+
+
+def sandbox_provider_platform(provider_id: str) -> str:
+    """provider 的 platform 键（沙箱杀灭时用来查后端工厂）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT platform FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def sandbox_provider_credential_id(provider_id: str) -> int:
+    """provider 关联的 runtime_credential_id（0 = 未关联）。
+
+    LLM 凭据路由要按 provider 的凭据 scope 决定走仓库级还是用户级凭据。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=%s",
+                  (provider_id,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def sandbox_provider_endpoint(provider_id: str) -> str:
+    """provider 当前 endpoint（空值不覆盖语义要用它）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT endpoint FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def update_sandbox_provider(provider_id: str, endpoint: str, api_key_enc: str,
+                            extra_config: str, updated_by: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_sandbox_provider_config SET endpoint=%s, api_key_enc=%s, "
+                  "extra_config=%s, updated_by=%s WHERE id=%s",
+                  (endpoint, api_key_enc, extra_config, updated_by, provider_id))
+        return int(c.rowcount or 0)
+
+
+def insert_sandbox_provider(provider_id: str, platform: str, endpoint: str, api_key_enc: str,
+                            extra_config: str, enabled: int, max_sandboxes: int,
+                            updated_by: str, runtime_credential_id: int) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, "
+                  "extra_config, enabled, max_sandboxes, updated_by, runtime_credential_id) "
+                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (provider_id, platform, endpoint, api_key_enc, extra_config, enabled,
+                   max_sandboxes, updated_by, runtime_credential_id))
+        return int(c.rowcount or 0)
+
+
+def sandbox_template_id(provider_id: str, template_id: str) -> str:
+    """(provider, template_id) 对应的行 id；不存在返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_sandbox_templates WHERE provider_id=%s AND template_id=%s",
+                  (provider_id, template_id))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def insert_sandbox_template(row_id: str, name: str, provider_id: str, template_id: str,
+                            alias: str, description: str, enabled: int,
+                            created_by: str, now_iso: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, "
+                  "description, enabled, created_by, created_at, updated_at) "
+                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (row_id, name, provider_id, template_id, alias, description, enabled,
+                   created_by, now_iso, now_iso))
+        return int(c.rowcount or 0)
+
+
+def sandbox_template_row(provider_id: str, template_id: str) -> tuple:
+    """(id, enabled) —— 探测上报要按启用态决定 binding 走向。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, enabled FROM grape_t_sandbox_templates "
+                  "WHERE provider_id=%s AND template_id=%s", (provider_id, template_id))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+# ── 沙箱配置读侧（runtime 执行链读管理面配置）────────────────────────────
+# ── 出口策略读侧（runtime 执行链按技能查放行策略）──────────────────────
+def channel_access_token(grape_user_id: str, provider: str) -> str:
+    """该用户在该渠道的 OAuth access_token 密文（status IN (1,4) 首条）；无行返回空串。
+
+    解密仍由调用方做（credential_crypto 归 mgmt，但明文不出域）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT access_token FROM external_identities "
+                  "WHERE grape_user_id=%s AND provider=%s AND status IN (1,4) LIMIT 1",
+                  (str(grape_user_id), provider))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def egress_policy_for_skill(skill_name: str) -> str:
+    """该技能的放行策略（skill_scope 降序取第一条）；无行返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=%s "
+                  "ORDER BY skill_scope DESC LIMIT 1", (skill_name,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def egress_admin_exceptions() -> list[tuple]:
+    """(host, host_type, ports, methods, scope, scope_target, skill_digest) —— 生效中的放行例外。
+
+    原 SQL 用 datetime('now')（SQLite 语法），这里改 CURRENT_TIMESTAMP，MySQL/MariaDB/SQLite 都认。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
+                  "FROM grape_t_egress_admin_exception "
+                  "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def egress_policy_global() -> str:
+    """全局兜底策略（skill_name='*'）；无行返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1")
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+# ── 沙箱任务代理令牌（runtime 签发/校验，表归 mgmt）────────────────────
+def upsert_task_proxy_token(row_id: str, task_id: str, token_hash: str, backend_name: str,
+                            expires_at: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("REPLACE INTO grape_t_task_proxy_tokens "
+                  "(id, task_id, token_hash, backend_name, expires_at) VALUES (%s,%s,%s,%s,%s)",
+                  (row_id, task_id, token_hash, backend_name, expires_at))
+        return int(c.rowcount or 0)
+
+
+def task_proxy_token_row(token_hash: str) -> tuple:
+    """(task_id, backend_name, expires_at)；无行返回 ()。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT task_id, backend_name, expires_at FROM grape_t_task_proxy_tokens "
+                  "WHERE token_hash=%s", (token_hash,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def repo_llm_credential_row(repo_key: str, engine_type: str) -> tuple:
+    """(provider, api_key_enc, base_url, model) —— 仓库级 LLM 凭据，enabled=1 首条。
+
+    engine_type 传具体引擎名或 'common'（通用兜底）；无行返回 ()。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT provider, api_key_enc, base_url, model FROM grape_t_repo_llm_credentials "
+                  "WHERE repo_key=%s AND engine_type=%s AND enabled=1 LIMIT 1",
+                  (repo_key, engine_type))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def user_llm_credential_row(user_id, engine_type: str = "common", any_user: bool = False) -> tuple:
+    """(provider, api_key_enc, base_url, model) —— 用户级 LLM 凭据，enabled=1 首条。
+
+    any_user=True 时忽略 user_id（系统级兜底：用户无凭据 / A2A 任务 user_id=0）。
+    """
+    sql = ("SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials "
+           "WHERE engine_type=%s AND enabled=1 LIMIT 1") if any_user else           ("SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials "
+           "WHERE user_id=%s AND engine_type=%s AND enabled=1 LIMIT 1")
+    args = (engine_type,) if any_user else (user_id, engine_type)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, args)
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_whitelist_rows(backend_name: str) -> list[tuple]:
+    """(id, backend_name, domain, method, path_prefix, scheme, port) —— 该后端的完整白名单行。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, backend_name, domain, method, path_prefix, scheme, port "
+                  "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=%s", (backend_name,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def purge_task_proxy_tokens(task_id: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("DELETE FROM grape_t_task_proxy_tokens WHERE task_id=%s", (task_id,))
+        return int(c.rowcount or 0)
+
+
+# ── 账号 id 解析（runtime 引擎注册按用户名找 mgmt 账号）──────────────────
+def active_account_id_by_username(username: str) -> int:
+    """status=1 的账号 id；无行返回 0。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_accounts WHERE username=%s AND status=1 LIMIT 1", (username,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def account_id_by_username(username: str) -> int:
+    """任意状态、id>0 的账号 id；无行返回 0。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_accounts WHERE username=%s AND id>0 LIMIT 1", (username,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def sandbox_provider_owned_by(provider_id: str, credential_id: int) -> bool:
+    """provider 是否属于该凭据（worker 上报越权校验）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT 1 FROM grape_t_sandbox_provider_config "
+                  "WHERE id=%s AND runtime_credential_id=%s", (provider_id, credential_id))
+        return c.fetchone() is not None
+
+
+def sandbox_provider_max_sandboxes(provider_id: str) -> int:
+    """provider 允许的最大沙箱数（缺行返回 0）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def sandbox_template_candidates(engine_like: str) -> list[tuple]:
+    """(template_id, provider, engines, updated_at) —— engines LIKE 且启用且探测通过的行。
+
+    原 SQL 在库里用 ORDER BY CASE provider ... 做优先级排序（依赖调用方传入的
+    platform 顺序）。跨库后排序挪到调用方 Python 侧做，这里只取候选集。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT template_id, provider, engines, updated_at FROM grape_t_sandbox_templates "
+                  "WHERE engines LIKE %s AND enabled=1 AND last_check_status='ok'",
+                  (engine_like,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def sandbox_template_provider_of(template_id: str) -> tuple:
+    """template_id → (template_id, provider)，执行链解析模板归属用。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT template_id, provider FROM grape_t_sandbox_templates WHERE template_id=%s",
+                  (template_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_mode(runtime_id, engine_name: str) -> tuple:
+    """(sandbox_mode, degrade_policy)；键是 (runtime_id, engine_name)。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT sandbox_mode, degrade_policy FROM grape_t_engine_sandbox_config "
+                  "WHERE runtime_id=%s AND engine_name=%s", (runtime_id, engine_name))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_provider_of(runtime_id, engine_name: str, allowed_providers) -> str:
+    """该 (runtime, engine) 的 sandbox_provider，仅当它在 allowed_providers 内。"""
+    keys = [str(x) for x in (allowed_providers or []) if x]
+    if not keys:
+        return ""
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
+                  f"WHERE runtime_id=%s AND engine_name=%s AND sandbox_provider IN ({ph})",
+                  (runtime_id, engine_name, *keys))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def any_engine_sandbox_provider(allowed_providers) -> str:
+    """任意一行落在 allowed_providers 内的 sandbox_provider（无 runtime 上下文时的 fallback）。"""
+    keys = [str(x) for x in (allowed_providers or []) if x]
+    if not keys:
+        return ""
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
+                  f"WHERE sandbox_provider IN ({ph}) LIMIT 2", tuple(keys))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def engine_sandbox_paths_of(backend_name: str) -> list[tuple]:
+    """后端挂载路径 (path, access) 列表。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=%s",
+                  (backend_name,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def engine_sandbox_toggles() -> list[tuple]:
+    """全部引擎的 (engine_type, sandbox_on)。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def engine_sandbox_whitelist_domains(backend_name: str) -> list[str]:
+    """该后端可访问的域名白名单（去重）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name=%s",
+                  (backend_name,))
+        return [str(r[0]) for r in c.fetchall()]
+
+
+def count_engine_sandbox_whitelist() -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT COUNT(*) FROM grape_t_engine_sandbox_whitelist")
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def disable_sandbox_template_bindings(provider_id: str, template_db_id, now_iso: str) -> int:
+    """模板被禁用时把 detected/空态 binding 降级为 disabled。返回影响行数。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_engine_template_binding SET status='disabled', updated_at=%s "
+                  "WHERE provider_id=%s AND template_id=%s AND status IN ('detected', '')",
+                  (now_iso, provider_id, template_db_id))
+        return int(c.rowcount or 0)
+
+
+def count_manual_sandbox_bindings(provider_id: str, engine_type: str) -> int:
+    """(provider, engine) 上非 detected 的 binding 数 —— manual 恒赢判定。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT COUNT(*) FROM grape_t_engine_template_binding "
+                  "WHERE provider_id=%s AND engine_type=%s AND status NOT IN ('detected', '')",
+                  (provider_id, engine_type))
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def upsert_sandbox_template_binding(provider_id: str, engine_type: str, template_db_id,
+                                    engine_version: str, now_iso: str, new_row_id: str = "") -> str:
+    """按 (provider, engine, template) 三元组 upsert binding，返回 'updated' / 'inserted'。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_engine_template_binding "
+                  "WHERE provider_id=%s AND engine_type=%s AND template_id=%s",
+                  (provider_id, engine_type, template_db_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE grape_t_engine_template_binding SET status='detected', "
+                      "engine_version=%s, updated_at=%s WHERE id=%s",
+                      (engine_version, now_iso, row[0]))
+            return "updated"
+        from src.kernel.sandbox_uid import new_row_uid as _nru
+        c.execute("INSERT INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, "
+                  "status, engine_version, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (new_row_id or _nru(), provider_id, engine_type, template_db_id, "detected",
+                   engine_version, now_iso, now_iso))
+        return "inserted"
+
+
+def reassign_runtime_binding(ids, keep_id: str) -> int:
+    """历史绑定表（devops_agent_runtime_binding）里指向待回收 runtime 的行改指到 keep_id。
+
+    本表归 mgmt；runtime 域的 refs_reconcile 只调本原语，不自己写 SQL（跨域写收口）。
+    返回影响行数。
+    """
+    keys = [i for i in (ids or []) if i]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"UPDATE devops_agent_runtime_binding SET runtime_id=%s WHERE runtime_id IN ({ph})",
+                  (keep_id, *keys))
+        return int(c.rowcount or 0)
+
+
+def purge_runtime_binding(ids) -> int:
+    """删除历史绑定表里指向待回收 runtime 的行，返回删除行数（归 mgmt，同上）。"""
+    keys = [i for i in (ids or []) if i]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", tuple(keys))
+        return int(c.rowcount or 0)
+
+
 def purge_outbound_ledger_before(cutoff: str) -> int:
     """删除 created_at 早于 cutoff 的记录（保留期清理），返回删除行数。"""
     return exec_any("outbound_ledger_purge_before", (cutoff,))
@@ -3264,16 +3804,28 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
     content_hash = payload.get("content_hash") or ""
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with _any_tx() as c:
-        c.execute("SELECT id, version, content_hash, is_active FROM scene_market "
-                  "WHERE name=? AND source=? LIMIT 1", (name, source))
+        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id "
+                  "FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
         row = c.fetchone()
         if row:
-            sid, old_version, old_hash, preserved_active = (
-                int(row[0]), row[1], (row[2] or ""), row[3])
+            sid, old_version, old_hash, preserved_active, old_tags = (
+                int(row[0]), row[1], (row[2] or ""), row[3], (row[4] or ""))
+            old_l1, old_l2 = (row[5] if len(row) > 5 else 0), (row[6] if len(row) > 6 else 0)
             if old_hash == content_hash:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
             if not cols:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
+            if "tags" in payload:
+                # Issue #2761：同步写入只补 auto 标签，保留人工(manual)标签
+                from src.kernel.tags import encode_tags, merge_tags  # noqa: PLC0415
+                payload["tags"] = encode_tags(merge_tags(old_tags, payload["tags"]))
+            if "cat_l1_id" in payload:
+                # Issue #2761：一级未变且来源未给二级时保留旧二级（未命中不覆盖旧值）
+                from src.kernel.category import sync_category_target  # noqa: PLC0415
+                payload["cat_l1_id"], payload["cat_l2_id"] = sync_category_target(
+                    payload.get("cat_l1_id"), payload.get("cat_l2_id"), old_l1, old_l2)
+                if "cat_l2_id" not in cols:
+                    cols.append("cat_l2_id")
             sets = ", ".join(f"{col}=?" for col in cols)
             # is_active 原样回写库内既有值（原 SQL 同样是 is_active=? 传 preserved_active，
             # 语义是"不改成 1"，admin 停用状态在同步后保持）
@@ -3285,13 +3837,14 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
         c.execute(
             "INSERT INTO scene_market "
             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-            "category_id, is_featured, like_count, source, source_user_id, "
+            "category_id, cat_l1_id, cat_l2_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, tags, author, "
             "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
             (name, payload.get("display_name", ""), payload.get("version", ""),
              payload.get("description", ""), payload.get("market_description", ""),
              "", "", payload.get("category_id", 0),
+             payload.get("cat_l1_id", 0), payload.get("cat_l2_id", 0),
              payload.get("recommended_template", ""), payload.get("nodes_json", ""),
              payload.get("onboarding", ""), payload.get("tags", ""), payload.get("author", ""),
              content_hash, payload.get("preset_custom_fields", "")))
@@ -4678,7 +5231,7 @@ def outbound_card_chat_row_any(out_track_id: str, cursor: Any = None) -> Any | N
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------
 #
 # 归位理由：gsb_service_registry 是唯一一张「所有域进程都写」的基础设施表，归属 mgmt
-# （docs/weekly-11/table-owner.tsv）。原实现在 kernel 里用进程主库直连——单库拓扑没问
+# （configs/table_ownership.json）。原实现在 kernel 里用进程主库直连——单库拓扑没问
 # 题，三库拓扑下每个域把注册写进自己那个库：注册不报错，但跨域互相发现不到（静默失效，
 # 不是能看到 1146 的那种故障）。SQL 收到本域后，任一域进程的注册/心跳/发现都落同一张
 # mgmt 表；单库 / 测试拓扑由任意拓扑原语回落进程主库，行为与改前逐字一致。
@@ -4890,3 +5443,836 @@ def feedback_mark_converted(items: list[tuple]) -> int:
             # rowcount 读游标（pymysql 的 execute() 返回的是 int，取不到 .rowcount）
             done += int(getattr(c, "rowcount", 0) or 0)
     return done
+
+
+def feedback_claim_row(claim_value: str, fid) -> bool:
+    """把一行待转换反馈「占位」给当前 worker；抢到返回 True。
+
+    单条条件 UPDATE（`WHERE id=? AND COALESCE(issue_url,'')=''`）+ rowcount 判定，
+    在共享库的多进程 / 多机下是原子的：只有第一个 worker 能拿到这一行。
+    各机各自独立库时该占位只在本库可见，此时防重复靠调用方的「同标题开放单探测」。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_claim_row"), (claim_value, fid))
+        return int(getattr(c, "rowcount", 0) or 0) == 1
+
+
+def feedback_release_claim(fid, prefix: str) -> int:
+    """清掉本 worker 的占位（建单失败 / 过期回收），返回影响行数。"""
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_release_claim"), (fid, f"{prefix}%"))
+        return int(getattr(c, "rowcount", 0) or 0)
+
+
+def feedback_list_claims(prefix: str) -> list[tuple]:
+    """当前占位行 `(id, issue_url)`：供调用方按占位里的时间戳判定是否过期。"""
+    return [tuple(r) for r in read_all_any("feedback_list_claims", (f"{prefix}%",))]
+
+
+def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
+    """同 `feedback_mark_converted`，但守卫放宽为「空 或 本次占位」。
+
+    `items` 为 `[(issue_url, issue_number, converted_at, id)]`。占位状态下回写若只认
+    `issue_url=''`，单已建出来却永远记不上（占位挡着自己写），故单列一条语句。
+    """
+    todo = [tuple(it) for it in (items or [])]
+    if not todo:
+        return 0
+    done = 0
+    with _any_tx() as c:
+        for url, number, converted_at, fid in todo:
+            c.execute(_any_sql("feedback_mark_converted_from_claim"),
+                      (url, number, converted_at, fid, f"{prefix}%"))
+            done += int(getattr(c, "rowcount", 0) or 0)
+    return done
+
+# ── 跨域异常类再导出（2026-11-18）──────────────────────────────────────────
+# runtime 的 VCS providers（gitcode/gitee/gitlab/card_module）在调用上游 API 失败时
+# 要抛/捕获与 mgmt repo_manager 同一套异常类型，调用方才能统一处理。此前直接
+# from src.domains.mgmt.user.repo_manager import UpstreamAPIError，属跨域 import
+# 别域内部实现。改为由 owner 域 public 提供类型，定义仍只在 repo_manager.py 一份。
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError  # noqa: E402
+
+__all_error_exports__ = ("UpstreamAPIError",)
+
+# ── 跨域函数原语（2026-11-18）──────────────────────────────────────────────
+# runtime 的 engine（agent.py / service.py）与 routes/chat.py 此前直接
+# `from src.domains.mgmt.user.db import ...` / `...auth.grape_account_db import ...`，
+# 属跨域 import 别域内部实现（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供
+# 具名入口：调用方只依赖契约面，实现仍只有一份。
+
+
+def task_token(task: dict) -> str:
+    """取任务可用的 GitCode/GitHub token（含按需刷新）。
+
+    原语实现见 mgmt.user.db.get_task_token（路径 A 的 bot token 优先，
+    空则走路径 B 实时获取并自动刷新；按 repo_key 前缀分流 github / gitcode）。
+    这里只做契约转发，不复制逻辑。
+    """
+    from src.domains.mgmt.user.db import get_task_token as _impl
+
+    return _impl(task)
+
+
+def grape_account_by_username(username: str) -> dict | None:
+    """按用户名取 Grape 账号行（不存在返回 None）。"""
+    from src.domains.mgmt.auth.grape_account_db import (
+        get_grape_account_by_username as _impl,
+    )
+
+    return _impl(username)
+
+def managed_repos_for_user(user_id: int, org_id: int = 0,
+                           personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库列表（JOIN user_repos；full_name 无前缀、repo_key 带前缀）。
+
+    insight 的看板/搜索需要按用户列出托管仓库，此前直接
+    `from src.domains.mgmt.user import db as user_db` 调内部函数（跨域硬耦合）。
+    org_id 语义与内部实现一致：>0 按组织过滤，0 返回全部；personal_org=True 放宽
+    个人组织口径（详见 mgmt.user.db.get_managed_repos 的说明）。
+    """
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+# ── 跨域读/写原语：mgmt.user.db 高频面（2026-11-18）────────────────────────
+# runtime / insight 有 165 处函数内 `from src.domains.mgmt.user.db import ...`
+# （44 个文件），属跨域引别域内部实现。这里按调用次数把最高频的一批收敛为
+# public 具名入口，调用方改成依赖契约面；实现仍只有 mgmt.user.db 一份。
+#
+# 转发体一律函数内 import：mgmt.user.db 自身在模块加载期会引用别域 public，
+# 顶层 import 会把它拉进 import 环。
+
+
+def meta_value(key: str) -> str:
+    """读 meta 配置值（不存在返回空串）。"""
+    from src.domains.mgmt.user.db import get_meta_value as _impl
+
+    return _impl(key)
+
+
+def set_meta_value(key: str, value: str):
+    """写 meta 配置值（幂等 upsert）。"""
+    from src.domains.mgmt.user.db import set_meta_value as _impl
+
+    return _impl(key, value)
+
+
+def repo_token_with_refresh(repo_key: str) -> str:
+    """取仓库 VCS token（按需自动刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_with_refresh as _impl
+
+    return _impl(repo_key)
+
+
+def github_token(repo_key: str = "") -> str:
+    """取 GitHub token（repo_key 为空时取全局）。"""
+    from src.domains.mgmt.user.db import get_github_token as _impl
+
+    return _impl(repo_key)
+
+
+def skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 id 取 skill 行。"""
+    from src.domains.mgmt.user.db import get_skill_by_id as _impl
+
+    return _impl(skill_id, raise_on_error=raise_on_error)
+
+
+def repo_scene(repo_key: str) -> str:
+    """取仓库所属 dev scene。"""
+    from src.domains.mgmt.user.db import get_repo_scene as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_id(skill_name: str, owner_id: str = "", repo_key: str = "",
+                     user_id: str | int = "") -> int:
+    """按名称/归属解析 skill 的数值 id。"""
+    from src.domains.mgmt.user.db import resolve_skill_id as _impl
+
+    return _impl(skill_name, owner_id, repo_key, user_id)
+
+
+def all_bot_usernames() -> list[str]:
+    """全部 bot 用户名（去重）。"""
+    from src.domains.mgmt.user.db import get_all_bot_usernames as _impl
+
+    return _impl()
+
+
+def skill_path(skill_id) -> str:
+    """skill 的物化路径。"""
+    from src.domains.mgmt.user.db import get_skill_path as _impl
+
+    return _impl(skill_id)
+
+
+def server_base_url() -> str:
+    """服务对外 base url。"""
+    from src.domains.mgmt.user.db import get_server_base_url as _impl
+
+    return _impl()
+
+# 原名别名：让调用点的 `from ... import get_meta_value` 只需把模块路径换成
+# src.domains.mgmt.public，函数名不变（批量收敛时改动面最小）。
+get_meta_value = meta_value
+get_repo_token_with_refresh = repo_token_with_refresh
+get_github_token = github_token
+get_skill_by_id = skill_by_id
+get_repo_scene = repo_scene
+get_all_bot_usernames = all_bot_usernames
+get_skill_path = skill_path
+get_server_base_url = server_base_url
+
+# ── 跨域原语：mgmt.user.db 凭据 / bot token 面（2026-11-18 batch 2）─────────
+# runtime 的 engine / vcs / routes / pipeline 有 24 处函数内
+# `from src.domains.mgmt.user.db import <token 读取函数>`，属跨域引别域内部实现。
+# 这里把这一批统一收敛成 public 具名入口，调用方只依赖契约面；实现仍只有一份。
+
+
+def credential_list(user_id: "int | str", include_unreadable: bool = False) -> list[dict]:
+    """某用户的凭据列表（kind 维度；不含历史旧复合键行）。"""
+    from src.domains.mgmt.user.db import get_credentials as _impl
+
+    return _impl(user_id, include_unreadable)
+
+
+def gitcode_token(repo_key: str = "", user_id: str = "") -> str:
+    """统一取 GitCode API token（内部走统一入口 + 自动刷新）。"""
+    from src.domains.mgmt.user.db import get_gitcode_token as _impl
+
+    return _impl(repo_key, user_id)
+
+
+def repo_bot_token(repo_key: str = "") -> str:
+    """仓库级 bot token（用户交互写操作用途，不含 agent session token）。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
+
+    return _impl(repo_key)
+
+
+def repo_bot_token_no_global(repo_key: str) -> str:
+    """仓库级 bot token（不含全局兜底）：服务端内部端点鉴权用。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token_no_global as _impl
+
+    return _impl(repo_key)
+
+
+def repo_token_for(repo_key: str) -> str:
+    """仓库 token 统一读入口（provider 策略链 + 刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_for as _impl
+
+    return _impl(repo_key)
+
+
+def global_bot_token_for(provider: str) -> str:
+    """任意平台的全局 bot token（meta key 按 provider 派生）。"""
+    from src.domains.mgmt.user.db import get_global_bot_token_for as _impl
+
+    return _impl(provider)
+
+
+def global_gitcode_bot_token() -> str:
+    """全局 GitCode bot token（统一入口的向后兼容名）。"""
+    from src.domains.mgmt.user.db import _get_global_bot_token as _impl
+
+    return _impl()
+
+
+def global_github_bot_token() -> str:
+    """全局 GitHub bot token（平台行 → meta → 文件 fallback）。"""
+    from src.domains.mgmt.user.db import get_global_github_bot_token as _impl
+
+    return _impl()
+
+
+def repo_credential_value(repo_key: str, cred_type: str) -> str:
+    """读 grape_t_repo_credentials 单表值（已解密；空串=无值）。"""
+    from src.domains.mgmt.user.db import get_repo_credential_value as _impl
+
+    return _impl(repo_key, cred_type)
+
+
+def repo_secret_decrypt(raw: str) -> str:
+    """repo 凭据读侧统一解密（历史明文行原样返回，空串直通）。"""
+    from src.domains.mgmt.user.db import _decrypt_repo_secret as _impl
+
+    return _impl(raw)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+get_credentials = credential_list
+get_gitcode_token = gitcode_token
+get_repo_bot_token = repo_bot_token
+get_repo_bot_token_no_global = repo_bot_token_no_global
+get_repo_token_for = repo_token_for
+get_global_bot_token_for = global_bot_token_for
+_get_global_bot_token = global_gitcode_bot_token
+get_global_github_bot_token = global_github_bot_token
+get_repo_credential_value = repo_credential_value
+_decrypt_repo_secret = repo_secret_decrypt
+get_task_token = task_token
+
+
+# ── 跨域原语：mgmt.user 组织 / 仓库 / host 读取面（2026-11-18 batch 3）───────
+# insight 的 observability/routes、runtime 的 pipeline/im/routes/vcs 共 35 处函数内
+# `from src.domains.mgmt.user.{db,org_db,repo_manager} import <读函数>`，属跨域引
+# 别域内部实现。这里把这一批收敛成 public 具名入口（实现仍只有 mgmt.user 一份）。
+# is_org_personal / get_org_id_by_repo_key 在 mgmt.user.org_db，其余在 mgmt.user.db，
+# github_req 在 mgmt.user.repo_manager。
+
+
+def is_org_personal(org_id) -> bool:
+    """组织是否为个人组织（个人组织不隔离其他个人组织）。"""
+    from src.domains.mgmt.user.org_db import is_org_personal as _impl
+
+    return _impl(org_id)
+
+
+def get_org_id_by_repo_key(repo_key: str) -> str:
+    """按 repo_key 取所属组织 id（无归属返回空串）。"""
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
+    """某用户可见的仓库行（user_repos 视角）。"""
+    from src.domains.mgmt.user.db import get_user_repos as _impl
+
+    return _impl(user_id, org_id)
+
+
+def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库（full_name 无前缀、repo_key 带前缀）。"""
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+
+def get_host_user_id(repo_key: str):
+    """仓库 host 用户 id（D105 后为 UUID TEXT，按字符串判定）。"""
+    from src.domains.mgmt.user.db import get_host_user_id as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",
+                           user_id: "str | int" = "", scene_id: str = "",
+                           node_tag: str = "", agent_type: str = "") -> dict:
+    """派发技能解析：skill_id 权威直查 → 名字降级（user→repo→official）。"""
+    from src.domains.mgmt.user.db import resolve_skill_dispatch as _impl
+
+    return _impl(skill_name, skill_id, repo_key, user_id, scene_id, node_tag, agent_type)
+
+
+def get_browser_callback_url() -> str:
+    """浏览器面回调 base url（附件等外链用）。"""
+    from src.domains.mgmt.user.db import get_browser_callback_url as _impl
+
+    return _impl()
+
+
+def github_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitHub REST 请求（Bearer token；失败抛异常）。"""
+    from src.domains.mgmt.user.repo_manager import _github_req as _impl
+
+    return _impl(method, url, token, body)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+_github_req = github_req
+
+
+# --- 跨域 import 收敛 batch：mgmt.user.db 转发面（调用方只换模块路径，函数名不动）---
+
+def get_host_detail(repo_key: str) -> Any:
+    """取仓库 host（部署）详情。"""
+    from src.domains.mgmt.user.db import get_host_detail as _impl
+
+    return _impl(repo_key)
+
+
+def set_host_status(repo_key: str, status: str = '', step: str = '', error: str = '') -> Any:
+    """写仓库 host 部署状态。"""
+    from src.domains.mgmt.user.db import set_host_status as _impl
+
+    return _impl(repo_key, status, step, error)
+
+
+def managed_webhook_id(repo_key: str) -> Any:
+    """取仓库绑定的管理 webhook id。"""
+    from src.domains.mgmt.user.db import _get_managed_webhook_id as _impl
+
+    return _impl(repo_key)
+
+
+def is_server_base_url_configured() -> Any:
+    """server base url 是否已配置。"""
+    from src.domains.mgmt.user.db import is_server_base_url_configured as _impl
+
+    return _impl()
+
+
+def get_server_base_url_warning() -> Any:
+    """server base url 配置告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_server_base_url_warning as _impl
+
+    return _impl()
+
+
+def get_worker_connect_url() -> Any:
+    """worker 连接地址。"""
+    from src.domains.mgmt.user.db import get_worker_connect_url as _impl
+
+    return _impl()
+
+
+def get_business_api_url() -> Any:
+    """业务 API base url。"""
+    from src.domains.mgmt.user.db import get_business_api_url as _impl
+
+    return _impl()
+
+
+def get_url_split_warning() -> Any:
+    """多入口 URL 不一致告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_url_split_warning as _impl
+
+    return _impl()
+
+
+def invalidate_global_bot_cache() -> Any:
+    """失效全局 bot 用户名缓存。"""
+    from src.domains.mgmt.user.db import _invalidate_global_bot_cache as _impl
+
+    return _impl()
+
+
+def is_known_engine_name(name: str) -> Any:
+    """是否为已登记引擎名。"""
+    from src.domains.mgmt.user.db import is_known_engine_name as _impl
+
+    return _impl(name)
+
+
+def get_skill_object_key(skill_id) -> Any:
+    """取技能对象存储 key。"""
+    from src.domains.mgmt.user.db import get_skill_object_key as _impl
+
+    return _impl(skill_id)
+
+
+def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = '') -> Any:
+    """引擎引用快照（JSON 友好）。"""
+    from src.domains.mgmt.user.db import engine_ref_snapshot as _impl
+
+    return _impl(runtime_id, pool_engine_ids)
+
+
+def get_host_vcs_username(repo_key: str, provider: str = '') -> Any:
+    """取仓库 host 的 VCS 用户名。"""
+    from src.domains.mgmt.user.db import get_host_vcs_username as _impl
+
+    return _impl(repo_key, provider)
+
+
+def get_global_bot_usernames_for(provider: str) -> Any:
+    """取该 provider 下全局 bot 用户名列表。"""
+    from src.domains.mgmt.user.db import get_global_bot_usernames_for as _impl
+
+    return _impl(provider)
+
+
+def get_runtime_id_by_engine_uid(engine_uid: str) -> Any:
+    """按 engine_uid 取 runtime 主键。"""
+    from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid as _impl
+
+    return _impl(engine_uid)
+
+
+def resolve_official_checker_skill(agent_type: str) -> Any:
+    """解析官方 checker 技能。"""
+    from src.domains.mgmt.user.db import resolve_official_checker_skill as _impl
+
+    return _impl(agent_type)
+
+
+def list_scene_market(q: str = '', category_id: int = 0, sort: str = 'latest', featured_only: int = 0, limit: int = 0, page: int = 1, page_size: int = 20, scope: str = '', repo_key: str = '', user_id: int = 0, cat_l1_id: int = 0, cat_l2_id: int = 0) -> Any:
+    """场景市场列表（分页）。"""
+    from src.domains.mgmt.user.db import list_scene_market as _impl
+
+    return _impl(q, category_id, sort, featured_only, limit, page, page_size, scope, repo_key, user_id, cat_l1_id, cat_l2_id)
+
+
+def get_all_managed_repos() -> Any:
+    """全部托管仓库。"""
+    from src.domains.mgmt.user.db import get_all_managed_repos as _impl
+
+    return _impl()
+
+
+def remove_managed_repo(repo_key: str) -> Any:
+    """删除托管仓库登记行。"""
+    from src.domains.mgmt.user.db import remove_managed_repo as _impl
+
+    return _impl(repo_key)
+
+
+def get_credential(user_id: 'int | str', provider: str, kind: str = '', diagnostics: 'dict | None' = None) -> Any:
+    """取用户凭据（诊断体可选）。"""
+    from src.domains.mgmt.user.db import get_credential as _impl
+
+    return _impl(user_id, provider, kind, diagnostics)
+
+
+def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = '') -> Any:
+    """按 name+scope(+owner) 取技能内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_key as _impl
+
+    return _impl(skill_name, scope, owner_id)
+
+
+def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> Any:
+    """按 name+scope 取多份技能 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hashes_by_name_scope as _impl
+
+    return _impl(skill_name, scope)
+
+
+def get_skill_hash_by_id(skill_id: int) -> Any:
+    """按技能主键取内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_id as _impl
+
+    return _impl(skill_id)
+
+
+def get_skill_content_hash(skill_name: str, scope: str = 'official') -> Any:
+    """取技能内容 hash（默认 official 域）。"""
+    from src.domains.mgmt.user.db import get_skill_content_hash as _impl
+
+    return _impl(skill_name, scope)
+
+
+def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = '') -> Any:
+    """更新技能内容 hash。"""
+    from src.domains.mgmt.user.db import update_skill_content_hash as _impl
+
+    return _impl(skill_id, content_hash, file_path)
+
+
+def list_temp_uploaded_files_before(hours: int = 24) -> Any:
+    """列出 N 小时前的临时上传文件。"""
+    from src.domains.mgmt.user.db import list_temp_uploaded_files_before as _impl
+
+    return _impl(hours)
+
+
+def hard_delete_uploaded_file(file_id: int) -> Any:
+    """硬删除上传文件记录。"""
+    from src.domains.mgmt.user.db import hard_delete_uploaded_file as _impl
+
+    return _impl(file_id)
+
+
+def invalidate_user_repos(user_id: 'str | int') -> Any:
+    """失效用户仓库缓存。"""
+    from src.domains.mgmt.user.db import invalidate_user_repos as _impl
+
+    return _impl(user_id)
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_get_managed_webhook_id = managed_webhook_id
+_invalidate_global_bot_cache = invalidate_global_bot_cache
+
+
+# ── 账号/身份/审计面：跨域（runtime、platform）只读+审计写契约 ──────────────
+# 归属说明：grape_accounts / external_identities / unified_user_mapping / audit_log
+# 均归 mgmt 域；外域只经下列转发函数读取，不再直连 mgmt.auth.* 内部模块。
+def get_grape_account_by_id(user_id: 'str | int') -> Any:
+    """按主键取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id as _impl
+
+    return _impl(user_id)
+
+
+def get_grape_account_by_username(username: str) -> Any:
+    """按用户名取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _impl
+
+    return _impl(username)
+
+
+def get_user_identities(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的外部身份绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def list_platform_links(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的平台登录名绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import list_platform_links as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def resolve_user_id_by_platform_login(provider: str, platform_login: str) -> Any:
+    """按 provider + 平台登录名反查 grape user_id。"""
+    from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login as _impl
+
+    return _impl(provider, platform_login)
+
+
+def has_refresh_token(user_id: 'str | int', provider: str) -> bool:
+    """账号在该 provider 上是否持有 refresh token。"""
+    from src.domains.mgmt.auth.grape_account_db import _has_refresh_token as _impl
+
+    return _impl(user_id, provider)
+
+
+def get_repo_admin_identity(user: dict, repo_key: str) -> Any:
+    """取用户在该仓库的管理员平台身份（dict | None）。"""
+    from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity as _impl
+
+    return _impl(user, repo_key)
+
+
+def log_audit(event_type: str, user_id: 'str | int' = 0, operator_id: 'str | int' = 0,
+              ip: str = '', detail: 'dict | None' = None) -> None:
+    """写审计日志（哈希链）。"""
+    from src.domains.mgmt.auth.audit import log_audit as _impl
+
+    return _impl(event_type, user_id=user_id, operator_id=operator_id, ip=ip, detail=detail)
+
+
+def encrypt(plaintext: str) -> str:
+    """凭据加密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import encrypt as _impl
+
+    return _impl(plaintext)
+
+
+def decrypt(encrypted: str) -> str:
+    """凭据解密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import decrypt as _impl
+
+    return _impl(encrypted)
+
+
+def list_providers() -> list[str]:
+    """已配置的认证 provider 列表。"""
+    from src.domains.mgmt.auth.providers import list_providers as _impl
+
+    return _impl()
+
+
+def invalidate_provider_cache() -> None:
+    """失效 provider 缓存。"""
+    from src.domains.mgmt.auth.providers import invalidate_provider_cache as _impl
+
+    return _impl()
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_has_refresh_token = has_refresh_token
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 路由层判定口径复用（内部 routes/*.py → public 转发）
+#
+# 这些符号是 mgmt **Web 路由里的判定/口径函数**，不是查询面。runtime / insight 侧
+# 需要与路由完全同源的实现（否则同一业务出现两套判定 → 静默漂移），故以转发函数
+# 收敛到 public；转发体一律函数内 import，避免内部模块加载期反向引别域 public 成环。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict]:
+    """按用户身份 + 组织隔离过滤仓库列表（与 /repos/member 同源）。"""
+    from src.domains.mgmt.routes.repos import _filter_repos as _impl
+
+    return _impl(user_id, repos, org_id=org_id)
+
+
+def check_repo_member(user: dict, repo_key: str) -> None:
+    """校验知识读取权限；无权限抛 HTTPException(403)（会话 token 走仓库作用域）。"""
+    from src.domains.mgmt.routes.knowledge import _check_repo_member as _impl
+
+    return _impl(user, repo_key)
+
+
+def resolve_repo_key(repo: str) -> str:
+    """把前端 owner/repo 解析为 managed 表里实际使用的 repo_key（含平台前缀）。"""
+    from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _impl
+
+    return _impl(repo)
+
+
+async def dispatch_finding_core(exec_id: int, finding_id: str,
+                                title: str = "", description: str = "",
+                                scene_id: str = "", user: dict = None,
+                                dedup_confirmed: bool = False,
+                                dedup_confirmed_by: str = "") -> dict:
+    """派发 autopilot finding（Web 路由与飞书 /finding-dispatch 共用口径）。
+
+    语义错误抛 HTTPException（404/409/400），由调用方捕获转回复卡；返回 JSON 友好 dict。
+    """
+    from src.domains.mgmt.routes.autopilot import _dispatch_finding_core as _impl
+
+    return await _impl(exec_id, finding_id, title=title, description=description,
+                       scene_id=scene_id, user=user,
+                       dedup_confirmed=dedup_confirmed,
+                       dedup_confirmed_by=dedup_confirmed_by)
+
+
+def sync_agent_tags(rid: int) -> None:
+    """engine_capabilities 变更后回写 agent_runtimes.agent_tags（派生缓存，幂等）。
+
+    原实现带一个未使用的 cursor 形参（历史回落残留），public 面不再暴露游标。
+    """
+    from src.domains.mgmt.routes.settings import _sync_agent_tags as _impl
+
+    return _impl(rid, None)
+
+
+def max_content_bytes() -> int:
+    """知识正文大小上限（字节，由 KNOWLEDGE_MAX_CONTENT_BYTES 派生并钳制）。"""
+    from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES as _impl
+
+    return int(_impl)
+
+
+def format_content_limit(limit_bytes: int) -> str:
+    """把字节上限格式化为可读 KB/MB 文案（报错口径统一）。"""
+    from src.domains.mgmt.routes.knowledge import _format_content_limit as _impl
+
+    return _impl(limit_bytes)
+
+
+def content_limit_config_hint() -> str:
+    """知识正文超限报错里追加的配置方法提示文案。"""
+    from src.domains.mgmt.routes.knowledge import _CONTENT_LIMIT_CONFIG_HINT as _impl
+
+    return _impl
+
+
+# 原名别名：调用点只换模块路径，函数名与 as 别名零改动。
+_filter_repos = filter_repos
+_check_repo_member = check_repo_member
+_resolve_repo_key = resolve_repo_key
+_dispatch_finding_core = dispatch_finding_core
+
+
+# ---- 场景/流水线配置（pipeline_config 收口） ----
+
+def pipeline_config(scene_id: str = "default", repo_key: str = "", use_cache: bool = True) -> dict:
+    """取仓库场景的流水线配置（{name, display_name, nodes, onboarding, ...}）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_config as _impl
+
+    return _impl(scene_id, repo_key=repo_key, use_cache=use_cache) or {}
+
+
+def scene_list(repo_key: str = "", limit: int = None, offset: int = 0, q: str = "",
+               sort: str = "id", minimal: bool = False) -> list:
+    """列出仓库场景（[{id, name, display_name, nodes, ...}]）。"""
+    from src.domains.mgmt.pipeline_config import get_scenes as _impl
+
+    return _impl(repo_key=repo_key, limit=limit, offset=offset, q=q,
+                 sort=sort, minimal=minimal) or []
+
+
+def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
+    """按 scene_id 取单个仓库场景（缺省回退官方模板）。"""
+    from src.domains.mgmt.pipeline_config import _query_scene_by_id as _impl
+
+    return _impl(scene_id, repo_key=repo_key) or {}
+
+
+# 原名别名：调用点只换模块路径。
+get_pipeline_config = pipeline_config
+get_scenes = scene_list
+_query_scene_by_id = scene_by_id
+
+
+# ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----
+# runtime 的 vcs providers 原先函数内 `from src.domains.mgmt.user import repo_manager
+# as _rm` 直接摸内部 `_req` / `_requests` / `UpstreamAPIError`。这里收敛成 public 具名
+# 入口：转发体在函数内取模块对象再按属性调用，故测试对
+# `src.domains.mgmt.user.repo_manager._req` / `._requests` 的 monkeypatch 契约不变
+# （from-import 旧符号会让 patch 失效并真出网——实测教训）。
+
+
+def gitcode_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitCode REST 请求（JSON body；>=400 抛 UpstreamAPIError）。"""
+    from src.domains.mgmt.user.repo_manager import _req as _impl
+
+    return _impl(method, url, token, body)
+
+
+def gitcode_req_form(method: str, url: str, token: str, data):
+    """GitCode REST 请求（x-www-form-urlencoded body；Spring form 形态端点专用）。
+
+    只负责编码与 >=400 抛错，**端点是否需要 form 由调用方判定**。
+    """
+    from src.domains.mgmt.user import repo_manager as _impl
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded",
+               "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = _impl._requests.request(method, url, data=data, headers=headers, timeout=30)
+    if resp.status_code >= 400:
+        raise _impl.UpstreamAPIError(method, url, resp.status_code, resp.text)
+    return resp.json() if resp.text.strip() else {}
+
+# ── 共享依赖层原语：token 刷新 / 凭据探测 / 组织上下文（2026-11-18）─────────
+# src/api/deps.py 与 src/api/org_context.py 是 api 组装层的共享依赖，此前直接
+# `from src.domains.mgmt.user import db as user_db` / `...user.org_db import (...)`。
+# api 层 import 各域 router 属组装职责，但依赖注入层拿内部 db 模块不是 —— 改走 public。
+
+
+def any_repo_credential_for_repos(repo_keys) -> bool:
+    """给定仓库集合里是否存在任一可用凭据。"""
+    from src.domains.mgmt.user.db import any_repo_credential_for_repos as _impl
+
+    return _impl(repo_keys)
+
+
+def refresh_oauth_token(*args, **kwargs):
+    """刷新 OAuth token（转发，签名以内部实现为准）。"""
+    from src.domains.mgmt.user.db import refresh_oauth_token as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def refresh_gitcode_oauth_token(*args, **kwargs):
+    """刷新 GitCode OAuth token（转发，签名以内部实现为准）。"""
+    from src.domains.mgmt.user.db import refresh_gitcode_oauth_token as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def org_by_slug(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_org_by_slug as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def member_role(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_member_role as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def personal_org_id(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_personal_org_id as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def org_member(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import is_org_member as _impl
+
+    return _impl(*args, **kwargs)

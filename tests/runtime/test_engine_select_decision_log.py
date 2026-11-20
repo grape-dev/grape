@@ -72,9 +72,9 @@ def _mk_engine(name, *, credential_id, status="online", healthy=1, installed=1,
     with db_lock:
         c = db.cursor()
         c.execute(
-            "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (name, name, credential_id, status, healthy, installed, ls, scope, owner_id))
+            "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, probe_status, last_seen_at, scope, owner_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (name, name, credential_id, status, healthy, installed, "ok", ls, scope, owner_id))
         rid = c.lastrowid
         c.execute(
             "INSERT OR IGNORE INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)",

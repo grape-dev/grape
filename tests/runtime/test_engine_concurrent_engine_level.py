@@ -47,8 +47,8 @@ def test_env(monkeypatch):
         c.execute("DELETE FROM agent_runtimes WHERE id=999")
         # 插入测试引擎
         c.execute(
-            "INSERT INTO agent_runtimes (id, credential_id, name, status, healthy, busy_slots, max_concurrent) "
-            "VALUES (999, 0, 'test-engine-claim', 'online', 1, 0, 4)"
+            "INSERT INTO agent_runtimes (id, credential_id, name, status, healthy, installed, probe_status, busy_slots, max_concurrent) "
+            "VALUES (999, 0, 'test-engine-claim', 'online', 1, 1, 'ok', 0, 4)"
         )
         # 引擎标签：coding tag，max_concurrent=1（旧值，方案一后应被忽略）
         c.execute(

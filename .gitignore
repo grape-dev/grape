@@ -16,12 +16,15 @@ __pycache__/
 data/test_*
 data/backups/
 node_modules/
+configs/platform-bots.json
+# D110 旧名，兼容一版后删除
 configs/global-bot-token.json
 configs/login-whitelist.json
 configs/db-backend.json
 configs/db-backend.json.*
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/cubesandbox-config.json
 configs/runtime-config.json
 configs/patrol-config.json
 configs/vlm-config.json
@@ -105,6 +108,7 @@ scripts/phase1_*.py
 scripts/sync_*.py
 scripts/trigger_*.py
 scripts/upgrade_*.py
+!scripts/upgrade_autopilot_engine_uids.py
 scripts/verify_*.py
 scripts/check-*-*.py
 !scripts/check-i18n-keys.py
@@ -114,12 +118,15 @@ scripts/check-*-*.py
 !scripts/check-openapi-endpoints.py
 # Issue #2462 A3：跨域读查询名闭包门禁（进入 check-all.sh，须入库）
 !scripts/check_lib_query_names.py
+# Issue #2227：grape CLI 能力漂移守卫（进入 check-all.sh，须入库）
+!scripts/check_grape_cli_drift.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh
 configs/admin.env
-admin/
-!src/admin/
+# 只忽略仓库根的 admin 构建目录（2026-11-14 修正：裸 `admin/` 会连
+# src/domains/mgmt/admin/ 一起排除，导致 D109 管理面路由文件无法入库）
+/admin/
 logs/
 examples/
 skills/
@@ -151,7 +158,9 @@ configs/*.local.json
 # temp stage/e2e files
 _grape_stage2*
 _e2e_test.py
-configs/oauth-providers.json
+# configs/oauth-providers.json 不在此列：它与 configs/platforms/*.json 同口径——
+# 运行必需的默认数据（渠道卡，不含凭据）随仓库发布，部署不需要手工复制；
+# 凭据（client_id/secret）走 DB meta / 管理面，永不入文件。
 .upgrade-backup/
 .project-info/
 # Vue refactor
@@ -175,3 +184,10 @@ build/
 # 运维快照：含内部库/视图真实名称，不入公开仓库
 docs/weekly-11/view-allowlist.txt
 docs/weekly-11/backup/
+
+# 内部运维文档（双活拓扑/事故复盘/验收记录）：只留本地，不入公开仓
+/docs/ops/
+
+# 内部运维文档（拓扑/事故复盘/主机操作记录）不入公开仓
+docs/nginx-dual-active-38080.md
+docs/engine-run-as-task-owner.md

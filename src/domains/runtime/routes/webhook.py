@@ -4,10 +4,14 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    is_native_issue_ident, is_actionable_issue_number, native_issue_number,
+)  # Issue #3055
 from src.api.deps import get_user_or_none
 from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
 from src.api.pipeline_constants import (
+    DISPATCHABLE_AGENTS,
     HANDOFF_RESULT_FAILED,
     HANDOFF_RESULT_OK,
     HANDOFF_RESULT_REJECTED,
@@ -71,7 +75,7 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     """
     from src.kernel.repo_key import to_repo_key
     from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
-    from src.domains.mgmt.user import db as user_db
+    from src.domains.mgmt import public as user_db
 
     repo_key = to_repo_key(repo, provider=provider)
     owner, _, repo_name = repo.partition("/")
@@ -349,15 +353,16 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     existing_seq 恒指向被去重/排队的那个前序活跃事件 seq。
     Issue #1942：追加共用恢复提示句（force 位置 + 换 key 无效）。
     """
-    return JSONResponse(status_code=200, content={
-        "status": "ok", "seq": 0, "agent": agent_name,
-        "skipped": "duplicate_a2a", "queued": False, "handoff_result": HANDOFF_RESULT_REJECTED,
-        "source_seq": int(source_seq or 0),
-        "reason": reason, "existing_seq": existing_seq,
-        "message": "same issue+agent already has an active a2a event (existing_seq); "
-                   "retry with queue=true to queue it. " + _a2a_force_resend_hint(),
-        "original_event": _duplicate_a2a_original_refs(repo_key, existing_seq),
-    })
+    return _a2a_skip_response(
+        "duplicate_a2a", agent=agent_name, source_seq=source_seq,
+        reason=reason,
+        detail={"existing_seq": int(existing_seq or 0)},
+        extra={
+            "queued": False, "existing_seq": existing_seq,
+            "message": "same issue+agent already has an active a2a event (existing_seq); "
+                       "retry with queue=true to queue it. " + _a2a_force_resend_hint(),
+            "original_event": _duplicate_a2a_original_refs(repo_key, existing_seq),
+        })
 
 
 def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
@@ -371,49 +376,150 @@ def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
         record_skip, detect_dispatch_storm, window_key as _guard_window_key)
     _seq = int((info or {}).get("seq") or 0)
     _wkey = _guard_window_key(issue_number, scene_id, agent_name)
-    _base = {"status": "ok", "seq": 0, "agent": agent_name,
-             "skipped": kind, "queued": False, "scene": scene_id,
-             "window_key": _wkey, "handoff_result": HANDOFF_RESULT_REJECTED}
+    _extra = {"queued": False, "scene": scene_id, "window_key": _wkey}
+    _resp_detail = {"existing_seq": _seq}
+    _status = "ok"
     if kind == "downstream_running":
         _reason = f"downstream_running:{_seq}"
         _detail = (f"target={agent_name} downstream={info.get('agent', '')} "
                    f"seq={_seq} status={info.get('status', '')}")
+        _resp_detail.update({"downstream_agent": info.get("agent", ""),
+                             "status": info.get("status", "")})
         # Issue #1973：该分支只在「真实下游 running 且未声明 queue」时到达，
         # 必须显式返回「未入队」语义，不能以 status=ok + skipped + queued=false
         # 让调用方误以为已排队。queueable=true 提示唯一恢复路径 queue=true。
-        _content = dict(_base, status="not_queued",
-                        reason=_reason, downstream_event=info,
-                        queueable=True, retry_with_queue=True,
-                        action="retry_with_queue_true",
-                        message=f"same issue already has a running downstream event "
-                                f"('{info.get('agent', '')}' seq={_seq}); this handoff was "
-                                f"NOT queued and NOT dispatched. Retry with queue=true to "
-                                f"queue it behind the blocking event. "
-                                + _a2a_force_resend_hint())
+        _status = "not_queued"
+        _extra.update(
+            downstream_event=info, queueable=True, retry_with_queue=True,
+            action="retry_with_queue_true",
+            message=f"same issue already has a running downstream event "
+                    f"('{info.get('agent', '')}' seq={_seq}); this handoff was "
+                    f"NOT queued and NOT dispatched. Retry with queue=true to "
+                    f"queue it behind the blocking event. "
+                    + _a2a_force_resend_hint())
     elif kind == "active_dispatch":
         _reason = f"active_dispatch:{_seq}"
         _detail = (f"target={agent_name} scene={scene_id} active_seq={_seq} "
                    f"status={info.get('status', '')}")
-        _content = dict(_base, reason=_reason, existing_seq=_seq,
-                        active_event=info,
-                        message="same issue+scene+agent already has an active a2a event "
-                                "(existing_seq); dispatch skipped to avoid a duplicate idle run. "
-                                + _a2a_force_resend_hint())
+        _resp_detail["status"] = info.get("status", "")
+        _extra.update(
+            existing_seq=_seq, active_event=info,
+            message="same issue+scene+agent already has an active a2a event "
+                    "(existing_seq); dispatch skipped to avoid a duplicate idle run. "
+                    + _a2a_force_resend_hint())
     else:
         _reason = f"duplicate_key:{_seq}"
         _detail = (f"target={agent_name} scene={scene_id} existing_seq={_seq} "
                    f"existing_status={info.get('status', '')} "
                    f"created_at={info.get('created_at', '')}")
-        _content = dict(_base, reason=_reason, existing_seq=_seq,
-                        message="same issue+scene+agent already dispatched within the "
-                                "idempotency time window; duplicate dispatch dropped. "
-                                + _a2a_force_resend_hint(),
-                        original_event=_duplicate_a2a_original_refs(repo_key, _seq))
+        _resp_detail["status"] = info.get("status", "")
+        _extra.update(
+            existing_seq=_seq,
+            message="same issue+scene+agent already dispatched within the "
+                    "idempotency time window; duplicate dispatch dropped. "
+                    + _a2a_force_resend_hint(),
+            original_event=_duplicate_a2a_original_refs(repo_key, _seq))
     record_skip(repo_key, issue_number, agent_name, _reason, detail=_detail)
     detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
     log.info(f"A2A #1770: dispatch skipped — issue=#{issue_number} agent={agent_name} "
              f"reason={_reason}")
-    return JSONResponse(status_code=200, content=_content)
+    return _a2a_skip_response(
+        kind, agent=agent_name, reason=_reason, status=_status,
+        detail=_resp_detail, extra=_extra)
+
+
+_A2A_SKIP_REASON_STATIC = {
+    "task_cancelled": "Issue #{issue_number} 处于 cancelled 状态，A2A 已拒绝；如需继续请先恢复该 Issue。",
+    "repo_mismatch": ("payload.repository 与 Issue 归属不一致："
+                      "该 Issue 属于 {expected_repository}，本次收到 {actual_repository}；"
+                      "请改用实际归属仓库重试。"),
+    "not_in_scene": ("目标 Agent 不在当前场景流水线节点中，A2A 被拦截；"
+                     "请确认场景已配置 {agent} 节点后重试。"),
+    "target_scene_not_found": "目标场景不存在，跨流水线交办被拦截；请确认目标场景配置后重试。",
+    "target_scene_missing_node": "目标场景未配置对应节点，跨流水线交办被拦截；请确认目标场景配置后重试。",
+    "duplicate_handoff": "目标场景已有进行中的同类交接事件，本次交办被判定为重复；请等待前序交接完成后再试。",
+    "dispatch_failed": "跨流水线交办派发失败，事件未能启动；请稍后重试或检查运行节点状态。",
+    "pr_subscription_a2a_disabled": "PR 订阅触发的 QA 仅做审查、不参与流水线流转，本次 A2A 已禁用；如需流转请从 Issue 流水线发起。",
+    "sre_subscribed": "SRE 已订阅 PR 合并事件，该 A2A 交办视为重复；无需重复派发，已由订阅链路处理。",
+}
+
+
+def _repo_key_to_repository(repo_key: str) -> str:
+    """repo_key（provider:owner/repo）→ 面向调用方的 owner/repo 形式。"""
+    _key = str(repo_key or "")
+    return _key.split(":", 1)[1] if ":" in _key else _key
+
+
+def _a2a_skip_reason(skipped: str, *, issue_number=None, agent: str = "",
+                     expected_repository: str = "",
+                     actual_repository: str = "") -> str:
+    """Issue #2555：跳过码 → 中文可读原因（为什么被跳过 + 下一步怎么做）。
+
+    只暴露调用方可理解的信息（单号/仓库/目标 Agent），不含 token、内部路径、
+    scene id 或节点清单。
+    """
+    _template = _A2A_SKIP_REASON_STATIC.get(skipped)
+    if not _template:
+        return f"A2A 交办被跳过（{skipped}）；请根据 detail 定位原因后重试。"
+    try:
+        return _template.format(
+            issue_number="" if issue_number is None else issue_number,
+            agent=agent, expected_repository=expected_repository or "-",
+            actual_repository=actual_repository or "-")
+    except (KeyError, IndexError, ValueError):
+        return _template
+
+
+_A2A_SKIP_RESERVED_KEYS = (
+    "status", "seq", "agent", "ok", "skipped", "reason", "detail",
+    "handoff_result", "source_seq",
+)
+
+
+def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = None,
+                       agent: str = "", source_seq: int = 0,
+                       status: str = "ok", status_code: int = 200,
+                       original_event: dict | None = None,
+                       extra: dict | None = None) -> JSONResponse:
+    """Issue #2555：A2A 跳过响应单点收口（只增不删，既有键保持原值）。
+
+    统一补齐 ok=false + skipped + reason + detail；status/seq/agent/
+    handoff_result/source_seq 与调用方原有键保持，extra 仅透传分支特有条目，
+    不得覆盖契约字段（见 `_A2A_SKIP_RESERVED_KEYS`）。
+    `status` 显式声明（默认 ok，not_in_scene 等历史分支显式传 skipped），
+    避免调用方靠 extra 覆盖契约字段。
+    """
+    _detail = dict(detail or {})
+    if not reason:
+        reason = _a2a_skip_reason(
+            skipped,
+            issue_number=_detail.get("issue_number"),
+            agent=agent,
+            expected_repository=_detail.get("expected_repository", ""),
+            actual_repository=_detail.get("actual_repository", ""))
+    content = {
+        "status": status, "seq": 0, "agent": agent,
+        "ok": False, "skipped": skipped,
+        "reason": reason, "detail": _detail,
+        "handoff_result": HANDOFF_RESULT_REJECTED,
+        "source_seq": int(source_seq or 0),
+    }
+    if original_event:
+        content["original_event"] = original_event
+    if extra:
+        content.update(
+            {k: v for k, v in extra.items() if k not in _A2A_SKIP_RESERVED_KEYS})
+    return JSONResponse(status_code=status_code, content=content)
+
+
+def _issue_repo_mismatch(repo_key: str, issue_number) -> str:
+    """Issue #2555/#3055：归属正向证据反查（实现见 IssueRepoScope）。
+
+    仅作为「仓库不匹配」的正向证据：本仓无该编号、**同 provider** 他仓存在才返回
+    他仓 repo_key；调用方须先确认本仓不存在再调用（新单未同步/跨仓回填不误拒）。
+    """
+    from src.domains.runtime.a2a_repo_scope import IssueRepoScope
+    return IssueRepoScope(repo_key).other_repo_with_issue(issue_number)
 
 
 def _a2a_event_payload(seq, status, agent, issue_id, created_at=None) -> dict:
@@ -594,7 +700,7 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
     _title = ""
     try:
         from src.api.issues_center import _get_issue_title
-        _title = _get_issue_title(repo_key, int(issue_number)) or ""
+        _title = _get_issue_title(repo_key, native_issue_number(issue_number)) or ""
     except Exception:
         pass
     if not _title:
@@ -812,29 +918,14 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
 
 
 def _resolve_a2a_repo_key(repository: str) -> str:
-    """A2A 端点 repo_key 统一解析（Issue #544 审查修正②）。
+    """A2A 端点 repo_key 统一解析（Issue #544 / #3055 C 项）。
 
-    - 已带 provider 前缀（github:/gitcode:）→ 幂等返回；
-    - 无前缀 → 查 managed_repos 反查实际 provider（github: / gitcode:）；
-    - 未命中/查表异常 → 默认 gitcode。
-    POST /api/a2a 与 GET /api/a2a/status 共用，保证两端点指纹/幂等键的
-    repo_key 维度一致（否则 github 托管仓无前缀传入时核对接口假阴性）。
+    实现收敛在 `src.domains.runtime.a2a_repo_scope.resolve_a2a_repo_key`：
+    裸 owner/repo 按平台卡驱动的全 provider 候选反查 managed_repos，未命中才回落
+    默认前缀并 warning。POST /api/a2a 与 GET /api/a2a/status 共用同一口径。
     """
-    from src.kernel.repo_key import to_repo_key
-    if not repository:
-        return ""
-    if ":" in repository:
-        return to_repo_key(repository)
-    try:
-        from src.domains.mgmt import public as _mg_pub_rk
-        _hit = _mg_pub_rk.repo_key_in_candidates(
-            [f"github:{repository}", f"gitcode:{repository}"])
-        if _hit:
-            return _hit
-    except Exception:
-        pass
-    return to_repo_key(repository)
-
+    from src.domains.runtime.a2a_repo_scope import resolve_a2a_repo_key
+    return resolve_a2a_repo_key(repository)
 
 def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
@@ -857,7 +948,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     if not repo_key:
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
-    from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+    from src.domains.mgmt.public import get_repo_bot_token_no_global
     from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
@@ -879,7 +970,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
                 return None
             # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
             try:
-                from src.domains.mgmt.user.db import get_host_user_id
+                from src.domains.mgmt.public import get_host_user_id
                 # D105 后 host_user_id 是 UUID TEXT（get_host_user_id 返回 str）——
                 # 原 `_session_host > 0` 会对 str 抛 TypeError 并被下面的 except 吞掉，
                 # 导致 A2A 同信任域判定恒不成立（静默）。按该函数文档口径字符串判定。
@@ -954,6 +1045,13 @@ class A2AHandoffBody(BaseModel):
                     "用于审计交棒来源段与幂等键派生；兼容 payload.source_event_seq / payload.source_seq。")
 
 
+def _node_id(node) -> str:
+    """节点标识兜底：优先 id，兼容仅有 tag 的存量节点（Issue #2427）。"""
+    if not isinstance(node, dict):
+        return ""
+    return str(node.get("id") or node.get("tag") or "")
+
+
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
 
@@ -981,7 +1079,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
-        "in_scene": any(n.get("id") == agent_name for n in nodes),
+        "in_scene": any(_node_id(n) == agent_name for n in nodes),
     }
 
 
@@ -1017,10 +1115,87 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     return effective_scene_id
 
 
+def _handoff_dispatch_retry_limit() -> int:
+    """Issue #2327：跨流水线派发失败的重派次数（env 可调，默认 2）。
+
+    默认 2 = 总尝试 3 次，与任务级自愈上限对齐：agent_tasks.attempts 的重跑
+    上限为 3（docs/weekly-08/model-stream-retry-design.md；transient_retry.py
+    「复用 agent_tasks.attempts 列计数，上限默认 3」）。派发层不另立更大的
+    次数，避免「派发 3 次 × 任务重试 3 次」叠成 9 次执行风暴。
+    """
+    try:
+        return max(0, int(os.environ.get("GRAPE_A2A_HANDOFF_RETRY_LIMIT", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _dispatch_handoff_a2a(repo_key: str, seq: int, target_node: str, evt: dict,
+                          issue_number, repository: str, ref_seq: int = 0,
+                          skill_name: str = "", skill_id: int = 0,
+                          skill_path: str = "", backend: str = "",
+                          guard_state: dict | None = None) -> dict:
+    """Issue #2327：handoff 建事件后统一走正常 A2A 派发实现（引擎选择 + 入队）。
+
+    不再自行构造 `agent/handoff` 事件手搓 payload（原实现绕过 `run_a2a_dispatch`，
+    `get_running_loop()` 缺席时事件写库却无人调度）。这里传的 runtime_id=0 是
+    auto-select 语义，与正常 /api/a2a 派发同款——由引擎选择决定定向/广播，不是
+    自行广播。
+
+    重派覆盖面（评审 O6）：plugin/event-driven 分支 `run_a2a_dispatch` 立即返回
+    ok（异步 listener 尚未执行），失败由 listener 自行 `_fail_event`
+    （code=a2a_dispatch_failed），不进入本循环；本循环只兜底 legacy/direct 的
+    同步失败路径。两类失败最终都由 patrol dispatch_stalled 巡检可见。
+    """
+    from src.domains.runtime.pipeline.event_pipeline import _fail_event
+
+    attempts = 1 + _handoff_dispatch_retry_limit()
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = run_a2a_dispatch(
+                repo_key, seq, target_node, evt,
+                skill_name=skill_name, skill_id=skill_id, skill_path=skill_path,
+                runtime_id=0, backend=backend,
+                issue_number=str(issue_number or ""),
+                repository=repository, ref_seq=int(ref_seq or 0),
+                guard_state=guard_state,
+            )
+        except Exception as _de:
+            result = {"status": "failed", "seq": 0, "error": str(_de)}
+        if isinstance(result, dict) and result.get("status") == "skipped":
+            # Issue #2816 复审（判断项）：终态 guard 的 skipped 不是成功；直接返回
+            # rejected，避免把「被短路」记成「已派发」。
+            log.info(f"A2A #2327: handoff dispatch rejected seq={seq} "
+                     f"reason={result.get('skipped') or 'skipped'}")
+            return {"status": "rejected", "attempts": attempt, "dispatch": result,
+                    "reason": result.get("reason") or result.get("skipped") or ""}
+        if isinstance(result, dict) and result.get("status") != "failed" and result.get("seq"):
+            if attempt > 1:
+                log.info(f"A2A #2327: handoff dispatch succeeded on attempt {attempt} seq={seq}")
+            return {"status": "ok", "attempts": attempt, "dispatch": result}
+        last_err = (result or {}).get("error") if isinstance(result, dict) else ""
+        last_err = last_err or "dispatch returned no task"
+        log.warning(f"A2A #2327: handoff dispatch failed attempt {attempt}/{attempts} seq={seq}: {str(last_err)[:200]}")
+    _fail_event(
+        seq,
+        f"跨流水线 A2A 派发失败（target={target_node}，已重试 {attempts - 1} 次）: {str(last_err)[:200]}",
+        diag={
+            "code": "dispatch_failed",
+            "target_node": target_node,
+            "phase": "cross_pipeline_handoff",
+            "attempts": attempts,
+            "ref_seq": int(ref_seq or 0),
+        },
+    )
+    return {"status": "failed", "attempts": attempts, "error": "dispatch_failed",
+            "reason": str(last_err)[:200]}
+
+
 def _cross_pipeline_handoff(
     repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
     carried_context: dict, target_assignee: str, engine_config, context: str,
     repository: str, account: str, source_seq: int = 0,
+    guard_state: dict | None = None,
 ) -> dict:
     """Issue #329: Cross-pipeline handoff — redirect A2A to target scene's vod node.
 
@@ -1110,7 +1285,7 @@ def _cross_pipeline_handoff(
                      f"(via {_resolved_via}, repo={repo_key})")
             issue_number = _resolved_num
             if isinstance(carried_context, dict):
-                carried_context["target_issue_number"] = int(_resolved_num)
+                carried_context["target_issue_number"] = native_issue_number(_resolved_num)
     except Exception as _755_e:
         log.warning(f"A2A #755: cross-pipeline issue_number backfill failed, keep original: {_755_e}")
 
@@ -1134,7 +1309,7 @@ def _cross_pipeline_handoff(
         from src.api.session_store import set_issue_scene, set_issue_stage
         from src.kernel.session_manager import db, db_lock
         _issue_key = f"#{issue_number}"
-        _issue_num = int(issue_number)
+        _issue_num = native_issue_number(issue_number)
         # Read current assignee BEFORE writing (audit trail needs the old value)
         with db_lock:
             c = db.cursor()
@@ -1163,8 +1338,8 @@ def _cross_pipeline_handoff(
     # 后续 A2A 入口按该字段做源仓单号 → 真实落地单号映射兜底（方案B）。
     try:
         _tgt_num_755 = str(issue_number).strip().lstrip("#")
-        if _tgt_num_755.isdigit():
-            _cc["target_issue_number"] = int(_tgt_num_755)
+        if is_native_issue_ident(_tgt_num_755):
+            _cc["target_issue_number"] = native_issue_number(_tgt_num_755)
     except Exception:
         pass
     if _cc:
@@ -1175,7 +1350,7 @@ def _cross_pipeline_handoff(
                 _sc = _sdb.cursor()
                 _sc.execute(
                     "UPDATE issue SET carried_context=? WHERE repo_key=? AND issue_number=?",
-                    (_cc_json, repo_key, int(issue_number)))
+                    (_cc_json, repo_key, native_issue_number(issue_number)))
                 _sdb.commit()
         except Exception:
             # carried_context column may not exist yet — store in issue_state metadata
@@ -1278,7 +1453,7 @@ def _cross_pipeline_handoff(
         _a2a_title = f"Cross-pipeline A2A → {target_node}"
         try:
             from src.api.issues_center import _get_issue_title
-            _a2a_title = _get_issue_title(repo_key, int(issue_number)) or _a2a_title
+            _a2a_title = _get_issue_title(repo_key, native_issue_number(issue_number)) or _a2a_title
         except Exception:
             pass
         seq = append_event(
@@ -1309,63 +1484,69 @@ def _cross_pipeline_handoff(
             scene_id=target_scene_id,
         )
         log.info(f"A2A #329: cross-pipeline a2a_event created seq={seq}")
-        # Trigger pipeline execution for the new event (same as normal A2A path)
-        try:
-            from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
-            import asyncio as _aio
-            handoff_event = GrapeEvent(
-                domain=EventDomain.AGENT,
-                type="agent/handoff",
-                repo_key=repo_key,
-                issue_id=f"#{issue_number}",
-                agent_type=target_node,
-                seq=seq,
-                payload={
-                    "target_agent": target_node,
-                    "node_id": target_node,
-                    "scene_id": target_scene_id,
-                    "runtime_id": 0,
-                    "evt": {
-                        "type": "a2a_event",
-                        "repository": repository,
-                        "source": "a2a",
-                        "actor": account,
-                        "account": account,
-                        "issue_id": str(issue_number) if issue_number else "",
-                        "_a2a_context": _handoff_context,
-                        "payload": {
-                            "repository": repository,
-                            "account": account,
-                            "issue_number": issue_number,
-                            "pr_number": None,
-                            "context": _handoff_context,
-                            "handoff_baseline_note": _baseline_note_1753,
-                            "carried_context": carried_context or {},
-                            "engine_config": engine_config,
-                            "target_scene_id": target_scene_id,
-                        },
-                    },
-                },
-            )
-            _bus = get_event_bus()
-            if not _bus.has_listeners("agent/handoff"):
-                _bus.on_sync("agent/handoff", _on_handoff_dispatch)
-            # 必须用 get_running_loop：get_event_loop() 在没有运行中 loop 的上下文里会返回
-            # （或新建）一个未被 run 的 loop，create_task 出来的 task 永远不会被调度 ——
-            # 于是事件写进了库（status=running）却没有任何 agent_tasks，前端显示
-            # 「未派发/无执行引擎」、日志空白。实测 2026-11-15 seq=9755 即此症状。
-            _loop = _aio.get_running_loop()
-            _loop.create_task(_bus.emit(handoff_event))
-            log.info(f"A2A #329: cross-pipeline event bus dispatch seq={seq}")
-        except Exception as _de2:
-            log.warning(f"A2A #329: event bus dispatch failed, falling back to direct: {_de2}")
-            try:
-                import json as _pj
-                _raw = _pj.dumps({"action": "a2a_event", "seq": seq, "repository": repository, "issue_number": issue_number}).encode()
-                run_pipeline(_raw, {"x-grape-token": "internal"})
-                log.info(f"A2A #329: cross-pipeline direct run_pipeline seq={seq}")
-            except Exception as _de3:
-                log.warning(f"A2A #329: direct run_pipeline also failed: {_de3}")
+        if not seq:
+            log.error(f"A2A #2327: cross-pipeline event store failed for issue=#{issue_number}")
+            return {"ok": False, "error": "event_store_failed"}
+        # Issue #2327：与普通 A2A 派发收敛到同一实现（run_a2a_dispatch 内做引擎
+        # 选择 + 入队/认领回写 runtime），不再自建 agent/handoff 且硬编码 runtime_id=0。
+        _handoff_skill = ""
+        for _n in target_nodes:
+            if (_n.get("id") or _n.get("tag")) == target_node:
+                _handoff_skill = _n.get("skill") or ""
+                break
+        _handoff_evt = {
+            "type": "a2a_event",
+            "repository": repository,
+            "source": "a2a",
+            "actor": account,
+            "account": account,
+            "issue_id": str(issue_number) if issue_number else "",
+            "_a2a_context": _handoff_context,
+            "payload": {
+                "repository": repository,
+                "account": account,
+                "issue_number": issue_number,
+                "pr_number": None,
+                "context": _handoff_context,
+                "handoff_baseline_note": _baseline_note_1753,
+                "carried_context": _cc,
+                "engine_config": engine_config,
+                "target_scene_id": target_scene_id,
+                "source_seq": int(source_seq or 0),
+                "ref_seq": int(source_seq or 0),
+            },
+        }
+        _dispatch_res = _dispatch_handoff_a2a(
+            repo_key, seq, target_node, _handoff_evt,
+            issue_number=issue_number, repository=repository,
+            ref_seq=int(source_seq or 0), skill_name=_handoff_skill,
+            guard_state=guard_state,
+        )
+        if _dispatch_res.get("status") == "rejected":
+            # 终态 guard 短路：事件已由 run_a2a_dispatch 落 cancelled + event_skipped，
+            # 按 A2A 契约回显 skipped/rejected，供调用方（页面/Agent）识别为拦截。
+            _rej = _dispatch_res.get("dispatch") or {}
+            log.info(f"A2A #329: cross-pipeline handoff rejected by terminal guard "
+                     f"seq={seq} reason={_rej.get('skipped') or 'skipped'}")
+            return {"ok": True, "response": {
+                "status": "ok", "seq": seq, "agent": target_node,
+                "scene": target_scene_id, "cross_pipeline": True,
+                "skipped": _rej.get("skipped") or "needs_human_terminal",
+                "handoff_result": HANDOFF_RESULT_REJECTED,
+                "source_seq": int(source_seq or 0),
+                "reason": _rej.get("reason") or "",
+            }}
+        if _dispatch_res.get("status") != "ok":
+            # 失败已由 _dispatch_handoff_a2a 落 dispatch_failed 终态（可见、非僵尸），
+            # 仍按 A2A 契约回显 seq 供调用方定位。
+            return {"ok": True, "response": {
+                "status": "failed", "seq": seq, "agent": target_node,
+                "scene": target_scene_id, "cross_pipeline": True,
+                "handoff_result": HANDOFF_RESULT_FAILED,
+                "source_seq": int(source_seq or 0),
+                "error": _dispatch_res.get("error") or "dispatch_failed",
+                "dispatch_attempts": _dispatch_res.get("attempts", 1),
+            }}
         # Issue #2050：成功路径也是 A2A 响应，按契约回显 handoff_result / source_seq。
         return {"ok": True, "response": {
             "status": "ok", "seq": seq, "agent": target_node, "scene": target_scene_id,
@@ -1398,8 +1579,11 @@ async def a2a_status_endpoint(request: Request,
     """
     if not repository or repository.count("/") != 1:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repository is required in 'owner/repo' format"})
-    if not issue_number or not str(issue_number).isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "issue_number is required (plain number)"})
+    if not _is_valid_issue_number(issue_number):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "issue_number must be a plain number (e.g. '1') or a platform issue "
+                       "ident (alnum, no '#', no spaces, <= 32 chars)"})
 
     # repo_key 解析：与 POST /api/a2a 同口径（Issue #544 审查修正②：
     # 无前缀时经 managed_repos 反查 provider，github 托管仓不再假阴性）
@@ -1407,7 +1591,7 @@ async def a2a_status_endpoint(request: Request,
 
     # 鉴权：与 POST /api/a2a 同口径（用户级身份校验托管仓库 / 内部 bot、会话 token）
     if user and user.get("auth_type") in ("jwt", "api_key"):
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
         if repo_key not in managed:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权查询该仓库的 A2A 交接"})
@@ -1476,7 +1660,17 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
     """
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
-    if _provider not in ("gitcode", "github") or not _owner or not _name:
+    # 平台在册即可预检（原白名单只放 gitcode/github，gitee/gitlab 恒 "unsupported" →
+    # 这些平台的仓库永远拿不到可达性判定，2026-11-14 深度检查发现）
+    if not _owner or not _name:
+        return "unsupported"
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc
+
+        if _provider and _gpc(_provider) is None:
+            return "unsupported"
+    except Exception:
+        # 平台卡目录不可用 → 无法判定，按"不支持"处理（与无卡等价），不改用平台白名单
         return "unsupported"
 
     token = ""
@@ -1491,7 +1685,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
             _uid = int(user_hint.get("id") or user_hint.get("user_id") or 0)
             _username = user_hint.get("username") or ""
             if not _username and _uid > 0:
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                from src.domains.mgmt.public import get_grape_account_by_id
                 _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
             if _username or _uid > 0:
                 from src.kernel.token_resolver import create_provider_from_repo_key
@@ -1521,10 +1715,9 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
 
 def _issue_exists_in_db(repo_key: str, issue_number) -> bool:
     """Issue #755：目标仓 issue 表存在性快查（平台已知 Issue 直接放行，避免每条 A2A 外呼 VCS）。"""
-    try:
-        _num = int(str(issue_number).strip().lstrip("#"))
-    except (TypeError, ValueError):
+    if not is_native_issue_ident(issue_number):
         return False
+    _num = native_issue_number(issue_number)
     try:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
@@ -1551,13 +1744,14 @@ def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_contex
     返回 (resolved_number_str, via)，via ∈ {"kept","target_field","db_mapping","unresolved"}。
     """
     _num = str(issue_number or "").strip().lstrip("#")
-    if not _num.isdigit():
+    # Issue #3055：ident 同样走映射解析（原 isdigit 门槛让 IK* 映射恒 unresolved）
+    if not is_native_issue_ident(_num):
         return _num, "unresolved"
     if _issue_exists_in_db(repo_key, _num):
         return _num, "kept"
     _cc = carried_context if isinstance(carried_context, dict) else {}
     _tgt = str(_cc.get("target_issue_number", "") or "").strip().lstrip("#")
-    if _tgt.isdigit() and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
+    if is_native_issue_ident(_tgt) and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
         return _tgt, "target_field"
     try:
         from src.kernel.session_manager import db, db_lock
@@ -1578,9 +1772,11 @@ def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_contex
         except Exception:
             continue
         if isinstance(_ctx, dict) and str(_ctx.get("source_issue_number", "") or "").strip().lstrip("#") == _num:
-            _hits.append(int(_n))
+            # Issue #3055：数字→int / ident→str（max 只在同型数字间取最新落地单）
+            _hits.append(native_issue_number(_n))
     if _hits:
-        return str(max(_hits)), "db_mapping"
+        _ints = [h for h in _hits if isinstance(h, int)]
+        return str(max(_ints) if _ints else _hits[-1]), "db_mapping"
     return _num, "unresolved"
 
 
@@ -1595,12 +1791,19 @@ def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
     """
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
-    if _provider not in ("gitcode", "github") or not _owner or not _name:
+    # 同上：按平台卡在册判定，别用平台白名单（gitee/gitlab 的 Issue 存在性校验此前恒 unknown）
+    if not _owner or not _name:
         return "unknown"
     try:
-        _num = int(str(issue_number).strip().lstrip("#"))
-    except (TypeError, ValueError):
+        from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc2
+
+        if _provider and _gpc2(_provider) is None:
+            return "unknown"
+    except Exception:
+        return "unknown"
+    if not is_native_issue_ident(issue_number):
         return "not_found"
+    _num = native_issue_number(issue_number)
     token = ""
     try:
         from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
@@ -1702,11 +1905,17 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     repository_early = payload.get("repository") or ""
     issue_number_early = str(payload.get("issue_number") or "")
     # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
-    if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of vod/issue/coding/qa/sre"})
-    # 2. issue_number 必须是纯数字（防止传 "#1"、issue 标题、随机文本）
-    if not issue_number_early.isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)"})
+    if agent_name not in DISPATCHABLE_AGENTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of {', '.join(DISPATCHABLE_AGENTS)}"})
+    # 2. issue_number 形态校验（Issue #3055）：判据唯一来源 = kernel.issue_ident；
+    #    纯数字（GitCode/GitHub）与平台字符串 ident（gitee IK*）同为合法形态，
+    #    "纯数字"文案退役（原 isdigit 把自家 DB 的合法 ident 拦成 400）。
+    if not _is_valid_issue_number(issue_number_early):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"invalid issue_number '{issue_number_early[:50]}': expected a plain "
+                       f"number (e.g. '1') or a platform issue ident (alnum, no '#', "
+                       f"no spaces, <= 32 chars)"})
     # 3. repository 必须是 owner/repo 二段格式
     if repository_early.count("/") != 1 or not all(p.strip() for p in repository_early.split("/")):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
@@ -1736,7 +1945,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             issue_number_early = _mapped_num
             issue_number = _mapped_num
             if isinstance(payload.get("carried_context"), dict):
-                payload["carried_context"]["target_issue_number"] = int(_mapped_num)
+                payload["carried_context"]["target_issue_number"] = native_issue_number(_mapped_num)
             log.info(f"A2A #755: issue_number backfilled to {_mapped_num} (via {_mapped_via}, repo={repo_key})")
     except Exception as _755_e:
         log.warning(f"A2A #755: entry issue_number backfill failed, keep original: {_755_e}")
@@ -1812,7 +2021,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
         _a2a_session_info = None
         if user and user.get("auth_type") in ("jwt", "api_key"):
-            from src.domains.mgmt.user.db import get_managed_repos
+            from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
                 raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
@@ -1858,30 +2067,82 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _source_seq = int(_a2a_ref_seq)
 
         if target_scene_id and issue_number:
+            # Issue #2816 复审（判断项）：跨流水线派发的终态 guard 在 async 端点内
+            # 用 executor 预判，避免 run_a2a_dispatch 在事件循环里同步读 VCS。
+            _cross_guard = None
+            if not _force:
+                import asyncio as _aio_cross
+                from src.api.a2a_terminal_guard import guard_terminal_dispatch
+                _cross_guard = await _aio_cross.to_thread(
+                    guard_terminal_dispatch, repo_key, issue_number,
+                    target_node or "vod",
+                    (payload if isinstance(payload, dict) else {}))
             _redirect = _cross_pipeline_handoff(
                 repo_key, issue_number, target_scene_id, target_node or "vod",
                 carried_context, target_assignee, engine_config, context, repository, account,
-                source_seq=_source_seq,
+                source_seq=_source_seq, guard_state=_cross_guard,
             )
             if _redirect.get("ok"):
+                # Issue #2327 评审 O7：ok=True 只表示「redirect 分支已处理」，不代表派发成功——
+                # 成功与否看 response.status / handoff_result（失败时仍是 ok=True + 真实 seq 回显）。
                 log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
                 return _redirect["response"]
             if _redirect.get("error"):
-                log.info(f"A2A #329: cross-pipeline handoff skipped: {_redirect['error']}")
+                _skip_code = _redirect["error"]
+                log.info(
+                    f"A2A #329: cross-pipeline handoff skipped: code={_skip_code} "
+                    f"issue=#{issue_number} repository={repository} "
+                    f"target_node={target_node or 'vod'} "
+                    f"reason={_a2a_skip_reason(_skip_code)}")
                 # Issue #729：拦截响应透传 original_event（含 task_ref/result_ref）
-                # Issue #2050：契约字段直接落字面量，静态扫描可核（required: handoff_result/source_seq）
-                _skip_content = {
-                    "status": "ok", "seq": 0, "agent": target_node or "vod",
-                    "skipped": _redirect["error"],
-                }
-                if _redirect.get("original_event"):
-                    _skip_content["original_event"] = _redirect["original_event"]
-                return JSONResponse(status_code=200, content={
-                    "status": "ok", "seq": 0, "agent": target_node or "vod",
-                    "skipped": _redirect["error"],
-                    "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq,
-                    **({"original_event": _redirect["original_event"]} if _redirect.get("original_event") else {}),
-                })
+                # Issue #2555：统一补 ok=false + reason + detail（目标码只回传 target_node，
+                # 不回传 scene id / 节点清单）。
+                _skip_detail = {}
+                if _skip_code in ("target_scene_not_found", "target_scene_missing_node"):
+                    _skip_detail = {"target_node": target_node or "vod"}
+                return _a2a_skip_response(
+                    _skip_code, agent=target_node or "vod", source_seq=_source_seq,
+                    detail=_skip_detail,
+                    original_event=_redirect.get("original_event"),
+                )
+
+        # Issue #2555：仓库归属校验（正向证据判定，置于取消判定之前）。
+        _issue_vcs_verdict_cache = ""
+        # 仅当「本仓无该单号 + 他仓存在该单号」同时成立才返回 repo_mismatch；
+        # 命中即不再执行取消判定，避免目标仓同号取消单误报 task_cancelled。
+        # QA 第 2 轮：归属还须本仓 VCS 复核——多仓同号是常态，新建单可能尚未同步进
+        # grape DB（DB 无、VCS 有）；只有 VCS 也确认本仓 404 才可定性为仓库不匹配，
+        # 否则沿用 #755 的 exists/unknown 放行口径，不误拒合法交办。
+        if issue_number and repo_key:
+            try:
+                if not _issue_exists_in_db(repo_key, issue_number):
+                    _other_repo_key = _issue_repo_mismatch(repo_key, issue_number)
+                    _mismatch_verdict = (
+                        _a2a_issue_vcs_check(repo_key, issue_number) if _other_repo_key else "")
+                    if _mismatch_verdict:
+                        # 供下方 #755 方案B 复用，避免同一请求重复外呼 VCS
+                        _issue_vcs_verdict_cache = _mismatch_verdict
+                    if _other_repo_key and _mismatch_verdict == "not_found":
+                        _expected_repository = _repo_key_to_repository(_other_repo_key)
+                        _rm_reason = _a2a_skip_reason(
+                            "repo_mismatch", issue_number=issue_number,
+                            expected_repository=_expected_repository,
+                            actual_repository=repository)
+                        log.info(
+                            f"A2A #2555: repo mismatch — code=repo_mismatch "
+                            f"issue=#{issue_number} "
+                            f"expected={_expected_repository} actual={repository} "
+                            f"agent={agent_name} reason={_rm_reason}")
+                        return _a2a_skip_response(
+                            "repo_mismatch", agent=agent_name, source_seq=_source_seq,
+                            reason=_rm_reason,
+                            detail={
+                                "issue_number": native_issue_number(issue_number),
+                                "expected_repository": _expected_repository,
+                                "actual_repository": repository,
+                            })
+            except Exception as _rm_e:
+                log.warning(f"A2A #2555: repo mismatch check failed: {_rm_e}")
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
         if issue_number and repo_key:
@@ -1890,11 +2151,23 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 with _ck_lock:
                     _ck_c = _ck_db.cursor()
                     _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
-                                  (repo_key, int(issue_number)))
+                                  (repo_key, native_issue_number(issue_number)))
                     if _ck_c.fetchone():
-                        log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
-                        return {"ok": False, "skipped": "task_cancelled",
-                                "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
+                        _cancel_reason = _a2a_skip_reason(
+                            "task_cancelled", issue_number=issue_number)
+                        log.info(
+                            f"A2A: rejected — task cancelled, code=task_cancelled "
+                            f"issue=#{issue_number} repository={repository} "
+                            f"agent={agent_name} status=cancelled "
+                            f"reason={_cancel_reason}")
+                        return _a2a_skip_response(
+                            "task_cancelled", agent=agent_name, source_seq=_source_seq,
+                            reason=_cancel_reason,
+                            detail={
+                                "issue_number": native_issue_number(issue_number),
+                                "repository": repository,
+                                "status": "cancelled",
+                            })
             except Exception as _ck_e:
                 log.warning(f"A2A: cancelled check failed: {_ck_e}")
         seq = 0
@@ -1933,7 +2206,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # DB 快查命中（平台已知 Issue）→ 放行不外呼；VCS 明确 404 → 400；
         # 网络/无 token（unknown）→ 放行，不误杀正常链路。
         if issue_number and not _issue_exists_in_db(repo_key, issue_number):
-            _issue_verdict = _a2a_issue_vcs_check(repo_key, issue_number)
+            _issue_verdict = _issue_vcs_verdict_cache or _a2a_issue_vcs_check(repo_key, issue_number)
             if _issue_verdict == "not_found":
                 log.info(f"A2A #755: rejected — issue #{issue_number} not found in target repo {repo_key}")
                 raise HTTPException(status_code=400, detail={
@@ -1977,9 +2250,16 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _prsub_c.execute("SELECT issue_id FROM agent_tasks WHERE id=?", (_caller_task_id,))
                     _prsub_row = _prsub_c.fetchone()
                 if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
-                    log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
-                    return {"ok": False, "skipped": "pr_subscription_a2a_disabled",
-                            "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
+                    log.info(
+                        f"A2A: rejected — PR subscription QA (task={_caller_task_id}, "
+                        f"issue={_prsub_row[0]}), A2A disabled "
+                        f"code=pr_subscription_a2a_disabled issue=#{issue_number} "
+                        f"repository={repository} "
+                        f"reason={_a2a_skip_reason('pr_subscription_a2a_disabled')}")
+                    return _a2a_skip_response(
+                        "pr_subscription_a2a_disabled", agent=agent_name,
+                        source_seq=_source_seq,
+                        detail={"issue_number": native_issue_number(issue_number)} if issue_number else {})
             except Exception as _prsub_e:
                 log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
@@ -1996,8 +2276,18 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
             if not _scene_ck.get("in_scene"):
-                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
-                return JSONResponse(status_code=409, content={"status": "skipped", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id"), "message": f"agent '{agent_name}' is not in the current scene pipeline (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
+                _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
+                _nis_reason = _a2a_skip_reason("not_in_scene", agent=agent_name)
+                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} (nodes={_scene_node_ids})")
+                return _a2a_skip_response(
+                    "not_in_scene", agent=agent_name, source_seq=_source_seq,
+                    status="skipped", status_code=409,
+                    reason=_nis_reason,
+                    detail={"agent": agent_name},
+                    extra={
+                        "scene": _scene_ck.get("scene_id"),
+                        "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
+                    })
 
         # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     except HTTPException:
@@ -2068,7 +2358,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     skill_name = row[1] or ""
                     skill_id = row[2] or 0
                     if row[2]:
-                        from src.domains.mgmt.user.db import get_skill_by_id
+                        from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                         _sk = get_skill_by_id(row[2])
                         if _sk:
                             skill_name = _sk.get("skill_name") or skill_name
@@ -2128,11 +2418,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                          "handoff_result": HANDOFF_RESULT_FAILED,
                                          "source_seq": _source_seq,
                                          "message": _reason})
-                        from src.domains.mgmt.user.db import resolve_skill_dispatch
+                        from src.domains.mgmt.public import resolve_skill_dispatch
                         _res = resolve_skill_dispatch(
                             _pipe_skill, _node_sid, repo_key=repo_key,
                             user_id=_a2a_issue_uid, scene_id=_a2a_issue_scene,
-                            node_tag=agent_name)
+                            node_tag=agent_name, agent_type=agent_name)
                         skill_id = _res["skill_id"]
                         skill_name = _res.get("skill_name") or _pipe_skill
                         skill_path = _res.get("skill_path") or _pipe_skill
@@ -2161,7 +2451,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             _defaults = json.load(_f)
                         _scene = _defaults.get("scenes", {}).get("default", {})
                         try:
-                            from src.domains.mgmt.user.db import get_repo_scene
+                            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                             _scene_id = get_repo_scene(repo_key) or "default"
                             _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
                         except Exception:
@@ -2216,6 +2506,47 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 find_active_duplicate, resolve_scene)
             _guard_scene, _guard_nodes = resolve_scene(repo_key, issue_number)
             _event_scene = _guard_scene
+            # Issue #2816：折叠进已终态载体 PR 的单不再重派 coding。命中
+            # needs-human 标签或载体 PR 的 needs-human-terminal 标记行即短路，
+            # 并把 Issue 置人工态（awaiting_input），巡检据此不再补偿派发。
+            import asyncio as _aio
+            from src.api.a2a_terminal_guard import guard_terminal_dispatch
+            _terminal = await _aio.to_thread(
+                guard_terminal_dispatch, repo_key, issue_number, agent_name,
+                (payload if isinstance(payload, dict) else {}))
+            if _terminal:
+                from src.api.terminal_disposition import available_actions
+                _terminal_reason = _terminal.get("reason") or "needs_human_terminal"
+                _terminal_content = {
+                    "status": "ok", "seq": 0, "agent": agent_name,
+                    "skipped": _terminal_reason, "queued": False,
+                    "scene": _guard_scene,
+                    "reason": f"{_terminal_reason}:{_terminal.get('detail') or ''}",
+                    "triggers": _terminal.get("triggers") or [],
+                    "carrier_pr": _terminal.get("carrier_pr") or 0,
+                    "folded": bool(_terminal.get("folded")),
+                    "conflict_scope": _terminal.get("conflict_scope") or "",
+                    "manual_status": _terminal.get("manual_status") or "",
+                    "manual_applied": bool(_terminal.get("manual_applied")),
+                    "manual_actions": available_actions(_terminal),
+                    "message": ("issue is folded into a terminal carrier PR "
+                                "(needs-human/needs-human-terminal); coding dispatch skipped "
+                                "and the issue moved to a manual state. Use the terminal "
+                                "disposition entry (new_carrier/reassign/close) or force=true "
+                                "to override manually."),
+                }
+                log.info(f"A2A terminal guard: skip coding dispatch issue=#{issue_number} "
+                         f"triggers={_terminal.get('triggers')}")
+                from src.api.a2a_dispatch_guard import detect_dispatch_storm
+                try:
+                    detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
+                except Exception as _tse:
+                    log.warning(f"A2A #2816: storm detection failed: {_tse}")
+                return JSONResponse(
+                    status_code=200,
+                    content={**_terminal_content,
+                             "handoff_result": HANDOFF_RESULT_REJECTED,
+                             "source_seq": int(_source_seq or 0)})
             _down = find_running_downstream(
                 repo_key, issue_number, agent_name, _guard_scene, _guard_nodes,
                 exclude_seq=_a2a_ref_seq)
@@ -2341,8 +2672,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     if row:
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
-                            log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
-                            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
+                            log.info(
+                                f"A2A: sre subscribed + pr_number={pr_number}, skip task "
+                                f"creation (stage=sre, code=sre_subscribed "
+                                f"issue=#{issue_number} repository={repository} "
+                                f"reason={_a2a_skip_reason('sre_subscribed')})")
+                            return _a2a_skip_response(
+                                "sre_subscribed", agent=agent_name,
+                                source_seq=_source_seq,
+                                detail={"issue_number": native_issue_number(issue_number)})
             except Exception:
                 pass
 
@@ -2441,7 +2779,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             try:
                 from src.api.issues_center import _get_issue_title
-                _a2a_title = _get_issue_title(repo_key, int(issue_number)) or ""
+                _a2a_title = _get_issue_title(repo_key, native_issue_number(issue_number)) or ""
             except Exception:
                 pass
         if not _a2a_title:
@@ -2509,6 +2847,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             runtime_id=runtime_id or 0, backend=backend,
             issue_number=issue_number, repository=repository,
             ref_seq=_a2a_ref_seq,
+            # Issue #2816 复审：入口已按 _force 做过终态短路；派发入口的同款
+            # 复查必须继承 force 语义，否则人工强制派发会在第二道门被拦回。
+            # 同时透传入口已算好的 guard 结果，避免在事件循环内二次同步读 VCS。
+            force=bool(_force),
+            guard_state=(_terminal if (issue_number and not _force) else None),
         )
         return _augment_a2a_dispatch_response(
             _dispatch_result, agent_name, issue_number, source_seq=_source_seq)
@@ -2564,18 +2907,13 @@ async def pipeline_handoff_endpoint(request: Request, body: A2AHandoffBody,
 # ==== arch-only port (kept from arch-weekly-11; absent in weekly-mys) ====
 
 def _is_valid_issue_number(v) -> bool:
-    """D102-G：A2A issue_number 合法形态校验（对齐 S70 平台现实）。
-    - 2026-10-14 事故防线保留：拒绝空白 / '#1' 前缀 / 标题文本（含空格、
-      连字符等分隔符）/ 超长——垃圾仍进不来；
-    - S70 字符串 ident 平台（gitee 'IKTREU'）合法化：字母数字 ≤32 视为
-      合法 ident。原 isdigit() 把内部代理链（需求中心移交直调，payload
-      来自自家 DB 的合法原生形态）误拦成 400。
-    """
-    s = str(v or "").strip()
-    if not s or len(s) > 32:
-        return False
-    return s.isalnum()  # 纯数字或字母数字 ident；空格/连字符/# 等即假
+    """A2A 入口 issue_number 合法形态（Issue #3055：判据唯一来源 = 内核）。
 
+    一行转发 `src.kernel.issue_ident.is_valid_issue_number_input`：纯数字与
+    平台字符串 ident（gitee IK*）合法；`#` 前缀 / 空白 / 分隔符文本 / 超长仍拒绝。
+    """
+    from src.kernel.issue_ident import is_valid_issue_number_input
+    return is_valid_issue_number_input(v)
 
 @router.post("/webhook/{provider}")
 async def generic_vcs_webhook(provider: str, request: Request):

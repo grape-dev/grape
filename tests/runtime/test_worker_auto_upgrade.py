@@ -303,8 +303,8 @@ class TestZombieTaskReclamation:
         except (asyncio.CancelledError, Exception):
             pass
 
-    def test_zombie_task_reclaimed_and_fail_called(self):
-        """超龄僵尸任务被摘除并回调 fail。"""
+    def test_zombie_task_reclaimed_when_server_terminal(self):
+        """超龄 + 服务端已终态 → 摘除并杀引擎（不再回调 fail）。"""
         client = AsyncMock()
         client.get_tags.return_value = []
         client.claim_by_tag.return_value = None
@@ -313,10 +313,11 @@ class TestZombieTaskReclamation:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": "h-newversion1234"
         }
-        client.get_task_state.return_value = "dispatched"
+        client.get_task_state.return_value = "failed"
         client.fail = AsyncMock()
         # 模拟一个已经超龄的僵尸任务（claim_time 设为极小值，阈值 1s → loop.time() - 0.001 > 1）
         _zombie_task = {"id": "zombie-tid", "_engine_name": "opencode", "_claim_time": 0.001}
+        _tasks = {"zombie-tid": "zombie-session"}
         with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
              patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
              patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (1.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)), \
@@ -324,10 +325,36 @@ class TestZombieTaskReclamation:
              patch("src.domains.runtime.engine.agent._kill_stale_engine"):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
-                _test_active_tasks={"zombie-tid": "zombie-session"},
+                _test_active_tasks=_tasks,
                 _test_active_task_objs={"zombie-tid": _zombie_task})))
-            # 僵尸任务被回调 fail
-            client.fail.assert_awaited()
+            # 终态僵尸被摘除；non-terminal 不再被强制 fail（见下一条用例）
+            assert _tasks == {}
+            client.fail.assert_not_awaited()
+
+    def test_over_age_running_task_not_force_failed(self):
+        """超龄但服务端仍在跑（大任务 2h 上限内）→ 不摘除、不 fail，避免砍健康任务。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [], "latest_version": "h-newversion1234"}
+        client.get_task_state.return_value = "running"
+        client.fail = AsyncMock()
+        _zombie_task = {"id": "long-tid", "_engine_name": "coding", "_claim_time": 0.001}
+        _tasks = {"long-tid": "long-session"}
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (1.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)), \
+             patch("random.uniform", return_value=0), \
+             patch("src.domains.runtime.engine.agent._kill_stale_engine") as _kill:
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
+                _test_active_tasks=_tasks,
+                _test_active_task_objs={"long-tid": _zombie_task})))
+            assert _tasks != {}, "非终态任务不得被摘除"
+            client.fail.assert_not_awaited()
+            _kill.assert_not_called()
 
     def test_non_zombie_task_not_reclaimed(self):
         """未超龄任务不被摘除。"""

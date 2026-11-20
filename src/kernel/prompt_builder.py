@@ -3,6 +3,11 @@
 import json, os, re, sys
 
 from src.kernel.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
+# 能力端口：kernel 不 import src.domains，域实现在装配层 src/api/contracts_wiring.py 绑定。
+from src.kernel.ports import engines as _engines
+from src.kernel.ports import tokens as _tokens
+from src.kernel.ports import vcs_cards as _vcs_cards
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -36,9 +41,8 @@ def _local_port() -> str:
 def _vcs_module(repo_key: str):
     """repo_key → provider 模块（能力位/常量载体；未在册返回 None）。"""
     try:
-        from src.domains.runtime.vcs.providers import module_for
         from src.kernel.repo_key import parse_repo_key
-        return module_for(parse_repo_key(repo_key or "")[0])
+        return _vcs_cards.module_for(parse_repo_key(repo_key or "")[0])
     except Exception:
         return None
 
@@ -82,8 +86,7 @@ def _runtime_is_local(runtime_id: int = 0) -> bool | None:
     if not runtime_id or runtime_id <= 0:
         return False
     try:
-        from src.domains.runtime.public import runtime_locality
-        row = runtime_locality(runtime_id)
+        row = _engines.runtime_locality(runtime_id)
         if not row:
             return False
         cid = row[0] or 0
@@ -105,8 +108,7 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
     """
     try:
-        from src.domains.mgmt.user.db import get_worker_connect_url
-        public_url = get_worker_connect_url()
+        public_url = _tokens.get_worker_connect_url()
         local = _runtime_is_local(runtime_id)
         if local is None:
             # DB 查询异常：保留改造前「异常回退 localhost」语义（Issue #372 §15.5）。
@@ -320,8 +322,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
     - 无基线 → 明确允许降级分析
     """
     try:
-        from src.domains.runtime.engine.service import load_project_info
-        files, meta = load_project_info(repo_key)
+        files, meta = _engines.load_project_info(repo_key)
     except Exception:
         files, meta = {}, {}
     lines = ["\n## 项目知识基线（repo 全局）"]
@@ -354,9 +355,8 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 def _has_manual_ref(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> bool:
     """查 ref 表是否有 source='manual' 的关联记录（Issue #95 条件引导用）。"""
     try:
-        from src.domains.mgmt.public import has_manual_knowledge_ref
-        return has_manual_knowledge_ref(repo_key, agent_type=agent_type,
-                                        issue_num=issue_num, scene_id=scene_id)
+        return _tokens.has_manual_knowledge_ref(repo_key, agent_type=agent_type,
+                                                issue_num=issue_num, scene_id=scene_id)
     except Exception:
         return False
 
@@ -387,8 +387,7 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
             except Exception:
                 scene_id = ""
         if not scene_id:
-            from src.domains.mgmt.public import repo_dev_scene
-            scene_id = repo_dev_scene(repo_key)
+            scene_id = _tokens.repo_dev_scene(repo_key)
         if not scene_id:
             return ""
         # 2. 读 devops_pipeline_scene.advanced_options
@@ -426,11 +425,9 @@ def _build_cross_pipeline_baseline(repo_key: str, issue_id: str = "") -> str:
     （与运行时 GRAPE_WORK_BRANCH 同源）。承接侧 issue Agent 生成/刷新 Spec 前需以该值为准，
     发现 Spec 头部目标分支不一致时纠正并留痕（原文 → 纠正值）。无转交上下文时返回空串。
     """
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    # Issue #3055：数字→int / 平台 ident→str（原 int() 强转对 ident 抛错成空串）
+    _raw_issue = str(issue_id or "").strip().lstrip("#")
+    _num = native_issue_number(_raw_issue) if _raw_issue else None
     if not _num or not repo_key:
         return ""
     try:
@@ -453,18 +450,14 @@ def _build_cross_pipeline_baseline(repo_key: str, issue_id: str = "") -> str:
     # os.environ 仅作可选覆盖（测试 / 显式覆盖）。
     _runtime_branch = str(os.environ.get("GRAPE_WORK_BRANCH", "") or "").strip()
     if not _runtime_branch:
-        # 与任务 env 注入同源：event_pipeline.build_task_env / scheduler 也用
-        # repogit._read_scene_work_branch 取场景 work_branch 注入 GRAPE_WORK_BRANCH。
-        # 不要用 #1841 已整组回退的「生效分支」helper —— 它已被删除，import 会 ImportError
-        # 并被此处的 except 吞掉，导致口径静默降级。
+        # 与任务 env 注入同源：event_pipeline.build_task_env / scheduler 也读场景
+        # work_branch 注入 GRAPE_WORK_BRANCH。直接调 api 层 helper
+        # session_store.get_scene_work_branch（repogit._read_scene_work_branch 只是它的
+        # 一层包装，查询口径相同）：语义等价，且 kernel 不引域依赖。
         try:
-            from src.domains.runtime.engine.repogit import _read_scene_work_branch
-            _runtime_branch = str(_read_scene_work_branch(repo_key, issue_id=issue_id) or "").strip()
+            _runtime_branch = str(get_scene_work_branch(repo_key, issue_id=issue_id) or "").strip()
         except Exception:
-            try:
-                _runtime_branch = str(get_scene_work_branch(repo_key, issue_id=issue_id) or "").strip()
-            except Exception:
-                _runtime_branch = ""
+            _runtime_branch = ""
     header = "\n## Cross-pipeline Baseline (Issue #1753)"
 
     # Issue #1753 复审：只有转交链标注 target_scene_work_branch 的值才是承接流水线权威基线。
@@ -1157,8 +1150,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
     if runtime_id:
         try:
-            from src.domains.runtime.public import runtime_engine_name
-            _engine_name = runtime_engine_name(runtime_id) or "unknown"
+            _engine_name = _engines.runtime_engine_name(runtime_id) or "unknown"
             parts.append(f"\n## Runtime Engine\nbound engine: {_engine_name} (runtime_id={runtime_id})\n"
                          "Engine binding info is provided in the prompt; no need to check /openapi.json. "
                          "A 403 from an interface is a normal security restriction and should not block subsequent scheduling.\n")
@@ -1222,8 +1214,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
         parts.append(f"Runtime engine: {backend_name}")
     elif runtime_id:
         try:
-            from src.domains.runtime.engine.engine_select import engine_name
-            _be = engine_name(runtime_id) or ""
+            _be = _engines.engine_name(runtime_id) or ""
             if _be:
                 parts.append(f"Runtime engine: {_be}")
         except Exception:
@@ -1256,16 +1247,14 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
         _skill_scope = ""
         if skill_id:
             try:
-                from src.domains.mgmt.user.db import get_skill_by_id
-                _ski = get_skill_by_id(skill_id)
+                _ski = _tokens.get_skill_by_id(skill_id)
                 if _ski:
                     _skill_scope = _ski.get("scope") or ""
             except Exception:
                 _skill_scope = ""
         if skill_id and (_skill_scope in ("user", "repo")
                          or (not _skill_scope and not resolve_official_skill_path(_sn))):
-            from src.domains.mgmt.user.db import get_skill_path
-            _abs = get_skill_path(skill_id)
+            _abs = _tokens.get_skill_path(skill_id)
             skill_path = _abs or os.path.join(SKILLS_DIR, _sn, "SKILL.md")
             parts.append(f"\n## Current Skill: {_sn or skill_id}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
         else:
@@ -1304,8 +1293,7 @@ def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: 
     # 注入当前执行的 runtime 引擎信息；403 是正常安全限制（D3 借鉴）
     if runtime_id:
         try:
-            from src.domains.runtime.engine.engine_select import engine_name
-            _be = engine_name(runtime_id) or ""
+            _be = _engines.engine_name(runtime_id) or ""
             if _be:
                 parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
             parts.append(
@@ -1356,9 +1344,8 @@ def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_nu
 
     # 1. 查 scene_knowledge_ref 表注入关联知识（source='agent'）
     try:
-        from src.domains.mgmt.public import list_agent_knowledge_refs
-        rows = list_agent_knowledge_refs(repo_key, agent_type=agent_type,
-                                         issue_num=issue_num, scene_id=scene_id)
+        rows = _tokens.list_agent_knowledge_refs(repo_key, agent_type=agent_type,
+                                                 issue_num=issue_num, scene_id=scene_id)
 
         from src.api.knowledge import read_entry_content
         for kid, scope, source, obs_key, file_path, content_hash in rows:
@@ -1444,8 +1431,7 @@ def _load_scene_recommend_config(repo_key: str) -> dict:
     读取时兜底过滤：规则中 scene_id 不在当前场景列表中的直接丢弃。
     """
     try:
-        from src.domains.mgmt.user.db import get_scene_recommend_config
-        config = get_scene_recommend_config(repo_key)
+        config = _tokens.get_scene_recommend_config(repo_key)
         fallback = config.get("fallback_scene", "") or ""
         rules = config.get("rules", []) or []
         # 读取时兜底过滤
@@ -1464,14 +1450,13 @@ def _sanitize_recommend_config(repo_key: str) -> dict | None:
     在场景删除时主动调用。返回修复后的 config（已写回 DB），或 None（无需修复）。
     """
     from src.api.pipeline_config import get_scenes
-    from src.domains.mgmt.user.db import get_scene_recommend_config, set_scene_recommend_config
 
     scenes = get_scenes(repo_key=repo_key)
     valid_ids = {s["id"] for s in scenes}
     if not valid_ids:
         return None
 
-    config = get_scene_recommend_config(repo_key)
+    config = _tokens.get_scene_recommend_config(repo_key)
     changed = False
 
     old_rules = config.get("rules") or []
@@ -1486,7 +1471,7 @@ def _sanitize_recommend_config(repo_key: str) -> dict | None:
         changed = True
 
     if changed:
-        set_scene_recommend_config(repo_key, config["fallback_scene"], config["rules"])
+        _tokens.set_scene_recommend_config(repo_key, config["fallback_scene"], config["rules"])
         from src.kernel.config import log
         log.info(f"RecommendConfig: auto-sanitized for {repo_key}, "
                  f"fallback={config['fallback_scene']}, rules={len(config['rules'])}")
@@ -1603,8 +1588,7 @@ def _vcs_card(repo_key: str):
     from src.kernel.repo_key import parse_repo_key
     provider, _, _ = parse_repo_key(repo_key or "")
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        return get_platform_card(provider)
+        return _vcs_cards.get_platform_card(provider)
     except Exception:
         return None
 
@@ -1627,8 +1611,7 @@ def _business_probe_ttl() -> float:
 def _business_port() -> str:
     """本机业务 API 端口：显式配置 > GRAPE_BUSINESS_PORT > `_local_port()` 兼容默认。"""
     try:
-        from src.domains.mgmt.user.db import get_business_api_port
-        port = get_business_api_port()
+        port = _tokens.get_business_api_port()
         if port:
             return port
     except Exception:
@@ -1770,12 +1753,11 @@ def _select_local_business_base(public_url: str) -> tuple[str, str]:
 def _resolve_business_base(runtime_id: int = 0) -> tuple[str, str]:
     """求值业务 API 基址并返回 (基址, 命中来源分支)。"""
     try:
-        from src.domains.mgmt.user.db import get_business_api_url, get_business_api_url_explicit
         # 显式配置体现运维意图，保持最高优先级且不做网络探测。
-        explicit = get_business_api_url_explicit()
+        explicit = _tokens.get_business_api_url_explicit()
         if explicit:
             return explicit, "explicit_config"
-        public_url = (get_business_api_url() or "").strip().rstrip("/")
+        public_url = (_tokens.get_business_api_url() or "").strip().rstrip("/")
         local = _runtime_is_local(runtime_id)
         if local is False:
             return public_url, "server_base_url"
@@ -1822,14 +1804,12 @@ def _build_service_base_env(business_url: str, business_source: str,
     gateway = ""
     explicit_by_service: dict = {}
     try:
-        from src.domains.mgmt.user.db import get_task_gateway_base_url
-        gateway = get_task_gateway_base_url() or ""
+        gateway = _tokens.get_task_gateway_base_url() or ""
     except Exception:
         gateway = ""
     try:
-        from src.domains.mgmt.user.db import get_task_service_api_url_explicit
         explicit_by_service = {
-            service: (get_task_service_api_url_explicit(service) or "")
+            service: (_tokens.get_task_service_api_url_explicit(service) or "")
             for service in _SERVICE_BASE_ENV_KEYS
         }
     except Exception:
@@ -1861,11 +1841,10 @@ def resolve_a2a_base(runtime_id: int = 0) -> str:
     不触发业务 API 可达性探测——重派/续办的诊断路径无需业务端点在线。
     """
     try:
-        from src.domains.mgmt.user.db import get_task_gateway_base_url, get_task_service_api_url_explicit
-        explicit = get_task_service_api_url_explicit("a2a")
+        explicit = _tokens.get_task_service_api_url_explicit("a2a")
         if explicit:
             return explicit.rstrip("/")
-        gateway = get_task_gateway_base_url()
+        gateway = _tokens.get_task_gateway_base_url()
         if gateway:
             return _join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES["a2a"])
     except Exception:

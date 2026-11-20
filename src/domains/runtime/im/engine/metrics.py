@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # 与 legacy 断开归因三分类一致（cluster-im-lease-stability-design.md §2.5）
-FLAP_CAUSES = ("lease", "ws_transport", "shutdown", "ilink_longpoll")
+# 2026-11-18 架构审查 A13：企微 disconnected_event（同一 bot 被新会话顶掉的会话接管事件）
+# 被软处理后不再走 ChannelError 路径，必须在这里留一个归因桶，否则"被抢连接"从看板上
+# 彻底消失（修复前正是靠这一项 13 次/10 分钟才发现问题）。
+FLAP_CAUSES = ("lease", "ws_transport", "shutdown", "ilink_longpoll", "takeover")
 
 # Issue #1095：卡片降级归因（/health/realtime im 段 degraded_by_reason）
 # Issue #1728：微信渠道媒体/入站/风控降级归因

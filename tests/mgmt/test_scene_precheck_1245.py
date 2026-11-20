@@ -27,7 +27,8 @@ def _patch_scene(monkeypatch, nodes):
     import src.api.pipeline_config as pc
 
     cfg = _scene(nodes)
-    monkeypatch.setattr(pc, "get_pipeline_config", lambda scene_id, repo_key="": cfg)
+    monkeypatch.setattr(pc, "get_pipeline_config",
+                        lambda scene_id, repo_key="", use_cache=True: cfg)
 
 
 def _insert_engine(name, *, credential_id=0, status="online", healthy=1, installed=1,
@@ -95,12 +96,58 @@ def _node(node_id, *, eids=None, skill="skill-ok", enabled=True, next_="done"):
             "enabled": enabled, "next": next_, "engine_runtime_ids": list(eids or [])}
 
 
+def _node_uid(node_id, *, uids=None, skill="skill-ok", enabled=True, next_="done"):
+    """uid 轨节点形态（保存端 #646/#868/#1208 只落 engine_runtime_uids、ids 留空）。"""
+    return {"id": node_id, "tag": node_id, "skill": skill, "skill_id": 0,
+            "enabled": enabled, "next": next_,
+            "engine_runtime_ids": [], "engine_runtime_uids": list(uids or [])}
+
+
 def _run(monkeypatch, nodes, user=None, resolve_result=999):
     _patch_scene(monkeypatch, nodes)
     import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_skill_id", lambda *a, **kw: resolve_result)
     return scene_precheck.precheck_scene(_SCENE_ID, _REPO,
                                          user or {"username": "me", "id": ""})
+
+
+def _insert_engine_with_uid(name, uid, **kw):
+    rid = _insert_engine(name, **kw)
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?", (uid, rid))
+        db.commit()
+    return rid
+
+
+def test_sre_node_bound_by_uid_not_misjudged(monkeypatch):
+    """[uid 优先回落 2026-11-13] SRE 节点按 uid 绑定（ids 空）不再被误判「未绑定机器」。
+
+    根因：_check_nodes 只读 engine_runtime_ids，而保存端（#646/#868/#1208）只落
+    engine_runtime_uids——uid 绑定的 SRE 节点建单一律 400（E2E 实证）。
+    """
+    _uid = "uid-sre-fix-1113"
+    rid = _insert_engine_with_uid("sre-uid-engine", _uid)
+    try:
+        out = _run(monkeypatch, [_node_uid("sre", uids=[_uid])])
+        assert out["ok"] is True, out["problems"]
+        assert not [p for p in out["problems"] if p["reason_code"] == "engine_missing"], out["problems"]
+    finally:
+        _cleanup([rid])
+
+
+def test_uid_dangling_engine_reported_as_missing(monkeypatch):
+    """uid 轨悬空引用（引擎已删）报 engine_missing，不静默放行。"""
+    out = _run(monkeypatch, [_node_uid("sre", uids=["uid-dangling-404"])])
+    assert out["ok"] is False
+    assert {p["reason_code"] for p in out["problems"]} == {"engine_missing"}
+
+
+def test_uid_empty_sre_still_blocked(monkeypatch):
+    """两轨全空的 SRE 仍按原约束报「未绑定机器」（SRE 不支持广播）。"""
+    out = _run(monkeypatch, [_node_uid("sre", uids=[])])
+    assert out["ok"] is False
+    assert {p["reason_code"] for p in out["problems"]} == {"engine_missing"}
 
 
 def test_engine_missing(monkeypatch):
@@ -254,6 +301,36 @@ def test_sre_empty_binding_rejected(monkeypatch):
     out = _run(monkeypatch, [_node("sre", eids=[])])
     assert out["ok"] is False
     assert any(p["reason_code"] == "engine_missing" for p in out["problems"])
+
+
+def test_sre_empty_binding_downgraded_for_non_explicit_scene(monkeypatch):
+    """非用户显式选择的场景（dev_scene/default 回落）只告警不拦单。
+
+    beta 实测故障：删场景后 60s 内建单落到另一台，请求命中旧缓存里的场景，
+    该场景带未绑机的 sre 节点 → 智能推荐路径被 400 拦死，而用户无从修复。
+    """
+    _patch_scene(monkeypatch, [_node("sre", eids=[])])
+    out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,
+                                        {"username": "me", "id": ""}, explicit=False)
+    assert out["ok"] is True
+    assert out["problems"] == []
+    assert any("SRE" in w for w in out["warnings"])
+
+
+def test_precheck_bypasses_scene_cache(monkeypatch):
+    """预校验必须读实时场景配置：调用 get_pipeline_config 时 use_cache=False。"""
+    import src.api.pipeline_config as pc
+
+    seen = {}
+    cfg = _scene([_node("vod", eids=[])])
+
+    def _spy(scene_id, repo_key="", use_cache=True):
+        seen["use_cache"] = use_cache
+        return cfg
+
+    monkeypatch.setattr(pc, "get_pipeline_config", _spy)
+    scene_precheck.precheck_scene(_SCENE_ID, _REPO, {"username": "me", "id": ""})
+    assert seen.get("use_cache") is False
 
 
 def test_fail_open_on_query_exception(monkeypatch):

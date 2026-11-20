@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import ast
 import re
 from collections import defaultdict
@@ -25,7 +26,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DB_SETUP = REPO / "src/api/db_setup.py"
-OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
+OWNER_JSON = REPO / "configs/table_ownership.json"
 TABLE_RE = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(\w+)[`\"]?", re.I)
 
 
@@ -34,13 +35,16 @@ SCHEMA_DOMAIN = {"grape_mgmt_db": "mgmt", "grape_runtime_db": "runtime",
 
 
 def load_owner() -> dict[str, str]:
-    """table → 归属域（冻结清单 docs/weekly-11/table-owner.tsv）。"""
-    owner = {}
-    for line in OWNER_TSV.read_text(encoding="utf-8").splitlines():
-        schema, _, table = line.partition("\t")
-        if table and schema in SCHEMA_DOMAIN:
-            owner[table.strip()] = SCHEMA_DOMAIN[schema]
-    return owner
+    """table → 归属域（唯一权威 configs/table_ownership.json）。
+
+    这里曾按 TSV 格式逐行 partition("\t") 解析 JSON —— JSON 没有制表符，
+    于是 owner 恒为空、所有表都判「无归属」，工具静默产出 0 个可搬 DDL。
+    改为直接读 JSON，与 scripts/foreign_table_refs.py 的 load_owner_json 同口径。
+    """
+    data = json.loads(OWNER_JSON.read_text(encoding="utf-8"))
+    per_domain = set(((data.get("_per_domain_tables") or {}).get("tables") or []))
+    return {t: d for t, d in (data.get("tables") or {}).items()
+            if d in set(SCHEMA_DOMAIN.values()) and t not in per_domain}
 
 
 def main(argv: list[str] | None = None) -> int:

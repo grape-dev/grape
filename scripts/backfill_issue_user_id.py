@@ -21,43 +21,62 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 _SQL_CANDIDATES = """
-SELECT i.id, i.repo_key, i.issue_number, i.assignee,
-       (SELECT m.user_id FROM unified_user_mapping m
-        WHERE m.gitcode_user = i.assignee AND m.user_id > 0 LIMIT 1) AS mapped_user_id
+SELECT i.id, i.repo_key, i.issue_number, i.assignee, i.created_by,
+       COALESCE(
+         (SELECT m.user_id FROM unified_user_mapping m
+          WHERE m.gitcode_user = i.assignee AND m.user_id > 0 LIMIT 1),
+         (SELECT m.user_id FROM unified_user_mapping m
+          WHERE m.gitcode_user = i.created_by AND m.user_id > 0 LIMIT 1)
+       ) AS mapped_user_id
 FROM issue i
 WHERE i.user_id = 0
-  AND i.assignee != ''
-  AND EXISTS (SELECT 1 FROM unified_user_mapping m
-              WHERE m.gitcode_user = i.assignee AND m.user_id > 0)
+  AND (
+    (i.assignee != '' AND EXISTS (SELECT 1 FROM unified_user_mapping m
+                                  WHERE m.gitcode_user = i.assignee AND m.user_id > 0))
+    OR
+    (i.created_by != '' AND EXISTS (SELECT 1 FROM unified_user_mapping m
+                                    WHERE m.gitcode_user = i.created_by AND m.user_id > 0))
+  )
 ORDER BY i.id
 """
 
 
 def candidates() -> list[dict]:
-    """返回待回填候选行。"""
+    """返回待回填候选行（assignee 不可映射时回退 created_by）。"""
     with db_lock:
         c = db.cursor()
         rows = c.execute(_SQL_CANDIDATES).fetchall()
     return [
         {"id": r[0], "repo_key": r[1], "issue_number": r[2],
-         "assignee": r[3], "mapped_user_id": r[4]}
+         "assignee": r[3], "created_by": r[4], "mapped_user_id": r[5]}
         for r in rows
     ]
 
 
 def apply() -> int:
-    """回填 user_id（0 → 映射 id），返回受影响行数；幂等。"""
+    """回填 user_id（0 → 映射 id），返回受影响行数；幂等。
+
+    Issue #827: assignee 不可映射时回退 created_by 作为 user_id 来源。
+    """
     affected = 0
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE issue "
-            "SET user_id = (SELECT m.user_id FROM unified_user_mapping m "
-            "               WHERE m.gitcode_user = issue.assignee AND m.user_id > 0 LIMIT 1) "
+            "SET user_id = COALESCE("
+            "  (SELECT m.user_id FROM unified_user_mapping m "
+            "   WHERE m.gitcode_user = issue.assignee AND m.user_id > 0 LIMIT 1),"
+            "  (SELECT m.user_id FROM unified_user_mapping m "
+            "   WHERE m.gitcode_user = issue.created_by AND m.user_id > 0 LIMIT 1)"
+            ") "
             "WHERE issue.user_id = 0 "
-            "  AND issue.assignee != '' "
-            "  AND EXISTS (SELECT 1 FROM unified_user_mapping m "
-            "              WHERE m.gitcode_user = issue.assignee AND m.user_id > 0)",
+            "  AND ("
+            "    (issue.assignee != '' AND EXISTS (SELECT 1 FROM unified_user_mapping m "
+            "        WHERE m.gitcode_user = issue.assignee AND m.user_id > 0))"
+            "    OR"
+            "    (issue.created_by != '' AND EXISTS (SELECT 1 FROM unified_user_mapping m "
+            "        WHERE m.gitcode_user = issue.created_by AND m.user_id > 0))"
+            "  )",
         )
         affected = c.rowcount
         db.commit()

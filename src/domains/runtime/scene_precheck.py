@@ -102,7 +102,7 @@ def _user_identities(user) -> tuple[set[str], set[str]]:
     if uid.isdigit() and int(uid) > 0:
         uids.add(uid)
     try:
-        from src.domains.mgmt.auth.grape_account_db import (
+        from src.domains.mgmt.public import (
             get_grape_account_by_id,
             get_grape_account_by_username,
         )
@@ -196,7 +196,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_id = _node_skill_id(node)
     if skill_id:
         try:
-            from src.domains.mgmt.user.db import get_skill_by_id
+            from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
             if get_skill_by_id(skill_id):
                 return True
         except Exception as e:
@@ -205,7 +205,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     if not skill_name:
         return False
     try:
-        from src.domains.mgmt.user.db import resolve_skill_id
+        from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
         return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")
@@ -364,6 +364,30 @@ def _check_skill(node: dict, tag: str, repo_key: str,
                 f"（{result.get('reason') or 'skill scope 不匹配'}）",
         suggestion=_suggestion)
 
+def _resolve_engine_refs(n: dict) -> list[int]:
+    """节点引擎引用解析（uid 优先、id 回落）——与调度层 get_scene_pool_engine_ids
+    同一判据（#646/#868 uid 改造口径 + #1208 三模式）。
+
+    - engine_runtime_uids 非空 → 按 agent_runtimes.engine_uid 解析为引擎 id 列表
+      （uid 悬空/查不到 → 0 哨兵，交由 _check_engine_binding 的存在性校验报
+      「绑定的引擎不存在」，不静默放行）；
+    - uids 为空 → 回落 engine_runtime_ids（legacy 轨，行为不变）。
+
+    注意 selector 模式节点两轨均空是**合法**（按标签圈池），调用方对 SRE 的
+    「未绑定机器」判定也因本函数的存在而只会在两轨都空时触发——SRE 走
+    selector 同样非法（SRE 无 label: 维度实践），维持原约束。
+    """
+    _uids = [u for u in (n.get("engine_runtime_uids") or []) if str(u or "").strip()]
+    if _uids:
+        from src.domains.runtime import public as _rt_pcheck
+        try:
+            # owner 域公开读原语（任意拓扑；lib 模式走注册面）
+            return _rt_pcheck.runtime_ids_by_engine_uids(_uids)
+        except Exception:
+            return [0 for _u in _uids]
+    return _normalize_engine_ids(n.get("engine_runtime_ids"))
+
+
 def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
                  cfg: dict, problems: list) -> None:
     names, uids = _user_identities(user)
@@ -375,7 +399,8 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
             continue
         tag = _node_key(n)
         is_sre = str(n.get("id") or n.get("tag") or "").strip().lower() == "sre"
-        eids = _normalize_engine_ids(n.get("engine_runtime_ids"))
+        # [uid 优先回落 2026-11-13] 引擎引用 uid 轨优先（#646/#868 口径），空再回落 id 轨
+        eids = _resolve_engine_refs(n)
         _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
         _check_skill(n, tag, repo_key, cfg, problems)
@@ -401,12 +426,17 @@ def _load_user_scene_nodes(scene_id: str, uids: set[str]):
             return nodes
     return None
 
-def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
+def precheck_scene(scene_id: str, repo_key: str, user=None, explicit: bool = True) -> dict:
     """建单前场景可用性预校验。
 
     返回 {"ok", "problems", "warnings", "trace_id"}；problems 非空即 ok=False。
     配置 enforce=false、场景不存在、查询异常一律放行（fail-open）。
     标准解析未命中时会补查 user 个人场景（scene_market scope='user'）。
+
+    explicit=False 表示场景不是用户显式选的（建单选智能推荐/留空时由仓库
+    dev_scene 或内置 default 兜底）：这种场景的节点问题用户无从修复，
+    转为 warnings 放行，不拦建单（否则 default 模板自带的 sre 节点会把
+    所有走智能推荐的仓库全部拦死）。
     """
     trace_id = "pc_" + uuid.uuid4().hex[:16]
     out = {"ok": True, "problems": [], "warnings": [], "trace_id": trace_id}
@@ -422,7 +452,9 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
         return out
     try:
         from src.api.pipeline_config import get_pipeline_config
-        scene = get_pipeline_config(scene_id, repo_key=repo_key)
+        # 预校验判断的是「此刻能不能执行」：必须读真实配置，不能命中 60s 进程缓存
+        # （双主各自持有缓存，另一台删/改场景后本机仍会用幽灵节点判定并发拦单）。
+        scene = get_pipeline_config(scene_id, repo_key=repo_key, use_cache=False)
         if _scene_unresolved(scene, scene_id):
             _names, uids = _user_identities(user)
             personal_nodes = _load_user_scene_nodes(scene_id, uids) if uids else None
@@ -439,6 +471,15 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
         problems = out["problems"]
         _check_structure(nodes, cfg, problems)
         _check_nodes(nodes, scene_id, repo_key, user, cfg, problems)
+        if problems and not explicit:
+            # 非用户显式选择的场景：问题降级为告警放行（用户没有可操作的修复入口）
+            out["warnings"].extend(
+                str(p.get("message") or p.get("reason_code") or "") for p in problems)
+            log.warning(
+                f"scene_precheck: non-explicit scene={scene_id} repo={repo_key} has "
+                f"{len(problems)} problem(s), downgraded to warnings: {summarize_problems(problems)}")
+            out["problems"] = []
+            problems = out["problems"]
         out["ok"] = not problems
     except Exception as e:
         # fail-open：预校验自身的异常不得误拦正常建单

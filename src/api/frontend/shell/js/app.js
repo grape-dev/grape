@@ -3,7 +3,19 @@
 // 外部/前端约定一律无前缀；dashboard 响应可能带 gitcode:/github: 前缀，需剥离
 // ═══════════════════════════════════════════════════════════════
 function stripRepoPrefix(s) {
-  return String(s || '').replace(/^(gitcode|github|gitlab):/, '');
+  // 前缀集合以运行时平台目录为准（服务端注入 __REPO_PLATFORMS__），缺目录时回退已知四家
+  // 仓库全称里不会出现 ':'，所以「开头是 [a-z0-9_-]+ 后接 : 且后面还有 / 」就是前缀段；
+  // 这样不必再枚举平台（原实现写死 gitcode|github|gitlab，gitee 前缀漏剥）。
+  var str = String(s || '');
+  var i = str.indexOf(':');
+  if (i > 0 && /^[a-z][a-z0-9_-]*$/.test(str.slice(0, i)) && str.slice(i + 1).indexOf('/') > 0) {
+    return str.slice(i + 1);
+  }
+  return str;
+}
+// 平台显示名统一走 platform-icons.js（平台目录驱动，含 Gitee/GitLab）；缺则回退 key
+function platformLabelOf(k) {
+  return (typeof window.platformLabel === 'function' && window.platformLabel(k)) || k;
 }
 window.stripRepoPrefix = stripRepoPrefix;
 
@@ -154,7 +166,7 @@ window._cfRevealSecretField = function(input, btn) {
 
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account','sandbox'];
 
   // ── 非仓库视图清单（单一事实源）──
   // 历史上 app.js 内有 4 份内容不一致的拷贝（restore 198 / check 1125 / nav 1458 /
@@ -162,7 +174,7 @@ const app = (() => {
   // 收敛为一份并集常量：合法 VIEWS 之外的历史遗留视图（scene-detail-local /
   // autopilot / autopilot-detail / organizations）一并纳入，多排无害（它们都不
   // 依赖仓库上下文，横幅/守卫跳过它们语义正确）。
-  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account'];
+  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account', 'sandbox'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -270,6 +282,16 @@ const app = (() => {
         // 缓存里有、服务端没有 → 已被解绑/无权限：清掉，别拿旧仓库打开别人的单
         try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
       }
+      // 2026-11-17 现场：只弹 toast 不动地址栏，用户会停在 /app/<owner>/<repo>/ 上——
+      // 每次刷新重放同一次失败，且所有仓库维度菜单都只是「静默回大厅」，现象就是
+      // 「项目场景/流水线点了没反应」。这里把路径改回大厅（保留 /en 语言前缀），
+      // 并丢掉指向别人仓库的 hash，避免脏 URL 反复把用户拽回同一个坑。
+      try {
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(window.history.state, '',
+            (ctx.prefix || '') + '/' + (window.location.search || ''));
+        }
+      } catch (e) {}
       showToast(I18N.t('app.deeplink.repo_not_found') ||
                 '无法通过该链接进入：仓库不存在、未托管或你没有权限', '', 6000);
       return false;
@@ -296,6 +318,14 @@ const app = (() => {
 
   function _bootRestore() {
     var _ctx0 = _appPathCtx();
+    // D109 收口（2026-11-14 复核）：关系为空时不得复用任何残留仓库入口（URL 深链 /
+    // sessionStorage currentRepo）——否则「清空全部 PAT 且无 OAuth」的用户刷新首页仍
+    // 停在项目工作台，绕过引导门。关系空 → 先清残留，再走引导页。
+    if (!_hasVcsBinding()) {
+      try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
+      goToRepos();
+      return;
+    }
     _applyAppPathRepo().then(function (hit) {
       const h = window.location.hash || '';
       if (hit && h.length <= 1) { nav('dash'); return; }
@@ -448,15 +478,27 @@ function loadAgentTypes() {
   // 绑定态是否已经「确知」：/auth/profile 成功返回后才置 true。
   // 未确知时绝不能按「未绑定」把带深链仓库的用户轰去引导页（那会把 /app/owner/repo/ 路径也改掉）。
   var _profileLoadedOk = false;
+  // 关系快照的取回时间（ms）。工作区/我的项目/项目模板这些入口在每次进入前用它判「是否要
+  // 重新取一次关系」——PAT 增删只改服务端，前端旧快照会让「已清空」的账号仍被判已接入。
+  var _linksLoadedAt = 0;
 
   function _hasVcsBinding() {
-    var _u = {};
-    try { _u = JSON.parse(localStorage.getItem('user') || '{}'); } catch (e) {}
-    var _bs = _u.bindings || [];
-    if (!_bs.length) return false;
-    var _cat = (typeof _appVcsCatalog === 'object' && _appVcsCatalog) ? _appVcsCatalog : null;
-    if (!_cat) return true;  // 目录未就绪：不误判，交给后端
-    return _bs.some(function(b) { return !!_cat[b]; });
+    // D109 收口：判据 = 「当前用户是否存在仓库平台关系」（grape_t_user_repo_platform_link，
+    // 未撤销行）。绑定 identities 只是登录身份，不是接入关系（huawei 纯登录渠道即为反例）。
+    // 表未就绪时后端返回 source='identities'，此时沿用旧判据，避免误判。
+    var _links = window.__repoPlatformLinks;
+    if (_links && (_links.source === 'table' || _links.source === 'identities')) {
+      // 2026-11-18：关系行在、但凭据全部失效（credential_error 非空）时仍要进项目页——
+      // 项目页的凭据提示条（"已隐藏其仓库，请重新配置"）是这批用户唯一的可处置入口；
+      // 判成"无绑定"会把他们送回引导页，复现 #3200 的"系统说我绑错了平台"。
+      if (_links.has_any) return true;
+      return ((_links.credential_broken || []).length
+              || Object.keys(_links.credential_error || {}).length) > 0;
+    }
+    // 快照未就绪：不按 identities 猜「已接入仓库平台」——Vue 线没有 _appVcsCatalog，
+    // 旧判据会把纯登录渠道（huawei 之类）当成仓库平台绑定，把无关系用户送进项目页。
+    // 无快照一律按「无关系」处理，落引导页；后端 /repos/member 的 _no_vcs_binding 仍有终裁权。
+    return false;
   }
 
   // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用
@@ -487,7 +529,11 @@ function loadAgentTypes() {
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (!_hasVcsBinding() && !currentRepo() && !_appPathCtx() && _profileLoadedOk) {
+      // D109 收口：先认「用户↔仓库平台关系」，再看当前仓库。
+      // 进需要仓库的视图（含 #repos 本身）时，没有关系一律引导页——
+      // sessionStorage 里残留的 currentRepo 不能代替关系（撤绑后它还在）。
+      // 绑定态未知（_profileLoadedOk=false）时不跳，避免误判（基线口径）。
+      if (!_hasVcsBinding() && !noRepoViews.includes(view) && _profileLoadedOk) {
         goToRepos();
       } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
@@ -497,18 +543,36 @@ function loadAgentTypes() {
     } else if (_appPathCtx() && !currentRepo()) {
       // 深链仓库没解析出来（同上）：保留 URL，落在 dashboard，刷新/重登后可恢复
       nav('dash');
-    } else if (bindings.length > 0) {
-      // 有仓库平台绑定无 hash → 加载仓库列表（纯登录渠道绑定 → loadRepos 内转引导页）
+    } else if (_hasVcsBinding()) {
+      // 有仓库平台关系无 hash → 加载仓库列表（纯登录渠道绑定不算关系 → 走引导页）
       loadRepos();
-    } else if (currentRepo()) {
-      // 无绑定但有当前仓库 → dashboard
-      nav('dash');
-    } else if (!_hasVcsBinding() && _profileLoadedOk) {
-      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）；绑定态未知时不跳，避免误判
+    } else if (!_hasVcsBinding()) {
+      // D109：先判关系，再判残留 currentRepo —— 清空全部 PAT 且无 OAuth 时关系为 0，
+      // sessionStorage 里的旧仓库必须丢弃，否则会绕过引导门直接停在项目页。
+      try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
       goToRepos();
+    } else if (currentRepo()) {
+      // 有绑定且有当前仓库 → dashboard
+      nav('dash');
     } else {
       // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
     }
+  }
+
+  // 仓库平台关系刷新（D109 对象模型）：PAT / OAuth 绑定后关系行是服务端写的，
+  // 前端 __repoPlatformLinks 是登录时的快照——不刷新就会「刚配完 PAT 仍被引导门拦回引导页」。
+  function refreshRepoLinks() {
+    return API.get('/auth/platform-links').then(function(d) {
+      window.__repoPlatformLinks = d || null;
+      _linksLoadedAt = Date.now();
+      // /auth/profile 的字段同源；同步回 localStorage 的 user 快照，供其它判据使用
+      try {
+        var u = JSON.parse(localStorage.getItem('user') || '{}');
+        u.repo_platform_links = d || null;
+        localStorage.setItem('user', JSON.stringify(u));
+      } catch (e) {}
+      return d || null;
+    }).catch(function() { return null; });
   }
 
   // 提示条已移除——未绑定用户直接显示引导页（goToRepos 处理）
@@ -532,6 +596,10 @@ function loadAgentTypes() {
       var _tbName = $('tbUserName'); if (_tbName) _tbName.textContent = displayName;
       localStorage.setItem('user', JSON.stringify(d));
       _profileLoadedOk = true;
+      // D109：仓库平台关系（对象模型）。登录后进不进引导页以它为准；
+      // 缺失（老后端/表未就绪回落）时 _hasVcsBinding 走 identities 旧判据。
+      window.__repoPlatformLinks = d.repo_platform_links || null;
+      _linksLoadedAt = Date.now();
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
       if (welcomeEl) welcomeEl.textContent = displayName;
@@ -792,7 +860,7 @@ function loadAgentTypes() {
     var bindSuccess = params.get('bind_success');
     var bindError = params.get('bind_error');
     if (bindSuccess) {
-      var label = bindSuccess === 'gitcode' ? 'GitCode' : 'GitHub';
+      var label = (typeof window.platformLabel === 'function' && window.platformLabel(bindSuccess)) || bindSuccess;
       showToast(I18N.t('app.login.bind_success', {label: label}),
                 I18N.t('app.login.bind_success_desc'));
       // D43: 绑定成功后清除仓库缓存，下次拉取获取含新平台的仓库
@@ -840,20 +908,25 @@ function loadAgentTypes() {
       window.history.replaceState({}, '', cleanUrl);
     }
     if (bindError) {
-      var rawErr = decodeURIComponent(bindError.replace(/\+/g, ' '));
-      var friendlyMsg = _translateOAuthError(rawErr);
+      // P0-3：解码失败按“参数无效”处理（bind_error=100%25 会抛 URIError 中断 init）
+      var rawErr = _safeDecodeParam(bindError.replace(/\+/g, ' '));
+      var friendlyMsg = _translateOAuthError(rawErr || '');
       showToast(I18N.t('app.login.bind_failed'), friendlyMsg);
       var cleanUrl2 = window.location.pathname + window.location.hash;
       window.history.replaceState({}, '', cleanUrl2);
     }
     // OAuth 绑定命中历史绑定 → 转移确认
+    // Issue #3097：票据不由回调 URL 传递（服务端 popup 模式故意不回传），
+    // 必须调 GET /auth/transfer-context 取票；取票失败在页面内可见，不得静默。
     var needTransfer = params.get('need_transfer');
-    var transferTicket = params.get('binding_ticket');
-    if (needTransfer && transferTicket) {
-      // 延迟调用，确保 account.js 已加载
+    if (needTransfer) {
+      // 延迟调用，确保 account 视图已加载并注册取票函数
       setTimeout(function() {
-        if (typeof _accountShowTransferConfirm === 'function') {
-          _accountShowTransferConfirm(needTransfer, transferTicket);
+        if (typeof window._accountFetchTransferContext === 'function') {
+          window._accountFetchTransferContext(needTransfer);
+        } else {
+          showToast(I18N.t('app.login.bind_failed'),
+                    I18N.t('app.account.transfer_context_expired'));
         }
       }, 500);
       var cleanUrl3 = window.location.pathname + window.location.hash;
@@ -1030,8 +1103,38 @@ function loadAgentTypes() {
 
   const REPO_CACHE_KEY = 'repo_member_cache';
 
+  // 关系守卫（工作区 / 我的项目 / 项目模板共用）：进入任何「需要仓库」的页面之前，
+  // 先取一次最新关系，没有关系就直接渲染绑定引导页。
+  // 2026-11-16 实锤：refreshRepoLinks 此前**从未被调用**，快照只来自登录那一刻——
+  // 用户清完 PAT 后前端仍认为已接入，于是"我的项目/项目模板"能进、进去后服务端报
+  // 授权过期/空列表，两个页面互相打脸。
+  function _ensureRepoLinksFresh(maxAgeMs) {
+    var age = Date.now() - (_linksLoadedAt || 0);
+    if (window.__repoPlatformLinks && age < (maxAgeMs || 0)) {
+      return Promise.resolve(window.__repoPlatformLinks);
+    }
+    return refreshRepoLinks().then(function(links) {
+      return links || window.__repoPlatformLinks || null;
+    });
+  }
+
   function loadRepos(forceRefresh) {
     console.log("[loadRepos] start");
+    // 我的项目 / 项目模板 / 工作区入口统一守卫：关系为空 → 只渲染引导页，不拉仓库。
+    // （重入保护：引导页本身不调用 loadRepos，不会递归）
+    _ensureRepoLinksFresh(0).then(function(links) {
+      var _broken = (((links && links.credential_broken) || []).length
+                     || Object.keys((links && links.credential_error) || {}).length) > 0;
+      if (!(links && links.has_any) && !_broken) {
+        goToRepos();
+        return;
+      }
+      _loadReposInner(forceRefresh);
+    }).catch(function() { _loadReposInner(forceRefresh); });
+    return;
+  }
+
+  function _loadReposInner(forceRefresh) {
     // 先用 localStorage 缓存的仓库列表立即渲染（避免白屏），后台再刷新
     let cachedRepos = null;
     try {
@@ -1161,24 +1264,27 @@ function loadAgentTypes() {
         sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
         sel.onclick = function() { switchRepo('__add__'); };
       } else {
-        // 按平台分组：optgroup label 为平台名称
-        var gitcodeRepos = repos.filter(function(r) { return !(r.repo_key || '').startsWith('github:'); });
-        var githubRepos = repos.filter(function(r) { return (r.repo_key || '').startsWith('github:'); });
+        // 按平台分组：分组键 = repo_key 前缀（任何在册平台都成立）。
+        // 原实现二分 github/非-github，gitee 仓库被塞进「GitCode」组（2026-11-14 实锤）。
+        var groups = {};
+        repos.forEach(function(r) {
+          var rk = r.repo_key || '';
+          var p = rk.indexOf(':') > 0 ? rk.slice(0, rk.indexOf(':')) : 'gitcode';
+          (groups[p] = groups[p] || []).push(r);
+        });
+        var order = (window.__REPO_PLATFORMS__ || []).map(function(x) { return x && x.provider; })
+          .filter(function(k) { return k && groups[k]; });
+        Object.keys(groups).forEach(function(k) { if (order.indexOf(k) < 0) order.push(k); });
         var html = '';
-        if (gitcodeRepos.length > 0) {
-          html += '<optgroup label="GitCode">';
-          gitcodeRepos.forEach(function(r) {
+        order.forEach(function(p) {
+          var list = groups[p];
+          if (!list || !list.length) return;
+          html += '<optgroup label="' + platformLabelOf(p) + '">';
+          list.forEach(function(r) {
             html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
           });
           html += '</optgroup>';
-        }
-        if (githubRepos.length > 0) {
-          html += '<optgroup label="GitHub">';
-          githubRepos.forEach(function(r) {
-            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
-          });
-          html += '</optgroup>';
-        }
+        });
         html += '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
         sel.innerHTML = html;
         sel.onclick = null;
@@ -1329,91 +1435,34 @@ function loadAgentTypes() {
     var _mv = document.getElementById('mainView');
     if (_mv) { _mv.style.position = 'fixed'; _mv.style.inset = '0'; }
 
-    // ── 平台绑定卡片 ──
-    var platformCards = '';
-    providers.forEach(function(p) {
-      var icon = platformIcon(p.provider, 28);
-      // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
-      var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
-      var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
-      var brandVar = '--brand:' + (_brandColor || 'var(--a)');
-      platformCards += '<div class="ob-bind-card" style="' + brandVar + '" onclick="app.bindProvider(\'' + p.provider + '\')">'
-        + '<div class="ob-bind-icon">' + icon + '</div>'
-        + '<div class="ob-bind-name">' + _esc(p.name) + '</div>'
-        + '<button class="bt bt-p ob-bind-btn" data-i18n="app.login.ob_bind_btn">'
-        + I18N.t('app.login.ob_bind_btn') + '</button>'
-        + '</div>';
-    });
-
-    // ── 单屏绑定页面 ──
-    var html = '<div class="lobby">'
-      + '<header class="lobby-head">'
-      +   '<div class="lobby-brand">'
-      +     '<img class="lobby-logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">'
-      +     '<span class="lobby-brand-name">Grape</span>'
-      +     '<span class="lobby-brand-sub" data-i18n="repos.brand_sub">' + I18N.t('repos.brand_sub') + '</span>'
-      +   '</div>'
-      +   '<div style="flex:1"></div>'
-      +   '<div style="display:flex;align-items:center;gap:10px">'
-      +     '<div class="lang-toggle" id="lobbyLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">'
-      +       '<button onclick="_setAppLang(\'zh\')" class="lang-btn' + (I18N.getLang() === 'zh' ? ' active' : '') + '" style="padding:3px 12px;border-radius:999px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;' + (I18N.getLang() === 'zh' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)') + '">中</button>'
-      +       '<button onclick="_setAppLang(\'en\')" class="lang-btn' + (I18N.getLang() === 'en' ? ' active' : '') + '" style="padding:3px 12px;border-radius:999px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;' + (I18N.getLang() === 'en' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)') + '">EN</button>'
-      +     '</div>'
-      +     '<div id="lobbyOrgDropdown" style="position:relative">'
-      +       '<button onclick="app._toggleLobbyOrgDropdown()" id="lobbyOrgBtn" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">'
-      +         '<span style="font-size:14px">🏢</span>'
-      +         '<span class="lobby-org-name" id="lobbyOrgName">' + (I18N.t('organizations.my_orgs') || '我的组织') + '</span>'
-      +       '</button>'
-      +       '<div id="lobbyOrgMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>'
-      +     '</div>'
-      +     '<div id="lobbyUserDropdown" style="position:relative">'
-      +       '<button onclick="app._toggleLobbyUserMenu()" style="display:flex;align-items:center;gap:8px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">'
-      +         '<span class="lobby-avatar">' + avatar + '</span>'
-      +         '<span class="lobby-user-name">' + _esc(name) + '</span>'
-      +       '</button>'
-      +       '<div id="lobbyUserMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>'
-      +     '</div>'
-      +   '</div>'
-      + '</header>'
-      + '<main class="lobby-main">'
-      +   '<div class="lobby-content ob-content">'
-      +     _obHeroHtml(name, isZh, platformCards)
-      +   '</div>'
-      + '</main>'
-      + '</div>';
-
-    d.innerHTML = html;
+    // 2026-11-14：引导页整页 Vue 化（view chunk onboarding-view.js）——
+    // 卡片渲染、绑定弹层（OAuth + PAT 双模式）、回跳成功态都由组件负责，
+    // 本函数只保留 shell 布局接管与挂载入口，不再字符串拼 DOM。
     d.classList.add('ob-mode');
-    // 入场终态兜底：0.7s 后锁定 opacity:1（.ob-shown）——
-    // 修复：点击绑定加 .bound 停动画时 obBindIn 的 forwards 终态被抹掉 → 卡片隐形
-    setTimeout(function() {
-      document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('ob-shown'); });
-    }, 1500);  // 级联最迟 ~1.2s，兜底留余量
-    // OAuth 回跳的迟到成功态：卡片此刻才存在，应用"已绑定 ✓"再进仓库列表
-    try {
-      var _pending = sessionStorage.getItem('ob_pending_bind_success');
-      if (_pending) {
-        sessionStorage.removeItem('ob_pending_bind_success');
-        var _pc = null;
-        document.querySelectorAll('.ob-bind-card').forEach(function(c) {
-          if ((c.getAttribute('onclick') || '').indexOf(_pending) >= 0) _pc = c;
-        });
-        if (_pc) {
-          document.querySelectorAll('.ob-bind-card').forEach(function(c) { c.classList.add('bound'); });
-          var _ph = document.querySelector('.ob-hero'); if (_ph) _ph.classList.add('ob-bound-done');
-          _pc.classList.add('just-bound');
-          _pc.insertAdjacentHTML('beforeend',
-            '<div class="ob-bound-check" style="position:absolute;top:12px;right:12px;width:26px;height:26px;border-radius:50%;'
-            + 'background:linear-gradient(135deg,#34c759,#30d158);display:flex;align-items:center;justify-content:center;'
-            + 'box-shadow:0 2px 8px rgba(52,199,89,.4)">'
-            + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>');
-          setTimeout(function() { loadRepos(); }, 1600);
-        }
+    // view chunk 是 <script type="module">（可能晚于 defer 的 app.js 执行）——
+    // 轮询等待入口就绪再挂载，避免竞态导致引导页空白/点了没响应。
+    var _payload = {
+      providers: providers || [],
+      name: name || '',
+      avatar: avatar || '',
+      lang: I18N.getLang()
+    };
+    var _tries = 0;
+    (function _mountOnboarding() {
+      if (typeof window.renderOnboarding === 'function') {
+        window.renderOnboarding(_payload);
+        return;
       }
-    } catch (e) {}
+      if (_tries++ > 200) {   // ~10s 兜底：chunk 加载失败要让用户看见，而不是白屏
+        d.innerHTML = '<div style="padding:40px;text-align:center;color:var(--t2)">'
+          + (I18N.t('app.login.ob_chunk_failed') || 'onboarding view failed to load')
+          + '</div>';
+        return;
+      }
+      setTimeout(_mountOnboarding, 50);
+    })();
     _updateTbOrgName();
     _updateLobbyOrgName();
-    // 时序 gating：未绑定平台时不做引擎引导（先 token 后引擎，见需求文档 O*/B* 场景修订）
   }
 
   function _copyEngineCmd(btn) {
@@ -1435,10 +1484,16 @@ function loadAgentTypes() {
     // 时序链（最终版）：token → 仓库 → 引擎。引擎引导只在用户已进入仓库
     // 上下文（选中了具体仓库）后触发——此时 token 与仓库均就绪，缺的只是
     // 引擎。仓库列表/绑定后不弹（避免在没托管仓库前提引擎）。
-    var _bu = JSON.parse(localStorage.getItem('user') || '{}');
-    if (!(_bu.bindings || []).length) return;      // 未绑定：引导页专心配 token
+    if (!_hasVcsBinding()) return;  // 无接入关系：引导页专心配 token（PAT 接入同样算已接入）
     if (!currentRepo()) return;                     // 未进入仓库：不提引擎
-    if (localStorage.getItem('engine_banner_skipped_' + (_bu.username || ''))) return;
+    // 读取侧与写入侧（_dismissEngineBanner）同口径：从 localStorage.user 取 username。
+    // 曾写成 `_bu.username`，而 `_bu` 在整个前端从未定义 → ReferenceError 在这里抛出，
+    // 把 renderReposFromData 后半段（含结尾的 nav('dash')）整段打断：
+    // _currentView 永远是空、主区永远是 showApp 写的「加载中」占位，
+    // 需求中心等所有视图都进不去（2026-11-18 定位）。
+    var _skipUser = {};
+    try { _skipUser = JSON.parse(localStorage.getItem('user') || '{}') || {}; } catch (e) {}
+    if (localStorage.getItem('engine_banner_skipped_' + (_skipUser.username || ''))) return;
     API.get('/runtime/engine-onboarding').then(function(d) {
       if (!d || !d.needs_worker) return;
       // 视图守卫：引擎引导是仓库维度的提示，非仓库视图（用户设置/任务/事件等）
@@ -1518,23 +1573,30 @@ function loadAgentTypes() {
   }
 
   // ── 欢迎区域（单屏居中）──
-  function _obHeroHtml(name, isZh, platformCards) {
-    return '<section class="ob-hero">'
-      + '<div class="ob-hero-logo"><img src="/static/img/grape-logo.jpg?v=1" alt="Grape"></div>'
-      + '<h1 class="ob-hero-title" data-i18n="app.login.ob_cta_title">' + I18N.t('app.login.ob_cta_title') + '</h1>'
-      + '<p class="ob-hero-sub" data-i18n="app.login.ob_cta_sub">' + I18N.t('app.login.ob_cta_sub') + '</p>'
-      + '<div class="ob-hero-bind" data-guide="' + _esc(I18N.t('app.login.ob_bind_guide')) + '">' + platformCards + '</div>'
-      + '<p class="ob-hero-hint" data-i18n="app.login.ob_hero_hint">' + I18N.t('app.login.ob_hero_hint') + '</p>'
-      + '</section>';
-  }
-
   function _esc(s) {
     if (!s) return '';
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  // 入口守卫：关系快照过期就先刷新再决定渲染 lobby 还是引导页
+  // （清 PAT 后旧快照会让 "我的项目/项目模板" 还能进来，进去后服务端又报无凭据）
   function goToRepos() {
+    var stale = Date.now() - (_linksLoadedAt || 0) > 30000;
+    if (stale) {
+      return refreshRepoLinks().then(function() { _goToReposInner(); })
+        .catch(function() { _goToReposInner(); });
+    }
+    return _goToReposInner();
+  }
+
+  function _goToReposInner() {
     _obExitMode();
+    // 关系在、但凭据不可用（历史派生密钥解不出来 / refresh 缺失）→ 明确提示重新授权，
+    // 而不是让用户以为"没有绑定"（2026-11-16 yangaiwu 现场：两处结论相反）
+    try {
+      var _rl = window.__repoPlatformLinks;
+      if (_rl && _rl.needs_reauth && _rl.needs_reauth.length && _rl.hint) showToast(_rl.hint);
+    } catch (e) {}
     _syncAppPathToRoot();
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
@@ -1551,10 +1613,9 @@ function loadAgentTypes() {
       document.body.appendChild(ov);
     }
 
-    // D9: 检查 bindings——未绑定时不调 /repos/member，直接显示绑定引导
-    const _user = JSON.parse(localStorage.getItem('user') || '{}');
-    const _bindings = _user.bindings || [];
-    if (_bindings.length === 0) {
+    // D9（D109 收口）: 无仓库平台关系时直接显示绑定引导，不白调 /repos/member；
+    // 判据 = 对象模型关系表（_hasVcsBinding），不是 identities 绑定数量。
+    if (!_hasVcsBinding()) {
       // 未绑定任何平台 → 直接显示新手引导页（不渲染 lobby 壳）
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
@@ -1625,9 +1686,7 @@ function loadAgentTypes() {
   // _rerenderReposView: 语言切换时轻量重渲染项目列表页/引导页
   // 不发 API 请求、不闪烁 loading 遮罩——用缓存数据重新执行 HTML 拼接渲染
   function _rerenderReposView() {
-    var _user = JSON.parse(localStorage.getItem('user') || '{}');
-    var _bindings = _user.bindings || [];
-    if (_bindings.length === 0) {
+    if (!_hasVcsBinding()) {
       // 未绑定 → 重新渲染引导页（引导页内部调 /auth/providers，是轻量请求）
       _renderBindingGuide();
       return;
@@ -1781,6 +1840,15 @@ function loadAgentTypes() {
     }
   });
 
+  // 仓库维度页面拿到 403（仓库不属于当前用户 / 已解绑 / 已改名）：清掉当前仓库上下文
+  // 并回仓库大厅，而不是把裸错误文本丢在内容区（2026-11-17 现场：用户从旧链接进到别人的
+  // 仓库，流水线页只剩一行 "No permission to access this repository"，且 URL 仍钉着脏路径）。
+  function _bailRepoForbidden() {
+    try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
+    showToast(I18N.t('app.repo.forbidden') || '没有该仓库的访问权限，已切回仓库大厅');
+    goToRepos();
+  }
+
   function nav(view, param) {
     // 离开引导页模式：清理 .ct.ob-mode 标记
     _obExitMode();
@@ -1799,9 +1867,9 @@ function loadAgentTypes() {
     var _nonRepoViews = NO_REPO_VIEWS;
     if (!repo && _repoDependentViews.indexOf(view) >= 0) {
       // 检查是否未绑定
-      var _u = JSON.parse(localStorage.getItem('user') || '{}');
-      var _bindings = _u.bindings || [];
-      if (_bindings.length === 0) {
+      // 判据用「用户↔仓库平台关系」（PAT 也算接入）；bindings 只有 OAuth 身份行，
+      // 纯 PAT 账号会被误判成"未绑定"（2026-11-14 深度检查）
+      if (!_hasVcsBinding()) {
         // 未绑定 → 提示用户并跳转到新手引导页
         var _isZh = I18N.getLang() === 'zh';
         showToast(I18N.t('app.login.link_platform_first'));
@@ -1809,10 +1877,18 @@ function loadAgentTypes() {
         return;
       }
       // 已绑定但无选中仓库 → loadRepos
+      // 2026-11-17 现场：深链仓库无权时 currentRepo 被清空，此后每个仓库维度菜单
+      // 都只是静默回仓库大厅——用户看到的现象是「点了没反应」。这里必须给一句话，
+      // 否则"回到大厅"和"点了没生效"在视觉上无法区分。
+      showToast(I18N.t('app.repo.pick_first') || '请先在仓库下拉里选择一个仓库');
       loadRepos();
       return;
     }
-    if (!repo && _nonRepoViews.indexOf(view) < 0) { loadRepos(); return; }
+    if (!repo && _nonRepoViews.indexOf(view) < 0) {
+      showToast(I18N.t('app.repo.pick_first') || '请先在仓库下拉里选择一个仓库');
+      loadRepos();
+      return;
+    }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -1873,6 +1949,11 @@ function loadAgentTypes() {
       try { _knowledgeVueApp.unmount(); } catch(e) {}
       _knowledgeVueApp = null;
     }
+    // [沙箱迁移] 离开 sandbox 页面时卸载 Vue 应用（与 knowledge 一致，避免内存泄漏）
+    if (view !== 'sandbox' && typeof _sandboxVueApp !== 'undefined' && _sandboxVueApp) {
+      try { _sandboxVueApp.unmount(); } catch(e) {}
+      _sandboxVueApp = null;
+    }
 
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
     if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
@@ -1926,11 +2007,14 @@ function loadAgentTypes() {
       if (!$('repoSelect') || $('repoSelect').options.length <= 1) initSidebarRepos();
       var _rk = repo.repoKey || repo.repo_key || '';
       var _fn = repo.fullName || (repo.owner + '/' + repo.name);
-      var _isGithub = _rk.indexOf('github:') === 0;
-      var _repoLink = _isGithub ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
-      var _logo = _isGithub
-        ? '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      // 平台目录驱动：链接域名与 logo 都不再二分 github/gitcode（gitee/gitlab 曾因此指向错站点、
+      // 显示 GitCode 图标）
+      var _prov = _rk.indexOf(':') > 0 ? _rk.slice(0, _rk.indexOf(':')) : '';
+      var _dom = (typeof window.platformHost === 'function' && window.platformHost(_prov)) || 'gitcode.com';
+      var _repoLink = 'https://' + _dom + '/' + _fn;
+      var _logo = (typeof window.platformIcon === 'function')
+        ? '<span style="margin-right:5px;color:var(--t2)">' + window.platformIcon(_prov || 'gitcode', 14) + '</span>'
+        : '';
       repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
@@ -2026,14 +2110,26 @@ function loadAgentTypes() {
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;
+        if (window._currentView !== 'pipe') return;
+        // 403/404 = 仓库不属于当前用户 / 已解绑 / 已改名：清上下文回大厅，
+        // 不再把一行裸 "No permission to access this repository" 留在内容区。
+        if (e.status === 403 || e.status === 404) { _bailRepoForbidden(); return; }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
+      });
       // Issue #600：流水线卡片轮询——重派成功/新终态到达后自动刷新，无手动刷新依赖
       if (typeof startPipePolling === 'function') startPipePolling();
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;
+        if (window._currentView !== view) return;
+        if (e.status === 403 || e.status === 404) { _bailRepoForbidden(); return; }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
+      });
     } else if (view === 'event') {
       // 路由入口清理：非 _jumpToNodeEvent 触发的进入（如全局搜索 / 直接路由）清除残留来源标志，
       // 防止上次任务详情遗留的 _eventFromTask 导致事件页错误显示「返回需求详情」按钮。
@@ -2092,6 +2188,9 @@ function loadAgentTypes() {
       if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
         renderKnowledge();
       }
+    } else if (view === 'sandbox') {
+      title.textContent = I18N.t('app.current_project');
+      renderSandbox();  // B2: Vue chunk — 深链 #sandbox/provider/{id} 由组件自解析
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       renderRuntimes();  // batch 11: Vue chunk 自管分页重置与数据加载
@@ -2167,7 +2266,7 @@ function loadAgentTypes() {
     // B+（Issue #535）：配置状态已知且未配置 → 不发请求直接给出原因+文档入口；
     // 状态未知（providers 未返回/检测失败）→ 走下方 API 的 A 兜底路径
     if (_oauthConfiguredMap && _oauthConfiguredMap[provider] === false) {
-      var _nm0 = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _nm0 = platformLabelOf(provider);
       var _lt0 = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
       showToast(
         I18N.t('app.login.oauth_not_configured', {name: _nm0}, _nm0 + ' OAuth 未配置，' + _nm0 + ' 登录暂不可用'),
@@ -2190,7 +2289,7 @@ function loadAgentTypes() {
         return;
       }
       // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册；附帮助文档链接（OAuth App 配置指南）
-      var _nm = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _nm = platformLabelOf(provider);
       var _doc = {
         gitcode: '/static/help.html#/developer/01-gitcode-integration',
         github: '/static/help.html#/developer/02-github-integration'
@@ -2236,7 +2335,7 @@ function loadAgentTypes() {
       });
       if (anyUnconfigured) {
         var providers = Object.keys(inj).map(function(k) {
-          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub'}[k] || k, configured: !!inj[k] };
+          return { provider: k, name: platformLabelOf(k), configured: !!inj[k] };
         });
         _renderOAuthUnconfiguredHint(container, providers);
       }
@@ -2292,6 +2391,16 @@ function loadAgentTypes() {
       });
       // oauth-configured 类仍由整体状态决定（hint 显隐的语义锚点：全配置=隐藏）
       _de.classList.toggle('oauth-configured', providers.every(function(p) { return !!p.configured; }));
+      // Vue 登录页（D109 转发后登录卡片由 src/views/LoginView.vue 接管）：目录状态与
+      // FOUC 类名仍由本函数计算（oauthLogin 的前置判断、CSS 置灰都读它们），但按钮与
+      // 未配置提示的 DOM 归 Vue——这里只广播状态，不再写 innerHTML、也不再命中预置按钮。
+      // 保留下方旧路径 = chunk 加载失败时的降级（无 #loginVueHost 即走老逻辑）。
+      if (document.getElementById('loginVueHost')) {
+        try {
+          window.dispatchEvent(new CustomEvent('grape:oauth-providers', { detail: { providers: providers } }));
+        } catch (e) { /* 旧浏览器无 CustomEvent：Vue 侧仍可用注入快照渲染 */ }
+        return;
+      }
       // 预渲染按钮已在 HTML 中，只在平台列表不一致时才重新渲染
       var existingBtns = container.querySelectorAll('.oauth-btn');
       var existingNames = Array.prototype.map.call(existingBtns, function(b) {
@@ -2309,8 +2418,9 @@ function loadAgentTypes() {
           var icon = _oauthIcon(p.provider, p.name);
           var i18nKey = 'app.login.' + p.provider + '_login';
           // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
-          var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
-          var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
+          // 品牌色 = platform-icons 目录值；后端给的原始色值不适配 Apple 风格仅作兜底
+          var _brandColor = (typeof window.platformColor === 'function' && window.platformColor(p.provider))
+            || p.brand_color || '';
           var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
           var ariaVar = p.configured ? '' : ' aria-disabled="true"';
           return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + ariaVar + brandVar + '>'
@@ -2348,7 +2458,7 @@ function loadAgentTypes() {
       return;
     }
     var names = unconfigured.map(function(p) {
-      return {gitcode: 'GitCode', github: 'GitHub'}[p.provider] || (p.name || p.provider);
+      return (p.name || platformLabelOf(p.provider));
     }).join(' / ');
     var linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
     var hint = I18N.t('app.login.oauth_needs_config', {name: names},
@@ -2371,6 +2481,19 @@ function loadAgentTypes() {
     el.style.display = '';
   }
 
+  // 内测申请「平台」下拉：选项 = 运行时登录渠道目录（服务端注入的 __OAUTH_PROVIDERS__，
+  // 与登录页按钮同源），不再写死 gitcode/github——渠道增删（gitee/华为/将来其它）自动跟随。
+  function _betaPlatformOptionsHtml() {
+    // 目录缺失 = 空壳（与引导页 T4 同口径：不写死 gitcode/github 兜底），
+    // 由 openBetaApply 里的 /auth/providers 对账回填。
+    var list = (Array.isArray(window.__OAUTH_PROVIDERS__) && window.__OAUTH_PROVIDERS__.length)
+      ? window.__OAUTH_PROVIDERS__
+      : [];
+    return list.filter(function(p) { return p && p.provider; }).map(function(p) {
+      return '<option value="' + _esc(p.provider) + '">' + _esc(p.name || p.provider) + '</option>';
+    }).join('');
+  }
+
   // 内测申请表单
 function openBetaApply() {
     var isZh = I18N.getLang() === 'zh';
@@ -2389,8 +2512,7 @@ function openBetaApply() {
           <div>
             <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_platform')}</label>
             <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
-              <option value="gitcode">GitCode</option>
-              <option value="github">GitHub</option>
+              ${_betaPlatformOptionsHtml()}
             </select>
           </div>
           <div>
@@ -2525,6 +2647,18 @@ function openBetaApply() {
         <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${I18N.t('app.login.beta_form_submit')}</button>
       </div>`;
     document.body.appendChild(overlay);
+    // 注入缺失（非常规入口）时用接口对账一次，回填仍在打开状态的弹窗
+    if (!(Array.isArray(window.__OAUTH_PROVIDERS__) && window.__OAUTH_PROVIDERS__.length)) {
+      API.get('/auth/providers').then(function(d) {
+        var list = (d && d.providers) || [];
+        var sel = document.getElementById('betaPlatform');
+        if (!sel || !list.length) return;
+        var cur = sel.value;
+        window.__OAUTH_PROVIDERS__ = list;
+        sel.innerHTML = _betaPlatformOptionsHtml();
+        if (list.some(function(p) { return p.provider === cur; })) sel.value = cur;
+      }).catch(function() { /* 保留兜底两项 */ });
+    }
     // Issue #205: 移除遮罩点击关闭逻辑，仅通过 × 按钮关闭；表单数据 sessionStorage 持久化
     _baRestoreForm();
     overlay.addEventListener('input', _baSaveForm);
@@ -2928,6 +3062,54 @@ function openBetaApply() {
     }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
+  // Issue #3469 P：改绑链的 400 一律带 error_code（EMAIL_FORMAT / EMAIL_SAME /
+  // EMAIL_TAKEN / CODE_INVALID / CODE_EXPIRED / NEED_SECOND_FACTOR / PASSWORD_INVALID）。
+  // 原来弹层只 showToast(e.message)，四种失败原因被压成一句，用户分不清「邮箱被占」
+  // 和「验证码过期」。命中已知码走 I18N 文案，未知码回落 errMsg（保留后端 message）。
+  var CE_ERR_KEY = {
+    EMAIL_FORMAT: 'err_email_format',
+    EMAIL_SAME: 'err_email_same',
+    EMAIL_TAKEN: 'err_email_taken',
+    CODE_INVALID: 'err_code_invalid',
+    CODE_EXPIRED: 'err_code_expired',
+    NEED_SECOND_FACTOR: 'err_need_second_factor',
+    PASSWORD_INVALID: 'err_password_invalid'
+  };
+
+  function changeEmailErrMsg(e) {
+    var code = (e && e.error_code) || '';
+    var key = CE_ERR_KEY[code];
+    if (key) {
+      var full = 'app.login.' + key;
+      var localized = I18N.t(full);
+      if (localized && localized !== full) return localized;
+    }
+    return errMsg(e) || I18N.t('app.account.error_failed');
+  }
+
+  // Issue #3469 G：改绑前必须二次认证，因子由 send-code 返回的 require_factor 决定：
+  //   password      → 当前密码框
+  //   old_email_code → 原邮箱验证码框（后端已把确认码发到原邮箱，scene=change_email_confirm）
+  //   none          → 不渲染任何因子框（无密码且原邮箱不可投递的账号靠这条自救，
+  //                   前端不得因为「没因子可填」把改绑堵死）
+  // 幂等：同一因子重复调用不重复插入，按容器 data-factor 判断。
+  function _ceRenderFactor(factor) {
+    var host = document.getElementById('ceFactor');
+    if (!host) return;
+    factor = factor || 'none';
+    if (host.getAttribute('data-factor') === factor) return;
+    host.setAttribute('data-factor', factor);
+    if (factor === 'password') {
+      host.innerHTML = '<input class="obtn" id="ceCurPwd" type="password" autocomplete="current-password" placeholder="'
+        + I18N.t('app.login.current_password') + '">';
+    } else if (factor === 'old_email_code') {
+      host.innerHTML = '<input class="obtn" id="ceOldCode" type="text" maxlength="6"'
+        + ' placeholder="' + I18N.t('app.login.old_email_code') + '">';
+    } else {
+      host.innerHTML = '';
+    }
+  }
+
   function showChangeEmail() {
     var isZh = I18N.getLang()==='zh';
     var html = '<div style="display:flex;flex-direction:column;gap:8px">'
@@ -2938,6 +3120,8 @@ function openBetaApply() {
       + '<div id="ceStep2" style="display:none;flex-direction:column;gap:8px">'
       + '<p style="font-size:12px;color:var(--t2)" id="ceHint">' + I18N.t('app.login.code_sent_new_email') + '</p>'
       + '<input class="obtn" id="ceCode" type="text" placeholder="' + I18N.t('app.login.verification_code_short') + '" maxlength="6">'
+      // Issue #3469 G：二次认证因子输入框的挂载点（send-code 返回 require_factor 后再渲染）
+      + '<div id="ceFactor" style="display:flex;flex-direction:column;gap:8px"></div>'
       + '<button class="bt bt-p" onclick="app.doChangeEmail()">' + I18N.t('app.login.confirm_change_email') + '</button>'
       + '</div>'
       + '</div>';
@@ -2947,24 +3131,60 @@ function openBetaApply() {
   function sendChangeEmailCode() {
     var email = $('ceEmail').value.trim();
     if (!email) return showToast(I18N.t('app.login.enter_email'));
-    API.post('/auth/change-email/send-code', {new_email: email}).then(function() {
+    API.post('/auth/change-email/send-code', {new_email: email}).then(function(d) {
       showToast(I18N.t('app.login.code_sent'));
       var step1 = document.getElementById('ceStep1');
       var step2 = document.getElementById('ceStep2');
       if (step1) step1.style.display = 'none';
       if (step2) step2.style.display = 'flex';
-    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
+      // Issue #3469 G：按后端 require_factor 渲染二次认证输入（none 时什么都不渲染）
+      _ceRenderFactor(d && d.require_factor);
+    }).catch(function(e) { showToast(changeEmailErrMsg(e)); });
   }
 
   function doChangeEmail() {
     var email = $('ceEmail').value.trim();
     var code = $('ceCode').value.trim();
     if (!email || !code) return showToast(I18N.t('app.login.fill_all_fields'));
-    API.post('/auth/change-email', {new_email: email, code: code}).then(function() {
+    var body = {new_email: email, code: code};
+    // Issue #3469 G：只有真正渲染出的因子框才提交对应字段（none 时 body 里两者都不出现）
+    var pwdEl = document.getElementById('ceCurPwd');
+    if (pwdEl) {
+      var curPwd = pwdEl.value.trim();
+      if (!curPwd) return showToast(I18N.t('app.login.fill_all_fields'));
+      body.password = curPwd;
+    }
+    var oldCodeEl = document.getElementById('ceOldCode');
+    if (oldCodeEl) {
+      var oldCode = oldCodeEl.value.trim();
+      if (!oldCode) return showToast(I18N.t('app.login.fill_all_fields'));
+      body.old_email_code = oldCode;
+    }
+    API.post('/auth/change-email', body).then(function() {
       closeConfirm();
       showToast(I18N.t('app.login.email_changed'));
       renderSettings('account');
-    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) {
+      // 后端回 NEED_SECOND_FACTOR 时带 require_factor：补渲染缺的因子框，让用户就地补，
+      // 不用重新走一遍 send-code（也避免「因子档位与前端渲染不一致」时用户卡死）。
+      if (e && e.error_code === 'NEED_SECOND_FACTOR') {
+        _ceRenderFactor((e.detail && e.detail.require_factor) || e.require_factor);
+      }
+      showToast(changeEmailErrMsg(e));
+    });
+  }
+
+  // ══ 绑定弹层：已组件化（app/src/components/BindDialog.vue）══
+  // 引导页 / 账号页的绑定弹层都由 Vue 组件实现（allowPat 控制双模式或纯 OAuth），
+  // shell 侧只保留一个兼容入口：点击引导页卡片 → 组件内的 openBind。
+  function _openBindModal(provider, allowPat) {
+    if (typeof window.__grapeOnboardingOpenBind === 'function') {
+      window.__grapeOnboardingOpenBind(provider);
+      return;
+    }
+    if (typeof window.openBindDialog === 'function') {
+      window.openBindDialog({ provider: provider, allowPat: allowPat !== false });
+    }
   }
 
   function bindProvider(provider) {
@@ -2974,15 +3194,30 @@ function openBetaApply() {
       var _h = document.querySelector('.ob-hero');
       if (_h) _h.classList.add('ob-bound-done');
     } catch (e) {}
-    // 复用设置页的绑定模态框——OAuth + 手动令牌 + spinner + 转移确认 + 成功反馈
-    if (typeof _accountBindProvider === 'function') {
-      _accountBindProvider(provider);
-    } else {
-      // 兜底：account.js 未加载时直接 OAuth 跳转
-      API.get('/auth/bind/' + provider).then(function(d) {
-        if (d.redirect_url) window.location.href = d.redirect_url;
-      }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
+    // 引导页绑定 = Vue BindDialog（allowPat=true：OAuth 授权 + PAT 表单；未配 OAuth → PAT 直达）
+    _openBindModal(provider, true);
+  }
+
+
+  function _shellEmailDeliverable() {
+    // Issue #3469 验收 11 / N4：判据以后端为准——/auth/profile 与 /auth/me 都返回
+    // email_deliverable（同一 ProviderEmailPolicy 来源）；下面的域名表只在老后端
+    // 没有该字段时兜底，避免两处判据长期漂移。
+    var p = (window.__grapeProfile || (window.G && G.user) || null);
+    if (!p) {
+      try { p = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { p = null; }
     }
+    if (p && typeof p.email_deliverable === 'boolean') return p.email_deliverable;
+    var e = (p && p.email) || '';
+    if (!e) return false;
+    // 形态 + 私有中转（与 identity_email.PRIVATE_EMAIL_DOMAINS 对齐）
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e).toLowerCase())) return false;
+    var d = String(e).toLowerCase().split('@')[1] || '';
+    var priv = ['noreply.gitcode.com','no-reply.gitcode.com','noreply.github.com','noreply.gitee.com','noreply.gitlab.com','noreply.gitee.io','privaterelay.appleid.com'];
+    for (var i = 0; i < priv.length; i++) {
+      if (d === priv[i] || d.slice(-(priv[i].length + 1)) === '.' + priv[i] || d.slice(-priv[i].length) === priv[i]) return false;
+    }
+    return true;
   }
 
   function deleteAccount() {
@@ -2992,7 +3227,10 @@ function openBetaApply() {
       + '<div id="daStep1" style="display:flex;flex-direction:column;gap:8px">'
       + '<p style="font-size:12px;color:var(--t2)">' + I18N.t('app.login.choose_verify_method') + '</p>'
       + '<button class="bt bt-p" onclick="app._daChoosePwd()">' + I18N.t('app.login.verify_with_password') + '</button>'
-      + '<button class="bt bt-s" onclick="app._daChooseCode()">' + I18N.t('app.login.verify_with_code') + '</button>'
+      // Issue #3469 验收 11：不可投递邮箱（noreply.*/私有中转）不提供"邮箱验证码"方式
+      + ((_shellEmailDeliverable())
+          ? '<button class="bt bt-s" onclick="app._daChooseCode()">' + I18N.t('app.login.verify_with_code') + '</button>'
+          : '')
       + '</div>'
       + '<div id="daStepPwd" style="display:none;flex-direction:column;gap:8px">'
       + '<input class="obtn" id="daPwd" type="password" placeholder="' + I18N.t('app.login.enter_password') + '">'
@@ -3036,19 +3274,78 @@ function openBetaApply() {
     }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
-  function _showWhitelistGuidance(platform, username) {
+  // P0-1（Issue #3054）：?oauth_error= 反射型 DOM XSS 防护。
+  // 静态兜底集合 = 渠道配置里的已知 key；运行时再叠加服务端注入的渠道目录
+  // （window.__OAUTH_PROVIDERS__）。URL 里带的 provider 只允许取这些值，其余一律丢弃。
+  var _STATIC_OAUTH_PROVIDERS = ['gitcode', 'github', 'gitee', 'gitlab', 'huawei', 'codearts'];
+  // 渠道 key 形态白名单：先钉死字符集，任何 HTML/JS 元字符都不可能进 DOM。
+  var _OAUTH_PROVIDER_KEY_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+  function _isKnownOAuthProvider(p) {
+    if (!p || !_OAUTH_PROVIDER_KEY_RE.test(p)) return false;
+    var list = (typeof window !== 'undefined' && Array.isArray(window.__OAUTH_PROVIDERS__))
+      ? window.__OAUTH_PROVIDERS__ : [];
+    for (var i = 0; i < list.length; i++) {
+      var k = list[i] && (list[i].provider || list[i]);
+      if (k === p) return true;
+    }
+    return _STATIC_OAUTH_PROVIDERS.indexOf(p) >= 0;
+  }
+
+  // P0-3（Issue #3054）：URL 参数解码兜底——decodeURIComponent('100%') 会抛 URIError，
+  // 异常冒到顶层会中断 init（弹窗版则永久停在 Processing）。失败返回 null，调用方按
+  // “参数无效”处理。
+  function _safeDecodeParam(v) {
+    if (v === null || v === undefined) return null;
+    try {
+      return decodeURIComponent(v);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // P0-1/P0-3（Issue #3054）：?oauth_error= 统一处理入口（init 与测试共用）。
+  //   - 解码失败（?oauth_error=100%25）按“参数无效”提示，不中断初始化；
+  //   - WHITELIST:<provider>[:<username>] 走引导弹窗，provider 必须过已知 key 白名单；
+  //   - 其它值按错误码走 I18N，不直接回显后端/第三方原文。
+  function _handleOAuthErrorParam(params) {
+    var oauthError = params && typeof params.get === 'function' ? params.get('oauth_error') : null;
+    if (!oauthError) return;
+    var decoded = _safeDecodeParam(oauthError);
+    if (decoded === null) {
+      showToast(I18N.t('app.login.oauth_error_invalid_param', null, '授权回调参数无效'), 6000);
+      return;
+    }
+    if (decoded.indexOf('WHITELIST:') === 0) {
+      var parts = decoded.split(':');
+      _showWhitelistGuidance(parts[1] || 'gitcode', parts[2] || '');
+      return;
+    }
+    var errorKey = 'app.login.oauth_error_' + decoded;
+    var translated = I18N.t(errorKey);
+    showToast(translated && translated !== errorKey ? translated : decoded, 6000);
+  }
+
+  function _showWhitelistGuidance(platform, prefillTicket) {
+    // P0-1：platform 未转义时会被拼进 innerHTML 与 onclick 的 JS 字符串，未知 key 直接丢弃。
+    if (!_isKnownOAuthProvider(platform)) return;
     var overlay = document.createElement('div');
     overlay.id = 'whitelistModal';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
-    var platName = platform === 'github' ? 'GitHub' : 'GitCode';
+    var platName = (typeof window.platformLabel === 'function' && window.platformLabel(platform)) || platform;
+    // onclick 里的字符串：encodeURIComponent 不转义单引号，补 %27 防止跳出 JS 串
+    var _platQ = encodeURIComponent(platform).replace(/'/g, '%27');
+    // #3054：第三方用户名不进 URL（XSS 面）；改带服务端一次性票据，申请页
+    // 凭票调 /auth/beta-apply/prefill 换 platform/username（自动填充恢复）。
+    // token_urlsafe 字符集 [A-Za-z0-9_-] 无 HTML/JS 元字符；仍防御性补 %27。
+    var _ticketQ = prefillTicket ? ('&prefill_ticket=' + encodeURIComponent(prefillTicket).replace(/'/g, '%27')) : '';
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
         + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
         + '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">' + I18N.t('app.login.whitelist_title') + '</h2>'
-        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: platName, username: username ? ' <b>' + _esc(username) + '</b> ' : ' '}) + '</p>'
+        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: _esc(platName), username: ' '}) + '</p>'
         + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">' + I18N.t('app.login.whitelist_apply_hint') + '</p>'
         + '<div style="display:flex;gap:8px;justify-content:center">'
-          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
+          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + _platQ + _ticketQ + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
           + '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">' + I18N.t('common.close') + '</button>'
         + '</div>'
       + '</div>';
@@ -3098,6 +3395,7 @@ function openBetaApply() {
         'CREDENTIAL_INCORRECT': 'app.login.credential_incorrect',
         'ACCOUNT_DEACTIVATED': 'app.login.account_deactivated',
         'ACCOUNT_DEACTIVATING': 'app.login.account_deactivating',
+        'ACCOUNT_DELETED': 'app.login.account_deleted',
         'TOO_MANY_ATTEMPTS': 'app.login.too_many_attempts',
       }[code];
     }
@@ -3287,11 +3585,82 @@ function openBetaApply() {
       body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
     }
   }
+  // Issue #2089: 全屏/还原切换——只切换 CSS 类，不重建 iframe，保留阅读位置
+  function toggleHelpFullscreen() {
+    const drawer = document.getElementById('helpDrawer');
+    if (!drawer) return;
+    const on = drawer.classList.toggle('fullscreen');
+    const btn = document.getElementById('helpFullscreenBtn');
+    if (btn) {
+      btn.textContent = on ? '⇲' : '⛶';
+      btn.title = I18N.t(on ? 'app.help.exit_fullscreen' : 'app.help.fullscreen') || (on ? '退出全屏' : '全屏');
+      btn.setAttribute('aria-label', btn.title);
+    }
+  }
+  // Issue #2089: 新标签页打开帮助（独立全屏页面，非 iframe）
+  function openHelpNewTab() {
+    window.open('/static/help.html', '_blank', 'noopener');
+  }
   function closeHelp() {
     const overlay = document.getElementById('helpOverlay');
     const drawer = document.getElementById('helpDrawer');
+    // Issue #2089: 关闭前先退出全屏态（fullscreen 类若残留，抽屉下次打开直接铺满）
+    if (drawer) drawer.classList.remove('fullscreen');
+    const fsBtn = document.getElementById('helpFullscreenBtn');
+    if (fsBtn) {
+      fsBtn.textContent = '⛶';
+      fsBtn.title = I18N.t('app.help.fullscreen') || '全屏';
+    }
     if (overlay) overlay.classList.remove('show');
     if (drawer) drawer.classList.remove('show');
+  }
+
+  // P0-2（Issue #3054）：popup 结果消费方——origin + source 双校验后处理
+  // oauth_result。只认本页亲自打开的 popup（window.__oauthPopupWin），
+  // 同源其它窗口的伪造消息在这里被丢弃。
+  //
+  // 休眠说明（勿当垃圾删除）：登录场景走全页重定向（见 oauthLogin），从不打开 popup，
+  // 因此本监听当前收不到 action='login' 的消息；__oauthPopupWin 也只有绑定场景
+  // （AccountView.registerOAuthPopup）会赋值。它保留的理由是这份 origin+source 双校验
+  // 是 P0-2 的唯一实现——将来登录若改回 popup 模式，删除后必须重写（且容易只校验
+  // origin 而漏掉 source，退回被同源窗口伪造 oauth_result 的洞）。
+  function _onOAuthPopupMessage(event) {
+    // origin + source 双校验：同源任意窗口都能伪造 oauth_result（伪登录成功 /
+    // 提交任意 exchange_code）。未记录 popup 引用时一律丢弃。
+    if (event.origin !== window.location.origin) return;
+    if (!window.__oauthPopupWin || event.source !== window.__oauthPopupWin) return;
+    var d = event.data;
+    if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
+    if (d.success && d.exchange_code) {
+      fetch('/api/auth/exchange', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({code: d.exchange_code}),
+      }).then(function(r) {
+        if (!r.ok) {
+          return r.json().catch(function() { return null; }).then(function(b) {
+            var det = (b && b.detail) || {};
+            throw new Error(det.message || det.error_code || 'exchange_failed');
+          });
+        }
+        return r.json();
+      }).then(function(t) {
+        localStorage.setItem('token', t.token);
+        localStorage.setItem('app_cache_ver', '46');
+        localStorage.removeItem('repo_member_cache');
+        localStorage.removeItem('currentRepo');
+        localStorage.removeItem('current_org_id');
+        sessionStorage.removeItem('currentRepo');
+        // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
+        // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
+        var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+        location.replace((_lg === 'en' ? '/en' : '') + '/');
+      }).catch(function(e) {
+        showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+      });
+    } else if (d.error) {
+      showToast(_safeDecodeParam((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+    }
   }
 
   function init() {
@@ -3311,21 +3680,8 @@ function openBetaApply() {
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     // Check for OAuth error in URL (e.g. github.com timeout)
-    const oauthError = p.get('oauth_error');
-    if (oauthError) {
-      const decoded = decodeURIComponent(oauthError);
-      if (decoded.startsWith('WHITELIST:')) {
-        // 白名单不通过——显示引导弹窗
-        var parts = decoded.split(':');
-        var platform = parts[1] || 'gitcode';
-        var username = parts[2] || '';
-        _showWhitelistGuidance(platform, username);
-      } else {
-        // P2-i18n: 错误码走 I18N 翻译，不直接显示后端消息
-        var errorKey = 'app.login.oauth_error_' + decoded;
-        var translated = I18N.t(errorKey);
-        showToast(translated && translated !== errorKey ? translated : decoded, 6000);
-      }
+    if (p.get('oauth_error')) {
+      _handleOAuthErrorParam(p);
       if (window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname);
       }
@@ -3342,41 +3698,7 @@ function openBetaApply() {
     // 不改变默认 UX。幂等守卫防止 init 重复注册。
     if (!window.__oauthPopupLoginListener) {
       window.__oauthPopupLoginListener = true;
-      window.addEventListener('message', function(event) {
-        if (event.origin !== window.location.origin) return;
-        var d = event.data;
-        if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
-        if (d.success && d.exchange_code) {
-          fetch('/api/auth/exchange', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({code: d.exchange_code}),
-          }).then(function(r) {
-            if (!r.ok) {
-              return r.json().catch(function() { return null; }).then(function(b) {
-                var det = (b && b.detail) || {};
-                throw new Error(det.message || det.error_code || 'exchange_failed');
-              });
-            }
-            return r.json();
-          }).then(function(t) {
-            localStorage.setItem('token', t.token);
-            localStorage.setItem('app_cache_ver', '46');
-            localStorage.removeItem('repo_member_cache');
-            localStorage.removeItem('currentRepo');
-            localStorage.removeItem('current_org_id');
-            sessionStorage.removeItem('currentRepo');
-            // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
-            // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
-            var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
-            location.replace((_lg === 'en' ? '/en' : '') + '/');
-          }).catch(function(e) {
-            showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
-          });
-        } else if (d.error) {
-          showToast(decodeURIComponent((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
-        }
-      });
+      window.addEventListener('message', _onOAuthPopupMessage);
     }
 
     // P0-3: Check for exchange_code in URL (new secure flow)
@@ -3584,16 +3906,19 @@ function openBetaApply() {
 
   // 注：`search` 已随旧版顶栏搜索框一起移除（全仓无调用方），不要再挂进导出表——
   // 悬空引用会让 IIFE 求值即抛 ReferenceError，window.app 永不出现（壳整页空白）。
-  return {nav, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, refreshRepoLinks, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, toggleHelpFullscreen, openHelpNewTab, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, _openBindModal, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
 function _vcsUrl(repoKey, path) {
   var rk = repoKey || '';
-  var host = rk.indexOf('github:') === 0 ? 'https://github.com' : 'https://gitcode.com';
-  var parts = rk.split(':');
-  var repoPath = parts.length > 1 ? parts[1] : rk;
-  return host + '/' + repoPath + (path || '');
+  var i = rk.indexOf(':');
+  var prov = i > 0 ? rk.slice(0, i) : '';
+  var repoPath = i > 0 ? rk.slice(i + 1) : rk;
+  // 域名按平台目录取（platform-icons.js），未知平台不回退到 gitcode——宁可返空也不给错链
+  var dom = (typeof window.platformHost === 'function' && window.platformHost(prov)) || '';
+  if (!dom) dom = 'gitcode.com';
+  return 'https://' + dom + '/' + repoPath + (path || '');
 }
 document.addEventListener('DOMContentLoaded', function() {
   // 等 i18n 语言包异步加载完成后初始化，避免刷新页面时 I18N.t() 返回 key

@@ -172,6 +172,10 @@ class InsightServiceLocal(InsightService):
             cols = [d[0] for d in c.description] if c.description else []
             return [dict(zip(cols, r)) for r in rows] if cols else [dict(r) for r in rows]
 
+    def aggregate_llm_usage(self, engine_ids: list) -> list:
+        from src.domains.insight.public import aggregate_llm_usage as _agg
+        return [list(r) for r in _agg(list(engine_ids or []))]
+
     def aggregate_runtime_stats(self) -> dict:
         """聚合 runtime 数据（events/agent_tasks/agent_runtimes）。
 

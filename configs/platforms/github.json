@@ -1,4 +1,20 @@
 {
+  "_readme": [
+    "仓库托管平台卡（真源）。优先级：meta.vcs_providers_config 逐键覆盖 > 本文件 > 代码兜底。",
+    "只管托管能力位；OAuth 登录配置在 configs/oauth-providers.json（两类字段互不渗透）。凭据不写在这里（见 SCHEMA.md）。",
+    "下划线前缀键=文档键，加载器跳过。"
+  ],
+  "_fields": {
+    "issue_search": "是否支持 issue 搜索端点（false=代理层走列表过滤）",
+    "branch_create_form": "建分支形态：form=POST /branches，refs_sha=先查 base sha 再 POST /git/refs",
+    "workflows_write": "是否允许写 .github/workflows（凭据级三态覆盖的默认值）",
+    "pr_comment_endpoint": "PR 评论端点族：issues=借 issue 评论接口，空=专用端点",
+    "pr_labels_via_issues": "标签是否走 issues 接口（true=issues/labels）",
+    "git_tree_family": "文件树/内容 API 族：github_api=git/trees 风格",
+    "owner_identity_token_fallback": "owner 身份 token 回落开关（用 owner 身份补抓 token）",
+    "pat_create_url": "PAT 创建页直达链接（前端「前往创建令牌」）",
+    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用；留空=该平台无 bot 身份）"
+  },
   "name": "GitHub",
   "dialect": "github",
   "host": "github.com",
@@ -19,5 +35,6 @@
   "git_tree_family": "github_api",
   "owner_identity_token_fallback": true,
   "brand_color": "#24292f",
-  "legacy_token_symbol": "get_user_github_token_with_refresh"
+  "legacy_token_symbol": "get_user_github_token_with_refresh",
+  "bot_username": ""
 }

@@ -28,6 +28,8 @@ GitCode 事件（Issue/PR/评论）
 | `RUNTIME_SERVER_URL` | **worker runtime / A2A 回连基址**（任务 server_url 同语义；`grape` 的 runtime 绑定命令用）。来源：`worker_connect_url`（未配置回退 `server_base_url`） | 全部 | `event_pipeline.py`（`_enqueue_pipeline_task` / `build_task_env`）/ 对话入队（`routes/chat.py`、`im/handler_async.py`、`im/vod_handler_async.py`、`runtime/scheduler.py`，均经 `resolve_task_server_env`）/ `agent.py` 本机或内网 worker 覆盖 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
+| `TASK_TMPDIR` / `SESSION_DIR` | **会话级唯一暂存目录**（两者同值，形如 `/tmp/opencode/{task_id}`）。技能写临时 body/req/spec 文件必须用该目录，禁止固定名 `/tmp/opencode/body.md`；worker 侧缺失或不可写时回退 `mktemp -d` 并告警（Issue #2225） | 全部 | `service.py` `enqueue_task` 下发；`agent.py` / `direct_executor.py` / `scheduler.py` 创建校验 |
+| `GRAPE_SESSION_TMPDIR_FALLBACK` | `0` = 使用平台下发路径；`1` = 平台变量缺失/不可写，已回退 mktemp（日志有告警） | 全部 | worker / direct 执行前 `ensure_session_tmpdir` |
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
 | `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
@@ -69,6 +71,28 @@ GitCode 事件（Issue/PR/评论）
 > `AGENT_NAME` = **身份**（谁在执行，按 agent_type 的角色显示名，如 `QA Agent`，用于 `[$AGENT_NAME]` 评论前缀）；
 > `DEVOPS_EVENT_TYPE` = **时机**（在响应什么触发事件，如 `issue_comment`/`push`，技能据此分派分支）。
 > 例：同一 `QA Agent`（名字恒为 `QA Agent`）可以在 `pr_opened`、`issue_comment` 等不同事件类型下被触发。
+
+## 会话级暂存目录（Issue #2225）
+
+共享 worker 上并发 Agent 会话共用固定名暂存文件会互相覆写，可能把其他 Issue 的正文写进线上 Issue/PR。
+平台为每个任务下发唯一暂存目录，技能应统一使用：
+
+```bash
+TMP="${TASK_TMPDIR:-${SESSION_DIR:-$(mktemp -d)}}"
+printf '%s' "$BODY" > "$TMP/body.md"
+```
+
+- 平台只下发路径，worker/direct 执行前创建并做可写探针；目录名由 task_id 派生。
+- 平台变量缺失或路径不可写 → 回退 `mktemp -d` 并输出告警（`GRAPE_SESSION_TMPDIR_FALLBACK=1`），
+  不静默退回固定名。
+- 会话结束由执行器清理自身子目录；sweeper 另按 TTL 兜底清理 `/tmp/opencode` 存量平铺文件与
+  超时会话子目录（`SWEEPER_TASK_TMPDIR_TTL_SECONDS`，默认 7200 秒）。
+
+## 发布前 Issue 号一致性断言（Issue #2225）
+
+`grape git-repo issues update`（正文写入）、`grape git-repo pulls create` / `pulls update`
+在落上游前校验正文主语 `Issue #N`、PR 标题首个 `#N`、`related_issue_nums` 与当前会话任务 Issue
+是否一致；不一致返回 409 且不产生线上写入。该断言无放行参数，仅会话 token 启用；用户 JWT / API Key（非会话 token）不启用该断言。
 
 ## GitCode Token 互斥注入（关键）
 

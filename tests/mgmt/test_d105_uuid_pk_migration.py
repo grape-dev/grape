@@ -101,7 +101,9 @@ def test_d105_migration_idempotent(tmp_path):
     db_setup.init_database()   # 第二次全量跑不报错不重复迁移
     con = sqlite3.connect(dbp)
     n = con.execute("SELECT COUNT(*) FROM grape_t_schema_migrations "
-                    "WHERE version='202611120002'").fetchone()[0]
+                    "WHERE version='202611090001'").fetchone()[0]
+    # 2026-11-17 PR#1507 迁移卫生改号：202611120002 → 202611090001
+    # （db_setup.py:2845 注释载明撞号避让；低位号在已盖章库的行为待人工复核）
     assert n >= 1
 
 

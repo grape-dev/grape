@@ -35,39 +35,114 @@ from src.kernel.session_manager import db, db_lock
 
 from src.domains.mgmt.user import db as user_db
 
-# 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
-# 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
-_DEFAULT_PROVIDERS: dict[str, dict] = {
-    "gitcode": {
-        "name": "GitCode",
-        "auth_url": "https://gitcode.com/oauth/authorize",
-        "token_url": "https://gitcode.com/oauth/token",
-        "user_url": "https://gitcode.com/api/v5/user",
-        "scope": "all",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "nickname",
-        "pkce_enabled": True,
-        "brand_color": "#e7330f",
-        "accept_header": "application/json",
-    },
-    "github": {
-        "name": "GitHub",
-        "auth_url": "https://github.com/login/oauth/authorize",
-        "token_url": "https://github.com/login/oauth/access_token",
-        "user_url": "https://api.github.com/user",
-        # D46 P1-12: 缩减 scope——仅需读取用户信息和邮箱，不需要 repo 写权限
-        "scope": "read:user user:email",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#24292f",
-        "accept_header": "application/vnd.github+json",
-    },
-}
+# 凭据真源与解析序全部收在 credential_source（Issue #3054 P1）：本模块只做适配，
+# 不再自写「表优先 / meta 兜底」——登录换 code、token 刷新、configured 三处共用同一实现。
+from src.domains.mgmt.auth.credential_source import (  # noqa: E402
+    CredentialDecryptError,
+    provider_credentials,
+)
+from src.domains.mgmt.auth.retry_policy import DEFAULT_TOKEN_RETRY, RetryPolicy  # noqa: E402
 
-# 运行时内存缓存——从 meta 表加载，无则用代码内置默认
+# 渠道卡真源 = configs/oauth-providers.json（一份聚合文件，与仓库侧的
+# configs/platforms/<provider>.json 同一纪律）。代码里不再持有任何平台卡字面量——
+# 加渠道/换端点 = 加一个文件，零代码、零发版（多平台解耦在登录渠道侧的收口）。
+# 优先级：meta.oauth_providers_config（运行时覆盖，逐键合并）> 文件卡 > 无（fail-closed）。
+# 登录渠道配置真源 = configs/oauth-providers.json（一份聚合文件，全部渠道）。
+# 与仓库托管配置（configs/platforms/*.json，每平台一文件）物理分离、字段互不渗透：
+# 这份文件只放 OAuth 渠道卡，不放托管能力位；那份只放托管卡，不放 auth/scope。
+_AUTH_CHANNELS_FILE_NAME = "oauth-providers.json"
+
+# 渠道卡合法键集（与消费面一一对应：build_auth_url / exchange_token /
+# get_user_info / get_redirect_uri / 渠道策略构建校验 / OIDC claims_map）。
+# 未知键整卡拒绝——静默丢键 = 能力静默丢失（S69 反模式）。
+_CHANNEL_CARD_FIELDS = {
+    "name", "type", "channel_type",
+    "auth_url", "token_url", "user_url",
+    "scope", "id_field", "login_field", "name_field", "email_field",
+    "avatar_field", "pkce_enabled", "brand_color", "accept_header",
+    "emails_endpoint", "claims_map",
+    # 环境值但可选：留空则由 server_base_url 派生 /api/auth/callback/<provider>；
+    # 显式写必须与平台后台登记的回调地址逐字节一致（get_redirect_uri 优先读它）。
+    "redirect_uri",
+    # legacy：白名单列名声明字段已于 2026-11-12 行式化改造退役（login_whitelist 改为
+    # provider/username 行式两列，卡不再声明列名）。仍允许出现：旧卡/旧文件里带着它，
+    # 整卡拒绝会让存量配置直接失效；加载后代码不再读取该键。
+    "whitelist_column",
+    # 渠道自足字段：登录页/绑定弹窗用（PAT 创建页直达链接）。缺失时回落平台卡的
+    # pat_create_url（过渡兼容），渠道卡显式声明后登录域不再依赖托管配置。
+    "pat_create_url",
+    "idp_sso_url", "attribute_map",     # SAML 类协议预留（由渠道策略消费）
+}
+_REQUIRED_CHANNEL_CARD_FIELDS = ("auth_url", "token_url", "user_url")
+
+def _repo_root(start: str) -> str:
+    """向上找到含 configs/ 的仓库根（与 platform_card._repo_root 同构）。"""
+    cur = os.path.dirname(os.path.abspath(start))
+    while cur and cur != "/":
+        if os.path.isdir(os.path.join(cur, "configs")):
+            return cur
+        cur = os.path.dirname(cur)
+    return os.path.dirname(os.path.abspath(start))
+
+_AUTH_CHANNELS_FILE = os.path.join(_repo_root(__file__), "configs", _AUTH_CHANNELS_FILE_NAME)
+
+# P2-7 缓存：渠道展示序（键=文件 mtime+size）
+_order_cache_key = None
+_order_cache_idx: "list[str] | None" = None
+
+def _builtin_channels_from_file(path: str) -> "dict[str, dict]":
+    """configs/oauth-providers.json → 渠道卡 raw（登录渠道的配置真源）。
+
+    守卫（与 configs/platforms 同纪律，构建即校验）：
+    - 顶层必须是 {provider: card} 对象；
+    - 每张卡未知键 → 整卡拒绝并 error 级响亮（拼错键=能力静默丢失）；
+    - 缺 auth_url/token_url/user_url → 整卡拒绝；
+    - 凭据不进文件：client_id/client_secret 若出现则剥离并告警（唯一落点=DB meta/管理面）。
+    """
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as e:
+        log.error(f"oauth-providers.json 解析失败 {path}: {e}（无渠道可用）")
+        return {}
+    if not isinstance(data, dict):
+        log.error(f"oauth-providers.json 顶层必须是 {{provider: card}} 对象（实际 {type(data).__name__}）")
+        return {}
+    raws: dict[str, dict] = {}
+    for provider, raw in data.items():
+        provider = str(provider or "").strip()
+        # 约定：下划线前缀 = 文档/注释键（JSON 无注释，用 "_readme"/"_note" 承载说明），
+        # 不是渠道名。这样 example 文件可以写满说明，复制成真文件也不会被当成渠道。
+        if not provider or provider.startswith("_"):
+            continue
+        if not isinstance(raw, dict):
+            log.error(f"oauth-providers.json: {provider!r} 卡不是 JSON 对象（整卡拒绝）")
+            continue
+        _creds = [k for k in ("client_id", "client_secret") if k in raw]
+        card = {k: v for k, v in raw.items()
+                if k not in ("client_id", "client_secret") and not str(k).startswith("_")}
+        if _creds:
+            log.warning(f"oauth-providers.json: {provider} 卡内出现 {_creds} —— 凭据不进配置文件，"
+                        f"已剥离；请在管理面「登录渠道」或 meta oauth_{provider}_client_id/secret 配置")
+        unknown = set(card) - _CHANNEL_CARD_FIELDS
+        if unknown:
+            log.error(f"oauth-providers.json: {provider} 含未知键 {sorted(unknown)}"
+                      f"（合法键={sorted(_CHANNEL_CARD_FIELDS)}），整卡拒绝")
+            continue
+        missing = [k for k in _REQUIRED_CHANNEL_CARD_FIELDS if not str(card.get(k) or "").strip()]
+        if missing:
+            log.error(f"oauth-providers.json: {provider} 缺必填端点 {missing}，整卡拒绝")
+            continue
+        raws[provider] = card
+    return raws
+
+def builtin_channels() -> "dict[str, dict]":
+    """登录渠道卡文件真源（管理面保存基线 / 测试口径的唯一入口；不含任何凭据）。"""
+    return _builtin_channels_from_file(_AUTH_CHANNELS_FILE)
+
+# 运行时内存缓存——文件卡 + meta 运行时覆盖
 _PROVIDERS_CACHE: dict[str, dict] = {}
 
 _loaded: bool = False
@@ -77,6 +152,50 @@ _cache_ts: float = 0.0          # P2-2: 上次加载时间戳
 _CACHE_TTL: float = 300.0       # P2-2: 缓存 TTL 5 分钟（兜底，admin 改配置时主动失效）
 
 _providers_lock = __import__("threading").Lock()
+
+_CHANNEL_TABLE_FIELDS = (
+    "name", "type", "auth_url", "token_url", "user_url", "emails_endpoint", "scope",
+    "id_field", "login_field", "name_field", "avatar_field", "redirect_uri",
+    "brand_color", "accept_header",
+)
+
+
+def _channels_from_table() -> dict:
+    """D109：表就绪后从 grape_t_oauth_channels 读渠道卡（运行时真源）。
+
+    未就绪 / 读失败 → 返回空 dict，调用方保持原有「文件 + meta」路径（§16 #1 回落）。
+    """
+    try:
+        from src.domains.platform.public import is_table_backed
+
+        if not is_table_backed():
+            return {}
+        import json as _json
+        from sqlalchemy.orm import Session
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        out: dict[str, dict] = {}
+        with Session(get_engine()) as s:
+            for row in OAuthChannelRepo.list_all(s, enabled_only=True):
+                # 防御：导入器已跳过下划线文档键，但历史库可能留有脏行。
+                # 注意不能写 `not row.provider`——ORM 列在类型层是 Column[str]，
+                # 布尔求值会触发 Pyright reportGeneralTypeIssues。
+                _prov = str(row.provider) if row.provider is not None else ""
+                _prov = _prov.strip()
+                if not _prov or _prov.startswith("_"):
+                    continue
+                card = {f: getattr(row, f) or "" for f in _CHANNEL_TABLE_FIELDS}
+                card["pkce_enabled"] = bool(row.pkce_enabled)
+                try:
+                    card["repo_links"] = _json.loads(row.repo_links_json or "[]")
+                except Exception:
+                    card["repo_links"] = []
+                out[row.provider] = card
+        return out
+    except Exception as e:
+        log.warning(f"oauth_channels table read failed, fallback to file+meta: {e}")
+        return {}
 
 def _load_providers():
     """从 meta 表加载 provider 配置，无则用代码内置默认。
@@ -94,23 +213,47 @@ def _load_providers():
         # 双重检查：进入锁后再检查一次
         if _loaded and (time.time() - _cache_ts < _CACHE_TTL):
             return
+        # 真源：configs/oauth-providers.json（一份聚合，全部渠道）；meta 逐键覆盖
+        # （D105-19 同型——meta 只覆盖它声明的键，缺席键落文件卡）。
+        if os.path.isfile(_AUTH_CHANNELS_FILE):
+            merged = {p: dict(c) for p, c in _builtin_channels_from_file(_AUTH_CHANNELS_FILE).items()}
+        else:
+            merged = {}
+            log.error(f"oauth-providers.json 缺失 {_AUTH_CHANNELS_FILE} —— 当前无可用登录渠道"
+                      f"（该文件是运行必需配置，随仓库发布；解耦后不放回代码兜底卡）")
         raw = user_db.get_meta_value("oauth_providers_config") or ""
         if raw:
             try:
                 data = json.loads(raw)
-                _PROVIDERS_CACHE.clear()
-                _PROVIDERS_CACHE.update(data)
-                log.info(f"Loaded {len(_PROVIDERS_CACHE)} OAuth providers from DB: {list(_PROVIDERS_CACHE.keys())}")
-                _loaded = True
-                _cache_ts = time.time()
-                return
+                for provider, card in (data or {}).items():
+                    provider = str(provider or "").strip()
+                    # 约定与文件分支同口径（providers.py:_builtin_channels_from_file）：
+                    # 下划线前缀 = 文档/注释键，不是渠道名。meta 里若被历史同步写进
+                    # `_fields`/`_readme` 之类文档键，不过滤就会凭空多出一个"渠道"，
+                    # 登录页按目录渲染按钮、未配置提示点名它（实弹：hint 出现 _fields）。
+                    if not provider or provider.startswith("_"):
+                        continue
+                    if not isinstance(card, dict):
+                        continue
+                    _base = dict(merged.get(provider) or {})
+                    _base.update(card)
+                    merged[provider] = _base
+                log.info(f"Loaded {len(merged)} OAuth channels (file cards + meta overrides): {sorted(merged)}")
             except Exception as e:
-                log.warning(f"Failed to parse oauth_providers_config from DB: {e}, using defaults")
+                log.warning(f"oauth_providers_config 解析失败: {e} —— 仅用文件卡: {sorted(merged)}")
+        else:
+            log.info(f"Using auth-channel file cards: {sorted(merged)}")
 
-        # meta 表无配置 → 用代码内置默认
+        # D109：表就绪后 DB 表是运行时真源（文件与 meta 只是导入源）；
+        # 表内有的 provider 覆盖同名文件卡，文件独有的仍保留（防表缺行致渠道消失）。
+        _tbl = _channels_from_table()
+        if _tbl:
+            for _p, _card in _tbl.items():
+                merged[_p] = dict(_card)
+            log.info(f"oauth channels from table: {sorted(_tbl)}")
+
         _PROVIDERS_CACHE.clear()
-        _PROVIDERS_CACHE.update(_DEFAULT_PROVIDERS)
-        log.info(f"Using built-in default providers: {list(_PROVIDERS_CACHE.keys())}")
+        _PROVIDERS_CACHE.update(merged)
         _loaded = True
         _cache_ts = time.time()
 
@@ -132,10 +275,127 @@ def get_provider(provider: str) -> "dict | None":
     _load_providers()
     return _PROVIDERS_CACHE.get(provider)
 
+def is_channel_enabled(provider: str) -> bool:
+    """登录渠道是否启用（P2-4 fail-closed 判据）。
+
+    真源 = `grape_t_oauth_channels.enabled`（与登录目录 `_catalog_from_object` 的
+    enabled_only 过滤同源）。表未就绪 / 读失败 → 按"启用"处理：这是历史行为，
+    否则 DB 抖动会把所有登录打挂。只有明确读到 enabled=0 才拒绝。
+    """
+    try:
+        from src.domains.platform.public import is_table_backed
+
+        if not is_table_backed():
+            return True
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            row = OAuthChannelRepo.get(s, str(provider))
+        if row is None:
+            return False  # 渠道不在对象表里 → 不存在即不可登录
+        return bool(getattr(row, "enabled", 1))
+    except Exception as e:
+        from src.kernel.config import log
+
+        log.warning(f"is_channel_enabled 读取失败，按启用处理（fail-open）: {e}")
+        return True
+
+
 def list_providers() -> list[str]:
     """列出所有已配置的 Provider。"""
     _load_providers()
     return list(_PROVIDERS_CACHE.keys())
+
+
+def _catalog_order_index() -> "dict[str, int]":
+    """登录渠道展示顺序：`configs/oauth-providers.json` 的 `_ui_order`（可选）→ 配置键顺序。
+
+    D102-B 曾用「平台 key → 序号」的字面表固定展示序（新渠道必须改代码），与「渠道集合由
+    配置/表驱动」的口径不一致（2026-11-14 深度检查）。顺序属产品展示偏好，改为数据：
+    优先 `_ui_order` 数组，其次配置文件的键顺序（当前文件即 gitcode → github → gitee →
+    huawei），未列出的渠道排最后按名。
+    """
+    # P2-7：本函数被 HTML head 注入与 /auth/providers 每请求调用；同文件其它读配置
+    # 的都走 _load_providers 的 TTL 缓存，这里不能每次 open+parse。
+    # 缓存键 = (路径, mtime, size)：配置被带外改写时自动失效，无需重启。
+    global _order_cache_key, _order_cache_idx
+    order: list[str] = []
+    try:
+        _st = os.stat(_AUTH_CHANNELS_FILE)
+        _key = (_AUTH_CHANNELS_FILE, int(_st.st_mtime), int(_st.st_size))
+        if _order_cache_key == _key and _order_cache_idx is not None:
+            order = _order_cache_idx
+        else:
+            with open(_AUTH_CHANNELS_FILE, encoding="utf-8") as f:
+                _cfg = json.load(f)
+            order = [p for p in (_cfg.get("_ui_order") or []) if isinstance(p, str) and p]
+            _order_cache_key = _key
+            _order_cache_idx = order
+    except Exception:
+        order = []
+    idx = {p: i for i, p in enumerate(order)}
+    for k in list_providers():
+        if k not in idx:
+            idx[k] = len(idx)
+    return idx
+
+
+def _catalog_from_object() -> "list[dict]":
+    """D109 对象层读模型（表就绪时=唯一真源，不再回查 meta）。
+
+    以 grape_t_oauth_channels 行为准：provider/name/brand_color 取行内定义字段，
+    configured 取行内加密凭据列（client_id_enc）——凭据迁移后 meta 不再是真源。
+    表未就绪 / 读失败 → 返回空列表，调用方回落 file+meta（§16 影响 #1 fail-open）。
+    """
+    try:
+        from src.domains.platform.public import is_table_backed
+
+        if not is_table_backed():
+            return []
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            rows = list(OAuthChannelRepo.list_all(s, enabled_only=True))
+        if not rows:
+            return []
+        from src.domains.runtime.public import get_platform_card
+
+        out = []
+        for row in rows:
+            # 防御：历史脏行（下划线文档键）不参与目录
+            provider = str(row.provider) if row.provider is not None else ""
+            provider = provider.strip()
+            if not provider or provider.startswith("_"):
+                continue
+            cfg = get_provider(provider) or {}
+            pat_url = str(cfg.get("pat_create_url") or "").strip()
+            try:
+                card = get_platform_card(provider)
+                if not pat_url:
+                    pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
+            except Exception:
+                pat_url = ""
+            out.append({
+                "provider": provider,
+                "name": str(row.name or cfg.get("name") or provider),
+                # configured 走与取用同一解析链（credential_source）：表内加密列优先，
+                # 两列皆空才整对回落 meta（迁移窗口）。两边都没有才是真未配置。
+                "configured": channel_configured(provider),
+                "brand_color": str(row.brand_color or cfg.get("brand_color") or ""),
+                "pat_create_url": pat_url,
+            })
+        _idx = _catalog_order_index()
+        out.sort(key=lambda c: (_idx.get(c["provider"], len(_idx)), c["provider"]))
+        return out
+    except Exception as e:
+        log.warning(f"oauth_channels table read failed, fallback to file+meta: {e}")
+        return []
 
 
 def providers_catalog() -> "list[dict]":
@@ -144,31 +404,37 @@ def providers_catalog() -> "list[dict]":
     返回固定展示序的 [{provider, name, configured, brand_color}]——
     服务端 HTML head 注入（window.__OAUTH_PROVIDERS__）与 /auth/providers
     路由共用此单一来源：登录页按钮在首帧渲染前同步生成，不等 AJAX。
+
+    D109 收口：查询真源 = 平台对象层（grape_t_oauth_channels），不再逐个回查
+    meta（凭据已迁到表内加密列，meta 只是导入源）。表未就绪才回落 file+meta。
     """
+    _from_table = _catalog_from_object()
+    if _from_table:
+        return _from_table
+
     from src.domains.mgmt.user.db import get_meta_value
-    # D102-B: 登录按钮固定展示序（用户拍板：gitcode→github→gitee→gitlab→
-    # hwcloud→其余按名）——不随 providers 配置加载序漂移
-    _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
-    keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
+    # D102-B 的展示序改由数据驱动（_catalog_order_index：_ui_order → 配置键顺序）
+    _idx = _catalog_order_index()
+    keys = sorted(list_providers(), key=lambda k: (_idx.get(k, len(_idx)), k))
     result = []
     # 2026-11-13：手动绑定令牌弹窗需要「前往令牌创建页面」的直达链接。
     # 单一来源=平台卡 pat_create_url（gitee/gitlab 等按卡派生）；取不到就返回空串，
     # 由前端对 github/gitcode 用官方预选参数链接兜底（见 AccountView.patCreateUrl）。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     for key in keys:
         cfg = get_provider(key) or {}
-        client_id = get_meta_value(f"oauth_{key}_client_id") or ""
-        pat_url = ""
+        pat_url = str(cfg.get("pat_create_url") or "").strip()
         try:
             card = get_platform_card(key)
-            pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
+            if not pat_url:
+                pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
         except Exception:
             pat_url = ""
         result.append({
             "provider": key,
             "name": cfg.get("name", key),
-            "configured": bool(client_id),
+            "configured": channel_configured(key),
             "brand_color": cfg.get("brand_color", ""),
             "pat_create_url": pat_url,
         })
@@ -223,6 +489,13 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     if not cfg:
         return None
 
+    # Issue #3054 QA：渠道凭证缺失时**不能**用空 client_id 拼 URL ——那会把用户送到
+    # 第三方授权页看一个与其无关的报错。这里直接返回 None，由调用方给可见错误。
+    _cid = _get_client_id(provider)
+    if not _cid:
+        log.warning(f"build_auth_url: {provider} client_id 未配置（渠道凭证缺失），拒绝拼 URL")
+        return None
+
     # PKCE
     code_verifier = ""
     code_challenge = ""
@@ -239,7 +512,7 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     user_db.save_oauth_state(state, provider, state_data)
 
     params = {
-        "client_id": _get_client_id(provider),
+        "client_id": _cid,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "state": state,
@@ -257,24 +530,32 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     return {"redirect_url": auth_url, "code_verifier": code_verifier}
 
 def exchange_token(provider: str, code: str, redirect_uri: str,
-                   code_verifier: str = "") -> "tuple[dict | None, str]":
+                   code_verifier: str = "",
+                   policy: "RetryPolicy | None" = None) -> "tuple[dict | None, str]":
     """用 code 换 access_token。
 
     P2-3: 统一用 requests 替代 urllib.request，与 get_user_info 保持一致。
     返回 (token_dict, error_type) tuple：
     - 成功：(token_dict, "")
-    - 失败：(None, "network_timeout") 或 (None, "token_exchange_failed")
-    - Provider 不存在/无 client_id：(None, "not_configured")
+    - 失败：(None, "network_timeout") / (None, "token_exchange_failed") /
+      (None, "credential_decrypt_failed") / (None, "not_configured")
 
-    超时策略：连接超时 5s，读超时 10s，重试 2 次，指数退避（1s, 2s）。
-    最坏情况约 5+10+1+5+10+2 = 33s（比原来 63s 快一倍）。
+    Issue #3054 P1-4：重试语义由 :class:`RetryPolicy` 决定——**只对瞬时错误重试**
+    （超时 / 连接类异常 / 5xx），4xx 立即返回并落 provider 的 error/error_description。
+    原实现除超时外一律 `except Exception` 重试 3 次且不读响应体，把 invalid_client /
+    redirect_uri_mismatch / invalid_grant 伪装成 token_exchange_failed；而按 RFC 6749
+    重复出示已用 code 会撤销先前 token —— 一次确定性失败被放大成「用户被登出」。
     """
     cfg = get_provider(provider)
     if not cfg:
         return None, "not_configured"
 
-    client_id = _get_client_id(provider)
-    client_secret = _get_client_secret(provider)
+    # 唯一取凭据入口（P1-2）：client_id + client_secret 同源成对。
+    try:
+        client_id, client_secret = get_client_credentials(provider)
+    except CredentialDecryptError as e:
+        log.error(f"Exchange token for {provider} blocked by credential failure: {e}")
+        return None, CredentialDecryptError.code
     if not client_id:
         return None, "not_configured"
 
@@ -288,13 +569,13 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
     if code_verifier:
         data["code_verifier"] = code_verifier
 
+    retry = policy or DEFAULT_TOKEN_RETRY
     try:
         import requests as _req
         _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
         _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
-        # 境外平台网络不稳定，重试 2 次（共 3 次尝试），指数退避
         last_err_type = "token_exchange_failed"
-        for _attempt in range(3):
+        for _attempt in range(retry.attempts):
             try:
                 resp = _req.post(
                     cfg["token_url"],
@@ -303,28 +584,87 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
                     timeout=(5, 10),  # (connect_timeout, read_timeout)
                     proxies=_proxies,
                 )
-                resp.raise_for_status()
-                return resp.json(), ""
-            except _req.exceptions.ConnectTimeout:
-                last_err_type = "network_timeout"
-                if _attempt < 2:
-                    import time as _t
-                    _t.sleep(1 * (2 ** _attempt))  # 1s, 2s
-            except _req.exceptions.ReadTimeout:
-                last_err_type = "network_timeout"
-                if _attempt < 2:
-                    import time as _t
-                    _t.sleep(1 * (2 ** _attempt))
             except Exception as e:
-                last_err_type = "token_exchange_failed"
-                if _attempt < 2:
+                if not retry.should_retry_exception(e):
+                    log.error(f"Exchange token for {provider} non-retryable error: "
+                              f"{type(e).__name__}: {e}")
+                    return None, "token_exchange_failed"
+                last_err_type = "network_timeout" if "Timeout" in {
+                    c.__name__ for c in type(e).__mro__} else "token_exchange_failed"
+                log.warning(f"Exchange token for {provider} transient failure "
+                            f"(attempt {_attempt + 1}/{retry.attempts}): "
+                            f"{type(e).__name__}: {e}")
+                if not retry.is_last_attempt(_attempt):
                     import time as _t
-                    _t.sleep(1 * (2 ** _attempt))
-        log.warning(f"Exchange token for {provider} failed after 3 retries: {last_err_type}")
+                    _t.sleep(retry.delay_for(_attempt))
+                continue
+
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if retry.should_retry_status(status):
+                last_err_type = "token_exchange_failed"
+                log.warning(f"Exchange token for {provider} provider 5xx (attempt "
+                            f"{_attempt + 1}/{retry.attempts}): status={status} "
+                            f"body={_resp_body_snippet(resp)}")
+                if retry.should_retry_server_error(_attempt):
+                    import time as _t
+                    _t.sleep(retry.delay_for(_attempt))
+                    continue
+                # Issue #3054 QA：5xx 可能发生在 code 已被消费之后，再出示会撤销已发
+                # token（RFC 6749）→ 到此为止，返回原始失败，不再二次出示。
+                log.error(f"Exchange token for {provider} 5xx: code may already be "
+                          f"consumed, not re-presenting it (status={status})")
+                return None, "token_exchange_failed"
+            if status >= 400:
+                # 4xx = 确定性失败（invalid_client / invalid_grant / redirect_uri_mismatch…）
+                # 立即返回，并把 provider 的错误码与描述写进日志（P1-4 可观测性）
+                oauth_err, desc = _parse_oauth_error(resp)
+                log.error(f"Exchange token for {provider} rejected by provider: "
+                          f"status={status} error={oauth_err or '-'} "
+                          f"error_description={desc or '-'} "
+                          f"body={_resp_body_snippet(resp)}")
+                return None, "token_exchange_failed"
+
+            try:
+                return resp.json(), ""
+            except Exception as e:
+                log.error(f"Exchange token for {provider} invalid JSON response: "
+                          f"status={status} {type(e).__name__}: {e} "
+                          f"body={_resp_body_snippet(resp)}")
+                return None, "token_exchange_failed"
+        log.warning(f"Exchange token for {provider} failed after {retry.attempts} attempts: "
+                    f"{last_err_type}")
         return None, last_err_type
     except Exception as e:
         log.warning(f"Exchange token for {provider} failed: {e}")
         return None, "token_exchange_failed"
+
+
+def _resp_body_snippet(resp, limit: int = 300) -> str:
+    """响应体摘要（日志用；避免整页 HTML/超长 body 灌日志，也不落我方 secret）。"""
+    try:
+        return str(resp.text or "")[:limit].replace("\n", " ")
+    except Exception:
+        return ""
+
+
+def _parse_oauth_error(resp) -> "tuple[str, str]":
+    """从 token 端点 4xx 响应解析 (error, error_description)（RFC 6749 §5.2）。
+
+    兼容 JSON 与 form-encoded 两种响应体；解析不出就返回 ("", "")。
+    """
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            return str(body.get("error") or ""), str(body.get("error_description") or "")
+    except Exception:
+        pass
+    try:
+        import urllib.parse as _up
+
+        parsed = _up.parse_qs(str(resp.text or ""))
+        return (parsed.get("error", [""])[0], parsed.get("error_description", [""])[0])
+    except Exception:
+        return "", ""
 
 def get_user_info(provider: str, access_token: str) -> "dict | None":
     """获取第三方平台用户信息。
@@ -403,13 +743,43 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
 
     return result
 
+# 凭据入口见模块顶部导入的 provider_credentials（成对/单列两种读法都在这里适配）。
+
+
+def get_client_credentials(provider: str) -> "tuple[str, str]":
+    """**唯一取凭据入口**（登录换 code / token 刷新 / configured 共用）。
+
+    返回 ``(client_id, client_secret)``——同源成对；密文不可解抛
+    :class:`CredentialDecryptError`，调用方必须显式失败（禁止回落 meta）。
+    """
+    cid, sec = provider_credentials.pair(provider)
+    if cid.error or sec.error:
+        err = cid.error or sec.error
+        raise CredentialDecryptError(provider, (cid.field if cid.error else sec.field), err)
+    return cid.value, sec.value
+
+
 def _get_client_id(provider: str) -> str:
-    """获取 OAuth client_id——统一用 provider 名拼 meta key。"""
-    return user_db.get_meta_value(f"oauth_{provider}_client_id") or ""
+    """client_id（宽容版：解密失败=空串，绝不回落 meta）。"""
+    try:
+        return get_client_credentials(provider)[0]
+    except CredentialDecryptError as e:
+        log.error("get_client_id blocked: %s", e)
+        return ""
+
 
 def _get_client_secret(provider: str) -> str:
-    """获取 OAuth client_secret——统一用 provider 名拼 meta key。"""
-    return user_db.get_meta_value(f"oauth_{provider}_client_secret") or ""
+    """client_secret（宽容版：解密失败=空串，绝不回落 meta）。"""
+    try:
+        return get_client_credentials(provider)[1]
+    except CredentialDecryptError as e:
+        log.error("get_client_secret blocked: %s", e)
+        return ""
+
+
+def channel_configured(provider: str) -> bool:
+    """``configured`` 判定：与运行时同一取凭据入口（Issue #3054 P1-1）。"""
+    return provider_credentials.configured(provider)
 
 def get_redirect_uri(request, provider: str = "") -> str:
     """获取 OAuth 回调 URI。
@@ -440,7 +810,7 @@ def get_redirect_uri(request, provider: str = "") -> str:
 
     # fallback 2：从 Host header 构造（开发环境直连）
     # 生产环境强制 https，防止 X-Forwarded-Proto 伪造
-    from src.domains.mgmt.auth.security_config import is_production
+    from src.kernel.security_config import is_production
     if is_production():
         scheme = "https"
     else:
@@ -514,7 +884,7 @@ def _channel_emails_endpoint(provider: str, cfg: "dict | None" = None) -> str:
         pass
     # 内置默认：仅 github 渠道有补抓端点（存量语义，经渠道内置卡派生）
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
         if card is not None and card.git_tree_family == "github_api":
             return f"https://{card.host.rstrip('/')}/user/emails" if card.host != "github.com" else "https://api.github.com/user/emails"
@@ -522,50 +892,5 @@ def _channel_emails_endpoint(provider: str, cfg: "dict | None" = None) -> str:
         pass
     return ""
 
-# 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
-# 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
-_DEFAULT_PROVIDERS: dict[str, dict] = {
-    "gitcode": {
-        "name": "GitCode",
-        "auth_url": "https://gitcode.com/oauth/authorize",
-        "token_url": "https://gitcode.com/oauth/token",
-        "user_url": "https://gitcode.com/api/v5/user",
-        "scope": "all",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "nickname",
-        "pkce_enabled": True,
-        "brand_color": "#e7330f",
-        "accept_header": "application/json",
-    },
-    "github": {
-        "name": "GitHub",
-        "auth_url": "https://github.com/login/oauth/authorize",
-        "token_url": "https://github.com/login/oauth/access_token",
-        "user_url": "https://api.github.com/user",
-        # D46 P1-12: 缩减 scope——仅需读取用户信息和邮箱，不需要 repo 写权限
-        "scope": "read:user user:email",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#24292f",
-        "accept_header": "application/vnd.github+json",
-    },
-    # D90-N5（2026-11-07）：gitee OAuth 登录渠道卡——OAuth 配置化平台化收口。
-    # endpoints 按 Gitee 官方 OAuth 文档。管理员在管理面填
-    # oauth_gitee_client_id/secret 即启用（无需改代码）。
-    "gitee": {
-        "name": "Gitee",
-        "auth_url": "https://gitee.com/oauth/authorize",
-        "token_url": "https://gitee.com/oauth/token",
-        "user_url": "https://gitee.com/api/v5/user",
-        "scope": "user_info emails",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#c71d23",
-        "accept_header": "application/json",
-    },
-}
+# 说明：登录渠道卡真源=configs/oauth-providers.json（一份聚合，全部渠道）。
+# 代码里不再有内置渠道卡字面量——加渠道/换端点 = 加文件，零代码发版。

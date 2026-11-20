@@ -44,11 +44,31 @@ CREATE TABLE IF NOT EXISTS skill (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
+    is_featured INTEGER DEFAULT 0,
+    like_count INTEGER DEFAULT 0,
+    sub_scene TEXT DEFAULT '',
     category_id INTEGER DEFAULT 0,
+    cat_l1_id INTEGER DEFAULT 0,
+    cat_l2_id INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
+    download_count INTEGER DEFAULT 0,
+    intro_override TEXT DEFAULT '',
     content_hash VARCHAR(256) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
+)
+"""
+
+_VERSION_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_skill_version (
+    id TEXT PRIMARY KEY,
+    skill_id INTEGER,
+    version TEXT,
+    change_note TEXT DEFAULT '',
+    uploaded_at TEXT DEFAULT '',
+    uploaded_by VARCHAR(64) DEFAULT ''
 )
 """
 _SCENE_REF_DDL = "CREATE TABLE IF NOT EXISTS scene_skill_ref (id INTEGER PRIMARY KEY AUTOINCREMENT, scene_id INTEGER, skill_id INTEGER)"
@@ -87,6 +107,7 @@ def wdb(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="issue561-")
     conn = sqlite3.connect(os.path.join(tmp, "w.db"), check_same_thread=False)
     conn.execute(_SKILL_DDL)
+    conn.execute(_VERSION_DDL)
     conn.execute(_SCENE_REF_DDL)
     conn.execute(_LIKES_DDL)
     conn.commit()
@@ -99,7 +120,9 @@ def wdb(monkeypatch):
             conn.commit()
 
     db_obj = _DB()
-    db_lock = threading.Lock()
+    # RLock（对齐生产 session_manager.db_lock）：log_audit 持锁内会再进
+    # _next_seq/_get_last_hash 重取同一把锁，非重入 Lock 会自死锁。
+    db_lock = threading.RLock()
 
     import src.kernel.session_manager as sm
     import src.domains.mgmt.user.db as user_db
@@ -157,7 +180,9 @@ def _call_update(wdb, skill_id, zip_bytes, zip_name="s.zip", user_id=7, agent_ty
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=zip_name)
     user = {"id": user_id, "auth_type": "api_key"}
     return asyncio.run(update_skill_by_id(
-        skill_id=skill_id, file=uf, user=user, agent_type=agent_type, category_id=category_id))
+        skill_id=skill_id, file=uf, user=user, agent_type=agent_type,
+        category_id=category_id, cat_l1_id=0, cat_l2_id=0,
+        summary="测试摘要", clear_category=False))
 
 
 # ---------------------------------------------------------------------------

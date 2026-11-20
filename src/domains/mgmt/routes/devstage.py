@@ -6,17 +6,18 @@ import os
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
 from src.domains.mgmt.user import db as user_db
-from src.domains.runtime.im.devstage_client import (
-    DevStageError,
-    list_environments as _list_envs,
-    create_environment as _create_env,
-    start_environment as _start_env,
-    stop_environment as _stop_env,
-    delete_environment as _delete_env,
-    list_specs as _list_specs,
-    _resolve_base_url,
-    _request,
-)
+# DevStage 客户端走 owner 域 public（原 import runtime.im.devstage_client 内部符号）
+from src.domains.runtime import public as _rt_devstage
+
+DevStageError = _rt_devstage.DevStageError
+_resolve_base_url = _rt_devstage.devstage_base_url
+_request = _rt_devstage.devstage_request
+_list_envs = _rt_devstage.devstage_list_environments
+_create_env = _rt_devstage.devstage_create_environment
+_start_env = _rt_devstage.devstage_start_environment
+_stop_env = _rt_devstage.devstage_stop_environment
+_delete_env = _rt_devstage.devstage_delete_environment
+_list_specs = _rt_devstage.devstage_list_specs
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/devstage", tags=["devstage"])
@@ -44,14 +45,23 @@ def _annotate_worker_online(envs: list) -> None:
     if not envs:
         return
     from src.domains.runtime import public as runtime_public
-    from src.domains.runtime.engine.health import derive_runtime_health
+    from src.domains.runtime.public import derive_runtime_health
     from datetime import datetime, timezone
     now_ts = datetime.now(timezone.utc).timestamp()
     # 一次性查出所有未吊销凭据的 name → health（凭据表归 runtime 域，三库拓扑下
     # 只能经 runtime public 原语读；原实现在进程库直查 → 1146 被吞成全部 offline）
     cred_map: dict[str, str] = {}
     try:
-        for cname, cstatus, last_seen in runtime_public.credential_health_rows_any():
+        # 走 provider（GSB）：跨域且 GRAPE_PROVIDER_MODE=remote → HTTP；同域/未开 → Local。
+        # 失败回落 owner 原语，不引入新失败模式。
+        try:
+            from src.kernel.gsb.provider import get_service as _gs
+            _rows = _gs("runtime").get_credential_health_rows()
+        except Exception as _ge:  # noqa: BLE001
+            from src.kernel.config import log as _lg
+            _lg.debug(f"devstage: provider credential rows failed, fallback: {_ge}")
+            _rows = runtime_public.credential_health_rows_any()
+        for cname, cstatus, last_seen in _rows:
             if not cname:
                 continue
             h = derive_runtime_health(cstatus or "offline", last_seen, now_ts)

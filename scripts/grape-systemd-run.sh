@@ -39,6 +39,15 @@ fi
 PY="$REPO_ROOT/venv/bin/python"
 [ -x "$PY" ] || { echo "missing venv python: $PY" >&2; exit 3; }
 
+# 引擎 CLI 装在服务用户目录下（~/.local/bin、~/.local/npm-global/bin），
+# systemd 默认 PATH 只有 /usr/local/bin:/usr/bin:/bin —— 于是 `opencode --version` /
+# `hermes --version` 探测全部找不到可执行文件 → healthy=0 → 健康分低 →
+# claim_by_tag 拒绝认领 → 任务永远没人跑（2026-11-15 实证：本机四进程都健康、
+# 心跳正常，但流水线一个任务都跑不动，根因就是这一行 PATH）。
+# deploy3db.sh（nohup 路径）早有这段，systemd 路径漏了。
+export HOME="${HOME:-/home/grape}"
+export PATH="$HOME/.local/bin:$HOME/.local/npm-global/bin:$PATH"
+
 # ── 三库独立模式（deploy/deploy3db.sh 的 systemd 等价路径）────────────────────
 # GRAPE_3DB_ENV 指向三库 DSN 文件（如 /etc/grape/grape-3db.env，内含
 # GRAPE_DSN_MGMT / GRAPE_DSN_RUNTIME / GRAPE_DSN_INSIGHT 三行）。设置后：
@@ -52,6 +61,10 @@ if [ -n "$_3db_env" ]; then
     # shellcheck disable=SC1090
     set -a; . "$_3db_env"; set +a
     export GRAPE_DOMAIN_LIB="${GRAPE_DOMAIN_LIB:-1}"
+    # 三库 = MySQL 拓扑。DSN 只导出 host/port/user/password/name，**后端开关不含在内**：
+    # session_manager 的后端判定读 DEVOPS_DB_BACKEND > configs/db-backend.json > 默认 sqlite，
+    # 缺这一行时四个进程会各自落到本地 sqlite（db-guard 却照旧打印 DSN，看起来像连了库）。
+    export DEVOPS_DB_BACKEND=mysql
     case "$role" in
         mgmt)         _dsn="${GRAPE_DSN_MGMT:-}" ;;
         event|worker) _dsn="${GRAPE_DSN_RUNTIME:-}" ;;
@@ -90,6 +103,17 @@ else
     : "${GRAPE_DOMAIN_DB_PASSWORD:?GRAPE_DOMAIN_DB_PASSWORD 未设置：单库分支需要显式提供库口令（不允许内置默认值）}"
     export DEVOPS_DB_PASSWORD="$GRAPE_DOMAIN_DB_PASSWORD"
 fi
+
+# 谁跑本域迁移：mgmt 走 init_database；runtime 表只由 event 跑（worker 与 event 共库，
+# 重复跑会并发下发同一 DDL）；insight 由 insight 跑。
+# 必须在上面 `set -a; . "$GRAPE_3DB_ENV"` **之后**按角色强制赋值 —— DSN 文件用 set -a
+# 导入时，同名变量会把前面的导出覆盖掉（review F2）。
+case "$role" in
+    mgmt)    export GRAPE_MIGRATION_OWNER="mgmt" ;;
+    event)   export GRAPE_MIGRATION_OWNER="runtime" ;;
+    insight) export GRAPE_MIGRATION_OWNER="insight" ;;
+    worker)  export GRAPE_MIGRATION_OWNER="" ;;
+esac
 
 # GSB 注册地址必须是其它节点可达的地址：留空时客户端回落 127.0.0.1，
 # 跨节点 round_robin 会全部打回本机（registry 里 base_url=http://127.0.0.1:3808x）。

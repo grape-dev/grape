@@ -107,6 +107,7 @@
 
         <!-- 设备与引擎 -->
         <template v-else-if="section === 'devices'">
+<template v-if="tab === 'overview'">
           <div v-if="!opsData && !rtData" class="loading">{{ t('loading') }}</div>
           <template v-else>
             <div class="obv-sec">
@@ -301,6 +302,79 @@
             </template>
             <div v-else class="ts t2" style="padding: 12px">{{ t('no_engine') }}</div>
           </template>
+</template>
+      <template v-else>
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px">
+          <input
+            v-model="sbx.searchQ"
+            class="obv-sbxsearch"
+            :placeholder="t('sbx.sbx_search_ph')"
+            :title="t('sbx.sbx_search_tip')"
+            @keyup.enter="sbxFilter()"
+          />
+          <select v-model="sbx.providerFilter" class="obv-sbxsel" @change="sbxFilter()">
+            <option :value="0">{{ t('sbx.sbx_all_platforms') }}</option>
+            <option v-for="p in sbx.providers" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <select v-model="sbx.stateFilter" class="obv-sbxsel" @change="sbxFilter()">
+            <option value="">{{ t('sbx.sbx_all_states') }}</option>
+            <option v-for="st in ['running', 'killed', 'kill_failed', 'stale', 'creating', 'setup_failed']" :key="st" :value="st">{{ st }}</option>
+          </select>
+          <button class="bt bt-o bt-s" @click="sbxFilter()">{{ t('sbx.sbx_search_btn') }}</button>
+          <button class="bt bt-o bt-s" @click="sbxLoad()">{{ t('sbx.sbx_refresh') }}</button>
+        </div>
+        <div v-if="!sbx.rows.length" class="ts t2" style="padding: 24px; text-align: center">
+          {{ t('sbx.sbx_empty') }}
+        </div>
+        <div v-else style="overflow-x: auto">
+          <table style="width: 100%; font-size: 11px; border-collapse: collapse">
+            <thead>
+              <tr style="border-bottom: 2px solid var(--b); text-align: left">
+                <th style="padding: 8px">Sandbox ID</th>
+                <th style="padding: 8px">Event</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_platform') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_template') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_engine') }}</th>
+                <th style="padding: 8px">State</th>
+                <th style="padding: 8px" :title="t('sbx.sbx_init_tip')">{{ t('sbx.sbx_col_init') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_created_by') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_created_at') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_last_refresh') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in sbx.rows" :key="s.sandbox_id" style="border-bottom: 1px solid var(--b)">
+                <td style="padding: 8px; font-family: monospace" :title="s.sandbox_id">{{ sbxTruncate(s.sandbox_id, 12) }}</td>
+                <td style="padding: 8px">
+                  <a v-if="s.event_seq" :href="'#event/' + s.event_seq" style="color: var(--a); text-decoration: none; font-weight: 600">#{{ s.event_seq }}</a>
+                  <template v-else>{{ s.task_id ? sbxTruncate(s.task_id, 10) : '—' }}</template>
+                </td>
+                <td style="padding: 8px" :title="s.provider">{{ s.provider }}</td>
+                <td style="padding: 8px; font-size: 11px" :title="s.template_id || s.template_name || ''">{{ s.template_name || sbxTruncate(s.template_id, 14) || '—' }}</td>
+                <td style="padding: 8px; font-size: 11px; font-family: monospace" :title="s.engine || ''">{{ s.engine || '—' }}</td>
+                <td style="padding: 8px" :style="{ color: sbxStateColor(s.state) }">
+                  {{ s.state
+                  }}<span
+                    v-if="s.state === 'setup_failed' && s.last_error"
+                    style="cursor: pointer; margin-left: 4px"
+                    :title="t('sbx.sbx_view_error_tip')"
+                    @click="sbxError.open = true; sbxError.id = s.sandbox_id; sbxError.text = s.last_error"
+                    >⚠️</span>
+                </td>
+                <td style="padding: 8px">{{ s.agent_installed ? '✅' : '❌' }}</td>
+                <td style="padding: 8px; font-size: 10px">{{ s.username || '—' }}</td>
+                <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ sbxFmtTime(s.created_at) }}</td>
+                <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ sbxFmtTime(s.last_refresh_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="sbx.total > sbx.pageSize" style="display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px">
+          <button class="bt bt-o bt-s" @click="sbxPrev()">‹</button>
+          <span style="font-size: 12px; color: var(--t2)">{{ sbx.page }} / {{ sbxTotalPages }} ({{ sbx.total }})</span>
+          <button class="bt bt-o bt-s" @click="sbxNext()">›</button>
+        </div>
+      </template>
         </template>
 
         <!-- 任务与日志 -->
@@ -1717,6 +1791,23 @@
         </div>
       </div>
     </div>
+
+    <!-- ═══ 沙箱失败原因弹窗（B3 移植，legacy openSbxError）═══ -->
+    <div
+      v-if="sbxError.open"
+      style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999"
+      @click.self="sbxError.open = false"
+    >
+      <div style="background: var(--c); border-radius: 14px; padding: 20px; max-width: 560px; width: 90%; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15)">
+        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ t('sbx.sbx_error_title') }}</h3>
+        <div style="font-size: 10px; color: var(--t3); font-family: monospace; margin-bottom: 10px; word-break: break-all" :title="sbxError.id">{{ sbxError.id }}</div>
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #b91c1c; line-height: 1.6; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; user-select: text">{{ sbxError.text || (t('sbx.sbx_no_error')) }}</div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
+          <button class="bt bt-o bt-s" @click="sbxCopyError()">📋 {{ t('sbx.sbx_copy') }}</button>
+          <button class="bt bt-p bt-s" @click="sbxError.open = false">✕ {{ t('sbx.sbx_close') }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1906,6 +1997,9 @@ function t(key, vars) {
   const v = G.I18N.t('observability.' + key, vars)
   return v && v !== 'observability.' + key ? v : key
 }
+const isZh = computed(function () {
+  return !!(G.I18N && G.I18N.getLang && G.I18N.getLang() === 'zh')
+})
 // Issue #701：worker/设备显示名唯一来源 runtime_credentials.name，空名统一占位「未命名设备」
 function workerDisplayName(wk) {
   const n = String((wk && wk.name) || '').trim()
@@ -1982,7 +2076,7 @@ const subTabs = computed(() =>
   section.value === 'inspect'
     ? ['tasks', 'efficiency', 'events', 'errorlogs']
     : section.value === 'devices'
-      ? ['overview']
+      ? ['overview', 'sandboxes']
       : []
 )
 function switchSection(v) {
@@ -2011,6 +2105,85 @@ function switchTab(tb) {
     eventReload()
     loadEventGap()
   } else if (tb === 'tasks' && !timelineIssues.value.length) loadTimeline()
+  else if (tb === 'sandboxes') sbxLoad()
+}
+
+// ═══ 沙箱实例列表（迁自云沙箱页 sandboxes tab——B3 移植，legacy _sbx* 族）═══
+const sbx = reactive({
+  page: 1,
+  total: 0,
+  pageSize: 20,
+  searchQ: '',
+  stateFilter: '',
+  providerFilter: 0,
+  providers: [],
+  rows: [],
+})
+const sbxError = reactive({ open: false, id: '', text: '' })
+const sbxTotalPages = computed(() => Math.max(1, Math.ceil(sbx.total / sbx.pageSize)))
+function sbxStateColor(st) {
+  return (
+    { running: '#16a34a', killed: '#6b7280', kill_failed: '#dc2626', stale: '#d97706', creating: '#2563eb', setup_failed: '#dc2626' }[st] || '#6b7280'
+  )
+}
+function sbxTruncate(id, len) {
+  return id && String(id).length > len ? String(id).substring(0, len) + '...' : id || '—'
+}
+function sbxFmtTime(ts) {
+  if (!ts) return '—'
+  try {
+    return new Date(ts).toLocaleString()
+  } catch (e) {
+    return ts
+  }
+}
+async function sbxLoadProviders() {
+  if (sbx.providers.length) return
+  try {
+    const d = await G.API.get('/settings/sandbox-providers?page=1&page_size=100')
+    sbx.providers = (d.providers || []).map((p) => ({ id: p.id, name: p.name }))
+  } catch (e) {
+    sbx.providers = []
+  }
+}
+async function sbxLoad() {
+  await sbxLoadProviders()
+  let url = '/runtime/cloud-sandboxes?page=' + sbx.page + '&page_size=' + sbx.pageSize
+  if (sbx.providerFilter) url += '&provider_id=' + sbx.providerFilter
+  if (sbx.stateFilter) url += '&state=' + encodeURIComponent(sbx.stateFilter)
+  if (sbx.searchQ) url += '&q=' + encodeURIComponent(sbx.searchQ)
+  try {
+    const d = await G.API.get(url)
+    sbx.total = d.total || 0
+    sbx.rows = d.sandboxes || []
+  } catch (e) {
+    sbx.total = 0
+    sbx.rows = []
+  }
+}
+function sbxFilter() {
+  sbx.page = 1
+  sbxLoad()
+}
+function sbxPrev() {
+  if (sbx.page > 1) {
+    sbx.page--
+    sbxLoad()
+  }
+}
+function sbxNext() {
+  if (sbx.page < sbxTotalPages.value) {
+    sbx.page++
+    sbxLoad()
+  }
+}
+function sbxCopyError() {
+  const text = sbxError.text || ''
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      G.app.showToast(t('sbx.sbx_error_copied'))
+    })
+  }
 }
 // ── Issue #476：跨仓失败空结果占比（异步摘要卡，失败静默） ──
 const evGap = ref(null)
@@ -2049,6 +2222,19 @@ function stopAuto() {
     obsTimer = null
   }
   G.window._stopObsAutoRan = true
+}
+// Issue #2132 A3：页面不可见时停止 10s 轮询，切回前台立即刷新一次并恢复轮询。
+// 只在用户开着 autoOn 时生效；后台标签页不再空耗服务端采样与配额。
+function _obsVisibilityHandler() {
+  if (G.document.visibilityState === 'hidden') {
+    if (obsTimer) {
+      clearInterval(obsTimer)
+      obsTimer = null
+    }
+  } else if (autoOn.value && !obsTimer) {
+    refreshObs(true)
+    startAuto()
+  }
 }
 // app.js 离开 observability 时调（typeof 守卫契约）
 G.window.stopObsAuto = stopAuto
@@ -3616,12 +3802,37 @@ const ovKpiEngines = computed(() => {
 // ═══ 生命周期 ═══
 onMounted(function () {
   G.window._currentView = 'observability'
-  const sec =
-    props.initialSection && ['overview', 'devices', 'inspect'].includes(props.initialSection)
+  // Issue #2132 A3：可见性启停（后台停表、回前台立即刷一次）
+  G.document.addEventListener('visibilitychange', _obsVisibilityHandler)
+  // [B3 深链] #observability/sandboxes?provider=N —— SandboxView「查看沙箱实例」入口
+  let deepSbxProvider = 0
+  let deepSbx = false
+  if (props.initialSection && String(props.initialSection).split('?')[0] === 'sandboxes') {
+    deepSbx = true
+    const q = String(props.initialSection).split('?')[1] || ''
+    const m = q.match(/provider=(\d+)/)
+    deepSbxProvider = m ? parseInt(m[1], 10) || 0 : 0
+  }
+  const sec = deepSbx
+    ? 'devices'
+    : props.initialSection && ['overview', 'devices', 'inspect'].includes(props.initialSection)
       ? props.initialSection
       : 'overview'
   section.value = sec
   tab.value = subTabs.value[0] || ''
+  if (deepSbx) {
+    // 沙箱深链：进 devices + sandboxes 子 Tab，预置平台筛选（等价 legacy _sbxDeepTarget）
+    tab.value = 'sandboxes'
+    if (deepSbxProvider) {
+      sbx.providerFilter = deepSbxProvider
+      sbx.page = 1
+    }
+    refreshObs()
+    if (autoOn.value) startAuto()
+    loadResHistory()
+    sbxLoad()
+    return
+  }
   if (sec === 'overview') {
     loadOverview()
   } else {
@@ -4067,6 +4278,7 @@ function effMetricText(x) {
 
 onBeforeUnmount(function () {
   stopAuto()
+  G.document.removeEventListener('visibilitychange', _obsVisibilityHandler)
   stopTaskLogPoll()
   G.document.removeEventListener('keydown', effEscKey)
   Object.keys(effCharts).forEach(function (k) {
@@ -4427,6 +4639,32 @@ onBeforeUnmount(function () {
   background: var(--c);
 }
 /* 资源曲线 */
+/* ── B3 沙箱实例列表 ── */
+/* 表单控件基线字色（2026-11-18）：这些输入框/下拉只设了背景，字色走 UA 默认黑，
+   暗色下等于深底黑字。统一钉到 --t，浅色不变（--t 浅色即 #1d1d1f）。 */
+.obv input,
+.obv select,
+.obv textarea {
+  color: var(--t);
+}
+.obv-sbxsearch {
+  padding: 6px 12px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  font-size: 12px;
+  background: var(--c);
+  color: var(--t);
+  width: 180px;
+}
+.obv-sbxsel {
+  padding: 6px 12px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  font-size: 12px;
+  background: var(--c);
+  color: var(--t);
+}
+
 .obv-ressection {
   padding: 0 20px 20px;
 }

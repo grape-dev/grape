@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS events (
     idempotency_key TEXT DEFAULT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
-    completed_at TEXT DEFAULT ''
+    completed_at TEXT DEFAULT '',
+    failed_node TEXT DEFAULT ''
 )
 """
 
@@ -89,9 +90,50 @@ CREATE TABLE IF NOT EXISTS skill (
     is_active INTEGER DEFAULT 1,
     sub_scene TEXT DEFAULT '',
     category_id INTEGER DEFAULT 0,
+    cat_l1_id INTEGER DEFAULT 0,
+    cat_l2_id INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
+    download_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
+)
+"""
+
+# 技能版本历史（Issue #3168 D6）：每次上传覆盖写一行，版本号强制递增。
+_SKILL_VERSION_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_skill_version (
+    id TEXT PRIMARY KEY,
+    skill_id INTEGER NOT NULL,
+    version VARCHAR(64) NOT NULL DEFAULT '',
+    change_note TEXT DEFAULT '',
+    uploaded_at TEXT DEFAULT (datetime('now')),
+    uploaded_by VARCHAR(64) DEFAULT '',
+    UNIQUE (skill_id, version)
+)
+"""
+
+# 技能包文件清单（Issue #3168 D9）：上传时解析 zip 落库，供资源 Tab 文件树。
+_SKILL_FILE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_skill_file (
+    id TEXT PRIMARY KEY,
+    skill_id INTEGER NOT NULL,
+    path VARCHAR(512) NOT NULL DEFAULT '',
+    size INTEGER DEFAULT 0,
+    UNIQUE (skill_id, path)
+)
+"""
+
+# 技能用户评论（Issue #3168 D11）：概览 Tab 底部评论区，纯文本。
+_SKILL_COMMENT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_skill_comment (
+    id TEXT PRIMARY KEY,
+    skill_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
+    user_name VARCHAR(128) DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
 )
 """
 
@@ -128,9 +170,16 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
     detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     role_tags TEXT DEFAULT '',           -- Issue #658：引擎角色标签（JSON 数组，如 ["coding","issue"]；空=按引擎类型默认映射兜底）
+    engine_uid VARCHAR(36) DEFAULT NULL,        -- Issue #646: 稳定业务键（UUIDv5 自然键派生，UNIQUE 索引兜底），自增 id 保留兼容
+    credential_uid VARCHAR(36) DEFAULT NULL,    -- Issue #646: 引用 runtime_credentials.credential_uid（自增 credential_id 保留兼容）
     model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
     model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
     model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
+    -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
+    -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
+    -- 老库由迁移 202611180002 补列；这里让新库建表即带。
+    runtime_type VARCHAR(32) NOT NULL DEFAULT 'local',  -- 引擎类型 local/sandbox（与既有 engine_type 并存）
+    runtime_info TEXT,                                  -- 云沙箱路由 JSON（template_id 等）；本机引擎为空 → bwrap
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -207,6 +256,11 @@ CREATE TABLE IF NOT EXISTS vod_conversations (
 )
 """
 
+# Issue #3055 B 项口径（勿改本声明）：SQLite 侧 issue_number 的 INTEGER 亲和是**有意
+# 契约**（#995/#2072：数字编号落盘即 int、读侧恒 int；字符串 ident 由 SQLite 动态类型
+# 原样存 text，不存在截断）。MySQL 侧翻译层会把它变成 INT 并在非严格 sql_mode 下静默
+# 截断 ident → 由注册迁移 202611172020（db_setup._fn_issue3055_ident_schema）
+# 在启动时 MODIFY 成 VARCHAR(191)，因此这里保持 INTEGER 声明不动。
 _ISSUE_DDL = """
 CREATE TABLE IF NOT EXISTS issue (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +309,10 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     pool_engine_ids    TEXT DEFAULT '',           -- 限定广播引擎列表（JSON 数组如[76,77]，空=全量广播）
+    pool_engine_uids   TEXT DEFAULT '',           -- Issue #646: pool_engine_ids 的 uid 语义镜像（JSON 数组，双读期双写）
+    pool_selector      TEXT,                      -- Issue #1208: selector 标签池（JSON {"tags":[...]}，与两池列三列语义互斥；TEXT NULL 无 DEFAULT，#627 MySQL 教训）
+    engine_uid         VARCHAR(36) DEFAULT NULL,  -- Issue #646: runtime_id 的 uid 引用（孤儿/历史置 NULL）
+    engine_name_snapshot TEXT DEFAULT '',         -- Issue #646: 引擎展示名快照（引擎删除后历史可读）
     pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择（降级判别，local-claimer 设计）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
     exit_code         INTEGER DEFAULT NULL,
@@ -310,6 +368,9 @@ CREATE TABLE IF NOT EXISTS runtime_credentials (
     owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名(如 owner/repo);个人/全局为 ''
     owner_name   TEXT DEFAULT '',           -- 归属用户 user_name(生成凭据的当前登录用户)
     repo_key     TEXT DEFAULT NULL,         -- 关联项目 repo_key（scope=user 时存）
+    credential_uid VARCHAR(36) DEFAULT NULL,-- Issue #646 凭据稳定键(UUIDv4,一次性终身不变;与迁移 202611080011 _ensure_column 同形,新库免迁移即带)
+    cred_type    VARCHAR(32) NOT NULL DEFAULT 'worker', -- worker(普通设备)/sandbox(沙箱 worker)
+    platform     VARCHAR(32) NOT NULL DEFAULT '',        -- cred_type=sandbox 时的沙箱平台(cubesandbox/devbox)
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
     last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP(展示用,不入唯一键)

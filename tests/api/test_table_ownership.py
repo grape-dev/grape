@@ -28,7 +28,7 @@ def test_key_owners():
     assert own.owner_of("skill") == "runtime"
     assert own.owner_of("devops_pipeline_scene") == "mgmt"
     assert own.owner_of("obs_log") == "insight"
-    # 多份表的裁决以 docs/weekly-11/table-owner.tsv（P0 冻结）为准
+    # 多份表的裁决以 configs/table_ownership.json（P0 冻结）为准
     for t in ("branch_guard_state", "takeover_sessions",
               "grape_t_credential_usage_log", "grape_t_system_credentials"):
         assert own.owner_of(t) == "runtime", f"{t} 应归 runtime"

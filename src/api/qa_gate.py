@@ -20,6 +20,9 @@ import threading
 from collections import OrderedDict
 
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    native_issue_number, is_actionable_issue_number,
+)  # Issue #3055
 
 # 失败语义（顺序：显式否定优先于泛化的“失败”）
 _QA_FAIL_TERMS = (
@@ -36,7 +39,7 @@ _QA_FAIL_WORDS = ("阻塞", "阻断")
 # 英文词按词边界匹配（避免 "criticality" 之类子串误命中）
 _QA_FAIL_EN_WORD_RE = re.compile(r"\b(?:critical|required)\b", re.IGNORECASE)
 _QA_NEGATION_RE = re.compile(
-    r"(?:无|非|不|未|没有|没|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|0)\s*"
+    r"(?:无|非|不|未|没有|没|不存在|未见|未发现|无需|不需要|no|not|without|zero|none|(?<![\d.])0(?![\d]))\s*"
     r"(?:任何|的|个|条|项)?\s*"
     r"(?:(?:阻塞|阻断|冲突|critical|required|硬违规|失败|不通过|未通过|未达标|不达标|"
     r"问题|缺陷|违规|违反|越界|超出范围|最差|驳回|打回|"
@@ -52,17 +55,131 @@ _QA_NEG_TRAILING_RE = re.compile(
     r"remaining|open|known)\s+)*"
     r"(?:critical|required|blockers?|blocking|failures?|fails?|issues?|fixes?|"
     r"problems?|bugs?|findings?|changes?)"
-    r"\s*[:：=-]?\s*(?:none|zero|0|no)\b"
+    r"\s*[:：=-]?\s*(?:none|zero|(?<![\d.])0(?![\d])|no)\b"
     # 英文后置定量否定：0/no tests failed / 0 failures（实际为全部通过，不能判失败）
-    r"|\b(?:no|zero|0)\s+(?:\w+\s+){0,3}?(?:failures?|fails?|failed|errors?)\b",
+    r"|\b(?:no|zero|(?<![\d.])0(?![\d]))\s+(?:\w+\s+){0,3}?(?:failures?|fails?|failed|errors?)\b",
     re.IGNORECASE,
 )
-# 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0 / 未通过项 0”）——中文无词边界，单独处理
-_QA_NEG_CN_TRAILING_RE = re.compile(
-    r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|问题|缺陷|违规|整改|修复)"
-    r"\s*(?:的)?\s*(?:项|个|条|例|处|次|数量|数)?\s*(?:[:：=]|为|是)?\s*"
-    r"(?:零|0)\s*(?:项|个|条|例|处|次)?",
+# Issue #2429：量词结构 + 已闭环上下文豁免。"上轮 2 条 Required 均已闭环" /
+# "N 条 Critical 已修复" / "Critical 1 项，Required 2 项，均已在上一轮闭环" 指代
+# 已处理项，英文词不得计入失败词。允许量词在名词前后，并允许闭环短语共享。
+_QA_CLOSED_CTX_RE = re.compile(
+    r"(?:(?:上轮|上一轮|此前|本轮|之前|前轮|历史)\s*)?"
+    r"(?:(?:\d+|若干|[Nn]|几)\s*(?:条|项|个)\s*)?"
+    r"\b(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))?"
+    r"(?:\s*(?:\d+|若干|[Nn]|几)\s*(?:条|项|个))?"
+    # 共享闭环短语的间隔只允许列表连接词等中性字符；出现失败信号（需/未/待/违/缺/失/不）
+    # 即视为该段包含真实失败项，不得整体豁免。
+    r"[^。;；\n需未待违缺失不]{0,20}?"
+    r"(?:均已|均已经|已经|已)\s*(?:全部)?\s*"
+    r"(?:(?:在|于)\s*(?:上一轮|上轮|此前|之前|本轮|历史)?)?\s*"
+    r"(?:全部)?\s*(?:闭环|修复|处理|解决|关闭|完成)"
+    # QA 第 3 轮：进行时尾缀（修复中/处理中/修复阶段/repairing）不算闭环。这条
+    # 前括号必须挡住，否则无数量表述（"Required 多项已在修复中"）会在规则 5 整体
+    # 豁免——规则 4c 只对带数量的句子生效，管不到这种形态。
+    r"(?![^\S\n]*(?:中|之中|阶段|stage|ing\b))",
+    re.IGNORECASE,
 )
+# Issue #2429：闭环词在名词之前（"已修复 2 条 Critical"）同样属已处理项豁免。
+_QA_CLOSED_LEAD_RE = re.compile(
+    r"(?:均已|均已经|已经|已)\s*(?:全部)?\s*(?:闭环|修复|处理|解决|关闭|完成)"
+    r"(?![^\S\n]*(?:中|之中|阶段|stage|ing\b))\s*"
+    r"(?:\d+|若干|[Nn]|几)?\s*(?:条|项|个)?\s*"
+    r"\b(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))*",
+    re.IGNORECASE,
+)
+# Issue #2429：显式“不存在未闭环项”是双重否定（无 + 未修复），须先剔除再做
+# 未闭环判定，否则“无未处理项，结论通过”会被误判 fail。
+_QA_NEGATED_UNRESOLVED_RE = re.compile(
+    r"(?:无|没有|没|不存在|未见|未发现|无需|不需要|零|(?<![\d.])0(?![\d]))\s*"
+    r"(?:任何|的|个|条|项|遗留|剩余)?\s*"
+    # Issue #2429：否定与“未+闭环”之间可夹英文名词（无 Critical 未闭环 /
+    # 没有 Required 未处理 / 未发现 Required 未修复）。只允许名词及其
+    # 问题/项修饰与中性连接符，禁止数字和逗号——“无 Critical，2 条
+    # Required 未修复”仍须命中未闭环判 fail。
+    r"(?:(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))?"
+    r"\s*(?:[/、和及与]|and)?\s*)*"
+    r"未(?:被|全部|完全|能|曾|再)?\s*"
+    r"(?:修复|闭环|处理|解决|关闭|完成)",
+    re.IGNORECASE,
+)
+# Issue #2429：反向未闭环结构必须优先判 fail（未修复/未闭环/未处理…），
+# 不能被上下文豁免或否定剔除吞掉。
+_QA_UNRESOLVED_RE = re.compile(
+    r"(?:尚未|未|没有|没)\s*(?:被|全部|完全|能)?\s*"
+    r"(?:修复|闭环|处理|解决|关闭|完成)",
+)
+# Issue #2429：显式“不存在失败项”也属通过语义（无 Critical/Required、
+# no blocking issues、0 failures），在失败语义之后放行。数字 0 需词边界，
+# 避免“20 failures”里的 0 被当成“0 failures”放行。
+_QA_ABSENCE_RE = re.compile(
+    r"(?:无|没有|不存在|未见|未发现|无需|不需要|\bno\b|\bnot\b|\bwithout\b|"
+    r"\bzero\b|\bnone\b|(?<![\d.])0(?![\d]))\s*"
+    r"(?:任何|的|个|条|项)?\s*"
+    r"(?:critical|required|阻塞|阻断|冲突|硬违规|失败|不通过|未通过|"
+    r"failures?|fails?|issues?|problems?|bugs?|blockers?|blocking)",
+    re.IGNORECASE,
+)
+# 中文后置否定（“阻塞为零 / 阻塞 0 / 阻断: 0 / 未通过项 0”）；动词须含闭环族，
+# 否则“未处理 0 项 / 未闭环 0 项”无法被剔除，会落到规则 4b 误拦（QA 第 2 轮）。
+_QA_NEG_CN_TRAILING_RE = re.compile(
+    r"(?:阻塞|阻断|冲突|硬违规|失败|不通过|未通过|问题|缺陷|违规|整改|修复|闭环|处理|解决|关闭|完成)"
+    r"\s*(?:的)?\s*(?:项|个|条|例|处|次|数量|数)?\s*(?:[:：=]|为|是)?\s*"
+    r"(?:零|(?<![\d.])0(?![\d]))\s*(?:项|个|条|例|处|次)?",
+)
+# 中文前置定量否定（“0 项未修复 / 零项待处理”）：数量在动词之前，上面的后置式匹配不到。
+_QA_NEG_CN_LEADING_RE = re.compile(
+    r"(?:零|(?<![\d.])0(?![\d]))\s*(?:项|个|条|例|处|次)?\s*(?:的)?\s*"
+    r"(?:尚未|未|没有|没)\s*(?:被|全部|完全|能)?\s*(?:修复|闭环|处理|解决|关闭|完成)",
+)
+
+# QA 第 2 轮：闭环豁免必须按项数对账，不能“命中即通过”。只对显式带正数量的
+# Critical/Required 项计账（“required fixes: none” 这类无数量表述交给既有否定规则）：
+#   - 闭环动词后跟 中/阶段/ing → 在修复中，不算闭环；
+#   - 句内出现 只有/仅/部分/前者/后者/其中 → 无法证明全部闭环；
+#   - “已修复 N 项” 少于声明总数 → 差额计入未闭环。
+_QA_ITEM_QTY_RE = re.compile(
+    r"(?:(?P<n>\d+)\s*(?:条|项|个)\s*(?:的)?\s*)?"
+    r"\b(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))?"
+    r"(?:\s*(?P<m>\d+)\s*(?:条|项|个))?",
+    re.IGNORECASE)
+_QA_CLOSED_VERB_RE = re.compile(
+    r"(?:均已|均已经|已经|已)\s*(?:全部)?\s*"
+    r"(?:(?:在|于)\s*(?:上一轮|上轮|此前|之前|本轮|历史)?)?\s*"
+    r"(?:全部)?\s*(?:闭环|修复|处理|解决|关闭|完成)")
+_QA_FIXED_QTY_RE = re.compile(
+    r"(?:已|均已|已经)\s*(?:全部)?\s*(?:闭环|修复|处理|解决|关闭|完成)\s*(?:了)?\s*"
+    r"(\d+)\s*(?:条|项|个)")
+_QA_IN_PROGRESS_TAIL_RE = re.compile(r"(?:中|之中|阶段|stage|ing\b)")
+_QA_PARTIAL_SCOPE_RE = re.compile(r"(?:只有|仅有|仅|部分|其余|前者|后者|其中)")
+
+
+def _qa_unresolved_items(blob: str) -> int:
+    """按句统计仍未闭环的 Critical/Required 项数（0 = 无残留项）。"""
+    _unresolved = 0
+    for _sent in re.split(r"[。;；\n]", blob or ""):
+        _total = 0
+        for _m in _QA_ITEM_QTY_RE.finditer(_sent):
+            _qty = int(_m.group("n") or _m.group("m") or 0)
+            if _qty > 0:
+                _total += _qty
+        if not _total:
+            continue
+        _closed = list(_QA_CLOSED_VERB_RE.finditer(_sent))
+        if any(_QA_IN_PROGRESS_TAIL_RE.match(_sent[m.end():]) for m in _closed):
+            _unresolved += _total
+            continue
+        if not _closed or _QA_PARTIAL_SCOPE_RE.search(_sent):
+            _unresolved += _total
+            continue
+        _fixed = sum(int(_x) for _x in _QA_FIXED_QTY_RE.findall(_sent))
+        if _fixed and _fixed < _total:
+            _unresolved += _total - _fixed
+    return _unresolved
 
 # 英文失败/通过按词边界识别（避免 "ok" 命中 "broken"、"fail" 命中 "failsafe" 之类子串误判）
 _QA_FAIL_EN_RE = re.compile(
@@ -78,7 +195,7 @@ _QA_NEG_PASS_RE = re.compile(
     r"not\s+(?:be\s+)?able\s+to|unable\s+to|cannot|can't|"
     r"did\s+not|does\s+not|didn't|doesn't|never|not|"
     # 英文量词否定：none of the tests passed / no tests passed / 0 tests passed
-    r"none|no|zero|0)\s*"
+    r"none|no|zero|(?<![\d.])0(?![\d]))\s*"
     r"(?:(?:全部|所有|全|完全|百分百|100%|能够|能|均|都|达到|达|满足|"
     r"all|every|any|fully|completely|entirely|be|been|"
     r"have|has|had|are|is|were|was|of|the|them|these|those|do|does|did)\s*)*"
@@ -185,14 +302,18 @@ def _is_annotated(key: tuple[str, int, str]) -> bool:
 def _issue_tags(issue_number) -> tuple[str, str] | None:
     """归一 Issue 编号为 (#N, N) 两种历史 issue_id 形态。非法编号返回 None。"""
     _s = str(issue_number or "").strip().lstrip("#")
-    if not _s.isdigit() or _s == "0":
+    if not is_actionable_issue_number(_s):
         return None
     return f"#{_s}", _s
 
 
-def _issue_number_int(issue_number) -> int:
+def _issue_number_int(issue_number):
+    """Issue 编号平台原生形态（数字→int，平台 ident→str）；非法返回 0。
+
+    Issue #3055：原实现 int() 强转对 gitee IK* 抛 ValueError，标注/PR 关联全跳过。
+    """
     _tags = _issue_tags(issue_number)
-    return int(_tags[1]) if _tags else 0
+    return native_issue_number(_tags[1]) if _tags else 0
 
 
 def _issue_scene_key(repo_key: str, issue_number) -> str | None:
@@ -327,10 +448,10 @@ def _classify_qa_text(blob: str) -> str:
        且显式“结论：通过”→ pass；
     2. 零失败率归一为“通过”（失败率为 0）；
     3. 剔除后置定量否定（0 tests failed / 未通过项 0）；
-    4. 否定式通过 / 未达标 / 部分通过 → fail；
-    5. 剔除否定语境（无违反 / 无阻塞 / no failures）；
+    4. 否定式通过 / 未达标 / 部分通过 / 反向未闭环 → fail；
+    5. 剔除“量词 + 已闭环”上下文与否定语境（无违反 / 无阻塞 / no failures）；
     6. 汇总失败词 → fail；
-    7. 失败语义 → fail，其次通过语义 → pass；
+    7. 失败语义 → fail，其次显式无失败/通过语义 → pass；
     8. 不可判定 → unknown（fail-open）。
     """
     # 规则 1：真实 qa 失败结论多为项数汇总，不能依赖“失败/不通过”字面；
@@ -341,8 +462,13 @@ def _classify_qa_text(blob: str) -> str:
     # 规则 2：失败率/失败数为 0 表示全量通过。
     _normalized = _QA_ZERO_FAIL_RATE_RE.sub("通过", blob)
     # 规则 3：先剔除后置定量否定，否则“未通过 0 项”会被否定式通过误判。
+    # 命中后置定量“零失败”表述即属显式无失败项。
+    _before_trailing = _normalized
     _normalized = _QA_NEG_TRAILING_RE.sub("", _normalized)
     _normalized = _QA_NEG_CN_TRAILING_RE.sub("", _normalized)
+    # QA 第 2 轮：前置定量否定（“0 项未修复”）与后置式同口径剔除，否则规则 4b 会误拦。
+    _normalized = _QA_NEG_CN_LEADING_RE.sub("", _normalized)
+    _zero_by_trailing = _normalized != _before_trailing
     # 规则 4：否定式通过/未达标/部分通过优先于泛化的“通过”词。
     if _QA_NEG_PASS_RE.search(_normalized):
         return "fail"
@@ -350,14 +476,30 @@ def _classify_qa_text(blob: str) -> str:
         return "fail"
     if _QA_PARTIAL_PASS_RE.search(_normalized):
         return "fail"
-    # 规则 5：剔除否定语境后再做失败/通过语义判定。
+    # 规则 4b：先在剔除“无/没有 + 未修复/未闭环”双重否定后判定，避免
+    # “无未处理项，结论通过”被反向未闭环规则误杀。QA 第 2 轮：改用
+    # `_normalized`（已剔除后置/前置定量否定），否则“0 项未修复”会按原文命中。
+    if _QA_UNRESOLVED_RE.search(_QA_NEGATED_UNRESOLVED_RE.sub("", _normalized)):
+        return "fail"
+    # 规则 4c：闭环豁免按项数对账——句内仍有未闭环的 Critical/Required 项即 fail。
+    # 覆盖三类误放：在修复中（不是闭环）、只有后者已闭环（共享短语吞掉前项）、
+    # 已修复 1 项 / 声明 2 项（部分修复）。
+    if _qa_unresolved_items(blob) > 0:
+        return "fail"
+    # 规则 5：先剔除“量词/闭环 + 已闭环”豁免，再剔除否定语境，最后做失败/通过判定。
+    _closed_context = bool(_QA_CLOSED_CTX_RE.search(_normalized)
+                           or _QA_CLOSED_LEAD_RE.search(_normalized))
+    _normalized = _QA_CLOSED_CTX_RE.sub("", _normalized)
+    _normalized = _QA_CLOSED_LEAD_RE.sub("", _normalized)
     _normalized = _QA_NEGATION_RE.sub("", _normalized)
     # 规则 6：汇总失败词（最差/违反/越界/需修复/未达）→ fail。
     if _QA_SUMMARY_KEYWORD_RE.search(_normalized):
         return "fail"
-    # 规则 7：失败语义优先于通过语义。
+    # 规则 7：失败语义优先于通过语义；已闭环上下文/显式无失败项也视为通过。
     if _qa_fail_by_terms(_normalized):
         return "fail"
+    if _closed_context or _zero_by_trailing or _QA_ABSENCE_RE.search(blob):
+        return "pass"
     if _qa_pass_by_terms(_normalized):
         return "pass"
     return "unknown"

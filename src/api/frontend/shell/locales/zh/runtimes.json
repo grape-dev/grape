@@ -25,6 +25,7 @@
   "stats": {
     "total": "共 {count} 台"
   },
+  "search_placeholder": "搜索名称、设备、标签…",
   "tab": {
     "engines": "Engines 引擎",
     "workers": "Workers 设备"
@@ -115,7 +116,12 @@
     "recent_models": "最近使用模型",
     "recent_models_desc": "按用量统计 Top 3",
     "recent_models_empty": "暂无使用记录",
-    "model_used_count": "{{count}} 次"
+    "model_used_count": "{{count}} 次",
+    "sandbox_platform": "沙箱平台",
+    "sandbox_template": "模板",
+    "platform_disabled": "已禁用",
+    "platform_disabled_tip": "关联的沙箱平台已禁用：不再新建沙箱，启用请在平台详情操作",
+    "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理"
   },
   "empty": {
     "no_engines": "暂无引擎",
@@ -156,7 +162,33 @@
     "revoke_confirm": "确认吊销并删除该凭据？此操作不可恢复，此后该 worker 将无法接入，凭据名可重新使用。",
     "toast_revoked": "已吊销并删除",
     "toast_revoke_failed": "吊销失败: {{msg}}",
-    "tasks_title": "凭据 #{{id}} · 任务"
+    "tasks_title": "凭据 #{{id}} · 任务",
+    "sandbox_gen_title": "生成沙箱凭据",
+    "sandbox_hint": "沙箱平台 worker 接入凭据（rta_ token）——在沙箱平台所在的 Linux 机器上一键安装",
+    "sandbox_platform": "沙箱平台",
+    "sandbox_platform_placeholder": "选择平台",
+    "sandbox_toast_platform_required": "请选择沙箱平台",
+    "sandbox_token_warning": "沙箱凭据 {name}（{scope}·{platform}）已生成。token 仅显示一次，请立即保存；泄露请到凭据列表吊销。",
+    "sandbox_install_hint": "🐧 在沙箱平台的 Linux 机器上一键安装接入",
+    "sandbox_install_desc": "在沙箱平台所在机器上执行（需 Python ≥ 3.10 + curl）。平台端点/API Key/SSL 证书以本表单为准（生成凭据时已保存）。安装后 worker 启动自动扫描上报模板列表与预装引擎（需平台 SDK），云沙箱页即可见该平台。当前暂不支持 Windows 与手动模式。",
+    "sandbox_conn_title": "平台连接信息",
+    "sandbox_key_ph": "平台 API Key（如 e2b_xxx，无鉴权留空）",
+    "sandbox_conn_desc": "以上信息将保存在 grape 服务端数据库（API Key 加密存储），一键安装命令无需携带；worker 启动后自动上报模板列表。",
+    "sandbox_endpoint_desc": "沙箱平台的 API 服务地址，grape 通过它创建/销毁沙箱并扫描模板列表。",
+    "sandbox_key_desc": "平台颁发的访问凭据（如 e2b_xxx），grape 调用平台 API 时携带；平台未开启鉴权时可留空。",
+    "sandbox_cert_label": "SSL 证书",
+    "sandbox_cert_desc": "平台使用自签/私有 CA 的 HTTPS 时的证书 PEM 内容，用于 grape 校验平台连接；普通 HTTP 或公共 CA 留空。",
+    "sandbox_toast_endpoint_required": "请填写平台 API URL（沙箱平台 API 地址）",
+    "platform_detail_btn": "详情",
+    "revoke_active_sandboxes": "当前有 {n} 个运行中的沙箱",
+    "revoke_active_sandboxes_body": "删除凭据后，这些沙箱将不再被管理，可能导致资源占用和持续计费，请手动去平台清理沙箱。",
+    "revoke_active_ok": "仍要删除凭据",
+    "revoke_active_cancel": "暂不删除",
+    "sandbox_conn_required": "(必填)",
+    "platform_unbound": "未绑定平台，无详情",
+    "warn_sandbox_provider_registration_failed": "沙箱平台登记失败：凭据已创建，但平台未绑定（无详情按钮），请检查服务端加密密钥配置后重试。",
+    "warn_unknown": "操作已完成，但有告警：{{code}}",
+    "platform_detail_btn_tip": "打开平台详情（信息/模板/沙箱）"
   },
   "toast": {
     "load_tasks_failed": "加载任务失败: {{msg}}",
@@ -263,7 +295,15 @@
       "unknown": "未知"
     }
   },
+  "fgrp_range": "范围",
+  "fgrp_type": "引擎",
+  "fgrp_scope": "归属",
   "rt_range_all": "全部",
   "rt_range_repo": "仓库",
-  "rt_range_user": "个人"
+  "rt_range_user": "个人",
+  "filter": {
+    "non_sandbox": "非沙箱",
+    "sandbox_platform": "沙箱平台"
+  },
+  "sandbox_toast_endpoint_required": "请填写平台 API URL（沙箱平台 API 地址）"
 }

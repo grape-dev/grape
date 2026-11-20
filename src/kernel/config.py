@@ -1,6 +1,11 @@
 """Bot 配置：全局常量、事件路由、多账户配置"""
-import os, json, logging, logging.handlers, urllib.request, socket
+import os, json, logging, logging.handlers, urllib.request, socket, sys
 import ssl
+
+# 能力端口：kernel 不 import src.domains；域实现在装配层 src/api/contracts_wiring.py 绑定。
+# meta 读写（mgmt.user.db）与登录白名单判定（mgmt.public）经端口转发。
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import tokens as _tokens
 
 # api.gitcode.com 被 GFW SNI 拦截（返回自签名证书），全局禁用 urllib SSL 验证。
 # 影响所有用 urllib.request.urlopen 调 api.gitcode.com 的模块（event_pipeline / auth / repo_manager 等）。
@@ -132,26 +137,79 @@ def _parse_level(s: str) -> int:
     return logging.INFO
 
 
-_LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
-_LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
-os.makedirs(_LOG_DIR, exist_ok=True)
+def _ensure_dir(path: str) -> str:
+    """尽力创建目录；失败返回 ``"<异常类>: <消息>"``（空串=成功），绝不上抛。
 
-_file_handler = logging.handlers.TimedRotatingFileHandler(
-    os.path.join(_LOG_DIR, "devops-bot.log"),
-    when="midnight", interval=1, backupCount=30, encoding="utf-8",
-)
-_file_handler.setLevel(_LOG_LEVEL)
-_file_handler.setFormatter(_JsonFormatter())
-_file_handler.addFilter(_RequestIdFilter())
+    Issue #2933：容器/沙箱把目录挂成只读时 ``os.makedirs`` 抛 ``OSError``，
+    这里只把真实原因回传给调用方，由调用方决定降级与告警文案。
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        return ""
+    except OSError as e:
+        return f"{e.__class__.__name__}: {e}"
+
+
+def _warn_stderr(message: str) -> bool:
+    """尽力把降级提示写到 stderr，返回是否成功；stderr 不可写时仅返回 False。"""
+    try:
+        sys.stderr.write(message)
+        sys.stderr.flush()
+        return True
+    except OSError:
+        return False
+
+
+_LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
+
+# Issue #2933：导入期日志初始化降级。容器/沙箱把 data/logs 挂成只读时，
+# os.makedirs 与 TimedRotatingFileHandler 构造都会抛 OSError，导致
+# ``import src.kernel.config`` 失败，进而让 pre-push 分支守卫在鉴权前崩溃阻断 push。
+# 处理原则：环境只读 ≠ 业务失败——文件 handler 构造失败仅降级为 stderr，绝不上抛。
+LOG_FILE_DEGRADED = False
+LOG_FILE_DEGRADED_REASON = ""
+_file_handler = None
+_log_init_stage = ""
+_log_dir_error = _ensure_dir(LOG_DIR)
+if _log_dir_error:
+    _log_init_stage = f"日志目录不可写({LOG_DIR})"
+else:
+    try:
+        _file_handler = logging.handlers.TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, "devops-bot.log"),
+            when="midnight", interval=1, backupCount=30, encoding="utf-8",
+        )
+        _file_handler.setLevel(_LOG_LEVEL)
+        _file_handler.setFormatter(_JsonFormatter())
+        _file_handler.addFilter(_RequestIdFilter())
+    except OSError as _log_init_err:
+        _log_dir_error = f"{_log_init_err.__class__.__name__}: {_log_init_err}"
+        _log_init_stage = "日志文件 handler 构造失败"
+if _log_dir_error:
+    LOG_FILE_DEGRADED = True
+    LOG_FILE_DEGRADED_REASON = _log_dir_error
+    _file_handler = None
+    # 降级提示直接写 sys.stderr（不能经 logger：坏掉的正是文件 handler，
+    # 经 logger 有递归/被吞风险）；只输出一条中文提示，不带 traceback。
+    _warn_stderr(
+        f"[grape] WARNING {_log_init_stage}：{_log_dir_error}；"
+        "已降级为仅 stderr 输出，不影响业务功能\n")
+# 导入期一次性临时变量，用完即删，避免残留为模块公开属性。
+del _log_init_stage, _log_dir_error
 
 _stream_handler = logging.StreamHandler()
 _stream_handler.setLevel(_LOG_LEVEL)
 _stream_handler.setFormatter(_JsonFormatter())
 _stream_handler.addFilter(_RequestIdFilter())
 
+_handlers = [_h for _h in (_file_handler, _stream_handler) if _h is not None]
+if not _handlers:
+    _handlers = [logging.NullHandler()]
+
 logging.basicConfig(
     level=_LOG_LEVEL,
-    handlers=[_file_handler, _stream_handler],
+    handlers=_handlers,
 )
 log = logging.getLogger("devops-bot")
 log.addFilter(_RequestIdFilter())
@@ -159,6 +217,95 @@ log.addFilter(_RequestIdFilter())
 # ====== 目录常量 ======
 SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".grape", "skills"))
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
+
+
+# D110：平台 bot 的初始化种子文件。沿用原名 global-bot-token.json（它承载的就是
+# "全局 bot 凭据"这件事，改名对运维无收益）；platform-bots.json 只是本项目某个
+# 中间版本用过的名字，保留兼容读，一个发布周期后可删。
+BOT_SEED_FILE = "global-bot-token.json"
+LEGACY_BOT_SEED_FILE = "platform-bots.json"
+
+
+def bot_seed_path() -> str:
+    """返回实际生效的种子文件路径：主名存在优先，其次兼容名，都没有则返回主名路径。"""
+    import os as _os
+
+    main_path = _os.path.join(CONFIG_DIR, BOT_SEED_FILE)
+    if _os.path.exists(main_path):
+        return main_path
+    legacy = _os.path.join(CONFIG_DIR, LEGACY_BOT_SEED_FILE)
+    if _os.path.exists(legacy):
+        return legacy
+    return main_path
+
+def read_bot_seed_file() -> dict[str, dict]:
+    """读平台 bot 种子文件并归一化成 {provider: {"username": str, "token": str}}。
+
+    兼容两种写法（后者字段优先，便于平滑升级）：
+    1) 旧扁平键：`gitcode_api_token` / `github_bot_token` / `github_bot_username` /
+       `<provider>_bot_token` / `<provider>_bot_username`；
+    2) 新数组：
+         "platform_bot": [
+             {"provider": "gitee", "bot_name": "gitee-bot", "bot_token": "..."}
+         ]
+       别名：provider ← platform_type | platform；bot_name ← username；
+       bot_token ← token | bit_token（历史笔误）。
+    文件缺失/损坏返回 {}（调用方按"无种子"处理）。
+    """
+    import json as _json
+    import os as _os
+
+    path = bot_seed_path()
+    if not _os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = _json.load(fh) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    out: dict[str, dict] = {}
+
+    def _put(provider: str, key: str, value) -> None:
+        # 归一化键：provider 一律小写去空白；空值视为"未配置"，不覆盖已有值
+        provider = str(provider or "").strip().lower()
+        if not provider or not value:
+            return
+        out.setdefault(provider, {})[key] = str(value)
+
+    # 1) 旧扁平键
+    for key, value in data.items():
+        if not value or str(key).startswith("_"):
+            continue
+        if key == "gitcode_api_token":
+            _put("gitcode", "token", value)
+            continue
+        if not isinstance(value, str):
+            continue
+        for suffix, field_name in (("_bot_token", "token"), ("_bot_username", "username")):
+            if key.endswith(suffix):
+                _put(key[: -len(suffix)], field_name, value)
+                break
+
+    # 2) 新数组：platform_bot（或同义 platform_bots）——同字段优先级高于上面的旧扁平键；
+    #    也接受 {provider: {...}} 的映射写法，统一转成列表处理
+    rows = data.get("platform_bot") or data.get("platform_bots") or []
+    if isinstance(rows, dict):
+        rows = [dict(v, provider=k) for k, v in rows.items()]
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            provider = (row.get("provider") or row.get("platform_type")
+                        or row.get("platform") or row.get("name") or "")
+            username = row.get("bot_name") or row.get("username") or ""
+            token = row.get("bot_token") or row.get("token") or row.get("bit_token") or ""
+            _put(provider, "username", username)
+            _put(provider, "token", token)
+    return out
+
 EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "examples"))
 
 
@@ -182,9 +329,13 @@ def _resolve_workspace_dir() -> str:
 
 
 WORKSPACE_DIR = _resolve_workspace_dir()
-LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+
+# Issue #2933：只读挂载下目录创建失败不得在导入期抛异常；真实原因写 stderr 告警。
+_workspace_dir_error = _ensure_dir(WORKSPACE_DIR)
+if _workspace_dir_error:
+    _warn_stderr(
+        f"[grape] WARNING 工作区目录不可写({WORKSPACE_DIR})：{_workspace_dir_error}；"
+        "已跳过创建，不影响导入\n")
 
 # Chat 工作目录下发的逻辑基准（远端 worker _remap_cwd 的默认映射契约）。
 # 服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，否则非 root 用户 worker
@@ -237,7 +388,7 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true",
 
 # 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/domains/mgmt/auth/，
 # 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
-# 服务端如需 is_production，直接 from src.domains.mgmt.auth.security_config import is_production。
+# 服务端如需 is_production，直接 from src.kernel.security_config import is_production。
 # IS_PRODUCTION 常量已删除：全库零消费（死代码）。
 
 # JWT 密钥安全门禁
@@ -307,53 +458,51 @@ def _load_accounts():
                 log.warning(f"_detect_server_base: hostname resolution failed: {e}")
             # Issue #372 §14.2.1: 全部失败 → 写标记供设置页展示
             try:
-                from src.domains.mgmt.user.db import set_meta_value
-                set_meta_value("webhook_url_detect_failed", "1")
+                _tokens.set_meta_value("webhook_url_detect_failed", "1")
                 log.warning("_detect_server_base: all detection methods failed, webhook_url will be empty until configured or detected from Host header")
             except Exception:
                 pass
             return ""
         try:
-            from src.domains.mgmt.user.db import get_meta_value, set_meta_value
             _cfg = read_server_config()
-            if not get_meta_value("webhook_url"):
+            if not _tokens.get_meta_value("webhook_url"):
                 _wh = (_cfg.get("webhook_url") or "").strip()
                 if _wh:
-                    set_meta_value("webhook_url", _wh)
+                    _tokens.set_meta_value("webhook_url", _wh)
                     log.info(f"Configured webhook URL from server-config.json: {_wh}")
                 else:
                     base = _detect_server_base()
                     if base:
-                        set_meta_value("webhook_url", base + "/webhook/gitcode")
+                        _tokens.set_meta_value("webhook_url", base + "/webhook/gitcode")
                         log.info(f"Auto-detected webhook URL: {base}/webhook/gitcode")
-            if not get_meta_value("server_base_url"):
+            if not _tokens.get_meta_value("server_base_url"):
                 _sb = (_cfg.get("server_base_url") or "").strip().rstrip("/")
                 if _sb:
-                    set_meta_value("server_base_url", _sb)
+                    _tokens.set_meta_value("server_base_url", _sb)
                     log.info(f"Configured server base URL from server-config.json: {_sb}")
                 else:
                     base = _detect_server_base()
                     if base:
-                        set_meta_value("server_base_url", base)
+                        _tokens.set_meta_value("server_base_url", base)
                         log.info(f"Auto-detected server base URL: {base}")
             # Issue #471 E1：拆分配置项双写 meta（与 server_base_url 同语义：
             # server-config.json 显式配置 > meta；未配置不写，getter 回退 server_base_url）
-            if not get_meta_value("browser_callback_url"):
+            if not _tokens.get_meta_value("browser_callback_url"):
                 _bcb = (_cfg.get("browser_callback_url") or "").strip().rstrip("/")
                 if _bcb:
-                    set_meta_value("browser_callback_url", _bcb)
+                    _tokens.set_meta_value("browser_callback_url", _bcb)
                     log.info(f"Configured browser_callback_url from server-config.json: {_bcb}")
-            if not get_meta_value("worker_connect_url"):
+            if not _tokens.get_meta_value("worker_connect_url"):
                 _wcu = (_cfg.get("worker_connect_url") or "").strip().rstrip("/")
                 if _wcu:
-                    set_meta_value("worker_connect_url", _wcu)
+                    _tokens.set_meta_value("worker_connect_url", _wcu)
                     log.info(f"Configured worker_connect_url from server-config.json: {_wcu}")
             # Issue #1577：业务 API 基址（任务内 GRAPE_SERVER_URL）可选配置，
             # 未配置 getter 回退 server_base_url（单地址部署与改造前等价）。
-            if not get_meta_value("task_business_api_url"):
+            if not _tokens.get_meta_value("task_business_api_url"):
                 _tba = (_cfg.get("task_business_api_url") or "").strip().rstrip("/")
                 if _tba:
-                    set_meta_value("task_business_api_url", _tba)
+                    _tokens.set_meta_value("task_business_api_url", _tba)
                     log.info(f"Configured task_business_api_url from server-config.json: {_tba}")
         except Exception:
             pass
@@ -479,11 +628,10 @@ def _read_runtime_config_file() -> dict:
 def _read_runtime_meta() -> dict:
     """DB meta 表读取管理台配置值（异常时返回空——worker 端无 DB 等场景）。"""
     try:
-        from src.domains.mgmt.user.db import get_meta_value
         keys = ("runtime_task_timeout",
                 "devstage_template_id", "devstage_flavor_id",
                 "devstage_cores", "devstage_memory", "devstage_arch")
-        return {k: get_meta_value(k) for k in keys}
+        return {k: _tokens.get_meta_value(k) for k in keys}
     except Exception:
         return {}
 
@@ -650,16 +798,14 @@ def _is_login_whitelist_enabled() -> bool:
     if _WL_ENABLED_CACHE is not None and (now - _WL_CACHE_TS) < _WL_CACHE_TTL:
         return _WL_ENABLED_CACHE
     try:
-        from src.domains.mgmt.user.db import get_meta_value
-        val = get_meta_value("login_whitelist_enabled")
+        val = _tokens.get_meta_value("login_whitelist_enabled")
         if val is not None and val != "":
             result = val.lower() in ("true", "1", "yes")
         else:
             # meta 未设置——兼容旧部署：表有数据则隐式启用
             # 表归 mgmt 域：读语句在 `src.domains.mgmt.public`（任意拓扑原语），
             # kernel 侧不再持有该表的 SQL（三库独立后进程库没有此表）。
-            from src.domains.mgmt.public import login_whitelist_count
-            count = login_whitelist_count()
+            count = _accounts.login_whitelist_count()
             if count > 0:
                 log.warning(
                     "login_whitelist has %d entries but meta 'login_whitelist_enabled' is not set. "
@@ -723,25 +869,20 @@ def is_user_allowed(provider: str, login: str) -> bool:
     # 表归 mgmt 域：三条语句都在 `src.domains.mgmt.public`（任意拓扑原语）。
     # 老列的列名由 owner 域从 provider 派生并过白名单，kernel 不再拼列名/SQL。
     try:
-        from src.domains.mgmt.public import (
-            login_whitelist_count,
-            login_whitelist_legacy_column_match,
-            login_whitelist_row_match,
-        )
         # fail-closed（2026-11-12 拍板，取代原 P2-6 全放行）：
         # 开关已启用而表空 = 未配置任何人 → 拒绝所有 OAuth 登录。
         # 管理台走独立密码链（admin_accounts），可登入即时补条目，不构成不可逆锁死。
-        count = login_whitelist_count()
+        count = _accounts.login_whitelist_count()
         if count == 0:
             log.error(
                 "login_whitelist_enabled=true but table is empty — denying all OAuth logins (fail-closed)"
             )
             return False
         # 1) 新行查询（行式：provider + username）
-        if login_whitelist_row_match(provider, login):
+        if _accounts.login_whitelist_row_match(provider, login):
             return True
         # 2) 老列兜底（列名由 provider 派生；物理列不存在 = 该渠道无老数据）
-        return login_whitelist_legacy_column_match(provider, login)
+        return _accounts.login_whitelist_legacy_column_match(provider, login)
     except Exception:
         pass  # DB 不可用，降级文件
     # 降级：读文件（fail-closed：开关已启用时，文件缺失/空/损坏一律拒绝）

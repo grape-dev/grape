@@ -104,7 +104,7 @@ def enrich_event_files(evt: dict, repo_key: str, token: str = "",
         else:
             if not token:
                 try:
-                    from src.domains.mgmt.user.db import get_repo_token_with_refresh
+                    from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
                     token = get_repo_token_with_refresh(repo_key) or ""
                 except Exception as e:
                     log.warning(f"files enrich: get repo token failed repo={repo_key}: {e}")

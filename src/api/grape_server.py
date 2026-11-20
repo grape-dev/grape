@@ -13,6 +13,10 @@ from src.kernel.config import log
 from src.api.version_check import ensure_python_version
 
 ensure_python_version()
+# 进程角色默认值（2026-11-16 实弹）：表归属守卫按角色判定 owner，缺角色会把本域 DDL
+# 整批当「别家域」跳过（平台四表 / meta 因此不建，PAT 关系写不进）。入口写死默认值，
+# 自定义启动方式未设 env 时也不会静默丢表。
+os.environ.setdefault("GRAPE_PROCESS_ROLE", "mgmt")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -31,7 +35,7 @@ def _startup_security_check():
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.kernel.config import log
-    from src.domains.mgmt.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+    from src.kernel.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 
@@ -135,21 +139,50 @@ async def lifespan(app: FastAPI):
     init_database()
     _load_accounts()
 
+    # 沙箱配置面 6 表（white-list / paths / config / template / llm credential /
+    # proxy token）归 mgmt。它们原先由 runtime 的 ensure_sandbox_tables() 建，
+    # 而那个函数四个进程都会调 —— 三库拓扑下每进程建进自己的库。
+    # 这里只在 mgmt 进程建 + seed 官方域名，幂等，失败只告警不阻断启动。
+    try:
+        from src.domains.mgmt.sandbox_schema import ensure_sandbox_config_tables
+        ensure_sandbox_config_tables()
+    except Exception as _sse:
+        log.warning(f"沙箱配置面建表失败（不阻断启动）: {_sse}")
+
     # 生产环境启动安全门禁
     try:
         _startup_security_check()
     except SystemExit as e:
         raise
 
-    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 mgmt 启动）
+    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 mgmt 启动）。
+    # 注册走 HTTP，注册端慢或不可达时会把端口监听一起拖住；
+    # 它不是对外服务的前置条件（进程内调用方拿到 gsb 实例即可），因此给 3s 预算，
+    # 超时就把启动转到后台继续，等它自己完成/失败——端口先对外可用。
     _gsb = getattr(app.state, "gsb", None)
     if _gsb is not None:
-        await _gsb.startup()
+        try:
+            await asyncio.wait_for(_gsb.startup(), timeout=3.0)
+        except asyncio.TimeoutError:
+            log.warning("[GSB] startup 超过 3s，转后台继续注册（不阻塞端口监听）")
+            asyncio.create_task(_gsb.startup())
+        except Exception as _ge:
+            log.warning(f"[GSB] startup failed: {_ge}")
 
     # Mgmt 进程定时任务（设计 §5.1）
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
     log.info("Grape Mgmt Server lifespan started")
+
+    # D109（平台对象模型）：扫描导入 → 一次性凭据迁移/关系回填 → 标记 migrated。
+    # A 进程是四进程模式的唯一 mgmt 入口，启动装配必须在这里；main.py 只管单进程模式，
+    # 两处调用同一个 src/api/d109_startup.py。失败 fail-open：读路径回落文件+meta。
+    try:
+        from src.api.d109_startup import d109_platform_object_startup
+
+        d109_platform_object_startup(log)
+    except Exception as _d109_err:
+        log.warning(f"D109 platform-object startup skipped (non-fatal, 回落旧存储): {_d109_err}")
 
     # 2026-11-12 结构修复：此处原本残留了一次 yield + 关闭段（合并时把 weekly 的
     # "先 yield 再起 IM" 段落拼了进来），导致后面的启动段（IM 引擎、engine probe、
@@ -483,7 +516,7 @@ app = server_common.build_app(
 from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
     feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community,
-    patrol,
+    patrol, categories as categories_routes,
 )
 
 app.include_router(grape_auth.router)
@@ -499,6 +532,8 @@ app.include_router(settings.router)
 app.include_router(skills.router)
 
 app.include_router(scenes.router)
+
+app.include_router(categories_routes.router)
 
 app.include_router(templates.router)
 

@@ -228,6 +228,29 @@
 | S103 | 凭据级 workflows 写能力三态（D105-18，D105-17 审阅保留收窄） | 用户在凭据 tab 配平台 PAT | 保存时对象形态声明 workflows_write（true/false/不声明三态，旧前端字符串形态=未声明）；保存后创建含 .github/workflows 的模板仓库 | true → push 不删（github 平台同样生效）；显式 false → 删；未声明 → 回退平台名旧逻辑（github 删/gitcode 不删，存量零回归）；OAuth 路径 → 保守删；get_credentials 回显 workflows_write 供凭据 tab 判定 | test_d105m_workflows_capability（6）+ test_s103_workflows_capability_scenarios（4）
 | S104 | 审计续审九轮收口：org 哨兵族场景锁（D105-18 续，F4 固化） | managed_repos.org_id 持 D105-15 TEXT 保值后形态（'' =未归属，0/'0'=历史哨兵） | 创建需求时解析归属组织：repo 关联 org=0 / org='0' / 真实 org / 无托管记录；组织级 explicit=31/0/'' | 0 与 '0' 与无记录一律出 ''（哨兵跨维度统一）；真实归属原值返回（'7'）；explicit 31 透传（==31 契约不 str 化）、0/'' 严格 ==''（round-11 收紧，无宽容 in-元组形态） | test_s104_issue_org_sentinel（5）+ test_issue_org_attribution::TestResolveIssueOrgId（回归）
 | S105 | 已删兜底退役锁（D105-18 续二，审计 round-10 遗留 RED 清偿） | D3 有意删除 _get_gitcode_credential_by_gitcode_id 兜底（跨 user_id 凭据匹配收口进现役供给链） | 测试套件运行 | 退役锁断言 hasattr=False——兜底回潮即 RED；悬空引用用例（连续 4 轮 RED）清零，分支 RED 归零 | test_issue_org_attribution::TestGetGitcodeCredByGitcodeId（退役锁）
+| S106 | 登录渠道配置解耦：oauth-providers.json 文件真源 + 与仓库托管配置分层（D108，2026-11-13） | 仓库侧平台卡已是文件真源（S83/D59），登录侧渠道卡仍硬编码在 providers._DEFAULT_PROVIDERS（文件内还重复定义两份，后者覆盖前者）；example 只有 gitcode/github（gitee/华为无样例）且迁移是整块覆盖（建文件重启会抹掉 DB 渠道卡）；真文件被 .gitignore 忽略（真源化后新部署无渠道卡、登录全断）；Gitee 每次弹授权页根因=scope 含非法 emails（Gitee 按请求 scope 与上次授权范围一致判定是否跳过授权页） | ①渠道卡迁 configs/oauth-providers.json（一份聚合、四渠道、无凭据），优先级 meta 逐键合并 > 文件 > 无（fail-closed，不放回代码兜底）；②删两份代码字面量 + 加载器（未知键整卡拒绝/缺三端点拒绝/凭据剥离告警/下划线文档键跳过）；③管理面保存基线改读文件卡；④.gitignore 移除该忽略项（与 platforms/*.json 同口径）；⑤example 补 _readme/_modes/每渠道 _note；⑥分层守卫（两类卡字段互不渗透）；⑦Gitee scope=user_info projects、pkce=false，补华为渠道卡。文件：configs/oauth-providers.json、configs/oauth-providers.example.json、src/domains/mgmt/auth/providers.py、src/domains/mgmt/admin/routes.py、.gitignore | 定向 43 passed（含 11 条新守卫）；Gitee scope ⊆ 官方合法集；gitee/华为 pkce=false；华为卡经构建校验；OAuth 卡含托管字段、平台卡含 OAuth 字段、配置文件含凭据三类越界均 RED；example 可直接复制成真文件加载。测试：test_oauth_channel_consistency（11）+ test_channel_strategy / test_d28_channel_login_wiring / test_s74_family_closure（回归 32） |
+| S107 | 平台对象模型：三类配置 / 五张表 / 派生能力视图 + 用户级平台关系（D109，2026-11-13） | ①configs/platforms/*.json 职责被放大（方言 + 凭据 + 身份/展示混装），"用哪种凭据"无独立配置位；②登录渠道与仓库平台是两个平行集合，靠同名文件隐式关联，无 grape_t_channel_repo_link / grape_t_user_repo_platform_link；③"是否支持仓库"有 4 套判据（list_vcs_platforms / repos.py:141 模块位 / repo_manager:1146 已知集合 / 前端），实锤 gitlab=configured:true+hosting:false+login:false；④平台可见性=平台卡在册即全可见（settings.py:2428 注释原文），无用户维度；⑤身份令牌可做仓库操作（deps.py:560 同函数两域 + token_resolver.py:438 ①PAT②OAuth 隐式序），D108-B 曾用 env 开关堵（绕行口） | ①三类配置：oauth-providers.json（怎么登录）/ platforms/*.json（怎么说话，含 pat_create_url 等原 caps 字段）/ channel-repo-links.json（谁能用谁；文件缺席→按 provider 同名默认，存在即权威）；②五张表：grape_t_oauth_channels / grape_t_repo_platforms / grape_t_channel_repo_link / grape_t_user_repo_platform_link（纯运行时，无配置来源）+ 派生能力视图（login / login_supported（第一批恒等 login）/ configured / hosting  / supports_bot_token / supports_webhook_secret / bot_username，无 credential_drivers），hosting 不落表；③用户关系=**纯对应关系表**（2026-11-14 裁定，取代 via_bits 生命周期表）：grape_t_user_repo_platform_link（改名，体现"仓库平台"）只存 user_id/repo_provider/linked_at/revoked_at/revoked_reason，**不存 status、不存来源渠道、不存可用性布尔**；关系=准入清单（收窄），可用性读取时现算（有 PAT(p) 或 ∃活跃渠道∧link(c→p)）；写入三路=OAuth 登录 / OAuth 绑定（2026-11-14 补，此前绑定路径漏写）/ PAT 保存（不经渠道直插）；撤销写 revoked_at+reason（user_unbind/credential_deleted/oauth_unbound/admin/disabled_by_user）；④**第一批必带数据回填迁移**：凭据域 PAT → 关系行；ei 的 (user,oauth_provider) 按 link 展开 → 关系行；幂等 upsert + 回填前后对账；⑤取 token 链保持三层（d101 §二 契约），只改 UserToken 内部：PAT → oauth_identity（第一批桩）→ NO_REPO_CREDENTIAL；⑥split mode：定义字段配置真源、enabled 归 DB、行级 config_hash、orphaned 软删与"无视 hash"的恢复、drifted 单义、meta 两键降级、双向导入规则（凭据能力有方言卡无→拒绝；反之→默认补齐）；⑦GRAPE_OAUTH_TOKEN_FALLBACK 降为运维硬关（=0 才禁 OAuth 驱动仓库；默认按关系表放行）；⑧判据收敛两处 + 对拍；⑨provider 命名规则（^[a-z][a-z0-9_-]{1,31}$ / 小写 / 禁保留字 / 与目录名+oauth key+repo_key 前缀+webhook_path 末段一致）；⑩字段值只准取真实枚举（§13 为唯一校验规则来源）；⑪link 目标存在性校验（显式声明缺失→导入 error；文件缺席时同名默认配对，无同名平台不派生，纯登录渠道无幽灵 link）；⑫一个 provider 一种方言（多方言拆卡，禁止数组）；⑬过渡期护栏=基线+增量棘轮（新增旧判据调用即红）；⑭非标准协议渠道（SAML/非标准扫码）需在 channel_strategy 注册策略；⑮**生效路径统一**：三类配置运行时真源=DB 表、文件仅导入源、删除文件 TTL 热重载（实查两类现为 300s TTL+主动失效）、行级 hash + 显式导入/dry-run、文件改不导入则不生效但 drifted 可见、meta 一次性迁移置 migrated 后不再逐键覆盖；⑯**配置初始化=启动扫描：按规范化内容 hash（非 mtime）逐 provider 判定 导入/跳过/orphaned/manual 跳过/恢复，日志五项，strict 可拒启动；配置文件只在初始化/显式导入时有效，运行时只读 DB；集群共享 DB + meta.config_state.epoch 跨实例失效（导入即全集群生效，多实例启动靠导入锁+幂等不重复导入）**；⑰字段归属裁定（2026-11-14 收敛）：token_storage_field/webhook_token_field/owner_fallback/pat_create_url 与 legacy_token_symbol/workflows_write 一律留在平台卡（repo-credentials.json 已删除，字段并入 grape_t_repo_platforms）；⑱**bot 三层分层**：能力位由账号事实派生（有账号即 supports_bot_token，无配置声明），账号与 token 进 grape_t_bot_accounts 对象（bot_identity_mode 取消）；职责收敛：grape_t_bot_accounts=平台账号目录（定义+tokens）、managed_repos.bot_username=仓库绑定、is_default=平台默认；身份解析=绑定>默认>无（第二批池选号）；git 签名与统计名单均从 grape_t_bot_accounts 派生（取绑定账号；env BOT_USERNAME 仅显式覆盖，删 grape_bot 兜底）；token 优先级=仓库级 grape_t_repo_credentials > grape_t_bot_accounts（加密，不落 meta、不散键名）；fail-closed 不变。⑲bot 归属与快照：bot 归 repo_provider（平台卡只声明 supports_bot_token、grape_t_bot_accounts 存账号、managed_repos 存绑定、oauth 不持有）；仓库级 bot=全局默认账号快照（托管时复制 username+token，routes/repos.py:911），补 grape_t_repo_credentials.derived_from（provider:username，空=用户自定义）做轮换精确传播；bot 全量入库清单（含历史别名 gitcode_api_token / github_bot_token、单值 username 键、gitcode 池、状态键、四平台 oauth client_id/secret(→oauth_channels 加密列)、redirect_uri，迁后旧键停读+迁移标记）/ 全局 bot 五场景（托管/webhook、评论兜底、巡检、self-loop、统计名单）统一由 is_default 账号服务，降级=其他 active 账号→仓库快照→无。㉖**凭据代理模式**（2026-11-14 裁定 + 同日简化）：凭据不在关系表、不在绑定时指定、不挂 managed_repos；统一门面 credential_resolver 按 (user_id, repo_provider, need_scope) 现算，返回 (token, source, reason)；解析序=①PAT（优先，显式意图）②渠道令牌（**只要有配对**：活跃渠道 ∧ channel-repo-links 里有该 (c→p)；relation 档位/drivers/scope/audience 一律不参与判定）③空+原因码（NO_PAT/NO_CHANNEL/LINK_MISSING/DRIVER_NOT_DECLARED/AUDIENCE_MISMATCH/TOKEN_EXPIRED）；**OAuth 仓库能力保留**（关系=identity_and_credentials 即可用，scope 由上游回答；收口对象是"无声明静默借用"，不是禁用）；存量四平台默认声明 drivers=[pat,oauth_identity]+oauth_requires_scope（迁移零感知）；source 写审计；缓存按 epoch 失效；bot 三层链序与回落不变（**无 bot 时用户 PAT/个人 OAuth 照常驱动托管动作，能力保留**）；actor 与凭据分维（审计记清用了谁的令牌、以谁的名义），两者不得互相冒充；㉗**仓库侧配置登录渠道 + link 的 DB 权威**（2026-11-14 裁定）：管理台入口改为「仓库平台卡 → 接受哪些登录渠道的令牌」，底层仍 grape_t_channel_repo_link(oauth_provider, repo_provider, relation)（键对称）；导入规则由全量替换（importer.py:401 replace_for_oauth）改为**合并、manual 优先**（表无配置有→插入；config/derived 且配置有→更新；config/derived 且配置无→删除；**manual 行无论配置有无都保留**），管理面写 link 标 source=manual；孤儿 link（目标平台已删/停用）告警但不自动删；㉘**建表 DDL 的 MySQL 方言适配**（2026-11-14 实锤修正）：曾用 executescript（sqlite3 专有，绕过 mysql_compat）+ MySQL 分支 return 跳过建表 → 迁移 0ms 照样盖章、六表未建、版本号盖死；改为**逐条 cursor.execute**（走翻译层，对齐 db_setup.py:4788/5021）；唯一不兼容=bot 部分唯一索引 → MySQL 用 STORED 生成列 is_default_uniq + 复合唯一键（NULL 不参与唯一）；补列 MySQL 用 VARCHAR(32) DEFAULT ''；实测 MySQL 8.0.46 五表 rc=0、盖章 164ms、启动导入 changed=12、管理面写接口 200；守卫 test_d109_ddl_dialect（反证 executescript 即红）；㉕**场景用例与影响评估**：设计分片 §15 列 44 个 UC（40–44=关系即判据/渠道关系独立配置文件）（导入/扫描/多实例/用户关系/纯登录渠道无幽灵 link/bot 选号轮换巡检/token 链/迁移回填/strict/双判据；28–34=绑定写关系/PAT-only 用户可见/代理优先级/scope 原因码/OAuth 保留/link manual 优先/用户禁用平台），§16 列 12 项影响，4 个高等级（启动时序=异步初始化 vs 读表、读路径 64+19+25 处容错、凭据迁移不可逆、用户可见性收紧）均为第一批上线前置条件；决策 A 修正为 meta 停读+保留旧值一版（回滚可用），物理删除放第二批。㉔**领域建模与持久化**：新表一律走 D53 持久化层（SQLAlchemy 2.0 + UoW + Repository + DTO），五聚合（OAuthChannel/RepoPlatform/BotAccount/UserPlatformLink/ChannelRepoLink）+ 值对象（ViaBits/ClientSecret/Dialect/Relation）；状态计算在领域对象（status() 读取算），事务边界=UoW（导入/回调/PAT/撤销/轮换各一个）；主键 uuid7_str；建表仍 db_setup+register_migration、ORM 只映射不 create_all；凭据列 ORM 层自动加解密；不新增裸 SQL（存量 2809 处不迁）。㉓**四项裁定**：①凭据进表=决策 A（client_id/secret 与 bot token 从 meta 迁入表加密列，迁完 meta 废弃+迁移标志，不做并存双源）；②不新建平台级 webhook secret 表（仓库级 grape_t_repo_credentials('webhook') 已权威，平台级共享更弱）；③epoch=表状态版本号（任何表写入同事务+1，读取前比对刷新；与 config_hash 分工：hash=行级内容指纹答 drifted，epoch=表级版本答缓存重载，不冗余）；④运行时参数落点=现有 meta + config.py getter（env>meta>runtime-config.json>默认），不新建 settings 表；⑤兼容层删除门=四条件 AND（grep 读取清零+迁移标志齐备且生产自检+一个发布周期无回滚需求+配置文件已删），未满足前兼容层只读不写，删除放第二批；⑥凭据加密=AES-256-GCM+多 kid（security.credential_keys > JWT_SECRET 派生(单kid不可轮换) > dev 零密钥仅测试），不引 Vault/KMS，将来接 KMS 只换 _get_current_key。㉒**配置统一=结构统一（非语义统一）**：统一对象结构/写入入口/命名（消除模板 12 键·ConfigBody 16 键·代码 26 键三层不一致）；不统一方言字段、能力位、端点（强统一=假一致，如 Gitee token_compare 当 hmac）；管理面对象式 CRUD + 旧扁平 ConfigBody 兼容一版后删；运行时参数走系统设置域。㉑废弃 configs/global-bot-token.json：全字段进表（bot→bot_accounts、webhook_token→grape_t_repo_credentials('webhook')（仓库级）、oauth client→oauth_channels 加密列）、webhook_url 改派生（server_base_url+平台 webhook_path，不落表）、代码停读 _GPT_PATH 加 grep 守卫、文件第二批删除、管理面入参名留兼容别名。⑳**建表规范：grape_t_ 前缀 + UUID 主键（uuid4().hex，禁自增）+ created_at/updated_at + 每字段注释，DDL=d109-schema.sql**；分层纪律：配置派生（四张定义/关联表，导入可覆盖）与运行态（grape_t_bot_accounts / grape_t_user_repo_platform_link / 凭据域）必须分表，导入器按表白名单工作；repo-credentials 的 bot_username 是「配置声明（1:1）」，grape_t_bot_accounts 是「运行态实例（N:1）」，两者非重复；校验选 A 弱校验（导入不查 DB，运行时不一致告警不阻断，避免冷启动死结）；能力视图的 grape_t_bot_accounts 摘要不含 token。扩展 checklist 见分片 §14。落点：db_setup 7 表 + 回填迁移 / 四类配置解析与导入服务 / 能力视图 / token_resolver UserToken / deps 删开关 / grape_auth 回调 + settings 凭据 + 撤销写关系 / repos.py + repo_manager.py 判据 | 导入幂等（连跑两次无 diff）、enabled 不被配置冲回、orphaned 软删与"内容未变加回仍能恢复"、双向导入规则、行级 config_hash、能力视图字段完整（gitee TTT+drivers / gitlab FTF / huawei TFF）、用户关系=纯对应关系（登录写/绑定写/PAT 直写三条路各自建行；撤销写 revoked_at；可用性由代理层现算不落表）；代理层四例（PAT 优先 source=pat / 无 PAT 时渠道令牌 source=oauth:<c> / 无渠道给 NO_CHANNEL / 过期给 TOKEN_EXPIRED）；link manual 优先（导入不覆盖 manual、config 行文件删行即清理）；MySQL 五表 rc=0 + 盖章非 0ms + 管理面写接口 200、回填后无用户可见平台集合缩小、枚举非法值整卡拒绝、无 PAT 且桩不可用→NO_REPO_CREDENTIAL、bot 两层不变、link 唯一性导入期报错、旧判据对拍一致、三类配置 drifted 均可查、字段无双源（grep 守卫）、纯登录渠道无幽灵 link、过渡期新增平台双判据一致。测试：test_d109_platform_object_model / test_d109_import_split_mode / test_d109_read_path / test_d109_admin_object_api / test_d109_credential_migration / test_d109_dual_predicate / test_d109_startup_wiring / test_d109_ddl_dialect / test_d109_credential_resolver / test_d109_user_repo_platform_link / test_oauth_token_fallback_gate + test_s118 / test_s119 / test_s127 回归 |
+| S108 | 仓库驱动判据收敛为“关系配置”+ 渠道关系独立配置文件（D109 续，2026-11-14 用户拍板） | ①驱动判据链过长：relation 档位 × drivers × scope × audience 四层与事实/上游能力纠缠，配置改一处不生效、403 归因困难；②relation 档位语义（identity_only/identity_and_credentials）与实际需求不符——“只作登录身份”就是没配配对；③登录/绑定建关系行依赖档位+drivers 双重判据，gitee/github 同域登录不建行 | ①渠道↔平台关系独立成 `configs/channel-repo-links.json`（links[]：oauth_provider / repo_provider，**无档位**）；②判据只有一条：配了配对 ⇒ 该渠道令牌可驱动该平台、登录即建用户平台关系；没配 ⇒ 不驱动不建行；③relation 档位 / drivers / scope / audience 退出判定：credential_resolver 与 hooks 只查配对存在性；④GRAPE_OAUTH_TOKEN_FALLBACK 降为运维硬关（=0 才禁）；⑤表列 relation 保留仅 DB 兼容，读路径不读；⑥`configs/repo-credentials.json` 删除，caps 表存活字段并入平台表并删表（迁移 202611170010） | configs/channel-repo-links.json、src/domains/platform/{importer,hooks,credential_resolver}.py、src/api/deps.py、src/kernel/persistence/repositories_platform_object.py、docs d109 §3/§5/§6/§15/§18/§19 | 配对存在即驱动（UC-40）/ 未配对不建行（UC-41）/ 无 PAT 用渠道令牌且 scope 不判（UC-42）/ 硬关=0 全覆盖（UC-43）/ 文件缺席同名默认、存在即权威（UC-44）；d109 套件 171 passed（15 条失败全为基线红，失败集与基线逐条同名） |
+| S109 | 档位列彻底退役 + 清 PAT 引导门二次收口 + 管理面列表/详情收敛（D109 续二，2026-11-14 用户拍板） | ①第一批只做到「读路径不读 relation」，列/枚举/请求体/管理面控件仍在，出现「代码没判定、数据还有列、界面还让人选」三重不一致；②用户实测「清空全部 PAT 且无 OAuth」仍落项目页：`_bootRestore` 先用 URL 深链/残留 currentRepo 恢复仓库并 `nav('dash')`，绕过关系门；`_hasVcsBinding` 在关系快照缺失时回落 identities（Vue 线无平台目录 → 任意登录身份都算绑定）；账号页清 PAT 后不刷新关系快照 | ①relation 全链删除：DDL/ORM/Repository/`domain.Relation`+`allows_credentials`/`ChannelRepoLinkBody`/管理面控件；`ChannelRepoLinkRepo.set_manual(s,c,p)` 两参；迁移 202611170011 幂等 DROP COLUMN（cleanup 语义 + min_code_version 门槛）；②引导门：`_bootRestore` 无关系→清 currentRepo→goToRepos；`_hasVcsBinding` 只认 table/identities 快照的 has_any，快照缺失按无关系；`clearPat()` 成功后 `refreshRepoLinks()` + 无关系即落引导页；③管理面：登录渠道/仓库平台改「列表 → 详情」，平台详情补 bot 账号增/轮换/删（`PUT|DELETE /bot-accounts/{p}/{u}`，token 空=不改）与逐平台 token 健康，渠道详情只显示配对+来源；④平台凭据页只留 webhook_url + 运行参数，退役 phToken/oauthPh/verifyToken/loadTokenHealth/health* 等辅助代码 | src/domains/platform/domain.py、src/kernel/persistence/{models_platform_object,repositories_platform_object}.py、src/domains/mgmt/admin/{channel_repo_link_routes,oauth_channel_routes,api_common}.py、src/api/{db_setup,platform_object_ddl}.py、src/api/frontend/shell/js/app.js、src/api/frontend/app/src/views/{AdminView,AdminChannels,AdminPlatforms,AccountView}.vue、docs d109 §4/§5/§20 | 档位列归零（PRAGMA/information_schema 无 relation；`Relation`/`allows_credentials` 符号不存在）；配对即授权（`test_link_pair_is_the_only_criterion`）；清 PAT → `/auth/platform-links` has_any=false 且前端落引导页（`tests/js/test_boot_gate_no_relation.js` + `test_app_deeplink.js` 7k/7l）；快照缺失按无关系；bot 账号 PUT/DELETE 实弹 200、渠道配对空体 PUT 落 source=manual；d109/管理面定向 143 passed（3 条 platform_whitelist_ratchet 为基线红同名） |
+| S110 | 同域配对隐式化 + 管理台术语/文案收口（D109 续三，2026-11-14 用户裁定 + 外部评审意见） | ①第一批「配对即授权」要求渠道给自己的平台也配一条 (c→c)：不表达新能力，界面读出「GitCode 可驱动 GitCode」，UI 隐藏后成「配了看不到也删不掉」的垃圾数据；②术语歧义：外部评审指出「仓库平台」易读成仓储、「可驱动」在技术语境强指硬件驱动；③管理台文案改动后新词条空白——语言包缓存键未随批 bump；④列表→详情切换点了没反应（`current` 是 computed，赋值被 Vue 忽略） | ①同域**隐式**：`hooks._targets()` = 跨名配对 ∪ 渠道自身（渠道在平台在册时）；`_default_links` 不再派生同域行，显式 `(c→c)` 告警忽略；管理面 `PUT /channel-repo-links/{c}/{p}` 同域返回 422 `SAME_DOMAIN_PAIR`；迁移 202611170012 删存量同域行（backfill 语义）；②术语：仓库平台→**代码托管平台**、可驱动的仓库平台→**可接入的代码托管平台**；「登录渠道」保留（与 `grape_t_oauth_channels`/`/admin/oauth-channels`/`OAuthChannel` 同名），只把说明改成「查看已支持的登录渠道并可更新各渠道配置」；代码标识符不动；③版本位纪律：view bundle 与 `I18N.init` 语言包键同批 bump（本批 v=29 / 20261114-10）；④返回列表改为 `back()` 清 `selected` ref | configs/channel-repo-links.json、src/domains/platform/{hooks,importer}.py、src/domains/mgmt/admin/{channel_repo_link_routes,repo_platform_routes,user_repo_platform_link_routes}.py、src/api/db_setup.py（202611170012）、src/api/frontend/shell/{admin.html,js/i18n.js,locales/*/admin.json}、src/api/frontend/app/src/views/{AdminChannels,AdminPlatforms}.vue、docs d109 §20.6-§20.9 | 同域不配也建关系（UC-51）/ 显式同域 422（UC-52）/ 导入不造同域行（UC-53）/ 文案中英一致 + 新词条不空白（UC-54）；线上实测 4 渠道 `repo_links=[]`、同域行 0、admin v=29；定向 85 passed |
+| S111 | 托管平台判定与 i18n/迁移收口（第五批，2026-11-14 用户实弹） | ①gitee 仓库托管失败（日志实锤用 GitHub token 查 gitee 仓库 → 404）：前端 provider 只认 github/gitcode 前缀、后端无线索时按 token 顺序兜底挑到 github；②Gitee v5 用 namespace 表示归属，owner 解析落空 → 「我明明是管理员」读成 Member；③旧壳按「非 github 即 gitcode」二分，gitee 仓库被归到 GitCode 分组、前缀不剥；④线上迁移 202611170010 盖章空转（5 列没建、caps 表还在），ORM 读平台表恒抛 Unknown column → 管理面静默退回文件兜底；⑤语言切换 en→zh 不重渲染（setLang 在 loadPacks 之前派发事件，之后无二次派发）、i18n.js 脚本 URL 版本位长期未 bump 导致中英互换 | ①`providerFromRepoKey()`（前缀即平台）+ 后端 `_provider_from_user_repos()`（缓存唯一命中反查）；②解析顺序 owner.login → namespace.path → full_name 段；③旧壳 `stripRepoPrefix` 结构化剥离、侧边栏按前缀分组、名表统一 `platformLabel()`；④010 加最终状态复检并 raise，线上补列+回填+删表；⑤setLang 在语言包就位后二次派发；i18n.js?v 全壳页 bump 到 20261114-16、auth.js→8 | src/api/frontend/app/src/lib/{repo-provider,bot-summary}.js、ReposView.vue、AdminPlatforms.vue、src/domains/mgmt/routes/repos.py、src/kernel/token_resolver.py、src/api/db_setup.py、src/api/frontend/shell/{app.js,index.html,js/i18n.js,locales/*/admin.json}、docs d109 §20.10-§20.15 | 托管 200（webhook 2148107）/ 缓存反查 UC-61..63 / 迁移复检 UC-64 / 语言双向切换 UC-55；实弹管理面 `source=table`、fallback 告警 0；定向 12 + 4 + 2 + 6 passed |
+| S112 | 顺序/集合去字面量与缓存写入范围（第六批，2026-11-14 深度复查） | ①登录渠道展示序是 5 个 key 的字面表（加渠道必改码）；②托管兜底序 `("github","gitcode")` 二元枚举且默认打到 github；③`platform/migration.py` 用 `if provider == "gitcode"` 读历史 bot 池；④webhook 预检在卡片 import 失败时回落到平台白名单；⑤`save_user_repos` 先删全部再写 → 某平台刷新会抹掉其它平台缓存 | ①`_catalog_order_index()`：`_ui_order` → 配置键序 → 其余按名；②`_default_token_provider_order()` = `sorted(hosting_providers())`；③历史池改 `_HISTORICAL_BOT_POOL_KEYS` 查表；④兜底直接 `unsupported`/`unknown`，守卫去掉 webhook.py 整文件豁免；⑤`save_user_repos(..., providers=ok_providers)`，member/sync/重授权部分成功三路接线 | src/domains/mgmt/auth/providers.py、src/domains/mgmt/routes/repos.py、src/domains/platform/migration.py、src/domains/runtime/routes/webhook.py、src/domains/mgmt/user/db.py、tests/mgmt/{test_d109_platform_order_data_driven,test_d109_user_repos_partial_save}.py、docs d109 §20.17-§20.18 | 渠道序随配置变（UC-66）/ 兜底序含 gitee（UC-67）/ 无顺序字面表（UC-68）/ 部分刷新保留他平台（UC-69）；`test_platform_whitelist_ratchet` 由 3 failed → 4 passed；定向 25 passed / 2 skipped |
+| S113 | 仓库维度读路径的真实前缀 + gitee 端到端收口（第八批，2026-11-14 用户接入 gitee PAT 后实弹） | ①`project-info`/`agents` 用裸 `to_repo_key` 默认 gitcode 前缀 → gitee 仓读错行、基线恒空；②`events` 候选写死 gitcode/github → gitee 事件恒不可见；③引擎 scope 的 repo 级凭据只匹配双前缀；④IM 卡片前缀剥离枚举三家漏 gitee；⑤issue URL→repo_key 域名表漏 gitee 且未知域名默认 gitcode（本批前一条修） | ①改用 `resolve_managed_repo_key()`（managed_repos 候选探针）；②改用 `repo_key_candidates()`（卡派生），会话 token 校验同集；③抽 `_repo_scope_clause()` 动态占位符；④结构化剥离；⑤host→provider 由平台卡派生 | src/domains/mgmt/routes/{repos,agents}.py、src/domains/runtime/routes/events.py、src/domains/runtime/im/handler_async.py、src/api/feedback_status.py、tests/mgmt/{test_repo_prefix_resolution_guard,test_issue_url_provider_mapping}.py、docs d109 §20.20-§20.21 | 实弹三平台 58/7/16 + project-info/issues/dashboard/events 全 200（UC-72/73）；守卫 3 条 + issue URL 3 条（UC-74/75/76）；串行双测：基线 191/68 → 当前 192/68，唯一差异用例隔离复跑两侧 5 passed（基线第二次复跑同为 192/68，证实为该用例套件内抖动） |
+| S114 | 补证 P1 三项收口：UUID 刷新失效 / 合并残留方法 / 版本位登记落后（第九批，2026-11-14 评审） | ①`hooks` 写死 `int(user_id)` → UUID 用户关系变更后的项目列表刷新从未执行（异常被吞）；②`ChannelRepoLinkRepo` 混入 6 个 bot 方法；③i18n/cache 守卫的四张登记表落后于实际值 | ①去 int() 直传 str + 行为级 uuid7 用例（回退 int 即红）；②删除冒名 33 行（AST 复核）；③同步指纹/CACHE_VER/I18N_JS_VER/FROZEN 九项 | src/domains/platform/hooks.py、src/domains/mgmt/user/db.py、src/kernel/persistence/repositories_platform_object.py、tests/mgmt/test_d109_relation_hooks_refresh_projects.py、tests/api/{test_i18n_locale_cache_ratchet,test_frontend_cache_version_ratchet}.py、docs d109 §20.22-§20.23 | UC-77/78/79 三向（uuid PAT、uuid OAuth、存量 "33"）；ratchet 4+2 passed；`-k bot` 与仓库域用例串行双测：差异全部为套件内顺序抖动（同文件隔离复跑两侧一致） |
+| S115 | P2 四项整治：关系写入原子性 / 渠道开关 fail-closed / DDL 切分 / 半建表补列（第十批，2026-11-14 评审） | ①link 两步写在并发窗口下唯一键冲突→异常被吞、uow 回滚；②enabled=0 只挡目录，直达登录可绕过；③iter_statements 正则切分被注释内分号击穿（注入实测 22 碎片）；④半建表（表在列缺）不报错不补齐 | ①方言 upsert（SQLite ON CONFLICT / MySQL ON DUPLICATE KEY UPDATE）+未知方言回退；②`is_channel_enabled()` + oauth_login 403 `CHANNEL_DISABLED`（表读失败 fail-open）；③逐字符扫描切分（注释/引号感知）；④`reconcile_missing_columns()` 按模型补列，启动时调用 | src/kernel/persistence/repositories_platform_object.py、src/domains/mgmt/{auth/providers.py,routes/grape_auth.py}、src/api/{platform_object_ddl.py,d109_startup.py}、tests/mgmt/{test_d109_user_repo_platform_link.py,test_channel_enabled_fail_closed.py,test_p2_ddl_and_schema_guards.py}、docs d109 §20.24 | UC-80 重复 link 单行+可复活 / UC-81 403 disabled & 表三态 / UC-82 四类切分样例 / UC-83 补列+幂等；合计 21 passed |
+| S116 | 增量两条：LIKE 通配符误删 / 顺序索引无缓存（第十一批，2026-11-14 评审增量） | ①`save_user_repos` 用 `repo_key LIKE 'p:%'`，provider 允许下划线 → 新增 `gitee_enterprise` 时会连 `giteeXenterprise:` 一起删；②`_catalog_order_index` 每请求 open+parse，绕开同文件的 TTL 缓存纪律 | ①改 `substr(repo_key,1,?)=?` 前缀相等；②缓存键=(路径,mtime,size)，配置改动自动失效 | src/domains/mgmt/user/db.py、src/domains/mgmt/auth/providers.py、tests/mgmt/{test_d109_user_repos_partial_save.py,test_d109_platform_order_data_driven.py}、docs d109 §20.25 | UC-84（回退 LIKE 即红）/ UC-85（缓存命中，json.load 抛错仍返回）；两文件 7 passed |
+| S133 | 文档/源码去敏（第十三批，2026-11-15 用户要求） | 设计稿里曾把线上 gitcode bot token 与 webhook secret 原文写进"配置文件示例"（weekly-06，weekly-08 有引用），等于把真凭据提交进仓库 | 两文件三处替换为 `<REDACTED_REAL_TOKEN>` / `<REDACTED_WEBHOOK_SECRET>`；新增扫描守卫（已知前缀 + 敏感键值形态 + 占位放行 + 键名放行） | docs/weekly-06/oauth-provider-plugin-design.md、docs/weekly-08/issue-372-design.md、tests/api/test_no_secrets_in_docs_and_src.py、d110 §14.5 | 守卫 1 passed；探针自测（塞入三条真值必红、占位不红） |
+| S134 | 部署级隐藏名单语义（第十四批，2026-11-15 用户拍板 B；**S136 已改为行级 enabled**） | 隐藏名单此前只有一处读取（settings 目录），`_repo_listable_providers()` 与 `platform_tokens` 写入口都不过滤 → "UI 看不到 gitlab、接口却能 `?provider=gitlab` 列仓"的口径分裂；线上 `vcs_platforms_hidden=["gitlab"]` | 判据收敛 `domains/platform/visibility.py`；`/repos/member` 显式隐藏平台 403 `PLATFORM_HIDDEN`、合并列表剔除；管理面项加 `hidden_by_deploy`；写入口保留（内网可用） | src/domains/platform/visibility.py、src/domains/mgmt/routes/{repos.py,settings.py}、src/domains/mgmt/admin/repo_platform_routes.py、tests/mgmt/test_platform_visibility.py、d110 §16 | 新用例 7 passed（显式 403 / 合并不拉取 / 目录判据 / 带外垃圾名单 / 管理面标记 / 基址路径替换 / 基址不变） |
+| S135 | `webhook_url` 口径写明（第十四批，用户拍板"只补注释"） | `get_webhook_url()` docstring 写"含 /webhook/gitcode 后缀"与实际不符（路径其实由平台卡决定、配置里的路径被丢弃），配置示例与管理面提示也没说明 | 行为不动；补 docstring、`server-config.example.json` `_comment_server_base_url`、`global-bot-token.example.json` 字段说明、管理面 `webhook_url_hint`（zh/en） | src/domains/mgmt/user/db.py、configs/server-config.example.json、configs/global-bot-token.example.json、shell/locales/{zh,en}/admin.json、d110 §16.2 | 两条语义锁用例通过与路径替换断言；两键线上实测一致 |
+| S136 | 可见性收敛到平台行 enabled（第十五批，2026-11-15 用户拍板"甲"） | 隐藏名单与行级开关语义重叠、名单无管理面入口；旧 registry 把"过滤后为空"当"表不可用"，导致**全关=全开**（回退平台卡）；关平台会让存量用户项目凭空消失且无提示 | ①`visibility` 改读 `enabled`（无行/未迁移 fail-open）；②迁移 202611170021 把名单写成 `enabled=0` 并删 meta 键；③registry 哨兵拆 `None`/`[]`；④`?provider=` 403 改为 `PLATFORM_DISABLED` 并保持"先于未绑定早退"；⑤管理面 `hidden_by_deploy`→`disabled`；⑥关平台影响面预检 409+`?confirm=1` | src/domains/platform/{visibility.py,registry.py}、src/domains/mgmt/routes/{repos.py,settings.py}、src/domains/mgmt/admin/repo_platform_routes.py、src/api/db_setup.py、tests/mgmt/test_platform_visibility.py、d110 §16 | 用例 13 passed（判据 / 403×2 / 合并不拉取 / registry 哨兵×3 / 预检×3 / webhook 语义×2）；回归 63 passed |
+| S137 | 默认不展示写在初始化代码（第十六批，2026-11-15 用户拍板"写死初始化"） | 平台卡方案需要新增 dataclass 字段 + 播种语义，卡片与"能力描述"职责混住；而"上线默认不展示 gitlab"本质是部署口径 | `DEFAULT_HIDDEN_PLATFORMS={"gitlab"}` 写在持久化层；生效点=新建平台行 + 迁移 021 补默认；导入不覆盖、orphaned 恢复视为可用；平台卡保持无 enabled 键 | src/kernel/persistence/repositories_platform_object.py、src/api/db_setup.py（021）、tests/mgmt/test_platform_visibility.py、d110 §16.4 | 新用例 3 条 + 恢复语义回归；可见性套件 16 passed；跨套件 56 passed |
+| S138 | 管理面交互三连修（第十七批，2026-11-15 真浏览器实测） | ①说明气泡被 `.ap-group{overflow:hidden}` 裁切（`elementFromPoint` 命中页面容器）；②关闭平台无确认→409 失败，随后改用 `window.confirm`（用户否决），再改 `AGModal` 又因 admin 壳未加载设计令牌导致遮罩失去 `position:fixed`、弹层跑到页面外；③两页共用 `field.enabled` 说明，平台页文案与"用户面可见"语义不符 | ①AGHelp Teleport+fixed+按锚点定位+z-index 3000+滚动/缩放重算；②页面内 Vue 弹层（自带 fixed/inset 样式、ghost/danger 按钮、影响面数字、`?confirm=1` 重发、取消回滚），后端关闭一律 409 预检；③按页映射 `field.enabled_channel`/`field.enabled_platform` | AGHelp.vue、AdminPlatforms.vue、AdminChannels.vue、shell/locales/{zh,en}/admin.json、tests/api/test_admin_help_popover.py、tests/api/test_admin_enabled_semantics.py、d110 §17 | 浏览器实测：气泡 `pos=fixed,z=3000,parent=BODY,inViewport=true,hitIsPop=true`；确认弹层 `mask fixed/z2000`、dialog 在视口内；两守卫 5 passed；ratchet 15 passed |
+| S129 | 品牌图标破图（第十三批，2026-11-15 用户实测） | 内联 SVG（`shell/js/oauth-buttons.js`）原样拷成 `.svg` 文件缺 `xmlns`，浏览器拒绝当图片解码：gitee / huawei 两枚破图，带 xmlns 的 gitlab / gitcode / github 正常 | 两枚补 `xmlns`；资产 URL 加 `?v=3`；新增"独立文件可渲染"守卫（xmlns + viewBox + 解析成功） | src/api/frontend/shell/img/{gitee,huawei,gitlab}.svg、AdminChannels.vue、AdminPlatforms.vue、tests/api/test_admin_brand_icons.py | 5 枚端点 200 且真实 Chrome `new Image()` 全 ok；守卫 6 passed |
+| S130 | 渠道命名国际化 + huawei 定名（第十三批） | 详情页头用 `current.name`（配置原名）绕过语言包，中文名漏进英文界面；huawei 标"华为云"与实际渠道（华为统一 OAuth 登录）不符 | 头改 `channelName(current)`；语言包 zh 华为 / en Huawei；配置文件与线上 meta `name` → Huawei | AdminChannels.vue、shell/locales/{zh,en}/admin.json、configs/oauth-providers.json、tests/api/test_admin_brand_icons.py | 线上 `/static/locales/{zh,en}/admin.json` 实测 华为/Huawei；meta 实测 Huawei |
+| S131 | 配对设置下线（第十三批，用户拍板） | "可接入的代码托管平台"三段口径（同域/跨名/未配置）讲不清，且不该让用户手配关系 | 整段删除（pills/选择框/保存/删除）＋`linkEdit` 状态与 7 个辅助函数 ＋ 列表副标题配对字样 ＋ 13 个孤儿语言包键；后端端点与 `channel-repo-links.json` 导入语义保留；反向守卫禁 vue 再现写入 | AdminChannels.vue、shell/locales/{zh,en}/admin.json、shell/js/i18n.js、tests/api/test_admin_brand_icons.py | `test_channel_page_offers_no_pairing_settings` 绿；页面实渲无该分节 |
+| S132 | 展示层版本位同步（第十三批） | 语言包 / 视图 / 图标都变了但版本位不齐 → 老用户持旧缓存（破图或旧口径） | 四页 cacheVer + 指纹 + `admin-view.js?v` + 图标 `?v=` 同批 bump，两张 ratchet 登记同步 | shell/{index,admin,register,forgot}.html、tests/api/{test_i18n_locale_cache_ratchet,test_frontend_cache_version_ratchet}.py | 两 ratchet 6 passed；线上 `/admin` 引用 `v=41`、`i18n.js?v=20261114-19` |
+| S117 | bot 单一归属（D110）：bot 落到平台行、删 bot 账号目录（第十二批，2026-11-14 用户拍板） | ①D109 把 bot 设计成平台级多账号目录 + is_default，运行时取 token 链（仓库级 → 全局 bot → 用户 PAT）从不读它；管理面写的是它、真源在 meta，82502db1f 删掉全局 bot 输入后页面写没人读、真源没入口；②`is_default`/`get_default` 零调用者、`mark_token_status`/`touch_last_used` 零调用者；③`capabilities.supports_bot_token = bool(bot_accounts)` 属假阳性，`bot_username` 恒空；④平台页仍按“多账号 + 设为默认”呈现，与“一平台一个 bot”的真实语义冲突 | ①平台行加 `bot_token_enc/bot_token_status/bot_checked_at`，`bot_username` 从配置声明升为事实；②读链平台行优先、meta/文件兜底；③写口收敛 `PUT|DELETE /admin/repo-platforms/{p}/bot`（加密、不回显）；④导入写保护 + 空值播种；⑤轮换触发 `global_bot_token_swap`（path A 仓库 webhook token 传播）；⑥巡检双写平台行；⑦删除 `grape_t_bot_accounts` 全代码面 + 前端单 bot 面板；⑧迁移 202611170013 加列 / 014 meta 播种 / 016 `derived_from` 32→36；不写 DROP 迁移 | src/kernel/persistence/{models_platform_object,repositories_platform_object}.py、src/domains/{platform/capabilities,platform/migration,platform/admin_sync,mgmt/user/db,mgmt/admin/config_store,mgmt/admin/repo_platform_routes,runtime/engine/bot_token_health}.py、src/kernel/token_resolver.py、src/api/{db_setup,platform_object_ddl,d109_startup}.py、src/api/frontend/app/src/views/AdminPlatforms.vue、docs d110 + d109 §4/§18.2/§18.3 | 冷启动 SQLite/MySQL：四张表、平台三列齐、`derived_from varchar(36)`、013/014/016 盖章且幂等（UC-D110-01/08）；读序平台优先（UC-D110-02）；导入播种一次、改名不被覆盖（UC-D110-03）；轮换触发 swap（UC-D110-04）；池丢弃、名单=平台行∪卡（UC-D110-05）；巡检写表（UC-D110-06）；能力视图按平台行（UC-D110-07）；退役面守卫（UC-D110-08）；另含 P1-4 修复（UC-86）与守卫盲区补齐（UC-87）。定向 76+7 passed，仅剩基线同红。 |
+
 
 | S91 | ORM 开关退役 + engine 重绑跟随修复（D67，先测后改，批次 2 收口） | 身份域 7 函数 _orm_enabled 分支删除（ORM 唯一路径，S79 对账转常态回归）；get_webhook_secret_by_repo_key_any 去门；orm_enabled 删除；test_s78 改退役锁。engine get_engine 缓存键含当前连接 id+路径、creator 动态解析（修复重绑后 ORM 停留旧 inode 的世界分裂残留盲区）；ast 块界折叠（行级脚本切错块界教训入册） | src/auth/grape_account_db / src/user.db / src/persistence/repositories+__init__+engine / tests/test_s78_persistence_skeleton.py | src 零开关引用（退役锁）；S79/S81 对账用例常态回归绿；372 文件原始 mock 用例 ORM 常开下全通过；5 预存量失败与开关无关（raw/ORM 双态失败集一致实测） | S78/S79/S81/S80b/S82/S60 全绿（5 预存量=372 基线）；372 文件 5 失败=测试基建专项（读回可见性异常）登记独立轮 |
 
@@ -578,3 +601,204 @@
 | [13-uc-test-mapping.md](13-uc-test-mapping.md) | UC↔测试 ID 对账（跨族聚合点） | — |
 
 全局约束标注：上方 Objective/续期口径/表设计铁律/双配置轴/实现状态/现状问题/范围/范围外/验收纪律各节为**全局约束，跨族生效**——各子分片头部已注明继承。
+
+## FR-29：身份 / 关系 / 凭据三段模型（2026-11-14 用户拍板；设计分片 d109 §4/§5/§6/§18）
+
+### 29.1 用户需求（模型逐条接住，缺一即不通过）
+
+| # | 需求（用户原话口径） | 判定 |
+|---|---|---|
+| N1 | 华为账号登录 grape | 必须支持任意已配置渠道登录 |
+| N2 | 登录后绑定 gitee 的 OAuth 账号，用 gitee 的令牌驱动 gitee 仓库 | 身份可多渠道；平台级凭据可独立于登录渠道获取 |
+| N3 | 没登录过某平台，只配了 PAT，也要能驱动该平台仓库 | 凭据建立关系，关系不依赖登录 |
+| N4 | 没有 bot 时，托管动作（建仓/推送/评论/巡检）用用户配置的 PAT 跑 | **不得把能力切成 bot-only** |
+| N5 | 管理台能看到"这个仓库平台接受哪些登录渠道"，关系只读、不可用要有原因 | 入口在仓库侧；状态可解释 |
+| N6 | 主动禁用某平台后不再出现，但凭据不删 | 关系撤销 ≠ 凭据删除 |
+
+### 29.2 三段模型（三张事实表 + 一个派生）
+
+```
+身份段:  user ──N:M── oauth_channel      (external_identities：绑定 + 令牌)
+配置段:  oauth_channel ──N:M── repo_platform  (channel_repo_link：允许哪种关系，仓库侧配置)
+关系段:  user ──N:M── repo_platform      (user_repo_platform_link：**只存关系与时间**)
+凭据段:  user ──N:M── PAT(repo_platform) (user_credentials kind=pat)
+        repo_platform ──1:N── bot_accounts (平台账号目录)
+派生:    可用性 / 凭据选择 / 能力视图 —— 全部读取时算，不落表
+```
+
+硬规则：
+
+1. **关系表只存关系**（user_id / repo_provider / linked_at / revoked_at / reason）：不存来源位、
+   不存状态、不存可用性布尔、不存偏好渠道。理由：来源无渠道标识（gitee 与 huawei 都是"oauth"）、
+   一次登录写多行时间无信息量、配置变更会让表内来源漂移。
+2. **凭据使用保持现有逻辑（2026-11-14 拍板）**：`fetch_user_token` 的 ①PAT ②OAuth 解析序不动，
+   `credential_resolver` 只做配置校验/诊断展示（drivers 声明 ∧ link relation ∧ scope 覆盖 ∧ audience 匹配），
+   **不接管取 token**；命中问题以原因码呈现给用户，不静默 401。
+3. **OAuth 仓库能力必须保留**：同域 + scope 足够即可用；收口对象是"无声明静默借用 / scope 不足照用"，
+   不是禁止 OAuth。存量四平台在 `configs/repo-credentials.json` 声明 `drivers` 即可迁移零感知。
+4. **三层链与回落不变**：`RepoBotToken → GlobalBotToken → UserToken`；**无 bot 时用户 PAT/个人 OAuth
+   照常驱动托管**（N4）。actor（记在谁名下）与凭据（用谁的令牌）是两个维度，不得互相冒充。
+5. **link 以 DB 为权威**：配置是首次种子，导入合并（manual 优先）；管理面写 link 标 `source=manual`。
+7. **闭环规则（本次实现）**：登录/绑定成功后判断该渠道能否**驱动**平台（同域，或 link 声明
+   `identity_and_credentials`），能驱动即 upsert 关系行并**异步刷新项目列表**（`user_repos` 标记过期，
+   下次 `/repos/member` 回源）；解绑时判断是否还有其它来源（其它活跃渠道 / PAT），**有 PAT 就保留关系**，
+   都没有才 `revoke(oauth_unbound)`；A 已登录再绑定 B' → 按 B' 的 link 追加关系行并刷新列表。
+6. **关系写入三条路**：OAuth 登录、**OAuth 绑定**（此前漏写，已补）、PAT 保存（不经渠道直插）；
+   撤销在"该平台再无其它来源"时写 `revoked_at + reason`（user_unbind / credential_deleted /
+   oauth_unbound / admin / disabled_by_user）。
+
+### 29.3 需求 ↔ 模型 映射与现状（实查，不掩盖）
+
+| 需求 | 模型要素 | 现状 |
+|---|---|---|
+| N1 | `external_identities` + `oauth_channels` | ✅ |
+| N2 | `ei(gitee)` + `link(gitee→gitee)` + `caps(gitee).drivers` 含 `oauth_identity` + `oauth_requires_scope` ⊆ 渠道 scope | ⚠️ 模型成立、**现实受阻**：gitee 渠道 scope=`user_info`（缺 projects/issues），github=`read:user user:email`（缺 repo）→ 现算给 `SCOPE_INSUFFICIENT`；只有 gitcode（scope=all）现成可用。补救=补充授权（应用 B）或 PAT |
+| N3 | `user_credentials(kind=pat)` + 关系直写 | ✅（hooks 已实现） |
+| N4 | 三层链回落 | ✅（本批不改链序） |
+| N5 | `link.source=manual` + reason 码 | ⚠️ 后端链路已定，管理面写接口与前端未开（规划） |
+| N6 | 关系 `revoked(disabled_by_user)`，凭据不动 | ✅ 模型/hook 已实现，管理面按钮待接 |
+
+不成立项一律以原因码呈现（NO_PAT / NO_CHANNEL / LINK_MISSING / DRIVER_NOT_DECLARED /
+SCOPE_INSUFFICIENT / AUDIENCE_MISMATCH / TOKEN_EXPIRED），**不允许静默 401**。
+
+### 29.4 显式不做
+
+- 关系表不加 status / 来源 / 偏好列；偏好真需要时单开表（不预留列）
+- 不建平台级 webhook secret 表（仓库级凭据已权威）
+- 不做组织/租户维度（第二批另立模型）
+- 不在本批实现跨名换域（仓库 OAuth 应用 B）——列第二批，契约待实弹
+
+### 29.5 验收（对应设计分片 d109 §15）
+
+UC-D109-28（绑定写关系）/ 29（只配 PAT 可见）/ 30（PAT 优先，source 可审计）/ 31（scope 不足给原因）/
+32（同域渠道令牌可用，**锁住 OAuth 能力未被砍**）/ 33（link manual 优先）/ 34（用户禁用平台）。
+
+补充回归：**无 bot 时托管链路仍用用户 PAT**（N4 反证：把三层链改成 bot-only 即必须红）。
+
+## FR-30：管理面接口按领域对象建模（2026-11-14 用户拍板；设计分片 d109 §19）
+
+### 30.1 问题
+
+初版读接口用 `channels` / `platforms` 复数泛称，丢了领域限定词（OAuthChannel / RepoPlatform）；
+`CredentialCaps` / `ChannelRepoLink` / `UserRepoPlatformLink` 三个聚合**没有路径**（被塞进
+channels/platforms 的响应字段里）；派生视图 `capabilities` 混在对象域前缀下 → 路径读不出模型。
+
+### 30.2 目标形态（路径 = 聚合根）
+
+| 聚合（路径 = 领域对象名，无父容器） | 路径（`/api/admin` 下） | 方法 |
+|---|---|---|
+| OAuthChannel | `/oauth-channels`、`/{channel}`；子资源 `/{channel}/credentials`、`/{channel}/enabled` | GET；PUT |
+| RepoPlatform | `/repo-platforms`、`/{provider}`；子资源 `/{provider}/enabled` | GET；PUT |
+| ChannelRepoLink | `/channel-repo-links`、`/{oauth}/{repo}` | GET / PUT(manual) / DELETE |
+| UserRepoPlatformLink | `/user-repo-platform-links?user_id=`、`/{user_id}/{repo}` | GET / DELETE(禁用) |
+| BotAccount | `/bot-accounts?provider=`、`/{provider}/{username}` | GET / PUT / DELETE |
+| 派生视图 | `/capabilities`、`/user-platforms?user_id=` | GET |
+
+### 30.3 硬规则
+
+1. **路径 = 领域对象名**，不造父容器（无 `/platform-objects/*`；credential-caps 聚合已随 repo-credentials.json 删除）；item 标识只用该对象领域键（provider / (oauth,repo) / (user,repo) / (provider,username)）
+2. **没有整卡 PUT**；定义字段只读，写入 = 改配置文件 + 导入；运行时只写 `enabled` / 凭据 / bot 账号 / manual link
+3. 凭据只回"有没有"（布尔），值与前缀永不出库；bot 响应只回 username/is_default/status/last_used_at
+4. 派生视图独立域（`/views/*`），`available` 与真实取 token 口径一致（关系有效 ∧ 有凭据来源），
+   scope/audience 只进 `diagnosis`
+5. 错误口径：404 带 code+resource+id；409 唯一冲突；422 校验失败；503 表未就绪（写不静默、读标 `source=fallback`）
+6. 守卫：**不得出现虚构父容器**（没有 PlatformObject 这个聚合，`/platform-objects/*` 禁止）；路径名必须是领域对象名；不得出现整卡 PUT（AST/grep 断言）
+
+### 30.4 验收
+
+UC-D109-35（五聚合集合 GET，凭据只回布尔、路径名=聚合名）/ 36（单条 GET 与 404）/
+37（channel-repo-links PUT 标 manual，导入不覆盖）/ 38（视图独立域，available 与真实口径一致）/
+39（契约守卫：无裸名、无整卡 PUT）。
+
+
+## FR-31：仓库驱动判据＝渠道关系配置（2026-11-14 用户拍板；设计分片 d109 §3/§5/§6/§15 UC-40~44）
+
+| 编号 | 规则 | 类型 |
+|---|---|---|
+| FR-31.1 | 渠道↔平台关系独立配置文件 `configs/channel-repo-links.json`，条目只有 `oauth_provider` / `repo_provider`（无 relation 档位） | 配置契约 |
+| FR-31.2 | 判据唯一：配了 (c → p) ⇒ c 的令牌可驱动 p、OAuth 登录/绑定即自动写 `grape_t_user_repo_platform_link`；没配 ⇒ 不驱动、不建行 | 行为锁（UC-40/41） |
+| FR-31.3 | relation 档位 / drivers / scope / audience 一律退出判定；能力是否真够由上游 API 在调用时回答（403/401） | 行为锁（UC-42） |
+| FR-31.4 | PAT 永远第一且不依赖任何渠道关系；`GRAPE_OAUTH_TOKEN_FALLBACK=0` 是运维硬关（一律不用渠道令牌），未设时按关系配置放行 | 行为锁（UC-43） |
+| FR-31.5 | 文件缺席 → 按 provider 同名默认配对（source=derived）；文件存在即权威（links 为空 = 显式关闭全部关系）；跨名配对同样生效 | 行为锁（UC-44） |
+| FR-31.6 | `relation` 档位**全链删除**（DDL/ORM/Repository/领域枚举/请求体/管理面 UI），迁移 202611170011 执行 DROP COLUMN；配对存在即授权，不存在「保留兼容」的列（UC-46） | 结构契约 |
+| FR-31.7 | 清空 PAT 的级联（`_cascade_pat_clear`）必须调用 `hooks.on_pat_deleted` 同步关系表；前端引导门以关系优先，残留 currentRepo 不得绕过引导页（UC-45） | 行为锁 |
+| FR-31.8 | `configs/repo-credentials.json` 删除；`grape_t_repo_credential_caps` 的存活字段（pat_create_url / token_storage_field / webhook_token_field / bot_username / owner_fallback）并入 `grape_t_repo_platforms`，drivers / oauth_requires_scope / supports_* 语义取消；迁移 202611170010 负责补列+回填+删表（cleanup 语义） | 结构契约 |
+| FR-31.9 | 引导门（前端三处收口）：`_bootRestore` 先判关系、不复用 URL 深链/残留 `currentRepo`；`_hasVcsBinding` 只认关系快照（缺失=无关系，不回落到 identities）；账号页清 PAT 后必须重取 `/auth/platform-links` 并在 `has_any=false` 时清残留、落引导页（UC-48/49） | 行为锁 |
+| FR-31.10 | 管理面登录渠道/仓库平台一律「列表 → 详情」：列表含状态、健康与计数；详情承载只读定义字段与写面（渠道：client_id/secret + 渠道↔平台配对；平台：bot_username/PAT 地址 + bot 账号增删与 token 轮换）。渠道↔平台不再有档位控件（UC-50） | 接口/UI 契约 |
+| FR-31.11 | 平台凭据页只保留部署级配置（webhook_url + runtime/devstage 运行参数）；平台/渠道凭据一律在各自菜单写，保存体不提交跨域字段（杜绝双入口互相覆盖） | 结构契约（UC-50） |
+| FR-31.12 | 同域（渠道 == 平台）**隐式可接入**：运行时 `_targets` = 跨名配对 ∪ 渠道自身；配置/导入不得派生或写入 `(c→c)` 行（显式写入告警忽略）；管理面 `PUT /channel-repo-links/{c}/{p}` 同域返回 422 `SAME_DOMAIN_PAIR`；迁移 202611170012 清理存量同域行（UC-51/52/53） | 行为+数据契约 |
+| FR-31.13 | 对外术语：平台集合叫**代码托管平台**、关系叫**可接入的代码托管平台**；「登录渠道」保留（与对象模型同名），说明改为「查看已支持的登录渠道并可更新各渠道配置」；代码标识符不随文案改名（UC-54） | 文案契约 |
+| FR-31.14 | 文案/bundle 改动必须同批 bump 两个版本位：`admin-view.js?v=`（bundle）与 `I18N.init('<ver>')`（语言包 `?v=`）；漏 bump 的症状=新词条空白/回显原始 key、旧 bundle 不认新视图（UC-54） | 发布纪律 |
+| FR-31.15 | 托管请求的平台判定：**前缀即平台**（前端任何在册平台前缀都取到 provider，不再二分 github/gitcode）；后端在无 provider 线索时先用本账号 `user_repos` 缓存反查（唯一命中才采用，同名跨平台不猜），最后才走 token 可用性兜底（UC-60/61/62） | 行为契约 |
+| FR-31.16 | 仓库归属解析：`owner.login` → `namespace.path/name`（Gitee v5）→ `full_name` 第一段；`full_name` 缺失时用 `owner/name` 反拼，保证「owner == 我的 login ⇒ admin」判定不落空（UC-63） | 数据契约 |
+| FR-31.17 | DDL 迁移必须按**最终状态复检**并在不满足时 `raise`（执行器：抛错=不盖章）；已知漏检项 202611170010（5 列 + caps 表）与 202611170011（relation 列）（UC-64） | 发布纪律 |
+| FR-31.18 | 前端与后端**不得出现二元平台枚举**：显示名/域名/品牌色/图标一律平台目录派生；前缀↔平台用 `providerFromRepoKey`/`repoKeyOf`；「是否接入」以用户↔平台关系为准（OAuth 身份行不作判据）；后端能力判定按平台卡在册（UC-65） | 结构契约（棘轮守卫锁定） |
+| FR-31.19 | 顺序与集合一律数据驱动：登录渠道集合=配置+meta+表；渠道展示序=`_ui_order`/配置键序；托管兜底序=`hosting_providers()` 卡目录；bot 名历史池走 `_HISTORICAL_*` 键映射。源码中不得再出现渠道/平台顺序字面表（UC-66/67/68） | 结构契约（棘轮守卫锁定） |
+| FR-31.20 | `user_repos` 缓存写入按平台范围生效：只替换本次刷新成功的平台，失败平台保留旧缓存；全量覆盖仅限显式 `providers=None`（UC-69） | 数据契约 |
+| FR-31.21 | 引导页绑定成功（OAuth/PAT）必须离开引导态进入项目页：出口 = `goToRepos()`（摘 `ob-mode`、置 `_currentView='repos'`、改路由），且跳转前先刷新关系快照（`/auth/platform-links`，失败用 `/auth/profile.repo_platform_links` 兜底）；文案 key 解析须跨 `app.account.*`/`app.login.*` 两个命名空间，且两组件监听语言切换事件（UC-70/71） | 行为+文案契约（守卫锁定） |
+| FR-31.22 | 仓库维度读路径（`<域>/{owner}/{repo}`，URL 不带平台前缀）必须解析真实前缀：已托管仓走 `resolve_managed_repo_key()`；批量查询走 `repo_key_candidates()`；不得直接用 `to_repo_key("{owner}/{repo}")` 当数据 key（UC-72/73/74） | 结构契约（守卫锁定） |
+| FR-31.23 | 引擎 scope 的 repo 级凭据匹配、会话 token 作用域校验、IM 显示前缀剥离，一律按平台卡候选集/结构化判定，不得写死 `gitcode:/github:` 双前缀（UC-73/75/76） | 结构契约（守卫锁定） |
+| FR-31.24 | 关系变更钩子（OAuth 登录/绑定、PAT 保存/删除、解绑、平台停用）触发项目列表刷新时必须按**原值**传递 user_id，禁止 `int()` 强转（D105 起主键为 UUIDv7 字符串）；刷新失败只告警不阻断（UC-77/78/79） | 行为契约（行为级用例锁定） |
+| FR-31.25 | 版本位登记侧与页面实际值必须同步：`LOCALE_FINGERPRINT` / `CACHE_VER` / `I18N_JS_VER` / `FROZEN` 四张登记表随文案与 bundle 改动同批更新（否则守卫红着进主分支，等于 §20.8 纪律失效） | 发布纪律（ratchet 锁定） |
+| FR-31.26 | 关系写入必须单语句原子完成（方言 upsert），不得 UPDATE→INSERT 两步；并发冲突即复活而非抛错回滚（UC-80） | 数据契约 |
+| FR-31.27 | 登录渠道 `enabled=0` 必须 fail-closed 覆盖**直达入口**（`/auth/login/<p>`），不能只过滤目录；表不可读时 fail-open 以保可用性（UC-81） | 行为契约 |
+| FR-31.28 | DDL 切分按词法扫描（注释/引号感知），半建表按模型逐列补齐；两者都以"最终状态"判定而非"调用未抛异常"（UC-82/83） | 结构契约 |
+| FR-31.29 | 按平台前缀操作 `user_repos` 必须用前缀相等（`substr(...)=?`）而非 `LIKE`；provider 名允许下划线，`_` 是 LIKE 单字符通配符，会误删同形前缀行（UC-84） | 数据契约（红绿用例锁定） |
+| FR-31.30 | 被每请求调用的配置读取函数必须走缓存（键含 mtime/size 以便带外改动自动失效），不得每次 open+parse（UC-85） | 性能纪律 |
+| FR-31.31 | 方言 upsert（SQLite `ON CONFLICT DO UPDATE` / MySQL `ON DUPLICATE KEY UPDATE`）**不参与 ORM identity-map 同步**：写入后必须过期该行已加载实例（只 `expire(row)`，不得 `expire_all()`——会波及调用方同 session 的其它脏对象）；否则同 session 内后续读拿到陈旧 `revoked_at`（UC-86） | 数据契约（行为级用例锁定） |
+| FR-31.32 | 前缀 LIKE 守卫必须覆盖**内嵌 f-string** 形态（`LIKE '{provider}:%'`）：原 `:%"` 正则只拦参数形态，拦不到写进 SQL 文本的 `:%%`。唯一豁免 `mgmt/user/db.py::_path_b_prefix_clause`（只读查询 / provider 取平台卡枚举 / 默认平台需匹配裸键的存量语义），豁免数量用 `==` 登记，新增或减少即红（UC-87） | 结构契约（守卫锁定） |
+
+## FR-32：bot 单一归属（D110，2026-11-14 用户拍板；设计文档 d110-bot-single-home-design.md）
+
+背景：D109 把 bot 设计成"平台级多账号目录 + is_default"，但运行时取 token 链里从来没有这张表，
+管理面写的没人读、真源没入口（82502db1f 删掉全局 bot 输入后彻底断）。结论：**归属与粒度设计错误**，
+不是实现缺口；修法是把 bot 挪到平台行、删表。
+
+| 编号 | 规则 | 类型 |
+|---|---|---|
+| FR-32.1 | bot 归属 `grape_t_repo_platforms` 一行（**一个平台一个 bot**）：`bot_username`（事实，非配置声明）/ `bot_token_enc`（密文）/ `bot_token_status` / `bot_checked_at`；仓库级覆盖仍在 `grape_t_repo_credentials(repo_key,'bot')`；**不建仓库↔账号绑定表、不做多账号/选号/池**（UC-D110-01） | 结构契约 |
+| FR-32.2 | `grape_t_bot_accounts` 及其全部代码面删除（模型 / 仓储 / `/admin/bot-accounts` 路由 / DDL 表与部分唯一索引 / MySQL 生成列等价实现 / 前端多账号面板）；**不写 DROP 迁移**——该表只存在于跑过本分支验证轮的库，发布面从未建过，残留表手工清（命令见 d110 §5）（UC-D110-08） | 结构契约 |
+| FR-32.3 | 取 token 读序：仓库级凭据 → 平台行 `bot_token_enc` → meta `global_bot_<p>_token` → 配置文件（仅迁移标记未置位）；bot 身份读序：`managed_repos.bot_username` → 平台行 → 平台卡 → meta。级别与链序不变（UC-D110-02） | 行为契约 |
+| FR-32.4 | 写口收敛到聚合根：`PUT /admin/repo-platforms/{provider}/bot`（username/token，token 留空=不改、落库前加密、响应永不含 token）、`DELETE …/bot`（清 token，保留名字）；旧 `PUT /admin/config` 的 bot 字段保留为兼容壳并转写平台行（UC-D110-03） | 接口契约 |
+| FR-32.5 | 导入写保护 + 空值播种：`bot_token_enc/bot_username/bot_token_status/bot_checked_at` 进 `_PROTECTED`；其中 `bot_token_enc/bot_username` **仅当当前为空时**接受配置/平台卡播种，之后导入永不覆盖；`enabled` 等维持硬保护（`0` 是有效状态，不被配置复位）（UC-D110-03） | 数据契约 |
+| FR-32.6 | 轮换传播：平台 bot token 变更（管理面端点或旧 config 保存两条路径任一）必须触发 `global_bot_token_swap` 批量刷新 path A 仓库的 webhook 验签 token；**首配（旧值为空）与同值不触发**。漏了这条 = 所有已托管仓库 webhook 立刻 403（UC-D110-04） | 行为契约（红绿用例锁定） |
+| FR-32.7 | 能力视图：`supports_bot_token` / `bot_accounts` 摘要来自平台行（一平台一行；`token_present` 决定 `active`/`disabled`），`bot_username` 回显平台行；不再有"表里有行就算支持"的假阳性（UC-D110-07） | 接口契约 |
+| FR-32.8 | 巡检写平台行：`bot_token_status` / `bot_checked_at` 为真源，meta `global_<p>_bot_token_status` 兼容期双写；`mark_bot_status` 不再零调用者（UC-D110-06） | 行为契约 |
+| FR-32.9 | `bot_usernames` 池丢弃（一平台一 bot）；bot 名单 = 各平台行 `bot_username` ∪ 平台卡 `bot_username`（UC-D110-05） | 数据契约 |
+| FR-32.15 | 用户面平台可见性（方案甲）：唯一判据 = `grape_t_repo_platforms.enabled`（`visibility.is_platform_visible`；`meta.vcs_platforms_hidden` 由迁移 202611170021 退役）；目录不返回 disabled 平台、`?provider=` → 403 `PLATFORM_DISABLED`（无绑定同样 403）、合并列表不拉取；内网写入口照常可用；管理面项带 `disabled`；关平台需影响面预检（409 + `?confirm=1`）；全禁用时目录为空且不回退平台卡（UC-D110-14/16/17） | 可见性契约（用户拍板：甲） |
+| FR-32.18 | 管理面字段说明气泡必须脱离容器裁切：Teleport 到 body + `position: fixed` + 按触发器矩形定位 + `z-index: 3000` + 滚动/缩放重算；禁 `position: absolute`（会被 `overflow:hidden` 容器裁掉）（UC-D110-19） | 交互契约 |
+| FR-32.19 | 关闭平台必须用**页面内 Vue 弹层**确认（自带 `position:fixed/inset:0` 样式，不依赖设计令牌、不用 `window.confirm`），展示影响面数字，确认后带 `?confirm=1` 重发；取消回滚开关。后端关闭一律要求确认（UC-D110-20） | 交互契约（用户拍板） |
+| FR-32.20 | `enabled` 双语义的文案分叉：登录渠道=`是否允许登录`（403 CHANNEL_DISABLED）、代码托管平台=`是否在用户面显示`；两页分别映射 `field.enabled_channel` / `field.enabled_platform`（UC-D110-21） | 契约一致性 |
+| FR-32.17 | 默认不展示的平台写在初始化代码：`DEFAULT_HIDDEN_PLATFORMS`（当前 `{"gitlab"}`）只在**新建平台行**与**迁移 202611170021** 生效；`enabled` 属导入保护列（配置永不覆盖）、orphaned 恢复视为可用（`enabled=1`）；平台卡不承载可见性（UC-D110-18） | 部署口径（用户拍板 B：写死初始化） |
+| FR-32.16 | `webhook_url` 语义=公网基址（非平台回调全路径）：平台路径由平台卡 `webhook_path` 追加，配置里的 `/webhook/xxx` 被整体替换；本轮**只补注释/示例提醒，不改行为**；缺失时托管注册 422 + 健康告警（UC-D110-15） | 配置口径（用户拍板：不合并两键） |
+| FR-32.14 | 设计/需求文档与源码不得含真实凭据：示例只写占位形态（`<REDACTED_...>` / `<your_...>` / CHANGE_ME / ${ENV}），真实 token / webhook secret / 口令一律不写入；守卫 `test_no_secrets_in_docs_and_src` 实跑为门（UC-D110-13） | 安全红线（用户要求） |
+| FR-32.11 | 渠道卡 / 平台卡展示契约：名称取 `provider_name.<provider>`（zh/en 两语言包，配置 name 只兜底），图标取 `/static/img/<provider>.svg`（独立文件必须 xmlns + viewBox + `?v=`），无图回退文字；huawei 定名 华为 / Huawei（UC-D110-09/10） | 展示契约 |
+| FR-32.12 | 登录渠道管理页不提供"渠道↔平台配对"设置：移除"可接入的代码托管平台"分节与 `channel-repo-links` 写入口；关系只由配置文件导入与同域隐式产生，运行时判定不变（UC-D110-11） | 范围收缩（用户拍板） |
+| FR-32.13 | 展示层变更的缓存版本纪律：改语言包 → 四页 cacheVer + LOCALE_FINGERPRINT，改管理台视图 → `admin-view.js?v`，改图标 → `?v=`；守卫用例实跑为门（UC-D110-12） | 工程纪律 |
+| FR-32.10 | 初始化种子文件 `configs/global-bot-token.json`（`.gitignore`；兼容名 `platform-bots.json` 亦认）：支持 `platform_bot[]` 数组（`provider`/`bot_name`/`bot_token`，别名 `platform_type`/`username`/`token|bit_token`）与旧扁平键并存，解析器唯一（`read_bot_seed_file`）；迁移 202611170017 只填空位、加密写入平台行，运行时不读文件；沿用原名 `global-bot-token.json`，中间版本名 `platform-bots.json(-.example.json)` 兼容一版（UC-D110-09） | 配置契约 |
+
+## FR-33：升级不丢平台关系（2026-11-16 用户拍板；设计分片 d109 §20）
+
+**问题（脱敏）**：一次部署后用户反馈「配了 PAT，但平台关系不出现」——用户面
+`/auth/platform-links` 恒空、仓库页落到「无仓库平台绑定」引导页；接口层全是 200。
+定位结论：① 平台对象四张表没有域归属（四进程各建一份或整批被归属守卫跳过）；
+② 迁移台账与实表不一致（`202611170030` 已盖章，四表却不存在），PAT 保存钩子
+写 `grape_t_user_repo_platform_link` 报 `no such table`，异常被 fail-safe 吞成一条 warning。
+
+**要求（四条，全部可机器验证）**：
+
+| # | 要求 | 验收 |
+|---|---|---|
+| R1 | 四表单一 owner = mgmt；DDL 一律过表归属守卫；`grape_t_repo_credentials` 补列只在 insight 进程执行 | `tests/api/test_platform_object_domain_boundary.py` + `test_table_ownership.py` |
+| R2 | runtime/insight 禁止 ORM 直连平台对象表；跨域读写只走 `mgmt.public` 具名查询/写原语，凭据列不出域 | 同上（源码断言 + 列白名单） |
+| R3 | 台账说谎可自愈：新增幂等迁移 `202611170041 ensure-platform-object-tables`，表缺失即补建 | `tests/api/test_platform_migration_self_heal.py` |
+| R4 | 部署前自检：角色 env / 台账非空 / 同号同名 / owner 表实存；FAIL 不得启动 | `tests/api/test_deploy_preflight.py` + `scripts/deploy_preflight.py` |
+| R5 | 凭据全部失效（清 PAT / 平台吊销）时工作区降级为引导页（200 + `_no_vcs_binding`），文案按来源区分 OAuth「重新授权」/ PAT「重新配置」；显式 `?provider=` 仍 401 | `tests/mgmt/test_repos_member_reauth_degrade.py` |
+| R6 | 工作区 / 我的项目 / 项目模板 三入口判据=用户↔平台关系表；进页前刷新关系快照；来源全无的残留关系读口自愈撤销 | `tests/api/test_workspace_entry_relation_gate.py` + `tests/mgmt/test_d109_pat_relation_scenario.py::test_dangling_relation_is_pruned_when_no_source_left` |
+| R7 | 判据叠加凭据可用性：身份行 token 解不出（历史派生密钥）且无 refresh/无 PAT 时不算已接入，返回 `needs_reauth` 提示重新授权；member 不再因此 401 | `tests/mgmt/test_dead_identity_not_counted.py` |
+
+**用户可见链路的验收口径**：PAT 保存 → 关系行写入 → `/auth/platform-links` 返回该 provider
+（`source=table`）→ 仓库页不再走引导页；删除 PAT → 仅该平台撤销，其它平台保留。
+场景用例 UC-D109-45~48（`10-usecases-decouple.md`），测试见 `13-uc-test-mapping.md`。
+
+**范围外**：全仓既有「裸跨域读」欠账（设计文档 §2.2 统计）与 252 个跨域视图退役，不在本 FR 内。

@@ -8,9 +8,71 @@
 import json
 import os
 import re
+import threading
+import time
 import urllib.request
 import urllib.error
 from src.kernel.config import log
+
+
+# ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
+# 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
+# 积压越慢越贵（实测 grape-dev/grape 330 open = 7 页 4.5s；2000 open ≈ 30s+）。
+# 按仓库缓存「完整 open 标题 → number」索引，TTL 内：
+#   · 标题命中 → 直接返回；
+#   · 索引完整且标题不在 → 直接判「不存在」，不再翻页；
+# 新建成单成功后把标题写回缓存（remember_open_issue_title），批量造单不必每次翻页。
+# 语义边界：TTL 内平台外新建的同名 issue 可能漏判（原实现同样不防并发建单，可接受）。
+_OPEN_TITLE_TTL_SECONDS = float(os.environ.get("ISSUE_DEDUP_TITLE_CACHE_TTL", "60"))
+_OPEN_TITLE_MAX_REPOS = int(os.environ.get("ISSUE_DEDUP_TITLE_CACHE_REPOS_MAX", "200"))
+_open_title_cache: dict[tuple, dict] = {}
+_open_title_lock = threading.Lock()
+
+
+def _open_title_key(provider: str, owner: str, repo: str) -> tuple:
+    return ((provider or "").lower(), (owner or "").lower(), (repo or "").lower())
+
+
+def _open_title_get(provider: str, owner: str, repo: str) -> dict | None:
+    """取未过期的仓库标题索引；过期即丢弃。"""
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        ent = _open_title_cache.get(key)
+        if not ent:
+            return None
+        if time.time() - ent.get("ts", 0) > _OPEN_TITLE_TTL_SECONDS:
+            _open_title_cache.pop(key, None)
+            return None
+        return ent
+
+
+def _open_title_put(provider: str, owner: str, repo: str,
+                    titles: dict, complete: bool) -> None:
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        if key not in _open_title_cache and len(_open_title_cache) >= _OPEN_TITLE_MAX_REPOS:
+            # 简单容量上限：淘汰最旧的一条
+            _oldest = min(_open_title_cache, key=lambda k: _open_title_cache[k].get("ts", 0))
+            _open_title_cache.pop(_oldest, None)
+        _open_title_cache[key] = {"titles": dict(titles), "complete": bool(complete),
+                                  "ts": time.time()}
+
+
+def remember_open_issue_title(provider: str, owner: str, repo: str, title: str,
+                              number) -> None:
+    """建单成功后把标题写回索引（只更新已存在的缓存条目，不新建）。"""
+    if not title or number is None:
+        return
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        ent = _open_title_cache.get(key)
+        if ent is not None:
+            ent["titles"][str(title).strip()] = number
+
+
+def invalidate_open_issue_title_cache(provider: str, owner: str, repo: str) -> None:
+    with _open_title_lock:
+        _open_title_cache.pop(_open_title_key(provider, owner, repo), None)
 
 
 # Issue #315: GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）链接识别与鉴权下载。
@@ -242,11 +304,11 @@ def _dedup_error_text(data: dict) -> str:
 
 
 def _native_issue_number(n):
-    """D41/S61：issue number 保持平台原生形态——int 平台（GitCode/GitHub）
+    """D41/S61/#3055：issue number 保持平台原生形态——int 平台（GitCode/GitHub）
     返回 int；字符串 ident 平台（gitee "IKSQ4O"）返回 str（int() 强转
-    会炸且丢形态）。"""
-    s = str(n)
-    return int(s) if s.isdigit() else s
+    会炸且丢形态）。转发内核唯一实现 `src.kernel.issue_ident.native_issue_number`。"""
+    from src.kernel.issue_ident import native_issue_number
+    return native_issue_number(n)
 
 
 class VcsApiClient:
@@ -307,7 +369,7 @@ class VcsApiClient:
         return _resp
 
     def list_issue_comments(self, issue_number: int, per_page: int = 100,
-                            max_pages: int = 20) -> list:
+                            max_pages: int = 20, timeout: int = 30) -> list:
         """获取 Issue 评论列表（Issue #1739：门禁标注跨进程幂等去重用）。
 
         分页拉取全部评论：只取首页会让评论超过 per_page 的 Issue 漏查旧标记，
@@ -325,7 +387,41 @@ class VcsApiClient:
             _resp = self._request("GET", self._generic_path(
                 f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
                 f"/comments?per_page={per_page}&page={_page}",
-                f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"))
+                f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"),
+                timeout=timeout)
+            if not isinstance(_resp, list) or not _resp:
+                break
+            if _resp == _prev:
+                break
+            _prev = _resp
+            _out.extend(_resp)
+            if len(_resp) < per_page:
+                break
+        return _out
+
+    def list_pr_comments(self, pr_number: int, per_page: int = 100,
+                         max_pages: int = 20, timeout: int = 30) -> list:
+        """获取 PR 评论列表（分页全量，Issue #2816）。
+
+        路径由平台卡 ``pr_comment_endpoint`` 派生：github 系 PR 与 Issue 共用
+        ``/issues/{n}/comments``；gitcode/gitee 系用 ``/pulls/{n}/comments``；
+        gitlab 方言用 ``/merge_requests/{n}/notes``。分页策略与
+        ``list_issue_comments`` 一致（空页/重复页/短页停止，最多 max_pages）。
+        """
+        card = self._platform_card()
+        if card is None:
+            return []
+        if card.dialect == "gitlab":
+            _base = f"/projects/{self.owner}%2F{self.repo}/merge_requests/{pr_number}/notes"
+        elif (getattr(card, "pr_comment_endpoint", "") or "pulls") == "issues":
+            _base = f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments"
+        else:
+            _base = f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments"
+        _out: list = []
+        _prev = None
+        for _page in range(1, max_pages + 1):
+            _resp = self._request(
+                "GET", f"{_base}?per_page={per_page}&page={_page}", timeout=timeout)
             if not isinstance(_resp, list) or not _resp:
                 break
             if _resp == _prev:
@@ -364,11 +460,11 @@ class VcsApiClient:
         return self._request("POST", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
 
-    def get_issue(self, issue_number: int) -> dict:
+    def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
         """获取 Issue 详情。"""
         return self._request("GET", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
-            f"/issues/{issue_number}"))
+            f"/issues/{issue_number}"), timeout=timeout)
 
     # === Issue 关闭 ===
 
@@ -457,7 +553,18 @@ class VcsApiClient:
                         return _native_issue_number(n)
             return None
         # 非 github：分页遍历（形态兼容 {data:[]}/items/records 与 list）
+        # Issue #3250：先查短 TTL 的仓库标题索引；命中/完整索引判无 → 不再翻页。
+        _title = title.strip()
+        _cached = _open_title_get(self.provider, self.owner, self.repo)
+        if _cached is not None:
+            if _title in _cached["titles"]:
+                return _cached["titles"][_title]
+            if _cached.get("complete"):
+                return None
+        _seen: dict = dict(_cached["titles"]) if _cached else {}
+        _found = None
         page = 1
+        _complete = False
         while page <= max_pages:
             data = self._request(
                 "GET", f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}")
@@ -470,20 +577,30 @@ class VcsApiClient:
             else:
                 items = data if isinstance(data, list) else []
             if not items:
+                _complete = True
                 break
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                if str(it.get("title") or "").strip() == title.strip():
-                    st = str(it.get("state") or "").lower()
-                    if st in ("open", "opened", "active", "1", "todo"):
-                        n = it.get("number") or it.get("iid") or it.get("id")
-                        if n:
-                            return _native_issue_number(n)
+                _t = str(it.get("title") or "").strip()
+                st = str(it.get("state") or "").lower()
+                if not _t or st not in ("open", "opened", "active", "1", "todo"):
+                    continue
+                n = it.get("number") or it.get("iid") or it.get("id")
+                if not n:
+                    continue
+                _seen.setdefault(_t, _native_issue_number(n))
+                if _t == _title and _found is None:
+                    _found = _native_issue_number(n)
+                    break
+            if _found is not None:
+                break   # 早退：索引不完整（complete=False），仅用于同名复用
             if len(items) < 50:
+                _complete = True
                 break
             page += 1
-        return None
+        _open_title_put(self.provider, self.owner, self.repo, _seen, _complete)
+        return _found  # type: ignore[return-value]
 
     def get_issue_state(self, issue_number: int) -> str:
 
@@ -719,7 +836,7 @@ class VcsApiClient:
             return None
 
     def _card_request(self, method: str, path: str, data: dict | None = None,
-                      form: bool = False) -> dict:
+                      form: bool = False, timeout: int = 30) -> dict:
         """卡驱动通用请求（D13/S14）：api_base + api_auth 按平台卡，零平台代码。
 
         - query_token（Gitee 系 v5）：?access_token= 查询参数（header 会 401，实测坑）
@@ -747,8 +864,9 @@ class VcsApiClient:
         if form and data:
             import urllib.parse as _up
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            return self._do_request(url, method, _up.urlencode(data), headers=headers)
-        return self._do_request(url, method, data, headers=headers)
+            return self._do_request(url, method, _up.urlencode(data), headers=headers,
+                                    timeout=timeout)
+        return self._do_request(url, method, data, headers=headers, timeout=timeout)
 
     def _generic_path(self, github_style: str, gitlab_style: str = "") -> str:
         """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。"""
@@ -763,18 +881,18 @@ class VcsApiClient:
         return {"error": f"unsupported provider: {self.provider}"}
 
     def _request(self, method: str, path: str, data: dict | None = None,
-                 form: bool = False) -> dict:
+                 form: bool = False, timeout: int = 30) -> dict:
         """统一请求入口（D22：所有平台含存量三平台走卡驱动，消 _xxx_request 平行族）。
 
         鉴权四态按卡 api_auth（query_token / token_header / private_token /
         bearer_header），存量平台请求头逐字节保留原形态（S14 回归锁）。
         """
-        return self._card_request(method, path, data, form=form)
+        return self._card_request(method, path, data, form=form, timeout=timeout)
 
     @staticmethod
     def _do_request(url: str, method: str, data: "dict | str | bytes | None" = None,
                     headers: dict | None = None,
-                    _span_target: str = "") -> dict:
+                    _span_target: str = "", timeout: int = 30) -> dict:
         """执行 HTTP 请求，返回 JSON dict。
 
         _span_target：调用方传入的脱敏目标（provider + path，不含 token/url），
@@ -785,7 +903,7 @@ class VcsApiClient:
             from urllib.parse import urlparse as _up
             _p = _up(url)
             _span_target = "%s%s" % (_p.netloc.split(".")[0], _p.path)
-        from src.domains.insight.observability.otel import external_call_span
+        from src.kernel.otel import external_call_span
         with external_call_span("vcs", _span_target,
                                 {"vcs.method": method, "vcs.path": _span_target}) as _span:
             try:
@@ -794,7 +912,7 @@ class VcsApiClient:
                 else:
                     body = json.dumps(data).encode("utf-8") if data else None
                 req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                     if _span is not None:
                         _span.set_attribute("http.status_code", 200)
@@ -841,7 +959,7 @@ def create_client(repo_key: str, token: str = "") -> "VcsApiClient":
     if not token:
         # 从 DB 获取 token
         try:
-            from src.domains.mgmt.user.db import get_gitcode_token
+            from src.domains.mgmt.public import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             pass

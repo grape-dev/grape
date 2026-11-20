@@ -57,9 +57,29 @@ def derive_feedback_status(stage: str, task_status: str = "") -> str:
 
 
 # 外部 Issue URL 解析（Issue #673 QA S4：repo_key 为空的历史行按 issue_url 兜底推导）
+# 域名白名单与 host→provider 一律从平台卡派生：原实现写死 github/gitcode/gitlab 三家，
+# gitee.com 的 issue 链接 regex 直接不匹配 → 历史行 repo_key 推导为空；即便匹配，
+# 未知 host 也会默认落 gitcode（错误前缀）。2026-11-14 深度检查修复。
 _EXTERNAL_ISSUE_URL_RE = re.compile(
-    r"^https?://(?:www\.)?(github\.com|gitcode\.com|gitlab\.com)"
+    r"^https?://(?:www\.)?([a-z0-9.-]+\.[a-z]{2,})"
     r"/([^/\s]+)/([^/\s]+)/(?:-/)?issues/(\d+)/?$")
+
+
+def _host_to_provider() -> "dict[str, str]":
+    """平台卡 host → provider（卡不可用时回落内建三家，仍优于默认 gitcode）。"""
+    out: dict[str, str] = {}
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+
+        for _p in list_vcs_platforms():
+            _card = get_platform_card(_p)
+            if _card is not None and _card.host:
+                out[str(_card.host).lower()] = _p
+    except Exception as e:  # 平台卡读失败 → 回落 host 表（调用方要的是 host→provider 映射）
+        log.debug(f"feedback_status: platform card host map failed: {e}")
+    for _p, _h in (("gitcode", "gitcode.com"), ("github", "github.com"), ("gitlab", "gitlab.com")):
+        out.setdefault(_h, _p)
+    return out
 
 
 def _repo_key_from_issue_url(issue_url: str) -> str:
@@ -68,8 +88,9 @@ def _repo_key_from_issue_url(issue_url: str) -> str:
     if not m:
         return ""
     host, owner, repo, _num = m.groups()
-    provider = ("github" if host.startswith("github")
-                else "gitlab" if host.startswith("gitlab") else "gitcode")
+    provider = _host_to_provider().get(host.lower(), "")
+    if not provider:
+        return ""
     return f"{provider}:{owner}/{repo}"
 
 

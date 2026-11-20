@@ -23,7 +23,7 @@ def _load_keys():
     if _loaded:
         return
 
-    from src.domains.mgmt.auth.security_config import get_credential_keys
+    from src.kernel.security_config import get_credential_keys
     raw = get_credential_keys()
 
     for pair in raw.split(","):
@@ -72,7 +72,7 @@ def encrypt(plaintext: str) -> str:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
         # 生产环境（密钥非默认值）拒绝降级为明文
-        from src.domains.mgmt.auth.security_config import get_credential_keys
+        from src.kernel.security_config import get_credential_keys
         _keys_raw = get_credential_keys()
         if _keys_raw and not _keys_raw.startswith("dev:"):
             raise RuntimeError(
@@ -88,6 +88,26 @@ def encrypt(plaintext: str) -> str:
     aesgcm = AESGCM(key)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
     return f"{kid}:{base64.b64encode(nonce).decode()}:{base64.b64encode(ciphertext).decode()}"
+
+
+def is_ciphertext(value: str) -> bool:
+    """判断一个凭据值是否已是 `{kid}:{nonce_b64}:{ct_b64}` 形态的密文。
+
+    只做形态判定（三段 + nonce 解出来正好 12 字节），不解密、不碰密钥池——
+    迁移要判断"这行到底落没落明文"，而 decrypt 对明文是**原样返回**的，
+    单看 decrypt 成功与否无法区分两者（D110 实锤：平台行被写进明文 PAT）。
+    """
+    if not value:
+        return False
+    parts = value.split(":", 2)
+    if len(parts) != 3 or not parts[0] or not parts[0].isprintable():
+        return False
+    try:
+        nonce = base64.b64decode(parts[1], validate=True)
+        base64.b64decode(parts[2], validate=True)
+    except Exception:
+        return False
+    return len(nonce) == 12
 
 
 def decrypt(encrypted: str) -> str:

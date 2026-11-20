@@ -25,6 +25,7 @@
   "stats": {
     "total": "Total {count}"
   },
+  "search_placeholder": "Search name, device or tag…",
   "tab": {
     "engines": "Engines",
     "workers": "Workers"
@@ -115,7 +116,12 @@
     "recent_models": "Recently used models",
     "recent_models_desc": "Top 3 by usage",
     "recent_models_empty": "No usage records",
-    "model_used_count": "{{count}} calls"
+    "model_used_count": "{{count}} calls",
+    "sandbox_platform": "Sandbox Platform",
+    "sandbox_template": "Template",
+    "platform_disabled": "Disabled",
+    "platform_disabled_tip": "Associated sandbox platform is disabled: no new sandboxes; enable it on the platform detail page",
+    "cred_id_tip": "Credential ID — on multi-instance hosts the service name is sandbox-worker-<instanceID>-<credID> (systemctl)"
   },
   "empty": {
     "no_engines": "No engines",
@@ -156,7 +162,33 @@
     "revoke_confirm": "Confirm revoke and delete this credential? This action is irreversible. The worker will no longer be able to connect. The credential name can be reused.",
     "toast_revoked": "Revoked and deleted",
     "toast_revoke_failed": "Revoke failed: {{msg}}",
-    "tasks_title": "Credential #{{id}} · Tasks"
+    "tasks_title": "Credential #{{id}} · Tasks",
+    "sandbox_gen_title": "Generate Sandbox Credential",
+    "sandbox_hint": "Sandbox platform worker credential (rta_ token) — one-click install on the Linux machine hosting the sandbox platform",
+    "sandbox_platform": "Sandbox Platform",
+    "sandbox_platform_placeholder": "Select platform",
+    "sandbox_toast_platform_required": "Please select a sandbox platform",
+    "sandbox_token_warning": "Sandbox credential {name} ({scope}·{platform}) generated. Token shown only once — save it now; revoke from the credential list if leaked.",
+    "sandbox_install_hint": "🐧 One-click install on the sandbox platform Linux machine",
+    "sandbox_install_desc": "Run on the machine hosting the sandbox platform (Python ≥ 3.10 + curl required). Platform endpoint/API key/SSL cert come from this form (saved when the credential is generated). After install the worker auto-scans and reports the template list and preinstalled engines (platform SDK required); the sandbox page will then show the platform. Windows and manual mode are not supported yet.",
+    "sandbox_conn_title": "Platform Connection",
+    "sandbox_key_ph": "Platform API Key (e.g. e2b_xxx, empty if no auth)",
+    "sandbox_conn_desc": "The above info is stored in the grape server database (API Key encrypted); the install command does not carry it. The worker reports the template list on startup.",
+    "sandbox_endpoint_desc": "API service address of the sandbox platform; grape uses it to create/destroy sandboxes and scan templates.",
+    "sandbox_key_desc": "Access credential issued by the platform (e.g. e2b_xxx), carried when grape calls platform APIs; leave empty if the platform has no auth.",
+    "sandbox_cert_label": "SSL Certificate",
+    "sandbox_cert_desc": "PEM content of the platform certificate (self-signed / private CA HTTPS) for grape to verify the connection; leave empty for HTTP or public CA.",
+    "sandbox_toast_endpoint_required": "Platform EndPoint is required (sandbox platform API address)",
+    "platform_detail_btn": "Detail",
+    "revoke_active_sandboxes": "{n} sandboxes are currently running",
+    "revoke_active_sandboxes_body": "After deleting this credential, these sandboxes will no longer be managed, may keep consuming resources and billing. Please clean them up on the platform manually.",
+    "revoke_active_ok": "Delete credential anyway",
+    "revoke_active_cancel": "Not now",
+    "sandbox_conn_required": "required",
+    "platform_unbound": "platform not bound - no detail",
+    "warn_sandbox_provider_registration_failed": "Sandbox platform registration failed: the credential was created but is not bound to a platform (no detail button). Check the server encryption key configuration and retry.",
+    "warn_unknown": "Completed with a warning: {{code}}",
+    "platform_detail_btn_tip": "Open platform detail (info/templates/sandboxes)"
   },
   "toast": {
     "load_tasks_failed": "Failed to load tasks: {{msg}}",
@@ -263,7 +295,15 @@
       "unknown": "Unknown"
     }
   },
+  "fgrp_range": "Range",
+  "fgrp_type": "Engine",
+  "fgrp_scope": "Owner",
   "rt_range_all": "All",
   "rt_range_repo": "Repo",
-  "rt_range_user": "Personal"
+  "rt_range_user": "Personal",
+  "filter": {
+    "non_sandbox": "Non-sandbox",
+    "sandbox_platform": "Sandbox Platform"
+  },
+  "sandbox_toast_endpoint_required": "Platform API URL is required"
 }

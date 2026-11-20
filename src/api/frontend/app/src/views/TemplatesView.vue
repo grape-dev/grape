@@ -127,6 +127,10 @@
       </div>
     </template>
 
+    <!-- 弹窗 Teleport 到 body：祖先 .lobby-main 带 z-index:2 形成独立层叠上下文，
+         留在原地时 overlay 的 z-index 再高也只能在该上下文内排序，压不过
+         .lobby-head 的 z-index:3（顶栏按钮会浮在遮罩上） -->
+    <Teleport to="body">
     <!-- fork modal -->
     <div v-if="forkModal.open" class="tv-modal-overlay">
       <div class="cd tv-fork-modal">
@@ -139,7 +143,7 @@
                   forkModal.t.name || forkModal.t.id
                 }}</span>
                 <span class="tg tg-d tmpl-platform-tag">{{
-                  forkModal.t.source_platform === 'github' ? 'GitHub' : 'GitCode'
+                  platformName(forkModal.t.source_platform)
                 }}</span>
               </div>
               <div style="font-size: 12px; color: var(--t3); margin-top: 4px">
@@ -208,19 +212,19 @@
               <span style="font-size: 48px; opacity: 0.3">{{ modal.t.icon || '📦' }}</span>
             </div>
           </div>
-          <div class="tv-section-title">{{ t('templates.section_desc') }}</div>
+          <div class="tv-section-title">📝 {{ t('templates.section_desc') }}</div>
           <p class="tv-desc">{{ modal.t.description || '' }}</p>
           <template v-if="modal.highlights.length">
-            <div class="tv-section-title">{{ t('templates.section_highlights') }}</div>
+            <div class="tv-section-title">✨ {{ t('templates.section_highlights') }}</div>
             <div v-for="h in modal.highlights" :key="h" class="tv-highlight">
               <span class="tv-hi-dot">◆</span><span>{{ h }}</span>
             </div>
           </template>
           <div class="tv-readme-wrap">
-            <div class="tv-section-title">{{ t('templates.section_readme') }}</div>
+            <div class="tv-section-title">📖 {{ t('templates.section_readme') }}</div>
             <div class="tv-readme">{{ modal.readme || t('templates.readme_loading') }}</div>
           </div>
-          <div class="tv-section-title">{{ t('templates.section_pipeline', { id: modal.t.scene_id || 'default' }) }}</div>
+          <div class="tv-section-title">💡 {{ t('templates.section_pipeline', { id: modal.t.scene_id || 'default' }) }}</div>
           <div class="tv-stages">
             <template v-for="(s, i) in pipelineStages(modal.t)" :key="i">
               <span class="tv-stage"
@@ -245,7 +249,7 @@
             <input v-model="modal.repoName" class="tv-repo-input" />
             <select v-if="bindings.length > 1" v-model="modal.provider" class="tv-provider">
               <option v-for="b in bindings" :key="b" :value="b">
-                {{ b === 'gitcode' ? 'GitCode' : b === 'github' ? 'GitHub' : b }}
+                {{ platformName(b) }}
               </option>
             </select>
           </div>
@@ -279,6 +283,7 @@
         </div>
       </div>
     </div>
+    </Teleport>
   </div>
 </template>
 
@@ -286,6 +291,7 @@
 // Batch 14 (templates): legacy templates.js gallery — rendered inside the ReposView lobby shell
 // (templates is a sub-tab of the repos lobby, one component so one vite chunk keeps the contract simple).
 import { computed, onMounted, reactive, ref } from 'vue'
+import { platformChoices, repoKeyOf } from '../lib/repo-provider.js'
 
 const G = globalThis
 const emit = defineEmits(['create'])
@@ -408,10 +414,9 @@ function toggleFav(id) {
   }
 }
 function platformLabel(x) {
+  // 模板来源平台名走平台目录（含 gitee/gitlab/未来平台），不再二分
   const p = x.source_platform || ''
-  if (p === 'github') return 'GitHub'
-  if (p === 'gitcode') return 'GitCode'
-  return ''
+  return (typeof window.platformLabel === 'function' && window.platformLabel(p)) || p || ''
 }
 function fmtStars(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n
@@ -435,42 +440,42 @@ function pipelineStages(x) {
 }
 
 const TAG_HIGHLIGHTS = {
-  python: 'tag.python',
-  flask: 'tag.flask',
-  fastapi: 'tag.fastapi',
-  web: 'tag.web',
-  api: 'tag.api',
-  cli: 'tag.cli',
-  game: 'tag.game',
-  pygame: 'tag.pygame',
-  starter: 'tag.starter',
-  test: 'tag.test',
-  html: 'tag.html',
-  css: 'tag.css',
-  js: 'tag.js',
-  frontend: 'tag.frontend',
-  blog: 'tag.blog',
-  docker: 'tag.docker',
-  k8s: 'tag.k8s',
-  terraform: 'tag.terraform',
-  ai: 'tag.ai',
-  agent: 'tag.agent',
-  automation: 'tag.automation',
-  skill: 'tag.skill',
-  harmonyos: 'tag.harmonyos',
-  arkts: 'tag.arkts',
-  ecommerce: 'tag.ecommerce',
-  mcp: 'tag.mcp',
-  vue: 'tag.vue',
-  golang: 'tag.golang',
-  gateway: 'tag.gateway',
-  iac: 'tag.iac',
-  spider: 'tag.spider',
-  crawler: 'tag.crawler',
-  markdown: 'tag.markdown',
-  tool: 'tag.tool',
-  helm: 'tag.helm',
-  cncf: 'tag.cncf',
+  python: 'templates.tag.python',
+  flask: 'templates.tag.flask',
+  fastapi: 'templates.tag.fastapi',
+  web: 'templates.tag.web',
+  api: 'templates.tag.api',
+  cli: 'templates.tag.cli',
+  game: 'templates.tag.game',
+  pygame: 'templates.tag.pygame',
+  starter: 'templates.tag.starter',
+  test: 'templates.tag.test',
+  html: 'templates.tag.html',
+  css: 'templates.tag.css',
+  js: 'templates.tag.js',
+  frontend: 'templates.tag.frontend',
+  blog: 'templates.tag.blog',
+  docker: 'templates.tag.docker',
+  k8s: 'templates.tag.k8s',
+  terraform: 'templates.tag.terraform',
+  ai: 'templates.tag.ai',
+  agent: 'templates.tag.agent',
+  automation: 'templates.tag.automation',
+  skill: 'templates.tag.skill',
+  harmonyos: 'templates.tag.harmonyos',
+  arkts: 'templates.tag.arkts',
+  ecommerce: 'templates.tag.ecommerce',
+  mcp: 'templates.tag.mcp',
+  vue: 'templates.tag.vue',
+  golang: 'templates.tag.golang',
+  gateway: 'templates.tag.gateway',
+  iac: 'templates.tag.iac',
+  spider: 'templates.tag.spider',
+  crawler: 'templates.tag.crawler',
+  markdown: 'templates.tag.markdown',
+  tool: 'templates.tag.tool',
+  helm: 'templates.tag.helm',
+  cncf: 'templates.tag.cncf',
 }
 function highlightsOf(x) {
   const out = []
@@ -517,9 +522,9 @@ function tplUrl(x) {
   let u = x.html_url || ''
   if (!u && x.source_repo) {
     u =
-      x.source_platform === 'github'
-        ? 'https://github.com/' + x.source_repo
-        : 'https://gitcode.com/' + x.source_repo
+      'https://' +
+      ((typeof window.platformHost === 'function' && window.platformHost(x.source_platform)) || 'gitcode.com') +
+      '/' + x.source_repo
   } else if (!u && x.source === 'local') {
     u = 'https://gitcode.com/grape-dev/grape-template/tree/main/' + (x.id || '')
   }
@@ -529,14 +534,19 @@ function openUrl(u) {
   window.open(u, '_blank')
 }
 
-const bindings = computed(() => {
-  try {
-    const u = JSON.parse(localStorage.getItem('user') || '{}')
-    return u.bindings || []
-  } catch (e) {
-    return []
-  }
-})
+// 可一键创建的平台：不能只看 localStorage.user.bindings（那只有 OAuth 身份行，
+// 纯 PAT 平台永不出现 → 多仓库权限的用户在创建页看不到平台选择；2026-11-14 实锤）。
+// 口径 = 服务端 /auth/platform-links（关系 ∪ PAT）∪ 已加载仓库前缀。
+const linkProviders = ref([])
+const repos = ref([])
+const bindings = computed(() =>
+  platformChoices(
+    linkProviders.value,
+    repos.value || [],
+    (k) => (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k)
+  ).map((p) => p.key)
+)
+const platformName = (k) => (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k)
 
 // ── create modal ──
 const modal = reactive({
@@ -671,7 +681,7 @@ function doCreate() {
             )
           }
           const parts = (r.full_name || '').split('/')
-          const rk = r.repo_key || (r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name
+          const rk = repoKeyOf(r)
           if (G.app._forceSyncRepos) G.app._forceSyncRepos()
           setTimeout(() => {
             G.window.selectRepo(r.full_name, parts[0], parts[1], rk)
@@ -740,7 +750,7 @@ function forkOne() {
         G.app.showToast(msg)
       }
       const parts = (r.full_name || '').split('/')
-      const rk = r.repo_key || (r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name
+      const rk = repoKeyOf(r)
       if (G.app._forceSyncRepos) G.app._forceSyncRepos()
       setTimeout(() => {
         G.window.selectRepo(r.full_name, parts[0], parts[1], rk)
@@ -773,6 +783,13 @@ function forkOne() {
 }
 
 onMounted(() => {
+  // 平台选择的数据源（两条都是轻量接口：platform-links 读关系表，repos/member 命中缓存）
+  G.API.get('/auth/platform-links')
+    .then((d) => { linkProviders.value = (d && d.providers) || [] })
+    .catch(() => {})
+  G.API.get('/repos/member')
+    .then((d) => { repos.value = (d && d.repos) || [] })
+    .catch(() => {})
   G.API.get('/project-templates')
     .then((data) => {
       rawCats.value = data.categories || []
@@ -803,22 +820,38 @@ defineExpose({ findTemplateById, openCreate })
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(6px);
   display: flex;
-  align-items: center;
+  /* 满高排版：弹窗贴满上下边缘、只在两侧居中（对齐迁移前 weekly-11 的口径），
+     内容多时不再把弹窗挤成"中间一块"，滚动的只有正文区。 */
+  align-items: stretch;
   justify-content: center;
-  padding: 3vh 24px;
-  z-index: 1001;
-  overflow-y: auto;
+  padding: 0 24px;
+  z-index: 1200;
+}
+/* 弹窗材质：实心白底（浅色 #fff / 暗色 #2c2c2e），与列表卡片同一材质。
+   不再吃 §23 的 --glass-strong 玻璃——玻璃在浅色下会把背后的卡片透出来，显脏。
+   全局 §23 的规则带 !important，这里用 :root 前缀 + !important 压过它。 */
+:root .tv-modal,
+:root .tv-fork-modal {
+  border-radius: 12px !important;
+  background: var(--glass-solid) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 1px solid var(--hairline) !important;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.18),
+    0 2px 8px rgba(0, 0, 0, 0.06) !important;
 }
 .tv-modal {
   width: 100%;
   max-width: 900px;
-  margin: auto;
+  margin: 0 auto;
   padding: 0;
-  border-radius: 18px;
+  border-radius: 12px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  max-height: 88vh;
+  height: 100vh;
+  max-height: 100vh;
 }
 /* 头部：图标+标题一块、关闭按钮固定在右上角。
    原来 .tv-modal-head 是块级，关闭按钮被挤到第二行（120px 高的"排版错位"）。 */
@@ -827,9 +860,9 @@ defineExpose({ findTemplateById, openCreate })
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 18px 56px 14px 28px;
+  padding: 20px 56px 14px 32px;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--b);
+  border-bottom: 1px solid var(--hairline);
 }
 .tv-modal-head-inner {
   display: flex;
@@ -845,7 +878,6 @@ defineExpose({ findTemplateById, openCreate })
 .tv-modal-title {
   flex: 1;
   min-width: 0;
-  margin-left: 14px;
 }
 .tv-modal-name-row {
   display: flex;
@@ -867,16 +899,16 @@ defineExpose({ findTemplateById, openCreate })
 }
 .tv-badge {
   font-size: 10px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
 }
 .tv-badge-local {
-  color: var(--g);
-  background: color-mix(in srgb, var(--g) 15%, transparent);
+  color: var(--g-fill);
+  background: color-mix(in srgb, var(--g) 14%, transparent);
 }
 .tv-badge-git {
-  color: var(--sk);
-  background: color-mix(in srgb, var(--sk) 15%, transparent);
+  color: var(--a-text);
+  background: color-mix(in srgb, var(--a) 12%, transparent);
 }
 .tv-stars {
   font-size: 11px;
@@ -888,7 +920,7 @@ defineExpose({ findTemplateById, openCreate })
 }
 .tv-external {
   font-size: 10px;
-  color: var(--a);
+  color: var(--a-text);
   text-decoration: none;
   margin-left: 8px;
 }
@@ -896,13 +928,14 @@ defineExpose({ findTemplateById, openCreate })
   position: absolute;
   top: 10px;
   right: 12px;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
-  font-size: 20px;
+  border-radius: 8px;
+  font-size: 22px;
+  line-height: 1;
   color: var(--t3);
   cursor: pointer;
   transition:
@@ -970,7 +1003,7 @@ defineExpose({ findTemplateById, openCreate })
 }
 .tv-readme {
   background: var(--bg);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 14px 16px;
   flex: 1;
   overflow-y: auto;
@@ -986,7 +1019,7 @@ defineExpose({ findTemplateById, openCreate })
   gap: 0;
   background: var(--bg);
   padding: 12px 14px;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 .tv-stage {
   display: inline-flex;
@@ -1024,21 +1057,19 @@ defineExpose({ findTemplateById, openCreate })
   flex-shrink: 0;
   margin-top: 6px;
   font-size: 11px;
-  color: var(--a);
-  background: #f0f4f8;
+  color: var(--a-text);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
   padding: 6px 10px;
   border-radius: 6px;
 }
 .tv-modal-foot {
   padding: 14px 32px;
   flex-shrink: 0;
-  border-radius: 0 0 18px 18px;
-  border-top: 1px solid var(--b);
+  border-top: 1px solid var(--hairline);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  background: var(--c);
 }
 .tv-foot-left {
   flex: 1;
@@ -1056,12 +1087,12 @@ defineExpose({ findTemplateById, openCreate })
 .tv-repo-input {
   flex: 1;
   min-width: 0;
-  padding: 9px 12px;
+  padding: 10px 14px;
   border: 1px solid var(--b);
   border-radius: 10px;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
-  background: var(--c);
+  background: var(--bg);
   color: var(--t);
   box-sizing: border-box;
   transition:

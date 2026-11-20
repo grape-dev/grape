@@ -38,8 +38,15 @@ from typing import Awaitable, Callable, Optional
 # 由调用方传入自己的连接（3921a54c6 归位时漏了这行 import，运行期 NameError 被
 # except 吞成 "读不到安装 → None"，IM 推送静默失效）。
 from src.domains.mgmt import public as _mgmt_public
-# 渠道族 DDL 归 mgmt 域（2026-11-15）：本模块只引用 owner 的建表语句，不再自带副本。
-from src.domains.mgmt.schema_ddl import _CHANNEL_INBOUND_MESSAGE_DDL as _MESSAGE_TABLE
+# 渠道族 DDL 归 mgmt 域（2026-11-15）。2026-11-18 修正：原先这里 import mgmt 的
+# _CHANNEL_INBOUND_MESSAGE_DDL 并在本进程 conn.execute() 建表 —— 该表归 mgmt
+# （configs/table_ownership.json），runtime 进程在三库拓扑下会把它建到 **自己的库**，
+# 既是越权建表、又会造出一张空的同名表。那张单表已删。
+#
+# 注意：渠道族其余 7 张表（grape_t_channel_*）同样归 mgmt，仍由本文件的
+# ensure_channel_tables 调用建/补，但**按归属逐次判断**（table_ownership.should_skip）：
+# 只有 owner 域进程（mgmt）才真正执行 DDL，runtime/insight 进程跳过。这样注释与行为一致，
+# 也不再往别域库里造空壳表。
 
 
 def _im_now() -> str:
@@ -152,6 +159,22 @@ def get_current_engine():
     return _CURRENT_ENGINE
 
 
+def kick_engine_scan() -> bool:
+    """安装行变更后立刻唤醒 Supervisor 扫描（同步、绝不抛）。
+
+    Supervisor 默认 30s 一轮扫描；凭证保存若只等窗口，新渠道要最多 30s 才建连，
+    这期间的首条通知必然撞 "long connection is not established"/no binding。
+    返回值仅用于日志/自检，失败不阻断保存主流程。
+    """
+    kick = getattr(get_current_engine(), "kick_scan", None)
+    if kick is None:
+        return False
+    try:
+        return bool(kick())
+    except Exception as e:
+        log.warning("im engine kick_scan failed: %s", e)
+        return False
+
 
 _APP_SEEN_TABLE = (
     "CREATE TABLE IF NOT EXISTS bot_seen_messages ("
@@ -245,7 +268,9 @@ def run_startup_migration(db_path: str) -> dict:
             log.info("[DDL_SKIP] `bot_seen_messages`: owner=runtime，非本域进程跳过")
         else:
             conn.execute(_APP_SEEN_TABLE)     # 测试库无则补空表
-        migrations.ensure_channel_tables(conn)
+        # 渠道族 7 表全归 mgmt：仅 owner 域进程执行，别域跳过（见文件头说明）。
+        if not _own_tbl.should_skip("grape_t_channel_installation"):
+            migrations.ensure_channel_tables(conn)
         try:
             mig004 = _load_migration_004()
             if mig004 is not None:
@@ -258,7 +283,8 @@ def run_startup_migration(db_path: str) -> dict:
                 mig005.ensure_purge_index(conn)
         except Exception as e:            # 索引缺失只影响性能，不阻断启动
             log.warning("[startup-migration] 005 purge index failed: %s", e)
-        conn.execute(_MESSAGE_TABLE)
+        # （已移除）conn.execute(_MESSAGE_TABLE) —— 见文件头说明：渠道入站消息表归 mgmt，
+        # 本进程不再建表；此处 commit 保留，用于上面 004/005 两个本域迁移的落库。
         conn.commit()
         return {"user": 0, "repo": 0, "installations": [],
                 "backfill": "moved-to-002_drop_legacy_im"}
@@ -270,14 +296,19 @@ def run_startup_migration(db_path: str) -> dict:
 
 
 def default_db_path() -> str:
-    """与 src.kernel.session_manager 同源的 sqlite 库路径（env DEVOPS_DB_PATH）。"""
-    return os.environ.get(
-        "DEVOPS_DB_PATH",
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "data", "sessions.db",
-        ),
-    )
+    """与 src.kernel.session_manager 同源的 sqlite 库路径（env DEVOPS_DB_PATH）。
+
+    2026-11-18：原实现用三层 dirname（只到 `src/domains`）拼出
+    `src/domains/data/sessions.db`——SQLite 部署下目录不存在，IM 仓储层所有读写
+    直接 `unable to open database file`（凭证保存/安装读取/通知全部静默失败，
+    只有 MySQL 后端与设了 DEVOPS_DB_PATH 的环境看不出来）。改为直接复用
+    session_manager 的 `_db_path`（同源唯一口径，便于测试临时库注入）。
+    """
+    env = os.environ.get("DEVOPS_DB_PATH")
+    if env:
+        return env
+    from src.kernel.session_manager import _db_path  # 延迟导入：避免与 kernel 层循环
+    return _db_path
 
 
 def _connect(db_path: str):
@@ -372,7 +403,14 @@ class _SharedConn:
 
 
 def ensure_channel_schema(conn) -> None:
-    """建/补齐 IM 渠道 4 表（幂等）。db_setup 启动建表与引擎启动迁移共用同一份 DDL。"""
+    """建/补齐 IM 渠道族 7 表（幂等）。db_setup 启动建表与引擎启动迁移共用同一份 DDL。
+
+    渠道族表归 mgmt（configs/table_ownership.json）：非 owner 域进程直接返回，
+    避免在三库拓扑下把表建进自己的库。返回值无意义，调用方只依赖幂等性。
+    """
+    from src.kernel import table_ownership as _own
+    if _own.should_skip("grape_t_channel_installation"):
+        return
     _load_migration_module().ensure_channel_tables(conn)
 
 
@@ -419,11 +457,13 @@ def feishu_api(app_id: str = ""):
 
 
 def get_active_installation(scope: str = "user", *, owner_user_id: str = "", repo_key: str = "",
-                            channel_type: str = "") -> Optional[dict]:
+                            channel_type: str = "", app_id: str = "") -> Optional[dict]:
     """读 grape_t_channel_installation 的活跃安装（旧 IM 下线 A2 M2）。
 
     业务侧（如 web→飞书推送）原本经 legacy BotManager 拿 ctx/api，现在统一从这里取
     安装凭证；返回 None 表示该轨没有活跃安装。
+    ``app_id`` 非空时按安装的 legacy_app_id 精确过滤——同一仓库同渠道绑定多个 bot 时，
+    避免取「最新活跃安装」而与目标群/绑定不匹配（Issue #2432）。
     """
     scope = scope or "user"
     key = _legacy_installation_key(scope, owner_user_id, repo_key)
@@ -487,9 +527,12 @@ def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = ""
                 installation_config, app_id)
             _mgmt_public.installation_activate(conn, app_id, scope, key)
             conn.commit()
-            return True
         finally:
             conn.close()
+        # 写成功后立刻唤醒扫描：否则新渠道要等满一个 30s 窗口才建连
+        # （企微首条通知就撞 "long connection is not established"）。
+        kick_engine_scan()
+        return True
     except Exception as e:
         log.warning("grape_t_channel_installation sync failed (scope=%s app=%s): %s",
                     scope, _safe_app_ref(app_id, channel_type), e)
@@ -513,9 +556,12 @@ def revoke_installation(scope: str, *, owner_user_id: str = "", repo_key: str = 
         try:
             _n = _mgmt_public.installation_revoke(conn, channel_type, scope, app_id, key)
             conn.commit()
-            return _n > 0
         finally:
             conn.close()
+        # 解绑也要立刻收敛：让渡/停连接不必等扫描窗口
+        if _n > 0:
+            kick_engine_scan()
+        return _n > 0
     except Exception as e:
         log.warning("grape_t_channel_installation revoke failed (scope=%s app=%s): %s",
                     scope, _safe_app_ref(app_id, channel_type), e)
@@ -1041,6 +1087,18 @@ class ImEngine:
             set_current_engine(None)
         log.info("IM engine: stopped")
 
+    def kick_scan(self) -> bool:
+        """立刻唤醒 Supervisor 扫描（凭证保存/解绑后秒级建连，不等 30s 窗口）。"""
+        sup = self.supervisor
+        kick = getattr(sup, "kick", None)
+        if kick is None:
+            return False
+        try:
+            return bool(kick())
+        except Exception as e:
+            log.warning("[im-engine] kick_scan failed: %s", e)
+            return False
+
     def health(self) -> dict:
         sup = self.supervisor
         snap = self._metrics.snapshot()
@@ -1464,16 +1522,61 @@ class ImEngine:
                 return ""
             try:
                 if raw_card is not None:
+                    if not msg_id:
+                        # 主动通知（待审核/待澄清/完成）没有可回复的入站消息：走 reply API 会把
+                        # URL 拼成 `messages//reply` → 404，且历史上还被记成 sent（2026-11-18 实障：
+                        # 待审核通知在飞书静默丢失）。无 msg_id 一律 proactive 发送。
+                        _raw_sender = getattr(api, "send_card_raw_to_chat", None)
+                        if _raw_sender is not None:
+                            return await _raw_sender(ctx, chat_id, raw_card,
+                                                     fallback_open_id=target_user)
+                        # 通用兜底（钉钉/企微/Slack/Telegram 的 AdapterApi 没有单发卡片方法）：
+                        # 直接交给本渠道 Sender —— 各渠道 Sender.send 都自己处理 metadata.raw_card
+                        # （2026-11-18 实障：钉钉报 DingtalkAdapterApi has no attribute send_card_to_chat）。
+                        _inst_id = str((inst or {}).get("installation_id") or (inst or {}).get("id") or "")
+                        # 走 Channel 公开契约（channel_for + send），不读 supervisor/_sender 私有属性
+                        _lookup = getattr(getattr(engine, "supervisor", None), "channel_for", None)
+                        _channel = _lookup(_inst_id) if _lookup is not None else None
+                        if _channel is not None:
+                            from src.domains.runtime.im.channel.message import OutboundMessage
+                            _res = await _channel.send(OutboundMessage(
+                                chat_id=chat_id, text=text or "",
+                                metadata={"raw_card": raw_card, "kind": kind or "card"}))
+                            if getattr(_res, "ok", False):
+                                return getattr(_res, "message_id", "") or "ok"
+                            log.warning(f"im engine proactive card via sender failed: "
+                                        f"{getattr(_res, 'error', '')}")
+                            return ""
+                        _fallback = getattr(api, "send_card_to_chat", None)
+                        if _fallback is not None:
+                            return await _fallback(ctx, chat_id, text, fallback_open_id=target_user,
+                                                   title=title, template=template)
+                        return ""
                     return "ok" if await legacy_send_card_reply(ctx, api, msg_id, raw_card) else ""
                 if target_user and not chat_id:
-                    return await api.send_text_to_user(ctx, target_user, text)
+                    _f = getattr(api, "send_text_to_user", None)
+                    return await _f(ctx, target_user, text) if _f is not None else ""
                 if msg_id and kind == "text":
-                    return await api.reply_text(ctx, msg_id, text)
+                    _f = getattr(api, "reply_text", None)
+                    return await _f(ctx, msg_id, text) if _f is not None else ""
                 if msg_id:
-                    return await api.reply_card(ctx, msg_id, text, title=title, template=template)
-                return await api.send_card_to_chat(
-                    ctx, chat_id, text, fallback_open_id=target_user,
-                    title=title, template=template)
+                    _f = getattr(api, "reply_card", None)
+                    return (await _f(ctx, msg_id, text, title=title, template=template)
+                            if _f is not None else "")
+                # 主动卡片（非 raw_card 路径）：各渠道 AdapterApi 方法名不一致，缺方法就交回 sender
+                _f = getattr(api, "send_card_to_chat", None)
+                if _f is not None:
+                    return await _f(ctx, chat_id, text, fallback_open_id=target_user,
+                                    title=title, template=template)
+                _inst_id2 = str((inst or {}).get("installation_id") or (inst or {}).get("id") or "")
+                _lookup2 = getattr(getattr(engine, "supervisor", None), "channel_for", None)
+                _channel2 = _lookup2(_inst_id2) if _lookup2 is not None else None
+                if _channel2 is not None:
+                    from src.domains.runtime.im.channel.message import OutboundMessage
+                    _res2 = await _channel2.send(OutboundMessage(chat_id=chat_id, text=text,
+                                                                 metadata={"kind": kind or "card"}))
+                    return (getattr(_res2, "message_id", "") or "ok") if getattr(_res2, "ok", False) else ""
+                return ""
             except Exception as e:
                 log.warning("im engine deliver failed: %s", e)
                 return ""

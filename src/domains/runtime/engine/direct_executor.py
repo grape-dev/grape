@@ -55,8 +55,28 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.domains.runtime.pipeline.event_pipeline import (
         _cleanup_direct_workdir, _update_direct_task,
     )
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError
     try:
         _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id, task_id)
+    except WorkspaceBaselineError as e:
+        # Issue #2514：工作区基线分叉/不可达 = 预置阶段的结构化拒绝，不是执行崩溃。
+        # 事件/任务如实标 failed 并保留六要素错误文本，Agent 未启动。
+        from datetime import datetime, timezone
+        _msg = str(e)
+        log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_key}] "
+                  f"workspace baseline blocked before execution: {_msg}")
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(seq, "failed", exit_code=1,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=_msg)
+            if task_id:
+                from src.domains.runtime.engine.service import update_task_status
+                update_task_status(task_id, "failed", exit_code=1, result_text=_msg)
+            else:
+                _update_direct_task(seq, "failed", exit_code=1, result_text=_msg)
+        except Exception as _fe:
+            log.warning(f"Exec agent: report workspace baseline block failed: {_fe}")
     except Exception as e:
         import traceback
         _tb = traceback.format_exc()
@@ -84,14 +104,21 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             revoke_session_token(task_id or f"d_{seq}")
         except Exception as e:
             log.warning(f"Exec agent: revoke session token failed: {e}")
-        # 任务级工位清理（direct 端）：轻文件 + 确认已 push 的 worktree
+        # 任务级工位清理（direct 端）：轻文件 + worktree 终态清理（Issue #2514 存档后必清）
         try:
             _cleanup_direct_workdir(
                 repo_key, agent_type,
-                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
+                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or "",
+                task_id=task_id,
             )
         except Exception:
             pass
+        # Issue #2225：direct 会话结束清理自身暂存目录（回退 mktemp 目录也一并回收）。
+        try:
+            from src.domains.runtime.engine.session_tmpdir import cleanup_session_tmpdir_by_key
+            cleanup_session_tmpdir_by_key(task_id or f"d_{seq}")
+        except Exception as e:
+            log.warning(f"Exec agent: session tmpdir cleanup failed: {e}")
 
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
@@ -168,22 +195,24 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     repo_gitcode_token = ""
     try:
         if repo_key.startswith("github:"):
-            from src.domains.mgmt.user.db import get_github_token
+            from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
             repo_gitcode_token = get_github_token(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
             repo_gitcode_token = get_repo_token_with_refresh(repo_key=repo_key) or ""
     except Exception as e:
         log.warning(f"Exec agent: get bot token failed: {e}")
-    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'} (provider={'github' if repo_key.startswith('github:') else 'gitcode'})")
+    # provider 从 repo_key 前缀取（原实现二分 github/其余=gitcode，gitee 仓日志会打成 gitcode）
+    _prov_log = repo_key.split(":", 1)[0] if ":" in repo_key else ""
+    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'} (provider={_prov_log or 'none'})")
 
     # R20.25.4: 获取 user_token 用于脱敏（路径 B 仓库的 host 用户 token，agent 可能复述）
     _user_token_for_redact = ""
     try:
-        from src.domains.mgmt.user.db import get_host_user_id
+        from src.domains.mgmt.public import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
         if str(_host_uid or "") not in ("", "0"):
-            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+            from src.domains.mgmt.public import get_grape_account_by_id
             _host_acc = get_grape_account_by_id(_host_uid)
             if _host_acc and _host_acc.get("username"):
                 # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode），
@@ -397,6 +426,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _is_inspector = False
     _wt = ""
     _delivery_info: dict = {}
+    # Issue #2514：direct 入口与 worker 同语义——复用闸门依赖 task_id 存档证据，
+    # 基线分叉/不可达必须显式上抛（顶层兜底把 event/task 标 failed），不静默复用错基线。
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     try:
         from src.domains.runtime.engine import repogit
         _gnum = repogit.issue_num_from(issue_id)
@@ -406,6 +438,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _wt = repogit.ensure_issue_worktree(
                 repo_key, agent_type, _gnum,
                 token=repo_gitcode_token, work_branch=_wb,
+                task_id=task_id,
+                strict_override=env_extra.get("GRAPE_WORKSPACE_STRICT"),
                 delivery_branch=f"feat/issue-{_gnum}" if _is_inspector else "",
                 delivery_info=_delivery_info if _is_inspector else None)
             if _is_inspector and _wt:
@@ -417,6 +451,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         token=repo_gitcode_token, delivery_info=_delivery_info))
                 except Exception as e:
                     log.warning(f"Exec agent: build QA delivery env failed: {e}")
+    except _WsBaselineError:
+        raise
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
@@ -467,6 +503,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         f"(issue={issue_id} agent={agent_type}), reset context injected")
     except Exception as _rge:
         log.warning(f"Exec agent: worktree reset context inject failed: {_rge}")
+    # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    try:
+        from src.domains.runtime.engine.repogit import inject_git_write_context
+        prompt, _git_write = inject_git_write_context(_task_view, env_extra, prompt)
+        if _git_write and not _git_write.get("writable"):
+            log.warning(f"Exec agent: git worktree is read-only "
+                        f"({_git_write.get('reason', '')}), read-only mode marked")
+    except Exception as _gwe:
+        log.warning(f"Exec agent: git write context inject failed: {_gwe}")
 
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
@@ -482,7 +527,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list_dr, agent_type, _gnum_lr,
-                    token=repo_gitcode_token, env=env_extra)
+                    token=repo_gitcode_token, env=env_extra, task_id=task_id)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -504,9 +549,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: issue session token failed: {e}")
 
+    # Issue #2225：direct 模式与 worker 同机执行，直接落会话级唯一暂存目录（缺失回退 mktemp）。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import (
+            ensure_session_tmpdir, inject_session_tmpdir_env)
+        inject_session_tmpdir_env(env_extra, task_id or f"d_{seq}")
+        ensure_session_tmpdir(env_extra, task_id or f"d_{seq}")
+    except Exception as _tmp_e:
+        log.warning(f"Exec agent: session tmpdir ensure failed: {_tmp_e}")
+
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；
     # 有 agent_tasks 行 → run_kind='task'，归属自动反查，幂等键与 worker 侧一致。
-    from src.domains.insight.observability.master_usage import for_task as _master_for_task
+    from src.domains.insight.public import master_usage_for_task as _master_for_task
     _mu = _master_for_task(task_id, backend, cwd=ws, session_id=oc_session_id, seq=seq,
                            repo_key=repo_key, agent_type=agent_type,
                            engine_id=int(runtime_id or 0))
@@ -891,7 +945,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         try:
             from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
             if is_subtask_mode_enabled(repo_key, issue_id):
-                set_issue_stage(repo_key, issue_id, "done", "issue")
+                set_issue_stage(repo_key, issue_id, "pending_review", "issue")
                 log.info(f"Multi-task mode: parent issue {issue_id} stage=done (subtasks will trigger independently)")
         except Exception as _e:
             log.warning(f"Multi-task mode stage=done check failed: {_e}")

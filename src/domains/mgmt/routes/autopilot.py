@@ -30,7 +30,9 @@ from src.kernel.session_manager import db, db_lock
 # 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
 from src.domains.runtime import public as _rt_ap
 
-from src.domains.runtime.engine.scheduler import _get_exec_agent_task
+# 执行记录→任务行解析走 owner 域 public（原 import runtime.engine.scheduler 内部函数，
+# 且 public 版本不再要求调用方传游标）
+
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
@@ -131,6 +133,76 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
             "code": 400,
             "message": f"engine runtime ids not available for this repo/user: {', '.join(invalid)}"})
 
+
+def _validate_engine_runtime_uids(user: dict, repo_key: str, engine_uids: list) -> None:
+    """Issue #1011: engine_runtime_uids 归属校验（uid-first，可见性口径与 #486 一致）。
+
+    - uid → agent_runtimes 行（JOIN engine_uid）→ 凭据可见性同 _validate_engine_runtime_ids；
+    - uid 非法/不存在/不可见 → 400 fail-fast；
+    - 空列表不校验（广播/selector 模式语义不变）。
+    """
+    if not engine_uids:
+        return
+    from src.kernel.repo_key import from_repo_key
+    from src.domains.mgmt.user import db as user_db
+    from src.domains.mgmt.routes.settings import _build_cred_map, _make_visible_credential_fn
+    from src.kernel.engine_uid import is_uid_str
+    uid = user.get("id") or 0
+    uname = user.get("username") or ""
+    user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
+    repo_base = from_repo_key(repo_key or "")
+    cred_map = _build_cred_map(db, db_lock)
+    _visible = _make_visible_credential_fn(uname, user_repos, repo_filter=repo_base)
+    invalid = []
+    norm = []
+    for u in engine_uids:
+        v = str(u or "").strip().lower()
+        if not is_uid_str(v):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_uids"})
+        norm.append(v)
+    # agent_runtimes 归 runtime 域，SQL 在 runtime public 一份
+    from src.domains.runtime import public as runtime_public
+    try:
+        rows = runtime_public.runtime_cred_rows_by_engine_uids(norm)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"engine_runtime_uids validation failed: {e}"})
+    by_uid = {(r[0] or "").strip().lower(): ((r[1] or 0), (r[2] or 0)) for r in rows}
+    for v in norm:
+        hit = by_uid.get(v)
+        if not hit:
+            invalid.append(v)
+            continue
+        rid, cid = hit
+        cred = cred_map.get(cid) or {"scope": "global", "owner_name": "", "owner_id": "", "repo_key": ""}
+        if cred.get("status") == "revoked":
+            invalid.append(v)
+            continue
+        if not _visible(cid, cred.get("scope", "global"), cred.get("owner_name", ""),
+                        cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+            invalid.append(v)
+    if invalid:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"engine runtime uids not available for this repo/user: {', '.join(invalid)}"})
+
+
+def _reject_dual_engine_fields(uids: list, ids: list) -> None:
+    """Issue #1011 姊妹字段方案：uids 与 ids 双非空 → 400（两字段不同时非空）。"""
+    if uids and ids:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "engine_runtime_uids and engine_runtime_ids must not both be non-empty"
+                       " (uid mode is authoritative; legacy ids field is read-only)"})
+
+
+def _autopilot_exec_cols() -> list:
+    """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
+    from src.kernel.bulk_read import reader
+    with reader() as c:
+        c.execute("PRAGMA table_info(autopilot_executions)")
+        return [r[1] for r in c.fetchall()]
+
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
     import json as _json
@@ -147,6 +219,12 @@ def _row_to_task(row) -> dict:
         except Exception:
             custom_fields = []
     work_branch = row[16] if len(row) > 16 else ""
+    engine_uids = []
+    if len(row) > 17 and row[17]:
+        try:
+            engine_uids = _json.loads(row[17])
+        except Exception:
+            engine_uids = []
     return {
         "id": row[0],
         "name": row[1],
@@ -163,6 +241,7 @@ def _row_to_task(row) -> dict:
         "updated_at": row[12] or "",
         "created_by": row[13] if len(row) > 13 else 0,
         "engine_runtime_ids": engine_ids,
+        "engine_runtime_uids": engine_uids,   # Issue #1011：读侧 uids 非空优先，空回落 ids（legacy 只读）
         "custom_fields": custom_fields,
         "work_branch": work_branch or "",
     }
@@ -176,6 +255,7 @@ class CreateTaskBody(BaseModel):
     max_retry: int = 3
     enabled: bool = True
     engine_runtime_ids: list = []
+    engine_runtime_uids: list = []   # Issue #1011 姊妹字段（uid 模式权威；与 ids 双非空拒绝）
     custom_fields: list = []
     work_branch: str = ""
 
@@ -215,6 +295,7 @@ class UpdateTaskBody(BaseModel):
     cron: Optional[str] = None
     max_retry: Optional[int] = None
     engine_runtime_ids: Optional[list] = None
+    engine_runtime_uids: Optional[list] = None   # Issue #1011 姊妹字段（升格：写 uids 清空 ids）
     enabled: Optional[bool] = None
     custom_fields: Optional[list] = None
     work_branch: Optional[str] = None
@@ -244,7 +325,7 @@ def list_tasks(
     if repo_key:
         check_repo_access(user, repo_key)
     sql = ("SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch "
+           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
            "FROM autopilot_tasks")
     conditions = []
     params = []
@@ -278,12 +359,24 @@ def list_tasks(
              (r[2].split(":", 1)[1] if ":" in r[2] else r[2]) in _repo_base]
     # 引擎绑定真实性同步 §5.1b：绑定引擎已被系统 detach 的任务带提示（两表协同，不删绑定）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
         import json as _json_hint
         _all_eids = set()
         for t in tasks:
             for _eid in (t.get("engine_runtime_ids") or []):
                 _all_eids.add(int(_eid))
+        # Issue #1011：uid 模式任务的绑定引擎解析为 id 参与 detach 提示（读侧 uid 优先）
+        _all_uids = set()
+        for t in tasks:
+            for _u in (t.get("engine_runtime_uids") or []):
+                _all_uids.add(str(_u or "").strip().lower())
+        if _all_uids:
+            try:
+                from src.domains.runtime import public as runtime_public
+                for _rid in runtime_public.runtime_ids_by_engine_uids(_all_uids):
+                    _all_eids.add(_rid or 0)
+            except Exception as _ue:
+                log.warning(f"list_tasks: uid->id hints resolve failed: {_ue}")
         if _all_eids:
             # 卡点④：按任务仓库分组取提示（引擎审计全局、任务提示只看本仓库场景）
             _hints_by_repo = {}
@@ -311,7 +404,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch "
+            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
             "FROM autopilot_tasks WHERE id=?", (task_id,)
         ).fetchone()
     if not row:
@@ -319,7 +412,19 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
     task = _row_to_task(row)
     # 引擎绑定真实性同步 §5.1b：详情同样带 engine_detached 提示（与列表口径一致）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
+        # Issue #1011：读侧 uid 优先——uid 模式任务的绑定引擎解析为 id 参与提示
+        _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
+        if _uids:
+            try:
+                from src.domains.runtime import public as _rt_ap
+                for _rid in _rt_ap.runtime_ids_by_engine_uids(_uids):
+                    _rid = _rid or 0
+                    task.setdefault("engine_runtime_ids", [])
+                    if _rid not in (task.get("engine_runtime_ids") or []):
+                        task["engine_runtime_ids"] = list(task.get("engine_runtime_ids") or []) + [_rid]
+            except Exception:
+                pass
         _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]
         if _eids:
             _hints = get_detached_engine_hints(runtime_ids=_eids, repo_key=task.get("repo_key") or "")
@@ -352,21 +457,31 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
             # 用用户实际关联的 repo_key（正确的前缀），而非前端硬编码的
             body.repo_key = _matched_repo_key
         check_repo_access(user, body.repo_key)
+    # Issue #1011 姊妹字段：uids 与 ids 双非空拒绝（两字段不同时非空）
+    _reject_dual_engine_fields(body.engine_runtime_uids or [], body.engine_runtime_ids or [])
     # Issue #486: 服务端校验 engine_runtime_ids 归属（与 #277 引擎可见性口径一致）
     _validate_engine_runtime_ids(user, body.repo_key or "", body.engine_runtime_ids or [])
+    # Issue #1011：uid 模式归属校验（uid-first，口径同 #486）
+    _validate_engine_runtime_uids(user, body.repo_key or "", body.engine_runtime_uids or [])
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
-    engine_ids_json = json.dumps(body.engine_runtime_ids) if body.engine_runtime_ids else ""
+    engine_ids_json = ""
+    engine_uids_json = ""
+    if body.engine_runtime_uids:
+        # 升格语义：用户选择引擎一律写 uids、清空 ids（姊妹字段方案第 3 条）
+        engine_uids_json = json.dumps(body.engine_runtime_uids)
+    elif body.engine_runtime_ids:
+        engine_ids_json = json.dumps(body.engine_runtime_ids)
     custom_fields_json = json.dumps(body.custom_fields, ensure_ascii=False) if body.custom_fields else ""
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO autopilot_tasks "
-            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (body.name, body.repo_key, _FIXED_AGENT_TYPE, body.instruction, body.skill_name,
-             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, str(user.get("id") or ""),
-             engine_ids_json, custom_fields_json, body.work_branch or "")
+             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0,
+             engine_ids_json, custom_fields_json, body.work_branch or "", engine_uids_json)
         )
         db.commit()
         task_id = c.lastrowid
@@ -380,9 +495,19 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
     # 如果要改 repo_key，校验新仓库归属
     if body.repo_key:
         check_repo_access(user, body.repo_key)
+    # Issue #1011 姊妹字段：双非空拒绝（提交侧两字段都带非空值）
+    _reject_dual_engine_fields(body.engine_runtime_uids or [], body.engine_runtime_ids or [])
     # Issue #486: engine_runtime_ids 服务端归属校验（生效仓库 = 提交的 repo_key 或任务原 repo_key）
     if body.engine_runtime_ids is not None:
         _validate_engine_runtime_ids(user, body.repo_key or task.get("repo_key") or "", body.engine_runtime_ids)
+    # Issue #1011：uid 模式归属校验 + 升格语义（写 uids 同步清空 ids）
+    if body.engine_runtime_uids is not None:
+        _validate_engine_runtime_uids(user, body.repo_key or task.get("repo_key") or "", body.engine_runtime_uids)
+        if body.engine_runtime_uids:
+            body.engine_runtime_ids = []
+        elif body.engine_runtime_ids is None:
+            # 显式提交空 uids 且未提交 ids → 清空两字段（回到广播/selector 模式）
+            body.engine_runtime_ids = []
     fields = []
     params = []
     updates = body.model_dump(exclude_none=True)
@@ -398,6 +523,9 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
             params.append(next_run)
         elif key == "engine_runtime_ids":
             fields.append("engine_runtime_ids=?")
+            params.append(json.dumps(val) if val else "")
+        elif key == "engine_runtime_uids":
+            fields.append("engine_runtime_uids=?")
             params.append(json.dumps(val) if val else "")
         elif key == "custom_fields":
             fields.append("custom_fields=?")
@@ -447,7 +575,7 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
 async def trigger_task(task_id: int, user: dict = Depends(get_current_user)):
     """手动触发自动化任务执行。"""
     _check_task_access(user, task_id)
-    from src.domains.runtime.engine.scheduler import trigger_task_now
+    from src.domains.runtime.public import trigger_task_now
     result = await trigger_task_now(task_id)
     if not result["ok"]:
         raise HTTPException(status_code=409, detail={"code": 409, "message": result["message"]})
@@ -507,10 +635,12 @@ def list_executions(
         if not agent_task_id:
             try:
                 with db_lock:
-                    c2 = db.cursor()
-                    at_row = _get_exec_agent_task(c2, exec_id, "", r[6], r[8])
+                    # public 契约返回 dict（列名→值），不是行元组：按列名取值，
+                    # 用 at_row[0] 会恒抛 KeyError:0 被下面的 except 吞掉，
+                    # 历史执行记录的 agent_task_id 关联静默失效。
+                    at_row = _rt_ap.exec_agent_task(exec_id, "", r[6], r[8])
                     if at_row:
-                        agent_task_id = at_row[0]
+                        agent_task_id = at_row.get("id") or ""
             except Exception as e:
                 log.warning(f"Autopilot: resolve agent_task_id failed for exec {exec_id}: {e}")
         # Issue #258: 查 agent_task_ids（issue_number + repo_key 关联，支持多阶段）
@@ -519,7 +649,7 @@ def list_executions(
             rk = repo_key_map.get(tid, "")
             if rk:
                 try:
-                    from src.domains.runtime.vcs.api_client import _native_issue_number
+                    from src.domains.runtime.public import _native_issue_number
                     agent_task_ids = _find_agent_task_ids(rk, _native_issue_number(issue_number))
                 except Exception:
                     agent_task_ids = []
@@ -573,15 +703,16 @@ class DispatchBody(BaseModel):
 
 # Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
 try:
-    from src.domains.runtime.engine.scheduler import (
-        DEDUP_LEVEL_SUSPECTED,
+    from src.domains.runtime.public import (
+        dedup_level_suspected,
         dedup_auto_merge_allowed,
         normalize_dedup_level,
         sanitize_dedup_note,
         sanitize_dedup_confirmed_by,
     )
 except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同策略）
-    DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+    def dedup_level_suspected():
+        return "suspected_duplicate"
 
     def normalize_dedup_level(raw):
         level = str(raw or "").strip().lower()
@@ -614,7 +745,7 @@ def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
             "code": 409,
             "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
                        "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
-            "dedup_level": DEDUP_LEVEL_SUSPECTED,
+            "dedup_level": dedup_level_suspected(),
             "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
         })
 
@@ -630,7 +761,7 @@ def _append_dedup_note(description: str, finding: dict) -> str:
     lines = [description.rstrip(), "", f"[dedup] level={level}"]
     if note:
         lines.append(f"[dedup] 差异说明: {note}")
-    if level == DEDUP_LEVEL_SUSPECTED:
+    if level == dedup_level_suspected():
         lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
     return "\n".join(lines)
 

@@ -35,5 +35,9 @@ class InsightService(ABC):
         """A 告警查询（obs_alert_rules / obs_alert_events）。"""
 
     @abstractmethod
+    def aggregate_llm_usage(self, engine_ids: list) -> list:
+        """按引擎聚合模型用量：[(engine_id, model_key, model_raw, cnt, last_used), ...]。"""
+
+    @abstractmethod
     def aggregate_runtime_stats(self) -> dict:
         """聚合 grape_runtime 数据（events/agent_tasks 维度，供看板）。"""

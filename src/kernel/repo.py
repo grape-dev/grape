@@ -5,6 +5,7 @@
 - repo.py：领域对象，封装业务行为（bot_token / api_base / clone_url）
 """
 
+from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.repo_key import parse_repo_key
 
 # 存量二元映射降级为无平台卡时的回退表（新平台一律卡驱动）
@@ -13,10 +14,13 @@ _API_BASES = {"gitcode": "https://gitcode.com/api/v5", "github": "https://api.gi
 
 
 def _card_for(provider: str):
-    """平台卡优先（回退 runtime/repogit.py 写法）；查卡失败按无卡处理。"""
+    """平台卡优先（回退 runtime/repogit.py 写法）；查卡失败按无卡处理。
+
+    走 kernel 端口 vcs_cards（装配层绑到 runtime.vcs.platform_card），
+    符号不变、语义不变：查不到卡仍返回 None，调用方回退存量表。
+    """
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        return get_platform_card(provider)
+        return _vcs_cards.get_platform_card(provider)
     except Exception:
         return None
 

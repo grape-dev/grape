@@ -24,10 +24,58 @@ from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skil
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
 
+# Issue #3229：SKILL.md 等文本文件首部的 UTF-8 BOM 会让前端 frontmatter 正则失配，
+# 入库时统一剥离；_compute_skill_hash 对 BOM 不敏感，保证归一化后能命中 skip。
+_UTF8_BOM = b"\xef\xbb\xbf"
+_BOM_TEXT_EXTS = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
+
+
+def _strip_utf8_bom(data: bytes) -> bytes:
+    """剥离字节流首部连续的 UTF-8 BOM。"""
+    while data.startswith(_UTF8_BOM):
+        data = data[len(_UTF8_BOM):]
+    return data
+
+
+def _is_bom_text_file(name: str) -> bool:
+    """判断文件是否属于做 BOM 规范化的文本类型（至少覆盖 SKILL.md）。"""
+    base = os.path.basename(name).lower()
+    return base == "skill.md" or os.path.splitext(base)[1] in _BOM_TEXT_EXTS
+
+
+def _normalize_skill_dir_bom(skill_dir: str) -> int:
+    """剥离技能目录内文本文件首部 BOM（原地改写），返回被改写的文件数。
+
+    幂等：无 BOM 的文件不改写，第二轮调用返回 0。
+    """
+    if not os.path.isdir(skill_dir):
+        return 0
+    changed = 0
+    for root, dirs, files in os.walk(skill_dir):
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git"))
+        for name in sorted(files):
+            if not _is_bom_text_file(name):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "rb") as fp:
+                    data = fp.read()
+                stripped = _strip_utf8_bom(data)
+                if stripped == data:
+                    continue
+                with open(path, "wb") as fp:
+                    fp.write(stripped)
+                changed += 1
+            except OSError as exc:
+                logger.warning(f"skill sync: strip BOM failed for {path}: {exc}")
+    return changed
+
 
 def _compute_skill_hash(skill_dir: str) -> str:
     """计算技能目录的内容 hash（遍历所有文件，按文件名排序，取完整 SHA-256）。
 
+    文本文件参与 hash 前剥离首部 BOM（Issue #3229），使 BOM 有/无的同一技能
+    得到相同 hash，避免每轮同步重复覆盖。
     返回 64 字符十六进制字符串。目录不存在返回空串。
     """
     if not os.path.isdir(skill_dir):
@@ -40,7 +88,10 @@ def _compute_skill_hash(skill_dir: str) -> str:
             h.update(rel.encode())
             try:
                 with open(os.path.join(root, f), "rb") as fp:
-                    h.update(fp.read())
+                    data = fp.read()
+                if _is_bom_text_file(f):
+                    data = _strip_utf8_bom(data)
+                h.update(data)
             except Exception:
                 pass
     return h.hexdigest()  # 完整 64 字符十六进制
@@ -59,6 +110,16 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
                 zf.write(full, rel)
     buf.seek(0)
     return buf.getvalue()
+
+
+def _resolve_skill_category(info: dict, dict_map: dict) -> tuple[int, int]:
+    """按 skill-description.json 的分类 slug 解析 (cat_l1_id, cat_l2_id)。
+
+    解析口径统一在 src.kernel.category（与 scene_sync 共用）；未命中返回 (0, 0)，
+    调用方保留旧值（不写 0 覆盖）。Issue #2761。
+    """
+    from src.kernel.category import resolve_category_slugs  # noqa: PLC0415
+    return resolve_category_slugs(info, dict_map, logger=logger, label="skill_sync")
 
 
 def _sync_skills_to_db(data: dict) -> int:
@@ -87,6 +148,13 @@ def _sync_skills_to_db(data: dict) -> int:
             cat_map = _mgmt_public_cat.skill_category_active_map()
         except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
             logger.debug(f"skill_category map unavailable, category_id falls back to 0: {exc}")
+        dict_map = {}
+        try:
+            from src.domains.mgmt import public as _mgmt_public_dict  # noqa: PLC0415
+            dict_map = _mgmt_public_dict.category_dict_active_map("skill")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"category_dict map unavailable, keep existing category: {exc}")
+        from src.kernel.tags import MAX_TAGS, encode_tags, merge_tags  # noqa: PLC0415
         for skill_name, info in data.items():
             try:
                 display_name = info.get("name", skill_name)
@@ -97,33 +165,56 @@ def _sync_skills_to_db(data: dict) -> int:
                 category_id = cat_map.get(sub_scene, 0)
                 if sub_scene and category_id == 0:
                     logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                new_l1, new_l2 = _resolve_skill_category(info, dict_map)
+                raw_tags = info.get("tags")
+                if isinstance(raw_tags, str):
+                    raw_tags = [t for t in raw_tags.replace("，", ",").split(",") if t.strip()]
+                tag_items = [{"name": str(t).strip(), "source": "auto"}
+                             for t in (raw_tags or []) if str(t).strip()]
+                tags_json = (encode_tags(tag_items, limit=MAX_TAGS)
+                             if "tags" in info else None)
+
                 row = c.execute(
-                    "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
+                    "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id, cat_l1_id, cat_l2_id, tags FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)
                 ).fetchone()
                 if row:
-                    old_display, old_desc, old_agent, old_path, old_fp, old_sub, old_cat = row
+                    (old_display, old_desc, old_agent, old_path, old_fp, old_sub,
+                     old_cat, old_l1, old_l2, old_tags) = row
+                    # 一级变更时才重置二级（一级未变且来源未给二级时保留旧二级，
+                    # 避免「未命中不覆盖旧值」与跨父级脏数据两种问题）
+                    from src.kernel.category import sync_category_target  # noqa: PLC0415
+                    l1_id, l2_id = sync_category_target(new_l1, new_l2, old_l1, old_l2)
+                    # Issue #2761：只补 auto 标签，保留既有 manual 标签
+                    new_tags = (encode_tags(merge_tags(old_tags, tag_items))
+                                if "tags" in info else (old_tags or ""))
                     # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
                     fp_nonempty = old_fp and old_fp != ""
                     changed = (old_display != display_name or old_desc != description
                                or old_agent != agent_type or old_sub != sub_scene
                                or old_cat != category_id
+                               or int(old_l1 or 0) != int(l1_id or 0)
+                               or int(old_l2 or 0) != int(l2_id or 0)
+                               or (old_tags or "") != new_tags
                                or (not fp_nonempty and old_path != skill_path_val))
                     if changed:
                         if fp_nonempty:
                             c.execute(
-                                "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, sub_scene, category_id, skill_name)
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, sub_scene, category_id,
+                                 l1_id, l2_id, new_tags, skill_name)
                             )
                         else:
                             c.execute(
-                                "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, skill_path_val, sub_scene,
+                                 category_id, l1_id, l2_id, new_tags, skill_name)
                             )
                 else:
                     c.execute(
-                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path_val, sub_scene, category_id)
+                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id, cat_l1_id, cat_l2_id, tags) VALUES (?,?,?,?,?,'official','','',?,?,?,?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path_val,
+                         sub_scene, category_id, new_l1, new_l2, tags_json or "")
                     )
                 count += 1
             except Exception:
@@ -139,7 +230,7 @@ async def sync_official_skills_to_obs() -> dict:
     返回 {"added": N, "updated": N, "skipped": N}。
     """
     from src.domains.runtime.storage import get_storage, skill_key, zip_cache_put, mem_cache_invalidate
-    from src.domains.mgmt.user.db import get_skill_content_hash, update_skill_content_hash
+    from src.domains.mgmt.public import get_skill_content_hash, update_skill_content_hash
 
     # 读 skill-description.json 获取官方技能清单
     json_path = os.path.join(CONFIG_DIR, "skill-description.json")
@@ -169,6 +260,9 @@ async def sync_official_skills_to_obs() -> dict:
 
         # 计算当前 content_hash（放线程池，不阻塞事件循环）
         loop = asyncio.get_running_loop()
+        # Issue #3229：先做 BOM 归一化，确保 OBS zip 打包的是无 BOM 的字节流；
+        # 归一化有实际改写时即使 hash 相同也重传一次，避免旧 zip 残留 BOM。
+        bom_normalized = await loop.run_in_executor(None, _normalize_skill_dir_bom, skill_dir)
         current_hash = await loop.run_in_executor(None, _compute_skill_hash, skill_dir)
         if not current_hash:
             continue
@@ -176,13 +270,12 @@ async def sync_official_skills_to_obs() -> dict:
         # 查 DB 的 content_hash 和 file_path（按 skill_name + scope 查主键 id + hash + file_path）
         skill_id, db_hash, db_file_path = get_skill_content_hash(skill_name)
 
-        # skip 条件：hash 相同且（非OBS模式 或 file_path非空）
-        # 非OBS模式：hash匹配就skip（不需要file_path）
-        # OBS模式：hash匹配但file_path为空时不skip（需要上传OBS补file_path）
-        if db_hash == current_hash:
-            if storage is None or db_file_path:
-                result["skipped"] += 1
-                continue
+        # skip 条件：hash 相同且（非OBS模式 或 file_path非空）；
+        # 本轮刚剥离过 BOM 时 OBS 需重传一次以刷新存量 zip。
+        if (db_hash == current_hash and (storage is None or db_file_path)
+                and not (storage is not None and bom_normalized)):
+            result["skipped"] += 1
+            continue
 
         # hash 不同或技能不存在 → 需要同步
         object_key = ""
@@ -209,6 +302,9 @@ async def sync_official_skills_to_obs() -> dict:
             elif db_hash == current_hash and not db_file_path and object_key:
                 result["updated"] += 1
                 logger.info(f"skill file_path synced: {skill_name} (hash unchanged, file_path was empty)")
+            elif db_hash == current_hash and bom_normalized:
+                result["updated"] += 1
+                logger.info(f"skill re-uploaded after BOM normalization: {skill_name}")
             else:
                 result["added"] += 1
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
@@ -335,12 +431,17 @@ async def sync_official_skills() -> dict:
                                     continue
                                 local_hash = _compute_skill_hash(local_skill_dir)
                                 if remote_hash == local_hash:
+                                    # Issue #3229：hash 相同也不放过存量 BOM，就地归一化本地目录
+                                    if _normalize_skill_dir_bom(local_skill_dir):
+                                        logger.info(f"skill sync: normalized BOM in local dir {skill_name}")
                                     result["dirs_skipped"] += 1
                                     continue
                                 if os.path.isdir(local_skill_dir):
                                     shutil.rmtree(local_skill_dir, ignore_errors=True)
                                 os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
                                 shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
+                                # Issue #3229：拷入后统一剥 BOM，保证本地目录与后续 OBS zip 无 BOM
+                                _normalize_skill_dir_bom(local_skill_dir)
                                 result["dirs_synced"] += 1
                                 logger.info(f"skill sync: synced directory {skill_name}")
                     finally:
@@ -384,12 +485,10 @@ async def sync_official_skills() -> dict:
         #    §6.3 外层锁续期（to_thread 卸载）：锁被抢 → 中止本轮剩余步骤。
         #    §8.8 滚动升级避让：非阻塞试探旧 scene_sync 锁，抢不到=旧实例在跑 → 跳过本轮场景步骤。
         try:
-            from src.kernel.lock import acquire_lock as _al, release_lock as _rl, renew_lock as _rn
+            from src.kernel.lock import acquire_lock as _al, release_lock as _rl
             from src.domains.runtime.storage.scene_sync import sync_official_scenes
             # §6.3 外层锁续期（to_thread 卸载，与下方 acquire/release 一致）
-            if not await asyncio.to_thread(_rn, "skill_sync", 1800):
-                logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
-            else:
+            if await _ensure_outer_lock():
                 scene_lock = await asyncio.to_thread(_al, "scene_sync", 300)
                 if not scene_lock:
                     logger.warning("skill sync: legacy scene_sync lock held, skipping scene step this cycle")
@@ -444,18 +543,57 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 
 
+async def _ensure_outer_lock(ttl: int = 1800) -> bool:
+    """续期外层 `skill_sync` 锁；续不上时按同一 holder 重抢一次。
+
+    为什么需要重抢：同一进程里可能存在不止一个调度器（历史上 main / server_tasks /
+    grape_server 三个入口各调一次 start_skill_sync_scheduler，而它并不幂等）。
+    两个 worker 共用模块级的锁 holder，A 的 release 会按 holder 删掉 B 刚拿到的行，
+    B 在下一轮续期时就必然失败并放弃剩余步骤——日志表现为每轮一条
+    `outer lock lost before scene step`，而场上其实只有一个存活进程。
+
+    重抢成功说明「行被自己人删了」（竞态）；抢不到说明锁真被别的实例接管，
+    这时确实该中止本轮剩余步骤。
+    """
+    from src.kernel.lock import acquire_lock as _al, renew_lock as _rn
+
+    if await asyncio.to_thread(_rn, "skill_sync", ttl):
+        return True
+    if await asyncio.to_thread(_al, "skill_sync", ttl):
+        logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
+        return True
+    logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
+    return False
+
+
+_scheduler_task: "asyncio.Task | None" = None
+
+
 def start_skill_sync_scheduler():
-    """启动定时同步调度（任何模式都启动）。"""
+    """启动定时同步调度（任何模式都启动，**且幂等**）。
+
+    三个入口都会调用本函数（`src/api/main.py`、`src/api/server_tasks.py`、
+    `src/api/grape_server.py`）。此前每次调用都新建一个 worker，同一进程里便跑着
+    2 个定时任务：它们共用模块级 holder，互相删对方的锁行，触发
+    `outer lock lost before scene step` 并让场景同步步骤被跳过。
+    现在只保留一个实例；已存在且未结束则直接返回。
+    """
+    global _scheduler_task
+    if _scheduler_task is not None and not _scheduler_task.done():
+        log.info("skill sync scheduler already running, skip duplicate start")
+        return
     interval = max(float(os.environ.get("SKILL_SYNC_INTERVAL", "1800")), 60)
-    t = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
-    _bg_tasks.add(t)
-    t.add_done_callback(_bg_tasks.discard)
+    _scheduler_task = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
+    _bg_tasks.add(_scheduler_task)
+    _scheduler_task.add_done_callback(_bg_tasks.discard)
     log.info(f"skill sync scheduler started (interval={interval}s)")
 
 
 async def stop_skill_sync_scheduler():
     """优雅关闭：cancel 所有定时任务并等待退出。"""
+    global _scheduler_task
     for t in _bg_tasks:
         t.cancel()
     await asyncio.gather(*_bg_tasks, return_exceptions=True)
+    _scheduler_task = None
     log.info("skill sync scheduler stopped")

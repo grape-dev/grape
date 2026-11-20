@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from src.api import server_common
 
 from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
+from src.domains.mgmt.routes import categories as categories_routes
 
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 
@@ -36,7 +37,7 @@ def _startup_security_check():
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.kernel.config import log
-    from src.domains.mgmt.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+    from src.kernel.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 
@@ -44,6 +45,29 @@ def _startup_security_check():
     from src.kernel.auth_sdk.jwt_utils import validate_jwt_secret
     if not validate_jwt_secret():
         errors.append("JWT_SECRET 不安全：未配置强密钥（生产必须设置 JWT_SECRET 或密钥轮换池）")
+
+    # 1b. 数据库加密密钥（沙箱平台 api_key / 用户 LLM 凭据 api_key）——无条件探测。
+    # 缺密钥时：沙箱凭据的平台登记会失败（凭据建好、平台没绑，详情按钮消失），
+    # LLM 凭据也无法保存。历史上这条失败在调用处被吞成 WARNING，用户完全看不出原因。
+    # 生产环境按启动门禁处理（fail-closed）；开发/测试只告警不拦。
+    from src.kernel.crypto import key_status as _key_status, crypto_config_path as _crypto_path
+    _ks = _key_status()
+    if not _ks.get("configured"):
+        _key_hint = (
+            "数据库加密密钥未配置（沙箱平台 api_key / 用户 LLM 凭据的加密密钥）。"
+            "配置方式二选一："
+            f"① 写 {_crypto_path()}，内容 "
+            '{"encryption_key": "<32字节base64url>"}，权限必须 0600（chmod 600）；'
+            "② 或设环境变量 GRAPE_DB_ENCRYPTION_KEY=<32字节base64url>（systemd 部署写在 "
+            "/etc/grape/grape.env，改完 daemon-reload 后重启 grape 相关服务）。"
+            "生成密钥：python3 -c \"import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())\"。"
+            "多主控实例必须使用同一把密钥。"
+            f"当前探测错误：{_ks.get('error')}"
+        )
+        if is_production():
+            errors.append(_key_hint)
+        else:
+            log.warning(f"[SECURITY] {_key_hint}")
 
     if not is_production():
         if errors:
@@ -81,7 +105,6 @@ def _startup_security_check():
     # 5. COOKIE_SECURE 校验（BUG-NEW-1: 生产环境必须启用 Secure cookie）
     if os.environ.get("COOKIE_SECURE", "false").lower() not in ("true", "1", "yes"):
         errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
-
     # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
     from src.domains.mgmt.auth.providers import get_provider, list_providers
     missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]
@@ -386,6 +409,15 @@ async def lifespan(app: FastAPI):
         from src.kernel.config import log as _log
         _log.warning(f"pat identity backfill skipped (non-fatal): {_e}")
 
+    # D109（平台对象模型）：扫描导入 → 一次性凭据迁移/关系回填 → 标记 migrated。
+    # 失败 fail-open：读路径回落文件+meta，不影响登录/托管。
+    try:
+        from src.api.d109_startup import d109_platform_object_startup
+
+        d109_platform_object_startup(log)
+    except Exception as _d109_err:
+        log.warning(f"D109 platform-object startup skipped (non-fatal, 回落旧存储): {_d109_err}")
+
     # ===== IM 引擎（2026-11-13 补齐）=====
     # weekly-11 退役 legacy BotManager 后，server_tasks 在 engine_mode=on 时直接 skip；
     # 而新引擎原先只在 grape_server.py（四进程 A 进程）里启动 → 单进程入口出现
@@ -595,6 +627,8 @@ app.include_router(webhook.router)
 
 app.include_router(scenes.router)
 
+app.include_router(categories_routes.router)
+
 app.include_router(templates.router)
 
 app.include_router(tasks.router)
@@ -624,7 +658,9 @@ app.include_router(latency.router)
 app.include_router(feedback.router)
 
 app.include_router(autopilot.router)
-
+# [沙箱迁移] 沙箱管理后台路由（/api/admin/sandbox/*，i7 移植）
+from src.domains.mgmt.routes import sandbox_admin
+app.include_router(sandbox_admin.router)
 app.include_router(orgs.router)
 
 app.include_router(community.router)

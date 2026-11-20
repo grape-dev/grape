@@ -77,11 +77,48 @@ def _ensure_legacy_unique_index(conn) -> None:
     ).fetchone()
     if row and row[0]:
         return
-    conn.execute(
-        f"CREATE UNIQUE INDEX {idx} ON grape_t_channel_installation "
-        "(legacy_app_id, scope, (COALESCE(NULLIF(repo_key,''), owner_user_id)))"
-    )
+    try:
+        conn.execute(
+            f"CREATE UNIQUE INDEX {idx} ON grape_t_channel_installation "
+            "(legacy_app_id, scope, (COALESCE(NULLIF(repo_key,''), owner_user_id)))"
+        )
+    except Exception as e:
+        # MariaDB 不支持 MySQL 8 函数索引语法 → 虚拟列降级（2026-11-14）
+        _ensure_legacy_unique_index_maria(conn)
 
+_MARIA_VIRT_COL = "legacy_owner_key"
+
+
+def _ensure_legacy_unique_index_maria(conn, log=None) -> bool:
+    """MariaDB 降级路径：MySQL 8 函数索引语法 (expr) 在 MariaDB 上 1064
+    （4p E2E 实证：ensure_channel_schema 炸 → 同 try 的 outbox 补列连带没跑）。
+    MariaDB 等价语义 = 虚拟列 + 普通唯一索引；两步都幂等（列/索引判存在再建）。
+    虚拟列也失败（老 MariaDB <10.2 无 generated column）时放弃该唯一约束并告警
+    ——查询侧仍有 COALESCE 匹配兜底（001:258），只丢插入防重防御。返回是否成功。
+    """
+    warn = (log.warning if log else (lambda *a, **k: None))
+    row = conn.execute(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_channel_installation' "
+        f"AND COLUMN_NAME='{_MARIA_VIRT_COL}'"
+    ).fetchone()
+    if not (row and row[0]):
+        conn.execute(
+            "ALTER TABLE grape_t_channel_installation "
+            f"ADD COLUMN {_MARIA_VIRT_COL} VARCHAR(512) "
+            "GENERATED ALWAYS AS (COALESCE(NULLIF(repo_key,''), owner_user_id)) VIRTUAL"
+        )
+    row = conn.execute(
+        "SELECT COUNT(*) FROM information_schema.statistics "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_channel_installation' "
+        f"AND INDEX_NAME='uk_channel_installation_legacy'"
+    ).fetchone()
+    if not (row and row[0]):
+        conn.execute(
+            "CREATE UNIQUE INDEX uk_channel_installation_legacy "
+            "ON grape_t_channel_installation (legacy_app_id, scope, legacy_owner_key)"
+        )
+    return True
 
 # grape_t_channel_installation.channel_type 取值域（与建表 CHECK 一致）
 _CHANNEL_TYPES = ("feishu", "dingtalk", "slack", "wecom", "telegram", "wechat")

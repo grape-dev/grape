@@ -146,9 +146,12 @@ def test_config_row_overrides_baseline(monkeypatch):
     assert decide_mode("runtime", "update_issue_state") == "lib"
     # 其它 key 不受影响
     assert decide_mode("runtime", "get_issue_state") == "remote"
-    # 基线 lib 的 key 也可显式放开 remote（opt-in 由配置表承载）
+    # 基线 lib 的 key 可通过配置表放开 remote（opt-in）—— 但 mgmt 作为被调方不行：
+    # 矩阵守卫优先级最高（decide_mode 第一步就返回 lib），配置表改不动它。
+    route_config.set_route("runtime.get_task_stats", "lib", updated_by="test")
+    assert decide_mode("runtime", "get_task_stats") == "lib"
     route_config.set_route("mgmt.get_bot_config", "remote", updated_by="test")
-    assert decide_mode("mgmt", "get_bot_config") == "remote"
+    assert decide_mode("mgmt", "get_bot_config") == "lib"
 
 
 def test_set_route_validation_and_version_bump():
@@ -233,9 +236,9 @@ def test_matrix_guard_forces_lib_for_runtime_and_insight(monkeypatch):
         assert decide_mode("mgmt", "verify_session_token") == "lib"
         assert decide_mode("mgmt", "fetch_rows") == "lib"   # 原语同样被矩阵覆盖
         assert matrix_forces_lib("mgmt") is True
-    # mgmt → runtime|insight 方向不禁止：允许 remote
+    # mgmt 作为被调方一律禁止（任何调用方）→ server 角色也不放行
     monkeypatch.setenv("GRAPE_PROCESS_ROLE", "server")
-    assert matrix_forces_lib("mgmt") is False
+    assert matrix_forces_lib("mgmt") is True
     assert matrix_forces_lib("runtime") is False
     assert matrix_forces_lib("insight") is False
     assert decide_mode("runtime", "update_issue_state") == "remote"
@@ -621,7 +624,7 @@ def test_contract_methods_registry_sync():
         assert actual == set(route_config.CONTRACT_METHODS[service]), service
     total = sum(len(v) for v in route_config.CONTRACT_METHODS.values())
     # 23 基线 + P2 补齐（N1–N5/N11/N12 runtime 7 + N6/N8/N9/N10 mgmt 4）
-    assert total == 34
+    assert total == 38  # 34 + 本轮 mgmt→runtime/insight 迁移的 4 个契约方法
 
 
 def test_public_primitives_registry_sync():

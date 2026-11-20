@@ -79,7 +79,7 @@ def release_lease() -> None:
 def lease_status() -> Optional[Dict[str, Any]]:
     """查看租约当前状态（排查/测试用）：holder 与到期时间戳（秒）；无锁返回 None。
 
-    取数走 runtime owner 域：`distributed_locks` 归 runtime（`table-owner.tsv`），
+    取数走 runtime owner 域：`distributed_locks` 归 runtime（`table_ownership.json`），
     本进程是 insight，直发 SQL 在三库拓扑下必然 1146。`lock_lease_status_any`
     是「任意拓扑」原语——有 runtime 自有 DSN 时读 runtime 库，单库/测试拓扑回落
     进程库（持 owner 域 db_lock），SQL 只留 runtime 一份。

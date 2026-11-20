@@ -20,6 +20,10 @@ if os.path.exists("/tmp/test_transfer_bind.db"):
 
 from fastapi.testclient import TestClient
 
+# Issue #3097：本文件用字符串路径 patch `...grape_account_db.*`，patch 解析要求该模块
+# 已在包命名空间里（否则 pkgutil 报 AttributeError）；显式导入一次固定下来。
+import src.domains.mgmt.auth.grape_account_db  # noqa: F401,E402
+
 
 @pytest.fixture
 def client():
@@ -114,7 +118,7 @@ class TestTransferExternalIdentity:
     """原子转移绑定——mock DB 层验证逻辑。"""
 
     @patch("src.domains.mgmt.auth.credential_crypto.encrypt")
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_transfer_success(self, mock_lock, mock_db, mock_encrypt):
         """转移成功——旧绑定 status=0，新绑定 INSERT。"""
@@ -138,7 +142,7 @@ class TestTransferExternalIdentity:
         mock_db.commit.assert_called_once()
 
     @patch("src.domains.mgmt.auth.credential_crypto.encrypt")
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_transfer_no_original_user(self, mock_lock, mock_db, mock_encrypt):
         """original_user_id=0 时跳过旧绑定 UPDATE，只 SELECT status=1 + DELETE + INSERT。"""
@@ -163,7 +167,7 @@ class TestTransferExternalIdentity:
         assert mock_cursor.execute.call_count == 4
 
     @patch("src.domains.mgmt.auth.credential_crypto.encrypt")
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_transfer_db_error_returns_false(self, mock_lock, mock_db, mock_encrypt):
         """DB 异常时返回 False 并 rollback。"""
@@ -191,34 +195,65 @@ class TestTransferExternalIdentity:
 class TestPlaceholderAccountMerge:
     """占位账号可合并性检查——mock DB 层验证逻辑。"""
 
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
-    def test_mergeable_no_business_data(self, mock_lock, mock_db):
-        """纯占位账号（无密码、无其他绑定、无业务数据）→ 可自动转移。"""
+    @patch("src.domains.mgmt.auth.business_data.BusinessDataProbe._runtime_counts")
+    def test_mergeable_no_business_data(self, mock_counts, mock_lock, mock_db):
+        """纯占位账号（无密码、无其他绑定、无业务数据）→ 可自动转移。
+
+        Issue #3097：本域 8 张表走调用方游标（mgmt），runtime 三张表走
+        `user_business_table_counts()` 契约；此处把跨域计数打桩成空 dict。
+        """
         from src.domains.mgmt.auth.grape_account_db import is_placeholder_account_mergeable
 
         mock_cursor = MagicMock()
         mock_db.cursor.return_value = mock_cursor
-        # grape_accounts 查询返回：email_is_placeholder=1, created_by_oauth=1, password_hash='', status=1
         mock_cursor.fetchone.side_effect = [
             (1, 1, "", 1),  # grape_accounts row
             (1,),           # external_identities count = 1
         ]
-        # _has_business_data: 所有表返回 count=0
-        # fetchone 在 _has_business_data 循环中每张表调一次，全部返回 (0,)
-        # 但 side_effect 已用完上面的两次，需要额外补充
+        # BusinessDataProbe 用 `c.execute(sql).fetchone()`（链式）：MagicMock 的 __int__
+        # 默认返回 1，不打桩会被误判成「有业务数据」；本域表统一给 0。
+        mock_cursor.execute.return_value.fetchone.return_value = (0,)
+        mock_counts.return_value = {}
+
+        assert is_placeholder_account_mergeable(100) is True
+
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
+    @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
+    @patch("src.domains.mgmt.auth.business_data.BusinessDataProbe._runtime_counts")
+    def test_missing_table_counts_as_no_data(self, mock_counts, mock_lock, mock_db):
+        """Issue #3097 回归断言：业务表不存在/不可读（1146）→ 视为**无数据**。
+
+        三库拓扑下 mgmt 进程看不到 runtime 表；旧实现 `except: return True` 让占位账号
+        自动合并永久失效。定稿语义：缺表 = 无数据 + 结构化 warn（warn 由 probe 发出，
+        本用例锁「判定结果」这一侧）。
+        """
+        from src.domains.mgmt.auth.grape_account_db import is_placeholder_account_mergeable
+
+        mock_cursor = MagicMock()
+        mock_db.cursor.return_value = mock_cursor
         mock_cursor.fetchone.side_effect = [
             (1, 1, "", 1),  # grape_accounts
             (1,),           # external_identities count
-        ] + [(0,)] * 20  # _has_business_data 的每张表返回 0
+        ]
+        mock_cursor.execute.return_value.fetchone.return_value = (0,)
+        # runtime 侧三张表全部不可读（1146）
+        mock_counts.return_value = {
+            "agent_tasks": {"count": None, "error": "Table 'grape_beta_runtime.agent_tasks' doesn't exist",
+                            "code": "1146", "missing_table": True},
+            "chat_conversations": {"count": None, "error": "same", "code": "1146", "missing_table": True},
+            "issue": {"count": None, "error": "same", "code": "1146", "missing_table": True},
+        }
 
-        result = is_placeholder_account_mergeable(100)
-        assert result is True
+        assert is_placeholder_account_mergeable(100) is True
 
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
-    def test_not_mergeable_has_business_data(self, mock_lock, mock_db):
+    @patch("src.kernel.bulk_read.reader")
+    def test_not_mergeable_has_business_data(self, mock_reader, mock_lock, mock_db):
         """占位账号有业务数据 → 不可自动转移。"""
+        from contextlib import contextmanager
         from src.domains.mgmt.auth.grape_account_db import is_placeholder_account_mergeable
 
         mock_cursor = MagicMock()
@@ -230,10 +265,16 @@ class TestPlaceholderAccountMerge:
             (1,),           # user_repos is_admin=1 count = 1 → 有业务数据
         ]
 
+        @contextmanager
+        def _fake_reader(domain=""):
+            yield mock_cursor
+
+        mock_reader.side_effect = _fake_reader
+
         result = is_placeholder_account_mergeable(100)
         assert result is False
 
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_not_mergeable_has_password(self, mock_lock, mock_db):
         """有密码的账号 → 不可自动转移。"""
@@ -246,7 +287,7 @@ class TestPlaceholderAccountMerge:
         result = is_placeholder_account_mergeable(100)
         assert result is False
 
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_not_mergeable_not_placeholder(self, mock_lock, mock_db):
         """非占位账号 → 不可自动转移。"""
@@ -259,7 +300,7 @@ class TestPlaceholderAccountMerge:
         result = is_placeholder_account_mergeable(100)
         assert result is False
 
-    @patch("src.domains.mgmt.auth.grape_account_db.db")
+    @patch("src.domains.mgmt.auth.grape_account_db._mg_db")
     @patch("src.domains.mgmt.auth.grape_account_db.db_lock")
     def test_not_mergeable_multiple_bindings(self, mock_lock, mock_db):
         """有多个活跃绑定的账号 → 不可自动转移。"""
@@ -287,8 +328,8 @@ class TestTransferBindAPI:
     @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
     @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     @patch("src.domains.mgmt.routes.grape_auth.auth_audit")
     @patch("src.domains.mgmt.routes.grape_auth._clear_user_repos_cache")
     def test_transfer_success(
@@ -356,8 +397,8 @@ class TestTransferBindAPI:
 
     @patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     def test_transfer_original_no_login_method(
         self, mock_count, mock_has_pwd, mock_validate, mock_get_account, client,
     ):
@@ -387,8 +428,8 @@ class TestTransferBindAPI:
     @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
     @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     def test_transfer_db_failure(
         self, mock_count, mock_has_pwd, mock_validate,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account, client,
@@ -419,8 +460,8 @@ class TestTransferBindAPI:
     @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
     @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     def test_transfer_original_has_other_oauth(
         self, mock_count, mock_has_pwd, mock_validate,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account, client,
@@ -451,8 +492,8 @@ class TestTransferBindAPI:
     @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
     @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     def test_transfer_placeholder_with_business_data(
         self, mock_count, mock_has_pwd, mock_validate,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account, client,
@@ -488,8 +529,8 @@ class TestTransferBindAPI:
     @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
     @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
     @patch("src.domains.mgmt.routes.grape_auth.validate_binding_ticket")
-    @patch("src.domains.mgmt.routes.grape_auth.has_password")
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password")
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities")
     def test_transfer_placeholder_biz_data_failure(
         self, mock_count, mock_has_pwd, mock_validate,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account, client,

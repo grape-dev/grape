@@ -5,7 +5,7 @@ import io as _io
 
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Body
 
 from pydantic import BaseModel
 
@@ -14,6 +14,14 @@ from src.domains.mgmt.user import db as user_db
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+from src.kernel.tags import (MAX_TAG_LEN, encode_tags, oversized_tags,
+                             parse_tags, prepare_tags, suggest_tags)
+
+#: 技能标签上限（Issue #3202）：技能侧显式传参，kernel 默认 3 保持场景市场契约不变。
+SKILL_MAX_TAGS = 5
+#: 系统标签（agent 类型名）——用户自定义标签不得与之重名。
+_SYSTEM_AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat", "auto",
+                      "VOD", "Issue", "Coding", "QA", "SRE", "Chat", "Auto"}
 
 # skill 归运行域：列表/统计/单行读取走该域原语或具名查询
 from src.domains.runtime import public as _rt_skills
@@ -58,6 +66,29 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
         pass
     return rk
 
+def _skill_category_payload(cat_l1_id: int = 0, cat_l2_id: int = 0) -> dict:
+    """分类路径 {l1, l2}（Issue #2761）。"""
+    from src.domains.mgmt.user.db import category_path
+    return category_path(int(cat_l1_id or 0), int(cat_l2_id or 0))
+
+
+def _normalize_skill_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]:
+    """校验并归一化技能分类（Issue #2761）。
+
+    统一口径见 `_category.normalize_category_pair`（与场景写路径共用）：
+    - 一级/二级 ID 必须存在且层级正确（一级 level=1、二级 level=2）；
+    - 二级必须属于所给一级（只给二级时由 parent_id 反推一级）。
+    """
+    from src.domains.mgmt.routes._category import normalize_category_pair
+    return normalize_category_pair(cat_l1_id, cat_l2_id)
+
+
+def _skill_tag_suggestions(name: str = "", description: str = "") -> list[str]:
+    """规则型标签候选（仅返回真实命中项，最多 3 个）。"""
+    return suggest_tags(name, description, candidates=(
+        "AI", "自动化", "测试", "部署", "代码评审", "文档", "安全", "监控", "数据", "协作"))
+
+
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
     丢弃系统目录。返回 zip 字节（OBS 存储正体，见 obs-skill-storage-design.md §2.2）。"""
@@ -76,9 +107,399 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
                     zf.writestr(info, fh.read())
     return buf.getvalue()
 
+
+# ===== Issue #3168 技能详情页：摘要 / 版本 / 文件清单 / 评论 =====
+_SUMMARY_MAX = 120
+_COMMENT_MAX = 1000
+# 相关技能池：只取热度前 N 作为共享标签/同类型打分的候选（全库技能 ~10² 量级，
+# 300 覆盖全部活跃技能且打分开销有界；detail 页只展示前 _RELATED_SKILL_COUNT 条）。
+_RELATED_POOL_SIZE = 300
+# 详情页「相关技能」最多展示 6 张卡片（两行 3 列网格，UI 设计值）。
+_RELATED_SKILL_COUNT = 6
+# 评论分页上限：防止一次拉全表（默认 20，UI「加载更多」逐页取）。
+_COMMENT_PAGE_MAX = 50
+# 概览 intro 槽位（#3227）：键为固定槽位名（scope/steps/products/constraints/review）
+# 加 5px 余量；单项文本 400 字对齐 _clean_summary 的概述截断口径（QA B2：数值须具名）。
+_INTRO_KEY_MAX = 32
+_INTRO_TEXT_MAX = 400
+# 列宽切片上限（与 schema_ddl 的列定义逐字一致，防双后端 silent truncation 漂移）：
+_VERSION_MAX = 64            # grape_t_skill_version.version VARCHAR(64)
+_UPLOADER_MAX = 64           # grape_t_skill_version.uploaded_by VARCHAR(64)
+_CHANGE_NOTE_MAX = 1000      # grape_t_skill_version.change_note TEXT，写入侧截断
+_FILE_PATH_MAX = 512         # grape_t_skill_file.path VARCHAR(512)
+_COMMENT_NAME_MAX = 128     # grape_t_skill_comment.user_name VARCHAR(128)
+# 评论分页缺省 20（UI「加载更多」步长），上限见 _COMMENT_PAGE_MAX。
+_COMMENT_PAGE_DEFAULT = 20
+
+
+def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
+    """摘要清洗：禁「→」「->」链式符号，压空白后截断（D3）。"""
+    import re as _re
+    t = (text or "").replace("\r", " ").replace("\n", " ")
+    t = _re.split(r"→|->", t, maxsplit=1)[0]
+    t = _re.sub(r"\s+", " ", t).strip(" -—·")
+    return t[:limit]
+
+
+def _parse_version_tuple(version: str) -> tuple:
+    """宽松版本比较：取数字段，缺省补 0（1.2 == 1.2.0）。"""
+    import re as _re
+    return tuple(int(x) for x in _re.findall(r"\d+", version or "")[:4]) or (0,)
+
+
+def _version_gt(a: str, b: str) -> bool:
+    ta, tb = _parse_version_tuple(a), _parse_version_tuple(b)
+    n = max(len(ta), len(tb))
+    ta += (0,) * (n - len(ta))
+    tb += (0,) * (n - len(tb))
+    return ta > tb
+
+
+def _bump_patch(version: str) -> str:
+    parts = list(_parse_version_tuple(version))
+    while len(parts) < 3:
+        parts.append(0)
+    parts[2] += 1
+    return ".".join(str(x) for x in parts[:3])
+
+
+def _next_skill_version(skill_id: int, incoming: str) -> str:
+    """返回值即本次写入版本号；显式版本号不大于历史版本时 400 拦截（D6）。"""
+    latest = _rt_skills.read_one_any("skill_version_latest", (int(skill_id),))
+    latest_v = (latest[0] if latest else "") or ""
+    incoming = (incoming or "").strip()
+    if not latest_v:
+        return incoming or "1.0.0"
+    if incoming:
+        if not _version_gt(incoming, latest_v):
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"版本号必须递增：当前最新 {latest_v}，本次 {incoming}"})
+        return incoming
+    return _bump_patch(latest_v)
+
+
+def _record_skill_version(skill_id: int, version: str, change_note: str, user: dict) -> None:
+    from src.kernel.id_gen import uuid7_str
+    from datetime import datetime
+    _rt_skills.exec_any("skill_version_insert", (
+        uuid7_str(), int(skill_id), (version or "1.0.0")[:_VERSION_MAX],
+        (change_note or "")[:_CHANGE_NOTE_MAX],
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX]))
+    # C3 非查询操作审计：版本行写入留痕（上传/更新/重传共用，detail 不落包内容）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_version_created",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id),
+                                   "version": (version or "1.0.0")[:_VERSION_MAX]})
+
+
+def _validate_manual_summary(summary: str) -> str:
+    """手工摘要校验：禁「→」「->」链式符号（D3），返回清洗值。"""
+    import re as _re
+    s = (summary or "").strip()
+    if s and _re.search(r"→|->", s):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "摘要请用人话短句，不要包含「→」或「->」流程链符号"})
+    return _clean_summary(s)
+
+
+def _require_skill_summary(summary: str) -> str:
+    """Issue #3202：摘要录入必填（≤120 字由 _clean_summary 截断保证）。"""
+    s = (summary or "").strip()
+    if not s:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "摘要不能为空（必填，≤120 字）"})
+    return _validate_manual_summary(s)
+
+
+def _resolve_skill_summary(summary, description: str) -> str:
+    """上传/更新入口的摘要解析（QA A14 契约兼容）。
+
+    - 缺省（Form 字段未携带 → None）：从 SKILL.md 的 description 推导（清洗截断），
+      存量 CLI / API 客户端（`grape skills upload` 不带 summary）不受影响；
+    - 显式空值 / 纯空白：按 #3202 必填规则 400；
+    - 显式值：走 #3202 校验（禁流程链符号 + 截断）。
+    """
+    if summary is None:
+        return _clean_summary(description)
+    return _require_skill_summary(summary)
+
+
+def _system_tag_names() -> set[str]:
+    """系统标签集合：agent 类型名 + 分类名（大小写不敏感）。"""
+    names = {n.lower() for n in _SYSTEM_AGENT_TAGS}
+    try:
+        from src.domains.mgmt.user.db import list_skill_categories
+        for cat in list_skill_categories() or []:
+            name = str(cat.get("name") or "").strip()
+            if name:
+                names.add(name.lower())
+    except Exception:  # noqa: BLE001 - 分类读取失败不影响系统标签硬约束
+        pass
+    return names
+
+
+def _validate_skill_tags(raw) -> list[dict[str, str]]:
+    """技能标签写侧校验（Issue #3202）：≤5 个 / 每个 ≤12 字符 / 去重 / 禁系统标签重名。"""
+    tag_items, overflow = prepare_tags(raw, limit=SKILL_MAX_TAGS)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {SKILL_MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
+    too_long = oversized_tags(tag_items, max_len=MAX_TAG_LEN)
+    if too_long:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"单个标签最多 {MAX_TAG_LEN} 个字符，超出：{'、'.join(too_long)}",
+            "oversized": too_long})
+    system_names = _system_tag_names()
+    conflicts = [t["name"] for t in tag_items if t["name"].lower() in system_names]
+    if conflicts:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签不能与系统标签（Agent 类型/分类名）重名：{'、'.join(conflicts)}",
+            "conflicts": conflicts})
+    return tag_items
+
+
+def _list_zip_entries(zip_bytes: bytes) -> list[tuple[str, int]]:
+    """解析 zip 文件清单（去公共顶层目录，路径相对技能根）。"""
+    if not zip_bytes:
+        return []
+    try:
+        with zipfile.ZipFile(_io.BytesIO(zip_bytes), "r") as zf:
+            infos = [i for i in zf.infolist() if not i.is_dir()]
+    except Exception:
+        return []
+    names = [i.filename.replace("\\", "/") for i in infos]
+    prefix = ""
+    if names and all("/" in n for n in names):
+        head = names[0].split("/", 1)[0]
+        if head and all(n.split("/", 1)[0] == head for n in names):
+            prefix = head + "/"
+    out = []
+    for info, name in zip(infos, names):
+        rel = name[len(prefix):] if prefix and name.startswith(prefix) else name
+        rel = rel.lstrip("/")
+        if not rel:
+            continue
+        out.append((rel, int(info.file_size or 0)))
+    return out
+
+
+def _replace_skill_files(skill_id: int, entries: list[tuple[str, int]]) -> None:
+    from src.kernel.id_gen import uuid7_str
+    _rt_skills.exec_any("skill_file_delete_by_skill", (int(skill_id),))
+    for path, size in entries:
+        _rt_skills.exec_any(
+            "skill_file_insert", (uuid7_str(), int(skill_id), path[:_FILE_PATH_MAX], int(size)))
+
+
+def _ensure_official_skill_files(skill_id: int, scope: str, content: str) -> list[tuple[str, int]]:
+    """文件清单缺失时按技能来源惰性补建（官方技能为部署内置目录，无 zip 可解析）。"""
+    rows = _rt_skills.read_all_any("skill_files_by_skill", (int(skill_id),))
+    if rows:
+        return [(r[0], int(r[1] or 0)) for r in rows]
+    if scope != "official":
+        return []
+    entries: list[tuple[str, int]] = []
+    try:
+        from src.kernel.config import resolve_official_skill_path
+        row = _rt_skills.read_one_any("skill_name_path", (int(skill_id),))
+        name = row[0] if row else ""
+        skill_md = resolve_official_skill_path(name) if name else None
+        if skill_md and os.path.exists(skill_md):
+            base = os.path.dirname(skill_md)
+            for root, _dirs, files in os.walk(base):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, base).replace(os.sep, "/")
+                    entries.append((rel, int(os.path.getsize(full))))
+            entries.sort(key=lambda x: x[0])
+    except Exception:
+        entries = []
+    if entries:
+        _replace_skill_files(skill_id, entries)
+    return entries
+
+
+def _ensure_official_skill_version(skill_id: int, content: str, created_at: str) -> str:
+    """官方技能无版本行时补 1.0.0（存量迁移口径，不伪造中间版本）。"""
+    latest = _rt_skills.read_one_any("skill_version_latest", (int(skill_id),))
+    if latest:
+        return latest[0] or "1.0.0"
+    version = ""
+    try:
+        fm = parse_skill_frontmatter_from_text(content or "")
+        version = (fm.get("version") or "").strip()
+    except Exception:
+        version = ""
+    version = version or "1.0.0"
+    try:
+        from src.kernel.id_gen import uuid7_str
+        _rt_skills.exec_any("skill_version_insert", (
+            uuid7_str(), int(skill_id), version, "存量官方技能版本补录",
+            created_at or "", "system"))
+    except Exception:
+        pass
+    return version
+
+
+def parse_skill_frontmatter_from_text(text: str) -> dict:
+    """从 SKILL.md 文本解析 front matter 的 key/value（详情页版本兜底）。"""
+    import re as _re
+    m = _re.match(r"^---\s*\n([\s\S]*?)\n---", text or "")
+    if not m:
+        return {}
+    out = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _ensure_skill_access(skill_id: int, user: dict) -> tuple:
+    """校验技能存在与可见性，返回 skill_meta_row（同名/归属口径与 by-id 一致）。"""
+    row = _rt_skills.read_one_any("skill_meta_row", (int(skill_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    scope, owner_id = row[1] or "", row[2] or ""
+    if scope == "user" and owner_id != str(user.get("id") or ""):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
+    if scope == "repo":
+        try:
+            from src.domains.mgmt.user.db import get_user_repos
+            repo_keys = {r["repo_key"] for r in (get_user_repos(user.get("id")) or [])}
+        except Exception:
+            repo_keys = set()
+        if owner_id not in repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
+    return row
+
+
+def _related_skills(skill_id: int, scope: str, agent_type: str, tags: list[str],
+                    user: dict) -> list[dict]:
+    """相关技能：同标签优先，无交集降级同 agent_type（D5）。"""
+    rows = _rt_skills.read_all_any("skills_related_pool", (int(skill_id),))
+    if not rows:
+        return []
+    repo_keys: set[str] = set()
+    if user.get("id"):
+        try:
+            from src.domains.mgmt.user.db import get_user_repos
+            repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) or [])}
+        except Exception:
+            repo_keys = set()
+    # tags 入参可能是字符串列表（详情 payload）或 dict 列表（parse_tags 产物），
+    # 统一取「标签名」做集合交集（dict 不可 hash，混用必抛 TypeError）
+    def _tag_names(items) -> set:
+        out = set()
+        for t in items or []:
+            if isinstance(t, dict):
+                n = str(t.get("name") or "").strip()
+                if n:
+                    out.add(n)
+            elif t:
+                out.add(str(t))
+        return out
+
+    my_tags = _tag_names(tags)
+    ranked = []
+    for r in rows:
+        rid, name, disp, desc, atype, rscope, owner, raw_tags = r[0], r[1], r[2], r[3], r[4], r[5], r[6] or "", r[7] or ""
+        if rscope == "user" and owner != str(user.get("id") or ""):
+            continue
+        if rscope == "repo" and owner not in repo_keys:
+            continue
+        rtags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
+        shared = len(my_tags & _tag_names(rtags))
+        same_agent = 1 if atype == agent_type else 0
+        if my_tags and shared == 0:
+            continue
+        if not my_tags and not same_agent:
+            continue
+        ranked.append((shared, same_agent, int(r[8] or 0), {
+            "id": rid,
+            "name": name,
+            "display_name": disp or name,
+            "description": desc or "",
+            "summary": _clean_summary(r[10] or desc or ""),
+            "agent_type": atype or "",
+            "scope": rscope or "",
+            "tags": rtags,
+            "like_count": int(r[8] or 0),
+            "category_id": int(r[9] or 0),
+        }))
+    ranked.sort(key=lambda x: (-x[0], -x[1], -x[2]))
+    return [x[3] for x in ranked[:_RELATED_SKILL_COUNT]]
+
+
+def _decorate_skill_detail(payload: dict, user: dict, scope: str, content: str) -> dict:
+    """by-id 返回补齐 D2/D3/D5/D6/D9/D11 字段（单一出口，两个存储分支共用）。"""
+    sid = int(payload.get("id") or 0)
+    if not sid:
+        return payload
+    extra = _rt_skills.read_one_any("skill_detail_extra_by_id", (sid,))
+    summary = (extra[0] if extra else "") or ""
+    payload["download_count"] = int((extra[1] if extra else 0) or 0)
+    payload["created_at"] = (extra[2] if extra else "") or ""
+    payload["updated_at"] = (extra[3] if extra else "") or ""
+    payload["created_by"] = (extra[4] if extra else "") or ""
+    payload["updated_by"] = (extra[5] if extra else "") or ""
+    payload["summary"] = _clean_summary(summary or payload.get("description") or "")
+    # 概览 Tab 技能介绍人工改写（issue：概览可编辑）——JSON 解析失败按空处理
+    try:
+        _ov = _rt_skills.read_one_any("skill_intro_override_by_id", (sid,))
+        payload["intro_override"] = json.loads((_ov[0] if _ov else "") or "{}") or {}
+    except Exception:
+        payload["intro_override"] = {}
+
+    if scope == "official":
+        payload["version"] = _ensure_official_skill_version(
+            sid, content, payload.get("created_at") or "")
+    else:
+        latest = _rt_skills.read_one_any("skill_version_latest", (sid,))
+        payload["version"] = (latest[0] if latest else "") or _version_from_content(content)
+    versions_rows = _rt_skills.read_all_any("skill_versions_by_skill", (sid,))
+    payload["versions"] = [
+        {"version": r[0] or "", "uploaded_at": r[1] or "",
+         "uploaded_by": r[2] or "", "change_note": r[3] or "",
+         "is_latest": i == 0}
+        for i, r in enumerate(versions_rows)
+    ]
+    files = _ensure_official_skill_files(sid, scope, content)
+    payload["files"] = [{"path": p, "size": int(s)} for p, s in files]
+    payload["file_count"] = len(files)
+    try:
+        payload["comment_count"] = int(
+            (_rt_skills.read_one_any("skill_comment_count", (sid,)) or [0])[0] or 0)
+    except Exception:
+        payload["comment_count"] = 0
+    payload["related"] = _related_skills(
+        sid, scope, payload.get("agent_type") or "", list(payload.get("tags") or []), user)
+    return payload
+
+
+def _version_from_content(content: str) -> str:
+    m = (content or "").split("---")
+    if len(m) >= 3:
+        try:
+            return (parse_skill_frontmatter_from_text(content).get("version") or "").strip() or "—"
+        except Exception:
+            return "—"
+    return "—"
+
+
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
+                cat_l1_id: int = 0, cat_l2_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；all = 不限 scope（官方+个人+所有仓库）；不传 = 返回全部（兼容旧逻辑）。
@@ -92,7 +513,8 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key
     from src.domains.mgmt.user.db import (batch_skill_liked, get_skill_usage_stats,
-                             batch_skill_scenes, list_skill_categories)
+                             batch_skill_scenes, list_skill_categories,
+                             list_category_dict, category_path_from_map)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = _resolve_repo_key(repo) if repo else ""
@@ -113,19 +535,29 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
             cat_map[cat["id"]] = cat["name"]
     except Exception:
         pass
+    try:
+        _cat_dict_map = {c["id"]: c for c in list_category_dict("skill")}
+    except Exception:
+        _cat_dict_map = {}
     total = 0
     try:
         total, _skill_rows = _rt_skills.skill_search(
             scope=scope, user_id=user.get("id"), repo_key=repo_key, org_id=_org_id,
             q=q, agent_type=agent_type, category_id=category_id or 0, sort=sort,
-            page=page, page_size=page_size if use_paging else 0)
+            page=page, page_size=page_size if use_paging else 0,
+            cat_l1_id=cat_l1_id or 0, cat_l2_id=cat_l2_id or 0)
         for r in _skill_rows:
             cat_id = r[10] or 0
+            l1_id = r[11] if len(r) > 11 else 0
+            l2_id = r[12] if len(r) > 12 else 0
+            raw_tags = r[13] if len(r) > 13 else ""
+            raw_summary = r[14] if len(r) > 14 else ""
             skills.append({
                 "id": r[0],
                 "name": r[1],
                 "display_name": r[2] or r[1],
                 "description": r[3] or "",
+                "summary": _clean_summary(raw_summary or r[3] or ""),
                 "agent_type": r[4] or "",
                 "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
                 "scope": r[5] or "",
@@ -133,6 +565,10 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                 "like_count": r[8] or 0,
                 "category_id": cat_id,
                 "category_name": cat_map.get(cat_id, ""),
+                "cat_l1_id": l1_id or 0,
+                "cat_l2_id": l2_id or 0,
+                "category": category_path_from_map(_cat_dict_map, l1_id, l2_id),
+                "tags": parse_tags(raw_tags, limit=SKILL_MAX_TAGS),
             })
             skill_ids.append(r[0])
     except Exception:
@@ -203,6 +639,11 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+        s["cat_l1_id"] = s.get("cat_l1_id", 0)
+        s["cat_l2_id"] = s.get("cat_l2_id", 0)
+        s["category"] = _skill_category_payload(s["cat_l1_id"], s["cat_l2_id"])
+        s["tags"] = parse_tags(s.get("tags", ""), limit=SKILL_MAX_TAGS)
+        s["summary"] = _clean_summary(s.get("summary") or s.get("description") or "")
     # 精选技能按 admin 管理台设置的顺序排列
     if skills:
         try:
@@ -255,9 +696,15 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
 @router.get("/categories", operation_id="skills_categories", summary="List skill categories",
             description="Lists skill categories (Issue #179 skill-sync-category).")
 def list_categories(user: dict = Depends(require_no_session_token)):
-    """返回技能分类列表（Issue #179）。"""
-    from src.domains.mgmt.user.db import list_skill_categories
-    return {"categories": list_skill_categories()}
+    """返回技能分类列表（Issue #179）；附统一分类树（Issue #2761）。"""
+    from src.domains.mgmt.user.db import list_skill_categories, list_category_tree
+    return {"categories": list_skill_categories(), "tree": list_category_tree("skill")}
+
+@router.get("/tag-suggest", operation_id="skills_tag_suggest",
+            summary="Suggest skill tags", description="Rule-based tag candidates (max 3) for skill name/description.")
+def suggest_skill_tags(name: str = "", description: str = "",
+                       user: dict = Depends(require_no_session_token)):
+    return {"tags": _skill_tag_suggestions(name, description)}
 
 @router.get("/search", operation_id="skills_search", summary="Search skills",
             description="Skill lookup for a task description: exact skill_name match first, then keyword match on description/display_name/agent_type.")
@@ -367,7 +814,7 @@ def download_skill_template():
                 zf.write(full, rel)
     buf.seek(0)
     # ===== OBS 分支（N8）：打包 → 传 OBS → 返回临时签名 URL（前端点击下载时动态获取）=====
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage is not None:
         key = "skills/template/skill-template.zip"
@@ -399,7 +846,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能不存在"})
     skill_id, skill_path, scope, owner_id, name = row
 
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
         from src.domains.mgmt.user.db import get_skill_object_key
@@ -407,10 +854,18 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
         if object_key:
             url = storage.temporary_url(object_key)
             if url:  # OBS：签名 URL
+                try:
+                    _rt_skills.exec_any("skill_download_inc", (int(skill_id),))
+                except Exception:
+                    pass
                 return {"url": url, "expires_in": getattr(storage, "default_expires", 300)}
             # 本地模式：直接回 zip 字节流
             data = storage.read_bytes(object_key)
             if data is not None:
+                try:
+                    _rt_skills.exec_any("skill_download_inc", (int(skill_id),))
+                except Exception:
+                    pass
                 return Response(content=data, media_type="application/zip",
                                 headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
     # 官方技能未转集群模式：无对象存储对象，不提供下载
@@ -463,6 +918,11 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     from src.domains.mgmt.user.db import get_skill_category
     cat = get_skill_category(category_id) if category_id else None
     category_name = cat["name"] if cat else ""
+    l1_id = row[12] if len(row) > 12 else 0
+    l2_id = row[13] if len(row) > 13 else 0
+    raw_tags = row[14] if len(row) > 14 else ""
+    category_payload = _skill_category_payload(l1_id, l2_id)
+    tags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -483,21 +943,31 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     current_id = row[7]
     from src.kernel.config import SKILLS_DIR  # 本地兜底分支按官方技能根解析
     # ===== 存储分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址/local 直接读 =====
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     object_key = ""
     if storage is not None:
         from src.domains.mgmt.user.db import get_skill_object_key
         object_key = get_skill_object_key(current_id)  # 官方技能转集群后 skill_path 也是对象键
     if object_key:
-        from src.domains.runtime.storage import skill_md_content
+        from src.domains.runtime.public import skill_md_content
         content = skill_md_content(object_key, row[0]) or ""
         zip_url = ""
         try:
             zip_url = storage.temporary_url(object_key)  # 用户点击下载时动态签发
         except Exception:
             zip_url = ""
-        return {
+        # 文件清单缺失时从对象包解析（D9 存量官方技能/历史上传）
+        try:
+            if not _rt_skills.read_one_any("skill_file_count", (current_id,)) or \
+                    int((_rt_skills.read_one_any("skill_file_count", (current_id,)) or [0])[0] or 0) == 0:
+                _raw_zip = storage.read_bytes(object_key)
+                _entries = _list_zip_entries(_raw_zip or b"")
+                if _entries:
+                    _replace_skill_files(int(current_id), _entries)
+        except Exception:
+            pass
+        return _decorate_skill_detail({
             "id": current_id,
             "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
             "agent_type": row[3] or "",
@@ -506,13 +976,18 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
             "content": content,
             "zip_url": zip_url,
             "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
+            "skill_path": skill_dir or "",
             "is_featured": is_featured,
             "like_count": like_count,
             "liked_by_me": liked_by_me,
             "scenes": scenes,
             "category_id": category_id,
             "category_name": category_name,
-        }
+            "cat_l1_id": l1_id or 0,
+            "cat_l2_id": l2_id or 0,
+            "category": category_payload,
+            "tags": tags,
+        }, user, scope, content)
     # ===== local 分支 =====
     # user/repo 技能：均衡负载环境下 local 存储会导致文件只存在单机，OBS 不可用时直接报 503
     if scope in ("user", "repo"):
@@ -533,7 +1008,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     if os.path.exists(skill_path):
         with open(skill_path, encoding="utf-8") as f:
             content = f.read()
-    return {
+    return _decorate_skill_detail({
         "id": current_id,
         "name": row[0], "display_name": row[1] or row[0], "description": row[2] or "",
         "agent_type": row[3] or "",
@@ -541,19 +1016,123 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
         "scope": scope or "",
         "content": content,
         "is_obs": False,
+        "skill_path": skill_dir or "",
         "is_featured": is_featured,
         "like_count": like_count,
         "liked_by_me": liked_by_me,
         "scenes": scenes,
         "category_id": category_id,
         "category_name": category_name,
+        "cat_l1_id": l1_id or 0,
+        "cat_l2_id": l2_id or 0,
+        "category": category_payload,
+        "tags": tags,
+    }, user, scope, content)
+
+@router.get("/by-id/{skill_id}/versions", operation_id="skills_versions", summary="Skill version history", description="Returns the skill version history (latest first) for the detail page.")
+def list_skill_versions(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """技能版本历史（D6）。"""
+    _ensure_skill_access(skill_id, user)
+    rows = _rt_skills.read_all_any("skill_versions_by_skill", (int(skill_id),))
+    return {"versions": [
+        {"version": r[0] or "", "uploaded_at": r[1] or "", "uploaded_by": r[2] or "",
+         "change_note": r[3] or "", "is_latest": i == 0}
+        for i, r in enumerate(rows)
+    ]}
+
+
+@router.get("/by-id/{skill_id}/files", operation_id="skills_files", summary="Skill package file tree", description="Returns the skill package file list with sizes for the detail page resources tab.")
+def list_skill_files(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """技能包文件清单（D9）。"""
+    row = _ensure_skill_access(skill_id, user)
+    scope = row[1] or ""
+    content = ""
+    if scope == "official":
+        try:
+            from src.kernel.config import resolve_official_skill_path
+            path = resolve_official_skill_path(row[0])
+            if path and os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    content = fh.read()
+        except Exception:
+            content = ""
+    entries = _ensure_official_skill_files(int(skill_id), scope, content)
+    return {"files": [{"path": p, "size": int(s)} for p, s in entries],
+            "file_count": len(entries)}
+
+
+@router.get("/by-id/{skill_id}/related", operation_id="skills_related", summary="Related skills", description="Related skills: shared tags first, falls back to same agent_type.")
+def list_related_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
+    """相关技能（D5）。"""
+    row = _ensure_skill_access(skill_id, user)
+    raw_tags = row[7] if len(row) > 7 else ""
+    tags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
+    skill = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
+    agent_type = skill[3] if skill else ""
+    return {"skills": _related_skills(int(skill_id), row[1] or "", agent_type or "", tags, user)}
+
+
+@router.get("/by-id/{skill_id}/comments", operation_id="skills_comments_list", summary="List skill comments", description="Paged user comments for a skill (newest first).")
+def list_skill_comments(skill_id: int, page: int = 1, page_size: int = 20,
+                        user: dict = Depends(get_current_user_or_api_key)):
+    """技能用户评论（D11）：默认最新在前，每页 20 条。"""
+    _ensure_skill_access(skill_id, user)
+    page = max(1, int(page or 1))
+    page_size = min(_COMMENT_PAGE_MAX, max(1, int(page_size or _COMMENT_PAGE_DEFAULT)))
+    total = int((_rt_skills.read_one_any("skill_comment_count", (int(skill_id),)) or [0])[0] or 0)
+    rows = _rt_skills.read_all_any(
+        "skill_comments_page", (int(skill_id), page_size, (page - 1) * page_size))
+    return {
+        "comments": [
+            {"id": r[0], "user_id": r[1] or "", "user_name": r[2] or "用户",
+             "content": r[3] or "", "created_at": r[4] or ""}
+            for r in rows
+        ],
+        "total": total, "page": page, "page_size": page_size,
     }
+
+
+@router.post("/by-id/{skill_id}/comments", operation_id="skills_comments_create", summary="Post skill comment", description="Posts a plain-text user comment (login required, max 1000 chars).")
+def create_skill_comment(skill_id: int, body: dict,
+                         user: dict = Depends(require_no_session_token)):
+    """发表技能评论（D11）：纯文本，限 1000 字。"""
+    _ensure_skill_access(skill_id, user)
+    content = str((body or {}).get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "评论内容不能为空"})
+    if len(content) > _COMMENT_MAX:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"评论最多 {_COMMENT_MAX} 字"})
+    from src.kernel.id_gen import uuid7_str
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cid = uuid7_str()
+    name = user.get("username") or user.get("display_name") or "用户"
+    _rt_skills.exec_any(
+        "skill_comment_insert",
+        (cid, int(skill_id), str(user.get("id") or ""), str(name)[:_COMMENT_NAME_MAX], content, now))
+    # C3 非查询操作审计：评论发布留痕（detail 只记标识与字数，不落评论原文）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_comment_posted",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id), "comment_id": cid,
+                                   "chars": len(content)})
+    return {"comment": {"id": cid, "user_id": str(user.get("id") or ""),
+                        "user_name": name, "content": content, "created_at": now}}
+
 
 @router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)", description="Uploads a skill ZIP. scope=user stores a personal skill; scope=repo requires repo. agent_type is required.")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user_or_api_key),
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
-                       category_id: int = Form(0)):
+                       category_id: int = Form(0), cat_l1_id: int = Form(0),
+                       cat_l2_id: int = Form(0), tags: str = Form(""),
+                       summary: "str | None" = Form(None), change_note: str = Form(""),
+                       clear_category: bool = Form(False)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
+    # 直接调用（非 FastAPI 注入）时 Form 默认值不是 bool，避免误判为「清空分类」
+    if not isinstance(clear_category, bool):
+        clear_category = False
     VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
@@ -578,6 +1157,10 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         from src.domains.mgmt.user.db import get_skill_category
         if not get_skill_category(category_id):
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {category_id} 不存在"})
+    if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
+        _normalize_skill_category(cat_l1_id, cat_l2_id)
+    tag_items = _validate_skill_tags(tags)
+    tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -631,19 +1214,25 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         # 从 SKILL.md Front Matter 提取描述（上传后技能列表需要展示）
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
+        summary_value = _resolve_skill_summary(summary, description)
+        incoming_version = (fm.get("version") or "").strip()
 
         import shutil
         from src.kernel.session_manager import db, db_lock
         # ===== OBS/本地存储分支（N4）：规范化重打包 → 存固定 key（原子覆盖）→ DB upsert → 缓存 =====
         from src.kernel.config import log
-        from src.domains.runtime.storage import get_skill_storage
+        from src.domains.runtime.public import get_skill_storage
         storage = get_skill_storage()
         if storage is not None:
-            from src.domains.runtime.storage import skill_key, zip_cache_put, mem_cache_invalidate
+            from src.domains.runtime.public import skill_key, zip_cache_put, mem_cache_invalidate
             from src.domains.mgmt.user.db import upsert_skill_obs
             from src.kernel.repo_key import to_repo_key
             owner = _resolve_repo_key(repo, strict=True) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
+            _existing = _rt_skills.read_one_any(
+                "skill_id_by_owner_scope", (skill_name, db_scope, owner))
+            target_version = (_next_skill_version(int(_existing[0]), incoming_version)
+                              if _existing else (incoming_version or "1.0.0"))
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
                 # user 不同 owner 段天然隔离，repo 同仓库同名覆盖不限角色
@@ -665,6 +1254,33 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                     if _prev_bytes is not None:
                         storage.save_bytes(object_key, _prev_bytes)   # 恢复旧对象（DB 行未动）
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
+                if cat_l1_id or cat_l2_id or tags or clear_category:
+                    try:
+                        # 仅写实际提供的字段：未提供的一侧回填既有值，避免仅改标签时
+                        # 以 0 覆盖既有分类（Issue #2761 QA）；clear_category 显式清空。
+                        from src.domains.mgmt.routes._category import prepare_category_write
+                        _cur = _rt_skills.read_one_any("skill_meta_row", (skill_id,))
+                        _cur_l1 = int(_cur[5] or 0) if _cur and len(_cur) > 5 else 0
+                        _cur_l2 = int(_cur[6] or 0) if _cur and len(_cur) > 6 else 0
+                        _cur_tags = (_cur[7] if _cur and len(_cur) > 7 else "") or ""
+                        _target_l1, _target_l2 = prepare_category_write(
+                            cat_l1_id, cat_l2_id, _cur_l1, _cur_l2, clear_category)
+                        _target_tags = tags_json if tags else _cur_tags
+                        _rt_skills.update_skill_category_tags(
+                            skill_id, _target_l1, _target_l2, _target_tags)
+                    except Exception as _te:  # noqa: BLE001 - 分类/标签写入失败不阻断主流程
+                        from src.kernel.config import log as _log
+                        _log.warning(f"skill upload: category/tags update failed: {_te}")
+                try:
+                    _rt_skills.exec_any("skill_summary_update",
+                                        (summary_value, int(skill_id)))
+                    _record_skill_version(int(skill_id), target_version,
+                                          change_note or "上传技能", user)
+                    _replace_skill_files(int(skill_id), _list_zip_entries(zip_bytes))
+                except HTTPException:
+                    raise
+                except Exception as _de:  # noqa: BLE001 - 详情附加数据失败不阻断主流程
+                    log.warning(f"skill upload: detail metadata write failed: {_de}")
                 zip_cache_put(object_key, zip_bytes, content_hash, skill_id or 0)  # put 覆盖同名 key + hash + id 锚点供读时校验
                 mem_cache_invalidate(object_key)      # 覆盖后显式失效内存提取缓存（object_key 口径，P49）
                 log.info(f"skill uploaded (storage={storage.backend_name()}, key={object_key})")
@@ -723,7 +1339,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
 
     # 存储对象清理（OBS 或单机本地）
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     object_key = ""
     if storage is not None:
@@ -754,7 +1370,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         log.warning("存储后端不可用，仅清理 DB 记录，对象文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
 
     if object_key:
-        from src.domains.runtime.storage import invalidate_skill_caches
+        from src.domains.runtime.public import invalidate_skill_caches
         try:
             storage.delete_object(object_key)
         except Exception:
@@ -770,7 +1386,11 @@ VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"
              description="Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.")
 async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                              user: dict = Depends(require_no_session_token),
-                             agent_type: str = Form(""), category_id: str = Form("")):
+                             agent_type: str = Form(""), category_id: str = Form(""),
+                             cat_l1_id: int = Form(0), cat_l2_id: int = Form(0),
+                             tags: str = Form(""), summary: "str | None" = Form(None),
+                             change_note: str = Form(""),
+                             clear_category: bool = Form(False)):
     """按 skill_id 上传 ZIP 覆盖更新既有技能（Issue #561：卡片直接更新，免删了重传）。
 
     权限对齐 delete：official 不允许更新；user 需本人；repo 需当前用户托管该仓库。
@@ -779,21 +1399,24 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
     原行，保留 id/场景引用/点赞）；不一致返回 400 明确指引。
     agent_type / category_id 可选，缺省沿用原记录值。
     """
-    from src.kernel.session_manager import db, db_lock
+    if not isinstance(clear_category, bool):
+        clear_category = False
 
-    # 1. 查既有记录（按主键 id 精确）
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_9f2ee7_f
-        _ru_lib_9f2ee7 = _ru_lib_9f2ee7_f(foreign_only=True)
-        if _ru_lib_9f2ee7 is not None:
-            row = _ru_lib_9f2ee7.read_one("skill_9f2ee7", (skill_id,))
-        else:
-            row = _rt_skills.read_one_any("skill_meta_row", (skill_id,))
+    # 1. 查既有记录（按主键 id 精确）——只读，不持有 db_lock（Issue #3168：
+    # 单库拓扑下 _rt_skills 内部会再取 db_lock，非重入锁会自锁）
+    from src.kernel.domain_read import runtime_lib as _ru_lib_9f2ee7_f
+    _ru_lib_9f2ee7 = _ru_lib_9f2ee7_f(foreign_only=True)
+    if _ru_lib_9f2ee7 is not None:
+        row = _ru_lib_9f2ee7.read_one("skill_9f2ee7", (skill_id,))
+    else:
+        row = _rt_skills.read_one_any("skill_meta_row", (skill_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     skill_name, skill_scope, owner_id, cur_agent_type, cur_category_id = row[0], row[1] or "user", row[2] or "", row[3] or "", row[4] or 0
+    cur_l1 = row[5] if len(row) > 5 else 0
+    cur_l2 = row[6] if len(row) > 6 else 0
+    cur_tags = row[7] if len(row) > 7 else ""
 
     # 2. 权限校验（对齐 delete）
     if skill_scope == "official":
@@ -822,6 +1445,16 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
     else:
         new_category_id = int(cur_category_id or 0)
+
+    if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
+        _normalize_skill_category(cat_l1_id, cat_l2_id)
+    tag_items = _validate_skill_tags(tags)
+    tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
+    update_cat_tags = bool(cat_l1_id or cat_l2_id or tags or clear_category)
+    from src.domains.mgmt.routes._category import prepare_category_write
+    target_l1, target_l2 = prepare_category_write(
+        cat_l1_id, cat_l2_id, cur_l1, cur_l2, clear_category)
+    target_tags = tags_json if tags else (cur_tags or "")
 
     # 4. ZIP 校验（复用 upload 链：大小/炸弹/结构/SKILL.md）
     content = await file.read()
@@ -874,14 +1507,17 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
+        summary_value = _resolve_skill_summary(summary, description)
+        incoming_version = (fm.get("version") or "").strip()
+        target_version = _next_skill_version(int(skill_id), incoming_version)
 
         # 5. 存储写序（对齐 #444：留存旧字节 → 覆盖 → upsert → 失败回滚 → 缓存失效）
         from src.kernel.config import log
-        from src.domains.runtime.storage import get_skill_storage
+        from src.domains.runtime.public import get_skill_storage
         storage = get_skill_storage()
         if storage is None:
             raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且本地存储被禁用，技能更新失败。请检查服务端存储配置后重试。"})
-        from src.domains.runtime.storage import skill_key, zip_cache_put, mem_cache_invalidate
+        from src.domains.runtime.public import skill_key, zip_cache_put, mem_cache_invalidate
         from src.domains.mgmt.user.db import upsert_skill_obs, get_skill_object_key
         object_key = get_skill_object_key(skill_id) or skill_key(
             "custom" if skill_scope == "user" else skill_scope, owner_id, skill_name)
@@ -897,6 +1533,21 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                 if _prev_bytes is not None:
                     storage.save_bytes(object_key, _prev_bytes)  # 回滚旧对象（DB 行未动）
                 raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录更新失败（并发冲突或同名记录漂移），已回滚，请重试"})
+            if update_cat_tags:
+                try:
+                    _rt_skills.update_skill_category_tags(
+                        int(new_id), target_l1, target_l2, target_tags)
+                except Exception as _te:  # noqa: BLE001 - 分类/标签写入失败不阻断主流程
+                    from src.kernel.config import log as _log
+                    _log.warning(f"skill update: category/tags update failed: {_te}")
+            try:
+                _rt_skills.exec_any("skill_summary_update",
+                                    (summary_value, int(new_id)))
+                _record_skill_version(int(new_id), target_version,
+                                      change_note or "上传更新", user)
+                _replace_skill_files(int(new_id), _list_zip_entries(zip_bytes))
+            except Exception as _de:  # noqa: BLE001 - 详情附加数据失败不阻断主流程
+                log.warning(f"skill update: detail metadata write failed: {_de}")
             zip_cache_put(object_key, zip_bytes, content_hash, int(new_id))
             mem_cache_invalidate(object_key)
             log.info(f"skill updated (storage={storage.backend_name()}, key={object_key}, skill_id={skill_id})")
@@ -911,6 +1562,152 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"更新失败: {e}"})
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+@router.patch("/{skill_id}", operation_id="skills_patch_meta",
+              summary="Skill metadata edit without re-uploading the package",
+              description="Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
+def patch_skill_meta(skill_id: int, body: dict = Body(...),
+                     user: dict = Depends(require_no_session_token)):
+    """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
+
+    权限对齐 delete/update：official 403；user 需本人；repo 需当前用户托管该仓库。
+    版本号不变（不写 grape_t_skill_version），仅刷新 updated_at。
+    """
+    row = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    skill_name = row[0] or ""
+    cur_desc = row[2] or ""
+    cur_agent = row[3] or ""
+    skill_scope = row[5] or "user"
+    owner_id = row[6] or ""
+    cur_cat_id = int(row[11] or 0)
+    cur_l1 = int(row[12] or 0) if len(row) > 12 else 0
+    cur_l2 = int(row[13] or 0) if len(row) > 13 else 0
+    cur_tags = row[14] if len(row) > 14 else ""
+
+    if skill_scope == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许修改"})
+    if skill_scope == "user" and owner_id != str(user.get("id")):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
+    if skill_scope == "repo":
+        from src.domains.mgmt.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
+
+    body = body if isinstance(body, dict) else {}
+    allowed = {"tags", "summary", "description", "category_id",
+               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category", "intro"}
+    unknown = sorted(set(body) - allowed)
+    if unknown:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"不支持更新的字段：{'、'.join(unknown)}"})
+    if not any(k in body for k in allowed):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "没有可更新的字段"})
+
+    extra = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))
+    cur_summary = (extra[0] if extra else "") or ""
+
+    new_desc = cur_desc
+    if "description" in body:
+        new_desc = str(body.get("description") or "")
+
+    new_agent = cur_agent
+    if "agent_type" in body:
+        new_agent = str(body.get("agent_type") or "").strip()
+        if new_agent not in VALID_SKILL_AGENT_TYPES:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_SKILL_AGENT_TYPES))}"})
+
+    new_category_id = cur_cat_id
+    if "category_id" in body:
+        try:
+            new_category_id = int(body.get("category_id") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if new_category_id > 0:
+            from src.domains.mgmt.user.db import get_skill_category
+            if not get_skill_category(new_category_id):
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
+
+    clear_category = body.get("clear_category")
+    if not isinstance(clear_category, bool):
+        clear_category = False
+    target_l1, target_l2 = cur_l1, cur_l2
+    if "cat_l1_id" in body or "cat_l2_id" in body or clear_category:
+        try:
+            in_l1 = int(body.get("cat_l1_id") or 0) if "cat_l1_id" in body else 0
+            in_l2 = int(body.get("cat_l2_id") or 0) if "cat_l2_id" in body else 0
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if not clear_category and (in_l1 or in_l2):
+            _normalize_skill_category(in_l1, in_l2)
+        from src.domains.mgmt.routes._category import prepare_category_write
+        target_l1, target_l2 = prepare_category_write(
+            in_l1, in_l2, cur_l1, cur_l2, clear_category)
+
+    tags_json = cur_tags or ""
+    if "tags" in body:
+        tag_items = _validate_skill_tags(body.get("tags"))
+        tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
+
+    new_summary = cur_summary
+    if "summary" in body:
+        new_summary = _require_skill_summary(str(body.get("summary") or ""))
+
+    if "intro" in body:
+        intro = body.get("intro")
+        if intro is None:
+            intro = {}
+        if not isinstance(intro, dict):
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "intro 必须为对象（槽位名→文本）"})
+        cleaned_intro = {}
+        for k, v in (intro or {}).items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "message": "intro 的键值必须均为字符串"})
+            key = k.strip()
+            val = v.strip()
+            if not key or len(key) > _INTRO_KEY_MAX:
+                continue
+            if len(val) > _INTRO_TEXT_MAX:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "message": f"intro 单项文本不得超过 {_INTRO_TEXT_MAX} 字"})
+            if val:
+                cleaned_intro[key] = val
+        _rt_skills.exec_any("skill_intro_override_update", (
+            json.dumps(cleaned_intro, ensure_ascii=False), int(skill_id)))
+
+    _rt_skills.exec_any("skill_meta_patch_update", (
+        new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),
+        int(target_l2 or 0), tags_json, new_summary,
+        str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX], int(skill_id)))
+    # C3 非查询操作审计：元信息免传包更新留痕（detail 只记字段名，不记值）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_meta_patched",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id),
+                                   "fields": sorted(set(body) & allowed)})
+
+    latest = _rt_skills.read_one_any("skill_version_latest", (int(skill_id),))
+    updated = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))
+    return {
+        "message": f"技能 {skill_name} 信息已更新",
+        "skill_id": int(skill_id),
+        "summary": new_summary,
+        "tags": parse_tags(tags_json, limit=SKILL_MAX_TAGS),
+        "agent_type": new_agent,
+        "category_id": int(new_category_id or 0),
+        "cat_l1_id": int(target_l1 or 0),
+        "cat_l2_id": int(target_l2 or 0),
+        "updated_at": (updated[3] if updated else "") or "",
+        "version": (latest[0] if latest else "") or "",
+    }
+
 
 class ConvertSkillRequest(BaseModel):
     skill_name: str
@@ -980,10 +1777,10 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
 
     # ===== 存储分支：copy → DB 回写（OBS copyObject / 本地 copy）=====
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
-        from src.domains.runtime.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
+        from src.domains.runtime.public import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
         from src.domains.mgmt.user.db import get_skill_object_key, upsert_skill_obs
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
@@ -1023,7 +1820,7 @@ def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
     （沿用既有 404/空列表口径）；有对象键但存储未启用 → 503（对齐 detail 端点）。
     """
     from src.domains.mgmt.user.db import get_skill_object_key
-    from src.domains.runtime.storage import get_skill_storage, get_skill_zip_bytes
+    from src.domains.runtime.public import get_skill_storage, get_skill_zip_bytes
     object_key = get_skill_object_key(skill_id)
     if not object_key:
         return None
@@ -1058,7 +1855,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
     if not os.path.isdir(ref_dir):
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取 references/ =====
-        from src.domains.runtime.storage import list_zip_sub_skills
+        from src.domains.runtime.public import list_zip_sub_skills
         zip_bytes = _get_sub_skill_zip(skill_id, skill_name)
         if zip_bytes is not None:
             return {"skill_name": skill_name, "sub_skills": list_zip_sub_skills(zip_bytes, skill_name)}
@@ -1124,7 +1921,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
 
     if not os.path.isfile(sub_md):
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
-        from src.domains.runtime.storage import read_zip_sub_skill
+        from src.domains.runtime.public import read_zip_sub_skill
         zip_bytes = _get_sub_skill_zip(skill_id, row[0])
         sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
         if sub_data is None:
@@ -1191,7 +1988,7 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
     else:
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
-        from src.domains.runtime.storage import read_zip_sub_skill
+        from src.domains.runtime.public import read_zip_sub_skill
         zip_bytes = _get_sub_skill_zip(pkg_id, row[0])
         sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
         content = sub_data["content"] if sub_data else None

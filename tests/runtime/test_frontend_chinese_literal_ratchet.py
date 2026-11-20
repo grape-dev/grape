@@ -21,13 +21,35 @@ ZH = re.compile(r"['\"]([^'\"]*[\u4e00-\u9fff][^'\"]*)['\"]")
 FROZEN = {
     "AccountView.vue": 96, "AdminView.vue": 1, "AgentView.vue": 0,
     "AutopilotView.vue": 11, "ChatView.vue": 68, "DashboardView.vue": 121,
-    "EventView.vue": 100, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
-    "IssuesView.vue": 161, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
+    "EventView.vue": 102, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
+    "IssuesView.vue": 163, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
     "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 11,
     "Pipeline.vue": 5, "ReposView.vue": 18, "RuntimesView.vue": 19,
     "SceneCard.vue": 4, "SceneMarket.vue": 86, "SettingsView.vue": 0,
     "SkillsView.vue": 91, "TemplatesView.vue": 33, "BetaApply.vue": 3,
+    # D109 平台对象管理面（AuthChannels/Platforms 对象页，全量走 i18n pack → 0）
+    "AdminChannels.vue": 0, "AdminPlatforms.vue": 1,
+    # 共享 UI 组件（AG* 等）：文案全走 i18n → 0 基线
+    "AGButton.vue": 0, "AGCard.vue": 0, "AGInput.vue": 0, "AGSelect.vue": 0, "AGHelp.vue": 0,
+    # Vue 登录页（2026-11-14 登录卡片迁入 Vue）：19 处 = t() 的 zh 兜底文案，
+    # 与 index.html 迁移前同款（data-i18n 键仍在，兜底串仅首帧/缺包时可见）
+    "LoginView.vue": 19,
+    # 注册/忘记密码卡片迁 Vue（2026-11-14）：值 = t() 的 zh 兜底串，与迁移前 shell 页同款
+    "RegisterView.vue": 40, "ForgotView.vue": 23,
+    # 引导页整页 Vue 化（2026-11-14）：卡面/文案全走 i18n pack → 0
+    "OnboardingView.vue": 0,
+    # 共享弹窗/行组件（aria 组件化，2026-11-14）：文案全走 app.account.* → 0
+    "BindDialog.vue": 0, "PatDialog.vue": 0, "CredRepoRow.vue": 0,
+    # LLM 凭据管理页 / 沙箱页（PR#1507 sandbox-uuid 线新增，2026-11-17 登记）：
+    # 值 = t() 的 zh 兜底串（与 Login/Register 卡片同款口径），只减不增
+    "LlmCredManager.vue": 15, "SandboxView.vue": 0,
 }
+# ↑ G-18（2026-11-17）SandboxView 99 → 0：全页 isZh 三元与拼接文案改走
+# shell/locales/{zh,en}/sandbox.json 的 sbx.* 词条（双包同步）。
+# 基线失真修正（同日）：AdminPlatforms=1 / EventView=102 / IssuesView=163
+# ——2026-11-13 快照取自并行迁移线，落后于 arch-weekly-11 基线自身演进
+# （takeover 状态面等 +2/+1 存量），经对 origin/arch-weekly-11@dd992f15a
+# 全文件中文串 diff 实证本 PR 对这三页零中文增量；按基线实测如实入账。
 
 
 def _count(path: Path) -> int:
@@ -41,7 +63,10 @@ def _count(path: Path) -> int:
 
 
 def _scan() -> dict:
-    files = sorted((APP_SRC / "views").glob("*.vue")) + sorted((APP_SRC / "pages").glob("*.vue"))
+    # 扫描面：views / pages / components（组件里的用户可见文案同样不得硬编码中文）
+    files = (sorted((APP_SRC / "views").glob("*.vue"))
+             + sorted((APP_SRC / "pages").glob("*.vue"))
+             + sorted((APP_SRC / "components").glob("*.vue")))
     assert files, f"扫描面为空：{APP_SRC} 下没有 .vue 页面（目录迁移后守卫会静默失效）"
     return {f.name: _count(f) for f in files}
 

@@ -6,7 +6,9 @@ import threading
 
 from fastapi import Header, HTTPException, Request, Depends
 
-from src.domains.mgmt.user import db as user_db
+# 依赖层原语走 owner 域 public（原 import mgmt.user.db 内部模块）
+from src.domains.mgmt import public as _mgmt_pub
+user_db = _mgmt_pub  # 调用点保持 user_db.xxx 形态，函数名由 public 提供
 
 from src.kernel.config import log
 
@@ -148,12 +150,38 @@ def get_current_user_or_api_key(request: Request) -> dict:
     供内部接口按需读取（如 repo_key/agent_type 做仓库级鉴权）。
     """
     from src.kernel.auth_sdk.auth_token import (
-        SESSION_TOKEN_PREFIX, API_KEY_PREFIX, SESSION_TOKEN_RECOVERY_HINT,
-        TAKEOVER_TOKEN_PREFIX, verify_session_token, verify_api_token, verify_takeover_token,
+        SESSION_TOKEN_PREFIX, API_KEY_PREFIX, TAKEOVER_TOKEN_PREFIX,
+        verify_session_token, verify_api_token, verify_takeover_token,
+        SESSION_TOKEN_RECOVERY_HINT, SESSION_TOKEN_FAILURE_ACTIONS,
+        SESSION_TOKEN_FAILURE_HINTS, classify_session_token_failure,
+        TOKEN_REVOKED_OR_TASK_FINISHED, MISSING_TOKEN, SNAPSHOT_EXPIRED,
     )
+
+    def _session_token_failure_detail(auth_code: str, legacy_error_code: str) -> dict:
+        """Issue #2508: three auth failure classes with the legacy contract kept.
+
+        - code: stays numeric 401 (repo-wide "code is the HTTP status" contract)
+        - auth_code: the new classification for CLI/UI
+        - error_code: legacy code for older callers
+        - message: classification hint; TOKEN_REVOKED_OR_TASK_FINISHED carries no
+          legacy re-read/retry hint since its action is stop_task_no_recovery
+        """
+        _hint = SESSION_TOKEN_FAILURE_HINTS.get(auth_code, SESSION_TOKEN_RECOVERY_HINT)
+        if auth_code == TOKEN_REVOKED_OR_TASK_FINISHED:
+            _hint = SESSION_TOKEN_FAILURE_HINTS[auth_code]
+        elif _hint != SESSION_TOKEN_RECOVERY_HINT:
+            _hint = f"{_hint}. Legacy hint: {SESSION_TOKEN_RECOVERY_HINT}"
+        return {
+            "code": 401,
+            "auth_code": auth_code,
+            "action": SESSION_TOKEN_FAILURE_ACTIONS.get(auth_code, ""),
+            "error_code": legacy_error_code,
+            "message": _hint,
+        }
     token = _extract_api_token(request)
     if not token:
-        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
+        raise HTTPException(status_code=401,
+                            detail=_session_token_failure_detail(MISSING_TOKEN, "NOT_LOGGED_IN"))
 
     # 接管会话（tko_）：与 tk_ 同类（repo 作用域），但只用于"用户接手任务"场景。
     # 能力矩阵见 src/api/auth_caps.py：repo_session=True，agent_self/user_scope=False。
@@ -181,10 +209,31 @@ def get_current_user_or_api_key(request: Request) -> dict:
             "kind": "takeover",
         }
 
+    def _task_status_for_token(raw_token: str) -> str:
+        """Resolve the task status for a tk_ token through the runtime primitive.
+
+        Issue #2508 review: agent_tasks belongs to the runtime domain; kernel must
+        not query it, so the status is resolved here and passed into the classifier.
+        """
+        try:
+            from src.kernel.auth_sdk.auth_token import inspect_session_token
+            _state = inspect_session_token(raw_token) or {}
+            _key = _state.get("session_key") or (_state.get("info") or {}).get("session_key")
+            if not _key:
+                return ""
+            from src.domains.runtime import public as _rt_public
+            return _rt_public.task_status_by_id(_key)
+        except Exception:
+            return ""
+
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_TOKEN_INVALID", "message": SESSION_TOKEN_RECOVERY_HINT})
+            _fail_code = (classify_session_token_failure(token, _task_status_for_token(token))
+                          or SNAPSHOT_EXPIRED)
+            raise HTTPException(
+                status_code=401,
+                detail=_session_token_failure_detail(_fail_code, "SESSION_TOKEN_INVALID"))
         return {
             "id": info["user_id"],
             "username": "",
@@ -566,6 +615,9 @@ def get_user_token_for(username: str, user_id: str = "", provider: str = "gitcod
         except Exception as e:
             log.warning(f"get_user_token_for: credential-domain PAT lookup failed "
                         f"(user={user_id}, provider={provider}): {e}")
+    # OAuth 与 PAT 两种模式并存（2026-11-14 用户口径）：PAT 缺席时正常回落登录令牌。
+    # 渠道↔平台关系配置（channel-repo-links.json）**不参与这里的判定**，它只决定
+    # "登录成功之后要不要写用户↔平台仓库关系"（hooks.on_oauth_login）。
     token = _get_oauth_token_from_identity(username, provider)
     if not token and user_id == "":
         return ""

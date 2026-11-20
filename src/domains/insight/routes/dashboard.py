@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
-from src.domains.mgmt.user import db as user_db
+# 托管仓库列表走 owner 域 public（原 import mgmt.user.db 内部函数）
 
 from src.api.deps import require_no_session_token, require_org_member
 
@@ -18,6 +18,45 @@ from src.kernel.config import log
 # 看板是跨域只读聚合：SQL 在 runtime / mgmt 的 public，本模块不再持有其他域表名
 from src.domains.runtime import public as _rt_dash
 from src.domains.mgmt import public as _mgmt_dash
+
+_LOCAL_HOSTNAME_CACHE = {"v": None}
+
+
+def _parse_role_tags(raw: str) -> list:
+    """把 agent_runtimes.role_tags（JSON 数组字符串）解析成 list。
+
+    #1208 前端角色分层/建议值消费；历史脏值（非 JSON）回退逗号分隔。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        import json as _json
+        v = _json.loads(raw)
+        if isinstance(v, list):
+            return [str(t).strip() for t in v if str(t).strip()]
+        if isinstance(v, str):
+            raw = v
+    except Exception:
+        pass
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _local_hostname() -> str:
+    """本机 hostname（进程内缓存）。
+
+    用途：本机直连引擎（credential_id=0）无凭据 device_name，展示名用 host_name 兜底；
+    host_name 为空的历史行回落本机 hostname——与 settings 引擎列表（_hn = host_name or
+    本机hostname）同口径，保证 dashboard 引擎选择弹窗与引擎页面展示名逐字对齐。
+    """
+    if _LOCAL_HOSTNAME_CACHE["v"] is None:
+        try:
+            import socket as _socket
+            _LOCAL_HOSTNAME_CACHE["v"] = _socket.gethostname() or ""
+        except Exception:
+            _LOCAL_HOSTNAME_CACHE["v"] = ""
+    return _LOCAL_HOSTNAME_CACHE["v"]
+
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -119,7 +158,7 @@ import re
 def _efficiency_bot_usernames() -> set:
     """bot 用户名集合（bot 是执行方不是需求方，不计入协作者）。失败按空集合降级。"""
     try:
-        from src.domains.mgmt.user.db import get_all_bot_usernames
+        from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
         return {u for u in (get_all_bot_usernames() or []) if u}
     except Exception as e:
         log.warning(f"Dashboard efficiency: bot usernames load failed: {e}")
@@ -184,7 +223,7 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
       src/domains/insight/observability/tokens.py 同口径：total 不含 reasoning），经
       `agent_tasks.issue_id` 回链 issue 创建人；孤儿任务（无 issue 行/归属 bot）丢弃。
     - 仓库隔离：repo 支持 owner/repo 与 platform:owner/repo 两种入参，
-      双平台前缀（gitcode:/github:）同查；空 repo 返回空态（仓库维度视图）。
+      前缀按平台卡目录派生（repo_key_candidates），不再写死双平台；空 repo 返回空态。
     - 任何查询异常降级为该路径空结果（统计不拖垮页面），绝不向上抛。
     """
     from src.kernel.repo_key import to_repo_key, repo_key_candidates
@@ -196,7 +235,10 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
         repo_keys = repo_key_candidates(_base)
-        repo_key_out = to_repo_key(_base)
+        # 出参前缀必须沿用入参的平台（原来一律 to_repo_key(_base) → 裸前缀默认 gitcode，
+        # gitee/gitlab 仓的仪表盘会被标成 gitcode，链接/缓存键全错；2026-11-14 深度检查）
+        _prov_in = repo.split(":", 1)[0] if ":" in repo else ""
+        repo_key_out = to_repo_key(_base, provider=_prov_in) if _prov_in else to_repo_key(_base)
 
     out = {
         "repo": repo_key_out,
@@ -330,7 +372,7 @@ def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id:
     pool_engine_ids / selected。库内字段（healthy/online/last_seen）与 console 展示
     不一致的核对可由 candidates 字段直接完成。
     """
-    from src.domains.runtime.engine.engine_select import explain_engine_selection
+    from src.domains.runtime.public import explain_engine_selection
     try:
         return {"ok": True, **explain_engine_selection(repo, agent_type, scene_id=scene_id)}
     except Exception as e:
@@ -367,7 +409,10 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
         repo_keys = repo_key_candidates(_base)
-        repo_key_out = to_repo_key(_base)
+        # 出参前缀必须沿用入参的平台（原来一律 to_repo_key(_base) → 裸前缀默认 gitcode，
+        # gitee/gitlab 仓的仪表盘会被标成 gitcode，链接/缓存键全错；2026-11-14 深度检查）
+        _prov_in = repo.split(":", 1)[0] if ":" in repo else ""
+        repo_key_out = to_repo_key(_base, provider=_prov_in) if _prov_in else to_repo_key(_base)
 
     if not repo_keys:
         return build_board(None, [], repo_label="", weeks=weeks,
@@ -409,7 +454,9 @@ def _eff_repo_keys(repo: str):
     if not (repo and repo.strip()):
         return [], ""
     base = repo.split(":", 1)[1] if ":" in repo else repo
-    return repo_key_candidates(base), to_repo_key(base)
+    _prov_in2 = base.split(":", 1)[0] if ":" in base else ""
+    return repo_key_candidates(base), (to_repo_key(base.split(":", 1)[-1], provider=_prov_in2)
+                                      if _prov_in2 else to_repo_key(base))
 
 @router.get("/efficiency/daily", operation_id="dashboard_efficiency_daily",
             summary="Efficiency board daily drill-down",
@@ -494,7 +541,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.engine.health import derive_runtime_health
+    from src.domains.runtime.public import derive_runtime_health
     from datetime import datetime, timezone, timedelta
     import time as _time
 
@@ -516,7 +563,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
     # 组织隔离：非个人组织只显示该组织的引擎/凭据
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal_org else _org_id
@@ -835,7 +882,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _dev_name = rhost or "本机直连"
                 else:
                     _dev_name = (rc_name or "").strip()
-                from src.domains.runtime.engine.instances import to_display as _td
+                from src.domains.runtime.public import to_display as _td
                 runtime_list.append({
                     "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
                     "health": health, "mode": mode,
@@ -850,7 +897,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 })
                 # 引擎健康分（Issue #134 展示增强）
                 try:
-                    from src.domains.runtime.engine.health_scorer import get_health_score
+                    from src.domains.runtime.public import get_health_score
                     _hd = get_health_score(rid)
                     runtime_list[-1]["health_score"] = _hd.get("health_score")
                     runtime_list[-1]["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
@@ -1185,7 +1232,7 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
         runtime_map[(row[0], row[1])] = row[3] or 0
 
     # runtime_id → 引擎实例名映射（type-device_name 格式）
-    from src.domains.runtime.engine.instances import instance_name as _inst_name
+    from src.domains.runtime.public import instance_name as _inst_name
     _local_hostname = ""
     try:
         _local_hostname = engine_host()
@@ -1263,7 +1310,7 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     import asyncio as _asyncio
     import time as _time
     import requests as _requests
-    from src.domains.mgmt.user.db import get_server_base_url
+    from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
 
     base_url = get_server_base_url()
 
@@ -1327,7 +1374,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     """
     from src.kernel.config import log as _log
     try:
-        from src.domains.mgmt.user.db import get_host_detail, set_host_status, _get_managed_webhook_id
+        from src.domains.mgmt.public import get_host_detail, set_host_status, _get_managed_webhook_id
         webhook_id = _get_managed_webhook_id(repo_key)
         detail = get_host_detail(repo_key)
         cur = detail.get("status", "")
@@ -1460,7 +1507,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 获取用户角色
     role = "Member"
     try:
-        repos = user_db.get_managed_repos(user["id"])
+        repos = _mgmt_dash.managed_repos_for_user(user["id"])
         for r in repos:
             if r["repo_owner"] == owner and r["repo_name"] == repo:
                 role = "Maintainer" if r.get("is_admin") else "Member"
@@ -1544,14 +1591,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 按 agent_type 标签过滤：只返回 tags 包含该 agent_type 或 "all" 的引擎
     # 返回全部引擎（含 offline/about_to_gc），前端通过状态徽章区分
     # 组织隔离：非个人组织只返回 org_id 匹配的引擎
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal_org else _org_id
     agent_engines = {}
     try:
-        from src.domains.runtime.engine.engine_select import query_engines
-        from src.domains.runtime.engine.instances import instance_name, to_display
+        from src.domains.runtime.public import query_engines
+        from src.domains.runtime.public import instance_name, to_display
         _uname = user.get("username") or ""
 
         # Issue #1310（对齐 origin/weekly-10 dashboard.py）：凭据名缓存，供前端引擎下拉展示
@@ -1584,7 +1631,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                            + query_engines(repo_key, "repo", agent_type=atype)
                            + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
-            from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
+            from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
             import time as _time
             _now = _time.time()
             _seen_ids = set()
@@ -1599,6 +1646,11 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             if _filter_org_id:
                 _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
             agent_engines[atype] = [{"id": e["runtime_id"],
+                                     # Issue #1208：本机直连无凭据 device_name，展示名用 host_name 兜底（与设置页同口径）
+                                     "name": instance_name(e["name"],
+                                                          (e.get("device_name") or "")
+                                                          or ((e.get("host_name") or _local_hostname()) if (e.get("credential_id") or 0) == 0 else ""),
+                                                          e.get("credential_id", 0)),
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      # Issue #1310（对齐 origin/weekly-10）：前端 engineDisplayName() 依赖
                                      # engine_name（引擎类型名）+ worker_name（凭据名；本机直连回退 host_name）。
@@ -1606,6 +1658,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                                      "engine_name": to_display(e.get("name", "")),
                                      "worker_name": ((e.get("host_name") or "") if (e.get("credential_id") or 0) == 0
                                                      else _cred_name(e.get("credential_id") or 0)),
+                                     "engine_uid": e.get("engine_uid") or "",
+                                     "engine_type": e.get("name") or "",
+                                     "role_tags": _parse_role_tags(e.get("role_tags_raw") or ""),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      # Issue #592（对齐 origin/weekly-10 dashboard.py）：本机直连（credential_id=0）
                                      # 不参与 worker 15s 心跳，last_seen_at 仅由 10min 本机探活循环刷新——
@@ -1618,7 +1673,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                                      "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
-                                     "alias": e.get("alias", "")}
+                                     "alias": e.get("alias", ""),
+                                     # [沙箱迁移 i7] 云引擎四段名 provider 段可辨接入；普通引擎为空
+                                     "sandbox_provider": ((e.get("name") or "").split(":")[2]
+                                                          if (e.get("name") or "").count(":") >= 3 else "")}
                                     for e in _deduped]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")
@@ -1655,7 +1713,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     host_status = _check_host_status(owner, repo, _actual_repo_key)
     # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
     try:
-        from src.domains.mgmt.user.db import get_host_detail
+        from src.domains.mgmt.public import get_host_detail
         _host_detail = get_host_detail(_actual_repo_key)
         _host_missing = _host_missing_items(host_status, _host_detail.get("step", ""))
     except Exception:

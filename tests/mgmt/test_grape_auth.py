@@ -49,7 +49,7 @@ from src.domains.mgmt.auth.verification import generate_code, send_code, verify_
 from src.domains.mgmt.auth.audit import log_audit, mask_email, mask_identifier, EVENT_TYPES
 from src.domains.mgmt.auth.signup_policy import check_signup_allowed
 from src.domains.mgmt.auth.login_throttle import record_failure, check_throttle, clear_failures
-from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, get_provider, list_providers
+from src.domains.mgmt.auth.providers import builtin_channels, get_provider, list_providers
 from src.domains.mgmt.auth.email_service import is_production_env, is_dev_verification_code
 
 # 初始化表
@@ -343,12 +343,13 @@ class TestVerification:
             assert 0 <= int(code) <= 999999
 
     def test_all_scenes_defined(self):
-        """7 个场景全部定义。"""
-        assert len(SCENES) == 7
+        """场景集合全部定义（Issue #3469 G 新增 change_email_confirm）。"""
+        assert len(SCENES) == 8
         assert "register" in SCENES
         assert "reset_password" in SCENES
         assert "set_password" in SCENES
         assert "change_email" in SCENES
+        assert "change_email_confirm" in SCENES
         assert "unlock_account" in SCENES
         assert "delete_account" in SCENES
         assert "oauth_associate" in SCENES
@@ -531,9 +532,11 @@ class TestLoginThrottle:
 
 class TestProviders:
     def test_providers_defined(self):
-        """Provider 已定义。"""
-        assert "gitcode" in _DEFAULT_PROVIDERS
-        assert "github" in _DEFAULT_PROVIDERS
+        """渠道卡真源=P configs/auth-channels/*.json（代码里不再有内置卡字面量）。"""
+        _cards = builtin_channels()
+        assert "gitcode" in _cards
+        assert "github" in _cards
+        assert "gitee" in _cards
 
     def test_get_provider(self):
         """获取 Provider 配置。"""
@@ -549,9 +552,12 @@ class TestProviders:
         assert get_provider("nonexistent") is None
 
     def test_pkce_config(self):
-        """PKCE 配置（OMIT-3 修复：默认启用 PKCE）。"""
-        assert _DEFAULT_PROVIDERS["gitcode"]["pkce_enabled"] is True
-        assert _DEFAULT_PROVIDERS["github"]["pkce_enabled"] is True
+        """PKCE 配置：渠道卡声明（gitcode/github 启用；gitee/华为不支持 PKCE 故关闭）。"""
+        _cards = builtin_channels()
+        assert _cards["gitcode"]["pkce_enabled"] is True
+        assert _cards["github"]["pkce_enabled"] is True
+        assert _cards["gitee"]["pkce_enabled"] is False
+        assert _cards["huawei"]["pkce_enabled"] is False
 
 
 # ===========================================================================

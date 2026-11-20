@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 
 from src.api.deps import check_repo_access, require_no_session_token, require_user_or_takeover
 from src.kernel.config import log
-from src.domains.runtime.engine import takeover as svc
+# 接管服务走 owner 域 public 门面（原 import runtime.engine.takeover 内部模块）
+from src.domains.runtime import public as svc
 
 router = APIRouter(prefix="/api/takeover", tags=["takeover"])
 
@@ -204,7 +205,7 @@ def takeover_progress(session_id: str, body: ProgressBody,
                 raise svc.TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
         elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
-        if sess.get("status") != svc.ST_ACTIVE:
+        if sess.get("status") != svc.takeover_active_status():
             raise svc.TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")
         res = svc.append_takeover_messages(task_id=sess.get("task_id") or "",
                                            entries=body.messages,
@@ -214,7 +215,7 @@ def takeover_progress(session_id: str, body: ProgressBody,
         # 失败不阻断进展上报（与原实现同一姿态）。
         try:
             from src.domains.runtime import public as _rt_takeover  # noqa: PLC0415
-            _rt_takeover.takeover_touch_updated_at_any(session_id, svc._now_iso())
+            _rt_takeover.takeover_touch_updated_at_any(session_id, svc.now_iso())
         except Exception as _e:
             log.warning(f"takeover progress: touch updated_at failed: {_e}")
         if body.summary:

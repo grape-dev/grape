@@ -43,4 +43,6 @@ ENV_FILE="$HOME/.grape/runtime.env"
 if [ -f "$ENV_FILE" ]; then
   set -a; . "$ENV_FILE"; set +a
 fi
-exec "$PYTHON" -m src.runtime.agent
+# 引擎实现在 src/domains/runtime/engine/agent.py；src.runtime.agent 只是给历史安装
+# 保留的兼容 shim。这里直接走真实入口，新安装不再经过转发层。
+exec "$PYTHON" -m src.domains.runtime.engine.agent

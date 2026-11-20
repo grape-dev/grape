@@ -38,5 +38,10 @@ class InsightServiceRemote(InsightService):
     def query_alerts(self, repo_key: str) -> list:
         return self.client.get(f"/internal/alerts/{repo_key}")
 
+    def aggregate_llm_usage(self, engine_ids: list) -> list:
+        r = self.client.post("/internal/llm-usage/aggregate",
+                             json_data={"engine_ids": [int(x) for x in (engine_ids or []) if x]})
+        return list((r or {}).get("rows") or [])
+
     def aggregate_runtime_stats(self) -> dict:
         return self.client.get("/internal/dashboard/overview")

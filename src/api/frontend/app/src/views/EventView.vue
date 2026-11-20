@@ -83,6 +83,9 @@
                 <div id="evStatusRow" @click="onInfoClick($event)" v-html="statusText"></div>
                 <div id="evFailReason" v-html="failReasonText"></div>
                 <div id="evLogRow" @click="onInfoClick($event)" v-html="logRowText"></div>
+                <!-- Issue #35 遗留：老页把门禁徽标放在信息区但模板里恒 display:none（从未被
+                     打开过），Vue 移植时照抄了 HTML 却漏掉了隐藏 → 信息区多出一行
+                     「✔ 评论开放中」。状态本身已由右侧对话面板的输入行表达，这里恢复隐藏。 -->
                 <div v-if="gateLoaded" id="convGate" v-html="gateText"></div>
               </div>
             </div>
@@ -138,7 +141,7 @@
       </div>
 
       <!-- 右栏：对话面板 -->
-      <div id="convPanel" class="cd ev__convpanel">
+      <div id="convPanel" class="cd ev__convpanel" :class="{ 'ev__convpanel--fs': convFs }">
         <div class="ev__convhdr">
           <h3 class="ev__convtitle">{{ t('section_conversation', { name: agentName }) }}</h3>
           <div class="ev__convbtns">
@@ -149,8 +152,12 @@
             >
               {{ t('clear_conv_btn') }}
             </button>
-            <button class="ev__fsbtn" :title="t('fullscreen_title')" @click="toggleConvFullscreen">
-              {{ t('fullscreen_btn') }}
+            <button
+              class="ev__fsbtn"
+              :title="convFs ? t('exit_fullscreen_title') : t('fullscreen_title')"
+              @click="toggleConvFullscreen"
+            >
+              {{ convFs ? t('fullscreen_restore_btn') : t('fullscreen_btn') }}
             </button>
           </div>
         </div>
@@ -194,13 +201,14 @@
     <!-- ═══ 任务日志模态（SSE 实时 / 内联） ═══ -->
     <Teleport to="body">
       <div v-if="taskLog.open" class="ev__tl-overlay" @click.self="closeTaskLog">
-        <div class="ev__tl-box">
+        <div class="ev__tl-box" :class="{ 'ev__tl-box--fs': tlFs }">
           <div class="ev__tl-hdr">
             <span class="ev__tl-title"
               >{{ taskLog.inline ? t('log_title_inline') : t('log_title_realtime') }}
               <span class="ev__tl-sub">· {{ taskLog.title }}</span></span
             >
             <span v-if="!taskLog.inline" class="ev__tl-status" v-html="taskLog.statusHtml"></span>
+            <span v-else class="ev__tl-count">{{ taskLog.inlineCount }}{{ t('log_count_suffix') }}</span>
             <button class="ev__tl-btn" :title="t('log_copy_title')" @click="copyTaskLog">
               {{ t('log_copy') }}
             </button>
@@ -215,10 +223,10 @@
             <button
               v-if="!taskLog.inline"
               class="ev__tl-btn"
-              :title="t('fullscreen_title')"
+              :title="tlFs ? t('exit_fullscreen_title') : t('fullscreen_title')"
               @click="toggleTaskLogFullscreen"
             >
-              {{ t('fullscreen_btn') }}
+              {{ tlFs ? t('fullscreen_restore_btn') : t('fullscreen_btn') }}
             </button>
             <button class="ev__tl-btn" @click="closeTaskLog">{{ t('log_close') }}</button>
           </div>
@@ -481,6 +489,7 @@ const DEFAULTS = {
   a2a_redo_unknown: '未知返回',
   redispatch_toast_success: '已重新派发',
   redispatch_toast_failed: '派发失败：{msg}',
+  redispatch_token_stale: '重派已发出，但任务凭据未能刷新：重跑时无法调用 grape CLI（git-repo / issues / a2a 等接口），请重建任务后再试',
   local_retry_toast_success: '已开始本机重试',
   local_retry_toast_failed: '本机重试失败：{msg}',
   prompt_expand_hint: '展开查看接收上下文',
@@ -1354,9 +1363,15 @@ const redispatch = reactive({ open: false, seq: 0 })
 function doRedispatch() {
   redispatch.open = false
   G.API.post('/events/' + redispatch.seq + '/redispatch')
-    .then(function () {
-      G.app.showToast(t('redispatch_toast_success'))
-      G.app.nav('event', redispatch.seq)
+    .then(function (d) {
+      // Issue #2508: token_reissued=false means the task credential was not
+      // refreshed, so the rerun cannot call the grape CLI at all.
+      if (d && d.token_reissued === false) {
+        G.app.showToast(t('redispatch_token_stale'))
+      } else {
+        G.app.showToast(t('redispatch_toast_success'))
+      }
+      G.app.nav('event', (d && d.event_seq) ? d.event_seq : redispatch.seq)
     })
     .catch(function (e) {
       G.app.showToast(
@@ -1466,6 +1481,7 @@ const taskLog = reactive({
   infoHtml: '',
   logHtml: '',
   inlineHtml: '',
+  inlineCount: 0,
   hasMsg: false,
 })
 const killBtnVisible = ref(false)
@@ -1505,16 +1521,25 @@ function tlLine(payload) {
   const icon =
     type === 'error'
       ? '❌'
-      : type === 'reasoning'
-        ? '🤔'
-        : type === 'step_start'
-          ? '▶'
-          : type === 'step_finish'
-            ? '✅'
-            : type === 'text'
-              ? '💬'
-              : '·'
-  const color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0'
+      : type === 'task:retry'
+        ? '↻'
+        : type === 'reasoning'
+          ? '🤔'
+          : type === 'step_start'
+            ? '▶'
+            : type === 'step_finish'
+              ? '✅'
+              : type === 'text'
+                ? '💬'
+                : '·'
+  const color =
+    type === 'error'
+      ? '#ff5b5b'
+      : type === 'task:retry'
+        ? '#f0a741'
+        : type === 'reasoning'
+          ? '#a0aac0'
+          : '#e0e6f0'
   return (
     '<div style="margin-bottom:8px">' +
     time +
@@ -1525,6 +1550,45 @@ function tlLine(payload) {
     esc(payload.content || '') +
     '</span></div>'
   )
+}
+// Issue #701：设备显示名唯一来源 runtime_credentials.name，空名统一占位「未命名设备」
+function logWorkerName(v) {
+  const s = String(v || '').trim()
+  if (s) return s
+  const lbl = tc('unnamed_worker')
+  return lbl && lbl !== 'unnamed_worker' ? lbl : '未命名设备'
+}
+function fmtTok(v) {
+  v = Number(v) || 0
+  return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1000 ? (v / 1000).toFixed(1) + 'K' : String(v)
+}
+// Issue #1255：执行模型 + 该任务真实 token 明细（主模型内联 ↑in ↓out，其余模型收成 +N 悬浮）。
+// 与老页 events.js 的 _tlLoadInfo 同口径；Vue 移植时整段丢失，实时日志只剩 CPU/MEM。
+function logModelSegment(info) {
+  if (!info.model)
+    return '🧠 <span style="color:var(--t3)">' + esc(t('model_unknown')) + '</span>'
+  const ms = Array.isArray(info.models) ? info.models : []
+  const top = ms.find(function (m) {
+    return m && m.model === info.model
+  }) || ms[0] || null
+  let out = '🧠 ' + esc(info.model)
+  if (top && (top.input || top.output))
+    out +=
+      ' <span style="color:var(--t3)">· ↑' +
+      fmtTok(top.input) +
+      ' ↓' +
+      fmtTok(top.output) +
+      '</span>'
+  const others = ms.filter(function (m) {
+    return m && m.model !== info.model
+  })
+  const tip = others
+    .map(function (m) {
+      return m.model + ' (↑' + fmtTok(m.input) + ' ↓' + fmtTok(m.output) + ')'
+    })
+    .join('、')
+  if (tip) out += ' <span class="t3" title="' + esc(tip) + '">+' + others.length + '</span>'
+  return out
 }
 function openTaskLogModal(taskId, title) {
   closeTaskLog()
@@ -1549,12 +1613,33 @@ function openTaskLogModal(taskId, title) {
               ? ' <span style="color:var(--t3)">v' + esc(info.agent_version) + '</span>'
               : '')
         )
+      // [B5 沙箱迁移 → spec 2026-11-14 cred_uid8 修正] 云沙箱引擎：🖥 Provider 名 + #cred_uid8
+      // （title 留 systemctl 服务名线索；服务名实为 sandbox-worker-<credential_uid 前 8 位>，
+      //  非 credential_id——走读误判已勘误，spec 2026-11-14-eventview-cred-uid8-fix）
+      if (info.sandbox_provider)
+        bits.push(
+          '🖥 ' +
+            esc(info.sandbox_provider) +
+            (info.credential_uid8
+              ? ' <span style="color:var(--t3)" title="Credential (systemctl: sandbox-worker-' +
+                esc(info.credential_uid8) +
+                ')">#' +
+                esc(info.credential_uid8) +
+                '</span>'
+              : '')
+        )
+      // 🌐 沙箱 id 位本期不激活（spec 拍板②：task→sandbox 关联键未核，后端不下发 sandbox_id）
+      if (info.sandbox_id) bits.push('🌐 ' + esc(info.sandbox_id))
       if (info.device_name) bits.push('🖥 ' + esc(info.device_name))
       if (info.last_ip) bits.push('🌐 ' + esc(info.last_ip))
       if (info.owner_name) bits.push('👤 ' + esc(info.owner_name))
       if (info.spec) bits.push('⚙️ ' + esc(info.spec))
-      if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
-      if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
+      bits.push(logModelSegment(info))
+      // [B5 沙箱迁移] 云沙箱引擎的心跳指标是 worker 宿主机的（非沙箱容器）——不展示防语义误导
+      if (info.cpu_percent && !info.sandbox_provider)
+        bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
+      if (info.memory_percent && !info.sandbox_provider)
+        bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
       taskLog.infoHtml = bits
         .map(function (b) {
           return '<span>' + b + '</span>'
@@ -1727,15 +1812,23 @@ function openInlineLog(seq, title) {
             const icon =
               type === 'error'
                 ? '❌'
-                : type === 'reasoning'
-                  ? '🤔'
-                  : type === 'step_start'
-                    ? '▶'
-                    : type === 'text'
-                      ? '💬'
-                      : '·'
+                : type === 'task:retry'
+                  ? '↻'
+                  : type === 'reasoning'
+                    ? '🤔'
+                    : type === 'step_start'
+                      ? '▶'
+                      : type === 'text'
+                        ? '💬'
+                        : '·'
             const color =
-              type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0'
+              type === 'error'
+                ? '#ff5b5b'
+                : type === 'task:retry'
+                  ? '#f0a741'
+                  : type === 'reasoning'
+                    ? '#a0aac0'
+                    : '#e0e6f0'
             return (
               '<div style="margin-bottom:8px">' +
               time +
@@ -1757,6 +1850,7 @@ function openInlineLog(seq, title) {
       taskLog.open = true
       taskLog.inline = true
       taskLog.title = title || 'seq#' + seq
+      taskLog.inlineCount = logs.length
       taskLog.inlineHtml = bodyHtml
     })
     .catch(function (e) {
@@ -1778,6 +1872,7 @@ function closeTaskLog() {
     tlStatusTimer = null
   }
   killBtnVisible.value = false
+  tlFs.value = false
 }
 G.window.openTaskLog = openTaskLog
 G.window.closeTaskLog = closeTaskLog
@@ -1788,13 +1883,22 @@ function toggleTaskLogFullscreen() {
   tlFs.value = !tlFs.value
 }
 
+// Esc 退出全屏（对话/任务日志），与事件页 v1 的键位一致
+function onFsKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (tlFs.value) tlFs.value = false
+  if (convFs.value) convFs.value = false
+}
+
 onBeforeUnmount(function () {
   stopPoll()
   closeTaskLog()
+  document.removeEventListener('keydown', onFsKeydown)
   if (convStreamAbort) convStreamAbort.abort()
 })
 
 onMounted(function () {
+  document.addEventListener('keydown', onFsKeydown)
   if (data.value.seq) {
     lastFp = fingerprint(data.value)
     loadConversation()
@@ -1906,6 +2010,10 @@ onMounted(function () {
   color: var(--t2);
   line-height: 1.8;
 }
+/* 门禁徽标：老页在信息区恒隐藏（模板 display:none 且无人打开），状态由右侧对话面板表达 */
+.ev__infolines #convGate {
+  display: none;
+}
 .ev__lbl {
   color: var(--t3);
 }
@@ -1978,6 +2086,18 @@ onMounted(function () {
   gap: 8px;
   height: 100%;
   overflow: hidden;
+}
+/* 对话全屏：CSS 类切换（DOM 不搬运），沿用事件页 v1 的 fixed 铺满语义 */
+.ev__convpanel--fs {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  height: auto;
+  border-radius: 0;
+  border: none;
+  padding: 18px;
+  box-sizing: border-box;
+  background: var(--bg, #11151c);
 }
 .ev__convhdr {
   flex-shrink: 0;
@@ -2108,6 +2228,15 @@ onMounted(function () {
   height: 100vh;
   border-radius: 0;
 }
+/* 任务日志全屏（按钮切换，不依赖浏览器 Fullscreen API） */
+.ev__tl-box--fs {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  border: none;
+}
 .ev__tl-hdr {
   display: flex;
   align-items: center;
@@ -2127,6 +2256,12 @@ onMounted(function () {
 .ev__tl-status {
   font-size: 11px;
   margin-left: auto;
+}
+/* 内联日志：老页在标题栏显示「N 条」（events.js openInlineLog），Vue 移植时漏掉 */
+.ev__tl-count {
+  font-size: 11px;
+  margin-left: auto;
+  color: var(--t3);
 }
 /* 日志弹窗工具按钮（Teleport 到 body，不进 #pageContent，所以样式只能写这里）*/
 .ev__tl-btn {

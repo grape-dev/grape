@@ -98,7 +98,7 @@ def eval_interval_sec() -> int:
     """
     raw = ""
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         raw = str(get_meta_value(EVAL_INTERVAL_META_KEY) or "").strip()
     except Exception:
         raw = ""

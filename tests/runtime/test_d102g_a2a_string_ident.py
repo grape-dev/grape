@@ -32,10 +32,15 @@ def test_d102g_int_still_valid():
 
 
 def test_d102g_string_ident_valid():
-    """gitee 字符串 ident 合法（本批核心语义）。"""
+    """gitee 字符串 ident 合法（本批核心语义）。
+
+    Issue #3055：判据统一到内核 `is_native_issue_ident`（平台 ident =
+    `[A-Z]{2,}[A-Z0-9]*`）；旧 D102-G 的 `isalnum()` 让小写随机文本
+    （"abc123"）也过关，已随统一收口退役。
+    """
     fn = _valid_ident_rule()
     assert fn("IKTREU") and fn("IKSZ3I")
-    assert fn("abc123")
+    assert not fn("abc123")
 
 
 def test_d102g_garbage_rejected():

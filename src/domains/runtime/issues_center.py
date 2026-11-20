@@ -163,7 +163,7 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
     # S51 身份优先归属：external_identities 命中即权威
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+        from src.domains.mgmt.public import resolve_user_id_by_platform_login
         _provider, _, _ = parse_repo_key(repo_key or "")
         _uid = resolve_user_id_by_platform_login(_provider, gitcode_user)
         if _uid:
@@ -239,7 +239,7 @@ def _get_gitcode_user_by_user_id(user_id) -> str:
         return ""
     # ① 身份域（权威）
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links, get_grape_account_by_id
+        from src.domains.mgmt.public import list_platform_links, get_grape_account_by_id
         # A 批：平台登录名解析取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         _idents = [i for i in (list_platform_links(uid) or [])
                    if i.get("provider") and (i.get("external_login") or "").strip()]
@@ -384,7 +384,7 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: str = "") -> str:
     - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
     """
     if repo_key:
-        from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+        from src.domains.mgmt.public import get_org_id_by_repo_key
         org_id = get_org_id_by_repo_key(repo_key) or ""
         return "" if str(org_id) == "0" else str(org_id)  # D105-15：哨兵 0/'0' 统一 ''
     return explicit_org or ""
@@ -443,7 +443,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
-    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.public import get_org_id_by_repo_key
     _repo_org = get_org_id_by_repo_key(repo_key) or ""
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
@@ -504,13 +504,21 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.info(f"ensure_issue_task: ownership calibrated issue #{issue_number} "
                          f"user_id {_existing_user_id}->{user_id}")
             if target and target != _existing_assignee:
-                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
+                # Issue #827: 新 assignee 未注册平台（解析 user_id 为空/0）时保留已有非零归属，
+                # 防止跨流水线/场景移交把创建人 user_id 清零（「我的需求」随之不可见）。
+                # D105 起 user_id 为 uuid 字符串：一律 str 归一比较，不用数值大小判定。
+                _resolved_uid = str(user_id or "").strip()
+                _preserve_uid = user_id if _resolved_uid not in ("", "0") else (_existing_user_id or "0")
+                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, _preserve_uid, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
                 except Exception:
                     pass
             # Issue #805: 创建人幂等补写——仅 created_by 为空时回填，绝不覆盖已有创建人
-            _creator_val = (creator or "").strip()
+            # Issue #827: creator 未提供时回退 sender（webhook 操作用户 = 真实创建人），
+            # 保证空 created_by 仍能被回补；幂等语义不变（仍只填空值）。
+            # 刻意不回退 assignee/target——责任人流转 ≠ 创建人，避免把归属误写成 assignee。
+            _creator_val = (creator or "").strip() or (sender or "").strip()
             if _creator_val:
                 c.execute(
                     "UPDATE issue SET created_by=? WHERE id=? AND (created_by IS NULL OR created_by='')",
@@ -523,12 +531,15 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 description = f"{event_type or 'Issue'}：请在任务中心查看并处理。"
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
+            # Issue #827: 创建人落库——creator 优先，缺失时回退 sender（webhook 操作用户）；
+            # 不回退 assignee/target（责任人 ≠ 创建人），与 #805 创建人口径一致。
+            _created_by_insert = (creator or "").strip() or (sender or "").strip()
             c.execute(
                 "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id, created_by) "
                 "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
                  _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id,
-                 (creator or "").strip())
+                 _created_by_insert)
             )
             _rt_db.commit()
             task_id = c.lastrowid
@@ -558,6 +569,9 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
     _issue_id = f"#{issue_number}"
     _stage_info = get_issue_stage(repo_key, _issue_id)
     _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+    # 人工闸（2026-11-17）：stage=done 只当「人推进的」才算开发者确认。
+    # owner_agent 是落库的推进方：user/admin = 人；agent/pipeline/issue = 自动路径。
+    _stage_owner = ((_stage_info or {}).get("owner_agent") or "").strip().lower()
 
     with db_lock:
         c = _rt_db.cursor()
@@ -567,11 +581,22 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             (repo_key, _issue_id))
         _has_running = c.fetchone() is not None
 
-        if _stage == "done":
-            # stage=done 表示开发者已确认 → 直接 completed
+        if _stage == "done" and _stage_owner in ("user", "admin"):
+            # 只认人工推进的 done（Web 确认 / 管理员确认）→ directly completed
             c.execute(
                 "UPDATE issue SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
+                (repo_key, issue_number)
+            )
+        elif _stage == "done":
+            # stage=done 但推进方不是人（历史自动收尾残留 / 脏数据）→ 不结单，
+            # 收口到待人工确认，等人工走 confirm-done。
+            log.info(f"close_issue_tasks: stage=done by '{_stage_owner or 'unknown'}' is not "
+                     f"human-driven, downgrade {repo_key}/#{issue_number} to pending_review")
+            set_issue_stage(repo_key, _issue_id, "pending_review", "pipeline")
+            c.execute(
+                "UPDATE issue SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number)
             )
         elif _stage == "pending_review":
@@ -654,7 +679,69 @@ def _resume_stage(owner_agent: str) -> str:
     _owner = (owner_agent or "").strip()
     return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
 
-def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
+def _resume_issue_rows(repo_key: str, issue_number: int, from_statuses: tuple,
+                       new_stage: str = "", new_owner: str = "",
+                       fallback_pending_review_stage: bool = False) -> tuple:
+    """`from_statuses → processing` 的**唯一**状态迁移实现（幂等）。
+
+    返回 ``(changed, stage, owner_agent)``：``stage``/``owner_agent`` 为翻转前读到的
+    库内值，供调用方决定 stage 落点。Issue #2816 复审：``_resume_issue_waiting`` 与
+    ``resume_issue_from_manual`` 曾各写一份 UPDATE，状态集合与 stage 策略各异；
+    此处收敛为单源，两条入口只保留各自的 stage 策略差异。
+
+    Issue #2816 复审（硬违规，MySQL `rowcount` 语义）：生产集群走 MySQL，PyMySQL
+    未启用 ``CLIENT_FOUND_ROWS``，匹配但值未变的 UPDATE 返回 ``rowcount=0``。
+    ``RESUMABLE_ISSUE_STATUSES`` 含 ``processing``，对已是 processing 的单执行
+    new_carrier/reassign 时 UPDATE 匹配但值不变 → 旧实现误判未恢复并 409。这里在
+    0 行时回读 status，若仍在 ``from_statuses``（尤其 processing）视为已恢复。
+
+    复审（判断项，事务一致性）：状态翻转与 stage 落点在同一 ``db_lock``/事务内完成，
+    避免先提交 status 再单独提交 stage；stage 写失败时不会留下「status=processing
+    但 stage 仍旧」的中间态。
+    """
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
+            (repo_key, issue_number))
+        _row = c.fetchone()
+        _stage = ((_row[0] if _row else "") or "").strip()
+        _owner = ((_row[1] if _row else "") or "").strip()
+        _ph = ",".join("?" * len(from_statuses))
+        c.execute(
+            f"UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
+            (repo_key, issue_number, *from_statuses))
+        _changed = c.rowcount > 0
+        if not _changed:
+            # MySQL 未启用 CLIENT_FOUND_ROWS：matched-but-unchanged → 0 行。
+            # 回读当前 status，仍处于可恢复集合时按「已恢复」处理（幂等重试）。
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _again = c.fetchone()
+            _cur = ((_again[0] if _again else "") or "").strip()
+            if _cur in from_statuses:
+                _changed = True
+        if _changed:
+            _target_stage = ""
+            _target_owner = _owner
+            if new_stage:
+                _target_stage = new_stage
+                _target_owner = new_owner or _owner
+            elif fallback_pending_review_stage and _stage == "pending_review":
+                _target_stage = _resume_stage(_owner)
+            if _target_stage:
+                c.execute(
+                    "UPDATE issue SET stage=?, owner_agent=? "
+                    "WHERE repo_key=? AND issue_number=?",
+                    (_target_stage, _target_owner, repo_key, issue_number))
+        _rt_db.commit()
+    return _changed, _stage, _owner
+
+
+def _resume_issue_waiting(repo_key: str, issue_number: int,
+                          preserve_review: bool = False) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
 
     供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6 / issue-pending-review-explicit-design.md §3.5）：
@@ -665,28 +752,30 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     Issue #1599（审核态漂移收敛）：翻转 status 时同步把 `stage=pending_review` 回落到
     `owner_agent`，避免库内 `status=processing` 但 `stage` 仍停在 pending_review，
     导致展示态继续显示「待审核」而 review-reject 必然 noop。
+
+    Issue #2381：``preserve_review=True`` 表示本次是 redispatch 重放历史评论，不是新的
+    用户输入，`pending_review` 审核点不得再次被消费（保留审核点，只恢复 awaiting_input）。
+
+    Issue #2816 复审：状态迁移走 ``_resume_issue_rows`` 单源；仅真实翻转时才回落
+    stage（``pending_review`` → ``_resume_stage(owner_agent)``）。
     """
+    _from_statuses = ("awaiting_input",) if preserve_review else ("awaiting_input", "pending_review")
     try:
-        with db_lock:
-            c = _rt_db.cursor()
-            c.execute(
-                "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, issue_number))
-            _row = c.fetchone()
-            _stage = ((_row[0] if _row else "") or "").strip()
-            _owner = ((_row[1] if _row else "") or "").strip()
-            c.execute(
-                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
-                (repo_key, issue_number))
-            _changed = c.rowcount > 0
-            if _changed and _stage == "pending_review":
-                c.execute(
-                    "UPDATE issue SET stage=? WHERE repo_key=? AND issue_number=?",
-                    (_resume_stage(_owner), repo_key, issue_number))
-            _rt_db.commit()
+        _changed, _stage, _owner = _resume_issue_rows(
+            repo_key, issue_number, _from_statuses,
+            fallback_pending_review_stage=True)
+        if _changed and _stage == "pending_review":
+            # stage 已在 _resume_issue_rows 的同一事务内提交；这里只补 task.status
+            # 同步（幂等，重复写同值不影响一致性）。
+            try:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", _resume_stage(_owner), _owner)
+            except Exception as _se:
+                log.warning(f"resume waiting: sync task status failed "
+                            f"{repo_key}/#{issue_number}: {_se}")
         if _changed:
-            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
+            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing "
+                     f"(preserve_review={preserve_review})")
         return _changed
     except Exception as _e:
         log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
@@ -710,15 +799,34 @@ def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
         log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
         return False
 
-def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
-    """当前 issue.stage 是否为流水线末节点（next=='done'）。
+# Issue #2381：末节点判据统一口径——`next=="done"` 与空串（无下游）均视为末节点。
+# 此前 _is_last_stage_node 仅认 "done"、_pipeline_last_node_check 同时认 ""，CLI 流水线
+# 末节点 next 为空串时 review-pass 的末节点放宽失效，target=done 恒 noop:not_pending_review。
+_LAST_NODE_NEXT_VALUES = ("done", "")
 
-    与 complete_task 末节点判定（service.py:1685-1687）同源复用 `next=='done'` 判据；
+def _next_is_last_node(next_value) -> bool:
+    """统一末节点判据：next 为 'done' 或空串（无下游节点）时为真。
+
+    Issue #2381 review: only string values may be interpreted. A missing key
+    (None) still means "no downstream node", but any other type (0, False,
+    numbers) is a configuration error and must NOT be treated as the last
+    node -- the previous `str(value or "")` turned 0 into "" and failed open.
+    """
+    if next_value is None:
+        return True
+    if not isinstance(next_value, str):
+        return False
+    return next_value.strip() in _LAST_NODE_NEXT_VALUES
+
+def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
+    """当前 issue.stage 是否为流水线末节点（next=='done' 或无下游节点）。
+
+    与 `_pipeline_last_node_check` 共用 `_next_is_last_node` 判据（Issue #2381 统一口径）；
     stage 不可推定 / 未知 / 已终态 → 保守返回 False（review-pass 归一兜底用）。
     """
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -729,52 +837,10 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
         for _n in (_cfg.get("nodes") or []):
             if _n.get("id") == _cur:
-                return _n.get("next") == "done"
+                return _next_is_last_node(_n.get("next"))
         return False
     except Exception:
         return False
-
-def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
-                         statuses: tuple = ("pending_review",),
-                         qa_info: dict | None = None) -> bool:
-    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。
-
-    Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
-    ``qa_info`` 为调用方已完成的门禁结果：传入时直接复用，避免同一收尾动作重复
-    查询/标注；未传入（None）时自行校验，保持既有调用契约。
-    """
-    if qa_info is None:
-        try:
-            from src.api.qa_gate import gate_or_annotate
-            qa_info = gate_or_annotate(repo_key, issue_number)
-        except Exception as _qe:
-            # 门禁自身异常 fail-open，保持既有收尾链路
-            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
-                        f"{repo_key}/#{issue_number}: {_qe}")
-            qa_info = {}
-    if qa_info.get("blocked"):
-        log.info(f"Issue #1739: qa failed → refuse complete "
-                 f"{repo_key}/#{issue_number} (seq={qa_info.get('event_seq')})")
-        return False
-    with db_lock:
-        c = _rt_db.cursor()
-        _ph = ",".join("?" * len(statuses))
-        c.execute(
-            f"UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
-            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
-            (repo_key, issue_number, *statuses))
-        _rt_db.commit()
-        _changed = c.rowcount > 0
-    if _changed:
-        try:
-            from src.api.session_store import set_issue_stage
-            set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
-        except Exception as _se:
-            log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
-        log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
-        # A4：完成通知扇出到该用户全部已连接渠道（去重窗口内只发一轮）
-        _notify_done(repo_key, issue_number, "审核已通过，该需求已完成。")
-    return _changed
 
 # Issue #1599：审核动作未命中原因分类所依赖的终态集合
 _ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
@@ -793,12 +859,45 @@ def _read_issue_status(repo_key: str, issue_number: int) -> str:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
 
+def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
+    """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。
+
+    判据：末节点（next in ('done','')）的最新事件已 completed（说明审核点曾置好），
+    但 issue 当前 stage 已回落到非末节点（`_resume_issue_waiting` 把 stage 从
+    pending_review 回落到 owner_agent）→ 审核点已失效。仅用于 noop 原因码降级分类，
+    不改变任何状态。
+    """
+    try:
+        from src.api.session_store import get_issue_stage, get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _issue_id = f"#{issue_number}"
+        _st = get_issue_stage(repo_key, _issue_id) or {}
+        _cur = (_st.get("stage") or "").strip()
+        if not _cur or _cur in ("done", "pending_review"):
+            return False
+        _scene = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
+        _last_ids = set()
+        for _n in _nodes:
+            _nid = (_n.get("id") or _n.get("tag") or "").strip()
+            if _nid and _next_is_last_node(_n.get("next")):
+                _last_ids.add(_nid)
+        if not _last_ids or _cur in _last_ids:
+            return False
+        _latest = _issue_latest_event_status_by_agent(repo_key, _issue_id)
+        return any(_latest.get(_nid) == "completed" for _nid in _last_ids)
+    except Exception:
+        return False
+
 def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) -> str:
     """审核动作未命中时回读真实 status 并给出机器可读原因码。
 
     - `noop:already_target`：已处于目标态（幂等，无需变更）；
     - `noop:terminal`：已完成/已取消，不可再变更；
     - `noop:not_pending_review`：前置态不符（如 awaiting_input/active）；
+    - `noop:review_checkpoint_invalidated`：Issue #2381——末节点审核点已因
+      redispatch/用户回复 resume 回落而失效（processing 且 stage 已离开末节点）；
     - `noop:error`：回读失败（无行/DB 异常）。
     """
     _cur = _read_issue_status(repo_key, issue_number)
@@ -808,6 +907,9 @@ def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) ->
         return "noop:already_target"
     if _cur in _ISSUE_TERMINAL_STATUSES:
         return "noop:terminal"
+    if (target_status == "completed" and _cur == "processing"
+            and _review_checkpoint_invalidated(repo_key, issue_number)):
+        return "noop:review_checkpoint_invalidated"
     return "noop:not_pending_review"
 
 # Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
@@ -817,7 +919,7 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
     """完成的 agent 是否为该 issue 流水线末节点（next=='done' 或 next 无下游节点）。"""
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -832,7 +934,7 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
             _nid = (_n.get("id") or _n.get("tag") or "").strip()
             if _nid == agent_type:
                 _next = (_n.get("next") or "").strip()
-                if _next == "done" or _next == "":
+                if _next_is_last_node(_next):
                     return True
                 if _next not in _ids:
                     # 配置笔误（next 指向不存在节点）不视为末节点，防误触发自动结单
@@ -862,70 +964,6 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"find github mirror for {repo_key} failed: {e}")
         return ""
-
-def _close_vcs_one_auto(repo_key: str, issue_number) -> str:
-    """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
-    try:
-        from src.kernel.repo_key import parse_repo_key
-        provider, owner, repo = parse_repo_key(repo_key)
-        if not owner or not repo:
-            return "skipped"
-        # D44/S65：token 统一入口 TokenResolver 策略链（bot 列→全局→用户
-        # 降级，get_github_token/get_repo_bot_token 内部即此形态）
-        token = ""
-        try:
-            from src.kernel.token_resolver import TokenResolver, create_provider
-            token = TokenResolver(create_provider(provider)).get_token(repo_key) or ""
-        except Exception:
-            token = ""
-        if not token:
-            log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
-            return "skipped"
-        from src.domains.runtime.vcs.api_client import VcsApiClient
-        client = VcsApiClient(provider, token, owner, repo)
-        try:
-            if client.get_issue_state(issue_number) == "closed":
-                return "skipped"
-        except Exception as _se:
-            log.warning(f"auto-finalize: get_issue_state {repo_key}#{issue_number} failed: {_se}")
-        resp = client.close_issue(issue_number)
-        if isinstance(resp, dict) and "error" not in resp:
-            log.info(f"auto-finalize: closed VCS issue {repo_key}#{issue_number}")
-            return "success"
-        log.warning(f"auto-finalize: close_issue {repo_key}#{issue_number} -> {resp}")
-        return "failed"
-    except Exception as _e:
-        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
-        return "failed"
-
-def _close_vcs_issue_auto(repo_key: str, issue_number) -> str:
-    """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
-
-    与 confirm-done 人工路径语义一致：GitCode 仓库同时尝试关闭绑定的 GitHub 镜像 Issue
-    （镜像 repo_key 解析失败按降级语义 skip）；github: 仓库仅关闭 GitHub 侧。
-
-    幂等：VCS 侧已 closed → skipped。返回 "success" / "skipped" / "failed"（聚合：
-    任一侧 success 即 success，否则任一侧 failed 即 failed，全 skipped 即 skipped；
-    失败仅记日志，不影响本地已完成状态，与 confirm-done 的降级语义一致）。
-    """
-    if not issue_number:
-        return "skipped"
-    _results = {}
-    try:
-        # S104/D78：镜像查找统一 _mirror_repo_keys（全平台，S97 同族；
-        # 手写 github-only 镜像漏 gitee/gitlab 绑定仓）
-        _results[repo_key] = _close_vcs_one_auto(repo_key, issue_number)
-        for _m_rk in _mirror_repo_keys(repo_key):
-            _results[_m_rk] = _close_vcs_one_auto(_m_rk, issue_number)
-    except Exception as _e:
-        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
-        return "failed"
-    _vals = list(_results.values())
-    if "success" in _vals:
-        return "success"
-    if "failed" in _vals:
-        return "failed"
-    return "skipped"
 
 def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dict:
     """该 issue 每个 agent_type 的最新事件状态（seq 最大者），用于「全部节点 completed」检测。
@@ -958,21 +996,25 @@ def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dic
         log.warning(f"auto-finalize: latest event status query failed {repo_key}/{issue_id_tag}: {_e}")
         return out
 
-def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: str,
+def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: str,
                                      source: str = "pipeline") -> str:
-    """Issue #656: 末节点完成后 issue 级自动收尾迁移（自动结单）。
+    """末节点完成后把需求推进到「待人工确认」（不再自动结单）。
 
-    触发条件（全部满足才自动结单）：
+    人工闸口径（需求确认只能由人做）：末节点全绿时只写
+    ``status=pending_review`` + ``stage=pending_review``，不写 completed、不关 VCS Issue；
+    VCS 关单与 completed 只发生在人工 confirm-done（routes/issues.py）。
+    失败/QA 拦截分支维持原有「回退 pending_review」语义。
+
+    触发条件（全部满足才推进）：
     - 完成的 agent == issue 当前 stage，且该节点为流水线末节点（next=='done' 或无下游）；
     - 该 issue 全部流水线节点最新事件均 completed（无 running/dispatched），且无 failed 阻断；
     - issue.status 非 pending_review（显式待人工确认场景不自动结单，保留 confirm done 人工路径）。
 
-    迁移：status→completed、completed_reason='auto_finalized'、completed_at 落库（#368）、
-    stage→done，并联动关闭 VCS（GitCode/GitHub）Issue（bot token，降级不阻断，幂等）。
+    迁移：status→pending_review、stage→pending_review（completed_reason/at 清空）。
 
-    有 failed 阻断时回退 stage=pending_review（保留 Issue #51 人工确认语义）。
+    有 failed 阻断时同样回退 stage=pending_review（保留 Issue #51 人工确认语义）。
 
-    返回："auto_done" / "pending_review_fallback" / "noop:<reason>"（幂等可重入）。
+    返回："pending_review" / "pending_review_fallback" / "noop:<reason>"（幂等可重入）。
     """
     try:
         _num_s = (issue_id or "").strip().lstrip("#")
@@ -1014,7 +1056,7 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
 
         # 「全部节点 completed + 无阻断」检测：每个流水线节点的最新事件
         from src.api.session_store import get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _scene = get_issue_scene(repo_key, _tag)
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
@@ -1077,89 +1119,85 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
             log.warning(f"Issue #1739: qa gate check failed (fail-open) "
                         f"{repo_key}/{_tag}: {_qe}")
 
-        # 条件齐备 → issue 级收尾迁移（幂等：仅可变状态放行）
+        # 条件齐备 → 推进到待人工确认（幂等：仅可变状态放行；不写 completed、不关 VCS）
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
-                "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
+                "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
-                (_AUTO_FINALIZED_REASON, repo_key, _num))
+                (repo_key, _num))
             _rt_db.commit()
             _changed = c.rowcount > 0
         if not _changed:
             return "noop:not_mutable"
         try:
             from src.api.session_store import set_issue_stage
-            set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+            set_issue_stage(repo_key, _tag, "pending_review", source or "pipeline")
         except Exception as _se:
-            # UPDATE completed 与 set_issue_stage 非原子 → 立即补偿重试一次，仍失败仅记日志
-            log.warning(f"auto-finalize stage=done failed {repo_key}/{_tag}: {_se}, retry once")
+            # UPDATE 与 set_issue_stage 非原子 → 立即补偿重试一次，仍失败仅记日志
+            log.warning(f"finalize stage=pending_review failed {repo_key}/{_tag}: {_se}, retry once")
             try:
-                set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+                set_issue_stage(repo_key, _tag, "pending_review", source or "pipeline")
             except Exception as _se2:
-                log.warning(f"auto-finalize stage=done retry failed {repo_key}/{_tag}: {_se2} "
+                log.warning(f"finalize stage=pending_review retry failed {repo_key}/{_tag}: {_se2} "
                             f"(will be compensated on next event)")
-        _closed = _close_vcs_issue_auto(repo_key, _num)
-        _notify_done(repo_key, _num, "流水线全部节点已完成，需求已自动结单。")
-        log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
-                 f"(agent={agent_type}, vcs_close={_closed})")
-        return "auto_done"
+        _notify_done(repo_key, _num, "流水线全部节点已完成，需求进入待确认，请人工确认完成。")
+        log.info(f"last-node finalize -> pending_review {repo_key}/{_tag} by {source} "
+                 f"(agent={agent_type})")
+        return "pending_review"
     except Exception as _e:
-        log.warning(f"auto-finalize failed {repo_key}/{issue_id}: {_e}")
+        log.warning(f"finalize to pending_review failed {repo_key}/{issue_id}: {_e}")
         return "noop:error"
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
-    """Agent 判定用户通过审核（幂等）。
+    """Agent 判定用户通过审核（只推进，不终态）。
 
-    - target=done：pending_review → completed+done（合入/收尾）；
-      **末节点放宽（#2266）**：若当前 stage 为流水线末节点（next=='done'），status 处于
-      active/processing/awaiting_input 也放行 done（CLI 流水线可从未进入 pending_review，
-      如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
-    - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
-      （review-pass-last-node-force-done-design.md，无下游可续）。
+    - target=done：**拒绝**。需求完成只能由人工确认（confirm-done / admin-confirm-done），
+      agent 没有任何终态通道；返回 ``noop:agent_finalize_forbidden``（路由转 400）。
+    - target=processing：pending_review → processing（继续流水线）；
+      末节点触达时无下游可续 → 归一为 pending_review（待人工确认），而不是 done。
     - 未命中 → `noop:already_target|terminal|not_pending_review|error`（Issue #1599：
       回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
-        # Issue #1739：统一 QA 结论门禁——仅在本次调用会收尾（target=done 或末节点归一
-        # done）时校验；target=processing 的「继续处理」不受影响。
-        _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
+        if str(target or "").strip().lower() == "done":
+            log.warning(f"Issue review-pass: agent tried to finalize "
+                        f"{repo_key}/#{issue_number} -> rejected (human confirm only)")
+            return "noop:agent_finalize_forbidden"
+        # Issue #1739：末节点走到「待确认」前仍过一次 QA 结论门禁，但只用于标注/记录——
+        # 人工闸下 AI 不再自动收尾，QA 失败不能把人挡在待确认列之外（否则卡片停在原
+        # stage，既进不了待审核也无人被通知）。人工确认时自行判断 QA 结论。
         _qa_info: dict | None = None
-        if _will_done:
+        if _is_last_stage_node(repo_key, issue_number):
             try:
                 from src.api.qa_gate import gate_or_annotate
                 _qa_info = gate_or_annotate(repo_key, issue_number)
                 if _qa_info.get("blocked"):
-                    log.info(f"Issue #1739: qa failed → review-pass blocked "
-                             f"{repo_key}/#{issue_number} target={target}")
-                    return "noop:qa_failed"
+                    log.info(f"Issue #1739: qa failed → still route to pending_review "
+                             f"(human decides) {repo_key}/#{issue_number}")
             except Exception as _qe:
                 log.warning(f"Issue #1739: qa gate check failed (fail-open) "
                             f"{repo_key}/#{issue_number}: {_qe}")
                 _qa_info = {}
-        if target == "done":
-            if _is_last_stage_node(repo_key, issue_number):
-                # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
-                if _complete_issue_done(repo_key, issue_number, evidence,
-                                        ("pending_review", "active", "processing", "awaiting_input"),
-                                        qa_info=_qa_info):
-                    return "passed_done"
-                return _review_noop_reason(repo_key, issue_number, "completed")
-            # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",),
-                                    qa_info=_qa_info):
-                return "passed_done"
-            return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
-            # 末节点 + processing → 归一 done（无下游可续）
-            log.info(f"Issue review-pass normalized last-node target=processing→done: "
-                     f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            if _complete_issue_done(repo_key, issue_number, evidence,
-                                    ("pending_review", "active", "processing", "awaiting_input"),
-                                    qa_info=_qa_info):
-                return "passed_done"
-            return _review_noop_reason(repo_key, issue_number, "completed")
+            # 末节点 + processing → 归一 pending_review（无下游可续，等人工确认；不再 done）
+            with db_lock:
+                c = _rt_db.cursor()
+                c.execute(
+                    "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
+                    "WHERE repo_key=? AND issue_number=? "
+                    "AND status IN ('active','processing','awaiting_input','pending_review')",
+                    (repo_key, issue_number))
+                _rt_db.commit()
+                _changed = c.rowcount > 0
+            if _changed:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", "pending_review", "agent")
+                log.info(f"Issue review-pass normalized last-node -> pending_review: "
+                         f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
+                return "pending_review"
+            return _review_noop_reason(repo_key, issue_number, "pending_review")
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
@@ -1555,24 +1593,134 @@ def _cleanup_issue_attachments(repo_key: str, issue_number):
     except Exception as _e:
         log.warning(f"Attachment cleanup failed: {_e}")
 
-def confirm_issue_done(repo_key: str, issue_number: "int | str", confirmed_by: str = "issue_comment"):
-    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
+def confirm_issue_done(repo_key: str, issue_number: "int | str", confirmed_by: str = "issue_comment",
+                       extra_statuses: tuple = (), skip_stage_if_no_change: bool = False):
+    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done
+
+    ``extra_statuses``：在主路径状态（active/processing）之外额外允许收敛的状态，
+    供终态载体单处置复用（awaiting_input/pending_review）。
+    ``skip_stage_if_no_change``：无真实状态变更时不推进 stage，避免落成
+    「status=awaiting_input + stage=done」的不一致（Issue #2816 审查）。
+    """
+    statuses = ("active", "processing") + tuple(extra_statuses or ())
     with db_lock:
         c = _rt_db.cursor()
         c.execute(
             "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (confirmed_by, repo_key, issue_number))
+            "WHERE repo_key=? AND issue_number=? AND status IN ("
+            + ",".join("?" for _ in statuses) + ")",
+            (confirmed_by, repo_key, issue_number, *statuses))
         affected = c.rowcount
         _rt_db.commit()
-    from src.api.session_store import set_issue_stage
-    set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
+    if affected or not skip_stage_if_no_change:
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
     log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
     if affected:
         _notify_done(repo_key, issue_number, f"需求已确认完成（{confirmed_by}）。")
     # Issue #1748 补充：关闭后回收平台自动转存的评论媒体/编辑器图片（保留用户手工附件）
     _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
+
+def mark_issue_manual_status(repo_key: str, issue_number: "int | str",
+                              reason: str = "needs_human_terminal") -> str:
+    """把 issue 置「等用户」人工态（status+stage）并返回当前状态（域内状态迁移单源）。
+
+    Issue #2816：终态载体单被短路后由 a2a_terminal_guard 调用；状态/阶段取自
+    ``pipeline_constants``（``PAUSED_ISSUE_STATUSES`` / ``MANUAL_ISSUE_STAGE``），
+    避免 api 模块内再硬编码。Spec 要求「folded + 载体 terminal 的单据 stage 置人工态」，
+    故 stage 同步写为 ``MANUAL_ISSUE_STAGE``；``patrol.issue_terminal`` 依据 status
+    判定终态，不会因 stage 变更产生额外影响。
+    可标记起始状态含 ``pending_review``（终态载体命中的在途审核态也要落人工态）；
+    已处于暂停态时 UPDATE 不命中，但返回实际状态，供响应如实呈现。
+    """
+    from src.api.pipeline_constants import (
+        MANUAL_ISSUE_STAGE, MARKABLE_PAUSE_STATUSES, PAUSED_ISSUE_STATUSES)
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    _paused = PAUSED_ISSUE_STATUSES[0]
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "UPDATE issue SET status=?, completed_reason=?, completed_at=NULL "
+            "WHERE repo_key=? AND issue_number=? AND status IN ("
+            + ",".join("?" for _ in MARKABLE_PAUSE_STATUSES) + ")",
+            (_paused, reason, repo_key, num, *MARKABLE_PAUSE_STATUSES))
+        _rt_db.commit()
+        c.execute("SELECT status, stage, owner_agent FROM issue "
+                  "WHERE repo_key=? AND issue_number=?", (repo_key, num))
+        row = c.fetchone()
+    status = (row[0] or "") if row else ""
+    if status == _paused:
+        _owner = (row[2] or "") if row else ""
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{num}", MANUAL_ISSUE_STAGE, _owner)
+        except Exception as _e:
+            log.warning(f"mark_issue_manual_status: set stage failed "
+                        f"{repo_key}/#{num}: {_e}")
+        log.info(f"Issue #{issue_number} → {_paused}/{MANUAL_ISSUE_STAGE} ({reason})")
+    return status
+
+
+def resume_issue_from_manual(repo_key: str, issue_number: "int | str",
+                             stage: str = "coding", owner_agent: str = "coding") -> bool:
+    """把人工态/暂停态恢复为 processing 并推进 stage（幂等）。
+
+    Issue #2816：``terminal_disposition.new_carrier`` / ``reassign`` 处置后调用。
+    api 层不再直写 ``UPDATE issue``，状态集合单源于
+    ``pipeline_constants.RESUMABLE_ISSUE_STATUSES``；状态迁移与
+    ``_resume_issue_waiting`` 共用 ``_resume_issue_rows`` 单源。
+
+    Issue #2816 复审（硬违规）：``UPDATE`` 未命中（``completed`` / ``cancelled`` 等
+    已收敛单据、或并发改写）时**不得**再写 stage——否则 ``set_issue_stage`` 会把
+    任务状态同步回 ``processing``，落成「status 终态 + stage=coding」并复活派发。
+    """
+    from src.api.pipeline_constants import RESUMABLE_ISSUE_STATUSES
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    try:
+        # 状态翻转与 stage 落点在同一事务内完成；已是 processing 的单（MySQL
+        # rowcount=0）由 _resume_issue_rows 回读 status 视为幂等恢复。
+        changed, _cur_stage, _ = _resume_issue_rows(
+            repo_key, num, tuple(RESUMABLE_ISSUE_STATUSES),
+            new_stage=stage, new_owner=owner_agent)
+    except Exception as e:
+        log.warning(f"resume_issue_from_manual: status update failed {repo_key}/#{num}: {e}")
+        return False
+    if not changed:
+        log.info(f"Issue #{issue_number} not resumable (terminal or changed concurrently), "
+                 f"stage untouched")
+        return False
+    try:
+        # stage 已随状态事务提交；此处仅同步 task.status（幂等）。
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{num}", stage, owner_agent)
+    except Exception as e:
+        log.warning(f"resume_issue_from_manual: sync task status failed: {e}")
+    log.info(f"Issue #{issue_number} resumed from manual → processing/{stage}")
+    return True
+
+
+def get_issue_lifecycle_status(repo_key: str, issue_number: "int | str") -> str:
+    """读 Issue 当前 ``status``（只读；无记录/异常返回空串）。
+
+    Issue #2816 复审：人工处置入口需在恢复前判状态上限——``completed`` /
+    ``cancelled`` 等已收敛单据不得再被 ``new_carrier`` / ``reassign`` 拉回。
+    """
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                      (repo_key, num))
+            row = c.fetchone()
+        return ((row[0] if row else "") or "").strip()
+    except Exception as e:
+        log.warning(f"get_issue_lifecycle_status failed {repo_key}/#{num}: {e}")
+        return ""
+
 
 def cancel_issue_task(repo_key: str, issue_number: int):
     """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""
@@ -2136,7 +2284,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     body = {"title": title}
     if body_text:
         body["body"] = body_text
@@ -2169,7 +2317,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
     # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
@@ -2236,6 +2384,12 @@ def create_standard_task(repo_key: str, title: str, description: str,
         except Exception as _le:
             log.warning(f"outbound_ledger record (create_standard_task) failed: {_le}")
         created = True
+        # Issue #3250：写回查重索引
+        try:
+            from src.domains.runtime.vcs.api_client import remember_open_issue_title
+            remember_open_issue_title(_provider, owner, rname, title.strip(), issue_num)
+        except Exception:
+            pass
     task_id = ensure_issue_task(repo_key, issue_num, title.strip(), description or "",
                                 assignee=assignee, event_type="onboarding")
     if not task_id:
@@ -2257,6 +2411,22 @@ def _refresh_user_gitcode_token(user: dict) -> str:
     except Exception as _e:
         log.warning(f"create_task: refresh user gitcode token failed: {_e}")
         return ""
+
+def _knowledge_warm_budget() -> float:
+    """Issue #2132 B1 建单预热时延预算（秒），env KNOWLEDGE_WARM_BUDGET_SEC 可调。
+
+    非法/非正数回退默认 0.8s；预热是纯缓存优化，不能占满「建单 < 2s」的验收预算。
+    """
+    try:
+        _v = float(os.environ.get("KNOWLEDGE_WARM_BUDGET_SEC", "0.8"))
+    except (TypeError, ValueError):
+        return 0.8
+    return _v if _v > 0 else 0.8
+
+
+# 后台预热任务强引用（asyncio 只弱引用任务，不留引用会被 GC 掉）
+_knowledge_warm_tasks: set = set()
+
 
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
@@ -2291,7 +2461,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # B2 补齐（对齐 gitcode/gitee 链）：bot token 缺席时回落用户 token
         # （get_user_token_for_repo 按 repo_key 前缀派生 provider——github PAT
         # 绑定后建单不再 400「Bot Token 未配置」）。
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         api_token = get_github_token(repo_key=repo_key) or ""
         if not api_token:
             from src.api.deps import get_user_token_for_repo
@@ -2328,7 +2498,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
     _creator_login = user["username"]
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        from src.domains.mgmt.public import list_platform_links
         _provider_name = _provider
         # A 批：创建者平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         for ident in list_platform_links(user["id"]):
@@ -2340,8 +2510,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
-        issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                              provider=_provider)
+        # 同步 urllib 出站调用必须离开事件循环（否则 GitCode 慢响应会把整个进程卡住，
+        # 实测单次 15~20s 期间所有 UI 请求一起排队）
+        issue_num = await asyncio.to_thread(
+            _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
+            provider=_provider)
     except RuntimeError as _dedup_err:
         from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
@@ -2350,8 +2523,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             if _renewed:
                 api_token = _renewed
                 try:
-                    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                                          provider=_provider)
+                    issue_num = await asyncio.to_thread(
+                        _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
+                        provider=_provider)
                 except RuntimeError as _dedup_err2:
                     _dedup_err = _dedup_err2
                 else:
@@ -2397,16 +2571,23 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # 显式场景直接校验；智能推荐（vod-auto）/留空时回落到仓库默认场景一并校验，
         # 与后续写入 issue 的 scene_id 口径一致，避免默认/推荐路径产生死单。
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
+        # 显式选择的场景严格拦单；以下回落的（仓库 dev_scene / 内置 default）
+        # 只告警不拦——用户没有修复入口，拦了也只会得到无法处理的错误。
+        # （3576aaa 语义；此段曾在 to_thread 改造提交中被误删，QA A14 判 BLOCKED）
+        _scene_is_explicit = bool(_scene_for_precheck)
         if not _scene_for_precheck:
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_for_precheck = get_repo_scene(repo_key) or ""
             except Exception as _rs_err:
                 log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
                 _scene_for_precheck = ""
         if _scene_for_precheck:
             from src.domains.runtime.scene_precheck import precheck_scene, summarize_problems
-            _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
+            # 显式选择的场景严格拦单；以下回落的只告警不拦——用户没有修复入口
+            # （3576aaa 语义；此段曾在 to_thread 改造时被误删，QA A14 判 BLOCKED）
+            _precheck = precheck_scene(_scene_for_precheck, repo_key, user,
+                                       explicit=_scene_is_explicit)
             if not _precheck.get("ok"):
                 _pc_problems = _precheck.get("problems") or []
                 _pc_summary = summarize_problems(_pc_problems)
@@ -2425,9 +2606,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
         try:
             # D35/S55：统一建单入口（卡驱动；gitee 自动正确，存量平台内置卡对齐）
-            resp = _create_issue_unified(api_token, _provider, owner, rname,
-                                         body.title.strip(), _desc_with_attach,
-                                         assignee=assignee)
+            resp = await asyncio.to_thread(
+                _create_issue_unified, api_token, _provider, owner, rname,
+                body.title.strip(), _desc_with_attach, assignee=assignee)
         except Exception as _create_err:
             _err_msg = str(_create_err)
             # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
@@ -2440,8 +2621,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _renewed:
                     api_token = _renewed
                     try:
-                        resp = _create_issue_unified(api_token, _provider, owner, rname,
-                                                     body.title.strip(), _desc_with_attach,
+                        resp = await asyncio.to_thread(
+                            _create_issue_unified, api_token, _provider, owner, rname,
+                            body.title.strip(), _desc_with_attach,
                                                      assignee=assignee)
                     except Exception as _create_err2:
                         _create_err = _create_err2
@@ -2541,6 +2723,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _le:
             log.warning(f"outbound_ledger record (create issue) failed: {_le}")
         created = True
+        # Issue #3250：把新标题写回查重索引，批量造单后续不必再翻页
+        try:
+            from src.domains.runtime.vcs.api_client import remember_open_issue_title
+            remember_open_issue_title(_provider, owner, rname, body.title.strip(), issue_num)
+        except Exception:
+            pass
         # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
         from src.domains.runtime.storage import get_storage
         _storage = get_storage()
@@ -2578,7 +2766,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         else:
             # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_to_write = get_repo_scene(repo_key) or ""
             except Exception as _re:
                 log.warning(f"create_task: get_repo_scene failed: {_re}")
@@ -2598,7 +2786,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
-            from src.domains.mgmt.pipeline_config import _query_scene_by_id
+            from src.domains.mgmt.public import _query_scene_by_id  # 跨域走 owner public
             _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
@@ -2686,6 +2874,26 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 扫雷⑩ S3：create_task_via_issue 是 async 处理器，run_pipeline 同步
             # 全量执行会阻塞事件循环（建单卡顿最重处）——to_thread 卸载到线程池，
             # 语义保持同步等待完成（结果仍写入日志/返回链路）。
+            # Issue #2132 B1：预热知识缓存的时延预算——在预算内等缓存就绪（让本轮
+            # run_pipeline 的 collect_knowledge_files 命中缓存、少打 OBS），超预算就把
+            # 预热留在后台继续跑，建单返回不被对象存储读取拖住（预算 env
+            # KNOWLEDGE_WARM_BUDGET_SEC，默认 0.8s；预热失败仅告警，不影响建单主流程）。
+            import asyncio as _aio2132
+            try:
+                from src.domains.runtime.engine.service import warm_knowledge_cache
+                _warm = _aio2132.ensure_future(
+                    _aio2132.to_thread(warm_knowledge_cache, repo_key,
+                                       agent_type="", issue_id=f"{issue_num}"))
+                # 预算内等待；超时不取消任务（wait_for 的取消对 to_thread 只是丢弃等待，
+                # 线程继续跑；显式 shield 语义更直白，避免未来 warm 变协程后被真取消）
+                try:
+                    await _aio2132.wait_for(_aio2132.shield(_warm), timeout=_knowledge_warm_budget())
+                except _aio2132.TimeoutError:
+                    log.info("create_task: knowledge warm exceeded budget, continuing in background")
+                _knowledge_warm_tasks.add(_warm)
+                _warm.add_done_callback(_knowledge_warm_tasks.discard)
+            except Exception as _we:
+                log.debug(f"create_task: knowledge warm skipped: {_we}")
             _pipe_result = await asyncio.to_thread(
                 run_pipeline, _pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                 account=repo_key, repo_key_override=repo_key)
@@ -2742,7 +2950,7 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
@@ -2783,7 +2991,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
         items, _ = storage.list_objects_with_meta(prefix_key)
-        from src.domains.mgmt.user.db import get_meta_value as _gmv
+        from src.domains.mgmt.public import get_meta_value as _gmv  # 跨域走 owner public
         result = []
         for item in items:
             fname = item["key"].rsplit("/", 1)[-1]
@@ -2800,7 +3008,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
     # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):
@@ -2876,7 +3084,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         token = get_repo_token_with_refresh(repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
@@ -3172,7 +3380,7 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
     - 返回 {targets: [{id, name, display_name, description, work_branch, scene_type}],
             current_scene_id}。空列表照常返回（前端展示「无可用目标」，非静默失败）。
     """
-    from src.domains.mgmt.pipeline_config import get_scenes
+    from src.domains.mgmt.public import get_scenes  # 跨域走 owner public
     _cur = (current_scene_id or "").strip() or "default"
     targets = []
     try:
@@ -3229,7 +3437,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         return []
 
     from src.kernel.repo_key import to_repo_key, from_repo_key
-    from src.domains.mgmt.pipeline_config import get_pipeline_config
+    from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
 
     _keys = [(r[2] or "", f"#{r[3]}") for r in rows]
     _stage_map = _batch_fetch_issue_state(_keys)
@@ -3244,7 +3452,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         if _rk in _repo_default_scene:
             continue
         try:
-            from src.domains.mgmt.user.db import get_repo_scene
+            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
             _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
         except Exception:
             _repo_default_scene[_rk] = ""
@@ -3358,7 +3566,7 @@ def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
     """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
     try:
         from src.domains.runtime.im.notify import notify_issue_event
-        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
+        notify_issue_event(repo_key, issue_number or 0, "done", text)
     except Exception as _e:
         log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
 
@@ -3479,7 +3687,7 @@ def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
         try:
-            from src.domains.mgmt.user.db import get_gitcode_token
+            from src.domains.mgmt.public import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             token = ""

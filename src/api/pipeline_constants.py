@@ -16,6 +16,24 @@ TERMINAL_ISSUE_STAGES = ("done", "pending_review", "cancelled")
 TERMINAL_TASK_STATUSES = ("completed", "cancelled", "pending_review")
 # 「等用户」暂停态：既非终态，也不代表流水线停滞/断链（人工等待中，禁止自动重派发）
 PAUSED_ISSUE_STATUSES = ("awaiting_input",)
+# 人工处置可恢复/可收敛的 issue.status 集合（new_carrier/reassign/close 共用单源）
+RESUMABLE_ISSUE_STATUSES = ("active", "processing") + PAUSED_ISSUE_STATUSES + ("pending_review",)
+# 允许被置为人工态（暂停）的起始状态：避免把已完成/已取消单据拉回。
+# Issue #2816 复审：pending_review 亦是终态载体可命中的在途状态，命中后同样要落
+# 「stage 置人工态」，故纳入可标记集合（completed/cancelled 仍排除）。
+MARKABLE_PAUSE_STATUSES = ("active", "processing", "pending_review")
+# 人工态 stage 口径（与暂停 status 同名，供 patrol/UI 直接识别「等用户」）
+MANUAL_ISSUE_STAGE = PAUSED_ISSUE_STATUSES[0]
+
+# A2A/人工处置可派发的 agent 白名单（单源：入口校验、改派校验共用）
+DISPATCHABLE_AGENTS = ("vod", "issue", "coding", "qa", "sre")
+
+# Issue #2508：终态重放拦截词表（事件口径）——仅 completed/cancelled 不可重放，
+# failed/timeout 保持既有失败重试语义。任务口径以 service.TASK_TERMINAL_STATUSES
+# 为单源、调用处显式排除 failed/timeout_failed（见 event_store/auth_token）。
+REPLAY_BLOCKING_EVENT_STATUSES = ("completed", "cancelled")
+TERMINAL_EVENT_REPLAY_REASON = "terminal_event_replay"
+REISSUE_EVENT_PAYLOAD_KEY = "_reissue"
 
 # 流水线「段」事件：一次 agent 执行对应一条 a2a_event；跨场景移交另有
 # cross_scene_handoff 标记，但段本身仍以 a2a_event 计量。

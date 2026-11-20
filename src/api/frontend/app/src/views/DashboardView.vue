@@ -46,7 +46,7 @@
         </div>
         <div class="ap-grid">
           <template v-for="(node, i) in editNodes" :key="node.id">
-            <div :class="['ap-nd', { off: !node.enabled }]">
+            <div :class="['ap-nd', { off: node.enabled === false }]">
               <div class="ap-nd-top" :style="{ background: agentColor(node.id) }"></div>
               <div class="ap-nd-head">
                 <span
@@ -58,26 +58,33 @@
                 <span
                   v-if="canToggle(node.id)"
                   class="ap-nd-toggle"
-                  :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
+                  :style="{ color: node.enabled === false ? 'var(--g)' : 'var(--r)' }"
                   @click.stop="toggleAgent(node.id)"
-                  >{{ node.enabled ? '✕' : '✓' }}</span
+                  >{{ node.enabled === false ? '✓' : '✕' }}</span
                 >
               </div>
-              <div v-if="node.enabled" class="ap-nd-desc">{{ agentDesc(node.id) }}</div>
+              <div v-if="node.enabled !== false" class="ap-nd-desc">{{ agentDesc(node.id) }}</div>
               <div v-else class="ap-nd-off-lbl">{{ t('not_needed_in_scene') }}</div>
               <div class="ap-nd-hr"></div>
               <div class="ap-nd-skillbox">
                 <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
-                <template v-if="node.enabled">
-                  <div class="dbv-skillpick" @click.stop="openSkillDropdown(node.id, $event)">
-                    {{ node.skill_display_name || node.skill || t('select_skill') }}
-                  </div>
+                <template v-if="node.enabled !== false">
+                  <button
+                    type="button"
+                    class="ap-nd-engbtn dbv-skillbtn"
+                    :class="{ 'is-unset': !(node.skill_display_name || node.skill) }"
+                    @click.stop="openSkillModal(node.id)"
+                  >
+                    <span class="dbv-skillbtn-t">{{
+                      node.skill_display_name || node.skill || t('select_skill')
+                    }}</span>
+                  </button>
                 </template>
                 <span v-else class="ap-nd-none">{{ t('agent_disabled') }}</span>
               </div>
               <div class="ap-nd-engbox">
                 <div class="ap-nd-lbl">{{ t('label_engine') }}</div>
-                <template v-if="node.enabled">
+                <template v-if="node.enabled !== false">
                   <div v-html="engineBadgeHtml(node)"></div>
                   <button class="ap-nd-engbtn" @click.stop="openEngineModal(node.id)">
                     {{ t('select_engine') }}
@@ -241,7 +248,7 @@
                 <button
                   v-else
                   class="dbv-globe-empty"
-                  title="登记场景访问地址"
+                  :title="t('dv2.reg_url_tip')"
                   @click="startDeployUrlEdit()"
                 >
                   🌐
@@ -323,12 +330,12 @@
                   <span
                     v-if="flowEditing && canToggle(node.id)"
                     class="ap-nd-toggle"
-                    :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
+                    :style="{ color: node.enabled === false ? 'var(--g)' : 'var(--r)' }"
                     @click.stop="toggleAgent(node.id)"
-                    >{{ node.enabled ? '✕' : '✓' }}</span
+                    >{{ node.enabled === false ? '✓' : '✕' }}</span
                   >
                 </div>
-                <div v-if="node.enabled" class="ap-nd-desc">
+                <div v-if="node.enabled !== false" class="ap-nd-desc">
                   {{ agentDesc(node.tag || node.id) }}
                 </div>
                 <div v-else class="ap-nd-off-lbl">{{ t('not_needed_in_scene') }}</div>
@@ -340,13 +347,17 @@
                   <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
                   <!-- enabled=null（老场景未存该字段）视为启用，与 off 判定一致 -->
                   <template v-if="node.enabled !== false">
-                    <div
+                    <button
                       v-if="flowEditing"
-                      class="dbv-skillpick"
-                      @click.stop="openSkillDropdown(node.id, $event)"
+                      type="button"
+                      class="ap-nd-engbtn dbv-skillbtn"
+                      :class="{ 'is-unset': !(node.skill_display_name || node.skill) }"
+                      @click.stop="openSkillModal(node.id)"
                     >
-                      {{ node.skill_display_name || node.skill || t('select_skill') }}
-                    </div>
+                      <span class="dbv-skillbtn-t">{{
+                        node.skill_display_name || node.skill || t('select_skill')
+                      }}</span>
+                    </button>
                     <span v-else-if="nodeSkill(node)" class="dbv-skillname">{{
                       nodeSkill(node)
                     }}</span>
@@ -787,42 +798,91 @@
       </template>
     </template>
 
-    <!-- ═══ 技能下拉面板 ═══ -->
-    <Teleport to="body">
-      <div
-        v-if="skillPanel.open"
-        class="dbv-skillpanel"
-        :style="{ left: skillPanel.x + 'px', top: skillPanel.y + 'px', width: skillPanel.w + 'px' }"
-      >
-        <input
-          v-model="skillPanel.q"
-          class="dbv-skillsearch"
-          :placeholder="t('skill_search_placeholder')"
-        />
-        <div class="dbv-skilllist">
-          <div class="dbv-skillopt clear" @click="pickSkill('')">✕ {{ t('skill_clear') }}</div>
-          <template v-if="skillGroups.length">
-            <template v-for="g in skillGroups" :key="g.key">
-              <div class="dbv-skillgroup">{{ g.label }} ({{ g.items.length }})</div>
-              <div
-                v-for="s in g.items"
-                :key="skillKeyOf(s)"
-                :class="['dbv-skillopt', { sel: skillIsSelected(s) }]"
-                :title="s.description || ''"
-                @click="pickSkill(s.skill_name, skillKeyOf(s))"
-              >
-                <span v-if="skillIsSelected(s)" class="dbv-skillcheck">✓</span>
-                <span class="dbv-skillname-t">{{ s.display_name || s.skill_name }}</span>
-              </div>
+    <!-- ═══ 技能选择弹窗（2026-11-18 · 保时捷/香奈儿式排版：结构细线 + 字距 + 单一强调色） ═══ -->
+    <div v-if="skillPanel.open" class="rtv-modal-ov" @click.self="closeSkillModal()">
+      <div class="dbv-skillmodal">
+        <div class="skm-head">
+          <div class="skm-kicker">{{ t('skill_kicker') }}</div>
+          <h3 class="skm-title">{{ t('select_skill') }}</h3>
+          <div class="skm-sub">
+            <span class="skm-agent">{{ agentLabel(skillPanel.agentType) }}</span>
+            <span class="skm-dash">—</span>
+            <span class="skm-count">{{ skillPanel.skills.length }}</span>
+            <span class="skm-unit">{{ t('skill_unit') }}</span>
+          </div>
+        </div>
+
+        <div class="skm-search">
+          <input
+            v-model="skillPanel.q"
+            class="skm-input"
+            :placeholder="t('skill_search_placeholder')"
+          />
+          <span v-if="skillPanel.q" class="skm-qclear" @click="skillPanel.q = ''">✕</span>
+        </div>
+
+        <div class="skm-well">
+          <div class="skm-list">
+            <button
+              type="button"
+              class="skm-row skm-row--none"
+              :class="{ on: !skillPanel.current && !skillPanel.currentKey }"
+              @click="selectSkill('', '')"
+            >
+              <span class="skm-num">—</span>
+              <span class="skm-body">
+                <span class="skm-name">{{ t('skill_unbind') }}</span>
+              </span>
+              <span class="skm-tick"></span>
+            </button>
+            <template v-if="skillGroups.length">
+              <template v-for="g in skillGroups" :key="g.key">
+                <div class="skm-group">
+                  <span class="skm-glabel">{{ g.label }}</span>
+                  <i class="skm-gline"></i>
+                  <span class="skm-gcount">{{ String(g.items.length).padStart(2, '0') }}</span>
+                </div>
+                <button
+                  v-for="(s, si) in g.items"
+                  :key="skillKeyOf(s)"
+                  type="button"
+                  class="skm-row"
+                  :class="{ on: skillIsSelected(s) }"
+                  @click="selectSkill(s.skill_name, skillKeyOf(s))"
+                >
+                  <span class="skm-num">{{ String(si + 1).padStart(2, '0') }}</span>
+                  <span class="skm-body">
+                    <span class="skm-line1">
+                      <span class="skm-name">{{ s.display_name || s.skill_name }}</span>
+                      <span
+                        v-if="s.display_name && s.skill_name && s.display_name !== s.skill_name"
+                        class="skm-alias"
+                        >{{ s.skill_name }}</span
+                      >
+                    </span>
+                    <span v-if="s.description" class="skm-desc">{{ s.description }}</span>
+                  </span>
+                  <span class="skm-tick"></span>
+                </button>
+              </template>
             </template>
-          </template>
-          <div v-else class="dbv-skillnomatch">{{ t('skill_no_match') }}</div>
+            <div v-else class="skm-empty">{{ t('skill_no_match') }}</div>
+          </div>
+        </div>
+
+        <div class="skm-foot">
+          <button type="button" class="skm-ghost" @click="closeSkillModal()">
+            {{ t('cancel') }}
+          </button>
+          <button type="button" class="skm-cta" @click="confirmSkillPick()">
+            {{ t('confirm') }}
+          </button>
         </div>
       </div>
-    </Teleport>
+    </div>
 
     <!-- ═══ 引擎选择弹窗 ═══ -->
-    <div v-if="engineModal.open" class="rtv-modal-ov" @click.self="engineModal.open = false">
+    <div v-if="engineModal.open" class="rtv-modal-ov" @click.self="closeEngineModal()">
       <div class="dbv-engmodal">
         <h3>{{ t('select_engine') }} — {{ agentLabel(engineModal.agentType) }}</h3>
         <div class="dbv-eng-sub">
@@ -831,28 +891,195 @@
           }}
         </div>
         <div v-if="engineDetachHint" v-html="engineDetachHint"></div>
-        <!-- 筛选 -->
-        <div class="dbv-engfilters">
-          <span
-            v-for="ty in engModalAvailTypes"
-            :key="'et' + ty"
-            :class="{ on: engineModal.filterType === ty }"
-            @click="engineModal.filterType = engineModal.filterType === ty ? '' : ty"
-            >{{ ty }}</span
-          >
-          <span v-if="engModalAvailTypes.length" class="dbv-engsep"></span>
-          <span
-            v-for="s in engModalAvailScopes"
-            :key="'es' + s"
-            :class="{ on: engineModal.filterScope === s }"
-            @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
-            >{{ SCOPE_LABELS_ALL[s] || s }}</span
-          >
-          <span style="flex: 1"></span>
-          <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
+        <!-- Issue #1208：两模式 radio——切换只换内容，互不清空、互不派生（用户口径 2026-11-09） -->
+        <div class="dbv-engmodes">
+          <label :class="{ on: engineModal.mode === 'engine' }">
+            <input type="radio" value="engine" v-model="engineModal.mode" @change="onModeSwitch" />
+            {{ t('selector_mode_engine') }}
+          </label>
+          <label :class="{ on: engineModal.mode === 'tag' }">
+            <input type="radio" value="tag" v-model="engineModal.mode" @change="onModeSwitch" />
+            {{ t('selector_mode_tag') }}
+          </label>
         </div>
-        <input v-model="engineModal.q" class="dbv-engsearch" placeholder="搜索引擎名称/标签..." />
-        <div class="dbv-englist">
+        <!-- ══ 标签模式面板 ══ -->
+        <div v-if="engineModal.mode === 'tag'" class="dbv-selpanel">
+          <div class="dbv-selhint">{{ t('selector_tag_hint') }}</div>
+          <div class="dbv-selsummary" :style="selSummaryStyle">{{ selSummaryText }}</div>
+          <div v-for="g in selGroups" :key="'sg' + g.prefix" class="dbv-selgroup">
+            <div class="dbv-selgroup-t">{{ g.title }}</div>
+            <div class="dbv-selgroup-chips">
+              <label
+                v-for="v in g.values"
+                :key="g.prefix + ':' + v"
+                :class="{ on: engineModal.selTags.includes(g.prefix + ':' + v) }"
+                class="dbv-selchip"
+                ><input
+                  type="checkbox"
+                  :checked="engineModal.selTags.includes(g.prefix + ':' + v)"
+                  @change="toggleSelTag(g.prefix + ':' + v)"
+                />{{ g.label(v) }}</label
+              >
+            </div>
+          </div>
+          <div v-if="engineModal.selTags.length" class="dbv-selclearrow">
+            <span class="dbv-selclear" @click="clearSelTags()"
+              >{{ t('selector_clear_tags') }} · {{ engineModal.selTags.length }}</span
+            >
+          </div>
+          <!-- Issue #1208 修复：标签模式下搜索框上移至「命中预览」标题上方（原在弹窗最底部） -->
+          <input
+            v-if="engineModal.mode === 'tag'"
+            v-model="engineModal.q"
+            class="dbv-engsearch"
+            :placeholder="t('dv2.engine_search_ph')"
+          />
+          <div class="dbv-selprevtitle">{{ t('selector_hit_preview') }}</div>
+          <div v-if="!previewShown.length" class="dbv-selprevempty">
+            {{ t('selector_preview_empty') }}
+          </div>
+          <template v-for="sec in previewSections" v-else :key="'sec' + sec.key">
+            <div
+              v-if="sec.list.length"
+              class="dbv-secwrap"
+              :class="sec.key"
+            >
+              <div
+                class="dbv-sechead2"
+                :style="{ borderBottom: engineModal.collapse[sec.key] ? 'none' : '1px solid ' + sec.border }"
+                @click="engineModal.collapse[sec.key] = !engineModal.collapse[sec.key]"
+              >
+                <span class="dbv-secarrow" :style="{ background: engineModal.collapse[sec.key] ? '#e8e8ed' : 'rgba(0,0,0,.06)' }" :title="engineModal.collapse[sec.key] ? t('dv2.expand_group') : t('dv2.collapse_group')">{{ engineModal.collapse[sec.key] ? '▶' : '▼' }}</span>
+                <span class="dbv-sectitle" :class="sec.key">{{ sec.title }}</span>
+                <span v-if="engineModal.collapse[sec.key]" class="dbv-seccollapsed">（已折叠）</span>
+                <span class="dbv-seccount">{{ sec.list.length }} 台</span>
+              </div>
+              <div v-if="!engineModal.collapse[sec.key]" class="dbv-secbody">
+                <div
+                  v-for="(grp, gi) in sec.groups"
+                  :key="sec.key + '-g' + gi"
+                >
+                  <div class="dbv-secgroupt" :class="sec.key">
+                    {{ grp.label }} ({{ grp.list.length }})
+                  </div>
+                  <div
+                    v-for="p in grp.list"
+                    :key="sec.key + '-' + p.engine.id"
+                    class="dbv-prevrow"
+                    :class="{ off: sec.key === 'offline', hit: sec.key === 'hit' }"
+                  >
+                    <div class="dbv-prevbody">
+                      <div class="dbv-prevname">
+                        {{ p.engine.alias || p.engine.name }}
+                        <span v-if="p.engine.alias" class="dbv-prevalias">({{ p.engine.name }})</span>
+                        <span
+                          v-for="tg in plainTags(p.engine)"
+                          :key="'pt' + tg"
+                          class="dbv-engtag"
+                          :style="{ background: ENG_TAG_COLORS[tg] || '#999' }"
+                          >{{ tg === 'all' ? 'All' : tg.charAt(0).toUpperCase() + tg.slice(1) }}</span
+                        >
+                        <span
+                          v-for="st in p.engine.scene_tags || []"
+                          :key="'ps' + st"
+                          class="dbv-engtag"
+                          :style="{ background: ENG_SCENE_COLORS[st] || '#10b981' }"
+                          >{{ engSceneDisplayName(st) }}</span
+                        >
+                        <span
+                          class="dbv-engtag"
+                          :style="{ background: SCOPE_COLORS_ALL[p.engine.scope] || '#999' }"
+                          >{{ (SCOPE_LABELS_ALL[p.engine.scope] && SCOPE_LABELS_ALL[p.engine.scope]()) || p.engine.scope }}</span
+                        >
+                      </div>
+                      <div class="dbv-prevmeta">
+                        {{ p.engine.device || '' }}{{ p.engine.cred_name ? ' · ' + p.engine.cred_name : '' }}
+                      </div>
+                    </div>
+                    <span class="dbv-prevstatus" :style="{ color: engStatusColor(p.engine.status) }">{{
+                      engStatusLabel(p.engine.status)
+                    }}</span>
+                    <span v-if="sec.key === 'hit'" class="dbv-prevmark hit">{{
+                      t('selector_hit')
+                    }}</span>
+                    <template v-else-if="sec.key === 'offline'">
+                      <span class="dbv-prevmark off">⚠ {{ reasonLabel(p.reason) }}</span>
+                      <span class="dbv-prevmarkoff">恢复后可承接</span>
+                    </template>
+                    <template v-else>
+                      <span
+                        class="dbv-prevmark miss"
+                        :style="{ color: reasonColor(p.reason) }">✗ {{ reasonLabel(p.reason) }}</span>
+                      <span
+                        class="dbv-prevhelp"
+                        title=""
+                        @mouseenter="showReasonTip($event, missReasonDetail(p))"
+                        @mouseleave="hideReasonTip()"
+                        >?</span>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <!-- ══ 实例模式面板 ══ -->
+        <template v-else>
+          <div class="dbv-selhint">{{ t('selector_engine_hint') }}</div>
+          <!-- 筛选 -->
+          <div class="dbv-engfilters">
+            <span v-if="engModalAvailTypes.length" class="dbv-enggrp">{{ t('fgrp_type') }}</span>
+            <span
+              v-for="ty in engModalAvailTypes"
+              :key="'et' + ty"
+              :class="{ on: engineModal.filterType === ty }"
+              @click="engineModal.filterType = engineModal.filterType === ty ? '' : ty"
+              >{{ ty }}</span
+            >
+            <span v-if="engModalAvailScopes.length" class="dbv-engsep"></span>
+            <span v-if="engModalAvailScopes.length" class="dbv-enggrp">{{ t('fgrp_scope') }}</span>
+            <span
+              v-for="s in engModalAvailScopes"
+              :key="'es' + s"
+              :class="{ on: engineModal.filterScope === s }"
+              @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
+              >{{ (SCOPE_LABELS_ALL[s] && SCOPE_LABELS_ALL[s]()) || s }}</span
+            >
+            <!-- 场景多选筛选（Issue #198 旧版口径回归：新版实例面板遗漏，用户 2026-11-18 要求补回） -->
+            <span v-if="engModalAvailScenes.length" class="dbv-engsep"></span>
+            <div v-if="engModalAvailScenes.length" class="dbv-ddwrap">
+              <span
+                class="dbv-engdd"
+                :class="{ on: engineModal.filterScene.length }"
+                @click.stop="engineModal.sceneDd = !engineModal.sceneDd"
+                >{{ t('engine_filter_scene') }}{{ engineModal.filterScene.length ? '(' + engineModal.filterScene.length + ')' : ''
+                }}<span class="dbv-ddcaret">▼</span></span
+              >
+              <div v-if="engineModal.sceneDd" class="dbv-ddpane">
+                <label v-for="sn in engModalAvailScenes" :key="'fs' + sn" class="dbv-dditem">
+                  <input
+                    type="checkbox"
+                    :checked="engineModal.filterScene.includes(sn)"
+                    :style="{ accentColor: ENG_SCENE_COLORS[sn] || '#10b981' }"
+                    @change="toggleEngFilterScene(sn)"
+                  />
+                  <span class="dbv-engtag" :style="{ background: ENG_SCENE_COLORS[sn] || '#10b981' }">{{
+                    engSceneDisplayName(sn)
+                  }}</span>
+                </label>
+              </div>
+            </div>
+            <span class="dbv-engspacer"></span>
+            <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
+          </div>
+        </template>
+        <input
+          v-if="engineModal.mode === 'engine'"
+          v-model="engineModal.q"
+          class="dbv-engsearch"
+          :placeholder="t('dv2.engine_search_ph')"
+        />
+        <div v-if="engineModal.mode === 'engine'" class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
             style="padding: 20px 0; text-align: center; color: var(--t3); font-size: 13px"
@@ -866,7 +1093,7 @@
           <template v-for="s in SCOPE_ORDER2" :key="'eg' + s">
             <template v-if="engModalByScope[s]">
               <div class="dbv-enggroup">
-                {{ SCOPE_LABELS_ALL[s] }} ({{ engModalByScope[s].length }})<span
+                {{ SCOPE_LABELS_ALL[s] && SCOPE_LABELS_ALL[s]() }} ({{ engModalByScope[s].length }})<span
                   v-if="s === 'user'"
                   class="dbv-engpersonalhint"
                   >{{ t('engine_personal_scope_hint') }}</span
@@ -887,7 +1114,7 @@
                     {{ e.alias || engineDisplayName(e) }}
                     <span v-if="e.alias" class="dbv-engalias">({{ engineDisplayName(e) }})</span>
                     <span
-                      v-for="tg in e.tags || []"
+                      v-for="tg in plainTags(e)"
                       :key="tg"
                       class="dbv-engtag"
                       :style="{ background: ENG_TAG_COLORS[tg] || '#999' }"
@@ -903,7 +1130,7 @@
                     <span
                       class="dbv-engtag"
                       :style="{ background: SCOPE_COLORS_ALL[e.scope] || '#999' }"
-                      >{{ SCOPE_LABELS_ALL[e.scope] || e.scope }}</span
+                      >{{ (SCOPE_LABELS_ALL[e.scope] && SCOPE_LABELS_ALL[e.scope]()) || e.scope }}</span
                     >
                   </div>
                   <div class="dbv-engmeta">
@@ -918,11 +1145,13 @@
           </template>
         </div>
         <div class="dbv-engfoot">
-          <button class="ap-btn" @click="engineModal.open = false">{{ t('cancel') }}</button>
+          <button class="ap-btn" @click="closeEngineModal()">{{ t('cancel') }}</button>
           <button class="ap-btn" @click="confirmEnginePick()">{{ t('confirm') }}</button>
         </div>
       </div>
     </div>
+    <!-- 未命中原因自绘浮层（原生 title 不换行，长文本溢出——用户裁定改自绘） -->
+    <div v-if="reasonTip.show" class="dbv-reasontip" :style="{ left: reasonTip.x + 'px', top: reasonTip.y + 'px' }">{{ reasonTip.text }}</div>
 
     <!-- ═══ 复制场景弹窗 ═══ -->
     <div v-if="copyDlg.open" class="rtv-modal-ov" @click.self="copyDlg.open = false">
@@ -950,6 +1179,20 @@
       </div>
     </div>
 
+    <!-- ═══ 未保存改动的离开确认（2026-11-19） ═══ -->
+    <div v-if="leaveDlg.open" class="rtv-modal-ov" @click.self="stayEditing()">
+      <div class="dbv-copymodal">
+        <h3>{{ t('leave_unsaved_title') }}</h3>
+        <p class="dbv-copy-hint">{{ t('leave_unsaved_hint') }}</p>
+        <div class="dbv-copy-btns">
+          <button class="ap-btn" @click="stayEditing()">{{ t('stay_editing') }}</button>
+          <button class="ap-btn ap-btn-d" @click="confirmLeaveDirty()">
+            {{ t('discard_and_leave') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ 密钥明文取回（#885，密码二次确认） ═══ -->
     <div v-if="revealDlg.open" class="rtv-modal-ov" @click.self="closeReveal()">
       <div class="dbv-copymodal">
@@ -959,7 +1202,7 @@
           v-model="revealDlg.password"
           type="password"
           class="dbv-copy-input"
-          placeholder="Grape 密码"
+          :placeholder="t('dv2.grape_password')"
           @keyup.enter="submitReveal()"
         />
         <div v-if="revealDlg.error" class="dbv-reveal-err">{{ revealDlg.error }}</div>
@@ -1039,7 +1282,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { providerFromRepoKey } from '../lib/repo-provider.js'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
 const G = globalThis
 
@@ -1097,7 +1341,7 @@ const ENG_TAG_COLORS = {
   sre: '#f59e0b',
 }
 const SCOPE_COLORS_ALL = { global: '#6366f1', user: 'var(--g)', repo: '#f59e0b', local: 'var(--t3)' }
-const SCOPE_LABELS_ALL = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
+const SCOPE_LABELS_ALL = { global: () => t('dv2.scope_global'), user: () => t('dv2.scope_user'), repo: () => t('dv2.scope_repo'), local: () => t('dv2.scope_local') }
 const SCOPE_ORDER2 = ['user', 'repo', 'global', 'local']
 const ENG_SCENE_COLORS = {
   default: '#10b981',
@@ -1199,17 +1443,15 @@ const newBranchRef = ref('main')
 const advFields = ref([])
 const linkedRepos = ref([])
 const linkedRepoOptions = ref([])
-// 技能下拉
+// 技能选择弹窗
 const skillPanel = reactive({
   open: false,
   agentType: '',
   current: '',
+  currentId: 0,
   currentKey: '',
   nameCounts: {},
   q: '',
-  x: 0,
-  y: 0,
-  w: 240,
   skills: [],
 })
 const skillPickCache = {}
@@ -1227,7 +1469,368 @@ function skillIsSelected(s) {
   )
 }
 // 引擎弹窗
-const engineModal = reactive({ open: false, agentType: '', q: '', filterType: '', filterScope: '' })
+// 两模式弹窗同尺寸几何在 CSS .dbv-engmodal（640×min(90vh,760)），切换只换内容不跳尺寸
+const engineModal = reactive({
+  open: false,
+  agentType: '',
+  q: '',
+  filterType: '',
+  filterScope: '',
+  // 场景多选筛选 + 下拉展开态（旧版 Issue #198 口径；用户 2026-11-18 要求补回）
+  filterScene: [],
+  sceneDd: false,
+  // Issue #1208：两模式（标签 selector / 实例 engine）——打开时按已配形态初始化，
+  // 切换互不清空、互不派生（用户口径 2026-11-09）；两侧选择只活在前端内存，
+  // 确定只写当前模式字段、另一侧按 D7 清空。
+  mode: 'engine',
+  selTags: [],
+  collapse: { hit: false, offline: false, miss: false },
+  serverPreview: null, // 服务端权威 hit/reason map（id→{hit,reason}），失败降级本地匹配
+})
+let _previewSeq = 0
+let _previewTimer = null
+// 未命中原因自绘浮层（title="" 禁用原生 tooltip）
+const reasonTip = reactive({ show: false, x: 0, y: 0, text: '' })
+function showReasonTip(ev, text) {
+  if (!text) return
+  reasonTip.text = text
+  reasonTip.show = true
+  // 先显示再量尺寸（display:none 时 offsetWidth=0）
+  requestAnimationFrame(function () {
+    const w = 320
+    let x = (ev && ev.clientX ? ev.clientX : 0) + 12
+    let y = (ev && ev.clientY ? ev.clientY : 0) + 14
+    const el = document.querySelector('.dbv-reasontip')
+    const tw = el ? el.offsetWidth || w : w
+    const th = el ? el.offsetHeight || 40 : 40
+    if (x + tw > window.innerWidth - 8) x = Math.max(8, window.innerWidth - tw - 8)
+    if (y + th > window.innerHeight - 8) y = Math.max(8, (ev && ev.clientY ? ev.clientY : 0) - th - 10)
+    reasonTip.x = x
+    reasonTip.y = y
+  })
+}
+function hideReasonTip() {
+  reasonTip.show = false
+}
+
+// ── Issue #1208：selector 标签模式前端纯函数（与服务端 engine_select._selector_match
+// 同语义：组内 OR + 组间 AND，D14）。#902 后服务端默认不限角色，本地降级匹配同样只认
+// 显式 role_tags；类型→展示名映射仅用于 UI 文案（标签值仍按内部名）。
+const ENG_DEFAULT_ROLES = {}
+const ENG_TYPE_LABELS = { hwcloud: 'aishell' }
+function engEngineTypeOf(e) {
+  // 云四段名子串误判修复（2026-11-12）：冒号首段整段匹配，防 opencode:hermes-… 被派 engine:hermes
+  const raw = String(e.engine_type || e.name || '').toLowerCase()
+  const first = raw.split(':')[0]
+  const keys = ['hermes', 'opencode', 'codearts', 'codex']
+  for (let i = 0; i < keys.length; i++) {
+    if (first === keys[i] || raw === keys[i]) return keys[i]
+  }
+  return first || raw
+}
+function engDeriveTags(e) {
+  // scope 以 e.tags 的权威 scope: 行为准；e.scope 字段仅在无行时兜底（双写不一致时防假命中）
+  const tags = (e.tags || []).slice()
+  const et = engEngineTypeOf(e)
+  if (et) tags.push('engine:' + et)
+  const hasScopeRow = tags.some(function (t) {
+    return String(t || '').indexOf('scope:') === 0
+  })
+  if (!hasScopeRow && e.scope) tags.push('scope:' + e.scope)
+  ;(e.scene_tags || []).forEach(function (s) {
+    if (s) tags.push('scene:' + s)
+  })
+  return tags.map(function (t) {
+    return String(t || '').toLowerCase()
+  })
+}
+function engSelectorMatchEngine(selTags, e) {
+  if (!selTags || !selTags.length) return true
+  const groups = {}
+  selTags.forEach(function (t) {
+    const s = String(t || '').toLowerCase()
+    if (!s) return
+    const p = s.split(':', 1)[0]
+    ;(groups[p] = groups[p] || []).push(s)
+  })
+  const engineTags = engDeriveTags(e)
+  return Object.keys(groups).every(function (p) {
+    return groups[p].some(function (t) {
+      return engineTags.indexOf(t) >= 0
+    })
+  })
+}
+function engSelectorPreview(engines, selTags, agentType) {
+  // 命中预览分层标注：selector 排除 / 角色排除 / 健康排除 / 命中
+  return (engines || []).map(function (e) {
+    if (!engSelectorMatchEngine(selTags, e)) return { engine: e, hit: false, reason: 'selector' }
+    const roles = e.role_tags && e.role_tags.length ? e.role_tags : ENG_DEFAULT_ROLES[engEngineTypeOf(e)] || null
+    if (roles && agentType && roles.indexOf(agentType) < 0) {
+      return { engine: e, hit: false, reason: 'role' }
+    }
+    if (e.status && e.status !== 'online' && e.status !== 'about_to_gc') {
+      return { engine: e, hit: false, reason: 'offline' }
+    }
+    return { engine: e, hit: true, reason: '' }
+  })
+}
+function engSelectorTagLabel(tag) {
+  const s = String(tag || '')
+  const i = s.indexOf(':')
+  const p = i >= 0 ? s.slice(0, i) : ''
+  const v = i >= 0 ? s.slice(i + 1) : s
+  if (p === 'engine') return ENG_TYPE_LABELS[v] || v
+  if (p === 'scope') return ({ global: t('dv2.scope_global'), user: t('dv2.scope_user'), repo: t('dv2.scope_repo'), local: t('dv2.scope_local') })[v] || v
+  if (p === 'scene') return engSceneDisplayName(v)
+  return s
+}
+function reasonLabel(reason) {
+  const k = {
+    selector: 'selector_reason_selector',
+    role: 'selector_reason_role',
+    offline: 'selector_reason_offline',
+    stale: 'selector_reason_stale',
+    scope: 'selector_reason_scope',
+    capability: 'selector_reason_capability',
+  }[reason]
+  return (k && t(k)) || reason || ''
+}
+function reasonColor(reason) {
+  return {
+    selector: '#8e8e93',
+    role: '#f59e0b',
+    offline: '#ff3b30',
+    stale: '#ff3b30',
+    scope: '#8e8e93',
+    capability: '#8e8e93',
+  }[reason] || '#8e8e93'
+}
+function plainTags(e) {
+  // 展示层过滤派生冒号行（engine:/scope:/scene: 只给匹配底座消费，不进能力徽章）
+  return (e.tags || []).filter(function (tg) {
+    return String(tg || '').indexOf(':') < 0
+  })
+}
+function missReasonDetail(p) {
+  const e = p.engine || {}
+  const reason = p.reason || ''
+  const agentType = engineModal.agentType
+  const selTags = engineModal.selTags
+  const tags = engDeriveTags(e)
+  const byPrefix = {}
+  ;(tags || []).forEach(function (tt) {
+    const i = String(tt).indexOf(':')
+    const p2 = i >= 0 ? String(tt).slice(0, i) : ''
+    if (!p2) return
+    ;(byPrefix[p2] = byPrefix[p2] || []).push(String(tt))
+  })
+  const vals = function (arr) {
+    return arr.map(function (tt) { return engSelectorTagLabel(tt) }).join('、') || t('dv2.none')
+  }
+  if (reason === 'selector') {
+    const fails = []
+    const groups = {}
+    selTags.forEach(function (tt) {
+      const i = String(tt).indexOf(':')
+      if (i > 0) (groups[String(tt).slice(0, i)] = groups[String(tt).slice(0, i)] || []).push(tt)
+    })
+    Object.keys(groups).forEach(function (g) {
+      const hit = (groups[g] || []).some(function (tt) {
+        return (tags || []).indexOf(String(tt).toLowerCase()) >= 0
+      })
+      if (!hit) fails.push(t('dv2.reason_tag_dim') + vals(groups[g]) + t('dv2.reason_tag_have') + vals(byPrefix[g] || []))
+    })
+    return t('dv2.reason_tag') + (fails.length ? fails.join('；') : t('dv2.reason_tag_nointer'))
+  }
+  if (reason === 'role') {
+    const roles = e.role_tags && e.role_tags.length ? e.role_tags.join('、') : t('dv2.no_role_declared')
+    return t('dv2.reason_role') + (agentType || t('dv2.unknown')) + t('dv2.reason_role_decl') + roles
+  }
+  if (reason === 'offline' || reason === 'stale') {
+    return t('dv2.reason_health') + (e.status || t('dv2.unknown')) + t('dv2.reason_health_hint')
+  }
+  if (reason === 'scope') {
+    return t('dv2.reason_scope') + ((SCOPE_LABELS_ALL[e.scope] && SCOPE_LABELS_ALL[e.scope]()) || e.scope) + t('dv2.reason_scope_suffix')
+  }
+  if (reason === 'capability') {
+    return t('dv2.reason_cap') + vals((e.tags || []).filter(function (tt) { return String(tt).indexOf(':') < 0 })) + t('dv2.reason_cap_suffix') + (agentType || t('dv2.cur_role')) + t('dv2.reason_cap_none_all')
+  }
+  return ''
+}
+// selector 弹窗标签组（三组：engine/scope/scene；scope 选项从派生标签推导——本机直连引擎
+// e.scope='local' 的权威行是 scope:global，按字段筛会漏；场景组按市场注册序，未登记排末尾）
+const SEL_SCOPE_LABELS = { global: t('dv2.sel_scope_global'), user: t('dv2.sel_scope_user'), repo: t('dv2.sel_scope_repo') }
+const selGroups = computed(function () {
+  const vis = engModalVisible.value
+  const types = []
+  vis.forEach(function (e) {
+    const ty = engEngineTypeOf(e)
+    if (ty && types.indexOf(ty) < 0) types.push(ty)
+  })
+  types.sort()
+  const scopes = ['global', 'user', 'repo'].filter(function (s) {
+    return vis.some(function (e) {
+      return engDeriveTags(e).indexOf('scope:' + s) >= 0
+    })
+  })
+  const scenes = []
+  vis.forEach(function (e) {
+    ;(e.scene_tags || []).forEach(function (s) {
+      if (s && scenes.indexOf(s) < 0) scenes.push(s)
+    })
+  })
+  if (sceneTagsCache.value && sceneTagsCache.value.length) {
+    const order = {}
+    sceneTagsCache.value.forEach(function (x, i) {
+      if (x && x.name) order[x.name] = i
+    })
+    scenes.sort(function (a, b) {
+      const ia = Object.prototype.hasOwnProperty.call(order, a) ? order[a] : 1e9
+      const ib = Object.prototype.hasOwnProperty.call(order, b) ? order[b] : 1e9
+      return ia - ib
+    })
+  }
+  return [
+    {
+      prefix: 'engine',
+      title: t('selector_group_engine'),
+      values: types,
+      label: function (v) { return ENG_TYPE_LABELS[v] || v },
+    },
+    {
+      prefix: 'scope',
+      title: t('selector_group_scope'),
+      values: scopes,
+      label: function (v) { return SEL_SCOPE_LABELS[v] || v },
+    },
+    {
+      prefix: 'scene',
+      title: t('selector_group_scene'),
+      values: scenes,
+      label: function (v) { return engSceneDisplayName(v) },
+    },
+  ]
+})
+function toggleSelTag(tag) {
+  const i = engineModal.selTags.indexOf(tag)
+  if (i >= 0) engineModal.selTags.splice(i, 1)
+  else engineModal.selTags.push(tag)
+}
+function clearSelTags() {
+  engineModal.selTags = []
+}
+function onModeSwitch() {
+  // 用户口径：切换只重渲染，不清另一侧、不派生（断言见 tests/js）
+}
+// 标签变更：丢弃旧服务端命中 map（本地匹配即时反馈），250ms 防抖对齐后端
+watch(
+  function () { return engineModal.selTags.slice().sort().join(',') + '|' + engineModal.mode },
+  function () {
+    if (!engineModal.open) return
+    if (engineModal.mode !== 'tag') return
+    engineModal.serverPreview = null
+    if (_previewTimer) clearTimeout(_previewTimer)
+    _previewTimer = setTimeout(requestServerPreview, 250)
+  }
+)
+function requestServerPreview() {
+  const seq = ++_previewSeq
+  if (!engineModal.selTags.length) {
+    engineModal.serverPreview = null
+    return
+  }
+  const payload = {
+    tags: engineModal.selTags.slice(),
+    agent_type: engineModal.agentType,
+    repo: dashOwner.value && dashName.value ? dashOwner.value + '/' + dashName.value : '',
+  }
+  API()
+    .post('/scenes/engine-selector-preview', payload)
+    .then(function (d) {
+      if (seq !== _previewSeq) return
+      engineModal.serverPreview = (d && d.engines) || null
+    })
+    .catch(function () {
+      if (seq !== _previewSeq) return
+      engineModal.serverPreview = null
+    })
+}
+function selectorPreviewData() {
+  const vis = engModalVisible.value
+  const selTags = engineModal.selTags
+  if (selTags.length && engineModal.serverPreview) {
+    return vis.map(function (e) {
+      const s = engineModal.serverPreview[String(e.id)]
+      if (!s) return { engine: e, hit: false, reason: 'selector' }
+      return { engine: e, hit: !!s.hit, reason: s.reason || '' }
+    })
+  }
+  return engSelectorPreview(vis, selTags, engineModal.agentType)
+}
+// 搜索框只过滤展示，不影响命中计算；命中前置、组内按名称排序
+const previewShown = computed(function () {
+  const q = (engineModal.q || '').toLowerCase().trim()
+  const list = selectorPreviewData().slice()
+  const shown = q
+    ? list.filter(function (p) {
+        return [p.engine.name, p.engine.alias].join(' ').toLowerCase().indexOf(q) >= 0
+      })
+    : list
+  shown.sort(function (a, b) {
+    if (a.hit !== b.hit) return a.hit ? -1 : 1
+    const an = (a.engine.alias || a.engine.name || '').toLowerCase()
+    const bn = (b.engine.alias || b.engine.name || '').toLowerCase()
+    return an < bn ? -1 : an > bn ? 1 : 0
+  })
+  return shown
+})
+const previewSections = computed(function () {
+  const shown = previewShown.value
+  const hits = shown.filter(function (p) { return p.hit })
+  const off = shown.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') })
+  const miss = shown.filter(function (p) { return !p.hit && p.reason !== 'offline' && p.reason !== 'stale' })
+  const mkGroups = function (list) {
+    const groups = {}
+    list.forEach(function (p) {
+      const sc = p.engine.scope || 'global'
+      ;(groups[sc] = groups[sc] || []).push(p)
+    })
+    return ['user', 'repo', 'global', 'local']
+      .filter(function (sc) { return groups[sc] && groups[sc].length })
+      .map(function (sc) { return { label: (SCOPE_LABELS_ALL[sc] && SCOPE_LABELS_ALL[sc]()) || sc, list: groups[sc] } })
+  }
+  // 2026-11-18：配色从内联样式搬到 CSS 状态类（.dbv-secwrap/.dbv-sectitle/.dbv-secgroupt + sec.key），
+  // 否则暗色模式下三组命中预览仍是浅色底（用户报「没有暗夜模式」）。
+  return [
+    { key: 'hit', title: t('selector_preview_hit_group'), list: hits, groups: mkGroups(hits) },
+    { key: 'offline', title: t('selector_preview_offline_group'), list: off, groups: mkGroups(off) },
+    { key: 'miss', title: t('selector_preview_miss_group'), list: miss, groups: mkGroups(miss) },
+  ]
+})
+const selSummaryText = computed(function () {
+  const preview = selectorPreviewData()
+  const hitCount = preview.filter(function (p) { return p.hit }).length
+  const offCount = preview.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') }).length
+  const hasTags = engineModal.selTags.length
+  const total = hitCount + offCount
+  if (!total) return t('selector_zero_hit')
+  const head = hasTags
+    ? t('selector_hit_count', { count: total })
+    : t('selector_broadcast') + ' ' + total + ' ' + '个引擎'
+  return head + ' · ' + hitCount + ' 在线' + (offCount ? ' · ' + offCount + ' 离线' : '') + t('selector_hit_note')
+})
+const selSummaryStyle = computed(function () {
+  const preview = selectorPreviewData()
+  const hitCount = preview.filter(function (p) { return p.hit }).length
+  const offCount = preview.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') }).length
+  return {
+    color: hitCount ? '#15803d' : offCount ? '#b45309' : '#d32f2f',
+  }
+})
+function closeEngineModal() {
+  hideReasonTip()
+  engineModal.open = false
+}
 const engCurIds = ref([])
 const engineDetachHint = ref('')
 // 场景标签缓存（显示名）
@@ -1295,7 +1898,14 @@ function t(key, vars) {
     label_engine: '引擎',
     select_skill: '选择技能',
     select_engine: '选择引擎',
-    skill_clear: '清除选择',
+    skill_unbind: '不绑定技能',
+    skill_kicker: '技能绑定',
+    skill_unit: '项',
+    leave_unsaved_title: '有未保存的改动',
+    leave_unsaved_hint:
+      '这个场景的编辑还没保存，离开后刚才对技能、引擎和节点启用状态的修改会被丢弃，并退出编辑模式。',
+    stay_editing: '继续编辑',
+    discard_and_leave: '放弃并离开',
     skill_no_match: '无匹配技能',
     skill_search_placeholder: '搜索技能名称/描述',
     not_needed_in_scene: '此场景下不需要',
@@ -1555,28 +2165,88 @@ function engineBadgeState(engineIds, agentType) {
     return { total: ids.length, offline: 0 }
   }
   const availMap = {}
+  const availUidMap = {}
   ae[agentType].forEach((e) => {
-    if (e.status === 'online' || e.status === 'recently_lost') availMap[e.id] = true
+    if (e.status === 'online' || e.status === 'recently_lost') {
+      availMap[e.id] = true
+      // Issue #1208：uid 形态节点传 uid 字符串进来也要按 engine_uid 匹配（否则 uid 恒判离线）
+      if (e.engine_uid) availUidMap[String(e.engine_uid).toLowerCase()] = true
+    }
   })
-  const offline = ids.filter((id) => !availMap[id]).length
+  const offline = ids.filter(
+    (id) => !(availMap[id] || (typeof id === 'string' && availUidMap[String(id).toLowerCase()]))
+  ).length
   return { total: ids.length, offline }
 }
 function engineBadgeHtml(node) {
+  // ── Issue #1208：selector 标签模式徽章（空的 tags 数组=广播，不落回实例徽章）──
+  const selTags = ((node && node.engine_selector) || {}).tags || []
+  const selModeSaved = !!(node && node.engine_selector && Array.isArray(node.engine_selector.tags))
+  const hasInstances =
+    (((node && node.engine_runtime_uids) || []).length + ((node && node.engine_runtime_ids) || []).length) > 0
+  if (selTags.length || (selModeSaved && !hasInstances)) {
+    const agentType = node.tag || node.id
+    const ae = agentEngines.value || {}
+    // 兼容 map（按角色索引）与数组两种形态（dashboard agent_engines 是 map）
+    const engs = Array.isArray(ae) ? ae : ae[agentType] || []
+    let hit = 0
+    let off = 0
+    let miss = 0
+    if (engs.length) {
+      engSelectorPreview(engs, selTags, agentType).forEach(function (p) {
+        if (p.hit) hit += 1
+        else if (p.reason === 'offline' || p.reason === 'stale') off += 1
+        else miss += 1
+      })
+    }
+    // 后端同源（2026-11-12 用户裁定）：进页面从 /scenes/engine-selector-preview 权威加载，
+    // 本地近似仅首帧兜底（role/capability 真值本地不可知）
+    const key = agentType + '|' + selTags.slice().sort().join(',') + '|' + selHitRepo.value
+    // 空 selector = 广播：后端 preview 对空 selector 返回空集合（语义上「不做约束」，
+    // 由前端全命中处理）。拿它覆盖本地全量近似，会把徽章清成「广播 · 0 个引擎 · 0 在线」，
+    // 与弹窗里看到的引擎数矛盾——广播只认本地全量近似，不读也不写后端缓存。
+    const cached = selTags.length ? selHitCache[key] : null
+    if (cached) {
+      hit = cached.hit
+      off = cached.off
+      miss = cached.miss || miss
+    } else if (selTags.length) {
+      fetchSelHit(key, agentType, selTags.slice().sort())
+    }
+    const total = hit + off
+    const txt = !selTags.length
+      ? t('dv2.sum_broadcast', { total: total, hit: hit }) + (off ? t('dv2.sum_offline', { off: off }) : '')
+      : total
+        ? t('dv2.sum_tag_hit', { total: total, hit: hit }) + (off ? t('dv2.sum_offline', { off: off }) : '')
+        : t('dv2.sum_zero')
+    const labels = selTags.map(engSelectorTagLabel)
+    const tip =
+      (selTags.length ? '' : t('dv2.sum_broadcast_note')) +
+      t('dv2.sum_hit_take', { hit: hit }) + (off ? t('dv2.sum_hit_off', { off: off }) : '') +
+      (miss ? t('dv2.sum_hit_miss', { miss: miss }) : '') +
+      (labels.length ? t('dv2.sum_labels') + labels.join('、') : '')
+    // 2026-11-18 暗色修正：徽章配色改由 CSS 状态类承载（原先内联浅色背景在暗色下过亮）。
+    // hit=命中(绿) / off=仅离线(琥珀) / zero=零命中(灰)；浅色与暗色各一套，见样式区。
+    const state = hit ? 'hit' : off ? 'off' : 'zero'
+    return `<span class="dbv-engbadge ${state}" data-selkey="${esc(key)}" title="${esc(tip)}">${esc(txt)}</span>`
+  }
   const tag = node.tag || node.id
-  const ids = node.engine_runtime_ids || []
+  // Issue #1208：uid 形态优先（D11 uid 输出后徽章按 uid 匹配），旧数据/uid 缺失回退 ids
+  const uids = node.engine_runtime_uids || []
+  const ids = uids.length ? uids : node.engine_runtime_ids || []
   const st = engineBadgeState(ids, tag)
   if (!st.total) {
     if (tag === 'sre') {
       return `<span class="dbv-engbadge gray">${esc(t('sre_engine_required'))}</span>`
     }
-    return `<span class="dbv-engbadge green">${esc(t('broadcast') || '广播')}</span>`
+    return `<span class="dbv-engbadge green">${esc(t('dv2.broadcast_fb'))}</span>`
   }
   if (st.offline > 0) {
     const label =
       st.offline < st.total
         ? t('engine_offline_partial', { total: st.total, offline: st.offline }) ||
           `${st.total} 台引擎 · ${st.offline} 离线`
-        : t('engine_offline_all') || '绑定失效 · 全部离线'
+        : t('engine_offline_all')
     return `<span class="dbv-engbadge red">${esc(label)}</span>`
   }
   return `<span class="dbv-engbadge blue">${esc(t('engine_count', { count: st.total }))}</span>`
@@ -1609,12 +2279,12 @@ const hostBanner = computed(() => {
   if (hs === 'bot_missing')
     return {
       error: true,
-      text: '该项目 grape_bot 未成功加入项目，请手动添加 bot 至项目，或点击「重检修复」自动处理',
-      btn: '重检修复',
+      text: t('dv2.host_bot_missing'),
+      btn: t('dv2.host_recheck'),
     }
   if (hs === 'webhook_missing')
-    return { error: false, text: '项目 webhook 缺失，Grape 无法接收仓库事件', btn: '补建 webhook' }
-  return { error: false, text: '该项目托管流程未完成，Grape 部分功能不可用', btn: '重检修复' }
+    return { error: false, text: t('dv2.host_webhook_missing'), btn: t('dv2.host_build_webhook') }
+  return { error: false, text: t('dv2.host_flow_incomplete'), btn: t('dv2.host_recheck') }
 })
 function repairHost() {
   let owner = ''
@@ -1633,14 +2303,14 @@ function repairHost() {
     .post('/repos/' + owner + '/' + name + '/repair-host', {})
     .then(function (d) {
       if (d && d.status === 'ok') {
-        app().showToast('托管已修复')
+        app().showToast(t('dv2.host_fixed'))
         G.window.location.reload()
       } else {
-        app().showToast((d && d.message) || '修复失败，请稍后手动重试')
+        app().showToast((d && d.message) || t('dv2.host_fix_failed'))
       }
     })
     .catch(function (e) {
-      app().showToast('修复请求失败：' + (e.detail?.message || e.message || '未知错误'))
+      app().showToast(t('dv2.host_fix_req_failed') + (e.detail?.message || e.message || t('dv2.unknown')))
     })
 }
 
@@ -1772,6 +2442,7 @@ function serializeNodes(nodes) {
       id: n.id,
       tag: n.tag,
       skill: n.skill,
+      skill_id: n.skill_id || 0,
       skill_display_name: n.skill_display_name,
       mode: n.mode,
       next: n.next,
@@ -1779,6 +2450,9 @@ function serializeNodes(nodes) {
       skip: n.skip,
       enabled: n.enabled,
       engine_runtime_ids: n.engine_runtime_ids,
+      // Issue #1208：草稿全量透传三模式字段（uids/selector），引擎选择确认后 F5 不丢
+      engine_runtime_uids: n.engine_runtime_uids || [],
+      engine_selector: n.engine_selector || {},
     }
   })
 }
@@ -1791,8 +2465,11 @@ function applyDraftNodes(draft) {
     if (dn) {
       en.enabled = dn.enabled
       en.skill = dn.skill || ''
+      en.skill_id = dn.skill_id || 0
       en.skill_display_name = dn.skill_display_name || ''
       en.engine_runtime_ids = dn.engine_runtime_ids || []
+      en.engine_runtime_uids = dn.engine_runtime_uids || []
+      en.engine_selector = dn.engine_selector || {}
     }
   })
   return true
@@ -1825,6 +2502,7 @@ function enterCreateMode() {
     id: at,
     tag: at,
     skill: '',
+    skill_id: 0,
     skill_display_name: '',
     mode: 'emit',
     next: 'done',
@@ -1832,6 +2510,8 @@ function enterCreateMode() {
     skip: [],
     enabled: true,
     engine_runtime_ids: [],
+    engine_runtime_uids: [],
+    engine_selector: {},
   }))
   createName.value = ''
   createDesc.value = ''
@@ -1887,7 +2567,12 @@ function saveCreateScene() {
   }
   // SRE 必选引擎前端拦截
   const sreNoEngine = editNodes.value.find(
-    (n) => n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length
+    (n) =>
+      n.id === 'sre' &&
+      n.enabled &&
+      !(n.engine_runtime_ids || []).length &&
+      !(n.engine_runtime_uids || []).length &&
+      !((n.engine_selector || {}).tags || []).length
   )
   if (sreNoEngine) {
     app().showToast(t('sre_engine_personal_only'))
@@ -1943,7 +2628,7 @@ function saveCreateScene() {
         app().showToast(
           (e.detail && e.detail.message) ||
             t('skill_scope_mismatch') ||
-            '技能 scope 不匹配，请修正标红节点'
+            t('dv2.skill_scope_fix')
         )
         return
       }
@@ -1971,7 +2656,7 @@ function scopeViolationHint(v) {
   const actual = v.actual_scope || ''
   const expected = v.expected_scope || 'repo'
   return (
-    (t('skill_scope_mismatch') || '技能 scope 不匹配') +
+    t('skill_scope_mismatch') +
     '：' +
     skill +
     '（' +
@@ -1988,12 +2673,16 @@ function buildNodesPayload(nodes) {
       id: n.id,
       tag: n.tag,
       skill: n.skill || '',
+      skill_id: n.skill_id || 0,
       mode: n.mode || 'emit',
       next: i < arr.length - 1 ? arr[i + 1].id : 'done',
       handoff: i < arr.length - 1 ? 'a2a' : 'complete',
       skip: n.skip || [],
       enabled: true,
-      engine_runtime_ids: n.engine_runtime_ids || [],
+      // uids 与 selector 互斥随 node 全量透传；已绑 ids 且全部有 uid 时按 D11 输出 uids 清 ids
+      engine_runtime_ids: (n.engine_runtime_uids || []).length ? [] : (n.engine_runtime_ids || []),
+      engine_runtime_uids: n.engine_runtime_uids || [],
+      engine_selector: n.engine_selector || {},
     }))
 }
 function collectLinkedRepos() {
@@ -2081,27 +2770,28 @@ function toggleAgent(agentType) {
   // Issue #406：禁用时 skill/display 同清
   if (!node.enabled) {
     node.skill = ''
+    node.skill_id = 0
     node.skill_display_name = ''
     node.engine_runtime_ids = []
+    node.engine_runtime_uids = []
+    node.engine_selector = {}
   }
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
 }
 
-// ═══ 技能下拉（Issue #292 分组+搜索） ═══
-function openSkillDropdown(agentType, e) {
-  const rect = e.currentTarget.getBoundingClientRect()
+// ═══ 技能选择弹窗（Issue #292 分组+搜索） ═══
+// 2026-11-18：由「跟随点击定位的浮层下拉」改为与引擎选择同构的居中弹窗（用户口径），
+// 交互也随之对齐：点选只改高亮，确定才落库。
+function openSkillModal(agentType) {
   skillPanel.agentType = agentType
   const node = editNodes.value.find((n) => n.id === agentType)
   skillPanel.current = node ? node.skill || '' : ''
+  // Issue #979/#2324-followup：节点自带 skill_id 是用户实际选中的档位，回显优先用它
+  skillPanel.currentId = node ? node.skill_id || 0 : 0
   skillPanel.currentKey = ''
   skillPanel.q = ''
-  skillPanel.x = rect.left
-  skillPanel.w = Math.max(rect.width, 240)
-  const estHeight = 320
-  let top = rect.bottom + 4
-  if (top + estHeight > G.window.innerHeight) top = Math.max(8, rect.top - estHeight - 4)
-  skillPanel.y = top
+  skillPanel.skills = []
   skillPanel.open = true
   // 加载技能
   const repo = currentRepo()
@@ -2115,15 +2805,29 @@ function openSkillDropdown(agentType, e) {
       const cache = (skillPickCache[agentType] = {})
       const counts = {}
       skillPanel.skills.forEach(function (s) {
-        cache[skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }
+        cache[skillKeyOf(s)] = {
+          name: s.skill_name,
+          id: s.skill_id || 0,
+          display: s.display_name || s.skill_name,
+        }
         counts[s.skill_name] = (counts[s.skill_name] || 0) + 1
       })
       skillPanel.nameCounts = counts
-      // 已选技能若在列表中唯一 → 用唯一键精确回显；同名多档不勾选
-      const hits = skillPanel.skills.filter(function (s) {
-        return s.skill_name === (skillPanel.current || '')
-      })
-      skillPanel.currentKey = hits.length === 1 ? skillKeyOf(hits[0]) : ''
+      // 回显顺序：节点 skill_id 精确命中 → 同名唯一才用名字；三档同名且无 id 不勾选
+      let picked = null
+      if (skillPanel.currentId) {
+        picked =
+          skillPanel.skills.filter(function (s) {
+            return Number(s.skill_id) === Number(skillPanel.currentId)
+          })[0] || null
+      }
+      if (!picked) {
+        const hits = skillPanel.skills.filter(function (s) {
+          return s.skill_name === (skillPanel.current || '')
+        })
+        picked = hits.length === 1 ? hits[0] : null
+      }
+      skillPanel.currentKey = picked ? skillKeyOf(picked) : ''
     })
     .catch(function () {
       skillPanel.skills = []
@@ -2138,9 +2842,9 @@ const skillGroups = computed(() => {
       )
     : skillPanel.skills.slice()
   const groups = [
-    { key: 'official', label: '官方技能' },
-    { key: 'repo', label: '仓库技能' },
-    { key: 'user', label: '个人技能' },
+    { key: 'official', label: t('dv2.skill_official') },
+    { key: 'repo', label: t('dv2.skill_repo') },
+    { key: 'user', label: t('dv2.skill_user') },
   ]
   return groups
     .map(function (g) {
@@ -2176,6 +2880,8 @@ function pickSkill(skillName, skillKey) {
   const node = editNodes.value.find((n) => n.id === skillPanel.agentType)
   if (node) {
     node.skill = skillName || ''
+    // 清空时同步清 id，避免旧 id 残留指向已不存在的档位
+    node.skill_id = 0
     if (scopeViolations[node.id || '']) delete scopeViolations[node.id]
     applySreLockForVodSkill(node, skillName)
     const cache = skillPickCache[skillPanel.agentType] || {}
@@ -2187,39 +2893,166 @@ function pickSkill(skillName, skillKey) {
       })
       entry = hit ? cache[hit] : null
     }
+    if (entry && entry.id) node.skill_id = entry.id
     node.skill_display_name = skillName ? (entry && entry.display) || skillName : ''
   }
   skillPanel.open = false
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
 }
+// 关闭引擎弹窗内的场景筛选下拉（技能面板改弹窗后，技能不再需要 outside-click 关闭）
 function onDocClick(e) {
-  // 关闭技能面板
-  if (
-    skillPanel.open &&
-    !e.target.closest('.dbv-skillpanel') &&
-    !e.target.closest('.dbv-skillpick')
-  ) {
-    skillPanel.open = false
+  if (engineModal.sceneDd && !e.target.closest('.dbv-ddwrap')) engineModal.sceneDd = false
+}
+// 2026-11-18：技能弹窗内点选只改高亮（current/currentKey），确定才调用 pickSkill 落库
+function selectSkill(skillName, skillKey) {
+  skillPanel.current = skillName || ''
+  skillPanel.currentKey = skillKey || ''
+  // 手工改选后旧 id 不再可信，交由 pickSkill 按唯一键从缓存重新解析
+  skillPanel.currentId = 0
+}
+function confirmSkillPick() {
+  pickSkill(skillPanel.current, skillPanel.currentKey)
+}
+function closeSkillModal() {
+  skillPanel.open = false
+}
+
+// ═══ 未保存改动的离开守卫（2026-11-19）═══
+// 场景编辑态下的改动只在前端 + 本地草稿，直接点侧栏/返回离开既不落库也不提示，
+// 用户会以为「改了没生效」。这里包一层 app.nav：有未保存改动先弹确认；
+// 确认离开则丢弃草稿并退出编辑态（= 用户口径「自动清空改动退出编辑模式」）。
+const leaveDlg = reactive({ open: false, nextView: '', nextParam: undefined })
+const editBaseline = ref('')
+let _origNav = null
+let _leaveBypass = false
+
+function editNodesSnapshot() {
+  return JSON.stringify(serializeNodes(editNodes.value))
+}
+function hasUnsavedEdit() {
+  return (
+    !!flowEditing.value && editBaseline.value !== '' && editNodesSnapshot() !== editBaseline.value
+  )
+}
+function installNavGuard() {
+  const a = G.app
+  if (!a || typeof a.nav !== 'function' || _origNav) return
+  _origNav = a.nav
+  a.nav = function (view, param) {
+    if (_leaveBypass) return _origNav.apply(a, arguments)
+    if (flowEditing.value && editBaseline.value !== '') {
+      if (hasUnsavedEdit()) {
+        // 有未保存改动 → 先确认，不拦就直接跳会静默丢改动
+        leaveDlg.nextView = view
+        leaveDlg.nextParam = param
+        leaveDlg.open = true
+        return
+      }
+      // 没改动 → 默认按「取消编辑」离开：退出编辑态并清掉草稿，再正常跳转（用户口径 2026-11-19）
+      discardUnsavedEdit()
+    }
+    return _origNav.apply(a, arguments)
+  }
+}
+function uninstallNavGuard() {
+  if (_origNav && G.app) {
+    G.app.nav = _origNav
+    _origNav = null
+  }
+}
+function stayEditing() {
+  leaveDlg.open = false
+}
+function discardUnsavedEdit() {
+  flowEditing.value = false
+  G.window._dashboardEditing = false
+  clearDashEditMode()
+  clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value ? detail.value.id : '')
+  editBaseline.value = ''
+  // 关掉可能开着的选择弹窗，避免它挂到下一个页面
+  skillPanel.open = false
+  engineModal.open = false
+}
+function confirmLeaveDirty() {
+  const v = leaveDlg.nextView
+  const p = leaveDlg.nextParam
+  leaveDlg.open = false
+  discardUnsavedEdit()
+  if (!v || !_origNav) return
+  _leaveBypass = true
+  try {
+    _origNav(v, p)
+  } finally {
+    _leaveBypass = false
   }
 }
 
 // ═══ 引擎选择弹窗 ═══
+// Issue #1208：卡片徽章命中数后端同源缓存（key=agentType|tags|repo；本地近似首帧兜底）
+const selHitCache = reactive({})
+const selHitInflight = {}
+const selHitRepo = computed(function () {
+  return dashOwner.value && dashName.value ? dashOwner.value + '/' + dashName.value : ''
+})
+function fetchSelHit(key, agentType, tags) {
+  // 广播（空 tags）不请求后端：preview 对空 selector 返回空集合，写进缓存会把徽章清零
+  if (!key || !tags || !tags.length || selHitInflight[key]) return
+  selHitInflight[key] = true
+  API()
+    .post('/scenes/engine-selector-preview', { repo: selHitRepo.value, agent_type: agentType || '', tags: tags || [] })
+    .then(function (d) {
+      const hit = (d.matched || []).length
+      let off = 0
+      let miss = 0
+      ;(d.dropped || []).forEach(function (x) {
+        const r = (x && x.reason) || ''
+        if (r === 'offline' || r === 'stale') off += 1
+        else miss += 1
+      })
+      selHitCache[key] = { hit: hit, off: off, miss: miss }
+      delete selHitInflight[key]
+    })
+    .catch(function () {
+      delete selHitInflight[key]
+    })
+}
 function openEngineModal(agentType) {
   engineModal.open = true
   engineModal.agentType = agentType
   engineModal.q = ''
   engineModal.filterType = ''
   engineModal.filterScope = ''
+  engineModal.filterScene = []
+  engineModal.sceneDd = false
+  engineModal.serverPreview = null
+  engineModal.collapse = { hit: false, offline: false, miss: false }
   engineDetachHint.value = ''
   const node = editNodes.value.find((n) => n.id === agentType)
+  const selTagsRaw = ((node && node.engine_selector) || {}).tags
+  const selTags = selTagsRaw || []
+  // Issue #1208：打开按已配形态初始化模式——已配 selector → 标签；其余（已绑实例或全新）→ 实例。
+  // 实例模式是改造前的原始默认形态，用户裁定放第一页并作为缺省。
+  // 广播（已存 selector 但 tags 为空数组）同样是标签模式：不能因长度 0 就掉回实例面板
+  // （#1208 broadcast 口径，用户 2026-11-18 报「广播模式重新点选择引擎会跳到指定引擎实例」）。
+  const boundUids = (node && node.engine_runtime_uids) || []
+  engineModal.mode = Array.isArray(selTagsRaw) ? 'tag' : 'engine'
+  engineModal.selTags = selTags.slice()
   const all = (agentEngines.value[agentType] || []).slice()
   // SRE 专属：只显示个人+仓库
-  const visible =
-    agentType === 'sre' ? all.filter((e) => e.scope === 'user' || e.scope === 'repo') : all
+  const visible = agentType === 'sre' ? all.filter((e) => e.scope === 'user' || e.scope === 'repo') : all
   const visibleIds = new Set(visible.map((e) => e.id))
   // 打开即剔除不可见引擎勾选
   engCurIds.value = ((node && node.engine_runtime_ids) || []).filter((id) => visibleIds.has(id))
+  // uid 形态回显：uids 非空 → 按引擎 uid 预勾（D11 输出 uid，前端无感）
+  if (boundUids.length) {
+    const uidSet = new Set(boundUids.map((u) => String(u || '').toLowerCase()))
+    visible.forEach(function (e) {
+      if (e.engine_uid && uidSet.has(String(e.engine_uid).toLowerCase()) && !engCurIds.value.includes(e.id)) {
+        engCurIds.value.push(e.id)
+      }
+    })
+  }
   // 异步拉 detached 引擎提示
   if (dashOwner.value && dashName.value) {
     API()
@@ -2238,11 +3071,11 @@ function openEngineModal(agentType) {
         })
         engineDetachHint.value =
           '<div class="dbv-detach">' +
-          '以下引擎因离线超过 8 小时被系统移除：' +
+          t('dv2.stale_removed_prefix') +
           '<b>' +
           esc(uniq.join('、')) +
           '</b>' +
-          '，如需使用请在下方列表重新勾选绑定。' +
+          t('dv2.stale_removed_suffix') +
           '</div>'
       })
       .catch(function () {})
@@ -2259,20 +3092,28 @@ const engModalVisible = computed(() => {
 const engModalAvailTypes = computed(() => {
   const types = []
   engModalVisible.value.forEach(function (e) {
-    const n = (e.name || '').toLowerCase()
-    const tn = n.includes('hermes')
-      ? 'hermes'
-      : n.includes('opencode')
-        ? 'opencode'
-        : n.includes('codearts')
-          ? 'codearts'
-          : n.includes('codex')
-            ? 'codex'
-            : ''
+    const tn = engFilterTypeOf(e)
     if (tn && !types.includes(tn)) types.push(tn)
   })
   return types
 })
+// 实例面板引擎类型归一：先按冒号首段（防 opencode:hermes-… 被误判 hermes），
+// 再按关键字收敛成短名，其余引擎保留自身首段成组（保证「没有其他引擎」的筛选项齐全）
+function engFilterTypeOf(e) {
+  const ty = String(engEngineTypeOf(e) || '').toLowerCase()
+  if (['hermes', 'opencode', 'codearts', 'codex'].includes(ty)) return ty
+  if (ty.includes('aishell') || ty.includes('hwcloud')) return 'aishell'
+  if (ty.includes('atomcode')) return 'atomcode'
+  return ty
+}
+const engModalAvailScenes = computed(() => [
+  ...new Set(engModalVisible.value.flatMap((e) => e.scene_tags || [])),
+].filter(Boolean))
+function toggleEngFilterScene(sn) {
+  const i = engineModal.filterScene.indexOf(sn)
+  if (i >= 0) engineModal.filterScene.splice(i, 1)
+  else engineModal.filterScene.push(sn)
+}
 const engModalAvailScopes = computed(() => [
   ...new Set(engModalVisible.value.map((e) => e.scope || 'global')),
 ])
@@ -2295,10 +3136,13 @@ const engModalFiltered = computed(() => {
       if (!hay.includes(q)) return false
     }
     if (engineModal.filterType) {
-      const ename = (e.name || '').toLowerCase()
-      if (!ename.includes(engineModal.filterType)) return false
+      if (engFilterTypeOf(e) !== engineModal.filterType) return false
     }
     if (engineModal.filterScope && (e.scope || 'global') !== engineModal.filterScope) return false
+    if (engineModal.filterScene.length) {
+      const stags = e.scene_tags || []
+      if (!engineModal.filterScene.some((s) => stags.includes(s))) return false
+    }
     return true
   })
 })
@@ -2325,14 +3169,35 @@ function engStatusColor(st) {
 }
 function engStatusLabel(st) {
   return (
-    { online: t('online'), recently_lost: '失联', offline: '离线', about_to_gc: '待回收' }[st] ||
-    '离线'
+    { online: t('online'), recently_lost: t('dv2.st_recently_lost'), offline: t('dv2.st_offline'), about_to_gc: t('dv2.st_gc') }[st] ||
+    t('dv2.st_offline')
   )
 }
 function confirmEnginePick() {
   const node = editNodes.value.find((n) => n.id === engineModal.agentType)
-  if (node) node.engine_runtime_ids = engCurIds.value.slice()
-  engineModal.open = false
+  if (node) {
+    // Issue #1208：两模式确认——标签模式写 engine_selector（实例两池清空）；
+    // 实例模式清 selector，选中引擎全部有 uid → 按 D11 提交 uids 清 ids
+    // （旧数据/uid 缺失回退 ids）；uid 回显经预勾后自然输出 uid。
+    if (engineModal.mode === 'tag') {
+      node.engine_selector = { tags: engineModal.selTags.slice().sort() }
+      node.engine_runtime_ids = []
+      node.engine_runtime_uids = []
+    } else {
+      node.engine_selector = {}
+      const visible = engModalVisible.value
+      const selEngines = visible.filter((e) => engCurIds.value.indexOf(e.id) >= 0)
+      const selUids = selEngines.map((e) => String(e.engine_uid || ''))
+      if (selEngines.length && selUids.every((u) => u)) {
+        node.engine_runtime_uids = selUids.map((u) => u.toLowerCase())
+        node.engine_runtime_ids = []
+      } else {
+        node.engine_runtime_ids = engCurIds.value.slice()
+        node.engine_runtime_uids = []
+      }
+    }
+  }
+  closeEngineModal()
   // Issue #407 R1: 引擎确认后同步保存草稿
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
@@ -2367,7 +3232,7 @@ function loadSceneDetail(sceneId) {
         return s.id === sceneId
       })
       if (!scene) {
-        detailError.value = '场景不存在'
+        detailError.value = t('dv2.scene_not_found')
         return
       }
       const scenePipeline = (scenesData.scenes || []).find(function (s) {
@@ -2522,7 +3387,7 @@ function saveInlineEdit(field) {
         })
     })
     .catch(function (err) {
-      app().showToast('加载场景数据失败: ' + (err.message || ''))
+      app().showToast(t('dv2.load_scene_failed') + (err.message || ''))
     })
 }
 // PR 订阅
@@ -2538,12 +3403,12 @@ function togglePrSubscription() {
       { pr_subscription_enabled: newOn }
     )
     .then(function () {
-      app().showToast(newOn ? 'PR 订阅已开启' : 'PR 订阅已关闭')
+      app().showToast(newOn ? t('dv2.pr_sub_on') : t('dv2.pr_sub_off'))
       if (detail.value) detail.value.pr_subscription_enabled = newOn
     })
     .catch(function (e) {
       detailPrSub.value = !newOn
-      app().showToast('保存失败: ' + (e.detail?.message || e.message))
+      app().showToast(t('dv2.save_failed_prefix') + (e.detail?.message || e.message))
     })
 }
 // 流程编辑
@@ -2565,6 +3430,8 @@ function enterFlowEdit() {
           })
           const originalNodes = (sc && sc.pipeline && sc.pipeline.nodes) || []
           buildEditNodes(originalNodes, agents.value)
+          // 基线 = 服务端当前形态；若随后恢复了草稿，diff 自然为「有未保存改动」
+          editBaseline.value = editNodesSnapshot()
           flowEditing.value = true
           G.window._dashboardEditing = true
           saveDashEditMode('edit', detail.value.id)
@@ -2574,6 +3441,7 @@ function enterFlowEdit() {
         })
         .catch(function () {
           buildEditNodes(null, agents.value)
+          editBaseline.value = editNodesSnapshot()
           flowEditing.value = true
           G.window._dashboardEditing = true
         })
@@ -2595,6 +3463,7 @@ function buildEditNodes(originalNodes, ags) {
         id: at,
         tag: at,
         skill: node.skill || a.skill || a.skill_display_name || '',
+        skill_id: node.skill_id || 0,
         skill_display_name: node.skill_display_name || a.skill_display_name || '',
         mode: node.mode || 'emit',
         next: node.next || 'done',
@@ -2602,12 +3471,15 @@ function buildEditNodes(originalNodes, ags) {
         skip: node.skip || [],
         enabled: node.enabled !== false,
         engine_runtime_ids: node.engine_runtime_ids || a.engine_runtime_ids || [],
+        engine_runtime_uids: node.engine_runtime_uids || a.engine_runtime_uids || [],
+        engine_selector: node.engine_selector || a.engine_selector || {},
       }
     }
     return {
       id: at,
       tag: at,
       skill: '',
+      skill_id: 0,
       skill_display_name: '',
       mode: 'emit',
       next: 'done',
@@ -2615,6 +3487,8 @@ function buildEditNodes(originalNodes, ags) {
       skip: [],
       enabled: false,
       engine_runtime_ids: [],
+      engine_runtime_uids: [],
+      engine_selector: {},
     }
   })
 }
@@ -2632,7 +3506,13 @@ function saveSceneEdit() {
     return
   }
   const sreNoEngine = editNodes.value.find(function (n) {
-    return n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length
+    return (
+      n.id === 'sre' &&
+      n.enabled &&
+      !(n.engine_runtime_ids || []).length &&
+      !(n.engine_runtime_uids || []).length &&
+      !((n.engine_selector || {}).tags || []).length
+    )
   })
   if (sreNoEngine) {
     app().showToast(t('sre_engine_personal_only'))
@@ -2649,6 +3529,7 @@ function saveSceneEdit() {
     .then(function () {
       G.window._dashboardEditing = false
       flowEditing.value = false
+      editBaseline.value = ''
       clearDashEditMode()
       clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value.id)
       app().showToast(t('scene_saved'))
@@ -2663,7 +3544,7 @@ function saveSceneEdit() {
         app().showToast(
           (e.detail && e.detail.message) ||
             t('skill_scope_mismatch') ||
-            '技能 scope 不匹配，请修正标红节点'
+            t('dv2.skill_scope_fix')
         )
         return
       }
@@ -2673,6 +3554,7 @@ function saveSceneEdit() {
 function cancelSceneEdit() {
   G.window._dashboardEditing = false
   flowEditing.value = false
+  editBaseline.value = ''
   clearDashEditMode()
   clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value.id)
 }
@@ -2753,7 +3635,7 @@ function doCopyScene() {
     .then(function (r) {
       copyDlg.open = false
       let msg = t('scene_copied')
-      if (dropped) msg += '（不可用引擎已剔除）'
+      if (dropped) msg += t('dv2.dropped_note')
       app().showToast(msg)
       app().nav('scene-detail-local', r.scene_id)
     })
@@ -2813,7 +3695,7 @@ function cancelDeployUrlEdit() {
 function saveDeployUrl() {
   const v = (deployUrlDraft.value || '').trim()
   if (v && !/^https?:\/\//i.test(v)) {
-    app().showToast('访问地址需以 http:// 或 https:// 开头')
+    app().showToast(t('dv2.url_scheme_invalid'))
     return
   }
   const sceneId = detail.value ? detail.value.id : ''
@@ -2905,7 +3787,7 @@ function loadScenePipePage(sceneId, page) {
     })
 }
 function stageLabel(stage) {
-  const map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: '完成' }
+  const map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: t('dv2.stage_done') }
   return map[stage] || stage
 }
 function pipeDuration(p) {
@@ -2915,7 +3797,8 @@ function pipeDuration(p) {
 function pipeIssueUrl(p) {
   const num = String(p.issue_id || '').replace(/^#/, '')
   const repo = (dashData.value || {}).repo || ''
-  const host = repo.startsWith('github:') ? 'github.com' : 'gitcode.com'
+  const prov = providerFromRepoKey(repo)
+  const host = (typeof window.platformHost === 'function' ? window.platformHost(prov) : '') || 'gitcode.com'
   const parts = stripRepoPrefix(repo).split('/')
   return num && parts.length === 2
     ? 'https://' + host + '/' + parts[0] + '/' + parts[1] + '/issues/' + num
@@ -2985,7 +3868,7 @@ function openSceneRecommendModal() {
       recDlg.loaded = true // Issue #487：场景列表就绪前禁用添加/保存，避免空选项静默丢规则
     })
     .catch(function (e) {
-      app().showToast('加载推荐配置失败: ' + (e.message || ''))
+      app().showToast(t('dv2.load_recommend_failed') + (e.message || ''))
     })
 }
 function saveSceneRecommend() {
@@ -3011,7 +3894,7 @@ function saveSceneRecommend() {
       rules: rules,
     })
     .then(function () {
-      app().showToast('智能推荐规则已保存')
+      app().showToast(t('dv2.recommend_saved'))
       recDlg.open = false
     })
     .catch(function (e) {
@@ -3021,7 +3904,9 @@ function saveSceneRecommend() {
 
 // ═══ 生命周期 ═══
 onMounted(function () {
+  // 引擎弹窗内的场景筛选下拉靠 outside-click 收起（技能面板已改弹窗，不再由这里关闭）
   document.addEventListener('click', onDocClick)
+  installNavGuard()
   if (props.initialData) {
     // renderDashboard(data) 契约：app.js 加载数据后注入
     renderDash(props.initialData)
@@ -3049,12 +3934,13 @@ onMounted(function () {
           loaded.value = true
         })
     } else {
-      loadError.value = '请先选择仓库'
+      loadError.value = t('dv2.pick_repo_first')
       loaded.value = true
     }
   }
 })
 onBeforeUnmount(function () {
+  uninstallNavGuard()
   document.removeEventListener('click', onDocClick)
   G.window._dashboardEditing = false
 })
@@ -3507,14 +4393,15 @@ onBeforeUnmount(function () {
 }
 /* 详情卡 */
 .det-card-wrap {
-  background: color-mix(in srgb, var(--c) 62%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: none;
+  /* 2026-11-16：原为 62% 玻璃 + blur16。场景详情页背景就是 --bg，
+     62% 白叠上去与背景几乎同色 → 区块内的 Agent 卡片/相关需求表全都“没有轮廓”。
+     改为实心亮面(--c) + 发丝描边，卡片才有可立界的父面。 */
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 18px;
   padding: 24px;
   margin-bottom: 16px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 .dbv-sechead {
   display: flex;
@@ -3552,8 +4439,12 @@ onBeforeUnmount(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: color-mix(in srgb, var(--c) 62%, transparent);
-  backdrop-filter: blur(16px);
+  /* 2026-11-16（第二轮，按验收意见）：卡片干脆**无边框**——靠「父面实心 --c、
+     卡片回落 --bg」的层次 + 一层软阴影立起来，不再用 1px 描边，避免边缘割裂。
+     查看态/编辑态共用同一个 .ap-nd。 */
+  /* 2026-11-16（第四轮）：底色再往背景色靠——62% 亮面 + 38% 背景，与面板只差 4~5 级，
+     仍可分辨；抬升感留给 hover 的阴影/位移（不动布局）。 */
+  background: color-mix(in srgb, var(--c) 62%, var(--bg));
   border: none;
   border-radius: 18px;
   padding: 18px;
@@ -3561,11 +4452,16 @@ onBeforeUnmount(function () {
   flex-direction: column;
   transition: all 0.25s ease;
   position: relative;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .ap-nd:hover {
-  background: color-mix(in srgb, var(--c) 82%, transparent);
-  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
+  /* 2026-11-16（第三轮）：hover 不再跳到 --c —— 那等于跟父面板同色，卡片直接消失。
+     底色只提亮一小档（始终与面板保持可见差值），抬升感交给阴影 + 上浮。 */
+  background: color-mix(in srgb, var(--c) 80%, var(--bg));
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.14),
+    0 3px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-3px);
 }
 .ap-nd.off {
   opacity: 0.35;
@@ -3661,24 +4557,25 @@ onBeforeUnmount(function () {
   font-weight: 500;
   color: var(--t);
 }
-.dbv-skillpick {
-  width: 100%;
-  padding: 6px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  font-size: 11px;
-  background: var(--bg);
-  color: var(--t);
-  outline: none;
-  cursor: pointer;
-  text-align: left;
+/* 技能触发按钮（2026-11-19 用户口径：不再用下拉框样式，改成跟「选择引擎」同款的文字按钮）。
+ * 外观完全复用 .ap-nd-engbtn（透明底 + hairline 描边 + 999px 药丸 + hover 转强调色），
+ * 这里只补：随内容变宽、超长省略、未选态更淡。 */
+.dbv-skillbtn {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+.dbv-skillbtn-t {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dbv-skillpick:hover {
-  border-color: var(--a-text);
-  background: var(--c);
+.dbv-skillbtn.is-unset {
+  color: var(--t3);
 }
 .ap-nd-engbtn {
   font-size: 12px;
@@ -3713,11 +4610,13 @@ onBeforeUnmount(function () {
   border-radius: 999px;
 }
 :deep(.dbv-engbadge.green) {
-  background: var(--g-fill)14;
+  /* 原写法 `var(--g-fill)14` 是无效语法（变量后直接拼两位十六进制），浏览器整条丢弃 → 无底色；
+     统一改成 color-mix 派生（浅色 12% / 暗色同值），与 red/gray 口径一致 */
+  background: color-mix(in srgb, var(--g) 12%, transparent);
   color: var(--g);
 }
 :deep(.dbv-engbadge.blue) {
-  background: var(--a)14;
+  background: color-mix(in srgb, var(--a) 10%, transparent);
   color: var(--a-text);
 }
 :deep(.dbv-engbadge.red) {
@@ -3727,6 +4626,47 @@ onBeforeUnmount(function () {
 :deep(.dbv-engbadge.gray) {
   background: #86868b14;
   color: var(--t3);
+}
+/* selector 摘要徽章（广播 · N 个引擎 · M 离线）三态：浅色/暗色各一套。
+   浅色值沿用原内联口径（#f0fdf4/#fffbeb/#f5f5f7），暗色换成同色系低透明度底 + 提亮字。 */
+:deep(.dbv-engbadge.hit) {
+  background: #f0fdf4;
+  color: #15803d;
+}
+:deep(.dbv-engbadge.off) {
+  background: #fffbeb;
+  color: #b45309;
+}
+:deep(.dbv-engbadge.zero) {
+  background: #f5f5f7;
+  color: #6b7280;
+}
+/* 暗色：用整段 :global(...) 包裹（:global 与 :deep 叠用会产出不可控选择器） */
+:global([data-theme-mode='dark'] .dbv-engbadge.hit) {
+  background: rgba(48, 209, 88, 0.18);
+  color: #30d158;
+}
+:global([data-theme-mode='dark'] .dbv-engbadge.off) {
+  background: rgba(255, 159, 10, 0.18);
+  color: #ff9f0a;
+}
+:global([data-theme-mode='dark'] .dbv-engbadge.zero) {
+  background: rgba(235, 235, 245, 0.1);
+  color: #aeaeb2;
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-engbadge.hit) {
+    background: rgba(48, 209, 88, 0.18);
+    color: #30d158;
+  }
+  :global([data-theme-mode='auto'] .dbv-engbadge.off) {
+    background: rgba(255, 159, 10, 0.18);
+    color: #ff9f0a;
+  }
+  :global([data-theme-mode='auto'] .dbv-engbadge.zero) {
+    background: rgba(235, 235, 245, 0.1);
+    color: #aeaeb2;
+  }
 }
 /* PR 订阅 */
 .dbv-prsub {
@@ -3975,7 +4915,7 @@ onBeforeUnmount(function () {
   text-align: center;
   padding: 8px 16px;
   background: var(--bg);
-  border: none;
+  border: 1px solid var(--b);
   border-radius: 14px;
   min-width: 64px;
 }
@@ -3999,14 +4939,14 @@ onBeforeUnmount(function () {
   padding: 10px 14px;
   font-weight: 500;
   color: var(--t3);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  border-bottom: 1px solid var(--hairline);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
 }
 .pl-table td {
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid var(--hairline);
 }
 .dbv-piperow {
   cursor: pointer;
@@ -4023,83 +4963,376 @@ onBeforeUnmount(function () {
   font-size: 12px;
   color: var(--t3);
 }
-/* 技能下拉面板 */
-.dbv-skillpanel {
-  position: fixed;
-  z-index: 1001;
+/* ═══ 技能选择弹窗（2026-11-18 · 保时捷/香奈儿式排版 + 明确的可点框）═══
+ * 三层底色，一眼看清「哪里能点」：
+ *   ① 弹窗面板 var(--c) 实心面（不再透出页面，避免底色发灰）
+ *   ② 列表底槽 var(--bg) + 内描边 hairline，框住可滚动区域
+ *   ③ 每一行是 var(--c) 的圆角小卡 + 1px 描边；hover 描边转强调色，选中再加 3px 左缘实心条
+ * 排版仍是编辑式：微字距小标 + 负字距大标题 + tabular 规格行 + 单一实心 CTA。
+ * 滚动条与全局同一几何（6px / 圆角 3px），只是把颜色换成主题感知的 t3 透明度，
+ * 避免全局 rgba(0,0,0,.15) 在暗色玻璃上几乎看不见。 */
+.dbv-skillmodal {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(88vh, 780px);
+  display: flex;
+  flex-direction: column;
   background: var(--c);
   border: 1px solid var(--hairline);
-  border-radius: 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
-  padding: 8px;
-  box-sizing: border-box;
+  border-radius: 18px;
+  box-shadow:
+    0 32px 80px rgba(0, 0, 0, 0.32),
+    0 2px 10px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
 }
-.dbv-skillsearch {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  font-size: 12px;
-  background: var(--bg);
-  color: var(--t);
-  outline: none;
-  margin-bottom: 6px;
-  font-family: inherit;
-}
-.dbv-skilllist {
-  max-height: 260px;
-  overflow-y: auto;
-}
-.dbv-skillgroup {
-  margin: 6px 4px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--t3);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.dbv-skillopt {
-  padding: 7px 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--t);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.dbv-skillopt:hover {
-  background: color-mix(in srgb, var(--a) 10%, transparent);
-}
-.dbv-skillopt.clear {
-  color: var(--t3);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  margin-bottom: 4px;
-}
-.dbv-skillopt.sel {
-  background: color-mix(in srgb, var(--a) 14%, transparent);
-}
-.dbv-skillopt.sel:hover {
-  background: color-mix(in srgb, var(--a) 14%, transparent);
-}
-.dbv-skillcheck {
-  color: var(--a-text);
-  font-weight: 700;
+.skm-head {
+  padding: 30px 32px 0;
   flex-shrink: 0;
 }
-.dbv-skillname-t {
+.skm-kicker {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.34em;
+  color: var(--t3);
+  text-transform: uppercase;
+}
+.skm-title {
+  margin: 13px 0 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.9px;
+  line-height: 1.1;
+  color: var(--t);
+}
+.skm-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--t3);
+}
+.skm-agent {
+  font-weight: 500;
+  color: var(--t2, var(--t));
+  letter-spacing: 0.02em;
+}
+.skm-dash {
+  opacity: 0.45;
+}
+.skm-count {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--t);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.skm-unit {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--t3);
+}
+.skm-search {
+  position: relative;
+  margin: 18px 32px 0;
+  flex-shrink: 0;
+}
+.skm-search::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--hairline);
+  transition: background 0.2s ease;
+}
+.skm-search:focus-within::after {
+  background: var(--a);
+}
+.skm-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--t);
+  font-family: inherit;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  padding: 10px 28px 10px 12px;
+  outline: none;
+}
+.skm-input::placeholder {
+  color: var(--t3);
+  letter-spacing: 0.06em;
+}
+.skm-search:focus-within .skm-input {
+  border-color: var(--a);
+  background: var(--c);
+}
+.skm-qclear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--t3);
+  cursor: pointer;
+  padding: 3px;
+}
+.skm-qclear:hover {
+  color: var(--t);
+}
+/* 底槽：把可滚动区域框出来 */
+.skm-well {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  margin: 14px 32px 0;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.skm-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--t3) 45%, transparent) transparent;
+}
+.skm-list::-webkit-scrollbar {
+  width: 6px;
+}
+.skm-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.skm-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--t3) 45%, transparent);
+  border-radius: 3px;
+}
+.skm-list::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--t3) 68%, transparent);
+}
+/* 每一行 = 明确可点的小卡 */
+.skm-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  margin: 0 0 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--c);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.skm-row:last-child {
+  margin-bottom: 0;
+}
+.skm-row:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+  background: var(--hover-card, var(--c));
+}
+.skm-row:focus-visible {
+  outline: 2px solid var(--a);
+  outline-offset: 2px;
+}
+.skm-row.on {
+  border-color: color-mix(in srgb, var(--a) 62%, transparent);
+  background: color-mix(in srgb, var(--a) 7%, var(--c));
+  box-shadow: inset 3px 0 0 var(--a);
+}
+.skm-row--none {
+  background: transparent;
+  border-style: dashed;
+}
+.skm-row--none:hover {
+  background: var(--hover-card, var(--c));
+}
+.skm-num {
+  flex-shrink: 0;
+  width: 22px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+}
+.skm-body {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.skm-line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.skm-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  color: var(--t);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  transition: color 0.16s ease;
 }
-.dbv-skillnomatch {
-  padding: 14px 0;
-  text-align: center;
+.skm-row.on .skm-name {
+  font-weight: 600;
+  color: var(--a-text);
+}
+.skm-alias {
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--t3);
+}
+.skm-desc {
+  font-size: 11.5px;
+  color: var(--t3);
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skm-tick {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: right;
   font-size: 12px;
+  font-weight: 700;
+  color: var(--a-text);
+}
+.skm-row.on .skm-tick::after {
+  content: '✓';
+}
+.skm-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 8px 8px;
+}
+.skm-group:first-child {
+  padding-top: 6px;
+}
+.skm-glabel {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  color: var(--t3);
+}
+.skm-gline {
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+.skm-gcount {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+}
+.skm-empty {
+  padding: 44px 0;
+  text-align: center;
+  font-size: 11.5px;
+  letter-spacing: 0.16em;
+  color: var(--t3);
+}
+.skm-foot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 32px 20px;
+}
+.skm-ghost {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--t3);
+  font-family: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  padding: 9px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+.skm-ghost:hover {
+  color: var(--t);
+  border-color: var(--hairline);
+  background: var(--bg);
+}
+.skm-cta {
+  border: none;
+  background: var(--a);
+  color: var(--on-accent);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 10px 28px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--a) 28%, transparent);
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
+}
+.skm-cta:hover {
+  background: var(--ah, var(--a));
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--a) 36%, transparent);
+}
+.skm-cta:active {
+  transform: translateY(0) scale(0.99);
+}
+@media (max-width: 640px) {
+  .skm-head {
+    padding: 24px 20px 0;
+  }
+  .skm-search {
+    margin: 14px 20px 0;
+  }
+  .skm-well {
+    margin: 12px 20px 0;
+  }
+  .skm-foot {
+    padding: 14px 20px 18px;
+  }
+  .skm-title {
+    font-size: 22px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skm-row,
+  .skm-name,
+  .skm-cta,
+  .skm-ghost,
+  .skm-search::after {
+    transition: none !important;
+  }
 }
 /* 引擎弹窗 */
 .rtv-modal-ov {
@@ -4111,13 +5344,406 @@ onBeforeUnmount(function () {
   align-items: center;
   justify-content: center;
 }
+
+/* ── Issue #1208 selector 两模式弹窗 ── */
+.dbv-engmodes {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-shrink: 0;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: var(--bg, #f5f5f7);
+  border-radius: 12px;
+}
+.dbv-engmodes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--t1, var(--t, #1d1d1f));
+}
+.dbv-engmodes label.on {
+  font-weight: 600;
+  color: var(--a, #0071e3);
+}
+.dbv-engmodes input {
+  accent-color: var(--a, #0071e3);
+}
+.dbv-selpanel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dbv-selhint {
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+  line-height: 1.6;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.dbv-selsummary {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.dbv-selgroup {
+  margin-bottom: 8px;
+}
+.dbv-selgroup-t {
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.dbv-selgroup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dbv-selchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  cursor: pointer;
+  /* 2026-11-18：浅色保持原值不动，暗色另给覆盖块（暗色下不再是一排亮白药丸） */
+  border: 1px solid #e8e8ed;
+  color: var(--t1, var(--t, #1d1d1f));
+  background: #f5f5f7;
+  font-weight: 500;
+}
+/* 暗色：实例/标签面板的选项药丸跟随暗色卡片（浅色值上面一条保持原样） */
+:global([data-theme-mode='dark'] .dbv-selchip) {
+  border-color: #3a3a3c;
+  background: #1e1e20;
+  color: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-selchip) {
+    border-color: #3a3a3c;
+    background: #1e1e20;
+    color: #fff;
+  }
+}
+.dbv-selchip.on {
+  border-color: #5e5ce6;
+  color: #fff;
+  background: #5e5ce6;
+}
+.dbv-selchip input {
+  display: none;
+}
+.dbv-selclearrow {
+  display: flex;
+  justify-content: flex-end;
+  margin: 2px 0 6px;
+}
+.dbv-selclear {
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #e8e8ed;
+  color: var(--t3, #86868b);
+  background: #f5f5f7;
+  font-weight: 500;
+}
+.dbv-selclear:hover {
+  color: #d32f2f;
+}
+/* 暗色：清除已选标签药丸（浅色值上面保持原样）——浅底在暗色弹窗里过亮、灰字看不清 */
+:global([data-theme-mode='dark'] .dbv-selclear) {
+  border-color: #3a3a3c;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d1d1d6;
+}
+:global([data-theme-mode='dark'] .dbv-selclear:hover) {
+  color: #ff453a;
+  border-color: rgba(255, 69, 58, 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-selclear) {
+    border-color: #3a3a3c;
+    background: rgba(255, 255, 255, 0.06);
+    color: #d1d1d6;
+  }
+  :global([data-theme-mode='auto'] .dbv-selclear:hover) {
+    color: #ff453a;
+    border-color: rgba(255, 69, 58, 0.45);
+  }
+}
+.dbv-selprevtitle {
+  margin-top: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  letter-spacing: 0.5px;
+}
+.dbv-selprevempty {
+  padding: 12px 0;
+  text-align: center;
+  color: var(--t3, #86868b);
+  font-size: 12px;
+}
+.dbv-secwrap {
+  border: 1px solid #e8e8ed;
+  border-radius: 12px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.dbv-sechead2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 12px;
+}
+.dbv-secarrow {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--t1, var(--t, #1d1d1f));
+  font-weight: 700;
+}
+.dbv-sectitle {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.dbv-seccollapsed {
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+}
+.dbv-seccount {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+}
+.dbv-secbody {
+  padding: 2px 10px 8px;
+}
+.dbv-secgroupt {
+  margin-top: 12px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.dbv-prevrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: #f5f5f7;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  margin-bottom: 4px;
+}
+.dbv-prevrow.off {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+.dbv-prevrow.hit .dbv-prevname {
+  color: var(--t1, var(--t, #1d1d1f));
+}
+/* 三组命中预览：状态类承载配色（浅色值与原内联值逐字一致） */
+.dbv-secwrap.hit {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+.dbv-secwrap.offline {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+.dbv-secwrap.miss {
+  border-color: #e8e8ed;
+  background: #fafafa;
+}
+.dbv-sectitle.hit {
+  color: #15803d;
+}
+.dbv-sectitle.offline {
+  color: #b45309;
+}
+.dbv-sectitle.miss {
+  color: #6b7280;
+}
+.dbv-secgroupt.hit {
+  color: #34c759;
+}
+.dbv-secgroupt.offline {
+  color: #b45309;
+}
+.dbv-secgroupt.miss {
+  color: #86868b;
+}
+/* 暗色档：三组预览与行卡片（用户 2026-11-18：暗色下这三组没有暗夜效果） */
+:global([data-theme-mode='dark'] .dbv-secwrap.hit) {
+  border-color: rgba(48, 209, 88, 0.32);
+  background: rgba(48, 209, 88, 0.1);
+}
+:global([data-theme-mode='dark'] .dbv-secwrap.offline) {
+  border-color: rgba(255, 159, 10, 0.32);
+  background: rgba(255, 159, 10, 0.1);
+}
+:global([data-theme-mode='dark'] .dbv-secwrap.miss) {
+  border-color: rgba(235, 235, 245, 0.16);
+  background: rgba(235, 235, 245, 0.05);
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.hit),
+:global([data-theme-mode='dark'] .dbv-secgroupt.hit) {
+  color: #30d158;
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.offline),
+:global([data-theme-mode='dark'] .dbv-secgroupt.offline),
+:global([data-theme-mode='dark'] .dbv-prevmarkoff) {
+  color: #ff9f0a;
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.miss),
+:global([data-theme-mode='dark'] .dbv-secgroupt.miss) {
+  color: #aeaeb2;
+}
+:global([data-theme-mode='dark'] .dbv-prevrow) {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+}
+:global([data-theme-mode='dark'] .dbv-prevrow.off) {
+  background: rgba(255, 159, 10, 0.1);
+  border-color: rgba(255, 159, 10, 0.3);
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-secwrap.hit) {
+    border-color: rgba(48, 209, 88, 0.32);
+    background: rgba(48, 209, 88, 0.1);
+  }
+  :global([data-theme-mode='auto'] .dbv-secwrap.offline) {
+    border-color: rgba(255, 159, 10, 0.32);
+    background: rgba(255, 159, 10, 0.1);
+  }
+  :global([data-theme-mode='auto'] .dbv-secwrap.miss) {
+    border-color: rgba(235, 235, 245, 0.16);
+    background: rgba(235, 235, 245, 0.05);
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.hit),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.hit) {
+    color: #30d158;
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.offline),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.offline),
+  :global([data-theme-mode='auto'] .dbv-prevmarkoff) {
+    color: #ff9f0a;
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.miss),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.miss) {
+    color: #aeaeb2;
+  }
+  :global([data-theme-mode='auto'] .dbv-prevrow) {
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: none;
+  }
+  :global([data-theme-mode='auto'] .dbv-prevrow.off) {
+    background: rgba(255, 159, 10, 0.1);
+    border-color: rgba(255, 159, 10, 0.3);
+  }
+}
+.dbv-prevbody {
+  flex: 1;
+  min-width: 0;
+}
+.dbv-prevname {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--t3, #86868b);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.dbv-prevrow.off .dbv-prevname,
+.dbv-prevrow.miss .dbv-prevname {
+  color: var(--t3, #86868b);
+}
+.dbv-prevalias {
+  font-size: 11px;
+  color: var(--t3, #86868b);
+  font-weight: 400;
+  margin-left: 4px;
+}
+.dbv-prevmeta {
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  margin-top: 3px;
+}
+.dbv-prevstatus {
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.dbv-prevmark {
+  font-size: 11.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.dbv-prevmark.hit {
+  color: #34c759;
+}
+.dbv-prevmark.off {
+  color: #b45309;
+}
+.dbv-prevmarkoff {
+  font-size: 11.5px;
+  color: #b45309;
+  flex-shrink: 0;
+}
+.dbv-prevhelp {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid #c7c7cc;
+  color: var(--t3, #86868b);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: help;
+  flex-shrink: 0;
+}
+/* 未命中原因自绘浮层（跟随鼠标、越界内收、可换行） */
+.dbv-reasontip {
+  position: fixed;
+  z-index: 10050;
+  max-width: 320px;
+  white-space: normal;
+  word-break: break-word;
+  background: #1d1d1f;
+  color: #fff;
+  font-size: 11.5px;
+  line-height: 1.65;
+  padding: 8px 10px;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
 .dbv-engmodal {
   background: var(--glass-hero-strong);
   backdrop-filter: blur(20px);
   border-radius: 18px;
   padding: 28px;
-  width: 460px;
-  height: 600px;
+  /* Issue #1208 用户口径 2026-11-09：两模式同尺寸（640×min(90vh,760)），切换只换内容不跳尺寸 */
+  width: min(640px, calc(100vw - 32px));
+  height: min(90vh, 760px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
   display: flex;
   flex-direction: column;
@@ -4175,6 +5801,86 @@ onBeforeUnmount(function () {
   padding: 0 !important;
   border: none !important;
   cursor: default !important;
+}
+/* 右侧弹簧：`.dbv-engfilters > span` 的胶囊样式会给空 span 画出长条，必须整类摘掉 */
+.dbv-engspacer {
+  flex: 1;
+  border: none !important;
+  background: none !important;
+  padding: 0 !important;
+  cursor: default !important;
+}
+/* 分组标题（类型 / 归属）：不能被 `.dbv-engfilters > span` 的胶囊样式收编 */
+/* 选择器必须带 .dbv-engfilters 前缀提高优先级：`.dbv-engfilters > span` 也是 (0,1,1)，
+   只写 .dbv-enggrp 会被它的胶囊字色/字重盖掉（只有 !important 的几何生效） */
+.dbv-engfilters > .dbv-enggrp {
+  font-size: 11px;
+  color: var(--t2);
+  font-weight: 600;
+  white-space: nowrap;
+  border: none !important;
+  background: none !important;
+  padding: 0 !important;
+  margin-right: 2px;
+  cursor: default !important;
+}
+/* 场景多选下拉（实例面板） */
+.dbv-engfilters .dbv-ddwrap {
+  position: relative;
+  display: inline-block;
+}
+.dbv-engfilters .dbv-engdd {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  color: var(--t);
+  background: var(--bg);
+  font-weight: 500;
+}
+.dbv-engfilters .dbv-engdd.on {
+  border-color: var(--a-text);
+  color: var(--on-accent);
+  background: var(--a);
+}
+.dbv-ddcaret {
+  font-size: 8px;
+  opacity: 0.6;
+}
+.dbv-ddpane {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1200;
+  min-width: 170px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+.dbv-dditem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.dbv-dditem:hover {
+  background: var(--bg);
+}
+.dbv-dditem input {
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
 }
 .dbv-engclear {
   color: var(--t3) !important;
@@ -4509,5 +6215,144 @@ onBeforeUnmount(function () {
   background: var(--bg);
   font-family: inherit;
   color: var(--t);
+}
+
+/* ═══ 引擎选择弹窗：视觉与技能弹窗同步（2026-11-18）═══
+ * 只改配色/描边/字体，不动结构、尺寸、两模式、筛选、分组折叠与底部按钮。
+ * 层级同技能弹窗：实心面板 → var(--bg) 底槽 → 每行 var(--c) 小卡。
+ * §23 全局「弹窗统一」用 !important 把 .dbv-engmodal 压成玻璃，这里用「遮罩>面板」双类 + !important 夺回控制权。 */
+.rtv-modal-ov .dbv-engmodal {
+  background: var(--c) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 18px !important;
+  box-shadow:
+    0 32px 80px rgba(0, 0, 0, 0.32),
+    0 2px 10px rgba(0, 0, 0, 0.14) !important;
+}
+.rtv-modal-ov .dbv-engmodal h3 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.9px;
+  margin: 0 0 2px;
+}
+.dbv-eng-sub {
+  margin-bottom: 14px;
+  letter-spacing: 0.01em;
+}
+/* 两模式切换：细线分段控件（radio 仍可见，交互不变） */
+.dbv-engmodes {
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 3px 4px;
+  gap: 2px;
+}
+.dbv-engmodes label {
+  padding: 6px 12px;
+  border-radius: 8px;
+  transition: background 0.16s ease;
+}
+.dbv-engmodes label.on {
+  background: var(--c);
+  color: var(--a-text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+/* 列表底槽：把可滚区框出来 */
+.dbv-englist,
+.dbv-selpanel {
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+}
+.dbv-englist {
+  gap: 8px;
+  padding: 8px;
+}
+.dbv-selpanel {
+  padding: 10px 8px 8px;
+}
+/* 每行 = 明确可点的小卡 */
+.dbv-engitem {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.dbv-engitem:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+  background: var(--hover-card, var(--c));
+}
+.dbv-engitem.on {
+  border-color: color-mix(in srgb, var(--a) 62%, transparent);
+  background: color-mix(in srgb, var(--a) 7%, var(--c));
+  box-shadow: inset 3px 0 0 var(--a);
+}
+/* 分组小标：同一套字距 */
+.dbv-enggroup,
+.dbv-selgroup-t,
+.dbv-selprevtitle {
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  color: var(--t3);
+}
+.dbv-enggroup {
+  margin: 12px 8px 6px;
+}
+.dbv-selgroup-t {
+  margin: 0 8px 6px;
+}
+.dbv-selprevtitle {
+  margin: 14px 8px 6px;
+}
+/* 搜索框：灰底细描边，聚焦转强调色 */
+.dbv-engsearch {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+.dbv-engsearch:focus {
+  border-color: var(--a);
+  background: var(--c);
+}
+/* 标签模式：命中预览行同步小卡；Chip 选中收敛到唯一强调色 */
+.dbv-prevrow {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: none;
+}
+.dbv-prevrow.off {
+  background: color-mix(in srgb, var(--y) 8%, var(--c));
+  border-color: color-mix(in srgb, var(--y) 40%, transparent);
+}
+.dbv-selchip {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+}
+.dbv-selchip:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+}
+.dbv-selchip.on {
+  background: var(--a);
+  border-color: var(--a);
+  color: var(--on-accent);
+}
+.dbv-selhint,
+.dbv-selsummary {
+  letter-spacing: 0.02em;
+}
+/* 底部：一条细线收口，按钮本身不动 */
+.dbv-engfoot {
+  border-top: 1px solid var(--hairline);
+  margin-top: 12px;
+  padding-top: 16px;
 }
 </style>

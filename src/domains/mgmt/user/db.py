@@ -22,6 +22,7 @@ from src.domains.runtime import public as _rt
 from src.domains.insight import public as _insight_public
 
 from src.kernel.config import log
+from src.kernel.tags import MAX_TAGS, encode_tags, parse_tags
 
 
 class _OwnedCursor:
@@ -101,7 +102,7 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
     user.db → runtime.health → runtime/__init__ → service → user.db 环；
     运行期（调用点）再解析则无环。
     """
-    from src.domains.runtime.engine.health import apply_runtime_state
+    from src.domains.runtime.public import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
 
 def _deprecated_user_accounts_fn(replacement: str = ""):
@@ -356,55 +357,17 @@ def cleanup_expired_exchange_codes() -> int:
     except Exception:
         return 0
 
-def validate_oauth_state(state: str, provider: str = "") -> dict | None:
-    """验证并原子消费 OAuth state（SELECT + DELETE + rowcount 检查）。
+def validate_oauth_state(state: str, provider: str = "", consume: bool = True) -> dict | None:
+    """校验 OAuth state（薄委托：实现见 auth_guards.OAuthStateStore.validate）。
 
-    需求 2：原子消费，确保只有一个请求拿到 state 数据。
-    - SQLite/单实例：db_lock 保证线程安全
-    - MySQL 多实例：db_lock 跨实例无效，原子性靠 DELETE rowcount 保证
-    - 不使用 FOR UPDATE，避免方言判断
-
-    D26 修复：provider 参数改为可选——统一回调地址时不传 provider，
-    从查询结果取 provider 返回给调用方。传了 provider 则做额外校验。
-
-    返回的 dict 额外包含 "_provider" 字段（从 DB 记录恢复）。
+    P3-5 口径：先比 provider 再 DELETE（不匹配不消费），`consume=False` 只读校验，
+    原子性靠 `DELETE ... WHERE state=? AND expires>?` 的 rowcount。本函数只为既有
+    import 面（路由/测试）保留同名入口，判定与 SQL 都在 auth_guards 里。
     """
-    import json as _json
-    import time as _time
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute(
-                "SELECT provider, data_json, expires FROM oauth_states WHERE state=?",
-                (state,),
-            )
-            row = c.fetchone()
-            if row:
-                # 原子消费：DELETE 带 state + expires 条件
-                # rowcount=0 说明已被其他请求消费或已过期
-                c.execute(
-                    "DELETE FROM oauth_states WHERE state=? AND expires > ?",
-                    (state, _time.time()),
-                )
-                if c.rowcount == 0:
-                    # 已被消费或已过期，不能使用 SELECT 到的数据
-                    _mg_db.commit()
-                    log.warning(f"validate_oauth_state: state={state[:20]}... already consumed or expired")
-                    return None
-            _mg_db.commit()
-        if not row:
-            log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
-            return None
-        db_provider = row[0]
-        if provider and provider != db_provider:
-            log.warning(f"validate_oauth_state: provider mismatch (expected={provider}, db={db_provider})")
-            return None
-        data = _json.loads(row[1] or "{}")
-        data["_provider"] = db_provider
-        return data
-    except Exception as e:
-        log.warning(f"validate_oauth_state failed: {e}")
-        return None
+    from src.domains.mgmt.auth.auth_guards import OAuthStateStore
+
+    return OAuthStateStore.validate(state, provider, consume=consume)
+
 
 @_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
@@ -497,16 +460,28 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
                        SET config_json=excluded.config_json, updated_at=excluded.updated_at""",
                     row)
             _mg_db.commit()
+            if (kind or "") == "pat":
+                try:
+                    from src.domains.platform.public import on_pat_saved
+                    on_pat_saved(str(user_id), str(provider))
+                except Exception as _hook_err:
+                    log.warning(f"platform-link hook (pat saved) skipped: {_hook_err}")
             return True
     except Exception as e:
         log.warning(f"Set credential failed: {e}")
         return False
 
-def get_credentials(user_id: "int | str") -> list[dict]:
+def get_credentials(user_id: "int | str", include_unreadable: bool = False) -> list[dict]:
     """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）
 
     A2：返回 kind 维度；双写期旧复合键行（provider 形如 `<name>_pat/_oauth` 且
     kind='') 与对应的新形态行重复，这里过滤掉旧键行，调用方只看到归位形态。
+
+    include_unreadable=True（2026-11-18）：密文解不开/解析失败的行**也返回**，带
+    ``credential_error``（decrypt_failed / parse_failed）+ 空 config。默认 False 保
+    持老语义（调用方只看到"能用的凭据"），需要"配了但坏了"这个中间态的地方
+    （平台关系/项目页/凭据页）显式打开——否则用户看到的是"你没配置"，而不是
+    "你的配置坏了，请重新配置"。
     """
     result = []
     # 1. user_credentials 表（huawei_cloud/codearts/feishu 等非 OAuth 凭据）
@@ -532,8 +507,14 @@ def get_credentials(user_id: "int | str") -> list[dict]:
                 picked.pop((p, k))
     for (p, k), (_upd, cfg_json) in picked.items():
         try:
-            cfg = _load_credential_json(cfg_json) if cfg_json else {}
-            result.append({"provider": p, "kind": k or "", "config": cfg})
+            _err: dict = {}
+            cfg = _load_credential_json(cfg_json, errors=_err) if cfg_json else {}
+            entry = {"provider": p, "kind": k or "", "config": cfg}
+            if _err:
+                if not include_unreadable:
+                    continue
+                entry.update(_err)
+            result.append(entry)
         except Exception:
             pass
     # 2. external_identities（gitcode/github OAuth token）
@@ -550,7 +531,8 @@ def get_credentials(user_id: "int | str") -> list[dict]:
         log.warning(f"get_credentials: read external_identities failed: {e}")
     return result
 
-def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict | None:
+def get_credential(user_id: "int | str", provider: str, kind: str = "",
+                   diagnostics: "dict | None" = None) -> dict | None:
     """获取指定凭据（读侧自动解密，历史明文行兼容）。
 
     A2 双读序：① 归位形态 (provider, kind) → ② 旧复合键 f"{provider}_{kind}" →
@@ -560,6 +542,9 @@ def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict 
     理由：回退窗口里旧实例只写 `<p>_pat` 行，归位行会变成 stale 副本；只认归位形态
     就会把旧值读回来（用户看到"凭据莫名回退"）。同 updated_at 时归位形态优先，保持
     结果确定性。
+
+    diagnostics（2026-11-18）：传入 dict 时，若密文解不开会写入
+    ``credential_error=decrypt_failed``——调用方据此区分"没配置"与"配置坏了"。
     """
     cands = [(provider, kind or "", 0)]
     if kind:
@@ -578,7 +563,11 @@ def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict 
                     pick = cand
     if pick is None:
         return None
-    return _load_credential_json(pick[2]) or None
+    _err: dict = {}
+    cfg = _load_credential_json(pick[2], errors=_err)
+    if _err and diagnostics is not None:
+        diagnostics.update(_err)
+    return cfg or None
 
 def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bool:
     """删除凭据（A2：同时删归位行与双写期旧键行，避免残留可读副本）。"""
@@ -596,6 +585,12 @@ def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bo
                           (user_id, prov, k))
                 deleted = deleted or c.rowcount > 0
             _mg_db.commit()
+            if (kind or "") == "pat" and deleted:
+                try:
+                    from src.domains.platform.public import on_pat_deleted
+                    on_pat_deleted(str(user_id), str(provider))
+                except Exception as _hook_err:
+                    log.warning(f"platform-link hook (pat deleted) skipped: {_hook_err}")
             return deleted
     except Exception as e:
         log.warning(f"Delete credential failed: {e}")
@@ -1321,7 +1316,8 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
 
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
                            repo_key: str = "", user_id: str | int = "",
-                           scene_id: str = "", node_tag: str = "") -> dict:
+                           scene_id: str = "", node_tag: str = "",
+                           agent_type: str = "") -> dict:
     """派发技能解析（Issue #979）：skill_id 权威直查 → 名字降级 + warning。
 
     - skill_id 非零且 skill 表命中（is_active=1）→ 直接返回该档（显式绑定，
@@ -1331,10 +1327,15 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
       warning（含场景/节点/降级原因），行为与既有名字派发一致；
     - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底）。
 
-    返回 {skill_id, skill_name, skill_path, degraded, skill}。
+    agent_type 非空时做职责校验：解析到的技能 agent_type 与该节点角色不一致时，
+    记 warning 并标 ``role_mismatch=True``——存量错绑（过滤上线前绑的）只告警不阻断，
+    避免老场景突然停摆；新绑定由场景页下拉的职责过滤挡住。
+
+    返回 {skill_id, skill_name, skill_path, degraded, skill, role_mismatch}。
     """
     out = {"skill_id": 0, "skill_name": skill_name or "",
-           "skill_path": skill_name or "", "degraded": False, "skill": None}
+           "skill_path": skill_name or "", "degraded": False, "skill": None,
+           "role_mismatch": False}
     if not skill_name and not skill_id:
         return out
     if skill_id:
@@ -1343,6 +1344,12 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
             _name = row.get("skill_name") or skill_name or ""
             out.update(skill_id=int(skill_id), skill_name=_name,
                        skill_path=row.get("skill_path") or _name, skill=row)
+            _role = (row.get("agent_type") or "").strip().lower()
+            if agent_type and _role and _role != agent_type.strip().lower():
+                out["role_mismatch"] = True
+                log.warning(f"resolve_skill_dispatch: skill agent_type mismatch "
+                            f"skill={_name} skill_role={_role} node_role={agent_type} "
+                            f"(scene={scene_id or '-'} node={node_tag or '-'}, warn only)")
             return out
         log.warning(
             f"resolve_skill_dispatch: skill_id={skill_id} invalid/inactive "
@@ -1363,6 +1370,12 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
         if row:
             out["skill_name"] = row.get("skill_name") or skill_name
             out["skill_path"] = row.get("skill_path") or out["skill_name"]
+            _role = (row.get("agent_type") or "").strip().lower()
+            if agent_type and _role and _role != agent_type.strip().lower():
+                out["role_mismatch"] = True
+                log.warning(f"resolve_skill_dispatch: skill agent_type mismatch (name path) "
+                            f"skill={out['skill_name']} skill_role={_role} node_role={agent_type} "
+                            f"(scene={scene_id or '-'} node={node_tag or '-'}, warn only)")
     else:
         out["degraded"] = True
     return out
@@ -1842,7 +1855,13 @@ def set_repo_scene(repo_key: str, scene_id: str):
         log.warning(f"Set repo scene failed: {e}")
 
 def get_repo_scene(repo_key: str) -> str:
-    """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。"""
+    """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。
+
+    悬空防护：dev_scene 指向的场景已被删除/从未存在时返回空串（按未配置处理）。
+    典型成因是删除场景不清 dev_scene，悬空 id 会让建单预校验和派发读到幽灵场景
+    （或回落内置 default 被其 sre 节点拦死）。解析查询本身失败时保持原值返回，
+    不改变既有行为。
+    """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
@@ -1850,10 +1869,22 @@ def get_repo_scene(repo_key: str) -> str:
             c = _mg_db.cursor()
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
-            return (row[0] or "") if row else ""
+            _scene = (row[0] or "") if row else ""
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
+    if not _scene:
+        return ""
+    try:
+        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        _cfg = get_pipeline_config(_scene, repo_key=repo_key, use_cache=False)
+        if not _cfg or _cfg.get("fallback"):
+            log.warning(f"Repo dev_scene dangling: repo={repo_key} scene={_scene}"
+                        f" -> treated as unset")
+            return ""
+    except Exception as e:
+        log.warning(f"Repo dev_scene validity check failed ({repo_key}/{_scene}): {e}")
+    return _scene
 
 def get_scene_recommend_config(repo_key: str) -> dict:
     """读取仓库智能推荐配置（managed_repos.scene_recommend_config）。
@@ -2168,7 +2199,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
             else:
                 # 凭据表归 insight：共用同一凭据值的仓库排查走该域原语
                 _related_repos = _insight_public.repo_keys_sharing_value(
-                    "bot", (_enc, bot_token), f"{provider}:%", repo_key)
+                    "bot", (_enc, bot_token), f"{provider}:", repo_key)
     except Exception:
         pass
     if _related_repos:
@@ -2379,27 +2410,37 @@ def _invalidate_global_bot_cache():
     """清除全局 bot token 缓存（admin 改配置后调用）。"""
     _global_bot_cache.clear()
 
+def _bot_seed_value(provider: str, kind: str) -> str:
+    """种子文件里某平台的值（kind = token | username）。运行期仅在库内无值时用。"""
+    try:
+        from src.kernel.config import read_bot_seed_file
+
+        return (read_bot_seed_file().get(provider) or {}).get(kind, "") or ""
+    except Exception:
+        return ""
+
+
 def _read_gbt_file_field(field: str) -> str:
-    """从 global-bot-token.json 读取指定字段（文件 fallback 用）。"""
+    """从平台 bot 种子文件读取指定字段（库内无值时的一次性 fallback；D110 改名）。"""
     import json, os
     try:
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
-                                  "configs", "global-bot-token.json")
+        from src.kernel.config import bot_seed_path
+
+        _gbt_path = bot_seed_path()
         if os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as f:
                 return json.load(f).get(field, "") or ""
     except Exception as e:
-        log.warning(f"Failed to read {field} from global-bot-token.json: {e}")
+        log.warning(f"Failed to read {field} from bot seed file: {e}")
     return ""
 
 def _read_gbt_file_usernames() -> str:
-    """从 global-bot-token.json 读取 bot_usernames（JSON 数组，返回原始字符串）。"""
+    """从平台 bot 种子文件读取 bot_usernames（JSON 数组，返回原始字符串）。"""
     import json, os
     try:
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
-                                  "configs", "global-bot-token.json")
+        from src.kernel.config import bot_seed_path
+
+        _gbt_path = bot_seed_path()
         if os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as f:
                 us = json.load(f).get("bot_usernames") or []
@@ -2408,18 +2449,73 @@ def _read_gbt_file_usernames() -> str:
         pass
     return ""
 
-def get_global_gitcode_bot_token() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+def _platform_bot_row(provider: str) -> dict:
+    """D110：平台行 bot 事实（username / token 密文 / 状态），60s 缓存；读不到返回 {}。
 
-    Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
+    真源 = grape_t_repo_platforms（一平台一个 bot）；表未就绪/无行时返回 {}，
+    调用方按 meta → 文件 的顺序回落（向前兼容）。
     """
+    import time as _t
+    key = ("platform_bot", provider)
+    cached = _global_bot_cache.get(key)
+    now = _t.time()
+    if cached and now < cached[1]:
+        return cached[0]
+    data: dict = {}
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            row = RepoPlatformRepo.get(s, provider)
+            if row is not None:
+                data = {
+                    "username": getattr(row, "bot_username", "") or "",
+                    "token_enc": getattr(row, "bot_token_enc", "") or "",
+                    "token_status": getattr(row, "bot_token_status", "") or "unknown",
+                    "checked_at": getattr(row, "bot_checked_at", "") or "",
+                }
+    except Exception:
+        data = {}
+    if data.get("token_enc") or data.get("username"):
+        _global_bot_cache[key] = (data, now + _GLOBAL_BOT_CACHE_TTL)
+    else:
+        _global_bot_cache.pop(key, None)
+    return data
+
+
+def _platform_bot_token(provider: str) -> str:
+    """D110 第 2 级来源：平台行 bot token（解密后明文；空=未配置/解密失败）。"""
+    enc = _platform_bot_row(provider).get("token_enc") or ""
+    if not enc:
+        return ""
+    try:
+        return _decrypt_repo_secret(enc) or ""
+    except Exception:
+        return ""
+
+
+def get_global_gitcode_bot_token() -> str:
+    """统一入口：平台行 → DB meta → 文件 fallback（60s 缓存）。
+
+    D110: grape_t_repo_platforms.bot_token_enc 是第 2 级来源（一平台一个 bot）；
+    meta / 文件只在平台行为空时兜底（向前兼容，迁移前后行为一致）。
+    """
+    _plat = _platform_bot_token("gitcode")
+    if _plat:
+        return _plat
     return _cached_get_meta("global_bot_gitcode_token",
-                            file_fallback_fn=lambda: _read_gbt_file_field("gitcode_api_token"))
+                            file_fallback_fn=lambda: _bot_seed_value("gitcode", "token"))
 
 def get_global_github_bot_token() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存，GitHub 版）。"""
+    """统一入口：平台行 → DB meta → 文件 fallback（60s 缓存，GitHub 版）。"""
+    _plat = _platform_bot_token("github")
+    if _plat:
+        return _plat
     return _cached_get_meta("global_bot_github_token",
-                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
+                            file_fallback_fn=lambda: _bot_seed_value("github", "token"))
 
 def get_global_github_bot_username() -> str:
     """统一入口：github 卡 bot_username 优先 → meta 兜底（D15，2026-11-12）。
@@ -2430,15 +2526,18 @@ def get_global_github_bot_username() -> str:
 
     Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
     """
+    _plat = _platform_bot_row("github").get("username") or ""
+    if _plat:
+        return _plat
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card("github")
         if _card is not None and _card.bot_username:
             return _card.bot_username
     except Exception:
         pass
     return _cached_get_meta("global_bot_github_username",
-                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_username"))
+                            file_fallback_fn=lambda: _bot_seed_value("github", "username"))
 
 def get_global_bot_usernames() -> list[str]:
     """统一入口：各卡 bot_username 纯卡派生并集（D16→D22，2026-11-12 拍板）。
@@ -2448,8 +2547,22 @@ def get_global_bot_usernames() -> list[str]:
     读链按用户拍板退役；存量 meta 键成死配置，清理挂账下批。
     """
     out: list[str] = []
+    # D110：平台行 bot_username 是事实来源（一平台一个 bot），卡是卡位缺失时的兜底
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            for _row in RepoPlatformRepo.list_all(s):
+                _u = getattr(_row, "bot_username", "") or ""
+                if _u and _u not in out:
+                    out.append(_u)
+    except Exception:
+        pass
+    try:
+        from src.domains.runtime.public import list_vcs_platforms, get_platform_card
         for _p in list_vcs_platforms():
             _card = get_platform_card(_p)
             if _card is not None and _card.bot_username and _card.bot_username not in out:
@@ -3141,7 +3254,7 @@ def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
             # 消除 `provider in (gitcode,github)` 二元枚举与列名映射硬编码；
             # 有列平台（gitcode/github 派生列名）行为不变。
             try:
-                from src.domains.runtime.vcs.platform_card import get_platform_card
+                from src.domains.runtime.public import get_platform_card
                 _wt_col = (getattr(get_platform_card(provider), "webhook_token_field", "") or "") \
                     if provider else ""
                 if _wt_col:
@@ -3434,10 +3547,18 @@ def get_server_base_url_warning() -> str:
     )
 
 def get_webhook_url() -> str:
-    """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
+    """返回部署级**公网基址**（历史键名 webhook_url；不是某平台的回调全路径）。
 
-    优先取 configs/server-config.json 显式配置；无则 meta.webhook_url；再兜底空串
-    （不设 localhost 兜底，让 repos.py「webhook_url 未配置即拒」守卫生效）。
+    语义（2026-11-15 用户确认：只补注释，不改行为）：
+    - 这里填的是 base（如 `https://grape.example.com`）。**平台路径一律由平台卡
+      `webhook_path` 追加**（`/webhook/gitcode`、`/webhook/gitlab` …），所以值里带的
+      `/webhook/xxx` 会被 `_webhook_url_for_provider` 丢弃——填 `https://x/webhook/gitcode`
+      与填 `https://x` 等价。
+    - 读取优先级：configs/server-config.json → meta.webhook_url → 空串。
+      不设 localhost 兜底，让 repos.py「未配置即拒（422）」的守卫生效。
+    - 与 `get_server_base_url()` 同一事实的两个键：后者优先 server_base_url、并会把本键
+      剥掉 `/webhook/*` 后缀使用；两个键目前并存（合并成单一键会影响 6 个读取点与自动探测
+      落库路径，2026-11-15 裁定暂不合并，只在本注释与配置示例里写明口径）。
     """
     try:
         from src.kernel.config import read_server_config
@@ -3569,6 +3690,12 @@ def _sync_providers_from_config(data: dict):
     loaded_creds = []
     from src.domains.runtime import public as _rt  # noqa: PLC0415
     for provider, cfg in data.items():
+        provider = str(provider or "").strip()
+        # 下划线前缀 = 文档键（_readme/_fields/_note），不是渠道：这里不过滤就会把
+        # 说明块整块写进 meta.oauth_providers_config，之后被当成一个渠道渲染
+        # （实弹：登录页出现 `_fields` 按钮，未配置提示点名 _fields）。
+        if not provider or provider.startswith("_") or not isinstance(cfg, dict):
+            continue
         # 剥离 client_id/secret，只存协议参数
         prov_cfg = {k: v for k, v in cfg.items()
                     if k not in ("client_id", "client_secret")}
@@ -3729,14 +3856,27 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         log.warning(f"refresh_oauth: no refresh_token for user={user_id}, provider={provider}")
         return None
 
-    client_id = get_meta_value(f"oauth_{provider}_client_id")
-    client_secret = get_meta_value(f"oauth_{provider}_client_secret")
+    # 凭据（Issue #3054 P1-2）：走与换 code 完全相同的取凭据入口，client_id+secret
+    # 同源成对取——原实现直接读 meta，凭据迁表后就是"登录用新凭据、刷新用旧/空凭据"，
+    # 刷新必然失败 → 身份行被打 status=4。
+    from src.domains.mgmt.auth.providers import (
+        CredentialDecryptError,
+        get_client_credentials,
+        get_provider,
+    )
+
+    try:
+        client_id, client_secret = get_client_credentials(provider)
+    except CredentialDecryptError as e:
+        # 密文不可解是密钥事故，不是"凭据过期"：不刷新、不打 status=4、绝不回落 meta。
+        log.error(f"refresh_oauth: credential_decrypt_failed for user={user_id}, "
+                  f"provider={provider}: {e}")
+        return None
     if not client_id or not client_secret:
         log.warning(f"refresh_oauth: OAuth client_id/secret not configured for {provider}")
         return None
 
     # 2. 获取 token_url（从 provider 配置）
-    from src.domains.mgmt.auth.providers import get_provider
     cfg = get_provider(provider)
     if not cfg:
         log.warning(f"refresh_oauth: provider {provider} not configured")
@@ -3900,18 +4040,32 @@ def init_user_repos_table():
         db.execute(_USER_REPOS_DDL)
         _mg_db.commit()
 
-def save_user_repos(user_id: int, repos: list[dict]):
+def save_user_repos(user_id: int, repos: list[dict], providers: list[str] | None = None):
     """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）
 
     is_join 从用户自己的主动托管记录（mark_user_repo_join 写入的 is_join=1 AND is_admin=1）继承，
     不再查询全局 managed_repos，防止 A 托管的仓库污染 B 的下拉框。
+
+    providers：本次**真正刷新成功**的平台集合。给定时只替换这些平台的行，其余平台的旧缓存
+    原样保留——否则某平台拉取失败（401/网络）时，先删后写会把它的整段缓存抹掉
+    （2026-11-14 实锤：gitee 7 行刷新后 gitcode 58 + github 16 行一起消失）。None = 全量覆盖。
     """
     from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = _mg_db.cursor()
         c.execute("SELECT repo_key FROM user_repos WHERE user_id=? AND is_join=1 AND is_admin=1", (user_id,))
         joined_keys = {row[0] for row in c.fetchall()}
-        c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        if providers is None:
+            c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        else:
+            for _p in providers:
+                # P2-6：不能用 LIKE 拼前缀——`_` 是 LIKE 的单字符通配符，provider 名允许
+                # 下划线（如 gitee_enterprise），会误删 giteeXenterprise: 同形行。
+                # substr 前缀相等在 SQLite/MySQL 语义一致，且天然无通配符。
+                _prefix = f"{_p}:"
+                c.execute(
+                    "DELETE FROM user_repos WHERE user_id=? AND substr(repo_key, 1, ?) = ?",
+                    (user_id, len(_prefix), _prefix))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
             # 优先使用 repos 中已有的 repo_key（含 provider 前缀），否则用 full_name 生成
@@ -3965,11 +4119,12 @@ def get_user_repos_synced_at(user_id: int) -> str:
         return row[0] or "" if row else ""
 
 
-def invalidate_user_repos(user_id: int):
+def invalidate_user_repos(user_id: "str | int"):
     """把用户仓库缓存标记为过期（保留缓存行与 is_join 状态）。
 
-    写操作（托管 / 模板建仓 / 解除托管）成功后调用，令下一次 /repos/member
-    直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    写操作（托管 / 模板建仓 / 解除托管）与关系变更钩子（D109）调用，令下一次
+    /repos/member 直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    user_id 接受 str（UUIDv7 主键）与存量 int 字符串化值——不要在这里做 int() 强转。
     synced_at 置 NULL 后 get_user_repos_synced_at 返回空串，命中 _is_expired。
     """
     with db_lock:
@@ -4069,6 +4224,268 @@ def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_sec
             log.warning(f"migrate_agent_runtimes_utc_caliber failed: {e}")
     return changed
 
+
+def _columns_exist(c, table: str, cols: tuple) -> bool:
+    """Issue #646：表是否已具备指定列（未迁移旧库降级判定）。
+
+    Issue #3097：实现迁至 runtime 域（`runtime.engine.refs_reconcile.columns_exist`）
+    ——被探测的表（agent_runtimes / agent_type_runtime_pool / 会话表）归 runtime 库，
+    mgmt 域不再持有这些表的 SQL；本别名只为既有调用方（engine_select 等）过渡。
+    """
+    from src.domains.runtime.public import columns_exist
+    return columns_exist(c, table, cols)
+
+
+# ── Issue #646 双读 helper（三库独立拓扑：agent_runtimes 归**运行域**） ──
+# 历史实现在这里直查进程主库 `db`：单库/sqlite 拓扑下就是同一个库，能跑；
+# 三库拆分（GRAPE_DOMAIN_LIB=1）后 mgmt 进程主库没有 agent_runtimes →
+# 1146（Table '<mgmt 库>.agent_runtimes' doesn't exist）被 except 吞掉 → 一律
+# 返回 None。外部表现：场景保存/引擎绑定按 uid 提交必报「引擎 uid 无效」，
+# scene_precheck / 任务快照的 uid 轨道全线静默丢失。
+# 修法：只走运行域公开读原语（`_any_cursor` 自带自有 DSN / 回落进程库两种拓扑），
+# 不在 mgmt 模块里拼跨域 SQL；取数失败按「调用点+错误」告警一次，避免把后端
+# 不可达继续伪装成「用户抄错 uid」（同文件其余取数路径均 log.warning）。
+
+_UID_LOOKUP_WARNED: set = set()
+
+
+def _warn_uid_lookup_once(where: str, exc: BaseException) -> None:
+    """uid 双读取数失败去重告警：同一 (调用点, 错误摘要) 只记一次 WARNING。
+
+    这些 helper 的 except 是刻意降级（不阻断保存/建任务），但完全静默会把
+    「运行域库不可达/缺表」与「uid 真不存在」抹成同一个 None，故障只能从
+    400「引擎 uid 无效」反推。去重后既不刷屏也保留可诊断线索。
+    """
+    key = (where, f"{type(exc).__name__}: {str(exc)[:120]}")
+    if key in _UID_LOOKUP_WARNED:
+        return
+    if len(_UID_LOOKUP_WARNED) > 64:
+        _UID_LOOKUP_WARNED.clear()
+    _UID_LOOKUP_WARNED.add(key)
+    log.warning(f"engine uid lookup failed ({where}): {exc}")
+
+
+def get_engine_uid_by_runtime_id(runtime_id: int) -> str | None:
+    """Issue #646 双读：自增 id → engine_uid（无/未迁移返回 None）。"""
+    if not runtime_id:
+        return None
+    try:
+        row = _rt.read_one_any("agent_runtime_engine_uid_by_id", (int(runtime_id),))
+    except Exception as e:
+        _warn_uid_lookup_once("get_engine_uid_by_runtime_id", e)
+        return None
+    uid = row[0] if row else None
+    return str(uid) if uid else None
+
+
+def get_runtime_id_by_engine_uid(engine_uid: str) -> int | None:
+    """Issue #646 双读：engine_uid → 自增 id（uid 无效/未迁移返回 None）。"""
+    if not engine_uid:
+        return None
+    _u = str(engine_uid).strip().lower()
+    if not _u:
+        return None
+    try:
+        _ids = _rt.runtime_ids_by_engine_uids([_u])
+    except Exception as e:
+        _warn_uid_lookup_once("get_runtime_id_by_engine_uid", e)
+        return None
+    rid = int(_ids[0]) if _ids else 0
+    return rid or None
+
+
+def resolve_engine_refs(refs) -> tuple[list, list]:
+    """Issue #646 双读解析：引擎引用列表（uid 字符串或数字 id 混合）→ (ids, uids)。
+
+    - 数字 id：按 id 查 uid（旧路径兜底，未迁移库 uid=None）
+    - uid 字符串：按 uid 查 id（服务端校验；无效 uid 对应项为 None）
+    返回与输入等长的两个列表（失败项 None，调用方决定 fail-fast 或跳过）。
+    """
+    from src.kernel.engine_uid import is_uid_str
+    _refs = list(refs or [])
+    # uid 形态引用批量解析（运行域公开读原语：三库独立拓扑下不跨域直查）
+    _uid_refs = [str(r).strip().lower() for r in _refs
+                 if isinstance(r, str) and is_uid_str(str(r).strip())]
+    _uid_to_id: dict = {}
+    if _uid_refs:
+        try:
+            for _u, _rid in zip(_uid_refs, _rt.runtime_ids_by_engine_uids(_uid_refs)):
+                if _rid:
+                    _uid_to_id[_u] = int(_rid)
+        except Exception as e:
+            _warn_uid_lookup_once("resolve_engine_refs", e)
+            _uid_to_id = {}
+    ids: list = []
+    uids: list = []
+    for ref in _refs:
+        if isinstance(ref, str) and is_uid_str(ref.strip()):
+            _u = ref.strip().lower()
+            ids.append(_uid_to_id.get(_u))
+            uids.append(_u)
+        elif isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
+            rid = int(ref)
+            ids.append(rid)
+            uids.append(get_engine_uid_by_runtime_id(rid))
+        else:
+            ids.append(None)
+            uids.append(None)
+    return ids, uids
+
+
+def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = "") -> tuple:
+    """Issue #646：任务落库时的引擎引用快照（写路径双写）。
+
+    返回 (engine_uid, engine_name_snapshot, pool_engine_uids_json)：
+    - 引擎已删除/未迁移 → (None, '', '')（不阻断任务创建，快照语义）；
+    - pool_engine_ids JSON 数字数组 → uid 数组镜像（孤儿项剔除）。
+    """
+    import json as _json
+    engine_uid = None
+    snapshot = ""
+    try:
+        row = _rt.read_one_any("agent_runtime_snapshot_by_id", (int(runtime_id),))
+        if row:
+            engine_uid = row[0] or None
+            snapshot = row[1] or row[2] or ""
+    except Exception as e:
+        _warn_uid_lookup_once("engine_ref_snapshot", e)
+        engine_uid, snapshot = None, ""
+    pool_uid_json = ""
+    if pool_engine_ids:
+        try:
+            ids = _json.loads(pool_engine_ids)
+            _ids, _uids = resolve_engine_refs(ids)
+            pool_uid_json = _json.dumps([u for u in _uids if u])
+        except Exception:
+            pool_uid_json = ""
+    return engine_uid, snapshot, pool_uid_json
+
+
+def ensure_credential_uid(credential_id: int, c=None) -> str:
+    """Issue #646：确保凭据行有 credential_uid（UUIDv4，一次性终身不变）。
+
+    注册/心跳链路调用；未迁移库（无列）返回 ''。可在已有 cursor/锁内复用 c。
+    实现与 SQL 全在 owner 域（runtime_credentials 归 runtime）：
+    `src.domains.runtime.public.ensure_credential_uid`。本壳只为既有 mgmt 调用面
+    与测试连接注入缝保留，不再持有判定逻辑。
+    """
+    from src.domains.runtime import public as _rt_pub
+    return _rt_pub.ensure_credential_uid(credential_id, c)
+
+
+def _session_uid_mirror_sql(tbl: str) -> str:
+    """Issue #868：会话表 engine_uid 镜像对账 UPDATE（跨方言 NULL-safe）。
+
+    Issue #3097：SQL 生成与实现随对账例程一并迁至 runtime 域
+    （`runtime.engine.refs_reconcile.session_uid_mirror_sql`）。
+    """
+    from src.domains.runtime.public import session_uid_mirror_sql
+    return session_uid_mirror_sql(tbl)
+
+
+def _rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "") -> dict:
+    """Issue #646 / #3097：引擎行删除前的引用改绑/显式清理（薄接线，无判定逻辑）。
+
+    判定逻辑与 SQL 全部在 runtime 域
+    `src/domains/runtime/engine/refs_reconcile.py`；本例程碰的 6 张表
+    （agent_runtimes / agent_tasks / agent_type_runtime_pool / engine_capabilities /
+    devops_agent_session / chat_agent_session）按 `configs/table_ownership.json`
+    **全归 runtime 库**。`reconcile_for_caller` 按进程域选通道：mgmt 进程（删用户/
+    合并账号）经 runtime public 原语落到 runtime 域连接；runtime 进程内复用调用方
+    游标（同域事务）。
+    """
+    from src.domains.runtime.public import reconcile_for_caller
+    return reconcile_for_caller(c, list(dup_ids or []), keep_id, reason=reason)
+
+
+def rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "") -> dict:
+    """Issue #646：去重路径公开入口——待删行引用改绑到保留行 + 对账报告。"""
+    return _rebind_runtime_references(c, list(dup_ids or []), keep_id, reason=reason)
+
+
+def explicit_cleanup_runtime_references(c, runtime_ids: list, reason: str = "") -> dict:
+    """Issue #646：删除路径统一公开入口（吊销 / devstage 删环境 / 刷新过期行）。
+
+    显式清理待删引擎行的池/能力/会话/绑定/场景引用并输出对账报告，caller 随后再
+    DELETE agent_runtimes（MySQL RESTRICT FK 兜底防漏，不静默级联蒸发）。
+    """
+    return _rebind_runtime_references(c, list(runtime_ids or []), 0, reason=reason)
+
+
+# ── Issue #868 交叉预警修正：engine_uid 派生源锚定后的存量回填/改绑 ──
+# 表清单与 SQL 随实现一并归 runtime 域（`runtime.public._ENGINE_UID_REF_TABLES`），
+# mgmt 侧不再保留第二份真源。
+
+
+def rebase_engine_uid_references(c, old_uid: str, new_uid: str) -> dict:
+    """Issue #868：单个 engine_uid 变更的引用轨道整体改绑（old_uid → new_uid）。
+
+    实现（引擎行 + 池/能力/任务/消息/会话 uid 轨道，碰的表全归 runtime）已在
+    owner 域：`src.domains.runtime.public.rebase_engine_uid_references`。本壳保留
+    mgmt 侧既有调用面（db_setup 启动期回填 / 测试连接注入缝），不再持有 SQL。
+    """
+    from src.domains.runtime import public as _rt_public
+    return _rt_public.rebase_engine_uid_references(c, old_uid, new_uid)
+
+
+def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:
+    """Issue #868（交叉预警处置项③ + 种子分量 id→uid 升格）：按不可变身份锚
+    批量重算存量 engine_uid 并改绑引用。
+
+    i5（feat/devbox-sandbox-integration5，四段名改名跟随）合流迁移回填入口：
+    对每个 ``{"runtime_id": int, "engine_type": str, "provider_id": str,
+    "template_id": str, "provider_uid": str, "template_uid": str}``——runtime 行
+    按新锚重派生 uid（uid 分量成对在场 → uid 公式
+    ``credential_uid|engine_type|scope|owner_id|host_name|provider_uid|template_uid``；
+    仅 id 锚 → id 公式，T13 行为不变），**旧行 uid 从行内读取（旧 uid→新 uid
+    映射式回填，禁止按 runtime_id 重派 JOIN——id/uid 两公式产物不可区分，重派
+    会静默漏回填）**，不同则连同全部引用轨道改绑（rebase_engine_uid_references），
+    保证改名/升格场景 uid 变更一次性收敛、引用不留孤儿。
+    幂等可重跑：uid 已是目标值时为 no-op。普通引擎行不在清单内则零影响。
+    """
+    from src.kernel.engine_uid import derive_engine_uid
+    report = {"engines_rebased": 0, "skipped": 0, "pool_rows": 0, "capability_rows": 0,
+              "task_rows": 0, "task_message_rows": 0,
+              "devops_sessions": 0, "chat_sessions": 0}
+    cred_uid_by_id = {}
+    try:
+        # G-02/F1：同上——public 可调用原语 + 调用方游标（同事务读，fixture 注入缝保留）
+        from src.domains.runtime import public as _rt_pub
+        cred_uid_by_id = {int(r[0]): (r[1] or "") for r in
+                          _rt_pub.credential_id_uid_pairs(c)}
+    except Exception:
+        cred_uid_by_id = {}
+    for row in anchor_rows or []:
+        try:
+            rid = int(row.get("runtime_id") or 0)
+            if not rid:
+                report["skipped"] += 1
+                continue
+            from src.domains.runtime import public as _rt_public2
+            erow = _rt_public2.runtime_rebase_row(rid)
+            if not erow:
+                report["skipped"] += 1
+                continue
+            cred_id, name, scope, owner_id, host_name, old_uid = erow
+            cred_uid = cred_uid_by_id.get(cred_id, "") if cred_id else ""
+            new_uid = derive_engine_uid(
+                cred_uid, name or "", scope or "", owner_id or "", host_name or "",
+                engine_type=str(row.get("engine_type") or ""),
+                provider_id=str(row.get("provider_id") or ""),
+                template_id=str(row.get("template_id") or ""),
+                provider_uid=str(row.get("provider_uid") or ""),
+                template_uid=str(row.get("template_uid") or ""))
+            sub = rebase_engine_uid_references(c, old_uid, new_uid)
+            for k in report:
+                if k in sub:
+                    report[k] += sub[k]
+        except Exception as _e:
+            report["skipped"] += 1
+            log.warning(f"rebase_engine_uids_by_anchor runtime_id={row.get('runtime_id')}: {_e}")
+    log.info("Issue #868 i5合流锚定回填报告: " + json.dumps(report, ensure_ascii=False))
+    return report
+
+
 def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
@@ -4124,6 +4541,7 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
 
     scope=None 时返回全量（含 user/repo 个人行，供视图层自行按可见性过滤，
     如 settings.get_agent_runtimes 的 Engines 列表）。
+    Issue #646：附带 engine_uid/credential_uid（API 出口双带 uid+id，uid 供绑定/复制）。
     """
     import os as _os
     from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
@@ -4142,7 +4560,7 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
     # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name（内部键不变）
-    from src.domains.runtime.engine.instances import to_display as _td
+    from src.domains.runtime.public import to_display as _td
     return [
         {"id": r[0], "name": _td(r[1]), "display_name": _td(r[2] or r[1]), "installed": bool(r[3]),
          "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -4159,7 +4577,8 @@ def _rows_to_runtimes(rows) -> list[dict]:
          "org_id": r[22] or 0,
          "spawn_fail_degraded_at": r[23] or "",
          "detached_from_scenes_at": r[24] or "",
-         "probe_spawn_fail_count": int(r[25] or 0) if len(r) > 25 else 0}
+         "probe_spawn_fail_count": int(r[25] or 0) if len(r) > 25 else 0,
+         "engine_uid": r[26] if len(r) > 26 else "" or "", "credential_uid": r[27] if len(r) > 27 else "" or ""}
         for r in rows
     ]
 
@@ -4225,14 +4644,14 @@ def is_known_engine_name(name: str) -> bool:
     if name in _KNOWN:
         return True
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
             return True
     except Exception:
         pass
     try:
-        from src.domains.runtime.engine.executor import _BACKENDS
-        if name in _BACKENDS:
+        from src.domains.runtime.public import backend_registered
+        if backend_registered(name):
             return True
     except Exception:
         pass
@@ -4241,7 +4660,7 @@ def is_known_engine_name(name: str) -> bool:
 def _local_engine_info(name: str) -> tuple[bool, str]:
     """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         for b in discover_backends():
             if (b.get("name") or "").strip().lower() == (name or "").strip().lower():
                 return bool(b.get("installed")), (b.get("cli_path") or "")
@@ -4276,7 +4695,7 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         healthy, version = 0, ""
         if installed and cli_path:
             try:
-                from src.domains.runtime.engine.local_probe import probe_local_engines
+                from src.domains.runtime.public import probe_local_engines
                 probed = probe_local_engines([{"name": name, "cli_path": cli_path, "installed": True}])
                 if probed:
                     healthy = 1 if probed[0].get("healthy") else 0
@@ -4382,11 +4801,216 @@ def get_skill_category(category_id: int) -> dict | None:
         return None
     return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
 
+def list_category_dict(scope: str = "") -> list[dict]:
+    """返回启用的统一分类字典（Issue #2761）。
+
+    scope: scene / skill / 空（全部）。applies_to='both' 的行对两种 scope 都可见。
+    """
+    scope = (scope or "").strip().lower()
+    with db_lock:
+        c = _mg_db.cursor()
+        sql = ("SELECT id, parent_id, level, name, slug, icon, order_num, applies_to "
+               "FROM grape_t_category_dict WHERE is_active=1")
+        params: list = []
+        if scope in ("scene", "skill"):
+            sql += " AND applies_to IN ('both', ?)"
+            params.append(scope)
+        sql += " ORDER BY level, parent_id, order_num, id"
+        c.execute(sql, params)
+        rows = c.fetchall()
+    return [{"id": r[0], "parent_id": r[1] or 0, "level": r[2] or 1,
+             "name": r[3], "slug": r[4] or "", "icon": r[5] or "",
+             "order_num": r[6] or 0, "applies_to": r[7] or "both"} for r in rows]
+
+
+def list_category_tree(scope: str = "") -> list[dict]:
+    """两级分类树：[{...一级, children:[{...二级}]}]（Issue #2761）。"""
+    rows = list_category_dict(scope)
+    l1 = [dict(r, children=[]) for r in rows if int(r.get("level") or 1) == 1]
+    by_id = {r["id"]: r for r in l1}
+    for r in rows:
+        if int(r.get("level") or 1) == 2:
+            parent = by_id.get(int(r.get("parent_id") or 0))
+            if parent is not None:
+                parent["children"].append(dict(r))
+    return l1
+
+
+def category_path_from_map(cat_map: dict, l1_id: int = 0, l2_id: int = 0) -> dict:
+    """用预取字典构造分类路径 {l1, l2}（批量列表用，避免逐行查库）。"""
+    l1 = cat_map.get(int(l1_id or 0))
+    l2 = cat_map.get(int(l2_id or 0))
+    if l2 and not l1:
+        l1 = cat_map.get(int(l2.get("parent_id") or 0))
+    return {
+        "l1": ({k: l1[k] for k in ("id", "name", "slug")} if l1 else None),
+        "l2": ({k: l2[k] for k in ("id", "name", "slug")} if l2 else None),
+    }
+
+
+def get_category_dict_entry(category_id: int) -> dict | None:
+    """按 id 取分类字典单行；不存在/停用返回 None。"""
+    if not category_id or int(category_id) <= 0:
+        return None
+    with db_lock:
+        c = _mg_db.cursor()
+        c.execute(
+            "SELECT id, parent_id, level, name, slug, icon, order_num, applies_to "
+            "FROM grape_t_category_dict WHERE id=? AND is_active=1", (int(category_id),))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "parent_id": row[1] or 0, "level": row[2] or 1,
+            "name": row[3], "slug": row[4] or "", "icon": row[5] or "",
+            "order_num": row[6] or 0, "applies_to": row[7] or "both"}
+
+
+def category_path(l1_id: int = 0, l2_id: int = 0) -> dict:
+    """构造分类路径 {l1, l2}（缺失侧为 None），用于场景/技能读接口。"""
+    l1 = get_category_dict_entry(l1_id)
+    l2 = get_category_dict_entry(l2_id)
+    if l2 and not l1:
+        l1 = get_category_dict_entry(l2.get("parent_id") or 0)
+    return {
+        "l1": ({k: l1[k] for k in ("id", "name", "slug")} if l1 else None),
+        "l2": ({k: l2[k] for k in ("id", "name", "slug")} if l2 else None),
+    }
+
+
+#: (parent_slug, level, name, slug, icon, order_num)；parent_slug 为空表示一级域
+_CATEGORY_DICT_SEED = [
+    ("", 1, "IT研发", "it-rd", "💻", 1),
+    ("it-rd", 2, "研发工程", "it-rd-engineering", "🧱", 1),
+    ("it-rd", 2, "AI应用", "it-rd-ai-app", "🤖", 2),
+    ("it-rd", 2, "基础设施", "it-rd-infra", "☁", 3),
+    ("it-rd", 2, "测试与质量", "it-rd-test-quality", "🧪", 4),
+    ("it-rd", 2, "移动开发", "it-rd-mobile-dev", "📱", 5),
+    ("it-rd", 2, "运维与观测", "it-rd-ops-observability", "📊", 6),
+    ("it-rd", 2, "安全与合规", "it-rd-security-compliance", "🛡", 7),
+    ("it-rd", 2, "成本治理", "it-rd-cost-governance", "💰", 8),
+    ("", 1, "运营域", "operations", "📈", 2),
+    ("operations", 2, "用户与增长", "ops-user-growth", "🚀", 1),
+    ("operations", 2, "内容与商品", "ops-content-goods", "🛒", 2),
+    ("operations", 2, "渠道与营销", "ops-channel-marketing", "📣", 3),
+    ("operations", 2, "客户体验", "ops-customer-experience", "😊", 4),
+    ("operations", 2, "文档与知识管理", "ops-doc-knowledge", "📚", 5),
+    ("operations", 2, "经营研究", "ops-business-research", "🔎", 6),
+    ("operations", 2, "资源与成本", "ops-resource-cost", "🧮", 7),
+    ("operations", 2, "流程运营", "ops-process-ops", "🔁", 8),
+    ("", 1, "客户支持", "customer-support", "🎧", 3),
+    ("customer-support", 2, "客户服务", "cs-customer-service", "💬", 1),
+    ("customer-support", 2, "售前支持", "cs-pre-sales", "🤝", 2),
+    ("customer-support", 2, "售后与技术支持", "cs-after-sales-tech", "🛠", 3),
+    ("", 1, "人力资源", "hr", "👥", 4),
+    ("hr", 2, "招聘与录用", "hr-recruiting", "🧑‍💼", 1),
+    ("hr", 2, "培训与发展", "hr-training", "🎓", 2),
+    ("hr", 2, "绩效与组织", "hr-performance-org", "🏢", 3),
+    ("", 1, "财务与会计", "finance", "💰", 5),
+    ("finance", 2, "费用与报销", "fin-expense-reimburse", "🧾", 1),
+    ("finance", 2, "应收应付", "fin-receivable-payable", "📑", 2),
+    ("finance", 2, "财务分析与合规", "fin-analysis-compliance", "📉", 3),
+    ("", 1, "供应链与采购", "supply-chain", "🚚", 6),
+    ("supply-chain", 2, "采购管理", "scm-procurement", "📦", 1),
+    ("supply-chain", 2, "仓储物流", "scm-warehousing-logistics", "🏬", 2),
+    ("supply-chain", 2, "供应商协同", "scm-supplier-collab", "🤝", 3),
+    ("", 1, "生产制造", "manufacturing", "🏭", 7),
+    ("manufacturing", 2, "生产计划", "mfg-production-planning", "🗓", 1),
+    ("manufacturing", 2, "质量控制", "mfg-quality-control", "🔬", 2),
+    ("manufacturing", 2, "生产制造", "mfg-production", "⚙", 3),
+    ("", 1, "销售域", "sales", "🤝", 8),
+    ("sales", 2, "营销与增长", "sales-marketing-growth", "📣", 1),
+    ("sales", 2, "市场调研", "sales-market-research", "🔎", 2),
+    ("sales", 2, "商机跟进", "sales-opportunity-followup", "🎯", 3),
+    ("", 1, "办公协作", "collaboration", "🗂", 9),
+    ("collaboration", 2, "行政办公", "collab-admin-office", "🏢", 1),
+    ("collaboration", 2, "数据分析", "collab-data-analysis", "📊", 2),
+    ("", 1, "其他", "other", "📌", 10),
+    ("other", 2, "个人生活", "other-personal-life", "🌱", 1),
+    ("other", 2, "其他", "other-misc", "📌", 2),
+]
+
+
+def category_dict_seed_id(level_tuples: list, index: int) -> int:
+    """种子行的显式 id（Issue #2761/A12）：一级 = 1000+order，二级 = 一级 id*100+order。
+
+    与建表 DDL 的「id INTEGER PRIMARY KEY（非自增）」配套：id 由种子规则直接算出，
+    不依赖 AUTOINCREMENT / lastrowid，迁移与同步两侧可独立复算。
+    """
+    parent_slug, level, _name, _slug, _icon, order_num = level_tuples[index]
+    if int(level) == 1:
+        return 1000 + int(order_num or 0)
+    parent_id = 0
+    for j in range(index):
+        if level_tuples[j][0] == "" and level_tuples[j][3] == parent_slug:
+            parent_id = category_dict_seed_id(level_tuples, j)
+            break
+    return parent_id * 100 + int(order_num or 0)
+
+
+def seed_category_dict() -> None:
+    """幂等写入分类字典种子（Issue #2761；id 显式分配，一级先落库再写二级）。"""
+    with db_lock:
+        c = _mg_db.cursor()
+        id_by_slug: dict[str, int] = {}
+        for idx, (parent_slug, level, name, slug, icon, order_num) in enumerate(_CATEGORY_DICT_SEED):
+            parent_id = int(id_by_slug.get(parent_slug, 0)) if parent_slug else 0
+            row_id = category_dict_seed_id(_CATEGORY_DICT_SEED, idx)
+            id_by_slug[slug] = row_id
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,'both',1)",
+                    (row_id, parent_id, level, name, slug, icon, order_num))
+            except Exception:  # noqa: BLE001 - MySQL 方言兜底（重复行忽略）
+                c.execute(
+                    "INSERT IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,'both',1)",
+                    (row_id, parent_id, level, name, slug, icon, order_num))
+        _mg_db.commit()
+
+
+
+
+
+def backfill_scene_market_legacy_tags() -> int:
+    """把 scene_market 旧逗号串标签就地回填为 JSON [{name, source:"manual"}]。
+
+    Issue #2761 迁移专用（幂等：已是规范 JSON 的行跳过）。返回迁移行数。
+    """
+    with db_lock:
+        c = _mg_db.cursor()
+        c.execute("SELECT id, tags FROM scene_market WHERE tags IS NOT NULL AND tags != ''")
+        rows = c.fetchall()
+        migrated = 0
+        for row in rows:
+            raw = row[1]
+            if isinstance(raw, str) and raw.strip().startswith("["):
+                try:
+                    data = json.loads(raw)
+                except (ValueError, TypeError):
+                    data = None
+                if isinstance(data, list) and all(
+                        isinstance(x, dict) and str(x.get("name") or "").strip()
+                        for x in data):
+                    continue
+            parsed = parse_tags(raw)
+            if not parsed:
+                continue
+            c.execute("UPDATE scene_market SET tags=? WHERE id=?",
+                      (encode_tags(parsed), int(row[0])))
+            migrated += 1
+        _mg_db.commit()
+        return migrated
+
+
 def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
                       featured_only: int = 0, limit: int = 0,
                       page: int = 1, page_size: int = 20,
                       scope: str = "", repo_key: str = "",
-                      user_id: int = 0) -> tuple[list[dict], int]:
+                      user_id: int = 0, cat_l1_id: int = 0,
+                      cat_l2_id: int = 0) -> tuple[list[dict], int]:
     """查询场景市场列表（is_active=1），支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
 
     sort: latest（按 updated_at 降序）/ hot（按 like_count 降序）。
@@ -4405,6 +5029,12 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
     if category_id and category_id > 0:
         where.append("category_id=?")
         params.append(category_id)
+    if cat_l1_id and cat_l1_id > 0:
+        where.append("cat_l1_id=?")
+        params.append(cat_l1_id)
+    if cat_l2_id and cat_l2_id > 0:
+        where.append("cat_l2_id=?")
+        params.append(cat_l2_id)
     if featured_only:
         where.append("is_featured=1")
     if scope:
@@ -4442,7 +5072,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         c.execute(
             f"SELECT id, name, display_name, version, description, market_description, "
             f"icon, obs_icon_key, category_id, is_featured, like_count, source, recommended_template, "
-            f"nodes_json, onboarding, created_at, scope "
+            f"nodes_json, onboarding, created_at, scope, cat_l1_id, cat_l2_id, tags "
             f"FROM scene_market WHERE {where_sql} ORDER BY {order_by}{limit_sql}",
             params,
         )
@@ -4473,6 +5103,8 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             "nodes_json": r[13] or "[]", "onboarding": r[14] or "repo-onboarding",
             "created_at": str(r[15] or ""),
             "scope": r[16] or "official",
+            "cat_l1_id": r[17] or 0, "cat_l2_id": r[18] or 0,
+            "tags": parse_tags(r[19] if len(r) > 19 else "", limit=MAX_TAGS),
         })
     return result, total
 
@@ -4484,7 +5116,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
             "SELECT id, name, display_name, version, description, market_description, "
             "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at, "
-            "scope, repo_key, preset_custom_fields "
+            "scope, repo_key, preset_custom_fields, cat_l1_id, cat_l2_id, tags "
             "FROM scene_market WHERE id=?",
             (market_id,),
         )
@@ -4503,6 +5135,8 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
         "scope": row[19] or "official", "repo_key": row[20] or "",
         "preset_custom_fields": row[21] or "[]",
+        "cat_l1_id": row[22] or 0, "cat_l2_id": row[23] or 0,
+        "tags": parse_tags(row[24] if len(row) > 24 else "", limit=MAX_TAGS),
     }
 
 def create_scene_market(name: str, display_name: str = "", description: str = "",
@@ -4510,22 +5144,25 @@ def create_scene_market(name: str, display_name: str = "", description: str = ""
                         nodes_json: str = "[]", icon: str = "", obs_icon_key: str = "",
                         category_id: int = 1, recommended_template: str = "",
                         onboarding: str = "repo-onboarding", created_by: str = "",
-                        market_description: str = "") -> int:
+                        market_description: str = "", cat_l1_id: int = 0,
+                        cat_l2_id: int = 0, tags: str = "") -> int:
     """创建用户自定义场景（写入 scene_market 表）。返回新记录 id。
 
     UNIQUE (name, scope, source_user_id, repo_key) 约束冲突时抛 IntegrityError。
+    Issue #2761：新增 cat_l1_id / cat_l2_id / tags（tags 传 JSON 串，空串=无标签）。
     """
     with db_lock:
         c = _mg_db.cursor()
         c.execute(
             "INSERT INTO scene_market "
             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-            "category_id, is_featured, like_count, source, source_user_id, recommended_template, "
-            "nodes_json, onboarding, tags, author, content_hash, is_active, scope, repo_key, "
+            "category_id, cat_l1_id, cat_l2_id, tags, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, author, content_hash, is_active, scope, repo_key, "
             "created_by, updated_by, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,0,0,'user',?,?,?,?, '','', '', 1, ?,?, ?,?, datetime('now'),datetime('now'))",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,'user',?,?,?,?, '','', 1, ?,?, ?,?, datetime('now'),datetime('now'))",
             (name, display_name or name, "1.0.0", description, market_description or description,
-             icon, obs_icon_key, category_id, source_user_id,
+             icon, obs_icon_key, category_id, int(cat_l1_id or 0), int(cat_l2_id or 0),
+             tags or "", source_user_id,
              recommended_template, nodes_json, onboarding,
              scope, repo_key, created_by, created_by),
         )
@@ -4536,7 +5173,9 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
                         description: str = "", nodes_json: str = "",
                         icon: str = "", obs_icon_key: str = "",
                         category_id: int = 0, recommended_template: str = "",
-                        updated_by: str = "") -> bool:
+                        updated_by: str = "", cat_l1_id: int = 0,
+                        cat_l2_id: int = 0, tags: str | None = None,
+                        clear_category: bool = False) -> bool:
     """更新用户自定义场景（scope != 'official'）。返回是否更新成功。
 
     版本号自动管理：只有内容真正变更才 patch+1，无变更不涨。
@@ -4547,7 +5186,8 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
         # 读取旧数据做内容比对
         c.execute(
             "SELECT name, display_name, description, market_description, nodes_json, "
-            "icon, obs_icon_key, category_id, recommended_template, version "
+            "icon, obs_icon_key, category_id, recommended_template, version, "
+            "cat_l1_id, cat_l2_id, tags "
             "FROM scene_market WHERE id=? AND scope!='official'",
             [market_id],
         )
@@ -4555,7 +5195,9 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
         if not row:
             return False
 
-        old_name, old_display, old_desc, old_mkt_desc, old_nodes, old_icon, old_obs_key, old_cat, old_tpl, old_version = row
+        (old_name, old_display, old_desc, old_mkt_desc, old_nodes, old_icon,
+         old_obs_key, old_cat, old_tpl, old_version, old_l1, old_l2,
+         old_tags) = row
 
         # 比对变更
         changed = False
@@ -4576,6 +5218,24 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
             sets.append("obs_icon_key=?"); params.append(obs_icon_key); changed = True
         if category_id and category_id != old_cat:
             sets.append("category_id=?"); params.append(category_id); changed = True
+        if clear_category:
+            # Issue #2761：显式清空分类（0 是「不修改」的哨兵值，故需要独立开关）
+            if int(old_l1 or 0) != 0:
+                sets.append("cat_l1_id=?"); params.append(0); changed = True
+            if int(old_l2 or 0) != 0:
+                sets.append("cat_l2_id=?"); params.append(0); changed = True
+        elif cat_l1_id:
+            new_l1 = int(cat_l1_id)
+            if new_l1 != int(old_l1 or 0):
+                sets.append("cat_l1_id=?"); params.append(new_l1); changed = True
+            # 一级变更而二级未提供：重置旧二级，避免「新一级 + 旧二级」跨父级脏数据
+            new_l2 = int(cat_l2_id or 0)
+            if new_l2 != int(old_l2 or 0):
+                sets.append("cat_l2_id=?"); params.append(new_l2); changed = True
+        elif cat_l2_id and int(cat_l2_id) != int(old_l2 or 0):
+            sets.append("cat_l2_id=?"); params.append(int(cat_l2_id)); changed = True
+        if tags is not None and (tags or "") != (old_tags or ""):
+            sets.append("tags=?"); params.append(tags or ""); changed = True
         if recommended_template and recommended_template != old_tpl:
             sets.append("recommended_template=?"); params.append(recommended_template); changed = True
 
@@ -5166,11 +5826,15 @@ def managed_repo_exists(repo_key: str) -> bool:
         return False
 
 def _webhook_url_for_provider(base_url: str, provider: str) -> str:
-    """webhook 回调 URL 的平台段由平台卡 webhook_path 决定（数据驱动，无平台字面量）。"""
+    """webhook 回调 URL 的平台段由平台卡 webhook_path 决定（数据驱动，无平台字面量）。
+
+    注意：`base_url` 里原有的 path（哪怕写的是 `/webhook/gitlab`）**会被整体替换掉**——
+    同一份基址喂给不同平台得到不同回调地址，这是"配置只写公网基址"的实现落点。
+    """
     if not base_url:
         return base_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card(provider)
         _path = getattr(_card, "webhook_path", "") if _card is not None else ""
     except Exception:
@@ -5263,17 +5927,37 @@ def get_task_gateway_base_url() -> str:
     """
     return _split_url_configured_value("task_gateway_base_url")
 
-def _load_credential_json(raw: str) -> dict:
+def _load_credential_json(raw: str, *, errors: "dict | None" = None) -> dict:
     """读侧统一解密+反序列化（N1 通道加密配套）。
 
     优先 decrypt()（密文格式 {kid}:{nonce}:{ct}），解密产物/明文行统一
     json.loads。decrypt 的明文兼容（无冒号分隔符原样返回）天然覆盖历史
-    明文行——读路径零迁移。解析失败返回 {}（与原 json.loads 失败语义一致，
-    不抛不阻断）。"""
+    明文行——读路径零迁移。
+
+    边界约束（2026-11-18 架构观察 5）：``errors`` 里的 ``credential_error_detail``
+    只给服务端日志/审计用，**不得进入任何 HTTP 响应**——响应面只允许出现
+    ``credential_error`` 代码值（decrypt_failed / parse_failed），避免解密实现细节外泄。
+
+    解析失败仍返回 {}（调用方零改动），但会把失败原因写进 ``errors``
+    （2026-11-18：凭据密文解不开时此前**完全静默**，上层只能看到"没有 token"，
+    于是把"配置在但坏了"误判成"没配置"，项目页整块回落引导页）。
+    """
     from src.domains.mgmt.auth.credential_crypto import decrypt
+    if not raw:
+        return {}
     try:
-        return json.loads(decrypt(raw))
-    except Exception:
+        plain = decrypt(raw)
+    except Exception as e:
+        if errors is not None:
+            errors["credential_error"] = "decrypt_failed"
+            errors["credential_error_detail"] = str(e)[:120] or type(e).__name__
+        return {}
+    try:
+        return json.loads(plain)
+    except Exception as e:
+        if errors is not None:
+            errors["credential_error"] = "parse_failed"
+            errors["credential_error_detail"] = str(e)[:120]
         return {}
 
 def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:
@@ -5286,7 +5970,7 @@ def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:
     if not webhook_url:
         return webhook_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
     except Exception:
         card = None
@@ -5305,11 +5989,12 @@ def get_global_bot_token_for(provider: str) -> str:
     meta key 按 provider 派生（与 VCSProvider.global_bot_meta_key 同模式）；
     文件 fallback 仅存量两平台（历史迁移兼容）；config-only 平台走 meta。
     """
+    _plat = _platform_bot_token(provider)
+    if _plat:
+        return _plat
     key = f"global_bot_{provider}_token"
-    field = _GLOBAL_BOT_FILE_FIELDS.get(provider)
-    if field:
-        return _cached_get_meta(key, file_fallback_fn=lambda: _read_gbt_file_field(field))
-    return _cached_get_meta(key)
+    # D110：种子文件按 provider 取值（不再限于 gitcode/github 两平台的历史字段名）
+    return _cached_get_meta(key, file_fallback_fn=lambda: _bot_seed_value(provider, "token"))
 
 def get_global_gitee_bot_username() -> str:
     """统一入口：DB meta 表读取（60s 缓存）。
@@ -5330,6 +6015,9 @@ def get_global_bot_usernames_for(provider: str) -> list[str]:
     D15 抽象不变量（test_guard_no_new_platform_branches）：按来源链/名单数据
     派生，src/ 不得出现平台名 == 字面分支。
     """
+    _plat = _platform_bot_row(provider).get("username") or ""
+    if _plat:
+        return [_plat]
     _src = GLOBAL_BOT_USERNAME_SOURCES.get(provider)
     if _src is None:
         return get_global_bot_usernames()
@@ -5356,8 +6044,8 @@ def _path_b_prefix_clause(provider: str) -> str:
     存量数据）；其余平台（github/gitee 等）精确前缀。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW
-        _default = next(iter(_DEFAULT_CARDS_RAW))
+        from src.domains.runtime.public import default_vcs_provider
+        _default = default_vcs_provider()
     except Exception:
         _default = ""
     if provider == _default:

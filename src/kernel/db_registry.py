@@ -211,11 +211,20 @@ class _CompatCursor:
         进而让 skill sync / feedback reconcile / table maintenance 每轮都失败。
         需要行数的调用方读 `c.rowcount`（如 runtime public 的 exec_any）。
         """
-        from src.kernel.mysql_compat import translate_sql
+        from src.kernel.mysql_compat import run_virtual_sql, translate_sql
 
-        sql2 = translate_sql(sql) or sql
         if params is not None and not isinstance(params, (tuple, list, dict)):
             params = (params,)
+        # PRAGMA / sqlite_master 方言语句：translate_sql 只打标记不翻译，必须由游标
+        # 自行改写为 information_schema 查询（与 mysql_compat.Cursor 对齐）。此前本
+        # 兼容游标缺这一段，三库分域拓扑下 PRAGMA table_info 原样透传 MySQL → 1064，
+        # 启动迁移（managed_repos / user_repos / events repo_key prefix）全部静默失败。
+        try:
+            if run_virtual_sql(self._raw, sql, params):
+                return self
+        except Exception as e:  # 保持原语义：写侧失败上抛，读侧降级为不处理
+            log.warning(f"db_registry: virtual sql failed, fallback raw: {sql[:80]!r} ({e})")
+        sql2 = translate_sql(sql) or sql
         if params is None:
             self._raw.execute(sql2)
         else:

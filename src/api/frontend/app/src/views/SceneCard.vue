@@ -19,6 +19,10 @@
       <div class="scn-card-desc" :title="s.market_description || s.description || ''">
         {{ s.market_description || s.description || '' }}
       </div>
+      <div v-if="catPath" class="scn-cat">{{ catPath }}</div>
+      <div v-if="tags.length" class="scn-chips">
+        <span v-for="(t, i) in tags" :key="'t' + i" class="scn-chip">{{ t.name }}</span>
+      </div>
       <div class="scn-chain">
         <template v-for="(sk, i) in skills" :key="i">
           <span v-if="i > 0" class="scn-arr">→</span>
@@ -71,6 +75,14 @@ const DEFAULTS = {
 }
 const catBg = computed(() => CAT_BG[props.s.category_id] || 'bg-default')
 const skills = computed(() => props.s.skills || [])
+const tags = computed(() => (props.s.tags || []).slice(0, 3))
+const catPath = computed(() => {
+  const c = props.s.category || {}
+  const l1 = c.l1 && c.l1.name
+  const l2 = c.l2 && c.l2.name
+  if (l1 && l2) return l1 + ' / ' + l2
+  return l1 || l2 || props.s.category_name || ''
+})
 const iconIsUrl = computed(() => {
   const v = props.s.icon || ''
   return v.startsWith('http') || v.startsWith('/static/') || v.startsWith('/uploads/')
@@ -104,6 +116,25 @@ function onIconErr(e) {
 .scn-arr {
   color: var(--t3);
   font-size: 10px;
+}
+.scn-cat {
+  font-size: 10px;
+  color: var(--t3);
+  margin-top: 2px;
+}
+.scn-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.scn-chip {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--a) 12%, transparent);
+  color: var(--a);
 }
 /* scn-card / scn-card-bar / scn-card-body / scn-card-head / scn-card-title /
    scn-card-desc / scn-chain / scn-tag / scn-card-foot / scn-meta / scn-card-btns /

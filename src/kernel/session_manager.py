@@ -4,17 +4,44 @@ from __future__ import annotations
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.api.time_utils import normalize_event_time
-# unified_user_mapping 归 mgmt 域：DDL / 启动引导 / 读写原语统一由该域 public lib 提供（P4 收口）
-from src.domains.mgmt import public as _mgmt_public
-# 会话主表 / 群绑定表 / 消息表归 runtime 域：SQL 与建表引导统一由该域 public lib 提供（P4 收口）
-from src.domains.runtime import public as _rt
+# 能力端口：kernel 不 import src.domains；域实现在装配层 src/api/contracts_wiring.py 绑定。
+# 只在调用点解析（_accounts.x / _engines.x / _tokens.x），不在模块级取符号。
+from src.kernel.ports import _base as _ports_base
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import engines as _engines
+from src.kernel.ports import im as _im
+from src.kernel.ports import tokens as _tokens
 
-# 兼容别名：DDL 快照只在 owner 域维护，这里保留可读入口（不要在此写建表语句）
-REPO_IM_GROUP_BINDING_TABLE_SQL = _rt.repo_im_binding_ddl()
+# 兼容别名：DDL 快照只在 owner 域维护，这里保留可读入口（不要在此写建表语句）。
+# 仿照端口做法，别名只在被访问时解析——模块 import 期不触碰端口，
+# 否则装配层尚未绑定时会直接抛 PortNotBound（进程启动早期会 import 本模块）。
+_DDL_ALIASES = {
+    "REPO_IM_GROUP_BINDING_TABLE_SQL": (_im, "repo_im_binding_ddl"),
+    "UNIFIED_USER_MAPPING_TABLE_SQL": (_accounts, "unified_user_mapping_ddl"),
+}
 
-UNIFIED_USER_MAPPING_TABLE_SQL = _mgmt_public.unified_user_mapping_ddl()
 
+def __getattr__(name: str):
+    """惰性兼容别名（PEP 562）：owner 域 DDL 快照只经端口取，kernel 不 import domains。"""
+    alias = _DDL_ALIASES.get(name)
+    if alias is not None:
+        port, symbol = alias
+        return getattr(port, symbol)()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+def __getattr__(name: str):
+    """惰性兼容别名（PEP 562）：owner 域 DDL 快照只经端口取，kernel 不 import domains。"""
+    alias = _DDL_ALIASES.get(name)
+    if alias is not None:
+        port, symbol = alias
+        return getattr(port, symbol)()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+# 备份/迁移用的库文件路径（import 期定型）。注意：这**不是**连接用的路径——
+# 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
+# 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
 _db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
 db_lock = threading.RLock()
 
@@ -95,29 +122,136 @@ def prune_db_backups(path: str, keep: int | None = None) -> int:
         return 0
 
 
-if _is_mysql_backend():
-    from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
-    db = MySQLCompatDB(**mysql_config())
-    log.info(f"DB backend: MySQL RDS ({mysql_config()['host']}:{mysql_config()['port']}/{mysql_config()['database']})")
-else:
-    db = sqlite3.connect(_db_path, check_same_thread=False)
-    # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
-    try:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA busy_timeout=5000")
-        db.execute("PRAGMA synchronous=FULL")  # FULL: commit 时 fsync WAL 到磁盘
-        db.execute("PRAGMA foreign_keys=ON")
-    except Exception as e:
-        log.warning(f"SQLite pragma setup failed: {e}")
-    # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_ 前缀，
-    # 业务代码经 kernel/db.qualify_sql 运行时改写，零改动无感。
-    try:
-        from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
-        if schema_mode_enabled():
-            db = SchemaSQLiteDB(db)
-            log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
-    except Exception as e:
-        log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+# ── 惰性连接（PEP 562 风格的代理）───────────────────────────────────────────────
+#
+# 历史实现在这里**模块级**建连：`import src.kernel.session_manager` 的瞬间就打开
+# 数据库并把 inode 绑死。全仓 103 个文件在 module level 写
+# `from src.kernel.session_manager import db`，于是：
+#
+#   1) 测试里 conftest 重建 data/test_sessions.db 之后，那 103 处早先绑定的连接
+#      仍指向**已 unlink 的旧 inode**，seed 进新库的行查不出来 → 表现成「单跑绿、
+#      整域跑红」的顺序敏感（tests/mgmt 整域 762 failed，单文件全绿）。
+#   2) DEVOPS_DB_PATH / DEVOPS_DB_BACKEND 必须在**任何**模块 import 之前定型，
+#      否则后续改环境变量不生效 —— 测试只能在 conftest 顶部靠「先删库再导入」
+#      这种脆弱顺序来规避。
+#
+# 改为惰性代理：模块级 `db` 是一个永不持有连接的壳，首次**真正使用**（execute /
+# cursor / commit …）时才建连。这样模块级 `from ... import db` 拿到的是代理，
+# 重建库/换 env 之后下一次访问自然拿到新连接，顺序不再敏感。
+#
+# 兼容性：代理转发全部属性，`db.execute(...)` / `with db_lock:` / `db.close()` 等
+# 既有写法一字不改；`isinstance(db, sqlite3.Connection)` 这类反射判断会失败，
+# 全仓无此用法（有则用 db.raw 取底层连接）。
+
+
+class _LazyDB:
+    """惰性数据库代理：首次访问属性时才建立真实连接。
+
+    线程安全：双检锁（模块内只有一个实例，竞争仅发生在首次访问）。
+    reset() 用于显式丢弃当前连接（测试重建库后调用，下次访问自动重连）。
+    """
+
+    __slots__ = ("_real", "_lock", "_building")
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_real", None)
+        object.__setattr__(self, "_lock", threading.RLock())
+        object.__setattr__(self, "_building", False)
+
+    def _build(self):
+        """建立真实连接（MySQL RDS 或 SQLite），按当前环境变量决定。"""
+        if _is_mysql_backend():
+            from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
+            real = MySQLCompatDB(**mysql_config())
+            log.info(
+                "DB backend: MySQL RDS (%s:%s/%s)",
+                mysql_config()["host"], mysql_config()["port"], mysql_config()["database"],
+            )
+            return real
+
+        # 路径在**建连时**读，而不是 import 时——测试换 DEVOPS_DB_PATH 才有效。
+        path = os.environ.get(
+            "DEVOPS_DB_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"),
+        )
+        path = os.path.abspath(path)
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except Exception:
+                pass
+        # timeout 保持 sqlite3 默认 5s（PRAGMA busy_timeout=5000 也是 5s）。
+        # 曾试过 30s，整域跑时每个拿不到锁的用例要多等 25s，累积到十几分钟看着像死锁。
+        real = sqlite3.connect(path, check_same_thread=False)
+        # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
+        try:
+            real.execute("PRAGMA journal_mode=WAL")
+            real.execute("PRAGMA busy_timeout=5000")
+            real.execute("PRAGMA synchronous=FULL")
+            real.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:
+            log.warning(f"SQLite pragma setup failed: {e}")
+        # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_
+        try:
+            from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
+            if schema_mode_enabled():
+                real = SchemaSQLiteDB(real)
+                log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
+        except Exception as e:
+            log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+        return real
+
+    def get(self):
+        """返回真实连接（必要时建立）。"""
+        real = object.__getattribute__(self, "_real")
+        if real is not None:
+            return real
+        lock = object.__getattribute__(self, "_lock")
+        with lock:
+            real = object.__getattribute__(self, "_real")
+            if real is None:
+                real = self._build()
+                object.__setattr__(self, "_real", real)
+        return real
+
+    @property
+    def raw(self):
+        """底层真实连接（仅供需要 isinstance 判断的极少数调用方）。"""
+        return self.get()
+
+    def __getattr__(self, name: str):
+        # __slots__ 下 _real/_lock 走 object.__getattribute__，不会落到这里
+        return getattr(self.get(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self.get(), name, value)
+
+    def __repr__(self) -> str:
+        real = object.__getattribute__(self, "_real")
+        state = "connected" if real is not None else "not-yet-connected"
+        return f"<LazyDB {state}>"
+
+
+db = _LazyDB()
+
+
+def reset_db_connection() -> None:
+    """丢弃当前连接，下次访问自动重连（测试重建库后调用）。"""
+    lock = object.__getattribute__(db, "_lock")
+    with lock:
+        real = object.__getattribute__(db, "_real")
+        object.__setattr__(db, "_real", None)
+    if real is not None:
+        try:
+            real.close()
+        except Exception:
+            pass
+
+
+def db_connection_state() -> str:
+    """诊断用：'connected' / 'not-yet-connected'。"""
+    return "connected" if object.__getattribute__(db, "_real") is not None else "not-yet-connected"
 # chat_agent_session / repo_im_group_binding 归运行域：旧表迁移、建表、兼容列补齐语句只在
 # runtime public 一份。
 # unified_user_mapping 归 mgmt 域：同上，由该域 public 引导。
@@ -132,12 +266,37 @@ try:
 except Exception:
     _proc_dom = None
 
-if _proc_dom in (None, "", "runtime"):
-    _rt.ensure_chat_session_schema(db)
-    _rt.ensure_repo_im_binding_schema(db)
-if _proc_dom in (None, "", "mgmt"):
-    _mgmt_public.ensure_user_mapping_schema(db)
-db.commit()
+_schema_bootstrapped = False
+
+
+def _bootstrap_domain_schema(*_hook_args) -> None:
+    """按本进程所属域引导会话 / 群绑 / 用户映射三张表。
+
+    建表、旧表改名、兼容列补齐语句只在 owner 域（runtime / mgmt public）各一份，
+    这里经 kernel 端口调用，kernel 不 import domains。
+
+    历史实现是 import 期直接调域函数；端口化后 import 期解析端口会撞 PortNotBound
+    （装配层尚未绑定时），故改为由 _base.on_bind 在端口绑定后驱动，并自带幂等闸：
+    装配层重复 bind（多进程 / 重复启动路径 / 测试）不会重复建表。
+    """
+    global _schema_bootstrapped
+    if _schema_bootstrapped:
+        return
+    if not (_im.is_bound() and _accounts.is_bound()):
+        return
+    if _proc_dom in (None, "", "runtime"):
+        _im.ensure_chat_session_schema(db)
+        _im.ensure_repo_im_binding_schema(db)
+    if _proc_dom in (None, "", "mgmt"):
+        _accounts.ensure_user_mapping_schema(db)
+    db.commit()
+    _schema_bootstrapped = True
+
+
+# import 顺序不定：本模块可能早于装配（常见，db_setup 顶层就 import db）也可能晚于装配。
+# 两条路径都覆盖：注册在绑钩子 + 立即试跑一次（未绑定则空转，绑定后钩子再补）。
+_ports_base.on_bind(_bootstrap_domain_schema)
+_bootstrap_domain_schema()
 
 MAX_HISTORY = 100
 
@@ -147,7 +306,7 @@ def get_or_create_session(repo_key, source, repository, backend=""):
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     # chat_agent_session 归运行域：读/写走具名查询与写原语（任意拓扑）
-    row = _rt.read_one_any("chat_session_by_repo", (repo_key,))
+    row = _im.read_one_any("chat_session_by_repo", (repo_key,))
     if row:
         sid, hist_json, bsid, status = row
         history = []
@@ -156,13 +315,13 @@ def get_or_create_session(repo_key, source, repository, backend=""):
                 history = json.loads(hist_json)
             except json.JSONDecodeError:
                 log.warning(f"session {sid} event_history corrupted (len={len(hist_json)}), resetting to []")
-                _rt.exec_any("chat_session_history_reset", ("[]", sid))
+                _im.exec_any("chat_session_history_reset", ("[]", sid))
         if status == "failed":
-            _rt.exec_any("chat_session_set_status", ("idle", sid))
+            _im.exec_any("chat_session_set_status", ("idle", sid))
         return sid, history, bsid or "", "", False
     sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
     now = datetime.now().isoformat()
-    _rt.exec_any("chat_session_insert",
+    _im.exec_any("chat_session_insert",
                  (sid, repo_key, source, repository, "idle", "[]", now, now))
     return sid, [], "", "", True
 
@@ -172,11 +331,11 @@ def update_session(sid, history, status, oc_session_id=None, backend=""):
     if len(history) > MAX_HISTORY:
         history = history[-MAX_HISTORY:]
     if oc_session_id:
-        _rt.exec_any("chat_session_update_state",
+        _im.exec_any("chat_session_update_state",
                      (json.dumps(history), status, oc_session_id,
                       datetime.now().isoformat(), sid))
     else:
-        _rt.exec_any("chat_session_update_state_noreid",
+        _im.exec_any("chat_session_update_state_noreid",
                      (json.dumps(history), status, datetime.now().isoformat(), sid))
 
 
@@ -267,8 +426,7 @@ def get_feishu_open_id(gitcode_user, app_id=""):
     """
     if not gitcode_user:
         return None
-    from src.domains.mgmt.public import resolve_feishu_open_id
-    return _u2m_call(resolve_feishu_open_id, gitcode_user, app_id)
+    return _u2m_call(_accounts.resolve_feishu_open_id, gitcode_user, app_id)
 
 
 def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
@@ -280,14 +438,13 @@ def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
     if not user_id:
         return False
     # P4：unified_user_mapping 归 mgmt 域 —— 写语句在 mgmt public，本函数只做拓扑选择 + 提交
-    from src.domains.mgmt.public import bind_feishu_mapping_row
     _args = (user_id, open_id, feishu_name, app_id, datetime.now().isoformat())
     _conn = _u2m_conn()
     if _conn is None:
-        bind_feishu_mapping_row(*_args)
+        _accounts.bind_feishu_mapping_row(*_args)
         return True
     with db_lock:
-        bind_feishu_mapping_row(*_args, conn=_conn)
+        _accounts.bind_feishu_mapping_row(*_args, conn=_conn)
         db.commit()
         return True
 
@@ -308,7 +465,7 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     # D32: 从 grape_accounts 读 user_id + nickname（表归 mgmt 域：走该域原语，按拓扑选连接）
     user_id = 0
     try:
-        row = _u2m_call(_mgmt_public.account_auth_row, gitcode_user) if gitcode_user else None
+        row = _u2m_call(_accounts.account_auth_row, gitcode_user) if gitcode_user else None
         if row:
             user_id = row[0]
             if not gitcode_nickname:
@@ -320,15 +477,14 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     if not gitcode_user:
         return False
     # P4：判定 + 写语句都在 mgmt public（sync_user_mapping），本函数只做拓扑选择与提交
-    from src.domains.mgmt.public import sync_user_mapping
     _args = (gitcode_user, open_id, feishu_name, gitcode_nickname, app_id, user_id,
              datetime.now().isoformat())
     _conn = _u2m_conn()
     if _conn is None:
-        _res = sync_user_mapping(*_args)
+        _res = _accounts.sync_user_mapping(*_args)
     else:
         with db_lock:
-            _res = sync_user_mapping(*_args, conn=_conn)
+            _res = _accounts.sync_user_mapping(*_args, conn=_conn)
             db.commit()
     if _res.get("action") == "skipped":
         # 无 user_id 也无已有记录：跳过（user_id 必须为真实 grape_accounts.id）
@@ -345,15 +501,13 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
 def get_feishu_mapping(repo_key):
     """获取所有已知映射 {gitcode_user: {open_id, name, gitcode_nickname}}"""
-    from src.domains.mgmt.public import list_user_mappings
-    rows = _u2m_call(list_user_mappings)
+    rows = _u2m_call(_accounts.list_user_mappings)
     return {row[0] or row[1]: {"open_id": row[2], "name": row[3], "gitcode_nickname": row[4] or ""} for row in rows}
 
 
 def get_feishu_group_name_map(repo_key):
     """获取飞书群成员 {name: open_id}（从 unified_user_mapping 聚合得到）"""
-    from src.domains.mgmt.public import list_feishu_name_open_id_pairs
-    return {row[0]: row[1] for row in _u2m_call(list_feishu_name_open_id_pairs)}
+    return {row[0]: row[1] for row in _u2m_call(_accounts.list_feishu_name_open_id_pairs)}
 
 
 def get_auto_impl_enabled(repo_key):
@@ -361,7 +515,7 @@ def get_auto_impl_enabled(repo_key):
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     # repo_im_group_binding 归运行域：读走具名查询（任意拓扑）
-    row = _rt.read_one_any("repo_im_auto_impl", (repo_key,))
+    row = _im.read_one_any("repo_im_auto_impl", (repo_key,))
     return bool(row[0]) if row else False
 
 
@@ -369,14 +523,14 @@ def set_auto_impl_enabled(repo_key, enabled):
     """设置仓库的自动实现开关"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    _rt.exec_any("repo_im_set_auto_impl", (int(enabled), repo_key))
+    _im.exec_any("repo_im_set_auto_impl", (int(enabled), repo_key))
 
 
 def get_notify_enabled(repo_key):
     """查询仓库是否开启了飞书通知"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    row = _rt.read_one_any("repo_im_notify", (repo_key,))
+    row = _im.read_one_any("repo_im_notify", (repo_key,))
     # default to 0 (False) if column is NULL
     return bool(row[0]) if row and row[0] is not None else False
 
@@ -385,7 +539,7 @@ def set_notify_enabled(repo_key, enabled):
     """设置仓库的飞书通知开关"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    _rt.exec_any("repo_im_set_notify", (int(enabled), repo_key))
+    _im.exec_any("repo_im_set_notify", (int(enabled), repo_key))
 
 
 # ====== repo_im_group_binding UPSERT (FR-CQ-2) ======
@@ -398,7 +552,7 @@ def upsert_repo_im_binding(chat_id: str, repo_key: str, source: str,
     原实现要求调用方持 db_lock 且负责提交；三库独立后语句落在运行域连接上（autocommit），
     故改为自提交。调用方仍可在外层持 db_lock（无害），但不再是本函数正确性的前提。
     """
-    _rt.upsert_repo_im_binding(chat_id, repo_key, source, bind_by, app_id)
+    _im.upsert_repo_im_binding(chat_id, repo_key, source, bind_by, app_id)
 
 
 def _is_constraint_error(exc: Exception) -> bool:
@@ -419,7 +573,7 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
     _conv_type = conv_type or "general"
     _issue_no = issue_number or 0
     try:
-        _rt.exec_any("conversation_insert",
+        _im.exec_any("conversation_insert",
                      (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title,
                       user_gitcode_token, _conv_type, _issue_no))
         return cid
@@ -430,8 +584,11 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
         if not ("1062" in msg or "Duplicate" in msg or "UNIQUE" in msg):
             raise
         # 复用既有读路径（不新增跨域 SQL）：命中同键会话即返回其 id
+        _want = native_issue_number(_issue_no)
         for conv in get_user_conversations(user_id, repo_key, limit=50):
-            if int(conv.get("issue_number") or 0) == int(_issue_no) \
+            # Issue #3055：两侧统一原生形态比较（数字 int / 平台 ident str），
+            # 不得再 int() 强转（ident 会抛 ValueError 打断 get-or-create）。
+            if native_issue_number(conv.get("issue_number") or 0) == _want \
                     and (conv.get("conv_type") or "general") == _conv_type:
                 return str(conv["id"])
         raise
@@ -443,14 +600,14 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
         repo_key = to_repo_key(repo_key)
     # chat_conversations 归运行域：具名查询走任意拓扑（三库独立后无视图可读，也不再保留本地兜底 SQL）
     if repo_key:
-        rows = _rt.read_all_any("conversations_by_user_repo", (user_id, repo_key, limit))
+        rows = _im.read_all_any("conversations_by_user_repo", (user_id, repo_key, limit))
     else:
-        rows = _rt.read_all_any("conversations_by_user", (user_id, limit))
+        rows = _im.read_all_any("conversations_by_user", (user_id, limit))
     return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5] or "", "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in rows]
 
 
 def get_conversation(conv_id: str) -> dict | None:
-    row = _rt.read_one_any("conversation_by_id", (conv_id,))
+    row = _im.read_one_any("conversation_by_id", (conv_id,))
     if not row:
         return None
     return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "",
@@ -461,9 +618,9 @@ def get_conversation(conv_id: str) -> dict | None:
 def get_conversation_by_im(im_channel_id: str, user_id: str = "") -> dict | None:
     """按 IM 渠道 + 用户查询会话（IM chat 场景用，幂等复用）"""
     if str(user_id or "") not in ("", "0"):  # D105：uuid 字符串哨兵（>0 会 TypeError）
-        row = _rt.read_one_any("conversation_by_im_user", (im_channel_id, user_id))
+        row = _im.read_one_any("conversation_by_im_user", (im_channel_id, user_id))
     else:
-        row = _rt.read_one_any("conversation_by_im", (im_channel_id,))
+        row = _im.read_one_any("conversation_by_im", (im_channel_id,))
     if not row:
         return None
     return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "", "im_channel_id": row[6],
@@ -473,11 +630,11 @@ def get_conversation_by_im(im_channel_id: str, user_id: str = "") -> dict | None
 
 def update_conversation(conv_id: str, **kwargs):
     # 可写列白名单与「updated_at 同步刷新」语义在 owner 域原语里（见 runtime public）
-    _rt.update_conversation_fields(conv_id, kwargs)
+    _im.update_conversation_fields(conv_id, kwargs)
 
 
 def touch_conversation(conv_id: str):
-    _rt.exec_any("conversation_touch", (conv_id,))
+    _im.exec_any("conversation_touch", (conv_id,))
 
 
 def mark_task_processing_by_conversation(conv_id: str):
@@ -489,20 +646,20 @@ def mark_task_processing_by_conversation(conv_id: str):
     if not conv_id:
         return
     from src.kernel.repo_key import to_repo_key
-    row = _rt.read_one_any("conversation_brief", (conv_id,))
+    row = _im.read_one_any("conversation_brief", (conv_id,))
     if not row or row[2] != "task" or not row[3]:
         return
     conv_user_id, repo_key, _ct, issue_number = row
-    _rt.mark_issue_processing(conv_id, conv_user_id, to_repo_key(repo_key), issue_number)
+    _im.mark_issue_processing(conv_id, conv_user_id, to_repo_key(repo_key), issue_number)
 
 
-def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
+def join_feishu_chat(chat_id: str, conv_id: str, user_id: "int | str") -> bool:
     """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
 
     im_channel_id 从"永久绑定"降级为"当前飞书接入指针"：任一时刻一个飞书接入点
     （chat_id）只能指向一条 conversation。校验属主 + 清旧 + 设新在同一事务内完成，防竞态。
     """
-    ok = _rt.join_feishu_chat(chat_id, conv_id, user_id)
+    ok = _im.join_feishu_chat(chat_id, conv_id, user_id)
     if not ok:
         log.warning(
             f"join_feishu_chat deny: conv={conv_id[:40] if conv_id else ''} "
@@ -515,7 +672,7 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
 
 def add_message(conversation_id: str, role: str, content: str, task_id: str = "", generate_status: int = None) -> int:
     # chat_messages 归运行域：写原语返回自增主键（任意拓扑，两条插入分支保持在 owner 域）
-    return _rt.append_chat_message(conversation_id, role, content, task_id, generate_status)
+    return _im.append_chat_message(conversation_id, role, content, task_id, generate_status)
 
 
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
@@ -529,49 +686,49 @@ def _row_to_msg(r) -> dict:
 
 def get_message(msg_id: int) -> dict | None:
     """按主键取单条消息（Issue #442 撤回用）。"""
-    row = _rt.read_one_any("message_by_id", (msg_id,))
+    row = _im.read_one_any("message_by_id", (msg_id,))
     return _row_to_msg(row) if row else None
 
 
 def recall_message(msg_id: int) -> bool:
     """软删除一条消息（Issue #442：撤回 = deleted=1，保留原文供重新编辑）。"""
-    return _rt.exec_any("message_recall", (msg_id,)) > 0
+    return _im.exec_any("message_recall", (msg_id,)) > 0
 
 
 def recall_agent_replies_by_task(task_id: str) -> int:
     """软删除同一轮（task_id 相同）的 agent 回复消息（Issue #442）。"""
     if not task_id:
         return 0
-    return _rt.exec_any("message_recall_by_task", (task_id,))
+    return _im.exec_any("message_recall_by_task", (task_id,))
 
 
 def is_task_recalled(task_id: str) -> bool:
     """该轮次用户消息是否已撤回（agent_fn 落库前校验，Issue #442）。"""
     if not task_id:
         return False
-    row = _rt.read_one_any("message_user_deleted", (task_id,))
+    row = _im.read_one_any("message_user_deleted", (task_id,))
     return bool(row and row[0])
 
 
 def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
     if before_id > 0:
-        rows = _rt.read_all_any("messages_page_before", (conversation_id, before_id, limit))
+        rows = _im.read_all_any("messages_page_before", (conversation_id, before_id, limit))
     else:
-        rows = _rt.read_all_any("messages_page", (conversation_id, limit))
+        rows = _im.read_all_any("messages_page", (conversation_id, limit))
     rows = list(rows or [])
     rows.reverse()
     return [_row_to_msg(r) for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
-    _rt.exec_any("messages_delete_by_conversation", (conversation_id,))
+    _im.exec_any("messages_delete_by_conversation", (conversation_id,))
 
 
 def delete_conversation(conv_id: str):
     """删除会话 DB 记录 + 清理文件系统工作目录（防孤儿目录堆积）。"""
     # 先查 user_id（目录路径需要），删 DB 后就查不到了
     conv = get_conversation(conv_id)
-    _rt.exec_any("conversation_delete", (conv_id,))
+    _im.exec_any("conversation_delete", (conv_id,))
     # 清理 chat 工作目录：{CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/
     if conv and conv.get("user_id"):
         try:
@@ -596,17 +753,22 @@ def _chat_config_candidate_rows(user_id: int):
     而原先的读路径是 `... WHERE user_id=? ... LIMIT 1`（**无 ORDER BY**）→ 读到哪行由存储顺序
     决定，出现"界面改了配置读不回来"（读路径按写入的主键行取，避免同一用户多行时读到旧行）。
 
-    返回 [(row_id, (runtime_id, skill, skill_id)), ...]
+    返回 [(row_id, (runtime_id, skill, skill_id, engine_uid)), ...]
 
     A2 收尾：im_* 三列已不是凭证真相源（改读 grape_t_channel_installation），这里不再 SELECT。
+    Issue #868 (T10)：末位补 engine_uid（uid 优先、runtime_id 兜底双读）；
+    旧库缺列（迁移未跑）时降级为不含 engine_uid 的列集，行元组末位补 ''。
     """
     seen, out = set(), []
     # 必须**同时**校验 user_id：云端存在 id 与 user_id 跨空间错位的行（如 id='sess-cfg-37' 却属于 user_id=1），
     # 只按 id 取会把**别人的配置（含飞书 app_id/secret）**当成自己的（实测 user 37 读到 user 1 的行）。
     # 两条具名查询都在 owner 域（chat_agent_session 归运行域），列序与原 SQL 一致。
+    # Issue #868 (T10)：uid 版查询优先；旧库缺列降级 legacy 查询（行尾补空 uid 占位）
     for rows in (
-        _rt.read_all_any("chat_config_row_canonical", (f"sess-cfg-{user_id}", user_id)),
-        _rt.read_all_any("chat_config_rows_by_user", (user_id,)),
+        _chat_config_query_rows("chat_config_row_canonical", "chat_config_row_canonical_legacy",
+                                (f"sess-cfg-{user_id}", user_id)),
+        _chat_config_query_rows("chat_config_rows_by_user", "chat_config_rows_by_user_legacy",
+                                (user_id,)),
     ):
         for r in rows:
             if r[0] not in seen:
@@ -615,21 +777,39 @@ def _chat_config_candidate_rows(user_id: int):
     return out
 
 
-def _chat_config_row_engine(runtime_id: int):
+def _chat_config_query_rows(uid_name: str, legacy_name: str, params: tuple) -> list:
+    """uid 版具名查询失败（旧库缺 engine_uid 列）时降级 legacy 版，行尾补 '' 占位。"""
+    try:
+        return [tuple(r) for r in _im.read_all_any(uid_name, params)]
+    except Exception:
+        return [tuple(r) + ("",) for r in _im.read_all_any(legacy_name, params)]
+
+
+def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None):
     """解析配置行指向的引擎，返回 (backend_name, usable)。
 
+    Issue #868 (T10)：engine_uid 优先（uid 命中且引擎可用即用 uid 轨道），
+    uid 失效/未命中回退 runtime_id（id 兜底）。
     usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
     """
+    if engine_uid:
+        urow = _im.read_one_any("agent_runtime_name_by_uid", (engine_uid,))
+        if urow and urow[0]:
+            _un = (urow[0] or "").strip().lower()
+            if _engines.is_known_engine_name(_un):
+                return urow[0], True
+            log.warning(f"get_chat_config: engine_uid={engine_uid} 指向未知引擎 '{urow[0]}'，回退 runtime_id={runtime_id}")
+        else:
+            log.warning(f"get_chat_config: engine_uid={engine_uid} 失效（引擎行已删除），回退 runtime_id={runtime_id}")
     if not runtime_id:
         return "", True
-    brow = _rt.read_one_any("agent_runtime_name_by_id", (runtime_id,))
+    brow = _im.read_one_any("agent_runtime_name_by_id", (runtime_id,))
     if not brow or not brow[0]:
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
         return "", False
-    from src.domains.mgmt.user.db import is_known_engine_name
     _n = (brow[0] or "").strip().lower()
-    if not is_known_engine_name(_n):
+    if not _engines.is_known_engine_name(_n):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 指向未知引擎 '{brow[0]}'，按未配置处理")
         return "", False
@@ -650,7 +830,8 @@ def _pick_chat_config_row(user_id: int):
     if not cands:
         return None, None, ""
     for rid, cand in cands:
-        name, usable = _chat_config_row_engine(cand[0])
+        # Issue #868 (T10)：uid 优先（cand 末位 engine_uid），失效回退 runtime_id
+        name, usable = _chat_config_row_engine(cand[0], cand[3] if len(cand) > 3 else "")
         if usable:
             return rid, cand, name
     rid, cand = cands[0]
@@ -687,11 +868,12 @@ def get_chat_config(user_id: int) -> dict:
         log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                  f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
     return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                           "", user_id=user_id)
+                                           "", engine_uid=(row[3] or "") if len(row) > 3 else "",
+                                           user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
-                                    updated_at, user_id: int = 0) -> dict:
+                                    updated_at, engine_uid: str = "", user_id: int = 0) -> dict:
     """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
@@ -705,15 +887,14 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     """
     if not backend and not runtime_id:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
-            _rid = resolve_local_engine(user_id) or 0
+            _rid = _engines.resolve_local_engine(user_id) or 0
             if _rid:
-                backend = engine_name(_rid) or ""
+                backend = _engines.engine_name(_rid) or ""
                 runtime_id = _rid
         except Exception:
             pass
     return {"backend": backend, "runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
-            "updated_at": updated_at}
+            "engine_uid": engine_uid, "updated_at": updated_at}
 
 
 def _resolve_chat_runtime_id(backend: str) -> int:
@@ -726,24 +907,34 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     """
     if not backend:
         return 0
-    from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name, get_local_direct_runtime_id
-    from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
-    _rid = resolve_instance_id(backend, scope="user")
-    if _rid is not None and scope_of_runtime(_rid) == "user":
+    _rid = _engines.resolve_instance_id(backend, scope="user")
+    if _rid is not None and _engines.scope_of_runtime(_rid) == "user":
         return _rid
     if "-" not in backend:
-        from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_REMOTE
-        if get_execution_mode() != EXEC_MODE_REMOTE:
-            _local = get_local_direct_runtime_id(backend)
+        if _engines.get_execution_mode() != _engines.EXEC_MODE_REMOTE:
+            _local = _engines.get_local_direct_runtime_id(backend)
             if _local:
                 return _local
-    return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
+    return _engines.get_runtime_id_by_name(backend) or _engines.ensure_default_backend(backend) or 0
+
+
+def _chat_config_engine_uid_rt(runtime_id: int) -> str:
+    """Issue #868 (T10) 双写：runtime_id → engine_uid（任意拓扑具名查询；行不存在/未迁移返回 ''）。"""
+    if not runtime_id:
+        return ""
+    try:
+        row = _im.read_one_any("agent_runtime_engine_uid_by_id", (int(runtime_id),))
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
 
 
 def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0):
     # 写前收敛重复 + upsert 在 owner 域同一事务内（见 runtime public.upsert_chat_config_row）：
     # 同 user 的 repo_key='' 行只保留 'sess-cfg-{user_id}'（账号迁移残留行一并清理）。
-    _rt.upsert_chat_config_row(user_id, runtime_id=runtime_id, skill=skill, skill_id=skill_id)
+    # Issue #868 (T10)：engine_uid 双写（runtime_id 的 uid 镜像，任意拓扑具名查询）。
+    _im.upsert_chat_config_row(user_id, runtime_id=runtime_id, skill=skill, skill_id=skill_id,
+                               engine_uid=_chat_config_engine_uid_rt(runtime_id))
 
 
 def set_chat_config(user_id: int, **kwargs):
@@ -767,7 +958,6 @@ def set_chat_config(user_id: int, **kwargs):
         runtime_id = _resolve_chat_runtime_id(data.get("backend") or "")
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
-        from src.domains.mgmt.user.db import resolve_skill_id
-        data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
+        data["skill_id"] = _tokens.resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
                            skill_id=data.get("skill_id", 0))

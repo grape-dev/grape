@@ -72,9 +72,9 @@ def visible_repo_keys(user: Dict[str, Any]) -> List[str]:
     if not uid:
         return []
     try:
-        from src.domains.mgmt.user.db import get_user_repos
-        from src.domains.mgmt.routes.repos import _filter_repos     # 口径同源，勿另写一套
-        from src.domains.mgmt.user.org_db import is_org_personal
+        from src.domains.mgmt.public import get_user_repos
+        from src.domains.mgmt.public import _filter_repos     # 口径同源，勿另写一套
+        from src.domains.mgmt.public import is_org_personal
     except Exception:
         return []
     org_id = str(user.get("org_id") or "")
@@ -113,7 +113,7 @@ def _cred_visibility(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[str, L
     _is_personal = False
     if org_id:
         try:
-            from src.domains.mgmt.user.org_db import is_org_personal
+            from src.domains.mgmt.public import is_org_personal
             _is_personal = is_org_personal(org_id)
         except Exception:
             _is_personal = False
@@ -179,13 +179,13 @@ def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int
     _is_personal = False
     if org_id:
         try:
-            from src.domains.mgmt.user.org_db import is_org_personal
+            from src.domains.mgmt.public import is_org_personal
             _is_personal = is_org_personal(org_id)
         except Exception:
             _is_personal = False
     from src.domains.runtime.public import obs_overview_credential_status_rows_any
     try:
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
     except Exception:
         derive_runtime_health = None
     try:

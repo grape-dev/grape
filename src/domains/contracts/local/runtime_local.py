@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from src.kernel import db_registry, session_manager
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.kernel.db import t_runtime
 from src.domains.contracts.runtime_service import RuntimeService
 
@@ -135,6 +136,55 @@ class RuntimeServiceLocal(RuntimeService):
                 return {}
             cols = [d[0] for d in c.description] if c.description else []
             return dict(zip(cols, row)) if cols else dict(row)
+
+    def list_credential_rows(self) -> list:
+        from src.domains.runtime.public import list_credential_rows as _f
+        return [list(r) for r in _f()]
+
+    def list_engine_tags(self, runtime_id: int, enabled_only: bool = True) -> list:
+        from src.domains.runtime.public import list_engine_tags as _f
+        return list(_f(int(runtime_id), bool(enabled_only)))
+
+    def get_agent_session_row(self, repo_keys: list, agent_type: str, token_field: str) -> list:
+        from src.domains.runtime.public import agent_session_row as _f
+        row = _f(repo_keys, agent_type, token_field)
+        return list(row) if row else []
+
+    def get_event_status_counts(self, repo_keys: list, agent_type: str) -> list:
+        from src.domains.runtime.public import event_status_counts as _f
+        return [list(r) for r in _f(repo_keys, agent_type)]
+
+    def search_events(self, repo_keys: list, agent_type: str, keyword: str = "",
+                      page: int = 1, page_size: int = 10) -> dict:
+        from src.domains.runtime.public import events_search as _f
+        total, rows = _f(repo_keys, agent_type, keyword, page, page_size)
+        return {"total": int(total), "rows": [list(r) for r in rows]}
+
+    def get_credential_health_rows(self) -> list:
+        """复用 runtime public 的具名查询（不复制 SQL）。"""
+        from src.domains.runtime.public import credential_health_rows_any
+        return [list(r) for r in credential_health_rows_any()]
+
+    def get_inflight_task_count(self, repo_keys: list) -> int:
+        from src.domains.runtime.public import inflight_task_count_any
+        return int(inflight_task_count_any(repo_keys))
+
+    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+        """A Issue 卡片状态——复用 runtime public 的 issue_card_row 具名查询。
+
+        不自己拼 SQL：字段顺序与过滤条件都在 owner 域里定义，这里只做形状归一，
+        保证 Local 与 Remote 两条路径返回同一结构。
+        """
+        from src.domains.runtime.public import read_one_any
+        _num = native_issue_number(issue_number)
+        row = read_one_any("issue_card_row", (repo_key, _num))
+        if not row:
+            return {}
+        return {"id": None, "stage": row[0], "owner_agent": row[1],
+                "a2a_seq": row[2], "updated_at": row[3], "assignee": row[4] or "",
+                "scene_id": row[5] or "", "scene_user_id": row[6] or 0,
+                "parent_issue_id": row[7] or "", "is_subtask_mode": row[8] or 0,
+                "allow_scene_override": row[9] or 0}
 
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         """A 用户操作推进 Issue 状态。
@@ -269,7 +319,7 @@ class RuntimeServiceLocal(RuntimeService):
         key = out.pop("file_path", "") or ""
         if key:
             try:
-                from src.domains.runtime.storage import get_storage
+                from src.domains.runtime.public import get_storage
 
                 storage = get_storage()
                 if storage is not None:
@@ -358,3 +408,47 @@ class RuntimeServiceLocal(RuntimeService):
                 "aggregate": {"total": total, "done": done,
                               "failed": by_status.get("failed", 0),
                               "completion_rate": round(done / total, 4) if total else 0.0}}
+
+    # ---- Issue #3097：占位账号业务数据判定 / 引擎引用对账 ----
+
+    def user_business_table_counts(self, user_id) -> dict:
+        """N14 本域业务数据按表计数；缺表/不可读 → count=None（不抛，语义交调用方）。"""
+        out: dict[str, dict] = {}
+        for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
+            try:
+                with self._lock:
+                    c = self._db.cursor()
+                    c.execute(f"SELECT COUNT(*) FROM {self._t(table)} WHERE user_id=?", (user_id,))
+                    row = c.fetchone()
+                out[table] = {"count": int(row[0] or 0) if row else 0}
+            except Exception as exc:  # noqa: BLE001  # 缺表/不可读：交给调用方按定稿语义处理
+                code = ""
+                args = getattr(exc, "args", ())
+                if args and isinstance(args[0], int):
+                    code = str(args[0])
+                text = f"{exc}"
+                lowered = text.lower()
+                out[table] = {
+                    "count": None, "error": text, "code": code,
+                    "missing_table": (code == "1146" or "1146" in text
+                                      or "doesn't exist" in lowered
+                                      or "no such table" in lowered),
+                }
+        return out
+
+    def reconcile_engine_references(self, runtime_ids: list, keep_id: int = 0,
+                                    reason: str = "") -> dict:
+        """N15 引用对账（本域写；判定/SQL 在 engine.refs_reconcile）。"""
+        from src.domains.runtime.public import reconcile_engine_references as _apply
+        return _apply(list(runtime_ids or []), keep_id, reason=reason)
+
+    def transfer_user_business_data(self, from_user_id, to_user_id) -> dict:
+        """N16 本域业务数据归属转移（幂等 UPDATE；失败抛异常）。"""
+        done: dict[str, int] = {}
+        with self._lock:
+            c = self._db.cursor()
+            for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
+                c.execute(f"UPDATE {self._t(table)} SET user_id=? WHERE user_id=?",
+                          (to_user_id, from_user_id))
+                done[table] = int(c.rowcount or 0)
+        return done

@@ -77,7 +77,11 @@ class FeishuSender:
             log.warning("[feishu] send failed chat=%s kind=%s err=%r",
                         (out.chat_id or "")[:24], (out.metadata or {}).get("kind", ""), e)
             return SendResult(ok=False, error=str(e))
-        return SendResult(ok=True, message_id=str(result or ""))
+        # 底层 legacy 发送函数失败时返回空串（成功返回 "ok"/msg_id）：空 = 没发出去。
+        # 2026-11-18 实障：这里恒 ok=True，导致 404 的飞书通知被 outbox 记成 sent（静默丢失）。
+        if not result:
+            return SendResult(ok=False, error="empty_result")
+        return SendResult(ok=True, message_id=str(result))
 
 
 def _wants_card(out: OutboundMessage) -> bool:

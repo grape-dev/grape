@@ -6,10 +6,13 @@
     "user_management": "User Management",
     "user_list": "Users",
     "whitelist": "Signup Whitelist",
+    "login_whitelist": "Login Whitelist",
     "change_password": "Change Password",
     "logout": "Sign Out",
     "auth_channels": "OAuth Login Channels",
-    "vcs_platforms": "Repo Platforms"
+    "vcs_platforms": "Code Hosting Platforms",
+    "channels": "OAuth Channels",
+    "platforms": "Code Hosting Platforms"
   },
   "login": {
     "subtitle": "System Admin · Config Center",
@@ -69,7 +72,7 @@
     "devstage_hint": "AI DevSpace default spec (3c6g/ARM); leave blank to keep current value. env GRAPE_DEVSTAGE_* overrides",
     "effective_value": "effective {{v}} (env override)",
     "runtime_effective": "Effective value",
-    "webhook_url_hint": "Deployment-level: public callback URL of this service, shared by all repo platforms",
+    "webhook_url_hint": "Public base URL (no platform path): the callback path is appended from the platform card as /webhook/&lt;platform&gt;; any /webhook/xxx here is ignored",
     "webhook_url_ph": "Public webhook callback URL of this service (deployment-level, shared by all platforms)"
   },
   "token_health": {
@@ -176,7 +179,7 @@
   },
   "login_whitelist": {
     "title": "OAuth Login Whitelist",
-    "desc": "GitCode/GitHub login whitelist",
+    "desc": "all OAuth login channels",
     "toggle": "Whitelist Toggle",
     "toggle_on": "Enabled",
     "toggle_off": "Disabled",
@@ -209,7 +212,8 @@
     "col_provider": "Provider",
     "col_username": "Username",
     "legacy_tag": "legacy column",
-    "empty_warn": "Switch is on but the whitelist is empty: all OAuth logins are denied. Add entries first (admin password login is unaffected)."
+    "empty_warn": "Switch is on but the whitelist is empty: all OAuth logins are denied. Add entries first (admin password login is unaffected).",
+    "no_providers": "No OAuth login channel is configured yet — enable one under the Login Channels menu first"
   },
   "error": {
     "LOGIN_RATE_LIMITED": "Too many login attempts, please try later",
@@ -262,7 +266,7 @@
     "save_failed": "Save failed"
   },
   "platforms": {
-    "title": "Repo Platforms",
+    "title": "Code Hosting Platforms",
     "subtitle": "Repo platform cards · dialects and capability bits",
     "col_name": "Name",
     "col_dialect": "Dialect",
@@ -346,5 +350,271 @@
     "global_bot_meta_key": "Meta storage key of the global bot token",
     "global_bot_status_meta_key": "Meta storage key of the global bot token expiry status"
   },
-  "adv_fields": "Advanced fields"
+  "adv_fields": "Advanced fields",
+  "field": {
+    "type": {
+      "what": "OAuth protocol mode.",
+      "values": "oauth2 | oidc | saml",
+      "note": "⚠ Only oidc has id_token claims fallback."
+    },
+    "auth_url": {
+      "what": "Authorization page URL.",
+      "values": "https://…/authorize",
+      "note": "All three endpoints are required; a card missing one is rejected."
+    },
+    "token_url": {
+      "what": "Code-to-token endpoint.",
+      "values": "https://…/token",
+      "note": "Wrong endpoint shows up as token exchange failure."
+    },
+    "user_url": {
+      "what": "User info endpoint.",
+      "values": "https://…/user (may contain {access_token})",
+      "note": "⚠ Huawei needs the token as a query parameter."
+    },
+    "emails_endpoint": {
+      "what": "Optional email endpoint.",
+      "values": "https://…/emails or empty",
+      "note": "Empty means this channel provides no email."
+    },
+    "scope": {
+      "what": "Scopes requested at login (least privilege).",
+      "values": "space separated, e.g. user_info / repo",
+      "note": "⚠ Changing it affects every link of this channel; Gitee requires the exact scope set and a matching previous grant; insufficient scope makes repo calls return SCOPE_INSUFFICIENT."
+    },
+    "pkce_enabled": {
+      "what": "PKCE toggle.",
+      "values": "true | false",
+      "note": "⚠ Gitee must keep this false, otherwise the consent page shows every login."
+    },
+    "id_field": {
+      "what": "Field holding the unique id.",
+      "values": "e.g. id / openID",
+      "note": "⚠ Huawei only exposes openID."
+    },
+    "login_field": {
+      "what": "Field used as login name.",
+      "values": "e.g. login / preferred_username",
+      "note": "Falls back to external id when missing."
+    },
+    "name_field": {
+      "what": "Field used as display name.",
+      "values": "e.g. name / nickname",
+      "note": "Empty falls back to the login name."
+    },
+    "avatar_field": {
+      "what": "Field holding avatar URL.",
+      "values": "e.g. avatar_url",
+      "note": "Empty uses the platform default rule."
+    },
+    "redirect_uri": {
+      "what": "OAuth callback URL.",
+      "values": "https://…/api/auth/callback/<provider> or empty",
+      "note": "Empty derives from server_base_url; a wrong value gives redirect_uri_mismatch."
+    },
+    "accept_header": {
+      "what": "Accept header for user info.",
+      "values": "e.g. application/vnd.github+json",
+      "note": "GitHub returns legacy fields without it."
+    },
+    "repo_links": {
+      "what": "Repo platforms this channel may drive (read-only).",
+      "values": "[{\"repo_provider\":\"gitee\"}]",
+      "note": "A configured pair lets that channel's token drive the platform (login writes the user-platform relation). No tier field exists; deleting the pair stops driving."
+    },
+    "bot_username": {
+      "what": "Config declaration (1:1).",
+      "values": "platform login or empty",
+      "note": "⚠ The single bot account of this platform; its token lives in bot_token_enc (encrypted)."
+    },
+    "enabled": {
+      "what": "Whether the object is enabled (DB authoritative).",
+      "values": "true | false",
+      "note": "⚠ Config files never override it; import never touches this column."
+    },
+    "dialect": {
+      "what": "API dialect family.",
+      "values": "github | gitlab",
+      "note": "⚠ Same family covers several platforms (gitcode/gitee/github all use github)."
+    },
+    "host": {
+      "what": "Web host.",
+      "values": "e.g. gitee.com",
+      "note": "Do not put the API base here."
+    },
+    "api_base": {
+      "what": "API base URL.",
+      "values": "e.g. https://gitee.com/api/v5",
+      "note": "Do not put the web host here."
+    },
+    "api_auth": {
+      "what": "How the token is sent.",
+      "values": "query_token | token_header | private_token",
+      "note": "Wrong mode shows up as 401."
+    },
+    "webhook_path": {
+      "what": "Webhook receiving path.",
+      "values": "/webhook/<provider>",
+      "note": "Must match the platform webhook config."
+    },
+    "event_header": {
+      "what": "Event header name.",
+      "values": "e.g. X-GitHub-Event",
+      "note": "Used to dispatch webhook handlers."
+    },
+    "webhook_verify": {
+      "what": "Webhook verification mode.",
+      "values": "hmac | token_compare",
+      "note": "⚠ hmac verifies a signature; token_compare compares a URL token."
+    },
+    "webhook_dialect": {
+      "what": "Webhook payload family.",
+      "values": "github_web | gitee_v5",
+      "note": "⚠ Must be declared; hosting is fail-closed when missing."
+    },
+    "clone_auth": {
+      "what": "Clone/push credential form.",
+      "values": "basic_password | x_access_token | oauth2",
+      "note": "Affects git remote URL building."
+    },
+    "issue_write_form": {
+      "what": "Issue creation endpoint form.",
+      "values": "repo_path | owner_param",
+      "note": "⚠ Gitee needs owner_param, otherwise 404."
+    },
+    "branch_create_form": {
+      "what": "Branch creation form.",
+      "values": "form | refs_sha",
+      "note": "Platform-specific request body."
+    },
+    "pr_head_filter": {
+      "what": "PR list head filter form.",
+      "values": "owner_ref | bare_ref",
+      "note": "⚠ Wrong form returns an empty list silently."
+    },
+    "issue_search": {
+      "what": "Whether issue search is supported.",
+      "values": "true | false",
+      "note": "Drives the issue picker."
+    },
+    "git_tree_family": {
+      "what": "Git tree API family.",
+      "values": "v5 | github_api",
+      "note": "Platform-specific tree endpoint."
+    },
+    "client_id": {
+      "what": "OAuth app client_id (encrypted column, only a boolean is returned).",
+      "values": "copy from the platform app page",
+      "note": "⚠ Empty keeps the current value; plaintext is never readable again."
+    },
+    "client_secret": {
+      "what": "OAuth app client_secret (encrypted column, only a boolean is returned).",
+      "values": "copy from the platform app page",
+      "note": "⚠ Empty keeps the current value; fill the new one to rotate."
+    },
+    "enabled_channel": {
+      "what": "Whether this login channel accepts logins (DB is authoritative).",
+      "values": "true | false",
+      "note": "⚠ When off, the login entry answers 403 CHANNEL_DISABLED (already signed-in users are unaffected); config never overwrites it and import never changes the column."
+    },
+    "enabled_platform": {
+      "what": "Whether this platform is shown to users (DB is authoritative).",
+      "values": "true | false",
+      "note": "⚠ When off, users cannot see the platform at all (directory, repo lists, explicit requests answer 403) while internal/script hosting keeps working; config never overwrites it and import never changes the column."
+    }
+  },
+  "page": {
+    "channels_title": "Login Channels",
+    "platforms_title": "Code Hosting Platforms",
+    "channels_hint": "Definition fields come from the config file (read-only). This page writes credentials and the enable switch only.",
+    "platforms_hint": "Dialect/endpoints/capabilities come from platform cards and repo-credentials.json (read-only). This page writes the enable switch and bot accounts only.",
+    "readonly_tag": "Read-only · from config",
+    "enabled": "Enabled",
+    "save_creds": "Save credentials",
+    "save": "Save",
+    "configured_keep": "configured (leave empty to keep)",
+    "not_configured": "not configured",
+    "loading": "Loading…",
+    "load_failed": "Failed to load",
+    "save_failed": "Failed to save",
+    "toggle_failed": "Failed to toggle",
+    "requires_scope": "Required scope",
+    "no_scope_check": "(not enforced)",
+    "bot_support": "bot",
+    "bot_supported": "supported",
+    "bot_unsupported": "not supported",
+    "bot_accounts": "Bot",
+    "bot_default": "default",
+    "bot_normal": "regular",
+    "bot_none": "(no bot account configured)",
+    "empty_val": "(empty)",
+    "need_one": "Fill at least one of client_id / client_secret",
+    "client_id": "client_id",
+    "client_secret": "client_secret",
+    "page_help_title": "What you can change here",
+    "no_doc": "No description yet (add to i18n or config _fields)",
+    "bot_no": "not supported",
+    "unset": "not configured",
+    "channels_note": "⚠ Edit configs/oauth-providers.json then restart or re-import.",
+    "bot_yes": "supported",
+    "scope_none": "(not enforced)",
+    "switch": "Enable",
+    "pill_on": "enabled",
+    "platforms_note": "⚠ Edit config files and re-import; 'enabled' is DB-owned and never overridden by config.",
+    "bots_note": "⚠ Responses never contain token values; repo-level bindings win over the default account.",
+    "help_title": "What you can change here",
+    "pill_off": "disabled",
+    "keep": "configured (leave empty to keep)",
+    "scope_need": "Required scope",
+    "empty": "(empty)",
+    "bots_what": "Operating identity and its token (encrypted). At most one is_default per platform.",
+    "bots": "Bot accounts",
+    "bot": "bot",
+    "values_label": "Values: ",
+    "health_healthy": "healthy",
+    "health_degraded": "degraded",
+    "health_unhealthy": "unhealthy",
+    "bot_username_ph": "bot username",
+    "bot_token_ph": "bot token (encrypted at rest)",
+    "bot_save_token": "Rotate with the token above",
+    "bot_need_username": "bot username is required",
+    "bot_add_failed": "Add bot failed",
+    "bot_save_failed": "Save token failed",
+    "bot_del_failed": "Delete bot failed",
+    "back": "Back to list",
+    "col_name": "Name",
+    "col_provider": "Key",
+    "col_enabled": "Status",
+    "col_health": "Bot token health",
+    "col_drive": "Code hosting platforms it can access",
+    "col_bots": "Bot accounts",
+    "channels_empty": "No OAuth login channel registered yet (they appear after config import)",
+    "platforms_empty": "No repo platform registered yet (they appear after config import)",
+    "domain_note_channel": "Login channel card: OAuth login/binding credentials, decoupled from repo platforms",
+    "domain_note_platform": "Hosting platform card: repo hosting and proxy behavior, decoupled from login channels",
+    "channels_list_sub": "Login channels handle OAuth login and binding. Tap a row for credentials and the code hosting platforms it can access.",
+    "platforms_list_sub": "Code hosting platforms handle repo hosting and proxy behaviour. Tap a row for definition fields, bot accounts and token health.",
+    "sec_state": "State",
+    "sec_credential": "Credentials",
+    "sec_definition": "Definition fields (read-only · from config)",
+    "keep_hint": "Leave blank to keep the current value",
+    "self_domain": "Same domain: the channel itself is this code hosting platform, so it can access it without any pair.",
+    "bot_username": "Bot username",
+    "bot_token": "Bot token (encrypted at rest)",
+    "bot_save": "Save",
+    "bot_clear": "Clear token",
+    "bots_hint": "One bot per platform; leave the token blank to keep it. Without a bot, hosting falls back to the user's PAT",
+    "bots_none_short": "no bot (falls back to your PAT)",
+    "bots_all_inactive": "all bots inactive (falls back to your PAT)",
+    "disable_confirm": "Turning off {provider} hides it from users entirely: {repos} repositories, {users} users and {managed} hosted repositories stop being listed (platform credentials of {pats} users are kept). Continue?",
+    "disable_confirm_title": "Turn this platform off",
+    "disable_confirm_btn": "Turn off",
+    "cancel": "Cancel"
+  },
+  "provider_name": {
+    "huawei": "Huawei",
+    "gitcode": "GitCode",
+    "github": "GitHub",
+    "gitee": "Gitee"
+  }
 }

@@ -5,7 +5,7 @@
   - 任何已有 pair 的引用数**上升** → 红；
   - 引用数下降但基线未收紧 → 红（提示运行 --update-baseline，保持棘轮咬合）。
 
-归属口径：`docs/weekly-11/table-owner.tsv`（P0 冻结，102 张基表，来自三库实况）。
+归属口径：`configs/table_ownership.json`（P0 冻结，102 张基表，来自三库实况）。
 扫描口径见 `scripts/foreign_table_refs.py`（只算四进程运行代码 api/kernel/domains）。
 """
 from __future__ import annotations
@@ -17,7 +17,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "foreign_table_refs.py"
-OWNER_TSV = REPO_ROOT / "docs" / "weekly-11" / "table-owner.tsv"
+# 归属唯一权威：configs/table_ownership.json（原 table_ownership.json 已并入并删除）
+OWNER_JSON = REPO_ROOT / "configs" / "table_ownership.json"
 BASELINE = REPO_ROOT / "docs" / "weekly-11" / "foreign-refs-allowlist.csv"
 
 
@@ -33,9 +34,9 @@ def _module():
 
 def _scan():
     mod = _module()
-    assert OWNER_TSV.is_file(), f"归属清单缺失：{OWNER_TSV}"
+    assert OWNER_JSON.is_file(), f"归属清单缺失：{OWNER_JSON}"
     assert BASELINE.is_file(), f"棘轮基线缺失：{BASELINE}"
-    owner = mod.load_owner(OWNER_TSV)
+    owner = mod.load_owner_json(OWNER_JSON)
     assert len(owner) >= 100, f"归属清单异常：只有 {len(owner)} 张表"
     rows = mod.scan(REPO_ROOT / "src", owner)
     return mod, rows
@@ -55,7 +56,7 @@ def test_baseline_kept_tight():
     _, improvements = mod.check(rows, base)
     assert not improvements, (
         "跨域引用已下降，但基线未收紧；请运行：\n"
-        "  python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv "
+        "  python3 scripts/foreign_table_refs.py --owner-json configs/table_ownership.json "
         "--baseline docs/weekly-11/foreign-refs-allowlist.csv --update-baseline\n"
         + "\n".join(improvements[:30])
     )

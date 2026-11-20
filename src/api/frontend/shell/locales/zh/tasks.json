@@ -48,9 +48,9 @@
     "pending": "待处理",
     "processing": "处理中",
     "completed": "已完成",
-    "tag_pending": "<b></b>待处理",
-    "tag_processing": "<b></b>处理中",
-    "tag_completed": "<b></b>已完成",
+    "tag_pending": "待处理",
+    "tag_processing": "处理中",
+    "tag_completed": "已完成",
     "tag_pending_review": "待审核",
     "tag_cancelled": "已取消",
     "tag_awaiting_input": "待澄清",
@@ -160,5 +160,9 @@
     "abort_confirm": "结束这台接管？只会停当前节点，不会重新派发任务。",
     "abort_done": "已结束接管",
     "abort_failed": "结束接管失败"
+  },
+  "board": {
+    "refresh_failed_keep": "看板刷新失败，已保留上次数据",
+    "retry": "重试"
   }
 }

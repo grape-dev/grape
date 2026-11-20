@@ -339,6 +339,13 @@
 
       <!-- ═══ 看板模式：六状态列 ═══ -->
       <div v-else class="isk-boardwrap">
+        <!-- Issue #2649：整刷失败保留旧帧，给可重试软横幅（不清空看板） -->
+        <div v-if="boardRefreshFailed" class="isk-board-banner">
+          <span>⚠ {{ t('board.refresh_failed_keep') }}</span>
+          <button class="tsk-btn tsk-btn-ghost" @click="retryBoardRefresh">
+            ↻ {{ t('board.retry') }}
+          </button>
+        </div>
         <div
           v-for="col in boardCols"
           :key="col.k"
@@ -393,7 +400,13 @@
             <!-- 列底：分屏提示（仅「仓库全部」看板；列内触底加载该列下一页） -->
             <div v-if="boardPagedView" class="isk-board-foot">
               <span v-if="boardCursorOf(col.k).loading">{{ tc('loading') }}</span>
-              <span v-else-if="boardCursorOf(col.k).hasMore">↓ {{ t('load_more') }}</span>
+              <span
+                v-else-if="boardCursorOf(col.k).hasMore"
+                class="isk-loadmore-btn"
+                :title="t('load_more')"
+                @click="boardFetch(BOARD_CURSOR_OF_COL[col.k])"
+                >↓ {{ t('load_more') }}</span
+              >
               <span v-else-if="boardGrouped[col.k].length"
                 >— {{ t('tab.all') }} {{ boardGrouped[col.k].length }} —</span
               >
@@ -602,22 +615,26 @@
           <template v-else>
             <div class="isk-fld">
               <label>
-                {{ t('create.title_label') }} <span class="isk-required">*</span>
+                <span class="isk-fld-lbl"
+                  >{{ t('create.title_label') }} <span class="isk-required">*</span></span
+                >
                 <span class="isk-fld-hint">{{ t('create.title_hint') }}</span>
                 <input v-model="modal.title" :placeholder="t('create.title_placeholder')" />
               </label>
             </div>
             <div class="isk-fld">
               <label>
-                {{ t('create.desc_label') }} <span class="isk-required">*</span>
-                <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
-                <span
-                  class="isk-sync-title"
-                  role="button"
-                  :title="t('create.sync_title_to_desc')"
-                  :aria-label="t('create.sync_title_to_desc')"
-                  @click.prevent="syncTitleToDesc"
-                  >↧</span
+                <span class="isk-fld-lbl"
+                  >{{ t('create.desc_label') }} <span class="isk-required">*</span>
+                  <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
+                  <span
+                    class="isk-sync-title"
+                    role="button"
+                    :title="t('create.sync_title_to_desc')"
+                    :aria-label="t('create.sync_title_to_desc')"
+                    @click.prevent="syncTitleToDesc"
+                    >↧</span
+                  ></span
                 >
                 <span class="isk-fld-hint">{{ t('create.desc_hint') }}</span>
                 <textarea
@@ -677,7 +694,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, shallowRef, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import {
+  boardFrameKey,
+  createBoardRound,
+  settleBoardRound,
+  aggregateBoardTasks,
+  decideBoardRound,
+} from '../lib/boardRound.js'
 
 const G = globalThis
 
@@ -726,7 +750,7 @@ const deployDraft = ref('')
 let deployLongPressTimer = null
 let pollTimer = null
 const PER_PAGE = 15 // 「我的需求」客户端分页（全量拉取后本地切页）
-const SERVER_PAGE = 30 // Issue #926：服务端分屏每屏条数（滚动追加）
+const SERVER_PAGE = 20 // Issue #926：服务端分屏每屏条数（滚动追加；看板列游标同款=每列一页 20 条）
 // Issue #926：服务端分页状态（仅「仓库全部」视图生效；我的需求条数有限，保持全量拉取）
 const tasksHasMore = ref(false) // 服务端 has_more，false 时停止滚动追加
 const tasksTotal = ref(null) // 服务端 total；null = 未给精确值（q 模式省 COUNT）
@@ -734,6 +758,9 @@ const tasksLoading = ref(false) // 分屏请求在途（列表尾 sentinel 展�
 const tasksAppendLoading = ref(false) // 滚动追加在途（防并发重复拉同屏）
 let taskReqSeq = 0 // Issue #2984d027a：请求序号——重置类请求让旧在途响应失效
 let taskServerPage = 1 // 下一次要拉的服务端页码（成功后才推进）
+// 首屏请求被 silent abort（导航取消）后自动重拉一次；重拉再被取消才转终态，
+// 避免「同 hash 重复点菜单 → abort 旧请求但视图不重挂载 → 无人重发」造成永久加载中。
+let _silentAbortRetried = false
 const listScrollEl = ref(null) // 列表滚动容器（IntersectionObserver 的 root）
 const listSentinelEl = ref(null) // 列表尾部哨兵
 let listObserver = null
@@ -742,6 +769,8 @@ let listObserver = null
 // ═══════════ I18N ═══════════
 const TASK_DEFAULTS = {
   page_title: '需求中心',
+  'board.refresh_failed_keep': '看板刷新失败，已保留上次数据',
+  'board.retry': '重试',
   view_mine: '我的需求',
   view_repo_all: '仓库全部',
   view_list: '列表',
@@ -828,7 +857,6 @@ const ISSUE_DEFAULTS = {
   'cross_pipeline.scene_placeholder': '选择目标场景',
   'cross_pipeline.assignee_hint': '移交后由目标场景的 Agent 接手',
   'cross_pipeline.loading_scenes': '场景加载中...',
-
 }
 function t(key, params) {
   const full = 'tasks.' + key
@@ -1093,12 +1121,10 @@ const filtered = computed(() => {
 function repoOf() {
   return currentRepo()
 }
-const serverPagedView = computed(
-  () => viewMode.value === 'repo_all' && taskView.value === 'list' && !!repoOf()
-)
-const boardPagedView = computed(
-  () => viewMode.value === 'repo_all' && taskView.value === 'board' && !!repoOf()
-)
+// 列表分屏：mine 同样分页（N2-①：此前只认 repo_all → mine 列表第 2 屏不可达）
+const serverPagedView = computed(() => taskView.value === 'list' && !!repoOf())
+// 看板按列分页：仓库全部 / 我的需求 一视同仁（mine 也走列游标，各自一页懒加载）
+const boardPagedView = computed(() => taskView.value === 'board' && !!repoOf())
 const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / PER_PAGE)))
 function clampPage() {
   if (page.value > totalPages.value) page.value = 1
@@ -1153,7 +1179,8 @@ function toggleFilterStatus(k) {
   else filterStatuses.value.push(k)
   page.value = 1
   // Issue #926：状态筛选映射 statuses= 走服务端过滤 → 重置回第 1 屏重拉
-  if (repoOf() && viewMode.value === 'repo_all') resetAndLoad()
+  // mine 分页后同样要服务端过滤（本地过滤只作用于已加载页）
+  if (repoOf()) resetAndLoad()
 }
 function toggleFilterAssignee(a) {
   const i = filterAssignees.value.indexOf(a)
@@ -1253,16 +1280,43 @@ const BOARD_CURSOR_STATUSES = {
   cancelled: 'cancelled',
 }
 const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
+// Issue #2649：整刷回合化（旧前端 issues.js 的语义等价迁移）
+const boardEpoch = ref(0) // 全局回合序号：reset 自增，旧 epoch 的在途响应一律丢弃
+const boardRound = shallowRef(null) // 进行中的整刷回合（createBoardRound 产出）。必须 shallowRef：ref 会把 round 深度 reactive 化 → round !== boardRound.value 恒成立 → commitBoardRound 永早退、boardRound 永不清空 → 列内翻页(滚动/点击)全被 boardRound 守卫拦死（#2649 粘合层缺陷，浏览器内实测 identity=false）
+const boardRefreshFailed = ref(false) // 软失败态：保留旧帧 + 可重试提示
+const boardFrameId = ref('') // 帧身份：只有身份变化才允许清空旧帧
+function boardFrameIdNow() {
+  const repo = repoOf()
+  const repoKey = repo
+    ? repo.repoKey || repo.fullName || (repo.owner || '') + '/' + (repo.name || '')
+    : ''
+  return boardFrameKey([
+    repoKey,
+    viewMode.value,
+    sortOrder.value,
+    query.value || '',
+    (filterStatuses.value || []).join(','),
+    (filterAssignees.value || []).join(','),
+  ])
+}
 function resetBoardCursors() {
+  boardEpoch.value += 1 // 乱序保护：旧 epoch 的响应不得回填新回合
   Object.keys(BOARD_CURSOR_STATUSES).forEach((k) => {
     colCursor[k] = { page: 1, hasMore: true, loading: false, total: null, seq: 0 }
   })
-  tasks.value = []
-  sel.value = null
+  // 同身份（如确认完成同仓刷新）保留旧帧到回合 commit 原子替换，消除中间态空板；
+  // 身份变化（切仓/切视图/切搜索/切筛选）才清空，避免 A 仓卡片被当旧帧长期展示。
+  const fk = boardFrameIdNow()
+  if (fk !== boardFrameId.value) {
+    boardFrameId.value = fk
+    tasks.value = []
+    sel.value = null
+    G.window._tasksById = {}
+  }
   tasksHasMore.value = false
   tasksTotal.value = null
   taskServerPage = 1
-  G.window._tasksById = {}
+  boardRefreshFailed.value = false // 新回合开始即清软失败态（重试也走这条链路）
 }
 resetBoardCursors() // 先建空游标：看板分屏关闭时模板也能安全读取
 function boardCursorOf(colKey) {
@@ -1286,23 +1340,39 @@ function mergeBoardItems(items) {
     if (upd) detailView.value = upd
   }
 }
-// 取某游标的一页（merge=true 只刷新第 1 屏，用于轮询对账）
+// 取某游标的一页（merge=true 只刷新第 1 屏用于轮询对账；round=整刷回合，先缓冲后原子提交）
 function boardFetch(key, opts) {
   const repo = repoOf()
   const cur = colCursor[key]
   if (!repo || !cur) return Promise.resolve()
   const merge = !!(opts && opts.merge)
-  if (cur.loading) return Promise.resolve()
-  if (!merge && !cur.hasMore) return Promise.resolve()
+  const round = (opts && opts.round) || null
+  const epoch = boardEpoch.value // Issue #2649：捕获回合序号，reset 后过期响应整体丢弃
+  if (cur.loading) {
+    // Issue #2649（QA 第 2 轮）：列在途时本次取数跳过，但回合必须收敛——否则
+    // pending 永不归零，boardRound 长期非空会静默挡住列内翻页且不提示。按 keep
+    // 处理：保留旧帧 + 可重试软横幅。
+    if (round) {
+      round.failed = true
+      round.error = new Error('column still loading: ' + key)
+      if (settleBoardRound(round)) commitBoardRound(round)
+    }
+    return Promise.resolve()
+  }
+  // Issue #2649：回合在途时暂停列内滚动追加，防回合提交后跳页
+  if (!merge && !round && boardRound.value) return Promise.resolve()
+  if (!merge && !round && !cur.hasMore) return Promise.resolve()
   cur.loading = true
   const seq = ++cur.seq
   const page = merge ? 1 : cur.page
+  // URL 按 viewMode 分支：仓库全部→仓库列表；我的需求→mine（statuses 下推同口径）
+  const baseMine =
+    viewMode.value === 'mine'
+      ? '/issues/mine?status=&repo_key=' + encodeURIComponent(repo.repoKey || (repo.owner + '/' + repo.name))
+      : '/issues/' + repo.owner + '/' + repo.name + '?status='
   let url =
-    '/issues/' +
-    repo.owner +
-    '/' +
-    repo.name +
-    '?sort_order=' +
+    baseMine +
+    '&sort_order=' +
     sortOrder.value +
     '&mode=time&per_page=' +
     SERVER_PAGE +
@@ -1316,21 +1386,49 @@ function boardFetch(key, opts) {
   return API()
     .get(url)
     .then(function (d) {
+      if (epoch !== boardEpoch.value) return // Issue #2649：过期回合（then 侧丢弃）
       if (seq !== cur.seq) return // 已被本列更新的请求取代
       cur.loading = false
       const items = d.issues || d.tasks || []
-      if (!merge) cur.page = page + 1
+      // 游标推进：整刷（含渐进）与滚动追加都要推进——否则滚到底永远重拉 page=1
+      if (!merge || round) cur.page = page + 1
       cur.hasMore = !!d.has_more
       cur.total = d.total === null || d.total === undefined ? null : d.total
+      if (round) {
+        // 整刷：先缓冲到回合，收敛后一次提交（无中间态空板）。
+        // 首屏例外：无旧帧时列到列渐进上屏——先到的列先渲染，最慢的列
+        // 不再阻塞整个看板（每列 header 的 loaded/total 也随本列响应到达）。
+        round.items[key] = items
+        if (round.progressive && items.length) {
+          mergeBoardItems(items)
+          loaded.value = true
+          loadError.value = ''
+        }
+        if (settleBoardRound(round)) commitBoardRound(round)
+        return
+      }
       mergeBoardItems(items)
       loaded.value = true
       loadError.value = ''
     })
     .catch(function (e) {
+      if (epoch !== boardEpoch.value) return // 过期回合（catch 侧同样丢弃）
       if (seq !== cur.seq) return
       cur.loading = false
-      if (e && e.name === 'AbortError' && e.silent) return
-      if (G.window._currentView !== 'tasks') return
+      if (e && e.name === 'AbortError' && e.silent) {
+        if (round) abandonBoardRound(round)
+        return
+      }
+      if (G.window._currentView !== 'tasks') {
+        if (round) abandonBoardRound(round)
+        return
+      }
+      if (round) {
+        round.failed = true
+        round.error = e
+        if (settleBoardRound(round)) commitBoardRound(round)
+        return
+      }
       loadError.value = t('load_failed', { msg: e.message })
       loaded.value = true
     })
@@ -1341,7 +1439,8 @@ function boardFetch(key, opts) {
 const takeovers = ref({})
 function loadTakeovers() {
   const repo = currentRepo()
-  const key = repo && (repo.repoKey || (repo.owner && repo.name ? repo.owner + '/' + repo.name : ''))
+  const key =
+    repo && (repo.repoKey || (repo.owner && repo.name ? repo.owner + '/' + repo.name : ''))
   if (!key) {
     takeovers.value = {}
     return
@@ -1383,7 +1482,65 @@ function abortTakeover(tk) {
   })
 }
 function loadBoardAll(opts) {
-  return Promise.all(Object.keys(BOARD_CURSOR_STATUSES).map((k) => boardFetch(k, opts)))
+  // Issue #2649：整刷回合——列数即 pending，全部收敛后一次性原子替换旧帧
+  const round =
+    opts && opts.round
+      ? opts.round
+      : opts && opts.merge
+        ? null
+        : createBoardRound(Object.keys(BOARD_CURSOR_STATUSES))
+  // 首屏渐进：无旧帧的整刷，每列到即渲（列头 loaded/total 随各列响应到达）；
+  // 有旧帧的刷新保持 #2649 原子替换（无中间态空板）。
+  if (round) {
+    round.progressive = !tasks.value.length
+    boardRound.value = round
+  }
+  return Promise.all(
+    Object.keys(BOARD_CURSOR_STATUSES).map((k) =>
+      boardFetch(k, round ? Object.assign({}, opts, { round }) : opts)
+    )
+  )
+}
+// Issue #2649：回合收敛点——成功=单次赋值原子替换；失败=保留旧帧 + 可重试软横幅
+function commitBoardRound(round) {
+  if (round !== boardRound.value) return // 已被更新的整刷取代
+  boardRound.value = null
+  const decision = decideBoardRound(round, {
+    inBoardView: boardPagedView.value && G.window._currentView === 'tasks',
+    hasOldFrame: tasks.value.length > 0,
+  })
+  if (decision.action === 'drop') return
+  if (decision.action === 'error') {
+    loadError.value = t('load_failed', {
+      msg: (round.error && round.error.message) || 'board refresh failed',
+    })
+    loaded.value = true
+    return
+  }
+  if (decision.action === 'keep') {
+    boardRefreshFailed.value = true // 保留旧帧 + 软横幅，不清空看板
+    return
+  }
+  const agg = aggregateBoardTasks(Object.keys(BOARD_CURSOR_STATUSES).map((k) => round.items[k]))
+  tasks.value = agg.list // 原子替换：渲染一帧完成新旧切换
+  if (sel.value) sel.value = agg.byId[sel.value.id] || null
+  if (detailView.value) {
+    const upd = agg.byId[detailView.value.id]
+    if (upd) detailView.value = Object.assign(detailView.value, upd)
+  }
+  loaded.value = true
+  loadError.value = ''
+  boardRefreshFailed.value = false
+}
+// Issue #2649：导航/切页导致回合作废——不视为刷新失败，收敛后由 commit 直接丢弃
+function abandonBoardRound(round) {
+  if (!round || round !== boardRound.value) return
+  round.aborted = true
+  if (settleBoardRound(round)) commitBoardRound(round)
+}
+function retryBoardRefresh() {
+  resetBoardCursors()
+  loadBoardAll()
 }
 // 列内滚到接近底部 → 只加载该列所属游标的下一页
 function onBoardScroll(colKey, ev) {
@@ -1620,6 +1777,16 @@ const pipelineCardHtml = computed(() => {
     let label = '⇄ 接续自 #' + sourceIssue
     if (sourceScene) label += '（' + sourceScene + '）'
     html += `<div class="isk-contin">${label}</div>`
+  }
+  // Issue #2432：失败节点提示（失败状态 + 失败节点名，不展示失败原因）
+  if (data.failed_node_name) {
+    html +=
+      '<div style="font-size:11px;color:var(--r);background:rgba(255,59,48,.08);' +
+      'border-radius:8px;padding:6px 10px;margin-bottom:10px"><b>' +
+      esc(t('pipeline.status_failed')) +
+      '</b> · ' +
+      esc(String(data.failed_node_name)) +
+      '</div>'
   }
   // 节点进度条
   if (nodes.length > 0) {
@@ -2688,9 +2855,12 @@ function loadTasks(opts) {
   const seq = ++taskReqSeq
   const reqPage = merge ? 1 : append ? taskServerPage : 1
   // 「仓库全部」视图：服务端分页 + q/statuses 过滤；「我的需求」：条数有限，保持全量拉取
-  const usePaging = viewMode.value === 'repo_all' && !!repo
+  // 「仓库全部」与「我的需求」都走服务端分页（需求量大的账号全量拉取要 4MB/3.6s
+  // —— _batch_* 富化 2935 条 + 巨型 JSON）。URL 按 viewMode 分支；分页响应处理共用。
+  const usePaging = true
+  const repoAll = viewMode.value === 'repo_all' && !!repo
   let apiUrl
-  if (usePaging) {
+  if (repoAll) {
     const apiStatuses = [
       ...new Set(
         filterStatuses.value.reduce(function (acc, k) {
@@ -2714,12 +2884,26 @@ function loadTasks(opts) {
     if (filterAssignees.value.length)
       apiUrl += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   } else {
+    // mine 分页后状态过滤必须下推服务端：本地 filtered 只作用于已加载页，
+    // 30 条里没有该状态时会显示成空列表（曾出现「只显示处理中，其余列全空」）
+    const mineStatuses = [
+      ...new Set(
+        filterStatuses.value.reduce(function (acc, k) {
+          return acc.concat(TASK_STATUS_TO_API[k] || [])
+        }, [])
+      ),
+    ].join(',')
     apiUrl =
       '/issues/mine?status=&repo_key=' +
       encodeURIComponent(repoKey) +
       '&sort_order=' +
       sortOrder.value +
-      '&mode=time' +
+      '&mode=time&per_page=' +
+      SERVER_PAGE +
+      '&page=' +
+      reqPage +
+      (query.value ? '&q=' + encodeURIComponent(query.value) : '') +
+      (mineStatuses ? '&statuses=' + encodeURIComponent(mineStatuses) : '') +
       (filterAssignees.value.length
         ? '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
         : '')
@@ -2762,7 +2946,7 @@ function loadTasks(opts) {
       } else {
         tasks.value = items
       }
-      if (usePaging && d.page !== undefined) {
+      if (d.page !== undefined) {
         tasksTotal.value = d.total === null || d.total === undefined ? null : d.total
         // 已滚动超过第 1 屏时，has_more 只能按已加载量对账（避免第 1 屏口径误停滚动）
         const beyondFirst = taskServerPage > 2
@@ -2775,8 +2959,9 @@ function loadTasks(opts) {
         // 成功后才推进页码：失败不推进 → 重试不跳屏
         if (!merge) taskServerPage = reqPage + 1
       } else {
-        tasksTotal.value = items.length
-        tasksHasMore.value = false
+        // mine 无分页元数据（旧后端）：按已加载量兜底
+        tasksTotal.value = d.total !== undefined ? d.total : items.length
+        tasksHasMore.value = d.has_more !== undefined ? !!d.has_more : false
       }
       loaded.value = true
       loadError.value = ''
@@ -2834,7 +3019,29 @@ function loadTasks(opts) {
       if (seq !== taskReqSeq) return // 已被更新的请求取代，静默丢弃
       tasksAppendLoading.value = false
       tasksLoading.value = false
-      if (e.name === 'AbortError' && e.silent) return
+      // silent abort 只允许一种含义：用户确实离开了这个视图。
+      // 之前这里无条件 return，于是「视图还在、但请求被 nav signal 取消」也被当成
+      // 静默丢弃 —— 而那一刻已经没有别的请求会来置 loaded，页面就永久停在「加载中」，
+      // 直到 18s 后看门狗兜底报「加载失败: request aborted or timed out」。
+      // 实测证据：请求已返回 200、signal 却已 abort（st=200 且 ab=1），then 不执行、
+      // catch 静默 return，加载终态无人写。
+      if (e.name === 'AbortError' && e.silent) {
+        if (G.window._currentView !== 'tasks') return   // 真离开了：静默丢弃
+        if (loaded.value) return                        // 已有数据：保留旧帧，不打扰
+        // 视图还在且首屏仍空 → 先自动重拉一次（此刻导航已结束，新 signal 是活的）
+        if (!_silentAbortRetried) {
+          _silentAbortRetried = true
+          // 3s 窗口内只自动重拉一次：既让「被取消的首屏」有机会落地，
+          // 又不会在确实反复被取消时打成死循环。
+          setTimeout(function () { _silentAbortRetried = false }, 3000)
+          loadTasks()
+          return
+        }
+        // 重拉仍被取消 → 给可重试的终态，绝不让 loading 成为终态
+        loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+        loaded.value = true
+        return
+      }
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
       G.window._deeplinkIssueNumber = null
@@ -2929,6 +3136,28 @@ function teardownListObserver() {
 }
 
 // ═══════════ 轮询（场景识别，30s） ═══════════
+// 加载看门狗：首屏数据若因「请求被静默取消」而永远不落地（loaded=false），
+// 页面会永久停在「加载中」。8s 兜底重拉一次；再 10s 仍空则显示错误+重试按钮。
+let _loadWatchdog = null
+function armLoadWatchdog() {
+  if (_loadWatchdog) clearTimeout(_loadWatchdog)
+  _loadWatchdog = setTimeout(function () {
+    _loadWatchdog = null
+    if (loaded.value || G.window._currentView !== 'tasks') return
+    try {
+      loadTasks()
+    } catch (e) {}
+    _loadWatchdog = setTimeout(function () {
+      _loadWatchdog = null
+      if (loaded.value || G.window._currentView !== 'tasks') return
+      loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+      loaded.value = true
+    }, 10000)
+  }, 8000)
+}
+function disarmLoadWatchdog() {
+  if (_loadWatchdog) { clearTimeout(_loadWatchdog); _loadWatchdog = null }
+}
 function startPoll() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(function () {
@@ -3002,8 +3231,10 @@ onMounted(function () {
   loadTakeovers()
   startPoll()
   loadDeployLink()
+  armLoadWatchdog()
 })
 onBeforeUnmount(function () {
+  disarmLoadWatchdog()
   stopPoll()
   teardownListObserver()
   if (deployLongPressTimer) clearTimeout(deployLongPressTimer)
@@ -3354,9 +3585,12 @@ onBeforeUnmount(function () {
 }
 /* 详情卡（v-html 内容） */
 .isk :deep(.isk-card) {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--c);
   border-radius: 14px;
-  border: 0.5px solid var(--b, #e8e8ed);
+  border: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 3px 10px rgba(0, 0, 0, 0.03);
   padding: 14px 16px;
   margin-bottom: 12px;
 }
@@ -3424,9 +3658,12 @@ onBeforeUnmount(function () {
 }
 /* 附件 */
 .isk-attach-card {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--c);
   border-radius: 14px;
-  border: 0.5px solid var(--b, #e8e8ed);
+  border: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 3px 10px rgba(0, 0, 0, 0.03);
   padding: 14px 16px;
   margin-bottom: 12px;
 }
@@ -3736,6 +3973,7 @@ onBeforeUnmount(function () {
 }
 /* 看板 */
 .isk-boardwrap {
+  position: relative;
   flex: 1;
   display: flex;
   gap: 10px;
@@ -3743,6 +3981,29 @@ onBeforeUnmount(function () {
   padding-bottom: 4px;
   flex-shrink: 0;
   min-height: 0;
+}
+/* Issue #2649：整刷失败的软横幅（绝对定位于看板顶部，不挤占列宽） */
+.isk-board-banner {
+  position: absolute;
+  z-index: 5;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c-issue) 14%, transparent);
+  color: var(--c-issue);
+  font-size: 12px;
+  white-space: nowrap;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+.isk-board-banner .tsk-btn {
+  padding: 1px 10px;
+  font-size: 12px;
 }
 .isk-board-col {
   min-width: 240px;
@@ -4030,11 +4291,15 @@ onBeforeUnmount(function () {
 }
 .isk-modal {
   width: min(520px, 92vw);
+  /* 2026-11-16：原来是 §23 统一玻璃（--glass-strong 85% 半透），跟输入框的实心白
+     撞在一起显得脏；按主人要求把两者对调 —— 弹窗改实心亮面（--c），输入框改浅底（--bg）。 */
   background: var(--c, #fff);
-  border: 0.5px solid #d2d2d7;
-  border-radius: 14px;
+  border: 0.5px solid var(--b, #d2d2d7);
+  border-radius: 18px;
   padding: 18px 20px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.1);
 }
 .isk-modal-head {
   display: flex;
@@ -4080,6 +4345,14 @@ onBeforeUnmount(function () {
   font-size: 13px;
   color: var(--t2, #333);
 }
+/* label 是 column flex：标题文字与红色 * 必须包在同一行（.isk-fld-lbl）里，
+   否则每个子节点各占一行，* 会另起一行（老页用 <div>13px</div> 包住这一行）。 */
+.isk-fld-lbl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
 .isk-fld-hint {
   font-size: 11px;
   color: var(--t3, #888);
@@ -4090,7 +4363,8 @@ onBeforeUnmount(function () {
   padding: 7px 10px;
   border: 1px solid var(--b, #ccc);
   border-radius: 6px;
-  background: var(--c, #fff);
+  /* 与弹窗对调：弹窗实心亮面(--c)、输入框浅底(--bg)，避免两块同色糊成一片 */
+  background: var(--bg, #f5f5f7);
   color: var(--t, #111);
   font-size: 13px;
   font-family: inherit;

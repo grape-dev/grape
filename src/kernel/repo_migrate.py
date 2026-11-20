@@ -24,6 +24,10 @@ import os
 import shutil
 
 from src.kernel.config import log
+# 依赖方向已倒置：kernel 只认端口，域实现在组装层（src/api/contracts_wiring.py）绑定。
+# 只在调用点解析（_repos.x / _accounts.x），不在模块级取符号。
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import repos as _repos
 
 class RepoMigrateError(Exception):
     """迁移失败（DB 事务已回滚，可安全重试）。"""
@@ -71,19 +75,16 @@ def migrate_repo_key(repo_key: str, new_owner: str, new_repo: str,
 
     old_keys = _normalize_keys(repo_key)
 
-    from src.domains.mgmt import public as _mgmt_mig
-    from src.domains.runtime import public as _rt_mig
-
     # 跨库事务不可得：按域拆成两段，各自在本域一个事务内完成。
     # 两段都是「删旧留新」语义 → 重复执行幂等；第二段失败时第一段已提交，调用方重试即收敛。
     try:
-        _mg_stats = _mgmt_mig.migrate_repo_key_mgmt(repo_key, old_keys, new, new_owner, new_repo)
+        _mg_stats = _repos.migrate_repo_key_mgmt(repo_key, old_keys, new, new_owner, new_repo)
     except Exception as e:
         log.warning(f"Migrate repo_key mgmt segment failed (rolled back) {repo_key}->{new}: {e}")
         _audit(repo_key, new, operator_id, {"error": str(e), "rolled_back": True, "segment": "mgmt"})
         raise RepoMigrateError(f"migrate repo_key failed at mgmt segment: {e}") from e
     try:
-        _rt_stats = _rt_mig.migrate_repo_key_runtime(old_keys, new)
+        _rt_stats = _repos.migrate_repo_key_runtime(old_keys, new)
     except Exception as e:
         # 第一段（mgmt）已提交 —— 如实记录，不做静默重试
         log.warning(f"Migrate repo_key runtime segment failed after mgmt committed "
@@ -133,8 +134,7 @@ def _migrate_workspace_dir(old: str, new: str) -> int:
 
 def _audit(old: str, new: str, operator_id: int, detail: dict) -> None:
     try:
-        from src.domains.mgmt.auth import audit as auth_audit
-        auth_audit.log_audit(
+        _accounts.log_audit(
             "repo_migrate",
             user_id=operator_id,
             detail={"old_repo_key": old, "new_repo_key": new, **detail},

@@ -85,50 +85,68 @@
               {{ t('no_third_party_platforms') }}
             </div>
             <div v-for="p in providers" :key="p.provider" class="ac__prowwrap">
-              <!-- token 过期 -->
-              <div
-                v-if="isBound(p.provider) && isExpired(p.provider)"
-                class="ac__prow ac__prow--expired"
-              >
+              <!-- 未开通 OAuth（D105k 纯 OAuth 三态：绑定/解绑全不渲染，PAT 的一切归凭据管理） -->
+              <div v-if="!channelConfigured(p.provider)" class="ac__prow">
+                <span
+                  class="ac__avatar ac__avatar--icon"
+                  v-html="platformIcon(p.provider, 22)"
+                ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
-                    <span v-html="platformIcon(p.provider, 20)"></span>
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg ac__expired-tag">{{ t('token_expired') }}</span>
+                    <span class="ac__stag ac__stag--idle">{{ t('bind_unavailable_badge') }}</span>
+                  </div>
+                  <div class="ac__linkhint">{{ t('bind_unavailable_hint') }}</div>
+                </div>
+              </div>
+              <!-- token 过期 -->
+              <div
+                v-else-if="isBound(p.provider) && isExpired(p.provider)"
+                class="ac__prow ac__prow--expired"
+              >
+                <span
+                  class="ac__avatar ac__avatar--icon"
+                  v-html="platformIcon(p.provider, 22)"
+                ></span>
+                <div class="ac__flex1">
+                  <div class="ac__pname">
+                    <span class="ac__name">{{ pName(p.provider) }}</span>
+                    <span class="ac__stag ac__stag--warn">{{ t('token_expired') }}</span>
                   </div>
                   <div class="ac__expired-hint">{{ t('token_expired_hint') }}</div>
                 </div>
-                <button class="bt bt-s bt-p" @click="bindProvider(p.provider)">
+                <button class="bt bt-s bt-p" @click="openBind(p.provider)">
                   {{ t('re_bind') }}
                 </button>
               </div>
               <!-- 已绑定 -->
               <div v-else-if="isBound(p.provider)" class="ac__prow ac__prow--bound">
-                <span v-if="identityOf(p.provider)?.external_avatar" class="ac__avatar">
-                  <img
-                    :src="identityOf(p.provider).external_avatar"
-                    @error="$event.target.style.display = 'none'"
-                  />
-                </span>
-                <span v-else class="ac__avatar ac__avatar--text">{{
-                  (identityOf(p.provider)?.external_login || pName(p.provider))[0].toUpperCase()
-                }}</span>
+                <span
+                  class="ac__avatar ac__avatar--brand"
+                  v-html="platformIcon(p.provider, 22)"
+                ></span>
                 <div class="ac__flex1 ac__min0">
                   <div class="ac__pname">
-                    <span v-html="platformIcon(p.provider, 20)"></span>
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg tg-d ac__tag10">{{ t('linked_badge') }}</span>
+                    <span class="ac__stag ac__stag--bound">{{ t('linked_badge') }}</span>
                   </div>
-                  <div class="ac__idline">{{ identityLine(p.provider) }}</div>
-                  <div v-if="identityOf(p.provider)?.created_at" class="ac__timeline">
-                    {{ t('linked_on') }}{{ identityOf(p.provider).created_at.substring(0, 10) }}
+                  <div class="ac__meta">
+                    <span class="ac__idline">{{ identityLine(p.provider) }}</span>
+                    <template v-if="identityOf(p.provider)?.created_at">
+                      <span class="ac__dot">·</span>
+                      <span class="ac__timeline"
+                        >{{ t('linked_on') }}{{
+                          identityOf(p.provider).created_at.substring(0, 10)
+                        }}</span
+                      >
+                    </template>
                   </div>
                 </div>
                 <div class="ac__prow-btns">
-                  <button class="bt bt-s bt-o" @click="bindProvider(p.provider)">
+                  <button class="bt bt-s bt-o" @click="openBind(p.provider)">
                     {{ t('update') }}
                   </button>
-                  <button class="bt bt-s ac__unbind-btn" @click="unbindProvider(p.provider)">
+                  <button class="bt bt-s bt-o ac__unbind-btn" @click="unbindProvider(p.provider)">
                     {{ t('unbind') }}
                   </button>
                 </div>
@@ -137,16 +155,16 @@
               <div v-else class="ac__prow">
                 <span
                   class="ac__avatar ac__avatar--icon"
-                  v-html="platformIcon(p.provider, 20)"
+                  v-html="platformIcon(p.provider, 22)"
                 ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg tg-d ac__tag10">{{ t('not_linked') }}</span>
+                    <span class="ac__stag ac__stag--idle">{{ t('not_linked') }}</span>
                   </div>
                   <div class="ac__linkhint">{{ t('link_to_manage_repos') }}</div>
                 </div>
-                <button class="bt bt-s bt-p" @click="bindProvider(p.provider)">
+                <button class="bt bt-s bt-p" @click="openBind(p.provider)">
                   {{ t('link_btn') }}
                 </button>
               </div>
@@ -160,6 +178,27 @@
 
         <!-- ═══ credentials ═══ -->
         <template v-else-if="tab === 'credentials'">
+          <!-- D102-L v6 职责分域：第三方仓库凭据 = PAT 域（仓库只配 PAT）——
+               行内只有 PAT 徽章（已配置/未配置）+ 令牌页直达 + 配置/重新配置/清除；
+               OAuth 三态徽章与 OAuth 过期标签一并退出本行（账号绑定域才有 OAuth）。 -->
+          <div class="cd">
+            <div class="cd-h">
+              <h2>{{ t('third_party_repo_credentials') }}</h2>
+            </div>
+            <p v-if="!repoPlatforms.length" class="tx t2 ac__mb">{{ t('loading') }}</p>
+            <CredRepoRow
+              v-for="rp in repoPlatforms"
+              :key="rp.provider"
+              :platform="rp"
+              :has-pat="hasPat(rp.provider)"
+              :pat-broken="patBroken(rp.provider)"
+              :token-source="patSource(rp.provider)"
+              :oauth-login="oauthLogin(rp.provider)"
+              @configure="openPatModal"
+              @clear="clearPat"
+            />
+            <p class="tx t2 mt8 ac__small">{{ t('repo_cred_desc') }}</p>
+          </div>
           <div class="cd">
             <div class="cd-h"><h2>Huawei Cloud</h2></div>
             <div class="srow ac__crow">
@@ -208,6 +247,11 @@
             <p class="tx t2 mt8">{{ t('huawei_cloud_desc') }}</p>
             <button class="bt bt-p mt8" @click="saveCloudCreds">{{ t('save') }}</button>
           </div>
+        </template>
+
+        <!-- ═══ llm（B4 移植：沙箱 agent 引擎的模型凭据）═══ -->
+        <template v-else-if="tab === 'llm'">
+          <LlmCredManager mode="user" />
         </template>
 
         <!-- ═══ appearance ═══ -->
@@ -318,7 +362,7 @@
                   >
                 </div>
               </div>
-              <button class="bt bt-s ac__revoke-btn" @click="revokeApiKey(k)">
+              <button class="bt bt-s bt-r ac__revoke-btn" @click="revokeApiKey(k)">
                 {{ t('revoke') }}
               </button>
             </div>
@@ -328,6 +372,25 @@
     </div>
 
     <!-- ═══ 通用弹窗（accountModal 等价物） ═══ -->
+    <!-- 共享组件：账号绑定（OAuth 域，allowPat=false）与仓库 PAT 配置（凭据域，只配 PAT） -->
+    <BindDialog
+      :open="bindOpen"
+      :provider="bindTarget"
+      :allow-pat="false"
+      :already-bound="bindBound"
+      :providers="providers"
+      @close="bindOpen = false"
+      @bound="onBindOk"
+    />
+    <PatDialog
+      :open="patOpen"
+      :provider="patTarget"
+      :name="pName(patTarget)"
+      :pat-url="patDialogUrl()"
+      :oauth-configured="patDialogConfigured()"
+      @close="patOpen = false"
+      @saved="onPatSaved"
+    />
     <Teleport to="body">
       <div v-if="modal.open" class="ac__modal-mask" @click.self="onModalMask">
         <div class="ac__modal" v-html="modal.html"></div>
@@ -392,6 +455,10 @@ function fmtKeyTime(v) {
 }
 
 import { ref, reactive, onMounted } from 'vue'
+import BindDialog from '../components/BindDialog.vue'
+import PatDialog from '../components/PatDialog.vue'
+import CredRepoRow from '../components/CredRepoRow.vue'
+import LlmCredManager from './LlmCredManager.vue'
 
 const G = globalThis
 
@@ -408,6 +475,7 @@ const DEFAULTS = {
   nav_profile: '个人资料',
   security_tab: '账号安全',
   credentials_tab: '凭据管理',
+  llm_tab: 'LLM 凭据',
   appearance_tab: '外观',
   apikeys_tab: 'API Keys',
   basic_info: '基本信息',
@@ -460,6 +528,16 @@ const DEFAULTS = {
   close: '关闭',
   change_email_btn: '更换邮箱',
   set_email: '设置邮箱',
+  // Issue #3469 G/P：改绑二次认证标签 + 按 error_code 的失败文案（zh 兜底；en 取 locales）
+  current_password: '当前密码',
+  old_email_code: '原邮箱验证码',
+  err_email_format: '邮箱格式不正确，例如 you@example.com',
+  err_email_same: '新邮箱与当前邮箱相同',
+  err_email_taken: '该邮箱已被其他账号使用',
+  err_code_invalid: '验证码不正确',
+  err_code_expired: '验证码已过期，请重新获取',
+  err_need_second_factor: '请先完成二次认证（当前密码或原邮箱验证码）',
+  err_password_invalid: '当前密码不正确',
   // Issue #474：明文按需取回
   reveal_plaintext: '查看明文',
   hide_plaintext: '隐藏明文',
@@ -488,7 +566,21 @@ function platformIcon(provider, size) {
   return typeof G.window.platformIcon === 'function' ? G.window.platformIcon(provider, size) : ''
 }
 function pName(provider) {
-  return provider === 'github' ? 'GitHub' : 'GitCode'
+  // 平台名真源：shell/js/platform-icons.js 的 platformLabel（按语言出 GitCode/GitHub/
+  // Gitee/GitLab/华为云|Huawei Cloud）；未知平台才回落到服务端渠道名 → provider id。
+  if (typeof G.window.platformLabel === 'function') {
+    const label = G.window.platformLabel(provider)
+    if (label && label !== provider) return label
+  }
+  const p = providers.value.find(function (x) {
+    return x.provider === provider
+  })
+  if (p && p.name) return p.name
+  const c = repoPlatforms.value.find(function (x) {
+    return x.provider === provider
+  })
+  if (c && c.name) return c.name
+  return provider
 }
 
 // ── tab 状态（hash 路由兼容：#account#security 等）──
@@ -497,6 +589,7 @@ const tabs = [
   { id: 'profile', label: t('nav_profile') },
   { id: 'security', label: t('security_tab') },
   { id: 'credentials', label: t('credentials_tab') },
+  { id: 'llm', label: t('llm_tab') },
   { id: 'appearance', label: t('appearance_tab') },
   { id: 'apikeys', label: 'API Keys' },
 ]
@@ -512,7 +605,9 @@ function resolveInitialTab() {
   )
     return props.initialTab
   if (G.window.location.hash && G.window.location.hash !== '#account') {
-    const hashTab = G.window.location.hash.replace('#account', '').replace('#', '')
+    // 兼容 '#account-credentials' 与 '#account/credentials'（shell nav 用后者）：
+    // 只 replace('#account') 会留下 '-credentials'/'/credentials'，永远匹配不到 tab。
+    const hashTab = G.window.location.hash.replace(/^#account[-/]?/, '').replace(/^#/, '')
     if (
       tabs.some(function (x) {
         return x.id === hashTab
@@ -565,136 +660,42 @@ function identityLine(provider) {
   const name = (identity && identity.external_name) || ''
   return name && name !== login ? login + ' · ' + name : login
 }
-function bindProvider(provider) {
-  // 绑定方式弹窗（OAuth + 手动令牌）——完整 OAuth popup 流程
-  const alreadyBound = isBound(provider)
-  const providerInfo = providers.value.find(function (p) {
+function channelConfigured(provider) {
+  const info = providers.value.find(function (p) {
     return p.provider === provider
   })
-  const oauthConfigured = !!(providerInfo && providerInfo.configured)
-  let html =
-    '<h3 style="display:flex;align-items:center;gap:8px">' +
-    platformIcon(provider, 24) +
-    ' ' +
-    esc(
-      alreadyBound
-        ? t('update_platform_token', { platform: pName(provider) })
-        : t('link_platform', { platform: pName(provider) })
-    ) +
-    '</h3>'
-  if (oauthConfigured) {
-    html += '<div class="stabs" style="margin-bottom:16px">'
-    html += '<a class="ac" id="bindTabOauth">' + esc(t('oauth_auth')) + '</a>'
-    html += '<a id="bindTabToken">' + esc(t('manual_token')) + '</a></div>'
-    html +=
-      '<div id="bindPanelOauth"><p class="tx t2" style="margin-bottom:16px">' +
-      esc(
-        alreadyBound
-          ? t('oauth_rebind_hint', { platform: pName(provider) })
-          : t('oauth_redirect_hint', { platform: pName(provider) })
-      ) +
-      '</p>'
-    html +=
-      '<button class="bt bt-p" style="width:100%" id="oauthBindBtn">' +
-      esc(alreadyBound ? t('re_authorize') : t('authorize')) +
-      '</button></div>'
-    html += '<div id="bindPanelToken" style="display:none">' + manualBindForm(provider) + '</div>'
-  } else {
-    html += '<div id="bindPanelToken">' + manualBindForm(provider) + '</div>'
-  }
-  showModal(html, function (root) {
-    const oauthBtn = root.querySelector('#oauthBindBtn')
-    if (oauthBtn)
-      oauthBtn.onclick = function () {
-        doOauthBind(provider, this)
-      }
-    const tabOauth = root.querySelector('#bindTabOauth')
-    const tabToken = root.querySelector('#bindTabToken')
-    if (tabOauth && tabToken) {
-      tabOauth.onclick = function () {
-        root.querySelector('#bindPanelOauth').style.display = ''
-        root.querySelector('#bindPanelToken').style.display = 'none'
-        tabOauth.classList.add('ac')
-        tabToken.classList.remove('ac')
-      }
-      tabToken.onclick = function () {
-        root.querySelector('#bindPanelOauth').style.display = 'none'
-        root.querySelector('#bindPanelToken').style.display = ''
-        tabOauth.classList.remove('ac')
-        tabToken.classList.add('ac')
-      }
-    }
-    const manualBtn = root.querySelector('#manualBindBtn')
-    if (manualBtn)
-      manualBtn.onclick = function () {
-        doManualBind(provider, this)
-      }
-  })
+  return !!(info && info.configured)
 }
+// D102-L v6 职责分域（2026-11-08 用户裁定 / 2026-11-14 复核恢复）：
+// 第三方账号行 = OAuth 域 —— 弹层纯 OAuth，未开通 OAuth 的渠道不渲染绑定入口，
+// 文案指路「凭据管理」配 PAT；PAT 的一切（配置/清除）只归凭据 tab。
+// 账号安全 tab = OAuth 域：弹层由共享 BindDialog 组件实现（allowPat=false，纯 OAuth；
+// 未开通 OAuth 的渠道由行级灰态处理，不在这里给 PAT 表单）。PAT 的一切归凭据 tab。
+const bindOpen = ref(false)
+function onBindOk(provider) {
+  // 绑定成功：本地 bindings 快照走 /auth/me 回读，然后在屏重渲染（与壳侧同源）
+  bindOpen.value = false
+  G.API.get('/auth/me')
+    .then(function (me) {
+      if (me && me.bindings) profile.value.bindings = me.bindings
+    })
+    .catch(function () {})
+  if (provider) loadTab()
+}
+const bindTarget = ref('')
+const bindBound = ref(false)
+function openBind(provider) {
+  bindTarget.value = provider
+  bindBound.value = isBound(provider)
+  bindOpen.value = true
+}
+
 // 2026-11-13 合入 arch-weekly-11 补齐（其实现原在 static/js/pages/account.js）：令牌创建页直达链接。
 // github/gitcode 用官方实测过的预选参数链接；其余平台取 /auth/providers 的
 // pat_create_url（来自平台卡）；都没有就不渲染按钮（宁缺勿指错站）。
 const PAT_CREATE_URLS = {
   github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
-}
-function patCreateUrl(provider, providerInfo) {
-  if (PAT_CREATE_URLS[provider]) return PAT_CREATE_URLS[provider]
-  if (providerInfo && providerInfo.pat_create_url) return providerInfo.pat_create_url
-  return ''
-}
-// D102 错站修复：帮助文案按平台查表，未命中走通用文案（带 host），
-// 不再让 gitee/gitlab 落到 gitcode 文案。
-const PAT_HELP_KEYS = {
-  github: 'github_token_help',
-  gitcode: 'gitcode_token_help',
-  gitee: 'gitee_token_help',
-}
-function manualBindForm(provider) {
-  const providerInfo = providers.value.find(function (p) {
-    return p.provider === provider
-  })
-  const createUrl = patCreateUrl(provider, providerInfo)
-  const createHost = createUrl ? createUrl.split('/')[2] || '' : ''
-  const helpKey = PAT_HELP_KEYS[provider] || 'pat_token_help_generic'
-  const helpSteps =
-    helpKey === 'pat_token_help_generic'
-      ? t(helpKey, { host: createHost || provider })
-      : t(helpKey)
-  const oauthConfigured = !!(providerInfo && providerInfo.configured)
-  let html = ''
-  if (!oauthConfigured) {
-    html +=
-      '<div style="background:var(--bg);border:1px solid var(--b);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;gap:8px;align-items:flex-start"><span style="font-size:14px;flex-shrink:0">ℹ️</span><div style="font-size:12px;color:var(--t2);line-height:1.6">' +
-      esc(t('pat_no_refresh_hint')) +
-      '</div></div>'
-  }
-  if (createUrl) {
-    html +=
-      '<a href="' + esc(createUrl) + '" target="_blank" rel="noopener noreferrer" class="bt" ' +
-      'style="display:block;text-align:center;text-decoration:none;margin:0 0 12px;color:var(--a);border:1px solid var(--a)">' +
-      esc(t('open_token_page') + (createHost ? ' ' + createHost : '')) +
-      '</a>'
-  }
-  html +=
-    '<div class="srow"><label>' +
-    esc(t('access_token')) +
-    '</label><input type="password" id="manualTokenInput" class="kb-input" placeholder="' +
-    esc(t('paste_token')) +
-    '"></div>'
-  html +=
-    '<div id="manualBindError" style="display:none;color:var(--r);font-size:12px;padding:4px 0"></div>'
-  html +=
-    '<details style="margin:8px 0"><summary style="cursor:pointer;font-size:12px;color:var(--a)">' +
-    esc(t('how_to_get_token')) +
-    '</summary><div style="font-size:12px;color:var(--t2);padding:8px 0;line-height:1.6">' +
-    helpSteps +
-    '</div></details>'
-  html +=
-    '<button class="bt bt-p" style="width:100%" id="manualBindBtn">' +
-    esc(t('confirm_bind')) +
-    '</button>'
-  return html
 }
 function translateBindError(e, provider) {
   let code = 0
@@ -706,57 +707,6 @@ function translateBindError(e, provider) {
   if (code === 400) return t('token_format_invalid')
   return (e && e.message) || t('bind_failed')
 }
-function doManualBind(provider, btn) {
-  const root = btn.closest('.ac__modal')
-  const tokenEl = root.querySelector('#manualTokenInput')
-  const errEl = root.querySelector('#manualBindError')
-  const token = (tokenEl.value || '').trim()
-  if (!token) {
-    if (errEl) {
-      errEl.textContent = t('please_enter_token')
-      errEl.style.display = 'block'
-    }
-    return
-  }
-  btn.disabled = true
-  const origText = btn.textContent
-  btn.innerHTML = '<span class="acct-btn-spinner"></span>' + esc(t('verifying'))
-  if (errEl) errEl.style.display = 'none'
-  const field = provider === 'github' ? 'github_token' : 'gitcode_token'
-  const body = {}
-  body[field] = token
-  G.API.put('/settings/credentials', body, 15000)
-    .then(function () {
-      G.window.localStorage.removeItem('repo_member_cache')
-      try {
-        const _u = JSON.parse(G.window.localStorage.getItem('user') || '{}')
-        if (!_u.bindings) _u.bindings = []
-        if (_u.bindings.indexOf(provider) < 0) _u.bindings.push(provider)
-        G.window.localStorage.setItem('user', JSON.stringify(_u))
-      } catch (e) {
-        /* ignore：与老代码同款静默降级 */
-      }
-      closeModal()
-      showBindSuccessToast(provider)
-      navigateToRepos()
-    })
-    .catch(function (e) {
-      const detail = e && e.detail && typeof e.detail === 'object' ? e.detail : {}
-      if (detail.need_transfer && detail.binding_ticket) {
-        closeModal()
-        showTransferConfirm(provider, detail.binding_ticket, token)
-        return
-      }
-      btn.disabled = false
-      btn.textContent = origText
-      const msg = translateBindError(e, provider)
-      if (errEl) {
-        errEl.textContent = msg
-        errEl.style.display = 'block'
-      }
-    })
-}
-// OAuth popup 绑定（同步上下文开窗防拦截 + postMessage + 轮询降级）
 function oauthOpenCenteredPopup(url) {
   const w = 600,
     h = 700
@@ -766,7 +716,7 @@ function oauthOpenCenteredPopup(url) {
   const parentH = G.window.innerHeight || document.documentElement.clientHeight || 900
   const left = Math.round(screenLeft + (parentW - w) / 2)
   const top = Math.round(screenTop + (parentH - h) / 2)
-  return G.window.open(
+  const popup = G.window.open(
     url,
     'oauth_popup',
     'width=' +
@@ -779,130 +729,18 @@ function oauthOpenCenteredPopup(url) {
       top +
       ',resizable=yes,scrollbars=yes,status=yes'
   )
+  return registerOAuthPopup(popup)
 }
-function doOauthBind(provider, btn) {
-  if (btn) {
-    btn.disabled = true
-    btn.dataset.origText = btn.textContent
-    btn.innerHTML = '<span class="acct-btn-spinner"></span>' + esc(t('verifying'))
+// P0-2（Issue #3054）：把本页打开的 popup 引用登记到 window，供 shell 的
+// _onOAuthPopupMessage 做 event.source 双校验（未登记的窗口一律丢弃）。
+// 原实现只读取 __oauthPopupWin，全仓没有赋值点 → 该校验恒失效。
+function registerOAuthPopup(win) {
+  try {
+    G.window.__oauthPopupWin = win || null
+  } catch (e) {
+    /* 跨域/受限环境忽略 */
   }
-  const alreadyBound = isBound(provider)
-  const promptParam = alreadyBound ? '&prompt=login' : ''
-  // 移动端全页跳转
-  if (/Mobi|Android|iPhone|iPad|iPod/i.test(G.window.navigator.userAgent)) {
-    G.API.get('/auth/bind/' + provider + promptParam.replace('&', '?'))
-      .then(function (d) {
-        if (d.redirect_url) G.window.location.href = d.redirect_url
-      })
-      .catch(function (e) {
-        if (btn) {
-          btn.disabled = false
-          btn.textContent = btn.dataset.origText || ''
-        }
-        G.app.showToast(e.message || '操作失败')
-      })
-    return
-  }
-  const popup = oauthOpenCenteredPopup('')
-  if (!popup) {
-    G.API.get('/auth/bind/' + provider + (promptParam ? '?prompt=login' : ''))
-      .then(function (d2) {
-        if (d2.redirect_url) G.window.location.href = d2.redirect_url
-      })
-      .catch(function () {
-        if (btn) {
-          btn.disabled = false
-          btn.textContent = btn.dataset.origText || ''
-        }
-        G.app.showToast(t('popup_blocked_hint') || '操作失败')
-      })
-    return
-  }
-  if (modal.open) modal.locked = true
-  G.API.get('/auth/bind/' + provider + '?popup=true' + promptParam)
-    .then(function (d) {
-      if (!d.redirect_url) throw new Error('no_redirect_url')
-      popup.location.href = d.redirect_url
-      let timeoutId = null
-      let pollId = null
-      let handled = false
-      function cleanup() {
-        if (timeoutId) {
-          clearTimeout(timeoutId)
-          timeoutId = null
-        }
-        if (pollId) {
-          clearInterval(pollId)
-          pollId = null
-        }
-        G.window.removeEventListener('message', handler)
-      }
-      function handler(ev) {
-        if (ev.origin !== G.window.location.origin) return
-        const data = ev.data
-        if (!data || data.type !== 'oauth_result') return
-        if (handled) return
-        handled = true
-        cleanup()
-        if (data.action === 'bind' && data.success) confirmBindSuccess(provider, btn, true)
-        else if (data.action === 'bind' && data.need_transfer) fetchTransferContext(provider, btn)
-        else if (data.action === 'bind' && !data.success) {
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          closeModal()
-          G.app.showToast(translateOAuthError(data.error))
-        } else {
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          closeModal()
-          G.app.showToast('操作失败')
-        }
-      }
-      G.window.addEventListener('message', handler)
-      pollId = setInterval(function () {
-        if (handled) {
-          cleanup()
-          return
-        }
-        if (popup.closed) {
-          handled = true
-          cleanup()
-          confirmBindSuccess(provider, btn)
-        }
-      }, 500)
-      timeoutId = setTimeout(function () {
-        if (!handled) {
-          handled = true
-          cleanup()
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          if (popup.closed) confirmBindSuccess(provider, btn)
-          else {
-            closeModal()
-            G.app.showToast(t('oauth_timeout_hint') || '操作失败')
-          }
-        }
-      }, 60000)
-    })
-    .catch(function (e) {
-      try {
-        popup.close()
-      } catch (e2) {
-        /* ignore */
-      }
-      if (btn) {
-        btn.disabled = false
-        btn.textContent = btn.dataset.origText || ''
-      }
-      closeModal()
-      G.app.showToast(e.message || '操作失败')
-    })
+  return win
 }
 function translateOAuthError(errorCode) {
   const key = 'app.login.oauth_error_' + errorCode
@@ -954,23 +792,22 @@ function confirmBindSuccess(provider, btn, fromPostMessage) {
     })
 }
 function fetchTransferContext(provider, btn) {
-  G.API.get('/auth/me')
-    .then(function (d) {
-      const identity = (d.identities || []).find(function (i) {
-        return i.provider === provider
-      })
-      const ticket = identity && identity.binding_ticket
+  // Issue #3097：票据只在服务端（popup 模式不回传 body/URL），取票一律走
+  // GET /auth/transfer-context；失败必须可见（i18n），不得静默只报「操作失败」。
+  G.API.get('/auth/transfer-context')
+    .then(function (ctx) {
+      const ticket = ctx && ctx.binding_ticket
       if (ticket) showTransferConfirm(provider, ticket)
       else {
         if (btn) btn.disabled = false
         closeModal()
-        G.app.showToast('操作失败')
+        G.app.showToast(t('transfer_context_expired'))
       }
     })
     .catch(function () {
       if (btn) btn.disabled = false
       closeModal()
-      G.app.showToast('操作失败')
+      G.app.showToast(t('transfer_context_expired'))
     })
 }
 function showTransferConfirm(provider, ticket, token) {
@@ -1005,7 +842,7 @@ function showTransferConfirm(provider, ticket, token) {
         { binding_ticket: ticket, confirm: true, access_token: token || '' },
         15000
       )
-        .then(function () {
+        .then(function (resp) {
           G.window.localStorage.removeItem('repo_member_cache')
           try {
             const _u = JSON.parse(G.window.localStorage.getItem('user') || '{}')
@@ -1016,6 +853,15 @@ function showTransferConfirm(provider, ticket, token) {
             /* ignore：与老代码同款静默降级 */
           }
           closeModal()
+          // 2026-11-18：转移票据按设计不携带平台令牌 → 新绑定是 status=4
+          // （已绑定、待授权）。此时不能再弹"绑定成功"就把人送到项目页（那里只会
+          // 是空的），必须立刻引导再授权一次，把 token 落到新绑定上。
+          const _need = (resp && resp.needs_reauth) || []
+          if (_need.length) {
+            G.app.showToast((resp && resp.hint) || t('transfer_need_reauth'))
+            openBind(provider)
+            return
+          }
           showBindSuccessToast(provider)
           navigateToRepos()
         })
@@ -1141,7 +987,8 @@ function onUnbindError(e) {
 
 // ── 密码/邮箱弹窗组 ──
 function showChangePassword() {
-  const hasEmail = profile.value && profile.value.email
+  // Issue #3469 验收 11：不可投递邮箱（noreply.* / 非邮箱字面串）不作为可用验证方式
+  const hasEmail = profile.value && profile.value.email && profile.value.email_deliverable !== false
   const html =
     '<h3>' +
     esc(t('change_password')) +
@@ -1204,7 +1051,8 @@ function showChangePassword() {
 }
 function showResetPassword() {
   const email = profile.value.email
-  if (!email || emailConfigured.value === false) {
+  // Issue #3469 验收 11：有 email 列但收不到信时不给重置入口
+  if (!email || profile.value.email_deliverable === false || emailConfigured.value === false) {
     if (emailConfigured.value === false) G.app.showToast(t('email_not_configured'))
     else G.app.showToast(t('set_password_needs_email'))
     return
@@ -1352,6 +1200,52 @@ function showSetPassword() {
     }
   })
 }
+// Issue #3469 P：改绑链 400 一律带 error_code，四种失败原因必须可区分；
+// 原来弹层只 showToast(e.message || '操作失败')，把「邮箱被占」和「验证码过期」压成一句。
+const CE_ERR_KEY = {
+  EMAIL_FORMAT: 'err_email_format',
+  EMAIL_SAME: 'err_email_same',
+  EMAIL_TAKEN: 'err_email_taken',
+  CODE_INVALID: 'err_code_invalid',
+  CODE_EXPIRED: 'err_code_expired',
+  NEED_SECOND_FACTOR: 'err_need_second_factor',
+  PASSWORD_INVALID: 'err_password_invalid',
+}
+function changeEmailErrText(e) {
+  const code = (e && (e.error_code || (e.detail && e.detail.error_code))) || ''
+  const key = CE_ERR_KEY[code]
+  if (key) {
+    const full = 'app.account.' + key
+    const v = G.I18N.t(full)
+    if (v && v !== full) return v
+    return DEFAULTS[key] || key
+  }
+  return (e && e.message) || '操作失败'
+}
+// Issue #3469 G：改绑前必须二次认证，因子档位由 send-code 返回的 require_factor 决定：
+//   password       → 当前密码框
+//   old_email_code → 原邮箱验证码框（后端已把确认码发到原邮箱）
+//   none           → 不渲染（无密码且原邮箱不可投递的账号靠这条自救，不得把改绑堵死）
+function renderChangeEmailFactor(root, factor) {
+  const host = root.querySelector('#ceFactor')
+  if (!host) return
+  factor = factor || 'none'
+  if (host.getAttribute('data-factor') === factor) return
+  host.setAttribute('data-factor', factor)
+  if (factor === 'password') {
+    host.innerHTML =
+      '<div class="srow"><label>' +
+      esc(t('current_password')) +
+      '</label><input type="password" id="ceCurPwd" class="kb-input" autocomplete="current-password"></div>'
+  } else if (factor === 'old_email_code') {
+    host.innerHTML =
+      '<div class="srow"><label>' +
+      esc(t('old_email_code')) +
+      '</label><input type="text" id="ceOldCode" class="kb-input" maxlength="6"></div>'
+  } else {
+    host.innerHTML = ''
+  }
+}
 function showChangeEmail() {
   if (emailConfigured.value === false) {
     G.app.showToast(t('email_not_configured'))
@@ -1377,6 +1271,8 @@ function showChangeEmail() {
     '<div class="srow"><label>' +
     esc(t('verification_code')) +
     '</label><input type="text" id="ceCode" class="kb-input" maxlength="6"></div>' +
+    // Issue #3469 G：二次认证因子输入框挂载点（send-code 拿到 require_factor 后再渲染）
+    '<div id="ceFactor"></div>' +
     '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
     '<button class="bt bt-o" id="ceCancel">' +
     esc(t('cancel')) +
@@ -1392,16 +1288,18 @@ function showChangeEmail() {
         return
       }
       G.API.post('/auth/change-email/send-code', { new_email: email })
-        .then(function () {
+        .then(function (d) {
           G.app.showToast(t('code_sent'))
           const hintEl = root.querySelector('#ceStep2Hint')
           if (hintEl)
             hintEl.innerHTML = esc(t('code_sent_to_new_email')) + '：<b>' + esc(email) + '</b>'
           root.querySelector('#ceStep1').style.display = 'none'
           root.querySelector('#ceStep2').style.display = 'flex'
+          // Issue #3469 G：按后端 require_factor 渲染二次认证输入（none 时什么都不渲染）
+          renderChangeEmailFactor(root, d && d.require_factor)
         })
         .catch(function (e) {
-          G.app.showToast(e.message || '操作失败')
+          G.app.showToast(changeEmailErrText(e))
         })
     }
     root.querySelector('#ceCancel').onclick = closeModal
@@ -1412,14 +1310,39 @@ function showChangeEmail() {
         G.app.showToast(t('please_fill_all'))
         return
       }
-      G.API.post('/auth/change-email', { new_email: email, code: code })
+      const body = { new_email: email, code: code }
+      // Issue #3469 G：只把真正渲染出的因子字段塞进 body（none 时两者都不出现）
+      const pwdEl = root.querySelector('#ceCurPwd')
+      if (pwdEl) {
+        const curPwd = pwdEl.value.trim()
+        if (!curPwd) {
+          G.app.showToast(t('please_fill_all'))
+          return
+        }
+        body.password = curPwd
+      }
+      const oldCodeEl = root.querySelector('#ceOldCode')
+      if (oldCodeEl) {
+        const oldCode = oldCodeEl.value.trim()
+        if (!oldCode) {
+          G.app.showToast(t('please_fill_all'))
+          return
+        }
+        body.old_email_code = oldCode
+      }
+      G.API.post('/auth/change-email', body)
         .then(function () {
           closeModal()
           G.app.showToast(t('email_changed'), t('old_email_disabled'))
           loadTab()
         })
         .catch(function (e) {
-          G.app.showToast(e.message || '操作失败')
+          // 后端回 NEED_SECOND_FACTOR 且带 require_factor 时补渲染缺的因子框，
+          // 让用户就地补齐，不必重走 send-code（避免档位不一致时卡死）。
+          if (e && e.error_code === 'NEED_SECOND_FACTOR') {
+            renderChangeEmailFactor(root, (e.detail && e.detail.require_factor) || e.require_factor)
+          }
+          G.app.showToast(changeEmailErrText(e))
         })
     }
   })
@@ -1429,7 +1352,9 @@ function showChangeEmail() {
 function showDeleteAccount() {
   const hasPwd = profile.value ? profile.value.has_password : false
   const hasEmail = profile.value ? !!profile.value.email : false
-  const canVerifyByEmail = hasEmail && emailConfigured.value !== false
+  // Issue #3469 验收 11：邮箱验证方式的判据必须排除「不可投递」地址
+  // （noreply.* 私有中转等占位邮箱收不到验证码，不能当作能收码的验证通道）。
+  const canVerifyByEmail = hasEmail && !!profile.value.email_deliverable && emailConfigured.value !== false
   const bindings = (profile.value && profile.value.bindings) || []
   const methods = []
   if (hasPwd) methods.push({ id: 'pwd', label: t('verify_with_password') })
@@ -1594,6 +1519,9 @@ function doDeleteOauth(provider) {
       }
       function handler(ev) {
         if (ev.origin !== G.window.location.origin) return
+        // P0-2（Issue #3054）：除 origin 外还须校验 source 是本流程打开的 popup，
+        // 否则同源任意窗口可伪造 oauth_result（伪注销 / 提交任意 delete_oauth_state）。
+        if (ev.source !== popup) return
         const data = ev.data
         if (!data || data.type !== 'oauth_result') return
         if (handled) return
@@ -1745,6 +1673,108 @@ function saveCloudCreds() {
     .catch(function (e) {
       G.app.showToast(t('save_failed') + ': ' + (e.message || ''))
     })
+}
+
+// ── 第三方仓库凭据（平台卡驱动：OAuth 三态徽章 + PAT 两态徽章 + 配置/清除）──
+const repoPlatforms = ref([])
+const platformCreds = ref({})
+const oauthCfg = ref({})
+function hasPat(provider) {
+  // 2026-11-18：只认"真的 PAT"（exists=true）。后端以前用 get_user_token_for 判存在性，
+  // OAuth 令牌会被算成 PAT → 只做过授权的账号也显示"PAT 已配置"，点清除又清不掉。
+  const c = platformCreds.value[provider + '_pat']
+  return !!(c && c.exists === true)
+}
+// PAT 行在但解不开（密钥变更/记录损坏）→ 必须显示"已损坏，请重配"，不能显示"未配置"
+function patBroken(provider) {
+  const c = platformCreds.value[provider + '_pat']
+  return (c && c.broken) || ''
+}
+// 令牌来源：pat / oauth / none（凭据页要把"PAT 配置"与"登录授权提供"分开说）
+function patSource(provider) {
+  const auth = (platformCreds.value.platform_auth || {})[provider] || {}
+  return auth.token_source || ''
+}
+function oauthLogin(provider) {
+  const auth = (platformCreds.value.platform_auth || {})[provider] || {}
+  return auth.oauth_login || ''
+}
+// 令牌创建页直达链接：github/gitcode 官方预选参数常量 → 平台卡 pat_create_url；都没有不渲染
+function patCardUrl(card) {
+  if (!card) return ''
+  return PAT_CREATE_URLS[card.provider] || card.pat_create_url || ''
+}
+function refreshRepoCreds() {
+  try {
+    if (G.app._clearCachedReposData) G.app._clearCachedReposData()
+    G.window.localStorage.removeItem('repo_member_cache')
+    if (G.window.invalidateProjectsCache) G.window.invalidateProjectsCache()
+  } catch (e) {
+    /* 缓存失效失败不阻断主流程 */
+  }
+}
+const patOpen = ref(false)
+const patTarget = ref('')
+function openPatModal(provider) {
+  patTarget.value = provider
+  patOpen.value = true
+}
+function onPatSaved(provider) {
+  patOpen.value = false
+  refreshRepoCreds()
+  if (G.app && G.app.showToast) G.app.showToast(t('credentials_saved'))
+  // 关系行由服务端 hooks.on_pat_saved 写；前端快照必须重拉，否则仓库页/引导门还按旧快照判定
+  if (G.app && typeof G.app.refreshRepoLinks === 'function') G.app.refreshRepoLinks()
+  if (G.app && typeof G.app.loadProfile === 'function') G.app.loadProfile()
+  switchTab('credentials')
+}
+function patDialogCard() {
+  return (
+    repoPlatforms.value.find(function (p) {
+      return p.provider === patTarget.value
+    }) || {}
+  )
+}
+function patDialogUrl() {
+  const card = patDialogCard()
+  return PAT_CREATE_URLS[card.provider] || card.pat_create_url || ''
+}
+function patDialogConfigured() {
+  return channelConfigured(patTarget.value)
+}
+
+function clearPat(provider) {
+  // 有 OAuth 绑定 → 只清 PAT 回落 OAuth；无绑定 → 平台级解绑（后端四象限级联）
+  const note = isBound(provider) ? t('pat_clear_fallback_note') : t('pat_clear_unbound_note')
+  G.app.showConfirm(
+    esc(t('confirm_clear_pat_prefix') + pName(provider) + t('confirm_clear_pat_suffix')) + note,
+    function () {
+      const body = { platform_tokens: {} }
+      body.platform_tokens[provider] = ''
+      G.API.put('/settings/credentials', body, 15000)
+        .then(function () {
+          refreshRepoCreds()
+          G.app.showToast(t('pat_cleared'))
+          // D109：清 PAT 会让用户↔平台关系归零（后端 _cascade_pat_clear → hook 撤销）。
+          // 前端快照不刷新的话，首页判据还是旧 has_any=true，会把人送回项目页。
+          if (G.app && typeof G.app.refreshRepoLinks === 'function') {
+            G.app.refreshRepoLinks().then(function (d) {
+              if (!d || !d.has_any) {
+                try { G.window.sessionStorage.removeItem('currentRepo') } catch (e) {}
+                if (typeof G.app.goToRepos === 'function') G.app.goToRepos()
+              }
+              loadTab()
+            })
+            return
+          }
+          loadTab()
+        })
+        .catch(function (e) {
+          G.app.showToast(t('pat_clear_failed') + ': ' + (e.message || ''))
+        })
+    },
+    { danger: true }
+  )
 }
 
 // ── appearance ──
@@ -1924,9 +1954,41 @@ function loadTab() {
       })
   } else if (tab.value === 'credentials') {
     tabLoading.value = true
-    G.API.get('/settings/credentials')
-      .then(function (d) {
-        const hw = d.huawei_cloud || {}
+    // 平台卡（/settings/vcs/platforms）+ 凭据存在性 + OAuth 配置态 + 绑定/过期态，四路并发
+    Promise.all([
+      G.API.get('/settings/vcs/platforms').catch(function () {
+        return { platforms: [] }
+      }),
+      G.API.get('/settings/credentials'),
+      G.API.get('/auth/providers').catch(function () {
+        return { providers: [] }
+      }),
+      G.API.get('/auth/me').catch(function () {
+        return {}
+      }),
+    ])
+      .then(function (res) {
+        repoPlatforms.value = (res[0] && res[0].platforms) || []
+        const d = res[1] || {}
+        const pd = res[2] || {}
+        const me = res[3] || {}
+        platformCreds.value = d || {}
+        const cfg = {}
+        ;(pd.providers || []).forEach(function (p) {
+          cfg[p.provider] = !!p.configured
+        })
+        oauthCfg.value = cfg
+        if (!providers.value.length) providers.value = pd.providers || []
+        if (me && (me.bindings || me.identities)) profile.value = me
+        if (me && me.token_expired_providers) {
+          const m = {}
+          me.token_expired_providers.forEach(function (ep) {
+            if (typeof ep === 'object') m[ep.provider] = ep
+            else m[ep] = { provider: ep, error_code: 'TOKEN_EXPIRED' }
+          })
+          expiredMap.value = m
+        }
+        const hw = (d && d.huawei_cloud) || {}
         // Issue #474：接口只回存在性（ak_exists/sk_exists），不回明文 → 已配置显示 ******** 占位
         hwAkExists.value = !!hw.ak_exists
         hwSkExists.value = !!hw.sk_exists
@@ -1971,6 +2033,8 @@ function loadApiKeys() {
 
 // app.js 契约：OAuth 回调页 (need_transfer) 延迟调 _accountShowTransferConfirm
 G.window._accountShowTransferConfirm = showTransferConfirm
+// app.js 契约：回调页 need_transfer 但 URL 不带票据 → 由本函数调接口取票（失败可见）
+G.window._accountFetchTransferContext = fetchTransferContext
 
 onMounted(function () {
   tab.value = resolveInitialTab()
@@ -1994,15 +2058,8 @@ onMounted(function () {
   margin-bottom: 0;
 }
 .ac__prow {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--b);
-  border-radius: 12px;
-  background: var(--c);
-  margin-bottom: 10px;
-  box-shadow: var(--sh);
+  /* 尺寸/边框/圆角/背景/阴影统一由 app.css §23c（行容器单一源）提供，
+     此处只保留账号卡自身的布局细节（Issue #3081 第 5 条）。 */
 }
 .ac__prow--expired {
   border-color: var(--r);
@@ -2018,7 +2075,7 @@ onMounted(function () {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 .ac__name {
   font-size: 14px;
@@ -2028,12 +2085,36 @@ onMounted(function () {
 .ac__tag10 {
   font-size: 10px;
 }
-.ac__expired-tag {
+.ac__stag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
   font-size: 10px;
-  background: var(--r);
-  color: var(--on-accent);
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.ac__stag--bound {
+  background: rgba(28, 164, 76, 0.12);
+  color: var(--g);
+}
+.ac__stag::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.9;
+}
+.ac__stag--idle {
+  background: var(--bg);
+  color: var(--t2);
+}
+.ac__stag--warn {
+  background: rgba(220, 40, 40, 0.12);
+  color: var(--r);
 }
 .ac__expired-hint {
   font-size: 12px;
@@ -2041,9 +2122,11 @@ onMounted(function () {
   margin-bottom: 8px;
 }
 .ac__avatar {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px rgba(16, 23, 36, 0.06);
   overflow: hidden;
   flex-shrink: 0;
   display: flex;
@@ -2065,27 +2148,53 @@ onMounted(function () {
   background: var(--bg);
   opacity: 0.5;
 }
-.ac__idline {
+/* 已绑定行：平台 logo 与原未绑定行同一槽位（不再在名字前重复渲染，避免名字右移） */
+.ac__avatar--brand {
+  background: var(--bg);
+}
+/* 账号 + 绑定时间合成一行元信息（与未绑定行的 hint 行同一视觉重量） */
+.ac__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
   font-size: 12px;
+  line-height: 1.5;
   color: var(--t2);
+}
+.ac__idline {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ac__timeline {
-  font-size: 11px;
+.ac__dot {
   color: var(--t3);
-  margin-top: 2px;
+  flex-shrink: 0;
+}
+.ac__timeline {
+  color: var(--t3);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .ac__prow-btns {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
+.ac__prow :deep(button.bt) {
+  min-width: 56px;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+}
 .ac__unbind-btn {
-  color: var(--r);
-  border-color: var(--r);
-  font-size: 11px;
+  color: var(--r) !important;
+  border-color: var(--b) !important;
+}
+.ac__unbind-btn:hover {
+  border-color: var(--r) !important;
+  background: rgba(220, 40, 40, 0.06);
 }
 .ac__linkhint {
   font-size: 12px;
@@ -2099,6 +2208,39 @@ onMounted(function () {
 }
 .ac__crow {
   align-items: center;
+}
+/* 凭据页徽章（OAuth 三态 + PAT 两态） */
+.ac__badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.ac__badge--bound {
+  background: rgba(52, 199, 89, 0.15);
+  color: #34c759;
+}
+.ac__badge--unbound {
+  background: rgba(10, 132, 255, 0.12);
+  color: #0a84ff;
+}
+.ac__badge--muted {
+  background: var(--bg);
+  color: var(--t3);
+}
+.ac__credrow {
+  padding: 12px 16px;
+  box-shadow: none;
+  border-radius: 12px;
+}
+.ac__small {
+  font-size: 12px;
+}
+.ac__linkbtn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
 }
 .ac__cred-row {
   display: flex;

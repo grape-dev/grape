@@ -93,6 +93,17 @@ fail-open 洞随机制消失：原"卡无 whitelist_column → return True"路�
   加 col_provider/col_username/legacy_tag；username_ph 去 "GitHub/GitCode" 字样
 - admin.html 引用 admin.js?v= bump（只升不降）
 
+### D5b 管理台 Vue 化后的重新落地（2026-11-14）
+
+D5 的窄表化最初落在 admin.html + admin.js；管理台整体迁到 Vue 后该页退回旧列式形态（写死两平台下拉、
+双平台列头），行式后端没有 UI。重新落地口径：
+
+- 渠道下拉 = `GET /admin/whitelist` 返回的 `providers[]`（`list_providers()` → `grape_t_oauth_channels`），
+  渠道下线/改 key 时自动纠偏选中值，无在册渠道给「去登录渠道启用」指引
+- 行形态 = `{id, provider, username, remark, created_at, legacy}`；legacy=true 的存量列式条目按 provider 定向删除
+- 空表红条：开关开 + 列表空 → fail-closed 语义显性提示（S6）
+- 守卫：`tests/mgmt/test_login_whitelist_row_model.py` 的 S6/S7 断言打到 SFC 源码与 admin-view 版本位
+
 ### D6 改名联动双写
 
 grape_account_db 改名同步第 4 步：新行

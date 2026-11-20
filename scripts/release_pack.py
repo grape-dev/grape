@@ -192,17 +192,17 @@ def pack_database(ts):
     ]
     # 机密表 — 只导 DDL, 不导数据
     # 2026-10-14 账号体系重构补充：grape_accounts / external_identities（D32 账号核心表）、
-    # api_tokens / session_api_tokens / task_proxy_tokens（会话与 API 凭据）、
+    # api_tokens / session_api_tokens / grape_t_task_proxy_tokens（会话与 API 凭据）、
     # verification_codes / login_failures / exchange_codes（注册验证与登录安全）、
-    # user_llm_credentials（用户模型凭据）。全部含用户数据/密钥，只导结构。
+    # grape_t_user_llm_credentials（用户模型凭据）。全部含用户数据/密钥，只导结构。
     schema_only_tables = [
         "user_accounts", "user_credentials", "runtime_credentials", "managed_repos",
         "oauth_states", "repo_platform_tokens", "user_vms", "user_vm_repos",
         "unified_user_mapping", "repo_im_group_binding",
         "grape_accounts", "external_identities",
-        "api_tokens", "session_api_tokens", "task_proxy_tokens",
+        "api_tokens", "session_api_tokens", "grape_t_task_proxy_tokens",
         "verification_codes", "login_failures", "exchange_codes",
-        "user_llm_credentials", "user_repos",
+        "grape_t_user_llm_credentials", "user_repos",
     ]
     # 运行时大表 — 只导 DDL
     runtime_tables = [

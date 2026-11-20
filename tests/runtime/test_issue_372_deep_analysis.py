@@ -474,7 +474,7 @@ class TestErrorCodeI18n:
                          "created_at": "2026-11-08", "status": 4}
         with patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id",
                    return_value={"username": "test", "email": "", "nickname": "", "avatar_url": ""}), \
-             patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True), \
+             patch("src.domains.mgmt.auth.grape_account_db.has_password", return_value=True), \
              patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[expired_ident]), \
              patch("src.domains.mgmt.auth.grape_account_db.is_identity_expired", return_value=True):
             resp = client.get("/api/auth/me", headers={"Authorization": "Bearer test"})

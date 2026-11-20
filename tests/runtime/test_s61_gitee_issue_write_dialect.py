@@ -51,7 +51,7 @@ def _client(provider, token="T", owner="acme", repo="web"):
     return VcsApiClient(provider, token, owner, repo)
 
 
-def _capture(method, url, data=None, headers=None):
+def _capture(method, url, data=None, headers=None, **kw):
     return {"method": method, "url": url, "data": data, "headers": headers or {}}
 
 
@@ -72,7 +72,7 @@ def test_s61_card_issue_write_form_default_and_validation():
 def test_s61_create_issue_gitee_owner_param(gitee_card):
     """gitee：POST /repos/{owner}/issues + form repo=仓名（实弹观测形态）。"""
     c = _client("gitee")
-    with patch.object(VcsApiClient, "_do_request", side_effect=lambda m, u, d=None, headers=None:
+    with patch.object(VcsApiClient, "_do_request", side_effect=lambda m, u, d=None, headers=None, **kw:
                       {"number": "IKSQ4O", "state": "open"}) as m_req:
         r = c.create_issue("标题", body="正文")
     assert r["number"] == "IKSQ4O"
@@ -89,7 +89,7 @@ def test_s61_create_issue_gitee_owner_param(gitee_card):
 def test_s61_create_issue_gitcode_parity():
     """gitcode（repo_path 默认）：/repos/{o}/{r}/issues + form {title, body} 不变。"""
     c = _client("gitcode")
-    with patch.object(VcsApiClient, "_do_request", side_effect=lambda m, u, d=None, headers=None:
+    with patch.object(VcsApiClient, "_do_request", side_effect=lambda m, u, d=None, headers=None, **kw:
                       {"number": 7}) as m_req:
         c.create_issue("t", body="b")
     url = m_req.call_args.args[0].split("?")[0]

@@ -27,7 +27,9 @@ from src.kernel.config import log
 from src.domains.runtime import public as _rt_alerts
 from src.domains.mgmt import public as _mgmt_alerts
 from src.domains.insight.observability import alert_policy as _policy
-from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
+# 超时失败签名走 owner 域 public（原 import runtime.engine.task_timeout 内部模块）
+from src.domains.runtime import public as _rt_timeout
+_TIMEOUT_FAIL_SIGNATURE = _rt_timeout.timeout_fail_signature()
 
 # ===== 种子规则 =====
 # 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的
@@ -438,7 +440,7 @@ def _platform_metrics() -> Dict[str, float]:
     try:
         from src.kernel.owner_db import db_pair
         db, db_lock = db_pair("insight")
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
         online = 0
         for status, last_seen in _rt_alerts.alerts_credential_heartbeats():
             try:
@@ -910,7 +912,7 @@ async def _send_event_text(rule: Dict[str, Any], ev: Dict[str, Any], text: str,
         for uid, open_id in recipients:
             try:
                 from src.api.issues_center import _resolve_user_chat_bot
-                from src.domains.runtime.im.engine_wiring import feishu_api
+                from src.domains.runtime.public import feishu_api
                 ctx = _resolve_user_chat_bot(None, uid)
                 api = feishu_api(ctx.app_id) if ctx else None
                 if not ctx or not api:
@@ -1057,7 +1059,7 @@ async def send_test_notification(user: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": "no_bot",
                 "message": "本人 chat bot 未配置（grape_t_channel_installation 无活跃飞书安装）——"
                            "请先在「Chat Agent」页扫码配置飞书"}
-    from src.domains.runtime.im.engine_wiring import feishu_api
+    from src.domains.runtime.public import feishu_api
     api = feishu_api(ctx.app_id)
     if not api:
         return {"ok": False, "reason": "no_api", "message": "IM 客户端未初始化"}
@@ -1136,7 +1138,7 @@ def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List
         _is_personal = True
         if _org_id:
             try:
-                from src.domains.mgmt.user.org_db import is_org_personal
+                from src.domains.mgmt.public import is_org_personal
                 _is_personal = is_org_personal(_org_id)
             except Exception:
                 _is_personal = False

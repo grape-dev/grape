@@ -244,7 +244,8 @@
     "anomaly": "Anomalies",
     "errorlogs": "Error Logs",
     "events": "Events",
-    "efficiency": "Efficiency"
+    "efficiency": "Efficiency",
+    "sandboxes": "Sandboxes"
   },
   "eff": {
     "total_issues": "Issues opened",
@@ -513,5 +514,28 @@
     "failed": "Failed to submit feedback, please retry later",
     "login_required": "Please sign in before submitting feedback",
     "count": "{n}/{max}"
+  },
+  "sbx": {
+    "sbx_search_ph": "Search event...",
+    "sbx_search_tip": "Event seq (exact) or full task ID (t_ prefix)",
+    "sbx_all_platforms": "All Platforms",
+    "sbx_all_states": "All States",
+    "sbx_search_btn": "Search",
+    "sbx_refresh": "Refresh",
+    "sbx_empty": "No sandboxes",
+    "sbx_col_platform": "Platform",
+    "sbx_col_template": "Template",
+    "sbx_col_engine": "Engine",
+    "sbx_init_tip": "Engine/env initialized in sandbox",
+    "sbx_col_init": "Init",
+    "sbx_col_created_by": "Created By",
+    "sbx_col_created_at": "Created At",
+    "sbx_col_last_refresh": "Last Refresh",
+    "sbx_view_error_tip": "Click to view error",
+    "sbx_error_title": "Sandbox Setup Error",
+    "sbx_no_error": "(no error recorded)",
+    "sbx_copy": "Copy",
+    "sbx_close": "Close",
+    "sbx_error_copied": "Error copied"
   }
 }

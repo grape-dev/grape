@@ -30,7 +30,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
 from src.domains.insight.observability.overview import _p95   # 复用同一分位数实现，避免两套口径
-from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
+# 超时失败签名走 owner 域 public（原 import runtime.engine.task_timeout 内部模块）
+from src.domains.runtime import public as _rt_timeout
+_TIMEOUT_FAIL_SIGNATURE = _rt_timeout.timeout_fail_signature()
 
 RES_MINUTE = "minute"
 RES_HOUR = "hour"

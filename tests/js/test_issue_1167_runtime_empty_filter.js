@@ -55,4 +55,14 @@ check('引导文案与筛选栏在无筛选场景下同时存在', function () {
   assert.ok(zh.empty && zh.empty.no_engines_title && zh.empty.no_engines_sub, 'zh 引导文案应存在');
 });
 
-console.log('\n#1167 全部通过 (' + passed + '/4)');
+check('真·空组织才走居中空态（有筛选时必须保留筛选栏）', function () {
+  const i = VIEW.indexOf('const isEmpty = computed(');
+  assert.ok(i > 0, '应存在 isEmpty');
+  const b = VIEW.slice(i, i + 320);
+  assert.ok(
+    b.indexOf('!hasActiveFilters.value') >= 0,
+    'isEmpty 必须排除「有激活筛选」，否则整条筛选栏被居中空态顶掉（Issue #1167 / MR 1008 回归）',
+  );
+});
+
+console.log('\n#1167 全部通过 (' + passed + '/5)');

@@ -13,6 +13,18 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
+# 2026-11-19：`Request` 出现在 `require_credential(request: Request)` 的注解里。
+# 本模块 `from __future__ import annotations` 使注解是字符串，但 FastAPI 在运行期
+# 按**模块全局名**解析依赖签名：仅有 TYPE_CHECKING 导入会让注解停在
+# ForwardRef('Request')，端点把 request 当必填 query 参数 → 全量 422，且
+# `/openapi.json` 渲染抛 PydanticUserError。因此运行期必须可解析，同时 worker
+# 任务路径（经 src.domains.mgmt.user.db → runtime.public）不得因缺 fastapi 崩掉：
+# 顶层 try/except 导入，缺包时降级为 Any（仅 worker 场景，注解不参与业务）。
+try:  # pragma: no cover - 主控有 fastapi；worker 缺包走降级分支
+    from fastapi import Request
+except ImportError:  # pragma: no cover - worker 无 web 框架
+    Request = Any  # type: ignore[assignment,misc]
+
 from src.kernel import db_registry
 
 
@@ -80,6 +92,103 @@ def get_runtime(runtime_id: int) -> dict[str, Any]:
         return rows[0] if rows else {}
 
 
+def cloud_sandboxes_active_count(provider_ids) -> int:
+    """给定 provider id 列表里状态为 creating/running 的沙箱数。
+
+    原实现在名为 cloud_sandboxes_active_count_by_cred 的具名查询里用子查询读 mgmt 的
+    sandbox_provider_config，三库拓扑下跨库执行必失败。现在拆成：mgmt 出 provider 列表，
+    本域按列表计数。
+    """
+    keys = [str(x) for x in (provider_ids or []) if x]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN ({ph}) "
+                  f"AND state IN ('creating','running')", tuple(keys))
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def list_runtime_uid_rows() -> list[tuple]:
+    """engine_uid 回填/校验用：id, credential_id, name, scope, owner_id, host_name, engine_uid。
+
+    原来散在 src/api/db_setup.py 的启动期回填里直查本表；lib 模式下 SQL 只留 owner 域一份。
+    """
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, credential_id, name, scope, owner_id, host_name, engine_uid "
+                  "FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def set_runtime_engine_uid(runtime_id: int, engine_uid: str | None) -> int:
+    """写单个运行时的 engine_uid（None/'' = 置空）。返回影响行数。"""
+    val = engine_uid or None
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE agent_runtimes SET engine_uid=%s WHERE id=%s", (val, runtime_id))
+        return int(c.rowcount or 0)
+
+
+def list_runtime_name_rows() -> list[tuple]:
+    """id, 展示名, name —— 引擎别名迁移/展示映射用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, COALESCE(display_name, name), name FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def list_runtime_id_uid_rows() -> list[tuple]:
+    """id, engine_uid —— uid 唯一性校验与批量回填用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, engine_uid FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def runtime_ids_by_engine_uids(engine_uids) -> list[int]:
+    """按 engine_uid（大小写不敏感）反查运行时 id 列表。"""
+    keys = [str(u).lower() for u in (engine_uids or []) if u]
+    if not keys:
+        return []
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({ph})", tuple(keys))
+        return [int(r[0]) for r in c.fetchall()]
+
+
+def runtime_cred_rows_by_engine_uids(engine_uids) -> list[tuple]:
+    """按 engine_uid 精确匹配取 engine_uid, id, credential_id —— 自动编排的引擎校验用。"""
+    keys = [str(u) for u in (engine_uids or []) if u]
+    if not keys:
+        return []
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT engine_uid, id, credential_id FROM agent_runtimes "
+                  f"WHERE engine_uid IN ({ph})", tuple(keys))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def rename_runtime_engine_uid(old_uid: str, new_uid: str) -> int:
+    """把一个 engine_uid 的所有运行时改名为新 uid（引擎重命名级联）。返回影响行数。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE agent_runtimes SET engine_uid=%s WHERE engine_uid=%s", (new_uid, old_uid))
+        return int(c.rowcount or 0)
+
+
+def runtime_rebase_row(runtime_id: int) -> tuple:
+    """credential_id, name, scope, owner_id, host_name, engine_uid —— uid 重算需要原始行。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT credential_id, name, scope, owner_id, host_name, engine_uid "
+                  "FROM agent_runtimes WHERE id=%s", (runtime_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def runtime_uid_of(runtime_id: int) -> str:
+    """单个运行时的 engine_uid（缺省空串）—— 追踪打点用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=%s", (runtime_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
 def task_stats(repo_key: str, since: str | None = None) -> dict[str, Any]:
     """任务聚合（insight 面板用；替代之前的跨库 JOIN/子查询）。"""
     sql = ("SELECT status, COUNT(*) AS n FROM agent_tasks WHERE repo_key=%s")
@@ -117,8 +226,11 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+# 列序必须与 mgmt._build_cred_map 的解包一一对应（14 列）：少 cred_type/platform
+# 时该处抛出 "not enough values to unpack (expected 14, got 12)"，设备/引擎页整体 500。
 _CRED_COLS = ("id", "name", "device_name", "scope", "owner_id", "owner_name",
-              "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec")
+              "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec",
+              "cred_type", "platform")
 
 
 def list_credential_rows() -> list[tuple]:
@@ -152,6 +264,10 @@ def task_brief(task_id: int) -> tuple | None:
         row = c.fetchone()
         return tuple(row) if row else None
 
+
+# 相关技能候选池大小：热度前 N 进打分池（与 mgmt 路由 _RELATED_POOL_SIZE 同值；
+# 全库技能 ~10² 量级，300 覆盖全部活跃技能。QA B2：裸数字须具名+来源）。
+_SKILL_RELATED_POOL_SIZE = 300
 
 _SKILL_DETAIL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                       "skill_path", "file_path", "scope", "owner_id", "content_hash")
@@ -699,6 +815,17 @@ def update_skill_obs(skill_id: int, object_key: str, display_name: str, agent_ty
         return int(c.rowcount or 0)
 
 
+def update_skill_category_tags(skill_id: int, cat_l1_id: int = 0, cat_l2_id: int = 0,
+                               tags: str = "") -> int:
+    """写入技能的一/二级分类与标签（Issue #2761；tags 为 JSON 字符串）。
+
+    走任意拓扑具名写语句：三库（自有 DSN）与单库/测试拓扑都可用。
+    """
+    return exec_any("skill_category_tags_update",
+                    (int(cat_l1_id or 0), int(cat_l2_id or 0), tags or "",
+                     int(skill_id)))
+
+
 def insert_skill(skill_name: str, display_name: str, description: str, agent_type: str,
                  file_path: str, scope: str, owner_id: str, created_by: str,
                  updated_by: str, category_id: str = "", content_hash: str = "") -> int:
@@ -750,24 +877,34 @@ def adjust_skill_like_count(skill_id: int, delta: int) -> int:
 # ---------- 凭据写原语（P3-5f-3：mgmt 进程写 runtime 基表） ----------
 
 def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: str,
-                              owner_name: str, repo_key: str, org_id: str) -> dict[str, Any]:
+                              owner_name: str, repo_key: str, org_id: str,
+                              cred_type: str = "worker", platform: str = "",
+                              credential_uid: str = "") -> dict[str, Any]:
     """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
     调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。
 
-    org_id 归一：runtime_credentials.org_id 是 int 列（NULL 默认 0），而调用方在
-    「个人设备/未归属组织」时通常传空串。MySQL STRICT_TRANS_TABLES 下空串写 int 直接
-    1366，整条凭据生成失败（「添加设备生成凭据」那个报错）。这里统一转 int，空 → 0。
+    org_id 归一（D105 第三批后 TEXT 列）：org_id 列已 TEXT 化（''=未归属哨兵，
+    db_setup 幂等补列 + 迁移 2026111700xx 同形）。「个人设备/未归属组织」空串直存
+    ''；uuid/组织 id 字符串原样存。**不再 int() 强转**——旧 int 列时代空串写 int 会
+    1366 才做的 0 归一，在 TEXT 列上会产出 '0' 脏值：可见性过滤按新口径
+    （org_id in ('', <org uuid>)）比对时 '0' 永不匹配 → 个人组织下 global 凭据
+    全部不可见（s3/s4 生成后页面消失的实测根因）。历史 '0' 行由调用方可见性
+    过滤按哨兵兼容（见 settings 列表端点），本函数不再制造新脏值。
     """
-    try:
-        _org_int = int(str(org_id).strip()) if str(org_id if org_id is not None else "").strip() not in ("", "None") else 0
-    except (TypeError, ValueError):
-        _org_int = 0
+    _org_val = str(org_id).strip() if str(org_id if org_id is not None else "").strip() not in ("", "None") else ""
     with _any_cursor(write=True) as c:
         try:
-            c.execute("INSERT INTO runtime_credentials "
-                      "(token_hash, name, scope, owner_id, owner_name, repo_key, org_id) "
-                      "VALUES (?,?,?,?,?,?,?)",
-                      (token_hash, name, scope, owner_id, owner_name, repo_key, _org_int))
+            _rc_cols = ["token_hash", "name", "scope", "owner_id", "owner_name", "repo_key", "org_id"]
+            _rc_vals = [token_hash, name, scope, owner_id, owner_name, repo_key, _org_val]
+            # [沙箱迁移 i7] cred_type/platform 列；#646 credential_uid 稳定键——旧库缺列由迁移兜底
+            for _col, _val in (("status", "active"),
+                               ("cred_type", cred_type or "worker"), ("platform", platform or ""),
+                               ("credential_uid", credential_uid or "")):
+                _rc_cols.append(_col)
+                _rc_vals.append(_val)
+            c.execute(f"INSERT INTO runtime_credentials ({', '.join(_rc_cols)}) "
+                      f"VALUES ({','.join('?' * len(_rc_cols))})",
+                      tuple(_rc_vals))
             return {"action": "inserted", "id": int(c.lastrowid or 0)}
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
@@ -1009,6 +1146,37 @@ def touch_device_credential_any(hostname: str, last_seen_at: str, last_ip: str =
 
 # ---------- 引擎行写原语（P3-5f-2：mgmt 进程写 runtime 基表 agent_runtimes） ----------
 
+def _sync_local_derived_tags(c, rid: int, name: str, scope: str,
+                             engine_uid: str = "") -> None:
+    """Issue #1208：本机直连引擎（credential_id=0）补派生 engine:/scope:/scene: 标签。
+
+    本机直连引擎既不走 worker 注册链（runtime.py 注册分支），也没有 worker 心跳——
+    心跳链的派生刷新按 `r.credential_id=?` 过滤，credential_id=0 的行永远匹配不到，
+    于是这些行只带平铺 'all' 行、没有任何冒号派生行。selector 按 engine:<name> 圈池时
+    它们恒判「标签不匹配」（reason=selector），命中预览里本机引擎永远进不了命中组。
+
+    本机探测快照 upsert 是这些行唯一的写入口，所以在 UPDATE/INSERT 两处都补这一步；
+    sync_derived_agent_tags 自带写放大防护与幂等替换，失败只告警，不阻断探测快照落库。
+    """
+    try:
+        import json as _json
+
+        from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags
+        c.execute("SELECT scene_tags, runtime_info FROM agent_runtimes WHERE id=?", (rid,))
+        row = c.fetchone()
+        scene_tags = row[0] if row else ""
+        engine_type = ""
+        try:
+            engine_type = (_json.loads((row[1] if row and len(row) > 1 else "") or "{}")
+                           .get("engine_type") or "")
+        except Exception:  # noqa: BLE001 - runtime_info 脏数据按无 engine_type 处理
+            engine_type = ""
+        sync_derived_agent_tags(c, rid, name, scope, scene_tags,
+                                engine_uid=engine_uid or "", engine_type=engine_type)
+    except Exception as e:  # noqa: BLE001 - 派生失败不阻断本机探测快照
+        log.warning(f"upsert_local_runtimes: agent_tags derive failed for runtime {rid}: {e}")
+
+
 def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_name: str,
                           now_iso: str) -> dict[str, Any]:
     """本机直连引擎行批量 upsert：SELECT → UPDATE/INSERT → prune → dedupe，**同一事务**。
@@ -1030,20 +1198,37 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             c.execute("SET SESSION innodb_lock_wait_timeout=5")
         except Exception as _e:
             log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
+        # Issue #646：engine_uid 派生轨道（UUIDv5 按自然键确定性派生，幂等防 id 漂移）；
+        # 旧库缺列时整段 uid 逻辑降级跳过（与 legacy 双读路径一致）。
+        from src.kernel.engine_uid import derive_engine_uid
+        _uid_ready = False
+        try:
+            c.execute("SELECT engine_uid FROM agent_runtimes LIMIT 1")
+            _uid_ready = True
+        except Exception:
+            _uid_ready = False
         for a in agents or []:
             name = (a.get("name") or "").strip().lower()
             if not name:
                 continue
             names.append(name)
+            _engine_uid = derive_engine_uid("", name, scope, owner_id, host_name)
             _ls = _json.dumps(a.get("local_skills") or [], ensure_ascii=False)
             _detail = a.get("local_skills_detail")
             _detail_json = _json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-            c.execute(
-                "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? "
-                "AND credential_id=0 AND (host_name=? OR host_name='' OR host_name IS NULL) "
-                "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
-                (name, scope, owner_id, host_name, host_name))
-            row = c.fetchone()
+            row = None
+            if _uid_ready:
+                # uid 优先匹配（稳定键，幂等防漂移）；未迁移库回退 legacy 路径
+                c.execute("SELECT id FROM agent_runtimes WHERE engine_uid=? LIMIT 1",
+                          (_engine_uid,))
+                row = c.fetchone()
+            if not row:
+                c.execute(
+                    "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? "
+                    "AND credential_id=0 AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                    "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
+                    (name, scope, owner_id, host_name, host_name))
+                row = c.fetchone()
             if row:
                 rid = int(row[0])
                 _derived = derive_local_runtime_health(bool(a.get("installed")), bool(a.get("healthy")))
@@ -1054,25 +1239,60 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id=?",
                               (now_iso, rid))
                 c.execute(
+                    # probe_* 必须一起写回：本地探测是直连引擎唯一的健康来源，
+                    # 缺了它 probe_status 永远 pending → claim 侧把"未探测"当低分 → 拒绝认领
+                    # （2026-11-15 实证：本机 4 个直连引擎全部 pending，任务无人认领或认领后不执行）。
                     "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, "
                     "healthy=?, pip_package=?, updated_at=?, local_skills=?, "
-                    "skill_scan_result=?, host_name=? WHERE id=?",
+                    "skill_scan_result=?, host_name=?, "
+                    "probe_status=?, probe_latency=?, probe_error=?, probe_last=?, "
+                    "probe_ok_streak=CASE WHEN ? THEN COALESCE(probe_ok_streak,0)+1 ELSE 0 END "
+                    "WHERE id=?",
                     (a.get("display_name", name), 1 if a.get("installed") else 0,
                      a.get("cli_path", ""), a.get("version", ""),
                      1 if a.get("healthy") else 0, a.get("pip_package", ""), now_iso,
-                     _ls, _detail_json, host_name, rid))
+                     _ls, _detail_json, host_name,
+                     (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                     int(a.get("probe_latency") or 0),
+                     a.get("probe_error", ""), now_iso,
+                     1 if a.get("healthy") else 0,
+                     rid))
+                if _uid_ready:
+                    # Issue #646：uid 派生轨道写回（UPDATE 路径）
+                    c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
+                              (_engine_uid, rid))
+                # Issue #1208：本机直连引擎补三维度派生标签（否则 selector 圈池恒不命中）
+                _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
                 out["upserted"] += 1
                 out["ids"][name] = rid
                 continue
             if not a.get("installed"):
                 continue
-            c.execute(
+            if _uid_ready:
+                c.execute(
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
+                    "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
+                    "last_seen_at, updated_at, probe_status, probe_latency, probe_last, probe_ok_streak, engine_uid) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
+                     1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
+                     _ls, _detail_json, host_name, now_iso, now_iso,
+                     (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                     int(a.get("probe_latency") or 0), now_iso,
+                     1 if a.get("healthy") else 0, _engine_uid))
+            else:
+                c.execute(
                 "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
                 "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
-                "last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "last_seen_at, updated_at, probe_status, probe_latency, probe_last, probe_ok_streak) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
                  1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
-                 _ls, _detail_json, host_name, now_iso, now_iso))
+                 _ls, _detail_json, host_name, now_iso, now_iso,
+                 # 新引擎首写就带上探测结果，避免"插入即 pending"再走一轮认领被拒
+                 (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                 int(a.get("probe_latency") or 0), now_iso,
+                 1 if a.get("healthy") else 0))
             rid = int(c.lastrowid or 0)
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
             if not c.fetchone():
@@ -1084,15 +1304,48 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             tags = [r[0] for r in c.fetchall()]
             c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?",
                       (_json.dumps(tags, ensure_ascii=False), rid))
+            # Issue #1208：新建的本机直连引擎同样补三维度派生标签（与 UPDATE 路径同口径）
+            _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
             out["inserted"] += 1
             out["ids"][name] = rid
 
         if names:
             ph = ",".join(["?"] * len(names))
+            # Issue #646：过期行删除走显式清理链（池/能力/会话/绑定/场景 + 对账报告），
+            # MySQL RESTRICT FK 兜底防漏（不静默级联蒸发）——与供体 save_agent_runtimes 口径一致。
+            # 必须在 DELETE 之前执行（行删掉后 stale 集合查不到了）。
+            try:
+                _stale_ids = [r[0] for r in c.execute(
+                    f"SELECT id FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
+                    f"AND host_name=? AND lower(name) NOT IN ({ph})",
+                    (scope, owner_id, host_name, *names)).fetchall()]
+                if _stale_ids:
+                    # 同域：runtime 引用对账归本模块 public 原语（不再绕 mgmt.user.db）
+                    reconcile_for_caller(c, _stale_ids, 0, reason="refresh stale engines")
+            except Exception as _se:
+                log.warning(f"upsert_local_runtimes stale-cleanup rebind skipped: {_se}")
             c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
                       f"AND host_name=? AND lower(name) NOT IN ({ph})",
                       (scope, owner_id, host_name, *names))
             out["pruned"] = int(c.rowcount or 0)
+        # Issue #646：DELETE 前先把待删行的跨表引用改绑到保留行（孤儿引用/静默失效防护）
+        try:
+            _dup_rows = c.execute(
+                "SELECT id, lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, '') "
+                "FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
+                "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
+                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, ''))"
+            ).fetchall()
+            for _dup_id, _n, _sc, _ow, _org, _host in _dup_rows:
+                _keep = c.execute(
+                    "SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 AND lower(name)=? "
+                    "AND scope=? AND owner_id=? AND COALESCE(org_id, 0)=? AND COALESCE(host_name, '')=?",
+                    (_n, _sc, _ow, _org, _host)).fetchone()
+                if _keep and _keep[0] and _keep[0] != _dup_id:
+                    # 同域：runtime 引用对账归本模块 public 原语（不再绕 mgmt.user.db）
+                    reconcile_for_caller(c, [_dup_id], _keep[0])
+        except Exception as _re:
+            log.warning(f"upsert_local_runtimes rebind-before-dedup skipped: {_re}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
                   "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
                   "GROUP BY lower(name), scope, owner_id, COALESCE(org_id,0), COALESCE(host_name,''))")
@@ -1292,7 +1545,7 @@ _READ_QUERIES: dict[str, str] = {
     "runtime_credentials_7431a6": "SELECT id FROM runtime_credentials WHERE name=%s",
     "runtime_credentials_3cd287": "SELECT owner_name FROM runtime_credentials WHERE id=%s",
     "runtime_credentials_ff9c0b": "SELECT owner_name, status FROM runtime_credentials WHERE id=%s",
-    "runtime_credentials_5b448f": "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials",
+    "runtime_credentials_5b448f": "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec, cred_type, platform FROM runtime_credentials",
     "devops_agent_session_dcd716": "SELECT id FROM devops_agent_session WHERE repo_key=%s AND agent_type='vod'",
     "devops_agent_session_a36e5f": "SELECT runtime_id FROM devops_agent_session WHERE repo_key=%s AND agent_type=%s",
     "agent_tasks_29ab8e": "SELECT repo_key, agent_type, runtime_id, user_id, issue_id FROM agent_tasks WHERE id=%s",
@@ -1341,7 +1594,7 @@ def read_all(query: str, params: tuple = ()) -> list[Any]:
 # N1 列表返回列：不含 file_path（OBS 明文地址）与 owner 敏感列
 _SKILL_LIST_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                     "scope", "owner_id", "category_id", "is_active", "is_featured",
-                    "like_count", "updated_at", "org_id")
+                    "like_count", "updated_at", "org_id", "summary")
 
 
 def list_skills(repo_key: str = "", q: str = "", limit: int = 50, offset: int = 0,
@@ -1476,6 +1729,26 @@ def task_stats_extended(repo_key: str = "", since: str | None = None) -> dict[st
     return {"by_status": base, "aggregate": dict(zip(cols, row)) if row else {}}
 
 
+def runtime_ids_by_engine_uids(uids: list[str]) -> list[int]:
+    """engine_uid 列表 → agent_runtimes.id 列表（缺失项以 0 哨兵占位）。
+
+    scene_precheck 的 uid-first 解析经此公开读原语取数，不再跨域调用本模块的
+    私有游标；lib 模式下亦可经注册表解析。
+    """
+    _uids = [u for u in (uids or []) if str(u or "").strip()]
+    if not _uids:
+        return []
+    placeholders = ",".join("?" * len(_uids))
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT id, engine_uid FROM agent_runtimes WHERE engine_uid IN ({placeholders})",
+            tuple(_uids),
+        )
+        rows = c.fetchall()
+    found = {row[1]: row[0] for row in rows}
+    return [int(found[u]) if found.get(u) else 0 for u in _uids]
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1494,10 +1767,11 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
            "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
            "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",
-           "stamp_task_traces",
+           "stamp_task_traces", "reconcile_engine_references",
            # 飞书扫码 onboarding 换绑清理（任意拓扑原语；SQL 只留本模块）
            "vod_session_id_by_repo_any", "chat_conversations_delete_by_im_channel_any",
            "vod_conversation_delete_by_session_any", "vod_agent_session_ensure_any",
@@ -1506,7 +1780,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "set_repo_im_notifications", "add_event_action_filter",
            "update_event_action_filter", "delete_event_action_filter",
            # P3-5f 写原语（skill / 凭据）
-           "update_skill_content", "update_skill_obs", "insert_skill", "create_skill_row",
+           "update_skill_content", "update_skill_obs", "update_skill_category_tags", "insert_skill", "create_skill_row",
            "delete_skill_row", "delete_skill_by_id", "adjust_skill_like_count",
            "insert_runtime_credential", "rename_runtime_credential",
            "set_runtime_credential_scope", "delete_runtime_credential",
@@ -1612,6 +1886,10 @@ def xwrite_apply(action: str, payload: dict[str, Any], idempotency_key: str) -> 
             str(p.get("updated_at", ""))),
         "repo_credential_clear": lambda p: {"cleared": clear_repo_credential(
             str(p["repo_key"]), str(p["cred_type"]), str(p.get("updated_at", "")))},
+        # Issue #3097：mgmt 删用户/合并账号时引用对账失败的重放（幂等）
+        "engine_refs_reconcile": lambda p: reconcile_engine_references(
+            list(p.get("runtime_ids") or []), int(p.get("keep_id") or 0),
+            reason=str(p.get("reason") or "")),
     }
     fn = handlers.get(action)
     if fn is None:
@@ -1759,7 +2037,8 @@ def list_featured_skills(ordered_ids: list[int] | None = None, limit: int = 5) -
     为空时直接 like_count 降序。列与 mgmt `get_featured_skills` 完全一致。
     """
     cols = ("id", "skill_name", "display_name", "description", "agent_type",
-            "is_featured", "like_count", "category_id")
+            "is_featured", "like_count", "category_id",
+            "cat_l1_id", "cat_l2_id", "tags", "summary")
     sel = f"SELECT {', '.join(cols)} FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official'"
     out: list[dict[str, Any]] = []
     with db_registry.cursor("runtime") as c:
@@ -1785,7 +2064,11 @@ def _skill_row(r: dict[str, Any]) -> dict[str, Any]:
             "display_name": r["display_name"] or r["skill_name"],
             "description": r["description"] or "", "agent_type": r["agent_type"] or "",
             "is_featured": r["is_featured"], "like_count": r["like_count"],
-            "category_id": r["category_id"] or 0}
+            "category_id": r["category_id"] or 0,
+            "cat_l1_id": r.get("cat_l1_id") or 0,
+            "cat_l2_id": r.get("cat_l2_id") or 0,
+            "tags": r.get("tags") or "",
+            "summary": r.get("summary") or ""}
 
 
 def list_active_credential_ids() -> list[int]:
@@ -1944,12 +2227,24 @@ _ANY_QUERIES: dict[str, str] = {
     'chat_session_update_state_noreid': (
         "UPDATE chat_agent_session SET event_history=?, status=?, last_active_at=? WHERE id=?"),
     'chat_config_row_canonical': (
+        "SELECT id, runtime_id, skill, skill_id, COALESCE(engine_uid,'') FROM chat_agent_session "
+        "WHERE id=? AND user_id=? AND (repo_key='' OR repo_key IS NULL)"),
+    'chat_config_row_canonical_legacy': (
         "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
         "WHERE id=? AND user_id=? AND (repo_key='' OR repo_key IS NULL)"),
     'chat_config_rows_by_user': (
+        "SELECT id, runtime_id, skill, skill_id, COALESCE(engine_uid,'') FROM chat_agent_session "
+        "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
+        "ORDER BY last_active_at DESC, id DESC"),
+    'chat_config_rows_by_user_legacy': (
         "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
         "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
         "ORDER BY last_active_at DESC, id DESC"),
+    'agent_runtime_name_by_uid': "SELECT name FROM agent_runtimes WHERE engine_uid=?",
+    'chat_config_upsert_uid': (
+        "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, engine_uid, skill, "
+        "skill_id, created_at, last_active_at) "
+        "VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))"),
     'chat_config_delete_others': (
         "DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?"),
     'chat_config_upsert': (
@@ -1993,6 +2288,25 @@ _ANY_QUERIES: dict[str, str] = {
     'message_recall': 'UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0',
     # 任务维度取该轮全部消息（chat 任务状态/SSE 兜底：跨机器或进程重启后内存无常驻任务）
     # chat 配置面（引擎/技能下拉）：三张表都归 runtime，mgmt 进程直查会 1146 → 下拉永远空
+    'runtime_credential_type_by_id': "SELECT cred_type FROM runtime_credentials WHERE id=?",
+    # G-02（A11 裁定 2026-11-17：grape_t_cloud_sandboxes 归 runtime）：mgmt 吊销链 409 门禁
+    # 的低频读点改走本 public 面。mgmt 侧禁止再直连该表（foreign_table_refs 收缩方向）。
+    # [跨域拆解 2026-11-18] 原来的具名查询用子查询读 mgmt 的 sandbox_provider_config ——
+    # 跨库必然失败（服务的是读，不是 DDL）。改为具名函数 cloud_sandboxes_active_count()，
+    # provider 列表由 mgmt.public 提供，调用方编排。
+    # G-02（A11）：runtime_credentials 归 runtime，mgmt 侧沙箱 Provider 端点族对它的
+    # JOIN/子查询全部收敛为以下具名读（mgmt 库视图依赖随之消除，单库/三库均可移植）。
+    # brief 全量 map：管理列表页单请求取一次，行数 = 凭据数（管理面小表）。
+    'sandbox_provider_cred_brief_map': (
+        "SELECT id, name, scope, owner_name, owner_id, repo_key FROM runtime_credentials"),
+    'runtime_credential_owner_name_by_id': "SELECT owner_name FROM runtime_credentials WHERE id=?",
+    'runtime_credential_scope_by_token': (
+        "SELECT id, scope FROM runtime_credentials WHERE token_hash=? AND status='active'"),
+    'runtime_credential_all_ids': "SELECT id FROM runtime_credentials",
+    'runtime_credential_uid_by_id': "SELECT credential_uid FROM runtime_credentials WHERE id=?",
+    'runtime_credential_id_uid_pairs': "SELECT id, credential_uid FROM runtime_credentials",
+
+    'agent_runtime_online_by_cred': "SELECT 1 FROM agent_runtimes WHERE credential_id=? AND status='online' LIMIT 1",
     'chat_local_engines': (
         "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
         "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
@@ -2000,10 +2314,26 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
         "WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?"),
+    # ↑ Issue #868 降级契约（2026-11-16 E2E 回归实锤）：引擎列表 SQL 不硬引用
+    # engine_uid——旧库缺列时整段查询塌空（backends=[]）。uid 统一由 chat.py 的
+    # _ar_engine_uid(rid) 补（自带缺列/缺行降级 ''），单源同尺。
     'chat_engine_by_id': (
         "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
         "WHERE ar.id=?"),
+    # Issue #868 指针外引擎反查 uid（chat 守卫口径：chat.py 不得直查 agent_runtimes，
+    # 走本登记层；缺列/缺行由调用侧 except 降级 ''，旧库语义不变）
+    'chat_engine_uid_by_id': (
+        "SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=?"),
+    # 旧库降级路径（engine_uid 列未迁移时 get_chat_config 的 fallback 查询；
+    # 与 chat_local_engines/chat_user_engines 同构、不含 engine_uid 列）
+    'chat_local_engines_legacy': (
+        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
+        "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
+    'chat_user_engines_legacy': (
+        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+        "WHERE rc.scope='user' AND rc.status='active' AND rc.owner_name = ?"),
     'chat_skill_id_scope': (
         "SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1"),
     'chat_skill_id_scope_owner': (
@@ -2014,7 +2344,10 @@ _ANY_QUERIES: dict[str, str] = {
         "FROM skill WHERE is_active=1 AND agent_type='chat' ORDER BY scope, skill_name"),
     'chat_skill_scope_by_id': 'SELECT scope FROM skill WHERE id=? AND is_active=1',
     'messages_by_task': (
-        "SELECT id, role, generate_status, content, conversation_id "
+        # 列序固定（tests/arch/test_chat_domain_reads.py 守）：0=id 1=role
+        # 2=generate_status 3=content 4=conversation_id；5=created_at 为本轮新增的
+        # 末列（孤儿轮次时间兜底用，老消费者按下标取前 5 列不受影响）。
+        "SELECT id, role, generate_status, content, conversation_id, created_at "
         "FROM chat_messages WHERE task_id=? ORDER BY id"),
     'message_recall_by_task': (
         "UPDATE chat_messages SET deleted=1 WHERE task_id=? "
@@ -2057,7 +2390,8 @@ _ANY_QUERIES: dict[str, str] = {
         "AND status='active'"),
     # ── session_store 去跨域所需具名查询（见 src/api/session_store.py 注释）──
     'agent_type_enable': 'SELECT enable FROM agent_type WHERE agent_type=?',
-    'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable, engine_uid FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_session_row_legacy': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
     'devops_agent_sessions_by_repo': 'SELECT id, agent_type, runtime_id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type',
     # 幂等：ensure_agent_session 语义是「已存在则不动」，SQL 必须带 OR IGNORE
     #（与本文件 devops_agent_session_insert_vod 及历史 INSERT IGNORE 对齐）。
@@ -2088,6 +2422,9 @@ _ANY_QUERIES: dict[str, str] = {
     "user_purge_chat_agent_session": "DELETE FROM chat_agent_session WHERE user_id=?",
     "user_purge_chat_conversations": "DELETE FROM chat_conversations WHERE user_id=?",
     "user_purge_issue": "DELETE FROM issue WHERE user_id=?",
+    'agent_runtime_engine_uid_by_id': 'SELECT engine_uid FROM agent_runtimes WHERE id=?',
+    'agent_runtime_snapshot_by_id': 'SELECT engine_uid, COALESCE(display_name, name), name FROM agent_runtimes WHERE id=?',
+    'devops_agent_session_insert_uid': "INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, engine_uid, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
@@ -2121,7 +2458,7 @@ _ANY_QUERIES: dict[str, str] = {
     # runtime_credentials / agent_runtimes / engine_capabilities（settings 引擎管理台读路径）
     "runtime_credentials_all": (
         "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
-        "last_ip, repo_key, org_id, spec FROM runtime_credentials"),
+        "last_ip, repo_key, org_id, spec, cred_type, platform FROM runtime_credentials"),
     "runtime_credentials_active_ids": (
         "SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC"),
     "runtime_credentials_list": (
@@ -2177,19 +2514,24 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_official_all": (
         "SELECT id, skill_name, display_name, description, agent_type, category_id FROM skill "
         "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
+    "skill_official_summary_rows": (
+        "SELECT id, skill_name, description, summary FROM skill "
+        "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
     "skill_detail_by_id": (
         "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
-        "is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1"),
+        "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags "
+        "FROM skill WHERE id=? AND is_active=1"),
     "skill_detail_by_name": (
         "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
-        "is_featured, like_count, sub_scene, category_id FROM skill WHERE skill_name=? AND is_active=1 "
+        "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags "
+        "FROM skill WHERE skill_name=? AND is_active=1 "
         "AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo') "
         "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END, id DESC LIMIT 1"),
     "skill_path_owner_scope": (
         "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1"),
     "skill_meta_row": (
-        "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill "
-        "WHERE id=? AND is_active=1"),
+        "SELECT skill_name, scope, owner_id, agent_type, category_id, "
+        "cat_l1_id, cat_l2_id, tags FROM skill WHERE id=? AND is_active=1"),
     "skill_name_path": "SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1",
     "skill_repo_full_row": (
         "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
@@ -2290,6 +2632,32 @@ _ANY_QUERIES: dict[str, str] = {
     "issue_stage_by_repo_number": (
         "SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
     "task_event_seq": "SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
+    # Issue #2327：dispatch_stalled 巡检候选（谓词/列序照抄原 api 侧 SQL，
+    # 三库拓扑下由 _any_cursor 路由到 runtime 域；查询已按状态/语义收窄、
+    # 不再用 LIMIT 截断，避免 7 天窗内早于上限的卡死事件被漏扫）。
+    # 形态一：running + runtime 空 + 无任何 agent_tasks 行（真「没派出去」；
+    # 有任务行的广播池排队属正常容量等待，不报）。
+    "patrol_a2a_unclaimed_rows": (
+        "SELECT e.seq, e.repo_key, e.issue_id, e.agent_type, e.status, e.runtime, "
+        "e.result, e.payload, e.created_at, e.started_at, e.completed_at "
+        "FROM events e LEFT JOIN agent_tasks t ON t.event_seq = e.seq "
+        "WHERE e.event_type='a2a_event' AND e.status='running' "
+        "AND (e.runtime IS NULL OR e.runtime='') AND t.id IS NULL "
+        "ORDER BY e.seq DESC"),
+    # 形态二/三：failed 且失败语义=派发失败/排队超时（结果文本已含
+    # _fail_event 写入的 [code]；LIKE 预筛只用于减少跨库取数，最终归类仍在 patrol）。
+    "patrol_a2a_failed_dispatch_rows": (
+        "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result, "
+        "payload, created_at, started_at, completed_at FROM events "
+        "WHERE event_type='a2a_event' AND status='failed' AND ("
+        "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
+        "OR result LIKE '%[a2a_dispatch_exception]%' "
+        "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
+        "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
+        "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
+        "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
+        "OR result LIKE '%unclaimed%') "
+        "ORDER BY seq DESC"),
     # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
     "task_recheck_row": (
         "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
@@ -2413,11 +2781,57 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO skill (skill_name, display_name, description, agent_type, file_path, "
         "scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
         "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)"),
+    "skill_category_tags_update": (
+        "UPDATE skill SET cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') "
+        "WHERE id=?"),
     "skill_row_create_ignore": (
         "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, "
         "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),
     "skill_like_inc": "UPDATE skill SET like_count=like_count+1 WHERE id=?",
     "skill_like_dec": "UPDATE skill SET like_count=like_count-1 WHERE id=?",
+    # Issue #3168 技能详情页：版本 / 文件清单 / 评论 / 下载计数
+    "skill_detail_extra_by_id": (
+        "SELECT summary, download_count, created_at, updated_at, created_by, updated_by "
+        "FROM skill WHERE id=?"),
+    "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
+    "skill_meta_patch_update": (
+        "UPDATE skill SET description=?, agent_type=?, category_id=?, cat_l1_id=?, "
+        "cat_l2_id=?, tags=?, summary=?, updated_by=?, updated_at=datetime('now') "
+        "WHERE id=?"),
+    "skill_download_inc": (
+        "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
+    "skill_intro_override_update": (
+        "UPDATE skill SET intro_override=?, updated_at=datetime('now') WHERE id=?"),
+    "skill_intro_override_by_id": (
+        "SELECT intro_override FROM skill WHERE id=?"),
+    "skill_version_latest": (
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM grape_t_skill_version "
+        "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC LIMIT 1"),
+    "skill_versions_by_skill": (
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM grape_t_skill_version "
+        "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC"),
+    "skill_version_insert": (
+        "INSERT INTO grape_t_skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
+        "VALUES (?,?,?,?,?,?)"),
+    "skill_file_delete_by_skill": "DELETE FROM grape_t_skill_file WHERE skill_id=?",
+    "skill_file_insert": (
+        "INSERT INTO grape_t_skill_file (id, skill_id, path, size) VALUES (?,?,?,?)"),
+    "skill_files_by_skill": (
+        "SELECT path, size FROM grape_t_skill_file WHERE skill_id=? ORDER BY path"),
+    "skill_file_count": "SELECT COUNT(*) FROM grape_t_skill_file WHERE skill_id=?",
+    "skill_comment_count": "SELECT COUNT(*) FROM grape_t_skill_comment WHERE skill_id=?",
+    "skill_comments_page": (
+        "SELECT id, user_id, user_name, content, created_at FROM grape_t_skill_comment "
+        "WHERE skill_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"),
+    "skill_comment_insert": (
+        "INSERT INTO grape_t_skill_comment (id, skill_id, user_id, user_name, content, created_at) "
+        "VALUES (?,?,?,?,?,?)"),
+    # 相关技能候选池：热度前 N（与 mgmt 路由 _RELATED_POOL_SIZE 同值；QA B2：数值须具名）
+    "skills_related_pool": (
+        "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, tags, "
+        "like_count, category_id, summary FROM skill "
+        "WHERE is_active=1 AND id<>? ORDER BY like_count DESC, id DESC LIMIT "
+        + str(_SKILL_RELATED_POOL_SIZE) + ""),
     # agent_runtimes
     "runtimes_all": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
@@ -2526,7 +2940,7 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT name, status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'"),
     "credential_id_by_name": "SELECT id FROM runtime_credentials WHERE name=?",
     # ── 分钟/小时指标桶取数（insight/observability/metric_rollup 跨域收口）──
-    # agent_tasks / events / runtime_credentials 三张表全归本域（table-owner.tsv）。
+    # agent_tasks / events / runtime_credentials 三张表全归本域（table_ownership.json）。
     # 列序/谓词与原 insight SQL 逐字一致（调用方按行下标取值，错位即静默串列），
     # 只把连接换成「任意拓扑」游标；`repo_key` 空值排除谓词照抄，不改口径。
     "rollup_task_counts_by_created": (
@@ -2711,6 +3125,18 @@ def read_all_any(name: str, params: tuple = ()) -> list[Any]:
     with _any_cursor() as c:
         c.execute(_any_sql(name), params)
         return list(c.fetchall() or [])
+
+
+def patrol_dispatch_stall_threshold_seconds() -> int:
+    """派发静默窗默认值的单一来源（Issue #2327）。
+
+    复用平台既有 queued 老化窗 `engine/service._STALE_QUEUED_THRESHOLD`
+    （env `HEALTH_STALE_QUEUED_THRESHOLD`，默认 120s，Issue #134）——
+    该常量已定义「queued 任务超龄即视为卡住」的项目口径，巡检的
+    dispatch_stalled 静默窗与它同语义，故不再另立魔数。
+    """
+    from src.domains.runtime.engine.service import _STALE_QUEUED_THRESHOLD
+    return int(_STALE_QUEUED_THRESHOLD)
 
 
 def exec_any(name: str, params: tuple = ()) -> int:
@@ -3490,13 +3916,18 @@ def merge_meta_json_any(key: str, patch: dict, base: dict | None = None,
 
 
 _FEATURED_SKILL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
-                        "is_featured", "like_count", "category_id")
+                        "is_featured", "like_count", "category_id",
+                        "cat_l1_id", "cat_l2_id", "tags", "summary")
 
 
 def _featured_skill_row(r) -> dict[str, Any]:
     return {"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
             "description": r[3] or "", "agent_type": r[4] or "",
-            "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
+            "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0,
+            "cat_l1_id": (r[8] if len(r) > 8 else 0) or 0,
+            "cat_l2_id": (r[9] if len(r) > 9 else 0) or 0,
+            "tags": (r[10] if len(r) > 10 else "") or "",
+            "summary": (r[11] if len(r) > 11 else "") or ""}
 
 
 def list_featured_skills_any(ordered_ids: list[int] | None = None, limit: int = 5) -> list[dict]:
@@ -4129,8 +4560,11 @@ def update_issue_card_fields(repo_key: str, issue_number, fields: dict,
 def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtime_id: int = 0,
                          skill: str = "", skill_id: int = 0, repo_gitcode_token: str = "",
                          status: str = "idle", enable: int = 1,
-                         subscribe_events: str = "[]") -> int:
+                         subscribe_events: str = "[]", engine_uid: str = "",
+                         uid_written: list | None = None) -> int:
     """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。返回 1=新建 / 0=已存在。
+
+    uid_written: 可选出参——[bool] 收到 engine_uid 是否实际写入（旧库缺列降级时 False）。
 
     幂等由 SQL 侧的 OR IGNORE 保证。返回值必须**读游标** rowcount：exec_any 在自有 DSN 路径上
     返回的是 pymysql execute() 的 int（恒 0），拿它当「新建/已存在」判据永远得到 0。
@@ -4138,9 +4572,25 @@ def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtim
     后者覆盖前者，调用方拿到的返回值语义完全取决于定义顺序。
     """
     with _any_cursor(write=True) as c:
-        c.execute(_ANY_QUERIES["devops_agent_session_insert"],
-                  (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
-                   repo_gitcode_token or "", status, enable, subscribe_events))
+        # Issue #868 (T10)：engine_uid 双写轨道；旧库缺列（迁移未跑）降级 legacy INSERT
+        _uid_ready = False
+        try:
+            _uid_ready = "engine_uid" in {r[1] for r in c.execute(
+                "PRAGMA table_info(devops_agent_session)").fetchall()}
+        except Exception:
+            _uid_ready = False
+        if _uid_ready:
+            c.execute(_ANY_QUERIES["devops_agent_session_insert_uid"],
+                      (session_id, repo_key, agent_type, runtime_id, engine_uid or "",
+                       skill, skill_id, repo_gitcode_token or "", status, enable, subscribe_events))
+            if uid_written is not None:
+                uid_written.append(True)
+        else:
+            if uid_written is not None:
+                uid_written.append(False)
+            c.execute(_ANY_QUERIES["devops_agent_session_insert"],
+                      (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
+                       repo_gitcode_token or "", status, enable, subscribe_events))
         return int(getattr(c, "rowcount", 0) or 0)
 
 def update_agent_session_fields(session_id: str, fields: dict,
@@ -4206,13 +4656,44 @@ def _any_tx():
             raise
 
 
+def reconcile_engine_references(runtime_ids: list, keep_id: int = 0, reason: str = "") -> dict:
+    """Issue #3097：引擎行引用对账的跨域写原语（供 mgmt 等**非 runtime 进程**调用）。
+
+    为什么需要这个原语：引用对账碰的 6 张表（agent_runtimes / agent_tasks /
+    agent_type_runtime_pool / engine_capabilities / devops_agent_session /
+    chat_agent_session）按 `configs/table_ownership.json` 全归 runtime 库。
+    其它进程若拿自己的游标执行这些 SQL，三库拓扑下每条都是 1146 —— 因此跨进程调用
+    必须落到 **runtime 域连接**上：`_any_tx()` 在自有 DSN 时开 runtime 真事务连接
+    （独立提交，调用方事务不含这些表的写），单库/复用进程库时回落进程库。
+
+    判定逻辑在 `engine.refs_reconcile.RuntimeRefReconciler`；本函数只做通道接线。
+    """
+    from src.domains.runtime.engine.refs_reconcile import reconcile_runtime_references
+
+    with _any_tx() as c:
+        return reconcile_runtime_references(c, list(runtime_ids or []), keep_id, reason=reason)
+
+
 def upsert_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "",
-                           skill_id: int = 0) -> None:
-    """写用户全局 Chat 配置行（`sess-cfg-<uid>`）：先收敛同用户其它配置行，再 upsert。"""
+                           skill_id: int = 0, engine_uid: str = "") -> None:
+    """写用户全局 Chat 配置行（`sess-cfg-<uid>`）：先收敛同用户其它配置行，再 upsert。
+
+    Issue #868 (T10)：engine_uid 双写（runtime_id 的 uid 镜像）；旧库缺列降级 legacy upsert。
+    """
     sid = f"sess-cfg-{user_id}"
     with _any_tx() as c:
         c.execute(_any_sql("chat_config_delete_others"), (user_id, sid))
-        c.execute(_any_sql("chat_config_upsert"), (sid, user_id, "", runtime_id, skill, skill_id))
+        _uid_ready = False
+        try:
+            _uid_ready = "engine_uid" in {r[1] for r in c.execute(
+                "PRAGMA table_info(chat_agent_session)").fetchall()}
+        except Exception:
+            _uid_ready = False
+        if _uid_ready:
+            c.execute(_any_sql("chat_config_upsert_uid"),
+                      (sid, user_id, "", runtime_id, engine_uid or "", skill, skill_id))
+        else:
+            c.execute(_any_sql("chat_config_upsert"), (sid, user_id, "", runtime_id, skill, skill_id))
 
 
 def join_feishu_chat(chat_id: str, conv_id: str, user_id) -> bool:
@@ -4223,7 +4704,10 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id) -> bool:
     with _any_tx() as c:
         c.execute(_any_sql("conversation_owner"), (conv_id,))
         row = c.fetchone()
-        if not row or row[0] != user_id:
+        # IM 侧 uid 来自渠道安装/身份表（TEXT：uuid 或 "1"，见 installation_owner_by_app_any 的
+        # str 保形），而 chat_conversations.user_id 在 sqlite 是 INTEGER。Python 层比较不做类型
+        # 亲和，"1" != 1 会恒定 deny（表现：/chat 选号回「❌ 加入失败」）。统一按字符串比对。
+        if not row or str(row[0]) != str(user_id):
             return False
         c.execute(_any_sql("conversation_clear_im_channel"), (chat_id, conv_id))
         c.execute(_any_sql("conversation_set_im_channel"), (chat_id, conv_id))
@@ -4312,6 +4796,8 @@ _CHAT_SESSION_LEGACY_COLUMNS = (
     ("skill", "TEXT DEFAULT ''"),
     ("user_id", "INTEGER DEFAULT 0"),
     ("runtime_session_id", "TEXT DEFAULT ''"),
+    # Issue #868 (T10)：engine_uid 双读列（runtime_id 的 uid 引用）；新库走迁移 202611030005
+    ("engine_uid", "VARCHAR(36) DEFAULT NULL"),
 )
 _REPO_IM_LEGACY_COLUMNS = (
     ("auto_impl_enabled", "INTEGER DEFAULT 0"),
@@ -4924,7 +5410,7 @@ def scene_detach_log_rebound(scene_row_id, node_tag: str, rebound_at: str) -> in
 
 _SKILL_LIST_COLS = (
     "id, skill_name, display_name, description, agent_type, scope, owner_id, "
-    "is_featured, like_count, sub_scene, category_id")
+    "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags, summary")
 
 
 def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> tuple[list, list]:
@@ -4950,16 +5436,20 @@ def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> t
     else:
         conds.append("(scope='official' OR (scope='user' AND owner_id=?))")
         params.append(str(user_id))
-    # 组织隔离：official 对全组织可见；repo/user 的可见性靠 owner，不追加 org_id
+    # 组织隔离：official 对全组织可见；repo/user 的可见性靠 owner，不追加 org_id。
+    # 哨兵值：'' 与 '0' 都表示「不归属任何组织」（官方技能存的是 '0'，旧数据还有 NULL），
+    # 三者都必须视为全局可见 —— 只认 '' 会把 73 条官方技能对已归属组织的用户全部过滤掉
+    # （列表接口返回 total=0，前端显示「无技能」）。
     if org_id and scope not in ("repo", "user"):
-        conds.append("(org_id='' OR org_id=?)")
+        conds.append("(COALESCE(org_id,'') IN ('', '0') OR org_id=?)")
         params.append(org_id)
     return conds, params
 
 
 def skill_search(scope=None, user_id="", repo_key="", org_id="", q: str = "",
                  agent_type: str = "", category_id: int = 0, sort: str = "",
-                 page: int = 1, page_size: int = 0) -> tuple[int, list[tuple]]:
+                 page: int = 1, page_size: int = 0, cat_l1_id: int = 0,
+                 cat_l2_id: int = 0) -> tuple[int, list[tuple]]:
     """技能列表查询：返回 (total, rows)。page_size<=0 表示不分页（total 为 0）。"""
     conds, params = _skill_scope_conditions(scope, user_id, repo_key, org_id)
     kw = (q or "").strip()
@@ -4974,6 +5464,12 @@ def skill_search(scope=None, user_id="", repo_key="", org_id="", q: str = "",
     if category_id and int(category_id) > 0:
         conds.append("category_id=?")
         params.append(int(category_id))
+    if cat_l1_id and int(cat_l1_id) > 0:
+        conds.append("cat_l1_id=?")
+        params.append(int(cat_l1_id))
+    if cat_l2_id and int(cat_l2_id) > 0:
+        conds.append("cat_l2_id=?")
+        params.append(int(cat_l2_id))
 
     where_sql = " WHERE " + " AND ".join(conds)
     order_by = ("ORDER BY updated_at DESC" if sort == "latest"
@@ -5487,13 +5983,18 @@ def skill_ids_active(skill_ids) -> list[int]:
 
 
 def scene_skill_search(user_id: str, repo_key: str, q: str = "", scope: str = "",
-                       page: int = 1, page_size: int = 50) -> tuple:
-    """场景页技能下拉：可见范围 = 官方 + 本人 + 该仓，可按关键词/范围过滤，返回 (total, rows)。
+                       page: int = 1, page_size: int = 50, agent_type: str = "") -> tuple:
+    """场景页技能下拉：可见范围 = 官方 + 本人 + 该仓，可按关键词/范围/角色过滤，返回 (total, rows)。
 
     条件在本域拼（skill 归运行域），调用方只给口径参数。
+    agent_type 非空时按职责过滤：只返回同角色技能与「未标注角色」的通用技能
+    （存量内建包 agent_type 为空，一律视为通用，否则下拉会被清空）。
     """
     where = ["(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))"]
     params: list = [user_id, repo_key]
+    if agent_type:
+        where.append("(agent_type=? OR agent_type='' OR agent_type IS NULL)")
+        params.append(agent_type)
     if q:
         where.append("(skill_name LIKE ? OR display_name LIKE ?)")
         params += [f"%{q}%", f"%{q}%"]
@@ -5547,7 +6048,7 @@ def devops_session_runtime_id(repo_key: str, agent_type: str) -> str:
 
 
 # ── 分布式锁协议（`distributed_locks`，本域基表）──────────────────────────────
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.distributed_locks。
+# 归属：`configs/table_ownership.json` → grape_runtime_db.distributed_locks。
 # 调用方是 `src/kernel/lock.py`（任何进程都会抢锁：mgmt/insight/runtime 各自后台线程）。
 # 三库独立后 kernel 进程库里没有这张表（视图已退役 → 1146），因此协议整体上移到
 # owner 域，kernel 只保留 holder 标识与时间戳计算。
@@ -5620,7 +6121,7 @@ def lock_lease_status_any(lock_key: str) -> tuple | None:
 
 
 # ── 指标桶取数（insight/observability/metric_rollup 跨域收口）─────────────────────
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.{agent_tasks,events,
+# 归属：`configs/table_ownership.json` → grape_runtime_db.{agent_tasks,events,
 # runtime_credentials}。原实现在 insight 侧持进程主库游标直查这三张表：单库拓扑能跑，
 # 三库拓扑下 insight 进程库没有这些表（视图已退役 → 1146），被上层 `except` 吞成
 # 「空桶 / 在线数恒 0」——聚合看板静默缺数据。取数上移本域后，SQL 只留这一份。
@@ -5787,7 +6288,7 @@ def health_runtime_rows() -> list[tuple]:
 
 # ---------- 业务采样器（insight/observability/__init__.collect_business_sampler）----------
 #
-# 归属：`docs/weekly-11/table-owner.tsv` → agent_tasks / agent_runtimes 均归本域。
+# 归属：`configs/table_ownership.json` → agent_tasks / agent_runtimes 均归本域。
 # 原实现在 insight 侧持 insight 进程库游标直发 4 条语句（`with db_lock: c = db.cursor()`，
 # 每条各自 `try/except: pass`）。三库拓扑下 insight 库没有这两张表（视图 0）→ 4 条必
 # 1146 并被吞成「队列/执行/卡住全 0、在线 0」，/metrics 上的业务 gauge 静默归零：
@@ -5848,7 +6349,7 @@ def task_sampler_snapshot_any(stuck_cutoff: str) -> dict[str, Any]:
 
 # ---------- 可观测性「failed 空 result 占比」取数（insight/observability/failed_gap.py）----------
 #
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.events（本域）。
+# 归属：`configs/table_ownership.json` → grape_runtime_db.events（本域）。
 # 原实现在 insight 侧是双路径：`runtime_lib()` 可用（本域配了自有 DSN）→ 具名查询
 # `count_events` / `query_events`；不可用 → insight 进程主库上直发 4 条 events SQL。
 # 后者是单库兜底，也正是 insight 文件里跨域引用恒计 4 处的原因；而三库拓扑下
@@ -6026,3 +6527,1134 @@ def first_online_runtime():
             "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
             "LIMIT 1")
         return c.fetchone()
+
+
+def terminal_task_statuses() -> tuple[str, ...]:
+    """任务终态词表（单源在 kernel.task_states，本域反向引用，见 Issue #2508 review）。"""
+    from src.kernel.task_states import TERMINAL_TASK_STATUSES
+    return tuple(TERMINAL_TASK_STATUSES)
+
+
+def task_status_by_id(task_id: str) -> str:
+    """任务当前状态；空串表示任务不存在或查询失败。
+
+    kernel 的 token 判定需要「任务是否已终态」，但 agent_tasks 归本域，kernel
+    不能直查（check-arch A11）：由 src/api 层通过本原语取值后传进去。
+    """
+    if not task_id:
+        return ""
+    try:
+        with _any_cursor() as c:
+            c.execute("SELECT status FROM agent_tasks WHERE id=? LIMIT 1", (task_id,))
+            row = c.fetchone()
+        return str(row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"task_status_by_id failed id={task_id}: {e}")
+        return ""
+
+
+# ── G-02（A11 裁定 2026-11-17）：grape_t_cloud_sandboxes 归 runtime 后，mgmt 吊销链的写点 ──
+# mgmt 凭据吊销时把该凭据名下沙箱行标记 orphaned（记录保留：用户去平台手动清理的对账
+# 依据）。写发生在 runtime 归属表上，mgmt 进程不得直连——经本原语在 runtime 域内执行。
+
+def mark_cloud_sandboxes_orphaned_by_provider(provider_id) -> int:
+    """吊销级联：该 Provider 名下沙箱行 state='orphaned'、provider_id 清零（防悬空 JOIN）。
+
+    返回受影响行数（0 = 该 Provider 无沙箱记录，吊销照常）。
+    """
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "UPDATE grape_t_cloud_sandboxes SET state='orphaned', provider_id=0 "
+            "WHERE provider_id=?",
+            (provider_id,))
+        return int(c.rowcount or 0)
+
+
+
+# G-02 补充形态：mgmt user/db.py 的 uid 换锚/回填链需要与调用方**同一事务**读写凭据表
+# （rebase 报表读旧 uid → 改绑 → 同事务提交，跨连接会读到陈旧快照，#868 实测测试缝
+# 即此形态）。F1（守卫复检 201339604）：SQL 文本与执行面均留在 owner 域——导出**可调用
+# 原语**（进 lib 注册面，`check_lib_query_names.py` 只认非下划线 callable），调用方游标
+# 作参数传入以保同事务语义与 fixture 连接注入缝；mgmt 不再执行 runtime 表 SQL。
+SQL_CREDENTIAL_UID_BY_ID = "SELECT credential_uid FROM runtime_credentials WHERE id=?"
+SQL_CREDENTIAL_SET_UID = "UPDATE runtime_credentials SET credential_uid=? WHERE id=?"
+SQL_CREDENTIAL_ID_UID_PAIRS = "SELECT id, credential_uid FROM runtime_credentials"
+
+
+def credential_uid_by_id(cursor: Any, credential_id: int) -> str:
+    """F1/A11：runtime_credentials 单行 credential_uid 读原语（调用方游标，同事务）。"""
+    row = cursor.execute(SQL_CREDENTIAL_UID_BY_ID, (credential_id,)).fetchone()
+    return (row[0] or "") if row else ""
+
+
+def set_credential_uid(cursor: Any, credential_id: int, uid: str) -> None:
+    """F1/A11：runtime_credentials credential_uid 写原语（调用方游标，同事务提交）。"""
+    cursor.execute(SQL_CREDENTIAL_SET_UID, (uid, credential_id))
+
+
+def credential_id_uid_pairs(cursor: Any) -> list[tuple]:
+    """F1/A11：全表 (id, credential_uid) 对读原语（调用方游标，回填报表用）。"""
+    return cursor.execute(SQL_CREDENTIAL_ID_UID_PAIRS, ()).fetchall()
+
+
+# ── 引擎 uid 轨道维护（2026-11-18 跨域 import 批次 · mgmt.user）──────────────
+# 迁移背景：runtime/routes/runtime.py 此前
+#   from src.domains.mgmt.user.db import ensure_credential_uid / rebase_engine_uid_references
+# 属跨域 import 别域内部模块；而这两条链路碰的表（runtime_credentials /
+# agent_runtimes / agent_type_runtime_pool / engine_capabilities / agent_tasks /
+# task_messages / devops_agent_session / chat_agent_session）按
+# `configs/table_ownership.json` **全归 runtime 域**。判定逻辑 + SQL 收到 owner 域
+# 一份；mgmt.user.db 的同名函数退化为转发壳（保留既有 import 面与测试缝），
+# 调用方照旧传自己的游标（runtime 进程内即 runtime 域连接，同事务语义不变）。
+_ENGINE_UID_REF_TABLES = (
+    # (表名, 计数键) —— 与 mgmt 侧历史口径逐项一致（Issue #868）
+    ("agent_type_runtime_pool", "pool_rows"),
+    ("engine_capabilities", "capability_rows"),
+    ("agent_tasks", "task_rows"),
+    ("task_messages", "task_message_rows"),
+    ("devops_agent_session", "devops_sessions"),
+    ("chat_agent_session", "chat_sessions"),
+)
+
+
+def ensure_credential_uid(credential_id: int, cursor: Any = None) -> str:
+    """确保凭据行有 credential_uid（UUIDv4，一次性终身不变）；未迁移旧库返回 ''。
+
+    cursor 传入即复用调用方事务（注册链路：credential_uid → engine_uid 派生同事务，
+    跨连接会读到陈旧快照）；不传则由本域自有 DSN 开事务。
+    """
+    from src.kernel.engine_uid import new_credential_uid
+
+    def _ensure(c) -> str:
+        existing = credential_uid_by_id(c, credential_id)
+        if existing:
+            return existing
+        uid = new_credential_uid()
+        set_credential_uid(c, credential_id, uid)
+        return uid
+
+    try:
+        if cursor is not None:
+            return _ensure(cursor)
+        with db_registry.cursor("runtime") as c:
+            return _ensure(c)
+    except Exception:  # noqa: BLE001  旧库缺列=降级空串（与历史行为一致）
+        return ""
+
+
+def rebase_engine_uid_references(cursor: Any, old_uid: str, new_uid: str) -> dict:
+    """单个 engine_uid 变更的引用轨道整体改绑（old_uid → new_uid），返回对账报告。
+
+    引擎行 uid 改绑 + 池/能力/任务/消息/会话 uid 轨道同步，不留孤儿；缺列/缺表
+    （未迁移旧库、历史 chat 专用库缺列）容错降级跳过。old_uid == new_uid 或任一
+    为空 → no-op（幂等）。游标由调用方给，保证与调用点同事务。
+    """
+    report = {"engines_rebased": 0, "pool_rows": 0, "capability_rows": 0,
+              "task_rows": 0, "task_message_rows": 0,
+              "devops_sessions": 0, "chat_sessions": 0}
+    old_uid = (old_uid or "").strip()
+    new_uid = (new_uid or "").strip()
+    if not old_uid or not new_uid or old_uid == new_uid:
+        return report
+    try:
+        report["engines_rebased"] = rename_runtime_engine_uid(old_uid, new_uid)
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"rebase_engine_uid_references agent_runtimes: {_e}")
+    for tbl, key in _ENGINE_UID_REF_TABLES:
+        if not columns_exist(cursor, tbl, ("engine_uid",)):
+            continue
+        try:
+            report[key] = cursor.execute(
+                f"UPDATE {tbl} SET engine_uid=? WHERE engine_uid=?",
+                (new_uid, old_uid)).rowcount
+        except Exception as _e:  # noqa: BLE001
+            log.warning(f"rebase_engine_uid_references {tbl}: {_e}")
+    log.info("Issue #868 uid锚定改绑报告: " + json.dumps(report, ensure_ascii=False))
+    return report
+
+
+# ── 跨域常量再导出（2026-11-18）────────────────────────────────────────────
+# insight 的告警求值（alerts.py / metric_rollup.py）要按 runtime 的失败判定口径
+# 识别超时任务。此前两个文件各自 from ...engine.task_timeout import 这个字面量，
+# 属跨域 import 别域内部模块（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供，
+# 调用方只依赖契约面；常量本体仍只有 task_timeout.py 一份，不复制。
+def timeout_fail_signature() -> str:
+    """超时失败的判定签名（供外域告警求值按同一口径识别超时任务）。
+
+    实现在 runtime.engine.task_timeout.TIMEOUT_FAIL_SIGNATURE。以函数形式暴露而不是
+    直接再导出常量：public 面只提供可调用入口（check_lib_query_names 亦按 def 登记）。
+    """
+    from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _sig
+
+    return _sig
+
+# ── 认证依赖与任务解析原语（2026-11-18）──────────────────────────────────────
+# insight 的日志接入端点与 mgmt 的 autopilot 视图此前直接 import runtime 内部：
+#   from src.domains.runtime.routes.runtime import _require_credential
+#   from src.domains.runtime.engine.scheduler import _get_exec_agent_task
+# 属跨域引内部实现（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供入口。
+
+def require_credential(request: Request) -> int:
+    """FastAPI 依赖：解析 Authorization 的 runtime 凭据，未授权抛 401。
+
+    转发到 runtime.routes.runtime._require_credential（唯一实现），
+    供 insight 等外域的端点直接用作 `Depends(...)`。
+
+    ⚠️ 形参注解 `Request` 是契约的一部分，不可省略（本模块 `from __future__ import
+    annotations` 下注解为字符串，FastAPI 靠模块全局名解析）：缺注解时 FastAPI 会把
+    `request` 当成**必填 query 参数**，端点对任何请求都先返回 422（凭据校验根本
+    没跑到），insight 的 POST /api/obs/logs/ingest 全量 422 即此故障形态。
+    返回值为 runtime_credentials.id（int），未授权由实现抛 HTTPException(401)。
+    """
+    from src.domains.runtime.routes.runtime import _require_credential as _impl
+
+    return _impl(request)
+
+
+def exec_agent_task(exec_id, agent_task_id: str = "", started_at: str = "",
+                    created_at: str = "") -> dict | None:
+    """按执行记录解析对应 agent_tasks 行（返回 dict，不传游标 —— 符合 public 约定）。
+
+    内部实现需要游标，这里自建连接调用后转成 dict 返回，调用方不再接触游标。
+    关联语义见 runtime.engine.scheduler._get_exec_agent_task：
+    agent_task_id 非空按主键直查，为空走受约束兜底。
+    """
+    from src.domains.runtime.engine.scheduler import _get_exec_agent_task as _impl
+    # 与内部实现同源：_get_exec_agent_task 原本就吃调用方游标，历史上调用方一直用
+    # 进程库（session_manager.db）。这里同样用进程库，保证 agent_tasks 在同一库内解析
+    # （曾经先试 db_registry.connection_for("runtime")，在单库测试环境会连到另一个库、
+    # 查不到数据而返回 None —— 契约测试随即红）。
+    from src.kernel.session_manager import db as _conn
+
+    cur = _conn.cursor()
+    row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
+    if not row:
+        return None
+    cols = [d[0] for d in (cur.description or [])]
+    return dict(zip(cols, row)) if cols else None
+
+# ── DevStage 云开发环境客户端（2026-11-18）──────────────────────────────────
+# mgmt 的 /api/devstage 路由此前直接 `from src.domains.runtime.im.devstage_client
+# import (...)` 一整套内部符号（含 _resolve_base_url / _request 两个私有函数），
+# 属跨域 import 别域内部实现。改为由 owner 域 public 暴露最小集合。
+#
+# 注：该客户端的唯一消费方其实是 mgmt 路由本身，理想归宿是随功能迁到 mgmt 域；
+# 在迁移前先用 public 收敛依赖方向（mgmt → runtime.public，而不是 → runtime.im.*）。
+from src.domains.runtime.im.devstage_client import (  # noqa: E402
+    DevStageError as DevStageError,
+    _request as devstage_request,
+    _resolve_base_url as devstage_base_url,
+    list_environments as devstage_list_environments,
+    create_environment as devstage_create_environment,
+    start_environment as devstage_start_environment,
+    stop_environment as devstage_stop_environment,
+    delete_environment as devstage_delete_environment,
+    list_specs as devstage_list_specs,
+)
+
+# ── 接管（takeover）服务门面（2026-11-18）──────────────────────────────────
+# mgmt 的 /api/takeover 路由此前 `from src.domains.runtime.engine import takeover as svc`，
+# 直接拿到 runtime 的内部服务模块并调用 12 个成员（含 _now_iso 私有函数），
+# 属跨域 import 别域内部实现。这里按成员逐个转发，收敛依赖方向为
+# mgmt → runtime.public（实现仍只有 runtime.engine.takeover 一份）。
+from src.domains.runtime.engine import takeover as _takeover_impl  # noqa: E402
+
+TakeoverError = _takeover_impl.TakeoverError
+
+
+def takeover_active_status() -> str:
+    """接管会话的「活跃」状态字面量（外域查询条件用，避免各写一份）。"""
+    return _takeover_impl.ST_ACTIVE
+
+
+def now_iso() -> str:
+    """UTC ISO 时间戳，与 takeover 内部同一口径。"""
+    return _takeover_impl._now_iso()
+abort_takeover = _takeover_impl.abort_takeover
+append_takeover_messages = _takeover_impl.append_takeover_messages
+attach_client_session = _takeover_impl.attach_client_session
+finish_takeover = _takeover_impl.finish_takeover
+get_session = _takeover_impl.get_session
+list_takeovers = _takeover_impl.list_takeovers
+renew_takeover_session = _takeover_impl.renew_takeover_session
+request_finish = _takeover_impl.request_finish
+start_takeover = _takeover_impl.start_takeover
+
+# ── 引擎实例 / 选择 / 健康派生门面（2026-11-18）──────────────────────────────
+# 外域（mgmt 路由与 user.db、insight 看板与告警）此前直接
+#   from src.domains.runtime.engine.instances import instance_name
+#   from src.domains.runtime.engine.engine_select import query_engines
+#   from src.domains.runtime.engine.health import derive_runtime_health
+# 逐个 import runtime 的内部实现模块（QA 跨域 import 清理项）。
+# 这里按成员转发，依赖方向收敛为 外域 → runtime.public；实现仍只有 engine.* 一份。
+# 转发体一律函数内 import：engine.* 在加载期会反向引用别域 public，顶层 import 会成环。
+
+
+def canonical_engine(engine_name: str | None) -> str:
+    """由引擎实例名推导规范引擎键（前缀最长匹配；未知 → opencode）。"""
+    from src.domains.runtime.engine.instances import canonical_engine as _impl
+
+    return _impl(engine_name)
+
+
+def usage_retry_engine(engine_name: str | None) -> bool:
+    """该引擎 usage 为空时是否值得短重试一次。"""
+    from src.domains.runtime.engine.instances import usage_retry_engine as _impl
+
+    return _impl(engine_name)
+
+
+def to_display(name: str) -> str:
+    """API 出口统一显示名转换（内部名 → 展示名）。"""
+    from src.domains.runtime.engine.instances import to_display as _impl
+
+    return _impl(name)
+
+
+def engine_mounts_to_credential(credential_id, host_name: str | None,
+                                cred_device_name: str | None) -> bool:
+    """引擎是否挂载到某凭据的设备（与设备视图挂载逻辑同一口径）。"""
+    from src.domains.runtime.engine.instances import engine_mounts_to_credential as _impl
+
+    return _impl(credential_id, host_name, cred_device_name)
+
+
+def instance_name(engine_type: str, device_name: str, credential_id) -> str:
+    """派生唯一引擎实例名（`{display}-{device_suffix}`）。"""
+    from src.domains.runtime.engine.instances import instance_name as _impl
+
+    return _impl(engine_type, device_name, credential_id)
+
+
+def resolve_instance_id(engine_name: str, scope: str | None = None) -> int | None:
+    """按唯一引擎名解析 agent_runtimes.id。"""
+    from src.domains.runtime.engine.instances import resolve_instance_id as _impl
+
+    return _impl(engine_name, scope)
+
+
+def scope_of_runtime(rid: int) -> str | None:
+    """返回 runtime 行所属 scope（user/repo/global）。"""
+    from src.domains.runtime.engine.instances import scope_of_runtime as _impl
+
+    return _impl(rid)
+
+
+def known_agent_roles() -> set[str]:
+    """合法节点角色集合（KNOWN_AGENT_ROLES 的可调用门面，避免再导出常量）。"""
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as _roles
+
+    return set(_roles)
+
+
+def node_agent_role(node) -> str:
+    """解析节点角色名（agent_type）——id 优先、tag 兜底。"""
+    from src.domains.runtime.engine.engine_select import node_agent_role as _impl
+
+    return _impl(node)
+
+
+def node_matches_agent_role(node, role) -> bool:
+    """节点是否匹配指定角色——id 优先、tag 兜底。"""
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role as _impl
+
+    return _impl(node, role)
+
+
+def selector_candidate_engines(selector: dict, agent_type: str, repo_key: str = "",
+                               user_id: int = 0) -> tuple:
+    """selector 候选集 + 分层排除原因（入队即时校验）。"""
+    from src.domains.runtime.engine.engine_select import selector_candidate_engines as _impl
+
+    return _impl(selector, agent_type, repo_key, user_id)
+
+
+def validate_selector_tags(tags, scene_values=None) -> str:
+    """保存端 L1 语法校验（服务端为权威）。"""
+    from src.domains.runtime.engine.engine_select import validate_selector_tags as _impl
+
+    return _impl(tags, scene_values)
+
+
+def load_engine_selection() -> dict:
+    """读引擎选择配置；缺失/损坏回默认。"""
+    from src.domains.runtime.engine.engine_select import load_engine_selection as _impl
+
+    return _impl()
+
+
+def engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
+    """按 runtime_id 列表查引擎详情（含 scope/priority）。"""
+    from src.domains.runtime.engine.engine_select import _engines_by_ids as _impl
+
+    return _impl(engine_ids, repo, cfg)
+
+
+def norm_repo(repo_key: str) -> str:
+    """仓库标识归一化为 owner/repo。"""
+    from src.domains.runtime.engine.engine_select import _norm_repo as _impl
+
+    return _impl(repo_key)
+
+
+def get_scene_engine_selector(scene_id: str, agent_type: str, repo_key: str = "",
+                             user_id: int = 0) -> dict | None:
+    """读场景 node 的 engine_selector。"""
+    from src.domains.runtime.engine.engine_select import get_scene_engine_selector as _impl
+
+    return _impl(scene_id, agent_type, repo_key, user_id)
+
+
+def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "",
+                              user_id: int = 0, issue_creator: str = "") -> str | None:
+    """限定广播引擎列表（JSON 字符串，供 pool_engine_ids 使用）。"""
+    from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids as _impl
+
+    return _impl(scene_id, agent_type, repo_key, user_id, issue_creator)
+
+
+def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
+    """托管默认选择：专属 → 全局 → 本机直连。"""
+    from src.domains.runtime.engine.engine_select import resolve_default_engine as _impl
+
+    return _impl(repo_key, agent_type)
+
+
+def query_engines(repo_key: str, scope: str, agent_type: str = "",
+                  username: str = "") -> list[dict]:
+    """某仓库在某档位的候选引擎（repo/global/local）。"""
+    from src.domains.runtime.engine.engine_select import query_engines as _impl
+
+    return _impl(repo_key, scope, agent_type, username)
+
+
+def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
+    """从所有活跃场景 nodes_json 中移除对 rid_list 引擎的绑定。"""
+    from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _impl
+
+    return _impl(rid_list, commit)
+
+
+def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
+                              repo_key: str = "") -> list:
+    """查询场景/引擎的被解绑提示信息。"""
+    from src.domains.runtime.engine.engine_select import get_detached_engine_hints as _impl
+
+    return _impl(scene_row_id, runtime_ids, repo_key)
+
+
+def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
+                             user_id: int = 0, issue_creator: str = "") -> dict:
+    """解释某 (repo, agent_type, scene) 的引擎候选与过滤全景。"""
+    from src.domains.runtime.engine.engine_select import explain_engine_selection as _impl
+
+    return _impl(repo_key, agent_type, scene_id, user_id, issue_creator)
+
+
+def derive_runtime_health(status: str, last_seen_at: str | None,
+                          now: float | None = None) -> str:
+    """在线态派生的唯一入口（status 为 agent_runtimes 在线态真源）。"""
+    from src.domains.runtime.engine.health import derive_runtime_health as _impl
+
+    return _impl(status, last_seen_at, now)
+
+
+# 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
+_engines_by_ids = engines_by_ids
+_norm_repo = norm_repo
+
+
+# ── 仓库平台卡 / VCS 客户端门面（2026-11-18）─────────────────────────────────
+# 外域（mgmt 路由与 user 域、contracts 本地适配）此前逐个
+#   from src.domains.runtime.vcs.platform_card import get_platform_card
+#   from src.domains.runtime.vcs.api_client import VcsApiClient
+# 直接 import runtime 内部实现模块（QA 跨域 import 清理项）。
+# 依赖方向收敛为 外域 → runtime.public；实现仍只有 vcs.* 一份。
+# 转发体一律函数内 import：vcs 内部模块在加载期会反向引用 mgmt.public，顶层 import 会成环。
+
+
+def get_platform_card(provider: str):
+    """按 provider 取平台卡快照（未注册 → None；内存缓存 TTL 300s）。"""
+    from src.domains.runtime.vcs.platform_card import get_platform_card as _impl
+
+    return _impl(provider)
+
+
+def list_vcs_platforms() -> list[str]:
+    """已注册（内置默认 + 表配置）的平台 provider 列表。"""
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _impl
+
+    return _impl()
+
+
+def invalidate_platform_card_cache() -> None:
+    """主动失效平台卡内存缓存（表配置写入后调用）。"""
+    from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache as _impl
+
+    return _impl()
+
+
+def build_platform_card(provider: str, raw: dict):
+    """由原始配置构建并校验平台卡（非法配置抛 PlatformCardError）。"""
+    from src.domains.runtime.vcs.platform_card import build_platform_card as _impl
+
+    return _impl(provider, raw)
+
+
+def module_for(provider: str):
+    """取 provider 对应的 VCS 后端模块（providers 注册表口径）。"""
+    from src.domains.runtime.vcs.providers import module_for as _impl
+
+    return _impl(provider)
+
+
+def pr_web_path(provider: str) -> str:
+    """provider 模块声明的 PR 网页路径（能力位缺失时回落 "pull"）。"""
+    from src.domains.runtime.vcs.providers import _MODULES as _mods
+
+    return getattr(_mods.get(provider), "PR_WEB_PATH", "pull") or "pull"
+
+
+def hosting_full_flow_providers() -> list[str]:
+    """声明支持托管全流程（HOSTING_FULL_FLOW）的 provider 列表。"""
+    from src.domains.runtime.vcs.providers import _MODULES as _mods
+
+    return sorted(p for p, m in _mods.items() if getattr(m, "HOSTING_FULL_FLOW", False))
+
+
+def default_vcs_provider() -> str:
+    """内置默认平台（平台卡声明序首）；不可用时返回空串。"""
+    try:
+        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW as _raw
+
+        return next(iter(_raw), "")
+    except Exception:
+        return ""
+
+
+def native_issue_number(value):
+    """issue 编号保持平台原生形态（int 平台返回 int；字符串 ident 平台返回 str）。"""
+    from src.domains.runtime.vcs.api_client import _native_issue_number as _impl
+
+    return _impl(value)
+
+
+# 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
+_native_issue_number = native_issue_number
+
+
+# 对象存储 / 技能包缓存面：跨域调用方（mgmt、contracts）只能用这层转发，
+# 不直接触达 runtime.storage 内部模块（storage 在加载期反向引用别域 public，顶层 import 会成环）
+def get_storage():
+    """取对象存储后端（未配置返回 None）。"""
+    from src.domains.runtime.storage import get_storage as _impl
+
+    return _impl()
+
+
+def get_skill_storage():
+    """取技能包对象存储后端（未配置返回 None）。"""
+    from src.domains.runtime.storage import get_skill_storage as _impl
+
+    return _impl()
+
+
+def skill_key(scope: str, owner: str, skill_name: str, version: int | None = None,
+              rand8: str | None = None) -> str:
+    """生成技能 zip 对象键（与 storage 同一口径）。"""
+    from src.domains.runtime.storage import skill_key as _impl
+
+    return _impl(scope, owner, skill_name, version, rand8)
+
+
+def zip_cache_get(object_key: str):
+    """读磁盘 zip 缓存字节（未命中返回 None）。"""
+    from src.domains.runtime.storage import zip_cache_get as _impl
+
+    return _impl(object_key)
+
+
+def zip_cache_get_with_hash(object_key: str):
+    """读磁盘 zip 缓存字节 + 内容哈希 + skill_id（未命中返回 None）。"""
+    from src.domains.runtime.storage import zip_cache_get_with_hash as _impl
+
+    return _impl(object_key)
+
+
+def zip_cache_put(object_key: str, data: bytes, content_hash: str = "",
+                  skill_id: int = 0) -> None:
+    """写入磁盘 zip 缓存（原子替换 + LRU 清理）。"""
+    from src.domains.runtime.storage import zip_cache_put as _impl
+
+    return _impl(object_key, data, content_hash, skill_id)
+
+
+def mem_cache_invalidate(key: str) -> None:
+    """失效单个内存缓存项。"""
+    from src.domains.runtime.storage import mem_cache_invalidate as _impl
+
+    return _impl(key)
+
+
+def invalidate_skill_caches(object_key: str) -> None:
+    """失效某个技能对象键相关的内存缓存。"""
+    from src.domains.runtime.storage import invalidate_skill_caches as _impl
+
+    return _impl(object_key)
+
+
+def get_skill_zip_bytes(object_key: str, skill_name: str = ""):
+    """取技能 zip 字节（缓存优先，回源后端）。"""
+    from src.domains.runtime.storage import get_skill_zip_bytes as _impl
+
+    return _impl(object_key, skill_name)
+
+
+def skill_md_content(object_key: str, skill_name: str):
+    """读技能包内 SKILL.md 文本（不存在返回 None）。"""
+    from src.domains.runtime.storage import skill_md_content as _impl
+
+    return _impl(object_key, skill_name)
+
+
+def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
+    """列出技能 zip 内的子技能。"""
+    from src.domains.runtime.storage import list_zip_sub_skills as _impl
+
+    return _impl(zip_bytes, skill_name)
+
+
+def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str):
+    """读技能 zip 内指定子技能（不存在返回 None）。"""
+    from src.domains.runtime.storage import read_zip_sub_skill as _impl
+
+    return _impl(zip_bytes, skill_name, sub_name)
+
+
+def rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
+                           repo_key: str = ""):
+    """重建 scene_skill_ref（DELETE + INSERT）。"""
+    from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref as _impl
+
+    return _impl(market_id, nodes, scene_name, repo_key)
+
+
+# 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
+_rebuild_scene_skill_ref = rebuild_scene_skill_ref
+
+
+# 值对象/客户端类：属性访问时再导入（顶层 import 会成环，类也无法用转发函数包住）
+_LAZY_CLASS_ATTRS = {
+    "PlatformCard": ("src.domains.runtime.vcs.platform_card", "PlatformCard"),
+    "PlatformCardError": ("src.domains.runtime.vcs.platform_card", "PlatformCardError"),
+    "VcsApiClient": ("src.domains.runtime.vcs.api_client", "VcsApiClient"),
+    "UsageCollector": ("src.domains.runtime.engine.usage_collect", "UsageCollector"),
+}
+
+
+def __getattr__(name: str):
+    """PEP 562 懒导出类：`from src.domains.runtime.public import VcsApiClient` 可用。"""
+    target = _LAZY_CLASS_ATTRS.get(name)
+    if not target:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(target[0]), target[1])
+
+
+# ── 引擎面（health / scorer / scheduler / executor / service）2026-11-18 ─────
+# 外域（mgmt 路由与 user 域、insight 观测面）此前逐个
+#   from src.domains.runtime.engine.<mod> import <sym>
+# 直接 import runtime 内部实现模块（QA 跨域 import 清理项）。
+# 依赖方向收敛为 外域 → runtime.public；实现仍只有 engine.* 一份。
+# 转发体一律函数内 import：engine 内部模块在加载期会反向引用别域 public，顶层 import 会成环。
+
+
+def runtime_credential_id(runtime_id: int):
+    """取 runtime 绑定的凭据 id（无绑定 → None）。"""
+    from src.domains.runtime.engine.service import runtime_credential_id as _impl
+
+    return _impl(runtime_id)
+
+
+def probe_aishell_dsh_acp(cli_path: str) -> dict:
+    """探测 aishell-dsh ACP 引擎可用性。"""
+    from src.domains.runtime.engine.agent import _probe_aishell_dsh_acp as _impl
+
+    return _impl(cli_path)
+
+
+_probe_aishell_dsh_acp = probe_aishell_dsh_acp
+
+
+def discover_backends() -> list[dict]:
+    """枚举已注册的 Agent 执行后端（含 installed/cli_path 探测结果）。"""
+    from src.domains.runtime.agents.executor import discover_backends as _impl
+
+    return _impl()
+
+
+# 原名别名：registry.discover_runtimes 即 executor.discover_backends 的 runtime 命名
+discover_runtimes = discover_backends
+
+
+def usage_payload(u: dict, engine: str = "") -> dict:
+    """用量事件字段归一的唯一入口（worker 侧与观测侧同一份）。"""
+    from src.domains.runtime.engine.agent import _usage_payload as _impl
+
+    return _impl(u, engine)
+
+
+_usage_payload = usage_payload
+
+
+def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
+    """runtime 健康分（缺省走 TTL 缓存）。"""
+    from src.domains.runtime.engine.health_scorer import get_health_score as _impl
+
+    return _impl(runtime_id, force_refresh)
+
+
+def reset_health(runtime_id: int) -> dict | None:
+    """清空指定 runtime 的健康分累计。"""
+    from src.domains.runtime.engine.health_scorer import reset_health as _impl
+
+    return _impl(runtime_id)
+
+
+def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
+    """本机引擎在线态派生（无 credential 的本地引擎）。"""
+    from src.domains.runtime.engine.health import derive_local_runtime_health as _impl
+
+    return _impl(installed, healthy)
+
+
+def parse_dt(s: str) -> float | None:
+    """解析 runtime 时间戳为 epoch 秒（不可解析 → None）。"""
+    from src.domains.runtime.engine.health import parse_dt as _impl
+
+    return _impl(s)
+
+
+def apply_runtime_state(c, runtime_id: int, status: str, last_seen_at: str) -> None:
+    """写 agent_runtimes 在线态（owner 域原语，调用方传自己的游标）。"""
+    from src.domains.runtime.engine.health import apply_runtime_state as _impl
+
+    return _impl(c, runtime_id, status, last_seen_at)
+
+
+def aggregate_skill_consistency(days: int = 7) -> dict:
+    """技能一致性聚合（观测面看板用）。"""
+    from src.domains.runtime.engine.health import aggregate_skill_consistency as _impl
+
+    return _impl(days)
+
+
+def recover_engine(runtime_id: int, trigger: str = "manual", force: bool = False) -> dict:
+    """engine 重挂载（readd）。"""
+    from src.domains.runtime.engine.recovery import recover_engine as _impl
+
+    return _impl(runtime_id, trigger, force)
+
+
+def probe_local_engines(engines: list | None = None) -> list[dict]:
+    """本机引擎探测（缺省枚举全部已注册后端）。"""
+    from src.domains.runtime.engine.local_probe import probe_local_engines as _impl
+
+    return _impl(engines)
+
+
+def scan_local_skills() -> list[dict]:
+    """扫描本机已装技能列表。"""
+    from src.domains.runtime.engine.agent import _scan_local_skills as _impl
+
+    return _impl()
+
+
+def scan_local_skills_with_detail(engine_type: str) -> list[dict]:
+    """扫描本机技能并带明细（按引擎类型）。"""
+    from src.domains.runtime.engine.agent import _scan_local_skills_with_detail as _impl
+
+    return _impl(engine_type)
+
+
+_scan_local_skills = scan_local_skills
+_scan_local_skills_with_detail = scan_local_skills_with_detail
+
+
+def get_execution_mode() -> str:
+    """当前执行模式（auto/direct/queue_remote）。"""
+    from src.domains.runtime.engine.service import get_execution_mode as _impl
+
+    return _impl()
+
+
+def set_execution_mode(mode: str):
+    """切换执行模式（owner 域校验 + 落库）。"""
+    from src.domains.runtime.engine.service import set_execution_mode as _impl
+
+    return _impl(mode)
+
+
+def load_project_info(repo_key: str) -> tuple[dict, dict]:
+    """取仓库 project-info（原始 + 派生）。"""
+    from src.domains.runtime.engine.service import load_project_info as _impl
+
+    return _impl(repo_key)
+
+
+def detect_engine_model(name: str) -> str:
+    """按引擎名推断默认模型。"""
+    from src.domains.runtime.engine.engine_model import detect_engine_model as _impl
+
+    return _impl(name)
+
+
+async def trigger_task_now(task_id: int) -> dict:
+    """立即触发一次任务调度（scheduler 单一入口）。"""
+    from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
+
+    return await _impl(task_id)
+
+
+def normalize_dedup_level(raw) -> str:
+    """去重级别归一。"""
+    from src.domains.runtime.engine.scheduler import normalize_dedup_level as _impl
+
+    return _impl(raw)
+
+
+def sanitize_dedup_note(raw) -> str:
+    """去重备注清洗。"""
+    from src.domains.runtime.engine.scheduler import sanitize_dedup_note as _impl
+
+    return _impl(raw)
+
+
+def sanitize_dedup_confirmed_by(raw) -> str:
+    """去重确认人清洗。"""
+    from src.domains.runtime.engine.scheduler import sanitize_dedup_confirmed_by as _impl
+
+    return _impl(raw)
+
+
+def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """自动合并门禁判定。"""
+    from src.domains.runtime.engine.scheduler import dedup_auto_merge_allowed as _impl
+
+    return _impl(dedup_level, dedup_confirmed)
+
+
+def dedup_level_suspected() -> str:
+    """疑似重复级别常量（常量不外露，包成函数以满足 lib 门禁登记口径）。"""
+    from src.domains.runtime.engine.scheduler import DEDUP_LEVEL_SUSPECTED
+
+    return DEDUP_LEVEL_SUSPECTED
+
+
+def columns_exist(cursor, table: str, cols: tuple) -> bool:
+    """判断表的列是否齐备（cursor 由调用方提供）。"""
+    from src.domains.runtime.engine.refs_reconcile import columns_exist as _impl
+
+    return _impl(cursor, table, cols)
+
+
+def session_uid_mirror_sql(tbl: str) -> str:
+    """session uid 镜像 SQL 片段（SQL 归 owner 域产出）。"""
+    from src.domains.runtime.engine.refs_reconcile import session_uid_mirror_sql as _impl
+
+    return _impl(tbl)
+
+
+def reconcile_for_caller(caller_cursor, runtime_ids: list, keep_id: int, reason: str = "") -> dict:
+    """按调用方游标做 runtime 引用归并。"""
+    from src.domains.runtime.engine.refs_reconcile import reconcile_for_caller as _impl
+
+    return _impl(caller_cursor, runtime_ids, keep_id, reason)
+
+
+def backend_registered(name: str) -> bool:
+    """后端是否已注册（替代直接 import 注册表对象 _BACKENDS）。"""
+    from src.domains.runtime.agents.executor import _BACKENDS
+
+    return name in _BACKENDS
+
+
+# ── IM 渠道安装 / 引擎 / 通知门面（2026-11-18 跨域 import 批次 runtime.im）──────
+# 外域（mgmt 路由 im/agents/feishu_onboard/feishu_card/settings，insight 告警）此前
+# 直接 import runtime.im 的内部模块：
+#   from src.domains.runtime.im.engine_wiring import _connect, default_db_path, ...
+#   from src.domains.runtime.im import outbox as OB / notify as _notify
+#   from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient ...
+# 依赖方向改为 外域 → runtime.public；实现仍只有 runtime.im 一份。
+# 转发体一律函数内 import：runtime.im.* 在加载期会反向引用别域 public，顶层 import 成环。
+#
+# 注：grape_t_channel_installation 归属 mgmt（configs/table_ownership.json），但该表实际
+# 落在 IM 共享域库（GRAPE_IM_DB_NAME 钉库），只有 engine_wiring 的连接解析知道目标库，
+# 因此这里暴露 im_db_connection() 让 mgmt 用同一连接做同库读写，不另起连接猜测库名。
+
+
+def im_db_connection():
+    """IM 共享域库连接（跨进程同库口径；调用方负责 close()）。
+
+    返回连接而非行对象：调用方需要在同库内做「查-改-提交」事务（安装行归属 mgmt），
+    public 无法在不引入跨库事务的前提下替它包成一个纯查询函数。
+    """
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path as _path
+
+    return _connect(_path())
+
+
+def engine_mode() -> str:
+    """IM 引擎模式（on | off，data/im_engine_mode 优先）。"""
+    from src.domains.runtime.im.engine_wiring import engine_mode as _impl
+
+    return _impl()
+
+
+def feishu_api(app_id: str = ""):
+    """按 app_id 取（进程内缓存的）飞书 Async 客户端。"""
+    from src.domains.runtime.im.engine_wiring import feishu_api as _impl
+
+    return _impl(app_id)
+
+
+def get_active_installation(scope: str = "user", *, owner_user_id: str = "", repo_key: str = "",
+                            channel_type: str = "", app_id: str = "") -> dict | None:
+    """读 IM 渠道活跃安装（返回 dict，不含游标）；无则 None。"""
+    from src.domains.runtime.im.engine_wiring import get_active_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key,
+                 channel_type=channel_type, app_id=app_id)
+
+
+def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = "",
+                      app_id: str = "", app_secret: str = "", channel_type: str = "feishu",
+                      extra_config: dict | None = None) -> bool:
+    """UI 保存/换 app 的安装写入口（幂等 upsert，active）。"""
+    from src.domains.runtime.im.engine_wiring import sync_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key, app_id=app_id,
+                 app_secret=app_secret, channel_type=channel_type, extra_config=extra_config)
+
+
+def revoke_installation(scope: str, *, owner_user_id: str = "", repo_key: str = "",
+                        app_id: str = "", channel_type: str = "feishu") -> bool:
+    """UI 解绑/换 app：安装行置 revoked。"""
+    from src.domains.runtime.im.engine_wiring import revoke_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key, app_id=app_id,
+                 channel_type=channel_type)
+
+
+def resolve_engine():
+    """本进程 IM 引擎（4 进程口径：只有持有引擎的进程返回实例，其余 None）。"""
+    from src.domains.runtime.im.notify import resolve_engine as _impl
+
+    return _impl()
+
+
+def notify_stats() -> dict:
+    """通知扇出计数（全渠道）。"""
+    from src.domains.runtime.im.notify import stats as _impl
+
+    return _impl()
+
+
+async def notify_user(user_id: int, kind: str, text: str, *, repo_key: str = "",
+                      issue_number: int = 0, conv_id: str = "", targets=None,
+                      engine=None, dedupe: bool = True) -> dict:
+    """主动通知该用户的全部已连接渠道（每渠独立成败）。"""
+    from src.domains.runtime.im.notify import notify_user as _impl
+
+    return await _impl(user_id, kind, text, repo_key=repo_key, issue_number=issue_number,
+                       conv_id=conv_id, targets=targets, engine=engine, dedupe=dedupe)
+
+
+def schedule_notify(user_id, kind: str, text: str, **kw) -> bool:
+    """通知（跨域契约：其他域只能经本函数发站内信/IM）。
+
+    Issue #3469 F：邮箱不可投递时的降级通道。有事件循环时 fire-and-forget，
+    没有时**同步入队**；返回值表示是否真的产生了通知动作（调用方不得再假定成功）。
+    """
+    from src.domains.runtime.im.notify import schedule_notify as _impl
+
+    return bool(_impl(user_id, kind, text, **kw))
+
+
+def outbox_counts() -> dict:
+    """通知 outbox 计数（按状态）。"""
+    from src.domains.runtime.im.outbox import counts as _impl
+
+    return _impl()
+
+
+def outbox_recent_undelivered(limit: int = 20) -> list:
+    """最近未送达的 outbox 行（dict 列表）。"""
+    from src.domains.runtime.im.outbox import recent_undelivered as _impl
+
+    return _impl(limit=limit)
+
+
+def outbox_list_rows(status: str = "", limit: int = 50) -> list:
+    """outbox 明细（可按状态筛，倒序）。"""
+    from src.domains.runtime.im.outbox import list_rows as _impl
+
+    return _impl(status=status, limit=limit)
+
+
+def outbox_get_row(out_track_id: str) -> dict | None:
+    """按 out_track_id 取 outbox 行。"""
+    from src.domains.runtime.im.outbox import get_row as _impl
+
+    return _impl(out_track_id)
+
+
+def outbox_requeue_for_retry(out_track_id: str) -> bool:
+    """手动重发：failed/expired → pending。"""
+    from src.domains.runtime.im.outbox import requeue_for_retry as _impl
+
+    return _impl(out_track_id)
+
+
+def dingtalk_card_client(app_id: str, app_secret: str):
+    """构造钉钉互动卡片实例客户端。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient as _C
+
+    return _C(app_id, app_secret)
+
+
+def new_out_track_id(seed: str = "") -> str:
+    """生成 out_track_id（跨进程幂等键）。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import new_out_track_id as _impl
+
+    return _impl(seed)
+
+
+def set_card_mode_file(enabled: bool) -> str:
+    """写钉钉卡片模式开关文件，返回写入值。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file as _impl
+
+    return _impl(enabled)
+
+
+def installation_fingerprint(cfg: dict) -> str:
+    """安装 config 指纹（与 IM 引擎扫描同一口径）。"""
+    from src.domains.runtime.im.engine.supervisor import fingerprint as _impl
+
+    return _impl(cfg)
+
+
+def parse_card_action(event_data: dict) -> dict | None:
+    """解析飞书卡片回调（兼容直接 POST 与 WS 两种格式）。"""
+    from src.domains.runtime.im.feishu_async import _parse_card_action as _impl
+
+    return _impl(event_data)
+
+
+def feishu_client():
+    """构造飞书 Async 客户端（调用方自行 close）。"""
+    from src.domains.runtime.im.feishu_async import FeishuAsync as _C
+
+    return _C()
+
+
+def bot_context(app_id: str = "", app_secret: str = "", bot_type: str = "chat_bot", name: str = ""):
+    """构造单 Bot 隔离上下文。"""
+    from src.domains.runtime.im.feishu_async import BotContext as _C
+
+    return _C(app_id=app_id, app_secret=app_secret, bot_type=bot_type, name=name)
+
+
+def set_gitcode_nickname(user_id, nickname: str) -> None:
+    """写 GitCode 昵称（channel_directory 单一权威访问层）。"""
+    from src.domains.runtime.im.channel_directory import set_gitcode_nickname as _impl
+
+    return _impl(user_id, nickname)
+
+
+# ── 云沙箱 adapter / 引擎注册表只读面（mgmt 管理面消费，2026-11-18 跨域收敛）──
+# 管理面（mgmt.routes.settings / sandbox_admin）原来直接 import runtime.agents.sandbox.*
+# 的内部模块。这里给等价原语，转发体一律函数内 import（内部模块加载期会反向引用别域）。
+def get_cloud_registry() -> dict:
+    """云沙箱平台 → Provider 类映射。"""
+    from src.domains.runtime.agents.sandbox.backends import get_cloud_registry as _impl
+
+    return _impl()
+
+
+def get_adapter(platform: str):
+    """取平台 adapter 实例；未注册平台返回 None。"""
+    from src.domains.runtime.agents.sandbox.backends import get_adapter as _impl
+
+    return _impl(platform)
+
+
+def get_all_adapters() -> list:
+    """全部 adapter 实例（本地 + 云）。"""
+    from src.domains.runtime.agents.sandbox.backends import get_all_adapters as _impl
+
+    return _impl()
+
+
+def get_cloud_platforms() -> list[str]:
+    """支持的云沙箱平台名列表。"""
+    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms as _impl
+
+    return _impl()
+
+
+def default_registry() -> Any:
+    """平台 → Provider 工厂映射（只读快照）。"""
+    from src.domains.runtime.agents.sandbox.backends import default_registry as _impl
+
+    return _impl()
+
+
+def engine_types() -> list[str]:
+    """云沙箱支持的引擎类型（ENGINE_REGISTRY 的键，保持注册顺序）。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return list(ENGINE_REGISTRY.keys())
+
+
+def has_engine_type(engine_type: str) -> bool:
+    """引擎类型是否已注册（严格比对，不含 "common" 兜底）。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return engine_type in ENGINE_REGISTRY
+
+
+def engine_plugins_info() -> list[dict]:
+    """引擎插件摘要（JSON 友好）：engine_type / display_name / installable。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return [
+        {
+            "engine_type": et,
+            "display_name": et,
+            "installable": bool(getattr(plugin.installer, "install_cmd", "")),
+        }
+        for et, plugin in sorted(ENGINE_REGISTRY.items())
+    ]
+
+
+def invalidate_cache(backend_name: str | None = None) -> None:
+    """失效沙箱网络访问规则缓存（白名单 CRUD 后调用）。"""
+    from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache as _impl
+
+    return _impl(backend_name)
+
+
+def refresh_whitelist_cache() -> None:
+    """刷新城墙域名白名单内存缓存（不直接暴露 _WhitelistCache 类）。"""
+    from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
+
+    _WhitelistCache.get().refresh()
+
+
+def is_plugin_mode() -> bool:
+    """当前管线模式是否为 plugin（plugin/legacy 二选一）。"""
+    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _impl
+
+    return _impl()

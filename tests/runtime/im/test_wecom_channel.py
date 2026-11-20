@@ -7,7 +7,7 @@
   - ack 超时 → ChannelError（可重连，不静默假活）；
   - 30s ping 保活（测试注入 10ms）；
   - 90s 读超时 → ChannelError；
-  - disconnected_event（被新连接踢掉）→ ChannelError；
+  - disconnected_event：同一连接首次只告警续用，第二次才 ChannelError 重连；
   - 坏帧不穿透接收循环（钉钉 #1008 教训）+ seen 去重；
   - 收帧即下载媒体（5 分钟 URL 的有效期约束）+ AES-256-CBC 解密；
   - lease 失配 → 优雅让渡（不建连）。
@@ -245,13 +245,43 @@ def test_read_timeout_raises_channel_error():
     asyncio.run(run())
 
 
-def test_disconnected_event_raises_channel_error():
+def test_disconnected_event_keeps_socket_first_time():
+    """首次 disconnected_event = 平台顶掉上一条会话的信号，**不断连**（2026-11-18 实障）。
+
+    原来直接抛 ChannelError → 每次重连又顶掉上一条 → 自伤死循环（10 分钟 14 次订阅/13 次被踢，
+    企微点击回调全丢）。实测该事件后 socket 仍可用（单连接探针保持 266s），故首次只告警续用。
+    """
     async def run():
         ws = FakeWS([_disconnect_frame()])
+        rec = Recorder()
+        ch, _, _ = _channel(ws, rec)
+        ctx = CancelContext()
+        task = asyncio.create_task(ch.connect(ctx))
+        await _drain()
+        assert not task.done(), "首发被踢事件不应让连接退出"
+        assert ch._kicks_this_conn == 1
+        # 后续消息照常派发（连接真的还能用）
+        ws.queue.put_nowait(json.dumps(_msg_frame(msgid="mid_after_kick")))
+        await _drain()
+        assert any(m.message_id == "mid_after_kick" for m in rec.messages)
+        ctx.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=1.0)
+        except (ChannelError, asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
+    asyncio.run(run())
+
+
+def test_second_disconnect_event_on_same_conn_reconnects():
+    """同一条连接第二次被踢 = 确实被新会话连续顶掉 → 抛 ChannelError 交给 Supervisor 重连。"""
+    async def run():
+        ws = FakeWS([_disconnect_frame(), _disconnect_frame()])
         ch, _, _ = _channel(ws, Recorder())
         with pytest.raises(ChannelError) as exc:
             await ch.connect(CancelContext())
         assert "kicked" in str(exc.value)
+        assert ch._kicks_this_conn == 2
 
     asyncio.run(run())
 

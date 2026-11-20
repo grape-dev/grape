@@ -20,6 +20,11 @@ import base64 as _b64
 import urllib.request as _urllib
 import shutil as _shutil
 
+# `--self-check` 任务路径 import 失败时的退出码：与 78（sysexits.h EX_CONFIG，
+# root 拒绝）区分；安装脚本按非零码中止升级并保留旧 worker。79 无标准定名，
+# 在此显式登记来源（Issue #3490 预检约定），仅供 scripts/install-worker.* 判定。
+_EXIT_PREFLIGHT_FAILED = 79
+
 # 方案 G: codearts per-task 权限隔离预写配置
 _CODEARTS_ALLOW_PERMS = [
     {"permission": "browser", "pattern": "*", "action": "ask"},
@@ -38,7 +43,12 @@ from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
 #   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
-from src.domains.mgmt.user.db import get_task_token as _get_task_token
+# token 取值走 owner 域 public（原 import mgmt.user.db 内部函数）
+from src.domains.mgmt import public as _mgmt_token
+
+
+def _get_task_token(task: dict) -> str:
+    return _mgmt_token.task_token(task)
 
 # 凭据吊销信号（全局）：_wrap 独立 task 中感知 401 时置位，主循环检查后退出进程。
 # create_task 的异常不穿透主循环，用 Event 跨 task 传递退出信号。
@@ -245,7 +255,11 @@ _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎
 #   - hermes_acp.py     _SILENT_TIMEOUT 读 HERMES_SILENT_TIMEOUT
 #   - hwcloud_acp.py    _SILENT_TIMEOUT 读 RUNTIME_TOOL_SILENT_TIMEOUT（已支持）
 # coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，300s 会在正常进行中误杀。
-_AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200}
+_AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200, "vod": 1200, "issue": 1200}
+# [看门狗 2026-11-12] vod/issue 加入放宽名单: 长工作流(2.5h/30+轮 LLM)每轮赌一次
+# "300s 内吐首 token", LLM 网关偶发停摆一次即全盘作废(实测 t_06416195392a:
+# API call #30 latency=3.8s 正常, 下一轮 OpenAI client created 后 300s 零事件被杀).
+# 与 coding/qa 同口径 1200s. 注意: 该 env 此前在 ACP 会话路径根本没被消费(见 executor.py 修复).
 _DEFAULT_SILENT_WINDOW = 300
 
 _worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
@@ -1257,6 +1271,34 @@ def _env_float(name, default):
         return float(default)
 
 
+def _workspace_patrol_interval() -> float:
+    """Issue #2514：派发前 workspace 巡检节流秒数（GRAPE_WORKSPACE_PATROL_INTERVAL，默认 3600）。
+
+    下限 60s：巡检要扫全 WORKSPACE_DIR 并对账 worktree，过密会与 claim 循环抢 IO。
+    """
+    return max(_env_float("GRAPE_WORKSPACE_PATROL_INTERVAL", 3600.0), 60.0)
+
+
+async def _run_workspace_patrol(active_cwds, label: str = "dispatch") -> None:
+    """Issue #2514：执行一轮 workspace 巡检（线程池，不阻塞事件循环）。"""
+    try:
+        from src.domains.runtime.engine import repogit
+        await asyncio.to_thread(repogit.patrol_workspaces, set(active_cwds or ()))
+    except Exception as e:
+        log.warning(f"workspace {label} patrol failed: {e}")
+
+
+async def _patrol_workspaces_startup() -> None:
+    """worker 启动巡检（无活跃任务，active_dirs 为空）。"""
+    await _run_workspace_patrol(set(), label="startup")
+
+
+async def _patrol_workspaces_active(active_task_objs) -> None:
+    """派发前巡检：在跑任务 cwd 作为活跃白名单，防 in-flight 工作树误删。"""
+    cwds = {t.get("cwd") or "" for t in (active_task_objs or {}).values()}
+    await _run_workspace_patrol(cwds, label="dispatch")
+
+
 def _watchdog_timeout_for(env: dict | None = None) -> float:
     """worker 任务级看门狗超时（秒，Issue #470 收敛点）。
 
@@ -1364,6 +1406,21 @@ def _usage_retry_engine(engine_name: str | None) -> bool:
     from src.domains.runtime.engine.instances import usage_retry_engine
 
     return usage_retry_engine(engine_name)
+
+
+def backend_for_engine(engine_name: str | None = "") -> str:
+    """[沙箱迁移] 引擎实例名 → backend 名（注册驱动版，24266092b 引擎注册体系统一，i7 移植）。
+
+    从 _BACKENDS key 前缀匹配，不硬编码引擎名。按 key 长度降序匹配。
+    匹配不到时返回空字符串（不 fallback 到 opencode）。
+    """
+    name = (engine_name or "").lower()
+    from src.domains.runtime.agents.executor import _BACKENDS
+    for backend_name in sorted(_BACKENDS, key=len, reverse=True):
+        if name.startswith(backend_name):
+            return backend_name
+    log.error(f"backend_for_engine: no match for '{engine_name}', registered={list(_BACKENDS.keys())}")
+    return ""
 
 
 def _scan_local_skills() -> list[dict]:
@@ -2045,6 +2102,12 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
     """
     import os as _os
     import shutil as _shutil
+    # Issue #2225：会话结束先清理自身暂存子目录（成功/异常/吊销路径都经本函数）。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import cleanup_session_tmpdir
+        cleanup_session_tmpdir(env or {})
+    except Exception as _tmp_e:
+        log.warning(f"session tmpdir cleanup failed for task {task.get('id')}: {_tmp_e}")
     cwd = task.get("cwd") or ""
     if not cwd or not _os.path.isdir(cwd):
         return
@@ -2059,9 +2122,10 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if _num and task.get("issue_session_id"):
+            # Issue #2514：终态清理传 task_id（证据存档文件名 workspace-<task_id>*.patch）
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=_get_task_token(task))
+                _num, token=_get_task_token(task), task_id=task.get("id") or "")
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -2076,7 +2140,8 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                             if _lrk:
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
-                                    token=_get_task_token(task))
+                                    token=_get_task_token(task),
+                                    task_id=task.get("id") or "")
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
@@ -2294,7 +2359,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
         _skill_scope = ""
         try:
             if _skill_id:
-                from src.domains.mgmt.user.db import get_skill_by_id
+                from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                 _skill_scope = (get_skill_by_id(_skill_id) or {}).get("scope") or ""
         except Exception as _sse:
             log.warning(f"[skill] scope resolve failed: {_sse}")
@@ -2595,13 +2660,37 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         except Exception as _rme:
             log.warning(f"task {tid}: skill source log report failed: {_rme}")
         if not _sv.get("ok"):
-            _err = skill_mismatch_error(_sv)
-            log.error(f"[skill] task {tid} refused to execute: {_err}")
-            try:
-                _res.dispose()
-            except Exception:
-                pass
-            return {"_error": _err, "_started": False}
+            # 自愈：绑定的技能没落在任务技能目录里 —— 最常见的原因不是"技能不存在"，
+            # 而是这次的物化根本没发生（换过部署目录、换过执行用户、或源解析在服务端
+            # 与引擎侧口径不一致）。此时引擎本地就能拿到官方源，直接再物化一次即可，
+            # 没有必要让整条任务失败（2026-11-16 Issue #94 实证：租户 checkout 侧的 .grape/skills
+            # 577 个文件齐备、resolve 成功，任务仍然报 not materialized）。
+            _healed = False
+            _b = (task.get("skill") or "").strip()
+            if _b and skill_dir:
+                try:
+                    from src.kernel.config import resolve_official_skill_path as _rosp_h
+                    from src.domains.runtime.engine.skill_materialize import (
+                        materialize_skill_dir_atomic as _msda_h)
+                    _src_h = _rosp_h(_b)
+                    if _src_h and os.path.isfile(_src_h):
+                        _hok, _hr = _msda_h(skill_dir, _b, os.path.dirname(_src_h))
+                        if _hok:
+                            log.warning(f"[skill] task {tid}: bound skill '{_b}' was not materialised; "
+                                        f"self-healed from {_src_h} into {skill_dir}")
+                            _healed = True
+                        else:
+                            log.warning(f"[skill] task {tid}: self-heal failed for '{_b}': {_hr}")
+                except Exception as _he:  # noqa: BLE001
+                    log.warning(f"[skill] task {tid}: self-heal attempt raised: {_he}")
+            if not _healed:
+                _err = skill_mismatch_error(_sv)
+                log.error(f"[skill] task {tid} refused to execute: {_err}")
+                try:
+                    _res.dispose()
+                except Exception:
+                    pass
+                return {"_error": _err, "_started": False}
     except Exception as _sve:
         log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
     return None
@@ -2810,6 +2899,13 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         env.setdefault("AGENT_SILENT_WINDOW", str(_ag_silent))
         env.setdefault("HERMES_SILENT_TIMEOUT", str(_ag_silent))
         env.setdefault("RUNTIME_TOOL_SILENT_TIMEOUT", str(_ag_silent))
+    # Issue #2225：会话级唯一暂存目录——平台已下发路径则创建校验；缺失/不可写时回退
+    # mktemp -d 并告警，禁止静默退回固定名 /tmp/opencode/body.md。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import ensure_session_tmpdir
+        ensure_session_tmpdir(env, tid)
+    except Exception as _tmp_e:
+        log.warning(f"task {tid}: ensure session tmpdir failed: {_tmp_e}")
     # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
     # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
     # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
@@ -2858,6 +2954,9 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
     # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
     # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 注入 agent env——git 操作走 `grape git`。
+    # Issue #2514：基线分叉/不可达 → WorkspaceBaselineError 在此显式阻断（不静默复用错基线），
+    # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
@@ -2865,7 +2964,13 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
                                           _num, token=_get_task_token(task),
-                                          work_branch=_wb)
+                                          work_branch=_wb, task_id=tid,
+                                          strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+    except _WsBaselineError as _wb_err:
+        log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
+                  f"fields={_wb_err.to_dict()}")
+        _res.dispose()
+        return {"_error": str(_wb_err), "_started": False}
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
@@ -2879,9 +2984,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             _linked_repos_list = _json_lr.loads(_linked_repos_env) if _linked_repos_env else []
             if _linked_repos_list:
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
+                # Issue #2514：关联仓基线分叉按仓降级（repogit 内记 baseline_blocked_linked）
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task), env=env)
+                    token=_get_task_token(task), env=env, task_id=tid)
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -2925,6 +3031,15 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                         f"reset context injected into env/prompt")
     except Exception as _rge:
         log.warning(f"task {tid}: worktree reset context inject failed: {_rge}")
+    # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    try:
+        from src.domains.runtime.engine.repogit import inject_git_write_context
+        prompt, _git_write = inject_git_write_context(task, env, prompt)
+        if _git_write and not _git_write.get("writable"):
+            log.warning(f"task {tid}: git worktree is read-only "
+                        f"({_git_write.get('reason', '')}), read-only mode marked")
+    except Exception as _gwe:
+        log.warning(f"task {tid}: git write context inject failed: {_gwe}")
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
@@ -3005,7 +3120,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             if has_user_id(_task_user_id):
                 try:
                     from src.api.deps import get_user_token_with_refresh
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     _acc = get_grape_account_by_id(_task_user_id)
                     if _acc:
                         user_token = get_user_token_with_refresh(_acc["username"], user_id=_task_user_id) or ""
@@ -3198,8 +3313,29 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
-        installed = [r for r in _discover_local_runtimes() if r.get("installed")]
+        # [云模式重注册修复 2026-11-11] prev_installed 含云引擎 → 重锚原云列表，
+        # 不做本地重发现。根因（服务端重启→云引擎孤儿态，.17 S2 cred15 实测）：
+        # _reregister 原逻辑无条件本地重发现（Issue #471 C1，为本机 worker 设计），
+        # cloud_worker 复用 _run_loop 时心跳连败≥3 / 5min 定期重注册会把云引擎
+        # 心跳列表 [22,25] 整体换成本机引擎——后果三连：
+        # ① 云引擎被挤出心跳列表 → 服务端 100s reap 永久 offline；
+        # ② 本机引擎被误注到沙箱凭据下（cred15 污染行 20/21/29，与 cred14 正身行并存）；
+        # ③ 模板 hash 未变 → _refresh_templates 不再重注册 → 非重启 worker 不可恢复。
+        # 云条目按 name 锚定注册（UPDATE 分支）拿回原 rid，心跳即刻恢复。
+        _cloud_prev = [r for r in (prev_installed or [])
+                       if (r.get("runtime_type") or "") == "cloud"]
+        if _cloud_prev:
+            installed = list(prev_installed)
+        elif (os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip():
+            # [云模式锚定 2026-11-16] cloud_worker 的 runtime.env 恒有 CLOUD_WORKER_PROVIDER——
+            # 模板列表是云 worker 的唯一引擎源，不做本地重发现。fresh 实例实锤（aw11 E-02）：
+            # boot 时服务端模板为空（探测批 ~18min 后才上报），首个 5min 定期重注册的
+            # _cloud_prev 为空 → 走 C1 本地发现 → 本机引擎误注到沙箱凭据下 + 顶掉
+            # runtime_ids，且模板落地后不可自愈（云条目永远进不了 prev_installed）。
+            installed = list(prev_installed or [])
+        else:
+            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
+            installed = [r for r in _discover_local_runtimes() if r.get("installed")]
         # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
         if not installed and prev_installed:
             log.warning("re-scan found no engines while snapshot had "
@@ -3298,7 +3434,8 @@ async def _presence_heartbeat_loop(client, runtime_ids, interval: float) -> None
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
-                    _test_active_task_objs=None):
+                    _test_active_task_objs=None, _execute_fn=None,
+                    _test_active_run_tokens=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -3310,10 +3447,50 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = _test_active_tasks if _test_active_tasks is not None else {}  # tid → sid 映射（task_id 去重 + sid 看门狗反查）
     active_task_objs = _test_active_task_objs if _test_active_task_objs is not None else {}  # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
+    # tid → 认领时的 started_at（执行代次 / run_token）。服务端每次回炉 + 重新派发都会刷新
+    # started_at，所以它天然就是「这是第几轮」的标识，不必新增字段、不必猜状态字符串。
+    active_run_tokens = (_test_active_run_tokens if _test_active_run_tokens is not None else {})
+    _restart_count = {}       # tid → 因代次变化重启的次数；上限 2，坏引擎被反复回炉时收敛
+    # 被回炉摘掉的旧执行轮标识 (tid, run_token)：旧协程稍后退出/上报时据此判定「已过期」，
+    # 既不覆盖新一轮账本、也不把上一轮结果重复上报（服务端会按 run_token 409）。
+    _stale_tokens: set = set()
+    hermes_active_tids = set()  # hermes 在跑任务的 tid 集合（限并发 1；集合幂等，避免计数泄漏）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
-    hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
+    _workspace_patrol_last = asyncio.get_running_loop().time()  # Issue #2514：巡检节流起点（worker 启动已巡检一轮）
+    # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）——限量由
+    # hermes_active_tids 承担；旧实现用 int 计数且只在正常收尾里 -= 1，
+    # 三条提前 return 路径会永久泄漏，攒够次数后这台 hermes 再也不接活。
     last_heartbeat = 0.0
+
+    async def _purge_active_task(tid: str) -> None:
+        """清掉本地一条残留活跃记录（代次已变 / 看门狗判定幽灵时用）。
+
+        顺序硬性要求：先把旧引擎进程杀干净（同步阻塞的 SIGTERM→SIGKILL 放线程池，
+        且必须 await 完），再清本地状态、再让调用方重新 claim —— 否则旧进程还占着
+        同一个 cwd，新进程起来后按 cwd 匹配的 kill 会把新进程误杀。
+        """
+        _obj = active_task_objs.get(tid)
+        _sid = active_tasks.get(tid, "")
+        _old_tok = str(active_run_tokens.get(tid, "") or "")
+        if _old_tok:
+            _stale_tokens.add((tid, _old_tok))
+        if _obj:
+            try:
+                _bk = _backend_for_engine(_obj.get("_engine_name") or "")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _kill_stale_engine, _obj, _bk)
+            except Exception as _ke:
+                log.warning(f"purge {tid}: kill stale engine failed: {_ke}")
+        active_sessions.discard(_sid)
+        active_tasks.pop(tid, None)
+        active_task_objs.pop(tid, None)
+        active_run_tokens.pop(tid, None)
+        try:
+            # 丢掉该 tid 用旧 run_token 的补报，免得重放时被服务端 409 刷日志
+            _report_queue().remove(tid)
+        except Exception as _qe:
+            log.debug(f"purge {tid}: drop pending reports skipped: {_qe}")
 
     # 启动 worker 引擎探测线程（每 10 分钟对本机引擎发起 CLI 测试对话）
     _start_worker_probe()
@@ -3350,6 +3527,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     while True:
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
+        # ---- Issue #2514：派发前 workspace 巡检（节流）----
+        # worktree list 对账 + prune + 回收「无活跃任务且超 GRAPE_WORKSPACE_TTL_HOURS」的
+        # 带标记残留；在跑任务 cwd 经 active_dirs 白名单保护（in-flight 工作树不误删）。
+        if now - _workspace_patrol_last >= _workspace_patrol_interval():
+            _workspace_patrol_last = now
+            await _patrol_workspaces_active(active_task_objs)
         if now - last_reregister >= RE_REGISTER_INTERVAL:
             _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if _rr is not None:
@@ -3414,8 +3597,25 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 否则任务被 requeue 回 queued → 下轮又 claim 到 → sid 冲突 → 再 requeue →
             # 无限循环饿死同 runtime 后续任务（seq#1477 SRE 被 chat 任务死循环阻塞 20min）。
             if tid in active_tasks:
-                log.debug(f"task {tid} already active, skip")
-                continue
+                # 代次比对：run_token = 认领结果的 started_at，服务端每次回炉 + 重新派发
+                # 都会刷新它。代次变了说明本地这条是上一个执行轮的残留（孤儿），杀掉重启；
+                # 代次没变则维持原语义「已在跑，跳过」（守住 seq#1477 的 claim 死循环）。
+                _rt_new = str((task or {}).get("started_at") or "")
+                _rt_old = str(active_run_tokens.get(tid, "") or "")
+                if _rt_new and _rt_old and _rt_new != _rt_old:
+                    if _restart_count.get(tid, 0) >= 2:
+                        # 坏引擎会被平台反复回炉：重启两次还不行就交给平台判死，别无限重起
+                        log.warning(f"task {tid} re-dispatched again (run_token {_rt_old} -> "
+                                    f"{_rt_new}), restart cap reached, skip")
+                        continue
+                    _restart_count[tid] = _restart_count.get(tid, 0) + 1
+                    log.warning(f"task {tid} re-dispatched (run_token {_rt_old} -> {_rt_new}), "
+                                f"purge stale engine and restart (restart #{_restart_count[tid]})")
+                    await _purge_active_task(tid)
+                    # 落下去走正常 claim 流程（active_tasks 已清，不会再次命中本分支）
+                else:
+                    log.debug(f"task {tid} already active, skip")
+                    continue
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
@@ -3447,7 +3647,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
-            if e == "hermes" and hermes_active >= 1:
+            if e == "hermes" and hermes_active_tids:
                 # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
                 continue
             active_sessions.add(sid)
@@ -3455,11 +3655,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             task["_engine_name"] = e  # 供 sid 看门狗杀进程用
             task["_claim_time"] = asyncio.get_running_loop().time()  # B2: zombie task age tracking
             active_task_objs[tid] = task
+            active_run_tokens[tid] = str((task or {}).get("started_at") or "")
             if e == "hermes":
-                hermes_active += 1
+                hermes_active_tids.add(tid)
 
-            async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
-                nonlocal hermes_active
+            async def _wrap_inner(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
                 # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/domains/runtime/engine/task_timeout.py。
                 # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
@@ -3498,6 +3698,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
+                    elif _execute_fn is not None:
+                        # [沙箱迁移] cloud_worker 注入的云沙箱执行函数（与 _test_execute 同位）
+                        _result = await _execute_fn(client, t, e)
                     else:
                         # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理。
                         # Issue #516 M2：超时失败有限次自动重试——每次超时 kill 引擎 →
@@ -3551,19 +3754,31 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
                 # Step 4：完成/失败先入补报队列（ms master 停机窗口不丢），ack 后出队
                 _run_token = (t or {}).get("started_at") or ""
+                # Issue #1011：上报 v2——任务行 engine_uid 快照随上报（v2-first/v1-fallback）
+                _task_engine_uid = str((t or {}).get("engine_uid") or "").strip().lower()
 
                 async def _do_report(kind: str, text: str, exit_code: int, **kw):
+                    # 代次守卫：本协程若已被回炉摘掉（当前 token 已换成别的），这条结果属于
+                    # 上一执行轮，不得再上报（否则服务端 409、补报队列反复重放）。
+                    _cur_tok = str(active_run_tokens.get(_tid, "") or "")
+                    if (_tid, _run_token) in _stale_tokens or (_run_token and _cur_tok and _cur_tok != _run_token):
+                        log.info(f"task {_tid}: drop stale report {kind} "
+                                 f"(run_token {_run_token} != current {_cur_tok})")
+                        return
                     q = _report_queue()
                     q.add({"task_id": _tid, "status": kind, "result_text": text,
                            "exit_code": exit_code, "run_token": _run_token,
                            "session_id": kw.get("session_id", ""),
                            "work_dir": kw.get("work_dir", ""),
-                           "engine": kw.get("engine", e)})
+                           "engine": kw.get("engine", e),
+                           "engine_uid": _task_engine_uid})
                     try:
                         if kind == "failed":
-                            resp = await client.fail(_tid, text, exit_code=exit_code, run_token=_run_token)
+                            resp = await client.fail(_tid, text, exit_code=exit_code, run_token=_run_token,
+                                                     engine_uid=_task_engine_uid)
                         else:
-                            resp = await client.complete(_tid, text, exit_code, run_token=_run_token, **kw)
+                            resp = await client.complete(_tid, text, exit_code, run_token=_run_token,
+                                                         engine_uid=_task_engine_uid, **kw)
                     except Exception:
                         return  # 保留补报队列，重连后由 replay 重放
                     if resp is not None:
@@ -3614,11 +3829,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
                     # tmp cleanup handled by TaskResourceStack.dispose() in _execute_task
-                active_sessions.discard(s)
-                active_tasks.pop(_tid, None)
-                active_task_objs.pop(_tid, None)
-                if e == "hermes":
-                    hermes_active -= 1
+
+            async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
+                """清理不变量：只要协程退出（正常结束 / 三条提前 return / 异常 / 取消），
+                本地活跃状态必须清干净。放在 finally 里——原实现把收尾写在函数末尾，
+                task_start 三次失败、凭据吊销、执行崩溃三条 return 会跳过收尾，
+                tid 永久留在 active_tasks，后续同 tid claim 永远 skip。
+                """
+                _my_token = str(active_run_tokens.get(_tid, "") or "")
+                _my_key = (_tid, _my_token)
+                try:
+                    await _wrap_inner(t=t, _tid=_tid, s=s, e=e)
+                finally:
+                    # 代次守卫：被 _purge_active_task 摘掉的旧协程晚些退出时，账本已经属于
+                    # 新一轮（token 已换）。此时清账会把新一轮的状态抹掉，故只在「我仍是
+                    # 当前代次」时清理。
+                    if _my_key in _stale_tokens:
+                        # 注意：finally 里不能 return（会吞掉在飞异常），只跳过清理
+                        _stale_tokens.discard(_my_key)
+                        log.info(f"task {_tid}: stale wrapper exit (run_token {_my_token} "
+                                 f"superseded), keep current round state")
+                    else:
+                        active_sessions.discard(s)
+                        active_tasks.pop(_tid, None)
+                        active_task_objs.pop(_tid, None)
+                        active_run_tokens.pop(_tid, None)
+                        hermes_active_tids.discard(_tid)
 
             asyncio.create_task(_wrap())
 
@@ -3745,8 +3981,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # 长时间 dispatched 的任务（引擎进程 hang 住，_wrap 的 finally 不执行）会
         # 让 active_tasks 永不空 → "空闲才升级" 条件永不满足。超龄阈值后查服务端
         # 终态，已终态→直接摘除；未终态但超龄→也摘除并回调 fail（任务实际已卡死）。
-        _zombie_threshold = _env_float("RUNTIME_ZOMBIE_TASK_THRESHOLD", 6 * 3600)
-        if active_tasks and pending_upgrade:
+        # 改动 1/2/3 生效后这条基本不会命中，保留作第三道兜底：
+        # 每轮都跑（原实现要求 pending_upgrade 才跑，未升级的 worker 等于没有兜底），
+        # 阈值降到 30 分钟。注意这里只在服务端**已终态**时摘除——非终态的大任务
+        # （coding 上限 7200s）还在正常跑，强制 fail 会砍掉健康任务。
+        _zombie_threshold = _env_float("RUNTIME_ZOMBIE_TASK_THRESHOLD", 30 * 60)
+        if active_tasks:
             _znow = asyncio.get_running_loop().time()
             _zombie_tids = []
             for _ztid, _zsid in list(active_tasks.items()):
@@ -3761,13 +4001,14 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         _zstate = ""
                     if _zstate in ("failed", "cancelled", "completed", "not_found"):
-                        _zombie_tids.append((_ztid, _zsid, _zstate, True))
-                    else:
-                        # 服务端未终态但 worker 端已超龄→任务卡死，摘除并回调 fail
-                        _zombie_tids.append((_ztid, _zsid, _zstate or "unknown", False))
-            for _ztid, _zsid, _zstate, _is_terminal in _zombie_tids:
+                        _zombie_tids.append((_ztid, _zsid, _zstate))
+                    # 非终态一律不动：可能是健康长任务（coding 上限 2h），也可能是本地
+                    # 记录泄漏——泄漏由代次比对 / finally / queued 幽灵三层处理。
+            for _ztid, _zsid, _zstate in _zombie_tids:
                 active_sessions.discard(_zsid)
                 active_tasks.pop(_ztid, None)
+                active_run_tokens.pop(_ztid, None)
+                hermes_active_tids.discard(_ztid)
                 _zt = active_task_objs.pop(_ztid, None)
                 if _zt:
                     _backend = _backend_for_engine(_zt.get("_engine_name") or "")
@@ -3775,13 +4016,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         _kill_stale_engine(_zt, _backend)
                     except Exception:
                         pass
-                if not _is_terminal:
-                    try:
-                        await client.fail(_ztid, f"zombie task reclaimed (age>{_zombie_threshold:.0f}s, server_state={_zstate})")
-                    except Exception:
-                        pass
-                log.warning(f"zombie reclamation: tid={_ztid} sid={_zsid} state={_zstate} "
-                            f"terminal={_is_terminal}, removed from active_tasks")
+                log.warning(f"zombie reclamation: tid={_ztid} sid={_zsid} state={_zstate}, "
+                            f"removed from active_tasks")
 
         # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
         if pending_upgrade and not active_tasks:
@@ -3834,7 +4070,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     _state = await client.get_task_state(_tid)
                 except Exception:
                     _state = ""
-                if _state in ("failed", "cancelled", "completed", "not_found", "") and _state:
+                # queued 也算幽灵：worker 认领成功的那个事务里服务端已置 running，
+                # 「我手里在跑、服务端说 queued」只可能是被回炉/被 stale 降级回队，
+                # 本地这条已经是孤儿。这层兜底让残留最迟 60s 被清掉，而不是等 6 小时。
+                if _state in ("failed", "cancelled", "completed", "not_found", "queued") and _state:
                     _ghost_tids.append((_tid, _sid, _state))
                 elif not _state:
                     # 查询失败（网络抖动/服务端 500）：跳过，下次再查
@@ -3842,6 +4081,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             for _tid, _sid, _state in _ghost_tids:
                 active_sessions.discard(_sid)
                 active_tasks.pop(_tid, None)
+                active_run_tokens.pop(_tid, None)
+                hermes_active_tids.discard(_tid)
                 _task = active_task_objs.pop(_tid, None)
                 # 杀掉残留引擎进程：用户终止/超时后服务端已标终态，但 worker 上的
                 # 引擎进程可能仍在跑（没有服务端→worker 的推送通道通知停进程）。
@@ -3873,6 +4114,21 @@ def _read_local_worker_version() -> str:
     （2026-10-21 恢复：fbc499c4a 误删，67b11da14 为 2026-10-18 worker 升级死循环事故加的防线。）
     """
     from src.domains.runtime.engine.os_adapter import is_windows, version_file
+    # [凭据目录 i7 漏迁移恢复] 沙箱 worker 版本戳在凭据状态目录 etc/ 下
+    # (/opt/grape-cw/<cred_uid8>/etc/worker.version)——systemd WorkingDirectory=该目录,
+    # 按 cwd 优先读; 读不到(普通 worker/裸跑)回落原路径。漏改后果: local 版本
+    # 读到 /etc/grape/worker.version 的陈旧值 → 误判 mismatch → 无意义升级
+    # （2026-11-10 .17 双 worker 实证：新实例读到二期旧戳 → 50s 一轮升级重启,
+    #   60s 模板刷新环永远跑不完, 引擎永不注册——i7 agent.py:3257 同款修复回迁）
+    if os.environ.get("CLOUD_WORKER_CREDENTIAL_UID", "").strip():
+        _inst_vp = os.path.join(os.getcwd(), "etc", "worker.version")
+        try:
+            with open(_inst_vp, "r", encoding="utf-8") as f:
+                got = f.read().strip()
+            if got:
+                return got
+        except Exception:
+            pass
     if is_windows():
         vp = version_file()
     elif os.environ.get("RUNTIME_ROOT_MODE") == "1" or (hasattr(os, "geteuid") and os.geteuid() == 0):
@@ -3987,10 +4243,12 @@ async def _perform_upgrade(server: str, token: str, device_name: str = "") -> bo
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
         else:
-            log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+            # [沙箱迁移/spec §4.2] install-worker.sh 已删 --dir（安装目录由 whoami 派生，
+            # 重复安装自认家门）；这里不再传 --dir，防升级命令 60s 循环报错（.17 实测）
+            log.info(f"Auto-upgrade: running install-worker.sh (whoami-derived dir)")
             result = await asyncio.to_thread(
                 subprocess.run,
-                ["bash", tmp_script, "--server", server, "--dir", _install_dir],
+                ["bash", tmp_script, "--server", server],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
 
@@ -4211,6 +4469,10 @@ def main():
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
         await asyncio.to_thread(_worker_probe_once)
 
+        # Issue #2514：worker 启动巡检——worktree 对账 + prune + 跨 Issue 残留回收
+        #（启动语境无活跃任务，active_dirs 为空；在跑任务由服务端 orphan 恢复后另行保护）。
+        await _patrol_workspaces_startup()
+
         # sweeper：worker 端定期清理本地磁盘残留（worktree/node_modules/tmp）。
         # 服务端的 sweep_loop 只扫服务端磁盘，远端 worker 的残留无人清理 → 撑满磁盘。
         # worker 启动时也跑一轮 sweep_once（清上次崩溃残留），然后每 15min 循环。
@@ -4242,4 +4504,43 @@ def main():
 
 
 if __name__ == "__main__":
+    # fail-fast：引擎必须以任务属主身份运行。以 root 运行会在 grape-workspaces 下留下
+    # root 拥有的目录，随后业务侧（grape）写 issue/<agent> 目录直接 EACCES ——
+    # 2026-11-16 #96/#97 流水线卡死的真实根因（runtime-agent.service 里 User=root）。
+    # Windows 没有 os.geteuid（AttributeError），必须 hasattr 守卫：否则任何 Windows
+    # worker 升级到该版本都会在 __main__ 阶段秒退 → daemon 重试 10 次后放弃 → 升级即离线。
+    _euid_is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    # --self-check：给安装/升级脚本用的「能否启动」预检（在停旧 worker 之前跑）。
+    # 必须走同一段守卫表达式，这样同类平台差异（如 Windows 无 geteuid）在预检期就暴露。
+    if "--self-check" in sys.argv[1:]:
+        # 2026-11-19：除了守卫表达式，再多验一层「任务路径要用到的 public 面能否 import」。
+        # 事故：Windows worker 缺 fastapi，任务跑到 skill scope 解析才炸（`stream failed`），
+        # 安装脚本完全无法预知。这里把 worker 任务路径实际会 import 的跨域 public 面拉一遍，
+        # 缺依赖在预检期就 fail，升级直接中止、旧 worker 继续跑。
+        _missing = []
+        for _m in (
+            "src.domains.runtime.public",
+            "src.domains.mgmt.public",
+            "src.domains.insight.public",
+            "src.domains.runtime.engine.skill_materialize",
+            "src.kernel.repo_key",
+        ):
+            try:
+                __import__(_m)
+            except Exception as _ie:
+                _missing.append(f"{_m}: {type(_ie).__name__}: {_ie}")
+        if _missing:
+            print("self-check FAILED: worker task-path imports broken:", file=sys.stderr)
+            for _line in _missing:
+                print(f"  - {_line}", file=sys.stderr)
+            raise SystemExit(_EXIT_PREFLIGHT_FAILED)
+        print(f"self-check ok: platform={sys.platform} euid_guard={'root' if _euid_is_root else 'nonroot'} "
+              f"task_path_imports=5")
+        raise SystemExit(0)
+    if _euid_is_root and os.environ.get("GRAPE_ALLOW_ROOT_ENGINE") != "1":
+        print("refusing to run the engine as root: workspace files would be root-owned and "
+              "business writes (issue/<agent> dirs) would fail with EACCES. "
+              "Run as the task owner (User=grape) or set GRAPE_ALLOW_ROOT_ENGINE=1.",
+              file=sys.stderr)
+        raise SystemExit(78)
     main()

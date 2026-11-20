@@ -84,6 +84,20 @@ def _ensure_test_db():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _bind_kernel_ports(_ensure_test_db):
+    """把 kernel 端口绑定到真实域实现（生产在进程启动时做同一件事）。
+
+    src/kernel 只经 `src.kernel.ports.*` 触达域；未绑定即 PortNotBound。测试直接
+    驱动 kernel 函数、不走应用启动，故在测试库就绪后统一绑定一次。端口按属性惰性
+    解析，`patch("src.domains...")` 仍然生效。
+    """
+    from src.api.contracts_wiring import ensure_bound
+
+    ensure_bound()
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _ensure_help_page_generated():
     """测试前先把 help/ markdown 渲染为 src/api/frontend/shell/help.html。
 
@@ -101,9 +115,12 @@ def _reset_db_path():
     """每个测试前重置 DEVOPS_DB_PATH。
 
     防止其他测试模块 import 时改 env 导致后续测试拿到错误路径。
-    注意：不重绑 session_manager.db 连接——73 个模块在 module level 导入了 db，
-    重绑 session_manager.db 不会更新它们的引用，反而导致写读不一致。
-    依赖 _ensure_test_db session fixture 在 session 开始时用正确 env 初始化表。
+
+    ⚠ 这里**不**调 reset_db_connection()。试过（2026-11-19）：在每个用例前重置连接
+    会让 test_knowledge_board.py 从 24 passed 掉到 20 failed——那些用例依赖 session
+    级 fixture 建立的那条连接上尚未 commit 的状态（账号行等），重置后读到的是库文件
+    里的旧内容。session_manager 的惰性连接只保证「import 不建连」，换库后的重连要由
+    真正重建库的地方显式触发，不能挂在逐用例 fixture 上。
     """
     _test_db = os.path.join(ROOT, "data", "test_sessions.db")
     os.environ["DEVOPS_DB_PATH"] = _test_db

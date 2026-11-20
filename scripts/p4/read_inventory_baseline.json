@@ -1,10 +1,13 @@
 {
-  "files_scanned": 439,
+  "files_scanned": 584,
   "stats": {
-    "total": 0,
-    "bare": 0,
+    "total": 26,
+    "bare": 26,
     "converted": 0,
-    "bare_by_host": {},
+    "bare_by_host": {
+      "api": 24,
+      "kernel": 2
+    },
     "w1_scope": {
       "bare": 0,
       "bare_by_host": {
@@ -21,14 +24,375 @@
       "bare_classification_by_table": {}
     },
     "shared_scope": {
-      "total": 0,
-      "bare": 0,
-      "by_host": {}
+      "total": 26,
+      "bare": 26,
+      "by_host": {
+        "api": 24,
+        "kernel": 2
+      }
     },
-    "tables": 0,
-    "bare_tables": 0,
-    "table_sites": {},
-    "classification": {}
+    "tables": 13,
+    "bare_tables": 13,
+    "table_sites": {
+      "agent_runtimes": 6,
+      "agent_tasks": 2,
+      "backend_agents": 4,
+      "devops_pipeline_scene": 1,
+      "engine_capabilities": 1,
+      "external_identities": 1,
+      "grape_t_external_identity_tombstones": 1,
+      "grape_t_repo_platforms": 1,
+      "grape_t_schema_migrations": 1,
+      "gsb_provider_route": 2,
+      "meta": 3,
+      "runtime_credentials": 4,
+      "task_messages": 1
+    },
+    "classification": {
+      "auto": 3,
+      "manual_non_fetch": 23
+    }
   },
-  "sites": []
+  "sites": [
+    {
+      "file": "src/api/db_setup.py",
+      "line": 1080,
+      "func": "_copy_backend_to_runtime",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "backend_agents"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at FROM back"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 6081,
+      "func": "_migrate_tables",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "backend_agents"
+      ],
+      "dynamic": false,
+      "sql": "SELECT lower(name) AS ln FROM backend_agents GROUP BY lower(name) HAVING COUNT(*)>1"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 6084,
+      "func": "_migrate_tables",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "backend_agents"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id FROM backend_agents WHERE lower(name)=? ORDER BY id ASC LIMIT 1"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 6086,
+      "func": "_migrate_tables",
+      "host": "api",
+      "status": "bare",
+      "classification": "auto",
+      "tables": [
+        "backend_agents"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, name FROM backend_agents WHERE lower(name)=? AND id!=? ORDER BY id ASC"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7984,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_repo_platforms"
+      ],
+      "dynamic": false,
+      "sql": "SELECT provider, bot_username, bot_token_enc FROM grape_t_repo_platforms"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8008,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8021,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8179,
+      "func": "_fn_retire_vcs_platforms_hidden",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key='vcs_platforms_hidden'"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8534,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "runtime_credentials"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id FROM runtime_credentials WHERE credential_uid IS NULL OR credential_uid=''"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8539,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "runtime_credentials"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, credential_uid FROM runtime_credentials"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8542,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, credential_id, name, scope, owner_id, host_name, engine_uid FROM agent_runtimes ORDER BY id"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8574,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, COALESCE(display_name, name), name FROM agent_runtimes"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8593,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_tasks"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, runtime_id, pool_engine_ids FROM agent_tasks WHERE (engine_uid IS NULL OR engine_uid='') AND id > ? ORDER BY "
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8632,
+      "func": "_migration_646_backfill_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_tasks",
+        "task_messages"
+      ],
+      "dynamic": false,
+      "sql": "SELECT tm.id, tm.task_id, at.engine_uid FROM task_messages tm LEFT JOIN agent_tasks at ON tm.task_id = at.id WHERE (tm.e"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 8898,
+      "func": "_migration_868_backfill_session_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, engine_uid FROM agent_runtimes"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9025,
+      "func": "_migration_1011_backfill_rederive_engine_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, name, scope, owner_id, host_name, engine_type, provider_id, template_id, provider_uid, template_uid, engine_u"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9032,
+      "func": "_migration_1011_backfill_rederive_engine_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "runtime_credentials"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, credential_uid FROM runtime_credentials"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9083,
+      "func": "_backfill_missing_migration_reports",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_schema_migrations"
+      ],
+      "dynamic": false,
+      "sql": "SELECT version FROM grape_t_schema_migrations"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9523,
+      "func": "_migration_1208_backfill_scene_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "devops_pipeline_scene"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1 ORDER BY id"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9565,
+      "func": "_migration_1208_backfill_scene_uids",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT engine_uid FROM agent_runtimes WHERE id=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9631,
+      "func": "_migration_1208_backfill_derived_agent_tags",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes",
+        "runtime_credentials"
+      ],
+      "dynamic": false,
+      "sql": "SELECT r.id, r.name, r.scene_tags, r.engine_uid, r.runtime_info, COALESCE(rc.scope,'global') FROM agent_runtimes r LEFT "
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9653,
+      "func": "_migration_1208_backfill_derived_agent_tags",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "engine_capabilities"
+      ],
+      "dynamic": false,
+      "sql": "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 AND tag LIKE '%:%'"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 9998,
+      "func": "_fn_issue3054_tombstone_table",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "external_identities"
+      ],
+      "dynamic": false,
+      "sql": "SELECT grape_user_id, provider, COALESCE(metadata,'') FROM external_identities WHERE metadata LIKE '%tombstones%'"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 10016,
+      "func": "_fn_issue3054_tombstone_table",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_external_identity_tombstones"
+      ],
+      "dynamic": false,
+      "sql": "SELECT 1 FROM grape_t_external_identity_tombstones WHERE provider=? AND external_id=?"
+    },
+    {
+      "file": "src/kernel/gsb/route_config.py",
+      "line": 235,
+      "func": "_load_all",
+      "host": "kernel",
+      "status": "bare",
+      "classification": "auto",
+      "tables": [
+        "gsb_provider_route"
+      ],
+      "dynamic": false,
+      "sql": "SELECT route_key, mode, timeout_ms, version, updated_at, updated_by FROM gsb_provider_route"
+    },
+    {
+      "file": "src/kernel/gsb/route_config.py",
+      "line": 321,
+      "func": "set_route",
+      "host": "kernel",
+      "status": "bare",
+      "classification": "auto",
+      "tables": [
+        "gsb_provider_route"
+      ],
+      "dynamic": false,
+      "sql": "SELECT version, timeout_ms FROM gsb_provider_route WHERE route_key=?"
+    }
+  ]
 }

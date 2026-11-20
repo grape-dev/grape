@@ -17,7 +17,21 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 生命周期接入，task_id/pipeline_trace_id 作为 span 属性与业务 id 同源对齐。
 """
 import os
+import platform
 from contextlib import contextmanager
+
+
+def _hostname() -> str:
+    """主机名（跨平台）。
+
+    `os.uname()` 仅 Unix；Windows worker 上会抛 `AttributeError: module 'os' has
+    no attribute 'uname'`，把 OTel 初始化整段打成 "OTel init failed" 日志（2026-11-19
+    实测于 Windows runtime-agent，service=grape-task）。platform.node() 全平台可用。
+    """
+    return (os.environ.get("HOSTNAME")
+            or (os.uname().nodename if hasattr(os, "uname") else "")
+            or platform.node()
+            or "unknown")
 
 _inited_service = None
 _inited_provider = None
@@ -129,7 +143,7 @@ def init_otel(service_name: str):
         resource = Resource.create({
             "service.name": service_name,
             "service.version": os.environ.get("GIT_COMMIT", "dev"),
-            "host": os.environ.get("HOSTNAME", os.uname().nodename),
+            "host": _hostname(),
             "env": os.environ.get("GRAPE_ENV", "dev"),
         })
 

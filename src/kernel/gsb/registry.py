@@ -12,30 +12,30 @@ purge_stale()（把心跳超时的 online 行标为 offline），供 /internal/g
 与巡检脚本使用；register/discover 行为保持设计稿语义不变。
 
 2026-11 跨域收口：注册表 SQL 全部下沉 mgmt 域 public（`gsb_service_registry` 归
-mgmt，见 docs/weekly-11/table-owner.tsv）。本模块只保留 GSB 语义——心跳超时判定、
+mgmt，见 configs/table_ownership.json）。本模块只保留 GSB 语义——心跳超时判定、
 实例派生字段、负载均衡依赖的排序口径；不再直连进程库。三库拓扑下各域进程写的是
 同一张 mgmt 表（改前各写各的库：注册不报错但互相发现不到），单库 / 测试拓扑由
 owner 域的「任意拓扑」原语回落进程主库，行为与改前逐字一致。
+
+访问路径：本模块不再延迟 import `mgmt.public`，而是经 kernel 端口 `pipeline` 调用这些
+mgmt 原语（GSB 是服务总线，注册表就是总线的发现层，与事件管道同属路由基础设施；
+同一端口已承载 mgmt.public 的其它基础设施原语）。符号名与调用点不变，符号解析由
+装配层（src/api/contracts_wiring.py）在启动时绑定，kernel 侧不出现 domains import。
 """
 from __future__ import annotations
 
 import json
 import time
 
+from src.kernel.ports import pipeline as _pipeline
+
 # 心跳超时：90s = 3 个心跳周期（30s × 3）
 HEARTBEAT_TIMEOUT = 90
 
 
-def _mgmt():
-    """mgmt 域 public 句柄（函数内延迟导入：kernel 顶层不得依赖 domains，check-arch R1）."""
-    from src.domains.mgmt import public as _public
-
-    return _public
-
-
 def _ensure_table() -> None:
     """幂等建表/补列（DDL 归 mgmt 域；每次 register 前调用，时机与原实现一致）。"""
-    _mgmt().ensure_gsb_registry_schema()
+    _pipeline.ensure_gsb_registry_schema()
 
 
 def register_service(
@@ -56,7 +56,7 @@ def register_service(
     """
     _ensure_table()
     payload = json.dumps(metadata or {}, ensure_ascii=False)
-    _mgmt().gsb_register(
+    _pipeline.gsb_register(
         name, base_url, health_url, version or "1", time.time(), payload
     )
 
@@ -64,7 +64,7 @@ def register_service(
 def heartbeat_service(name: str) -> None:
     """定时心跳更新（30s 调用一次）。"""
     _ensure_table()
-    _mgmt().gsb_heartbeat(name, time.time())
+    _pipeline.gsb_heartbeat(name, time.time())
 
 
 def discover_service(name: str) -> dict:
@@ -74,7 +74,7 @@ def discover_service(name: str) -> dict:
         服务行 dict（service_name, base_url, health_url, ...）或空 dict。
     """
     _ensure_table()
-    data = _mgmt().gsb_discover_row(name)
+    data = _pipeline.gsb_discover_row(name)
     if not data:
         return {}
     # 心跳超时检查
@@ -86,7 +86,7 @@ def discover_service(name: str) -> dict:
 def list_services() -> list:
     """列出所有在线服务（心跳未超时）。"""
     _ensure_table()
-    return _mgmt().gsb_online_services(time.time() - HEARTBEAT_TIMEOUT)
+    return _pipeline.gsb_online_services(time.time() - HEARTBEAT_TIMEOUT)
 
 
 def split_key(key: str) -> tuple[str, str]:
@@ -120,7 +120,7 @@ def list_instances(service: str, include_offline: bool = False) -> list[dict]:
     """
     _ensure_table()
     cutoff = time.time() - HEARTBEAT_TIMEOUT
-    rows = _mgmt().gsb_instances(service, cutoff, include_offline=include_offline)
+    rows = _pipeline.gsb_instances(service, cutoff, include_offline=include_offline)
 
     now = time.time()
     for r in rows:
@@ -140,7 +140,7 @@ def list_all_services(include_offline: bool = True) -> list:
     两个派生字段，方便一眼看出"注册了但已经死掉"的服务。
     """
     _ensure_table()
-    rows = _mgmt().gsb_all_services(include_offline=include_offline)
+    rows = _pipeline.gsb_all_services(include_offline=include_offline)
 
     now = time.time()
     for r in rows:
@@ -156,10 +156,10 @@ def purge_stale(ttl: float = HEARTBEAT_TIMEOUT) -> int:
     仅做状态收敛，不删除行——保留 base_url / metadata 便于事后排查。
     """
     _ensure_table()
-    return _mgmt().gsb_purge_stale(time.time() - ttl)
+    return _pipeline.gsb_purge_stale(time.time() - ttl)
 
 
 def deregister_service(name: str) -> None:
     """服务关闭时注销。"""
     _ensure_table()
-    _mgmt().gsb_mark_offline(name)
+    _pipeline.gsb_mark_offline(name)

@@ -21,6 +21,7 @@ EVENT_TYPES = frozenset({
     "email_change",                # 邮箱变更
     "bind",                        # 第三方绑定
     "unbind",                      # 第三方解绑
+    "transfer_bind",               # 绑定转移到另一个账号（此前不在白名单 → 转移动作没有任何审计行）
     "login_rename",                # 第三方登录名变更（Issue #497：external_id 不变、login 变）
     "account_disabled",            # 账号禁用
     "account_restored",            # 账号恢复
@@ -46,10 +47,22 @@ EVENT_TYPES = frozenset({
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
     "issue_reverted_to_pending_review",  # 需求属主撤销已完成需求回待审核（Issue #1408）
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
+    "credential_decrypt_failed",    # 渠道表凭据密文解密失败（Issue #3054 P1-3：密钥事故显式化，detail 只记 provider/field/column/kid/error，不落密文与明文）
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
     "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
     "cross_write_apply",            # 跨域补偿写应用（/internal/xwrite/apply：action/幂等键/调用方/结果摘要，detail 不落 payload 原文）
+    "sandbox_whitelist_created",    # admin 新增沙箱五维白名单规则（PR #1507 F7：detail 只记标识，不记凭据）
+    "sandbox_whitelist_updated",    # admin 更新沙箱白名单规则（detail 含 rule_id/backend/domain）
+    "sandbox_whitelist_deleted",    # admin 删除沙箱白名单规则（detail 含 rule_id/backend）
+    "sandbox_path_created",         # admin 新增沙箱文件系统路径（detail 含 backend/path/access）
+    "sandbox_path_updated",         # admin 更新沙箱文件系统路径
+    "sandbox_path_deleted",         # admin 删除沙箱文件系统路径
+    "sandbox_config_updated",       # admin 更新沙箱配置（detail 含 config_id/mode/degrade_policy）
+    "issue_terminal_disposition",   # 终态载体单人工处置（Issue #2816：new_carrier/reassign/close，detail 含 repo_key/issue_id/action/结果，不含 secret）
+    "skill_comment_posted",          # 技能详情页发表评论（Issue #3168 D11：detail 含 skill_id/comment_id/字数，不落评论原文）
+    "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
+    "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
 })
 
 

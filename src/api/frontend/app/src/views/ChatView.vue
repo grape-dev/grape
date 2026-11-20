@@ -220,7 +220,35 @@
               :class="['chat-picker-item', { active: isBackendActive(b) }]"
               @click="saveModelConfig(b)"
             >
-              <span class="cv__pop-ic">{{ b.scope === 'local' ? '🖥' : '☁' }}</span>
+              <span class="cv__pop-ic">
+                <svg
+                  v-if="b.scope === 'local'"
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="2" y="4" width="20" height="13" rx="2" />
+                  <path d="M8 21h8M12 17v4" />
+                </svg>
+                <svg
+                  v-else
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+                </svg>
+              </span>
               <span class="cv__pop-name">{{ b.display_name || b.name }}</span>
               <span v-if="isBackendActive(b)" class="cv__pop-cur">
                 {{ t('current_engine') }}
@@ -370,6 +398,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ONBOARD_POLL_MS } from '@/lib/onboard.js'
 
 const G = globalThis
 const uid = Math.random().toString(36).slice(2, 8)
@@ -1291,7 +1320,7 @@ function positionPicker() {
   const btn = document.getElementById(btnId)
   if (!btn) return
   const r = btn.getBoundingClientRect()
-  const W = 280
+  const W = 300
   const vw = G.window.innerWidth || 0
   const vh = G.window.innerHeight || 0
   // 贴按钮上方弹出：left 夹到视口内，bottom 以「按钮顶 - 10px」为基线
@@ -1505,7 +1534,7 @@ function pollOnboardStatus() {
       clearInterval(onboardTimer)
       onboardTimer = null
     }
-  }, 2000)
+  }, ONBOARD_POLL_MS)
 }
 function stopOnboardPoll() {
   if (onboardTimer) {
@@ -1797,66 +1826,99 @@ onMounted(function () {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 上弹起点在按钮上方 → 缩放从底部展开 */
+  transform-origin: 50% 100%;
 }
 .cv__pop-label {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--t3);
-  padding: 8px 14px 6px;
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--t2);
+  padding: 12px 16px 8px;
+  letter-spacing: -0.1px;
 }
 .cv__pop-list {
   flex: 1 1 auto;
   min-height: 0;
-  max-height: 280px;
   overflow-y: auto;
-  padding: 0 6px 6px;
+  padding: 6px;
+  border-top: 1px solid var(--hairline);
+}
+.cv__pop-list::-webkit-scrollbar {
+  width: 8px;
+}
+.cv__pop-list::-webkit-scrollbar-thumb {
+  background: var(--b);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+.cv__pop-list::-webkit-scrollbar-track {
+  background: transparent;
 }
 .cv__pop-hint {
-  padding: 16px;
+  padding: 22px 16px;
   text-align: center;
   color: var(--t3);
   font-size: 12px;
+  line-height: 1.6;
 }
 .cv__pop-ic {
-  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--t3);
 }
 .cv__pop-name {
   flex: 1;
-  font-size: 12px;
+  font-size: 12.5px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .cv__pop-cur {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
   color: var(--a);
+  background: color-mix(in srgb, var(--a) 12%, transparent);
 }
 .cv__scope-tabs {
   display: flex;
-  gap: 4px;
-  margin: 0 14px 8px;
+  gap: 2px;
+  margin: 2px 12px 10px;
+  padding: 3px;
+  background: var(--chip-bg);
+  border-radius: 999px;
 }
 .cv__scope-tab {
   flex: 1;
   padding: 5px 8px;
-  border: 1px solid var(--b);
-  border-radius: 6px;
-  font-size: 11px;
-  background: var(--c);
+  border: none;
+  border-radius: 999px;
+  font-size: 12px;
+  background: transparent;
   color: var(--t2);
   cursor: pointer;
-  transition: all 0.15s;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+.cv__scope-tab:hover {
+  color: var(--t);
 }
 .cv__scope-tab.active {
-  background: var(--a);
-  color: var(--on-accent);
-  border-color: var(--a);
+  background: var(--c);
+  color: var(--t);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 /* 删除气泡（复用 .chat-del-* 壳类） */
 .cv__delpop {

@@ -186,46 +186,50 @@ def test_login_whitelist_empty_denies_all():
 
 
 def test_login_whitelist_empty_warn_banner():
-    """S6：管理面空表红条在位（html 容器 + js 显隐 + i18n 双语键）。"""
-    html = (SRC_ROOT / "api/static/admin.html").read_text(encoding="utf-8")
-    js = (SRC_ROOT / "api/static/js/admin.js").read_text(encoding="utf-8")
-    assert 'id="loginWlEmptyWarn"' in html
-    assert 'data-i18n="admin.login_whitelist.empty_warn"' in html
-    assert "loginWlEmptyWarn" in js
-    assert "_lastLoginWhitelistEnabled && ((_lastLoginWhitelist || []).length === 0)" in js
+    """S6：管理面空表红条在位（Vue 侧 v-if + 双语词条）。"""
+    view = (SRC_ROOT / "api/frontend/app/src/views/AdminView.vue").read_text(encoding="utf-8")
+    assert 'v-if="loginWlEnabled === \'1\' && !loginWl.length"' in view
+    assert "login_whitelist.empty_warn" in view
+    assert ".card.card-warn" in view
     for lang in ("zh", "en"):
-        loc = json.loads((SRC_ROOT / f"api/static/locales/{lang}/admin.json").read_text(encoding="utf-8"))
+        loc = json.loads(
+            (SRC_ROOT / f"api/frontend/shell/locales/{lang}/admin.json").read_text(encoding="utf-8")
+        )
         assert loc["login_whitelist"].get("empty_warn")
+        assert loc["login_whitelist"].get("no_providers")
 
 
 # ───────────────────────── S7 管理面行式渲染 ─────────────────────────
 
 def test_login_whitelist_admin_ui():
-    """S7：admin.html/js 零平台字面量 option/列；下拉动态填充；?v= 已 bump。"""
-    html = (SRC_ROOT / "api/static/admin.html").read_text(encoding="utf-8")
-    js = (SRC_ROOT / "api/static/js/admin.js").read_text(encoding="utf-8")
-    # 下拉零字面量平台 option（选项由 GET /whitelist providers 动态填充）
-    assert 'option value="gitcode"' not in html
-    assert 'option value="github"' not in html
-    assert 'data-i18n="admin.login_whitelist.provider_gitcode"' not in html
+    """S7：管理面行式渲染零平台字面量（Vue 管理台，2026-11-14 迁移后口径）。
+
+    迁移说明：管理台已从 admin.html + admin.js 迁到 Vue（app/src/views/AdminView.vue，
+    产物 static-vue/viewjs/admin-view.js），断言打到 SFC 源码与其缓存版本位。
+    """
+    view = (SRC_ROOT / "api/frontend/app/src/views/AdminView.vue").read_text(encoding="utf-8")
+    i = view.index("login_whitelist.title")
+    block = view[i:view.index("<!-- ===== pwd modal ===== -->", i)]
+    # 下拉零字面量平台 option（选项由 GET /admin/whitelist 的 providers 动态填充）
+    assert 'value="gitcode"' not in block and 'value="github"' not in block
+    assert 'v-for="p in lwProviders"' in block
     # 表头行式化（平台/用户名），双平台列头退役
-    assert 'col_gitcode' not in html and 'col_github' not in html
-    assert 'col_provider' in html and 'col_username' in html
-    # 标题 tag 去双平台字样
-    assert "GitCode/GitHub 登录白名单" not in html
-    # 行式渲染 + 动态下拉 + legacy 删除粒度在位
-    assert "_fillLoginWlProviderSelect" in js
-    assert "_renderLoginWhitelistRows" in js
-    assert "gitcode_username" not in js
-    assert "deleteLoginWhitelist(' + delArg + ')" in js
-    # 缓存版本 bump（只升不降；20261112-2=批次2 卡管理 UI 扩展再 bump）
-    # 版本 bump 只升不降（S43 批次改日期段格式 YYYYMMDD-N）：日期段或同日序号
-    # 任一前进即过——后续批次再 bump 无需改测试（勿写死日期，跨天即红）
+    assert "col_gitcode" not in block and "col_github" not in block
+    assert "col_provider" in block and "col_username" in block
+    # 存量列式条目可见 + 删除按 provider 定向（S11 删除粒度前端口径）
+    assert "providerLabel(w.provider)" in block
+    assert "w.legacy" in block
+    assert "'?provider='" in view
+    # 渠道目录回填 + 空表红条（fail-closed 显性提示）
+    assert "lwProviders.value = d.providers" in view
+    assert "login_whitelist.empty_warn" in view
+    # 缓存版本 bump（只升不降；admin-view.js 入口版本位）
     import re as _re
-    _m = _re.search(r"admin\.js\?v=(\d{8})-(\d+)", html)
-    assert _m, "admin.js 版本号缺失/格式漂移"
-    _date, _seq = int(_m.group(1)), int(_m.group(2))
-    assert (_date, _seq) >= (20261112, 6), "admin.js 版本号回退/未 bump"
+
+    html = (SRC_ROOT / "api/frontend/shell/admin.html").read_text(encoding="utf-8")
+    _m = _re.search(r"admin-view\.js\?v=(\d+)", html)
+    assert _m, "admin-view.js 版本号缺失/格式漂移"
+    assert int(_m.group(1)) >= 18, "admin-view.js 版本号回退/未 bump"
 
 
 # ───────────────────────── S8 改名联动双写 ─────────────────────────

@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 PY=${PY:-venv/bin/python}
-OWNER=docs/weekly-11/table-owner.tsv
+OWNER=configs/table_ownership.json
 BASE=docs/weekly-11/foreign-refs-allowlist.csv
 rc=0
 step() { echo; echo "=== $* ==="; }
@@ -15,7 +15,9 @@ step "R1-R7 架构约束"
 python3 scripts/check-arch.py | tail -2 || rc=1
 
 step "外域表引用棘轮（G4）"
-python3 scripts/foreign_table_refs.py --owner "$OWNER" --baseline "$BASE" --check | tail -2 || rc=1
+# --owner 是 TSV 解析器（按 schema<TAB>table 切行），喂 JSON 会解析出空归属 →
+# 全部按「清零」处理、无条件通过 = 假绿灯。必须用 --owner-json。
+python3 scripts/foreign_table_refs.py --owner-json "$OWNER" --baseline "$BASE" --check | tail -2 || rc=1
 
 step "内部契约快照（P2）"
 python3 scripts/gen_internal_contract.py --check | tail -2 || rc=1

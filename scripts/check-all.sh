@@ -22,6 +22,10 @@ echo "=== Running all contract checks ==="
 "$PY" scripts/check-secrets.py || exit 1
 # Issue #536：危险 DDL 卡点——db_setup.py 新增 DROP/RENAME/MODIFY COLUMN 必须收口
 "$PY" scripts/check-destructive-ddl.py || exit 1
+# Issue #2227：grape CLI 能力漂移卡点——部署线必须支持 `git-repo commits --sha`
+# （按分支/SHA 核验目标分支是否已实现）。无 grape 环境显式 SKIP 不误报；存在但缺
+# `--sha` 时 FAIL 并输出实际版本与缺失项。可用 GRAPE_CLI_BIN 指定被测二进制。
+"$PY" scripts/check_grape_cli_drift.py || exit 1
 # Issue #2462 A3：跨域读查询名闭包——代码引用的 lib 函数与命名查询必须都在
 # 目标域 public 模块的注册面内（lib 开关关闭时这类漂移在测试里不可见，
 # 只会在三库三机切换时以 AttributeError/KeyError 暴露，因此做成静态门禁）。
@@ -74,7 +78,13 @@ fi
 # 语言包内容指纹/cacheVer 单调）与 node 前端用例此前不在本门禁内，导致「check-all exit 0」
 # 掩盖了 head 上真实失败的守卫。此处纳入统一门禁。
 "$PY" -m pytest -q tests/api/test_frontend_cache_version_ratchet.py \
-                      tests/api/test_i18n_locale_cache_ratchet.py || exit 1
+                      tests/api/test_i18n_locale_cache_ratchet.py \
+                      tests/api/test_frontend_bundle_source_ratchet.py || exit 1
+# G-01（QA 第 6 轮守卫轴）：异步阻塞棘轮——db_lock 长扫描会让心跳/claim/complete
+# 一起排队（实测 4 次复发为 nginx 504 + 引擎失联）。此前不在本门禁内，PR #1507
+# 曾以 +28 新增形态绕过所有「守卫全绿」自述。请求路径新增读一律走
+# src/kernel/bulk_read.reader()（免进程锁读通道）。
+"$PY" scripts/check_async_blocking.py || exit 1
 if command -v node >/dev/null 2>&1; then
   _rc=0
   for _f in tests/js/test_*.js; do

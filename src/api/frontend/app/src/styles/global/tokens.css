@@ -67,16 +67,16 @@
    apple-theme.css 里 → 运营台根本没有暗色。现在 index.html / admin.html 同源。
    两个块必须保持一致（改一处改两处）：强制 dark / auto 跟随系统。 */
 :root[data-theme-mode="dark"] {
-  --s: #1a1a1c;
-  --s2: #262628;
-  --s3: #3a3a3c;
-  --bg: #1e1e20;
-  --c: #2c2c2e;
-  --b: #3a3a3c;
-  --b-strong: #48484a;
-  --t: #ffffff;
-  --t2: rgba(235,235,245,.62);
-  --t3: rgba(235,235,245,.55);
+  --s: #202023;
+  --s2: #2a2a2e;
+  --s3: #3e3e42;
+  --bg: #232326;
+  --c: #303033;
+  --b: #3e3e42;
+  --b-strong: #4e4e52;
+  --t: #ececf1;
+  --t2: rgba(235,235,245,.70);
+  --t3: rgba(235,235,245,.62);
   --a: #0a84ff;
   --a-text: #2997ff;
   --ah: #0077ed;
@@ -88,18 +88,18 @@
   --result-fg: #e0e6f0;
   --result-link: #5b9eff;
   --result-code: #b8c2d6;
-  --edge: #3a3a3c;
+  --edge: #3e3e42;
   --hairline: rgba(255,255,255,.10);
-  --hover-row: rgba(255,255,255,.05);
-  --hover-card: rgba(255,255,255,.045);
+  --hover-row: rgba(255,255,255,.06);
+  --hover-card: rgba(255,255,255,.055);
   --hover-accent: rgba(10,132,255,.18);
-  --chip-bg: rgba(255,255,255,.08);
+  --chip-bg: rgba(255,255,255,.09);
   --g-fill: #22873c;
   --on-accent: #fff;
   --scrim: rgba(0,0,0,.5);
-  --glass: rgba(44,44,46,.62);
-  --glass-strong: rgba(58,58,60,.82);
-  --glass-solid: #2c2c2e;
+  --glass: rgba(48,48,51,.62);
+  --glass-strong: rgba(62,62,65,.82);
+  --glass-solid: #303033;
   --glass-blur: 10px;
   --glass-border: rgba(255,255,255,.10);
   --glass-hero: var(--glass);
@@ -108,16 +108,16 @@
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode="auto"] {
-    --s: #1a1a1c;
-    --s2: #262628;
-    --s3: #3a3a3c;
-    --bg: #1e1e20;
-    --c: #2c2c2e;
-    --b: #3a3a3c;
-    --b-strong: #48484a;
-    --t: #ffffff;
-    --t2: rgba(235,235,245,.62);
-    --t3: rgba(235,235,245,.55);
+    --s: #202023;
+    --s2: #2a2a2e;
+    --s3: #3e3e42;
+    --bg: #232326;
+    --c: #303033;
+    --b: #3e3e42;
+    --b-strong: #4e4e52;
+    --t: #ececf1;
+    --t2: rgba(235,235,245,.70);
+    --t3: rgba(235,235,245,.62);
     --a: #0a84ff;
     --ah: #0077ed;
     --g: #30d158;
@@ -128,18 +128,18 @@
     --result-fg: #e0e6f0;
     --result-link: #5b9eff;
     --result-code: #b8c2d6;
-    --edge: #3a3a3c;
+    --edge: #3e3e42;
     --hairline: rgba(255,255,255,.10);
-    --hover-row: rgba(255,255,255,.05);
-    --hover-card: rgba(255,255,255,.045);
+    --hover-row: rgba(255,255,255,.06);
+    --hover-card: rgba(255,255,255,.055);
     --hover-accent: rgba(10,132,255,.18);
-    --chip-bg: rgba(255,255,255,.08);
+    --chip-bg: rgba(255,255,255,.09);
     --g-fill: #22873c;
     --on-accent: #fff;
     --scrim: rgba(0,0,0,.5);
-    --glass: rgba(44,44,46,.62);
-    --glass-strong: rgba(58,58,60,.82);
-    --glass-solid: #2c2c2e;
+    --glass: rgba(48,48,51,.62);
+    --glass-strong: rgba(62,62,65,.82);
+    --glass-solid: #303033;
     --glass-blur: 10px;
     --glass-border: rgba(255,255,255,.10);
     --glass-hero: var(--glass);

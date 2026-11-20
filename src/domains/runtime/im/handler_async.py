@@ -18,6 +18,8 @@ from src.kernel.config import log
 from src.kernel.config import WORKSPACE_DIR, SKILLS_DIR
 from src.domains.runtime.im.channel.card import Card
 
+from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
+
 from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
 
 from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
@@ -85,6 +87,9 @@ _pending_image_desc: dict[str, dict] = {}
 _MAX_INLINE_LEN = 1500
 
 _UPDATE_MIN_INTERVAL = 0.8
+
+# 终态回复正文上限（2026-11-19 由写死的 2000 放宽到 10000，口径见 reply_limits）
+_MAX_REPLY_CHARS = MAX_REPLY_CHARS
 
 def _set_pending_image(chat_id: str, desc: str):
     _pending_image_desc[chat_id] = {"desc": desc, "expires": time.time() + _PENDING_IMAGE_TTL}
@@ -179,7 +184,7 @@ async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: s
       - "sent"：卡片已发出（含渠道降级为文本后发出）；
       - "failed"：有仓库但卡片没发出去 → 调用方必须报"发送失败"，不得说没仓库。
     """
-    from src.domains.mgmt.user.db import get_managed_repos
+    from src.domains.mgmt.public import get_managed_repos
     from src.kernel.repo_key import from_repo_key
     repos = get_managed_repos(uid)
     if not repos:
@@ -392,7 +397,7 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     if not uid or not repo_key:
         return False
     try:
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         repos = get_managed_repos(uid) or []
         return any(r.get("repo_key") == repo_key for r in repos)
     except Exception as e:
@@ -554,10 +559,10 @@ async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding
         await egress.reply_card(ctx, msg_id, "**你没有该仓库的访问权限**")
         return
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.public import get_grape_account_by_id
         _acc = get_grape_account_by_id(uid) or {}
         _uname = _acc.get("username", "")
-        from src.domains.mgmt.routes.autopilot import _dispatch_finding_core
+        from src.domains.mgmt.public import _dispatch_finding_core
         result = await _dispatch_finding_core(exec_id, finding_id, scene_id=scene_id,
                                               user={"id": uid, "username": _uname},
                                               dedup_confirmed=dedup_confirmed,
@@ -849,10 +854,10 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
             # 成功卡片：展示仓库 + 真实会话/Issue 标题（awaiting-notify 优化）
             # 仓库名：repo_key 去掉 provider 前缀（gitcode:/github:）
             _repo_show = str(_rk or "")
-            for _pre in ("gitcode:", "github:", "gitlab:"):
-                if _repo_show.startswith(_pre):
-                    _repo_show = _repo_show[len(_pre):]
-                    break
+            # 前缀剥离走结构化判定（原枚举 gitcode/github/gitlab，gitee 仓会带前缀显示）
+            _idx = _repo_show.find(":")
+            if _idx > 0 and "/" in _repo_show[_idx + 1:]:
+                _repo_show = _repo_show[_idx + 1:]
             # 会话标题：优先 chat_conversations.title（如「Issue #14 · xxx」）；空则回退查 issue.title
             _conv_title = ""
             if cid:
@@ -1356,12 +1361,11 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
         chat_type = parsed.get("chat_type", "")
         if sender_open_id and chat_type == "p2p":
             try:
-                from src.domains.mgmt.user import db as user_db
                 from src.kernel.session_manager import bind_feishu_identity, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     # D32: 从 grape_accounts 读 username + nickname
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     user_row = get_grape_account_by_id(uid)
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
@@ -1396,7 +1400,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     bind_feishu_identity(uid, bind_open_id, feishu_name=feishu_name,
                                                           app_id=ctx.app_id)
                                     _pending_binds.pop(key, None)
-                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 GitCode 账号「{username}」已绑定当前飞书账号。")
+                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 Grape 账号「{username}」已绑定当前飞书账号。")
                                     log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")
                                     return
                                 elif _DENY_RE.match(text.strip()):
@@ -1405,7 +1409,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     return
                                 else:
                                     # 既不是确认也不是否认，重新提示
-                                    await egress.reply_text(ctx, msg_id, f"请问你的 GitCode 昵称是否是「{nickname or username}」？请回复「是」或「不是」。")
+                                    await egress.reply_text(ctx, msg_id, f"请问你的 Grape 账号昵称是否是「{nickname or username}」？请回复「是」或「不是」。")
                                     return
                             else:
                                 # 首次：发确认询问，不直接绑定
@@ -1414,7 +1418,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     "gitcode_nickname": nickname,
                                     "expires": now + _PENDING_TTL,
                                 }
-                                await egress.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 GitCode 账号，请确认：\n你的 GitCode 昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
+                                await egress.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 Grape 账号，请确认：\n你的 Grape 账号昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
                                 return
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
@@ -1630,7 +1634,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
             if has_user_id(user_id) and repo_key:
                 try:
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     _feishu_acc = get_grape_account_by_id(user_id)
                     if _feishu_acc and _feishu_acc.get("username"):
                         # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）
@@ -1830,8 +1834,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     issue_number=(conv or {}).get("issue_number") or "")
                 _direct_env["IM_CHAT_ID"] = chat_id
                 # 用量采集（合并保留双方功能）：审计 2026-10-17 起 IM 直连也要记 token（P2-1 口径 B）
-                from src.domains.insight.observability.master_usage import MasterRun, new_run_id
-                _mu = MasterRun("im", new_run_id("im"), engine=backend, cwd=wsd,
+                from src.domains.insight.public import master_run, new_run_id
+                _mu = master_run("im", new_run_id("im"), engine=backend, cwd=wsd,
                                 session_id=oc_sid,
                                 attr={"repo_key": repo_key, "scene_id": chat_id or "",
                                       "agent_type": "chat", "user_id": int(user_id or 0),
@@ -1960,7 +1964,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            await egress.send_card_to_chat(ctx, chat_id, output[:2000], fallback_open_id=open_id)
+            await egress.send_card_to_chat(ctx, chat_id, output[:_MAX_REPLY_CHARS], fallback_open_id=open_id)
             # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
             #（feishu-web-chat-unified-design.md §3.2）
             # Step 1：带 chat_task_id + 终态 generate_status（2=成功 / 3=失败），

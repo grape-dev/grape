@@ -476,7 +476,8 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
-def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
+def get_pipeline_config(scene_id: str = "default", repo_key: str = "",
+                        use_cache: bool = True) -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.
 
     Resolution priority (Issue #502, aligns docs/new-version3/scene-center-design.md):
@@ -494,11 +495,16 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
     Results are cached at process level (TTL 60s) to eliminate N+1 in _query_tasks
     (P1-B, Issue #357). Write paths (create/update/delete_custom_scene) invalidate
     immediately via invalidate_scene_cache().
+
+    use_cache=False 只给「必须反映此刻真实配置」的调用方用（建单前场景预校验、
+    dev_scene 悬空探测）：缓存是进程级的，双主各自持有，另一台删除/修改场景后
+    60s 窗口内仍会读到旧节点，用缓存做可执行性判定会拿幽灵场景拦单。
     """
     # Check cache first
-    cached, hit = _cache_get(scene_id, repo_key)
-    if hit:
-        return cached
+    if use_cache:
+        cached, hit = _cache_get(scene_id, repo_key)
+        if hit:
+            return cached
 
     scene = None
     fallback = False
@@ -586,7 +592,7 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
     default 兜底）后补查用户个人场景（scene_market scope='user'），避免个人
     场景节点查不到而静默走名字降级（user_id 此前为死参数）。
     """
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    from src.domains.runtime.public import node_matches_agent_role
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     node = None
     if cfg:
@@ -833,6 +839,24 @@ def delete_custom_scene(scene_id: str, repo_key: str):
         db.commit()
     invalidate_scene_cache(scene_id, repo_key)
 
+    # 自检默认场景：仓库 dev_scene 正好指向被删场景 → 清空（回到智能推荐）。
+    # 不清就会留悬空指针：建单预校验 / 派发读到幽灵 id，或回落内置 default
+    # 被其 sre 节点拦死（beta 实测：删场景 17 秒后建单被拦）。
+    try:
+        from src.domains.mgmt.user.db import set_repo_scene
+        _dbr, _lockr = _db()
+        _cur_dev = ""
+        with _lockr:
+            _cr = _dbr.cursor()
+            _cr.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            _rowr = _cr.fetchone()
+            _cur_dev = (_rowr[0] or "") if _rowr else ""
+        if _cur_dev == scene_id:
+            set_repo_scene(repo_key, "")
+            log.info(f"RepoScene: cleared dangling dev_scene={scene_id} for {repo_key}")
+    except Exception as _e:
+        log.warning(f"RepoScene: clear dangling dev_scene failed ({repo_key}/{scene_id}): {_e}")
+
     # 自检推荐配置：清理指向被删场景的规则/兜底
     try:
         from src.kernel.prompt_builder import _sanitize_recommend_config
@@ -926,11 +950,15 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
                              user_id: int = 0) -> dict:
     """Issue #653：解析场景节点的 engine_runtime_ids 绑定状态（空值语义单点收口）。
 
-    返回 {"status": <状态>, "engine_ids": [...]}，status 四态：
+    返回 {"status": <状态>, "engine_ids": [...], "engine_uids": [...]}，status 四态：
     - "no_scene"：场景配置整体不存在（查询失败 / 未创建）
     - "no_node" ：场景存在但无该 agent 节点
-    - "unbound" ：节点存在但 engine_runtime_ids 为空（未配置 → 保持全量广播）
-    - "bound"  ：节点显式配置了非空 engine_runtime_ids（派发硬约束）
+    - "unbound" ：节点存在但引擎绑定字段全空（未配置 → 保持全量广播）
+    - "bound"  ：节点显式配置了非空绑定（ids 或 uids，派发硬约束）
+
+    Issue #1208 读侧（D11/D12）：engine_runtime_uids 非空优先（uid 池路径，ids 忽略
+    ——双非空由保存端拒绝，此处以 uids 为权威防双轨漂移），空则回落 engine_runtime_ids
+    （legacy 只读兼容）。存量 id 节点 uids 恒空 → 读侧行为零变化。
 
     此前 get_scene_engine_ids 对「节点不存在/查询失败」与「未配置」均返回 []，
     派发侧无法区分，已配置节点解析落空时被静默当作未配置回退全局池（#653 根因）。
@@ -939,35 +967,38 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
         cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     except Exception as e:
         log.warning(f"get_scene_engine_binding: scene query failed: {e}")
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     if not cfg:
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     # pipelines.json default 兜底（fallback=True）：请求的 scene_id 未解析到真实场景
     # → 视为 no_scene（Issue #653：不得把兜底 default 节点当作真实绑定语义）
     if cfg.get("fallback"):
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    from src.domains.runtime.public import node_matches_agent_role
     for n in cfg.get("nodes") or []:
         if node_matches_agent_role(n, agent_type):
             node = n
             break
     if node is None:
-        return {"status": "no_node", "engine_ids": []}
-    ids = node.get("engine_runtime_ids") or []
-    if not ids:
-        return {"status": "unbound", "engine_ids": []}
+        return {"status": "no_node", "engine_ids": [], "engine_uids": []}
+    uids = [str(u or "").strip().lower() for u in (node.get("engine_runtime_uids") or [])
+            if str(u or "").strip()]
     out_ids = []
-    for _x in ids:
+    for _x in (node.get("engine_runtime_ids") or []):
         try:
             _xi = int(_x)
         except (TypeError, ValueError):
             continue
         if _xi:
             out_ids.append(_xi)
-    return {"status": "bound", "engine_ids": out_ids}
+    if not uids and not out_ids:
+        return {"status": "unbound", "engine_ids": [], "engine_uids": []}
+    if uids:
+        return {"status": "bound", "engine_ids": [], "engine_uids": uids}
+    return {"status": "bound", "engine_ids": out_ids, "engine_uids": []}
 
 
 def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> list[int]:

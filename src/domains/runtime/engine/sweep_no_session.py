@@ -21,25 +21,37 @@ log = logging.getLogger(__name__)
 NO_SESSION_FAIL_SECONDS = int(os.environ.get("CLAIM_NO_SESSION_FAIL_SECONDS", "90"))
 # 近期有消息说明引擎确实活着，不动它
 RECENT_MESSAGE_ACTIVE_SECONDS = int(os.environ.get("RUNTIME_RECENT_MESSAGE_ACTIVE_SECONDS", "180"))
+# Issue #3353：认领后从未建会话，通常是「认领方被重启/杀掉」而非任务本身失败。
+# 直接判死会让流水线永久停在当前节点（只能外部逐跳重派）；这里先原地回队重派，
+# 超过次数才落 timeout_failed 终态。
+MAX_NO_SESSION_RETRIES = int(os.environ.get("CLAIM_NO_SESSION_MAX_RETRIES", "3"))
 
 FAIL_TXT = ("claimed but the engine session never started "
             "(runtime_session_id empty; the worker never spawned the engine process)")
 
 
 def sweep_claim_without_session_once() -> int:
-    """回收「认领超过阈值仍无引擎会话」的 running 任务，并把事件收敛为 failed。
+    """回收「认领超过阈值仍无引擎会话」的 running 任务：先回队重派，超限再判死。
 
-    返回收敛的任务数。幂等：已被其它路径判终态的行不会被重复处理。
+    Issue #3353：认领后从未建会话的成因是「认领方没起来」（worker 重启/OOM/机器漂移），
+    不是任务内容失败。直接落终态会让流水线永久停在该节点（a2a 对同节点终态任务不会重建
+    task，只能外部逐跳重派）。因此 attempts < MAX_NO_SESSION_RETRIES 时把任务原地回队
+    （status=queued、started_at=NULL、attempts+1、事件回 pending、归还 busy_slot），
+    超过次数才按原逻辑判 failed 并级联事件。
+
+    返回收敛（判死）的任务数；回队重派数在日志里给出。幂等：已终态/已被其它路径处理的
+    行不会被重复处理。
     """
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(seconds=NO_SESSION_FAIL_SECONDS)).isoformat()
     msg_cutoff = (now - timedelta(seconds=RECENT_MESSAGE_ACTIVE_SECONDS)).isoformat()
     fixed = 0
+    retried = 0
     try:
         # 用 sweeper 专用游标（三库拓扑走独立连接），避免与请求路径抢进程级 db_lock
         with _sweep_cursor() as c:
             c.execute(
-                "SELECT t.id, t.runtime_id, t.event_seq FROM agent_tasks t "
+                "SELECT t.id, t.runtime_id, t.event_seq, COALESCE(t.attempts,0) FROM agent_tasks t "
                 "WHERE t.status IN ('running','dispatched') "
                 "AND COALESCE(t.runtime_session_id,'')='' "
                 "AND COALESCE(t.started_at, t.created_at) < ? "
@@ -47,7 +59,35 @@ def sweep_claim_without_session_once() -> int:
                 "                WHERE m.task_id=t.id AND m.created_at > ?)",
                 (cutoff, msg_cutoff))
             rows = c.fetchall()
-            for tid, rid, ev_seq in rows:
+            for tid, rid, ev_seq, attempts in rows:
+                # Issue #3353：先原地回队重派（次数受限），把「认领方没起来」当可恢复故障。
+                # 保留 runtime_id：worker 重启后引擎 id 稳定，可被原引擎重新认领；
+                # 超过重试次数仍无会话 → 落 timeout_failed 终态，交给人工/上层处置。
+                if int(attempts or 0) < MAX_NO_SESSION_RETRIES:
+                    _att = int(attempts or 0) + 1
+                    cur = c.execute(
+                        "UPDATE agent_tasks SET status='queued', attempts=?, started_at=NULL "
+                        "WHERE id=? AND status IN ('running','dispatched')",
+                        (_att, tid))
+                    if not (getattr(cur, "rowcount", 0) or 0):
+                        continue
+                    retried += 1
+                    log.info(f"sweeper: task {tid} claimed without an engine session for "
+                             f">{NO_SESSION_FAIL_SECONDS}s -> requeued "
+                             f"(attempt {_att}/{MAX_NO_SESSION_RETRIES})")
+                    if ev_seq:
+                        try:
+                            c.execute("UPDATE events SET status='pending' "
+                                      "WHERE seq=? AND status IN ('running','pending')", (ev_seq,))
+                        except Exception as _ee:
+                            log.debug(f"sweeper: reset event {ev_seq} to pending failed: {_ee}")
+                    if rid and int(rid) > 0:
+                        try:
+                            from src.domains.runtime.engine.service import release_busy_slot
+                            release_busy_slot(int(rid), cursor=c)
+                        except Exception as _re:
+                            log.debug(f"sweeper: release busy slot {rid} failed: {_re}")
+                    continue
                 cur = c.execute(
                     "UPDATE agent_tasks SET status='failed', exit_code=1, "
                     "result_text=?, completed_at=? "
@@ -77,4 +117,6 @@ def sweep_claim_without_session_once() -> int:
     except Exception as e:
         log.warning(f"sweeper claim-without-session sweep failed: {e}")
         return fixed
+    if retried:
+        log.info(f"sweeper: requeued {retried} claim-without-session task(s) for retry")
     return fixed

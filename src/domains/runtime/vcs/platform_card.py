@@ -546,17 +546,64 @@ def _builtin_raws_from_dir(dir_path: str) -> "dict[str, dict]":
         except Exception as e:
             log.error(f"platform_card: 配置文件解析失败 {path}: {e}（整卡拒绝）")
             continue
-        unknown = set(raw.keys()) - valid_fields
+        # 下划线前缀 = 文档键（JSON 没有注释语法，用 _readme / _fields / _note 承载说明）。
+        # 先剥离说明键再做键集校验与卡构建——说明不会变成能力位，也不会触发"未知键整卡拒绝"。
+        card_raw = {k: v for k, v in raw.items() if not str(k).startswith("_")}
+        unknown = set(card_raw.keys()) - valid_fields
         if unknown:
             log.error(f"platform_card: {provider} 配置文件含未知键 {sorted(unknown)} "
                       f"（合法键=PlatformCard 字段），整卡拒绝——修文件或扩展 Builder")
             continue
         try:
-            build_platform_card(provider, raw)  # 校验预演（非法整卡拒绝）
-            raws[provider] = raw
+            build_platform_card(provider, card_raw)  # 校验预演（非法整卡拒绝）
+            raws[provider] = card_raw
         except PlatformCardError as e:
             log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
     return raws
+
+
+_TABLE_SKIP = {"id", "provider", "source", "config_hash", "created_at", "updated_at", "enabled"}
+# 跨域读原语返回的列（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）
+_PLATFORM_CARD_COLUMNS = (
+    "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
+    "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
+    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
+    "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
+    "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
+    "user_images_base", "brand_color",
+)
+# 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
+
+
+def _raws_from_table() -> dict:
+    """D109：表就绪后从 grape_t_repo_platforms（+caps）构造平台卡 raw。
+
+    未就绪 / 读失败 → 空 dict，调用方保持「meta > 文件 > 代码兜底」原路径。
+    """
+    try:
+        from src.domains.platform.public import is_table_backed
+
+        if not is_table_backed():
+            return {}
+        # 平台对象表归 mgmt 域：拆库拓扑下必须走 mgmt public 原语（lib 命名查询），
+        # 不能在本进程库里 ORM 直读——那是另一份空/陈旧副本（三库四进程守护）。
+        from src.domains.mgmt import public as _mgmt_public
+
+        out: dict[str, dict] = {}
+        # 这里**保留** enabled_only：disabled 平台不用表行覆盖卡，卡仍从
+        # configs/platforms/*.json 解析 → "用户面不提供"不等于"内网不可用"
+        # （方言/host/托管链路还要能工作）。与用户面目录的判据是两件事。
+        for row in _mgmt_public.repo_platform_cards(enabled_only=True):
+            out[str(row.get("provider") or "")] = {
+                col: row.get(col) or ""
+                for col in _PLATFORM_CARD_COLUMNS
+                if col not in _TABLE_SKIP
+            }
+        return {k: v for k, v in out.items() if k}
+    except Exception as e:
+        log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
+        return {}
 
 
 def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
@@ -566,54 +613,77 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
             for p, raw in _builtin_raws_from_dir(dir_path).items()}
 
 
+def _build_cards() -> "dict[str, PlatformCard]":
+    """无锁构建平台卡（meta > 文件 > 代码兜底 > DB 表）。
+
+    2026-11-19：**调用本函数时不得持有 `_cache_lock`**。函数内部经
+    `get_meta_value()` / `_raws_from_table()` 会走到 `runtime.public._any_cursor`，
+    进而拿 `session_manager.db_lock`；而调用方常在已持 db_lock 的路径上进来
+    （如 mgmt.routes.scenes._resolve_repo_key → repo_key_candidates → list_vcs_platforms）。
+    「_cache_lock 里读库」与「db_lock 里读平台卡」反序，就是 2026-11-19 两次
+    全站卡死的 ABBA 死锁（thread dump 实证：一边卡 platform_card.py:620，
+    另一边卡 runtime/public._any_cursor）。
+    """
+    cards: dict[str, PlatformCard] = {}
+    raw_cfg = ""
+    try:
+        from src.domains.mgmt import public as user_db
+        raw_cfg = user_db.get_meta_value("vcs_providers_config") or ""
+    except Exception as e:  # DB 未就绪（测试/启动早期）→ 走默认
+        log.debug(f"platform_card: read meta failed ({e}), using defaults")
+    # S83/D59 优先级链：meta（admin 运行时覆盖）> configs/platforms/ 文件
+    # （内置默认载体，每平台一个文件）> _DEFAULT_CARDS_RAW（代码兜底，
+    # 目录缺失时才用）。
+    # D105-19：meta 对文件卡是【逐键覆盖】——meta 只覆盖它声明的键，缺席键
+    # 落到文件卡值。存量 meta 常是整卡全量 dump（admin UI 保存形态），若做
+    # 整卡替换，代码/文件新增的卡字段（如 webhook_dialect）会被 stale dump
+    # 静默抹掉，导致托管消费侧 fail-closed。显式置空语义不变（键存在即尊重）。
+    if os.path.isdir(_CONFIGS_DIR):
+        _base_raws = _builtin_raws_from_dir(_CONFIGS_DIR)
+    else:
+        log.warning(f"platform_card: 配置目录缺失 {_CONFIGS_DIR}，回退代码内置默认")
+        _base_raws = {p: dict(raw) for p, raw in _DEFAULT_CARDS_RAW.items()}
+    if raw_cfg:
+        try:
+            data = json.loads(raw_cfg)
+            for provider, raw in (data or {}).items():
+                _merged = dict(_base_raws.get(provider) or {})
+                _merged.update(raw or {})
+                _base_raws[provider] = _merged
+        except Exception as e:
+            log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
+    # D109：表就绪后 DB 表为运行时真源——表内 provider 覆盖 meta/文件合并结果；
+    # 文件独有平台仍保留（防表缺行致平台消失）。
+    _tbl_raws = _raws_from_table()
+    if _tbl_raws:
+        for _p, _raw in _tbl_raws.items():
+            _base_raws[_p] = dict(_raw)
+        log.info(f"platform cards from table: {sorted(_tbl_raws)}")
+    cards = {}
+    for provider, raw in _base_raws.items():
+        try:
+            cards[provider] = build_platform_card(provider, raw)
+        except PlatformCardError as e:
+            # meta 合并产物非法：退回纯文件卡（meta 覆盖被拒），不静默丢平台
+            _fb = (_builtin_raws_from_dir(_CONFIGS_DIR).get(provider)
+                   if os.path.isdir(_CONFIGS_DIR) else None)
+            if _fb is not None:
+                log.warning(f"platform_card: {provider} meta 合并卡非法（{e}），回退文件卡")
+                cards[provider] = build_platform_card(provider, _fb)
+            else:
+                log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
+    return cards
+
+
 def _load_cards() -> None:
     global _loaded, _cache_ts
     if _loaded and (time.time() - _cache_ts < _CACHE_TTL):
         return
+    # 构建阶段刻意不持锁：并发重建最多多读一次库（幂等结果），换来
+    # 「_cache_lock 只在换缓存那一瞬持有，且期间绝不碰 DB」——这是消除
+    # 与 session_manager.db_lock 反序死锁的结构性前提（见 _build_cards 注释）。
+    cards = _build_cards()
     with _cache_lock:
-        if _loaded and (time.time() - _cache_ts < _CACHE_TTL):
-            return
-        cards: dict[str, PlatformCard] = {}
-        raw_cfg = ""
-        try:
-            from src.domains.mgmt.user import db as user_db
-            raw_cfg = user_db.get_meta_value("vcs_providers_config") or ""
-        except Exception as e:  # DB 未就绪（测试/启动早期）→ 走默认
-            log.debug(f"platform_card: read meta failed ({e}), using defaults")
-        # S83/D59 优先级链：meta（admin 运行时覆盖）> configs/platforms/ 文件
-        # （内置默认载体，每平台一个文件）> _DEFAULT_CARDS_RAW（代码兜底，
-        # 目录缺失时才用）。
-        # D105-19：meta 对文件卡是【逐键覆盖】——meta 只覆盖它声明的键，缺席键
-        # 落到文件卡值。存量 meta 常是整卡全量 dump（admin UI 保存形态），若做
-        # 整卡替换，代码/文件新增的卡字段（如 webhook_dialect）会被 stale dump
-        # 静默抹掉，导致托管消费侧 fail-closed。显式置空语义不变（键存在即尊重）。
-        if os.path.isdir(_CONFIGS_DIR):
-            _base_raws = _builtin_raws_from_dir(_CONFIGS_DIR)
-        else:
-            log.warning(f"platform_card: 配置目录缺失 {_CONFIGS_DIR}，回退代码内置默认")
-            _base_raws = {p: dict(raw) for p, raw in _DEFAULT_CARDS_RAW.items()}
-        if raw_cfg:
-            try:
-                data = json.loads(raw_cfg)
-                for provider, raw in (data or {}).items():
-                    _merged = dict(_base_raws.get(provider) or {})
-                    _merged.update(raw or {})
-                    _base_raws[provider] = _merged
-            except Exception as e:
-                log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
-        cards = {}
-        for provider, raw in _base_raws.items():
-            try:
-                cards[provider] = build_platform_card(provider, raw)
-            except PlatformCardError as e:
-                # meta 合并产物非法：退回纯文件卡（meta 覆盖被拒），不静默丢平台
-                _fb = (_builtin_raws_from_dir(_CONFIGS_DIR).get(provider)
-                       if os.path.isdir(_CONFIGS_DIR) else None)
-                if _fb is not None:
-                    log.warning(f"platform_card: {provider} meta 合并卡非法（{e}），回退文件卡")
-                    cards[provider] = build_platform_card(provider, _fb)
-                else:
-                    log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
         _CACHE.clear()
         _CACHE.update(cards)
         _loaded = True

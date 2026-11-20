@@ -378,6 +378,22 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # kernel 端口绑定与建表/迁移无关，三库模式同样必须执行：insight 角色
+        # （dashboard 等按 repo_key 取权限的入口）若拿不到 vcs_cards 端口，
+        # repo_key 的平台前缀候选集会退化成空，非默认前缀仓库一律 403。
+        try:
+            from src.api import contracts_wiring as _contracts_wiring
+            _contracts_wiring.bind_all(replace=True)
+        except Exception as _cw:
+            _log.warning(f"three-database mode: kernel port binding failed ({_cw})")
+        # 但本域登记的增量迁移仍要跑：台账（grape_t_schema_migrations）与 DDL 都落在
+        # 本域库，归属守卫保证不会碰别域的表；只有 GRAPE_MIGRATION_OWNER 指定的那个
+        # 进程执行（runtime=event / insight=insight / mgmt 由 init_database 走常规路径）。
+        try:
+            from src.api.db_setup import run_domain_migrations as _run_domain_migrations
+            _run_domain_migrations()
+        except Exception as _mig_err:  # noqa: BLE001
+            _log.warning(f"three-database mode: domain migrations skipped ({_mig_err})")
         try:
             from src.kernel.config import _load_accounts
             _load_accounts()
@@ -531,6 +547,15 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             result["runtimes"] = {"total": total, "online": online}
         except Exception as e:
             result["db_error"] = str(e)
+
+        # Issue #2132 B2/B3: knowledge read cache and truncation counters (hits /
+        # misses / evictions / truncated_files / truncated_batches / size / caps).
+        # Truncation is no longer visible only through warning logs.
+        try:
+            from src.api.knowledge import knowledge_cache_stats
+            result["knowledge_cache"] = knowledge_cache_stats()
+        except Exception as e:
+            result["knowledge_cache"] = {"error": str(e)}
         return result
 
     @app.get("/metrics")
@@ -882,6 +907,20 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp = FileResponse(os.path.join(STATIC_DIR, "oauth-popup-callback.html"))
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def serve_favicon():
+        """页签图标：浏览器/书签直连 /favicon.ico，不能落到 SPA 兜底。
+
+        兜底会把 favicon.ico 当成页面路由返回 200 + index.html，浏览器拿到非图片
+        内容就只能显示默认空白图标（下线前浏览器还爱请求它）。
+        """
+        _fav = os.path.join(STATIC_DIR, "favicon.ico")
+        if not os.path.isfile(_fav):
+            raise HTTPException(status_code=404)
+        resp = FileResponse(_fav, media_type="image/x-icon")
+        resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
     @app.get("/{path:path}")

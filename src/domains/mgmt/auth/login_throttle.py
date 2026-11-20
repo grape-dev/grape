@@ -12,6 +12,7 @@ P1-2 修复：锁定时长独立于统计窗口。
   新实现：锁定时记录 locked_until 时间戳，check_throttle 优先检查 locked_until
   是否在有效期内，而非依赖窗口内计数。
 """
+import calendar
 import time
 
 from src.kernel.session_manager import db, db_lock
@@ -171,8 +172,11 @@ def _get_lock_until(identifier: str, is_ip: bool = False) -> float:
             row = c.fetchone()
             if not row:
                 return None
-            # created_at 格式 "YYYY-MM-DD HH:MM:SS"
-            lock_start = time.mktime(time.strptime(row[0], "%Y-%m-%d %H:%M:%S"))
+            # created_at 格式 "YYYY-MM-DD HH:MM:SS"，入库是 UTC 字符串（见 _now_str），
+            # 必须按 UTC 解析：原用 time.mktime 按本地时区解释，东八区下
+            # lock_until = 失败时间 - 8h + duration，恒在过去 → 锁定永不生效。
+            # Issue #3469 B：改用 calendar.timegm 按 UTC 解析。
+            lock_start = calendar.timegm(time.strptime(row[0], "%Y-%m-%d %H:%M:%S"))
             return lock_start + duration
     except Exception as e:
         log.warning(f"Get lock_until failed: {e}")

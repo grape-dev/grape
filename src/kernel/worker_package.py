@@ -4,7 +4,12 @@
 写入临时文件缓存，代码变更后失效重建。产物由 GET /api/runtime/install/package
 （rta_ 鉴权）下发。
 """
-import hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
+import contextlib, hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
+
+try:
+    import fcntl  # 跨进程构建锁（Windows 无 fcntl → 退化为进程内锁）
+except Exception:  # noqa: BLE001
+    fcntl = None
 
 from src.kernel.config import log
 
@@ -21,6 +26,53 @@ GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev
 # 免编译、自包含）。worker 端 install-worker.sh 在系统无 Python>=3.10 时用包内解释器建 venv。
 UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
 
+# legacy 入口 shim：随包下发，源码不进仓库 src/ 树。
+# 存量设备的 start-worker.sh / systemd unit / 第三方 wrapper 是旧版 install-worker.sh
+# 生成的，命令行里仍固化 `-m src.runtime.agent`（沙箱为 `-m src.runtime.cloud_worker`）。
+# #699 删掉 src/runtime/ 之后，这类设备「换了代码但没重跑安装脚本」一启动就
+# ModuleNotFoundError，现象是设备接入不上（AI devspace 一直等设备）。
+# 仓库树里不能恢复 src/runtime：tests/arch/test_domain_boundaries.py 要求它 import 失败，
+# test_issue_2010_src_top_level_layout.py 禁止 MANIFEST 出现 legacy 顶层路径。
+# 因此 shim 源码放 packaging/legacy-entry-src/，打包时映射成包内 src/runtime/*，
+# 只在设备侧生效；文件变化也进版本指纹，改 shim 会让设备重新拉包。
+LEGACY_ENTRY_SRC = os.path.join(ROOT, "packaging", "legacy-entry-src")
+LEGACY_ENTRY_FILES = (
+    "runtime/__init__.py",
+    "runtime/agent.py",
+    "runtime/cloud_worker.py",
+)
+
+
+def legacy_entry_members() -> list[tuple[str, str]]:
+    """(包内相对路径, 磁盘绝对路径)：legacy 入口 shim 的注入清单。"""
+    out: list[tuple[str, str]] = []
+    for rel in LEGACY_ENTRY_FILES:
+        fp = os.path.join(LEGACY_ENTRY_SRC, rel)
+        if os.path.isfile(fp):
+            out.append((f"src/{rel}", fp))
+    return out
+
+
+def require_legacy_entry_members() -> list[tuple[str, str]]:
+    """取注入清单，缺文件直接抛错（fail-closed）。
+
+    静默打出一个不含 src/runtime/* 的包，等于把「没重跑安装脚本的老设备」判死，
+    而且现象要等到设备换代码时才出现。部署目录漏拷 packaging/ 是真实风险
+    （本仓 clone 曾用 sparse-checkout 只勾 configs/deploy/docs/scripts/src/tests，
+    packaging/ 不在里面），所以宁可打包失败。
+    """
+    members = legacy_entry_members()
+    got = {arc for arc, _ in members}
+    missing = [f"src/{rel}" for rel in LEGACY_ENTRY_FILES if f"src/{rel}" not in got]
+    if missing:
+        raise RuntimeError(
+            "worker_package: legacy 入口 shim 源缺失: " + ", ".join(missing)
+            + f"（源目录 {LEGACY_ENTRY_SRC}）。缺了它打出的包不带 src/runtime/*，"
+            "旧启动脚本（-m src.runtime.agent / cloud_worker）的设备换代码后即 "
+            "ModuleNotFoundError。请检查部署是否漏拷 packaging/。"
+        )
+    return members
+
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
 # 依据：src.domains.runtime.engine.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
 # src/api/ 只列 worker 实际引用的模块：time_utils/event_store/event_archive/
@@ -32,6 +84,10 @@ MANIFEST = [
     # Issue #699: canonical layers only. Legacy top-level shim dirs
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
+    # Issue #2292（同 #2147）: pre-push branch guard imports lock from the canonical
+    # ``src.kernel.lock`` (covered by this entry). 顶层 ``src/lock.py`` 是
+    # ``src/__init__.py`` 一跳别名，不是文件；MANIFEST 不要再加 "src/lock.py"
+    # （加了会在全新 checkout 上打空/报错），旧导入方由别名解析满足。
     "src/kernel/",
     # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。
@@ -69,6 +125,62 @@ MANIFEST = [
 ]
 
 _build_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _crossproc_lock():
+    """跨进程构建互斥。
+
+    mgmt/event/worker/insight 四个进程都会调 build_package()，进程内 threading.Lock
+    挡不住跨进程：多个进程同时写同一个 `PKG_PATH + ".tmp"`，tar 的 gzip 流被交叉
+    写入 → 生成的包截断（实测 `gzip: invalid compressed data--length error`，
+    79MB 的包解不开），worker 下载后安装必失败。
+    这里用 `PKG_PATH + ".lock"` 上的 flock 串行化；Windows 无 fcntl 时退化为无锁
+    （平台主控只跑 Linux，Windows 端只做安装，不会构建包）。
+    """
+    if fcntl is None:
+        yield
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        _fd = os.open(PKG_PATH + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"worker_package: cross-process lock unavailable: {e}")
+        yield
+        return
+    try:
+        fcntl.flock(_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(_fd, fcntl.LOCK_UN)
+        except Exception:  # noqa: BLE001
+            pass
+        os.close(_fd)
+
+
+def _cleanup_stale_tmp() -> None:
+    """删除非当前进程遗留的临时包（`<PKG_PATH>.tmp.<pid>`）。
+
+    构建异常（wheels 下载失败/磁盘满/进程被杀）可能在缓存目录留下临时文件；
+    每次构建入口（已在跨进程锁内）顺带清理其它 pid 的残留，避免无限累积。
+    """
+    try:
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+    prefix = os.path.basename(f"{PKG_PATH}.tmp.")
+    keep = f"{PKG_PATH}.tmp.{os.getpid()}"
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(CACHE_DIR, name)
+        if path == keep:
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _is_excluded_arcname(arcname: str) -> bool:
@@ -131,11 +243,17 @@ def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> No
 def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
 
-    - wheels/ 已含 `grape-*.whl` → 跳过；
-    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），`pip wheel` 产出到 wheels/；
+    - wheels/ 已含 `grape-*.whl` **且** `.grape-cli-built` 标记存在 → 跳过
+      （标记证明该 wheel 是本进程构建的当前快照）；
+    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），清掉旧 grape-*.whl（#896：
+      陈旧 wheel 缓存一旦过期永远过期——同文件名 pip wheel 报错、pip install
+      同版本号不重解压，缺 GRAPE_AUTH_FILE 的旧 CLI 随包下发永不自愈），
+      `pip wheel` 产出到 wheels/ 并写标记；
     - 失败仅告警：安装侧回退在线（现状兜底，不影响包构建）。
     """
-    if any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir)):
+    marker = os.path.join(whl_dir, ".grape-cli-built")
+    have = any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir))
+    if have and os.path.isfile(marker):
         return whl_dir
     src = os.path.join(CACHE_DIR, "grape-cli-src")
     try:
@@ -148,11 +266,22 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
                 _git_retry(["-C", src, "pull", "--ff-only"])
             except Exception:
                 pass  # 更新失败用已有缓存
+        # 重建前先清旧 grape-*.whl（#896）：陈旧 wheel（内容与远端 HEAD 不一致）
+        # 留在 wheels/ 会随包下发并骗过安装端版本判断，不允许存活。
+        # 删除失败仅告警不中断（占用等场景），由后续构建重试收敛。
+        for f in os.listdir(whl_dir):
+            if f.startswith("grape-") and f.endswith(".whl"):
+                try:
+                    os.remove(os.path.join(whl_dir, f))
+                except Exception as e:
+                    log.warning(f"worker_package: failed to remove stale grape wheel {f}: {e}")
         subprocess.run(
             [sys.executable, "-m", "pip", "wheel", "--no-cache-dir", src,
              "--no-deps", "-w", whl_dir],
             check=True, capture_output=True, text=True, timeout=600,
         )
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("built")
         log.info(f"worker_package: grape-cli wheel built into {whl_dir}")
     except Exception as e:
         log.warning(f"worker_package: grape-cli wheel build failed (fallback online install): {e}")
@@ -226,6 +355,14 @@ def _manifest_version() -> str:
                     h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
             except Exception:
                 h.update(b"unreadable")
+    # legacy 入口 shim 也在包内，改了它必须让版本号变（否则设备不会重新拉包）
+    for arc, fp in legacy_entry_members():
+        h.update(arc.encode("utf-8"))
+        try:
+            with open(fp, "rb") as fh:
+                h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+        except Exception:
+            h.update(b"unreadable")
     return h.hexdigest()[:16]
 
 
@@ -426,7 +563,46 @@ WHEEL_PLATFORMS = [
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
 # pip download cannot parse extras from pyproject.toml directly, so we list the worker
 # deps explicitly here. Keep in sync with pyproject.toml [project.optional-dependencies] worker.
-WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24"]
+# [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [project.optional-dependencies] worker 同源
+# （离线 wheels 打包范围）——补 cubesandbox/requests/cryptography，与 install-worker.sh 对齐。
+# [2026-11-18 worker 离线安装事故] 缓存键曾只含 pyproject 内容指纹：升级窗口期旧进程用内存里的
+# 旧 WORKER_DEPS 下载 wheels，却把磁盘上新 pyproject 的指纹写进 .req-hash marker →
+# 重启后 marker 命中，缺 cubesandbox 的 wheels 被永久固化（线上 worker 实证：
+# src 代码已含 cubesandbox 后端，wheels 仍是无 cubesandbox 的 30 个旧包）。
+# 缓存键必须同时纳入 WORKER_DEPS 自身指纹 + 命中路径做依赖完备性校验，缺一个都重下。
+# 2026-11-19：fastapi 进清单——worker 任务路径历史上会经 mgmt.user.db →
+# runtime.public 触发 API 层导入，缺包时任务 `stream failed`。根因已改成
+# TYPE_CHECKING（运行期不再需要），此处仍随包下发：多一层保险，且与
+# pyproject [worker] extra 保持一致（parity 由测试守护）。
+WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24",
+               "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42",
+               "fastapi>=0.110"]
+
+
+def _dep_base_name(dep: str) -> str:
+    """依赖声明 → wheel 文件名里的 dist 基名（去版本约束；PEP 503 归一 - 和 . → _）。"""
+    base = re.split(r"[><=!~;\[ ]", dep, maxsplit=1)[0].strip().lower()
+    return base.replace("-", "_").replace(".", "_")
+
+
+def _missing_dep_wheels(whl_dir: str) -> list[str]:
+    """校验 wheels 目录覆盖 WORKER_DEPS 每个顶层依赖（至少一个同名 wheel），返回缺失清单。
+
+    覆盖两类静默缺口：
+    - 升级窗口期旧进程污染的缓存（marker 键与下载集合失配）；
+    - pip download 单次失败只告警不阻断（_pip_download_wheels 设计如此），
+      依赖缺失无任何硬信号，离线安装端才发现（那时已晚）。
+    """
+    try:
+        names = [f.lower() for f in os.listdir(whl_dir) if f.endswith(".whl")]
+    except Exception:
+        return list(WORKER_DEPS)
+    missing = []
+    for dep in WORKER_DEPS:
+        base = _dep_base_name(dep)
+        if not any(n.startswith(base + "-") for n in names):
+            missing.append(dep)
+    return missing
 
 
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
@@ -452,8 +628,17 @@ def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -
 
 
 def _wheels_cache_key(py_version: str) -> str:
-    """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹（任一变更重新下载）。"""
-    return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}"
+    """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹 + WORKER_DEPS 指纹。
+
+    WORKER_DEPS 指纹入键：键此前只含 pyproject 内容指纹，升级窗口期旧进程
+    （内存里还是旧依赖清单）下载的 wheels 会带着新 pyproject 指纹的 marker
+    骗过重启后的新进程，缺包缓存永久固化（2026-11-18 worker 离线事故，见
+    WORKER_DEPS 上方注释）。依赖清单自身入键后，旧 marker 自然失效触发重下。
+    """
+    h = hashlib.sha256("|".join(sorted(WORKER_DEPS)).encode("utf-8")).hexdigest()[:16]
+    # [:16] = 64bit 指纹宽度：沿用本模块指纹宽度约定（_python_fingerprint 等 [:8]）
+    # 的一族，依赖清单属低频变更面取更宽值，非配置/限额数值。
+    return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}:{h}"
 
 
 def _ensure_wheels(py_version: str = "") -> str:
@@ -478,7 +663,15 @@ def _ensure_wheels(py_version: str = "") -> str:
         pass
     has_whl = any(f.endswith(".whl") for f in os.listdir(WHEELS_DIR))
     if cur == old and has_whl:
-        return WHEELS_DIR
+        # 完备性校验（第二道防线）：marker 命中但依赖 wheel 缺失（旧进程污染 /
+        # 下载静默失败）→ 缓存视为失效，走下方重下路径自愈
+        _missing = _missing_dep_wheels(WHEELS_DIR)
+        if not _missing:
+            return WHEELS_DIR
+        log.warning(
+            f"worker_package: wheels cache hit but missing dep wheels "
+            f"{_missing}, redownloading (stale cache would break offline install)")
+        cur = ""  # 使 marker 比对失效，落进重下逻辑
     dl_py = py_version or f"{sys.version_info.major}.{sys.version_info.minor}"
     log.info(
         f"worker_package: downloading wheels for platforms "
@@ -496,8 +689,18 @@ def _ensure_wheels(py_version: str = "") -> str:
             log.info(f"worker_package: wheels ready for {label}")
         else:
             log.warning(f"worker_package: wheels download failed for {label} (install side will fall back online)")
+    # 下载后完备性校验：缺失项硬告警（此前 pip download 失败完全静默，只在
+    # 离线安装端爆雷）。缺失仍写 marker 防每次全量重试，但告警留痕可发现。
+    _missing = _missing_dep_wheels(WHEELS_DIR)
+    if _missing:
+        log.error(
+            f"worker_package: wheels incomplete after download, missing deps: "
+            f"{_missing} (offline installs of these will fall back online; "
+            f"check PIP_INDEX={PIP_INDEX} reachability)")
     with open(marker, "w", encoding="utf-8") as f:
-        f.write(cur)
+        # heal 路径 cur 被置空仅为绕过短路；写 marker 一律写当前完整键——
+        # 自愈成功后的下一次调用应命中短路，不再多一次全量重下（架构守护观察1）
+        f.write(cur or _wheels_cache_key(py_version))
     return WHEELS_DIR
 
 
@@ -687,7 +890,7 @@ def _cached_pkg_code_version() -> str:
 
 def build_package() -> str:
     """构建安装包并返回路径。缓存命中直接返回；代码变更后重建（原子替换）。"""
-    with _build_lock:
+    with _build_lock, _crossproc_lock():
         os.makedirs(CACHE_DIR, exist_ok=True)
         ver = package_version()
         cur = ""
@@ -714,7 +917,9 @@ def build_package() -> str:
         pythons = _find_pythons()
         ver = package_version(force=True)
 
-        tmp = PKG_PATH + ".tmp"
+        # 唯一临时名：即使锁失效（如 NFS 不认 flock），两个构建也不会互相截断
+        tmp = f"{PKG_PATH}.tmp.{os.getpid()}"
+        _cleanup_stale_tmp()
         members: list = []  # ("arc", bytes) 小文件 / ("arc", path, "path") 大文件流式
         # 内置 Python>=3.10 standalone（按架构分目录，Issue #515；无则靠系统 Python）
         # 依赖 wheels：按 bundle python 版本下载（匹配离线安装）；无 bundle 时按构建机。
@@ -735,72 +940,85 @@ def build_package() -> str:
             log.info(f"worker_package: bundling python per-arch: {sorted(pythons)}")
         else:
             log.warning("worker_package: no python to bundle (system python required on worker)")
-        with tarfile.open(tmp, "w:gz") as tar:
-            # MANIFEST 存在目录/文件重叠（如 src/domains/ 与 src/domains/runtime/engine/），
-            # 按归档名去重，避免同一文件在包内出现两次（SHA256SUMS 校验与安装端解压都需要唯一名）。
-            _seen: set[str] = set()
+        try:
+            with tarfile.open(tmp, "w:gz") as tar:
+                # MANIFEST 存在目录/文件重叠（如 src/domains/ 与 src/domains/runtime/engine/），
+                # 按归档名去重，避免同一文件在包内出现两次（SHA256SUMS 校验与安装端解压都需要唯一名）。
+                _seen: set[str] = set()
 
-            def _add(arc: str, fp: str) -> None:
-                if arc in _seen:
-                    return
-                _seen.add(arc)
-                tar.add(fp, arcname=f"grape-worker/{arc}", filter=_tar_filter)
-                with open(fp, "rb") as fh:
-                    members.append((f"grape-worker/{arc}", fh.read()))
+                def _add(arc: str, fp: str) -> None:
+                    if arc in _seen:
+                        return
+                    _seen.add(arc)
+                    tar.add(fp, arcname=f"grape-worker/{arc}", filter=_tar_filter)
+                    with open(fp, "rb") as fh:
+                        members.append((f"grape-worker/{arc}", fh.read()))
 
-            for item in MANIFEST:
-                path = os.path.join(ROOT, item)
-                if not os.path.exists(path):
-                    continue
-                if os.path.isdir(path):
-                    for root, dirs, files in os.walk(path):
-                        # 与指纹侧同一口径：运行期状态目录/文件不进包（双主 data/ 内容不同会污染包内容）
-                        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIR_NAMES]
-                        for f in sorted(files):
-                            fp = os.path.join(root, f)
-                            if f.endswith(".pyc") or _is_runtime_state_file(root, f):
-                                continue
-                            arc = os.path.relpath(fp, ROOT).replace(os.sep, "/")
-                            _add(arc, fp)
-                else:
-                    arc = item.replace(os.sep, "/")
-                    _add(arc, path)
-            # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
-            # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
-            # 打包路径强制重算（不走 TTL 缓存）：确保版本戳与包内代码一致
-            _code_ver = _compute_worker_code_version()
-            vdata = _code_ver.encode("utf-8")
-            info = tarfile.TarInfo("grape-worker/VERSION")
-            info.size = len(vdata)
-            tar.addfile(info, io.BytesIO(vdata))
-            # wheels 目录（离线依赖）
-            if os.path.isdir(whl_dir):
-                for f in sorted(os.listdir(whl_dir)):
-                    if not f.endswith(".whl"):
+                for item in MANIFEST:
+                    path = os.path.join(ROOT, item)
+                    if not os.path.exists(path):
                         continue
-                    fp = os.path.join(whl_dir, f)
-                    try:
-                        tar.add(fp, arcname=f"grape-worker/wheels/{f}", filter=_tar_filter)
-                        with open(fp, "rb") as fh:
-                            members.append((f"grape-worker/wheels/{f}", fh.read()))
-                    except Exception as e:
-                        log.warning(f"worker_package: add wheel {f} failed: {e}")
-            # 内置 Python 解释器（按架构分目录 python-<arch>/，standalone 免编译；
-            # 含 python 可执行 + stdlib + libpython.so；install-worker.sh 按 uname -m 选目录）
-            for arch in sorted(pythons):
-                py_root = pythons[arch]
-                for r in _python_subset_entries(py_root):
-                    fp = os.path.join(py_root, r)
-                    arc = f"grape-worker/python-{arch}/{r}"
-                    try:
-                        tar.add(fp, arcname=arc, filter=_tar_filter)
-                        if os.path.isfile(fp) and not os.path.islink(fp):
+                    if os.path.isdir(path):
+                        for root, dirs, files in os.walk(path):
+                            # 与指纹侧同一口径：运行期状态目录/文件不进包（双主 data/ 内容不同会污染包内容）
+                            dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIR_NAMES]
+                            for f in sorted(files):
+                                fp = os.path.join(root, f)
+                                if f.endswith(".pyc") or _is_runtime_state_file(root, f):
+                                    continue
+                                arc = os.path.relpath(fp, ROOT).replace(os.sep, "/")
+                                _add(arc, fp)
+                    else:
+                        arc = item.replace(os.sep, "/")
+                        _add(arc, path)
+                # legacy 入口 shim：包内补 src/runtime/*，让旧启动脚本
+                # （`-m src.runtime.agent` / `src.runtime.cloud_worker`）在只剩 canonical
+                # 代码的设备上仍能起来。MANIFEST 不列它（arch 守卫禁止），只在构建期注入。
+                for _arc, _fp in require_legacy_entry_members():
+                    _add(_arc, _fp)
+                # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
+                # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
+                # 打包路径强制重算（不走 TTL 缓存）：确保版本戳与包内代码一致
+                _code_ver = _compute_worker_code_version()
+                vdata = _code_ver.encode("utf-8")
+                info = tarfile.TarInfo("grape-worker/VERSION")
+                info.size = len(vdata)
+                tar.addfile(info, io.BytesIO(vdata))
+                # wheels 目录（离线依赖）
+                if os.path.isdir(whl_dir):
+                    for f in sorted(os.listdir(whl_dir)):
+                        if not f.endswith(".whl"):
+                            continue
+                        fp = os.path.join(whl_dir, f)
+                        try:
+                            tar.add(fp, arcname=f"grape-worker/wheels/{f}", filter=_tar_filter)
                             with open(fp, "rb") as fh:
-                                members.append((arc, fh.read()))
-                    except Exception as e:
-                        log.warning(f"worker_package: add python {arch}/{r} failed: {e}")
-            _write_sha256sums(tar, members)
-        os.replace(tmp, PKG_PATH)
+                                members.append((f"grape-worker/wheels/{f}", fh.read()))
+                        except Exception as e:
+                            log.warning(f"worker_package: add wheel {f} failed: {e}")
+                # 内置 Python 解释器（按架构分目录 python-<arch>/，standalone 免编译；
+                # 含 python 可执行 + stdlib + libpython.so；install-worker.sh 按 uname -m 选目录）
+                for arch in sorted(pythons):
+                    py_root = pythons[arch]
+                    for r in _python_subset_entries(py_root):
+                        fp = os.path.join(py_root, r)
+                        arc = f"grape-worker/python-{arch}/{r}"
+                        try:
+                            tar.add(fp, arcname=arc, filter=_tar_filter)
+                            if os.path.isfile(fp) and not os.path.islink(fp):
+                                with open(fp, "rb") as fh:
+                                    members.append((arc, fh.read()))
+                        except Exception as e:
+                            log.warning(f"worker_package: add python {arch}/{r} failed: {e}")
+                _write_sha256sums(tar, members)
+            os.replace(tmp, PKG_PATH)
+        except BaseException:
+            # 构建失败/中断时清掉本次临时包，避免残留半截 gzip 污染缓存目录
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         with open(VERSION_PATH, "w", encoding="utf-8") as f:
             f.write(ver)
         return PKG_PATH

@@ -168,10 +168,16 @@ function buildSandbox(opts) {
 
   const names = ['currentRepo', '_appPathCtx', '_setCurrentRepoFromDeeplink',
                  '_applyAppPathRepo', '_bootRestore', '_syncAppPath', '_appPathPrefix',
-                 '_syncAppPathToRoot'];
+                 '_syncAppPathToRoot', '_hasVcsBinding'];
   const body = names.map(n => extractFn(appJs, n)).join('\n');
+  // D109 引导门：_bootRestore 现在先判关系（_hasVcsBinding → window.__repoPlatformLinks），
+  // 无关系时清 currentRepo 并 goToRepos。沙箱按 opts.links 注入关系快照。
+  win.__repoPlatformLinks = opts.links === undefined
+    ? { source: 'table', has_any: true }
+    : opts.links;
   const routedFn = 'function _restoreNavAfterLogin() { window.__routed = (window.__routed || 0) + 1; }\n' +
-    'function nav(v, p) { window.__nav = (v || "") + "/" + (p === undefined || p === null ? "" : p); }';
+    'function nav(v, p) { window.__nav = (v || "") + "/" + (p === undefined || p === null ? "" : p); }\n' +
+    'function goToRepos() { window.__wentRepos = (window.__wentRepos || 0) + 1; }';
   const runner = new Function('window', 'GrapeDeepLink', 'sessionStorage', 'localStorage',
     'API', 'I18N', 'showToast', 'REPO_CACHE_KEY', '__routedMark',
     routedFn + '\n' + body + '\nreturn {boot: _bootRestore, apply: _applyAppPathRepo, ' +
@@ -292,6 +298,33 @@ function flush() { return new Promise(r => setImmediate(r)); }
     const env = buildSandbox({ pathname: '/en/app/acme/demo/', hash: '#repos', repos: [] });
     env.api.syncRoot();
     ok(env.calls.replaceState[0] === '/en/#repos', '7h 英文站路径还原保留 /en 前缀');
+  }
+
+  // 7k（D109 引导门，2026-11-14）：关系为空 → 不恢复任何残留仓库，落引导页
+  {
+    const env = buildSandbox({
+      pathname: '/app/acme/demo/', hash: '',
+      repos: [{ full_name: 'acme/demo', owner: 'acme', name: 'demo' }],
+      currentRepo: { fullName: 'acme/demo', repoKey: 'gitcode:acme/demo' },
+      links: { source: 'table', has_any: false, providers: [] },
+    });
+    env.api.boot();
+    await flush();
+    ok(env.win.__wentRepos === 1, '7k 关系为空 → goToRepos（引导页）');
+    ok(env.win.__nav === undefined, '7k 不得凭残留 currentRepo 直接进 dashboard');
+    ok(env.sandbox.sessionStorage.getItem('currentRepo') === null, '7k 残留 currentRepo 已清除');
+  }
+
+  // 7l（D109 引导门）：快照缺失（接口还没回）→ 按无关系处理，不按 identities 猜
+  {
+    const env = buildSandbox({
+      pathname: '/app/acme/demo/', hash: '',
+      repos: [{ full_name: 'acme/demo', owner: 'acme', name: 'demo' }],
+      links: null,
+    });
+    env.api.boot();
+    await flush();
+    ok(env.win.__wentRepos === 1, '7l 快照缺失 → 引导页（不再回落 bindings）');
   }
 
   console.log('结果: ' + pass + ' 通过, 0 失败');

@@ -466,6 +466,12 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
+    # Issue #2225：会话级唯一暂存目录（同一自动化任务每次触发独立目录，避免并发互覆写）。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import inject_session_tmpdir_env
+        inject_session_tmpdir_env(env_extra, f"autopilot-{exec_id}")
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: inject session tmpdir failed: {_tmp_e}")
 
     # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
     # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。
@@ -550,12 +556,17 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     final_text = ""
 
     # 用量采集（审计 2026-10-17）：autopilot DIRECT 模式跑在主控进程里，以前不记 token
-    from src.domains.insight.observability.master_usage import for_task as _master_for_task
+    from src.domains.insight.public import master_usage_for_task as _master_for_task
     _mu = _master_for_task(task_id, backend, cwd=ws, session_id="", seq=exec_id,
                            repo_key=repo_key, agent_type=agent_type,
                            engine_id=int(engine_id or 0))
     _mu.start()
 
+    try:
+        from src.domains.runtime.engine.session_tmpdir import ensure_session_tmpdir
+        ensure_session_tmpdir(env_extra, f"autopilot-{exec_id}")
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: ensure session tmpdir failed: {_tmp_e}")
     try:
         from src.domains.runtime.engine.executor import stream_devops_agent
         for evt_type, data in stream_devops_agent(
@@ -578,6 +589,12 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         final_text = f"执行异常: {e}"
         exit_code = 1
 
+    # Issue #2225：direct 自动化任务结束清理自身暂存目录。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import cleanup_session_tmpdir
+        cleanup_session_tmpdir(env_extra)
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: session tmpdir cleanup failed: {_tmp_e}")
     # 更新 agent_tasks 状态（用 task_id 精确更新）
     _finalize_autopilot_task(task_id, exec_id, exit_code, final_text)
     # 用量落台账：放在任务终态之后（引擎已退出、账本已落盘），失败只打日志
@@ -627,30 +644,51 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 广播模式设 pool_tag
     _pool_tag = agent_type if engine_id == 0 else ""
 
-    # 任务级引擎限定：task 有 engine_runtime_ids 时用它限定广播范围
+    # 任务级引擎限定：uid 模式（engine_runtime_uids 非空）优先 → uid 池路径；
+    # legacy id 路径（engine_runtime_ids）行为不变——三分支判据不混装（Issue #1011）
     # Issue #259：写入前按健康过滤（复用 engine_select 的 _engines_by_ids + _health_ok）
     _pool_engine_ids = ""
     if engine_id == 0:
-        _task_engine_ids = task.get("engine_runtime_ids") or ""
-        if _task_engine_ids:
+        _task_engine_uids = task.get("engine_runtime_uids") or ""
+        if _task_engine_uids:
             try:
-                _raw_ids = json.loads(_task_engine_ids) if isinstance(_task_engine_ids, str) else _task_engine_ids
-                if isinstance(_raw_ids, list) and _raw_ids:
-                    from src.domains.runtime.engine.engine_select import _engines_by_ids, _health_ok, load_engine_selection, _norm_repo
-                    _members = _engines_by_ids([int(x) for x in _raw_ids if str(x).strip().isdigit()],
-                                               _norm_repo(repo_key), load_engine_selection())
-                    _healthy_ids = [m["runtime_id"] for m in _members if _health_ok(m)]
-                    if _healthy_ids:
-                        _pool_engine_ids = json.dumps(_healthy_ids)
-                        log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
+                _raw_uids = json.loads(_task_engine_uids) if isinstance(_task_engine_uids, str) else _task_engine_uids
+                if isinstance(_raw_uids, list) and _raw_uids:
+                    from src.domains.runtime.engine.engine_select import _engines_by_uids, _health_ok, _norm_repo
+                    _members = _engines_by_uids([str(u).strip() for u in _raw_uids if str(u).strip()],
+                                                _norm_repo(repo_key))
+                    _healthy = [m for m in _members if _health_ok(m)]
+                    if _healthy:
+                        _pool_engine_ids = json.dumps([m["runtime_id"] for m in _healthy])
+                        log.info(f"Autopilot exec {exec_id}: task 级限定（uid 模式）engines={_pool_engine_ids}")
                     else:
-                        # 方案A：任务级引擎全灭 → 明确报错，不广播
-                        log.warning(f"Autopilot exec {exec_id}: task engines {_raw_ids} all offline (Issue #259)")
+                        log.warning(f"Autopilot exec {exec_id}: task engines(uid) {_raw_uids} all offline (Issue #1011)")
                         _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
                         return
             except Exception as _pe:
-                log.warning(f"Autopilot exec {exec_id}: parse engine ids failed: {_pe}")
+                log.warning(f"Autopilot exec {exec_id}: parse engine uids failed: {_pe}")
                 _pool_engine_ids = ""
+        else:
+            _task_engine_ids = task.get("engine_runtime_ids") or ""
+            if _task_engine_ids:
+                try:
+                    _raw_ids = json.loads(_task_engine_ids) if isinstance(_task_engine_ids, str) else _task_engine_ids
+                    if isinstance(_raw_ids, list) and _raw_ids:
+                        from src.domains.runtime.engine.engine_select import _engines_by_ids, _health_ok, load_engine_selection, _norm_repo
+                        _members = _engines_by_ids([int(x) for x in _raw_ids if str(x).strip().isdigit()],
+                                                   _norm_repo(repo_key), load_engine_selection())
+                        _healthy_ids = [m["runtime_id"] for m in _members if _health_ok(m)]
+                        if _healthy_ids:
+                            _pool_engine_ids = json.dumps(_healthy_ids)
+                            log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
+                        else:
+                            # 方案A：任务级引擎全灭 → 明确报错，不广播
+                            log.warning(f"Autopilot exec {exec_id}: task engines {_raw_ids} all offline (Issue #259)")
+                            _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
+                            return
+                except Exception as _pe:
+                    log.warning(f"Autopilot exec {exec_id}: parse engine ids failed: {_pe}")
+                    _pool_engine_ids = ""
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 
@@ -659,7 +697,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     _skill_id = 0
     if skill_name:
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id
+            from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
             _skill_id = resolve_skill_id(skill_name, repo_key=repo_key,
                                          user_id=task.get("created_by") or 0)
             if not _skill_id:
@@ -1023,7 +1061,14 @@ def _get_enabled_tasks() -> list[dict]:
     from src.domains.mgmt import public as _mgmt_public
     rows = _mgmt_public.list_enabled_autopilot_tasks_any()
     tasks = []
+    skipped: list[str] = []
     for r in rows:
+        # 指令为空的任务不能派发：创建端已经拒收空指令（mgmt 路由 instruction_not_empty），
+        # 但存量行（历史数据/直接改库）仍然 enabled，调度器不拦的话会按 cron 反复生成
+        # 空壳 execution 与空壳 agent_task（实测每 30 分钟一次，且执行必然空转失败）。
+        if not (r[4] or "").strip():
+            skipped.append(f"{r[0]}({r[1]})")
+            continue
         tasks.append({
             "id": r[0], "name": r[1], "repo_key": r[2],
             "agent_type": r[3], "instruction": r[4], "skill_name": r[5],
@@ -1031,7 +1076,13 @@ def _get_enabled_tasks() -> list[dict]:
             "engine_runtime_ids": r[9] if len(r) > 9 else "",
             "custom_fields": r[10] if len(r) > 10 else "",
             "work_branch": r[11] if len(r) > 11 else "",
+            # Issue #1011 姊妹字段：uid 绑定（非空优先，ids legacy 只读回落）
+            "engine_runtime_uids": r[12] if len(r) > 12 else "",
         })
+    if skipped:
+        log.warning(
+            f"Autopilot: skipped {len(skipped)} enabled task(s) with empty instruction: "
+            f"{', '.join(skipped)}（补齐指令或停用后再派发）")
     return tasks
 
 def _is_cron_due(cron_expr: str, last_run: str) -> bool:
@@ -1289,6 +1340,11 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
 async def _execute_task(task: dict):
     """执行单个 autopilot 任务（含重试逻辑）。"""
     task_id = task["id"]
+    if not (task.get("instruction") or "").strip():
+        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并留痕，
+        # 不要建 execution/agent_task 再在 agent 侧空转（见 _get_enabled_tasks 同名守卫）。
+        log.warning(f"Autopilot: task {task_id} has empty instruction, refuse to dispatch")
+        return
     if task_id in _RUNNING_TASKS:
         log.info(f"Autopilot: task {task_id} already running, skip")
         return
@@ -1757,6 +1813,8 @@ async def trigger_task_now(task_id: int) -> dict:
         "engine_runtime_ids": row[9] if len(row) > 9 else "",
         "custom_fields": row[10] if len(row) > 10 else "",
         "work_branch": row[11] if len(row) > 11 else "",
+        # Issue #1011 姊妹字段：uid 绑定（非空优先）
+        "engine_runtime_uids": row[12] if len(row) > 12 else "",
     }
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}

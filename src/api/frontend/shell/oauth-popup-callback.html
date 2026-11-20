@@ -33,6 +33,18 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
   // 构建回传给父窗口的结果——不包含 access_token / binding_ticket 等敏感凭证
   var result = {type: 'oauth_result'};
 
+  function safeDecode(v) {
+    // P0-3（Issue #3054）：decodeURIComponent 对含裸 % 的值抛 URIError
+    // （?oauth_error=100%25），抛出会把整页卡在 Processing。
+    // 失败按“参数无效”处理，不中断初始化。
+    if (v === null || v === undefined) return '';
+    try {
+      return decodeURIComponent(String(v).replace(/\+/g, ' '));
+    } catch (e) {
+      return 'invalid_param';
+    }
+  }
+
   var bindSuccess = params.get('bind_success');
   var bindError   = params.get('bind_error');
   var needTransfer = params.get('need_transfer');
@@ -48,7 +60,7 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
   } else if (bindError) {
     result.action = 'bind';
     result.success = false;
-    result.error = decodeURIComponent(bindError.replace(/\+/g, ' '));
+    result.error = safeDecode(bindError);
   } else if (needTransfer) {
     // 不传 binding_ticket——父窗口用 JWT 调 GET /auth/transfer-context 获取
     result.action = 'bind';
@@ -62,7 +74,7 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
   } else if (oauthError) {
     result.action = 'login';
     result.success = false;
-    result.error = decodeURIComponent(oauthError.replace(/\+/g, ' '));
+    result.error = safeDecode(oauthError);
   } else if (oauthAssociate) {
     result.action = 'login';
     result.success = false;
@@ -150,11 +162,12 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
         'delete_mismatch':    '注销认证用户不匹配 / Delete auth user mismatch',
         'WHITELIST':          '用户不在白名单中 / User not in whitelist',
         'account_not_found':  '账号不存在 / Account not found',
-        'account_disabled':   '账号已被禁用 / Account disabled'
+        'account_disabled':   '账号已被禁用 / Account disabled',
+        'invalid_param':      '授权回调参数无效 / Invalid callback parameter'
       };
       function friendlyError(code) {
         if (!code) return '';
-        // WHITELIST 错误格式为 WHITELIST:provider:login
+        // WHITELIST 错误格式为 WHITELIST:provider（P0-1 起不再夹带第三方 login）
         if (code.indexOf('WHITELIST') === 0) return ERROR_MESSAGES['WHITELIST'];
         return ERROR_MESSAGES[code] || code;
       }

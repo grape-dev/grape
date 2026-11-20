@@ -1,6 +1,7 @@
 """Agent 路由：详情、配置、类型元数据"""
 
 import json
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 
@@ -22,10 +23,18 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 
 def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
-    """更新当前场景 node 的 engine_runtime_ids。
+    """更新当前场景 node 的引擎绑定（Issue #1208 D11：一律写 uids 清 ids）。
 
-    查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node 的 engine_runtime_ids。
+    查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node：
+    - engine_runtime_ids（数字）→ 服务端透明升格解析 engine_uid → 写
+      engine_runtime_uids + 清空 engine_runtime_ids + 清空 engine_selector
+      （三模式互斥，保存引擎清单即离开标签模式）；
+    - uid 解析失败（悬空/未迁移）→ 降级保留 ids 形态（不猜不静默，detach 链负责清理）。
     方案 B：场景只与仓库关联，无 official/user fork 逻辑。
+
+    Issue #1208 v2 审查整改：返回 ("", False)（场景不存在/未更新）或
+    (scene_id, had_selector)——had_selector=True 表示本次保存覆盖了原标签(selector)
+    模式（显式模式切换），调用方须在响应带 cleared_selector 警告。
     """
     from src.kernel.session_manager import db, db_lock
     from src.api.pipeline_config import _query_scene_by_id, update_custom_scene
@@ -41,22 +50,40 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
     except Exception:
         pass
     if not scene_id:
-        return
+        return "", False
     # 查场景
     scene_info = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not scene_info:
-        return
-    # 更新 node 的 engine_runtime_ids
+        return "", False
+    # 数字 id → engine_uid（透明升格，D11；悬空项置 None，全部可解析才升格）
+    _uids = []
+    try:
+        from src.domains.mgmt.user.db import get_engine_uid_by_runtime_id
+        _uids = [get_engine_uid_by_runtime_id(int(x)) for x in (engine_ids or [])]
+    except (TypeError, ValueError):
+        _uids = []
+    _all_resolved = bool(engine_ids) and all(_uids)
+    # 更新 node 的引擎绑定
     nodes = scene_info.get("nodes", [])
     updated = False
+    had_selector = False
     for node in nodes:
         if (node.get("tag") or node.get("id", "")) == agent_type:
-            node["engine_runtime_ids"] = engine_ids
+            _sel = node.get("engine_selector") or {}
+            had_selector = bool(isinstance(_sel, dict) and _sel.get("tags"))
+            if _all_resolved:
+                node["engine_runtime_uids"] = [str(u).strip().lower() for u in _uids if u]
+                node["engine_runtime_ids"] = []
+            else:
+                node["engine_runtime_ids"] = list(engine_ids or [])
+                node["engine_runtime_uids"] = []
+            node["engine_selector"] = {}
             updated = True
             break
     if updated:
         update_custom_scene(
             scene_id=scene_id, repo_key=repo_key, nodes=nodes)
+    return scene_id, had_selector
 
 async def _remove_vod_bot(app_id: str) -> None:
     """从 BotManager 移除 VOD bot（仅在该 app_id 已释放、无其他仓库引用时调用）。"""
@@ -91,8 +118,8 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     released = False
     try:
-        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-        conn = _connect(default_db_path())
+        from src.domains.runtime.public import im_db_connection
+        conn = im_db_connection()
         try:
             released = int(conn.execute(
                 "SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? "
@@ -126,7 +153,7 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
     try:
-        from src.domains.runtime.im.engine_wiring import revoke_installation
+        from src.domains.runtime.public import revoke_installation
         if revoke_installation("repo", repo_key=repo_key, app_id=old_app_id):
             log.info(f"VOD IM: grape_t_channel_installation revoked for {repo_key}")
     except Exception as e:
@@ -244,7 +271,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             # 会话 token 列按 provider 从端口派生（模块/卡 session_token_field 能力位）
             from src.kernel.token_resolver import create_provider
             _token_col = create_provider(_provider).session_token_field()
-            row = _rt_agents.agent_session_row(_repo_keys, name, _token_col)
+            # 走 provider（GSB，mgmt → runtime）；失败回落 owner 域原语
+            try:
+                from src.kernel.gsb.provider import get_service as _gs
+                row = _gs("runtime").get_agent_session_row(_repo_keys, name, _token_col)
+            except Exception as _ge:  # noqa: BLE001
+                log.debug(f"agents: provider agent_session_row failed, fallback: {_ge}")
+                row = _rt_agents.agent_session_row(_repo_keys, name, _token_col)
             if row:
                 backend_name = ""
                 instance_name_val = ""
@@ -262,7 +295,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                         if brow[1]:
                             _d = _rt_agents.read_one_any("credential_device_name", (brow[1],))
                             _dev = _d[0] if _d else ""
-                        from src.domains.runtime.engine.instances import instance_name
+                        from src.domains.runtime.public import instance_name
                         instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
                 _sub_evts = []
                 try:
@@ -296,7 +329,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             vod_bot_connected = bool(_vod_app_id)
 
         try:
-            for r in _rt_agents.event_status_counts(_repo_keys, name):
+            try:
+                from src.kernel.gsb.provider import get_service as _gs2
+                _cnts = _gs2("runtime").get_event_status_counts(_repo_keys, name)
+            except Exception as _ge2:  # noqa: BLE001
+                log.debug(f"agents: provider event_status_counts failed, fallback: {_ge2}")
+                _cnts = _rt_agents.event_status_counts(_repo_keys, name)
+            for r in _cnts:
                 event_stats[r[0]] = r[1]
         except Exception:
             pass
@@ -305,8 +344,16 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         # 事件检索（keyword LIKE 条件在 owner 域构造）：一次调用拿 (total, rows)
         _rows_ev: list = []
         try:
-            events_total, _rows_ev = _rt_agents.events_search(
-                _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
+            try:
+                from src.kernel.gsb.provider import get_service as _gs3
+                _ev = _gs3("runtime").search_events(
+                    _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
+                events_total = int(_ev.get("total") or 0)
+                _rows_ev = list(_ev.get("rows") or [])
+            except Exception as _ge3:  # noqa: BLE001
+                log.debug(f"agents: provider search_events failed, fallback: {_ge3}")
+                events_total, _rows_ev = _rt_agents.events_search(
+                    _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
         except Exception as e:
             log.warning(f"agent events search failed (keyword={keyword!r}): {e}")
             events_total = 0
@@ -342,7 +389,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     pool = []
     _eids = []  # Issue #524: 场景声明引擎集合（声明配置），供 declared/effective 区分
     try:
-        from src.domains.runtime.engine.instances import instance_name
+        from src.domains.runtime.public import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.kernel.session_manager import db, db_lock
         # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
@@ -406,7 +453,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
-            from src.domains.runtime.engine.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
+            from src.domains.runtime.public import _engines_by_ids, load_engine_selection, _norm_repo
             _cfg = load_engine_selection()
             _repo = _norm_repo(repo_key)
             pool = _engines_by_ids(_eids, _repo, _cfg)
@@ -433,7 +480,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                             (_dev_scene, *_repo_keys))
                 _sr = _sc.fetchone()
             if _sr:
-                from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+                from src.domains.runtime.public import get_detached_engine_hints
                 detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
     except Exception as _de:
         log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
@@ -498,7 +545,9 @@ def clean_agent_session(name: str, owner: str, repo: str,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
     from src.kernel.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    # 前缀按 managed_repos 解析（裸 to_repo_key 恒 gitcode:，gitee/github 托管仓会落到错行）
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
     from src.kernel.session_manager import db, db_lock
@@ -535,7 +584,9 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
     from src.kernel.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    # 前缀按 managed_repos 解析（裸 to_repo_key 恒 gitcode:，gitee/github 托管仓会落到错行）
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
@@ -565,8 +616,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             app_secret = str(_inst_cfg.get("app_secret", "") or "")
         if app_secret:
             # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
-            from src.domains.runtime.im.engine_wiring import _connect as _ew_connect, default_db_path as _ew_db_path
-            _conn = _ew_connect(_ew_db_path())
+            from src.domains.runtime.public import im_db_connection as _ew_db_conn
+            _conn = _ew_db_conn()
             try:
                 _holders = _conn.execute(
                     "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
@@ -602,15 +653,27 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         # 旧 IM（BotManager）已下线：解绑后由新引擎下一轮扫描（≤30s）让渡，无需手工摘 bot
         return {"message": "Agent 配置已更新", "session_id": session_id}
 
+    # Issue #1208 v2 审查整改：engine_selector 仅在显式模式切换时清除（见引擎配置分支）
+    _cleared_selector = False
     # ---- 引擎配置：写入场景 node 的 engine_runtime_ids ----
     # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
     # 无场景则为空（全广播/兜底）。
     if body.backends is not None:
-        from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+        from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
         from src.domains.mgmt.user.db import get_runtime_id_by_name
         rids = []
         for bn in body.backends:
-            # 优先按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
+            # Issue #646：优先按 uid 字符串解析（服务端校验 fail-fast）；
+            # 其次按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
+            from src.kernel.engine_uid import is_uid_str
+            if isinstance(bn, str) and is_uid_str(bn.strip()):
+                from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+                _rid = get_runtime_id_by_engine_uid(bn.strip().lower())
+                if not _rid:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "message": f"引擎 uid 无效: {bn.strip()}（请从引擎详情面板复制有效 uid）"})
+                rids.append(_rid)
+                continue
             _rid = None
             try:
                 _rid = int(bn)
@@ -635,9 +698,44 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             if not _rid:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知引擎: {bn}"})
             rids.append(_rid)
+        # Issue #1208 v2 审查整改：engine_selector 只允许显式模式切换清除——
+        # 空清单保存（backends=[]）且节点当前处于标签(selector)模式 → 拒绝 400
+        # （避免把 selector 模式静默清成全广播）；非空清单保存 = 显式离开标签模式，
+        # 清空合法但响应必须带 cleared_selector 警告。
+        if not rids:
+            try:
+                from src.api.pipeline_config import get_pipeline_config
+                # G-01（A6）：async 路由内同步读经 to_thread——dev_scene 单行
+                # fetchone 读持 db_lock 会卡事件循环（守卫实测该形态复发四次）
+                def _fetch_dev_scene_row(_rk):
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+                    with _sdl:
+                        _c1 = _sdb.cursor()
+                        _c1.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (_rk,))
+                        return _c1.fetchone()
+                _dev_scene_row = await asyncio.to_thread(_fetch_dev_scene_row, repo_key)
+                _ds = (_dev_scene_row[0] if _dev_scene_row else "") or ""
+                if _ds:
+                    _pc = get_pipeline_config(_ds, repo_key=repo_key)
+                    if _pc and not _pc.get("fallback"):
+                        for _n in _pc.get("nodes") or []:
+                            if (_n.get("tag") or _n.get("id", "")) == name:
+                                _sv = _n.get("engine_selector") or {}
+                                if isinstance(_sv, dict) and _sv.get("tags"):
+                                    raise HTTPException(status_code=400, detail={
+                                        "code": 400, "message": (
+                                            "该 Agent 当前为标签(selector)模式，空引擎清单保存会静默离开标签模式"
+                                            "（变为全广播）——请改为显式选择引擎清单，或在场景编辑中调整/清除标签后重试"
+                                            "（Issue #1208）")})
+                                break
+            except HTTPException:
+                raise
+            except Exception as _pre_e:
+                log.warning(f"Agent engine config: selector mode precheck failed: {_pre_e}")
         # 更新场景 node 的 engine_runtime_ids
         try:
-            _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
+            _, _had_sel = _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
+            _cleared_selector = bool(_had_sel)
         except Exception as e:
             log.warning(f"Agent engine config: update scene node failed: {e}")
         # 引擎绑定真实性同步 §4.3：场景侧重绑 → 该 (场景, 节点) 的解绑审计标记 rebound，
@@ -687,7 +785,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name
-            from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+            from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
             # runtime_id：优先按 backends 集合首项解析；其次 body.backend；否则按类型名兜底
             _backend_for_rid = body.backend
             if not _backend_for_rid and body.backends:
@@ -767,7 +865,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # config，请求内生效不依赖扫描窗口），new 模式下自动反向回写 legacy 双轨表。
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
+            from src.domains.runtime.public import revoke_installation, sync_installation
             if sync_installation("repo", repo_key=repo_key, app_id=body.im_app_id,
                                         app_secret=app_secret):
                 log.info(f"VOD IM: grape_t_channel_installation synced for {repo_key}")
@@ -786,12 +884,18 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         except Exception as e:
             log.warning(f"VOD IM: sync grape_t_channel_installation failed: {e}")
 
+    # Issue #1208 v2 审查整改：显式模式切换（保存引擎清单覆盖标签模式）→ 响应带警告
+    if _cleared_selector:
+        return {"message": (
+                    "Agent 配置已更新（原标签(selector)模式已被引擎清单保存覆盖，"
+                    "engine_selector 已清空——如需标签模式请在场景编辑中重新配置标签，Issue #1208）"),
+                "session_id": session_id, "cleared_selector": True}
     return {"message": "Agent 配置已更新", "session_id": session_id}
 
 def _active_repo_installation(repo_key: str) -> dict:
     """仓库轨 active 的 IM 安装（A2 收尾后 VOD 凭证真相源；无则 {}）。"""
     try:
-        from src.domains.runtime.im.engine_wiring import get_active_installation
+        from src.domains.runtime.public import get_active_installation
         return get_active_installation("repo", repo_key=repo_key) or {}
     except Exception as e:
         log.warning(f"VOD IM: read installation failed: {e}")

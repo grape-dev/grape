@@ -80,11 +80,45 @@ class Supervisor:
         self._task: Optional[asyncio.Task] = None
         self._run_tasks: dict[str, asyncio.Task] = {}   # inst_id → 连接循环任务（stop 收敛用）
         self._running = False
+        # 配置保存后打断「等 30s 扫描」的唤醒闸（kick）：Event 在 loop 内等，
+        # 保存接口在任何线程都能唤醒（call_soon_threadsafe 兜底）。
+        self._wake = asyncio.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # inst_id → 已并入 metrics 的渠道侧接管计数（软处理事件后仍要可观测，A13）
+        self._takeover_seen: dict[str, int] = {}
         self.instances: list = [instance_id]  # 扫描前由 list_active_instances 刷新
 
     async def start(self) -> None:
         self._running = True
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._task = asyncio.get_running_loop().create_task(self._scan_loop())
+
+    def kick(self) -> bool:
+        """立刻打断扫描等待（凭证保存/解绑后秒级建连或让渡，不等 30s 窗口）。
+
+        同步、绝不抛：Event.set 必须在持有 loop 的线程上执行，跨线程走
+        call_soon_threadsafe；loop 未起（start 前）或已停 → 留待自然扫描。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._wake.set()
+            log.info("[supervisor] scan kicked (config change)")
+            return True
+        try:
+            loop.call_soon_threadsafe(self._wake.set)
+            log.info("[supervisor] scan kicked (config change, cross-thread)")
+            return True
+        except RuntimeError:
+            return False
 
     async def stop(self) -> None:
         """A7：stop → release_all + 入口 _running 检查。"""
@@ -120,12 +154,22 @@ class Supervisor:
                 # 一直没被建连，日志里连一行都没有——异常在这里被 pass 吞掉了，
                 # 排查只能靠猜）。记栈 + 退避后下一轮继续。
                 log.warning("[supervisor] scan round failed: %s", exc, exc_info=True)
-            await asyncio.sleep(self._scan_interval)
+            # 等下一轮，但配置保存（kick）可以立刻打断：否则新保存的凭证最多要等
+            # 一整个扫描窗口才建连（企微首条通知就撞上 "long connection is not
+            # established"）。Event 语义：被 kick → 立即下一轮；否则睡满窗口。
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self._scan_interval)
+                # 只在真被唤醒时清位：避免清了之后 kick 恰好落在 wait 之前被吃掉
+                # （多扫一轮无副作用，漏掉一次 kick 就是 30s 窗口）。
+                self._wake.clear()
+            except asyncio.TimeoutError:
+                log.debug("[supervisor] scan window elapsed (%.0fs)", self._scan_interval)
 
     async def _scan_once(self) -> None:
         if not self._running:
             return
         self._refresh_instances()
+        self._sync_channel_counters()
         await self._renew_held_leases()
         installations = await self._provider()
         ring = build_ring(self.instances)
@@ -297,6 +341,44 @@ class Supervisor:
                 self._run_tasks.pop(_inst_id, None)
 
         task.add_done_callback(_done)
+
+    def channel_for(self, inst_id: str):
+        """取某安装当前活着的渠道（未建连/已让渡 → None）。
+
+        装配层要按渠道发消息时走这里 + `Channel.send()`（公开契约），
+        不要再读 `_channels[...][0]._sender` 这类私有属性（架构审查 A8）。
+        """
+        entry = self._channels.get(str(inst_id or ""))
+        if not entry:
+            return None
+        return entry[0] if isinstance(entry, tuple) else entry
+
+    def _sync_channel_counters(self) -> None:
+        """把渠道侧自计数并入既有 flap 归因桶（架构审查 A13）。
+
+        企微 `disconnected_event` 被软处理（保留 socket、不重连）后不再走
+        `except ChannelError` 路径，`reconnects`/`flap_by_cause` 会归零 ——
+        「同一个 bot 被别的会话持续顶掉」会变成完全不可见的静默失效。
+        渠道只暴露累计只读计数（`takeover_count`），归因仍由本层写入既有桶，
+        保持"指标只有一个写入方"的分层；按增量记账，渠道重建后计数归零也不会重复计。
+        """
+        if self._metrics is None:
+            return
+        for inst_id, entry in list(self._channels.items()):
+            channel = entry[0] if isinstance(entry, tuple) else entry
+            try:
+                current = int(getattr(channel, "takeover_count", 0) or 0)
+            except Exception:
+                continue
+            seen = self._takeover_seen.get(inst_id, 0)
+            if current < seen:
+                # 渠道重建（换个连接对象）→ 计数从 0 重新累计，按重置处理，
+                # 否则重建后的新事件会被旧基线吞掉。
+                seen = 0
+            if current > seen:
+                for _ in range(current - seen):
+                    self._metrics.record_disconnect("takeover")
+            self._takeover_seen[inst_id] = current
 
     def _record_reconnect(self, cause: str) -> None:
         """Issue #870：重连计数 + 按原因抖动（metrics 未注入时零开销）。"""

@@ -333,7 +333,7 @@ def _normalize_terminal(status: str) -> str:
 def _runtime_mode(runtime_id: int) -> str:
     """从 runtime_id 推导 runtime_mode（local/remote）。"""
     try:
-        from src.domains.runtime.engine.service import runtime_credential_id
+        from src.domains.runtime.public import runtime_credential_id
         cid = runtime_credential_id(runtime_id)
         if cid is None:
             return "unknown"
@@ -467,6 +467,22 @@ DB_ABORTED_CONNECTS = Counter(
     registry=registry,
 )
 
+# SHOW STATUS 里这些值是**服务端累计值**（单调递增），不是"本次采樣的增量"。
+# 直接用 .inc(value) 会按照「累计值 × 抓取次数」放大：实测 Aborted_connects=12 被报成 48/min、
+# Threads_created 被报成 408/min，让基于 increase() 的告警长期误报。
+# 这里记住上次观测到的累计值，只累加真正的增量。
+_COUNTER_LAST: dict = {}
+
+
+def _inc_by_delta(counter, name: str, value: int) -> None:
+    """把服务端累计值转成 Prometheus 计数器增量（首次观测按已累计量补齐）。"""
+    prev = _COUNTER_LAST.get(name)
+    if prev is None or value < prev:  # 首次观测 / 服务端重启导致计数回绕
+        counter.inc(value)
+    else:
+        counter.inc(value - prev)
+    _COUNTER_LAST[name] = value
+
 
 def collect_mysql_metrics():
     """采集 MySQL SHOW STATUS 指标。在 /metrics scrape 时调用。
@@ -491,13 +507,13 @@ def collect_mysql_metrics():
                 elif name == "Threads_running":
                     DB_THREADS_RUNNING.set(value)
                 elif name == "Threads_created":
-                    DB_THREADS_CREATED.inc(value)
+                    _inc_by_delta(DB_THREADS_CREATED, name, value)
                 elif name == "Threads_cached":
                     DB_THREADS_CACHED.set(value)
                 elif name == "Max_used_connections":
                     DB_MAX_USED_CONNECTIONS.set(value)
                 elif name == "Aborted_connects":
-                    DB_ABORTED_CONNECTS.inc(value)
+                    _inc_by_delta(DB_ABORTED_CONNECTS, name, value)
             # 配置上限（分母）：SHOW VARIABLES，不是 STATUS —— 别和 Max_used_connections（历史峰值）混用
             try:
                 c.execute("SHOW VARIABLES WHERE Variable_name='max_connections'")
@@ -604,7 +620,7 @@ def collect_business_sampler():
     # 采集新快照
     try:
         from src.domains.runtime import public as runtime_public
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
         from datetime import datetime, timezone, timedelta
 
         now_ts = _time.time()

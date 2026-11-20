@@ -45,7 +45,7 @@ def _provider_credential_columns(provider: str) -> tuple[str, str]:
     """
     tok_col = wh_col = ""
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider) if provider else None
         if card is not None:
             tok_col = card.token_storage_field or ""
@@ -65,7 +65,7 @@ def _repo_credential(repo_key: str, cred_type: str) -> str:
     cred_type ∈ {'bot','webhook'}（平台语义由 repo_key 前缀承载，D99）；
     表不存在（旧库/裁剪库）或读失败 → 空串（调用方回落历史列），并留 warning。
 
-    表归 insight（table-owner.tsv），读写只经 insight public 的
+    表归 insight（table_ownership.json），读写只经 insight public 的
     `repo_credential_value`（任意拓扑原语：自有 DSN 走 insight 连接，单库回落进程库），
     本模块不再持有该表的 SQL——原先在 mgmt 连接上直读，独立三库拓扑下必然 1146。
     """
@@ -78,7 +78,7 @@ def _repo_credential(repo_key: str, cred_type: str) -> str:
     if not raw:
         return ""
     try:
-        from src.domains.mgmt.user.db import _decrypt_repo_secret
+        from src.domains.mgmt.public import _decrypt_repo_secret
         return _decrypt_repo_secret(raw) or ""
     except Exception as e:
         log.warning(f"mgmt_local: repo credential decrypt failed ({repo_key}, {cred_type}): {e}")

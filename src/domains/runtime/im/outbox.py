@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -79,7 +80,19 @@ def _parse_ts(value: str) -> float:
         return 0.0
 
 
-def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
+def norm_user_id(value):
+    """账号 id 归一：纯数字转 int（**对数字 id 的 sha1 输入完全不变**，跨进程幂等
+    单号不漂移），其余原样保留。
+
+    Issue #3510：D105 后 `grape_accounts.id` 是 UUIDv7 字符串，原实现裸
+    `int(user_id)` 直接 ValueError，被上游 except 吞掉 → 站内信静默丢失。
+    数字仍返回 int，是为了让 f-string 输出与历史一致（24 → "24"）。
+    """
+    s = str(value if value is not None else "").strip()
+    return int(s) if s.isdigit() else s
+
+
+def out_track_id(user_id, kind: str, repo_key: str, issue_number: int,
                  channel_type: str, installation_id: str, event_key: str = "") -> str:
     """跨进程幂等单号：sha1(uid|kind|repo|issue|channel|inst[|event])[:40]。
 
@@ -89,7 +102,7 @@ def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
     被历史行静默吞掉（架构守护 Critical-2）。
     """
     import hashlib
-    raw = f"{int(user_id or 0)}|{kind or ''}|{repo_key or ''}|{int(issue_number or 0)}" \
+    raw = f"{norm_user_id(user_id) or 0}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
           f"|{channel_type or ''}|{installation_id or ''}"
     if event_key:
         raw += f"|{event_key}"
@@ -106,7 +119,7 @@ def _conn():
 def enqueue(*, out_track_id: str, installation_id: str, channel_type: str,
             channel_chat_id: str, payload: dict, expires_at: str,
             status: str = "pending", last_error: str = "",
-            replace: bool = False) -> bool:
+            replace: bool = False, chat_type: str = "p2p") -> bool:
     """写入一行 outbox（默认 INSERT OR IGNORE：同单号已存在 → 不动它，返回 False）。
 
     payload：kind/text/repo_key/issue_number/conv_id/user_id 等投递所需的全部字段。
@@ -125,7 +138,7 @@ def enqueue(*, out_track_id: str, installation_id: str, channel_type: str,
             " payload, status, attempt_count, next_retry_at, expires_at, last_error, "
             " created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)",
-            (out_track_id, installation_id, channel_type, channel_chat_id or "", "p2p",
+            (out_track_id, installation_id, channel_type, channel_chat_id or "", chat_type or "p2p",
              json.dumps(payload or {}, ensure_ascii=False), status,
              now, expires_at, last_error, now, now),
         )
@@ -696,23 +709,33 @@ class OutboxConsumer:
         sent: list[str] = []
         failed: list[tuple[str, str]] = []
         degraded_marks: list[dict] = []
-        for row in rows:
-            payload = row.get("payload") or {}
-            chat_id = row.get("channel_chat_id") or ""
-            target = {"installation_id": row["installation_id"],
-                      "channel_type": row["channel_type"]}
-            card, text_card = build_cards_from_payload(payload)
-            try:
-                ok, degraded, reason = await _deliver(engine, target, chat_id, card, text_card)
-            except Exception as e:
-                ok, degraded, reason = False, False, repr(e)[:_REASON_LEN]
+        # 多渠并发投递（2026-11-18）：逐行顺序 await 会让先排到的渠道先到、另一个晚 1~2s，
+        # 用户侧体感「不是同时收到」。这里按行并发，但同一 (installation, chat) 内用锁串行保序。
+        _locks: dict[tuple, "asyncio.Lock"] = {}
+
+        async def _deliver_one(_row):
+            _payload = _row.get("payload") or {}
+            _chat = _row.get("channel_chat_id") or ""
+            _target = {"installation_id": _row["installation_id"],
+                       "channel_type": _row["channel_type"]}
+            _lock = _locks.setdefault((_row["installation_id"], _chat), asyncio.Lock())
+            _card, _text_card = build_cards_from_payload(_payload)
+            async with _lock:
+                try:
+                    _ok, _degraded, _reason = await _deliver(engine, _target, _chat, _card, _text_card)
+                except Exception as _e:
+                    _ok, _degraded, _reason = False, False, repr(_e)[:_REASON_LEN]
+            return _row, _payload, _chat, _ok, _degraded, _reason
+
+        results = await asyncio.gather(*[_deliver_one(r) for r in rows])
+        for row, payload, chat_id, ok, degraded, reason in results:
             if ok:
                 sent.append(row["out_track_id"])
                 if degraded:
                     degraded_marks.append({"chat_id": chat_id,
                                            "conv": payload.get("conv_id") or "",
                                            "repo_key": payload.get("repo_key", ""),
-                                           "issue_number": int(payload.get("issue_number") or 0)})
+                                           "issue_number": native_issue_number(payload.get("issue_number") or 0)})
             else:
                 failed.append((row["out_track_id"], reason or "send_failed"))
 

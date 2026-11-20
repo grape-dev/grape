@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title data-i18n-title="admin.title">Grape Admin — Config Center</title>
-<link rel="icon" type="image/png" href="/static/logo-64.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/favicon-48.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon-180.png">
+<link rel="stylesheet" href="/static-vue/assets/viewcss/admin-view.css?v=2">
 <script>
 (function(){
   // P2-6: 主题默认值与主应用对齐——未设置时默认 apple
@@ -19,7 +22,7 @@
 
 })();
 </script>
-<link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=1">
+<link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
 <style>
 /* Batch 17: page shell only — all view styles now live in the Vue chunk (viewcss/admin-view.css).
    Kept: :root auth vars + body base + toast styles (toasts are appended to document.body by the component). */
@@ -38,9 +41,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <!-- Batch 17: whole admin site (login + config center + users + whitelists) rendered by AdminView.vue -->
 <div id="adminVueHost"></div>
 
-<script src="/static/js/i18n.js?v=20261113-1"></script>
-<script>I18N.init('20261113-2');</script>
+<script src="/static/js/i18n.js?v=20261117-1"></script>
+<script>I18N.init('20261119-1');</script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script>
-  <script type="module" src="/static-vue/viewjs/admin-view.js?v=11"></script>
+  <script type="module" src="/static-vue/viewjs/admin-view.js?v=46"></script>
 </body>
 </html>

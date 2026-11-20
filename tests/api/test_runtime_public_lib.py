@@ -38,13 +38,28 @@ class NullLock:
 
 
 def install(monkeypatch, cur):
-    """把 db_registry.cursor 换成产出该 FakeCursor 的上下文管理器。"""
+    """把 db_registry.cursor 与进程主库游标都换成产出该 FakeCursor 的上下文管理器。
+
+    runtime lib 的单库/测试拓扑回落路径（`_any_cursor` → session_manager.db）
+    不经过 db_registry；只补 registry 会让 list_credential_rows 这类函数打到
+    真实空库、静默返回 []（2026-11-16 修 s80b 同批红）。
+    """
     @contextlib.contextmanager
     def _ctx(domain):
         yield cur
 
+    class _FakeDB:
+        def cursor(self):
+            return cur
+
+        def commit(self):
+            pass
+
     monkeypatch.setattr(db_registry, "cursor", _ctx)
     monkeypatch.setattr(db_registry, "domain_lock", lambda d: NullLock())
+    import src.kernel.session_manager as _sm
+    monkeypatch.setattr(_sm, "db", _FakeDB())
+    monkeypatch.setattr(_sm, "db_lock", NullLock())
     return cur
 
 
@@ -177,15 +192,19 @@ def test_task_brief_missing(monkeypatch):
     assert rt.task_brief(-1) is None
 
 def test_list_credential_rows_columns_and_passthrough(monkeypatch):
-    row = (1, "rt-cred", "dev-1", "global", "", "alice", "active", "t0", "1.2.3.4", "", 1, "")
+    row = (1, "rt-cred", "dev-1", "global", "", "alice", "active", "t0", "1.2.3.4", "", 1,
+           "", "worker", "")
     cur = install(monkeypatch, FakeCursor(rows=[row], desc=[("id",)]))
     out = rt.list_credential_rows()
     assert out == [row]
     sql, _args = cur.executed[0]
     for col in ("id", "name", "device_name", "scope", "owner_id", "owner_name",
-                "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec"):
+                "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec",
+                "cred_type", "platform"):
         assert col in sql
     assert "FROM runtime_credentials" in sql
+    # 列序契约：mgmt._build_cred_map 按 14 列解包，列数少了整页 500
+    assert len(row) == 14
 
 
 def test_list_credential_rows_empty(monkeypatch):

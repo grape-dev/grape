@@ -19,15 +19,14 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-# 2026-11-13 快照：templates(+66 键) / tasks / admin 文案变更并 bump 四页 cacheVer 之后
-LOCALE_FINGERPRINT = "55b6fb084de9af1d"
+LOCALE_FINGERPRINT = "5e8c8b45653b7b8c"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    "index.html": ("44", "42"),
-    "admin.html": ("20261113-2", "20261016-8"),
-    "register.html": ("36", "34"),
-    "forgot.html": ("36", "34"),
+    "index.html": ("74", "53"),
+    "admin.html": ("20261119-1", "20261114-23"),
+    "register.html": ("55", "45"),
+    "forgot.html": ("55", "45"),
 }
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）
@@ -94,7 +93,7 @@ def test_page_cache_ver_is_current_and_monotonic():
 
 # shell/js/i18n.js 自身的脚本缓存键：日期型版本，同样「只升不降」
 # （复审 R-1：棘轮只认纯数字，这类版本此前没有任何下界检查）
-I18N_JS_VER = ("20261113-1", "20261112-1")  # (当前, base 下界)
+I18N_JS_VER = ("20261117-1", "20261114-23")  # (当前, base 下界)
 
 
 def test_i18n_js_script_version_monotonic():

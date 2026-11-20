@@ -68,6 +68,7 @@ _RUNTIME_TABLES = (
     "scene_knowledge_ref", "grape_t_engine_lifecycle_audit", "agent_type", "backend_agents",
     "distributed_locks", "meta",
     "chat_conversations", "chat_messages", "chat_agent_session",
+    "grape_t_skill_version", "grape_t_skill_file", "grape_t_skill_comment",
     # 存量（db_setup DDL）
     "agent_type_config",
 )

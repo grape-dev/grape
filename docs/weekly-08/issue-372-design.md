@@ -2539,7 +2539,7 @@ issue-372 分支将实现改为调 `TokenResolver.read_stored_token()`，注释�
 # 对无 bot_gitcode_token 的托管仓库调用：
 get_repo_bot_token_no_global('gitcode:owner/repo')
 # 基线返回: ""（空串，正确——"no_global"语义）
-# 分支返回: "m4kj4JfiLDKLxisQpbfjURwh"（全局 bot token，语义被破坏）
+# 分支返回: "<REDACTED_REAL_TOKEN>"（全局 bot token，语义被破坏）
 ```
 
 **影响**：

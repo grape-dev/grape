@@ -48,9 +48,9 @@
     "pending": "Pending",
     "processing": "Processing",
     "completed": "Completed",
-    "tag_pending": "<b></b>Pending",
-    "tag_processing": "<b></b>Processing",
-    "tag_completed": "<b></b>Completed",
+    "tag_pending": "Pending",
+    "tag_processing": "Processing",
+    "tag_completed": "Completed",
     "tag_pending_review": "Pending Review",
     "tag_cancelled": "Cancelled",
     "tag_awaiting_input": "Awaiting Input",
@@ -160,5 +160,9 @@
     "abort_confirm": "End this takeover? It only stops the current node and never re-dispatches the task.",
     "abort_done": "Takeover ended",
     "abort_failed": "Failed to end the takeover"
+  },
+  "board": {
+    "refresh_failed_keep": "Board refresh failed, showing the last data",
+    "retry": "Retry"
   }
 }
