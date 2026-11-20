@@ -841,6 +841,11 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                # REPEATABLE READ 下，只读不 commit 的线程会让池化连接的读快照
+                # 冻结在首次 SELECT（登录 state: 签发线程 INSERT+commit 落库成功，
+                # 校验线程沿用老快照 → 3 秒后仍 NOT FOUND，登录永远 state_invalid）。
+                # READ COMMITTED 与代码的显式事务/行锁用法兼容（同 SQLite 语义）。
+                init_command="SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
             )
             log.info("MySQLCompatDB: connection pool initialized "
                      f"(min={os.environ.get('DB_POOL_MIN', '2')}, "
