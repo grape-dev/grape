@@ -161,6 +161,9 @@ def _patch_successful_vcs(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create_new_repo)
     monkeypatch.setattr(provision, "host_repo", _fake_host_repo)
+    # 分支同步涉及真实 git/网络；单元用例只验证 provisioning 编排。
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     return calls
 
 
@@ -296,6 +299,8 @@ def _patch_claim_host(monkeypatch, calls: dict):
         return {"message": "hosted", "webhook_id": 4242}
 
     monkeypatch.setattr(provision, "host_repo", _host)
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
 
 
 def test_retry_claims_repo_created_before_crash(monkeypatch):
@@ -429,6 +434,8 @@ def test_host_failure_retry_does_not_recreate_repo(monkeypatch):
         return {"message": "hosted", "webhook_id": 4242}
 
     monkeypatch.setattr(provision, "host_repo", _host)
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     second = provision.provision_org(org_id)
 
     assert second["provision_status"] == "ready"
@@ -567,17 +574,21 @@ def test_default_org_repo_name_has_no_prefix():
     assert _repo_name({"slug": "", "id": "42"}) == "repo-42"
 
 
-def test_provision_schedules_context_sync(monkeypatch):
-    """provisioning 只调度 org-context 同步；分析分支在默认分支落定后由它接力创建。"""
-    import src.domains.mgmt.org_context_repo as org_context_repo
+def test_provision_creates_branches_before_ready(monkeypatch):
+    """provisioning 必须先创建默认分支 + 分析分支，再置 ready。"""
+    import src.domains.mgmt.org_provision as provision
     from src.domains.mgmt.org_provision import provision_org
+    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
 
     calls = []
-    monkeypatch.setattr(org_context_repo, "schedule_sync",
-                        lambda org_id, delay=0: calls.append(("context", str(org_id))))
     _patch_successful_vcs(monkeypatch)
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: calls.append(
+            (str(org["id"]), repo_key, kwargs.get("enforce_default"))))
     org_id = _seed_team_org()
 
     result = provision_org(org_id)
     assert result["provision_status"] == "ready"
-    assert ("context", str(org_id)) in calls
+    assert calls == [(str(org_id), REPO_KEY, True)]
+    assert ORG_REPO_DEFAULT_BRANCH == "grape-repo-knowledge"

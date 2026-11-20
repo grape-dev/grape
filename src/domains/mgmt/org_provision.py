@@ -36,7 +36,7 @@ from src.kernel.lock import acquire_lock, release_lock, renew_lock
 from src.kernel.repo_key import from_repo_key, to_repo_key
 
 
-_ORG_LOCKS: dict[int, threading.Lock] = {}
+_ORG_LOCKS: dict[str, threading.RLock] = {}
 _ORG_LOCKS_GUARD = threading.Lock()
 # rationale（数值登记 docs/org-pipeline/org-runtime-budget.md §2）：组织供给一次包含
 # 建仓 + 建场景 + 首次绑定，需求 Issue #2403 的目标 P95 供给时长 < 10min；租约取 600s
@@ -50,11 +50,13 @@ class _LeaseLost(RuntimeError):
     pass
 
 
-def _org_lock(org_id: str) -> threading.Lock:
+def _org_lock(org_id: str) -> threading.RLock:
+    # provisioning 内需要同步调用 org-context/analysis 同步（它们会再次获取同一
+    # org 锁），必须可重入，否则同一线程自锁。
     with _ORG_LOCKS_GUARD:
         lock = _ORG_LOCKS.get(org_id)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _ORG_LOCKS[org_id] = lock
         return lock
 
@@ -406,6 +408,72 @@ def _ensure_org_scene(org: dict, repo_key: str, *,
     return scene_id
 
 
+def _ensure_org_repo_branches(org: dict, repo_key: str, *,
+                              enforce_default: bool = True) -> None:
+    """同步创建默认分支 + 分析分支；两条都就绪才允许组织进入 ready。
+
+    必须在 provisioning 的 org 锁内调用：``sync_org_context_to_repo`` 会再次获取
+    同一把锁（RLock）。
+    """
+    from src.domains.mgmt.org_context_repo import (
+        ORG_REPO_ANALYSIS_BRANCH,
+        ORG_REPO_DEFAULT_BRANCH,
+        sync_org_analysis_to_repo,
+        sync_org_context_to_repo,
+    )
+    from src.domains.mgmt.pipeline_config import set_org_scene_work_branch
+    from src.domains.mgmt.user.repo_manager import set_default_branch
+    from src.domains.runtime import public as runtime_public
+    from src.kernel.repo_key import parse_repo_key
+
+    org_id = str(org.get("id") or "")
+    if not org_id or not repo_key:
+        raise RuntimeError("org repo missing")
+
+    sync_org_context_to_repo(org_id)
+    sync_org_analysis_to_repo(org_id)
+
+    owner_user = _owner_user(org)
+    provider, token = _resolve_repo_provider(org, owner_user)
+    if not token:
+        raise RuntimeError("VCS token missing after hosting")
+    _prov, owner, name = parse_repo_key(repo_key)
+    provider = provider or _prov
+    client = runtime_public.VcsApiClient(provider, token, owner, name)
+    info = client.get_repo_info() or {}
+    if info.get("error"):
+        raise RuntimeError(f"repo info failed: {str(info.get('error'))[:200]}")
+    names = {str(b.get("name") or "") for b in (client.list_branches() or [])}
+    if enforce_default and ORG_REPO_DEFAULT_BRANCH not in names:
+        raise RuntimeError(
+            f"default branch {ORG_REPO_DEFAULT_BRANCH} missing (branches={sorted(names)})")
+    if ORG_REPO_ANALYSIS_BRANCH not in names:
+        raise RuntimeError(
+            f"analysis branch {ORG_REPO_ANALYSIS_BRANCH} missing (branches={sorted(names)})")
+
+    current_default = str(info.get("default_branch") or "")
+    expected_default = ORG_REPO_DEFAULT_BRANCH if enforce_default else (
+        current_default or ORG_REPO_DEFAULT_BRANCH)
+    if expected_default in names and current_default != expected_default:
+        if not set_default_branch(token, owner, name, expected_default, provider=provider):
+            raise RuntimeError(
+                f"set default branch failed: {current_default} -> {expected_default}")
+    elif enforce_default and current_default != ORG_REPO_DEFAULT_BRANCH:
+        raise RuntimeError(
+            f"unexpected default branch {current_default!r}, expected {ORG_REPO_DEFAULT_BRANCH}")
+
+    scene_id = str(org.get("org_scene_id") or "")
+    if scene_id:
+        set_org_scene_work_branch(scene_id, repo_key, expected_default)
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(
+                org_id, actor_id=org.get("owner_id") or "")
+        except Exception as exc:  # noqa: BLE001 - 任务补建失败不推翻已建分支
+            log.warning(f"org_provision ensure analysis task failed org={org_id}: {exc}")
+
+
 def _normalize_repo_key(raw: str) -> str:
     """归一化手动绑定的 repo_key（provider:owner/repo 或 owner/repo）。"""
     text = (raw or "").strip()
@@ -699,6 +767,13 @@ def _provision_org_impl(org_id: str) -> dict:
                 org, repo_key,
                 fallback_branch=(ORG_REPO_DEFAULT_BRANCH if created_repo else "main"))
 
+            # 「分支建好才算组织创建完成」：同步建默认分支 + 分析分支，再置 ready。
+            # 不再用后台 timer 抢跑，避免空仓首推把 grape-repo-analysis 设成默认分支。
+            _set_provision_fields(org_id, provision_status="branches_creating")
+            org = get_org(org_id) or org
+            _ensure_org_repo_branches(
+                org, repo_key, enforce_default=created_repo)
+
             _renew_org_lease(org_id)
             _set_provision_fields(
                 org_id,
@@ -707,14 +782,6 @@ def _provision_org_impl(org_id: str) -> dict:
                 provisioned_at=_utc_now(),
             )
             _refresh_org_overview(org_id)
-            # 组织仓库建好后把 org-context/（README/规则/画像/架构/知识/仓库地图）
-            # 推到默认分支：否则新仓是空仓，GitHub 页面只有一个空仓库没有任何目录。
-            try:
-                from src.domains.mgmt.org_context_repo import schedule_sync
-
-                schedule_sync(org_id)
-            except Exception as _sync_e:
-                log.warning(f"org_provision schedule context sync failed org={org_id}: {_sync_e}")
             
         except _LeaseLost:
             log.warning(f"org_provision lease lost org={org_id}")

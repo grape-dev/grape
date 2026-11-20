@@ -834,14 +834,14 @@ def sync_org_context_to_repo(org_id: str) -> bool:
             # org-context 首次 push 后才变成 grape-repo-knowledge）。
             try:
                 from src.domains.mgmt.pipeline_config import set_org_scene_work_branch
-                from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
                 from src.domains.mgmt import org_analysis
 
                 _scene_id = str(org.get("org_scene_id") or "")
                 if _scene_id:
-                    _scene_branch = resolve_org_repo_default_branch(
-                        org, repo_key, fallback=branch)
-                    set_org_scene_work_branch(_scene_id, repo_key, _scene_branch)
+                    # 本次同步推的就是组织仓库默认分支（新仓 grape-repo-knowledge /
+                    # 存量仓 main）；不要在此刻再查 VCS 默认分支——GitCode 的
+                    # default_branch 往往要等本次 push 后才更新，会读到旧的 main。
+                    set_org_scene_work_branch(_scene_id, repo_key, branch)
                     org_analysis.ensure_analysis_automation(
                         org_id, actor_id=org.get("owner_id") or "")
             except Exception as _wb_e:  # noqa: BLE001 - 回填失败不阻断上下文同步
