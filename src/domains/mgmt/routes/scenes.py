@@ -599,6 +599,63 @@ def _normalize_scene_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]
     return normalize_category_pair(cat_l1_id, cat_l2_id)
 
 
+def _collect_plugin_credential_requirements(nodes: list, user_id: int | str = 0) -> list[dict]:
+    """收集场景插件中"凭据未配置"的协商清单（Issue #1089 挂点①，应用场景时弹凭据配置）。
+
+    继承链合并生效（Issue #1089 验收3，A4 #1082 契约 seam）：
+    - 插件集合 = merge_plugin_scopes(node=节点级多选, agent=Agent 类型种子默认
+      （按节点 tag 读取 agent-description.json agent.plugins，挂点③）)，
+      高优先级作用域标记来源；repo/personal 级插件声明源归 A4 #1082；
+    - 凭据值 = resolve_plugin_credentials(name, personal=user_credentials
+      provider=plugin:{name}) 键级覆盖合并（repo/agent/node 级凭据源暂无
+      存储入口，缺省为空 → 等价个人级直取，为后续作用域来源预留统一合并点）。
+
+    - 跨作用域/跨节点去重；未注册插件（插件市场未上架）视为软引用，不阻塞应用；
+    - 逐字段对比插件 credentials 声明与合并后配置，给出 missing_fields
+      （含可选字段，供弹窗完整展示）与 required_fields。
+    """
+    from src.domains.mgmt.user.db import get_credential
+    from src.domains.mgmt.plugins.registry import get_plugin
+    from src.domains.mgmt.plugins.resolver import (
+        get_agent_plugins, merge_plugin_scopes, resolve_plugin_credentials)
+    node_plugins: list[str] = []
+    agent_plugins: list[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        for p in node.get("plugins") or []:
+            if isinstance(p, str) and p.strip():
+                node_plugins.append(p.strip())
+        tag = (node.get("tag") or "").strip().lower()
+        if tag:
+            agent_plugins.extend(get_agent_plugins(tag))
+    requirements = []
+    for entry in merge_plugin_scopes(node=node_plugins, agent=agent_plugins):
+        name = entry["name"]
+        plugin = get_plugin(name)
+        if not plugin:
+            continue  # 软引用：未注册插件不阻塞
+        declared = plugin.get("credentials") or []
+        if not declared:
+            continue
+        configured = resolve_plugin_credentials(
+            name, personal=get_credential(user_id, f"plugin:{name}") or {})
+        missing = [
+            {"key": f["key"], "label": f.get("label") or f["key"],
+             "required": bool(f.get("required", False))}
+            for f in declared
+            if not str(configured.get(f["key"], "") or "").strip()
+        ]
+        if missing:
+            requirements.append({
+                "plugin": name,
+                "display_name": plugin.get("display_name") or name,
+                "missing_fields": missing,
+                "required_fields": [f["key"] for f in missing if f["required"]],
+            })
+    return requirements
+
+
 def _parse_scene_skills(nodes_json: str) -> list[str]:
     """从 nodes_json 提取技能名称列表"""
     try:
@@ -990,7 +1047,14 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         log.warning(f"apply_market_scene: merge preset custom fields failed: {_e}")
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
-    return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
+    # Issue #1089 挂点①：应用市场场景时按模板 nodes.plugins 协商插件凭据
+    try:
+        credential_required = _collect_plugin_credential_requirements(nodes, user.get("id", 0))
+    except Exception as _e:
+        log.warning(f"apply_market_scene: collect plugin credential requirements failed: {_e}")
+        credential_required = []
+    return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id,
+            "credential_required": credential_required}
 
 @router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
 async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
@@ -2136,6 +2200,7 @@ class SceneNodeInput(BaseModel):
     skip: list = []
     enabled: bool = True
     engine_runtime_ids: list = []
+    plugins: list = []  # Issue #1089 挂点①：节点级插件多选（软引用，应用场景时协商凭据）
     # Issue #1208：uid 池（D12 姊妹字段，与 ids 双非空拒绝）+ selector 标签池
     # （三模式同 node 互斥，D7；保存端为权威校验点）
     engine_runtime_uids: list = []
@@ -3103,6 +3168,13 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
 
     log.info(f"Scene applied: scene={body.scene_id}, repo={repo_key}, updated={updated} agents")
 
+    # Issue #1089 挂点①：节点插件凭据协商（应用场景时弹凭据配置；软引用不阻塞）
+    try:
+        credential_required = _collect_plugin_credential_requirements(nodes, user.get("id", 0))
+    except Exception as _e:
+        log.warning(f"apply_scene: collect plugin credential requirements failed: {_e}")
+        credential_required = []
+
     return {
         "message": f"场景 '{cfg.get('name', body.scene_id)}' 已应用",
         "updated": updated,
@@ -3110,6 +3182,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         "applied": applied_cnt,
         "skipped": skipped_cnt,
         "failed": failed_cnt,
+        "credential_required": credential_required,
     }
 
 def app_current_repo():

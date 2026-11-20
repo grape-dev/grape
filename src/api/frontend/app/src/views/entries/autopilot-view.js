@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/autopilot-view.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=61'
+    link.href = '/static-vue/assets/' + f + '?v=63'
     document.head.appendChild(link)
   })
 })()
@@ -19,7 +19,7 @@ let _app = null
 function mount(props) {
   const el = document.getElementById('pageContent')
   if (!el) return
-  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  if (_app) { try { _app.unmount() } catch (e) { /* 未挂载/已卸载则忽略 */ } _app = null }
   el.innerHTML = ''
   _app = createApp(AutopilotView, props || {})
   _app.mount(el)

@@ -8,6 +8,7 @@
         <div class="seg-bar sm__seg">
           <a class="ac">🏪 {{ tt('scenes_tab') }}</a>
           <a @click="G.app.nav('skills')">⚙ {{ tt('skills_tab') }}</a>
+          <a v-if="showPlugins" @click="G.app.nav('plugins')">🧩 {{ tt('plugins_tab') }}</a>
         </div>
         <div class="sm__intro">
           <b class="sm__intro-b">{{ tt('scenes_tab') }}</b>
@@ -505,8 +506,11 @@ import AGButton from '@/components/ui/AGButton.vue'
 import AGModal from '@/components/ui/AGModal.vue'
 import AGInput from '@/components/ui/AGInput.vue'
 import AGSelect from '@/components/ui/AGSelect.vue'
+import { pluginsEnabled } from '@/lib/features'
 
 const G = globalThis
+// Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
+const showPlugins = pluginsEnabled()
 
 // ── I18N helpers（老壳 skills.* 命名空间为主）──
 // 陷阱：t(key) 找不到返回 key 本身（truthy），|| 兜底不生效——必须与完整 key 比对
@@ -517,6 +521,7 @@ function tt(key) {
 }
 const keyDefaults = {
   scenes_tab: '场景',
+  plugins_tab: '插件',
   skills_tab: '技能',
   market_intro_scene: '是多个技能按开发流程组合的开发模式',
   market_intro_skill: '是单个 Agent 的能力包',

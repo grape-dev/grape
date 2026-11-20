@@ -212,7 +212,36 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
     """Sync wrapper: calls _enqueue_pipeline_task from event_pipeline.py."""
     try:
         from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
-        from src.domains.runtime.engine.engine_select import pick_engine
+        from src.domains.runtime.engine.engine_select import (
+            POOL_SOURCE_DIRECTED, directed_pool_engine_ids, pick_engine,
+            resolve_directive_engine, resolve_scene_user_scope,
+        )
+
+        # Issue #2791（P1-8）：A2A 交办携带 `engine_config.runtime_id` 时，定向派发优先于池选择。
+        # 命中 → 锁定该引擎并跳过 pick_engine / 场景池解析（场景池全灭也不否决定向派发）；
+        # 未命中 → 落到下面的既有池选择路径，结构化 WARN 由 _enqueue_pipeline_task 统一输出
+        #（那层能拿到最终 pool，WARN 才写得清「最终选中引擎」）。
+        try:
+            _directive = resolve_directive_engine(
+                (evt.get("payload") or {}).get("engine_config"), repo_key, agent_type)
+        except Exception as _dir_e:
+            log.warning(f"Pipeline emit: resolve engine_config directive failed: {_dir_e}")
+            _directive = None
+        if _directive and _directive.get("hit"):
+            _dir_rid = _directive["runtime_id"]
+            log.info(f"Pipeline emit (directed): engine_config.runtime_id={_dir_rid} "
+                     f"({_directive.get('engine_name') or '-'}) locked, pool selection skipped, seq={seq}")
+            # 场景仍要解析出 user scope（技能 scope 门禁/任务行 user_id 依赖它），
+            # 但**不读场景池**——定向派发就是跳过池选择。解析单点 resolve_scene_user_scope。
+            _dir_uid = resolve_scene_user_scope(
+                repo_key, issue_id, evt.get("actor", ""))[1]
+            _enqueue_pipeline_task(
+                repo_key, seq, agent_type, "", skill_name, evt,
+                skill_id, skill_path, _dir_rid, issue_id,
+                pool_engine_ids=directed_pool_engine_ids(_dir_rid), user_id=_dir_uid,
+                pool_engine_source=POOL_SOURCE_DIRECTED,
+            )
+            return {"task_id": "enqueued"}
 
         # Validate runtime_id: if the engine no longer exists or is offline,
         # drop it to 0 so the task becomes a pool task (claim_by_tag can pick it up).
@@ -236,24 +265,9 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         _pool_sel_a2a = ""
         _scene_uid = 0
         if is_plugin_mode():
-            # 获取 issue 级场景（A2A 交办时场景已持久化到 issue_state）
-            _scene_id = "default"
-            _scene_uid = 0
-            try:
-                from src.api.session_store import get_issue_scene
-                _scene_id, _scene_uid = get_issue_scene(repo_key, issue_id)
-                _scene_id = _scene_id or "default"
-            except Exception as _se653:
-                # Issue #653：场景解析失败曾是静默回退「default」的旁路，必须留痕
-                log.warning(f"Pipeline emit: get_issue_scene failed for repo={repo_key} "
-                            f"issue={issue_id}: {_se653}")
-            # scene_user_id=0 时兜底反查（Task Center 建 repo 级场景任务时可能漏写 scene_uid）
-            if not _scene_uid:
-                try:
-                    from src.domains.runtime.engine.engine_select import _repo_user_id
-                    _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
-                except Exception:
-                    pass
+            # 获取 issue 级场景 + 场景 user scope（解析/异常留痕/反查兜底单点）
+            _scene_id, _scene_uid = resolve_scene_user_scope(
+                repo_key, issue_id, evt.get("actor", ""))
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
                                   scene_id=_scene_id, user_id=_scene_uid,
                                   issue_creator=evt.get("actor", ""))

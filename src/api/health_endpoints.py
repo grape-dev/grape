@@ -14,6 +14,9 @@ from functools import lru_cache
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+# Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
+from src.api.contract_versioning import CONTRACT_VERSION
+
 _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 
@@ -59,7 +62,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         return {
             "status": "ok",
             "service": service_name,
-            "version": "2.2.0",
+            "version": CONTRACT_VERSION,
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,

@@ -64,7 +64,8 @@ def _parse_env_extra(env_extra) -> dict:
         return env_extra
     if isinstance(env_extra, str) and env_extra:
         try:
-            _d = json.loads(env_extra)
+            from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+            _d = decrypt_env_extra(env_extra)  # enc:v1（#2423）
             return _d if isinstance(_d, dict) else {}
         except Exception:
             return {}

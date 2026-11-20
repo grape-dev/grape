@@ -381,6 +381,19 @@
                   </template>
                   <span v-else class="ap-nd-none">none</span>
                 </div>
+                <!-- #3355：节点插件标签（display_name 展示，缺失回落 name） -->
+                <div v-if="nodePlugins(node).length" class="ap-nd-plugbox">
+                  <div class="ap-nd-lbl">{{ t('label_plugins') }}</div>
+                  <div class="ap-nd-plugtags">
+                    <span
+                      v-for="pn in nodePlugins(node)"
+                      :key="pn"
+                      class="ap-nd-plugtag"
+                      :title="pn"
+                      >🧩 {{ pluginLabel(pn) }}</span
+                    >
+                  </div>
+                </div>
               </div>
               <span v-if="i < (flowEditing ? editNodes : viewNodes).length - 1" class="ap-arr"
                 >→</span
@@ -1283,6 +1296,7 @@
 
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
+import { pluginsEnabled } from '../lib/features.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
 const G = globalThis
@@ -1895,6 +1909,7 @@ function t(key, vars) {
     custom_config: '自定义配置',
     add_config: '添加配置项',
     label_skill: '技能',
+    label_plugins: '插件',
     label_engine: '引擎',
     select_skill: '选择技能',
     select_engine: '选择引擎',
@@ -2272,6 +2287,44 @@ function nodeSkill(node) {
   return node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || ''
 }
 
+// ═══ #3355：场景节点插件标签（display_name 展示，缺失回落 name）═══
+const pluginNameMap = ref({})
+
+function nodePlugins(node) {
+  return (node && node.plugins) || []
+}
+
+function pluginLabel(name) {
+  return pluginNameMap.value[name] || name
+}
+
+function applyPluginNames(list) {
+  const next = Object.assign({}, pluginNameMap.value)
+  ;(list || []).forEach(function (p) {
+    if (p && p.name && !next[p.name]) next[p.name] = p.display_name || p.name
+  })
+  pluginNameMap.value = next
+}
+
+// 中文名映射：installed 清单优先，市场列表补齐缺失（两级拉取互不阻塞）
+// Issue #3395：flag=0（插件入口关闭）时短路——不发任何 /api/plugins 请求（QA 低危项收口）
+function loadPluginNameMap() {
+  if (!pluginsEnabled()) return
+  API()
+    .get('/plugins/installed')
+    .then(function (d) {
+      applyPluginNames((d && d.plugins) || [])
+    })
+    .catch(function () {})
+    .then(function () {
+      return API().get('/plugins?page=1&page_size=100')
+    })
+    .then(function (m) {
+      applyPluginNames((m && m.plugins) || [])
+    })
+    .catch(function () {})
+}
+
 // ═══ host banner（托管自愈） ═══
 const hostBanner = computed(() => {
   const hs = (dashData.value || {}).host_status || ''
@@ -2435,7 +2488,7 @@ function clearDashEditMode() {
     /* ignore */
   }
 }
-// 节点精简序列化（草稿用）
+// 节点精简序列化（草稿用；#3355：携带 plugins 防草稿恢复丢插件）
 function serializeNodes(nodes) {
   return nodes.map(function (n) {
     return {
@@ -2450,6 +2503,7 @@ function serializeNodes(nodes) {
       skip: n.skip,
       enabled: n.enabled,
       engine_runtime_ids: n.engine_runtime_ids,
+      plugins: n.plugins || [],
       // Issue #1208：草稿全量透传三模式字段（uids/selector），引擎选择确认后 F5 不丢
       engine_runtime_uids: n.engine_runtime_uids || [],
       engine_selector: n.engine_selector || {},
@@ -2468,6 +2522,7 @@ function applyDraftNodes(draft) {
       en.skill_id = dn.skill_id || 0
       en.skill_display_name = dn.skill_display_name || ''
       en.engine_runtime_ids = dn.engine_runtime_ids || []
+      en.plugins = dn.plugins || []
       en.engine_runtime_uids = dn.engine_runtime_uids || []
       en.engine_selector = dn.engine_selector || {}
     }
@@ -2679,6 +2734,7 @@ function buildNodesPayload(nodes) {
       handoff: i < arr.length - 1 ? 'a2a' : 'complete',
       skip: n.skip || [],
       enabled: true,
+      plugins: n.plugins || [],
       // uids 与 selector 互斥随 node 全量透传；已绑 ids 且全部有 uid 时按 D11 输出 uids 清 ids
       engine_runtime_ids: (n.engine_runtime_uids || []).length ? [] : (n.engine_runtime_ids || []),
       engine_runtime_uids: n.engine_runtime_uids || [],
@@ -2767,7 +2823,8 @@ function toggleAgent(agentType) {
   const node = editNodes.value.find((n) => n.id === agentType)
   if (!node) return
   node.enabled = !node.enabled
-  // Issue #406：禁用时 skill/display 同清
+  // Issue #406：禁用时 skill/display 同清；#3355 复审：plugins 绑定保留——
+  // 禁用态会写入草稿/载荷，清空后重启用将永久丢失插件绑定（Spec 未要求清插件）
   if (!node.enabled) {
     node.skill = ''
     node.skill_id = 0
@@ -3471,6 +3528,7 @@ function buildEditNodes(originalNodes, ags) {
         skip: node.skip || [],
         enabled: node.enabled !== false,
         engine_runtime_ids: node.engine_runtime_ids || a.engine_runtime_ids || [],
+        plugins: node.plugins || [],
         engine_runtime_uids: node.engine_runtime_uids || a.engine_runtime_uids || [],
         engine_selector: node.engine_selector || a.engine_selector || {},
       }
@@ -3487,6 +3545,7 @@ function buildEditNodes(originalNodes, ags) {
       skip: [],
       enabled: false,
       engine_runtime_ids: [],
+      plugins: [],
       engine_runtime_uids: [],
       engine_selector: {},
     }
@@ -3535,6 +3594,11 @@ function saveSceneEdit() {
       app().showToast(t('scene_saved'))
       // 重新加载详情（查看模式）
       loadSceneDetail(detail.value.id)
+      // #3355：保存后 1.5s 自动 reload——防后端缺 plugins 字段回包时插件标签
+      // 渲染丢失（对齐老版线 dashboard.js 终态行为）
+      setTimeout(function () {
+        G.window.location.reload()
+      }, 1500)
     })
     .catch(function (e) {
       // Issue #1564：技能 scope 冲突 → 按后端 400 violations[] 对节点标红，就地修正
@@ -3906,6 +3970,8 @@ function saveSceneRecommend() {
 onMounted(function () {
   // 引擎弹窗内的场景筛选下拉靠 outside-click 收起（技能面板已改弹窗，不再由这里关闭）
   document.addEventListener('click', onDocClick)
+  // #3355：节点插件中文名映射（installed ∪ 市场）
+  loadPluginNameMap()
   installNavGuard()
   if (props.initialData) {
     // renderDashboard(data) 契约：app.js 加载数据后注入
@@ -4551,6 +4617,37 @@ onBeforeUnmount(function () {
 .ap-nd-none {
   font-size: 11px;
   color: var(--t3);
+}
+/* #3355：节点插件标签 */
+.ap-nd-plugbox {
+  flex: 1;
+  justify-content: center;
+  gap: 6px;
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 8px;
+}
+.ap-nd-plugtags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+}
+.ap-nd-plugtag {
+  font-size: 10px;
+  color: var(--a);
+  background: rgba(49, 104, 224, 0.08);
+  border-radius: 999px;
+  padding: 2px 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dbv-skillname {
   font-size: 11px;

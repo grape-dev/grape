@@ -2,7 +2,13 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agentic DevOps API",
-    "version": "2.2.0"
+    "version": "2.3.0a1",
+    "x-grape-local-cli-commands": [
+      "git",
+      "refresh",
+      "commands",
+      "tasks wait"
+    ]
   },
   "paths": {
     "/api/auth/change-password": {
@@ -2422,6 +2428,16 @@
               "type": "string",
               "title": "Repo"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -2444,11 +2460,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -2474,7 +2526,7 @@
           "git-repo"
         ],
         "summary": "List milestones",
-        "description": "Lists repository milestones (state filter: open/closed/all). Issue #900: optional page/per_page pass through to the provider (upstream default small page silently truncated long lists; use per_page=100 for the full set). per_page larger than 100 is clamped to 100, not rejected. Optional title filter narrows by milestone title. When page/per_page are omitted they are not sent upstream (provider defaults apply, preserving pre-#900 request URLs). Returned items' `state` field is normalized to open/closed (upstream `active`/`opened` is mapped to `open`).",
+        "description": "Lists repository milestones (state filter: open/closed/all). Issue #2082 paging (semantics unified with issues_list/issues_mine): page is 1-based; per_page defaults to 20, is clamped to a max of 100 and 0 means explicit full list. The server fetches all upstream pages (per_page=100 each) and slices locally, so `total`/`has_more` reflect the full filtered set — long lists are no longer silently truncated. Default response is the envelope {milestones, total, page, per_page, has_more}; `shape=array` keeps the legacy top-level array (full list) for one compatibility version. Optional title filter narrows by milestone title (server-side). Returned items' `state` field is normalized to open/closed (upstream `active`/`opened` is mapped to `open`).",
         "operationId": "gitrepo_milestones",
         "parameters": [
           {
@@ -2514,10 +2566,11 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "description": "Page number (1-based); omitted = provider default",
+              "description": "页码（1-based）",
+              "default": 1,
               "title": "Page"
             },
-            "description": "Page number (1-based); omitted = provider default"
+            "description": "页码（1-based）"
           },
           {
             "name": "per_page",
@@ -2525,11 +2578,25 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1,
-              "description": "Page size, clamped to 100 when larger; omitted = provider default",
+              "minimum": 0,
+              "description": "每页条数；默认 20；0=显式全量；上限 100，超限夹取",
+              "default": 20,
               "title": "Per Page"
             },
-            "description": "Page size, clamped to 100 when larger; omitted = provider default"
+            "description": "每页条数；默认 20；0=显式全量；上限 100，超限夹取"
+          },
+          {
+            "name": "shape",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(array|envelope)$",
+              "description": "出参形态：envelope={milestones,total,page,per_page,has_more}（默认）；array=顶层数组全量（兼容期逃生口，jq '.[]' 直接可用）",
+              "default": "envelope",
+              "title": "Shape"
+            },
+            "description": "出参形态：envelope={milestones,total,page,per_page,has_more}（默认）；array=顶层数组全量（兼容期逃生口，jq '.[]' 直接可用）"
           },
           {
             "name": "title",
@@ -2549,7 +2616,35 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "milestones": {
+                          "type": "array",
+                          "items": {}
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "page": {
+                          "type": "integer"
+                        },
+                        "per_page": {
+                          "type": "integer"
+                        },
+                        "has_more": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    {
+                      "type": "array",
+                      "items": {}
+                    }
+                  ]
+                }
               }
             }
           },
@@ -2602,6 +2697,16 @@
               "type": "string",
               "title": "Repo"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -2624,11 +2729,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -2683,6 +2824,16 @@
               "type": "integer",
               "title": "Number"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -2705,11 +2856,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -2848,6 +3035,16 @@
               "type": "string",
               "title": "Repo"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -2870,11 +3067,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -3012,6 +3245,16 @@
               ],
               "title": "Number"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -3034,11 +3277,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -3100,6 +3379,16 @@
               ],
               "title": "Number"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "responses": {
@@ -3112,11 +3401,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -3254,6 +3579,16 @@
               ],
               "title": "Number"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -3276,11 +3611,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -3419,6 +3790,16 @@
               "type": "string",
               "title": "Repo"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -3441,11 +3822,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -3576,6 +3993,16 @@
               "type": "integer",
               "title": "Number"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional idempotency key (Issue #2084): with this header a duplicate write replays the first response instead of executing again; concurrent same-key requests get 409 idempotency_in_flight; the same key with a different request body gets 422 idempotency_key_conflict. Reuse the same key for retries of the same logical operation.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
           }
         ],
         "requestBody": {
@@ -3598,11 +4025,47 @@
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "Unprocessable Entity - either request body validation failed, or the Idempotency-Key was reused with a different request body (Issue #2084: idempotency_key_conflict).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                },
+                "example": {
+                  "detail": {
+                    "code": 422,
+                    "reason": "idempotency_key_conflict",
+                    "message": "Idempotency-Key 已被不同请求体使用：同一键只能绑定同一逻辑操作（同 body 重试请保持请求体一致，或换新键）"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Upstream write timeout - landing state uncertain (Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, default 25s < client 30s, Issue #2084). Do NOT blind-retry: read back first; retry only after confirming the write did not land.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 504,
+                    "uncertain": true,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；确认未落地才重试"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in flight (Issue #2084): the upstream write executes only once.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "code": 409,
+                    "reason": "idempotency_in_flight",
+                    "message": "同键请求正在执行中：请等待本次完成，或按 504 uncertain 回读指引先核对落地状态（禁止盲重试；接管窗口外的 in_flight 记录可带原键重试）"
+                  }
                 }
               }
             }
@@ -4263,6 +4726,148 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs": {
+      "get": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "List commit check runs (CI checks)",
+        "description": "Lists CI check runs for a commit ref/head sha (read-only; Issue #2035). GitHub: passthrough of the native `GET /repos/{owner}/{repo}/commits/{ref}/check-runs` (response shape = GitHub check-runs: total_count + check_runs[]{name,status,conclusion,details_url,...}). GitCode: no native check-runs API — adapted from the Actions v8 API (runs filtered by head_sha + per-run jobs), mapped to the same field semantics: conclusion=failure (e.g. secret-scan failed) is distinguishable from status=in_progress (checks still running). Degradation semantics are explicit and never silently empty: 404 detail.code=ref_not_found (ref does not exist), 404 checks_unavailable (Actions channel unavailable for the repo), 403 passthrough (no permission), 200 total_count=0 (channel OK, this commit simply has no checks). Prefer the PR head sha as ref (from `git-repo pulls get`) — on the GitCode channel every ref (branch names, slash refs, and full 40-hex shas) is existence-verified and resolved to its head commit sha: non-existent refs (including well-formed but fake shas) → 404 ref_not_found, matching GitHub-native behavior.",
+        "operationId": "gitrepo_checks_list",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/commits/{ref}/status": {
+      "get": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "List commit statuses (combined)",
+        "description": "Lists commit statuses (combined status) for a commit ref/head sha (read-only; Issue #2035). GitHub: passthrough of the native `GET /repos/{owner}/{repo}/commits/{ref}/status` (combined: {state, total_count, sha, statuses[]{state,context,target_url,description,...}}; a commit with no statuses returns 200 with total_count=0). GitCode: passthrough of the Gitea-lineage combined status path (`/api/v5/repos/{owner}/{repo}/commits/{sha}/status`) after resolving the ref to a commit sha — every ref (branch names, slash refs, and full 40-hex shas) is existence-verified, so non-existent refs (including well-formed but fake shas) → 404 ref_not_found. Degradation semantics are explicit and distinguishable: 404 detail.code=ref_not_found (ref does not exist), 404 statuses_unavailable (no status records or the platform has no status channel for this repo — verified against a resolved ref), 403 passthrough (no permission). Never silently returns an empty list to mask upstream errors.",
+        "operationId": "gitrepo_statuses_list",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ref"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -8043,7 +8648,7 @@
           "settings"
         ],
         "summary": "Get agent runtime detail",
-        "description": "Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.",
+        "description": "Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner/desired_plugins). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.",
         "operationId": "settings_agent_runtime_detail",
         "parameters": [
           {
@@ -10490,6 +11095,1371 @@
           }
         ],
         "x-token-scope": "user_only"
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "List plugins",
+        "description": "Lists plugins: official visible to all, user visible to owner, repo visible to members. Supports scope/repo/category_id filtering, q keyword, sort (latest/hot) and paging.",
+        "operationId": "plugins_list",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Category Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/categories": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "List plugin categories",
+        "description": "Lists plugin categories (grape_t_plugin_category table).",
+        "operationId": "plugins_categories",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/by-id/{plugin_id}": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Plugin detail",
+        "description": "Plugin detail incl. manifest content and zip_url (short-lived signed URL). Access: official public, user=owner, repo=managed by caller.",
+        "operationId": "plugins_detail",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "delete": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Revoke shelf entry (soft delete)",
+        "description": "Issue #1799 B1：市场侧条目软删——status=revoked + revoked_at 留痕，行与对象包保留（台账可追溯），货架/详情/下载随之下架。与 runtime 卸载 DELETE /api/plugins/{name}（注销已安装插件）语义不同、互不影响。权限：user scope 仅本人；repo scope 需托管成员；official 货架为部署内置，不支持市场侧软删（403）；重复删 409 显式冲突提示。",
+        "operationId": "plugins_market_delete",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/plugins/by-id/{plugin_id}/download": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Download plugin package with content_hash verification",
+        "description": "B2 #1085 消费链路统一入口（下载/安装/物化取包）：从对象存储读包后重算 sha256 指纹与入库 content_hash 比对——不一致 409 拒绝（防篡改），对象缺失 404。可见性对齐详情：official 公开；user 仅本人；repo 托管成员。",
+        "operationId": "plugins_download",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/by-id/{plugin_id}/versions": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "List all versions of a plugin (ledger)",
+        "description": "Issue #1799 B1：返回某插件同 (name, scope, owner) 版本族全部记录（active=生效 / superseded=被顶替历史 / revoked=软删台账），生效版本排前，updated_at 降序。可见性对齐详情端点。",
+        "operationId": "plugins_versions",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/by-id/{plugin_id}/rollback": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Roll back effective version",
+        "description": "Issue #1799 B1：版本族内切换生效版本——目标版本置 active，其余 active 行降 superseded（历史版本保留可再回滚）。revoked 目标不可回滚（409 显式冲突，提示重传恢复）。权限对齐软删端点：user 本人；repo 托管成员；official 部署内置 403。",
+        "operationId": "plugins_rollback",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/plugins/search": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Search plugins",
+        "description": "Plugin lookup: exact name/display_name match first, then keyword match on description/display_name/author.",
+        "operationId": "plugins_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/{plugin_id}/like": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Toggle plugin like",
+        "description": "Toggles a plugin like: liked -> unlike, not liked -> like.",
+        "operationId": "plugins_like_toggle",
+        "parameters": [
+          {
+            "name": "plugin_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plugin Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/upload": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Upload plugin (user personal / repo)",
+        "description": "Uploads a plugin ZIP (manifest.json required in plugin dir). scope=user stores a personal plugin; scope=repo requires repo. L0 validation runs synchronously (A1 adapter; builtin minimal fallback when A1 not merged).",
+        "operationId": "plugins_upload",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_plugins_upload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/validate-consistency": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Dry-run source consistency check (no persist)",
+        "description": "Issue #1798 dry-run：预上传自检「上架包 == 仓库 HEAD 产物」。入参与 /upload 同（file + scope + source_repo + source_ref），返回同一份 consistency 评估（diff 清单/告警），不写对象存储、不落库。mismatch 在 dry-run 中不映射 409——自检输出以 200 + consistency.status 呈现，由调用方（如 plugin-publish）决定处置。",
+        "operationId": "plugins_validate_consistency",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_plugins_validate_consistency"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/installed": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "List plugins",
+        "description": "Lists installed plugins (plugin.json manifests registered server-side, #1089).",
+        "operationId": "plugins_runtime_list",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/install": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Install plugin",
+        "description": "Installs (registers) a plugin from its plugin.json manifest; bundled_skills linkage: missing skills are created and annotated, existing skills only annotated (#1089 hook ⑤).",
+        "operationId": "plugins_runtime_install",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginInstallBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/plugins/agent-defaults": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Agent-type default plugins",
+        "description": "Issue #1089 hook ③ frontend selector data: agent-description.json agent.plugins per agent type (seed defaults pushed to runtimes via register desired_plugins).",
+        "operationId": "plugins_runtime_agent_defaults",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/{name}": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Plugin detail",
+        "description": "Returns one installed plugin by name (credentials / bundled_skills resolved).",
+        "operationId": "plugins_runtime_detail",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "delete": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Uninstall plugin",
+        "description": "Uninstalls a plugin; bundled skills created by the plugin are removed, pre-existing skills keep but lose the source annotation (#1089 hook ⑤).",
+        "operationId": "plugins_runtime_uninstall",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/plugins/{name}/skills": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Plugin bundled skills",
+        "description": "Returns the plugin's bundled_skills with skill-market rows (annotation state).",
+        "operationId": "plugins_runtime_bundled_skills",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/{name}/credentials": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Save plugin credentials",
+        "description": "Saves the current user's credentials for a plugin (user_credentials provider=plugin:{name}); consumed by the scene-apply credential negotiation (#1089 hook ①). Values are write-only; GET returns existence only.",
+        "operationId": "plugins_runtime_save_credentials",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Plugin credential existence",
+        "description": "Returns which credential keys are configured for the current user (no values — privacy parity with /credentials).",
+        "operationId": "plugins_runtime_get_credentials",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/{name}/config": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Get my plugin param defaults",
+        "description": "A4 配置继承链·个人档：读取当前用户对该插件的参数默认值（grape_t_plugin_config_overlays scope=personal）。未配置返回空对象。",
+        "operationId": "plugins_config_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "put": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Save my plugin param defaults",
+        "description": "A4 配置继承链·个人档：保存当前用户对该插件的参数默认值（仅写差异项，config 合并进既有 overlay）。任务运行时 Runner 从继承链现场解析。",
+        "operationId": "plugins_config_put",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/agent/report-missing": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Report missing plugins (agent negotiation)",
+        "description": "D1-a missing-plugin negotiation for the executing agent: reports required but uninstalled plugins with suggested install items. Enqueues into the unified plugin confirmation queue (source=agent_report); degrades to a comment-channel payload when the queue is unavailable. Always 200 - never blocks the task core path. Session-token requests are repo/agent scoped by the token itself.",
+        "operationId": "plugins_agent_report_missing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportMissingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugins/agent/installed": {
+      "get": {
+        "tags": [
+          "plugins"
+        ],
+        "summary": "Current installed plugin capabilities (agent refresh)",
+        "description": "Returns the currently available plugin capability list (B5-materialized state, degrade-first). Used by the agent to refresh capabilities within the same task after a confirmed install; bypasses the TTL cache to reflect the latest materialized state. Session-token requests are repo-scoped by the token itself.",
+        "operationId": "plugins_agent_installed",
+        "parameters": [
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "runtime_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Runtime Id"
+            }
+          },
+          {
+            "name": "scene_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Scene Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugin-market/validate": {
+      "post": {
+        "tags": [
+          "plugin-market"
+        ],
+        "summary": "Validate Plugin",
+        "description": "上架前 manifest 门禁：schema 结构校验；probe=true 时附带免凭据命令探测。\n\n直接复用校验器公开入口 validate_manifest（探测 exec 白名单强制），\n路由层不自行拼装报告/反 import 校验器私有件。",
+        "operationId": "plugin_market_validate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestValidateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/plugin-market/validate-package": {
+      "post": {
+        "tags": [
+          "plugin-market"
+        ],
+        "summary": "Validate Plugin Package",
+        "description": "上传门禁：插件包 zip 解包后做 schema + 禁二进制（+ 可选探测）。\n\n同步 def 路由（FastAPI 自动进线程池）：zip 校验/解压/子进程探测均为阻塞\n操作，不占用事件循环；上传流分块读取，累计超限立即 413，不全量缓冲。",
+        "operationId": "plugin_market_validate_package",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_plugin_market_validate_package"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
       }
     },
     "/api/skills": {
@@ -15831,7 +17801,7 @@
           "issues"
         ],
         "summary": "Agent declares issue pending_review (阶段审核点)",
-        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。",
+        "description": "任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。",
         "operationId": "issues_pending-review",
         "parameters": [
           {
@@ -16259,7 +18229,7 @@
           "issues"
         ],
         "summary": "My issues (personal dimension)",
-        "description": "My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.",
+        "description": "My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses. Issue #2082 paging (semantics unified with issues_list/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), is clamped to a max of 100 and 0 means explicit full list. With per_page>0 the response carries total/page/per_page/has_more (total counts the filtered set).",
         "operationId": "issues_mine",
         "parameters": [
           {
@@ -16373,31 +18343,36 @@
             "description": "Issue #926：标题/编号模糊搜索（服务端过滤；前端 mine 分支已下推 &q=，此前被静默丢弃）"
           },
           {
-            "name": "per_page",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 200,
-              "minimum": 0,
-              "description": "服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）",
-              "default": 0,
-              "title": "Per Page"
-            },
-            "description": "服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"
-          },
-          {
             "name": "page",
             "in": "query",
             "required": false,
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "description": "服务端分页：页码（per_page>0 时生效）",
+              "description": "页码（1-based，per_page>0 时生效）",
               "default": 1,
               "title": "Page"
             },
-            "description": "服务端分页：页码（per_page>0 时生效）"
+            "description": "页码（1-based，per_page>0 时生效）"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量；上限 100，超限夹取",
+              "title": "Per Page"
+            },
+            "description": "每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量；上限 100，超限夹取"
           }
         ],
         "responses": {
@@ -16440,7 +18415,7 @@
           "issues"
         ],
         "summary": "Repo issue list (stage/status enriched)",
-        "description": "Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.",
+        "description": "Repo issue list (unified all view) enriched with stage/status/events. Issue #2082 paging (semantics unified with issues_mine/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), clamped to max 100 (over-limit clamped, not rejected), 0 means explicit full list; `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.",
         "operationId": "issues_list",
         "parameters": [
           {
@@ -16555,38 +18530,49 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "description": "页码（per_page>0 时生效）",
+              "description": "页码（1-based，per_page>0 时生效）",
               "default": 1,
               "title": "Page"
             },
-            "description": "页码（per_page>0 时生效）"
+            "description": "页码（1-based，per_page>0 时生效）"
           },
           {
             "name": "per_page",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 0,
-              "description": "每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）",
-              "default": 0,
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量（终态不再截断）；上限 100，超限夹取",
               "title": "Per Page"
             },
-            "description": "每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"
+            "description": "每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量（终态不再截断）；上限 100，超限夹取"
           },
           {
             "name": "recent_terminal",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "非分页模式下终态(completed/cancelled)保留的最近条数；0=全量",
-              "default": 30,
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "全量模式下终态(completed/cancelled)保留的最近条数；缺省=30（显式 per_page=0 的全量逃生口缺省=0 不截断）；0=全量",
               "title": "Recent Terminal"
             },
-            "description": "非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"
+            "description": "全量模式下终态(completed/cancelled)保留的最近条数；缺省=30（显式 per_page=0 的全量逃生口缺省=0 不截断）；0=全量"
           },
           {
             "name": "include_deleted",
@@ -22110,6 +24096,191 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/orgs/{org_id}/ov-credentials/{user_id}": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Set a member's OV credential (credential cell)",
+        "description": "组织管理员为成员（含本人）配置/重置 OpenViking 凭据（凭据格子 user_id×org）。明文经统一凭据库（vault）入库——全系统唯一持明文处，不落明文文件；格子行只存 vault 句柄。重置同格时 vault ref 稳定（句柄引用不失效）。",
+        "operationId": "orgs_ov_credential_put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOVCredentialBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Revoke a member's OV credential (revocation is permanent)",
+        "description": "吊销一格（user_id×org）：格子行与 vault 明文行同事务删除；执行期兑换（exec 端点）每次实时解析、无缓存副本——吊销即刻生效、不可复活。",
+        "operationId": "orgs_ov_credential_delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/ov-credentials": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization OV credential cells (masked)",
+        "description": "列出本组织全部 OV 凭据格子（user_id×org）。只回存在性/base_url/时间戳等元数据，凭据明文与 vault 句柄永不返回。仅组织管理员可见。",
+        "operationId": "orgs_ov_credentials_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/orgs/{org_id}/repos": {
       "get": {
         "tags": [
@@ -27361,6 +29532,103 @@
         ],
         "title": "Body_issues_upload_attachment"
       },
+      "Body_plugin_market_validate_package": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "probe": {
+            "type": "boolean",
+            "title": "Probe",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_plugin_market_validate_package"
+      },
+      "Body_plugins_upload": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "default": "user"
+          },
+          "repo": {
+            "type": "string",
+            "title": "Repo",
+            "default": ""
+          },
+          "category_id": {
+            "type": "string",
+            "title": "Category Id",
+            "default": "0"
+          },
+          "source_repo": {
+            "type": "string",
+            "title": "Source Repo",
+            "default": ""
+          },
+          "source_ref": {
+            "type": "string",
+            "title": "Source Ref",
+            "default": ""
+          },
+          "source_branch": {
+            "type": "string",
+            "title": "Source Branch",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_plugins_upload"
+      },
+      "Body_plugins_validate_consistency": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "default": "user"
+          },
+          "source_repo": {
+            "type": "string",
+            "title": "Source Repo",
+            "default": ""
+          },
+          "source_ref": {
+            "type": "string",
+            "title": "Source Ref",
+            "default": ""
+          },
+          "source_branch": {
+            "type": "string",
+            "title": "Source Branch",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_plugins_validate_consistency"
+      },
       "Body_saml_callback_api_auth_callback__provider__post": {
         "properties": {
           "SAMLResponse": {
@@ -27600,6 +29868,19 @@
         "type": "object",
         "title": "CancelBody"
       },
+      "CertificationBody": {
+        "properties": {
+          "certified": {
+            "type": "boolean",
+            "title": "Certified"
+          }
+        },
+        "type": "object",
+        "required": [
+          "certified"
+        ],
+        "title": "CertificationBody"
+      },
       "ChangeEmailBody": {
         "properties": {
           "new_email": {
@@ -27700,6 +29981,14 @@
             "type": "string",
             "title": "Video Data",
             "default": ""
+          },
+          "plugins": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Plugins",
+            "default": []
           }
         },
         "type": "object",
@@ -27894,6 +30183,40 @@
         },
         "type": "object",
         "title": "ContextUpdateBody"
+      },
+      "ContractGuardSignalBody": {
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "title": "Host",
+            "default": ""
+          },
+          "pid": {
+            "type": "integer",
+            "title": "Pid",
+            "default": 0
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "title": "ContractGuardSignalBody",
+        "description": "Issue #2085（#1297 移植）：worker contract_guard 失败信号上报。\n\noutcome=degraded（检出 CLI 契约缓存退化/缺失）| rebuild_failed（从主控重建失败）；\nhost/pid/ts 仅供服务端日志甄别（worker 侧 http_alert_sink 就地补充）。"
       },
       "ConversationMessage": {
         "properties": {
@@ -28892,6 +31215,30 @@
         "title": "ExchangeCodeBody",
         "description": "P0-3: 一次性交换码换 JWT。"
       },
+      "ExecBody": {
+        "properties": {
+          "command": {
+            "type": "string",
+            "title": "Command"
+          },
+          "args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Args",
+            "default": {}
+          },
+          "evidence": {
+            "type": "string",
+            "title": "Evidence",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "title": "ExecBody"
+      },
       "ExecModeBody": {
         "properties": {
           "mode": {
@@ -29679,6 +32026,25 @@
         ],
         "title": "LoginWhitelistBody"
       },
+      "ManifestValidateBody": {
+        "properties": {
+          "manifest": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Manifest"
+          },
+          "probe": {
+            "type": "boolean",
+            "title": "Probe",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "manifest"
+        ],
+        "title": "ManifestValidateBody"
+      },
       "ManualBindRepoBody": {
         "properties": {
           "repo_key": {
@@ -29802,6 +32168,27 @@
         "type": "object",
         "title": "MilestoneUpdateBody",
         "description": "Issue #632：更新里程碑。全字段可选（空值不透传，存量行为不受影响）。"
+      },
+      "MissingPluginItem": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "MissingPluginItem"
       },
       "NewConversationBody": {
         "properties": {
@@ -30119,6 +32506,19 @@
         ],
         "title": "PinSceneRequest"
       },
+      "PluginInstallBody": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "PluginInstallBody",
+        "description": "安装请求体 = plugin.json 清单透传（QA Standards-7：Pydantic body）。\n\n清单字段权威校验归 registry.parse_plugin_manifest（credentials/\nbundled_skills 等结构化字段由其校验），这里 extra=\"allow\" 保持\nplugin.json 全字段透传，仅约束必须为 JSON 对象。"
+      },
       "PolishBody": {
         "properties": {
           "name": {
@@ -30160,6 +32560,26 @@
         },
         "type": "object",
         "title": "ProgressBodyV2"
+      },
+      "PutOVCredentialBody": {
+        "properties": {
+          "ov_api_key": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Ov Api Key"
+          },
+          "base_url": {
+            "type": "string",
+            "title": "Base Url",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "ov_api_key"
+        ],
+        "title": "PutOVCredentialBody",
+        "description": "Issue #2423 M2b：管理端 OV 凭据格子配置体（明文仅入 vault，永不回显）。"
       },
       "RecoverOrphansBody": {
         "properties": {
@@ -30289,6 +32709,40 @@
         "title": "RepoLLMCredentialBody",
         "description": "[repo-llm-credential] 仓库级 LLM 凭据（仓库资产，加密存储）。api_key 留空=保留旧值。"
       },
+      "ReportMissingBody": {
+        "properties": {
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingPluginItem"
+            },
+            "type": "array",
+            "title": "Missing",
+            "default": []
+          },
+          "task_ref": {
+            "type": "string",
+            "title": "Task Ref",
+            "default": ""
+          },
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "agent_type": {
+            "type": "string",
+            "title": "Agent Type",
+            "default": ""
+          },
+          "runtime_id": {
+            "type": "integer",
+            "title": "Runtime Id",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ReportMissingBody"
+      },
       "RequestFinishBody": {
         "properties": {
           "summary": {
@@ -30342,6 +32796,20 @@
           "password"
         ],
         "title": "ResetPasswordBody"
+      },
+      "RollbackBody": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "RollbackBody",
+        "description": "回滚请求体：目标版本号（版本族内唯一键 (name, version, scope, owner) 定位）。"
       },
       "RunAnalysisBody": {
         "properties": {
@@ -30761,6 +33229,12 @@
             "title": "Engine Runtime Ids",
             "default": []
           },
+          "plugins": {
+            "items": {},
+            "type": "array",
+            "title": "Plugins",
+            "default": []
+          },
           "engine_runtime_uids": {
             "items": {},
             "type": "array",
@@ -31038,6 +33512,26 @@
           "issue_summary": {
             "type": "string",
             "title": "Issue Summary",
+            "default": ""
+          },
+          "issue_number": {
+            "type": "integer",
+            "title": "Issue Number",
+            "default": 0
+          },
+          "node": {
+            "type": "string",
+            "title": "Node",
+            "default": ""
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository",
+            "default": ""
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
             "default": ""
           }
         },
@@ -31773,6 +34267,11 @@
             "type": "string",
             "title": "Evidence",
             "default": ""
+          },
+          "pr_number": {
+            "type": "integer",
+            "title": "Pr Number",
+            "default": 0
           }
         },
         "type": "object",
@@ -32410,5 +34909,187 @@
         "name": "access_token"
       }
     }
-  }
+  },
+  "x-changelog": {
+    "version": "2.3.0a1",
+    "added": [
+      "/admin/sandbox/audit/{task_id}",
+      "/admin/sandbox/audit/{task_id}/alerts",
+      "/admin/sandbox/config",
+      "/admin/sandbox/config/{config_id}",
+      "/admin/sandbox/external-api-audit/{task_id}",
+      "/admin/sandbox/paths",
+      "/admin/sandbox/paths/{path_id}",
+      "/admin/sandbox/whitelist",
+      "/admin/sandbox/whitelist/{rule_id}",
+      "/api/auth/platform-links",
+      "/api/categories/tree",
+      "/api/chat/im/wechat/login/start",
+      "/api/chat/im/wechat/login/status",
+      "/api/dashboard/efficiency",
+      "/api/dashboard/efficiency/board",
+      "/api/dashboard/efficiency/daily",
+      "/api/dashboard/efficiency/issues",
+      "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs",
+      "/api/git-repo/{owner}/{repo}/commits/{ref}/status",
+      "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean",
+      "/api/im/dingtalk/card-setup",
+      "/api/im/installations",
+      "/api/im/installations/{installation_id}",
+      "/api/im/notify-test",
+      "/api/im/outbound",
+      "/api/im/outbound/{out_track_id}/retry",
+      "/api/im/status",
+      "/api/issues/{issue_id}/reopen",
+      "/api/issues/{issue_id}/terminal-disposition",
+      "/api/orgs/repo-namespaces",
+      "/api/orgs/{org_id}/audit",
+      "/api/orgs/{org_id}/context",
+      "/api/orgs/{org_id}/context/{ctx_id}",
+      "/api/orgs/{org_id}/context/{ctx_id}/deprecate",
+      "/api/orgs/{org_id}/context/{ctx_id}/publish",
+      "/api/orgs/{org_id}/dispatches",
+      "/api/orgs/{org_id}/dispatches/{dispatch_id}",
+      "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel",
+      "/api/orgs/{org_id}/dispatches/{dispatch_id}/context",
+      "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry",
+      "/api/orgs/{org_id}/knowledge",
+      "/api/orgs/{org_id}/knowledge/{knowledge_id}",
+      "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive",
+      "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate",
+      "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish",
+      "/api/orgs/{org_id}/ov-credentials",
+      "/api/orgs/{org_id}/ov-credentials/{user_id}",
+      "/api/orgs/{org_id}/provision",
+      "/api/orgs/{org_id}/provision/repo",
+      "/api/orgs/{org_id}/provision/retry",
+      "/api/orgs/{org_id}/repo-analysis/automation/ensure",
+      "/api/orgs/{org_id}/repo-analysis/context/{repo_key}",
+      "/api/orgs/{org_id}/repo-analysis/docs",
+      "/api/orgs/{org_id}/repo-analysis/run",
+      "/api/orgs/{org_id}/repo-analysis/status",
+      "/api/orgs/{org_id}/repo-analysis/targets",
+      "/api/orgs/{org_id}/repo-map",
+      "/api/orgs/{org_id}/repo-map/analyze",
+      "/api/orgs/{org_id}/repo-map/recall",
+      "/api/orgs/{org_id}/repo-map/{repo_key}",
+      "/api/orgs/{org_id}/repo-map/{repo_key}/ai-result",
+      "/api/orgs/{org_id}/repo-map/{repo_key}/analyze",
+      "/api/orgs/{org_id}/repos",
+      "/api/orgs/{org_id}/repos/available",
+      "/api/orgs/{org_id}/repos/batch",
+      "/api/orgs/{org_id}/repos/{repo_key}",
+      "/api/orgs/{org_id}/repos/{repo_key}/transfer",
+      "/api/pipeline/handoff",
+      "/api/plugin-market/validate",
+      "/api/plugin-market/validate-package",
+      "/api/plugins",
+      "/api/plugins/agent-defaults",
+      "/api/plugins/agent/installed",
+      "/api/plugins/agent/report-missing",
+      "/api/plugins/by-id/{plugin_id}",
+      "/api/plugins/by-id/{plugin_id}/download",
+      "/api/plugins/by-id/{plugin_id}/rollback",
+      "/api/plugins/by-id/{plugin_id}/versions",
+      "/api/plugins/categories",
+      "/api/plugins/install",
+      "/api/plugins/installed",
+      "/api/plugins/search",
+      "/api/plugins/upload",
+      "/api/plugins/validate-consistency",
+      "/api/plugins/{name}",
+      "/api/plugins/{name}/config",
+      "/api/plugins/{name}/credentials",
+      "/api/plugins/{name}/skills",
+      "/api/plugins/{plugin_id}/like",
+      "/api/runtime/admin/sandbox/engines",
+      "/api/runtime/cloud-sandboxes",
+      "/api/runtime/cloud-sandboxes/{sandbox_id}",
+      "/api/runtime/issues/takeover-context",
+      "/api/runtime/tasks/{task_id}/detail",
+      "/api/scenes/engine-selector-preview",
+      "/api/scenes/skill-scope-audit",
+      "/api/scenes/tag-suggest",
+      "/api/scenes/{scene_id}/advanced-options/reveal",
+      "/api/scenes/{scene_id}/copy",
+      "/api/scenes/{scene_id}/pin",
+      "/api/settings/agent-runtimes/{rid}/readd",
+      "/api/settings/llm-credentials",
+      "/api/settings/llm-credentials/repo",
+      "/api/settings/llm-credentials/repo/{cred_id}",
+      "/api/settings/llm-credentials/repo/{cred_id}/toggle",
+      "/api/settings/llm-credentials/{cred_id}",
+      "/api/settings/llm-engine-types",
+      "/api/settings/sandbox-engines",
+      "/api/settings/sandbox-platforms",
+      "/api/settings/sandbox-provider-configs",
+      "/api/settings/sandbox-provider-configs/{provider}",
+      "/api/settings/sandbox-providers",
+      "/api/settings/sandbox-providers/{provider_id}",
+      "/api/settings/sandbox-providers/{provider_id}/health",
+      "/api/settings/sandbox-providers/{provider_id}/scan-templates",
+      "/api/settings/sandbox-providers/{provider_id}/toggle",
+      "/api/settings/sandbox-templates",
+      "/api/settings/sandbox-templates/{tpl_id}",
+      "/api/settings/sandbox-templates/{tpl_id}/bind-engine",
+      "/api/settings/sandbox-templates/{tpl_id}/bind-engine/{engine_type}",
+      "/api/settings/sandbox-templates/{tpl_id}/check",
+      "/api/settings/sandbox-templates/{tpl_id}/toggle",
+      "/api/skills/by-id/{skill_id}/comments",
+      "/api/skills/by-id/{skill_id}/files",
+      "/api/skills/by-id/{skill_id}/related",
+      "/api/skills/by-id/{skill_id}/versions",
+      "/api/skills/tag-suggest",
+      "/api/skills/{skill_id}",
+      "/api/takeover/sessions",
+      "/api/takeover/sessions/{session_id}",
+      "/api/takeover/sessions/{session_id}/abort",
+      "/api/takeover/sessions/{session_id}/attach",
+      "/api/takeover/sessions/{session_id}/finish",
+      "/api/takeover/sessions/{session_id}/progress",
+      "/api/takeover/sessions/{session_id}/request-finish"
+    ],
+    "removed": [],
+    "deprecated": [
+      "/api/dashboard/efficiency"
+    ],
+    "baseline_available": true
+  },
+  "x-endpoint-count": 390,
+  "x-groups": [
+    "a2a",
+    "agents",
+    "auth",
+    "categories",
+    "chat",
+    "dashboard",
+    "devstage",
+    "events",
+    "feedback",
+    "feishu",
+    "git-repo",
+    "grape",
+    "issues",
+    "knowledge",
+    "obs",
+    "org",
+    "orgs",
+    "patrol",
+    "pipeline",
+    "plugin",
+    "plugins",
+    "project",
+    "repos",
+    "runtime",
+    "sandbox",
+    "scenes",
+    "search",
+    "settings",
+    "skills",
+    "takeover",
+    "task",
+    "tasks"
+  ],
+  "x-source-commit": "c77202850",
+  "x-generated-at": "2026-11-20T09:25:31.625514+00:00"
 }

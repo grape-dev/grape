@@ -4162,9 +4162,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     so workers with matching engine tags can claim via claim_by_tag.
 
     pool_engine_source（local-claimer 设计）：pool_engine_ids 来源标记。
-    场景绑定路径传 'scene'，引擎自动选择传 'auto'；空=未标记（历史语义，
-    降级判定按 scene 保守处理）。调用方未显式传时：带 pool_engine_ids 且
-    evt 带 scene 上下文 → 'scene'，否则 'auto'。
+    取值三态 —— 'scene'（场景绑定）/ 'auto'（引擎自动选择）/ 'directed'
+    （Issue #2791：`engine_config.runtime_id` 定向锁定，pool 收敛为单元素）；
+    空=未标记（历史语义，降级判定按 scene 保守处理）。调用方未显式传时：
+    带 pool_engine_ids 且 evt 带 scene 上下文 → 'scene'，否则 'auto'。
+    词汇常量在 engine_select.POOL_SOURCE_*，与 db schema 注释同步。
     """
     # Issue #657/#1758：派发前统一 scope 门禁（单一判官）。
     # 所有派发路径（issue / PR 订阅 / fallback / vod / 订阅）都经由本函数入队，
@@ -4190,10 +4192,42 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.kernel.repo_key import from_repo_key
     import os as _os
 
+    # Issue #2791（P1-8）：`engine_config.runtime_id` 定向派发——统一入队口单点解析。
+    # 命中：锁定该引擎（确定性路由 runtime_id）+ pool 收敛为单元素，跳过池选择；
+    # 未命中：保持既有路由/池选择，但留结构化 WARN（runtime_id / 回落原因 / 最终选中引擎），
+    # 不静默换引擎。解析/打点/收敛实现单点在 engine_select（各派发入口共用，不复制格式）。
+    from src.domains.runtime.engine.engine_select import (
+        POOL_SOURCE_AUTO, POOL_SOURCE_DIRECTED, POOL_SOURCE_SCENE,
+        directed_pool_engine_ids, log_directed_fallback, resolve_directive_engine,
+    )
+    _directive = None
+    # 上游命中时已解析并锁定（pool_engine_source=directed）→ 这里不再重复查库/重复打点
+    if pool_engine_source != POOL_SOURCE_DIRECTED:
+        try:
+            _directive = resolve_directive_engine(
+                (evt.get("payload") or {}).get("engine_config"), repo_key, agent_type)
+        except Exception as _dir_err:
+            log.warning(f"Pipeline enqueue: resolve engine_config directive failed: {_dir_err}")
+            _directive = None
+    if _directive and _directive.get("hit"):
+        runtime_id = _directive["runtime_id"]
+        pool_engine_ids = directed_pool_engine_ids(runtime_id)
+        pool_engine_source = POOL_SOURCE_DIRECTED
+        log.info(f"Pipeline enqueue (directed): engine_config.runtime_id={runtime_id} "
+                 f"({_directive.get('engine_name') or '-'}) locked, pool selection skipped, seq={seq}")
+    elif _directive and _directive.get("requested") and not evt.get("_directed_warned"):
+        # 结构化 WARN：runtime_id + 回落原因 + 最终选中引擎（Spec 验收可观测项）
+        try:
+            log_directed_fallback(_directive, runtime_id, pool_engine_ids,
+                                  repo_key, agent_type, seq)
+            evt["_directed_warned"] = True
+        except Exception as _warn_err:
+            log.warning(f"dispatch_directed: warn log failed: {_warn_err}")
+
     # local-claimer 设计：未显式指定时按上下文推导来源（带场景上下文的绑定 = scene）
     if pool_engine_ids and not pool_engine_source:
         _scene_ctx = evt.get("scene_id") or evt.get("_scene_id") or ""
-        pool_engine_source = "scene" if _scene_ctx else "auto"
+        pool_engine_source = POOL_SOURCE_SCENE if _scene_ctx else POOL_SOURCE_AUTO
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
     # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
@@ -6703,33 +6737,28 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: linked repos worktree init failed: {e}")
 
     # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
+    # Issue #2267：会话 token 必须携带任务归属用户 id（此前固定 0，
+    # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库/创建下派）。
+    _tk_uid = 0
     try:
-        from src.kernel.auth_sdk.auth_token import issue_session_token
-        if repo_key and agent_type:
-            # Issue #2267：会话 token 必须携带任务归属用户 id。此前固定 user_id=0，
-            # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库 /
-            # 创建下派，组织流水线看起来毫无进展。
-            _tk_uid = 0
-            try:
-                if isinstance(evt, dict):
-                    _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
-                if not _tk_uid and task_id:
-                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
-                    with _sdl:
-                        _r = _sdb.cursor().execute(
-                            "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-                    _tk_uid = (_r[0] if _r else 0) or 0
-            except Exception as _uid_e:
-                from src.kernel.config import log as _uid_log
-                _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
-            env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
-                session_key=task_id or f"d_{seq}",
-                repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid))
-            # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
-            # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
-            env_extra["GRAPE_CLI_MODE"] = "WORKER"
-    except Exception as e:
-        log.warning(f"Exec agent: issue session token failed: {e}")
+        if isinstance(evt, dict):
+            _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
+        if not _tk_uid and task_id:
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+            with _sdl:
+                _r = _sdb.cursor().execute(
+                    "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            _tk_uid = (_r[0] if _r else 0) or 0
+    except Exception as _uid_e:
+        from src.kernel.config import log as _uid_log
+        _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
+    # #2790：与 enqueue 同口径——签发失败/上下文缺失写诊断（agent_tasks.errors）+ 显式日志，
+    # 不再静默降级；钩子自身异常由 safe 封装兜底记 error，不阻断派发。
+    from src.domains.runtime.engine.service import issue_and_inject_session_token_safe
+    issue_and_inject_session_token_safe(
+        env_extra, log_scope="Exec agent", session_key=task_id or f"d_{seq}",
+        repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid),
+        task_id=task_id, scope="direct", context_log_level="error")
 
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；
     # 有 agent_tasks 行 → run_kind='task'，归属自动反查，幂等键与 worker 侧一致。

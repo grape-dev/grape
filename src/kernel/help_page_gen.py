@@ -41,6 +41,7 @@ USAGE_ORDER = [
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
+    "grape-kit.md",
 ]
 
 # 独立参考文档（首页独立入口，不归入使用文档或 API 文档）
@@ -74,6 +75,10 @@ _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 OPENAPI_STATIC_URL = "/static/openapi.json"
 OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "shell" / "openapi.json"
 OPENAPI_HELP_PATH = HELP_DIR / "api" / "openapi.json"
+# 契约基线快照（CI 版本间比对用，Issue #897；契约域弃用期门禁的
+# 观察期基准不取本文件——它与删除同 PR 刷新，对删除天然失明，见
+# src/domains/contracts/deprecation.py）
+OPENAPI_BASELINE_PATH = HELP_DIR / "api" / "openapi-baseline.json"
 
 _CSS = """\
 /* Liquid Glass (twin themes) — aligned with frontend/app tokens.css */
@@ -629,6 +634,32 @@ def write_openapi_contract(schema: dict, help_path: Path | None = None,
 
     return len(new_paths) if written_any else 0
 
+
+
+def write_contract_baseline(schema: dict, path: Path | str | None = None,
+                            change_reason: str = "") -> dict:
+    """把当前契约固化为基线快照（check-openapi-endpoints / regenerate 共用写盘口径）。
+
+    维护路径：有意增删端点后执行
+    `python scripts/regenerate_openapi.py --update-baseline --reason <契约变更说明>`
+    重写基线；`change_reason` 随 `updated_at` 一并写入基线文件留痕
+    （评审面），自由文本说明不是观察期放行口（判定在
+    src/domains/contracts/deprecation.py check_deprecation_gate）。
+    """
+    from datetime import datetime, timezone
+
+    target = Path(path) if path else OPENAPI_BASELINE_PATH
+    data = dict(schema)
+    data["change_reason"] = " ".join((change_reason or "").split())
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "contract_version": (schema.get("info") or {}).get("version", ""),
+        "endpoint_count": len(schema.get("paths") or {}),
+        "change_reason": data["change_reason"],
+        "path": str(target),
+    }
 
 if __name__ == "__main__":
     n = generate()

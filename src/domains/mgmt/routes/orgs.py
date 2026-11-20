@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field  # Field：#2423 M2b 移植
 
 from src.api.deps import get_user_token_for, require_no_session_token, require_org_admin
 from src.domains.mgmt.user.org_db import (
@@ -603,3 +603,61 @@ def leave_org(org_id: str, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "Owner cannot leave the organization; transfer ownership first"})
     ok = remove_org_member(org_id, user["id"])
     return {"ok": ok}
+
+
+# ===== Issue #2423 M2b（#2423 移植）：管理端 OV 凭据格子三端点 =====
+
+class PutOVCredentialBody(BaseModel):
+    """Issue #2423 M2b：管理端 OV 凭据格子配置体（明文仅入 vault，永不回显）。"""
+    ov_api_key: str = Field(min_length=1)
+    base_url: str = ""
+
+
+@router.put("/{org_id}/ov-credentials/{user_id}",
+            operation_id="orgs_ov_credential_put",
+            summary="Set a member's OV credential (credential cell)",
+            description="组织管理员为成员（含本人）配置/重置 OpenViking 凭据（凭据格子 user_id×org）。"
+                        "明文经统一凭据库（vault）入库——全系统唯一持明文处，不落明文文件；"
+                        "格子行只存 vault 句柄。重置同格时 vault ref 稳定（句柄引用不失效）。")
+def put_ov_credential(org_id: str, user_id: str, body: PutOVCredentialBody,  # arch11 D105：org/user id 均为 UUID 串
+                      user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395 同款：写接口鉴权绑定路径 org_id（组织不存在→404；非成员→403；非管理员→403）
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
+    if not is_org_member(user_id, org_id):
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": "目标用户不是该组织的成员"})
+    from src.domains.mgmt.auth.credential_cell import put_cell
+    try:
+        put_cell(user["id"], user_id, org_id, body.ov_api_key, body.base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": 422, "message": str(e)})
+    return {"ok": True, "user_id": user_id, "org_id": org_id}
+
+
+@router.get("/{org_id}/ov-credentials",
+            operation_id="orgs_ov_credentials_list",
+            summary="List organization OV credential cells (masked)",
+            description="列出本组织全部 OV 凭据格子（user_id×org）。只回存在性/base_url/时间戳等"
+                        "元数据，凭据明文与 vault 句柄永不返回。仅组织管理员可见。")
+def list_ov_credentials(org_id: str, user: dict = Depends(require_no_session_token)):  # arch11 D105
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
+    from src.domains.mgmt.auth.credential_cell import list_cells
+    return list_cells(org_id)
+
+
+@router.delete("/{org_id}/ov-credentials/{user_id}",
+               operation_id="orgs_ov_credential_delete",
+               summary="Revoke a member's OV credential (revocation is permanent)",
+               description="吊销一格（user_id×org）：格子行与 vault 明文行同事务删除；执行期兑换"
+                           "（exec 端点）每次实时解析、无缓存副本——吊销即刻生效、不可复活。")
+def delete_ov_credential(org_id: str, user_id: str,  # arch11 D105：org/user id 均为 UUID 串
+                         user: dict = Depends(require_no_session_token)):
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
+    from src.domains.mgmt.auth.credential_cell import revoke_cell
+    if not revoke_cell(user_id, org_id):
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": "该成员未配置 OV 凭据（或已吊销）"})
+    return {"ok": True}

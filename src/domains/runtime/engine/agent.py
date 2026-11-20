@@ -277,6 +277,23 @@ def _close_proc_pipes(proc, label: str = "") -> None:
 
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
+# Issue #2791（P1-13）：首探时延窗口。worker 安装/启动完成（注册成功、或重注册拾起
+# 「起机后新装的引擎」）属于「安装完成事件」，必须立即探测，失败按指数退避重试，
+# 把「安装完成 → 首探 ok」压进 60s（P95）。此前只有注册时的一次性探测 + 600s 周期，
+# 新装引擎实测要等约 10 分钟才第一次被判 ok（母单 #2747 P1-13）。
+_PROBE_RETRY_BASE = float(os.environ.get("RUNTIME_PROBE_RETRY_BASE", "4"))
+_PROBE_RETRY_MAX = float(os.environ.get("RUNTIME_PROBE_RETRY_MAX", "20"))
+_PROBE_FIRST_WINDOW = float(os.environ.get("RUNTIME_PROBE_FIRST_WINDOW", "60"))
+
+# Issue #2791（评审 P2）：窗口起点必须贴近「安装完成」而不是「检测到安装」。
+# 重注册周期（RUNTIME_REREGISTER_INTERVAL，默认 300s）是防 id 静默失效的兜底节奏，
+# 拿它做「新装引擎」的唯一发现手段，install→首探 ok 最坏 = 300 + 60 秒（> 60s 口径）。
+# 于是再加一档廉价发现（只查 PATH，不跑 CLI/握手，15s 量级）：命中新装引擎即立即
+# 重注册 + 进首探窗口，install→ok 上界 ≈ 发现间隔 + 窗口首个尝试点（t=0）。
+_FAST_DISCOVER_INTERVAL = float(os.environ.get("RUNTIME_FAST_DISCOVER_INTERVAL", "15"))
+# 定期重注册间隔（防服务端重启后 runtime id 静默失效）
+_REREGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
+
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
 #   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
@@ -1021,6 +1038,223 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
+def _probe_backoff_seconds(fail_streak: int, base: float | None = None,
+                           cap: float | None = None) -> float:
+    """首探失败第 N 次重试前的等待秒数（指数退避 + 封顶，防止风暴式重试）。
+
+    Issue #2791（P1-13）：`base * 2^(N-1)`，上限 `cap`。封顶让单次等待既不超窗、
+    也不会高频重试（安装脚本竞态里探测本身要起 CLI 进程，不宜秒级连打）。
+    """
+    _b = _PROBE_RETRY_BASE if base is None else base
+    _c = _PROBE_RETRY_MAX if cap is None else cap
+    if fail_streak <= 0:
+        return 0.0
+    return min(_b * (2 ** (fail_streak - 1)), _c)
+
+
+def _probe_first_window_plan(window: float | None = None, base: float | None = None,
+                             cap: float | None = None) -> list:
+    """首探窗口的尝试时间表（相对「安装完成」时刻的累计偏移，首个元素恒为 0）。
+
+    t=0 立即首探（事件驱动，不等周期）；其后按指数退避排点，最后一个点仍落在窗口内。
+    可观测性/可测性都落在这份纯函数上：窗口内尝试点数、每次间隔、封顶。
+    """
+    _w = _PROBE_FIRST_WINDOW if window is None else window
+    _plan = [0.0]
+    _t = 0.0
+    _streak = 0
+    while True:
+        _streak += 1
+        _next = _t + _probe_backoff_seconds(_streak, base=base, cap=cap)
+        if _next > _w:
+            break
+        _plan.append(_next)
+        _t = _next
+    return _plan
+
+
+def _probe_engines_first_window(engines, reason: str = "install", window: float | None = None,
+                                probe_fn=None, sleep_fn=None, now_fn=None) -> dict:
+    """安装/启动完成事件驱动的首探窗口：立即探测 → 失败指数退避重试 → ok 即停。
+
+    失败不放弃（交给周期探活 600s），只在窗口内尽量把首探 ok 逼出来：
+    每次重试都有上限等待，窗口尽头停止，避免探测线程与安装脚本抢资源。
+    probe_fn/sleep_fn/now_fn 可注入（纯调度，测试不依赖真实 CLI 与挂钟）。
+    """
+    _w = _PROBE_FIRST_WINDOW if window is None else window
+    _probe = probe_fn or (lambda eng: _probe_engine_worker(eng["name"], eng.get("cli_path", "")))
+    _sleep = sleep_fn or _time_mod.sleep
+    _now = now_fn or _time_mod.monotonic
+    _iso = lambda: _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
+
+    results = {}
+    pending = {}
+    for eng in engines or []:
+        _name = eng.get("name") or ""
+        if not _name:
+            continue
+        if not eng.get("installed"):
+            # 未安装不是「首探失败」：置 skip，不进重试（装完会由重注册拾起）
+            results[_name] = {"status": "skip", "latency": 0, "last_probe": _iso(),
+                              "error": "not installed"}
+            continue
+        pending[_name] = eng
+
+    if pending:
+        log.info(f"worker engine probe (first window/{reason}): probing {sorted(pending)} immediately "
+                 f"(retry backoff base={_PROBE_RETRY_BASE}s cap={_PROBE_RETRY_MAX}s window={_w}s)")
+    _t0 = _now()
+    # 单一时间表：窗口循环只消费 _probe_first_window_plan 的排点（不在此另算退避），
+    # 免得「计划表」与「实跑表」两份推导各自漂移（评审判断项）。
+    _plan = _probe_first_window_plan(window=_w)
+    _attempt = 0
+    try:
+        for _idx, _point in enumerate(_plan):
+            _attempt += 1
+            for _name in list(pending):
+                _res = None
+                try:
+                    _res = dict(_probe(pending[_name]) or {})
+                except Exception as _pe:
+                    _res = {"status": "fail", "latency": 0, "error": str(_pe)[:200]}
+                _res["last_probe"] = _iso()
+                results[_name] = _res
+                if _res.get("status") == "ok":
+                    pending.pop(_name, None)
+            if not pending:
+                break
+            if _idx + 1 >= len(_plan):
+                log.info(f"worker engine probe (first window/{reason}): {sorted(pending)} still not ok "
+                         f"after {_now() - _t0:.0f}s ({_attempt} attempts), "
+                         f"hand over to periodic probe ({_PROBE_INTERVAL}s)")
+                break
+            _delay = _plan[_idx + 1] - _point
+            if (_now() - _t0) + _delay > _w:
+                log.info(f"worker engine probe (first window/{reason}): {sorted(pending)} still not ok "
+                         f"after {_now() - _t0:.0f}s, hand over to periodic probe ({_PROBE_INTERVAL}s)")
+                break
+            _sleep(_delay)
+    except Exception as _we:
+        log.warning(f"worker engine probe (first window/{reason}) error: {_we}")
+    finally:
+        try:
+            with _worker_probe_lock:
+                _worker_probe_results.update(results)
+        except Exception:
+            pass
+    return results
+
+
+def _start_first_probe_window(engines, reason: str = "install"):
+    """把首探窗口放到后台线程（不阻塞 worker 启动与心跳）。"""
+    _list = [e for e in (engines or []) if e.get("name")]
+    if not _list:
+        return None
+    _t = _threading.Thread(target=_probe_engines_first_window, args=(_list,),
+                           kwargs={"reason": reason}, daemon=True,
+                           name="worker-engine-first-probe")
+    _t.start()
+    return _t
+
+
+def _new_engines(prev_installed, installed) -> list:
+    """比对两次发现结果，取出「新出现且已安装」的引擎（= 安装完成事件）。"""
+    _prev = {e.get("name") for e in (prev_installed or []) if e.get("name")}
+    return [e for e in (installed or []) if e.get("name") and e.get("installed")
+            and e.get("name") not in _prev]
+
+
+def _probe_after_reregister(prev_installed, installed):
+    """重注册拾起新装引擎后立即触发首探（否则要等 600s 周期，实测约 10 分钟才可派发）。"""
+    try:
+        _new = _new_engines(prev_installed, installed)
+        if not _new:
+            return []
+        log.info(f"worker engine probe: newly installed engine(s) {[e['name'] for e in _new]} "
+                 f"detected on re-register, triggering first probe window immediately")
+        _start_first_probe_window(_new, reason="install")
+        return _new
+    except Exception as e:
+        log.warning(f"worker first-probe after re-register failed: {e}")
+        return []
+
+
+def _scan_installed_cheap() -> list:
+    """廉价安装发现：只走 PATH 查找（`discover_runtimes`），不起 CLI 进程。
+
+    与 `_discover_local_runtimes`（会跑 `<cli> --version`、hermes 可能做 ACP 握手，
+    单个引擎最长 20s）刻意分开：SUB-60s 的发现节奏只能用这份廉价数据判「装没装」，
+    版本/健康度由随后的重注册（全量发现）补齐。
+    """
+    from src.domains.runtime.engine.registry import discover_runtimes
+    return [{"name": r.get("name"), "installed": bool(r.get("installed")),
+             "cli_path": r.get("cli_path") or ""}
+            for r in (discover_runtimes() or []) if r.get("name")]
+
+
+def _fast_install_triggered(installed, scan_fn=None) -> list:
+    """快速发现：返回本次扫描命中的「新装引擎」（空 = 无安装完成事件）。
+
+    扫描异常不触发（宁可按周期兜底，也不因一次扫描失败抖动重注册）。
+    """
+    try:
+        _scan = scan_fn() if scan_fn is not None else _scan_installed_cheap()
+    except Exception as e:
+        log.warning(f"worker engine discovery (cheap scan) failed: {e}")
+        return []
+    return _new_engines(installed, _scan)
+
+
+async def _reregister_cycle(client, installed, device_name, *, now, last_reregister,
+                            last_fast_scan, cli_version: str = "", force: bool = False,
+                            fast_interval: float | None = None,
+                            reregister_interval: float | None = None,
+                            scan_fn=None, reregister_fn=None, probe_fn=None) -> dict:
+    """两档重注册决策 + 执行（worker 主循环的单点实现）。
+
+    - 周期档：`now-last_reregister >= RUNTIME_REREGISTER_INTERVAL`（防 id 静默失效）；
+    - 安装档：`now-last_fast_scan >= RUNTIME_FAST_DISCOVER_INTERVAL` 且廉价发现命中
+      「新装引擎」→ 立即重注册（拾起新引擎 runtime id）并触发首探窗口；
+    - force 档：心跳连续失败（调用方已判定必须重注册）→ 不再看时钟直接执行。
+
+    只有安装档命中（周期档未到期）才做廉价扫描，避免每轮主循环都扫 PATH。
+    返回 dict：did / triggered_by(periodic|install|"") / ok / runtime_ids /
+    engine_by_rid / installed / last_reregister / last_fast_scan。
+    """
+    _fast_iv = _FAST_DISCOVER_INTERVAL if fast_interval is None else fast_interval
+    _rr_iv = _REREGISTER_INTERVAL if reregister_interval is None else reregister_interval
+    _state = {"did": False, "triggered_by": "", "ok": True,
+              "runtime_ids": None, "engine_by_rid": None, "installed": installed,
+              "last_reregister": last_reregister, "last_fast_scan": last_fast_scan}
+
+    _periodic = (now - last_reregister) >= _rr_iv
+    _install_event = False
+    if not (force or _periodic) and (now - last_fast_scan) >= _fast_iv:
+        _state["last_fast_scan"] = now
+        _install_event = bool(_fast_install_triggered(installed, scan_fn=scan_fn))
+        if _install_event:
+            log.info(f"worker engine discovery: new engine installed after startup "
+                     f"({(_fast_iv)}s cadence), re-registering immediately")
+    if not (force or _periodic or _install_event):
+        return _state
+
+    _state.update({"did": True,
+                   "triggered_by": "forced" if force else ("periodic" if _periodic else "install")})
+    _rereg = reregister_fn or _reregister
+    _rr = await _rereg(client, installed, device_name, cli_version=cli_version)
+    if _rr is not None:
+        runtime_ids, engine_by_rid, _installed = _rr
+        _state.update({"runtime_ids": runtime_ids, "engine_by_rid": engine_by_rid,
+                       "installed": _installed})
+        _probe = probe_fn or _probe_after_reregister
+        _probe(installed, _installed)
+    else:
+        _state["ok"] = False
+    _state["last_reregister"] = now
+    _state["last_fast_scan"] = now
+    return _state
+
+
 def _worker_probe_once():
     """同步执行一轮引擎探测，结果写入 _worker_probe_results。
 
@@ -1046,6 +1280,28 @@ def _worker_probe_once():
             log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
     except Exception as e:
         log.warning(f"worker engine probe (initial) error: {e}")
+
+
+def _probe_after_registration(installed) -> list:
+    """「启动完成事件」：立即一轮探测，未 ok 的引擎进首探窗口（Issue #2791 / P1-13）。
+
+    先同步探测一轮（首个心跳必须带 probe 观测，服务端才能纠正 healthy），
+    再对没 ok 的引擎按指数退避在 60s 窗口内重试——不再干等 600s 周期探测。
+    返回进了首探窗口的引擎列表（空 = 全部已 ok）。
+    """
+    try:
+        _worker_probe_once()
+    except Exception as e:
+        log.warning(f"worker probe after registration failed: {e}")
+    try:
+        _not_ok = [r for r in (installed or []) if r.get("installed")
+                   and (_worker_probe_results.get(r.get("name")) or {}).get("status") != "ok"]
+        if _not_ok:
+            _start_first_probe_window(_not_ok, reason="startup")
+            return _not_ok
+    except Exception as _pfw:
+        log.warning(f"worker first-probe window (startup) failed to start: {_pfw}")
+    return []
 
 
 def _worker_probe_loop():
@@ -2985,7 +3241,8 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
 
     env = {}
     try:
-        env = json.loads(task.get("env_extra") or "{}")
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        env = decrypt_env_extra(task.get("env_extra"))  # enc:v1 信封解密（#2423）
     except Exception:
         pass
     # Fetch latest env (AK/SK) from server DB — overrides stale snapshot
@@ -3628,8 +3885,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         name="worker-presence-heartbeat")
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
-    RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
+    RE_REGISTER_INTERVAL = _REREGISTER_INTERVAL
     last_reregister = asyncio.get_running_loop().time()
+    last_fast_discover = last_reregister
     engine_by_rid = engine_by_rid or {}
 
     # 自动升级状态
@@ -3646,7 +3904,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     VERSION_CHECK_INTERVAL = float(os.environ.get("RUNTIME_VERSION_CHECK_INTERVAL", "3600"))
 
     while True:
-        # ---- 定期重注册（防 id 静默失效）----
+        # ---- 重注册：周期兜底（防 id 静默失效）+ 安装完成事件（SUB-60s 发现）----
+        # 决策与执行单点在 _reregister_cycle，本处只搬运状态。
         now = asyncio.get_running_loop().time()
         # ---- Issue #2514：派发前 workspace 巡检（节流）----
         # worktree list 对账 + prune + 回收「无活跃任务且超 GRAPE_WORKSPACE_TTL_HOURS」的
@@ -3654,14 +3913,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         if now - _workspace_patrol_last >= _workspace_patrol_interval():
             _workspace_patrol_last = now
             await _patrol_workspaces_active(active_task_objs)
-        if now - last_reregister >= RE_REGISTER_INTERVAL:
-            _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-            if _rr is not None:
-                runtime_ids, _new_ebr, installed = _rr
-                if _new_ebr:
-                    engine_by_rid = _new_ebr
-                heartbeat_fail_streak = 0
-            last_reregister = asyncio.get_running_loop().time()
+        _rrc = await _reregister_cycle(
+            client, installed, device_name, now=now,
+            last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+            cli_version=_read_local_worker_version(),
+            reregister_interval=RE_REGISTER_INTERVAL)
+        last_reregister = _rrc["last_reregister"]
+        last_fast_discover = _rrc["last_fast_scan"]
+        if _rrc["did"] and _rrc["ok"]:
+            runtime_ids = _rrc["runtime_ids"]
+            if _rrc["engine_by_rid"]:
+                engine_by_rid = _rrc["engine_by_rid"]
+            installed = _rrc["installed"]
+            heartbeat_fail_streak = 0
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
@@ -4039,13 +4303,19 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-                if _rr is not None:
-                    runtime_ids, _new_ebr, installed = _rr
-                    if _new_ebr:
-                        engine_by_rid = _new_ebr
+                # Issue #2791：与周期档共用同一实现（force 档）；新装引擎同样立即进首探窗口
+                _hbrc = await _reregister_cycle(
+                    client, installed, device_name, now=asyncio.get_running_loop().time(),
+                    last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+                    cli_version=_read_local_worker_version(), force=True)
+                if _hbrc["ok"]:
+                    runtime_ids = _hbrc["runtime_ids"]
+                    if _hbrc["engine_by_rid"]:
+                        engine_by_rid = _hbrc["engine_by_rid"]
+                    installed = _hbrc["installed"]
                     heartbeat_fail_streak = 0
-                    last_reregister = asyncio.get_running_loop().time()
+                    last_reregister = _hbrc["last_reregister"]
+                    last_fast_discover = _hbrc["last_fast_scan"]
                 else:
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
@@ -4463,6 +4733,30 @@ def _check_opencode_api_keys():
         )
 
 
+
+def _start_cli_version_check(log_sink=None):
+    """Issue #2695（#2695 移植）：后台线程核对 grape CLI 版本，返回该线程（不阻塞 worker 启动）。
+
+    - 线程为 daemon：worker 退出不被它拖住；
+    - 核对失败/版本未知只 warn，不阻断启动；
+    - `log_sink` 缺省回落 `log.warning`（测试可注入收集器）。
+    """
+    say = log_sink or (lambda m: log.warning(m))
+
+    def _run():
+        try:
+            from src.domains.runtime.engine.cli_version_guard import check as _cli_version_check
+            out = _cli_version_check(log=say)
+            if out.get("status") == "ok":
+                log.info(f"grape CLI version check ok: {out.get('version')}")
+        except Exception as e:  # 任何异常都不得影响 worker 启动
+            log.warning(f"grape CLI version check failed (non-blocking): {e}")
+
+    t = _threading.Thread(target=_run, name="grape-cli-version-check", daemon=True)
+    t.start()
+    return t
+
+
 def main():
     # Windows: 确保 stderr/stdout 使用 UTF-8 编码（避免 GBK 中文乱码）
     if sys.platform == "win32":
@@ -4501,6 +4795,32 @@ def main():
 
     # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
     _check_opencode_api_keys()
+    # Issue #2423 M0（#2423 移植）：机器级静态 OV conf 检测（C2 混账号风险可见性；
+    # 任务凭据已收敛服务端链路——env 无 OV 凭据 + tk_ 兑换，静态 conf 仅告警提示迁移）。
+    try:
+        from src.domains.runtime.engine.env_extra_security import warn_static_ov_conf_once
+        warn_static_ov_conf_once()
+    except Exception:
+        pass
+    # Issue #2695（#2695 移植）：worker 侧 grape CLI 版本核对（grape-cli #1634 的 issue_id 本地拦截是否在位）。
+    # 走后台 daemon 线程：探活要起子进程（最坏秒级），不得占用 main 的启动关键路径。
+    # warn-only：探活失败/版本未知不误报，功能门未发布时不告警（见 cli_version_guard）。
+    _start_cli_version_check()
+
+    # Issue #1616/#2085（#1297 移植）：CLI 契约缓存完整性检查（退化即从主控重建缓存
+    # 并告警，禁止静默进入 runtime-only 命令缺失态），失败信号经 http_alert_sink
+    # 上报主控 observability 管线（退化/重建失败分开计数；上报失败落
+    # ~/.grape/contract-guard-alerts.jsonl 本地兜底）。warn-only：不阻断 worker 启动。
+    try:
+        from src.domains.runtime.engine.contract_guard import (GUARD_DISABLE_ENV, http_alert_sink,
+                                                        run_startup_check)
+        if (os.environ.get(GUARD_DISABLE_ENV, "") or "").strip().lower() not in ("1", "true", "yes"):
+            _guard = run_startup_check(log=lambda m: log.warning(m),
+                                       alert_sink=http_alert_sink(base_url=server, token=token))
+            if _guard.get("status") == "rebuilt":
+                log.info(f"contract guard: {_guard.get('detail')}")
+    except Exception as _ge:
+        log.warning(f"contract guard startup check failed: {_ge}")
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
@@ -4601,7 +4921,9 @@ def main():
             await client.recover_orphans(rid)
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
-        await asyncio.to_thread(_worker_probe_once)
+        # Issue #2791（P1-13）：注册 = 「启动完成事件」——没 ok 的引擎进首探窗口退避重试，
+        # 而不是干等 600s 周期探测。决策/重试链单点在 _probe_after_registration。
+        await asyncio.to_thread(_probe_after_registration, installed)
 
         # Issue #2514：worker 启动巡检——worktree 对账 + prune + 跨 Issue 残留回收
         #（启动语境无活跃任务，active_dirs 为空；在跑任务由服务端 orphan 恢复后另行保护）。

@@ -111,6 +111,9 @@ class ChatMessage(BaseModel):
     conversation_id: str = ""
     image_data: str = ""  # JSON array of base64 strings, or single base64 string
     video_data: str = ""  # base64 encoded video data
+    # Issue #3169：Chat 插件多选（选中插件名数组）——必须显式声明，
+    # 否则 pydantic v2 默认丢弃未声明字段，选择永不进入会话 Prompt。
+    plugins: list[str] = []
 
 class FeedbackBody(BaseModel):
     seq: int
@@ -511,6 +514,54 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
     except Exception:
         return ""
 
+def _build_chat_prompt_for(cfg: dict, user: dict, acc: dict | None, history: list,
+                           repo_key: str, conv: dict | None, message: str,
+                           skill_name: str = "", skill_id: int = 0, *,
+                           backend_name: str = "", runtime_id=None,
+                           has_valid_session=None, plugins=None):
+    """Chat prompt 统一构建入口（Issue #2546：build_general_chat_prompt 五处复制粘贴收敛）。
+
+    task 会话（conv.conv_type=='task'）→ build_issue_chat_prompt；一般会话 →
+    build_general_chat_prompt（全仓唯一直接调用点）。后续 prompt 新增参数（如
+    runtime_id / installing_plugins）只改本函数即可覆盖全部 chat 端点，杜绝
+    「改一处漏三处」。
+
+    语义差异点显式参数化，不隐藏分支：
+    - backend_name：send/stream/submit/async 注入引擎名；_enqueue_chat 原路径
+      不注入，显式传空串。
+    - runtime_id：task 分支注入用；默认取 cfg.runtime_id；_enqueue_chat 传其
+      已解析的本机/远端 id。
+    - has_valid_session：默认（None）按 conv.runtime_session_id 经
+      _engine_aware_session_gate 计算（send/stream/submit/async 共用语义）；
+      _enqueue_chat 的会话态来自 agent session store，由调用方算好显式传入。
+
+    返回 (prompt, runtime_session_id)：runtime_session_id 为引擎感知门生效后的
+    conv 会话 id（send/stream 各自随后的 conv 回读清空逻辑保持在端点；has_valid_session
+    显式传入时为 None——调用方自持会话态，如 _enqueue_chat 用 agent session 的 id）。
+    """
+    if has_valid_session is None:
+        runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
+        runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
+    else:
+        runtime_session_id = None
+    if runtime_id is None:
+        runtime_id = cfg.get("runtime_id", 0)
+    account = user.get("username") or ""
+    if conv and conv.get("conv_type") == "task":
+        from src.kernel.prompt_builder import build_issue_chat_prompt
+        prompt = build_issue_chat_prompt(message, repo_key, history, conv,
+                                         account=account, runtime_id=runtime_id,
+                                         has_valid_session=has_valid_session,
+                                         plugins=plugins)
+    else:
+        prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
+                                           runtime_id=runtime_id,
+                                           backend_name=backend_name,
+                                           user_info=_build_web_user_info(user, acc),
+                                           has_valid_session=has_valid_session,
+                                           plugins=plugins)
+    return prompt, runtime_session_id
+
 def _save_chat_images(image_data: str, conv_id: str) -> list:
     """Save image(s) from base64 data to filesystem, return list of URL paths."""
     if not image_data:
@@ -720,16 +771,11 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     from src.api.deps import get_user_token_for_repo
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
-    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
-    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
-    if conv and conv.get("conv_type") == "task":
-        from src.kernel.prompt_builder import build_issue_chat_prompt
-        prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
-    else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
-                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc),
-                                           has_valid_session=has_valid_session)
+    # prompt 统一构建入口（Issue #2546）：task 会话走独立 prompt（注入 Issue 上下文
+    # + 场景: task）；一般会话走通用 prompt；has_valid_session 由内部会话门计算
+    prompt, _ = _build_chat_prompt_for(cfg, user, acc, history, repo_key, conv, body.message,
+                                       skill_name, skill_id, backend_name=backend_name,
+                                       plugins=body.plugins)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -770,7 +816,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     kind = runtime_execution_kind(_rid)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
-        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data, body.plugins)
 
     from src.domains.runtime.engine.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
@@ -912,16 +958,11 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     from src.api.deps import get_user_token_for_repo
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
-    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
-    # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
-    if conv and conv.get("conv_type") == "task":
-        from src.kernel.prompt_builder import build_issue_chat_prompt
-        prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
-    else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
-                                           backend_name=backend_name, user_info=_build_web_user_info(user, acc),
-                                           has_valid_session=has_valid_session)
+    # prompt 统一构建入口（Issue #2546）：task 会话走独立 prompt（注入 Issue 上下文
+    # + 场景: task）；一般会话走通用 prompt；has_valid_session 由内部会话门计算
+    prompt, _ = _build_chat_prompt_for(cfg, user, acc, history, repo_key, conv, body.message,
+                                       skill_name, skill_id, backend_name=backend_name,
+                                       plugins=body.plugins)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -1245,7 +1286,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                  "X-Accel-Buffering": "no"},
     )
 
-def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data=""):
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data="", plugins=None):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
     返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
@@ -1301,12 +1342,13 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     acc = _get_acc(user.get("username") or "") or {}
     _rsid = session.get("runtime_session_id") or ""
     has_valid_session = bool(_rsid.startswith("ses_"))
-    if conv and conv.get("conv_type") == "task":
-        from src.kernel.prompt_builder import build_issue_chat_prompt
-        prompt = build_issue_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "", runtime_id=runtime_id, has_valid_session=has_valid_session)
-    else:
-        prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
-                                           user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
+    # prompt 统一构建入口（Issue #2546）：本路径会话态来自 agent session store
+    #（has_valid_session 上方已算好显式传入）；task 分支注入解析后的 runtime_id；
+    # 原路径不注入 backend_name，保持空串
+    prompt, _ = _build_chat_prompt_for(cfg, user, acc, history, repo_key, conv, message,
+                                       skill_name, skill_id, runtime_id=runtime_id,
+                                       has_valid_session=has_valid_session,
+                                       plugins=plugins)
     # 图片理解注入
     if image_data:
         prompt += "\n\n" + _understand_image(image_data)
@@ -2049,18 +2091,11 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
-    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
-    if conv and conv.get("conv_type") == "task":
-        from src.kernel.prompt_builder import build_issue_chat_prompt
-        prompt = build_issue_chat_prompt(body.message, repo_key, history, conv,
-                                        account=user["username"], runtime_id=cfg.get("runtime_id", 0),
-                                        has_valid_session=has_valid_session)
-    else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
-                                           backend_name=backend_name,
-                                           user_info=_build_web_user_info(user, acc),
-                                           has_valid_session=has_valid_session)
+    # prompt 统一构建入口（Issue #2546）：task 会话走独立 prompt；一般会话走通用
+    # prompt；返回引擎感知门生效后的 conv 会话 id，供 agent_fn/入队续用
+    prompt, runtime_session_id = _build_chat_prompt_for(cfg, user, acc, history, repo_key, conv, body.message,
+                                                        skill_name, skill_id, backend_name=backend_name,
+                                                        plugins=body.plugins)
 
     log.info(f"Chat submit: backend={backend_name or '(none)'}, skill={skill_name}, "
              f"has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
@@ -2501,13 +2536,11 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     user_token = get_user_token_for_repo(repo_key, user["username"], user_id=user["id"])
     gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
-    runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
-    runtime_session_id, has_valid_session = _engine_aware_session_gate(cfg, runtime_session_id)
-    if conv and conv.get("conv_type") == "task":
-        from src.kernel.prompt_builder import build_issue_chat_prompt
-        prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
-    else:
-        prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name, user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
+    # prompt 统一构建入口（Issue #2546）：task 会话走独立 prompt；一般会话走通用
+    # prompt；返回引擎感知门生效后的 conv 会话 id，供入队 payload 续用
+    prompt, runtime_session_id = _build_chat_prompt_for(cfg, user, acc, history, repo_key, conv, body.message,
+                                                        skill_name, skill_id, backend_name=backend_name,
+                                                        plugins=body.plugins)
 
     # 图片理解注入
     if body.image_data:

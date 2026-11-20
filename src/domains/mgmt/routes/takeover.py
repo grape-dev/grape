@@ -145,12 +145,16 @@ def start_takeover(body: StartBody, request: Request,
     except svc.TakeoverError as e:
         return _err(e)
     sess = res.get("session") or {}
+    _bundle = res.get("bundle") or {}
     return {
         "ok": True,
         "takeover_id": sess.get("id") or "",
         "reused": bool(res.get("reused")),
-        "bundle": res.get("bundle"),
-        "warnings": (res.get("bundle") or {}).get("warnings") or [],
+        "bundle": _bundle,
+        # warnings 是稳定 code 列表（端侧按 code 映射文案）；
+        # 结构化字段（如 node_already_advanced 的 seq/agent_type）走 warning_details。
+        "warnings": _bundle.get("warnings") or [],
+        "warning_details": _bundle.get("warning_details") or {},
         "cancel_ok": res.get("cancel_ok", True),
         "cancel_error": res.get("cancel_error", ""),
         "mark_status": res.get("mark_status", ""),

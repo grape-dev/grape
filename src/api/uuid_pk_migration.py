@@ -165,7 +165,8 @@ class UuidPkMigration:
         c.execute(f"ALTER TABLE {self.pk_table} RENAME TO {old}")
         c.execute(create_stmt)
         c.execute(copy_stmt)
-        c.execute(f"DROP TABLE {old}")
+        from src.api.db_setup import _destructive_ddl  # 调用期取用（db_setup 反向调用本模块，勿模块级固化）
+        _destructive_ddl(c, f"DROP TABLE {old}", kind_hint="cleanup")
         for isql in index_sqls:
             # RENAME 会把索引 SQL 里的表名改写为旧表名，重建前替换回新表名
             isql = isql.replace(f'"{old}"', f'"{self.pk_table}"').replace(f"'{old}'", f"'{self.pk_table}'")

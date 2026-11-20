@@ -76,13 +76,15 @@ class TestChatSessionEnvExtra:
         assert _lookup_session_key(e2["GRAPE_SESSION_TOKEN"]) == "conv:test-conv"
 
     def test_issue_token_failure_degrades(self):
-        """issue_session_token 抛异常 → helper 不抛，仅缺 token 字段，其余 env 保留（chat 仍可正常回复）。"""
-        with patch("src.kernel.auth_sdk.auth_token.issue_session_token", side_effect=Exception("DB down")):
+        """issue_session_token 抛异常 → helper 不抛，仅缺 token 字段；#2790 要求留 log.error。"""
+        with patch("src.kernel.auth_sdk.auth_token.issue_session_token", side_effect=Exception("DB down")), \
+                patch("src.domains.runtime.engine.service.log.error") as err_log:
             env = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo")
         assert "GRAPE_SESSION_TOKEN" not in env
         assert "GRAPE_CLI_MODE" not in env
         assert env["USER_ID"] == "99991"
         assert env["CONVERSATION_ID"] == "test-conv"
+        assert err_log.call_count >= 1, "chat 签发失败必须打 log.error（不再静默 warning）"
 
 class TestChatSessionEnvRepoInjection:
     """Issue #1757：chat 三条路径补齐 REPO_* / ISSUE_NUMBER / GRAPE_SERVER_URL。"""

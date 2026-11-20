@@ -326,8 +326,10 @@ def test_abort_redispatches_same_node_never_next(client, monkeypatch):
 
     seen = {}
     monkeypatch.setattr(svc, "_dispatch_next", _boom)
-    monkeypatch.setattr(evmod, "redispatch_event",
-                        lambda seq, local_only=False, user=None: seen.update(seq=seq) or
+    # 重派的接缝是 abort 实际调用的服务内通道（Issue #2517 起 abort 走 redispatch_event_internal，
+    # 它显式跳过 30s 用户级幂等门；公共 HTTP 路由不在 abort 路径上）
+    monkeypatch.setattr(evmod, "redispatch_event_internal",
+                        lambda seq, user=None: seen.update(seq=seq) or
                         {"status": "redispatched", "task_id": "t_again_2", "event_seq": seq})
     r = client.post(f"/api/takeover/sessions/{sid}/abort", json={"reason": "环境不对"})
     assert r.status_code == 200, r.text
@@ -538,19 +540,20 @@ def test_abort_redispatches_node_by_default(client, monkeypatch):
 
     calls = {}
 
-    def _fake_redispatch(seq, local_only=False, user=None):
-        calls.update({"seq": seq, "local_only": local_only, "user": (user or {}).get("username")})
+    def _fake_redispatch(seq, user=None):
+        calls.update({"seq": seq, "user": (user or {}).get("username")})
         from src.api.event_store import reset_event_terminal
         reset_event_terminal(seq)
         return {"status": "redispatched", "task_id": "t_new_8", "event_seq": seq}
 
-    monkeypatch.setattr(evmod, "redispatch_event", _fake_redispatch)
+    # abort 走服务内通道 redispatch_event_internal（显式 skip_debounce），不是公共 HTTP 路由
+    monkeypatch.setattr(evmod, "redispatch_event_internal", _fake_redispatch)
     r = client.post(f"/api/takeover/sessions/{sid}/abort", json={"reason": "测完放弃"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "aborted"
     assert body["redispatch"]["ok"] is True and body["redispatch"]["task_id"] == "t_new_8"
-    assert calls == {"seq": 9008, "local_only": False, "user": "tester"}
+    assert calls == {"seq": 9008, "user": "tester"}
     assert _get("SELECT status FROM events WHERE seq=9008")[0] == "running"
 
 
@@ -562,7 +565,8 @@ def test_abort_can_skip_redispatch(client, monkeypatch):
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
         "id": 1, "username": "tester", "auth_type": "api_key", "token": "x", "token_type": "api_key"}
     called = {"n": 0}
-    monkeypatch.setattr(evmod, "redispatch_event", lambda *a, **k: called.update(n=called["n"] + 1) or {})
+    monkeypatch.setattr(evmod, "redispatch_event_internal",
+                        lambda *a, **k: called.update(n=called["n"] + 1) or {})
     r = client.post(f"/api/takeover/sessions/{sid}/abort", json={"reason": "不重派", "redispatch": False})
     assert r.status_code == 200, r.text
     assert called["n"] == 0

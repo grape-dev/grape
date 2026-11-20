@@ -39,6 +39,16 @@
 # 用户自行安装即可，worker 启动自动发现并注册；运行中装好引擎无需重启（周期重注册）。
 set -euo pipefail
 
+# #2790/#2789：容器常注入 PYTHONPATH=/app，会遮蔽 venv site-packages / 安装目录 src，
+# 导致 `python -m src.domains.runtime.engine.agent` 或 `grape` 报 ModuleNotFoundError。
+# 安装/升级/启动全程不依赖外部 PYTHONPATH：先清空，再显式 cd 到安装目录。
+unset PYTHONPATH
+
+
+# pgrep/pkill -f 匹配的是完整命令行，venv 绝对路径里的正则元字符必须先转义。
+# 回滚限域 / 停旧实例 / 启动存活判定 / 重启 四处复用同一字面量，集中一处避免改漏。
+_SED_ESCAPE_BRE='s/[.[\*^$]/\\&/g'
+
 # ===== 参数解析 =====
 TOKEN="${TOKEN:-}"
 SERVER=""
@@ -842,6 +852,20 @@ else
   _install_grape_online
 fi
 
+# ===== 4.6 安装后 CLI smoke（#2789 P0-1）=====
+# 显式带污染 PYTHONPATH=/app 跑一次（脚本顶部 unset 只作用于本进程，不能证明污染下可用），
+# 验证安装后的 grape 入口在容器注入环境下仍能启动；失败仅告警，worker 主链路仍可用。
+# #2789 CLI smoke begin
+if [ -x "$VENV/bin/grape" ]; then
+  if _cli_smoke_out="$(cd "$INSTALL_DIR" && PYTHONPATH=/app "$VENV/bin/grape" --version 2>&1)"; then
+    log "CLI smoke check passed (PYTHONPATH=/app): $_cli_smoke_out"
+  else
+    log "Warning: CLI smoke check failed under PYTHONPATH=/app: $_cli_smoke_out"
+    log "Warning: verify '$VENV/bin/grape --version' after install; an inherited PYTHONPATH must not shadow the venv (see #2790)"
+  fi
+fi
+# #2789 CLI smoke end
+
 # 能力校验（Issue #2227）：同一版本号也可能是不同构建（如离线 wheel 过旧缺 --sha），
 # 因此探测实际 --help 而不是信任 `grape --version`。缺失时显式告警并记录实际版本，
 # worker 仍继续运行（守卫退出码：scripts/check_grape_cli_drift.py；降级核验见
@@ -1078,8 +1102,41 @@ fi
 # 跨实例互斥：同机其他安装目录已登记同一 unit → fail-fast，不动它的进程/unit。
 registry_guard
 
+# #2789 boot marker begin
+# 本次启动的日志起点：升级/重装时 worker.log 里还有上一轮的行，末尾判定必须只看
+# 本次启动之后的新行（worker.log 记字节偏移，journal 记启动时间戳）。
+_BOOT_STAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+_LOG_OFFSET=$( { wc -c < "$INSTALL_DIR/data/worker.log"; } 2>/dev/null || true )
+_LOG_OFFSET="${_LOG_OFFSET// /}"
+_LOG_OFFSET="${_LOG_OFFSET:-0}"
+_USING_SYSTEMD=""
+# #2789 boot marker end
+
+# #2789 engines probe begin
+# worker 日志来源随启动方式不同：root+systemd 的 unit 没有 StandardOutput，stdout/stderr
+# 只进 journal（journalctl -u runtime-agent）；普通用户/容器 nohup 重定向到
+# data/worker.log。只 grep worker.log 会让 systemd 模式的 engines=[] 告警永不命中。
+_worker_log_has() {
+  local _needle="$1"
+  if [ -n "${_USING_SYSTEMD:-}" ]; then
+    if journalctl -u runtime-agent --since "$_BOOT_STAMP" --no-pager 2>/dev/null \
+        | grep -q -- "$_needle"; then
+      return 0
+    fi
+  fi
+  if [ -f "$INSTALL_DIR/data/worker.log" ]; then
+    if tail -c "+$((_LOG_OFFSET + 1))" "$INSTALL_DIR/data/worker.log" 2>/dev/null \
+        | grep -q -- "$_needle"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+# #2789 engines probe end
+
 if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
   # ---- root + systemd 可用：systemd 服务（unit 名按实例派生）----
+  _USING_SYSTEMD=1
   # 既有同名 unit 不属于本安装目录 → fail-fast，绝不静默覆盖/重启他人的 unit
   if [ -f "$SERVICE_FILE" ] && ! grep -qxF "WorkingDirectory=$INSTALL_DIR" "$SERVICE_FILE" 2>/dev/null; then
     log "!!! $SERVICE_FILE already exists and belongs to another install dir: $(grep -F 'WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | head -1)"
@@ -1251,6 +1308,7 @@ if [ "\$1" != "--no-daemon" ]; then
 fi
 
 cd "$INSTALL_DIR"
+unset PYTHONPATH
 export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 # 容器/无 systemd 的 root 回退路径同样会撞 agent.py 的 root 引擎守卫（exit 78）：
 # 按 euid 放行；非 root 安装不受影响（守卫只在 root 下生效）。
@@ -1259,6 +1317,27 @@ set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m ${WORKER_MODULE}
 EOF
   chmod +x "$START_SCRIPT"
+# ===== 5.9 hermes 模型配置对齐校验（Issue #2545：模型名 vs 网关 /v1/models）=====
+# chat 切 hermes 引擎 404 Model not found 的根因是 config.yaml 模型名不在 key
+# 所属网关可用列表——安装期即拦截（而非运行时透传 404 给用户）。
+# 统一走包内 src/domains/runtime/engine/engine_model.py（与探针/Windows 侧同一实现）：
+#   - 模型名不对齐 → 模块打印「配置模型名 vs 可用列表」对照并 exit 1 → 安装失败；
+#   - 网关不可达 → 模块降级告警 exit 0（不误伤离线安装）；
+#   - 无 config.yaml（本机不用 hermes）→ 跳过。
+# ⚠️ 必须在「杀旧起新」之前：校验失败时不能杀掉正在运行的旧 worker。
+_hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+if [ -f "$_hermes_home/config.yaml" ]; then
+  log "Validating hermes model config against gateway /v1/models ($_hermes_home/config.yaml, Issue #2545)..."
+  if ( cd "$INSTALL_DIR" && "$VENV/bin/python" -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home" ); then
+    log "hermes model config validation passed (models aligned with gateway /v1/models)"
+  else
+    fail "hermes model config validation FAILED: configured model name(s) not in the gateway /v1/models list (see comparison above; fix model.default/model_aliases in config.yaml or switch key, then re-run install. See docs/deployment/model-gateway-alignment.md)"
+  fi
+else
+  log "No hermes config found ($_hermes_home/config.yaml), skipping model validation"
+fi
+unset _hermes_home
+
   # 停掉本实例旧进程（daemon + agent）：unit / PIDFile / venv 前缀 + 模块右边界，
   # 三条限域都只覆盖本安装目录——同机其他 worker（不同 VENV、不同入口模块、
   # 普通/沙箱混跑）不受影响；也不再需要按进程名扫 start-worker.sh。

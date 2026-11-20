@@ -595,10 +595,10 @@ def test_write_evidence_via_input_command():
     assert tr.has_write_evidence([tu], "") is True
 
 
-def test_write_evidence_input_command_no_write():
-    """has_write_evidence 通过 input.command 确认无写操作。"""
+def test_write_evidence_input_command_git_push():
+    """Issue #2793：git push 已纳入写证据口径（含 input.command 提取路径）。"""
     tu = {"input": {"command": "git push origin feat/issue-403"}}
-    assert tr.has_write_evidence([tu], "") is False
+    assert tr.has_write_evidence([tu], "") is True
 
 # ════════════════════════════════════════════════════════════
 # 借鉴 PR #573 的增强：task:retry 实时透出 + 分类失败摘要 + config 常量

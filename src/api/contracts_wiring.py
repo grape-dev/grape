@@ -29,6 +29,7 @@ from typing import Any, Callable, Sequence
 from src.kernel.ports import (
     accounts,
     engines,
+    plugins,
     im,
     oauth,
     pipeline,
@@ -156,6 +157,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         # 前面候选先命中，既有符号解析不变。
         "src.domains.mgmt.user.db",
     ),
+    "plugins": (
+        "src.domains.runtime.engine.plugin_state",
+    ),
     "im": (
         "src.domains.runtime.im.feishu_async",
         "src.domains.runtime.public",
@@ -183,6 +187,7 @@ _PORTS = {
     "engines": engines,
     "im": im,
     "pipeline": pipeline,
+    "plugins": plugins,
 }
 
 

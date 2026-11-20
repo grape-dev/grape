@@ -254,6 +254,7 @@
   "toast.update_success": "Skill updated",
   "toast.update_failed": "Update failed: {{msg}}",
   "filter_all_l1": "All Domains",
+  "plugins_tab": "Plugins",
   "filter_all_l2": "All Scenarios",
   "upload_cat_l1": "Domain",
   "upload_cat_l2": "Scenario",

@@ -128,6 +128,13 @@ def invalidate_user_cache(uid: str) -> None:
     """主动失效用户状态缓存（密码重置/禁用/登出时调用）。"""
     _user_status_cache.pop(uid, None)
 
+
+def extract_api_token(request) -> str:
+    """``_extract_api_token`` 公开别名（Issue #2084，#2084 移植：幂等层跨模块复用，
+    不外引下划线私有符号）。"""
+    return _extract_api_token(request)
+
+
 def _extract_api_token(request) -> str:
     """三通道取值：Authorization: Bearer / PRIVATE-TOKEN header / ?access_token= query。"""
     auth = request.headers.get("authorization", "")

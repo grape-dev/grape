@@ -86,3 +86,14 @@ def has_recent_activity(cursor, task_id, window_seconds: int,
         if _e is not None and _e >= _cutoff:
             return True
     return False
+
+
+def has_no_recent_activity(cursor, task_id, window_seconds: int,
+                           now_epoch: float | None = None) -> bool:
+    """Issue #2793：running 任务在 window_seconds 内是否**无**活跃产出（假死判据）。
+
+    与 `has_recent_activity` 共用同一活跃度口径（`task_messages.created_at` 宽容
+    解析 → epoch 数值比较，SQL 内不对时间列做函数运算），语义取反即可；
+    单独具名以固定「无进展」测试 seam，避免调用方各写一套取反逻辑。
+    """
+    return not has_recent_activity(cursor, task_id, window_seconds, now_epoch=now_epoch)

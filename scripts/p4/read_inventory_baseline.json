@@ -1,27 +1,54 @@
 {
-  "files_scanned": 601,
+  "files_scanned": 662,
   "stats": {
-    "total": 26,
-    "bare": 26,
+    "total": 29,
+    "bare": 29,
     "converted": 0,
     "bare_by_host": {
       "api": 24,
-      "kernel": 2
+      "kernel": 2,
+      "mgmt": 3
     },
     "w1_scope": {
-      "bare": 0,
+      "bare": 3,
       "bare_by_host": {
         "insight": 0,
-        "mgmt": 0,
+        "mgmt": 3,
         "runtime": 0
       },
       "converted": 0,
-      "by_file_bare": {},
-      "classification": {},
-      "bare_classification": {},
-      "bare_tables": 0,
-      "bare_by_table": {},
-      "bare_classification_by_table": {}
+      "by_file_bare": {
+        "src/domains/mgmt/plugins/registry.py": 1,
+        "src/domains/mgmt/plugins/resolver.py": 1,
+        "src/domains/mgmt/routes/settings.py": 1
+      },
+      "classification": {
+        "manual_non_fetch": 3
+      },
+      "bare_classification": {
+        "manual_non_fetch": 3
+      },
+      "bare_tables": 2,
+      "bare_by_table": {
+        "agent_runtimes": 2,
+        "skill": 1
+      },
+      "bare_classification_by_table": {
+        "agent_runtimes": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 2
+        },
+        "skill": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        }
+      }
     },
     "shared_scope": {
       "total": 26,
@@ -31,10 +58,10 @@
         "kernel": 2
       }
     },
-    "tables": 13,
-    "bare_tables": 13,
+    "tables": 14,
+    "bare_tables": 14,
     "table_sites": {
-      "agent_runtimes": 6,
+      "agent_runtimes": 8,
       "agent_tasks": 2,
       "backend_agents": 4,
       "devops_pipeline_scene": 1,
@@ -46,17 +73,18 @@
       "gsb_provider_route": 2,
       "meta": 3,
       "runtime_credentials": 4,
+      "skill": 1,
       "task_messages": 1
     },
     "classification": {
       "auto": 3,
-      "manual_non_fetch": 23
+      "manual_non_fetch": 26
     }
   },
   "sites": [
     {
       "file": "src/api/db_setup.py",
-      "line": 1085,
+      "line": 1276,
       "func": "_copy_backend_to_runtime",
       "host": "api",
       "status": "bare",
@@ -69,7 +97,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 6147,
+      "line": 6407,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -82,7 +110,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 6150,
+      "line": 6410,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -95,7 +123,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 6152,
+      "line": 6412,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -108,7 +136,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8026,
+      "line": 8286,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -121,7 +149,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8050,
+      "line": 8310,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -134,7 +162,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8063,
+      "line": 8323,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -147,7 +175,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8221,
+      "line": 8481,
       "func": "_fn_retire_vcs_platforms_hidden",
       "host": "api",
       "status": "bare",
@@ -160,7 +188,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8577,
+      "line": 8939,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -173,7 +201,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8582,
+      "line": 8944,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -186,7 +214,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8585,
+      "line": 8947,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -199,7 +227,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8617,
+      "line": 8979,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -212,7 +240,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8636,
+      "line": 8998,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -225,7 +253,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8675,
+      "line": 9037,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -239,7 +267,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8941,
+      "line": 9303,
       "func": "_migration_868_backfill_session_uids",
       "host": "api",
       "status": "bare",
@@ -252,7 +280,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9068,
+      "line": 9430,
       "func": "_migration_1011_backfill_rederive_engine_uids",
       "host": "api",
       "status": "bare",
@@ -265,7 +293,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9075,
+      "line": 9437,
       "func": "_migration_1011_backfill_rederive_engine_uids",
       "host": "api",
       "status": "bare",
@@ -278,7 +306,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9126,
+      "line": 9488,
       "func": "_backfill_missing_migration_reports",
       "host": "api",
       "status": "bare",
@@ -291,7 +319,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9561,
+      "line": 9923,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -304,7 +332,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9603,
+      "line": 9965,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -317,7 +345,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9669,
+      "line": 10031,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -331,7 +359,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9691,
+      "line": 10053,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -344,7 +372,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 10036,
+      "line": 10409,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",
@@ -357,7 +385,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 10054,
+      "line": 10427,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",
@@ -367,6 +395,45 @@
       ],
       "dynamic": false,
       "sql": "SELECT 1 FROM grape_t_external_identity_tombstones WHERE provider=? AND external_id=?"
+    },
+    {
+      "file": "src/domains/mgmt/plugins/registry.py",
+      "line": 134,
+      "func": "install_plugin",
+      "host": "mgmt",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "skill"
+      ],
+      "dynamic": false,
+      "sql": "SELECT id FROM skill WHERE skill_name=? AND is_active=1 LIMIT 1"
+    },
+    {
+      "file": "src/domains/mgmt/plugins/resolver.py",
+      "line": 139,
+      "func": "installed_plugin_names",
+      "host": "mgmt",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT installed_plugins FROM agent_runtimes WHERE id=?"
+    },
+    {
+      "file": "src/domains/mgmt/routes/settings.py",
+      "line": 1865,
+      "func": "_runtime_desired_plugins",
+      "host": "mgmt",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "agent_runtimes"
+      ],
+      "dynamic": false,
+      "sql": "SELECT desired_plugins FROM agent_runtimes WHERE id=?"
     },
     {
       "file": "src/kernel/gsb/route_config.py",

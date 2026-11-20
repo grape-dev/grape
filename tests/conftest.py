@@ -206,3 +206,162 @@ def _reset_gsb_lb_state():
     except Exception:  # noqa: BLE001
         pass
     yield
+
+# ============================== redispatch 路由测试共享件（Issue #2547 QA 复审收敛，port 到 arch11） ==============================
+# 原 test_issue_521 / test_issue_2547 两文件 setup_db 脚手架大段同款，收敛到这里单一来源。
+# schema 取两文件并集（2547 版含 event_active_guard 与 events 全列），互相兼容。
+
+@pytest.fixture()
+def redispatch_mem_db(monkeypatch):
+    """重派路由测试共享内存库：agent_tasks / agent_runtimes / runtime_credentials /
+    engine_capabilities / events / devops_agent_session / event_active_guard。
+
+    防污染预导入：org_db / event_pipeline / session_store / user.db 均在模块级
+    `from src.kernel.session_manager import db` 捕获连接——必须赶在 sm.db 被 patch 成
+    内存库之前完成首次导入，否则其模块级 db 会捕获本 fixture 的临时连接，
+    teardown close 后污染同会话后续用例（append_event 审计链路实测踩坑）。
+    """
+    import sqlite3
+    import threading
+    from src.domains.runtime.engine import service as svc
+
+    import src.domains.mgmt.user.org_db  # noqa: F401
+    from src.domains.runtime.pipeline import event_pipeline  # noqa: F401
+    import src.api.session_store  # noqa: F401
+    from src.domains.mgmt.user import db as _udb  # noqa: F401
+
+    test_db = sqlite3.connect(":memory:", check_same_thread=False)
+    test_db.execute("PRAGMA foreign_keys=OFF")
+    test_db.executescript("""
+    CREATE TABLE agent_tasks (
+        id TEXT PRIMARY KEY, agent_session_id TEXT DEFAULT '', runtime_id INTEGER DEFAULT 0,
+        event_seq INTEGER, issue_id TEXT DEFAULT '', repo_key TEXT DEFAULT '',
+        agent_type TEXT DEFAULT '', skill TEXT DEFAULT '', skill_id INTEGER DEFAULT 0,
+        prompt TEXT DEFAULT '', cwd TEXT DEFAULT '', runtime_session_id TEXT DEFAULT '',
+        event_type TEXT DEFAULT '', account TEXT DEFAULT '', user_id INTEGER DEFAULT 0,
+        repo_gitcode_token TEXT DEFAULT '', env_extra TEXT DEFAULT '{}',
+        skill_files TEXT DEFAULT '{}', server_url TEXT DEFAULT '',
+        issue_session_id TEXT DEFAULT '',
+        project_info_files TEXT DEFAULT '{}', project_info_meta TEXT DEFAULT '{}',
+        knowledge_files TEXT DEFAULT '{}', project_info_file_urls TEXT DEFAULT '{}',
+        knowledge_file_urls TEXT DEFAULT '{}', attempts INTEGER DEFAULT 0,
+        pool_agent_type TEXT DEFAULT '', affinity_runtime_id INTEGER DEFAULT 0,
+        pool_tag TEXT DEFAULT '', pool_engine_ids TEXT DEFAULT '',
+        status TEXT DEFAULT 'queued', stream_ended INTEGER DEFAULT 0, self_reported INTEGER DEFAULT 0,
+        exit_code INTEGER, result_text TEXT DEFAULT '', errors TEXT DEFAULT '', stderr TEXT DEFAULT '',
+        usage_json TEXT DEFAULT '{}', started_at TEXT, completed_at TEXT, created_at TEXT,
+        user_gitcode_token TEXT DEFAULT ''
+    );
+    CREATE TABLE agent_runtimes (
+        id INTEGER PRIMARY KEY, name TEXT, status TEXT DEFAULT 'offline',
+        healthy INTEGER DEFAULT 0, installed INTEGER DEFAULT 0, credential_id INTEGER DEFAULT 0,
+        last_seen_at TEXT, scope TEXT DEFAULT '', busy_slots INTEGER DEFAULT 0,
+        max_concurrent INTEGER DEFAULT 4, probe_status TEXT DEFAULT '',
+        /* 沙箱迁移列（service.get_task JOIN 只读）——arch-weekly-11 整线合并补齐 */
+        provider TEXT DEFAULT '', runtime_type TEXT DEFAULT 'local', runtime_info TEXT DEFAULT '',
+        engine_uid VARCHAR(36) DEFAULT NULL
+    );
+    CREATE TABLE runtime_credentials (
+        id INTEGER PRIMARY KEY, scope TEXT DEFAULT 'global', owner_id TEXT DEFAULT '',
+        owner_name TEXT DEFAULT '', device_name TEXT DEFAULT '', status TEXT DEFAULT 'active'
+    );
+    CREATE TABLE engine_capabilities (
+        runtime_id INTEGER, tag TEXT, max_concurrent INTEGER DEFAULT 4, enabled INTEGER DEFAULT 1
+    );
+    CREATE TABLE events (
+        seq INTEGER PRIMARY KEY, repo_key TEXT, event_type TEXT, source TEXT, issue_id TEXT,
+        title TEXT, summary TEXT, actor TEXT, payload TEXT DEFAULT '', agent_type TEXT,
+        runtime TEXT, skill TEXT, status TEXT, exit_code INTEGER, duration REAL,
+        agent_logs TEXT, result TEXT, structured_output TEXT,
+        created_at TEXT, started_at TEXT, completed_at TEXT, entity_type TEXT DEFAULT '',
+        scene_id TEXT DEFAULT '', org_id INTEGER DEFAULT 0, idempotency_key TEXT DEFAULT ''
+    );
+    CREATE TABLE devops_agent_session (
+        repo_key TEXT, agent_type TEXT, runtime_id INTEGER DEFAULT 0
+    );
+    CREATE TABLE event_active_guard (
+        repo_key TEXT, issue_id TEXT, agent_type TEXT, seq INTEGER, created_at TEXT
+    );
+    """)
+    _lock = threading.RLock()
+    # redispatch_event 内部均为函数级 import：patch 模块属性即可全部生效
+    import src.kernel.session_manager as _sm
+    import src.api.event_store as _es
+    monkeypatch.setattr(_sm, "db", test_db, raising=False)
+    monkeypatch.setattr(_sm, "db_lock", _lock, raising=False)
+    monkeypatch.setattr(_es, "db", test_db, raising=False)
+    monkeypatch.setattr(_es, "db_lock", _lock, raising=False)
+    monkeypatch.setattr(svc, "db", test_db, raising=False)
+    monkeypatch.setattr(svc, "db_lock", _lock, raising=False)
+    yield test_db
+    test_db.close()
+
+
+# ===== 插件市场测试 fixtures（#1079/#1084 移植自 weekly conftest）=====
+from src.domains.mgmt.plugin_market.schema import PLATFORM_ENGINES as _PLUGIN_SIX_ENGINES  # noqa: E402
+from src.domains.mgmt.plugin_market.validator import ProbeResult  # noqa: E402
+
+
+def build_cli_manifest():
+    """最小合法 plugin.json 清单工厂（cli 适配器 + exec 白名单）；每次调用返回新 dict。"""
+    return {
+        "name": "demo-weather-cli",
+        "version": "1.0.0",
+        "adapters": [
+            {
+                "id": "default",
+                "transport": "cli",
+                "command": "demo-weather",
+                "compat": {"engines": list(_PLUGIN_SIX_ENGINES)},
+            }
+        ],
+        "commands": [
+            {
+                "name": "weather.query",
+                "adapters": ["default"],
+                "params": [{"name": "city", "type": "string", "required": True}],
+            }
+        ],
+        "permissions": {"exec": ["demo-weather"]},
+    }
+
+
+@pytest.fixture
+def cli_manifest_factory():
+    """最小合法清单工厂 fixture（可重复调用，每次生成独立 dict 供用例改写）。"""
+    return build_cli_manifest
+
+
+def _probe_stub(status, evidence="stub"):
+    def _prober(command, adapter):
+        return ProbeResult(status=status, evidence=evidence)
+    return _prober
+
+
+@pytest.fixture
+def probe_ok():
+    """探测成功桩（check_commands prober seam）。"""
+    return _probe_stub("ok")
+
+
+@pytest.fixture
+def probe_auth_required():
+    """401 分层桩：命令存在仅缺凭据。"""
+    return _probe_stub("auth_required", evidence="HTTP 401")
+
+
+@pytest.fixture
+def probe_invalid():
+    """探测失败桩（404/连接失败）。"""
+    return _probe_stub("invalid")
+
+
+@pytest.fixture(autouse=False)
+def plugin_market_stubs(request, cli_manifest_factory, probe_ok, probe_auth_required, probe_invalid):
+    """把共享工厂/桩绑定为用例实例属性，供插件市场测试文件以 self._* 引用。"""
+    inst = request.instance
+    if inst is not None:
+        inst._manifest_factory = cli_manifest_factory
+        inst._probe_ok = probe_ok
+        inst._probe_auth_required = probe_auth_required
+        inst._probe_invalid = probe_invalid

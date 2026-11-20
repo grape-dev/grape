@@ -19,12 +19,15 @@ APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend"
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     "index.html": {
-        "tokens.css": "2", "app.css": "10", "all-views.css": "66", "auth.css": "1", "faro.js": "7", "api.js": "36",
-        "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "86", "pipeline.js": "55", "agent-view.js": "51", "event-view.js": "61",
-        "chat-view.js": "61", "im-channel.js": "55", "repos-view.js": "64", "issues-view.js": "66", "account-view.js": "60", "scene-market.js": "59",
-        "skills-view.js": "59", "knowledge-view.js": "49", "runtimes-view.js": "87", "observability-view.js": "57", "organizations.js": "79", "feedback-dialog.js": "50",
-        "my-feedback.js": "50", "my-feedback-detail.js": "50", "autopilot-view.js": "55", "sandbox-view.js": "11", "deeplink.js": "1", "platform-icons.js": "2",
-        "app.js": "308", "login-view.js": "2", "onboarding-view.js": "9", "auto-recovery.js": "2", "oauth-buttons.js": "2", "host-status.js": "1",
+        "tokens.css": "2", "app.css": "10", "all-views.css": "67", "auth.css": "1", "faro.js": "7", "api.js": "36",
+        "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "88", "pipeline.js": "56",
+        "agent-view.js": "51", "event-view.js": "63", "chat-view.js": "63", "im-channel.js": "56",
+        "repos-view.js": "65", "issues-view.js": "68", "account-view.js": "62", "scene-market.js": "61",
+        "skills-view.js": "60", "plugins.js": "56", "knowledge-view.js": "49", "runtimes-view.js": "89",
+        "observability-view.js": "59", "organizations.js": "80", "feedback-dialog.js": "50", "my-feedback.js": "50",
+        "my-feedback-detail.js": "50", "autopilot-view.js": "57", "sandbox-view.js": "13", "deeplink.js": "1",
+        "platform-icons.js": "2", "app.js": "308", "login-view.js": "2", "onboarding-view.js": "9",
+        "auto-recovery.js": "2", "oauth-buttons.js": "2", "host-status.js": "1",
     },
     "admin.html": {
         "admin-view.css": "2", "tokens.css": "2", "pwd-blocklist.js": "3", "admin-view.js": "46",
@@ -35,10 +38,9 @@ FROZEN = {
     },
     "forgot.html": {
         "app.css": "10", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",
-        "forgot-view.js": "1",
+        "forgot-view.js": "3",
     },
 }
-
 # 日期型版本模块：交给 i18n_locale_cache_ratchet 的「下界 + 指纹」守护
 DATE_VERSIONED = {
     "i18n.js",
@@ -124,7 +126,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ("66", "43f02ff90893a901")
+ALL_VIEWS = ("67", "3d013bee414aa3d0")
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）

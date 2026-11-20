@@ -11,3 +11,5 @@ Grape 是一个多 Agent 协作的 DevOps 平台，通过 VOD/Issue/Coding/QA/SR
 > - **流水线（Pipeline）**：Issue 从创建到关闭的全流程，Agent 按 VOD→Issue→Coding→QA→SRE 链路协作
 
 > 📖 **部署参考**：服务端支持的环境变量见 [server-environment-variables.md](server-environment-variables.md)；Agent 执行环境变量见 [agent-environment-variables.md](agent-environment-variables.md)。
+
+> 🧩 **把 grape 装进你自己的 Agent**：grape 插件（grape-kit / grape-dsh）安装指南见 [grape-kit.md](grape-kit.md)。

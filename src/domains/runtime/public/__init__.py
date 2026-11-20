@@ -4656,6 +4656,38 @@ def trace_runtime_label(runtime_id: int) -> dict[str, str]:
     return {"engine": str(row[0] or ""), "device": str(row[1] or "")}
 
 
+def strip_task_diagnostics(errors_raw) -> str:
+    """去掉 agent_tasks.errors 里 diagnostic=True 的条目（#2790 token 诊断等）。
+
+    `errors` 既是诊断通道又是失败原因来源：诊断条目不得抢占「真实原因」。
+    实现唯一权威在 runtime 域（`service._strip_task_diagnostics`），此处只做
+    **跨域公共原语**转发——insight（trace）/ routes（事件详情）不再各写一份口径。
+    解析失败 / 非 JSON / 非 list → 原样返回（历史兼容）。
+    """
+    from src.domains.runtime.engine.service import _strip_task_diagnostics
+    return _strip_task_diagnostics(errors_raw)
+
+
+def summarize_task_errors(errors_raw, limit: int = 5) -> list[str]:
+    """任务失败归因摘要：`agent_tasks.errors` → 展示用字符串列表（最多 limit 条）。
+
+    事件详情 `task_errors`（#494）用：诊断条目先按统一口径滤掉，再逐条 str 截断 500；
+    非 JSON 纯文本原样透传，空值 → 空列表。
+    """
+    _kept = strip_task_diagnostics(errors_raw)
+    if not _kept:
+        return []
+    try:
+        _parsed = json.loads(str(_kept))
+    except (ValueError, TypeError):
+        return [str(_kept)[:500]]
+    if isinstance(_parsed, list):
+        _out = [str(e)[:500] for e in _parsed if str(e).strip()]
+    else:
+        _out = [str(_kept)[:500]]
+    return _out[:max(0, int(limit))]
+
+
 def trace_events_by_seq(seqs) -> list[dict[str, Any]]:
     """同一流水线的事件上下文（seq 候选集，按 seq 升序）。
 

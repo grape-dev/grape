@@ -43,6 +43,9 @@ SUBPROCESS_FUNCS = {"run", "check_output", "check_call", "call", "Popen"}
 HTTP_MODULES = {"requests"}
 URLOPEN_FUNCS = {"urlopen"}
 
+# A7 作用域外：只跑在进程启动（import 期 / lifespan 之前）的引导模块。
+_A7_STARTUP_ONLY_FILES = {"src/api/db_setup.py"}
+
 
 def _call_name(node: ast.Call) -> tuple[str, str]:
     """(dotted owner, func name)。owner 取到倒数第二段，兼容 a.b.c()。"""
@@ -148,7 +151,26 @@ def _scan_db_lock(tree: ast.AST, rel: str, out: list[dict]) -> None:
 
     A6  async def 里 `with db_lock:` —— 直接卡事件循环，一定报。
     A7  同步函数里 `with db_lock:` 且块内含 fetchall/executemany —— 长扫描持锁，报。
+
+    `_A7_STARTUP_ONLY_FILES` 里的模块只跑在进程启动（import 期 / lifespan 之前）：
+    那时事件循环还没有可拖垮的心跳，A7 的故障语义不成立。请求路径确实要跑迁移时，
+    调用方必须显式 `asyncio.to_thread`（server_tasks 里的迁移调用已全部如此）。
+    曾靠「整表上调基线」把这批启动期命中记进棘轮（QA G-7：上调等于豁免，不得随手抬），
+    改为在此显式声明作用域，基线随之收紧到真实请求路径命中数。
     """
+    if rel in _A7_STARTUP_ONLY_FILES:
+        # 只做 A6 判定（async def 里持锁在启动期同样会卡住启动流程，照样报）
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Module)):
+                continue
+            if not isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            for node in _walk_body(fn):
+                if isinstance(node, ast.With) and any(
+                        _is_db_lock(it.context_expr) for it in node.items):
+                    out.append({"file": rel, "line": node.lineno,
+                                "kind": "A6 db_lock in async", "detail": "with db_lock"})
+        return
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Module)):
             continue

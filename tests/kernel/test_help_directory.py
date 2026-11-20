@@ -39,6 +39,7 @@ EXPECTED_USAGE_FILES = [
     "knowledge-base.md",
     "faq.md",
     "server-environment-variables.md",
+    "grape-kit.md",
 ]
 
 EXPECTED_REFERENCE_FILES = [

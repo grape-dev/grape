@@ -1424,8 +1424,8 @@ def main():
                         # 兜底记录 sid——批末清扫用（kill 语义成功但平台未终止的箱）
                         try:
                             _leak_watch.add(getattr(inst, "sandbox_id", "") or "")
-                        except Exception:
-                            pass
+                        except Exception as _lw_e:
+                            log.debug(f"[engine-probe] leak-watch add failed: {_lw_e}")
                 finally:
                     pass  # enter 失败路径由 cloud_base.__enter__ 自 _do_kill 兜底
                 return engines
@@ -1488,8 +1488,9 @@ def main():
                             try:
                                 _Sb.connect(_sid, config=_cfg).kill()
                                 _alive.append(_sid)
-                            except Exception:
-                                pass  # connect 404=已销毁
+                            except Exception as _sk_e:
+                                # connect 404=已销毁；其余（网络抖动）留痕后继续扫
+                                log.debug(f"[engine-probe] sweep kill {_sid} failed: {_sk_e}")
                     if not _alive:
                         break
                     _leak_watch = set(_alive)
@@ -1714,8 +1715,9 @@ def main():
                     # 触发）；超时兜底重跑一轮，防 refresh 扫描链路自身故障漏检。
                     try:
                         await asyncio.wait_for(_watch_evt.wait(), timeout=_probe_watch_interval)
-                    except asyncio.TimeoutError:
-                        pass
+                    except asyncio.TimeoutError as _to_e:
+                        # 看护超时属正常节拍（refresh 未发现新模板）：留痕而非静默
+                        log.debug(f"[engine-probe] watch wait timed out: {_to_e}")
                     _watch_evt.clear()
                 _pending = await _report_providers_once()
                 if _pending:

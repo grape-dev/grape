@@ -1653,6 +1653,193 @@ def _sweep_pending_self_report_timeouts() -> int:
         log.warning(f"sweep pending_self_report timeouts failed: {e}")
         return 0
 
+
+def _requeue_no_progress(task_id, started_at, diagnostic) -> bool:
+    """Issue #2793：原子回炉一次假死任务（仅当仍是同一 running 执行）。
+
+    对齐 transient_retry._do_requeue 的重派复位惯例（service.py 实测教训）：
+    归零 runtime_id 后必须回填 pool_tag/pool_agent_type，否则池匹配不命中、
+    定向 claim 失配 → 任务永久 queued；同时 attempts+1、复位 stream_ended/
+    self_reported/exit_code/result_text，避免旧执行信号污染新一轮。
+
+    - `started_at=?` 条件更新 = 乐观并发：worker 在此期间已自报终态/已被其它路径
+      回收时 rowcount=0，不覆盖终态（防新旧执行同时写终态）；
+    - 置 started_at=NULL 即「旧执行 superseded」——started_at 是 worker run_token，
+      旧实例迟到上报会被 validate_run_token 判 stale 拒收；
+    - 释放 busy slot、事件同步回 pending，诊断写入 errors（NO_PROGRESS_REQUEUE）。
+    """
+    from src.domains.runtime.engine.transient_retry import (
+        TASK_ERROR_SLOTS, parse_task_errors,
+    )
+    try:
+        from src.domains.runtime.engine.service import release_busy_slot
+    except Exception:
+        release_busy_slot = None
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT event_seq, errors, runtime_id, pool_tag, pool_agent_type, agent_type "
+                "FROM agent_tasks WHERE id=? AND status='running' AND started_at=?",
+                (task_id, started_at)).fetchone()
+            if not row:
+                db.commit()
+                return False
+            _evt_seq, _errors, _rt_id, _pool_tag, _pool_agent_type, _agent_type = row
+            errs = parse_task_errors(_errors)
+            errs.append(diagnostic)
+            _tag = _pool_tag or (_agent_type or "")
+            _pool_type = _pool_agent_type or (_agent_type or "")
+            c.execute(
+                "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0, "
+                "attempts=COALESCE(attempts,0)+1, stream_ended=0, self_reported=0, "
+                "exit_code=NULL, result_text='', pool_tag=?, pool_agent_type=?, "
+                "created_at=?, errors=? "
+                "WHERE id=? AND status='running' AND started_at=?",
+                (_tag, _pool_type, datetime.now(timezone.utc).isoformat(),
+                 json.dumps(errs[-TASK_ERROR_SLOTS:], ensure_ascii=False),
+                 task_id, started_at))
+            if c.rowcount <= 0:
+                db.commit()
+                return False
+            if _rt_id and release_busy_slot:
+                try:
+                    release_busy_slot(_rt_id, cursor=c)
+                except Exception as _re:
+                    log.warning(f"no_progress: release_busy_slot {_rt_id} failed: {_re}")
+            if _evt_seq:
+                try:
+                    c.execute(
+                        "UPDATE events SET status='pending', result=? "
+                        "WHERE seq=? AND status IN ('running','pending')",
+                        ("NO_PROGRESS_REQUEUE: 无进展假死，已自动重派一次"
+                         f"（静默 {diagnostic.get('silent_sec')}s / 阈值 {diagnostic.get('threshold')}s）",
+                         _evt_seq))
+                except Exception as _ee:
+                    log.warning(f"no_progress: sync event pending failed seq={_evt_seq}: {_ee}")
+            db.commit()
+        return True
+    except Exception as e:
+        log.warning(f"no_progress: requeue task {task_id} failed: {e}")
+        return False
+
+
+def _sweep_no_progress_tasks(now_epoch=None) -> int:
+    """Issue #2793：running 无新日志/无进展超时自愈巡检。
+
+    判据：status='running' ∧ started_at 距今 ≥ no_progress_timeout_sec ∧ 窗口内
+    无 task_messages 产出（task_activity.has_no_recent_activity，与
+    has_recent_activity 共用活跃度口径，SQL 内不对时间列做函数运算）。命中后：
+      1. 未达 `no_progress_retries` 上限 → 写 NO_PROGRESS_REQUEUE 诊断并原子回炉一次
+         （按 _do_requeue 惯例复位 runtime_id/attempts/信号字段并回填 pool_tag，
+         先置旧执行 superseded 再排队，防新旧执行同时写终态）；
+      2. 已达上限 → 仅写一次 NO_PROGRESS_EXHAUSTED 诊断，不重派，交由原失败路径处理；
+      3. `no_progress_enabled=false`（全局/per_skill/per_repo/任务 env）→ 仅写一次
+         NO_PROGRESS_DISABLED 诊断，不重派（文档承诺的「只留诊断」）。
+    阈值/次数非法值由 task_timeout 配置链静默回退默认，坏配置不拖垮主链路。
+    重派计数存于 errors 槽位，配置上限按 TASK_ERROR_SLOTS 截断，防计数被截断丢失后无限重派。
+    返回本轮成功重派次数。
+    """
+    from src.domains.runtime.engine import task_timeout as tt
+    from src.domains.runtime.engine.task_activity import has_no_recent_activity
+    from src.domains.runtime.engine.transient_retry import (
+        TASK_ERROR_SLOTS, _append_task_error, parse_task_errors,
+    )
+    now = time.time() if now_epoch is None else float(now_epoch)
+    try:
+        cfg = tt.load_timeout_config()
+    except Exception:
+        cfg = {}
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 仅按 status 过滤，时间比较全部在 Python 侧（不在 SQL 内对时间列做函数运算）。
+            rows = list(c.execute(
+                "SELECT id, event_seq, runtime_id, started_at, skill, repo_key, env_extra, errors "
+                "FROM agent_tasks WHERE status='running'"))
+    except Exception as e:
+        log.warning(f"no_progress: scan running tasks failed: {e}")
+        return 0
+    requeued = 0
+    for row in rows or []:
+        tid, evt_seq, _rt_id, started_at, skill, repo_key, env_extra, errors = row
+        task = {"skill": skill or "", "repo_key": repo_key or "",
+                "env_extra": env_extra or "{}"}
+        try:
+            enabled = tt.no_progress_enabled(task, cfg)
+            threshold, _src = tt.no_progress_timeout_sec(task, cfg)
+            limit = tt.no_progress_retries(task, cfg)
+        except Exception:
+            continue
+        _started = _parse_iso_aware(started_at)
+        if _started is None:
+            continue  # 信息不足不判死（started_at 缺失/解析失败）
+        silent_sec = now - _started.timestamp()
+        if silent_sec < threshold:
+            continue
+        try:
+            with db_lock:
+                no_activity = has_no_recent_activity(
+                    db.cursor(), tid, threshold, now_epoch=now)
+        except Exception:
+            continue
+        if not no_activity:
+            continue
+        errs = parse_task_errors(errors)
+        if not enabled:
+            # Spec-1：开关关闭时文档承诺「只留诊断」——写一次即可，避免每轮刷屏。
+            if not any(isinstance(e, dict) and e.get("error_code") == "NO_PROGRESS_DISABLED"
+                       for e in errs):
+                try:
+                    _append_task_error(tid, {
+                        "error_code": "NO_PROGRESS_DISABLED",
+                        "task_id": tid,
+                        "silent_sec": round(silent_sec),
+                        "threshold": threshold,
+                        "note": "no_progress_enabled=false: diagnostic only, no requeue"})
+                except Exception as _de:
+                    log.warning(f"no_progress: disabled diagnostic failed for {tid}: {_de}")
+            continue
+        prior = [e for e in errs if isinstance(e, dict)
+                 and e.get("error_code") == "NO_PROGRESS_REQUEUE"]
+        # 重派计数存于 errors 槽位：上限按槽位数截断（超配上限后计数会被截断丢失 → 无限重派）
+        limit = min(limit, TASK_ERROR_SLOTS)
+        if len(prior) >= limit:
+            if not any(isinstance(e, dict) and e.get("error_code") == "NO_PROGRESS_EXHAUSTED"
+                       for e in errs):
+                try:
+                    _append_task_error(tid, {
+                        "error_code": "NO_PROGRESS_EXHAUSTED",
+                        "task_id": tid,
+                        "silent_sec": round(silent_sec),
+                        "threshold": threshold,
+                        "requeues": len(prior),
+                        "limit": limit,
+                        "note": "no-progress requeue limit reached; no further requeue, "
+                                "left to the original failure path"})
+                except Exception as _ae:
+                    log.warning(f"no_progress: exhausted diagnostic failed for {tid}: {_ae}")
+            log.info(f"no_progress: task {tid} requeue limit reached "
+                     f"(requeues={len(prior)}, limit={limit}); not requeued")
+            continue
+        diagnostic = {
+            "error_code": "NO_PROGRESS_REQUEUE",
+            "task_id": tid,
+            "silent_sec": round(silent_sec),
+            "threshold": threshold,
+            "attempt": len(prior) + 1,
+            "limit": limit,
+            "superseded_started_at": started_at,
+            "note": "running task had no new task_messages within threshold; old execution "
+                    "superseded (started_at reset) and requeued once",
+        }
+        if _requeue_no_progress(tid, started_at, diagnostic):
+            requeued += 1
+            log.info(f"no_progress: task {tid} silent {silent_sec:.0f}s >= {threshold:.0f}s "
+                     f"-> requeued (attempt {len(prior) + 1}/{limit})")
+    return requeued
+
+
 def _reap_zombie_executions() -> None:
     """僵尸执行回收：主控重启后 _poll_dispatched_completion 协程被杀，
     autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
@@ -1825,6 +2012,11 @@ async def scheduler_loop():
             await asyncio.to_thread(_sweep_pending_self_report_timeouts)
         except Exception as _se2:
             log.warning(f"Autopilot pending timeout sweep error: {_se2}")
+        # Issue #2793：running 无新日志/无进展假死 → 超时自愈重派（有上限，可开关回滚）
+        try:
+            await asyncio.to_thread(_sweep_no_progress_tasks)
+        except Exception as _np:
+            log.warning(f"Autopilot no-progress sweep error: {_np}")
 
         await asyncio.sleep(_SCHEDULER_INTERVAL)
 

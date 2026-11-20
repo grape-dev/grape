@@ -498,6 +498,39 @@ EXPECTED_PUBLIC = {
     "takeover_progress": ("post", "/api/takeover/sessions/{session_id}/progress"),
     "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
     "takeover_start": ("post", "/api/takeover/sessions"),
+    # ---- 插件体系（grape-kit）对外端点登记：这 30 条由插件面新增，原先漏登记，
+    #      锁进清单后任何新增/改名都会红（QA review：EXPECTED_PUBLIC 登记缺口）。
+    #      组级基线 contracts/openapi_baseline.json 已按受控通道重定基。
+    "gitrepo_checks_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs"),
+    "gitrepo_statuses_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/status"),
+    "orgs_ov_credential_delete": ("delete", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credential_put": ("put", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credentials_list": ("get", "/api/orgs/{org_id}/ov-credentials"),
+    "plugin_market_validate": ("post", "/api/plugin-market/validate"),
+    "plugin_market_validate_package": ("post", "/api/plugin-market/validate-package"),
+    "plugins_agent_installed": ("get", "/api/plugins/agent/installed"),
+    "plugins_agent_report_missing": ("post", "/api/plugins/agent/report-missing"),
+    "plugins_categories": ("get", "/api/plugins/categories"),
+    "plugins_config_get": ("get", "/api/plugins/{name}/config"),
+    "plugins_config_put": ("put", "/api/plugins/{name}/config"),
+    "plugins_detail": ("get", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_download": ("get", "/api/plugins/by-id/{plugin_id}/download"),
+    "plugins_like_toggle": ("post", "/api/plugins/{plugin_id}/like"),
+    "plugins_list": ("get", "/api/plugins"),
+    "plugins_market_delete": ("delete", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_rollback": ("post", "/api/plugins/by-id/{plugin_id}/rollback"),
+    "plugins_runtime_agent_defaults": ("get", "/api/plugins/agent-defaults"),
+    "plugins_runtime_bundled_skills": ("get", "/api/plugins/{name}/skills"),
+    "plugins_runtime_detail": ("get", "/api/plugins/{name}"),
+    "plugins_runtime_get_credentials": ("get", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_install": ("post", "/api/plugins/install"),
+    "plugins_runtime_list": ("get", "/api/plugins/installed"),
+    "plugins_runtime_save_credentials": ("post", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_uninstall": ("delete", "/api/plugins/{name}"),
+    "plugins_search": ("get", "/api/plugins/search"),
+    "plugins_upload": ("post", "/api/plugins/upload"),
+    "plugins_validate_consistency": ("post", "/api/plugins/validate-consistency"),
+    "plugins_versions": ("get", "/api/plugins/by-id/{plugin_id}/versions"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -521,8 +554,11 @@ def test_docs_endpoints_accessible():
     assert client.get("/openapi.json").status_code == 200
 
 def test_contract_version_and_security_schemes():
+    from src.api.contract_versioning import CONTRACT_VERSION
+
     s = _schema()
-    assert s["info"]["version"] == "2.2.0"
+    # Issue #2784：版本号改为单一来源（从现网递进的预发布版，禁跳版）
+    assert s["info"]["version"] == CONTRACT_VERSION
     schemes = s["components"]["securitySchemes"]
     assert set(schemes) == {"apiKey", "privateKey", "accessToken"}
     assert schemes["apiKey"]["scheme"] == "bearer"

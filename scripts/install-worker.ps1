@@ -25,6 +25,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# #2789：外部继承的 PYTHONPATH 会遮蔽安装目录的 src，安装全程先清空。
+if (Test-Path Env:PYTHONPATH) { Remove-Item Env:PYTHONPATH }
+
 # Issue #429: pip 版本检查提示（stderr，如 "[notice] A new release of pip is available"）
 # 在 Stop 模式下经 2>$null/2>&1 重定向会被包装成错误记录并终止脚本。从源头禁用该提示；
 # 各 pip 调用点另有 EAP 防御层（Invoke-PipQuiet），双保险。
@@ -662,6 +665,21 @@ if (-not (Test-Path $canonicalAgent)) {
     }
 }
 
+
+# ===== Issue #2545: hermes model config alignment gate (before restart) =====
+$_hermes_home = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$HOME\.hermes" }
+if (Test-Path "$_hermes_home\config.yaml") {
+    Log "Validating hermes model config against gateway /v1/models ($_hermes_home\config.yaml, Issue #2545)..."
+    # Issue #429/#2545：Stop 模式下原生命令 stderr 会终止脚本——调用前临时切 EAP=Continue
+    $_prev_eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    & "$VenvPython" -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
+    $ErrorActionPreference = $_prev_eap
+    if ($LASTEXITCODE -ne 0) { Fail "hermes model config validation FAILED: model name(s) not in gateway /v1/models (fix config.yaml or switch key; see docs/deployment/model-gateway-alignment.md)" }
+    Log "hermes model config validation passed"
+} else {
+    Log "No hermes config found, skipping model validation"
+}
+
 # ===== 6. 生成启动脚本并启动 =====
 $startScript = Join-Path $Dir "start-worker.ps1"
 
@@ -789,3 +807,5 @@ Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windo
 Log "Install complete! Verify registration:"
 Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"
 Log "  Controller WebUI Workers page should show device $Device"
+
+

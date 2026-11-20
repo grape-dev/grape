@@ -44,6 +44,10 @@ echo "=== Running all contract checks ==="
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，
 # 版本间比对不再静默跳过（QA 审查修复项）。
 "$PY" scripts/check-openapi-endpoints.py --require-baseline || exit 1
+# Issue #2837（等价 #2783）：弃用期机制文档面门禁——与上一条构成双通道防绕过。
+# 已挂牌端点必须在 help/api 与 docs/openapi 两处同步标注 Deprecated + 替代端点；
+# --require-baseline 保证共享契约基线快照随仓携带（缺失即 FAIL，不静默空转）。
+"$PY" scripts/check-api-docs.py --require-baseline || exit 1
 # 跨库视图新鲜度（缺列 1054 / 视图多余列 / 孤儿视图 1146 / 列类型漂移；
 # 缺视图默认只报告（owner-only 新表不卡门禁），需要跨域的表登记在 create-missing 清单；
 # 未配置 DB_HOST 时跳过，配置了但连不上则失败）
