@@ -526,6 +526,75 @@
           </button>
         </div>
         <div v-html="detailCardHtml"></div>
+        <div v-if="dispatchLoading" class="isk-card isk-dispatch-card">
+          <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+          <div class="isk-muted">{{ t('loading') }}</div>
+        </div>
+        <div v-else-if="dispatchDetails.length" class="isk-card isk-dispatch-card">
+          <div class="isk-card-tt">{{ t('dispatch.title') }}</div>
+          <div
+            v-for="d in dispatchDetails"
+            :key="'dispatch-' + d.id"
+            class="isk-dispatch"
+          >
+            <div class="isk-dispatch-head">
+              <b>{{ t('dispatch.batch') }} #{{ d.id }}</b>
+              <span class="isk-dispatch-badge">{{ dispatchStatusLabel(d.status) }}</span>
+              <span class="isk-muted">{{ fmtLocal(d.created_at).substring(0, 16) }}</span>
+              <span v-if="(d.targets || []).length" class="isk-muted">
+                {{ (d.targets || []).length }} {{ t('dispatch.targets') }}
+              </span>
+            </div>
+            <div v-if="!(d.targets || []).length" class="isk-muted">
+              {{ t('dispatch.empty') }}
+            </div>
+            <div
+              v-for="tgt in d.targets || []"
+              :key="d.id + '-' + tgt.repo_key"
+              class="isk-dispatch-target"
+            >
+              <div class="isk-dispatch-row">
+                <span>{{ t('dispatch.repo') }}</span>
+                <a class="isk-link" @click.prevent="openDispatchRepo(tgt)">
+                  {{ bareRepo(tgt.repo_key) }} ↗
+                </a>
+              </div>
+              <div class="isk-dispatch-row">
+                <span>{{ t('dispatch.scene') }}</span>
+                <b>{{ tgt.scene_name || tgt.scene_id || '—' }}</b>
+                <span v-if="tgt.scene_name && tgt.scene_id" class="isk-muted"
+                  >({{ tgt.scene_id }})</span
+                >
+              </div>
+              <div class="isk-dispatch-row">
+                <span>{{ t('dispatch.issue') }}</span>
+                <a
+                  v-if="tgt.child_issue_number"
+                  class="isk-link"
+                  :href="vcsUrl(tgt.repo_key, '/issues/' + tgt.child_issue_number)"
+                  target="_blank"
+                  rel="noopener"
+                  >#{{ tgt.child_issue_number }} ↗</a
+                >
+                <span v-else class="isk-muted">—</span>
+              </div>
+              <div v-if="tgt.pr_number" class="isk-dispatch-row">
+                <span>PR</span>
+                <a
+                  class="isk-link"
+                  :href="vcsUrl(tgt.repo_key, '/pull/' + tgt.pr_number)"
+                  target="_blank"
+                  rel="noopener"
+                  >#{{ tgt.pr_number }} ↗</a
+                >
+              </div>
+              <div v-if="tgt.error" class="isk-dispatch-row">
+                <span></span>
+                <span class="isk-dispatch-error">{{ tgt.error }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
         <div v-html="reviewBannerHtml"></div>
         <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
@@ -857,6 +926,14 @@ const ISSUE_DEFAULTS = {
   'cross_pipeline.scene_placeholder': '选择目标场景',
   'cross_pipeline.assignee_hint': '移交后由目标场景的 Agent 接手',
   'cross_pipeline.loading_scenes': '场景加载中...',
+  'dispatch.title': '任务派发详情',
+  'dispatch.batch': '批次',
+  'dispatch.targets': '个目标',
+  'dispatch.repo': '仓库',
+  'dispatch.scene': '场景',
+  'dispatch.issue': 'Issue',
+  'dispatch.status': '状态',
+  'dispatch.empty': '尚未派发',
 }
 function t(key, params) {
   const full = 'tasks.' + key
@@ -1938,6 +2015,112 @@ function setRepoFromKey(repoKeyRaw) {
 function currentDetailTask() {
   return detailView.value || (sel.value && !sel.value.is_pr_event ? sel.value : null)
 }
+
+// ═══════════ 任务派发详情（组织需求 → 目标仓库 / 场景 / 子 Issue） ═══════════
+const dispatchDetails = ref([])
+const dispatchLoading = ref(false)
+let dispatchReqSeq = 0
+const DISPATCH_STATUS_LABELS = {
+  planning: '计划中',
+  dispatching: '派发中',
+  running: '执行中',
+  completed: '已完成',
+  partial_failed: '部分失败',
+  failed: '失败',
+  needs_review: '待审核',
+  cancelled: '已取消',
+  pending: '待派发',
+  creating: '创建中',
+}
+function dispatchStatusLabel(status) {
+  return DISPATCH_STATUS_LABELS[String(status || '')] || String(status || '—')
+}
+function dispatchTaskOrgId(tk) {
+  return String((tk && tk.org_id) || '')
+}
+function loadDispatchDetails(tk) {
+  const seq = ++dispatchReqSeq
+  dispatchDetails.value = []
+  const orgId = dispatchTaskOrgId(tk)
+  // 子 Issue 看父组织需求；组织需求看自己。
+  const issueNumber = Number((tk && (tk.parent_issue_number || tk.issue_number)) || 0)
+  if (!tk || tk.is_pr_event || !orgId || !issueNumber) {
+    dispatchLoading.value = false
+    return
+  }
+  dispatchLoading.value = true
+  G.API.get(
+    '/orgs/' + encodeURIComponent(orgId) + '/dispatches?org_issue_number=' +
+      encodeURIComponent(String(issueNumber)) + '&limit=20'
+  )
+    .then(function (d) {
+      const items = (d && (d.items || d.dispatches)) || []
+      return Promise.all(
+        items.map(function (it) {
+          if (!it || !it.id) return it
+          return G.API.get('/orgs/' + encodeURIComponent(orgId) + '/dispatches/' + it.id).catch(
+            function () {
+              return it
+            }
+          )
+        })
+      )
+    })
+    .then(function (list) {
+      if (seq !== dispatchReqSeq) return
+      dispatchDetails.value = (list || []).filter(Boolean)
+    })
+    .catch(function () {
+      if (seq === dispatchReqSeq) dispatchDetails.value = []
+    })
+    .then(function () {
+      if (seq === dispatchReqSeq) dispatchLoading.value = false
+    })
+}
+function openDispatchRepo(t) {
+  const repoKey = String((t && t.repo_key) || '')
+  const fullName = bareRepo(repoKey)
+  const parts = fullName.split('/')
+  if (parts.length < 2) return
+  const tk = currentDetailTask() || {}
+  try {
+    if (tk.org_id) localStorage.setItem('current_org_id', String(tk.org_id))
+  } catch (e) {
+    /* ignore */
+  }
+  const issueNumber = String((t && t.child_issue_number) || '')
+  // 目标仓有子 Issue：切仓库上下文后直接进该仓的需求详情，不先落 Dashboard。
+  // setRepoContext 只改上下文不 nav，保证 history 只多一条；返回时按 history.repo
+  // 恢复来源组织仓库，回到组织需求详情。
+  if (issueNumber && G.app && typeof G.app.setRepoContext === 'function') {
+    G.app.setRepoContext({
+      fullName: fullName,
+      owner: parts[0],
+      name: parts[1],
+      repoKey: repoKey,
+      orgId: tk.org_id || '',
+    })
+    if (typeof G.app.nav === 'function') G.app.nav('tasks', issueNumber)
+    return
+  }
+  if (typeof G.selectRepo === 'function') {
+    G.selectRepo(fullName, parts[0], parts[1], repoKey)
+  } else if (G.app && typeof G.app.switchRepo === 'function') {
+    G.app.switchRepo(repoKey)
+  }
+}
+watch(
+  function () {
+    const tk = currentDetailTask()
+    return tk
+      ? [tk.id, tk.org_id, tk.issue_number, tk.parent_issue_number, tk.is_pr_event].join('|')
+      : ''
+  },
+  function () {
+    loadDispatchDetails(currentDetailTask())
+  },
+  { immediate: true }
+)
 
 // ═══════════ PR 详情 ═══════════
 const prLink = computed(() => {
@@ -4151,6 +4334,77 @@ onBeforeUnmount(function () {
   margin: 0 auto;
   flex: 1;
   overflow-y: auto;
+}
+/* 任务派发详情 */
+.isk-dispatch-card {
+  margin-top: 12px;
+}
+.isk-dispatch {
+  padding-top: 10px;
+  margin-top: 10px;
+  border-top: 0.5px solid var(--b, #e3e6ee);
+}
+.isk-dispatch:first-of-type {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+}
+.isk-dispatch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--t2, #3a3a3c);
+}
+.isk-dispatch-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg2, #f2f3f7);
+  color: var(--t2, #3a3a3c);
+  font-size: 11px;
+  font-weight: 600;
+}
+.isk-dispatch-target {
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 0.5px solid var(--b, #e3e6ee);
+  border-radius: 10px;
+  background: var(--c, #fff);
+}
+.isk-dispatch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.isk-dispatch-row > span:first-child {
+  flex: 0 0 42px;
+  color: var(--t3, #86868b);
+}
+.isk-dispatch-row b {
+  font-weight: 500;
+  color: var(--t, #1d1d1f);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.isk-dispatch-target .isk-link {
+  cursor: pointer;
+}
+.isk-dispatch-target .isk-link:hover {
+  text-decoration: underline;
+}
+.isk-dispatch-error {
+  color: var(--r, #d93025);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .isk-tko-pill {
   display: inline-flex;

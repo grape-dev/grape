@@ -1,4 +1,4 @@
-# Auth / Dashboard / Pipeline / Search / 模板 / 飞书 Onboard 接口
+# Auth / Dashboard / Pipeline / Search / 模板 / 飞书 Onboard / 组织审计接口
 
 > 对外公开（openapi-full-coverage-design.md A/D 批收录），认证：`require_no_session_token`。
 > scope（x-token-scope）：**全部 = user_only**（`grape_` API Key / JWT；`tk_` → 403）。
@@ -200,6 +200,21 @@
 
 ---
 
+## 组织审计
+
+### GET /api/orgs/{org_id}/audit — 查询组织审计日志（Issue #2260）
+
+> scope：user_only。权限：仅组织 owner/admin；member 与非成员 403。
+
+| Path | `{org_id}` 组织 ID |
+| Query | `event_type`（事件名或前缀，如 `org_repo_bind` / `org_repo_` / `org_dispatch_`；空=全部组织相关事件）、`limit`（默认 50，最大 200，越界夹取）、`offset`（默认 0，负数夹取为 0）、`since`（`YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`，含边界） |
+| 出参 | `{items: [{id, seq, event_type, user_id, operator_id, ip, detail, created_at}], total, limit, offset}`：`items` 按 `id` 倒序，`detail` 递归脱敏（敏感键 → `[REDACTED]`，正文键剔除，超出深度上限的子树整棵丢弃），`total` 为全量匹配数 |
+| 返回 | 200；400 `INVALID_SINCE`（格式非法或含时区）；404 `ORG_NOT_FOUND`；403 `PERMISSION_DENIED`（含 `tk_` 会话凭据） |
+
+> 事件白名单固定为组织相关事件（`org_repo_*` / `org_context_*` / `org_knowledge_*`）与跨仓下派事件（`dispatch_*` / `target_*`）；`org_dispatch_` 是下派事件的语义别名。`org_provision_` 当前无对应审计写入，返回空页。日志本身不可变（哈希链），接口只读。
+
+---
+
 ## 错误返回（全端点通用）
 
 | 码 | 场景 |
@@ -213,3 +228,292 @@
 ```json
 {"detail": {"code": 404, "message": "Not Found"}}
 ```
+
+---
+
+## 组织管理（/api/orgs）
+
+> 组织上下文、关联仓库、仓库地图、跨仓下派、组织知识与审计。
+> 认证与 scope 以 OpenAPI 的 `security` / `x-token-scope` 为准；组织成员/管理员校验由服务端执行。
+
+### GET /api/orgs — orgs_list
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs — orgs_create
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/repo-namespaces — orgs_repo_namespaces
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/search/users — orgs_search_users
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id} — orgs_delete
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id} — orgs_detail
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PUT /api/orgs/{org_id} — orgs_update
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/context — org_context_list
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/context — org_context_create
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id}/context/{ctx_id} — org_context_delete
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/context/{ctx_id} — org_context_get
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PUT /api/orgs/{org_id}/context/{ctx_id} — org_context_update
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/context/{ctx_id}/deprecate — org_context_deprecate
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/context/{ctx_id}/publish — org_context_publish
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/dispatches — org_dispatches_list
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/dispatches — org_dispatches_create
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/dispatches/{dispatch_id} — org_dispatches_detail
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/dispatches/{dispatch_id}/cancel — org_dispatches_cancel
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/dispatches/{dispatch_id}/context — org_dispatches_context
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry — org_dispatches_target_retry
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/knowledge — org_knowledge_list
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/knowledge — org_knowledge_create
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id}/knowledge/{knowledge_id} — org_knowledge_delete
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/knowledge/{knowledge_id} — org_knowledge_get
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PUT /api/orgs/{org_id}/knowledge/{knowledge_id} — org_knowledge_update
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/knowledge/{knowledge_id}/archive — org_knowledge_archive
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate — org_knowledge_deprecate
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/knowledge/{knowledge_id}/publish — org_knowledge_publish
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/leave — orgs_leave
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/members — orgs_members_list
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/members — orgs_members_add
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id}/members/{user_id} — orgs_members_remove
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PATCH /api/orgs/{org_id}/members/{user_id} — orgs_members_update
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/provision — orgs_provision_get
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PUT /api/orgs/{org_id}/provision/repo — orgs_provision_manual_bind
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/provision/retry — orgs_provision_retry
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-map — org_repo_map_list
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-map/analyze — org_repo_map_analyze_all
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-map/recall — org_repo_map_recall
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-map/{repo_key} — org_repo_map_detail
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-map/{repo_key}/analyze — org_repo_map_analyze_one
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repos — org_repos_list
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repos — org_repos_bind
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repos/available — org_repos_available
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repos/batch — org_repos_bind_batch
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id}/repos/{repo_key} — org_repos_unbind
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repos/{repo_key}/transfer — org_repos_transfer
+
+> scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。

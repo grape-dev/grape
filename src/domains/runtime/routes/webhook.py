@@ -311,18 +311,12 @@ def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str) -> No
         _current_stage = _stage_info["stage"] if _stage_info else ""
         _pipeline_next = {}
         try:
-            import os as _os, json as _json
-            from src.api.session_store import get_issue_scene
-            _scene_id, _ = get_issue_scene(repo_key, f"#{issue_number}") or ("default", 0)
-            _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
-                                       "configs", "pipelines.json")
-            with open(_pipe_path, "r", encoding="utf-8") as _f:
-                _pipes = _json.load(_f)
-            _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
-            for _node in (_scene.get("nodes") or []):
-                _pipeline_next[_node.get("id", "")] = _node.get("next", "")
-        except Exception:
-            pass
+            # Issue #2118：不能直读 configs/pipelines.json——组织等仓库级自定义场景
+            # 只存在于 DB/场景市场，必须经 get_pipeline_config 并按 repo_key 解析。
+            _pipeline_next = _scene_node_order(repo_key, issue_number)
+        except Exception as _cfg_err:
+            log.warning(f"A2A: pipeline next-node resolution failed: {_cfg_err}")
+            _pipeline_next = {}
         _stage_order = list(_pipeline_next.keys())
     except Exception as _pe:
         log.warning(f"A2A: pipeline order check failed: {_pe}")
@@ -1045,11 +1039,50 @@ class A2AHandoffBody(BaseModel):
                     "用于审计交棒来源段与幂等键派生；兼容 payload.source_event_seq / payload.source_seq。")
 
 
+
+def _scene_node_order(repo_key: str, issue_number, default_scene_id: str = "default") -> dict:
+    """Issue 场景的节点推进表（repo_key 感知，角色键 alias）。
+
+    Issue #2118：A2A 阶段推进不能直读 configs/pipelines.json——组织场景等
+    仓库级自定义场景只存在于 DB/场景市场，必须经 `get_pipeline_config`
+    并按 repo_key 解析，否则取不到节点导致 stage/pending_review 判断失准。
+
+    返回 {角色键: 下一节点角色键}，角色键同时包含 id 与 tag（org 场景
+    id=org_intake、tag=issue，阶段推进按 tag 记录，必须能互查）。下一节点
+    角色优先取 tag（A2A agent 白名单只接受 issue/coding/qa 等 tag），
+    终态统一为 "done"。
+    """
+    from src.api.pipeline_config import get_pipeline_config, node_role
+    from src.api.session_store import get_issue_scene
+    _scene_id = default_scene_id
+    try:
+        _sid, _ = get_issue_scene(repo_key, f"#{issue_number}")
+        _scene_id = _sid or default_scene_id
+    except Exception:
+        _scene_id = default_scene_id
+    _cfg = get_pipeline_config(_scene_id or "default", repo_key=repo_key) or {}
+    _nodes = [n for n in (_cfg.get("nodes") or []) if isinstance(n, dict)]
+    _by_id = {str(n.get("id") or ""): n for n in _nodes if n.get("id")}
+    order = {}
+    for n in _nodes:
+        _nid = str(n.get("id") or "").strip()
+        _nxt = str(n.get("next") or "").strip()
+        _nxt_node = _by_id.get(_nxt)
+        _target = "done" if (not _nxt or _nxt.lower() in ("done", "complete", "end")) else node_role(_nxt_node or {"id": _nxt})
+        if _nid:
+            order[_nid] = _target
+        _tag = str(n.get("tag") or "").strip()
+        if _tag and _tag != _nid:
+            order.setdefault(_tag, _target)
+    return order
+
 def _node_id(node) -> str:
     """节点标识兜底：优先 id，兼容仅有 tag 的存量节点（Issue #2427）。"""
     if not isinstance(node, dict):
         return ""
     return str(node.get("id") or node.get("tag") or "")
+
+
 
 
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
@@ -1061,7 +1094,9 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     返回一致节点集合（修复 404 vs 409 nodes 口径分歧）。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
-    返回 {"scene_id", "nodes", "in_scene"}。
+    Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
+    id=org_* / tag=issue|coding|qa 时 A2A 以 tag 交办不应被误判 not_in_scene。
+    返回 {"scene_id", "nodes", "in_scene", "node"}。
     """
     from src.api.pipeline_config import get_pipeline_config
     from src.api.session_store import get_issue_scene
@@ -1076,10 +1111,16 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
         nodes = (_cfg or {}).get("nodes") or []
     except Exception:
         nodes = []
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    _matched = next(
+        (n for n in nodes if isinstance(n, dict) and node_matches_agent_role(n, agent_name)),
+        None,
+    )
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
-        "in_scene": any(_node_id(n) == agent_name for n in nodes),
+        "in_scene": _matched is not None,
+        "node": _matched,
     }
 
 

@@ -253,6 +253,16 @@ async def start_mgmt_tasks(app) -> dict:
         log.warning(f"Patrol loop start failed: {e}")
     h["patrol_task"] = _patrol_task
 
+    # Issue #2112：组织需求跨仓下派汇总 sweeper（60s；仅 Mgmt 进程持有，避免多进程重复推进）
+    _org_dispatch_sweep_task = None
+    try:
+        from src.domains.mgmt.org_dispatch import org_dispatch_sweep_loop
+        _org_dispatch_sweep_task = asyncio.create_task(org_dispatch_sweep_loop())
+        log.info("Org dispatch sweeper started (Mgmt)")
+    except Exception as e:
+        log.warning(f"Org dispatch sweeper start failed: {e}")
+    h["org_dispatch_sweep_task"] = _org_dispatch_sweep_task
+
     # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
     try:
         from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
@@ -376,6 +386,14 @@ async def stop_mgmt_tasks(app, h: dict) -> None:
         _patrol_task.cancel()
         try:
             await asyncio.wait_for(_patrol_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    _org_dispatch_sweep_task = h.get("org_dispatch_sweep_task")
+    if _org_dispatch_sweep_task:
+        _org_dispatch_sweep_task.cancel()
+        try:
+            await asyncio.wait_for(_org_dispatch_sweep_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 

@@ -1168,38 +1168,9 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = _rt_db.cursor()
-        c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
-                  (issue_id, user["id"]))
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        status, repo_key, issue_number = row[0], row[1], row[2]
-        _issue_id = f"#{issue_number}" if issue_number else ""
-        if status == 'cancelled':
-            # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
-            # 防止残留 awaiting_input 行继续出现在待澄清列表；并同步终止其残留 agent_tasks。
-            if repo_key and issue_number:
-                _cancel_issue_agents(c, repo_key, _issue_id)
-                cancel_issue_rows(c, repo_key, issue_number)
-                _rt_db.commit()
-            return {"ok": True, "already_cancelled": True}
-        if status == 'completed':
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
-        _cancelled_agents = _cancel_issue_agents(c, repo_key, _issue_id)
-        # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
-        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成/已取消行保持终态不受影响。
-        if repo_key and issue_number:
-            cancel_issue_rows(c, repo_key, issue_number)
-        else:
-            c.execute(
-                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
-                (issue_id,))
-        _rt_db.commit()
-    log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
-    return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
+    from src.domains.runtime.issue_cancel import cancel_issue_core
+
+    return cancel_issue_core(issue_id, user_id=user["id"])
 
 @router.post("/{issue_id}/resume", operation_id="issues_resume", summary="Resume cancelled issue", description="Resumes a cancelled requirement from its pre-cancel stage.")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -2576,6 +2547,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
+    from src.api.org_context import validate_org_scene_entry
     _body = body or {}
     # D107/B2 补口（2026-11-11 实弹发现）：默认 repo_key 是裸名（{owner}/{repo}），
     # 建单链 _is_github 按前缀分流——裸名恒走 gitcode 链，github 仓（托管或 member）
@@ -2585,12 +2557,20 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     if ":" not in _rk_in:
         from src.domains.mgmt.public import _resolve_repo_key as _resolve_rk
         _rk_in = _resolve_rk(f"{owner}/{repo}")
+    # Issue #2118：组织场景入口校验（org-only 模板只能由组织上下文使用）
+    _repo_key = _rk_in
+    _scene_id = _body.get("scene_id", "") or ""
+    validate_org_scene_entry(
+        _repo_key,
+        _scene_id,
+        str(user.get("org_id") or ""),
+    )
     b = TaskCreateBody(
-        repo_key=_rk_in,
+        repo_key=_repo_key,
         title=_body.get("title", "") or "",
         description=_body.get("description", "") or "",
         assignee=_body.get("assignee", "") or "",
-        scene_id=_body.get("scene_id", "") or "",
+        scene_id=_scene_id,
         is_subtask_mode=int(_body.get("is_subtask_mode") or 0),
         attachments=_body.get("attachments") or [],
     )

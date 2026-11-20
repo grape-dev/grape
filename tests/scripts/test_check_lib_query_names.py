@@ -198,6 +198,12 @@ class TestRegistry:
         assert registry is not None
         assert "managed_repos_b939bc" in registry.queries
 
+    def test_registry_includes_lazy_class_exports(self):
+        """PEP 562 懒导出类也必须进入注册面（否则跨域引用被误判未登记）。"""
+        registry = clqn.collect_registry("runtime")
+        assert registry is not None
+        assert "VcsApiClient" in registry.functions
+
     def test_missing_domain_module_yields_none(self):
         """不存在的域 → 注册表缺失（insight 目前没有 public 模块）。"""
         assert clqn.collect_registry("no_such_domain_xyz") is None

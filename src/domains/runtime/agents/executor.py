@@ -14,6 +14,10 @@ from .hwcloud import HwcloudBackend
 from .aishell_acp import AishellDshACPBackend
 
 _bwrap_fail_notified = False
+_SESSION_AUTH_FILE_GLOB = ".grape-sess-*.tok"
+# 正常任务最长也远低于该阈值；只有崩溃后长期残留的 token 才会被清扫，
+# 避免同 cwd 并发任务仍在运行时被后续任务误删。
+_SESSION_AUTH_FILE_STALE_SECONDS = 6 * 60 * 60
 
 
 def _note_bwrap_fail_once(message: str) -> None:
@@ -28,6 +32,48 @@ def _note_bwrap_fail_once(message: str) -> None:
         return
     _bwrap_fail_notified = True
     log.warning(message)
+
+
+def _cleanup_session_auth_file(cwd: str, auth_file: "str | None",
+                               task_started_at: "float | None" = None) -> None:
+    """清理本任务凭据文件，并按 mtime 清扫崩溃残留。
+
+    只允许直接删除 prepare_env 明确返回并由 _auth_state 记录的本任务文件；cwd 下
+    其他新文件可能属于重叠执行的另一任务，必须保留。SIGKILL 不会执行 finally，
+    因此额外清扫超过陈旧阈值的同名前缀文件，作为后续任务的兜底。
+    """
+    if auth_file:
+        try:
+            os.unlink(auth_file)
+        except OSError:
+            pass
+    if not cwd or not os.path.isdir(cwd):
+        return
+    import glob as _glob
+    cutoff = (task_started_at if task_started_at is not None else time.time()) \
+        - _SESSION_AUTH_FILE_STALE_SECONDS
+    for _stale in _glob.glob(os.path.join(cwd, _SESSION_AUTH_FILE_GLOB)):
+        try:
+            if os.path.getmtime(_stale) < cutoff:
+                os.unlink(_stale)
+        except OSError:
+            pass
+
+
+def _call_prepare_env(prepare_env, env: dict, cwd: str):
+    """调用 prepare_env；兼容尚未接收 cwd 的自定义 runtime 旧签名。"""
+    import inspect
+    try:
+        params = inspect.signature(prepare_env).parameters.values()
+    except (TypeError, ValueError):
+        return prepare_env(env, cwd=cwd)
+    accepts_cwd = any(
+        param.name == "cwd" or param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in params
+    )
+    if accepts_cwd:
+        return prepare_env(env, cwd=cwd)
+    return prepare_env(env)
 
 
 def _find_hermes_bin(venv_py: str = "", sandbox_mode: bool = False) -> str:
@@ -732,6 +778,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
     from src.domains.runtime.agents.aishell_acp import AishellDshACPBackend
 
     label = f"{agent_label} " if agent_label else ""
+    task_started_at = time.time()
 
     acp = AishellDshACPBackend()
     env = acp.get_env(account=account, user_id=user_id)
@@ -801,24 +848,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
             else:
                 yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
     finally:
-        # prepare_env 在 cwd 下创建的 token 文件：任务结束即清（仅清 cwd 下的，
-        # /tmp fallback 的不主动删，避免误删并发任务文件）。
-        # QA 架构守护 C-2 补强：finally 只清记录在 _auth_file 的那个文件——进程被
-        # kill/超时后 finally 不执行、文件残留 → 平台收尾 git add -A 会把 token 提交
-        # 进任务分支。追加 glob 兜底：扫 cwd 下所有 .grape-sess-*.tok 一并清掉
-        # （同前缀专属命名空间，不会误删其它文件）。
-        if cwd and os.path.isdir(cwd):
-            import glob as _glob
-            for _stale in _glob.glob(os.path.join(cwd, ".grape-sess-*.tok")):
-                try:
-                    os.unlink(_stale)
-                except OSError:
-                    pass
-        elif _auth_file and _auth_file.startswith(os.sep):
-            try:
-                os.unlink(_auth_file)
-            except OSError:
-                pass
+        _cleanup_session_auth_file(cwd, _auth_file, task_started_at)
 
 
 def _assemble_env(env: dict, *, kind: str, label: str = "",
@@ -1082,12 +1112,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  agent_label: str = "",
                  repo_key: str = "",
                  max_exec_seconds: int = 600) -> Generator:
-    """流式执行 Agent（执行作用域包装）。
+    """流式执行 Agent（public wrapper）。
+
+    dsh 在通用 CLI 分支创建的 token 文件必须在整个生成器生命周期结束后清理，
+    包括正常完成、异常退出和调用方提前关闭生成器的路径。
 
     Issue #1982：为本轮所有引擎子进程建立 fd 收口作用域——正常结束由
     _untrack_proc 关闭管道；异常/cancel/requeue/消费方提前中断/GeneratorExit
     由 finally 兜底 terminate + 关闭 stdin/stdout/stderr，避免 pipe fd 泄漏。
     """
+    _auth_state: dict = {"started_at": time.time()}
     prev_scope = _scope_procs()
     _exec_scope.procs = set()
     _exec_scope.reader_threads = set()
@@ -1098,8 +1132,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             env_extra=env_extra, bot_token=bot_token, user_token=user_token,
             agent_name=agent_name, agent_label=agent_label,
             repo_key=repo_key, max_exec_seconds=max_exec_seconds,
+            _auth_state=_auth_state,
         )
     finally:
+        if _auth_state.get("prepare_env_attempted"):
+            _cleanup_session_auth_file(
+                cwd, _auth_state.get("auth_file"), _auth_state.get("started_at"))
         _close_exec_scope(prev_scope)
 
 
@@ -1111,7 +1149,8 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
                        agent_name: str = "",
                        agent_label: str = "",
                        repo_key: str = "",
-                       max_exec_seconds: int = 600) -> Generator:
+                       max_exec_seconds: int = 600,
+                       _auth_state: dict | None = None) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
     **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，
@@ -1179,10 +1218,15 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
     # 绕过它 subprocess 服务的 /TOKEN/i scrub。必须放在 env_extra 之后：
     # token 是任务级的，get_env() 执行时它还不在 env 里（#948 曾写在 get_env 里，
     # 读到的永远是空串，临时文件从未生成）。
+    _auth_file = None
     try:
         _prepare_env = getattr(backend, "prepare_env", None)
         if callable(_prepare_env):
-            _prepare_env(env)
+            if _auth_state is not None:
+                _auth_state["prepare_env_attempted"] = True
+            _auth_file = _call_prepare_env(_prepare_env, env, cwd)
+            if _auth_state is not None:
+                _auth_state["auth_file"] = _auth_file
     except Exception as _pe:
         log.warning(f"{label}prepare_env failed: {_pe}")
 

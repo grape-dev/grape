@@ -624,7 +624,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                        cat_l1_id: int = 0, cat_l2_id: int = 0):
     """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
-    scope: official / repo，空=全部。
+    scope: official / repo / org；空=普通市场（不返回 org 系统模板）。
     repo: scope=repo 时按 repo_key 过滤（owner/repo 格式）。
     """
     from src.domains.mgmt.user.db import (list_scene_market, batch_scene_liked,
@@ -894,6 +894,12 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+    if (scene.get("scope") or "").lower() == "org":
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "ORG_SCENE_PROTECTED",
+            "message": "组织流水线模板由组织 provisioning 自动创建，不能从场景市场应用",
+        })
 
     # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
     if not repo_key:
@@ -1650,15 +1656,15 @@ class UpdateMarketSceneRequest(BaseModel):
 @router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
 def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
                         user: dict = Depends(require_no_session_token)):
-    """更新用户自定义场景（scope != 'official'）。"""
+    """更新用户自定义场景（source != 'official'）。"""
     from src.domains.mgmt.user.db import (update_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
 
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-    if scene.get("scope") == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可编辑"})
+    if scene.get("source") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方/系统场景不可编辑"})
 
     # Issue #955：市场场景更新同样校验节点 id 角色枚举（与 create 口径一致）
     if body.nodes:
@@ -1737,15 +1743,15 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
 
 @router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene", description="Hard-deletes a custom market scene (scope != official).")
 def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
-    """硬删除用户自定义场景（scope != 'official'）。"""
+    """硬删除用户自定义场景（source != 'official'）。"""
     from src.domains.mgmt.user.db import (delete_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
 
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-    if scene.get("scope") == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可删除"})
+    if scene.get("source") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方/系统场景不可删除"})
 
     # 删除关联的图标文件
     old_files = get_uploaded_files_by_ref("scene_market", market_id)
@@ -2496,7 +2502,7 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
             opts, parse_error = {}, True
     return created_by, opts, (row[2] or ""), parse_error
 
-def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
+def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: str = ""):
     """返回「当前用户在该仓库可选引擎 id（按角色）」查询闭包。
 
     口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
@@ -2507,7 +2513,7 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     try:
         from src.domains.mgmt.user.org_db import is_org_personal
         if org_id and not is_org_personal(org_id):
-            _filter_org = int(org_id)
+            _filter_org = str(org_id)
     except Exception:
         _filter_org = 0
     _cache: dict = {}
@@ -2536,7 +2542,8 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
             if _rid in _seen:
                 continue
             _seen.add(_rid)
-            if _filter_org and int(e.get("org_id") or 0) != _filter_org:
+            # Issue #2265：global 引擎（org_id=''）平台共享，团队组织场景也可绑定
+            if _filter_org and str(e.get("org_id") or "") and str(e.get("org_id")) != _filter_org:
                 continue
             _ids_out.append(_rid)
         _cache[role] = _ids_out

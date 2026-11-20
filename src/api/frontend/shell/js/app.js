@@ -174,14 +174,40 @@ const app = (() => {
   // 收敛为一份并集常量：合法 VIEWS 之外的历史遗留视图（scene-detail-local /
   // autopilot / autopilot-detail / organizations）一并纳入，多排无害（它们都不
   // 依赖仓库上下文，横幅/守卫跳过它们语义正确）。
-  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account', 'sandbox'];
+const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'org-pipeline', 'account', 'sandbox'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
   // _replaying: popstate 回放时禁止再次入栈；_histReady: 首个视图用 replaceState，
   // 避免登录后第一次导航多出一个无意义的入口。
   let _replaying = false;
-  let _histReady = false;
+  let _histReady = false
+
+  // 只切换仓库上下文，不触发 nav（用于「跳到目标仓的某个需求详情」：
+  // 由调用方紧接着 nav('tasks', issue)，保证 history 只多一条，浏览器返回
+  // 能回到来源需求，而不是先卡在目标仓 Dashboard）。
+  function _applyRepoState(repo) {
+    if (!repo || !repo.fullName) return null;
+    const parts = String(repo.fullName).split('/');
+    if (parts.length < 2) return null;
+    const state = {
+      fullName: String(repo.fullName),
+      owner: repo.owner || parts[0],
+      name: repo.name || parts[1],
+      repoKey: repo.repoKey || repo.repo_key || '',
+    };
+    if (repo.isOrgRepo !== undefined) state.isOrgRepo = !!repo.isOrgRepo;
+    if (repo.orgId !== undefined) state.orgId = repo.orgId;
+    sessionStorage.setItem('currentRepo', JSON.stringify(state));
+    if (state.orgId) localStorage.setItem('current_org_id', state.orgId);
+    _syncAppPath(state.owner, state.name);
+    const sel = $('repoSelect');
+    if (sel) sel.value = state.fullName;
+    _updateRepoOrgBadge();
+    _updateTbOrgName();
+    return state;
+  }
+
   function _pushHistory(view, param) {
     if (_replaying) return;
     const hash = '#' + view + (param !== undefined && param !== null ? '/' + encodeURIComponent(param) : '');
@@ -189,7 +215,13 @@ const app = (() => {
     try {
       const fn = _histReady ? 'pushState' : 'replaceState';
       if (window.history[fn]) {
-        window.history[fn]({view: view, param: (param !== undefined && param !== null) ? param : null}, '', hash);
+        // 把仓库上下文一并写入 history：跨仓跳转后按浏览器返回，先恢复来源仓库，
+        // 再回放来源需求，避免「#tasks/20 在目标仓里查不到」。
+        window.history[fn]({
+          view: view,
+          param: (param !== undefined && param !== null) ? param : null,
+          repo: currentRepo(),
+        }, '', hash);
         _histReady = true;
       }
     } catch (e) {}
@@ -227,6 +259,197 @@ const app = (() => {
     } catch { return null; }
   }
 
+  // ===== 组织仓库 / 组织项目 UI 判定 =====
+  // /repos/managed 返回 is_org_repo；同时把 flags 缓存在内存，供刷新后
+  // sessionStorage 里的 currentRepo 还没有 isOrgRepo 时兜底。
+  function _isOrgRepo(repo) {
+    if (!repo) return false;
+    if (repo.isOrgRepo === true) return true;
+    var fn = repo.fullName || '';
+    return !!(fn && window._managedRepoFlags && window._managedRepoFlags[fn]);
+  }
+
+  function _currentOrgMeta() {
+    try {
+      var id = localStorage.getItem('current_org_id') || '';
+      return (window._orgMetaById || {})[id] || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 当前是否处于「团队组织」上下文：组织仓库和关联仓库都要保留组织标识。
+  function _isTeamOrgContext() {
+    var meta = _currentOrgMeta();
+    if (meta) return !meta.is_personal;
+    var cur = currentRepo() || {};
+    if (cur.orgId) {
+      var byRepo = (window._orgMetaById || {})[String(cur.orgId)] || null;
+      if (byRepo) return !byRepo.is_personal;
+      return false; // 快照缺失先不显示，_updateRepoOrgBadge 会补拉 /orgs 后重绘
+    }
+    return false;
+  }
+
+  function _platformRepoLink(repo, labelOverride) {
+    var _rk = repo.repoKey || repo.repo_key || '';
+    var _fn = repo.fullName || (repo.owner + '/' + repo.name);
+    var _prov = _rk.indexOf(':') > 0 ? _rk.slice(0, _rk.indexOf(':')) : '';
+    var _dom = (typeof window.platformHost === 'function' && window.platformHost(_prov)) || 'gitcode.com';
+    var _repoLink = 'https://' + _dom + '/' + _fn;
+    var _logo = (typeof window.platformIcon === 'function')
+      ? '<span style="margin-right:5px;color:var(--t2)">' + window.platformIcon(_prov || 'gitcode', 14) + '</span>'
+      : '';
+    var _label = labelOverride || _fn;
+    return `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${_label} ↗</a>`;
+  }
+
+  function _updateRepoOrgBadge() {
+    var badge = document.getElementById('repoOrgBadge');
+    if (!badge) return;
+    var isTeam = _isTeamOrgContext();
+    var _cur0 = currentRepo() || {};
+    var _curIsOrgRepo = _isOrgRepo(_cur0) ||
+      !!(window._managedRepoFlags && _cur0.fullName && window._managedRepoFlags[_cur0.fullName]);
+    // 仅「组织上下文 + 当前仓库是组织仓库（is_org_repo）」显示紫色「组织项目」胶囊。
+    // 个人空间、以及组织下关联的普通仓库都不显示。
+    badge.style.display = (isTeam && _curIsOrgRepo) ? 'inline-flex' : 'none';
+    var sel = document.getElementById('repoSelect');
+    if (sel) {
+      sel.style.borderColor = isTeam ? 'rgba(123,60,242,.7)' : '';
+      sel.style.boxShadow = isTeam ? '0 0 0 2px rgba(49,104,224,.16)' : '';
+    }
+    // 首次进入时组织元信息可能还没缓存：补一次 /orgs 后重绘，避免组织标识闪没。
+    if (!_currentOrgMeta() && (localStorage.getItem('current_org_id') || '')) {
+      API.get('/orgs').then(function (orgs) {
+        _cacheOrgs(orgs);
+        _updateRepoOrgBadge();
+      }).catch(function () {});
+    }
+  }
+
+  function _orgProjectLink(orgId) {
+    var _cur = currentRepo() || {};
+    var id = String(orgId || _cur.orgId || localStorage.getItem('current_org_id') || '');
+    var label = I18N.t('app.repo.org_project') || '组织项目';
+    if (!id) return '<span style="color:var(--t2);font-weight:500">' + label + '</span>';
+    var safe = id.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    var title = I18N.t('organizations.demands.title') || '组织需求';
+    return '<a href="javascript:void(0)" onclick="app._openOrgDemandCenter(\'' + safe + '\')" style="color:var(--a);font-weight:600;text-decoration:none" title="' + title + '">' + label + ' ↗</a>';
+  }
+
+  // 「组织项目」→ 组织需求中心：切到该组织的组织仓库，再进需求中心（#tasks）。
+  // 组织级需求（org_dispatch 父单）落在组织仓库下，因此需求中心按组织仓库过滤
+  // 即可看到该组织的组织需求；组织仓库缺失时回落到组织详情页。
+  function _openOrgDemandCenter(orgId) {
+    var _cur = currentRepo() || {};
+    var id = String(orgId || _cur.orgId || localStorage.getItem('current_org_id') || '');
+    if (!id) return;
+    localStorage.setItem('current_org_id', id);
+    API.get('/repos/managed').then(function (md) {
+      var list = (md && md.repos) || [];
+      var orgRepo = list.find(function (r) { return !!r.is_org_repo; });
+      if (!orgRepo || !orgRepo.full_name) {
+        nav('organizations', id);
+        return;
+      }
+      var parts = String(orgRepo.full_name).split('/');
+      var owner = orgRepo.repo_owner || parts[0] || '';
+      var name = orgRepo.repo_name || parts[1] || '';
+      if (!owner || !name) {
+        nav('organizations', id);
+        return;
+      }
+      sessionStorage.setItem('currentRepo', JSON.stringify({
+        fullName: orgRepo.full_name, owner: owner, name: name,
+        repoKey: orgRepo.repo_key || '', isOrgRepo: true, orgId: id
+      }));
+      _syncAppPath(owner, name);
+      var sel = $('repoSelect');
+      if (sel) sel.value = orgRepo.full_name;
+      initSidebarRepos();
+      _updateRepoOrgBadge();
+      nav('tasks');
+    }).catch(function () {
+      nav('organizations', id);
+    });
+  }
+
+  function _escOpt(v) {
+    return String(v == null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // 仓库下拉统一渲染：组织仓库置顶且只显示「组织仓库」，普通仓库按平台分组。
+  function _renderSidebarRepoOptions(repos) {
+    var sel = $('repoSelect');
+    if (!sel) return;
+    // 仓库下拉只展示「当前组织」作用域内的仓库：个人空间不混入组织仓库/团队组织仓库，
+    // 团队组织只展示该组织的仓库。组织清单未就绪时不做过滤（保持旧行为，避免误隐藏）。
+    if (window.__orgsList && window.__orgsList.length) {
+      var _ctx = _orgContext();
+      repos = (repos || []).filter(function(r) { return _repoInOrgScope(r, _ctx); });
+    }
+    var current = currentRepo();
+    var orgRepos = [];
+    var normal = [];
+    (repos || []).forEach(function(r) {
+      var isOrg = !!(r.is_org_repo || (window._managedRepoFlags && window._managedRepoFlags[r.full_name]));
+      if (isOrg) orgRepos.push(r);
+      else normal.push(r);
+    });
+    var html = '';
+    if (orgRepos.length) {
+      html += '<optgroup label="' + _escOpt(I18N.t('app.repo.org_group') || '组织仓库') + '">';
+      orgRepos.forEach(function(r) {
+        var selected = current && current.fullName === r.full_name ? ' selected' : '';
+        // 组织项目：隐藏具体仓库名（用户口径），但前缀优先用组织名区分多个组织；
+        // 组织名缺失时回落 owner。形如：github-g-test / 组织项目
+        var _owner = String(r.full_name || '').split('/')[0] || '';
+        var _orgName = String(r.org_name || '').trim();
+        var _prefix = _orgName || _owner;
+        var _orgLabel = _prefix
+          ? _prefix + ' / ' + (I18N.t('app.repo.org_project') || '组织项目')
+          : (I18N.t('app.repo.org_project') || '组织项目');
+        html += '<option value="' + _escOpt(r.full_name) + '"' + selected + '>'
+          + _escOpt(_orgLabel) + '</option>';
+      });
+      html += '</optgroup>';
+    }
+    // 按平台分组：分组键 = repo_key 前缀（任何在册平台都成立）。
+    var groups = {};
+    normal.forEach(function(r) {
+      var rk = r.repo_key || '';
+      var p = rk.indexOf(':') > 0 ? rk.slice(0, rk.indexOf(':')) : 'gitcode';
+      (groups[p] = groups[p] || []).push(r);
+    });
+    var order = (window.__REPO_PLATFORMS__ || []).map(function(x) { return x && x.provider; })
+      .filter(function(k) { return k && groups[k]; });
+    Object.keys(groups).forEach(function(k) { if (order.indexOf(k) < 0) order.push(k); });
+    order.forEach(function(p) {
+      var list = groups[p];
+      if (!list || !list.length) return;
+      html += '<optgroup label="' + _escOpt(platformLabelOf(p)) + '">';
+      list.forEach(function(r) {
+        var selected = current && current.fullName === r.full_name ? ' selected' : '';
+        html += '<option value="' + _escOpt(r.full_name) + '"' + selected + '>'
+          + _escOpt(r.full_name) + '</option>';
+      });
+      html += '</optgroup>';
+    });
+    html += '<option value="__add__">＋ ' + _escOpt(I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
+    sel.innerHTML = html;
+    sel.onclick = null;
+    _updateRepoOrgBadge();
+    // 刷新后 currentRepo 的 isOrgRepo 可能缺失，等 /repos/managed 返回后补一次顶栏文案。
+    var _repoViews = ['dash', 'pipe', 'vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'knowledge', 'skills'];
+    if (_isOrgRepo(current) && _repoViews.indexOf(window._currentView || '') >= 0) {
+      var _rt = $('repoTitle');
+      if (_rt) _rt.innerHTML = _orgProjectLink(current.orgId);
+    }
+  }
+
   // ── 需求详情深链：/app/<owner>/<repo>/#tasks/<N>（区分仓库）──
   // hash 路由只带视图与参数（#tasks/12），仓库维度放在路径里；解析器见 js/deeplink.js。
   function _appPathCtx() {
@@ -240,13 +463,25 @@ const app = (() => {
     try {
       const owner = repo.owner || String(repo.full_name || '').split('/')[0] || '';
       const name = repo.name || String(repo.full_name || '').split('/')[1] || '';
-      sessionStorage.setItem('currentRepo', JSON.stringify({
+      const state = {
         fullName: repo.full_name || (owner + '/' + name),
         owner: owner,
         name: name,
         repoKey: repo.repo_key || ''
-      }));
+      };
+      // 深链同样要带上组织归属：否则登录/刷新后顶栏与仓库下拉无法按组织过滤
+      const orgId = String(repo.org_id || repo.orgId || '');
+      if (orgId) state.orgId = orgId;
+      if (repo.is_org_repo !== undefined || repo.isOrgRepo !== undefined) {
+        state.isOrgRepo = !!(repo.is_org_repo || repo.isOrgRepo);
+      }
+      sessionStorage.setItem('currentRepo', JSON.stringify(state));
+      if (orgId) localStorage.setItem('current_org_id', orgId);
     } catch (e) {}
+    // 深链落仓后组织上下文已变：顶栏名称和仓库下拉都要按新组织重绘，
+    // 否则会停留在「默认个人组织」的旧渲染上。
+    _updateTbOrgName();
+    initSidebarRepos();
   }
 
   // 把路径里的仓库落到 currentRepo（深链入口）。返回 Promise<boolean>：
@@ -262,7 +497,11 @@ const app = (() => {
         const r = list[i] || {};
         const full = r.full_name || ((r.owner || '') + '/' + (r.name || ''));
         if (window.GrapeDeepLink.sameRepo(full, ctx.full)) {
-          _setCurrentRepoFromDeeplink({full_name: full, owner: r.owner, name: r.name, repo_key: r.repo_key});
+          _setCurrentRepoFromDeeplink({
+            full_name: full, owner: r.owner, name: r.name, repo_key: r.repo_key,
+            org_id: r.org_id, orgId: r.orgId, is_org_repo: r.is_org_repo, isOrgRepo: r.isOrgRepo,
+            org_name: r.org_name
+          });
           return true;
         }
       }
@@ -454,6 +693,24 @@ function loadAgentTypes() {
   function showApp() {
     document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
+    // 退出登录（showLogin）会把 sidebar/mainView 写成内联 display:none。重新登录时
+    // 必须摘掉这两个内联样式，交回 CSS（[data-logged-in="1"] .sb/.mn → display:flex）；
+    // 否则登录后若路由直接命中 #dash（如 /app/<owner>/<repo>/ 深链，_bootRestore 不走
+    // loadRepos）主区会一直隐藏——现象就是「只剩左侧栏，右侧一片空白」。
+    $('sidebar').style.display = '';
+    $('mainView').style.display = '';
+    // 登出会清 current_org_id：重新登录默认落「个人」上下文——个人空间要能
+    // 看到全部托管仓库（含被团队组织关联的），深链落仓时再由仓库归属覆盖。
+    _fetchOrgs().then(function(orgs) {
+      if (!localStorage.getItem('current_org_id') && orgs && orgs.length) {
+        var _pid = _personalOrgId(orgs);
+        if (_pid) localStorage.setItem('current_org_id', _pid);
+      }
+      _updateTbOrgName();
+    }).catch(function() {});
+    // 同一页内「退出→重新登录」不会清空侧栏 DOM：仓库下拉可能还留着上一个组织/
+    // 账号的选项。按当前组织重新拉一次，避免残留上一个账号的仓库。
+    initSidebarRepos();
     // 工作台已由 CSS 显示，立即展示加载中状态
     // 登录/刷新是「重新绘制」入口：先清空视图标记，否则下面的 loading 占位会盖掉
     // 深链 hash 已经渲染好的视图（如 /login#event/9717），而 _restoreNavAfterLogin
@@ -692,34 +949,151 @@ function loadAgentTypes() {
       document.removeEventListener('click', _closeOrgDropdownOnOutside);
     }
   }
+  // 组织下拉底部统一入口：创建组织（列表页不再作为入口，创建动作放在组织切换器里）。
+  function _orgCreateMenuItem(menuId) {
+    // 创建组织：优先在当前页面直接弹出创建弹窗（不切页）；全局函数未就绪时才回退到组织页。
+    return '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
+      + '<div onclick="(window.openCreateOrgModal?window.openCreateOrgModal():app.nav(\'organizations\',\'__create__\'));document.getElementById(\'' + menuId + '\').style.display=\'none\'"'
+      + ' style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:600;display:flex;align-items:center;gap:7px"'
+      + ' onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>' + (I18N.t("organizations.create_org") || "＋ 创建组织") + '</span></div></div>';
+  }
+
+  function _cacheOrgs(orgs) {
+    window._orgMetaById = window._orgMetaById || {};
+    (orgs || []).forEach(function(o) {
+      if (o && o.id != null) window._orgMetaById[String(o.id)] = o;
+    });
+  }
+
+  // ===== 当前组织上下文 =====
+  // 「组织」是仓库下拉的作用域：顶栏名称、仓库下拉、切换组织必须共用同一个组织 id。
+  // 登出会清 current_org_id，重新登录后若没人补默认值，顶栏会一直停在 i18n 的
+  // 「我的组织」，仓库下拉也会退化成「所有组织的托管仓库混在一起」。
+  var _orgsFetchPromise = null;
+  function _fetchOrgs(force) {
+    if (!force && window.__orgsList) return Promise.resolve(window.__orgsList);
+    if (_orgsFetchPromise) return _orgsFetchPromise;
+    _orgsFetchPromise = API.get('/orgs').then(function(orgs) {
+      window.__orgsList = orgs || [];
+      _cacheOrgs(window.__orgsList);
+      return window.__orgsList;
+    }).catch(function() {
+      return window.__orgsList || [];
+    }).then(function(list) {
+      _orgsFetchPromise = null;
+      return list;
+    });
+    return _orgsFetchPromise;
+  }
+
+  function _validOrgId(orgs, id) {
+    return !!(id && (orgs || []).some(function(o) { return String(o.id) === String(id); }));
+  }
+
+  function _personalOrgId(orgs) {
+    var personal = (orgs || []).find(function(o) { return o.is_personal; });
+    return personal ? String(personal.id) : '';
+  }
+
+  // 解析/补齐当前组织：优先跟随当前仓库的 org_id（仓库是具体的操作上下文），
+  // 其次沿用已选组织，最后回落到个人组织。结果写回 localStorage.current_org_id。
+  function _ensureOrgContext(orgs) {
+    var list = orgs || window.__orgsList || [];
+    var currentId = String(localStorage.getItem('current_org_id') || '');
+    var next = '';
+    // 已选组织优先：个人空间要能看到全部托管仓库（含被团队组织关联的），
+    // 不能被当前仓库归属反向改写。current_org_id 缺失时默认落个人组织；
+    // 深链/显式切仓会先写入仓库所属组织，再走到这里。
+    if (_validOrgId(list, currentId)) next = currentId;
+    else next = _personalOrgId(list);
+    if (next && next !== currentId) localStorage.setItem('current_org_id', next);
+    // 仓库 org_id 缺失时只用托管清单回填快照（用于「组织项目」标识），不改变组织上下文。
+    var repo = currentRepo() || {};
+    if (repo.fullName && !repo.orgId && window._managedRepoOrgMap &&
+        Object.prototype.hasOwnProperty.call(window._managedRepoOrgMap, repo.fullName)) {
+      var repoOrg = String(window._managedRepoOrgMap[repo.fullName] || '');
+      if (repoOrg) {
+        repo.orgId = repoOrg;
+        try { sessionStorage.setItem('currentRepo', JSON.stringify(repo)); } catch (e) {}
+      }
+    }
+    return next;
+  }
+
+  function _orgContext() {
+    var list = window.__orgsList || [];
+    var id = _ensureOrgContext(list);
+    var meta = (list || []).find(function(o) { return String(o.id) === String(id); }) || null;
+    return { id: id, meta: meta, isPersonal: !!(meta && meta.is_personal) };
+  }
+
+  // 仓库是否属于当前组织作用域：
+  // - 个人组织：**托管的所有仓库都可见**（含被团队组织关联的普通仓库）；
+  //   只排除组织自动仓库（下拉里显示为「组织项目」的那种）。
+  // - 团队组织：只保留 org_id 等于该组织的仓库（含它的组织仓库）。
+  function _repoInOrgScope(r, ctx) {
+    ctx = ctx || _orgContext();
+    if (!ctx.id) return true;   // 组织清单还没拿到：不做过滤，保持旧行为
+    var oid = String(
+      (r && (r.org_id || r.orgId)) ||
+      (window._managedRepoOrgMap && r && window._managedRepoOrgMap[r.full_name]) || ''
+    );
+    if (ctx.isPersonal) {
+      var isOrgRepo = !!(r && (r.is_org_repo || r.isOrgRepo ||
+        (window._managedRepoFlags && r.full_name && window._managedRepoFlags[r.full_name])));
+      return !isOrgRepo;
+    }
+    return oid === String(ctx.id);
+  }
+
+  // 创建组织弹窗的数据源预热：organizations 页 / 全局创建弹窗复用同一个请求
+  // （window.__orgNsPromise），避免每次打开弹窗都等 1.5~2.5s 的 VCS 外部调用。
+  function _warmOrgNamespaces() {
+    var now = Date.now();
+    if (window.__orgNsPromise && now - (window.__orgNsAt || 0) < 60000) return;
+    window.__orgNsAt = now;
+    window.__orgNsPromise = API.get('/orgs/repo-namespaces').catch(function () {
+      window.__orgNsPromise = null;
+    });
+  }
+
   function _loadTbOrgs() {
     var menu = document.getElementById('tbOrgMenu');
     if (!menu) return;
+    _warmOrgNamespaces();
     menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div>';
-    API.get('/orgs').then(function(orgs) {
+    _fetchOrgs(true).then(function(orgs) {
       if (!orgs || orgs.length === 0) {
-        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>'
+          + _orgCreateMenuItem('tbOrgMenu');
         return;
       }
-      var currentId = localStorage.getItem('current_org_id') || '';
+      var currentId = _ensureOrgContext(orgs);
       var html = '';
       orgs.forEach(function(o) {
         var isActive = String(o.id) === String(currentId);
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
         var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
-        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+        // 团队组织在行内提供「管理」入口；个人组织不显示，避免无意义的详情跳转。
+        var manage = '';
+        if (!o.is_personal) {
+          manage = '<span role="button" title="' + (I18N.t("organizations.detail.open") || "打开组织管理") + '"'
+            + ' onclick="event.stopPropagation();app.nav(\'organizations\',\'' + _escOpt(o.id) + '\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'"'
+            + ' style="flex-shrink:0;padding:3px 8px;border:1px solid ' + (isActive ? 'rgba(255,255,255,.35)' : 'var(--b)') + ';border-radius:6px;font-size:10px;font-weight:600;color:' + (isActive ? '#fff' : 'var(--a)') + ';background:' + (isActive ? 'rgba(255,255,255,.12)' : 'transparent') + ';cursor:pointer;margin-left:4px">'
+            + (I18N.t("common.manage") || "管理") + '</span>';
+        }
+        html += '<div onclick="app.switchOrg(\'' + _escOpt(o.id) + '\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:14px">🏢</span>'
           + '<div style="flex:1;min-width:0">'
           + '<div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
           + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
           + '</div>'
-          + (isActive ? '<span style="font-size:12px">✓</span>' : '')
+          + manage
           + '</div>';
       });
-      html += '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
-        + '<div onclick="app.nav(\'organizations\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px">'
-        + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div></div>';
+      html += _orgCreateMenuItem('tbOrgMenu');
       menu.innerHTML = html;
     }).catch(function() {
       menu.innerHTML = '<div style="padding:8px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
@@ -729,10 +1103,15 @@ function loadAgentTypes() {
     // Issue #299: 显示当前已选空间名称（而非固定文本"我的组织"）
     var nameEl = document.getElementById('tbOrgName');
     if (!nameEl) return;
-    var currentId = localStorage.getItem('current_org_id') || '';
-    if (!currentId) return; // 未选择组织时保留 i18n 默认文本
-    API.get('/orgs').then(function(orgs) {
+    // 登出会清 current_org_id；重新登录后必须先补默认组织（仓库所属组织 → 个人组织），
+    // 否则这里直接 return，顶栏永远停在 i18n 的「我的组织」。
+    _fetchOrgs().then(function(orgs) {
       if (!orgs || orgs.length === 0) return;
+      // G-3：展示层只认已选组织；缺失/失效时保留 i18n 默认文案。
+      // 默认组织的回填由 initSidebarRepos() 负责（重新登录后先补 current_org_id，
+      // 再由后续 _updateTbOrgName() 调用显示名称），这里不再隐式改写组织上下文。
+      var currentId = String(localStorage.getItem('current_org_id') || '');
+      if (!_validOrgId(orgs, currentId)) return;
       var current = orgs.find(function(o) { return String(o.id) === String(currentId); });
       if (current && current.name) {
         nameEl.textContent = current.name;
@@ -767,31 +1146,39 @@ function loadAgentTypes() {
   function _loadLobbyOrgs() {
     var menu = document.getElementById('lobbyOrgMenu');
     if (!menu) return;
-    var currentId = localStorage.getItem('current_org_id') || '';
+    _warmOrgNamespaces();
     menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div>';
-    API.get('/orgs').then(function(orgs) {
+    _fetchOrgs(true).then(function(orgs) {
       if (!orgs || orgs.length === 0) {
-        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>'
+          + _orgCreateMenuItem('lobbyOrgMenu');
         return;
       }
+      var currentId = _ensureOrgContext(orgs);
       var html = '';
       orgs.forEach(function(o) {
         var isActive = String(o.id) === String(currentId);
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
         var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
-        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\';app._updateLobbyOrgName()" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+        // 团队组织行内「管理」入口；个人组织不显示。
+        var manage = '';
+        if (!o.is_personal) {
+          manage = '<span role="button" title="' + (I18N.t("organizations.detail.open") || "打开组织管理") + '"'
+            + ' onclick="event.stopPropagation();app.nav(\'organizations\',\'' + _escOpt(o.id) + '\');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\'"'
+            + ' style="flex-shrink:0;padding:3px 8px;border:1px solid ' + (isActive ? 'rgba(255,255,255,.35)' : 'var(--b)') + ';border-radius:6px;font-size:10px;font-weight:600;color:' + (isActive ? '#fff' : 'var(--a)') + ';background:' + (isActive ? 'rgba(255,255,255,.12)' : 'transparent') + ';cursor:pointer;margin-left:4px">'
+            + (I18N.t("common.manage") || "管理") + '</span>';
+        }
+        html += '<div onclick="app.switchOrg(\'' + _escOpt(o.id) + '\');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\';app._updateLobbyOrgName()" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:13px">🏢</span>'
           + '<div style="flex:1;min-width:0">'
           + '<div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
           + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
           + '</div>'
-          + (isActive ? '<span style="font-size:11px">✓</span>' : '')
+          + manage
           + '</div>';
       });
-      html += '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
-        + '<div onclick="app.nav(\'organizations\');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-        + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div></div>';
+      html += _orgCreateMenuItem('lobbyOrgMenu');
       menu.innerHTML = html;
     }).catch(function() {
       menu.innerHTML = '<div style="padding:8px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
@@ -802,9 +1189,9 @@ function loadAgentTypes() {
     setTimeout(function() {
       var nameEl = document.getElementById('lobbyOrgName');
       if (!nameEl) return;
-      var currentId = localStorage.getItem('current_org_id') || '';
-      API.get('/orgs').then(function(orgs) {
+      _fetchOrgs().then(function(orgs) {
         if (!orgs || orgs.length === 0) return;
+        var currentId = _ensureOrgContext(orgs);
         var current = orgs.find(function(o) { return String(o.id) === String(currentId); });
         if (current) {
           nameEl.textContent = current.name;
@@ -1047,6 +1434,8 @@ function loadAgentTypes() {
 
   function switchOrg(orgId) {
     if (!orgId) return;
+    var _prevOrgId = localStorage.getItem('current_org_id') || '';
+    var _sameOrg = String(_prevOrgId) === String(orgId);
     var sel = document.getElementById('orgSelect');
     if (sel) { sel.disabled = true; }
     localStorage.setItem('current_org_id', orgId);
@@ -1061,32 +1450,38 @@ function loadAgentTypes() {
       }
       sel.disabled = false;
     }
-    // 保持当前页面不变，只静默刷新仓库缓存 + 侧边栏下拉
-    API.get('/repos/member').then(function(d) {
-      var repos = (d && d.repos) || [];
-      try { localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
-      // 查找该组织已托管的仓库
-      var managed = repos.filter(function(r) { return r.is_hosted || r.is_joined; });
+    // 切换组织后按「目标组织」重新选仓库并重渲染当前视图。
+    function _applyOrgRepoSelection(managed) {
       if (managed.length > 0) {
         // 切换到第一个已托管仓库
         var first = managed[0];
-        sessionStorage.setItem('currentRepo', JSON.stringify({fullName: first.full_name, owner: first.owner, name: first.name, repoKey: first.repo_key || ''}));
+        sessionStorage.setItem('currentRepo', JSON.stringify({
+          fullName: first.full_name, owner: first.owner, name: first.name,
+          repoKey: first.repo_key || '', isOrgRepo: !!first.is_org_repo,
+          orgId: first.org_id || ''
+        }));
         // 更新侧边栏仓库下拉
         initSidebarRepos();
         // 刷新当前页面数据（切换组织后所有视图都重新加载）
         if (window._currentView === 'repos') {
           selectRepo(first.full_name, first.owner, first.name, first.repo_key || '');
+        } else if (window._currentView === 'organizations' || window._currentView === 'org-pipeline') {
+          // 组织管理/组织流水线跟随组织切换，不要继续显示旧组织详情
+          nav(window._currentView, orgId);
         } else if (window._currentView) {
           nav(window._currentView, _currentParam);
         }
       } else {
         // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
         sessionStorage.removeItem('currentRepo');
+        sessionStorage.removeItem('_bindReturnView');  // 绑定返回标记不跨会话残留
         initSidebarRepos();
         showToast(I18N.t("organizations.switch_org.no_repos"));
         // 切换组织后所有视图都重新加载（显示空态或刷新数据）
         if (window._currentView === 'repos') {
           goToRepos();
+        } else if (window._currentView === 'organizations' || window._currentView === 'org-pipeline') {
+          nav(window._currentView, orgId);
         } else if (window._currentView) {
           nav(window._currentView, _currentParam);
         }
@@ -1097,8 +1492,115 @@ function loadAgentTypes() {
       if (typeof _loadOrgSection === 'function') {
         _loadOrgSection();
       }
-    }).catch(function() {});
-    showToast(I18N.t("organizations.switch_org.success"));
+    }
+
+    // Issue #2262：优先用组织作用域的 /repos/managed 选仓库。
+    // /repos/member 是 VCS 侧全量列表、不含组织归属，按它选会把 currentRepo 指到
+    // 个人/未归属仓库；Dashboard 的场景列表按 currentRepo 查询，于是切换团队组织后
+    // 显示「暂无场景」（实际组织场景存在）。
+    function _orgScopedRepos(md) {
+      return ((md && md.repos) || []).map(function(r) {
+        return {
+          full_name: r.full_name,
+          owner: r.repo_owner || (r.full_name || '').split('/')[0],
+          name: r.repo_name || (r.full_name || '').split('/')[1],
+          repo_key: r.repo_key || '',
+          is_org_repo: !!r.is_org_repo,
+          org_id: r.org_id || '',
+          is_hosted: true,
+          is_joined: true
+        };
+      });
+    }
+
+    function _switchToast() {
+      showToast(I18N.t(_sameOrg ? "organizations.switch_org.current" : "organizations.switch_org.success"));
+    }
+
+    // 切到团队组织：进入该组织的「组织仓库」工作台（/app/<owner>/<org-repo>/#dash）。
+    // 注意：只认 is_org_repo=1 的组织仓库，不自动选关联的其它仓库；组织仓库尚未
+    // provisioning 完成时才回落到组织详情页。
+    // 组织作用域过滤：
+    // - 个人组织：全部托管仓库都可选（含被团队组织关联的普通仓库），只排除组织自动仓库；
+    // - 团队组织：只保留本组织仓库。
+    function _scopeRepos(list, _orgId, _isPersonal) {
+      return (list || []).filter(function(r) {
+        if (_isPersonal) {
+          return !(r && (r.is_org_repo || r.isOrgRepo ||
+            (window._managedRepoFlags && r.full_name && window._managedRepoFlags[r.full_name])));
+        }
+        var oid = String((r && (r.org_id || r.orgId)) || '');
+        return oid === String(_orgId);
+      });
+    }
+
+    function _enterTeamOrgWorkbench() {
+      sessionStorage.removeItem('currentRepo');
+      sessionStorage.removeItem('_bindReturnView');
+      _updateTbOrgName();
+      API.get('/repos/managed').then(function(md) {
+        var list = _scopeRepos((md && md.repos) || [], orgId, false);
+        var orgRepo = list.find(function(r) { return !!r.is_org_repo; });
+        if (orgRepo && orgRepo.full_name) {
+          var parts = String(orgRepo.full_name).split('/');
+          var owner = orgRepo.repo_owner || parts[0] || '';
+          var name = orgRepo.repo_name || parts[1] || '';
+          if (owner && name) {
+            sessionStorage.setItem('currentRepo', JSON.stringify({
+              fullName: orgRepo.full_name, owner: owner, name: name,
+              repoKey: orgRepo.repo_key || '', isOrgRepo: true, orgId: orgId
+            }));
+            _syncAppPath(owner, name);
+            initSidebarRepos();
+            _switchToast();
+            nav('dash');
+            return;
+          }
+        }
+        // 组织仓库不存在（provisioning 未完成/失败）：先落到组织详情，便于查看状态。
+        initSidebarRepos();
+        _updateRepoOrgBadge();
+        if (typeof _loadOrgSection === 'function') _loadOrgSection();
+        _switchToast();
+        _syncAppPathToRoot();
+        nav('organizations', orgId);
+      }).catch(function() {
+        initSidebarRepos();
+        _switchToast();
+        _syncAppPathToRoot();
+        nav('organizations', orgId);
+      });
+    }
+
+    function _loadOrgReposForSwitch(_isPersonal) {
+      API.get('/repos/member').then(function(d) {
+        var repos = (d && d.repos) || [];
+        try { localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
+        var memberScoped = _scopeRepos(repos.filter(function(r) { return r.is_hosted || r.is_joined; }),
+                                        orgId, _isPersonal);
+        API.get('/repos/managed').then(function(md) {
+          var orgRepos = _scopeRepos(_orgScopedRepos(md), orgId, _isPersonal);
+          _applyOrgRepoSelection(orgRepos.length ? orgRepos : memberScoped);
+        }).catch(function() {
+          _applyOrgRepoSelection(memberScoped);
+        });
+      }).catch(function() {});
+      _switchToast();
+    }
+
+    var _knownOrg = (window._orgMetaById || {})[String(orgId)];
+    if (_knownOrg) {
+      if (!_knownOrg.is_personal) { _enterTeamOrgWorkbench(); return; }
+      _loadOrgReposForSwitch(true);
+      return;
+    }
+    // 组织信息还没缓存（例如从其它页面直接切）：补一次 /orgs 再决定落点。
+    API.get('/orgs').then(function(orgs) {
+      _cacheOrgs(orgs);
+      var target = (orgs || []).find(function(o) { return String(o.id) === String(orgId); });
+      if (target && !target.is_personal) { _enterTeamOrgWorkbench(); return; }
+      _loadOrgReposForSwitch(true);
+    }).catch(function() { _loadOrgReposForSwitch(true); });
   }
 
   const REPO_CACHE_KEY = 'repo_member_cache';
@@ -1232,7 +1734,18 @@ function loadAgentTypes() {
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
     if (!current) {
       const r = managedRepos[0];
-      if (r) sessionStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
+      if (r) {
+        // 组织归属一并落快照：否则顶栏/仓库下拉不知道这个仓库属于哪个组织
+        const _oid = String(r.org_id ||
+          (window._managedRepoOrgMap && window._managedRepoOrgMap[r.full_name]) || '');
+        sessionStorage.setItem('currentRepo', JSON.stringify({
+          fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || '',
+          isOrgRepo: !!(r.is_org_repo ||
+            (window._managedRepoFlags && window._managedRepoFlags[r.full_name])),
+          orgId: _oid
+        }));
+        _updateTbOrgName();
+      }
       else sessionStorage.removeItem('currentRepo');
     }
     // Issue #278: 刷新后保持当前 URL 路由——若 hash 已指向有效子页面则导航到该页，
@@ -1243,7 +1756,7 @@ function loadAgentTypes() {
       var _hp = _h.substring(1).split('/');
       var _hv = _hp[0];
       // 包含 VIEWS 数组 + nav() 视图开关中的额外视图（不在 VIEWS 但有对应渲染分支）
-      var _validHashViews = VIEWS.concat(['skill-sub', 'scene-detail-local', 'autopilot', 'autopilot-detail']);
+      var _validHashViews = VIEWS.concat(['skill-sub', 'scene-detail-local', 'autopilot', 'autopilot-detail', 'organizations', 'org-pipeline']);
       if (_validHashViews.indexOf(_hv) !== -1) {
         nav(_hv, _hp[1] ? decodeURIComponent(_hp[1]) : undefined);
         _restored = true;
@@ -1254,50 +1767,56 @@ function loadAgentTypes() {
 
   function initSidebarRepos() {
     // Lightweight version for after repo selection - just populate sidebar dropdown
-    API.get('/repos/managed').then(d => {
-      const repos = d.repos || [];
-      window._managedRepoMap = {};
-      repos.forEach(r => { window._managedRepoMap[r.full_name] = r.repo_key || ''; });
-      const sel = $('repoSelect');
-      const current = currentRepo();
-      if (repos.length === 0) {
-        sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
-        sel.onclick = function() { switchRepo('__add__'); };
-      } else {
-        // 按平台分组：分组键 = repo_key 前缀（任何在册平台都成立）。
-        // 原实现二分 github/非-github，gitee 仓库被塞进「GitCode」组（2026-11-14 实锤）。
-        var groups = {};
-        repos.forEach(function(r) {
-          var rk = r.repo_key || '';
-          var p = rk.indexOf(':') > 0 ? rk.slice(0, rk.indexOf(':')) : 'gitcode';
-          (groups[p] = groups[p] || []).push(r);
+    // 先拿组织清单：仓库下拉要按当前组织作用域过滤，且 currentRepo 可能缺 org_id
+    //（深链 / 旧会话快照），需要用 /repos/managed 的 org_id 回填后再决定组织上下文。
+    return _fetchOrgs().then(function(orgs) {
+      return API.get('/repos/managed').then(d => {
+        const repos = d.repos || [];
+        window._managedRepoMap = {};
+        window._managedRepoFlags = {};
+        window._managedRepoOrgMap = {};
+        repos.forEach(r => {
+          window._managedRepoMap[r.full_name] = r.repo_key || '';
+          window._managedRepoFlags[r.full_name] = !!r.is_org_repo;
+          window._managedRepoOrgMap[r.full_name] = r.org_id || '';
         });
-        var order = (window.__REPO_PLATFORMS__ || []).map(function(x) { return x && x.provider; })
-          .filter(function(k) { return k && groups[k]; });
-        Object.keys(groups).forEach(function(k) { if (order.indexOf(k) < 0) order.push(k); });
-        var html = '';
-        order.forEach(function(p) {
-          var list = groups[p];
-          if (!list || !list.length) return;
-          html += '<optgroup label="' + platformLabelOf(p) + '">';
-          list.forEach(function(r) {
-            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
-          });
-          html += '</optgroup>';
-        });
-        html += '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
-        sel.innerHTML = html;
-        sel.onclick = null;
-      }
+        // 回填当前仓库的组织归属，让顶栏组织名与仓库下拉作用域跟当前仓库一致
+        var _cur = currentRepo();
+        if (_cur && _cur.fullName && !_cur.orgId) {
+          var _curOrg = window._managedRepoOrgMap[_cur.fullName] || '';
+          if (_curOrg) {
+            _cur.orgId = _curOrg;
+            _cur.isOrgRepo = !!(window._managedRepoFlags[_cur.fullName] || _cur.isOrgRepo);
+            sessionStorage.setItem('currentRepo', JSON.stringify(_cur));
+          }
+        }
+        _ensureOrgContext(orgs);
+        if (repos.length === 0) {
+          const sel = $('repoSelect');
+          if (sel) {
+            sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
+            sel.onclick = function() { switchRepo('__add__'); };
+          }
+          _updateRepoOrgBadge();
+          _updateTbOrgName();
+          return;
+        }
+        _renderSidebarRepoOptions(repos);
+        _updateTbOrgName();
+      });
     }).catch(() => {});
   }
 
   function _updateSidebarRepos(repos) {
-    const sel = $('repoSelect');
-    const current = currentRepo();
-    sel.innerHTML = repos.map(r =>
-      `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-    ).join('');
+    window._managedRepoMap = window._managedRepoMap || {};
+    window._managedRepoFlags = window._managedRepoFlags || {};
+    window._managedRepoOrgMap = window._managedRepoOrgMap || {};
+    (repos || []).forEach(function(r) {
+      window._managedRepoMap[r.full_name] = r.repo_key || window._managedRepoMap[r.full_name] || '';
+      window._managedRepoFlags[r.full_name] = !!(r.is_org_repo || window._managedRepoFlags[r.full_name]);
+      window._managedRepoOrgMap[r.full_name] = r.org_id || window._managedRepoOrgMap[r.full_name] || '';
+    });
+    _renderSidebarRepoOptions(repos || []);
   }
 
   function switchRepo(val) {
@@ -1313,11 +1832,23 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
-    sessionStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    const _isOrg = !!(window._managedRepoFlags && window._managedRepoFlags[val]);
+    const _repoOrgId = (window._managedRepoOrgMap && window._managedRepoOrgMap[val]) || '';
+    sessionStorage.setItem('currentRepo', JSON.stringify({
+      fullName: val, owner: parts[0], name: parts[1], repoKey: _rk,
+      isOrgRepo: _isOrg, orgId: _repoOrgId
+    }));
+    // 已有组织上下文（含个人）时不要被仓库归属反向改写：个人空间允许选择
+    // 任意托管仓库（含被团队组织关联的）。仅上下文缺失时用仓库归属兜底。
+    if (!localStorage.getItem('current_org_id') && _repoOrgId) {
+      localStorage.setItem('current_org_id', _repoOrgId);
+    }
     _syncAppPath(parts[0], parts[1]);   // 路径跟随仓库，深链分享不会指错仓
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
+    _updateRepoOrgBadge();
+    _updateTbOrgName();
     nav('dash');
   }
 
@@ -1850,6 +2381,8 @@ function loadAgentTypes() {
   }
 
   function nav(view, param) {
+    // 组织流水线独立页面已下线：旧深链（#org-pipeline/<id>）回落到组织工作台详情。
+    if (view === 'org-pipeline') view = 'organizations';
     // 离开引导页模式：清理 .ct.ob-mode 标记
     _obExitMode();
     // 引擎横幅退场（语义对齐 _gotoEnginePage）：无论从哪条路径进入引擎页
@@ -2005,19 +2538,33 @@ function loadAgentTypes() {
       // F5 refresh: ensure sidebar repo dropdown is populated even when
       // currentRepo() is restored from sessionStorage (skips loadRepos path)
       if (!$('repoSelect') || $('repoSelect').options.length <= 1) initSidebarRepos();
-      var _rk = repo.repoKey || repo.repo_key || '';
-      var _fn = repo.fullName || (repo.owner + '/' + repo.name);
-      // 平台目录驱动：链接域名与 logo 都不再二分 github/gitcode（gitee/gitlab 曾因此指向错站点、
-      // 显示 GitCode 图标）
-      var _prov = _rk.indexOf(':') > 0 ? _rk.slice(0, _rk.indexOf(':')) : '';
-      var _dom = (typeof window.platformHost === 'function' && window.platformHost(_prov)) || 'gitcode.com';
-      var _repoLink = 'https://' + _dom + '/' + _fn;
-      var _logo = (typeof window.platformIcon === 'function')
-        ? '<span style="margin-right:5px;color:var(--t2)">' + window.platformIcon(_prov || 'gitcode', 14) + '</span>'
-        : '';
-      repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
+      _updateRepoOrgBadge();
+      if (_isTeamOrgContext()) {
+        var _orgLink = _orgProjectLink();
+        if (_isOrgRepo(repo)) {
+          // 组织仓库：只展示组织项目（组织仓库自身就是当前工作台）。
+          repoTitle.innerHTML = _orgLink;
+        } else {
+          // 组织下的关联仓库：组织项目在前，关联仓库 + 代码仓跳转在后。
+          var _linkedLabel = I18N.t('organizations.detail.repo_linked') || '关联仓库';
+          repoTitle.innerHTML = _orgLink
+            + '<span style="margin:0 8px;color:var(--t3)">/</span>'
+            + '<span style="color:var(--t3);font-weight:500;margin-right:5px">' + _linkedLabel + '</span>'
+            + _platformRepoLink(repo);
+        }
+      } else if (_isOrgRepo(repo)) {
+        repoTitle.innerHTML = _orgProjectLink();
+      } else {
+        repoTitle.innerHTML = _platformRepoLink(repo);
+      }
+      // 团队组织上下文：面包屑只用「组织项目 / 关联仓库」表达，不再重复“当前项目”。
+      if (_isTeamOrgContext()) {
+        var _pt = $('pageTitle');
+        if (_pt) _pt.textContent = '';
+      }
     } else {
       repoTitle.textContent = '';
+      _updateRepoOrgBadge();
     }
 
     // 无仓库时的统一空态引导
@@ -2169,11 +2716,19 @@ function loadAgentTypes() {
       var _accSb = $('sidebar'); if (_accSb) _accSb.style.display = 'none';
       _ensureViewFn('renderAccount', function () { renderAccount(param || 'profile'); });
     } else if (view === 'organizations') {
-      title.textContent = I18N.t('app.nav.organizations') || '组织管理';
+      title.textContent = param
+        ? (I18N.t('organizations.workbench.title') || '组织工作台')
+        : (I18N.t('app.nav.organizations') || '组织管理');
       repoTitle.textContent = '';
-      // 组织管理页面隐藏左侧菜单，全屏展示
+      // 组织管理页面隐藏左侧菜单，全屏展示。
+      // 列表页不再作为入口：有 param 直接进详情；__create__ 直接开创建弹窗；
+      // 无 param 时回退当前组织。
       var _orgSb = $('sidebar'); if (_orgSb) _orgSb.style.display = 'none';
-      _ensureViewFn('renderOrganizations', function () { renderOrganizations(); });
+      var _orgCreateOnly = param === '__create__';
+      var _orgDetailId = _orgCreateOnly ? '' : (param || localStorage.getItem('current_org_id') || '');
+      _ensureViewFn('renderOrganizations', function () {
+        renderOrganizations(_orgDetailId, _orgCreateOnly);
+      });
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
       _ensureViewFn('renderMyFeedback', function () { renderMyFeedback(); });
@@ -2226,6 +2781,13 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       renderAutopilotDetail(param);
     }
+
+    // 团队组织上下文：面包屑前段只保留「组织项目 / 关联仓库」，不再显示“当前项目”。
+    // 组织管理、组织流水线、设置/账号等自身有独立标题的页面除外。
+    if (repo && _isTeamOrgContext() &&
+        ['organizations', 'org-pipeline', 'repos', 'account', 'settings'].indexOf(view) < 0) {
+      title.textContent = '';
+    }
   }
 
   // 浏览器回退/前进：按 history 状态回放视图（回放时不重复入栈）
@@ -2233,6 +2795,11 @@ function loadAgentTypes() {
     const s = e.state;
     _replaying = true;
     try {
+      // 跨仓跳转返回：history 里带了来源仓库，先恢复仓库上下文再回放视图。
+      if (s && s.repo && s.repo.fullName) {
+        const cur = currentRepo();
+        if (!cur || cur.fullName !== s.repo.fullName) _applyRepoState(s.repo);
+      }
       if (s && s.view === 'repos') goToRepos();          // 全屏仓库选择页
       else if (s && s.view) nav(s.view, s.param);
       else {
@@ -3510,6 +4077,18 @@ function openBetaApply() {
     var ex = document.getElementById('grapeConfirmOverlay');
     if (ex) { ex.remove(); document.body.style.overflow = ''; }
   }
+  // 跨模块确认弹窗契约：IssuesView 挂载时会覆盖为它的完整实现；但组织页/反馈页
+  // 不依赖 Issues 先挂载，必须在这里先兜底。否则 window._grapeConfirm 为 undefined，
+  // 组织页「解绑仓库 / 删除组织」等按钮点击直接 TypeError——弹窗不出、请求不发，
+  // 表现就是“点了没反应”（2026-11-19 实测）。
+  if (typeof window._grapeConfirm !== 'function') {
+    window._grapeConfirm = function (opts, event) {
+      var o = opts || {};
+      showConfirm(o.message || o.title || '', function () {
+        if (typeof o.onConfirm === 'function') o.onConfirm();
+      }, { danger: !!o.danger, confirmText: o.confirmText, cancelText: o.cancelText });
+    };
+  }
 
   // ── 统一模态弹层（R13-4: z=1001，压过 .tb 1000，低于 toast 10000 / warn 9999）──
   var _modalEl = null;
@@ -3906,7 +4485,7 @@ function openBetaApply() {
 
   // 注：`search` 已随旧版顶栏搜索框一起移除（全仓无调用方），不要再挂进导出表——
   // 悬空引用会让 IIFE 求值即抛 ReferenceError，window.app 永不出现（壳整页空白）。
-  return {nav, refreshRepoLinks, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, toggleHelpFullscreen, openHelpNewTab, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, _openBindModal, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, refreshRepoLinks, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, toggleHelpFullscreen, openHelpNewTab, switchRepo, setRepoContext: _applyRepoState, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _openOrgDemandCenter, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, _updateSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, _openBindModal, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

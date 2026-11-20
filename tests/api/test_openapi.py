@@ -277,6 +277,7 @@ EXPECTED_PUBLIC = {
     "obs_trace": ("get", "/api/obs/trace/{trace}"),
     "obs_trace_by_issue": ("get", "/api/obs/trace"),
     "obs_trace_stamp": ("post", "/api/obs/trace/stamp"),
+    "orgs_audit": ("get", "/api/orgs/{org_id}/audit"),
     "orgs_create": ("post", "/api/orgs"),
     "orgs_delete": ("delete", "/api/orgs/{org_id}"),
     "orgs_detail": ("get", "/api/orgs/{org_id}"),
@@ -286,6 +287,12 @@ EXPECTED_PUBLIC = {
     "orgs_members_list": ("get", "/api/orgs/{org_id}/members"),
     "orgs_members_remove": ("delete", "/api/orgs/{org_id}/members/{user_id}"),
     "orgs_members_update": ("patch", "/api/orgs/{org_id}/members/{user_id}"),
+    "orgs_repo_namespaces": ("get", "/api/orgs/repo-namespaces"),
+    "org_repo_map_list": ("get", "/api/orgs/{org_id}/repo-map"),
+    "org_repo_map_analyze_all": ("post", "/api/orgs/{org_id}/repo-map/analyze"),
+    "org_repo_map_recall": ("get", "/api/orgs/{org_id}/repo-map/recall"),
+    "org_repo_map_detail": ("get", "/api/orgs/{org_id}/repo-map/{repo_key}"),
+    "org_repo_map_analyze_one": ("post", "/api/orgs/{org_id}/repo-map/{repo_key}/analyze"),
     "orgs_search_users": ("get", "/api/orgs/search/users"),
     "orgs_update": ("put", "/api/orgs/{org_id}"),
     "pipeline_handoff": ("post", "/api/pipeline/handoff"),
@@ -438,6 +445,49 @@ EXPECTED_PUBLIC = {
     "tasks_notify": ("post", "/api/tasks/notify"),
     "transfer_bind_api_auth_transfer_bind_post": ("post", "/api/auth/transfer-bind"),
     "unbind_provider_api_auth_bind__provider__delete": ("delete", "/api/auth/bind/{provider}"),
+    # 组织（org）特性 + weekly-11 期间新增的公开端点：一并锁进契约白名单
+    # （此前 EXPECTED_PUBLIC 与实现漂移，本表补齐后该门禁重新可拦回归）。
+    "auth_platform_links": ("get", "/api/auth/platform-links"),
+    "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
+    "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
+    "org_context_create": ("post", "/api/orgs/{org_id}/context"),
+    "org_context_delete": ("delete", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_context_deprecate": ("post", "/api/orgs/{org_id}/context/{ctx_id}/deprecate"),
+    "org_context_get": ("get", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_context_list": ("get", "/api/orgs/{org_id}/context"),
+    "org_context_publish": ("post", "/api/orgs/{org_id}/context/{ctx_id}/publish"),
+    "org_context_update": ("put", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_dispatches_cancel": ("post", "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel"),
+    "org_dispatches_context": ("get", "/api/orgs/{org_id}/dispatches/{dispatch_id}/context"),
+    "org_dispatches_create": ("post", "/api/orgs/{org_id}/dispatches"),
+    "org_dispatches_detail": ("get", "/api/orgs/{org_id}/dispatches/{dispatch_id}"),
+    "org_dispatches_list": ("get", "/api/orgs/{org_id}/dispatches"),
+    "org_dispatches_target_retry": ("post", "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry"),
+    "org_knowledge_archive": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive"),
+    "org_knowledge_create": ("post", "/api/orgs/{org_id}/knowledge"),
+    "org_knowledge_delete": ("delete", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_knowledge_deprecate": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate"),
+    "org_knowledge_get": ("get", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_knowledge_list": ("get", "/api/orgs/{org_id}/knowledge"),
+    "org_knowledge_publish": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish"),
+    "org_knowledge_update": ("put", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_repos_available": ("get", "/api/orgs/{org_id}/repos/available"),
+    "org_repos_bind": ("post", "/api/orgs/{org_id}/repos"),
+    "org_repos_bind_batch": ("post", "/api/orgs/{org_id}/repos/batch"),
+    "org_repos_list": ("get", "/api/orgs/{org_id}/repos"),
+    "org_repos_transfer": ("post", "/api/orgs/{org_id}/repos/{repo_key}/transfer"),
+    "org_repos_unbind": ("delete", "/api/orgs/{org_id}/repos/{repo_key}"),
+    "orgs_provision_get": ("get", "/api/orgs/{org_id}/provision"),
+    "orgs_provision_manual_bind": ("put", "/api/orgs/{org_id}/provision/repo"),
+    "orgs_provision_retry": ("post", "/api/orgs/{org_id}/provision/retry"),
+    "takeover_abort": ("post", "/api/takeover/sessions/{session_id}/abort"),
+    "takeover_attach": ("post", "/api/takeover/sessions/{session_id}/attach"),
+    "takeover_finish": ("post", "/api/takeover/sessions/{session_id}/finish"),
+    "takeover_get": ("get", "/api/takeover/sessions/{session_id}"),
+    "takeover_list": ("get", "/api/takeover/sessions"),
+    "takeover_progress": ("post", "/api/takeover/sessions/{session_id}/progress"),
+    "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
+    "takeover_start": ("post", "/api/takeover/sessions"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -632,3 +682,24 @@ from src.domains.mgmt.auth import grape_account_db
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
+
+
+def test_org_ops_have_english_summary_and_scope():
+    """组织功能契约：summary 必须 ASCII（CLI --help 要求），且 scope 合法。"""
+    schema = app.openapi()
+    bad = []
+    org_ops = 0
+    for path, methods in schema.get("paths", {}).items():
+        if not path.startswith("/api/orgs"):
+            continue
+        for method, op in methods.items():
+            if not isinstance(op, dict):
+                continue
+            org_ops += 1
+            summary = op.get("summary") or ""
+            if not summary or any(ord(ch) > 127 for ch in summary):
+                bad.append((method, path, summary))
+            if op.get("x-token-scope") not in ("user_only", "session_only", "dual"):
+                bad.append((method, path, op.get("x-token-scope")))
+    assert org_ops >= 37
+    assert not bad, bad[:10]

@@ -64,6 +64,34 @@ def start_external_span(kind: str, target: str, attrs: dict | None = None):
 
 
 @contextmanager
+def feature_span(name: str, attrs: dict | None = None):
+    """业务特性 span（A13：新增特性接入 Tempo 的最小切口）。
+
+    - name: span 名（如 ``org.provision`` / ``org.dispatch.create_child``）
+    - attrs: 业务属性（org_id/repo_key/action 等，不含凭据）
+    - OTel 未启用时零开销空上下文；异常记录 error.type/error.message。
+    """
+    if not otel_enabled():
+        yield None
+        return
+    from opentelemetry import trace
+    tracer = trace.get_tracer("grape.feature")
+    with tracer.start_as_current_span(name) as span:
+        for k, v in (attrs or {}).items():
+            try:
+                span.set_attribute(str(k)[:60], str(v)[:200])
+            except Exception:
+                pass
+        try:
+            yield span
+        except Exception as e:
+            span.set_attribute("error.type", type(e).__name__)
+            span.set_attribute("error.message", str(e)[:200])
+            span.record_exception(e)
+            raise
+
+
+@contextmanager
 def external_call_span(kind: str, target: str, attrs: dict | None = None):
     """外部依赖调用 span（MR-3，2026-11-05）：GitCode/GitHub/OBS/引擎进程等黑盒展开。
 

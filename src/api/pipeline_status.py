@@ -94,6 +94,13 @@ def compute_node_statuses(nodes, issue_events, current_stage):
     for n in nodes:
         nid = n.get("id", "")
         latest_event = events_by_agent.get(nid)
+        # Issue #2268：组织场景节点 id 是 org_intake/org_dispatch/org_aggregate，
+        # 但事件 agent_type 记录的是节点 tag（issue/coding/qa）。只按 id 匹配时
+        # 组织流水线三个节点永远查不到事件 → 全部灰色「待处理」。
+        if not latest_event:
+            _tag = str(n.get("tag") or "").strip()
+            if _tag and _tag != nid:
+                latest_event = events_by_agent.get(_tag)
 
         if latest_event:
             # 有事件：按最新 event 状态映射

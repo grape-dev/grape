@@ -349,8 +349,8 @@ def get_user_gitcode_login(api_token: str) -> str:
         log.warning(f"get_user_gitcode_login failed: {e}")
         return ""
 
-def fetch_user_orgs(api_token: str) -> list[dict]:
-    """获取当前 token 用户拥有的 GitCode 组织列表。
+def fetch_user_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
+    """获取当前 token 用户的 GitCode 组织列表。
 
     Issue #543：迁移目标组织下拉框数据源。
     返回 [{"login", "name", "avatar_url"}, ...]（login 为组织账号名，用作 target_owner）。
@@ -358,6 +358,8 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
 
     GitCode 无 /user/orgs 端点（404），需先获取用户 login，
     再走 /users/{login}/orgs 查组织列表。
+    admin_only=True 时改走 /users/orgs?admin=true（仅返回当前用户可管理的组织，
+    用于「创建组织仓库」的所有者下拉，避免列出无建仓权限的空间）。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
@@ -373,7 +375,10 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
     orgs: list[dict] = []
     page = 1
     while True:
-        url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
+        if admin_only:
+            url = f"{API_BASE}/users/orgs?per_page=50&page={page}&admin=true"
+        else:
+            url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
         data = _req("GET", url, api_token)
         items = data if isinstance(data, list) else []
         if not items and isinstance(data, dict):
@@ -399,15 +404,120 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
             break
     return orgs
 
-def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
-    """在 token 用户个人名下创建一个空仓库（POST /api/v5/user/repos）。
 
+def fetch_github_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
+    """获取当前 token 用户可建仓的 GitHub 组织（创建组织仓库的所有者下拉）。
+
+    优先 /user/memberships/orgs（带 role；admin_only 时只保留 role=admin，
+    即拥有组织级建仓/管理权限的组织），该端点 404/权限不足时回落到 /user/orgs。
+    返回 [{"login", "name", "avatar_url"}, ...]。
+    """
+    if not api_token:
+        raise RuntimeError("GitHub API Token 未配置")
+
+    orgs: list[dict] = []
+    memberships_ok = False
+    page = 1
+    try:
+        while True:
+            url = (f"{_GITHUB_API_BASE}/user/memberships/orgs"
+                   f"?state=active&per_page=100&page={page}")
+            data = _github_req("GET", url, api_token)
+            items = data if isinstance(data, list) else []
+            if not items:
+                break
+            memberships_ok = True
+            for m in items:
+                if not isinstance(m, dict):
+                    continue
+                role = str(m.get("role") or "").lower()
+                if admin_only and role and role != "admin":
+                    continue
+                org = m.get("organization") if isinstance(m.get("organization"), dict) else m
+                login = org.get("login") or ""
+                if not login:
+                    continue
+                orgs.append({
+                    "login": login,
+                    "name": org.get("name") or login,
+                    "avatar_url": org.get("avatar_url") or "",
+                })
+            if len(items) < 100:
+                break
+            page += 1
+            if page > 10:  # 安全上限（1000 组织）
+                break
+    except Exception as exc:
+        # memberships 端点依赖 read:org 等 scope；失败时回落 /user/orgs（若 token 本身
+        # 无效，回落也会失败并上抛，由路由层标记 connected=false）。
+        log.warning(f"fetch_github_orgs memberships fallback: {exc}")
+        memberships_ok = False
+        orgs = []
+
+    if memberships_ok:
+        return orgs
+
+    # 回落：/user/orgs（无 role 字段，只能按成员关系列出）
+    page = 1
+    while True:
+        url = f"{_GITHUB_API_BASE}/user/orgs?per_page=100&page={page}"
+        items = _github_req("GET", url, api_token)
+        if not isinstance(items, list) or not items:
+            break
+        for o in items:
+            if not isinstance(o, dict):
+                continue
+            login = o.get("login") or ""
+            if not login:
+                continue
+            orgs.append({
+                "login": login,
+                "name": o.get("name") or login,
+                "avatar_url": o.get("avatar_url") or "",
+            })
+        if len(items) < 100:
+            break
+        page += 1
+        if page > 10:
+            break
+    return orgs
+
+
+# 支持「在组织空间创建仓库」的平台 → 组织列表抓取实现。
+# 逐行单平台键：平台能力表驱动，新增平台只需在此登记，路由层零平台分支。
+_ORG_NAMESPACE_FETCHERS = {
+    "gitcode": fetch_user_orgs,
+    "github": fetch_github_orgs,
+}
+
+
+def org_namespace_providers() -> list[str]:
+    """支持选择所属空间（个人/组织）的 provider 列表。"""
+    return sorted(_ORG_NAMESPACE_FETCHERS)
+
+
+def fetch_org_namespaces(provider: str, api_token: str) -> list[dict]:
+    """按 provider 抓取当前用户可创建仓库的组织空间列表（未登记平台返回 []）。"""
+    fetcher = _ORG_NAMESPACE_FETCHERS.get(str(provider or "").lower())
+    if fetcher is None:
+        return []
+    return fetcher(api_token, admin_only=True)
+
+
+def create_repo(api_token: str, name: str, description: str = "", private: bool = False,
+                owner: str = "", path: str = "") -> dict:
+    """创建空仓库（POST /api/v5/user/repos，指定 owner 时 POST /api/v5/orgs/{owner}/repos）。
+
+    owner 为空 = 在 token 用户个人空间创建；owner 为组织 path 时在组织空间创建。
+    path/GitCode 仓库 URL 路径，缺省与 name 一致。
     返回 GitCode 仓库信息（含 full_name / html_url 等）。同名仓库冲突时抛 RuntimeError。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
     if not name:
         raise RuntimeError("仓库名不能为空")
+    owner = (owner or "").strip()
+    repo_path = (path or "").strip() or name
     body = {
         "name": name,
         "description": description,
@@ -415,15 +525,40 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
         "auto_init": False,
         "default_branch": "main",
         "repository_type": "code",
-        "path": name,
+        "path": repo_path,
     }
-    result = _req("POST", f"{API_BASE}/user/repos", api_token, body)
+    endpoint = (f"{API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
+                if owner else f"{API_BASE}/user/repos")
+    result = _req("POST", endpoint, api_token, body)
     full_name = result.get("full_name", "")
     if not full_name and result.get("name"):
-        full_name = f"{get_user_gitcode_login(api_token)}/{result.get('name')}"
+        if owner:
+            full_name = f"{owner}/{result.get('name')}"
+        else:
+            full_name = f"{get_user_gitcode_login(api_token)}/{result.get('name')}"
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+def delete_gitcode_repo(api_token: str, owner: str, repo: str) -> bool:
+    """删除 GitCode 仓库（DELETE /api/v5/repos/{owner}/{repo}）。
+
+    Issue #2261：删除组织时回收该组织自动创建的仓库。仅允许对「组织自动仓库」
+    调用；用户手工关联的仓库绝不能走这里（删组织不应删用户的远端仓库）。
+    """
+    if not (api_token and owner and repo):
+        raise RuntimeError("delete repo: token/owner/repo 不能为空")
+    _req("DELETE", f"{API_BASE}/repos/{owner}/{repo}", api_token)
+    return True
+
+
+def delete_github_repo(api_token: str, owner: str, repo: str) -> bool:
+    """删除 GitHub 仓库（DELETE /repos/{owner}/{repo}）。语义同 delete_gitcode_repo。"""
+    if not (api_token and owner and repo):
+        raise RuntimeError("delete repo: token/owner/repo 不能为空")
+    _github_req("DELETE", f"https://api.github.com/repos/{owner}/{repo}", api_token)
+    return True
+
 
 def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
@@ -951,6 +1086,77 @@ _WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
 }
 
 
+def _github_token_scopes(api_token: str) -> str | None:
+    """经典 PAT 的 x-oauth-scopes；细粒度 PAT / 读取失败返回 None。
+
+    细粒度 PAT 不返回该响应头（权限由细粒度权限集控制，无法从这里自查）。
+    """
+    req = urllib.request.Request(
+        f"{_GITHUB_API_BASE}/user",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Grape-DevOps",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.headers.get("x-oauth-scopes")
+    except Exception:
+        return None
+
+
+def probe_github_repo_create(api_token: str, owner: str = "", private: bool = True
+                             ) -> "tuple[bool | None, str]":
+    """无副作用探测 GitHub token 是否有建仓权限。
+
+    返回 (结论, 说明)：False=确定无权限；True=可建仓；None=无法判定（调用方不应阻断）。
+
+    - 经典 PAT：读 x-oauth-scopes；私有仓需 repo，公开仓 repo/public_repo 均可。
+    - 细粒度 PAT：GitHub 没有权限自查端点。用一次「非法仓库名」的 POST 触发权限层：
+      403 → 无权限；422 → 有权限（请求体校验在权限之后，不会真正建仓）。
+    """
+    if not api_token:
+        return False, "未配置 GitHub Token"
+    scopes = _github_token_scopes(api_token)
+    if scopes is not None:
+        if "repo" in scopes:
+            return True, ""
+        if "public_repo" in scopes and not private:
+            return True, ""
+        return False, (
+            "当前 GitHub 经典 PAT 缺少建仓权限：私有仓库需要 repo scope，"
+            "公开仓库至少需要 public_repo scope。请更新 Token 后重试"
+        )
+
+    login = get_user_github_login(api_token)
+    target = (owner or "").strip()
+    if target and login and target.lower() == login.lower():
+        target = ""
+    endpoint = (
+        f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(target, safe='')}/repos"
+        if target else f"{_GITHUB_API_BASE}/user/repos"
+    )
+    try:
+        # 名字含空格必定非法：有权限时 422，无权限时权限层先返回 403；不会产生仓库
+        _github_req("POST", endpoint, api_token,
+                    {"name": "invalid repo name with spaces", "private": True,
+                     "auto_init": False})
+    except RuntimeError as e:
+        msg = str(e)
+        if "403" in msg:
+            return False, (
+                "当前 GitHub 凭据没有创建仓库权限：细粒度 PAT 需 "
+                "Repository creation（或 Administration）Read and write，"
+                "且 Repository access 选 All repositories；经典 PAT 需 repo scope。"
+                "请更新 Token 后重试，或先在 GitHub 手动建仓再关联"
+            )
+        if "422" in msg:
+            return True, ""
+        return None, f"GitHub 权限探测失败（不阻断创建）：{msg[:160]}"
+    return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
+
+
 def get_user_github_login(api_token: str) -> str:
     """获取当前 token 的 GitHub 登录用户名。"""
     if not api_token:
@@ -1066,23 +1272,42 @@ def check_github_is_collaborator(api_token: str, owner: str, repo: str, username
         log.warning(f"check_github_is_collaborator failed: {e}")
         return False
 
-def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
-    """在 token 用户个人名下创建一个空仓库。"""
+def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False,
+                       owner: str = "", path: str = "") -> dict:
+    """创建空仓库（个人空间 POST /user/repos，指定 owner 时 POST /orgs/{owner}/repos）。
+
+    GitHub 的仓库路径恒等于仓库名，path 参数仅为与服务端统一签名而保留（忽略）。
+    """
     if not api_token:
         raise RuntimeError("GitHub API Token 未配置")
+    owner = (owner or "").strip()
+    # 所选 owner 是当前 token 用户本人时走个人空间：GitHub 的
+    # POST /orgs/{login}/repos 对个人账号恒 404（创建组织弹窗默认选中的就是
+    # 「个人」空间，曾导致 GitHub 组织仓库 provisioning 直接失败）。
+    if owner and get_user_github_login(api_token).strip().lower() == owner.lower():
+        owner = ""
     body = {
         "name": name,
         "description": description,
         "private": bool(private),
         "auto_init": False,
     }
+    endpoint = (f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
+                if owner else f"{_GITHUB_API_BASE}/user/repos")
     try:
-        result = _github_req("POST", f"{_GITHUB_API_BASE}/user/repos", api_token, body)
+        result = _github_req("POST", endpoint, api_token, body)
     except RuntimeError as e:
         if "403" in str(e) and "Resource not accessible by integration" in str(e):
             # 检测 installation 状态，区分"未安装"和"权限不足"
             _hint = _github_check_installation(api_token)
             raise RuntimeError(_hint) from e
+        if "403" in str(e) and "Resource not accessible by personal access token" in str(e):
+            # 细粒度 PAT 权限模型：建仓需要 Administration=write（组织仓库还需授予该组织）
+            raise RuntimeError(
+                "当前 GitHub 凭据是细粒度 PAT，缺少创建仓库权限（需 Administration: Write；"
+                "在组织下建仓还需为该组织授权）。请到设置页更新 GitHub Token 后重试；"
+                "或先在 GitHub 手动创建仓库，再用组织页「添加关联仓库」绑定"
+            ) from e
         raise
     full_name = result.get("full_name", "")
     if not full_name:

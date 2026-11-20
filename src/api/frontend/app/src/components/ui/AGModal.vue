@@ -1,7 +1,7 @@
 <template>
   <Teleport to="body">
     <Transition name="a-modal">
-      <div v-if="open" class="a-modal__mask" @click.self="$emit('close')">
+      <div v-if="open" class="a-modal__mask" @click.self="closeOnMask && $emit('close')">
         <div class="a-modal" role="dialog" aria-modal="true">
           <div v-if="title" class="a-modal__title">{{ title }}</div>
           <div class="a-modal__body">
@@ -17,7 +17,13 @@
 </template>
 
 <script setup>
-defineProps({ open: { type: Boolean, default: false }, title: { type: String, default: '' } })
+defineProps({
+  open: { type: Boolean, default: false },
+  title: { type: String, default: '' },
+  // 点遮罩是否关闭：表单型弹窗（如创建组织）关掉它，避免误点丢失已填内容，
+  // 只允许显式「取消 / X」关闭。默认保持既有行为。
+  closeOnMask: { type: Boolean, default: true },
+})
 defineEmits(['close'])
 </script>
 

@@ -1056,7 +1056,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
             # （与当前查看组织不同），但仓库级设备对仓库成员可见（#277 仓库隔离口径），
             # 可见性最终由 _visible_credential 的 repo_key in user_repos 判定收敛，不越权。
-            if rt_org_id != _org_filter_key:
+            # Issue #2265：org_id='' 的 global 引擎是平台共享资源，团队组织也应可见；
+            # 仅隔离属于其它组织的引擎。repo scope 维持既有豁免。
+            if rt_org_id and rt_org_id != _org_filter_key:
                 _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
                 if _cred_early.get("scope") != "repo":
                     continue
@@ -1195,7 +1197,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _devices_cred_map = {k: v for k, v in cred_map.items()
                              if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                              or v.get("scope") == "repo"}
-        _devices_cached = [rt for rt in cached if _org_key(rt) == _org_filter_key
+        _devices_cached = [rt for rt in cached if not _org_key(rt) or _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1726,7 +1728,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     if _filter_org_id:
         # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
-        _local_runtimes = [rt for rt in _local_runtimes if _org_key(rt) == _org_filter_key
+        _local_runtimes = [rt for rt in _local_runtimes if not _org_key(rt) or _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
                     if not _org_unassigned(v) and _org_key(v) == _org_filter_key

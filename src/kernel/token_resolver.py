@@ -168,10 +168,12 @@ class VCSProvider(ABC):
         return []
 
     def create_repo(self, api_token: str, name: str, description: str = "",
-                    private: bool = False) -> dict:
+                    private: bool = False, owner: str = "", path: str = "") -> dict:
         """D42/S62 端口：在 token 用户名下建仓，返回平台 repo dict。
 
-        默认不支持的实现返回 error dict（调用方按 error 处理）。
+        owner 非空 = 在指定组织/空间下建仓（平台实现支持时）；path 为仓库 URL 路径
+        （GitCode 特有，缺省等于 name）。默认不支持的实现返回 error dict（调用方按
+        error 处理）。
         """
         return {"error": f"create_repo unsupported for {self.provider_name}"}
 
@@ -301,16 +303,20 @@ class GenericVcsProvider(VCSProvider):
         """
         return True
 
-    def create_repo(self, api_token, name, description="", private=False) -> dict:
-        """D42/S62 端口：在 token 用户名下建仓（POST /user/repos）。
+    def create_repo(self, api_token, name, description="", private=False,
+                    owner="", path="") -> dict:
+        """D42/S62 端口：建仓（POST /user/repos，指定 owner 时 /orgs/{owner}/repos）。
 
         generic 形态：query_token 走 form（Gitee 系 v5 写接口要求），
         其余 JSON；返回平台 repo dict（full_name/owner/name 由调用方归一）。
         """
         data = {"name": name, "description": description or "",
                 "private": "true" if private else "false"}
+        if path:
+            data["path"] = path
         form = self._card.api_auth == "query_token"
-        return self._http("POST", "/user/repos", api_token, data, form=form)
+        endpoint = f"/orgs/{owner}/repos" if owner else "/user/repos"
+        return self._http("POST", endpoint, api_token, data, form=form)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         """D42/S62 端口：查指向 webhook_url 的已有 webhook（id 或 None）。
@@ -549,9 +555,11 @@ class GitCodeProvider(GenericVcsProvider):
         # D39/S59：存量邀请制语义（v5 邀请列表→匹配→接受）
         return _repos.accept_invite_for_repo(bot_token, owner, repo)
 
-    def create_repo(self, api_token, name, description="", private=False) -> dict:
-        # D42/S62：存量委托（v5 form 语义）
-        return _repos.create_repo(api_token=api_token, name=name, description=description, private=private)
+    def create_repo(self, api_token, name, description="", private=False,
+                    owner="", path="") -> dict:
+        # D42/S62：存量委托（v5 form 语义；owner=组织空间，path=仓库 URL 路径）
+        return _repos.create_repo(api_token=api_token, name=name, description=description,
+                                  private=private, owner=owner, path=path)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（含 429/5xx 退避）
@@ -613,9 +621,11 @@ class GitHubProvider(GenericVcsProvider):
         # D39/S59：存量邀请制语义（PATCH /user/repository_invitations）
         return _repos.accept_github_invite(bot_token, owner, repo)
 
-    def create_repo(self, api_token, name, description="", private=False) -> dict:
-        # D42/S62：存量委托
-        return _repos.create_github_repo(api_token=api_token, name=name, description=description, private=private)
+    def create_repo(self, api_token, name, description="", private=False,
+                    owner="", path="") -> dict:
+        # D42/S62：存量委托（owner=组织空间；GitHub 仓库路径恒等于 name，path 忽略）
+        return _repos.create_github_repo(api_token=api_token, name=name, description=description,
+                                         private=private, owner=owner, path=path)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（FR-5.1 空列表=None 不误判）
@@ -1521,7 +1531,11 @@ class GitLabProvider(GenericVcsProvider):
         except Exception:
             return False
 
-    def create_repo(self, api_token, name, description="", private=False) -> dict:
+    def create_repo(self, api_token, name, description="", private=False,
+                    owner="", path="") -> dict:
+        if owner:
+            # GitLab 组织空间建仓需要 namespace_id，未在本次范围内落地 → 显式失败
+            return {"error": "GitLab 暂不支持在指定命名空间创建仓库"}
         return self._http("POST", "/projects", api_token,
                           {"name": name, "description": description or "",
                            "visibility": "private" if private else "public"})

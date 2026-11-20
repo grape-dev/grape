@@ -174,25 +174,91 @@ def _load_official_scene_from_market(scene_id: str) -> Optional[dict]:
     """Look up an official scene (template) from scene_market(source='official').
 
     Used as build-time / fallback source when a repo has no applied scene copy.
+
+    Issue #2118：组织模板以 scope='org' 隔离，不属于普通官方模板。这里只读取
+    scope 为 official/空的历史行，避免普通仓库按 scene_id 直接解析到组织模板。
     """
     db, lock = _db()
     with lock:
         c = db.cursor()
         try:
             c.execute(
-                "SELECT name, display_name, description, nodes_json, onboarding FROM scene_market "
+                "SELECT name, display_name, description, nodes_json, onboarding, scope FROM scene_market "
                 "WHERE name=? AND source='official' AND is_active=1 LIMIT 1", (scene_id,))
             row = c.fetchone()
             if row:
+                scope = (row[5] or "official").lower()
+                if scope == "org":
+                    return None
                 nodes = json.loads(row[3] or "[]") if row[3] else []
                 return {
                     "scene_id": scene_id, "name": row[0],
                     "display_name": row[1] or row[0], "description": row[2] or "",
                     "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
+                    "scene_type": "standard",
                 }
         except Exception as e:
             log.warning(f"_load_official_scene_from_market failed: {e}")
     return None
+
+
+def _repo_is_org_repo(repo_key: str) -> bool:
+    """仓库是否为组织 provisioning 生成的仓库（is_org_repo=1）。"""
+    if not repo_key:
+        return False
+    try:
+        from src.domains.mgmt.user.org_db import get_managed_repo_binding
+        return bool((get_managed_repo_binding(repo_key) or {}).get("is_org_repo"))
+    except Exception as e:
+        # 查询失败时不放行组织模板（fail-closed），但普通标准场景不受影响。
+        log.warning(f"_repo_is_org_repo lookup failed (treat as non-org): repo={repo_key} err={e}")
+        return False
+
+
+def scene_is_org_scoped(scene_id: str) -> bool:
+    """判定 scene_id 是否指向组织专用场景（不依赖 repo_key）。
+
+    Issue #2118 复审：普通仓库直接提交组织模板（如官方模板 ``org``）时，仓库作用域
+    解析会落空并回退 default；入口校验/预校验若只看「当前仓库的场景行」会漏判，从而
+    产出指向不可执行场景的死单。这里按「模板来源」统一判定 org 归属，覆盖三处来源：
+      1. devops_pipeline_scene：任意仓库行 scene_type='org'（含跨仓库引用）；
+      2. scene_market：source='official' 且 scope='org'；
+      3. pipelines.json 文件模板 scene_type='org'。
+    """
+    sid = (scene_id or "").strip()
+    if not sid:
+        return False
+    db, lock = _db()
+    try:
+        with lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT 1 FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND is_active=1 AND scene_type='org' LIMIT 1",
+                (sid,))
+            if c.fetchone():
+                return True
+    except Exception as e:
+        log.warning(f"scene_is_org_scoped: repo scene lookup failed scene={sid}: {e}")
+    try:
+        with lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scope FROM scene_market "
+                "WHERE name=? AND source='official' AND is_active=1 LIMIT 1",
+                (sid,))
+            row = c.fetchone()
+        if row and str(row[0] or "").strip().lower() == "org":
+            return True
+    except Exception as e:
+        log.warning(f"scene_is_org_scoped: market lookup failed scene={sid}: {e}")
+    try:
+        scene = (_load_pipelines_file().get("scenes") or {}).get(sid)
+        if isinstance(scene, dict) and str(scene.get("scene_type") or "").strip().lower() == "org":
+            return True
+    except Exception as e:
+        log.warning(f"scene_is_org_scoped: file lookup failed scene={sid}: {e}")
+    return False
 
 
 def _scene_search_where(q: str, cols: set[str]) -> tuple[str, list]:
@@ -534,10 +600,17 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "",
                 "display_name": _name,
                 "nodes": file_scene.get("nodes", []),
                 "onboarding": file_scene.get("onboarding", "repo-onboarding"),
+                "scene_type": file_scene.get("scene_type", "standard"),
                 "scene_id": fallback_source.get("scene_id") or scene_id,
                 "fallback": fallback,
                 "fallback_source": fallback_source,
             }
+            # Issue #2118：组织模板（scene_type=org）只允许组织仓库解析，
+            # 普通仓库直接传 scene_id=org 时视为未命中，而不是拿到组织节点。
+            if result.get("scene_type") == "org" and repo_key and not _repo_is_org_repo(repo_key):
+                log.info(f"get_pipeline_config: org scene '{scene_id}' rejected for non-org repo={repo_key}")
+                _cache_put(scene_id, repo_key, None)
+                return None
             _cache_put(scene_id, repo_key, result)
             return result
         _cache_put(scene_id, repo_key, None)  # cache None to avoid repeated misses
@@ -624,9 +697,9 @@ def get_first_node(scene_id: str = "default", repo_key: str = "") -> Optional[di
     return cfg["nodes"][0]
 
 
-def get_next_node(scene_id: str, current_node_id: str) -> Optional[dict]:
+def get_next_node(scene_id: str, current_node_id: str, repo_key: str = "") -> Optional[dict]:
     """Return the next node after the current one, respecting skip list."""
-    cfg = get_pipeline_config(scene_id)
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return None
     nodes = cfg.get("nodes", [])
@@ -650,9 +723,9 @@ def get_next_node(scene_id: str, current_node_id: str) -> Optional[dict]:
     return None
 
 
-def is_node_skipped(scene_id: str, node_id: str) -> bool:
+def is_node_skipped(scene_id: str, node_id: str, repo_key: str = "") -> bool:
     """Check if a node is in any other node's skip list."""
-    cfg = get_pipeline_config(scene_id)
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return False
     for node in cfg.get("nodes", []):
@@ -662,7 +735,93 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
     return False
 
 
+def node_role(node: dict) -> str:
+    """节点对外角色名：tag（阶段/agent_type）优先，缺省回退 id。
+
+    Issue #2118：组织节点 id=org_intake/org_dispatch/org_aggregate，但对外仍复用
+    issue/coding/qa tag。所有阶段的推进、A2A 目标与 pending_review 判定都必须用
+    tag 作为角色键，不能只按 id 比对。
+    """
+    if not isinstance(node, dict):
+        return ""
+    return str(node.get("tag") or node.get("id") or "").strip()
+
+
+def get_pipeline_transition(scene_id: str, agent_role: str,
+                            repo_key: str = "") -> Optional[dict]:
+    """按 agent 角色（id 或 tag）解析节点与下一个节点的推进信息。
+
+    返回 {"node", "next_node", "next_id", "next_role", "terminal", "handoff"}；
+    场景/节点缺失返回 None。terminal=True 表示 next 已是 done/complete/end。
+
+    供 complete_task 的自动推进与 pending_review 判定复用，保证 org 场景
+    （id != tag）与标准场景（id == tag）同一口径。
+    """
+    from src.domains.runtime.public import node_matches_agent_role
+
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+    if not cfg:
+        return None
+    nodes = [n for n in (cfg.get("nodes") or []) if isinstance(n, dict)]
+    node = next((n for n in nodes if node_matches_agent_role(n, agent_role)), None)
+    if not node:
+        return None
+    next_id = str(node.get("next") or "").strip()
+    terminal = (not next_id) or next_id.lower() in ("done", "complete", "end")
+    next_node = None
+    if not terminal:
+        next_node = next((n for n in nodes if str(n.get("id") or "") == next_id), None)
+    return {
+        "node": node,
+        "next_node": next_node,
+        "next_id": next_id,
+        "next_role": node_role(next_node) if next_node else next_id,
+        "terminal": terminal,
+        "handoff": str(node.get("handoff") or "").strip().lower(),
+    }
+
+
 # ===== Scene CRUD (for custom scenes) =====
+
+ORG_SCENE_NODES = [
+    {
+        "id": "org_intake",
+        "tag": "issue",
+        "skill": "org-intake-cli",
+        "name": "组织需求接收",
+        "mode": "emit",
+        "next": "org_dispatch",
+        "handoff": "a2a",
+        "skip": [],
+        "enabled": True,
+        "engine_runtime_ids": [],
+    },
+    {
+        "id": "org_dispatch",
+        "tag": "coding",
+        "skill": "org-dispatch-cli",
+        "name": "组织任务派发",
+        "mode": "emit",
+        "next": "org_aggregate",
+        "handoff": "a2a",
+        "skip": [],
+        "enabled": True,
+        "engine_runtime_ids": [],
+    },
+    {
+        "id": "org_aggregate",
+        "tag": "qa",
+        "skill": "org-aggregate-cli",
+        "name": "组织结果聚合",
+        "mode": "emit",
+        "next": "done",
+        "handoff": "complete",
+        "skip": [],
+        "enabled": True,
+        "engine_runtime_ids": [],
+    },
+]
+
 
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
@@ -711,6 +870,54 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         db.commit()
         invalidate_scene_cache(scene_id, repo_key)
         return new_id
+
+
+def create_org_scene(scene_id: str, org_name: str, repo_key: str,
+                     created_by: str = "", org_id: str = "") -> int:
+    """Create or update the default organization scene definition."""
+    db_id = create_custom_scene(
+        scene_id=scene_id,
+        name=f"{org_name or 'Organization'} Pipeline",
+        description="Organization intake, dispatch and aggregate pipeline",
+        repo_key=repo_key,
+        nodes=ORG_SCENE_NODES,
+        onboarding="repo-onboarding",
+        created_by=created_by,
+        scene_type="org",
+    )
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            row = c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? LIMIT 1",
+                (scene_id, repo_key),
+            ).fetchone()
+            try:
+                opts = json.loads((row[0] if row else "") or "{}")
+            except Exception:
+                opts = {}
+            if not isinstance(opts, dict):
+                opts = {}
+            opts["work_branch"] = "main"
+            c.execute(
+                "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=datetime('now') "
+                "WHERE scene_id=? AND repo_key=?",
+                (json.dumps(opts, ensure_ascii=False), scene_id, repo_key),
+            )
+            if org_id:
+                c.execute(
+                    "UPDATE devops_pipeline_scene SET org_id=? "
+                    "WHERE scene_id=? AND repo_key=?",
+                    (str(org_id), scene_id, repo_key),
+                )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"create_org_scene advanced_options failed: {exc}") from exc
+    invalidate_scene_cache(scene_id, repo_key)
+    return db_id
 
 
 def _try_set_created_by(c, row_id: int, created_by: str):

@@ -164,5 +164,15 @@
   "board": {
     "refresh_failed_keep": "Board refresh failed, showing the last data",
     "retry": "Retry"
+  },
+  "dispatch": {
+    "title": "Dispatch details",
+    "batch": "Batch",
+    "targets": "targets",
+    "repo": "Repository",
+    "scene": "Scene",
+    "issue": "Issue",
+    "status": "Status",
+    "empty": "Not dispatched yet"
   }
 }

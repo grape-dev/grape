@@ -515,8 +515,9 @@ app = server_common.build_app(
 # 管理域用户面路由（设计 §5.1 清单）
 from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
-    feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community,
-    patrol, categories as categories_routes,
+    feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community,
+    patrol, org_context_store, org_knowledge, org_audit,
+    categories as categories_routes,
 )
 
 app.include_router(grape_auth.router)
@@ -548,7 +549,12 @@ app.include_router(feedback.router)
 app.include_router(autopilot.router)
 
 app.include_router(orgs.router)
-
+app.include_router(org_repos.router)
+app.include_router(org_dispatches.router)
+# 组织上下文 + 组织知识库（Issue #2150）
+app.include_router(org_context_store.router)
+app.include_router(org_knowledge.router)
+app.include_router(org_audit.router)  # 组织审计只读查询（Issue #2260）
 app.include_router(community.router)
 
 # 巡检（Issue: 4 进程拆分时漏挂，导致 /api/patrol/* 404 且契约丢失）

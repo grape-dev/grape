@@ -47,8 +47,11 @@ async def dispatch_node(
         return {"status": "failed", "node": node_id, "mode": "none", "error": "no pipeline config"}
 
     node = None
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
     for n in cfg.get("nodes", []):
-        if n["id"] == node_id:
+        if not isinstance(n, dict):
+            continue
+        if n.get("id") == node_id or node_matches_agent_role(n, node_id):
             node = n
             break
     if not node:

@@ -1124,25 +1124,10 @@ function selectRepoAndNav(fullName) {
   return G.API.get('/repos/managed')
     .then(function (d) {
       var repos = d.repos || []
-      var sel = document.getElementById('repoSelect')
-      if (sel) {
-        sel.innerHTML =
-          repos
-            .map(function (r) {
-              return (
-                '<option value="' +
-                r.full_name +
-                '"' +
-                (r.full_name === fullName ? ' selected' : '') +
-                '>' +
-                r.full_name +
-                '</option>'
-              )
-            })
-            .join('') +
-          '<option value="__add__">＋ ' +
-          (G.I18N.t('app.repo.add_new') || '添加仓库') +
-          '</option>'
+      // 统一走 shell 的仓库下拉渲染：组织仓库只显示「组织仓库」，普通仓库按平台分组。
+      // 这里不能再手工拼 full_name，否则会把组织仓库的标签覆盖成真实仓库名。
+      if (typeof G.app._updateSidebarRepos === 'function') {
+        G.app._updateSidebarRepos(repos)
       }
       G.app.switchRepo(fullName)
     })

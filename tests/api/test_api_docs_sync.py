@@ -68,3 +68,11 @@ def test_readme_links_all_doc_files():
             continue  # 索引自身不要求出现在正文
         assert doc in readme, f"README 缺少链接: {doc}"
         assert (_HELP_DIR / doc).exists(), f"缺失文档: {doc}"
+
+def test_org_endpoints_documented():
+    """组织功能新增/存量 /api/orgs 端点必须全部有文档（本功能验收口径）。"""
+    missing, extra = compare()
+    org_missing = [x for x in missing if x[1].startswith("/api/orgs")]
+    org_extra = [x for x in extra if x[1].startswith("/api/orgs")]
+    assert not org_missing, f"组织接口缺文档: {org_missing}"
+    assert not org_extra, f"组织文档有契约外端点: {org_extra}"

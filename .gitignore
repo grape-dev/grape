@@ -130,6 +130,16 @@ configs/admin.env
 logs/
 examples/
 skills/
+# .grape/skills 仅白名单化随仓库分发的资产（org 组织技能、qa/dev-workflow 存量技能）；
+# 运行时写入的 custom/、repo/ 等目录不落库，避免误提交（Issue #2118 复审）。
+!.grape/skills/
+.grape/skills/*
+!.grape/skills/dev-workflow/
+!.grape/skills/dev-workflow/**
+!.grape/skills/org/
+!.grape/skills/org/**
+!.grape/skills/qa/
+!.grape/skills/qa/**
 trace_*.py
 diag_*.py
 configs/scene-sync.json

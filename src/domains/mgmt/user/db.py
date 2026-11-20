@@ -668,6 +668,9 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     bot_username TEXT DEFAULT '',
     host_user_id TEXT DEFAULT '',         -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时；UUID TEXT，D105 后恒 str，''=未配置）
     webhook_secret TEXT DEFAULT '',       -- Issue #372: webhook 验证密钥（与 token 解耦）
+    is_org_repo INTEGER DEFAULT 0,         -- 组织自动 provisioning 的仓库；禁止解绑/迁移
+    linked_by TEXT DEFAULT '',             -- 关联到组织的操作用户（D105 后 user id 恒 TEXT）
+    linked_at TEXT DEFAULT '',             -- 关联时间
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -1666,7 +1669,7 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
                      bot_username: str = "", dev_scene: str = "",
                      github_webhook_token: str = "", bot_github_token: str = "",
-                     org_id: int = 0, host_user_id: str = "", webhook_secret: str = "",
+                     org_id: str = "", host_user_id: str = "", webhook_secret: str = "",
                      **extra_cols) -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
 
@@ -1677,6 +1680,8 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
     full_name = from_repo_key(repo_key)
+    # D105 第三批：org_id 统一 str，哨兵 0/None → ''（''=全局/未归属）
+    org_id = "" if org_id in (None, "", 0, "0") else str(org_id)
     # D44/S64：动态平台列（config-only 平台卡派生列，如 bot_gitee_token）
     # ——identifier 白名单校验，非法列名拒绝写入。
     # S74/D49：响亮失败（raise）——原静默 return False，而全仓 10 个调用点
@@ -2026,58 +2031,39 @@ def get_global_bot_credential() -> tuple[str, str]:
     user = us[0] if us else ""
     return tok, user
 
-def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
+def get_managed_repos(user_id: int, org_id: str = "", personal_org: bool = False) -> list[dict]:
     """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。
 
-    org_id > 0 时按组织过滤（managed_repos.org_id=?），实现组织级仓库隔离。
-    org_id=0 时返回全部（兼容旧调用，但实际由调用方 require_org_member 保证 org_id 已解析）。
-
-    personal_org=True（当前组织是个人组织）时放宽 org 过滤：
-    自己组织托管的 + 托管在其他个人组织的仓库都显示（与大堂 /repos/member 的
-    _filter_repos 对个人组织的口径完全一致——个人组织不隔离其他个人组织、
-    但仍隔离其他团队组织）。见 docs/weekly-06/repo-dropdown-grape-invisible-diagnosis.md 方案A。
-    注意不能用 user_repos.is_join 判定：VCS 协作者同步的行 is_join=0（is_admin=1），
-    大堂同样显示这类仓库，下拉框口径必须一致。
-    团队组织（is_personal=0）仍严格按 m.org_id=? 隔离，不影响团队间隔离语义。
+    Issue #2264：个人空间（personal_org=True）不再隐藏「已关联团队组织」的仓库——
+    用户是仓库 owner，关联组织后仓库不应在个人列表里凭空消失；返回 org_id/org_name
+    供前端展示组织徽标。团队组织（personal_org=False）仍严格按 m.org_id=? 隔离。
     """
     from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = _mg_db.cursor()
+        _base = (
+            "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
+            "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
+            "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,''), "
+            "COALESCE(m.org_id,''), COALESCE(o.name,''), COALESCE(m.is_org_repo,0) "
+            "FROM managed_repos m "
+            "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
+            "LEFT JOIN organization o ON o.id=m.org_id "
+            "WHERE u.repo_key IS NOT NULL "
+        )
         try:
-            if org_id and personal_org:
-                c.execute(
-                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
-                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
-                    "FROM managed_repos m "
-                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
-                    "WHERE u.repo_key IS NOT NULL "
-                    "AND (m.org_id=? OR m.org_id IN (SELECT id FROM organization WHERE is_personal=1)) "
-                    "ORDER BY m.full_name", (user_id, org_id))
-            elif org_id:
-                c.execute(
-                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
-                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
-                    "FROM managed_repos m "
-                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
-                    "WHERE u.repo_key IS NOT NULL AND m.org_id=? "
-                    "ORDER BY m.full_name", (user_id, org_id))
+            if org_id and not personal_org:
+                # 团队组织：严格隔离
+                c.execute(_base + "AND m.org_id=? ORDER BY m.full_name", (user_id, org_id))
             else:
-                c.execute(
-                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
-                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0), COALESCE(m.host_status,'') "
-                    "FROM managed_repos m "
-                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
-                    "WHERE u.repo_key IS NOT NULL "
-                    "ORDER BY m.full_name", (user_id,))
+                # 个人空间/未指定组织：显示该用户全部托管仓库（含已关联组织）
+                c.execute(_base + "ORDER BY m.full_name", (user_id,))
         except Exception as e:
             log.warning(f"get_managed_repos join failed: {e}")
             c.execute(
                 "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
                 "bot_gitcode_token, gitcode_webhook_token, bot_username, created_at, 0, 0, "
-                "COALESCE(host_status,'') "
+                "COALESCE(host_status,''), COALESCE(org_id,''), '', COALESCE(is_org_repo,0) "
                 "FROM managed_repos ORDER BY full_name")
         rows = c.fetchall()
         # autocommit=False 下 SELECT 会打开事务，同线程连接后续 SELECT 看到旧快照。
@@ -2090,6 +2076,9 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
             "bot_username": r[7] or "", "created_at": r[8],
             "is_join": bool(r[9]), "is_admin": bool(r[10]),
             "host_status": (r[11] or "") if len(r) > 11 else "",
+            "org_id": (r[12] or "") if len(r) > 12 else "",
+            "org_name": (r[13] or "") if len(r) > 13 else "",
+            "is_org_repo": bool(r[14]) if len(r) > 14 else False,
         } for r in rows]
 
 
@@ -4079,7 +4068,7 @@ def save_user_repos(user_id: int, repos: list[dict], providers: list[str] | None
             )
         _mg_db.commit()
 
-def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
+def get_user_repos(user_id: int, org_id: str = "") -> list[dict]:
     """读取用户仓库缓存（对外返回 full_name 无前缀）。
 
     org_id 参数保留兼容，但实际过滤在 _filter_repos 中完成
@@ -5017,7 +5006,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
     featured_only: 1=只查精选场景，0=全部。
     limit: >0 限制返回条数（精选场景用，不分页）。
     page/page_size: 分页参数（limit=0 时生效），page 从 1 开始。
-    scope: official / repo，空=全部。
+    scope: official / repo / org；空=普通市场（不返回 org 系统模板）。
       scope='repo': 查当前仓库下所有用户的仓库场景（scope='repo' AND repo_key=?）
     返回 (rows, total)。
     """
@@ -5043,6 +5032,10 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         if scope == "repo" and repo_key:
             where.append("repo_key=?")
             params.append(repo_key)
+    else:
+        # Organization templates are provisioned server-side and are not
+        # ordinary market items. They remain queryable with scope='org'.
+        where.append("scope!='org'")
     where_sql = " AND ".join(where)
     order_by = "updated_at DESC" if sort != "hot" else "like_count DESC"
 
@@ -5176,7 +5169,7 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
                         updated_by: str = "", cat_l1_id: int = 0,
                         cat_l2_id: int = 0, tags: str | None = None,
                         clear_category: bool = False) -> bool:
-    """更新用户自定义场景（scope != 'official'）。返回是否更新成功。
+    """更新用户自定义场景（source != 'official'）。返回是否更新成功。
 
     版本号自动管理：只有内容真正变更才 patch+1，无变更不涨。
     版本号仅代表编辑轮次，不是标准语义化版本。
@@ -5188,7 +5181,7 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
             "SELECT name, display_name, description, market_description, nodes_json, "
             "icon, obs_icon_key, category_id, recommended_template, version, "
             "cat_l1_id, cat_l2_id, tags "
-            "FROM scene_market WHERE id=? AND scope!='official'",
+            "FROM scene_market WHERE id=? AND source!='official'",
             [market_id],
         )
         row = c.fetchone()
@@ -5262,7 +5255,7 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
 
         try:
             c.execute(
-                f"UPDATE scene_market SET {', '.join(sets)} WHERE id=? AND scope!='official'",
+                f"UPDATE scene_market SET {', '.join(sets)} WHERE id=? AND source!='official'",
                 params,
             )
             _mg_db.commit()
@@ -5273,7 +5266,7 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
             raise
 
 def delete_scene_market(market_id: int) -> bool:
-    """硬删除用户自定义场景（scope != 'official'）。
+    """硬删除用户自定义场景（source != 'official'）。
     场景市场无回收站需求，删除即销毁，name 立即释放。
     级联清理 scene_skill_ref 和 scene_likes 关联记录。
     """
@@ -5282,7 +5275,7 @@ def delete_scene_market(market_id: int) -> bool:
         c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
         c.execute("DELETE FROM scene_likes WHERE scene_id=?", (market_id,))
         c.execute(
-            "DELETE FROM scene_market WHERE id=? AND scope!='official'",
+            "DELETE FROM scene_market WHERE id=? AND source!='official'",
             (market_id,),
         )
         _mg_db.commit()

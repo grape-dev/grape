@@ -395,3 +395,11 @@ def agent_runtimes_new_insert_select(cols: list[str]) -> str:
     """agent_runtimes 重建表的行搬迁（只带新旧表共有列）。"""
     _c = ",".join(cols)
     return f"INSERT INTO agent_runtimes_new ({_c}) SELECT {_c} FROM agent_runtimes"
+
+
+# ── org uuid-pk（PR #1820 A12）：issue.org_context_snapshot_id 哨兵回填 ──────
+# 该列属 runtime 域（configs/table_ownership.json: issue→runtime）；SQL 常量下沉到
+# runtime 侧，避免 api 域迁移文件出现对 runtime 表的跨域数据引用（P0-2 棘轮）。
+UPDATE_ISSUE_ORG_CONTEXT_SNAPSHOT_ID_SENTINEL = (
+    "UPDATE issue SET org_context_snapshot_id='' "
+    "WHERE org_context_snapshot_id IN (0, '0')")

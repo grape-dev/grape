@@ -164,5 +164,15 @@
   "board": {
     "refresh_failed_keep": "看板刷新失败，已保留上次数据",
     "retry": "重试"
+  },
+  "dispatch": {
+    "title": "任务派发详情",
+    "batch": "批次",
+    "targets": "个目标",
+    "repo": "仓库",
+    "scene": "场景",
+    "issue": "Issue",
+    "status": "状态",
+    "empty": "尚未派发"
   }
 }

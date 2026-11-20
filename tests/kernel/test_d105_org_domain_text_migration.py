@@ -191,6 +191,8 @@ class TestOrgDomainTextNormalize:
             ("organization", "owner_id"),
             ("org_member", "org_id"), ("org_member", "invited_by"),
             ("org_invitation", "org_id"), ("org_invitation", "inviter_id"),
+            # 组织下派/上下文表（Issue #2150/#2251）存量库旧 DDL 为 INTEGER org_id
+            ("grape_t_org_dispatch", "org_id"), ("grape_t_org_context", "org_id"),
             *[(t, "org_id") for t in _ORG_ID_TABLES],
         }
         assert set(_ORG_DOMAIN_TEXT_COLS) == required

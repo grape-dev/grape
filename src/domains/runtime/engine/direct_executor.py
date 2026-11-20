@@ -540,9 +540,25 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.domains.runtime.engine.service import session_token_for_execution
         if repo_key and agent_type:
+            # Issue #2267：会话 token 必须携带任务归属用户 id。此前固定 user_id=0，
+            # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库 /
+            # 创建下派，组织流水线看起来毫无进展。
+            _tk_uid = 0
+            try:
+                if isinstance(evt, dict):
+                    _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
+                if not _tk_uid and task_id:
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+                    with _sdl:
+                        _r = _sdb.cursor().execute(
+                            "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    _tk_uid = (_r[0] if _r else 0) or 0
+            except Exception as _uid_e:
+                from src.kernel.config import log as _uid_log
+                _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
-                repo_key=repo_key, agent_type=agent_type, user_id=0)
+                repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid))
             # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
             # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
             env_extra["GRAPE_CLI_MODE"] = "WORKER"
