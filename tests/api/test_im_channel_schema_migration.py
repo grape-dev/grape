@@ -24,9 +24,12 @@ sys.path.insert(0, str(ROOT))
 def test_channel_tables_migration_registered():
     from src.api import db_setup
 
-    mig = next((m for m in db_setup._MIGRATIONS if m.version == "202611182001"), None)
+    # 版本号按名定位：202611182001 在本仓与 create-org-dispatch-tables 撞号，
+    # db_setup 已避让改号为 202611184000（同号不同名会被判「已执行」永久跳过）。
+    mig = next((m for m in db_setup._MIGRATIONS
+                if m.name == "ensure-im-channel-tables"), None)
     assert mig is not None, "存量库补建 IM 渠道表的迁移必须注册（否则新表永不创建）"
-    assert mig.name == "ensure-im-channel-tables"
+    assert mig.version in {"202611182001", "202611184000"}, mig.version
     assert mig.kind == "safe"
     assert callable(mig.fn)
 

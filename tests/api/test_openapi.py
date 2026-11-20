@@ -240,6 +240,7 @@ EXPECTED_PUBLIC = {
     "issues_resume": ("post", "/api/issues/{issue_id}/resume"),
     "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
     "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),   # 完成态回退（配套 reopening UI）
     "issues_start": ("post", "/api/issues/{issue_id}/start"),
     "issues_status": ("put", "/api/issues/{issue_id}/status"),
     "issues_status_get": ("get", "/api/issues/{issue_id}/status"),
