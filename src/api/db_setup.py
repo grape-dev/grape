@@ -4467,6 +4467,10 @@ def run_pending_migrations() -> None:
     下发 SET SESSION lock_wait_timeout=10（QA R1：专用连接上的 SET 对 DDL 无效）；
     执行器内每条 pending 迁移前还会再下发一次。
     """
+    # Issue #3527（review R1）：不筛域全量迁移的真正入口在这里（server_common
+    # → init_database → run_pending_migrations），owner 为空时必须在此告警，
+    # 而不是只挂在 run_domain_migrations() 顶部（该入口 owner 为空直接 return）。
+    _warn_missing_migration_owner_if_multi_db("pending")
     _ensure_migration_session_lock_timeout()
     try:
         _run_migrations_with_conn(db)
@@ -4488,11 +4492,15 @@ def _ensure_migrations_ledger(conn) -> None:
     conn.commit()
 
 
-def _warn_missing_migration_owner_if_multi_db() -> None:
+def _warn_missing_migration_owner_if_multi_db(call_site: str = "pending") -> None:
     """多库 DSN 已配但 GRAPE_MIGRATION_OWNER 为空 → ERROR 级告警（含修复指引）。
 
-    Issue #3527：不筛域形态下 current_migration_domain() 返回空串，执行器按全量
-    登记表跑迁移，非属主进程会把别域的表建进本域库（沙箱同名空表遮蔽即此形态）。
+    Issue #3527：告警必须挂在真正跑迁移的入口，且按 call site 区分文案——
+    - "pending"：init_database() → run_pending_migrations() 的不筛域形态，
+      执行器按全量登记表跑迁移，非属主进程会把别域的表建进本域库
+      （沙箱同名空表遮蔽即此形态）；
+    - "domain"：run_domain_migrations()（GRAPE_DOMAIN_LIB=1）的域迁移入口，
+      owner 为空时该入口直接 return，本进程未执行任何域迁移。
     worker 与 event 共用 runtime 库、按设计不跑迁移，owner 为空属正常，不告警。
     """
     try:
@@ -4510,6 +4518,15 @@ def _warn_missing_migration_owner_if_multi_db() -> None:
     }
     if "worker" in _roles:
         return
+    if call_site == "domain":
+        log.error(
+            "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
+            "但 GRAPE_MIGRATION_OWNER 为空：本进程未执行任何域迁移（域迁移入口直接跳过），"
+            "登记的增量迁移将停留在未盖章状态。"
+            "修复：启动脚本按角色导出 GRAPE_MIGRATION_OWNER —— mgmt=mgmt / event=runtime / "
+            "insight=insight / worker 留空；参考 scripts/grape-systemd-run.sh 与 deploy/deploy3db.sh。"
+        )
+        return
     log.error(
         "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
         "但 GRAPE_MIGRATION_OWNER 为空：本进程将以「不筛域」形态执行全量迁移，"
@@ -4526,7 +4543,9 @@ def run_domain_migrations() -> None:
     runtime 表只由 event 进程跑（worker 与 event 共库，避免并发重复 DDL），
     insight 由 insight 进程跑；mgmt 仍走 init_database() 的常规路径。
     """
-    _warn_missing_migration_owner_if_multi_db()
+    # Issue #3527（review R1）：此处 owner 为空 → 直接 return，本进程未执行
+    # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
+    _warn_missing_migration_owner_if_multi_db("domain")
     domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
     if domain not in ("runtime", "insight"):
         return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
