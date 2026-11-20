@@ -28,7 +28,7 @@ FROZEN = {
         "host-status.js": "1",
     },
     "admin.html": {
-        "admin-view.css": "2", "tokens.css": "2", "pwd-blocklist.js": "3", "admin-view.js": "46",
+        "admin-view.css": "2", "tokens.css": "2", "pwd-blocklist.js": "3", "admin-view.js": "47",
     },
     "register.html": {
         "app.css": "10", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",

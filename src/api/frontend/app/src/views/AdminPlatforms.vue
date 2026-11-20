@@ -289,10 +289,20 @@ async function saveCard(p) {
   }
   for (const f of EDIT_FIELDS) base[f] = (editForm[f] || '').trim()
   try {
-    await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [p.provider]: base } } })
+    const r = await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [p.provider]: base } } })
     editMode.value = false
     await loadCard(p.provider)
     await load()
+    // 配置驱动的平台（configs/platforms/<p>.json 导入行）管理面改不动：路由按
+    // 「双真源」策略只写 meta、不落行（rows: config_owned），旧页面照旧弹成功 →
+    // 运维以为 CA/下载基址改好了，实际启动导入即被配置文件冲回。这里必须明说。
+    const action = ((r && r.rows) || {})[p.provider]
+    if (action === 'config_owned') {
+      cardError.value = t(
+        'page.config_owned',
+        '该平台由配置文件定义（configs/platforms/' + p.provider + '.json），管理面修改不会入库；要改请改配置文件，或另建一张手建实例卡'
+      )
+    }
   } catch (e) {
     const d = e.detail || {}
     const detail = d.errors ? d.errors.join('；') : d.message || e.message || e
