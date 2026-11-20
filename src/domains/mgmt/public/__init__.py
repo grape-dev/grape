@@ -918,7 +918,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # W2 渠道写原语
            "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
            # 渠道租约只读（runtime/im/outbox 归属过滤；任意拓扑）
-           "lease_owner_by_key", "lease_owned_installations_by_owner",
+           "lease_owner_by_key", "lease_owned_installations_by_owner", "live_channel_lease_owners",
            "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
            "upsert_chat_session_binding", "upsert_sender_identity",
            "add_event_action_filter", "update_event_action_filter",
@@ -5053,6 +5053,22 @@ def lease_owned_installations_by_owner(owner: str, cursor: Any = None) -> list[t
     with _owner_cursor(cursor) as c:
         c.execute(_any_sql("lease_owned_installations_by_owner"), (str(owner or ""),))
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def live_channel_lease_owners(cursor: Any = None) -> dict:
+    """全集群「谁持有哪条渠道」的快照（installation_id → (lease_owner, lease_expires_at)）。
+
+    用途：IM 渠道页的「已连接」口径。四台主控按租约分片各连一部分，
+    单台进程的 supervisor 只知道自己那几条，直接拿它当 connected 会让
+    其余三台连着的渠道显示成「已配置 · 未连接」。租约表是跨进程唯一真源。
+    `cursor` 语义同 `lease_owner_by_key`。
+    """
+    sql = ("SELECT installation_id, COALESCE(lease_owner,''), COALESCE(lease_expires_at,'') "
+           "FROM grape_t_channel_lease WHERE installation_id<>'' AND COALESCE(lease_owner,'')<>''")
+    with _owner_cursor(cursor) as c:
+        c.execute(sql)
+        rows = c.fetchall() or []
+    return {str(r[0]): (str(r[1] or ""), str(r[2] or "")) for r in rows}
 
 
 def installation_status(installation_id: str):

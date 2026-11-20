@@ -15,6 +15,7 @@ A2 收尾（Phase B）后 legacy 三列与 `global_im_bot_config` 整表已 DROP
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -94,13 +95,36 @@ def _masked_config(raw: str) -> dict:
 
 
 def _connected_ids() -> set:
-    """Supervisor._channels 的 key 就是 installation_id（真连上的渠道）。"""
+    """Supervisor._channels 的 key 就是 installation_id（**本进程**真连上的渠道）。"""
     eng = _engine()
     sup = getattr(eng, "supervisor", None) if eng else None
     try:
         return set(sup._channels) if sup else set()
     except Exception:
         return set()
+
+
+def _local_instance_id() -> str:
+    """本进程 IM 引擎实例 id（与 /api/im/status 的 instance_id 同源）。"""
+    eng = _engine()
+    return str(getattr(eng, "instance_id", "") or "") if eng else ""
+
+
+def _lease_connected_owners() -> dict:
+    """全集群口径：租约活着 = 某台主控正在维护这条渠道。
+
+    四台主控按 `grape_t_channel_lease` 分片，每条安装只在**一台**上连；
+    只按本进程 `supervisor._channels` 判 connected，会让另外三台连着的渠道
+    在页面上显示成「已配置 · 未连接」（Issue：IM 页误报）。租约表是跨进程
+    唯一真源：owner 非空且未过期即视为已连接。
+    """
+    try:
+        leases = _mgmt_public().live_channel_lease_owners()
+    except Exception as e:
+        log.warning(f"IM lease snapshot read failed: {e}")
+        return {}
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    return {str(i): str(o) for i, (o, exp) in (leases or {}).items() if not exp or str(exp) > now}
 
 
 @router.get("/status")
@@ -154,7 +178,9 @@ def im_installations(
     uid = str(user.get("id") or "")
     rows = _mgmt_public().installation_list_any()
 
-    connected = _connected_ids()
+    local_connected = _connected_ids()
+    lease_owners = _lease_connected_owners()
+    connected = local_connected | set(lease_owners)
     out = []
     for r in rows or []:
         inst_id, ctype, scope, owner, repo_key, config, status, updated = r
@@ -180,6 +206,8 @@ def im_installations(
             "config": _masked_config(config),
             "status": str(status or ""),
             "connected": inst_id in connected,
+            "connected_on": str(_local_instance_id() if inst_id in local_connected
+                                else lease_owners.get(inst_id, "")),
             "updated_at": str(updated or ""),
         })
     return {"installations": out, "total": len(out)}
