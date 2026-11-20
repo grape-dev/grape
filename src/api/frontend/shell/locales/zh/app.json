@@ -797,5 +797,11 @@
   },
   "deeplink": {
     "repo_not_found": "无法通过该链接进入：仓库不存在、未托管或你没有权限"
+  },
+  "boot": {
+    "watchdog_title": "页面还在加载",
+    "watchdog_body": "服务端响应较慢，已等待 {secs} 秒。可以再等一下，或点下方按钮重试。",
+    "watchdog_retry": "重试",
+    "watchdog_clear": "清除缓存并重载"
   }
 }

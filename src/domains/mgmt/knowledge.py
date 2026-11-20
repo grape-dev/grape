@@ -15,6 +15,7 @@ OBS 改造（feat/knowledge-obs）：
 """
 
 import hashlib
+import time
 
 import json
 
@@ -950,10 +951,11 @@ def _knowledge_sync_pass(storage):
     每个 repo 抢一次分布式锁（同步 DB 事务）、读文件、上传 OBS、INSERT/UPDATE，
     一跑就是 60~90 秒，期间同进程所有请求（含 /api/ping）一起排队。
     """
-    import hashlib
     from src.kernel.repo_key import parse_repo_key, workspace_repo_dir
     from src.kernel.session_manager import db, db_lock
 
+    _t0 = time.time()
+    _scanned = _synced = _failed = 0
     cursor = 0
     while True:
         with db_lock:
@@ -963,6 +965,7 @@ def _knowledge_sync_pass(storage):
                 "FROM agent_shared_knowledge WHERE (obs_key='' OR obs_key IS NULL) AND id>? ORDER BY id LIMIT 500",
                 (cursor,)
             ).fetchall()
+            _scanned += len(rows)
         if not rows:
             break
         for row in rows:
@@ -1028,8 +1031,9 @@ def _knowledge_sync_pass(storage):
                              rid)
                         )
                         db.commit()
+                _synced += 1
             except Exception as e:
-                
+                _failed += 1
                 log.warning(f"[knowledge] sync failed id={rid}: {e}")
             cursor = rid
         if len(rows) < 500:
@@ -1047,6 +1051,8 @@ def _knowledge_sync_pass(storage):
         _sync_baseline_files()
     except Exception as e:
         log.error(f"[knowledge] sync baseline files error: {e}")
+    log.info(f"[knowledge] sync pass done in {time.time() - _t0:.1f}s "
+             f"scanned={_scanned} synced={_synced} failed={_failed} remaining={remaining}")
     # Issue #103：清理 7 天前的 failed 队列记录
     try:
         _cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")

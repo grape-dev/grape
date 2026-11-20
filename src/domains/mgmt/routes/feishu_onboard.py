@@ -319,19 +319,9 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
     finally:
         _TASKS.pop(task_id, None)
 
-@router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
-def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
-    """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
-    if body.bot_type not in ("chat_bot", "vod_bot"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "bot_type 仅支持 chat_bot / vod_bot"})
-    if body.bot_type == "vod_bot" and not body.repo_key:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "vod_bot 需要 repo_key"})
-
-    # 并发限制：同用户同时只允许一个进行中的扫码任务。
-    # 2026-10-19（428）：
-    # - 409 时 detail 附带旧 task_id，供前端「确认重开」直接作废旧任务（不再只能干等）。
-    # - STALE_TTL 兜底：进行中任务超过存活时间（如进程重启丢协程/二维码过期未确认）自动置
-    #   failed 并放行新任务，杜绝 waiting_confirm 永久滞留阻塞再扫码（docs/weekly-08 方案 §1.3）。
+def _guard_active_onboard(user_id) -> None:
+    """扫码任务并发闸门（同步 DB 段）：由 async 路由经 `asyncio.to_thread` 调用，
+    不在事件循环上做同步 SELECT/UPDATE。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -340,7 +330,7 @@ def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token
             "SELECT task_id, created_at FROM feishu_onboard_task "
             "WHERE user_id=? AND status IN ('pending','waiting_confirm') "
             "ORDER BY created_at ASC LIMIT 1",
-            (user["id"],),
+            (user_id,),
         )
         active = c.fetchone()
         if active:
@@ -370,8 +360,29 @@ def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token
             log.info(f"Feishu onboard start: auto-closed stale task {old_task_id} "
                      f"(created_at={old_created}, >STALE_TTL={STALE_TTL}s)")
 
+
+
+@router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
+async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
+    """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
+    if body.bot_type not in ("chat_bot", "vod_bot"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "bot_type 仅支持 chat_bot / vod_bot"})
+    if body.bot_type == "vod_bot" and not body.repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "vod_bot 需要 repo_key"})
+
+    # 并发限制：同用户同时只允许一个进行中的扫码任务。
+    # 2026-10-19（428）：
+    # - 409 时 detail 附带旧 task_id，供前端「确认重开」直接作废旧任务（不再只能干等）。
+    # - STALE_TTL 兜底：进行中任务超过存活时间（如进程重启丢协程/二维码过期未确认）自动置
+    #   failed 并放行新任务，杜绝 waiting_confirm 永久滞留阻塞再扫码（docs/weekly-08 方案 §1.3）。
+    # 同步 DB 段（并发闸门）下放线程池：本路由必须保持 async def —— 末尾要
+    # `asyncio.create_task` 起扫码协程；同步 def 路由由 FastAPI 丢进线程池，
+    # 线程内无事件循环 → create_task 抛 RuntimeError → 端点 500、DB 留 pending，
+    # 用户 STALE_TTL(600s) 内无法再次扫码（架构守护 F2）。
+    await asyncio.to_thread(_guard_active_onboard, user["id"])
+
     task_id = uuid.uuid4().hex
-    _create_task(task_id, body.bot_type, body.repo_key, user["id"])
+    await asyncio.to_thread(_create_task, task_id, body.bot_type, body.repo_key, user["id"])
     task = asyncio.create_task(_run_registration(task_id, body.bot_type, body.repo_key,
                                                  user["id"], user.get("username", "")))
     _TASKS[task_id] = task

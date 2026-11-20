@@ -223,13 +223,32 @@ def _feishu_api_for_ctx(ctx):
 
 
 @router.post("/notify", operation_id="tasks_notify", summary="Task assign/notify (Agent runtime)", description="Called by issue agents after assign/reassign/takeover: creates a task, refreshes the assignee, writes the conversation and sends static template + Feishu notifications. Session-only (tk_), repo scope must match.")
-def notify_task(body: TaskNotifyBody, request: Request,
+async def notify_task(body: TaskNotifyBody, request: Request,
                       user: dict = Depends(get_current_user_or_api_key)):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）
 
     - **仅会话通道**：`get_current_user_or_api_key` 让本端点进契约（CLI 可见），但体内
       `_require_session_repo_token` 强制 `tk_` + 仓库作用域；`grape_` API Key / JWT → 403。
     - x-token-scope：session_only（见 openapi._SESSION_ONLY_OPERATIONS）。
+
+    A14 执行模型裁决：本路由**必须保持 async def** —— 末尾要 `asyncio.create_task`
+    起后台通知协程；同步 `def` 路由由 FastAPI 丢进线程池执行，线程内无运行中的
+    事件循环，`asyncio.create_task` 会抛 `RuntimeError: no running event loop`
+    → 端点 500 且通知静默丢失（架构守护 F1）。同步 DB 段统一下放
+    `asyncio.to_thread(_notify_sync, ...)`，事件循环不被阻塞。
+    """
+    res = await asyncio.to_thread(_notify_sync, body, request, user)
+    defer = res.pop("_defer", None)
+    if defer:
+        asyncio.create_task(_run_notify(*defer))
+    return res
+
+
+def _notify_sync(body: TaskNotifyBody, request: Request, user: dict) -> dict:
+    """`POST /api/tasks/notify` 的同步实现（建任务/换人/会话/映射查询）。
+
+    成功路径把后台通知参数放进返回值的 `"_defer"`；HTTPException 在
+    `await asyncio.to_thread(...)` 处原样抛回。
     """
     from src.kernel.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
@@ -288,11 +307,12 @@ def notify_task(body: TaskNotifyBody, request: Request,
     if not ctx:
         log.warning(f"Task notify: assignee={body.assignee} 未配置本人 chat bot，跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     api = _feishu_api_for_ctx(ctx)
-    asyncio.create_task(_run_notify(ctx, api, user_id, conv_id, open_id,
-                                    body.task_description, body.repo_key, body.issue_number, cfg))
-
-    return {"ok": True, "issue_id": task_id, "task_id": task_id, "conversation_id": conv_id,
-            "message": "任务已创建并通知责任人"}
+    defer = (ctx, api, user_id, conv_id, open_id,
+             body.task_description, body.repo_key, body.issue_number, cfg)
+    payload = {"ok": True, "issue_id": task_id, "task_id": task_id, "conversation_id": conv_id,
+               "message": "任务已创建并通知责任人"}
+    payload["_defer"] = defer
+    return payload
 
 
 @router.post("/awaiting-input", operation_id="tasks_awaiting-input", summary="Declare task awaiting-input (Agent runtime)", description="[moved] awaiting-input 已迁移至 POST /api/issues/{issue_id}/awaiting-input（issue-explicit-awaiting-input-api-design.md）；本端点保留为 410 路由，避免旧调用方误用。")
