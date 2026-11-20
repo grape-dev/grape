@@ -3186,9 +3186,9 @@ def runtime_whoami(cred: CredentialContext = Depends(_require_credential_ctx)):
     设计不变量：本响应永不包含凭证类字段（token/api_key）——泄露面为零。
     凭据吊销后本端点 401（安装脚本据此在第一步报"凭据无效或已吊销"）。
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    # runtime_credentials 归 runtime 域：具名域游标（三库拓扑下 mgmt 进程库只有旧
+    # 视图/旧副本，cred_type/credential_uid 列不在——#646 后缺列即 1054）。
+    with _domain_cursor("runtime") as c:
         c.execute(
             "SELECT name, cred_type, platform, credential_uid FROM runtime_credentials WHERE id=? AND status='active'",
             (cred.id,))
