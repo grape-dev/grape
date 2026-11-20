@@ -116,6 +116,170 @@ const API = (() => {
     } catch (e) {}
   }
 
+  // ── Issue #3569: reauth 按平台跳转 + 防整页重载循环 ──
+  // 旧实现收到 401 reauth_required 一律跳 /auth/login/gitcode：GitHub 令牌失效被送去 GitCode
+  // 授权，回调后仍 401 → 整页重载 → 再 401，形成无限重载闭环（页面级 _reauthRedirecting 在
+  // 整页重载后归零，挡不住）。这里用 sessionStorage（页签级、跨整页重载保留）记录
+  // 「同一 provider 60 秒内已跳转过」，命中则停止跳转并渲染明确提示。
+  var _REAUTH_MARK_KEY = 'grape_reauth_redirect';
+  var _REAUTH_MARK_TTL_MS = 60 * 1000;
+  var _REAUTH_PROVIDER_PATHS = {gitcode: '/auth/login/gitcode', github: '/auth/login/github'};
+  var _REAUTH_PROVIDER_LABELS = {gitcode: 'GitCode', github: 'GitHub'};
+  var _REAUTH_NOTICE_ID = 'oauthReauthNotice';
+
+  function _reauthProviderLabel(provider) {
+    return _REAUTH_PROVIDER_LABELS[provider] || provider;
+  }
+
+  // provider 归一化：只认 gitcode/github；缺失（旧后端无 provider 字段）→ 回退 GitCode；
+  // 已知但无授权入口的平台（如 gitee）返回 ''，由调用方改为「只提示不跳转」——
+  // 猜一个平台去跳会原样复制本缺陷（GitCode 修不了 GitHub/Gitee）。
+  function _normalizeReauthProvider(provider) {
+    var p = String(provider || '').trim().toLowerCase();
+    if (!p) return 'gitcode';
+    return _REAUTH_PROVIDER_PATHS[p] ? p : '';
+  }
+
+  function _readReauthMarks() {
+    try {
+      var m = JSON.parse(sessionStorage.getItem(_REAUTH_MARK_KEY) || 'null');
+      return (m && typeof m === 'object') ? m : {};
+    } catch (e) { return {}; }
+  }
+
+  function _setReauthMark(provider) {
+    try {
+      var m = _readReauthMarks();
+      m[provider] = Date.now();
+      sessionStorage.setItem(_REAUTH_MARK_KEY, JSON.stringify(m));
+    } catch (e) { /* sessionStorage 不可用（隐私模式）→ 仅页面级去重兜底 */ }
+  }
+
+  function _clearReauthMark(provider) {
+    try {
+      if (!provider) { sessionStorage.removeItem(_REAUTH_MARK_KEY); return; }
+      var m = _readReauthMarks();
+      delete m[provider];
+      if (Object.keys(m).length) sessionStorage.setItem(_REAUTH_MARK_KEY, JSON.stringify(m));
+      else sessionStorage.removeItem(_REAUTH_MARK_KEY);
+    } catch (e) {}
+  }
+
+  // 同一 provider 60 秒内已跳转过 → true（本轮 401 不得再跳，否则整页重载闭环）
+  function _recentlyRedirected(provider) {
+    var ts = Number(_readReauthMarks()[provider] || 0);
+    return !!ts && (Date.now() - ts) < _REAUTH_MARK_TTL_MS;
+  }
+
+  // 重新绑定/重新登录成功（URL 带 bind_success=<provider>）→ 清除该平台标记，
+  // 保证重新授权后下一次 401 仍能正常跳转（正向回归）。
+  function _consumeBindSuccessMark() {
+    try {
+      var p = new URLSearchParams(window.location.search || '').get('bind_success');
+      if (p) _clearReauthMark(String(p).trim().toLowerCase());
+    } catch (e) {}
+  }
+  _consumeBindSuccessMark();
+
+  function _reauthNoticeText(key, provider, fallback) {
+    try {
+      if (typeof I18N !== 'undefined' && I18N.t) {
+        return I18N.t('app.error.' + key, {label: _reauthProviderLabel(provider)}, fallback);
+      }
+    } catch (e) {}
+    return fallback;
+  }
+
+  // reauth 提示条：不整页跳转，只在当前页面渲染可读提示 + 账号设置入口（#account/profile）
+  function _showReauthNotice(provider, textKey, fallbackText) {
+    var msg = textKey
+      ? _reauthNoticeText(textKey, provider, fallbackText)
+      : _reauthNoticeText('reauth_expired', provider,
+          _reauthProviderLabel(provider) + ' 授权已过期，请到 账号设置 → 第三方绑定 重新授权');
+    var shown = false;
+    try {
+      var old = document.getElementById(_REAUTH_NOTICE_ID);
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var bar = document.createElement('div');
+      bar.id = _REAUTH_NOTICE_ID;
+      bar.setAttribute('role', 'alert');
+      bar.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:10001;'
+        + 'background:#fff7e6;color:#7a4d00;border:1px solid #ffd591;border-radius:10px;padding:10px 14px;'
+        + 'font-size:13px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.12);display:flex;'
+        + 'align-items:center;gap:10px;max-width:min(92vw,720px)';
+      var span = document.createElement('span');
+      span.textContent = msg;
+      var go = document.createElement('a');
+      go.href = '#account/profile';
+      go.textContent = _reauthNoticeText('reauth_go_settings', provider, '去账号设置');
+      go.style.cssText = 'color:#0a6cff;text-decoration:underline;white-space:nowrap';
+      go.onclick = function (ev) {
+        if (typeof app !== 'undefined' && app.nav) {
+          ev.preventDefault();
+          app.nav('account', 'profile');
+        }
+      };
+      var close = document.createElement('button');
+      close.type = 'button';
+      close.textContent = '×';
+      close.setAttribute('aria-label', 'close');
+      close.style.cssText = 'background:transparent;border:0;font-size:16px;line-height:1;cursor:pointer;color:inherit';
+      close.onclick = function () { if (bar.parentNode) bar.parentNode.removeChild(bar); };
+      bar.appendChild(span);
+      bar.appendChild(go);
+      bar.appendChild(close);
+      (document.body || document.documentElement).appendChild(bar);
+      shown = true;
+    } catch (e) { /* DOM 不可用 → 走 toast 兜底 */ }
+    if (!shown) {
+      try {
+        if (typeof app !== 'undefined' && app.showToast) app.showToast(msg, '', 6000);
+      } catch (e) {}
+    }
+  }
+
+  // Issue #3569: 按 401 detail.provider 跳对应平台授权；
+  // 目标平台未配置（400）/限流（429）/其他失败一律「只提示 + 退避」，不做整页导航。
+  function _redirectToOAuth(provider) {
+    var p = _normalizeReauthProvider(provider);
+    if (!p) {
+      // 未知平台没有已知授权入口 → 不猜平台，只提示去账号设置重新授权（不做整页导航）
+      _showReauthNotice(String(provider || '').trim().toLowerCase());
+      return;
+    }
+    if (_reauthRedirecting) return;   // 页面级并发去重
+    if (_isOnLoginPage()) return;     // 已在登录页
+    if (_recentlyRedirected(p)) {
+      // 同一 provider 60 秒内已跳转过且本次仍 401 → 再跳只会整页重载循环，停止并提示
+      _showReauthNotice(p);
+      return;
+    }
+    _reauthRedirecting = true;
+    API.get(_REAUTH_PROVIDER_PATHS[p]).then(function (d) {
+      if (d && d.redirect_url) {
+        _setReauthMark(p);            // 跳转前落标记（sessionStorage 跨整页重载保留）
+        location.href = d.redirect_url;
+        return;
+      }
+      // 无 redirect_url（后端未给出授权地址）→ 只提示，不做整页导航
+      _showReauthNotice(p);
+    }).catch(function (e) {
+      var st = (e && e.status) || 0;
+      if (st === 429) {
+        // 429 只提示 + 退避：禁止新增整页导航（否则正是闭环加速器）
+        _showReauthNotice(p, 'reauth_retry_later',
+          _reauthProviderLabel(p) + ' 授权入口请求过于频繁，请稍后重试');
+      } else if (st === 400) {
+        // 目标平台 OAuth 未配置 → 只提示，不跳转
+        _showReauthNotice(p, 'reauth_not_configured',
+          _reauthProviderLabel(p) + ' OAuth 未配置，请联系管理员完成平台应用配置');
+      } else {
+        _showReauthNotice(p, 'reauth_redirect_failed',
+          _reauthProviderLabel(p) + ' 授权跳转失败，请稍后重试');
+      }
+    });
+  }
+
   // 多 Tab 同步——监听 localStorage token 变化，其他 Tab 刷新 token 后自动同步
   // 体验优化，不是安全屏障——同步失败有 401 + Promise 队列兜底
   if (typeof window !== 'undefined') {
@@ -135,6 +299,16 @@ const API = (() => {
       // R8: 其他标签页清除 repo_member_cache 或修改 user.bindings 时
       // 检查当前标签页的 currentRepo 是否仍有效
       if (e.key === 'repo_member_cache' || e.key === 'user') {
+        // Issue #3569: 重新绑定成功（bindings 变化）→ 清除对应平台的 reauth 跳转标记，
+        // 保证用户手动重新授权后下一次 401 仍能正常跳转（reload 回调之外的 popup 绑定路径）
+        if (e.key === 'user' && e.newValue) {
+          try {
+            var _ub = JSON.parse(e.newValue).bindings || [];
+            for (var _bi = 0; _bi < _ub.length; _bi++) {
+              _clearReauthMark(String(_ub[_bi] || '').toLowerCase());
+            }
+          } catch (ex) {}
+        }
         try {
           var cr = JSON.parse(sessionStorage.getItem('currentRepo') || 'null');
           if (cr && cr.repoKey) {
@@ -297,9 +471,9 @@ const API = (() => {
         // 但先检查是否是 OAuth 平台过期（不需要 JWT refresh，需要重新授权）
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
-            // （GitHub 走 /auth/login/github；provider 缺省保持 GitCode 原行为）
-            _redirectToProviderAuth(err.detail);
+            // Issue #3569：按 detail.provider 跳对应平台授权；失败只提示不整页导航。
+            // Issue #3563 的结构化错误继续透传，入口页可按 status/detail 分流。
+            _redirectToOAuth(err?.detail?.provider);
             throw _reauthError(err.detail);
           }
           // R1 fix: credential 401 on public auth endpoints — user has no token
@@ -321,11 +495,11 @@ const API = (() => {
         });
       }
       if (r.status === 401) {
-        // 没有 retryFn——检查是否 OAuth reauth，否则直接跳登录
+// 没有 retryFn——检查是否 reauth_required（按 provider 跳对应平台），否则直接跳登录
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
-            _redirectToProviderAuth(err.detail);
+            // Issue #3569: 按 provider 跳对应平台授权（缺失/未知回退 GitCode）
+            _redirectToOAuth(err?.detail?.provider);
             throw _reauthError(err.detail);
           }
           // P33 fix: don't clear token for public auth endpoint 401s
@@ -374,78 +548,16 @@ const API = (() => {
     return r.json();
   }
 
-  // R7: Language-aware login URL helper
-  function _langLoginUrl() {
-    var lang = (typeof I18N !== 'undefined' && I18N.getLang) ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
-    return (lang === 'en' ? '/en' : '') + '/login';
-  }
   // R7: Check if currently on any login page (both /login and /en/login)
   function _isOnLoginPage() {
     var p = location.pathname;
     return p === '/login' || p === '/en/login';
   }
 
-  // Issue #52: GitCode OAuth token 过期且无法刷新时跳转授权页
-  // R9-2: Added _reauthRedirecting dedup guard
+  // Issue #52: OAuth token 过期且无法刷新时跳转授权页
+  // R9-2: 页面级去重标记（整页重载后归零，跨页防循环见 Issue #3569 的 sessionStorage 标记）
   var _reauthRedirecting = false;
-  function _redirectToGitcodeAuth() {
-    if (_reauthRedirecting) return;  // R9-2: dedup — already redirecting
-    if (_isOnLoginPage()) return;    // R7: already on login page
-    _reauthRedirecting = true;
-    API.get('/auth/login/gitcode').then(d => {
-      if (d.redirect_url) {
-        location.href = d.redirect_url;
-      } else {
-        location.href = _langLoginUrl();  // R7: preserve language prefix
-      }
-    }).catch(() => {
-      location.href = _langLoginUrl();    // R7: preserve language prefix
-    });
-  }
 
-  // Issue #3563（Spec v2 B2）：401 reauth 按 detail.provider 分流。
-  // - provider 缺省 / gitcode：保持既有 _redirectToGitcodeAuth() 行为（回归安全）；
-  // - 其它平台（github/gitee/…）：路由到 GET /auth/login/<provider>；
-  //   GitHub 在 OAuth App 未配置（无 redirect_url / 400）时不跳空白授权页——
-  //   提示 + 直达「账号设置 → 凭据」的 GitHub Token 输入。
-  function _redirectToProviderAuth(detail) {
-    var provider = (detail && detail.provider) || '';
-    if (!provider || provider === 'gitcode') {
-      _redirectToGitcodeAuth();  // 缺省兜底 + GitCode 原行为（回归不变）
-      return;
-    }
-    if (_reauthRedirecting) return;
-    if (_isOnLoginPage()) return;
-    _reauthRedirecting = true;
-    API.get('/auth/login/' + provider).then(function (d) {
-      if (d && d.redirect_url) {
-        _toastReauth((detail && detail.message) || I18N.t('common.' + provider + '_reauth_required'));
-        location.href = d.redirect_url;
-      } else if (provider === 'github') {
-        _reauthGithubFallback();
-      } else {
-        _reauthRedirecting = false;
-        location.href = _langLoginUrl();
-      }
-    }).catch(function () {
-      if (provider === 'github') {
-        _reauthGithubFallback();
-      } else {
-        _reauthRedirecting = false;
-        location.href = _langLoginUrl();
-      }
-    });
-  }
-  function _reauthGithubFallback() {
-    _reauthRedirecting = false;  // 允许后续重试（如配置 token 后再触发）
-    _toastReauth(I18N.t('common.github_reauth_token_hint'));
-    try { location.hash = '#account/credentials'; } catch (e) { /* noop */ }
-  }
-  function _toastReauth(msg) {
-    try {
-      if (window.app && window.app.showToast) window.app.showToast(msg, 6000);
-    } catch (e) { /* noop */ }
-  }
   // Issue #3563（Spec v2 B3）：401 reauth 抛出的错误携带 status/detail，
   // 供入口页（repos/templates）先判 status/action 再决定提示，不再直塞 check_failed 文案。
   function _reauthError(detail) {
@@ -834,6 +946,10 @@ const API = (() => {
       });
       });
     },
+    // Issue #3569: reauth 跳转/标记（跨平台跳转 + 防整页重载循环）；导出供回归测试与后续视图复用
+    _redirectToOAuth: _redirectToOAuth,
+    _clearReauthMark: _clearReauthMark,
+    _recentlyRedirected: _recentlyRedirected,
   };
 })();
 
