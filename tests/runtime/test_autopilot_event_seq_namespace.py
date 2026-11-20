@@ -34,3 +34,21 @@ def test_autopilot_event_seq_is_strictly_increasing_and_nonzero():
         assert seq > 0
         assert seq > prev
         prev = seq
+
+def test_scheduler_call_sites_use_isolated_event_seq():
+    """F2：direct/remote 两个生产调用点都必须走 _autopilot_event_seq。
+
+    仅测 helper 算术拦不住「把调用点回退成 event_seq=exec_id」的回归；
+    这里直接静态锁死 scheduler 内的两处实参。
+    """
+    import inspect
+
+    from src.domains.runtime.engine import scheduler
+
+    src = inspect.getsource(scheduler)
+    assert src.count("_autopilot_event_seq(exec_id)") >= 2, (
+        "scheduler direct/remote 两个调用点必须都使用 _autopilot_event_seq(exec_id)"
+    )
+    assert "event_seq=exec_id" not in src, (
+        "禁止把 autopilot event_seq 回退成裸 exec_id（会与真实 events 序号碰撞）"
+    )

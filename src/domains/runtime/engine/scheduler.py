@@ -7,7 +7,7 @@
 - 底层复用 pick_engine / get_agent_workdir / _materialize_direct_workdir / stream_devops_agent
 - 执行结果独立存储在 autopilot_executions，不写 issue 表 / events 表
 - agent 产出中解析问题列表(findings)，用户可手动派发为真实 Issue 走完整流水线
-- event_seq 用 autopilot_executions.id（非0，避免多任务并发覆盖）
+- event_seq 用 900_000_000 + autopilot_executions.id（高位命名空间，避开真实 events 序号；见 _autopilot_event_seq）
 """
 
 from __future__ import annotations

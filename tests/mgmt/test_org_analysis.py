@@ -203,3 +203,62 @@ def test_request_all_skips_when_task_running(monkeypatch):
     assert out["skipped"] is True
     assert out["reason"] == "running"
     assert not called
+
+
+def test_analysis_routes_write_audit_logs(monkeypatch):
+    """C3：AI 分析三条写路由必须落审计（结果回写 / 手动触发 / 开启每日任务）。"""
+    import json as _json
+
+    from src.domains.mgmt import org_analysis as service
+    from src.domains.mgmt.routes import org_analysis as routes
+
+    org = _seed_org()
+    user = {"id": UID, "auth_type": "api_key"}
+
+    # 避免真实触发 autopilot 引擎：只验证路由的审计落点。
+    monkeypatch.setattr(service, "request_all_analysis",
+                        lambda *a, **k: {"skipped": True, "reason": "no_repos"})
+    monkeypatch.setattr(service, "request_repo_analysis",
+                        lambda *a, **k: {"ok": True, "task_id": 1})
+    monkeypatch.setattr(service, "ensure_analysis_automation",
+                        lambda *a, **k: {"ok": True, "task_id": 1})
+
+    result = {
+        "schema_version": 1, "repo_key": REPO_KEY, "full_name": "ai-org/order-service",
+        "purpose": "审计用例", "domains": [], "keywords": [], "interfaces": [],
+        "depends_on": [], "not_owns": [], "capabilities": [], "evidence": [],
+        "risks": [], "confidence": 0.5,
+    }
+    routes.save_ai_result(
+        org["id"], REPO_KEY,
+        routes.AIResultBody(result=result, engine_id=7, source_commit="abc123"),
+        user=user,
+    )
+    routes.run_analysis(org["id"], routes.RunAnalysisBody(mode="all"), user=user)
+    routes.ensure_automation(org["id"], user=user)
+
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT event_type, operator_id, detail FROM audit_logs WHERE event_type IN (?,?,?) "
+            "ORDER BY seq",
+            ("org_repo_ai_result", "org_repo_analysis_run",
+             "org_repo_analysis_automation_ensure"),
+        ).fetchall()
+    expected = {
+        "org_repo_ai_result",
+        "org_repo_analysis_run",
+        "org_repo_analysis_automation_ensure",
+    }
+    got = set()
+    for event_type, operator_id, detail in rows:
+        parsed = _json.loads(detail or "{}")
+        if parsed.get("org_id") != org["id"]:
+            continue
+        got.add(event_type)
+        assert str(operator_id) == str(UID)
+        if event_type == "org_repo_ai_result":
+            assert parsed.get("trigger") == "worker"
+            assert parsed.get("result_hash")
+        else:
+            assert parsed.get("trigger") == "manual"
+    assert got == expected, f"missing audit types: {expected - got}"

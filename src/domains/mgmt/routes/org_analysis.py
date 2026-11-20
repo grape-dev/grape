@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from src.api.deps import require_no_session_token, require_org_api_user
 from src.domains.mgmt import org_analysis as service
+from src.domains.mgmt.auth.audit import log_audit
 from src.domains.mgmt.routes.org_repos import (
     _error,
     _require_admin,
@@ -95,6 +96,15 @@ def save_ai_result(org_id: str, repo_key: str, body: AIResultBody,
     )
     if not saved:
         raise _error(404, "REPO_MAP_NOT_FOUND", "Repository map target not found")
+    # C3：分析结果回写必须留痕（旧 /repo-map/analyze 端点有审计，AI 结果端点不得回退）。
+    # worker session token 的 user["id"] 是任务创建者，operator 取该值。
+    log_audit(
+        "org_repo_ai_result",
+        user_id=str(user.get("id") or 0),
+        operator_id=str(user.get("id") or 0),
+        detail={"org_id": org_id, "repo_key": repo_key, "trigger": "worker",
+                "engine_id": int(body.engine_id or 0), "result_hash": result_hash},
+    )
     return {"ok": True, "repo_key": repo_key, "confidence": saved.get("confidence"),
             "analyzed_at": saved.get("analyzed_at"), "result_hash": result_hash}
 
@@ -119,9 +129,18 @@ def run_analysis(org_id: str, body: RunAnalysisBody,
     if mode == "single":
         if not body.repo_key:
             raise _error(400, "INVALID_TARGET", "repo_key is required for single mode")
-        return service.request_repo_analysis(
+        result = service.request_repo_analysis(
             org_id, body.repo_key, trigger="manual", actor_id=user["id"])
-    return service.request_all_analysis(org_id, trigger="manual", actor_id=user["id"])
+    else:
+        result = service.request_all_analysis(org_id, trigger="manual", actor_id=user["id"])
+    # C3：手动触发分析留痕（组织仓库地图旧端点同口径）。
+    log_audit(
+        "org_repo_analysis_run",
+        user_id=str(user["id"]), operator_id=str(user["id"]),
+        detail={"org_id": org_id, "mode": mode, "repo_key": body.repo_key,
+                "trigger": "manual"},
+    )
+    return result
 
 
 @router.get("/{org_id}/repo-analysis/status",
@@ -142,4 +161,11 @@ def status(org_id: str, repo_key: str = "",
 def ensure_automation(org_id: str, user: dict = Depends(require_no_session_token)):
     _require_team_org(org_id)
     _require_admin(user["id"], org_id)
-    return service.ensure_analysis_automation(org_id, actor_id=user["id"])
+    result = service.ensure_analysis_automation(org_id, actor_id=user["id"])
+    # C3：开启每日自动分析留痕。
+    log_audit(
+        "org_repo_analysis_automation_ensure",
+        user_id=str(user["id"]), operator_id=str(user["id"]),
+        detail={"org_id": org_id, "trigger": "manual"},
+    )
+    return result
