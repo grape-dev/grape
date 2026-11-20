@@ -36,16 +36,27 @@ from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 
-_CREATE_REPO_KWARG_PROVIDERS = {"gitcode", "github"}
+def _supports_create_repo_kwargs(provider: str) -> bool:
+    """卡驱动能力位 `create_repo_options`：true = 适配器接受 auto_init/default_branch。
+
+    禁止 kernel 内二元平台字面量（platform-whitelist ratchet）；新平台只需在
+    configs/platforms/<provider>.json 声明该能力位即可获得建仓可选参数。
+    """
+    try:
+        card = _vcs_cards.get_platform_card(str(provider or "").lower())
+    except Exception as exc:
+        log.warning(f"create_repo_kwargs: platform card lookup failed provider={provider!r}: {exc}")
+        return False
+    return bool(card and getattr(card, "create_repo_options", False))
 
 
 def create_repo_kwargs(provider: str, auto_init: bool = False,
                        default_branch: str = "") -> dict:
-    """建仓可选参数（仅支持自定义默认分支/初始化的 provider 才透传）。
+    """建仓可选参数（仅卡声明 create_repo_options 的平台才透传）。
 
     provider 差异收敛在 kernel 层，避免调用方（mgmt/repos.py）出现平台名比较。
     """
-    if str(provider or "").lower() in _CREATE_REPO_KWARG_PROVIDERS:
+    if _supports_create_repo_kwargs(provider):
         return {"auto_init": bool(auto_init),
                 "default_branch": (default_branch or "main")}
     return {}
