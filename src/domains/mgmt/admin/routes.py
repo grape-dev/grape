@@ -837,200 +837,50 @@ class VcsPlatformCardBody(BaseModel):
 @router.get("/vcs-platforms", operation_id="admin_vcs_platforms_list",
             summary="List vcs platform cards (repo hosting platforms)")
 def vcs_platforms_list(admin: dict = Depends(require_admin)):
-    """D10（2026-11-12）：全字段回读——编辑回写零丢失（S70 反例锁：
-    子集字段 GET→编辑→PUT 回写会让未返回字段落回 Builder 默认值，
-    gitee issue_write_form 丢失建单 404 的实弹事故同型）。
-    event_map/fields 用 PUT 清洗同款别名键，保证 GET→PUT 回环合法。
-    resources/capabilities 属高级配置（卡文件口径），不进管理面编辑，不回读。
-    bot_token_configured=global_bot_meta_key 已配置（值不回读）。
+    """平台卡列表/详情回读（HTTP 适配）。
+
+    用例在 `platform_cards.PlatformCardService.list_cards`：整卡回读（GET→编辑→PUT
+    回环零丢失）、凭据只回存在性、并带出管理面覆盖字段（A2）。本函数不做业务判断。
     """
-    import dataclasses as _dc
-    import json as _json
-    from src.domains.mgmt.user.db import get_meta_value
-    from src.domains.runtime.public import get_platform_card, list_vcs_platforms
-    # D19：探活数据按平台并入各卡（meta bot_token_health，per-provider 结构）
-    _h, _checked_at = {}, ""
-    try:
-        _raw_h = get_meta_value("bot_token_health")
-        if _raw_h:
-            _hd = _json.loads(_raw_h) or {}
-            _h = _hd.get("platforms") or {}
-            _checked_at = _hd.get("checked_at") or ""
-    except Exception:
-        _h, _checked_at = {}, ""
-    out = {}
-    # A2：把「管理面覆盖了配置文件哪些字段」一并回读，UI 才能说清「这个值哪来的」
-    try:
-        _raw_ov = get_meta_value("vcs_platform_overrides") or ""
-        _ovs = (_json.loads(_raw_ov) or {}) if _raw_ov else {}
-    except Exception:
-        _ovs = {}
-    for provider in list_vcs_platforms():
-        card = get_platform_card(provider)
-        if card is None:
-            continue
-        d = _dc.asdict(card)
-        d.pop("provider", None)
-        d.pop("resources", None)
-        d.pop("capabilities", None)
-        d["event_map"] = d.pop("event_map_overrides", {})
-        d["fields"] = d.pop("fields_overrides", {})
-        d["token_env"] = card.token_env
-        bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
-        d["bot_token_configured"] = bool(get_meta_value(bot_key))
-        # D13/S20：webhook token 凭据态（值不回读）；按卡 webhook_token_field
-        # 判该平台有无 webhook 存储语义（gitcode/github 列在册）
-        d["webhook_token_configured"] = bool(get_meta_value(f"{provider}_webhook_token"))
-        d["webhook_token_supported"] = bool(card.webhook_token_field)
-        # D19（2026-11-12 拍板）：探活状态跟平台走——每卡并入自己的
-        # bot_token_health（healthy/degraded/unhealthy+错误摘要），顶层附
-        # checked_at（整体最近探活时间）。全局汇总卡退役，列表逐行展示。
-        d["bot_token_health"] = _h.get(provider, {})
-        d["overrides"] = _ovs.get(provider, {})
-        out[provider] = d
-    return {"cards": out, "bot_token_health_checked_at": _checked_at}
+    from src.domains.mgmt.admin.platform_cards import PlatformCardService
+
+    views, checked_at = PlatformCardService().list_cards()
+    return {
+        "cards": {provider: view.as_dict() for provider, view in views.items()},
+        "bot_token_health_checked_at": checked_at,
+    }
+
 
 @router.put("/vcs-platforms", operation_id="admin_vcs_platforms_put",
             summary="Save vcs platform cards (validated by PlatformCard builder)")
 def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_admin)):
-    import json as _json
-    from src.domains.runtime.public import build_platform_card, PlatformCardError
-    from src.domains.runtime.public import card_field_overrides as _card_diff
-    from src.domains.runtime.public import base_platform_card as _base_card
-    from src.domains.runtime.public import invalidate_platform_card_cache
+    """整卡保存（HTTP 适配）。
 
-    cleaned = {}
-    errors = []
-    for provider, raw in (body.cards or {}).items():
-        try:
-            card = build_platform_card(provider, raw or {})
-            # S70（实弹发现）：清洗白名单须覆盖能力位整族——原白名单丢
-            # issue_write_form/branch_create_form 等字段，卡经 admin 保存即静默
-            # 降级（gitee 落回 repo_path → 建单 404）。以 Builder 校验后的卡为准
-            # 全字段持久化：直接 dataclasses.asdict（Issue #3580 实测：手抄白名单
-            # 漏了 webhook_dialect / ca_bundle —— 自建 GitLab 实例经管理面写卡后
-            # 托管 fail-closed「未声明 webhook 形态」、私有 CA 也不生效，且无任何报错）。
-            # 白名单形态每加一个能力位就要记得补一次，漏一次就是静默降级。
-            import dataclasses as _dc
-            _card_raw = _dc.asdict(card)
-            _card_raw.pop("provider", None)
-            _card_raw["event_map"] = _card_raw.pop("event_map_overrides", {})
-            _card_raw["fields"] = _card_raw.pop("fields_overrides", {})
-            # capabilities 在值对象里是 tuple（空=()）——空值必须摘掉：Builder 的
-            # _build_capabilities 只认 None/[]，收到 () 会整卡拒绝（本路由下文还会用
-            # cleaned 再构建一次卡写 bot token，实测必修）。
-            _caps = _card_raw.get("capabilities")
-            if _caps:
-                _card_raw["capabilities"] = list(_caps)
-            else:
-                _card_raw.pop("capabilities", None)
-            cleaned[provider] = _card_raw
-        except PlatformCardError as e:
-            errors.append(f"{provider}: {e}")
-    if errors:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "platform card validation failed",
-            "errors": errors})
+    用例在 `platform_cards.PlatformCardService.save_cards`：校验整卡 + 唯一性 →
+    落 meta（卡定义/凭据通道/管理面覆盖层）→ 落手建行 → 失效缓存 → 审计。
+    跨域只经 runtime.public 契约；本函数只负责 body → 请求对象 → 结果/错误映射。
+    """
+    from src.domains.mgmt.admin.platform_cards import (
+        CardSaveRequest,
+        CardValidationError,
+        PlatformCardService,
+    )
 
-    # 唯一性校验：host / webhook_path 全局唯一（D14 invariant）
-    hosts, paths = {}, {}
-    for provider, raw in cleaned.items():
-        if raw["host"] in hosts:
-            errors.append(f"{provider}: host 与 {hosts[raw['host']]} 重复")
-        hosts[raw["host"]] = provider
-        if raw["webhook_path"] in paths:
-            errors.append(f"{provider}: webhook_path 与 {paths[raw['webhook_path']]} 重复")
-        paths[raw["webhook_path"]] = provider
-    if errors:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "platform card validation failed",
-            "errors": errors})
-
-    # meta 基表归运行域：写入走 runtime public 的批量 upsert（任意拓扑、单事务）。
-    # 校验放在写之前——原实现边写边校验，`bot_tokens` 含不在册平台时 400 已经
-    # 写下了 `vcs_providers_config`（未提交事务挂到下一次 commit，属隐性部分写）。
-    from src.domains.runtime import public as _rt
-    meta_pairs: list[tuple[str, str]] = [
-        ("vcs_providers_config", _json.dumps(cleaned, ensure_ascii=False))]
-    # D11（2026-11-12）：bot token 凭据通道——按各卡 global_bot_meta_key 写 meta
-    for provider, token in (body.bot_tokens or {}).items():
-        token = str(token or "").strip()
-        if not token:
-            continue
-        if provider not in cleaned:
-            raise HTTPException(status_code=400, detail={
-                "code": 400,
-                "message": f"bot_tokens 含不在册平台: {provider}"})
-        card = build_platform_card(provider, cleaned[provider])
-        bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
-        meta_pairs.append((bot_key, token))
-    # D13/S20：webhook token 凭据通道（{provider}_webhook_token meta key）
-    for provider, token in (body.webhook_tokens or {}).items():
-        token = str(token or "").strip()
-        if not token:
-            continue
-        if provider not in cleaned:
-            raise HTTPException(status_code=400, detail={
-                "code": 400,
-                "message": f"webhook_tokens 含不在册平台: {provider}"})
-        meta_pairs.append((f"{provider}_webhook_token", token))
-    # A2（Issue #3580）：管理面覆盖层。config 派生行（source=config）不写行是防双真源，
-    # 但管理面改的字段必须生效且不能被下次启动的导入冲回——这里只记「相对当前生效卡
-    # 真正变化」的键（改回文件值 = 该平台覆盖整条移除），读卡时最后叠加。
-    from src.domains.mgmt.user.db import get_meta_value as _get_meta
+    request = CardSaveRequest(
+        cards=body.cards or {},
+        bot_tokens=body.bot_tokens or {},
+        webhook_tokens=body.webhook_tokens or {},
+        operator_id=admin["id"] if isinstance(admin.get("id"), int) else 0,
+    )
     try:
-        _raw_prev_ov = _get_meta("vcs_platform_overrides") or ""
-        _ovs = (_json.loads(_raw_prev_ov) or {}) if _raw_prev_ov else {}
-    except Exception:
-        _ovs = {}
-    for _p, _fields in cleaned.items():
-        # 基线 = 不含覆盖层的卡：与配置文件/表行一致的提交不产生覆盖，
-        # 于是「改回文件值」就是删掉该平台的覆盖（而非留一条永久空覆盖）。
-        _changed = _card_diff(_fields, _base_card(_p))
-        if _changed:
-            _ovs[_p] = _changed
-        else:
-            _ovs.pop(_p, None)
-    meta_pairs.append(("vcs_platform_overrides", _json.dumps(_ovs, ensure_ascii=False)))
-    _rt.set_meta_values_any(meta_pairs)
-    invalidate_platform_card_cache()
-    # Issue #3580 复审：实例卡还必须落成平台行（D109 表是运行时权威）——只写 meta 时
-    # `/settings/vcs/platforms`（表优先）与凭据 tab 永远看不到该实例（用户配不了 PAT），
-    # 而导入器只扫 configs/platforms/*.json（不读 meta），重启也补不上。
-    # 只对「文件未定义」的 provider 落 manual 行；文件派生行返回 config_owned 不写（防双真源）。
-    rows: dict[str, str] = {}
-    rows_error = ""
-    try:
-        from sqlalchemy.orm import Session as _OrmSession
-
-        from src.kernel.persistence.engine import get_engine as _get_engine
-        from src.kernel.persistence.models_platform_object import RepoPlatformModel
-        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
-
-        _cols = {c.name for c in RepoPlatformModel.__table__.columns}
-        with _OrmSession(_get_engine()) as _s:
-            for _provider, _fields in cleaned.items():
-                # 卡里有非表列字段（token_env/event_map/fields/global_bot_meta_key…），
-                # 不过滤会被 _apply_fields 的未知键 fail-closed 整条拒绝。
-                rows[_provider] = RepoPlatformRepo.upsert_manual(
-                    _s, _provider, {k: v for k, v in _fields.items() if k in _cols})
-            _s.commit()
-        invalidate_platform_card_cache()      # 行变了 → 卡按表重建
-    except Exception as e:  # noqa: BLE001
-        # 落行失败不阻断卡保存（方言/host 链路仍可用），但必须让管理面看见——
-        # 静默成功会让运维以为实例已接入，实际目录里没有。
-        rows_error = f"{type(e).__name__}: {e}"
-        log.warning(f"vcs-platforms: 平台行落库失败（卡已保存）: {rows_error}")
-    from src.domains.mgmt.auth.audit import log_audit
-    log_audit("admin_vcs_platforms_saved", operator_id=admin["id"],
-              detail={"providers": sorted(cleaned.keys()), "rows": rows})
-    out = {"message": "VCS platform cards saved (cache invalidated)",
-           "cards": sorted(cleaned.keys()), "rows": rows,
-           # A2：本次写入后每个平台生效的覆盖字段（空=与配置文件一致）
-           "overrides": {_p: _ovs.get(_p, {}) for _p in cleaned}}
-    if rows_error:
-        out["rows_error"] = rows_error
-    return out
+        result = PlatformCardService().save_cards(request)
+    except CardValidationError as exc:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "platform card validation failed",
+            "errors": exc.errors,
+        })
+    return result.as_dict()
 
 class AuthChannelsBody(BaseModel):
     providers: dict  # {provider: {name, type, auth_url, ..., client_id?, client_secret?}}
