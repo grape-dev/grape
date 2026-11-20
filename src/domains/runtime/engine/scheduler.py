@@ -336,6 +336,16 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
         parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
     return "\n".join(parts)
 
+# Autopilot 不使用 events 表，但 agent_tasks.event_seq 需要非 0 且不能与真实事件
+# 序号碰撞（历史实现直接传 exec_id，重放/已有 events 的库会命中旧事件状态，
+# 被 executor 误判为 event:failed 而提前 kill）。用高位命名空间隔离。
+_AUTOPILOT_EVENT_SEQ_BASE = 900_000_000
+
+
+def _autopilot_event_seq(exec_id: int) -> int:
+    return _AUTOPILOT_EVENT_SEQ_BASE + int(exec_id or 0)
+
+
 def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     """执行单个 autopilot agent（在线程池中运行）。
 
@@ -519,11 +529,11 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     """DIRECT 模式：本机 stream_devops_agent 执行。"""
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
-    # 创建 agent_tasks 记录（用 exec_id 作为 event_seq，skip_event_config=True 不写 events 表）
+    # 创建 agent_tasks 记录（用 autopilot 专属 seq 命名空间，skip_event_config=True 不写 events 表）
     # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
     # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
     task_id = _create_direct_task(
-        repo_key, exec_id, agent_type, backend, skill_name,
+        repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
         "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
         issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
     )
@@ -731,7 +741,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取（W5）
             user_gitcode_token="",
             env_extra=env_extra,
-            event_seq=exec_id,
+            event_seq=_autopilot_event_seq(exec_id),
             issue_id=_autopilot_issue_ref(task.get("id")),
             # P8-consistency：issue 回链键创建即落（无数字合成键 autopilot-<letters>）。
             # 旧注释顾虑已由键的形态消除：纯字母键使 service._issue_num→0、
