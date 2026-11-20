@@ -1461,20 +1461,22 @@ def _node_id(node) -> str:
 
 
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
-    """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
+    """目标 agent 是否在当前 Issue 场景的有效派发目标内（单一数据源）。
 
-    Issue #568: 节点来源统一走 `get_pipeline_config`（与 `scenes detail` 同源：
-    DB 项目场景行 → 市场官方模板 → pipelines.json → default，含进程级缓存），
-    保证「同一 token + 同一 scene_id」在 scenes detail 与 a2a handoff 两路
-    返回一致节点集合（修复 404 vs 409 nodes 口径分歧）。
+    Issue #568: 节点来源统一走 `get_pipeline_config`（与 `scenes detail` 同源）。
+    Issue #3582: 解析收敛到 `scene_targets.resolve_scene_targets`——与
+    `scenes detail` 同一解析函数、同一过滤口径（enabled + resolvable），
+    保证「scenes detail 清单内的合法节点」handoff 均放行；禁用/技能不可
+    解析节点不出现在有效目标集合（两处同步生效）。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
     Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
     id=org_* / tag=issue|coding|qa 时 A2A 以 tag 交办不应被误判 not_in_scene。
-    返回 {"scene_id", "nodes", "in_scene", "node"}。
+    返回 {"scene_id", "nodes", "in_scene", "valid_targets", "conflict_reason"}。
     """
-    from src.api.pipeline_config import get_pipeline_config
+    from src.api.scene_targets import resolve_scene_targets
     from src.api.session_store import get_issue_scene
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
     _scene_id = "default"
     try:
         _sid, _ = get_issue_scene(repo_key, f"#{issue_number}")
@@ -1482,20 +1484,35 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     except Exception:
         _scene_id = "default"
     try:
-        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
-        nodes = (_cfg or {}).get("nodes") or []
+        _res = resolve_scene_targets(_scene_id, repo_key=repo_key)
     except Exception:
-        nodes = []
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
-    _matched = next(
-        (n for n in nodes if isinstance(n, dict) and node_matches_agent_role(n, agent_name)),
-        None,
-    )
+        _res = {"scene_id": _scene_id, "cfg": None, "nodes": [],
+                "valid_targets": [], "node_status": {}}
+    nodes = (_res.get("cfg") or {}).get("nodes") or []
+    valid_targets = list(_res.get("valid_targets") or [])
+    node_status = _res.get("node_status") or {}
+    in_scene = False
+    conflict_reason = "not_in_scene"
+    for n in nodes:
+        if not isinstance(n, dict) or not node_matches_agent_role(n, agent_name):
+            continue
+        _nid = str(n.get("id") or n.get("tag") or "")
+        _st = node_status.get(_nid) or {}
+        if _nid in valid_targets:
+            in_scene = True
+            conflict_reason = ""
+            break
+        if _st.get("enabled") is False:
+            conflict_reason = "node_disabled"
+        elif _st.get("resolvable") is False:
+            conflict_reason = "skill_unresolvable"
+        break
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
-        "in_scene": _matched is not None,
-        "node": _matched,
+        "in_scene": in_scene,
+        "valid_targets": valid_targets,
+        "conflict_reason": conflict_reason,
     }
 
 
@@ -2795,9 +2812,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
             if not _scene_ck.get("in_scene"):
+                # Issue #3582: 409 结构化——conflict_reason（not_in_scene /
+                # node_disabled / skill_unresolvable）+ valid_targets（当前
+                # 有效目标清单，与 scenes detail 同一解析函数产出），调用方
+                # 可据此修正目标后重试；沿用 #2555 单点收口的 skip 响应。
+                _reason = _scene_ck.get("conflict_reason") or "not_in_scene"
+                _valid = list(_scene_ck.get("valid_targets") or [])
                 _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
                 _nis_reason = _a2a_skip_reason("not_in_scene", agent=agent_name)
-                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} (nodes={_scene_node_ids})")
+                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} conflict_reason={_reason} valid_targets={_valid} (nodes={_scene_node_ids})")
                 return _a2a_stamp_degraded(_a2a_skip_response(
                     "not_in_scene", agent=agent_name, source_seq=_source_seq,
                     status="skipped", status_code=409,
@@ -2805,7 +2828,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     detail={"agent": agent_name},
                     extra={
                         "scene": _scene_ck.get("scene_id"),
-                        "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
+                        "conflict_reason": _reason,
+                        "valid_targets": _valid,
+                        "message": f"agent '{agent_name}' is not accepted by the current scene pipeline (conflict_reason={_reason}, valid_targets={_valid}, nodes={_scene_node_ids})",
                     }), _a2a_degraded)
 
         # Issue #2792（#2747 子单4，Spec 案 2）：前向跳步披露——零语义变更。

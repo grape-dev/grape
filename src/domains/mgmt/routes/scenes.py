@@ -2362,44 +2362,22 @@ def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
                             cache: dict | None = None) -> dict:
     """单节点技能可解析性前置判定（Issue #1721 / #1758）。
 
-    判定统一委托给 ``scene_skill_scope.evaluate``：显式 skill_id 仍需 scope
-    校验（user scope 即使由本人显式绑定也不放行），失效 id 回退按名解析，
-    查询异常按统一 fail-closed 策略处理。detail 只做结果投影，不再 import
-    其它模块的私有判定函数。
-    返回 {resolvable, scope_check{ok,skill,actual_scope,expected_scope,reason}}。
-    `cache` 可选，用于同一响应内按 skill_id/技能名去重，避免重复查询。
+    Issue #3582：判定逻辑收敛到 ``src.api.scene_targets``（与 a2a handoff
+    同一解析函数），此处仅保留兼容委托。
     """
-    from src.api.scene_skill_scope import evaluate
-    result = evaluate(node, repo_key, "repo", scene_id=scene_id,
-                      cache=cache)
-    return {
-        "resolvable": bool(result["ok"]),
-        "scope_check": {
-            "ok": bool(result["ok"]),
-            "skill": result.get("skill") or "",
-            "actual_scope": result.get("actual_scope") or "",
-            "expected_scope": result.get("expected_scope") or "repo",
-            "reason": result.get("reason") or "",
-        },
-    }
+    from src.api.scene_targets import node_scope_check
+    return node_scope_check(node, repo_key, scene_id, cache=cache)
+
 
 def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
                                     scene_id: str = "") -> list:
-    """为 scenes detail 节点附加 resolvable/scope_check（Issue #1721，纯增量）。
+    """为场景节点附加 resolvable/scope_check（Issue #1721，纯增量）。
 
-    复制每个节点后附加字段，确保不修改 get_pipeline_config 的缓存对象。
-    同一响应内按 skill_id/技能名缓存判定结果，避免重复节点触发多次查询。
+    Issue #3582：收敛到 ``src.api.scene_targets``（单一数据源），此处仅
+    保留兼容委托。
     """
-    result = []
-    _cache = {}
-    for node in nodes or []:
-        if not isinstance(node, dict):
-            result.append(node)
-            continue
-        item = dict(node)
-        item.update(_scene_node_scope_check(node, repo_key, scene_id, cache=_cache))
-        result.append(item)
-    return result
+    from src.api.scene_targets import attach_node_scope_checks
+    return attach_node_scope_checks(nodes, repo_key, scene_id=scene_id)
 
 
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.")
@@ -2437,12 +2415,15 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
         # 命中 pipelines.json default 兜底（与请求 scene_id 不一致）→ 视为未解析到，禁止静默回退
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
     resolved_id = cfg.get("scene_id") or scene_id
-    # Issue #1721：节点级技能可解析性前置暴露（与派发侧同一判定口径：显式 skill_id
-    # 有效即授权，否则按技能名判定），纯增量字段；复制节点后附加，避免污染
-    # get_pipeline_config 的进程级缓存。
-    nodes = _attach_scene_node_scope_checks(
-        cfg.get("nodes") or [], repo_key, resolved_id)
+    # Issue #3582: 节点清单与 a2a handoff 目标校验收敛到同一解析函数
+    # （scene_targets.resolve_scene_targets，enabled/resolvable 过滤口径一致）：
+    # detail 只做结果投影——nodes 附带 resolvable/scope_check（展示），
+    # valid_targets 为当前有效派发目标清单（handoff 校验同源产出）。
+    from src.api.scene_targets import resolve_scene_targets
+    _res = resolve_scene_targets(resolved_id, repo_key=repo_key, cfg=cfg)
+    nodes = _res.get("nodes") or cfg.get("nodes") or []
     return {"id": resolved_id, "name": cfg["name"], "nodes": nodes,
+            "valid_targets": list(_res.get("valid_targets") or []),
             "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
