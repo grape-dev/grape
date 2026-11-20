@@ -2550,7 +2550,7 @@ _PLATFORM_CARD_COLUMNS = (
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 
 

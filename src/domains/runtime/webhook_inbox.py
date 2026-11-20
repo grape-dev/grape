@@ -203,6 +203,28 @@ def worker_owner() -> str:
     return f"{os.environ.get('HOSTNAME', 'event')}:{os.getpid()}"
 
 
+def ensure_webhook_inbox_table() -> bool:
+    """幂等建表（Event 进程启动、worker 起跑前调用）。
+
+    为什么不能只靠迁移：本机多库拓扑下 runtime/insight 库的
+    `grape_t_schema_migrations` 是 mgmt 台账的**跨库视图**（迁移只在 mgmt 进程执行），
+    runtime 域的新表在 mgmt 侧盖章后，Event 进程永远判「已执行」→ 表建不出来
+    （#3527 的 grape_t_cloud_sandboxes 同现象，runtime 库里至今缺表）。
+    本表由 Event 进程独占读写，启动时 CREATE TABLE IF NOT EXISTS 自建最可靠。
+    """
+    from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_DDL
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(_WEBHOOK_INBOX_DDL)
+            db.commit()
+        return True
+    except Exception as e:  # noqa: BLE001 - 建表失败由 worker 循环逐轮重试
+        log.warning(f"webhook inbox ensure table failed: {e}")
+        return False
+
+
 async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
     """Event 进程消费循环：claim → run_pipeline → finish（可取消）。"""
     import asyncio

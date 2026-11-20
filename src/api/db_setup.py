@@ -10745,20 +10745,63 @@ def _fn_rename_org_tables_and_uuid_pk() -> None:
 
 
 def _fn_add_platform_ca_bundle() -> None:
-    """Issue #3580：grape_t_repo_platforms 增 ca_bundle（实例 TLS CA，PEM 绝对路径）。"""
-    with db_lock:
-        c = db.cursor()
+    """Issue #3580：grape_t_repo_platforms 增 ca_bundle（实例 TLS CA，PEM 绝对路径）。
+
+    部署补强（2026-11-20，arch-weekly-11-yaw）：原版本号 202611200001 已被
+    takeover-sessions-user-id-uuid-v1（PR #1869，11:08 落库）先行盖帽——三库台账
+    同号不同名 → 本迁移永久判「已执行」，列永不落地；mgmt public 的
+    repo_platform_cards 查询带 ca_bundle 直接 1054，平台卡整体回落文件（DB 覆盖/
+    enabled 开关全失效）。renumber 到空号 202611200002，并加 strict + 落地回验：
+    印章只在列真正存在后写。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    with _lock:
+        c = _db.cursor()
         _ensure_column(c, "grape_t_repo_platforms", "ca_bundle",
-                       "TEXT NOT NULL DEFAULT ''", allow_copy=True)
-        db.commit()
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True,
+                       strict=True, force=True)
+        _db.commit()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+        if "ca_bundle" not in cols:
+            raise RuntimeError("grape_t_repo_platforms.ca_bundle missing after migration")
 
 
 register_migration(
-    version="202611200001",
+    version="202611200002",
     name="add-platform-ca-bundle",
     kind="safe",
     domains=("mgmt",),
     fn=_fn_add_platform_ca_bundle,
+)
+
+
+def _fn_create_webhook_inbox_table() -> None:
+    """Issue #3580/P3 部署缺口：grape_t_webhook_inbox 只登记在冻结老轨 _NEW_TABLES。
+
+    存量库（已盖 legacy-stamp）启动完全不跑 _create_tables() → 表永不创建 →
+    Event 进程 enqueue_webhook 每次 1054/1146 → 通用 webhook 全量 500（事件进不来）。
+    与 patrol-findings、merge-gate-log 同因，改走 register_migration；表归 runtime 域
+    （入队/消费同在 Event 进程），三库模式取 owner 连接，单库回落进程库。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    conn = _migration_conn("runtime", default=_db)
+    with (_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            c.execute(_WEBHOOK_INBOX_DDL)
+        conn.commit()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            raise RuntimeError("grape_t_webhook_inbox missing after migration")
+
+
+register_migration(
+    version="202611200003",
+    name="create-webhook-inbox-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_webhook_inbox_table,
 )
 
 register_migration(

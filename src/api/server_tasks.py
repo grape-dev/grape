@@ -463,7 +463,10 @@ async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
 
     # Issue #3580/P3：webhook 事件持久收件箱消费 worker（先入队、再消费、可重放）
     try:
-        from src.domains.runtime.webhook_inbox import webhook_inbox_loop
+        from src.domains.runtime.webhook_inbox import webhook_inbox_loop, ensure_webhook_inbox_table
+        # 表归 Event 进程（runtime 库）独占：共享台账是 mgmt 的跨库视图，迁移不会在
+        # 本域执行 → 起 worker 前先 IF NOT EXISTS 自建（幂等，缺失时否则入队 1146 → 全量 500）
+        ensure_webhook_inbox_table()
         h["webhook_inbox_task"] = asyncio.create_task(webhook_inbox_loop())
         log.info("Webhook inbox worker started (1s poll)")
     except Exception as e:
