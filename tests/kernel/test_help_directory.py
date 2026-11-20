@@ -27,6 +27,7 @@ HELP_HTML = REPO_ROOT / "src" / "api" / "frontend" / "shell" / "help.html"
 EXPECTED_USAGE_FILES = [
     "overview.md",
     "quickstart.md",
+    "cli.md",
     "agents.md",
     "agent-environment-variables.md",
     "pipeline.md",

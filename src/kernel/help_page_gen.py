@@ -31,6 +31,7 @@ OUT_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "shell" / "help.html"
 USAGE_ORDER = [
     "overview.md",
     "quickstart.md",
+    "cli.md",
     "agents.md",
     "agent-environment-variables.md",
     "pipeline.md",
