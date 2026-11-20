@@ -166,7 +166,13 @@ window._cfRevealSecretField = function(input, btn) {
 
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account','sandbox'];
+  // Issue #3395：插件市场前端入口开关——唯一数据源 = 服务端 shell 注入的
+  // window.__FEATURES__（默认开；见 src/api/frontend_flags.py）。
+  const PLUGINS_ENABLED = !(window.__FEATURES__ && window.__FEATURES__.plugins === false);
+  // flag=0：从路由表过滤 'plugins'，刷新/hash 恢复不再进入插件市场。
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account','plugins','sandbox'].filter(function (view) {
+    return view !== 'plugins' || PLUGINS_ENABLED;
+  });
 
   // ── 非仓库视图清单（单一事实源）──
   // 历史上 app.js 内有 4 份内容不一致的拷贝（restore 198 / check 1125 / nav 1458 /
@@ -174,7 +180,7 @@ const app = (() => {
   // 收敛为一份并集常量：合法 VIEWS 之外的历史遗留视图（scene-detail-local /
   // autopilot / autopilot-detail / organizations）一并纳入，多排无害（它们都不
   // 依赖仓库上下文，横幅/守卫跳过它们语义正确）。
-const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'org-pipeline', 'account', 'sandbox'];
+const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'org-pipeline', 'account', 'plugins', 'sandbox'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -2381,6 +2387,8 @@ function loadAgentTypes() {
   }
 
   function nav(view, param) {
+    // Issue #3395：#plugins 深链（含 popstate 回放）在开关关闭时回退默认视图。
+    if (view === 'plugins' && !PLUGINS_ENABLED) view = 'dash';
     // 组织流水线独立页面已下线：旧深链（#org-pipeline/<id>）回落到组织工作台详情。
     if (view === 'org-pipeline') view = 'organizations';
     // 离开引导页模式：清理 .ct.ob-mode 标记
@@ -2738,6 +2746,13 @@ function loadAgentTypes() {
     } else if (view === 'skills') {
       title.textContent = I18N.t('app.current_project');
       renderSkills();
+    } else if (view === 'plugins') {
+      // Issue #3169：插件市场（Vue chunk 自管加载；无仓库上下文可浏览，repo scope 由视图内降级提示）
+      title.textContent = I18N.t('app.current_project');
+      _ensureViewFn('renderPlugins', function () {
+        if (window._currentView !== 'plugins') return;
+        renderPlugins();
+      });
     } else if (view === 'knowledge') {
       title.textContent = I18N.t('app.current_project');
       if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {

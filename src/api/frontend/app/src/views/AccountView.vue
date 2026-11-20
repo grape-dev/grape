@@ -697,16 +697,6 @@ const PAT_CREATE_URLS = {
   github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
-function translateBindError(e, provider) {
-  let code = 0
-  if (e && e.detail && typeof e.detail === 'object') code = e.detail.code || 0
-  else if (e && e.status) code = e.status
-  if (code === 401) return t('token_invalid_expired', { platform: pName(provider) })
-  if (code === 409) return t('already_bound_to_another')
-  if (code === 502) return t('network_error_retry')
-  if (code === 400) return t('token_format_invalid')
-  return (e && e.message) || t('bind_failed')
-}
 function oauthOpenCenteredPopup(url) {
   const w = 600,
     h = 700
@@ -1699,11 +1689,6 @@ function oauthLogin(provider) {
   const auth = (platformCreds.value.platform_auth || {})[provider] || {}
   return auth.oauth_login || ''
 }
-// 令牌创建页直达链接：github/gitcode 官方预选参数常量 → 平台卡 pat_create_url；都没有不渲染
-function patCardUrl(card) {
-  if (!card) return ''
-  return PAT_CREATE_URLS[card.provider] || card.pat_create_url || ''
-}
 function refreshRepoCreds() {
   try {
     if (G.app._clearCachedReposData) G.app._clearCachedReposData()
@@ -1719,7 +1704,7 @@ function openPatModal(provider) {
   patTarget.value = provider
   patOpen.value = true
 }
-function onPatSaved(provider) {
+function onPatSaved() {
   patOpen.value = false
   refreshRepoCreds()
   if (G.app && G.app.showToast) G.app.showToast(t('credentials_saved'))
@@ -1760,7 +1745,7 @@ function clearPat(provider) {
           if (G.app && typeof G.app.refreshRepoLinks === 'function') {
             G.app.refreshRepoLinks().then(function (d) {
               if (!d || !d.has_any) {
-                try { G.window.sessionStorage.removeItem('currentRepo') } catch (e) {}
+                try { G.window.sessionStorage.removeItem('currentRepo') } catch (e) { /* 无会话键则忽略 */ }
                 if (typeof G.app.goToRepos === 'function') G.app.goToRepos()
               }
               loadTab()
@@ -1783,7 +1768,7 @@ const mode = ref('light')
 const lang = ref('zh')
 const langSwitching = ref(false)
 // 2026-11-12 默认风格退役（第一步）：外观页只保留 Liquid Glass，setTheme 只接受 apple
-function selectTheme(th) {
+function selectTheme() {
   if (!G.app.setTheme) {
     G.app.showToast(t('theme_switch_unavailable'))
     return

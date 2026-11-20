@@ -80,7 +80,11 @@ def backfill_uuid() -> None:
                 _commit(c)
                 log.info(f"user_credentials UUID backfill: {len(need)} rows")
         except Exception as e:
-            log.warning(f"user_credentials UUID backfill failed: {e}")
+            from src.kernel.db_errors import missing_schema
+            if missing_schema(e):
+                log.debug(f"user_credentials UUID backfill skipped (no local schema): {e}")
+            else:
+                log.warning(f"user_credentials UUID backfill failed: {e}")
 
 
 def backfill_encryption() -> None:
@@ -105,7 +109,11 @@ def backfill_encryption() -> None:
                 _commit(c)
                 log.info(f"user_credentials plaintext encryption backfill: {len(plain)} rows")
     except Exception as e:
-        log.warning(f"user_credentials encrypt backfill failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"user_credentials encrypt backfill skipped (no local schema): {e}")
+        else:
+            log.warning(f"user_credentials encrypt backfill failed: {e}")
 
 
 def backfill_repo_credentials_encrypt() -> int:
@@ -127,7 +135,11 @@ def backfill_repo_credentials_encrypt() -> int:
             log.info(f"grape_t_repo_credentials encryption backfill: {len(plain)} rows")
         return len(plain)
     except Exception as e:
-        log.warning(f"grape_t_repo_credentials encrypt backfill failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"grape_t_repo_credentials encrypt backfill skipped (no local schema): {e}")
+        else:
+            log.warning(f"grape_t_repo_credentials encrypt backfill failed: {e}")
         return 0
 
 
@@ -144,7 +156,11 @@ def backfill_repo_credentials_uuid() -> int:
                         f"(D99 主键化后不应出现，检查库版本): {need[:3]}")
         return len(need)
     except Exception as e:
-        log.warning(f"grape_t_repo_credentials UUID backfill failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"grape_t_repo_credentials UUID backfill skipped (no local schema): {e}")
+        else:
+            log.warning(f"grape_t_repo_credentials UUID backfill failed: {e}")
         return 0
 
 def run() -> None:

@@ -546,6 +546,33 @@ class GenericVcsProvider(VCSProvider):
         return ""
 
 
+def _platform_card(provider: str):
+    """读平台卡；未绑定 vcs_cards 端口时返回 None。
+
+    主控进程由 assembly 层绑定端口；worker 进程的 MANIFEST 不含
+    ``src/api/contracts_wiring.py``，端口永远绑不上。kernel 层不得 import
+    domains（R1 架构守卫），所以这里不做「本域默认卡」兜底，而是把
+    「没有卡」交回上层：provider 构造抛 PortNotBound，token_service 那些
+    入口统一降级为空结果（worker 本来就不做 repo token 链）。
+    """
+    try:
+        return _vcs_cards.get_platform_card(provider)
+    except Exception:  # noqa: BLE001 - 端口未绑定/装配缺失都按无卡处理
+        return None
+
+
+def _require_card(provider: str):
+    """取卡；取不到时抛 PortNotBound（语义：本进程没有装配层）。"""
+    from src.kernel.ports._base import PortNotBound
+
+    card = _platform_card(provider)
+    if card is None:
+        raise PortNotBound(
+            f"kernel port 'vcs_cards' is not bound for provider {provider!r} "
+            "(no assembly layer in this process)")
+    return card
+
+
 class GitCodeProvider(GenericVcsProvider):
     """GitCode 平台（D22：GenericVcsProvider 基座 + 存量委托覆盖）。
 
@@ -556,10 +583,7 @@ class GitCodeProvider(GenericVcsProvider):
     """
 
     def __init__(self):
-        card = _vcs_cards.get_platform_card("gitcode")
-        if card is None:
-            card = _vcs_cards.build_platform_card("gitcode", {})
-        super().__init__(card)
+        super().__init__(_require_card("gitcode"))
 
     def get_user_login(self, token: str) -> str:
         # D85 迁移修复：身份探测委托存量网络缝 repo_manager.get_user_gitcode_login
@@ -622,10 +646,7 @@ class GitHubProvider(GenericVcsProvider):
     """GitHub 平台（D22：GenericVcsProvider 基座 + 存量委托覆盖，同 GitCode 说明）。"""
 
     def __init__(self):
-        card = _vcs_cards.get_platform_card("github")
-        if card is None:
-            card = _vcs_cards.build_platform_card("github", {})
-        super().__init__(card)
+        super().__init__(_require_card("github"))
         # resolve_repo_token/fetch_owner_identity_token 走 GenericVcsProvider 基类：
         # 卡能力位 owner_identity_token_fallback=true（configs/platforms/github.json）
         # 派生回落语义，基类默认实现按 provider_name="github" 查 external_identities
@@ -1513,10 +1534,7 @@ class GitLabProvider(GenericVcsProvider):
     _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
 
     def __init__(self):
-        card = _vcs_cards.get_platform_card("gitlab")
-        if card is None:
-            card = _vcs_cards.build_platform_card("gitlab", {})
-        super().__init__(card)
+        super().__init__(_require_card("gitlab"))
 
     def _pid(self, owner, repo) -> str:
         import urllib.parse as _up

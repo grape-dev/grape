@@ -254,6 +254,7 @@
   "toast.update_success": "技能更新成功",
   "toast.update_failed": "更新失败: {{msg}}",
   "filter_all_l1": "全部领域",
+  "plugins_tab": "插件",
   "filter_all_l2": "全部场景",
   "upload_cat_l1": "领域",
   "upload_cat_l2": "场景",

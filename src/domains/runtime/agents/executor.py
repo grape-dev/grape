@@ -986,7 +986,13 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 if provider == "openai" and cfg.get("api_key"):
                     env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
-            log.warning(f"Failed to inject user credentials: {e}")
+            from src.kernel.db_errors import missing_schema
+            if missing_schema(e):
+                # worker 本地库 user_credentials 缺 kind 列：任务照常跑（token 由
+                # claim 现取注入），只记 debug，不再每个任务刷一条 WARNING。
+                log.debug(f"user credential injection skipped (no local schema): {e}")
+            else:
+                log.warning(f"Failed to inject user credentials: {e}")
 
 # ── 运行时环境变量注入契约（Issue #2395）──────────────────────────────────
 # 四个变量在 VOD/Issue/Coding/QA 各引擎路径必须口径一致：

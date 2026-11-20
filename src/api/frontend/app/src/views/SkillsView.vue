@@ -6,6 +6,7 @@
       <div class="seg-bar sk__seg">
         <a @click="G.app.nav('scene-market')">🏪 {{ tt('scenes_tab') }}</a>
         <a class="ac">⚙ {{ tt('skills_tab') }}</a>
+        <a v-if="showPlugins" @click="G.app.nav('plugins')">🧩 {{ tt('plugins_tab') }}</a>
       </div>
       <div class="sk__intro">
         <b class="sk__intro-b">{{ tt('scenes_tab') }}</b>
@@ -874,8 +875,11 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import AGButton from '@/components/ui/AGButton.vue'
 import AGModal from '@/components/ui/AGModal.vue'
 import AGSelect from '@/components/ui/AGSelect.vue'
+import { pluginsEnabled } from '@/lib/features'
 
 const G = globalThis
+// Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
+const showPlugins = pluginsEnabled()
 
 // app.js 契约：renderSkillDetail(d) 入口注入完整数据对象（含 huawei-cloud 分包）
 const props = defineProps({ initialDetail: { type: Object, default: null } })
@@ -907,6 +911,7 @@ function th(key) {
 }
 const KEY_DEFAULTS = {
   scenes_tab: '场景',
+  plugins_tab: '插件',
   skills_tab: '技能',
   market_intro_scene: '是多个技能按开发流程组合的开发模式',
   market_intro_skill: '是单个 Agent 的能力包',

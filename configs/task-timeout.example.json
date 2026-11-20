@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #516 任务超时配置示例。复制为 configs/task-timeout.json 后按需修改；文件缺省时全部走内置默认（coding=7200，其余 agent=3600，全局 env RUNTIME_TASK_TIMEOUT 仍生效）。agent_defaults/per_repo/per_skill 的键做大小写不敏感匹配；timeout_retries 为超时自动重试次数（0=禁用，默认 1）；retry_backoff_sec 为重试前退避间隔（默认 30）。",
+  "_comment": "Issue #516 任务超时配置示例。复制为 configs/task-timeout.json 后按需修改；文件缺省时全部走内置默认（coding=7200，其余 agent=3600，全局 env RUNTIME_TASK_TIMEOUT 仍生效）。agent_defaults/per_repo/per_skill 的键做大小写不敏感匹配；timeout_retries 为超时自动重试次数（0=禁用，默认 1）；retry_backoff_sec 为重试前退避间隔（默认 30）。Issue #2793 新增无进展（假死）自愈：no_progress_timeout_sec（默认 600s）、no_progress_retries（默认 1，0=只诊断不重派）、no_progress_enabled（默认 true，false=整体回滚）；per_skill/per_repo 既可写标量超时值，也可写 dict 同时覆盖 timeout 与 no_progress_* 字段；非法值静默回退默认。",
   "agent_defaults": {
     "coding": 7200
   },
@@ -7,8 +7,16 @@
     "gitcode:owner/repo": 7200
   },
   "per_skill": {
-    "coding-cli-1": 10800
+    "coding-cli-1": 10800,
+    "vod-cli": {
+      "timeout": 7200,
+      "no_progress_timeout_sec": 300,
+      "no_progress_retries": 1
+    }
   },
   "timeout_retries": 1,
-  "retry_backoff_sec": 30
+  "retry_backoff_sec": 30,
+  "no_progress_timeout_sec": 600,
+  "no_progress_retries": 1,
+  "no_progress_enabled": true
 }

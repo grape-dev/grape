@@ -65,9 +65,12 @@ def test_revoke_is_immediate():
 
 
 def test_expired_token_rejected():
-    # 用 auth_token 模块自己的连接改过期时间：全树收集时其它模块可能 reload
-    # session_manager，另取新连接会写到别的库，签发/校验却还在旧库 → 断言假失败
-    from src.kernel.auth_sdk.auth_token import db, db_lock
+    # 改过期时间用 session_manager 的 db/db_lock：tokens 表读写走 mgmt 的 _any_cursor
+    # （src/domains/mgmt/public/__init__.py:1487），单库拓扑下它回落的正是 session_manager.db
+    # 这把连接和这把锁（只有 mgmt 配了自有 DSN 才另开连接，测试拓扑没有）——签发、校验与这里
+    # 手改过期时间命中同一张 session_api_tokens。用同一把 db 也避免全树收集时其它模块
+    # reload session_manager 后另取连接写到别的库、断言假失败。
+    from src.kernel.session_manager import db, db_lock
     t = _issue("t_expired", ttl=1)["token"]
     with db_lock:
         c = db.cursor()

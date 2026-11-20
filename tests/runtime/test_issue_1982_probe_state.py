@@ -14,68 +14,20 @@ from unittest.mock import patch
 
 import pytest
 
-ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
-sys.path.insert(0, ROOT)
-os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
-
-from src.session_manager import db, db_lock  # noqa: E402
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _insert_credential():
-    name = f"cred-1982-{uuid.uuid4().hex[:8]}"
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name, status, last_seen_at) "
-            "VALUES (?, ?, ?, 'global', '', 'active', ?)",
-            (f"hash_{name}", name, f"dev-{name}", _now_iso()))
-        cid = c.lastrowid
-        db.commit()
-    return cid
-
-
-def _insert_runtime(cid, name, healthy=1, probe_fail_count=0):
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "INSERT INTO agent_runtimes (credential_id, name, status, healthy, installed, scope, last_seen_at, "
-            "probe_fail_count, probe_status, probe_last) "
-            "VALUES (?, ?, 'online', ?, 1, 'global', ?, ?, 'ok', '')",
-            (cid, name, healthy, _now_iso(), probe_fail_count))
-        rid = c.lastrowid
-        db.commit()
-    return rid
-
-
-def _cleanup(cid):
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
-        c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
-        db.commit()
+from probe_state_support import (  # noqa: E402  共用 #490/#1982/#2791 探活脚手架
+    STATE_COLUMNS_WITH_SPAWN,
+    FakeRequest as _FakeRequest,
+    cleanup as _cleanup,
+    heartbeat as _heartbeat,
+    insert_credential as _insert_credential,
+    insert_runtime as _insert_runtime,
+    state as _shared_state,
+)
 
 
 def _state(name, cid):
-    with db_lock:
-        row = db.cursor().execute(
-            "SELECT healthy, probe_status, probe_fail_count, probe_spawn_fail_count, probe_error "
-            "FROM agent_runtimes WHERE name=? AND credential_id=?", (name, cid)).fetchone()
-    return tuple(row) if row else None
-
-
-class _FakeRequest:
-    headers = {}
-    client = None
-
-
-def _heartbeat(probe_results, runtime_ids, cid):
-    from src.domains.runtime.routes.runtime import runtime_heartbeat, HeartbeatBody
-    body = HeartbeatBody(runtime_ids=runtime_ids, probe_results=probe_results)
-    return runtime_heartbeat(body, _FakeRequest(), credential_id=cid)
+    """#1982 观测面比 #2791 多一列 probe_spawn_fail_count。"""
+    return _shared_state(name, cid, STATE_COLUMNS_WITH_SPAWN)
 
 
 def _spawn_failed_obs(name, i):

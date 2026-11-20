@@ -39,6 +39,16 @@
 # 用户自行安装即可，worker 启动自动发现并注册；运行中装好引擎无需重启（周期重注册）。
 set -euo pipefail
 
+# #2790/#2789：容器常注入 PYTHONPATH=/app，会遮蔽 venv site-packages / 安装目录 src，
+# 导致 `python -m src.domains.runtime.engine.agent` 或 `grape` 报 ModuleNotFoundError。
+# 安装/升级/启动全程不依赖外部 PYTHONPATH：先清空，再显式 cd 到安装目录。
+unset PYTHONPATH
+
+
+# pgrep/pkill -f 匹配的是完整命令行，venv 绝对路径里的正则元字符必须先转义。
+# 回滚限域 / 停旧实例 / 启动存活判定 / 重启 四处复用同一字面量，集中一处避免改漏。
+_SED_ESCAPE_BRE='s/[.[\*^$]/\\&/g'
+
 # ===== 参数解析 =====
 TOKEN="${TOKEN:-}"
 SERVER=""
@@ -80,9 +90,34 @@ if [ -z "$SERVER" ]; then
   log "No --server given, using default $SERVER (add --server https://<your-controller> if wrong)"
 fi
 SERVER="${SERVER%/}"
-# 设备名：hostname 小写，非字母数字替换为 -，清理首尾 -（hostname 输出含换行会产生尾随 -）
+# 设备名：主机名小写，非字母数字替换为 -，清理首尾 -。
+# 不要直接调 hostname：精简镜像/沙箱里没有该命令，而本脚本是 set -euo pipefail，
+# 一条 127 就会让整个自动升级失败（实测 rc=127，stderr=hostname: command not found
+# —— 服务端 h-90c96d41e662 vs 设备 h-6aedab5afaf2 的自动升级连环重试就是这么来的）。
+# 探测顺序：hostname → /proc/sys/kernel/hostname → uname -n → python socket → 时间戳兜底。
 if [ -z "$DEVICE" ]; then
-  DEVICE="worker-$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')"
+  _host_raw=""
+  if command -v hostname >/dev/null 2>&1; then
+    _host_raw="$(hostname 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ] && [ -r /proc/sys/kernel/hostname ]; then
+    _host_raw="$(cat /proc/sys/kernel/hostname 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ]; then
+    _host_raw="$(uname -n 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ] && command -v python3 >/dev/null 2>&1; then
+    _host_raw="$(python3 -c 'import socket;print(socket.gethostname())' 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ]; then
+    _host_raw="worker-$(date +%s 2>/dev/null || echo 0)"
+  fi
+  _host_slug="$(printf '%s' "$_host_raw" | tr 'A-Z' 'a-z' 2>/dev/null || true)"
+  _host_slug="$(printf '%s' "$_host_slug" | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//' 2>/dev/null || true)"
+  if [ -z "$_host_slug" ]; then
+    _host_slug="unknown"
+  fi
+  DEVICE="worker-$_host_slug"
 fi
 
 # ===== whoami：凭据自述（服务端是唯一事实源）=====
@@ -456,6 +491,42 @@ if [ -d "$INSTALL_DIR/src" ]; then
 fi
 log "Extracting worker package to $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "Failed to extract worker package"
+
+# ===== 3.1 清理遗留顶层模块目录（与 Windows install-worker.ps1 同口径）=====
+# arch 分支把 src/runtime|agent|user|auth|observability 等顶层模块迁到
+# src/domains|src/kernel；解压是覆盖式，旧目录残留会被 import 优先命中。
+# 白名单制：src/ 下不在 canonical 清单内的目录一律删除。
+if [ -f "$INSTALL_DIR/src/domains/runtime/engine/agent.py" ] && [ -d "$INSTALL_DIR/src" ]; then
+  for _legacy_dir in "$INSTALL_DIR/src"/*; do
+    [ -d "$_legacy_dir" ] || continue
+    _legacy_name=$(basename "$_legacy_dir")
+    case "$_legacy_name" in
+      api|domains|kernel|runtime) continue ;;   # runtime = 包内 legacy 入口 shim
+    esac
+    rm -rf "$_legacy_dir" && log "Removed legacy module dir: src/$_legacy_name"
+  done
+
+  # src/runtime：旧版本真实模块（残留）与包内 shim 同名同路径。整体删掉后从包里
+  # 重解三个 shim 文件；包内缺 shim 时保留现状，绝不把设备入口删空。
+  _rt_dir="$INSTALL_DIR/src/runtime"
+  if [ -d "$_rt_dir" ]; then
+    _shim_stage=$(mktemp -d)
+    _shim_ok=1
+    for _shim in __init__.py agent.py cloud_worker.py; do
+      tar -xzf "$TMP_PKG" -C "$_shim_stage" --strip-components=2 \
+          "grape-worker/src/runtime/$_shim" 2>/dev/null || _shim_ok=0
+    done
+    if [ "$_shim_ok" = "1" ] && [ -f "$_shim_stage/runtime/agent.py" ]; then
+      rm -rf "$_rt_dir"
+      mkdir -p "$_rt_dir"
+      cp -f "$_shim_stage"/runtime/* "$_rt_dir"/ 2>/dev/null || true
+      log "Restored legacy entry shim: src/runtime (agent.py/cloud_worker.py)"
+    else
+      log "Warning: package has no complete src/runtime shim; kept existing dir as-is"
+    fi
+    rm -rf "$_shim_stage"
+  fi
+fi
 rm -f "$TMP_PKG"
 
 # ===== 3.5 升级前 import 冒烟检查（2026-10-14 五台 worker 心跳全断事故）=====
@@ -727,7 +798,10 @@ fi
 # worker 保持一致（声明与消费同源）——此前 pyproject 加了 cubesandbox/requests/cryptography
 # 但安装脚本硬列表没跟上 → 沙箱 worker 装机缺平台 SDK（skip template scan）与凭据加密
 # （crypto 软降级告警），.17 实例 852b4efd 实证；二期 7506b5c6 靠手工 pip 补装掩盖。
-WORKER_DEPS="aiohttp bcrypt click httpx cubesandbox requests cryptography"
+# 2026-11-20：补 fastapi——pyproject [worker] 与 WORKER_DEPS 早已声明，脚本硬列表
+# 没跟上，Windows 装机后任务链路 `stream failed: No module named 'fastapi'`
+# （`src.domains.mgmt.public` 的历史导入面）。三处清单必须同源。
+WORKER_DEPS="aiohttp bcrypt click httpx cubesandbox requests cryptography fastapi"
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
@@ -754,7 +828,7 @@ if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
     fi
     # 安装完成打印实际版本(pip list 里的 worker 依赖)
     log "Installed dependency versions:"
-    "$PIP_CMD" list --format=freeze 2>/dev/null | grep -iE '^(aiohttp|bcrypt|click|httpx|cubesandbox|grape)==?' | sed 's/^/    /' || true
+    "$PIP_CMD" list --format=freeze 2>/dev/null | grep -iE '^(aiohttp|bcrypt|click|httpx|cubesandbox|requests|cryptography|fastapi|grape)==?' | sed 's/^/    /' || true
   fi
 fi
 
@@ -777,6 +851,20 @@ if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
 else
   _install_grape_online
 fi
+
+# ===== 4.6 安装后 CLI smoke（#2789 P0-1）=====
+# 显式带污染 PYTHONPATH=/app 跑一次（脚本顶部 unset 只作用于本进程，不能证明污染下可用），
+# 验证安装后的 grape 入口在容器注入环境下仍能启动；失败仅告警，worker 主链路仍可用。
+# #2789 CLI smoke begin
+if [ -x "$VENV/bin/grape" ]; then
+  if _cli_smoke_out="$(cd "$INSTALL_DIR" && PYTHONPATH=/app "$VENV/bin/grape" --version 2>&1)"; then
+    log "CLI smoke check passed (PYTHONPATH=/app): $_cli_smoke_out"
+  else
+    log "Warning: CLI smoke check failed under PYTHONPATH=/app: $_cli_smoke_out"
+    log "Warning: verify '$VENV/bin/grape --version' after install; an inherited PYTHONPATH must not shadow the venv (see #2790)"
+  fi
+fi
+# #2789 CLI smoke end
 
 # 能力校验（Issue #2227）：同一版本号也可能是不同构建（如离线 wheel 过旧缺 --sha），
 # 因此探测实际 --help 而不是信任 `grape --version`。缺失时显式告警并记录实际版本，
@@ -828,6 +916,19 @@ RUNTIME_MAX_CONCURRENT_TASKS=20
 RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
+fi
+# root 安装必须把放行写进 ENV_FILE（Issue #3602）：agent.py 在 geteuid()==0 且没有
+# GRAPE_ALLOW_ROOT_ENGINE=1 时以退出码 78 拒绝启动。原先放行只写进两处 ——
+# systemd drop-in 30-allow-root.conf 和生成的 start-worker.sh —— 而这两份文件
+# 都会被「升级验证失败 → 回滚」一起退回旧版。结果：新代码 + 旧启动脚本 = 每次重启
+# 都 78，安装脚本再判启动失败，继续回滚，形成死循环（2026-11-20 一台无 systemd、
+# 无 hostname 的容器实测）。ENV_FILE 在两条启动路径上都会被 source（systemd 的
+# EnvironmentFile= / start-worker.sh 的 set -a; . ENV_FILE），写在这里跟着环境文件
+# 走，回滚也带不走。已存在该键则不动（尊重运维手写的 0/1）。
+if [ "$ROOT_MODE" = "1" ]; then
+  if ! grep -q '^GRAPE_ALLOW_ROOT_ENGINE=' "$ENV_FILE" 2>/dev/null; then
+    printf 'GRAPE_ALLOW_ROOT_ENGINE=1\n' >> "$ENV_FILE"
+  fi
 fi
 # 追加旧配置中保留的自定义 keys（防重装/升级丢 key → opencode 401 / aishell 无凭据）
 if [ -n "$_PRESERVED_KEYS" ]; then
@@ -1001,8 +1102,41 @@ fi
 # 跨实例互斥：同机其他安装目录已登记同一 unit → fail-fast，不动它的进程/unit。
 registry_guard
 
+# #2789 boot marker begin
+# 本次启动的日志起点：升级/重装时 worker.log 里还有上一轮的行，末尾判定必须只看
+# 本次启动之后的新行（worker.log 记字节偏移，journal 记启动时间戳）。
+_BOOT_STAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+_LOG_OFFSET=$( { wc -c < "$INSTALL_DIR/data/worker.log"; } 2>/dev/null || true )
+_LOG_OFFSET="${_LOG_OFFSET// /}"
+_LOG_OFFSET="${_LOG_OFFSET:-0}"
+_USING_SYSTEMD=""
+# #2789 boot marker end
+
+# #2789 engines probe begin
+# worker 日志来源随启动方式不同：root+systemd 的 unit 没有 StandardOutput，stdout/stderr
+# 只进 journal（journalctl -u runtime-agent）；普通用户/容器 nohup 重定向到
+# data/worker.log。只 grep worker.log 会让 systemd 模式的 engines=[] 告警永不命中。
+_worker_log_has() {
+  local _needle="$1"
+  if [ -n "${_USING_SYSTEMD:-}" ]; then
+    if journalctl -u runtime-agent --since "$_BOOT_STAMP" --no-pager 2>/dev/null \
+        | grep -q -- "$_needle"; then
+      return 0
+    fi
+  fi
+  if [ -f "$INSTALL_DIR/data/worker.log" ]; then
+    if tail -c "+$((_LOG_OFFSET + 1))" "$INSTALL_DIR/data/worker.log" 2>/dev/null \
+        | grep -q -- "$_needle"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+# #2789 engines probe end
+
 if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
   # ---- root + systemd 可用：systemd 服务（unit 名按实例派生）----
+  _USING_SYSTEMD=1
   # 既有同名 unit 不属于本安装目录 → fail-fast，绝不静默覆盖/重启他人的 unit
   if [ -f "$SERVICE_FILE" ] && ! grep -qxF "WorkingDirectory=$INSTALL_DIR" "$SERVICE_FILE" 2>/dev/null; then
     log "!!! $SERVICE_FILE already exists and belongs to another install dir: $(grep -F 'WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | head -1)"
@@ -1174,6 +1308,7 @@ if [ "\$1" != "--no-daemon" ]; then
 fi
 
 cd "$INSTALL_DIR"
+unset PYTHONPATH
 export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 # 容器/无 systemd 的 root 回退路径同样会撞 agent.py 的 root 引擎守卫（exit 78）：
 # 按 euid 放行；非 root 安装不受影响（守卫只在 root 下生效）。
@@ -1182,6 +1317,27 @@ set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m ${WORKER_MODULE}
 EOF
   chmod +x "$START_SCRIPT"
+# ===== 5.9 hermes 模型配置对齐校验（Issue #2545：模型名 vs 网关 /v1/models）=====
+# chat 切 hermes 引擎 404 Model not found 的根因是 config.yaml 模型名不在 key
+# 所属网关可用列表——安装期即拦截（而非运行时透传 404 给用户）。
+# 统一走包内 src/domains/runtime/engine/engine_model.py（与探针/Windows 侧同一实现）：
+#   - 模型名不对齐 → 模块打印「配置模型名 vs 可用列表」对照并 exit 1 → 安装失败；
+#   - 网关不可达 → 模块降级告警 exit 0（不误伤离线安装）；
+#   - 无 config.yaml（本机不用 hermes）→ 跳过。
+# ⚠️ 必须在「杀旧起新」之前：校验失败时不能杀掉正在运行的旧 worker。
+_hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+if [ -f "$_hermes_home/config.yaml" ]; then
+  log "Validating hermes model config against gateway /v1/models ($_hermes_home/config.yaml, Issue #2545)..."
+  if ( cd "$INSTALL_DIR" && "$VENV/bin/python" -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home" ); then
+    log "hermes model config validation passed (models aligned with gateway /v1/models)"
+  else
+    fail "hermes model config validation FAILED: configured model name(s) not in the gateway /v1/models list (see comparison above; fix model.default/model_aliases in config.yaml or switch key, then re-run install. See docs/deployment/model-gateway-alignment.md)"
+  fi
+else
+  log "No hermes config found ($_hermes_home/config.yaml), skipping model validation"
+fi
+unset _hermes_home
+
   # 停掉本实例旧进程（daemon + agent）：unit / PIDFile / venv 前缀 + 模块右边界，
   # 三条限域都只覆盖本安装目录——同机其他 worker（不同 VENV、不同入口模块、
   # 普通/沙箱混跑）不受影响；也不再需要按进程名扫 start-worker.sh。

@@ -8,7 +8,7 @@ direct 收尾）对失败原因分类，瞬时上游抖动（IAM 瞬断、模型
 - 复用 agent_tasks.attempts 列计数（无 schema 变更），上限默认 3；
 - 指数退避经 threading.Timer，窗口 ≤300s，远小于僵尸判死阈值（30min/6h）；
 - 写操作证据闸门与假完成硬门槛共用同一证据定义（结构化产出 / tool_uses
-  里的 POST comments|pulls / A2A handoff），有证据一律不重试；
+  里的 POST comments|pulls / A2A handoff / git push），有证据一律不重试；
 - 只拦截 running 状态任务（终态幂等先于本检查，由调用方保证）。
 """
 from __future__ import annotations
@@ -79,10 +79,45 @@ def classify_stream_failure(exit_code, error_text: str, has_output: bool) -> dic
 
 # ── R52 副作用闸门（与假完成硬门槛共用证据定义）──────────────
 
+# Issue #2793：git push 是不可逆的外部副作用（先 push 后收尾失败 = 实质产出已交付）。
+# 识别原生 `git push`、`grape git push`（本仓推荐封装）以及 repogit 包装调用；
+# `--dry-run` 不产生远端副作用，不算写证据。
+_GIT_PUSH_RE = re.compile(
+    r"(?:^|[;&|()\s`])(?:grape\s+)?git\s+push(?:\s|$)", re.I)
+_REPOGIT_PUSH_RE = re.compile(r"\brepogit\b[\s\S]{0,40}\bpush\b", re.I)
+
+# Issue #2793 审查修复：--dry-run 只豁免所在子命令，不得因
+# `git push --dry-run a && git push origin b` 中第一条 dry-run 而丢失真实 push 证据；
+# echo/printf 只是打印文本，不算执行过 push（收窄误报面）。
+_CMD_SEGMENT_RE = re.compile(r"&&|\|\||[;|&\n]")
+_ECHO_SEGMENT_RE = re.compile(r"^\s*(?:echo|printf)\b", re.I)
+_DRY_RUN_RE = re.compile(r"--dry-run\b", re.I)
+
+
+def _has_push_evidence(cmd: str) -> bool:
+    """命令串中是否存在真实（非 --dry-run）的 git push / repogit push 子命令。
+
+    按 shell 分隔符（&& / || / ; / | / & / 换行）拆分子命令后逐段判定：
+    - 段内出现 `--dry-run` → 该段不算（dry-run 不产生远端副作用）；
+    - 段以 echo/printf 开头 → 打印文本，不算执行 push；
+    - 其余段命中 `git push` / `grape git push` / repogit 包装 → 算写证据。
+    """
+    for seg in _CMD_SEGMENT_RE.split(cmd or ""):
+        seg = seg.strip()
+        if not seg or _ECHO_SEGMENT_RE.match(seg) or _DRY_RUN_RE.search(seg):
+            continue
+        if _GIT_PUSH_RE.search(seg) or _REPOGIT_PUSH_RE.search(seg):
+            return True
+    return False
+
+
 def has_write_evidence(tool_uses, result_text: str) -> bool:
-    """任务失败前是否产生过外部写操作（评论/PR/A2A）或结构化产出。
+    """任务失败前是否产生过外部写操作（评论/PR/A2A/git push）或结构化产出。
 
     有证据 → 重跑可能重复提交，一律不自动重试（留给人工）。
+    Issue #2793：口径新增 `git push`（含 `grape git push` / repogit 包装调用；
+    `--dry-run` 仅豁免其所在子命令，echo/printf 打印文本不算），与
+    `POST /comments|/pulls|merge_requests`、A2A handoff 并列。
     """
     if result_text:
         try:
@@ -112,6 +147,10 @@ def has_write_evidence(tool_uses, result_text: str) -> bool:
         _up = (_cmd or "").upper()
         if (("POST" in _up and any(k in _up for k in ("/COMMENTS", "/PULLS", "/MERGE_REQUESTS")))
                 or ("A2A HANDOFF" in _up) or ("POST" in _up and "/API/A2A" in _up)):
+            return True
+        # Issue #2793：git push 纳入写证据口径（--dry-run 按子命令粒度排除，
+        # echo/printf 打印文本不算）
+        if _cmd and _has_push_evidence(_cmd):
             return True
     return False
 
@@ -231,22 +270,33 @@ def _notify_retry(task_id, attempt: int, max_retries: int, error_class: str, rea
 
 # ── R51/R53 重试执行 ─────────────────────────────────────────
 
+#: agent_tasks.errors 保留槽位（transient_retry 与 no-progress 巡检共用同一口径）。
+TASK_ERROR_SLOTS = 5
+
+
+def parse_task_errors(raw) -> list:
+    """agent_tasks.errors → list（坏 JSON/非列表回退为单元素列表，空值回退空列表）。"""
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw)
+    except Exception:
+        return [str(raw)]
+    if isinstance(v, list):
+        return v
+    return [str(v)]
+
+
 def _append_task_error(task_id, entry: dict):
-    """R53：agent_tasks.errors 追加结构化条目（保留最近 5 条）。"""
+    """R53：agent_tasks.errors 追加结构化条目（保留最近 TASK_ERROR_SLOTS 条）。"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
-        errs = []
-        if row and row[0]:
-            try:
-                errs = json.loads(row[0])
-                if not isinstance(errs, list):
-                    errs = [str(errs)]
-            except Exception:
-                errs = [str(row[0])]
+        errs = parse_task_errors(row[0] if row else None)
         errs.append(entry)
-        c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(errs[-5:]), task_id))
+        c.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
+                  (json.dumps(errs[-TASK_ERROR_SLOTS:]), task_id))
         db.commit()
 
 
@@ -427,6 +477,40 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
     if not _effective_tool_uses and event_seq:
         _effective_tool_uses = _collect_tool_uses_from_agent_logs(event_seq)
     if has_write_evidence(_effective_tool_uses, result_text):
+        # 收尾瞬时故障降级（2026-11-16 #29 实测）：实质工作已产出且留痕（write
+        # evidence），仅收尾动作（如发布评论）被上游瞬时 401/网络抖动打挂时，
+        # 任务不应判 failed——审查结论与终态脱节会直接误导下游（#587 级联红色）。
+        # 「不重试」≠「判死」：降级 completed + errors 留诊断（可追溯原始错误）。
+        # 仅 has_output（有实质输出）才降级；纯崩溃空跑维持原 fail 路径。
+        if has_output:
+            _degrade_note = (f"收尾瞬时故障降级为完成：实质产出已留痕，收尾动作遇"
+                             f"{_cls['error_class']}（{_cls['reason'][:150]}），未重试")
+            try:
+                _append_task_error(task_id, {
+                    "error_code": "TRANSIENT_DEGRADED_COMPLETED",
+                    "error_class": _cls["error_class"],
+                    "reason": _cls["reason"][:200],
+                    "note": "substantive work delivered (write evidence); tail-action "
+                            "transient failure does not overturn it"})
+            except Exception:
+                pass
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "UPDATE agent_tasks SET status='completed', exit_code=0, "
+                        "result_text=COALESCE(NULLIF(result_text,''), ?), "
+                        "stream_ended=1, completed_at=? "
+                        "WHERE id=? AND status='running'",
+                        (_degrade_note,
+                         datetime.now(timezone.utc).isoformat(), task_id))
+                    db.commit()
+                log.info(f"transient_retry: task {task_id} {_cls['error_class']} with "
+                         f"write evidence → degraded to completed (no retry)")
+                return True  # 调用方语义：已处理，跳过终态写入（终态已在此写为 completed）
+            except Exception as e:
+                log.warning(f"transient_retry: degrade-to-completed failed for {task_id}: {e}")
+                return False
         log.info(f"transient_retry: task {task_id} {_cls['error_class']} but has write "
                  f"evidence, no auto-retry")
         return False

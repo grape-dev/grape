@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
+from pathlib import Path
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.api.time_utils import normalize_event_time
@@ -23,13 +24,20 @@ _DDL_ALIASES = {
 }
 
 
-def __getattr__(name: str):
-    """惰性兼容别名（PEP 562）：owner 域 DDL 快照只经端口取，kernel 不 import domains。"""
-    alias = _DDL_ALIASES.get(name)
-    if alias is not None:
-        port, symbol = alias
-        return getattr(port, symbol)()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def default_db_path() -> str:
+    """默认 sqlite 主库路径（单一出口，Issue #3251）。
+
+    env DEVOPS_DB_PATH 优先；否则按本文件位置推仓库根：
+    src/kernel/session_manager.py -> parents[0]=src/kernel, [1]=src, [2]=仓库根
+    -> <repo>/data/sessions.db（与原 ../../data/sessions.db 口径等价）。
+    IM 装配层等复用本函数，消除各处自拼 dirname 层级的双口径
+    （目录再调整时不再复发 src/domains/data/sessions.db 型错位）。
+    """
+    env_path = os.environ.get("DEVOPS_DB_PATH")
+    if env_path:
+        return env_path
+    return str(Path(__file__).resolve().parents[2] / "data" / "sessions.db")
+
 
 def __getattr__(name: str):
     """惰性兼容别名（PEP 562）：owner 域 DDL 快照只经端口取，kernel 不 import domains。"""
@@ -42,7 +50,7 @@ def __getattr__(name: str):
 # 备份/迁移用的库文件路径（import 期定型）。注意：这**不是**连接用的路径——
 # 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
 # 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
-_db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
+_db_path = default_db_path()
 db_lock = threading.RLock()
 
 

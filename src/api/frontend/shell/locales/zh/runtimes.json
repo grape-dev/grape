@@ -117,6 +117,11 @@
     "recent_models_desc": "按用量统计 Top 3",
     "recent_models_empty": "暂无使用记录",
     "model_used_count": "{{count}} 次",
+    "plugin_panel": "插件",
+    "plugin_count_paren": "（{count} 个已安装）",
+    "plugin_selfcheck_ok": "插件自检通过",
+    "plugin_missing": "缺 {count} 个期望插件",
+    "plugin_desired": "期望插件（desired_plugins）",
     "sandbox_platform": "沙箱平台",
     "sandbox_template": "模板",
     "platform_disabled": "已禁用",
@@ -134,7 +139,9 @@
     "no_engines_title": "暂无引擎",
     "no_engines_sub": "当前组织下暂无接入的引擎或设备",
     "worker_guide_title": "接入你的第一台引擎设备",
-    "worker_guide_sub": "在任意装了 Agent 引擎的机器上添加设备接入为执行节点——侧边栏会引导你生成凭据并给出安装命令"
+    "worker_guide_sub": "在任意装了 Agent 引擎的机器上添加设备接入为执行节点——侧边栏会引导你生成凭据并给出安装命令",
+    "no_installed_plugin": "此引擎暂无已安装插件",
+    "plugin_repo_required": "请先在侧边栏选择仓库后查看插件"
   },
   "time": {
     "not_online": "未上线",

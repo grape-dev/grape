@@ -14,7 +14,7 @@
 | **时间格式** | 一律 ISO 8601 UTC（如 `2026-09-16T08:00:00Z`） |
 | **ID 前缀口径** | `t_` = Agent 执行实例 / task_id（agent_tasks.id）；`tk_` = 会话 token；`grape_` = 用户级 API Key；`rta_` = 运行时凭据；`seq` = 事件序号；**`issue_id` / `issue.id` = 需求卡片 id**（`/api/issues` 创建与 notify 返回的 `task_id` 即此值，主字段为 `issue_id`）；`{number}` = 平台 issue 编号 |
 | **repo_key 口径** | 统一表达式 `[gitcode:|github:]owner/repo`；对外入参写 `owner/repo`（无前缀）时由服务端按托管记录判定前缀 |
-| **CLI 命令映射** | CLI 命令名由契约 `operation_id` 派生（`<tag> <verb>`，如 `scenes_list` → `grape scenes list`），**并非 HTTP 路径字面量**；`grape <cmd> --help` 可查实际对应路径 |
+| **CLI 命令映射** | CLI 命令名由契约 `operation_id` 派生（`<tag> <verb>`，如 `scenes_list` → `grape scenes list`），**并非 HTTP 路径字面量**；`grape <cmd> --help` 可查实际对应路径。**命令面边界（#2237，#1302 移植）**：`grape commands` 除契约命令外，还按契约 `/openapi.json` 的 `info["x-grape-local-cli-commands"]` 字段派生列示本地命令（`grape git`、`grape refresh`、`grape commands`、`grape tasks wait`，行尾带 `[local]` 标注；均无 HTTP 语义、不进契约 operation 集）；本地/非契约命令以 `grape <group> --help` 为准（单一事实源：`src/kernel/help_docs_sync.py` 的 `KNOWN_LOCAL_CLI_COMMANDS`，经契约 info 字段发布） |
 | **SSE** | 事件格式 `data: {…}\n\n`；流终止固定 `data: {"done": true}`；异常 `data: {"error": {"code", "message"}}`；请求头 `Accept: text/event-stream` |
 | **限流/重试** | 429 时先 1s 退避，最多重试 3 次；幂等操作可无惧重放 |
 

@@ -40,9 +40,13 @@ _probing: bool = False  # 是否正在探测中（防止并发探测）
 
 def _probe_engine(engine_name: str, cli_path: str) -> dict:
     """对单个引擎发起测试对话，返回探测结果。"""
-    # hermes 使用 ACP 模式探活（和实际任务执行路径一致）
+    # hermes 走 runtime 的单源实现（initialize + session/new + prompt 三段）。
+    # 本地曾有只发 initialize 的浅探活：ACP 通了就报 ok，provider 侧错误
+    # （模型不存在 → admitted_turn_failed）永远看不到，导致控制台 ok 而 worker
+    # fail 的口径分裂（2026-11-20 实测 112 次 fail）。
     if engine_name == "hermes":
-        return _probe_hermes_acp(cli_path)
+        from src.domains.runtime.public import probe_hermes_acp
+        return probe_hermes_acp(cli_path)
 
     # aishell-dsh 同走 ACP 探活。实现单源自 src.domains.runtime.engine.agent._probe_aishell_dsh_acp
     # （worker 侧同函数，已实测）——engine_probe 曾因缺此分支每 10 分钟对本机行写出

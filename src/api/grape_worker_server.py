@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api import server_common, server_tasks
+# Issue #2784：契约版本号单一来源（勿再写死字面量）
+from src.api.contract_versioning import CONTRACT_VERSION
 
 
 @asynccontextmanager
@@ -63,7 +65,7 @@ async def lifespan(app: FastAPI):
 
 app = server_common.build_app(
     title="Grape Worker Server",
-    version="2.2.0",
+    version=CONTRACT_VERSION,
     lifespan=lifespan,
 )
 

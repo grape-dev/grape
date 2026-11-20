@@ -129,8 +129,6 @@ class CloudSandboxBase:
         self._state_reporter = state_reporter       # 状态上报回调（DB 版或 HTTP 版）
         self._llm_env: dict[str, str] = {}          # LLM 凭据（外部注入，不从 DB 查）
         self._ctx: SandboxContext | None = None     # _make_context 时构造
-        self._grape_server_url: str = ""             # grape-cli server URL
-        self._grape_cli_token: str = ""              # grape-cli auth token
         self._repo_url: str = ""                     # 仓库 URL（configure_repo 设置）
         self._bot_token: str = ""                    # bot token（configure_repo 设置）
         self._work_branch: str = ""                  # 工作分支（configure_repo 设置）
@@ -372,30 +370,12 @@ class CloudSandboxBase:
         else:
             log.warning(f"[{self.provider_name}] no installer for engine_type='{self._engine_type}', skipping install")
 
-        # 4. grape-cli 安装（通用）
-        self._install_grape_cli()
-
-        # 5. grape-cli 配置（通用）
-        if self._grape_server_url and self._grape_cli_token:
-            self._configure_grape_cli()
-
-        # 6. 引擎配置（策略分派）
+        # 4. 引擎配置（策略分派）
         if plugin:
             plugin.configurator.configure(ctx)
             log.info(f"[{self.provider_name}] engine config applied for {self._sandbox_id}")
 
-        # 7. clone repo（通用）——从 ctx 读 repo 信息（内聚到上下文，不依赖 configure_repo 后置设置）
-        if self._ctx:
-            if not self._repo_url:
-                self._repo_url = self._ctx.repo_url
-            if not self._bot_token:
-                self._bot_token = self._ctx.bot_token
-            if not self._work_branch:
-                self._work_branch = self._ctx.work_branch
-        if self._repo_url and self._bot_token:
-            self._clone_repo()
-
-        # 8. 同步 ctx.env_vars 到沙箱 _credentials
+        # 5. 同步 ctx.env_vars 到沙箱 _credentials
         self._sync_env_vars()
 
     def _extract_llm_cred(self) -> dict | None:
@@ -420,63 +400,6 @@ class CloudSandboxBase:
         for k, v in self.ctx.env_vars.items():
             self._credentials[k] = v
             self._init_envs[k] = v
-
-    def _install_grape_cli(self) -> None:
-        """安装 grape-cli。已存在则跳过。失败不阻断（引擎不依赖 grape-cli）。
-
-        pip install git+https 需要 clone + build，60s 可能不够。
-        supports_long_cmd=True 的平台（CubeSandbox gRPC 60s deadline）用 run_long_cmd；
-        supports_long_cmd=False 的平台（DevBox 无 deadline）直接 run_cmd 传 300s。
-        """
-        try:
-            # 检查是否已安装（模板预装或 PATH 里有）
-            _, grape_path = self.run_cmd("which grape 2>/dev/null || echo ''")
-            if grape_path.strip():
-                log.info(f"[{self.provider_name}] grape-cli already installed at {grape_path.strip()}, skip")
-                return
-            # BUG-A 修复：PyPI 上不存在 grape-cli 包，从 gitcode 源码安装
-            # DevBox 沙箱没有 pip，先 ensurepip / get-pip.py
-            _pip_bootstrap = (
-                "python3 -m ensurepip --upgrade 2>/dev/null; "
-                "python3 -c 'import pip' 2>/dev/null || "
-                "(curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py -i https://pypi.tuna.tsinghua.edu.cn/simple); "
-            )
-            _pip_cmd = _pip_bootstrap + (
-                "python3 -m pip install --no-cache-dir --target /tmp/pylibs -i https://pypi.tuna.tsinghua.edu.cn/simple git+https://gitcode.com/grape-dev/grape-cli.git 2>&1 | tail -3"
-            )
-            if self.supports_long_cmd:
-                self.run_long_cmd(_pip_cmd, timeout=300)
-            else:
-                self.run_cmd(_pip_cmd, timeout=300)
-            # 方案 D：wrapper 写到 /usr/local/bin（在 hermes _SANE_PATH 中），
-            # 不依赖 ~/.bashrc 注入——hermes terminal snapshot 的 bash -l 是
-            # non-interactive login shell，~/.bashrc 的 interactivity guard 会
-            # 阻止 export PATH 执行。/usr/local/bin 在 _SANE_PATH 中，_make_run_env
-            # 的 _append_missing_sane_path_entries 会保证它在 PATH 中。
-            _, py = self.run_cmd("which python3 2>/dev/null || echo python3")
-            py = py.strip() or "python3"
-            wrapper = f"#!{py}\nimport sys; sys.path.insert(0, '/tmp/pylibs'); from src.cli import main; main()\n"
-            # 优先写 /usr/local/bin（root 用户可写），失败则回退 /tmp/pylibs/bin
-            try:
-                self.run_cmd("mkdir -p /usr/local/bin", timeout=5)
-                self.write_file("/usr/local/bin/grape", wrapper)
-                self.run_cmd("chmod +x /usr/local/bin/grape", timeout=5)
-                log.info(f"[{self.provider_name}] grape-cli wrapper installed to /usr/local/bin/grape")
-            except Exception:
-                self.run_cmd("mkdir -p /tmp/pylibs/bin", timeout=5)
-                self.write_file("/tmp/pylibs/bin/grape", wrapper)
-                self.run_cmd("chmod +x /tmp/pylibs/bin/grape", timeout=5)
-                log.warning(f"[{self.provider_name}] /usr/local/bin not writable, grape-cli wrapper fallback to /tmp/pylibs/bin")
-        except Exception as e:
-            log.warning(f"[{self.provider_name}] grape-cli install skipped: {e}")
-
-    def _configure_grape_cli(self) -> None:
-        """配置 grape-cli server+token。子类 override 补平台差异。"""
-        raise NotImplementedError
-
-    def _clone_repo(self) -> None:
-        """git clone 仓库。子类 override 补平台路径差异。"""
-        raise NotImplementedError
 
     # ---- 公共方法（委托给子类）----
 

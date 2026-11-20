@@ -22,6 +22,11 @@ from pydantic import BaseModel
 from src.api.deps import check_repo_access, get_current_user_or_api_key
 from src.kernel.config import log
 
+# src.auth 只存在于主控（审计实现归主控）；worker 包不含该目录。
+# 少数构建会把 mgmt 路由装进 worker：此时审计必须静默跳过，不能每个 IM 请求
+# 都刷一条 WARNING（下游日志实测会被淹没）。按模块名去重，只记一次 debug。
+_IM_AUDIT_MISSING_WARNED: set[str] = set()
+
 router = APIRouter(prefix="/api/im", tags=["im"])
 
 
@@ -48,6 +53,10 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
                              user_id=int(user.get("id") or 0),
                              operator_id=int(user.get("id") or 0),
                              ip=ip, detail=detail)
+    except ImportError as _ie:  # 审计模块不在本构建（worker 包无 src.auth）
+        if "src.auth" not in _IM_AUDIT_MISSING_WARNED:
+            _IM_AUDIT_MISSING_WARNED.add("src.auth")
+            log.debug(f"IM audit unavailable in this build ({_ie}); audit skipped")
     except Exception as e:      # 审计失败不得阻断业务
         log.warning(f"IM audit log failed (action={action}): {e}")
 

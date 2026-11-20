@@ -196,6 +196,7 @@
   "host_repair_request_failed": "修复请求失败：",
   "host_unknown_error": "未知错误",
   "list_sep": "、",
+  "label_plugins": "插件",
   "selector_mode_tag": "按标签匹配",
   "selector_mode_engine": "指定引擎实例",
   "selector_tag_hint": "按标签匹配：声明引擎标签（类型/范围/场景），扩容新引擎自动进池、退役零改绑，适合团队持续扩容",

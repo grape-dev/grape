@@ -18,8 +18,10 @@ import sys
 
 log = logging.getLogger(__name__)
 
-# 合并后的对外契约版本（bump 触发 CLI 自动刷新契约）
-CONTRACT_VERSION = "2.2.3"
+# 合并后的对外契约版本（bump 触发 CLI 自动刷新契约）。
+# Issue #2784：改为单一来源——本文件此前写死 2.2.2，与各进程入口的 2.2.0 漂移，
+# 且 2.2.2 相对现网 2.2.0 本身就是跳版。
+from src.api.contract_versioning import CONTRACT_VERSION  # noqa: F401  (re-export 供既有调用方)
 
 ENTRY_MODULES = {
     "mgmt": "src.api.grape_server",

@@ -25,6 +25,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRoute
 
 from src.api.version_check import ensure_python_version
+# Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
+from src.api.frontend_flags import apply_feature_flags
+# Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
+from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
 from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
                                trace_id_var, user_var)
@@ -440,7 +444,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         return {
             "status": "ok",
             "service": service_name,
-            "version": "2.2.0",
+            "version": CONTRACT_VERSION,
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,
@@ -524,7 +528,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         now_ts = _time2.time()
         result = {
             "status": "ok",
-            "version": "2.2.0",
+            "version": CONTRACT_VERSION,
             "pid": _os2.getpid(),
         }
         try:
@@ -844,6 +848,8 @@ document.documentElement.classList.remove('i18n-loading');})();
             html = html.replace('</head>', head_inject + '</head>', 1)
             html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
             html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
+            # Issue #3395：注入前端功能开关（flag=0 时移除侧边栏插件入口整块）
+            html = apply_feature_flags(html)
             return html
 
         def _serve_auth_page(filename: str) -> HTMLResponse:
@@ -851,6 +857,34 @@ document.documentElement.classList.remove('i18n-loading');})();
                 html = f.read()
             html = _inject_email_configured(html)
             return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+        # 官网落地页优先（114 预览形态，对齐生产 www：/=落地页，/app=平台）。
+        # 目录不存在时全部 miss，行为与未改动前完全一致（生产零影响）。
+        _LANDING_DIR = os.environ.get("GRAPE_LANDING_DIR", "")
+
+        # docs 站（生产由 nginx 伺服；114 预览：GRAPE_DOCS_DIR 指向 build-docs.py 生成物）
+        _DOCS_DIR = os.environ.get("GRAPE_DOCS_DIR", "")
+
+        def _landing_file(rel: str):
+            if rel == "docs" or rel.startswith("docs/"):
+                if not _DOCS_DIR or not os.path.isdir(_DOCS_DIR):
+                    return None
+                droot = os.path.realpath(_DOCS_DIR)
+                dfull = os.path.realpath(os.path.join(droot, rel[5:] or "index.html"))
+                if dfull != droot and not dfull.startswith(droot + os.sep):
+                    return None
+                if os.path.isdir(dfull):
+                    dfull = os.path.join(dfull, "index.html")
+                return dfull if os.path.isfile(dfull) else None
+            if not _LANDING_DIR or not os.path.isdir(_LANDING_DIR):
+                return None
+            root = os.path.realpath(_LANDING_DIR)
+            full = os.path.realpath(os.path.join(root, rel))
+            if full != root and not full.startswith(root + os.sep):
+                return None
+            if os.path.isdir(full):
+                full = os.path.join(full, "index.html")
+            return full if os.path.isfile(full) else None
 
         def _spa_response():
             with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
@@ -860,6 +894,10 @@ document.documentElement.classList.remove('i18n-loading');})();
 
         @app.get("/")
         async def serve_spa():
+            _lf = _landing_file("index.html")
+            if _lf:
+                from fastapi.responses import FileResponse as _LFR
+                return _LFR(_lf)
             return _spa_response()
 
         @app.get("/register")
@@ -876,6 +914,10 @@ document.documentElement.classList.remove('i18n-loading');})();
             from fastapi import HTTPException
             if path.startswith("api/") or path.startswith("static/"):
                 raise HTTPException(status_code=404)
+            _lf = _landing_file(os.path.join("en", path, "index.html") if not path else os.path.join("en", path))
+            if _lf:
+                from fastapi.responses import FileResponse as _LFR
+                return _LFR(_lf)
             if path == "register":
                 return _serve_auth_page("register.html")
             if path == "forgot":
@@ -932,10 +974,32 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
+    # 官网落地页（grape-website）优先：文件存在则直接伺服（对齐生产 www 形态：/=落地页，/app=平台）。
+    _LANDING_DIR = os.environ.get("GRAPE_LANDING_DIR", "/root/grape-website-preview")
+
+    def _landing_candidate(path: str):
+        _df = _landing_file(path if not path.endswith("/") else path + "index.html")
+        if _df:
+            return _df
+        if not os.path.isdir(_LANDING_DIR):
+            return None
+        rel = os.path.join(path, "index.html") if (not path or path.endswith("/")) else path
+        root = os.path.realpath(_LANDING_DIR)
+        full = os.path.realpath(os.path.join(root, rel))
+        if full != root and not full.startswith(root + os.sep):
+            return None
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        return full if os.path.isfile(full) else None
+
     @app.get("/{path:path}")
     async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
+        _lf = _landing_candidate(path)
+        if _lf:
+            from fastapi.responses import FileResponse as _LandingFR
+            return _LandingFR(_lf)
         if not os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:

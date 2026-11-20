@@ -241,10 +241,19 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_2133_recovery.py -v
+
       - name: Organization provisioning and repo binding tests (issue #2090)
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/mgmt/test_org_provisioning.py tests/mgmt/test_org_repo_binding.py tests/mgmt/test_org_repo_picker.py tests/mgmt/test_repo_org_visibility.py tests/mgmt/test_org_delete_cleanup.py -q
+      - name: Takeover dispatch guard regression tests (issue #3201)
+        # Issue #3201：接管 active 期间统一拦截自动派发（webhook/direct/A2A/过期自愈/
+        # 状态聚合/忽略计数边界）回归用例此前未接入 CI，回退只能靠人工本地执行。
+        # 本步骤把新用例与既有 takeover 守卫用例一起纳入门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_takeover_dispatch_guard_3201.py tests/test_takeover_flow.py tests/test_takeover_event_guard.py tests/test_takeover_dispatch.py tests/test_takeover_mark.py tests/runtime/test_issue_1770_a2a_dispatch_guard.py -q
       - name: Org unassigned int/str visibility tests (issue #3167)
         # Issue #3167 QA 审查修复（Required）：新增回归用例
         # tests/mgmt/test_issue_3167_org_unassigned_int.py 此前未接入 CI，int org_id

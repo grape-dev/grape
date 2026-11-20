@@ -12,6 +12,9 @@ except Exception:  # noqa: BLE001
     fcntl = None
 
 from src.kernel.config import log
+# Issue #2695（#2695 移植）：部署门常量复用 kernel.cli_version 单一事实源
+#（worker_package/安装脚本/启动核对三方共用同一对象，禁止各自硬编码）。
+from src.kernel.cli_version import GRAPE_CLI_MIN_VERSION  # noqa: F401  re-export for packager/tests
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 CACHE_DIR = os.path.join(ROOT, "data", "cache", "worker-package")

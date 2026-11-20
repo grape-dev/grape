@@ -283,7 +283,7 @@ def issue_takeover_token(*, task_id: str, repo_key: str, agent_type: str,
     key = takeover_session_key(task_id)
     expires_at = _now() + int(ttl)
     try:
-        _tokens.session_token_insert(key, repo_key or "", agent_type or "", int(user_id or 0),
+        _tokens.session_token_insert(key, repo_key or "", agent_type or "", str(user_id or 0),
                                      _sha256(token), expires_at, kind="takeover")
         return {"token": token, "token_sha256": _sha256(token),
                 "session_key": key, "expires_at": expires_at}

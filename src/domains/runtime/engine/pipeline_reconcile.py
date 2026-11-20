@@ -68,9 +68,14 @@ def _age_seconds(ts) -> float | None:
 
 
 def _candidate_tasks(limit: int) -> list[dict]:
-    """最近完成的流水线任务（预过滤：有事件序号、Issue 形态的 issue_id）。"""
-    with _sm.db_lock:
-        c = _sm.db.cursor()
+    """最近完成的流水线任务（预过滤：有事件序号、Issue 形态的 issue_id）。
+
+    读侧走 bulk_read 免锁通道：持 db_lock 做批量扫描会让心跳/claim/complete
+    与请求路径一起排队（G-01 故障谱），本函数只读，不应参与进程级串行化。
+    """
+    from src.kernel.bulk_read import reader
+
+    with reader() as c:
         c.execute(
             "SELECT id, repo_key, issue_id, agent_type, event_seq, completed_at "
             "FROM agent_tasks "
@@ -85,8 +90,9 @@ def _candidate_tasks(limit: int) -> list[dict]:
 
 
 def _issue_state(repo_key: str, issue_number: int) -> dict:
-    with _sm.db_lock:
-        c = _sm.db.cursor()
+    from src.kernel.bulk_read import reader
+
+    with reader() as c:
         c.execute(
             "SELECT status, stage FROM issue WHERE repo_key=? AND issue_number=? "
             "ORDER BY id LIMIT 1",

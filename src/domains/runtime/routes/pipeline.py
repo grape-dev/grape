@@ -86,6 +86,9 @@ STAGE_STATUS_MAP = {
     "running": 1,
     "completed": 2,
     "failed": 3,
+    # 接管中：runner 已退出但 Issue 由本地会话推进，展示口径等同运行中
+    # （与 src/api/pipeline_status.py 的 EVENT_STATUS_MAP['takeover'] 同值）
+    "takeover": 1,
 }
 
 # Issue #2925 / 架构闸 A8 整改：标题兜底的实现（占位判定单一事实源、缓存三件套、
@@ -313,7 +316,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             pipe_cfg_cache[_scene_id] = _pipe_cfg
     _scene_nodes = (_pipe_cfg or {}).get("nodes", []) or [{"id": a, "tag": a} for a in AGENT_ORDER]
 
-    _nodes, stage_statuses = compute_node_statuses(_scene_nodes, issue_events, _stage)
+    _nodes, stage_statuses = compute_node_statuses(
+        _scene_nodes, issue_events, _stage, repo_key=repo_key, issue_id=issue_id)
 
     # 转换为原有数据格式（兼容前端 pipeline.js）
     stages = []

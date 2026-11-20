@@ -5,7 +5,7 @@
 - CubeSandboxInstance: _do_create/_do_connect/_do_kill/_do_is_running/_do_refresh
 - _run_long_command: uuid 唯一文件名 + nohup 轮询
 - run_cmd / run_long_cmd / write_file / get_home / read_file / list_files
-- upload_skill / _configure_grape_cli / _clone_repo
+- upload_skill / _ensure_workspace_dirs / _is_repo_cloned
 - 能力声明: supports_pty / supports_long_cmd / needs_entry_point_wrapper
 - configure_repo / repo_dir / skill_dir / cleanup / is_active
 - CubeSandboxProvider: create_sandbox / connect_sandbox / _do_kill_sandbox / is_configured
@@ -512,137 +512,70 @@ class TestUploadSkill:
 
 
 # ============================================================
-# _configure_grape_cli 测试
+# _ensure_workspace_dirs / _is_repo_cloned 测试（无 clone 形态）
 # ============================================================
 
-class TestConfigureGrapeCli:
-    """grape-cli 配置测试。"""
+class TestWorkspaceDirs:
+    """建箱期不再 clone：工作目录路径状态由 _ensure_workspace_dirs 保证。"""
 
-    def test_configure_grape_cli_runs_commands(self):
-        """_configure_grape_cli 调 set-server + set-token + bashrc。"""
+    def test_configure_repo_ensures_dirs_no_clone(self):
+        """configure_repo 不 clone，只建目录并设置 _REPO_DIR/_SKILL_DIR。"""
         inst = make_instance()
         sdk = attach_mock_sandbox(inst)
         sdk.commands.run = MagicMock(return_value=MockCommandResult(0, "", ""))
-        inst._configure_grape_cli()
-        # 至少调了 set-server、set-token、bashrc
-        assert sdk.commands.run.call_count >= 3
-        cmd_strs = [str(c.args[0]) for c in sdk.commands.run.call_args_list]
-        assert any("set-server" in s for s in cmd_strs)
-        assert any("set-token" in s for s in cmd_strs)
-        assert any("bashrc" in s for s in cmd_strs)
-
-
-# ============================================================
-# _clone_repo 测试
-# ============================================================
-
-class TestCloneRepo:
-    """git clone + GIT_ASKPASS 测试。"""
-
-    def test_clone_repo_success(self):
-        """clone 成功 → 设置 _REPO_DIR + _SKILL_DIR。"""
-        inst = make_instance()
-        sdk = attach_mock_sandbox(inst)
-        inst._repo_url = "https://git.test/repo.git"
-        inst._bot_token = "bot-token-123"
-
-        # _clone_repo 调 commands.run (chmod + git config) + _run_long_command + dir check
-        # _run_long_command: files.write + chmod + nohup + poll
-        # 让 poll 第一次就 done
-        long_cmd_poll = [
-            MockCommandResult(0, "done"),
-            MockCommandResult(0, "0"),
-            MockCommandResult(0, "clone ok"),
-        ]
-        pre_long = [
-            MockCommandResult(0, ""),       # chmod script
-            MockCommandResult(0, "started"), # nohup
-        ]
-        # 前2个 commands.run: chmod askpass + git config
-        pre_cmds = [
-            MockCommandResult(0, ""),  # chmod askpass
-            MockCommandResult(0, ""),  # git config
-            MockCommandResult(0, "/usr/bin/git\nhas"),  # git 探测（新版前置）
-        ]
-        # 最后1个: dir check（新版检查 .git 存在 → "git"）
-        dir_check = MockCommandResult(0, "git")
-        # 遗漏-5 修复配套：_run_long_command 成功路径清理 4 个临时文件（rm -f x4）
-        rm_cleanups = [MockCommandResult(0, "")] * 4
-        sdk.commands.run = MagicMock(side_effect=pre_cmds + pre_long + long_cmd_poll + rm_cleanups + [dir_check])
-
-        with patch("time.sleep"):
-            inst._clone_repo()
+        inst.configure_repo(
+            repo_url="https://git.test/repo.git",
+            bot_token="bot-token",
+            work_branch="main",
+        )
         assert inst._REPO_DIR == "/home/user/repo"
         assert inst._SKILL_DIR == "/home/user/repo/.skills"
+        cmd_strs = [str(c.args[0]) for c in sdk.commands.run.call_args_list]
+        # 只建目录，不 clone、不写 askpass、不 git config
+        assert any("mkdir -p /home/user/repo/.skills" in c for c in cmd_strs)
+        assert not any("git clone" in c for c in cmd_strs)
+        assert not any("askpass" in c.lower() for c in cmd_strs)
 
-    def test_clone_repo_exit_nonzero_raises(self):
-        """clone exit_code != 0 → 抛 RuntimeError。"""
+    def test_ensure_workspace_dirs_idempotent(self):
+        """重复调用幂等——_REPO_DIR 已设则不再执行命令。"""
         inst = make_instance()
         sdk = attach_mock_sandbox(inst)
-        inst._repo_url = "https://git.test/repo.git"
-        inst._bot_token = "bot-token"
+        sdk.commands.run = MagicMock(return_value=MockCommandResult(0, "", ""))
+        inst._ensure_workspace_dirs()
+        assert sdk.commands.run.call_count == 1
+        inst._ensure_workspace_dirs()
+        assert sdk.commands.run.call_count == 1  # 未增加
 
-        pre_cmds = [
-            MockCommandResult(0, ""),  # chmod askpass
-            MockCommandResult(0, ""),  # git config
-        ]
-        pre_long = [
-            MockCommandResult(0, ""),       # chmod script
-            MockCommandResult(0, "started"), # nohup
-        ]
-        polls = [
-            MockCommandResult(0, "done"),
-            MockCommandResult(0, "1"),      # exit code 1
-            MockCommandResult(0, "error"),   # tail
-        ]
-        # 失败路径: rm x4 清理 + dir check(.git 缺失 → 走 dulwich 降级) + dulwich 长命令 + HEAD 检查
-        rm_cleanups = [MockCommandResult(0, "")] * 4
-        dir_check = MockCommandResult(0, "missing")
-        dul_pre = [MockCommandResult(0, ""), MockCommandResult(0, "started")]  # chmod + nohup
-        dul_poll = [MockCommandResult(0, "done"), MockCommandResult(0, "1"), MockCommandResult(0, "dulwich error")]
-        dul_rm = [MockCommandResult(0, "")] * 4
-        head_check = MockCommandResult(0, "fail")
-        sdk.commands.run = MagicMock(side_effect=pre_cmds + pre_long + polls + rm_cleanups + [dir_check] + dul_pre + dul_poll + dul_rm + [head_check])
+    def test_configure_repo_without_sandbox_skips(self):
+        """未 connect 时 configure_repo 不建目录（只存 repo 信息）。"""
+        inst = make_instance()
+        inst.configure_repo(
+            repo_url="https://git.test/repo.git",
+            bot_token="t",
+            work_branch="",
+        )
+        assert inst._repo_url == "https://git.test/repo.git"
+        assert not hasattr(inst, "_REPO_DIR") or inst._REPO_DIR == ""
 
-        with patch("time.sleep"):
-            with pytest.raises(RuntimeError, match="git clone failed"):
-                inst._clone_repo()
 
-    def test_clone_repo_exit_zero_but_dir_missing_raises(self):
-        """exit_code=0 但目录不存在 → 抛 RuntimeError。"""
+class TestIsRepoCloned:
+    """仓库已克隆判据——.git 存在性。"""
+
+    def test_is_repo_cloned_true(self):
         inst = make_instance()
         sdk = attach_mock_sandbox(inst)
-        inst._repo_url = "https://git.test/repo.git"
-        inst._bot_token = "bot-token"
+        sdk.commands.run = MagicMock(return_value=MockCommandResult(0, "yes"))
+        assert inst._is_repo_cloned() is True
 
-        pre_cmds = [MockCommandResult(0, ""), MockCommandResult(0, "")]
-        pre_long = [MockCommandResult(0, ""), MockCommandResult(0, "started")]
-        polls = [
-            MockCommandResult(0, "done"),
-            MockCommandResult(0, "0"),
-            MockCommandResult(0, ""),
-        ]
-        # exit=0 但 .git 缺失（clone 假成功）→ 走 dulwich 降级；dulwich 也失败 → RuntimeError
-        dir_check = MockCommandResult(0, "missing")
-        # 遗漏-5 修复配套：_run_long_command 成功路径清理 4 个临时文件（rm -f x4）
-        rm_cleanups = [MockCommandResult(0, "")] * 4
-        dul_pre = [MockCommandResult(0, ""), MockCommandResult(0, "started")]  # chmod + nohup
-        dul_poll = [MockCommandResult(0, "done"), MockCommandResult(0, "1"), MockCommandResult(0, "dulwich err")]
-        dul_rm = [MockCommandResult(0, "")] * 4
-        head_check = MockCommandResult(0, "fail")
-        sdk.commands.run = MagicMock(side_effect=pre_cmds + pre_long + polls + rm_cleanups + [dir_check] + dul_pre + dul_poll + dul_rm + [head_check])
-
-        with patch("time.sleep"):
-            with pytest.raises(RuntimeError, match="git clone failed"):
-                inst._clone_repo()
-
-    def test_clone_repo_no_sandbox_skips(self):
-        """未 connect 时 _clone_repo 不操作。"""
+    def test_is_repo_cloned_false(self):
         inst = make_instance()
-        inst._repo_url = "https://git.test/repo.git"
-        inst._bot_token = "token"
-        inst._clone_repo()  # 不应抛异常
-        assert not hasattr(inst, "_REPO_DIR")
+        sdk = attach_mock_sandbox(inst)
+        sdk.commands.run = MagicMock(return_value=MockCommandResult(0, "no"))
+        assert inst._is_repo_cloned() is False
+
+    def test_is_repo_cloned_no_sandbox(self):
+        inst = make_instance()
+        assert inst._is_repo_cloned() is False
 
 
 # ============================================================

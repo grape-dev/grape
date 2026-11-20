@@ -7,15 +7,37 @@
 - 对外 operation 的 `operation_id` 由 routes 侧显式声明（契约友好，CLI 按 tag+动词命名）。
 - 版本号由 FastAPI `app.version` 承载（2.1.0），bump 触发 CLI 自动拉新。
 """
+from datetime import datetime, timezone
+import json
+import os
 import re
 
 from fastapi.openapi.utils import get_openapi
+
+# Issue #2237（#1302 移植）：契约侧本地命令清单单一事实源——经 /openapi.json
+# info["x-grape-local-cli-commands"] 发布，供 grape-cli 反向消费渲染 [local]。
+from src.kernel.help_docs_sync import KNOWN_LOCAL_CLI_COMMANDS
 from fastapi.routing import APIRoute
+
+from src.api.contract_versioning import build_changelog, load_contract_baseline
 
 _METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 
 # FastAPI 路由模板 `/contents/{path:path}` → OpenAPI 路径 `/contents/{path}`
 _PATH_PARAM_CONV = re.compile(r"\{(\w+):\w+\}")
+
+
+def is_http_method(method: str) -> bool:
+    """HTTP 方法白名单判定（openapi 渲染 / 登记清单校验 / 回归测试共用口径）。
+
+    QA 复审判断项(d)：_METHODS（7 种，含 head/options）与测试侧 5 种白名单口径曾
+    不一致——共用本判定，防 method 合法性口径漂移。
+    """
+    return str(method or "").lower() in _METHODS
+
+# FastAPI 路由模板 `/contents/{path:path}` → OpenAPI 路径 `/contents/{path}`
+_PATH_PARAM_CONV = re.compile(r"\{(\w+):\w+\}")
+
 
 
 def _openapi_path(path: str) -> str:
@@ -213,12 +235,336 @@ def _side_process_openapi_paths(router, prefixes) -> dict:
     return merged, sub_schemas
 
 
-def custom_openapi(app):
+import pathlib as _pl
+import subprocess  # x-source-commit git fallback (PR #1847 review M1)
+_REPO_ROOT = str(_pl.Path(__file__).resolve().parents[2])
+CONTRACT_BASELINE_PATH = os.path.join(_REPO_ROOT, "contracts", "openapi_baseline.json")
+
+
+# ===================== Issue #1863：契约元信息 + 完整性基线 =====================
+
+# 与 grape-cli registry.GROUP_ALIAS 对齐：命令组名 = operation_id 首段（gitrepo → git-repo）
+_GROUP_ALIAS = {"gitrepo": "git-repo"}
+
+_source_commit_cache: str | None = None
+
+
+def _source_commit() -> str:
+    """契约产物来源 commit：环境注入优先，git rev-parse 兜底，未知则 'unknown'。"""
+    global _source_commit_cache
+    if _source_commit_cache is None:
+        v = os.environ.get("GRAPE_SOURCE_COMMIT") or os.environ.get("GIT_COMMIT")
+        if not v:
+            try:
+                out = subprocess.run(
+                    ["git", "-C", _REPO_ROOT, "rev-parse", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=5)
+                if out.returncode == 0:
+                    v = out.stdout.strip()
+            except Exception:
+                v = ""
+        _source_commit_cache = v or "unknown"
+    return _source_commit_cache
+
+
+def contract_command_groups(schema: dict) -> set[str]:
+    """契约命令组集合：按 grape-cli 命令树推导口径（operation_id 首段 + gitrepo 别名）。
+
+    CLI 侧（registry.parse_operations）把含 "api_" 的自动生成丑名过滤出命令树，
+    服务端基线校验沿用同一口径，保证「命令组」与用户可见命令一一对应。
+    """
+    groups: set[str] = set()
+    for methods in (schema.get("paths") or {}).values():
+        if not isinstance(methods, dict):
+            continue
+        for op in methods.values():
+            if not isinstance(op, dict):
+                continue
+            oid = op.get("operationId") or ""
+            if not oid or "api_" in oid:
+                continue
+            head = oid.split("_")[0]
+            groups.add(_GROUP_ALIAS.get(head, head))
+    return groups
+
+
+def attach_contract_meta(schema: dict) -> dict:
+    """契约透出元信息（Issue #1863 ③）：x-endpoint-count / x-groups / x-source-commit / x-generated-at。
+
+    - 一律走 OpenAPI 扩展位 x- 前缀（docs/weekly-03/openapi-x-token-scope-design.md 仓库口径，
+      与 x-token-scope 同一先例）——严格校验器不忽略非 x- 根字段
+    - x-endpoint-count = paths 数（与客户端 `grape refresh` 展示口径一致）
+    - x-groups = 命令组清单（CLI 命令树口径，见 contract_command_groups）
+    """
+    schema["x-endpoint-count"] = len(schema.get("paths") or {})
+    schema["x-groups"] = sorted(contract_command_groups(schema))
+    schema["x-source-commit"] = _source_commit()
+    schema["x-generated-at"] = datetime.now(timezone.utc).isoformat()
+    return schema
+
+
+class ContractDegradedError(RuntimeError):
+    """契约降级（Issue #1863 ② / #2080 B）：命令组集合不一致或端点数偏离基线，fail-fast 拒绝出契约。
+
+    `.report` 为 `contract_integrity()` 完整性报告（missing_groups / extra_groups /
+    endpoint_count / baseline_endpoint_count 等）。
+    """
+
+    def __init__(self, report: dict):
+        self.report = report
+        parts = []
+        missing = ", ".join(report["missing_groups"])
+        if missing:
+            parts.append(f"missing command groups [{missing}]")
+        extra = ", ".join(report.get("extra_groups") or [])
+        if extra:
+            parts.append(f"unexpected command groups [{extra}]")
+        # Issue #2081：登记操作缺失明细可定位（AC2：operationId + method + path）
+        missing_ops = report.get("missing_operations") or []
+        if missing_ops:
+            parts.append("missing required operations [" + ", ".join(
+                fmt_operation(m["operationId"], m["path"], m["method"])
+                for m in missing_ops) + "]")
+        parts.append(
+            f"endpoint_count={report['endpoint_count']} "
+            f"(baseline exact={report.get('baseline_endpoint_count')}, "
+            f"baseline groups={len(report['baseline_groups'])})"
+        )
+        super().__init__(
+            "OpenAPI contract degraded: " + "; ".join(parts) + ". "
+            "Refusing to serve a contract that deviates from the baseline "
+            "(see contracts/openapi_baseline.json and "
+            "contracts/required_operations.json). For intentional changes, "
+            "re-baseline: python scripts/regenerate_openapi.py "
+            "--update-baseline --reason '<contract change note>'"
+        )
+
+
+_baseline_cache: dict | None = None
+
+
+def load_contract_baseline() -> dict:
+    """加载契约基线（Issue #1863 ①）：contracts/openapi_baseline.json，版本化入库。
+
+    基线文件缺失/损坏均显式报错（fail-closed）——基线是完整性校验的前提，
+    宁可显式失败也不能静默跳过校验后对外出降级契约。
+    """
+    global _baseline_cache
+    if _baseline_cache is not None:
+        return _baseline_cache
+    try:
+        with open(CONTRACT_BASELINE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"contract baseline missing: {CONTRACT_BASELINE_PATH} — restore the "
+            "versioned baseline, or regenerate after intentional endpoint changes: "
+            "python scripts/regenerate_openapi.py --update-baseline "
+            "--reason '<contract change note>'")
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(f"contract baseline corrupt: {CONTRACT_BASELINE_PATH}: {e}")
+    if (not isinstance(data.get("groups"), list) or not data["groups"]
+            or not all(isinstance(g, str) and g for g in data["groups"])
+            or not isinstance(data.get("endpoint_count"), int)
+            or not isinstance(data.get("min_endpoint_count"), int)):
+        raise RuntimeError(
+            f"contract baseline malformed (groups/endpoint_count/min_endpoint_count): "
+            f"{CONTRACT_BASELINE_PATH}")
+    _baseline_cache = data
+    return data
+
+
+
+
+# ===================== Issue #2081：必需操作登记清单（单一事实源） =====================
+
+# contracts/required_operations.json：runbook/skill 引用面全量操作登记（含 #1173
+# 的 5 条与 #897 的 runtime 2 条）。门禁脚本（scripts/check-openapi-endpoints.py）、
+# 渲染层完整性校验（contract_integrity）与回归测试（tests/test_contract_command_groups_
+# 1934.py）共用本清单——三处常量口径收敛为一处，任一登记操作被删即红。
+REQUIRED_OPERATIONS_PATH = os.path.join(_REPO_ROOT, "contracts", "required_operations.json")
+
+# QA 复审遗留2（PR 评论 200396669）：登记清单自我缩水防线——最小条数下限
+# （对称 #1151 端点基线下限口径）。直接从清单删条目（数据面缩水）在旧口径下
+# 门禁不拦（43/43 仍绿，评审漏看即静默降级）；下限落在代码常量，合法缩水须同 PR
+# 显式改本常量（代码 diff 即评审面）。现网 44 条，下限留 4 条合法调整余量。
+MIN_REQUIRED_OPERATIONS = 40
+
+_required_operations_cache: dict | None = None
+
+
+def load_required_operations() -> dict[str, tuple[str, str]]:
+    """加载必需操作登记清单（Issue #2081 单一事实源），返回 {operationId: (path, method)}。
+
+    清单缺失/损坏/条目非法/重复定义均显式报错（fail-closed）——清单是三类门禁的
+    共同前提，宁可显式失败也不能静默跳过校验。删除登记项属契约变更，须
+    `--update-baseline --change-note` + PR 评审说明，禁止静默下调。
+    """
+    global _required_operations_cache
+    if _required_operations_cache is not None:
+        return _required_operations_cache
+    try:
+        with open(REQUIRED_OPERATIONS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"required operations registry missing: {REQUIRED_OPERATIONS_PATH} — "
+            "restore the versioned registry (Issue #2081 single source of truth)")
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"required operations registry corrupt: {REQUIRED_OPERATIONS_PATH}: {e}")
+    ops_raw = data.get("operations")
+    if not isinstance(ops_raw, list) or not ops_raw:
+        raise RuntimeError(
+            f"required operations registry malformed (operations): "
+            f"{REQUIRED_OPERATIONS_PATH}")
+    result: dict[str, tuple[str, str]] = {}
+    seen_pairs: set[tuple[str, str]] = set()
+    for entry in ops_raw:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"required operations registry malformed entry: {entry!r}")
+        oid = entry.get("operationId")
+        method = str(entry.get("method") or "").lower()
+        path = entry.get("path")
+        if (not isinstance(oid, str) or not oid or "api_" in oid
+                or not isinstance(path, str) or not path.startswith("/")
+                or not is_http_method(method)):
+            raise RuntimeError(
+                f"required operations registry malformed entry: {entry!r} "
+                "(need operationId/method/path)")
+        if oid in result or (method, path) in seen_pairs:
+            raise RuntimeError(
+                f"required operations registry duplicate entry: {oid} ({method} {path})")
+        result[oid] = (path, method)
+        seen_pairs.add((method, path))
+    if len(result) < MIN_REQUIRED_OPERATIONS:
+        # QA 复审遗留2：数据面缩水 fail-closed——渲染层/门禁/测试三处同步拦截
+        raise RuntimeError(
+            f"required operations registry shrank below floor: {len(result)} < "
+            f"{MIN_REQUIRED_OPERATIONS} ({REQUIRED_OPERATIONS_PATH}) — intentional "
+            "shrinkage must lower MIN_REQUIRED_OPERATIONS in the same reviewed "
+            "change (silent registry shrinkage is a contract regression, "
+            "QA review item 200396669)")
+    _required_operations_cache = result
+    return result
+
+
+def operations_of(paths: dict) -> dict[str, tuple[str, str]]:
+    """从契约 paths 提取 {operationId: (path, method)}（跳过无 operationId 条目）。
+
+    QA 复审判断项(a)：渲染层 contract_integrity 与门禁脚本（scripts/check-openapi-
+    endpoints.py）原本逐字双实现本映射——上移共享，与「单一事实源」目标对齐。
+    """
+    ops: dict[str, tuple[str, str]] = {}
+    for path, methods in (paths or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            if isinstance(op, dict) and op.get("operationId"):
+                ops[op["operationId"]] = (path, method)
+    return ops
+
+
+def fmt_operation(oid: str, path: str, method: str) -> str:
+    """操作三元组可定位格式（门禁失败信息 / 降级错误信息共用）："oid (METHOD path)"。
+
+    QA 复审判断项(b)：该格式串曾在 openapi.py 与门禁脚本 5 处重复——提取共享。
+    """
+    return f"{oid} ({str(method).upper()} {path})"
+
+
+def write_contract_integrity_baseline(schema: dict, change_reason: str,
+                                      path: str | None = None) -> dict:
+    """受控重定基通道：按当前渲染结果重写组级完整性基线（contracts/openapi_baseline.json）。
+
+    QA G-5 补口：该基线此前无生成器覆盖，端点有意增删后只能手改 JSON，门禁长期红。
+    纪律与原 `help/api/openapi-baseline.json` 一致——`change_reason` 必填留痕，
+    只允许由 `scripts/regenerate_openapi.py --update-baseline --reason '<说明>'` 触发。
+    """
+    global _baseline_cache
+    reason = " ".join((change_reason or "").split())
+    if not reason:
+        raise RuntimeError(
+            "contract integrity baseline re-baseline requires a non-empty change reason "
+            "(contracts/openapi_baseline.json is the completeness gate's reference; "
+            "silent re-baseline turns the gate into decoration)")
+    target = path or CONTRACT_BASELINE_PATH
+    endpoint_count = len(schema.get("paths") or {})
+    data = {
+        "contract_version": ((schema.get("info") or {}).get("version") or ""),
+        "endpoint_count": endpoint_count,
+        "min_endpoint_count": int(endpoint_count * _BASELINE_FLOOR_RATIO),
+        "groups": sorted(contract_command_groups(schema)),
+        "change_reason": reason,
+        "source_commit": _source_commit(),
+    }
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    _baseline_cache = None
+    return data
+
+
+def contract_integrity(schema: dict) -> dict:
+    """完整性校验（Issue #1863 ① / #2080 B + #2081 清单接入）：命令组集合一致 + 端点数与基线精确相等 + 登记清单全量在场。
+
+    - 命令组集合双向钉死：整组缺失（baseline - 当前）或新增（当前 - baseline）均判不完整
+    - 端点数精确相等：任何方向偏离（含组内零散增删端点）均判不完整——
+      有意增删端点走 `scripts/regenerate_openapi.py --update-baseline --reason`
+      受控重定基通道（#2080：防同号不同容契约静默漏过下限式校验）
+    - Issue #2081：登记清单（contracts/required_operations.json）内任一操作缺失
+      （operationId 消失或 method/path 漂移）→ 判不完整——runbook/skill 引用面全量，
+      缺项即红（S15 删 7 端点全部漏检的补口）。
+    - `min_endpoint_count` 仅作报告字段保留（旧下限口径的观测值，不再参与判定）
+    """
+    baseline = load_contract_baseline()
+    required = load_required_operations()
+    groups = contract_command_groups(schema)
+    endpoint_count = len(schema.get("paths") or {})
+    baseline_endpoint_count = int(baseline["endpoint_count"])
+    min_endpoint_count = int(baseline["min_endpoint_count"])
+    baseline_groups = set(baseline["groups"])
+    missing_groups = sorted(baseline_groups - groups)
+    extra_groups = sorted(groups - baseline_groups)
+    seen = operations_of(schema.get("paths") or {})
+    missing_operations = sorted(
+        ({"operationId": oid, "method": method, "path": path}
+         for oid, (path, method) in required.items()
+         if seen.get(oid) != (path, method)),
+        key=lambda m: m["operationId"])
+    complete = (not missing_groups and not extra_groups
+                and not missing_operations
+                and endpoint_count == baseline_endpoint_count)
+    return {
+        "complete": complete,
+        "endpoint_count": endpoint_count,
+        "baseline_endpoint_count": baseline_endpoint_count,
+        "min_endpoint_count": min_endpoint_count,
+        "groups": sorted(groups),
+        "baseline_groups": sorted(baseline_groups),
+        "missing_groups": missing_groups,
+        "extra_groups": extra_groups,
+        "missing_operations": missing_operations,
+    }
+
+
+# min_endpoint_count = 观测值 × 该比例：仅作报告字段保留（旧下限口径的观测值，
+# #2080 B 起不参与判定——判定口径为 endpoint_count 与基线精确相等，任何方向偏离均判
+# 降级；有意增删端点须走 --update-baseline --reason 受控重定基）
+_BASELINE_FLOOR_RATIO = 0.9
+
+
+
+
+def custom_openapi(app, check_baseline: bool = True):
     """定制 /openapi.json 渲染：注入 securitySchemes + 只保留对外安全路由 + 逐操作 security。"""
     if app.openapi_schema:
         return app.openapi_schema
     schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
     schema.setdefault("components", {})["securitySchemes"] = _SECURITY_SCHEMES
+    # 契约 info 扩展（Issue #2237 #1302 条件 A）：发布 CLI 本地命令清单，值直接取自
+    # KNOWN_LOCAL_CLI_COMMANDS（单一事实源）——禁止在此硬编码第二份清单。
+    schema.setdefault("info", {})["x-grape-local-cli-commands"] = list(KNOWN_LOCAL_CLI_COMMANDS)
 
     public_ops = {
         (_openapi_path(r.path), m.lower(), token_scope(r))
@@ -282,5 +628,37 @@ def custom_openapi(app):
         pass
 
     schema["paths"] = paths
+    # Issue #2784：契约根透出 x-changelog（版本 -> 新增/删除/弃用端点清单），
+    # 供 CLI `refresh --diff` 直接读取变更摘要。基线取现网发布快照
+    # （help/api/openapi-baseline.json），缺失/损坏时降级为空清单而非报错。
+    # Issue #2784：x-changelog 基线取全量发布快照（help/api/openapi-baseline.json）；
+    # 完整性门禁的组级基线（contracts/openapi_baseline.json）不含 paths，两口径分离。
+    try:
+        import json as _json
+        _snap = _json.loads(open(os.path.join(_REPO_ROOT, "help/api/openapi-baseline.json"), encoding="utf-8").read())
+        schema["x-changelog"] = build_changelog(
+            paths, _snap.get("paths"), version=app.version, meta=_snap.get("info") or {})
+    except Exception as _ce:
+        schema["x-changelog"] = {"error": f"baseline snapshot unreadable: {_ce}"}
+    # Issue #2837（等价 #2783）：挂牌登记表 → deprecated / x-deprecated-since /
+    # x-deprecated-replacement（挂牌态随契约发布，可从冻结发布快照机器读取；
+    # 登记漂移在契约域 fail-fast）。空登记表时本调用是 no-op。
+    from src.domains.contracts.deprecation import apply_deprecation_markup
+    apply_deprecation_markup(schema)
+    attach_contract_meta(schema)  # Issue #1863 ③：元信息透出（x-endpoint-count/x-groups/x-source-commit/x-generated-at）
+    # Issue #1863/#2080/#2081：契约完整性 fail-fast——必需操作缺失/端点数偏离基线即拒出契约。
+    # check_baseline=False 供测试/局部渲染上下文跳过（weekly 口径）；生产默认 True。
+    if not check_baseline:
+        app.openapi_schema = schema
+        return schema
+    try:
+        _report = contract_integrity(schema)
+        _bad = _report.get("missing_groups") or _report.get("missing_operations") or _report.get("degraded")
+        if _bad:
+            raise ContractDegradedError(_report)
+    except ContractDegradedError:
+        raise
+    except Exception as _e:
+        raise RuntimeError(f"contract integrity check error: {_e}")
     app.openapi_schema = schema
     return schema

@@ -314,7 +314,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     pool_selector      TEXT,                      -- Issue #1208: selector 标签池（JSON {"tags":[...]}，与两池列三列语义互斥；TEXT NULL 无 DEFAULT，#627 MySQL 教训）
     engine_uid         VARCHAR(36) DEFAULT NULL,  -- Issue #646: runtime_id 的 uid 引用（孤儿/历史置 NULL）
     engine_name_snapshot TEXT DEFAULT '',         -- Issue #646: 引擎展示名快照（引擎删除后历史可读）
-    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择（降级判别，local-claimer 设计）
+    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定（降级判别，local-claimer 设计 + Issue #2791）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
@@ -576,7 +576,9 @@ CREATE TABLE IF NOT EXISTS takeover_sessions (
     repo_key          VARCHAR(255) NOT NULL DEFAULT '',
     issue_id          VARCHAR(32) NOT NULL DEFAULT '',
     agent_type        VARCHAR(32) NOT NULL DEFAULT '',
-    user_id           INTEGER NOT NULL DEFAULT 0,
+    -- D105 口径：账号 id 是 uuid 字符串（grape_accounts.id VARCHAR(36)），
+    -- INTEGER 会在这里 int() 崩（ValueError），统一 VARCHAR(36)。
+    user_id           VARCHAR(36) NOT NULL DEFAULT '0',
     username          VARCHAR(128) NOT NULL DEFAULT '',
     runtime_id        INTEGER NOT NULL DEFAULT 0,
     platform          VARCHAR(32) NOT NULL DEFAULT '',

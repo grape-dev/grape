@@ -204,5 +204,15 @@
     "hint": "消息已撤回",
     "re_edit": "重新编辑",
     "failed": "撤回失败: {{msg}}"
+  },
+  "plugin_label": "插件",
+  "plugin_config_tip": "选择插件",
+  "plugin_multi_hint": "可多选，随会话上下文提交",
+  "plugin": {
+    "no_installed": "暂无已安装插件，去插件市场安装",
+    "clear": "清除全部",
+    "source_installed": "已安装",
+    "source_market": "市场",
+    "degraded_hint": "清单可能含未安装插件"
   }
 }

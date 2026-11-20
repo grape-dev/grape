@@ -16,6 +16,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
+from src.api.frontend_flags import apply_feature_flags
+
 log = logging.getLogger(__name__)
 
 # Faro 上报反代上游（Alloy faro.receiver）。必须经 GRAPE_FARO_UPSTREAM 显式配置，
@@ -248,6 +251,8 @@ document.documentElement.classList.remove('i18n-loading');})();
         html = html.replace('</head>', head_inject + '</head>', 1)
         html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
         html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
+        # Issue #3395：注入前端功能开关（flag=0 时移除侧边栏插件入口整块）
+        html = apply_feature_flags(html)
         return html
 
     def _serve_auth_page(filename: str) -> HTMLResponse:
@@ -255,6 +260,32 @@ document.documentElement.classList.remove('i18n-loading');})();
             html = f.read()
         html = _inject_email_configured(html)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+    # 官网落地页优先（同 server_common._landing_file；未配置时行为不变）
+    _LANDING_DIR = os.environ.get("GRAPE_LANDING_DIR", "")
+
+    _DOCS_DIR = os.environ.get("GRAPE_DOCS_DIR", "")
+
+    def _landing_file(rel: str):
+        if rel == "docs" or rel.startswith("docs/"):
+            if not _DOCS_DIR or not os.path.isdir(_DOCS_DIR):
+                return None
+            droot = os.path.realpath(_DOCS_DIR)
+            dfull = os.path.realpath(os.path.join(droot, rel[5:] or "index.html"))
+            if dfull != droot and not dfull.startswith(droot + os.sep):
+                return None
+            if os.path.isdir(dfull):
+                dfull = os.path.join(dfull, "index.html")
+            return dfull if os.path.isfile(dfull) else None
+        if not _LANDING_DIR or not os.path.isdir(_LANDING_DIR):
+            return None
+        root = os.path.realpath(_LANDING_DIR)
+        full = os.path.realpath(os.path.join(root, rel))
+        if full != root and not full.startswith(root + os.sep):
+            return None
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        return full if os.path.isfile(full) else None
 
     def _spa_response():
         with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
@@ -314,6 +345,10 @@ document.documentElement.classList.remove('i18n-loading');})();
 
     @app.get("/")
     async def serve_spa():
+        _lf = _landing_file("index.html")
+        if _lf:
+            from fastapi.responses import FileResponse as _LFR
+            return _LFR(_lf)
         return _spa_response()
 
     @app.get("/register")
@@ -330,8 +365,13 @@ document.documentElement.classList.remove('i18n-loading');})();
     @app.get("/en/{path:path}")
     async def serve_spa_en(path: str = ""):
         """英文国际化路由——返回同一个 index.html。"""
+        from fastapi import HTTPException
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
+        _lf = _landing_file(os.path.join("en", path, "index.html") if not path else os.path.join("en", path))
+        if _lf:
+            from fastapi.responses import FileResponse as _LFR
+            return _LFR(_lf)
         if path == "register":
             return _serve_auth_page("register.html")
         if path == "forgot":

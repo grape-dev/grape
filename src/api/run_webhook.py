@@ -6,8 +6,10 @@ from fastapi import FastAPI
 from src.domains.runtime.routes.webhook import router as webhook_router
 from src.api.db_setup import init_database
 from src.kernel.config import _load_accounts, log
+# Issue #2784：契约版本号单一来源（本入口此前写死 2.0.0，属同一漂移族）
+from src.api.contract_versioning import CONTRACT_VERSION
 
-app = FastAPI(title="Agentic DevOps Webhook", version="2.0.0")
+app = FastAPI(title="Agentic DevOps Webhook", version=CONTRACT_VERSION)
 app.include_router(webhook_router)
 
 # OTel HTTP spans（2026-11-05 MR-1）：webhook 入口
@@ -23,7 +25,7 @@ _load_accounts()
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0", "service": "webhook"}
+    return {"status": "ok", "version": CONTRACT_VERSION, "service": "webhook"}
 
 
 @app.exception_handler(Exception)

@@ -8,6 +8,7 @@ from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.kernel.ports import engines as _engines
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
+from src.kernel.ports import plugins as _plugins
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -960,6 +961,64 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
         except Exception:
             pass
 
+
+def _build_plugin_capability_section(repo_key: str, agent_type: str = "",
+                                     scene_id: str = "", runtime_id: int = 0) -> str:
+    """插件能力清单段（Issue #1090 C2）：任务下发时注入当前可用插件能力。
+
+    - 数据来源：B5（#1088）物化 installed_plugins + C1（#1089）挂点声明
+      （经 src.runtime.plugin_state 契约读取，未合入时降级空清单）。
+    - 空清单注入「无可用插件」占位说明，避免静默缺失（Spec AC ①）。
+    - 同时注入 D1-a 缺插件协商协议与降级指引：缺插件时降级继续不阻塞、
+      降级提示可见、缺插件报告+建议安装项走统一确认单（Spec AC ②③）。
+    - 读取异常一律降级为占位+降级标记，任务核心链路不阻塞（Spec AC ②）。
+    """
+    plugins = []
+    _degraded_read = False
+    try:
+        plugins = _plugins.collect_plugin_capabilities(repo_key, runtime_id=runtime_id, scene_id=scene_id) or []
+    except Exception:
+        plugins = []
+        _degraded_read = True
+
+    lines = ["\n## Plugin Capabilities (可用插件能力清单)"]
+    if plugins:
+        lines.append("Plugin capabilities available in this runtime:")
+        for p in plugins:
+            _hooks = ", ".join(p.get("hooks") or []) or "-"
+            _caps = (p.get("capabilities") or "").strip()
+            _ver = f" v{p.get('version')}" if p.get("version") else ""
+            _health = p.get("health") or "unknown"
+            _line = f"- {p.get('name')}{_ver} [{p.get('status')}] (hooks: {_hooks}; health: {_health})"
+            if _caps:
+                _line += f" — {_caps}"
+            lines.append(_line)
+    else:
+        _ph = "[无可用插件] 当前 Runtime 未安装任何插件（插件市场未安装或状态未上报）。"
+        if _degraded_read:
+            _ph += "（插件状态读取失败，本段已降级生成）"
+        lines.append(_ph)
+
+    lines.append(
+        "Missing-capability negotiation (D1-a) — MUST follow when the task requires a capability not listed above:\n"
+        "1. Degrade and continue: do NOT fail or block the core task path; keep executing with degraded skills.\n"
+        "2. Visible degradation notice: state it clearly in your final answer/report, e.g. "
+        "`[degraded] plugin <name> unavailable — continuing without it`.\n"
+        "3. Negotiate install: build a structured missing-plugin report + suggested install items "
+        "(missing_plugin_report card, aligned with the unified plugin confirmation card fields: "
+        "name(@owner/name)/version/credentials/reason/task_ref) and POST it to "
+        "`{{SERVER_URL}}/api/plugins/agent/report-missing` with header "
+        "`Authorization: Bearer $GRAPE_SESSION_TOKEN` "
+        "(body: {\"missing\": [{\"name\": \"...\", \"reason\": \"...\"}], \"task_ref\": \"<issue#>\"}). "
+        "The platform routes the install request through the unified confirmation flow - installation "
+        "always requires explicit user confirmation; if the response reports a degraded/comment channel, "
+        "include its degraded_comment text in your issue comment so the negotiation is user-visible.\n"
+        "4. Restore: after the install is confirmed, re-check the current list via "
+        "`GET {{SERVER_URL}}/api/plugins/agent/installed` (same-task refresh, Authorization header as above) "
+        "or continue to the next task dispatch; then retry the degraded step to restore full capability."
+    )
+    return "\n".join(lines)
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -1145,6 +1204,26 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         repo_key = f"{evt['source']}:{evt['repository']}"
         parts.append(_build_feishu_context_section(repo_key, feishu_ctx))
 
+    if agent_type in ("coding", "qa", "sre"):
+        try:
+            _pc_scene_id = ""
+            try:
+                from src.api.session_store import get_issue_scene as _gis
+                _pc_scene_id, _ = _gis(_rk, evt.get("issue_id", "") or "")
+            except Exception:
+                _pc_scene_id = ""
+            _pc = _build_plugin_capability_section(_rk, agent_type=agent_type,
+                                                   scene_id=_pc_scene_id or "",
+                                                   runtime_id=runtime_id)
+            if _pc:
+                parts.append(_pc)
+        except Exception as _e:
+            try:
+                from src.kernel.config import log as _log
+                _log.warning(f"plugin capability section injection failed: {_e}")
+            except Exception:
+                pass
+
     parts.append("\n## Role Definition\n" + build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
 
     # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
@@ -1196,6 +1275,50 @@ def _append_chat_history(parts: list, history: list = None, has_valid_session: b
             parts.append("\n## Chat History")
             for m in recent:
                 parts.append(f"[{m.get('role')}] {m.get('content', '')[:500]}")
+
+
+def _build_chat_plugin_capability_section(repo_key: str, plugins, runtime_id: int = 0) -> str:
+    """会话级插件能力清单段（Issue #3169 P1-1）。
+
+    用户在 Chat 里多选的插件必须真正进入会话 Prompt（此前 /chat/submit 的
+    plugins 字段被 pydantic 丢弃，选择永不生效）。段头固定为
+    `## Plugin Capabilities`，与任务下发段同名，便于验收与模型识别。
+    能力明细来自 B5/C1 契约；读取失败时降级为仅列插件名，不阻塞会话建立。
+    """
+    names: list[str] = []
+    for n in plugins or []:
+        if not isinstance(n, str):
+            continue
+        s = n.strip()
+        if s and s not in names:
+            names.append(s)
+    if not names:
+        return ""
+    metas: dict = {}
+    try:
+        for p in _plugins.collect_plugin_capabilities(repo_key, runtime_id=runtime_id) or []:
+            if isinstance(p, dict) and p.get("name"):
+                metas[p["name"]] = p
+    except Exception:
+        metas = {}
+    lines = ["\n## Plugin Capabilities (selected for this conversation)"]
+    lines.append("The user selected the following plugin capabilities for this conversation:")
+    for name in names:
+        p = metas.get(name) or {}
+        ver = f" v{p.get('version')}" if p.get("version") else ""
+        hooks = ", ".join(p.get("hooks") or []) or "-"
+        health = p.get("health") or "unknown"
+        line = f"- {name}{ver} (hooks: {hooks}; health: {health})"
+        caps = (p.get("capabilities") or "").strip()
+        if caps:
+            line += f" — {caps}"
+        lines.append(line)
+    lines.append(
+        "Use these plugins when the user's request needs their capabilities. "
+        "If a selected plugin is unavailable, state the degradation visibly and continue "
+        "without blocking the conversation."
+    )
+    return "\n".join(lines)
 
 def build_general_chat_prompt(message: str, repo_key: str = "", history: list = None,
                               skill_name: str = "", skill_id: int = 0,
@@ -1263,6 +1386,9 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 f"Skill file: {{{{SKILL_DIR}}}}/{_sn}/SKILL.md\n"
                 f"**MANDATORY**: Read this SKILL.md with the read tool and strictly follow its instructions to complete the task (do not skip reading or guess)."
             )
+    _plugin_section = _build_chat_plugin_capability_section(repo_key, plugins, runtime_id)
+    if _plugin_section:
+        parts.append(_plugin_section)
     repo_note = f" (in {repo_key})" if repo_key else ""
     parts.append(f"\nUser{repo_note}: {message}{_CHAT_PROMPT_SUFFIX}")
     return "\n".join(parts)
@@ -1314,6 +1440,10 @@ def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: 
 
     # 对话历史 / Issue Agent 进展（chat-prompt-history-injection-design.md §3）
     _append_chat_history(parts, history, has_valid_session)
+
+    _plugin_section = _build_chat_plugin_capability_section(repo_key, plugins, runtime_id)
+    if _plugin_section:
+        parts.append(_plugin_section)
 
     parts.append(f"\n## Current User Message\n{user_text}")
 

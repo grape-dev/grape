@@ -11,6 +11,17 @@ from src.kernel.config import log
 # /api/v5/user 仍在 api.gitcode.com 上可用（auth.py 单独使用）。
 API_BASE = "https://gitcode.com/api/v5"
 
+class UpstreamTimeoutError(RuntimeError):
+    """上游 Git 平台 API 请求超时（Issue #1940，#2084 移植）。
+
+    继承 RuntimeError：既有 ``except RuntimeError`` 调用点零改动兼容；
+    ``str()`` 保持 "Cannot reach GitCode API: ..." / "Cannot reach GitHub API: ..." 格式。
+
+    语义：请求已发出、响应未按时返回——上游可能已受理并落地（写操作不可盲重试），
+    供写链路分流（写 504 uncertain / 读 502 维持）。
+    """
+
+
 class UpstreamAPIError(RuntimeError):
     """上游 Git 平台 API 返回 >=400（Issue #549）：携带真实 status_code / message。
 
@@ -31,21 +42,40 @@ class UpstreamAPIError(RuntimeError):
             f"{provider} API {method} {url} failed ({self.status_code}): {self.message}"
         )
 
+def upstream_timeout_seconds(default: float = 25.0) -> float:
+    """上游 Git 平台请求超时（秒）——Issue #2084（#2084 移植）超时错开。
+
+    - `GRAPE_UPSTREAM_TIMEOUT_SECONDS` 环境变量可调（运行时逐次读取，改配置即时生效）；
+    - 默认 25s **严格小于** CLI 客户端 30s：上游慢响应时服务端先超时返回
+      可判定的 504 uncertain + request_id + 回读指引（#1940 写超时语义），
+      而不是与客户端 30s 同值竞速让调用方先本地断开（eval-F10「客户端先断」）；
+    - 非法值/非正值回落默认（配置错误不打瘫上游客户端）。
+    """
+    raw = os.environ.get("GRAPE_UPSTREAM_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
         if method == "GET":
-            resp = _requests.get(url, headers=headers, timeout=30)
+            resp = _requests.get(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "POST":
-            resp = _requests.post(url, json=body, headers=headers, timeout=30)
+            resp = _requests.post(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "DELETE":
-            resp = _requests.delete(url, headers=headers, timeout=30)
+            resp = _requests.delete(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PUT":
-            resp = _requests.put(url, json=body, headers=headers, timeout=30)
+            resp = _requests.put(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PATCH":
-            resp = _requests.patch(url, json=body, headers=headers, timeout=30)
+            resp = _requests.patch(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         else:
             raise ValueError(f"Unsupported method: {method}")
         if resp.status_code >= 400:
@@ -171,7 +201,7 @@ def _req_query(method: str, path: str, token: str, params: dict | None = None,
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
@@ -1013,7 +1043,7 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             if raw.strip():
                 return json.loads(raw)

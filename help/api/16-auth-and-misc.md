@@ -87,10 +87,10 @@
 > scope：user_only。权限：`check_repo_access`。
 
 | Path | `{owner}` `{repo}` |
-| 出参 | 该仓库 pipeline 路线图（阶段/节点/事件） |
+| 出参 | 该仓库 pipeline 路线图（阶段/节点/事件）。条目含 `statuses` 数组——与 nodes 一一对应的**节点状态数值码**：0=pending 1=running 2=completed 3=failed 4=cancelled 5=skipped（由 `compute_node_statuses` 统一计算，与流水线菜单页同源） |
 | 返回 | 200；403 无仓库权限 |
 
-> 与 `GET /api/issues/{owner}/{repo}/{number}/pipeline`（Issue 维度，dual）的差异：本接口为**仓库全局**流水线视图。
+> 与 `GET /api/issues/{owner}/{repo}/{number}/pipeline`（Issue 维度，dual）的差异：本接口为**仓库全局**流水线视图；Issue 维度接口的 `node_status` 同一套数值码（见 help/api/11-issues.md「节点状态」说明）。
 
 ---
 
@@ -515,5 +515,89 @@
 ### POST /api/orgs/{org_id}/repos/{repo_key}/transfer — org_repos_transfer
 
 > scope：`user_only`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+## 组织 OV 凭据格子（/api/orgs/{org_id}/ov-credentials）
+
+### GET /api/orgs/{org_id}/ov-credentials — orgs_ov_credentials_list
+
+> scope：`user_only`
+
+列出本组织全部 OV 凭据格子（user_id×org）。只回存在性 / base_url / 时间戳等元数据，凭据明文与 vault 句柄永不返回。仅组织管理员可见。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### PUT /api/orgs/{org_id}/ov-credentials/{user_id} — orgs_ov_credential_put
+
+> scope：`user_only`
+
+为成员（含本人）配置/重置 OpenViking 凭据。明文经统一凭据库入库（全系统唯一持明文处，不落明文文件），格子行只存 vault 句柄；重置同格时句柄引用稳定。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### DELETE /api/orgs/{org_id}/ov-credentials/{user_id} — orgs_ov_credential_delete
+
+> scope：`user_only`
+
+吊销一格（user_id×org）：格子行与 vault 明文行同事务删除，吊销台账落一笔；执行期兑换每次实时解析、无缓存副本——吊销即刻生效、不可复活。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+## 组织仓库分析（/api/orgs/{org_id}/repo-analysis）
+
+### GET /api/orgs/{org_id}/repo-analysis/targets — org_repo_analysis_targets
+
+> scope：`dual`
+
+列出组织内可用于 AI 分析的仓库目标（含可分析性判定），组织看板与 CLI 共用。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-analysis/context/{repo_key} — org_repo_analysis_context
+
+> scope：`dual`
+
+取某仓库的组织上下文快照（成员/项目/仓库关系），供组织分析流水线拼提示词。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-analysis/run — org_repo_analysis_run
+
+> scope：`user_only`
+
+发起一次组织分析（异步）：落分析任务并派发，返回 task_id；进度用 status 端点查。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-analysis/status — org_repo_analysis_status
+
+> scope：`dual`
+
+查组织分析任务进度（排队/执行/完成/失败），失败回原因，不吞异常。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-analysis/automation/ensure — org_repo_analysis_automation_ensure
+
+> scope：`user_only`
+
+确保组织分析自动化已配置（定时任务/流水线挂点幂等创建）。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-analysis/docs — org_repo_analysis_docs
+
+> scope：`dual`
+
+列出组织分析产出文档（设计说明/报告）及索引。
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-map/{repo_key}/ai-result — org_repo_map_ai_result
+
+> scope：`dual`
+
+接收某仓库的 AI 仓库地图生成结果（写入组织仓库地图，供看板可视化）。
 
 参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。

@@ -19,3 +19,5 @@ meta,runtime,platform,1
 runtime_credentials,runtime,api,6
 task_messages,runtime,api,2
 user_credentials,mgmt,platform,1
+agent_runtimes,runtime,mgmt,2
+skill,mgmt,mgmt,3

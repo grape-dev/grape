@@ -38,5 +38,6 @@
   "owner_identity_token_fallback": true,
   "brand_color": "#24292f",
   "legacy_token_symbol": "get_user_github_token_with_refresh",
-  "bot_username": ""
+  "bot_username": "",
+  "issue_write_form": "repo_path"
 }

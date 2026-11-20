@@ -142,6 +142,20 @@ def test_reconcile_reads_real_db_rows(monkeypatch):
     monkeypatch.setattr(sm, "db", conn, raising=False)
     monkeypatch.setattr(sm, "db_lock", threading.RLock(), raising=False)
 
+    # 读侧走免锁 bulk_read 通道；测试内存库需把 reader 指向同一连接。
+    import src.kernel.bulk_read as bulk_read
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _reader(domain=""):
+        cur = conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+
+    monkeypatch.setattr(bulk_read, "reader", _reader)
+
     calls = []
     monkeypatch.setattr(runtime_public, "has_inflight", lambda *a: False)
     monkeypatch.setattr(engine_service, "run_auto_advance_hook",

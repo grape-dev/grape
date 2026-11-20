@@ -1551,7 +1551,10 @@ function analyzeOneMap(item) {
 function openMapSummary(item) {
   if (!detailId.value || !item) return
   mapSummaryUrl.value = String(item.summary_url || '')
-  G.API.get('/orgs/' + detailId.value + '/repo-map/' + encodeURIComponent(item.repo_key))
+  ensureRepoMapSynced()
+    .then(function () {
+      return G.API.get('/orgs/' + detailId.value + '/repo-map/' + encodeURIComponent(item.repo_key))
+    })
     .then(function (d) {
       mapSummaryTitle.value = (d && (d.full_name || d.repo_key)) || item.full_name || ''
       mapSummary.value = d || {}
@@ -1562,9 +1565,20 @@ function openMapSummary(item) {
     })
 }
 
+function ensureRepoMapSynced() {
+  if (!detailId.value) return Promise.resolve()
+  return G.API.post('/orgs/' + detailId.value + '/repo-map/sync', {}, 60000)
+    .catch(function () {
+      return null
+    })
+}
+
 function openRepoMapSummary() {
   if (!detailId.value) return
-  G.API.get('/orgs/' + detailId.value + '/repo-map/summary')
+  ensureRepoMapSynced()
+    .then(function () {
+      return G.API.get('/orgs/' + detailId.value + '/repo-map/summary')
+    })
     .then(function (d) {
       repoMapSummaryData.value = d || {}
       showRepoMapSummary.value = true

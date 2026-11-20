@@ -118,6 +118,115 @@ _R16_ERROR_MESSAGES = {
     "NO_TOKEN_AVAILABLE": "no token available for this repo",
 }
 
+# #2790：会话 token 诊断口径——签发失败与「根本没尝试签发」分开记，避免正常任务
+# （旧事件透传空 repo_key/agent_type）被误记为错误。
+SESSION_TOKEN_ISSUE_FAILED = "SESSION_TOKEN_ISSUE_FAILED"
+SESSION_TOKEN_CONTEXT_MISSING = "SESSION_TOKEN_CONTEXT_MISSING"
+_TOKEN_DIAG_MESSAGES = {
+    SESSION_TOKEN_ISSUE_FAILED: (
+        "session token issue failed; task continues without GRAPE_SESSION_TOKEN "
+        "(CLI falls back to GRAPE_AUTH_FILE/config)"),
+    SESSION_TOKEN_CONTEXT_MISSING: (
+        "session token not issued: missing dispatch context; task continues without "
+        "GRAPE_SESSION_TOKEN (CLI falls back to GRAPE_AUTH_FILE/config)"),
+}
+
+
+def _token_diag_entry(error_code, reason):
+    """构造任务诊断条目：带 message（events_view 不再显示裸 code）与 diagnostic 标记
+    （friendly_failure_hint 不把它当真实失败原因）。"""
+    _reason = str(reason)[:500]
+    return {
+        "error_code": error_code,
+        "reason": _reason,
+        "message": _TOKEN_DIAG_MESSAGES.get(error_code, _reason),
+        "diagnostic": True,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _persist_task_diagnostic(task_id, entry):
+    """把诊断追加进 agent_tasks.errors（同 error_code 幂等覆盖，最多保留 5 条）。"""
+    if not task_id:
+        return
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+            row = c.fetchone()
+            if not row:
+                return
+            _existing = []
+            if row[0]:
+                try:
+                    _parsed = json.loads(row[0])
+                    _existing = _parsed if isinstance(_parsed, list) else [row[0]]
+                except Exception:
+                    _existing = [row[0]]
+            _existing = [e for e in _existing
+                         if not (isinstance(e, dict)
+                                 and e.get("error_code") == entry["error_code"])]
+            _existing = (_existing + [entry])[-5:]
+            c.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
+                      (json.dumps(_existing, ensure_ascii=False), task_id))
+            _rt_db.commit()
+    except Exception as e:
+        log.warning(f"record session token diagnostic failed for {task_id}: {e}")
+
+
+def issue_and_inject_session_token(env, *, session_key, repo_key, agent_type,
+                                   user_id=0, task_id="", scope="dispatch",
+                                   context_log_level="warning"):
+    """签发 tk_ 会话 token 注入 env（enqueue/direct/chat 三条派发链统一口径）。
+
+    #2790：签发失败记 SESSION_TOKEN_ISSUE_FAILED + log.error；派发上下文缺失
+    （repo_key/agent_type 为空，根本没尝试签发）记 SESSION_TOKEN_CONTEXT_MISSING +
+    log.warning——正常任务（旧事件透传空值）不冒充错误。不抛异常，任务继续。
+    `context_log_level` 只作用于「上下文缺失」这一档：默认 warning（enqueue/chat 的
+    空上下文是常态），direct 派发链传 "error"（direct 一定有 task_id，空上下文属异常）。
+    返回 None（成功）或诊断条目（失败/未签发）。
+    """
+    if not (repo_key and agent_type):
+        _reason = (f"session token not issued: missing dispatch context "
+                   f"(repo_key={'set' if repo_key else 'empty'}, "
+                   f"agent_type={'set' if agent_type else 'empty'})")
+        _entry = _token_diag_entry(SESSION_TOKEN_CONTEXT_MISSING, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        _log = log.error if context_log_level == "error" else log.warning
+        _log(f"{scope}: {_reason} (task={task_id or '-'}); "
+             "continuing without GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_AUTH_FILE/config")
+        return _entry
+    try:
+        from src.kernel.auth_sdk.auth_token import issue_session_token
+        env["GRAPE_SESSION_TOKEN"] = issue_session_token(
+            session_key=session_key, repo_key=repo_key,
+            agent_type=agent_type, user_id=user_id or 0)
+        # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
+        env["GRAPE_CLI_MODE"] = "WORKER"
+        return None
+    except Exception as e:
+        _reason = f"session token issue failed: {type(e).__name__}: {e}"
+        _entry = _token_diag_entry(SESSION_TOKEN_ISSUE_FAILED, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        log.error(f"{scope}: {_reason} (task={task_id or '-'} repo={repo_key} agent={agent_type}); "
+                  "continuing without GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_AUTH_FILE/config")
+        return _entry
+
+
+def issue_and_inject_session_token_safe(env, *, log_scope, **kwargs):
+    """派发链兜底封装：诊断钩子自身异常不得阻断派发（#2790）。
+
+    三条派发链（event_pipeline / direct_executor / chat_session_env）原先各自复制
+    `try: issue_and_inject_session_token(...) except Exception: log.error(...)`；
+    统一收在这里，调用方只关心「注入 + 留痕」，钩子炸了按 error 记一行并继续。
+    返回 None（成功/钩子异常）或诊断条目（签发失败/上下文缺失）。
+    """
+    try:
+        return issue_and_inject_session_token(env, **kwargs)
+    except Exception as e:
+        log.error(f"{log_scope}: session token diagnostic hook failed: {e}")
+        return None
+
 # ===== 执行模式开关（engine-selection-design.md v2）=====
 # auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
 # / direct（本机就地 stream_agent）/ queue_remote（远端 RuntimeAgent）。queue_local 已废除。
@@ -821,13 +930,76 @@ def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
     return files
 
 
-def _collect_server_env(user_id, account):
+# ===== Issue #2423 M1-b（#2423 移植）：agent_tasks.env_extra 落库加密信封 =====
+
+def _encrypt_env_extra_for_write(env: dict) -> str:
+    """env_extra 写入加密（dict → enc:v1 信封）。
+
+    加密失败抛出（入队失败处理）——凭据不允许静默降级为明文落库；
+    开发模式（无 cryptography）信封内为明文 JSON（credential_crypto 降级兼容）。
+    """
+    from src.domains.runtime.engine.env_extra_security import encrypt_env_extra
+    return encrypt_env_extra(env)
+
+
+def _fn_migrate_env_extra_encryption() -> None:
+    """backfill（#2423 移植）：存量 env_extra 明文 JSON 行批量加密（幂等，分批 1000 行）。
+
+    Issue #2423 C3：enqueue_task 曾把凭据明文写入 agent_tasks.env_extra。新写入路径
+    已改 enc:v1 信封；本迁移把存量明文行（LIKE '{%'）逐行加密。读取兼容：
+    decrypt_env_extra 对存量明文降级解析并告警——即使迁移单批失败跳过，
+    读取不中断（幂等续跑收敛）。
+    """
+    import json as _json
+
+    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.engine.env_extra_security import encrypt_env_extra
+    done, batches, failures = 0, 0, 0
+    while True:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, env_extra FROM agent_tasks "
+                "WHERE env_extra IS NOT NULL AND env_extra LIKE '{%' LIMIT 1000")
+            rows = c.fetchall()
+            if not rows:
+                break
+            for row_id, raw in rows:
+                try:
+                    env = _json.loads(raw)
+                    if not isinstance(env, dict):
+                        continue
+                    c.execute("UPDATE agent_tasks SET env_extra=? WHERE id=?",
+                              (encrypt_env_extra(env), row_id))
+                    done += 1
+                except Exception:
+                    failures += 1
+                    c.execute("UPDATE agent_tasks SET env_extra=NULL WHERE id=?", (row_id,))
+            db.commit()
+            batches += 1
+    if done or failures:
+        log.info(f"[2423-migrate] env_extra encryption backfill: encrypted={done} "
+                 f"cleared={failures} batches={batches}")
+
+
+def _collect_server_env(user_id, account, agent_type: str = ""):
     """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。
 
     huawei_cloud AK/SK 注入为 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量，
     供 SRE agent (cloud-deploy skill) 通过 hcloud CLI 认证使用。
     codearts AK/SK 注入为 CODEARTS_CLI_AK / CODEARTS_CLI_SK。
+
+    Issue #2423 M0/M1（#2423 移植，凭据安全收敛）：
+    - OAuth 身份 provider（gitcode/github）与 plugin:* provider 不再上行 env——
+      token/PAT 运行期按需解析（get_task_token 等），OV 凭据走 tk_ 兑换（exec 端点）；
+    - 其余 provider 的凭据类键（_KEY/_SK/_SECRET/_TOKEN/_PASSWORD/_PWD/_CREDENTIALS
+      命名约定）不再上抬（C3：明文 env_extra 落库根因之一），非 secret 配置键保留。
+    - AK/SK 上行收敛仅 sre 可见（0119137e9 语义并入）：非 sre 任务的 huawei_cloud/
+      codearts AK/SK 零上行（agent_type 过滤）。
     """
+    from src.kernel.scene_custom_env import is_secret_name
+    from src.domains.runtime.engine.env_extra_security import OAUTH_IDENTITY_PROVIDERS, is_env_secret_key
+    _env_agent_type = (agent_type or "").strip().lower()
     env = {}
     if has_user_id(user_id):
         try:
@@ -837,18 +1009,27 @@ def _collect_server_env(user_id, account):
                 cfg = c.get("config", {})
                 if provider == "huawei_cloud":
                     # 注入为 SRE cloud-deploy skill 期望的环境变量名
-                    if cfg.get("ak"):
-                        env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"):
-                        env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                    # Issue #2423（#2423 移植）：AK/SK 上行收敛仅 sre 任务可见
+                    if _env_agent_type == "sre":
+                        if cfg.get("ak"):
+                            env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                        if cfg.get("sk"):
+                            env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
                     continue
                 if provider == "codearts":
-                    if cfg.get("ak"):
-                        env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"):
-                        env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                    # Issue #2423（#2423 移植）：AK/SK 上行收敛仅 sre 任务可见
+                    if _env_agent_type == "sre":
+                        if cfg.get("ak"):
+                            env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                        if cfg.get("sk"):
+                            env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                    continue
+                # OAuth 身份 / 插件凭据 provider：零上行（凭据走运行期解析或 tk_ 兑换）
+                if provider in OAUTH_IDENTITY_PROVIDERS or provider.startswith("plugin:"):
                     continue
                 for k, v in cfg.items():
+                    if is_env_secret_key(k):
+                        continue
                     env[k.upper()] = str(v)
         except Exception:
             pass
@@ -1188,6 +1369,20 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
                    f"check scene skill binding or upload the skill first"), 0
 
 
+# Issue #2547（QA 复审判断项）：任务「可认领/执行中」活跃态白名单。状态机词汇
+# 收敛在 service 层单一来源——路由层入队后置校验统一引用，状态机演进不再双处同改。
+TASK_CLAIMABLE_STATUSES = ("queued", "pending", "running")
+
+
+def is_task_claimable(status) -> bool:
+    """任务状态是否为可被引擎认领/继续执行的活跃态（queued/pending/running）。
+
+    Issue #2547 入队后置校验口径：redispatch 入队成功后断言新任务落库且处于
+    其中之一，否则视为「入队未生效」（宁失败不跑飞）。
+    """
+    return (status or "") in TASK_CLAIMABLE_STATUSES
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", user_gitcode_token="", env_extra=None,
@@ -1218,6 +1413,26 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         raise ValueError("agent_session_id is required")
     if not runtime_id and not pool_agent_type:
         raise ValueError("runtime_id or pool_agent_type is required (确定路由 D3)")
+    # Issue #653 / #2791 回归复核：入队前置空候选校验——pool_engine_ids 为 JSON 空数组 "[]" 时：
+    # '[]' 是 truthy 字符串但没有任何引擎能通过 claim 守卫，任务会卡死无人认领。
+    # scene 来源（用户显式绑定，#253 硬约束）→ 拒绝入队（宁失败不跑飞）；
+    # auto 来源（系统自动选择）→ 降级 "" 全量广播 + 告警（可审计）；
+    # directed 来源（Issue #2791 显式定向，pool 恒为单元素）→ 同 scene：拒绝入队。
+    if pool_engine_ids:
+        try:
+            _pei_653 = json.loads(pool_engine_ids)
+        except Exception:
+            _pei_653 = None  # 非 JSON 值保持原语义（历史调用方可能传其它格式）
+        if isinstance(_pei_653, list) and not _pei_653:
+            if (pool_engine_source or "") == "auto":
+                log.warning(f"enqueue_task: empty pool_engine_ids (source=auto) degraded to "
+                            f"broadcast for agent={pool_agent_type} (Issue #653)")
+                pool_engine_ids = ""
+            else:
+                raise ValueError(
+                    "pool_engine_ids resolved to an empty engine list (source="
+                    f"{pool_engine_source or 'scene'}, agent={pool_agent_type}); refusing enqueue "
+                    "to avoid silent global-pool fallback (Issue #653)")
     task_id = "t_" + uuid.uuid4().hex[:12]
     # 双池互斥（Issue #1208 补漏，2026-11-18）：selector 与 id/uid 池三列语义互斥，但重派
     # 终态重建路径会「重读场景 id 池 + 原样透传旧任务的 pool_selector」，使同一行同时挂两套
@@ -1327,7 +1542,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         knowledge_files = {k: ("" if k in knowledge_file_urls else v)
                            for k, v in (knowledge_files or {}).items()}
     env = dict(env_extra or {})
-    for k, v in _collect_server_env(user_id, account).items():
+    for k, v in _collect_server_env(user_id, account, agent_type=agent_type).items():
         env.setdefault(k, v)
     # Issue #2225：会话级唯一暂存目录——平台只下发路径，worker 侧负责创建与回退。
     # 每次任务独立 task_id 派生，避免并发会话共用固定名 /tmp/opencode/body.md。
@@ -1349,21 +1564,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。
-    if repo_key and agent_type:
-        try:
-            from src.kernel.auth_sdk.auth_token import issue_session_token
-            _tk_uid = user_id or 0
-            _usr = env.get("USER_ID") or ""
-            if str(_usr).isdigit():
-                _tk_uid = int(str(_usr))
-            env["GRAPE_SESSION_TOKEN"] = issue_session_token(
-                session_key=task_id, repo_key=repo_key,
-                agent_type=agent_type, user_id=_tk_uid)
-            # CLI 命令按 token 作用域过滤：本任务持 tk_ 会话 token → 只暴露 dual+session_only 命令
-            # （见 grape-cli-mode-filter-design.md；chat 与 devops 任务均适用）
-            env["GRAPE_CLI_MODE"] = "WORKER"
-        except Exception as e:
-            log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
+    # #2790：签发失败/派发上下文缺失不得静默降级——记为任务诊断（errors）并留显式日志。
+    # 旧实现只 log.warning 后继续入队，任务日志看不到任何线索，agent 只能盲搜 .grape-sess 自救。
+    # 签发失败 = error（SESSION_TOKEN_ISSUE_FAILED）；无派发上下文 = warning
+    # （SESSION_TOKEN_CONTEXT_MISSING，正常任务也可能无仓库上下文，不冒充错误）。
+    _tk_uid = user_id or 0
+    _usr = env.get("USER_ID") or ""
+    if str(_usr).isdigit():
+        _tk_uid = int(str(_usr))
+    _token_diag = issue_and_inject_session_token(
+        env, session_key=task_id, repo_key=repo_key, agent_type=agent_type,
+        user_id=_tk_uid, task_id="", scope="enqueue")
     _server_url = server_url or ""
     if not _server_url:
         try:
@@ -1398,19 +1609,38 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _task_span = None
         _task_trace_context = ""
+    # Issue #646：任务落库前的引擎引用快照（uid + 展示名 + pool uid 镜像；
+    # 未迁移旧库/引擎已删 → (None,'','')，不阻断任务创建）
+    try:
+        from src.domains.mgmt.public import engine_ref_snapshot
+        # Issue #1208：selector 任务两池列均空（pool_selector 承载圈池语义），
+        # uid 镜像无源 → 不做快照（engine_ref_snapshot 空串入参返回空镜像）
+        _snap = engine_ref_snapshot(runtime_id, pool_engine_ids or "")
+        from src.kernel.otel import start_task_span, snapshot_trace_context
+        _pipeline_tid = ""
+        if repo_key and issue_id:
+            try:
+                from src.domains.insight.public import pipeline_trace_id
+                _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
+            except Exception:
+                pass
+        # span 名带业务标识（task_id + agent_type）：trace 列表的 rootTraceName 从抽象的
+        # "task.enqueue" 变成可读的 "task t_xxx vod enqueue"——排查时按 SeqID/task_id 一眼定位
+        _task_span, _ = start_task_span(f"task {task_id} {agent_type or 'task'} enqueue", {
+            "task_id": task_id, "agent_type": agent_type, "skill": skill,
+            "repo_key": repo_key, "issue_id": issue_id, "runtime_id": runtime_id,
+            "pool_tag": pool_tag, "pipeline_trace_id": _pipeline_tid,
+            "event_seq": event_seq, "event_type": event_type,
+        })
+        if _task_span is not None:
+            _task_trace_context = snapshot_trace_context(_task_span)
+    except Exception:
+        _snap = (None, "", "")
+    # 组织派发租约（a85f72d33）：同仓库 enqueue 串行化，避免 dispatch 双写竞争
     dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
     if dispatch_lease_key and not acquire_lock_with_retry(dispatch_lease_key, ttl=30):
         raise RuntimeError(f"task enqueue busy for repo {repo_key}")
     try:
-        # Issue #646：任务落库前的引擎引用快照（uid + 展示名 + pool uid 镜像；
-        # 未迁移旧库/引擎已删 → (None,'','')，不阻断任务创建）
-        try:
-            from src.domains.mgmt.public import engine_ref_snapshot
-            # Issue #1208：selector 任务两池列均空（pool_selector 承载圈池语义），
-            # uid 镜像无源 → 不做快照（engine_ref_snapshot 空串入参返回空镜像）
-            _snap = engine_ref_snapshot(runtime_id, pool_engine_ids or "")
-        except Exception:
-            _snap = (None, "", "")
         with db_lock:
             c = _rt_db.cursor()
             _avail = _table_columns("agent_tasks")
@@ -1425,7 +1655,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 "prompt": prompt, "cwd": cwd or "", "runtime_session_id": runtime_session_id or "",
                 "event_type": event_type or "", "account": account or "", "user_id": user_id or 0,
                 "repo_gitcode_token": repo_gitcode_token or "", "user_gitcode_token": user_gitcode_token or "",
-                "env_extra": json.dumps(env), "skill_files": json.dumps(skill_files), "server_url": _server_url,
+                "env_extra": _encrypt_env_extra_for_write(env), "skill_files": json.dumps(skill_files), "server_url": _server_url,
                 "issue_session_id": issue_session_id or "",
                 "project_info_files": json.dumps(project_info_files), "project_info_meta": json.dumps(project_info_meta),
                 "knowledge_files": json.dumps(knowledge_files),
@@ -1438,7 +1668,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 # 未迁移旧库（无列）经 _avail 过滤自然降级）
                 "pool_selector": pool_selector or "",
                 "pool_engine_source": pool_engine_source or "",
-                "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
+                "status": "queued", "exit_code": None, "result_text": "",
+                "errors": (json.dumps([_token_diag], ensure_ascii=False)
+                           if _token_diag else ""),
+                "stderr": "",
                 "usage_json": "{}", "started_at": None, "completed_at": None,
                 "pending_since": None,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2014,7 +2247,16 @@ def get_task(task_id) -> dict | None:
         row = c.fetchone()
     if not row:
         return None
-    return dict(zip(_cols + ["sandbox_provider", "runtime_type", "runtime_info", "runtime_name"], row))
+    _t = dict(zip(_cols + ["sandbox_provider", "runtime_type", "runtime_info", "runtime_name"], row))
+    # Issue #2423 M1-b（#2423 移植）：get_task 出口解密 env_extra（enc:v1 信封 → dict；
+    # 兼容存量明文 JSON 由 decrypt_env_extra 降级处理并告警）。
+    try:
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        if isinstance(_t.get("env_extra"), str) and _t["env_extra"]:
+            _t["env_extra"] = decrypt_env_extra(_t["env_extra"])
+    except Exception:
+        pass
+    return _t
 
 
 def _has_verified_executor(probe_status: str, worker_version: str,
@@ -4469,6 +4711,25 @@ def _task_errors_json(task_id):
     return []
 
 
+def _strip_task_diagnostics(errors_raw):
+    """去掉 agent_tasks.errors 里 diagnostic=True 的条目（#2790 token 诊断等）。
+
+    `errors` 既是诊断通道又是失败原因来源：诊断条目不得抢占 fail 兜底的「真实原因」。
+    解析失败/非 JSON → 原样返回（保持历史兼容）。
+    """
+    _raw = str(errors_raw or "")
+    if not _raw.lstrip().startswith("["):
+        return errors_raw
+    try:
+        _vals = json.loads(_raw)
+    except Exception:
+        return errors_raw
+    if not isinstance(_vals, list):
+        return errors_raw
+    _kept = [e for e in _vals if not (isinstance(e, dict) and e.get("diagnostic"))]
+    return json.dumps(_kept, ensure_ascii=False) if _kept else ""
+
+
 def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
     """失败任务 → (发生了什么, 下一步行动) 的友好提示（chat-remote-failure-hint-design §2.2）。
 
@@ -4478,7 +4739,7 @@ def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
     """
     if not task:
         return "任务不存在或已被清理", "请重新发起对话重试"
-    _errors = task.get("errors") or ""
+    _errors = _strip_task_diagnostics(task.get("errors") or "")
     _result = task.get("result_text") or ""
     _stderr = task.get("stderr") or ""
     _exit = task.get("exit_code")

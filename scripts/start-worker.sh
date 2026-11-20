@@ -40,6 +40,9 @@ if [ "$1" != "--no-daemon" ]; then
 fi
 
 cd "$WORKER_DIR"
+# #2789：外部 PYTHONPATH（如容器注入 /app）会让 python -m 抢先导入错误 src，
+# 报 ModuleNotFoundError: No module named 'src.cli'。启动前清空，以本目录为准。
+unset PYTHONPATH
 export PATH="$HOME/.local/bin:$HOME/.local/npm-global/bin:$PATH"
 ENV_FILE="$HOME/.grape/runtime.env"
 if [ -f "$ENV_FILE" ]; then

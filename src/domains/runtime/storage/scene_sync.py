@@ -193,6 +193,22 @@ def _validate_scene_nodes(nodes: list) -> list[str]:
         if mode not in _VALID_MODES:
             errors.append(f"node {nid}: mode 不合法 '{mode}'，合法值: {', '.join(sorted(_VALID_MODES))}")
 
+        # Issue #1089 挂点①：node.plugins 多选（数组，元素为非空插件名，节点内去重）
+        plugins = n.get("plugins")
+        if plugins is not None:
+            if not isinstance(plugins, list):
+                errors.append(f"node {nid}: plugins 必须是数组")
+            else:
+                seen_plugins: set[str] = set()
+                for p in plugins:
+                    if not isinstance(p, str) or not p.strip():
+                        errors.append(f"node {nid}: plugins 含非法条目（须为非空插件名）")
+                        continue
+                    if p in seen_plugins:
+                        errors.append(f"node {nid}: plugins 重复: {p}")
+                        continue
+                    seen_plugins.add(p)
+
         handoff = n.get("handoff", "")
         nxt = n.get("next", "")
         if handoff == "complete" and nxt != "done":

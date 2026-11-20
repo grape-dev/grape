@@ -44,6 +44,20 @@ def _pin_contract_copy(monkeypatch, tmp_path):
     monkeypatch.setattr(coe, "CONTRACT_COPY", str(copy))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_released_snapshots(tmp_path, monkeypatch):
+    """隔离发布快照数据面（Issue #2837 删侧观察期门禁）。
+
+    本文件的用例注入的是 7 个核心端点级合成契约；若指向真实 contracts/released/
+    的冻结快照，门禁会把「合成契约缺 277 个端点」判成未挂牌删除而误红——那是用例
+    口径与真实数据面不一致，不是被测行为。真实快照面由
+    tests/contracts/test_contract_deprecation.py 的 e2e 用例与 check-all.sh 把关。
+    """
+    from src.domains.contracts import deprecation as _dep
+    monkeypatch.setattr(_dep, "RELEASED_CONTRACTS_DIR",
+                        str(tmp_path / "no-released-snapshots"))
+
+
 def test_parse_version():
     assert parse_version("2.2.0") == (2, 2)
     assert parse_version("v2.1") == (2, 1)
@@ -182,6 +196,14 @@ def test_update_baseline_writes_current_contract(tmp_path, monkeypatch):
                         lambda: {"paths": _full_paths(),
                                  "info": {"version": "2.2.1"}})
     _pin_contract_copy(monkeypatch, tmp_path)
+    # Issue #2837：--require-baseline 下必须随仓携带发布快照（观察期基准），
+    # 否则缺快照即红。本用例给一份与合成契约一致的 tmp 快照。
+    from src.domains.contracts import deprecation as _dep
+    released = tmp_path / "released"
+    released.mkdir()
+    (released / "2.2.0.json").write_text(json.dumps(
+        {"release_index": 1, "version": "2.2.0", "paths": _full_paths()}))
+    monkeypatch.setattr(_dep, "RELEASED_CONTRACTS_DIR", str(released))
     target = tmp_path / "new-baseline.json"
     target.write_text(json.dumps(
         {"info": {"version": "2.2.0"},

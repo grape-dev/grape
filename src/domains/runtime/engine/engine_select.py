@@ -483,6 +483,9 @@ _DEFAULT_CFG = {
     "rule": "order",
     "filters": {"only_online": True, "only_healthy": True, "only_installed": True},
     "local_priority": _PRIO_LOCAL,
+    # Issue #653 / #2791 回归复核：场景节点已绑引擎时，候选解析为空（引擎已注销/全部离线）
+    # 绝不静默回退全局池——默认严格（存量部署未写该键也是严格模式）。
+    "strict_scene_engines": True,
 }
 
 def load_engine_selection() -> dict:
@@ -841,6 +844,169 @@ def _best_health_fallback(members: list[dict]) -> int | None:
         # 兜底的兜底：取第一个候选
         return members[0]["runtime_id"] if members else None
 
+# Issue #2791：`pool_engine_source` 取值（与 db schema 注释、local-claimer 设计的降级
+# 判定共用一套词汇）：scene=场景绑定 / auto=引擎自动选择 / directed=engine_config 定向锁定。
+POOL_SOURCE_SCENE = "scene"
+POOL_SOURCE_AUTO = "auto"
+POOL_SOURCE_DIRECTED = "directed"
+
+
+def resolve_scene_user_scope(repo_key: str, issue_id, actor: str = "") -> tuple[str, int]:
+    """Issue / PR 级场景 + 场景 user scope 的单点解析（派发入口共用）。
+
+    scene_user_id 参与技能 scope 门禁与任务行 user_id；Task Center 建的 repo 级场景
+    任务可能漏写（=0），此时按 actor 反查兜底。场景解析异常必须留痕（Issue #653：
+    曾经静默回退「default」= 节点查不到 → 全局池的旁路）。
+
+    返回 (scene_id, user_id)；scene_id 恒非空（回落 "default"）。
+    """
+    _scene_id, _scene_uid = "", 0
+    try:
+        from src.api.session_store import get_issue_scene
+        _scene_id, _scene_uid = get_issue_scene(repo_key, issue_id) or ("", 0)
+    except Exception as _se:
+        log.warning(f"Pipeline emit: get_issue_scene failed for repo={repo_key} "
+                    f"issue={issue_id}: {_se}")
+    _scene_uid = _scene_uid or 0
+    if not _scene_uid:
+        try:
+            _scene_uid = _repo_user_id(repo_key, issue_creator=actor) or 0
+        except Exception:
+            _scene_uid = 0
+    return (_scene_id or "default"), _scene_uid
+
+
+def log_directed_fallback(directive, runtime_id, pool_engine_ids, repo_key: str,
+                          agent_type: str = "", seq=0) -> str:
+    """定向未命中时的结构化 WARN（单点实现：所有派发入口共用同一行格式）。
+
+    字段固定为 runtime_id + 回落原因 + 最终选中引擎 + pool + repo/agent/seq，
+    Spec 验收「不静默换引擎」就靠这一行的可观测性。返回写出的日志正文。
+    """
+    _final_desc = "broadcast"
+    try:
+        if runtime_id:
+            _final_desc = f"{engine_name(runtime_id) or '-'}(id={runtime_id})"
+        elif pool_engine_ids:
+            try:
+                _warn_ids = [int(x) for x in (json.loads(pool_engine_ids) or [])]
+            except Exception:
+                _warn_ids = []
+            if len(_warn_ids) == 1:
+                _final_desc = f"{engine_name(_warn_ids[0]) or '-'}(id={_warn_ids[0]})"
+            elif _warn_ids:
+                _final_desc = "pool:" + ",".join(str(x) for x in _warn_ids)
+    except Exception as _e:
+        log.warning(f"dispatch_directed: describe selected engine failed: {_e}")
+    _pool_desc = pool_engine_ids or "\"\""
+    _body = (f"dispatch_directed: engine_config.runtime_id={directive.get('requested')} "
+             f"not used, fallback to global pool; reason={directive.get('reason') or 'unavailable'}; "
+             f"selected_engine={_final_desc}; pool_engine_ids={_pool_desc}; "
+             f"repo={repo_key} agent={agent_type} seq={seq}")
+    log.warning(_body)
+    return _body
+
+
+def directed_pool_engine_ids(runtime_id: int) -> str:
+    """定向命中的 pool 收敛值：单元素 JSON 串（锁定引擎 = pool 就是它自己）。"""
+    return json.dumps([int(runtime_id)])
+
+
+def parse_engine_config_runtime_id(engine_config) -> int:
+    """Issue #2791：从 A2A `engine_config` 解析定向 runtime_id（0 = 未指定/非法）。
+
+    契约形态（cross-pipeline-handoff-design.md）：`{"type": "runtime", "runtime_id": N}` | null。
+    兼容宽松形态（只给 runtime_id / 纯整数 / 数字串），但**只认 runtime 类型**——
+    `{"type": "pool"}` 之类不是定向派发，一律 0（不改变池选择语义）。
+    """
+    if engine_config is None or isinstance(engine_config, bool):
+        return 0
+    _raw = engine_config
+    if isinstance(engine_config, dict):
+        _type = str(engine_config.get("type") or "runtime").strip().lower()
+        if _type not in ("runtime", ""):
+            return 0
+        _raw = engine_config.get("runtime_id", 0)
+    if isinstance(_raw, (int, float)):
+        _rid = int(_raw)
+    elif isinstance(_raw, str):
+        _s = _raw.strip()
+        if not _s.isdigit():
+            return 0
+        _rid = int(_s)
+    else:
+        return 0
+    return _rid if _rid > 0 else 0
+
+
+def resolve_directive_engine(engine_config, repo_key: str, agent_type: str = "") -> dict:
+    """Issue #2791：派发入口对 `engine_config.runtime_id` 的单点解析（命中即锁定）。
+
+    返回 dict：
+    - requested: 配置指定的 runtime_id（0 = 未配置）
+    - runtime_id: 命中时为该引擎 id；未命中 0
+    - hit: 是否命中（已注册且健康可达）
+    - reason: 未命中原因（engine_not_registered / engine_not_installed /
+      engine_not_online(status=..) / engine_unhealthy / stale_heartbeat / lookup_failed）；
+      命中恒为 "hit"（标签不匹配不改变命中，见 tag_mismatch）
+    - engine_name: 命中或未命中时该引擎行的类型名（未注册时为空）
+    - tag_mismatch: 命中但该引擎没有 agent_type 的能力标签（命中仍成立）
+
+    「健康可达」与池选择同一把尺子（engine_health_ok，见 health.py），保证
+    「池里选得到」与「定向锁得住」不会互相矛盾。
+
+    能力标签则**故意不同尺**（评审 P4 取舍）：池选择用 `_filter_by_tags` 把无该 agent
+    标签的引擎过滤掉；定向派发是显式指令（运维/上游明确点名一台引擎），再做标签否决
+    等于把显式指令降级成建议。因此命中条件不含标签，但命中时会把 tag_mismatch 打成
+    结构化 WARN——「池会排除它，但被显式指定」必须可观测，不能是静默旁路。
+    """
+    _out = {"requested": 0, "runtime_id": 0, "hit": False, "reason": "",
+            "engine_name": "", "tag_mismatch": False}
+    requested = parse_engine_config_runtime_id(engine_config)
+    if not requested:
+        return _out
+    _out["requested"] = requested
+    try:
+        cfg = load_engine_selection()
+        members = _engines_by_ids([requested], _norm_repo(repo_key), cfg)
+    except Exception as e:
+        _out["reason"] = f"lookup_failed: {e}"[:200]
+        log.warning(f"resolve_directive_engine: lookup runtime_id={requested} failed: {e}")
+        return _out
+    if not members:
+        _out["reason"] = "engine_not_registered"
+        return _out
+    m = members[0]
+    _out["engine_name"] = m.get("name") or ""
+    if not _health_ok(m):
+        if not m.get("installed"):
+            _out["reason"] = "engine_not_installed"
+        elif (m.get("status") or "") not in ("online", "active"):
+            _out["reason"] = f"engine_not_online(status={m.get('status') or 'offline'})"
+        elif not m.get("healthy"):
+            _out["reason"] = "engine_unhealthy"
+        else:
+            _out["reason"] = f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s"
+        return _out
+    _out.update({"runtime_id": requested, "hit": True, "reason": "hit"})
+    # 标签口径只用于「观测」，不用于否决（见 docstring 的取舍说明）
+    if agent_type:
+        try:
+            _tag_hit = bool(_filter_by_tags([m], agent_type))
+        except Exception as _tag_e:
+            log.warning(f"resolve_directive_engine: capability tag lookup failed for "
+                        f"runtime_id={requested}: {_tag_e}")
+            _tag_hit = True
+        if not _tag_hit:
+            _out["tag_mismatch"] = True
+            log.warning(
+                f"dispatch_directed: engine_config.runtime_id={requested} "
+                f"({m.get('name') or '-'}) has no capability tag for agent={agent_type}; "
+                f"explicit directive takes precedence over the pool tag filter "
+                f"(pool selection would exclude it)")
+    return _out
+
+
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 scene_id: str = "", user_id: int = 0,
                 issue_creator: str = "") -> int | None:
@@ -975,7 +1141,7 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     SRE 专属（sre-repo-worker-relax §1.1）：只保留 user/repo 两档引擎；
     场景没配 SRE 引擎 → None（空 = 无引擎，不广播，调用方报错）。
 
-    Issue #653（空值语义单点收口 + 严格模式开关，默认严格）：
+    Issue #653（空值语义单点收口 + 严格模式开关，默认严格）/ Issue #2791 回归复核：
     通过 get_scene_engine_binding 区分节点绑定四态（no_scene/no_node/unbound/bound）：
     - bound（已配置）：候选解析为空（引擎行不存在/被删）或全部不健康 → None（显式报错，
       绝不回退全局池）；strict_scene_engines=False 时回退 ""（广播）但打告警日志。
@@ -1010,10 +1176,10 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
         try:
             from src.api.pipeline_config import get_scene_engine_binding
             _binding_653 = get_scene_engine_binding(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
-            ids = _binding_653.get("engine_ids") or []
+            ids = (_binding_653 or {}).get("engine_ids") or []
             # Issue #1208（D11/D12）：uid 池路径——uids 非空优先，按 uid 解析候选；
             # 存量 id 节点 uids 恒空 → 走 ids 原路径（行为零变化）
-            _bound_uids = _binding_653.get("engine_uids") or []
+            _bound_uids = (_binding_653 or {}).get("engine_uids") or []
         except Exception as e:
             # 场景查询异常：严格模式 fail-closed（宁失败不跑飞，#253 语义）；关闭时维持广播
             log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")

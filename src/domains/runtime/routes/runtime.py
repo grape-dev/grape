@@ -469,7 +469,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 多行历史脏数据时取 MAX(id)（与 scope 切换去重「保留最新行」口径一致，
             # 重复行已由上方 merge_duplicate_engine_rows 合并）。
 
-            c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+            c.execute("SELECT id, scope, owner_id, repo_key, org_id, desired_plugins FROM agent_runtimes "
                       "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
                       (credential_id, name))
             row = c.fetchone()
@@ -491,6 +491,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             _ri_type = (rt.get("runtime_type") or "").strip() or ("cloud" if _ri_platform else "local")
             if row:
                 rid = row[0]
+                _row_desired_json = row[5] or "[]"
 
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
@@ -592,9 +593,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                          _model_name, "worker_report" if _model_name else "",
                          datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
+                _row_desired_json = "[]"
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
-            # 存量行可离线重算（002 重派生迁移消费）；未迁移旧库缺列时降级跳过。
+            # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。
             try:
                 c.execute(
                     "UPDATE agent_runtimes SET engine_type=?, provider_id=?, template_id=?, "
@@ -626,8 +628,8 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     pass
             # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
             # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
-            from src.domains.mgmt.public import sync_agent_tags
-            sync_agent_tags(rid)
+            from src.domains.mgmt.routes.settings import _sync_agent_tags
+            _sync_agent_tags(rid, c)
             # Issue #1208：三维度派生标签（engine:/scope:/scene:）落 capabilities 冒号行
             # + JSON 快照刷新（selector 圈池数据底座；注册链先写，心跳链幂等收敛）
             try:
@@ -643,8 +645,32 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                       engine_type=_et)
             except Exception as _at_e:
                 log.warning(f"runtime_register: agent_tags derive failed for {rid}: {_at_e}")
+            # Issue #1089 挂点③：Agent 类型种子默认安装——按引擎角色标签下发
+            # desired_plugins（'all'/无标签不注入种子），worker 协商补装。
+            _desired_plugins: list[str] = []
+            try:
+                from src.domains.mgmt.plugins.resolver import desired_plugins_for_tags as _dpft
+                _tags = []
+                if isinstance(rt.get("role_tags"), list):
+                    _tags = [str(t).strip().lower() for t in rt["role_tags"] if str(t).strip()]
+                if not _tags:
+                    _ec = c.execute(
+                        "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
+                    _tags = [r[0] for r in _ec if r and r[0]]
+                _desired_plugins = _dpft(_tags)
+            except Exception as _dp_err:
+                log.warning(f"runtime_register: desired_plugins resolve failed: {_dp_err}")
+            # 挂点④：合并控制台远程安装的期望插件（agent_runtimes.desired_plugins）
+            try:
+                _console_desired = json.loads(_row_desired_json) if _row_desired_json else []
+                if isinstance(_console_desired, list):
+                    _desired_plugins = sorted(set(_desired_plugins) | {
+                        str(n).strip() for n in _console_desired if str(n).strip()})
+            except Exception:
+                pass
             # Issue #646：返回双带 id+uid（新 worker 用 uid 落历史；旧版 worker 忽略 uid，混跑兼容）
-            registered.append({"id": rid, "name": name, "engine_uid": _engine_uid})
+            registered.append({"id": rid, "name": name,
+                               "desired_plugins": _desired_plugins, "engine_uid": _engine_uid})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
     # 验证完整链路：网络+签名+读取；空库返回空，worker 声明能力 false）
@@ -4060,3 +4086,51 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
     return {"provider_id": pid, "templates_upserted": _tpl_upserted,
             "engines_detected": _engines_bound, "status": "ok"}
 
+try:
+    from prometheus_client import Counter as _PC
+    from src.domains.insight.observability import registry as _obs_registry
+    _relay_total = _PC("grape_trace_relay_requests_total",
+                       "Trace relay requests forwarded to LGTM",
+                       ["status"], registry=_obs_registry)
+except Exception:
+    _relay_total = None
+
+
+
+class ContractGuardSignalBody(BaseModel):
+    """Issue #2085（#1297 移植）：worker contract_guard 失败信号上报。
+
+    outcome=degraded（检出 CLI 契约缓存退化/缺失）| rebuild_failed（从主控重建失败）；
+    host/pid/ts 仅供服务端日志甄别（worker 侧 http_alert_sink 就地补充）。
+    """
+    outcome: str
+    detail: str = ""
+    host: str = ""
+    pid: int = 0
+    ts: float = 0
+
+
+@router.post("/contract-guard/signal", operation_id="runtime_contract_guard_signal")
+def runtime_contract_guard_signal(body: ContractGuardSignalBody,
+                                  credential_id: int = Depends(_require_credential)):
+    """Issue #2085（#1297 移植）：承接 worker contract_guard 失败信号 → observability 指标出口。
+
+    worker 检出 CLI 契约缓存退化（outcome=degraded）或从主控重建失败
+    （outcome=rebuild_failed）时上报，服务端计数
+    grape_contract_guard_failures_total{outcome=...}，经 /metrics 暴露给
+    deploy/alerts.yml 的 GrapeContractGuardFailed 规则。承接失败只记日志
+    不报错（worker 侧另有本地兜底落点）。
+    """
+    from src.domains.insight.observability import (CONTRACT_GUARD_OUTCOMES,
+                                                   record_contract_guard_failure)
+    outcome = (body.outcome or "").strip().lower()
+    if outcome not in CONTRACT_GUARD_OUTCOMES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid outcome"})
+    try:
+        record_contract_guard_failure(outcome, body.detail)
+    except Exception as e:
+        log.warning(f"contract guard signal record failed: {e}")
+    if body.detail:
+        log.info(f"contract guard signal: outcome={outcome} host={body.host or '?'}"
+                 f" detail={body.detail[:200]}")
+    return {"status": "ok"}

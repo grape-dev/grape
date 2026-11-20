@@ -334,7 +334,7 @@ def test_is_ciphertext_distinguishes_plaintext_from_ciphertext():
     from src.domains.mgmt.auth.credential_crypto import encrypt, is_ciphertext
 
     assert not is_ciphertext("")
-    assert not is_ciphertext("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+    assert not is_ciphertext("ghp_abcdefghijklmnopqrstuvwxyz0123456789")  # secrets-check: allow
     assert not is_ciphertext("gitcode-token:with-colon:inside")
     assert is_ciphertext(encrypt("ghp_real"))
 

@@ -285,3 +285,21 @@ class TestIssue2089NarrowAdaptation:
         text = _page_text()
         assert "max-width:min(940px,100%)" in text, "help.html 产物未更新（需重跑生成器）"
         assert "overflow-x:auto" in text
+
+
+class TestHelpHtmlFreshness:
+    """生成物新鲜度守卫（PR #1847 F1）：重跑生成器后，入仓 help.html 必须与生成结果一致。
+
+    防「改了 help/**.md 忘记再生成」——产物与源不一致会静默发布旧文档。
+    """
+
+    def test_regenerated_output_matches_committed_artifact(self, tmp_path):
+        out = tmp_path / "help.html"
+        data = gen.build_data()
+        out.write_text(gen.build_help_html(data), encoding="utf-8")
+        committed = HELP_HTML.read_bytes()
+        regenerated = out.read_bytes()
+        assert committed == regenerated, (
+            "src/api/frontend/shell/help.html 与 help/ 源不一致："
+            "docs 变更后请重跑 `python -m src.kernel.help_page_gen` 并把产物一并提交"
+        )

@@ -430,12 +430,28 @@ def recall_org_repo_map(org_id: str, q: str = "", limit: int = 3,
 def get_org_repo_map_summary(org_id: str, user: dict = Depends(require_org_api_user)):
     _require_member(user["id"], org_id)
     _require_team_org(org_id)
+    from src.domains.mgmt.org_repo_map import repo_map_summary
+
+    return repo_map_summary(org_id)
+
+
+@router.post("/{org_id}/repo-map/sync", operation_id="org_repo_map_sync",
+             summary="Ensure repository map documents exist in the org repository")
+def sync_org_repo_map(org_id: str, user: dict = Depends(require_org_api_user)):
+    _require_member(user["id"], org_id)
+    _require_team_org(org_id)
     from src.domains.mgmt.org_context_repo import ensure_repo_map_summary_file
     from src.domains.mgmt.org_repo_map import repo_map_summary
 
-    # 汇总文档必须真实存在于组织仓库分析分支；缺失时先补推一次，避免跳转 404。
-    ensure_repo_map_summary_file(org_id)
-    return repo_map_summary(org_id)
+    ok = ensure_repo_map_summary_file(org_id)
+    log_audit(
+        "org_repo_map_sync",
+        user_id=str(user["id"]), operator_id=str(user["id"]),
+        detail={"org_id": org_id, "ok": bool(ok)},
+    )
+    data = repo_map_summary(org_id)
+    return {"ok": bool(ok), "branch": data.get("branch"),
+            "path": data.get("path"), "url": data.get("url")}
 
 
 @router.get("/{org_id}/repo-map/{repo_key:path}", operation_id="org_repo_map_detail",
@@ -443,11 +459,8 @@ def get_org_repo_map_summary(org_id: str, user: dict = Depends(require_org_api_u
 def get_org_repo_map(org_id: str, repo_key: str, user: dict = Depends(require_org_api_user)):
     _require_member(user["id"], org_id)
     _require_team_org(org_id)
-    from src.domains.mgmt.org_context_repo import ensure_repo_map_summary_file
     from src.domains.mgmt.org_repo_map import get_map
 
-    # 打开能力详情时同样确保 grape-org 已有地图文件，避免跳转 404。
-    ensure_repo_map_summary_file(org_id)
     data = get_map(org_id, repo_key)
     if not data:
         raise _error(404, "REPO_MAP_NOT_FOUND", "Repository map has not been generated yet")

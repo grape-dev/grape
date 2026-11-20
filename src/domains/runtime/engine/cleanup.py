@@ -932,7 +932,11 @@ def _active_session_task_ids() -> set:
                       "WHERE status IN ('queued','dispatched','running')")
             ids = {str(r[0]) for r in c.fetchall() if r and r[0]}
     except Exception as e:
-        log.warning(f"sweeper opencode active-task lookup failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"sweeper opencode active-task lookup skipped (no local table): {e}")
+        else:
+            log.warning(f"sweeper opencode active-task lookup failed: {e}")
     return ids
 
 
@@ -1393,9 +1397,17 @@ def _sweep_im_tables() -> int:
                 if n:
                     log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
             except Exception as e:
-                log.warning(f"sweeper im-table purge failed ({table}): {e}")
+                from src.kernel.db_errors import missing_schema
+                if missing_schema(e):
+                    log.debug(f"sweeper im-table purge skipped ({table}, no local table): {e}")
+                else:
+                    log.warning(f"sweeper im-table purge failed ({table}): {e}")
     except Exception as e:
-        log.warning(f"sweeper im-table purge failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"sweeper im-table purge skipped (no local tables): {e}")
+        else:
+            log.warning(f"sweeper im-table purge failed: {e}")
     return cleaned
 
 def _sweep_branch_guard_state() -> int:

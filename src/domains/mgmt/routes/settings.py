@@ -1844,17 +1844,49 @@ def user_db_get_backend_agents_alias():
     from src.domains.mgmt.user import db as user_db
     return user_db.get_backend_agents()
 
-@router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
+def _runtime_desired_plugins(rt: dict) -> list[str]:
+    """引擎详情下发 desired_plugins（Issue #3169 P2，Spec 四.4）。
+
+    口径与后端 derive_plugin_health 同源：角色标签 → Agent 类型种子默认
+    （resolver.desired_plugins_for_tags）∪ 控制台远程安装期望
+    （agent_runtimes.desired_plugins，挂点④）。前端直接消费本字段，
+    不再自行按 agent-defaults 重算，避免漏掉控制台来源而多报 missing。
+    """
+    from src.domains.mgmt.plugins.resolver import (
+        desired_plugins_for_tags, normalize_plugin_names)
+    out: set[str] = set()
+    try:
+        out.update(desired_plugins_for_tags(rt.get("agent_tags") or []))
+    except Exception:
+        pass
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT desired_plugins FROM agent_runtimes WHERE id=?",
+                (rt.get("id"),)).fetchone()
+        if row and row[0]:
+            data = json.loads(row[0])
+            out.update(normalize_plugin_names(
+                [(p.get("name") if isinstance(p, dict) else p) for p in data]))
+    except Exception:
+        pass
+    return sorted(out)
+
+
+@router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner/desired_plugins). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
 def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
     """单引擎详情（Issue #364）：按 agent_runtimes.id 精确返回。
 
     复用 get_agent_runtimes 的全量可见性过滤与字段派生（page_size=0 全量口径），
     保证详情与 Engines 列表可见性 100% 一致（credential scope + org 隔离 +
     repo 过滤 + 已删除用户/已吊销凭据过滤），未命中/不可见统一 404。
+    Issue #3169：详情额外下发 desired_plugins（插件面板协商口径）。
     """
     result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
     for rt in result.get("runtimes", []):
         if rt.get("id") == rid:
+            rt["desired_plugins"] = _runtime_desired_plugins(rt)
             return rt
     raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
 
