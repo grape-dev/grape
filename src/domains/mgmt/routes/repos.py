@@ -1037,6 +1037,7 @@ def check_repo_name(name: str,
     _space = (owner or "").strip()
     if _space and not _valid_space_path(_space):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间格式非法"})
+    _assert_owner_visible(provider, api_token, _space, user)
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
@@ -1091,6 +1092,18 @@ def list_create_targets(provider: str = Query("", description="目标平台，�
         log.warning(f"create-targets: 列空间失败 ({provider}): {e}")
         spaces = []
     return {"provider": provider, "personal_login": login, "spaces": spaces}
+
+
+def _assert_owner_visible(provider: str, api_token: str, owner: str, user: dict) -> None:
+    """owner 校验的 HTTP 适配：领域规则在 `mgmt.user.namespaces`，这里只映射错误码。"""
+    from src.domains.mgmt.user.namespaces import NamespaceNotVisible, assert_owner_visible
+
+    try:
+        assert_owner_visible(provider, api_token, owner,
+                             {"login": str(user.get("username") or "")})
+    except NamespaceNotVisible as exc:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "NAMESPACE_NOT_VISIBLE", "message": str(exc)})
 
 
 def _owner_from_full_name(full_name: str) -> str:
@@ -1153,6 +1166,10 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+
+    # 授权不猜（2026-11-20）：owner 是用户可控输入，前端下拉只是服务端清单的投影。
+    # 建仓前用**服务端自己拉的清单**校验；不匹配就拒，别把「是否越权」押给上游语义。
+    _assert_owner_visible(provider, api_token, owner, user)
 
     # B 批（2026-11-13）：建仓走 provider 端口（GitHub/GitCode/GitLab 各自实现），
     # 路由层不再按平台名分派 create_github_repo / create_repo。

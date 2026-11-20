@@ -290,28 +290,18 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
             entry["org_error"] = str(org_exc)[:300]
 
     try:
+        from src.domains.mgmt.user.namespaces import compose_namespaces
+
         login = str(info.get("login") or info.get("username") or "")
         if not login:
             raise RuntimeError("平台未返回登录名")
         display = str(info.get("name") or info.get("nickname") or login)
         avatar = str(info.get("avatar_url") or info.get("avatar") or "")
         entry["account"] = {"login": login, "name": display, "avatar_url": avatar}
-        entry["namespaces"].append({
-            "login": login,
-            "name": display,
-            "avatar_url": avatar,
-            "type": "user",
-        })
-        for org in orgs:
-            org_login = str((org or {}).get("login") or "").strip()
-            if not org_login or org_login == login:
-                continue
-            entry["namespaces"].append({
-                "login": org_login,
-                "name": str((org or {}).get("name") or org_login),
-                "avatar_url": str((org or {}).get("avatar_url") or ""),
-                "type": "org",
-            })
+        # 归一 kind（personal/org/unknown，白名单）由命名空间值对象负责；未知类型
+        # 不会落进「个人」桶——个人桶是最宽的权限面，未知输入不能默认进去。
+        refs = compose_namespaces(provider, entry["account"], orgs)
+        entry["namespaces"] = [ref.as_payload() for ref in refs]
     except Exception as exc:
         entry["connected"] = False
         entry["error"] = str(exc)[:300]
@@ -329,9 +319,9 @@ def list_org_repo_namespaces(user: dict = Depends(require_no_session_token)):
     每个 provider 返回 connected（是否已绑定 token）和 account/namespaces；
     token 失效仅影响该 provider（connected=false + error），不阻断另一平台。
     """
-    from src.domains.mgmt.user.repo_manager import org_namespace_providers
+    from src.domains.mgmt.user.namespaces import listable_providers
 
-    providers = org_namespace_providers()
+    providers = listable_providers()
     if not providers:
         return {"providers": []}
     with ThreadPoolExecutor(max_workers=min(4, len(providers))) as pool:
