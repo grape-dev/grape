@@ -49,3 +49,74 @@ def test_card_capability_flags_are_persisted_columns(column):
 
     cols = {c.name for c in RepoPlatformModel.__table__.columns}
     assert column in cols, f"卡能力位 {column} 未落表（importer 会整条拒绝平台配置）"
+
+# ── F1 回归：能力位必须贯通「表 → 跨域读 → 卡构建」整条读链路 ──────────────────
+_CARD_SRC = os.path.join(ROOT, "src", "domains", "runtime", "vcs", "platform_card.py")
+_MGMT_SRC = os.path.join(ROOT, "src", "domains", "mgmt", "public", "__init__.py")
+# raw 键 → 表列 的历史别名（importer 侧做同名语义映射）
+_RAW_ALIAS = {"owner_identity_token_fallback": "owner_fallback"}
+
+
+def _raw_read_keys() -> set:
+    """`build_platform_card` 实际从 raw 里读的键。"""
+    import re
+
+    src = open(_CARD_SRC, encoding="utf-8").read()
+    body = src[src.index("def build_platform_card("):]
+    return set(re.findall(r'raw\.get\(\s*"([a-z0-9_]+)"', body))
+
+
+def _allowlists() -> tuple:
+    import re
+
+    out = []
+    for path in (_CARD_SRC, _MGMT_SRC):
+        src = open(path, encoding="utf-8").read()
+        block = re.search(r"_PLATFORM_CARD_COLUMNS = \(([^)]*)\)", src, re.S).group(1)
+        out.append({c.strip().strip('"\'') for c in block.split(",") if c.strip()})
+    return tuple(out)
+
+
+def _cross_domain_selects() -> tuple:
+    import re
+
+    src = open(_MGMT_SRC, encoding="utf-8").read()
+    one = re.search(r'"repo_platform_cards": \((.*?)\),\n', src, re.S).group(1)
+    every = re.search(r'"repo_platform_cards_all": \((.*?)\),\n', src, re.S).group(1)
+    return one, every
+
+
+def test_card_capabilities_reach_the_table_read_path():
+    """表真源模式下卡能力位必须能读到 —— 列建了但白名单/SELECT 没带上，能力位恒 False。
+
+    事故（PR #1878 review F1）：`create_repo_options` 写进了表与卡构建器，却没进两侧
+    `_PLATFORM_CARD_COLUMNS` 与两条跨域具名 SELECT，于是 `_raws_from_table()` 整卡替换后
+    该键天然缺失 → `build_platform_card` 走默认 False → 建仓的 auto_init/default_branch
+    被静默丢弃。
+    """
+    from src.kernel.persistence.models_platform_object import RepoPlatformModel
+
+    cols = {c.name for c in RepoPlatformModel.__table__.columns}
+    required = {_RAW_ALIAS.get(k, k) for k in _raw_read_keys()} & cols
+    runtime_cols, mgmt_cols = _allowlists()
+    one, every = _cross_domain_selects()
+
+    problems = []
+    for col in sorted(required):
+        if col not in runtime_cols:
+            problems.append(f"runtime._PLATFORM_CARD_COLUMNS 缺 {col}")
+        if col not in mgmt_cols:
+            problems.append(f"mgmt._PLATFORM_CARD_COLUMNS 缺 {col}")
+        if col not in one:
+            problems.append(f"repo_platform_cards SELECT 缺 {col}")
+        if col not in every:
+            problems.append(f"repo_platform_cards_all SELECT 缺 {col}")
+    assert not problems, "卡能力位未贯通表读链路：\n  " + "\n  ".join(problems)
+
+
+def test_allowlists_stay_in_sync():
+    """runtime 与 mgmt 两份白名单必须同序同集合（一方改了一方没改 = 跨域读错列）。"""
+    runtime_cols, mgmt_cols = _allowlists()
+    assert runtime_cols == mgmt_cols, (
+        f"两份白名单不一致：runtime-only={sorted(runtime_cols - mgmt_cols)} "
+        f"mgmt-only={sorted(mgmt_cols - runtime_cols)}")

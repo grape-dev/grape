@@ -1817,7 +1817,8 @@ _ANY_QUERIES: dict[str, str] = {
     "repo_platform_cards": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
         "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
-        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "branch_create_form, create_repo_options, issue_search, git_tree_family, "
+        "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
         "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
@@ -1825,7 +1826,8 @@ _ANY_QUERIES: dict[str, str] = {
     "repo_platform_cards_all": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
         "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
-        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "branch_create_form, create_repo_options, issue_search, git_tree_family, "
+        "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
         "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
@@ -2546,7 +2548,8 @@ def exec_any(name: str, params: tuple = ()) -> int:
 _PLATFORM_CARD_COLUMNS = (
     "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
     "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
-    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "issue_write_form", "branch_create_form", "create_repo_options", "issue_search",
+    "git_tree_family",
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
