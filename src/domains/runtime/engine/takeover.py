@@ -1134,7 +1134,35 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
                    agent_type: str = "", platform: str = "", host: str = "", base_url: str = "",
                    client_version: str = "", supports: dict | None = None,
                    host_os: str = "", host_arch: str = "", host_shell: str = "") -> dict:
-    """开始接管（原子）。返回 {session, bundle, reused}；失败抛 TakeoverError。"""
+    """开始接管（原子）。返回 {session, bundle, reused}；失败抛 TakeoverError。
+
+    错误面约定（P0-2 加固）：本函数对外只抛 TakeoverError —— 未预期异常统一兜成
+    `500 internal_error` + `log.exception`（带 repo/issue/agent，日志同一行有 request_id），
+    调用方据此返回 `{ok:false, code, message, request_id}`，不再出现「裸 500 + 无堆栈」。
+    """
+    try:
+        return _start_takeover(
+            repo_key=repo_key, issue_number=issue_number, user=user,
+            agent_type=agent_type, platform=platform, host=host, base_url=base_url,
+            client_version=client_version, supports=supports,
+            host_os=host_os, host_arch=host_arch, host_shell=host_shell,
+        )
+    except TakeoverError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底：对外统一错误面，异常写日志
+        log.exception(
+            f"takeover: unexpected failure repo={repo_key} issue=#{issue_number} "
+            f"agent={agent_type or '-'}: {exc}"
+        )
+        raise TakeoverError(500, "internal_error",
+                            "接管失败：服务端内部错误（已记录日志，请附带 request_id 反馈）") from exc
+
+
+def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
+                    agent_type: str = "", platform: str = "", host: str = "", base_url: str = "",
+                    client_version: str = "", supports: dict | None = None,
+                    host_os: str = "", host_arch: str = "", host_shell: str = "") -> dict:
+    """start_takeover 的实现体（不对外；所有分支只抛 TakeoverError）。"""
     from src.kernel.auth_sdk.auth_token import issue_takeover_token, revoke_takeover_token
     from src.domains.runtime.engine import service as rt
 
@@ -1163,7 +1191,18 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
 
     task_id = task["id"]
     lock_key = f"takeover:{task_id}"
-    if not acquire_lock(lock_key, ttl=60):
+    # 锁不是硬依赖：kernel 端口未绑定（PortNotBound）/锁表不可达等异常一律降级，
+    # 并发窗口最终由 takeover_sessions.active_key 唯一索引兜住（冲突 → 409）。
+    # 硬依赖的旧行为是锁一抛就冒泡成裸 500（会话未写、任务未取消），现象为通用「服务器内部错误」。
+    lock_held = False
+    lock_degraded = False
+    try:
+        lock_held = bool(acquire_lock(lock_key, ttl=60))
+    except Exception as exc:  # noqa: BLE001 - 锁不可用不阻断接管
+        lock_degraded = True
+        log.warning(f"takeover: distributed lock unavailable for {lock_key}, "
+                    f"degrade to active_key unique index: {exc}")
+    if not lock_held and not lock_degraded:
         raise TakeoverError(409, "taken_by_other", "另一个接管请求正在处理该任务，请稍后重试")
     try:
         # ② 组装 bundle（在 cancel 之前读 prompt/env/messages，避免与 worker 的写竞争）
@@ -1243,7 +1282,11 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
         return {"reused": False, "session": sess, "bundle": bundle,
                 "mark_status": mark_status, "cancel_ok": cancel_ok, "cancel_error": cancel_err}
     finally:
-        release_lock(lock_key)
+        if lock_held:
+            try:
+                release_lock(lock_key)
+            except Exception as exc:  # noqa: BLE001 - 释放失败只告警：此时事务已提交，不能把成功回滚成 500
+                log.warning(f"takeover: release_lock({lock_key}) failed (ignored): {exc}")
 
 
 def _rebuild_for_session(sess: dict, user: dict) -> dict:

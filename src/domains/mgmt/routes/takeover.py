@@ -107,8 +107,20 @@ def _auth_headers(request: Request) -> dict:
 
 
 def _err(e: svc.TakeoverError) -> JSONResponse:
-    return JSONResponse(status_code=e.status,
-                        content={"ok": False, "code": e.code, "message": e.message, **e.extra})
+    """统一失败体：{ok:false, code, message, request_id}。
+
+    request_id 取当前请求的 ContextVar（中间件注入），与日志里的 request_id 同值，
+    用户/插件把这段回执贴回来即可直接定位日志行；未预期异常由服务层兜成
+    `500 internal_error` 并写 log.exception（含堆栈）。
+    """
+    body = {"ok": False, "code": e.code, "message": e.message}
+    try:
+        from src.kernel.config import request_id_var
+        body["request_id"] = request_id_var.get() or "-"
+    except Exception:  # noqa: BLE001 - request_id 只是诊断字段，取不到不影响错误面
+        body["request_id"] = "-"
+    body.update(e.extra)
+    return JSONResponse(status_code=e.status, content=body)
 
 
 # ----------------------------------------------------------------------------- endpoints

@@ -86,6 +86,9 @@ STAGE_STATUS_MAP = {
     "running": 1,
     "completed": 2,
     "failed": 3,
+    # 接管中：runner 已退出但 Issue 由本地会话推进，展示口径等同运行中
+    # （与 src/api/pipeline_status.py 的 EVENT_STATUS_MAP['takeover'] 同值）
+    "takeover": 1,
 }
 
 # Issue #2925 / 架构闸 A8 整改：标题兜底的实现（占位判定单一事实源、缓存三件套、
