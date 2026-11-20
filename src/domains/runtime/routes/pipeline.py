@@ -503,16 +503,42 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
     need = max(1, int(need))
     # Issue #1312：审计事件与无归属事件不参与流水线聚合
     _exclude_clause = " AND e.event_type <> 'admin_action' AND e.issue_id NOT IN ('', '#0')"
-    # 无场景过滤时不 join（省一次 i 表查找；全仓口径只依赖 events）
-    if scene_filter:
-        _join = ("LEFT JOIN issue i ON i.repo_key = e.repo_key "
-                 "AND i.issue_number = CAST(SUBSTR(e.issue_id, 2) AS INTEGER)")
-        _scene_clause = " AND COALESCE(NULLIF(i.scene_id,''), e.scene_id) = ?"
-        _scene_params = [scene_filter]
-    else:
-        _join, _scene_clause, _scene_params = "", "", []
+    _join = ""
+    _scene_clause, _scene_params = "", []
     with db_lock:
         c = db.cursor()
+        # 场景过滤：issue.scene_id 权威、events.scene_id 兜底。
+        # 原写法 LEFT JOIN issue + CAST(SUBSTR(e.issue_id,2)) 逐行换算 issue_number，
+        # 1.6 万事件的仓库实测 39 秒（EXPLAIN：8911 行驱动 + 每行 33 次 ref 查找），
+        # 期间全程占着进程级 db_lock，导致同进程其它请求（含场景详情页自己的
+        # advanced-options / deploy-url / dashboard）全部排队到浏览器 30 秒超时，
+        # 页面卡在「加载中」、点「编辑」没反应。
+        # 改为先把本仓 issue 的场景归属取回（issue 表千行级，几十毫秒），
+        # 在 Python 侧算成两组 issue_id 下推 IN/NOT IN，实测 39.4s → 0.05s。
+        if scene_filter:
+            c.execute(
+                f"SELECT issue_number, scene_id FROM issue WHERE repo_key IN ({_ph})",
+                tuple(repo_keys))
+            _same, _other = [], []
+            for _num, _sid in c.fetchall():
+                _sid = (_sid or "").strip()
+                if _sid == scene_filter:
+                    _same.append("#%s" % _num)
+                elif _sid:
+                    _other.append("#%s" % _num)
+            _parts = []
+            _params = []
+            if _other:
+                _parts.append(" AND e.issue_id NOT IN (%s)" % ",".join("?" * len(_other)))
+                _params.extend(_other)
+            if _same:
+                _parts.append(" AND (e.issue_id IN (%s) OR COALESCE(e.scene_id,'') = ?)"
+                              % ",".join("?" * len(_same)))
+                _params.extend(_same)
+            else:
+                _parts.append(" AND COALESCE(e.scene_id,'') = ?")
+            _params.append(scene_filter)
+            _scene_clause, _scene_params = "".join(_parts), _params
         # ① 窗口：最新事件倒序，只要前 need 条
         c.execute(
             f"SELECT e.issue_id, MAX(e.seq) AS m FROM events e {_join} "
