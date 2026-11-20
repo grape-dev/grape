@@ -107,7 +107,7 @@ def test_ensure_cloud_sandboxes_skips_on_non_owner_domain(monkeypatch):
 def test_missing_owner_alerts_only_when_multi_db(monkeypatch):
     """多库 DSN 已配 + owner 为空 → ERROR；worker / 已注入 owner / 单库不告警。
 
-    文案按 call site 区分（review R1）：pending=不筛域跑全量；domain=未执行任何域迁移。
+    文案按 call site 区分：pending=不筛域跑全量；domain=未执行任何域迁移。
     """
     from src.kernel import db_registry
 
@@ -156,7 +156,7 @@ def test_missing_owner_alerts_only_when_multi_db(monkeypatch):
 
 
 def test_migration_entries_wire_owner_guard_by_call_site(monkeypatch):
-    """告警挂点（review R1）：pending 入口与 domain 入口分别按 call site 触发。"""
+    """告警挂点：pending 入口与 domain 入口分别按 call site 触发。"""
     calls = []
     monkeypatch.setattr(
         db_setup, "_warn_missing_migration_owner_if_multi_db",
@@ -241,7 +241,7 @@ def _patch_kill_env(monkeypatch, hit_domain, write_results):
 
 @pytest.mark.parametrize("hit", ["runtime", "mgmt"])
 def test_kill_write_follows_read_hit_domain(monkeypatch, hit):
-    """读/写域一致（review R2）：读命中哪个域，台账就先写哪个域。"""
+    """读/写域一致：读命中哪个域，台账就先写哪个域。"""
     writes = _patch_kill_env(monkeypatch, hit, [1])
 
     out = rt.runtime_kill_cloud_sandbox("sbx-1", user={"auth_type": "api_key", "id": "1"})
@@ -261,7 +261,7 @@ def test_kill_write_falls_back_to_other_domain_on_zero_rows(monkeypatch):
 
 
 def test_kill_reports_visible_error_when_ledger_update_misses(monkeypatch):
-    """两域都 0 行（review R2）：不得静默返回 killed，必须报可见 500。"""
+    """两域都 0 行：不得静默返回 killed，必须报可见 500。"""
     writes = _patch_kill_env(monkeypatch, "runtime", [0, 0])
 
     with pytest.raises(Exception) as exc:
@@ -304,7 +304,7 @@ class _KillWriteConn:
 
 
 def test_kill_write_uses_dedicated_connection_and_closes(monkeypatch):
-    """自有 DSN 路径用 new_connection 专用连接，用完即关（review R3）。"""
+    """自有 DSN 路径用 new_connection 专用连接，用完即关。"""
     from src.kernel import db_registry as dbr
 
     conn = _KillWriteConn(rowcount=1)
@@ -323,7 +323,7 @@ def test_kill_write_uses_dedicated_connection_and_closes(monkeypatch):
 
 
 def test_kill_write_unknown_rowcount_is_not_success(monkeypatch):
-    """游标无 rowcount 时返回 0（未确认），不得让调用方当成功（review R3）。"""
+    """游标无 rowcount 时返回 0（未确认），不得让调用方当成功。"""
     from src.kernel import db_registry as dbr
 
     conn = _KillWriteConn(rowcount=None)
@@ -333,7 +333,7 @@ def test_kill_write_unknown_rowcount_is_not_success(monkeypatch):
 
 
 def test_kill_write_falls_back_to_process_db_without_own_dsn(monkeypatch):
-    """无自有 DSN（new_connection 抛错）→ 回落进程主库并 commit（review R3）。"""
+    """无自有 DSN（new_connection 抛错）→ 回落进程主库并 commit。"""
     from src.kernel import db_registry as dbr
     from src.kernel import session_manager as sm
 

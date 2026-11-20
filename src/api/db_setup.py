@@ -4467,7 +4467,7 @@ def run_pending_migrations() -> None:
     下发 SET SESSION lock_wait_timeout=10（QA R1：专用连接上的 SET 对 DDL 无效）；
     执行器内每条 pending 迁移前还会再下发一次。
     """
-    # Issue #3527（review R1）：不筛域全量迁移的真正入口在这里（server_common
+    # Issue #3527：不筛域全量迁移的真正入口在这里（server_common
     # → init_database → run_pending_migrations），owner 为空时必须在此告警，
     # 而不是只挂在 run_domain_migrations() 顶部（该入口 owner 为空直接 return）。
     _warn_missing_migration_owner_if_multi_db("pending")
@@ -4543,7 +4543,7 @@ def run_domain_migrations() -> None:
     runtime 表只由 event 进程跑（worker 与 event 共库，避免并发重复 DDL），
     insight 由 insight 进程跑；mgmt 仍走 init_database() 的常规路径。
     """
-    # Issue #3527（review R1）：此处 owner 为空 → 直接 return，本进程未执行
+    # Issue #3527：此处 owner 为空 → 直接 return，本进程未执行
     # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
     _warn_missing_migration_owner_if_multi_db("domain")
     domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
@@ -9837,14 +9837,10 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
-# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号。
-# 实测台账：beta runtime 库的 202611180001 行名是 issue2761-skill-classification-columns
-# （旧号占章），ensure-cloud-sandboxes-in-runtime 的 202611180001 因此被判「已执行」而
-# 从未真跑，runtime 库沙箱表一直缺失。按「已发布保持原号、只改未发布的」规则，本迁移
-# 顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。存量 beta 环境需由运维执行
-# DELETE FROM grape_t_schema_migrations WHERE version='202611180001'
-#   AND name='issue2761-skill-classification-columns'（version+name 双条件），
-# 让 ensure-cloud-sandboxes-in-runtime 重跑补章。
+# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号：
+# 同一 version 的登记行名已被 issue2761-skill-classification-columns 占用，
+# ensure-cloud-sandboxes-in-runtime 因此被判「已执行」而从未真跑。按「已发布保持原号、
+# 只改未发布的」规则，本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。
 register_migration(
     version="202611180003",
     name="issue2761-skill-classification-columns",
