@@ -102,3 +102,37 @@ def test_upstream_rejection_becomes_error_dict_not_exception(monkeypatch):
     out = prov.create_repo("tok", "demo")
     assert out.get("error")
     assert "is not valid" in out["error"] or "上游拒绝" in out["error"]
+
+
+def test_check_name_reads_gitlab_username_field(monkeypatch):
+    """GitLab /user 的登录名字段是 username（github/gitcode 是 login）。
+
+    只认 login 时，个人空间建仓前的查重直接 502「无法获取当前用户身份」——
+    2026-11-20 在 8101 实例上实测：PAT 绑定成功后建仓表单点「创建项目」即卡死，
+    服务端只留下 GET /api/repos/check-name 502。
+    """
+    import src.domains.mgmt.routes.repos as R
+
+    monkeypatch.setattr(R, "get_user_token_for", lambda *a, **k: "tok")
+
+    class _Prov:
+        def verify_token(self, token):
+            return {"id": 44646095, "username": "yangaiwu"}      # 无 login 键
+
+    monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _Prov())
+
+    seen = {}
+
+    class _Client:
+        def __init__(self, provider, api_token, login, name):
+            seen.update(provider=provider, login=login, name=name)
+
+        def get_repo_info(self):
+            return {"error": "HTTP 404"}
+
+    monkeypatch.setattr("src.domains.runtime.public.VcsApiClient", _Client)
+
+    out = R.check_repo_name(name="proj", provider="gitlab", owner="",
+                            user={"id": 1, "username": "gvtest"})
+    assert out == {"exists": False}
+    assert seen["login"] == "yangaiwu"

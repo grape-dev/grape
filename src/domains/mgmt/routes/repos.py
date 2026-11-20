@@ -1044,7 +1044,9 @@ def check_repo_name(name: str,
     from src.domains.runtime.public import VcsApiClient
     try:
         _uinfo = create_provider(provider).verify_token(api_token)
-        login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
+        # GitLab /user 的登录名字段是 username（github/gitcode 是 login），
+        # 只认 login 会让 GitLab 个人空间查重直接 502「无法获取当前用户身份」。
+        login = str((_uinfo or {}).get("login", "") or (_uinfo or {}).get("username", "") or "") if isinstance(_uinfo, dict) else ""
         login = _space or login          # 指定空间时按空间路径查重（子组仓不误判为占用）
         if not login:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})

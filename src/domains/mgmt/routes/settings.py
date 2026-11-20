@@ -515,12 +515,14 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 except Exception as _ve:
                     raise HTTPException(status_code=502, detail={
                         "code": 502, "message": f"{_p} token 验证失败: {_ve}"})
-                if not isinstance(_info, dict) or not _info.get("login") or not _info.get("id"):
+                _info_login = str((_info or {}).get("login") or (_info or {}).get("username") or "") if isinstance(_info, dict) else ""
+                _info_id = str((_info or {}).get("id") or "") if isinstance(_info, dict) else ""
+                if not _info_login or not _info_id:
                     raise HTTPException(status_code=400, detail={
                         "code": 400, "error_code": "TOKEN_INVALID",
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
-                _ext_id = str(_info.get("id"))
-                _ext_login = str(_info.get("login", ""))
+                _ext_id = _info_id
+                _ext_login = _info_login
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
                 # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
