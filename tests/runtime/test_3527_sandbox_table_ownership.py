@@ -5,7 +5,9 @@
    且 202611110007 显式声明 mgmt 域、仍保留 `_ensure_column` 列补齐段；
 2. `ensure_cloud_sandboxes_table()` 在非 owner 域直接跳过（不筛域形态兜底）；
 3. 列表 / kill / provider 计数读路径统一 runtime 优先，历史落库位置仅作 1146 回退；
-4. 多库 DSN 已配但 `GRAPE_MIGRATION_OWNER` 为空时输出 ERROR 告警（worker 除外）。
+4. 多库 DSN 已配但 `GRAPE_MIGRATION_OWNER` 为空时输出 ERROR 告警（worker 除外），
+   且按入口区分文案：run_pending_migrations=不筛域跑全量 / run_domain_migrations=未执行任何域迁移；
+5. kill 的台账写跟随读侧命中的域（0 行回退另一域，两域皆 0 行报可见 500）。
 """
 import contextlib
 
@@ -103,7 +105,10 @@ def test_ensure_cloud_sandboxes_skips_on_non_owner_domain(monkeypatch):
 
 
 def test_missing_owner_alerts_only_when_multi_db(monkeypatch):
-    """多库 DSN 已配 + owner 为空 → ERROR；worker / 已注入 owner / 单库不告警。"""
+    """多库 DSN 已配 + owner 为空 → ERROR；worker / 已注入 owner / 单库不告警。
+
+    文案按 call site 区分（review R1）：pending=不筛域跑全量；domain=未执行任何域迁移。
+    """
     from src.kernel import db_registry
 
     monkeypatch.setattr(db_registry, "lib_enabled", lambda: True)
@@ -113,26 +118,61 @@ def test_missing_owner_alerts_only_when_multi_db(monkeypatch):
     messages = []
     monkeypatch.setattr(db_setup.log, "error", lambda msg, *a, **k: messages.append(msg))
 
-    db_setup._warn_missing_migration_owner_if_multi_db()
+    # pending 入口（run_pending_migrations）：不筛域形态，跑全量登记表
+    db_setup._warn_missing_migration_owner_if_multi_db("pending")
     assert messages and "[migration-guard]" in messages[0]
     assert "GRAPE_MIGRATION_OWNER" in messages[0]
+    assert "不筛域" in messages[0]
 
+    # domain 入口（run_domain_migrations）：owner 为空 → 未执行任何域迁移
+    messages.clear()
+    db_setup._warn_missing_migration_owner_if_multi_db("domain")
+    assert messages and "[migration-guard]" in messages[0]
+    assert "未执行任何域迁移" in messages[0]
+    assert "不筛域" not in messages[0]
+
+    # worker：两个入口都不告警（与 event 共库，owner 为空属正常）
     messages.clear()
     monkeypatch.setenv("GRAPE_PROCESS_ROLE", "worker")
-    db_setup._warn_missing_migration_owner_if_multi_db()
+    db_setup._warn_missing_migration_owner_if_multi_db("pending")
+    db_setup._warn_missing_migration_owner_if_multi_db("domain")
     assert messages == [], "worker 与 event 共库，owner 为空属正常"
 
+    # 已注入 owner：不告警
     messages.clear()
     monkeypatch.setenv("GRAPE_PROCESS_ROLE", "server")
     monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "mgmt")
-    db_setup._warn_missing_migration_owner_if_multi_db()
+    db_setup._warn_missing_migration_owner_if_multi_db("pending")
+    db_setup._warn_missing_migration_owner_if_multi_db("domain")
     assert messages == []
 
+    # 单库：不告警
     messages.clear()
     monkeypatch.delenv("GRAPE_MIGRATION_OWNER", raising=False)
     monkeypatch.setattr(db_registry, "lib_enabled", lambda: False)
-    db_setup._warn_missing_migration_owner_if_multi_db()
+    db_setup._warn_missing_migration_owner_if_multi_db("pending")
+    db_setup._warn_missing_migration_owner_if_multi_db("domain")
     assert messages == [], "单库部署不筛域，无需告警"
+
+
+def test_migration_entries_wire_owner_guard_by_call_site(monkeypatch):
+    """告警挂点（review R1）：pending 入口与 domain 入口分别按 call site 触发。"""
+    calls = []
+    monkeypatch.setattr(
+        db_setup, "_warn_missing_migration_owner_if_multi_db",
+        lambda call_site="pending": calls.append(call_site))
+    # run_pending_migrations：告警必须在真正跑全量迁移的入口
+    monkeypatch.setattr(db_setup, "_ensure_migration_session_lock_timeout", lambda: None)
+    monkeypatch.setattr(db_setup, "_run_migrations_with_conn", lambda conn, **kw: None)
+    monkeypatch.setattr(db_setup, "_backfill_missing_migration_reports", lambda: None)
+    db_setup.run_pending_migrations()
+    assert calls == ["pending"]
+
+    # run_domain_migrations（owner 为空 → 直接 return）：domain 文案入口
+    calls.clear()
+    monkeypatch.delenv("GRAPE_MIGRATION_OWNER", raising=False)
+    db_setup.run_domain_migrations()
+    assert calls == ["domain"]
 
 
 def test_list_endpoint_prefers_runtime_domain(monkeypatch):
@@ -157,11 +197,77 @@ def test_kill_reads_across_domains_runtime_first(monkeypatch):
 
     def fake(sql, params=(), domains=("runtime", "mgmt")):
         seen.append(domains)
-        return []
+        return [], domains[0]
 
-    monkeypatch.setattr(rt, "_fetch_across_domains", fake)
+    monkeypatch.setattr(rt, "_fetch_across_domains_with_hit", fake)
     with pytest.raises(Exception) as exc:
         rt.runtime_kill_cloud_sandbox("sbx-1", user={"auth_type": "api_key", "id": "1"})
 
     assert getattr(exc.value, "status_code", None) == 404
     assert seen == [("runtime", "mgmt")]
+
+
+class _FakeProvider:
+    """kill_sandbox 恒成功的 provider 替身（不触真实平台）。"""
+
+    def kill_sandbox(self, sandbox_id):
+        return True
+
+
+def _patch_kill_env(monkeypatch, hit_domain, write_results):
+    """组装 kill 端点测试环境。
+
+    读命中 hit_domain 的 (provider, state, repo_key, provider_id) 行；
+    _mark_sandbox_killed_on_domain 依序弹出 write_results 作为 rowcount。
+    返回记录实际写域序列的 list。
+    """
+    monkeypatch.setattr(
+        rt, "_fetch_across_domains_with_hit",
+        lambda sql, params=(), domains=("runtime", "mgmt"):
+            ([("prov", "running", "", None)], hit_domain))
+    writes = []
+
+    def fake_write(domain, sandbox_id, now_iso):
+        writes.append(domain)
+        return write_results.pop(0) if write_results else 1
+
+    monkeypatch.setattr(rt, "_mark_sandbox_killed_on_domain", fake_write)
+    from src.domains.runtime.agents.sandbox import backends as _bk
+    monkeypatch.setattr(
+        _bk, "default_registry",
+        lambda: {"prov": lambda *a, **kw: _FakeProvider()})
+    return writes
+
+
+@pytest.mark.parametrize("hit", ["runtime", "mgmt"])
+def test_kill_write_follows_read_hit_domain(monkeypatch, hit):
+    """读/写域一致（review R2）：读命中哪个域，台账就先写哪个域。"""
+    writes = _patch_kill_env(monkeypatch, hit, [1])
+
+    out = rt.runtime_kill_cloud_sandbox("sbx-1", user={"auth_type": "api_key", "id": "1"})
+
+    assert out == {"status": "killed"}
+    assert writes == [hit], "写侧必须跟随读侧命中的域，而不是固定写进程主库"
+
+
+def test_kill_write_falls_back_to_other_domain_on_zero_rows(monkeypatch):
+    """读命中 mgmt 回退行、该域 0 行更新 → 回退另一域补写，仍返回 killed。"""
+    writes = _patch_kill_env(monkeypatch, "mgmt", [0, 1])
+
+    out = rt.runtime_kill_cloud_sandbox("sbx-1", user={"auth_type": "api_key", "id": "1"})
+
+    assert out == {"status": "killed"}
+    assert writes == ["mgmt", "runtime"]
+
+
+def test_kill_reports_visible_error_when_ledger_update_misses(monkeypatch):
+    """两域都 0 行（review R2）：不得静默返回 killed，必须报可见 500。"""
+    writes = _patch_kill_env(monkeypatch, "runtime", [0, 0])
+
+    with pytest.raises(Exception) as exc:
+        rt.runtime_kill_cloud_sandbox("sbx-1", user={"auth_type": "api_key", "id": "1"})
+
+    assert getattr(exc.value, "status_code", None) == 500
+    detail = getattr(exc.value, "detail", {}) or {}
+    assert "ledger row update failed" in detail.get("message", "")
+    assert writes == ["runtime", "mgmt"], "命中域优先，另一域兜底，两者都试过"
