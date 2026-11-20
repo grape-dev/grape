@@ -298,6 +298,10 @@ def test_provision_uses_selected_provider_namespace_and_path(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create)
     monkeypatch.setattr(provision, "host_repo", _fake_host)
+    # 本用例只验证建仓选项透传；分支同步需要真实 VCS token/网络，单测统一桩掉。
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: None)
 
     result = provision.provision_org(org["id"])
 
