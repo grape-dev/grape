@@ -388,15 +388,13 @@ def instrument_fastapi(app, service_name: str):
         # 2026-11-20 实测修正：excluded_urls 是正则、按完整 path 匹配，原来写的
         # "runtimes/.../tasks/claim"、"/runtime/heartbeat" 少了 api/ 前缀，一条都没命中，
         # 结果 worker 的 claim/heartbeat 反而被全量埋点（legacy 路径本来排除 api/ping）。
+        # 2026-11-20 二次修正：一开始把 worker 轮询（claim/tags/heartbeat）排除了，
+        # 结果 nginx-gateway 的访问日志里绝大多数行（实测 800 行里 ~80%）属于这些
+        # 端点 → 日志里的 traceparent 在 Tempo 里查不到，点「调用链」是空页。
+        # 日志入口能点通比"trace 列表干净"更重要，故只保留真正无意义的排除项：
+        # 探针、静态资源、RUM 收集（浏览器侧另有 RUM trace）。
         FastAPIInstrumentor.instrument_app(app, excluded_urls=(
-            "health,healthz,readyz,metrics,api/ping,"
-            "api/runtime/heartbeat,api/runtime/register,api/runtime/install,"
-            # 实测两条路由都吃：/api/runtime/runtimes/uid/<engine_uid>/tasks/claim
-            # 和 /api/runtime/runtimes/<runtime_id>/tasks/claim-by-tag/<tag>，
-            # 所以用 .* 放宽，别按固定段写（写死 uid/ 那么 claim-by-tag 会漏）。
-            "api/runtime/runtimes/.*tasks/claim,"
-            "api/runtime/runtimes/.*/tags,"
-            "faro/collect"
+            "health,healthz,readyz,metrics,api/ping,static,faro/collect"
         ))
         # DB span 采用「单一来源」策略（架构审查 P2-2）：只保留 mysql_compat.py 的
         # 手动埋点（start_db_span/end_db_span，带 db.operation/rowcount 且显式挂父上下文），
