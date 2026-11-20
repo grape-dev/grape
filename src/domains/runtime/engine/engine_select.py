@@ -41,8 +41,7 @@ _PRIO_GLOBAL = 50
 _PRIO_LOCAL = 90
 
 # ===== Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射 =====
-# 撤销 opencode/codearts/hermes 的类型刻板映射——引擎能力与引擎类型无关，
-# 所有引擎默认不限角色；仅显式声明 role_tags 时才按声明硬过滤。
+# 撤销 opencode/codearts/hermes 的类型刻板映射——引擎能力与引擎类型无关。
 # （类型默认映射曾把 hermes 锁在 vod/chat/sre、opencode 锁在 coding/issue/qa，
 # 误伤跨类型绑定的合法场景；保留显式声明轨，默认口径 = 不限。）
 _DEFAULT_ENGINE_ROLE_TAGS: dict = {}
@@ -301,7 +300,7 @@ def selector_candidate_engines(selector: dict, agent_type: str,
 
     判定顺序即语义（对齐 claim 六层守卫，正交勿合并）：
       selector 匹配（agent_tags 派生快照）→ #658 角色硬过滤 → 健康尺子（#259 语义）→
-      SRE scope 收紧（user/repo 两档）→ 凭据 scope 隔离（第 ⑥ 级同尺）→ 能力行。
+      凭据 scope 隔离（第 ⑥ 级同尺）→ 能力行（Issue #3396：SRE scope 收紧档已删）。
     返回 (matched, dropped)：matched 为通过全部过滤的引擎列表；
     dropped 为 [{"runtime_id", "name", "reason"}]，reason ∈ selector/role/offline/stale/scope，
     供命中预览分层标注与配置死/瞬时死分流判定复用。
@@ -311,7 +310,6 @@ def selector_candidate_engines(selector: dict, agent_type: str,
         return [], []
     db, lock = _db()
     matched, dropped = [], []
-    _is_sre = _sre_no_broadcast(agent_type)
     with lock:
         c = db.cursor()
         for m in members:
@@ -321,16 +319,14 @@ def selector_candidate_engines(selector: dict, agent_type: str,
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": "selector"})
                 continue
             # #658 角色硬守卫（selector 命中后叠加：角色六词不进 selector，防双入口漂移 D8）
-            roles = engine_role_tags(m["name"], m.get("role_tags") or "")
-            if roles is not None and is_agent_role(agent_type) and agent_type not in roles:
+            # Issue #3396：口径统一到 engine_capabilities（与派发/认领同一把尺子，UI 勾选即生效）；
+            # 空标签 fail-closed（A7），role_tags 注册声明不再参与守卫判定（A4）。
+            if is_agent_role(agent_type) and not engine_allows_role(rid, agent_type):
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": "role"})
                 continue
             if not _health_ok(m):
                 why = "offline" if (m.get("status") or "") != "online" else "stale"
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": why})
-                continue
-            if _is_sre and m.get("scope") not in ("user", "repo"):
-                dropped.append({"runtime_id": rid, "name": m["name"], "reason": "scope"})
                 continue
             # 第 ⑥ 级 scope 隔离（claim_by_tag 同尺）：别人的 user 档引擎、别的仓库的
             # repo 档引擎永远认领不到本场景任务，不能算命中（徽章/入队门禁同源）。
@@ -420,12 +416,10 @@ def is_agent_role(tag: str) -> bool:
     return (tag or "").strip().lower() in KNOWN_AGENT_ROLES
 
 def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
-    """解析引擎有效角色集（双轨：显式 role_tags 声明 > 引擎类型默认映射兜底）。
+    """解析引擎注册声明的 role_tags（注册透传轨）。
 
-    返回：
-    - 非空 list：引擎可服务的 agent_type 集合（硬过滤口径）
-    - None：不限角色（引擎类型不在默认映射且未显式声明——存量引擎零配置兼容，
-      不因缺声明被全量排除）
+    Issue #3396：角色守卫已统一改读 engine_capabilities（单一事实源，UI 勾选即生效），
+    本函数仅供注册链路透传解析与展示，**守卫不再消费**；返回值 None = 未声明（仅注册语义）。
     """
     raw = (role_tags_json or "").strip()
     if raw:
@@ -440,33 +434,67 @@ def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
     name = (engine_name or "").strip().lower()
     return _DEFAULT_ENGINE_ROLE_TAGS.get(name)
 
-def _member_role_tags(m: dict) -> list | None:
-    """从候选引擎成员 dict 取有效角色集（成员未带 role_tags 字段时按 name 解析）。"""
-    return engine_role_tags(m.get("name") or "", m.get("role_tags") or "")
+def engine_capability_tags(runtime_id: int) -> list:
+    """读引擎角色标签（Issue #3396 单一事实源：engine_capabilities，UI 勾选即生效）。
+
+    返回 enabled=1 的标签列表；runtime_id 无效或查询异常 → 空列表。
+    空标签 fail-closed（A7 裁定：手动清空标签的引擎任何角色两侧均不可调度，
+    绝不回退「不限角色」敞开口径）；存量未手工设标签的引擎由注册/本机发现
+    自动补 'all'（A8），行为与基线一致。
+    """
+    rid = runtime_id or 0
+    if not rid:
+        return []
+    try:
+        rid = int(rid)
+    except (TypeError, ValueError):
+        return []
+    try:
+        db, lock = _db()
+        with lock:
+            c = db.cursor()
+            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+            return [str(r[0] or "").strip().lower() for r in c.fetchall() if str(r[0] or "").strip()]
+    except Exception:
+        return []
+
+
+def engine_allows_role(runtime_id: int, agent_type: str) -> bool:
+    """Issue #3396 统一判定：引擎是否可服务指定角色（engine_capabilities 单一事实源）。
+
+    agent_type ∈ tags 或 'all' ∈ tags 即放行；空标签/查询异常 fail-closed。
+    agent_type 为空（未指定角色）不限制。
+    """
+    at = (agent_type or "").strip().lower()
+    if not at:
+        return True
+    tags = engine_capability_tags(runtime_id)
+    return at in tags or "all" in tags
+
+
+def _member_role_tags(m: dict) -> list:
+    """从候选引擎成员读有效角色集（Issue #3396：engine_capabilities 单一事实源；空 = fail-closed）。"""
+    return engine_capability_tags(m.get("runtime_id") or 0)
 
 def _filter_by_role(members: list[dict], agent_type: str) -> list[dict]:
-    """Issue #658 角色硬过滤（派发候选筛选最前置）：agent_type ∈ engine 有效角色集。
+    """Issue #658 角色硬过滤（候选筛选最前置）：agent_type ∈ engine 有效角色集。
 
-    有效角色集为 None 的引擎（未知类型且未显式声明）不参与过滤（兼容口径）。
+    Issue #3396：有效角色集改读 engine_capabilities（单一事实源，UI 勾选即生效，
+    与 _filter_by_tags 同口径）；空标签 fail-closed——无标签引擎不参与任何角色调度。
     """
     at = (agent_type or "").strip().lower()
     if not at or not members:
         return members
-    out = []
-    for m in members:
-        roles = _member_role_tags(m)
-        if roles is None or at in roles:
-            out.append(m)
-    return out
+    return [m for m in members if engine_allows_role(m.get("runtime_id") or 0, at)]
 
 def _role_no_candidates_detail(members: list[dict], agent_type: str) -> str:
-    """角色硬过滤后无候选的显式错误信息（含 agent_type 与各候选引擎 role_tags）。"""
+    """角色硬过滤后无候选的显式错误信息（含 agent_type 与各候选引擎标签）。"""
     at = (agent_type or "").strip().lower()
     parts = []
     for m in members:
         roles = _member_role_tags(m)
-        parts.append(f"{m.get('name') or '?'}(id={m.get('runtime_id')}):{','.join(roles) if roles else 'any'}")
-    return (f"no engine matches agent_type '{at}' by role_tags "
+        parts.append(f"{m.get('name') or '?'}(id={m.get('runtime_id')}):{','.join(roles) or 'none'}")
+    return (f"no engine matches agent_type '{at}' by engine_capabilities "
             f"(available engines: {'; '.join(parts) or 'none'})")
 
 def _log_role_no_candidates(stage: str, repo_key: str, agent_type: str, scene_id: str,
@@ -1036,7 +1064,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
         _pick_decision("disabled")
         return None
     # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
-    # （SRE 的空列表/非个人级约束在 get_scene_pool_engine_ids 内生效——那里是广播范围的唯一收口）
+    # （Issue #3396：SRE 禁广播特例已删除，广播范围收口统一为角色/健康过滤）
     try:
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         if is_plugin_mode():
@@ -1056,31 +1084,9 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             engine_ids = []
     else:
         engine_ids = []
-    # SRE 派发层约束（sre-repo-worker-relax §1.1）：允许 user+repo 两档（user 优先，
-    # 个人机器环境有登录态优先复用，repo 档作协作兜底）；空 = 无引擎不回退不广播
-    if _sre_no_broadcast(agent_type):
-        if not engine_ids:
-            _pick_decision("engine_unavailable", reason="sre_no_bound_engine")
-            return None
-        members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
-        members = _filter_by_tags(members, agent_type)
-        members = [m for m in members if m.get("scope") in ("user", "repo")]
-        for _scope in ("user", "repo"):
-            cand = _apply_filters([m for m in members if m.get("scope") == _scope], cfg)
-            if not cand:
-                continue
-            cand = _filter_by_health(cand)
-            if not cand:
-                continue
-            if cfg.get("rule") == "order":
-                _rid = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-            else:
-                _rid = random.choice(cand)["runtime_id"]
-            _pick_decision("selected", selected=_rid,
-                           reason=f"scope={_scope},rule={cfg.get('rule')}", members=members)
-            return _rid
-        _pick_decision("engine_unavailable", reason="sre_no_healthy_engine", members=members)
-        return None
+    # Issue #3396：删除 SRE 禁广播特例（_sre_no_broadcast）——SRE 与其他角色同走
+    # 通用选择链（role → tag → scope → health），global 池广播放开；官方机器由
+    # engine_capabilities 角色守卫（派发侧 _filter_by_role + 认领侧 #658 守卫）拦截。
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
         members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
@@ -1121,15 +1127,6 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
-def _sre_no_broadcast(agent_type: str) -> bool:
-    """SRE Agent 是否禁止广播（sre-repo-worker-relax-design §1.1）。
-
-    派发层约束：SRE 任务只允许 user/repo 两档引擎（user 优先，repo 作协作兜底）；
-    空列表 = 无引擎（不广播、不回退）。global 池不放行：SRE 执行部署/运维命令，
-    广播到任意用户贡献的机器责任边界不清（sre-repo-worker-relax 安全边界）。
-    """
-    return str(agent_type or "").strip().lower() == "sre"
-
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
                               issue_creator: str = "") -> str | None:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
@@ -1138,19 +1135,21 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     离线（status!=online）或心跳超时（last_seen_at 距今 > _RUNTIME_STALE_SECONDS，默认 100s）
     的引擎不写入 pool。
 
-    SRE 专属（sre-repo-worker-relax §1.1）：只保留 user/repo 两档引擎；
-    场景没配 SRE 引擎 → None（空 = 无引擎，不广播，调用方报错）。
+    Issue #3396：删除 SRE 禁广播特例（原 sre-repo-worker-relax §1.1 只放行
+    user/repo 两档、空 = 全灭）——SRE 与其他角色同口径：未配置节点 → 全量广播，
+    越权机器由 engine_capabilities 角色守卫在派发侧（_filter_by_role）与认领侧
+    （service.claim_by_tag #658 守卫）拦截。
 
     Issue #653（空值语义单点收口 + 严格模式开关，默认严格）/ Issue #2791 回归复核：
     通过 get_scene_engine_binding 区分节点绑定四态（no_scene/no_node/unbound/bound）：
     - bound（已配置）：候选解析为空（引擎行不存在/被删）或全部不健康 → None（显式报错，
       绝不回退全局池）；strict_scene_engines=False 时回退 ""（广播）但打告警日志。
-    - unbound / no_node（未配置）：非 SRE → ""（全量广播，存量行为不变）。
+    - unbound / no_node（未配置）：""（全量广播，存量行为不变）。
     - 场景查询异常：严格模式 fail-closed → None；关闭时 ""（广播）+ 告警。
 
     返回值（三方语义，调用方必须用 is None 显式区分 None 与 ""）：
     - JSON 字符串：场景配了引擎且有健康的 → 限定名单（仅健康引擎）
-    - ""：场景没配引擎 / node 不存在（原行为不变，SRE 除外）
+    - ""：场景没配引擎 / node 不存在（原行为不变）
     - None：场景配了引擎但全部不健康 / 解析为空 / 查询异常（严格模式）→ 全灭，
       调用方不入队并明确报错（Issue #259 方案A / #653）
     """
@@ -1159,16 +1158,13 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
         user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
         # Issue #541：仓内存在性兜底——scene_id 在该仓库查不到（如误绑模板场景名）
-        # 时不静默回退全局模板行。SRE 直接按派发失败处理（None，调用方按
-        # 「场景仓内不存在」报错）；非 SRE 维持全量广播原行为（仅告警留痕）。
+        # 时不静默回退全局模板行（仅告警留痕）。
         if repo_key:
             try:
                 from src.api.pipeline_config import scene_exists_in_repo
                 if not scene_exists_in_repo(scene_id, repo_key):
                     log.warning(f"get_scene_pool_engine_ids: scene={scene_id} not found in repo "
                                 f"{repo_key}, skip global template fallback for dispatch (Issue #541)")
-                    if _sre_no_broadcast(agent_type):
-                        return None
             except Exception as _e541:
                 log.warning(f"get_scene_pool_engine_ids: repo existence check failed: {_e541}")
         # Issue #653：严格模式开关（engine-selection.json strict_scene_engines，默认 True）
@@ -1189,11 +1185,8 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                               result="query_failed_strict")
                 return None
             return ""
-        # SRE 空 = 无引擎：不广播，直接全灭语义（Q2 裁定，区别于其他 agent 的 "" 广播）
-        if _sre_no_broadcast(agent_type) and not ids and not _bound_uids:
-            return None
         if _bound_uids:
-            # uid 池路径（#646 轨语义同款）：uid 解析 + 健康/角色/SRE 同一把尺子
+            # uid 池路径（#646 轨语义同款）：uid 解析 + 健康/角色同一把尺子（Issue #3396 去 SRE 特例）
             members = dedupe_engines(_engines_by_uids(_bound_uids, _norm_repo(repo_key)))
             _decision_log("pool_engine_uids", repo_key=repo_key, agent_type=agent_type,
                           scene_id=scene_id, bound_engine_uids=_bound_uids,
@@ -1209,11 +1202,6 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                               scene_id=scene_id, bound_engine_uids=_bound_uids, healthy_ids=[],
                               result="bound_engines_missing")
                 return None
-            if _sre_no_broadcast(agent_type):
-                _before = len(members)
-                members = [m for m in members if m.get("scope") in ("user", "repo")]
-                if len(members) < _before:
-                    log.warning(f"get_scene_pool_engine_ids: SRE(uid轨) 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
             if members:
                 _pre_role = list(members)
                 members = _filter_by_role(members, agent_type)
@@ -1242,22 +1230,15 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                               scene_id=scene_id, bound_engine_ids=ids, healthy_ids=[],
                               result="bound_engines_missing")
                 return None
-            # SRE 派发层约束（Q3 裁定）：只允许 user/repo 档（配置后引擎 scope 被改也不放行 global）
-            if _sre_no_broadcast(agent_type):
-                _before = len(members)
-                members = [m for m in members if m.get("scope") in ("user", "repo")]
-                if len(members) < _before:
-                    log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
-            # Issue #658：角色硬过滤（候选筛选最前置，先于健康过滤）——
-            # agent_type ∈ engine 有效角色集（显式 role_tags > 引擎类型默认映射）；
-            # 无候选返回 None（调用方明确报错，不静默降级/广播给不匹配引擎）
-            # SRE 档位过滤后已空时不重复报「角色不匹配」（沿用 #653 的 all_offline 语义）
-            if members:
-                _pre_role = list(members)
-                members = _filter_by_role(members, agent_type)
-                if not members:
-                    _log_role_no_candidates("pool_engine_ids", repo_key, agent_type, scene_id, _pre_role)
-                    return None
+            # Issue #658/#3396：角色硬过滤（候选筛选最前置，先于健康过滤）——
+            # agent_type ∈ engine_capabilities（单一事实源，UI 勾选即生效，空标签
+            # fail-closed）；无候选返回 None（调用方明确报错，不静默降级/广播给
+            # 不匹配引擎）
+            _pre_role = list(members)
+            members = _filter_by_role(members, agent_type)
+            if not members:
+                _log_role_no_candidates("pool_engine_ids", repo_key, agent_type, scene_id, _pre_role)
+                return None
             # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
             _dropped = []
             for m in members:
@@ -1282,29 +1263,17 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
             return None
     return ""
 
-def resolve_local_engine(user_id: int = 0) -> int | None:
-    """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
+def _pick_local_engine(user_id: int = 0, agent_type: str = "") -> int | None:
+    """只挑「本机直连」档的健康引擎（role 过滤 + 同主机限定 + 用户稳定取模）。
 
-    用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
-    无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
-    避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
-
-    user_id 非空且非哨兵（chat 场景，per-user-random-default-engine 设计；D105 后为 uuid
-    str）：候选限定**当前这台
-    主控机**的直连引擎（host_name=本机 hostname，ELB 分流下请求落哪台就直连哪台，
-    跨主机的直连行无法本机拉进程），再按 user_id 稳定取模挑选——同一用户在同一台
-    机器上恒定同一引擎，不同用户自然散开，避免全员滑向同一个默认引擎（此前取
-    MIN(id) 造成单引擎压力集中）。
-    user_id=0（IM 等无用户上下文兜底）：维持旧行为取最小 id。
-
-    结果缓存 30 秒——引擎列表不频繁变化，缓存可大幅减少 DB 查询。
+    从 resolve_local_engine 抽出（2026-11-20），供 chat 四档兜底复用：
+    resolve_local_engine 语义不变（local → global），chat 走 resolve_chat_engine
+    （local → user → repo → global，用户裁定）。
     """
-    now = _time.time()
-    _ck = _resolve_local_cache.get("expires", 0)
-    if _ck > now and not user_id:
-        return _resolve_local_cache.get("result")
     cand = query_engines("", "local")
     cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
+    if agent_type:
+        cand = [m for m in cand if engine_allows_role(m.get("runtime_id") or 0, agent_type)]
     if user_id:
         # 方案 A：只挑当前主控机自己的直连引擎（别的 master 的行留显示，不留执行）
         try:
@@ -1315,10 +1284,97 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
         except Exception:
             pass
     if not cand:
-        # 回退：任意健康全局引擎（chat 未配置时可用远端 worker 引擎入队执行）
-        cand = query_engines("", "global")
-        cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
+        return None
+    if user_id:
+        # 稳定取模：同一用户恒定命中同一引擎（会话连续），用户间均匀散开
+        _seed_src = str(user_id)
+        try:
+            _seed = int(_seed_src)
+        except ValueError:
+            import hashlib as _hl
+            _seed = int(_hl.md5(_seed_src.encode("utf-8")).hexdigest()[:12], 16)
+        _ids = sorted(r["runtime_id"] for r in cand)
+        return _ids[_seed % len(_ids)]
+    return min(cand, key=lambda r: r["runtime_id"])["runtime_id"]
+
+
+def resolve_chat_engine(user_id: int = 0, username: str = "", repo_key: str = "",
+                        agent_type: str = "chat") -> int | None:
+    """Chat 未显式绑定时的默认引擎：**本机 → 个人 → 仓库 → 全局**（用户 2026-11-20 裁定）。
+
+    覆盖 engine-selection-design.md §8.2 的「local → global」两档：用户的私有引擎与
+    当前仓库引擎现在也是合法兜底（此前会被跳过，直接落到排队更慢的 global worker）。
+    每一档都必须过角色过滤（engine_capabilities 含 agent_type 或 all；空标签 fail-closed），
+    不符合的档位视为无候选、继续往后找；全都没有返回 None（调用方给明确提示）。
+    """
+    at = (agent_type or "chat").strip().lower()
+    try:
+        rid = _pick_local_engine(user_id, agent_type=at)
+    except Exception:  # noqa: BLE001 - 本机档取数失败不阻断后续档位
+        rid = None
+    if rid:
+        return rid
+    plans = (
+        ("user", "", {"username": username, "user_id": user_id}),
+        # repo 档同样带 username：空 repo_key 时靠它把候选收紧到"用户已加入的仓库"，
+        # 否则只有在明确指定 repo_key 时才有候选（别人仓库的引擎永远不可用）。
+        ("repo", repo_key, {"username": username}),
+        ("global", "", {}),
+    )
+    for scope, rk, extra in plans:
+        try:
+            cand = query_engines(rk, scope, agent_type=at, **extra)
+            cand = _apply_filters([dict(m, scope=scope) for m in cand], load_engine_selection())
+            cand = [m for m in cand if engine_allows_role(m.get("runtime_id") or 0, at)]
+        except Exception:  # noqa: BLE001 - 单档异常继续下一档
+            continue
+        if cand:
+            return min(cand, key=lambda r: r["runtime_id"])["runtime_id"]
+    return None
+
+
+def resolve_local_engine(user_id: int = 0, agent_type: str = "") -> int | None:
+    """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
+
+    用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
+    无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
+    避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
+
+    Issue #3396：agent_type 非空时（chat 调用面统一传 "chat"），本机直连与
+    global 回退候选均须过角色过滤（engine_capabilities 勾了 agent_type 或 all，
+    空标签 fail-closed）；无合规候选返回 None（调用方给出"无可用引擎"明确提示，
+    不静默调度到越出可选面的引擎），决策日志 role_no_candidates 留痕。
+
+    user_id 非空且非哨兵（chat 场景，per-user-random-default-engine 设计；D105 后为 uuid
+    str）：候选限定**当前这台
+    主控机**的直连引擎（host_name=本机 hostname，ELB 分流下请求落哪台就直连哪台，
+    跨主机的直连行无法本机拉进程），再按 user_id 稳定取模挑选——同一用户在同一台
+    机器上恒定同一引擎，不同用户自然散开，避免全员滑向同一个默认引擎（此前取
+    MIN(id) 造成单引擎压力集中）。
+    user_id=0（IM 等无用户上下文兜底）：维持旧行为取最小 id。
+
+    结果缓存 30 秒——仅 user_id=0 且未指定 agent_type 的旧语义调用使用；
+    带角色过滤的结果不缓存（改标签后 30s 内不得仍落不合规引擎）。
+    """
+    now = _time.time()
+    _ck = _resolve_local_cache.get("expires", 0)
+    if _ck > now and not user_id and not agent_type:
+        return _resolve_local_cache.get("result")
+    # 本机档：抽到 _pick_local_engine（与 chat 四档兜底共用一份实现，避免规则漂移）
+    _local_rid = _pick_local_engine(user_id, agent_type=agent_type)
+    if _local_rid:
+        return int(_local_rid)
+    # 回退：任意健康全局引擎（chat 未配置时可用远端 worker 引擎入队执行）；
+    # Issue #3396：global 回退同样必须过 agent_type 角色过滤
+    cand = query_engines("", "global")
+    cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
+    if agent_type:
+        _role_trace = list(cand)
+        cand = [m for m in cand if engine_allows_role(m.get("runtime_id") or 0, agent_type)]
     if not cand:
+        if agent_type and _role_trace:
+            # A6：存在健康候选但均未勾角色（chat/all）→ 显式留痕，绝不静默放行
+            _log_role_no_candidates("resolve_local_engine", "", agent_type, "", _role_trace)
         return None
     if user_id:
         # 稳定取模：同一用户恒定命中同一引擎（会话连续），用户间均匀散开
@@ -1334,8 +1390,9 @@ def resolve_local_engine(user_id: int = 0) -> int | None:
         result = _ids[_seed % len(_ids)]
     else:
         result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
-    _resolve_local_cache["result"] = result
-    _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
+    if not user_id and not agent_type:
+        _resolve_local_cache["result"] = result
+        _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
     return result
 
 def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
@@ -1357,11 +1414,14 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
         return random.choice(cand)["runtime_id"]
     return None
 
-def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "") -> list[dict]:
+def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str = "",
+                  user_id: int | str = 0) -> list[dict]:
     """返回某仓库在某档位的候选引擎：repo=仓库级；global=远端全局；local=本机直连。
     agent_type 非空时，只返回标签匹配的引擎（tags 包含 agent_type 或 "all"）。
-    username 非空时，user scope 只返回该用户的个人引擎。
-    repo scope 只返回当前仓库的仓库级引擎（按 repo_key 过滤 owner_id）。"""
+    user scope：user_id 非空时**按 owner_id 精确过滤**（别人名下的个人引擎绝不返回）；
+    owner_id 为空的存量行才用 username 兜底匹配。只给 username 时维持旧行为。
+    repo scope 只返回当前仓库的仓库级引擎（按 repo_key 过滤 owner_id）；
+    空 repo_key 时按当前用户加入的仓库收紧，无 username 则空集（别人仓库的引擎不可用）。"""
     repo = _norm_repo(repo_key)
     db, lock = _db()
     # 收集用户加入的仓库列表（用于 repo scope 无 repo_key 时的回退过滤）
@@ -1395,14 +1455,34 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         f"AND rc.owner_id IN ({_ph}) ORDER BY r.id",
                         _args)
                 else:
-                    c.execute(
-                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
-                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
-                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
-                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0), "
-                        " '' AS host_name, COALESCE(LOWER(r.engine_uid),''), COALESCE(r.role_tags,'')"
-                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                        "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
+                    # 2026-11-20 用户裁定：「别人仓库的也不能用」。
+                    # 空 repo_key 时**不再**返回全部仓库级引擎（那会把别人仓库的执行资源
+                    # 当成本仓库候选，兜底/计费都落到别人头上）。只按当前用户加入的仓库收紧；
+                    # 连 username 都没有 → 空集（fail-closed），宁可不给候选也不越界。
+                    from src.kernel.repo_key import repo_key_candidates
+                    _repo_cands: list[str] = []
+                    for _r in sorted(user_repos):
+                        _repo_cands.extend(repo_key_candidates(_r))
+                    if not _repo_cands:
+                        c.execute(
+                            "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                            " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                            " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                            " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0), "
+                            " '' AS host_name, COALESCE(LOWER(r.engine_uid),''), COALESCE(r.role_tags,'')"
+                            "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                            "WHERE 1=0")
+                    else:
+                        _ph2 = ",".join("?" * len(_repo_cands))
+                        c.execute(
+                            "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                            " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                            " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                            " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0), "
+                            " '' AS host_name, COALESCE(LOWER(r.engine_uid),''), COALESCE(r.role_tags,'')"
+                            "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                            "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
+                            f"AND rc.owner_id IN ({_ph2}) ORDER BY r.id", tuple(_repo_cands))
             elif scope == "local":
                 # 本机引擎（credential_id=0）对所有人可见；host_name 区分多台主控机
                 # （per-user-random-default-engine 方案 A 靠它过滤"当前这台主控机"）
@@ -1413,7 +1493,21 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                     " COALESCE(LOWER(engine_uid),''), COALESCE(role_tags,'')"
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
-                if username:
+                _uid_s = str(user_id or "").strip()
+                if _uid_s:
+                    # 2026-11-20 用户裁定：个人档必须按 owner_id 精确过滤（个人引擎属私有设备，
+                    # 绝不能把别人的机器当着"个人档"返回）。存量行 owner_id 为空时用 owner_name 兜底。
+                    c.execute(
+                        "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
+                        " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
+                        " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=r.id AND enabled=1),"
+                        " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0), "
+                        " '' AS host_name, COALESCE(LOWER(r.engine_uid),''), COALESCE(r.role_tags,'')"
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.credential_id>0 AND rc.scope='user' AND rc.status='active' "
+                        "AND (rc.owner_id=? OR (COALESCE(rc.owner_id,'')='' AND rc.owner_name=?)) ORDER BY r.id",
+                        (_uid_s, username or ""))
+                elif username:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                         " COALESCE(rc.device_name,''), COALESCE(rc.owner_name,''), COALESCE(rc.owner_id,''),"
@@ -1809,12 +1903,10 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
         except Exception:
             tags = []
         if agent_type not in tags and "all" not in tags:
+            # Issue #3396：角色硬过滤口径已与标签口径同源（engine_capabilities
+            # 单一事实源，_filter_by_role/_filter_by_tags 同一把尺子），不再单列
+            # role_mismatch——本 reason 即角色不匹配的取证口径。
             reasons.append(f"tag_mismatch({','.join(tags) or 'none'})")
-        # Issue #658：角色硬过滤口径（role_tags/引擎类型默认映射）
-        _at = (agent_type or "").strip().lower()
-        _roles = _member_role_tags(m)
-        if _at and _roles is not None and _at not in _roles:
-            reasons.append(f"role_mismatch({','.join(_roles)})")
     if rid:
         try:
             from src.domains.runtime.engine.health_scorer import is_healthy as _score_ok

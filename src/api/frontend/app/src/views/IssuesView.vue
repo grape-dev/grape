@@ -2817,13 +2817,14 @@ function updateSceneWarn() {
   const s = modal.scenes.find((x) => x.id === modal.sceneId)
   if (!s || !s.all_offline) return
   const nodes = (s.offline_nodes || []).join('、')
+  // Issue #3396：SRE 未选机器特例已删除（SRE 空绑定 = 广播模式，不再是告警条件；
+  // sre_unbound 字段保留恒 False，仅作 API 兼容）。
   modal.sceneWarn = {
     sceneId: s.id,
-    reason: s.sre_unbound
-      ? 'SRE 节点未选择机器（SRE 不支持广播模式），部署任务无法执行。请为 SRE 节点绑定个人或仓库级机器。'
-      : '该场景绑定的引擎当前全部离线' +
-        (nodes ? '（离线节点：' + nodes + '）' : '') +
-        '，创建后任务将无法派发。',
+    reason:
+      '该场景绑定的引擎当前全部离线' +
+      (nodes ? '（离线节点：' + nodes + '）' : '') +
+      '，创建后任务将无法派发。',
   }
 }
 function goSceneRebind() {

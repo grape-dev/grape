@@ -13,7 +13,7 @@ Issue #501 迁移：探测从 /scenes/with-pipeline（N 场景 × M 节点，拉
 3. 无引擎绑定的节点不参与判定
 4. enabled=False 的节点跳过
 5. 校验异常降级为不标记（不挡创建入口）
-6. SRE 空绑定 → sre_unbound=True（「未选择机器」话术，区别于引擎全灭）
+6. Issue #3396：SRE 空绑定特例已删除（空绑定 = 广播模式）→ sre_unbound 恒 False
 7. 场景不存在 → all_offline=False（不拦创建入口）
 """
 import os
@@ -104,13 +104,14 @@ def test_disabled_node_skipped(monkeypatch):
 
 
 def test_sre_unbound_flagged(monkeypatch):
-    """SRE 节点未选机器（无 engine_runtime_ids）→ sre_unbound=True、all_offline=True。"""
+    """Issue #3396：SRE 空绑定特例已删除——未绑定的 SRE 节点 = 广播模式，
+    不再标记 sre_unbound / all_offline（字段保留恒 False 仅作 API 兼容）。"""
     scene_list = [{
         "id": "scene_sre", "name": "sre", "display_name": "sre",
         "description": "", "work_branch": "main", "created_by": "",
         "scene_type": "standard", "pr_subscription_enabled": 0, "linked_repos": [],
         "nodes": [
-            # SRE 空绑定：无 engine_runtime_ids（SRE 不支持广播 → 无引擎）
+            # SRE 空绑定：无 engine_runtime_ids（Issue #3396 后 = 广播模式，非告警）
             {"tag": "sre", "skill": "s3"},
             # coding 正常
             {"tag": "coding", "skill": "s1", "engine_runtime_ids": [1]},
@@ -121,8 +122,8 @@ def test_sre_unbound_flagged(monkeypatch):
     import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
-    assert s["sre_unbound"] is True
-    assert s["all_offline"] is True
+    assert s["sre_unbound"] is False
+    assert s["all_offline"] is False
     assert s["offline_nodes"] == []  # coding 健康，不在离线列表
 
 

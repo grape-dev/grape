@@ -2437,34 +2437,39 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
             # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
             # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
             # 这里用 Python 循环 LIMIT N 逐个检查。
-            # Issue #658：认领侧角色守卫——引擎有效角色集（显式 role_tags > 引擎类型默认映射）
-            # 非空时，任务 pool_tag（已知节点角色）必须 ∈ 角色集才可认领（堵全量广播漏洞：
-            # #90 vod 任务被 codearts 引擎按 tag='all' 认领 → rc=1）。角色集为 None
-            # （未知类型且未显式声明）不限制；pool_tag 非已知角色（自定义路由 tag）不受约束。
-            _engine_roles = None
+            # Issue #658/#3396：认领侧角色守卫——角色集统一读 engine_capabilities
+            # （单一事实源，UI 勾选即生效；空标签 fail-closed）。任务 pool_tag 为
+            # 已知节点角色时必须 ∈ 引擎标签集（或引擎勾了 all）才可认领；pool_tag
+            # 非已知角色（自定义路由 tag）不受约束。step 1 的标签能力匹配
+            # （ec.tag=? OR 'all'）与本守卫同源，此处为纵深防御（防止上游口径松动）。
             try:
-                from src.domains.runtime.engine.engine_select import engine_role_tags as _ert, is_agent_role as _is_role
-                _er_row = c.execute(
-                    "SELECT name, COALESCE(role_tags,'') FROM agent_runtimes WHERE id=?",
-                    (runtime_id,)).fetchone()
-                if _er_row:
-                    _engine_roles = _ert(_er_row[0] or "", _er_row[1] or "")
+                from src.domains.runtime.engine.engine_select import (
+                    engine_capability_tags as _ect, is_agent_role as _is_role)
+            except Exception as _gie:
+                # 复审 Informational 3：守卫依赖导入失败时显式 fail-closed（不认领），
+                # 不再让 ImportError 直接中断认领路径且无留痕。
+                log.warning(f"claim_by_tag: role guard import failed, fail-closed: {_gie}")
+                return None
+            _engine_roles: list = []
+            try:
+                _engine_roles = _ect(runtime_id) or []
             except Exception as _ere:
-                log.warning(f"claim_by_tag: role tags lookup failed for engine {runtime_id}: {_ere}")
-                _engine_roles = None
+                log.warning(f"claim_by_tag: capability tags lookup failed for engine {runtime_id}: {_ere}")
+                _engine_roles = []  # 查询异常按空标签处理（fail-closed）
             _tried_ids = [task_id]
             _max_tries = 20  # 防止全表扫描
             while True:
                 if expected_task_id is not None:
                     # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），
-                    # 此处补角色硬校验：不匹配 → fail-closed（不尝试其他任务）
-                    if _engine_roles is not None:
-                        _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-                        _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
-                        if _is_role(_bt_tag) and _bt_tag not in _engine_roles:
-                            log.warning(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} "
-                                        f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658), reject bound claim")
-                            return None
+                    # 此处补角色硬校验（engine_capabilities 口径）：不匹配 → fail-closed
+                    # （不尝试其他任务）
+                    _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
+                    if (_is_role(_bt_tag) and _bt_tag not in _engine_roles
+                            and "all" not in _engine_roles):
+                        log.warning(f"claim_by_tag: engine {runtime_id} caps={_engine_roles} "
+                                    f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658/#3396), reject bound claim")
+                        return None
                     # Issue #1208 ③：selector 守卫（bound fail-closed，不尝试其他任务；
                     # 层级在角色②之后、名单④之前——顺序即语义）
                     if _selector_guard_blocks(c, task_id, runtime_id):
@@ -2476,12 +2481,13 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
                 if _pe_row:
                     _task_pool_tag = (_pe_row[1] or "").strip().lower()
                 _skip = False
-                if (_engine_roles is not None and _is_role(_task_pool_tag)
-                        and _task_pool_tag not in _engine_roles):
-                    # Issue #658：角色不匹配 → 跳过该任务继续尝试下一个（与 pool 名单
-                    # 守卫同款跳过语义，不阻塞队列，也绝不认领不匹配角色任务）
-                    log.info(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} mismatch "
-                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658), skip")
+                if (_is_role(_task_pool_tag) and _task_pool_tag not in _engine_roles
+                        and "all" not in _engine_roles):
+                    # Issue #658/#3396：角色不匹配（engine_capabilities 口径）→ 跳过该任务
+                    # 继续尝试下一个（与 pool 名单守卫同款跳过语义，不阻塞队列，
+                    # 也绝不认领不匹配角色任务）
+                    log.info(f"claim_by_tag: engine {runtime_id} caps={_engine_roles} mismatch "
+                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658/#3396), skip")
                     _skip = True
                 # Issue #1208 ③：selector 守卫（层级在角色②之后、名单④之前——顺序即语义）——
                 # 不匹配跳过该任务继续尝试下一个（与 #658 同款跳过语义，不阻塞队列）

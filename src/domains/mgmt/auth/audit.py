@@ -106,6 +106,7 @@ EVENT_TYPES = frozenset({
     "skill_comment_posted",          # 技能详情页发表评论（Issue #3168 D11：detail 含 skill_id/comment_id/字数，不落评论原文）
     "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
     "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
+    "engine_tag_change",            # 引擎角色标签写入（Issue #3396 F2：add/update/delete/set，detail 含 runtime_id/tag(s)/enabled/priority，不含凭据）
 })
 
 

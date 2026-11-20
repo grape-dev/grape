@@ -925,7 +925,9 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     """
     if not backend and not runtime_id:
         try:
-            _rid = _engines.resolve_local_engine(user_id) or 0
+            # Issue #3396：chat 兜底候选必须过 chat 角色过滤（engine_capabilities
+            # 勾了 chat/all；无合规候选返回 0 = 前端"无 engine，不可用"，明确不静默）
+            _rid = _engines.resolve_local_engine(user_id, agent_type="chat") or 0
             if _rid:
                 backend = _engines.engine_name(_rid) or ""
                 runtime_id = _rid
@@ -942,18 +944,34 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     兜底按名/默认。修复：裸名 'opencode' 被解析成同名的共享全局 worker。
     queue_remote 强制模式下本机直连行（credential_id=0）无 claim 方=黑洞
     （chat-task-blackhole-local-direct-2026-08.md），跳过本机解析直接按名找远端 worker。
+
+    Issue #3396：各级解析结果必须过 chat 角色过滤（engine_capabilities 勾了
+    chat 或 all，空标签 fail-closed），不合规落下一级；全不合规返回 0——
+    调用方给出明确提示，绝不静默调度到越出可选面的引擎。
     """
     if not backend:
         return 0
     _rid = _engines.resolve_instance_id(backend, scope="user")
-    if _rid is not None and _engines.scope_of_runtime(_rid) == "user":
+    if _rid is not None and _engines.scope_of_runtime(_rid) == "user" \
+            and _engines.engine_allows_role(_rid, "chat"):
         return _rid
     if "-" not in backend:
         if _engines.get_execution_mode() != _engines.EXEC_MODE_REMOTE:
             _local = _engines.get_local_direct_runtime_id(backend)
-            if _local:
+            if _local and _engines.engine_allows_role(_local, "chat"):
                 return _local
-    return _engines.get_runtime_id_by_name(backend) or _engines.ensure_default_backend(backend) or 0
+    _by_name = _engines.get_runtime_id_by_name(backend) or 0
+    if _by_name and _engines.engine_allows_role(_by_name, "chat"):
+        return _by_name
+    _default = _engines.ensure_default_backend(backend) or 0
+    if _default and _engines.engine_allows_role(_default, "chat"):
+        return _default
+    if _by_name or _default:
+        # 末级兜底命中但未勾 chat/all → 明确拒绝（A6），留痕不静默
+        log.warning(f"_resolve_chat_runtime_id: backend '{backend}' resolved to engine(s) without "
+                    f"chat capability (by_name={_by_name}, default={_default}), "
+                    f"chat fallback rejected (Issue #3396)")
+    return 0
 
 
 def _chat_config_engine_uid_rt(runtime_id: int) -> str:

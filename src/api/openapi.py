@@ -75,6 +75,9 @@ def _iter_routes(route):
 _PUBLIC_AUTH_DEPS = frozenset({
     "get_current_user_or_api_key",
     "get_user_or_none",  # a2a 软认证（JWT/session/api key 任一；None 交给内部 bot 鉴权）
+    # Issue #3396：角色标签写权限收紧依赖（平台管理员 JWT / 用户认证二选一，
+    # session_token 体内拒绝）——挂载端点对外（PUT /runtimes/{id}/tags）
+    "_resolve_user_or_platform_admin",
 })
 
 # session 强制但依赖链不可见（体内 `_repo_token`/`_repo_platform_token` 判 auth_type）的 operation_id。
@@ -127,6 +130,9 @@ def token_scope(route) -> str | None:
     if op_id in _SESSION_ONLY_OPERATIONS or path.startswith(_SESSION_ONLY_PATH_PREFIXES):
         return "session_only"
     if "require_no_session_token" in names:
+        return "user_only"
+    # Issue #3396：写权限收紧依赖同样体内拒绝 session_token（账户/平台管理语义）→ user_only
+    if "_resolve_user_or_platform_admin" in names:
         return "user_only"
     if names & _PUBLIC_AUTH_DEPS:
         return "dual"
