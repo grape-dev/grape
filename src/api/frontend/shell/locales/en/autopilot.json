@@ -219,7 +219,11 @@
     "result_label": "Result:",
     "no_result": "(none)",
     "running_hint": "Running...\n",
-    "load_failed": "Failed to load: {{msg}}"
+    "load_failed": "Failed to load: {{msg}}",
+    "log_copy": "Copy",
+    "log_copied": "Copied",
+    "log_empty": "No log output yet",
+    "log_loading": "Loading..."
   },
   "findings": {
     "none_found": "No issues found",

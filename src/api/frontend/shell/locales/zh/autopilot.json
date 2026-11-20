@@ -219,7 +219,11 @@
     "result_label": "执行结果:",
     "no_result": "(无)",
     "running_hint": "正在执行中...\n",
-    "load_failed": "加载失败: {{msg}}"
+    "load_failed": "加载失败: {{msg}}",
+    "log_copy": "复制",
+    "log_copied": "已复制",
+    "log_empty": "暂无日志输出",
+    "log_loading": "加载中..."
   },
   "findings": {
     "none_found": "未发现问题",

@@ -884,6 +884,25 @@
       </div>
     </div>
 
+    <!-- ═══ 执行日志弹窗（页面内自足实现，不依赖 event-view 的全局函数） ═══ -->
+    <div v-if="logDlg.open" class="apv-modal-ov" @click.self="closeLog()">
+      <div class="apv-logdlg">
+        <div class="apv-dlg-head">
+          <span class="apv-dlg-title">📜 {{ logDlg.title }}</span>
+          <span class="apv-logdlg-st">{{ logDlg.status }}</span>
+          <div class="apv-dlg-tools">
+            <button class="apv-dlg-tool" :title="tt('exec.log_copy')" @click="copyLog()">📋</button>
+            <button class="apv-dlg-close" @click="closeLog()">×</button>
+          </div>
+        </div>
+        <div class="apv-logdlg-body">
+          <div v-if="logDlg.loading" class="apv-muted">{{ tt('exec.log_loading') }}</div>
+          <div v-else-if="!logDlg.lines.length" class="apv-muted">{{ tt('exec.log_empty') }}</div>
+          <pre v-else class="apv-logdlg-pre">{{ logDlg.lines.join('\n') }}</pre>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ 行 kebab 菜单 ═══ -->
     <Teleport to="body">
       <div
@@ -1810,11 +1829,119 @@ function toggleExecDetail(e) {
     }
   }
 }
-// 日志按钮：调批8 event-view 的 window.openTaskLog（跨模块契约）
-function openTaskLog(e) {
-  if (G.window.openTaskLog && e.agent_task_id) {
-    G.window.openTaskLog(e.agent_task_id, tt('exec.log_title', { id: e.id }))
+// 日志按钮：页面内自足实现（不再依赖 event-view 的 window.openTaskLog ——
+// 那个全局函数只在 EventView 挂载时才注册，自动化页面点日志会静默无反应）
+const logDlg = reactive({
+  open: false,
+  taskId: '',
+  title: '',
+  status: '',
+  lines: [],
+  loading: false,
+})
+let logTimer = null
+let logSince = 0
+
+function logLineOf(m) {
+  const ty = m.type || ''
+  const content = m.content || m.tool || ''
+  if (ty === 'text') return content
+  if (ty === 'step_start') return '▶ ' + content
+  if (ty === 'step_finish') return '✓ ' + content
+  if (ty === 'tool_use') return '🔧 ' + (m.tool || content)
+  if (ty === 'error') return '❌ ' + content
+  if (ty === 'reasoning') return '🤔 ' + content
+  if (ty === 'task:retry') return '↻ ' + content
+  return ''
+}
+function scrollLogToEnd() {
+  setTimeout(function () {
+    const el = document.querySelector('.apv-logdlg-body')
+    if (el) el.scrollTop = el.scrollHeight
+  }, 0)
+}
+function pollLog() {
+  if (!logDlg.open || !logDlg.taskId) return
+  const tid = logDlg.taskId
+  API()
+    .get('/task-logs/' + encodeURIComponent(tid) + '/messages?since=' + logSince)
+    .then(function (d) {
+      if (!logDlg.open || logDlg.taskId !== tid) return
+      const msgs = d.messages || []
+      logDlg.loading = false
+      if (msgs.length) {
+        logSince = msgs[msgs.length - 1].seq
+        msgs.forEach(function (m) {
+          const line = logLineOf(m)
+          if (line) logDlg.lines.push(line)
+        })
+        scrollLogToEnd()
+      }
+    })
+    .catch(function (e) {
+      logDlg.loading = false
+      if (!logDlg.lines.length) logDlg.lines.push((e && e.message) || String(e))
+    })
+  API()
+    .get('/runtime/tasks/' + encodeURIComponent(tid) + '/status')
+    .then(function (d) {
+      if (!logDlg.open || logDlg.taskId !== tid) return
+      if (d && d.status) {
+        logDlg.status = d.status
+        if (d.status !== 'running' && d.status !== 'dispatched') stopLogTimer()
+      }
+    })
+    .catch(function () {})
+}
+function stopLogTimer() {
+  if (logTimer) {
+    clearInterval(logTimer)
+    logTimer = null
   }
+}
+function openTaskLog(e) {
+  if (!e || !e.agent_task_id) return
+  closeLog()
+  logDlg.open = true
+  logDlg.taskId = e.agent_task_id
+  logDlg.title = tt('exec.log_title', { id: e.id })
+  logDlg.status = e.status || ''
+  logDlg.lines = []
+  logDlg.loading = true
+  logSince = 0
+  pollLog()
+  logTimer = setInterval(pollLog, 2000)
+}
+function closeLog() {
+  logDlg.open = false
+  logDlg.taskId = ''
+  logDlg.lines = []
+  logDlg.loading = false
+  logSince = 0
+  stopLogTimer()
+}
+function copyLog() {
+  const text = logDlg.lines.join('\n')
+  if (!text) return
+  const nav = G.window.navigator
+  if (nav && nav.clipboard && nav.clipboard.writeText) {
+    nav.clipboard.writeText(text).then(
+      function () {
+        app().showToast(tt('exec.log_copied'))
+      },
+      function () {}
+    )
+    return
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    app().showToast(tt('exec.log_copied'))
+  } catch (err) {}
+  ta.remove()
 }
 function startLogPoll(e) {
   if (logPollTimers[e.id]) clearInterval(logPollTimers[e.id])
@@ -2350,6 +2477,7 @@ onMounted(function () {
 onBeforeUnmount(function () {
   document.removeEventListener('click', onDocClick)
   stopAllLogPolls()
+  closeLog()
 })
 </script>
 
@@ -3511,4 +3639,44 @@ onBeforeUnmount(function () {
   margin-top: 2px;
   color: var(--t3, #86868b);
 }
-</style>
+
+/* 执行日志弹窗 */
+.apv-logdlg {
+  width: min(900px, 94vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg1, #fff);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+.apv-logdlg-st {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--bg3, #eef1f6);
+  color: var(--t2, #5b667b);
+  font-size: 12px;
+}
+.apv-logdlg-body {
+  flex: 1;
+  min-height: 200px;
+  max-height: 70vh;
+  overflow: auto;
+  padding: 10px 14px;
+  background: #0f1420;
+  color: #d7dee9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.apv-logdlg-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+.apv-logdlg-body .apv-muted {
+  color: #8b96a8;
+}</style>
