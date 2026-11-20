@@ -169,3 +169,56 @@ def test_remove_overlay_tree_does_not_follow_links(tmp_path):
 def test_overlay_supported_is_true_everywhere():
     from src.domains.runtime.agents.hermes_acp import _overlay_supported
     assert _overlay_supported() is True
+
+# ── 7. ACP 探活超时可调 + 冷启动重试一次 ──────────────────────────
+def test_acp_probe_timeout_default_and_env(monkeypatch):
+    from src.domains.runtime.engine import agent as mod
+
+    monkeypatch.delenv("RUNTIME_ACP_PROBE_TIMEOUT", raising=False)
+    assert mod._acp_probe_timeout() == 30.0
+
+    monkeypatch.setenv("RUNTIME_ACP_PROBE_TIMEOUT", "45")
+    assert mod._acp_probe_timeout() == 45.0
+
+    monkeypatch.setenv("RUNTIME_ACP_PROBE_TIMEOUT", "2")  # 越界 → 回落默认
+    assert mod._acp_probe_timeout() == 30.0
+
+    monkeypatch.setenv("RUNTIME_ACP_PROBE_TIMEOUT", "abc")
+    assert mod._acp_probe_timeout() == 30.0
+
+
+def test_hermes_probe_retries_once_on_cold_start(monkeypatch):
+    from src.domains.runtime.engine import agent as mod
+
+    calls = {"n": 0}
+
+    def _fake_once(cli_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"status": "fail", "latency": 30.0,
+                    "error": "ACP initialize: no response"}
+        return {"status": "ok", "latency": 23.4, "error": "",
+                "output": "ACP initialize ok (hermes)"}
+
+    monkeypatch.setattr(mod, "_probe_hermes_acp_once", _fake_once)
+    r = mod._probe_hermes_acp("hermes")
+    assert r["status"] == "ok"
+    assert "retried after cold-start timeout" in r["output"]
+    assert calls["n"] == 2
+
+
+def test_hermes_probe_does_not_retry_provider_errors(monkeypatch):
+    from src.domains.runtime.engine import agent as mod
+
+    calls = {"n": 0}
+
+    def _fake_once(cli_path):
+        calls["n"] += 1
+        return {"status": "fail", "latency": 1.2,
+                "error": "ACP prompt error: Internal error [details=admitted_turn_failed]"}
+
+    monkeypatch.setattr(mod, "_probe_hermes_acp_once", _fake_once)
+    r = mod._probe_hermes_acp("hermes")
+    assert r["status"] == "fail"
+    assert "admitted_turn_failed" in r["error"]
+    assert calls["n"] == 1, "provider 侧错误重试无意义，不应重试"

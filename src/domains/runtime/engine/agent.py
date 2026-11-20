@@ -76,8 +76,32 @@ _PROBE_COMMANDS = {
     "atomcode": ["atomcode", "-p", "Reply OK"],
 }
 _PROBE_TIMEOUT = 30
-_ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
+# ACP 探活超时（Issue：Windows 实测 hermes 冷启动 initialize/session/new 会到
+# 20~23s；旧的 15s 会让冷启动机器周期性误报「ACP initialize no response」）。
+# 默认 30s，可用 RUNTIME_ACP_PROBE_TIMEOUT 覆盖（5~300s）。
+_ACP_PROBE_TIMEOUT = 30
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
+
+
+def _acp_probe_timeout() -> float:
+    """ACP initialize/session/new 超时（秒）：env RUNTIME_ACP_PROBE_TIMEOUT 可调。
+
+    非法值/越界回落默认并对 WARNING 一次，避免静默用了错的预算。
+    """
+    raw = (os.environ.get("RUNTIME_ACP_PROBE_TIMEOUT") or "").strip()
+    if not raw:
+        return float(_ACP_PROBE_TIMEOUT)
+    try:
+        val = float(raw)
+    except ValueError:
+        log.warning(f"RUNTIME_ACP_PROBE_TIMEOUT={raw!r} not numeric, "
+                    f"using default {_ACP_PROBE_TIMEOUT}s")
+        return float(_ACP_PROBE_TIMEOUT)
+    if not (5.0 <= val <= 300.0):
+        log.warning(f"RUNTIME_ACP_PROBE_TIMEOUT={raw!r} out of range [5, 300], "
+                    f"using default {_ACP_PROBE_TIMEOUT}s")
+        return float(_ACP_PROBE_TIMEOUT)
+    return val
 # Issue #423: _read_response 防御性行数上限（保险丝，防失控流）。真正终止条件是 deadline；
 # 会话通知量是动态值（三步探活实测 prompt 响应前 36 行），行数上限不得与其耦合。
 _ACP_READ_MAX_LINES = 500
@@ -311,6 +335,31 @@ def _acp_stderr_tail(proc) -> str:
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
+    """hermes ACP 探活（冷启动失败重试一次）。
+
+    Windows 实测：机器冷启动时 initialize/session/new 会跑到 20~23s，恰好超过
+    旧的 15s 预算，于是连续 3 次探活都在 15.0s 处报 no response、把健康的
+    hermes 判成离线。这里两件事：
+      1. 单步超时改成 env 可调（默认 30s，见 _acp_probe_timeout）
+      2. 只在「no response / timeout」（= 可能是冷启动）时重试一次；
+         provider 侧错误（模型不存在、认证失败）重试没有意义，直接返回。
+    """
+    result = _probe_hermes_acp_once(cli_path)
+    if result.get("status") == "fail" and any(
+            k in str(result.get("error", "")) for k in ("no response", "timeout")):
+        retry = _probe_hermes_acp_once(cli_path)
+        if retry.get("status") != "fail":
+            retry["output"] = (str(retry.get("output", "")) +
+                               " (retried after cold-start timeout)").strip()
+            retry["latency"] = round(float(retry.get("latency", 0) or 0), 1)
+            return retry
+        # 两次都失败：把第一次的原因保留下来（第二次可能只是排队更久）
+        retry["error"] = f"{retry.get('error', '')} | first attempt: {result.get('error', '')}"
+        return retry
+    return result
+
+
+def _probe_hermes_acp_once(cli_path: str) -> dict:
     """hermes ACP 模式探活：initialize + session/new + 轻量 prompt，端到端验证引擎可用性。
 
     1. 启动 hermes acp 子进程（和实际任务执行路径一致）
@@ -422,7 +471,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                "params": {"protocolVersion": 1,
                           "clientInfo": {"name": "grape-probe", "version": "1.0"},
                           "capabilities": {}}})
-        _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
+        _step_timeout = _acp_probe_timeout()
+        _init_resp = _read_response(1, _step_timeout)
         if not _init_resp:
             latency = round(_time_mod.time() - start, 1)
             _stderr = ""
@@ -448,7 +498,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         _probe_cwd = _tempfile.mkdtemp(prefix="hermes-probe-")
         _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
                "params": {"cwd": _probe_cwd, "mcpServers": []}})
-        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        _new_resp = _read_response(2, _step_timeout)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
             _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
@@ -498,7 +548,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
 
     except _subprocess.TimeoutExpired:
         latency = round(_time_mod.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": f"timeout ({_ACP_PROBE_TIMEOUT + _ACP_PROMPT_TIMEOUT}s)"}
+        return {"status": "fail", "latency": latency,
+                "error": f"timeout ({_acp_probe_timeout() + _ACP_PROMPT_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
     except OSError as e:
@@ -637,7 +688,8 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
                "params": {"protocolVersion": 1,
                           "clientInfo": {"name": "grape-probe", "version": "1.0"},
                           "capabilities": {}}})
-        _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
+        _step_timeout = _acp_probe_timeout()
+        _init_resp = _read_response(1, _step_timeout)
         if not _init_resp or "error" in _init_resp:
             latency = round(_time_mod.time() - start, 1)
             _err = "no response" if not _init_resp else _acp_error_detail(_init_resp)
@@ -650,7 +702,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         _probe_cwd = _tempfile.mkdtemp(prefix="hwcloud-probe-")
         _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
                "params": {"cwd": _probe_cwd, "mcpServers": []}})
-        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        _new_resp = _read_response(2, _step_timeout)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
             _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
