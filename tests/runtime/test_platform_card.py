@@ -169,3 +169,30 @@ def test_row_to_card_raw_drops_empty_columns():
     assert "id" not in raw and "enabled" not in raw  # 非卡定义列
     card = build_platform_card("gitlab", raw)       # 以前这里会抛 PlatformCardError
     assert card.ca_bundle == "/etc/pki/tls/cert.pem"
+
+
+def test_card_overrides_value_object_contract():
+    """CardOverrides：只留变化键、改回基线即撤销、坏 JSON 不拖垮读卡。"""
+    from src.domains.runtime.vcs.card_overrides import CardOverrides, diff_card_fields
+
+    base = build_platform_card("gitlab", {"host": "gitlab.com"})
+    ov = CardOverrides.empty().with_provider("gitlab", {"ca_bundle": "/opt/ca.pem"})
+    assert ov.for_provider("gitlab") == {"ca_bundle": "/opt/ca.pem"}
+    assert ov.to_json()
+
+    raws = {"gitlab": {"host": "gitlab.com", "ca_bundle": ""}}
+    ov.apply_to(raws)
+    assert raws["gitlab"]["ca_bundle"] == "/opt/ca.pem"
+
+    # 撤销：同名 provider 传空字段
+    assert CardOverrides.from_json(ov.to_json()).with_provider("gitlab", {}).providers() == []
+
+    # 反向：提交与基线一致 → 无覆盖
+    import dataclasses as _dc
+    raw = _dc.asdict(base); raw.pop("provider", None)
+    raw["event_map"] = raw.pop("event_map_overrides", {})
+    raw["fields"] = raw.pop("fields_overrides", {})
+    assert diff_card_fields(raw, base) == {}
+
+    # 坏 JSON / 非对象 → 视为空覆盖
+    assert CardOverrides.from_json("{not json").providers() == []
