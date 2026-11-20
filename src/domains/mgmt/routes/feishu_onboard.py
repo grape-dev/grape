@@ -320,7 +320,7 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
         _TASKS.pop(task_id, None)
 
 @router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
-async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
+def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
     """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
     if body.bot_type not in ("chat_bot", "vod_bot"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "bot_type 仅支持 chat_bot / vod_bot"})

@@ -223,7 +223,7 @@ def _feishu_api_for_ctx(ctx):
 
 
 @router.post("/notify", operation_id="tasks_notify", summary="Task assign/notify (Agent runtime)", description="Called by issue agents after assign/reassign/takeover: creates a task, refreshes the assignee, writes the conversation and sends static template + Feishu notifications. Session-only (tk_), repo scope must match.")
-async def notify_task(body: TaskNotifyBody, request: Request,
+def notify_task(body: TaskNotifyBody, request: Request,
                       user: dict = Depends(get_current_user_or_api_key)):
     """issue agent 分配/换人后调用：建任务 + 换人刷新 + Web conversation + 静态模板通知 + 飞书通知（不触发 ChatAgent）
 

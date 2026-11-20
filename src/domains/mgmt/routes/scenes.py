@@ -1057,7 +1057,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
             "credential_required": credential_required}
 
 @router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
-async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
+def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
 
     返回: {"repo_exists": bool, "scene_applied": bool, "full_name": str, "scene_name": str}

@@ -1695,7 +1695,7 @@ def _cross_pipeline_handoff(
                         "timed-out POST /api/a2a to check whether the handoff event was already "
                         "created before retrying. Accepts JWT/session token/API key (public) "
                         "plus internal bot-token.")
-async def a2a_status_endpoint(request: Request,
+def a2a_status_endpoint(request: Request,
                               repository: str = "",
                               issue_number: str = "",
                               agent: str = "",

@@ -618,6 +618,22 @@ def _resolve_probe_target(url: str, allow_private: bool) -> _ProbeTarget | Probe
                         pinned_ip=pinned_ip, request_path=request_path)
 
 
+_SSL_CTX_CACHE = None
+
+
+def _probe_ssl_context():
+    """钉定 IP 探测用的 TLS 上下文，进程内只建一次。
+
+    原来每次探测都 ssl.create_default_context()，会同步解析/加载系统 CA
+    证书链（py-spy 实测卡在 ssl.load_default_certs，几百毫秒级），
+    而探测发生在异步路由里 → 直接阻塞事件循环。
+    """
+    global _SSL_CTX_CACHE
+    if _SSL_CTX_CACHE is None:
+        _SSL_CTX_CACHE = ssl.create_default_context()
+    return _SSL_CTX_CACHE
+
+
 def _probe_request_once(target: _ProbeTarget, method: str,
                         timeout: float) -> tuple[int | None, str]:
     """单方法探测请求：http.client 直连已钉定 IP，不跟随重定向；返回 (status, error)。"""
@@ -625,7 +641,7 @@ def _probe_request_once(target: _ProbeTarget, method: str,
         if target.scheme == "https":
             conn = _PinnedHTTPSConnection(
                 target.pinned_ip, target.host, port=target.port, timeout=timeout,
-                context=ssl.create_default_context())
+                context=_probe_ssl_context())
         else:
             conn = http.client.HTTPConnection(target.pinned_ip, port=target.port, timeout=timeout)
         try:
