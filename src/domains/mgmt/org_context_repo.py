@@ -740,7 +740,9 @@ def _ensure_content_branch(work: str, *, run, token: str, scheme: str) -> bool:
 def _commit_content_branch(work: str, message: str, *, run, token: str,
                            scheme: str) -> bool:
     """提交并推送当前 ``grape-org`` 工作树（无变化返回 True）。"""
-    add = run(["-C", work, "add", "-A", "--", "org-context"], token=token, scheme=scheme)
+    # 迁移时旧分支可能含根级 README/context 等文件，必须全量暂存；
+    # 本工作副本只承载 grape-org，不存在混入业务代码的风险。
+    add = run(["-C", work, "add", "-A"], token=token, scheme=scheme)
     if add is None or add.returncode != 0:
         return False
     diff = run(["-C", work, "diff", "--cached", "--quiet"], token=token, scheme=scheme)

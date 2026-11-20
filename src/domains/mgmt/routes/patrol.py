@@ -182,11 +182,29 @@ async def pipeline_advance_run(body: PipelineAdvanceBody = None,
     agent + 无在途下游 → 按场景 next/handoff 幂等推进。技能是否显式
     ``grape a2a handoff``、收尾钩子是否执行，都不影响本口径。
     """
+    from src.domains.mgmt.auth.audit import log_audit
     from src.domains.runtime.engine.pipeline_reconcile import (
         reconcile_pipeline_progress,
     )
+    from src.domains.insight.observability import loops
+
     b = body or PipelineAdvanceBody()
     limit = max(1, min(int(b.limit or 200), 1000))
-    stats = await asyncio.to_thread(
-        reconcile_pipeline_progress, limit, b.lookback_hours)
+    try:
+        stats = await asyncio.to_thread(
+            reconcile_pipeline_progress, limit, b.lookback_hours)
+        loops.beat("pipeline_advance")
+    except Exception as e:
+        loops.fail("pipeline_advance", e)
+        raise
+    uid = str(user.get("id") or 0)
+    log_audit(
+        "issue_pipeline_advanced",
+        user_id=uid, operator_id=uid,
+        detail={"source": "manual", "limit": limit,
+                "advanced": int(stats.get("advanced") or 0),
+                "scanned": int(stats.get("scanned") or 0),
+                "skipped": int(stats.get("skipped") or 0),
+                "actions": (stats.get("actions") or [])[:50]},
+    )
     return {"status": "ok", "advance": stats}

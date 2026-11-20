@@ -122,6 +122,27 @@ def reconcile_pipeline_progress(limit: int = 200,
     - ``scanned``：候选任务数；
     - ``skipped``：谓词不满足（stage 已前移 / 在途 / 已收口 / 过期 / 非流水线节点）。
     """
+    from src.kernel import org_metrics
+    from src.kernel.otel import feature_span
+
+    with feature_span("pipeline.advance", {"limit": int(limit),
+                                           "lookback_hours": lookback_hours}) as span:
+        stats = _reconcile_guarded(limit, lookback_hours)
+        if span is not None:
+            try:
+                for _key in ("advanced", "scanned", "skipped"):
+                    span.set_attribute(_key, int(stats.get(_key) or 0))
+                span.set_attribute("busy", bool(stats.get("busy")))
+            except Exception:
+                pass
+        try:
+            org_metrics.observe_pipeline_advance(stats)
+        except Exception as _e:  # 指标失败不影响收敛主流程
+            log.debug(f"pipeline-advance: metrics observe skipped: {_e}")
+        return stats
+
+
+def _reconcile_guarded(limit: int, lookback_hours: float | None) -> dict:
     if not _run_lock.acquire(blocking=False):
         return {"scanned": 0, "advanced": 0, "skipped": 0, "actions": [],
                 "busy": True}

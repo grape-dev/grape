@@ -64,6 +64,7 @@ EVENT_TYPES = frozenset({
     "org_provision_started",        # 组织供给开始（建仓/建场景/绑定）
     "org_provision_completed",      # 组织供给完成
     "org_provision_failed",         # 组织供给失败（含租约丢失）
+    "issue_pipeline_advanced",      # 流水线确定性推进（manual/patrol；detail 含任务/from/to/seq，不落正文）
     # Issue #2112：组织需求跨仓下派（6 类事件，未登记会走 Unknown 分支丢弃）
     "dispatch_created",             # 下派批次创建
     "target_created",               # 单目标子 Issue 创建成功

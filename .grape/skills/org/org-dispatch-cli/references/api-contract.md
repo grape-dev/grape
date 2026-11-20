@@ -10,8 +10,10 @@ grape refresh
 grape commands "org dispatches"
 ```
 
-必须列出 `create`、`list`、`detail`、`cancel`、`target retry`、`scene catalog`。
-缺失时返回 `CLI_CONTRACT_UNAVAILABLE`，禁止 curl 或裸 HTTP 兜底。
+必须列出 `create`、`list`、`detail`、`cancel`、`target retry`。
+`scene catalog` 若尚未随 CLI 契约生成，**不阻断下派**：跳过目录预检，直接调用
+`create` 由服务端解析场景，并在输出标注 `SCENE_CATALOG_UNAVAILABLE`；
+禁止 curl 或裸 HTTP 兜底。
 
 命令组由 `org_*` operationId 生成，固定为 `grape org dispatches ...`。组织运行态接口为
 **dual scope**，允许 worker 的 `$GRAPE_SESSION_TOKEN`；服务端仍按组织成员与 owner/admin

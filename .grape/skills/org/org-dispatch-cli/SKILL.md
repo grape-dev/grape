@@ -61,7 +61,7 @@ tools:
 |--------|---------|---------|---------|
 | CLI 可用 | `grape --version` | ≥0.3.2 | **自愈**：按 `references/grape-cli-installation.md` 安装/升级 → 再验证；仍失败 → 输出「前置检查未通过：<原因>」结束 |
 | 契约刷新 | `grape refresh` | 拉取最新契约成功 | **重试** ≤2 次；仍失败 → 继续（回退内置快照），命令「不识别」时再 refresh |
-| 下派命令组 | `grape commands "org dispatches"` | 列出 `create`/`list`/`detail`/`cancel`/`target retry`/`scene catalog` | 缺任一条 → `CLI_CONTRACT_UNAVAILABLE`，STOP（禁止裸 HTTP 兜底）|
+| 下派命令组 | `grape commands "org dispatches"` | 列出 `create`/`list`/`detail`/`cancel`/`target retry` | 核心命令缺任一条 → `CLI_CONTRACT_UNAVAILABLE`，STOP；`scene catalog` 缺失不阻断，降级由服务端解析场景（禁止裸 HTTP 兜底）|
 | 分析文档命令 | `grape commands "org repo analysis"` | 含 `docs` | 缺失 → 跳过文档、只用地图召回，并在输出标注降级 |
 | 组织上下文 | `grape tasks current --json-out` | 能解析 `ORG_ID` / 组织 Issue / plan | 缺失 → `grape git-repo issues get` 定位；定位不到 → STOP |
 | 认证可用 | `grape org dispatches list --org_id "$ORG_ID" --limit 1 --json-out` | 2xx | 401 → STOP；403 → STOP（权限问题）|
@@ -120,6 +120,9 @@ tools:
    grape org dispatches scene catalog --org_id "$ORG_ID" --repo_key "$REPO_KEY" \
      --include executable --json-out
    ```
+
+   若该命令尚未随 CLI 契约开放，**不要阻断下派**：跳过目录预检，直接调用
+   `create` 由服务端解析场景，并在输出标注 `SCENE_CATALOG_UNAVAILABLE`。
 
    返回 `repos[].dev_scene / scene_recommend_config / scenes[]`。按以下顺序为每个
    target 选择 `scene_id`：
@@ -187,7 +190,8 @@ grape org dispatches target retry --org_id "$ORG_ID" --dispatch_id "$DISPATCH_ID
 - `INVALID_DONE_WHEN`：`done_when` 不在允许集合；修正 plan 后重试一次。
 - `PERMISSION_DENIED`：调用方无权下派。停止写操作并返回可读原因。
 - `ORG_NOT_FOUND` / `ORG_REPO_NOT_FOUND`：组织或组织仓库不存在。
-- `CLI_CONTRACT_UNAVAILABLE`：当前 `grape` 契约未暴露下派命令。停止，不调用裸 HTTP。
+- `CLI_CONTRACT_UNAVAILABLE`：当前 `grape` 契约未暴露核心下派命令。停止，不调用裸 HTTP。
+- `SCENE_CATALOG_UNAVAILABLE`：`scene catalog` 未开放；跳过预检，直接 create 由服务端解析场景，不阻断。
 - `DISPATCH_IN_PROGRESS`：已有同 Issue 批次在途；读取并复用，不新建。
 
 失败结果必须显式输出，不得把 CLI/HTTP 错误转换为成功。取消与 retry 只输出处置建议，
