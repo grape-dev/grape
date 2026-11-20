@@ -169,15 +169,49 @@ class _GiteeUserOrgsLister:
 
 
 def _registry() -> dict[str, NamespaceLister]:
-    """provider → 组织清单端口（登记顺序即「组织」页平台顺序）。"""
+    """provider → 组织清单端口（登记顺序即「组织」页平台顺序）。
+
+    内置四平台 + **所有 GitLab 方言的实例卡**（自建实例一实例一卡，provider id
+    形如 `gitlab-corp`）：实例卡的本事全来自卡，组织清单端口按方言复用同一实现，
+    不再需要为每个自建实例往这里加一行（上一版是固定四键，新卡在清单里恒缺席）。
+    """
     from src.domains.mgmt.user.repo_manager import fetch_github_orgs, fetch_user_orgs
 
-    return {
+    registry: dict[str, NamespaceLister] = {
         "gitcode": _FetcherLister("gitcode", lambda tok: fetch_user_orgs(tok, admin_only=True)),
         "github": _FetcherLister("github", lambda tok: fetch_github_orgs(tok, admin_only=True)),
         "gitlab": _CardSpacesLister("gitlab"),
         "gitee": _GiteeUserOrgsLister(),
     }
+    for provider in _instance_card_providers():
+        if provider not in registry:
+            registry[provider] = _CardSpacesLister(provider)
+    return registry
+
+
+def _instance_card_providers() -> list[str]:
+    """平台卡里「同族但非内置名」的实例 provider（目前只认 GitLab 方言的实例）。
+
+    只收 GitLab 方言：其 lister（list_create_spaces）本来就是卡驱动、可跨实例；
+    github/gitee 的内置 orgs 抓取绑死官方域名，收进来反而是假可用。
+    """
+    try:
+        from src.kernel.ports import vcs_cards
+
+        providers = list(vcs_cards.list_vcs_platforms() or [])
+    except Exception:  # noqa: BLE001 - 卡端口不可用（单测/未装配）按无实例处理
+        return []
+    out: list[str] = []
+    for provider in providers:
+        if provider in ("gitcode", "github", "gitlab", "gitee"):
+            continue
+        try:
+            card = vcs_cards.get_platform_card(provider)
+        except Exception:  # noqa: BLE001
+            continue
+        if card is not None and str(getattr(card, "dialect", "") or "") == "gitlab":
+            out.append(provider)
+    return out
 
 
 def listable_providers() -> list[str]:

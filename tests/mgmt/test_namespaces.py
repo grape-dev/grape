@@ -171,3 +171,32 @@ def test_platform_login_falls_back_when_provider_unavailable(monkeypatch):
 
     monkeypatch.setattr(tr, "create_provider", _boom)
     assert ns_mod.platform_login("gitlab", "tok") == ""
+
+
+def test_instance_cards_join_the_registry_by_dialect(monkeypatch):
+    """实例卡（gitlab-corp）必须自动进入清单；同族复用 GitLab 的卡驱动 lister。
+
+    回归（2026-11-20 线上）：组织清单的 provider 表是**固定四键**，管理台新建的
+    实例卡在 /api/orgs/repo-namespaces 里恒缺席 —— 用户建了卡、绑了 PAT，
+    组织下拉里却永远没有这个实例。
+    """
+    from src.domains.mgmt.user import namespaces as ns_mod
+    import src.kernel.ports.vcs_cards as cards
+
+    class _Card:
+        def __init__(self, dialect):
+            self.dialect = dialect
+
+    monkeypatch.setattr(cards, "list_vcs_platforms",
+                        lambda: ["gitcode", "github", "gitee", "gitlab", "gitlab-corp", "github-corp"], raising=False)
+    monkeypatch.setattr(cards, "get_platform_card",
+                        lambda p: _Card("gitlab") if p == "gitlab-corp" else (
+                            _Card("github") if p == "github-corp" else None), raising=False)
+
+    providers = ns_mod.listable_providers()
+    assert "gitlab-corp" in providers, providers
+    assert "github-corp" not in providers       # 非 GitLab 方言的实例暂不支持，不假装可用
+    assert {"gitcode", "github", "gitlab", "gitee"} <= set(providers)
+
+    inst = ns_mod._registry()["gitlab-corp"]
+    assert isinstance(inst, ns_mod._CardSpacesLister) and inst.provider == "gitlab-corp"
