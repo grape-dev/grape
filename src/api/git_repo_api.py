@@ -12,6 +12,7 @@
 from src.kernel.user_ids import has_user_id
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Any
 
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.config import log
@@ -482,6 +483,53 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
     return url
 
 
+def _repo_path_hooks(p: str) -> "tuple[Any, str]":
+    """仓库树/文件内容的「URL 构造 + 返回归一」钩子解析（Issue #3580 复审，对齐 PR #1854）。
+
+    返回 (hooks_module, api_base)；无钩子 → (None, "")，调用方走原 /git/trees、/contents 语义。
+
+    解析序（两跳都不含平台名字面量分支）：
+      ① provider 代码模块自带钩子（`tree_url`/`dir_url`/`file_url`/`normalize_*`）——
+         内置 gitlab 卡即此路，api_base 取模块常量；
+      ② 卡方言同族（`card.dialect == "gitlab"`）——自建实例卡（gitlab-corp 等）走纯配卡
+         垫片模块，没有钩子，故按方言回落到同族模块的构造器，**api_base 取卡**
+         （一实例一 host，绝不能退回 gitlab.com）；
+      ③ 其余平台 → 无钩子。
+    """
+    mod = _provider_module(p)
+    if mod is not None and callable(getattr(mod, "tree_url", None)):
+        return mod, str(getattr(mod, "API_BASE", "") or "")
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(p)
+    except Exception:
+        card = None
+    if card is not None and str(getattr(card, "dialect", "") or "") == "gitlab":
+        from src.domains.runtime.vcs.providers import gitlab as _gl_mod
+        return _gl_mod, str(getattr(card, "api_base", "") or "")
+    return None, ""
+
+
+_HOOKS_TREE_MAX_PAGES = 50      # 树/目录翻页上限（100 条/页 → 5000 条目）
+
+
+def _hooks_paged(hooks, url_fn, p: str, token: str, *args) -> Any:
+    """按页拉取（上游 per_page 满页就继续），返回归一后的条目列表。"""
+    per_page = int(getattr(hooks, "_PER_PAGE", 100) or 100)
+    _norm = getattr(hooks, "normalize_tree", None)
+    out: list = []
+    page = 1
+    while page <= _HOOKS_TREE_MAX_PAGES:
+        batch = _vcs_req(p, "GET", url_fn(*args, page=page, per_page=per_page), token)
+        if not isinstance(batch, list):
+            return batch                      # 上游错误包络原样透传（不吞成空列表）
+        out.extend(_norm(batch) if callable(_norm) else batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+    return out
+
+
 def _issue_write_url(owner: str, repo: str, number, p: str) -> str:
     """issue 写端点 URL（owner-path 契约；create/update 同款机制）。
 
@@ -591,6 +639,18 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
     """
     depth = (depth or "single").strip().lower()
     ref = (ref or "").strip()
+
+    # GitLab 方言族（含自建实例卡）：上游是 /repository/tree，不是 git/trees/{ref}
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None:
+        if not ref:
+            ref = _default_ref(p, owner, repo, user)
+        _recursive = depth == "recursive"
+        if _recursive and not getattr(_hooks, "TREE_RECURSIVE", False):
+            raise HTTPException(status_code=400, detail={"code": 400,
+                "message": f"该平台（{p}）暂不支持递归树，请用单层或 Git 仓库等效接口"})
+        return _hooks_paged(_hooks, getattr(_hooks, "tree_url"), p, _repo_token(owner, repo, user, p),
+                            _api_base, owner, repo, ref, _recursive)
 
     # 单层
     if depth != "recursive":
@@ -708,6 +768,10 @@ def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
 def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None:
+        return _hooks_paged(_hooks, getattr(_hooks, "dir_url"), p, _repo_token(owner, repo, user, p),
+                            _api_base, owner, repo, "", ref)
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/", {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
@@ -715,6 +779,21 @@ def list_root_contents(owner: str, repo: str, ref: str = Query("", description="
 @router.get("/{owner}/{repo}/contents/{path:path}", operation_id="gitrepo_contents", summary="Repository contents: dir listing or file content (base64)", description="Repository contents via the Git provider: empty/root or directory returns an entry list; a file returns base64 content.")
 def get_file_content(owner: str, repo: str, path: str = "", ref: str = Query("", description="分支/引用"),
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # GitLab 方言族：/contents/{path} 无对应端点。先按**文件**取（/repository/files/{path}），
+    # 上游 404 说明是目录 → 回落目录列表（/repository/tree?path=），与网关「文件/目录同端点」
+    # 语义对齐（PR #1854 的 contents 404 回退同口径）。
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None:
+        _token = _repo_token(owner, repo, user, p)
+        try:
+            data = _vcs_req(p, "GET", getattr(_hooks, "file_url")(_api_base, owner, repo, path, ref), _token)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            return _hooks_paged(_hooks, getattr(_hooks, "dir_url"), p, _token,
+                                _api_base, owner, repo, path, ref)
+        _norm = getattr(_hooks, "normalize_file", None)
+        return _norm(data, path) if callable(_norm) else data
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/" + path, {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
@@ -2037,3 +2116,38 @@ def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int | str, bod
 
 
 # ===================== Pull Requests =====================
+
+
+# ===================== 多级命名空间（Issue #3580 复审，对齐 PR #1854） =====================
+# GitLab 子组仓库的全路径是 `<组>/<子组>/<仓>`：两段式 `/{owner}/{repo}` 路由无法
+# 寻址（owner 段自身含 `/`）。这里在既有两段式路由**全部注册之后**追加同名端点的
+# `{owner:path}` 变体——星网址点贪婪匹配，必须后注册，且按路径长度降序，否则
+# `/{owner:path}/{repo}` 会抢走 `/{owner}/{repo}/tree` 这类更具体的路由。
+# 两种形态：
+#   /api/git-repo/{owner:path}/{repo}/...       斜杠直连（与 GitLab 全路径同形）
+#   /api/git-repo/{owner:path}/{repo}/-/...     GitLab 风格 `/-/` 分隔
+# operation_id 加后缀且 include_in_schema=False：OpenAPI 文档与 CLI 命令面零变化，
+# 只有 HTTP 层多出可达路径（判据与现状一致：两段式路径仍走原路由）。
+_NAMESPACE_ROUTE_PREFIX = "/api/git-repo/{owner}/{repo}"
+
+_namespace_route_seed = sorted(list(router.routes), key=lambda r: len(r.path), reverse=True)
+for _suffix, _opsuffix in (("/-", "_separated_namespace"), ("", "_namespace")):
+    # 两遍：`/-/` 变体必须先注册——星网址点贪婪，否则 "/<组>/<子组>/<仓>/-/tree"
+    # 会被斜杠直连形态的 /{owner:path}/{repo}/tree 抢走（repo 段被判成 "-"）。
+    for _route in _namespace_route_seed:
+        _rpath = str(getattr(_route, "path", "") or "")
+        if not _rpath.startswith(_NAMESPACE_ROUTE_PREFIX):
+            continue
+        _relative = _rpath[len("/api/git-repo"):]
+        _ns_path = _relative.replace("/{owner}/{repo}", "/{owner:path}/{repo}" + _suffix, 1)
+        if _ns_path == _relative:
+            continue                      # 非两段式形态（防御：前缀命中但结构不符）
+        router.add_api_route(
+            _ns_path,
+            _route.endpoint,
+            methods=list(_route.methods or ["GET"]),
+            operation_id=(_route.operation_id or _route.name) + _opsuffix,
+            summary=_route.summary,
+            description=_route.description,
+            include_in_schema=False,
+        )

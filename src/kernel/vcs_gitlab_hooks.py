@@ -55,7 +55,8 @@ def _request(method: str, url: str, token: str = "", body: dict | None = None,
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        _pol = __import__("src.kernel.upstream_http", fromlist=["open_with_policy"])
+        with _pol.open_with_policy(req, timeout=timeout) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:

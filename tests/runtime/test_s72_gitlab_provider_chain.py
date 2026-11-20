@@ -63,8 +63,12 @@ def test_s72_private_token_header():
         req.update({"url": url, "headers": headers or {}})
         return orig(url, data=data, method=method, headers=headers or {}, **kw)
 
+    # Issue #3580 复审：上游 HTTP 收口到 src.kernel.upstream_http.open_with_policy（私有 CA /
+    # 不跟随重定向），patch 点随之迁移；断言仍锁 PRIVATE-TOKEN 头与"不发 Bearer"。
+    import src.kernel.upstream_http as _uh
     with patch.object(_ur, "Request", side_effect=_spy), \
-         patch.object(_ur, "urlopen", return_value=FakeResp({"id": 1, "username": "u"})):
+         patch.object(_uh, "open_with_policy",
+                      return_value=FakeResp({"id": 1, "username": "u"})):
         p2 = create_provider("gitlab")
         p2._http("GET", "/user", "glpat-1")
     assert req["headers"].get("PRIVATE-TOKEN") == "glpat-1", (

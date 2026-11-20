@@ -54,3 +54,29 @@ R10 事件验签/幂等/重放/实例隔离；R11 PAT 不产生登录身份；R1
 7. 回归用例：`tests/runtime/test_issue_3580_review_fixes.py`（密钥必填/禁止 token 回落、
    gitlab_v4 强制路径 B、404 幂等、GIT_CONFIG 累加、hooks 单源对拍、
    gitcode/github 端点入队与幂等）。
+
+## 能力补齐（PR #1854 二轮对账，2026-11-20）
+
+对上一条 PR #1854 逐能力复核后确认四项真缺口，本批一次补齐（其余差异保留原口径：
+前端 UI 归 P5、文档/探针脚本不入主干）：
+
+1. **多级命名空间寻址**：GitLab 仓库全路径是 `<组>/<子组>/<仓>`，此前 `parse_repo_key`
+   按首个 `/` 切分（owner=组、repo=子组/仓），且 git-repo 网关只有两段式
+   `/{owner}/{repo}` 路由，子组仓在树/文件/分支/PR 文件等页面不可达。现按卡方言
+   （`dialect=gitlab`）末段切分，并在既有两段式路由之后追加 `{owner:path}` 变体
+   （斜杠直连 + `/-/` 分隔两种形态；星网址点贪婪，故按路径长度降序且 `/-/` 先注册）。
+   `include_in_schema=False`：OpenAPI/CLI 命令面零变化。
+2. **实例卡模块解析**：自建实例卡（`gitlab-corp` 一类）既无代码模块也无 `resources` 段，
+   `module_for()` 返回 None → 实例仓的网关调用全量 502。现按卡方言回落到同族代码模块
+   （`FamilyProviderModule` 代理），`API_BASE` 取卡的实例 host。
+3. **API 侧私有 CA + 不跟随重定向**：`ca_bundle` 此前只进 git 传输层，API 侧
+   （列仓/托管/建钩/Issue/MR）走默认 SSL 上下文 → 私有 CA 自建实例 TLS 全失败；且带
+   `PRIVATE-TOKEN` 的 3xx 会被 urllib 把 header 带到异域。新增
+   `src/kernel/upstream_http.py` 统一入口（按卡取 CA、GitLab 方言族不跟随重定向），
+   provider 模块 / token_resolver / api_client / 托管钩子四处收口；其它平台保持存量语义。
+4. **仓库树/文件内容 + 按用户名指派**：GitLab 没有 `git/trees`、`contents` 端点，模块钩子
+   改发 `/repository/tree`、`/repository/files/{整路径编码}`（含递归与翻页、文件→目录 404
+   回退），条目归一成网关契约；建 Issue 的 `assignee` 由用户名解析为
+   `assignee_ids`（纯数字直接采用、解析不到只告警不阻断）。
+5. 回归用例：`test_issue_3580_namespace_routes.py`（8）、`test_issue_3580_gitlab_repo_paths.py`（8）、
+   `test_issue_3580_upstream_tls.py`（6）、`test_issue_3580_gitlab_assignee.py`（4）。

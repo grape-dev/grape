@@ -217,7 +217,12 @@ class GenericVcsProvider(VCSProvider):
             body = _json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            from src.kernel.upstream_http import open_with_policy as _open_policy
+            with _open_policy(
+                    req, timeout=30,
+                    ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
+                    allow_redirects=self._card.dialect != "gitlab",
+            ) as resp:
                 return _json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"{self._card.name} API {method} {path} failed ({e.code}): {e}") from e

@@ -35,7 +35,8 @@ def request(method, url, token, body=None):
     data = _json.dumps(body).encode() if body else None
     req = _ur.Request(url, data=data, headers=headers, method=method)
     try:
-        with _ur.urlopen(req, timeout=30) as resp:
+        from src.kernel.upstream_http import open_with_policy as _open_policy
+        with _open_policy(req, timeout=30) as resp:
             raw = resp.read().decode()
             return _json.loads(raw) if raw.strip() else {}
     except _ue.HTTPError as e:
@@ -105,3 +106,78 @@ PR_WEB_PATH = "merge_requests"
 
 # Issue #3580/P4：GitLab 实例（含自建）托管全流程已接入（webhook_dialect=gitlab_v4）。
 HOSTING_FULL_FLOW = True
+
+
+# ===================== 仓库树 / 文件内容（Issue #3580 复审，对齐 PR #1854） =====================
+# 网关对上层是「github 契约」：/git/trees/{ref} 与 /contents/{path}。GitLab 方言没有这两个
+# 端点——树是 /repository/tree?path=&ref=（且原生支持 recursive=true），文件内容是
+# /repository/files/{整路径 URL 编码}?ref=。这里提供「URL 构造 + 返回归一」两组模块钩子，
+# 路由层据此零平台分支（无钩子的平台继续走原 /git/trees、/contents 语义）。
+
+TREE_RECURSIVE = True          # /repository/tree?recursive=true 原生支持（返回扁平全路径）
+
+_PER_PAGE = 100
+
+
+def _project_base(api_base: str, owner: str, repo: str) -> str:
+    return f"{api_base.rstrip('/')}/projects/{_up.quote(f'{owner}/{repo}', safe='')}"
+
+
+def tree_url(api_base, owner, repo, ref, recursive=False, page=1, per_page=_PER_PAGE) -> str:
+    params = {"ref": ref or "HEAD", "per_page": str(per_page), "page": str(page)}
+    if recursive:
+        params["recursive"] = "true"
+    return _project_base(api_base, owner, repo) + "/repository/tree?" + _up.urlencode(params)
+
+
+def dir_url(api_base, owner, repo, path, ref, page=1, per_page=_PER_PAGE) -> str:
+    params = {"path": path or "", "ref": ref or "HEAD",
+              "per_page": str(per_page), "page": str(page)}
+    return _project_base(api_base, owner, repo) + "/repository/tree?" + _up.urlencode(params)
+
+
+def file_url(api_base, owner, repo, path, ref) -> str:
+    # GitLab files API 要求**整条路径**编码（含 /），不能逐段拼接
+    return (_project_base(api_base, owner, repo) + "/repository/files/"
+            + _up.quote(path or "", safe="") + "?" + _up.urlencode({"ref": ref or "HEAD"}))
+
+
+def normalize_tree(entries) -> list:
+    """GitLab {id,name,type(tree|blob),path,mode,size} → 网关条目（github 契约）。"""
+    out = []
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        is_tree = str(e.get("type")) == "tree"
+        _path = str(e.get("path") or "")
+        out.append({
+            "type": "tree" if is_tree else "file",
+            "mode": str(e.get("mode") or ("040000" if is_tree else "100644")),
+            "path": _path,
+            "name": str(e.get("name") or _path.rsplit("/", 1)[-1] or ""),
+            "sha": str(e.get("id") or e.get("sha") or ""),
+            "size": 0 if is_tree else int(e.get("size") or 0),
+        })
+    return out
+
+
+def normalize_file(data, path: str = "") -> dict:
+    """GitLab 文件对象 → 网关文件条目（content 统一 base64，与 github contents 同形）。"""
+    import base64 as _b64
+    if not isinstance(data, dict):
+        return data
+    content = str(data.get("content") or "")
+    if str(data.get("encoding") or "").lower() != "base64":
+        content = _b64.b64encode(content.encode()).decode()
+    _path = str(data.get("file_path") or path or "")
+    return {
+        "type": "file",
+        "mode": "100644",
+        "path": _path,
+        "name": str(data.get("file_name") or _path.rsplit("/", 1)[-1] or ""),
+        "sha": str(data.get("last_commit_id") or data.get("blob_id")
+                   or data.get("content_sha256") or ""),
+        "size": int(data.get("size") or 0),
+        "content": content,
+        "encoding": "base64",
+    }

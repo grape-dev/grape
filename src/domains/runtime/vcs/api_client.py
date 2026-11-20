@@ -443,9 +443,12 @@ class VcsApiClient:
         if card is None:
             return self._unsupported()
         if self._dialect_is_gitlab():
-            data = {"title": title, "description": body}
-            if assignee:
-                data["assignee_id"] = assignee
+            data: dict = {"title": title, "description": body}
+            # Issue #3580 复审：GitLab 只认数值 assignee_ids——用户名先解析成 id，
+            # 解析不到就放弃指派（不把用户名原样塞进 assignee_id 让上游 400/静默忽略）。
+            _ids = self._gitlab_assignee_ids(assignee)
+            if _ids:
+                data["assignee_ids"] = _ids
         else:
             data = {"title": title, "body": body}
             if assignee:
@@ -711,6 +714,33 @@ class VcsApiClient:
         card = self._platform_card()
         return bool(card is not None and card.dialect == "gitlab")
 
+    def _gitlab_assignee_ids(self, assignee: str) -> list:
+        """GitLab 指派：用户名 → assignee_ids（Issue #3580 复审，对齐 PR #1854）。
+
+        GitLab 写接口只认**数值 user id**（`assignee_ids`），传用户名会被上游 400/忽略。
+        解析序：纯数字入参直接采用（历史调用点传 id 的形态零回归）→ 否则
+        `GET /users?username=<名字>` 精确匹配后取 id。解析不到只告警并放弃指派，
+        不阻断建 Issue（指派是可选语义，PR 上游同口径）。
+        """
+        _raw = str(assignee or "").strip()
+        if not _raw:
+            return []
+        if _raw.isdigit():
+            return [int(_raw)]
+        from urllib.parse import quote as _quote
+        try:
+            users = self._request("GET", f"/users?username={_quote(_raw)}")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab assignee resolve failed ({_raw}): {e}")
+            return []
+        for u in users if isinstance(users, list) else []:
+            if not isinstance(u, dict):
+                continue
+            if str(u.get("username", "")).lower() == _raw.lower() and u.get("id"):
+                return [int(u["id"])]
+        log.warning(f"gitlab assignee not found: {_raw}")
+        return []
+
     def create_branch(self, branch_name: str, refs: str = "main") -> dict:
         """D44/S66：创建分支（方言模板，零平台名分支）。
 
@@ -959,7 +989,8 @@ class VcsApiClient:
                 else:
                     body = json.dumps(data).encode("utf-8") if data else None
                 req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                from src.kernel.upstream_http import open_with_policy as _open_policy
+                with _open_policy(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                     if _span is not None:
                         _span.set_attribute("http.status_code", 200)
