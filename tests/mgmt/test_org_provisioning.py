@@ -567,20 +567,17 @@ def test_default_org_repo_name_has_no_prefix():
     assert _repo_name({"slug": "", "id": "42"}) == "repo-42"
 
 
-def test_provision_schedules_context_and_analysis_branch_sync(monkeypatch):
-    """新组织仓库必须同时初始化默认分支和分析数据分支。"""
+def test_provision_schedules_context_sync(monkeypatch):
+    """provisioning 只调度 org-context 同步；分析分支在默认分支落定后由它接力创建。"""
     import src.domains.mgmt.org_context_repo as org_context_repo
     from src.domains.mgmt.org_provision import provision_org
 
     calls = []
     monkeypatch.setattr(org_context_repo, "schedule_sync",
                         lambda org_id, delay=0: calls.append(("context", str(org_id))))
-    monkeypatch.setattr(org_context_repo, "schedule_analysis_sync",
-                        lambda org_id, delay=0: calls.append(("analysis", str(org_id))))
     _patch_successful_vcs(monkeypatch)
     org_id = _seed_team_org()
 
     result = provision_org(org_id)
     assert result["provision_status"] == "ready"
     assert ("context", str(org_id)) in calls
-    assert ("analysis", str(org_id)) in calls

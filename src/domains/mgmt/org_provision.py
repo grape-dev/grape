@@ -715,15 +715,7 @@ def _provision_org_impl(org_id: str) -> dict:
                 schedule_sync(org_id)
             except Exception as _sync_e:
                 log.warning(f"org_provision schedule context sync failed org={org_id}: {_sync_e}")
-            # AI 分析产物分支（grape-repo-analysis）即使暂无关联仓库也先建出来，
-            # 保证新组织仓库固定有「默认分支 + 分析数据分支」两条。
-            try:
-                from src.domains.mgmt.org_context_repo import schedule_analysis_sync
-
-                schedule_analysis_sync(org_id)
-            except Exception as _as_e:
-                log.warning(
-                    f"org_provision schedule analysis sync failed org={org_id}: {_as_e}")
+            
         except _LeaseLost:
             log.warning(f"org_provision lease lost org={org_id}")
             try:

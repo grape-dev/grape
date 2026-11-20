@@ -724,6 +724,33 @@ def sync_org_analysis_to_repo(org_id: str) -> bool:
             return False
         log.info(f"org-analysis sync: pushed {len(files)} file(s) to "
                  f"{repo_key}#{ORG_REPO_ANALYSIS_BRANCH}")
+        # 防御：空仓首推分析分支时 Git 可能把 grape-repo-analysis 设成默认分支；
+        # 默认分支必须回到 grape-repo-knowledge（存量仓 main）。
+        try:
+            from src.kernel.repo_key import parse_repo_key
+            from src.domains.mgmt.user.repo_manager import set_default_branch
+
+            _prov, _owner, _repo = parse_repo_key(repo_key)
+            _client = runtime_public.VcsApiClient(_prov, token, _owner, _repo)
+            _names = {str(b.get("name") or "") for b in (_client.list_branches() or [])}
+            if ORG_REPO_DEFAULT_BRANCH in _names:
+                _intended = ORG_REPO_DEFAULT_BRANCH
+            elif "main" in _names:
+                _intended = "main"
+            else:
+                _intended = ""
+            _current = str((_client.get_repo_info() or {}).get("default_branch") or "")
+            if _intended and _current and _current != _intended:
+                if set_default_branch(token, _owner, _repo, _intended, provider=_prov):
+                    log.info(
+                        f"org-analysis sync: restored default branch "
+                        f"{_current}->{_intended} for {repo_key}")
+            elif not _intended:
+                log.warning(
+                    f"org-analysis sync: no default branch candidate for {repo_key} "
+                    f"(branches={sorted(_names)})")
+        except Exception as _bd_e:  # noqa: BLE001 - 默认分支修复 best-effort
+            log.warning(f"org-analysis sync: default branch guard failed repo={repo_key}: {_bd_e}")
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"org-analysis sync failed org={org_id}: {exc}")
@@ -855,6 +882,12 @@ def sync_org_context_to_repo(org_id: str) -> bool:
                         log.info(f"org-context sync: default branch set to {branch} for {repo_key}")
                 except Exception as _de:
                     log.warning(f"org-context sync: set default branch failed repo={repo_key}: {_de}")
+            # 默认分支已落定后再创建分析分支，避免空仓首推把 grape-repo-analysis
+            # 误设成默认分支（Git 空仓首推会接管默认分支）。
+            try:
+                schedule_analysis_sync(org_id)
+            except Exception as _as_e:  # noqa: BLE001 - 分支创建失败不阻断上下文同步
+                log.warning(f"org-context sync: schedule analysis branch failed org={org_id}: {_as_e}")
             return True
         except Exception as e:
             log.warning(f"org-context sync failed org={org_id}: {e}")
