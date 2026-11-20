@@ -19,6 +19,14 @@ from src.kernel.session_manager import db, db_lock
 
 DEFAULT_LEASE_SECONDS = 300
 DEFAULT_MAX_ATTEMPTS = 5
+# 消费期租约续期间隔：取租约的 1/6（PR #1854 的 60s/10s 同比例）。流水线时长可能
+# 远超租约，不续期就会被第二个 worker 重复认领 → 同一投递双跑。
+LEASE_RENEW_INTERVAL = DEFAULT_LEASE_SECONDS / 6
+# 清理：只清 consumed（已完成）且超过 24h 的行；pending/failed 永不清（长故障期
+# 间投递必须保活）。dead 保留 7 天供排查后再清。
+CONSUMED_RETENTION_HOURS = 24
+DEAD_RETENTION_DAYS = 7
+PURGE_INTERVAL_SECONDS = 3600
 
 _DELIVERY_HEADERS = (
     "x-gitlab-event-uuid",
@@ -175,10 +183,13 @@ def finish_claim(item_id: int, owner: str, *, ok: bool, error: str = "",
             return {"id": int(item_id), "status": "lost"}
         attempts, max_attempts = int(row[0]), int(row[1])
         if ok:
+            # 成功也保留 note（如「unhosted: skipped」）：这条投递为什么被消费掉，
+            # 事后只能从库里看，不能只活在一次日志里。
             c.execute(
                 "UPDATE grape_t_webhook_inbox SET status='consumed', finished_at=?, "
-                "last_error='', claim_owner='', lease_expires_at='', updated_at=? "
-                "WHERE id=? AND claim_owner=?", (now, now, int(item_id), owner))
+                "last_error=?, claim_owner='', lease_expires_at='', updated_at=? "
+                "WHERE id=? AND claim_owner=?",
+                (now, (error or "")[:2000], now, int(item_id), owner))
             db.commit()
             return {"id": int(item_id), "status": "consumed", "attempts": attempts}
         attempts += 1
@@ -228,35 +239,113 @@ def ensure_webhook_inbox_table() -> bool:
         return False
 
 
+def is_still_hosted(repo_key: str) -> bool:
+    """消费前复验托管状态（对齐 PR #1854 的 dispatch 复验 secret）。
+
+    为什么必须在**消费时**再问一次：投递入队后、消费前，仓库可能已被解除托管。
+    托管=授权；授权撤销后残留的 pending 投递若照跑，等于撤销不生效。
+    读法走 GSB mgmt 契约（跨域不直连对方表）；契约不可用时返回 True（fail-open）：
+    宁可让投递继续（与改动前行为一致），也不能因 mgmt 抖动把整批事件卡死丢单。
+    """
+    try:
+        from src.kernel.gsb.provider import get_service
+
+        cfg = get_service("mgmt").get_repo_webhook_config(repo_key) or {}
+        return bool(cfg)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"webhook inbox hosting recheck unavailable (repo={repo_key}): {e}")
+        return True
+
+
+def _consume_one(item: dict, owner: str, *, pipeline=None) -> dict:
+    """消费一条投递：托管复验 → run_pipeline → finish。共三次 DB 写，均可重入。"""
+    repo_key = item["repo_key"]
+    if not is_still_hosted(repo_key):
+        log.info(f"webhook inbox skip unhosted id={item['id']} repo={repo_key}")
+        return finish_claim(item["id"], owner, ok=True, error="unhosted: skipped")
+    if pipeline is None:
+        from src.domains.runtime.pipeline.event_pipeline import run_pipeline
+        pipeline = run_pipeline
+    headers = {}
+    try:
+        headers = json.loads(item.get("headers") or "{}")
+    except Exception:
+        headers = {}
+    body = (item.get("payload") or "").encode("utf-8")
+    account = repo_key.split(":", 1)[-1]
+    try:
+        pipeline(body, headers, account=account, repo_key_override=repo_key)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"webhook inbox consume failed id={item['id']}: {e}")
+        return finish_claim(item["id"], owner, ok=False, error=str(e))
+    return finish_claim(item["id"], owner, ok=True)
+
+
+async def _run_with_lease(item: dict, owner: str, *, pipeline=None,
+                          renew_interval: float = LEASE_RENEW_INTERVAL) -> dict:
+    """在线程里跑消费，同时续租：长流水线不会被第二个 worker 认领重跑。"""
+    import asyncio
+
+    task = asyncio.create_task(
+        asyncio.to_thread(_consume_one, item, owner, pipeline=pipeline))
+    while not task.done():
+        done, _ = await asyncio.wait({task}, timeout=renew_interval)
+        if done:
+            break
+        try:
+            renewed = await asyncio.to_thread(renew_claim, item["id"], owner)
+        except Exception as e:  # noqa: BLE001 - 续租失败不能把仍在跑的任务判失败
+            log.warning(f"webhook inbox lease renew failed id={item['id']}: {e}")
+            continue
+        if not renewed:
+            # 租约已被别人拿走：这条投递可能已在别处重跑，交给 finish 的
+            # claim_owner 条件判 lost（不会覆盖别人的结果）。
+            log.warning(f"webhook inbox lease lost id={item['id']} owner={owner}")
+            break
+    return await task
+
+
+def purge_finished(retention_hours: int = CONSUMED_RETENTION_HOURS,
+                   dead_days: int = DEAD_RETENTION_DAYS) -> dict:
+    """清理已完成/已判死的行；pending/failed 永不清（长故障期间投递要保活）。"""
+    consumed_before = (datetime.now(timezone.utc)
+                       - timedelta(hours=retention_hours)).isoformat()
+    dead_before = (datetime.now(timezone.utc) - timedelta(days=dead_days)).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM grape_t_webhook_inbox "
+                  "WHERE status='consumed' AND finished_at!='' AND finished_at<?",
+                  (consumed_before,))
+        consumed = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        c.execute("DELETE FROM grape_t_webhook_inbox "
+                  "WHERE status='dead' AND updated_at<?", (dead_before,))
+        dead = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        db.commit()
+    if consumed or dead:
+        log.info(f"webhook inbox purged consumed={consumed} dead={dead}")
+    return {"consumed": consumed, "dead": dead}
+
+
 async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
-    """Event 进程消费循环：claim → run_pipeline → finish（可取消）。"""
+    """Event 进程消费循环：claim → [托管复验] → run_pipeline（含续租）→ finish。"""
     import asyncio
 
     owner = worker_owner()
     log.info(f"webhook inbox worker started (owner={owner})")
+    last_purge = time.time()
     while True:
         try:
+            if time.time() - last_purge >= PURGE_INTERVAL_SECONDS:
+                last_purge = time.time()
+                try:
+                    await asyncio.to_thread(purge_finished)
+                except Exception as e:  # noqa: BLE001 - 清理失败不影响消费
+                    log.warning(f"webhook inbox purge failed: {e}")
             item = await asyncio.to_thread(claim_next, owner)
             if item is None:
                 await asyncio.sleep(poll_interval)
                 continue
-            _headers = {}
-            try:
-                _headers = json.loads(item.get("headers") or "{}")
-            except Exception:
-                _headers = {}
-            _body = (item.get("payload") or "").encode("utf-8")
-            _account = item["repo_key"].split(":", 1)[-1]
-            try:
-                from src.domains.runtime.pipeline.event_pipeline import run_pipeline
-                await asyncio.to_thread(
-                    run_pipeline, _body, _headers,
-                    account=_account, repo_key_override=item["repo_key"])
-                await asyncio.to_thread(finish_claim, item["id"], owner, ok=True)
-            except Exception as e:
-                log.warning(f"webhook inbox consume failed id={item['id']}: {e}")
-                await asyncio.to_thread(finish_claim, item["id"], owner, ok=False,
-                                        error=str(e))
+            await _run_with_lease(item, owner)
         except asyncio.CancelledError:
             raise
         except Exception as e:

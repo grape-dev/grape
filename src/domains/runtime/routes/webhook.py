@@ -3034,6 +3034,15 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
     if not repo:
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+    # Issue #3580/PR#1854 对齐：仓库全路径来自外部 payload，随后进 repo_key、托管查表
+    # 与工作目录 —— 段级校验（拒 `..`/空段/控制字符/各平台禁用字符），挡路径穿越。
+    from src.kernel.repo_path import RepoPathError, validate_repo_path
+    try:
+        repo = validate_repo_path(repo)
+    except RepoPathError as e:
+        log.warning(f"generic webhook rejected: invalid repository path provider={provider}: {e}")
+        return JSONResponse(status_code=400, content={
+            "code": 400, "message": "invalid repository path"})
 
     # 未托管仓库拒绝（与 gitcode 端点同语义：防幽灵 webhook）
     # 扫雷⑦（中危④）：显式传 provider——跨平台同名仓不互串预期 token
