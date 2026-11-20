@@ -116,7 +116,7 @@
   },
   "delete_org": {
     "title": "Delete Organization",
-    "confirm_msg": "Delete organization \"{name}\"?\nThe auto-provisioned organization repository will also be deleted (including the remote repo); manually linked repositories will be unbound.\nThis cannot be undone.",
+    "confirm_msg": "Delete organization \"{name}\"?\nThe auto-provisioned organization repository will also be deleted; manually linked repositories will be unbound.\nThis cannot be undone.",
     "confirm": "Delete",
     "success": "Organization deleted",
     "failed": "Delete failed: {msg}"

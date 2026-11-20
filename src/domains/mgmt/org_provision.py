@@ -131,9 +131,15 @@ def _owner_user(org: dict) -> dict:
 
 
 def _repo_name(org: dict) -> str:
-    raw = str(org.get("slug") or f"org-{org.get('id') or 0}").strip().lower()
-    slug = re.sub(r"[^a-z0-9_.-]+", "-", raw).strip("-.") or f"org-{org.get('id') or 0}"
-    name = f"org-{slug}"
+    """组织仓库默认名 = 组织 slug（不再自动加 org- 前缀）。
+
+    组织展示名由用户填写；仓库名默认使用可 URL 化的 slug，显式指定
+    org_repo_name 时优先使用指定值（见 _repo_create_options）。
+    空 slug 的极老数据用 repo-<id> 兜底，避免生成非法仓库名。
+    """
+    raw = str(org.get("slug") or org.get("name") or f"repo-{org.get('id') or 0}").strip().lower()
+    slug = re.sub(r"[^a-z0-9_.-]+", "-", raw).strip("-.") or f"repo-{org.get('id') or 0}"
+    name = slug
     if len(name) > 80:
         name = f"{name[:64].rstrip('-')}-{org.get('id') or 0}"
     return name
