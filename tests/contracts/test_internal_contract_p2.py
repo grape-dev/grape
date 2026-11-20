@@ -37,6 +37,7 @@ MGMT_READONLY_WHITELIST = {
     ("/internal/accounts/{account_id}", "GET"),
     ("/internal/knowledge/{knowledge_id}", "GET"),
     ("/internal/user-mapping", "POST"),
+    ("/internal/platform-cards", "GET"),
     ("/internal/repos/{repo_key}", "GET"),
 }
 MGMT_XWRITE = {("/internal/xwrite/apply", "POST")}
@@ -68,7 +69,7 @@ def test_contract_methods_implemented_both_sides():
                        "get_runtime_credential_meta", "get_meta_namespace",
                        "get_tasks_batch", "get_task_stats")
     mgmt_methods = ("get_repo_bundle", "get_account", "get_knowledge",
-                    "get_user_mapping_batch")
+                    "get_user_mapping_batch", "get_repo_platform_cards")
     for name in runtime_methods:
         assert name in RuntimeService.__abstractmethods__, f"RuntimeService 缺 {name}"
         assert hasattr(RuntimeServiceLocal, name), f"Local 缺 {name}"

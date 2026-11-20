@@ -123,6 +123,11 @@ MANIFEST = [
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra
     "pyproject.toml",
+    # Issue #3632：**不把 configs/ 打进 worker 包**。曾评估"文件卡随包下发"作为
+    # 第三条来源（文件卡是新平台纯配置接入的载体），但包内容门禁明确禁止
+    # configs 出现在包里（防服务端配置/凭据随包扩散到每台机器），而
+    # `GET /api/runtime/platform-cards` 契约通道已覆盖同一需求（worker 取卡
+    # 不依赖文件系统），故不推翻该安全决定。文件卡仍由运维按需铺到部署目录。
     # Issue #666 (M4): 随包下发 codegraph 离线安装脚本（降级/离线环境的预装入口）
     "scripts/install-codegraph.sh",
 ]

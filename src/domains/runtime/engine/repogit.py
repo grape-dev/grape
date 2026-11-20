@@ -1900,8 +1900,14 @@ def _host_for_provider(provider: str) -> str:
         card = None
     if card is not None:
         return card.host
-    raise ValueError(f"unknown vcs provider {provider!r}: no platform card "
-                     f"(clone URL 拒绝静默回退，S7 fail-fast)")
+    # Issue #3632：抛带 code 的专用异常，别让"平台未注册"落进通用 ValueError
+    # 与"工作区 git 不可写"同一条降级链（后者会静默转只读、任务假完成）。
+    from src.domains.runtime.vcs.platform_card import PlatformCardMissingError
+    raise PlatformCardMissingError(
+        provider,
+        detail=("平台卡来源已试：本进程表/主控契约（GET /api/runtime/platform-cards）、"
+                "configs/platforms/*.json、代码内置默认；clone URL 拒绝静默回退（S7 fail-fast）"),
+    )
 
 def _clone_auth_scheme_for(repo_key: str) -> str:
     """按平台卡取 git 传输鉴权 scheme（D4/G2）。默认 x-access-token（现状）。"""

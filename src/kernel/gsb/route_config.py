@@ -41,6 +41,8 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
         "get_skill",
         # P2 服务接口补齐（N6/N8/N9/N10）
         "get_repo_bundle", "get_account", "get_knowledge", "get_user_mapping_batch",
+        # Issue #3632：平台卡跨域只读（worker/engine 取卡契约的数据源）
+        "get_repo_platform_cards",
     ),
     "runtime": (
         "get_events", "get_event_detail", "get_tasks", "get_task_messages",

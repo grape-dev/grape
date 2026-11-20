@@ -3161,6 +3161,24 @@ async def _execute_task(client, task, engine_name: str = ""):
             return await _execute_task_impl(client, task, engine_name)
 
 
+def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
+    """Issue #3632：平台未注册时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：这段行为是本次修复最关键的一条（"平台未注册"曾经只
+    WARNING 一条就放行 agent，agent 拿不到 clone 地址后自述"git 只读降级交付"，
+    任务 completed/exit 0、工作区空）。把"判定 → 结构化错误 + 明确日志"从
+    执行流程里抽出来，才能被用例直接锁住，而不是靠读代码确认。
+
+    Returns:
+        `{"_error": "<code>: <message>", "_started": False}` —— 由 `_wrap` 上报
+        failed，任务**不进入** Agent 执行（与 WorkspaceBaselineError 同一条阻断语义）。
+    """
+    code = getattr(exc, "code", "platform_not_registered")
+    log.error(f"task {tid} blocked by platform card: code={code} "
+              f"repo_key={repo_key or ''} err={exc}")
+    return {"_error": f"{code}: {exc}", "_started": False}
+
+
 async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -3319,6 +3337,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # Issue #2514：基线分叉/不可达 → WorkspaceBaselineError 在此显式阻断（不静默复用错基线），
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
+    from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
@@ -3333,6 +3352,13 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                   f"fields={_wb_err.to_dict()}")
         _res.dispose()
         return {"_error": str(_wb_err), "_started": False}
+    except _PlatformCardMissing as _pc_err:
+        # Issue #3632：平台未注册（三条卡来源全断）≠ 工作区 git 不可写。
+        # 原先这里只 WARNING 一条就放行 agent，agent 拿不到 clone 地址 → 自述
+        # "git 只读降级交付" → 任务 completed/exit 0，工作区空、无 PR、无 QA 交办。
+        # 现在显式阻断并把 code 带进任务错误（构造逻辑见 platform_card_block_result）。
+        _res.dispose()
+        return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）

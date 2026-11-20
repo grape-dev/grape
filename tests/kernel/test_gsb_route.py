@@ -624,7 +624,7 @@ def test_contract_methods_registry_sync():
         assert actual == set(route_config.CONTRACT_METHODS[service]), service
     total = sum(len(v) for v in route_config.CONTRACT_METHODS.values())
     # 23 基线 + P2 补齐（N1–N5/N11/N12 runtime 7 + N6/N8/N9/N10 mgmt 4）
-    assert total == 38  # 34 + 本轮 mgmt→runtime/insight 迁移的 4 个契约方法
+    assert total == 39  # 38 + Issue #3632 平台卡跨域只读（mgmt.get_repo_platform_cards）
 
 
 def test_public_primitives_registry_sync():
