@@ -466,6 +466,10 @@ def _scan_pythons() -> dict[str, str]:
     mac/win 平台由 wheels 矩阵与 ps1 覆盖，不入包。
     """
     found: dict[str, str] = {}
+    # 版本钉定：wheels 按 _UV_INSTALL_REQUEST 的版本下载，捆绑解释器必须同版本，
+    # 否则二进制轮子 ABI 对不上（生产 aarch64 曾因机器上多装了个 3.14 而串成 cp314）。
+    _pinned_ver = _uv_request_version()
+    exact: dict[str, str] = {}
     try:
         if os.path.isdir(UV_PYTHON_DIR):
             for d in os.listdir(UV_PYTHON_DIR):
@@ -486,9 +490,28 @@ def _scan_pythons() -> dict[str, str]:
                     continue
                 if arch not in found or _py_ver_key(full) > _py_ver_key(found[arch]):
                     found[arch] = full
+                if (_pinned_ver and _py_ver_key(full)[:2] == _pinned_ver
+                        and (arch not in exact or _py_ver_key(full) > _py_ver_key(exact[arch]))):
+                    exact[arch] = full
     except Exception as e:
         log.warning(f"worker_package: scan python dir failed: {e}")
+    # 钉定版本优先；某架构没有该版本时才保留「最高版本」的结果
+    for _arch, _root in exact.items():
+        if found.get(_arch) != _root:
+            log.info(
+                "worker_package: bundling %s python %s (pinned to %s, was %s)",
+                _arch, _py_ver_key(_root), _UV_INSTALL_REQUEST, _py_ver_key(found[_arch]))
+        found[_arch] = _root
     return found
+
+
+def _uv_request_version() -> tuple[int, int] | None:
+    """`_UV_INSTALL_REQUEST`（如 "3.12"）→ (3, 12)；解析失败返回 None。"""
+    try:
+        parts = str(_UV_INSTALL_REQUEST).split(".")
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
 
 
 def _find_pythons() -> dict[str, str]:
