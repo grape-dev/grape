@@ -83,3 +83,30 @@ def test_retry_loop_watches_for_new_templates_after_success():
     # 看护轮次复用 _report_providers_once——负缓存在函数内部挡住已探模板
     assert "_pending = await _report_providers_once()" in seg, \
         "看护轮次必须复用同一上报+探测入口（负缓存由其内部消费）"
+
+
+def test_refresh_loop_triggers_probe_on_platform_template_change():
+    src = _worker_src()
+    start = src.find("async def _template_refresh_loop():")
+    assert start != -1, "_template_refresh_loop 缺失"
+    end = src.find("async def _cloud_run_loop", 0) if start == -1 else \
+        src.find("_refresh_task = asyncio.create_task", start)
+    assert end != -1
+    seg = src[start:end]
+    # refresh 循环（60s）顺路做轻量平台扫描，模板 id 新增 → set 事件唤醒探测循环
+    assert 'config.get("probe_watch_trigger")' in seg, \
+        "refresh 循环必须读取探测唤醒事件（跨作用域经共享 config 传递）"
+    assert "_last_platform_tids" in seg, "平台模板 id 快照缺失——无法做变更检测"
+    assert "_evt.set()" in seg, "发现新模板 id 必须 set 事件唤醒探测循环"
+    # 首轮只建快照不触发（启动探测批已覆盖）
+    assert "_pk in _last_platform_tids" in seg, \
+        "变更 diff 必须排除首轮基线（否则每轮误触发）"
+    # 扫描失败沿用旧快照（瞬时平台故障不掩盖后续新增模板）
+    assert "_seen[_pk] = _old_ids or set()" in seg, \
+        "扫描失败必须沿用旧快照——否则平台恢复后新增 id 无法被 diff 出"
+    # 同步网络调用放线程池（60s 高频路径不阻塞事件循环/心跳调度）
+    assert "await asyncio.to_thread(_ad.list_templates" in seg, \
+        "list_templates 同步调用必须 to_thread（会阻塞 60s 循环内的心跳/claim 调度）"
+    # 探测侧必须有对应等待端（事件+超时兜底），两端缺一即死代码
+    assert 'asyncio.wait_for(_watch_evt.wait(), timeout=_probe_watch_interval)' in src, \
+        "探测循环缺少事件等待端（refresh 侧 set 了也没人消费）"

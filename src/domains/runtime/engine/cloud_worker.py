@@ -1102,6 +1102,9 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
     # [探测重试 2026-11-04] 模板探测失败计数（run_loop 里注册后首轮赋值；refresh loop
     # 依据它决定是否重跑 provider 上报+探测）
     _probe_fail_count = 0
+    # [新模板看护 2026-11-20 用户裁定] 平台侧模板 id 快照（provider 键 → id 集合）：
+    # refresh 循环每 60s 轻量 list_templates 对比，发现新增 → set 探测唤醒事件。
+    _last_platform_tids: dict = {}
 
     async def _template_refresh_loop():
         nonlocal _whoami_401_streak, _whoami_tick, _probe_fail_count
@@ -1118,6 +1121,67 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 await _refresh_provider_configs(client)
                 _fail_streak = 0
                 # [探测重试] 由 _amain 内 _probe_retry_loop 负责（跨函数作用域不可达）
+                # [新模板看护 2026-11-20] 平台侧模板 id 集合变更检测（轻量元数据扫描，
+                # 不建箱）：与 _report_providers_once 同款 list_templates 调用。发现新增
+                # id → set config["probe_watch_trigger"] 唤醒探测循环（负缓存挡已探模板，
+                # 只建箱探测新增 id）。扫描失败不更新该 provider 的快照（瞬时故障不
+                # 掩盖下轮变更）；首轮只建快照不触发（启动探测批已覆盖）。
+                _evt = config.get("probe_watch_trigger")
+                if _evt is not None:
+                    _seen: dict = {}
+                    for _pc in list((_provider_configs or {}).values()):
+                        _ep = (_pc.get("api_url") or _pc.get("endpoint") or "").strip()
+                        _pk = (_pc.get("name") or _ep or "").strip()
+                        if not _pk:
+                            continue
+                        _old_ids = _last_platform_tids.get(_pk)
+                        if not _ep:
+                            _seen[_pk] = _old_ids or set()
+                            continue
+                        try:
+                            from src.domains.runtime.agents.sandbox.backends import get_adapter as _ga
+                            _ad = _ga(_pc.get("platform", ""))
+                            if not _ad or not hasattr(_ad, "list_templates"):
+                                _seen[_pk] = _old_ids or set()
+                                continue
+                            _extra_cfg = _pc.get("extra_config") or {}
+                            # to_thread：list_templates 是同步网络调用——本循环 60s 一轮
+                            # （_report_providers_once 的同款调用频次低得多），阻塞事件循环
+                            # 会拖心跳/claim 调度。
+                            _scan = await asyncio.to_thread(_ad.list_templates, {
+                                "api_url": _ep,
+                                "api_key": _pc.get("api_key", ""),
+                                **({"gateway_ip": _extra_cfg["gateway_ip"]}
+                                   if _extra_cfg.get("gateway_ip") else {}),
+                                **({"gateway_url": _extra_cfg["gateway_url"]}
+                                   if _extra_cfg.get("gateway_url") else {}),
+                            })
+                            if _scan is None:
+                                # SDK 未装：不可扫描——保留旧快照
+                                _seen[_pk] = _old_ids or set()
+                                continue
+                            _seen[_pk] = {(t.get("template_id") or "").strip()
+                                          for t in (_scan or [])
+                                          if (t.get("template_id") or "").strip()}
+                        except Exception as _se:
+                            # 扫描失败：沿用旧快照——平台恢复后新增 id 仍能被 diff 出
+                            _seen[_pk] = _old_ids or set()
+                            log.debug(f"[engine-probe] watch scan failed for {_pk}: {_se}")
+                    _new_tids = set()
+                    for _pk, _ids in _seen.items():
+                        if _pk in _last_platform_tids:
+                            _new_tids |= (_ids - _last_platform_tids[_pk])
+                    # provider 消失 → 清其快照（回来时重新基线，不误触发）
+                    for _pk in list(_last_platform_tids.keys()):
+                        if _pk not in _seen:
+                            del _last_platform_tids[_pk]
+                    _last_platform_tids.clear()
+                    _last_platform_tids.update(_seen)
+                    if _new_tids:
+                        log.info(f"[engine-probe] watch: {len(_new_tids)} new platform "
+                                 f"template id(s) detected, waking probe loop: "
+                                 f"{sorted(t[:16] for t in _new_tids)}")
+                        _evt.set()
                 # ---- whoami: 改名跟随/身份守护/401 自杀（spec §6.2/§6.3）----
                 _whoami_tick += 1
                 if _whoami_tick % 5 == 0:
@@ -1626,14 +1690,17 @@ def main():
         # 且连续 3 轮无进展（pending 不降——平台资源持续不足/不可达）直接跳到封顶，
         # 消掉对平台每 10 分钟一轮的无效冲击；有进展（部分模板探成）时保持指数节奏，
         # 短间隔快速收敛。
-        # [新模板看护 2026-11-20 用户裁定] 全成功后循环不再退出——转入看护模式：每
-        # PROBE_WATCH_INTERVAL 秒（默认 600s）重跑 _report_providers_once。负缓存保证
-        # 已探过的模板（含确认无引擎的）直接跳过建箱——每轮净成本 = list_templates
-        # 扫描 + 幂等上报；平台侧新增模板 id 不在缓存 → 自动建箱探测并登记。修复
-        # 「重试循环退出后新模板永不被自动发现、只能重启 worker」缺口（此前唯一的
-        # 自动发现机制是'真无引擎模板永远差 1'的病态重试，本批已消）。
+        # [新模板看护 2026-11-20 用户裁定] 全成功后循环不再退出——转入看护模式，由
+        # 60s _template_refresh_loop 顺路做轻量 list_templates 扫描，发现平台侧模板
+        # id 集合变化 → set config["probe_watch_trigger"] 事件唤醒本循环重跑
+        # _report_providers_once（负缓存挡住已探模板，只建箱探测新增 id）。事件等待
+        # 带 PROBE_WATCH_INTERVAL（默认 600s）超时兜底——refresh 循环扫描自身失败
+        # （平台不可达等）不丢发现机会。修复「重试循环退出后新模板永不被自动发现、
+        # 只能重启 worker」缺口（此前唯一的自动发现机制是'真无引擎模板永远差 1'的
+        # 病态重试，本批已消）。
         _probe_max_backoff = int(os.environ.get("PROBE_RETRY_MAX_BACKOFF", "1800"))
         _probe_watch_interval = int(os.environ.get("PROBE_WATCH_INTERVAL", "600"))
+        _watch_evt: asyncio.Event = config.setdefault("probe_watch_trigger", asyncio.Event())
         async def _probe_retry_loop():
             _backoff = 120
             _pending = _probe_fail_count
@@ -1643,8 +1710,13 @@ def main():
                 if _pending:
                     await asyncio.sleep(_backoff)
                 else:
-                    # 看护模式：负缓存挡住已探模板，本轮只可能建箱探测新增模板
-                    await asyncio.sleep(_probe_watch_interval)
+                    # 看护模式：等 refresh 循环的模板变更事件（60s 扫描发现新模板即刻
+                    # 触发）；超时兜底重跑一轮，防 refresh 扫描链路自身故障漏检。
+                    try:
+                        await asyncio.wait_for(_watch_evt.wait(), timeout=_probe_watch_interval)
+                    except asyncio.TimeoutError:
+                        pass
+                    _watch_evt.clear()
                 _pending = await _report_providers_once()
                 if _pending:
                     if _last_pending is not None and _pending >= _last_pending:
@@ -1666,7 +1738,8 @@ def main():
                     _stall_rounds = 0
                     _last_pending = None
                     log.info(f"[engine-probe] all pending cleared; watching for new "
-                             f"templates every {_probe_watch_interval}s (cached ones skipped)")
+                             f"templates via refresh-loop scan (event-triggered, "
+                             f"{_probe_watch_interval}s timeout fallback)")
 
         asyncio.create_task(_probe_retry_loop())
 
