@@ -706,12 +706,29 @@ class MySQLCompatCursor:
         _otel_span = None
         try:
             from src.kernel.otel import start_db_span
-            _otel_span = start_db_span(t)
+            # db.name 让三库（mgmt/runtime/insight）在 trace 里分得开；连不上就留空
+            _dbn = ""
+            try:
+                _dbn = (getattr(self._conn, "_cfg", None) or {}).get("database", "")
+            except Exception:
+                _dbn = ""
+            _otel_span = start_db_span(t, db_name=_dbn)
         except Exception:
             _otel_span = None
         try:
             cur.execute(t, params)
-        finally:
+        except Exception as _otel_exc:
+            # 失败也要把 span 收干净并标成 error（原来走 finally 只 end()，
+            # 排障时看着像成功的一跳）
+            if _otel_span is not None:
+                try:
+                    from src.kernel.otel import end_db_span
+                    end_db_span(_otel_span, rowcount=None, exc=_otel_exc)
+                except Exception:
+                    pass
+                _otel_span = None
+            raise
+        else:
             if _otel_span is not None:
                 try:
                     from src.kernel.otel import end_db_span

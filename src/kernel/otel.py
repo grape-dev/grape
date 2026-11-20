@@ -18,6 +18,7 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 """
 import os
 import platform
+import re
 from contextlib import contextmanager
 
 
@@ -210,22 +211,43 @@ def init_otel(service_name: str):
         return None
 
 
+_REQUESTS_INSTRUMENTED = False
+
+
 def instrument_fastapi(app, service_name: str):
-    """FastAPI 自动 HTTP span（A/B/C/webhook 四入口通用）。幂等、失败不致命。"""
+    """FastAPI 自动 HTTP span（A/B/C/webhook 四入口通用）。幂等、失败不致命。
+
+    service.name 优先取 GRAPE_TRACE_SERVICE——betamulti-process 下四个入口都走
+    server_common.build_app，靠这个变量把 mgmt/event/worker/insight 分开，否则
+    只能拿到调用方硬编码的名字（曾出现四进程同叫 grape-server-a）。
+
+    app 上已经挂过 FastAPIInstrumentor 时直接返回：grape_server.py 在 build_app
+    之后又显式调用一次，没有这道闸门会产生重复 span。
+    """
     try:
         if not otel_enabled():
             return False
-        init_otel(service_name)
+        if getattr(app, "_is_instrumented_by_opentelemetry", False):
+            return True
+        _svc = os.environ.get("GRAPE_TRACE_SERVICE", "").strip() or service_name
+        init_otel(_svc)
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         # 剔除探针/指标路径，避免无意义 span 噪声（与 metrics 中间件同款口径）
         # 噪声端点剔除（2026-11-05）：worker 每 15s 的 claim/heartbeat/tags 刷屏 Tempo
         # 列表，把真正要看的任务 trace 挤出搜索窗口。任务生命周期另有专门 span
         # （task.*），协议面已在 metrics（/metrics）观测，trace 层保留完整请求以外的价值。
+        # 2026-11-20 实测修正：excluded_urls 是正则、按完整 path 匹配，原来写的
+        # "runtimes/.../tasks/claim"、"/runtime/heartbeat" 少了 api/ 前缀，一条都没命中，
+        # 结果 worker 的 claim/heartbeat 反而被全量埋点（legacy 路径本来排除 api/ping）。
         FastAPIInstrumentor.instrument_app(app, excluded_urls=(
-            "health,healthz,readyz,metrics,"
-            "runtimes/[^/]+/tasks/claim,runtimes/[^/]+/tags,"
-            "/runtime/heartbeat,/runtime/register,"
-            "grape-worker[.]tar[.]gz,/runtime/install"
+            "health,healthz,readyz,metrics,api/ping,"
+            "api/runtime/heartbeat,api/runtime/register,api/runtime/install,"
+            # 实测两条路由都吃：/api/runtime/runtimes/uid/<engine_uid>/tasks/claim
+            # 和 /api/runtime/runtimes/<runtime_id>/tasks/claim-by-tag/<tag>，
+            # 所以用 .* 放宽，别按固定段写（写死 uid/ 那么 claim-by-tag 会漏）。
+            "api/runtime/runtimes/.*tasks/claim,"
+            "api/runtime/runtimes/.*/tags,"
+            "faro/collect"
         ))
         # DB span 采用「单一来源」策略（架构审查 P2-2）：只保留 mysql_compat.py 的
         # 手动埋点（start_db_span/end_db_span，带 db.operation/rowcount 且显式挂父上下文），
@@ -241,6 +263,16 @@ def instrument_fastapi(app, service_name: str):
                          "— duplicate db.query spans possible; disable one of them")
         except Exception:
             pass
+        # requests 出站 span：旧路径在 setup_tracing 里装了，新路径原来没有，
+        # 切过来会让 LLM（requests 直连）与 VCS/SCM 的调用从 trace 里消失。
+        global _REQUESTS_INSTRUMENTED
+        if not _REQUESTS_INSTRUMENTED:
+            try:
+                from opentelemetry.instrumentation.requests import RequestsInstrumentor
+                RequestsInstrumentor().instrument()
+                _REQUESTS_INSTRUMENTED = True
+            except Exception:
+                pass
         return True
     except Exception as e:
         try:
@@ -251,12 +283,51 @@ def instrument_fastapi(app, service_name: str):
         return False
 
 
-def start_db_span(sql: str):
+_SQL_STR_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_SQL_DQ_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+_SQL_IN_RE = re.compile(r"\bIN\s*\([^)]{0,400}\)", re.IGNORECASE)
+_SQL_CMP_NUM_RE = re.compile(r"([=<>!]=?|<>)\s*(\d+(?:\.\d+)?)")
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+`?([A-Za-z0-9_$.`]+)`?", re.IGNORECASE)
+_SQL_OP_RE = re.compile(r"\s*([A-Za-z]+)")
+
+
+def sanitize_sql(sql: str, limit: int = 512) -> str:
+    """把 SQL 里的「值」抹成占位符，只留形状。
+
+    目的：db.statement 会进 Tempo，原文里的邮箱 / token / 手机号不能再落第三处
+    （日志、DB、trace 已经三份）。只做三件事——字符串字面量、IN 列表、比较运算符
+    后面的数字；表名与列名保留，否则 span 就没有诊断价值了。
+    """
+    try:
+        s = _SQL_STR_RE.sub("?", sql)
+        s = _SQL_DQ_RE.sub('"?"', s)
+        s = _SQL_IN_RE.sub("IN (?)", s)
+        s = _SQL_CMP_NUM_RE.sub(r"\1 ?", s)
+        return s[:limit]
+    except Exception:
+        return "?"
+
+
+def _sql_table(sql: str) -> str:
+    """粗提取主表名（去掉库前缀），只用于 db.sql.table 属性。"""
+    try:
+        m = _SQL_TABLE_RE.search(sql)
+        return (m.group(1).replace("`", "").split(".")[-1] if m else "")[:64]
+    except Exception:
+        return ""
+
+
+def start_db_span(sql: str, db_name: str = ""):
     """SQL 执行 span（DB 阶段拆解 2026-11-05）：在 execute 调用点创建，自动挂当前
     请求 trace（contextvars 传播）。OTel 未启用/无有效父 span → None（零开销）。
 
     架构审查 P2-3：无父上下文时（后台线程/启动期 SQL）不建 span——否则每条 SQL
     都会成为独立 trace 的根，按采样率灌进 Tempo 产生大量孤儿 trace。
+
+    2026-11-20 补全排障必需属性：db.system / db.name（三库分得开）/ db.sql.table /
+    db.operation（完整首词，原来只取 6 个字符，INSERT 会被截成 INSERT）；同时把
+    statement 脱敏——原来是原文截断，邮箱与 token 直接进 Tempo。
     """
     if not otel_enabled():
         return None
@@ -266,30 +337,59 @@ def start_db_span(sql: str):
         _parent = _trace.get_current_span()
         if _parent is None or not _parent.get_span_context().is_valid:
             return None
-        _span = _trace.get_tracer(__name__).start_span("db.query")
+        _span = _trace.get_tracer(__name__).start_span("db.query", kind=_trace.SpanKind.CLIENT)
         if not _span.get_span_context().is_valid:
             return None
-        _span.set_attribute("db.statement", sql[:512])
-        _sys = (sql.lstrip()[:6]).upper()
-        _span.set_attribute("db.operation", _sys)
+        _m = _SQL_OP_RE.match(sql)
+        _op = (_m.group(1) if _m else "").upper()
+        _span.set_attribute("db.system", "mysql")
+        _span.set_attribute("db.operation", _op)
+        _span.set_attribute("db.statement", sanitize_sql(sql))
+        if db_name:
+            _span.set_attribute("db.name", str(db_name)[:64])
+        _tbl = _sql_table(sql)
+        if _tbl:
+            _span.set_attribute("db.sql.table", _tbl)
         return _span
     except Exception:
         return None
 
 
-def end_db_span(span, rowcount=None):
-    """结束 start_db_span 的 span；失败标记 error。"""
+def end_db_span(span, rowcount=None, exc=None):
+    """结束 start_db_span 的 span；失败标记 error（status + errno + 异常事件）。
+
+    原来只在 finally 里 end()，execute 抛异常时 span 不带任何错误标记，排障时
+    看起来像「成功的一跳」——这是 2026-11-20 修掉的坑。
+    """
     try:
         if span is None:
             return
+        if exc is not None:
+            try:
+                span.set_attribute("db.error", type(exc).__name__)
+                _errno = getattr(exc, "args", (None,))[0]
+                if isinstance(_errno, int):
+                    span.set_attribute("db.mysql_errno", _errno)
+            except Exception:
+                pass
+            try:
+                span.record_exception(exc)
+                from opentelemetry.trace import Status, StatusCode
+                span.set_status(Status(StatusCode.ERROR, str(exc)[:200]))
+            except Exception:
+                pass
         if rowcount is not None:
             try:
                 span.set_attribute("db.rowcount", int(rowcount))
             except Exception:
                 pass
-        span.end()
     except Exception:
         pass
+    finally:
+        try:
+            span.end()
+        except Exception:
+            pass
 
 
 def current_trace_context_headers() -> dict:

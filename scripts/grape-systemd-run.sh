@@ -143,7 +143,11 @@ export DB_POOL_MAX_CACHED="$_pool_cache"
 # 不写 .env（避免影响 restart-four-process.sh 等其它启动方式）。
 export METRICS_ADDR="127.0.0.1:${mport}"
 export GRAPE_SERVICE_NAME="${role}"
-export GRAPE_OTLP_ENDPOINT="${GRAPE_OTLP_ENDPOINT:-http://127.0.0.1:4317}"
+# 旧埋点路径（insight/observability/tracing.py）只在这条变量**显式设置**时启用。
+# 原来这里补了 127.0.0.1:4317 的默认值，等于把"没配"变成"配了"：新路径
+# （src/kernel/otel.py，认 OTEL_EXPORTER_OTLP_ENDPOINT）因此永远不生效，而本机
+# 通常没有 4317 监听，span 被静默发往死端口。保持 opt-in，不再补默认值。
+if [ -n "${GRAPE_OTLP_ENDPOINT:-}" ]; then export GRAPE_OTLP_ENDPOINT; fi
 export GRAPE_TRACE_SERVICE="${GRAPE_TRACE_SERVICE:-grape-${role}}"
 export GRAPE_TRACE_RATIO="${GRAPE_TRACE_RATIO:-0.5}"
 export PYTHONUNBUFFERED=1
