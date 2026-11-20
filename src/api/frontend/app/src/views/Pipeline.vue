@@ -1078,4 +1078,54 @@ onBeforeUnmount(function () {
   margin-left: 8px;
   font-size: 10px;
 }
+
+/* 暗色档徽章（2026-11-20 主人反馈：issue 号 / 场景 / agent 一栏在暗色下不像一套语言）
+ * 旧档来自 legacy app.css：20% 低透底（片底/卡片对比只有 1.08–1.20 = 无形）+ 400 档亮粉字，
+ * 深色卡片上只剩「发光小字」，既没有形状也不是这套深色语言。
+ * 改成与运行时页同一套口径：同色相 18% 底 + 34% 同色 inset 环 + 55%↔白提亮字；
+ * 浅色档一个字节不动（仍由 app.css 的 pastel 档负责）。 */
+:root[data-theme-mode='dark'] .pl .tg-v { --pl-tag: #e86aa8; }
+:root[data-theme-mode='dark'] .pl .tg-i { --pl-tag: #ff7a70; }
+:root[data-theme-mode='dark'] .pl .tg-c { --pl-tag: #6fb4ff; }
+:root[data-theme-mode='dark'] .pl .tg-q { --pl-tag: #b39bf2; }
+:root[data-theme-mode='dark'] .pl .tg-s { --pl-tag: #ffc66e; }
+:root[data-theme-mode='dark'] .pl .tg-ch { --pl-tag: #67cbe8; }
+:root[data-theme-mode='dark'] .pl :is(.tg-v, .tg-i, .tg-c, .tg-q, .tg-s, .tg-ch) {
+  background: color-mix(in srgb, var(--pl-tag) 18%, transparent) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pl-tag) 34%, transparent);
+  color: color-mix(in srgb, var(--pl-tag) 55%, #fff) !important;
+}
+/* 「尚未生成流水线事件」提示条：框线用的是满饱和 --c-warning，深底上太跳，压到 35% */
+:root[data-theme-mode='dark'] .pl .pl__twe {
+  background: color-mix(in srgb, var(--c-warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--c-warning) 35%, transparent);
+}
+/* 执行中标签原来是实心 --c-success + 白字（深底上整块发光），压成同族淡底 */
+:root[data-theme-mode='dark'] .pl .pl__table .exec {
+  background: color-mix(in srgb, var(--c-success) 20%, transparent) !important;
+  color: color-mix(in srgb, var(--c-success) 60%, #fff) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c-success) 38%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .pl .tg-v { --pl-tag: #e86aa8; }
+  :root[data-theme-mode='auto'] .pl .tg-i { --pl-tag: #ff7a70; }
+  :root[data-theme-mode='auto'] .pl .tg-c { --pl-tag: #6fb4ff; }
+  :root[data-theme-mode='auto'] .pl .tg-q { --pl-tag: #b39bf2; }
+  :root[data-theme-mode='auto'] .pl .tg-s { --pl-tag: #ffc66e; }
+  :root[data-theme-mode='auto'] .pl .tg-ch { --pl-tag: #67cbe8; }
+  :root[data-theme-mode='auto'] .pl :is(.tg-v, .tg-i, .tg-c, .tg-q, .tg-s, .tg-ch) {
+    background: color-mix(in srgb, var(--pl-tag) 18%, transparent) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pl-tag) 34%, transparent);
+    color: color-mix(in srgb, var(--pl-tag) 55%, #fff) !important;
+  }
+  :root[data-theme-mode='auto'] .pl .pl__twe {
+    background: color-mix(in srgb, var(--c-warning) 10%, transparent);
+    border-color: color-mix(in srgb, var(--c-warning) 35%, transparent);
+  }
+  :root[data-theme-mode='auto'] .pl .pl__table .exec {
+    background: color-mix(in srgb, var(--c-success) 20%, transparent) !important;
+    color: color-mix(in srgb, var(--c-success) 60%, #fff) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c-success) 38%, transparent);
+  }
+}
 </style>
