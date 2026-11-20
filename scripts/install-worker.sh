@@ -80,9 +80,34 @@ if [ -z "$SERVER" ]; then
   log "No --server given, using default $SERVER (add --server https://<your-controller> if wrong)"
 fi
 SERVER="${SERVER%/}"
-# 设备名：hostname 小写，非字母数字替换为 -，清理首尾 -（hostname 输出含换行会产生尾随 -）
+# 设备名：主机名小写，非字母数字替换为 -，清理首尾 -。
+# 不要直接调 hostname：精简镜像/沙箱里没有该命令，而本脚本是 set -euo pipefail，
+# 一条 127 就会让整个自动升级失败（实测 rc=127，stderr=hostname: command not found
+# —— 服务端 h-90c96d41e662 vs 设备 h-6aedab5afaf2 的自动升级连环重试就是这么来的）。
+# 探测顺序：hostname → /proc/sys/kernel/hostname → uname -n → python socket → 时间戳兜底。
 if [ -z "$DEVICE" ]; then
-  DEVICE="worker-$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')"
+  _host_raw=""
+  if command -v hostname >/dev/null 2>&1; then
+    _host_raw="$(hostname 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ] && [ -r /proc/sys/kernel/hostname ]; then
+    _host_raw="$(cat /proc/sys/kernel/hostname 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ]; then
+    _host_raw="$(uname -n 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ] && command -v python3 >/dev/null 2>&1; then
+    _host_raw="$(python3 -c 'import socket;print(socket.gethostname())' 2>/dev/null || true)"
+  fi
+  if [ -z "$_host_raw" ]; then
+    _host_raw="worker-$(date +%s 2>/dev/null || echo 0)"
+  fi
+  _host_slug="$(printf '%s' "$_host_raw" | tr 'A-Z' 'a-z' 2>/dev/null || true)"
+  _host_slug="$(printf '%s' "$_host_slug" | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//' 2>/dev/null || true)"
+  if [ -z "$_host_slug" ]; then
+    _host_slug="unknown"
+  fi
+  DEVICE="worker-$_host_slug"
 fi
 
 # ===== whoami：凭据自述（服务端是唯一事实源）=====
