@@ -232,20 +232,31 @@ class HermesACPBackend:
         # 使用基于 cwd 的稳定路径（非随机临时目录），使 state.db 在任务结束后持久化，
         # 下次同一 cwd 执行时 session/resume 能找到历史会话数据（chat-ctx-fix §方向一）。
         import hashlib
-        _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
-        _hermes_homes_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes")
-        os.makedirs(_hermes_homes_root, exist_ok=True)
-        iso_home = os.path.join(_hermes_homes_root, _cwd_hash)
-        os.makedirs(iso_home, exist_ok=True)
         src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+        # 2026-11-20 Windows 修复：symlink 需要 SeCreateSymbolicLinkPrivilege，
+        # 普通用户/服务账号默认没有 → overlay 退化整目录复制，而复制出来的 home
+        # 缺运行时与已初始化状态，引擎把它当**全新数据根**重新 bootstrap
+        # （实测：`Preparing the isolated Hermes runtime… Installing Python
+        # dependencies…` 后 ACP reader EOF，任务 0.2 秒即挂）。
+        # 非 POSIX 平台直接复用原 HERMES_HOME，不建 overlay：worker 一次只跑一个
+        # 任务，state.db 无并发争用，牺牲 per-task 隔离换功能可用。
+        _use_overlay = _overlay_supported()
+        if _use_overlay:
+            _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
+            # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
+            _hermes_homes_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes")
+            os.makedirs(_hermes_homes_root, exist_ok=True)
+            iso_home = os.path.join(_hermes_homes_root, _cwd_hash)
+            os.makedirs(iso_home, exist_ok=True)
 
-        # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
-        # 只覆写 state.db（task-local）和 config.yaml（tool_progress=new）
-        _build_overlay_home(iso_home, src_home)
-        # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
-        # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
-        ensure_overlay_writable_dirs(iso_home)
+            # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
+            # 只覆写 state.db（task-local）和 config.yaml（tool_progress=new）
+            _build_overlay_home(iso_home, src_home)
+            # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
+            # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
+            ensure_overlay_writable_dirs(iso_home)
+        else:
+            iso_home = src_home
 
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
@@ -305,7 +316,10 @@ class HermesACPBackend:
         # TaskResourceStack: unified resource lifecycle (effect/dispose pattern)
         from src.domains.runtime.engine.resource_stack import TaskResourceStack
         _res = TaskResourceStack(task_id="", cwd=cwd)
-        _res.track_overlay(iso_home)
+        if _use_overlay:
+            # 非 overlay（Windows）时 iso_home 就是用户真实 HERMES_HOME；
+            # 注册为清理目标会在 dispose 时 rmtree 掉共享 home。绝不注册。
+            _res.track_overlay(iso_home)
         _res.track_proc(proc)
 
         collected_text = []
@@ -1630,6 +1644,17 @@ def _is_platform_enable_cred(line: str) -> bool:
         key = key[len("export "):].strip()
     key = key.split("=", 1)[0].strip()
     return key in _PLATFORM_ENABLE_CRED_KEYS
+
+
+def _overlay_supported() -> bool:
+    """per-task HERMES_HOME overlay 是否可用（非 POSIX 平台不可用）。
+
+    Windows 上 symlink 需要 SeCreateSymbolicLinkPrivilege（普通用户/服务账号
+    默认没有）：overlay 会退化成整目录复制，复制出来的 home 缺运行时与已初始化
+    状态，引擎把它当全新数据根重新 bootstrap，ACP 却已不再响应 —— 任务 0.2s
+    即 EOF 挂掉（2026-11-20 Windows 实测）。此场景直接复用原 HERMES_HOME。
+    """
+    return os.name != "nt"
 
 
 def _build_overlay_home(iso_home: str, src_home: str):

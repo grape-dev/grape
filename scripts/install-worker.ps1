@@ -498,7 +498,9 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
 # [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [worker] extra 同源——补 cubesandbox/
 # requests/cryptography（沙箱平台 SDK / 网络代理 / 凭据加密），与 install-worker.sh 对齐。
-$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography")
+# 2026-11-20：补 fastapi——pyproject [worker] 与 WORKER_DEPS 已声明，脚本硬列表漏了，
+# Windows 装机后任务链路 `stream failed: No module named 'fastapi'`（实测 11-19 21:36/21:38）。
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography", "fastapi")
 $pyprojectFile = Join-Path $Dir "pyproject.toml"
 if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL

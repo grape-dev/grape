@@ -70,6 +70,10 @@ _PROBE_COMMANDS = {
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
     "dsh": ["dsh", "headless", "hello"],
+    # AtomCode：worker 侧探针（此前缺此条目 → 每 10 分钟上报
+    # `skip: unknown engine: atomcode`，调度层无法判断健康）。可选开关
+    # （--ephemeral/--no-tools）由 _probe_engine_worker 按 CLI help 能力追加。
+    "atomcode": ["atomcode", "-p", "Reply OK"],
 }
 _PROBE_TIMEOUT = 30
 _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
@@ -877,6 +881,19 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
     if cli_path:
         cmd = [cli_path] + cmd[1:]
+    # AtomCode：--ephemeral/--no-tools 只在 CLI 支持时追加（5.0.4 没有这些
+    # 开关，盲目传会 exit=2 把健康引擎误报成 fail）。
+    if engine_name == "atomcode":
+        try:
+            from src.domains.runtime.engine.atomcode import cli_help_text as _atom_help
+            _ah = _atom_help(cmd[0])
+            if _ah:
+                if "--no-tools" in _ah:
+                    cmd.append("--no-tools")
+                if "--ephemeral" in _ah:
+                    cmd.append("--ephemeral")
+        except Exception as _ae:  # noqa: BLE001 - 探测失败按基础参数探
+            log.debug(f"atomcode probe capability detection skipped: {_ae}")
     # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
     # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
     _probe_env = None

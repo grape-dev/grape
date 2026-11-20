@@ -129,6 +129,21 @@ class LibseccompProgram:
         self._fd = None
 
 
+def socket_syscall_nr(arch: str) -> int:
+    """__NR_socket per architecture（未知架构按 aarch64 兜底并告警）。
+
+    Windows 的 platform.machine() 返回 "AMD64" / "ARM64"（大小写不一），
+    必须先归一化；否则 AMD64 落到 aarch64 分支，用错系统调用号。
+    """
+    _a = (arch or "").lower()
+    if _a in ("x86_64", "amd64", "x64", "i386", "i686", "x86"):
+        return 41   # asm/unistd_64.h
+    if _a in ("aarch64", "arm64"):
+        return 198  # asm-generic/unistd.h
+    log.warning(f"seccomp: unknown architecture {arch}, using aarch64 __NR_socket=198")
+    return 198
+
+
 class NullSeccompProgram:
     """空 seccomp——不做 seccomp 限制。
 
@@ -167,15 +182,13 @@ class BPFSocketFilter:
     """
 
     # P0-13 修复：按架构选 __NR_socket（aarch64=198, x86_64=41）
+    # 2026-11-20：Windows 的 platform.machine() 返回 "AMD64"，旧判定落到
+    # aarch64 默认分支（AMD64 上用 aarch64 的 socket 号=198，而 x86_64 是 41）——
+    # 语义完全错位。统一做大小写归一 + AMD64/x64 映射，并在非 POSIX 平台
+    # 直接降级为空实现（seccomp 是 Linux 内核特性，Windows 上生成 BPF 无意义）。
     import platform as _platform
-    _arch = _platform.machine()
-    if _arch == "aarch64" or _arch == "arm64":
-        _NR_SOCKET = 198  # asm-generic/unistd.h
-    elif _arch == "x86_64":
-        _NR_SOCKET = 41   # asm/unistd_64.h
-    else:
-        _NR_SOCKET = 198  # 默认 aarch64（生产环境）
-        log.warning(f"seccomp: unknown architecture {_arch}, using aarch64 __NR_socket=198")
+    _SECCOMP_SUPPORTED = os.name == "posix"
+    _NR_SOCKET = socket_syscall_nr(_platform.machine())
     _AF_INET = 2
     _AF_INET6 = 10
     _SECCOMP_RET_ALLOW = 0x7FFF0000
@@ -188,6 +201,11 @@ class BPFSocketFilter:
 
     def open(self) -> int:
         """生成 BPF 字节码文件，返回 fd。幂等。"""
+        if not self._SECCOMP_SUPPORTED:
+            # Windows/macOS：没有 seccomp(2)，返回 -1 = 不启用（调用方按无过滤处理）
+            if self._fd is None:
+                log.debug("seccomp: skipped (not a POSIX platform)")
+            return -1
         if self._fd is not None:
             return self._fd
         with self._lock:

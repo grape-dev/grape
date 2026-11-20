@@ -81,9 +81,16 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
                         f"(task={tid}, repo={_rk}) — claim-time injection "
                         f"will likely yield empty token")
             except Exception as _dce:
-                # 检查器自身故障不阻断任务（跳过，由 claim 现取自然暴露）
-                log.warning(f"dependency_check token level probe failed "
-                            f"(skipped, task={tid}): {_dce}")
+                # 检查器自身故障不阻断任务（跳过，由 claim 现取自然暴露）。
+                # worker 侧没有 assembly 层，`vcs_cards` 等 kernel 端口天然未绑定——
+                # 那不是缺陷，是「本进程没有该能力」，按 debug 记一条即可，否则每个
+                # git 类任务都刷一条 warning（Windows worker 实测每任务一条）。
+                if "is not bound" in str(_dce):
+                    log.debug(f"dependency_check token level probe unavailable "
+                              f"(kernel port unbound, task={tid}): {_dce}")
+                else:
+                    log.warning(f"dependency_check token level probe failed "
+                                f"(skipped, task={tid}): {_dce}")
 
     # 5. Issue session for git worktree agents (warning, not hard fail)
     issue_session_id = task.get("issue_session_id") or ""

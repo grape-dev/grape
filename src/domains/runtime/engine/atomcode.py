@@ -1,10 +1,31 @@
 """Rust-based AtomCode CLI: prompt files and schema-v1 headless JSONL."""
+import functools
 import json
 import os
+import subprocess
 import tempfile
 from contextlib import contextmanager
 
 from .base import AgentRuntime
+
+
+@functools.lru_cache(maxsize=4)
+def cli_help_text(binary: str = "atomcode") -> str:
+    """Return `atomcode --help` output, or "" when the CLI cannot be probed.
+
+    Issue #3511: CLI 版本间参数集不同（5.0.4 没有 `--output-format`，多了会
+    `error: unexpected argument` → exit=2，任务全灭）。可选参数一律按 help
+    能力探测决定，探测失败（CLI 缺失/超时）返回空串表示「不知道」——调用方
+    此时保持既有参数不变，避免把老环境改坏。
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "--help"], capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        return (proc.stdout or "") + (proc.stderr or "")
+    except Exception:  # noqa: BLE001 - 探测失败只是没有能力信息
+        return ""
 
 
 class AtomCodeRuntime(AgentRuntime):
@@ -31,8 +52,15 @@ class AtomCodeRuntime(AgentRuntime):
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         """prompt is the file path yielded by prepare_prompt, never prompt text."""
-        args = ["--prompt-file", prompt, "--output-format", "jsonl",
-                "--dangerously-skip-permissions"]
+        args = ["--prompt-file", prompt]
+        _help = cli_help_text(self.binary)
+        # 能力探测：help 里没有的开关绝不传（AtomCode 5.0.4 收到
+        # --output-format 直接 `error: unexpected argument` → exit=2，任务全灭）。
+        # _help 为空 = 探测不到，保持历史参数不变（既不放宽也不收紧）。
+        if not _help or "--output-format" in _help:
+            args.extend(["--output-format", "jsonl"])
+        if not _help or "--dangerously-skip-permissions" in _help:
+            args.append("--dangerously-skip-permissions")
         if session_id:
             args.extend(["--resume", session_id])
         return args
