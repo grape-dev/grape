@@ -845,6 +845,27 @@ class _NonOwnerObject(Exception):
     """
 
 
+def _base_table_present(c, tbl: str) -> bool:
+    """当前库里 tbl 是否为**基表**（MySQL 只认 BASE TABLE；SQLite 只认 table）。
+
+    2026-11-20（审计 F2）：`_fn_rename_org_tables_and_uuid_pk` 对六张 org 表无条件跑
+    `UuidPkMigration(...).run()`。三库模式下 runtime/insight 库里既没有这些表、看到的还是
+    跨库只读视图 → 1146/1347 → 执行器按「异常=不盖章」跳过 → 每轮启动重试、该域台账永不收敛。
+    迁移只应处理「本域库里的基表」。探针自身异常按存在处理（fail-safe：宁可让 DDL 自己报错，
+    也不要把迁移静默跳过，否则又会变成「跳过却盖章」）。
+    """
+    try:
+        if _mysql_backend():
+            return bool(c.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND TABLE_TYPE='BASE TABLE'",
+                (tbl,)).fetchone()[0])
+        return bool(c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone())
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _is_base_table(c, tbl: str) -> bool:
     """当前库中 tbl 是否为基表（MySQL 查 information_schema；SQLite 恒 True）。
 
@@ -10547,10 +10568,16 @@ register_migration(
 
 # ===== Issue #2150/org pipeline：issue 记录组织上下文快照引用 =====
 def _fn_add_issue_org_snapshot_column() -> None:
+    # 2026-11-20（审计 F3）：本迁移 ALTER 的是 `issue`，其属主域是 runtime。
+    # 旧写法「注册域缺省 mgmt + raise_on_guard 未开」在三库模式下形成假绿：
+    #   mgmt 进程 _owned_skip(issue) 命中 → _ensure_column 静默 return False → fn 正常返回 → 盖章；
+    #   runtime 进程又因缺省域=mgmt 被 filter_migration_registry 剔除，压根不跑。
+    # 两侧都不建列，而 engine/service.py:1087 SELECT 该列 → 1054。
+    # 修法：注册域收敛到属主域 runtime；并开 raise_on_guard，万一仍在非属主进程执行则显式失败不盖章。
     with db_lock:
         c = db.cursor()
         _ensure_column(c, "issue", "org_context_snapshot_id",
-                       "TEXT NOT NULL DEFAULT ''", strict=True)
+                       "TEXT NOT NULL DEFAULT ''", strict=True, raise_on_guard=True)
         db.commit()
 
 
@@ -10558,6 +10585,7 @@ register_migration(
     version="202611183010",
     name="add-issue-org-context-snapshot",
     kind="safe",
+    domains=("runtime",),
     fn=_fn_add_issue_org_snapshot_column,
 )
 
@@ -10813,9 +10841,15 @@ def _fn_rename_org_tables_and_uuid_pk() -> None:
         db.commit()
 
     # 主键整型→TEXT（SQLite 重建 / MySQL MODIFY；已是目标形态则零写入）
+    # 2026-11-20（审计 F2）：只处理本域库里真实存在的表。三库模式下 runtime/insight 库
+    # 没有这些 mgmt 表，旧写法会 1146 → 不盖章 → 每轮重试永不收敛。
     from src.api.uuid_pk_migration import UuidPkMigration
 
     for _old, new in _ORG_TABLE_RENAMES:
+        with db_lock:
+            _present = _base_table_present(db.cursor(), new)
+        if not _present:
+            continue
         UuidPkMigration(pk_table=new).run()
 
     if mysql:
@@ -10920,6 +10954,13 @@ register_migration(
 
 
 register_migration(
+    # 2026-11-20（审计 F2）：本迁移**确实跨两域** —— 六张 org 表
+    # （grape_t_org_dispatch / _target / _aggregate / grape_t_org_context /
+    #   _context_snapshot / _org_repo_map）owner=mgmt，而它后段还要放宽
+    # issue.org_context_snapshot_id（issue owner=runtime）。所以不能像审计建议那样
+    # 简单收敛成 ("mgmt",)：那会让 runtime 库里的 issue 列永远不被放宽。
+    # 真问题是 fn 里对「本域库不存在的表」也硬跑 UuidPkMigration → runtime/insight 每轮 1146、
+    # 不盖章、永不收敛。修法：每一跳先探表是否存在，缺表即跳过（见 fn 内 _table_present）。
     version="202611191000",
     name="rename-org-tables-and-uuid-pk",
     kind="safe",
