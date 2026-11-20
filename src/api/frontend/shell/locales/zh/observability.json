@@ -537,5 +537,8 @@
     "sbx_copy": "复制",
     "sbx_close": "关闭",
     "sbx_error_copied": "失败原因已复制"
-  }
+  },
+  "obs_no_data": "暂时拿不到 worker 数据（不是 0 台）",
+  "obs_stale_since": "数据更新失败，显示的是 {{time}} 的快照",
+  "obs_partial": "部分数据不可用（后端降级）"
 }

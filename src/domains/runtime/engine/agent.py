@@ -3814,7 +3814,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         pass
                     return
-                _result = None
+                # 哨兵：区分「真的超时」与「执行函数返回 None」。旧实现两者共用
+                # None，导致 2 秒就结束的任务被上报成 "task timed out after 7200.0s"，
+                # 真实原因（引擎根本没给结果）被这句假超时掩埋。
+                _TIMED_OUT = object()
+                _result = _TIMED_OUT
                 _timeout_attempts = 0  # Issue #516 M2：超时触发的尝试次数（观测/fail 消息用）
                 try:
                     if _test_execute is not None:
@@ -3846,7 +3850,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     f"child processes and failing" +
                                     (", will retry" if _will_retry else ""))
                                 _kill_stale_engine(t, _backend_for_engine(e))
-                                _result = None  # timeout → 重试或最终走 fail 路径
+                                _result = _TIMED_OUT  # timeout → 重试或最终走 fail 路径
                             finally:
                                 # MR-2：task.execute span 收口（本轮执行结束，含超时路径）
                                 _es = t.pop("__exec_span__", None)
@@ -3909,7 +3913,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     try:
                         if isinstance(_result, dict) and _result.get("_error"):
                             await _do_report("failed", _result["_error"], -1)
-                        elif _result is None:
+                        elif _result is _TIMED_OUT:
                             # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发。
                             # Issue #516 M2：保留 "timed out after" 签名（M3 观测聚合依赖），
                             # 追加尝试数（含自动重试）便于排障。
@@ -3917,6 +3921,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             if _timeout_attempts > 1:
                                 _to_msg += f" (attempts: {_timeout_attempts}, retries: {_retry_max})"
                             await _do_report("failed", _to_msg, -1)
+                        elif _result is None:
+                            # 执行函数正常返回 None：引擎没有产出任何结果（未启动、提前
+                            # 退出、沙箱执行函数没回包）。这不是超时，以前会被报成
+                            # "task timed out after {N}s"，把真实原因彻底掩埋。
+                            _eng = str(e or "").strip() or "unknown"
+                            await _do_report(
+                                "failed",
+                                f"task produced no result (engine={_eng}, no output, "
+                                f"no exit code reported)", -1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
