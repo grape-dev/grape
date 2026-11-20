@@ -19,7 +19,7 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = "efbb06f73dd5e493"
+LOCALE_FINGERPRINT = "1c4c9d608d0e151b"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {

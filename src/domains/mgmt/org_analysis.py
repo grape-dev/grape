@@ -297,7 +297,7 @@ def analysis_targets(org_id: str, *, mode: str = "all", repo_key: str = "") -> l
 
 def request_repo_analysis(org_id: str, repo_key: str, *, trigger: str = "link",
                           actor_id: str | int = 0) -> dict:
-    """关联仓库后触发单仓 AI 分析（幂等：任务已在跑则返回 running）。"""
+    """对单个仓库触发 AI 分析（手动重新分析；任务已在跑则返回 running）。"""
     org = get_org(str(org_id)) or {}
     if not org or org.get("is_personal"):
         return {"ok": False, "reason": "ORG_NOT_TEAM"}
