@@ -2904,6 +2904,35 @@ register_migration(
 )
 
 
+def _fn_repo_platforms_create_repo_options() -> None:
+    """grape_t_repo_platforms 补 create_repo_options 列（2026-11-20）。
+
+    上游把该能力位同时写进了 `configs/platforms/*.json` 与
+    `src/domains/runtime/vcs/platform_card.py`，唯独持久化模型/存量库没有这列。
+    后果链：`importer._apply_fields` 把配置键当成「未知配置键」→ 整条平台配置被拒
+    （启动日志 `platform-object import failed: platform:gitcode: 未知配置键
+    ['create_repo_options']（整条拒绝）`）→ 平台行停在 `source='orphaned'`、
+    `enabled=0` → `is_platform_visible()` 为假 → **用户面仓库列表整页为空**，
+    现象像「托管仓库丢了」，实际数据一行没少。
+
+    模型列已补（models_platform_object.RepoPlatformModel），存量库靠本迁移补列；
+    列判存在 + 幂等，重跑零写入。
+    """
+    from src.kernel.session_manager import db as _c_db, db_lock as _c_lock
+    with _c_lock:
+        _ensure_column(_c_db.cursor(), "grape_t_repo_platforms",
+                       "create_repo_options", "INTEGER DEFAULT 0")
+        _c_db.commit()
+
+
+register_migration(
+    version="202611202001",
+    name="repo-platforms-create-repo-options",
+    kind="safe",
+    fn=_fn_repo_platforms_create_repo_options,
+)
+
+
 def _fn_create_repo_credentials_table() -> None:
     """S80/D55 建 rc 单表；D99（2026-11-08）语义重设计——目标态一步建对。
 
