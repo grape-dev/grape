@@ -5,8 +5,7 @@ import io as _io
 
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Body
-
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Query, Body
 from pydantic import BaseModel
 
 from src.domains.mgmt.user import db as user_db
@@ -497,8 +496,7 @@ def _version_from_content(content: str) -> str:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",
-                agent_type: str = "", category_id: int = 0,
+def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",                agent_type: str = "", category_id: int = 0,
                 cat_l1_id: int = 0, cat_l2_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
@@ -516,6 +514,9 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                              batch_skill_scenes, list_skill_categories,
                              list_category_dict, category_path_from_map)
 
+    # Issue #1790（#1790/#1786 移植）：区分「未传 repo / 合规 owner/repo / 不合规」三态，
+    # 不合规（裸仓库名/非法前缀/残留冒号）直接 400，不再静默回退官方列表。
+    _validate_repo_param(repo)
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = _resolve_repo_key(repo) if repo else ""
 

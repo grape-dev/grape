@@ -584,6 +584,52 @@ def _task_insert_row(_cols, **kw):
     return tuple(kw[c] for c in _cols)
 
 
+def _takeover_issue_id(issue_id) -> str:
+    """归一化 Issue 号用于接管判定（#N；伪 Issue / #0 / 空串返回空）。"""
+    value = str(issue_id or "").strip()
+    if not value:
+        return ""
+    if not value.startswith("#"):
+        value = f"#{value}"
+    if value in ("#0",) or value.startswith("#pr_"):
+        return ""
+    return value
+
+
+def _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type) -> dict | None:
+    """Issue #3201：active 接管期间统一拦截自动派发。
+
+    命中后把事件置 ``skipped_takeover``（不建 task、不推进节点、不缓存重放），
+    并释放事件活跃守卫，避免被拦事件把 Issue 永久卡在 dedup 状态。
+    返回命中的接管会话；未命中返回 None。
+    """
+    issue_id = _takeover_issue_id(issue_id)
+    if not repo_key or not issue_id:
+        return None
+    try:
+        from src.domains.runtime.engine.takeover import active_takeover_for
+        sess = active_takeover_for(repo_key, issue_id)
+    except Exception as e:
+        log.warning(f"Pipeline: takeover guard check failed, allow dispatch: {e}")
+        return None
+    if not sess:
+        return None
+    if seq:
+        try:
+            from src.api.event_store import update_event_status, _release_guard_by_seq
+            update_event_status(
+                int(seq), "skipped_takeover",
+                result=(f"接管期间忽略自动派发（takeover={sess.get('id') or ''}，"
+                        f"user={sess.get('username') or ''}）"),
+            )
+            _release_guard_by_seq(int(seq))
+        except Exception as e:
+            log.warning(f"Pipeline: mark seq={seq} skipped_takeover failed: {e}")
+    log.info(f"Pipeline: takeover={sess.get('id')} active for {repo_key}{issue_id}, "
+             f"skip dispatch seq={seq} agent={agent_type}")
+    return sess
+
+
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                         skill_path, engine_id, evt, issue_id="", skill_id=0,
                         skip_event_config=False):
@@ -595,6 +641,13 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     from src.api.session_store import get_or_create_agent_session
     from src.domains.runtime.engine.instances import runtime_instance_name
     from datetime import datetime, timezone
+
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+
+    # Issue #3201：建 task 的唯一出口统一守门（webhook / A2A / 重派 / autopilot）。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return ""
 
     inst_name = runtime_instance_name(engine_id) or backend or ""
     now = datetime.now(timezone.utc).isoformat()
@@ -623,9 +676,6 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             pass
 
     task_id = "t_" + uuid.uuid4().hex[:12]
-    # issue_id 优先用传参，兜底从 evt 解析
-    if not issue_id:
-        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     from src.kernel.repo_key import from_repo_key
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
@@ -2933,6 +2983,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
+    # Issue #3201：接管守门放在分派入口，先于引擎可用性判定。
+    # 否则「引擎不可用 / 场景引擎全部离线 / 自动选机失败」等早退分支仍会建 failed task，
+    # 并把事件置 failed，违背「接管期间被拦事件一律 skipped_takeover、不建 task」的契约。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        result["skipped"] = "already_taken_over"
+        return result
+
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
@@ -4105,9 +4162,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     so workers with matching engine tags can claim via claim_by_tag.
 
     pool_engine_source（local-claimer 设计）：pool_engine_ids 来源标记。
-    场景绑定路径传 'scene'，引擎自动选择传 'auto'；空=未标记（历史语义，
-    降级判定按 scene 保守处理）。调用方未显式传时：带 pool_engine_ids 且
-    evt 带 scene 上下文 → 'scene'，否则 'auto'。
+    取值三态 —— 'scene'（场景绑定）/ 'auto'（引擎自动选择）/ 'directed'
+    （Issue #2791：`engine_config.runtime_id` 定向锁定，pool 收敛为单元素）；
+    空=未标记（历史语义，降级判定按 scene 保守处理）。调用方未显式传时：
+    带 pool_engine_ids 且 evt 带 scene 上下文 → 'scene'，否则 'auto'。
+    词汇常量在 engine_select.POOL_SOURCE_*，与 db schema 注释同步。
     """
     # Issue #657/#1758：派发前统一 scope 门禁（单一判官）。
     # 所有派发路径（issue / PR 订阅 / fallback / vod / 订阅）都经由本函数入队，
@@ -4133,12 +4192,49 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.kernel.repo_key import from_repo_key
     import os as _os
 
+    # Issue #2791（P1-8）：`engine_config.runtime_id` 定向派发——统一入队口单点解析。
+    # 命中：锁定该引擎（确定性路由 runtime_id）+ pool 收敛为单元素，跳过池选择；
+    # 未命中：保持既有路由/池选择，但留结构化 WARN（runtime_id / 回落原因 / 最终选中引擎），
+    # 不静默换引擎。解析/打点/收敛实现单点在 engine_select（各派发入口共用，不复制格式）。
+    from src.domains.runtime.engine.engine_select import (
+        POOL_SOURCE_AUTO, POOL_SOURCE_DIRECTED, POOL_SOURCE_SCENE,
+        directed_pool_engine_ids, log_directed_fallback, resolve_directive_engine,
+    )
+    _directive = None
+    # 上游命中时已解析并锁定（pool_engine_source=directed）→ 这里不再重复查库/重复打点
+    if pool_engine_source != POOL_SOURCE_DIRECTED:
+        try:
+            _directive = resolve_directive_engine(
+                (evt.get("payload") or {}).get("engine_config"), repo_key, agent_type)
+        except Exception as _dir_err:
+            log.warning(f"Pipeline enqueue: resolve engine_config directive failed: {_dir_err}")
+            _directive = None
+    if _directive and _directive.get("hit"):
+        runtime_id = _directive["runtime_id"]
+        pool_engine_ids = directed_pool_engine_ids(runtime_id)
+        pool_engine_source = POOL_SOURCE_DIRECTED
+        log.info(f"Pipeline enqueue (directed): engine_config.runtime_id={runtime_id} "
+                 f"({_directive.get('engine_name') or '-'}) locked, pool selection skipped, seq={seq}")
+    elif _directive and _directive.get("requested") and not evt.get("_directed_warned"):
+        # 结构化 WARN：runtime_id + 回落原因 + 最终选中引擎（Spec 验收可观测项）
+        try:
+            log_directed_fallback(_directive, runtime_id, pool_engine_ids,
+                                  repo_key, agent_type, seq)
+            evt["_directed_warned"] = True
+        except Exception as _warn_err:
+            log.warning(f"dispatch_directed: warn log failed: {_warn_err}")
+
     # local-claimer 设计：未显式指定时按上下文推导来源（带场景上下文的绑定 = scene）
     if pool_engine_ids and not pool_engine_source:
         _scene_ctx = evt.get("scene_id") or evt.get("_scene_id") or ""
-        pool_engine_source = "scene" if _scene_ctx else "auto"
+        pool_engine_source = POOL_SOURCE_SCENE if _scene_ctx else POOL_SOURCE_AUTO
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
+    # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
+    # 命中 active 接管时不建 task，事件置 skipped_takeover（不重放）。
+    # 返回空串供调用方（A2A dispatch）识别「已跳过」，不得当作派发成功。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return ""
     # 1) 路由判定：
     #    runtime_id>0 → 确定性路由（指定引擎）
     #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
@@ -4162,7 +4258,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 log.info(f"Pipeline enqueue: legacy runtime_id=0 -> local direct engine {runtime_id} seq={seq}")
             else:
                 _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-                return
+                return ""
     # Issue #630：技能物化完整性校验门禁（enqueue 前，fail-fast）——配置了技能但
     # 内容源全缺失（空壳技能行，如 sid=3276 vod-cli-crossrepo）时显式告警并阻断派发，
     # 不静默降级；技能未配置（推荐模式/无 skill）不阻断，official 内置包兜底放行。
@@ -4175,7 +4271,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                         f"skill={skill_name} sid={_gate_sid}: {_gate_reason}")
             _fail_event(seq, f"技能物化校验未通过，已阻断派发（skill={skill_name}）: "
                              f"{_gate_reason[:200]}")
-            return
+            return ""
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -4236,7 +4332,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
-        return
+        return ""
 
     from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key 并告警），
@@ -4353,7 +4449,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
         _fail_event(seq, f"enqueue_task error {str(e)[:150]}")
-        return
+        return ""
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
@@ -4361,6 +4457,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 本机 direct 引擎现由 local_claimer_loop 以一等认领者身份参与广播（与远端 worker 同一条
     # claim_by_tag 检查链：白名单/健康分/满载/scope 全约束）。此处的 self-run 会在入队同一毫秒
     # 抢跑绑定引擎的任务（2026-10-14 pvs-zombies-demo2 issue #4/#6 两轮事故根因），不再需要。
+    return tid or ""
 
 
 def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
@@ -6640,33 +6737,28 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.warning(f"Exec agent: linked repos worktree init failed: {e}")
 
     # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
+    # Issue #2267：会话 token 必须携带任务归属用户 id（此前固定 0，
+    # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库/创建下派）。
+    _tk_uid = 0
     try:
-        from src.kernel.auth_sdk.auth_token import issue_session_token
-        if repo_key and agent_type:
-            # Issue #2267：会话 token 必须携带任务归属用户 id。此前固定 user_id=0，
-            # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库 /
-            # 创建下派，组织流水线看起来毫无进展。
-            _tk_uid = 0
-            try:
-                if isinstance(evt, dict):
-                    _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
-                if not _tk_uid and task_id:
-                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
-                    with _sdl:
-                        _r = _sdb.cursor().execute(
-                            "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-                    _tk_uid = (_r[0] if _r else 0) or 0
-            except Exception as _uid_e:
-                from src.kernel.config import log as _uid_log
-                _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
-            env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
-                session_key=task_id or f"d_{seq}",
-                repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid))
-            # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
-            # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
-            env_extra["GRAPE_CLI_MODE"] = "WORKER"
-    except Exception as e:
-        log.warning(f"Exec agent: issue session token failed: {e}")
+        if isinstance(evt, dict):
+            _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
+        if not _tk_uid and task_id:
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+            with _sdl:
+                _r = _sdb.cursor().execute(
+                    "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            _tk_uid = (_r[0] if _r else 0) or 0
+    except Exception as _uid_e:
+        from src.kernel.config import log as _uid_log
+        _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
+    # #2790：与 enqueue 同口径——签发失败/上下文缺失写诊断（agent_tasks.errors）+ 显式日志，
+    # 不再静默降级；钩子自身异常由 safe 封装兜底记 error，不阻断派发。
+    from src.domains.runtime.engine.service import issue_and_inject_session_token_safe
+    issue_and_inject_session_token_safe(
+        env_extra, log_scope="Exec agent", session_key=task_id or f"d_{seq}",
+        repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid),
+        task_id=task_id, scope="direct", context_log_level="error")
 
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；
     # 有 agent_tasks 行 → run_kind='task'，归属自动反查，幂等键与 worker 侧一致。

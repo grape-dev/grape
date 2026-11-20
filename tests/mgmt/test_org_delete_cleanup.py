@@ -224,3 +224,32 @@ def test_delete_personal_org_rejected(monkeypatch):
     from src.domains.mgmt.user.org_db import get_org
 
     assert get_org(org_id) is not None
+
+def test_delete_prefers_repo_level_token(monkeypatch):
+    """仓库级凭据（通常 admin）优先于组织 owner 的用户 token；否则 GitHub 403。"""
+    from src.domains.mgmt.user.org_db import update_org_provision_fields
+
+    org_id = _seed_org()
+    assert update_org_provision_fields(
+        org_id, org_repo_key=AUTO_REPO_KEY, provision_status="ready"
+    )
+    _seed_repo(AUTO_REPO_KEY, org_id=org_id, is_org_repo=1, webhook_id=7201)
+
+    deleted = []
+
+    def _fake_delete(repo_key, token):
+        deleted.append((repo_key, token))
+
+    monkeypatch.setattr("src.domains.mgmt.org_provision._delete_vcs_repo", _fake_delete)
+    monkeypatch.setattr(
+        "src.domains.mgmt.user.db.get_repo_token_for", lambda repo_key: "repo-admin-token"
+    )
+
+    api = _client(monkeypatch)
+    try:
+        r = api.delete(f"/api/orgs/{org_id}")
+    finally:
+        app.dependency_overrides.pop(get_current_user_or_api_key, None)
+
+    assert r.status_code == 200, r.text
+    assert deleted == [(AUTO_REPO_KEY, "repo-admin-token")]

@@ -332,3 +332,38 @@ function redispatchEvent(seq) {
 ---
 
 *本文为设计文档，纳入 git（docs/new-version2/event-redispatch-design.md）。*
+| `src/runtime/service.py` | `_run_task`（`queue_local` 已废除；本地执行见 direct 路径，remote 见 `agent.py` `_execute_task`）同步 `task_start` 延迟 |
+| `src/api/static/js/pages/events.js` | Status 行加按钮 + `redispatchEvent()` |
+| `src/api/static/index.html` | events.js 版本号 +1 |
+| 本文档 | `docs/new-version2/event-redispatch-design.md` |
+
+## 6. 验收标准
+
+1. 打开一个卡死的 `running` 事件（`started_at` 距今 > 10 分钟，如 seq#678 复现后）→
+   显示「🔄 重新派发」按钮。
+2. 打开一个 `failed` 事件 → 显示「🔄 重新派发」按钮。
+3. 打开 `completed` 或 `running` ≤ 10 分钟的事件 → 不显示按钮。
+4. 点击后：非终态 task 置回 `queued`（或终态/缺失时新建 task），事件状态回 `running`，
+   toast 成功。
+5. worker/本机 RuntimeAgent 在下一轮 claim 重新领取，事件最终进入 `completed/failed`。
+6. 30s 内重复点击被幂等拒绝（toast 提示"已重派过，请稍候"）。
+7. 登录用户可调；未登录 401。
+8. **running 语义修正后**：
+   - 引擎启动失败（场景 A）→ 任务由 `dispatched` 直接置 `failed`，事件 `failed`，
+     不误标 running，可在 failed 事件上手动重派；
+   - worker 丢弃任务（场景 C）→ 停留在 `dispatched`，由 `claim` 的 120s 超时回收
+     自动重排（attempts≥3 后置 failed）。
+
+## 7. 风险与后续增强
+
+| 项 | 说明 |
+|---|---|
+| 重复执行 | 旧 opencode 进程可能仍活着。第一阶段 requeue 复用原 task/session；后续增强：服务端下发终止（kill 旧进程 / cancel 会话）后再 requeue。 |
+| 事件/任务状态不一致 | 终态 task + running 事件是历史遗留，重派走"新建任务"分支收敛。 |
+| running 语义修正影响 | 延迟 `task_start` 后：引擎启动失败任务直接置 `failed`；worker 丢弃任务停留 `dispatched`（120s 回收）。需确认 UI/统计对 `failed`/`dispatched` 的展示（Pipeline/历史列表）可接受。 |
+| prompt 重建 | 无 task 时回退 `_enqueue_pipeline_task` 重建 prompt，可能因 payload 缺失降级；优先走"复制原 task 参数"。 |
+| 权限 | 第一阶段对齐 cancel 端点（仅登录校验）；如需收紧到 repo 管理权限，后续补。 |
+
+---
+
+*本文为设计文档，纳入 git（docs/new-version2/event-redispatch-design.md）。*

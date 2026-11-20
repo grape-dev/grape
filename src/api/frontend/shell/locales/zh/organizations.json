@@ -80,6 +80,8 @@
     "repo_map_subtitle": "自动分析仓库职责、接口与关键词，供组织下派时选择目标仓库；摘要会同步到组织仓库 org-context/repo-map/。",
     "repo_map_generate": "生成地图",
     "repo_map_analyzing": "分析中…",
+    "repo_map_running": "已有 AI 分析任务正在运行，请稍后",
+    "repo_map_no_repos": "组织下没有可分析的关联仓库",
     "repo_map_analyze": "分析",
     "repo_map_reanalyze": "重新分析",
     "repo_map_view": "查看能力详情",
@@ -116,7 +118,7 @@
   },
   "delete_org": {
     "title": "删除组织",
-    "confirm_msg": "确定要删除组织「{name}」吗？\n组织自动仓库会一并删除（含 GitCode 远端仓库）；手工关联的仓库会退回未归属。\n该操作不可撤销。",
+    "confirm_msg": "确定要删除组织「{name}」吗？\n组织自动仓库会一并删除；手工关联的仓库会退回未归属。\n该操作不可撤销。",
     "confirm": "删除",
     "success": "组织已删除",
     "failed": "删除失败: {msg}"

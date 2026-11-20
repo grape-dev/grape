@@ -314,7 +314,7 @@ def test_retry_claims_repo_created_before_crash(monkeypatch):
     result = provision_org(org_id)
 
     assert result["provision_status"] == "ready"
-    assert calls == {"create": 1, "host": 1, "probe": ["org-issue2090-team-team"]}
+    assert calls == {"create": 1, "host": 1, "probe": ["issue2090-team-team"]}
     assert get_org(org_id)["org_repo_key"] == REPO_KEY
 
 
@@ -332,7 +332,7 @@ def test_retry_claim_miss_keeps_original_error(monkeypatch):
 
     assert result["provision_status"] == "failed"
     assert "repository already exists" in result["provision_error"]
-    assert calls == {"create": 1, "host": 0, "probe": ["org-issue2090-team-team"]}
+    assert calls == {"create": 1, "host": 0, "probe": ["issue2090-team-team"]}
     assert get_org(org_id)["org_repo_key"] == ""
 
 
@@ -355,7 +355,7 @@ def test_retry_claim_rejects_repo_without_ownership_evidence(monkeypatch):
 
     assert result["provision_status"] == "failed"
     assert "repository already exists" in result["provision_error"]
-    assert calls == {"create": 1, "host": 0, "probe": ["org-issue2090-team-team"]}
+    assert calls == {"create": 1, "host": 0, "probe": ["issue2090-team-team"]}
     assert get_org(org_id)["org_repo_key"] == ""
 
 
@@ -554,3 +554,12 @@ def test_retry_ready_does_not_reset_status(monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["provision_status"] == "ready"
     assert scheduled == []
+
+
+def test_default_org_repo_name_has_no_prefix():
+    """新建组织仓库默认名 = slug，不再自动加 org- 前缀。"""
+    from src.domains.mgmt.org_provision import _repo_name
+
+    assert _repo_name({"slug": "123", "id": "uuid-1"}) == "123"
+    assert _repo_name({"slug": "Test Team", "id": "uuid-2"}) == "test-team"
+    assert _repo_name({"slug": "", "id": "42"}) == "repo-42"

@@ -4656,6 +4656,38 @@ def trace_runtime_label(runtime_id: int) -> dict[str, str]:
     return {"engine": str(row[0] or ""), "device": str(row[1] or "")}
 
 
+def strip_task_diagnostics(errors_raw) -> str:
+    """去掉 agent_tasks.errors 里 diagnostic=True 的条目（#2790 token 诊断等）。
+
+    `errors` 既是诊断通道又是失败原因来源：诊断条目不得抢占「真实原因」。
+    实现唯一权威在 runtime 域（`service._strip_task_diagnostics`），此处只做
+    **跨域公共原语**转发——insight（trace）/ routes（事件详情）不再各写一份口径。
+    解析失败 / 非 JSON / 非 list → 原样返回（历史兼容）。
+    """
+    from src.domains.runtime.engine.service import _strip_task_diagnostics
+    return _strip_task_diagnostics(errors_raw)
+
+
+def summarize_task_errors(errors_raw, limit: int = 5) -> list[str]:
+    """任务失败归因摘要：`agent_tasks.errors` → 展示用字符串列表（最多 limit 条）。
+
+    事件详情 `task_errors`（#494）用：诊断条目先按统一口径滤掉，再逐条 str 截断 500；
+    非 JSON 纯文本原样透传，空值 → 空列表。
+    """
+    _kept = strip_task_diagnostics(errors_raw)
+    if not _kept:
+        return []
+    try:
+        _parsed = json.loads(str(_kept))
+    except (ValueError, TypeError):
+        return [str(_kept)[:500]]
+    if isinstance(_parsed, list):
+        _out = [str(e)[:500] for e in _parsed if str(e).strip()]
+    else:
+        _out = [str(_kept)[:500]]
+    return _out[:max(0, int(limit))]
+
+
 def trace_events_by_seq(seqs) -> list[dict[str, Any]]:
     """同一流水线的事件上下文（seq 候选集，按 seq 升序）。
 
@@ -6930,6 +6962,15 @@ def takeover_active_status() -> str:
 def now_iso() -> str:
     """UTC ISO 时间戳，与 takeover 内部同一口径。"""
     return _takeover_impl._now_iso()
+
+
+def same_user(sess_user_id, user: dict) -> bool:
+    """接管会话归属校验（uuid / 历史整数 id 统一折算成字符串比较）。
+
+    原路由里写 `int(sess["user_id"]) != int(user["id"])` —— D105 后账号 id 是 uuid，
+    每次调用都 ValueError → 接管端点 500。判定实现归 runtime 域，外域只调这个门面。
+    """
+    return _takeover_impl._same_user(sess_user_id, user)
 abort_takeover = _takeover_impl.abort_takeover
 append_takeover_messages = _takeover_impl.append_takeover_messages
 attach_client_session = _takeover_impl.attach_client_session
@@ -6939,6 +6980,11 @@ list_takeovers = _takeover_impl.list_takeovers
 renew_takeover_session = _takeover_impl.renew_takeover_session
 request_finish = _takeover_impl.request_finish
 start_takeover = _takeover_impl.start_takeover
+# mgmt 路由的 list / get 端点会调用这两个（「接管中」卡片上的 skipped_dispatches 计数）；
+# 漏转发时 svc.skipped_dispatch_count 抛 AttributeError → GET /api/takeover/sessions
+# 与 GET /api/takeover/sessions/{id} 恒 500（issue-3201 引入的守门计数）。
+skipped_dispatch_count = _takeover_impl.skipped_dispatch_count
+skipped_dispatch_message = _takeover_impl.skipped_dispatch_message
 
 # ── 引擎实例 / 选择 / 健康派生门面（2026-11-18）──────────────────────────────
 # 外域（mgmt 路由与 user.db、insight 看板与告警）此前直接
@@ -7347,6 +7393,21 @@ def probe_aishell_dsh_acp(cli_path: str) -> dict:
 _probe_aishell_dsh_acp = probe_aishell_dsh_acp
 
 
+def probe_hermes_acp(cli_path: str) -> dict:
+    """探测 hermes ACP 引擎可用性（initialize + session/new + prompt 三步）。
+
+    单源：与 worker 侧同一实现。insight 的 engine_probe 曾自带一份只发
+    initialize 的浅探活 —— provider 侧错误（模型不存在等）只在 prompt 阶段
+    暴露，于是控制台一路显示 ok 而 worker 报 fail（实测 112 次 fail 对 0 次）。
+    """
+    from src.domains.runtime.engine.agent import _probe_hermes_acp as _impl
+
+    return _impl(cli_path)
+
+
+_probe_hermes_acp = probe_hermes_acp
+
+
 def discover_backends() -> list[dict]:
     """枚举已注册的 Agent 执行后端（含 installed/cli_path 探测结果）。"""
     from src.domains.runtime.agents.executor import discover_backends as _impl
@@ -7475,6 +7536,24 @@ async def trigger_task_now(task_id: int) -> dict:
     from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
 
     return await _impl(task_id)
+
+
+def seed_official_skill_if_missing(skill_name: str, display_name: str, description: str,
+                                   agent_type: str, skill_path: str) -> bool:
+    """启动期补齐官方技能行（幂等；skill 表归 runtime 域）。"""
+    from src.domains.runtime.storage.skill_sync import seed_official_skill_if_missing as _impl
+
+    return _impl(skill_name, display_name, description, agent_type, skill_path)
+
+
+async def trigger_task_now_with_params(task_id: int, params: dict | None = None) -> dict:
+    """立即触发一次任务调度，并把本次参数注入 prompt（组织 AI 分析单次运行）。
+
+    scheduler.trigger_task_now 是 async；本函数供 mgmt 域通过 public 调用。
+    """
+    from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
+
+    return await _impl(task_id, params or {})
 
 
 def normalize_dedup_level(raw) -> str:

@@ -7,7 +7,7 @@
 - D1 重试发生层：判定层收口（complete_task / fail_task / event_pipeline direct 收尾），不做 ACP 层会话重发。理由：引擎层无副作用边界感知，历史上 49 次 requeue 造成重复评论污染（service.py L2062 注释）。
 - D2 重试计数：复用 agent_tasks.attempts 列。理由：schema 零变更（PRAGMA 实测列已存在），语义一致（每次重跑 +1）。既有超时回池路径同用该列，上限同为 3，天然合流。
 - D3 退避机制：threading.Timer 延迟 requeue（任务保持 running）。理由：不引入新调度设施；退避窗口 ≤300s 远小于僵尸判死阈值（30min/6h）；进程重启丢 timer 由既有僵尸兜底收口，属可接受降级。
-- D4 副作用闸门：写操作证据 = 结构化产出（actions+conclusion）∨ tool_uses 写操作（POST comments/pulls、A2A handoff）。理由：与假完成硬门槛（event_pipeline L3987-3998）共用同一证据定义，不造第二套口径。
+- D4 副作用闸门：写操作证据 = 结构化产出（actions+conclusion）∨ tool_uses 写操作（POST comments/pulls、A2A handoff、git push）。Issue #2793 补充：git push（含 `grape git push` / repogit 包装；`--dry-run` 仅豁免其所在子命令，echo/printf 打印文本不算）是不可逆外部副作用，先 push 后收尾失败属实质产出已交付，纳入证据后一律不自动重试（走降级 completed 判定）。理由：与假完成硬门槛（event_pipeline L3987-3998）共用同一证据定义，不造第二套口径。
 - D5 瞬时判定：静态特征表 + is_auth_401_error 负向排除；未命中特征一律不重试（保守面，防误重试业务失败）。
 - D6 提示通道：events.result + agent_tasks.errors 既有字段为主；task:retry 事件经既有
   日志渲染链透出，events.js 仅做图标/颜色/字段回退三点小适配（非新前端）。

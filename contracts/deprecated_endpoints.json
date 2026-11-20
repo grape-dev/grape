@@ -1,0 +1,9 @@
+{
+  "description": "Issue #2837（等价 #2783）端点弃用挂牌登记表（arch 线单一事实源）。条目 = 当前契约中已挂牌（deprecated）的 operation：渲染层（src/domains/contracts/deprecation.py apply_deprecation_markup，经 src/api/openapi.py 接入）据此输出 deprecated: true + x-deprecated-since + x-deprecated-replacement，随 /openapi.json 发布并可从 contracts/released/ 冻结发布快照机器读取。字段口径：deprecated_since_release / removal_target 为发布快照序号 release_index（整数，单调递增、发布后不得回填；与版本号解耦）；deprecated_since_date 仅作报告字段，不参与观察期判定。观察期纪律：挂牌起须保留至下一发布期（删除时要求 current_release_index - deprecated_since_release >= 1）；删除端点须在满期后同 PR 清理本表条目。历史机制生效前的下架端点不登记本表，走 contracts/deprecated_exemptions.json（只减不增）。",
+  "policy": {
+    "deprecate_first": "端点下线前先在本表登记 + 渲染 deprecated，经至少一个发布期（release_index 差 >= 1）后才允许从契约/代码删除",
+    "removal": "删除时须同 PR 删除本表条目；scripts/check-openapi-endpoints.py 与 scripts/regenerate_openapi.py 的 --update-baseline 通道会先行调用共用校验函数（check_deprecation_gate），自由文本说明不能绕过观察期",
+    "cleanup": "登记条目数不设上限（挂牌是合法动作），但条目指向的 operation 必须在当前契约在场（漂移/已删条目 → 渲染层与门禁双红）"
+  },
+  "entries": []
+}

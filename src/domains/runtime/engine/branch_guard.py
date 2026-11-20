@@ -262,7 +262,13 @@ def prune_guard_state(older_than_days: int = 90) -> int:
             log.info(f"branch guard state pruned: {n} row(s) older than {older_than_days}d")
         return n
     except Exception as e:
-        log.warning(f"branch guard state prune failed: {e}")
+        # worker 本地 SQLite 没有 branch_guard_state 是常态（agent 不读主控表）：
+        # 缺表/缺列只记 debug，别让 sweeper 每 15 分钟刷一条 WARNING。
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            log.debug(f"branch guard state prune skipped (no local table): {e}")
+        else:
+            log.warning(f"branch guard state prune failed: {e}")
         return 0
 
 

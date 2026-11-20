@@ -16,6 +16,8 @@ $RestartDelay = 5
 # ===== 公共路径：加载 runtime.env + 扩展 PATH =====
 # 必须在 daemon 分支之前执行，确保子进程能继承环境变量
 Set-Location $WorkerDir
+# #2789：清空外部继承的 PYTHONPATH，让 python -m 从本安装目录解析 src。
+if (Test-Path Env:PYTHONPATH) { Remove-Item Env:PYTHONPATH }
 
 $envPath = $env:PATH
 $localBin = Join-Path $HOME ".local\bin"

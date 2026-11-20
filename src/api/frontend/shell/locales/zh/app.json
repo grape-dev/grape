@@ -32,6 +32,7 @@
     "organizations": "组织管理",
     "autopilot": "自动化",
     "obs_cockpit": "运行驾驶舱",
+    "plugins": "插件市场",
     "sandbox": "云沙箱"
   },
   "sidebar": {

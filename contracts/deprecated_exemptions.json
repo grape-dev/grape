@@ -1,0 +1,7 @@
+{
+  "description": "Issue #2837（等价 #2783）存量豁免白名单（arch 线）。只登记端点弃用期机制生效前已下架的历史端点（basis=pre_mechanism），本文件只减不增（上限钉死 src/domains/contracts/deprecation.py MAX_DEPRECATION_EXEMPTIONS，扩容须同 PR 显式上调常量并过 PR 评审）。mechanism 生效后的端点下架一律走 contracts/deprecated_endpoints.json 挂牌 → 观察一发布期 → 删除，不得新增本表条目。arch 线现状：机制自始生效，无 pre_mechanism 存量（weekly 线 #1522 认作已下架的 19 个 operation 在本线仍在契约中），故 entries 为空、上限为 0。",
+  "issue": "#2837",
+  "basis": "pre_mechanism",
+  "scope_note": "arch 线与 weekly 线（PR #1522）端点面不同：weekly 2.5.0 已下架的 18 条路径 / 19 个 operation 在 arch11-weekly-1102-zrr 契约中仍全部在场，因此不构成历史存量豁免；其未来下线同样须走挂牌观察纪律。",
+  "entries": []
+}

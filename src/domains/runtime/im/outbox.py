@@ -666,7 +666,12 @@ class OutboxConsumer:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("[outbox] consumer round failed: %s", e)
+                if getattr(e, "_db_open_logged", False):
+                    # Issue #3251：DB 打开失败已在 _connect 层按路径一次性 ERROR，
+                    # 消费轮不再逐轮 WARNING 刷屏（曾 2.5h 刷 5005 条拖死事件循环）。
+                    log.debug("[outbox] consumer round skipped (db open failure already reported): %s", e)
+                else:
+                    log.warning("[outbox] consumer round failed: %s", e)
             try:
                 await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
             except Exception as _e:

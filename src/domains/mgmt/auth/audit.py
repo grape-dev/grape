@@ -55,6 +55,9 @@ EVENT_TYPES = frozenset({
     "org_repo_bind",                # 组织关联托管仓库
     "org_repo_map_analyze",         # 组织仓库地图：单仓分析
     "org_repo_map_analyze_all",     # 组织仓库地图：全量分析
+    "org_repo_ai_result",           # 组织仓库 AI 分析结果回写（worker / 手动）
+    "org_repo_analysis_run",        # 组织 AI 分析手动触发（单仓/全量）
+    "org_repo_analysis_automation_ensure",  # 组织 AI 分析每日自动任务开启
     "org_repo_unbind",              # 组织解绑普通关联仓库
     "org_repo_transfer",            # 组织间迁移普通关联仓库
     "org_provision_manual_bind",    # 组织手动绑定已有仓库为组织仓库（Issue #2258 兜底）

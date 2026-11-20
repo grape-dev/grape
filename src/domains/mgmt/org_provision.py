@@ -131,9 +131,15 @@ def _owner_user(org: dict) -> dict:
 
 
 def _repo_name(org: dict) -> str:
-    raw = str(org.get("slug") or f"org-{org.get('id') or 0}").strip().lower()
-    slug = re.sub(r"[^a-z0-9_.-]+", "-", raw).strip("-.") or f"org-{org.get('id') or 0}"
-    name = f"org-{slug}"
+    """组织仓库默认名 = 组织 slug（不再自动加 org- 前缀）。
+
+    组织展示名由用户填写；仓库名默认使用可 URL 化的 slug，显式指定
+    org_repo_name 时优先使用指定值（见 _repo_create_options）。
+    空 slug 的极老数据用 repo-<id> 兜底，避免生成非法仓库名。
+    """
+    raw = str(org.get("slug") or org.get("name") or f"repo-{org.get('id') or 0}").strip().lower()
+    slug = re.sub(r"[^a-z0-9_.-]+", "-", raw).strip("-.") or f"repo-{org.get('id') or 0}"
+    name = slug
     if len(name) > 80:
         name = f"{name[:64].rstrip('-')}-{org.get('id') or 0}"
     return name
@@ -255,8 +261,8 @@ def _create_org_repo(org: dict) -> str:
                 description=_repo_description(org),
                 private=private,
                 visibility="private" if private else "public",
-                auto_init=True,
-                default_branch="main",
+                auto_init=False,
+                default_branch="grape-repo-knowledge",
                 host_after_create=False,
                 provider=options["provider"],
                 owner=options["owner"],
@@ -313,6 +319,13 @@ def _bind_org_repo(org: dict, repo_key: str) -> None:
                     "via": "org_provision",
                 },
             )
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(str(org["id"] or ""),
+                                                     actor_id=str(org.get("owner_id") or ""))
+        except Exception as _ae:
+            log.warning(f"org_provision analysis automation failed org={org.get('id')}: {_ae}")
         return
     code = {
         "protected": "ORG_REPO_PROTECTED",
@@ -445,6 +458,22 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
 
     _provider_tokens: dict[str, str] = {}
 
+    def _token_for_repo(repo_key: str, provider: str) -> str:
+        """删组织仓库优先用仓库级凭据（通常带 admin 权限），再回落用户 token。
+
+        实测：组织 owner 的 GitHub 用户 PAT 对 Misheng-chenyan/org-123 只有
+        push 权限，DELETE 会 403；而托管时落库的仓库级 token 有 admin，可删。
+        """
+        try:
+            from src.domains.mgmt.user import db as _udb
+
+            _t = _udb.get_repo_token_for(repo_key) or ""
+            if _t:
+                return _t
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"org delete: repo token lookup skipped repo={repo_key}: {exc}")
+        return _token_for_provider(provider)
+
     def _token_for_provider(provider: str) -> str:
         """按仓库 provider 取 owner token（GitHub 组织仓库不能用 GitCode token 删）。"""
         if provider in _provider_tokens:
@@ -475,7 +504,7 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
                 from src.kernel.repo_key import parse_repo_key
 
                 provider = parse_repo_key(repo_key)[0]
-                token = _token_for_provider(provider)
+                token = _token_for_repo(repo_key, provider)
                 if token:
                     try:
                         _delete_vcs_repo(repo_key, token)
@@ -490,6 +519,13 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
         else:
             if unbind_org_repo_local(repo_key, org_id):
                 result["unbound"].append(repo_key)
+
+    try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.disable_analysis_automation(org_id)
+    except Exception as exc:
+        log.warning(f"org delete: analysis automation cleanup failed org={org_id}: {exc}")
 
     try:
         delete_org_scenes(org_id)
@@ -577,6 +613,13 @@ def manual_bind_org_repo(org_id: str, repo_key: str, *, actor_id: str = "",
                 "scene_id": scene_id,
             },
         )
+
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(org_id, actor_id=actor_id)
+        except Exception as _ae:
+            log.warning(f"org_provision manual bind analysis automation failed org={org_id}: {_ae}")
 
         return _serialize_org(get_org(org_id))
 

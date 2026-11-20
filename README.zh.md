@@ -172,3 +172,6 @@ git clone https://gitcode.com/grape-dev/grape.git ; python grape/quickstart.py
 ## 许可证
 
 MIT。
+
+
+引擎模型名与网关 key 可用列表对齐约定（hermes `/v1/models`）：[docs/deployment/model-gateway-alignment.md](docs/deployment/model-gateway-alignment.md)。

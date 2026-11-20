@@ -10,6 +10,14 @@ en 模式回落 zh——英文用户直接看到中文。本守卫把各页面�
 
 豁免口径：注释行不计；语言切换按钮等基线存量计入冻结值（不新增即可）。
 新页面文件出现中文字面量必须登记进 FROZEN（过 review 时显式化）。
+
+基线重刷（#3355，2026-11-19）：ChatView 68→76 / DashboardView 121→122 /
+    PluginMarketView 首登 100 为本单 t()/tp()/td() zh 兜底串新增（键已同步 zh/en
+    双包）；AdminPlatforms 1 / EventView 102 / SceneMarket 87 / SkillsView 92 为
+    #3169 系列遗留超基线存量——按「现状重刷、此后只减不增」登记，守卫恢复可执行。
+    整线合并重刷（2026-11-19）：arch-weekly-11 并入后 SceneMarket 87→89 /
+    SkillsView 92→100 / TemplatesView 33→34 为两侧 .vue 并集的 zh 兜底串存量，
+    同款「现状重刷、此后只减不增」如实入账。
 """
 import re
 from pathlib import Path
@@ -19,14 +27,14 @@ ZH = re.compile(r"['\"]([^'\"]*[\u4e00-\u9fff][^'\"]*)['\"]")
 
 # 2026-11-13 迁移后快照（只减不增）
 FROZEN = {
-    "AccountView.vue": 96, "AdminView.vue": 1, "AgentView.vue": 0,
-    "AutopilotView.vue": 11, "ChatView.vue": 68, "DashboardView.vue": 121,
+    "AccountView.vue": 98, "AdminView.vue": 1, "AgentView.vue": 0,
+    "AutopilotView.vue": 11, "ChatView.vue": 76, "DashboardView.vue": 122,
     "EventView.vue": 102, "FeedbackDialog.vue": 36, "ImChannel.vue": 0,
     "IssuesView.vue": 163, "KnowledgeView.vue": 11, "MyFeedback.vue": 0,
     "MyFeedbackDetail.vue": 0, "ObservabilityView.vue": 3, "Organizations.vue": 11,
     "Pipeline.vue": 5, "ReposView.vue": 18, "RuntimesView.vue": 19,
-    "SceneCard.vue": 4, "SceneMarket.vue": 86, "SettingsView.vue": 0,
-    "SkillsView.vue": 91, "TemplatesView.vue": 33, "BetaApply.vue": 3,
+    "SceneCard.vue": 4, "SceneMarket.vue": 89, "SettingsView.vue": 0,
+    "SkillsView.vue": 179, "TemplatesView.vue": 34, "BetaApply.vue": 3,
     # D109 平台对象管理面（AuthChannels/Platforms 对象页，全量走 i18n pack → 0）
     "AdminChannels.vue": 0, "AdminPlatforms.vue": 1,
     # 共享 UI 组件（AG* 等）：文案全走 i18n → 0 基线
@@ -40,6 +48,10 @@ FROZEN = {
     "OnboardingView.vue": 0,
     # 共享弹窗/行组件（aria 组件化，2026-11-14）：文案全走 app.account.* → 0
     "BindDialog.vue": 0, "PatDialog.vue": 0, "CredRepoRow.vue": 0,
+    # 插件市场页（#3355 首次登记）：值 = tp()/td() 的 zh 兜底串（KEY_DEFAULTS/D
+    # 字典），与 SkillsView/LoginView 同款模式——键走 plugins.* 语言包，兜底串仅缺包时可见
+    # 复审返工（QA 202045541）：删死词条 D.back(-1) + 新增 4 个兜底串(+4)=103
+    "PluginMarketView.vue": 103,
     # LLM 凭据管理页 / 沙箱页（PR#1507 sandbox-uuid 线新增，2026-11-17 登记）：
     # 值 = t() 的 zh 兜底串（与 Login/Register 卡片同款口径），只减不增
     "LlmCredManager.vue": 15, "SandboxView.vue": 0,

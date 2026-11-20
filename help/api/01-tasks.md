@@ -67,6 +67,10 @@
 | `conclusion` | string | 否 | 结论（如「已按审查意见完成哪些修复，测试结果，待 QA 重新审查」） |
 | `artifacts` | string[] | 否 | 产出/标识（如 `["PR #N 评论", "commit xxxxxx"]`） |
 | `issue_summary` | string | 否 | 一句话摘要（如「已按审查意见修复 \| 修改摘要 \| 待重新审查」） |
+| `issue_number` | int | 外部上报时 ✅ | Issue 编号（Issue #2792：外部执行结论上报入口，用户态、无 task_id） |
+| `node` | string | 外部上报时 ✅ | 节点标识（`vod`/`issue`/`coding`/`qa`/`sre`），结论写成该节点的对应事件 |
+| `repository` | string | 外部上报时 ✅ | `owner/repo` 或 `repo_key`；Issue 号逐仓唯一，必须显式指定仓库 |
+| `session_id` | string | 否 | 外部执行会话标识；缺省按调用者身份归并，用于 `(issue, node, session)` 幂等 |
 
 > 结构化示例（agent 收尾 `grape tasks complete --json`）：
 > ```json
@@ -92,6 +96,33 @@
 
 > 会话 token：任务 id 由 `session_key` 自动定位（M2 以 task_id 签发），agent 收尾直接
 > `grape tasks complete --json '{"result_text":"...","next_step":"a2a_issue"}'`，无需 `--task-id`。
+
+### 外部执行结论上报（Issue #2792，无 task_id 的用户态入口）
+
+外部执行者（用户或本机 `tk_` 会话在 GitCode 上完成 Spec/标签/负责人/QA 审查）没有
+Grape 执行实例，用 JWT / API Key 携带 `issue_number` + `node` + `repository`
+（+ 结论字段）调用本端点，**结论写成该节点的对应事件**，不创建/不改变任何执行实例：
+
+```json
+{
+  "repository": "owner/repo",
+  "issue_number": 2792,
+  "node": "issue",
+  "conclusion": "Spec 已确认，标签/里程碑/负责人已就绪",
+  "artifacts": ["评论 #201190348"],
+  "session_id": "sess-ext-1"
+}
+```
+
+| 项 | 值 |
+|----|-----|
+| 落库事件 | `event_type=a2a_event`、`agent_type=<node>`、`source=external`、`status=completed`、`payload.external=true` |
+| 幂等键 | `(issue, node, session)` 派生 `external-…`，撞键返回既有 seq（`already: true`），**不覆盖终态结论** |
+| 出参 | `{"ok": true, "external": true, "already": false, "seq": 123, "issue_number": 2792, "node": "issue", "session": "sess-ext-1", "task_id": 7, "status": "completed", "source": "external"}` |
+| 返回 | 200；400 缺 task_id / 缺 repository / 缺 node；403 非本人托管仓库（防 IDOR）；500 事件落库失败 |
+
+> 判定顺序：会话 token 优先（按 `session_key` 收尾执行实例，即便带了 issue/node 也不转外部上报）；
+> JWT/API Key 有 `task_id` 时走原自报收尾；无 `task_id` 且 `issue_number`+`node` 齐全才走外部上报。
 
 ---
 

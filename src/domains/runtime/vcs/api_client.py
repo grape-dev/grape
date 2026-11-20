@@ -959,6 +959,12 @@ class VcsApiClient:
                 else:
                     body = json.dumps(data).encode("utf-8") if data else None
                 req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+                # Issue #2084（#2084 移植）：上游超时可配（默认 25s < CLI 30s）。
+                # 调用链未显式传非默认超时（_request 默认 30 哨兵）时按 env 可配
+                # 上游超时错开（GRAPE_UPSTREAM_TIMEOUT_SECONDS），显式值按调用方。
+                from src.domains.mgmt.user.repo_manager import upstream_timeout_seconds
+                if timeout == 30:
+                    timeout = upstream_timeout_seconds()
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                     if _span is not None:

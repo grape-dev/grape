@@ -1,4 +1,4 @@
-# Grape 使用指导文档
+# 1. Grape 使用指导文档
 
 Grape 是一个多 Agent 协作的 DevOps 平台，通过 VOD/Issue/Coding/QA/SRE 五类 Agent 覆盖从需求分析到部署运维的全生命周期。平台对接 GitCode 代码托管，通过 Webhook 自动触发流水线，由 AI Agent 自主完成任务并提交 PR。
 
@@ -11,3 +11,5 @@ Grape 是一个多 Agent 协作的 DevOps 平台，通过 VOD/Issue/Coding/QA/SR
 > - **流水线（Pipeline）**：Issue 从创建到关闭的全流程，Agent 按 VOD→Issue→Coding→QA→SRE 链路协作
 
 > 📖 **部署参考**：服务端支持的环境变量见 [server-environment-variables.md](server-environment-variables.md)；Agent 执行环境变量见 [agent-environment-variables.md](agent-environment-variables.md)。
+
+> 🧩 **把 grape 装进你自己的 Agent**：grape 插件（grape-kit / grape-dsh）安装指南见 [grape-kit.md](grape-kit.md)。

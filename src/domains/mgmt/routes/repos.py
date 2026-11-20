@@ -1084,11 +1084,12 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
 
     # B 批（2026-11-13）：建仓走 provider 端口（GitHub/GitCode/GitLab 各自实现），
     # 路由层不再按平台名分派 create_github_repo / create_repo。
-    from src.kernel.token_resolver import create_provider
+    from src.kernel.token_resolver import create_provider, create_repo_kwargs
     try:
         repo_info = create_provider(provider).create_repo(
             api_token=api_token, name=name, description=body.description, private=private,
-            owner=owner, path=repo_path)
+            owner=owner, path=repo_path,
+            **create_repo_kwargs(provider, body.auto_init, body.default_branch))
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
     if isinstance(repo_info, dict) and repo_info.get("error"):
@@ -1516,6 +1517,30 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         user_db.mark_user_repo_join(user["id"], _repo_key, is_join=True, is_admin=True)
         ensure_default_agent_sessions(_repo_key)
         user_db.invalidate_user_repos(user["id"])
+        # 托管进团队组织：后台确保每日分析任务并为该仓触发一次 AI 分析
+        if _org_id:
+            try:
+                from src.domains.mgmt.user.org_db import get_org as _get_org
+
+                _org = _get_org(_org_id) or {}
+                if _org and not _org.get("is_personal"):
+                    import threading as _th
+
+                    def _analysis_run():
+                        try:
+                            from src.domains.mgmt import org_analysis
+
+                            org_analysis.ensure_analysis_automation(_org_id, actor_id=user["id"])
+                            org_analysis.schedule_all_analysis(
+                                _org_id, trigger="link", delay=10.0,
+                                fallback_repo_key=_repo_key, actor_id=user["id"])
+                        except Exception as _ae:  # noqa: BLE001
+                            log.warning(f"host repo analysis trigger failed org={_org_id} repo={_repo_key}: {_ae}")
+
+                    _th.Thread(target=_analysis_run, name=f"org-analysis-{_org_id}-{_repo_key}",
+                               daemon=True).start()
+            except Exception as _hook_exc:  # noqa: BLE001
+                log.debug(f"host repo org-analysis hook skipped: {_hook_exc}")
         return _payload
 
     # ===== GitHub 仓库托管 =====

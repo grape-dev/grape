@@ -56,6 +56,8 @@ export default defineConfig({
           'knowledge-view': /^knowledge-[vV]iew-.*\.css$/,
           'feedback-dialog': /^feedback-[dD]ialog-.*\.css$/,
           'admin-view': /^admin-[vV]iew-.*\.css$/,
+          // Issue #3169：插件市场视图（entry 名 plugins；兼容组件名 PluginMarketView 拆出的独立 CSS chunk）
+          plugins: /^([pP]lugins?|[pP]lugin-[mM]arket-[vV]iew)-.*\.css$/,
           'sandbox-view': /^sandbox-[vV]iew-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
@@ -147,6 +149,7 @@ export default defineConfig({
         'knowledge-view': fileURLToPath(new URL('./src/views/entries/knowledge-view.js', import.meta.url)),
         'feedback-dialog': fileURLToPath(new URL('./src/views/entries/feedback-dialog.js', import.meta.url)),
         'admin-view': fileURLToPath(new URL('./src/views/entries/admin-view.js', import.meta.url)),
+        plugins: fileURLToPath(new URL('./src/views/entries/plugins.js', import.meta.url)),
         'sandbox-view': fileURLToPath(new URL('./src/views/entries/sandbox-view.js', import.meta.url)),
       },
       output: {

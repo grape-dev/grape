@@ -99,3 +99,20 @@ groups:
         annotations:
           summary: "Event report-missing compensation is frequent"
           description: "{{ $value }} cascade compensations in the last 10 minutes (agent={{ $labels.agent_type }}, trigger={{ $labels.trigger }}) — agent report was lost; check the worker report/callback path."
+      # Issue #2085（#1297 移植）：worker contract_guard 失败信号（契约退化检出 / 缓存重建失败）
+      # 语义：worker 检出 CLI 契约缓存退化（outcome=degraded），或从主控重建缓存失败
+      # （outcome=rebuild_failed，worker 带退化契约继续跑，warn-only 不阻断启动）。
+      # 信号经 POST /api/runtime/contract-guard/signal 落服务端指标，此前该故障仅
+      # worker 日志可见，值守无从感知。
+      # 排查：看 worker 日志 "contract guard" 行；~/.grape/contract-guard-alerts.jsonl
+      # （上报失败兜底落点，存在即说明 worker 连不上主控/无凭据）；确认主控
+      # /static/openapi.json 可达与 RUNTIME_TOKEN 有效；必要时
+      # GRAPE_CONTRACT_GUARD_DISABLED=true 先停用再修复（逃生口）。
+      - alert: GrapeContractGuardFailed
+        expr: increase(grape_contract_guard_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker contract guard failed (contract degradation or rebuild failure)"
+          description: "Contract guard reported failures in the last 10 minutes (outcome label: degraded = CLI contract cache degradation detected, rebuild_failed = full-contract rebuild from master failed). Risk: business command groups (git-repo/issues/scenes/a2a/knowledge/repos) may vanish from CLI. Check worker logs for 'contract guard', ~/.grape/contract-guard-alerts.jsonl fallback file, and master /static/openapi.json reachability."

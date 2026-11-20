@@ -57,6 +57,25 @@ def _now() -> int:
     return int(time.time())
 
 
+def _user_key(v: Any) -> str:
+    """账号 id 归一为字符串（D105 后 grape_accounts.id 是 uuid，历史行可能是整数）。
+
+    空值统一成 '0'（与原 `int(x or 0)` 的哨兵口径一致），其余原样保留字符串形态，
+    这样 uuid / 数字 / 字符串三种存量值都能比较，且写入 VARCHAR(36) 列不丢信息。
+    """
+    s = str(v if v is not None else "").strip()
+    return "0" if s in ("", "None") else s
+
+
+def _same_user(sess_user_id: Any, user: dict) -> bool:
+    """接管会话归属校验：会话记录的用户 == 当前调用者。
+
+    原实现用 int(...) 比较 —— 账号 id 变成 uuid 后对任意端点都会抛
+    ValueError（接管接口 500 的真因），故改为字符串归一比较。
+    """
+    return _user_key(sess_user_id) == _user_key((user or {}).get("id"))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -83,14 +102,22 @@ def _local_port() -> int:
 # ----------------------------------------------------------------------------- 查询
 
 def find_running_task(repo_key: str, issue_number: str) -> dict | None:
-    """按 Issue 查 running/dispatched 任务（与旧 takeover-context 同口径）。"""
+    """按 Issue 查活动态任务（与旧 takeover-context 同口径）。
+
+    活动态 = running / dispatched / pending_self_report。
+    `pending_self_report` 是主控停机或重启时对 REMOTE（worker 承载）任务设置的中间态：
+    worker 进程还活着、平台在等它自报，30 分钟内没自报才转 timeout_failed。它和
+    `running` 一样属于「正在跑」——issues_center 的 is_running 也把它算作运行中。
+    早先这里只认 running/dispatched，导致「主控一重启，接管就报 no_running_task」。
+    """
     issue_id = f"#{_issue_num(issue_number)}"
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT id, status, agent_type, skill, skill_id, prompt, env_extra, cwd, runtime_id, "
             "       event_seq, repo_key, issue_id, user_id, account, skill_files, server_url, created_at "
-            "FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('running','dispatched') "
+            "FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('running','dispatched','pending_self_report') "
             "ORDER BY created_at DESC LIMIT 1",
             (repo_key, issue_id),
         )
@@ -117,18 +144,139 @@ def get_session(session_id: str) -> dict | None:
         return _row_dict(c, c.fetchone())
 
 
-def active_takeover_for(repo_key: str, issue_id: str, agent_type: str = "") -> dict | None:
-    """查询该 Issue（可选：该 agent 节点）是否有进行中的接管。"""
-    sql = ("SELECT * FROM takeover_sessions WHERE status='active' "
-           "AND repo_key=? AND issue_id=?")
+def active_takeover_for(repo_key: str, issue_id: str, agent_type: str = "",
+                        *, readonly: bool = False) -> dict | None:
+    """查询该 Issue（可选：该 agent 节点）是否有进行中的接管。
+
+    自愈（Issue #3201）：token 已过期的 active 会话按不活跃处理，并与
+    list_takeovers 同口径把它转成 expired，避免过期接管永久冻结 Issue。
+
+    readonly=True 时**只读**：跳过过期会话的落库自愈（仍在 SELECT 里用
+    token_expires_at 过滤，语义不变）。列表/详情这类 GET 读路径必须用只读形态——
+    否则 N 个 issue 就是 N 次读路径写库（PR #1869 架构审查 M1）。
+    """
+    now = _now()
+    where = "status='active' AND repo_key=? AND issue_id=?"
     args: list[Any] = [repo_key, issue_id]
     if agent_type:
-        sql += " AND agent_type=?"
+        where += " AND agent_type=?"
         args.append(agent_type)
+    # 先把匹配范围内的过期会话转 expired（与 list_takeovers 同口径），
+    # 再只取未过期的 active；避免"最新一条恰好过期"时漏掉仍在有效期内的接管。
+    if not readonly:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"UPDATE takeover_sessions SET status=?, active_key=NULL, updated_at=? "
+                    f"WHERE {where} AND token_expires_at > 0 AND token_expires_at < ?",
+                    [ST_EXPIRED, _now_iso(), *args, now],
+                )
+                db.commit()
+        except Exception as e:
+            log.warning(f"takeover: expire stale sessions failed: {e}")
     with db_lock:
         c = db.cursor()
-        c.execute(sql + " ORDER BY created_at DESC LIMIT 1", args)
+        c.execute(
+            f"SELECT * FROM takeover_sessions WHERE {where} "
+            f"AND (token_expires_at = 0 OR token_expires_at >= ?) "
+            f"ORDER BY created_at DESC LIMIT 1",
+            [*args, now],
+        )
         return _row_dict(c, c.fetchone())
+
+
+def active_takeover_in_repo(repo_key: str) -> dict | None:
+    """查询该仓库是否有进行中的接管（仓储级判定，Issue #3201 R2）。
+
+    autopilot 巡检任务没有真实 Issue 关联（`_autopilot_issue_ref` 产出 `autopilot-<字母>`
+    这类纯字母统计合成键），而真实接管会话的 issue_id 恒为 `#<数字>`——按 issue 维度
+    永远无法命中。autopilot 是仓库级任务，故以其所属仓库是否存在 active 接管为准。
+
+    自愈口径与 `active_takeover_for` 一致：token 已过期的 active 会话先转 expired，
+    再只取仍在有效期内的那条，避免过期接管永久冻结自动派发。
+    """
+    if not repo_key:
+        return None
+    now = _now()
+    where = "status='active' AND repo_key=?"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE takeover_sessions SET status=?, active_key=NULL, updated_at=? "
+                f"WHERE {where} AND token_expires_at > 0 AND token_expires_at < ?",
+                (ST_EXPIRED, _now_iso(), repo_key, now),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"takeover: expire stale sessions failed: {e}")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM takeover_sessions WHERE {where} "
+                f"AND (token_expires_at = 0 OR token_expires_at >= ?) "
+                f"ORDER BY created_at DESC LIMIT 1",
+                [repo_key, now],
+            )
+            return _row_dict(c, c.fetchone())
+    except Exception as e:
+        log.warning(f"takeover: query repo takeover failed: {e}")
+        return None
+
+
+def skipped_dispatch_count(sess: dict | None) -> int:
+    """本次接管期间已被守门忽略的自动派发条数（events.status=skipped_takeover）。
+
+    以溯源的 event_seq 为下界：只统计接管开始后产生的事件，历史接管的忽略记录
+    不会串到本次会话。
+
+    上界（Issue #3201 审查意见）：同 Issue 下一次接管的 event_seq。会话结束后的
+    新接管产生的 skipped_takeover 不能让已结束会话的计数继续累加——否则「已忽略 N 条」
+    会随后续接管无限增长。用下一会话的溯源 seq 作为边界，无需在 finish 时冻结。
+    """
+    if not sess:
+        return 0
+    repo_key = str(sess.get("repo_key") or "")
+    issue_id = str(sess.get("issue_id") or "")
+    event_seq = int(sess.get("event_seq") or 0)
+    if not repo_key or not issue_id:
+        return 0
+    if not issue_id.startswith("#"):
+        issue_id = f"#{issue_id}"
+    next_seq = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT MIN(event_seq) FROM takeover_sessions "
+                "WHERE repo_key=? AND issue_id=? AND event_seq>?",
+                (repo_key, issue_id, event_seq),
+            )
+            row = c.fetchone()
+            next_seq = int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.warning(f"takeover: query next takeover boundary failed: {e}")
+    sql = ("SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=? "
+           "AND status='skipped_takeover' AND seq>?")
+    params: list[Any] = [repo_key, issue_id, event_seq]
+    if next_seq > 0:
+        sql += " AND seq<?"
+        params.append(next_seq)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(sql, params)
+            row = c.fetchone()
+            return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.warning(f"takeover: count skipped dispatches failed: {e}")
+        return 0
+
+
+def skipped_dispatch_message(count: int) -> str:
+    return f"本次接管期间已忽略 {int(count or 0)} 条自动派发"
 
 
 def list_takeovers(repo_key: str, issue_id: str = "", status: str = "active",
@@ -165,6 +313,74 @@ def list_takeovers(repo_key: str, issue_id: str = "", status: str = "active",
         return [_row_dict(c, r) for r in c.fetchall()]
 
 
+def node_advanced_detail(repo_key: str, issue_id: str, since_seq) -> dict:
+    """探测「链是否已越过本节点」：返回同 issue 里更新的 a2a_event 的 seq/agent_type。
+
+    Issue #2517 补充发现 #2（实测 #19：start 的 cancel 与云端 agent 自然完成同秒发生）：
+    下游节点在该 issue 上已开跑，本次接管与它并行。平台语义允许这种接管（finish 层有
+    already_dispatched 跳过逻辑），但必须披露，否则端侧以为「链暂停在本节点」。
+
+    时序约束（#2678 复审）：复现 trace 里下游 a2a 是 cancel 之后约 0.5s 才入库的，
+    所以调用方必须在 cancel 之后探测；放在 cancel 之前查永远检不出该窗口。
+    """
+    try:
+        since = int(since_seq or 0)
+    except (TypeError, ValueError):
+        since = 0
+    issue_key = str(issue_id or "")
+    if not (repo_key and issue_key and since):
+        return {}
+    if not issue_key.startswith("#"):
+        issue_key = f"#{issue_key}"
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT seq, agent_type FROM events WHERE repo_key=? AND issue_id=? "
+                "AND seq>? AND event_type='a2a_event' ORDER BY seq DESC LIMIT 1",
+                (repo_key, issue_key, since),
+            ).fetchone()
+    except Exception as e:
+        log.warning(f"takeover: node-advanced probe failed (allow-through): {e}")
+        return {}
+    if not row:
+        return {}
+    return {"seq": int(row[0]), "agent_type": str(row[1] or "")}
+
+
+_NODE_ADVANCED_CODE = "node_already_advanced"
+
+
+def attach_node_advanced(detail: dict, warnings: list, *payloads: dict) -> None:
+    """把 node_already_advanced 挂到 warnings（纯 code）+ 各 payload 的 warning_details。
+
+    为什么只追加 code（#2678 复审观察 1）：既有 warnings 元素全是稳定 code
+    （skill_no_references / skill_not_found / knowledge_empty / project_info_empty ...），
+    端侧按 code 映射本地化文案；把「code + 中文散文 + seq 插值」混进同一个串，端侧会落到
+    未知 key 分支。结构化字段（seq / agent_type）一律走 warning_details。
+
+    bundle 与 persist（落库版本）在 build_bundle 里共用同一个 warnings list，所以只追加
+    一次即可三处同步；这里仍对各自 payload 的 warnings / warning_details 做一次幂等补齐。
+    """
+    if not detail:
+        return
+    if _NODE_ADVANCED_CODE not in warnings:
+        warnings.append(_NODE_ADVANCED_CODE)
+    structured = {"seq": int(detail.get("seq") or 0),
+                  "agent_type": str(detail.get("agent_type") or "")}
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        details = payload.get("warning_details")
+        payload["warning_details"] = {
+            **(details if isinstance(details, dict) else {}),
+            _NODE_ADVANCED_CODE: structured,
+        }
+        own = payload.get("warnings")
+        if isinstance(own, list) and _NODE_ADVANCED_CODE not in own:
+            own.append(_NODE_ADVANCED_CODE)
+
+
 def downstream_event_exists(repo_key: str, issue_id: str, agent_type: str, since_seq: int) -> dict | None:
     """接管结束前探测：下一节点是不是**已经**被派发过。
 
@@ -188,15 +404,6 @@ def downstream_event_exists(repo_key: str, issue_id: str, agent_type: str, since
     except Exception as e:
         log.warning(f"takeover: downstream probe failed: {e}")
         return None
-
-
-def assert_no_active_takeover(repo_key: str, issue_id: str, agent_type: str = "") -> None:
-    """防重做守卫：接管中的节点禁止任何派发（A2A / a2a-redo / issues-resume 调用）。"""
-    sess = active_takeover_for(repo_key, issue_id, agent_type)
-    if sess:
-        raise TakeoverError(409, "already_taken_over",
-                            f"Issue {issue_id} 正被 {sess.get('username') or '用户'} 接管中（"
-                            f"takeover={sess.get('id')}），禁止再次派发")
 
 
 # ----------------------------------------------------------------------------- bundle
@@ -887,7 +1094,8 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     # —— env：入队快照 + 服务端 fresh env + 接管专用覆盖 ——
     env: dict[str, Any] = {}
     try:
-        env = json.loads(task.get("env_extra") or "{}") or {}
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        env = decrypt_env_extra(task.get("env_extra")) or {}  # enc:v1（#2423）
     except Exception:
         env = {}
     try:
@@ -1028,7 +1236,35 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
                    agent_type: str = "", platform: str = "", host: str = "", base_url: str = "",
                    client_version: str = "", supports: dict | None = None,
                    host_os: str = "", host_arch: str = "", host_shell: str = "") -> dict:
-    """开始接管（原子）。返回 {session, bundle, reused}；失败抛 TakeoverError。"""
+    """开始接管（原子）。返回 {session, bundle, reused}；失败抛 TakeoverError。
+
+    错误面约定（P0-2 加固）：本函数对外只抛 TakeoverError —— 未预期异常统一兜成
+    `500 internal_error` + `log.exception`（带 repo/issue/agent，日志同一行有 request_id），
+    调用方据此返回 `{ok:false, code, message, request_id}`，不再出现「裸 500 + 无堆栈」。
+    """
+    try:
+        return _start_takeover(
+            repo_key=repo_key, issue_number=issue_number, user=user,
+            agent_type=agent_type, platform=platform, host=host, base_url=base_url,
+            client_version=client_version, supports=supports,
+            host_os=host_os, host_arch=host_arch, host_shell=host_shell,
+        )
+    except TakeoverError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底：对外统一错误面，异常写日志
+        log.exception(
+            f"takeover: unexpected failure repo={repo_key} issue=#{issue_number} "
+            f"agent={agent_type or '-'}: {exc}"
+        )
+        raise TakeoverError(500, "internal_error",
+                            "服务端内部错误（已记录日志，请附带 request_id 反馈）") from exc
+
+
+def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
+                    agent_type: str = "", platform: str = "", host: str = "", base_url: str = "",
+                    client_version: str = "", supports: dict | None = None,
+                    host_os: str = "", host_arch: str = "", host_shell: str = "") -> dict:
+    """start_takeover 的实现体（不对外；所有分支只抛 TakeoverError）。"""
     from src.kernel.auth_sdk.auth_token import issue_takeover_token, revoke_takeover_token
     from src.domains.runtime.engine import service as rt
 
@@ -1042,7 +1278,7 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
     if sess:
         # 归属校验：_rebuild_for_session 会吊销原 token 并按调用者重签，
         # 不校验就会让同仓库其它用户接管他人会话并踢掉对方 token。
-        if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        if not _same_user(sess.get("user_id"), user):
             raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         return {"reused": True, "session": sess, "bundle": _rebuild_for_session(sess, user)}
 
@@ -1052,19 +1288,30 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
     if agent_type and task.get("agent_type") and agent_type != task.get("agent_type"):
         raise TakeoverError(409, "agent_mismatch",
                             f"该任务属于 {task.get('agent_type')} 节点，不是 {agent_type}")
-    if task.get("status") not in ("running", "dispatched"):
+    if task.get("status") not in ("running", "dispatched", "pending_self_report"):
         raise TakeoverError(409, "already_terminal", f"任务 {task.get('id')} 已终态（{task.get('status')}）")
 
     task_id = task["id"]
     lock_key = f"takeover:{task_id}"
-    if not acquire_lock(lock_key, ttl=60):
+    # 锁不是硬依赖：kernel 端口未绑定（PortNotBound）/锁表不可达等异常一律降级，
+    # 并发窗口最终由 takeover_sessions.active_key 唯一索引兜住（冲突 → 409）。
+    # 硬依赖的旧行为是锁一抛就冒泡成裸 500（会话未写、任务未取消），现象为通用「服务器内部错误」。
+    lock_held = False
+    lock_degraded = False
+    try:
+        lock_held = bool(acquire_lock(lock_key, ttl=60))
+    except Exception as exc:  # noqa: BLE001 - 锁不可用不阻断接管
+        lock_degraded = True
+        log.warning(f"takeover: distributed lock unavailable for {lock_key}, "
+                    f"degrade to active_key unique index: {exc}")
+    if not lock_held and not lock_degraded:
         raise TakeoverError(409, "taken_by_other", "另一个接管请求正在处理该任务，请稍后重试")
     try:
         # ② 组装 bundle（在 cancel 之前读 prompt/env/messages，避免与 worker 的写竞争）
         session_id = _TAKEOVER_SESSION_ID_PREFIX + secrets.token_hex(12)
         tok = issue_takeover_token(task_id=task_id, repo_key=repo_key,
                                    agent_type=task.get("agent_type") or "",
-                                   user_id=int(user.get("id") or 0))
+                                   user_id=_user_key(user.get("id")))
         if not tok:
             raise TakeoverError(503, "token_issue_failed", "接管 token 签发失败")
 
@@ -1080,7 +1327,7 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
                     " host_os, host_arch, host_shell) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (session_id, task_id, task_id, int(task.get("event_seq") or 0), repo_key, issue_id,
-                     task.get("agent_type") or "", int(user.get("id") or 0), user.get("username") or "",
+                     task.get("agent_type") or "", _user_key(user.get("id")), user.get("username") or "",
                      int(task.get("runtime_id") or 0), platform or "", host or "", client_version or "",
                      ST_ACTIVE, tok["token_sha256"], int(tok["expires_at"]), _now(), "", "[]",
                      _now_iso(), _now_iso(),
@@ -1119,6 +1366,14 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
             token_expires_at=int(tok["expires_at"]), user=user,
             platform_meta=meta, cancel_ok=cancel_ok, cancel_error=cancel_err,
             base_url=base_url, host_os=host_os)
+        # ⑥' 竞态探测（Issue #2517 补充发现 #2 / #2678 复审）：必须在 cancel（④）之后执行。
+        # 复现 trace 里下游 a2a 是 cancel 之后约 0.5s 才入库的——放在 cancel 之前查会漏掉
+        # 整个窗口；这里落在 cancel → bundle 组装之后、落库之前，覆盖 start 全过程的晚到事件。
+        # 残余窗口（探测之后才入库）由 finish 侧 downstream_event_exists/already_dispatched
+        # 与重连时的同函数复算兜住，不硬拒（对齐平台既有语义）。
+        attach_node_advanced(
+            node_advanced_detail(repo_key, issue_id, task.get("event_seq")),
+            warnings, bundle, persist)
 
         # ⑦ 回填 bundle 快照（不含 secrets）+ warnings
         try:
@@ -1137,7 +1392,11 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
         return {"reused": False, "session": sess, "bundle": bundle,
                 "mark_status": mark_status, "cancel_ok": cancel_ok, "cancel_error": cancel_err}
     finally:
-        release_lock(lock_key)
+        if lock_held:
+            try:
+                release_lock(lock_key)
+            except Exception as exc:  # noqa: BLE001 - 释放失败只告警：此时事务已提交，不能把成功回滚成 500
+                log.warning(f"takeover: release_lock({lock_key}) failed (ignored): {exc}")
 
 
 def _rebuild_for_session(sess: dict, user: dict) -> dict:
@@ -1150,13 +1409,21 @@ def _rebuild_for_session(sess: dict, user: dict) -> dict:
     revoke_takeover_token(task["id"])
     tok = issue_takeover_token(task_id=task["id"], repo_key=task.get("repo_key") or "",
                                agent_type=task.get("agent_type") or "",
-                               user_id=int(user.get("id") or 0))
+                               user_id=_user_key(user.get("id")))
     if not tok:
         raise TakeoverError(503, "token_issue_failed", "接管 token 续签失败")
     bundle, warnings, persist = build_bundle(
         task=task, session_id=sess["id"], token=tok["token"],
         token_expires_at=int(tok["expires_at"]), user=user,
         platform_meta={"platform": sess.get("platform") or "", "workspace_created": False})
+    # 重连复算（#2678 复审 Spec 可疑 2）：build_bundle 会重新产出一份 warnings 并覆盖
+    # warnings_json —— 若不在重连时重算，start 时披露的 node_already_advanced 重连即丢失，
+    # 与「必须披露」的语义和 PR 正文「含持久化 warnings_json」不符。
+    # 这里按当前库状态复算一次（事件只会越积越多，重算不会漏掉首次 start 的披露）。
+    attach_node_advanced(
+        node_advanced_detail(task.get("repo_key") or "", sess.get("issue_id") or "",
+                             task.get("event_seq")),
+        warnings, bundle, persist)
     try:
         with db_lock:
             c = db.cursor()
@@ -1177,7 +1444,7 @@ def attach_client_session(*, session_id: str, user: dict, client_session: str,
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     cs = (client_session or "").strip()[:128]
     try:
@@ -1199,7 +1466,7 @@ def renew_takeover_session(*, session_id: str, user: dict) -> dict:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"renewed": False, "status": sess.get("status"), "remaining": 0}
@@ -1386,7 +1653,7 @@ def request_finish(*, session_id: str, user: dict, summary: str = "", evidence: 
         from src.kernel.auth_sdk.auth_token import takeover_session_key as _tko_key
         if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
             raise TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
-    elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    elif not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         raise TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")
@@ -1437,8 +1704,12 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
+
+    # Issue #3201：本次接管期间被守门忽略的自动派发条数（面板可观测）。
+    _skipped_count = skipped_dispatch_count(sess)
+    _skipped_message = skipped_dispatch_message(_skipped_count)
 
     # agent 已经用 request-finish 提交过内容 → 用户点确认时直接沿用（不被空 body 覆盖）
     if not summary and sess.get("summary"):
@@ -1471,12 +1742,21 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     if sess.get("status") != ST_ACTIVE:
         retry = (sess.get("status") == ST_FINISHED and handoff == "a2a" and not sess.get("handoff_seq"))
         if not retry:
+            _sess_view = dict(sess)
+            _sess_view["skipped_dispatches"] = _skipped_count
             return {"ok": True, "changed": False, "status": sess.get("status"),
-                    "session": sess}
+                    "session": _sess_view,
+                    "skipped_dispatches": _skipped_count,
+                    "skipped_message": _skipped_message}
         _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
                        auth_headers=auth_headers, base_url=base_url)
+        _sess_view = get_session(session_id) or sess
+        _sess_view = dict(_sess_view)
+        _sess_view["skipped_dispatches"] = _skipped_count
         return {"ok": True, "changed": False, "status": sess.get("status"),
-                "session": get_session(session_id)}
+                "session": _sess_view,
+                "skipped_dispatches": _skipped_count,
+                "skipped_message": _skipped_message}
 
     outcome = (outcome or "completed").lower()
     if outcome not in ("completed", "failed"):
@@ -1574,11 +1854,16 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
                 log.debug(f"takeover.py best-effort skipped: {_e}")
 
     log.info(f"takeover: finished {session_id} event={outcome} next={next_agent_resolved or '-'} "
-             f"handoff_ok={handoff_result.get('ok')} done={is_done}")
+             f"handoff_ok={handoff_result.get('ok')} done={is_done} skipped={_skipped_count}")
+    _sess_view = get_session(session_id) or sess
+    _sess_view = dict(_sess_view)
+    _sess_view["skipped_dispatches"] = _skipped_count
     return {"ok": True, "changed": True, "status": ST_FINISHED,
             "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
             "next_agent": next_agent_resolved or next_agent,
-            "handoff": handoff_result, "session": get_session(session_id)}
+            "handoff": handoff_result, "session": _sess_view,
+            "skipped_dispatches": _skipped_count,
+            "skipped_message": _skipped_message}
 
 
 def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str = "",
@@ -1619,7 +1904,7 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"ok": True, "changed": False, "status": sess.get("status"), "session": sess}
@@ -1644,8 +1929,8 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     redispatch_info: dict = {}
     if redispatch and event_seq:
         try:
-            from src.domains.runtime.routes.events import redispatch_event
-            res = redispatch_event(event_seq, False, user) or {}
+            from src.domains.runtime.routes.events import redispatch_event_internal
+            res = redispatch_event_internal(event_seq, user) or {}
             redispatch_info = {"ok": True, **{k: res.get(k) for k in ("status", "task_id", "event_seq")}}
             log.info(f"takeover: aborted {session_id} → redispatch seq={event_seq} "
                      f"task={redispatch_info.get('task_id')} status={redispatch_info.get('status')}")
@@ -1659,6 +1944,20 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     log.info(f"takeover: aborted {session_id} issue={sess.get('issue_id')} reason={reason[:120]} "
              f"redispatch={redispatch}")
     out = {"ok": True, "changed": True, "status": ST_ABORTED, "session": get_session(session_id)}
+    # Issue #2517 / #2678：重派结果顶层披露，且四态可区分——只看 redispatched=false 无法区分
+    # 「我没要求重派」「没有事件可重派」「重派失败、链已断」。端侧据此决定是提示「无需处理」
+    # 还是显著告警「链未恢复，请手动重派」。
+    if not redispatch:
+        out["redispatch_status"] = "not_requested"
+    elif not event_seq:
+        out["redispatch_status"] = "no_event"
+    elif redispatch_info.get("ok"):
+        out["redispatch_status"] = "redispatched"
+    else:
+        out["redispatch_status"] = "failed"
+        out["redispatch_error"] = str(redispatch_info.get("error") or "")[:500]
+    # redispatched 保留给既有端侧（grape-kit 等）消费，语义收敛为「本次回执确实恢复了链」
+    out["redispatched"] = out["redispatch_status"] == "redispatched"
     if redispatch_info:
         out["redispatch"] = redispatch_info
     return out

@@ -73,6 +73,10 @@ class RepoPlatformModel(Base):
     clone_auth = Column("clone_auth", Text, default="")
     issue_write_form = Column("issue_write_form", Text, default="")
     branch_create_form = Column("branch_create_form", Text, default="")
+    # 2026-11-20：卡能力位 create_repo_options 已进 configs/platforms/*.json 与
+    # platform_card.py，但本表模型漏了列 → importer._apply_fields 判「未知配置键」整条拒绝，
+    # 平台行停留在 orphaned/enabled=0，用户面仓库列表整页为空。列名须与配置键一致。
+    create_repo_options = Column("create_repo_options", Integer, default=0)
     issue_search = Column("issue_search", Integer, default=0)
     git_tree_family = Column("git_tree_family", Text, default="")
     pr_comment_endpoint = Column("pr_comment_endpoint", Text, default="")

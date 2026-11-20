@@ -75,14 +75,14 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str, *,
 
     env.update(chat_repo_env(repo_key))
     if repo_key and not repo_key.startswith("chat:"):
-        try:
-            from src.kernel.auth_sdk.auth_token import issue_session_token
-            env["GRAPE_SESSION_TOKEN"] = issue_session_token(
-                session_key=f"conv:{conv_id}",
-                repo_key=repo_key, agent_type="chat", user_id=user_id)
-            env["GRAPE_CLI_MODE"] = "WORKER"
-        except Exception as e:
-            log.warning(f"chat_session_env_extra: issue session token failed for conv={conv_id}: {e}")
+        # #2790：与 enqueue/direct 同口径——签发失败打 log.error（chat 无 agent_tasks 行，
+        # 诊断落在日志；不再 log.warning 静默吞掉「为什么没 token」）。钩子自身异常由
+        # safe 封装兜底，不阻断会话环境构建。
+        from src.domains.runtime.engine.service import issue_and_inject_session_token_safe
+        issue_and_inject_session_token_safe(
+            env, log_scope=f"chat_session_env_extra conv={conv_id}",
+            session_key=f"conv:{conv_id}", repo_key=repo_key,
+            agent_type="chat", user_id=user_id, scope="chat")
         _issue = _resolve_issue_number(issue_number, conv_id)
         if _issue:
             env["ISSUE_NUMBER"] = _issue

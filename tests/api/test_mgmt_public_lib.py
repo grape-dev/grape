@@ -36,8 +36,8 @@ def install(monkeypatch, cur):
         yield cur
 
     monkeypatch.setattr(db_registry, "cursor", _ctx)
-    # G-2/F2：lib 只在「本域自有 DSN」时走 MySQL 方言 SQL，否则回退进程主库（SQLite `?`）。
-    # 本文件测的是 lib 自己的 SQL 组装，强制走 lib 分支；回退分支另有覆盖。
+    # 实现里「无自有 DSN → 回退进程主库」的分支会绕过 db_registry.cursor，
+    # 这里显式声明自有 DSN，测试对象仍是 SQL 组装与封装逻辑本身。
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda domain: True)
     return cur
 

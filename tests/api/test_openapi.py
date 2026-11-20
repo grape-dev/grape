@@ -72,6 +72,8 @@ EXPECTED_PUBLIC = {
     "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
     "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
     "auth_platform_links": ("get", "/api/auth/platform-links"),
+    # 误完成回退端点（arch-weekly-11 新增，实现已带 operation_id/summary/security）
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     # [rebase 2026-11-12] uuid+沙箱+#1208 线新增对外端点（42 个：沙箱管理/凭据/LLM 凭据/绑定/selector 预览）
     "external_api_audit_query": ("get", "/admin/sandbox/external-api-audit/{task_id}"),
     "runtime_cloud_sandbox_kill": ("delete", "/api/runtime/cloud-sandboxes/{sandbox_id}"),
@@ -237,10 +239,10 @@ EXPECTED_PUBLIC = {
     "issues_pipeline_detail": ("get", "/api/issues/{issue_id}/pipeline"),
     "issues_production_release": ("post", "/api/issues/{issue_id}/production-release"),
     "issues_production_release_list": ("get", "/api/issues/{issue_id}/production-release"),
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     "issues_resume": ("post", "/api/issues/{issue_id}/resume"),
     "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
     "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
-    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),   # 完成态回退（配套 reopening UI）
     "issues_start": ("post", "/api/issues/{issue_id}/start"),
     "issues_status": ("put", "/api/issues/{issue_id}/status"),
     "issues_status_get": ("get", "/api/issues/{issue_id}/status"),
@@ -294,6 +296,13 @@ EXPECTED_PUBLIC = {
     "org_repo_map_recall": ("get", "/api/orgs/{org_id}/repo-map/recall"),
     "org_repo_map_detail": ("get", "/api/orgs/{org_id}/repo-map/{repo_key}"),
     "org_repo_map_analyze_one": ("post", "/api/orgs/{org_id}/repo-map/{repo_key}/analyze"),
+    "org_repo_analysis_targets": ("get", "/api/orgs/{org_id}/repo-analysis/targets"),
+    "org_repo_analysis_context": ("get", "/api/orgs/{org_id}/repo-analysis/context/{repo_key}"),
+    "org_repo_analysis_docs": ("get", "/api/orgs/{org_id}/repo-analysis/docs"),
+    "org_repo_map_ai_result": ("post", "/api/orgs/{org_id}/repo-map/{repo_key}/ai-result"),
+    "org_repo_analysis_run": ("post", "/api/orgs/{org_id}/repo-analysis/run"),
+    "org_repo_analysis_status": ("get", "/api/orgs/{org_id}/repo-analysis/status"),
+    "org_repo_analysis_automation_ensure": ("post", "/api/orgs/{org_id}/repo-analysis/automation/ensure"),
     "orgs_search_users": ("get", "/api/orgs/search/users"),
     "orgs_update": ("put", "/api/orgs/{org_id}"),
     "pipeline_handoff": ("post", "/api/pipeline/handoff"),
@@ -489,6 +498,39 @@ EXPECTED_PUBLIC = {
     "takeover_progress": ("post", "/api/takeover/sessions/{session_id}/progress"),
     "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
     "takeover_start": ("post", "/api/takeover/sessions"),
+    # ---- 插件体系（grape-kit）对外端点登记：这 30 条由插件面新增，原先漏登记，
+    #      锁进清单后任何新增/改名都会红（QA review：EXPECTED_PUBLIC 登记缺口）。
+    #      组级基线 contracts/openapi_baseline.json 已按受控通道重定基。
+    "gitrepo_checks_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs"),
+    "gitrepo_statuses_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/status"),
+    "orgs_ov_credential_delete": ("delete", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credential_put": ("put", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credentials_list": ("get", "/api/orgs/{org_id}/ov-credentials"),
+    "plugin_market_validate": ("post", "/api/plugin-market/validate"),
+    "plugin_market_validate_package": ("post", "/api/plugin-market/validate-package"),
+    "plugins_agent_installed": ("get", "/api/plugins/agent/installed"),
+    "plugins_agent_report_missing": ("post", "/api/plugins/agent/report-missing"),
+    "plugins_categories": ("get", "/api/plugins/categories"),
+    "plugins_config_get": ("get", "/api/plugins/{name}/config"),
+    "plugins_config_put": ("put", "/api/plugins/{name}/config"),
+    "plugins_detail": ("get", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_download": ("get", "/api/plugins/by-id/{plugin_id}/download"),
+    "plugins_like_toggle": ("post", "/api/plugins/{plugin_id}/like"),
+    "plugins_list": ("get", "/api/plugins"),
+    "plugins_market_delete": ("delete", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_rollback": ("post", "/api/plugins/by-id/{plugin_id}/rollback"),
+    "plugins_runtime_agent_defaults": ("get", "/api/plugins/agent-defaults"),
+    "plugins_runtime_bundled_skills": ("get", "/api/plugins/{name}/skills"),
+    "plugins_runtime_detail": ("get", "/api/plugins/{name}"),
+    "plugins_runtime_get_credentials": ("get", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_install": ("post", "/api/plugins/install"),
+    "plugins_runtime_list": ("get", "/api/plugins/installed"),
+    "plugins_runtime_save_credentials": ("post", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_uninstall": ("delete", "/api/plugins/{name}"),
+    "plugins_search": ("get", "/api/plugins/search"),
+    "plugins_upload": ("post", "/api/plugins/upload"),
+    "plugins_validate_consistency": ("post", "/api/plugins/validate-consistency"),
+    "plugins_versions": ("get", "/api/plugins/by-id/{plugin_id}/versions"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -512,8 +554,11 @@ def test_docs_endpoints_accessible():
     assert client.get("/openapi.json").status_code == 200
 
 def test_contract_version_and_security_schemes():
+    from src.api.contract_versioning import CONTRACT_VERSION
+
     s = _schema()
-    assert s["info"]["version"] == "2.2.0"
+    # Issue #2784：版本号改为单一来源（从现网递进的预发布版，禁跳版）
+    assert s["info"]["version"] == CONTRACT_VERSION
     schemes = s["components"]["securitySchemes"]
     assert set(schemes) == {"apiKey", "privateKey", "accessToken"}
     assert schemes["apiKey"]["scheme"] == "bearer"

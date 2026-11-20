@@ -633,9 +633,14 @@ def aishell_dsh_capable(cli_path: str) -> bool:
 
     _timeout = _env_float("RUNTIME_ENGINE_CAP_TIMEOUT", 20.0)
     _ttl = _env_float("RUNTIME_PROBE_INTERVAL", 600.0)
+    # 负面结论（exit≠0 / 无签名）按 RUNTIME_PROBE_NEGATIVE_TTL（默认 6h）缓存：
+    # 这类失败多半是本地安装坏了（实测 ERR_PNPM_EPERM 让 aishell 每次启动都重装
+    # 自己、耗时 65s 才失败），每 10 分钟重跑一遍纯属烧 CPU 并刷日志。
+    # 超时仍按 RUNTIME_PROBE_INTERVAL（可能是真冷启动，短周期重试才有意义）。
+    _neg_ttl = _env_float("RUNTIME_PROBE_NEGATIVE_TTL", 21600.0)
     now = _time.monotonic()
     _hit = aishell_dsh_capable._cache.get(cli_path)
-    if _hit and now - _hit[0] < _ttl:
+    if _hit and now - _hit[0] < (_hit[2] if len(_hit) > 2 else _ttl):
         return _hit[1]
     capable = False
     reason = "unknown"
@@ -645,24 +650,32 @@ def aishell_dsh_capable(cli_path: str) -> bool:
                      stdin=_sp.DEVNULL, encoding="utf-8", errors="replace",
                      timeout=_timeout)
         _out = ((_r.stdout or "") + (_r.stderr or "")).lower()
+        # 失败原因必须带上 CLI 自己的输出尾部：「exit=1」对使用者毫无信息量，
+        # 而真正的病因（ERR_PNPM_EPERM / preinstall guard failed）就在最后几行。
+        _tail = " | ".join(
+            ln.strip() for ln in ((_r.stderr or _r.stdout or "").strip().splitlines()[-6:])
+            if ln.strip())[:400]
         if _r.returncode != 0:
-            reason = f"exit={_r.returncode}"
+            reason = f"exit={_r.returncode}" + (f": {_tail}" if _tail else "")
         elif "agent client protocol" not in _out:
-            reason = "no ACP signature in output"
+            reason = "no ACP signature in output" + (f": {_tail}" if _tail else "")
         else:
             capable = True
     except _sp.TimeoutExpired:
         reason = f"timeout after {_timeout}s"
     except Exception as _exc:
         reason = f"{type(_exc).__name__}: {_exc}"
-    aishell_dsh_capable._cache[cli_path] = (now, capable)
+    _ttl_used = _ttl if (capable or reason.startswith("timeout")) else _neg_ttl
+    aishell_dsh_capable._cache[cli_path] = (now, capable, _ttl_used)
     if not capable:
         _key = (cli_path, reason)
         if _key not in aishell_dsh_capable._warned:
             aishell_dsh_capable._warned.add(_key)
             log.warning("aishell-dsh capability probe failed: %s (%s) — "
-                        "same-name tool without acp, or real CLI cold start slower than %.0fs "
-                        "(engine will report installed=False)", cli_path, reason, _timeout)
+                        "same-name tool without acp, or local install broken; "
+                        "engine will report installed=False and this negative result is "
+                        "cached for %.0fs (RUNTIME_PROBE_NEGATIVE_TTL)",
+                        cli_path, reason, _ttl_used)
     return capable
 
 

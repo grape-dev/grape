@@ -326,6 +326,108 @@ class TaskSelfCompleteBody(BaseModel):
     conclusion: str = ""
     artifacts: list = []
     issue_summary: str = ""
+    # Issue #2792（#2747 子单4）：外部执行者结论上报（用户态、无 task_id）。
+    # 三件套齐全时按「外部结论」写入对应节点事件，而非收尾执行实例。
+    issue_number: int = 0
+    node: str = ""
+    repository: str = ""
+    session_id: str = ""
+
+
+def _compose_structured_result(body: TaskSelfCompleteBody, fallback: str) -> str:
+    """组装结构化 result_text（issue-219 口径）：结构化字段缺失时用叙述文本回填。
+
+    自报收尾与外部结论上报共用同一套组装口径，避免两条入口产出的归档结构漂移。
+    """
+    import json as _json
+    result_text = (body.result_text or "").strip() or fallback
+    return _json.dumps({
+        "actions": body.actions or [],
+        "conclusion": body.conclusion or result_text,
+        "artifacts": body.artifacts or [],
+        "next_step": body.next_step,
+        "issue_summary": body.issue_summary or result_text,
+    }, ensure_ascii=False)
+
+
+def _resolve_issue_task_id(repo_key: str, issue_number: int, title: str = "") -> int:
+    """解析 Issue 关联任务 id：已有行（含终态）复用，无行才补建。
+
+    Issue #2792：Spec 要求「解析/补建 Issue 任务」，但**已终结任务不覆盖**——
+    `ensure_issue_task` 对终态 Issue 会另起一条 active 任务、等于把已收尾的单
+    重新打开。这里先做只读解析：有行就复用（不写状态），无行才交给
+    `ensure_issue_task` 幂等建档。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? "
+                      "ORDER BY id DESC LIMIT 1", (repo_key, int(issue_number)))
+            row = c.fetchone()
+        if row and row[0]:
+            return int(row[0])
+    except Exception as e:
+        log.warning(f"external complete #2792: issue task lookup failed "
+                    f"repo={repo_key} issue=#{issue_number}: {e}")
+    return int(ensure_issue_task(repo_key, int(issue_number), title=title) or 0)
+
+
+def _complete_external_node_report(body: TaskSelfCompleteBody, user: dict) -> dict:
+    """Issue #2792：外部执行者（用户态、无 task_id）结论上报 → 写对应节点事件。
+
+    鉴权/作用域：用户级身份（JWT / API Key）必须托管该仓库（`_require_repo_access`，
+    防 IDOR）；仓库由 `repository`（owner/repo 或 repo_key）显式指定——Issue 号
+    逐仓唯一，不能只凭单号猜仓库。
+
+    幂等：`(issue, node, session)` 三元派生 `idempotency_key`，撞键时 `append_event`
+    返回既有 seq 的负值 → 本次返回 `already=true` 且**不覆盖**原结论。
+    """
+    from src.kernel.repo_key import to_repo_key
+    from src.api.external_node_report import build_external_node_event
+    from src.api.event_store import append_event
+
+    _raw_repo = str(body.repository or "").strip()
+    if not _raw_repo:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "缺少 repository（外部结论上报必须显式指定仓库：owner/repo 或 repo_key）"})
+    repo_key = to_repo_key(_raw_repo)
+    _require_repo_access(user, repo_key)
+
+    node = str(body.node or "").strip()
+    if not node:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 node（节点标识）"})
+
+    # 会话维度：显式 session_id 优先；缺省按调用者身份归并（同一用户对同一节点的
+    # 重复上报视为同一份结论，不刷出多条事件）。
+    session = str(body.session_id or "").strip() or f"u{user.get('id') or 0}"
+    result_text = _compose_structured_result(
+        body, f"外部执行结论上报：{node}")
+    task_id = _resolve_issue_task_id(repo_key, int(body.issue_number))
+
+    fields = build_external_node_event(
+        body.issue_number, node, result_text,
+        task_id=task_id, session=session,
+        actor=str(user.get("username") or ""))
+    seq = append_event(repo_key=repo_key, **fields)
+    created = seq > 0
+    if seq < 0:
+        # 幂等命中：既有事件（不覆盖终态）
+        seq = -seq
+        log.info(f"external complete #2792: idempotent hit repo={repo_key} "
+                 f"issue=#{body.issue_number} node={node} session={session} seq={seq}")
+    if not seq:
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "message": "外部执行结论落库失败（事件存储不可用，可重试）"})
+    log.info(f"external complete #2792: node event written repo={repo_key} "
+             f"issue=#{body.issue_number} node={node} session={session} "
+             f"seq={seq} created={created}")
+    return {
+        "ok": True, "external": True, "already": not created,
+        "seq": seq, "issue_number": int(body.issue_number), "node": node,
+        "session": session, "task_id": task_id, "status": "completed",
+        "source": "external",
+    }
 
 
 @router.post("/complete", operation_id="tasks_complete", summary="Self-report task complete", description="Agent self-reports completion of an execution instance. With a session token the task id is derived from session_key; JWT/API key requires task_id. Structured fields build a structured result_text.")
@@ -334,6 +436,8 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
 
     - 会话 token（tk_）：任务 id 由 session_key 自动定位（M2 以 task_id 签发），校验 repo 作用域。
     - JWT / API Key（用户级）：body.task_id 必填，校验任务 repo 在该用户托管仓库内。
+      Issue #2792：无 task_id 但携带 issue_number + node + repository 时，走**外部执行
+      结论上报**——写为对应节点事件（source=external），不碰任何执行实例状态。
     - 终态幂等：completed/failed/cancelled 不再覆盖（返回现状）。
     - 完成后任务 + 事件置为成功，不经过 evaluate_agent_output 启发。
     """
@@ -343,6 +447,9 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
         task_id = user.get("session_key") or ""
     elif body.task_id:
         task_id = str(body.task_id).strip()
+    elif body.issue_number and str(body.node or "").strip():
+        # Issue #2792：外部执行者结论上报（用户态、无 task_id、无执行实例）
+        return _complete_external_node_report(body, user)
     else:
         task_id = ""
     if not task_id:
@@ -368,19 +475,11 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
         # 取消不提升（单信号下唯不可补挂的终态）
         return {"ok": True, "task_id": task_id, "status": _status, "already": True}
 
-    result_text = (body.result_text or "").strip() or f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}"
     # 结构化产出：始终组装为结构化 JSON——结构化字段缺失时用叙述 result_text 回填 conclusion/issue_summary，
     # 保证 event.json archive.seg.output 有结论/动作/产出（issue-219：仅传叙述文本会丢结构化归档，
-    # 详情页「处理记录与答复结论」为空）。
-    import json as _json
-    _sd = {
-        "actions": body.actions or [],
-        "conclusion": body.conclusion or result_text,
-        "artifacts": body.artifacts or [],
-        "next_step": body.next_step,
-        "issue_summary": body.issue_summary or result_text,
-    }
-    result_text = _json.dumps(_sd, ensure_ascii=False)
+    # 详情页「处理记录与答复结论」为空）。组装口径与外部结论上报共用 `_compose_structured_result`。
+    result_text = _compose_structured_result(
+        body, f"任务自报完成{(' / ' + body.next_step) if body.next_step else ''}")
     from src.domains.runtime.engine import service as _svc
     # 单信号（C，stream-end-finalize-single-signal-design.md）：
     # 自报 = 记录权威结构化结论（产物而非闸门）；终态由引擎流结束(finalize_by_stream_end)定案。

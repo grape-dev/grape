@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     clone_auth          TEXT NOT NULL DEFAULT '',      -- clone 凭据形态：x_access_token | oauth2 | basic_password
     issue_write_form    TEXT NOT NULL DEFAULT '',      -- 建/关 Issue 端点形态：repo_path | owner_param（Gitee=owner_param）
     branch_create_form  TEXT NOT NULL DEFAULT '',      -- 建分支形态：form | refs_sha
+    create_repo_options INTEGER NOT NULL DEFAULT 0,   -- 1=适配器接受 auto_init/default_branch（建仓可选参数）
     issue_search        INTEGER NOT NULL DEFAULT 0,    -- 1=支持原生 issue 搜索端点（布尔，非枚举）
     git_tree_family     TEXT NOT NULL DEFAULT '',      -- 文件树/内容 API 族：github_api | （空=不支持）
     pr_comment_endpoint TEXT NOT NULL DEFAULT '',      -- PR 评论端点族：issues（借 issue 评论接口）| 空=专用端点

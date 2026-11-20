@@ -11,6 +11,17 @@ from src.kernel.config import log
 # /api/v5/user 仍在 api.gitcode.com 上可用（auth.py 单独使用）。
 API_BASE = "https://gitcode.com/api/v5"
 
+class UpstreamTimeoutError(RuntimeError):
+    """上游 Git 平台 API 请求超时（Issue #1940，#2084 移植）。
+
+    继承 RuntimeError：既有 ``except RuntimeError`` 调用点零改动兼容；
+    ``str()`` 保持 "Cannot reach GitCode API: ..." / "Cannot reach GitHub API: ..." 格式。
+
+    语义：请求已发出、响应未按时返回——上游可能已受理并落地（写操作不可盲重试），
+    供写链路分流（写 504 uncertain / 读 502 维持）。
+    """
+
+
 class UpstreamAPIError(RuntimeError):
     """上游 Git 平台 API 返回 >=400（Issue #549）：携带真实 status_code / message。
 
@@ -31,21 +42,40 @@ class UpstreamAPIError(RuntimeError):
             f"{provider} API {method} {url} failed ({self.status_code}): {self.message}"
         )
 
+def upstream_timeout_seconds(default: float = 25.0) -> float:
+    """上游 Git 平台请求超时（秒）——Issue #2084（#2084 移植）超时错开。
+
+    - `GRAPE_UPSTREAM_TIMEOUT_SECONDS` 环境变量可调（运行时逐次读取，改配置即时生效）；
+    - 默认 25s **严格小于** CLI 客户端 30s：上游慢响应时服务端先超时返回
+      可判定的 504 uncertain + request_id + 回读指引（#1940 写超时语义），
+      而不是与客户端 30s 同值竞速让调用方先本地断开（eval-F10「客户端先断」）；
+    - 非法值/非正值回落默认（配置错误不打瘫上游客户端）。
+    """
+    raw = os.environ.get("GRAPE_UPSTREAM_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
         if method == "GET":
-            resp = _requests.get(url, headers=headers, timeout=30)
+            resp = _requests.get(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "POST":
-            resp = _requests.post(url, json=body, headers=headers, timeout=30)
+            resp = _requests.post(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "DELETE":
-            resp = _requests.delete(url, headers=headers, timeout=30)
+            resp = _requests.delete(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PUT":
-            resp = _requests.put(url, json=body, headers=headers, timeout=30)
+            resp = _requests.put(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PATCH":
-            resp = _requests.patch(url, json=body, headers=headers, timeout=30)
+            resp = _requests.patch(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         else:
             raise ValueError(f"Unsupported method: {method}")
         if resp.status_code >= 400:
@@ -171,7 +201,7 @@ def _req_query(method: str, path: str, token: str, params: dict | None = None,
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
@@ -505,7 +535,8 @@ def fetch_org_namespaces(provider: str, api_token: str) -> list[dict]:
 
 
 def create_repo(api_token: str, name: str, description: str = "", private: bool = False,
-                owner: str = "", path: str = "") -> dict:
+                owner: str = "", path: str = "", auto_init: bool = False,
+                default_branch: str = "main") -> dict:
     """创建空仓库（POST /api/v5/user/repos，指定 owner 时 POST /api/v5/orgs/{owner}/repos）。
 
     owner 为空 = 在 token 用户个人空间创建；owner 为组织 path 时在组织空间创建。
@@ -522,8 +553,8 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
-        "default_branch": "main",
+        "auto_init": bool(auto_init),
+        "default_branch": (default_branch or "main"),
         "repository_type": "code",
         "path": repo_path,
     }
@@ -539,6 +570,32 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+def set_default_branch(api_token: str, owner: str, repo: str, branch: str,
+                       provider: str = "gitcode") -> bool:
+    """把已存在分支设为仓库默认分支（新组织仓库 grape-repo-knowledge 收口）。
+
+    GitHub/GitCode 建仓时对自定义 default_branch 支持不一致；统一在建出首个分支后
+    通过平台 API 校正。失败只返回 False，由调用方 best-effort 记录。
+    """
+    branch = (branch or "").strip()
+    if not (api_token and owner and repo and branch):
+        return False
+    prov = (provider or "gitcode").strip().lower()
+    try:
+        if prov == "github":
+            _github_req("PATCH", f"{_GITHUB_API_BASE}/repos/{owner}/{repo}",
+                        api_token, {"default_branch": branch})
+            return True
+        if prov == "gitcode":
+            _req("PATCH", f"{API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+                          f"{urllib.parse.quote(repo, safe='')}",
+                 api_token, {"default_branch": branch})
+            return True
+    except Exception as exc:
+        log.warning(f"set default branch failed provider={prov} {owner}/{repo} -> {branch}: {exc}")
+    return False
+
 
 def delete_gitcode_repo(api_token: str, owner: str, repo: str) -> bool:
     """删除 GitCode 仓库（DELETE /api/v5/repos/{owner}/{repo}）。
@@ -986,7 +1043,7 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             if raw.strip():
                 return json.loads(raw)
@@ -1273,7 +1330,8 @@ def check_github_is_collaborator(api_token: str, owner: str, repo: str, username
         return False
 
 def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False,
-                       owner: str = "", path: str = "") -> dict:
+                       owner: str = "", path: str = "", auto_init: bool = False,
+                       default_branch: str = "") -> dict:
     """创建空仓库（个人空间 POST /user/repos，指定 owner 时 POST /orgs/{owner}/repos）。
 
     GitHub 的仓库路径恒等于仓库名，path 参数仅为与服务端统一签名而保留（忽略）。
@@ -1290,7 +1348,7 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
+        "auto_init": bool(auto_init),
     }
     endpoint = (f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
                 if owner else f"{_GITHUB_API_BASE}/user/repos")

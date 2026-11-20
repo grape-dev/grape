@@ -537,5 +537,8 @@
     "sbx_copy": "Copy",
     "sbx_close": "Close",
     "sbx_error_copied": "Error copied"
-  }
+  },
+  "obs_no_data": "Worker data unavailable (not zero workers)",
+  "obs_stale_since": "Refresh failed — showing the snapshot from {{time}}",
+  "obs_partial": "Partially degraded (backend section failed)"
 }

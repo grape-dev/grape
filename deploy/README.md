@@ -61,3 +61,19 @@ systemctl restart grape-systemd@mgmt.service grape-systemd@event.service \
 
 `CREATE OR REPLACE VIEW` 会把视图 DEFINER 重置为执行账号；若线上视图依赖特定 definer
 授权，用 `--definer user@host` 显式指定。
+
+## 契约版本与「测试契约通道」（Issue #2784）
+
+- **测试契约通道**：`grape.example.com` 承载**预发布契约**（`info.version` 带
+  `a1`/`b1`/`rc1` 后缀，例如 `2.3.0a1`），仅测试环境可查；现网契约是去掉后缀的正式版。
+  预发布契约不得直接对现网用户发布，CLI 升级提醒也不会以预发布版本作为升级目标。
+- **版本号来源**：所有进程（mgmt / event / worker / insight，以及 webhook-only 入口）
+  的 `/openapi.json` 与 `/health` 里的 `version` 都取自
+  `src/api/contract_versioning.py::CONTRACT_VERSION`；**不要**在部署脚本或环境变量里
+  另设一份契约版本号——四进程之间版本漂移时，CLI 会按不同号的契约来回刷新。
+- **变更通知**：契约根 `x-changelog` 给出本次相对现网快照的新增/删除/弃用端点
+  （`added` / `removed` / `deprecated`）。基线 `help/api/openapi-baseline.json` 是
+  发布产物，随发布构建刷新；部署副本若不带 `help/`，`x-changelog.baseline_available`
+  为 `false`、清单为空，属预期降级，不是故障。
+- 规则全文（禁跳版、预发布后缀、单一事实源、`x-changelog` 通知）见
+  [`CONTRIBUTING.md` §9.1「契约版本号策略」](../CONTRIBUTING.md)。

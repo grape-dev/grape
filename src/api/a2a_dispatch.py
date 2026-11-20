@@ -388,8 +388,26 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             # Issue #653：场景解析失败曾是静默回退「default」的旁路（节点查不到 → 全局池），必须留痕
             log.warning(f"A2A: get_issue_scene failed for repo={repo_key} "
                         f"issue=#{issue_number}: {_se653}")
-    engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
-                            scene_id=_a2a_scene, user_id=_a2a_scene_uid)
+    # Issue #2791（评审 P1）：legacy 兜底路径（非 plugin / plugin 事件驱动异常回退）
+    # 同样「定向优先」——命中即锁定 `engine_config.runtime_id`，不跑 pick_engine、
+    # 也不过场景池门（场景池全灭也不否定派发）；未命中才落到既有池选择。
+    # 解析实现单点在 engine_select.resolve_directive_engine，本处不复制判定。
+    _directive = None
+    try:
+        from src.domains.runtime.engine.engine_select import resolve_directive_engine
+        _directive = resolve_directive_engine(
+            (evt.get("payload") or {}).get("engine_config"), repo_key, agent_name)
+    except Exception as _dir_e:
+        log.warning(f"A2A: resolve engine_config directive failed: {_dir_e}")
+        _directive = None
+    if _directive and _directive.get("hit"):
+        engine_id = _directive["runtime_id"]
+        log.info(f"A2A (directed): engine_config.runtime_id={engine_id} "
+                 f"({_directive.get('engine_name') or '-'}) locked, "
+                 f"pick_engine/scene pool skipped, seq={seq}")
+    else:
+        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
+                                scene_id=_a2a_scene, user_id=_a2a_scene_uid)
     if engine_id is None:
         log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
         # Issue #418：早退统一走 _fail_event，回写 result/exit_code/completed_at
@@ -460,7 +478,7 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             f"#{issue_number}" if issue_number else "",
         )
         try:
-            _enqueue_pipeline_task(
+            _bcast_task_id = _enqueue_pipeline_task(
                 *_enq_args,
                 pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
                 pool_selector=_pool_sel_a2a,
@@ -473,10 +491,16 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             log.warning(
                 "A2A: enqueue module does not accept pool_selector; "
                 "fallback without selector (mixed-version process)")
-            _enqueue_pipeline_task(
+            _bcast_task_id = _enqueue_pipeline_task(
                 *_enq_args,
                 pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
             )
+        # Issue #3201：接管守门命中时入队返回空串 → 按 skipped 返回，不得误报 ok。
+        if not _bcast_task_id:
+            log.info(f"A2A (plugin broadcast): skipped {agent_name}, seq={seq} "
+                     f"(reason=already_taken_over)")
+            return {"status": "skipped", "seq": seq, "agent": agent_name,
+                    "reason": "already_taken_over"}
         log.info(f"A2A (plugin broadcast): enqueued pool task for {agent_name}, seq={seq}")
         return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
     # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）
@@ -516,17 +540,32 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
         _a2a_task_id = _create_direct_task(repo_key, seq, agent_name, _be,
                             skill_name or agent_name, skill_path or "",
                             engine_id, evt, _issue_id, skill_id=skill_id)
+        # Issue #3201：守门命中时 _create_direct_task 返回空串——不得继续 start_direct_agent
+        # （task_id="" 会让 _execute_agent_inner 无 task 行照常 build prompt / 跑 agent，
+        # 与本地接管双写 worktree），按 skipped 如实返回，交给 drain 视作「已跳过」而非失败。
+        if not _a2a_task_id:
+            log.info(f"A2A: skipped direct dispatch for {agent_name}, seq={seq} "
+                     f"(reason=already_taken_over)")
+            return {"status": "skipped", "seq": seq, "agent": agent_name,
+                    "reason": "already_taken_over"}
         start_direct_agent(_execute_agent, (
             repo_key, seq, agent_name, _be, skill_name or agent_name, evt, engine_id, _a2a_task_id,
         ), name=f"a2a-{agent_name}-{seq}")
         log.info(f"A2A: started agent execution for {agent_name} (direct, engine={engine_id})")
     else:
         from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task
-        _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
+        _remote_task_id = _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                skill_name or agent_name, evt,
                                skill_id, skill_path, engine_id,
                                f"#{issue_number}" if issue_number else "",
                                user_id=_a2a_scene_uid)
+        # Issue #3201：接管守门命中时入队返回空串 → 按 skipped 返回；drain 视 skipped 为
+        # 已跳过（seq 非空、非 failed），不会误走 _fail_event 把事件改成 failed。
+        if not _remote_task_id:
+            log.info(f"A2A: skipped remote dispatch for {agent_name}, seq={seq} "
+                     f"(reason=already_taken_over)")
+            return {"status": "skipped", "seq": seq, "agent": agent_name,
+                    "reason": "already_taken_over"}
         log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, engine={engine_id}, mode={kind}")
     return {"status": "ok", "seq": seq, "agent": agent_name}
 

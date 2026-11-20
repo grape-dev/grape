@@ -43,7 +43,7 @@
 | 出参 | `{issues: Issue[], sort_order, mode}`（跨仓库，user_id=当前用户） |
 | 返回 | 200；401 未认证；403 session token |
 
-> 富化字段：`scene_id/scene_name/stage/is_running/agent_statuses`。
+> 富化字段：`scene_id/scene_name/stage/is_running/agent_statuses`。若响应含 `statuses`/`node_status` 数值码：0=pending 1=running 2=completed 3=failed 4=cancelled 5=skipped（详见 `GET /api/issues/{issue_id}/pipeline` 说明）。
 > 个人维度查询依赖调用者身份（`user_id` 过滤）——session token（`tk_`）无个人语义，故禁。
 
 ---
@@ -407,6 +407,17 @@ Issue 对象字段：
 > 与 `awaiting-input` 对称：`awaiting_input`=「我要你的输入/澄清」，`pending_review`=「我交付这个决策点，请你审核/拍板」。
 > **任意 devops agent**（vod/issue/coding/qa/sre）可在**任意阶段**显式将 issue 置为待审核，不改 stage。
 > CLI：`grape issues pending-review --issue_id {issue_id} --json '{"review_points":"...","references":"..."}' --json-out`（operation_id=`issues_pending-review`）。
+
+> **`--issue_id` 只能传纯数字内部 id（Issue #2695，#2695 移植）**：取值来自 `grape issues detail --json-out` 返回体的
+> `issue_id` 字段（首选服务端注入的 `$GRAPE_ISSUE_ID`，同源）——它是平台内部需求卡片 id，
+> **不是 GitCode issue number**（`number`）也不是 GitCode 侧 `id`。传空/非数字时服务端在路由入口前置返回
+> **400 `{"detail":{"code":400,"message":"invalid issue_id"}}`**（平台统一信封，见本文件「错误返回」与 `README.md`
+> 「错误响应统一格式」）；空 id 拼出的 `/api/issues//pending-review` 同口径，不再落 method-mismatch 兜底 405
+> （历史症状：`HTTP 405: request failed` 且无 detail，调用方无法自诊断）。
+> **仅 POST**：上面的收敛只作用于本端点（`POST`）；`GET/PUT/DELETE` 对空路径段的行为保持不变，
+> 不会返回 `invalid issue_id`。
+> 新版 grape CLI 对非数字 `--issue_id` 已在本地拦截（grape-cli #1634，随 grape-cli 发版生效）；
+> worker 启动会核对 CLI 版本，版本线陈旧时提示升级（不阻断启动）。
 
 | 项 | 值 |
 |----|-----|

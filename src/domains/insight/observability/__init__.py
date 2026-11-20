@@ -459,6 +459,37 @@ def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens
     LLM_REQUESTS.labels(provider=p, model=m).inc()
 
 
+# 标签分开计数（两类事件运维含义不同）。
+# CONTRACT_GUARD_OUTCOMES 与 src/domains/runtime/engine/contract_guard.ALERT_OUTCOMES 为自包含
+# 双实现（worker 包闭包内没有 src/observability），口径由漂移看护测试锁定。
+
+CONTRACT_GUARD_FAILURES_METRIC = "grape_contract_guard_failures_total"
+
+CONTRACT_GUARD_OUTCOMES = ("degraded", "rebuild_failed")
+
+CONTRACT_GUARD_FAILURES = Counter(
+    CONTRACT_GUARD_FAILURES_METRIC,
+    "Contract guard failure signals reported by workers: CLI contract cache "
+    "degradation detected (outcome=degraded) or full-contract rebuild failed "
+    "(outcome=rebuild_failed).",
+    ["outcome"],
+    registry=registry,
+)
+
+
+def record_contract_guard_failure(outcome: str, detail: str = ""):
+    """guard 失败信号计数（/api/runtime/contract-guard/signal 的承接落点）。
+
+    outcome 取值见 CONTRACT_GUARD_OUTCOMES；未知取值按 unknown 计数（不丢数，
+    契约口径变化先在指标上可见，再由漂移看护测试追齐）。detail 仅供日志甄别，
+    不进指标标签（防高基数）。
+    """
+    o = (outcome or "").strip().lower()
+    if o not in CONTRACT_GUARD_OUTCOMES:
+        o = "unknown"
+    CONTRACT_GUARD_FAILURES.labels(outcome=o).inc()
+
+
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
 
 DB_THREADS_CONNECTED = Gauge(

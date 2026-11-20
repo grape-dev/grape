@@ -32,6 +32,7 @@
     "organizations": "Organizations",
     "autopilot": "Automation",
     "obs_cockpit": "Operations Cockpit",
+    "plugins": "Plugin Market",
     "sandbox": "Cloud Sandbox"
   },
   "sidebar": {

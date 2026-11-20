@@ -298,17 +298,42 @@ def run_startup_migration(db_path: str) -> dict:
 def default_db_path() -> str:
     """与 src.kernel.session_manager 同源的 sqlite 库路径（env DEVOPS_DB_PATH）。
 
-    2026-11-18：原实现用三层 dirname（只到 `src/domains`）拼出
-    `src/domains/data/sessions.db`——SQLite 部署下目录不存在，IM 仓储层所有读写
-    直接 `unable to open database file`（凭证保存/安装读取/通知全部静默失败，
-    只有 MySQL 后端与设了 DEVOPS_DB_PATH 的环境看不出来）。改为直接复用
-    session_manager 的 `_db_path`（同源唯一口径，便于测试临时库注入）。
+    Issue #3251：本函数曾自拼 dirname 上三级，模块迁到 src/domains/runtime/im/
+    后解析成 src/domains/data/sessions.db（不存在）→ 裸启动 outbox 每轮报
+    unable to open database file 并拖死事件循环。现委托 session_manager 单一
+    出口（env 优先 + import 期快照 _db_path，与主库口径天然一致）；
+    函数名与 __all__ 导出保持不变（调用方零改动）。
     """
     env = os.environ.get("DEVOPS_DB_PATH")
     if env:
         return env
-    from src.kernel.session_manager import _db_path  # 延迟导入：避免与 kernel 层循环
-    return _db_path
+    from src.kernel import session_manager as _sm  # 延迟导入：避免与 kernel 层循环
+    return _sm._db_path
+
+
+# Issue #3251：DB 打开失败按解析路径只报一次 ERROR——裸启动路径错位时 outbox
+# 每轮重试（实测 2.5h 刷 5005 条 unable to open database file），既淹没日志
+# 又拖慢事件循环（最终 event loop stalled 7211s）。路径恢复或变化后会重新告警。
+_DB_OPEN_ERROR_LOGGED: set = set()
+
+
+def _note_db_open_failure(db_path: str, exc: sqlite3.Error) -> None:
+    """记录 DB 打开失败：同一解析路径只发一次 ERROR，异常打 _db_open_logged 标记后原样抛出。
+
+    外层循环（如 outbox consumer）看到 _db_open_logged 即可静默降级，
+    避免逐轮 WARNING 刷屏；其余异常语义不变。
+    """
+    key = os.path.abspath(db_path)
+    if key not in _DB_OPEN_ERROR_LOGGED:
+        _DB_OPEN_ERROR_LOGGED.add(key)
+        log.error(
+            "[db] cannot open sqlite db path=%s (DEVOPS_DB_PATH %s): %s "
+            "— reported once per path, retries stay silent until recovered",
+            db_path,
+            "set" if os.environ.get("DEVOPS_DB_PATH") else "not set",
+            exc,
+        )
+    exc._db_open_logged = True
 
 
 def _connect(db_path: str):
@@ -342,7 +367,11 @@ def _connect(db_path: str):
                 _IM_DB_CONN = MySQLCompatDB(**_cfg)
             return _SharedConn(_IM_DB_CONN)
         return _SharedConn(_shared_db())
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as e:
+        _note_db_open_failure(db_path, e)
+        raise
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 

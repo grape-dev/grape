@@ -415,18 +415,15 @@ def test_org_scene_metadata_lookup_failure_is_fail_closed(monkeypatch, caplog):
     from fastapi import HTTPException
 
     import src.api.org_context as org_context
+    from src.domains.mgmt import public as mgmt_public
 
     _seed_managed_repo(NORMAL_REPO_KEY)
 
-    class _BrokenCursor:
-        def execute(self, *_args, **_kwargs):
-            raise RuntimeError("database unavailable")
+    def _broken_lookup(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
 
-    class _BrokenDB:
-        def cursor(self):
-            return _BrokenCursor()
-
-    monkeypatch.setattr(org_context, "db", _BrokenDB())
+    # 场景元数据读取已收敛到 mgmt 域 public，模拟该原语不可用即可。
+    monkeypatch.setattr(mgmt_public, "get_scene_org_metadata", _broken_lookup)
     caplog.set_level("WARNING")
 
     with pytest.raises(HTTPException) as exc:

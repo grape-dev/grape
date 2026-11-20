@@ -25,6 +25,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api import server_common, server_tasks
+# Issue #2784：契约版本号单一来源——修复前本入口写死 2.2.2，与其它三个进程的
+# 2.2.0 互相漂移（相对现网 2.2.0 还属跳版）。
+from src.api.contract_versioning import CONTRACT_VERSION
 
 bot_manager = None
 
@@ -508,7 +511,7 @@ async def _stop_feedback_reconcile() -> None:
 
 app = server_common.build_app(
     title="Grape Mgmt Server",
-    version="2.2.2",
+    version=CONTRACT_VERSION,
     lifespan=lifespan,
 )
 
@@ -516,7 +519,7 @@ app = server_common.build_app(
 from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
     feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community,
-    patrol, org_context_store, org_knowledge, org_audit,
+    patrol, org_context_store, org_knowledge, org_audit, org_analysis,
     categories as categories_routes,
 )
 
@@ -555,6 +558,7 @@ app.include_router(org_dispatches.router)
 app.include_router(org_context_store.router)
 app.include_router(org_knowledge.router)
 app.include_router(org_audit.router)  # 组织审计只读查询（Issue #2260）
+app.include_router(org_analysis.router)  # 组织仓库 AI 分析
 app.include_router(community.router)
 
 # 巡检（Issue: 4 进程拆分时漏挂，导致 /api/patrol/* 404 且契约丢失）
@@ -614,7 +618,10 @@ app.include_router(knowledge.router)
 # ===== Issue-45: OpenAPI 定制渲染 =====
 from src.api.openapi import custom_openapi
 
-app.openapi = lambda: custom_openapi(app)
+# Issue #2081 移植注记：cluster 模式下 Mgmt 进程天生不含 tasks 等他进程路由（四进程拆分），
+# 基线完整性校验（exact-count pinning）只在门禁脚本（check-openapi-endpoints.py，权威全量渲染）
+# 执行；进程内渲染跳过校验防误杀（weekly 单进程语义与 arch 四进程语义的差异适配）。
+app.openapi = lambda: custom_openapi(app, check_baseline=False)
 
 server_common.init_process_db()
 

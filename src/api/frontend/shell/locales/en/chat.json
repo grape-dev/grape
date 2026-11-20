@@ -204,5 +204,15 @@
     "hint": "Message recalled",
     "re_edit": "Re-edit",
     "failed": "Recall failed: {{msg}}"
+  },
+  "plugin_label": "Plugin",
+  "plugin_config_tip": "Select plugins",
+  "plugin_multi_hint": "Multi-select; sent with the conversation context",
+  "plugin": {
+    "no_installed": "No plugins installed yet. Install from the Plugin Market.",
+    "clear": "Clear all",
+    "source_installed": "Installed",
+    "source_market": "Market",
+    "degraded_hint": "List may contain uninstalled plugins"
   }
 }

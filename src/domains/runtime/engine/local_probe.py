@@ -10,7 +10,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from src.kernel.config import log
 
 LOCAL_PROBE_TIMEOUT = 5          # 单引擎 --version 超时（秒），与 worker 现有实现（agent.py:46）一致
-LOCAL_PROBE_MAX_TOTAL = 25       # 全量探测总上限（秒）
+# 全量探测总上限（秒）。Issue #2545：25 → 35——hermes 探活由两段扩为三段
+# （--version 5s + ACP 握手预算 + 最小模型调用 5s），原 25s 预算下最坏情形
+# 会撞总闸被误标 healthy=False（Spec 验收：不误判）。
+LOCAL_PROBE_MAX_TOTAL = 35
+MODEL_CALL_TIMEOUT = 5           # hermes 最小模型调用超时（秒，Issue #2545）——沿用单引擎超时预算
+
+
+def _hermes_model_call_probe(timeout: float = MODEL_CALL_TIMEOUT) -> tuple[bool, dict]:
+    """hermes 最小模型调用探针（Issue #2545）。
+
+    ACP 握手只能证明引擎可起，暴露不了「模型名不在该 key 所属网关可用列表」——
+    该错配此前 healthy 但实际 chat 404 Model not found。此处在握手通过后补一次
+    真实 1-token 补全（engine_model.minimal_model_call，统一模型名来源）：
+      404/模型不存在 → (False, {"model_call": "model_not_found: <模型名>"}) → 探针置 unhealthy
+      其余（200/其它状态/网络不可达/无配置）→ (True, detail) 不误判。
+    任何异常都不让探针崩（单引擎失败不影响其他引擎）。
+    """
+    from src.domains.runtime.engine import engine_model
+    try:
+        cfg = engine_model.read_hermes_model_config()
+        if not cfg:
+            return True, {}
+        return engine_model.minimal_model_call(cfg, timeout=timeout)
+    except Exception as e:
+        return True, {"model_call": "skipped: probe error (%s)" % e}
 
 
 def _probe_one(eng: dict) -> dict:
@@ -27,6 +51,7 @@ def _probe_one(eng: dict) -> dict:
         return {**eng, "version": "", "healthy": False, "probe_status": "failed", "probe_latency": 0}
     try:
         _t0 = time.monotonic()
+        _probe_detail = {}   # Issue #2545：模型调用探针详情（ACP 分支填充，全路径可见）
         # hermes 固定 --version（健康由 acp_probe 握手判定）；其余引擎保留 probe_args 覆盖
         if (eng.get("name") or "").lower() == "hermes":
             _args = ["--version"]
@@ -43,12 +68,20 @@ def _probe_one(eng: dict) -> dict:
             # 不落 ACP_CHECK_TIMEOUT 默认 20s（服务端心跳口径，超出本机直连单引擎预算）。
             _budget = round(max(1.0, LOCAL_PROBE_TIMEOUT - (time.monotonic() - _t0)), 2)
             healthy = _acp_check(cli, timeout=_budget)
+            # Issue #2545：握手通过后再做一次最小模型调用——模型名 vs 网关 key
+            # 可用列表不对齐 → healthy=False + probe_detail 带 model_not_found 原因
+            # （而非 healthy 但实际 chat 404 Model not found）。arch11 版 probe_status
+            # 语义保持（ok/failed 随最终 healthy 落库）。
+            if healthy:
+                healthy, _probe_detail = _hermes_model_call_probe()
         # probe_status 必须随结果一起返回：upsert 侧只认这几个字段，
         # 缺了它 agent_runtimes.probe_status 就永远停在 pending，
         # 健康判定把"从未探测"当成"低分/连败"，claim 直接被拒（2026-11-15 实证）。
         out = {**eng, "version": version, "healthy": healthy,
                "probe_status": "ok" if healthy else "failed",
                "probe_latency": latency_ms}
+        if _probe_detail:
+            out["probe_detail"] = _probe_detail
         out.pop("probe_args", None)
         return out
     except Exception:

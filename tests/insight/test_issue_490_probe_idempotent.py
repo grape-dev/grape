@@ -76,10 +76,15 @@ class _FakeRequest:
 
 
 def _do_heartbeat(probe_results: dict, runtime_ids: list[int], cid: int):
-    """直接调用 runtime_heartbeat（绕过鉴权，传 credential_id=cid）。"""
+    """直接调用 runtime_heartbeat（绕过鉴权，传 credential_id=cid）。
+
+    async 端点必须真跑（asyncio.run）——只造协程不 await 会静默不写库，
+    去重/计数断言全部失真（套件曾因此整体假红）。
+    """
+    import asyncio
     from src.domains.runtime.routes.runtime import runtime_heartbeat, HeartbeatBody
     body = HeartbeatBody(runtime_ids=runtime_ids, probe_results=probe_results)
-    return runtime_heartbeat(body, _FakeRequest(), credential_id=cid)
+    return asyncio.run(runtime_heartbeat(body, _FakeRequest(), credential_id=cid))
 
 
 # ============================ 服务端幂等去重 ============================

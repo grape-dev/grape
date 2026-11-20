@@ -113,6 +113,241 @@ def ensure_table() -> None:
             "ON grape_t_org_repo_map(org_id, repo_key)"
         )
         db.commit()
+    try:
+        ensure_ai_table()
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"org_repo_map ensure_ai_table skipped: {exc}")
+
+
+def ensure_ai_table() -> None:
+    """AI 分析台账表（与确定性地图分表；幂等）。"""
+    from src.domains.mgmt.schema_ddl import _ORG_REPO_AI_DDL
+
+    try:
+        from src.kernel import table_ownership as _own
+
+        if _own.should_skip("grape_t_org_repo_ai"):
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"org_repo_ai ownership guard unavailable: {exc}")
+    with db_lock:
+        c = db.cursor()
+        c.execute(_ORG_REPO_AI_DDL)
+        db.commit()
+
+
+def get_ai_status(org_id: str, repo_key: str) -> dict:
+    """读取某仓最近一次 AI 分析的台账（无记录返回空 dict）。"""
+    ensure_ai_table()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT org_id, repo_key, status, error, engine_id, source_commit, "
+            "result_hash, triggered_by, analyzed_at, updated_at "
+            "FROM grape_t_org_repo_ai WHERE org_id=? AND repo_key=?",
+            (str(org_id), str(repo_key)),
+        )
+        row = c.fetchone()
+        if not row:
+            return {}
+        cols = [d[0] for d in c.description]
+    return dict(zip(cols, row))
+
+
+def mark_ai_status(org_id: str, repo_key: str, status: str, *,
+                   error: str = "", triggered_by: str = "",
+                   engine_id: int = 0) -> None:
+    """只更新运行状态，不清空上次成功结果。"""
+    ensure_ai_table()
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT result_json, source_commit, result_hash, analyzed_at "
+            "FROM grape_t_org_repo_ai WHERE org_id=? AND repo_key=?",
+            (str(org_id), str(repo_key)),
+        )
+        old = c.fetchone() or ("", "", "", "")
+        c.execute(
+            "DELETE FROM grape_t_org_repo_ai WHERE org_id=? AND repo_key=?",
+            (str(org_id), str(repo_key)),
+        )
+        c.execute(
+            "INSERT INTO grape_t_org_repo_ai "
+            "(org_id, repo_key, status, result_json, error, engine_id, source_commit, "
+            "result_hash, triggered_by, analyzed_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(org_id), str(repo_key), status, old[0] or "", error,
+                int(engine_id or 0), old[1] or "", old[2] or "",
+                triggered_by, old[3] or "", now, now,
+            ),
+        )
+        db.commit()
+
+
+def _render_ai_summary(result: dict) -> str:
+    """把 AI 结构化结果渲染成组织仓库分支上的 Markdown。"""
+    def _list(name: str) -> list:
+        raw = result.get(name)
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(x).strip() for x in (raw or []) if str(x).strip()]
+
+    confidence = result.get("confidence")
+    try:
+        confidence = round(max(0.0, min(1.0, float(confidence))), 2)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    lines = [
+        "---",
+        "schema_version: 1",
+        f"repo_key: {result.get('repo_key') or ''}",
+        f"full_name: {result.get('full_name') or ''}",
+        "generated_by: org-repo-analyzer",
+        f"confidence: {confidence}",
+        f"source_commit: {result.get('source_commit') or ''}",
+        f"analyzed_at: {result.get('analyzed_at') or _utc_now()}",
+        "---",
+        "",
+        "# 仓库能力摘要",
+        "",
+        f"> {result.get('purpose') or '（模型未给出定位）'}",
+        "",
+        "## 负责的功能",
+    ]
+    caps = result.get("capabilities") or []
+    if isinstance(caps, list) and caps:
+        for c in caps:
+            if isinstance(c, dict):
+                name = str(c.get("name") or "").strip()
+                desc = str(c.get("description") or "").strip()
+                paths = c.get("paths") or []
+                if name:
+                    lines.append(f"- **{name}**" + (f"：{desc}" if desc else ""))
+                    if paths:
+                        lines.append(f"  - 证据：{', '.join(f'`{p}`' for p in paths[:8])}")
+    if not lines or lines[-1] == "## 负责的功能":
+        lines += [f"- {x}" for x in _list("features")] or ["- （模型未提供功能列表）"]
+    lines += ["", "## 对外接口"]
+    lines += [f"- `{x}`" for x in _list("interfaces")] or ["- （未发现显式接口）"]
+    lines += ["", "## 依赖 / 被依赖"]
+    lines += [f"- {x}" for x in _list("depends_on")] or ["- （未发现显式依赖）"]
+    lines += ["", "## 不负责什么"]
+    lines += [f"- {x}" for x in _list("not_owns")] or ["- （未填写）"]
+    lines += ["", "## 关键词", ", ".join(_list("keywords")) or "（无）"]
+    lines += ["", "## 证据"]
+    lines += [f"- {x}" for x in _list("evidence")] or ["- （模型未给出证据）"]
+    risks = _list("risks")
+    if risks:
+        lines += ["", "## 风险 / 待确认"] + [f"- {x}" for x in risks]
+    lines += ["", "> 由 Grape AI 仓库分析自动生成；本文件位于分析分支，可直接编辑后等待下次覆盖。", ""]
+    return "\n".join(lines)
+
+
+def save_ai_result(org_id: str, repo_key: str, result: dict, *,
+                   engine_id: int = 0, source_commit: str = "",
+                   triggered_by: str = "", result_hash: str = "") -> dict | None:
+    """保存 AI 分析结果：更新地图主字段（供召回/UI）+ 记录台账 + 触发分支同步。"""
+    if not isinstance(result, dict):
+        raise ValueError("result must be a JSON object")
+    ensure_table()
+    ensure_ai_table()
+    org = get_org(str(org_id)) or {}
+    full_name = str(result.get("full_name") or "")
+    if not full_name:
+        for r in list_org_repos(str(org_id)) or []:
+            if str(r.get("repo_key") or "") == str(repo_key):
+                full_name = str(r.get("full_name") or "")
+                break
+    purpose = str(result.get("purpose") or "").strip()
+    domains = _json_list(result.get("domains"))
+    keywords = _json_list(result.get("keywords"))
+    interfaces = _json_list(result.get("interfaces"))
+    depends_on = _json_list(result.get("depends_on"))
+    not_owns = _json_list(result.get("not_owns"))
+    try:
+        confidence = round(max(0.0, min(1.0, float(result.get("confidence") or 0))), 2)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    source_commit = str(result.get("source_commit") or source_commit or "")
+    analyzed_at = str(result.get("analyzed_at") or _utc_now())
+    summary_md = _render_ai_summary({**result, "full_name": full_name,
+                                     "source_commit": source_commit,
+                                     "analyzed_at": analyzed_at,
+                                     "confidence": confidence})
+    _upsert(
+        str(org_id), str(repo_key),
+        full_name=full_name, is_org_repo=False, status="ready",
+        purpose=purpose, domains=domains, keywords=keywords,
+        interfaces=interfaces, depends_on=depends_on, not_owns=not_owns,
+        confidence=confidence, source_commit=source_commit,
+        summary_md=summary_md, analyzed_at=analyzed_at,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "DELETE FROM grape_t_org_repo_ai WHERE org_id=? AND repo_key=?",
+            (str(org_id), str(repo_key)),
+        )
+        c.execute(
+            "INSERT INTO grape_t_org_repo_ai "
+            "(org_id, repo_key, status, result_json, error, engine_id, source_commit, "
+            "result_hash, triggered_by, analyzed_at, created_at, updated_at) "
+            "VALUES (?, ?, 'succeeded', ?, '', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(org_id), str(repo_key),
+                json.dumps(result, ensure_ascii=False),
+                int(engine_id or 0), source_commit, result_hash,
+                triggered_by, analyzed_at, now, now,
+            ),
+        )
+        db.commit()
+    try:
+        from src.domains.mgmt.org_context_repo import schedule_analysis_sync
+
+        schedule_analysis_sync(str(org_id))
+    except Exception as exc:
+        log.warning(f"org_repo_map analysis sync schedule failed org={org_id}: {exc}")
+    return get_map(str(org_id), str(repo_key))
+
+
+def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 60000) -> dict:
+    """构建给 AI 分析引擎的上下文包（不暴露平台 token）。"""
+    org = get_org(str(org_id)) or {}
+    row = None
+    for r in list_org_repos(str(org_id)) or []:
+        if str(r.get("repo_key") or "") == str(repo_key):
+            row = r
+            break
+    if not row or bool(row.get("is_org_repo")):
+        return {}
+    sources = _repo_sources(org, row)
+    bundle = {
+        "repo_key": str(repo_key),
+        "full_name": str(row.get("full_name") or ""),
+        "org_id": str(org_id),
+        "org_name": str(org.get("name") or ""),
+        "description": str(sources.get("description") or ""),
+        "readme": str(sources.get("readme_local") or sources.get("readme") or ""),
+        "repo_map_doc": str(sources.get("repo_map_doc") or ""),
+        "capabilities": str(sources.get("capabilities") or ""),
+        "graph": str(sources.get("graph") or ""),
+        "org_context": str(sources.get("org_context") or ""),
+        "source_commit": str(sources.get("source_commit") or ""),
+    }
+    # 总体截断，避免 prompt 爆炸
+    total = 0
+    for k in ("description", "readme", "repo_map_doc", "capabilities", "graph", "org_context"):
+        val = str(bundle.get(k) or "")
+        remain = max(0, max_chars - total)
+        if remain <= 0:
+            bundle[k] = ""
+        elif len(val) > remain:
+            bundle[k] = val[:remain] + "\n\n> （内容过长，已截断）"
+        total += len(bundle[k] or "")
+    return bundle
 
 
 def _row_to_map(row) -> dict:
@@ -707,9 +942,32 @@ def analyze_all(org_id: str, *, actor_id: str = "") -> dict:
     return {"queued": len(repo_keys)}
 
 
+def _ai_status_map(org_id: str) -> dict[str, dict]:
+    """repo_key -> AI 台账（状态/错误/时间），供组织详情页展示 AI 进度。"""
+    try:
+        ensure_ai_table()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT repo_key, status, error, analyzed_at FROM grape_t_org_repo_ai "
+                "WHERE org_id=?",
+                (str(org_id),),
+            )
+            rows = c.fetchall()
+        return {
+            str(r[0]): {"status": str(r[1] or ""), "error": str(r[2] or ""),
+                        "analyzed_at": str(r[3] or "")}
+            for r in rows
+        }
+    except Exception as exc:  # noqa: BLE001 - 缺表/分库时退回纯地图视图
+        log.debug(f"org_repo_map ai status unavailable org={org_id}: {exc}")
+        return {}
+
+
 def list_repo_map(org_id: str) -> dict:
     """全量视图：组织关联仓库 + 地图状态（未分析的也返回）。"""
     maps = {m["repo_key"]: m for m in list_maps(org_id)}
+    ai_status = _ai_status_map(org_id)
     out = []
     for row in list_org_repos(org_id) or []:
         if row.get("is_org_repo"):
@@ -733,6 +991,9 @@ def list_repo_map(org_id: str) -> dict:
             "error": m.get("error") or "",
             "analyzed_at": m.get("analyzed_at") or "",
             "has_summary": bool(m.get("summary_md")),
+            "ai_status": (ai_status.get(key) or {}).get("status", ""),
+            "ai_error": (ai_status.get(key) or {}).get("error", ""),
+            "ai_analyzed_at": (ai_status.get(key) or {}).get("analyzed_at", ""),
         })
     out.sort(key=lambda x: (0 if x["is_org_repo"] else 1, x["full_name"] or x["repo_key"]))
     ready = sum(1 for x in out if x["status"] == "ready")

@@ -1,0 +1,771 @@
+{
+  "description": "Issue #2081 契约回归门禁单一事实源：runbook/skill 引用面引用的全部 OpenAPI 操作登记。任一登记操作被删（operationId 缺失或 method/path 漂移）→ CI 门禁红（scripts/check-openapi-endpoints.py）、渲染层 fail-fast（src/api/openapi.py contract_integrity）、回归测试红（tests/test_contract_command_groups_1934.py）。删除登记项属契约变更：须 --update-baseline --change-note + PR 评审说明（AC3），禁止静默下调。",
+  "contract_version_verified": "2.5.0",
+  "generated_at": "2026-11-12T04:12:20.035977+00:00",
+  "extraction": {
+    "method": "从 Agent 技能 runbook/references 的 CLI 命令引用面抽取：grep -hoE 'grape [a-z][a-z0-9-]*( [a-z][a-z0-9-]*)+' <技能文档> 得叶子命令 → operationId（首段=命令组，git-repo 组对应 gitrepo_*）→ 契约 method+path；与 #1173 REQUIRED_OPERATIONS（5 条）和 #897 CORE_WORKFLOW_ENDPOINTS（7 路径，其中 runtime 2 条不在技能引用面）合并去重。runbook 新引用命令时在此登记（缺项 = 回归）。",
+    "skill_sources": [
+      {
+        "skill": "coding-mattpocock",
+        "version": "1.0.0",
+        "documents": [
+          "SKILL.md",
+          "references/coding-runbook.md",
+          "references/grape-cli-reference.md"
+        ]
+      },
+      {
+        "skill": "vod-cli",
+        "version": "3.0.1",
+        "documents": [
+          "SKILL.md",
+          "references/vod-runbook.md",
+          "references/grape-cli-reference.md",
+          "references/requirement-elicit-guide.md"
+        ]
+      },
+      {
+        "skill": "grape-vod-cli",
+        "version": "3.0.0",
+        "documents": [
+          "SKILL.md",
+          "references/*"
+        ]
+      }
+    ],
+    "legacy_sources": [
+      {
+        "artifact": "tests/test_contract_command_groups_1934.py REQUIRED_OPERATIONS",
+        "origin": "#1173",
+        "entries": 5
+      },
+      {
+        "artifact": "scripts/check-openapi-endpoints.py CORE_WORKFLOW_ENDPOINTS",
+        "origin": "#897 (arch-weekly-11)",
+        "entries": 7
+      }
+    ],
+    "excluded_cli_local_commands": [
+      {
+        "command": "grape tasks wait",
+        "reason": "CLI 侧本地轮询聚合命令，无独立服务端契约操作（服务端依赖 tasks_current 已登记）"
+      },
+      {
+        "command": "grape tasks status",
+        "reason": "CLI 侧本地聚合/历史命令，当前契约无对应 operationId"
+      },
+      {
+        "command": "grape tasks status get",
+        "reason": "CLI 侧本地命令，当前契约无对应 operationId（issues status get 已按 issues_status_get 登记）"
+      },
+      {
+        "command": "grape tasks clarify",
+        "reason": "CLI 侧本地命令，当前契约无对应 operationId（issues clarify 已按 issues_clarify 登记）"
+      }
+    ]
+  },
+  "operations": [
+    {
+      "operationId": "a2a_handoff",
+      "method": "post",
+      "path": "/api/a2a",
+      "command": "grape a2a handoff",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0",
+        "legacy:#1173 REQUIRED_OPERATIONS(tests/test_contract_command_groups_1934.py)"
+      ]
+    },
+    {
+      "operationId": "a2a_status",
+      "method": "get",
+      "path": "/api/a2a/status",
+      "sources": [
+        "legacy:#1173 REQUIRED_OPERATIONS(tests/test_contract_command_groups_1934.py) + legacy:#897 CORE_WORKFLOW_ENDPOINTS(scripts/check-openapi-endpoints.py@arch-weekly-11)"
+      ]
+    },
+    {
+      "operationId": "events_detail",
+      "method": "get",
+      "path": "/api/events/detail/{seq}",
+      "command": "grape events detail",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "feedback_submit",
+      "method": "post",
+      "path": "/api/feedback",
+      "command": "grape feedback submit",
+      "sources": [
+        "vod-cli@3.0.1"
+      ]
+    },
+    {
+      "operationId": "gitrepo_branches",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/branches",
+      "command": "grape git-repo branches",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_commits",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/commits",
+      "command": "grape git-repo commits",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_contents",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/contents/{path}",
+      "command": "grape git-repo contents",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_comments_create",
+      "method": "post",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}/comments",
+      "command": "grape git-repo issues comments create",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_comments_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}/comments",
+      "command": "grape git-repo issues comments list",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_create",
+      "method": "post",
+      "path": "/api/git-repo/{owner}/{repo}/issues",
+      "command": "grape git-repo issues create",
+      "sources": [
+        "vod-cli@3.0.1"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_get",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}",
+      "command": "grape git-repo issues get",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/issues",
+      "command": "grape git-repo issues list",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_update",
+      "method": "patch",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}",
+      "command": "grape git-repo issues update",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_comments_create",
+      "method": "post",
+      "path": "/api/git-repo/{owner}/{repo}/pulls/{number}/comments",
+      "command": "grape git-repo pulls comments create",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_comments_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/pulls/{number}/comments",
+      "command": "grape git-repo pulls comments list",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_create",
+      "method": "post",
+      "path": "/api/git-repo/{owner}/{repo}/pulls",
+      "command": "grape git-repo pulls create",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_files",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/pulls/{number}/files",
+      "command": "grape git-repo pulls files",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_get",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/pulls/{number}",
+      "command": "grape git-repo pulls get",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/pulls",
+      "command": "grape git-repo pulls list",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1"
+      ]
+    },
+    {
+      "operationId": "gitrepo_pulls_update",
+      "method": "patch",
+      "path": "/api/git-repo/{owner}/{repo}/pulls/{number}",
+      "command": "grape git-repo pulls update",
+      "sources": [
+        "coding-mattpocock@1.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_repo",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}",
+      "command": "grape git-repo repo",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_tree",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/tree",
+      "command": "grape git-repo tree",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_awaiting-input",
+      "method": "post",
+      "path": "/api/issues/{issue_id}/awaiting-input",
+      "command": "grape issues awaiting-input",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_clarify",
+      "method": "post",
+      "path": "/api/issues/{issue_id}/clarify",
+      "command": "grape issues clarify",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_detail",
+      "method": "get",
+      "path": "/api/issues/{owner}/{repo}/{number}",
+      "command": "grape issues detail",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_events",
+      "method": "get",
+      "path": "/api/issues/{owner}/{repo}/{number}/events",
+      "command": "grape issues events",
+      "sources": [
+        "vod-cli@3.0.1"
+      ]
+    },
+    {
+      "operationId": "issues_list",
+      "method": "get",
+      "path": "/api/issues/{owner}/{repo}",
+      "command": "grape issues list",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_list_attachments",
+      "method": "get",
+      "path": "/api/issues/{issue_id}/attachments",
+      "command": "grape issues list attachments",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_mine",
+      "method": "get",
+      "path": "/api/issues/mine",
+      "command": "grape issues mine",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_pipeline",
+      "method": "get",
+      "path": "/api/issues/{owner}/{repo}/{number}/pipeline",
+      "command": "grape issues pipeline",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_pipeline_detail",
+      "method": "get",
+      "path": "/api/issues/{issue_id}/pipeline",
+      "command": "grape issues pipeline detail",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_status",
+      "method": "put",
+      "path": "/api/issues/{issue_id}/status",
+      "command": "grape issues status",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "issues_status_get",
+      "method": "get",
+      "path": "/api/issues/{issue_id}/status",
+      "command": "grape issues status get",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "knowledge_detail",
+      "method": "get",
+      "path": "/api/knowledge/{knowledge_id}",
+      "command": "grape knowledge detail",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "knowledge_list",
+      "method": "get",
+      "path": "/api/knowledge",
+      "command": "grape knowledge list",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "knowledge_stats",
+      "method": "get",
+      "path": "/api/knowledge/stats",
+      "command": "grape knowledge stats",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "repos_project_info",
+      "method": "get",
+      "path": "/api/repos/{owner}/{repo}/project-info",
+      "command": "grape repos project info",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "runtime_task_cancel",
+      "method": "post",
+      "path": "/api/runtime/tasks/{task_id}/cancel",
+      "sources": [
+        "legacy:#897 CORE_WORKFLOW_ENDPOINTS(scripts/check-openapi-endpoints.py@arch-weekly-11)"
+      ]
+    },
+    {
+      "operationId": "runtime_task_status",
+      "method": "get",
+      "path": "/api/runtime/tasks/{task_id}/status",
+      "sources": [
+        "legacy:#897 CORE_WORKFLOW_ENDPOINTS(scripts/check-openapi-endpoints.py@arch-weekly-11)"
+      ]
+    },
+    {
+      "operationId": "scenes_detail",
+      "method": "get",
+      "path": "/api/scenes/{scene_id}",
+      "command": "grape scenes detail",
+      "sources": [
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "skills_list",
+      "method": "get",
+      "path": "/api/skills",
+      "command": "grape skills list",
+      "sources": [
+        "grape-vod-cli@3.0.0"
+      ]
+    },
+    {
+      "operationId": "tasks_complete",
+      "method": "post",
+      "path": "/api/tasks/complete",
+      "command": "grape tasks complete",
+      "sources": [
+        "coding-mattpocock@1.0.0",
+        "vod-cli@3.0.1",
+        "grape-vod-cli@3.0.0",
+        "legacy:#1173 REQUIRED_OPERATIONS(tests/test_contract_command_groups_1934.py)"
+      ]
+    },
+    {
+      "operationId": "tasks_current",
+      "method": "get",
+      "path": "/api/tasks/current",
+      "command": "grape tasks current",
+      "sources": [
+        "grape-vod-cli@3.0.0",
+        "legacy:#1173 REQUIRED_OPERATIONS(tests/test_contract_command_groups_1934.py)"
+      ]
+    },
+    {
+      "operationId": "tasks_notify",
+      "method": "post",
+      "path": "/api/tasks/notify",
+      "sources": [
+        "legacy:#1173 REQUIRED_OPERATIONS(tests/test_contract_command_groups_1934.py)"
+      ]
+    },
+    {
+      "operationId": "gitrepo_checks_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs",
+      "command": "grape git-repo checks list",
+      "sources": [
+        "Issue #2035（#2035 移植）：qa-cli runbook unstable 归因主通道"
+      ]
+    },
+    {
+      "operationId": "gitrepo_statuses_list",
+      "method": "get",
+      "path": "/api/git-repo/{owner}/{repo}/commits/{ref}/status",
+      "command": "grape git-repo statuses list",
+      "sources": [
+        "Issue #2035（#2035 移植）：checks 通道不可用时的降级观测通道"
+      ]
+    },
+    {
+      "operationId": "orgs_ov_credential_put",
+      "method": "put",
+      "path": "/api/orgs/{org_id}/ov-credentials/{user_id}",
+      "command": "grape orgs ov-credentials put",
+      "sources": [
+        "Issue #2423 M2b（#2423 移植）：管理端凭据格子配置"
+      ]
+    },
+    {
+      "operationId": "orgs_ov_credentials_list",
+      "method": "get",
+      "path": "/api/orgs/{org_id}/ov-credentials",
+      "command": "grape orgs ov-credentials list",
+      "sources": [
+        "Issue #2423 M2b（#2423 移植）：掩码列表"
+      ]
+    },
+    {
+      "operationId": "orgs_ov_credential_delete",
+      "method": "delete",
+      "path": "/api/orgs/{org_id}/ov-credentials/{user_id}",
+      "command": "grape orgs ov-credentials delete",
+      "sources": [
+        "Issue #2423 M2b（#2423 移植）：吊销（不复活）"
+      ]
+    },
+    {
+      "operationId": "plugins_list",
+      "method": "get",
+      "path": "/api/plugins",
+      "command": "plugins list",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_categories",
+      "method": "get",
+      "path": "/api/plugins/categories",
+      "command": "plugins categories",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_detail",
+      "method": "get",
+      "path": "/api/plugins/by-id/{plugin_id}",
+      "command": "plugins detail",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_market_delete",
+      "method": "delete",
+      "path": "/api/plugins/by-id/{plugin_id}",
+      "command": "plugins market delete",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_download",
+      "method": "get",
+      "path": "/api/plugins/by-id/{plugin_id}/download",
+      "command": "plugins download",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_versions",
+      "method": "get",
+      "path": "/api/plugins/by-id/{plugin_id}/versions",
+      "command": "plugins versions",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_rollback",
+      "method": "post",
+      "path": "/api/plugins/by-id/{plugin_id}/rollback",
+      "command": "plugins rollback",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_search",
+      "method": "get",
+      "path": "/api/plugins/search",
+      "command": "plugins search",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_like_toggle",
+      "method": "post",
+      "path": "/api/plugins/{plugin_id}/like",
+      "command": "plugins like toggle",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_upload",
+      "method": "post",
+      "path": "/api/plugins/upload",
+      "command": "plugins upload",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_validate_consistency",
+      "method": "post",
+      "path": "/api/plugins/validate-consistency",
+      "command": "plugins validate consistency",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_list",
+      "method": "get",
+      "path": "/api/plugins/installed",
+      "command": "plugins runtime list",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_install",
+      "method": "post",
+      "path": "/api/plugins/install",
+      "command": "plugins runtime install",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_agent_defaults",
+      "method": "get",
+      "path": "/api/plugins/agent-defaults",
+      "command": "plugins runtime agent defaults",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_detail",
+      "method": "get",
+      "path": "/api/plugins/{name}",
+      "command": "plugins runtime detail",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_uninstall",
+      "method": "delete",
+      "path": "/api/plugins/{name}",
+      "command": "plugins runtime uninstall",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_bundled_skills",
+      "method": "get",
+      "path": "/api/plugins/{name}/skills",
+      "command": "plugins runtime bundled skills",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_save_credentials",
+      "method": "post",
+      "path": "/api/plugins/{name}/credentials",
+      "command": "plugins runtime save credentials",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_runtime_get_credentials",
+      "method": "get",
+      "path": "/api/plugins/{name}/credentials",
+      "command": "plugins runtime get credentials",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_config_get",
+      "method": "get",
+      "path": "/api/plugins/{name}/config",
+      "command": "plugins config get",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_config_put",
+      "method": "put",
+      "path": "/api/plugins/{name}/config",
+      "command": "plugins config put",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_agent_report_missing",
+      "method": "post",
+      "path": "/api/plugins/agent/report-missing",
+      "command": "plugins agent report missing",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugins_agent_installed",
+      "method": "get",
+      "path": "/api/plugins/agent/installed",
+      "command": "plugins agent installed",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugin_market_validate",
+      "method": "post",
+      "path": "/api/plugin-market/validate",
+      "command": "validate plugin api plugin market validate post",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    },
+    {
+      "operationId": "plugin_market_validate_package",
+      "method": "post",
+      "path": "/api/plugin-market/validate-package",
+      "command": "validate plugin package api plugin market validate package post",
+      "sources": [
+        "桶B B4 契约登记：plugin 体系端点"
+      ]
+    }
+  ],
+  "arch_note": "ported from weekly #2081; ops not in arch11 native rendering removed: orgs_ov_credential_delete, orgs_ov_credential_put, orgs_ov_credentials_list"
+}

@@ -67,6 +67,7 @@ class RepoPlatform:
     webhook_dialect: str = ""
     pr_head_filter: str = ""
     clone_auth: str = ""
+    create_repo_options: bool = False
     issue_search: bool = False
     enabled: bool = True
 

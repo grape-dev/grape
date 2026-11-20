@@ -40,13 +40,20 @@ class TransferRepoBody(BaseModel):
     target_org: str = ""
 
 
-def _schedule_repo_map_analysis(org_id: str, repo_key: str) -> None:
-    """仓库绑定后自动生成/刷新仓库地图（后台，不阻断绑定请求）。"""
+def _schedule_repo_map_analysis(org_id: str, repo_key: str, actor_id: str | int = 0) -> None:
+    """仓库绑定后触发组织级 AI 分析（后台去抖，不阻断绑定请求）。
+
+    不再按单仓拆任务：10s 去抖窗口把一次批量绑定的多个仓库合并成一次
+    mode=all 分析，AI 一次拿到全部关联仓库，逐个分析并回传。
+    """
     def _run():
         try:
-            from src.domains.mgmt.org_repo_map import analyze_repo
+            from src.domains.mgmt import org_analysis
 
-            analyze_repo(org_id, repo_key)
+            org_analysis.ensure_analysis_automation(org_id, actor_id=actor_id)
+            org_analysis.schedule_all_analysis(
+                org_id, trigger="link", delay=10.0,
+                fallback_repo_key=repo_key, actor_id=actor_id)
         except Exception as exc:  # noqa: BLE001 - best-effort
             from src.kernel.config import log
 
@@ -235,7 +242,7 @@ def _bind_one(org: dict, org_id: str, user: dict, repo_key: str) -> dict:
         detail={"org_id": org_id, "repo_key": repo_key},
     )
     _schedule_context_sync(org_id)
-    _schedule_repo_map_analysis(org_id, repo_key)
+    _schedule_repo_map_analysis(org_id, repo_key, user["id"])
     return _repo_payload(row)
 
 
@@ -334,6 +341,14 @@ def transfer_repo(org_id: str, repo_key: str, body: TransferRepoBody,
     )
     _schedule_context_sync(org_id)
     _schedule_context_sync(target_org_id)
+    try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.ensure_analysis_automation(target_org_id, actor_id=user["id"])
+    except Exception as ensure_exc:  # noqa: BLE001
+        from src.kernel.config import log as _log
+
+        _log.warning(f"org analysis automation ensure failed org={target_org_id}: {ensure_exc}")
     return _repo_payload(get_managed_repo_binding(source_key) or row)
 
 

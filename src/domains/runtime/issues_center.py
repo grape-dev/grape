@@ -575,6 +575,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
     # owner_agent 是落库的推进方：user/admin = 人；agent/pipeline/issue = 自动路径。
     _stage_owner = ((_stage_info or {}).get("owner_agent") or "").strip().lower()
 
+    _promoted_review = 0    # 本次调用真实推进到 pending_review 的行数（#2419 通知触发判据）
     with db_lock:
         c = _rt_db.cursor()
         # 检查是否有 agent 正在 running
@@ -609,6 +610,7 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number)
             )
+            _promoted_review = c.rowcount
         elif not _has_running:
             # 还在 pipeline 流转中且无 agent 运行 → 设为 pending_review 等待开发者确认
             # Issue #85: 无 issue_state 记录（stage 为空）时也走此路径
@@ -617,9 +619,15 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number)
             )
+            _promoted_review = c.rowcount
             set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
+        # Issue #2419 修复项 2：Issue 关闭兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
+        if _promoted_review > 0:
+            maybe_notify_review_point_status(
+                repo_key, issue_number, "pending_review",
+                "VCS Issue 已关闭，关联任务转入待审核，请确认是否完结")
         return c.rowcount
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
@@ -644,6 +652,7 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
     _stage_info = get_issue_stage(repo_key, _issue_id)
     _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
 
+    _promoted_review = 0    # 本次调用真实推进到 pending_review 的行数（#2419 通知触发判据）
     # 检查是否有 agent 正在 running
     with db_lock:
         c = _rt_db.cursor()
@@ -661,15 +670,22 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
                 "UPDATE issue SET status='pending_review' "
                 "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number))
+            _promoted_review = c.rowcount
         elif not _has_running:
             # 没有 agent 在运行 → 设为 pending_review（Issue #85: 同步 processing 任务）
             c.execute(
                 "UPDATE issue SET status='pending_review', completed_reason=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
                 (repo_key, issue_number))
+            _promoted_review = c.rowcount
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
+        # Issue #2419 修复项 2：bot 接管兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
+        if _promoted_review > 0:
+            maybe_notify_review_point_status(
+                repo_key, issue_number, "pending_review",
+                "任务已被 bot 接管并转入待审核，请确认后续处理方式")
         return c.rowcount
 
 # 进入 pending_review 时可能写入的哨兵 owner_agent（非真实流水线节点）；
@@ -1297,8 +1313,13 @@ def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: s
                 return f"noop:node_running:{_nid}"
             if _st == "failed":
                 # 阻断 → 回退 pending_review，等待人工确认（Issue #51 语义保留给异常场景）
-                from src.api.session_store import set_issue_stage
-                set_issue_stage(repo_key, _tag, "pending_review", agent_type)
+                # Issue #2419 修复项 2（#2419 移植）：回退即进入审核点，须推待审核通知
+                # （复用 #1211 stage 包装器，review_points 指明失败节点供用户拍板）。
+                from src.domains.runtime.issues_center import set_issue_stage_with_pending_review_notify
+                set_issue_stage_with_pending_review_notify(
+                    repo_key, _tag, "pending_review", agent_type,
+                    review_points=f"流水线节点 {_nid} 执行失败，任务已回退至待审核（人工确认路径），"
+                                  f"请确认后续处理方式")
                 log.info(f"Issue #656: node {_nid} failed → pending_review "
                          f"(manual confirm path) {repo_key}/{_tag}")
                 if _nid == "qa":
@@ -1378,8 +1399,22 @@ def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: s
         return "noop:error"
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
-                 evidence: str = "") -> str:
-    """Agent 判定用户通过审核（只推进，不终态）。
+                 evidence: str = "", pr_number: int = 0) -> str:
+    """Agent 判定用户通过审核（幂等）。Issue #1211（#1211 移植）：passed_done 且关联
+    PR open 时挂钩「📮 有 PR 待合入」通知（evidence 即 QA 结论摘要，pr_number 显式透传）。"""
+    _out = _review_pass_inner(repo_key, issue_number, target, evidence)
+    if _out == "passed_done":
+        try:
+            _fire_notify_coro(_pr_pending_merge_notify_task(
+                repo_key, issue_number, evidence or "", int(pr_number or 0)))
+        except Exception as _e:
+            log.warning(f"Issue #1211: review-pass pr pending-merge notify schedule failed: {_e}")
+    return _out
+
+
+def _review_pass_inner(repo_key: str, issue_number: int, target: str = "processing",
+                       evidence: str = "") -> str:
+    """原 _review_pass 本体（#1211 拆分：外壳挂钩通知，本函数纯状态机）。
 
     - target=done：**拒绝**。需求完成只能由人工确认（confirm-done / admin-confirm-done），
       agent 没有任何终态通道；返回 ``noop:agent_finalize_forbidden``（路由转 400）。
@@ -1462,6 +1497,9 @@ def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
             _changed = c.rowcount > 0
         if _changed:
             log.info(f"Issue review-reject({_t}): {repo_key}/#{issue_number} reason={reason[:60]}")
+            # Issue #2419 修复项 2：打回转澄清是审核点状态变化，须主动触达用户（❓ 待澄清卡片）。
+            _questions = (f"审核未通过，Agent 需要你补充信息后继续：{(reason or '').strip()}").rstrip("：")
+            maybe_notify_review_point_status(repo_key, issue_number, _t, _questions)
             return f"rejected_{_t}"
         return _review_noop_reason(repo_key, issue_number, _t)
     except Exception as _e:
@@ -1606,12 +1644,14 @@ _IM_NOTIFY_TEMPLATES = {
     "task": "blue",
     "awaiting": "orange",
     "pending_review": "red",
+    "pr_pending_merge": "green",  # Issue #1211（#1211 移植）：PR 待合入绿卡
 }
 
 _IM_NOTIFY_TITLES = {
     "task": "📋 信息知会",
     "awaiting": "❓ 需求待澄清",
     "pending_review": "🔎 需求待审核",
+    "pr_pending_merge": "📮 有 PR 待合入",  # Issue #1211（#1211 移植）
 }
 
 def _build_notify_fields(repo_key: str, issue_number: int) -> list:
@@ -1716,6 +1756,12 @@ async def _run_awaiting_notify(ctx, api, user_id: str, conv_id: str, open_id: st
                 log.warning(f"Task awaiting: template write failed: {e}")
 
         _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
+        try:
+            int(user_id or 0)
+        except (TypeError, ValueError):
+            # arch11 D105：UUID 串 user_id 不适用 im/notify int 体系——可观测 skip。
+            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
+            return
         # A4：全渠道扇出（微信/企微/Slack/企微等没有卡片就降级文本+回数字）
         from src.domains.runtime.im.notify import notify_user
         notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
@@ -1726,6 +1772,10 @@ async def _run_awaiting_notify(ctx, api, user_id: str, conv_id: str, open_id: st
             _im_notify_counter("sent_ok")
         else:
             _im_notify_counter("sent_failed")
+            # Issue #2419 移植可观测口径：无任何渠道配置（no_ctx 等价形态）单独计数，
+            # 保留 A4 全渠道扇出主语义不变。
+            if not (_res.get("failed") or _res.get("skipped")):
+                _im_notify_counter("skipped_no_ctx")
             log.warning(f"Task awaiting: no channel delivered (sent={_res.get('sent')} "
                         f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
@@ -1752,6 +1802,13 @@ async def _run_pending_review_notify(ctx, api, user_id: str, conv_id: str, open_
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
         _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
+        try:
+            int(user_id or 0)
+        except (TypeError, ValueError):
+            # arch11 D105：grape_accounts.id 为 UUIDv7 字符串，im/notify（int 体系）不适用——
+            # 等价于「无可达渠道」，走可观测 skip（#2419 移植口径）。
+            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
+            return
         # A4：全渠道扇出（待审核 = 必须主动触达，用户可能只开着某一个渠）
         from src.domains.runtime.im.notify import notify_user
         notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
@@ -1762,10 +1819,1113 @@ async def _run_pending_review_notify(ctx, api, user_id: str, conv_id: str, open_
             _im_notify_counter("sent_ok")
         else:
             _im_notify_counter("sent_failed")
+            # Issue #2419 移植可观测口径：无任何渠道配置（no_ctx 等价形态）单独计数。
+            if not (_res.get("failed") or _res.get("skipped")):
+                _im_notify_counter("skipped_no_ctx")
             log.warning(f"Issue pending-review: no channel delivered (sent={_res.get('sent')} "
                         f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
+
+
+def _fire_notify_coro(coro) -> None:
+    """通知协程 fire-and-forget 调度：有事件循环 → create_task（不阻塞端点）；
+    无（worker 线程/同步上下文）→ run_coroutine_threadsafe 投递回主 loop 执行。
+
+    直接 asyncio.run 会新建事件循环，而 IM 共享 aiohttp ClientSession 绑定主 loop
+    → 跨 loop 抛 "Timeout context manager should be used inside a task"（token
+    获取失败 → no token available → 卡片静默丢失）。与 chat.py
+    _dispatch_push_to_main_loop 同款修复：投递回 BotManager 保存的主 loop。
+    无主 loop（测试/启动异常）→ 兜底本线程 asyncio.run（同步可断言）。"""
+    try:
+        asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        from src import api as _api_pkg
+        bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
+        loop = getattr(bm, "loop", None)
+        if loop is not None and loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                fut.add_done_callback(
+                    lambda f: log.warning(f"[im-notify] background notify failed: {f.exception()}")
+                    if not f.cancelled() and f.exception() else None)
+                return
+            except Exception as e:
+                log.warning(f"[im-notify] notify dispatch to main loop failed: {e}")
+        try:
+            asyncio.run(coro)
+        except Exception as e:
+            log.warning(f"[im-notify] background notify run failed: {e}")
+
+
+def _issue_status_by_tag(repo_key: str, issue_id: str) -> str:
+    """按 issue_id（#N/N）读 issue.status（查询失败/无行 → ''）。"""
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        if not _num:
+            return ""
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                      (repo_key, _num))
+            row = c.fetchone()
+        return (row[0] if row else "") or ""
+    except Exception:
+        return ""
+
+
+def _schedule_pending_review_notify(repo_key: str, issue_number: int,
+                                    review_points: str, references: str = ""):
+    """缺口 2（Issue #1211）：解析 issue 归属用户通知目标 → 调度 _run_pending_review_notify。
+
+    复用显式 pending-review 端点同款链路（_resolve_issue_notify_targets + fire-and-forget），
+    best-effort：解析/调度失败仅日志。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num:
+            return
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        _fire_notify_coro(_run_pending_review_notify(
+            targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+            targets["open_id"], review_points or "请审核确认交付结果", references or "",
+            repo_key, _num, targets["cfg"]))
+    except Exception as e:
+        log.warning(f"[im-notify] schedule pending-review notify {repo_key}#{issue_number} failed: {e}")
+
+
+def _schedule_awaiting_notify(repo_key: str, issue_number: int, questions: str):
+    """Issue #2419：awaiting_input 状态变化通知调度（复用 #1211 目标解析 + fire-and-forget）。
+
+    与 _schedule_pending_review_notify 同链路：_resolve_issue_notify_targets（本人 chat bot
+    open_id / conv 兜底建 / cfg）→ _run_awaiting_notify（❓ 需求待澄清 orange 卡片 + 会话模板）。
+    best-effort：解析/调度失败仅日志。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num:
+            return
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        _fire_notify_coro(_run_awaiting_notify(
+            targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+            targets["open_id"], questions or "Agent 需要你补充信息。",
+            repo_key, _num, targets["cfg"]))
+    except Exception as e:
+        log.warning(f"[im-notify] schedule awaiting notify {repo_key}#{issue_number} failed: {e}")
+
+
+def maybe_notify_review_point_status(repo_key: str, issue_number: int, new_status: str,
+                                     text: str = "") -> None:
+    """Issue #2419 修复项 2：任务进入审核点状态（pending_review / awaiting_input）统一事件分发。
+
+    状态事件 → 飞书卡片的扩覆盖入口：调用方在确认「状态真实变更」后调用（幂等由各入口
+    UPDATE WHERE 排除当前状态保证，重复置入 0 行不触发——沿用 #1211 机制，防通知风暴）。
+    - new_status == "pending_review" → 🔎 需求待审核（red，review_points=text）
+    - new_status == "awaiting_input" → ❓ 需求待澄清（orange，questions=text）
+    其他状态 no-op。best-effort：失败仅日志，不阻断调用方主流程。
+    复用 #1211 卡片模板与 instance 路由（_resolve_issue_notify_targets → 本人 chat bot）。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num or new_status not in ("pending_review", "awaiting_input"):
+            return
+        if new_status == "pending_review":
+            _schedule_pending_review_notify(repo_key, _num, text or "请审核确认交付结果")
+        else:
+            _schedule_awaiting_notify(repo_key, _num, text or "Agent 需要你补充信息。")
+    except Exception as e:
+        log.warning(f"[im-notify] review-point dispatch {repo_key}#{issue_number}->{new_status} failed: {e}")
+
+
+def set_issue_stage_with_pending_review_notify(repo_key: str, issue_id: str, stage: str,
+                                               owner_agent: str, review_points: str = "",
+                                               references: str = "", **kwargs) -> None:
+    """缺口 2（Issue #1211）：set_issue_stage 调用点包装——stage 流转到 pending_review
+    且状态真实变更时，调度待审核通知（复用显式端点同款 _run_pending_review_notify）。
+
+    其余语义与 session_store.set_issue_stage 完全一致（**kwargs 透传 a2a_seq/assignee）。
+    设计决策（Spec）：不在 session_store 内统一 hook（避免反向依赖 im 层），由
+    a2a/webhook（webhook.py）与 flow/reset（events.py）调用点显式换用本包装。
+
+    「仅真实变更时」双重守卫：
+    - stage 之前不是 pending_review（重复置入不重复打扰）；
+    - issue.status 经 set_issue_stage 同步后为 pending_review（awaiting_input/completed 等
+      被同步排除保持原状的路径不通知）。
+    """
+    from src.api.session_store import set_issue_stage, get_issue_stage_name
+    try:
+        _prev_stage = (get_issue_stage_name(repo_key, issue_id) or "")
+    except Exception:
+        _prev_stage = ""
+    _status_before = _issue_status_by_tag(repo_key, issue_id)
+    set_issue_stage(repo_key, issue_id, stage, owner_agent, **kwargs)
+    try:
+        if stage != "pending_review" or _prev_stage == "pending_review":
+            return
+        _status_after = _issue_status_by_tag(repo_key, issue_id)
+        if _status_after == "pending_review" and _status_before != "pending_review":
+            _num = int(str(issue_id or "").lstrip("#") or 0)
+            if _num:
+                log.info(f"[im-notify] stage→pending_review real change {repo_key}#{_num}, "
+                         f"schedule review notify")
+                _schedule_pending_review_notify(repo_key, _num, review_points, references)
+    except Exception as e:
+        log.warning(f"[im-notify] pending-review stage notify hook {repo_key}/{issue_id} failed: {e}")
+
+
+
+# ===== PR 待合入通知（Issue #1211，#1211 移植自 weekly-1102-zrr）=====
+
+# Issue #1211：(repo_key, pr_number) 待合入通知幂等去重集合（进程级，QA 复审/双路径不重复轰炸）。
+_PR_PENDING_MERGE_NOTIFIED: set = set()
+_PR_PENDING_MERGE_SET_CAP = 10000
+# open PR 扫描分页参数与单 issue 通知上限（防大仓库误轰炸）
+_PR_SCAN_PAGE_SIZE = 50
+_PR_SCAN_MAX_PAGES = 4
+_PR_NOTIFY_MAX_PER_ISSUE = 3
+
+
+def _pr_pending_merge_dedup_mark(repo_key: str, pr_number: int) -> bool:
+    """(repo_key, pr_number) 已通知 → True；首次 → 记账返回 False（进程级幂等）。"""
+    key = (repo_key, int(pr_number))
+    if key in _PR_PENDING_MERGE_NOTIFIED:
+        return True
+    if len(_PR_PENDING_MERGE_NOTIFIED) >= _PR_PENDING_MERGE_SET_CAP:
+        _PR_PENDING_MERGE_NOTIFIED.clear()
+        log.info("[im-notify] pr pending-merge dedup set capped, cleared")
+    _PR_PENDING_MERGE_NOTIFIED.add(key)
+    return False
+
+
+def _pr_vcs_client(repo_key: str):
+    """repo_key → VcsApiClient（bot token；解析失败/无 token → None，不抛出）。"""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider, owner, repo = parse_repo_key(repo_key)
+        if not owner or not repo:
+            return None
+        token = ""
+        if provider == "github":
+            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            token = _get_gh(repo_key=repo_key) or ""
+        else:
+            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            token = _get_gc(repo_key=repo_key) or ""
+        if not token:
+            log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")
+            return None
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        return VcsApiClient(provider, token, owner, repo)
+    except Exception as e:
+        log.warning(f"[im-notify] pr client repo={repo_key} failed: {e}")
+        return None
+
+
+def _pr_vcs_client(repo_key: str):
+    """repo_key → VcsApiClient（bot token；解析失败/无 token → None，不抛出）。"""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider, owner, repo = parse_repo_key(repo_key)
+        if not owner or not repo:
+            return None
+        token = ""
+        if provider == "github":
+            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            token = _get_gh(repo_key=repo_key) or ""
+        else:
+            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            token = _get_gc(repo_key=repo_key) or ""
+        if not token:
+            log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")
+            return None
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        return VcsApiClient(provider, token, owner, repo)
+    except Exception as e:
+        log.warning(f"[im-notify] pr client repo={repo_key} failed: {e}")
+        return None
+
+
+def _pr_ref_of(side) -> str:
+    """head/base 兼容提取（dict.ref / dict.label / 裸字符串）。"""
+    if isinstance(side, dict):
+        return str(side.get("ref") or side.get("label") or "")
+    return str(side or "")
+
+
+def _pr_web_url_fallback(provider: str, owner: str, repo: str, pr_number: int) -> str:
+    if not (owner and repo and pr_number):
+        return ""
+    if provider == "github":
+        return f"https://github.com/{owner}/{repo}/pull/{pr_number}"
+    if provider == "gitlab":
+        return f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{pr_number}"
+    return f"https://gitcode.com/{owner}/{repo}/pulls/{pr_number}"
+
+
+def _pr_info_from(pr: dict, provider: str, owner: str, repo: str) -> dict:
+    """VCS PR 原始 dict → 通知用 pr_info（number/title/url/head/base）。"""
+    _n = pr.get("number") or pr.get("iid") or 0
+    try:
+        _n = int(_n)
+    except Exception:
+        _n = 0
+    _url = str(pr.get("html_url") or "").strip()
+    if not _url:
+        _url = _pr_web_url_fallback(provider, owner, repo, _n)
+    return {"number": _n, "title": str(pr.get("title") or ""), "url": _url,
+            "head": _pr_ref_of(pr.get("head")), "base": _pr_ref_of(pr.get("base"))}
+
+
+def _pr_related_issue_nums(pr: dict) -> set:
+    """PR ↔ Issue 关联信号（容忍各平台/各端点形态）：
+
+    - GitCode 原生：PR 详情 `issues` 数组（unlink 端点同款判据）/ `inner_issue_nums` 编码串；
+    - 通用回退：body / title 中的 `#N` 引用（经 Issue #728 上下文过滤，代码块内不算）。
+    """
+    nums = set()
+    try:
+        issues = pr.get("issues")
+        if isinstance(issues, list):
+            for it in issues:
+                if isinstance(it, dict):
+                    try:
+                        nums.add(int(it.get("number")))
+                    except Exception:
+                        pass
+        inner = pr.get("inner_issue_nums")
+        if isinstance(inner, list):
+            inner = ",".join(str(x) for x in inner)
+        if isinstance(inner, str) and inner.strip():
+            import re as _re
+            for m in _re.finditer(r"#(\d+)", inner):
+                nums.add(int(m.group(1)))
+        from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
+        for text in (pr.get("body") or "", pr.get("title") or ""):
+            if text:
+                nums.update(extract_related_issue_nums(str(text)) or [])
+        nums.discard(0)
+    except Exception:
+        pass
+    return nums
+
+
+def _find_open_prs_for_issue(client, issue_number: int) -> list:
+    """扫描仓库 open PR 列表，返回与 issue 关联的 PR（分页有界，best-effort）。"""
+    matched = []
+    try:
+        for _page in range(1, _PR_SCAN_MAX_PAGES + 1):
+            resp = client.list_prs(state="open", page=_page, per_page=_PR_SCAN_PAGE_SIZE)
+            if isinstance(resp, dict):
+                if resp.get("error"):
+                    log.warning(f"[im-notify] list prs failed: {resp.get('error')}")
+                break
+            prs = [p for p in (resp or []) if isinstance(p, dict)]
+            for pr in prs:
+                if issue_number in _pr_related_issue_nums(pr):
+                    matched.append(pr)
+            if len(prs) < _PR_SCAN_PAGE_SIZE:
+                break
+    except Exception as e:
+        log.warning(f"[im-notify] find open prs failed: {e}")
+    return matched[:_PR_NOTIFY_MAX_PER_ISSUE]
+
+
+def _safe_int(v) -> int:
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def _pr_change_stats(client, pr_number: int) -> dict:
+    """PR 变更统计（files/additions/deletions；失败返回零值不阻断）。"""
+    stats = {"files": 0, "additions": 0, "deletions": 0}
+    try:
+        resp = client.get_pr_files(pr_number)
+        if isinstance(resp, list):
+            files = [f for f in resp if isinstance(f, dict)]
+            stats["files"] = len(files)
+            for f in files:
+                stats["additions"] += _safe_int(f.get("additions"))
+                stats["deletions"] += _safe_int(f.get("deletions"))
+        elif isinstance(resp, dict) and resp.get("error"):
+            log.warning(f"[im-notify] pr files #{pr_number} failed: {resp.get('error')}")
+    except Exception as e:
+        log.warning(f"[im-notify] pr files #{pr_number} error: {e}")
+    return stats
+
+
+def _im_notify_counter(key: str) -> None:
+    """通知计数器（cluster-im-lease-stability-design.md §3.3）。"""
+    _IM_NOTIFY_COUNTERS[key] = _IM_NOTIFY_COUNTERS.get(key, 0) + 1
+
+
+def get_im_notify_counters() -> dict:
+    return dict(_IM_NOTIFY_COUNTERS)
+
+
+def _im_notify_begin(ntype: str, repo_key, issue_number, user_id, open_id, ctx):
+    _im_notify_counter("attempted")
+    _ctx_name = getattr(ctx, "name", "") if ctx else ""
+    log.info(f"[im-notify] type={ntype} repo={repo_key} issue=#{issue_number} "
+             f"user={user_id} open_id={open_id or ''} ctx={_ctx_name or 'none'}")
+
+
+def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
+    if not ctx:
+        _reason = "no_ctx"
+    elif not open_id:
+        _reason = "no_openid"
+    else:
+        _reason = "no_api"
+    _im_notify_counter(f"skipped_{_reason}")
+    log.warning(f"[im-notify] type={ntype} issue=#{issue_number} user={user_id} reason={_reason}")
+
+
+async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                      task_description: str, repo_key: str, issue_number: int, cfg: dict):
+    """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
+
+    §十 原则：ChatAgent 只在用户真实回复消息时执行；任务分配/通知不得触发 opencode/stream，
+    也不注入用户个人 token 用于 GitCode 写操作（见 agent-tasks-direct-create-binding-fix-design.md §10.4）。
+    """
+    try:
+        # 静态模板 agent 消息（不生成 LLM 回复，提示用户去任务中心『去对话』）。
+        # 任务上下文/描述已由 _ensure_task_conversation 预写入，此处仅追加指针消息，不重复内容。
+        if conv_id:
+            try:
+                from src.kernel.repo_key import from_repo_key
+                _tpl = (f"📋 任务已分配 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"请到任务中心『去对话』查看并处理。你的第一条回复将创建会话。")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Task notify: static template written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Task notify: static template write failed: {e}")
+
+        # 飞书仅作通知（D3）
+        _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
+        if open_id and api and ctx:
+            notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
+                           if (task_description or "").strip() else "你有一条新任务待处理。")
+            try:
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["task"],
+                    template=_IM_NOTIFY_TEMPLATES["task"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
+            except Exception as e:
+                _im_notify_counter("sent_failed")
+                log.warning(f"Task notify feishu failed: {e}")
+        else:
+            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
+    except Exception as e:
+        log.warning(f"Task notify _run_notify error: {e}")
+
+
+async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                               questions: str, repo_key: str, issue_number: int, cfg: dict):
+    """待澄清通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_notify 同规约）。
+
+    进入 awaiting_input 的语义就是「等用户输入」，必须主动触达用户；fd：本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.kernel.repo_key import from_repo_key
+        if conv_id:
+            try:
+                _tpl = (f"❓ 需要你补充信息 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{questions}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Task awaiting: questions written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Task awaiting: template write failed: {e}")
+
+        _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
+        if open_id and api and ctx:
+            notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
+                           if (questions or "").strip() else "Agent 需要你补充信息。")
+            try:
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["awaiting"],
+                    template=_IM_NOTIFY_TEMPLATES["awaiting"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
+            except Exception as e:
+                _im_notify_counter("sent_failed")
+                log.warning(f"Task awaiting feishu failed: {e}")
+        else:
+            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
+    except Exception as e:
+        log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
+
+
+async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                                     review_points: str, references: str,
+                                     repo_key: str, issue_number: int, cfg: dict):
+    """待审核通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_awaiting_notify 同规约）。
+
+    进入 pending_review 的语义就是「交付审核点请用户拍板」，必须主动触达用户；本机本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.kernel.repo_key import from_repo_key
+        _refs_suffix = (f"\n\n参考: {references}" if (references or "").strip() else "")
+        if conv_id:
+            try:
+                _tpl = (f"🔎 需要你审核确认 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{review_points}{_refs_suffix}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Issue pending-review: review points written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Issue pending-review: template write failed: {e}")
+
+        _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
+        if open_id and api and ctx:
+            notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
+                           if (review_points or "").strip() else "请审核确认交付结果。")
+            try:
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pending_review"],
+                    template=_IM_NOTIFY_TEMPLATES["pending_review"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
+            except Exception as e:
+                _im_notify_counter("sent_failed")
+                log.warning(f"Issue pending-review feishu failed: {e}")
+        else:
+            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
+    except Exception as e:
+        log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
+
+
+def _build_pr_pending_merge_fields(repo_key: str, issue_number: int, pr_info: dict,
+                                   qa_summary: str) -> list:
+    """PR 待合入通知卡字段：基础三件套（仓库/Issue/标题）+ PR 链接/分支/增删行数/QA 结论。"""
+    fields = _build_notify_fields(repo_key, issue_number)
+    _n = pr_info.get("number") or 0
+    _url = (pr_info.get("url") or "").strip()
+    _pr_link = f"[#{_n}]({_url})" if (_n and _url) else (f"#{_n}" if _n else "—")
+    _head = (pr_info.get("head") or "").strip() or "—"
+    _base = (pr_info.get("base") or "").strip() or "—"
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**📮 PR**\n{_pr_link}"}})
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**🌿 分支**\n{_head} → {_base}"}})
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**📁 变更**\n{pr_info.get('files', 0)} 文件 "
+                              f"+{pr_info.get('additions', 0)}/-{pr_info.get('deletions', 0)}"}})
+    _qa = (qa_summary or "").strip()
+    if _qa:
+        fields.append({"is_short": False, "text": {"tag": "lark_md",
+                       "content": f"**✅ QA 结论**\n{_qa}"}})
+    return fields
+
+
+def _build_pr_pending_merge_actions(repo_key: str, issue_number: int, conv_id: str,
+                                     pr_url: str) -> list:
+    """PR 待合入快捷按钮：基础两件套（进入会话/查看 Issue）+ 查看 PR。"""
+    actions = _build_notify_actions(repo_key, issue_number, conv_id)
+    if pr_url:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看 PR ↗"},
+            "url": pr_url,
+        })
+    return actions
+
+
+def _build_pr_pending_merge_conv_message(pr_info: dict, qa_summary: str,
+                                         repo_key: str, issue_number: int) -> str:
+    """会话兜底模板消息（无 chat bot / 发送失败时任务会话仍可见）。"""
+    from src.kernel.repo_key import from_repo_key
+    _n = pr_info.get("number") or 0
+    _url = (pr_info.get("url") or "").strip()
+    lines = [f"📮 PR #{_n} 待合入 · Issue #{issue_number}"]
+    lines.append(f"仓库: {from_repo_key(repo_key) or '—'}")
+    lines.append(f"分支: {(pr_info.get('head') or '—')} → {(pr_info.get('base') or '—')}")
+    lines.append(f"变更: {pr_info.get('files', 0)} 文件"
+                 f"（+{pr_info.get('additions', 0)} / -{pr_info.get('deletions', 0)}）")
+    if _url:
+        lines.append(f"PR 链接: {_url}")
+    _qa = (qa_summary or "").strip()
+    if _qa:
+        lines.append("")
+        lines.append(f"QA 结论：{_qa}")
+    lines.append("")
+    lines.append("QA 已通过，请到仓库完成人工合入。")
+    return "\n".join(lines)
+
+
+async def _run_pr_pending_merge_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                                       pr_info: dict, qa_summary: str,
+                                       repo_key: str, issue_number: int, cfg: dict):
+    """PR 待合入通知（Issue #1211）：QA 通过且关联 PR open 待人工合入时主动触达。
+
+    与 _run_pending_review_notify 同规约：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM。
+    兜底：未配置 chat bot / 发送失败 → 任务会话仍写入「📮 PR #n 待合入」模板消息（add_message 路径）。
+    """
+    try:
+        if conv_id:
+            try:
+                _tpl = _build_pr_pending_merge_conv_message(pr_info, qa_summary, repo_key, issue_number)
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Issue #1211: PR pending-merge template written to conv={conv_id}")
+            except Exception as e:
+                log.warning(f"Issue #1211: PR pending-merge template write failed: {e}")
+
+        _im_notify_begin("pr_pending_merge", repo_key, issue_number, user_id, open_id, ctx)
+        if open_id and api and ctx:
+            _n = pr_info.get("number") or 0
+            notify_text = f"QA 已通过，PR #{_n} 待人工合入。"
+            _qa = (qa_summary or "").strip()
+            if _qa:
+                notify_text += f"\n\n{_qa}"
+            try:
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pr_pending_merge"],
+                    template=_IM_NOTIFY_TEMPLATES["pr_pending_merge"],
+                    actions=_build_pr_pending_merge_actions(
+                        repo_key, issue_number, conv_id, (pr_info.get("url") or "").strip()),
+                    fields=_build_pr_pending_merge_fields(repo_key, issue_number, pr_info, qa_summary),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
+            except Exception as e:
+                _im_notify_counter("sent_failed")
+                log.warning(f"Issue #1211: PR pending-merge feishu failed: {e}")
+        else:
+            _im_notify_skip("pr_pending_merge", issue_number, user_id, ctx, open_id)
+    except Exception as e:
+        log.warning(f"Issue #1211: _run_pr_pending_merge_notify error: {e}")
+
+
+def _fire_notify_coro(coro) -> None:
+    """通知协程 fire-and-forget 调度：有事件循环 → create_task（不阻塞端点）；
+    无（worker 线程/同步上下文）→ run_coroutine_threadsafe 投递回主 loop 执行。
+
+    直接 asyncio.run 会新建事件循环，而 IM 共享 aiohttp ClientSession 绑定主 loop
+    → 跨 loop 抛 "Timeout context manager should be used inside a task"（token
+    获取失败 → no token available → 卡片静默丢失）。与 chat.py
+    _dispatch_push_to_main_loop 同款修复：投递回 BotManager 保存的主 loop。
+    无主 loop（测试/启动异常）→ 兜底本线程 asyncio.run（同步可断言）。"""
+    try:
+        asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        from src import api as _api_pkg
+        bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
+        loop = getattr(bm, "loop", None)
+        if loop is not None and loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                fut.add_done_callback(
+                    lambda f: log.warning(f"[im-notify] background notify failed: {f.exception()}")
+                    if not f.cancelled() and f.exception() else None)
+                return
+            except Exception as e:
+                log.warning(f"[im-notify] notify dispatch to main loop failed: {e}")
+        try:
+            asyncio.run(coro)
+        except Exception as e:
+            log.warning(f"[im-notify] background notify run failed: {e}")
+
+
+def _issue_status_by_tag(repo_key: str, issue_id: str) -> str:
+    """按 issue_id（#N/N）读 issue.status（查询失败/无行 → ''）。"""
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        if not _num:
+            return ""
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                      (repo_key, _num))
+            row = c.fetchone()
+        return (row[0] if row else "") or ""
+    except Exception:
+        return ""
+
+
+def _schedule_pending_review_notify(repo_key: str, issue_number: int,
+                                    review_points: str, references: str = ""):
+    """缺口 2（Issue #1211）：解析 issue 归属用户通知目标 → 调度 _run_pending_review_notify。
+
+    复用显式 pending-review 端点同款链路（_resolve_issue_notify_targets + fire-and-forget），
+    best-effort：解析/调度失败仅日志。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num:
+            return
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        _fire_notify_coro(_run_pending_review_notify(
+            targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+            targets["open_id"], review_points or "请审核确认交付结果", references or "",
+            repo_key, _num, targets["cfg"]))
+    except Exception as e:
+        log.warning(f"[im-notify] schedule pending-review notify {repo_key}#{issue_number} failed: {e}")
+
+
+def _schedule_awaiting_notify(repo_key: str, issue_number: int, questions: str):
+    """Issue #2419：awaiting_input 状态变化通知调度（复用 #1211 目标解析 + fire-and-forget）。
+
+    与 _schedule_pending_review_notify 同链路：_resolve_issue_notify_targets（本人 chat bot
+    open_id / conv 兜底建 / cfg）→ _run_awaiting_notify（❓ 需求待澄清 orange 卡片 + 会话模板）。
+    best-effort：解析/调度失败仅日志。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num:
+            return
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        _fire_notify_coro(_run_awaiting_notify(
+            targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+            targets["open_id"], questions or "Agent 需要你补充信息。",
+            repo_key, _num, targets["cfg"]))
+    except Exception as e:
+        log.warning(f"[im-notify] schedule awaiting notify {repo_key}#{issue_number} failed: {e}")
+
+
+def maybe_notify_review_point_status(repo_key: str, issue_number: int, new_status: str,
+                                     text: str = "") -> None:
+    """Issue #2419 修复项 2：任务进入审核点状态（pending_review / awaiting_input）统一事件分发。
+
+    状态事件 → 飞书卡片的扩覆盖入口：调用方在确认「状态真实变更」后调用（幂等由各入口
+    UPDATE WHERE 排除当前状态保证，重复置入 0 行不触发——沿用 #1211 机制，防通知风暴）。
+    - new_status == "pending_review" → 🔎 需求待审核（red，review_points=text）
+    - new_status == "awaiting_input" → ❓ 需求待澄清（orange，questions=text）
+    其他状态 no-op。best-effort：失败仅日志，不阻断调用方主流程。
+    复用 #1211 卡片模板与 instance 路由（_resolve_issue_notify_targets → 本人 chat bot）。
+    """
+    try:
+        _num = int(issue_number or 0)
+        if not _num or new_status not in ("pending_review", "awaiting_input"):
+            return
+        if new_status == "pending_review":
+            _schedule_pending_review_notify(repo_key, _num, text or "请审核确认交付结果")
+        else:
+            _schedule_awaiting_notify(repo_key, _num, text or "Agent 需要你补充信息。")
+    except Exception as e:
+        log.warning(f"[im-notify] review-point dispatch {repo_key}#{issue_number}->{new_status} failed: {e}")
+
+
+def set_issue_stage_with_pending_review_notify(repo_key: str, issue_id: str, stage: str,
+                                               owner_agent: str, review_points: str = "",
+                                               references: str = "", **kwargs) -> None:
+    """缺口 2（Issue #1211）：set_issue_stage 调用点包装——stage 流转到 pending_review
+    且状态真实变更时，调度待审核通知（复用显式端点同款 _run_pending_review_notify）。
+
+    其余语义与 session_store.set_issue_stage 完全一致（**kwargs 透传 a2a_seq/assignee）。
+    设计决策（Spec）：不在 session_store 内统一 hook（避免反向依赖 im 层），由
+    a2a/webhook（webhook.py）与 flow/reset（events.py）调用点显式换用本包装。
+
+    「仅真实变更时」双重守卫：
+    - stage 之前不是 pending_review（重复置入不重复打扰）；
+    - issue.status 经 set_issue_stage 同步后为 pending_review（awaiting_input/completed 等
+      被同步排除保持原状的路径不通知）。
+    """
+    from src.api.session_store import set_issue_stage, get_issue_stage_name
+    try:
+        _prev_stage = (get_issue_stage_name(repo_key, issue_id) or "")
+    except Exception:
+        _prev_stage = ""
+    _status_before = _issue_status_by_tag(repo_key, issue_id)
+    set_issue_stage(repo_key, issue_id, stage, owner_agent, **kwargs)
+    try:
+        if stage != "pending_review" or _prev_stage == "pending_review":
+            return
+        _status_after = _issue_status_by_tag(repo_key, issue_id)
+        if _status_after == "pending_review" and _status_before != "pending_review":
+            _num = int(str(issue_id or "").lstrip("#") or 0)
+            if _num:
+                log.info(f"[im-notify] stage→pending_review real change {repo_key}#{_num}, "
+                         f"schedule review notify")
+                _schedule_pending_review_notify(repo_key, _num, review_points, references)
+    except Exception as e:
+        log.warning(f"[im-notify] pending-review stage notify hook {repo_key}/{issue_id} failed: {e}")
+
+
+def _resolve_issue_notify_targets(repo_key: str, issue_number: int) -> dict:
+    """issue 归属用户的通知目标解析（复用 pending-review 显式端点同款链路）。
+
+    issue 行（user_id/assignee/title/conversation_id）→ conv 兜底建/复用 →
+    open_id（user_id 优先，assignee 兜底）→ 本人 chat bot ctx/api → cfg。
+    任一步失败仅日志，字段保持默认空值（runner 走 skip 可观测路径）。
+    """
+    out = {"user_id": 0, "assignee": "", "title": "", "conv_id": "", "open_id": "",
+           "ctx": None, "api": None, "cfg": {}}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT user_id, assignee, title, conversation_id FROM issue "
+                      "WHERE repo_key=? AND issue_number=?", (repo_key, issue_number))
+            row = c.fetchone()
+        if not row:
+            return out
+        out["user_id"] = row[0] or 0
+        out["assignee"] = row[1] or ""
+        out["title"] = row[2] or ""
+        out["conv_id"] = row[3] or ""
+        if out["user_id"] > 0 and not out["conv_id"]:
+            conv_id = _ensure_task_conversation(out["user_id"], repo_key, issue_number,
+                                                out["title"], "", write_context_on_reuse=False)
+            if conv_id:
+                out["conv_id"] = conv_id
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+                                  (conv_id, repo_key, issue_number))
+                        db.commit()
+                except Exception:
+                    pass
+        out["open_id"] = (_get_feishu_open_id_by_user_id(out["user_id"])
+                          if out["user_id"] else "") or _get_feishu_open_id(out["assignee"], repo_key)
+        try:
+            from src.api import main as api_main
+            bm = api_main.bot_manager
+            if bm:
+                out["ctx"] = _resolve_user_chat_bot(bm, out["user_id"])
+                out["api"] = bm.api
+        except Exception:
+            pass
+        if out["user_id"]:
+            try:
+                out["cfg"] = get_chat_config(out["user_id"]) or {}
+            except Exception:
+                out["cfg"] = {}
+    except Exception as e:
+        log.warning(f"[im-notify] resolve targets {repo_key}#{issue_number} failed: {e}")
+    return out
+
+
+async def _pr_pending_merge_notify_task(repo_key: str, issue_number: int,
+                                        qa_summary: str, pr_number_hint: int):
+    """async 包装：VCS 发现挪出事件循环（端点路径不阻塞 loop）。"""
+    await asyncio.to_thread(maybe_notify_prs_pending_merge, repo_key, issue_number,
+                            qa_summary, pr_number_hint)
+
+
+def maybe_notify_prs_pending_merge(repo_key: str, issue_number: int,
+                                   qa_summary: str = "", pr_number_hint: int = 0) -> int:
+    """Issue #1211 挂钩点：QA 通过/自动结单后检测关联 open PR → 调度「📮 有 PR 待合入」通知。
+
+    - pr_number_hint>0（review-pass 端点显式透传）→ 直接取 PR 详情，state open 才通知；
+      =0 → 扫描仓库 open PR 列表按关联匹配（GitCode issues 原生 / inner_issue_nums / body·title #N）。
+    - (repo_key, pr_number) 进程级去重：同 PR 复审/双路径不重复（skipped_duplicate 计数）。
+    - 无关联 open PR → skipped_no_open_pr；无 bot token → skipped_no_client。
+    - 全链 best-effort：任一步失败仅日志，不影响调用方主流程。返回本次调度通知的 PR 数。
+    """
+    scheduled = 0
+    try:
+        from src.kernel.repo_key import to_repo_key, parse_repo_key
+        repo_key = to_repo_key(repo_key)
+        _num = int(issue_number or 0)
+        if not _num:
+            return 0
+        client = _pr_vcs_client(repo_key)
+        if client is None:
+            _im_notify_counter("skipped_no_client")
+            return 0
+        provider, owner, repo = parse_repo_key(repo_key)
+        candidates = []
+        if pr_number_hint:
+            try:
+                detail = client.get_pr(int(pr_number_hint))
+            except Exception as e:
+                log.warning(f"[im-notify] get pr #{pr_number_hint} error: {e}")
+                detail = {}
+            if isinstance(detail, dict) and not detail.get("error") \
+                    and str(detail.get("state") or "").lower() in ("open", "opened"):
+                candidates = [detail]
+            else:
+                log.info(f"[im-notify] pr pending-merge hint #{pr_number_hint} not open, skip")
+        else:
+            candidates = _find_open_prs_for_issue(client, _num)
+        if not candidates:
+            _im_notify_counter("skipped_no_open_pr")
+            return 0
+        _qa = (qa_summary or "").strip()[:500]
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        for pr in candidates:
+            pr_info = _pr_info_from(pr, provider, owner, repo)
+            if not pr_info["number"]:
+                continue
+            if _pr_pending_merge_dedup_mark(repo_key, pr_info["number"]):
+                _im_notify_counter("skipped_duplicate")
+                log.info(f"[im-notify] pr pending-merge duplicate skip "
+                         f"repo={repo_key} pr=#{pr_info['number']}")
+                continue
+            pr_info.update(_pr_change_stats(client, pr_info["number"]))
+            _fire_notify_coro(_run_pr_pending_merge_notify(
+                targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+                targets["open_id"], pr_info, _qa, repo_key, _num, targets["cfg"]))
+            scheduled += 1
+        return scheduled
+    except Exception as e:
+        log.warning(f"[im-notify] maybe_notify_prs_pending_merge {repo_key}#{issue_number} error: {e}")
+        return scheduled
+
+
+def _resolve_user_chat_bot(bm, user_id: int):
+    """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
+
+    用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
+    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
+    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
+    """
+    if not bm:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
+        return None
+    try:
+        bots = bm.get_all_bots()
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
+                (user_id,)).fetchone()
+        if not row or not row[0]:
+            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
+            return None
+        bot = bots.get(row[0])
+        if bot:
+            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
+        else:
+            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
+        return bot
+    except Exception as e:
+        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+        return None
+
+
+
+def _build_pr_pending_merge_fields(repo_key: str, issue_number: int, pr_info: dict,
+                                   qa_summary: str) -> list:
+    """PR 待合入通知卡字段：基础三件套（仓库/Issue/标题）+ PR 链接/分支/增删行数/QA 结论。"""
+    fields = _build_notify_fields(repo_key, issue_number)
+    _n = pr_info.get("number") or 0
+    _url = (pr_info.get("url") or "").strip()
+    _pr_link = f"[#{_n}]({_url})" if (_n and _url) else (f"#{_n}" if _n else "—")
+    _head = (pr_info.get("head") or "").strip() or "—"
+    _base = (pr_info.get("base") or "").strip() or "—"
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**📮 PR**\n{_pr_link}"}})
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**🌿 分支**\n{_head} → {_base}"}})
+    fields.append({"is_short": True, "text": {"tag": "lark_md",
+                   "content": f"**📁 变更**\n{pr_info.get('files', 0)} 文件 "
+                              f"+{pr_info.get('additions', 0)}/-{pr_info.get('deletions', 0)}"}})
+    _qa = (qa_summary or "").strip()
+    if _qa:
+        fields.append({"is_short": False, "text": {"tag": "lark_md",
+                       "content": f"**✅ QA 结论**\n{_qa}"}})
+    return fields
+
+
+def _build_pr_pending_merge_actions(repo_key: str, issue_number: int, conv_id: str,
+                                     pr_url: str) -> list:
+    """PR 待合入快捷按钮：基础两件套（进入会话/查看 Issue）+ 查看 PR。"""
+    actions = _build_notify_actions(repo_key, issue_number, conv_id)
+    if pr_url:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看 PR ↗"},
+            "url": pr_url,
+        })
+    return actions
+
+
+def _build_pr_pending_merge_conv_message(pr_info: dict, qa_summary: str,
+                                         repo_key: str, issue_number: int) -> str:
+    """会话兜底模板消息（无 chat bot / 发送失败时任务会话仍可见）。"""
+    from src.kernel.repo_key import from_repo_key
+    _n = pr_info.get("number") or 0
+    _url = (pr_info.get("url") or "").strip()
+    lines = [f"📮 PR #{_n} 待合入 · Issue #{issue_number}"]
+    lines.append(f"仓库: {from_repo_key(repo_key) or '—'}")
+    lines.append(f"分支: {(pr_info.get('head') or '—')} → {(pr_info.get('base') or '—')}")
+    lines.append(f"变更: {pr_info.get('files', 0)} 文件"
+                 f"（+{pr_info.get('additions', 0)} / -{pr_info.get('deletions', 0)}）")
+    if _url:
+        lines.append(f"PR 链接: {_url}")
+    _qa = (qa_summary or "").strip()
+    if _qa:
+        lines.append("")
+        lines.append(f"QA 结论：{_qa}")
+    lines.append("")
+    lines.append("QA 已通过，请到仓库完成人工合入。")
+    return "\n".join(lines)
+
+
+async def _run_pr_pending_merge_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                                       pr_info: dict, qa_summary: str,
+                                       repo_key: str, issue_number: int, cfg: dict):
+    """PR 待合入通知（Issue #1211）：QA 通过且关联 PR open 待人工合入时主动触达。
+
+    与 _run_pending_review_notify 同规约：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM。
+    兜底：未配置 chat bot / 发送失败 → 任务会话仍写入「📮 PR #n 待合入」模板消息（add_message 路径）。
+    """
+    try:
+        if conv_id:
+            try:
+                _tpl = _build_pr_pending_merge_conv_message(pr_info, qa_summary, repo_key, issue_number)
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Issue #1211: PR pending-merge template written to conv={conv_id}")
+            except Exception as e:
+                log.warning(f"Issue #1211: PR pending-merge template write failed: {e}")
+
+        _im_notify_begin("pr_pending_merge", repo_key, issue_number, user_id, open_id, ctx)
+        if open_id and api and ctx:
+            _n = pr_info.get("number") or 0
+            notify_text = f"QA 已通过，PR #{_n} 待人工合入。"
+            _qa = (qa_summary or "").strip()
+            if _qa:
+                notify_text += f"\n\n{_qa}"
+            try:
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pr_pending_merge"],
+                    template=_IM_NOTIFY_TEMPLATES["pr_pending_merge"],
+                    actions=_build_pr_pending_merge_actions(
+                        repo_key, issue_number, conv_id, (pr_info.get("url") or "").strip()),
+                    fields=_build_pr_pending_merge_fields(repo_key, issue_number, pr_info, qa_summary),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
+            except Exception as e:
+                _im_notify_counter("sent_failed")
+                log.warning(f"Issue #1211: PR pending-merge feishu failed: {e}")
+        else:
+            _im_notify_skip("pr_pending_merge", issue_number, user_id, ctx, open_id)
+    except Exception as e:
+        log.warning(f"Issue #1211: _run_pr_pending_merge_notify error: {e}")
+
+
+async def _pr_pending_merge_notify_task(repo_key: str, issue_number: int,
+                                        qa_summary: str, pr_number_hint: int):
+    """async 包装：VCS 发现挪出事件循环（端点路径不阻塞 loop）。"""
+    await asyncio.to_thread(maybe_notify_prs_pending_merge, repo_key, issue_number,
+                            qa_summary, pr_number_hint)
+
+
+def maybe_notify_prs_pending_merge(repo_key: str, issue_number: int,
+                                   qa_summary: str = "", pr_number_hint: int = 0) -> int:
+    """Issue #1211 挂钩点：QA 通过/自动结单后检测关联 open PR → 调度「📮 有 PR 待合入」通知。
+
+    - pr_number_hint>0（review-pass 端点显式透传）→ 直接取 PR 详情，state open 才通知；
+      =0 → 扫描仓库 open PR 列表按关联匹配（GitCode issues 原生 / inner_issue_nums / body·title #N）。
+    - (repo_key, pr_number) 进程级去重：同 PR 复审/双路径不重复（skipped_duplicate 计数）。
+    - 无关联 open PR → skipped_no_open_pr；无 bot token → skipped_no_client。
+    - 全链 best-effort：任一步失败仅日志，不影响调用方主流程。返回本次调度通知的 PR 数。
+    """
+    scheduled = 0
+    try:
+        from src.kernel.repo_key import to_repo_key, parse_repo_key
+        repo_key = to_repo_key(repo_key)
+        _num = int(issue_number or 0)
+        if not _num:
+            return 0
+        client = _pr_vcs_client(repo_key)
+        if client is None:
+            _im_notify_counter("skipped_no_client")
+            return 0
+        provider, owner, repo = parse_repo_key(repo_key)
+        candidates = []
+        if pr_number_hint:
+            try:
+                detail = client.get_pr(int(pr_number_hint))
+            except Exception as e:
+                log.warning(f"[im-notify] get pr #{pr_number_hint} error: {e}")
+                detail = {}
+            if isinstance(detail, dict) and not detail.get("error") \
+                    and str(detail.get("state") or "").lower() in ("open", "opened"):
+                candidates = [detail]
+            else:
+                log.info(f"[im-notify] pr pending-merge hint #{pr_number_hint} not open, skip")
+        else:
+            candidates = _find_open_prs_for_issue(client, _num)
+        if not candidates:
+            _im_notify_counter("skipped_no_open_pr")
+            return 0
+        _qa = (qa_summary or "").strip()[:500]
+        targets = _resolve_issue_notify_targets(repo_key, _num)
+        for pr in candidates:
+            pr_info = _pr_info_from(pr, provider, owner, repo)
+            if not pr_info["number"]:
+                continue
+            if _pr_pending_merge_dedup_mark(repo_key, pr_info["number"]):
+                _im_notify_counter("skipped_duplicate")
+                log.info(f"[im-notify] pr pending-merge duplicate skip "
+                         f"repo={repo_key} pr=#{pr_info['number']}")
+                continue
+            pr_info.update(_pr_change_stats(client, pr_info["number"]))
+            _fire_notify_coro(_run_pr_pending_merge_notify(
+                targets["ctx"], targets["api"], targets["user_id"], targets["conv_id"],
+                targets["open_id"], pr_info, _qa, repo_key, _num, targets["cfg"]))
+            scheduled += 1
+        return scheduled
+    except Exception as e:
+        log.warning(f"[im-notify] maybe_notify_prs_pending_merge {repo_key}#{issue_number} error: {e}")
+        return scheduled
+
+
+def _resolve_issue_notify_targets(repo_key: str, issue_number: int) -> dict:
+    """issue 归属用户的通知目标解析（复用 pending-review 显式端点同款链路）。
+
+    issue 行（user_id/assignee/title/conversation_id）→ conv 兜底建/复用 →
+    open_id（user_id 优先，assignee 兜底）→ 本人 chat bot ctx/api → cfg。
+    任一步失败仅日志，字段保持默认空值（runner 走 skip 可观测路径）。
+    """
+    out = {"user_id": 0, "assignee": "", "title": "", "conv_id": "", "open_id": "",
+           "ctx": None, "api": None, "cfg": {}}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT user_id, assignee, title, conversation_id FROM issue "
+                      "WHERE repo_key=? AND issue_number=?", (repo_key, issue_number))
+            row = c.fetchone()
+        if not row:
+            return out
+        out["user_id"] = row[0] or 0
+        out["assignee"] = row[1] or ""
+        out["title"] = row[2] or ""
+        out["conv_id"] = row[3] or ""
+        _uid_ok = str(out["user_id"] or "").strip() not in ("", "0")  # arch11 D105: user_id 为 UUID 串
+        if _uid_ok and not out["conv_id"]:
+            conv_id = _ensure_task_conversation(out["user_id"], repo_key, issue_number,
+                                                out["title"], "", write_context_on_reuse=False)
+            if conv_id:
+                out["conv_id"] = conv_id
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
+                                  (conv_id, repo_key, issue_number))
+                        db.commit()
+                except Exception:
+                    pass
+        out["open_id"] = (_get_feishu_open_id_by_user_id(out["user_id"])
+                          if _uid_ok else "") or _get_feishu_open_id(out["assignee"], repo_key)
+        try:
+            from src.api import main as api_main
+            bm = api_main.bot_manager
+            if bm:
+                out["ctx"] = _resolve_user_chat_bot(bm, out["user_id"])
+                out["api"] = bm.api
+        except Exception:
+            pass
+        if _uid_ok:
+            try:
+                out["cfg"] = get_chat_config(out["user_id"]) or {}
+            except Exception:
+                out["cfg"] = {}
+    except Exception as e:
+        log.warning(f"[im-notify] resolve targets {repo_key}#{issue_number} failed: {e}")
+    return out
+
 
 def _resolve_user_chat_bot(bm, user_id: str):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
@@ -3437,6 +4597,53 @@ def _build_creator_filter(creators: str, clauses: list, params: list):
         clauses.append(f"created_by IN ({','.join('?' * len(_list))})")
         params.extend(_list)
 
+# ===================== Issue #2082（#2082 移植）：issues 组公共分页语义 =====================
+
+# 分页上限：per_page 超上限夹取到 100（不 400，防 Agent 流水线因参数被拒中断，
+# 与 milestones #900 / git-repo 组口径一致）
+ISSUES_PER_PAGE_MAX = 100
+
+
+def issues_default_per_page() -> int:
+    """issues 组默认每页条数（灰度开关 ISSUES_DEFAULT_PER_PAGE，Issue #2082）。
+
+    - 未设置 / 非法值 → 默认 20（终结默认全量倾泻）
+    - 置 0 → 回退 legacy 语义（per_page 缺省 = 不分页，全量+终态截断）
+    - 每次调用即时读 env：灰度切换无需重启，值域夹取 [0, ISSUES_PER_PAGE_MAX]
+    """
+    raw = (os.environ.get("ISSUES_DEFAULT_PER_PAGE") or "").strip()
+    if not raw:
+        return 20
+    try:
+        val = int(raw)
+    except ValueError:
+        return 20
+    return max(0, min(ISSUES_PER_PAGE_MAX, val))
+
+
+def resolve_issues_page_params(page, per_page) -> tuple[int, int]:
+    """issues 组公共分页解析（list / mine 共用，Issue #2082 分页语义统一）。
+
+    - page：1-based，缺省/非法 → 1
+    - per_page：缺省 → 灰度默认（20，开关置 0 → legacy 全量）；
+      0 = 显式全量（逃生口）；> ISSUES_PER_PAGE_MAX 夹取 100
+    """
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+    if per_page is None:
+        per_page = issues_default_per_page()
+    else:
+        try:
+            per_page = int(per_page)
+        except (TypeError, ValueError):
+            per_page = issues_default_per_page()
+    per_page = max(0, min(int(per_page), ISSUES_PER_PAGE_MAX))
+    return page, per_page
+
+
 def _batch_fetch_pr_issue_keys(keys: list) -> set:
     """批量查 events 表，返回 issue 本身是 PR 的 (repo_key, issue_id) 集合。
 
@@ -3540,6 +4747,12 @@ def _batch_running_agent_tasks(keys: list) -> set:
             log.warning(f"batch agent_tasks fetch failed: {e}")
     return out
 
+# P1-8：事件状态展示别名 —— events.status='takeover'（本地接手）在 agent_statuses 里
+# 归一成 'running'，与流水线卡片（compute_node_statuses / EVENT_STATUS_MAP 的
+# takeover→STATUS_RUNNING）同口径；原始值仍以 raw_status 透出。
+_EVENT_STATUS_ALIASES = {"takeover": "running"}
+
+
 def _batch_fetch_agent_statuses(keys: list) -> dict:
     """批量查各 Agent 节点最新事件状态（Issue #126: 与菜单流水线数据源一致）。
 
@@ -3597,15 +4810,24 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
                 })
             else:
                 _latest = _agent_events[-1]  # seq ASC → 最后一条即最新
-                _status = _latest[3] or "pending"
-                _statuses.append({
+                _raw_status = _latest[3] or "pending"
+                # P1-8：events.status='takeover'（有人本地接手）在展示口径上等同 running。
+                # 流水线卡片侧（compute_node_statuses / EVENT_STATUS_MAP）早已映射成运行中，
+                # 这里若原样透传，同一节点会在同页出现「执行中」与「待执行」两种结论。
+                _status = _EVENT_STATUS_ALIASES.get(_raw_status, _raw_status)
+                _row = {
                     "agent": agent,
                     "label": AGENT_LABELS[i],
                     "status": _status,
                     "status_num": STAGE_STATUS_MAP.get(_status, 0),
                     "latest_seq": _latest[4],
                     "latest_title": _latest[5] or "",
-                })
+                }
+                if _raw_status != _status:
+                    # 保留原始口径，供需要区分「本地接手」与「worker 在跑」的调用方使用
+                    _row["raw_status"] = _raw_status
+                    _row["takeover"] = True
+                _statuses.append(_row)
         out[key] = _statuses
 
     return out
@@ -3724,6 +4946,13 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         _st = _stage_map.get((_rk, _issue_id))
         _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
         _stage = (_st.get("stage") or "") if _st else ""
+        if not _stage:
+            # Issue #2111（#1214/#1999 遗留收敛，#1214 移植）：/mine 出口空值归一——建档/阶段推进
+            # 窗口 issue 表该列可为 NULL/空串，原样透传（""）与 detail/list 出口
+            # 「恒非空 vod」口径分歧；与 DB 默认值一致归一并打 warning 保留可观测性。
+            log.warning(f"issues: issue #{r[3]} stage empty from issue table "
+                        f"(mine/query_tasks exit), normalized to 'vod'")
+            _stage = "vod"
         if _issue_scene_id:
             _scene_id = _issue_scene_id
             _scene_source = "vod"  # VOD 识别

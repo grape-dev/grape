@@ -61,6 +61,9 @@ class PlatformCard:
     # D105-19：平台默认 workflows 写权限（三态回退位，替代 provider=="github" 硬分派）。
     # github=False（App token 无 workflow scope，push 前删 .github/workflows）；其余平台 True。
     workflows_write: bool = True
+    # 建仓可选参数（auto_init/default_branch）能力位：卡驱动替代 kernel 内
+    # 二元 provider 字面量分叉。true = 该平台适配器接受这两个可选参数。
+    create_repo_options: bool = False
     clone_auth: str = "x_access_token"  # x_access_token | oauth2 | basic_password
     token_env: str = ""               # BOT_<PROVIDER>_TOKEN 环境变量名（空=派生）
     bot_username: str = ""            # B2：bot 身份（空=无 bot 协作能力）
@@ -422,6 +425,7 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         webhook_verify=webhook_verify,
         webhook_dialect=webhook_dialect,
         workflows_write=bool(raw.get("workflows_write", True)),
+        create_repo_options=bool(raw.get("create_repo_options", False)),
         clone_auth=clone_auth,
         token_env=token_env,
         bot_username=str(raw.get("bot_username") or ""),
@@ -477,6 +481,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
         "webhook_path": "/webhook/gitcode", "event_header": "X-GitCode-Event",
         "api_base": "https://gitcode.com/api/v5", "api_auth": "query_token",
         "webhook_verify": "hmac", "clone_auth": "x_access_token",
+        "create_repo_options": True,
         "bot_username": "my_grape_bot",
         "user_images_base": "https://raw.gitcode.com/user-images",
         "download_base": "https://raw.gitcode.com",
@@ -484,6 +489,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
     "github": {
         "name": "GitHub", "dialect": "github", "host": "github.com",
         "webhook_dialect": "github_web", "workflows_write": False,
+        "create_repo_options": True,
         "issue_search": True, "branch_create_form": "refs_sha",
         "webhook_path": "/webhook/github", "event_header": "X-GitHub-Event",
         "api_base": "https://api.github.com", "api_auth": "token_header",
@@ -567,7 +573,8 @@ _TABLE_SKIP = {"id", "provider", "source", "config_hash", "created_at", "updated
 _PLATFORM_CARD_COLUMNS = (
     "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
     "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
-    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "issue_write_form", "branch_create_form", "create_repo_options", "issue_search",
+    "git_tree_family",
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
