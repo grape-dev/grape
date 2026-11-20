@@ -173,6 +173,18 @@ def resolve_lb_strategy() -> str:
     return value
 
 
+def _annotate_gsb_span(**attrs: Any) -> None:
+    """把目标实例/状态补到 dispatch 层那条 gsb span 上（无活动 span 时无副作用）。
+
+    dispatch 只看到 service/method/mode，真正解析出来的实例与 HTTP 状态只有这里知道。
+    """
+    try:
+        from src.kernel.otel import annotate_current_span
+        annotate_current_span(**attrs)
+    except Exception:  # noqa: BLE001 — 埋点失败绝不阻断总线调用
+        return
+
+
 def _instance_of(url: str) -> str:
     """URL → 实例标识（netloc），用于指标与冷却表。"""
     try:
@@ -393,6 +405,11 @@ class GsbClient:
             self._enter_inflight(base)
             try:
                 resp = self._http.request(method, f"{base}{path}", headers=self._headers(), **kwargs)
+                _annotate_gsb_span(**{
+                    "gsb.instance": _instance_of(base),
+                    "gsb.status": getattr(resp, "status_code", "unknown"),
+                    "gsb.attempt": idx + 1,
+                })
                 if idx > 0:
                     log.info(f"GSB failover: service={self.service_name} used {base} (candidate #{idx + 1})")
                 self._cached_url, self._cached_at = base, time.time()
@@ -408,6 +425,12 @@ class GsbClient:
                 resp.raise_for_status()
                 return resp
             except Exception as exc:  # noqa: BLE001
+                _annotate_gsb_span(**{
+                    "gsb.instance": _instance_of(base),
+                    "gsb.status": _status_label(exc),
+                    "gsb.attempt": idx + 1,
+                    "gsb.error": type(exc).__name__,
+                })
                 _gsb_metrics.observe(
                     target=self.service_name,
                     caller=self.caller_name,

@@ -4467,6 +4467,10 @@ def run_pending_migrations() -> None:
     下发 SET SESSION lock_wait_timeout=10（QA R1：专用连接上的 SET 对 DDL 无效）；
     执行器内每条 pending 迁移前还会再下发一次。
     """
+    # Issue #3527：不筛域全量迁移的真正入口在这里（server_common
+    # → init_database → run_pending_migrations），owner 为空时必须在此告警，
+    # 而不是只挂在 run_domain_migrations() 顶部（该入口 owner 为空直接 return）。
+    _warn_missing_migration_owner_if_multi_db("pending")
     _ensure_migration_session_lock_timeout()
     try:
         _run_migrations_with_conn(db)
@@ -4488,6 +4492,50 @@ def _ensure_migrations_ledger(conn) -> None:
     conn.commit()
 
 
+def _warn_missing_migration_owner_if_multi_db(call_site: str = "pending") -> None:
+    """多库 DSN 已配但 GRAPE_MIGRATION_OWNER 为空 → ERROR 级告警（含修复指引）。
+
+    Issue #3527：告警必须挂在真正跑迁移的入口，且按 call site 区分文案——
+    - "pending"：init_database() → run_pending_migrations() 的不筛域形态，
+      执行器按全量登记表跑迁移，非属主进程会把别域的表建进本域库
+      （沙箱同名空表遮蔽即此形态）；
+    - "domain"：run_domain_migrations()（GRAPE_DOMAIN_LIB=1）的域迁移入口，
+      owner 为空时该入口直接 return，本进程未执行任何域迁移。
+    worker 与 event 共用 runtime 库、按设计不跑迁移，owner 为空属正常，不告警。
+    """
+    try:
+        from src.kernel import db_registry as _dbreg
+        if not _dbreg.lib_enabled():
+            return
+    except Exception as _e:  # noqa: BLE001 - 判定失败不阻断启动
+        log.warning(f"迁移属主告警判定跳过（db_registry 不可用）: {_e}")
+        return
+    if (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip():
+        return
+    _roles = {
+        (os.environ.get("GRAPE_PROCESS_ROLE") or "").strip().lower(),
+        (os.environ.get("GRAPE_SERVICE_NAME") or "").strip().lower(),
+    }
+    if "worker" in _roles:
+        return
+    if call_site == "domain":
+        log.error(
+            "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
+            "但 GRAPE_MIGRATION_OWNER 为空：本进程未执行任何域迁移（域迁移入口直接跳过），"
+            "登记的增量迁移将停留在未盖章状态。"
+            "修复：启动脚本按角色导出 GRAPE_MIGRATION_OWNER —— mgmt=mgmt / event=runtime / "
+            "insight=insight / worker 留空；参考 scripts/grape-systemd-run.sh 与 deploy/deploy3db.sh。"
+        )
+        return
+    log.error(
+        "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
+        "但 GRAPE_MIGRATION_OWNER 为空：本进程将以「不筛域」形态执行全量迁移，"
+        "可能把别域的表建进本域库（Issue #3527 空表遮蔽的成因）。"
+        "修复：启动脚本按角色导出 GRAPE_MIGRATION_OWNER —— mgmt=mgmt / event=runtime / "
+        "insight=insight / worker 留空；参考 scripts/grape-systemd-run.sh 与 deploy/deploy3db.sh。"
+    )
+
+
 def run_domain_migrations() -> None:
     """三库模式：本域进程只跑本域登记的迁移（不跑 legacy 全量）。
 
@@ -4495,6 +4543,9 @@ def run_domain_migrations() -> None:
     runtime 表只由 event 进程跑（worker 与 event 共库，避免并发重复 DDL），
     insight 由 insight 进程跑；mgmt 仍走 init_database() 的常规路径。
     """
+    # Issue #3527：此处 owner 为空 → 直接 return，本进程未执行
+    # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
+    _warn_missing_migration_owner_if_multi_db("domain")
     domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
     if domain not in ("runtime", "insight"):
         return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
@@ -9165,31 +9216,12 @@ register_migration(
 # =============================================================================
 
 _SANDBOX_CONTROL_TABLES: list[tuple[str, str]] = [
-    ("grape_t_cloud_sandboxes", """
-CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
-    id TEXT PRIMARY KEY,
-    issue_id VARCHAR(255) NOT NULL,
-    repo_key VARCHAR(255) NOT NULL,
-    sandbox_id VARCHAR(255) NOT NULL,
-    provider VARCHAR(64) NOT NULL,
-    provider_id TEXT DEFAULT '',
-    state VARCHAR(32) DEFAULT 'creating',
-    sandbox_url VARCHAR(512) DEFAULT '',
-    created_at TEXT,
-    last_refresh_at TEXT,
-    agent_installed INTEGER DEFAULT 0,
-    kill_attempts INTEGER DEFAULT 0,
-    task_id VARCHAR(255) DEFAULT '',
-    stage VARCHAR(64) DEFAULT '',
-    expire_at VARCHAR(32) DEFAULT '',
-    attempt INTEGER DEFAULT 0,
-    created_by INTEGER DEFAULT 0,
-    template_id VARCHAR(255) DEFAULT '',
-    template_name VARCHAR(255) DEFAULT '',
-    engine_type VARCHAR(64) DEFAULT '',
-    last_error TEXT DEFAULT '',
-    UNIQUE(sandbox_id)
-)"""),
+    # Issue #3527（2026-11-20）：grape_t_cloud_sandboxes 已从本组摘除。
+    # 该表归 runtime（configs/table_ownership.json: tables.grape_t_cloud_sandboxes=runtime），
+    # runtime 侧已有双实现：202611180001 ensure_cloud_sandboxes_table()（带所有权守卫）
+    # 与 src/domains/runtime/agents/sandbox/schema.py::ensure_sandbox_tables()。
+    # 保留在这里会让 mgmt 进程额外建出第三份同名空表，把沙箱列表读成 0 行。
+    # 本组剩余表全部归 mgmt；摘表不影响 202611110007 的 _ensure_column 列补齐段。
     ("grape_t_sandbox_templates", """
 CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
     id TEXT PRIMARY KEY,
@@ -9367,10 +9399,17 @@ CREATE TABLE IF NOT EXISTS grape_t_egress_admin_exception (
 
 
 def _migration_sandbox_control_plane_schema() -> None:
-    """沙箱控制面表/列（i7 移植）。全部 IF NOT EXISTS/_ensure_column 幂等。"""
+    """沙箱控制面表/列（i7 移植）。全部 IF NOT EXISTS/_ensure_column 幂等。
+
+    Issue #3527：本组表全部归 mgmt；函数体逐表过归属守卫，使「已配 DSN 但未注入
+    迁移属主（不筛域）」形态下 runtime/insight 进程也不会越权建出 mgmt 同名空表。
+    grape_t_cloud_sandboxes 已摘出本组，由 runtime 域 202611180001 建表。
+    """
     with db_lock:
         c = db.cursor()
         for _name, ddl in _SANDBOX_CONTROL_TABLES:
+            if _owned_skip(_name, "create sandbox control table"):
+                continue
             c.execute(ddl)
         # [沙箱迁移] 沙箱凭据形态列：cred_type 区分普通 worker('worker')/沙箱 worker('sandbox')
         _ensure_column(c, "runtime_credentials", "cred_type", "TEXT DEFAULT 'worker'")
@@ -9413,24 +9452,31 @@ def _migration_sandbox_control_plane_schema() -> None:
             ("github.com", "GET", "*", "https", 443),
             ("github.com", "POST", "*", "https", 443),
         ]
-        for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
-            try:
-                from src.kernel.sandbox_uid import new_row_uid as _nru
-                c.execute(
-                    "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
-                    "(id, backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (_nru(), "*", domain, method, path_prefix, scheme, port))
-            except Exception:
-                pass
+        # 白名单种子表归 mgmt：非属主域跳过，否则守卫已跳过建表、这里 INSERT 会 1146。
+        if not _owned_skip("grape_t_engine_sandbox_whitelist", "seed sandbox whitelist"):
+            for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
+                try:
+                    from src.kernel.sandbox_uid import new_row_uid as _nru
+                    c.execute(
+                        "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
+                        "(id, backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (_nru(), "*", domain, method, path_prefix, scheme, port))
+                except Exception:
+                    pass
         db.commit()
 
 
 # [rebase 撞号 2026-11-12] 原 202611100003 与基线 scene-pin-columns（weekly-11 新批次
 # 迁移时已顺延到 003）撞号——同号迁移被判「已执行」永久跳过。顺延到 202611110007
 # （004-006 已被 #1208 selector 占用，007 空闲）。迁移为幂等 DDL，重跑无损。
+# [Issue #3527] 本迁移只剩 mgmt 归属表（grape_t_cloud_sandboxes 已摘出并由 runtime
+# 域的 202611180001 负责），显式声明 domains 避免缺省域语义随摘表漂移；函数体内的
+# runtime 列补齐段（runtime_credentials / agent_runtimes）由 _ensure_column 守卫跳过，
+# 真正落地在 runtime 域 202611170045 / 202611180002。
 register_migration(
     "202611110007", "issue-sandbox-control-plane-schema", "safe",
-    lambda: _migration_sandbox_control_plane_schema())
+    lambda: _migration_sandbox_control_plane_schema(),
+    domains=("mgmt",))
 # =====================================================================
 # ===== Issue #1208: selector 标签化调度迁移 ===========================
 # 版本号：202611110004/5/6。[撞号教训 2026-11-11] 原选 202611110001-003「全新日期
@@ -9731,7 +9777,7 @@ def _fn_category_dict_and_tags() -> None:
 
     - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
     - scene_market 补 cat_l1_id / cat_l2_id（mgmt 域；skill 的三列同号需求
-      归 runtime 域，见 202611180001）；
+      归 runtime 域，见 202611180003）；
     - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
     - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
     """
@@ -9743,7 +9789,7 @@ def _fn_category_dict_and_tags() -> None:
             seed_category_dict()
         # skill 归 runtime 域（configs/table_ownership.json），本迁移只跑 mgmt 域：
         # 在这里补 skill 列会被归属守卫跳过、却因本迁移盖章而永久假绿 → 参考
-        # 202611180001（runtime 域）单独补。scene_market 归 mgmt，就地补。
+        # 202611180003（runtime 域）单独补。scene_market 归 mgmt，就地补。
         for _tbl, _col, _ddl in (
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
@@ -9791,10 +9837,10 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
-# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号。
-# 该号在 runtime 库已盖章（cloud-sandboxes），按「已发布保持原号、只改未发布的」规则，
-# 本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。若沿用旧号，
-# 版本表会判「已执行」而永久跳过，skill 的三个分类列永远不会被加。
+# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号：
+# 同一 version 的登记行名已被 issue2761-skill-classification-columns 占用，
+# ensure-cloud-sandboxes-in-runtime 因此被判「已执行」而从未真跑。按「已发布保持原号、
+# 只改未发布的」规则，本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。
 register_migration(
     version="202611180003",
     name="issue2761-skill-classification-columns",
@@ -10540,14 +10586,14 @@ register_migration(
 #   ② 按属主域各补一条幂等补正迁移，把已盖章库里缺失的列补上（存量库不会重跑老号）。
 _CATEGORY_COLUMN_PLANS = (
     # (属主域, 表, ((列, DDL), ...), 需重建视图的消费域)
-    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180001 补（基线自带），
+    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180003 补（基线自带），
     # 在这里重复补只会与它抢写同一批列（架构复审 F3 / 基线 085f736a5）。
     ("mgmt", "scene_market",
      (("cat_l1_id", "INTEGER DEFAULT 0"), ("cat_l2_id", "INTEGER DEFAULT 0")),
      ("insight", "runtime")),
 )
 
-# skill 的消费域视图：列由 202611180001 补，但 MariaDB 视图列清单在 CREATE 时固化，
+# skill 的消费域视图：列由 202611180003 补，但 MariaDB 视图列清单在 CREATE 时固化，
 # 补列不会让既有视图自愈 —— 读 mgmt/insight 上的 skill 视图仍 1054。本迁移只重建视图。
 _SKILL_VIEW_OWNER = "runtime"
 _SKILL_VIEW_TABLE = "skill"

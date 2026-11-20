@@ -293,23 +293,41 @@ class _RoutedService:
 
         def _dispatch(*args: Any, **kwargs: Any) -> Any:
             mode = decide_mode(self._svc_name, method)
-            impl = getattr(self._instance(mode), method)
-            if mode != _MODE_REMOTE:
-                return impl(*args, **kwargs)
-            with self._remote_timeout_ctx(method):
-                try:
+
+            def _call() -> Any:
+                impl = getattr(self._instance(mode), method)
+                if mode != _MODE_REMOTE:
                     return impl(*args, **kwargs)
-                except _REMOTE_CHANNEL_ERRORS as exc:
-                    # fail-fast：明确错误码、不回落 lib（本地实例未被触碰）
-                    if _httpx is not None and isinstance(exc, _httpx.TimeoutException):
-                        raise GsbRemoteTimeoutError(
-                            f"GSB remote timeout: {self._svc_name}.{method} "
+                with self._remote_timeout_ctx(method):
+                    try:
+                        return impl(*args, **kwargs)
+                    except _REMOTE_CHANNEL_ERRORS as exc:
+                        # fail-fast：明确错误码、不回落 lib（本地实例未被触碰）
+                        if _httpx is not None and isinstance(exc, _httpx.TimeoutException):
+                            raise GsbRemoteTimeoutError(
+                                f"GSB remote timeout: {self._svc_name}.{method} "
+                                f"({type(exc).__name__})"
+                            ) from exc
+                        raise GsbRemoteUnreachableError(
+                            f"GSB remote unreachable: {self._svc_name}.{method} "
                             f"({type(exc).__name__})"
                         ) from exc
-                    raise GsbRemoteUnreachableError(
-                        f"GSB remote unreachable: {self._svc_name}.{method} "
-                        f"({type(exc).__name__})"
-                    ) from exc
+
+            # 总线调用 span（2026-11-20）：Local 模式走同进程 lib，以前在 trace 里
+            # 完全不可见，跨域调用只能看到"请求变慢"看不到是哪一段。放在 dispatch
+            # 层是因为它是 local / remote 两条路径的唯一共同入口；调用方据此能看到
+            # service/method/mode，remote 模式再由 client 补 instance/status。
+            try:
+                from src.kernel.otel import feature_span as _feature_span
+            except Exception:  # noqa: BLE001 — 埋点不可用绝不能影响业务调用
+                return _call()
+            with _feature_span(f"gsb {self._svc_name}.{method}", {
+                "gsb.service": self._svc_name,
+                "gsb.method": method,
+                "gsb.mode": mode,
+                "gsb.caller": caller_domain() or "",
+            }):
+                return _call()
 
         return _dispatch
 

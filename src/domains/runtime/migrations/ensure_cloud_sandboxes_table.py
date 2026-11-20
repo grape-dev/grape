@@ -44,9 +44,23 @@ _INDEXES = (
 
 
 def ensure_cloud_sandboxes_table() -> None:
-    """在 owner 域（runtime）库建表 + 索引；幂等。"""
+    """在 owner 域（runtime）库建表 + 索引；幂等。
+
+    Issue #3527：函数体补所有权守卫。迁移执行器在「多 DSN 已配但
+    GRAPE_MIGRATION_OWNER 为空」时不筛域、会跑全量登记表，mgmt/insight 进程
+    曾因此把本表建进自己的库（同名空表遮蔽沙箱列表）。守卫按
+    configs/table_ownership.json 判定，非 runtime 域直接跳过。
+    """
     from src.kernel.config import log
     from src.kernel.session_manager import db, db_lock
+
+    try:
+        from src.kernel import table_ownership as _own
+        if _own.should_skip("grape_t_cloud_sandboxes"):
+            log.info("[DDL_SKIP] `grape_t_cloud_sandboxes`: 归属 runtime，非本域跳过建表")
+            return
+    except Exception as _e:  # noqa: BLE001 - 归属清单不可用时按本域表处理（本模块即 runtime）
+        log.warning(f"table_ownership 不可用，按本域处理建表: {_e}")
 
     with db_lock:
         c = db.cursor()

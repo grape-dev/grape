@@ -3273,6 +3273,8 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
     """
     _task_user_id = _check_task_access(task_id, cred)
     _now = datetime.now(timezone.utc).isoformat()
+    # 表 owner=runtime（configs/table_ownership.json）。本端点在 runtime 域进程内运行，
+    # 写走进程主库即属主库，不做跨域写；读侧（列表/kill/计数）才需按域解析兜底历史落库。
     try:
         with db_lock:
             c = db.cursor()
@@ -3343,6 +3345,98 @@ def _fetch_across_domains(sql: str, params=(), domains=("runtime", "mgmt")) -> l
     return []
 
 
+def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgmt")) -> tuple:
+    """同 _fetch_across_domains，但额外返回命中域：(rows, hit_domain)。
+
+    Issue #3527：kill 的台账写必须跟随读侧落点——rows 非空时
+    hit_domain 即数据所在域（runtime 表 1146 回退到历史 mgmt 时为 "mgmt"）。
+    读语义与 _fetch_across_domains 完全一致：表不存在才换域，其余异常原样抛出。
+    """
+    from src.kernel.bulk_read import reader
+
+    last = None
+    for dom in domains:
+        try:
+            with reader(dom) as c:
+                c.execute(sql, params)
+                rows = c.fetchall() or []
+            return rows, dom
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "1146" not in msg and "doesn't exist" not in msg:
+                raise
+            last = e
+    if last is not None:
+        raise last
+    return [], (domains[0] if domains else "")
+
+
+def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -> int:
+    """在指定域写 kill 台账（state='killed'），返回 UPDATE rowcount。
+
+    Issue #3527：写侧跟随读侧定位的域——
+    - 该域有自有 DSN（三库拓扑）→ db_registry.new_connection 独立域连接
+      （不复用进程级缓存连接，避免跨线程 InterfaceError；autocommit，用完即关）；
+    - 域连接不可用（单库 / 视图期 / SQLite）→ 回落进程主库（与读侧 reader 的回落
+      语义一致），持 db_lock 并 commit。
+    表不存在（1146 / doesn't exist）按 0 行返回，交由调用方回退另一域；
+    其余异常原样抛出，不静默。
+    """
+    from src.kernel import session_manager as _sm
+
+    _sql = ("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? "
+            "WHERE sandbox_id=?")
+    conn = None
+    try:
+        from src.kernel import db_registry as _dbreg
+        conn = _dbreg.new_connection(domain, autocommit=True)
+    except Exception:  # noqa: BLE001 - 无自有 DSN/连接失败按不可用处理，回落进程主库
+        conn = None
+
+    def _rowcount(cur) -> int:
+        try:
+            return int(cur.rowcount)
+        except Exception:  # noqa: BLE001 - 无 rowcount 视为未确认更新，交由调用方回退
+            return 0
+
+    if conn is not None:
+        c = None
+        try:
+            c = conn.cursor()
+            c.execute(_sql, (now_iso, sandbox_id))
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    with _sm.db_lock:
+        c = _sm.db.cursor()
+        try:
+            c.execute(_sql, (now_iso, sandbox_id))
+            _sm.db.commit()
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 @router.get("/cloud-sandboxes", operation_id="runtime_cloud_sandboxes", summary="List cloud sandboxes",
             description="Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.")
 def runtime_list_cloud_sandboxes(
@@ -3360,22 +3454,12 @@ def runtime_list_cloud_sandboxes(
 
     extra_conditions = []
     extra_params = []
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    # 三库拓扑：沙箱/owner/provider 配置与 agent_tasks/agent_runtimes/runtime_credentials
-    # 分属不同域库，单条跨域 JOIN 必然 1146（beta 实测：进程库是 grape_beta_runtime）。
-    # 改为「沙箱分页查询 + runtime 侧富化」两段读，分页/计数/排序只由沙箱单表决定；
-    # 每段用 _fetch_across_domains 按域重试，避免把表的实际落库位置写死。
+    # 归属（configs/table_ownership.json）：grape_t_cloud_sandboxes 归 runtime，
+    # user_accounts / grape_t_sandbox_provider_config 归 mgmt；agent_tasks /
+    # agent_runtimes / runtime_credentials 归 runtime。单条跨域 JOIN 在分库下必然
+    # 1146，故拆成「沙箱单表分页计数 + runtime 侧富化 + mgmt public 补 owner/provider
+    # 名」；每段用 _fetch_across_domains 按域重试（runtime 优先，仅 1146 时回退
+    # mgmt），既不把表的历史落库位置写死，也不让历史空表遮蔽 owner 域的真实行。
     q = (q or "").strip()
     if q:
         # 事件号（t.event_seq）不在沙箱表上：先在任务域解析成 task_id 集合，再回沙箱表过滤。
@@ -3402,7 +3486,9 @@ def runtime_list_cloud_sandboxes(
         extra_conditions.append("s.state=?")
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
-    _domains = ("mgmt", "runtime")
+    # 沙箱表 owner=runtime：域序必须 runtime 优先，否则会先读历史 mgmt 空表 → total=0
+    # 遮蔽真实数据（Issue #3527）。保留 mgmt 作为 1146 回退，兼容迁移前的历史落库位置。
+    _domains = ("runtime", "mgmt")
     # 原 SQL 有两个跨域 LEFT JOIN（user_accounts / sandbox_provider_config 都归 mgmt）。
     # JOIN 要求同库，三库拓扑下必须拆：这里只查本域单表，两个 mgmt 列留 NULL 占位，
     # 由下面的富化段批量补齐（列数与顺序保持不变，下游下标不动）。
@@ -3501,16 +3587,17 @@ def runtime_list_cloud_sandboxes(
 def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_session_token)):
     """[沙箱迁移] 强杀云沙箱。BOLA 校验后调 provider.kill_sandbox。"""
     from src.api.deps import check_repo_access
-    with db_lock:
-        c = db.cursor()
-        # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
-        # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
-        # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
-        # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
-        # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform
-        c.execute("SELECT provider, state, repo_key, provider_id "
-                  "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,))
-        row = c.fetchone()
+    # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
+    # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
+    # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
+    # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
+    # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform。
+    # 表 owner=runtime：读按域解析（runtime 优先，1146 回退历史 mgmt/单库形态），
+    # 不再假定进程主库一定有表；状态写跟随读侧命中的域（见下方 UPDATE 回退链）。
+    _kill_rows, _hit_domain = _fetch_across_domains_with_hit(
+        "SELECT provider, state, repo_key, provider_id "
+        "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,), ("runtime", "mgmt"))
+    row = _kill_rows[0] if _kill_rows else None
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "sandbox not found"})
     _platform_key = ""
@@ -3535,11 +3622,30 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
         if hasattr(provider, 'kill_sandbox'):
             success = provider.kill_sandbox(sandbox_id)
             if success:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
-                              (datetime.now(timezone.utc).isoformat(), sandbox_id))
-                    db.commit()
+                # Issue #3527：写侧跟随读侧定位——先写读命中的域，
+                # 0 行（1146/行不在该域）回退另一域；两域都 0 行 → 报可见错误，
+                # 不再「provider 已杀、台账停留 running 且静默返回 killed」。
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                _updated = 0
+                _write_err = None
+                _zero_rowcount = False
+                for _dom in (_hit_domain,) + tuple(
+                        d for d in ("runtime", "mgmt") if d != _hit_domain):
+                    try:
+                        _updated = _mark_sandbox_killed_on_domain(_dom, sandbox_id, _now_iso)
+                    except Exception as _e:  # noqa: BLE001 - 单域写失败继续试另一域
+                        _write_err = _e
+                        continue
+                    if _updated:
+                        break
+                    _zero_rowcount = True
+                if not _updated:
+                    _reason = "rowcount=0" if _zero_rowcount else "no confirmed row"
+                    if _write_err is not None:
+                        _reason += f"; domain write error: {_write_err}"
+                    _msg = (f"provider killed sandbox {sandbox_id} but ledger row "
+                            f"update failed in runtime/mgmt domains ({_reason})")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": _msg})
                 return {"status": "killed"}
             return {"status": "kill_failed"}
         raise HTTPException(status_code=500, detail={"code": 500, "message": "provider has no kill_sandbox method"})
@@ -3641,19 +3747,22 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 表归 mgmt：SQL 在 mgmt public 一份
-    from src.domains.mgmt import public as _mg_own
-    if not _mg_own.sandbox_provider_owned_by(provider_id, cred.id):
+    # 归属：grape_t_sandbox_provider_config 归 mgmt，跨域读写一律经 mgmt public
+    # （sandbox_provider_owned_by / sandbox_provider_max_sandboxes），本文件不直查该表；
+    # grape_t_cloud_sandboxes 归 runtime，读保留域解析（1146 回退 mgmt 历史落库位置）。
+    from src.domains.mgmt.public import (sandbox_provider_max_sandboxes,
+                                         sandbox_provider_owned_by)
+
+    if not sandbox_provider_owned_by(provider_id, cred.id):
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
-                  (provider_id,))
-        active_count = c.fetchone()[0] or 0
-        from src.domains.mgmt import public as _mg_max
-        max_sandboxes = _mg_max.sandbox_provider_max_sandboxes(provider_id) or 10
-    return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
+    max_sandboxes = sandbox_provider_max_sandboxes(provider_id) or 10
+    _cnt_rows = _fetch_across_domains(
+        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
+        "WHERE provider_id=? AND state IN ('creating','running')",
+        (provider_id,), ("runtime", "mgmt"))
+    active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
+    return {"active_count": active_count, "max_sandboxes": max_sandboxes}
 
 
 @router.get("/cloud-runtimes", operation_id="runtime_cloud_runtimes",
