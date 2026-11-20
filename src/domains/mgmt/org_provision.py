@@ -458,6 +458,22 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
 
     _provider_tokens: dict[str, str] = {}
 
+    def _token_for_repo(repo_key: str, provider: str) -> str:
+        """删组织仓库优先用仓库级凭据（通常带 admin 权限），再回落用户 token。
+
+        实测：组织 owner 的 GitHub 用户 PAT 对 Misheng-chenyan/org-123 只有
+        push 权限，DELETE 会 403；而托管时落库的仓库级 token 有 admin，可删。
+        """
+        try:
+            from src.domains.mgmt.user import db as _udb
+
+            _t = _udb.get_repo_token_for(repo_key) or ""
+            if _t:
+                return _t
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"org delete: repo token lookup skipped repo={repo_key}: {exc}")
+        return _token_for_provider(provider)
+
     def _token_for_provider(provider: str) -> str:
         """按仓库 provider 取 owner token（GitHub 组织仓库不能用 GitCode token 删）。"""
         if provider in _provider_tokens:
@@ -488,7 +504,7 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
                 from src.kernel.repo_key import parse_repo_key
 
                 provider = parse_repo_key(repo_key)[0]
-                token = _token_for_provider(provider)
+                token = _token_for_repo(repo_key, provider)
                 if token:
                     try:
                         _delete_vcs_repo(repo_key, token)
