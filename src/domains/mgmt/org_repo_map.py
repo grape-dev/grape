@@ -942,9 +942,32 @@ def analyze_all(org_id: str, *, actor_id: str = "") -> dict:
     return {"queued": len(repo_keys)}
 
 
+def _ai_status_map(org_id: str) -> dict[str, dict]:
+    """repo_key -> AI 台账（状态/错误/时间），供组织详情页展示 AI 进度。"""
+    try:
+        ensure_ai_table()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT repo_key, status, error, analyzed_at FROM grape_t_org_repo_ai "
+                "WHERE org_id=?",
+                (str(org_id),),
+            )
+            rows = c.fetchall()
+        return {
+            str(r[0]): {"status": str(r[1] or ""), "error": str(r[2] or ""),
+                        "analyzed_at": str(r[3] or "")}
+            for r in rows
+        }
+    except Exception as exc:  # noqa: BLE001 - 缺表/分库时退回纯地图视图
+        log.debug(f"org_repo_map ai status unavailable org={org_id}: {exc}")
+        return {}
+
+
 def list_repo_map(org_id: str) -> dict:
     """全量视图：组织关联仓库 + 地图状态（未分析的也返回）。"""
     maps = {m["repo_key"]: m for m in list_maps(org_id)}
+    ai_status = _ai_status_map(org_id)
     out = []
     for row in list_org_repos(org_id) or []:
         if row.get("is_org_repo"):
@@ -968,6 +991,9 @@ def list_repo_map(org_id: str) -> dict:
             "error": m.get("error") or "",
             "analyzed_at": m.get("analyzed_at") or "",
             "has_summary": bool(m.get("summary_md")),
+            "ai_status": (ai_status.get(key) or {}).get("status", ""),
+            "ai_error": (ai_status.get(key) or {}).get("error", ""),
+            "ai_analyzed_at": (ai_status.get(key) or {}).get("analyzed_at", ""),
         })
     out.sort(key=lambda x: (0 if x["is_org_repo"] else 1, x["full_name"] or x["repo_key"]))
     ready = sum(1 for x in out if x["status"] == "ready")

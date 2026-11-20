@@ -80,6 +80,8 @@
     "repo_map_subtitle": "Automatically summarize each repository purpose, interfaces and keywords for organization dispatch. Summaries are mirrored to org-context/repo-map/.",
     "repo_map_generate": "Build map",
     "repo_map_analyzing": "Analyzing…",
+    "repo_map_running": "An AI analysis is already running; please wait",
+    "repo_map_no_repos": "No linked repositories to analyze",
     "repo_map_analyze": "Analyze",
     "repo_map_reanalyze": "Re-analyze",
     "repo_map_view": "View capabilities",

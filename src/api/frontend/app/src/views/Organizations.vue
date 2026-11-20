@@ -916,7 +916,17 @@ function repoName(repo) {
 }
 function repoMapItem(repo) {
   const key = String((repo && repo.repo_key) || '')
-  return repoMap.value.find((item) => item.repo_key === key) || null
+  const item = repoMap.value.find((x) => x.repo_key === key) || null
+  if (!item) return null
+  // AI 台账优先：链接/生成地图现在都走 AI，地图 status 可能仍是上一次的 ready。
+  const ai = String(item.ai_status || '')
+  const aiToMap = { queued: 'queued', running: 'analyzing', succeeded: 'ready', failed: 'failed' }
+  return {
+    ...item,
+    status: aiToMap[ai] || item.status,
+    error: ai === 'failed' ? (item.ai_error || item.error) : item.error,
+    analyzed_at: item.ai_analyzed_at || item.analyzed_at,
+  }
 }
 function openRepoWorkspace(repo) {
   const fullName = String((repo && repo.full_name) || '').trim()
@@ -1385,8 +1395,28 @@ function _startMapPoll() {
 function analyzeAllMap() {
   if (!detailId.value || mapBusy.value) return
   mapBusy.value = true
-  G.API.post('/orgs/' + detailId.value + '/repo-map/analyze', {})
+  G.API.post('/orgs/' + detailId.value + '/repo-analysis/run', { mode: 'all' })
     .then(function (d) {
+      if (d && d.skipped) {
+        G.app.showToast(
+          d.reason === 'running'
+            ? t('detail.repo_map_running')
+            : t('detail.repo_map_no_repos')
+        )
+        setTimeout(loadRepoMap, 500)
+        if (d.reason === 'running') _startMapPoll()
+        else mapBusy.value = false
+        return
+      }
+      if (d && d.ok === false) {
+        mapBusy.value = false
+        G.app.showToast(
+          d.reason === 'running'
+            ? t('detail.repo_map_running')
+            : t('detail.repo_map_failed', { msg: d.reason || '' })
+        )
+        return
+      }
       G.app.showToast(t('detail.repo_map_started', { n: (d && d.queued) || 0 }))
       setTimeout(loadRepoMap, 800)
       _startMapPoll()
@@ -1399,22 +1429,27 @@ function analyzeAllMap() {
 function analyzeOneMap(item) {
   if (!detailId.value || !item || !item.repo_key) return
   mapBusy.value = true
-  G.API.post(
-    '/orgs/' + detailId.value + '/repo-map/' + encodeURIComponent(item.repo_key) + '/analyze',
-    {},
-    120000
-  )
-    .then(function () {
-      return loadRepoMap()
-    })
-    .then(function () {
-      G.app.showToast(t('detail.repo_map_one_done'))
+  G.API.post('/orgs/' + detailId.value + '/repo-analysis/run', {
+    mode: 'single',
+    repo_key: item.repo_key,
+  })
+    .then(function (d) {
+      if (d && d.ok === false) {
+        mapBusy.value = false
+        G.app.showToast(
+          d.reason === 'running'
+            ? t('detail.repo_map_running')
+            : t('detail.repo_map_failed', { msg: d.reason || '' })
+        )
+        return
+      }
+      G.app.showToast(t('detail.repo_map_started', { n: 1 }))
+      setTimeout(loadRepoMap, 500)
+      _startMapPoll()
     })
     .catch(function (e) {
-      G.app.showToast(t('detail.repo_map_failed', { msg: (e && e.message) || e }))
-    })
-    .finally(function () {
       mapBusy.value = false
+      G.app.showToast(t('detail.repo_map_failed', { msg: (e && e.message) || e }))
     })
 }
 function openMapSummary(item) {

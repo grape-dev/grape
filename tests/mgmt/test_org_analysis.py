@@ -104,6 +104,9 @@ def test_save_ai_result_overwrites_and_records_status():
     assert status["engine_id"] == 7
     files = org_repo_map.repo_map_markdown_files(org["id"])
     assert any("summary.md" in p for p in files)
+    rows = org_repo_map.list_repo_map(org["id"])["repos"]
+    assert rows[0]["ai_status"] == "succeeded"
+    assert rows[0]["ai_analyzed_at"]
 
 
 def test_ensure_daily_task_is_idempotent():
