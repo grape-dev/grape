@@ -46,6 +46,45 @@ def _expected_webhook_token(repo: str, provider: str) -> str:
         return ""
 
 
+def _webhook_web_url(payload: dict) -> str:
+    """从 webhook payload 提取仓库/项目 web URL（跨平台字段并集）。"""
+    if not isinstance(payload, dict):
+        return ""
+    project = payload.get("project")
+    if isinstance(project, dict) and project.get("web_url"):
+        return str(project.get("web_url") or "")
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        for key in ("html_url", "web_url", "url"):
+            if repository.get(key):
+                return str(repository.get(key) or "")
+    for key in ("web_url", "html_url"):
+        if payload.get(key):
+            return str(payload.get(key) or "")
+    return ""
+
+
+def _webhook_instance_mismatch(provider: str, payload: dict) -> bool:
+    """Issue #3580/R10：payload web_url 的 host 必须与平台卡 host 一致。
+
+    只做 host（含端口）强校验，防跨实例同名仓伪造投递；url 缺失时不判定
+    （旧平台形态兼容）。
+    """
+    import urllib.parse as _up
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    url = _webhook_web_url(payload)
+    if not url:
+        return False
+    card = get_platform_card(provider)
+    if card is None:
+        return False
+    try:
+        got = (_up.urlsplit(url).netloc or "").lower()
+    except Exception:
+        return True
+    return got != (card.host or "").lower()
+
+
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
     """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
 
@@ -2931,7 +2970,6 @@ def _is_valid_issue_number(v) -> bool:
 @router.post("/webhook/{provider}")
 async def generic_vcs_webhook(provider: str, request: Request):
     """平台卡驱动 webhook：验签策略按卡（hmac / token_compare），事件经方言模板归一。"""
-    import asyncio as _aio
     from src.domains.runtime.vcs.adapter import get_backend, resolve_source_by_path
     from src.domains.runtime.vcs.platform_card import get_platform_card
 
@@ -2990,10 +3028,27 @@ async def generic_vcs_webhook(provider: str, request: Request):
         log.info(f"generic webhook: provider={provider} repo={repo} repo-deleted handled: {_del_result.get('status')}")
         return JSONResponse(status_code=_code, content=_del_result)
 
-    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} verified, pipeline scheduled")
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, headers,
-                                      account=repo, repo_key_override=_repo_key))
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/R10：实例隔离——payload web_url 必须属于该卡实例
+    if _webhook_instance_mismatch(str(provider or "").lower(),
+                                  _raw_payload if isinstance(_raw_payload, dict) else {}):
+        log.warning(f"generic webhook rejected: web_url instance mismatch provider={provider} repo={repo}")
+        return JSONResponse(status_code=403, content={
+            "code": 403, "message": "web_url does not belong to this platform instance"})
+
+    # Issue #3580/P3：验签通过后先持久化再 200；Event 进程 worker 幂等消费/重放
+    from src.domains.runtime.webhook_inbox import enqueue_webhook
+    try:
+        _enq = enqueue_webhook(repo_key=_repo_key, provider=str(provider or "").lower(),
+                               event_header=event_header, body=body, headers=headers)
+    except Exception as _e:
+        log.warning(f"generic webhook enqueue failed provider={provider} repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} "
+             f"persisted id={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "duplicate" if _enq.get("duplicate") else "queued",
+            "seq": 0, "inbox_id": _enq.get("id"), "event_type": event_header,
+            "message": "event persisted"}
 
 
 async def _on_handoff_dispatch(event):

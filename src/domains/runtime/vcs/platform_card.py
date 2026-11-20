@@ -31,8 +31,15 @@ _VALID_ISSUE_WRITE_FORM = {"repo_path", "owner_param"}
 _VALID_BRANCH_CREATE_FORM = {"form", "refs_sha"}
 _VALID_WEBHOOK_VERIFY = ("hmac", "token_compare")
 # D105-19：托管 webhook 形态（分派 webhook 三件套的实现家族）
-_VALID_WEBHOOK_DIALECTS = ("github_web", "gitee_v5")
+# Issue #3580：gitlab_v4 = GitLab /projects/{id}/hooks 家族（自建实例可复用）
+_VALID_WEBHOOK_DIALECTS = ("github_web", "gitee_v5", "gitlab_v4")
 _VALID_CLONE_AUTH = ("x_access_token", "oauth2", "basic_password")
+
+# 一实例一卡（Issue #3580）：卡名即 provider。仅允许字母/数字/下划线/短横线，
+# 长度受限；显式拒绝 `@`（避免把账号/实例语法混进 provider 前缀）。
+_PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# host 为裸主机名（可带合法端口），不含 scheme/路径/内嵌凭据。
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$")
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,9 @@ class PlatformCard:
     bot_username: str = ""            # B2：bot 身份（空=无 bot 协作能力）
     user_images_base: str = ""        # 平台编辑器图片附件基址（空=该平台无此机制）
     download_base: str = ""           # 仓库 ZIP 下载基址（github=codeload，gitcode=raw）
+    # Issue #3580：自建/私有实例的 TLS CA（PEM 绝对路径，仅 git 传输使用）。
+    # 空=使用系统 CA；改卡即生效，不引入环境变量。
+    ca_bundle: str = ""
     issue_search: bool = False        # D36/S56：有无 issue 搜索端点（策略能力位，非平台名）
     issue_write_form: str = "repo_path"  # D41/S61：issue 写端点形态（repo_path=存量 /repos/{o}/{r}/issues；owner_param=gitee /repos/{o}/issues+repo 入 body，实弹观测）
     branch_create_form: str = "form"     # D44/S66：建分支形态（form=Gitee 系 v5 POST /branches {branch_name,refs}；refs_sha=GitHub 查 sha→POST /git/refs，存量两形态）
@@ -139,6 +149,64 @@ def _build_brand_color(provider: str, raw: dict) -> str:
     if len(c) != 7 or c[0] != "#" or any(ch not in "0123456789abcdefABCDEF" for ch in c[1:]):
         raise PlatformCardError(f"{provider}: brand_color 必须是 #RRGGBB 十六进制色值: {c!r}")
     return c
+
+
+def _validate_provider_name(provider: str) -> None:
+    """Issue #3580/R2：卡名即 provider，一实例一卡。
+
+    只允许 `[A-Za-z0-9_-]`、长度 1..64；显式拒绝 `@`（账号/实例语法不得混入
+    provider 前缀），并给出「每实例一卡」的可执行提示。
+    """
+    if "@" in (provider or ""):
+        raise PlatformCardError(
+            f"provider 名不得包含 '@'（每实例一卡）：{provider!r}——"
+            "请为每个自建 GitLab 实例单独建卡，如 gitlab-corp")
+    if not provider or not _PROVIDER_NAME_RE.match(provider):
+        raise PlatformCardError(
+            f"provider 名非法: {provider!r}（仅允许 [A-Za-z0-9_-]，长度 1..64）")
+
+
+def _validate_host(provider: str, host: str) -> None:
+    """Issue #3580/R3：host 为裸主机名（可带合法端口），不含 scheme/路径/凭据。"""
+    if not host or not _HOST_RE.match(host) or ".." in host:
+        raise PlatformCardError(f"{provider}: host 非法: {host!r}（应为裸主机名，可带端口）")
+
+
+def _validate_instance_url(provider: str, name: str, url: str, *, required: bool) -> None:
+    """Issue #3580/R3：实例 URL 必须 https、无内嵌凭据/query/fragment/`..`。"""
+    if not url:
+        if required:
+            raise PlatformCardError(f"{provider}: {name} 不能为空")
+        return
+    import urllib.parse as _up
+    try:
+        parts = _up.urlsplit(url)
+    except Exception:
+        raise PlatformCardError(f"{provider}: {name} 非法: {url!r}")
+    if parts.scheme != "https":
+        raise PlatformCardError(f"{provider}: {name} 必须使用 https: {url!r}")
+    if not parts.hostname:
+        raise PlatformCardError(f"{provider}: {name} 缺少主机名: {url!r}")
+    if parts.username or parts.password or "@" in parts.netloc:
+        raise PlatformCardError(f"{provider}: {name} 不得内嵌凭据: {url!r}")
+    if parts.query or parts.fragment:
+        raise PlatformCardError(f"{provider}: {name} 不得包含 query/fragment: {url!r}")
+    path = parts.path or ""
+    if ".." in path.split("/"):
+        raise PlatformCardError(f"{provider}: {name} 不得包含 '..' 路径段: {url!r}")
+
+
+def _build_ca_bundle(provider: str, raw: dict) -> str:
+    """Issue #3580/R4：ca_bundle 为 PEM 绝对路径（空=系统 CA）。"""
+    raw_ca = str(raw.get("ca_bundle") or "").strip()
+    if not raw_ca:
+        return ""
+    import os as _os
+    if "\x00" in raw_ca or not _os.path.isabs(raw_ca):
+        raise PlatformCardError(f"{provider}: ca_bundle 必须是绝对路径: {raw_ca!r}")
+    if not _os.path.isfile(raw_ca):
+        raise PlatformCardError(f"{provider}: ca_bundle 文件不存在: {raw_ca!r}")
+    return raw_ca
 
 
 # 台阶3：resources 段合法键（声明化资源 API 映射）
@@ -353,22 +421,23 @@ def _opt_bool(raw: dict, key: str) -> "bool | None":
 
 def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     """Builder：dict → PlatformCard，校验失败抛 PlatformCardError（S18 校验面）。"""
-    if not provider or not isinstance(provider, str) or not provider.replace("_", "").isalnum():
+    if not isinstance(provider, str):
         raise PlatformCardError(f"provider 名非法: {provider!r}")
+    _validate_provider_name(provider)
     if not isinstance(raw, dict):
         raise PlatformCardError(f"{provider}: 配置必须是对象")
     dialect = raw.get("dialect", "github")
     if dialect not in _VALID_DIALECTS:
         raise PlatformCardError(f"{provider}: dialect 必须是 {'/'.join(_VALID_DIALECTS)}，得到 {dialect!r}")
     host = str(raw.get("host") or "").strip()
-    if not host or "/" in host or " " in host:
-        raise PlatformCardError(f"{provider}: host 非法: {host!r}")
+    _validate_host(provider, host)
     webhook_path = str(raw.get("webhook_path") or f"/webhook/{provider}")
     if not webhook_path.startswith("/webhook/") or len(webhook_path) <= len("/webhook/"):
         raise PlatformCardError(f"{provider}: webhook_path 必须形如 /webhook/<name>: {webhook_path!r}")
     api_base = str(raw.get("api_base") or f"https://{host}").strip().rstrip("/")
-    if not api_base.startswith(("http://", "https://")):
-        raise PlatformCardError(f"{provider}: api_base 非法: {api_base!r}")
+    _validate_instance_url(provider, "api_base", api_base, required=True)
+    download_base = str(raw.get("download_base") or "").strip().rstrip("/")
+    _validate_instance_url(provider, "download_base", download_base, required=False)
     api_auth = raw.get("api_auth", "query_token" if dialect == "github" else "bearer_header")
     if api_auth not in _VALID_API_AUTH:
         raise PlatformCardError(f"{provider}: api_auth 必须是 {'/'.join(_VALID_API_AUTH)}")
@@ -426,7 +495,8 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         token_env=token_env,
         bot_username=str(raw.get("bot_username") or ""),
         user_images_base=str(raw.get("user_images_base") or ""),
-        download_base=str(raw.get("download_base") or ""),
+        download_base=download_base,
+        ca_bundle=_build_ca_bundle(provider, raw),
         issue_search=bool(raw.get("issue_search", False)),
         issue_write_form=str(raw.get("issue_write_form", "repo_path")),
         branch_create_form=str(raw.get("branch_create_form", "form")),
@@ -495,6 +565,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
     },
     "gitlab": {
         "name": "GitLab", "dialect": "gitlab", "host": "gitlab.com",
+        "webhook_dialect": "gitlab_v4",
         "webhook_path": "/webhook/gitlab", "event_header": "X-Gitlab-Event",
         "api_base": "https://gitlab.com/api/v4", "api_auth": "private_token",
         "webhook_verify": "token_compare", "clone_auth": "oauth2",
@@ -571,7 +642,7 @@ _PLATFORM_CARD_COLUMNS = (
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 # 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
 

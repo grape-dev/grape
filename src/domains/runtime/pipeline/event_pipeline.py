@@ -4868,7 +4868,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 continue
             _r_push = repogit._run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_linked_token, timeout=120)
+                token=_linked_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 _log.warning(f"direct linked PR: push failed {_rk}: {_err}")

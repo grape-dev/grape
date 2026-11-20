@@ -1820,7 +1820,7 @@ _ANY_QUERIES: dict[str, str] = {
         "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
     "repo_platform_cards_all": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
@@ -1828,7 +1828,7 @@ _ANY_QUERIES: dict[str, str] = {
         "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms ORDER BY provider"),
     "repo_platform_bot_status_set": (
         "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "

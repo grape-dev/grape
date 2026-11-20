@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     download_base       TEXT NOT NULL DEFAULT '',      -- 归档/文件下载基址（展示用）
     user_images_base    TEXT NOT NULL DEFAULT '',      -- 用户图片基址（展示用）
     brand_color         TEXT NOT NULL DEFAULT '',      -- 品牌色（展示用）
+    ca_bundle           TEXT NOT NULL DEFAULT '',      -- Issue #3580：实例 TLS CA（PEM 绝对路径，仅 git 传输）
     source              TEXT NOT NULL DEFAULT 'config',-- 行来源：config | manual
     config_hash         TEXT NOT NULL DEFAULT '',      -- 规范化内容 hash（行级）
     enabled             INTEGER NOT NULL DEFAULT 1,    -- 运行时开关（DB 权威）

@@ -2133,9 +2133,83 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
     } for r in repos]}
 
 
+class RepoConnectionBody(BaseModel):
+    """Issue #3580/R11：实例 PAT 连接（只落 user_credentials kind=pat）。"""
+    token: str = ""
+    login: str = ""
+
+
 class BotTokenBody(BaseModel):
     full_name: str
     bot_token: str = ""
+
+
+def _provider_card_or_404(provider: str):
+    from src.domains.runtime.public import get_platform_card
+    card = get_platform_card(provider)
+    if card is None:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": f"未注册的平台: {provider}"})
+    return card
+
+
+@router.get("/{provider}/connection", operation_id="repos_connection_get",
+            summary="Get platform PAT connection",
+            description="Issue #3580: returns whether the current user has a PAT for this platform instance. Never returns the token value.")
+def get_repo_connection(provider: str, user: dict = Depends(get_current_user_or_api_key)):
+    _provider_card_or_404(provider)
+    cfg = user_db.get_credential(user["id"], provider, kind="pat") or {}
+    return {
+        "provider": provider,
+        "configured": bool(str(cfg.get("token") or "")),
+        "login": str(cfg.get("login") or ""),
+        "source": "pat" if str(cfg.get("token") or "") else "",
+    }
+
+
+@router.put("/{provider}/connection", operation_id="repos_connection_put",
+            summary="Set platform PAT connection",
+            description="Issue #3580: validates the token against that platform instance and stores it as user_credentials(kind=pat). PAT is a repo-execution credential: no login identity / external_identities row is created.")
+def set_repo_connection(provider: str, body: RepoConnectionBody,
+                        user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    token = str(body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "token required"})
+    try:
+        from src.kernel.token_resolver import create_provider
+        info = create_provider(provider).verify_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": f"{provider} token 验证失败: {e}"})
+    if not isinstance(info, dict) or not info.get("id"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "TOKEN_INVALID",
+            "message": f"{provider} token 校验失败（无用户信息）"})
+    login = str(info.get("username") or info.get("login") or body.login or "")
+    cfg = {"token": token, "login": login}
+    if not user_db.set_credential(user["id"], provider, cfg, kind="pat"):
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+    # PAT 是仓库执行凭据，不产生登录身份（R11）：这里刻意不写 external_identities。
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    log.info(f"repos connection: {provider} PAT bound for user={user['id']} login={login}")
+    return {"provider": provider, "configured": True, "login": login, "source": "pat"}
+
+
+@router.delete("/{provider}/connection", operation_id="repos_connection_delete",
+               summary="Clear platform PAT connection",
+               description="Issue #3580: clears user_credentials(kind=pat) for the platform instance; login identities are untouched.")
+def delete_repo_connection(provider: str, user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    user_db.set_credential(user["id"], provider, {}, kind="pat")
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    return {"provider": provider, "configured": False}
 
 
 @router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token.")

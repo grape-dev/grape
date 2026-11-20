@@ -548,18 +548,57 @@ def _basic_auth(token: str, scheme: str = "x_access_token") -> str:
     user = _AUTH_USER_BY_SCHEME.get(scheme, "x-access-token")
     return base64.b64encode(f"{user}:{token}".encode()).decode()
 
-def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_access_token"):
-    """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。
+def _transport_config_for(repo_key: str) -> "tuple[str, str]":
+    """repo_key → (clone_auth scheme, ca_bundle)。无卡/未知 provider → 现状默认。
+
+    Issue #3580/R4/R9：自建实例的 TLS CA 由平台卡 `ca_bundle` 提供，只在 git
+    传输层注入，改卡即生效，不依赖环境变量。
+    """
+    if not repo_key:
+        return "x_access_token", ""
+    from src.kernel.repo_key import parse_repo_key
+    provider, _, _ = parse_repo_key(repo_key)
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(provider)
+    except Exception:
+        card = None
+    if card is None:
+        return _clone_auth_scheme_for(repo_key), ""
+    return (card.clone_auth or "x_access_token"), (getattr(card, "ca_bundle", "") or "")
+
+
+def _run_git(args: list, token: str = "", timeout: int = 900,
+             scheme: str = "x_access_token", repo_key: str = "",
+             ca_bundle: str = ""):
+    """执行 git；凭据/TLS 经 env（GIT_CONFIG_COUNT）注入，不进 argv/日志。
+
+    Issue #3580/R9：token 不落进程参数（`ps`/错误输出均不可见）；Authorization
+    以 `http.extraHeader` 配置项注入。R4：自建实例 CA 以 `http.sslCAInfo` 注入，
+    `http.followRedirects=false` 防止凭据随重定向外泄。
 
     scheme 由平台卡 clone_auth 决定（gitcode/github=x-access-token 现状，
-    gitlab=oauth2，gitee=basic_password）。
+    gitlab=oauth2，gitee=basic_password）；传 repo_key 时自动按卡解析 scheme 与 CA。
     """
-    cmd = ["git"]
-    if token:
-        cmd += ["-c", f"http.extraheader=Authorization: Basic {_basic_auth(token, scheme)}"]
-    cmd += args
+    if repo_key:
+        _scheme, _ca = _transport_config_for(repo_key)
+        scheme = _scheme or scheme
+        ca_bundle = _ca or ca_bundle
+    cmd = ["git"] + list(args)
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    _pairs: list[tuple[str, str]] = []
+    if token:
+        _pairs.append(("http.extraHeader",
+                       f"Authorization: Basic {_basic_auth(token, scheme)}"))
+    if ca_bundle:
+        _pairs.append(("http.sslCAInfo", str(ca_bundle)))
+    # 传输安全：禁止 HTTP 重定向携带鉴权头到其他主机（默认 true 会跨主机转发）
+    _pairs.append(("http.followRedirects", "false"))
+    env["GIT_CONFIG_COUNT"] = str(len(_pairs))
+    for _i, (_k, _v) in enumerate(_pairs):
+        env[f"GIT_CONFIG_KEY_{_i}"] = _k
+        env[f"GIT_CONFIG_VALUE_{_i}"] = _v
     try:
         return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
@@ -587,17 +626,20 @@ def _is_git_network_error(result) -> bool:
     return bool(_NETWORK_ERR_RE.search(err))
 
 def _run_git_retry(args: list, token: str = "", timeout: int = 900,
-                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token"):
+                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token",
+                   repo_key: str = "", ca_bundle: str = ""):
     """执行 git；网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。
 
     - 成功（returncode==0）立即返回；
     - 仅网络类错误重试；4xx（401/403/404）与非网络类立即返回；
     - 全部重试失败返回最后一次结果（调用方按原有 None/非 0 逻辑降级）。
+    Issue #3580：repo_key 透传，保证每次重试都用同一实例的 CA/鉴权方式。
     """
     delay = base_delay
     last = None
     for attempt in range(retries):
-        last = _run_git(args, token=token, timeout=timeout, scheme=scheme)
+        last = _run_git(args, token=token, timeout=timeout, scheme=scheme,
+                        repo_key=repo_key, ca_bundle=ca_bundle)
         if last is not None and last.returncode == 0:
             return last
         if not _is_git_network_error(last):
@@ -623,12 +665,12 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
         try:
             if not os.path.isdir(base):
                 os.makedirs(os.path.dirname(base), exist_ok=True)
-                r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme)
+                r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme, repo_key=repo_key)
                 if r is None or r.returncode != 0:
                     log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                     return None
-                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme)
-            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme)
+                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme, repo_key=repo_key)
+            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme, repo_key=repo_key)
             if r is None or r.returncode != 0:
                 log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
@@ -1737,7 +1779,7 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
         if head is None or not (head.stdout or "").strip():
             return False
         local_head = head.stdout.strip()
-        remote = _run_git_retry(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token)
+        remote = _run_git_retry(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token, repo_key=repo_key)
         if remote is None or remote.returncode != 0:
             log.warning(f"workspace terminal cleanup deferred (remote unreachable) "
                         f"{repo_key} issue={issue_num} path={issue_dir} "

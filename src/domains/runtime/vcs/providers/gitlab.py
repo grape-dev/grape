@@ -102,3 +102,6 @@ def query_state(state: str) -> str:
 
 # PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
 PR_WEB_PATH = "merge_requests"
+
+# Issue #3580/P4：GitLab 实例（含自建）托管全流程已接入（webhook_dialect=gitlab_v4）。
+HOSTING_FULL_FLOW = True

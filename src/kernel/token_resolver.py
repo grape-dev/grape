@@ -674,6 +674,11 @@ def create_provider(provider: str) -> VCSProvider:
     except Exception:
         card = None
     if card is not None:
+        # Issue #3580：gitlab 方言的实例卡（含自建 gitlab-corp）必须走
+        # GitLabProvider（/projects 寻址、PRIVATE-TOKEN、members/hooks 形态）；
+        # 纯卡驱动 GenericVcsProvider 只适用于 github 系 API 形态。
+        if getattr(card, "dialect", "") == "gitlab":
+            return GitLabProvider(card)
         return GenericVcsProvider(card)
     # D105i：逃逸口可观测——纯配卡平台静默落 GitCode 兜底 = 卡缺能力字段，
     # 是“github 系假设”类静默错误的源头，必须留痕而非无声吞掉
@@ -1484,8 +1489,11 @@ class GitLabProvider(GenericVcsProvider):
 
     _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
 
-    def __init__(self):
-        card = _vcs_cards.get_platform_card("gitlab")
+    def __init__(self, card=None):
+        # Issue #3580：一实例一卡——允许传入任意 GitLab 实例卡（如 gitlab-corp）；
+        # 缺省仍取内置 gitlab 卡（存量行为不变）。
+        if card is None:
+            card = _vcs_cards.get_platform_card("gitlab")
         if card is None:
             card = _vcs_cards.build_platform_card("gitlab", {})
         super().__init__(card)
@@ -1550,9 +1558,18 @@ class GitLabProvider(GenericVcsProvider):
         return None
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        projects = self._http("GET", "/projects?membership=true&per_page=100", api_token)
-        if not isinstance(projects, list):
-            return []
+        # Issue #3580/R5：分页取全（100/页翻到底），不再只取第一页。
+        projects: list = []
+        page = 1
+        while True:
+            batch = self._http(
+                "GET", f"/projects?membership=true&per_page=100&page={page}", api_token)
+            if not isinstance(batch, list):
+                break
+            projects.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
         out = []
         for p in projects:
             if not isinstance(p, dict):

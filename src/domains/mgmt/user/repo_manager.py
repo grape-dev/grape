@@ -911,9 +911,11 @@ def get_hosting_provider_config(provider: str) -> dict:
         "remove_webhook": _remove_w,
         # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
         "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
-        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
-        "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
-        "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）。
+        # Issue #3580：F4 终态卡显式空串 = 无物理列，凭据只落 rc 单表——
+        # 调用方必须传逻辑键 'webhook'/'bot'，不得派生不存在的平台列名。
+        "db_token_field": _pc.webhook_token_field or "webhook",
+        "db_bot_token_field": _pc.token_storage_field or "bot",
         # B 批（2026-11-13）：建 webhook 的鉴权参数按方言派生——Gitee 系用
         # webhook_password（路径 B=secret / 路径 A=token），GitHub 系用
         # webhook_secret（仅路径 B）。调用方零平台分支。
@@ -1077,12 +1079,85 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
     return hook_id
 
 
+def _gitlab_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
+    """GitLab v4 API 请求（PRIVATE-TOKEN 头；Issue #3580）。"""
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise UpstreamAPIError(method, url, e.code, body_text, provider="GitLab")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Cannot reach GitLab API: {e.reason}")
+
+
+def _gitlab_pid(owner: str, repo: str) -> str:
+    import urllib.parse as _up
+    return _up.quote(f"{owner}/{repo}", safe="")
+
+
+def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                                 api_base: str = "") -> "int | None":
+    if not webhook_url:
+        return None
+    base = (api_base or "").rstrip("/")
+    url = f"{base}/projects/{_gitlab_pid(owner, repo)}/hooks?per_page=100"
+    try:
+        hooks = _gitlab_req("GET", url, api_token)
+        if isinstance(hooks, list):
+            for h in hooks:
+                if isinstance(h, dict) and h.get("url") == webhook_url:
+                    return h.get("id")
+    except Exception:
+        pass
+    return None
+
+
+def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                         webhook_password: str = "", api_base: str = "") -> int:
+    base = (api_base or "").rstrip("/")
+    url = f"{base}/projects/{_gitlab_pid(owner, repo)}/hooks"
+    body = {
+        "url": webhook_url,
+        "token": webhook_password or api_token,
+        "push_events": True,
+        "issues_events": True,
+        "merge_requests_events": True,
+        "note_events": True,
+        "tag_push_events": True,
+        "pipeline_events": True,
+        "wiki_page_events": True,
+        "releases_events": True,
+    }
+    result = _gitlab_req("POST", url, api_token, body)
+    hook_id = result.get("id", 0)
+    if not hook_id:
+        raise RuntimeError(f"Created GitLab webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
+    return hook_id
+
+
+def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                          api_base: str = "") -> bool:
+    base = (api_base or "").rstrip("/")
+    url = f"{base}/projects/{_gitlab_pid(owner, repo)}/hooks/{int(webhook_id)}"
+    _gitlab_req("DELETE", url, api_token)
+    return True
+
+
 # D105-19：webhook 三件套实现家族注册表（键=平台卡 webhook_dialect）。
 # 新增家族：实现 (find, setup, remove) 三件套（api_base 关键字参数）→ 表加一行
 # → platform_card._VALID_WEBHOOK_DIALECTS 加一项 → 新平台卡声明即启用。
 _WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
     "github_web": (find_existing_github_webhook, setup_github_webhook, remove_github_webhook),
     "gitee_v5": (find_existing_webhook, setup_webhook, remove_webhook),
+    # Issue #3580：GitLab v4 /projects/{id}/hooks 家族（自建实例复用）
+    "gitlab_v4": (find_existing_gitlab_webhook, setup_gitlab_webhook, remove_gitlab_webhook),
 }
 
 

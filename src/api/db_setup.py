@@ -100,6 +100,7 @@ from src.domains.runtime.schema_ddl import (
     _CUL_DDL,
     _SC_DDL,
     _TAKEOVER_SESSIONS_DDL,
+    _WEBHOOK_INBOX_DDL,
 )
 
 from src.domains.mgmt import migrations_ddl as mgmt_mig
@@ -224,6 +225,7 @@ _NEW_TABLES = [
     ("pipeline_instances", _PIPELINE_INSTANCES_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
+    ("grape_t_webhook_inbox", _WEBHOOK_INBOX_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("engine_capabilities", _ENGINE_CAPABILITIES_DDL),
     ("event_action_filter", _EVENT_ACTION_FILTER_DDL),
@@ -10741,6 +10743,23 @@ def _fn_rename_org_tables_and_uuid_pk() -> None:
                 db.commit()
                 log.info("org uuid-pk: issue.org_context_snapshot_id -> TEXT (SQLite)")
 
+
+def _fn_add_platform_ca_bundle() -> None:
+    """Issue #3580：grape_t_repo_platforms 增 ca_bundle（实例 TLS CA，PEM 绝对路径）。"""
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "grape_t_repo_platforms", "ca_bundle",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True)
+        db.commit()
+
+
+register_migration(
+    version="202611200001",
+    name="add-platform-ca-bundle",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_add_platform_ca_bundle,
+)
 
 register_migration(
     version="202611191000",

@@ -2256,7 +2256,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             from src.domains.runtime.engine.repogit import _run_git
             _r_push = _run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_token, timeout=120)
+                token=_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 log.warning(f"linked PR: push failed {_rk}: {_err}")

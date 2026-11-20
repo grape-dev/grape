@@ -461,6 +461,14 @@ async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
         except Exception as e:
             log.warning(f"Event sweeper loop start failed: {e}")
 
+    # Issue #3580/P3：webhook 事件持久收件箱消费 worker（先入队、再消费、可重放）
+    try:
+        from src.domains.runtime.webhook_inbox import webhook_inbox_loop
+        h["webhook_inbox_task"] = asyncio.create_task(webhook_inbox_loop())
+        log.info("Webhook inbox worker started (1s poll)")
+    except Exception as e:
+        log.warning(f"Webhook inbox worker start failed: {e}")
+
     # Issue #345: 全局 bot token 健康探活——每 5 分钟探活，集群下分布式锁保证单实例执行
     try:
         from src.domains.runtime.engine.bot_token_health import start_bot_token_health
@@ -477,6 +485,13 @@ async def stop_event_tasks(app, h: dict) -> None:
         _t.cancel()
         try:
             await asyncio.wait_for(_t, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    _wi = h.get("webhook_inbox_task")
+    if _wi:
+        _wi.cancel()
+        try:
+            await asyncio.wait_for(_wi, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
