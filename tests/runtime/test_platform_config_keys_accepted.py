@@ -134,7 +134,8 @@ def test_every_platform_config_builds_a_card_from_table_truth():
 
     fields_by_provider, errors = importer.load_repo_platforms()
     assert not errors, f"平台配置解析有错: {errors}"
-    assert set(fields_by_provider) >= {"gitcode", "github"}, "三张主平台卡必须在场"
+    assert set(fields_by_provider) >= {"gitcode", "github", "gitlab", "gitee"}, (
+        f"四个平台卡都必须在场（G3）：{sorted(fields_by_provider)}")
 
     from src.kernel.persistence.models_platform_object import RepoPlatformModel
 
@@ -160,3 +161,61 @@ def test_every_platform_config_builds_a_card_from_table_truth():
         if not getattr(card, "issue_write_form", ""):
             problems.append(f"{provider}: issue_write_form 为空")
     assert not problems, "平台配置缺键，表真源卡构建会失败：\n  " + "\n  ".join(problems)
+
+# ── G1 回归：建表 DDL 必须与 ORM 模型列一致（新列只加模型 = 建库缺列，ORM 直读即 1054）──
+_DDL_SRC = os.path.join(ROOT, "src", "api", "platform_object_ddl.py")
+_DDL_DOC = os.path.join(ROOT, "docs", "weekly-09", "multi-platform-decouple", "d109-schema.sql")
+
+
+def _ddl_text(path: str) -> str:
+    """取 grape_t_repo_platforms 的建表块（两处文本：Python 常量 / 设计文档 SQL）。"""
+    import ast
+    import re
+
+    raw = open(path, encoding="utf-8").read()
+    if raw[:1] != "C" and "CREATE TABLE IF NOT EXISTS grape_t_repo_platforms" not in raw:
+        tree = ast.parse(raw)
+        raw = "\n".join(n.value for n in ast.walk(tree)
+                        if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    m = re.search(r"CREATE TABLE IF NOT EXISTS grape_t_repo_platforms\b(.*?)\);", raw, re.S)
+    assert m, f"{path} 未找到 grape_t_repo_platforms 建表块"
+    return m.group(0)
+
+
+def _ddl_columns(path: str) -> set:
+    body = _ddl_text(path)
+    cols = set()
+    for line in body.splitlines():
+        s = line.strip()
+        head = s.upper().split()[0] if s.split() else ""
+        if not s or s.startswith("--") or head in {"CREATE", "PRIMARY", "UNIQUE", "FOREIGN",
+                                                  "KEY", "CONSTRAINT", "INDEX"} or s.startswith(")"):
+            continue
+        name = s.split()[0].strip('`"')
+        if name:
+            cols.add(name)
+    return cols
+
+
+def test_create_table_ddl_covers_every_model_column():
+    """建表唯一来源（DDL 文本 + 设计文档 SQL）必须包含 ORM 的每一列。
+
+    G1（PR #1878 review）：`create_repo_options` 只加进了模型与迁移，初始建表 DDL 没跟上，
+    于是用该 DDL 直建 schema 的用例（d109/d110 系列）在 ORM SELECT 时 1054。
+    """
+    from src.kernel.persistence.models_platform_object import RepoPlatformModel
+
+    model_cols = {c.name for c in RepoPlatformModel.__table__.columns}
+    api_cols = _ddl_columns(_DDL_SRC)
+    doc_cols = _ddl_columns(_DDL_DOC)
+    problems = []
+    missing_api = sorted(model_cols - api_cols)
+    missing_doc = sorted(model_cols - doc_cols)
+    if missing_api:
+        problems.append(f"platform_object_ddl.py 缺列: {missing_api}")
+    if missing_doc:
+        problems.append(f"d109-schema.sql 缺列: {missing_doc}")
+    if api_cols != doc_cols:
+        problems.append(
+            f"两处 DDL 不一致：仅 api={sorted(api_cols - doc_cols)} 仅 doc={sorted(doc_cols - api_cols)}")
+    assert not problems, "建表 DDL 与模型列漂移：\n  " + "\n  ".join(problems)

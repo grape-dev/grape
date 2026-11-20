@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     clone_auth          TEXT NOT NULL DEFAULT '',      -- clone 凭据形态：x_access_token | oauth2 | basic_password
     issue_write_form    TEXT NOT NULL DEFAULT '',      -- 建/关 Issue 端点形态：repo_path | owner_param（Gitee=owner_param）
     branch_create_form  TEXT NOT NULL DEFAULT '',      -- 建分支形态：form | refs_sha
+    create_repo_options INTEGER NOT NULL DEFAULT 0,   -- 1=适配器接受 auto_init/default_branch（建仓可选参数）
     issue_search        INTEGER NOT NULL DEFAULT 0,    -- 1=支持原生 issue 搜索端点（布尔，非枚举）
     git_tree_family     TEXT NOT NULL DEFAULT '',      -- 文件树/内容 API 族：github_api | （空=不支持）
     pr_comment_endpoint TEXT NOT NULL DEFAULT '',      -- PR 评论端点族：issues（借 issue 评论接口）| 空=专用端点
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     token_storage_field  TEXT NOT NULL DEFAULT '',     -- managed_repos bot token 物理列名（''=无）
     webhook_token_field  TEXT NOT NULL DEFAULT '',     -- managed_repos webhook token 物理列名（''=无）
     bot_username         TEXT NOT NULL DEFAULT '',     -- 配置声明的默认 bot 账号名
+    bot_token_enc        TEXT NOT NULL DEFAULT '',      -- 平台 bot PAT 密文（空=该平台无全局 bot，托管回落用户 PAT）
+    bot_token_status     TEXT NOT NULL DEFAULT 'unknown', -- ok | expired | unknown（巡检写入，替代 meta global_<p>_bot_token_status）
+    bot_checked_at       TEXT NOT NULL DEFAULT '',      -- 最近一次 bot token 探活时间
     owner_fallback       INTEGER NOT NULL DEFAULT 0,   -- 1=允许 owner 身份 token 回落
     download_base       TEXT NOT NULL DEFAULT '',      -- 归档/文件下载基址（展示用）
     user_images_base    TEXT NOT NULL DEFAULT '',      -- 用户图片基址（展示用）
