@@ -456,6 +456,42 @@ if [ -d "$INSTALL_DIR/src" ]; then
 fi
 log "Extracting worker package to $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "Failed to extract worker package"
+
+# ===== 3.1 清理遗留顶层模块目录（与 Windows install-worker.ps1 同口径）=====
+# arch 分支把 src/runtime|agent|user|auth|observability 等顶层模块迁到
+# src/domains|src/kernel；解压是覆盖式，旧目录残留会被 import 优先命中。
+# 白名单制：src/ 下不在 canonical 清单内的目录一律删除。
+if [ -f "$INSTALL_DIR/src/domains/runtime/engine/agent.py" ] && [ -d "$INSTALL_DIR/src" ]; then
+  for _legacy_dir in "$INSTALL_DIR/src"/*; do
+    [ -d "$_legacy_dir" ] || continue
+    _legacy_name=$(basename "$_legacy_dir")
+    case "$_legacy_name" in
+      api|domains|kernel|runtime) continue ;;   # runtime = 包内 legacy 入口 shim
+    esac
+    rm -rf "$_legacy_dir" && log "Removed legacy module dir: src/$_legacy_name"
+  done
+
+  # src/runtime：旧版本真实模块（残留）与包内 shim 同名同路径。整体删掉后从包里
+  # 重解三个 shim 文件；包内缺 shim 时保留现状，绝不把设备入口删空。
+  _rt_dir="$INSTALL_DIR/src/runtime"
+  if [ -d "$_rt_dir" ]; then
+    _shim_stage=$(mktemp -d)
+    _shim_ok=1
+    for _shim in __init__.py agent.py cloud_worker.py; do
+      tar -xzf "$TMP_PKG" -C "$_shim_stage" --strip-components=2 \
+          "grape-worker/src/runtime/$_shim" 2>/dev/null || _shim_ok=0
+    done
+    if [ "$_shim_ok" = "1" ] && [ -f "$_shim_stage/runtime/agent.py" ]; then
+      rm -rf "$_rt_dir"
+      mkdir -p "$_rt_dir"
+      cp -f "$_shim_stage"/runtime/* "$_rt_dir"/ 2>/dev/null || true
+      log "Restored legacy entry shim: src/runtime (agent.py/cloud_worker.py)"
+    else
+      log "Warning: package has no complete src/runtime shim; kept existing dir as-is"
+    fi
+    rm -rf "$_shim_stage"
+  fi
+fi
 rm -f "$TMP_PKG"
 
 # ===== 3.5 升级前 import 冒烟检查（2026-10-14 五台 worker 心跳全断事故）=====
