@@ -264,7 +264,7 @@ def _create_org_repo(org: dict) -> str:
                 private=private,
                 visibility="private" if private else "public",
                 auto_init=False,
-                default_branch="grape-repo-knowledge",
+                default_branch="main",
                 host_after_create=False,
                 provider=options["provider"],
                 owner=options["owner"],
@@ -410,13 +410,15 @@ def _ensure_org_scene(org: dict, repo_key: str, *,
 
 def _ensure_org_repo_branches(org: dict, repo_key: str, *,
                               enforce_default: bool = True) -> None:
-    """同步创建默认分支 + 分析分支；两条都就绪才允许组织进入 ready。
+    """同步创建 main + grape-org；两条就绪才允许组织进入 ready。
 
-    必须在 provisioning 的 org 锁内调用：``sync_org_context_to_repo`` 会再次获取
-    同一把锁（RLock）。
+    新组织仓库：
+    - ``main``：默认分支，保持空仓，留给组织自己开发；
+    - ``grape-org``：Grape 托管内容唯一分支（组织上下文/知识/仓库地图/AI 结果）。
+    必须在 provisioning 的 org 锁内调用：上下文同步会再次获取同一把 RLock。
     """
     from src.domains.mgmt.org_context_repo import (
-        ORG_REPO_ANALYSIS_BRANCH,
+        ORG_REPO_COMBINED_BRANCH,
         ORG_REPO_DEFAULT_BRANCH,
         sync_org_analysis_to_repo,
         sync_org_context_to_repo,
@@ -447,9 +449,10 @@ def _ensure_org_repo_branches(org: dict, repo_key: str, *,
     if enforce_default and ORG_REPO_DEFAULT_BRANCH not in names:
         raise RuntimeError(
             f"default branch {ORG_REPO_DEFAULT_BRANCH} missing (branches={sorted(names)})")
-    if ORG_REPO_ANALYSIS_BRANCH not in names:
-        raise RuntimeError(
-            f"analysis branch {ORG_REPO_ANALYSIS_BRANCH} missing (branches={sorted(names)})")
+    for required in (ORG_REPO_COMBINED_BRANCH,):
+        if required not in names:
+            raise RuntimeError(
+                f"branch {required} missing (branches={sorted(names)})")
 
     current_default = str(info.get("default_branch") or "")
     expected_default = ORG_REPO_DEFAULT_BRANCH if enforce_default else (
@@ -464,7 +467,10 @@ def _ensure_org_repo_branches(org: dict, repo_key: str, *,
 
     scene_id = str(org.get("org_scene_id") or "")
     if scene_id:
-        set_org_scene_work_branch(scene_id, repo_key, expected_default)
+        # 场景/任务使用 grape-org：一处即可读到组织上下文与仓库地图。
+        work_branch = (ORG_REPO_COMBINED_BRANCH
+                       if ORG_REPO_COMBINED_BRANCH in names else expected_default)
+        set_org_scene_work_branch(scene_id, repo_key, work_branch)
         try:
             from src.domains.mgmt import org_analysis
 
@@ -767,8 +773,8 @@ def _provision_org_impl(org_id: str) -> dict:
                 org, repo_key,
                 fallback_branch=(ORG_REPO_DEFAULT_BRANCH if created_repo else "main"))
 
-            # 「分支建好才算组织创建完成」：同步建默认分支 + 分析分支，再置 ready。
-            # 不再用后台 timer 抢跑，避免空仓首推把 grape-repo-analysis 设成默认分支。
+            # 「分支建好才算组织创建完成」：同步建 main（空仓）+ grape-org，再置 ready。
+            # 不再用后台 timer 抢跑，避免空仓首推把 grape-org 设成默认分支。
             _set_provision_fields(org_id, provision_status="branches_creating")
             org = get_org(org_id) or org
             _ensure_org_repo_branches(

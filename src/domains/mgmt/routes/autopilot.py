@@ -218,6 +218,19 @@ def _row_to_task(row) -> dict:
             custom_fields = _json.loads(row[15])
         except Exception:
             custom_fields = []
+    # 防御历史数据：GRAPE_* 是系统保留环境变量，执行侧拒绝注入、前端保存也拒绝。
+    # 这类字段在配置页只会标红挡住整次保存，不应展示给用户；读侧直接过滤，
+    # 用户重新保存后即从 DB 中清掉（存量清理另见注册式迁移）。
+    try:
+        from src.kernel.scene_custom_env import is_reserved_name
+
+        custom_fields = [
+            f for f in custom_fields
+            if not (isinstance(f, dict)
+                    and is_reserved_name(str(f.get("name") or "").strip()))
+        ]
+    except Exception as _cf_err:  # noqa: BLE001 - 读侧过滤失败不阻断任务详情
+        log.debug(f"autopilot: reserved custom_fields filter skipped: {_cf_err}")
     work_branch = row[16] if len(row) > 16 else ""
     engine_uids = []
     if len(row) > 17 and row[17]:

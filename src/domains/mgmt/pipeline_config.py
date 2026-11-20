@@ -877,8 +877,8 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
                      work_branch: str = "main") -> int:
     """Create or update the default organization scene definition.
 
-    ``work_branch`` 必须是组织仓库真实默认分支（新仓 grape-repo-knowledge，
-    存量仓可能仍是 main）；调用方无法解析时默认 main。
+    ``work_branch`` 必须是组织仓库可用的工作分支（新仓先 main，provisioning
+    建好 grape-org 后回填为汇总分支）；调用方无法解析时默认 main。
     """
     db_id = create_custom_scene(
         scene_id=scene_id,

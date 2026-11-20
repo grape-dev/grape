@@ -1058,3 +1058,58 @@ def test_unexecutable_target_scene_falls_back_to_repo_default(client, monkeypatc
     )
     assert resp.status_code == 201, resp.text
     assert calls[0]["scene_id"] == SCENE_A
+
+
+def test_lookup_org_issue_prefers_org_repo(monkeypatch):
+    """关联仓库与组织仓库存在同名 issue_number 时，必须命中组织仓库。"""
+    from src.domains.mgmt import org_dispatch
+    from src.domains.mgmt.user import org_db
+
+    repos = [
+        {"repo_key": TARGET_A, "full_name": "issue2112/svc-a", "is_org_repo": 0},
+        {"repo_key": ORG_REPO_KEY, "full_name": "issue2112/org-repo", "is_org_repo": 1},
+    ]
+    monkeypatch.setattr(org_db, "list_org_repos", lambda org_id: list(repos))
+    monkeypatch.setattr(
+        org_dispatch.runtime_public, "issue_brief",
+        lambda repo_key, num: {"repo_key": repo_key, "issue_number": num}
+        if str(num) == "1" else None)
+
+    found = org_dispatch._lookup_org_issue("org-2112", 1)
+
+    assert found and found["repo_key"] == ORG_REPO_KEY
+
+
+def test_resolve_target_scene_ambiguous_without_recommendation(monkeypatch):
+    """多场景且无默认/推荐时不得随便挑一个，交给 AI 明确选择。"""
+    from src.domains.mgmt import org_dispatch_scene as ods
+
+    monkeypatch.setattr(ods, "get_repo_scene", lambda repo_key: "")
+    monkeypatch.setattr(ods, "get_scenes",
+                        lambda repo_key="", **kw: [{"id": "s1"}, {"id": "s2"}])
+    monkeypatch.setattr(ods, "scene_exists_in_repo", lambda sid, rk: True)
+    monkeypatch.setattr(ods.runtime_public, "precheck_scene",
+                        lambda *a, **kw: {"ok": True, "problems": []})
+
+    detail = ods.resolve_target_scene_detail("gitcode:acme/svc", "")
+
+    assert detail["scene_id"] == ""
+    assert detail["source"] == "none"
+    assert any("ambiguous scene" in w for w in detail["warnings"])
+
+
+def test_resolve_target_scene_prefers_explicit_recommendation(monkeypatch):
+    """显式推荐（AI 选场景）优先于默认/唯一，且必须可执行。"""
+    from src.domains.mgmt import org_dispatch_scene as ods
+
+    monkeypatch.setattr(ods, "get_repo_scene", lambda repo_key: "s_default")
+    monkeypatch.setattr(ods, "get_scenes",
+                        lambda repo_key="", **kw: [{"id": "s_default"}, {"id": "s_topic"}])
+    monkeypatch.setattr(ods, "scene_exists_in_repo", lambda sid, rk: True)
+    monkeypatch.setattr(ods.runtime_public, "precheck_scene",
+                        lambda *a, **kw: {"ok": True, "problems": []})
+
+    detail = ods.resolve_target_scene_detail("gitcode:acme/svc", "s_topic")
+
+    assert detail["scene_id"] == "s_topic"
+    assert detail["source"] == "explicit"

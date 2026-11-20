@@ -583,8 +583,8 @@ def test_set_org_scene_work_branch_is_idempotent():
     from src.api.pipeline_config import set_org_scene_work_branch
 
     _seed_org_scene()
-    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-repo-knowledge")
-    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-repo-knowledge")
+    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-org")
+    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-org")
     with db_lock:
         c = db.cursor()
         row = c.execute(
@@ -592,4 +592,4 @@ def test_set_org_scene_work_branch_is_idempotent():
             "WHERE scene_id=? AND repo_key=? AND is_active=1",
             (ORG_SCENE_ID, ORG_REPO_KEY),
         ).fetchone()
-    assert row and json.loads(row[0])["work_branch"] == "grape-repo-knowledge"
+    assert row and json.loads(row[0])["work_branch"] == "grape-org"

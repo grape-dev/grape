@@ -7081,6 +7081,22 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"Exec agent: last-node finalize to pending_review failed: {_e}")
 
+    # Issue #2118/#2270：本地 direct 收尾也按场景 next/handoff 自动推进。
+    # 此前只有远程 worker 的 complete_task() 调用该钩子；本地执行路径在技能未显式
+    # `grape a2a handoff` 时会停在中间节点（coding 完成后不再进 qa）。
+    # 放在末节点 finalize 之后：末节点已置 pending_review 时由 stage 守卫幂等跳过。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.domains.runtime.engine.service import run_auto_advance_hook
+            _adv = run_auto_advance_hook(task_id or "", repo_key, issue_id,
+                                         agent_type, seq, result_text or "")
+            if _adv.get("action") in ("a2a", "recheck", "pending_review"):
+                log.info(f"Exec agent: auto-advance issue={issue_id} agent={agent_type} "
+                         f"action={_adv.get('action')} next={_adv.get('next_role')} "
+                         f"round={_adv.get('round')} seq={_adv.get('seq')}")
+        except Exception as _e:
+            log.warning(f"Exec agent: auto-advance failed issue={issue_id}: {_e}")
+
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
         try:

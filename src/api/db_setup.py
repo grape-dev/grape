@@ -8036,6 +8036,71 @@ register_migration(
 )
 
 
+def _fn_strip_org_analysis_reserved_fields() -> None:
+    """清掉组织分析自动化里的系统保留 custom_fields（幂等）。
+
+    历史 ensure_analysis_task 会写入 GRAPE_MANAGED_BY / GRAPE_ORG_ID /
+    GRAPE_ANALYSIS_MODE。GRAPE_* 是保留环境变量：前端自定义配置页标红、保存被拒，
+    执行侧也拒绝注入（日志 `custom env ... rejected`）。现在 org_id/mode 由任务
+    指令和本次运行参数提供，受管身份走 skill_name；这些字段不再生成，存量行在此
+    一次性删除。
+    """
+    _names = {"GRAPE_MANAGED_BY", "GRAPE_ORG_ID", "GRAPE_ANALYSIS_MODE"}
+    from src.kernel.mysql_compat import get_db_backend
+
+    with db_lock:
+        c = db.cursor()
+        if get_db_backend() == "mysql":
+            _tbl = c.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=DATABASE() AND table_name='autopilot_tasks'"
+            ).fetchone()
+        else:
+            _tbl = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='autopilot_tasks'"
+            ).fetchone()
+        if not _tbl:
+            log.info("202611201700 autopilot_tasks 不存在，跳过")
+            return
+        rows = c.execute(
+            "SELECT id, custom_fields FROM autopilot_tasks "
+            "WHERE custom_fields LIKE '%GRAPE%'"
+        ).fetchall()
+        changed = 0
+        for _task_id, _raw in rows:
+            try:
+                fields = json.loads(_raw or "[]")
+            except Exception:
+                continue
+            if not isinstance(fields, list):
+                continue
+            cleaned = [
+                f for f in fields
+                if not (isinstance(f, dict)
+                        and str(f.get("name") or "").strip() in _names)
+            ]
+            if len(cleaned) == len(fields):
+                continue
+            c.execute(
+                "UPDATE autopilot_tasks SET custom_fields=? WHERE id=?",
+                (json.dumps(cleaned, ensure_ascii=False) if cleaned else "", _task_id),
+            )
+            changed += 1
+        db.commit()
+    if changed:
+        log.info(f"202611201700 已清理 {changed} 个自动化任务的保留 custom_fields")
+
+
+register_migration(
+    version="202611201700",
+    name="strip-org-analysis-reserved-custom-fields",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_strip_org_analysis_reserved_fields,
+)
+
+
 # 已盖章迁移的源码（含 docstring）是 checksum 冻结面：改动会让每次启动报"漂移"。
 # 因此下面的原 docstring 保持盖章时的原文；与事实不符之处在此更正：
 #   - meta 的 global_bot_*_token 是**历史明文**，本迁移会把它原样搬进 bot_token_enc

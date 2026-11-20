@@ -693,11 +693,21 @@ def _mark_target_failed(target_id: str, error: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _lookup_org_issue(org_id: str, org_issue_number) -> dict | None:
-    """组织需求必须位于该组织关联仓库（org_id 权威来自 managed_repos）。"""
+    """组织需求必须位于该组织关联仓库（org_id 权威来自 managed_repos）。
+
+    组织仓库（``is_org_repo=1``）优先：同一组织下多个关联仓库常见相同
+    issue_number（各仓 #1），按 full_name 顺序遍历会先命中子仓库，导致批次
+    ``org_repo_key`` 指向子仓库——聚合评论/状态归一就写到子仓 Issue 上。
+    """
     from src.domains.mgmt.user.org_db import list_org_repos
 
     num = native_issue_number(org_issue_number)
-    for repo in list_org_repos(org_id) or []:
+    repos = list_org_repos(org_id) or []
+    repos.sort(key=lambda r: (
+        0 if str(r.get("is_org_repo") or "0") in ("1", "True", "true") else 1,
+        str(r.get("full_name") or ""),
+    ))
+    for repo in repos:
         repo_key = str(repo.get("repo_key") or "")
         if not repo_key:
             continue

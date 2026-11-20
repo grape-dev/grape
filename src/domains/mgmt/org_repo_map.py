@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from src.domains.mgmt.user.org_db import (
     db,
@@ -37,6 +38,7 @@ _RECALL_FALLBACK = str(
     __import__("os").environ.get("ORG_REPO_MAP_FALLBACK", "none") or "none"
 ).strip().lower()
 _MAX_QUERY_TOKENS = 120
+REPO_MAP_SUMMARY_PATH = "org-context/repo-map/repo-map-summary.md"
 
 _STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that", "http", "https", "www",
@@ -883,9 +885,11 @@ def analyze_repo(org_id: str, repo_key: str, *, actor_id: str = "") -> dict:
         )
         log.warning(f"org_repo_map analyze failed org={org_id} repo={repo_key}: {exc}")
     try:
-        from src.domains.mgmt.org_context_repo import schedule_sync
+        from src.domains.mgmt.org_context_repo import schedule_analysis_sync, schedule_sync
 
         schedule_sync(org_id)
+        # 地图（手动/批量）刷新后同样刷新 grape-org 与总结文件。
+        schedule_analysis_sync(org_id)
     except Exception:
         pass
     return get_map(org_id, repo_key) or {}
@@ -964,10 +968,143 @@ def _ai_status_map(org_id: str) -> dict[str, dict]:
         return {}
 
 
+def _repo_summary_path(repo_key: str) -> str:
+    provider, owner, name = parse_repo_key(str(repo_key or ""))
+    if not (provider and owner and name):
+        return ""
+    return f"org-context/repo-map/repos/{provider}/{owner}/{name}/summary.md"
+
+
+def _repo_file_url(repo_key: str, path: str, ref: str) -> str:
+    """仓库内文件的浏览器可访问地址（跨平台差异收敛在本函数）。"""
+    provider, owner, name = parse_repo_key(str(repo_key or ""))
+    if not (provider and owner and name and path):
+        return ""
+    host = {
+        "gitcode": "gitcode.com",
+        "github": "github.com",
+        "gitee": "gitee.com",
+        "gitlab": "gitlab.com",
+    }.get(provider, "gitcode.com")
+    ref = quote(str(ref or "").strip() or "main", safe="")
+    rel = quote(str(path).lstrip("/"), safe="/")
+    blob_segment = {"gitlab": "-/blob"}.get(provider, "blob")
+    return f"https://{host}/{owner}/{name}/{blob_segment}/{ref}/{rel}"
+
+
+def _summary_file_meta(org_id: str) -> dict:
+    """汇总文件的分支/路径/URL（前端按钮直接可用）。"""
+    from src.domains.mgmt.org_context_repo import ORG_REPO_COMBINED_BRANCH
+
+    org = get_org(str(org_id)) or {}
+    repo_key = str(org.get("org_repo_key") or "")
+    return {
+        "repo_key": repo_key,
+        "branch": ORG_REPO_COMBINED_BRANCH,
+        "path": REPO_MAP_SUMMARY_PATH,
+        "url": _repo_file_url(repo_key, REPO_MAP_SUMMARY_PATH, ORG_REPO_COMBINED_BRANCH),
+    }
+
+
+_SUMMARY_STATUS_LABELS = {
+    "none": "未分析",
+    "queued": "排队中",
+    "running": "分析中",
+    "analyzing": "分析中",
+    "succeeded": "已生成",
+    "ready": "已生成",
+    "failed": "失败",
+    "skipped": "已跳过",
+}
+
+
+def _build_repo_map_summary(org_id: str, data: dict) -> dict:
+    """基于已加载的地图数据渲染汇总总结（避免重复读库）。"""
+    org = get_org(str(org_id)) or {}
+    repos = data.get("repos") or []
+    counts = data.get("summary") or {}
+    lines = [
+        "# 组织关联仓库能力总结",
+        "",
+        f"> 组织：{org.get('name') or ''}（`{org.get('slug') or ''}`）",
+        f"> 组织仓库：`{org.get('org_repo_key') or '（未绑定）'}`",
+        f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"> 覆盖：{counts.get('ready') or 0}/{counts.get('total') or 0} "
+        "个关联仓库已生成能力摘要",
+        "",
+        "## 仓库总览",
+        "",
+    ]
+    if not repos:
+        lines += ["（组织暂无可分析的关联仓库。）", ""]
+    else:
+        lines += ["| 仓库 | 定位 | 状态 | 主要领域 |", "| --- | --- | --- | --- |"]
+        for item in repos:
+            purpose = str(item.get("purpose") or "").replace("|", "\\|").strip() or "尚未分析"
+            domains = "、".join((item.get("domains") or [])[:5]) or "（无）"
+            status = _SUMMARY_STATUS_LABELS.get(
+                str(item.get("ai_status") or item.get("status") or "none"),
+                str(item.get("status") or "none"))
+            lines.append(
+                f"| `{item.get('full_name') or item.get('repo_key')}` | {purpose} "
+                f"| {status} | {domains} |")
+        lines.append("")
+
+    lines += ["## 各仓库摘要", ""]
+    for item in repos:
+        full_name = str(item.get("full_name") or item.get("repo_key") or "")
+        lines += [f"### {full_name}", ""]
+        lines.append(f"- 仓库标识：`{item.get('repo_key') or ''}`")
+        status = _SUMMARY_STATUS_LABELS.get(
+            str(item.get("ai_status") or item.get("status") or "none"),
+            str(item.get("status") or "none"))
+        lines.append(f"- 状态：{status}")
+        lines.append(f"- 一句话定位：{item.get('purpose') or '尚未分析，可点击生成地图补齐。'}")
+        domains = "、".join((item.get("domains") or [])[:12]) or "（无）"
+        lines.append(f"- 主要领域：{domains}")
+        interfaces = "、".join(f"`{x}`" for x in (item.get("interfaces") or [])[:12])
+        lines.append(f"- 对外接口：{interfaces or '（未识别）'}")
+        depends = "、".join((item.get("depends_on") or [])[:12]) or "（未识别）"
+        lines.append(f"- 依赖仓库：{depends}")
+        if item.get("analyzed_at"):
+            lines.append(f"- 最近分析：{str(item.get('analyzed_at'))[:16].replace('T', ' ')}")
+        summary_path = str(item.get("summary_path") or "")
+        if summary_path:
+            lines.append(f"- 能力详情：`{summary_path}`")
+        lines.append("")
+
+    lines += [
+        "> 由 Grape 仓库地图自动生成。每次手动/自动生成地图都会刷新本文件；"
+        "能力详情按仓库拆分在 `org-context/repo-map/repos/` 下。",
+        "",
+    ]
+    markdown = "\n".join(lines)
+    file_meta = _summary_file_meta(str(org_id))
+    return {
+        "org_id": str(org_id),
+        "org_repo_key": file_meta.get("repo_key") or "",
+        "branch": file_meta.get("branch") or "",
+        "path": file_meta.get("path") or REPO_MAP_SUMMARY_PATH,
+        "url": file_meta.get("url") or "",
+        "markdown": markdown,
+        "summary": counts,
+        "repos": repos,
+    }
+
+
+def repo_map_summary(org_id: str) -> dict:
+    """所有关联仓库的汇总总结（UI 卡片与组织仓库 MD 共用同一份渲染）。"""
+    return _build_repo_map_summary(str(org_id), list_repo_map(str(org_id)))
+
+
 def list_repo_map(org_id: str) -> dict:
     """全量视图：组织关联仓库 + 地图状态（未分析的也返回）。"""
+    from src.domains.mgmt.org_context_repo import ORG_REPO_COMBINED_BRANCH
+
     maps = {m["repo_key"]: m for m in list_maps(org_id)}
     ai_status = _ai_status_map(org_id)
+    org = get_org(str(org_id)) or {}
+    org_repo_key = str(org.get("org_repo_key") or "")
     out = []
     for row in list_org_repos(org_id) or []:
         if row.get("is_org_repo"):
@@ -975,6 +1112,7 @@ def list_repo_map(org_id: str) -> dict:
             continue
         key = str(row.get("repo_key") or "")
         m = maps.get(key) or {}
+        summary_path = _repo_summary_path(key) if m.get("summary_md") else ""
         out.append({
             "repo_key": key,
             "full_name": row.get("full_name") or m.get("full_name") or "",
@@ -991,6 +1129,10 @@ def list_repo_map(org_id: str) -> dict:
             "error": m.get("error") or "",
             "analyzed_at": m.get("analyzed_at") or "",
             "has_summary": bool(m.get("summary_md")),
+            "summary_path": summary_path,
+            "summary_branch": ORG_REPO_COMBINED_BRANCH if summary_path else "",
+            "summary_url": (_repo_file_url(org_repo_key, summary_path, ORG_REPO_COMBINED_BRANCH)
+                            if summary_path else ""),
             "ai_status": (ai_status.get(key) or {}).get("status", ""),
             "ai_error": (ai_status.get(key) or {}).get("error", ""),
             "ai_analyzed_at": (ai_status.get(key) or {}).get("analyzed_at", ""),
@@ -1000,6 +1142,7 @@ def list_repo_map(org_id: str) -> dict:
     return {
         "repos": out,
         "summary": {"total": len(out), "ready": ready, "coverage": round(ready / len(out), 2) if out else 0},
+        "summary_file": _summary_file_meta(str(org_id)),
     }
 
 
@@ -1007,6 +1150,8 @@ def repo_map_markdown_files(org_id: str) -> dict[str, str]:
     """给 org-context 同步使用的 repo-map 镜像文件。"""
     data = list_repo_map(org_id)
     files: dict[str, str] = {}
+    summary = _build_repo_map_summary(org_id, data)
+    files[summary["path"]] = str(summary["markdown"]).rstrip("\n") + "\n"
     index_items = []
     for item in data.get("repos") or []:
         m = get_map(org_id, item["repo_key"]) or {}
@@ -1031,10 +1176,11 @@ def repo_map_markdown_files(org_id: str) -> dict[str, str]:
         })
     files["org-context/repo-map/index.json"] = json.dumps(
         {"org_id": org_id, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-         "repos": index_items}, ensure_ascii=False, indent=2)
+         "summary": REPO_MAP_SUMMARY_PATH, "repos": index_items}, ensure_ascii=False, indent=2)
     lines = [
         "# 组织仓库地图", "",
         "> 由 Grape 自动生成；每仓一份 `summary.md`，机器索引见 `index.json`。", "",
+        "> 全组织汇总总结：[`repo-map-summary.md`](repo-map-summary.md)", "",
         f"覆盖：{len(index_items)}/{data['summary']['total']}", "",
     ]
     for item in index_items:

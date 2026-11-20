@@ -164,3 +164,29 @@ async def scan_run(user: dict = Depends(require_no_session_token)):
 
 
 _scan_in_flight = False
+
+
+class PipelineAdvanceBody(BaseModel):
+    limit: int = 200
+    lookback_hours: float | None = None
+
+
+@router.post("/pipeline-advance", operation_id="patrol_pipeline_advance_run",
+             summary="Run one deterministic pipeline advance round",
+             description="Manually run the DB-driven convergence pass: completed tasks whose Issue stage is still the completed agent are advanced by scene next/handoff (idempotent, independent of skills or in-process completion hooks). Does not require an explicit agent handoff; safe to call repeatedly.")
+async def pipeline_advance_run(body: PipelineAdvanceBody = None,
+                               user: dict = Depends(require_no_session_token)):
+    """手动触发「任务已完成 → 下一节点」确定性推进（运营/排障入口）。
+
+    真源是数据库：``agent_tasks.status=completed`` + ``issue.stage`` 仍停在该
+    agent + 无在途下游 → 按场景 next/handoff 幂等推进。技能是否显式
+    ``grape a2a handoff``、收尾钩子是否执行，都不影响本口径。
+    """
+    from src.domains.runtime.engine.pipeline_reconcile import (
+        reconcile_pipeline_progress,
+    )
+    b = body or PipelineAdvanceBody()
+    limit = max(1, min(int(b.limit or 200), 1000))
+    stats = await asyncio.to_thread(
+        reconcile_pipeline_progress, limit, b.lookback_hours)
+    return {"status": "ok", "advance": stats}

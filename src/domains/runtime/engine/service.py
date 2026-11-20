@@ -3633,8 +3633,18 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
         # 子任务还在关联仓库里跑，聚合节点必须等 dispatch 进入终态后由
         # _maybe_trigger_terminal_aggregate 触发，不能任务一完成就自动 A2A，
         # 否则 org_aggregate 会在子任务未完成时提前跑完，流水线看似走完。
-        if str((_transition.get("node") or {}).get("id") or "") == "org_dispatch":
-            return {"action": "wait_for_dispatch", "node": "org_dispatch",
+        # 节点身份按语义判定（id / skill / 下一节点 skill），不假设自定义组织场景
+        # 的下派节点 id 一定叫 org_dispatch：只要「当前节点是组织下派」或
+        # 「下一节点是组织聚合」，就必须等批次终态，不能任务一完成就提前聚合。
+        _cur_node = _transition.get("node") or {}
+        _next_node = _transition.get("next_node") or {}
+        _cur_id = str(_cur_node.get("id") or "")
+        _cur_skill = str(_cur_node.get("skill") or "")
+        _next_skill = str(_next_node.get("skill") or "")
+        if (_cur_id == "org_dispatch"
+                or _cur_skill == "org-dispatch-cli"
+                or _next_skill == "org-aggregate-cli"):
+            return {"action": "wait_for_dispatch", "node": _cur_id or "org_dispatch",
                     "scene_id": _scene_id}
         if _transition.get("handoff") != "a2a":
             return {"action": "none", "reason": "handoff_not_a2a",
@@ -3651,6 +3661,25 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
     except Exception as e:
         log.warning(f"auto-advance failed issue={issue_id} agent={agent_type}: {e}")
         return {"action": "none", "reason": f"error: {e}"}
+
+
+def run_auto_advance_hook(task_id: str, repo_key: str, issue_id: str,
+                          agent_type: str, event_seq: int,
+                          result_text: str = "") -> dict:
+    """本地 direct 收尾的统一 auto-advance 入口（与远程 complete_task 同一判定）。
+
+    Issue #2118/#2270：此前只有远程 worker 的 complete_task() 调用
+    ``_auto_advance_after_complete``，本地执行路径（event_pipeline /
+    direct_executor）在技能未显式 ``grape a2a handoff`` 时会停在中间节点。
+    这里只做参数装配，判定/派发仍由 ``_auto_advance_after_complete`` 负责。
+    """
+    from src.api.event_store import parse_agent_output_json
+
+    task = {"id": task_id or "", "repo_key": repo_key, "issue_id": issue_id,
+            "agent_type": agent_type, "event_seq": event_seq or 0}
+    return _auto_advance_after_complete(
+        task, output=parse_agent_output_json(result_text or ""),
+        result_text=result_text or "")
 
 
 def _create_auto_advance_a2a(task: dict, next_role: str, scene_id: str,

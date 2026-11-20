@@ -201,3 +201,9 @@ docs/weekly-11/backup/
 # 内部运维文档（拓扑/事故复盘/主机操作记录）不入公开仓
 docs/nginx-dual-active-38080.md
 docs/engine-run-as-task-owner.md
+
+# 本地分析/部署产物（可能含凭据、日志或大文件）：不入仓
+/grape-analysis/
+/nginx-local/
+/tunnel/
+/.pipcache/

@@ -543,7 +543,7 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
 
 def set_default_branch(api_token: str, owner: str, repo: str, branch: str,
                        provider: str = "gitcode") -> bool:
-    """把已存在分支设为仓库默认分支（新组织仓库 grape-repo-knowledge 收口）。
+    """把已存在分支设为仓库默认分支（组织仓库默认 main / 存量分支收口）。
 
     GitHub/GitCode 建仓时对自定义 default_branch 支持不一致；统一在建出首个分支后
     通过平台 API 校正。失败只返回 False，由调用方 best-effort 记录。

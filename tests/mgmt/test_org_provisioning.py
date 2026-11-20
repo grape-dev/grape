@@ -578,7 +578,10 @@ def test_provision_creates_branches_before_ready(monkeypatch):
     """provisioning 必须先创建默认分支 + 分析分支，再置 ready。"""
     import src.domains.mgmt.org_provision as provision
     from src.domains.mgmt.org_provision import provision_org
-    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+    from src.domains.mgmt.org_context_repo import (
+        ORG_REPO_COMBINED_BRANCH,
+        ORG_REPO_DEFAULT_BRANCH,
+    )
 
     calls = []
     _patch_successful_vcs(monkeypatch)
@@ -591,4 +594,5 @@ def test_provision_creates_branches_before_ready(monkeypatch):
     result = provision_org(org_id)
     assert result["provision_status"] == "ready"
     assert calls == [(str(org_id), REPO_KEY, True)]
-    assert ORG_REPO_DEFAULT_BRANCH == "grape-repo-knowledge"
+    assert ORG_REPO_DEFAULT_BRANCH == "main"
+    assert ORG_REPO_COMBINED_BRANCH == "grape-org"

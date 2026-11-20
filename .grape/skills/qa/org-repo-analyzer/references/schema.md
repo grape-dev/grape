@@ -18,4 +18,4 @@
 | risks | string[] | 否 | 待人工确认项 |
 
 写入后由后端渲染为 `org-context/repo-map/repos/<provider>/<owner>/<repo>/summary.md`，
-并同步到组织仓库的 `grape-repo-analysis` 分支。
+并同步到组织仓库的 `grape-org` 分支。

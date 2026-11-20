@@ -1037,6 +1037,31 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"SRE → pending_review failed: {_e}")
 
+    # 末节点完成后 → 推进到「待人工确认」（与 event_pipeline 同一钩子清单）。
+    # 技能未显式置 pending-review 时由服务端兜底；函数自带 stage/末节点守卫，非末节点 noop。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.api.issues_center import finalize_issue_to_pending_review
+            _fin = finalize_issue_to_pending_review(repo_key, issue_id, agent_type, source="exec")
+            if _fin not in ("noop:not_last_node", "noop:not_issue", "noop:terminal"):
+                log.info(f"Exec agent: last-node finalize result={_fin} issue={issue_id}")
+        except Exception as _e:
+            log.warning(f"Exec agent: last-node finalize to pending_review failed: {_e}")
+
+    # Issue #2118/#2270：本地 direct 收尾也按场景 next/handoff 自动推进，与远程
+    # worker 的 complete_task() 保持同一钩子清单（避免 coding 完成后停在中间节点）。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.domains.runtime.engine.service import run_auto_advance_hook
+            _adv = run_auto_advance_hook(task_id or "", repo_key, issue_id,
+                                         agent_type, seq, result_text or "")
+            if _adv.get("action") in ("a2a", "recheck", "pending_review"):
+                log.info(f"Exec agent: auto-advance issue={issue_id} agent={agent_type} "
+                         f"action={_adv.get('action')} next={_adv.get('next_role')} "
+                         f"round={_adv.get('round')} seq={_adv.get('seq')}")
+        except Exception as _e:
+            log.warning(f"Exec agent: auto-advance failed issue={issue_id}: {_e}")
+
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
         try:

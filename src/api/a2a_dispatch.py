@@ -565,9 +565,18 @@ def trigger_org_aggregate(dispatch: dict, targets: list[dict] | None,
     if existing:
         return {"status": "dedup", "seq": int(existing.get("seq") or 0)}
 
-    from src.api.pipeline_config import get_pipeline_transition, node_role
+    from src.api.pipeline_config import get_pipeline_config, get_pipeline_transition, node_role
     transition = get_pipeline_transition(scene_id, "org_aggregate", repo_key=repo_key) or {}
     node = transition.get("node") or {}
+    if not node:
+        # 自定义组织场景可能给聚合节点换了 id/tag，但技能语义仍是 org-aggregate-cli。
+        # 按技能兜底解析，避免聚合事件没有目标技能而永远派发不出去。
+        _cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+        node = next(
+            (n for n in (_cfg.get("nodes") or [])
+             if str(n.get("skill") or "") == "org-aggregate-cli"),
+            None,
+        ) or {}
     role = node_role(node) or "qa"
     repository = from_repo_key(repo_key) or repo_key
     context = (

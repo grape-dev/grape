@@ -405,6 +405,39 @@ def test_org_template_resolves_for_org_repo(monkeypatch):
     ]
 
 
+# --------------------------------------------- 本地 direct 收尾钩子对齐
+
+def test_run_auto_advance_hook_assembles_task_and_parses_output(monkeypatch):
+    """本地收尾入口：任务上下文装配 + 结构化产出解析后交给同一判定函数。"""
+    captured = {}
+
+    def _fake(task, output=None, result_text=""):
+        captured.update(task=task, output=output, result_text=result_text)
+        return {"action": "a2a", "next_role": "qa", "seq": 901}
+
+    monkeypatch.setattr(engine_service, "_auto_advance_after_complete", _fake)
+
+    out = engine_service.run_auto_advance_hook(
+        "t_local", ORG_REPO, "#42", "coding", 123,
+        '{"actions": ["x"], "conclusion": "ok"}')
+
+    assert out == {"action": "a2a", "next_role": "qa", "seq": 901}
+    assert captured["task"] == {"id": "t_local", "repo_key": ORG_REPO,
+                                "issue_id": "#42", "agent_type": "coding",
+                                "event_seq": 123}
+    assert captured["output"]["conclusion"] == "ok"
+
+
+def test_local_executors_call_auto_advance_hook():
+    """本地 direct 两条收尾路径（event_pipeline / direct_executor）都必须调用钩子。"""
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    for rel in ("src/domains/runtime/pipeline/event_pipeline.py",
+                "src/domains/runtime/engine/direct_executor.py"):
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            src = f.read()
+        assert "run_auto_advance_hook(" in src, f"{rel} 收尾未调用 run_auto_advance_hook"
+
+
 def test_official_market_lookup_excludes_org_scope(monkeypatch):
     from src.kernel.session_manager import db, db_lock
 

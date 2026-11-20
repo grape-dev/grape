@@ -1063,8 +1063,10 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         _scene = get_issue_scene(repo_key, _issue_id)
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
+        from src.domains.runtime.engine.engine_select import node_matches_agent_role
+        # stage 是角色（tag），组织场景节点 id 与 tag 不同 → 必须按角色匹配。
         for _n in (_cfg.get("nodes") or []):
-            if _n.get("id") == _cur:
+            if node_matches_agent_role(_n, _cur):
                 return _next_is_last_node(_n.get("next"))
         return False
     except Exception:
@@ -1157,18 +1159,23 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
         _nodes = _cfg.get("nodes") or []
-        _ids = {(_n.get("id") or _n.get("tag") or "").strip() for _n in _nodes}
+        from src.domains.runtime.engine.engine_select import node_matches_agent_role
+        # 末节点判定必须按角色（id 或 tag）命中：组织场景 id=org_aggregate/tag=qa，
+        # 事件里的 agent_type 是 tag。只比 id 会让 org 场景永远判不出末节点。
+        _ids = {(str(_n.get("id") or "").strip()) for _n in _nodes}
+        _ids |= {(str(_n.get("tag") or "").strip()) for _n in _nodes}
+        _ids.discard("")
         for _n in _nodes:
-            _nid = (_n.get("id") or _n.get("tag") or "").strip()
-            if _nid == agent_type:
-                _next = (_n.get("next") or "").strip()
-                if _next_is_last_node(_next):
-                    return True
-                if _next not in _ids:
-                    # 配置笔误（next 指向不存在节点）不视为末节点，防误触发自动结单
-                    log.warning(f"pipeline last-node check: next={_next} not in nodes "
-                                f"(misconfig?) {repo_key}/#{issue_number} agent={agent_type}")
-                return False
+            if not node_matches_agent_role(_n, agent_type):
+                continue
+            _next = (_n.get("next") or "").strip()
+            if _next_is_last_node(_next):
+                return True
+            if _next not in _ids:
+                # 配置笔误（next 指向不存在节点）不视为末节点，防误触发自动结单
+                log.warning(f"pipeline last-node check: next={_next} not in nodes "
+                            f"(misconfig?) {repo_key}/#{issue_number} agent={agent_type}")
+            return False
         return False
     except Exception as _e:
         log.warning(f"pipeline last-node check failed {repo_key}/#{issue_number}: {_e}")
@@ -1288,7 +1295,9 @@ def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: s
         _scene = get_issue_scene(repo_key, _tag)
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
-        _node_ids = [(_n.get("id") or _n.get("tag") or "").strip() for _n in _nodes]
+        # 事件 agent_type 记的是角色（tag）；组织场景 id != tag，必须用角色对齐，
+        # 否则会把 org_aggregate 误判成一直「未完成」。
+        _node_ids = [(_n.get("tag") or _n.get("id") or "").strip() for _n in _nodes]
         _node_ids = [n for n in _node_ids if n]
         _latest = _issue_latest_event_status_by_agent(repo_key, _tag)
         for _nid in _node_ids:
