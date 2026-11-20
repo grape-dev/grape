@@ -114,6 +114,9 @@ def validate_org_scene_entry(repo_key: str, scene_id: str, context_org_id: str) 
     is_org_repo = bool(binding.get("is_org_repo"))
     scene_meta = _org_scene_metadata(scene_id, normalized_repo)
     scene_org_id = str(scene_meta.get("org_id") or "")
+    if scene_org_id in ("0", "0.0"):
+        # D105-15 哨兵：'0' 表示无组织，不能当成组织场景（bool('0') 为 True）
+        scene_org_id = ""
     is_org_scene = scene_meta.get("scene_type") == "org" or bool(scene_org_id)
     # Issue #2118 复审：普通仓库引用组织模板（官方 market scope='org' / file
     # scene_type='org' / 其它仓库的 org 场景行）时，本仓库场景表查不到 org 属性，
