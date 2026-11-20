@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
@@ -2434,6 +2435,14 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT installation_id, channel_type FROM grape_t_channel_lease "
         "WHERE lease_owner=? AND installation_id<>'' "
         "ORDER BY updated_at DESC LIMIT 200"),
+    # 全集群租约快照（IM 渠道页 connected 口径）：一条查询取回安装 → 持有者/到期。
+    # 谓词与 COALESCE 与调用方原语句逐字一致；「是否过期」不在 SQL 判（写侧存在
+    # 空格与 ISO 8601 两种口径，字符串比大小会把 ISO 行判成永远未过期），交调用方
+    # 解析时间后判定。
+    "live_channel_lease_owners": (
+        "SELECT installation_id, COALESCE(lease_owner,''), COALESCE(lease_expires_at,'') "
+        "FROM grape_t_channel_lease "
+        "WHERE installation_id<>'' AND COALESCE(lease_owner,'')<>''"),
     # ── 互动卡片台账（grape_t_channel_outbound_card 归 mgmt；runtime/im/engine/
     # outbound_cards 的钉钉 outTrackId → 会话映射）──────────────────────────────
     # 与上方 W3 `upsert_outbound_card`（outbox 投递状态机）**分开登记**：那条是
@@ -5055,20 +5064,60 @@ def lease_owned_installations_by_owner(owner: str, cursor: Any = None) -> list[t
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+_LEASE_EXPIRY_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f")
+
+
+def _lease_expiry_alive(expires_at: Any, now: Any = None) -> bool:
+    """租约是否仍在有效期内（空值/脏值一律按「已失效」）。
+
+    到期列是文本，写侧有两条口径、都是 UTC：
+      - 主续约路径 `bot_lease._future` → `"YYYY-MM-DD HH:MM:SS"`；
+      - `acquire_channel_lease`（lib 抢租约）→ `datetime.isoformat()`，
+        形如 `"YYYY-MM-DDTHH:MM:SS+00:00"`。
+    逐字比大小会把 ISO 行判成「永远未过期」——同一 UTC 日第 11 个字符
+    `T`(84) > 空格(32)。两种口径的判定只在这一点收口，调用方（两条 IM 路由）
+    不再各写一份比较。
+    """
+    raw = str(expires_at or "").strip()
+    if not raw:
+        return False
+    dt = None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in _LEASE_EXPIRY_FORMATS:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return False
+    if dt.tzinfo is None:          # 两种写法都是 UTC 口径，补上时区再比
+        dt = dt.replace(tzinfo=timezone.utc)
+    ref = now if now is not None else datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return dt > ref
+
+
 def live_channel_lease_owners(cursor: Any = None) -> dict:
-    """全集群「谁持有哪条渠道」的快照（installation_id → (lease_owner, lease_expires_at)）。
+    """全集群「谁正在维护哪条渠道」的快照（installation_id → lease_owner）。
 
     用途：IM 渠道页的「已连接」口径。四台主控按租约分片各连一部分，
     单台进程的 supervisor 只知道自己那几条，直接拿它当 connected 会让
-    其余三台连着的渠道显示成「已配置 · 未连接」。租约表是跨进程唯一真源。
-    `cursor` 语义同 `lease_owner_by_key`。
+    其余三台连着的渠道显示成「已配置 · 未连接」。租约表是跨进程唯一真源：
+    **owner 非空且未过期**才计入（到期判定走 `_lease_expiry_alive`，
+    同时吃空格与 ISO 两种写入口径）。
+    `cursor` 语义同 `lease_owner_by_key`；SQL 登记在 `_ANY_QUERIES`（跨域读白名单口径），
+    走 `_any_sql` 以便两种方言都能翻译。
     """
-    sql = ("SELECT installation_id, COALESCE(lease_owner,''), COALESCE(lease_expires_at,'') "
-           "FROM grape_t_channel_lease WHERE installation_id<>'' AND COALESCE(lease_owner,'')<>''")
     with _owner_cursor(cursor) as c:
-        c.execute(sql)
+        c.execute(_any_sql("live_channel_lease_owners"))
         rows = c.fetchall() or []
-    return {str(r[0]): (str(r[1] or ""), str(r[2] or "")) for r in rows}
+    now = datetime.now(timezone.utc)
+    return {str(r[0]): str(r[1] or "") for r in rows
+            if _lease_expiry_alive(r[2], now)}
 
 
 def installation_status(installation_id: str):

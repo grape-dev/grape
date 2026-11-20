@@ -15,7 +15,6 @@ A2 收尾（Phase B）后 legacy 三列与 `global_im_bot_config` 整表已 DROP
 from __future__ import annotations
 
 import json
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -116,15 +115,15 @@ def _lease_connected_owners() -> dict:
     四台主控按 `grape_t_channel_lease` 分片，每条安装只在**一台**上连；
     只按本进程 `supervisor._channels` 判 connected，会让另外三台连着的渠道
     在页面上显示成「已配置 · 未连接」（Issue：IM 页误报）。租约表是跨进程
-    唯一真源：owner 非空且未过期即视为已连接。
+    唯一真源：`mgmt.public.live_channel_lease_owners()` 已按「owner 非空 + 未过期」
+    过滤（两种到期文本口径的判定收口在那里），这里只做异常降级。
     """
     try:
-        leases = _mgmt_public().live_channel_lease_owners()
+        owners = _mgmt_public().live_channel_lease_owners()
     except Exception as e:
         log.warning(f"IM lease snapshot read failed: {e}")
         return {}
-    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    return {str(i): str(o) for i, (o, exp) in (leases or {}).items() if not exp or str(exp) > now}
+    return {str(i): str(o) for i, o in (owners or {}).items()}
 
 
 @router.get("/status")
