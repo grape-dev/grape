@@ -136,3 +136,23 @@ def test_check_name_reads_gitlab_username_field(monkeypatch):
                             user={"id": 1, "username": "gvtest"})
     assert out == {"exists": False}
     assert seen["login"] == "yangaiwu"
+
+
+def test_gitlab_create_repo_normalizes_full_name_and_owner():
+    """GitLab 建仓响应没有 full_name/owner —— 不归一会写空 repo_key，托管回调全 404。
+
+    2026-11-20 实锤：托管返回「仓库创建并托管成功」，但 managed_repos.repo_key=''
+    （owner/name 正常），/webhook/gitlab 按 repo_key 查不到仓库 → 一律 404
+    repository not managed，inbox 永远 0 行。
+    """
+    fake = _FakeHttp(create_response={
+        "id": 1, "name": "proj", "path": "proj",
+        "path_with_namespace": "grp/sub/proj",
+        "namespace": {"id": 9, "full_path": "grp/sub", "path": "sub"},
+        "web_url": "https://gitlab.com/grp/sub/proj",
+    })
+    out = _provider(fake).create_repo("tok", "proj")
+    assert out["full_name"] == "grp/sub/proj"
+    assert out["owner"] == "grp/sub"          # 组/子组必须保完整路径
+    assert out["name"] == "proj"
+    assert out["path_with_namespace"] == "grp/sub/proj"   # 原始字段保留
