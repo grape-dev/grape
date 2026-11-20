@@ -21,10 +21,20 @@
 - 新增实例卡的写入口 = `PUT /api/admin/vcs-platforms`（`src/domains/mgmt/admin/routes.py:886`）：
   Builder 全字段校验 → host / webhook_path 全局唯一校验 → 写 meta `vcs_providers_config`
   → `invalidate_platform_card_cache()` → `audit_logs(admin_vcs_platforms_saved)`。
-- **导入时机**：`d109_startup.py::d109_platform_object_startup()` 启动期跑
-  `importer.run_startup_import()`。所以：写卡后**方言/host/托管链路立即可用**（读 meta 卡），
-  但用户面目录与凭据 tab 要等**重启后的导入**（或对象模型批次补一个"立即导入"入口）。
-  文档按此口径写验收步骤：写卡 → 重启 → 目录可见 → 用户绑 PAT → 托管。
+- **写卡即落行（本批新增）**：路由在 meta 写入之后，对每个 provider 调
+  `RepoPlatformRepo.upsert_manual()` 落一行 `source='manual'`（字段先按表列过滤——卡里的
+  `token_env`/`event_map`/`fields`/`global_bot_meta_key` 等不是列，不过滤会被未知键
+  fail-closed 拒掉），再失效一次卡缓存。**写卡是同一个请求内完成"卡 + 行"，用户面目录与
+  凭据 tab 立即出现该实例，不需要重启。**
+- 为什么不能靠"立即导入"：`importer.load_repo_platforms()` 只 glob
+  `configs/platforms/*.json`（**不读 meta `vcs_providers_config`**），
+  `platform_descriptors()` 又只在**表为空**时回落平台卡——而表里已有内置平台行，
+  所以纯 meta 卡永远进不了目录。立即导入跑一次也是导入文件，补不上 meta 卡。
+- 文件派生行不被改写：`upsert_manual` 遇到 `source != 'manual'`（即
+  `configs/platforms/<p>.json` 派生）返回 `config_owned` 且不写，响应里 `rows` 可见；
+  该 provider 的定义真源仍是配置文件（防双真源，下次启动导入不会被冲掉）。
+- 落行失败不阻断卡保存：响应带 `rows_error`（同时 `log.warning`），避免"卡存成功但目录
+  没实例"被静默当成已接入。
 - 已知技术债（登记，不在本议题修）：`/api/admin/vcs-platforms` 是 D109 之前的老卡视图，
   对象模型批次接管时把"新增实例"迁到 `/api/admin/repo-platforms` 的显式创建动作，
   并守住 §23 契约（无父容器 / 无整卡 PUT）。
@@ -84,7 +94,20 @@
 - `enabled`（平台行）= 用户面目录可见性；**不门禁**托管/列仓/凭据解析（内网仍可用）。
 - 隐藏 ≠ 关闭；`is_platform_visible()` 单一判据（本议题不改动该语义）。
 
-## D10 端到端校验脚本
+## D10 最小配置：方言默认值（B 方案）
+
+- `platform_card.build_platform_card` 新增 `_DIALECT_DEFAULTS`：`dialect=gitlab` 时，
+  键缺席的字段按方言默认派生 —— `api_base=https://{host}/api/v4`、`api_auth=private_token`、
+  `clone_auth=oauth2`、`webhook_dialect=gitlab_v4`、`event_header=X-Gitlab-Event`、
+  `download_base=https://{host}`；`webhook_path`/`name`/`webhook_verify`/`pat_create_url`
+  原本就有默认或按 host 推导。
+- 所以接入一个自建实例的最小请求是 **`{"<provider>": {"dialect": "gitlab", "host": "<host>"}}`**。
+- 为什么只有 gitlab 给默认：该方言当前只有 `gitlab_v4` 一族 webhook（1:1），按方言推导不会
+  换族；github 方言下 gitcode/gitee 实为 `gitee_v5`，D105-19 明确禁止推导。
+- 显式给值一律优先（少数自建实例 API 前缀不同可覆盖）；校验不放松（非 http、相对 CA 路径、
+  host/webhook_path 撞车仍 400）。
+
+## D11 端到端校验脚本
 
 - `scripts/probe_gitlab_instance.py <provider>`：读卡 → ①token 校验（`/user`）②列仓（`/projects?membership=true` 首页）
   ③namespace 寻址（`/projects/{owner%2Frepo}/repository/tree?ref=HEAD`）④文件读（README 或指定路径）

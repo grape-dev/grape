@@ -8,7 +8,7 @@
 
 | # | 问题 | 证据 |
 |---|---|---|
-| G1 | 实例卡新增只能靠 `PUT /api/admin/config`（整卡集合写入），前端无入口 | `src/domains/mgmt/admin/routes.py:204`（写 `vcs_providers_config`）；`grep -rn "admin/config" src/api/frontend/`（Vue/shell）命中 0 |
+| G1 | 实例卡新增只能靠管理接口写整卡集合，且**只写 meta**：目录/凭据 tab 表优先，永远看不到纯 meta 卡 | `src/domains/mgmt/admin/routes.py:204`（写 `vcs_providers_config`）；`grep -rn "admin/config" src/api/frontend/`（Vue/shell）命中 0 |
 | G2 | 实例卡缺代码模块时，网关调用直接 502（"Git provider 未支持"） | `src/domains/runtime/vcs/providers/__init__.py::module_for`；`src/api/git_repo_api.py::_provider_module` |
 | G3 | 子组仓库（`grp/sub/proj`）寻址失败：repo_key 按首个 `/` 切分，网关只有两段式路由 | `src/kernel/repo_key.py::parse_repo_key`（已修）；`src/api/git_repo_api.py`（已补 `{owner:path}`） |
 | G4 | 私有 CA 只进 git 传输层，API 侧（列仓/托管/建钩/Issue/MR）走默认 SSL 上下文 | `src/kernel/token_resolver.py::_http`、`vcs/api_client.py::_do_request`（已收口到 `src/kernel/upstream_http.py`） |
@@ -36,8 +36,9 @@
 
 | # | 场景 | 前置 | 动作 | 预期 | 用例 |
 |---|---|---|---|---|---|
-| S1 | 新增实例卡 | 管理员 token | `PUT /api/admin/config` 带 `gitlab-corp` 卡 | 201/200；`/settings/vcs/platforms` 出该实例；host/webhook_path 重复被 400 | `test_issue_3580_instance_card_via_admin_config.py::test_card_visible_after_write` |
-| S2 | 字段非法 | 同上 | `api_base` 非 http、`ca_bundle` 相对路径、`dialect` 未知 | 400 + `errors[]` 明细，库内零写入 | 同上 `::test_invalid_card_rejected_without_write` |
+| S1 | 新增实例卡（**最小配置**：只给 `dialect` + `host`） | 管理员 token | `PUT /api/admin/vcs-platforms` 带 `gitlab-corp` 卡 | 200 + `rows.gitlab-corp=inserted`；`source='manual'` 行落库；`/settings/vcs/platforms` **立即**出现该实例（无需重启）；host/webhook_path 重复被 400 | `test_issue_3580_instance_card_via_admin_config.py::test_minimal_card_derives_gitlab_defaults` / `::test_instance_row_is_manual_and_listed` |
+| S2 | 字段非法 | 同上 | `api_base` 非 http、`ca_bundle` 相对路径、`dialect` 未知 | 400 + `errors[]` 明细，meta 与表零写入 | 同上 `::test_instance_card_rejected_when_fields_invalid` |
+| S1b | 文件派生 provider 被管理面改写 | `gitcode` 行来自 `configs/platforms/gitcode.json` | `PUT` 带改过的 `gitcode` 卡 | `rows.gitcode=config_owned`，行仍是 `source='config'` 且字段未被改写 | 同上 `::test_file_backed_provider_is_not_overwritten` |
 | S3 | 子组寻址 | 卡已接入 | 请求 `/api/git-repo/grp/sub/proj/tree` | 命中 namespace 路由，owner=`grp/sub` | `test_issue_3580_namespace_routes.py`（已绿） |
 | S4 | 私有 CA | 实例 API 用企业 CA | 列表/建钩 | 走卡 `ca_bundle`；3xx 不跟随 | `test_issue_3580_upstream_tls.py`（已绿） |
 | S5 | 树/文件 | 实例可达 | `GET .../tree`、`.../contents/src/a.py`、`.../contents/src` | 归一为 `{type,mode,path,name,sha,size}`；文件 base64；目录回落 | `test_issue_3580_gitlab_repo_paths.py`（已绿） |

@@ -982,11 +982,41 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
         meta_pairs.append((f"{provider}_webhook_token", token))
     _rt.set_meta_values_any(meta_pairs)
     invalidate_platform_card_cache()
+    # Issue #3580 复审：实例卡还必须落成平台行（D109 表是运行时权威）——只写 meta 时
+    # `/settings/vcs/platforms`（表优先）与凭据 tab 永远看不到该实例（用户配不了 PAT），
+    # 而导入器只扫 configs/platforms/*.json（不读 meta），重启也补不上。
+    # 只对「文件未定义」的 provider 落 manual 行；文件派生行返回 config_owned 不写（防双真源）。
+    rows: dict[str, str] = {}
+    rows_error = ""
+    try:
+        from sqlalchemy.orm import Session as _OrmSession
+
+        from src.kernel.persistence.engine import get_engine as _get_engine
+        from src.kernel.persistence.models_platform_object import RepoPlatformModel
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        _cols = {c.name for c in RepoPlatformModel.__table__.columns}
+        with _OrmSession(_get_engine()) as _s:
+            for _provider, _fields in cleaned.items():
+                # 卡里有非表列字段（token_env/event_map/fields/global_bot_meta_key…），
+                # 不过滤会被 _apply_fields 的未知键 fail-closed 整条拒绝。
+                rows[_provider] = RepoPlatformRepo.upsert_manual(
+                    _s, _provider, {k: v for k, v in _fields.items() if k in _cols})
+            _s.commit()
+        invalidate_platform_card_cache()      # 行变了 → 卡按表重建
+    except Exception as e:  # noqa: BLE001
+        # 落行失败不阻断卡保存（方言/host 链路仍可用），但必须让管理面看见——
+        # 静默成功会让运维以为实例已接入，实际目录里没有。
+        rows_error = f"{type(e).__name__}: {e}"
+        log.warning(f"vcs-platforms: 平台行落库失败（卡已保存）: {rows_error}")
     from src.domains.mgmt.auth.audit import log_audit
     log_audit("admin_vcs_platforms_saved", operator_id=admin["id"],
-              detail={"providers": sorted(cleaned.keys())})
-    return {"message": "VCS platform cards saved (cache invalidated)",
-            "cards": sorted(cleaned.keys())}
+              detail={"providers": sorted(cleaned.keys()), "rows": rows})
+    out = {"message": "VCS platform cards saved (cache invalidated)",
+           "cards": sorted(cleaned.keys()), "rows": rows}
+    if rows_error:
+        out["rows_error"] = rows_error
+    return out
 
 class AuthChannelsBody(BaseModel):
     providers: dict  # {provider: {name, type, auth_url, ..., client_id?, client_secret?}}

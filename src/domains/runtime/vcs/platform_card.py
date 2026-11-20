@@ -434,11 +434,14 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     webhook_path = str(raw.get("webhook_path") or f"/webhook/{provider}")
     if not webhook_path.startswith("/webhook/") or len(webhook_path) <= len("/webhook/"):
         raise PlatformCardError(f"{provider}: webhook_path 必须形如 /webhook/<name>: {webhook_path!r}")
-    api_base = str(raw.get("api_base") or f"https://{host}").strip().rstrip("/")
+    api_base = str(raw.get("api_base") or _dialect_default(dialect, "api_base", host)
+                   or f"https://{host}").strip().rstrip("/")
     _validate_instance_url(provider, "api_base", api_base, required=True)
-    download_base = str(raw.get("download_base") or "").strip().rstrip("/")
+    download_base = str(raw.get("download_base") or _dialect_default(dialect, "download_base", host)
+                        or "").strip().rstrip("/")
     _validate_instance_url(provider, "download_base", download_base, required=False)
-    api_auth = raw.get("api_auth", "query_token" if dialect == "github" else "bearer_header")
+    api_auth = (raw.get("api_auth") or _dialect_default(dialect, "api_auth", host)
+                or ("query_token" if dialect == "github" else "bearer_header"))
     if api_auth not in _VALID_API_AUTH:
         raise PlatformCardError(f"{provider}: api_auth 必须是 {'/'.join(_VALID_API_AUTH)}")
     webhook_verify = raw.get("webhook_verify", "hmac" if dialect == "github" else "token_compare")
@@ -447,10 +450,12 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     # D105-19：webhook 形态（github_web/gitee_v5）。必须卡显式声明——同为 github
     # API 方言的 gitcode/gitee webhook 形态实为 v5，从 dialect 派生会静默换家族，
     # 故不做缺省推导；未声明时托管消费侧 fail-closed（显式报错，不猜）。
-    webhook_dialect = str(raw.get("webhook_dialect") or "")
+    webhook_dialect = str(raw.get("webhook_dialect")
+                          or _dialect_default(dialect, "webhook_dialect", host) or "")
     if webhook_dialect and webhook_dialect not in _VALID_WEBHOOK_DIALECTS:
         raise PlatformCardError(f"{provider}: webhook_dialect 必须是 {'/'.join(_VALID_WEBHOOK_DIALECTS)}: {webhook_dialect!r}")
-    clone_auth = raw.get("clone_auth", "x_access_token")
+    clone_auth = (raw.get("clone_auth") or _dialect_default(dialect, "clone_auth", host)
+                  or "x_access_token")
     if clone_auth not in _VALID_CLONE_AUTH:
         raise PlatformCardError(f"{provider}: clone_auth 必须是 {'/'.join(_VALID_CLONE_AUTH)}")
     token_env = str(raw.get("token_env") or "").strip()
@@ -485,7 +490,9 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         dialect=dialect,
         host=host,
         webhook_path=webhook_path,
-        event_header=str(raw.get("event_header") or f"X-{provider.capitalize()}-Event"),
+        event_header=str(raw.get("event_header")
+                         or _dialect_default(dialect, "event_header", host)
+                         or f"X-{provider.capitalize()}-Event"),
         api_base=api_base,
         api_auth=api_auth,
         webhook_verify=webhook_verify,
@@ -537,6 +544,27 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         event_map_overrides=dict(raw.get("event_map") or {}),
         fields_overrides=dict(raw.get("fields") or {}),
     )
+
+
+# Issue #3580 复审：方言族默认值——自建实例只给 dialect + host 即可接入。
+# 为什么只有 gitlab：该方言当前只有 gitlab_v4 一族 webhook（1:1 映射），按方言推导
+# 不会换族；github 方言下 gitcode/gitee 实为 gitee_v5（D105-19 因此禁止推导）。
+# 只补「键缺席」的字段，卡里显式给值一律优先（少数自建实例 API 前缀不同可覆盖）。
+_DIALECT_DEFAULTS: dict[str, dict] = {
+    "gitlab": {
+        "api_base": "https://{host}/api/v4",
+        "api_auth": "private_token",
+        "clone_auth": "oauth2",
+        "webhook_dialect": "gitlab_v4",
+        "event_header": "X-Gitlab-Event",
+        "download_base": "https://{host}",
+    },
+}
+
+
+def _dialect_default(dialect: str, key: str, host: str) -> str:
+    tpl = str((_DIALECT_DEFAULTS.get(dialect) or {}).get(key) or "")
+    return tpl.replace("{host}", host) if tpl else ""
 
 
 # 内置默认：三平台与现状行为一致（D14 存量回归锁的基线）
