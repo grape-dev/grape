@@ -216,15 +216,30 @@ def _reconcile_locked(limit: int, lookback_hours: float | None) -> dict:
         # advanced；否则统计会虚高，且掩盖「历史自动事件失败/已存在」的真实状态。
         if action in ("a2a", "recheck") and _seq > 0:
             stats["advanced"] += 1
-            stats["actions"].append({
+            action_row = {
                 "task_id": task_id, "repo_key": repo_key, "issue_id": issue_id,
                 "agent": agent_type, "action": action,
                 "next": (result or {}).get("next_role") or "",
-                "seq": (result or {}).get("seq") or 0,
-            })
-            log.info(f"pipeline-advance: {agent_type}->{(result or {}).get('next_role')} "
+                "seq": _seq,
+            }
+            stats["actions"].append(action_row)
+            log.info(f"pipeline-advance: {agent_type}->{action_row['next']} "
                      f"task={task_id} issue={repo_key}/{issue_id} "
-                     f"action={action} seq={(result or {}).get('seq')}")
+                     f"action={action} seq={_seq}")
+            # C3：自动推进是写操作，必须与手动入口同口径留审计行。
+            try:
+                from src.domains.mgmt import public as mgmt_public
+                mgmt_public.log_audit(
+                    "issue_pipeline_advanced",
+                    user_id="0", operator_id="0",
+                    detail={"source": "pipeline_advance",
+                            "task_id": task_id, "repo_key": repo_key,
+                            "issue_id": issue_id, "from": agent_type,
+                            "to": action_row["next"], "action": action,
+                            "seq": _seq},
+                )
+            except Exception as _ae:  # 审计失败不阻断推进，但必须可观测
+                log.warning(f"pipeline-advance: audit write failed task={task_id}: {_ae}")
         else:
             stats["skipped"] += 1
     return stats

@@ -48,6 +48,10 @@ def test_advances_completed_task_whose_stage_did_not_move(monkeypatch):
         monkeypatch, task=_task("coding"),
         state={"status": "processing", "stage": "coding"},
         result={"action": "a2a", "next_role": "qa", "seq": 9001})
+    audits = []
+    import src.domains.mgmt.public as mgmt_public
+    monkeypatch.setattr(mgmt_public, "log_audit",
+                        lambda *a, **kw: audits.append((a, kw)))
 
     stats = pr.reconcile_pipeline_progress()
 
@@ -56,6 +60,10 @@ def test_advances_completed_task_whose_stage_did_not_move(monkeypatch):
     assert len(calls) == 1
     args = calls[0][0]
     assert args[:5] == ("t_reconcile", "gitcode:acme/svc", "#9", "coding", 321)
+    assert audits and audits[0][0][0] == "issue_pipeline_advanced"
+    assert audits[0][1]["detail"]["source"] == "pipeline_advance"
+    assert audits[0][1]["detail"]["to"] == "qa"
+    assert audits[0][1]["detail"]["seq"] == 9001
 
 
 def test_skips_when_stage_already_advanced(monkeypatch):

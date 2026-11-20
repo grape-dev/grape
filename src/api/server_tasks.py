@@ -563,10 +563,20 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
             while True:
                 try:
                     stats = await asyncio.to_thread(reconcile_pipeline_progress)
+                    try:
+                        from src.domains.insight.observability import loops
+                        loops.beat("pipeline_advance")
+                    except Exception:
+                        pass
                     if stats.get("advanced"):
                         log.info(f"Pipeline advance loop: advanced={stats['advanced']} "
                                  f"scanned={stats.get('scanned', 0)}")
                 except Exception as e:
+                    try:
+                        from src.domains.insight.observability import loops
+                        loops.fail("pipeline_advance", e)
+                    except Exception:
+                        pass
                     log.warning(f"Pipeline advance loop failed: {e}")
                 await asyncio.sleep(300)
 
