@@ -1468,6 +1468,9 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     `scenes detail` 同一解析函数、同一过滤口径（enabled + resolvable），
     保证「scenes detail 清单内的合法节点」handoff 均放行；禁用/技能不可
     解析节点不出现在有效目标集合（两处同步生效）。
+    Issue #3582 复审：目标标识与 resolver 的 id/tag 别名口径一致，冲突原因
+    （node_disabled / skill_unresolvable）由 resolver 直接产出，此处仅投影，
+    不再二次遍历节点判定。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
     Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
@@ -1476,7 +1479,6 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     """
     from src.api.scene_targets import resolve_scene_targets
     from src.api.session_store import get_issue_scene
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
     _scene_id = "default"
     try:
         _sid, _ = get_issue_scene(repo_key, f"#{issue_number}")
@@ -1487,26 +1489,16 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
         _res = resolve_scene_targets(_scene_id, repo_key=repo_key)
     except Exception:
         _res = {"scene_id": _scene_id, "cfg": None, "nodes": [],
-                "valid_targets": [], "node_status": {}}
+                "available_nodes": [], "valid_targets": [],
+                "target_reasons": {}}
     nodes = (_res.get("cfg") or {}).get("nodes") or []
     valid_targets = list(_res.get("valid_targets") or [])
-    node_status = _res.get("node_status") or {}
-    in_scene = False
-    conflict_reason = "not_in_scene"
-    for n in nodes:
-        if not isinstance(n, dict) or not node_matches_agent_role(n, agent_name):
-            continue
-        _nid = str(n.get("id") or n.get("tag") or "")
-        _st = node_status.get(_nid) or {}
-        if _nid in valid_targets:
-            in_scene = True
-            conflict_reason = ""
-            break
-        if _st.get("enabled") is False:
-            conflict_reason = "node_disabled"
-        elif _st.get("resolvable") is False:
-            conflict_reason = "skill_unresolvable"
-        break
+    target = str(agent_name or "")
+    in_scene = target in valid_targets
+    conflict_reason = ""
+    if not in_scene:
+        target_reasons = _res.get("target_reasons") or {}
+        conflict_reason = target_reasons.get(target) or "not_in_scene"
     return {
         "scene_id": _scene_id,
         "nodes": nodes,

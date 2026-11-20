@@ -8,8 +8,11 @@
   pipelines.json → default，含进程级缓存）；
 - 过滤口径统一：``enabled``（节点未启用不在可用清单）+ ``resolvable``
   （``scene_skill_scope.evaluate`` 单一判定器）；
-- 调用方（scenes detail / a2a handoff）只做结果投影，不再各自组装清单，
-  场景定义变更后两处同步生效（同一解析 + 同一缓存失效链路）。
+- 目标标识口径统一：节点的 ``id`` 与 ``tag`` 均可作为 handoff 目标
+  （与 ``engine_select.node_matches_agent_role`` 的 id 优先/tag 兜底一致），
+  ``valid_targets`` 同时收录两者（去重），保证「清单 = handoff 接受集合」；
+- 不可派发目标的 ``conflict_reason`` 归因也在此产出（``target_reasons``），
+  webhook 仅做投影，不再二次判定。
 """
 
 from __future__ import annotations
@@ -60,22 +63,43 @@ def node_scope_check(node: dict, repo_key: str, scene_id: str = "",
     }
 
 
+def _node_aliases(node: dict) -> list:
+    """节点的可接受目标标识：id 与 tag（不同时都收录，保持顺序去重）。
+
+    与 ``engine_select.node_matches_agent_role`` 的「id 优先、tag 兜底」保持
+    一致，使 ``valid_targets`` 覆盖 handoff 实际接受的全部标识。
+    """
+    aliases: list = []
+    for key in ("id", "tag"):
+        value = node.get(key)
+        if value is None or value == "":
+            continue
+        text = str(value)
+        if text not in aliases:
+            aliases.append(text)
+    return aliases
+
+
 def resolve_scene_targets(scene_id: str, repo_key: str = "",
                           cfg: Optional[dict] = None) -> dict:
     """同一解析函数：场景节点清单 + 有效派发目标集合（单一数据源）。
 
-    Issue #3582：scenes detail 的可用节点清单与 a2a handoff 的目标校验
-    均调用本函数，保证两处口径一致：
+    Issue #3582：scenes detail 的节点清单与 a2a handoff 的目标校验均调用
+    本函数，保证两处口径一致：
 
-    - ``nodes``：全量节点（复制后附加 resolvable/scope_check，展示用）；
-    - ``valid_targets``：当前有效目标清单（enabled 且 resolvable 的节点
-      id 列表，按场景定义顺序）——scenes detail 作为可用清单回显，
-      a2a handoff 作为目标校验与 409 冲突详情的依据；
-    - ``node_status``：{node_id: {enabled, resolvable, reason}}，供 409
-      conflict_reason 归因（node_disabled / skill_unresolvable）。
+    - ``nodes``：全量节点（复制后附加 resolvable/scope_check）。
+      ⚠️ 这是场景定义全量（含 disabled/unresolvable），不是可用派发清单；
+      调用方按清单交办时应使用 ``valid_targets`` / ``available_nodes``。
+    - ``available_nodes``：可用节点（enabled 且 resolvable），按场景定义顺序；
+    - ``valid_targets``：当前有效派发目标清单——可用节点的 id/tag 别名
+      （去重，按场景定义顺序），即 handoff 接受的目标集合；
+    - ``target_reasons``：不可派发别名 → 冲突原因（node_disabled /
+      skill_unresolvable），供 409 ``conflict_reason`` 直接投影；不在场景内
+      的目标由调用方回退为 not_in_scene。
 
-    返回 {"scene_id", "cfg", "nodes", "valid_targets", "node_status"}；
-    场景解析失败时返回空集合（cfg=None），调用方按既有语义处理。
+    返回 {"scene_id", "cfg", "nodes", "available_nodes", "valid_targets",
+    "target_reasons"}；场景解析失败时返回空集合（cfg=None），调用方按既有
+    语义处理。
     """
     from src.domains.mgmt.pipeline_config import get_pipeline_config
     # 调用方已持有解析结果（如 scenes detail 的会话绑定二级解析 cfg）时直接
@@ -85,24 +109,31 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
         cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         return {"scene_id": scene_id, "cfg": None, "nodes": [],
-                "valid_targets": [], "node_status": {}}
+                "available_nodes": [], "valid_targets": [],
+                "target_reasons": {}}
     resolved_id = cfg.get("scene_id") or scene_id
     nodes = attach_node_scope_checks(cfg.get("nodes") or [], repo_key,
                                      scene_id=resolved_id)
+    available_nodes: list = []
     valid_targets: list = []
-    node_status: dict = {}
+    target_reasons: dict = {}
     for item in nodes:
         if not isinstance(item, dict):
             continue
-        node_id = str(item.get("id") or item.get("tag") or "")
+        aliases = _node_aliases(item)
+        if not aliases:
+            continue
         enabled = item.get("enabled", True) is not False
         resolvable = bool(item.get("resolvable"))
         if enabled and resolvable:
-            valid_targets.append(node_id)
-        node_status[node_id] = {
-            "enabled": enabled,
-            "resolvable": resolvable,
-            "reason": (item.get("scope_check") or {}).get("reason") or "",
-        }
+            available_nodes.append(item)
+            for alias in aliases:
+                if alias not in valid_targets:
+                    valid_targets.append(alias)
+            continue
+        reason = "node_disabled" if not enabled else "skill_unresolvable"
+        for alias in aliases:
+            target_reasons[alias] = reason
     return {"scene_id": resolved_id, "cfg": cfg, "nodes": nodes,
-            "valid_targets": valid_targets, "node_status": node_status}
+            "available_nodes": available_nodes,
+            "valid_targets": valid_targets, "target_reasons": target_reasons}

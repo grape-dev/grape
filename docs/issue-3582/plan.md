@@ -60,3 +60,29 @@
 - 按 scenes detail 清单对每个合法节点 handoff 均不 409（T2）
 - 非法/冲突目标 409，响应含 conflict_reason + valid_targets（T3-T5）
 - 场景定义变更后两处同步生效（同一解析 + 同一缓存失效链路，T6）
+
+## QA 复审修订（2026-11-20，PR #1871）
+
+针对 QA 两轴审查意见的处理：
+
+1. **PEP8 E302**：删除 `scenes.py` 中已无调用的私有兼容委托
+   `_scene_node_scope_check` / `_attach_scene_node_scope_checks`（grep 确认
+   src/tests 仅定义处引用），同时消除 `pin_scene` 与顶层函数间空行不足。
+2. **AC1 标识口径**：`valid_targets` 收录有效节点的 `id` 与 `tag` 别名
+   （不同时同时收录、去重），与 `node_matches_agent_role` 的「id 优先、tag
+   兜底」一致；新增 T7 覆盖 id ≠ tag 场景（如 `coding` / `coding-agent`）。
+3. **Objective 清单语义**：`nodes` 明确为全量场景定义（含 disabled/
+   unresolvable，展示/诊断用，不是可用清单）；新增 `available_nodes`（可用
+   节点）与 `valid_targets`（可用目标别名），并在 scenes detail OpenAPI
+   description 与 docstring 中写明。按可用清单交办均不会 409。
+4. **AC3/AC5 路由级覆盖**：新增 T9（GET /api/scenes/{scene_id} 的
+   available_nodes/valid_targets 与 handoff 同源）、T10（POST /api/a2a 真实
+   409 响应含 conflict_reason + valid_targets，覆盖 not_in_scene 与
+   node_disabled）。
+5. **冲突归因收敛**：`resolve_scene_targets` 直接产出 `target_reasons`
+   （node_disabled / skill_unresolvable），`_scene_node_check` 仅做
+   `valid_targets` 命中判定与原因投影，删除 webhook 内二次遍历节点的
+   `node_matches_agent_role` 判定。
+6. **未解析口径注明**：技能名不在 skill 表时 `scene_skill_scope.evaluate`
+   按存量兼容返回 ok=True（source=unresolved），此类节点仍进入可用清单；
+   新增 T8 固化该口径。
