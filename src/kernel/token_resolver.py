@@ -175,6 +175,16 @@ class VCSProvider(ABC):
         """
         return []
 
+    def normalize_created_repo(self, raw: dict) -> dict:
+        """建仓响应 → 全平台同形的仓库身份（补 full_name/owner/name，原字段保留）。
+
+        平台差异收在对齐器里（`src.kernel.vcs.repo_ref`，按卡 dialect 注册）；这里
+        是给各 provider 的 create_repo 复用的通用钩子——路由层因此零平台分支。
+        """
+        from src.kernel.vcs.repo_ref import normalize_repo_payload
+
+        return normalize_repo_payload(self.provider_name, raw, getattr(self._card, "dialect", ""))
+
     def create_repo(self, api_token: str, name: str, description: str = "",
                     private: bool = False, owner: str = "", path: str = "") -> dict:
         """D42/S62 端口：在 token 用户名下建仓，返回平台 repo dict。
@@ -1619,21 +1629,12 @@ class GitLabProvider(GenericVcsProvider):
             # 上游拒绝（token 无 create 权限 / 重名 / 组禁建）必须落 error dict：
             # 抛异常会被路由当成 500，用户看不到原因。
             return {"error": f"上游拒绝建仓: {e}"}
-        # Issue #3580（2026-11-20 实锤）：GitLab 的建仓响应**没有** full_name/owner 字段
-        # （它叫 path_with_namespace，owner 藏在 namespace.full_path 里）。路由按
-        # repo_info["full_name"] 取仓库全名 → 空串 → to_repo_key("") 写成空 repo_key →
-        # managed_repos 行无法被 webhook/同步链路定位，托管「成功」但回调一律
-        # 404 repository not managed。这里在 provider 层补齐三平台同形字段，
-        # 让路由的零平台分支对 gitlab 也成立（原始字段一律保留，消费方不受影响）。
-        if isinstance(info, dict):
-            _ns_raw = info.get("namespace")
-            _ns: dict = _ns_raw if isinstance(_ns_raw, dict) else {}
-            info.setdefault("full_name", info.get("path_with_namespace") or "")
-            if not info.get("owner"):
-                info["owner"] = (_ns.get("full_path") or _ns.get("path") or "")
-            if not info.get("name"):
-                info["name"] = info.get("path") or body.get("name") or ""
-        return info
+        # Issue #3580（2026-11-20 实锤）：GitLab 建仓响应没有 full_name/owner
+        # （它叫 path_with_namespace，owner 在 namespace.full_path）。归一细节归
+        # `kernel.vcs.repo_ref` 的 GitLabRepoRefMapper（按卡 dialect 注册），这里
+        # 只调通用钩子——空 full_name 会让 to_repo_key("") 写出空 repo_key，托管
+        # 「成功」而回调一律 404 repository not managed。
+        return self.normalize_created_repo(info)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）

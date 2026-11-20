@@ -62,10 +62,12 @@ def policy_for(url: str) -> "tuple[str, bool]":
         return cached
     ca_bundle, allow_redirects = "", True
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        # 分层约束（check-arch R1 HARD）：kernel 只能经能力端口取平台卡——
+        # 装配层把 vcs_cards 端口绑定到 domains 实现，kernel 侧不出现 domains import。
         from src.kernel.ports import vcs_cards as _vcs_cards
+
         for provider in _vcs_cards.list_vcs_platforms():
-            card = get_platform_card(provider)
+            card = _vcs_cards.get_platform_card(provider)
             api_base = str(getattr(card, "api_base", "") or "").rstrip("/")
             if not api_base or not (url == api_base or url.startswith(api_base + "/")):
                 continue
