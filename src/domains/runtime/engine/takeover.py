@@ -102,14 +102,22 @@ def _local_port() -> int:
 # ----------------------------------------------------------------------------- 查询
 
 def find_running_task(repo_key: str, issue_number: str) -> dict | None:
-    """按 Issue 查 running/dispatched 任务（与旧 takeover-context 同口径）。"""
+    """按 Issue 查活动态任务（与旧 takeover-context 同口径）。
+
+    活动态 = running / dispatched / pending_self_report。
+    `pending_self_report` 是主控停机或重启时对 REMOTE（worker 承载）任务设置的中间态：
+    worker 进程还活着、平台在等它自报，30 分钟内没自报才转 timeout_failed。它和
+    `running` 一样属于「正在跑」——issues_center 的 is_running 也把它算作运行中。
+    早先这里只认 running/dispatched，导致「主控一重启，接管就报 no_running_task」。
+    """
     issue_id = f"#{_issue_num(issue_number)}"
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT id, status, agent_type, skill, skill_id, prompt, env_extra, cwd, runtime_id, "
             "       event_seq, repo_key, issue_id, user_id, account, skill_files, server_url, created_at "
-            "FROM agent_tasks WHERE repo_key=? AND issue_id=? AND status IN ('running','dispatched') "
+            "FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('running','dispatched','pending_self_report') "
             "ORDER BY created_at DESC LIMIT 1",
             (repo_key, issue_id),
         )
@@ -1205,7 +1213,7 @@ def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
     if agent_type and task.get("agent_type") and agent_type != task.get("agent_type"):
         raise TakeoverError(409, "agent_mismatch",
                             f"该任务属于 {task.get('agent_type')} 节点，不是 {agent_type}")
-    if task.get("status") not in ("running", "dispatched"):
+    if task.get("status") not in ("running", "dispatched", "pending_self_report"):
         raise TakeoverError(409, "already_terminal", f"任务 {task.get('id')} 已终态（{task.get('status')}）")
 
     task_id = task["id"]

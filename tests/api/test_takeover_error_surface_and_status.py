@@ -248,3 +248,24 @@ def test_same_user_helper_handles_uuid_and_legacy_int():
     assert svc._same_user(0, {"id": ""}) is True
     assert svc._same_user(None, {"id": 0}) is True
     assert svc._same_user(0, {"id": 2}) is False
+
+
+def test_pending_self_report_task_can_be_taken_over(client):
+    """主控重启后的中间态 pending_self_report 也必须能接管。
+
+    Issue #537 口径：主控停机/重启把 REMOTE 任务的 status 置为 pending_self_report
+    （worker 还活着、等它 30 分钟内自报）。issues_center 把该态算作「运行中」，
+    接管侧早先只认 running/dispatched → 用户每次重启主控后再点接管都是
+    「没有找到正在运行的任务」。改后两端同口径，接管正常取消该任务。
+    """
+    _seed()
+    with svc.db_lock:
+        c = svc.db.cursor()
+        c.execute("UPDATE agent_tasks SET status='pending_self_report', "
+                  "pending_since='2026-11-20T03:07:55+00:00' WHERE id='t_err_101'")
+        svc.db.commit()
+    assert svc.find_running_task(REPO, "101") is not None
+    r = _start(client)
+    assert r.status_code == 200, r.text
+    assert _get("SELECT status FROM agent_tasks WHERE id='t_err_101'")[0] == "cancelled"
+    assert _get("SELECT status FROM takeover_sessions WHERE repo_key=?", (REPO,))[0] == "active"
