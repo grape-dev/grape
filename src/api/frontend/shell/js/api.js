@@ -258,13 +258,15 @@ const API = (() => {
     API.get(_REAUTH_PROVIDER_PATHS[p]).then(function (d) {
       if (d && d.redirect_url) {
         _setReauthMark(p);            // 跳转前落标记（sessionStorage 跨整页重载保留）
-        location.href = d.redirect_url;
+        location.href = d.redirect_url;   // 已导航 → 保持页面级锁，下次重载后由 sessionStorage 标记接管
         return;
       }
       // 无 redirect_url（后端未给出授权地址）→ 只提示，不做整页导航
+      _reauthRedirecting = false;     // 未导航 → 释放页面级锁（否则本页后续 401 被 :238 静默吞掉）
       _showReauthNotice(p);
     }).catch(function (e) {
       var st = (e && e.status) || 0;
+      _reauthRedirecting = false;     // 请求失败未导航 → 释放页面级锁，允许后续 401 重新提示/跳转
       if (st === 429) {
         // 429 只提示 + 退避：禁止新增整页导航（否则正是闭环加速器）
         _showReauthNotice(p, 'reauth_retry_later',

@@ -296,6 +296,53 @@ const REAUTH_401 = {
   await tick();
   ok(loginFetches(env9).length === 1, 'T9 同页并发只发一次登录请求');
 
+  // ---------------------------------------------------------------- T12（失败后同页锁必须释放）
+  // 背景：页面级 _reauthRedirecting 置 true 后若跳转请求失败（400/429/网络错误/无 redirect_url），
+  // 只有提示不导航——若不释放锁，本页生命周期内后续任何平台的 reauth_required 401 都会在
+  // :238 被静默 return（无提示、无跳转），与 sessionStorage 60 秒窗口「超时后允许重跳」语义冲突。
+  const t12routes = [
+    REAUTH_401,
+    { match: '/auth/login/github', status: 429, body: { detail: { code: 429, message: '请求过于频繁' } } },
+  ];
+  const env12 = sandbox({ routes: t12routes });
+  await env12.api.get('/repos/member').catch(() => {});
+  await tick();
+  ok(/请求过于频繁/.test(noticeText(env12)), 'T12 前置：首次跳转 429 只提示不导航: ' + noticeText(env12));
+  const firstTry = loginFetches(env12).length;
+  ok(firstTry === 1, 'T12 前置：首次失败确实发过一次授权入口请求（实际 ' + firstTry + '）');
+  // 同页第二次同平台 401：必须重新提示/重试，而不是被页面级锁静默吞掉
+  await env12.api.get('/repos/member').catch(() => {});
+  await tick();
+  ok(loginFetches(env12).length === firstTry + 1,
+    'T12 跳转失败后同页再次 401 仍重新请求授权入口（被锁吞掉时为 ' + firstTry + '，实际 ' + loginFetches(env12).length + '）');
+  // 退避窗口过后重试成功 → 正常跳转（失败不写 sessionStorage 标记，不应被 60 秒窗口拦住）
+  t12routes[1].status = 200;
+  t12routes[1].body = { redirect_url: 'https://github.com/login/oauth/authorize?x=12' };
+  await env12.api.get('/repos/member').catch(() => {});
+  await tick();
+  ok(env12.location.href === 'https://github.com/login/oauth/authorize?x=12', 'T12 失败后重试成功可正常跳转');
+  ok(typeof JSON.parse(env12.storage[MARK_KEY] || '{}').github === 'number', 'T12 成功跳转前才落标记（失败分支不写标记）');
+
+  // ---------------------------------------------------------------- T12b（失败后换平台仍可跳转）
+  const env12b = sandbox({
+    routes: [
+      REAUTH_401,
+      { match: '/api/issues', status: 401, body: { detail: { code: 401, message: 'GitCode 授权已过期', action: 'reauth_required', provider: 'gitcode' } } },
+      { match: '/auth/login/github', status: 429, body: { detail: { code: 429, message: '请求过于频繁' } } },
+      { match: '/auth/login/gitcode', status: 200, body: { redirect_url: 'https://gitcode.com/oauth/authorize?x=13' } },
+    ],
+  });
+  await env12b.api.get('/repos/member').catch(() => {});
+  await tick();
+  ok(loginFetches(env12b).length === 1 && loginFetches(env12b)[0].url === '/api/auth/login/github',
+    'T12b 前置：GitHub 跳转请求 429 失败');
+  await env12b.api.get('/issues').catch(() => {});
+  await tick();
+  const l12b = loginFetches(env12b).map(f => f.url);
+  ok(l12b.indexOf('/api/auth/login/gitcode') >= 0,
+    'T12b GitHub 跳转失败后，GitCode 的 reauth_required 401 仍能跳转（锁不得跨平台卡死）: ' + JSON.stringify(l12b));
+  ok(env12b.location.href === 'https://gitcode.com/oauth/authorize?x=13', 'T12b 换平台跳转到对应授权入口');
+
   // ---------------------------------------------------------------- T10（结构断言）
   ok(API_JS.indexOf('_redirectToGitcodeAuth') < 0, 'T10 无条件跳 GitCode 的旧函数已删除');
   ok(/location\.href\s*=\s*d\.redirect_url/.test(API_JS), 'T10 仍在拿到 redirect_url 后跳转');

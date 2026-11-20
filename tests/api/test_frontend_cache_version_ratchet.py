@@ -22,7 +22,7 @@ FROZEN = {
         'account-view.js': '63',
         'agent-view.js': '51',
         'all-views.css': '73',
-        'api.js': '37',
+        'api.js': '38',
         'app.css': '11',
         'app.js': '310',
         'auth.css': '1',
@@ -64,7 +64,7 @@ FROZEN = {
         'tokens.css': '2',
     },
     'register.html': {
-        'api.js': '37',
+        'api.js': '38',
         'app.css': '10',
         'auth.css': '1',
         'auth.js': '8',
@@ -72,7 +72,7 @@ FROZEN = {
         'register-view.js': '1',
     },
     'forgot.html': {
-        'api.js': '37',
+        'api.js': '38',
         'app.css': '10',
         'auth.css': '1',
         'auth.js': '8',
