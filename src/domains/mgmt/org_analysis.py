@@ -113,6 +113,22 @@ def _analysis_instruction(org_id: str) -> str:
     )
 
 
+def _scene_work_branch(scene_id: str, repo_key: str) -> str:
+    """读组织场景上的 work_branch；场景未建/查询失败返回空串。"""
+    scene_id = str(scene_id or "")
+    if not scene_id:
+        return ""
+    try:
+        from src.domains.mgmt.pipeline_config import get_scenes
+
+        for scene in get_scenes(repo_key=repo_key) or []:
+            if str(scene.get("id") or "") == scene_id:
+                return str(scene.get("work_branch") or "")
+    except Exception as exc:  # noqa: BLE001 - 场景未就绪时由调用方兜底
+        log.debug(f"org_analysis: scene work_branch unavailable org scene={scene_id}: {exc}")
+    return ""
+
+
 def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
     """幂等创建/校正组织仓库上的每日分析任务，返回 task_id（0=不适用）。"""
     org = get_org(str(org_id)) or {}
@@ -122,6 +138,13 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
     if not org_repo_key:
         return 0
     ensure_ai_table()
+    scene_id = str(org.get("org_scene_id") or "")
+    work_branch = _scene_work_branch(scene_id, org_repo_key)
+    if not work_branch:
+        from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+
+        work_branch = resolve_org_repo_default_branch(
+            org, org_repo_key, fallback="main")
     name = managed_task_name(org)
     now = datetime.now(timezone.utc).isoformat()
     next_run = _next_run(ANALYSIS_CRON)
@@ -160,10 +183,10 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
             task_id = int(row[0])
             c.execute(
                 "UPDATE autopilot_tasks SET name=?, instruction=?, cron=?, enabled=1, "
-                "next_run_at=?, custom_fields=?, engine_runtime_ids=?, updated_at=? "
-                "WHERE id=?",
+                "next_run_at=?, custom_fields=?, engine_runtime_ids=?, work_branch=?, "
+                "updated_at=? WHERE id=?",
                 (name, instruction, ANALYSIS_CRON, next_run, custom_fields,
-                 engine_ids_json, now, task_id),
+                 engine_ids_json, work_branch, now, task_id),
             )
             db.commit()
             return task_id
@@ -172,9 +195,10 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
             "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, "
             "enabled, last_run_at, next_run_at, created_at, updated_at, created_by, "
             "engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids) "
-            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, ?, '', '')",
+            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, ?, ?, '')",
             (name, org_repo_key, instruction, ANALYSIS_SKILL, ANALYSIS_CRON,
-             next_run, now, now, created_by, engine_ids_json, custom_fields),
+             next_run, now, now, created_by, engine_ids_json, custom_fields,
+             work_branch),
         )
         db.commit()
         task_id = int(c.lastrowid or 0)

@@ -262,3 +262,31 @@ def test_analysis_routes_write_audit_logs(monkeypatch):
         else:
             assert parsed.get("trigger") == "manual"
     assert got == expected, f"missing audit types: {expected - got}"
+
+
+def test_ensure_task_uses_scene_work_branch():
+    """每日分析任务的 work_branch 必须跟随组织场景（新组织=grape-repo-knowledge）。"""
+    from src.domains.mgmt import org_analysis
+    from src.kernel.session_manager import db, db_lock
+
+    org = _seed_org()
+    scene_id = "custom-org-branch-test"
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO devops_pipeline_scene "
+            "(scene_id, name, repo_key, nodes_json, advanced_options, is_active) "
+            "VALUES (?,?,?,'[]','{\"work_branch\":\"grape-repo-knowledge\"}',1)",
+            (scene_id, scene_id, ORG_REPO_KEY),
+        )
+        c.execute("UPDATE organization SET org_scene_id=? WHERE id=?", (scene_id, org["id"]))
+        db.commit()
+
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    assert task_id
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT work_branch FROM autopilot_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    assert row and row[0] == "grape-repo-knowledge"

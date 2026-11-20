@@ -873,8 +873,13 @@ def create_custom_scene(scene_id: str, name: str, description: str,
 
 
 def create_org_scene(scene_id: str, org_name: str, repo_key: str,
-                     created_by: str = "", org_id: str = "") -> int:
-    """Create or update the default organization scene definition."""
+                     created_by: str = "", org_id: str = "",
+                     work_branch: str = "main") -> int:
+    """Create or update the default organization scene definition.
+
+    ``work_branch`` 必须是组织仓库真实默认分支（新仓 grape-repo-knowledge，
+    存量仓可能仍是 main）；调用方无法解析时默认 main。
+    """
     db_id = create_custom_scene(
         scene_id=scene_id,
         name=f"组织任务下派 - {org_name or 'Organization'}",
@@ -900,7 +905,7 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
                 opts = {}
             if not isinstance(opts, dict):
                 opts = {}
-            opts["work_branch"] = "main"
+            opts["work_branch"] = str(work_branch or "main").strip() or "main"
             c.execute(
                 "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=datetime('now') "
                 "WHERE scene_id=? AND repo_key=?",

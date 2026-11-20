@@ -365,19 +365,25 @@ def _host_org_repo(org: dict, repo_key: str) -> None:
     _renew_org_lease(org["id"])
 
 
-def _ensure_org_scene(org: dict, repo_key: str) -> str:
+def _ensure_org_scene(org: dict, repo_key: str, *,
+                      fallback_branch: str = "main") -> str:
     _renew_org_lease(org["id"])
     scene_id = org.get("org_scene_id") or ""
     if not scene_id:
         scene_id = f"custom-org-{uuid.uuid4()}"
         _set_provision_fields(org["id"], org_scene_id=scene_id)
     owner_user = _owner_user(org)
+    from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+
+    work_branch = resolve_org_repo_default_branch(
+        org, repo_key, fallback=fallback_branch or "main")
     create_org_scene(
         scene_id=scene_id,
         org_name=org.get("name") or "",
         repo_key=repo_key,
         created_by=owner_user.get("username") or "",
         org_id=str(org["id"] or ""),
+        work_branch=work_branch,
     )
     # 组织仓库默认场景 = 组织场景：保证直接在组织仓库开 Issue 时 issue_opened 能进入
     # org_intake，而不是回落到 vod/智能推荐。
@@ -387,6 +393,15 @@ def _ensure_org_scene(org: dict, repo_key: str) -> str:
         set_repo_scene(repo_key, scene_id)
     except Exception as exc:
         log.warning(f"org_provision set default scene failed org={org['id']}: {exc}")
+    # 任务可能先于场景创建（_bind_org_repo 早于 _ensure_org_scene）：场景落库后
+    # 再 ensure 一次，让每日分析任务拿到场景上的真实 work_branch。
+    try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.ensure_analysis_automation(
+            str(org["id"]), actor_id=owner_user.get("id") or "")
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log.warning(f"org_provision ensure analysis branch failed org={org['id']}: {exc}")
     _renew_org_lease(org["id"])
     return scene_id
 
@@ -665,6 +680,7 @@ def _provision_org_impl(org_id: str) -> dict:
             )
             org = get_org(org_id) or org
             repo_key = org.get("org_repo_key") or ""
+            created_repo = not bool(repo_key)
             if not repo_key:
                 _set_provision_fields(org_id, provision_status="repo_creating")
                 org = get_org(org_id) or org
@@ -677,7 +693,11 @@ def _provision_org_impl(org_id: str) -> dict:
 
             org = get_org(org_id) or org
             _set_provision_fields(org_id, provision_status="scene_creating")
-            _ensure_org_scene(org, repo_key)
+            from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+            _ensure_org_scene(
+                org, repo_key,
+                fallback_branch=(ORG_REPO_DEFAULT_BRANCH if created_repo else "main"))
 
             _renew_org_lease(org_id)
             _set_provision_fields(

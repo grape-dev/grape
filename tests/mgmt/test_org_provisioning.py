@@ -196,7 +196,9 @@ def test_provision_reaches_ready_and_is_idempotent(monkeypatch):
     nodes = json.loads(scene[0])
     assert [n["id"] for n in nodes] == ["org_intake", "org_dispatch", "org_aggregate"]
     assert [n["skill"] for n in nodes] == ["org-intake-cli", "org-dispatch-cli", "org-aggregate-cli"]
-    assert json.loads(scene[1])["work_branch"] == "main"
+    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+    assert json.loads(scene[1])["work_branch"] == ORG_REPO_DEFAULT_BRANCH
     assert scene[2] == org_id
 
     second = provision_org(org_id)
