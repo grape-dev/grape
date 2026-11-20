@@ -23,11 +23,52 @@ c.lastrowid / c.rowcount / c.description / PRAGMA table_info / sqlite_master 查
 import json
 import os
 import re
+import socket
 import threading
+import time
 
 import pymysql
 
 from src.kernel.config import log
+
+# ── 长连接健活参数（2026-11 生产实测：mgmt 进程全站卡顿 40~100s）─────────────
+# 现象：MySQL 侧 processlist 全 Sleep（查询没到过），客户端线程全停在 pymysql
+# `_read_bytes`；点「编辑」触发的 /dashboard + /scenes/with-pipeline 一起排队，
+# 浏览器 30s 放弃 → 499。原因是跨网段链路上的池化长连接被中间设备静默丢弃
+# （对端 ACK 过、包没到 DB），复用时既没有存活校验也没有读超时，只能等内核
+# keepalive（默认 7200s）或 NAT 侧 RST 才解锁。
+# 修法：连接建立时打开短周期 TCP keepalive；借出前按空闲阈值做**带超时的** ping；
+# 读/写加兜底超时。全部可用环境变量调参，便于线上按需回退。
+_DB_PING_IDLE_SECONDS = float(os.environ.get("DB_PING_IDLE_SECONDS", "5"))
+_DB_PING_TIMEOUT_SECONDS = float(os.environ.get("DB_PING_TIMEOUT_SECONDS", "3"))
+_DB_READ_TIMEOUT = int(os.environ.get("DB_READ_TIMEOUT", "120"))
+_DB_WRITE_TIMEOUT = int(os.environ.get("DB_WRITE_TIMEOUT", "120"))
+_DB_TCP_KEEPALIVE = os.environ.get("DB_TCP_KEEPALIVE", "1").lower() in ("1", "true", "yes")
+
+
+def _enable_tcp_keepalive(conn) -> None:
+    """给已建立连接开短周期 TCP keepalive（默认 60s 起探、10s 间隔、3 次判死）。"""
+    if not _DB_TCP_KEEPALIVE:
+        return
+    sock = getattr(conn, "_sock", None)
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, val in (("TCP_KEEPIDLE", int(os.environ.get("DB_TCP_KEEPIDLE", "60"))),
+                         ("TCP_KEEPINTVL", int(os.environ.get("DB_TCP_KEEPINTVL", "10"))),
+                         ("TCP_KEEPCNT", int(os.environ.get("DB_TCP_KEEPCNT", "3")))):
+            if hasattr(socket, opt):
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+    except Exception as e:  # noqa: BLE001 - keepalive 失败不影响连接可用
+        log.debug(f"mysql_compat: enable tcp keepalive failed: {e}")
+
+
+def _pymysql_connect(**kwargs):
+    """PooledDB creator：建连 + 打开 keepalive（池内每条连接都走这里）。"""
+    conn = pymysql.connect(**kwargs)
+    _enable_tcp_keepalive(conn)
+    return conn
 
 # ====== 配置读取 ======
 
@@ -828,7 +869,7 @@ class MySQLCompatDB:
             return
         try:
             self._pool = PooledDB(
-                creator=pymysql,
+                creator=_pymysql_connect,
                 mincached=int(os.environ.get("DB_POOL_MIN", "2")),
                 maxcached=int(os.environ.get("DB_POOL_MAX_CACHED", "16")),
                 maxconnections=int(os.environ.get("DB_POOL_MAX_CONNECTIONS", "32")),
@@ -841,6 +882,11 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
+                # 借出时 ping(reconnect=True)：DB 重启 / NAT 静默丢流后自动换新连接，
+                # 而不是把死连接交给业务查询（否则查询读 socket 挂死几十秒~几分钟）
+                ping=1,
                 # REPEATABLE READ 下，只读不 commit 的线程会让池化连接的读快照
                 # 冻结在首次 SELECT（登录 state: 签发线程 INSERT+commit 落库成功，
                 # 校验线程沿用老快照 → 3 秒后仍 NOT FOUND，登录永远 state_invalid）。
@@ -854,6 +900,46 @@ class MySQLCompatDB:
         except Exception as e:
             log.warning(f"MySQLCompatDB: pool init failed ({e}), falling back to per-thread connection")
             self._pool_disabled = True
+
+    def _conn_alive(self, conn) -> bool:
+        """借出前健活校验（带 socket 超时，避免 ping 自己挂死）。
+
+        只在空闲超过 _DB_PING_IDLE_SECONDS 时做一次，正常请求不会多一次往返。
+        ping 失败/超时即判死交给调用方丢弃重取 —— 死连接若直接拿去执行查询，
+        读会挂在 socket 上几十秒到几分钟（2026-11 生产全站卡顿的机制：
+        对端 ACK 过、包没到 DB，MySQL 侧 processlist 只有 Sleep）。
+        """
+        last = float(getattr(self._local, "conn_alive_at", 0.0) or 0.0)
+        if time.time() - last < _DB_PING_IDLE_SECONDS:
+            return True
+        sock = getattr(conn, "_sock", None)
+        prev = None
+        try:
+            if sock is not None:
+                prev = sock.gettimeout()
+                sock.settimeout(_DB_PING_TIMEOUT_SECONDS)
+            conn.ping(reconnect=True)
+            self._local.conn_alive_at = time.time()
+            return True
+        except Exception as e:  # noqa: BLE001 - 判死即重建
+            log.warning(f"MySQLCompatDB: 池化连接失活，丢弃重建: {e}")
+            return False
+        finally:
+            if sock is not None and prev is not None:
+                try:
+                    sock.settimeout(prev)
+                except Exception:
+                    pass
+
+    def _drop_local_conn(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        self._local.conn_alive_at = 0.0
+        if conn is not None:
+            try:
+                conn.close()  # 池化包装 close() = 归还；死连接由池在借出时剔除
+            except Exception:
+                pass
 
     def _raw_cursor(self):
         """Get a raw pymysql cursor.
@@ -876,15 +962,19 @@ class MySQLCompatDB:
             # Borrowing once per thread (not per cursor) ensures multi-statement
             # transactions (db.execute×N + db.commit) share one connection.
             conn = getattr(self._local, "conn", None)
+            if conn is not None and not self._conn_alive(conn):
+                self._drop_local_conn()
+                conn = None
             if conn is None:
                 conn = self._pool.connection()
                 self._local.conn = conn
+                self._local.conn_alive_at = time.time()
             return conn.cursor()
 
         # Fallback: per-thread bare connection (legacy)
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = pymysql.connect(
+            conn = _pymysql_connect(
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -893,12 +983,14 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
             )
             self._local.conn = conn
         try:
             conn.ping(reconnect=True)
         except Exception:
-            conn = pymysql.connect(
+            conn = _pymysql_connect(
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -907,6 +999,8 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
             )
             self._local.conn = conn
         return conn.cursor()
@@ -990,6 +1084,8 @@ def _dedicated_connect_params(cfg: dict) -> dict:
         "charset": cfg.get("charset", "utf8mb4"),
         "autocommit": False,
         "connect_timeout": 10,
+        "read_timeout": _DB_READ_TIMEOUT,
+        "write_timeout": _DB_WRITE_TIMEOUT,
     }
 
 
