@@ -27,3 +27,18 @@ R10 事件验签/幂等/重放/实例隔离；R11 PAT 不产生登录身份；R1
 
 端到端：配卡 → 列仓 → 托管 → MR 事件 → clone/fetch → 解除托管；实例隔离；同 delivery 三投只消费一次
 且可重放；存量四平台回归无新增失败。
+## Review fixes（PR #1868 复审，2026-11-20）
+
+1. **Webhook 密钥语义（高危）**：GitLab 钩子的 `token` 只能是共享密钥。`setup_gitlab_webhook`
+   删除 `webhook_password or api_token` 回落（会把 PAT/bot token 写进 GitLab 项目 webhook
+   配置并对维护者可见，且 DB `webhook_secret` 为空导致所有投递 404）；`gitlab_v4` 家族在
+   `get_hosting_provider_config` 中 `bot_token` 恒为空 → 所有调用点走路径 B（随机密钥）。
+2. **对外契约**：通用 webhook 响应保持 `status="ok"`，入队信息以 `inbox_id` / `duplicate`
+   新增字段表达（既有 `test_webhook_dynamic_routes` 不再红）。
+3. **守卫回潮**：`find_existing_gitlab_webhook` 查询失败记 `warning`（原静默 `pass` 会静默
+   重复建钩）；`server_tasks` worker 取消/超时记 `debug`。
+4. **幂等与稳健**：`remove_gitlab_webhook` 上游 404 视为成功；`_run_git` 累加调用方已有
+   `GIT_CONFIG_*`；通用 webhook 增 10MB 载荷上限（413）；收件箱 `payload` 改 `MEDIUMTEXT`
+   （MySQL 64KB 上限）并补 claim 索引 `(status, next_attempt_at, lease_expires_at)`。
+5. 回归用例：`tests/runtime/test_issue_3580_review_fixes.py`（密钥必填/禁止 token 回落、
+   gitlab_v4 强制路径 B、404 幂等、GIT_CONFIG 累加）。

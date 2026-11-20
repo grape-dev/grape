@@ -595,10 +595,12 @@ def _run_git(args: list, token: str = "", timeout: int = 900,
         _pairs.append(("http.sslCAInfo", str(ca_bundle)))
     # 传输安全：禁止 HTTP 重定向携带鉴权头到其他主机（默认 true 会跨主机转发）
     _pairs.append(("http.followRedirects", "false"))
-    env["GIT_CONFIG_COUNT"] = str(len(_pairs))
-    for _i, (_k, _v) in enumerate(_pairs):
+    # Issue #3580 复审：累加调用方已有的 GIT_CONFIG_* 项，不覆盖
+    _offset = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+    for _i, (_k, _v) in enumerate(_pairs, _offset):
         env[f"GIT_CONFIG_KEY_{_i}"] = _k
         env[f"GIT_CONFIG_VALUE_{_i}"] = _v
+    env["GIT_CONFIG_COUNT"] = str(_offset + len(_pairs))
     try:
         return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
     except Exception as e:

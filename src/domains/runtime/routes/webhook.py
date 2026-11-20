@@ -791,6 +791,9 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
 # 误导健康探针/监控把 webhook 入口误判为成功。仅 POST 是合法的 webhook 入口方法。
 _WEBHOOK_REJECTED_METHODS = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 
+# Issue #3580：通用 webhook 载荷上限（超限 413，不落库/不消费）
+_WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024
+
 
 @router.api_route("/webhook/gitcode", methods=_WEBHOOK_REJECTED_METHODS,
                   include_in_schema=False, name="gitcode_webhook_method_reject")
@@ -2982,6 +2985,11 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=404, content={"code": 404, "message": "no backend for provider"})
 
     body = await request.body()
+    # Issue #3580 复审：webhook 载荷上限（与 GitLab 侧实务一致），防超大 body 打爆
+    # 入库与消费端内存；超限直接 413，不落库。
+    if len(body) > _WEBHOOK_MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={
+            "code": 413, "message": "webhook body too large"})
     headers = {k.lower(): v for k, v in request.headers.items()}
     event_header = headers.get(backend.event_header_key.lower(),
                                headers.get("x-gitcode-event", "unknown"))
@@ -3046,9 +3054,11 @@ async def generic_vcs_webhook(provider: str, request: Request):
             "code": 500, "message": "event store failed, retry webhook"})
     log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} "
              f"persisted id={_enq.get('id')} duplicate={_enq.get('duplicate')}")
-    return {"status": "duplicate" if _enq.get("duplicate") else "queued",
-            "seq": 0, "inbox_id": _enq.get("id"), "event_type": event_header,
-            "message": "event persisted"}
+    # Issue #3580 复审：对外契约保持既有 `status="ok"`（消费方/gate 依赖它），
+    # 入队信息以新增字段表达；重复投递只多 duplicate 标记。
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 async def _on_handoff_dispatch(event):

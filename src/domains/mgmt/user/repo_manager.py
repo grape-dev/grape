@@ -904,7 +904,11 @@ def get_hosting_provider_config(provider: str) -> dict:
     _find_w, _setup_w, _remove_w = (
         functools.partial(_fn, api_base=_ab) for _fn in _family)
     return {
-        "bot_token": get_global_bot_token_for(provider),
+        # Issue #3580 复审：GitLab webhook 的 `token` 只能是共享密钥，绝不能复用
+        # PAT/bot token（会随 X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会
+        # 让所有投递 404）。gitlab_v4 家族因此强制走路径 B（随机密钥）：
+        # bot_token 置空 → 所有调用点 _use_path_b=True。
+        "bot_token": "" if _wd == "gitlab_v4" else get_global_bot_token_for(provider),
         "bot_username": resolve_bot_username(provider),
         "find_webhook": _find_w,
         "setup_webhook": _setup_w,
@@ -1114,18 +1118,30 @@ def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_
             for h in hooks:
                 if isinstance(h, dict) and h.get("url") == webhook_url:
                     return h.get("id")
-    except Exception:
-        pass
+    except Exception as e:
+        # 查询失败不得静默：调用方会据此决定"复用 or 新建"，静默吞掉会重复建钩
+        log.warning(f"find_existing_gitlab_webhook failed {owner}/{repo}: {e}")
     return None
 
 
 def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
                          webhook_password: str = "", api_base: str = "") -> int:
+    """GitLab webhook 建钩（POST /projects/:id/hooks）。
+
+    Issue #3580 复审：`token` 必须是共享密钥（随机生成、DB 同值），
+    **禁止回落到 api_token**——否则 PAT/bot token 会写进 GitLab 项目 webhook
+    配置（项目维护者可见），并随每次投递以 X-Gitlab-Token 外泄。
+    """
+    secret = str(webhook_password or "").strip()
+    if not secret:
+        raise RuntimeError(
+            "GitLab webhook secret required: 该平台 webhook 只能使用共享密钥，"
+            "不得复用 api_token（调用方须走路径 B 生成 webhook_secret）")
     base = (api_base or "").rstrip("/")
     url = f"{base}/projects/{_gitlab_pid(owner, repo)}/hooks"
     body = {
         "url": webhook_url,
-        "token": webhook_password or api_token,
+        "token": secret,
         "push_events": True,
         "issues_events": True,
         "merge_requests_events": True,
@@ -1144,9 +1160,16 @@ def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str
 
 def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
                           api_base: str = "") -> bool:
+    """删除 GitLab webhook；上游已不存在（404）视为幂等成功（Issue #3580 复审）。"""
     base = (api_base or "").rstrip("/")
     url = f"{base}/projects/{_gitlab_pid(owner, repo)}/hooks/{int(webhook_id)}"
-    _gitlab_req("DELETE", url, api_token)
+    try:
+        _gitlab_req("DELETE", url, api_token)
+    except Exception as e:
+        if _extract_http_code(e) == 404:
+            log.info(f"remove_gitlab_webhook: hook {webhook_id} already gone {owner}/{repo}")
+            return True
+        raise
     return True
 
 

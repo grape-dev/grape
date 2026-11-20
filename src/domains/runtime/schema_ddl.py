@@ -607,7 +607,7 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
     provider VARCHAR(64) NOT NULL DEFAULT '',
     delivery_id VARCHAR(128) NOT NULL,
     event_header VARCHAR(128) NOT NULL DEFAULT '',
-    payload TEXT NOT NULL,
+    payload MEDIUMTEXT NOT NULL,
     headers TEXT NOT NULL DEFAULT '{}',
     status VARCHAR(16) NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,

@@ -495,8 +495,9 @@ async def stop_event_tasks(app, h: dict) -> None:
         _wi.cancel()
         try:
             await asyncio.wait_for(_wi, timeout=5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        except (asyncio.CancelledError, asyncio.TimeoutError) as _e:
+            # Issue #3580 复审：取消/超时不静默（静默 except ratchet）
+            log.debug(f"webhook inbox worker shutdown: {type(_e).__name__}")
 
 
 # ===========================================================================

@@ -758,6 +758,9 @@ def _create_tables():
         # obs_runtime_samples：资源曲线按 (引擎, 时间) 取；SLO 可用率按时间扫 online
         "CREATE INDEX IF NOT EXISTS idx_obs_sample_rt ON obs_runtime_samples(runtime_id, sampled_at)",
         "CREATE INDEX IF NOT EXISTS idx_obs_sample_time ON obs_runtime_samples(sampled_at)",
+        # Issue #3580：webhook 收件箱消费查询（status + 到期时间 + 租约）走索引，避免 1s 轮询全表扫
+        "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_claim "
+        "ON grape_t_webhook_inbox(status, next_attempt_at, lease_expires_at)",
         # obs_slo / obs_slo_snapshots：燃尽曲线按 (SLO, 桶) 取
         "CREATE INDEX IF NOT EXISTS idx_obs_slo_enabled ON obs_slo(enabled, scope_type)",
         "CREATE INDEX IF NOT EXISTS idx_obs_slo_snap ON obs_slo_snapshots(slo_id, bucket_start)",
