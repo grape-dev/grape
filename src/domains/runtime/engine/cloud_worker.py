@@ -1251,7 +1251,7 @@ def main():
     except Exception as e:
         log.warning(f"sandbox init failed: {e}")
 
-    async def _probe_templates_engines(adapter, pcfg, tpl_list, device) -> list:
+    async def _probe_templates_engines(adapter, pcfg, tpl_list, device) -> tuple[list, int]:
         """[引擎探测 spec §2.5] 建箱层全量探测：逐模板建箱 → 白名单扫描 → kill。
 
         即建即杀（幂等，与模板检查同款）；单模板失败不拖垮整批；探测在
@@ -1259,8 +1259,13 @@ def main():
         串行逐模板（建箱本身就是平台资源消费，探测箱不并发）。
         [模板上限 2026-11-04] 单批最多 PROBE_TEMPLATES_MAX（默认 8）——防模板
         爆炸串行探测数小时（每箱 20-40s，8 个 ≈ 3-5min）。超出的截断跳过并告警
-        （返回列表不含它们 → 调用方计为失败 → 重试循环下轮会再探）。
-        返回 [{\"template_id\", engines: [...]}]（探测不到引擎的模板不进列表）。
+        （计入失败 → 重试循环下轮会再探）。
+        返回 (结果列表, 失败计数)。结果列表 [{"template_id", engines: [...]}]
+        ——探测成功但无引擎的模板也进列表（engines=[]），由调用方原样上报
+        （服务端空 engines 不落 binding）并写负缓存 ok=true（[2026-11-20 用户裁定]
+        无引擎模板探完即成功，不再重探——此前不进列表导致对账公式永远差 1、
+        重试循环永不停、每 1800s 白费一轮建箱）。失败计数 = 建箱探测异常的模板数
+        + 本轮截断未探的模板数（不含无引擎的成功探测）。
         """
         import asyncio as _aio
         import time as _time_mod
@@ -1286,13 +1291,16 @@ def main():
                      f"templates already probed OK, skipping them")
         _tid_list = [t for t in _tid_list
                      if not _neg_cache.get((t.get("template_id") or "").strip(), {}).get("ok")]
-        if len(_tid_list) > _max:
-            log.warning(f"[engine-probe] template count {len(_tid_list)} > cap {_max} "
-                        f"(PROBE_TEMPLATES_MAX) — probing first {_max} this round, rest "
-                        f"deferred to the retry loop")
+        _pre_cap = len(_tid_list)
+        if _pre_cap > _max:
+            log.warning(f"[engine-probe] template count {_pre_cap} > cap {_max} "
+                         f"(PROBE_TEMPLATES_MAX) — probing first {_max} this round, rest "
+                         f"deferred to the retry loop")
             _tid_list = _tid_list[:_max]
+        _deferred = _pre_cap - len(_tid_list)
         tpl_list = _tid_list
         out = []
+        _probe_failed = 0   # 建箱探测异常计数（不含无引擎的成功探测）
         _leak_watch: set = set()  # 本批触碰过的 sandbox_id（批末清扫验证）
         _total = len([t for t in (tpl_list or []) if (t.get("template_id") or "").strip()])
         log.info(f"[engine-probe] start: {_total} templates, ~20-40s each (creates a "
@@ -1377,6 +1385,7 @@ def main():
                         log.warning(f"[engine-probe] [{_done}/{_total}] template {_tid[:24]} probe "
                                     f"failed ({_dt:.0f}s): {_pe}")
                         _engines = None
+                        _probe_failed += 1
                         break
                     _bo = _res_backoffs[min(_res_attempt, len(_res_backoffs) - 1)]
                     log.warning(f"[engine-probe] [{_done}/{_total}] 130597 resource busy "
@@ -1389,6 +1398,10 @@ def main():
                     log.info(f"[engine-probe] [{_done}/{_total}] {pcfg.get('name', '?')} template "
                              f"{_tid[:24]}: {[e['engine'] for e in _engines]} ({_dt:.0f}s)")
                 else:
+                    # [2026-11-20] 探测成功但无引擎——进结果列表（engines=[]）：
+                    # 上报给服务端（空 engines 不落 binding、模板照常登记）+
+                    # 写负缓存 ok=true（下轮看护模式不再建箱重探）。
+                    out.append({"template_id": _tid, "engines": []})
                     log.info(f"[engine-probe] [{_done}/{_total}] {pcfg.get('name', '?')} template "
                              f"{_tid[:24]}: no engines ({_dt:.0f}s)")
         # [批末清扫 2026-11-06] 本批触碰过的箱逐个验证：仍存活→connect+kill（最多 3 轮）。
@@ -1448,8 +1461,9 @@ def main():
             out.append({"template_id": _tid,
                         "engines": [{"engine": e, "version": "", "source": "cache"}
                                     for e in (_hit.get("engines") or [])]})
-        log.info(f"[engine-probe] done: {len(out)}/{_total} templates with engines")
-        return out
+        log.info(f"[engine-probe] done: {len(out)}/{_total} templates probed OK this round, "
+                 f"{_probe_failed + _deferred} pending (failed/deferred)")
+        return out, _probe_failed + _deferred
 
     from src.domains.runtime.engine.client import RuntimeClient
 
@@ -1560,15 +1574,15 @@ def main():
                     _failed += 1
                 # [引擎探测 spec] 建箱层全量探测：每模板建箱 → 白名单 --version → kill（即建即杀）
                 # 前提: adapter 声明 probe_engines 能力（MANIFEST 双向断言保证实现存在）
-                _tpl_engines = []
+                # [对账改精确计数 2026-11-20 用户裁定] 探测函数返回 (结果, 失败计数)：
+                # 失败=建箱异常+截断未探；无引擎模板探完即成功（engines=[] 进结果并
+                # 写负缓存 ok=true）——不再用"扫描数-有引擎数"差值对账（真无引擎模板
+                # 永远差 1 → 重试循环永不停 → 每 1800s 白探一轮建箱）。
+                _tpl_engines: list = []
                 if _adapter and "probe_engines" in getattr(_adapter, "MANIFEST", {}).get("capabilities", []):
-                    _probe_pre = len([t for t in (_tpl_list or []) if (t.get("template_id") or "").strip()])
-                    _tpl_engines = await _probe_templates_engines(
+                    _tpl_engines, _probe_failed_cnt = await _probe_templates_engines(
                         _adapter, _pcfg, _tpl_list, device)
-                    # [失败对账] 探测返回的"有引擎模板数" < 扫描到的模板数 = 有模板
-                    # 未探完（130597 失败/无引擎/截断）——计入失败让重试循环接手。
-                    # 注: 真无引擎的模板会永远差 1（重试会重探——幂等, 只是多花一轮）。
-                    _failed += max(0, _probe_pre - len(_tpl_engines))
+                    _failed += _probe_failed_cnt
                 try:
                     _rep = await client.sandbox_provider_report(
                         platform=_pcfg.get("platform", ""),
@@ -1605,21 +1619,32 @@ def main():
         _probe_fail_count = await _report_providers_once()
 
         # [探测重试 2026-11-04] 失败重试任务：上轮有模板探测失败（130597 资源不足等）
-        # → 每 120s 重跑（指数退避），全成功自然退出。幂等性：detected
+        # → 每 120s 重跑（指数退避），全成功转入看护模式。幂等性：detected
         # binding 三元组 UPSERT + 模板登记幂等——重跑无副作用。修复"启动探测失败后
         # binding 永缺"缺口（.17 实例 22 实证）。
         # [退避加大 2026-11-10 用户裁定] 封顶 600s → 1800s（PROBE_RETRY_MAX_BACKOFF 可调），
         # 且连续 3 轮无进展（pending 不降——平台资源持续不足/不可达）直接跳到封顶，
         # 消掉对平台每 10 分钟一轮的无效冲击；有进展（部分模板探成）时保持指数节奏，
         # 短间隔快速收敛。
+        # [新模板看护 2026-11-20 用户裁定] 全成功后循环不再退出——转入看护模式：每
+        # PROBE_WATCH_INTERVAL 秒（默认 600s）重跑 _report_providers_once。负缓存保证
+        # 已探过的模板（含确认无引擎的）直接跳过建箱——每轮净成本 = list_templates
+        # 扫描 + 幂等上报；平台侧新增模板 id 不在缓存 → 自动建箱探测并登记。修复
+        # 「重试循环退出后新模板永不被自动发现、只能重启 worker」缺口（此前唯一的
+        # 自动发现机制是'真无引擎模板永远差 1'的病态重试，本批已消）。
         _probe_max_backoff = int(os.environ.get("PROBE_RETRY_MAX_BACKOFF", "1800"))
+        _probe_watch_interval = int(os.environ.get("PROBE_WATCH_INTERVAL", "600"))
         async def _probe_retry_loop():
             _backoff = 120
             _pending = _probe_fail_count
             _last_pending = None
             _stall_rounds = 0
-            while _pending:
-                await asyncio.sleep(_backoff)
+            while True:
+                if _pending:
+                    await asyncio.sleep(_backoff)
+                else:
+                    # 看护模式：负缓存挡住已探模板，本轮只可能建箱探测新增模板
+                    await asyncio.sleep(_probe_watch_interval)
                 _pending = await _report_providers_once()
                 if _pending:
                     if _last_pending is not None and _pending >= _last_pending:
@@ -1638,7 +1663,10 @@ def main():
                              + (f" (stalled {_stall_rounds} rounds, max backoff)" if _stall_rounds >= 3 else ""))
                 else:
                     _backoff = 120
-            log.info("[engine-probe] all templates probed OK, retry loop exited")
+                    _stall_rounds = 0
+                    _last_pending = None
+                    log.info(f"[engine-probe] all pending cleared; watching for new "
+                             f"templates every {_probe_watch_interval}s (cached ones skipped)")
 
         asyncio.create_task(_probe_retry_loop())
 
