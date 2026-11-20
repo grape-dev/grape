@@ -893,6 +893,19 @@ RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
 fi
+# root 安装必须把放行写进 ENV_FILE（Issue #3602）：agent.py 在 geteuid()==0 且没有
+# GRAPE_ALLOW_ROOT_ENGINE=1 时以退出码 78 拒绝启动。原先放行只写进两处 ——
+# systemd drop-in 30-allow-root.conf 和生成的 start-worker.sh —— 而这两份文件
+# 都会被「升级验证失败 → 回滚」一起退回旧版。结果：新代码 + 旧启动脚本 = 每次重启
+# 都 78，安装脚本再判启动失败，继续回滚，形成死循环（2026-11-20 一台无 systemd、
+# 无 hostname 的容器实测）。ENV_FILE 在两条启动路径上都会被 source（systemd 的
+# EnvironmentFile= / start-worker.sh 的 set -a; . ENV_FILE），写在这里跟着环境文件
+# 走，回滚也带不走。已存在该键则不动（尊重运维手写的 0/1）。
+if [ "$ROOT_MODE" = "1" ]; then
+  if ! grep -q '^GRAPE_ALLOW_ROOT_ENGINE=' "$ENV_FILE" 2>/dev/null; then
+    printf 'GRAPE_ALLOW_ROOT_ENGINE=1\n' >> "$ENV_FILE"
+  fi
+fi
 # 追加旧配置中保留的自定义 keys（防重装/升级丢 key → opencode 401 / aishell 无凭据）
 if [ -n "$_PRESERVED_KEYS" ]; then
   printf '%s\n' "$_PRESERVED_KEYS" >> "$ENV_FILE"
