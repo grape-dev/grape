@@ -92,6 +92,155 @@ def feature_span(name: str, attrs: dict | None = None):
             raise
 
 
+def annotate_current_span(**attrs: object) -> None:
+    """给当前 span 追加属性（未启用 / 无活动 span 时零开销）。
+
+    总线客户端在真正发 HTTP 的那一层补 instance/status：dispatch 层只知道
+    service/method，解析出来的目标实例只有 client 拿得到。
+    """
+    if not otel_enabled():
+        return
+    try:
+        from opentelemetry import trace as _trace
+        span = _trace.get_current_span()
+        if span is None or not span.is_recording():
+            return
+        for key, value in attrs.items():
+            if value is None:
+                continue
+            span.set_attribute(str(key)[:60], str(value)[:200])
+    except Exception:  # noqa: BLE001 — 埋点失败不影响业务
+        return
+
+
+# 出站 span 命名：requests 自动插桩默认给 "GET"/"POST"，既看不出打的是谁，
+# 也没法按 URL 归并（P95 面板里全挤在一条 "GET" 上）。这里把 span 名改成
+# "METHOD /masked/path"，id 段（uuid / 长 hex / 纯数字）归一成 {id} 防基数爆炸。
+_ID_SEGMENT_RE = re.compile(
+    r"(?<=/)(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|[0-9a-fA-F]{16,}|\d+)(?=/|$)"
+)
+
+
+def _mask_url_path(url: str) -> str:
+    try:
+        from urllib.parse import urlsplit
+        path = urlsplit(url or "").path or ""
+        return _ID_SEGMENT_RE.sub("{id}", path)[:120]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_HTTP_METHOD_BYTES = (bytes, bytearray)
+
+
+def _method_of(request) -> str:
+    """httpx 的 Request.method 在某些版本/路径上是 bytes，直接拼进 span 名会得到 b'GET'。"""
+    method = getattr(request, "method", "HTTP")
+    if isinstance(method, _HTTP_METHOD_BYTES):
+        return method.decode("ascii", "ignore") or "HTTP"
+    return str(method)
+
+
+def _requests_request_hook(span, request) -> None:
+    """requests 出站：span 名 + 对端 + 超时，不用再点进 attributes 才能认。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(getattr(request, "url", "") or "")
+        path = _mask_url_path(getattr(request, "url", ""))
+        span.update_name(f"{_method_of(request)} {path or '/'}")
+        if parts.hostname:
+            span.set_attribute("http.peer", parts.hostname)
+            span.set_attribute("server.address", parts.hostname)
+        if parts.port:
+            span.set_attribute("server.port", parts.port)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _requests_response_hook(span, request, response) -> None:
+    """requests 出站：状态码 / 重试次数 / 5xx 标 ERROR。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            span.set_attribute("http.status_code", status)
+        elapsed = getattr(response, "elapsed", None)
+        if elapsed is not None:
+            span.set_attribute("http.elapsed_ms", int(elapsed.total_seconds() * 1000))
+        history = getattr(getattr(getattr(response, "raw", None), "retries", None),
+                          "history", None)
+        if history:
+            span.set_attribute("http.retries", len(history))
+        if status is not None and status >= 500:
+            from opentelemetry.trace import Status, StatusCode
+            span.set_status(Status(StatusCode.ERROR, f"HTTP {status}"))
+    except Exception:  # noqa: BLE001
+        return
+
+
+_HTTPX_INSTRUMENTED = False
+
+
+def _httpx_request_hook(span, request) -> None:
+    """httpx 出站：与 requests 同款命名（多数客户端走 httpx，requests 只覆盖旧代码）。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        url = str(getattr(request, "url", "") or "")
+        span.update_name(f"{_method_of(request)} {_mask_url_path(url) or '/'}")
+        host = getattr(getattr(request, "url", None), "host", None)
+        if host:
+            span.set_attribute("http.peer", host)
+            span.set_attribute("server.address", host)
+        port = getattr(getattr(request, "url", None), "port", None)
+        if port:
+            span.set_attribute("server.port", port)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _httpx_response_hook(span, request, response) -> None:
+    if span is None or not span.is_recording():
+        return
+    try:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            span.set_attribute("http.status_code", status)
+        ext = getattr(response, "extensions", None) or {}
+        elapsed = ext.get("elapsed") if isinstance(ext, dict) else None
+        if elapsed is not None:
+            span.set_attribute("http.elapsed_ms", int(elapsed.total_seconds() * 1000))
+        if status is not None and status >= 500:
+            from opentelemetry.trace import Status, StatusCode
+            span.set_status(Status(StatusCode.ERROR, f"HTTP {status}"))
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _install_httpx_instrumentor() -> None:
+    """httpx 客户端插桩（可选依赖：装了就启用，没装不影响其它埋点）。
+
+    2026-11-20 实测：beta 的出站调用绝大多数走 httpx（GSB 总线、LLM SDK），
+    只装 requests 插桩等于出站全黑——trace 里从 server span 直接跳到 callee。
+    """
+    global _HTTPX_INSTRUMENTED
+    if _HTTPX_INSTRUMENTED:
+        return
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument(
+            request_hook=_httpx_request_hook,
+            response_hook=_httpx_response_hook,
+        )
+        _HTTPX_INSTRUMENTED = True
+    except Exception:  # noqa: BLE001
+        return
+
+
 @contextmanager
 def external_call_span(kind: str, target: str, attrs: dict | None = None):
     """外部依赖调用 span（MR-3，2026-11-05）：GitCode/GitHub/OBS/引擎进程等黑盒展开。
@@ -269,10 +418,14 @@ def instrument_fastapi(app, service_name: str):
         if not _REQUESTS_INSTRUMENTED:
             try:
                 from opentelemetry.instrumentation.requests import RequestsInstrumentor
-                RequestsInstrumentor().instrument()
+                RequestsInstrumentor().instrument(
+                    request_hook=_requests_request_hook,
+                    response_hook=_requests_response_hook,
+                )
                 _REQUESTS_INSTRUMENTED = True
             except Exception:
                 pass
+        _install_httpx_instrumentor()
         return True
     except Exception as e:
         try:
