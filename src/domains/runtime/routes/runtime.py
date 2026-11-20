@@ -3273,6 +3273,8 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
     """
     _task_user_id = _check_task_access(task_id, cred)
     _now = datetime.now(timezone.utc).isoformat()
+    # 表 owner=runtime（configs/table_ownership.json）。本端点在 runtime 域进程内运行，
+    # 写走进程主库即属主库，不做跨域写；读侧（列表/kill/计数）才需按域解析兜底历史落库。
     try:
         with db_lock:
             c = db.cursor()
@@ -3360,22 +3362,12 @@ def runtime_list_cloud_sandboxes(
 
     extra_conditions = []
     extra_params = []
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    # 三库拓扑：沙箱/owner/provider 配置与 agent_tasks/agent_runtimes/runtime_credentials
-    # 分属不同域库，单条跨域 JOIN 必然 1146（beta 实测：进程库是 grape_beta_runtime）。
-    # 改为「沙箱分页查询 + runtime 侧富化」两段读，分页/计数/排序只由沙箱单表决定；
-    # 每段用 _fetch_across_domains 按域重试，避免把表的实际落库位置写死。
+    # 归属（configs/table_ownership.json）：grape_t_cloud_sandboxes 归 runtime，
+    # user_accounts / grape_t_sandbox_provider_config 归 mgmt；agent_tasks /
+    # agent_runtimes / runtime_credentials 归 runtime。单条跨域 JOIN 在分库下必然
+    # 1146，故拆成「沙箱单表分页计数 + runtime 侧富化 + mgmt public 补 owner/provider
+    # 名」；每段用 _fetch_across_domains 按域重试（runtime 优先，仅 1146 时回退
+    # mgmt），既不把表的历史落库位置写死，也不让历史空表遮蔽 owner 域的真实行。
     q = (q or "").strip()
     if q:
         # 事件号（t.event_seq）不在沙箱表上：先在任务域解析成 task_id 集合，再回沙箱表过滤。
@@ -3402,7 +3394,9 @@ def runtime_list_cloud_sandboxes(
         extra_conditions.append("s.state=?")
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
-    _domains = ("mgmt", "runtime")
+    # 沙箱表 owner=runtime：域序必须 runtime 优先，否则会先读历史 mgmt 空表 → total=0
+    # 遮蔽真实数据（Issue #3527）。保留 mgmt 作为 1146 回退，兼容迁移前的历史落库位置。
+    _domains = ("runtime", "mgmt")
     # 原 SQL 有两个跨域 LEFT JOIN（user_accounts / sandbox_provider_config 都归 mgmt）。
     # JOIN 要求同库，三库拓扑下必须拆：这里只查本域单表，两个 mgmt 列留 NULL 占位，
     # 由下面的富化段批量补齐（列数与顺序保持不变，下游下标不动）。
@@ -3501,16 +3495,17 @@ def runtime_list_cloud_sandboxes(
 def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_session_token)):
     """[沙箱迁移] 强杀云沙箱。BOLA 校验后调 provider.kill_sandbox。"""
     from src.api.deps import check_repo_access
-    with db_lock:
-        c = db.cursor()
-        # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
-        # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
-        # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
-        # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
-        # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform
-        c.execute("SELECT provider, state, repo_key, provider_id "
-                  "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,))
-        row = c.fetchone()
+    # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
+    # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
+    # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
+    # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
+    # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform。
+    # 表 owner=runtime：读按域解析（runtime 优先，1146 回退历史 mgmt/单库形态），
+    # 不再假定进程主库一定有表；状态写仍落 owner 域（见下方 UPDATE）。
+    _kill_rows = _fetch_across_domains(
+        "SELECT provider, state, repo_key, provider_id "
+        "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,), ("runtime", "mgmt"))
+    row = _kill_rows[0] if _kill_rows else None
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "sandbox not found"})
     _platform_key = ""
@@ -3641,18 +3636,22 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 表归 mgmt：SQL 在 mgmt public 一份
-    from src.domains.mgmt import public as _mg_own
-    if not _mg_own.sandbox_provider_owned_by(provider_id, cred.id):
+    # 归属：grape_t_sandbox_provider_config 归 mgmt、grape_t_cloud_sandboxes 归 runtime。
+    # 三库拓扑下两条 SQL 各按归属域解析读取（provider_config=mgmt 优先，
+    # cloud_sandboxes=runtime 优先），不写死表的历史落库位置，也不跨域 JOIN。
+    _prov_rows = _fetch_across_domains(
+        "SELECT max_sandboxes FROM grape_t_sandbox_provider_config "
+        "WHERE id=? AND runtime_credential_id=?",
+        (provider_id, cred.id), ("mgmt", "runtime"))
+    if not _prov_rows:
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
-                  (provider_id,))
-        active_count = c.fetchone()[0] or 0
-        from src.domains.mgmt import public as _mg_max
-        max_sandboxes = _mg_max.sandbox_provider_max_sandboxes(provider_id) or 10
+    max_sandboxes = _prov_rows[0][0] or 10
+    _cnt_rows = _fetch_across_domains(
+        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
+        "WHERE provider_id=? AND state IN ('creating','running')",
+        (provider_id,), ("runtime", "mgmt"))
+    active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
     return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
 
 
