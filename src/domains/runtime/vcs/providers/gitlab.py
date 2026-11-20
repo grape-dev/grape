@@ -124,6 +124,7 @@ def _project_base(api_base: str, owner: str, repo: str) -> str:
 
 
 def tree_url(api_base, owner, repo, ref, recursive=False, page=1, per_page=_PER_PAGE) -> str:
+    # Issue #3580 实测：GitLab 不接受 ref=HEAD（404）——空 ref 由网关先解析默认分支
     params = {"ref": ref or "HEAD", "per_page": str(per_page), "page": str(page)}
     if recursive:
         params["recursive"] = "true"

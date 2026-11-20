@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agentic DevOps API",
-    "version": "2.2.3"
+    "version": "2.2.0"
   },
   "paths": {
     "/api/auth/change-password": {
@@ -943,6 +943,86 @@
               "type": "string",
               "title": "Name"
             }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "目标平台，空=按已绑令牌自动选择",
+              "default": "",
+              "title": "Provider"
+            },
+            "description": "目标平台，空=按已绑令牌自动选择"
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "所属空间路径（GitLab 可填组/子组），空=个人空间",
+              "default": "",
+              "title": "Owner"
+            },
+            "description": "所属空间路径（GitLab 可填组/子组），空=个人空间"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/repos/create-targets": {
+      "get": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "List spaces a repository can be created in",
+        "description": "Returns the personal namespace login plus provider-declared spaces (GitLab: groups the token can create projects in, full_path form). Providers without organisation namespaces return an empty list.",
+        "operationId": "repos_create_targets",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "目标平台，空=按已绑令牌自动选择",
+              "default": "",
+              "title": "Provider"
+            },
+            "description": "目标平台，空=按已绑令牌自动选择"
           }
         ],
         "responses": {
@@ -1187,6 +1267,171 @@
           }
         ],
         "x-token-scope": "dual"
+      }
+    },
+    "/api/repos/{provider}/connection": {
+      "get": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Get platform PAT connection",
+        "description": "Issue #3580: returns whether the current user has a PAT for this platform instance. Never returns the token value.",
+        "operationId": "repos_connection_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "put": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Set platform PAT connection",
+        "description": "Issue #3580: validates the token against that platform instance and stores it as user_credentials(kind=pat). PAT is a repo-execution credential: no login identity / external_identities row is created.",
+        "operationId": "repos_connection_put",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoConnectionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Clear platform PAT connection",
+        "description": "Issue #3580: clears user_credentials(kind=pat) for the platform instance; login identities are untouched.",
+        "operationId": "repos_connection_delete",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
       }
     },
     "/api/repos/bot-token/{owner}/{repo_name}": {
@@ -29792,6 +30037,23 @@
         ],
         "title": "RepoAction"
       },
+      "RepoConnectionBody": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "login": {
+            "type": "string",
+            "title": "Login",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "RepoConnectionBody",
+        "description": "Issue #3580/R11：实例 PAT 连接（只落 user_credentials kind=pat）。"
+      },
       "RepoLLMCredentialBody": {
         "properties": {
           "repo_key": {
@@ -31923,29 +32185,6 @@
         },
         "type": "object",
         "title": "ProgressBody"
-      },
-      "FeedbackBody": {
-        "properties": {
-          "seq": {
-            "type": "integer",
-            "title": "Seq"
-          },
-          "feedback_type": {
-            "type": "string",
-            "title": "Feedback Type",
-            "default": "create_issue"
-          },
-          "comment": {
-            "type": "string",
-            "title": "Comment",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "seq"
-        ],
-        "title": "FeedbackBody"
       }
     },
     "securitySchemes": {
@@ -31964,6 +32203,5 @@
         "name": "access_token"
       }
     }
-  },
-  "tags": []
+  }
 }

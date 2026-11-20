@@ -898,39 +898,24 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
             # S70（实弹发现）：清洗白名单须覆盖能力位整族——原白名单丢
             # issue_write_form/branch_create_form 等字段，卡经 admin 保存即静默
             # 降级（gitee 落回 repo_path → 建单 404）。以 Builder 校验后的卡为准
-            # 全字段持久化（值对象 → dict，不手抄白名单防再漏）。
+            # 全字段持久化：直接 dataclasses.asdict（Issue #3580 实测：手抄白名单
+            # 漏了 webhook_dialect / ca_bundle —— 自建 GitLab 实例经管理面写卡后
+            # 托管 fail-closed「未声明 webhook 形态」、私有 CA 也不生效，且无任何报错）。
+            # 白名单形态每加一个能力位就要记得补一次，漏一次就是静默降级。
             import dataclasses as _dc
-            cleaned[provider] = {
-                "name": card.name, "dialect": card.dialect, "host": card.host,
-                "webhook_path": card.webhook_path, "event_header": card.event_header,
-                "api_base": card.api_base, "api_auth": card.api_auth,
-                "webhook_verify": card.webhook_verify, "clone_auth": card.clone_auth,
-                "token_env": card.token_env, "bot_username": card.bot_username,
-                # F4/终态口径：cli_repo 维度已退役（CLI 源是安装面全局配置，
-                # 非平台维度；tests/test_bot_identity_cli_catalog.py 已锁）——
-                # 本清洗白名单原保留 card.cli_repo 导致每次 PUT AttributeError 500。
-                "user_images_base": card.user_images_base,
-                "download_base": card.download_base,
-                "issue_search": card.issue_search,
-                "issue_write_form": card.issue_write_form,
-                "branch_create_form": card.branch_create_form,
-                "pr_comment_endpoint": card.pr_comment_endpoint,
-                "pr_labels_via_issues": card.pr_labels_via_issues,
-                "git_tree_family": card.git_tree_family,
-                "token_storage_field": card.token_storage_field,
-                "webhook_token_field": card.webhook_token_field,
-                "session_token_field": card.session_token_field,
-                "global_bot_meta_key": card.global_bot_meta_key,
-                "global_bot_status_meta_key": card.global_bot_status_meta_key,
-                "pat_create_url": card.pat_create_url,
-                # D10（2026-11-12）：GET 全字段回读后编辑回环必须零丢失——
-                # brand_color/legacy_token_symbol 补进清洗（原 PUT 会把它们
-                # 落回 Builder 派生默认，用户自定义值静默丢失）
-                "brand_color": card.brand_color,
-                "legacy_token_symbol": card.legacy_token_symbol,
-                "event_map": card.event_map_overrides,
-                "fields": card.fields_overrides,
-            }
+            _card_raw = _dc.asdict(card)
+            _card_raw.pop("provider", None)
+            _card_raw["event_map"] = _card_raw.pop("event_map_overrides", {})
+            _card_raw["fields"] = _card_raw.pop("fields_overrides", {})
+            # capabilities 在值对象里是 tuple（空=()）——空值必须摘掉：Builder 的
+            # _build_capabilities 只认 None/[]，收到 () 会整卡拒绝（本路由下文还会用
+            # cleaned 再构建一次卡写 bot token，实测必修）。
+            _caps = _card_raw.get("capabilities")
+            if _caps:
+                _card_raw["capabilities"] = list(_caps)
+            else:
+                _card_raw.pop("capabilities", None)
+            cleaned[provider] = _card_raw
         except PlatformCardError as e:
             errors.append(f"{provider}: {e}")
     if errors:

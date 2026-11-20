@@ -170,6 +170,9 @@ def test_instance_row_is_manual_and_listed(orm_engine):
         assert int(row.enabled) == 1
         assert str(row.api_base) == "https://gitlab.corp.example.com/api/v4"
         assert str(row.host) == "gitlab.corp.example.com"
+        # Issue #3580 实测：手抄白名单曾漏掉这两个 → 托管 fail-closed / 私有 CA 不生效
+        assert str(row.webhook_dialect) == "gitlab_v4"
+        assert str(row.branch_create_form) != ""      # asdict 全字段，不再漏能力位
 
     from src.domains.mgmt.routes.settings import list_vcs_platforms_public
 

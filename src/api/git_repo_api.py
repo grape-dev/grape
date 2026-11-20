@@ -693,10 +693,17 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
     """解析默认分支（ref 空时）：S89/D65 树家族卡派生——github_api 族读仓库详情
     default_branch，v5 系用 branches[0]。无平台枚举。"""
     try:
-        if _tree_family(p) == "github_api":
+        # Issue #3580 实测：GitLab 方言族的 tree/files 接口**不接受 ref=HEAD**
+        # （上游 404 Tree/Commit Not Found）→ 必须先取项目 default_branch。
+        # hooks 族（dialect=gitlab 有 tree_url）优先读项目详情；github_api 族同款；
+        # v5 系（gitcode/gitee）沿用 branches[0]。
+        _hooks_mod, _ = _repo_path_hooks(p)
+        if _tree_family(p) == "github_api" or _hooks_mod is not None:
             data = _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
             if isinstance(data, dict) and data.get("default_branch"):
                 return data["default_branch"]
+        if _hooks_mod is not None:
+            return "main"
         else:
             data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": 1}, p),
                             _repo_token(owner, repo, user, p))
@@ -769,6 +776,8 @@ def list_root_contents(owner: str, repo: str, ref: str = Query("", description="
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""
     _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None and not (ref or "").strip():
+        ref = _default_ref(p, owner, repo, user)      # GitLab 不接受 ref=HEAD
     if _hooks is not None:
         return _hooks_paged(_hooks, getattr(_hooks, "dir_url"), p, _repo_token(owner, repo, user, p),
                             _api_base, owner, repo, "", ref)
@@ -784,6 +793,8 @@ def get_file_content(owner: str, repo: str, path: str = "", ref: str = Query("",
     # 语义对齐（PR #1854 的 contents 404 回退同口径）。
     _hooks, _api_base = _repo_path_hooks(p)
     if _hooks is not None:
+        if not (ref or "").strip():
+            ref = _default_ref(p, owner, repo, user)  # GitLab 不接受 ref=HEAD
         _token = _repo_token(owner, repo, user, p)
         try:
             data = _vcs_req(p, "GET", getattr(_hooks, "file_url")(_api_base, owner, repo, path, ref), _token)

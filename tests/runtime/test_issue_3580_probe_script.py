@@ -88,3 +88,21 @@ def test_probe_reports_subgroup_owner_in_url(probe):
 
     probe.probe(card, "tok", "grp/sub", "proj", "README.md", capture)
     assert any("projects/grp%2Fsub%2Fproj/repository/tree" in p for p in seen), seen
+
+def test_empty_repo_skips_tree_and_file(probe):
+    """空仓库（无提交）上游 tree/files 404 是正确语义 → SKIP，不判实例坏。"""
+    card = probe._card("gitlab")
+
+    def empty(provider_card, path, token, params=None):
+        if path == "/user":
+            return 200, {"username": "u", "id": 1}
+        if path == "/projects":
+            return 200, [{"path_with_namespace": "grp/proj", "default_branch": "main",
+                          "empty_repo": True}]
+        return 404, "not found"
+
+    results = {c["check"]: c["status"] for c in
+               probe.probe(card, "tok", "grp", "proj", "README.md", empty)}
+    assert results["tree"] == probe.SKIP
+    assert results["file"] == probe.SKIP
+    assert results["repos"] == probe.PASS

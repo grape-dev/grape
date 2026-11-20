@@ -101,3 +101,38 @@ def test_other_platforms_keep_legacy_paths(fake_upstream):
     assert "/git/trees/" in fake_upstream[-1][2]
     gr.get_file_content("owner", "repo", path="a.py", ref="main", user=USER, p="gitcode")
     assert "/contents/a.py" in fake_upstream[-1][2]
+
+
+def test_default_ref_uses_project_default_branch_for_gitlab(monkeypatch):
+    """ref 空时 GitLab 族取项目 default_branch（HEAD/branches[0] 都会踩坑）。"""
+    calls = []
+
+    def fake_req(provider, method, url, token, body=None):
+        calls.append(url)
+        if url.endswith("/api/v4/projects/grp%2Fproj"):
+            return {"default_branch": "trunk"}
+        return []
+
+    monkeypatch.setattr(gr, "_vcs_req", fake_req)
+    monkeypatch.setattr(gr, "_repo_token", lambda owner, repo, user, p: "tok")
+    assert gr._default_ref("gitlab", "grp", "proj", USER) == "trunk"
+
+    # 根目录/文件端点：ref 空 → 用默认分支（不得发 ref=HEAD）
+    gr.list_root_contents("grp", "proj", ref="", user=USER, p="gitlab")
+    assert "ref=trunk" in calls[-1] and "ref=HEAD" not in calls[-1]
+
+
+def test_empty_ref_file_uses_default_branch(monkeypatch):
+    calls = []
+
+    def fake_req(provider, method, url, token, body=None):
+        calls.append(url)
+        if url.endswith("/api/v4/projects/grp%2Fproj"):
+            return {"default_branch": "trunk"}
+        return {"file_name": "a.py", "file_path": "a.py", "size": 1,
+                "encoding": "base64", "content": "eA==", "last_commit_id": "c0ffee"}
+
+    monkeypatch.setattr(gr, "_vcs_req", fake_req)
+    monkeypatch.setattr(gr, "_repo_token", lambda owner, repo, user, p: "tok")
+    gr.get_file_content("grp", "proj", path="a.py", ref="", user=USER, p="gitlab")
+    assert "ref=trunk" in calls[-1]

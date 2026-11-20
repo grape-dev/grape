@@ -104,20 +104,34 @@ def probe(card, token: str, owner: str, repo: str, file_path: str, fetch) -> lis
     else:
         out.append(_r("token", FAIL, f"HTTP {st}: {payload}"))
 
-    st, payload = fetch(card, "/projects", token, {"membership": "true", "per_page": 1})
+    st, payload = fetch(card, "/projects", token, {"membership": "true", "per_page": 100})
+    _default_branch = ""
+    _empty_repo = False
     if st == 200 and isinstance(payload, list):
         out.append(_r("repos", PASS, f"可见仓库数>=1（首个: {payload[0].get('path_with_namespace')}）"
                       if payload else "可见仓库 0 个（token 可能无 membership）"))
+        for p in payload:
+            if str(p.get("path_with_namespace") or "") == f"{owner}/{repo}":
+                _default_branch = str(p.get("default_branch") or "")
+                _empty_repo = bool(p.get("empty_repo"))
+                break
+        if not _default_branch and payload:
+            _default_branch = str(payload[0].get("default_branch") or "")
     else:
         out.append(_r("repos", FAIL, f"HTTP {st}: {payload}"))
 
     owner_repo = f"{owner}/{repo}" if owner and repo else ""
+    _ref = _default_branch or "main"      # GitLab 不接受 ref=HEAD（实测 404）
     if not owner_repo:
         out.append(_r("tree", SKIP, "未给 --repo"))
         out.append(_r("file", SKIP, "未给 --repo"))
+    elif _empty_repo:
+        # 空仓库（无任何提交）上游对 tree/files 一律 404，是正确语义，不是接入故障
+        out.append(_r("tree", SKIP, f"{owner_repo} 是空仓库（无提交）；先推一次提交再测"))
+        out.append(_r("file", SKIP, f"{owner_repo} 是空仓库（无提交）；先推一次提交再测"))
     else:
         st, payload = fetch(card, _project_seg(owner, repo) + "/repository/tree",
-                            token, {"ref": "HEAD", "per_page": 20})
+                            token, {"ref": _ref, "per_page": 20})
         if st == 200 and isinstance(payload, list):
             names = [str(e.get("name")) for e in payload if isinstance(e, dict)][:5]
             out.append(_r("tree", PASS, f"{owner_repo} 根目录 {len(payload)} 项: {names}"))
@@ -126,7 +140,7 @@ def probe(card, token: str, owner: str, repo: str, file_path: str, fetch) -> lis
 
         fp = file_path or "README.md"
         st, payload = fetch(card, _project_seg(owner, repo) + "/repository/files/"
-                            + urllib.parse.quote(fp, safe=""), token, {"ref": "HEAD"})
+                            + urllib.parse.quote(fp, safe=""), token, {"ref": _ref})
         if st == 200 and isinstance(payload, dict) and payload.get("content"):
             out.append(_r("file", PASS, f"{fp} 读取成功（{payload.get('size')} bytes, base64）"))
         else:

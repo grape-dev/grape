@@ -140,3 +140,20 @@
   i18n 指纹/index cacheVer，`all-views.css?v=` 与前端版本棘轮同批抬版。
 - 用例：`tests/runtime/test_issue_3580_create_space.py`（6 条：namespace 解析/无 owner 零查询/
   空间不存在不建/空间清单/路径校验/full_name 回填）。
+
+## D13 真机验证结论（gitlab.com 实测）
+
+- **`ref` 不接受 `HEAD`**：GitLab 的 `/repository/tree|files` 只认真实分支/标签/commit，
+  传 `HEAD` 一律 404（Tree/Commit Not Found）。网关的默认分支解析（`_default_ref`）已改为
+  hooks 方言族读项目 `default_branch`；根目录/文件端点 ref 为空时同样先解析，
+  不再把 `HEAD` 下发给上游。
+- **空仓库的 404 是正确语义**：`empty_repo=true` 的项目对 tree/files 全 404，
+  探针记为 SKIP（提示先推一次提交），不判实例坏。
+- **管理面写卡必须全字段持久化**：手抄白名单漏了 `webhook_dialect` / `ca_bundle`，
+  自建实例经管理面写入后托管 fail-closed、私有 CA 不生效且无任何报错；
+  已改为 `dataclasses.asdict(card)` 全量落 meta/表（守护用例断言行内有 webhook_dialect）。
+- **重启幂等**：manual 行在重启导入后 `source/enabled/webhook_dialect/ca_bundle` 全部不变，
+  目录仍可见（实测）。
+- 已知噪声（D109 既有，不在本议题修）：`grape_t_repo_platforms` 里 gitcode/gitlab 的
+  config 行 `branch_create_form=''`（文件卡未声明），卡合并时打 warning 并回落文件卡，
+  功能不受影响。
