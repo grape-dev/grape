@@ -362,6 +362,20 @@ def _guard_active_onboard(user_id) -> None:
 
 
 
+def _guard_and_create_task(user_id, task_id, bot_type, repo_key) -> None:
+    """并发闸门 + 任务落库，在**同一把** `db_lock` 内一次完成。
+
+    分两次 `asyncio.to_thread` 调用会在两个 await 之间留出事件循环调度点：
+    两个并发 /start 都能在闸门的 SELECT 里读到空结果、然后各自 INSERT，
+    同进程的「查重→插入」原子性丢失（架构守护 N1）。`db_lock` 是 RLock，
+    闸门与 `_create_task` 内部各自的 `with db_lock:` 可重入。
+    """
+    from src.kernel.session_manager import db_lock
+    with db_lock:
+        _guard_active_onboard(user_id)
+        _create_task(task_id, bot_type, repo_key, user_id)
+
+
 @router.post("/start", operation_id="feishu_onboard_start", summary="Start Feishu scan onboarding", description="Creates a scan-onboarding task and returns task_id; poll status for the QR/result.")
 async def start_onboard(body: StartBody, user: dict = Depends(require_no_session_token)):
     """创建扫码任务，返回 task_id（前端轮询 status 获取二维码/结果）。"""
@@ -379,10 +393,11 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     # `asyncio.create_task` 起扫码协程；同步 def 路由由 FastAPI 丢进线程池，
     # 线程内无事件循环 → create_task 抛 RuntimeError → 端点 500、DB 留 pending，
     # 用户 STALE_TTL(600s) 内无法再次扫码（架构守护 F2）。
-    await asyncio.to_thread(_guard_active_onboard, user["id"])
-
     task_id = uuid.uuid4().hex
-    await asyncio.to_thread(_create_task, task_id, body.bot_type, body.repo_key, user["id"])
+    # 闸门与 INSERT 合并为一次线程调用（架构守护 N1）：两次 to_thread 会在
+    # 两个 await 之间留出调度点，两个并发 /start 能同时通过查重。
+    await asyncio.to_thread(_guard_and_create_task, user["id"], task_id,
+                            body.bot_type, body.repo_key)
     task = asyncio.create_task(_run_registration(task_id, body.bot_type, body.repo_key,
                                                  user["id"], user.get("username", "")))
     _TASKS[task_id] = task

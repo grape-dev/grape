@@ -1031,7 +1031,9 @@ def _knowledge_sync_pass(storage):
                              rid)
                         )
                         db.commit()
-                _synced += 1
+                    # 只在真正落 OBS + 写库之后计数（架构守护 N3）：空文件
+                    # 跳过了上传与 UPDATE，原先也被计成 synced，日志会高估同步量。
+                    _synced += 1
             except Exception as e:
                 _failed += 1
                 log.warning(f"[knowledge] sync failed id={rid}: {e}")
@@ -1086,7 +1088,9 @@ async def knowledge_sync_loop():
 
     while True:
         # 并发保护：检查是否有其他实例正在执行
-        running = get_meta_value(SYNC_LOCK_KEY)
+        # 架构守护 N2：锁检查/抢锁/释放也是同步 DB，别压在事件循环上（每小时数次，
+        # 但与后台 pass 的 db_lock 争用时会造成秒级阻塞）。
+        running = await asyncio.to_thread(get_meta_value, SYNC_LOCK_KEY)
         if running:
             try:
                 running_ts = float(running)
@@ -1098,7 +1102,7 @@ async def knowledge_sync_loop():
                 pass  # 值不是时间戳 → 视为过期 → 继续执行
 
         # 抢锁
-        set_meta_value(SYNC_LOCK_KEY, str(time.time()))
+        await asyncio.to_thread(set_meta_value, SYNC_LOCK_KEY, str(time.time()))
 
         try:
             await asyncio.to_thread(_knowledge_sync_pass, storage)
@@ -1106,7 +1110,7 @@ async def knowledge_sync_loop():
             log.error(f"[knowledge] sync error: {e}")
         finally:
             # 释放锁
-            set_meta_value(SYNC_LOCK_KEY, "")
+            await asyncio.to_thread(set_meta_value, SYNC_LOCK_KEY, "")
         await asyncio.sleep(3600)
 
 def _sync_baseline_files():

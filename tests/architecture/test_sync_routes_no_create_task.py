@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ROUTES_DIRS = [ROOT / "src" / "domains"]
 
 #: 线程池里调用必然失败的「起任务」写法
-_LOOP_ONLY_CALLS = {"create_task", "ensure_future"}
+_LOOP_ONLY_CALLS = {"create_task", "ensure_future", "run_coroutine_threadsafe"}
 
 
 def _is_route_handler(node: ast.AST) -> bool:
@@ -33,16 +33,38 @@ def _is_route_handler(node: ast.AST) -> bool:
 
 
 def _loop_only_hits(node: ast.AST) -> list[int]:
+    """按「被调用属性名」匹配，不限定接收者写法。
+
+    架构守护 N4：原实现只认 `asyncio.create_task` / `loop.create_task` 这类
+    「接收者是名字」的形式，`asyncio.get_running_loop().create_task(...)`、
+    `self.loop.create_task(...)` 都会漏判。名字匹配会把 `foo.create_task(...)`
+    也算上——同步路由里出现任何「起任务」调用都应当被人看一眼，宁可多报。
+    """
     lines = []
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            f = sub.func
-            if isinstance(f, ast.Attribute) and f.attr in _LOOP_ONLY_CALLS:
-                if isinstance(f.value, ast.Name) and f.value.id in ("asyncio", "loop", "event_loop"):
-                    lines.append(sub.lineno)
-                elif isinstance(f.value, ast.Attribute) and f.value.attr in ("loop", "event_loop"):
-                    lines.append(sub.lineno)
+        if not isinstance(sub, ast.Call):
+            continue
+        f = sub.func
+        if isinstance(f, ast.Attribute):
+            name = f.attr
+        elif isinstance(f, ast.Name):
+            name = f.id
+        else:
+            continue
+        if name in _LOOP_ONLY_CALLS:
+            lines.append(sub.lineno)
     return lines
+
+
+def _offenders_in_source(src: str) -> list[int]:
+    """给护栏自身做单测用：返回同步路由里起任务的函数起始行。"""
+    tree = ast.parse(src)
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and _is_route_handler(node):
+            if _loop_only_hits(node):
+                out.append(node.lineno)
+    return out
 
 
 def _iter_route_files():
@@ -79,3 +101,29 @@ def test_notify_and_onboard_routes_are_async():
 
     assert inspect.iscoroutinefunction(notify_task), "tasks.notify_task 必须是 async def"
     assert inspect.iscoroutinefunction(start_onboard), "feishu_onboard.start_onboard 必须是 async def"
+
+
+def test_guard_catches_indirect_loop_receivers():
+    """护栏自身：接收者不是名字的写法也必须命中（架构守护 N4）。"""
+    src = '''
+@router.post("/a")
+def hack_a():
+    asyncio.get_running_loop().create_task(work())
+
+@router.post("/b")
+def hack_b():
+    fut = asyncio.run_coroutine_threadsafe(work(), loop)
+
+@router.post("/c")
+def hack_c():
+    self.loop.ensure_future(work())
+
+@router.post("/d")
+async def fine_async():
+    asyncio.create_task(work())
+
+@router.post("/e")
+def fine_sync():
+    do_something_sync()
+'''
+    assert _offenders_in_source(src) == [3, 7, 11]
