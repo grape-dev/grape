@@ -19,16 +19,19 @@
           <button
             class="bt bt-o bt-s"
             :disabled="!data.prev_seq"
-            :title="t('prev_event_title', { name: agentName })"
+            :title="t('prev_event_title', { name: data.prev_agent || agentName })"
             @click="navEvent(data.prev_seq)"
           >
             ‹
           </button>
           <span class="ts t3 ev__seq">Event #{{ data.seq || '—' }}</span>
+          <span v-if="data.nav_scope === 'issue' && data.nav_issue_id" class="ts t3 ev__navscope"
+            >{{ t('nav_same_issue', { id: data.nav_issue_id }) }}</span
+          >
           <button
             class="bt bt-o bt-s"
             :disabled="!data.next_seq"
-            :title="t('next_event_title', { name: agentName })"
+            :title="t('next_event_title', { name: data.next_agent || agentName })"
             @click="navEvent(data.next_seq)"
           >
             ›
@@ -429,6 +432,7 @@ const DEFAULTS = {
   outcome_flow: '流程操作',
   prev_event_title: '上一个事件（{name}）',
   next_event_title: '下一个事件（{name}）',
+  nav_same_issue: '同需求 {id} 内',
   btn_feedback: '反馈',
   btn_feedback_title: '针对该失败事件提交问题反馈（自动携带仓库/任务/引擎上下文）',
   btn_redispatch: '重新派发',
@@ -1954,6 +1958,15 @@ onMounted(function () {
   cursor: pointer;
   padding: 6px 0;
   user-select: none;
+}
+/* 箭头导航的作用域提示：说明左右箭头只在「同需求」内跳（2026-11-20） */
+.ev__navscope {
+  font-size: 11px;
+  color: var(--t3);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--chip-bg, rgba(120, 120, 128, 0.12));
+  white-space: nowrap;
 }
 .ev-arrow {
   font-size: 10px;

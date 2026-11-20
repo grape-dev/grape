@@ -98,25 +98,42 @@ ok(!/-->\s*>\s*</.test(VIEW), '模板注释后残留了裸 ">" 文本节点');
 
 // 9. 暗色档：本页自锁 token 必须自带暗色变体，否则暗色模式下页面永远停在浅色
 //    （2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）
+//    2026-11-20：卡片暗色值由 #1c1c1e 校准到壳同源 #303033（卡片必须比页面底
+//    #232326 亮一档，否则是「凹进去」）。契约不变：暗色变体必须存在，只改取值。
 ok(
-  /:root\[data-theme-mode='dark'\]\s*\.rtv\s*\{[\s\S]{0,400}--c:\s*#1c1c1e/.test(VIEW),
+  /:root\[data-theme-mode='dark'\]\s*\.rtv\s*\{[\s\S]{0,400}--c:\s*#303033/.test(VIEW),
   '自锁 token 缺 data-theme-mode=dark 的暗色变体（卡片会保持白底）',
 );
 ok(
-  /prefers-color-scheme:\s*dark[\s\S]{0,200}:root\[data-theme-mode='auto'\]\s*\.rtv\s*\{[\s\S]{0,400}--c:\s*#1c1c1e/.test(VIEW),
+  /prefers-color-scheme:\s*dark[\s\S]{0,200}:root\[data-theme-mode='auto'\]\s*\.rtv\s*\{[\s\S]{0,400}--c:\s*#303033/.test(VIEW),
   'auto 模式缺 prefers-color-scheme:dark 的暗色变体',
 );
 
 // 10. 暗色档的徽章/危险按钮（2026-11-18 用户裁定）：
 //     pastel 徽章压成「同色系低透明度底 + 提亮字」；吊销按钮由实心红改成卡片底 + 红描边红字
+//    2026-11-20 改写：徽章实现已从「每条徽章一份 rgba 字面量暗色档」重构为 --tag 派生
+//     （--tag 在暗色档取 400 亮档色），老断言还在比对 rgba(48,209,88,.18) 这类字面量，
+//     与实现脱节 → 长期红。新契约：①徽章底色必须来自 --tag；②暗色两档淡底固定 20%（再抬会把 400 档字色对比压到 3.2 以下）
+//     并加同色 inset 环；③吊销按钮暗色仍是「卡片底 + 红字 + 红描边」。
 const DK = "(?:\\[data-theme-mode='dark'\\]|\\[data-theme-mode='auto'\\])";
 ok(
-  new RegExp(DK + "\\s*\\.rtv\\s*\\.rtv-hbadge\\.online\\s*\\{[^}]*background:\\s*rgba\\(48, 209, 88, 0\\.18\\)").test(VIEW),
-  '暗色缺健康徽章 online 加深档（浅底 pastel 在深色卡片上过亮）',
+  /\.rtv-hbadge\s*\{[\s\S]{0,220}background:\s*color-mix\(in srgb, var\(--tag/.test(VIEW),
+  '健康徽章底色必须由 --tag 派生（暗色档靠 --rtv-ok 提档）',
+);
+const BADGE_DEEP = 'background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent)';
+ok(
+  VIEW.split(BADGE_DEEP).length - 1 === 2,
+  '暗色两档（dark + auto/media）都要把徽章淡底抬到 26%',
+);
+const BADGE_RING =
+  'box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tag, var(--t3)) 38%, transparent)';
+ok(
+  VIEW.split(BADGE_RING).length - 1 === 2,
+  '暗色两档徽章都要带同色 inset 环（否则淡底糊在深卡上看不出色）',
 );
 ok(
-  new RegExp(DK + "\\s*\\.rtv\\s*\\.rtv-sbadge\\.global\\s*\\{[^}]*color:\\s*#5b9eff").test(VIEW),
-  '暗色缺范围徽章 global 加深档',
+  /\.rtv-sbadge\.global\s*\{[^}]*--tag:\s*var\(--rtv-sc-global\)/.test(VIEW),
+  '范围徽章 global 应取 --rtv-sc-global（暗色档由该变量提档到 #60a5fa）',
 );
 ok(
   new RegExp(
@@ -152,6 +169,35 @@ ok(
 ok(
   !/color:\s*#6d28d9/i.test(VIEW),
   '视图内不得再有 color: #6d28d9（紫色已从沙箱平台行整族移除）',
+);
+
+// 12. 暗色刺眼两处（2026-11-20 主人两轮反馈）：
+//     ①「有问题机器的红框对比度太高」：整卡 1px 环 + 3px 左条改走语义变量
+//        --ring / --bar-bad —— 浅色档=原口径（var(--r) 纯红），暗色档压暗到 40% / 55%↔卡片；
+//     ②「一键加回按钮风格不一致」：它原先是实心 accent 药丸，夹在一排「淡底+同色字」徽章里，
+//        改回徽章同族（淡底 + 同色字 + 同色 inset 环），暗色档字色再提亮一档。
+ok(
+  /const ABNORMAL_RING = 'var\(--sh\), var\(--ring\)'/.test(VIEW),
+  '整卡红环应由 --ring 语义变量给出（否则暗色压不下去）',
+);
+ok(
+  /\.rtv \{[\s\S]{0,2000}--ring: 0 0 0 1px var\(--r\);/.test(VIEW),
+  '浅色档 --ring 必须等于原口径 0 0 0 1px var(--r)',
+);
+const RING_DARK = '--ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);';
+const BAR_DARK = '--bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));';
+ok(VIEW.split(RING_DARK).length - 1 === 2, '暗色两档（dark + auto）都要把红环压到 40%');
+ok(VIEW.split(BAR_DARK).length - 1 === 2, '暗色两档都要把 3px 红左条压到 55%↔卡片');
+const readd = block(VIEW, '.rtv-readd');
+ok(readd.indexOf('background: var(--a);') < 0, '一键加回不得再用实心 accent 底（与徽章不是一套语言）');
+ok(
+  readd.indexOf('background: color-mix(in srgb, var(--a) 12%, transparent)') >= 0 &&
+    readd.indexOf('color: var(--a)') >= 0,
+  '一键加回应取徽章同族：淡底 + 同色字',
+);
+ok(
+  VIEW.split('color: color-mix(in srgb, var(--a) 55%, #fff);').length - 1 === 2,
+  '暗色两档一键加回字色要提亮（实心 #0a84ff 在深底上只有 2.9:1）',
 );
 
 console.log('PASS runtimes legacy style guard (' + count + ' assertions)');

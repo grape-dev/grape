@@ -1197,7 +1197,7 @@ const RUNTIME_COLOR = {
   online: 'var(--rtv-ok)',
   recently_lost: 'var(--rtv-warn)',
   offline: 'var(--t3)',
-  about_to_gc: 'var(--rtv-bad)',
+  about_to_gc: 'var(--bar-bad)',
 }
 const HEALTH_NAMES = {
   online: 'online',
@@ -1328,12 +1328,12 @@ function isAbnormalEngine(rt) {
 }
 function abnormalBorderColor(rt) {
   const h = rt.health || rt.status || 'offline'
-  if (h === 'about_to_gc' || h === 'offline') return 'var(--r)'
+  if (h === 'about_to_gc' || h === 'offline') return 'var(--bar-bad)'
   if (rt.health_abnormal !== undefined && rt.health_abnormal !== null) {
-    return rt.health_abnormal === true ? 'var(--r)' : ''
+    return rt.health_abnormal === true ? 'var(--bar-bad)' : ''
   }
   if ((rt.health_consecutive_failures || 0) > 0 || rt.health_heartbeat_alive === false)
-    return 'var(--r)'
+    return 'var(--bar-bad)'
   return ''
 }
 // Issue #498：worker 版本落后是独立提示（琥珀标签），不参与异常描边
@@ -1567,7 +1567,7 @@ function platformDisabled(x) {
   // B5：沙箱引擎卡看 is_sandbox，凭据卡看 cred_type（后端两路字段）
   return !!((x.cred_type === 'sandbox' || x.is_sandbox) && x.platform_enabled === false)
 }
-const ABNORMAL_RING = 'var(--sh), 0 0 0 1px var(--r)'
+const ABNORMAL_RING = 'var(--sh), var(--ring)'
 function cardLeftBorder(h, rt) {
   // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
   if (rt && isAbnormalEngine(rt)) {
@@ -1575,7 +1575,7 @@ function cardLeftBorder(h, rt) {
     if (red) return { borderLeft: '3px solid ' + red, boxShadow: ABNORMAL_RING }
   }
   // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
-  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626', boxShadow: ABNORMAL_RING }
+  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
   // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
   return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
 }
@@ -2787,6 +2787,9 @@ onBeforeUnmount(function () {
   --rtv-tg-coding: #2563eb;
   --rtv-tg-qa: #7c3aed;
   --rtv-tg-sre: #ca8a04;
+  /* 异常描边语义：浅色档与旧口径等价（整卡 1px 红环 + 3px 纯红条） */
+  --ring: 0 0 0 1px var(--r);
+  --bar-bad: var(--r);
   min-height: 100%;
 }
 /* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
@@ -2794,20 +2797,20 @@ onBeforeUnmount(function () {
  * 取值与 legacy apple-theme 暗色档逐项对齐；键位与 bridge.css 同源——
  * data-theme-mode="dark" 无条件深色，"auto" 才跟随系统偏好。 */
 :root[data-theme-mode='dark'] .rtv {
-  --bg: #000;
-  --c: #1c1c1e;
-  --b: #38383a;
-  --t: #f5f5f7;
-  --t1: #f5f5f7;
-  --t2: #aeaeb2;
-  --t3: #8e8e93;
+  --bg: #232326;
+  --c: #303033;
+  --b: #3e3e42;
+  --t: #ececf1;
+  --t1: #ececf1;
+  --t2: rgba(235, 235, 245, 0.7);
+  --t3: rgba(235, 235, 245, 0.62);
   --a: #0a84ff;
   --ah: #409cff;
   --g: #30d158;
   --y: #ff9f0a;
   --r: #ff453a;
-  --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --chip-bg: #2c2c2e;
+  --sh: 0 1px 2px rgba(0, 0, 0, 0.34);
+  --chip-bg: rgba(255, 255, 255, 0.09);
   --rtv-ok: #34d399;
   --rtv-warn: #fbbf24;
   --rtv-bad: #f87171;
@@ -2833,6 +2836,9 @@ onBeforeUnmount(function () {
   --rtv-tg-coding: #60a5fa;
   --rtv-tg-qa: #a78bfa;
   --rtv-tg-sre: #facc15;
+  /* 2026-11-20：深底上 #ff453a 全不透明 1px 环=霓虹，环降到 40%，左条 55%↔卡片 */
+  --ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);
+  --bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));
 }
 
 /* 暗色档：危险按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」。
@@ -2865,20 +2871,20 @@ onBeforeUnmount(function () {
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] .rtv {
-    --bg: #000;
-    --c: #1c1c1e;
-    --b: #38383a;
-    --t: #f5f5f7;
-    --t1: #f5f5f7;
-    --t2: #aeaeb2;
-    --t3: #8e8e93;
+    --bg: #232326;
+    --c: #303033;
+    --b: #3e3e42;
+    --t: #ececf1;
+    --t1: #ececf1;
+    --t2: rgba(235, 235, 245, 0.7);
+    --t3: rgba(235, 235, 245, 0.62);
     --a: #0a84ff;
     --ah: #409cff;
     --g: #30d158;
     --y: #ff9f0a;
     --r: #ff453a;
-    --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --chip-bg: #2c2c2e;
+    --sh: 0 1px 2px rgba(0, 0, 0, 0.34);
+    --chip-bg: rgba(255, 255, 255, 0.09);
     --rtv-ok: #34d399;
     --rtv-warn: #fbbf24;
     --rtv-bad: #f87171;
@@ -2904,6 +2910,8 @@ onBeforeUnmount(function () {
     --rtv-tg-coding: #60a5fa;
     --rtv-tg-qa: #a78bfa;
     --rtv-tg-sre: #facc15;
+    --ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);
+    --bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));
   }
   :root[data-theme-mode='auto'] .rtv .bt-p {
     background: color-mix(in srgb, var(--a) 18%, transparent) !important;
@@ -3074,15 +3082,18 @@ onBeforeUnmount(function () {
   line-height: 1.4;
   white-space: nowrap;
 }
+/* 一键加回（2026-11-20）：原先实心 accent 药丸夹在一排「淡底+同色字」状态徽章中间，
+   不是一套语言（暗色下实心 #0a84ff 也最跳）。改回徽章同族：淡底 + 同色字 + 同色环。 */
 .rtv-readd {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   padding: 2px 10px;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 999px;
-  background: var(--a);
-  color: #fff;
+  background: color-mix(in srgb, var(--a) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 32%, transparent);
+  color: var(--a);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -3090,7 +3101,8 @@ onBeforeUnmount(function () {
   cursor: pointer;
 }
 .rtv-readd:hover {
-  filter: brightness(1.08);
+  background: color-mix(in srgb, var(--a) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 52%, transparent);
 }
 /* B5：沙箱平台禁用徽标 */
 .rtv-pdisabled {
@@ -3580,10 +3592,12 @@ onBeforeUnmount(function () {
 /* 暗色下 14% 淡底在近黑卡片上看不清，抬到 20%（同色系，不加饱和） */
 :root[data-theme-mode='dark'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
   background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tag, var(--t3)) 38%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
     background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tag, var(--t3)) 38%, transparent);
   }
 }
 /* 弹窗通用 */
@@ -4274,5 +4288,82 @@ onBeforeUnmount(function () {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* 暗色观感校准（2026-11-20）
+ * 浅色档的几何与蓝紫渐变是主人 11-12 亲口裁定的「旧页风格」，由
+ * tests/js/test_runtimes_legacy_style_guard.js 钉住 —— 本段一律用
+ * :root[data-theme-mode=…] .rtv 前缀只覆盖暗色档，浅色档一个字节都不动。
+ * 校准三件事：①卡片比页面底亮一档（#303033 on #232326），不再是「凹进去」；
+ * ②去掉暗底上的霓虹渐变+蓝色外发光，改实心 accent + 静音投影；
+ * ③压回两处硬编码浅底（#dbeafe / #f1f5f9）与蓝色描边，避免暗色下闪白块。 */
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn,
+:root[data-theme-mode='dark'] .rtv .rtv-sb-ic,
+:root[data-theme-mode='dark'] .rtv .rtv-dev-head {
+  background: var(--a);
+  box-shadow: none;
+}
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.34);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn:hover {
+  background: var(--ah);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sb-opt-ic {
+  background: color-mix(in srgb, var(--a) 22%, var(--c));
+}
+:root[data-theme-mode='dark'] .rtv .rtv-cred-disabled {
+  background: rgba(255, 255, 255, 0.05);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sb-opt:hover {
+  border-color: var(--a);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-readd {
+  /* 深底上实心 #0a84ff 字色只有 2.9:1，按 iOS 深色 tinted chip 口径提亮字色 */
+  background: color-mix(in srgb, var(--a) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 38%, transparent);
+  color: color-mix(in srgb, var(--a) 55%, #fff);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-modal-ov {
+  background: rgba(0, 0, 0, 0.55);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-side-ov {
+  background: rgba(0, 0, 0, 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn,
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-ic,
+  :root[data-theme-mode='auto'] .rtv .rtv-dev-head {
+    background: var(--a);
+    box-shadow: none;
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.34);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn:hover {
+    background: var(--ah);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-opt-ic {
+    background: color-mix(in srgb, var(--a) 22%, var(--c));
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-cred-disabled {
+    background: rgba(255, 255, 255, 0.05);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-opt:hover {
+    border-color: var(--a);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-readd {
+    background: color-mix(in srgb, var(--a) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 38%, transparent);
+    color: color-mix(in srgb, var(--a) 55%, #fff);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-modal-ov {
+    background: rgba(0, 0, 0, 0.55);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-side-ov {
+    background: rgba(0, 0, 0, 0.45);
+  }
 }
 </style>

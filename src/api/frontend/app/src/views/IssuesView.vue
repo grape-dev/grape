@@ -302,6 +302,14 @@
                 >
                   ↻ {{ t('resume_task') }}
                 </button>
+                <!-- 2026-11-20：误触「确认完成」后唯一的回退入口（completed 之前没有任何操作按钮） -->
+                <button
+                  v-if="sel.status === 'completed'"
+                  class="tsk-btn tsk-btn-ghost"
+                  @click="reopenTask(sel, $event)"
+                >
+                  ↩ {{ t('reopen_task') }}
+                </button>
               </template>
               <button
                 class="tsk-btn tsk-btn-ghost isk-handoff"
@@ -517,6 +525,14 @@
             @click="resumeTask(detailView)"
           >
             ↻ {{ t('resume_task') }}
+          </button>
+          <!-- 2026-11-20：已完成需求回到处理中（误触完成的回退口，不自动重派） -->
+          <button
+            v-if="detailView.status === 'completed'"
+            class="tsk-btn tsk-btn-ghost"
+            @click="reopenTask(detailView, $event)"
+          >
+            ↩ {{ t('reopen_task') }}
           </button>
           <button
             class="tsk-btn tsk-btn-ghost isk-handoff"
@@ -2512,6 +2528,29 @@ function resumeTask(tk) {
     function (e) {
       return t('operation_failed', { msg: (e.detail && e.detail.message) || e.message })
     }
+  )
+}
+
+function reopenTask(tk, event) {
+  // 2026-11-20：误触「确认完成」后的回退（主人口径 B：只回处理中，不自动重派）
+  grapeConfirm(
+    {
+      title: t('reopen_task'),
+      message: t('reopen_task_message'),
+      confirmText: t('reopen_task'),
+      onConfirm: function () {
+        withTaskLoading(
+          function () {
+            return API().post('/issues/' + tk.id + '/reopen')
+          },
+          t('task_reopened_toast'),
+          function (e) {
+            return t('operation_failed', { msg: (e.detail && e.detail.message) || e.message })
+          }
+        )
+      },
+    },
+    event
   )
 }
 

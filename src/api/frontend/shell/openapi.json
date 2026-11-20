@@ -15424,6 +15424,59 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/reopen": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Reopen completed issue",
+        "description": "Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.",
+        "operationId": "issues_reopen",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/pipeline": {
       "get": {
         "tags": [

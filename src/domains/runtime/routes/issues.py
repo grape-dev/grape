@@ -1259,6 +1259,72 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
+@router.post("/{issue_id}/reopen", operation_id="issues_reopen", summary="Reopen completed issue", description="Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.")
+async def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """把误标完成的需求退回「处理中」（2026-11-20 主人口径 B）。
+
+    与 `resume`（cancelled→processing，自动续派）的区别：
+    - 只回状态 + 清完成信息 + **清空 stage**，不自动 A2A 派发，避免点一下就消耗引擎；
+      续跑由用户在事件页手动「重派」决定从哪一步开始；
+    - stage 必须清空：UI 的 `mapStatusL` 把 `stage='done'` 直接判成「已完成」，
+      留着 done 即使 status 已是 processing 也仍然显示已完成（等于按钮没生效）。
+    不碰平台 Issue（GitCode/GitHub issue 不重新打开）——#1408 撤销路径同口径。
+    """
+    from src.kernel.session_manager import db_lock
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "SELECT status, repo_key, issue_number, stage, completed_at "
+            "FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
+            (issue_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+        cur_status, repo_key, issue_number, cur_stage, prev_completed_at = row[0], row[1], row[2], row[3], row[4]
+        if cur_status != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 400, "message": "仅已完成需求可回到处理中"})
+        # Issue #1741 口径：同一 repo_key+issue_number 可能有多行，全量幂等回退（不插新卡）。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status='completed'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE id=? AND status='completed'",
+                (issue_id,))
+        if c.rowcount == 0:
+            # 并发下已被别的进程改走 → 与 _write_issue_status 同口径按 409 让前端刷新
+            _rt_db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
+        _rt_db.commit()
+    try:
+        from src.domains.mgmt.public import log_audit
+        log_audit("issue_reopened_from_completed", operator_id=user.get("id", 0) or 0,
+                  detail={
+                      "repo_key": repo_key,
+                      "issue_id": issue_id,
+                      "issue_number": issue_number,
+                      "from_status": cur_status,
+                      "to_status": "processing",
+                      "from_stage": cur_stage or "",
+                      "to_stage": "",
+                      "prev_completed_at": prev_completed_at or "",
+                      "auto_redispatch": False,
+                  })
+    except Exception as _e:
+        log.warning(f"issue-reopen: audit log failed (issue={issue_id}): {_e}")
+    log.info(f"Issue #{issue_id} reopened completed → processing by user {user.get('id', 0)} "
+             f"(stage cleared, no auto redispatch)")
+    return {"ok": True, "issue_id": issue_id, "status": "processing", "stage": ""}
+
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
