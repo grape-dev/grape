@@ -163,20 +163,27 @@ def test_t6_scene_change_syncs_both_reads():
 
 # ===== Issue #3582 复审补充：标识别名一致 / 未解析口径 / 路由级契约 =====
 
-def test_t7_node_id_and_tag_are_unified_targets():
-    """AC1：id 与 tag 不同时，valid_targets 同时收录两者（= handoff 接受集合）。"""
+def test_t7_valid_targets_are_dispatchable_roles_only():
+    """AC1/AC2（复审 #202444109）：valid_targets 仅含实际可投递角色。
+
+    节点角色取 id 优先、tag 兜底（engine_select.node_agent_role），并与
+    DISPATCHABLE_AGENTS 取交集：展示用 tag 阶段名（可为中文）/ 非白名单角色
+    （如 chat）不进清单——它们会被 POST /api/a2a 的白名单校验 400 拒绝，
+    清单不得宣告 handoff 实际不收的目标。
+    """
     _set_issue(7, "scene-3582")
     _set_scene("scene-3582", [
-        {"id": "coding", "tag": "coding-agent"},
-        {"id": "qa", "tag": "qa"},
+        {"id": "coding", "tag": "开发编码"},       # 展示用中文 tag
+        {"id": "qa", "tag": "qa"},                 # id == tag
+        {"tag": "sre"},                            # 存量 tag-only 节点兜底
+        {"id": "chat", "tag": "chat"},             # 非白名单角色
     ])
     detail = resolve_scene_targets("scene-3582", repo_key=REPO)
-    assert detail["valid_targets"] == ["coding", "coding-agent", "qa"]
-    # id 与 tag 别名均放行，清单不再遗漏 tag
+    assert detail["valid_targets"] == ["coding", "qa", "sre"]
+    # 白名单角色放行；展示用 tag / 非白名单角色不是 handoff 目标
     assert _scene_node_check(REPO, 7, "coding")["in_scene"] is True
-    assert _scene_node_check(REPO, 7, "coding-agent")["in_scene"] is True
-    assert detail["valid_targets"] == _scene_node_check(
-        REPO, 7, "coding-agent")["valid_targets"]
+    assert _scene_node_check(REPO, 7, "开发编码")["in_scene"] is False
+    assert _scene_node_check(REPO, 7, "chat")["in_scene"] is False
 
 
 def test_t8_unresolved_skill_kept_dispatchable_by_compat_policy():
@@ -227,7 +234,8 @@ def test_t9_route_scene_detail_exposes_available_targets(monkeypatch):
         body = r.json()
         assert [n["id"] for n in body["available_nodes"]] == ["coding"]
         assert [n["id"] for n in body["nodes"]] == ["coding", "qa"]
-        assert body["valid_targets"] == ["coding", "coding-agent"]
+        # 展示用 tag（coding-agent）不是可投递角色，不在 valid_targets 内
+        assert body["valid_targets"] == ["coding"]
         assert body["valid_targets"] == _scene_node_check(
             REPO, 9, "coding")["valid_targets"]
     finally:
@@ -249,12 +257,107 @@ def test_t10_route_a2a_409_structured_reason_and_targets(monkeypatch):
         assert r.status_code == 409, r.text
         data = r.json()
         assert data["conflict_reason"] == "not_in_scene"
-        assert data["valid_targets"] == ["coding", "coding-agent"]
+        assert data["valid_targets"] == ["coding"]
+        # 复审 #202444109（AC3）：skipped 与 conflict_reason 对齐（旧契约恒为
+        # not_in_scene，与机读归因矛盾；机读消费方以 conflict_reason 为准）
+        assert data["skipped"] == data["conflict_reason"] == "not_in_scene"
 
         r2 = client.post("/api/a2a", json={"agent": "qa", "payload": payload})
         assert r2.status_code == 409, r2.text
         data2 = r2.json()
         assert data2["conflict_reason"] == "node_disabled"
-        assert data2["valid_targets"] == ["coding", "coding-agent"]
+        assert data2["skipped"] == data2["conflict_reason"] == "node_disabled"
+        assert data2["valid_targets"] == ["coding"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_t11_every_detail_valid_target_is_post_accepted(monkeypatch):
+    """阻塞项（复审 #202444109 AC1/AC2）：detail.valid_targets 的每个值
+    POST /api/a2a 均不返回 400/409（清单 = POST 实际接受集合）。"""
+    _set_issue(11, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "vod"}, {"id": "issue"},
+        {"id": "coding", "tag": "开发编码"},
+        {"id": "qa"}, {"id": "sre"},
+    ])
+    client, app = _client_and_managed_repo(monkeypatch)
+    # 真实派发会触发引擎选择/入队，与本验收无关：stub 掉派发与终态 guard，
+    # 只验证「场景校验 + 400 白名单」不再拒绝清单内目标。
+    import src.api.a2a_terminal_guard as _tg
+    monkeypatch.setattr(_tg, "guard_terminal_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.routes.webhook.run_a2a_dispatch",
+                        lambda *a, **k: {"status": "ok", "seq": 0})
+    try:
+        r = client.get("/api/scenes/scene-3582?repo=org/issue3582")
+        assert r.status_code == 200, r.text
+        targets = r.json()["valid_targets"]
+        assert sorted(targets) == ["coding", "issue", "qa", "sre", "vod"]
+        for target in targets:
+            rr = client.post("/api/a2a", json={"agent": target, "payload": {
+                "repository": "org/issue3582", "issue_number": "11",
+                "context": f"t11 {target}"}})
+            assert rr.status_code not in (400, 409), (target, rr.status_code, rr.text)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_t12_node_write_paths_invalidate_scene_cache():
+    """AC4（复审 #202444109）：节点写路径立即失效 pipeline 配置缓存。
+
+    此前仅 create/update/delete_custom_scene 失效，set_scene_nodes /
+    scene_nodes_write_by_id 写后最多 60s TTL 陈旧；现在真实写路径立即失效，
+    scenes detail 与 handoff 同步读到新节点（无需手工 invalidate）。"""
+    from src.domains.mgmt.public import scene_nodes_write_by_id
+    _set_issue(12, "scene-3582")
+    _set_scene("scene-3582", [{"id": "coding"}])
+    assert resolve_scene_targets("scene-3582", repo_key=REPO)["valid_targets"] == ["coding"]
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=?",
+                  ("scene-3582", REPO))
+        row_id = c.fetchone()[0]
+        # 真实写路径（按行号覆写）：不手工失效缓存，resolver 立即读到新节点
+        changed = scene_nodes_write_by_id(
+            json.dumps([{"id": "coding"}, {"id": "qa"}]),
+            "2026-11-20T00:00:00", row_id, c)
+        db.commit()
+    assert changed == 1
+    assert resolve_scene_targets("scene-3582", repo_key=REPO)["valid_targets"] == ["coding", "qa"]
+    assert _scene_node_check(REPO, 12, "qa")["in_scene"] is True
+
+
+def test_t12b_set_scene_nodes_write_path_invalidates_cache(monkeypatch):
+    """AC4：set_scene_nodes 写路径失效缓存（自有 DSN 生产路径，stub 域游标验证）。"""
+    from contextlib import contextmanager
+    import src.kernel.db_registry as dbr
+    import src.domains.mgmt.pipeline_config as pc
+    from src.domains.mgmt import public as mgmt_pub
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, sql, params=()):
+            self.queries.append(sql)
+
+        def fetchone(self):
+            return ('[{"id": "coding"}]',)  # 旧节点内容 → 与新内容哈希不同 → updated
+
+    fake = _FakeCursor()
+
+    @contextmanager
+    def _fake_cursor_ctx(domain):
+        yield fake
+
+    invalidated = []
+    monkeypatch.setattr(dbr, "cursor", _fake_cursor_ctx)
+    monkeypatch.setattr(pc, "invalidate_scene_cache",
+                        lambda scene_id="", repo_key="": invalidated.append((scene_id, repo_key)))
+    out = mgmt_pub.set_scene_nodes(
+        json.dumps([{"id": "coding"}, {"id": "qa"}]),
+        scene_id="scene-3582", repo_key=REPO)
+    assert out["action"] == "updated"
+    assert invalidated == [("scene-3582", REPO)]
