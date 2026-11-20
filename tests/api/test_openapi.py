@@ -237,6 +237,7 @@ EXPECTED_PUBLIC = {
     "issues_pipeline_detail": ("get", "/api/issues/{issue_id}/pipeline"),
     "issues_production_release": ("post", "/api/issues/{issue_id}/production-release"),
     "issues_production_release_list": ("get", "/api/issues/{issue_id}/production-release"),
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     "issues_resume": ("post", "/api/issues/{issue_id}/resume"),
     "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
     "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),

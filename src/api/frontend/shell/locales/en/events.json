@@ -7,6 +7,7 @@
   "label_issue_summary": "Issue Summary:",
   "prev_event_title": "Previous {{name}} Event",
   "next_event_title": "Next {{name}} Event",
+  "nav_same_issue": "within {{id}}",
   "status_success": "✅ Success",
   "status_failed": "❌ Failed",
   "status_running_prefix": "⏳ ",

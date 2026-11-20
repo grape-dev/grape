@@ -216,18 +216,22 @@ def _org_repos_for_analysis(org_id: str) -> list[dict]:
 
 
 def _analysis_task_running(task_id: int) -> bool:
-    """任务是否已有 running/dispatched 执行（避免链接触发互相打架）。"""
+    """任务是否已有 running/dispatched 执行（避免链接触发互相打架）。
+
+    autopilot_executions 属 runtime 域（configs/table_ownership.json）；跨域读走
+    runtime.public 端口，禁止在 mgmt 直连本表（三库拓扑会读错库，且 p4 棘轮会红）。
+    """
     if not task_id:
         return False
     try:
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT 1 FROM autopilot_executions WHERE task_id=? "
-                "AND status IN ('running','dispatched') LIMIT 1",
-                (int(task_id),),
-            ).fetchone()
-        return bool(row)
+        from src.domains.runtime import public as _rt_public
+
+        for st in ("running", "dispatched"):
+            page = _rt_public.list_autopilot_executions(
+                task_id=int(task_id), status=st, limit=1)
+            if int((page or {}).get("total") or 0) > 0:
+                return True
+        return False
     except Exception as exc:  # 分库/缺表：按未运行处理，交给 trigger 兜底
         log.debug(f"org_analysis: running check skipped task={task_id}: {exc}")
         return False
