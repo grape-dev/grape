@@ -160,3 +160,43 @@ def test_request_single_triggers_with_params(monkeypatch):
     assert captured["params"]["mode"] == "single"
     assert captured["params"]["repo_key"] == REPO_KEY
     assert captured["params"]["org_id"] == org["id"]
+
+
+def test_managed_task_name_is_user_readable():
+    from src.domains.mgmt.org_analysis import managed_task_name
+
+    name = managed_task_name({"name": "grape-gitcode", "slug": "grape-gitcode"})
+    assert name == "组织仓库 AI 分析 - grape-gitcode"
+    assert "__org_analysis__" not in name
+
+
+def test_disable_analysis_automation_removes_task():
+    from src.domains.mgmt import org_analysis
+
+    org = _seed_org()
+    assert org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    assert org_analysis.automation_task(org["id"])
+    assert org_analysis.disable_analysis_automation(org["id"]) == 1
+    assert org_analysis.automation_task(org["id"]) == {}
+
+
+def test_request_all_skips_when_task_running(monkeypatch):
+    from src.domains.mgmt import org_analysis
+
+    org = _seed_org()
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO autopilot_executions (task_id, status, retry_count, started_at, created_at, agent_type) "
+            "VALUES (?, 'running', 0, datetime('now'), datetime('now'), 'issue')",
+            (task_id,),
+        )
+        db.commit()
+
+    called = []
+    monkeypatch.setattr(org_analysis, "_trigger_task", lambda *a, **k: called.append(a) or {"ok": True})
+    out = org_analysis.request_all_analysis(org["id"], trigger="link", actor_id=UID)
+    assert out["skipped"] is True
+    assert out["reason"] == "running"
+    assert not called

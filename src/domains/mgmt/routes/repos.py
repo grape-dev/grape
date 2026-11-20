@@ -1531,8 +1531,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                             from src.domains.mgmt import org_analysis
 
                             org_analysis.ensure_analysis_automation(_org_id, actor_id=user["id"])
-                            org_analysis.request_repo_analysis(
-                                _org_id, _repo_key, trigger="link", actor_id=user["id"])
+                            org_analysis.schedule_all_analysis(
+                                _org_id, trigger="link", delay=10.0,
+                                fallback_repo_key=_repo_key, actor_id=user["id"])
                         except Exception as _ae:  # noqa: BLE001
                             log.warning(f"host repo analysis trigger failed org={_org_id} repo={_repo_key}: {_ae}")
 

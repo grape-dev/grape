@@ -877,8 +877,8 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
     """Create or update the default organization scene definition."""
     db_id = create_custom_scene(
         scene_id=scene_id,
-        name=f"{org_name or 'Organization'} Pipeline",
-        description="Organization intake, dispatch and aggregate pipeline",
+        name=f"组织任务下派 - {org_name or 'Organization'}",
+        description="组织需求接收、任务下派与结果聚合",
         repo_key=repo_key,
         nodes=ORG_SCENE_NODES,
         onboarding="repo-onboarding",

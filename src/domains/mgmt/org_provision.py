@@ -521,6 +521,13 @@ def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> 
                 result["unbound"].append(repo_key)
 
     try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.disable_analysis_automation(org_id)
+    except Exception as exc:
+        log.warning(f"org delete: analysis automation cleanup failed org={org_id}: {exc}")
+
+    try:
         delete_org_scenes(org_id)
     except Exception as exc:
         log.warning(f"org delete: scene cleanup failed org={org_id}: {exc}")

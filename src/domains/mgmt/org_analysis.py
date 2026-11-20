@@ -6,7 +6,7 @@
 - 组织下派前读取分析结果（由 org_repo_map.analysis_context 提供）。
 
 执行载体复用 Autopilot 定时任务：
-- 每个组织在组织仓库上有一条受管任务（name=__org_analysis__:<slug>）；
+- 每个组织在组织仓库上有一条受管任务（name=组织仓库 AI 分析 - <组织名>）；
 - 单仓/全量通过 trigger_task_now_with_params 传入本次运行参数；
 - 实际 AI 推理由运行时引擎执行 ``org-repo-analyzer`` 技能完成，结果通过
   ``POST /api/orgs/{id}/repo-map/{repo_key}/ai-result`` 回传。
@@ -32,7 +32,6 @@ from src.kernel.config import log
 
 ANALYSIS_CRON = "0 0 * * *"
 ANALYSIS_SKILL = "org-repo-analyzer"
-MANAGED_TASK_PREFIX = "__org_analysis__:"
 MANAGED_FIELDS = [
     {"name": "GRAPE_MANAGED_BY", "value": "org-analysis"},
 ]
@@ -72,7 +71,9 @@ def _safe_slug(value: str) -> str:
 
 
 def managed_task_name(org: dict) -> str:
-    return MANAGED_TASK_PREFIX + _safe_slug(str(org.get("slug") or org.get("id") or "org"))
+    """自动化任务的用户可读默认名（不再用 __org_analysis__ 内部前缀）。"""
+    label = str(org.get("name") or org.get("slug") or org.get("id") or "组织").strip()
+    return (f"组织仓库 AI 分析 - {label}")[:100]
 
 
 def _managed_custom_fields(org_id: str, mode: str = "all") -> str:
@@ -148,18 +149,20 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
 
     with db_lock:
         c = db.cursor()
+        # 按 repo_key + skill 认领，按名字兼容旧任务并顺手改名（曾用
+        # __org_analysis__:<slug> 内部前缀，用户不可读）。
         row = c.execute(
             "SELECT id, cron, skill_name, enabled FROM autopilot_tasks "
-            "WHERE repo_key=? AND name=? AND skill_name=?",
-            (org_repo_key, name, ANALYSIS_SKILL),
+            "WHERE repo_key=? AND skill_name=? ORDER BY id LIMIT 1",
+            (org_repo_key, ANALYSIS_SKILL),
         ).fetchone()
         if row:
             task_id = int(row[0])
             c.execute(
-                "UPDATE autopilot_tasks SET instruction=?, cron=?, enabled=1, "
+                "UPDATE autopilot_tasks SET name=?, instruction=?, cron=?, enabled=1, "
                 "next_run_at=?, custom_fields=?, engine_runtime_ids=?, updated_at=? "
                 "WHERE id=?",
-                (instruction, ANALYSIS_CRON, next_run, custom_fields,
+                (name, instruction, ANALYSIS_CRON, next_run, custom_fields,
                  engine_ids_json, now, task_id),
             )
             db.commit()
@@ -189,13 +192,12 @@ def automation_task(org_id: str) -> dict:
     org = get_org(str(org_id)) or {}
     if not org:
         return {}
-    name = managed_task_name(org)
     with db_lock:
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, cron, enabled, last_run_at, next_run_at "
-            "FROM autopilot_tasks WHERE repo_key=? AND name=?",
-            (str(org.get("org_repo_key") or ""), name),
+            "FROM autopilot_tasks WHERE repo_key=? AND skill_name=? ORDER BY id LIMIT 1",
+            (str(org.get("org_repo_key") or ""), ANALYSIS_SKILL),
         ).fetchone()
     if not row:
         return {}
@@ -211,6 +213,78 @@ def _org_repos_for_analysis(org_id: str) -> list[dict]:
         out.append({"repo_key": str(row.get("repo_key") or ""),
                     "full_name": str(row.get("full_name") or "")})
     return out
+
+
+def _analysis_task_running(task_id: int) -> bool:
+    """任务是否已有 running/dispatched 执行（避免链接触发互相打架）。"""
+    if not task_id:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT 1 FROM autopilot_executions WHERE task_id=? "
+                "AND status IN ('running','dispatched') LIMIT 1",
+                (int(task_id),),
+            ).fetchone()
+        return bool(row)
+    except Exception as exc:  # 分库/缺表：按未运行处理，交给 trigger 兜底
+        log.debug(f"org_analysis: running check skipped task={task_id}: {exc}")
+        return False
+
+
+_ANALYSIS_TIMERS: dict[str, threading.Timer] = {}
+_TIMER_LOCK = threading.Lock()
+
+
+def schedule_all_analysis(org_id: str, *, trigger: str = "link", delay: float = 10.0,
+                          fallback_repo_key: str = "", actor_id: str | int = 0) -> None:
+    """链接仓库后的组织级 AI 分析（去抖 + 一次分析全部关联仓库）。
+
+    一次给 AI 全部 targets，让技能串行分析并逐个回传；不再按单仓拆任务，
+    避免多个链接同时 trigger 撞上同一个 Autopilot 任务。
+    """
+    org_id = str(org_id or "")
+    if not org_id:
+        return
+
+    def _fire() -> None:
+        with _TIMER_LOCK:
+            _ANALYSIS_TIMERS.pop(org_id, None)
+        try:
+            ensure_analysis_automation(org_id, actor_id=actor_id)
+            result = request_all_analysis(org_id, trigger=trigger, actor_id=actor_id)
+            if not result.get("ok") and not result.get("skipped") and fallback_repo_key:
+                from src.domains.mgmt.org_repo_map import analyze_repo
+
+                analyze_repo(org_id, fallback_repo_key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"org_analysis: scheduled all-analysis failed org={org_id}: {exc}")
+
+    with _TIMER_LOCK:
+        old = _ANALYSIS_TIMERS.pop(org_id, None)
+        if old is not None:
+            old.cancel()
+        timer = threading.Timer(max(1.0, float(delay)), _fire)
+        timer.daemon = True
+        _ANALYSIS_TIMERS[org_id] = timer
+        timer.start()
+
+
+def disable_analysis_automation(org_id: str) -> int:
+    """删除组织的受管分析任务（组织删除时调用，避免 cron 打向已删仓库）。"""
+    org = get_org(str(org_id)) or {}
+    repo_key = str(org.get("org_repo_key") or "")
+    if not repo_key:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "DELETE FROM autopilot_tasks WHERE repo_key=? AND skill_name=?",
+            (repo_key, ANALYSIS_SKILL),
+        )
+        db.commit()
+        return int(c.rowcount or 0)
 
 
 def analysis_targets(org_id: str, *, mode: str = "all", repo_key: str = "") -> list[dict]:
@@ -239,16 +313,18 @@ def request_repo_analysis(org_id: str, repo_key: str, *, trigger: str = "link",
     task_id = ensure_analysis_task(str(org_id), actor_id=actor_id)
     if not task_id:
         return {"ok": False, "reason": "NO_ORG_REPO"}
-    mark_ai_status(str(org_id), str(repo_key), "queued", triggered_by=trigger)
     params = {"mode": "single", "org_id": str(org_id), "repo_key": str(repo_key),
               "trigger": str(trigger)}
     result = _trigger_task(task_id, params)
     if not result.get("ok"):
-        mark_ai_status(str(org_id), str(repo_key), "failed",
-                       error=str(result.get("message") or "trigger_failed"),
+        _msg = str(result.get("message") or "trigger_failed")
+        if "already running" in _msg:
+            return {"ok": False, "task_id": task_id, "reason": "running"}
+        mark_ai_status(str(org_id), str(repo_key), "failed", error=_msg,
                        triggered_by=trigger)
-    return {"ok": bool(result.get("ok")), "task_id": task_id,
-            "reason": "" if result.get("ok") else str(result.get("message") or "trigger_failed")}
+        return {"ok": False, "task_id": task_id, "reason": _msg}
+    mark_ai_status(str(org_id), str(repo_key), "queued", triggered_by=trigger)
+    return {"ok": True, "task_id": task_id, "reason": ""}
 
 
 def request_all_analysis(org_id: str, *, trigger: str = "manual",
@@ -259,6 +335,9 @@ def request_all_analysis(org_id: str, *, trigger: str = "manual",
     task_id = ensure_analysis_task(str(org_id), actor_id=actor_id)
     if not task_id:
         return {"ok": False, "skipped": False, "reason": "NO_ORG_REPO", "queued": 0}
+    if _analysis_task_running(task_id):
+        return {"ok": True, "skipped": True, "reason": "running", "queued": 0,
+                "task_id": task_id}
     for r in repos:
         mark_ai_status(str(org_id), r["repo_key"], "queued", triggered_by=trigger)
     params = {"mode": "all", "org_id": str(org_id), "trigger": str(trigger)}

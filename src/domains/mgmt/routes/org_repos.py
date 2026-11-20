@@ -41,33 +41,23 @@ class TransferRepoBody(BaseModel):
 
 
 def _schedule_repo_map_analysis(org_id: str, repo_key: str, actor_id: str | int = 0) -> None:
-    """仓库绑定后自动触发 AI 分析（后台，不阻断绑定请求），并确保每日任务存在。
+    """仓库绑定后触发组织级 AI 分析（后台去抖，不阻断绑定请求）。
 
-    AI 调度失败时回落到确定性分析，保证仓库地图至少不是空态。
+    不再按单仓拆任务：10s 去抖窗口把一次批量绑定的多个仓库合并成一次
+    mode=all 分析，AI 一次拿到全部关联仓库，逐个分析并回传。
     """
     def _run():
         try:
             from src.domains.mgmt import org_analysis
 
             org_analysis.ensure_analysis_automation(org_id, actor_id=actor_id)
-            result = org_analysis.request_repo_analysis(
-                org_id, repo_key, trigger="link", actor_id=actor_id)
-            if not result.get("ok"):
-                from src.domains.mgmt.org_repo_map import analyze_repo
-
-                analyze_repo(org_id, repo_key)
+            org_analysis.schedule_all_analysis(
+                org_id, trigger="link", delay=10.0,
+                fallback_repo_key=repo_key, actor_id=actor_id)
         except Exception as exc:  # noqa: BLE001 - best-effort
             from src.kernel.config import log
 
             log.warning(f"org repo map auto-analyze failed org={org_id} repo={repo_key}: {exc}")
-            try:
-                from src.domains.mgmt.org_repo_map import analyze_repo
-
-                analyze_repo(org_id, repo_key)
-            except Exception as fallback_exc:  # noqa: BLE001
-                from src.kernel.config import log as _log
-
-                _log.warning(f"org repo map deterministic fallback failed org={org_id} repo={repo_key}: {fallback_exc}")
 
     threading.Thread(
         target=_run, name=f"org-repo-map-{org_id}-{repo_key}", daemon=True,
