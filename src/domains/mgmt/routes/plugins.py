@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from src.api.deps import (get_current_user_or_api_key, require_admin,
                           require_no_session_token, require_org_member)
+from src.kernel.config import log
 from src.kernel.id_gen import uuid7_str
 from src.domains.mgmt.plugin_market.l0_adapter import validate_plugin_l0, l0_degraded_hint
 from src.domains.mgmt.plugin_market.security import certification_projection as _certification_projection
@@ -724,6 +725,20 @@ class CertificationBody(BaseModel):
     certified: bool
 
 
+
+
+def _audit_write(event: str, user: dict, **detail):
+    """插件市场写操作审计（C3）：失败只告警，不阻断业务。
+
+    detail 只放标识与结果（插件名/版本/字段名），绝不落凭据明文与密钥。
+    """
+    try:
+        from src.domains.mgmt.auth import audit as _auth_audit
+        _auth_audit.log_audit(event, operator_id=(user or {}).get("id") or 0,
+                              detail=detail or None)
+    except Exception as _e:  # noqa: BLE001 — 审计链路异常不改变业务结果
+        log.warning(f"plugin audit write failed ({event}): {_e}")
+
 @router.put("/by-id/{plugin_id}/certification",
             operation_id="plugins_set_certification",
             summary="Mark / revoke official certification (admin only)",
@@ -734,7 +749,9 @@ def set_plugin_certification(plugin_id: str, body: CertificationBody,
     """认证位标记/撤销：certification = official（标记）/ none（撤销），操作留痕。"""
     from src.domains.mgmt.plugin_market.security import set_certification
     try:
-        return set_certification(plugin_id, body.certified, admin.get("username", ""))
+        out = set_certification(plugin_id, body.certified, admin.get("username", ""))
+        _audit_write("plugin_certify", admin, plugin_id=plugin_id, certified=body.certified)
+        return out
     except LookupError:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "插件未找到"})
 
@@ -777,6 +794,7 @@ def revoke_plugin_shelf_entry(plugin_id: str,
         db.commit()
     log.info(f"plugin shelf entry revoked: id={plugin_id} {name}@{version} "
              f"operator={user.get('username') or user.get('id')}")
+    _audit_write("plugin_delete", user, plugin=name, version=version, plugin_id=plugin_id)
     return {"message": f"插件 {name}@{version} 已软删（revoked），台账保留",
             "plugin_id": plugin_id, "status": STATUS_REVOKED}
 
@@ -887,6 +905,8 @@ def rollback_plugin_version(plugin_id: str, body: RollbackBody,
         db.commit()
     log.info(f"plugin rolled back: {name}@{target_version} (family scope={scope} "
              f"owner={owner_id}) operator={user.get('username') or user.get('id')}")
+    _audit_write("plugin_rollback", user, plugin=name, plugin_id=plugin_id,
+                 target_version=target_version)
     return {"message": f"插件 {name} 生效版本已切换为 {target_version}（原生效版本转历史）",
             "plugin_id": plugin_id, "effective_version": target_version,
             "status": STATUS_ACTIVE}
@@ -994,6 +1014,7 @@ def toggle_plugin_like(plugin_id: str, user: dict = Depends(require_org_member))
             db.commit()
             liked = True
         like_count = c.execute("SELECT like_count FROM grape_t_plugin WHERE id=?", (plugin_id,)).fetchone()[0]
+    _audit_write("plugin_like", user, plugin_id=plugin_id, liked=liked)
     return {"liked": liked, "like_count": like_count or 0}
 
 
@@ -1213,6 +1234,8 @@ async def upload_plugin(file: UploadFile = File(...), user: dict = Depends(get_c
             # Issue #1795：L0 软提示（新插件首版建议 0.0.1）随成功响应返回，不阻断
             if l0.get("l0_warnings"):
                 resp["l0_warnings"] = l0["l0_warnings"]
+            _audit_write("plugin_upload", user, plugin=m_name, version=m_version,
+                         scope=scope)
             return resp
         # 存储后端不可用（obs-only 且 OBS 未配置）
         raise HTTPException(status_code=503, detail={"code": 503,
@@ -1304,6 +1327,7 @@ def install_runtime_plugin_api(body: PluginInstallBody, user: dict = Depends(req
     out = install_plugin(body.model_dump())
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "插件清单校验失败: " + "; ".join(out.get("errors") or [])})
+    _audit_write("plugin_install", user, plugin=body.name or out.get("name", ""))
     return out
 
 
@@ -1355,6 +1379,7 @@ def uninstall_runtime_plugin_api(name: str, user: dict = Depends(require_no_sess
     if not out.get("ok"):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "; ".join(out.get("errors") or ["插件不存在"])})
     log.info(f"plugin uninstalled via API: {name} operator={user.get('username') or user.get('id')}")
+    _audit_write("plugin_uninstall", user, plugin=name)
     return out
 
 
@@ -1388,6 +1413,8 @@ def save_runtime_plugin_credentials_api(name: str, body: dict, user: dict = Depe
     if not set_credential(user.get("id", 0), f"plugin:{name}", cleaned):
         raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
     log.info(f"plugin credentials saved: plugin={name} user={user.get('username') or user.get('id')} keys={sorted(cleaned.keys())}")
+    _audit_write("plugin_credentials_saved", user, plugin=name,
+                 keys=sorted(cleaned.keys()))
     return {"message": "凭据已保存", "configured_keys": sorted(cleaned.keys())}
 
 
@@ -1424,6 +1451,7 @@ def put_plugin_config(name: str, body: dict, user: dict = Depends(get_current_us
             c.execute("INSERT INTO grape_t_plugin_config_overlays (id, scope, scope_key, plugin_id, config_json, updated_by) VALUES (?,'personal',?,?,?,?)",
                       (uuid7_str(), str(user.get("id", 0)), name, json.dumps(merged, ensure_ascii=False), str(user.get("username") or "")))
         _db.commit()
+    _audit_write("plugin_config_saved", user, plugin=name, keys=sorted(merged.keys()))
     return {"message": "参数默认值已保存", "plugin": name, "config": merged}
 
 
