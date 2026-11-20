@@ -127,6 +127,16 @@ def _catalog_providers_from_dir() -> set[str]:
     return names
 
 
+def provider_prefixes() -> set[str]:
+    """repo_key 合法 provider 前缀集：已注册平台 + 默认前缀。
+
+    供入参校验做前缀白名单（#1790/#1786）：只放行平台卡注册表内（或目录兜底）
+    的 provider，未知前缀（如 `foo:owner/repo`）不得当作合规 repo_key 静默入库。
+    空集兜底不误拒默认平台：未带平台卡的进程仍接受默认 `gitcode:` 前缀。
+    """
+    return _catalog_providers() | {"gitcode"}
+
+
 def strip_provider_prefix(owner: str) -> str:
     """剥离 owner 段的 provider 前缀（gitcode:/github:/gitee:…），URL/workspace 拼接用。
 

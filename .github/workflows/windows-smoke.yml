@@ -286,3 +286,12 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/kernel/test_worker_package_build_lock.py -v
+      - name: Skills repo param + auth route regression tests (issues #1790/#1786)
+        # Issue #1790/#1786 移植用例（repo 参数三态校验）与 tests/api/test_auth_routes.py
+        # 此前未接入 linux-backend 门禁，回退只能靠人工 pytest；本 PR 修复 NameError 后
+        # 两者一并纳入门禁，防止「实现漂移但 CI 仍绿」。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_1790_1786_port.py -v
+          python -m pytest tests/api/test_auth_routes.py -v

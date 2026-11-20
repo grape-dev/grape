@@ -30,34 +30,32 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
 
-#: 合规 repo 参数：可选 provider 前缀 + owner/repo（Issue #1790/#1786 移植）
-_REPO_PARAM_RE = re.compile(r"^(?:[a-z][a-z0-9_-]{1,20}:)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+#: 合规 repo 参数：owner/repo，可带已注册 provider 前缀（Issue #1790/#1786 移植）
+_REPO_PARAM_RE = re.compile(r"^(?:([a-z][a-z0-9_-]{0,20}):)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+#: 400 文案与既有回归契约 tests/test_issue_1790_1786_port.py 精确对齐（完整句）。
+_REPO_PARAM_FORMAT_MESSAGE = "repo 参数格式应为 owner/repo"
 
 
 def _validate_repo_param(repo: str) -> None:
     """repo 查询参数三态校验：未传 / 合规 owner/repo / 不合规。
 
-    不合规（裸仓库名、非法前缀、残留冒号、http/git@ 地址、多级路径）直接 400。
-    此前这类参数会被静默忽略、回退成官方列表——前端看起来是「这个仓没有技能」，
-    实际是参数写错了，故障被藏起来（#1790：「不再静默回退官方列表」）。
+    不合规（裸仓库名、未知 provider 前缀、残留冒号、http/git@ 地址、多级路径）
+    直接 400。此前这类参数会被静默忽略、回退成官方列表——前端看起来是「这个仓
+    没有技能」，实际是参数写错了，故障被藏起来（#1790：「不再静默回退官方列表」）。
     """
     if repo is None:
         return
     raw = str(repo).strip()
     if not raw:
         return
-    if _REPO_PARAM_RE.match(raw):
+    from src.kernel.repo_key import provider_prefixes
+
+    m = _REPO_PARAM_RE.match(raw)
+    if m and (not m.group(1) or m.group(1) in provider_prefixes()):
         return
-    hint = "需为 owner/repo（可带 provider 前缀）"
-    if ":" not in raw and "/" not in raw:
-        reason = "裸仓库名"
-    elif raw.count("/") > 1:
-        reason = "多级路径"
-    else:
-        reason = "非法前缀或残留冒号"
     raise HTTPException(status_code=400, detail={
         "code": 400,
-        "message": f"仓库参数不合规（{reason}）：{raw}；{hint}",
+        "message": _REPO_PARAM_FORMAT_MESSAGE,
     })
 
 
@@ -527,7 +525,9 @@ def _version_from_content(content: str) -> str:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",                agent_type: str = "", category_id: int = 0,
+def list_skills(user: dict = Depends(require_org_member),
+                repo: str = Query("", description="仓库参数，格式为 owner/repo（可带 provider 前缀，如 gitcode:owner/repo）"),
+                scope: str = "",                agent_type: str = "", category_id: int = 0,
                 cat_l1_id: int = 0, cat_l2_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。

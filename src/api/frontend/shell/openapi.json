@@ -12477,9 +12477,11 @@
             "required": false,
             "schema": {
               "type": "string",
+              "description": "仓库参数，格式为 owner/repo（可带 provider 前缀，如 gitcode:owner/repo）",
               "default": "",
               "title": "Repo"
-            }
+            },
+            "description": "仓库参数，格式为 owner/repo（可带 provider 前缀，如 gitcode:owner/repo）"
           },
           {
             "name": "scope",
@@ -35090,7 +35092,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d24080c4d",
-  "x-generated-at": "2026-11-20T10:20:08.931432+00:00",
-  "tags": []
+  "x-source-commit": "560486ef5",
+  "x-generated-at": "2026-11-20T11:10:09.041853+00:00"
 }
