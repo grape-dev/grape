@@ -69,29 +69,57 @@ def test_other_errors_are_not_swallowed(monkeypatch):
 
 
 def test_active_sandboxes_403_when_provider_not_owned(monkeypatch):
+    import src.domains.mgmt.public as mgmt_public
+
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_owned_by", lambda *a, **k: False)
     monkeypatch.setattr(rt, "_fetch_across_domains", lambda *a, **k: [])
     with pytest.raises(Exception) as exc:
         rt.runtime_provider_active_sandboxes("prov-1", types.SimpleNamespace(id=7))
     assert getattr(exc.value, "status_code", None) == 403
 
 
-def test_active_sandboxes_reads_both_queries_across_domains(monkeypatch):
+def test_active_sandboxes_provider_owner_via_mgmt_public(monkeypatch):
+    """provider 属表归 mgmt：归属与上限只经 mgmt public，本文件不直查该表、不跨域试域。"""
+    import src.domains.mgmt.public as mgmt_public
+
+    seen_owner = []
+
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_owned_by",
+                        lambda pid, cid: seen_owner.append((pid, cid)) or True)
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_max_sandboxes", lambda pid: 25)
+    monkeypatch.setattr(rt, "_fetch_across_domains", lambda *a, **k: [(3,)])
+    out = rt.runtime_provider_active_sandboxes("prov-1", types.SimpleNamespace(id=7))
+    assert out == {"active_count": 3, "max_sandboxes": 25}
+    assert seen_owner == [("prov-1", 7)]
+
+
+def test_active_sandboxes_count_reads_cloud_sandboxes_across_domains(monkeypatch):
+    import src.domains.mgmt.public as mgmt_public
+
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_owned_by", lambda *a, **k: True)
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_max_sandboxes", lambda pid: 25)
     calls = []
 
     def fake(sql, params=(), domains=("runtime", "mgmt")):
         calls.append((sql, params, domains))
-        if "max_sandboxes" in sql:
-            return [(25,)]
         return [(3,)]
 
     monkeypatch.setattr(rt, "_fetch_across_domains", fake)
     out = rt.runtime_provider_active_sandboxes("prov-1", types.SimpleNamespace(id=7))
     assert out == {"active_count": 3, "max_sandboxes": 25}
-    # 两条查询各自按归属域优先：provider_config 三方口径 mgmt → mgmt 优先；
-    # cloud_sandboxes 归属未裁定 → runtime 优先。都不是写死单域。
-    assert len(calls) == 2
-    by_table = {("provider_config" if "provider_config" in sql else "cloud_sandboxes"): dom
-                for sql, _, dom in calls}
-    assert by_table["provider_config"] == ("mgmt", "runtime")
-    assert by_table["cloud_sandboxes"] == ("runtime", "mgmt")
-    assert calls[0][1] == ("prov-1", 7)
+    # 仅沙箱属表保留域解析读：runtime 优先、1146 回退 mgmt 历史落库位置
+    assert len(calls) == 1
+    assert "grape_t_cloud_sandboxes" in calls[0][0]
+    assert "grape_t_sandbox_provider_config" not in calls[0][0]
+    assert calls[0][1] == ("prov-1",)
+    assert calls[0][2] == ("runtime", "mgmt")
+
+
+def test_active_sandboxes_max_defaults_when_row_missing(monkeypatch):
+    import src.domains.mgmt.public as mgmt_public
+
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_owned_by", lambda *a, **k: True)
+    monkeypatch.setattr(mgmt_public, "sandbox_provider_max_sandboxes", lambda pid: 0)
+    monkeypatch.setattr(rt, "_fetch_across_domains", lambda *a, **k: [])
+    out = rt.runtime_provider_active_sandboxes("prov-1", types.SimpleNamespace(id=7))
+    assert out == {"active_count": 0, "max_sandboxes": 10}

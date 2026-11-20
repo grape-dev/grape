@@ -3348,7 +3348,7 @@ def _fetch_across_domains(sql: str, params=(), domains=("runtime", "mgmt")) -> l
 def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgmt")) -> tuple:
     """同 _fetch_across_domains，但额外返回命中域：(rows, hit_domain)。
 
-    Issue #3527（review R2）：kill 的台账写必须跟随读侧落点——rows 非空时
+    Issue #3527：kill 的台账写必须跟随读侧落点——rows 非空时
     hit_domain 即数据所在域（runtime 表 1146 回退到历史 mgmt 时为 "mgmt"）。
     读语义与 _fetch_across_domains 完全一致：表不存在才换域，其余异常原样抛出。
     """
@@ -3374,7 +3374,7 @@ def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgm
 def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -> int:
     """在指定域写 kill 台账（state='killed'），返回 UPDATE rowcount。
 
-    Issue #3527（review R2/R3）：写侧跟随读侧定位的域——
+    Issue #3527：写侧跟随读侧定位的域——
     - 该域有自有 DSN（三库拓扑）→ db_registry.new_connection 独立域连接
       （不复用进程级缓存连接，避免跨线程 InterfaceError；autocommit，用完即关）；
     - 域连接不可用（单库 / 视图期 / SQLite）→ 回落进程主库（与读侧 reader 的回落
@@ -3622,7 +3622,7 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
         if hasattr(provider, 'kill_sandbox'):
             success = provider.kill_sandbox(sandbox_id)
             if success:
-                # Issue #3527（review R2）：写侧跟随读侧定位——先写读命中的域，
+                # Issue #3527：写侧跟随读侧定位——先写读命中的域，
                 # 0 行（1146/行不在该域）回退另一域；两域都 0 行 → 报可见错误，
                 # 不再「provider 已杀、台账停留 running 且静默返回 killed」。
                 _now_iso = datetime.now(timezone.utc).isoformat()
@@ -3747,23 +3747,22 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 归属：grape_t_sandbox_provider_config 归 mgmt、grape_t_cloud_sandboxes 归 runtime。
-    # 三库拓扑下两条 SQL 各按归属域解析读取（provider_config=mgmt 优先，
-    # cloud_sandboxes=runtime 优先），不写死表的历史落库位置，也不跨域 JOIN。
-    _prov_rows = _fetch_across_domains(
-        "SELECT max_sandboxes FROM grape_t_sandbox_provider_config "
-        "WHERE id=? AND runtime_credential_id=?",
-        (provider_id, cred.id), ("mgmt", "runtime"))
-    if not _prov_rows:
+    # 归属：grape_t_sandbox_provider_config 归 mgmt，跨域读写一律经 mgmt public
+    # （sandbox_provider_owned_by / sandbox_provider_max_sandboxes），本文件不直查该表；
+    # grape_t_cloud_sandboxes 归 runtime，读保留域解析（1146 回退 mgmt 历史落库位置）。
+    from src.domains.mgmt.public import (sandbox_provider_max_sandboxes,
+                                         sandbox_provider_owned_by)
+
+    if not sandbox_provider_owned_by(provider_id, cred.id):
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    max_sandboxes = _prov_rows[0][0] or 10
+    max_sandboxes = sandbox_provider_max_sandboxes(provider_id) or 10
     _cnt_rows = _fetch_across_domains(
         "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
         "WHERE provider_id=? AND state IN ('creating','running')",
         (provider_id,), ("runtime", "mgmt"))
     active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
-    return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
+    return {"active_count": active_count, "max_sandboxes": max_sandboxes}
 
 
 @router.get("/cloud-runtimes", operation_id="runtime_cloud_runtimes",
