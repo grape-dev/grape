@@ -36,6 +36,8 @@ opentelemetry-sdk>=1.27,<2
 opentelemetry-exporter-otlp-proto-grpc>=1.27,<2
 opentelemetry-exporter-otlp-proto-http>=1.27,<2
 opentelemetry-instrumentation-fastapi>=0.48b0,<1
+# 出站 httpx 插桩（GSB 总线 / LLM SDK 绝大多数走 httpx；缺它 trace 里出站是黑的）
+opentelemetry-instrumentation-httpx>=0.48b0,<1
 
 # Persistence layer (S78+): src/persistence ORM modules import sqlalchemy at module level (required for service start)
 SQLAlchemy>=2.0
