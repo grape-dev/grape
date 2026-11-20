@@ -109,11 +109,18 @@ def test_seccomp_open_disabled_outside_posix(monkeypatch):
 
 
 # ── 4. Windows 不建 overlay ───────────────────────────────────────────
-def test_overlay_supported_false_on_windows(monkeypatch):
+def test_overlay_attempted_on_windows_with_junction_tier(monkeypatch):
+    """Windows 也要尝试 overlay：symlink→junction→递归复制 三梯次 + 可用性自检。
+
+    2026-11-20 起的策略改成「先试、不行再回退共享 home」——直接禁用 overlay
+    会让 Windows 上 per-task 隔离永久缺失；而 junction 不需要提权。
+    """
     from src.domains.runtime.agents import hermes_acp as mod
 
     monkeypatch.setattr(mod.os, "name", "nt")
-    assert mod._overlay_supported() is False
+    assert mod._overlay_supported() is True
+    # 非 Windows 下 _junction_dir 恒 False（无 mklink/权限）
+    assert callable(mod._junction_dir) and callable(mod._overlay_looks_usable)
 
 
 def test_overlay_supported_true_on_posix(monkeypatch):

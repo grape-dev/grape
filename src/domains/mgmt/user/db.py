@@ -837,7 +837,11 @@ def _migrate_repo_key_tables():
                     )
                     _mg_db.commit()
             except Exception as e:
-                log.warning(f"Migrate {_tbl} repo_key prefix failed: {e}")
+                from src.kernel.db_errors import missing_schema
+                if missing_schema(e):
+                    log.debug(f"Migrate {_tbl} repo_key prefix skipped (no local table): {e}")
+                else:
+                    log.warning(f"Migrate {_tbl} repo_key prefix failed: {e}")
         # skill 表 repo 级记录：owner_id 存 repo_key（scope='repo'）
         # skill 归运行域：独立拓扑下必须走 owner 连接，否则 1146
         try:
@@ -846,7 +850,11 @@ def _migrate_repo_key_tables():
             from src.domains.runtime import public as _rt  # noqa: PLC0415
             _rt.exec_any("skill_repo_owner_prefix")
         except Exception as e:
-            log.warning(f"Migrate skill repo_key prefix failed: {e}")
+            from src.kernel.db_errors import missing_schema
+            if missing_schema(e):
+                log.debug(f"Migrate skill repo_key prefix skipped (no local table): {e}")
+            else:
+                log.warning(f"Migrate skill repo_key prefix failed: {e}")
 
         # 幂等清理：迁移后遗留的 legacy 表删除（如 managed_repos_legacy / user_repos_legacy）
         try:
@@ -1171,7 +1179,12 @@ def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
     except Exception as e:
         if raise_on_error:
             raise
-        log.warning(f"get_skill_by_id failed: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            # worker 本地库没有 skill 表：agent 端 skill scope 解析按「无此技能」降级
+            log.debug(f"get_skill_by_id skipped (no local table): {e}")
+        else:
+            log.warning(f"get_skill_by_id failed: {e}")
         return None
 
 def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
@@ -3406,7 +3419,12 @@ def get_meta_value(key: str) -> str:
     try:
         return _rt.get_meta_value_any(key)
     except Exception as e:  # noqa: BLE001
-        log.warning(f"get_meta_value failed: {key}: {e}")
+        from src.kernel.db_errors import missing_schema
+        if missing_schema(e):
+            # worker 本地库无 meta 表：vcs 平台卡等配置读回空值即可
+            log.debug(f"get_meta_value skipped (no local table): {key}: {e}")
+        else:
+            log.warning(f"get_meta_value failed: {key}: {e}")
         return ""
 
 def set_meta_value(key: str, value: str):

@@ -241,6 +241,7 @@ class HermesACPBackend:
         # 非 POSIX 平台直接复用原 HERMES_HOME，不建 overlay：worker 一次只跑一个
         # 任务，state.db 无并发争用，牺牲 per-task 隔离换功能可用。
         _use_overlay = _overlay_supported()
+        _shared_home_mode = False  # 回退共享 home 时串行化（state.db 单文件）
         if _use_overlay:
             _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
             # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
@@ -255,8 +256,26 @@ class HermesACPBackend:
             # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
             # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
             ensure_overlay_writable_dirs(iso_home)
+            if not _overlay_looks_usable(iso_home, src_home):
+                # 三个梯次（symlink/junction/递归复制）都没拼出可用 home 时，
+                # 绝不能把残缺目录交给引擎（它会把这里当全新数据根重装自己）。
+                log.warning(f"{label}hermes ACP: overlay home unusable — falling back to "
+                            f"shared HERMES_HOME={src_home} (hermes tasks serialized)")
+                _remove_overlay_tree(iso_home)
+                iso_home = src_home
+                _use_overlay = False
+                _shared_home_mode = True
         else:
             iso_home = src_home
+            _shared_home_mode = True
+
+        _locked = False
+        if _shared_home_mode:
+            # 共享 HERMES_HOME 的 state.db 是单文件：并发 hermes 任务会抢 SQLite
+            # 写锁（database is locked / EOF）。worker 通常串行跑任务，这里加锁
+            # 只是保证并发上限为 1，不是性能瓶颈。
+            _SHARED_HOME_LOCK.acquire()
+            _locked = True
 
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
@@ -827,6 +846,12 @@ class HermesACPBackend:
             # state.db 需要持久化供下次 session/resume 使用（chat-ctx-fix §方向一）。
             # 只杀进程，不删目录。
             _res.dispose(kill_procs=False, keep_overlays=True)
+            try:
+                if _locked:
+                    _SHARED_HOME_LOCK.release()
+            except (NameError, RuntimeError):
+                # 任务在加锁前就失败（异常早于 _locked 赋值）时无事可做
+                pass
 
 class _ACPSimpleClient:
     """极简 ACP JSON-RPC 客户端：request/response + notification 处理。
@@ -1600,6 +1625,52 @@ def _remove_path(path: str):
     elif os.path.exists(path):
         os.remove(path)
 
+
+def _remove_overlay_tree(path: str):
+    """删除整个 overlay home，绝不穿透 junction/symlink。
+
+    `shutil.rmtree` 对 Windows junction 会递归进目标目录，删掉共享 HERMES_HOME
+    里的真实资产（回退共享 home 的路径上这是不可接受的数据损失）。逐项判定：
+    链接用 os.remove、reparse point 目录用 os.rmdir、真实目录最后删。
+    """
+    try:
+        if not os.path.exists(path) and not _is_reparse_point_or_link(path):
+            return
+        if os.path.islink(path) or _is_reparse_point_or_link(path):
+            try:
+                os.rmdir(path)
+            except OSError:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return
+        for root, dirs, files in os.walk(path, topdown=False, followlinks=False):
+            for _f in files:
+                try:
+                    os.remove(os.path.join(root, _f))
+                except OSError:
+                    pass
+            for _d in dirs:
+                _p = os.path.join(root, _d)
+                try:
+                    if os.path.islink(_p):
+                        os.remove(_p)  # symlink to dir：rmdir 报 ENOTDIR
+                    else:
+                        os.rmdir(_p)   # 真实空目录 / Windows junction
+                except OSError:
+                    try:
+                        os.rmdir(_p)   # Windows junction 在 islink=True 时走这里
+                    except OSError:
+                        # 真实目录里还有内容（walk 漏掉的 reparse point 等）→ 不强删
+                        log.debug(f"hermes ACP overlay: kept non-empty dir {_p}")
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+    except Exception as _e:  # noqa: BLE001 - 清理失败不影响任务
+        log.debug(f"hermes ACP overlay: safe removal of {path} failed: {_e}")
+
 def ensure_overlay_writable_dirs(iso_home: str):
     """issue #439 worker 写前兜底：确保可写状态目录为真实目录。
 
@@ -1647,14 +1718,71 @@ def _is_platform_enable_cred(line: str) -> bool:
 
 
 def _overlay_supported() -> bool:
-    """per-task HERMES_HOME overlay 是否可用（非 POSIX 平台不可用）。
+    """是否尝试 per-task HERMES_HOME overlay（所有平台都试）。
 
-    Windows 上 symlink 需要 SeCreateSymbolicLinkPrivilege（普通用户/服务账号
-    默认没有）：overlay 会退化成整目录复制，复制出来的 home 缺运行时与已初始化
-    状态，引擎把它当全新数据根重新 bootstrap，ACP 却已不再响应 —— 任务 0.2s
-    即 EOF 挂掉（2026-11-20 Windows 实测）。此场景直接复用原 HERMES_HOME。
+    历史上 Windows 直接禁用 overlay：symlink 需要 SeCreateSymbolicLinkPrivilege，
+    普通用户/服务账号默认没有，失败后「浅拷贝」出来的 home 缺运行时，引擎把它当
+    全新数据根重新 bootstrap，ACP 却已不响应（2026-11-20 Windows 实测 0.2s EOF）。
+
+    现在 overlay 构建有三个梯次：
+      1. symlink（POSIX，或有特权的 Windows）
+      2. junction（Windows 目录，无提权；`mklink /J`）
+      3. 有界递归复制（文件/目录，上限见 _MIRROR_* 常量）
+    构建完再做可用性自检（_overlay_looks_usable），不达标就整体回退共享
+    HERMES_HOME —— 宁可放弃隔离，也不让引擎在残缺 home 上重新 bootstrap。
     """
-    return os.name != "nt"
+    return True
+
+
+def _junction_dir(target: str, link: str) -> bool:
+    """Windows 目录 junction（``mklink /J``）——不需要 SeCreateSymbolicLinkPrivilege。
+
+    junction 是 NTFS 重解析点，对普通目录 API 透明；引擎读写 assets 的语义与
+    symlink 相同，但只需目标目录的写权限。非 Windows 或目标不是目录时返回 False。
+    """
+    if os.name != "nt" or not os.path.isdir(target) or os.path.exists(link):
+        return False
+    try:
+        import subprocess as _sp
+        _r = _sp.run(["cmd", "/c", "mklink", "/J", link, target],
+                     capture_output=True, text=True, timeout=20,
+                     stdin=_sp.DEVNULL, encoding="utf-8", errors="replace")
+        return _r.returncode == 0 and os.path.exists(link)
+    except Exception:  # noqa: BLE001 - 降级链的下一步会接手
+        return False
+
+
+# 共享 HERMES_HOME 模式下的进程级串行锁：state.db 是单文件，并发 hermes 任务
+# 会抢 SQLite 写锁。worker 本来串行跑任务，这把锁只在回退共享 home 时生效。
+_SHARED_HOME_LOCK = __import__("threading").Lock()
+
+
+def _overlay_looks_usable(iso_home: str, src_home: str) -> bool:
+    """构建后自检：引擎启动必须的条目是否就位。
+
+    缺运行时（tools/installs）或身份目录（skills/plugins/auth/profiles）时，
+    hermes 会把该 home 当全新数据根重新 bootstrap —— 那正是 Windows 上任务
+    0.2s EOF 的根因。检查口径：源 home 里存在且非空的条目，目标必须同样存在
+    且非空（junction/真实目录/复制的文件都算）。
+    """
+    # 引擎启动硬依赖：缺任何一个就不值得尝试 overlay
+    _required = ("tools", "installs", "skills", "plugins", "auth", "profiles")
+    for entry in _required:
+        _src = os.path.join(src_home, entry)
+        if not os.path.exists(_src):
+            continue  # 源 home 本来没有（比如 auth 用 env 注入），不算缺陷
+        _dst = os.path.join(iso_home, entry)
+        if not os.path.exists(_dst):
+            log.warning(f"hermes ACP overlay: '{entry}' missing in overlay home")
+            return False
+        try:
+            if os.path.isdir(_dst) and not os.listdir(_dst) and os.listdir(_src):
+                log.warning(f"hermes ACP overlay: '{entry}' empty in overlay home "
+                            f"(src has {len(os.listdir(_src))} entries)")
+                return False
+        except Exception:  # noqa: BLE001 - 列目录失败按不可用处理
+            return False
+    return True
 
 
 def _build_overlay_home(iso_home: str, src_home: str):
@@ -1733,6 +1861,11 @@ def _build_overlay_home(iso_home: str, src_home: str):
                         try:
                             os.symlink(src, dst)
                         except Exception as _sl_e:
+                            # Windows 无 symlink 特权时先试 junction（目录，无提权）
+                            if os.path.isdir(src) and _junction_dir(src, dst):
+                                log.info(f"hermes ACP overlay: dir '{entry}' linked via "
+                                         f"junction (symlink failed: {_sl_e})")
+                                continue
                             # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
                             # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
                             # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
@@ -1813,13 +1946,71 @@ def _build_overlay_home(iso_home: str, src_home: str):
 # 单文件复制上限：防止把超大缓存（模型/向量库）整体拷进 overlay 拖死启动。
 _MIRROR_FILE_MAX_BYTES = 10 * 1024 * 1024
 
-def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
-    """symlink 失败后的降级镜像：文件复制（≤10MB），目录浅层复制一层。
+class _MirrorBudgetExceeded(Exception):
+    """递归复制的预算（文件数/字节数）耗尽 —— 该 entry 视为不可用。"""
 
-    大文件/深层目录跳过并 WARNING——hermes 启动所需的核心资产
-    （skills/plugins/auth 等）通常是小文件或浅目录，复制后即可正常加载；
-    跳过项留日志供 worker 侧排查（issue #416 随 13 台 worker 升级合入）。
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
+# 递归复制上限：只读共享资产通常在几十 MB 以内；触上限说明这不是可复制资产
+# （模型缓存、node_modules 之类），改为回退共享 home 比复制半成品安全。
+_MIRROR_MAX_FILES = 5000
+_MIRROR_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
+    """symlink/junction 都失败后的最后降级：有界递归复制。
+
+    旧实现目录只复制一层、深层目录整段跳过 —— Windows 上 `tools/` 浅拷贝
+    `tools/` 只留下几个文件，嵌套的 runtime 目录全缺，hermes 判定"未装完"开始
+    联网重装，ACP 随即不响应（2026-11-20 实测）。现在递归复制，只受两个上限
+    约束（文件数 / 单文件大小），触上限时整条 entry 判为不可用并明确告警，
+    由调用方的可用性自检回退共享 home。
     """
+    _budget = {"files": _MIRROR_MAX_FILES, "bytes": _MIRROR_MAX_BYTES}
+    _skipped: list[str] = []
+
+    def _copy_tree(_src: str, _dst: str, _rel: str = "") -> None:
+        os.makedirs(_dst, exist_ok=True)
+        for sub in os.listdir(_src):
+            _s = os.path.join(_src, sub)
+            _d = os.path.join(_dst, sub)
+            _name = f"{_rel}/{sub}" if _rel else sub
+            try:
+                if os.path.islink(_s) or _is_reparse_point_or_link(_s):
+                    # 源侧链接先解析成实路径再决定（不把 reparse point 复制进 home）
+                    _real = os.path.realpath(_s)
+                    if os.path.isdir(_real):
+                        _copy_tree(_real, _d, _name)
+                    elif os.path.isfile(_real):
+                        _budget["files"] -= 1
+                        _budget["bytes"] -= os.path.getsize(_real)
+                        if _budget["files"] < 0 or _budget["bytes"] < 0:
+                            raise _MirrorBudgetExceeded(_name)
+                        shutil.copy2(_real, _d)
+                    else:
+                        _skipped.append(_name)
+                elif os.path.isdir(_s):
+                    _copy_tree(_s, _d, _name)
+                elif os.path.isfile(_s):
+                    _size = os.path.getsize(_s)
+                    if _size > _MIRROR_FILE_MAX_BYTES:
+                        _skipped.append(f"{_name}({_size}B)")
+                        continue
+                    _budget["files"] -= 1
+                    _budget["bytes"] -= _size
+                    if _budget["files"] < 0 or _budget["bytes"] < 0:
+                        raise _MirrorBudgetExceeded(_name)
+                    shutil.copy2(_s, _d)
+                else:
+                    _skipped.append(_name)
+            except _MirrorBudgetExceeded:
+                raise
+            except Exception:  # noqa: BLE001 - 单条失败不放弃整棵树
+                _skipped.append(_name)
+
     try:
         if os.path.isfile(src):
             if os.path.getsize(src) > _MIRROR_FILE_MAX_BYTES:
@@ -1827,33 +2018,27 @@ def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
                             f"({os.path.getsize(src)} bytes > cap, symlink failed: {reason})")
                 return
             shutil.copy2(src, dst)
-            log.warning(f"hermes ACP overlay: file '{entry}' copied instead of "
-                        f"symlink (symlink failed: {reason})")
         elif os.path.isdir(src):
-            copied = skipped = 0
-            os.makedirs(dst, exist_ok=True)
-            for sub in os.listdir(src):
-                _src_sub = os.path.join(src, sub)
-                _dst_sub = os.path.join(dst, sub)
-                if os.path.isfile(_src_sub):
-                    if os.path.getsize(_src_sub) > _MIRROR_FILE_MAX_BYTES:
-                        skipped += 1
-                        continue
-                    try:
-                        shutil.copy2(_src_sub, _dst_sub)
-                        copied += 1
-                    except Exception:
-                        skipped += 1
-                elif os.path.isdir(_src_sub):
-                    # 深层目录不递归（保持降级路径有界），留待引擎按需重建
-                    skipped += 1
-            log.warning(f"hermes ACP overlay: dir '{entry}' shallow-copied "
-                        f"({copied} files, {skipped} skipped; symlink failed: {reason})")
+            _copy_tree(src, dst)
         else:
             log.warning(f"hermes ACP overlay: skip special entry '{entry}' "
                         f"(symlink failed: {reason})")
+        if _skipped:
+            log.warning(f"hermes ACP overlay: dir '{entry}' mirrored with "
+                        f"{len(_skipped)} skipped item(s) (e.g. {_skipped[:3]}; "
+                        f"symlink failed: {reason})")
+    except _MirrorBudgetExceeded as _b:
+        # 超预算 = 这个 entry 复制不完，删掉半成品让自检回退共享 home
+        log.warning(f"hermes ACP overlay: mirror of '{entry}' exceeded budget at "
+                    f"'{_b.name}' (files={_MIRROR_MAX_FILES}, bytes={_MIRROR_MAX_BYTES}); "
+                    f"removing partial copy, overlay will fall back to shared home")
+        try:
+            _remove_path(dst)
+        except Exception:
+            pass
     except Exception as _cp_e:
         log.warning(f"hermes ACP overlay: mirror fallback for '{entry}' failed: {_cp_e}")
+
 
 def _cleanup_overlay(iso_home: str):
     """清理 per-task HERMES_HOME（保留 state.db 供可能的续接，只删 symlink）。"""

@@ -277,6 +277,39 @@ _worker_probe_started = False
 _last_sent_probe_fingerprint: dict = {}
 
 
+def _acp_error_detail(resp: dict) -> str:
+    """JSON-RPC error 的完整原因：message + data.details 原样拼接。
+
+    hermes 把 provider 侧错误（模型不存在等）包装成
+    {"code": -32603, "message": "Internal error",
+     "data": {"details": "admitted_turn_failed"}}，
+    只上报 message 会让平台侧完全无从判断——data.details 才是可检索的线索。
+    """
+    err = (resp or {}).get("error") or {}
+    if not isinstance(err, dict):
+        return str(err)[:400]
+    msg = str(err.get("message") or "")
+    data = err.get("data")
+    details = ""
+    if isinstance(data, dict):
+        details = str(data.get("details") or data.get("reason") or "")
+    elif data:
+        details = str(data)
+    if details and details not in msg:
+        return f"{msg} [details={details}]"[:400]
+    return msg[:400]
+
+
+def _acp_stderr_tail(proc) -> str:
+    """terminate 后取 stderr 尾部（单行化，供探活结果上报）。"""
+    try:
+        _out = proc.stderr.read() or b""
+        _text = _out if isinstance(_out, str) else _out.decode("utf-8", "replace")
+        return _text.strip().replace("\n", " | ")[-300:]
+    except Exception:  # noqa: BLE001 - 诊断信息取不到不影响结论
+        return ""
+
+
 def _probe_hermes_acp(cli_path: str) -> dict:
     """hermes ACP 模式探活：initialize + session/new + 轻量 prompt，端到端验证引擎可用性。
 
@@ -418,7 +451,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
         _sid = (_new_resp.get("result") or {}).get("sessionId", "")
         if not _sid:
@@ -444,7 +477,10 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     "error": f"ACP prompt no response (provider/model unreachable?): {_stderr}"}
         if "error" in _prompt_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = _prompt_resp["error"].get("message", str(_prompt_resp["error"]))[:200]
+            _err = _acp_error_detail(_prompt_resp)
+            _tail = _acp_stderr_tail(proc)
+            if _tail:
+                _err = f"{_err} | stderr: {_tail}"
             return {"status": "fail", "latency": latency,
                     "error": f"ACP prompt error: {_err}"}
 
@@ -604,7 +640,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
         if not _init_resp or "error" in _init_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _init_resp else _init_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _init_resp else _acp_error_detail(_init_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP initialize: {_err}"}
 
         # 2. session/new（hwcloud 必须先建会话；mcpServers 必须空数组）
@@ -617,7 +653,7 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
         _sid = (_new_resp.get("result") or {}).get("sessionId", "")
 
