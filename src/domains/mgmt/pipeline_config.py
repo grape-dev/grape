@@ -925,6 +925,47 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
     return db_id
 
 
+def set_org_scene_work_branch(scene_id: str, repo_key: str, work_branch: str) -> bool:
+    """幂等校正组织场景工作分支（同步/默认分支落定后回填）。"""
+    scene_id = str(scene_id or "").strip()
+    repo_key = str(repo_key or "").strip()
+    branch = str(work_branch or "").strip()
+    if not (scene_id and repo_key and branch):
+        return False
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            row = c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? LIMIT 1",
+                (scene_id, repo_key),
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                opts = json.loads((row[0] if row else "") or "{}")
+            except Exception:
+                opts = {}
+            if not isinstance(opts, dict):
+                opts = {}
+            if str(opts.get("work_branch") or "") == branch:
+                return True
+            opts["work_branch"] = branch
+            c.execute(
+                "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=datetime('now') "
+                "WHERE scene_id=? AND repo_key=?",
+                (json.dumps(opts, ensure_ascii=False), scene_id, repo_key),
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log.warning(f"set_org_scene_work_branch failed scene={scene_id} repo={repo_key}: {exc}")
+            return False
+    invalidate_scene_cache(scene_id, repo_key)
+    return True
+
+
 def _try_set_created_by(c, row_id: int, created_by: str):
     """幂等写入 created_by（列不存在时忽略）。"""
     if not created_by:

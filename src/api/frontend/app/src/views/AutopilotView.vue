@@ -92,7 +92,10 @@
                 @click.stop="toggleSelect(t.id)"
               />
             </div>
-            <div class="apv-c-name apv-cname" @click="goDetail(t.id)">{{ t.name }}</div>
+            <div class="apv-c-name apv-cname" @click="goDetail(t.id)">
+              <span>{{ t.name }}</span>
+              <span v-if="t.work_branch" class="apv-wb-chip">🌿 {{ t.work_branch }}</span>
+            </div>
             <div class="apv-c-cron apv-mono">{{ t.cron }}</div>
             <div class="apv-c-last">
               <span class="apv-dot" :style="{ background: lastColor(t) }"></span>
@@ -2443,6 +2446,12 @@ onBeforeUnmount(function () {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+.apv-wb-chip {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--t3);
+  font-weight: 400;
 }
 .apv-c-cron {
   color: var(--t3);

@@ -576,3 +576,20 @@ def test_create_issue_route_rejects_normal_repo_with_org_template(monkeypatch):
     assert response.status_code == 400
     assert response.json()["detail"]["error_code"] == "INVALID_ORG_CONTEXT"
     assert called["n"] == 0, "入口拒绝后不得继续建单"
+
+
+def test_set_org_scene_work_branch_is_idempotent():
+    """默认分支落定后回填场景工作分支，重复调用不应报错/漂移。"""
+    from src.api.pipeline_config import set_org_scene_work_branch
+
+    _seed_org_scene()
+    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-repo-knowledge")
+    assert set_org_scene_work_branch(ORG_SCENE_ID, ORG_REPO_KEY, "grape-repo-knowledge")
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT advanced_options FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1",
+            (ORG_SCENE_ID, ORG_REPO_KEY),
+        ).fetchone()
+    assert row and json.loads(row[0])["work_branch"] == "grape-repo-knowledge"

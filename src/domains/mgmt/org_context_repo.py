@@ -803,6 +803,23 @@ def sync_org_context_to_repo(org_id: str) -> bool:
                 branch = ORG_REPO_DEFAULT_BRANCH
                 _unborn = True
 
+            # 默认分支已经落定：回填场景/自动化任务的工作分支（建仓时可能还是 main，
+            # org-context 首次 push 后才变成 grape-repo-knowledge）。
+            try:
+                from src.domains.mgmt.pipeline_config import set_org_scene_work_branch
+                from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+                from src.domains.mgmt import org_analysis
+
+                _scene_id = str(org.get("org_scene_id") or "")
+                if _scene_id:
+                    _scene_branch = resolve_org_repo_default_branch(
+                        org, repo_key, fallback=branch)
+                    set_org_scene_work_branch(_scene_id, repo_key, _scene_branch)
+                    org_analysis.ensure_analysis_automation(
+                        org_id, actor_id=org.get("owner_id") or "")
+            except Exception as _wb_e:  # noqa: BLE001 - 回填失败不阻断上下文同步
+                log.warning(f"org-context sync: align scene work branch failed org={org_id}: {_wb_e}")
+
             _clean_managed_org_context(work)
             for rel, content in files.items():
                 path = os.path.join(work, *rel.split("/"))
