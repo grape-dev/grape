@@ -89,3 +89,16 @@ def test_owner_from_full_name_keeps_subgroup_path():
     assert _owner_from_full_name("grp/sub/proj") == "grp/sub"
     assert _owner_from_full_name("owner/repo") == "owner"
     assert _owner_from_full_name("bare") == ""
+
+def test_upstream_rejection_becomes_error_dict_not_exception(monkeypatch):
+    """上游拒绝建仓（403/400/重名）必须落 error dict：抛异常会被路由当 500，用户看不到原因。"""
+    prov = _provider(_FakeHttp())
+
+    def boom(*a, **k):
+        raise RuntimeError('GitLab API POST /projects failed (400): Bad Request | '
+                           '{"message":{"namespace":["is not valid"]}}')
+
+    monkeypatch.setattr(prov, "_http", boom)
+    out = prov.create_repo("tok", "demo")
+    assert out.get("error")
+    assert "is not valid" in out["error"] or "上游拒绝" in out["error"]

@@ -233,7 +233,14 @@ class GenericVcsProvider(VCSProvider):
             ) as resp:
                 return _json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"{self._card.name} API {method} {path} failed ({e.code}): {e}") from e
+            # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
+            try:
+                _detail = e.read().decode("utf-8", "replace")[:300]
+            except Exception:  # noqa: BLE001
+                _detail = ""
+            raise RuntimeError(
+                f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
+                + (f" | {_detail}" if _detail else "")) from e
 
     def verify_token(self, token: str) -> dict:
         info = self._http("GET", "/user", token)
@@ -1606,7 +1613,12 @@ class GitLabProvider(GenericVcsProvider):
             if not ns_id:
                 return {"error": f"所属空间不存在或无建仓权限: {owner}"}
             body["namespace_id"] = ns_id
-        return self._http("POST", "/projects", api_token, body)
+        try:
+            return self._http("POST", "/projects", api_token, body)
+        except Exception as e:  # noqa: BLE001
+            # 上游拒绝（token 无 create 权限 / 重名 / 组禁建）必须落 error dict：
+            # 抛异常会被路由当成 500，用户看不到原因。
+            return {"error": f"上游拒绝建仓: {e}"}
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）
