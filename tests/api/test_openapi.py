@@ -72,6 +72,8 @@ EXPECTED_PUBLIC = {
     "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
     "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
     "auth_platform_links": ("get", "/api/auth/platform-links"),
+    # 误完成回退端点（arch-weekly-11 新增，实现已带 operation_id/summary/security）
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     # [rebase 2026-11-12] uuid+沙箱+#1208 线新增对外端点（42 个：沙箱管理/凭据/LLM 凭据/绑定/selector 预览）
     "external_api_audit_query": ("get", "/admin/sandbox/external-api-audit/{task_id}"),
     "runtime_cloud_sandbox_kill": ("delete", "/api/runtime/cloud-sandboxes/{sandbox_id}"),

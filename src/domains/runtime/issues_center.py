@@ -3540,6 +3540,12 @@ def _batch_running_agent_tasks(keys: list) -> set:
             log.warning(f"batch agent_tasks fetch failed: {e}")
     return out
 
+# P1-8：事件状态展示别名 —— events.status='takeover'（本地接手）在 agent_statuses 里
+# 归一成 'running'，与流水线卡片（compute_node_statuses / EVENT_STATUS_MAP 的
+# takeover→STATUS_RUNNING）同口径；原始值仍以 raw_status 透出。
+_EVENT_STATUS_ALIASES = {"takeover": "running"}
+
+
 def _batch_fetch_agent_statuses(keys: list) -> dict:
     """批量查各 Agent 节点最新事件状态（Issue #126: 与菜单流水线数据源一致）。
 
@@ -3597,15 +3603,24 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
                 })
             else:
                 _latest = _agent_events[-1]  # seq ASC → 最后一条即最新
-                _status = _latest[3] or "pending"
-                _statuses.append({
+                _raw_status = _latest[3] or "pending"
+                # P1-8：events.status='takeover'（有人本地接手）在展示口径上等同 running。
+                # 流水线卡片侧（compute_node_statuses / EVENT_STATUS_MAP）早已映射成运行中，
+                # 这里若原样透传，同一节点会在同页出现「执行中」与「待执行」两种结论。
+                _status = _EVENT_STATUS_ALIASES.get(_raw_status, _raw_status)
+                _row = {
                     "agent": agent,
                     "label": AGENT_LABELS[i],
                     "status": _status,
                     "status_num": STAGE_STATUS_MAP.get(_status, 0),
                     "latest_seq": _latest[4],
                     "latest_title": _latest[5] or "",
-                })
+                }
+                if _raw_status != _status:
+                    # 保留原始口径，供需要区分「本地接手」与「worker 在跑」的调用方使用
+                    _row["raw_status"] = _raw_status
+                    _row["takeover"] = True
+                _statuses.append(_row)
         out[key] = _statuses
 
     return out

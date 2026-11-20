@@ -584,6 +584,52 @@ def _task_insert_row(_cols, **kw):
     return tuple(kw[c] for c in _cols)
 
 
+def _takeover_issue_id(issue_id) -> str:
+    """归一化 Issue 号用于接管判定（#N；伪 Issue / #0 / 空串返回空）。"""
+    value = str(issue_id or "").strip()
+    if not value:
+        return ""
+    if not value.startswith("#"):
+        value = f"#{value}"
+    if value in ("#0",) or value.startswith("#pr_"):
+        return ""
+    return value
+
+
+def _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type) -> dict | None:
+    """Issue #3201：active 接管期间统一拦截自动派发。
+
+    命中后把事件置 ``skipped_takeover``（不建 task、不推进节点、不缓存重放），
+    并释放事件活跃守卫，避免被拦事件把 Issue 永久卡在 dedup 状态。
+    返回命中的接管会话；未命中返回 None。
+    """
+    issue_id = _takeover_issue_id(issue_id)
+    if not repo_key or not issue_id:
+        return None
+    try:
+        from src.domains.runtime.engine.takeover import active_takeover_for
+        sess = active_takeover_for(repo_key, issue_id)
+    except Exception as e:
+        log.warning(f"Pipeline: takeover guard check failed, allow dispatch: {e}")
+        return None
+    if not sess:
+        return None
+    if seq:
+        try:
+            from src.api.event_store import update_event_status, _release_guard_by_seq
+            update_event_status(
+                int(seq), "skipped_takeover",
+                result=(f"接管期间忽略自动派发（takeover={sess.get('id') or ''}，"
+                        f"user={sess.get('username') or ''}）"),
+            )
+            _release_guard_by_seq(int(seq))
+        except Exception as e:
+            log.warning(f"Pipeline: mark seq={seq} skipped_takeover failed: {e}")
+    log.info(f"Pipeline: takeover={sess.get('id')} active for {repo_key}{issue_id}, "
+             f"skip dispatch seq={seq} agent={agent_type}")
+    return sess
+
+
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                         skill_path, engine_id, evt, issue_id="", skill_id=0,
                         skip_event_config=False):
@@ -595,6 +641,13 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     from src.api.session_store import get_or_create_agent_session
     from src.domains.runtime.engine.instances import runtime_instance_name
     from datetime import datetime, timezone
+
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+
+    # Issue #3201：建 task 的唯一出口统一守门（webhook / A2A / 重派 / autopilot）。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return ""
 
     inst_name = runtime_instance_name(engine_id) or backend or ""
     now = datetime.now(timezone.utc).isoformat()
@@ -623,9 +676,6 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             pass
 
     task_id = "t_" + uuid.uuid4().hex[:12]
-    # issue_id 优先用传参，兜底从 evt 解析
-    if not issue_id:
-        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     from src.kernel.repo_key import from_repo_key
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
@@ -2933,6 +2983,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
+    # Issue #3201：接管守门放在分派入口，先于引擎可用性判定。
+    # 否则「引擎不可用 / 场景引擎全部离线 / 自动选机失败」等早退分支仍会建 failed task，
+    # 并把事件置 failed，违背「接管期间被拦事件一律 skipped_takeover、不建 task」的契约。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        result["skipped"] = "already_taken_over"
+        return result
+
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
@@ -4139,6 +4196,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         pool_engine_source = "scene" if _scene_ctx else "auto"
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
+    # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
+    # 命中 active 接管时不建 task，事件置 skipped_takeover（不重放）。
+    # 返回空串供调用方（A2A dispatch）识别「已跳过」，不得当作派发成功。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return ""
     # 1) 路由判定：
     #    runtime_id>0 → 确定性路由（指定引擎）
     #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
@@ -4162,7 +4224,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 log.info(f"Pipeline enqueue: legacy runtime_id=0 -> local direct engine {runtime_id} seq={seq}")
             else:
                 _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-                return
+                return ""
     # Issue #630：技能物化完整性校验门禁（enqueue 前，fail-fast）——配置了技能但
     # 内容源全缺失（空壳技能行，如 sid=3276 vod-cli-crossrepo）时显式告警并阻断派发，
     # 不静默降级；技能未配置（推荐模式/无 skill）不阻断，official 内置包兜底放行。
@@ -4175,7 +4237,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                         f"skill={skill_name} sid={_gate_sid}: {_gate_reason}")
             _fail_event(seq, f"技能物化校验未通过，已阻断派发（skill={skill_name}）: "
                              f"{_gate_reason[:200]}")
-            return
+            return ""
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -4236,7 +4298,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
-        return
+        return ""
 
     from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key 并告警），
@@ -4353,7 +4415,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
         _fail_event(seq, f"enqueue_task error {str(e)[:150]}")
-        return
+        return ""
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
@@ -4361,6 +4423,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 本机 direct 引擎现由 local_claimer_loop 以一等认领者身份参与广播（与远端 worker 同一条
     # claim_by_tag 检查链：白名单/健康分/满载/scope 全约束）。此处的 self-run 会在入队同一毫秒
     # 抢跑绑定引擎的任务（2026-10-14 pvs-zombies-demo2 issue #4/#6 两轮事故根因），不再需要。
+    return tid or ""
 
 
 def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:

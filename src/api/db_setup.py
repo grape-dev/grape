@@ -2048,6 +2048,8 @@ _ACCOUNT_FK_USER_ID_COLS = (
     ("org_member", "user_id"),
     ("org_invitation", "invitee_user_id"),
     ("audit_logs", "user_id"),
+    # 接管会话归属人（Issue: 接管 500 真因 —— 账号 id 已 uuid，INT 列 int() 崩）
+    ("takeover_sessions", "user_id"),
     ("exchange_codes", "user_id"),
     ("binding_tickets", "initiating_user_id"),
     ("binding_tickets", "original_user_id"),
@@ -3882,6 +3884,71 @@ register_migration(
     name="takeover-host-os-v1",
     kind="safe",
     fn=_fn_takeover_host_os_v1,
+)
+
+
+def _fn_takeover_sessions_user_id_uuid_v1() -> None:
+    """接管会话 user_id 放宽为 VARCHAR(36)：D105 后账号 id 是 uuid 字符串。
+
+    存量库该列是 INTEGER —— `int(user["id"])` 直接 ValueError（接管接口 500 的真因），
+    MySQL 侧即便吞掉也只会把 uuid 截成 0 → 会话归属校验永远不相等。
+    两条约束：
+    - MODIFY 属破坏性 DDL（Issue #536 D4-2），必须走 `_destructive_ddl` 的
+      min_code_version 门槛；被拦下时不盖章（raise），下次启动再试；
+    - `takeover_sessions` 归 runtime 域：三库拓扑下 mgmt/insight 进程库里可能有同名
+      历史表，真正被接管接口读写的是 runtime 域库 —— 有自有 DSN 时再补一次。
+    """
+    from src.kernel import db_registry
+    from src.kernel.mysql_compat import get_db_backend
+
+    if get_db_backend() == "sqlite":
+        return  # sqlite 动态类型接受文本；新库 DDL 已是 VARCHAR(36)
+
+    _ddl = ("ALTER TABLE takeover_sessions MODIFY COLUMN user_id "
+            "VARCHAR(36) NOT NULL DEFAULT '0'")
+
+    def _widen(cur) -> bool:
+        """True=该库无需再改/已改完；False=被 destructive 门槛拦下。"""
+        cur.execute(
+            "SELECT DATA_TYPE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='takeover_sessions' "
+            "AND COLUMN_NAME='user_id'")
+        row = cur.fetchone()
+        dtype = str((row[0] if row else "") or "").lower()
+        if dtype not in ("int", "bigint", "smallint", "tinyint", "mediumint"):
+            return True
+        return bool(_destructive_ddl(cur, _ddl, kind_hint="cleanup"))
+
+    blocked = False
+    with db_lock:
+        c = db.cursor()
+        try:
+            if not _widen(c):
+                blocked = True
+        finally:
+            db.commit()
+
+    if db_registry.uses_own_dsn("runtime") and db_registry.current_domain() != "runtime":
+        try:
+            with db_registry.transaction("runtime") as rc:
+                if not _widen(rc):
+                    blocked = True
+        except Exception as e:  # noqa: BLE001 - 连接/DDL 失败都不盖章，下次重试
+            log.warning(f"takeover_sessions.user_id widen (runtime domain) failed: {e}")
+            blocked = True
+
+    if blocked:
+        raise RuntimeError(
+            "takeover_sessions.user_id 放宽被 min_code_version 门槛拦截或 runtime 域执行失败"
+            "（本次不盖章，下次启动重试）")
+    log.info("takeover_sessions.user_id widened to VARCHAR(36) (uuid) where applicable")
+
+
+register_migration(
+    version="202611200001",
+    name="takeover-sessions-user-id-uuid-v1",
+    kind="cleanup",  # 含 MODIFY COLUMN：破坏性 DDL，走 min_code_version 门槛
+    fn=_fn_takeover_sessions_user_id_uuid_v1,
 )
 
 

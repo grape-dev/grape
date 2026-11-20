@@ -6930,6 +6930,15 @@ def takeover_active_status() -> str:
 def now_iso() -> str:
     """UTC ISO 时间戳，与 takeover 内部同一口径。"""
     return _takeover_impl._now_iso()
+
+
+def same_user(sess_user_id, user: dict) -> bool:
+    """接管会话归属校验（uuid / 历史整数 id 统一折算成字符串比较）。
+
+    原路由里写 `int(sess["user_id"]) != int(user["id"])` —— D105 后账号 id 是 uuid，
+    每次调用都 ValueError → 接管端点 500。判定实现归 runtime 域，外域只调这个门面。
+    """
+    return _takeover_impl._same_user(sess_user_id, user)
 abort_takeover = _takeover_impl.abort_takeover
 append_takeover_messages = _takeover_impl.append_takeover_messages
 attach_client_session = _takeover_impl.attach_client_session
@@ -6939,6 +6948,11 @@ list_takeovers = _takeover_impl.list_takeovers
 renew_takeover_session = _takeover_impl.renew_takeover_session
 request_finish = _takeover_impl.request_finish
 start_takeover = _takeover_impl.start_takeover
+# mgmt 路由的 list / get 端点会调用这两个（「接管中」卡片上的 skipped_dispatches 计数）；
+# 漏转发时 svc.skipped_dispatch_count 抛 AttributeError → GET /api/takeover/sessions
+# 与 GET /api/takeover/sessions/{id} 恒 500（issue-3201 引入的守门计数）。
+skipped_dispatch_count = _takeover_impl.skipped_dispatch_count
+skipped_dispatch_message = _takeover_impl.skipped_dispatch_message
 
 # ── 引擎实例 / 选择 / 健康派生门面（2026-11-18）──────────────────────────────
 # 外域（mgmt 路由与 user.db、insight 看板与告警）此前直接

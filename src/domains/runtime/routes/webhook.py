@@ -2070,6 +2070,34 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
             _a2a_session_info = _authorize_a2a(request, repo_key)
 
+        # Issue #3201：接管 active 期间同一 Issue 的 A2A 派发统一拒绝（整 issue 冻结，
+        # 不提供 force 旁路）。守门下沉在建 task 出口，这里只负责给出清晰的 409 文案。
+        if issue_number:
+            from src.domains.runtime.engine.takeover import active_takeover_for
+            _tko_sess = active_takeover_for(repo_key, f"#{issue_number}")
+            if _tko_sess:
+                log.info(f"A2A: rejected — issue=#{issue_number} is under active takeover "
+                         f"{_tko_sess.get('id')} (agent={_tko_sess.get('agent_type')})")
+                try:
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(
+                        repo_key, "a2a_event", "already_taken_over",
+                        detail=f"takeover={_tko_sess.get('id') or ''}",
+                        issue_id=f"#{issue_number}")
+                except Exception as _tko_audit_e:
+                    log.warning(f"A2A: takeover skip audit failed: {_tko_audit_e}")
+                return JSONResponse(status_code=409, content={
+                    "status": "error", "code": 409,
+                    "error": "already_taken_over", "skipped": "already_taken_over",
+                    "takeover_id": _tko_sess.get("id") or "",
+                    "agent": _tko_sess.get("agent_type") or "",
+                    "message": (f"Issue #{issue_number} 正被 "
+                                f"{_tko_sess.get('username') or '用户'} 接管中（"
+                                f"takeover={_tko_sess.get('id')}），禁止自动派发"),
+                    "handoff_result": HANDOFF_RESULT_REJECTED,
+                    "source_seq": _source_seq,
+                })
+
         # Issue #1948 / #1973：解析调用方自身事件 seq，供派发门禁精确排除自身
         # running 事件（下游 qa 打回上游 coding 时不能把自己判成「下游 running」自锁）。
         _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)

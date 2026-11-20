@@ -1357,7 +1357,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         events = get_events(repo_key, issue_id=issue_key, limit=30)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
-    nodes, _ = compute_node_statuses(nodes, events, _current_stage)
+    nodes, _ = compute_node_statuses(
+        nodes, events, _current_stage, repo_key=repo_key, issue_id=issue_key)
     # Issue #329: extract carried_context for cross-pipeline continuation source annotation
     from src.api.session_store import get_carried_context
     _carried_context = get_carried_context(repo_key, issue_number)
@@ -2884,7 +2885,8 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
-    nodes, _ = compute_node_statuses(nodes, events, _current_stage)
+    nodes, _ = compute_node_statuses(
+        nodes, events, _current_stage, repo_key=repo_key, issue_id=issue_key)
     # Issue #329: extract carried_context for cross-pipeline continuation source annotation
     from src.api.session_store import get_carried_context
 

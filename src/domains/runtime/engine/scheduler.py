@@ -94,6 +94,32 @@ def _autopilot_issue_ref(task_id) -> str:
         s = chr(ord("a") + r) + s
     return f"autopilot-{s}"
 
+
+def _skip_autopilot_for_takeover(repo_key, task, exec_id) -> bool:
+    """Issue #3201：接管 active 期间 autopilot 派发同样统一拦截。
+
+    autopilot 巡检任务没有真实 Issue 维度（`_autopilot_issue_ref` 是纯字母统计合成键，
+    与真实接管会话的 `#<数字>` 永远不可能命中），因此按**仓库**判定：该仓库存在任一
+    active 接管（`active_takeover_in_repo`）即冻结自动派发。命中后执行记录置
+    ``skipped``、不建 task、不消耗重试次数，并日志留痕。
+    返回 True 表示本次派发已被拦截，调用方须立即 return。
+    """
+    if not repo_key:
+        return False
+    try:
+        from src.domains.runtime.engine.takeover import active_takeover_in_repo
+        sess = active_takeover_in_repo(repo_key)
+    except Exception as e:
+        log.warning(f"Autopilot exec {exec_id}: takeover guard check failed (allow): {e}")
+        return False
+    if not sess:
+        return False
+    log.info(f"Autopilot exec {exec_id}: skipped — takeover {sess.get('id')} active in repo "
+             f"{repo_key} for {sess.get('issue_id')} (agent={sess.get('agent_type')})")
+    _update_execution_result(exec_id, "skipped", error="接管进行中，自动派发已拦截")
+    return True
+
+
 _FINDINGS_PATTERN = re.compile(
     r'<!--\s*autopilot-findings\s*(.*?)\s*-->',
     re.DOTALL
@@ -529,6 +555,10 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     """DIRECT 模式：本机 stream_devops_agent 执行。"""
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
+    # Issue #3201：接管 active 期间不建 task、不起 agent（执行记录置 skipped）。
+    if _skip_autopilot_for_takeover(repo_key, task, exec_id):
+        return
+
     # 创建 agent_tasks 记录（用 autopilot 专属 seq 命名空间，skip_event_config=True 不写 events 表）
     # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
     # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
@@ -727,6 +757,10 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
                             f"creator={task.get('created_by')}, enqueue without skill files")
         except Exception as _se:
             log.warning(f"Autopilot exec {exec_id}: pre-resolve skill '{skill_name}' failed: {_se}")
+
+    # Issue #3201：接管 active 期间不建 task（执行记录置 skipped，不消耗重试）。
+    if _skip_autopilot_for_takeover(repo_key, task, exec_id):
+        return
 
     try:
         task_id = enqueue_task(
@@ -1403,6 +1437,10 @@ async def _execute_task(task: dict):
 
             if exec_status == "success":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} success (attempt {attempt})")
+                break
+            if exec_status == "skipped":
+                # Issue #3201：接管守门拦截 → 非失败，立即终止，不重试、不消耗执行次数
+                log.info(f"Autopilot: task {task_id} exec {exec_id} skipped under active takeover, stop")
                 break
             if exec_status == "cancelled":
                 # 用户杀死：立即停止，不再重试
