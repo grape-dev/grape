@@ -247,7 +247,8 @@ class TestAccountFkUserIdTextNormalize:
         assert c2.execute("SELECT COUNT(*) FROM issue WHERE user_id='24'").fetchone()[0] == 1
 
     def test_enum_covers_required_pairs(self):
-        """清单完整性：任务枚举的 33 对表列必须全量在列（202611091100 补录 2 对）。"""
+        """清单完整性：任务枚举的 34 对表列必须全量在列（202611091100 补录 2 对；
+        202611200001 补 takeover_sessions.user_id —— 账号 uuid 写进 INT 列即接管 500）。"""
         required = {
             ("chat_agent_session", "user_id"), ("user_credentials", "user_id"),
             ("managed_repos", "host_user_id"), ("user_repos", "user_id"),
@@ -270,9 +271,10 @@ class TestAccountFkUserIdTextNormalize:
             ("issue", "user_id"), ("issue", "scene_user_id"),
             ("grape_t_patrol_findings", "owner"),
             ("issue", "release_approved_by"),
+            ("takeover_sessions", "user_id"),
         }
         assert set(_ACCOUNT_FK_USER_ID_COLS) == required
-        assert len(_ACCOUNT_FK_USER_ID_COLS) == 33
+        assert len(_ACCOUNT_FK_USER_ID_COLS) == 34
 
 
 class Test202611091100OwnerReleaseApprovedBy:

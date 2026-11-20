@@ -57,6 +57,25 @@ def _now() -> int:
     return int(time.time())
 
 
+def _user_key(v: Any) -> str:
+    """账号 id 归一为字符串（D105 后 grape_accounts.id 是 uuid，历史行可能是整数）。
+
+    空值统一成 '0'（与原 `int(x or 0)` 的哨兵口径一致），其余原样保留字符串形态，
+    这样 uuid / 数字 / 字符串三种存量值都能比较，且写入 VARCHAR(36) 列不丢信息。
+    """
+    s = str(v if v is not None else "").strip()
+    return "0" if s in ("", "None") else s
+
+
+def _same_user(sess_user_id: Any, user: dict) -> bool:
+    """接管会话归属校验：会话记录的用户 == 当前调用者。
+
+    原实现用 int(...) 比较 —— 账号 id 变成 uuid 后对任意端点都会抛
+    ValueError（接管接口 500 的真因），故改为字符串归一比较。
+    """
+    return _user_key(sess_user_id) == _user_key((user or {}).get("id"))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1176,7 +1195,7 @@ def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
     if sess:
         # 归属校验：_rebuild_for_session 会吊销原 token 并按调用者重签，
         # 不校验就会让同仓库其它用户接管他人会话并踢掉对方 token。
-        if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        if not _same_user(sess.get("user_id"), user):
             raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         return {"reused": True, "session": sess, "bundle": _rebuild_for_session(sess, user)}
 
@@ -1209,7 +1228,7 @@ def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
         session_id = _TAKEOVER_SESSION_ID_PREFIX + secrets.token_hex(12)
         tok = issue_takeover_token(task_id=task_id, repo_key=repo_key,
                                    agent_type=task.get("agent_type") or "",
-                                   user_id=int(user.get("id") or 0))
+                                   user_id=_user_key(user.get("id")))
         if not tok:
             raise TakeoverError(503, "token_issue_failed", "接管 token 签发失败")
 
@@ -1225,7 +1244,7 @@ def _start_takeover(*, repo_key: str, issue_number: str, user: dict,
                     " host_os, host_arch, host_shell) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (session_id, task_id, task_id, int(task.get("event_seq") or 0), repo_key, issue_id,
-                     task.get("agent_type") or "", int(user.get("id") or 0), user.get("username") or "",
+                     task.get("agent_type") or "", _user_key(user.get("id")), user.get("username") or "",
                      int(task.get("runtime_id") or 0), platform or "", host or "", client_version or "",
                      ST_ACTIVE, tok["token_sha256"], int(tok["expires_at"]), _now(), "", "[]",
                      _now_iso(), _now_iso(),
@@ -1299,7 +1318,7 @@ def _rebuild_for_session(sess: dict, user: dict) -> dict:
     revoke_takeover_token(task["id"])
     tok = issue_takeover_token(task_id=task["id"], repo_key=task.get("repo_key") or "",
                                agent_type=task.get("agent_type") or "",
-                               user_id=int(user.get("id") or 0))
+                               user_id=_user_key(user.get("id")))
     if not tok:
         raise TakeoverError(503, "token_issue_failed", "接管 token 续签失败")
     bundle, warnings, persist = build_bundle(
@@ -1326,7 +1345,7 @@ def attach_client_session(*, session_id: str, user: dict, client_session: str,
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     cs = (client_session or "").strip()[:128]
     try:
@@ -1348,7 +1367,7 @@ def renew_takeover_session(*, session_id: str, user: dict) -> dict:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"renewed": False, "status": sess.get("status"), "remaining": 0}
@@ -1535,7 +1554,7 @@ def request_finish(*, session_id: str, user: dict, summary: str = "", evidence: 
         from src.kernel.auth_sdk.auth_token import takeover_session_key as _tko_key
         if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
             raise TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
-    elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    elif not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         raise TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")
@@ -1586,7 +1605,7 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
 
     # Issue #3201：本次接管期间被守门忽略的自动派发条数（面板可观测）。
@@ -1786,7 +1805,7 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if not _same_user(sess.get("user_id"), user):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"ok": True, "changed": False, "status": sess.get("status"), "session": sess}

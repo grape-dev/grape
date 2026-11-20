@@ -206,3 +206,45 @@ def test_list_and_get_session_endpoints_are_200(client):
     got = client.get(f"/api/takeover/sessions/{sid}")
     assert got.status_code == 200, got.text
     assert got.json()["session"]["id"] == sid
+
+
+UUID_USER = "aebb29af-64b1-40ce-84fc-02ba3e335066"
+
+
+def _as(client, uid, name="uuid-user"):
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {
+        "id": uid, "username": name, "auth_type": "api_key", "token": "x", "token_type": "api_key",
+    }
+
+
+def test_uuid_account_can_start_and_read_takeover(client):
+    """账号 id 是 uuid（D105）时接管全链路可用：原来 int(user["id"]) 直接 ValueError → 500。"""
+    _seed()
+    _as(client, UUID_USER)
+    r = _start(client)
+    assert r.status_code == 200, r.text
+    sid = r.json()["takeover_id"]
+    assert _get("SELECT user_id FROM takeover_sessions WHERE id=?", (sid,))[0] == UUID_USER
+    # 幂等重连（_rebuild_for_session 同样走归属校验 + 重签 token）
+    assert _start(client).json()["reused"] is True
+    # 列表 / 详情 / 进展 三条读路径在 uuid 下都必须通
+    assert client.get("/api/takeover/sessions", params={"repo_key": REPO, "status": "active"}).status_code == 200
+    assert client.get(f"/api/takeover/sessions/{sid}").status_code == 200
+    assert client.post(f"/api/takeover/sessions/{sid}/progress",
+                       json={"messages": [{"type": "text", "content": "hi"}]}).status_code == 200
+    # 归属校验对别的 uuid 用户仍然拒绝
+    _as(client, "00000000-0000-4000-8000-000000000000", "other")
+    other = client.get(f"/api/takeover/sessions/{sid}")
+    assert other.status_code == 403, other.text
+    assert other.json()["code"] == "not_owner"
+
+
+def test_same_user_helper_handles_uuid_and_legacy_int():
+    """归属比较：uuid 原样比、空值哨兵一致、历史整数 id 与字符串形态等价。"""
+    assert svc._same_user(UUID_USER, {"id": UUID_USER}) is True
+    assert svc._same_user(UUID_USER, {"id": "someone-else"}) is False
+    assert svc._same_user(3, {"id": 3}) is True
+    assert svc._same_user("3", {"id": 3}) is True
+    assert svc._same_user(0, {"id": ""}) is True
+    assert svc._same_user(None, {"id": 0}) is True
+    assert svc._same_user(0, {"id": 2}) is False

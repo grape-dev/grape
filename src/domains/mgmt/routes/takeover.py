@@ -182,7 +182,7 @@ def get_takeover(session_id: str, renew: int = 0,
         sess = svc.get_session(session_id)
         if not sess:
             raise svc.TakeoverError(404, "not_found", "接管会话不存在")
-        if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        if not svc.same_user(sess.get("user_id"), user):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         _skipped = svc.skipped_dispatch_count(sess)
         _sess_view = {k: v for k, v in sess.items() if k != "bundle_json"}
@@ -215,7 +215,7 @@ def takeover_progress(session_id: str, body: ProgressBody,
             from src.kernel.auth_sdk.auth_token import takeover_session_key as _tko_key
             if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
                 raise svc.TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
-        elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        elif not svc.same_user(sess.get("user_id"), user):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         if sess.get("status") != svc.takeover_active_status():
             raise svc.TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")

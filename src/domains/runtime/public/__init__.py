@@ -6770,6 +6770,15 @@ def takeover_active_status() -> str:
 def now_iso() -> str:
     """UTC ISO 时间戳，与 takeover 内部同一口径。"""
     return _takeover_impl._now_iso()
+
+
+def same_user(sess_user_id, user: dict) -> bool:
+    """接管会话归属校验（uuid / 历史整数 id 统一折算成字符串比较）。
+
+    原路由里写 `int(sess["user_id"]) != int(user["id"])` —— D105 后账号 id 是 uuid，
+    每次调用都 ValueError → 接管端点 500。判定实现归 runtime 域，外域只调这个门面。
+    """
+    return _takeover_impl._same_user(sess_user_id, user)
 abort_takeover = _takeover_impl.abort_takeover
 append_takeover_messages = _takeover_impl.append_takeover_messages
 attach_client_session = _takeover_impl.attach_client_session

@@ -2041,6 +2041,8 @@ _ACCOUNT_FK_USER_ID_COLS = (
     ("org_member", "user_id"),
     ("org_invitation", "invitee_user_id"),
     ("audit_logs", "user_id"),
+    # 接管会话归属人（Issue: 接管 500 真因 —— 账号 id 已 uuid，INT 列 int() 崩）
+    ("takeover_sessions", "user_id"),
     ("exchange_codes", "user_id"),
     ("binding_tickets", "initiating_user_id"),
     ("binding_tickets", "original_user_id"),
@@ -3867,6 +3869,41 @@ register_migration(
     name="takeover-host-os-v1",
     kind="safe",
     fn=_fn_takeover_host_os_v1,
+)
+
+
+def _fn_takeover_sessions_user_id_uuid_v1() -> None:
+    """接管会话 user_id 放宽为 VARCHAR(36)：D105 后账号 id 是 uuid 字符串。
+
+    存量库该列是 INTEGER —— `int(user["id"])` 直接 ValueError（接管接口 500 的真因），
+    MySQL 侧即便吞掉也只会把 uuid 截成 0 → 会话归属校验永远不相等。
+    MySQL 按 information_schema 探测后 MODIFY（一次性、幂等）；sqlite 动态类型本就
+    接受文本，且新库 DDL 已是 VARCHAR(36)，无需重建。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+
+    if get_db_backend() == "sqlite":
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT DATA_TYPE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='takeover_sessions' "
+            "AND COLUMN_NAME='user_id'")
+        row = c.fetchone()
+        dtype = str((row[0] if row else "") or "").lower()
+        if dtype in ("int", "bigint", "smallint", "tinyint", "mediumint"):
+            c.execute("ALTER TABLE takeover_sessions MODIFY COLUMN user_id "
+                      "VARCHAR(36) NOT NULL DEFAULT '0'")
+            log.info("takeover_sessions.user_id widened to VARCHAR(36) (uuid)")
+        db.commit()
+
+
+register_migration(
+    version="202611200001",
+    name="takeover-sessions-user-id-uuid-v1",
+    kind="safe",
+    fn=_fn_takeover_sessions_user_id_uuid_v1,
 )
 
 

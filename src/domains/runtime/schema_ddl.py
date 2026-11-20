@@ -574,7 +574,9 @@ CREATE TABLE IF NOT EXISTS takeover_sessions (
     repo_key          VARCHAR(255) NOT NULL DEFAULT '',
     issue_id          VARCHAR(32) NOT NULL DEFAULT '',
     agent_type        VARCHAR(32) NOT NULL DEFAULT '',
-    user_id           INTEGER NOT NULL DEFAULT 0,
+    -- D105 口径：账号 id 是 uuid 字符串（grape_accounts.id VARCHAR(36)），
+    -- INTEGER 会在这里 int() 崩（ValueError），统一 VARCHAR(36)。
+    user_id           VARCHAR(36) NOT NULL DEFAULT '0',
     username          VARCHAR(128) NOT NULL DEFAULT '',
     runtime_id        INTEGER NOT NULL DEFAULT 0,
     platform          VARCHAR(32) NOT NULL DEFAULT '',
