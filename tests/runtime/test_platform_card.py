@@ -87,6 +87,21 @@ def test_default_cards_match_current_behavior():
     assert {"gitcode", "github", "gitlab"} <= set(list_vcs_platforms())
 
 
+def test_gitlab_pat_create_url_uses_current_gitlab_route():
+    """GitLab 17.0 删了 /profile/personal_access_tokens。PAT 深链必须是
+    /-/user_settings/personal_access_tokens，自建实例同构派生（一实例一卡）。"""
+    invalidate_platform_card_cache()
+    gl = get_platform_card("gitlab")
+    assert gl is not None and gl.pat_create_url == "https://gitlab.com/-/user_settings/personal_access_tokens"
+
+    selfhosted = build_platform_card("gitlab-corp", {"dialect": "gitlab", "host": "gl.example.com"})
+    assert selfhosted.pat_create_url == "https://gl.example.com/-/user_settings/personal_access_tokens"
+
+    # 其他方言保持原路径（gitcode/gitee 的 PAT 页仍在 /profile/...）
+    gc = get_platform_card("gitcode")
+    assert gc is not None and gc.pat_create_url.endswith("/profile/personal_access_tokens")
+
+
 def test_card_has_no_oauth_fields():
     """D10：仓库平台卡不得携带 OAuth 字段（登录渠道卡专属）。"""
     card = build_platform_card("gitee", GITEE_CARD)

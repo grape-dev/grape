@@ -535,7 +535,11 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         global_bot_meta_key=str(raw.get("global_bot_meta_key") or f"global_bot_{provider}_token"),
         global_bot_status_meta_key=str(raw.get("global_bot_status_meta_key")
                                        or f"global_{provider}_bot_token_status"),
+        # 方言默认优先：GitLab 17.0 起 PAT 页从 /profile/personal_access_tokens 迁到
+        # /-/user_settings/personal_access_tokens（旧路由移除后是 404），gitcode/gitee 仍是
+        # /profile/...，所以不能一个模板套所有方言。
         pat_create_url=str(raw.get("pat_create_url")
+                           or _dialect_default(dialect, "pat_create_url", host)
                            or f"https://{host}/profile/personal_access_tokens"),
         brand_color=_build_brand_color(provider, raw),
         legacy_token_symbol=str(raw.get("legacy_token_symbol") or "").strip(),
@@ -558,6 +562,9 @@ _DIALECT_DEFAULTS: dict[str, dict] = {
         "webhook_dialect": "gitlab_v4",
         "event_header": "X-Gitlab-Event",
         "download_base": "https://{host}",
+        # GitLab 17.0（2024-05）删除了 /profile/personal_access_tokens 旧路由，
+        # PAT 页迁到 /-/user_settings/personal_access_tokens（自建实例同构）。
+        "pat_create_url": "https://{host}/-/user_settings/personal_access_tokens",
     },
 }
 

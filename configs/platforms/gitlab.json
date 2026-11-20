@@ -32,5 +32,6 @@
   "webhook_token_field": "",
   "bot_username": "",
   "webhook_dialect": "gitlab_v4",
-  "ca_bundle": ""
+  "ca_bundle": "",
+  "pat_create_url": "https://gitlab.com/-/user_settings/personal_access_tokens"
 }
