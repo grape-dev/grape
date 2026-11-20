@@ -159,3 +159,102 @@ def test_t6_scene_change_syncs_both_reads():
     assert detail["valid_targets"] == ["coding", "qa"]
     assert ck["in_scene"] is True
     assert ck["valid_targets"] == detail["valid_targets"]
+
+
+# ===== Issue #3582 复审补充：标识别名一致 / 未解析口径 / 路由级契约 =====
+
+def test_t7_node_id_and_tag_are_unified_targets():
+    """AC1：id 与 tag 不同时，valid_targets 同时收录两者（= handoff 接受集合）。"""
+    _set_issue(7, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "coding", "tag": "coding-agent"},
+        {"id": "qa", "tag": "qa"},
+    ])
+    detail = resolve_scene_targets("scene-3582", repo_key=REPO)
+    assert detail["valid_targets"] == ["coding", "coding-agent", "qa"]
+    # id 与 tag 别名均放行，清单不再遗漏 tag
+    assert _scene_node_check(REPO, 7, "coding")["in_scene"] is True
+    assert _scene_node_check(REPO, 7, "coding-agent")["in_scene"] is True
+    assert detail["valid_targets"] == _scene_node_check(
+        REPO, 7, "coding-agent")["valid_targets"]
+
+
+def test_t8_unresolved_skill_kept_dispatchable_by_compat_policy():
+    """口径注明：技能名不在 skill 表（官方内置包）按存量兼容视为可派发。"""
+    _set_issue(8, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "coding", "skill": "issue3582-not-in-skill-table"},
+    ])
+    detail = resolve_scene_targets("scene-3582", repo_key=REPO)
+    assert detail["valid_targets"] == ["coding"]
+    assert _scene_node_check(REPO, 8, "coding")["in_scene"] is True
+
+
+def _client_and_managed_repo(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.api.main import app
+    from src.api.deps import get_user_or_none, get_current_user_or_api_key
+    import src.api.session_store as store
+    import src.domains.mgmt.user.db as user_db
+
+    user = {"id": 1, "username": "alice", "auth_type": "jwt"}
+    app.dependency_overrides[get_user_or_none] = lambda: user
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: user
+    monkeypatch.setattr(user_db, "get_managed_repos",
+                        lambda uid: [{"repo_key": REPO}])
+    monkeypatch.setattr(store, "is_agent_enabled", lambda *a, **k: True)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR IGNORE INTO managed_repos "
+            "(repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
+            (REPO, "org", "issue3582", "org/issue3582"))
+        db.commit()
+    return TestClient(app), app
+
+
+def test_t9_route_scene_detail_exposes_available_targets(monkeypatch):
+    """AC3/AC5：GET /api/scenes/{id} 的 available_nodes/valid_targets 与 handoff 同源。"""
+    _set_issue(9, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "coding", "tag": "coding-agent"},
+        {"id": "qa", "tag": "qa", "enabled": False},
+    ])
+    client, app = _client_and_managed_repo(monkeypatch)
+    try:
+        r = client.get("/api/scenes/scene-3582?repo=org/issue3582")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [n["id"] for n in body["available_nodes"]] == ["coding"]
+        assert [n["id"] for n in body["nodes"]] == ["coding", "qa"]
+        assert body["valid_targets"] == ["coding", "coding-agent"]
+        assert body["valid_targets"] == _scene_node_check(
+            REPO, 9, "coding")["valid_targets"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_t10_route_a2a_409_structured_reason_and_targets(monkeypatch):
+    """AC3/AC5：POST /api/a2a 真实 409 响应含 conflict_reason + valid_targets。"""
+    _set_issue(10, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "coding", "tag": "coding-agent"},
+        {"id": "qa", "tag": "qa", "enabled": False},
+    ])
+    client, app = _client_and_managed_repo(monkeypatch)
+    try:
+        payload = {"repository": "org/issue3582", "issue_number": "10",
+                   "context": "issue3582 route 409"}
+        r = client.post("/api/a2a", json={"agent": "sre", "payload": payload})
+        assert r.status_code == 409, r.text
+        data = r.json()
+        assert data["conflict_reason"] == "not_in_scene"
+        assert data["valid_targets"] == ["coding", "coding-agent"]
+
+        r2 = client.post("/api/a2a", json={"agent": "qa", "payload": payload})
+        assert r2.status_code == 409, r2.text
+        data2 = r2.json()
+        assert data2["conflict_reason"] == "node_disabled"
+        assert data2["valid_targets"] == ["coding", "coding-agent"]
+    finally:
+        app.dependency_overrides.clear()
