@@ -495,6 +495,33 @@ def _version_from_content(content: str) -> str:
     return "—"
 
 
+def _validate_repo_param(repo: str) -> None:
+    """校验 repo 查询参数：空 / owner/repo / <provider>:owner/repo 合规，其余 400。
+
+    Issue #1790：不合规（裸仓库名、残留冒号、缺失 owner、多余路径段）必须显式报错，
+    不能静默回退到官方列表——否则前端把错参数当成功，看到的列表是错的。
+    平台前缀不硬编码：新平台接入后 <provider> 仍能通过，只校验结构。
+    """
+    if not repo:
+        return
+
+    def _bad(reason: str):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"repo 参数不合规（{reason}）: {repo!r}"})
+
+    _rest = repo
+    if ":" in repo:
+        _prefix, _rest = repo.split(":", 1)
+        if not _prefix or not _prefix.strip() or _prefix != _prefix.strip():
+            _bad("平台前缀为空或不合法")
+    if not _rest or _rest != _rest.strip():
+        _bad("owner/repo 为空或含首尾空格")
+    _segs = _rest.split("/")
+    if len(_segs) != 2 or not _segs[0] or not _segs[1]:
+        _bad("需为 owner/repo 两段且都非空")
+    if any(c.isspace() for c in _rest):
+        _bad("含空白字符")
+
+
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",                agent_type: str = "", category_id: int = 0,
                 cat_l1_id: int = 0, cat_l2_id: int = 0,
