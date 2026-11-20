@@ -74,6 +74,41 @@
         </div>
       </div>
 
+      <!-- 平台卡高级配置：/admin/repo-platforms 的列表投影不含 ca_bundle/download_base/
+           存储字段等，所以自建实例的私有 CA 在旧页面上根本没有落点（2026-11-20 用户实测
+           "管理台看不到配 CA 的地方"）。这里按平台卡 GET 的整卡展示并允许编辑，保存时整卡
+           回写（未展示字段原样带回），避免手抄白名单漏字段导致的静默降级。 -->
+      <div class="ap-sect">
+        {{ t('page.sec_card', '平台卡（高级）') }}
+        <AGHelp
+          :title="t('page.sec_card', '平台卡（高级）')"
+          :what="t('page.card_what', '平台卡的完整定义：自建 GitLab 实例的私有 CA 填 ca_bundle（PEM 绝对路径，空=系统 CA）；PAT 创建页地址、下载基址等也在这里。')"
+          values="PUT /api/admin/vcs-platforms"
+          :note="t('page.card_note', '保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达。')"
+        />
+        <button class="ap-btn" @click="editMode ? cancelEdit() : startEdit()">
+          {{ editMode ? t('page.cancel') : t('page.edit', '编辑') }}
+        </button>
+      </div>
+      <div class="ap-group">
+        <div v-for="f in EDIT_FIELDS" :key="f" class="ap-row">
+          <span class="ap-label">{{ f }}</span>
+          <input
+            v-if="editMode"
+            v-model="editForm[f]"
+            class="ap-input"
+            :placeholder="f === 'ca_bundle' ? t('page.ca_ph', '/etc/ssl/certs/corp-ca.pem（空=系统 CA）') : ''"
+          />
+          <span v-else class="ap-val mono">{{ fmt(cardVal(f)) }}</span>
+        </div>
+        <div v-if="cardLoading" class="ap-row"><span class="ap-hint">{{ t('page.loading') }}</span></div>
+        <div v-if="editMode" class="ap-add">
+          <span class="ap-hint">{{ cardError }}</span>
+          <button class="ap-btn" @click="saveCard(current)">{{ t('page.save', '保存') }}</button>
+        </div>
+        <div v-else-if="cardError" class="ap-row"><span class="ap-err">{{ cardError }}</span></div>
+      </div>
+
       <!-- 平台 bot（D110）：一平台一个 bot，落 grape_t_repo_platforms.bot_token_enc。
            平台卡上的 bot_username 只做首次播种；管理面写下的值才是事实。 -->
       <div class="ap-sect">
@@ -189,6 +224,80 @@ function back() {
 function open(p) {
   error.value = ''
   selected.value = p.provider
+  editMode.value = false
+  cardError.value = ''
+  loadCard(p.provider)
+}
+
+// ── 平台卡（高级）：整卡读 → 整卡回写 ───────────────────────────────────────
+// 列表投影(/repo-platforms)只带用户面需要的键，ca_bundle/download_base/存储字段都不在，
+// 所以编辑必须以 /admin/vcs-platforms 的整卡为底稿，保存时把未编辑字段原样带回。
+const EDIT_FIELDS = ['name', 'dialect', 'host', 'api_base', 'api_auth', 'webhook_path',
+  'event_header', 'webhook_verify', 'webhook_dialect', 'clone_auth', 'download_base',
+  'ca_bundle', 'pat_create_url', 'brand_color']
+// 只读派生键：不是卡字段，回写会被 Builder 判未知键整卡拒绝
+const CARD_DROP = new Set(['provider', 'source', 'config_hash', 'enabled',
+  'bot_token_configured', 'bot_token_health', 'webhook_token_configured',
+  'webhook_token_supported', 'token_env'])
+const card = ref(null)
+const cardLoading = ref(false)
+const cardError = ref('')
+const editMode = ref(false)
+const editForm = reactive({})
+
+function cardVal(f) {
+  const c = card.value || {}
+  if (f in c) return c[f]
+  return current.value ? current.value[f] : ''
+}
+
+async function loadCard(provider) {
+  cardLoading.value = true
+  cardError.value = ''
+  try {
+    const r = await props.api('/vcs-platforms')
+    card.value = (r.cards || {})[provider] || null
+    if (!card.value) cardError.value = t('page.card_missing', '该平台没有平台卡（仅表投影），高级配置不可编辑')
+  } catch (e) {
+    cardError.value = `${t('page.load_failed')}：${e.message || e}`
+  } finally {
+    cardLoading.value = false
+  }
+}
+
+function startEdit() {
+  if (!card.value) return
+  cardError.value = ''
+  for (const f of EDIT_FIELDS) editForm[f] = card.value[f] === undefined || card.value[f] === null ? '' : String(card.value[f])
+  editMode.value = true
+}
+
+function cancelEdit() {
+  editMode.value = false
+  cardError.value = ''
+}
+
+async function saveCard(p) {
+  cardError.value = ''
+  const base = {}
+  const src = card.value || {}
+  for (const k of Object.keys(src)) {
+    if (CARD_DROP.has(k)) continue
+    const v = src[k]
+    if (v === null || v === undefined) continue
+    base[k] = v
+  }
+  for (const f of EDIT_FIELDS) base[f] = (editForm[f] || '').trim()
+  try {
+    await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [p.provider]: base } } })
+    editMode.value = false
+    await loadCard(p.provider)
+    await load()
+  } catch (e) {
+    const d = e.detail || {}
+    const detail = d.errors ? d.errors.join('；') : d.message || e.message || e
+    cardError.value = `${t('page.save_failed')}：${detail}`
+  }
 }
 
 function docRow(field) {
