@@ -80,3 +80,12 @@ R10 事件验签/幂等/重放/实例隔离；R11 PAT 不产生登录身份；R1
    `assignee_ids`（纯数字直接采用、解析不到只告警不阻断）。
 5. 回归用例：`test_issue_3580_namespace_routes.py`（8）、`test_issue_3580_gitlab_repo_paths.py`（8）、
    `test_issue_3580_upstream_tls.py`（6）、`test_issue_3580_gitlab_assignee.py`（4）。
+
+## 实例接入（自建 GitLab，2026-11-20）
+
+自建实例的接入口径、场景用例与决策见同目录两份文档：`gitlab-instance-requirements.md`（S1–S8 场景）与
+`gitlab-instance-design.md`（D1–D10 决策）。要点：实例 = 一张平台卡（`provider` 即 repo_key 前缀），
+接入走既有 `PUT /api/admin/vcs-platforms`（Builder 校验 + host/webhook_path 唯一 + 审计），
+**不新增平台对象写接口、不新增前端页面**；接入后用
+`python scripts/probe_gitlab_instance.py <provider> --token <PAT> --repo <owner>/<repo>` 六项自检
+（token / 列仓 / namespace / 树 / 文件 / 建钩 dry-run / CA）。
