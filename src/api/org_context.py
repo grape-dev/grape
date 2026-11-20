@@ -117,7 +117,15 @@ def validate_org_scene_entry(repo_key: str, scene_id: str, context_org_id: str) 
     if scene_org_id in ("0", "0.0"):
         # D105-15 哨兵：'0' 表示无组织，不能当成组织场景（bool('0') 为 True）
         scene_org_id = ""
-    is_org_scene = scene_meta.get("scene_type") == "org" or bool(scene_org_id)
+    is_org_scene = scene_meta.get("scene_type") == "org"
+    if scene_org_id and not is_org_scene:
+        # 场景行上的 org_id 并不等于「组织场景」：建场景时会写入创建者归属组织，
+        # 个人组织（organization.is_personal=1）的 org_id 只是归属标记。把它当成
+        # 组织场景，会让「普通仓库 + 个人流水线」被判成「组织仓库/组织场景必须成对」
+        # 而直接 400（grape-dev/grape 下 10 条个人流水线全线建单失败）。
+        scene_org = get_org(scene_org_id) or {}
+        if not scene_org.get("is_personal"):
+            is_org_scene = True
     # Issue #2118 复审：普通仓库引用组织模板（官方 market scope='org' / file
     # scene_type='org' / 其它仓库的 org 场景行）时，本仓库场景表查不到 org 属性，
     # 只看 devops_pipeline_scene 会把错配当成普通场景放行。这里补一层「模板来源」
