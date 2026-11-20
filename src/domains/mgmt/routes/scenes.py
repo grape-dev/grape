@@ -2380,8 +2380,7 @@ def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
     return attach_node_scope_checks(nodes, repo_key, scene_id=scene_id)
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Re-bind the node to a repo/official skill before dispatch.")
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Issue #3582: `nodes` is the full scene definition (including disabled/unresolvable nodes) for display and diagnosis; the dispatchable set is `available_nodes` / `valid_targets` (same resolver as a2a handoff, so every listed target is accepted without 409). `valid_targets` contains each valid node's id and tag aliases (deduplicated).")
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Issue #3582: `nodes` is the full scene definition (including disabled/unresolvable nodes) for display and diagnosis; the dispatchable set is `available_nodes` / `valid_targets` (same resolver as a2a handoff, so every listed target is accepted without 409). `valid_targets` contains each valid node's dispatchable role name (node id first, display tag fallback, intersected with the platform dispatchable agent whitelist), matching exactly what POST /api/a2a accepts.")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
 
@@ -2420,7 +2419,8 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
     # （scene_targets.resolve_scene_targets，enabled/resolvable 过滤口径一致）：
     # - nodes：全量场景定义（含 disabled/unresolvable，展示/诊断用，不是可用清单）；
     # - available_nodes：可用节点（enabled 且 resolvable）；
-    # - valid_targets：可用节点的 id/tag 别名集合，即 handoff 接受的目标集合。
+    # - valid_targets：可用节点的可投递角色名（id 优先、tag 兜底，与
+    #   DISPATCHABLE_AGENTS 交集，复审 #202444109），即 POST /api/a2a 接受集合。
     from src.api.scene_targets import resolve_scene_targets
     _res = resolve_scene_targets(resolved_id, repo_key=repo_key, cfg=cfg)
     nodes = _res.get("nodes") or cfg.get("nodes") or []

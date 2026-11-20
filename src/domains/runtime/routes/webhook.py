@@ -20,6 +20,7 @@ from src.api.pipeline_constants import (
 # Issue #3758：模块级导入 = 符号缺失时进程启动即失败（fail-fast）；
 # 不再在请求内 import 后被 except Exception 吞成静默 WARNING（#1841 失效根因）。
 from src.domains.runtime.engine.repogit import resolve_work_branch
+from src.api.scene_targets import REASON_NOT_IN_SCENE  # Issue #3582 复审：409 skipped/conflict_reason 同源常量
 
 router = APIRouter(tags=["webhook"])
 
@@ -1468,9 +1469,9 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     `scenes detail` 同一解析函数、同一过滤口径（enabled + resolvable），
     保证「scenes detail 清单内的合法节点」handoff 均放行；禁用/技能不可
     解析节点不出现在有效目标集合（两处同步生效）。
-    Issue #3582 复审：目标标识与 resolver 的 id/tag 别名口径一致，冲突原因
-    （node_disabled / skill_unresolvable）由 resolver 直接产出，此处仅投影，
-    不再二次遍历节点判定。
+    Issue #3582 复审（#202444109）：valid_targets 仅含实际可投递角色（id 优先、
+    tag 兜底，与 DISPATCHABLE_AGENTS 交集），conflict_reason 由 resolver 直接
+    产出（常量单一来源），此处仅投影，不再二次遍历节点判定。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
     Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
@@ -1488,6 +1489,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     try:
         _res = resolve_scene_targets(_scene_id, repo_key=repo_key)
     except Exception:
+        # 解析异常的空集合与 resolver 的空结果同构（常量/键复用，不再散落字面量）
         _res = {"scene_id": _scene_id, "cfg": None, "nodes": [],
                 "available_nodes": [], "valid_targets": [],
                 "target_reasons": {}}
@@ -1498,7 +1500,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     conflict_reason = ""
     if not in_scene:
         target_reasons = _res.get("target_reasons") or {}
-        conflict_reason = target_reasons.get(target) or "not_in_scene"
+        conflict_reason = target_reasons.get(target) or REASON_NOT_IN_SCENE
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
@@ -2808,21 +2810,23 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # node_disabled / skill_unresolvable）+ valid_targets（当前
                 # 有效目标清单，与 scenes detail 同一解析函数产出），调用方
                 # 可据此修正目标后重试；沿用 #2555 单点收口的 skip 响应。
-                _reason = _scene_ck.get("conflict_reason") or "not_in_scene"
+                # skipped 保持稳定枚举 not_in_scene（旧消费方与 help 文档均按
+                # 此字面判定），粒度归因放 conflict_reason。
+                _reason = _scene_ck.get("conflict_reason") or REASON_NOT_IN_SCENE
                 _valid = list(_scene_ck.get("valid_targets") or [])
-                _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
+                _scene_node_ids = [_node_id(n) for n in (_scene_ck.get("nodes") or [])]
                 _nis_reason = _a2a_skip_reason("not_in_scene", agent=agent_name)
                 log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} conflict_reason={_reason} valid_targets={_valid} (nodes={_scene_node_ids})")
                 return _a2a_stamp_degraded(_a2a_skip_response(
                     "not_in_scene", agent=agent_name, source_seq=_source_seq,
                     status="skipped", status_code=409,
                     reason=_nis_reason,
-                    detail={"agent": agent_name},
+                    detail={"agent": agent_name, "conflict_reason": _reason},
                     extra={
                         "scene": _scene_ck.get("scene_id"),
                         "conflict_reason": _reason,
                         "valid_targets": _valid,
-                        "message": f"agent '{agent_name}' is not accepted by the current scene pipeline (conflict_reason={_reason}, valid_targets={_valid}, nodes={_scene_node_ids})",
+                        "message": f"agent '{agent_name}' is not accepted by the current scene pipeline (scene={_scene_ck.get('scene_id')}, nodes={_scene_node_ids}, conflict_reason={_reason}, valid_targets={_valid})",
                     }), _a2a_degraded)
 
         # Issue #2792（#2747 子单4，Spec 案 2）：前向跳步披露——零语义变更。

@@ -710,6 +710,14 @@ def set_scene_nodes(nodes_json: str, scene_id: str | None = None, row_id: int | 
             return {"action": "mismatch", "changed": 0, "hash": new_hash}
         c.execute(f"UPDATE devops_pipeline_scene SET nodes_json=%s, updated_at=NOW() WHERE {where}",
                   (nodes_json,) + params)
+        # Issue #3582 复审（#202444109 AC4）：节点写路径立即失效 pipeline 配置缓存，
+        # 保证 scenes detail 与 a2a handoff 同步读到新节点（不再依赖 60s TTL 兜底）。
+        # 进程内立即生效；跨进程读侧最多 60s TTL 陈旧（与 create/update 同口径）。
+        try:
+            from src.domains.mgmt.pipeline_config import invalidate_scene_cache
+            invalidate_scene_cache(scene_id or "", repo_key or "")
+        except Exception:
+            pass
         return {"action": "updated", "changed": int(c.rowcount or 0), "hash": new_hash}
 
 
@@ -4128,7 +4136,17 @@ def scene_nodes_write_by_id(nodes_json: str, now_iso: str, row_id: int,
     """
     with _same_domain_write_cursor(cursor) as c:
         cur = c.execute(_any_sql("scene_nodes_write_by_id"), (nodes_json, now_iso, row_id))
-        return int(getattr(cur, "rowcount", 0) or 0)
+        changed = int(getattr(cur, "rowcount", 0) or 0)
+        # Issue #3582 复审（#202444109 AC4）：按行号覆写节点后失效 pipeline 配置
+        # 缓存。此处只有 row_id、无法定位 (scene_id, repo_key)，按安全兜底清空
+        # 全部缓存（低频运维路径，代价可接受）。
+        if changed:
+            try:
+                from src.domains.mgmt.pipeline_config import invalidate_scene_cache
+                invalidate_scene_cache()
+            except Exception:
+                pass
+        return changed
 
 
 def list_pr_subscription_scenes_any(repo_key: str) -> list[tuple]:

@@ -8,16 +8,24 @@
   pipelines.json → default，含进程级缓存）；
 - 过滤口径统一：``enabled``（节点未启用不在可用清单）+ ``resolvable``
   （``scene_skill_scope.evaluate`` 单一判定器）；
-- 目标标识口径统一：节点的 ``id`` 与 ``tag`` 均可作为 handoff 目标
-  （与 ``engine_select.node_matches_agent_role`` 的 id 优先/tag 兜底一致），
-  ``valid_targets`` 同时收录两者（去重），保证「清单 = handoff 接受集合」；
+- 目标标识口径统一（复审 #202444109）：节点角色取 ``id`` 优先、``tag``
+  兜底（``engine_select.node_agent_role``），并与平台可派发白名单
+  ``DISPATCHABLE_AGENTS`` 取交集——``valid_targets`` 只含实际可投递角色，
+  与 POST /api/a2a 的接受集合一致（展示用 tag 阶段名不可作为 handoff 目标，
+  否则清单会宣告被 400 拒绝的名字）；
 - 不可派发目标的 ``conflict_reason`` 归因也在此产出（``target_reasons``），
-  webhook 仅做投影，不再二次判定。
+  webhook 仅做投影，不再二次判定；原因字面量以本模块常量为单一来源。
 """
 
 from __future__ import annotations
 
 from typing import Optional
+
+# ===== Issue #3582 复审（PR 评论 #202444109）：冲突原因常量（单一来源） =====
+# resolver 归因 / webhook 409 投影共用，避免字面量散落导致两侧口径漂移。
+REASON_NOT_IN_SCENE = "not_in_scene"
+REASON_NODE_DISABLED = "node_disabled"
+REASON_SKILL_UNRESOLVABLE = "skill_unresolvable"
 
 
 def attach_node_scope_checks(nodes: list, repo_key: str,
@@ -63,21 +71,21 @@ def node_scope_check(node: dict, repo_key: str, scene_id: str = "",
     }
 
 
-def _node_aliases(node: dict) -> list:
-    """节点的可接受目标标识：id 与 tag（不同时都收录，保持顺序去重）。
+def _dispatchable_role(node) -> str:
+    """节点的实际可投递角色名；非可派发白名单角色返回空串。
 
-    与 ``engine_select.node_matches_agent_role`` 的「id 优先、tag 兜底」保持
-    一致，使 ``valid_targets`` 覆盖 handoff 实际接受的全部标识。
+    Issue #3582 复审（阻塞项 AC1/AC2）：``valid_targets`` 必须等于
+    POST /api/a2a 实际接受的目标集合。场景写侧 ``tag`` 是展示用阶段名
+    （可为中文等任意值，scenes.py::_validate_scene_node_roles），不是可投递
+    角色；因此节点角色复用 ``engine_select.node_agent_role``（id 优先、tag
+    兜底——与 handoff/引擎选择的匹配口径同一实现），再与
+    ``DISPATCHABLE_AGENTS`` 取交集，保证清单内每个名字都能通过 POST 的
+    白名单 400 校验。
     """
-    aliases: list = []
-    for key in ("id", "tag"):
-        value = node.get(key)
-        if value is None or value == "":
-            continue
-        text = str(value)
-        if text not in aliases:
-            aliases.append(text)
-    return aliases
+    from src.api.pipeline_constants import DISPATCHABLE_AGENTS
+    from src.domains.runtime.engine.engine_select import node_agent_role
+    role = node_agent_role(node)
+    return role if role in DISPATCHABLE_AGENTS else ""
 
 
 def resolve_scene_targets(scene_id: str, repo_key: str = "",
@@ -91,9 +99,10 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
       ⚠️ 这是场景定义全量（含 disabled/unresolvable），不是可用派发清单；
       调用方按清单交办时应使用 ``valid_targets`` / ``available_nodes``。
     - ``available_nodes``：可用节点（enabled 且 resolvable），按场景定义顺序；
-    - ``valid_targets``：当前有效派发目标清单——可用节点的 id/tag 别名
-      （去重，按场景定义顺序），即 handoff 接受的目标集合；
-    - ``target_reasons``：不可派发别名 → 冲突原因（node_disabled /
+    - ``valid_targets``：当前有效派发目标清单——可用节点的可投递角色名
+      （id 优先、tag 兜底，与 DISPATCHABLE_AGENTS 取交集后去重，按场景
+      定义顺序），即 POST /api/a2a 实际接受的目标集合；
+    - ``target_reasons``：不可派发角色 → 冲突原因（node_disabled /
       skill_unresolvable），供 409 ``conflict_reason`` 直接投影；不在场景内
       的目标由调用方回退为 not_in_scene。
 
@@ -120,20 +129,21 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
     for item in nodes:
         if not isinstance(item, dict):
             continue
-        aliases = _node_aliases(item)
-        if not aliases:
+        role = _dispatchable_role(item)
+        if not role:
+            # 展示用 tag（非白名单角色）不是可投递目标：既不进 valid_targets
+            # （POST /api/a2a 会按白名单 400 拒绝），也不进 target_reasons
+            # （handoff 到达 _scene_node_check 的目标必先通过 400 白名单）。
             continue
         enabled = item.get("enabled", True) is not False
         resolvable = bool(item.get("resolvable"))
         if enabled and resolvable:
             available_nodes.append(item)
-            for alias in aliases:
-                if alias not in valid_targets:
-                    valid_targets.append(alias)
+            if role not in valid_targets:
+                valid_targets.append(role)
             continue
-        reason = "node_disabled" if not enabled else "skill_unresolvable"
-        for alias in aliases:
-            target_reasons[alias] = reason
+        reason = REASON_NODE_DISABLED if not enabled else REASON_SKILL_UNRESOLVABLE
+        target_reasons[role] = reason
     return {"scene_id": resolved_id, "cfg": cfg, "nodes": nodes,
             "available_nodes": available_nodes,
             "valid_targets": valid_targets, "target_reasons": target_reasons}
