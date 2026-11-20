@@ -68,29 +68,41 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
         if not _rk:
             missing.append(f"repo_key is empty for git agent {agent_type} (task={tid})")
         else:
+            # worker 进程没有 assembly 层：tokens 端口未绑定 = 本进程不做
+            # repo 配置级别判定（token 由 claim 现取注入），跳过整段。
+            # 不跳过会在 worker 上对每个 git 类任务刷一条「no repo token
+            # config ... likely yield empty token」。
+            _skip_level_probe = False
             try:
-                from src.kernel.token_service import resolve_repo_config_level
-                _lvl = (resolve_repo_config_level(_rk).level or "")
-                if _lvl == "user":
-                    log.warning(
-                        f"repo token is user-level for git agent {agent_type} "
-                        f"(task={tid}) — claim-time injection will provide it")
-                elif _lvl == "":
-                    log.warning(
-                        f"no repo token config for git agent {agent_type} "
-                        f"(task={tid}, repo={_rk}) — claim-time injection "
-                        f"will likely yield empty token")
-            except Exception as _dce:
-                # 检查器自身故障不阻断任务（跳过，由 claim 现取自然暴露）。
-                # worker 侧没有 assembly 层，`vcs_cards` 等 kernel 端口天然未绑定——
-                # 那不是缺陷，是「本进程没有该能力」，按 debug 记一条即可，否则每个
-                # git 类任务都刷一条 warning（Windows worker 实测每任务一条）。
-                if "is not bound" in str(_dce):
-                    log.debug(f"dependency_check token level probe unavailable "
-                              f"(kernel port unbound, task={tid}): {_dce}")
-                else:
-                    log.warning(f"dependency_check token level probe failed "
-                                f"(skipped, task={tid}): {_dce}")
+                from src.kernel.ports import tokens as _tokens_port
+                if not _tokens_port.is_bound():
+                    log.debug(f"dependency_check: tokens port unbound "
+                              f"(worker process), repo-level probe skipped (task={tid})")
+                    _skip_level_probe = True
+            except Exception:  # noqa: BLE001 - 端口探测失败按原语义继续
+                _skip_level_probe = False
+            if not _skip_level_probe:
+                try:
+                    from src.kernel.token_service import resolve_repo_config_level
+                    _lvl = (resolve_repo_config_level(_rk).level or "")
+                    if _lvl == "user":
+                        log.warning(
+                            f"repo token is user-level for git agent {agent_type} "
+                            f"(task={tid}) — claim-time injection will provide it")
+                    elif _lvl == "":
+                        log.warning(
+                            f"no repo token config for git agent {agent_type} "
+                            f"(task={tid}, repo={_rk}) — claim-time injection "
+                            f"will likely yield empty token")
+                except Exception as _dce:
+                    # 检查器自身故障不阻断任务（跳过，由 claim 现取自然暴露）。
+                    # 端口未绑定不是缺陷（worker 无装配层），按 debug 记一条。
+                    if "is not bound" in str(_dce):
+                        log.debug(f"dependency_check token level probe unavailable "
+                                  f"(kernel port unbound, task={tid}): {_dce}")
+                    else:
+                        log.warning(f"dependency_check token level probe failed "
+                                    f"(skipped, task={tid}): {_dce}")
 
     # 5. Issue session for git worktree agents (warning, not hard fail)
     issue_session_id = task.get("issue_session_id") or ""

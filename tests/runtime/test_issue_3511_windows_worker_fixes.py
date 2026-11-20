@@ -153,26 +153,39 @@ def test_install_worker_ps1_deps_cover_worker_deps():
     assert not missing, f"install-worker.ps1 缺依赖: {missing}"
 
 
-# ── 6. kernel 端口未绑定不算故障 ──────────────────────────────────────
-def test_kernel_port_unbound_probe_is_debug(caplog):
-    """worker 侧 kernel 端口未绑定 → debug，不刷 warning。"""
+# ── 6. worker 无装配层：端口未绑定路径必须安静 ─────────────────────
+def test_token_service_degrades_when_port_unbound(monkeypatch):
+    """worker 进程没有 contracts_wiring → 端口未绑定，查询返回空级别不抛。"""
+    from src.kernel.ports import tokens as _tokens_port
+    from src.kernel import token_service
+
+    monkeypatch.setattr(_tokens_port, "is_bound", lambda: False)
+    monkeypatch.setattr(
+        _tokens_port, "get_credential",
+        lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("kernel port 'tokens' is not bound. The assembly layer")),
+        raising=False)
+    # 端口未绑定时 provider 构造/fetch 都会抛 PortNotBound，统一降级
+    from src.kernel.ports._base import PortNotBound
+    monkeypatch.setattr(
+        token_service, "create_provider_from_repo_key",
+        lambda _rk: (_ for _ in ()).throw(PortNotBound("tokens")))
+
+    res = token_service.resolve_repo_config_level("gitcode/grape-dev/grape")
+    assert res.level == ""
+    assert res.repo_key == "gitcode/grape-dev/grape"
+
+
+def test_dependency_check_skips_level_probe_when_port_unbound(monkeypatch, caplog):
     import logging
-    import src.kernel.token_service as ts
+    from src.kernel.ports import tokens as _tokens_port
     from src.domains.runtime.engine import dependency_check as mod
 
-    def _raise(_rk):
-        raise RuntimeError("kernel port 'vcs_cards' is not bound. The assembly layer")
-
-    orig = getattr(ts, "resolve_repo_config_level", None)
-    ts.resolve_repo_config_level = _raise
+    monkeypatch.setattr(_tokens_port, "is_bound", lambda: False)
     task = {"id": "t1", "repo_key": "gitcode/a/b", "agent_type": "coding",
             "prompt": "do it", "skill": "coding"}
-    try:
-        with caplog.at_level(logging.DEBUG):
-            mod.validate_task_dependencies(task=task, engine_name="opencode")
-    finally:
-        if orig is not None:
-            ts.resolve_repo_config_level = orig
-    warnings = [r.message for r in caplog.records
-                if r.levelno == logging.WARNING and "token level probe failed" in r.message]
-    assert not warnings, "端口未绑定不该按 warning 刷屏"
+    with caplog.at_level(logging.DEBUG):
+        mod.validate_task_dependencies(task=task, engine_name="opencode")
+    msgs = [r.message for r in caplog.records]
+    assert not [m for m in msgs if "no repo token config" in m], \
+        "worker 上不该刷 repo token 级别告警"
