@@ -7347,6 +7347,21 @@ def probe_aishell_dsh_acp(cli_path: str) -> dict:
 _probe_aishell_dsh_acp = probe_aishell_dsh_acp
 
 
+def probe_hermes_acp(cli_path: str) -> dict:
+    """探测 hermes ACP 引擎可用性（initialize + session/new + prompt 三步）。
+
+    单源：与 worker 侧同一实现。insight 的 engine_probe 曾自带一份只发
+    initialize 的浅探活 —— provider 侧错误（模型不存在等）只在 prompt 阶段
+    暴露，于是控制台一路显示 ok 而 worker 报 fail（实测 112 次 fail 对 0 次）。
+    """
+    from src.domains.runtime.engine.agent import _probe_hermes_acp as _impl
+
+    return _impl(cli_path)
+
+
+_probe_hermes_acp = probe_hermes_acp
+
+
 def discover_backends() -> list[dict]:
     """枚举已注册的 Agent 执行后端（含 installed/cli_path 探测结果）。"""
     from src.domains.runtime.agents.executor import discover_backends as _impl

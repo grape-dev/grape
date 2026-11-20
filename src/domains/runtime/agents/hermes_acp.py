@@ -849,9 +849,9 @@ class HermesACPBackend:
             try:
                 if _locked:
                     _SHARED_HOME_LOCK.release()
-            except (NameError, RuntimeError):
+            except (NameError, RuntimeError) as _le:
                 # 任务在加锁前就失败（异常早于 _locked 赋值）时无事可做
-                pass
+                log.debug(f"{label}hermes ACP: shared-home lock release skipped: {_le}")
 
 class _ACPSimpleClient:
     """极简 ACP JSON-RPC 客户端：request/response + notification 处理。
@@ -1642,15 +1642,15 @@ def _remove_overlay_tree(path: str):
             except OSError:
                 try:
                     os.remove(path)
-                except OSError:
-                    pass
+                except OSError as _re:
+                    log.debug(f"hermes ACP overlay: could not remove link {path}: {_re}")
             return
         for root, dirs, files in os.walk(path, topdown=False, followlinks=False):
             for _f in files:
                 try:
                     os.remove(os.path.join(root, _f))
-                except OSError:
-                    pass
+                except OSError as _fe:
+                    log.debug(f"hermes ACP overlay: keep file {root}\\{_f}: {_fe}")
             for _d in dirs:
                 _p = os.path.join(root, _d)
                 try:
@@ -1666,8 +1666,8 @@ def _remove_overlay_tree(path: str):
                         log.debug(f"hermes ACP overlay: kept non-empty dir {_p}")
         try:
             os.rmdir(path)
-        except OSError:
-            pass
+        except OSError as _de:
+            log.debug(f"hermes ACP overlay: overlay dir {path} kept: {_de}")
     except Exception as _e:  # noqa: BLE001 - 清理失败不影响任务
         log.debug(f"hermes ACP overlay: safe removal of {path} failed: {_e}")
 
@@ -2034,8 +2034,8 @@ def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
                     f"removing partial copy, overlay will fall back to shared home")
         try:
             _remove_path(dst)
-        except Exception:
-            pass
+        except Exception as _pe:
+            log.debug(f"hermes ACP overlay: partial mirror removal failed: {_pe}")
     except Exception as _cp_e:
         log.warning(f"hermes ACP overlay: mirror fallback for '{entry}' failed: {_cp_e}")
 
