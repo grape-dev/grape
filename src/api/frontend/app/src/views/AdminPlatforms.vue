@@ -28,6 +28,44 @@
       <p v-if="!loading && !platforms.length" class="ap-hint">{{ t('page.platforms_empty') }}</p>
       <p v-if="loading" class="ap-hint">{{ t('page.loading') }}</p>
       <p v-if="error" class="ap-err">{{ error }}</p>
+
+      <!-- Issue #3580/PR#1854：新增平台卡（自建实例一实例一卡：克隆现有同族卡改 id/host/base） -->
+      <div class="ap-group">
+        <div class="ap-row clickable" @click="openAdd()">
+          <div class="ap-main">
+            <div class="ap-title">＋ {{ t('page.add_card', '新增平台卡') }}</div>
+            <div class="ap-desc">{{ t('page.add_card_desc', '为自建实例新建一张卡（如 gitlab-corp）：克隆现有同族卡后改 id/host/API 基址') }}</div>
+          </div>
+          <span class="ap-chev">›</span>
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">{{ t('page.add_from', '基于') }}</span>
+          <select v-model="addForm.from" class="ap-input">
+            <option v-for="p in platforms" :key="p.provider" :value="p.provider">{{ p.name || p.provider }}</option>
+          </select>
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">provider id</span>
+          <input v-model="addForm.provider" class="ap-input" :placeholder="t('page.add_id_ph', 'gitlab-corp（小写字母开头，字母数字下划线短横）')" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">{{ t('page.add_name', '显示名') }}</span>
+          <input v-model="addForm.name" class="ap-input" placeholder="GitLab (corp)" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">host</span>
+          <input v-model="addForm.host" class="ap-input" placeholder="gitlab.corp.example" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">api_base</span>
+          <input v-model="addForm.api_base" class="ap-input" placeholder="https://gitlab.corp.example/api/v4" />
+        </div>
+        <div v-if="addOpen" class="ap-add">
+          <span class="ap-hint">{{ addError }}</span>
+          <button class="ap-btn" :disabled="addSaving" @click="saveAdd()">{{ t('page.save', '保存') }}</button>
+          <button class="ap-btn ap-btn-ghost" @click="cancelAdd()">{{ t('page.cancel', '取消') }}</button>
+        </div>
+      </div>
     </template>
 
     <!-- 详情 -->
@@ -277,6 +315,77 @@ function startEdit() {
 function cancelEdit() {
   editMode.value = false
   cardError.value = ''
+}
+
+// ── 新增平台卡（自建实例：克隆同族卡 → 新 provider id）──────────────────────────
+// Issue #3580/PR#1854：PR 侧用 GRAPE_GITLAB_INSTANCES + gitlab@corp 一行 env 加实例；
+// 我们的真源是平台卡，所以补一个「克隆现有卡」入口——不硬编码方言默认值
+// （私有 CA/api_auth/webhook_verify 这些差异全跟着模板卡走），只要求改 id/host/api_base。
+const addOpen = ref(false)
+const addSaving = ref(false)
+const addError = ref('')
+const addForm = reactive({ from: '', provider: '', name: '', host: '', api_base: '' })
+
+function openAdd() {
+  addError.value = ''
+  addForm.from = addForm.from || (platforms.value[0] && platforms.value[0].provider) || ''
+  addForm.provider = ''
+  addForm.name = ''
+  addForm.host = ''
+  addForm.api_base = ''
+  addOpen.value = true
+}
+
+function cancelAdd() {
+  addOpen.value = false
+  addError.value = ''
+}
+
+async function saveAdd() {
+  addError.value = ''
+  const id = String(addForm.provider || '').trim().toLowerCase()
+  if (!/^[a-z][a-z0-9_-]{0,39}$/.test(id)) {
+    addError.value = t('page.add_bad_id', 'provider id 非法：小写字母开头，仅字母/数字/下划线/短横，≤40 字符')
+    return
+  }
+  if (platforms.value.some((p) => p.provider === id)) {
+    addError.value = t('page.add_exists', '该 provider id 已存在')
+    return
+  }
+  addSaving.value = true
+  try {
+    const r0 = await props.api('/vcs-platforms')
+    const src = ((r0 && r0.cards) || {})[addForm.from]
+    if (!src) throw new Error(t('page.add_no_template', '模板卡不可用（所选平台没有平台卡）'))
+    const base = {}
+    for (const k of Object.keys(src)) {
+      if (CARD_DROP.has(k)) continue
+      const v = src[k]
+      if (v === null || v === undefined) continue
+      base[k] = v
+    }
+    base.name = String(addForm.name || id).trim()
+    if (addForm.host) base.host = String(addForm.host).trim()
+    if (addForm.api_base) base.api_base = String(addForm.api_base).trim()
+    // 新实例的钩子路径必须带自己的 id，否则与模板卡抢同一个 /webhook/<provider>
+    base.webhook_path = `/webhook/${id}`
+    // 令牌创建页直达链接是模板平台的官方地址，自建实例不能继承
+    delete base.pat_create_url
+    const r = await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [id]: base } } })
+    addOpen.value = false
+    await load()
+    if (r && r.errors && r.errors.length) {
+      addError.value = r.errors.join('；')
+      return
+    }
+    const created = platforms.value.find((p) => p.provider === id)
+    if (created) open(created)
+  } catch (e) {
+    const d = e.detail || {}
+    addError.value = d.errors ? d.errors.join('；') : d.message || e.message || String(e)
+  } finally {
+    addSaving.value = false
+  }
 }
 
 async function saveCard(p) {

@@ -194,6 +194,9 @@
               :pat-broken="patBroken(rp.provider)"
               :token-source="patSource(rp.provider)"
               :oauth-login="oauthLogin(rp.provider)"
+              :pat-expires-at="patExpires(rp.provider).at"
+              :pat-expires-state="patExpires(rp.provider).state"
+              :pat-expires-days="patExpires(rp.provider).days"
               @configure="openPatModal"
               @clear="clearPat"
             />
@@ -1691,6 +1694,16 @@ function patBroken(provider) {
   return (c && c.broken) || ''
 }
 // 令牌来源：pat / oauth / none（凭据页要把"PAT 配置"与"登录授权提供"分开说）
+function patExpires(provider) {
+  // Issue #3580/PR#1854：PAT 到期信息由后端 <p>_pat 状态给出（expires_at / expires_in_days
+  // / expires_state=ok|soon|expired|unknown）。没有就是空，前端不猜。
+  const c = platformCreds.value[provider + '_pat'] || {}
+  return {
+    at: c.expires_at || '',
+    state: c.expires_state || '',
+    days: typeof c.expires_in_days === 'number' ? c.expires_in_days : null,
+  }
+}
 function patSource(provider) {
   const auth = (platformCreds.value.platform_auth || {})[provider] || {}
   return auth.token_source || ''

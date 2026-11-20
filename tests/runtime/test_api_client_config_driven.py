@@ -211,3 +211,29 @@ def test_non_gitlab_dialect_keeps_github_style_repo_path(monkeypatch):
                         lambda m, path, data=None, form=False, timeout=30: seen.update(path=path) or {})
     client.get_repo_info()
     assert seen["path"] == "/repos/owner/repo"
+
+
+def test_gitlab_dialect_refuses_github_style_path(gitlab_card):
+    """gitlab 卡下漏传 gitlab_style 必须报错，不能静默拼出 /repos/（否则 404 当「不存在」）。"""
+    from src.domains.runtime.vcs.api_client import VcsPathContractError
+
+    client = VcsApiClient("gitlab", "tok", "yangaiwu", "demo")
+    with pytest.raises(VcsPathContractError):
+        client._generic_path("/repos/yangaiwu/demo/issues")
+
+
+def test_every_generic_path_call_site_declares_gitlab_form():
+    """静态守卫：新增端点若忘记给 gitlab_style，这里直接红（防止再漏一个 /repos/）。"""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("src/domains/runtime/vcs/api_client.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    offenders = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_generic_path"):
+            has_kw = any(k.arg == "gitlab_style" for k in node.keywords)
+            if len(node.args) < 2 and not has_kw:
+                offenders.append(node.lineno)
+    assert not offenders, f"_generic_path 调用点未声明 GitLab 形态（行号）: {offenders}"

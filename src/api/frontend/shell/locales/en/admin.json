@@ -617,7 +617,15 @@
     "card_note": "Saved as a whole card, so fields not shown here are preserved. Verify the instance before changing host/api_base; for platforms defined by a config file the change is stored as an admin override.",
     "ca_ph": "/path/to/corp-ca.pem (empty = system CA)",
     "edit": "Edit",
-    "card_missing": "No platform card for this platform (table projection only); advanced settings are read-only"
+    "card_missing": "No platform card for this platform (table projection only); advanced settings are read-only",
+    "add_card": "Add a platform card",
+    "add_card_desc": "Create a card for a self-hosted instance (for example gitlab-corp): clone a card of the same family, then change the id, host and API base",
+    "add_from": "Based on",
+    "add_id_ph": "gitlab-corp (lowercase letter first, letters, digits, underscore or dash)",
+    "add_name": "Display name",
+    "add_bad_id": "Invalid provider id: start with a lowercase letter; letters, digits, underscore or dash only; 40 chars max",
+    "add_exists": "That provider id already exists",
+    "add_no_template": "No template card available for the selected platform"
   },
   "provider_name": {
     "huawei": "Huawei",

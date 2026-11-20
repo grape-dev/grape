@@ -85,6 +85,14 @@ class VCSProvider(ABC):
     def get_user_login(self, token: str) -> str:
         """获取 token 对应的用户名。"""
 
+    def token_expiry(self, token: str) -> dict:
+        """凭据自身有效期元数据（默认无：多数平台不提供）。
+
+        返回 {"expires_at": "YYYY-MM-DD", "scopes": [...], "revoked": bool} 或 {}。
+        有能力的平台（GitLab PAT）覆盖它；调用方（凭据绑定）按需取，读不到就落空。
+        """
+        return {}
+
     @abstractmethod
     def add_collaborator(self, api_token: str, owner: str, repo: str,
                          username: str, permission: str = "") -> bool:
@@ -1537,6 +1545,25 @@ class GitLabProvider(GenericVcsProvider):
         if not isinstance(info, dict) or not info:
             raise RuntimeError("GitLab token verify: empty user info")
         return info
+
+    def token_expiry(self, token: str) -> dict:
+        """PAT 自身元数据（GitLab 15.4+ `/personal_access_tokens/self`）。
+
+        单独成方法而不是塞进 verify_token：校验身份的调用点不需要多打一次网络；
+        只有「绑定凭据」这类要落到期时间的调用方显式取（见 settings.py）。
+        读不到（旧版本/非 PAT/权限不足）返回 {}，不阻断绑定。
+        """
+        try:
+            pat = self._http("GET", "/personal_access_tokens/self", token)
+        except Exception:  # noqa: BLE001
+            return {}
+        if not isinstance(pat, dict) or not pat.get("expires_at"):
+            return {}
+        return {
+            "expires_at": str(pat.get("expires_at") or ""),
+            "scopes": pat.get("scopes") or [],
+            "revoked": bool(pat.get("revoked")),
+        }
 
     def get_user_login(self, token: str) -> str:
         # GitLab /user 字段 = username（非 login）

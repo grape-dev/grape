@@ -139,3 +139,36 @@ def test_bot_token_for_unknown_provider_is_rejected(monkeypatch):
         PlatformCardService(rows=_Rows()).save_cards(
             CardSaveRequest(cards={"gitcode": VALID_CARD}, bot_tokens={"nope": "t"}))
     assert "不在册平台" in exc.value.errors[0]
+
+def test_provider_id_must_be_instance_safe(monkeypatch):
+    """provider id 是实例标识（进 repo_key/webhook 路径/工作目录），服务端必须拦非法形态。
+
+    Issue #3580/PR#1854：管理台新增"自建实例卡"后，id 由用户输入 —— 前端正则只是
+    即时提示，权威判定在这里；`../x`、`a/b`、大写、超长都必须拒。
+    """
+    recorded = {}
+    import dataclasses as _dc
+
+    @_dc.dataclass
+    class _Card:
+        provider: str
+        host: str
+        webhook_path: str
+        capabilities: tuple = ()
+        event_map_overrides: dict = _dc.field(default_factory=dict)
+        fields_overrides: dict = _dc.field(default_factory=dict)
+        global_bot_meta_key: str = ""
+        webhook_token_field: str = ""
+
+    _patch_contracts(monkeypatch, recorded,
+                     card_factory=lambda p, raw: _Card(p, raw.get("host", ""),
+                                                       raw.get("webhook_path", "")))
+    for bad_id in ("../etc", "a/b", "GitLab", "1gitlab", "x" * 41, ""):
+        with pytest.raises(CardValidationError) as exc:
+            PlatformCardService(rows=_Rows()).save_cards(
+                CardSaveRequest(cards={bad_id: VALID_CARD}))
+        assert "provider id 非法" in exc.value.errors[0]
+
+    ok = PlatformCardService(rows=_Rows(actions={"gitlab-corp": "updated"})).save_cards(
+        CardSaveRequest(cards={"gitlab-corp": VALID_CARD}))
+    assert ok.cards == ["gitlab-corp"]

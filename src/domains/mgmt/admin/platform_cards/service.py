@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import dataclasses as _dc
 import json
+import re as _re
+
+#: provider id = 实例标识（见 _validate_cards）：小写字母开头，≤40，字母/数字/_/-
+_PROVIDER_ID_RE = _re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
 
 from src.domains.mgmt.admin.platform_cards.models import (
     CardSaveRequest,
@@ -129,6 +133,11 @@ class PlatformCardService:
         cleaned: dict[str, dict] = {}
         errors: list[str] = []
         for provider, raw in (cards or {}).items():
+            # Issue #3580/PR#1854：provider id 即实例标识（gitlab-corp / gitlab@corp），
+            # 它会进 repo_key、webhook 路径与工作目录，所以形态由服务端定（前端只做即时提示）。
+            if not _PROVIDER_ID_RE.match(str(provider or "")):
+                errors.append(f"{provider}: provider id 非法（小写字母开头，字母/数字/下划线/短横，≤40）")
+                continue
             try:
                 card = build_card(provider, dict(raw or {}))
             except platform_card_error as exc:

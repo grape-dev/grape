@@ -617,7 +617,15 @@
     "card_note": "保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达；配置文件定义的平台，改动会落成管理面覆盖。",
     "ca_ph": "/path/to/corp-ca.pem（空=系统 CA）",
     "edit": "编辑",
-    "card_missing": "该平台没有平台卡（仅表投影），高级配置不可编辑"
+    "card_missing": "该平台没有平台卡（仅表投影），高级配置不可编辑",
+    "add_card": "新增平台卡",
+    "add_card_desc": "为自建实例新建一张卡（如 gitlab-corp）：克隆现有同族卡后改 id / host / API 基址",
+    "add_from": "基于",
+    "add_id_ph": "gitlab-corp（小写字母开头，字母数字下划线短横）",
+    "add_name": "显示名",
+    "add_bad_id": "provider id 非法：小写字母开头，仅字母/数字/下划线/短横，≤40 字符",
+    "add_exists": "该 provider id 已存在",
+    "add_no_template": "模板卡不可用（所选平台没有平台卡）"
   },
   "provider_name": {
     "huawei": "华为",

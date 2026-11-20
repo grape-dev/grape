@@ -105,6 +105,13 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         }
         if isinstance(_cfg, dict) and "workflows_write" in _cfg:
             out["workflows_write"] = _cfg["workflows_write"]
+        if _pat_tok:
+            # Issue #3580/PR#1854：到期判定统一走域值对象 CredentialExpiry
+            # （绑定落库 expires_at；这里只投影状态，前端不再自己算天数）。
+            from src.domains.mgmt.user.credential_expiry import CredentialExpiry
+            _exp = str(_cfg.get("expires_at") or "")
+            if _exp:
+                out.update(CredentialExpiry.parse(_exp).as_payload())
         if _diag.get("credential_error"):
             # PAT 行在但读不出来（密钥变更/记录损坏）：不能报"没配置"，否则用户
             # 会去重新配一遍而不知道旧记录坏了（也会让"清不掉"更难解释）。
@@ -509,7 +516,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
             if _tok and not _is_placeholder(_tok):
                 try:
                     from src.kernel.token_resolver import create_provider
-                    _info = create_provider(_p).verify_token(_tok)
+                    _provider = create_provider(_p)
+                    _info = _provider.verify_token(_tok)
                 except HTTPException:
                     raise
                 except Exception as _ve:
@@ -529,6 +537,14 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 # 凭据写进 B 账号」的半转移态，也就不再需要 409 与转移票据。
                 # 平台登录名来源 = 凭据域 config.login（list_platform_links 并集读）。
                 _pat_cfg = {"token": _tok, "login": _ext_login}
+                try:
+                    _exp_meta = _provider.token_expiry(_tok) or {}
+                except Exception:  # noqa: BLE001 - 取不到到期信息不影响绑定
+                    _exp_meta = {}
+                if _exp_meta.get("expires_at"):
+                    # Issue #3580/PR#1854：PAT 到期时间落库（config_json，不加列）。
+                    # 没有它只能等 401 才发现过期——那时智能体任务已经失败。
+                    _pat_cfg["expires_at"] = str(_exp_meta["expires_at"])
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
                 # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成

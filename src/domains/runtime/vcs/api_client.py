@@ -311,6 +311,15 @@ def _native_issue_number(n):
     return native_issue_number(n)
 
 
+class VcsPathContractError(ValueError):
+    """平台方言的路径契约被违反（例：gitlab 卡下拼出 /repos/ 前缀）。
+
+    为什么用异常而不是告警：对方平台对不存在的路由会回 404，而 404 在业务层
+    被解读成「资源不存在」——查重、探活、删除感知会全部静默失效（2026-11-20
+    实锤：GitLab 重名预检恒返回「可用」）。宁可 500 暴露，也不要假阴性。
+    """
+
+
 class VcsApiClient:
     """统一 VCS API 客户端：Issue 评论 / PR 操作 / 文件读写。
 
@@ -958,10 +967,23 @@ class VcsApiClient:
         """
         card = self._platform_card()
         if card and card.dialect == "gitlab" and gitlab_style is not None:
-            return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            path = f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            return self._assert_gitlab_path(path)
         if not github_style and gitlab_style is not None:
-            return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            path = f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            return self._assert_gitlab_path(path)
+        if card and card.dialect == "gitlab":
+            # 漏传 gitlab_style 就是在拼一条 GitLab 不存在的 `/repos/...`：
+            # 静默 404 会被上层解读成「不存在」，比报错危险得多（查重/探活全失效）。
+            raise VcsPathContractError(
+                f"{self.provider}: gitlab 方言端点必须给出 gitlab_style"
+                f"（收到 github 形态 {github_style!r}）")
         return github_style
+
+    def _assert_gitlab_path(self, path: str) -> str:
+        if path.startswith("/repos/"):
+            raise VcsPathContractError(f"{self.provider}: gitlab 路径不得以 /repos/ 开头: {path}")
+        return path
 
     def _unsupported(self) -> dict:
         return {"error": f"unsupported provider: {self.provider}"}
