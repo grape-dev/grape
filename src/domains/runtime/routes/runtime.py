@@ -3374,8 +3374,9 @@ def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgm
 def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -> int:
     """在指定域写 kill 台账（state='killed'），返回 UPDATE rowcount。
 
-    Issue #3527（review R2）：写侧跟随读侧定位的域——
-    - 该域有自有 DSN（三库拓扑）→ db_registry 域连接（autocommit，commit 幂等无害）；
+    Issue #3527（review R2/R3）：写侧跟随读侧定位的域——
+    - 该域有自有 DSN（三库拓扑）→ db_registry.new_connection 独立域连接
+      （不复用进程级缓存连接，避免跨线程 InterfaceError；autocommit，用完即关）；
     - 域连接不可用（单库 / 视图期 / SQLite）→ 回落进程主库（与读侧 reader 的回落
       语义一致），持 db_lock 并 commit。
     表不存在（1146 / doesn't exist）按 0 行返回，交由调用方回退另一域；
@@ -3388,32 +3389,34 @@ def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -
     conn = None
     try:
         from src.kernel import db_registry as _dbreg
-        conn = _dbreg.domain_db(domain)
-    except Exception:  # noqa: BLE001 - 域连接判定失败按不可用处理，回落进程主库
+        conn = _dbreg.new_connection(domain, autocommit=True)
+    except Exception:  # noqa: BLE001 - 无自有 DSN/连接失败按不可用处理，回落进程主库
         conn = None
 
     def _rowcount(cur) -> int:
         try:
             return int(cur.rowcount)
-        except Exception:  # noqa: BLE001 - 个别游标无 rowcount 属性时按未知处理
-            return -1
+        except Exception:  # noqa: BLE001 - 无 rowcount 视为未确认更新，交由调用方回退
+            return 0
 
-    if conn is not None and conn is not _sm.db:
-        c = conn.cursor()
+    if conn is not None:
+        c = None
         try:
+            c = conn.cursor()
             c.execute(_sql, (now_iso, sandbox_id))
-            try:
-                conn.commit()  # own-DSN 连接为 autocommit；幂等无害
-            except Exception:  # noqa: BLE001
-                pass
             return _rowcount(c)
         except Exception as e:  # noqa: BLE001
             if "1146" in str(e) or "doesn't exist" in str(e):
                 return 0
             raise
         finally:
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
             try:
-                c.close()
+                conn.close()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -3625,6 +3628,7 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
                 _now_iso = datetime.now(timezone.utc).isoformat()
                 _updated = 0
                 _write_err = None
+                _zero_rowcount = False
                 for _dom in (_hit_domain,) + tuple(
                         d for d in ("runtime", "mgmt") if d != _hit_domain):
                     try:
@@ -3634,10 +3638,13 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
                         continue
                     if _updated:
                         break
+                    _zero_rowcount = True
                 if not _updated:
+                    _reason = "rowcount=0" if _zero_rowcount else "no confirmed row"
+                    if _write_err is not None:
+                        _reason += f"; domain write error: {_write_err}"
                     _msg = (f"provider killed sandbox {sandbox_id} but ledger row "
-                            f"update failed in runtime/mgmt domains (rowcount=0"
-                            + (f": {_write_err}" if _write_err else "") + ")")
+                            f"update failed in runtime/mgmt domains ({_reason})")
                     raise HTTPException(status_code=500, detail={"code": 500, "message": _msg})
                 return {"status": "killed"}
             return {"status": "kill_failed"}
