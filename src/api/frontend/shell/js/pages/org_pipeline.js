@@ -1874,7 +1874,8 @@ function _createOrgDispatch() {
     title: issue.title || '',
     description: issue.description || '',
     context: _orgDispatchPayloadContext(preview),
-    scene_id: org.org_scene_id || ''
+    // 组织场景只用于组织仓库编排，不能当 target 场景；target 场景由服务端/AI 解析。
+    scene_id: ''
   };
   var request = API.orgDispatches ? API.orgDispatches.create(org.id, payload) :
     API.post('/orgs/' + org.id + '/dispatches', payload);

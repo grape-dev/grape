@@ -92,6 +92,34 @@ def _normalize_targets(targets: list[str]) -> list[str]:
     return out
 
 
+def _normalize_target_scenes(raw: dict[str, str] | None, targets: list[str]) -> dict[str, str]:
+    """只保留属于本批 targets 的非空场景推荐。"""
+    allowed = set(targets)
+    out: dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        repo_key = to_repo_key(str(key or "").strip())
+        scene_id = str(value or "").strip()
+        if not repo_key or not scene_id:
+            continue
+        if repo_key not in allowed:
+            log.warning(f"org-dispatch: ignore target_scenes for non-target {repo_key}")
+            continue
+        out[repo_key] = scene_id
+    return out
+
+
+def _normalize_scene_reasons(raw: dict[str, str] | None,
+                             targets: list[str]) -> dict[str, str]:
+    allowed = set(targets)
+    out: dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        repo_key = to_repo_key(str(key or "").strip())
+        reason = str(value or "").strip()
+        if repo_key in allowed and reason:
+            out[repo_key] = reason[:500]
+    return out
+
+
 def _issue_url(repo_key: str, issue_number) -> str:
     provider, owner, name = parse_repo_key(repo_key)
     host = {
@@ -306,6 +334,8 @@ def _dispatch_payload(d: dict) -> dict:
         "scene_id": d["scene_id"] or "",
         "status": d["status"],
         "targets_requested": plan.get("targets") or [],
+        "target_scenes": plan.get("target_scenes") or {},
+        "scene_reasons": plan.get("scene_reasons") or {},
         "title": plan.get("title") or "",
         "context": context,
         "context_hash": d["context_hash"] or "",
@@ -315,7 +345,7 @@ def _dispatch_payload(d: dict) -> dict:
     }
 
 
-def _target_payload(t: dict) -> dict:
+def _target_payload(t: dict, dispatch_payload: dict | None = None) -> dict:
     scene_id = t["scene_id"] or ""
     scene_name = ""
     if scene_id:
@@ -326,7 +356,7 @@ def _target_payload(t: dict) -> dict:
             scene_name = str(cfg.get("display_name") or cfg.get("name") or "")
         except Exception:
             scene_name = ""
-    return {
+    payload = {
         "repo_key": t["repo_key"],
         "scene_id": scene_id,
         "scene_name": scene_name,
@@ -339,6 +369,14 @@ def _target_payload(t: dict) -> dict:
         "started_at": t["started_at"],
         "finished_at": t["finished_at"],
     }
+    if dispatch_payload:
+        requested = (dispatch_payload.get("target_scenes") or {}).get(t["repo_key"]) or ""
+        reason = (dispatch_payload.get("scene_reasons") or {}).get(t["repo_key"]) or ""
+        if requested:
+            payload["scene_requested"] = requested
+        if reason:
+            payload["scene_reason"] = reason
+    return payload
 
 
 def get_dispatch_detail(org_id: str, dispatch_id: str) -> dict:
@@ -349,7 +387,7 @@ def get_dispatch_detail(org_id: str, dispatch_id: str) -> dict:
             raise _error(404, "ORG_REPO_NOT_FOUND", "Dispatch not found")
         targets = _get_target_rows(c, dispatch_id)
     payload = _dispatch_payload(d)
-    payload["targets"] = [_target_payload(t) for t in targets]
+    payload["targets"] = [_target_payload(t, payload) for t in targets]
     return payload
 
 
@@ -362,7 +400,7 @@ def get_dispatch_snapshot(dispatch_id: str) -> dict:
             return {}
         targets = _get_target_rows(c, str(dispatch_id))
     payload = _dispatch_payload(d)
-    payload["targets"] = [_target_payload(t) for t in targets]
+    payload["targets"] = [_target_payload(t, payload) for t in targets]
     return payload
 
 
@@ -409,28 +447,38 @@ def list_dispatches(org_id: str, limit: int = 50, offset: int = 0,
 # 场景解析
 # ---------------------------------------------------------------------------
 
-def _resolve_target_scene(repo_key: str, requested_scene_id: str = "") -> str:
-    """4 档解析目标仓库场景；解析不到返回空串。"""
-    from src.api.pipeline_config import get_scenes, scene_exists_in_repo
-    from src.domains.mgmt.user.db import get_repo_scene
+def _dispatch_plan(dispatch: dict) -> dict:
+    try:
+        plan = json.loads(dispatch.get("plan_json") or "{}")
+        return plan if isinstance(plan, dict) else {}
+    except Exception:
+        return {}
 
-    if requested_scene_id and scene_exists_in_repo(requested_scene_id, repo_key):
-        return requested_scene_id
-    try:
-        repo_scene = get_repo_scene(repo_key) or ""
-    except Exception as exc:
-        log.warning(f"org-dispatch: get_repo_scene failed repo={repo_key}: {exc}")
-        repo_scene = ""
-    if repo_scene and scene_exists_in_repo(repo_scene, repo_key):
-        return repo_scene
-    try:
-        scenes = get_scenes(repo_key=repo_key) or []
-    except Exception as exc:
-        log.warning(f"org-dispatch: get_scenes failed repo={repo_key}: {exc}")
-        scenes = []
-    if len(scenes) == 1:
-        return str(scenes[0].get("id") or "")
-    return ""
+
+def _requested_target_scene(dispatch: dict, repo_key: str) -> str:
+    """单个 target 的显式场景：per-target 优先，批次级 scene_id 兼容兜底。"""
+    plan = _dispatch_plan(dispatch)
+    target_scenes = plan.get("target_scenes") or {}
+    if isinstance(target_scenes, dict):
+        picked = str(target_scenes.get(repo_key) or "").strip()
+        if picked:
+            return picked
+    return str(dispatch.get("scene_id") or "").strip()
+
+
+def _resolve_target_scene_detail(repo_key: str, requested_scene_id: str = "",
+                                 *, user: dict | None = None) -> dict:
+    """解析目标仓库场景；显式推荐不可执行时回退默认/唯一场景。"""
+    from src.domains.mgmt.org_dispatch_scene import resolve_target_scene_detail
+
+    return resolve_target_scene_detail(repo_key, requested_scene_id, user=user)
+
+
+def _resolve_target_scene(repo_key: str, requested_scene_id: str = "",
+                          *, user: dict | None = None) -> str:
+    """4 档解析目标仓库场景；解析不到返回空串（兼容旧调用方）。"""
+    resolved = _resolve_target_scene_detail(repo_key, requested_scene_id, user=user)
+    return str(resolved.get("scene_id") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -502,14 +550,26 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                               org_title: str = "",
                               description: str, context: dict | str | None,
                               actor_id: str, operator_name: str,
-                              snapshot_id: int = 0) -> dict:
+                              snapshot_id: int = 0,
+                              actor_user: dict | None = None) -> dict:
     """为单个目标创建/复用子 Issue，返回更新后的 target 行。"""
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
 
     repo_key = target["repo_key"]
-    scene_id = _resolve_target_scene(repo_key, dispatch.get("scene_id") or "")
+    requested_scene = _requested_target_scene(dispatch, repo_key)
+    resolved = _resolve_target_scene_detail(repo_key, requested_scene, user=actor_user)
+    scene_id = str(resolved.get("scene_id") or "")
     if not scene_id:
-        return _mark_target_failed(target["id"], "NO_TARGET_SCENE: Target repository has no available scene")
+        _warnings = [str(w) for w in (resolved.get("warnings") or []) if str(w).strip()]
+        _detail = "；".join(_warnings[:3])
+        _msg = "NO_TARGET_SCENE: Target repository has no available scene"
+        if _detail:
+            _msg = f"{_msg}（{_detail}）"
+        return _mark_target_failed(target["id"], _msg[:500])
+    log.info(
+        f"org-dispatch: target scene resolved dispatch={dispatch.get('id')} "
+        f"repo={repo_key} requested={requested_scene or '-'} scene={scene_id} "
+        f"source={resolved.get('source') or '-'}")
 
     token = _repo_bot_token(repo_key)
     if not token:
@@ -699,6 +759,8 @@ def _find_same_dispatch(c, org_id: str, org_issue_number,
 async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
                           context: dict | str | None, title: str, description: str,
                           scene_id: str, user: dict,
+                          target_scenes: dict[str, str] | None = None,
+                          scene_reasons: dict[str, str] | None = None,
                           done_when: str = DONE_WHEN_ISSUE_DONE) -> tuple[dict, int]:
     """创建下派批次并逐目标建子 Issue。返回 (payload, http_status)。"""
     targets = _normalize_targets(targets)
@@ -747,6 +809,8 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
             "No target repository met the confidence threshold; specify targets explicitly or enrich the repository map" + _hint,
         )
     _validate_targets(org_id, targets)
+    target_scenes = _normalize_target_scenes(target_scenes, targets)
+    scene_reasons = _normalize_scene_reasons(scene_reasons, targets)
 
     actor_id = str((user or {}).get("id") or "")
     operator_name = str((user or {}).get("username") or "")
@@ -760,6 +824,8 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
         "org_title": org_title,
         "description": description or "",
         "scene_id": scene_id or "",
+        "target_scenes": target_scenes,
+        "scene_reasons": scene_reasons,
     }
     if routing:
         _plan_obj["routing"] = routing
@@ -848,6 +914,7 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
         "org_repo_key": org_issue.get("repo_key") or "",
         "targets": targets,
         "scene_id": scene_id or "",
+        "target_scenes": target_scenes,
     })
 
     for target in target_rows:
@@ -857,6 +924,7 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
                 description=description, context=context, actor_id=actor_id,
                 operator_name=operator_name,
                 snapshot_id=str((dispatch or {}).get("_snapshot_id") or ""),
+                actor_user=user,
             )
         except Exception as exc:
             log.warning(f"org-dispatch: target {target['repo_key']} failed: {exc}")
@@ -1749,8 +1817,11 @@ async def retry_target(org_id: str, dispatch_id: str, repo_key: str, *, user: di
 
     if native_issue_number(target["child_issue_number"]):
         issue_number = native_issue_number(target["child_issue_number"])
-        scene_id = target["scene_id"] or _resolve_target_scene(
-            repo_key, dispatch.get("scene_id") or "")
+        scene_id = str(target["scene_id"] or "")
+        if not scene_id:
+            _requested = _requested_target_scene(dispatch, repo_key)
+            _resolved = _resolve_target_scene_detail(repo_key, _requested, user=user)
+            scene_id = str(_resolved.get("scene_id") or "")
         if not scene_id:
             _mark_target_failed(str(target["id"] or ""), "NO_TARGET_SCENE: Target repository has no available scene")
             _aggregate_dispatch(dispatch_id, actor_id=actor_id)
@@ -1799,6 +1870,7 @@ async def retry_target(org_id: str, dispatch_id: str, repo_key: str, *, user: di
             description=plan.get("description") or "", context=context,
             actor_id=actor_id,
             operator_name=str((user or {}).get("username") or ""),
+            actor_user=user,
         )
 
     _aggregate_dispatch(dispatch_id, actor_id=actor_id)

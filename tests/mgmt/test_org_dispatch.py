@@ -30,6 +30,7 @@ UNLINKED = "gitcode:issue2112/not-linked"
 ORG_ISSUE = 2112
 SCENE_A = "scene-2112-a"
 SCENE_B = "scene-2112-b"
+SCENE_A_ALT = "scene-2112-a-alt"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -115,6 +116,21 @@ def _seed_repo(repo_key: str, org_id: int, *, dev_scene: str = "", scene_id: str
             db.commit()
 
 
+def _seed_scene(repo_key: str, scene_id: str, *, nodes=None, advanced_options: str = ""):
+    import json as _json
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO devops_pipeline_scene "
+            "(scene_id, name, repo_key, nodes_json, advanced_options, is_active) "
+            "VALUES (?,?,?,?,?,1)",
+            (scene_id, scene_id, repo_key, _json.dumps(nodes or [], ensure_ascii=False),
+             advanced_options),
+        )
+        db.commit()
+
+
 def _seed_org_issue(org_id: int):
     with db_lock:
         c = db.cursor()
@@ -187,12 +203,11 @@ def _seed_standard(org_id: int):
     _seed_org_issue(org_id)
 
 
-def _create(api, org_id, targets):
-    return api.post(
-        f"/api/orgs/{org_id}/dispatches",
-        json={"org_issue_number": ORG_ISSUE, "targets": targets,
-              "context": {"goal": "mvp"}, "title": "统一登录改造"},
-    )
+def _create(api, org_id, targets, **extra):
+    payload = {"org_issue_number": ORG_ISSUE, "targets": targets,
+               "context": {"goal": "mvp"}, "title": "统一登录改造"}
+    payload.update(extra)
+    return api.post(f"/api/orgs/{org_id}/dispatches", json=payload)
 
 
 def test_create_dispatch_creates_child_issues(client):
@@ -916,3 +931,130 @@ def test_create_dispatch_accepts_non_numeric_issue_ident(client):
     body = resp.json()
     assert str(body["org_issue_number"]) == ident
     assert body["targets"][0]["status"] == "running"
+
+
+def test_scene_catalog_lists_linked_repo_scenes_without_secrets(client):
+    api, _state, _calls, _triggers = client
+    org_id = _seed_org()
+    _seed_repo(ORG_REPO_KEY, org_id)
+    _seed_repo(TARGET_A, org_id, dev_scene=SCENE_A, scene_id=SCENE_A)
+    _seed_scene(TARGET_A, SCENE_A_ALT, advanced_options='{"secret":"do-not-leak"}')
+
+    resp = api.get(
+        f"/api/orgs/{org_id}/dispatch/scene-catalog",
+        params={"repo_key": TARGET_A, "include": "executable"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["org_id"] == str(org_id)
+    assert len(body["repos"]) == 1
+    repo = body["repos"][0]
+    assert repo["repo_key"] == TARGET_A
+    assert repo["dev_scene"] == SCENE_A
+    assert {"fallback_scene", "rules"} <= set(repo["scene_recommend_config"])
+    scenes = {s["scene_id"]: s for s in repo["scenes"]}
+    assert {SCENE_A, SCENE_A_ALT} <= set(scenes)
+    assert scenes[SCENE_A]["is_default"] is True
+    assert scenes[SCENE_A]["executable"] is True
+    assert "advanced_options" not in resp.text
+    assert "do-not-leak" not in resp.text
+
+
+def test_scene_catalog_rejects_unlinked_repo(client):
+    api, _state, _calls, _triggers = client
+    org_id = _seed_org()
+
+    resp = api.get(
+        f"/api/orgs/{org_id}/dispatch/scene-catalog",
+        params={"repo_key": UNLINKED},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error_code"] == "INVALID_TARGET"
+
+
+def test_scene_catalog_marks_unexecutable_scene(client, monkeypatch):
+    from src.domains.mgmt import org_dispatch_scene
+
+    api, _state, _calls, _triggers = client
+    org_id = _seed_org()
+    _seed_repo(ORG_REPO_KEY, org_id)
+    _seed_repo(TARGET_A, org_id, dev_scene=SCENE_A, scene_id=SCENE_A)
+    _seed_scene(TARGET_A, SCENE_A_ALT)
+
+    def _fake_precheck(scene_id, repo_key="", user=None, explicit=True):
+        if scene_id == SCENE_A_ALT:
+            return {"ok": False, "problems": [
+                {"reason_code": "engine_missing", "message": "SRE 节点 sre 未绑定机器"},
+            ]}
+        return {"ok": True, "problems": []}
+
+    monkeypatch.setattr(org_dispatch_scene.runtime_public, "precheck_scene", _fake_precheck)
+    resp = api.get(
+        f"/api/orgs/{org_id}/dispatch/scene-catalog",
+        params={"repo_key": TARGET_A, "include": "executable"},
+    )
+    assert resp.status_code == 200, resp.text
+    scenes = {s["scene_id"]: s for s in resp.json()["repos"][0]["scenes"]}
+    assert scenes[SCENE_A_ALT]["executable"] is False
+    assert scenes[SCENE_A_ALT]["problems"][0]["code"] == "engine_missing"
+
+
+def test_target_scene_override_wins_over_repo_default(client):
+    api, _state, calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+    _seed_scene(TARGET_A, SCENE_A_ALT)
+
+    resp = _create(
+        api, org_id, [TARGET_A],
+        target_scenes={TARGET_A: SCENE_A_ALT},
+        scene_reasons={TARGET_A: "需求包含前端改动"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert calls[0]["scene_id"] == SCENE_A_ALT
+    body = resp.json()
+    assert body["target_scenes"][TARGET_A] == SCENE_A_ALT
+    target = body["targets"][0]
+    assert target["scene_id"] == SCENE_A_ALT
+    assert target["scene_requested"] == SCENE_A_ALT
+    assert target["scene_reason"] == "需求包含前端改动"
+
+
+def test_invalid_target_scene_falls_back_to_repo_default(client):
+    api, _state, calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+
+    resp = _create(
+        api, org_id, [TARGET_A],
+        target_scenes={TARGET_A: "scene-missing"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert calls[0]["scene_id"] == SCENE_A
+    target = resp.json()["targets"][0]
+    assert target["scene_id"] == SCENE_A
+    assert target["scene_requested"] == "scene-missing"
+
+
+def test_unexecutable_target_scene_falls_back_to_repo_default(client, monkeypatch):
+    from src.domains.mgmt import org_dispatch_scene
+
+    api, _state, calls, _triggers = client
+    org_id = _seed_org()
+    _seed_standard(org_id)
+    _seed_scene(TARGET_A, SCENE_A_ALT)
+
+    def _fake_precheck(scene_id, repo_key="", user=None, explicit=True):
+        if scene_id == SCENE_A_ALT:
+            return {"ok": False, "problems": [
+                {"reason_code": "engine_missing", "message": "SRE 节点 sre 未绑定机器"},
+            ]}
+        return {"ok": True, "problems": []}
+
+    monkeypatch.setattr(org_dispatch_scene.runtime_public, "precheck_scene", _fake_precheck)
+    resp = _create(
+        api, org_id, [TARGET_A],
+        target_scenes={TARGET_A: SCENE_A_ALT},
+    )
+    assert resp.status_code == 201, resp.text
+    assert calls[0]["scene_id"] == SCENE_A

@@ -7021,6 +7021,14 @@ def node_matches_agent_role(node, role) -> bool:
     return _impl(node, role)
 
 
+def precheck_scene(scene_id: str, repo_key: str = "", user: dict | None = None,
+                   explicit: bool = True) -> dict:
+    """场景可执行性预校验（只读；供 mgmt 下派场景目录复用同一把尺子）。"""
+    from src.domains.runtime.scene_precheck import precheck_scene as _impl
+
+    return _impl(scene_id, repo_key, user=user, explicit=explicit)
+
+
 def selector_candidate_engines(selector: dict, agent_type: str, repo_key: str = "",
                                user_id: int = 0) -> tuple:
     """selector 候选集 + 分层排除原因（入队即时校验）。"""

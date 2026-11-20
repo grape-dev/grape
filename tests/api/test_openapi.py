@@ -471,6 +471,7 @@ EXPECTED_PUBLIC = {
     "org_dispatches_detail": ("get", "/api/orgs/{org_id}/dispatches/{dispatch_id}"),
     "org_dispatches_list": ("get", "/api/orgs/{org_id}/dispatches"),
     "org_dispatches_target_retry": ("post", "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry"),
+    "org_dispatches_scene_catalog": ("get", "/api/orgs/{org_id}/dispatch/scene-catalog"),
     "org_knowledge_archive": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive"),
     "org_knowledge_create": ("post", "/api/orgs/{org_id}/knowledge"),
     "org_knowledge_delete": ("delete", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),

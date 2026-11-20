@@ -22937,6 +22937,79 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/orgs/{org_id}/dispatch/scene-catalog": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read linked repository scene catalog for dispatch",
+        "description": "组织下派前的场景目录：只返回关联仓库的场景元数据，不返回敏感配置。\n\n``repo_key`` 为空返回全部关联仓库（排除组织自动仓库）；``include=executable``\n额外返回每个场景的可执行性预检查结果。",
+        "operationId": "org_dispatches_scene_catalog",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Include"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
     "/api/orgs/{org_id}/dispatches/{dispatch_id}/context": {
       "get": {
         "tags": [
@@ -28034,6 +28107,20 @@
             "type": "string",
             "title": "Scene Id",
             "default": ""
+          },
+          "target_scenes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Target Scenes"
+          },
+          "scene_reasons": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Scene Reasons"
           },
           "done_when": {
             "type": "string",
