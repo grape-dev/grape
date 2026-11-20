@@ -3345,6 +3345,95 @@ def _fetch_across_domains(sql: str, params=(), domains=("runtime", "mgmt")) -> l
     return []
 
 
+def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgmt")) -> tuple:
+    """同 _fetch_across_domains，但额外返回命中域：(rows, hit_domain)。
+
+    Issue #3527（review R2）：kill 的台账写必须跟随读侧落点——rows 非空时
+    hit_domain 即数据所在域（runtime 表 1146 回退到历史 mgmt 时为 "mgmt"）。
+    读语义与 _fetch_across_domains 完全一致：表不存在才换域，其余异常原样抛出。
+    """
+    from src.kernel.bulk_read import reader
+
+    last = None
+    for dom in domains:
+        try:
+            with reader(dom) as c:
+                c.execute(sql, params)
+                rows = c.fetchall() or []
+            return rows, dom
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "1146" not in msg and "doesn't exist" not in msg:
+                raise
+            last = e
+    if last is not None:
+        raise last
+    return [], (domains[0] if domains else "")
+
+
+def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -> int:
+    """在指定域写 kill 台账（state='killed'），返回 UPDATE rowcount。
+
+    Issue #3527（review R2）：写侧跟随读侧定位的域——
+    - 该域有自有 DSN（三库拓扑）→ db_registry 域连接（autocommit，commit 幂等无害）；
+    - 域连接不可用（单库 / 视图期 / SQLite）→ 回落进程主库（与读侧 reader 的回落
+      语义一致），持 db_lock 并 commit。
+    表不存在（1146 / doesn't exist）按 0 行返回，交由调用方回退另一域；
+    其余异常原样抛出，不静默。
+    """
+    from src.kernel import session_manager as _sm
+
+    _sql = ("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? "
+            "WHERE sandbox_id=?")
+    conn = None
+    try:
+        from src.kernel import db_registry as _dbreg
+        conn = _dbreg.domain_db(domain)
+    except Exception:  # noqa: BLE001 - 域连接判定失败按不可用处理，回落进程主库
+        conn = None
+
+    def _rowcount(cur) -> int:
+        try:
+            return int(cur.rowcount)
+        except Exception:  # noqa: BLE001 - 个别游标无 rowcount 属性时按未知处理
+            return -1
+
+    if conn is not None and conn is not _sm.db:
+        c = conn.cursor()
+        try:
+            c.execute(_sql, (now_iso, sandbox_id))
+            try:
+                conn.commit()  # own-DSN 连接为 autocommit；幂等无害
+            except Exception:  # noqa: BLE001
+                pass
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    with _sm.db_lock:
+        c = _sm.db.cursor()
+        try:
+            c.execute(_sql, (now_iso, sandbox_id))
+            _sm.db.commit()
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 @router.get("/cloud-sandboxes", operation_id="runtime_cloud_sandboxes", summary="List cloud sandboxes",
             description="Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.")
 def runtime_list_cloud_sandboxes(
@@ -3501,8 +3590,8 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
     # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
     # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform。
     # 表 owner=runtime：读按域解析（runtime 优先，1146 回退历史 mgmt/单库形态），
-    # 不再假定进程主库一定有表；状态写仍落 owner 域（见下方 UPDATE）。
-    _kill_rows = _fetch_across_domains(
+    # 不再假定进程主库一定有表；状态写跟随读侧命中的域（见下方 UPDATE 回退链）。
+    _kill_rows, _hit_domain = _fetch_across_domains_with_hit(
         "SELECT provider, state, repo_key, provider_id "
         "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,), ("runtime", "mgmt"))
     row = _kill_rows[0] if _kill_rows else None
@@ -3530,11 +3619,26 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
         if hasattr(provider, 'kill_sandbox'):
             success = provider.kill_sandbox(sandbox_id)
             if success:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
-                              (datetime.now(timezone.utc).isoformat(), sandbox_id))
-                    db.commit()
+                # Issue #3527（review R2）：写侧跟随读侧定位——先写读命中的域，
+                # 0 行（1146/行不在该域）回退另一域；两域都 0 行 → 报可见错误，
+                # 不再「provider 已杀、台账停留 running 且静默返回 killed」。
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                _updated = 0
+                _write_err = None
+                for _dom in (_hit_domain,) + tuple(
+                        d for d in ("runtime", "mgmt") if d != _hit_domain):
+                    try:
+                        _updated = _mark_sandbox_killed_on_domain(_dom, sandbox_id, _now_iso)
+                    except Exception as _e:  # noqa: BLE001 - 单域写失败继续试另一域
+                        _write_err = _e
+                        continue
+                    if _updated:
+                        break
+                if not _updated:
+                    _msg = (f"provider killed sandbox {sandbox_id} but ledger row "
+                            f"update failed in runtime/mgmt domains (rowcount=0"
+                            + (f": {_write_err}" if _write_err else "") + ")")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": _msg})
                 return {"status": "killed"}
             return {"status": "kill_failed"}
         raise HTTPException(status_code=500, detail={"code": 500, "message": "provider has no kill_sandbox method"})
