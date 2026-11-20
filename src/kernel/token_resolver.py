@@ -167,6 +167,14 @@ class VCSProvider(ABC):
         """D44/S66 端口：拉仓库协作者列表（分页，平台原生字段）。"""
         return []
 
+    def list_create_spaces(self, api_token: str) -> "list[dict]":
+        """可建仓的「所属空间」清单（GitLab 组/子组；其它平台暂无 → 空 = 只有个人空间）。
+
+        返回 [{path, name, kind}]：`path` 可直接作为建仓 owner（GitLab 用 full_path，
+        含子组）。默认空实现——平台没有组织空间概念时，创建表单只渲染"个人空间"。
+        """
+        return []
+
     def create_repo(self, api_token: str, name: str, description: str = "",
                     private: bool = False, owner: str = "", path: str = "") -> dict:
         """D42/S62 端口：在 token 用户名下建仓，返回平台 repo dict。
@@ -1544,14 +1552,61 @@ class GitLabProvider(GenericVcsProvider):
         except Exception:
             return False
 
+    def list_create_spaces(self, api_token: str) -> "list[dict]":
+        """GitLab：当前 token 能建仓的组（Developer=30 及以上）。
+
+        用 `/groups?min_access_level=30`（含用户所属的组）；子组不在默认返回里，
+        由创建表单允许直接填完整组路径（`grp/sub`）覆盖——建仓时按 full_path 精确
+        解析 namespace_id，等价于下拉里选中它。取组失败降级为空（不阻断个人空间建仓）。
+        """
+        try:
+            rows = self._http("GET", "/groups?min_access_level=30&per_page=100", api_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab list_create_spaces failed: {e}")
+            return []
+        out = []
+        for g in rows if isinstance(rows, list) else []:
+            if not isinstance(g, dict):
+                continue
+            path = str(g.get("full_path") or "")
+            if path:
+                out.append({"path": path, "name": str(g.get("name") or path), "kind": "group"})
+        return out
+
+    def _namespace_id(self, api_token: str, owner: str) -> int:
+        """组/子组完整路径 → namespace_id（GitLab 建仓只认数字 id，不认路径）。"""
+        import urllib.parse as _up
+
+        try:
+            rows = self._http("GET", f"/namespaces?search={_up.quote(owner, safe='')}&per_page=100",
+                              api_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab namespace lookup failed ({owner}): {e}")
+            return 0
+        for ns in rows if isinstance(rows, list) else []:
+            if not isinstance(ns, dict):
+                continue
+            if str(ns.get("full_path") or "").lower() == owner.lower():
+                try:
+                    return int(ns.get("id") or 0)
+                except Exception:  # noqa: BLE001
+                    return 0
+        return 0
+
     def create_repo(self, api_token, name, description="", private=False,
                     owner="", path="") -> dict:
+        """建仓；owner 非空 = 建到指定组/子组（先解析 namespace_id）。"""
+        body = {"name": name, "description": description or "",
+                "visibility": "private" if private else "public",
+                "initialize_with_readme": True}
+        if path and path != name:
+            body["path"] = path
         if owner:
-            # GitLab 组织空间建仓需要 namespace_id，未在本次范围内落地 → 显式失败
-            return {"error": "GitLab 暂不支持在指定命名空间创建仓库"}
-        return self._http("POST", "/projects", api_token,
-                          {"name": name, "description": description or "",
-                           "visibility": "private" if private else "public"})
+            ns_id = self._namespace_id(api_token, owner)
+            if not ns_id:
+                return {"error": f"所属空间不存在或无建仓权限: {owner}"}
+            body["namespace_id"] = ns_id
+        return self._http("POST", "/projects", api_token, body)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）

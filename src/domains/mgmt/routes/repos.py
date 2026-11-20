@@ -2,7 +2,7 @@
 import os
 import re
 import time
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.kernel.config import log, WORKSPACE_DIR
 from src.domains.mgmt.user import db as user_db
@@ -1021,11 +1021,22 @@ def sync_repos(user: dict = Depends(require_org_member)):
 
 
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
-def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
-    """检查当前用户名下是否已存在同名仓库"""
-    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
+def check_repo_name(name: str,
+                    provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                    owner: str = Query("", description="所属空间路径（GitLab 可填组/子组），空=个人空间"),
+                    user: dict = Depends(require_no_session_token)):
+    """检查指定平台/空间下是否已存在同名仓库（Issue #3580：支持组/子组）。"""
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    _space = (owner or "").strip()
+    if _space and not _valid_space_path(_space):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间格式非法"})
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
@@ -1034,6 +1045,7 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     try:
         _uinfo = create_provider(provider).verify_token(api_token)
         login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
+        login = _space or login          # 指定空间时按空间路径查重（子组仓不误判为占用）
         if not login:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
         _repo_info = VcsApiClient(provider, api_token, login, name).get_repo_info()
@@ -1049,6 +1061,62 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
 
 
+@router.get("/create-targets", operation_id="repos_create_targets",
+            summary="List spaces a repository can be created in",
+            description="Returns the personal namespace login plus provider-declared spaces "
+                        "(GitLab: groups the token can create projects in, full_path form). "
+                        "Providers without organisation namespaces return an empty list.")
+def list_create_targets(provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                        user: dict = Depends(require_no_session_token)):
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    from src.kernel.token_resolver import create_provider
+    _p = create_provider(provider)
+    login = ""
+    try:
+        login = str(_p.get_user_login(api_token) or "")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"create-targets: 取登录名失败 ({provider}): {e}")
+    try:
+        spaces = _p.list_create_spaces(api_token) if api_token else []
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"create-targets: 列空间失败 ({provider}): {e}")
+        spaces = []
+    return {"provider": provider, "personal_login": login, "spaces": spaces}
+
+
+def _owner_from_full_name(full_name: str) -> str:
+    """建仓响应 full_name → owner（Issue #3580：子组仓 owner 是完整组路径）。
+
+    GitLab 子组仓 `full_name = grp/sub/proj`：取最后一段之前的完整路径
+    （按首个 `/` 切会把 owner 截成 grp → webhook 路径拼错、托管 404）。
+    """
+    _fn = str(full_name or "")
+    return _fn.rpartition("/")[0] if "/" in _fn else ""
+
+
+def _valid_space_path(value: str) -> bool:
+    """所属空间路径校验（Issue #3580）：GitLab 支持组/子组（`group/sub`）。
+
+    段级规则：非空、非点段、字符集限字母数字下划线连字符点; 禁首尾斜杠。其它平台只传单段
+    （组织名/登录名），同样被这条规则接受（零回归）。
+    """
+    import re as _re
+
+    if not value or value.startswith("/") or value.endswith("/"):
+        return False
+    for seg in value.split("/"):
+        if not seg or seg in (".", "..") or not _re.match(r"^[\w\-.]+$", seg):
+            return False
+    return True
+
+
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
@@ -1060,8 +1128,10 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     if not _re.match(r'^[\w\-\.]+$', name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
     owner = (body.owner or "").strip()
-    if owner and not _re.match(r'^[\w\-\.]+$', owner):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间只能包含字母、数字、下划线、连字符和点"})
+    if owner and not _valid_space_path(owner):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "所属空间格式非法（可填组/子组路径如 group/sub，段只能含字母数字下划线连字符点，禁 .. 与首尾斜杠）"})
     repo_path = (body.path or "").strip()
     if repo_path and not _re.match(r'^[\w\-\.]+$', repo_path):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库路径只能包含字母、数字、下划线、连字符和点"})
@@ -1102,9 +1172,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     # GitCode 建仓响应不带 owner 字段（只有 namespace/human_name），此前 owner 落空
     # 导致 webhook 拼成 /repos//<name>/hooks → 404、托管永久 partial。统一从
     # full_name 兜底解析，github/gitcode/其它卡路径口径一致。
-    if not owner and "/" in full_name:
-        owner = full_name.split("/", 1)[0]
-    repo_name = repo_info.get("name") or (full_name.split("/", 1)[1] if "/" in full_name else name)
+    if not owner:
+        owner = _owner_from_full_name(full_name)
+    repo_name = repo_info.get("name") or (full_name.rpartition("/")[2] or name)
 
     try:
         def _fetch(token, _uid=user["id"], _p=provider):

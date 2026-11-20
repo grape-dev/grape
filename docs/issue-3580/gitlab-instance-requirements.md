@@ -44,6 +44,8 @@
 | S5 | 树/文件 | 实例可达 | `GET .../tree`、`.../contents/src/a.py`、`.../contents/src` | 归一为 `{type,mode,path,name,sha,size}`；文件 base64；目录回落 | `test_issue_3580_gitlab_repo_paths.py`（已绿） |
 | S6 | 指派 | 建 Issue 带用户名 | `create_issue(assignee="alice")` | payload 带 `assignee_ids=[alice 的 id]` | `test_issue_3580_gitlab_assignee.py`（已绿） |
 | S7 | 接入自检 | 实例卡已写入 | `python scripts/probe_gitlab_instance.py <provider>` | 输出 token/列仓/namespace/tree/CA/建钩 dry-run 六项结论 | 脚本 `--self-test` 单测（mock 上游） |
+| S9 | 一键建仓到组/子组 | 实例卡 + 用户 PAT（组内 Developer 及以上） | 创建弹窗选"所属空间" `grp/sub` → 建仓 | `/namespaces` 拿到 id → `/projects` 带 `namespace_id` 建成；仓库列表出现 `gitlab-corp:grp/sub/<name>`；组不存在/无权限给出明确错误 | `test_issue_3580_create_space.py` |
+| S10 | 空清单与查重 | 同上 | `GET /repos/create-targets`、`GET /repos/check-name?owner=` | 空间清单返回组 full_path（上游失败降级为空 = 只有个人空间）；查重按空间判定，子组同名不误判 | 同上 |
 | S8 | 事件接入 | 实例已托管仓库 | 上游投递 MR 事件 | 通用 inbox 幂等入队（`(repo_key, delivery_id)`），worker 消费 | `test_issue_3580_review_fixes.py` + 真库演练 |
 
 ## 4. 验收标准

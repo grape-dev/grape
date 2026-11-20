@@ -121,3 +121,22 @@
 3. 既有 26 条（S3–S6）逐文件隔离复跑
 4. `tests/arch/test_migration_version_integrity.py` + `tests/api/test_migration_*`（迁移未动，确认无回归）
 5. 文档样例字段与 `platform_object_ddl.py` 列一致（grep 双向）
+
+## D12 建仓到组/子组（一键创建项目）
+
+- 后端：`GitLabProvider.create_repo(owner=...)` 先 `GET /namespaces?search=<组路径>` 精确匹配
+  `full_path` 得 `namespace_id` 再 `POST /projects`（GitLab 建仓只认数字 id）；`initialize_with_readme`
+  默认 true；解析不到 → 明确错误，绝不退化成"建到个人空间"。
+- 空间清单：新端口方法 `list_create_spaces()`（基类默认空 = 只有个人空间）；GitLab 实现
+  `GET /groups?min_access_level=30`（Developer 及以上可建仓），返回 `full_path`。子组不在默认返回内，
+  由表单允许直接填完整路径覆盖（输入即校验）。
+- 路由：`GET /api/repos/create-targets?provider=`（个人登录名 + 空间清单）、
+  `POST /api/repos/create` 的 owner 改为段级校验（允许 `group/sub`，禁点段/空段/首尾斜杠）、
+  `GET /api/repos/check-name?provider=&owner=` 按空间查重（否则子组同名仓误判占用）。
+- 建仓响应回填：`full_name` 用 `rpartition` 取 owner（`grp/sub/proj` → `grp/sub`），
+  split 首个 `/` 会把 owner 截成 grp → webhook 路径拼错、托管 404。
+- 前端：创建弹窗新增"所属空间"下拉（默认个人空间），换平台即重拉清单；提交带 `owner`；
+  查重带 `provider/owner`。样式复用输入框规则；locales 新增 3 键并 bump
+  i18n 指纹/index cacheVer，`all-views.css?v=` 与前端版本棘轮同批抬版。
+- 用例：`tests/runtime/test_issue_3580_create_space.py`（6 条：namespace 解析/无 owner 零查询/
+  空间不存在不建/空间清单/路径校验/full_name 回填）。

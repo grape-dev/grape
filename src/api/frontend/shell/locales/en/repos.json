@@ -112,7 +112,7 @@
     "platform_label": "Platform",
     "name_label": "Repository Name",
     "name_placeholder": "e.g. my-project",
-    "name_hint": "Only letters, numbers, underscores, hyphens and dots allowed. Will be created under your account namespace.",
+    "name_hint": "Letters, digits, underscore, hyphen and dot only; personal space creates under your account namespace.",
     "desc_label": "Project Description",
     "desc_placeholder": "Briefly describe the purpose of this project (optional)",
     "vis_label": "Visibility",
@@ -127,7 +127,10 @@
     "err_exists": "Repository {{name}} already exists, please choose another name",
     "success": "Project created successfully: {{name}}",
     "err_create_failed": "Create failed: {{msg}}",
-    "err_check_failed": "Check failed: {{msg}}"
+    "err_check_failed": "Check failed: {{msg}}",
+    "space_label": "Owner space",
+    "space_personal": "Personal space",
+    "space_hint": "Create inside a group or subgroup of this instance; leave empty for your personal space."
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
