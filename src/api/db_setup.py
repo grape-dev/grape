@@ -10853,6 +10853,60 @@ register_migration(
     fn=_fn_create_webhook_inbox_table,
 )
 
+
+def _fn_webhook_inbox_last_error_nullable() -> None:
+    """Issue #3580 复审：把 last_error 收敛成可空列（MySQL 独有 1364 的存量库修法）。
+
+    建表 DDL 原为 `last_error TEXT NOT NULL DEFAULT ''`：MySQL 不接受 TEXT 字面默认值，
+    兼容层剥掉默认值后列变成 NOT NULL 无默认，严格模式里任何不写该列的 INSERT 直接
+    1364（实测：webhook 入队每次 500；SQLite 全套测试测不出来）。新装库由修好的 DDL
+    直接建成可空 MEDIUMTEXT，本迁移负责把**已盖 202611200003 章的存量库**收敛过来。
+
+    SQLite 侧的字面默认值合法、无需改动（早退即视为已满足）；非 owner 库与跨库视图
+    跳过（视图列是 owner 建视图时的快照，不能在本库 ALTER）。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    conn = _migration_conn("runtime", default=_db)
+    with (_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            return                      # 本库没有该表（非 owner 域）→ 无需收敛
+        if not _is_base_table(c, "grape_t_webhook_inbox"):
+            return                      # 跨库可更新视图：列快照由 owner 域重建
+        if not _mysql_backend():
+            return                      # SQLite 的字面默认值合法
+        sql_nullable = (
+            "SELECT IS_NULLABLE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_webhook_inbox' "
+            "AND COLUMN_NAME='last_error'")
+        row = c.execute(sql_nullable).fetchone()
+        if not row:
+            raise RuntimeError("grape_t_webhook_inbox.last_error missing")
+        if str(row[0]).upper() == "YES":
+            return                      # 已收敛（幂等：二次启动零写入）
+        if not _destructive_ddl(
+                c, "ALTER TABLE grape_t_webhook_inbox MODIFY last_error MEDIUMTEXT NULL",
+                kind_hint="cleanup"):
+            raise RuntimeError(
+                "webhook inbox last_error 放宽被 cleanup 门槛拦下"
+                "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+        row = c.execute(sql_nullable).fetchone()   # _destructive_ddl 失败只告警，必须复验
+        if str((row or [""])[0]).upper() != "YES":
+            raise RuntimeError(
+                "webhook inbox last_error MODIFY 未生效（仍非空）→ 本次不盖章，下版本重试")
+        conn.commit()
+        log.info("webhook inbox last_error: TEXT NOT NULL -> MEDIUMTEXT NULL")
+
+
+register_migration(
+    version="202611200004",
+    name="webhook-inbox-last-error-nullable",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_webhook_inbox_last_error_nullable,
+)
+
 register_migration(
     version="202611191000",
     name="rename-org-tables-and-uuid-pk",

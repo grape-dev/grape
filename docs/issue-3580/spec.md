@@ -42,6 +42,9 @@ R10 事件验签/幂等/重放/实例隔离；R11 PAT 不产生登录身份；R1
 4. **幂等与稳健**：`remove_gitlab_webhook` 上游 404 视为成功；`_run_git` 累加调用方已有
    `GIT_CONFIG_*`；通用 webhook 增 10MB 载荷上限（413）；收件箱 `payload` 改 `MEDIUMTEXT`
    （MySQL 64KB 上限）并补 claim 索引 `(status, next_attempt_at, lease_expires_at)`。
+   收件箱 `last_error` 原为 `TEXT NOT NULL DEFAULT ''`——MySQL 不接受 TEXT 字面默认值，
+   兼容层剥掉后严格模式下入队必报 1364（SQLite 测不出来）；改为可空 `MEDIUMTEXT`，
+   入队显式写 `''`，存量库由迁移 `202611200004` 收敛并回验 `IS_NULLABLE`。
 5. **GitLab hooks 单源**：新增 `src/kernel/vcs_gitlab_hooks.py`（project_path / find /
    setup / update / remove），mgmt 托管三件套与 `GitLabProvider` 三个同名方法都改为薄委托，
    消除"两版实现语义分叉"（此前一版用 `token=webhook_secret`、一版用 `or api_token`）。

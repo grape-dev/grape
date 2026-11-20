@@ -80,13 +80,16 @@ def enqueue_webhook(*, repo_key: str, provider: str, event_header: str,
         if row:
             return {"id": row[0], "status": row[1], "duplicate": True}
         try:
+            # Issue #3580 复审：显式写 last_error —— MySQL 下 TEXT 列带不了 DEFAULT ''，
+            # 省略该列会在严格模式报 1364（SQLite 测不出来）。
             c.execute(
                 "INSERT INTO grape_t_webhook_inbox "
                 "(repo_key, provider, delivery_id, event_header, payload, headers, "
-                " status, attempts, max_attempts, next_attempt_at, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " status, attempts, max_attempts, next_attempt_at, last_error, "
+                " created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_key, provider or "", did, event_header or "", payload,
-                 headers_json, "pending", 0, int(max_attempts), now, now, now))
+                 headers_json, "pending", 0, int(max_attempts), now, "", now, now))
             db.commit()
             return {"id": c.lastrowid, "status": "pending", "duplicate": False}
         except Exception as e:

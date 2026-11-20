@@ -91,3 +91,61 @@ def test_run_git_accumulates_git_config(monkeypatch):
     assert pairs["http.followRedirects"] == "false"
     assert any(k.lower() == "http.extraheader" for k in pairs)
     assert "t0ken" not in " ".join(captured["cmd"])
+
+# ===== Issue #3580 复审（MySQL 独有 P0）：收件箱 last_error 的默认值 =====
+# 三个断言分别锁住：新装库 DDL 可空、入队语句显式写该列、存量库有收敛迁移。
+# SQLite 对 `TEXT NOT NULL DEFAULT ''` 完全合法，所以整族缺陷只有 MySQL 严格模式
+# 才现形（实测 1364 → 通用 webhook 每次 500），必须靠静态锁 + 真库演练双保险。
+
+def test_webhook_inbox_ddl_last_error_nullable():
+    from src.domains.runtime import schema_ddl
+
+    ddl = schema_ddl._WEBHOOK_INBOX_DDL
+    assert "last_error MEDIUMTEXT DEFAULT NULL" in ddl
+    assert "last_error TEXT NOT NULL DEFAULT ''" not in ddl
+
+
+def test_webhook_enqueue_writes_last_error_explicitly():
+    import inspect
+
+    from src.domains.runtime import webhook_inbox
+
+    src = inspect.getsource(webhook_inbox.enqueue_webhook)
+    insert = src.split("INSERT INTO grape_t_webhook_inbox", 1)[1]
+    assert "last_error" in insert, "入队 INSERT 必须显式写 last_error（MySQL 无列默认）"
+
+
+def test_webhook_inbox_last_error_migration_registered():
+    import src.api.db_setup as ds
+
+    by_version = {m.version: m.name for m in ds._MIGRATIONS}
+    assert by_version.get("202611200004") == "webhook-inbox-last-error-nullable"
+    # 部署线已占用 202611200002/202611200003（ca_bundle / create-webhook-inbox-table），
+    # 本迁移必须另占号，否则按号跳过 = 列永远收敛不了
+    assert by_version.get("202611200002") != "webhook-inbox-last-error-nullable"
+    assert by_version.get("202611200003") != "webhook-inbox-last-error-nullable"
+    names = [m.name for m in ds._MIGRATIONS]
+    assert names.count("webhook-inbox-last-error-nullable") == 1
+
+
+def test_webhook_inbox_last_error_migration_sqlite_idempotent(monkeypatch):
+    """SQLite 侧：建表后连跑两次零异常（早退分支），且入队仍可省略该列。"""
+    import sqlite3
+
+    import src.api.db_setup as ds
+    from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_DDL
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_WEBHOOK_INBOX_DDL)
+
+    monkeypatch.setattr(ds, "_mysql_backend", lambda: False)
+    monkeypatch.setattr(ds, "_migration_conn",
+                        lambda domain, default=None: conn)
+    monkeypatch.setattr("src.kernel.session_manager.db", conn, raising=False)
+
+    ds._fn_webhook_inbox_last_error_nullable()
+    ds._fn_webhook_inbox_last_error_nullable()   # 幂等：二次调用无副作用
+
+    cols = {r[1]: r for r in conn.execute("PRAGMA table_info(grape_t_webhook_inbox)")}
+    assert "last_error" in cols
