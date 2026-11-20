@@ -369,3 +369,23 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v
+      - name: Branch guard runtime resolution tests (issue #3579)
+        # Issue #3579 QA 复审（工作流审查·变更验证 Required）：pre-push 守卫钩子的
+        # 运行时解释器/模块解析用例此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245
+        # 均由 QA 要求补齐），模板改动红/绿只能靠提交者自证。接入 branch_guard 全量
+        # 回归（fail-open/fail-closed 边界、部署态优先加载、存量模板升级）。
+        # 注：test_issue_993 的两个 linked-push 用例在基线上即失败（与 #3579 无关，
+        # 历史问题另行跟踪），显式 deselect 保持门禁可绿，其余用例全部进门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_3579_branch_guard_runtime_path.py \
+            tests/test_issue_2028_branch_guard_fail_open.py \
+            tests/runtime/test_issue_2292_branch_guard_canonical_lock.py \
+            tests/runtime/test_issue_2314_branch_guard_fast_forward.py \
+            tests/runtime/test_issue_2514_workspace_binding.py \
+            tests/runtime/test_issue_2706_branch_guard_lease_fallback.py \
+            tests/runtime/test_issue_2933_readonly_log_failopen.py \
+            tests/runtime/test_issue_993_branch_guard.py -v \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard

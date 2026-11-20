@@ -401,6 +401,10 @@ def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
 
     guard_seen = tmp_path / "guard-stdin.txt"
     env = os.environ.copy()
+    # Issue #3579（QA 复审）：钩子解释器按 GRAPE_PYTHON → VIRTUAL_ENV → .venv → PATH
+    # 解析；本用例注入 PATH 假解释器，需先清掉高优先级来源，保证确定性。
+    env.pop("GRAPE_PYTHON", None)
+    env.pop("VIRTUAL_ENV", None)
     env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
     env["LOCAL_SEEN"] = str(local_seen)
     env["GUARD_SEEN"] = str(guard_seen)
