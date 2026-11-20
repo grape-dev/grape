@@ -235,7 +235,6 @@ def _ns_cache_put(key: tuple[str, str, str], entry: dict) -> None:
 
 def _namespace_provider_entry(user: dict, provider: str) -> dict:
     """单个 provider 的账号/空间视图（并行外部调用 + 60s 缓存）。"""
-    from src.domains.mgmt.user.repo_manager import fetch_org_namespaces
 
     token = get_user_token_for(
         user.get("username", ""), user_id=str(user.get("id") or ""), provider=provider)
@@ -271,7 +270,12 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
         return create_provider(provider).verify_token(token) or {}
 
     def _orgs() -> list:
-        return fetch_org_namespaces(provider, token) or []
+        # 组织清单归命名空间领域（gitlab 走 provider.list_create_spaces 端口，
+        # gitee 走 /user/orgs，gitcode/github 复用各自 /orgs 适配器）——不再查
+        # 只登记了两家的旧 fetcher 表。
+        from src.domains.mgmt.user.namespaces import list_org_namespaces
+
+        return [ref.as_payload() for ref in list_org_namespaces(provider, token)]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_info = pool.submit(_verify)

@@ -112,3 +112,20 @@ def test_route_guard_maps_domain_error_to_400(monkeypatch):
     detail = exc.value.detail
     assert isinstance(detail, dict)
     assert detail["error_code"] == "NAMESPACE_NOT_VISIBLE"
+
+def test_gitlab_lister_uses_provider_spaces_port(monkeypatch):
+    """GitLab 组织清单必须走 provider.list_create_spaces（组/子组完整 full_path）。
+
+    回归：路由曾继续用只登记 gitcode/github 的旧 fetcher 表，于是 gitlab 的
+    组织空间在清单里恒为空——接口 200 但只有个人项。
+    """
+    from src.domains.mgmt.user import namespaces as ns_mod
+    import src.kernel.token_resolver as tr
+
+    class _Prov:
+        def list_create_spaces(self, token):
+            return [{"path": "grp/sub", "name": "SUB", "kind": "group"}]
+
+    monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
+    refs = ns_mod.list_org_namespaces("gitlab", "tok")
+    assert [(r.path, r.kind) for r in refs] == [("grp/sub", KIND_ORG)]
