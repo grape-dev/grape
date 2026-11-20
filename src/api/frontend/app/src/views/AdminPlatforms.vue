@@ -297,11 +297,13 @@ async function saveCard(p) {
     // 「双真源」策略只写 meta、不落行（rows: config_owned），旧页面照旧弹成功 →
     // 运维以为 CA/下载基址改好了，实际启动导入即被配置文件冲回。这里必须明说。
     const action = ((r && r.rows) || {})[p.provider]
+    const ovs = ((r && r.overrides) || {})[p.provider] || {}
     if (action === 'config_owned') {
-      cardError.value = t(
-        'page.config_owned',
-        '该平台由配置文件定义（configs/platforms/' + p.provider + '.json），管理面修改不会入库；要改请改配置文件，或另建一张手建实例卡'
-      )
+      const fields = Object.keys(ovs)
+      cardError.value = fields.length
+        ? t('page.config_overridden', '该平台由配置文件定义，本次改动已按管理面覆盖生效：{fields}；改回文件值即解除覆盖')
+            .replace('{fields}', fields.join(', '))
+        : t('page.config_same', '该平台由配置文件定义，本次提交与文件一致，未产生覆盖')
     }
   } catch (e) {
     const d = e.detail || {}

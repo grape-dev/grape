@@ -859,6 +859,12 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
     except Exception:
         _h, _checked_at = {}, ""
     out = {}
+    # A2：把「管理面覆盖了配置文件哪些字段」一并回读，UI 才能说清「这个值哪来的」
+    try:
+        _raw_ov = get_meta_value("vcs_platform_overrides") or ""
+        _ovs = (_json.loads(_raw_ov) or {}) if _raw_ov else {}
+    except Exception:
+        _ovs = {}
     for provider in list_vcs_platforms():
         card = get_platform_card(provider)
         if card is None:
@@ -880,6 +886,7 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
         # bot_token_health（healthy/degraded/unhealthy+错误摘要），顶层附
         # checked_at（整体最近探活时间）。全局汇总卡退役，列表逐行展示。
         d["bot_token_health"] = _h.get(provider, {})
+        d["overrides"] = _ovs.get(provider, {})
         out[provider] = d
     return {"cards": out, "bot_token_health_checked_at": _checked_at}
 
@@ -888,6 +895,8 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
 def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_admin)):
     import json as _json
     from src.domains.runtime.public import build_platform_card, PlatformCardError
+    from src.domains.runtime.public import card_field_overrides as _card_diff
+    from src.domains.runtime.public import base_platform_card as _base_card
     from src.domains.runtime.public import invalidate_platform_card_cache
 
     cleaned = {}
@@ -965,6 +974,24 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
                 "code": 400,
                 "message": f"webhook_tokens 含不在册平台: {provider}"})
         meta_pairs.append((f"{provider}_webhook_token", token))
+    # A2（Issue #3580）：管理面覆盖层。config 派生行（source=config）不写行是防双真源，
+    # 但管理面改的字段必须生效且不能被下次启动的导入冲回——这里只记「相对当前生效卡
+    # 真正变化」的键（改回文件值 = 该平台覆盖整条移除），读卡时最后叠加。
+    from src.domains.mgmt.user.db import get_meta_value as _get_meta
+    try:
+        _raw_prev_ov = _get_meta("vcs_platform_overrides") or ""
+        _ovs = (_json.loads(_raw_prev_ov) or {}) if _raw_prev_ov else {}
+    except Exception:
+        _ovs = {}
+    for _p, _fields in cleaned.items():
+        # 基线 = 不含覆盖层的卡：与配置文件/表行一致的提交不产生覆盖，
+        # 于是「改回文件值」就是删掉该平台的覆盖（而非留一条永久空覆盖）。
+        _changed = _card_diff(_fields, _base_card(_p))
+        if _changed:
+            _ovs[_p] = _changed
+        else:
+            _ovs.pop(_p, None)
+    meta_pairs.append(("vcs_platform_overrides", _json.dumps(_ovs, ensure_ascii=False)))
     _rt.set_meta_values_any(meta_pairs)
     invalidate_platform_card_cache()
     # Issue #3580 复审：实例卡还必须落成平台行（D109 表是运行时权威）——只写 meta 时
@@ -998,7 +1025,9 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
     log_audit("admin_vcs_platforms_saved", operator_id=admin["id"],
               detail={"providers": sorted(cleaned.keys()), "rows": rows})
     out = {"message": "VCS platform cards saved (cache invalidated)",
-           "cards": sorted(cleaned.keys()), "rows": rows}
+           "cards": sorted(cleaned.keys()), "rows": rows,
+           # A2：本次写入后每个平台生效的覆盖字段（空=与配置文件一致）
+           "overrides": {_p: _ovs.get(_p, {}) for _p in cleaned}}
     if rows_error:
         out["rows_error"] = rows_error
     return out

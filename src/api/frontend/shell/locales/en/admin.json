@@ -533,6 +533,8 @@
     "save_creds": "Save credentials",
     "save": "Save",
     "configured_keep": "configured (leave empty to keep)",
+    "config_overridden": "This platform is defined by its config file; this change takes effect as an admin override: {fields}. Restore the file value to drop the override.",
+    "config_same": "This platform is defined by its config file; this submission matches the file, so no override was recorded.",
     "not_configured": "not configured",
     "loading": "Loading…",
     "load_failed": "Failed to load",

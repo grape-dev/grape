@@ -533,6 +533,8 @@
     "save_creds": "保存凭据",
     "save": "保存",
     "configured_keep": "已配置（留空不改）",
+    "config_overridden": "该平台由配置文件定义，本次改动已按管理面覆盖生效：{fields}；改回文件值即解除覆盖",
+    "config_same": "该平台由配置文件定义，本次提交与文件一致，未产生覆盖",
     "not_configured": "未配置",
     "loading": "加载中…",
     "load_failed": "加载失败",
