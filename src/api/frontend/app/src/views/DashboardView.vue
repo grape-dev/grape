@@ -3470,6 +3470,13 @@ function togglePrSubscription() {
 }
 // 流程编辑
 function enterFlowEdit() {
+  // 进入编辑态前先给可见反馈：依赖请求失败时原来被空 catch 吞掉，
+  // 用户只看到「点了编辑没反应」（本次线上就是被 39s 的 pipeline 查询拖住）。
+  const _fail = function (e) {
+    console.error('[enterFlowEdit] 进入编辑态失败', e)
+    app().showToast((e && e.message) || t('load_failed') || '加载失败，请重试', 5000)
+  }
+  if (app() && app().showToast) app().showToast(t('loading') || '加载中...', '', 1200)
   // 获取权威 dashData + pipeline nodes
   API()
     .get('/dashboard/' + dashOwner.value + '/' + dashName.value)
@@ -3496,14 +3503,16 @@ function enterFlowEdit() {
           const draft = restoreDashDraft(dashOwner.value, dashName.value, 'edit', detail.value.id)
           if (draft) applyDraftNodes(draft)
         })
-        .catch(function () {
+        .catch(function (e2) {
+          // 流程数据取不到仍允许进编辑态（用空节点兜底），但要留痕
+          console.warn('[enterFlowEdit] 流程节点加载失败，进入空编辑态', e2)
           buildEditNodes(null, agents.value)
           editBaseline.value = editNodesSnapshot()
           flowEditing.value = true
           G.window._dashboardEditing = true
         })
     })
-    .catch(function () {})
+    .catch(_fail)
 }
 function buildEditNodes(originalNodes, ags) {
   const sceneNodes = originalNodes || (dashData.value || {}).scene_nodes || []

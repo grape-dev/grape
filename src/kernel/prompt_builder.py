@@ -1396,8 +1396,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
 
 def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
                             account: str = "", runtime_id: int = 0, user_info: str = "",
-                            has_valid_session: bool = False,
-                            plugins: list = None) -> str:
+                            has_valid_session: bool = False, plugins: list = None) -> str:
     """Issue 会话独立 prompt：围绕该 Issue 展开讨论（咨询/评审/澄清/解读）。
 
     原 build_task_chat_prompt（决策 R1 重命名）；语义从「任务澄清」放宽为

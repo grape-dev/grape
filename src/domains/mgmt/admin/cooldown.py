@@ -255,11 +255,16 @@ def run_cooldown_cleanup():
         release_lock(_LOCK_KEY)
 
 async def _cooldown_worker(interval: float = _COOLDOWN_INTERVAL):
-    """定时任务 worker。"""
+    """定时任务 worker。
+
+    清理是同步 DB 活（含全局 db_lock）：**必须丢到线程里跑**。直接在事件循环里
+    调用会占住 loop，期间所有接口一起僵住（2026-11-20 生产 py-spy 实证：
+    MainThread 停在 _cleanup_login_failures 的 db_lock 上，全站冻结 60~90 秒）。
+    """
     await asyncio.sleep(_INITIAL_DELAY)  # 启动后延迟首次执行
     while True:
         try:
-            run_cooldown_cleanup()
+            await asyncio.to_thread(run_cooldown_cleanup)
         except Exception as e:
             log.warning(f"Cooldown worker error: {e}")
         await asyncio.sleep(interval)

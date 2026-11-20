@@ -75,6 +75,17 @@ async def verify_token(body: dict) -> dict:
     return _get_local("mgmt").verify_session_token((body or {}).get("token_hash", ""))
 
 
+@readonly_router.get("/platform-cards", operation_id="mgmt_platform_cards")
+async def get_platform_cards(enabled_only: bool = True) -> list:
+    """Issue #3632：平台卡行（供 `MgmtServiceRemote.get_repo_platform_cards()`）。
+
+    只读白名单端点，语义等同于 `mgmt.public.repo_platform_cards`：
+    列白名单由 owner 域原语决定，凭据列不出域；不缓存、不投影，
+    避免与 `grape_t_repo_platforms` 真源漂移。
+    """
+    return _get_local("mgmt").get_repo_platform_cards(bool(enabled_only))
+
+
 @readonly_router.get("/skills/{skill_id}", operation_id="mgmt_skill_get")
 async def get_skill(skill_id: str) -> dict:
     """供 MgmtServiceRemote.get_skill() 调用。"""

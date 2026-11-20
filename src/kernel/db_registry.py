@@ -32,7 +32,9 @@ _forbidden: set[str] = set()         # 永久禁用（配置/鉴权类错误：�
 _retry_after: dict[str, float] = {}  # 临时失败的退避时间点（monotonic 秒）
 _RETRY_BACKOFF_S = 5.0
 #: 缓存连接的存活校验节流：空闲超过该秒数才 ping，避免每次取连接都多一次往返。
-_PING_IDLE_SECONDS = 30.0
+_PING_IDLE_SECONDS = float(os.environ.get("DB_PING_IDLE_SECONDS", "30"))
+#: 探活 ping 的 socket 超时（秒）：死连接上裸 ping 会挂死，必须设上限。
+_PING_TIMEOUT_SECONDS = float(os.environ.get("DB_PING_TIMEOUT_SECONDS", "3"))
 # 连接一次失败就永久禁用整个域，是 2026-11-15 事故的放大器：
 # 本地 runtime MySQL 打满 max_connections（1040）后，mgmt 进程把 runtime 拉黑，
 # 之后所有跨域读（meta / scene_category / skill）静默回落到进程库 → 满屏 1146。
@@ -280,12 +282,44 @@ class _CompatConn:
 
 
 def _new_conn(domain: str, autocommit: bool = True):
+    """建域连接：带 keepalive 与读写超时兜底（与 MySQLCompatDB 同一套阈值）。
+
+    跨网段链路会静默丢弃空闲长连接（对端 ACK 过、包没到库）：没有 keepalive 和
+    读超时的话，复用时查询会挂在 socket 读上几十秒到几分钟，并拖住整个域。
+    """
     import pymysql
+
+    from src.kernel.mysql_compat import (_DB_READ_TIMEOUT, _DB_WRITE_TIMEOUT,
+                                         _enable_tcp_keepalive)
 
     cfg = parse_dsn(dsn_of(domain))
     # connect_timeout=8s：pymysql 默认 10s，收紧 2s 与域读超时 10s 留余量
-    conn = pymysql.connect(autocommit=autocommit, connect_timeout=8, **cfg)
+    conn = pymysql.connect(autocommit=autocommit, connect_timeout=8,
+                           read_timeout=_DB_READ_TIMEOUT,
+                           write_timeout=_DB_WRITE_TIMEOUT, **cfg)
+    _enable_tcp_keepalive(conn)
     return _CompatConn(conn)
+
+
+def _bounded_ping(conn, timeout: float) -> None:
+    """带 socket 超时的 ping(reconnect=True)。
+
+    裸 ping 在死连接上同样会挂死（等内核 keepalive / NAT RST），所以探活必须自己
+    有时间上限；超时即抛，由调用方丢弃重建。
+    """
+    sock = getattr(conn, "_sock", None)
+    prev = None
+    try:
+        if sock is not None:
+            prev = sock.gettimeout()
+            sock.settimeout(timeout)
+        conn.ping(reconnect=True)
+    finally:
+        if sock is not None and prev is not None:
+            try:
+                sock.settimeout(prev)
+            except Exception:
+                pass
 
 
 def _needs_liveness_check(domain: str) -> bool:
@@ -328,7 +362,8 @@ def domain_db(domain: str):
         # 这里按空闲节流 ping(reconnect=True)：断开时 pymysql 自动重连。
         if _needs_liveness_check(domain):
             try:
-                conns[domain].ping(reconnect=True)
+                # 探活必须带超时：死连接上的裸 ping 会挂几十秒到几分钟
+                _bounded_ping(conns[domain], _PING_TIMEOUT_SECONDS)
                 _mark_alive(domain)
             except Exception as _e:  # noqa: BLE001 - ping 失败即丢弃重建
                 log.debug(f"domain conn {domain} ping failed, reconnecting: {_e}")
