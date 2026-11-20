@@ -112,7 +112,7 @@
     "platform_label": "目标平台",
     "name_label": "仓库名称",
     "name_placeholder": "例如：my-project",
-    "name_hint": "仅限字母、数字、下划线、连字符和点；建到个人空间时以你的账号命名空间创建。",
+    "name_hint": "仅限字母、数字、下划线、连字符和点；建到个人账号时以你的账号命名空间创建。",
     "desc_label": "项目描述",
     "desc_placeholder": "简要描述这个项目的用途（可选）",
     "vis_label": "可见性",
@@ -129,8 +129,8 @@
     "err_create_failed": "创建失败: {{msg}}",
     "err_check_failed": "检查失败: {{msg}}",
     "space_label": "所属空间",
-    "space_personal": "个人空间",
-    "space_hint": "可在该实例的组/子组下建仓；留空则建到个人空间。"
+    "space_personal": "个人账号（Personal）",
+    "space_hint": "可在该实例的组/子组下建仓；留空则建到个人账号下。"
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "仓库",
