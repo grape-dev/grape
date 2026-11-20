@@ -14,7 +14,9 @@ webhook 事件、git 传输、PAT 凭据五条链路全部可用；新增实例�
 - P2 传输安全：`_run_git` 以 env 注入 Authorization / `sslCAInfo` / `followRedirects`，token 不进 argv。
 - P3 事件持久队列：`grape_t_webhook_inbox`（幂等键、claim 租约、finish 退避）、端点先持久化再 200、
   Event 进程 worker 消费、`web_url` 与卡 host 强校验。
-- P4 托管全流程 GitLab 化、`/api/repos/<provider>/connection` PAT、前端实例选择与托管页。
+- P4 托管全流程 GitLab 化、`/api/repos/<provider>/connection` PAT。
+- **前端（实例选择 / 托管 / PAT 连接页）本期未实现**：本 PR 变更集不含任何 frontend 文件，
+  归入 P5（前端 Vue + locales + i18n 版本 bump），不随本 PR 交付。
 
 Out of scope：GitLab OAuth 登录/身份绑定/登录白名单；组织级成员同步、分支保护、合并策略；
 实例级 bot 身份与协作者邀请。
@@ -40,5 +42,12 @@ R10 事件验签/幂等/重放/实例隔离；R11 PAT 不产生登录身份；R1
 4. **幂等与稳健**：`remove_gitlab_webhook` 上游 404 视为成功；`_run_git` 累加调用方已有
    `GIT_CONFIG_*`；通用 webhook 增 10MB 载荷上限（413）；收件箱 `payload` 改 `MEDIUMTEXT`
    （MySQL 64KB 上限）并补 claim 索引 `(status, next_attempt_at, lease_expires_at)`。
-5. 回归用例：`tests/runtime/test_issue_3580_review_fixes.py`（密钥必填/禁止 token 回落、
-   gitlab_v4 强制路径 B、404 幂等、GIT_CONFIG 累加）。
+5. **GitLab hooks 单源**：新增 `src/kernel/vcs_gitlab_hooks.py`（project_path / find /
+   setup / update / remove），mgmt 托管三件套与 `GitLabProvider` 三个同名方法都改为薄委托，
+   消除"两版实现语义分叉"（此前一版用 `token=webhook_secret`、一版用 `or api_token`）。
+6. **P3 覆盖全部入口**：gitcode / github 专用端点与通用路由统一走
+   `webhook.persist_webhook_event()` → 先入队再 200，入队失败 500 让上游重投；
+   gitee / gitlab 走通用路由本就覆盖。
+7. 回归用例：`tests/runtime/test_issue_3580_review_fixes.py`（密钥必填/禁止 token 回落、
+   gitlab_v4 强制路径 B、404 幂等、GIT_CONFIG 累加、hooks 单源对拍、
+   gitcode/github 端点入队与幂等）。

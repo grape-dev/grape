@@ -12,16 +12,17 @@ import pytest
 
 from src.domains.mgmt.user import repo_manager as rm
 from src.domains.runtime.engine import repogit
+from src.kernel import vcs_gitlab_hooks as hooks
 
 
 def test_gitlab_webhook_secret_required(monkeypatch):
     seen = {}
 
-    def fake_req(method, url, token="", body=None):
+    def fake_req(method, url, token="", body=None, timeout=30):
         seen["body"] = body
         return {"id": 11}
 
-    monkeypatch.setattr(rm, "_gitlab_req", fake_req)
+    monkeypatch.setattr(hooks, "_request", fake_req)
 
     with pytest.raises(RuntimeError, match="secret required"):
         rm.setup_gitlab_webhook("PAT-must-not-leak", "g", "r",
@@ -47,17 +48,17 @@ def test_gitlab_family_forces_secret_path(monkeypatch):
 
 
 def test_remove_gitlab_webhook_404_idempotent(monkeypatch):
-    def not_found(method, url, token="", body=None):
-        raise rm.UpstreamAPIError(method, url, 404, "404 Not Found", provider="GitLab")
+    def not_found(method, url, token="", body=None, timeout=30):
+        raise hooks.GitLabHookError(method, url, 404, "404 Not Found")
 
-    monkeypatch.setattr(rm, "_gitlab_req", not_found)
+    monkeypatch.setattr(hooks, "_request", not_found)
     assert rm.remove_gitlab_webhook("tok", "g", "r", 9, api_base="https://gl.corp/api/v4") is True
 
-    def forbidden(method, url, token="", body=None):
-        raise rm.UpstreamAPIError(method, url, 403, "403 Forbidden", provider="GitLab")
+    def forbidden(method, url, token="", body=None, timeout=30):
+        raise hooks.GitLabHookError(method, url, 403, "403 Forbidden")
 
-    monkeypatch.setattr(rm, "_gitlab_req", forbidden)
-    with pytest.raises(rm.UpstreamAPIError):
+    monkeypatch.setattr(hooks, "_request", forbidden)
+    with pytest.raises(hooks.GitLabHookError):
         rm.remove_gitlab_webhook("tok", "g", "r", 9, api_base="https://gl.corp/api/v4")
 
 

@@ -95,17 +95,26 @@ def test_s72_get_user_login_gitlab_field():
 
 
 def test_s72_webhook_projects_path_and_flags():
-    """建钩：POST /projects/{o}%2F{r}/hooks + token + 布尔位事件集（GitLab 形态）。"""
+    """建钩：/projects/{o}%2F{r}/hooks + token + 布尔位事件集（GitLab 形态）。
+
+    口径更新（Issue #3580 复审）：GitLab hooks 实现已收口到
+    `src/kernel/vcs_gitlab_hooks.py`，provider 侧只做委托，故拦截点由
+    `GenericVcsProvider._http` 改为 `vcs_gitlab_hooks._request`（断言改为完整 URL）。
+    """
+    from src.kernel import vcs_gitlab_hooks as _hooks
+
     p = _prov()
     calls = []
-    with patch.object(GenericVcsProvider, "_http", side_effect=_capture(calls)) as m:
-        hid = p.setup_webhook("T", "acme", "web", "http://wh", webhook_secret="sec")
-    assert hid == 42
-    c = m.call_args
-    path = c.args[1] if len(c.args) > 1 else ""
-    assert "/projects/acme%2Fweb/hooks" in str(path), (
-        f"gitlab hook path should be /projects/:id family, got {path}")
-    body = c.args[3] if len(c.args) > 3 else (c.kwargs.get("data") or {})
+
+    def _fake(method, url, token="", body=None, timeout=30):
+        calls.append({"method": method, "url": url, "body": body})
+        return {"id": 42}
+
+    with patch.object(_hooks, "_request", side_effect=_fake):
+        assert p.setup_webhook("T", "acme", "web", "http://wh", webhook_secret="sec") == 42
+    c = calls[0]
+    assert "/projects/acme%2Fweb/hooks" in c["url"], c["url"]
+    body = c["body"]
     assert body.get("url") == "http://wh"
     assert body.get("token") == "sec"
     assert body.get("push_events") is True
@@ -115,21 +124,24 @@ def test_s72_webhook_projects_path_and_flags():
 
 
 def test_s72_find_and_remove_webhook_projects_path():
+    """查/删钩（实现已收口到 kernel.vcs_gitlab_hooks）：路径同上，删除按 id 定位。"""
+    from src.kernel import vcs_gitlab_hooks as _hooks
+
     p = _prov()
     calls = []
 
-    def _fake(method, path, token, data=None, form=False):
-        calls.append({"method": method, "path": path})
+    def _fake(method, url, token="", body=None, timeout=30):
+        calls.append({"method": method, "url": url})
         if method == "GET":
             return [{"id": 7, "url": "http://wh"}, {"id": 8, "url": "http://other"}]
         return {}
 
-    with patch.object(GenericVcsProvider, "_http", side_effect=_fake):
+    with patch.object(_hooks, "_request", side_effect=_fake):
         assert p.find_existing_webhook("T", "acme", "web", "http://wh") == 7
         ok = p.remove_webhook("T", "acme", "web", 7)
     assert ok is True
-    assert "projects/acme%2Fweb/hooks" in calls[0]["path"]
-    assert "projects/acme%2Fweb/hooks/7" in calls[1]["path"]
+    assert "projects/acme%2Fweb/hooks" in calls[0]["url"]
+    assert "projects/acme%2Fweb/hooks/7" in calls[1]["url"]
 
 
 def test_s72_create_repo_projects():

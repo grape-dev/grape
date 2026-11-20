@@ -85,6 +85,20 @@ def _webhook_instance_mismatch(provider: str, payload: dict) -> bool:
     return got != (card.host or "").lower()
 
 
+def persist_webhook_event(repo_key: str, provider: str, event_header: str,
+                          body: bytes, headers) -> dict:
+    """P3 统一入口：**所有**平台 webhook（gitcode/github 专用端点 + 通用路由）
+    验签通过后先持久化入队，再由 Event 进程 worker 幂等消费/重放。
+
+    入队失败抛异常——调用方必须转 500，让上游重投（at-least-once）；静默吞掉
+    等于丢事件。返回 {"id","status","duplicate"}。
+    """
+    from src.domains.runtime.webhook_inbox import enqueue_webhook
+
+    return enqueue_webhook(repo_key=repo_key, provider=provider,
+                           event_header=event_header, body=body, headers=headers)
+
+
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
     """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
 
@@ -873,10 +887,19 @@ async def gitcode_webhook(request: Request):
     # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
     import asyncio as _aio
     loop = _aio.get_event_loop()
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(request.headers),
-                                     account=repo, repo_key_override=f"gitcode:{repo}"))
-    log.info(f"Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：先持久化再 200（入队失败 → 500 让上游重投）
+    try:
+        _enq = persist_webhook_event(f"gitcode:{repo}", "gitcode", event_header,
+                                     body, dict(request.headers))
+    except Exception as _e:
+        log.warning(f"Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 @router.post("/webhook/github")
@@ -946,11 +969,19 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         status_code = 200 if result.get("status") == "repo_deleted" else 500
         return JSONResponse(status_code=status_code, content=result)
 
-    import asyncio as _aio
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
-                                     account=repo, repo_key_override=f"github:{repo}"))
-    log.info(f"GitHub Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：与 gitcode 端点和通用路由同口径——先持久化再 200
+    try:
+        _enq = persist_webhook_event(f"github:{repo}", "github", event_header,
+                                     body, dict(headers))
+    except Exception as _e:
+        log.warning(f"GitHub Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"GitHub Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 def _resolve_a2a_repo_key(repository: str) -> str:
@@ -3044,10 +3075,9 @@ async def generic_vcs_webhook(provider: str, request: Request):
             "code": 403, "message": "web_url does not belong to this platform instance"})
 
     # Issue #3580/P3：验签通过后先持久化再 200；Event 进程 worker 幂等消费/重放
-    from src.domains.runtime.webhook_inbox import enqueue_webhook
     try:
-        _enq = enqueue_webhook(repo_key=_repo_key, provider=str(provider or "").lower(),
-                               event_header=event_header, body=body, headers=headers)
+        _enq = persist_webhook_event(_repo_key, str(provider or "").lower(),
+                                     event_header, body, headers)
     except Exception as _e:
         log.warning(f"generic webhook enqueue failed provider={provider} repo={repo}: {_e}")
         return JSONResponse(status_code=500, content={

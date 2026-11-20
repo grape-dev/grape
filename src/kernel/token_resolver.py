@@ -1549,13 +1549,14 @@ class GitLabProvider(GenericVcsProvider):
                            "visibility": "private" if private else "public"})
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        hooks = self._http("GET", f"{self._pid(owner, repo)}/hooks?per_page=100", api_token)
-        if not isinstance(hooks, list):
+        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）
+        from src.kernel.vcs_gitlab_hooks import find_hook
+
+        try:
+            return find_hook(self._card.api_base, api_token, owner, repo, webhook_url)
+        except Exception as e:
+            log.warning(f"gitlab find_existing_webhook failed {owner}/{repo}: {e}")
             return None
-        for h in hooks:
-            if isinstance(h, dict) and h.get("url") == webhook_url:
-                return h.get("id")
-        return None
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
         # Issue #3580/R5：分页取全（100/页翻到底），不再只取第一页。
@@ -1609,26 +1610,20 @@ class GitLabProvider(GenericVcsProvider):
         return [{"login": m.get("username", ""), "id": m.get("id", 0)} for m in members if isinstance(m, dict)]
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        # GitLab 形态：POST /projects/:id/hooks，token=密钥 + 布尔位事件集
-        resp = self._http("POST", f"{self._pid(owner, repo)}/hooks", api_token, {
-            "url": webhook_url,
-            "token": webhook_secret,
-            "push_events": True,
-            "tag_push_events": True,
-            "issues_events": True,
-            "note_events": True,
-            "merge_requests_events": True,
-            "pipeline_events": False,
-            "wiki_page_events": True,
-            "release_events": True,
-        })
-        return int(resp.get("id", 0) or 0)
+        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）；
+        # GitLab 的 token 只能是共享密钥，缺省即报错、绝不复用 api_token。
+        from src.kernel.vcs_gitlab_hooks import setup_hook
+
+        return setup_hook(self._card.api_base, api_token, owner, repo, webhook_url, webhook_secret)
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
+        # Issue #3580 复审：收口到 kernel.vcs_gitlab_hooks；404 幂等（返回 True）
+        from src.kernel.vcs_gitlab_hooks import remove_hook
+
         try:
-            self._http("DELETE", f"{self._pid(owner, repo)}/hooks/{hook_id}", api_token)
-            return True
-        except Exception:
+            return remove_hook(self._card.api_base, api_token, owner, repo, hook_id)
+        except Exception as e:
+            log.warning(f"gitlab remove_webhook failed {owner}/{repo} hook={hook_id}: {e}")
             return False
 
 """Token 获取统一接口（策略模式 + 职责链）。
