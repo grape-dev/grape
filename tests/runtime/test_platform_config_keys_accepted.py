@@ -120,3 +120,43 @@ def test_allowlists_stay_in_sync():
     assert runtime_cols == mgmt_cols, (
         f"两份白名单不一致：runtime-only={sorted(runtime_cols - mgmt_cols)} "
         f"mgmt-only={sorted(mgmt_cols - runtime_cols)}")
+
+def test_every_platform_config_builds_a_card_from_table_truth():
+    """配置 → 导入器字段 → 卡构建必须能走通（表真源模式下这是唯一路径）。
+
+    事故（PR #1878 复现）：`configs/platforms/gitcode.json` 没写 `branch_create_form` /
+    `issue_write_form`，导入器按 '' 落库，于是表行整卡替换后 `build_platform_card` 直接抛
+    `branch_create_form 必须是 form/refs_sha: ''` —— 读链路退回文件卡，能力位（含
+    create_repo_options）等于白建。缺键必须显式声明，不能靠卡构建器的默认值蒙混。
+    """
+    from src.domains.platform import importer
+    from src.domains.runtime.vcs.platform_card import build_platform_card
+
+    fields_by_provider, errors = importer.load_repo_platforms()
+    assert not errors, f"平台配置解析有错: {errors}"
+    assert set(fields_by_provider) >= {"gitcode", "github"}, "三张主平台卡必须在场"
+
+    from src.kernel.persistence.models_platform_object import RepoPlatformModel
+
+    # 关键：模拟**落库后的行**，不是配置文件本身 —— 导入器只写配置里出现的键，
+    # 缺键的列保持模型默认值（Text→''），表真源读到的就是 ''（不是卡构建器的 form/repo_path 兜底）。
+    model_defaults = {}
+    for col in RepoPlatformModel.__table__.columns:
+        default = getattr(col.default, "arg", "") if col.default is not None else ""
+        model_defaults[col.name] = "" if default is None else default
+
+    problems = []
+    for provider, fields in sorted(fields_by_provider.items()):
+        row = dict(model_defaults)
+        row.update(fields)
+        row["provider"] = provider
+        try:
+            card = build_platform_card(provider, row)
+        except Exception as e:  # noqa: BLE001 - 任何构建失败都算配置缺键
+            problems.append(f"{provider}: {e}")
+            continue
+        if not getattr(card, "branch_create_form", ""):
+            problems.append(f"{provider}: branch_create_form 为空")
+        if not getattr(card, "issue_write_form", ""):
+            problems.append(f"{provider}: issue_write_form 为空")
+    assert not problems, "平台配置缺键，表真源卡构建会失败：\n  " + "\n  ".join(problems)
