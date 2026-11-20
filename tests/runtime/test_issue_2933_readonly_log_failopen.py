@@ -133,7 +133,7 @@ def test_hook_template_fail_open_warning_mentions_no_verify():
 
 
 def test_hook_template_version_bumped():
-    assert bg.HOOK_TEMPLATE_VERSION == "2028-06"
+    assert bg.HOOK_TEMPLATE_VERSION == "2028-07"
     assert bg.HOOK_VERSION_LINE == "# hook-template-version: " + bg.HOOK_TEMPLATE_VERSION
 
 

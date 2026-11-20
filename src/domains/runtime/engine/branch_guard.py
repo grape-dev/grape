@@ -25,6 +25,7 @@ import importlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -92,8 +93,16 @@ LEASE_LOCK_MODULE = "src.kernel.lock"
 # 告警单行含 --no-verify 指引（Issue #2933）。
 # 2028-06：并入 #2292 修复指引（HOOK_REPAIR_HINT：重装/升级 worker 包），
 # 模板文案变化必须递增版本号，否则存量 worktree 永不升级。
-HOOK_TEMPLATE_VERSION = "2028-06"
+# 2028-07（Issue #3579）：去掉安装时固化的解释器/模块绝对路径，改运行时解析；
+# 存量钩子在 ensure_issue_worktree 时按本版本重写升级。
+HOOK_TEMPLATE_VERSION = "2028-07"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
+
+# Issue #3579：钩子只记录仓库相对模块路径，运行时由当前 worktree 顶层解析。
+# 安装发生在 in-flight issue worktree 时，任何绝对路径都会随 worktree 回收而失效
+# （解释器 → exit 127；模块 → 导入失败），且 shell 层 127 早于内联 Python 的
+# try/except，fail-open 无法执行。
+HOOK_MODULE_REL_PATH = "src/domains/runtime/engine/branch_guard.py"
 # 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
 # Issue #2292（同 #2147）：lock 随 #2010 布局收敛到 ``src.kernel.lock``，部署树不再保证
 # 顶层 ``src/lock.py``（现存别名仅由 ``src/__init__.py`` 一跳解析）。自检必须直接校验
@@ -801,6 +810,11 @@ def _hook_module_path() -> str:
     return os.path.abspath(__file__)
 
 
+def _hook_module_relpath() -> str:
+    """仓库相对守卫模块路径（写入钩子，运行时按当前 worktree 顶层解析）。"""
+    return HOOK_MODULE_REL_PATH
+
+
 def _hook_root() -> str:
     """仓库/安装根目录：``<root>/src/domains/runtime/engine/branch_guard.py`` 上溯 5 层。"""
     root = _hook_module_path()
@@ -809,31 +823,38 @@ def _hook_root() -> str:
     return root
 
 
+def _resolve_hook_interpreter() -> str:
+    """钩子运行时解释器：与 shell 层 ``command -v python3`` 保持同一来源。"""
+    return shutil.which("python3") or ""
+
+
 def _existing_hook_usable(existing: str, repo_key: str) -> bool:
-    """版本指纹命中后仍校验钩子内固化的运行时路径是否可用（Issue #2028）。
+    """版本指纹命中后校验钩子运行时依赖是否可用（Issue #2028 / #3579）。
 
-    钩子通过单行 marker 注释（``# hook-interpreter:/hook-module-path:/hook-repo-key:``）
-    固化解释器绝对路径、守卫模块路径与 repo_key；解释器升级/目录搬迁后旧路径失效
-    会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open 无从执行。
-    任一项缺失或失效即返回 False，触发重写自愈。
+    2028-07 模板只固化仓库相对模块路径（``# hook-module-rel:``）与 repo_key，
+    解释器在运行时由 ``command -v python3`` 解析。因此可用性校验为：
+    - repo_key 一致；
+    - 相对模块路径与当前 canonical 布局一致且真实存在；
+    - 当前环境仍能解析到 python3 解释器。
 
-    注意不要回退到解析内联 Python 代码（2028-02 的做法）：代码经 shlex.quote 后
-    跨物理行，``splitlines()`` 首行引号未闭合，``shlex.split`` 抛 ValueError 被吞，
-    校验恒 False，「版本命中→校验→幂等跳过」分支退化为死代码（QA 第 2 轮 M-2 复现）。
+    任一项缺失或失效即返回 False，触发重写自愈（存量旧模板的绝对
+    ``# hook-interpreter:`` / ``# hook-module-path:`` marker 同样视为不可用）。
     """
     markers = {}
     for line in existing.splitlines():
-        for key in ("hook-interpreter", "hook-module-path", "hook-repo-key"):
+        for key in ("hook-module-rel", "hook-repo-key"):
             prefix = f"# {key}: "
             if line.startswith(prefix):
                 markers[key] = line[len(prefix):].strip()
-    if len(markers) != 3:
+    if len(markers) != 2:
         return False
-    if not markers["hook-interpreter"] or not os.path.isfile(markers["hook-interpreter"]):
+    if markers["hook-repo-key"] != repo_key:
         return False
-    if not markers["hook-module-path"] or not os.path.isfile(markers["hook-module-path"]):
+    if markers["hook-module-rel"] != _hook_module_relpath():
         return False
-    return markers["hook-repo-key"] == repo_key
+    if not _resolve_hook_interpreter():
+        return False
+    return os.path.isfile(os.path.join(_hook_root(), markers["hook-module-rel"]))
 
 
 def _hook_entry_code(root: str, module_path: str) -> str:
@@ -842,6 +863,9 @@ def _hook_entry_code(root: str, module_path: str) -> str:
     Issue #2028：模块加载与 ``hook_main()`` 调用一并纳入 try/except，
     守卫自身异常一律 fail-open（stderr 明确告警 + exit 0），真实违规仍由
     ``hook_main`` 显式 return 1 阻断。
+
+    说明：``module_path`` 为显式文件路径，仅供单元测试/诊断内联生成复用；
+    生产钩子使用 ``_hook_runtime_entry_code`` 在运行时解析仓库相对路径。
     """
     return (
         "import sys, importlib.util; "
@@ -860,6 +884,48 @@ def _hook_entry_code(root: str, module_path: str) -> str:
         f"% (_e, {json.dumps(module_path)}))\n"
         # Issue #2292：同一条 WARNING 通道给出可执行修复动作，避免只留裸异常 repr。
         f"    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
+        f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
+        "    _rc = 0\n"
+        "sys.exit(_rc)"
+    )
+
+
+def _hook_runtime_entry_code() -> str:
+    """生成生产钩子内联代码：运行时解析仓库相对守卫模块并执行 hook_main（#3579）。
+
+    钩子 shell 层把当前 worktree 顶层作为 ``sys.argv[2]`` 传入。守卫模块先按
+    ``<root>/src/domains/runtime/engine/branch_guard.py`` 解析，再退回当前工作目录
+    的同相对路径；两者都不存在时按部署态包导入 ``src.domains.runtime.engine.branch_guard``。
+    解析/导入/执行任一失败都 fail-open（stderr 单行告警 + exit 0），
+    真实违规仍由 ``hook_main`` 显式返回 1 阻断。
+    """
+    rel = _hook_module_relpath()
+    return (
+        "import sys, os, importlib, importlib.util\n"
+        "_root = sys.argv[2] if len(sys.argv) > 2 else ''\n"
+        f"_rel = {json.dumps(rel)}\n"
+        "_candidates = []\n"
+        "if _root:\n"
+        "    _candidates.append(os.path.join(_root, _rel))\n"
+        "_candidates.append(os.path.join(os.getcwd(), _rel))\n"
+        "_module_path = next((p for p in _candidates if os.path.isfile(p)), '')\n"
+        "try:\n"
+        "    if _root and _root not in sys.path:\n"
+        "        sys.path.insert(0, _root)\n"
+        "    if _module_path:\n"
+        "        _spec = importlib.util.spec_from_file_location('grape_branch_guard', _module_path)\n"
+        "        if _spec is None or _spec.loader is None:\n"
+        "            raise ImportError('cannot load guard module: %s' % _module_path)\n"
+        "        _m = importlib.util.module_from_spec(_spec)\n"
+        "        _spec.loader.exec_module(_m)\n"
+        "    else:\n"
+        "        _m = importlib.import_module('src.domains.runtime.engine.branch_guard')\n"
+        "    _rc = _m.hook_main()\n"
+        "except Exception as _e:\n"
+        "    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
+        "(fail-open): %r [module=%s]；如需跳过本钩子可加 --no-verify\\n' "
+        "% (_e, _module_path or _rel))\n"
+        "    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
         f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
         "    _rc = 0\n"
         "sys.exit(_rc)"
@@ -958,21 +1024,18 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                         return True
             except Exception:
                 pass
-        root = _hook_root()
+        # Issue #3579：模板不再固化解释器/模块绝对路径（worktree 回收后 127/导入失败）。
+        # 解释器由 shell 运行时 command -v python3 解析；模块路径记录仓库相对路径，
+        # 由内联 Python 按当前 push worktree 顶层（或部署态包）解析。
         # Issue #993 R8：钩子按文件路径直接加载本模块，绕过运行时包 __init__ 的重型依赖链。
-        # Issue #2028：模板必须按当前 canonical 布局（src/domains/runtime/engine/）定位，
-        # 不能沿用 #699 迁移前的 src/runtime/ 路径，否则守卫模块加载必失败、静默 no-op。
-        module_path = _hook_module_path()
-        code = _hook_entry_code(root, module_path)
-        interpreter = sys.executable or "python3"
+        code = _hook_runtime_entry_code()
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
             HOOK_VERSION_LINE,
-            # Issue #2028：固化元数据单行 marker，供 _existing_hook_usable 解析
+            # Issue #2028/#3579：固化元数据单行 marker，供 _existing_hook_usable 解析
             # （2028-02 解析多行内联代码恒 False 的教训，勿再回退）。
-            f"# hook-interpreter: {interpreter}",
-            f"# hook-module-path: {module_path}",
+            f"# hook-module-rel: {_hook_module_relpath()}",
             f"# hook-repo-key: {repo_key}",
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
@@ -987,7 +1050,18 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             "fi",
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
             'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" < "$STDIN_TMP" || exit $?; fi',
-            f'{shlex.quote(interpreter)} -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
+            # Issue #3579：解释器解析失败走 fail-open（不再因固化失效路径 exit 127）。
+            'PY="$(command -v python3 2>/dev/null || true)"',
+            'if [ -z "$PY" ]; then',
+            ('    echo "[branch-guard] WARNING 未找到可用的 python3 解释器'
+             '（command -v python3 失败）；守卫已放行本次 push（fail-open）。'
+             '如需跳过本钩子可加 --no-verify" >&2'),
+            "    exit 0",
+            "fi",
+            # Issue #3579：模块路径运行时按当前 worktree 顶层解析，不引用安装时
+            # in-flight issue worktree 的绝对路径。
+            'ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
+            f'"$PY" -c {shlex.quote(code)} {shlex.quote(repo_key)} "$ROOT" < "$STDIN_TMP"',
             "",
         ]
         with open(hook_path, "w", encoding="utf-8") as f:
