@@ -223,7 +223,11 @@
     "log_copy": "Copy",
     "log_copied": "Copied",
     "log_empty": "No log output yet",
-    "log_loading": "Loading..."
+    "log_loading": "Loading...",
+    "log_title_realtime": "📜 Runtime Logs",
+    "log_close": "Close",
+    "log_fs": "Fullscreen",
+    "log_fs_exit": "Restore"
   },
   "findings": {
     "none_found": "No issues found",
