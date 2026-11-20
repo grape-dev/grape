@@ -216,3 +216,7 @@ class TestIssueAssigneeBackfill:
         ss.set_issue_stage(RK, "#7", "coding", "coding", assignee="songspace")
         assert ss.sync_issue_assignee(RK, "#7", "") is False
         assert ss.get_issue_assignee(RK, "#7") == "songspace"
+
+    def test_no_card_row_is_not_reported_as_backfilled(self):
+        """无卡片行 → 不假装回填成功（对账口径），也不抛异常。"""
+        assert ss.sync_issue_assignee(RK, "#404", "songspace") is False
