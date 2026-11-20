@@ -231,10 +231,33 @@ def compose_namespaces(provider: str, account: Mapping[str, Any] | None,
     return refs
 
 
+def platform_login(provider: str, token: str) -> str:
+    """用 token 解析**平台侧**登录名（GitLab /user 是 username，其它平台是 login）。
+
+    为什么必须问平台（2026-11-20 实锤）：owner 校验曾把「本系统账号名」当平台登录名，
+    `gvtest3` 的 gitlab 个人空间实为 `yangaiwu` —— 前端下拉里选个人空间会带
+    owner=yangaiwu，被服务端清单（个人项按 gvtest3 合成）判 NAMESPACE_NOT_VISIBLE 400，
+    而 owner=""（隐含个人）却能成功。个人空间的权威身份只能来自平台本身。
+    """
+    try:
+        from src.kernel.token_resolver import create_provider
+
+        info = create_provider(provider).verify_token(token) or {}
+        if isinstance(info, dict):
+            return str(info.get("login") or info.get("username") or "").strip()
+    except Exception:  # noqa: BLE001 - 解析失败退回调用方给的账号信息
+        return ""
+    return ""
+
+
 def list_namespaces(provider: str, token: str, account: Mapping[str, Any] | None = None) -> list[NamespaceRef]:
-    """完整清单：个人空间在前，组织在后（个人项由账号身份合成，不依赖 orgs 端点）。"""
+    """完整清单：个人空间在前，组织在后（个人项由平台身份合成，不依赖 orgs 端点）。"""
     org_rows = [ref.as_payload() for ref in list_org_namespaces(provider, token)]
-    return compose_namespaces(provider, account, org_rows)
+    acct = dict(account or {})
+    verified = platform_login(provider, token)
+    if verified:                    # 平台身份优先：本系统账号名可能有别名/大小写差异
+        acct["login"] = verified
+    return compose_namespaces(provider, acct, org_rows)
 
 
 def namespace_paths(provider: str, token: str, account: Mapping[str, Any] | None = None) -> set[str]:

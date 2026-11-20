@@ -129,3 +129,45 @@ def test_gitlab_lister_uses_provider_spaces_port(monkeypatch):
     monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
     refs = ns_mod.list_org_namespaces("gitlab", "tok")
     assert [(r.path, r.kind) for r in refs] == [("grp/sub", KIND_ORG)]
+
+
+def test_personal_owner_uses_platform_login_not_local_username(monkeypatch):
+    """个人空间必须按**平台登录名**认，不能拿本系统账号名当平台身份。
+
+    实锤（2026-11-20 线上）：gvtest3 绑定 gitlab PAT（平台登录 yangaiwu），
+    前端个人空间项 path=yangaiwu；check-name 传 owner=yangaiwu 被 400
+    NAMESPACE_NOT_VISIBLE（个人项按 gvtest3 合成），而 owner="" 反而成功。
+    """
+    from src.domains.mgmt.user import namespaces as ns_mod
+    import src.kernel.token_resolver as tr
+
+    class _Prov:
+        def verify_token(self, token):
+            return {"username": "yangaiwu", "name": "aiwu yang"}   # GitLab /user 字段
+
+        def list_create_spaces(self, token):
+            return [{"path": "xiaowu3", "name": "xiaowu-群组", "kind": "group"}]
+
+    monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
+
+    paths = ns_mod.namespace_paths("gitlab", "tok", {"login": "gvtest3"})
+    assert paths == {"yangaiwu", "xiaowu3"}
+    ns_mod.assert_owner_visible("gitlab", "tok", "yangaiwu", {"login": "gvtest3"})
+    ns_mod.assert_owner_visible("gitlab", "tok", "xiaowu3", {"login": "gvtest3"})
+    with pytest.raises(NamespaceNotVisible):
+        ns_mod.assert_owner_visible("gitlab", "tok", "gitlab-org", {"login": "gvtest3"})
+    # 本系统账号名不再是有效 owner
+    with pytest.raises(NamespaceNotVisible):
+        ns_mod.assert_owner_visible("gitlab", "tok", "gvtest3", {"login": "gvtest3"})
+
+
+def test_platform_login_falls_back_when_provider_unavailable(monkeypatch):
+    """平台身份解析失败时退回调用方给的账号信息（不因网络抖动把校验全打死）。"""
+    from src.domains.mgmt.user import namespaces as ns_mod
+    import src.kernel.token_resolver as tr
+
+    def _boom(p):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(tr, "create_provider", _boom)
+    assert ns_mod.platform_login("gitlab", "tok") == ""
