@@ -611,7 +611,13 @@
     "disable_confirm": "关闭 {provider} 后，它在用户面将完全不可见：{repos} 个仓库、{users} 位用户、{managed} 个托管仓库不再展示（{pats} 位用户的平台凭据仍保留）。确认关闭？",
     "disable_confirm_title": "关闭平台确认",
     "disable_confirm_btn": "确认关闭",
-    "cancel": "取消"
+    "cancel": "取消",
+    "sec_card": "平台卡（高级）",
+    "card_what": "平台卡的完整定义：私有 CA（ca_bundle，PEM 绝对路径，空=系统 CA）、PAT 创建页地址、下载基址、存储字段等都在这里；私有 CA 只对走 HTTPS 校验的实例有意义。",
+    "card_note": "保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达；配置文件定义的平台，改动会落成管理面覆盖。",
+    "ca_ph": "/path/to/corp-ca.pem（空=系统 CA）",
+    "edit": "编辑",
+    "card_missing": "该平台没有平台卡（仅表投影），高级配置不可编辑"
   },
   "provider_name": {
     "huawei": "华为",

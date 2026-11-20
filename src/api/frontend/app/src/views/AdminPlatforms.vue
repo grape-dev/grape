@@ -75,16 +75,18 @@
       </div>
 
       <!-- 平台卡高级配置：/admin/repo-platforms 的列表投影不含 ca_bundle/download_base/
-           存储字段等，所以自建实例的私有 CA 在旧页面上根本没有落点（2026-11-20 用户实测
+           存储字段等，所以私有 CA 在旧页面上根本没有落点（2026-11-20 用户实测
            "管理台看不到配 CA 的地方"）。这里按平台卡 GET 的整卡展示并允许编辑，保存时整卡
-           回写（未展示字段原样带回），避免手抄白名单漏字段导致的静默降级。 -->
+           回写（未展示字段原样带回），避免手抄白名单漏字段导致的静默降级。
+           文案必须平台无关：这块按卡渲染，gitcode/gitee/github/gitlab/自建实例共用一套，
+           把某个平台的语义（例如 GitLab 私有 CA）写死进文案，其它平台点进来就是错的。 -->
       <div class="ap-sect">
         {{ t('page.sec_card', '平台卡（高级）') }}
         <AGHelp
           :title="t('page.sec_card', '平台卡（高级）')"
-          :what="t('page.card_what', '平台卡的完整定义：自建 GitLab 实例的私有 CA 填 ca_bundle（PEM 绝对路径，空=系统 CA）；PAT 创建页地址、下载基址等也在这里。')"
+          :what="t('page.card_what', '平台卡的完整定义：私有 CA（ca_bundle，PEM 绝对路径，空=系统 CA）、PAT 创建页地址、下载基址、存储字段等都在这里；私有 CA 只对走 HTTPS 校验的实例有意义。')"
           values="PUT /api/admin/vcs-platforms"
-          :note="t('page.card_note', '保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达。')"
+          :note="t('page.card_note', '保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达；配置文件定义的平台，改动会落成管理面覆盖。')"
         />
         <button class="ap-btn" @click="editMode ? cancelEdit() : startEdit()">
           {{ editMode ? t('page.cancel') : t('page.edit', '编辑') }}
@@ -97,7 +99,7 @@
             v-if="editMode"
             v-model="editForm[f]"
             class="ap-input"
-            :placeholder="f === 'ca_bundle' ? t('page.ca_ph', '/etc/ssl/certs/corp-ca.pem（空=系统 CA）') : ''"
+            :placeholder="f === 'ca_bundle' ? t('page.ca_ph', '/path/to/corp-ca.pem（空=系统 CA）') : ''"
           />
           <span v-else class="ap-val mono">{{ fmt(cardVal(f)) }}</span>
         </div>
