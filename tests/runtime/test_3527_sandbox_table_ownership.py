@@ -271,3 +271,80 @@ def test_kill_reports_visible_error_when_ledger_update_misses(monkeypatch):
     detail = getattr(exc.value, "detail", {}) or {}
     assert "ledger row update failed" in detail.get("message", "")
     assert writes == ["runtime", "mgmt"], "命中域优先，另一域兜底，两者都试过"
+
+
+class _KillWriteCursor:
+    def __init__(self, rowcount=None):
+        self.executed = []
+        self.closed = False
+        if rowcount is not None:
+            self.rowcount = rowcount
+
+    def execute(self, sql, params=()):
+        self.executed.append((sql, params))
+
+    def close(self):
+        self.closed = True
+
+
+class _KillWriteConn:
+    def __init__(self, rowcount=None):
+        self.cur = _KillWriteCursor(rowcount)
+        self.closed = False
+        self.committed = False
+
+    def commit(self):
+        self.committed = True
+
+    def cursor(self):
+        return self.cur
+
+    def close(self):
+        self.closed = True
+
+
+def test_kill_write_uses_dedicated_connection_and_closes(monkeypatch):
+    """自有 DSN 路径用 new_connection 专用连接，用完即关（review R3）。"""
+    from src.kernel import db_registry as dbr
+
+    conn = _KillWriteConn(rowcount=1)
+    seen = []
+
+    def fake_new_connection(domain, autocommit=True):
+        seen.append((domain, autocommit))
+        return conn
+
+    monkeypatch.setattr(dbr, "new_connection", fake_new_connection)
+
+    assert rt._mark_sandbox_killed_on_domain("runtime", "sbx-1", "now") == 1
+    assert seen == [("runtime", True)]
+    assert conn.closed and conn.cur.closed
+    assert "UPDATE grape_t_cloud_sandboxes" in conn.cur.executed[0][0]
+
+
+def test_kill_write_unknown_rowcount_is_not_success(monkeypatch):
+    """游标无 rowcount 时返回 0（未确认），不得让调用方当成功（review R3）。"""
+    from src.kernel import db_registry as dbr
+
+    conn = _KillWriteConn(rowcount=None)
+    monkeypatch.setattr(dbr, "new_connection", lambda *a, **k: conn)
+
+    assert rt._mark_sandbox_killed_on_domain("runtime", "sbx-1", "now") == 0
+
+
+def test_kill_write_falls_back_to_process_db_without_own_dsn(monkeypatch):
+    """无自有 DSN（new_connection 抛错）→ 回落进程主库并 commit（review R3）。"""
+    from src.kernel import db_registry as dbr
+    from src.kernel import session_manager as sm
+
+    conn = _KillWriteConn(rowcount=1)
+
+    def no_dsn(*_a, **_kw):
+        raise RuntimeError("domain has no own DSN")
+
+    monkeypatch.setattr(dbr, "new_connection", no_dsn)
+    monkeypatch.setattr(sm, "db", conn)
+    monkeypatch.setattr(sm, "db_lock", contextlib.nullcontext())
+
+    assert rt._mark_sandbox_killed_on_domain("mgmt", "sbx-1", "now") == 1
+    assert conn.cur.executed, "必须向进程主库发出 UPDATE"
