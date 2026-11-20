@@ -945,12 +945,21 @@ class VcsApiClient:
                                     timeout=timeout)
         return self._do_request(url, method, data, headers=headers, timeout=timeout)
 
-    def _generic_path(self, github_style: str, gitlab_style: str = "") -> str:
-        """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。"""
+    def _generic_path(self, github_style: str, gitlab_style: "str | None" = None) -> str:
+        """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。
+
+        `gitlab_style` 的 None/"" 语义必须区分（2026-11-20 实锤）：
+        - 未给（None）= 该端点没有 GitLab 专属形态，沿用 github_style；
+        - 显式给 ""（如仓库根 `/projects/{owner}%2F{repo}`）= 用 GitLab 形态。
+        旧实现把 "" 当"未给"，`get_repo_info()` 于是对 GitLab 请求 `/repos/o/r`
+        ——那是**不存在的路由**，GitLab 恒回 404 且响应体是 404 页，
+        查重/存在性判定永远得到「不存在」（线上 check-name 对真实存在的
+        yangaiwu/hello-fastapi-2 报 exists:false）。
+        """
         card = self._platform_card()
-        if card and card.dialect == "gitlab" and gitlab_style:
+        if card and card.dialect == "gitlab" and gitlab_style is not None:
             return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
-        if not github_style and gitlab_style:
+        if not github_style and gitlab_style is not None:
             return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
         return github_style
 

@@ -159,3 +159,55 @@ def test_s14_unsupported_provider_rejected(monkeypatch):
     c = VcsApiClient("nonexist", "TK", "o", "r")
     resp = c.get_issue(1)
     assert "error" in resp and "unsupported" in resp["error"]
+
+
+GITLAB_CARD = {
+    "name": "GitLab", "dialect": "gitlab", "host": "gitlab.com",
+    "webhook_path": "/webhook/gitlab", "event_header": "X-Gitlab-Event",
+    "api_base": "https://gitlab.com/api/v4", "api_auth": "private_token",
+    "webhook_verify": "token_compare", "clone_auth": "basic_password",
+}
+
+
+@pytest.fixture()
+def gitlab_card():
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
+            (json.dumps({"gitlab": GITLAB_CARD}),))
+        db.commit()
+    invalidate_platform_card_cache()
+    yield GITLAB_CARD
+    with db_lock:
+        db.cursor().execute("DELETE FROM meta WHERE key='vcs_providers_config'")
+        db.commit()
+    invalidate_platform_card_cache()
+
+
+def test_gitlab_repo_info_uses_projects_endpoint(gitlab_card, monkeypatch):
+    """GitLab 仓库根必须走 /projects/{全路径编码}。
+
+    回归（2026-11-20 线上）：`_generic_path(..., "")` 把空串当"未给"，于是
+    get_repo_info 对 GitLab 请求了不存在的 `/repos/{o}/{r}` → 恒 404 →
+    查重永远得到「不存在」（真实存在的 yangaiwu/hello-fastapi-2 也被判为空）。
+    """
+    client = VcsApiClient("gitlab", "tok", "yangaiwu", "hello-fastapi-2")
+    seen = {}
+
+    def _fake_request(method, path, data=None, form=False, timeout=30):
+        seen["path"] = path
+        return {"id": 1}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.get_repo_info()
+    assert seen["path"] == "/projects/yangaiwu%2Fhello-fastapi-2"
+
+
+def test_non_gitlab_dialect_keeps_github_style_repo_path(monkeypatch):
+    """非 gitlab 方言不受影响：仍用 /repos/{o}/{r}（存量四平台逐字节不变）。"""
+    client = VcsApiClient("gitcode", "tok", "owner", "repo")
+    seen = {}
+    monkeypatch.setattr(client, "_request",
+                        lambda m, path, data=None, form=False, timeout=30: seen.update(path=path) or {})
+    client.get_repo_info()
+    assert seen["path"] == "/repos/owner/repo"
