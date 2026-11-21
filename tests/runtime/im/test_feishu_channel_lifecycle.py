@@ -25,7 +25,9 @@ from src.domains.runtime.im.channel.channel import (
     PermanentChannelError,
 )
 from src.domains.runtime.im.channel.types import Scope, Type
-from src.domains.runtime.im.adapters.feishu.channel import PERMANENT_WS_ERROR_CODES, FeishuChannel
+from src.domains.runtime.im.adapters.feishu.channel import (
+    PERMANENT_WS_ERROR_CODES, FeishuChannel, _ws_close_code, _ws_failure,
+)
 from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender
 
 
@@ -428,3 +430,26 @@ def test_cancelled_error_passes_through():
 
 def test_permanent_codes_match_legacy():
     asyncio.run(_test_permanent_codes_match_legacy_impl())
+
+
+def test_ws_close_code_ignores_non_websockets_code_attribute():
+    """PR #1947 审查返修：`_ws_close_code` 只认 websockets 的关闭对象。
+
+    非 WS 异常自带的同名 `.code`（HTTP 状态码 / 业务错误码）不得被误判为关闭码，
+    因此也不会把普通链路失败错归成并发注册冲突；真实 3001（含 cause 链包装）仍命中。
+    """
+    class HttpLike(Exception):
+        code = 3001
+
+    assert _ws_close_code(HttpLike("boom")) is None
+    assert _ws_close_code(_closed_error(3001)) == 3001
+
+    wrapped = RuntimeError("outer")
+    wrapped.__cause__ = _closed_error(3001)
+    assert _ws_close_code(wrapped) == 3001
+
+    conflict = _ws_failure("cli_test", HttpLike("boom"))
+    assert isinstance(conflict, ChannelError)
+    assert not isinstance(conflict, ChannelRegistrationConflict)
+    assert isinstance(_ws_failure("cli_test", _closed_error(3001)),
+                      ChannelRegistrationConflict)

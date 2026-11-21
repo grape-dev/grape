@@ -13,11 +13,13 @@
 """
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from src.domains.runtime.im.channel import (
-    CancelContext, Channel, ChannelConfig, ChannelRegistrationConflict,
+    CancelContext, Channel, ChannelConfig, ChannelError,
+    ChannelRegistrationConflict,
     OutboundMessage, SendResult, Type,
 )
 from src.domains.runtime.im.channel.registry import ChannelRegistry as Registry
@@ -344,3 +346,125 @@ def test_skipped_duplicate_takes_over_after_owner_released(captured):
 
     assert built == ["inst-a", "inst-b"]
     assert list(sup._channels) == ["inst-b"]
+
+
+# ---------------------------------------------------------------- 4. 健康期重置（PR #1947 审查返修）
+
+
+class FakeClock:
+    """可控单调时钟：connect() 推进它来模拟"本次会话健康存活了多久"。"""
+
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class ScriptedChannel(Channel):
+    """按脚本重放「冲突 → 健康长连接 → 再冲突」（现场主场景）。"""
+
+    script: list = []
+    attempts = 0
+    clock: FakeClock | None = None
+
+    def __init__(self, cfg: ChannelConfig):
+        self.cfg = cfg
+
+    def type(self) -> Type:
+        return Type.FEISHU
+
+    async def connect(self, ctx: CancelContext) -> None:
+        i = type(self).attempts
+        type(self).attempts += 1
+        step = type(self).script[min(i, len(type(self).script) - 1)]
+        clock = type(self).clock
+        assert clock is not None
+        if step == "healthy_drop":
+            # 健康长连接正常跑了 120s（≥ REGISTER_CONFLICT_STABLE_SECS）后链路断开：
+            # connect() 以 ChannelError 结束，而不是正常 return（现场 1006 主场景）。
+            clock.now += 120.0
+            raise ChannelError("ws closed: app-1 close_code=1006")
+        # 并发注册冲突：握手阶段快速失败（毫秒级），与现场一致
+        clock.now += 0.01
+        raise ChannelRegistrationConflict(
+            "feishu ws register conflict: close_code=3001 (registered) too many connections")
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def send(self, out: OutboundMessage) -> SendResult:
+        return SendResult(ok=True)
+
+
+def test_conflict_counters_reset_after_healthy_session(captured, delays, monkeypatch):
+    """健康会话（存活 ≥60s）结束后再撞 3001 → 计数与退避重置，不沿用健康期前的残留。
+
+    现场主场景：健康长连接断开（1006/正常返回）后立即重连，飞书回 3001；此时本轮
+    connect() 耗时≈0。若用"本轮耗时"判断是否已恢复，冲突计数会跨健康期一路累加：
+    非连续冲突误升级 ERROR 告警，恢复后首次冲突又沿用最长 300s 退避。
+    """
+    clock = FakeClock()
+    monkeypatch.setattr(supervisor_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    ScriptedChannel.attempts = 0
+    ScriptedChannel.clock = clock
+    ScriptedChannel.script = ["conflict"] * 4 + ["healthy_drop", "conflict"]
+
+    sup = _supervisor(EngineMetrics(), lambda: [_inst("app-1")], ScriptedChannel)
+
+    async def scenario():
+        try:
+            await sup._scan_once()
+
+            async def _poll():
+                # 4 次冲突 + 1 次健康断开的退避 + 1 次冲突退避 = 6 次睡眠记账
+                while len(delays) < 6:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(_poll(), timeout=3.0)
+        finally:
+            await _cancel_runs(sup)
+
+    asyncio.run(scenario())
+
+    conflict_logs = [r for r in captured.records
+                     if "registration conflict" in r.getMessage()]
+    assert conflict_logs, "应记录并发注册冲突日志"
+    last = conflict_logs[-1]
+    # 健康会话后重新计数：不再沿用健康期前的 4 次 → 不升级 ERROR
+    assert last.levelno == logging.WARNING
+    assert "consecutive=1" in last.getMessage()
+    assert "registration conflict escalated" not in captured.text(logging.ERROR)
+    # 退避回到最短档 5s，而不是沿用 40s 继续翻倍
+    assert delays[-1] == supervisor_mod.REGISTER_CONFLICT_BACKOFF_MIN
+
+
+# ---------------------------------------------------------------- 5. app 身份 / 日志标识（Optional）
+
+
+def test_app_identity_ignores_legacy_token_and_covers_wecom_bot_id():
+    """只认适配器真实读取的身份键：legacy `token` 不再参与去重（避免凭据当 app 身份）。"""
+    assert supervisor_mod.app_identity({"token": "legacy-secret"}) == ""
+    assert supervisor_mod.app_identity({"app_id": "cli_abc123456"}) == "cli_abc123456"
+    assert supervisor_mod.app_identity({"bot_id": "wecom-bot"}) == "wecom-bot"
+    assert supervisor_mod.app_identity({"ilink_bot_id": "ilink-1"}) == "ilink-1"
+    assert supervisor_mod.app_identity({"bot_token": "123:abc"}) == "123:abc"
+    assert supervisor_mod.app_identity({}) == ""
+
+
+def test_app_log_ref_digests_non_public_app_refs():
+    """日志标识白名单：仅飞书/钉钉公开 app 形态明文，其余一律不可逆摘要。"""
+    ref = supervisor_mod._app_log_ref
+    assert ref("cli_abc123456", "feishu") == "cli_abc123456"
+    assert ref("dingabc123456", "dingtalk") == "dingabc123456"
+    # 企微 bot_id / 微信 ilink_bot_id / Slack token / Telegram bot id 一律摘要
+    for value, kind in (("wecom-bot", "wecom"),
+                        ("ilink-1", "wechat"),
+                        ("xoxb-123456", "slack"),
+                        ("123456:abcdef", "telegram"),
+                        ("legacy-secret", "feishu")):
+        out = ref(value, kind)
+        assert out.startswith(f"{kind}:"), out
+        assert value not in out, out
+        assert len(out.split(":", 1)[1]) == 12
+    assert ref("", "feishu") == ""
