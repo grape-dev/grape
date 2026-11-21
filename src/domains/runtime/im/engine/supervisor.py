@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -52,18 +53,36 @@ def next_backoff(current: float, *, register_conflict: bool = False) -> float:
 
 
 def app_identity(raw: dict) -> str:
-    """安装配置里的 app 身份（同 app 多安装去重键）。取不到 → 空串（不去重）。"""
-    for key in ("app_id", "ilink_bot_id", "bot_token", "token"):
+    """安装配置里的 app 身份（同 app 多安装去重键）。取不到 → 空串（不去重）。
+
+    只探测各适配器真正读取的身份键（adapters/*/channel.py）：app_id（飞书/钉钉）、
+    bot_id（企微）、ilink_bot_id（微信）、bot_token（Slack/Telegram）。
+    历史遗留的 `token` 键没有任何适配器读取，探测它等于把凭据值当 app 身份去重
+    并让其进入日志（PR #1947 审查意见 Optional）。
+    """
+    for key in ("app_id", "bot_id", "ilink_bot_id", "bot_token"):
         value = str((raw or {}).get(key) or "")
         if value:
             return value
     return ""
 
 
-def _app_log_ref(app_key: str, channel_type: str = "") -> str:
-    """日志里的 app 标识（与 engine_wiring._safe_app_ref 同口径）：
+# 只有「已知的公开 app 标识形态」可明文入日志（飞书 cli_xxx / 钉钉 dingxxx），
+# 其余（企微 bot_id、微信 ilink_bot_id、任意凭据形态）一律摘要。
+_PUBLIC_APP_REF_RE = re.compile(r"^(?:cli_[0-9A-Za-z]{6,64}|ding[0-9A-Za-z]{6,64})$")
 
-    Slack/Telegram 的 app_id 位存 token → 只输出不可逆摘要，绝不落令牌片段。
+
+def _is_public_app_ref(value: str) -> bool:
+    """是否为已知的公开 app 标识（白名单形态，其余一律视为不可明文）。"""
+    return bool(_PUBLIC_APP_REF_RE.match(value))
+
+
+def _app_log_ref(app_key: str, channel_type: str = "") -> str:
+    """日志里的 app 标识：白名单外一律输出不可逆摘要，日志永不出现凭据片段。
+
+    PR #1947 审查意见 Optional：原实现对非 slack/telegram 类型明文截取前 12 字符 ——
+    只要安装 config 的 app 身份位承载凭据（企微 bot_id、微信 ilink_bot_id 等），就会把
+    凭据片段写进日志。改为默认摘要、仅飞书/钉钉的公开 app_id 形态明文。
     """
     value = str(app_key or "")
     if not value:
@@ -71,10 +90,12 @@ def _app_log_ref(app_key: str, channel_type: str = "") -> str:
     kind = str(channel_type or "").strip().lower()
     head = value.split(":", 1)[0]
     telegramish = ":" in value and head.isdigit()
-    if kind in ("slack", "telegram") or value.startswith(("xoxb-", "xapp-")) or telegramish:
+    if (kind in ("slack", "telegram")
+            or telegramish
+            or not _is_public_app_ref(value)):
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
         return f"{kind or 'app'}:{digest}"
-    return value[:12]
+    return value
 
 
 async def _backoff_sleep(delay: float) -> None:
@@ -371,11 +392,20 @@ class Supervisor:
             backoff = BACKOFF_MIN
             conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
             consecutive_conflicts = 0
+            # Issue #3698（PR #1947 审查返修）：上一轮 connect() 的真实存活时长。
+            # connect() 只在会话结束时才返回/抛出（正常断开或链路断开），故该值 =
+            # "上一次连接健康运行了多久"。并发注册冲突分支自身的 connect() 是握手期
+            # 快速失败（毫秒级），用本轮 elapsed 判断"是否已恢复"恒为否 —— 健康长连接
+            # 断开（ChannelError）后再注册撞 3001 时，计数/退避会跨健康期残留：非连续
+            # 冲突误升级 ERROR 告警、恢复后首次冲突仍沿用最长 300s 退避。
+            # 因此记录上一会话存活时长，由冲突分支据此重置。
+            last_session_secs = 0.0
             try:
                 while self._running and not ctx.cancelled:
                     started = time.monotonic()
                     try:
                         await channel.connect(ctx)
+                        last_session_secs = time.monotonic() - started
                         backoff = BACKOFF_MIN
                         conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
                         consecutive_conflicts = 0
@@ -387,10 +417,13 @@ class Supervisor:
                     except ChannelRegistrationConflict:
                         # Issue #3698：服务端并发注册上限（飞书 3001）。可重试但同一时刻
                         # 重连只会继续撞上限——单独归因、长退避，连续多次后升级告警。
-                        if time.monotonic() - started >= REGISTER_CONFLICT_STABLE_SECS:
-                            # 上一次连接已健康存活 → 这是新一轮冲突，重新计数
+                        if last_session_secs >= REGISTER_CONFLICT_STABLE_SECS:
+                            # 上一轮连接已健康存活 → 这是一轮新冲突，重新计数/退回最短退避
                             conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
                             consecutive_conflicts = 0
+                        # 冲突是快速失败：把"上一会话存活时长"换成本次尝试的时长，避免陈旧
+                        # 健康标记让后续每次冲突都重复触发重置（计数恒为 1、告警失灵）。
+                        last_session_secs = time.monotonic() - started
                         consecutive_conflicts += 1
                         self._record_reconnect("ws_register_conflict")
                         if consecutive_conflicts >= REGISTER_CONFLICT_ALERT_AFTER:
@@ -413,6 +446,8 @@ class Supervisor:
                     except ChannelError:
                         # 链路断开 → 退避重连（Issue #870：reconnects +1，抖动归因 ws_transport）
                         # Issue #1728：微信 ilink 长轮询断线单独归因 ilink_longpoll，便于看板区分。
+                        # 记录本会话存活时长：下一轮若撞并发注册冲突，据此判断是否已恢复。
+                        last_session_secs = time.monotonic() - started
                         self._record_reconnect(
                             "ilink_longpoll" if channel_type == Type.WECHAT.value
                             else "ws_transport")
@@ -423,6 +458,7 @@ class Supervisor:
                         # 就此静默死亡（2026-11-05 钉钉 data 为字符串 → AttributeError
                         # 打死 connect 任务，channels 恒为 1 但永不收消息）。按瞬时故障
                         # 计 ws_transport 抖动并退避重连，异常栈留在日志。
+                        last_session_secs = time.monotonic() - started
                         log.exception("[im-engine] channel crashed (unexpected): inst=%s type=%s",
                                       inst_id, channel_type)
                         self._record_reconnect(
