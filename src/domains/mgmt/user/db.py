@@ -1113,21 +1113,6 @@ def init_db():
             _mg_db.commit()
         except Exception as e:
             log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
-        # 收敛 user_accounts：移除废弃列（须在所有读取迁移之后执行）
-        try:
-            c = _mg_db.cursor()
-            ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
-            for col in ["gitcode_webhook_token", "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
-                        "gitcode_oauth_redirect_uri", "webhook_url", "bot_usernames"]:
-                if col in ua_cols:
-                    try:
-                        db.execute(f"ALTER TABLE user_accounts DROP COLUMN {col}")
-                    except Exception:
-                        pass
-            _mg_db.commit()
-            log.info("Cleaned up user_accounts deprecated columns (webhook_token/oauth/webhook_url/bot_usernames)")
-        except Exception as e:
-            log.warning(f"Cleanup user_accounts columns failed: {e}")
         _mg_db.commit()
     _cleanup_expired_oauth_states()
     # P2-1: 启动时也清理过期的 exchange_codes

@@ -17,11 +17,10 @@ init_db 一行调用 + 下线=删文件。
   存量部署渗透完成即可删（观察生产日志无 "added" 输出即零命中）
 - _remap_orphan_user_ids / _cleanup_orphan_credentials：D32 迁移遗留兜底，
   生产重映射/清理计数连续为零即可删
-- _migrate_user_accounts_deprecated_fields / _drop_user_accounts_deprecated_columns：
-  user_accounts 写入冻结收尾（死表收敛），列全部 DROP 完成后整个 user_accounts
-  域随表 DROP 一并消失
+- user_accounts 收敛（字段搬迁 + 废弃列 DROP）：已下线删除（2026-11-22）。
+  死表且废弃列零残留，原实现还存在"用进程主库 db 跑 DDL + 吞异常后打印成功"
+  的缺陷；既然迁移恒零命中，修复没有意义，直接删掉
 """
-import json
 import os
 
 from src.kernel.session_manager import db
@@ -174,98 +173,12 @@ def cleanup_orphan_credentials() -> None:
         pass
 
 
-def migrate_user_accounts_deprecated_fields() -> None:
-    """user_accounts 死表收敛（1/2）：废弃字段搬迁到正确位置（DROP COLUMN 之前）。
-
-    1. webhook_url → meta 表（全局配置，取首个非空值）
-    2. OAuth 配置 → meta 表（default 账户清理时已完成，此处兜底）
-    3. bot_usernames → managed_repos.bot_username（Issue #345 按前缀分流）
-    下线判据：user_accounts 列全 DROP（见 drop_user_accounts_deprecated_columns）
-    且死表 DROP 后，本函数与上一步一并消失。
-    """
-    try:
-        # meta 基表在运行域（runtime）；延迟导入：本模块在 init_db 早期被加载，
-        # 模块级 import 运行域 public 会把启动顺序绑死；导入失败由下面既有的
-        # except 兜成「迁移零命中」，与原「表不存在即跳过」行为一致。
-        from src.domains.runtime import public as _rt  # noqa: PLC0415
-        c = db.cursor()
-        ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
-        if "webhook_url" in ua_cols:
-            c.execute("SELECT webhook_url FROM user_accounts WHERE webhook_url IS NOT NULL AND webhook_url!='' LIMIT 1")
-            row = c.fetchone()
-            if row and row[0]:
-                # meta 基表在运行域：幂等「不存在才写」原语自带单库回落（单库=进程主库，
-                # 三库=运行域自有 DSN），计数+写入在 owner 侧一次完成 —— 原「先 COUNT 再
-                # INSERT OR REPLACE」的两次跨域往返收成一条语句，也不再依赖 SQLite 专有
-                # 的元组式 INSERT OR REPLACE。
-                _rt.set_meta_if_absent("webhook_url", row[0])
-        if "gitcode_oauth_client_id" in ua_cols:
-            c.execute("SELECT gitcode_oauth_client_id, gitcode_oauth_client_secret, gitcode_oauth_redirect_uri FROM user_accounts WHERE gitcode_oauth_client_id IS NOT NULL AND gitcode_oauth_client_id!='' LIMIT 1")
-            row = c.fetchone()
-            if row:
-                for meta_key, val in zip(("oauth_gitcode_client_id", "oauth_gitcode_client_secret", "oauth_gitcode_redirect_uri"), row):
-                    if val:
-                        _rt.set_meta_if_absent(meta_key, val)
-        if "bot_usernames" in ua_cols:
-            c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
-            for uname, raw in c.fetchall():
-                try:
-                    names = json.loads(raw)
-                    if not isinstance(names, list):
-                        names = []
-                except (json.JSONDecodeError, TypeError):
-                    names = [s.strip() for s in raw.split(",") if s.strip()]
-                if not names:
-                    continue
-                bot_name = names[0]
-                # Issue #345: github: 仓不填 GitCode bot name（user_accounts.bot_usernames 是 GitCode 的 bot 列表）
-                c.execute(
-                    "UPDATE managed_repos SET bot_username=? "
-                    "WHERE full_name=? AND (bot_username='' OR bot_username IS NULL) "
-                    "AND repo_key NOT LIKE 'github:%'",
-                    (bot_name, uname))
-                c.execute(
-                    "UPDATE managed_repos SET bot_username=? "
-                    "WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL) "
-                    "AND repo_key NOT LIKE 'github:%'",
-                    (bot_name, uname, uname))
-            # 兜底：有 bot_gitcode_token 但无 bot_username 时设置默认值
-            c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
-        db.commit()
-    except Exception as e:
-        log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
-
-
-def drop_user_accounts_deprecated_columns() -> None:
-    """user_accounts 死表收敛（2/2）：移除废弃列（须在所有读取迁移之后执行）。
-
-    下线判据：与 migrate_user_accounts_deprecated_fields 一并消失（列全 DROP
-    后本函数零命中）。
-    """
-    try:
-        c = db.cursor()
-        ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
-        for col in ["gitcode_webhook_token", "gitcode_oauth_client_id", "gitcode_oauth_client_secret",
-                    "gitcode_oauth_redirect_uri", "webhook_url", "bot_usernames"]:
-            if col in ua_cols:
-                try:
-                    db.execute(f"ALTER TABLE user_accounts DROP COLUMN {col}")
-                except Exception:
-                    pass
-        db.commit()
-        log.info("Cleaned up user_accounts deprecated columns (webhook_token/oauth/webhook_url/bot_usernames)")
-    except Exception as e:
-        log.warning(f"Cleanup user_accounts columns failed: {e}")
-
-
 def run() -> None:
     """迁移入口（init_db 在 DDL 执行后、_migrate_repo_key_tables 前调用一次）。
 
-    执行顺序敏感：字段搬迁（migrate_user_accounts_deprecated_fields）必须先于
-    列删除（drop_user_accounts_deprecated_columns）。
+    user_accounts 收敛（字段搬迁 + 废弃列 DROP）已整体下线：该域是死表，
+    废弃列在存量部署里全部消失（真库 29 列中零残留），两段迁移恒零命中。
     """
     add_legacy_columns()
     remap_orphan_user_ids()
     cleanup_orphan_credentials()
-    migrate_user_accounts_deprecated_fields()
-    drop_user_accounts_deprecated_columns()
