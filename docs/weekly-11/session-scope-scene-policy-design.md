@@ -177,3 +177,41 @@ runtime/im/handler_async.py::_autopilot_user_allowed 原本自己 `get_managed_r
 本次改为委托 user_can_access_repo —— 可见性口径只剩宿主域一份实现。
 （此前该私有函数是唯一一处，另一处就是本次新增的 notify 守卫：属于重复实现，已合并。）
 ```
+
+
+## 8. 附：user_accounts 旧账号表清退（2026-11-22）
+
+现网事实（运维给出）：生产 user_accounts **0 行**；归档库 grape_system_db.user_accounts 94 行（回滚用，
+用户名 94/94 在新表可命中）；新表 grape_accounts 232 行；孤儿凭据/悬空身份 0。
+
+本轮删除（纯死代码，零调用/零命中）：
+
+```
+user/db.py
+  · @_deprecated_user_accounts_fn 装饰器
+  · get_user / get_user_by_username / list_users
+  · get_user_account / get_all_user_accounts / USER_ACCOUNT_FIELDS
+  · get_user_by_gitcode_id / get_user_by_github_id
+  · _USER_ACCOUNTS_DDL 及其在 init_db 建表注册
+  · init_db 三段死迁移：user_credentials 旧表重映射、managed_repos(users) 重映射、
+    user_accounts 废弃字段搬迁（读 webhook_url/oauth/bot_usernames）
+  · migrate_accounts_from_json 里的 default 账户迁移块
+user/legacy_column_migrations.py
+  · _USER_ACCOUNTS_LEGACY_COLUMNS 及其补列计划项
+  · remap_orphan_user_ids（引用 user_accounts 与真库不存在的 users 表）
+  · cleanup_orphan_credentials 尾部的 managed_repos/users 映射块
+```
+
+仍保留、需先回填再切（Step 2，不做在本次）：
+
+```
+mgmt/public/__init__.py:  "user_accounts_e2eb04" / "user_account_username_by_id"
+                          （autopilot 任务创建者、沙箱 owner 名回显）
+mgmt/public/__init__.py:  usernames_by_ids()
+mgmt/routes/sandbox_admin.py: JOIN user_accounts 的超管判定
+src/api/db_setup.py:      老库升级语句（个人组织迁移 / default 账户 / publish 列 / alter 列表）
+configs/table_ownership.json: user_accounts 归属与禁读域（随表 DROP 一并删）
+```
+
+判据：现网该表 0 行 ⇒ 上述读路径当前返回空（已破，不是"改了才破"）；切到 grape_accounts
+前必须先把历史 created_by/user_id 的旧 id 回填成新 id（映射可用归档库 94 行 × 新表 username 闭合）。

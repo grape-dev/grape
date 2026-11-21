@@ -105,84 +105,9 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
     from src.domains.runtime.public import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
 
-def _deprecated_user_accounts_fn(replacement: str = ""):
-    """装饰器：标记 user_accounts 老表函数为 deprecated。
-    调用时发出 DeprecationWarning，日志记录。
-    """
-    import functools
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            msg = f"user_accounts.{fn.__name__}() is deprecated"
-            if replacement:
-                msg += f", use {replacement} instead"
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
-            log.warning(f"Deprecated function called: {fn.__name__}() — {msg}")
-            return fn(*args, **kwargs)
-        return wrapper
-    return decorator
-
 # ====== 用户账户表（合并 users + bot_accounts） ======
-_USER_ACCOUNTS_DDL = """
-CREATE TABLE IF NOT EXISTS user_accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL DEFAULT '',
-    gitcode_id TEXT DEFAULT '',
-    gitcode_api_token TEXT DEFAULT '',
-    github_id TEXT DEFAULT '',
-    github_api_token TEXT DEFAULT '',
-    github_login TEXT DEFAULT '',
-    nickname TEXT DEFAULT '',
-    feishu_app_id TEXT DEFAULT '',
-    feishu_app_secret TEXT DEFAULT '',
-    huawei_cloud_ak TEXT DEFAULT '',
-    huawei_cloud_sk TEXT DEFAULT '',
-    CODEARTS_CLI_AK TEXT DEFAULT '',
-    CODEARTS_CLI_SK TEXT DEFAULT '',
-    gitcode_publish_repo TEXT DEFAULT '',
-    github_publish_repo TEXT DEFAULT '',
-    password TEXT DEFAULT '',
-    token_version INTEGER DEFAULT 0,  -- JWT 撤销版本号——改密码/logout 时 +1
-    created_by INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    hw_iam_domain TEXT DEFAULT '',
-    hw_iam_user TEXT DEFAULT '',
-    hw_iam_password TEXT DEFAULT '',
-    hw_iam_account_type TEXT DEFAULT 'iam',
-    last_active_at TEXT DEFAULT NULL  -- 最后活跃时间（用户在线状态判定）
-)
-"""
-
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
-
-@_deprecated_user_accounts_fn("get_grape_account_by_id")
-def get_user(user_id: int) -> dict | None:
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-@_deprecated_user_accounts_fn("get_grape_account_by_username")
-def get_user_by_username(username: str) -> dict | None:
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute("SELECT id, username, password_hash, created_by, created_at FROM user_accounts WHERE username=?", (username,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "password_hash": row[2], "created_by": row[3], "created_at": row[4]}
-
-@_deprecated_user_accounts_fn("admin/db.py list_grape_accounts")
-def list_users() -> list[dict]:
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts ORDER BY id")
-        return [{"id": r[0], "username": r[1], "created_by": r[2], "created_at": r[3]} for r in c.fetchall()]
 
 def batch_update_last_active(uids: list) -> None:
     """批量更新用户最后活跃时间——定时任务调用，分批每 1000 个"""
@@ -368,28 +293,6 @@ def validate_oauth_state(state: str, provider: str = "", consume: bool = True) -
 
     return OAuthStateStore.validate(state, provider, consume=consume)
 
-
-@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
-def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
-    """通过 GitCode 用户 ID 查找本地用户"""
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE gitcode_id=?", (gitcode_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
-
-@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
-def get_user_by_github_id(github_id: str) -> dict | None:
-    """通过 GitHub 用户 ID 查找本地用户"""
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute("SELECT id, username, created_by, created_at FROM user_accounts WHERE github_id=?", (github_id,))
-        row = c.fetchone()
-    if not row:
-        return None
-    return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
 # ====== 凭据表 ======
 # 铁律（2026-11-07）：所有新增表必须有 UUID 主键 id——应用层 uuid7_str() 生成、
@@ -904,7 +807,7 @@ def init_db():
     """初始化用户相关表（幂等）。
 
     迁移段全部收敛到独立一次性模块（生命周期：上线=调用行，下线=删文件+删行）：
-    - src/domains/mgmt/user/legacy_column_migrations.py：存量列补齐/重映射/孤儿清理/user_accounts 死表收敛
+    - src/domains/mgmt/user/legacy_column_migrations.py：存量列补齐 / 孤儿凭据清理
     - src/domains/mgmt/user/credentials_backfill_n1.py：N1 凭据 UUID 主键补列 + 明文加密回填
     每个模块幂等（重跑零写入），各自 docstring 记录下线判据。
     （合并重同步：weekly-08 s122 模块化结构恢复；模块覆盖面已逐标记核验，
@@ -916,8 +819,7 @@ def init_db():
         # （2026-11-15：runtime 库被重建过 user_accounts / user_credentials /
         # managed_repos / oauth_states / user_repos，跨域读于是在空表上静默返回空结果）。
         from src.kernel import table_ownership as _own_tbl
-        for _tbl, _ddl in (("user_accounts", _USER_ACCOUNTS_DDL),
-                           ("user_credentials", _CREDENTIALS_DDL),
+        for _tbl, _ddl in (("user_credentials", _CREDENTIALS_DDL),
                            ("managed_repos", _MANAGED_REPOS_DDL),
                            ("oauth_states", _OAUTH_STATES_DDL)):
             if _own_tbl.should_skip(_tbl):
@@ -957,25 +859,6 @@ def init_db():
         # D32 死表收敛（2026-11-07 起）：原「从 users/bot_accounts 回填 user_accounts」
         # 写入已退役——账号唯一权威表是 grape_accounts，回填只会在死表留影子数据。
         # 守卫：tests/test_user_accounts_write_freeze_guard.py（GC1/2/3 零写入）。
-        # 修复 user_credentials.user_id 与 user_accounts.id 不匹配（合并后 id 可能变化）
-        # 2026-10-17 修复（账号体系重构遗留）：user_credentials 的 user_id 现在指向
-        # grape_accounts.id（新体系），但下面的重映射/清理曾锚定旧表 user_accounts——
-        # 新体系 id（如 1）不在旧表（id 区间 37+）里，被当"悬空行"每次启动时批量
-        # 删除，导致用户在设置页保存的 AK/SK 反复丢失。三处全部改锚 grape_accounts；
-        # users 中间表已不存在（重映射 UPDATE 自然 no-op，保留幂等兼容）。
-        try:
-            db.execute("""
-                UPDATE user_credentials
-                SET user_id = (SELECT ga.id FROM grape_accounts ga, user_accounts ua
-                                WHERE ga.username = ua.username AND ua.id = user_credentials.user_id)
-                WHERE EXISTS (SELECT 1 FROM user_accounts ua WHERE ua.id = user_credentials.user_id)
-                  AND NOT EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = user_credentials.user_id)
-                  AND EXISTS (SELECT 1 FROM grape_accounts ga, user_accounts ua
-                              WHERE ga.username = ua.username AND ua.id = user_credentials.user_id)
-            """)
-            _mg_db.commit()
-        except Exception:
-            pass
         # D32 死表收敛：原「同一 username 只保留最小 id」的 user_accounts DELETE 清扫
         # 已退役（ours@64144d06a 口径）——grape_accounts 唯一性由 UNIQUE 约束保证，
         # 死表不再需要去重写入。孤儿凭据清理保留（锚 grape_accounts，非死表）：
@@ -1015,15 +898,6 @@ def init_db():
                         break
                 else:
                     break
-            # 修复 managed_repos 中的旧 user_id（通过旧 users 表映射）
-            try:
-                db.execute("""
-                    UPDATE managed_repos SET user_id = (
-                        SELECT ua.id FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = managed_repos.user_id
-                    ) WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = managed_repos.user_id)
-                """)
-            except Exception:
-                pass
             _mg_db.commit()
         except Exception:
             pass
@@ -1062,57 +936,6 @@ def init_db():
             db.execute("ALTER TABLE managed_repos ADD COLUMN host_vcs_username TEXT DEFAULT ''")
         except Exception:
             pass
-        # 迁移 user_accounts 废弃字段 → 正确位置（须在 DROP COLUMN 之前执行）
-        try:
-            c = _mg_db.cursor()
-            ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
-            # 1. webhook_url → meta 表（全局配置，取首个非空值）
-            if "webhook_url" in ua_cols:
-                c.execute("SELECT webhook_url FROM user_accounts WHERE webhook_url IS NOT NULL AND webhook_url!='' LIMIT 1")
-                row = c.fetchone()
-                if row and row[0]:
-                    # meta 归运行域：计数判存 + 写入都走任意拓扑原语（单库回落进程库，三库走自有 DSN）
-                    if (_rt.read_one_any("meta_count", ("webhook_url",)) or (0,))[0] == 0:
-                        _rt.set_meta_value_any("webhook_url", row[0])
-            # 2. OAuth 配置 → meta 表（default 账户清理时已完成，此处兜底）
-            if "gitcode_oauth_client_id" in ua_cols:
-                c.execute("SELECT gitcode_oauth_client_id, gitcode_oauth_client_secret, gitcode_oauth_redirect_uri FROM user_accounts WHERE gitcode_oauth_client_id IS NOT NULL AND gitcode_oauth_client_id!='' LIMIT 1")
-                row = c.fetchone()
-                if row:
-                    for meta_key, val in zip(("oauth_gitcode_client_id", "oauth_gitcode_client_secret", "oauth_gitcode_redirect_uri"), row):
-                        if val:
-                            if (_rt.read_one_any("meta_count", (meta_key,)) or (0,))[0] == 0:
-                                _rt.set_meta_value_any(meta_key, val)
-            # 3. bot_usernames → managed_repos.bot_username（对每个配置了 bot_usernames 的账户）
-            if "bot_usernames" in ua_cols:
-                c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
-                for uname, raw in c.fetchall():
-                    try:
-                        names = json.loads(raw)
-                        if not isinstance(names, list):
-                            names = []
-                    except (json.JSONDecodeError, TypeError):
-                        names = [s.strip() for s in raw.split(",") if s.strip()]
-                    if not names:
-                        continue
-                    bot_name = names[0]
-                    # Issue #345: 按 repo_key 前缀分流——github: 仓不填 GitCode bot name
-                    # user_accounts.bot_usernames 是 GitCode 的 bot 列表，只填 GitCode 仓库
-                    c.execute(
-                        "UPDATE managed_repos SET bot_username=? "
-                        "WHERE full_name=? AND (bot_username='' OR bot_username IS NULL) "
-                        "AND repo_key NOT LIKE 'github:%'",
-                        (bot_name, uname))
-                    c.execute(
-                        "UPDATE managed_repos SET bot_username=? "
-                        "WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL) "
-                        "AND repo_key NOT LIKE 'github:%'",
-                        (bot_name, uname, uname))
-                # 兜底：managed_repos 有 bot_gitcode_token 但无 bot_username 时设置默认值
-                c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
-            _mg_db.commit()
-        except Exception as e:
-            log.warning(f"Migrate user_accounts deprecated fields failed: {e}")
         _mg_db.commit()
     _cleanup_expired_oauth_states()
     # P2-1: 启动时也清理过期的 exchange_codes
@@ -3329,55 +3152,6 @@ def get_all_managed_repos() -> list[dict]:
                  "full_name": from_repo_key(r[0]), "webhook_id": r[4], "created_at": r[5],
                  "host_status": r[6] or ""} for r in c.fetchall()]
 
-USER_ACCOUNT_FIELDS = [
-    "id", "username", "password_hash", "gitcode_id",
-    "gitcode_api_token",
-    "github_id", "github_api_token", "github_login",
-    "nickname",
-    "feishu_app_id", "feishu_app_secret",
-    "huawei_cloud_ak", "huawei_cloud_sk",
-    "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
-    "gitcode_publish_repo", "github_publish_repo",
-    "password",
-    "created_by", "created_at",
-    "hw_iam_domain", "hw_iam_user", "hw_iam_password",
-    "hw_iam_account_type",
-]
-
-def get_all_user_accounts() -> list[dict]:
-    """获取所有用户账户"""
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts ORDER BY username")
-        rows = c.fetchall()
-    result = []
-    for r in rows:
-        d = dict(zip(USER_ACCOUNT_FIELDS, r))
-        d["name"] = d["username"]  # 向后兼容
-        try:
-            d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
-        except (json.JSONDecodeError, TypeError):
-            d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
-        result.append(d)
-    return result
-
-@_deprecated_user_accounts_fn("grape_account_db.get_grape_account_by_username")
-def get_user_account(username: str) -> dict | None:
-    """获取单个用户账户"""
-    with db_lock:
-        c = _mg_db.cursor()
-        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE username=?", (username,))
-        row = c.fetchone()
-    if not row:
-        return None
-    d = dict(zip(USER_ACCOUNT_FIELDS, row))
-    d["name"] = d["username"]  # 向后兼容
-    try:
-        d["bot_usernames"] = json.loads(d.get("bot_usernames", "[]"))
-    except (json.JSONDecodeError, TypeError):
-        d["bot_usernames"] = [s.strip() for s in d.get("bot_usernames", "").split(",") if s.strip()]
-    return d
-
 def get_all_bot_usernames() -> list[str]:
     """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）。
 
@@ -3706,44 +3480,11 @@ def _sync_providers_from_config(data: dict) -> None:
 def migrate_accounts_from_json():
     """首次运行加载配置：迁移旧数据到 meta 表。
 
-    OAuth 配置迁移已移交给 migrate_oauth_providers()（统一入口）。
-    本函数仅保留 default 账户清理（旧版 user_accounts default 账户的 OAuth 配置迁移到 meta 表）。
+    OAuth 配置迁移由 migrate_oauth_providers() 统一处理。
+    （default 账户迁移已随 user_accounts 清退删除：现网该表 0 行，迁移恒零命中。）
     """
     # OAuth 配置由 migrate_oauth_providers 统一处理
     migrate_oauth_providers()
-
-    # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute("SELECT * FROM user_accounts WHERE username='default'")
-            row = c.fetchone()
-            if row:
-                cols = [d[0] for d in c.description]
-                acc = dict(zip(cols, row))
-                _oauth_keys = [
-                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-                    ("github_oauth_client_id", "oauth_github_client_id"),
-                    ("github_oauth_client_secret", "oauth_github_client_secret"),
-                    # 不迁移 redirect_uri——D27 已废弃
-                ]
-                migrated = False
-                for src_key, meta_key in _oauth_keys:
-                    val = acc.get(src_key, "") or ""
-                    if val:
-                        if (_rt.read_one_any("meta_count", (meta_key,)) or (0,))[0] == 0:
-                            _rt.set_meta_value_any(meta_key, val)
-                            migrated = True
-                # 写入冻结铁律（2026-11-07）：原 DELETE default 账户语句已删除——
-                # 行留着无害（零业务读），配置已迁移即达成目的。守卫: GC1-GC3。
-                _mg_db.commit()
-                if migrated:
-                    log.info("Migrated OAuth config from default account to meta table")
-                else:
-                    log.info("Default account config checked (no config to migrate)")
-    except Exception as e:
-        log.warning(f"Migrate/delete default account failed: {e}")
 
 def link_user_provider(user_id: int, provider: str, external_id: str,
                         access_token: str, refresh_token: str = "") -> bool:
@@ -6170,7 +5911,6 @@ def get_repo_credential_value(repo_key: str, cred_type: str) -> str:
 D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
 Issue #1588 B 批：老表包装函数（create_user/get_user/get_user_by_username/list_users/
 delete_user/update_password/verify_user/get_token_version/increment_token_version/
-get_user_by_gitcode_id/link_gitcode_user/get_all_user_accounts/get_user_account/
 save_user_account/delete_user_account 等 16 个包装、其私有别名与字段常量）
 已整体删除——新代码一律使用 src/domains/mgmt/auth/grape_account_db.py：
   账号 CRUD → create_grape_account/get_grape_account_by_id/get_grape_account_by_username
