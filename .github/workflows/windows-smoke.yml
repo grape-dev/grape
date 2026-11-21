@@ -295,3 +295,10 @@ jobs:
         run: |
           python -m pytest tests/test_issue_1790_1786_port.py -v
           python -m pytest tests/api/test_auth_routes.py -v
+      - name: Trace relay disabled-state noise regression tests (issue #3699)
+        # Issue #3699 QA 审查修复（Required）：新增用例 test_issue_3699_trace_relay_noise.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/#3167/#3490 均由 QA
+        # 要求补齐），中继禁用态降噪与 exporter 退避策略回归只能靠人工 pytest。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3699_trace_relay_noise.py -v
