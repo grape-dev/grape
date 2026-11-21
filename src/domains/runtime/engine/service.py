@@ -5934,6 +5934,67 @@ def session_token_for_execution(task_id: str, *, session_key_fallback: str,
         agent_type=agent_type, user_id=user_id)
 
 
+def reuse_or_issue_session_token(env, *, session_key, repo_key, agent_type,
+                                 user_id=0, task_id="", scope="dispatch",
+                                 context_log_level="warning"):
+    """派发/执行前的 token 注入：#990 口径 —— 复用任务快照，不新签未落库 token。
+
+    ``issue_and_inject_session_token`` 是「每次新签一枚」的上游口径（建任务时用）；
+    派发链必须走这里：``session_token_for_execution`` 先读 ``agent_tasks.env_extra``
+    快照，有效即复用、失效才在同一事务内轮换**并回写快照**。
+
+    为什么不能继续用 issue_session_token：每次派发都把入队那枚覆盖成新 token，
+    快照里留下 stale 值，靠后续 ``sync_task_session_token`` 轮换回写才能收敛，
+    中间存在 401 窗口 —— 正是 #990 记录的症状（"绝不制造未落库 token"）。
+
+    返回 None（成功注入）或诊断条目（上下文缺失 / 快照同步失败 / 签发失败）。
+    """
+    if not (repo_key and agent_type):
+        _reason = (f"session token not issued: missing dispatch context "
+                   f"(repo_key={'set' if repo_key else 'empty'}, "
+                   f"agent_type={'set' if agent_type else 'empty'})")
+        _entry = _token_diag_entry(SESSION_TOKEN_CONTEXT_MISSING, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        _log = log.error if context_log_level == "error" else log.warning
+        _log(f"{scope}: {_reason} (task={task_id or '-'}); continuing without "
+             "GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_AUTH_FILE/config")
+        return _entry
+    try:
+        _uid = int(user_id or 0)
+    except (TypeError, ValueError):
+        _uid = 0
+    try:
+        _token = session_token_for_execution(
+            task_id, session_key_fallback=session_key, repo_key=repo_key,
+            agent_type=agent_type, user_id=_uid)
+    except Exception as e:
+        _reason = f"session token snapshot sync failed: {type(e).__name__}: {e}"
+        _entry = _token_diag_entry(SESSION_TOKEN_ISSUE_FAILED, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        log.error(f"{scope}: {_reason} (task={task_id or '-'} repo={repo_key} "
+                  f"agent={agent_type}); continuing without GRAPE_SESSION_TOKEN")
+        return _entry
+    if not _token:
+        _reason = ("session token snapshot sync returned empty "
+                   f"(task={task_id or '-'} repo={repo_key} agent={agent_type})")
+        _entry = _token_diag_entry(SESSION_TOKEN_ISSUE_FAILED, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        log.error(f"{scope}: {_reason}; continuing without GRAPE_SESSION_TOKEN")
+        return _entry
+    env["GRAPE_SESSION_TOKEN"] = _token
+    env["GRAPE_CLI_MODE"] = "WORKER"
+    return None
+
+
+def reuse_or_issue_session_token_safe(env, *, log_scope, **kwargs):
+    """派发链兜底封装：诊断钩子自身异常不得阻断派发（#2790 同口径）。"""
+    try:
+        return reuse_or_issue_session_token(env, **kwargs)
+    except Exception as e:
+        log.error(f"{log_scope}: session token reuse hook failed: {e}")
+        return None
+
+
 def _release_task_token_lock(dconn, lock_name: str):
     """释放命名锁并归还进程内 guard（连接保留复用；断链时下次自动重建）。"""
     try:

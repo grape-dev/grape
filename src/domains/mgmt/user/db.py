@@ -3686,41 +3686,37 @@ def migrate_oauth_providers():
     except Exception as e:
         log.warning(f"migrate_oauth_providers: fallback sync failed: {e}")
 
-def _sync_providers_from_config(data: dict):
-    """从 oauth-providers.json 格式的配置同步到 meta 表。
+def _sync_providers_from_config(data: dict) -> None:
+    """把 oauth-providers.json 的**渠道定义**同步到 DB 表（不再写 meta）。
 
-    新文件格式：嵌套的 { provider: { name, auth_url, ..., client_id, client_secret } }
-    - 协议参数（不含 client_id/secret）：覆盖写入 oauth_providers_config
-    - 凭据（client_id/secret）：幂等写入 oauth_{provider}_client_id/secret
+    为什么要改（2026-11-21）：`grape_t_oauth_channels` 已经承载全套字段 ——
+    provider / name / type / auth_url / token_url / user_url / emails_endpoint /
+    scope / pkce_enabled / id_field / redirect_uri / brand_color / accept_header /
+    client_id_enc / client_secret_enc / enabled —— 而且 `providers.py::_load_providers`
+    的读取顺序是「文件卡 → meta 逐键覆盖 → **表整卡覆盖**」，表是最后一层，即运行时真源。
+    既然表能承载全部信息，meta 里的 `oauth_providers_config` 与 `oauth_<p>_client_id/secret`
+    只是历史导入源：每次启动再写一遍既是空转，又会因同值重写触发
+    `meta.PRIMARY` 1062（set_meta_value_any 的 rowcount 判据已单独修好，但这条写入
+    本就不该存在）。
+
+    现在的分工：
+      · 文件（随仓发布）  → 首次导入 / 表未就绪时的基底
+      · 表               → 运行时真源（管理台写、`platform.migration` 负责从文件灌入）
+      · meta             → 仅作为老部署的读取兼容层保留（本函数不再写入）
     """
-    providers_cfg = {}
-    loaded_creds = []
-    from src.domains.runtime import public as _rt  # noqa: PLC0415
-    for provider, cfg in data.items():
-        provider = str(provider or "").strip()
-        # 下划线前缀 = 文档键（_readme/_fields/_note），不是渠道：这里不过滤就会把
-        # 说明块整块写进 meta.oauth_providers_config，之后被当成一个渠道渲染
-        # （实弹：登录页出现 `_fields` 按钮，未配置提示点名 _fields）。
-        if not provider or provider.startswith("_") or not isinstance(cfg, dict):
-            continue
-        # 剥离 client_id/secret，只存协议参数
-        prov_cfg = {k: v for k, v in cfg.items()
-                    if k not in ("client_id", "client_secret")}
-        providers_cfg[provider] = prov_cfg
-        # 幂等同步凭据（meta 在运行域：不存在才写，原语自带单库回落）
-        for cred_field in ("client_id", "client_secret"):
-            val = cfg.get(cred_field, "") or ""
-            if not val:
-                continue
-            meta_key = f"oauth_{provider}_{cred_field}"
-            if _rt.set_meta_if_absent(meta_key, val):
-                loaded_creds.append(meta_key)
-    # 覆盖写入协议参数
-    if providers_cfg:
-        _rt.set_meta_value_any(
-            "oauth_providers_config", json.dumps(providers_cfg, ensure_ascii=False))
-    log.info(f"Synced OAuth providers from oauth-providers.json: "
-             f"providers={list(providers_cfg.keys())}, credentials={loaded_creds}")
+    from src.domains.platform.public import is_table_backed
+
+    providers = [str(p or "").strip() for p in (data or {}).keys()]
+    providers = [p for p in providers if p and not p.startswith("_")]
+    if not providers:
+        return
+    if not is_table_backed():
+        # 表未就绪（老库/单库）：文件本身就是基底，无需落 meta；此处只留一条调试
+        log.debug("oauth providers: table not ready, keep file cards as source: %s", providers)
+        return
+    log.info("OAuth providers source of truth is grape_t_oauth_channels "
+             "(file cards are the import source); meta sync skipped: %s", providers)
+
 
 def migrate_accounts_from_json():
     """首次运行加载配置：迁移旧数据到 meta 表。
@@ -6133,11 +6129,20 @@ def get_repo_credential_meta(repo_key: str, cred_type: str) -> "dict | None":
         row = _insight_public.repo_credential_meta(repo_key, cred_type)
         if not row:
             return None
-        return {"value": _decrypt_repo_secret(row[0] or ""),
-                "id": row[1] or ""}
     except Exception as e:
         log.warning(f"get_repo_credential_meta failed: {e}")
         return None
+    # 行存在 ≠ 值可用：解密失败必须与「无行」区分开（2026-11-21）。
+    # 混在一起会让上层把「配了但解不开」当成「没配」→ 静默降级到用户身份，
+    # 正是 D90 禁止的身份混用。
+    raw = row[0] or ""
+    try:
+        plain, undecryptable = _decrypt_repo_secret(raw), False
+    except Exception as e:
+        log.error(f"repo credential decrypt failed: repo_key={repo_key} "
+                  f"cred_type={cred_type} err={type(e).__name__}")
+        plain, undecryptable = "", True
+    return {"value": plain, "id": row[1] or "", "undecryptable": undecryptable}
 
 def _decrypt_repo_secret(raw: str) -> str:
     """D90-N3：repo 凭据读侧统一解密（bot token 通道加密配套）。

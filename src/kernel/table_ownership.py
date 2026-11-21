@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import threading
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -127,3 +128,69 @@ def reload_manifest() -> None:
     with _cache_lock:
         _cache = None
         _cache_mtime = 0.0
+
+# ── 表归属副本审计（2026-11-21）───────────────────────────────────────────────
+#
+# 问题：契约层是单点的（跨域读只走 owner 域 public），但 DDL 层带历史副本 ——
+# 每个进程都曾建全量表，拆库后 `_migration_conn` 在目标域 DSN 不可用时又会回落
+# 进程库，于是非 owner 库里留下一张同名 **BASE TABLE**（不是视图）。裸 SQL 查它
+# 成功返回 0 行、不报错，会被当成「没配置/数据丢了」（本仓已误判两次）。
+#
+# 这两个原语只做「发现 + 安全清理」，不改变任何读路径。
+
+_SAFE_IDENT = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True) -> list[dict]:
+    """列出本库里「归别域、但物理上是 BASE TABLE」的副本，并分类。
+
+    - `empty_copy`     副本 0 行 → 数据在 owner 库，可安全清理（`drop_empty_copy`）
+    - `divergent_copy`  副本非 0 行 → 可能这个部署的真源就在这（实测 227：rc 基表在
+                        runtime 而清单声明 owner=insight），**绝不自动删除**，必须人工裁决
+
+    视图形态（227 的 mgmt/insight 里的 rc）不会出现在结果里 —— 视图转发读到的就是
+    owner 数据，属正确形态。
+    """
+    dom = _domain_from(dbname)
+    if not dom:
+        return []
+    tables = sorted(_load_manifest()["tables"].keys())
+    if not tables:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_TYPE='BASE TABLE'", (dbname,)).fetchall()
+    except Exception:  # noqa: BLE001 - 单库/测试环境没有 information_schema
+        return []
+    present = {str(r[0] or "").strip().lower() for r in rows}
+    out: list[dict] = []
+    for table in tables:
+        if table not in present:
+            continue
+        owner = owner_of(table)
+        if not owner or owner == dom:
+            continue
+        n = -1
+        if count_rows and _SAFE_IDENT.match(table):
+            try:
+                n = int(conn.execute(f"SELECT COUNT(*) FROM `{table}`").fetchone()[0] or 0)
+            except Exception:  # noqa: BLE001
+                n = -1
+        out.append({"table": table, "owner": owner, "rows": n,
+                    "kind": "empty_copy" if n == 0 else "divergent_copy"})
+    return out
+
+
+def drop_empty_copy(conn, table: str) -> bool:
+    """删除一张 **0 行** 的别域副本；非 0 行一律拒绝（数据可能只在这份里）。
+
+    表名来自 information_schema，但仍做标识符白名单校验（防注入/异常名）。
+    """
+    if not _SAFE_IDENT.match(table or ""):
+        raise ValueError(f"unsafe table name: {table!r}")
+    row = conn.execute(f"SELECT COUNT(*) FROM `{table}`").fetchone()
+    if int((row or [0])[0] or 0) != 0:
+        raise RuntimeError(f"refuse to drop non-empty copy `{table}`")
+    conn.execute(f"DROP TABLE `{table}`")
+    return True

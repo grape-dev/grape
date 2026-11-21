@@ -1177,6 +1177,15 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     )
     scripts = build_script_assets(host_os=host_os, env=env, takeover_id=session_id)
 
+    # clone 地址单点派生（平台卡 host）；过去写死 gitcode.com，非 gitcode 仓的接管
+    # 会给 agent 一个错平台的 clone_url。派生失败留空优于给错地址。
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import clone_url as _clone_url
+
+        _bundle_clone_url = _clone_url(repo_key)
+    except Exception as _clone_err:
+        log.warning(f"takeover: clone endpoint resolve failed ({repo_key}): {_clone_err}")
+        _bundle_clone_url = ""
     bundle = {
         "takeover_id": session_id,
         "task": {"id": task.get("id") or "", "repo_key": repo_key, "issue_number": issue_number,
@@ -1192,7 +1201,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
                      "nodes": nodes, "segments": _segments(repo_key, f"#{issue_number}"),
                      "issue_stage": issue.get("stage") or ""},
         "workspace": {"repo_full_name": repo_short,
-                      "clone_url": f"https://gitcode.com/{repo_short}.git",
+                      "clone_url": _bundle_clone_url,
                       "branch_hint": env.get("GRAPE_WORK_BRANCH") or "",
                       "work_branch": env.get("GRAPE_WORK_BRANCH") or "",
                       "cwd_hint": task.get("cwd") or ""},

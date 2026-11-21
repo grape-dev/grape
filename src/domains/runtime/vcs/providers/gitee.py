@@ -137,3 +137,13 @@ def repo_segment(owner: str, repo: str) -> str:
     import urllib.parse
     return (f"repos/{urllib.parse.quote(owner, safe='')}/"
             f"{urllib.parse.quote(repo, safe='')}")
+
+
+# ── 通道能力位（Issue #3632 后继：checks/status 通道不再按平台名分派）──
+# Gitee v5 有原生 check-runs（GET /repos/{owner}/{repo}/commits/{ref}/check-runs，
+# 见平台 swagger 实测）——过去被 else 分支错打到 gitcode Actions，读不到本仓数据。
+CHECK_RUNS_NATIVE = True
+# Gitee 无 combined status 端点：显式 404 statuses_unavailable，不打别的平台。
+STATUS_NATIVE = False
+# PR↔Issue 关联在 Gitee 属 body 文本 + close_related_issue，无原生写端点 → 幂等 no-op。
+PR_ISSUE_LINK_NATIVE = False

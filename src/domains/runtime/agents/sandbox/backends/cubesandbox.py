@@ -460,10 +460,10 @@ touch {marker_done}
 
     # ---- 仓库配置 override ----
 
-    def configure_repo(self, *, repo_url, bot_token, work_branch):
+    def configure_repo(self, *, repo_url, bot_token, work_branch, username=""):
         super().configure_repo(
             repo_url=repo_url, bot_token=bot_token,
-            work_branch=work_branch,
+            work_branch=work_branch, username=username,
         )
         # 工作目录就绪：repo/.skills 无条件保证——skill/知识物化与 {{SKILL_DIR}}
         # 占位替换只依赖 _REPO_DIR/_SKILL_DIR 路径状态，与是否克隆仓库无关。

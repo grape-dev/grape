@@ -4650,23 +4650,63 @@ def pipeline_scene_advanced_options(scene_id, repo_keys) -> str:
 # 为什么在 mgmt：两张表在三库拓扑里落在 mgmt 库，而签发/校验逻辑是 kernel 的共享能力，
 # 由 api / mgmt / runtime 三个进程共同调用 —— 跨域时连接必须走本域（自有 DSN 或单库回落）。
 
+def _is_unique_conflict(exc: BaseException) -> bool:
+    """跨方言识别唯一键冲突：SQLite `UNIQUE constraint failed` / MySQL `1062 Duplicate entry`。
+
+    只在 `session_token_insert` / `session_token_rotate` 的降级路径上用：本仓库**不主张**
+    `session_key` 唯一（原设计允许多枚并存），但部署侧可能存在手工建的 `uniq_session_key`
+    （实测 grape_arch_upgrade2 有、grape_dev_mgmt 没有），此时裸 INSERT 会撞键。
+    撞了就就地覆盖那一行；没撞就保留多行 —— 不把某一部署的物理约束写成代码语义。
+    """
+    if type(exc).__name__ != "IntegrityError":
+        return False
+    text = str(exc).lower()
+    return "unique" in text or "duplicate entry" in text or "1062" in text
+
+
 def session_token_insert(session_key: str, repo_key: str, agent_type: str, user_id,
                          token_sha256: str, expires_at: int, kind: str | None = None) -> int:
-    """插入一条会话 token（kind=None 为 worker/tk_，'takeover' 为接管）；返回自增 id。"""
+    """写入一条会话 token；返回该行 id。
+
+    kind=None 为 worker/tk_，'takeover' 为接管。
+
+    语义：**同一 session_key 允许多枚并存**（原设计 —— 建表只有 id 主键，历史原语
+    `session_token_set_expiry` / `session_token_shrink_active` / `session_token_delete_by_session`
+    全是按 key 批量操作；索引 `ix_sat_kind_key(kind, session_key)` 也是非唯一的）。
+    所以这里先裸 INSERT：无唯一索引的库（如 grape_dev_mgmt）会得到多行，各枚各自有效。
+
+    唯一例外：部署侧可能手工建了 `uniq_session_key`（实测 grape_lfr_mgmt / grape_arch_upgrade2
+    有），此时 INSERT 会抛唯一键冲突 —— 就地 UPDATE 该行并返回它的 id，调用方语义不变。
+    这是**兼容既有可能存在的物理约束**，不是把单行当成契约。
+
+    历史坑（别退回 UPDATE-then-INSERT 那种判存在性写法）：MySQL 的 affected-rows 计的是
+    「实际改变的行数」，同值重写为 0 → 被判成「未命中」再 INSERT → 1062 复现；
+    SQLite 计「匹配行数」，单测永远绿。要么裸 INSERT，要么按主键/唯一键判。
+    """
+    _cols = "session_key, repo_key, agent_type, user_id, token_sha256, expires_at"
+    _vals = "?,?,?,?,?,?"
+    _params = [session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)]
+    _sets = "repo_key=?, agent_type=?, user_id=?, token_sha256=?, expires_at=?"
+    _set_params = [repo_key, agent_type, user_id, token_sha256, int(expires_at)]
+    if kind:
+        _cols += ", kind"
+        _vals += ",?"
+        _params.append(kind)
+        _sets += ", kind=?"
+        _set_params.append(kind)
     with _any_cursor(write=True) as c:
-        if kind:
-            cur = c.execute(
-                "INSERT INTO session_api_tokens "
-                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at, kind) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at), kind))
-        else:
-            cur = c.execute(
-                "INSERT INTO session_api_tokens "
-                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
-        return int(getattr(cur, "lastrowid", 0) or 0)
+        try:
+            c.execute(f"INSERT INTO session_api_tokens ({_cols}) VALUES ({_vals})", tuple(_params))
+        except Exception as exc:  # noqa: BLE001 —— 只处理唯一键冲突，其余原样抛
+            if not _is_unique_conflict(exc):
+                raise
+            c.execute(f"UPDATE session_api_tokens SET {_sets} WHERE session_key=?",
+                      tuple(_set_params + [session_key]))
+        row = c.execute(
+            "SELECT id FROM session_api_tokens WHERE session_key=? AND token_sha256=? "
+            "ORDER BY id DESC", (session_key, token_sha256)).fetchone()
+        return int((row[0] if row else 0) or 0)
+
 
 
 def session_token_by_sha(token_sha256: str, kind: str | None = None) -> tuple | None:
@@ -4737,18 +4777,34 @@ def session_token_rotate(session_key: str, repo_key: str, agent_type: str, user_
                          token_sha256: str, expires_at: int, now: int) -> None:
     """轮换：作废仍有效的旧 token + 插入新 token（**同一事务**）。
 
+    原语义（本函数自古如此，2026-11-21 曾被我误改成无条件 upsert，已还原）：
+    · 按 session_key 批量把「仍有效」的旧行 expires_at 改写成 now —— 多枚并存时全部作废；
+    · 然后裸 INSERT 新行 —— 无唯一索引的库上就是新增一枚（原设计）。
+    唯一例外仍是部署侧手工的 `uniq_session_key`：INSERT 撞键时降级为就地覆盖该行。
+
     注意跨域边界：调用方若还要回写别的域（如 agent_tasks.env_extra）的快照，
     那一步已不在本事务内 —— 顺序上必须先完成本原语（新 token 已落库）再回写快照，
     并由调用方自己的实例锁串行化，失败重试即可收敛。
     """
+    _sets = ("repo_key=?, agent_type=?, user_id=?, token_sha256=?, expires_at=?")
+    _set_params = [repo_key, agent_type, user_id, token_sha256, int(expires_at)]
     with _any_tx() as c:
-        c.execute("UPDATE session_api_tokens SET expires_at=? "
-                  "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
-                  (int(now), session_key, int(now)))
-        c.execute("INSERT INTO session_api_tokens "
-                  "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
-                  "VALUES (?,?,?,?,?,?)",
-                  (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+        c.execute(
+            "UPDATE session_api_tokens SET expires_at=? "
+            "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+            (int(now), session_key, int(now)))
+        try:
+            c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+        except Exception as exc:  # noqa: BLE001 —— 只处理唯一键冲突
+            if not _is_unique_conflict(exc):
+                raise
+            c.execute(f"UPDATE session_api_tokens SET {_sets} WHERE session_key=?",
+                      tuple(_set_params + [session_key]))
+
 
 
 def api_token_insert(user_id, token_sha256: str, name: str, created_at: str) -> int:

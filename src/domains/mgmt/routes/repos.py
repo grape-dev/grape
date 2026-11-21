@@ -3048,6 +3048,12 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         return "", stage, exc
 
     _getters = repo_token_getters(provider)
+    # 显式 bot 闸的两个信号（仅 config-only 平台分支使用；_getters 分支自带存量四级
+    # fallback，不看这个闸）。这里必须**两个都给默认值**：外层 else 分支会引用它们，
+    # 少初始化一个就会在 gitcode/github 路径上抛 UnboundLocalError
+    # （实测 2026-11-21：github 仓直接报 "cannot access local variable '_has_bot_row'"）。
+    _has_bot_row = False
+    _gate_bot = False
     # 内部契约：_bot()/_user() 必须返回 (token, stage, exc) —— 下面按 3 元组解包。
     # B7 曾把这两个函数写成裸字符串，端点每次调用都会 ValueError（500）；
     # 2026-11-13 附带的用例 test_repo_token_getters_provider_keyed 现在锁住该契约。
@@ -3064,30 +3070,132 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
 
-        def _user():
+        def _user(**_kw):
+            """存量平台的用户档：**devops 先归属者，再会话用户**。
+
+            2026-11-21 P0 修复：此前这里只看会话身份，而 devops 任务的会话是仓库
+            身份（`agent_tasks.user_id=0`）→ `_getter("", user_id=0)` 恒空，于是
+            gitcode/github 的 path-B 仓（bot 档被 db 层守卫按设计挡掉）整条链断，
+            表现为 git-credential 502/424。owner 回落是 path-B 的原始语义（R2.1），
+            gitee/gitlab 的 generic 分支早就这么做，这里补齐。
+            chat 分支不走 owner（否则非 owner 会话会拿 owner 的 PAT → 权限放大）。
+            """
             try:
                 import importlib
                 _mod, _fn = _getters["user"]
                 _getter = getattr(importlib.import_module(_mod), _fn)
+                if user.get("agent_type") != "chat":
+                    from src.domains.mgmt.user.db import get_host_user_id, get_host_vcs_username
+                    try:
+                        _huid = str(get_host_user_id(_rk) or "")
+                    except Exception:
+                        _huid = ""
+                    if _huid and _huid != "0":
+                        _huser = get_host_vcs_username(_rk) or ""
+                        if not _huser:
+                            # OAuth 档按 username 匹配；空 username 取不到，回落 owner 段
+                            _huser = (_rk.split(":", 1)[-1].split("/") or [""])[0]
+                        _t = _getter(_huser, user_id=_huid) or ""
+                        if _t:
+                            return _t, "owner_user", None
                 uid = user.get("id") or 0
                 username = user.get("username") or ""
                 if not username and has_user_id(uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
-                return _getter(username, user_id=uid) or "", "", None
+                _t = _getter(username, user_id=uid) or ""
+                return _t, ("session_user" if _t else ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
     else:
         # 其余在册平台（gitee/gitlab…）：仓库级 bot token 走端口（token_storage_field），
         # 用户 token 走 provider 无关解析（PAT→OAuth），零平台分支。
+        #
+        # ── 2026-11-21 三次修订：闸判「value 非空」而不是「行存在」──
+        # bypass_path_b 一旦打开会把 RepoBot 与 GlobalBot 两级**同时**解锁。
+        # 若拿"行存在"当闸，以下两种形态会悄悄落到平台全局 bot：
+        #   ① rc 行被清空（value=''，行还在）
+        #   ② rc 值已失效/被撤销
+        # 而全局 bot 通常不是该私仓协作者 → git push 403；且因为拿到的是非空 token，
+        # 下面"失效即 424"的分支不会触发 —— 比 502 难查得多（看着走得通，身份错了）。
+        # 所以：闸 = value 非空；**开了闸就直取 rc value，不再经策略链**。
+        try:
+            from src.domains.mgmt.user.db import get_repo_credential_meta
+            _bot_meta = get_repo_credential_meta(rk, "bot") or {}
+            _bot_value = str(_bot_meta.get("value") or "")
+            _undecryptable = bool(_bot_meta.get("undecryptable"))
+        except Exception as _ge:
+            log.debug(f"git-credential explicit-bot gate lookup failed: {_ge}")
+            _bot_meta, _bot_value, _undecryptable = {}, "", False
+        # 两个信号分开：`_has_bot_row` 回答「管理员是否显式配了 bot」，`_gate_bot`
+        # 回答「这个值此刻能不能用」。混成一个会掉进两个坑之一：
+        #   用行存在判闸 → 值被清空时打开 bypass，落到全局 bot（身份错）
+        #   用 value 判一切 → 显式配了但值空时静默走策略链（同样是落全局 bot）
+        _has_bot_row = bool(_bot_meta)
+        _gate_bot = bool(_bot_value)
+
+        def _bot_expired(repo_key: str) -> bool:
+            """仓库级 bot 是否已被标记过期（managed_repos.bot_token_status）。
+
+            R18.2.2「过期短路」的原始落点就在这里：RepoBotToken._is_expired 读同一列。
+            走 rc 直取的路径必须自己调它，否则绕过短路，把过期 token 当可用发出去。
+            """
+            try:
+                from src.domains.mgmt.public import repo_bot_token_status_any
+                return str(repo_bot_token_status_any(repo_key) or "") == "expired"
+            except Exception as e:
+                log.debug(f"git-credential repo bot expiry lookup failed: {e}")
+                return False
+
         def _bot():
             try:
+                # 行存在但解不开：值与「无行」不可区分是历史缺陷（get_repo_credential_meta
+                # 曾把解密异常吞成 None）→ 会静默落到归属者。现在带 stage 上报，外层报 424。
+                if _undecryptable:
+                    return "", "undecryptable", None
+                if _gate_bot:
+                    # 过期短路必须保留（R18.2.2 原始要求，已落地在 managed_repos.bot_token_status：
+                    # RepoBotToken._is_expired → repo_bot_token_status_any == "expired"）。
+                    # 直取其值而不看状态 = 把过期 token 当可用发出去 → 上游 401、
+                    # 任务报「推送失败」，运维看不出该轮换凭据。这里补回短路：
+                    # 已标 expired → 视为不可用 → 外层 _has_bot_row 报 424。
+                    if _bot_expired(rk):
+                        return "", "expired", None
+                    # 只认显式配置的仓库 bot；不经 TokenResolver（它会顺带解锁全局 bot）
+                    return _bot_value, "rc_bot", None
+                if _has_bot_row:
+                    # 显式配了 bot 但值不可用（被清空）：不落全局 bot，
+                    # 由外层报 424 —— 身份不能混，修凭据是运维动作。
+                    return "", "empty", None
+                # 根本没配仓库 bot：path-A（host_user_id 空）不受守卫影响仍走全局 bot；
+                # path-B 跳过两级 bot，由归属者/会话用户兜底。
                 from src.kernel.token_resolver import TokenResolver, create_provider
-                return TokenResolver(create_provider(provider)).read_stored_token(rk) or "", "", None
+                _t = TokenResolver(create_provider(provider)).get_token(rk) or ""
+                return _t, ("strategy" if _t else ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
 
-        def _user():
+        def _owner_user():
+            """仓库归属者（host_user_id）的凭据。"""
+            try:
+                from src.api.deps import get_user_token_for
+                from src.domains.mgmt.user.db import get_host_user_id, get_host_vcs_username
+                _huid = str(get_host_user_id(rk) or "").strip()
+                if not _huid or _huid in ("0", "None"):
+                    return "", "", None
+                _huser = get_host_vcs_username(rk) or ""
+                if not _huser:
+                    # host_vcs_username 可能为空（本环境实测为空）：PAT 档按 user_id 命中，
+                    # 但 OAuth 档按 username 匹配 —— 回落仓库 owner 段，避免 OAuth-only 取不到。
+                    from src.kernel.repo_key import parse_repo_key
+                    _huser = (parse_repo_key(rk)[1:2] or [""])[0] or ""
+                _t = get_user_token_for(_huser, user_id=_huid, provider=provider) or ""
+                return _t, ("owner_user" if _t else ""), None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
+
+        def _session_user():
+            """当前会话用户的凭据。"""
             try:
                 from src.api.deps import get_user_token_for
                 username = user.get("username") or ""
@@ -3095,12 +3203,28 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 if not username and has_user_id(uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
-                return get_user_token_for(username, user_id=str(uid), provider=provider) or "", "", None
+                _t = get_user_token_for(username, user_id=str(uid), provider=provider) or ""
+                return _t, ("session_user" if _t else ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
 
+        def _user(chat_first: bool = False):
+            """用户档组合。
+
+            chat_first=True（chat / Web 会话）：**会话用户优先** —— 聊天里操作仓库的身份
+              必须是发起人，不能替仓库 owner 代签（否则等于权限放大，且审计看着像 owner）。
+            chat_first=False（devops 事件）：归属者优先 —— 路径 B 的原始语义。
+            """
+            _first, _second = ((_session_user, _owner_user) if chat_first
+                               else (_owner_user, _session_user))
+            tok, st, ex = _first()
+            if tok:
+                return tok, st, ex
+            tok2, st2, ex2 = _second()
+            return tok2, st2, (ex2 or ex)
+
     if user.get("agent_type") == "chat":
-        tok, stage, exc = _user()
+        tok, stage, exc = _user(chat_first=True)
         if not tok:
             alt, alt_stage, alt_exc = _bot()
             tok = alt
@@ -3108,6 +3232,18 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 stage, exc = alt_stage, alt_exc
     else:
         tok, stage, exc = _bot()
+        if not tok and _has_bot_row:
+            # 该仓**显式**配了 rc bot 行，但取不到可用值 → 凭据失效/被撤销。
+            # 不静默降级到用户身份：否则「机器身份」和「用户身份」混在一根链上，
+            # 审计与提交署名都会失真，且下次排障看不出到底用的是谁。
+            _why = ("密文无法解密（密钥不匹配或行被破坏）" if stage == "undecryptable"
+                    else "已标记过期" if stage == "expired"
+                    else "值为空或被撤销")
+            raise HTTPException(status_code=424, detail={
+                "code": "BOT_CREDENTIAL_INVALID",
+                "stage": stage or "empty",
+                "message": f"{_provider_display(provider)} 该仓库 bot 凭据不可用（{_why}），请轮换",
+            })
         if not tok:
             alt, alt_stage, alt_exc = _user()
             tok = alt
@@ -3120,10 +3256,22 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             "repo_key": rk,
             "auth_type": user.get("auth_type", ""),
             "agent_type": user.get("agent_type", ""),
+            "token_stage": stage or "",
             "duration_ms": round((time.monotonic() - _start) * 1000),
         })
         return tok
-    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_provider_display(provider)} 仓库 token 解析失败"})
+    # 不再用 502 表达配置问题（2026-11-21）：全空且无异常 = 该仓没配任何凭据，
+    # 这是可判定、可自助修复的状态；只有 stage/exc 记录了具体异常才是上游故障。
+    if exc:
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "stage": stage or "",
+            "message": f"{_provider_display(provider)} 仓库 token 解析失败（{type(exc).__name__}）",
+        })
+    raise HTTPException(status_code=424, detail={
+        "code": "CREDENTIAL_NOT_CONFIGURED",
+        "message": f"{_provider_display(provider)} 该仓库未配置任何可用凭据（无 bot，也无归属者/会话用户凭据）",
+    })
 
 
 @router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
@@ -3142,13 +3290,24 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     token/凭据 URL 落日志；现场由 request_id 关联全局 handler 的 500 记录。
     """
     token = _repo_platform_token(owner, repo, user, p)
-    _gh = _clone_host(p)
     _o = _strip_provider_prefix(owner)
+    # 用户名按平台卡 clone_auth 派生、地址同源——过去 username 恒 "x-access-token"，
+    # 与 gitee 卡的 clone_auth=basic_password（真实账号 + 令牌当密码）不符，clone 必被拒。
+    from src.kernel.repo_key import to_repo_key as _to_repo_key
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError, clone_params
+
+    try:
+        _cp = clone_params(_to_repo_key(f"{p}:{_o}/{repo}"))
+    except CloneEndpointError as e:
+        raise HTTPException(status_code=503, detail={
+            "code": "clone_endpoint_unavailable",
+            "message": f"{_provider_display(p)} clone 端点不可派生（平台卡缺 host）: {e}",
+        })
     return {
         "provider": p,
-        "username": "x-access-token",
+        "username": _cp["username"],
         "password": token,
-        "clone_url": f"https://{_gh}/{_o}/{repo}.git",
+        "clone_url": _cp["clone_url"],
         "expires_in": _CREDENTIAL_TTL,
     }
 

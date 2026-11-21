@@ -2118,19 +2118,36 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
 
     # 从 proc_env 补充仓库参数（manager.prepare 没传这些）
     repo_full_name = proc_env.get("REPO_FULL_NAME", "")
-    bot_token = proc_env.get("BOT_GITCODE_TOKEN", "")
+    # bot token 键按平台派生（过去写死 BOT_GITCODE_TOKEN：gitee 仓在沙箱里恒空 → 不 clone）
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
+
+        bot_token = _bot_from_env(proc_env, repo_full_name)
+    except Exception as _bt_err:
+        log.warning(f"{label}bot token env derive failed: {_bt_err}")
+        bot_token = proc_env.get("BOT_GITCODE_TOKEN", "")
     work_branch = proc_env.get("GRAPE_WORK_BRANCH", "")
 
     # 通过通用接口配置仓库（不直接设私有属性，不 isinstance 分叉）
     if repo_full_name and bot_token:
-        # 去掉 repo_key 前缀（gitcode:owner/repo → owner/repo）
-        _repo_name = repo_full_name.split(":", 1)[-1] if ":" in repo_full_name else repo_full_name
-        repo_url = f"https://gitcode.com/{_repo_name}.git"
+        # clone 三要素（地址/鉴权形态/用户名）单点派生：这里过去写死
+        # https://gitcode.com/{repo}.git，gitee/github/gitlab 仓会被当成 gitcode
+        # 仓去 clone，失败与"仓库不存在"不可区分。
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import clone_params
+
+            _cp = clone_params(repo_full_name)
+            repo_url = _cp["clone_url"]
+            _clone_username = _cp["username"]
+        except Exception as e:
+            log.warning(f"{label}clone endpoint resolve failed for {repo_full_name}: {e}")
+            repo_url, _clone_username = "", ""
         try:
             sandbox.configure_repo(
                 repo_url=repo_url,
                 bot_token=bot_token,
                 work_branch=work_branch,
+                username=_clone_username,
             )
         except Exception as e:
             log.warning(f"{label}cloud sandbox repo clone failed: {e}")

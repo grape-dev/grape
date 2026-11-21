@@ -6752,12 +6752,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as _uid_e:
         from src.kernel.config import log as _uid_log
         _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
-    # #2790：与 enqueue 同口径——签发失败/上下文缺失写诊断（agent_tasks.errors）+ 显式日志，
-    # 不再静默降级；钩子自身异常由 safe 封装兜底记 error，不阻断派发。
-    from src.domains.runtime.engine.service import issue_and_inject_session_token_safe
-    issue_and_inject_session_token_safe(
+    # #2790 保留诊断口径；#990 改为复用任务快照（有效即复用、失效才轮换并回写
+    # agent_tasks.env_extra），不再每次派发新签一枚覆盖快照。
+    from src.domains.runtime.engine.service import reuse_or_issue_session_token_safe
+    reuse_or_issue_session_token_safe(
         env_extra, log_scope="Exec agent", session_key=task_id or f"d_{seq}",
-        repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid),
+        repo_key=repo_key, agent_type=agent_type, user_id=_tk_uid,
         task_id=task_id, scope="direct", context_log_level="error")
 
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；

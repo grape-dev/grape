@@ -1076,6 +1076,14 @@ class TokenResolver:
     """
 
     def __init__(self, provider: VCSProvider):
+        """链序固定：仓库 bot → 全局 bot → 用户凭据，path-B 守卫全部保留。
+
+        **不提供 bypass_path_b**（2026-11-21 撤除）：一旦暴露这个参数，调用方很容易
+        对 git-credential 这类路径裸传 True —— 那会把「仓库无 bot、平台有全局 bot」的
+        path-B 私仓推到全局 bot 账号上（通常不是协作者 → push 403），是身份错用。
+        需要「回帖必须来自 bot 账号」语义的调用方，直接用策略级的
+        get_bot_identity_token()（内部 RepoBotToken/GlobalBotToken 自带 bypass）。
+        """
         self.provider = provider
         # 策略链序 = 架构常量（D90-N2② 2026-11-07；D101 方案三 2026-11-08
         # 四改三——第 1 级 DevopsAgentSessionToken 退役：R25.9 回声治理后

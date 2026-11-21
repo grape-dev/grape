@@ -3032,6 +3032,14 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
         "pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')"),
     # meta 写
+    # 单语句 upsert（2026-11-21）：存在性由主键回答，不靠 UPDATE 的 rowcount。
+    # MySQL 的 UPDATE 返回「实际改变的行数」，同值重写 = 0 → 旧的两段式会误判
+    # 「这行不存在」再去 INSERT → 1062 meta.PRIMARY（实测：每次启动刷一条）。
+    # ON CONFLICT(key) 由方言层翻译成 ON DUPLICATE KEY UPDATE（mysql_compat）。
+    # `key` 是 MySQL 保留字，列名必须加反引号（否则 1064 near '`key` UPDATE …'）；
+    # 反引号在 SQLite 侧同样合法，一套 SQL 两边都能跑。
+    "meta_upsert": "INSERT INTO meta (`key`, value) VALUES (?, ?) "
+                   "ON CONFLICT(`key`) DO UPDATE SET value=excluded.value",
     "meta_upsert_update": "UPDATE meta SET value=? WHERE key=?",
     "meta_upsert_insert": "INSERT INTO meta (key, value) VALUES (?, ?)",
     "meta_insert_absent": "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
@@ -4005,11 +4013,14 @@ def get_meta_value_any(key: str) -> str:
 
 
 def set_meta_value_any(key: str, value: str) -> None:
-    """写 meta 配置值（任意拓扑）：UPDATE→INSERT 两段式幂等 upsert。"""
+    """写 meta 配置值（任意拓扑）：**单语句**幂等 upsert。
+
+    存在性只由主键回答，不看 UPDATE 的 rowcount（MySQL 计「实际改变的行」，
+    同值重写返回 0；SQLite 计「匹配行」——同一份两段式实现在 SQLite 上全绿、
+    在 MySQL 上必炸，2026-11-21 每次启动一条 1062 实测为证）。
+    """
     with _any_cursor(write=True) as c:
-        cur = c.execute(_any_sql("meta_upsert_update"), (value, key))
-        if not getattr(cur, "rowcount", 0):
-            c.execute(_any_sql("meta_upsert_insert"), (key, value))
+        c.execute(_any_sql("meta_upsert"), (key, value))
 
 
 def set_meta_if_absent(key: str, value: str) -> bool:

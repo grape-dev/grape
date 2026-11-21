@@ -442,7 +442,9 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("session_api_tokens", """
 CREATE TABLE IF NOT EXISTS session_api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key TEXT NOT NULL,
+    -- 唯一键列用定长类型：MySQL 的 TEXT 不能直接建 UNIQUE（BLOB/TEXT column used
+    -- in key specification without a key length），会话键是 task_id/conv_id，远短于 191。
+    session_key VARCHAR(191) NOT NULL,
     repo_key TEXT NOT NULL DEFAULT '',
     agent_type TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL DEFAULT 0,
@@ -4575,18 +4577,60 @@ def _ensure_migration_session_lock_timeout(seconds: int = 10) -> None:
         log.warning(f"SET SESSION lock_wait_timeout on migration session failed: {e}")
 
 
+_MIGRATION_DOMAINS = ("mgmt", "runtime", "insight")
+
+
+def _process_role() -> str:
+    """进程角色（server / event / worker / insight）。"""
+    for key in ("GRAPE_PROCESS_ROLE", "GRAPE_SERVICE_NAME"):
+        val = (os.environ.get(key) or "").strip().lower()
+        if val:
+            return val
+    return ""
+
+
 def current_migration_domain() -> str:
     """本进程负责的迁移域（只在三库分库模式下返回非空）。
 
-    - `GRAPE_DOMAIN_LIB=1`（三库模式，各域有独立 DSN）且 `GRAPE_MIGRATION_OWNER`
-      有值时才筛域；单库部署（含 sqlite / 单 MySQL 库）返回空串 = 跑全量，
-      行为与历史完全一致。
+    三级判定（2026-11-21 补齐后两级）：
+
+      ① `GRAPE_MIGRATION_OWNER` 显式声明 → 直接用（部署脚本的权威来源）；
+      ② 缺省/非法 → 由本进程库名推断（`grape_lfr_runtime` → runtime）；
+      ③ 仍判不出 → 由进程角色映射（event → runtime / insight → insight / server → mgmt）。
+
+    **为什么必须补 ② ③**：owner 为空时本函数返回空串 = 不筛域，mgmt 进程会以
+    「全量迁移」形态把别域 DDL 建进自己的库，而 event/insight 的域迁移入口会直接
+    return（本域库永远拿不到该有的列和台账表）。实测后果：迁移 202611200006 把
+    `agent_runtimes.desired_plugins` 建进了 `grape_lfr_mgmt`（该表 0 行），而
+    `grape_lfr_runtime` 有 19 行却缺这一列 → 引擎注册连续 500 unknown column。
+    部署脚本漏一个 env 就能造成这种「盖章在错库、列没建」的假绿，必须由代码兜住。
+
+    - 单库部署（`GRAPE_DOMAIN_LIB` 非 1）仍返回空串 = 跑全量，历史行为不变。
     - 返回空串的语义是「不筛」，调用方据此决定是否按 `Migration.domains` 过滤。
     """
     if (os.environ.get("GRAPE_DOMAIN_LIB") or "").strip() not in ("1", "true", "yes"):
         return ""
     dom = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
-    return dom if dom in ("mgmt", "runtime", "insight") else ""
+    if dom in _MIGRATION_DOMAINS:
+        return dom
+    # ② 库名推断（DEVOPS_DB_NAME 优先，其次角色名）
+    try:
+        from src.kernel import db_registry as _dbreg
+
+        inferred = (_dbreg.current_domain() or "").strip().lower()
+        if inferred in _MIGRATION_DOMAINS:
+            return inferred
+    except Exception as e:  # noqa: BLE001 - 推断失败继续走角色映射
+        log.debug(f"current_migration_domain: db_registry 推断失败: {e}")
+    # ③ 角色映射
+    role = _process_role()
+    if role in ("server", "mgmt", "main"):
+        return "mgmt"
+    if role == "event":
+        return "runtime"
+    if role == "insight":
+        return "insight"
+    return ""
 
 
 def filter_migration_registry(registry: Optional[List[Migration]]) -> List["Migration"]:
@@ -4911,6 +4955,15 @@ def _warn_missing_migration_owner_if_multi_db(call_site: str = "pending") -> Non
         return
     if (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip():
         return
+    # 代码已能自行推断域（库名 → 角色）时，这不是错误，只是一条建议：
+    # 否则「env 漏配但实际筛域正确」的进程会一直刷 ERROR，把真问题淹掉
+    # （2026-11-21 实测：推断已把 mgmt 筛成 122→82 条，告警仍在报「不筛域跑全量」）。
+    _resolved = current_migration_domain()
+    if _resolved:
+        log.info(f"[migration-guard] GRAPE_MIGRATION_OWNER 未显式设置，已按本进程推断域="
+                 f"{_resolved}（库名/角色）；建议在启动脚本显式导出 —— "
+                 f"mgmt=mgmt / event=runtime / insight=insight / worker 留空")
+        return
     _roles = {
         (os.environ.get("GRAPE_PROCESS_ROLE") or "").strip().lower(),
         (os.environ.get("GRAPE_SERVICE_NAME") or "").strip().lower(),
@@ -4945,9 +4998,14 @@ def run_domain_migrations() -> None:
     # Issue #3527：此处 owner 为空 → 直接 return，本进程未执行
     # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
     _warn_missing_migration_owner_if_multi_db("domain")
-    domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
+    # worker 与 event 共用 runtime 库，按设计不跑迁移（避免并发重复 DDL）。
+    # 这一跳必须在推断之前：库名推断会把 worker 也判成 runtime。
+    if _process_role() == "worker":
+        log.info("run_domain_migrations: 进程角色=worker，与 event 共库，跳过域迁移")
+        return
+    domain = current_migration_domain()
     if domain not in ("runtime", "insight"):
-        return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
+        return  # mgmt：init_database() 已经跑
     registry = [m for m in _MIGRATIONS if domain in (m.domains or ())]
     if not registry:
         log.info(f"{domain} 域无登记的迁移，跳过")
@@ -11407,4 +11465,109 @@ register_migration(
     kind="safe",
     domains=("mgmt", "runtime"),
     fn=_fn_rename_org_tables_and_uuid_pk,
+)
+
+
+def _fn_session_token_unique_session_key() -> None:
+    """session_api_tokens 列宽对齐（幂等）；**不再**去重、**不再**建唯一索引。
+
+    2026-11-21 我曾在此处把「同 key 可多行」收敛成单行（去重 + 建 uniq_session_key），
+    用来支撑当时的无条件 upsert。那是倒果为因，已撤销：
+
+      · 原设计允许多枚并存 —— 建表只有 id 主键；索引 ix_sat_kind_key(kind, session_key)
+        是非唯一的；session_token_set_expiry / shrink_active / delete_by_session 全是按 key
+        批量操作；读侧只有 by_sha，没有「按 key 取一枚」。
+      · chat 的 conv 级 key 正依赖这一点（同一会话多条消息各持一枚）。
+      · 现在 session_token_insert / rotate 是「裸 INSERT 优先 → 撞唯一键才降级 UPDATE」，
+        无唯一索引的库恢复多行，有索引的库兼容单行。
+
+    本迁移只保留 MySQL 侧 TEXT → VARCHAR(191) 的列宽对齐：部署侧**可能**已手工建了
+    uniq_session_key（实测 grape_lfr_mgmt / grape_arch_upgrade2 有），而 MySQL 不允许在
+    TEXT 上建唯一索引 —— 列宽不改会与该索引形态冲突。
+
+    已经跑过本迁移并且据此建过 uniq_session_key 的部署，保留现状即可（代码把它当「可能
+    存在的物理约束」兼容，不依赖它）。要还原成原设计形态，需人工确认后执行：
+        ALTER TABLE session_api_tokens DROP INDEX uniq_session_key
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+
+    with db_lock:
+        c = db.cursor()
+        if _is_mysql_backend():
+            c.execute("ALTER TABLE session_api_tokens "
+                      "MODIFY session_key VARCHAR(191) NOT NULL")
+        db.commit()
+    log.info("session_api_tokens: session_key 列宽对齐 VARCHAR(191)（不建唯一索引、不去重）")
+
+
+
+register_migration(
+    version="202611210004",
+    name="session-token-key-column-width",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_session_token_unique_session_key,
+)
+
+
+def _fn_table_ownership_copy_audit() -> None:
+    """审计本库里「归别域、却是 BASE TABLE」的表副本（2026-11-21）。
+
+    背景：契约层单点（跨域读只走 owner 域 public），但 DDL 层带历史副本 ——
+    非 owner 库里的同名 BASE TABLE 查起来成功返回 0 行、不报错，会被当成
+    「没配置/数据丢了」（本仓已误判两次）。这里把副本变成可观测。
+
+    默认**只告警不删**：
+      · 非 0 行副本可能是该部署的真源（实测 227：rc 基表在 runtime，清单却声明
+        owner=insight），自动删会直接丢数据；
+      · 0 行副本虽然安全，清理仍是运维动作，不该在启动里静默发生。
+    需要清理时显式开 `GRAPE_TABLE_COPY_CLEANUP=1`，且只删 0 行的那部分。
+    """
+    from src.kernel import table_ownership as _own
+
+    try:
+        row = db.execute("SELECT DATABASE()").fetchone()
+        dbname = str((row[0] if row else "") or "")
+    except Exception as e:  # noqa: BLE001 - 审计失败不阻断启动（本迁移不盖章也无害）
+        log.debug(f"[TABLE_OWNERSHIP_AUDIT] skip: {e}")
+        return
+    dom = _own._domain_from(dbname)
+    if not dom:
+        # 判不出域 = 单库部署 / 库名不含域标识 → 不做跨域副本审计（debug 说明，不让空结果冒充干净）
+        log.debug(f"[TABLE_OWNERSHIP_AUDIT] skip {dbname or '?'}: 判不出域，不做跨域副本审计")
+        return
+    try:
+        items = _own.audit_foreign_copies(db, dbname)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[TABLE_OWNERSHIP_AUDIT] failed on {dbname}: {e}")
+        return
+    if not items:
+        # 与上面的 skip 区分：这里是**审过了且干净**，不是没审
+        log.info(f"[TABLE_OWNERSHIP_AUDIT] {dbname} (owner={dom}): clean")
+        return
+    empty = [i for i in items if i["kind"] == "empty_copy"]
+    diverge = [i for i in items if i["kind"] == "divergent_copy"]
+    log.warning(
+        f"[TABLE_OWNERSHIP_AUDIT] {dbname}: 别域副本 {len(items)} 张 "
+        f"(空 {len(empty)} / 非空 {len(diverge)})；裸 SQL 会读到空表或旧数据且不报错，"
+        f"断言数据面请走 owner 域 public 原语")
+    for i in diverge:
+        log.warning(
+            f"[TABLE_OWNERSHIP_AUDIT] `{i['table']}` owner={i['owner']} 本库 {i['rows']} 行 "
+            f"→ 非空副本，可能该部署真源在此，需人工裁决后再迁，禁止自动删")
+    if os.environ.get("GRAPE_TABLE_COPY_CLEANUP", "").strip().lower() in ("1", "true", "on"):
+        for i in empty:
+            try:
+                _own.drop_empty_copy(db, i["table"])
+                log.warning(f"[TABLE_COPY_CLEANUP] dropped empty copy `{i['table']}` (owner={i['owner']})")
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[TABLE_COPY_CLEANUP] skip `{i['table']}`: {e}")
+
+
+register_migration(
+    version="202611210005",
+    name="table-ownership-copy-audit",
+    kind="safe",
+    domains=("mgmt", "runtime", "insight"),
+    fn=_fn_table_ownership_copy_audit,
 )

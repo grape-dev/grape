@@ -549,7 +549,10 @@ def _backtick_key(sql: str) -> str:
     def _protect(mm):
         placeholders.append(mm.group(0))
         return f"__KWP{len(placeholders) - 1}__"
-    pat = re.compile(r"\b(?:PRIMARY|UNIQUE|FOREIGN|INDEX)\s+KEY\b", re.I)
+    # ON DUPLICATE KEY 是 MySQL 的 upsert 关键字（由 _CONFLICT_UPSERT_RE 翻译产生），
+    # 不能被当成 meta 表的 key 列加反引号 —— 否则得到 `ON DUPLICATE `key` UPDATE` → 1064
+    # （2026-11-21 实测：meta upsert 首次上 MySQL 就炸在这里）。
+    pat = re.compile(r"\b(?:(?:PRIMARY|UNIQUE|FOREIGN|INDEX)\s+KEY|ON\s+DUPLICATE\s+KEY)\b", re.I)
     sql2 = pat.sub(_protect, sql)
     out, in_str, i = [], None, 0
     while i < len(sql2):

@@ -77,11 +77,24 @@ def build_context(task: dict) -> SandboxContext:
         _env_extra = _raw_env
 
     repo_full_name = _env_extra.get("REPO_FULL_NAME") or task.get("repo_key") or ""
-    bot_token = _env_extra.get("BOT_GITCODE_TOKEN") or task.get("repo_gitcode_token") or ""
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
+
+        bot_token = (_bot_from_env(_env_extra, repo_full_name)
+                     or task.get("repo_gitcode_token") or "")
+    except Exception:
+        bot_token = _env_extra.get("BOT_GITCODE_TOKEN") or task.get("repo_gitcode_token") or ""
     work_branch = _env_extra.get("GRAPE_WORK_BRANCH", "")
-    # repo_key 格式：gitcode:owner/repo → owner/repo → URL
-    _repo_name = repo_full_name.split(":", 1)[-1] if ":" in repo_full_name else repo_full_name
-    repo_url = f"https://gitcode.com/{_repo_name}.git" if _repo_name else ""
+    # clone 地址单点派生（平台卡 host）。过去这里写死 gitcode.com，gitee/github/gitlab
+    # 仓会被当成 gitcode 仓去 clone；派生失败留空，由调用方按"无仓库"处理。
+    repo_url = ""
+    if repo_full_name:
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import clone_url as _clone_url
+
+            repo_url = _clone_url(repo_full_name)
+        except Exception as e:
+            log.warning(f"build_context: clone endpoint resolve failed ({repo_full_name}): {e}")
 
     return SandboxContext(
         task_id=task.get("id") or "",

@@ -540,20 +540,48 @@ def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
 def clone_url_for(repo_key: str) -> str:
     """按仓库平台卡解析 host 构造 clone URL（D4/G1 修复）。
 
-    未知 provider（带前缀但无平台卡）fail-fast 抛错——替代旧版静默回退
-    gitcode.com 的错误地址（S7 验收）。无前缀 repo_key 由 parse_repo_key
-    默认 gitcode，行为不变。
-    """
-    from src.kernel.repo_key import parse_repo_key
-    provider, owner, repo = parse_repo_key(repo_key)
-    host = _host_for_provider(provider)
-    return f"https://{host}/{owner}/{repo}.git"
+    实现已收口到 `vcs.clone_endpoint.clone_url`（单一派生点，四处 clone 入口共用）：
+    沙箱 executor / sandbox_context / takeover 原先各自硬编码 `https://gitcode.com/...`，
+    gitee/github/gitlab 仓在那些链路上会被当成 gitcode 仓去 clone。本函数保留原名与
+    异常语义（`PlatformCardMissingError`，带 code=platform_not_registered），因为
+    agent 侧按该类型显式阻断任务——异常类型一变，又会落回"一条 WARNING 就放行"的旧链。
 
-def _basic_auth(token: str, scheme: str = "x_access_token") -> str:
-    user = _AUTH_USER_BY_SCHEME.get(scheme, "x-access-token")
+    未知 provider（带前缀但无平台卡）fail-fast——替代旧版静默回退 gitcode.com 的错误
+    地址（S7 验收）。无前缀 repo_key 由 parse_repo_key 默认 gitcode，行为不变。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError, clone_url
+    from src.domains.runtime.vcs.platform_card import PlatformCardMissingError
+
+    try:
+        return clone_url(repo_key)
+    except CloneEndpointError as e:
+        raise PlatformCardMissingError(e.provider, detail=str(e)) from e
+
+def _basic_auth(token: str, scheme: str = "x_access_token", provider: str = "",
+                repo_key: str = "", username: str = "") -> str:
+    """Basic 凭据（用户名按平台卡 clone_auth 派生，Issue #3632 后继）。
+
+    改前用户名查本模块常量表且 `basic_password` → 空串。真机实测（gitee 私有仓）：
+    `x-access-token:<token>` 与 `:<token>` 均返回 `The token username invalid`，
+    只有"令牌所属账号名:<token>"能过——所以用户名必须按卡派生，且派生要有 repo_key
+    （`basic_password` 的兜底是仓库 owner，缺 repo_key 会退化成空用户名而必然被拒）。
+
+    Args:
+        username: 已派生好的用户名（调用方一次算好、多处复用，避免每处再解析）；
+        repo_key: 未给 username 时的派生输入（owner 兜底需要它）。
+    """
+    user = username or _AUTH_USER_BY_SCHEME.get(scheme, "x-access-token")
+    if provider and not username:
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import clone_username
+
+            user = clone_username(provider, repo_key) or user
+        except Exception as e:  # noqa: BLE001 - 派生失败回落旧表，不阻断 git
+            log.warning(f"repogit clone username derive failed ({provider}): {e}")
     return base64.b64encode(f"{user}:{token}".encode()).decode()
 
-def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_access_token"):
+def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_access_token",
+             provider: str = "", username: str = ""):
     """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。
 
     scheme 由平台卡 clone_auth 决定（gitcode/github=x-access-token 现状，
@@ -561,7 +589,8 @@ def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_a
     """
     cmd = ["git"]
     if token:
-        cmd += ["-c", f"http.extraheader=Authorization: Basic {_basic_auth(token, scheme)}"]
+        cmd += ["-c", f"http.extraheader=Authorization: Basic "
+                       f"{_basic_auth(token, scheme, provider, username=username)}"]
     cmd += args
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -592,7 +621,8 @@ def _is_git_network_error(result) -> bool:
     return bool(_NETWORK_ERR_RE.search(err))
 
 def _run_git_retry(args: list, token: str = "", timeout: int = 900,
-                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token"):
+                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token",
+                   provider: str = "", username: str = ""):
     """执行 git；网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。
 
     - 成功（returncode==0）立即返回；
@@ -602,7 +632,8 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
     delay = base_delay
     last = None
     for attempt in range(retries):
-        last = _run_git(args, token=token, timeout=timeout, scheme=scheme)
+        last = _run_git(args, token=token, timeout=timeout, scheme=scheme,
+                        provider=provider, username=username)
         if last is not None and last.returncode == 0:
             return last
         if not _is_git_network_error(last):
@@ -624,16 +655,42 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     base = repo_base_dir(repo_key)
     url = clone_url_for(repo_key)
     _scheme = _clone_auth_scheme_for(repo_key)
+    # 用户名按平台卡 clone_auth 派生（gitee=真实账号名），与地址同一个派生点
+    from src.kernel.repo_key import parse_repo_key as _parse_rk
+
+    _provider = _parse_rk(repo_key)[0]
+    # 用户名只解析一次（basic_password 需要 repo_key 才能落 owner 兜底；缺它会变空用户名）
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import clone_username_source as _clone_user_for
+
+        _clone_user, _clone_user_src = _clone_user_for(_provider, repo_key)
+        # 来源可观测（2026-11-21）：basic_password 平台只接受**令牌所属账号名**；
+        # owner_fallback 只在「个人仓 owner 恰等于令牌账号」时正确，组织仓/他人仓
+        # 会被上游拒（The token username invalid / 403）。此前只有 clone_endpoint
+        # 内部一条一次性 WARNING，调用侧看不到，排障会误查凭据。
+        if _clone_user_src in ("owner_fallback", "missing"):
+            log.warning(f"repogit clone username source={_clone_user_src} provider={_provider} "
+                        f"repo_key={repo_key} username={_clone_user or '-'} —— "
+                        f"该平台要求令牌账号名，组织仓/他人仓会被上游拒；请在平台卡填 bot_username")
+        else:
+            log.info(f"repogit clone username source={_clone_user_src} provider={_provider}")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"repogit clone username resolve failed ({repo_key}): {e}")
+        _clone_user = ""
     with _repo_lock(base):
         try:
             if not os.path.isdir(base):
                 os.makedirs(os.path.dirname(base), exist_ok=True)
-                r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme)
+                r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme,
+                              provider=_provider, username=_clone_user)
                 if r is None or r.returncode != 0:
                     log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                     return None
-                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme)
-            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme)
+                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme,
+                                provider=_provider, username=_clone_user)
+            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*",
+                                "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme,
+                               provider=_provider, username=_clone_user)
             if r is None or r.returncode != 0:
                 log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
@@ -2001,24 +2058,23 @@ def patrol_workspaces(active_dirs=None, ttl_hours=None, now=None) -> dict:
 from src import config
 
 def _host_for_provider(provider: str) -> str:
-    host = _HOSTS.get(provider)
-    if host:
-        return host
-    try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card(provider)
-    except Exception:
-        card = None
-    if card is not None:
-        return card.host
-    # Issue #3632：抛带 code 的专用异常，别让"平台未注册"落进通用 ValueError
-    # 与"工作区 git 不可写"同一条降级链（后者会静默转只读、任务假完成）。
+    """host 派生：平台卡优先，`_HOSTS` 仅无卡时兜底（D105：卡是唯一真源）。
+
+    改前是 `_HOSTS` 常量优先——卡里配置的内网镜像 / 自建域名会被静默忽略，那个常量
+    本身就是第二真源；现在卡在则用卡，卡缺（数据未就绪）才回落存量常量。
+    仍然抛 `PlatformCardMissingError`（带 code），保持 agent 侧"平台未注册 → 显式阻断"
+    的既有语义，不让它落回通用异常后的一条 WARNING 就放行。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError, clone_host
     from src.domains.runtime.vcs.platform_card import PlatformCardMissingError
-    raise PlatformCardMissingError(
-        provider,
-        detail=("平台卡来源已试：本进程表/主控契约（GET /api/runtime/platform-cards）、"
-                "configs/platforms/*.json、代码内置默认；clone URL 拒绝静默回退（S7 fail-fast）"),
-    )
+
+    try:
+        return clone_host(provider)
+    except CloneEndpointError as e:
+        host = _HOSTS.get(provider)
+        if host:
+            return host
+        raise PlatformCardMissingError(provider, detail=str(e)) from e
 
 def _clone_auth_scheme_for(repo_key: str) -> str:
     """按平台卡取 git 传输鉴权 scheme（D4/G2）。默认 x-access-token（现状）。"""
