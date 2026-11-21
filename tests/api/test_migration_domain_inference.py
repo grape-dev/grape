@@ -4,8 +4,8 @@
 `GRAPE_MIGRATION_OWNER` 时，`current_migration_domain()` 返回空串 = **不筛域**：
 
   · mgmt 进程以「全量迁移」形态把 runtime 域的 DDL 建进自己的库
-    → 迁移 202611200006 把 `agent_runtimes.desired_plugins` 建在 `grape_lfr_mgmt`
-      （那张表 0 行），而 `grape_lfr_runtime` 有 19 行却缺这一列；
+    → 迁移 202611200006 把 `agent_runtimes.desired_plugins` 建在 `app_mgmt`
+      （那张表 0 行），而 `app_runtime` 有 19 行却缺这一列；
   · event/insight 的 `run_domain_migrations()` 看到 owner 为空直接 return
     → 本域库永远拿不到该有的列和台账表（连 `grape_t_schema_migrations` 都没有）。
 
@@ -48,25 +48,25 @@ def _three_db(monkeypatch, *, owner=None, dbname=None, role=None):
 
 def test_s1_explicit_owner_wins(monkeypatch):
     """S1：显式 env 是权威来源，优先于任何推断。"""
-    _three_db(monkeypatch, owner="insight", dbname="grape_lfr_runtime", role="worker")
+    _three_db(monkeypatch, owner="insight", dbname="app_runtime", role="worker")
     assert D.current_migration_domain() == "insight"
 
 
 def test_s2_infer_runtime_from_db_name(monkeypatch):
     """S2：env 缺失 → 库名推断为 runtime（本机 event 进程的真实形态）。"""
-    _three_db(monkeypatch, dbname="grape_lfr_runtime")
+    _three_db(monkeypatch, dbname="app_runtime")
     assert D.current_migration_domain() == "runtime"
 
 
 def test_s3_infer_mgmt_from_db_name(monkeypatch):
     """S3：mgmt 库 → mgmt。这条最关键 —— 它让 mgmt 进程不再跑全量。"""
-    _three_db(monkeypatch, dbname="grape_lfr_mgmt")
+    _three_db(monkeypatch, dbname="app_mgmt")
     assert D.current_migration_domain() == "mgmt"
 
 
 def test_s4_invalid_owner_falls_back_to_inference(monkeypatch):
     """S4：env 是脏值（拼错/空白）→ 回落推断，不得静默变成「不筛域」。"""
-    _three_db(monkeypatch, owner="runtme", dbname="grape_lfr_runtime")
+    _three_db(monkeypatch, owner="runtme", dbname="app_runtime")
     assert D.current_migration_domain() == "runtime"
 
 
@@ -84,7 +84,7 @@ def test_s5_role_mapping_when_db_name_unknown(monkeypatch):
 
 def test_s6_single_db_mode_stays_empty(monkeypatch):
     """S6：单库部署不筛域（历史行为不变），不能因为推断把单库部署切成分域。"""
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_lfr_runtime")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "app_runtime")
     monkeypatch.setenv("GRAPE_PROCESS_ROLE", "event")
     assert D.current_migration_domain() == ""
 
@@ -94,7 +94,7 @@ def test_s7_worker_skips_domain_migrations(monkeypatch):
 
     注意这一跳要在推断之前：库名推断会把 worker 也判成 runtime。
     """
-    _three_db(monkeypatch, dbname="grape_lfr_runtime", role="worker")
+    _three_db(monkeypatch, dbname="app_runtime", role="worker")
     calls: list[str] = []
     monkeypatch.setattr(D, "_ensure_migrations_ledger", lambda db: calls.append("ledger"))
     monkeypatch.setattr(D, "_run_migrations_with_conn",
@@ -114,7 +114,7 @@ def test_s8_inferred_domain_does_not_trigger_error_guard(monkeypatch, caplog):
     """
     import logging
 
-    _three_db(monkeypatch, dbname="grape_lfr_mgmt", role="server")
+    _three_db(monkeypatch, dbname="app_mgmt", role="server")
     monkeypatch.setattr(D, "log", logging.getLogger("test.migration.guard"), raising=False)
     with caplog.at_level(logging.INFO):
         D._warn_missing_migration_owner_if_multi_db("pending")

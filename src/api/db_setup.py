@@ -4595,14 +4595,14 @@ def current_migration_domain() -> str:
     三级判定（2026-11-21 补齐后两级）：
 
       ① `GRAPE_MIGRATION_OWNER` 显式声明 → 直接用（部署脚本的权威来源）；
-      ② 缺省/非法 → 由本进程库名推断（`grape_lfr_runtime` → runtime）；
+      ② 缺省/非法 → 由本进程库名推断（`<db_runtime>` → runtime）；
       ③ 仍判不出 → 由进程角色映射（event → runtime / insight → insight / server → mgmt）。
 
     **为什么必须补 ② ③**：owner 为空时本函数返回空串 = 不筛域，mgmt 进程会以
     「全量迁移」形态把别域 DDL 建进自己的库，而 event/insight 的域迁移入口会直接
     return（本域库永远拿不到该有的列和台账表）。实测后果：迁移 202611200006 把
-    `agent_runtimes.desired_plugins` 建进了 `grape_lfr_mgmt`（该表 0 行），而
-    `grape_lfr_runtime` 有 19 行却缺这一列 → 引擎注册连续 500 unknown column。
+    `agent_runtimes.desired_plugins` 建进了 `<db_mgmt>`（该表 0 行），而
+    `<db_runtime>` 有 19 行却缺这一列 → 引擎注册连续 500 unknown column。
     部署脚本漏一个 env 就能造成这种「盖章在错库、列没建」的假绿，必须由代码兜住。
 
     - 单库部署（`GRAPE_DOMAIN_LIB` 非 1）仍返回空串 = 跑全量，历史行为不变。
@@ -11468,6 +11468,23 @@ register_migration(
 )
 
 
+def _audit_ops_event(event_type: str, detail: dict) -> None:
+    """运维类 DDL 的审计留痕（QA C3，2026-11-21）。
+
+    为什么需要：`GRAPE_TABLE_COPY_CLEANUP=1` 会在启动期 DROP 副本表，列宽 MODIFY
+    也是破坏性 DDL —— 只有一条可能被轮转掉的 warning，事后无法回答「哪次启动、
+    哪个进程、动了哪张表、当时多少行」。审计写 mgmt 审计链（哈希链），detail 只记
+    结构信息（表名/域/行数/库/角色/迁移号），不含任何数据内容。
+
+    审计失败不阻断 DDL：审计面 vs 可用性是两个口径，这里选择可用性优先并留 warning。
+    """
+    try:
+        from src.domains.mgmt.public import log_audit
+        log_audit(event_type, detail=dict(detail or {}))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[audit] {event_type} 写入失败（不影响 DDL）: {e}")
+
+
 def _fn_session_token_unique_session_key() -> None:
     """session_api_tokens 列宽对齐（幂等）；**不再**去重、**不再**建唯一索引。
 
@@ -11482,7 +11499,7 @@ def _fn_session_token_unique_session_key() -> None:
         无唯一索引的库恢复多行，有索引的库兼容单行。
 
     本迁移只保留 MySQL 侧 TEXT → VARCHAR(191) 的列宽对齐：部署侧**可能**已手工建了
-    uniq_session_key（实测 grape_lfr_mgmt / grape_arch_upgrade2 有），而 MySQL 不允许在
+    uniq_session_key（实测 <db_mgmt> / <db_alt> 有），而 MySQL 不允许在
     TEXT 上建唯一索引 —— 列宽不改会与该索引形态冲突。
 
     已经跑过本迁移并且据此建过 uniq_session_key 的部署，保留现状即可（代码把它当「可能
@@ -11491,12 +11508,25 @@ def _fn_session_token_unique_session_key() -> None:
     """
     from src.kernel.session_manager import _is_mysql_backend
 
+    _ddl = "ALTER TABLE session_api_tokens MODIFY session_key VARCHAR(191) NOT NULL"
+    _detail = {
+        "migration": "202611210004",
+        "ddl": _ddl,
+        "db": os.environ.get("DEVOPS_DB_NAME", ""),
+        "role": os.environ.get("GRAPE_PROCESS_ROLE", ""),
+    }
     with db_lock:
         c = db.cursor()
         if _is_mysql_backend():
-            c.execute("ALTER TABLE session_api_tokens "
-                      "MODIFY session_key VARCHAR(191) NOT NULL")
+            # QA C3（2026-11-21）：MODIFY COLUMN 属破坏性 DDL，必须走 _destructive_ddl
+            # （min_code_version 门槛 + MDL 处理）；门槛未过时跳过不盖章，下次启动重试。
+            if not _destructive_ddl(c, _ddl, kind_hint="cleanup", version="202611210004"):
+                db.commit()
+                raise RuntimeError(
+                    "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
+                    "session_key 列宽未对齐，跳过不盖章")
         db.commit()
+    _audit_ops_event("session_token_key_widen", {**_detail, "phase": "after"})
     log.info("session_api_tokens: session_key 列宽对齐 VARCHAR(191)（不建唯一索引、不去重）")
 
 
@@ -11504,7 +11534,7 @@ def _fn_session_token_unique_session_key() -> None:
 register_migration(
     version="202611210004",
     name="session-token-key-column-width",
-    kind="safe",
+    kind="cleanup",  # 含 MODIFY COLUMN：破坏性 DDL，走 min_code_version 门槛
     domains=("mgmt",),
     fn=_fn_session_token_unique_session_key,
 )
@@ -11547,18 +11577,44 @@ def _fn_table_ownership_copy_audit() -> None:
         return
     empty = [i for i in items if i["kind"] == "empty_copy"]
     diverge = [i for i in items if i["kind"] == "divergent_copy"]
+    unknown = [i for i in items if i["kind"] == "unknown_rows"]
     log.warning(
         f"[TABLE_OWNERSHIP_AUDIT] {dbname}: 别域副本 {len(items)} 张 "
-        f"(空 {len(empty)} / 非空 {len(diverge)})；裸 SQL 会读到空表或旧数据且不报错，"
-        f"断言数据面请走 owner 域 public 原语")
+        f"(空 {len(empty)} / 非空 {len(diverge)} / 行数未知 {len(unknown)})；"
+        f"裸 SQL 会读到空表或旧数据且不报错，断言数据面请走 owner 域 public 原语")
     for i in diverge:
         log.warning(
             f"[TABLE_OWNERSHIP_AUDIT] `{i['table']}` owner={i['owner']} 本库 {i['rows']} 行 "
             f"→ 非空副本，可能该部署真源在此，需人工裁决后再迁，禁止自动删")
+    for i in unknown:
+        # 没数过 ≠ 空：不得进入 empty 清理队列（QA B2）
+        log.warning(
+            f"[TABLE_OWNERSHIP_AUDIT] `{i['table']}` owner={i['owner']} 行数未知 "
+            f"→ 不做任何自动处理（先人工确认）")
     if os.environ.get("GRAPE_TABLE_COPY_CLEANUP", "").strip().lower() in ("1", "true", "on"):
+        # QA C3：清理前先过破坏性 DDL 门槛一次。门槛未过 → raise，让本迁移不盖章、
+        # 下次启动重试（不能在 try/except 里吞掉，否则会带着「已清理」的假象盖章）。
+        if not _cleanup_gate_passed():
+            raise RuntimeError(
+                "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
+                "本次不清理副本，跳过不盖章")
         for i in empty:
+            _detail = {
+                "migration": "202611210005",
+                "table": i["table"],
+                "owner": i["owner"],
+                "rows": i["rows"],
+                "db": dbname,
+                "role": os.environ.get("GRAPE_PROCESS_ROLE", ""),
+            }
             try:
-                _own.drop_empty_copy(db, i["table"])
+                # QA C3：DROP 走 _destructive_ddl（门槛 + MDL），前后各留一条审计；
+                # 门槛拦截时 drop_empty_copy 抛错 → 本迁移不盖章、下次启动重试。
+                _audit_ops_event("table_copy_cleanup", {**_detail, "phase": "before"})
+                _own.drop_empty_copy(
+                    db, i["table"],
+                    execute_ddl=lambda ddl: _destructive_ddl(db, ddl, kind_hint="cleanup"))
+                _audit_ops_event("table_copy_cleanup", {**_detail, "phase": "after"})
                 log.warning(f"[TABLE_COPY_CLEANUP] dropped empty copy `{i['table']}` (owner={i['owner']})")
             except Exception as e:  # noqa: BLE001
                 log.warning(f"[TABLE_COPY_CLEANUP] skip `{i['table']}`: {e}")
@@ -11567,7 +11623,7 @@ def _fn_table_ownership_copy_audit() -> None:
 register_migration(
     version="202611210005",
     name="table-ownership-copy-audit",
-    kind="safe",
+    kind="cleanup",  # 显式开启时含 DROP TABLE：破坏性 DDL，走 min_code_version 门槛
     domains=("mgmt", "runtime", "insight"),
     fn=_fn_table_ownership_copy_audit,
 )

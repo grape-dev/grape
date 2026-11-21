@@ -90,8 +90,8 @@ token，绝不制造未落库 token」—— 这条没落地。
 ## 3. 证据（现场实测）
 
 ```
-· 表约束：grape_lfr_mgmt.session_api_tokens 有 uniq_session_key = UNIQUE(session_key)
-          （create_time 2026-11-18 00:21:49；同库 grape_lfr_runtime / grape_dev_mgmt 只有
+· 表约束：<db_mgmt>.session_api_tokens 有 uniq_session_key = UNIQUE(session_key)
+          （create_time 2026-11-18 00:21:49；同库 <db_runtime> / <db_mgmt> 只有
            UNIQUE(token_sha256)，故 1062 只发生在 mgmt 库这张表）
 · DDL：代码里 db_setup.py 的建表语句 session_key TEXT NOT NULL 无 UNIQUE，
        全仓 grep uniq_session_key = 0 命中 → 该索引是部署/迁移侧手工加的
@@ -101,12 +101,12 @@ token，绝不制造未落库 token」—— 这条没落地。
 · 日志：多份日志累计出现 "uniq_session_key" 1062 记录（补丁前；补丁+重启后单文件 0 新增）
 · MySQL 语义实测：`UPDATE ... SET <同值> WHERE session_key=?` → `ROW_COUNT()` = **0**；
   改值 → 1（即 rowcount 判存在性在 MySQL 上不可用）
-· 旧逻辑红证据（真库 grape_lfr_mgmt，临时 key，跑完已清）：
+· 旧逻辑红证据（真库 <db_mgmt>，临时 key，跑完已清）：
     第 1 次 INSERT ok → 同值 UPDATE rowcount=0 → 再 INSERT
     → IntegrityError (1062, "Duplicate entry '…' for key 'session_api_tokens.uniq_session_key'")
 · 部署库形态不一致（同一张表两种形态，这是缺陷能长期潜伏的原因）：
-    grape_lfr_mgmt: session_key = varchar(100) + uniq_session_key(UNIQUE)  + ix_sat_kind_key
-    grape_dev_mgmt: session_key = text        + 只有 UNIQUE(token_sha256)，同 key 已有 1 组重复行
+    <db_mgmt>: session_key = varchar(100) + uniq_session_key(UNIQUE)  + ix_sat_kind_key
+    <db_mgmt>: session_key = text        + 只有 UNIQUE(token_sha256)，同 key 已有 1 组重复行
 ```
 
 ## 4. 修复
@@ -128,8 +128,8 @@ UPDATE session_api_tokens SET repo_key=?, agent_type=?, user_id=?, token_sha256=
 
 - **多枚并存是原设计**：建表只有 id 主键；`ix_sat_kind_key(kind, session_key)` 非唯一；
   `set_expiry` / `shrink_active` / `delete_by_session` 全是按 key 批量操作 —— 无唯一索引的库
-  （如 grape_dev_mgmt）上同 key 两次签发就该是两行；
-- **降级只为兼容既有索引**：部署侧手工建的 `uniq_session_key`（grape_lfr_mgmt，2026-11-18）
+  （如 <db_mgmt>）上同 key 两次签发就该是两行；
+- **降级只为兼容既有索引**：部署侧手工建的 `uniq_session_key`（<db_mgmt>，2026-11-18）
   会让 INSERT 抛唯一键冲突，此时就地覆盖该行，调用方语义不变；
 - **判存在性仍不得用 rowcount**（MySQL 计改变行数=0、SQLite 计匹配行数=1，前者掩盖线上 1062）；
 - **返回契约不变**：落库后 `SELECT id ... WHERE session_key=? AND token_sha256=?`。
@@ -164,7 +164,7 @@ log.error(... "continuing without GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_A
 ### 4.4 部署（已按内网基址修正）
 
 ```
-grape_lfr_runtime.meta.server_base_url: http://<公网 IP>  →  http://<server_ip>
+<db_runtime>.meta.server_base_url: http://<公网 IP>  →  http://<server_ip>
 （内网地址对本机四进程与远端 worker 均可达；webhook 回调走独立键 webhook_url，不受影响）
 ```
 
@@ -209,7 +209,7 @@ reuse_or_issue_session_token_safe(env, *, log_scope, **kw)   # 诊断钩子异�
     上下文缺失 → SESSION_TOKEN_CONTEXT_MISSING
     同步抛错 → SESSION_TOKEN_ISSUE_FAILED（reason 带原始异常）
     safe 封装吞掉钩子异常，不阻断派发
-· 真库实测（grape_lfr_mgmt，临时 key，跑完已清）：
+· 真库实测（<db_mgmt>，临时 key，跑完已清）：
     新实现：同值 insert×2 + rotate×2 → 无异常，行数 1
     旧逻辑：同值 UPDATE rowcount=0 → INSERT → 1062（红证据，说明缺陷真实存在）
 · 现网观察：日志中 "Duplicate entry … uniq_session_key" 计数归零

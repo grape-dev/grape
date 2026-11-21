@@ -406,7 +406,7 @@ credential_id == 0（本机直连）                  → installed && healthy
 
 ```
 错在哪
-  起点是 grape_lfr_mgmt 上有手工 UNIQUE(session_key) → 裸 INSERT 第二次 1062 → 上层吞成
+  起点是 <db_mgmt> 上有手工 UNIQUE(session_key) → 裸 INSERT 第二次 1062 → 上层吞成
   warning → 快照有 token、子进程没有（#990 症状）。当时的修法是改成
   INSERT ... ON CONFLICT(session_key) DO UPDATE，并为了让它在无索引的库上不退化，
   又补了一条迁移：去重 + CREATE UNIQUE INDEX uniq_session_key（同时把 TEXT 改 VARCHAR(191)）。
@@ -418,7 +418,7 @@ credential_id == 0（本机直连）                  → installed && healthy
   原语     session_token_set_expiry / _shrink_active / _delete_by_session 全是
            UPDATE/DELETE ... WHERE session_key=? （批量语义）
   读侧     只有 session_token_by_sha，没有「按 session_key 取一枚」
-  实测     grape_dev_mgmt 至今没有 uniq_session_key；grape_arch_upgrade2 的那个是这条迁移加的
+  实测     <db_mgmt> 至今没有 uniq_session_key；<db_alt> 的那个是这条迁移加的
   文档     session-token-idempotent-issue.md:97 自己写着「全仓 grep uniq_session_key=0 命中
            → 该索引是部署/迁移侧手工加的」
 
@@ -467,8 +467,8 @@ DDL      session_key VARCHAR(191) NOT NULL（原 TEXT：MySQL 不允许 TEXT 上
 迁移     202611210004 session-token-key-column-width（kind=safe, domains=("mgmt",)）
            ① MySQL: MODIFY session_key VARCHAR(191) NOT NULL
            ② 仅此一步 —— 不去重、不建 uniq_session_key（早期版本做过这两步，已撤销）
-为什么   部署侧可能有手工建的 uniq_session_key（实测 grape_lfr_mgmt 建于 2026-11-18、
-         grape_arch_upgrade2），而 MySQL 不允许 TEXT 列建唯一索引 → 列宽必须对齐，
+为什么   部署侧可能有手工建的 uniq_session_key（实测 <db_mgmt> 建于 2026-11-18、
+         <db_alt>），而 MySQL 不允许 TEXT 列建唯一索引 → 列宽必须对齐，
          否则该索引形态与写入路径冲突。但「唯一性」不是本仓的设计主张（见 §9.10.1）。
 ```
 
@@ -504,7 +504,7 @@ tests/runtime/test_session_token_idempotent.py        7 例（含同值重写 ×
                                                              ON CONFLICT→ON DUPLICATE KEY 方言翻译锁）
 tests/runtime/test_session_token_reuse_snapshot.py    5 例（复用不新签 / 空快照不注入 / 上下文缺失 /
                                                              同步异常 / safe 封装）
-真库红绿对照（grape_lfr_mgmt）：旧逻辑同值重写 → 1062；新实现同值 insert×2 + rotate×2 → 1 行
+真库红绿对照（<db_mgmt>）：旧逻辑同值重写 → 1062；新实现同值 insert×2 + rotate×2 → 1 行
 ```
 
 完整记录见 `docs/weekly-11/session-token-idempotent-issue.md`。

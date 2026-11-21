@@ -4655,7 +4655,7 @@ def _is_unique_conflict(exc: BaseException) -> bool:
 
     只在 `session_token_insert` / `session_token_rotate` 的降级路径上用：本仓库**不主张**
     `session_key` 唯一（原设计允许多枚并存），但部署侧可能存在手工建的 `uniq_session_key`
-    （实测 grape_arch_upgrade2 有、grape_dev_mgmt 没有），此时裸 INSERT 会撞键。
+    （实测 <db_alt> 有、<db_mgmt> 没有），此时裸 INSERT 会撞键。
     撞了就就地覆盖那一行；没撞就保留多行 —— 不把某一部署的物理约束写成代码语义。
     """
     if type(exc).__name__ != "IntegrityError":
@@ -4673,9 +4673,9 @@ def session_token_insert(session_key: str, repo_key: str, agent_type: str, user_
     语义：**同一 session_key 允许多枚并存**（原设计 —— 建表只有 id 主键，历史原语
     `session_token_set_expiry` / `session_token_shrink_active` / `session_token_delete_by_session`
     全是按 key 批量操作；索引 `ix_sat_kind_key(kind, session_key)` 也是非唯一的）。
-    所以这里先裸 INSERT：无唯一索引的库（如 grape_dev_mgmt）会得到多行，各枚各自有效。
+    所以这里先裸 INSERT：无唯一索引的库（如 <db_mgmt>）会得到多行，各枚各自有效。
 
-    唯一例外：部署侧可能手工建了 `uniq_session_key`（实测 grape_lfr_mgmt / grape_arch_upgrade2
+    唯一例外：部署侧可能手工建了 `uniq_session_key`（实测 <db_mgmt> / <db_alt>
     有），此时 INSERT 会抛唯一键冲突 —— 就地 UPDATE 该行并返回它的 id，调用方语义不变。
     这是**兼容既有可能存在的物理约束**，不是把单行当成契约。
 

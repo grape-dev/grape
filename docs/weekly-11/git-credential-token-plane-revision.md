@@ -50,7 +50,7 @@ src/kernel/token_resolver.py:941   GlobalBotToken._fetch()
     if self._is_path_b(repo_key) and not self.bypass_path_b:
         return ""
 
-src/domains/mgmt/user/db.py:2279    _repo_bot_token_value()
+src/domains/mgmt/user/db.py:<host_b>9    _repo_bot_token_value()
     # R12.12 同口径：路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
     if str(get_host_user_id(repo_key) or "") not in ("", "0"):
         return ""
@@ -245,7 +245,7 @@ path-B 的任何分支。
             get_repo_credential_meta 自身三态：无行=None / 解不开=undecryptable / 可用=value
 ```
 
-真实库六组合（`grape_lfr_insight@<insight_db_host>`，arch11 `:38080` 进程内 `bind_all()` 后实跑；
+真实库六组合（`<db_insight>@<insight_db_host>`，<host_a> `:38080` 进程内 `bind_all()` 后实跑；
 脚本打印实际连接的 `TABLE_SCHEMA`，因为 mgmt 库里那张同名表是空壳）：
 
 ```
@@ -291,13 +291,13 @@ demo bot_token_status → 复原 ''
 ## 6. 相邻缺陷：表归属副本审计（2026-11-21）
 
 本轮两次把 `grape_t_repo_credentials` 从 **mgmt 库** 查成「0 行」，据此判断「该仓没配 bot」——
-实际数据在 insight 库（`grape_lfr_insight@<insight_db_host>`）。**代码走契约是对的，错的是举证走裸 SQL。**
+实际数据在 insight 库（`<db_insight>@<insight_db_host>`）。**代码走契约是对的，错的是举证走裸 SQL。**
 
 ```
 契约链    mgmt.get_repo_credential_meta → insight.public.repo_credential_meta
           → insight read_one_any('repo_cred_value_id')（连 insight 自己的 DSN）
-裸 SQL    grape_lfr_mgmt.grape_t_repo_credentials   BASE TABLE，0 行（空副本，不报错）
-          grape_lfr_insight.grape_t_repo_credentials 2 行（真数据）
+裸 SQL    <db_mgmt>.grape_t_repo_credentials   BASE TABLE，0 行（空副本，不报错）
+          <db_insight>.grape_t_repo_credentials 2 行（真数据）
 ```
 
 副本是结构性的：单库时代每进程建全表 + `_migration_conn` 目标域 DSN 不可用时回落进程库 +
@@ -315,7 +315,7 @@ src/api/db_setup.py
                                      GRAPE_TABLE_COPY_CLEANUP=1 才清理 0 行副本
 ```
 
-真库结果（`grape_lfr_mgmt`）：别域副本 11 张 —— 10 张 `empty_copy`（含 `grape_t_repo_credentials`、
+真库结果（`<db_mgmt>`）：别域副本 11 张 —— 10 张 `empty_copy`（含 `grape_t_repo_credentials`、
 `agent_runtimes`、`takeover_sessions` 等）+ 1 张 `divergent_copy`（`meta`，4 行，owner=runtime）。
 `meta` 那 4 个键 runtime 里都有且当前值一致，但历史上「往 mgmt 写 meta 不生效」踩过一次 ——
 所以它禁止自动删。迁移盖章 `202611210005 / 2026-11-21 18:46:47`。
@@ -333,7 +333,7 @@ event/insight  run_domain_migrations() 看到 owner 为空 → 直接 return，�
 ```
 
 实测后果：迁移 `202611200006`（`agent_runtimes.desired_plugins`，`domains=("runtime",)`）
-把列建在 `grape_lfr_mgmt`（该表 0 行），而 `grape_lfr_runtime` 有 19 行却缺这一列，
+把列建在 `<db_mgmt>`（该表 0 行），而 `<db_runtime>` 有 19 行却缺这一列，
 连台账表都没有 → 引擎注册连续 `500 (1054, "Unknown column 'desired_plugins'")`。
 mgmt 账本 18:14:27 却盖了章，形成「盖章在错库、列没建」的假绿。
 
@@ -445,7 +445,59 @@ tests/runtime/test_issue_3632_platform_card_contract.py    25 passed
 · 用旧卡兜底的方案（stale-on-error / 磁盘缓存）评估过，收益窄、且会掩盖主控长期故障，暂不做。
 ```
 
-## 10. 未做（需评审）
+## 10. PR #1946 QA 整改（A9 / C3 / B2，2026-11-21）
+
+三处不符合来自架构守护 3.0 第 6 轮审查，逐条落地如下。
+
+### 10.1 A9（BLOCKED，鉴权）：仓库作用域 + chat 不得回落归属者
+
+```
+缺陷 1  git-credential 只校验 auth_type==session_token，没有把路径 {owner}/{repo}
+        与会话 token 的 repo_key 比对 → 持 A 仓 tk_ 的 agent 可以对 B 仓换券。
+        修复  repos.py::_repo_platform_token（:3035-3051）鉴权后立即比对三项：
+                provider：parse_repo_key(user.repo_key)[0] 与请求 provider
+                          （裸键按既有约定默认 gitcode）→ 不一致 403「平台不匹配」
+                owner/repo：先 _strip_provider_prefix 再比 → 不一致 403「仓库作用域不匹配」
+              为什么连 provider 一起比：同名不同平台是两套凭据，`gitcode:o/r` 的会话打
+              `?provider=gitee` 读同名仓曾经能过闸（Issue #466 跨平台换券的残留口子）。
+              跨平台共用需在关联关系上显式登记，不在这里放开。
+              会话无 repo_key 时整段跳过（历史 token 向后兼容）。
+
+缺陷 2  gitee/gitlab 分支的 chat 用户档第二级回落 _owner_user()
+        → 非 owner 的 chat 会话在自己没有凭据时拿到 owner 的 PAT（代签 + 权限放大）。
+        修复  chat_first=True 只取会话用户；取不到走 bot → 424 可判定码，绝不回归属者。
+              devops（非 chat）保持归属者优先，path-B 语义不变。
+```
+
+用例 `tests/api/test_git_credential_authorization.py` 9 条（S1 跨仓 403 / S2 同仓通过 /
+S3 带前缀路径通过 / S4 chat 不回 owner / S5 devops 仍回 owner / S6 无 repo_key 不误拒 /
+S7 跨平台同名 403 / S8 裸键按 gitcode 通过 / S9 裸键不能借其他平台）。
+红相实测：把该文件跑在整改前代码上 → 2 failed（S1、S4），整改后 9 passed。
+
+### 10.2 C3（Critical，审计）：破坏性 DDL 必须有审计且走门槛
+
+```
+DROP     table_ownership.drop_empty_copy 新增 execute_ddl 参数，启动清理把 DROP 交给
+         _destructive_ddl（min_code_version 门槛 + MDL 处理）；门槛未过 → 抛错、不盖章。
+MODIFY   session_key VARCHAR(191) 不再裸发，同样走 _destructive_ddl。
+审计     db_setup._audit_ops_event → mgmt 审计链（哈希链），事件
+         `table_copy_cleanup` / `session_token_key_widen`，detail 记
+         table/owner/rows/db/role/migration/phase（前后各一条），不含任何数据内容。
+登记     两条迁移 kind: safe → cleanup（破坏性 DDL 语义）。
+```
+
+用例：S10 断言 before/after 两条审计与行数；S12 断言门槛拦截时不 DROP；
+S13 断言清理门槛未过时迁移抛错（不盖章）且一张表都不删。
+
+### 10.3 B2（Critical，魔鬼数字）：行数未知要具名、要单独分类
+
+```
+新增 `_ROWS_UNKNOWN = -1`（COUNT 未跑/表名不合法/查询失败），并新增分类
+`unknown_rows`：未知**不得**落 empty_copy，否则启动清理会把没数过的副本当空表删掉。
+`_SAFE_IDENT` 的 64 补来源说明（MySQL 标识符上限）。用例 S11 覆盖。
+```
+
+## 11. 未做（需评审）
 
 ```
 ① 把 db 层 _repo_bot_token_value 的守卫改成"仅当没有任何 bot 凭据时生效"
@@ -459,7 +511,7 @@ tests/runtime/test_issue_3632_platform_card_contract.py    25 passed
 ④ S118 结构守卫改造（按 §3 的新两态写法）
 ```
 
-## 11. 关联
+## 12. 关联
 
 ```
 需求主线   docs/weekly-08/issue-372-user-token-only-requirements.md  R1.x / R2.1 / R2.3

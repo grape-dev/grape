@@ -136,11 +136,11 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
 ## 4. `grape_stage_mgmt` 缺表的处置（2026-11-15 补做）
 
 实测兄弟节点 `:3311` 的 `grape_stage_mgmt`：59 张基表、0 视图；按清单缺 33 张。分类后发现清单
-是从旧三域库 `grape_dev_mgmt`（141 张）派生的，里面混着**本仓没有任何代码引用**的名字。
+是从旧三域库 `<db_mgmt>`（141 张）派生的，里面混着**本仓没有任何代码引用**的名字。
 
 处置（全部用源库 DDL，不手写建表语句）：
 
-- `SHOW CREATE TABLE grape_dev_mgmt.<t>` 取原语句（去 `AUTO_INCREMENT=` 起始值），在
+- `SHOW CREATE TABLE <db_mgmt>.<t>` 取原语句（去 `AUTO_INCREMENT=` 起始值），在
   `grape_stage_mgmt` 里 `CREATE TABLE IF NOT EXISTS`，一次补了 **27 张**：
   `admin_*`（10 张）、`cloud_sandboxes` / `sandbox_*` / `engine_sandbox_*` / `user_vms` /
   `user_vm_repos`、`egress_admin_*`、`task_proxy_tokens`、`repo_platform_tokens`、

@@ -1,6 +1,6 @@
-# 3 库 4 进程部署的环境契约（arch11 现场教训）
+# 3 库 4 进程部署的环境契约（<host_a> 现场教训）
 
-本文记录 2026-11-21 在 `grape-arch11`（本机 `<server_ip>`，公网 `<public_ip>`）
+本文记录 2026-11-21 在 `<host_a>`（本机 `<server_ip>`，公网 `<public_ip>`）
 做会话凭据验证时踩到的 4 个部署侧坑。它们都不在代码里，但每个都能让流水线在
 "代码没问题"的情况下整段失效，因此固化成契约。
 
@@ -10,10 +10,10 @@
 
 ```
 进程        端口    角色     库                          账号
-mgmt       38080   server   <mgmt_db_host> / grape_lfr_mgmt      liufei_dev_mgmt
-event      38081   event    <runtime_db_host> / grape_lfr_runtime  liufei_dev_runtime
-worker     38082   worker   <runtime_db_host> / grape_lfr_runtime  liufei_dev_runtime
-insight    38083   insight  <insight_db_host> / grape_lfr_insight  liufei_dev_insight
+mgmt       38080   server   <mgmt_db_host> / <db_mgmt>      <db_user_mgmt>
+event      38081   event    <runtime_db_host> / <db_runtime>  <db_user_runtime>
+worker     38082   worker   <runtime_db_host> / <db_runtime>  <db_user_runtime>
+insight    38083   insight  <insight_db_host> / <db_insight>  <db_user_insight>
 ```
 
 三库三机、`GRAPE_DOMAIN_LIB=1`，跨域读走 lib 模式；nginx 按路径分流到四进程
@@ -61,8 +61,8 @@ grep -h 'GSB registered' data/logs/{server,event,worker,insight}.log | tail -4
 ## 三、契约 2：正式启动路径是 arch11-3host.sh，不是旁路脚本
 
 ```
-真路径   /home/liufei/bin/arch11-3host.sh start
-         ← 由 liufei 的 crontab 每分钟经 guard-grape-four.sh 调用
+真路径   <home>/bin/arch11-3host.sh start
+         ← 由 <operator> 的 crontab 每分钟经 guard-grape-four.sh 调用
 
 旁路     data/start_rest.sh、data/restart_svc.py、data/restart_mgmt_launcher.py
          ← 早期手工脚本，env 来自 data/env_svc_<port>.json / data/mgmt_env.json
@@ -73,19 +73,19 @@ grep -h 'GSB registered' data/logs/{server,event,worker,insight}.log | tail -4
 1. 改旁路脚本的 env 会在**下一分钟被 guard 用 3host 的硬编码 env 覆盖回去**
    —— 表现为"改完生效、几分钟后又变回去"，很难自证。
 2. `guard-grape-four.sh` 用 `ss -tlnpH` 找监听者的 pid。以 root 跑起来的进程，
-   liufei 身份的 guard **看不到 pid**，会判成"没监听"→ 再拉一轮 → root/liufei
+   <operator> 身份的 guard **看不到 pid**，会判成"没监听"→ 再拉一轮 → root/<operator>
    两份进程抢同一端口，端口看起来 200，实际是错的那份在服务。
 3. `arch11-3host.sh` 的凭据来自 `$HOME/.grape-3host-credentials`。用
-   `sudo -u liufei` 但没带 `-H` 时 `HOME` 仍是 `/root`，凭据读不到 →
+   `sudo -u <operator>` 但没带 `-H` 时 `HOME` 仍是 `/root`，凭据读不到 →
    `GRAPE_DSN_*` 密码为空 → 跨域查询 `(1045, "Access denied ... (using password: NO)")`。
 
 **正确用法**：
 
 ```bash
-sudo -u liufei -H bash /home/liufei/bin/arch11-3host.sh start
+sudo -u <operator> -H bash <home>/bin/arch11-3host.sh start
 # 或彻底干净：
 env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-      HOME=/home/liufei bash /home/liufei/bin/arch11-3host.sh start
+      HOME=<home> bash <home>/bin/arch11-3host.sh start
 ```
 
 启动后必须验三件事，缺一不可：
@@ -106,7 +106,7 @@ tr '\0' '\n' < /proc/<pid>/environ | grep '^GRAPE_DSN_MGMT=' | grep -q ':@' && e
 
 ```
 env_extra 里有 GRAPE_SESSION_TOKEN（46 字符，tk_ 前缀）
-grape_lfr_mgmt.session_api_tokens 里查不到该 session_key 的行
+<db_mgmt>.session_api_tokens 里查不到该 session_key 的行
 ```
 
 **这是正常终态，不是"未落库 token"**。判定方法看任务状态：
@@ -142,15 +142,15 @@ running / queued 的任务               → 行必须存在；不存在才是�
 四进程 → 三库的映射，两套环境不同，务必先确认在跑的是哪套：
 
 ```
-本机 arch11（/home/liufei/grape-arch11，38080-38083）
-  mgmt    38080  grape_lfr_mgmt     <mgmt_db_host>
-  event   38081  grape_lfr_runtime  <runtime_db_host>
-  worker  38082  grape_lfr_runtime  <runtime_db_host>
-  insight 38083  grape_lfr_insight  <insight_db_host>
+本机 <host_a>（<home>/<host_a>，38080-38083）
+  mgmt    38080  <db_mgmt>     <mgmt_db_host>
+  event   38081  <db_runtime>  <runtime_db_host>
+  worker  38082  <db_runtime>  <runtime_db_host>
+  insight 38083  <db_insight>  <insight_db_host>
 
-227 grape-arch4（8081-8084）
+<host_b> <host_b>（8081-8084）
   mgmt 8081 / event 8082 / worker 8083 / insight 8084
-  三库同实例 <mgmt_db_host>：grape_dev_mgmt / grape_dev_runtime / grape_dev_insight
+  三库同实例 <mgmt_db_host>：<db_mgmt> / <db_runtime> / <db_insight>
 ```
 
 **归属以 `configs/table_ownership.json` 为准**（149 张基表 + 131 个视图，随仓维护；
@@ -183,8 +183,8 @@ WHERE TABLE_NAME = 'grape_t_repo_credentials' AND TABLE_SCHEMA LIKE 'grape_%';
 写入：runtime.public.upsert_repo_credential → insight.public.upsert_repo_credential_value
 
 裸 SQL
-  grape_lfr_mgmt.grape_t_repo_credentials     BASE TABLE，0 行   ← 空副本，不报错
-  grape_lfr_insight.grape_t_repo_credentials  2 行              ← 数据在这
+  <db_mgmt>.grape_t_repo_credentials     BASE TABLE，0 行   ← 空副本，不报错
+  <db_insight>.grape_t_repo_credentials  2 行              ← 数据在这
 ```
 
 副本怎么来的（结构性，不是偶发）：
@@ -227,14 +227,14 @@ SELECT TABLE_SCHEMA, TABLE_TYPE FROM information_schema.TABLES
 ```
 规范        insight=BASE(真源)    mgmt=VIEW    runtime=无
 本机实测    insight=BASE(2 行)✔   mgmt=BASE(0 行)✘ 应是视图   runtime=BASE(0 行)✘
-227  实测   insight=VIEW✘         mgmt=VIEW✔                  runtime=BASE✘ 应是 insight
+<host_b>  实测   insight=VIEW✘         mgmt=VIEW✔                  runtime=BASE✘ 应是 insight
 ```
 
 后果（只影响排查，不影响运行）：
 
 ```
 · 本机查 mgmt 得 0 行 → 会误判「该仓没配 bot」（已实际踩过）
-· 227 因视图转发，查任何库都读到 runtime 那份 → 看不出落点错误
+· <host_b> 因视图转发，查任何库都读到 runtime 那份 → 看不出落点错误
 · 同一张表在两套环境物理位置不同，结论不可跨环境套用
 ```
 
@@ -248,7 +248,7 @@ branch_guard_state              runtime   (无 view)
 grape_t_repo_credentials        insight   (view: insight, mgmt)
 ```
 
-待办（需停机窗口，未执行）：227 把 rc 基表迁回 insight；本机 mgmt 那张空基表改成视图。
+待办（需停机窗口，未执行）：<host_b> 把 rc 基表迁回 insight；本机 mgmt 那张空基表改成视图。
 
 ## 七、契约 6：GRAPE_MIGRATION_OWNER 必须按角色设置
 
@@ -270,8 +270,8 @@ owner 为空直接 return，**自己的库永远拿不到该有的列和台账�
 
 ```
 迁移 202611200006（agent_runtimes.desired_plugins，domains=("runtime",)）
-  盖章在 grape_lfr_mgmt 账本 18:14:27，列建在 mgmt.agent_runtimes（那表 0 行）
-  grape_lfr_runtime.agent_runtimes 有 19 行，反而没这一列；连账本表都不存在
+  盖章在 <db_mgmt> 账本 18:14:27，列建在 mgmt.agent_runtimes（那表 0 行）
+  <db_runtime>.agent_runtimes 有 19 行，反而没这一列；连账本表都不存在
   → 引擎注册 /api/runtime/register 连续 500
      (1054, "Unknown column 'desired_plugins' in 'field list'")
 ```
@@ -280,13 +280,13 @@ owner 为空直接 return，**自己的库永远拿不到该有的列和台账�
 
 ```
 ① 补列（该 MySQL 上 TEXT 不能带字面默认值，会报 1101）：
-     ALTER TABLE grape_lfr_runtime.agent_runtimes ADD COLUMN desired_plugins TEXT;
-     UPDATE grape_lfr_runtime.agent_runtimes SET desired_plugins='[]' WHERE desired_plugins IS NULL;
+     ALTER TABLE <db_runtime>.agent_runtimes ADD COLUMN desired_plugins TEXT;
+     UPDATE <db_runtime>.agent_runtimes SET desired_plugins='[]' WHERE desired_plugins IS NULL;
    （mgmt 里那条是迁移用表达式默认值建的，列定义 text/NULL/DEFAULT '[]'，效果等价）
 ② arch11-3host.sh 的 start_one 增加第 9 参数并导出 GRAPE_MIGRATION_OWNER
    （`${mowner:+"GRAPE_MIGRATION_OWNER=$mowner"}`，空则不导出）
 ③ 重启后：runtime/insight 自动建起 grape_t_schema_migrations 并盖章
-     grape_lfr_runtime 42 条 / grape_lfr_insight 2 条
+     <db_runtime> 42 条 / <db_insight> 2 条
      /api/runtime/register 从 500 unknown column → 401 invalid runtime credential
      （401 是缺 token 的正确行为）
    `[migration-guard]` 的 ERROR 告警随之消失
@@ -299,9 +299,9 @@ AND TABLE_NAME='agent_runtimes' AND COLUMN_NAME='desired_plugins'` 在该域库�
 ## 八、回滚清单（本机契约落地后如需退回）
 
 ```
-启动脚本   /home/liufei/bin/arch11-3host.sh.bak-<ts>        ← 去掉 RUNTIME_SERVER_URL 行
+启动脚本   <home>/bin/arch11-3host.sh.bak-<ts>        ← 去掉 RUNTIME_SERVER_URL 行
 旁路 env   data/env_svc_3808{1,2,3}.json、data/mgmt_env.json  ← 去掉 RUNTIME_SERVER_URL 键
-crontab    /home/liufei/crontab.bak-<ts>                     ← guard 行若被改过可整体还原
+crontab    <home>/crontab.bak-<ts>                     ← guard 行若被改过可整体还原
 ```
 
 ## 九、与其他文档的关系

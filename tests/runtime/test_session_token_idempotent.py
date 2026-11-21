@@ -68,7 +68,7 @@ def unique_session_key_index():
 
 @pytest.fixture()
 def no_unique_session_key_index():
-    """原设计形态：库里没有 uniq_session_key（grape_dev_mgmt 就是这样）。"""
+    """原设计形态：库里没有 uniq_session_key（app_mgmt 就是这样）。"""
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE session_key LIKE 'multi:test:%'")
@@ -159,7 +159,7 @@ def test_primitives_insert_first_and_fall_back_on_conflict():
     1) 不得用 UPDATE 的 rowcount 判存在性（MySQL changed rows=0 / SQLite matched rows=1，
        前者会让线上 1062 复现、后者让单测永远绿）；
     2) 必须是「裸 INSERT 优先」—— 原设计允许同一 session_key 多枚并存（无唯一索引的库，
-       如 grape_dev_mgmt），不能再用无条件 upsert 把它抹成单行；
+       如 app_mgmt），不能再用无条件 upsert 把它抹成单行；
     3) 必须带撞唯一键降级路径（部署侧可能已手工建 uniq_session_key）。
     """
     import inspect

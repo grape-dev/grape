@@ -3032,6 +3032,23 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     """
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    # 会话 token 的仓库作用域必须与路径一致（QA A9，2026-11-21）：否则持 A 仓 tk_
+    # 的 agent 可以对 B 仓换券、拿到 B 仓凭据。与 /project-info 同口径
+    # （repos.py::get_repo_project_info），差别只在先剥掉路径 owner 的 provider 前缀。
+    #
+    # provider 也要比（同名不同平台是两套凭据）：`gitcode:o/r` 的会话打
+    # `?provider=gitee` 读同名仓，是「跨平台关联仓换券」的残留口子。仓库前缀就是
+    # 平台标识（parse_repo_key 对裸键默认 gitcode），所以直接比前缀即可；
+    # 真需要跨平台共用，应在关联关系上显式登记，而不是在这里放开。
+    from src.kernel.repo_key import parse_repo_key, split_owner_repo
+    _bound_provider, _bound_owner, _bound_repo = parse_repo_key(user.get("repo_key") or "")
+    if _bound_owner or _bound_repo:
+        if _bound_provider != provider:
+            raise HTTPException(status_code=403, detail={
+                "code": 403,
+                "message": f"无权使用该仓库的 git 凭据（平台不匹配：会话绑定 {_bound_provider}，请求 {provider}）"})
+        if _bound_owner != _strip_provider_prefix(owner) or _bound_repo != repo:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权使用该仓库的 git 凭据（仓库作用域不匹配）"})
     from src.kernel.repo_key import to_repo_key
 
     # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
@@ -3211,16 +3228,18 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         def _user(chat_first: bool = False):
             """用户档组合。
 
-            chat_first=True（chat / Web 会话）：**会话用户优先** —— 聊天里操作仓库的身份
-              必须是发起人，不能替仓库 owner 代签（否则等于权限放大，且审计看着像 owner）。
+            chat_first=True（chat / Web 会话）：**只取会话用户** —— 聊天里操作仓库的
+              身份必须是发起人。此前第二档回落到归属者（`_owner_user`），非 owner 的
+              chat 会话在自己没有凭据时就会拿到 owner 的 PAT，等于代签 + 权限放大
+              （QA A9，2026-11-21）。现在取不到就走外层：bot → 424 可判定码。
             chat_first=False（devops 事件）：归属者优先 —— 路径 B 的原始语义。
             """
-            _first, _second = ((_session_user, _owner_user) if chat_first
-                               else (_owner_user, _session_user))
-            tok, st, ex = _first()
+            if chat_first:
+                return _session_user()
+            tok, st, ex = _owner_user()
             if tok:
                 return tok, st, ex
-            tok2, st2, ex2 = _second()
+            tok2, st2, ex2 = _session_user()
             return tok2, st2, (ex2 or ex)
 
     if user.get("agent_type") == "chat":

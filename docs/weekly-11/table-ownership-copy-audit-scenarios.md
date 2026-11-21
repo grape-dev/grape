@@ -22,9 +22,9 @@
 ```
 owner           configs/table_ownership.json 里声明的归属域（唯一权威副本应在该域库）
 BASE TABLE 副本  非 owner 库里物理存在的同名实表 —— 裸 SQL 能查到，值可能为空或陈旧
-VIEW 副本        非 owner 库里的视图，转发到 owner 表 —— 正确形态（227 那套的 mgmt/insight 就是）
+VIEW 副本        非 owner 库里的视图，转发到 owner 表 —— 正确形态（<host_b> 那套的 mgmt/insight 就是）
 empty_copy       副本 0 行 → 数据在 owner 库，可安全清理
-divergent_copy   副本非 0 行 → 可能该部署真源就在这份里（实测 227：rc 基表在 runtime），
+divergent_copy   副本非 0 行 → 可能该部署真源就在这份里（实测 <host_b>：rc 基表在 runtime），
                  绝不能自动删，必须人工裁决后再迁
 ```
 
@@ -54,9 +54,9 @@ items = audit_foreign_copies(conn, "<库名>")      # 只发现不改；empty_co
 drop_empty_copy(conn, "<表名>")                   # 只删 0 行副本，非 0 行/非法名一律拒绝
 ```
 
-## 4. 真库证据（本机 arch11，2026-11-21 18:46）
+## 4. 真库证据（本机 <host_a>，2026-11-21 18:46）
 
-`grape_lfr_mgmt`（<mgmt_db_host>）的别域副本 —— 11 张：
+`<db_mgmt>`（<mgmt_db_host>）的别域副本 —— 11 张：
 
 ```
 agent_runtimes                    owner=runtime  rows=0    empty_copy
@@ -81,14 +81,14 @@ takeover_sessions                 owner=runtime  rows=0    empty_copy
 启动日志（mgmt 重启后，原句）：
 
 ```json
-{"level":"WARNING","message":"[TABLE_OWNERSHIP_AUDIT] grape_lfr_mgmt: 别域副本 11 张 (空 10 / 非空 1)；裸 SQL 会读到空表或旧数据且不报错，断言数据面请走 owner 域 public 原语"}
+{"level":"WARNING","message":"[TABLE_OWNERSHIP_AUDIT] <db_mgmt>: 别域副本 11 张 (空 10 / 非空 1)；裸 SQL 会读到空表或旧数据且不报错，断言数据面请走 owner 域 public 原语"}
 {"level":"WARNING","message":"[TABLE_OWNERSHIP_AUDIT] `meta` owner=runtime 本库 4 行 → 非空副本，可能该部署真源在此，需人工裁决后再迁，禁止自动删"}
 ```
 
 迁移盖章：
 
 ```
-grape_lfr_mgmt.grape_t_schema_migrations
+<db_mgmt>.grape_t_schema_migrations
 202611210005  table-ownership-copy-audit  2026-11-21 18:46:47
 ```
 
@@ -125,7 +125,7 @@ SELECT TABLE_SCHEMA, LEFT(VIEW_DEFINITION,200) FROM information_schema.VIEWS
 ## 7. 待办（不在本 PR）
 
 ```
-① 227 那套：rc 基表在 runtime（清单声明 insight）→ 先迁后删，需停机窗口
+① <host_b> 那套：rc 基表在 runtime（清单声明 insight）→ 先迁后删，需停机窗口
 ② 本机 mgmt：10 张 0 行副本可开开关清理一次，但 meta 那 4 行必须先确认
    （当前与 runtime 一致，删除前需证明无写入方依赖 mgmt 那份）
 ③ 单库/回落部署（GRAPE_DDL_OWNER_GUARD=0）不适用本审计，勿在那边开清理开关

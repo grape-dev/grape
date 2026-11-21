@@ -5,7 +5,7 @@
 `clone_auth=basic_password`（gitee 等）把「用户名 + 令牌」一起作为 HTTP Basic 发出，
 用户名必须是**令牌所属账号的 login**：写 `x-access-token` / `bot` / 组织名 / grape 账号名
 都会被上游判 `The token username invalid` / 403。实测（2026-11-21，gitee 私有仓）：
-同一枚有效令牌，卡上填 `grape_dev_yangaiwu` → 403，填令牌真实 login → `git ls-remote` rc=0。
+同一枚有效令牌，卡上填 `<account>` → 403，填令牌真实 login → `git ls-remote` rc=0。
 
 平台卡上那个 `bot_username` 字段因此是个「必须与令牌一致」的约束，靠人保证必然出错
 （令牌换了、账号换了、复制粘贴错一位）。这里把约束变成派生：**拿着令牌问平台“我是谁”**，

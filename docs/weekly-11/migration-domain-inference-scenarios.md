@@ -8,8 +8,8 @@
 四进程 env 只有 `GRAPE_DOMAIN_LIB=1`、没有 `GRAPE_MIGRATION_OWNER`：
 
 ```
-grape_lfr_mgmt.agent_runtimes      desired_plugins=有   行数=0     账本=有   202611200006 盖章 18:14:27
-grape_lfr_runtime.agent_runtimes   desired_plugins=缺   行数=19    账本=无   未盖章
+<db_mgmt>.agent_runtimes      desired_plugins=有   行数=0     账本=有   202611200006 盖章 18:14:27
+<db_runtime>.agent_runtimes   desired_plugins=缺   行数=19    账本=无   未盖章
 ```
 
 后果：
@@ -51,8 +51,8 @@ event/insight  run_domain_migrations() 看到 owner 为空 → 直接 return
 | 编号 | 场景 | 期望 | 用例 |
 |---|---|---|---|
 | S1 | 显式 `GRAPE_MIGRATION_OWNER=insight`（同时库名是 runtime、角色是 worker） | `insight`（env 权威） | `test_s1_explicit_owner_wins` |
-| S2 | env 缺失 + `DEVOPS_DB_NAME=grape_lfr_runtime` | `runtime` | `test_s2_infer_runtime_from_db_name` |
-| S3 | env 缺失 + `DEVOPS_DB_NAME=grape_lfr_mgmt` | `mgmt` | `test_s3_infer_mgmt_from_db_name` |
+| S2 | env 缺失 + `DEVOPS_DB_NAME=<db_runtime>` | `runtime` | `test_s2_infer_runtime_from_db_name` |
+| S3 | env 缺失 + `DEVOPS_DB_NAME=<db_mgmt>` | `mgmt` | `test_s3_infer_mgmt_from_db_name` |
 | S4 | env 是脏值 `runtme` | 回落推断 → `runtime`（不静默变「不筛域」） | `test_s4_invalid_owner_falls_back_to_inference` |
 | S5 | 库名判不出域 + 角色 event/insight/server | `runtime` / `insight` / `mgmt` | `test_s5_role_mapping_when_db_name_unknown` |
 | S6 | 单库模式（无 `GRAPE_DOMAIN_LIB=1`） | `""`（跑全量，历史行为） | `test_s6_single_db_mode_stays_empty` |
@@ -65,7 +65,7 @@ event/insight  run_domain_migrations() 看到 owner 为空 → 直接 return
 ```
 部署侧（已完成）
   arch11-3host.sh 加第 9 参数 mowner，server=mgmt / event=runtime / worker=空 / insight=insight
-  重启后 runtime/insight 自动建账本：grape_lfr_runtime 42 条，grape_lfr_insight 2 条
+  重启后 runtime/insight 自动建账本：<db_runtime> 42 条，<db_insight> 2 条
   /api/runtime/register：500 unknown column → 401 invalid runtime credential（缺 token，正确）
   [migration-guard] 的 ERROR 告警消失
 

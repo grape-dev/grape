@@ -6,7 +6,7 @@
 - **未知表放行**：清单里没有的表不拦（兼容新增表；随后由清单刷新纳入）
 - **可关闭**：`GRAPE_DDL_OWNER_GUARD=0` 时完全透传（应急/单机调试）
 - **只读语义**：本模块只做判定，不执行任何 DDL
-- 域判定：优先 `DEVOPS_DB_NAME`（grape_dev_mgmt → mgmt），否则 `GRAPE_PROCESS_ROLE`
+- 域判定：优先 `DEVOPS_DB_NAME`（<db_mgmt> → mgmt），否则 `GRAPE_PROCESS_ROLE`
 """
 from __future__ import annotations
 
@@ -63,8 +63,6 @@ def _domain_from(name: str) -> str | None:
         return None
     if low.startswith("grape_") and low.endswith("_db"):
         low = low[len("grape_"):-len("_db")]
-    if low.startswith("grape_dev_"):
-        low = low[len("grape_dev_"):]
     for dom in _VALID_DOMAINS:
         if low == dom or low.endswith("_" + dom) or low.startswith(dom + "_"):
             return dom
@@ -138,18 +136,26 @@ def reload_manifest() -> None:
 #
 # 这两个原语只做「发现 + 安全清理」，不改变任何读路径。
 
+#: 表名白名单：MySQL 标识符上限 64 字符（`docs: identifier length limit`），
+#: 只允许字母数字下划线 —— 表名虽来自 information_schema，仍按不可信输入校验。
 _SAFE_IDENT = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+#: 行数未知的哨兵（COUNT 未跑：count_rows=False / 表名不合法 / 查询失败）。
+#: 显式具名而不是裸 -1：调用方必须把「未知」与「非空」分开处理 —— 未知不得落
+#: empty_copy（否则启动清理会把没数过的副本当空表删掉，可能丢数据）。
+_ROWS_UNKNOWN = -1
 
 
 def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True) -> list[dict]:
     """列出本库里「归别域、但物理上是 BASE TABLE」的副本，并分类。
 
     - `empty_copy`     副本 0 行 → 数据在 owner 库，可安全清理（`drop_empty_copy`）
-    - `divergent_copy`  副本非 0 行 → 可能这个部署的真源就在这（实测 227：rc 基表在
-                        runtime 而清单声明 owner=insight），**绝不自动删除**，必须人工裁决
+    - `divergent_copy` 副本非 0 行 → 可能这个部署的真源就在这（实测：某部署的 rc
+                       基表在 runtime 而清单声明 owner=insight），**绝不自动删除**，必须人工裁决
+    - `unknown_rows`   行数没数出来（`count_rows=False` / 表名不合法 / COUNT 失败）→
+                       同样不得自动删除：没数过不等于空
 
-    视图形态（227 的 mgmt/insight 里的 rc）不会出现在结果里 —— 视图转发读到的就是
-    owner 数据，属正确形态。
+    视图形态不会出现在结果里 —— 视图转发读到的就是 owner 数据，属正确形态。
     """
     dom = _domain_from(dbname)
     if not dom:
@@ -171,26 +177,36 @@ def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True) -> list[
         owner = owner_of(table)
         if not owner or owner == dom:
             continue
-        n = -1
+        n = _ROWS_UNKNOWN
         if count_rows and _SAFE_IDENT.match(table):
             try:
                 n = int(conn.execute(f"SELECT COUNT(*) FROM `{table}`").fetchone()[0] or 0)
             except Exception:  # noqa: BLE001
-                n = -1
-        out.append({"table": table, "owner": owner, "rows": n,
-                    "kind": "empty_copy" if n == 0 else "divergent_copy"})
+                n = _ROWS_UNKNOWN
+        kind = ("empty_copy" if n == 0
+                else "unknown_rows" if n == _ROWS_UNKNOWN
+                else "divergent_copy")
+        out.append({"table": table, "owner": owner, "rows": n, "kind": kind})
     return out
 
 
-def drop_empty_copy(conn, table: str) -> bool:
+def drop_empty_copy(conn, table: str, *, execute_ddl=None) -> bool:
     """删除一张 **0 行** 的别域副本；非 0 行一律拒绝（数据可能只在这份里）。
 
     表名来自 information_schema，但仍做标识符白名单校验（防注入/异常名）。
+
+    `execute_ddl`（可选）：把 DROP 交给调用方的统一危险 DDL 入口（过 min_code_version
+    门槛 + MDL 处理）。返回 False 表示被门槛拦截 —— 此时抛错，让迁移不盖章、下次重试
+    （QA C3：启动清理不能绕过 `_destructive_ddl` 直接发 DROP）。
     """
     if not _SAFE_IDENT.match(table or ""):
         raise ValueError(f"unsafe table name: {table!r}")
     row = conn.execute(f"SELECT COUNT(*) FROM `{table}`").fetchone()
     if int((row or [0])[0] or 0) != 0:
         raise RuntimeError(f"refuse to drop non-empty copy `{table}`")
-    conn.execute(f"DROP TABLE `{table}`")
+    _ddl = f"DROP TABLE `{table}`"
+    if execute_ddl is None:
+        conn.execute(_ddl)
+    elif execute_ddl(_ddl) is False:
+        raise RuntimeError(f"cleanup gate 拦截 DROP（未盖章，下次重试）: {_ddl}")
     return True
