@@ -9,5 +9,5 @@
 - [x] T7 `list_skills` 去裸 except：`log.exception` + 503
 - [x] T8 `SkillsView.loadCategories()` 缓存失效 + 前端缓存版本 bump
 - [x] T9 回归：迁移守护 / 域归属 / 分类标签 / 新增守护测试
-- [ ] T10 自审查 + 开源前置增量检查
-- [ ] T11 提交 / push / 创建 PR / Issue 评论 / A2A QA
+- [x] T10 自审查 + 开源前置增量检查
+- [x] T11 提交 / push / 创建 PR #1938 / Issue 评论 / A2A QA（seq=91449）

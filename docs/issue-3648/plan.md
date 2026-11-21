@@ -58,7 +58,8 @@
 5. post_check 失败不盖章；
 6. mgmt / runtime 后置校验行为；
 7. `list_skills` schema 异常 503 + ERROR；
-8. SkillsView 不再会话级缓存。
+8. SkillsView 不再会话级缓存；
+9. 启动期 `verify_migration_targets` 拦截缺列 / 活跃一级≠3。
 
 回归：`test_issue_536_migrations`、`test_category_columns_repair`、
 `test_migration_track_guard`、域归属守卫、`test_issue2761_classification_tags`。
