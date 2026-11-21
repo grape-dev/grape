@@ -555,7 +555,10 @@ def clone_url_for(repo_key: str) -> str:
     try:
         return clone_url(repo_key)
     except CloneEndpointError as e:
-        raise PlatformCardMissingError(e.provider, detail=str(e)) from e
+        # 透传 code：取卡通道不可用（platform_card_contract_unavailable）与
+        # 平台未注册（platform_not_registered）在任务侧要能分开处置。
+        raise PlatformCardMissingError(e.provider, detail=str(e),
+                                       code=getattr(e, "code", "") or None) from e
 
 def _basic_auth(token: str, scheme: str = "x_access_token", provider: str = "",
                 repo_key: str = "", username: str = "") -> str:

@@ -144,7 +144,11 @@ class PlatformCardMissingError(ValueError):
 
     code = "platform_not_registered"
 
-    def __init__(self, provider: str, detail: str = ""):
+    def __init__(self, provider: str, detail: str = "", code: str | None = None):
+        # code 可覆盖类属性：取卡通道不可用时传 platform_card_contract_unavailable，
+        # 让上游按「修链路」而不是「配卡」分流（2026-11-21）。
+        if code:
+            self.code = code
         self.provider = provider
         base = (f"{provider!r} 未注册为仓库平台（no platform card）："
                 f"表/契约、configs/platforms 文件、代码内置默认三处都没有该平台")
@@ -532,6 +536,10 @@ _CACHE: dict[str, PlatformCard] = {}
 _cache_lock = threading.Lock()
 _cache_ts: float = 0.0
 _CACHE_TTL = 300.0
+#: 最近一次装配是否降级（"" = 正常）。取值见 card_sources 的 degraded：
+#: "contract_unavailable" / "contract_error" / "contract_empty"。
+#: 与卡缓存同生命周期（_load_cards 每次重建都会覆盖），读它的人就是读卡的人。
+_degraded_reason: str = ""
 _loaded = False
 
 
@@ -675,7 +683,13 @@ def _build_cards() -> "dict[str, PlatformCard]":
         table_source=_table_source(),
         server_source=ServerContractCardSource(),
     )
-    return assembler.build(builder=build_platform_card, error_type=PlatformCardError)
+    global _degraded_reason
+    cards = assembler.build(builder=build_platform_card, error_type=PlatformCardError)
+    _degraded_reason = assembler.last_degraded
+    if _degraded_reason:
+        log.warning(f"platform_card: 装配降级 reason={_degraded_reason}"
+                    "（取卡通道异常时不会退化成「平台未注册」）")
+    return cards
 
 
 def _load_cards() -> None:
@@ -699,6 +713,16 @@ def invalidate_platform_card_cache() -> None:
     with _cache_lock:
         _loaded = False
     log.info("platform card cache invalidated")
+
+
+def platform_card_degraded_reason() -> str:
+    """最近一次装配的降级原因（"" = 正常）。
+
+    clone 端在 `get_platform_card()` 返回 None 时用它区分两类故障：
+      · 非空（contract_unavailable / contract_error）→ 取卡通道坏了，修链路；
+      · 空 → 真的没有这张卡，去配卡。
+    """
+    return _degraded_reason
 
 
 def get_platform_card(provider: str) -> "PlatformCard | None":

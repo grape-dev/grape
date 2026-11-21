@@ -72,14 +72,32 @@ def _card(provider: str):
 
 
 def clone_host(provider: str) -> str:
-    """平台卡 host（clone / web 域名）。无卡或 host 为空 → fail-fast，不猜域名。"""
+    """平台卡 host（clone / web 域名）。无卡或 host 为空 → fail-fast，不猜域名。
+
+    两类"没有卡"必须给出不同 code（2026-11-21）：
+      · `platform_card_contract_unavailable` —— 取卡通道坏了（主控读表失败 /
+        401 / 超时 / 网络不通）：修链路；
+      · `platform_not_registered` —— 三处来源确实都没有这张卡：去配卡。
+    此前两种情况都表现为"平台未注册"，把系统性故障伪装成配置缺失。
+    """
     card = _card(provider)
     host = ((getattr(card, "host", "") or "") if card is not None else "").strip()
     if not host:
-        raise CloneEndpointError(
-            provider,
-            "平台卡未在册或未声明 host（表/契约、configs/platforms/*.json、代码内置默认三处都没有该平台）",
-        )
+        _code = "platform_not_registered"
+        _detail = ("平台卡未在册或未声明 host"
+                   "（表/契约、configs/platforms/*.json、代码内置默认三处都没有该平台）")
+        if card is None:
+            from src.domains.runtime.vcs.platform_card import (
+                platform_card_degraded_reason,
+            )
+            _deg = platform_card_degraded_reason()
+            # contract_empty（表里 0 行 enabled）属配置问题，仍归「未注册」
+            if _deg and _deg != "contract_empty":
+                _code = "platform_card_contract_unavailable"
+                _detail = (f"取卡通道不可用（{_deg}）：请检查 RUNTIME_SERVER_URL / "
+                           f"RUNTIME_TOKEN 是否可达有效、主控能否读 mgmt 平台卡表 —— "
+                           f"这不是「平台未注册」，不要先去改配置")
+        raise CloneEndpointError(provider, _detail, code=_code)
     return host
 
 

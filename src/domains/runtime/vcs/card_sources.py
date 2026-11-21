@@ -37,6 +37,7 @@ from src.kernel.config import log
 from src.domains.runtime.vcs.card_contract import (
     PlatformCardContractClient,
     PlatformCardContractError,
+    PlatformCardUnavailableError,
 )
 
 
@@ -225,17 +226,32 @@ class ServerContractCardSource(PlatformCardSource):
 
     def __init__(self, client: PlatformCardContractClient | None = None):
         self._client = client or PlatformCardContractClient()
+        #: 本次 raws() 的降级原因（"" = 正常）。装配层据此把「取卡通道坏了」
+        #: 从「平台未注册」里分出来（见 card_contract.PlatformCardUnavailableError）。
+        self.degraded = ""
 
     def raws(self) -> "dict[str, dict]":
+        self.degraded = ""
         if not self._client.configured():
-            # 非 worker 进程（无 RUNTIME_TOKEN）：正常路径，不打日志
+            # 非 worker 进程（无 RUNTIME_TOKEN）：正常路径，不打日志，也不算降级
             return {}
         try:
-            return self._client.fetch_cards()
+            cards = self._client.fetch_cards()
+        except PlatformCardUnavailableError as e:
+            self.degraded = "contract_unavailable"
+            log.warning(f"platform_card: 服务端平台卡契约**通道不可用**（{e}）"
+                        "——回落文件卡/代码默认；任务侧会看到 code="
+                        "platform_card_contract_unavailable（不是「平台未注册」）")
+            return {}
         except PlatformCardContractError as e:
+            self.degraded = "contract_error"
             log.warning(f"platform_card: 服务端平台卡契约取卡失败（{e}）"
                         "——回落文件卡/代码默认")
             return {}
+        if not cards:
+            # 服务端确实没返回任何卡（表里 0 行 enabled）：属配置问题，不算通道故障
+            self.degraded = "contract_empty"
+        return cards
 
 
 class PlatformCardAssembler:
@@ -257,6 +273,9 @@ class PlatformCardAssembler:
                  file_source: FileDirCardSource,
                  builtin: BuiltinCardSource,
                  fallback_sources: "Iterable[PlatformCardSource]"):
+        #: 本次装配的降级原因（"" = 所有来源都正常）。门面把它挂到卡缓存上，
+        #: clone 端据此区分「取卡通道坏了」与「平台未注册」。
+        self.last_degraded = ""
         self.meta = meta
         self.file_source = file_source
         self.builtin = builtin
@@ -279,8 +298,12 @@ class PlatformCardAssembler:
             base[provider] = merged
 
         # 表 / 契约：整卡覆盖已合并结果，文件独有平台仍保留（防表缺行致平台消失）
+        self.last_degraded = ""
         for source in self.fallback_sources:
             raws = source.raws()
+            _deg = str(getattr(source, "degraded", "") or "")
+            if _deg and _deg != "contract_empty" and not self.last_degraded:
+                self.last_degraded = _deg
             if not raws:
                 continue
             for provider, raw in raws.items():
