@@ -55,6 +55,6 @@
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 只替换双花括号，漏单花括号变体 | 中 | 正则 `/\{\{?\s*name\s*\}?/g` 兼容两种写法 |
-| 长名在 AGModal 标题溢出 | 低 | `:deep(.a-modal__title)` + `overflow-wrap/word-break` |
+| 长名在 AGModal 标题溢出 | 低 | 标题样式 `overflow-wrap/word-break` 落在 AGModal 自身（Teleport 根节点不继承调用方 scopeId，`:deep` 不生效） |
 | 误改历史扁平键或其它弹窗 | 低 | 只新增降级键、只改删除弹窗 |
 | 老客户端缓存住旧语言包 | 中 | 四页 cacheVer 联动 bump + 指纹更新 |

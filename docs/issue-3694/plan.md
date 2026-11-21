@@ -29,15 +29,16 @@
 3. **模板去重**：`:title="deleteTitle"`；正文删除重复 `<h3>`，仅保留 `.sk__conf-ic`（🗑 图标位）
    + `delete_skill_tip`。`sk__conf h3` 样式保留（转换弹窗仍用）。
 
-4. **长名样式**：scoped 样式内新增
+4. **长名样式**：放在 `AGModal.vue` 自身的 `.a-modal__title`
    ```css
-   /* #3694: AGModal 标题节点属于子组件，需 :deep 才能命中 */
-   :deep(.a-modal__title) {
-     overflow-wrap: anywhere;
-     word-break: break-word;
-   }
+   overflow-wrap: anywhere;
+   word-break: break-word;
    ```
-   弹窗宽度仍由 `AGModal` 的 `max-width: min(92vw, 520px)` 约束，长名在标题内换行而非撑破。
+   **实施偏差（已实测）**：Spec 原计划在 `SkillsView.vue` 写 `:deep(.a-modal__title)`。该组件根节点是
+   `Teleport to="body"`，Vue 只把父组件 scopeId 传给「子组件根元素」，Teleport 的根节点不参与这次传递
+   （jsdom + 同版本 runtime 复现：弹窗标题节点仅有 AGModal 的 `data-v-*`，无 SkillsView 的），
+   编译结果 `[data-v-skills] .a-modal__title` 永远命中不了（构建产物 `[data-v-e59b57d8] .a-modal__title` 可验证）。
+   因此把换行规则放回 AGModal 自身样式：只影响标题排版，对其它弹窗是防御性增强，无行为变更。
 
 5. **i18n**：`zh/en skills.json` 的 `confirm` 对象新增 `delete_skill_fallback`
    （zh `该技能` / en `this skill`）；保留 `confirm.delete_skill` 的成对 `{{name}}`
