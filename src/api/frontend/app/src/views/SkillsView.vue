@@ -824,14 +824,9 @@
     </AGModal>
 
     <!-- ═══ 删除确认弹窗 ═══ -->
-    <AGModal
-      :open="deleteCtx.open"
-      :title="tc2('skills.confirm.delete_skill')"
-      @close="deleteCtx.open = false"
-    >
+    <AGModal :open="deleteCtx.open" :title="deleteTitle" @close="deleteCtx.open = false">
       <div class="sk__conf">
         <div class="sk__conf-ic">🗑</div>
-        <h3>{{ tc2('skills.confirm.delete_skill') }}</h3>
         <div class="sk__conf-desc">{{ tt('delete_skill_tip') }}</div>
       </div>
       <template #footer>
@@ -1013,6 +1008,8 @@ const KEY2_DEFAULTS = {
   'upload.file_label': '技能 ZIP 包',
   'upload.format_req': 'ZIP 内含 SKILL.md',
   'upload.uploading': '上传中',
+  // Issue #3694：删除确认弹窗空名降级（i18n 缺包时中文兜底）
+  'confirm.delete_skill_fallback': '该技能',
   // Issue #561：覆盖更新
   'action.update_skill': '上传更新',
   'action.edit_meta': '编辑信息',
@@ -2494,6 +2491,16 @@ function doEditMeta() {
 
 // ── 删除 ──
 const deleteCtx = reactive({ open: false, skill: null, busy: false })
+// #3694：标题/正文直出未插值模板（{{name}}）的修复。
+// 展示名取当前被删对象（display_name 优先），空名降级为「该技能 / this skill」。
+const deleteSkillName = computed(function () {
+  var n = (titleOf(deleteCtx.skill) || '').trim()
+  return n || tt2('confirm.delete_skill_fallback')
+})
+// 只替换 name 占位符（兼容 {{name}} 与历史扁平键的 {name}），不改 I18N 全局语义。
+const deleteTitle = computed(function () {
+  return tc2('skills.confirm.delete_skill').replace(/\{\{?\s*name\s*\}?\}/g, deleteSkillName.value)
+})
 function askDelete(s) {
   deleteCtx.skill = s
   deleteCtx.busy = false

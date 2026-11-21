@@ -57,6 +57,11 @@ defineEmits(['close'])
   font-weight: 600;
   margin-bottom: var(--s-3);
   flex-shrink: 0;
+  /* #3694：标题可能带入超长名称，需在标题行内换行而非撑破弹窗。
+     放在组件自身样式里——Teleport 到 body 的根节点不继承调用方 scopeId，
+     调用方的 :deep(.a-modal__title) 选择器命中不了。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .a-modal__body {
   font-size: var(--f-body);
