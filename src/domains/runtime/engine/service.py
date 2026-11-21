@@ -3812,6 +3812,23 @@ def _run_aggregate_recheck(task: dict, transition: dict, scene_id: str,
                     f"round={round_no}: {e}")
 
 
+def _node_declares_auto_advance(node: dict) -> bool:
+    """场景节点是否显式开启「完成即自动推进下一棒」（Issue #3688）。
+
+    仅为 ``auto_advance`` 为真值的节点启用 #2118 的兜底派发；缺省即关闭，
+    回到「技能自行 grape a2a handoff」的旧语义。接受布尔与字符串写法，
+    便于场景编辑页/接口以 ``true`` / ``"true"`` / ``1`` 任一形态配置。
+    """
+    if not isinstance(node, dict):
+        return False
+    raw = node.get("auto_advance")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _auto_advance_after_complete(task: dict, output: dict | None = None,
                                  result_text: str = "") -> dict:
     """Issue #2118：按场景 next/handoff 自动推进已完成节点。
@@ -3878,6 +3895,17 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
         if str((_transition.get("node") or {}).get("id") or "") == "org_dispatch":
             return {"action": "wait_for_dispatch", "node": "org_dispatch",
                     "scene_id": _scene_id}
+        # Issue #3688：自动推进兜底必须由场景节点显式声明 auto_advance=true 才启用。
+        # #2118 引入的兜底原本用于组织链条（技能未显式 handoff 时防卡死），但它对所有
+        # 场景节点无差别生效：交付类节点（如 sre）会在 PR 尚未合入时被提前派发，
+        # 表现为「qa 一完成 sre 就开跑」，且派发侧拿不到 PR 号无法自行判断合并状态。
+        # 未声明的节点回到旧语义——仍由技能自行 `grape a2a handoff` 推进。
+        if not _node_declares_auto_advance(_transition.get("node") or {}):
+            log.info(f"auto-advance: skip issue={issue_id} agent={agent_type} "
+                     f"(node does not declare auto_advance)")
+            return {"action": "none", "reason": "auto_advance_not_declared",
+                    "scene_id": _scene_id,
+                    "node": str((_transition.get("node") or {}).get("id") or "")}
         if _transition.get("handoff") != "a2a":
             return {"action": "none", "reason": "handoff_not_a2a",
                     "handoff": _transition.get("handoff") or ""}

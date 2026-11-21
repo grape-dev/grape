@@ -794,6 +794,7 @@ ORG_SCENE_NODES = [
         "handoff": "a2a",
         "skip": [],
         "enabled": True,
+        "auto_advance": True,
         "engine_runtime_ids": [],
     },
     {
@@ -806,6 +807,7 @@ ORG_SCENE_NODES = [
         "handoff": "a2a",
         "skip": [],
         "enabled": True,
+        "auto_advance": True,
         "engine_runtime_ids": [],
     },
     {
@@ -818,6 +820,7 @@ ORG_SCENE_NODES = [
         "handoff": "complete",
         "skip": [],
         "enabled": True,
+        "auto_advance": True,
         "engine_runtime_ids": [],
     },
 ]
