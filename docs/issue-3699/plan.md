@@ -42,7 +42,9 @@ finally:
             _log.error(msg, extra=extra)
 ```
 
-- 判据是**路径 + 503 + 标记**三者合一：只有中继自己产出的禁用态被降级；
+- 判据是**503 + 标记**二者合一（`X-Grape-Trace-Relay: disabled` 仅由中继禁用分支在
+  `/api/runtime/traces` 产出，路径区分由此隐式成立，无需额外路径判断）：只有中继自己
+  产出的禁用态被降级；
 - `relay_disabled` 在 `try` 前初始化，`call_next` 抛异常时仍走 `status=500 → ERROR`；
 - `/faro/collect` 的既有 503 降级分支保持不动。
 

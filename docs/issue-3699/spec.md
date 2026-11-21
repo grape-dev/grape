@@ -31,8 +31,9 @@
 
 ### In Scope
 
-- 主控中继禁用响应加确定性标记（响应头），访问日志对「该路径 + 503 + 标记」降级为
-  `debug`，并在中继侧进程内一次性 `WARNING` 提示配置 `OTLP_RELAY_TARGET`。
+- 主控中继禁用响应加确定性标记（响应头），访问日志对「503 + 标记」降级为
+  `debug`（标记仅由中继禁用分支在该路径产出，路径区分隐式成立），并在中继侧进程内
+  一次性 `WARNING` 提示配置 `OTLP_RELAY_TARGET`。
 - worker 侧中继 exporter 识别 `503 + trace relay disabled`：一次性 `WARNING` + 指数退避
   静默窗口（窗口内不再发起上报），恢复 2xx 后自动复位；网络错误与其他 5xx 保持可重试
   并保留 `ERROR` 收尾（不被误抑制）。
