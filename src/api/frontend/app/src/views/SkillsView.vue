@@ -2498,8 +2498,13 @@ const deleteSkillName = computed(function () {
   return n || tt2('confirm.delete_skill_fallback')
 })
 // 只替换 name 占位符（兼容 {{name}} 与历史扁平键的 {name}），不改 I18N 全局语义。
+// 用函数式替换：字符串替换值会解释 `$&`/`$1`/`$'` 等模式，技能名含 `$` 时会把模板片段
+// 插进标题；函数返回字面量，任意名称原样渲染。
 const deleteTitle = computed(function () {
-  return tc2('skills.confirm.delete_skill').replace(/\{\{?\s*name\s*\}?\}/g, deleteSkillName.value)
+  var name = deleteSkillName.value
+  return tc2('skills.confirm.delete_skill').replace(/\{\{?\s*name\s*\}?\}/g, function () {
+    return name
+  })
 })
 function askDelete(s) {
   deleteCtx.skill = s

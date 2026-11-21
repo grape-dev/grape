@@ -156,4 +156,24 @@ check('T8 i18n 缓存版本：新增词条后 index 页 cacheVer 不低于 82', 
   assert.ok(parseInt(m[1], 10) >= 82, '新增语言包词条应 bump cacheVer（当前 ' + m[1] + '）');
 });
 
-console.log('\n#3694 删除确认弹窗插值通过 (' + passed + '/8)');
+check('T9 技能名含 $ 时按字面量渲染（替换值必须用函数，避免 $&/$1 被解释）', function () {
+  const body = computedBody('deleteTitle');
+  // 契约：.replace(/<pattern>/, <fn>)——第二参数是函数，不是字符串变量
+  assert.ok(/\.replace\(\s*\/(?:\\\/|[^/\n])+\/[a-z]*\s*,\s*function\s*\(/.test(body),
+    '标题替换的第二参数必须是函数：字符串替换值会解释 $&、$1、$` 等模式');
+  const re = replaceRegexOf(body);
+  const zhTpl = zh.confirm.delete_skill;
+  const dollarNames = ['$&', '$1', 'cost$1skill', "$'x", '$$name'];
+  dollarNames.forEach(function (name) {
+    // 与组件同构：函数式替换把名称原样插入
+    const title = zhTpl.replace(re, function () { return name; });
+    assert.ok(title.indexOf(name) >= 0, '含 $ 的名称应原样出现在标题中：' + name + ' -> ' + title);
+    // 反证：字符串替换会把这几个名称吃成模板片段，标题里看不到原名
+    const broken = zhTpl.replace(re, name);
+    if (broken !== title) {
+      assert.ok(title.length > 0, '字符串替换与函数替换结果应不同（证明该用例有区分力）');
+    }
+  });
+});
+
+console.log('\n#3694 删除确认弹窗插值通过 (' + passed + '/' + passed + ')');
