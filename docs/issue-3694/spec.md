@@ -48,6 +48,9 @@
 - [ ] 超长名（中英文 ≥80 字符无空格串）在标题行内换行，不溢出弹窗
 - [ ] 取消/确认删除、按钮 loading 文案、删除接口调用与 toast 行为完全不变
 - [ ] `node tests/js/test_issue_3694_skill_delete_confirm.js` 通过；`src/api/frontend/app` 的 `npm run lint`、`npm run build` 通过
+- [ ] 静态入口/CSS 缓存版本与本次改动联动抬档（`all-views.css`、AGModal 使用入口、入口运行时注入 CSS），
+      `pytest tests/api/test_frontend_cache_version_ratchet.py tests/api/test_frontend_bundle_source_ratchet.py` 为绿
+- [ ] 技能名含 `$`（`$&`/`$1`）时标题按字面量渲染，不出现模板片段
 - [ ] 既有 `tests/js` i18n 用例与 `tests/api/test_i18n_locale_cache_ratchet.py` 无回归
 
 ## 风险与缓解
@@ -58,3 +61,4 @@
 | 长名在 AGModal 标题溢出 | 低 | 标题样式 `overflow-wrap/word-break` 落在 AGModal 自身（Teleport 根节点不继承调用方 scopeId，`:deep` 不生效） |
 | 误改历史扁平键或其它弹窗 | 低 | 只新增降级键、只改删除弹窗 |
 | 老客户端缓存住旧语言包 | 中 | 四页 cacheVer 联动 bump + 指纹更新 |
+| 老客户端缓存住旧入口 JS/`all-views.css`（修复到不了端上） | 中 | 受影响入口/CSS `?v=` 联动 bump，`test_frontend_{cache_version,bundle_source}_ratchet.py` 守卫拦截 |
