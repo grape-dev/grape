@@ -73,9 +73,16 @@ def test_nonempty_repository_without_credential_is_still_attributed(monkeypatch)
     assert repogit.worktree_credential_error(RK).startswith("credential_not_configured")
 
 
-def test_undecryptable_rc_reports_credential_undecryptable(monkeypatch):
+def test_undecryptable_rc_degrades_to_the_next_level(monkeypatch):
+    """2026-11-22 二次收敛：unknown kid / 解不开 = 不可用 → 跳过本级。
+
+    这里没有下一档可用凭据，所以最终如实报 not_configured；
+    关键在于它**不再**把“解不开”升级成独立的硬失败分类（gitee 毒行事故）。
+    """
     install(monkeypatch, CredWorld(rc_undecryptable=True, host_user_id="15962"))
-    assert repogit.worktree_credential_error(RK).startswith("credential_undecryptable")
+    err = repogit.worktree_credential_error(RK)
+    assert err.startswith("credential_not_configured"), err
+    assert not err.startswith("credential_undecryptable")
 
 
 def test_no_credential_at_all_reports_not_configured(monkeypatch):
@@ -100,7 +107,7 @@ def test_credential_block_result_shape(monkeypatch):
     blk = agent_mod.credential_block_result("t_1", RK)
     assert blk is not None
     assert blk["_started"] is False
-    assert blk["_error"].startswith("credential_undecryptable")
+    assert blk["_error"].startswith("credential_not_configured")
 
 
 def test_credential_block_result_none_when_usable(monkeypatch):

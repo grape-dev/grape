@@ -118,7 +118,12 @@ def get_credential_keys() -> str:
     if jwt_secret and len(jwt_secret) >= 32:
         _warn_derived_keys_once()
         derived = hashlib.sha256(jwt_secret.encode()).digest()
-        return "derived:" + base64.b64encode(derived).decode()
+        # kid 必须能区分密钥字节：两台主机 JWT_SECRET 不同时，旧 kid "derived" 相同、
+        # 密钥不同 → 解不开却看不出原因（2026-11-22 gitee rc 毒行事故）。
+        # 版本化后，异主机的行 kid 互不认识 → 归为 unknown kid → 视为不可用、回落下一档，
+        # 而不是把一次配置差异升级成流水线硬失败。
+        kid = "derived-" + derived.hex()[:8]
+        return kid + ":" + base64.b64encode(derived).decode()
     # 兜底到内置 dev 常量：该密钥是公开常量，等于明文存凭据，且 worker 侧
     # （配有 credential_keys 的进程）根本解不开 → 任务信封全废。
     # 生产环境直接拒绝，让故障在入队时可见，而不是写下一条注定跑不起来的任务。
@@ -141,9 +146,10 @@ def _warn_derived_keys_once() -> None:
     if _derived_warned:
         return
     _derived_warned = True
-    log.warning("credential_keys 未配置：凭据密钥由 JWT_SECRET 派生（kid 恒为 derived）。"
-                "多主机 JWT_SECRET 不一致时密文互通不了且 kid 无法区分密钥字节 —— "
-                "建议在 security.json 显式配置 credential_keys（kid:base64, ...）。")
+    log.warning("credential_keys 未配置：凭据密钥由 JWT_SECRET 派生（kid=derived-<8hex>，"
+                "随密钥字节变化）。多主机 JWT_SECRET 不一致时异主机的行会归为 unknown kid，"
+                "按「不可用 → 回落」处理；建议在 security.json 显式配置 credential_keys"
+                "（kid:base64, ...）以便轮换。")
 
 
 def _warn_dev_keys_once() -> None:

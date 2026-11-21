@@ -181,6 +181,16 @@ def repo_credential_meta(repo_key: str, cred_type: str) -> tuple | None:
     return read_one_any("repo_cred_value_id", (repo_key, cred_type))
 
 
+def set_repo_credential_derived_from(cred_id: str, derived_from: str) -> int:
+    """标记 rc 行的来源身份（derived_from）。owner 域写口，供平台迁移经契约调用。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_repo_credentials SET derived_from=? WHERE id=?",
+            (derived_from, cred_id),
+        )
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
 def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
                                  updated_at: str) -> dict:
     """幂等 upsert：UPDATE → rowcount==0 → INSERT → 并发冲突再 UPDATE（同一事务）。

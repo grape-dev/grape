@@ -843,8 +843,12 @@ class ExplicitRepoBotToken(TokenStrategy):
         （见 TokenResolver.__init__）→ path-B 私仓拿到全局 bot 身份，
         那不是修 bug，是开身份越界口子。
 
-    本级别只读这一行、不做 path-B 守卫（显式配置 = 显式意图），但**不**触碰 global bot：
-    行存在而不可用（空/解不开/过期）→ 显式失败（`stage()` 给出分类），不降级到任何身份。
+    本级别只读这一行、不做 path-B 守卫（显式配置 = 显式意图）。
+    可用性口径（2026-11-22 二次收敛）：
+      · 空值（=无行）   → 跳过本级，交回原链（840431a8b）；
+      · 过期标记滞后    → 跳过本级（C3）；
+      · 解不开（unknown kid / 密钥不匹配）→ 不可用 → 跳过本级，回落仓库 bot/平台 bot；
+        绝不把一次配置/轮换差异升级成流水线硬失败（gitee rc 毒行事故）。
     """
 
     error_code = "REPO_TOKEN_EXPIRED"   # 与 RepoBotToken 同一回写列（bot_token_status）
@@ -903,7 +907,13 @@ class ExplicitRepoBotToken(TokenStrategy):
         if not row:
             return "", ""
         if row.get("undecryptable"):
-            return "", CREDENTIAL_STAGE_UNDECRYPTABLE
+            # 解不开 ≠ 该仓没配：但也不能升级成硬失败（2026-11-22 gitee 事故）。
+            # unknown kid（异主机/旧派生密钥写的行）按「不可用 → 回落」处理：
+            # 跳过本级，落到仓库 bot / 平台 bot，任务与换券都不中断。
+            _why = str(row.get("reason") or "decrypt_failed")
+            log.warning(f"ExplicitRepoBotToken: rc row unusable ({_why}), skip to next level "
+                        f"repo={repo_key}（密钥不匹配是配置/轮换问题，执行面降级）")
+            return "", ""
         value = str(row.get("value") or "")
         if not value:
             # 空值 = 没有这行（840431a8b 定的契约）：写侧已改「空 → 删行」，存量空行
@@ -945,7 +955,7 @@ class ExplicitRepoBotToken(TokenStrategy):
 
         三态必须分开（换券路由曾把「无行」与「行存在但空」混成一个信号，踩过两次坑）：
           · 无行      → ''，交回原链（path-A 仓库/全局 bot；path-B 归属者）；
-          · 解不开    → undecryptable（运维要换密钥/重建行，不是「没配」）；
+          · 解不开    → 视同不可用但**不判失败**（unknown kid / 密钥不匹配 → 跳过本级，回落下一档）；
           · 值被清空  → 视同无行（写侧空值即删行；存量空行交回原链，840431a8b）；
           · 已标过期  → 视同不可用但**不判失败**（跳过本级，落到下一档；C3）。
         """
@@ -956,7 +966,7 @@ class ExplicitRepoBotToken(TokenStrategy):
         if not row:
             return ""
         if row.get("undecryptable"):
-            return CREDENTIAL_STAGE_UNDECRYPTABLE
+            return ""   # 解不开 = 不可用 → 跳过本级（与 resolve 同口径；C3/毒行事故）
         if not str(row.get("value") or ""):
             return ""   # 空值 = 无行（840431a8b），交回原链
         if self._is_expired(repo_key):

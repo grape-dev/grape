@@ -109,3 +109,41 @@ tests/kernel/test_domain_route_strict.py
 3) /api/health 的 db_registry health 无 _missing_dsns
 4) 数据善后按 §5 执行并复测三个 gitee 仓
 ```
+## 8. 二次收敛（2026-11-22）：密钥版本化 + 写入口收口 + 止血脚本
+
+### 8.1 派生密钥必须带版本
+
+```
+旧：security.json 没配 credential_keys 时，kid 恒为 "derived"，字节 = sha256(JWT_SECRET)
+    → 两台主机 JWT_SECRET 不同：kid 相同、字节不同 → 解不开，且无法归因
+新：kid = "derived-" + sha256(JWT_SECRET)[:8]
+    → 异主机写出的行 kid 互不认识 → 归为 unknown kid → 视为不可用 → 回落，不硬失败
+```
+
+### 8.2 未知 kid 不再硬失败
+
+```
+credential_crypto.decrypt：kid 不在本进程密钥环 → 抛 UnknownKeyError（ValueError 子类，兼容旧捕获）
+db.get_repo_credential_meta：reason = "unknown_key" | "decrypt_failed"（与“无行”区分）
+token_resolver.ExplicitRepoBotToken：解不开 → warning + 跳过本级 → 仓库 bot / 平台 bot
+                                    （执行面不中断；A2A 鉴权面本来就读不到明文，不受影响）
+```
+
+### 8.3 写入口只有一处
+
+```
+rc 表写操作只允许出现在 src/domains/insight/：
+  · mgmt.git-credential 写路径：mgmt._upsert_repo_credential → insight.public.upsert_repo_credential_value
+  · platform 迁移回填 derived_from：改走 insight.public.set_repo_credential_derived_from（本轮新增）
+  · 手写 SQL：只允许出现在数据修复脚本里，且必须先备份、只删非 owner 行
+棘轮用例：tests/kernel/test_credential_key_version_scenarios.py::test_s6/s7
+```
+
+### 8.4 数据止血脚本
+
+```
+scripts/repair_repo_credentials_split.py
+  默认只读：两库盘点，按 (repo_key, cred_type) 比对，标出 kid 与“owner 是否有”
+  --apply ：先导出 SQL 备份（/root/backup-rc-<ts>/），再删除 mgmt 库 stray 行并校验行数
+  不改 insight（唯一权威）；删掉的行若 owner 侧没有 → 该仓回落平台 bot（与部署前一致）
+```

@@ -5908,13 +5908,18 @@ def get_repo_credential_meta(repo_key: str, cred_type: str) -> "dict | None":
     # 混在一起会让上层把「配了但解不开」当成「没配」→ 静默降级到用户身份，
     # 正是 D90 禁止的身份混用。
     raw = row[0] or ""
+    reason = ""
     try:
         plain, undecryptable = _decrypt_repo_secret(raw), False
     except Exception as e:
-        log.error(f"repo credential decrypt failed: repo_key={repo_key} "
-                  f"cred_type={cred_type} err={type(e).__name__}")
+        from src.domains.mgmt.auth.credential_crypto import UnknownKeyError
+
+        reason = "unknown_key" if isinstance(e, UnknownKeyError) else "decrypt_failed"
+        log.warning(f"repo credential unusable: repo_key={repo_key} cred_type={cred_type} "
+                    f"reason={reason} err={type(e).__name__}")
         plain, undecryptable = "", True
-    return {"value": plain, "id": row[1] or "", "undecryptable": undecryptable}
+    return {"value": plain, "id": row[1] or "", "undecryptable": undecryptable,
+            "reason": reason}
 
 def _decrypt_repo_secret(raw: str) -> str:
     """D90-N3：repo 凭据读侧统一解密（bot token 通道加密配套）。

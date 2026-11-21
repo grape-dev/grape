@@ -289,10 +289,10 @@ def estimate_derived_from(session: Session) -> int:
         if not hit:
             continue
         prov, username = hit
-        session.execute(
-            text("UPDATE grape_t_repo_credentials SET derived_from=:d WHERE id=:i"),
-            {"d": f"{prov}:{username}".rstrip(":"), "i": cred_id},
-        )
+        # 凭据表归 insight：只能经 owner 契约写（平台不得直写别人的表）。
+        from src.domains.insight.public import set_repo_credential_derived_from
+
+        set_repo_credential_derived_from(cred_id, f"{prov}:{username}".rstrip(":"))
         n += 1
     return n
 

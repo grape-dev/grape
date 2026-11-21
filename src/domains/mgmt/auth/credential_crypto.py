@@ -141,6 +141,18 @@ def is_ciphertext(value: str) -> bool:
     return len(nonce) == 12
 
 
+class UnknownKeyError(ValueError):
+    """密文的 kid 不在本进程密钥环里（多半是另一台主机/另一套密钥写的）。
+
+    语义上不是“数据坏了”，而是“这枚钥匙不归我”：按契约视为不可用、回落下一档，
+    不能升级成硬失败（2026-11-22 gitee rc 毒行事故的直接触发点）。
+    """
+
+    def __init__(self, kid: str):
+        self.kid = kid
+        super().__init__(f"credential key unknown for kid={kid}")
+
+
 def decrypt(encrypted: str) -> str:
     """解密 {key_id}:{nonce_b64}:{ciphertext_b64}，返回明文。
 
@@ -162,7 +174,7 @@ def decrypt(encrypted: str) -> str:
     key = _get_key_by_id(kid)
     if key is None:
         # D46 P1-10: key_id 不存在 → 抛异常，不静默返回密文
-        raise ValueError(f"Credential key not found for kid={kid}")
+        raise UnknownKeyError(kid)
 
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
