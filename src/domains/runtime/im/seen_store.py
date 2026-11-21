@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import time
 
-from src.kernel.session_manager import db, db_lock
+from src.kernel.owner_db import db_pair
+
+# bot_seen_messages 是 runtime 基表；本模块会被 mgmt 进程里的 IM 引擎调用，
+# 必须走 runtime owner 连接（单库拓扑自动回落 session_manager.db）。
+db, db_lock = db_pair("runtime")
 
 _SEEN_MSG_TTL = 86400 * 2
 _SEEN_MSG_MAX_LOAD = 2000
