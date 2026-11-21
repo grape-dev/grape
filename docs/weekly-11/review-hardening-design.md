@@ -98,6 +98,11 @@ api/oauth_token.py::with_oauth_token
 | S15 | 测试恢复纪律 | 只用 monkeypatch | `::test_s15` |
 | S16 | 云沙箱 executor 平台判定 | REPO_KEY 优先（与 sandbox_context 同序） | `test_sandbox_clone_provider.py::test_s6` |
 | S17 | 脱敏红线 | 本分支变更文件零真实账号/库名/个人路径 | `test_public_docs_redaction.py` |
+| S18 | 个人组织回填（mgmt） | 缺组织才建、slug 冲突退后缀、停用账号跳过、幂等 | `test_org_backfill_migrations.py` S1–S5 |
+| S19 | org_id 回填（runtime） | 凭证/引擎/技能/仓库维表回填，跨域走契约 | 同文件 S6–S9 |
+| S20 | 任务日志读权限 | 本人 / 管理方可读；提报者与契约异常 403 | `test_task_logs_acl.py` S1–S7 |
+| S21 | DDL 目标态错误码 | 1051/1054/1146 也按幂等放行 | `test_destructive_ddl_stamp_scenarios.py::test_s5_*` |
+| S22 | 脱敏守卫自身 | 扫描跳过自身，不再自伤 | `test_public_docs_redaction.py` |
 
 ## 6. 验证命令（一次一个文件）
 
@@ -109,6 +114,7 @@ $PY -m pytest tests/runtime/test_clone_endpoint_multiplatform.py -q
 $PY -m pytest tests/mgmt/test_oauth_refresh_backoff.py -q
 $PY -m pytest tests/mgmt/test_oauth_reauth_scenarios.py -q
 $PY -m pytest tests/arch/test_public_docs_redaction.py -q
+$PY -m pytest tests/mgmt/test_org_backfill_migrations.py -q
 $PY -m pytest tests/runtime/test_sandbox_clone_provider.py -q
 $PY -m pytest tests/mgmt/test_issue_3563_reauth_401_split.py -q
 $PY -m pytest tests/mgmt/test_issue_3563_github_token_refresh.py -q
@@ -198,4 +204,76 @@ R1 顺序改动：单文件回退 settings.py（无数据影响）
 R2/R3 只用例改动：回退测试文件
 R4：回退 db.py 的 _REFRESH_LAST/mark_identity_reauth_required 与 oauth_token.py 的调用；
     已写入的 status=4 行需要人工按绑定关系恢复（重新授权即恢复，属常规流程）
+```
+
+## 14. 个人组织 / org_id 回填迁移（R12）
+
+```
+为什么恢复：删 user_accounts 时把 _migrate_create_personal_orgs 与
+_migrate_data_to_personal_orgs 整段删了；后者第 1/3/4/5 段不依赖废表，
+删掉后“存量 org_id 为空”的行永不再修（新写入已带 org_id）。
+
+拆分（owner 域各管各的表）：
+  mgmt  src/domains/mgmt/migrations/personal_org_backfill.py   版本 202611220006
+    · 账号源 grape_accounts(status=1)
+    · 缺个人组织才建：slug=personal-<id>，冲突退 personal-<id>-<username[:8]>
+    · org_member 补 owner 行
+    · managed_repos.org_id 空 → 按 user_repos.is_admin 找管理员 → 其个人组织
+  runtime  src/domains/runtime/migrations/org_id_backfill.py     版本 202611220007
+    · runtime_credentials(scope<>global) 按 owner_name → 个人组织（mgmt 契约解析）
+    · agent_runtimes 跟随 credential_id
+    · skill scope=user → owner_id 用户；scope=repo → owner_id 当 repo_key
+    · 其它跟随 repo_key 的表：repo_org_map() 取映射，
+      mgmt.public.backfill_org_id_by_repo / runtime.public.backfill_org_id_by_repo 各回各库
+
+不变式：
+  · 不读 user_accounts（写冻结守卫 + 表归属清单）；
+  · 幂等：只处理空 org_id；已填不覆盖；
+  · 失败抛出 → 不盖章 → 下次启动重试（与 DDL 盖章纪律一致）；
+  · 跨域解析失败只告警并跳过该行，不猜、不跨库直写。
+```
+
+## 15. 组织机构回填迁移的验证与回滚
+
+```
+回滚：撤销 202611220006/007 两个 register_migration 与两个迁移模块（数据只补空值，回滚无副作用）。
+验证：一次一文件
+  tests/mgmt/test_org_backfill_migrations.py        9 passed
+  tests/kernel/test_migration_no_baseline_version_collision.py
+    1 failed —— 基线 dcb3759e7 同样失败（既有撞号锁红，非本轮）
+```
+
+## 16. 任务日志读权限（R14）
+
+```
+src/domains/runtime/routes/task_logs.py::_require_task_access
+  1 session_token / api_key → 豁免（作用域已限定）
+  2 agent_tasks.user_id == 当前用户 → 本人，放行
+  3 其余：只放行仓库管理方
+      mgmt.public.user_can_manage_repo(uid, repo_key)
+        = managed_repos.host_user_id == uid 或 user_repos.is_admin=1
+      契约异常 → 按无权（fail-closed），403 + error_code=TASK_LOG_FORBIDDEN
+  4 无 repo_key 且非本人 → 403
+
+为什么不能沿用 check_repo_access：它以“能看见仓库”为判据，外部 issue 提报者
+也有 user_repos 可见行；而任务日志与 diff 是代码泄漏面，必须按“管理方”收紧。
+```
+
+## 17. DDL 目标态错误码与文档纠偏（R15）
+
+```
+_destructive_ddl 放行码（幂等重跑，不是失败）：
+  1050 表已存在 · 1051 表不存在 · 1054 列不存在 · 1060 列已存在
+  1061 索引已存在 · 1091 待删列/键不存在 · 1146 表不存在
+其余异常 → raise（迁移不盖章、下次启动重试）
+
+文档纠偏：db_setup 内两处 docstring 原写“只记 WARNING 并返回 True（fail-open）”，
+与实现相反，已统一为 fail-closed + 目标态清单。
+```
+
+## 18. 脱敏守卫自身（S22）
+
+```
+tests/arch/test_public_docs_redaction.py 扫描本分支变更文件；
+黑名单字面量就在该文件里 → 必须跳过自身（SELF），否则守卫永远红。
 ```

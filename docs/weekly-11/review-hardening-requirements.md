@@ -80,3 +80,43 @@
 
 - 分支内所有 commit 的 author/committer 与 `Signed-off-by` 必须是机器账号
   `grape-bot <bot@grapedev.cn>`；历史遗留的个人署名在合入前重写清洗。
+
+## R12 个人组织 / org_id 存量回填必须保留（按 owner 域拆）
+
+- 背景：清退废表 `user_accounts` 时，`db_setup._migrate_create_personal_orgs()` 与
+  `_migrate_data_to_personal_orgs()` 被整段删除。前者读废表本就空转，但后者中
+  “补个人组织 / 回填空 org_id”并不依赖废表 —— 属删过头。
+- 要求：
+  · 账号来源改为 `grape_accounts`（status=1），不得再读 `user_accounts`；
+  · mgmt 只回填 mgmt 归属表（`organization` / `org_member` / `managed_repos.org_id`）；
+  · runtime 归属表（`runtime_credentials` / `agent_runtimes` / `skill` / `events` /
+    `agent_tasks` / `devops_agent_session` / `issue`）由 runtime 自己的迁移回填，
+    跨域解析一律走契约（`mgmt.public.personal_org_id` / `repo_org_map`）；
+  · 全部幂等（只处理空 org_id）；失败抛出、不盖章（下次启动重试）。
+- 验收：新建/已存在组织、slug 冲突、停用账号、org_id 已填不覆盖、非 owner 库拒绝、
+  runtime 四类表按用户/仓库回填、repo-keyed 表经两域契约回填，全部用例覆盖。
+
+## R13 迁移版本号
+
+- 新迁移使用未被占用的号段（本轮 `202611220006` mgmt / `202611220007` runtime），
+  不得与基线同号异名（撞号锁用例负责）。
+
+## R14 任务日志 / 代码差异的读权限
+
+- 现状：`_require_task_access` 非本人时走 `check_repo_access`（“能看见仓库”即放行）；
+  外部 issue 提报者也有 `user_repos` 可见行 → 能读私有托管仓任务的日志与 diff。
+- 要求：
+  · 本人（`agent_tasks.user_id == 当前用户`）可读；
+  · 非本人只放行**仓库管理方**：`managed_repos.host_user_id` 或 `user_repos.is_admin=1`；
+  · `session_token` / `api_key` 维持既有豁免（作用域已限定）；
+  · 判定不出（契约异常 / 无 repo_key）→ 403 fail-closed，并带可判定 `error_code`。
+- 验收：本人 / 管理方 / 提报者（不可管）/ 无 repo_key / 契约异常 五类用例。
+
+## R15 破坏性 DDL 的“已达目标态”错误码清单
+
+- 要求：`_destructive_ddl` 只在**已达目标态**时放行（幂等重跑），其余异常一律抛出
+  （迁移不盖章、下次启动重试）。
+- 清单：1050（表已存在）、1051（表不存在）、1054（列不存在）、1060（列已存在）、
+  1061（索引已存在）、1091（待删列/键不存在）、1146（表不存在）。
+- 文档：`db_setup` 里旧的“只记 WARNING 返回 True（fail-open）”描述必须与实现一致
+  （fail-closed），不得留反向说明。

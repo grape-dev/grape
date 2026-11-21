@@ -15,6 +15,8 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BASES = ("grape-dev/arch-weekly-11", "arch-weekly-11", "origin/arch-weekly-11")
 
+SELF = "tests/arch/test_public_docs_redaction.py"   # 黑名单字面量就在本文件里，跳过自身
+
 FORBIDDEN = {
     "个人账号名": "yang-aiwu-new",
     "个人署名": "liufei_cloud",
@@ -55,7 +57,7 @@ def test_s17_changed_files_carry_no_real_identifiers():
     assert files, "diff 为空——扫描口径坏了"
     hits = []
     for rel in files:
-        if not rel.startswith(SCOPES):
+        if rel == SELF or not rel.startswith(SCOPES):
             continue
         f = ROOT / rel
         if not f.exists() or f.suffix in {".pyc"}:

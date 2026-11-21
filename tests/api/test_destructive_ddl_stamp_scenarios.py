@@ -55,3 +55,12 @@ def test_s3_gate_not_passed_returns_false_without_running(monkeypatch):
 def test_s4_kind_hint_is_enforced():
     with pytest.raises(ValueError):
         ds._destructive_ddl(_Cursor(None), "DROP TABLE x", kind_hint="alter")
+
+
+@pytest.mark.parametrize("code,name", [(1051, "unknown table"), (1054, "unknown column"),
+                                       (1146, "table doesn't exist")])
+def test_s5_target_state_error_codes_are_accepted(code, name):
+    """DROP/ALTER 的“已达目标态”错误码扩展（评审第二点）。"""
+    err = Exception(name)
+    err.args = (code, name)
+    assert ds._destructive_ddl(_Cursor(err), "DROP TABLE IF EXISTS old", kind_hint="cleanup") is True

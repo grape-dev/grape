@@ -4455,6 +4455,28 @@ def managed_repo_host_user(repo_key: str) -> str:
     return str(row[0]) if row and row[0] else ""
 
 
+def user_can_manage_repo(user_id: Any, repo_key: str) -> bool:
+    """该用户是否是仓库的**管理方**（托管人 host_user_id 或 user_repos.is_admin=1）。
+
+    与 `user_can_access_repo` 的区别：能看见仓库（含外部 issue 提报者）不等于能读
+    任务日志/代码 diff。runtime 读任务日志用它做 fail-closed 判据。
+    """
+    uid = str(user_id or "").strip()
+    if not uid or not repo_key:
+        return False
+    try:
+        host = managed_repo_host_user(repo_key)
+        if host and host == uid:
+            return True
+        with _any_cursor() as c:
+            c.execute("SELECT 1 FROM user_repos WHERE repo_key=? AND user_id=? "
+                      "AND is_admin=1 LIMIT 1", (repo_key, uid))
+            return bool(c.fetchone())
+    except Exception as e:  # noqa: BLE001 - 判定不出按无权（fail-closed）
+        log.warning(f"user_can_manage_repo failed user={uid} repo={repo_key}: {e}")
+        return False
+
+
 def repo_admin_user_id(repo_key: str):
     """仓库的首个管理员 user_id（按 created_at 最早）；无则返回 0。"""
     with _any_cursor() as c:

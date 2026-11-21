@@ -2442,8 +2442,9 @@ def _org_columns_not_text(conn=None) -> list:
     """当前库里仍是数值型的 org 域列清单（迁移后校验用，不做 DDL）。
 
     用途：注册式迁移 `d105-org-domain-text-normalize`（QA 命名）转换完成后自查——
-    `_destructive_ddl()` 内部对非 MDL 异常只记 WARNING 并返回 True（fail-open），
-    所以「ALTER 没成功」不能靠它的返回值判定，必须落到列类型实查。
+    `_destructive_ddl()` 对非 MDL 异常**抛出**（fail-closed，迁移不盖章），
+    「已达目标态」的重复/缺失错误码（1050/1051/1054/1060/1061/1091/1146）才放行；
+    即便如此，「ALTER 是否真生效」仍应落到列类型实查。
 
     口径对称（QA I2）：两种后端都按 `_ORG_MYSQL_TEXT_COLS` 的同一份清单检查，
     organization.id 在 SQLite 分支同样纳入。
@@ -4351,7 +4352,7 @@ def _destructive_ddl(c, ddl: str, *, kind_hint: str = "cleanup",
             raise _MdlWaitTimeout(str(e))
         # 已经处于目标状态 = 成功（重复删列/建列、列不存在等）：这类异常不阻断启动。
         _code = getattr(e, "args", (None,))[0] if getattr(e, "args", None) else None
-        if isinstance(_code, int) and _code in (1050, 1060, 1061, 1091):
+        if isinstance(_code, int) and _code in (1050, 1051, 1054, 1060, 1061, 1091, 1146):
             log.debug(f"_destructive_ddl already in target state: {ddl}: {e}")
             return True
         # 其它失败必须抛出：调用链约定「fn 正常返回 = 盖章」，吞掉异常会让
@@ -11127,8 +11128,8 @@ def _fn_normalize_org_domain_text() -> None:
     只处理**本域库里存在**的表：三库拓扑下 mgmt 进程改 organization/org_member 等，
     runtime 进程改 runtime_credentials/agent_tasks 等，缺表按项跳过。
 
-    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常只记 WARNING 并返回 True，
-    单靠它的返回值会「ALTER 失败也盖章」（QA M3/I2）。发现仍有数值列 → ERROR +
+    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常抛出（不盖章），
+    只有「已达目标态」错误码放行；但放行不等于生效，仍以列类型实查为准（QA M3/I2）。发现仍有数值列 → ERROR +
     raise，执行器据此不盖章、下次启动重试——本函数属注册式迁移，存量库每次启动
     都会跑到（QA M2）。
     """
@@ -11285,6 +11286,22 @@ def _fn_create_org_repo_ai_table() -> None:
         db.commit()
 
 
+def _fn_personal_orgs_from_accounts(conn=None):
+    from src.domains.mgmt.migrations.personal_org_backfill import (
+        migrate_personal_orgs_from_accounts as _impl,
+    )
+
+    return _impl(conn)
+
+
+def _fn_runtime_org_backfill(conn=None):
+    from src.domains.runtime.migrations.org_id_backfill import (
+        migrate_runtime_org_ids as _impl,
+    )
+
+    return _impl(conn)
+
+
 register_migration(
     version="202611191120",
     name="create-org-repo-ai-table",
@@ -11394,6 +11411,24 @@ def _fn_session_token_unique_session_key() -> None:
         _audit_ops_event("session_token_key_widen", {**_detail, "phase": "after"})
     log.info("session_api_tokens: session_key 列宽对齐 VARCHAR(191)（不建唯一索引、不去重）")
 
+
+
+register_migration(
+    version="202611220006",
+    name="personal-orgs-from-accounts",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_personal_orgs_from_accounts,
+)
+
+
+register_migration(
+    version="202611220007",
+    name="runtime-org-id-backfill",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_runtime_org_backfill,
+)
 
 
 register_migration(
