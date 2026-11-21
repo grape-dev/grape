@@ -2117,7 +2117,10 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
     _refresh_thread.start()
 
     # 从 proc_env 补充仓库参数（manager.prepare 没传这些）
-    repo_full_name = proc_env.get("REPO_FULL_NAME", "")
+    # 平台必须来自带前缀的 REPO_KEY：REPO_FULL_NAME 是剥前缀裸名（runbook 用），
+    # 单独用它会让 parse_repo_key 默认 provider=gitcode（gitee 仓被 clone 到 gitcode.com，
+    # 令牌键也回落 BOT_GITCODE_TOKEN）。与 sandbox_context 同一判定顺序。
+    repo_full_name = proc_env.get("REPO_KEY") or proc_env.get("REPO_FULL_NAME", "")
     # bot token 键按平台派生（过去写死 BOT_GITCODE_TOKEN：gitee 仓在沙箱里恒空 → 不 clone）
     try:
         from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env

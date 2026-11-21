@@ -2865,7 +2865,7 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     from src.kernel.repo_key import split_owner_repo, to_repo_key
     from src.domains.runtime.public import load_project_info
     # 前缀必须解析真实平台：裸 to_repo_key 默认 gitcode:，gitee/github 托管仓会读错 key
-    # （2026-11-14 实锤：gitee:yang-aiwu-new/... 的 project-info 返回 gitcode: 前缀 + 空基线）
+    # （2026-11-14 实锤：gitee:<ACCOUNT>/... 的 project-info 返回 gitcode: 前缀 + 空基线）
     from src.domains.mgmt.user.db import resolve_managed_repo_key
     repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     if user.get("auth_type") == "session_token":

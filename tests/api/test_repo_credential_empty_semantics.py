@@ -31,8 +31,8 @@ def recorder(monkeypatch):
 
 
 def test_empty_value_deletes_row(recorder):
-    user_db._upsert_repo_credential(None, "gitee:yang-aiwu-new/demo", "bot", "")
-    assert recorder == [("delete", "gitee:yang-aiwu-new/demo", "bot")]
+    user_db._upsert_repo_credential(None, "gitee:acme/demo", "bot", "")
+    assert recorder == [("delete", "gitee:acme/demo", "bot")]
 
 
 def test_whitespace_value_deletes_row(recorder):

@@ -15,4 +15,4 @@
 | 11 | 全量回归（api / mgmt / kernel / runtime） | ✅ | 见 PR 说明的回归记录 |
 | 12 | 自审查（五轴） | ✅ | 见 PR 说明 |
 | 13 | PR 创建 + Issue 评论 + A2A 交办 QA | ✅ | PR 链接见 Issue 评论 |
-| 14 | demo 实测（`gitee:yang-aiwu-new/demo`：换券 200 / `get_task_token` 非空 source=rc_bot / 建树 refs 非 0） | ⏳ 待部署环境 | 需要 worker 环境与真实 rc 行，交由 QA/运维在 dev 复核 |
+| 14 | demo 实测（`gitee:<ACCOUNT>/demo`：换券 200 / `get_task_token` 非空 source=rc_bot / 建树 refs 非 0） | ⏳ 待部署环境 | 需要 worker 环境与真实 rc 行，交由 QA/运维在 dev 复核 |

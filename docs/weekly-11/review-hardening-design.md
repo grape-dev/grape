@@ -96,16 +96,20 @@ api/oauth_token.py::with_oauth_token
 | S12 | linked push / 远端探测 | 两个调用点都传 repo_key | 同文件 `::test_s8` |
 | S14 | DDL + ownership 同进程 | 全绿（无全局污染） | `::test_s14` |
 | S15 | 测试恢复纪律 | 只用 monkeypatch | `::test_s15` |
+| S16 | 云沙箱 executor 平台判定 | REPO_KEY 优先（与 sandbox_context 同序） | `test_sandbox_clone_provider.py::test_s6` |
+| S17 | 脱敏红线 | 本分支变更文件零真实账号/库名/个人路径 | `test_public_docs_redaction.py` |
 
 ## 6. 验证命令（一次一个文件）
 
 ```
-PY=/home/liufei/grape-arch11/.venv/bin/python
+PY=<venv>/bin/python
 $PY -m pytest tests/mgmt/test_settings_bot_username_order.py -q
 $PY -m pytest tests/mgmt/test_user_accounts_write_freeze_guard.py -q
 $PY -m pytest tests/runtime/test_clone_endpoint_multiplatform.py -q
 $PY -m pytest tests/mgmt/test_oauth_refresh_backoff.py -q
 $PY -m pytest tests/mgmt/test_oauth_reauth_scenarios.py -q
+$PY -m pytest tests/arch/test_public_docs_redaction.py -q
+$PY -m pytest tests/runtime/test_sandbox_clone_provider.py -q
 $PY -m pytest tests/mgmt/test_issue_3563_reauth_401_split.py -q
 $PY -m pytest tests/mgmt/test_issue_3563_github_token_refresh.py -q
 ```
@@ -139,7 +143,45 @@ tests/arch/test_silent_except_ratchet.py  2 failed —— 基线 dcb3759e7 同�
 tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate —— 基线同样失败
 ```
 
-## 9. 测试隔离纪律（R8）
+## 9. 云沙箱 executor 的平台判定（R9）
+
+```
+src/domains/runtime/agents/executor.py::_run_cloud_sandbox
+  repo_full_name = proc_env.get("REPO_KEY") or proc_env.get("REPO_FULL_NAME", "")
+  → clone_params(repo_full_name) 得到 clone_url / clone_auth / username
+  → bot_token_from_env(proc_env, repo_full_name) 得到对应平台的 BOT_<PROVIDER>_TOKEN
+
+为什么顺序不能反：派发侧 env_extra 的 REPO_FULL_NAME 是剥前缀裸名（runbook 拼 URL 用），
+cloud_worker 先写的带前缀 repo_key 随后被 env.update(env_extra) 覆盖；只读裸名 →
+parse_repo_key 默认 gitcode → 非 gitcode 仓 clone 到错平台、令牌键也错。
+
+不变式：任何“从 task/env 推平台”的位置都必须先读 REPO_KEY；
+REPO_FULL_NAME 只用于拼展示/runbook URL。
+```
+
+## 10. 脱敏约定（R10）
+
+| 真实值类型 | 占位符 | 示例 |
+|---|---|---|
+| 个人目录 | `<venv>` / `<home>` | `PY=<venv>/bin/python` |
+| 账号名（含平台账号） | `<ACCOUNT>` / `<platform_account>` | `gitee:<ACCOUNT>/demo` |
+| 库名 | `<db_mgmt>` / `<db_insight>` | `--mgmt-dsn mysql://…/<db_mgmt>` |
+| 备份目录 | `<BACKUP_DIR>` | 脚本默认 `RC_BACKUP_DIR` 或相对目录 `./backup-rc-<ts>` |
+| 主机/IP | `<host_a>` / `<server_ip>` / `<public_ip>` | 运维文档 |
+| 测试夹具仓 | `acme/<repo>` | `gitee:acme/demo` |
+
+守门用例：`tests/arch/test_public_docs_redaction.py` —— 只扫**本分支变更文件**
+（`git diff --name-only <merge-base>...HEAD`），基线历史命中登记在 allowlist。
+
+## 11. 提交署名（R11）
+
+```
+author/committer/Signed-off-by = grape-bot <bot@grapedev.cn>
+历史遗留个人署名：合入前用 filter-branch 重写（本轮已清洗 2 个 commit），
+重写后所有 sha 变化，PR head 与 QA 历史的 sha 需重新对账。
+```
+
+## 12. 测试隔离纪律（R8）
 
 ```
 禁止：orig = mod.global; mod.global = fake; ... finally: mod.global = orig
@@ -149,7 +191,7 @@ tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate —— 基线同�
 守门用例：S14（同进程跑两个文件全绿）+ S15（源码里不得再出现手工赋值恢复）。
 ```
 
-## 10. 回滚
+## 13. 回滚
 
 ```
 R1 顺序改动：单文件回退 settings.py（无数据影响）

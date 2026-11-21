@@ -48,11 +48,11 @@ def test_cache_hit_avoids_second_lookup(monkeypatch):
 
     def _fake_fetch(provider, token):
         calls.append(token)
-        return "yang-aiwu-new"
+        return "acme"
 
     monkeypatch.setattr(ci, "_fetch_login", _fake_fetch)
-    assert ci.resolve_login("gitee", "tok-a") == "yang-aiwu-new"
-    assert ci.resolve_login("gitee", "tok-a") == "yang-aiwu-new"
+    assert ci.resolve_login("gitee", "tok-a") == "acme"
+    assert ci.resolve_login("gitee", "tok-a") == "acme"
     assert len(calls) == 1, calls
     assert ci.cache_stats()["entries"] == 1
 
@@ -119,7 +119,7 @@ def test_single_flight_concurrent(monkeypatch):
         started.set()
         import time as _t
         _t.sleep(0.05)
-        return "yang-aiwu-new"
+        return "acme"
 
     monkeypatch.setattr(ci, "_fetch_login", _slow)
     out = []
@@ -132,7 +132,7 @@ def test_single_flight_concurrent(monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    assert out == ["yang-aiwu-new"] * 8
+    assert out == ["acme"] * 8
     assert len(calls) == 1, calls
 
 
@@ -145,9 +145,9 @@ def test_scheme_const_no_network(monkeypatch):
 
 def test_basic_password_uses_token_owner(monkeypatch):
     _patch_card(monkeypatch, bot_username="wrong-name")
-    monkeypatch.setattr(ci, "_fetch_login", lambda p, t: "yang-aiwu-new")
-    assert ci.username_for_token("gitee", "tok", "gitee:yang-aiwu-new/demo") == (
-        "yang-aiwu-new", "token_owner")
+    monkeypatch.setattr(ci, "_fetch_login", lambda p, t: "acme")
+    assert ci.username_for_token("gitee", "tok", "gitee:acme/demo") == (
+        "acme", "token_owner")
 
 
 def test_basic_password_falls_back_to_card_on_error(monkeypatch):

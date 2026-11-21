@@ -1,6 +1,6 @@
 # Issue #3055 深度分析与实施方案：字符串 ident 单号导致 A2A 交办整族失效
 
-> 关联单：#3055（作者 gcw_3FZApeLT / <operator>，标签 bug）
+> 关联单：#3055（作者 <platform_account> / <operator>，标签 bug）
 > 基线：`arch-weekly-11` @ `6ac893296`（2026-11-17 19:10）
 > 分支：`feat/issue-3054-oauth-hardening`（#3054 与本单同批交付）
 > 状态：分析结论已按基线真实代码逐条复核（file:line 均为本基线实测，非引用单内行号）

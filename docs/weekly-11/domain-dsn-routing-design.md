@@ -3,11 +3,11 @@
 ## 1. 事故现象
 
 ```
-resolve_exec_token('gitee:yang-aiwu-new/demo') → stage=undecryptable
+resolve_exec_token('gitee:<ACCOUNT>/demo') → stage=undecryptable
 ```
 同一仓库在两库里各有一条 `grape_t_repo_credentials` 行：
-- `grape_dev_mgmt`：5 条 gitee 行，`kid=derived`，解不开（InvalidTag）
-- `grape_dev_insight`：3 条，`kid=k1`，能解出 32 位令牌
+- `<db_mgmt>`：5 条 gitee 行，`kid=derived`，解不开（InvalidTag）
+- `<db_insight>`：3 条，`kid=k1`，能解出 32 位令牌
 
 新代码把“仓库级凭据行”当权威 → 读到毒行 → 显式失败；此前它跳过 rc 行落平台 bot，所以 gitee 能 push，现在被挡住。
 
@@ -71,8 +71,8 @@ transaction_for(domain)           # 域连接真事务 或 主库锁 + 提交/�
 
 ```sql
 -- 0) 备份（两台都做）
---    mysqldump ... grape_dev_mgmt    grape_t_repo_credentials > rc_mgmt_<ts>.sql
---    mysqldump ... grape_dev_insight grape_t_repo_credentials > rc_insight_<ts>.sql
+--    mysqldump ... <db_mgmt>    grape_t_repo_credentials > rc_mgmt_<ts>.sql
+--    mysqldump ... <db_insight> grape_t_repo_credentials > rc_insight_<ts>.sql
 
 -- 1) 只读盘点：mgmt 里哪些 repo_key/cred_type 是 stray（不在 insight 期望集合内）
 SELECT repo_key, cred_type, updated_at FROM grape_t_repo_credentials
@@ -86,7 +86,7 @@ DELETE FROM grape_t_repo_credentials
 -- 3) 补齐：insight 缺的仓用平台写口（k1 加密）补行，不手写 SQL 加密
 
 -- 4) 复测
---    resolve_exec_token('gitee:yang-aiwu-new/demo') → level=rc_bot, stage=''
+--    resolve_exec_token('gitee:<ACCOUNT>/demo') → level=rc_bot, stage=''
 --    换券 200；建树 refs≠0；三个 gitee 仓 push 正常
 ```
 
@@ -144,6 +144,6 @@ rc 表写操作只允许出现在 src/domains/insight/：
 ```
 scripts/repair_repo_credentials_split.py
   默认只读：两库盘点，按 (repo_key, cred_type) 比对，标出 kid 与“owner 是否有”
-  --apply ：先导出 SQL 备份（/root/backup-rc-<ts>/），再删除 mgmt 库 stray 行并校验行数
+  --apply ：先导出 SQL 备份（<BACKUP_DIR>/），再删除 mgmt 库 stray 行并校验行数
   不改 insight（唯一权威）；删掉的行若 owner 侧没有 → 该仓回落平台 bot（与部署前一致）
 ```

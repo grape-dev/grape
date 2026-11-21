@@ -16,7 +16,7 @@ from src.kernel.token_resolver import (
     create_action_handler,
 )
 
-RK = "gitee:yang-aiwu-new/demo"
+RK = "gitee:acme/demo"
 
 
 def _result(provider):

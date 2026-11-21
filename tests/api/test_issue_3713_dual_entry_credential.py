@@ -30,8 +30,8 @@ from src.kernel.token_resolver import ExplicitRepoBotToken, resolve_exec_token
 
 SESSION_USER = {"auth_type": "session_token", "id": "0", "username": "",
                 "agent_type": "coding"}
-RK = "gitee:yang-aiwu-new/demo"
-OWNER, REPO = "yang-aiwu-new", "demo"
+RK = "gitee:acme/demo"
+OWNER, REPO = "acme", "demo"
 RC_BOT = "rc-bot-token-0123456789abcdef01234567"
 OWNER_PAT = "owner-pat-0123456789abcdef01234567"
 GLOBAL_BOT = "global-bot-token-should-never-leak"

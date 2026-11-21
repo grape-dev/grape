@@ -20,7 +20,7 @@ from issue_3713_fakes import CredWorld, install, restore_ports, snapshot_ports
 from src.domains.runtime.engine import agent as agent_mod
 from src.domains.runtime.engine import repogit
 
-RK = "gitee:yang-aiwu-new/demo"
+RK = "gitee:acme/demo"
 
 
 

@@ -208,12 +208,12 @@ def test_clone_username_source_is_observable():
 
     # 卡上有 bot_username → card_bot_username（本机 gitee 的实际情况）
     card = type("C", (), {"host": "gitee.com", "clone_auth": "basic_password",
-                          "bot_username": "yang-aiwu-new", "token_env": ""})()
+                          "bot_username": "acme", "token_env": ""})()
     orig = ce._card
     ce._card = lambda p: card
     try:
         user, src = ce.clone_username_source("gitee", "gitee:some-org/repo")
-        assert user == "yang-aiwu-new" and src == "card_bot_username"
+        assert user == "acme" and src == "card_bot_username"
 
         # 卡上无 bot_username → owner_fallback（可观测，不静默）
         card.bot_username = ""

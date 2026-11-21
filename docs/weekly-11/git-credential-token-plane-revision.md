@@ -261,7 +261,7 @@ case                              coding            chat            返回值
 硬断言（只看 HTTP 200 不够 —— username 错时 200 也会在推的时候 403）：
 
 ```
-git ls-remote  https://gitee.com/yang-aiwu-new/demo.git   （username=yang-aiwu-new + 返回 token）
+git ls-remote  https://gitee.com/<ACCOUNT>/demo.git   （username=<ACCOUNT> + 返回 token）
                → rc=0，读到 HEAD 6b805e7 / refs/heads/master / feat/issue-...
 git push --dry-run HEAD:refs/heads/probe-cred-check
                → rc=0，`* [new branch]`（dry-run，未落远端）

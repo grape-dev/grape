@@ -56,3 +56,27 @@
 - 要求：测试不得手工改写并“恢复”模块级全局（`orig = mod.f; mod.f = ...; finally: mod.f = orig` 之类）。
   一律用 pytest 的 monkeypatch 夹具恢复；同进程内多个测试文件必须互不影响。
 - 验收：DDL 场景与 table_ownership 场景同进程全绿；DDL 场景源码中不存在手工赋值全局的写法。
+
+## R9 云沙箱 executor 必须与 sandbox_context 用同一判定
+
+- 现状：`agents/executor.py::_run_cloud_sandbox` 用 `proc_env["REPO_FULL_NAME"]`（剥前缀裸名）
+  派生平台；`parse_repo_key` 对裸名默认 gitcode → gitee/github/gitlab 仓被 clone 到
+  gitcode.com，令牌环境变量名也回落 `BOT_GITCODE_TOKEN`。
+- 要求：判定顺序与 `sandbox_context` 完全一致：`REPO_KEY`（带前缀）→ `REPO_FULL_NAME`（裸名兜底）；
+  `REPO_FULL_NAME` 只对 runbook 拼 URL 有意义，不得单独决定平台。
+- 验收：用例钉住该顺序；gitee/github/gitlab 三个仓的 clone URL 由前缀决定。
+
+## R10 文档/脚本/夹具脱敏红线
+
+- 禁止出现在仓库内的真实值：个人绝对路径（`/home/<name>`、`/root/<name>`）、
+  真实账号名（含平台账号）、真实库名、真实主机/IP、备份目录实路径。
+- 允许形态：`<venv>`、`<ACCOUNT>`、`<db_mgmt>`、`<db_insight>`、`<BACKUP_DIR>`、
+  `<host_a>`、`<server_ip>`、`<public_ip>`、`<platform_account>`；测试夹具用通用仓
+  `acme/<repo>`。
+- 验收：扫描本分支变更文件（`git diff --name-only <base>...HEAD`）不得命中上述真实值；
+  基线已有的历史命中登记在白名单，只允许减少不允许新增。
+
+## R11 提交署名
+
+- 分支内所有 commit 的 author/committer 与 `Signed-off-by` 必须是机器账号
+  `grape-bot <bot@grapedev.cn>`；历史遗留的个人署名在合入前重写清洗。

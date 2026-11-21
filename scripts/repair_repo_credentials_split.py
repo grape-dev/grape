@@ -9,8 +9,8 @@
 
 用法：
   python scripts/repair_repo_credentials_split.py \
-      --mgmt-dsn 'mysql://u:p@h:3306/grape_dev_mgmt' \
-      --insight-dsn 'mysql://u:p@h:3306/grape_dev_insight' [--apply] [--backup-dir DIR]
+      --mgmt-dsn 'mysql://u:p@h:3306/<db_mgmt>' \
+      --insight-dsn 'mysql://u:p@h:3306/<db_insight>' [--apply] [--backup-dir DIR]
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def main() -> int:
             return 0
 
         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bdir = a.backup_dir or f"/root/backup-rc-{ts}"
+        bdir = a.backup_dir or os.path.join(os.environ.get("RC_BACKUP_DIR") or ".", f"backup-rc-{ts}")
         os.makedirs(bdir, exist_ok=True)
         path = os.path.join(bdir, f"grape_t_repo_credentials_mgmt_{ts}.sql")
         with open(path, "w", encoding="utf-8") as f:

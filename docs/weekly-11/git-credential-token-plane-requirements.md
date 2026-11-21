@@ -20,7 +20,7 @@
 ④ 错误码误导   全部失败都返回 502 Bad Gateway，把「未配置凭据」伪装成「上游故障」
 ```
 
-现场证据：gitee 托管仓库 `git-credential` 恒 502；`gitee:yang-aiwu-new/demo`
+现场证据：gitee 托管仓库 `git-credential` 恒 502；`gitee:<ACCOUNT>/demo`
 无 rc bot 行、host_user_id=`629a7971-…`、归属者 PAT 存在（len=32），
 但用会话 user_id（空）取返回空 → 502。
 

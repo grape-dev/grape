@@ -44,3 +44,15 @@ def test_s5_dispatch_writes_the_prefixed_key():
     src = (pathlib.Path(__file__).resolve().parents[2]
            / "src/domains/runtime/pipeline/event_pipeline.py").read_text(encoding="utf-8")
     assert src.count('"REPO_KEY": repo_key') >= 2
+
+
+def test_s6_cloud_executor_prefers_the_prefixed_key():
+    """评审 T1：云沙箱 executor 曾用裸名派生平台（gitee 仓 clone 到 gitcode.com）。
+
+    行为口径与 sandbox_context 一致：REPO_KEY 优先，REPO_FULL_NAME 只是兜底。
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "src/domains/runtime/agents/executor.py").read_text(encoding="utf-8")
+    assert 'proc_env.get("REPO_KEY") or proc_env.get("REPO_FULL_NAME"' in src
