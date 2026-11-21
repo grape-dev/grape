@@ -16,9 +16,12 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 的关系：MR-1 仅 HTTP span 与日志注入（OTel 自动生成 trace id）；MR-2 把任务
 生命周期接入，task_id/pipeline_trace_id 作为 span 属性与业务 id 同源对齐。
 """
+import logging
 import os
 import platform
 import re
+import threading
+import time
 from contextlib import contextmanager
 
 
@@ -294,6 +297,180 @@ def _worker_relay_exporter_kwargs():
         return None
 
 
+# ===== Issue #3699：中继禁用态（503 trace relay disabled）识别与降噪 =====
+# 背景：prod 主控未配置 OTLP_RELAY_TARGET 时，中继端点对每批 worker 上报都回
+# 503 {"detail":"trace relay disabled"}（主控侧保护分支正确）。这是**配置态确定性
+# 错误**，重试无意义；而 SDK OTLPSpanExporter 把 503 当可重试，5 次指数退避后仍以
+# ERROR 收尾 → 每 5s 一批持续刷屏（Issue #3699 日志证据）。
+# 策略：只对「503 + trace relay disabled」一次性 WARNING 并进入指数退避静默窗口
+# （窗口内不再发请求，主控访问日志也随之安静）；网络错误/429/其他 5xx 保持可重试。
+
+_RELAY_DISABLED_MARKER = "trace relay disabled"
+_RELAY_LOG_NAME = "devops-bot"   # 与 src.kernel.config 的 log 同名，沿用既有 handler/脱敏
+
+
+def relay_failure_kind(status_code: int, body: str = "") -> str:
+    """中继失败分类：``disabled``（确定性禁用）/ ``retryable`` / ``fatal``。
+
+    仅 503 且响应体含 ``trace relay disabled`` 判为禁用——这是主控「未配置
+    OTLP_RELAY_TARGET」的保护分支；上游 LGTM 故障透传的 503/502、网络错误等
+    不含该语义，仍按可重试处理（不得误抑制）。
+    """
+    status = int(status_code or 0)
+    if status == 503 and _RELAY_DISABLED_MARKER in (body or "").lower():
+        return "disabled"
+    if status == 429 or 500 <= status < 600:
+        return "retryable"
+    return "fatal"
+
+
+class _RelayBackoffPolicy:
+    """中继禁用态的进程级退避状态（线程安全，BatchSpanProcessor 单线程 + 手动 flush）。
+
+    - 首次禁用：允许输出一次 WARNING；
+    - 之后按 base_delay 翻倍（上限 max_delay）延长静默窗口，窗口内 ``in_window()``
+      为真 → exporter 直接丢弃本批、不再发请求；
+    - 收到 2xx 即 ``note_success()`` 复位，恢复上报与再次告警能力。
+    """
+
+    def __init__(self, base_delay: float = 30.0, factor: float = 2.0,
+                 max_delay: float = 900.0):
+        self._base = float(base_delay)
+        self._factor = max(float(factor), 1.0)
+        self._max = max(float(max_delay), self._base)
+        self._delay = self._base
+        self._until = 0.0
+        self._warned = False
+        self._lock = threading.Lock()
+
+    @property
+    def delay(self) -> float:
+        """下一次禁用时应采用的退避秒数（当前累积值）。"""
+        with self._lock:
+            return self._delay
+
+    def in_window(self, now: float | None = None) -> bool:
+        """是否处于禁用静默窗口内（窗口内不再发起上报）。"""
+        with self._lock:
+            return self._warned and (time.time() if now is None else now) < self._until
+
+    def note_disabled(self, now: float | None = None) -> bool:
+        """记录一次禁用：返回 True 表示本次应输出（首次）WARNING。
+
+        首次用 base_delay；此后每探测到一次（静默窗口到期后的探针）翻倍，封顶 max_delay。
+        """
+        with self._lock:
+            current = time.time() if now is None else now
+            first = not self._warned
+            if not first:
+                self._delay = min(self._delay * self._factor, self._max)
+            self._warned = True
+            self._until = current + self._delay
+            return first
+
+    def note_success(self) -> None:
+        """中继恢复（2xx）：复位退避与告警去重状态。"""
+        with self._lock:
+            self._delay = self._base
+            self._until = 0.0
+            self._warned = False
+
+
+def _default_relay_post(url: str, payload: bytes, headers: dict, timeout: float):
+    """默认 POST 实现。requests 由 opentelemetry-exporter-otlp-proto-http 传递依赖提供
+    （该 exporter 的 HTTP transport 本身就是 requests），worker 包无需新增依赖。"""
+    import requests
+    return requests.post(url, data=payload, headers=headers, timeout=timeout)
+
+
+class _RelaySpanExporter:
+    """worker 中继 exporter（OTLP/HTTP protobuf），带禁用态降噪。
+
+    与 SDK ``OTLPSpanExporter`` 的差异仅在传输/重试策略：编码复用 SDK 的
+    ``encode_spans``（同源 protobuf 编码）；成功/失败语义、Bearer 头、endpoint
+    契约不变。``post`` / ``sleep`` 为测试 seam。
+
+    刻意不继承 SDK ``SpanExporter``：内核模块 import 期只依赖标准库（worker 包可能
+    未装 opentelemetry），``BatchSpanProcessor`` 仅按 export/shutdown 协议鸭子调用。
+    """
+
+    def __init__(self, endpoint: str, headers: dict | None = None, timeout: float = 5.0,
+                 policy: _RelayBackoffPolicy | None = None, post=None, sleep=None,
+                 max_retries: int = 3, backoff_base: float = 0.5):
+        self._endpoint = endpoint
+        self._timeout = float(timeout or 5.0)
+        self._headers = {"Content-Type": "application/x-protobuf", **(headers or {})}
+        self._policy = policy or _RelayBackoffPolicy()
+        self._post = post or _default_relay_post
+        self._sleep = sleep or time.sleep
+        self._max_retries = max(int(max_retries), 1)
+        self._backoff_base = float(backoff_base)
+        self._log = logging.getLogger(_RELAY_LOG_NAME)
+
+    def export(self, spans):
+        from opentelemetry.sdk.trace.export import SpanExportResult
+
+        if self._policy.in_window():
+            # 禁用静默窗口：本批直接丢弃，不发请求（避免主控访问日志/worker 日志刷屏）
+            return SpanExportResult.FAILURE
+        try:
+            from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
+            payload = encode_spans(spans).SerializePartialToString()
+        except Exception as e:  # noqa: BLE001 — 编码失败不影响业务
+            self._log.warning(f"OTel relay encode failed ({type(e).__name__}): {e}")
+            return SpanExportResult.FAILURE
+
+        last_error = ""
+        for attempt in range(self._max_retries):
+            try:
+                resp = self._post(self._endpoint, payload, dict(self._headers), self._timeout)
+            except Exception as e:  # noqa: BLE001 — 网络错误按可重试处理
+                last_error = f"network error {type(e).__name__}: {e}"
+            else:
+                code = int(getattr(resp, "status_code", 0) or 0)
+                if 200 <= code < 400:
+                    self._policy.note_success()
+                    return SpanExportResult.SUCCESS
+                body = str(getattr(resp, "text", "") or "")
+                kind = relay_failure_kind(code, body)
+                if kind == "disabled":
+                    delay = self._policy.delay
+                    if self._policy.note_disabled():
+                        self._log.warning(
+                            "trace relay disabled by master (503 trace relay disabled): "
+                            f"worker trace export suspended, backing off {delay:.0f}s "
+                            "— check OTLP_RELAY_TARGET on the master")
+                    return SpanExportResult.FAILURE
+                last_error = f"status={code} {body[:160]}"
+                if kind != "retryable":
+                    break
+            if attempt + 1 < self._max_retries:
+                wait = min(self._backoff_base * (2 ** attempt), self._timeout)
+                self._log.warning(
+                    f"transient trace relay export failure ({last_error}), retrying in {wait:.1f}s")
+                self._sleep(wait)
+
+        self._log.error(
+            f"Failed to export spans batch after {self._max_retries} attempt(s): {last_error}")
+        return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        """无缓冲（每批同步 POST），关闭时无需额外动作（BatchSpanProcessor 会调用）。"""
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
+def _relay_exporter(relay: dict):
+    """worker 中继 exporter 工厂：降噪实现优先，构造失败回退 SDK 默认（保通道可用）。"""
+    try:
+        return _RelaySpanExporter(relay["endpoint"], headers=relay.get("headers"),
+                                  timeout=float(relay.get("timeout") or 5))
+    except Exception:  # noqa: BLE001 — 回退不让 trace 通道整体失效
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        return OTLPSpanExporter(**relay)
+
+
 def init_otel(service_name: str):
     """初始化本进程的 OTel。进程级幂等：本进程只要成功初始化过一次，后续任何
     service_name 的重复调用都直接复用同一个 Provider（架构审查 P2-4）。
@@ -334,8 +511,9 @@ def init_otel(service_name: str):
         # 不直连 LGTM（生产 LGTM 机器不对 worker 开放）。主控/CLI 维持 gRPC 直连。
         relay = _worker_relay_exporter_kwargs()
         if relay is not None:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter as _HTTPExporter
-            exporter = _HTTPExporter(**relay)
+            # Issue #3699：中继 exporter 带禁用态降噪（503 trace relay disabled → 一次性
+            # WARNING + 指数退避静默），构造失败时内部回退 SDK 默认实现。
+            exporter = _relay_exporter(relay)
         else:
             # MR-3（2026-11-05）：gRPC→HTTP exporter 切换。实测 Tempo 3.1.1 的 4317 gRPC
             # 接收静默丢弃 span（force_flush 成功但 Tempo 无数据），4318 HTTP 正常落库。

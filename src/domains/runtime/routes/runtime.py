@@ -3105,6 +3105,12 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
 # - 鉴权复用 _require_credential（与 claim 同款）；失败透传状态码，业务零影响
 OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
 
+# Issue #3699：禁用态是**配置态确定性分支**（不是事故）——给响应加确定性标记头，
+# 让访问日志分级能精确区分「中继自己拒绝的 503」与「上游 LGTM 故障透传的 5xx」，
+# 同时进程内只提示一次（13 台 worker × 每 5s 一批，避免告警本身刷屏）。
+RELAY_DISABLED_HEADER = "X-Grape-Trace-Relay"
+_relay_disabled_warned = False
+
 from fastapi.responses import Response as _RelayResponse
 
 _relay_total = None
@@ -3127,10 +3133,18 @@ except Exception:
                          "asynchronously, zero business impact).")
 async def runtime_traces_relay(request: Request,
                                credential_id: int = Depends(_require_credential)):
+    global _relay_disabled_warned
     if not OTLP_RELAY_TARGET:
+        # Issue #3699：配置缺失是确定性禁用（重试无意义）。body/状态码契约不变，
+        # 只加标记头供访问日志精确降噪；进程内一次性提示运维补配置。
+        if not _relay_disabled_warned:
+            _relay_disabled_warned = True
+            log.warning("trace relay disabled: OTLP_RELAY_TARGET not configured on the "
+                        "master; worker trace exports are rejected with 503 until it is set")
         return _RelayResponse(status_code=503,
                               content='{"detail":"trace relay disabled"}',
-                              media_type="application/json")
+                              media_type="application/json",
+                              headers={RELAY_DISABLED_HEADER: "disabled"})
     # 公开端点（虽要求 runtime token）仍需限体：OTLP 批量包通常 <512KB。
     # 架构守护 Medium-1：先按 content-length 拒绝，避免超大包整块读入内存造成尖峰。
     _max_body = int(os.environ.get("GRAPE_TRACE_RELAY_MAX_BODY", str(2 * 1024 * 1024)))
