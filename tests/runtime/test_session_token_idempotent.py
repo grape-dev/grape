@@ -63,6 +63,12 @@ def unique_session_key_index():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE session_key LIKE 'idem:test:%'")
+        # QA 第 6 轮 Informational 4（测试隔离）：只删行不删索引，同进程后续用例会
+        # 带着这枚唯一索引跑，「同 key 多枚并存」的库形态就复现不出来 → 显式 DROP。
+        try:
+            c.execute("DROP INDEX IF EXISTS uniq_session_key_probe")
+        except Exception:  # pragma: no cover - 库不支持/已被清掉
+            pass
         db.commit()
 
 

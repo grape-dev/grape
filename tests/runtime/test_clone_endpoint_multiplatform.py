@@ -232,3 +232,25 @@ def test_clone_username_source_is_observable():
     finally:
         ce._card = orig
         ce._warned_providers.discard("gitee")
+
+
+def test_f_legacy_gitcode_env_fallback_is_logged(monkeypatch, caplog):
+    """F：平台键缺失、回落 BOT_GITCODE_TOKEN 时必须留可检索告警（QA Informational 3b）。
+
+    回落本身保留（旧派发载荷只写 gitcode 键，升级期不能断链）；
+    但多平台混跑时这是跨平台凭据错用，必须能在日志里查出来。
+    """
+    import logging
+
+    from src.domains.runtime.vcs import clone_endpoint as ce
+
+    ce._warned_legacy_env.discard("gitee:o/r")
+    env = {"BOT_GITCODE_TOKEN": "legacy-token"}
+    with caplog.at_level(logging.WARNING):
+        v1 = ce.bot_token_from_env(env, "gitee:o/r")
+        v2 = ce.bot_token_from_env(env, "gitee:o/r")     # 去重：第二次不再刷
+    assert v1 == v2 == "legacy-token", "回落值本身必须保留（升级期兼容）"
+    hits = [r for r in caplog.records if "回落 BOT_GITCODE_TOKEN" in r.getMessage()]
+    assert len(hits) == 1, f"应恰好一条告警（去重），实际 {len(hits)}"
+    assert "gitee:o/r" in hits[0].getMessage()
+    ce._warned_legacy_env.discard("gitee:o/r")

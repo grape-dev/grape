@@ -48,6 +48,9 @@ _USERNAME_BY_SCHEME = {
 #: 用户名派生告警去重（每个 provider 一次，避免每任务刷屏）。
 _warned_providers: set = set()
 
+#: 平台 token 键缺失、回落 gitcode 键的告警去重（每 repo_key 一次）。
+_warned_legacy_env: set = set()
+
 
 class CloneEndpointError(RuntimeError):
     """clone 端点不可派生（平台未在册 / 卡缺 host）。
@@ -231,6 +234,18 @@ def bot_token_from_env(env: dict, repo_key: str) -> str:
     if value:
         return value
     if name != "BOT_GITCODE_TOKEN":
-        # 旧 worker / 旧派发载荷只写 gitcode 键：仍取一次，避免升级期断链
-        return str(env.get("BOT_GITCODE_TOKEN") or "")
+        # 旧 worker / 旧派发载荷只写 gitcode 键：仍取一次，避免升级期断链。
+        # 但这条回落有跨平台错用风险（多平台混跑进程里，gitee 仓会拿到 gitcode 的
+        # bot token → 上游 403 且看着像凭据配错），所以要留一条可检索的告警
+        # （QA 第 6 轮 Informational 3b）。
+        legacy = str(env.get("BOT_GITCODE_TOKEN") or "")
+        if legacy:
+            _rk = str(repo_key or "")
+            if _rk not in _warned_legacy_env:
+                _warned_legacy_env.add(_rk)
+                log.warning(
+                    f"clone_endpoint: 平台键 {name} 未注入，回落 BOT_GITCODE_TOKEN"
+                    f"（repo_key={_rk or '-'}）；多平台混跑时这可能是跨平台凭据错用，"
+                    f"请检查派发侧是否按卡 token_env 注入")
+        return legacy
     return ""
