@@ -26,24 +26,28 @@ EngineMetrics.flap_by_cause        ← 新增归因桶（/health/realtime im 段
    显式 `except asyncio.CancelledError: raise`（停机/让渡取消不得被包成链路失败），
    `except (ChannelError, PermanentChannelError): raise` 透传已归一的契约异常，
    其余 `except Exception` → `_ws_failure()`，`raise ... from exc` 保留原始 cause 链。
-3. **关闭码提取**：`_ws_close_code()` 依次探测 `exc.code` / `exc.rcvd.code` / `exc.sent.code`
-   并沿 `__cause__`/`__context__` 上溯（带 visited 去环），因此
-   「BrokenPipe 被 3001 覆盖」的现场也能命中 3001。
+3. **关闭码提取**：`_ws_close_code()` 只认 websockets 关闭对象
+   （`ConnectionClosed` 含 Error 子类、`frames.Close`）的 `.code`，并沿
+   `__cause__`/`__context__` 上溯（带 visited 去环），因此「BrokenPipe 被 3001 覆盖」
+   的现场也能命中 3001；非 WS 异常自带的同名 `.code`（HTTP/业务错误码）不再被误判。
 4. **归因而非字符串匹配**：Supervisor 用异常类型分派，不解析日志文本；桶名
    `ws_register_conflict` 进入 `FLAP_CAUSES`（缺失键按 0 暴露，看板零改动）。
 5. **退避分档**：`next_backoff(current, register_conflict=)` 纯函数——
-   普通抖动 2s→15s（原行为不变），注册冲突 5s→300s。冲突计数在
-   「一次连接健康存活 ≥ 60s」后重置（`REGISTER_CONFLICT_STABLE_SECS`），
-   避免历史冲突把后续偶发冲突直接顶到告警。
+   普通抖动 2s→15s（原行为不变），注册冲突 5s→300s。冲突计数按**上一轮 connect()
+   的真实存活时长**（`last_session_secs`）判定：≥60s
+   （`REGISTER_CONFLICT_STABLE_SECS`）即视为已恢复并重置计数/退避——冲突分支自身
+   是握手期快速失败，不能用本轮耗时判断，否则健康长连接断开后再撞 3001 时计数会
+   跨健康期残留（非连续冲突误升级 ERROR、恢复后仍沿用最长退避）。
 6. **告警即日志级别分级**：前 4 次 WARNING（带 `consecutive` / `retry_in`），
    第 5 次起 ERROR 且带 `registration conflict escalated` 与 `cause=ws_register_conflict`
    —— Grafana 既有 ERROR 规则即可捕获，无需新增外部告警通道。
 7. **同 app 单连接**：`Supervisor._ensure_channel` 按 `app_identity(config)`
-   （`app_id`/`ilink_bot_id`/`bot_token`/`token`）判重，第二个持有者直接跳过（**不建连接、
-   不抢租约**），WARNING 记录 `app/inst/owner`；归属在让渡/revoke/停机时由
-   `_drop_app_ref()` 释放，被跳过的安装下一轮自然接上（不饿死、不静默删安装行）。
-   日志里的 app 标识对 Slack/Telegram 的 token 位做不可逆摘要（与
-   `engine_wiring._safe_app_ref` 同口径），不落令牌片段。
+   （各适配器真实读取的 `app_id`/`bot_id`/`ilink_bot_id`/`bot_token`）判重，第二个持有者
+   直接跳过（**不建连接、不抢租约**），WARNING 记录 `app/inst/owner`；归属在
+   让渡/revoke/停机时由 `_drop_app_ref()` 释放，被跳过的安装下一轮自然接上
+   （不饿死、不静默删安装行）。日志里的 app 标识走白名单：仅飞书 `cli_*` / 钉钉 `ding*`
+   公开形态明文，其余（企微 `bot_id`、微信 `ilink_bot_id`、任意凭据形态）一律 sha256 摘要，
+   日志不落凭据片段。
 8. **不重复造轮子**：`engine_wiring._built_apps` 的 app 去重仍在（装配层「同一 app 只建一条」），
    本改动补的是 Supervisor 层「多安装/僵尸连接并发注册」这一层缺失的校验——
    工厂被不同 scope 放过时才会真正撞 3001。

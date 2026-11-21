@@ -21,8 +21,12 @@
 
 ## 复核要点（给 QA）
 
-- `_ws_close_code` 只认 `int` 关闭码，沿 cause/context 上溯一次即止环；不可退化为日志文本匹配。
+- `_ws_close_code` 只认 websockets 关闭对象的 `int` 关闭码（`ConnectionClosed` / `frames.Close`），
+  沿 cause/context 上溯一次即止环；非 WS 异常的同名 `.code` 不参与判定，不可退化为日志文本匹配。
+- 冲突计数重置依据**上一轮 connect() 的真实存活时长**（`last_session_secs`），不能用本轮
+  attempt 的 elapsed（冲突分支恒为握手期毫秒级失败）。
 - Supervisor 分支顺序：`PermanentChannelError` → `ChannelRegistrationConflict` → `ChannelError`
   → `Exception`（子类必须先于父类，否则 3001 又落回通用分支）。
 - app 去重在 `try_acquire` **之前**返回，绝不出现「持租约但不建连接」。
-- 日志中的 app 标识不落 token 明文（Slack `app_id` 位存 Bot Token，Telegram 形如 `123:ABC`）。
+- app 身份只探测适配器真实读取的键（`app_id`/`bot_id`/`ilink_bot_id`/`bot_token`）；
+  日志标识白名单外一律摘要（Slack/Telegram token 位、企微 `bot_id`、微信 `ilink_bot_id`）。
