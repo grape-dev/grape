@@ -9,7 +9,7 @@
 1. **要做**：把"clone 地址 + 鉴权形态 + 用户名"收口成一个纯函数面 `vcs/clone_endpoint.py`，四处 clone 入口（普通 worker / 云沙箱 executor / 沙箱上下文 / 接管下发）与两处凭据下发（CLI 一次券 / 沙箱 askpass）全部改为向它取参，删除 3 处硬编码 `https://gitcode.com/...` 与 2 套用户名常量。
 2. **不做**（本轮）：不改 git 传输形态（不引入 bundle / HTTP 代理）、不动 `/api/git-repo` 的通道端点（checks/status 错平台是独立一步）、不新增平台卡 schema 键（`clone_username` 复用既有 `bot_username`，避免撞卡键集门禁）。
 3. **收益**：新增平台 = 只加一张平台卡，clone 四处自动生效；沙箱/接管不再把 gitee/github/gitlab 仓当 gitcode 仓去 clone。
-4. **行为变化点**（必须评审确认）：gitee 的 clone 用户名从 `""`/`x-access-token` 变为卡 `bot_username`（缺省回退仓库 owner）；沙箱与接管对非 gitcode 仓的 clone URL 从 `gitcode.com` 变为卡 host。前者是修复但需真机验证，后者是 bug 修复。
+4. **行为变化点**（必须评审确认）：gitee 的 clone 用户名从 `""`/`x-access-token` 变为**令牌账号名**（解析失败才回落卡 `bot_username` → 仓库 owner）；沙箱与接管对非 gitcode 仓的 clone URL 从 `gitcode.com` 变为卡 host。前者是修复但需真机验证，后者是 bug 修复。
 
 ## 1. 现状事实（逐条可复验）
 
@@ -84,16 +84,27 @@ clone_url(repo_key) -> str                  # https://<card.host>/<owner>/<repo>
 clone_params(repo_key) -> dict              # provider/owner/repo/clone_url/clone_auth/username
 ```
 
-`clone_username` 派生顺序（关键设计点）：
+`clone_username` 派生顺序（关键设计点；2026-11-21 修正为两层）：
 
 ```
-1) clone_auth = basic_password  → 卡 bot_username；为空 → 仓库 owner（其与令牌同账号时相等）
-                                  首次回退打一条 WARNING（每 provider 一次），提示在卡里填 bot_username
+1) clone_auth = basic_password  → 有令牌：问平台「这枚令牌是谁的」→ 令牌账号名（token_owner）
+                                  无令牌 / 解析失败：卡 bot_username → 仓库 owner
 2) clone_auth = x_access_token  → "x-access-token"（gitcode/github 现形态）
 3) clone_auth = oauth2          → "oauth2"（gitlab 现形态）
 ```
 
-为什么 `basic_password` 不能给常量：该形态语义是"真实用户名 + 令牌当密码"，占位用户名在 gitee 上不是账号，凭据必然被拒。用户的真实账号名只有两个来源——卡（`bot_username`）或仓库归属（owner），别处没有。
+为什么 `basic_password` 不能给常量：该形态语义是"真实用户名 + 令牌当密码"，占位用户名在 gitee 上不是账号，凭据必然被拒。
+
+为什么"按卡派生"后来又改了一次：卡上的 `bot_username` 是人工填的——填成组织名、填成 grape 账号名、令牌轮换后没同步，症状都是 403，而令牌本身有效。同一症状三种成因，运维只能猜。真实账号名只有一个权威来源：平台按令牌回答（`verify_token` → `login`）。所以第一层改为**令牌身份解析**（`src/domains/runtime/vcs/clone_identity.py`，`84ac4a1d3`）：
+
+```
+username_for_token(provider, token, repo_key) -> (username, source)
+  只对 basic_password 出网；按令牌指纹（sha256 前缀）缓存，TTL 默认 3600s，
+  同 key 并发用 per-key 锁收敛（single-flight）；失败不缓存
+  source: token_owner / card_bot_username / owner_fallback / scheme_const / missing
+```
+
+解析失败**不抛**：回落第 1) 条的后两层，`source` 记日志——"谁给的用户名"必须可观测，否则又回到"改了没用"的排查。卡 `bot_username` 由此降级为**回落值**；保存 bot token 时平台侧还会按令牌回填它（`mgmt/admin/repo_platform_routes.py`）。
 
 ### 3.3 消费点改造（一次性对齐）
 
@@ -116,6 +127,7 @@ devbox._clone_repo             → askpass 脚本 Username 读 $GIT_BOT_USERNAME
 ### 3.4 异常与失败语义（保持既有口径）
 
 - 无卡 → `CloneEndpointError(code=platform_not_registered)`；repogit 边界转译为 `PlatformCardMissingError`，agent 侧继续显式阻断（#3632 语义不变）。
+- 取卡通道不可用（主控读表失败 / 超时 / 5xx）→ `code=platform_card_contract_unavailable`，与「平台未注册」**分码**；repogit 把 `code` 透传给 `PlatformCardMissingError`。默认超时 10s，仅传输类失败重试 1 次（详见 `git-credential-token-plane-revision.md` §9）。
 - 派生失败绝**不**回退 `gitcode.com`：静默回退会把 gitee 仓伪装成 gitcode 仓，是本次要消灭的形态。
 - 用户名派生失败（basic_password 且 owner 解析不出）→ 返回空串 + WARNING，不阻断 git（让上游 401 带原文暴露），避免本地把网络/权限问题伪装成配置错误。
 
@@ -135,6 +147,11 @@ assert clone_params("gitlab:o/r")["username"]  == "oauth2"
 # gitee：卡 bot_username 为空 → owner；配了 bot_username → 取卡值
 assert clone_params("gitee:o/r")["username"] == "o"
 monkeypatch(卡.bot_username="gitee-bot"); assert clone_params("gitee:o/r")["username"] == "gitee-bot"
+
+# B2. gitee 有令牌：令牌账号名优先于卡值（source=token_owner）；解析失败回落卡值/owner
+assert username_for_token("gitee", "<token>", "gitee:o/r")[1] == "token_owner"
+assert username_for_token("gitee", "", "gitee:o/r")[1] in ("card_bot_username", "owner_fallback")
+# 其余形态（x_access_token / oauth2）是常量用户名，绝不出网
 
 # C. 无卡 fail-fast，不静默 gitcode
 pytest.raises(CloneEndpointError) / pytest.raises(PlatformCardMissingError) 各测一次

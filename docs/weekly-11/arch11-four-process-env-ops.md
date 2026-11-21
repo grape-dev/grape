@@ -1,6 +1,6 @@
 # 3 库 4 进程部署的环境契约（arch11 现场教训）
 
-本文记录 2026-11-21 在 `grape-arch11`（本机 `192.168.0.194`，公网 `1.92.108.106`）
+本文记录 2026-11-21 在 `grape-arch11`（本机 `<server_ip>`，公网 `<public_ip>`）
 做会话凭据验证时踩到的 4 个部署侧坑。它们都不在代码里，但每个都能让流水线在
 "代码没问题"的情况下整段失效，因此固化成契约。
 
@@ -10,10 +10,10 @@
 
 ```
 进程        端口    角色     库                          账号
-mgmt       38080   server   192.168.0.59 / grape_lfr_mgmt      liufei_dev_mgmt
-event      38081   event    192.168.0.243 / grape_lfr_runtime  liufei_dev_runtime
-worker     38082   worker   192.168.0.243 / grape_lfr_runtime  liufei_dev_runtime
-insight    38083   insight  192.168.0.164 / grape_lfr_insight  liufei_dev_insight
+mgmt       38080   server   <mgmt_db_host> / grape_lfr_mgmt      liufei_dev_mgmt
+event      38081   event    <runtime_db_host> / grape_lfr_runtime  liufei_dev_runtime
+worker     38082   worker   <runtime_db_host> / grape_lfr_runtime  liufei_dev_runtime
+insight    38083   insight  <insight_db_host> / grape_lfr_insight  liufei_dev_insight
 ```
 
 三库三机、`GRAPE_DOMAIN_LIB=1`，跨域读走 lib 模式；nginx 按路径分流到四进程
@@ -143,14 +143,14 @@ running / queued 的任务               → 行必须存在；不存在才是�
 
 ```
 本机 arch11（/home/liufei/grape-arch11，38080-38083）
-  mgmt    38080  grape_lfr_mgmt     192.168.0.59
-  event   38081  grape_lfr_runtime  192.168.0.243
-  worker  38082  grape_lfr_runtime  192.168.0.243
-  insight 38083  grape_lfr_insight  192.168.0.164
+  mgmt    38080  grape_lfr_mgmt     <mgmt_db_host>
+  event   38081  grape_lfr_runtime  <runtime_db_host>
+  worker  38082  grape_lfr_runtime  <runtime_db_host>
+  insight 38083  grape_lfr_insight  <insight_db_host>
 
 227 grape-arch4（8081-8084）
   mgmt 8081 / event 8082 / worker 8083 / insight 8084
-  三库同实例 192.168.0.59：grape_dev_mgmt / grape_dev_runtime / grape_dev_insight
+  三库同实例 <mgmt_db_host>：grape_dev_mgmt / grape_dev_runtime / grape_dev_insight
 ```
 
 **归属以 `configs/table_ownership.json` 为准**（149 张基表 + 131 个视图，随仓维护；

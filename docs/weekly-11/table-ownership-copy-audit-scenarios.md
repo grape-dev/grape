@@ -56,7 +56,7 @@ drop_empty_copy(conn, "<表名>")                   # 只删 0 行副本，非 0
 
 ## 4. 真库证据（本机 arch11，2026-11-21 18:46）
 
-`grape_lfr_mgmt`（192.168.0.59）的别域副本 —— 11 张：
+`grape_lfr_mgmt`（<mgmt_db_host>）的别域副本 —— 11 张：
 
 ```
 agent_runtimes                    owner=runtime  rows=0    empty_copy
@@ -74,7 +74,7 @@ takeover_sessions                 owner=runtime  rows=0    empty_copy
 
 `meta` 的 4 行：`issue343_jwt_invalidated` / `issue95_migrate_done` / `m0_backup_done` /
 `server_base_url` —— runtime 库里**四个键都存在**，当前值一致（`server_base_url` 两边都是
-`http://192.168.0.194`）。但这条路径历史上踩过坑：往 mgmt 的同名 `meta` 写键**完全不生效**
+`http://<server_ip>`）。但这条路径历史上踩过坑：往 mgmt 的同名 `meta` 写键**完全不生效**
 （服务只读 runtime 那份）。它是「双写路径残留」，一旦哪次只写 mgmt 就会分叉 ——
 这正是它被归为 `divergent_copy`、禁止自动删的原因。
 

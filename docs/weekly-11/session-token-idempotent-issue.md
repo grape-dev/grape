@@ -15,7 +15,7 @@ Issue #1 的 A2A 补发处理未执行
    `issues detail` / `tasks complete` / 评论回复全部 `Missing token` 或超时；
 2. 同一任务的 `agent_tasks.env_extra`（快照）里**却有** `GRAPE_SESSION_TOKEN`（长度正常、前缀 `tk_`）；
 3. 日志报「服务端不可达」：`GRAPE_SERVER_URL=http://<公网 IP>`，而执行节点访问该地址 80 端口返回 000
-   （同机 `127.0.0.1:80` 与内网 `192.168.0.x:80` 均 200）。
+   （同机 `127.0.0.1:80` 与内网 `<intranet_ip>:80` 均 200）。
 
 ## 2. 根因
 
@@ -164,7 +164,7 @@ log.error(... "continuing without GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_A
 ### 4.4 部署（已按内网基址修正）
 
 ```
-grape_lfr_runtime.meta.server_base_url: http://<公网 IP>  →  http://192.168.0.194
+grape_lfr_runtime.meta.server_base_url: http://<公网 IP>  →  http://<server_ip>
 （内网地址对本机四进程与远端 worker 均可达；webhook 回调走独立键 webhook_url，不受影响）
 ```
 

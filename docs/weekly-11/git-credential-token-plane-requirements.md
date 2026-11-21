@@ -106,6 +106,14 @@ R2.13 OAuth 渠道定义的写入只走 `grape_t_oauth_channels`，不再抄进 
        表已承载全套字段（auth_url/token_url/scope/pkce/id_field/client_*_enc/enabled），
        且 providers.py 读取顺序为「文件卡 → meta 逐键覆盖 → 表整卡覆盖」，表是运行时真源。
        meta 的读取层保留（老部署表未就绪时的兼容），但写入路径删除。
+R2.14 取卡通道故障必须与「平台未注册」分码，不得退化成一个错误码：
+       服务端为避免 5xx 以 `{cards:{}, error:"platform_cards_unavailable"}` 报告读表失败，
+       客户端此前只取 cards（`{}` 是合法值）→ 装配层回落 builtin（只有 gitcode）
+       → 任务看到 `platform_not_registered`，把系统性故障伪装成"没配卡"。
+       契约：fetch_cards 消费 error / 5xx → `PlatformCardUnavailableError`；
+       装配层记录 degraded 原因并随缓存同生命周期；clone 端 code=`platform_card_contract_unavailable`；
+       默认超时 10.0s（取卡只在缓存未命中时发生），仅传输类失败重试 1 次，
+       401/403/404 与响应格式非法不重试。
 ```
 
 ### R3  用户档的兜底面
@@ -177,4 +185,6 @@ R2.15 `session_key` 不得被写成代码级唯一契约（2026-11-21 修正，�
 A17 meta upsert 幂等：同值重写两次不抛异常、行数恒 1（SQLite S1/S2 + MySQL 真库探针）
 A18 方言翻译：meta upsert 翻成 ON DUPLICATE KEY UPDATE 且 KEY 不被反引号化（S1–S4）；
     OAuth 渠道同步不再调用任何 meta 写入（S4 源码锁）
+A19 取卡故障分码：服务端 error / 5xx → `platform_card_contract_unavailable`，
+    卡正常时派生结果一字不变；默认超时 10.0s，只重试传输类失败（S1–S9）
 ```

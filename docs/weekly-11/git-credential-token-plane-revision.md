@@ -245,7 +245,7 @@ path-B 的任何分支。
             get_repo_credential_meta 自身三态：无行=None / 解不开=undecryptable / 可用=value
 ```
 
-真实库六组合（`grape_lfr_insight@192.168.0.164`，arch11 `:38080` 进程内 `bind_all()` 后实跑；
+真实库六组合（`grape_lfr_insight@<insight_db_host>`，arch11 `:38080` 进程内 `bind_all()` 后实跑；
 脚本打印实际连接的 `TABLE_SCHEMA`，因为 mgmt 库里那张同名表是空壳）：
 
 ```
@@ -291,7 +291,7 @@ demo bot_token_status → 复原 ''
 ## 6. 相邻缺陷：表归属副本审计（2026-11-21）
 
 本轮两次把 `grape_t_repo_credentials` 从 **mgmt 库** 查成「0 行」，据此判断「该仓没配 bot」——
-实际数据在 insight 库（`grape_lfr_insight@192.168.0.164`）。**代码走契约是对的，错的是举证走裸 SQL。**
+实际数据在 insight 库（`grape_lfr_insight@<insight_db_host>`）。**代码走契约是对的，错的是举证走裸 SQL。**
 
 ```
 契约链    mgmt.get_repo_credential_meta → insight.public.repo_credential_meta
@@ -411,7 +411,41 @@ near '`key` UPDATE value=VALUES(value)'
       最后一条 1062 停在 11:19（修复前）
 ```
 
-## 9. 未做（需评审）
+## 9. 相邻缺陷：取卡通道故障被伪装成「平台未注册」（2026-11-21）
+
+服务端 `snapshot()` 读 mgmt 表失败时**故意不打 5xx**，改回
+`{"cards": {}, "error": "platform_cards_unavailable"}`，好让故障跨进程传到 worker。
+客户端 `fetch_cards()` 只取 `payload["cards"]`，而 `{}` 是合法值 → 装配层回落 builtin（只有 gitcode）
+→ `get_platform_card("gitee")` 返回 `None` → 任务得到 `platform_not_registered`。
+处置方向被带偏：以为是"没配卡"，实际是主控读表坏了。
+
+改动（`034c36aed`）：
+
+```
+PlatformCardUnavailableError        error / 5xx → 该异常；401/403/404 仍为不可重试的 ContractError
+_RETRY_ATTEMPTS=2  _RETRY_DELAY=0.5s  只重试传输类失败（配置错重试不会变对）
+_DEFAULT_CARD_TIMEOUT 2.0 → 10.0s     取卡只在缓存未命中时发生（300s 一次）
+card_sources.degraded / platform_card._degraded_reason   降级原因随缓存同生命周期
+clone_endpoint → code=platform_card_contract_unavailable（repogit 透传 code）
+```
+
+验证（一次一个文件）：
+
+```
+tests/runtime/test_platform_card_contract_failure.py        9 passed
+tests/runtime/test_issue_3632_platform_card_contract.py    25 passed
+```
+
+已知限制（本轮不修，登记在此）：
+
+```
+· worker 只有进程内 300s 卡缓存，无磁盘兜底；主控卡契约不可用 + worker 冷启动时非 gitcode 平台直接失败。
+· _load_cards() 重建是无条件的：一次降级重建会清掉上一次的好缓存（实测 gitee 消失），
+  所以抖动跨过 300s 重建点时，该窗口内 clone 失败——错误码可自诊断，重派或等自愈。
+· 用旧卡兜底的方案（stale-on-error / 磁盘缓存）评估过，收益窄、且会掩盖主控长期故障，暂不做。
+```
+
+## 10. 未做（需评审）
 
 ```
 ① 把 db 层 _repo_bot_token_value 的守卫改成"仅当没有任何 bot 凭据时生效"
@@ -425,7 +459,7 @@ near '`key` UPDATE value=VALUES(value)'
 ④ S118 结构守卫改造（按 §3 的新两态写法）
 ```
 
-## 10. 关联
+## 11. 关联
 
 ```
 需求主线   docs/weekly-08/issue-372-user-token-only-requirements.md  R1.x / R2.1 / R2.3
