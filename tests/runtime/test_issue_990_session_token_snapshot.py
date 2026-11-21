@@ -65,7 +65,14 @@ def _new_task(repo_key="gitcode:issue990/r", agent_type="coding", user_id=0, env
 def _task_env(task_id):
     with db_lock:
         row = db.cursor().execute("SELECT env_extra FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-    return json.loads(row[0]) if row else {}
+    if not row or not row[0]:
+        return {}
+    raw = row[0]
+    if isinstance(raw, str):
+        # #2423：落库可能是 enc:v1 信封，明文 json.loads 读不出来（本文件长期红着的根因）
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        return decrypt_env_extra(raw)
+    return raw
 
 
 def _expire_token(token):
@@ -247,6 +254,48 @@ class TestSyncTaskSessionToken:
             assert auth_token.verify_session_token(new) is not None
             info = auth_token.verify_session_token(new)
             assert info["session_key"] == tid and info["repo_key"] == "gitcode:issue990/r"
+        finally:
+            _cleanup([tid])
+
+    def test_rotates_expired_snapshot_and_preserves_all_keys(self):
+        """#3649：轮换只替换 token，不得抹掉场景/仓库/凭据变量。
+
+        历史实现用 json.loads 读 enc:v1 信封 → 必然抛错 → env 被当成空 dict，
+        回写后整行只剩 GRAPE_SESSION_TOKEN，任务执行时 shell 里就没有
+        场景自定义变量（如 EXAMPLE_SCENE_PASSWORD）了。
+        """
+        tid = _new_task(env_extra={
+            "EXAMPLE_SCENE_PASSWORD": "pw-123456",
+            "EXAMPLE_SCENE_HOST": "198.51.100.7",
+            "PR_NUMBER": "4242",
+        })
+        try:
+            old = _task_env(tid)["GRAPE_SESSION_TOKEN"]
+            _expire_token(old)
+            new = sync_task_session_token(tid)
+            assert new.startswith("tk_") and new != old
+            after = _task_env(tid)
+            assert after["GRAPE_SESSION_TOKEN"] == new
+            assert after["EXAMPLE_SCENE_PASSWORD"] == "pw-123456"
+            assert after["EXAMPLE_SCENE_HOST"] == "198.51.100.7"
+            assert after["PR_NUMBER"] == "4242"
+        finally:
+            _cleanup([tid])
+
+    def test_unreadable_envelope_is_never_overwritten(self):
+        """解密不出来时 fail-closed：返回空串且原快照一行不动（禁止抹平）。"""
+        tid = _new_task()
+        bogus = "enc:v1:AAAA:bm90LWEtdmFsaWQtZW52ZWxvcGU="
+        try:
+            with db_lock:
+                db.cursor().execute("UPDATE agent_tasks SET env_extra=? WHERE id=?", (bogus, tid))
+                db.commit()
+            got = sync_task_session_token(tid)
+            assert got == ""
+            with db_lock:
+                raw = db.cursor().execute(
+                    "SELECT env_extra FROM agent_tasks WHERE id=?", (tid,)).fetchone()[0]
+            assert raw == bogus  # 未被覆盖成 {"GRAPE_SESSION_TOKEN": ...}
         finally:
             _cleanup([tid])
 
