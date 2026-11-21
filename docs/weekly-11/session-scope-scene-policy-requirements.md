@@ -44,6 +44,9 @@ R5  空 repo_key 的历史 token：repo_bound 场景由 legacy_unbound_ok 保留
 R6  任务平面跨仓：必须传 access_check（用户对目标仓的可见权），未传或返回 False → 拒绝
 R7  错误响应同时带 code（403）与 error_code（场景错误码）+ message（含具体原因）
 R8  取券口径随场景声明（credential_source），为 #3713「换券与建树同源」提供唯一入口
+R9  架构约束：判定层（kernel.scene_policy）不得依赖任何 domain；「用户对仓库的可见性」
+    属宿主域能力，只能经 mgmt.public 契约调用（3库4进程：非 mgmt 进程按 GRAPE_DSN_MGMT
+    路由，单库拓扑回落；判定不出按无权，不许静默跨库查表）
 ```
 
 ## 4. 验收标准
@@ -60,6 +63,8 @@ A5  未登记场景 → SCENE_NOT_REGISTERED
 A6  非法/缺失 token → 403，文案区分"需会话 token"/"会话 token 无效"
 A7  原有 18 条 token 平面用例与 9 条换券授权用例保持全绿
 A8  响应体 shape 不变（code/error_code/message），唯一新增 error_code 字段
+A9  tests/arch/test_domain_boundaries.py 与 tests/contracts 全绿；kernel 判定层零 domain import；
+    runtime 侧无新增 SQL/跨库 JOIN
 ```
 
 ## 5. 场景表（首付三处已改，其余登记迁移）

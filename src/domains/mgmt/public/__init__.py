@@ -6041,6 +6041,25 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
     return _impl(user_id, org_id, personal_org)
 
 
+def user_can_access_repo(user_id, repo_key: str) -> bool:
+    """宿主域能力：某用户是否可见（有权限的）某仓库。
+
+    「用户 → 仓库可见性」的判定归 mgmt 域所有，其它域（runtime / insight）一律通过本契约
+    取值，不自己 JOIN managed_repos / user_repos（3库4进程：跨域只走 public）。
+    口径 = get_managed_repos(user_id) 含目标 repo_key（JOIN user_repos，成员也算可见）；
+    user_id 缺失、查询异常一律 False（宁拒勿放）。
+    """
+    uid = str(user_id or "").strip()
+    rk = str(repo_key or "").strip()
+    if not uid or not rk:
+        return False
+    try:
+        return any((r.get("repo_key") or "") == rk
+                   for r in (get_managed_repos(uid) or []))
+    except Exception:  # noqa: BLE001 - 判定不出可见性按无权处理
+        return False
+
+
 def get_host_user_id(repo_key: str):
     """仓库 host 用户 id（D105 后为 UUID TEXT，按字符串判定）。"""
     from src.domains.mgmt.user.db import get_host_user_id as _impl

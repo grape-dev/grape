@@ -407,9 +407,9 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     if not uid or not repo_key:
         return False
     try:
-        from src.domains.mgmt.public import get_managed_repos
-        repos = get_managed_repos(uid) or []
-        return any(r.get("repo_key") == repo_key for r in repos)
+        # 可见性判定归 mgmt 域（宿主能力），此处只消费契约
+        from src.domains.mgmt.public import user_can_access_repo
+        return user_can_access_repo(uid, repo_key)
     except Exception as e:
         log.warning(f"[finding-card] access check failed uid={uid}: {e}")
         return False

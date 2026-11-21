@@ -80,8 +80,9 @@ chat 的两种 token：
     但要给 SESSION_NOT_REPO_BOUND，让 agent 知道"去绑仓"，而不是"作用域不匹配"；
   · 任务平面（notify / 下派）chat 代表用户本人操作，授权依据是**用户对目标仓的可见权**，
     不是 token 的仓绑定 —— 否则 chat 永远派不了任务（本次现场即此）。
-可见权口径：`mgmt.get_managed_repos(user_id)` 包含目标 repo_key（JOIN user_repos，
-成员也可见）。判定不出（异常/无 user_id）一律按无权。
+可见权口径：宿主域能力 `mgmt.public.user_can_access_repo(user_id, repo_key)`
+（内部 = `get_managed_repos` 含目标 repo_key，JOIN user_repos，成员也可见）。
+判定不出（异常/无 user_id/无 DSN）一律按无权。
 ```
 
 ### 2.4 取券口径留位（#3713）
@@ -134,4 +135,45 @@ tests/api/test_git_credential_authorization.py  S1–S10（含 S6 空作用域�
 · 不放宽 repo_bound 场景（除了历史空作用域这一条兼容开关）
 · access_check 只认"用户可见权"，不认"关系表"；dispatch 关系证明随 #2112 迁移批次补
 · 不把 HTTP 语义塞进 worker：任务面只用 error_code 分类，渲染各自做
+```
+
+## 7. 3库4进程与跨域契约（本实现如何满足）
+
+```
+分层        src/kernel/scene_policy.py = 纯策略（无 DB / 无 domain import，grep 为空）
+            → mgmt / runtime / insight 三个进程共用同一份判定，不引入跨域依赖
+跨域能力    需要「用户是否可见目标仓」，这属于宿主域（mgmt）的能力：
+            新增 src/domains/mgmt/public/__init__.py::user_can_access_repo
+            → runtime 只 `from src.domains.mgmt.public import user_can_access_repo`
+            内部按域连接路由（db_registry._MgmtDbProxy）：
+              本进程域=mgmt → 进程主库；其它进程 → GRAPE_DSN_MGMT；单库 → 回落
+            不直接 JOIN managed_repos/user_repos，不写裸表名，不做 DSN 反查猜域
+SQL 面      本次改动在 runtime 侧 0 条 SQL；mgmt 侧只新增一个契约函数，无新表
+进程面      mgmt 进程承载换券/project-info；runtime 进程承载 notify；
+            跨进程取值靠契约 + DSN，四进程拓扑与重启面不变（无新进程/新端点）
+```
+
+### 7.1 真机实测（本机 38081 = runtime 进程 env 注入，只读调用）
+
+```
+A. 三库 DSN 齐备
+   current_domain = runtime ; uses_own_dsn("mgmt") = True
+   真实组合(uid=1, managed∩user_repos 共 21 行) → True
+   陌生仓 → False ; 空 user_id → False
+
+B. 摘掉 GRAPE_DSN_MGMT（模拟漏配 / 单库拓扑）
+   uses_own_dsn("mgmt") = False
+   日志：get_managed_repos join failed: no such table: organization
+   契约返回 False → 拒绝，而不是静默去本进程库查一张不存在/同名的表
+
+C. mgmt 进程内视角走进程主库（current_domain()=='mgmt'），由运行中的 mgmt 进程保证；
+   独立脚本无法复现主库 wiring，故不以此单独下结论（避免把"脚本没连对库"当成缺陷）。
+```
+
+### 7.2 复用既有能力（不重造）
+
+```
+runtime/im/handler_async.py::_autopilot_user_allowed 原本自己 `get_managed_repos + any()`；
+本次改为委托 user_can_access_repo —— 可见性口径只剩宿主域一份实现。
+（此前该私有函数是唯一一处，另一处就是本次新增的 notify 守卫：属于重复实现，已合并。）
 ```

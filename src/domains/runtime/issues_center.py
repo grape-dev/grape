@@ -129,16 +129,15 @@ def _require_session_repo_token(request: Request, repo_key: str, *, scene=None) 
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无效"})
 
     def _visible(target: str) -> bool:
-        """会话用户对目标仓是否有可见权（跨仓/伪作用域的唯一放行依据）。"""
-        uid = str(info.get("user_id") or "")
-        if not uid:
-            return False
-        try:
-            from src.domains.mgmt.public import get_managed_repos
-            return any((r.get("repo_key") or "") == target
-                       for r in (get_managed_repos(uid) or []))
-        except Exception:  # noqa: BLE001 - 判定不出可见权一律按无权
-            return False
+        """会话用户对目标仓是否有可见权（跨仓/伪作用域的唯一放行依据）。
+
+        能力由宿主域提供：`mgmt.public.user_can_access_repo`。runtime 不自己 JOIN
+        managed_repos/user_repos —— 3库4进程下 mgmt 库不在本进程，契约内部按
+        GRAPE_DSN_MGMT 路由（db_registry），这样单库/三库拓扑都不用改调用点。
+        """
+        from src.domains.mgmt.public import user_can_access_repo
+
+        return user_can_access_repo(info.get("user_id"), target)
 
     _decision = decide(scene or Scene.TASK_NOTIFY, info.get("repo_key") or "", repo_key,
                        access_check=_visible)
