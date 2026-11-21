@@ -485,12 +485,15 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
         # devops 事件任务：只注入 BOT_GITCODE_TOKEN，不注入 USER_GITCODE_TOKEN
         env["BOT_GITCODE_TOKEN"] = task.get("repo_gitcode_token") or ""
 
-    # env_extra（JSON 字符串 → dict）
-    import json as _json
+    # env_extra（enc:v1 信封 → dict，#2423/#3649：直接 json.loads 会静默得到空 env）
     _env_extra = task.get("env_extra") or ""
     if _env_extra:
         try:
-            env.update(_json.loads(_env_extra) if isinstance(_env_extra, str) else _env_extra)
+            if isinstance(_env_extra, str):
+                from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+                env.update(decrypt_env_extra(_env_extra))
+            else:
+                env.update(_env_extra)
         except Exception:
             pass
 

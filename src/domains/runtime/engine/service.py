@@ -5814,12 +5814,25 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                     user_id = int(row[2] or 0)
                 except (TypeError, ValueError):
                     user_id = 0
+                # #3649：env_extra 落库已是 enc:v1 信封（#2423 M1 加密），必须走
+                # decrypt_env_extra。历史实现直接 json.loads → 解信封必抛 JSONDecodeError
+                # → env 被当成空字典 → 回写只剩 GRAPE_SESSION_TOKEN，把场景/仓库/凭据变量
+                # 整片抹平（现场表现：任务执行时 shell 里缺少场景自定义变量与 PR 上下文）。
+                _raw_env = row[3]
                 try:
-                    env = json.loads(row[3] or "{}")
-                except Exception:
+                    from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+                    env = decrypt_env_extra(_raw_env) if _raw_env else {}
+                except Exception as _env_e:
+                    log.error(f"sync_task_session_token: env_extra 解析失败 task={task_id}: {_env_e}")
                     env = {}
                 if not isinstance(env, dict):
                     env = {}
+                if _raw_env and not env:
+                    # fail-closed：快照读不出来时绝不回写，否则一次解密失败就永久抹平任务环境
+                    log.error("sync_task_session_token: env_extra 不可读（信封解密为空），"
+                              f"task={task_id} 拒绝回写以免抹平任务环境快照")
+                    _rt_db.commit()
+                    return ""
                 if not repo_key or not agent_type:
                     _rt_db.commit()
                     return ""
@@ -5843,6 +5856,9 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                     session_key=task_id, repo_key=repo_key,
                     agent_type=agent_type, user_id=user_id, commit=False)
                 env["GRAPE_SESSION_TOKEN"] = new_token
+                # 注意：这里沿用明文回写（启动迁移 _fn_migrate_env_extra_encryption 会
+                # 重新加密）。改信封属于 #2423 的独立收口，不在本次数据丢失修复范围内——
+                # 但绝不因为格式问题丢掉任何变量。
                 c.execute(
                     "UPDATE agent_tasks SET env_extra=? WHERE id=?",
                     (json.dumps(env, ensure_ascii=False), task_id),

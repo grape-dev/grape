@@ -67,9 +67,12 @@ def build_context(task: dict) -> SandboxContext:
     _raw_env = task.get("env_extra") or "{}"
     if isinstance(_raw_env, str):
         try:
-            _env_extra = _json.loads(_raw_env)
-        except Exception:
-            pass
+            # #3649：env_extra 是 enc:v1 信封（#2423），必须解密；直接 json.loads
+            # 只会静默得到空 env，REPO_FULL_NAME/BOT token/工作分支全部丢失。
+            from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+            _env_extra = decrypt_env_extra(_raw_env)
+        except Exception as _e:
+            log.warning(f"build_context: env_extra decrypt failed: {_e}")
     elif isinstance(_raw_env, dict):
         _env_extra = _raw_env
 
