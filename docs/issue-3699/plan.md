@@ -59,9 +59,12 @@ class _RelayBackoffPolicy:
 
 def relay_failure_kind(status, body) -> str    # "disabled" | "retryable" | "fatal"
 
-class _RelaySpanExporter(SpanExporter):
+class _RelaySpanExporter:                     # 鸭子类型实现 export/shutdown/force_flush
     """替代 SDK OTLPSpanExporter 的 worker 中继 exporter（单一 POST + 自主退避）。"""
 ```
+
+> 不继承 SDK `SpanExporter`：内核模块 import 期只依赖标准库（worker 包可能未装
+> opentelemetry），`BatchSpanProcessor` 仅按 export/shutdown 协议调用。
 
 行为矩阵：
 
