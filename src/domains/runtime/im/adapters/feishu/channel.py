@@ -22,6 +22,8 @@ import time
 from typing import Any, Awaitable, Callable, Optional
 
 import websockets
+from websockets.exceptions import ConnectionClosed
+from websockets.frames import Close as WsCloseFrame
 from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
@@ -51,20 +53,26 @@ WS_CLOSE_REGISTER_CONFLICT = 3001
 REGISTER_CONFLICT_CLOSE_CODES = frozenset({WS_CLOSE_REGISTER_CONFLICT})
 
 
+# WS 关闭码的合法来源类型：websockets 的 ConnectionClosed（含 Error/OK 子类）与 Close 帧。
+# 只认这两类对象的 .code —— 任意异常自带的同名 .code（HTTP 状态码、业务错误码）不得被
+# 误判为 WS 关闭码（PR #1947 审查意见 Optional：原实现沿 cause 链宽匹配任意 .code int）。
+_WS_CLOSE_SOURCES = (ConnectionClosed, WsCloseFrame)
+
+
 def _ws_close_code(exc: BaseException) -> Optional[int]:
-    """从异常链里取 WS 关闭码（websockets ConnectionClosed.code 或 Close.code）。"""
+    """从异常链里取 WS 关闭码（只认 websockets ConnectionClosed / Close 帧）。"""
     visited: set[int] = set()
     cur: Optional[BaseException] = exc
     while cur is not None and id(cur) not in visited:
         visited.add(id(cur))
-        candidates = (
-            getattr(cur, "code", None),
-            getattr(getattr(cur, "rcvd", None), "code", None),
-            getattr(getattr(cur, "sent", None), "code", None),
-        )
-        for value in candidates:
-            if isinstance(value, int):
-                return value
+        # 先看 rcvd/sent 的 Close 帧，再看对象自身：websockets 13.1+ 已弃用
+        # ConnectionClosed.code（等价于 rcvd/sent 的 code），避免在日志里刷弃用警告。
+        for holder in (getattr(cur, "rcvd", None), getattr(cur, "sent", None), cur):
+            if not isinstance(holder, _WS_CLOSE_SOURCES):
+                continue
+            code = getattr(holder, "code", None)
+            if isinstance(code, int):
+                return code
         cur = cur.__cause__ or cur.__context__
     return None
 
