@@ -1334,7 +1334,8 @@ function stale() {
 }
 
 function loadCategories() {
-  if (categories.value.length) return
+  // Issue #3648：去掉原有的会话级分类缓存。
+  // 管理员收敛分类后整页仍显示旧结构；进入视图 / 切 tab 时重新拉取。
   G.API.get('/skills/categories')
     .then(function (d) {
       categories.value = d.categories || []

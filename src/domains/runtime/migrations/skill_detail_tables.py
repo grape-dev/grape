@@ -17,7 +17,8 @@ domains=("runtime",)：三库模式由 runtime 进程执行
 - 1301/1302 曾顺延到 202611181201/1202，因基线守卫
   tests/api/test_category_columns_repair.py 钉死「20261118120x 段必须为空」
   再顺延到 202611181301/1302；1303 原用 202611180003（基线
-  issue2761-skill-classification-columns 占用）。
+  issue2761-skill-classification-columns 占用；该条已按 Issue #3648 改号到
+  202611210001，classifier 列后置校验也住本模块）。
 """
 from __future__ import annotations
 
@@ -33,6 +34,27 @@ def _ensure_column(cur, table: str, column: str, ddl: str) -> None:
     if _column_exists(cur, table, column):
         return
     cur.execute(f"ALTER TABLE {table} ADD COLUMN `{column}` {ddl}")
+
+
+def verify_skill_classification_columns(conn=None) -> list:
+    """后置校验（Issue #3648）：skill 必须真的具备 cat_l1_id / cat_l2_id。
+
+    执行器在盖章前调用；缺列 raise → 不盖章、下次启动重试。
+    可注入连接供测试使用（sqlite / MySQLCompat 均走 PRAGMA 翻译）。
+    """
+    if conn is None:
+        from src.kernel.session_manager import db as conn
+    cur = conn.cursor()
+    rows = cur.execute("PRAGMA table_info(skill)").fetchall()
+    if not rows:
+        raise RuntimeError(
+            "skill 表不存在（分类列后置校验失败；不盖章，下次启动重试）")
+    cols = {r[1] for r in rows}
+    missing = [col for col in ("cat_l1_id", "cat_l2_id") if col not in cols]
+    if missing:
+        raise RuntimeError(
+            f"skill 缺分类列 {missing}（列迁移未真正到位；不盖章，下次启动重试）")
+    return ["cat_l1_id", "cat_l2_id"]
 
 
 def ensure_skill_detail_schema() -> None:

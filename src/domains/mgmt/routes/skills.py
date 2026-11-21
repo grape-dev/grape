@@ -599,8 +599,16 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                 "tags": parse_tags(raw_tags, limit=SKILL_MAX_TAGS),
             })
             skill_ids.append(r[0])
-    except Exception:
-        pass
+    except Exception as _search_exc:
+        # Issue #3648：schema 故障（如 skill 缺 cat_l1_id）不得伪装成 200 空列表。
+        # 记录完整堆栈并显式 5xx；前端/运维能据此定位，而不是被误导成「没有技能」。
+        from src.kernel.config import log
+        log.exception("list_skills: skill_search failed (schema/query error): %s",
+                      _search_exc)
+        raise HTTPException(status_code=503, detail={
+            "code": 503,
+            "message": "技能列表查询失败（数据库 schema 或查询异常），请查看服务端日志",
+        }) from _search_exc
 
     # 批量查 liked_by_me
     liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids) if skill_ids else {}

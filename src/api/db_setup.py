@@ -2183,6 +2183,10 @@ class Migration:
     # 默认 mgmt = 历史行为；只碰 runtime 表的迁移必须标 ("runtime",)，否则
     # mgmt 进程会「加列被归属守卫跳过、预检又判未完成」永远不盖章。
     domains: tuple = ("mgmt",)
+    # 执行后置校验（#3648）：fn 正常返回后、盖章前调用；不达标抛错 = 不盖章。
+    # 同号不同名（跨分支 renumber 撞号）时也用它判定目标是否真的到位：
+    # 校验通过 → 视为已执行；校验失败 → 重跑幂等 fn 再校验（禁止静默跳过）。
+    post_check: Optional[Callable[[], None]] = None
 
     def __post_init__(self):
         if self.kind not in MIGRATION_KINDS:
@@ -2872,7 +2876,8 @@ _LEGACY_DOMAIN_LABELS = {
 
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None,
-                       domains: Optional[tuple] = None) -> Migration:
+                       domains: Optional[tuple] = None,
+                       post_check: Optional[Callable[[], None]] = None) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。
 
     ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
@@ -2895,10 +2900,13 @@ def register_migration(version: str, name: str, kind: str,
     5. renumber 前必须人工核对目标环境 grape_t_schema_migrations 现值
        （读写版本台账表的 version/name 两列）——测试连不了真实库，
        跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
+    6. 关键迁移（列存在性 / 收敛结果可判定）应传 post_check（Issue #3648）：
+       fn → post_check 通过才盖章；同号不同名时 post_check 失败会重跑幂等 fn 兜底。
     """
     # 未显式声明域时，套用存量补正表（见 _LEGACY_DOMAIN_LABELS 注释）
     _doms = tuple(domains) if domains else _LEGACY_DOMAIN_LABELS.get(version, ("mgmt",))
-    mig = Migration(version=version, name=name, kind=kind, fn=fn, domains=_doms)
+    mig = Migration(version=version, name=name, kind=kind, fn=fn, domains=_doms,
+                    post_check=post_check)
     # 撞号守卫（对齐 weekly-10 #1412）：runner 只按 version 判「已执行」不比对 name，
     # 源内同号后登记者将被永久跳过（跨线教训 202611040001/002 与 weekly-10 撞号，
     # 8082 实锤 #1011 两条被顶替跳过 → autopilot 500）。
@@ -4671,21 +4679,46 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         # 盖帽后重读（上面全量迁移可能已含注册表内的早期迁移语义，直接进入增量判定）
         applied = _applied_versions()
 
-    # 同号不同名守卫（Issue #1412）：撞号 ≠ 普通 checksum 漂移。
+    # 同号不同名守卫（Issue #1412 / #3648）：撞号 ≠ 普通 checksum 漂移。
     # 存量库可能已被其它分支的同号迁移盖章（name 不同），此时 pending 判定按
-    # version 会把它永久判「已执行」，本分支的迁移 fn 永不执行 —— 必须 ERROR 报出，
-    # 让 operator 能据此 renumber。行为仍是跳过不执行（fail-safe，不阻断启动）。
+    # version 会把它永久判「已执行」，本分支的迁移 fn 永不执行。处理策略：
+    #   · 迁移带 post_check → 先用后置校验判目标是否真的到位；
+    #       - 已到位：视为已执行（只留痕，不重复 ALTER）；
+    #       - 未到位：加入 reconcile 队列，重跑幂等 fn + 再校验，通过后才改盖新名。
+    #   · 无 post_check → 保留 fail-safe 跳过，但必须 ERROR 报出（禁止静默）。
+    # 本 Issue 的两条撞号迁移已 renumber 到未占用号（见 202611210001/2/3），
+    # 上面的 reconcile 是给历史库 / 后续跨分支撞号兜底。
+    _reconcile: List[Migration] = []
     for m in registry:
         if m.version not in applied:
             continue
         recorded_name = applied[m.version][0]
-        if recorded_name and recorded_name != m.name:
+        if not (recorded_name and recorded_name != m.name):
+            continue
+        if getattr(m, "post_check", None) is None:
             log.error(
                 f"迁移版本号撞号（同号不同名，非普通 checksum 漂移）: version={m.version} "
                 f"库内盖章名={recorded_name} 本次注册名={m.name}。该号在目标库已被其它分支的"
                 f"迁移占用，本次迁移会被判「已执行」而永久跳过、其 DDL 不会执行。"
                 f"修复指引：把本次迁移 renumber 到未占用号（日期+序号顺延），并先核对目标库 "
                 f"版本台账表 version/name 两列的现值。")
+            continue
+        try:
+            m.post_check()
+        except _NonOwnerObject as e:
+            log.error(
+                f"迁移撞号后置校验无法在本域执行: version={m.version} {m.name}: {e}；"
+                f"不重跑（由 owner 域进程收敛）")
+        except Exception as e:
+            log.error(
+                f"迁移版本号撞号且目标未到位（同号不同名）: version={m.version} "
+                f"库内盖章名={recorded_name} 本次注册名={m.name}，后置校验失败: {e}。"
+                f"将重跑幂等迁移并再次校验后再盖章（禁止静默跳过）。")
+            _reconcile.append(m)
+        else:
+            log.warning(
+                f"迁移版本号撞号（同号不同名）但目标已到位: version={m.version} "
+                f"库内盖章名={recorded_name} 本次注册名={m.name}；按已执行处理，不重复执行。")
 
     # checksum 漂移告警（fail-safe：不阻断不重跑；先于 pending 判定，0 pending 时也要查）
     for m in registry:
@@ -4698,6 +4731,12 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
                     f" recorded={recorded} current={current}")
 
     pending = [m for m in registry if m.version not in applied]
+    if _reconcile:
+        _seen = {m.version for m in pending}
+        pending.extend(m for m in _reconcile if m.version not in _seen)
+        pending.sort(key=lambda m: m.version)
+        log.error(f"grape_t_schema_migrations: {len(_reconcile)} 条撞号迁移目标未到位，"
+                  f"纳入本次重跑（{', '.join(m.version + ' ' + m.name for m in _reconcile)}）")
     if not pending:
         log.info("grape_t_schema_migrations: 0 pending（全部已盖章，启动迁移段收敛）")
         return
@@ -4726,6 +4765,17 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
             # backfill/cleanup 失败跳过不阻断启动（可用性优先，幂等下次续跑）
             log.warning(f"迁移 {mig.version} {mig.name}（{mig.kind}）失败，跳过不盖章: {e}")
             continue
+        # 后置校验（#3648）：执行成功 ≠ 目标到位。校验失败绝不盖章，下次启动重试。
+        if getattr(mig, "post_check", None) is not None:
+            try:
+                mig.post_check()
+            except _NonOwnerObject as e:
+                log.info(f"迁移 {mig.version} {mig.name} 后置校验非 owner 视图，跳过不盖章: {e}")
+                continue
+            except Exception as e:
+                log.error(
+                    f"迁移 {mig.version} {mig.name} 后置校验失败，不盖章（目标未到位，下次启动重试）: {e}")
+                continue
         duration_ms = int((_time_mod.monotonic() - started) * 1000)
         try:
             c = conn.cursor()
@@ -4742,6 +4792,60 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     if _DDL_MANUAL_REVIEW:
         for entry in _DDL_MANUAL_REVIEW:
             log.error(f"[Issue #536 DDL 人工处理清单] {entry}")
+
+
+def verify_migration_targets(conn=None, domain: Optional[str] = None,
+                             raise_on_fail: bool = False) -> list:
+    """启动期后置校验（Issue #3648）：台账之外再核对一次关键目标是否到位。
+
+    检查项（只检查当前库真实存在的表，域外对象由对应域进程负责）：
+    - mgmt（单库/不筛域）：`grape_t_category_dict` 一级活跃必须恰好 1001/1002/1010；
+    - runtime（单库/不筛域）：`skill` 必须含 `cat_l1_id` / `cat_l2_id`。
+
+    返回失败清单；`raise_on_fail=True` 时抛 RuntimeError。默认只 ERROR 留痕，
+    避免把「已盖章但目标缺失」的历史库直接变成启动崩溃（迁移本身已在盖章前
+    post_check 拦截，不会产生新的假绿）。
+    """
+    conn = db if conn is None else conn
+    dom = (domain if domain is not None else current_migration_domain()) or ""
+    failures: list = []
+    try:
+        cur = conn.cursor()
+    except Exception as e:  # noqa: BLE001 - 连接不可用不阻断启动
+        failures.append(f"后置校验无法取得游标: {e}")
+        cur = None
+    if cur is not None:
+        if dom in ("", "mgmt"):
+            try:
+                if _table_present(cur, "grape_t_category_dict"):
+                    rows = cur.execute(
+                        "SELECT id FROM grape_t_category_dict "
+                        "WHERE level=1 AND is_active=1").fetchall()
+                    ids = sorted(int(r[0] or 0) for r in rows or [])
+                    if ids != [1001, 1002, 1010]:
+                        failures.append(
+                            f"mgmt 一级活跃分类={ids}（期望 [1001, 1002, 1010]）")
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"mgmt 分类字典后置校验异常: {e}")
+        if dom in ("", "runtime"):
+            try:
+                if _table_present(cur, "skill"):
+                    cols = {r[1] for r in cur.execute(
+                        "PRAGMA table_info(skill)").fetchall() or []}
+                    missing = [c for c in ("cat_l1_id", "cat_l2_id")
+                               if c not in cols]
+                    if missing:
+                        failures.append(f"runtime skill 缺列 {missing}")
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"runtime skill 列后置校验异常: {e}")
+    if failures:
+        msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
+        log.error(msg)
+        if raise_on_fail:
+            raise RuntimeError(msg)
+    else:
+        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列）")
+    return failures
 
 
 def _now_iso() -> str:
@@ -4767,6 +4871,9 @@ def run_pending_migrations() -> None:
         # 执行器自身异常（版本表读不了等）→ 退回全量迁移（与历史行为一致的兜底）
         log.warning(f"run_pending_migrations 执行器异常，退回全量 _run_all_migrations: {e}")
         _run_all_migrations()
+    # Issue #3648：迁移段收口后再核对关键目标（列在 / 仅 3 个活跃一级）。
+    # 迁移自身已 post_check 不盖章；这里保证「已盖章历史库」也能在启动日志暴露漂移。
+    verify_migration_targets()
     # Issue #1011 In Scope 0：已盖章存量库迁移报告补写（幂等，失败不阻断启动）
     try:
         _backfill_missing_migration_reports()
@@ -4850,6 +4957,8 @@ def run_domain_migrations() -> None:
     def _apply() -> None:
         _ensure_migration_session_lock_timeout()
         _run_migrations_with_conn(db, registry=registry, allow_legacy=False)
+        # Issue #3648：域库同样在启动期核对关键目标（只检查本域对象）。
+        verify_migration_targets(domain=domain)
         log.info(f"{domain} 域迁移完成（{len(registry)} 条登记）")
 
     try:
@@ -10168,7 +10277,7 @@ def _fn_category_dict_and_tags() -> None:
 
     - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
     - scene_market 补 cat_l1_id / cat_l2_id（mgmt 域；skill 的三列同号需求
-      归 runtime 域，见 202611180003）；
+      归 runtime 域，见 202611210001）；
     - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
     - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
     """
@@ -10180,7 +10289,7 @@ def _fn_category_dict_and_tags() -> None:
             seed_category_dict()
         # skill 归 runtime 域（configs/table_ownership.json），本迁移只跑 mgmt 域：
         # 在这里补 skill 列会被归属守卫跳过、却因本迁移盖章而永久假绿 → 参考
-        # 202611180003（runtime 域）单独补。scene_market 归 mgmt，就地补。
+        # 202611210001（runtime 域，Issue #3648 renumber）单独补。scene_market 归 mgmt，就地补。
         for _tbl, _col, _ddl in (
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
@@ -10204,7 +10313,7 @@ register_migration(
     name="issue2761-category-dict-and-tags",
     kind="safe",
     # 显式标域：本迁移只碰 mgmt 属主的 grape_t_category_dict / scene_market；runtime 的
-    # skill 三列由 202611180003（runtime 域）负责。不标会被默认成 mgmt。
+    # skill 三列由 202611210001（runtime 域）负责。不标会被默认成 mgmt。
     domains=("mgmt",),
     fn=_fn_category_dict_and_tags,
 )
@@ -10228,16 +10337,29 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
+def _postcheck_skill_classification_columns() -> list:
+    """后置校验（Issue #3648）：委托 runtime 属主域模块，避免双份列清单漂移。"""
+    from src.domains.runtime.migrations.skill_detail_tables import (
+        verify_skill_classification_columns,
+    )
+    return verify_skill_classification_columns()
+
+
 # [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号：
 # 同一 version 的登记行名已被 issue2761-skill-classification-columns 占用，
 # ensure-cloud-sandboxes-in-runtime 因此被判「已执行」而从未真跑。按「已发布保持原号、
 # 只改未发布的」规则，本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。
+#
+# [Issue #3648 再 renumber] dev 三库的 202611180003 已被旧构建的
+# skill-intro-override-schema 盖章（同号不同名），本迁移被永久判已执行、skill 缺列。
+# 顺延到未占用号 202611210001，并加 post_check：列在才算执行成功（执行→校验→盖章）。
 register_migration(
-    version="202611180003",
+    version="202611210001",
     name="issue2761-skill-classification-columns",
     kind="safe",
     fn=_fn_skill_classification_columns,
     domains=("runtime",),
+    post_check=_postcheck_skill_classification_columns,
 )
 
 
@@ -10995,14 +11117,14 @@ register_migration(
 #   ② 按属主域各补一条幂等补正迁移，把已盖章库里缺失的列补上（存量库不会重跑老号）。
 _CATEGORY_COLUMN_PLANS = (
     # (属主域, 表, ((列, DDL), ...), 需重建视图的消费域)
-    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180003 补（基线自带），
+    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611210001 补（Issue #3648 renumber），
     # 在这里重复补只会与它抢写同一批列（架构复审 F3 / 基线 085f736a5）。
     ("mgmt", "scene_market",
      (("cat_l1_id", "INTEGER DEFAULT 0"), ("cat_l2_id", "INTEGER DEFAULT 0")),
      ("insight", "runtime")),
 )
 
-# skill 的消费域视图：列由 202611180003 补，但 MariaDB 视图列清单在 CREATE 时固化，
+# skill 的消费域视图：列由 202611210001 补，但 MariaDB 视图列清单在 CREATE 时固化，
 # 补列不会让既有视图自愈 —— 读 mgmt/insight 上的 skill 视图仍 1054。本迁移只重建视图。
 _SKILL_VIEW_OWNER = "runtime"
 _SKILL_VIEW_TABLE = "skill"
@@ -11046,10 +11168,12 @@ register_migration(
 # 这里只做注册引导（模式同 ensure_runtime_type_info_columns / drop_same_domain_links）。
 # 版本号沿革（rebase 改号记录见各模块 docstring）：1301/1302 曾用
 # 202611180001/002（基线占用）→ 202611181201/1202（基线守卫钉空）→ 202611181301/1302；
-# 1303 原用 202611180003（基线 issue2761-skill-classification-columns 占用）。
-# 分类收敛按属主拆两条：202611180004（mgmt：字典停用 + scene_market 重挂）、
-# 202611181304（runtime：skill 重挂 + 老分类废止）——QA A11：混在一条无 domains=
-# 声明的迁移里，三库拓扑下 runtime 库的收敛会被静默跳过。
+# 1303 原用 202611180003（基线 issue2761-skill-classification-columns 占用，该条已按
+# Issue #3648 改号到 202611210001）。
+# 分类收敛按属主拆两条：202611210002（mgmt：字典停用 + scene_market 重挂）、
+# 202611210003（runtime：skill 重挂 + 老分类废止）——QA A11：混在一条无 domains=
+# 声明的迁移里，三库拓扑下 runtime 库的收敛会被静默跳过。两条原用
+# 202611180004/202611181304，因 dev 库已被旧名盖章而按 #3648 改号，并各带 post_check。
 from src.domains.runtime.migrations.skill_detail_tables import (
     MIGRATION_SCHEMA as _M_SKILL_DETAIL_SCHEMA,
     MIGRATION_BACKFILL as _M_SKILL_DETAIL_BACKFILL,
