@@ -128,9 +128,12 @@ check('T5 模板：标题绑定 deleteTitle，正文移除重复句与孤立 �
   assert.strictEqual(calls, 1, '删除模板调用应只剩 deleteTitle computed 一处，实际 ' + calls);
 });
 
-check('T6 长名不溢出：:deep(.a-modal__title) 具备 overflow-wrap/word-break', function () {
-  const m = /:deep\(\.a-modal__title\)\s*\{([^}]*)\}/.exec(VIEW);
-  assert.ok(m, '缺少 :deep(.a-modal__title) 样式规则');
+check('T6 长名不溢出：AGModal 标题具备 overflow-wrap/word-break（Teleport 根节点，调用方 :deep 命中不了）', function () {
+  assert.ok(VIEW.indexOf(':deep(.a-modal__title)') < 0,
+    'SkillsView 不应依赖 :deep(.a-modal__title)——Teleport 根节点不继承调用方 scopeId，该规则不生效');
+  const modal = fs.readFileSync(path.join(FE, 'app/src/components/ui/AGModal.vue'), 'utf8');
+  const m = /\.a-modal__title\s*\{([^}]*)\}/.exec(modal);
+  assert.ok(m, 'AGModal.vue 缺少 .a-modal__title 样式规则');
   assert.ok(/overflow-wrap:\s*anywhere/.test(m[1]), '标题应 overflow-wrap: anywhere');
   assert.ok(/word-break:\s*break-word/.test(m[1]), '标题应 word-break: break-word');
 });
