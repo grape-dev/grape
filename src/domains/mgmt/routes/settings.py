@@ -851,8 +851,10 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         # FR-9.1: verify token 有效性（与 R15 同口径）
         from src.kernel.token_resolver import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
+        _verified_login = ""
         try:
-            _vcs_provider.verify_token(token)
+            _info = _vcs_provider.verify_token(token) or {}
+            _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
@@ -864,6 +866,11 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                 "code": 404, "error_code": "REPO_NOT_FOUND",
                 "message": "仓库不存在或写入失败"
             })
+        # 存令牌顺手回填账号名：basic_password 平台（gitee）的 clone 用户名必须是
+        # 令牌所属账号 login，让平台自己回答「我是谁」，不再要求用户手填。
+        if _verified_login and not body.bot_username:
+            body.bot_username = _verified_login
+            _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
     else:
         _result = {"ok": True, "warning": "", "related_repos": []}

@@ -661,9 +661,13 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     _provider = _parse_rk(repo_key)[0]
     # 用户名只解析一次（basic_password 需要 repo_key 才能落 owner 兜底；缺它会变空用户名）
     try:
-        from src.domains.runtime.vcs.clone_endpoint import clone_username_source as _clone_user_for
+        from src.domains.runtime.vcs.clone_identity import (
+            username_for_token as _user_for_token,
+        )
 
-        _clone_user, _clone_user_src = _clone_user_for(_provider, repo_key)
+        # 有令牌时优先「令牌→账号 login」动态解析（带本地缓存），失败回落卡/owner 派生。
+        # 卡上 bot_username 人工填错（组织名 / grape 账号名）时，这里不会再发出错用户名。
+        _clone_user, _clone_user_src = _user_for_token(_provider, token, repo_key)
         # 来源可观测（2026-11-21）：basic_password 平台只接受**令牌所属账号名**；
         # owner_fallback 只在「个人仓 owner 恰等于令牌账号」时正确，组织仓/他人仓
         # 会被上游拒（The token username invalid / 403）。此前只有 clone_endpoint

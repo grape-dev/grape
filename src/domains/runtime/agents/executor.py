@@ -2139,6 +2139,15 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
             _cp = clone_params(repo_full_name)
             repo_url = _cp["clone_url"]
             _clone_username = _cp["username"]
+            # basic_password 平台（gitee）：用户名必须是令牌所属账号 login。
+            # 有令牌就现场解析（带本地缓存），解析失败回落卡值——别再依赖人手填准。
+            try:
+                from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+
+                _clone_username, _cu_src = _user_for_token(_cp["provider"], bot_token, repo_full_name)
+                log.info(f"{label}clone username source={_cu_src}")
+            except Exception as _cu_err:  # noqa: BLE001
+                log.warning(f"{label}clone username dynamic failed: {_cu_err}")
         except Exception as e:
             log.warning(f"{label}clone endpoint resolve failed for {repo_full_name}: {e}")
             repo_url, _clone_username = "", ""

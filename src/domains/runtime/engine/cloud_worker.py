@@ -650,7 +650,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
                 _sb._repo_url = _ctx.repo_url
                 _sb._bot_token = _ctx.bot_token
                 _sb._work_branch = _ctx.work_branch
-                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} bot_token={'yes' if _ctx.bot_token else 'no'}")
+                # clone 用户名（basic_password 平台必须是令牌所属账号 login）：
+                # 过去只注入 url/token/branch，云沙箱 askpass 回退 "bot" → gitee 必被拒。
+                if hasattr(_sb, "_clone_username"):
+                    setattr(_sb, "_clone_username", getattr(_ctx, "clone_username", "") or "")
+                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} "
+                         f"bot_token={'yes' if _ctx.bot_token else 'no'} "
+                         f"clone_user={getattr(_ctx, 'clone_username', '') or '-'}")
             else:
                 log.warning(f"{_engine_tag}repo info NOT set: hasattr_repo_url={hasattr(_sb, '_repo_url')} ctx_repo_url={_ctx.repo_url[:50] if _ctx.repo_url else '(empty)'}")
             _sb.__enter__()

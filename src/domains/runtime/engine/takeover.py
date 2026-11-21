@@ -1186,6 +1186,20 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     except Exception as _clone_err:
         log.warning(f"takeover: clone endpoint resolve failed ({repo_key}): {_clone_err}")
         _bundle_clone_url = ""
+    # clone 用户名：basic_password 平台（gitee）必须是令牌所属账号 login。
+    # 有 bot token 就动态解析（带本地缓存），否则回落卡/owner 派生；过去 bundle 只带地址，
+    # 接管侧只能自己写死 "bot" / "x-access-token"。
+    _bundle_clone_user = ""
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
+        from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+
+        _bundle_clone_user, _cu_src = _user_for_token(
+            (repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"),
+            _bot_from_env(env, repo_key), repo_key)
+        log.debug(f"takeover: clone username source={_cu_src}")
+    except Exception as _cu_err:  # noqa: BLE001
+        log.warning(f"takeover: clone username resolve failed ({repo_key}): {_cu_err}")
     bundle = {
         "takeover_id": session_id,
         "task": {"id": task.get("id") or "", "repo_key": repo_key, "issue_number": issue_number,
@@ -1202,6 +1216,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
                      "issue_stage": issue.get("stage") or ""},
         "workspace": {"repo_full_name": repo_short,
                       "clone_url": _bundle_clone_url,
+                      "clone_username": _bundle_clone_user,
                       "branch_hint": env.get("GRAPE_WORK_BRANCH") or "",
                       "work_branch": env.get("GRAPE_WORK_BRANCH") or "",
                       "cwd_hint": task.get("cwd") or ""},

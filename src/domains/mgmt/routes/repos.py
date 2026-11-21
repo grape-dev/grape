@@ -3296,16 +3296,29 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     from src.kernel.repo_key import to_repo_key as _to_repo_key
     from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError, clone_params
 
+    _repo_key_obj = _to_repo_key(f"{p}:{_o}/{repo}")
     try:
-        _cp = clone_params(_to_repo_key(f"{p}:{_o}/{repo}"))
+        _cp = clone_params(_repo_key_obj)
     except CloneEndpointError as e:
         raise HTTPException(status_code=503, detail={
             "code": "clone_endpoint_unavailable",
             "message": f"{_provider_display(p)} clone 端点不可派生（平台卡缺 host）: {e}",
         })
+    # basic_password 平台：用户名由**令牌本身**解析（令牌所属账号 login），
+    # 不再依赖人在卡上填的 bot_username（实测填组织名/grape 账号名 → 上游 403）。
+    # 解析失败回落卡/owner 派生，并用 username_source 把档位报给调用方。
+    _username = _cp["username"]
+    _username_src = ""
+    try:
+        from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+
+        _username, _username_src = _user_for_token(p, token, _repo_key_obj)
+    except Exception as e:  # noqa: BLE001 - 派生失败不阻断换券，回落卡值
+        log.debug(f"git-credential dynamic username failed: {e}")
     return {
         "provider": p,
-        "username": _cp["username"],
+        "username": _username,
+        "username_source": _username_src,
         "password": token,
         "clone_url": _cp["clone_url"],
         "expires_in": _CREDENTIAL_TTL,
