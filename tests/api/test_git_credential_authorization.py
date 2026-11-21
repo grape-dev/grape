@@ -99,8 +99,8 @@ def test_s5_devops_still_falls_back_to_owner(monkeypatch):
     assert tok == OWNER_PAT
 
 
-def test_s6_token_without_repo_key_is_not_broken(monkeypatch):
-    """S6：历史 token 上下文没有 repo_key → 不因作用域误拒（向后兼容）。"""
+def test_s6_token_without_repo_key_keeps_legacy_behavior(monkeypatch):
+    """S6：历史 token 没有 repo_key → 保持旧行为（本仓实测 0 行，清零后可关）。"""
     _wire(monkeypatch)
     tok = _repo_platform_token("a", "r", _session(""), "gitcode")
     assert tok == OWNER_PAT
@@ -130,3 +130,13 @@ def test_s9_bare_repo_key_cannot_borrow_other_provider(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _repo_platform_token("a", "r", _session("a/r"), "gitee")
     assert ei.value.status_code == 403
+
+
+def test_s10_chat_pseudo_scope_cannot_take_credentials(monkeypatch):
+    """S10：chat 的 `chat:<uid>` 伪作用域不能换券（chat 需要先绑仓，属单独场景）。"""
+    _wire(monkeypatch)
+    with pytest.raises(HTTPException) as ei:
+        _repo_platform_token("a", "r", _session("chat:42", agent_type="chat",
+                                                uid="42", username="alice"), "gitcode")
+    assert ei.value.status_code == 403
+    assert "SESSION_NOT_REPO_BOUND" in str(ei.value.detail)

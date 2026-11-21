@@ -2869,9 +2869,14 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     from src.domains.mgmt.user.db import resolve_managed_repo_key
     repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     if user.get("auth_type") == "session_token":
-        _bound_owner, _bound_repo = split_owner_repo(user.get("repo_key") or "")
-        if _bound_owner and (_bound_owner != owner or _bound_repo != repo):
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权读取该项目知识（仓库作用域不匹配）"})
+        # 场景化作用域（src/kernel/scene_policy.py）：PROJECT_INFO = repo_bound
+        from src.kernel.scene_policy import Scene as _Scene, decide as _decide_scene
+
+        _d = _decide_scene(_Scene.PROJECT_INFO, user.get("repo_key") or "", repo_key)
+        if not _d.ok:
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "error_code": _d.code,
+                "message": f"无权读取该项目知识（{_d.message}）"})
     files, meta = load_project_info(repo_key)
     return {"repo_key": repo_key, "files": files, "meta": meta}
 
@@ -3044,23 +3049,19 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     """
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
-    # 会话 token 的仓库作用域必须与路径一致（QA A9，2026-11-21）：否则持 A 仓 tk_
-    # 的 agent 可以对 B 仓换券、拿到 B 仓凭据。与 /project-info 同口径
-    # （repos.py::get_repo_project_info），差别只在先剥掉路径 owner 的 provider 前缀。
-    #
-    # provider 也要比（同名不同平台是两套凭据）：`gitcode:o/r` 的会话打
-    # `?provider=gitee` 读同名仓，是「跨平台关联仓换券」的残留口子。仓库前缀就是
-    # 平台标识（parse_repo_key 对裸键默认 gitcode），所以直接比前缀即可；
-    # 真需要跨平台共用，应在关联关系上显式登记，而不是在这里放开。
-    from src.kernel.repo_key import parse_repo_key, split_owner_repo
-    _bound_provider, _bound_owner, _bound_repo = parse_repo_key(user.get("repo_key") or "")
-    if _bound_owner or _bound_repo:
-        if _bound_provider != provider:
-            raise HTTPException(status_code=403, detail={
-                "code": 403,
-                "message": f"无权使用该仓库的 git 凭据（平台不匹配：会话绑定 {_bound_provider}，请求 {provider}）"})
-        if _bound_owner != _strip_provider_prefix(owner) or _bound_repo != repo:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权使用该仓库的 git 凭据（仓库作用域不匹配）"})
+    # 作用域判定统一收敛到场景策略（src/kernel/scene_policy.py，2026-11-22）：
+    # 场景 = GIT_CREDENTIAL（repo_bound + 同平台；`chat:<uid>`/空作用域直接拒绝并给
+    # SESSION_NOT_REPO_BOUND，提示调用方先绑仓）。策略表是唯一真源，调用点只声明场景。
+    from src.kernel.repo_key import to_repo_key as _trk
+    from src.kernel.scene_policy import Scene as _Scene, decide as _decide_scene
+
+    _target_rk = _trk(f"{provider}:{_strip_provider_prefix(owner)}/{repo}")
+    _scope = _decide_scene(_Scene.GIT_CREDENTIAL, user.get("repo_key") or "", _target_rk,
+                           target_provider=provider)
+    if not _scope.ok:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": _scope.code,
+            "message": f"无权使用该仓库的 git 凭据（{_scope.message}）"})
     from src.kernel.repo_key import to_repo_key
 
     # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
