@@ -80,3 +80,31 @@ def test_s6_network_call_sites_pass_the_repository_key():
     }
     for rel, needle in checks.items():
         assert needle in (root / rel).read_text(encoding="utf-8"), rel
+
+
+def test_s7_retry_path_forwards_the_repository_key(monkeypatch):
+    """重试路径必须把 repo_key 传到底层 _run_git（旧实现签名有、调用没有 → 死参数）。"""
+    seen = {}
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake(args, **kw):
+        seen.update(kw)
+        return _R()
+
+    monkeypatch.setattr(rg, "_run_git", _fake)
+    rg._run_git_retry(["fetch"], token="tok", repo_key="gitee:acme/widget")
+    assert seen.get("repo_key") == "gitee:acme/widget"
+
+
+def test_s8_linked_push_and_remote_probe_pass_the_key():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "src/domains/runtime"
+    assert "repo_key=_rk" in (root / "engine/agent.py").read_text(encoding="utf-8")
+    guard = (root / "engine/worktree_guard.py").read_text(encoding="utf-8")
+    assert "def _remote_branch_head(wt_dir: str, branch: str, token: str = \"\"," in guard
+    assert "repo_key=repo_key)" in guard

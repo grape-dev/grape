@@ -41,3 +41,12 @@
 
 - `tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate` 在基线 `dcb3759e7` 同样失败，
   记为“既有失败”，不改断言迎合；本分支不因它变红而扩大改动范围。
+## R6 传输凭据同源必须覆盖“重试/连带推送/远端探测”
+
+- 现状（二次评审发现）：`_run_git` 已能按 repo_key 派生 scheme，但
+  `_run_git_retry` 收了 `repo_key` 从不传给底层（死参数）→ 重试路径回落 x-access-token；
+  `agent.py` 的 linked-repo push、`worktree_guard.py` 的 `ls-remote` 远端探测也未传。
+- 要求：**任何会发网络的 git 动作**（fetch/push/ls-remote/clone）都必须把 repo_key 传到底；
+  重试封装不得吞参数；远端探测失败与“分支未推送”必须可区分。
+- 验收：`_run_git_retry(repo_key=…)` 的行为用例（不是字符串搜索）断言底层收到 repo_key；
+  worktree_guard 与 agent 的调用点有用例钉住。

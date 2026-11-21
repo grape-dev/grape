@@ -92,6 +92,8 @@ api/oauth_token.py::with_oauth_token
 | S8 | 退避到期 | 正常刷新并记录时间戳 | `::test_s2` |
 | S9 | 打 status=4 | SQL 参数与提交正确 | `::test_s3` |
 | S10 | 刷新成功但重试 401 | 打 status=4 + 重新授权 | `::test_s4` |
+| S11 | 重试路径的 repo_key | 底层 `_run_git` 收到 repo_key | `test_run_git_platform_auth.py::test_s7` |
+| S12 | linked push / 远端探测 | 两个调用点都传 repo_key | 同文件 `::test_s8` |
 
 ## 6. 验证命令（一次一个文件）
 
@@ -106,7 +108,36 @@ $PY -m pytest tests/mgmt/test_issue_3563_reauth_401_split.py -q
 $PY -m pytest tests/mgmt/test_issue_3563_github_token_refresh.py -q
 ```
 
-## 7. 回滚
+## 7. 传输凭据的调用点清单（R6）
+
+```
+必须传 repo_key 的调用点（网络动作）：
+  repogit._run_git_retry → _run_git         （重试路径；旧实现死参数）
+  repogit 基线 fetch / _branch_vs_baseline fetch / ls-remote
+  branch_guard.guarded_push
+  event_pipeline 直连 PR push（repo_key=_rk）
+  agent.py linked-repo push（repo_key=_rk）
+  worktree_guard：collect_reset_risk → _collect_unpushed → _remote_branch_head（ls-remote）
+  project_info/builder 两处 fetch
+
+本地动作（rev-parse/diff/show-ref）不传也能过，但传了无害；不列入验收。
+
+不变式：
+  · 重试封装必须透传 repo_key（否则“同源”只在首次尝试成立）；
+  · 远端探测失败必须与“分支未推送”区分（probed=False 回退本地判定）；
+  · 派生失败（clone_params 异常）回落 x_access_token，并留 warning。
+```
+
+## 8. 已知失败登记
+
+```
+tests/arch/test_silent_except_ratchet.py  2 failed —— 基线 dcb3759e7 同样失败
+  （基线 json 计数落后于代码：repogit 3→5、mysql_compat 7→9、db_registry 未登记）
+  属既有失败；本分支未新增静默 except（逐文件比对与基线计数一致），不改断言、不上调基线。
+tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate —— 基线同样失败
+```
+
+## 9. 回滚
 
 ```
 R1 顺序改动：单文件回退 settings.py（无数据影响）

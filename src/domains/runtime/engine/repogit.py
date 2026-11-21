@@ -651,7 +651,7 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
     last = None
     for attempt in range(retries):
         last = _run_git(args, token=token, timeout=timeout, scheme=scheme,
-                        provider=provider, username=username)
+                        provider=provider, username=username, repo_key=repo_key)
         if last is not None and last.returncode == 0:
             return last
         if not _is_git_network_error(last):

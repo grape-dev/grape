@@ -39,17 +39,17 @@ def test_s2_already_in_target_state_is_success():
                                kind_hint="cleanup") is True
 
 
-def test_s3_gate_not_passed_returns_false_without_running():
+def test_s3_gate_not_passed_returns_false_without_running(monkeypatch):
+    """门槛未过 → False（跳过不盖章）。
+
+    必须用 monkeypatch 恢复：旧写法手工把 _cleanup_gate_passed 赋回 _mysql_backend 的原函数，
+    hasattr 恒真导致全局被污染，同进程后续用例（table_ownership s10）读到错误的 gate。
+    """
     import src.api.db_setup as d
-    c = _Cursor(None)
-    orig = d._mysql_backend
-    d._mysql_backend = lambda: True
-    d._cleanup_gate_passed = lambda: False
-    try:
-        assert d._destructive_ddl(c, "DROP TABLE old", kind_hint="cleanup") is False
-    finally:
-        d._mysql_backend = orig
-        d._cleanup_gate_passed = orig if hasattr(d, "_cleanup_gate_passed") else None
+
+    monkeypatch.setattr(d, "_mysql_backend", lambda: True)
+    monkeypatch.setattr(d, "_cleanup_gate_passed", lambda: False)
+    assert d._destructive_ddl(_Cursor(None), "DROP TABLE old", kind_hint="cleanup") is False
 
 
 def test_s4_kind_hint_is_enforced():
