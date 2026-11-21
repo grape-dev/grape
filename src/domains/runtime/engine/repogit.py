@@ -19,6 +19,11 @@ _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
 
 _GIT_AGENTS = ("coding", "qa", "sre")
 
+# 检测/发布类环节：其工作区的职责是核对或上传既有交付，不需要继承 coding 本地
+# 未合并提交。本地 `feat/issue-N` 既 ahead 又 behind 时不再直接复用，先按基线
+# 对齐（旧 tip 存 refs/grape-preserved/），避免闸门判 diverged 把整条流水线卡死。
+_REUSE_CLEAN_AGENTS = ("qa", "sre")
+
 # ---------------------------------------------------------------------------
 # Issue #2514：coding 工作区与「当前 Issue + 当前基线」严格绑定
 #
@@ -1293,6 +1298,79 @@ def _align_inspector_delivery(issue_dir: str, base: str, issue_num, delivery_bra
         log.warning(f"repogit delivery align failed {issue_dir}: {e}")
 
 
+def _branch_vs_baseline(base: str, branch: str, base_branch: str,
+                        token: str = "") -> dict:
+    """本地分支相对 origin/<base> 的分叉状态（复用判据用）。
+
+    sre/qa 这类「检测-发布」环节不应继承 coding 未合并的本地提交：一旦本地
+    `feat/issue-N` 既 ahead 又 behind，闸门必判 diverged，任务在 2 秒内失败且
+    agent 从未启动（见 #92017 同类现场）。复用前先量化，再决定是否对齐基线。
+
+    Returns:
+        {exists, ahead, behind, pushed}；判不出时 ahead/behind 为 -1。
+        - pushed: 本地 tip 已包含在 origin/<branch>（提交推过，重置不丢东西）。
+    先 fetch origin <base> 刷新判据；fetch 失败（只读 gitdir/离线）沿用已有 refs。
+    """
+    st = {"exists": False, "ahead": -1, "behind": -1, "pushed": False}
+    if not base or not branch or not base_branch:
+        return st
+    _run_git(["-C", base, "fetch", "origin", base_branch], token=token, timeout=30)
+    r = _run_git(["-C", base, "show-ref", "--verify", "--quiet",
+                  f"refs/heads/{branch}"], token=token)
+    st["exists"] = r is not None and r.returncode == 0
+    if not st["exists"]:
+        return st
+    rel = _run_git(["-C", base, "rev-list", "--left-right", "--count",
+                    f"refs/heads/{branch}...origin/{base_branch}"], token=token)
+    if rel is not None and rel.returncode == 0:
+        try:
+            _a, _b = (rel.stdout or "").split()[:2]
+            st["ahead"], st["behind"] = int(_a), int(_b)
+        except Exception:
+            pass
+    remote = _run_git(["-C", base, "rev-parse", "--verify", "--quiet",
+                       f"refs/remotes/origin/{branch}"], token=token)
+    if remote is not None and remote.returncode == 0 and (remote.stdout or "").strip():
+        anc = _run_git(["-C", base, "merge-base", "--is-ancestor",
+                        f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"], token=token)
+        st["pushed"] = anc is not None and anc.returncode == 0
+    return st
+
+
+def _preserve_diverged_branch(base: str, branch: str, issue_num, token: str = "") -> str:
+    """把分叉本地分支的 tip 存进 `refs/grape-preserved/issue-N-<sha12>`。
+
+    重置分支前必须先落这个 ref，保证「不复用」不会变成「删工作」。
+    """
+    tip = _run_git(["-C", base, "rev-parse", "--verify", "--quiet",
+                    f"refs/heads/{branch}"], token=token)
+    sha = (tip.stdout or "").strip() if tip is not None and tip.returncode == 0 else ""
+    if not sha:
+        return ""
+    ref = f"refs/grape-preserved/issue-{issue_num}-{sha[:12]}"
+    upd = _run_git(["-C", base, "update-ref", ref, sha], token=token)
+    if upd is None or upd.returncode != 0:
+        log.warning(f"workspace.preserve_branch_failed issue={issue_num} "
+                    f"branch={branch} sha={sha[:12]}")
+        return ""
+    log.warning(f"workspace.branch_preserved issue={issue_num} agent_branch={branch} "
+                f"sha={sha[:12]} ref={ref}")
+    return ref
+
+
+def _reset_branch_to_baseline(base: str, branch: str, base_branch: str,
+                              issue_num, token: str = "") -> bool:
+    """把本地分支重置到 origin/<base>（调用前须已 _preserve_diverged_branch）。"""
+    r = _run_git(["-C", base, "branch", "-f", branch, f"origin/{base_branch}"], token=token)
+    if r is None or r.returncode != 0:
+        log.warning(f"workspace.branch_reset_failed issue={issue_num} branch={branch}: "
+                    f"{((r.stderr if r is not None else '') or '')[:200]}")
+        return False
+    log.warning(f"workspace.branch_baseline_reset issue={issue_num} branch={branch} "
+                f"baseline={base_branch} (diverged branch aligned before reuse)")
+    return True
+
+
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "",
                           work_branch: str = "", task_id: str = "",
                           strict_override=None, delivery_branch: str = "",
@@ -1358,6 +1436,16 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                     # 复用并由后续基线闸门兜底
                     log.warning(f"workspace.reuse_status_unreadable issue={issue_num} "
                                 f"agent={agent_type} path={issue_dir} (git status failed)")
+                else:
+                    # 已存在的 git 工作区若停在「既 ahead 又 behind」的本地 feat
+                    # 分支上，复用必然被基线闸门拦下（sre 2 秒 failed，agent 从未
+                    # 启动）。检测/发布类环境、或提交已推到远端的，按分叉拒绝复用，
+                    # 走下面的重建对齐路径；coding 未推提交仍保留复用（稍后阻断）。
+                    _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                    if (_st["ahead"] > 0 and _st["behind"] > 0
+                            and not is_inspector_agent(agent_type)
+                            and (agent_type in _REUSE_CLEAN_AGENTS or _st["pushed"])):
+                        reason = "diverged_ahead"
                 if reason:
                     # 拒绝复用 = 存档 + 移除 + 重建；移除失败（#1891 只读 gitdir）才降级为复用
                     if not _refuse_reuse(issue_dir, base, repo_key, issue_num,
@@ -1375,7 +1463,30 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                                f"refs/heads/{branch}"], token=token)
                 _branch_reused = br is not None and br.returncode == 0
                 if _branch_reused:
-                    # Issue #2281：分支 ref 仍在 → 直接复用（上一轮未推送 commit 随分支保留）
+                    # Issue #2281：分支 ref 仍在 → 上一轮未推送 commit 随分支保留。
+                    # 但「本地 feat 分支既 ahead 又 behind」时不直接复用：sre 会把
+                    # coding 未合并提交带进工作区，闸门随即判 diverged，任务 2 秒
+                    # 就 failed（#92017）。检测/发布类环境或提交已推远端的，先把旧
+                    # tip 存 refs/grape-preserved/ 再把分支对齐基线，用干净树建树；
+                    # 作者类 coding 且提交未推 → 保持阻断（不允许静默丢工作）。
+                    _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                    if _st["ahead"] > 0 and _st["behind"] > 0:
+                        if not is_inspector_agent(agent_type) and (
+                                agent_type in _REUSE_CLEAN_AGENTS or _st["pushed"]):
+                            _pres_ref = _preserve_diverged_branch(
+                                base, branch, issue_num, token=token)
+                            if _pres_ref and _reset_branch_to_baseline(
+                                    base, branch, base_branch, issue_num, token=token):
+                                _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                            log.warning(
+                                f"workspace.reuse_branch_aligned issue={issue_num} "
+                                f"agent={agent_type} preserved={_pres_ref or '-'} "
+                                f"ahead_after={_st['ahead']} behind_after={_st['behind']}")
+                        else:
+                            log.warning(
+                                f"workspace.diverged_branch_kept issue={issue_num} "
+                                f"agent={agent_type} ahead={_st['ahead']} behind={_st['behind']} "
+                                f"(unpushed commits; baseline gate will block by design)")
                     r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir,
                                   branch], token=token)
                 else:
