@@ -220,11 +220,17 @@ def test_register_conflict_escalates_to_error_alert(captured, delays):
 
     asyncio.run(scenario())
 
-    errors = captured.text(logging.ERROR)
-    assert "registration conflict escalated" in errors
-    assert f"consecutive={REGISTER_CONFLICT_ALERT_AFTER}" in errors
+    escalations = [
+        r for r in captured.records
+        if r.levelno >= logging.ERROR and "registration conflict escalated" in r.getMessage()
+    ]
+    assert escalations
+    assert any(
+        f"consecutive={REGISTER_CONFLICT_ALERT_AFTER}" in r.getMessage()
+        for r in escalations
+    )
     # 前几次仍应是 WARNING（降噪）：不是一来就 ERROR
-    assert captured.text(logging.ERROR).count("registration conflict escalated") == 1
+    assert "registration conflict: inst=app-1" in captured.text(logging.WARNING)
 
 
 # ---------------------------------------------------------------- 2. 退避

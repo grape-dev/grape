@@ -16,7 +16,12 @@ from typing import Any
 # 2026-11-18 架构审查 A13：企微 disconnected_event（同一 bot 被新会话顶掉的会话接管事件）
 # 被软处理后不再走 ChannelError 路径，必须在这里留一个归因桶，否则"被抢连接"从看板上
 # 彻底消失（修复前正是靠这一项 13 次/10 分钟才发现问题）。
-FLAP_CAUSES = ("lease", "ws_transport", "shutdown", "ilink_longpoll", "takeover")
+# Issue #3698：飞书 3001（同 app 并发注册上限）单独归因——与普通链路抖动分开，
+# 便于看板/告警区分"网络断了"与"连接数超限被拒登"。
+FLAP_CAUSES = (
+    "lease", "ws_transport", "shutdown", "ilink_longpoll", "takeover",
+    "ws_register_conflict",
+)
 
 # Issue #1095：卡片降级归因（/health/realtime im 段 degraded_by_reason）
 # Issue #1728：微信渠道媒体/入站/风控降级归因

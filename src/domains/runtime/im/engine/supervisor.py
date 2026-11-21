@@ -14,10 +14,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from typing import Awaitable, Callable, Optional
 
 from ..channel.channel import (
-    CancelContext, Channel, ChannelConfig, ChannelError, PermanentChannelError,
+    CancelContext, Channel, ChannelConfig, ChannelError,
+    ChannelRegistrationConflict, PermanentChannelError,
 )
 from ..channel.registry import ChannelRegistry
 from ..channel.types import Scope, Type
@@ -28,7 +30,56 @@ from .metrics import EngineMetrics
 BACKOFF_MIN = 2.0   # 指数退避 2s→15s（继承 run_bot）
 BACKOFF_MAX = 15.0
 
+# Issue #3698：并发注册冲突（飞书 WS 关闭码 3001 too many connections）不是普通链路
+# 抖动——服务端对同一 app 的并发长连接注册数已满，15s 短退避只会持续撞上限并刷屏。
+# 单独一档更长退避（5s→300s），并在连续多次失败后升级为可告警的 ERROR。
+REGISTER_CONFLICT_BACKOFF_MIN = 5.0
+REGISTER_CONFLICT_BACKOFF_MAX = 300.0
+REGISTER_CONFLICT_ALERT_AFTER = 5
+# 一次连接健康存活 ≥ 该时长 → 视为已恢复，重置并发注册冲突的连续计数。
+REGISTER_CONFLICT_STABLE_SECS = 60.0
+
 log = logging.getLogger(__name__)
+
+
+def next_backoff(current: float, *, register_conflict: bool = False) -> float:
+    """退避递推（Issue #3698）：普通抖动 2s→15s 封顶；并发注册冲突 5s→300s 封顶。"""
+    if register_conflict:
+        floor, cap = REGISTER_CONFLICT_BACKOFF_MIN, REGISTER_CONFLICT_BACKOFF_MAX
+    else:
+        floor, cap = BACKOFF_MIN, BACKOFF_MAX
+    return min(max(current, floor) * 2, cap)
+
+
+def app_identity(raw: dict) -> str:
+    """安装配置里的 app 身份（同 app 多安装去重键）。取不到 → 空串（不去重）。"""
+    for key in ("app_id", "ilink_bot_id", "bot_token", "token"):
+        value = str((raw or {}).get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+def _app_log_ref(app_key: str, channel_type: str = "") -> str:
+    """日志里的 app 标识（与 engine_wiring._safe_app_ref 同口径）：
+
+    Slack/Telegram 的 app_id 位存 token → 只输出不可逆摘要，绝不落令牌片段。
+    """
+    value = str(app_key or "")
+    if not value:
+        return ""
+    kind = str(channel_type or "").strip().lower()
+    head = value.split(":", 1)[0]
+    telegramish = ":" in value and head.isdigit()
+    if kind in ("slack", "telegram") or value.startswith(("xoxb-", "xapp-")) or telegramish:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"{kind or 'app'}:{digest}"
+    return value[:12]
+
+
+async def _backoff_sleep(delay: float) -> None:
+    """退避睡眠（测试 seam：用例可替身以跳过真实等待，不改变生产语义）。"""
+    await asyncio.sleep(delay)
 
 
 # config 里的运行期状态键（不是凭证）：改了也不该拆连接重建。
@@ -86,6 +137,12 @@ class Supervisor:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # inst_id → 已并入 metrics 的渠道侧接管计数（软处理事件后仍要可观测，A13）
         self._takeover_seen: dict[str, int] = {}
+        # Issue #3698：同 app_id 单连接/单租约。同一 app 的多个安装行（或旧连接残留）
+        # 并发注册会撞服务端上限（飞书 3001）；这里按 app 身份去重，只允许一条连接，
+        # 被跳过的安装显式记录（不静默删安装行），owner 让渡后下一轮自然接上。
+        self._app_refs: dict[str, str] = {}         # app 身份 → 持有连接的 inst_id
+        self._app_ref_by_inst: dict[str, str] = {}  # inst_id → app 身份（释放用）
+        self._duplicate_installs: dict[str, str] = {}   # 被跳过的 inst_id → owner inst_id
         self.instances: list = [instance_id]  # 扫描前由 list_active_instances 刷新
 
     async def start(self) -> None:
@@ -187,6 +244,10 @@ class Supervisor:
         for inst_id in list(self._channels):
             if inst_id not in seen:
                 await self._yield_channel(inst_id)
+        # 被跳过的安装已不在 provider 里 → 清掉记账，避免无界增长
+        for inst_id in list(self._duplicate_installs):
+            if inst_id not in seen:
+                self._duplicate_installs.pop(inst_id, None)
 
     def _refresh_instances(self) -> None:
         """每轮扫描前刷新活跃实例集（grape_im_instance 心跳 + im_enabled=1）。
@@ -257,6 +318,21 @@ class Supervisor:
         raw = inst.get("config") or {}
         fp = fingerprint(raw)
         channel_type = str(inst.get("channel_type", "feishu"))
+        app_key = app_identity(raw)
+        if app_key:
+            holder = self._app_refs.get(app_key)
+            if holder and holder != inst_id and holder in self._channels:
+                # Issue #3698：同一 app 并发注册会撞服务端上限（飞书 3001）——同一时刻
+                # 只保留一条连接。被跳过的安装显式记录（不静默删安装行）；owner 让渡/
+                # 断连释放归属后，下一轮扫描自然接上。
+                if self._duplicate_installs.get(inst_id) != holder:
+                    log.warning(
+                        "[im-engine] duplicate app installation skipped: app=%s "
+                        "inst=%s owner=%s type=%s",
+                        _app_log_ref(app_key, channel_type), inst_id, holder, channel_type)
+                self._duplicate_installs[inst_id] = holder
+                return
+            self._duplicate_installs.pop(inst_id, None)
         if inst_id in self._channels:
             if (self._fingerprints.get(inst_id) == fp
                     and self._channel_types.get(inst_id) == channel_type):
@@ -287,27 +363,61 @@ class Supervisor:
             self._lease_tokens[inst_id] = token
         ctx = CancelContext()
         self._channels[inst_id] = (channel, ctx)
+        if app_key:
+            self._app_refs[app_key] = inst_id
+            self._app_ref_by_inst[inst_id] = app_key
 
         async def _run() -> None:
             backoff = BACKOFF_MIN
+            conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
+            consecutive_conflicts = 0
             try:
                 while self._running and not ctx.cancelled:
+                    started = time.monotonic()
                     try:
                         await channel.connect(ctx)
                         backoff = BACKOFF_MIN
+                        conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
+                        consecutive_conflicts = 0
                     except PermanentChannelError:      # A5：永久错误 → revoked 不再重试
                         self._revoked.add(inst_id)
                         self._channels.pop(inst_id, None)
                         self._release_lease(inst_id)
                         return
+                    except ChannelRegistrationConflict:
+                        # Issue #3698：服务端并发注册上限（飞书 3001）。可重试但同一时刻
+                        # 重连只会继续撞上限——单独归因、长退避，连续多次后升级告警。
+                        if time.monotonic() - started >= REGISTER_CONFLICT_STABLE_SECS:
+                            # 上一次连接已健康存活 → 这是新一轮冲突，重新计数
+                            conflict_backoff = REGISTER_CONFLICT_BACKOFF_MIN
+                            consecutive_conflicts = 0
+                        consecutive_conflicts += 1
+                        self._record_reconnect("ws_register_conflict")
+                        if consecutive_conflicts >= REGISTER_CONFLICT_ALERT_AFTER:
+                            log.error(
+                                "[im-engine] channel registration conflict escalated: "
+                                "inst=%s type=%s consecutive=%d retry_in=%.0fs "
+                                "cause=ws_register_conflict "
+                                "（同一 app 并发注册上限持续被撞，需核对重复安装/僵尸连接）",
+                                inst_id, channel_type, consecutive_conflicts,
+                                conflict_backoff)
+                        else:
+                            log.warning(
+                                "[im-engine] channel registration conflict: inst=%s "
+                                "type=%s consecutive=%d retry_in=%.0fs",
+                                inst_id, channel_type, consecutive_conflicts,
+                                conflict_backoff)
+                        await _backoff_sleep(conflict_backoff)
+                        conflict_backoff = next_backoff(
+                            conflict_backoff, register_conflict=True)
                     except ChannelError:
                         # 链路断开 → 退避重连（Issue #870：reconnects +1，抖动归因 ws_transport）
                         # Issue #1728：微信 ilink 长轮询断线单独归因 ilink_longpoll，便于看板区分。
                         self._record_reconnect(
                             "ilink_longpoll" if channel_type == Type.WECHAT.value
                             else "ws_transport")
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, BACKOFF_MAX)
+                        await _backoff_sleep(backoff)
+                        backoff = next_backoff(backoff)
                     except Exception:
                         # 非契约异常（适配器 bug / 意外 payload 形态）：绝不能让任务
                         # 就此静默死亡（2026-11-05 钉钉 data 为字符串 → AttributeError
@@ -318,16 +428,16 @@ class Supervisor:
                         self._record_reconnect(
                             "ilink_longpoll" if channel_type == Type.WECHAT.value
                             else "ws_transport")
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, BACKOFF_MAX)
+                        await _backoff_sleep(backoff)
+                        backoff = next_backoff(backoff)
                     else:
                         # 正常 return：ctx 取消 = 停机；否则 = lease 失配优雅让渡
                         if ctx.cancelled:
                             self._record_disconnect("shutdown")
                         else:
                             self._record_disconnect("lease")
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, BACKOFF_MAX)
+                        await _backoff_sleep(backoff)
+                        backoff = next_backoff(backoff)
             except asyncio.CancelledError:
                 # stop() 收敛 / 外部取消：停机归因（退避睡眠中被取消也落账，Issue #870）
                 self._record_disconnect("shutdown")
@@ -392,6 +502,7 @@ class Supervisor:
 
     def _release_lease(self, inst_id: str) -> None:
         """按 §4.2 租约键契约释放；token 由本方持有（不探测 LeaseStore 私有属性）。"""
+        self._drop_app_ref(inst_id)
         if self._leases is None:
             return
         channel_type = self._channel_types.pop(inst_id, "feishu")
@@ -401,5 +512,17 @@ class Supervisor:
         except Exception:
             pass
 
+    def _drop_app_ref(self, inst_id: str) -> None:
+        """释放 app 身份归属（让渡/revoke/停机）：同 app 的其他安装可在下一轮接上。"""
+        app_key = self._app_ref_by_inst.pop(inst_id, None)
+        self._duplicate_installs.pop(inst_id, None)
+        if app_key and self._app_refs.get(app_key) == inst_id:
+            self._app_refs.pop(app_key, None)
 
-__all__ = ["Supervisor", "fingerprint", "BACKOFF_MIN", "BACKOFF_MAX"]
+
+__all__ = [
+    "Supervisor", "fingerprint", "app_identity", "next_backoff",
+    "BACKOFF_MIN", "BACKOFF_MAX",
+    "REGISTER_CONFLICT_BACKOFF_MIN", "REGISTER_CONFLICT_BACKOFF_MAX",
+    "REGISTER_CONFLICT_ALERT_AFTER",
+]
