@@ -8,6 +8,7 @@ AES-256-GCM 认证加密，密钥从环境变量读取，支持密钥轮换。
 import base64
 import os
 import secrets
+import threading
 
 from src.kernel.config import log
 
@@ -15,32 +16,62 @@ from src.kernel.config import log
 _keys: dict[str, bytes] = {}  # key_id → 32 字节密钥
 _current_key_id: str = ""
 _loaded = False
+_load_lock = threading.Lock()
 
 
 def _load_keys():
-    """从 security_config 加载密钥，格式：kid1:key1,kid2:key2"""
+    """从 security_config 加载密钥，格式：kid1:key1,kid2:key2
+
+    2026-11-21 修复两处（配合 security_config._load 的原子发布）：
+    1. 一个有效密钥都没解析出来时**不 latch**（旧实现无条件置 _loaded=True，
+       首个读到空配置的进程会永久写 dev 信封，且再也解不开 cred1，直到重启）；
+    2. 生产环境密钥环只剩内置 dev 常量时直接抛错——那是公开常量，
+       写出的信封在配了 credential_keys 的 worker 侧解不开，属于静默数据损坏。
+    """
     global _loaded, _current_key_id
     if _loaded:
         return
 
-    from src.kernel.security_config import get_credential_keys
-    raw = get_credential_keys()
+    with _load_lock:
+        if _loaded:
+            return
 
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair or ":" not in pair:
-            continue
-        kid, key_b64 = pair.split(":", 1)
-        try:
-            key = base64.b64decode(key_b64)
-            if len(key) == 32:
-                _keys[kid] = key
-                if not _current_key_id:
-                    _current_key_id = kid
-        except Exception:
-            log.warning(f"Invalid credential key for kid={kid}, skip")
+        from src.kernel.security_config import get_credential_keys, is_production
+        raw = get_credential_keys()
 
-    _loaded = True
+        parsed: dict[str, bytes] = {}
+        first_kid = ""
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if not pair or ":" not in pair:
+                continue
+            kid, key_b64 = pair.split(":", 1)
+            try:
+                key = base64.b64decode(key_b64)
+                if len(key) == 32:
+                    parsed[kid] = key
+                    if not first_kid:
+                        first_kid = kid
+            except Exception:
+                log.warning(f"Invalid credential key for kid={kid}, skip")
+
+        if not parsed:
+            # 不 latch：允许下次调用重试（security_config._load 失败也不缓存了）
+            log.error("credential key ring is EMPTY (no valid kid:base64-32B pair parsed) — "
+                      "encrypt/decrypt would fall back to the built-in dev key. Not latching, "
+                      "will retry on next call. 检查 configs/security.json 的 credential_keys。")
+            return
+
+        if is_production() and set(parsed) == {"dev"}:
+            raise RuntimeError(
+                "refusing built-in 'dev' credential key in production（公开常量，等价明文存凭据）"
+                "：请在 configs/security.json 配置真实 credential_keys"
+            )
+
+        _keys.update(parsed)
+        if not _current_key_id:
+            _current_key_id = first_kid
+        _loaded = True
 
 
 def _get_current_key() -> tuple[str, bytes]:
