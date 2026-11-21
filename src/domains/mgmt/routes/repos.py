@@ -1029,24 +1029,36 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
+    # Issue #3563：身份获取改经 with_oauth_token 包装——过期 token（上游 401）走
+    # 刷新重试，仍失败统一 401 reauth_required（detail 带 provider，Spec v2），
+    # 替代零信息量 502；其余上游异常剥离内部 URL 后短消息化（原文仅落日志）。
     from src.kernel.token_resolver import create_provider
+    from src.api.oauth_token import sanitize_upstream_error
     from src.domains.runtime.public import VcsApiClient
     try:
-        _uinfo = create_provider(provider).verify_token(api_token)
+        # 捕获 with_oauth_token 实际使用的 token（刷新成功后重取 repo 信息用旧 token 会再 401）
+        _used_token = {"v": api_token}
+        def _verify_identity(t, _p=provider):
+            _used_token["v"] = t
+            return create_provider(_p).verify_token(t)
+        _uinfo = with_oauth_token(user, provider, _verify_identity)
         login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
         if not login:
+            # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-        _repo_info = VcsApiClient(provider, api_token, login, name).get_repo_info()
+        _repo_info = VcsApiClient(provider, _used_token["v"], login, name).get_repo_info()
         if isinstance(_repo_info, dict) and str(_repo_info.get("error", "")).strip() == "HTTP 404":
             return {"exists": False}
         if isinstance(_repo_info, dict) and _repo_info.get("error"):
+            _short = sanitize_upstream_error(_repo_info.get("error"))
             raise HTTPException(status_code=502, detail={
-                "code": 502, "message": f"检查失败: {_repo_info['error']}"})
+                "code": 502, "message": f"检查失败: {_short}"})
         return {"exists": True, "full_name": f"{login}/{name}"}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+        log.warning(f"check_repo_name failed (provider={provider}, user={user.get('id', '')}): {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {sanitize_upstream_error(e)}"})
 
 
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")

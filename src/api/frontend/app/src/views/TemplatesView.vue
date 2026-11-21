@@ -692,6 +692,9 @@ function doCreate() {
           stopProgressTimer()
           modal.submitting = false
           setProgress(0, t('templates.progress_failed', { msg: e.message }))
+          // Issue #3563（Spec v2 B3）：401 reauth——全局重授权流程已由 api.js
+          // 触发（provider 分流跳转/凭据页直达），不再透传「创建失败」文案
+          if (e && e.status === 401 && e.detail && e.detail.action === 'reauth_required') return
           G.app.showToast(t('templates.create_failed', { msg: e.message }))
         })
     },
@@ -699,6 +702,10 @@ function doCreate() {
       stopProgressTimer()
       modal.submitting = false
       modal.progress.pct = null
+      // Issue #3563（Spec v2 B3）：401 reauth（check-name 阶段）——同上走全局流程；
+      // 其它错误保持「检查失败」提示（err 可为字符串——auto rename 耗尽场景）
+      if (err && typeof err === 'object' && err.status === 401 && err.detail
+        && err.detail.action === 'reauth_required') return
       G.app.showToast(err || t('templates.check_failed', { msg: '' }))
     }
   )

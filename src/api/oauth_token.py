@@ -14,6 +14,59 @@ provider 无关——GitCode 和 GitHub 读 API 都走此包装器。
 """
 from src.kernel.config import log
 
+# Issue #3563（Spec v2，Issue 评论 202381001/202380151）：401 重授权统一出口。
+# 协议口径：复用既有 action=reauth_required（前端 api.js 已消费），不新增
+# error_code；detail 附带 provider 字段供前端分流到 /auth/login/<provider>。
+REAUTH_REQUIRED_ACTION = "reauth_required"
+
+# 平台显示名（「GitHub/GitCode」驼峰形态，capitalize() 会得到 Github/Gitcode）
+_PROVIDER_LABELS = {"github": "GitHub", "gitcode": "GitCode",
+                    "gitee": "Gitee", "gitlab": "GitLab"}
+
+
+def _provider_label(provider: str) -> str:
+    _p = (provider or "").strip().lower()
+    return _PROVIDER_LABELS.get(_p, _p.capitalize())
+
+
+def reauth_required_detail(provider: str) -> dict:
+    """Issue #3563: 统一 401 reauth detail。
+
+    字段口径（Spec v2 B1）：
+    - action=reauth_required：既有协议字段（api.js:286/312 按此拦截）；
+    - provider：前端按其分流到 /auth/login/<provider>，避免 GitHub 用户
+      被误导向 GitCode 授权页（Issue #3563 评论 202380151）；
+    - message：provider 对应的「授权已过期，请重新登录授权」；
+    - 不携带 error_code（用户裁定：避免两套口径并存）。
+    """
+    _provider = (provider or "").strip()
+    return {
+        "code": 401,
+        "message": f"{_provider_label(_provider)} 授权已过期，请重新登录授权",
+        "action": REAUTH_REQUIRED_ACTION,
+        "provider": _provider,
+    }
+
+
+def raise_reauth_required(provider: str):
+    """Issue #3563: 三入口统一的 401 错误出口（check-name / 模板一键创建 / 托管权限判断）。"""
+    from fastapi import HTTPException
+    raise HTTPException(status_code=401, detail=reauth_required_detail(provider))
+
+
+def sanitize_upstream_error(err) -> str:
+    """Issue #3563: 上游异常短消息化——剥离内部 API URL（https?://...）。
+
+    上游报文格式形如 "GitHub API GET https://api.github.com/user failed (401): ..."，
+    原文直接拼入用户可见 message 会泄露内部端点；剥离后保留状态码与短描述，
+    日志仍可看到完整原文（调用方自行 log）。
+    """
+    import re
+    msg = str(err or "")
+    msg = re.sub(r'\s*https?://\S+', '', msg)
+    msg = re.sub(r'\s{2,}', ' ', msg).strip()
+    return msg[:300]
+
 
 def _is_token_error(err: Exception) -> bool:
     """判断异常是否为 token 失效（401/403）。
@@ -74,14 +127,8 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
     from src.api.deps import get_user_token_for
     token = get_user_token_for(username, user_id=user_id, provider=provider)
 
-    _provider_label = provider.capitalize()
-
     if not token:
-        raise HTTPException(status_code=401, detail={
-            "code": 401,
-            "message": f"{_provider_label} 授权已过期，请重新登录授权",
-            "action": "reauth_required"
-        })
+        raise_reauth_required(provider)
 
     try:
         return api_call_fn(token, *args, **kwargs)
@@ -93,11 +140,7 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
         log.info(f"with_oauth_token: token error for user={user_id}, provider={provider}, attempting refresh: {str(e)[:100]}")
         new_token = refresh_oauth_token(user_id, provider)
         if not new_token:
-            raise HTTPException(status_code=401, detail={
-                "code": 401,
-                "message": f"{_provider_label} 授权已过期，请重新登录授权",
-                "action": "reauth_required"
-            })
+            raise_reauth_required(provider)
 
         # 刷新成功 → 重试一次
         try:
@@ -105,11 +148,7 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
         except Exception as e2:
             if _is_token_error(e2):
                 # 重试后仍 401/403(token) → refresh_token 也失效
-                raise HTTPException(status_code=401, detail={
-                    "code": 401,
-                    "message": f"{_provider_label} 授权已过期，请重新登录授权",
-                    "action": "reauth_required"
-                })
+                raise_reauth_required(provider)
             if _is_business_forbidden(e2):
                 # 重试后 403 但不含 token 关键词 → 业务权限不足
                 raise HTTPException(status_code=403, detail={
