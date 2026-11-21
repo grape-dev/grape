@@ -174,6 +174,14 @@ class PlatformCardContractClient:
             with self.opener(req, timeout=self.timeout) as resp:
                 status = getattr(resp, "status", None) or 200
                 body = resp.read().decode("utf-8", "replace") or "{}"
+        except urllib.error.HTTPError as e:
+            # urllib 对 4xx/5xx 是抛 HTTPError，不会返回 response.status ——
+            # 必须在这里分流，否则 401/403 会被归成“通道不可用”并触发无意义重试
+            # （2026-11-22 评审③：下面按 status 分类的分支曾是真传输永不到的死代码）。
+            code = int(getattr(e, "code", 0) or 0)
+            if code >= 500:
+                raise PlatformCardUnavailableError(f"{url}: HTTP {code}") from e
+            raise PlatformCardContractError(f"{url}: HTTP {code}") from e
         except Exception as e:  # noqa: BLE001 - 网络/超时统一归类为"通道不可用"
             raise PlatformCardUnavailableError(f"{url}: {e}") from e
         if not (200 <= int(status) < 300):

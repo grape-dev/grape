@@ -19,7 +19,7 @@ import ast
 from pathlib import Path
 
 _TEST_DIR = Path(__file__).resolve().parent
-_SRC = _TEST_DIR.parent / "src"
+_SRC = _TEST_DIR.parents[1] / "src"   # tests/mgmt/x.py → 仓库根/src
 
 _TABLE = "user_accounts"
 

@@ -17,6 +17,8 @@ import sys
 import types
 from pathlib import Path
 
+import re
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -254,3 +256,48 @@ def test_f_legacy_gitcode_env_fallback_is_logged(monkeypatch, caplog):
     assert len(hits) == 1, f"应恰好一条告警（去重），实际 {len(hits)}"
     assert "gitee:o/r" in hits[0].getMessage()
     ce._warned_legacy_env.discard("gitee:o/r")
+
+# 已知的历史硬编码点（基线就有，非本轮引入）：只做棘轮，不允许新增。
+_KNOWN_CLONE_HOST_LITERALS = {
+    "src/domains/runtime/vcs/repo_manager.py",          # 存量自拼（待收口）
+    "src/domains/runtime/agents/org_context_repo.py",   # hosts 字典（待收口）
+    # 以下是 runbook 文案/示例里的地址（不是 clone 构造），扫描区分不了文本与代码
+    "src/api/main.py",
+    "src/api/server_common.py",
+    "src/domains/runtime/agents/executor.py",
+    "src/domains/runtime/pipeline/event_pipeline.py",
+    "src/domains/runtime/storage/scene_sync.py",
+    "src/kernel/repo.py",
+    "src/kernel/worker_package.py",
+}
+
+
+def test_repo_wide_no_new_hardcoded_clone_hosts():
+    """评审③：原扫描只覆盖 3 个文件、且只查两种字面量，漏掉其它自拼地址。
+
+    这里扫全仓 src/：凡是自己拼 clone/上游地址（gitcode.com/gitee.com/github.com
+    的 https 字面量）都必须在 clone_endpoint 单点，或登记在已知清单里。
+    """
+    root = ROOT / "src"
+    host = re.compile(r"https://(?:gitcode|gitee|github)\.com/")
+    offenders = set()
+    for f in root.rglob("*.py"):
+        rel = str(f.relative_to(ROOT))
+        for line in f.read_text(encoding="utf-8").splitlines():
+            # 只看“拼仓库地址”的行：同一行既有 host 字面量又有 .git
+            if host.search(line) and ".git" in line:
+                offenders.add(rel)
+                break
+    new = sorted(offenders - _KNOWN_CLONE_HOST_LITERALS - {"src/domains/runtime/vcs/clone_endpoint.py"})
+    assert not new, f"新增自拼仓库地址（应走 clone_endpoint）：{new}"
+
+
+def test_sandbox_clone_uses_the_prefixed_key_not_the_bare_name():
+    """数据流断言：REPO_FULL_NAME 裸名存在时，平台仍取 REPO_KEY（评审③ 缺口）。"""
+    from src.domains.runtime.agents.sandbox.sandbox_context import build_context
+
+    ctx = build_context({"repo_key": "gitee:acme/widget",
+                         "env_extra": {"REPO_KEY": "gitee:acme/widget",
+                                       "REPO_FULL_NAME": "acme/widget"}})
+    url = getattr(ctx, "repo_url", "") or (ctx.get("repo_url") if isinstance(ctx, dict) else "")
+    assert url == "https://gitee.com/acme/widget.git"

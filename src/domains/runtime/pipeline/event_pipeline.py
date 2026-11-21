@@ -822,6 +822,9 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     _full_name, _owner, _repo_name = _derive(repository, repo_key)
     _resolved_account = resolve_actor_account(evt, repo_key)
     env_extra = {
+        # 沙箱 clone 必须知道平台：REPO_FULL_NAME 是剥前缀的裸名（runbook 拼 URL 用），
+        # 只有 REPO_KEY 带 provider 前缀；缺它时 sandbox 会按 parse_repo_key 默认 gitcode。
+        "REPO_KEY": repo_key,
         "REPO_FULL_NAME": _full_name,
 
         "REPO_OWNER": _owner,
@@ -4991,7 +4994,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 continue
             _r_push = repogit._run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_linked_token, timeout=120)
+                token=_linked_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 _log.warning(f"direct linked PR: push failed {_rk}: {_err}")
@@ -6673,6 +6676,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # （https://gitcode.com/$REPO_FULL_NAME.git）不会拼出 gitcode:owner/repo 形式的错误地址。
     from src.kernel.repo_key import from_repo_key as _frk721
     env_extra = {
+        "REPO_KEY": repo_key or repository,
         "REPO_FULL_NAME": _frk721(repository) or repository,
         "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],

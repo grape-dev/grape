@@ -395,7 +395,7 @@ def _baseline_fail_or_warn(issue_dir, issue_num, agent_type, expected, head,
 
 
 def _validate_issue_baseline(issue_dir, issue_num, agent_type, expected,
-                             token: str = "", requested: str = "",
+                             token: str = "", requested: str = "", repo_key: str = "",
                              strict_override=None) -> None:
     """#2514 闸门三：HEAD 与 origin/<expected> 的一致性显式校验。
 
@@ -413,7 +413,8 @@ def _validate_issue_baseline(issue_dir, issue_num, agent_type, expected,
                  f"issue={issue_num} (head aligned to delivery)")
         return
     # 显式 fetch 刷新该基线 ref（失败仅告警：只读 gitdir #2245/#1891，用 mirror 已有 refs 判）
-    _run_git_retry(["-C", issue_dir, "fetch", "origin", expected], token=token, timeout=120)
+    _run_git_retry(["-C", issue_dir, "fetch", "origin", expected], token=token, timeout=120,
+                   repo_key=repo_key)
     r = _run_git(["-C", issue_dir, "rev-list", "--left-right", "--count",
                   f"HEAD...origin/{expected}"], token=token)
     head = "unknown"
@@ -583,13 +584,27 @@ def _basic_auth(token: str, scheme: str = "x_access_token", provider: str = "",
             log.warning(f"repogit clone username derive failed ({provider}): {e}")
     return base64.b64encode(f"{user}:{token}".encode()).decode()
 
-def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "x_access_token",
-             provider: str = "", username: str = ""):
+def _run_git(args: list, token: str = "", timeout: int = 900, scheme: str = "",
+             provider: str = "", username: str = "", repo_key: str = ""):
     """执行 git；token 经 `-c http.extraheader` 注入（不落盘、不进日志）。
 
     scheme 由平台卡 clone_auth 决定（gitcode/github=x-access-token 现状，
     gitlab=oauth2，gitee=basic_password）。
     """
+    if token and not scheme:
+        # 传输凭据必须与 clone 同源：gitee=basic_password（用户名=令牌账号）、
+        # gitlab=oauth2、github/gitcode=x-access-token。缺 repo_key 才回落旧默认。
+        scheme = "x_access_token"
+        if repo_key:
+            try:
+                from src.domains.runtime.vcs.clone_endpoint import clone_params
+
+                _p = clone_params(repo_key)
+                scheme = _p.get("clone_auth") or scheme
+                provider = provider or _p.get("provider", "")
+                username = username or _p.get("username", "")
+            except Exception as e:  # noqa: BLE001 - 派生失败回落旧默认，不阻断 git
+                log.warning(f"transport auth derive failed ({repo_key}): {e}")
     cmd = ["git"]
     if token:
         cmd += ["-c", f"http.extraheader=Authorization: Basic "
@@ -624,8 +639,8 @@ def _is_git_network_error(result) -> bool:
     return bool(_NETWORK_ERR_RE.search(err))
 
 def _run_git_retry(args: list, token: str = "", timeout: int = 900,
-                   retries: int = 3, base_delay: float = 1.0, scheme: str = "x_access_token",
-                   provider: str = "", username: str = ""):
+                   retries: int = 3, base_delay: float = 1.0, scheme: str = "",
+                   provider: str = "", username: str = "", repo_key: str = ""):
     """执行 git；网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。
 
     - 成功（returncode==0）立即返回；
@@ -1363,7 +1378,7 @@ def _align_inspector_delivery(issue_dir: str, base: str, issue_num, delivery_bra
 
 
 def _branch_vs_baseline(base: str, branch: str, base_branch: str,
-                        token: str = "") -> dict:
+                        token: str = "", repo_key: str = "") -> dict:
     """本地分支相对 origin/<base> 的分叉状态（复用判据用）。
 
     sre/qa 这类「检测-发布」环节不应继承 coding 未合并的本地提交：一旦本地
@@ -1378,7 +1393,8 @@ def _branch_vs_baseline(base: str, branch: str, base_branch: str,
     st = {"exists": False, "ahead": -1, "behind": -1, "pushed": False}
     if not base or not branch or not base_branch:
         return st
-    _run_git(["-C", base, "fetch", "origin", base_branch], token=token, timeout=30)
+    _run_git(["-C", base, "fetch", "origin", base_branch], token=token, timeout=30,
+             repo_key=repo_key)
     r = _run_git(["-C", base, "show-ref", "--verify", "--quiet",
                   f"refs/heads/{branch}"], token=token)
     st["exists"] = r is not None and r.returncode == 0
@@ -1569,7 +1585,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                     # 分支上，复用必然被基线闸门拦下（sre 2 秒 failed，agent 从未
                     # 启动）。检测/发布类环境、或提交已推到远端的，按分叉拒绝复用，
                     # 走下面的重建对齐路径；coding 未推提交仍保留复用（稍后阻断）。
-                    _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                    _st = _branch_vs_baseline(base, branch, base_branch, token=token, repo_key=repo_key)
                     if (_st["ahead"] > 0 and _st["behind"] > 0
                             and not is_inspector_agent(agent_type)
                             and (agent_type in _REUSE_CLEAN_AGENTS or _st["pushed"])):
@@ -1597,7 +1613,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                     # 就 failed（#92017）。检测/发布类环境或提交已推远端的，先把旧
                     # tip 存 refs/grape-preserved/ 再把分支对齐基线，用干净树建树；
                     # 作者类 coding 且提交未推 → 保持阻断（不允许静默丢工作）。
-                    _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                    _st = _branch_vs_baseline(base, branch, base_branch, token=token, repo_key=repo_key)
                     if _st["ahead"] > 0 and _st["behind"] > 0:
                         if not is_inspector_agent(agent_type) and (
                                 agent_type in _REUSE_CLEAN_AGENTS or _st["pushed"]):
@@ -1605,7 +1621,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                                 base, branch, issue_num, token=token)
                             if _pres_ref and _reset_branch_to_baseline(
                                     base, branch, base_branch, issue_num, token=token):
-                                _st = _branch_vs_baseline(base, branch, base_branch, token=token)
+                                _st = _branch_vs_baseline(base, branch, base_branch, token=token, repo_key=repo_key)
                             log.warning(
                                 f"workspace.reuse_branch_aligned issue={issue_num} "
                                 f"agent={agent_type} preserved={_pres_ref or '-'} "
@@ -1976,7 +1992,8 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
         if head is None or not (head.stdout or "").strip():
             return False
         local_head = head.stdout.strip()
-        remote = _run_git_retry(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token)
+        remote = _run_git_retry(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"],
+                                token=token, repo_key=repo_key)
         if remote is None or remote.returncode != 0:
             log.warning(f"workspace terminal cleanup deferred (remote unreachable) "
                         f"{repo_key} issue={issue_num} path={issue_dir} "

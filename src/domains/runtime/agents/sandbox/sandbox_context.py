@@ -77,7 +77,10 @@ def build_context(task: dict) -> SandboxContext:
     elif isinstance(_raw_env, dict):
         _env_extra = _raw_env
 
-    repo_full_name = _env_extra.get("REPO_FULL_NAME") or task.get("repo_key") or ""
+    # 平台必须来自带前缀的 key：REPO_FULL_NAME 是裸全名（runbook 用），
+    # 单独用它会让 parse_repo_key 默认成 gitcode（gitee 仓被 clone 到 gitcode.com）。
+    repo_full_name = (_env_extra.get("REPO_KEY") or task.get("repo_key")
+                      or _env_extra.get("REPO_FULL_NAME") or "")
     try:
         from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
 

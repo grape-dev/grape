@@ -147,7 +147,15 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
             return api_call_fn(new_token, *args, **kwargs)
         except Exception as e2:
             if _is_token_error(e2):
-                # 重试后仍 401/403(token) → refresh_token 也失效
+                # 重试后仍 401/403(token)：**刷新是成功的**，但上游同样拒绝
+                # （令牌被服务端吊销/权限被收回）。旧实现只提示重新授权，
+                # 既不落 status=4 也不退避 → 下次请求再次刷新，GitHub refresh_token
+                # 被逐请求轮换（2026-11-22 评审补强④）。
+                try:
+                    from src.domains.mgmt.user.db import mark_identity_reauth_required
+                    mark_identity_reauth_required(user_id, provider, "post_refresh_401")
+                except Exception as _me:
+                    log.warning(f"with_oauth_token: mark reauth failed: {_me}")
                 raise_reauth_required(provider)
             if _is_business_forbidden(e2):
                 # 重试后 403 但不含 token 关键词 → 业务权限不足

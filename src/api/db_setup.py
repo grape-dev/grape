@@ -4349,7 +4349,15 @@ def _destructive_ddl(c, ddl: str, *, kind_hint: str = "cleanup",
         if _is_mdl_timeout(e):
             _LEGACY_BLOCKED_DDL.append(f"{ddl}（MDL 超时）")
             raise _MdlWaitTimeout(str(e))
-        log.warning(f"_destructive_ddl failed（幂等可重试）: {ddl}: {e}")
+        # 已经处于目标状态 = 成功（重复删列/建列、列不存在等）：这类异常不阻断启动。
+        _code = getattr(e, "args", (None,))[0] if getattr(e, "args", None) else None
+        if isinstance(_code, int) and _code in (1050, 1060, 1061, 1091):
+            log.debug(f"_destructive_ddl already in target state: {ddl}: {e}")
+            return True
+        # 其它失败必须抛出：调用链约定「fn 正常返回 = 盖章」，吞掉异常会让
+        # 审计写成 after 且下次启动不再重试（2026-11-22 评审④：假绿）。
+        log.warning(f"_destructive_ddl failed, not stamped: {ddl}: {e}")
+        raise
     return True
 
 

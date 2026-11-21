@@ -3601,6 +3601,58 @@ def _read_refresh_token_from_credentials(user_id: int, provider: str) -> str:
         return ""
     return cred["refresh_token"]
 
+# Issue #3054 后续（2026-11-22 评审补强④）：刷新成功但上游仍 401 的退避。
+# GitHub 每次 refresh 都会轮换 refresh_token：上游持续 401 时逐请求刷新 =
+# 用掉一枚、写回一枚，风暴式轮换且每一轮都以用户重新授权收场。
+_REFRESH_MIN_INTERVAL_S = 60.0
+_REFRESH_LAST: "dict[tuple, float]" = {}
+
+
+def _read_access_token_from_identity(user_id: int, provider: str) -> str:
+    """读 external_identities 里当前 access_token（解密）；无行/失败返回空。"""
+    try:
+        from src.kernel.session_manager import db_lock as _sm_dl
+        from src.domains.mgmt.auth.credential_crypto import decrypt
+        with _sm_dl:
+            c = _mg_db.cursor()
+            try:
+                c.execute(
+                    "SELECT access_token FROM external_identities "
+                    "WHERE grape_user_id=? AND provider=? AND status=1",
+                    (user_id, provider))
+                row = c.fetchone()
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        if not row or not row[0]:
+            return ""
+        return decrypt(row[0])
+    except Exception as e:
+        log.warning(f"_read_access_token_from_identity failed: {e}")
+        return ""
+
+
+def mark_identity_reauth_required(user_id: int, provider: str, reason: str = "") -> None:
+    """把身份行打成 status=4（绑定仍在、token 失效 → 引导重新授权）。
+
+    调用点：invalid_grant/400（refresh_token 彻底失效），以及
+    `with_oauth_token` 里“刷新成功但重试仍 401”（refresh 有效、上游同样拒绝）。
+    """
+    try:
+        from src.kernel.session_manager import db_lock as _sm_dl
+        with _sm_dl:
+            db.execute(
+                "UPDATE external_identities SET status=4, updated_at=datetime('now') "
+                "WHERE grape_user_id=? AND provider=? AND status=1",
+                (user_id, provider))
+            _mg_db.commit()
+        log.warning(f"identity marked reauth-required: user={user_id} provider={provider} {reason}")
+    except Exception as e:
+        log.warning(f"mark_identity_reauth_required failed: {user_id}/{provider}: {e}")
+
+
 def refresh_oauth_token(user_id: int, provider: str) -> str | None:
     """通用 OAuth token 刷新——用 provider 配置里的 token_url，消除硬编码 URL。
 
@@ -3624,6 +3676,14 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
     if not rt:
         log.warning(f"refresh_oauth: no refresh_token for user={user_id}, provider={provider}")
         return None
+
+    # 退避：刚刷新过又要求刷新 → 不碰 OAuth（否则每轮都轮换 refresh_token）。
+    # 返回当前 access_token 让调用方重试；若上游仍 401，由 with_oauth_token 打 status=4。
+    _last = _REFRESH_LAST.get((user_id, provider))
+    if _last and (time.monotonic() - _last) < _REFRESH_MIN_INTERVAL_S:
+        log.warning(f"refresh_oauth: backoff active ({_REFRESH_MIN_INTERVAL_S:.0f}s) "
+                    f"user={user_id}, provider={provider} —— 跳过本轮刷新")
+        return _read_access_token_from_identity(user_id, provider) or None
 
     # 凭据（Issue #3054 P1-2）：走与换 code 完全相同的取凭据入口，client_id+secret
     # 同源成对取——原实现直接读 meta，凭据迁表后就是"登录用新凭据、刷新用旧/空凭据"，
@@ -3678,15 +3738,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         if e.code == 400 or "invalid_grant" in body:
             log.warning(f"refresh_oauth: invalid_grant/400 → credential expired flow "
                         f"user={user_id}, provider={provider}")
-            try:
-                with db_lock:
-                    db.execute(
-                        "UPDATE external_identities SET status=4, updated_at=datetime('now') "
-                        "WHERE grape_user_id=? AND provider=? AND status=1",
-                        (user_id, provider))
-                    _mg_db.commit()
-            except Exception as _me:
-                log.warning(f"mark expired failed: {_me}")
+            mark_identity_reauth_required(user_id, provider, "invalid_grant")
             return None
         log.warning(f"refresh_oauth: refresh failed (transient) for user={user_id}, provider={provider}: {e}")
         # R21.4.2: refresh 失败时重读 external_identities 获取最新 refresh_token 重试一次
@@ -3754,6 +3806,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         refresh_token=new_refresh,
         expires_in=new_expires_in,
     )
+    _REFRESH_LAST[(user_id, provider)] = time.monotonic()
 
     # 5. 同步更新 user_credentials（迁移期保留，上层 deps.py 读 fetched_at/token_expires_at 判断过期）
     # Issue #343: cred 不存在时创建新条目，否则预刷新永远跳过（user_credentials 无 gitcode_oauth → 死路）
