@@ -38,17 +38,17 @@ ORG_NODES = [
     {
         "id": "org_intake", "tag": "issue", "skill": "org-intake-cli",
         "mode": "emit", "next": "org_dispatch", "handoff": "a2a",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
     {
         "id": "org_dispatch", "tag": "coding", "skill": "org-dispatch-cli",
         "mode": "emit", "next": "org_aggregate", "handoff": "a2a",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
     {
         "id": "org_aggregate", "tag": "qa", "skill": "org-aggregate-cli",
         "mode": "emit", "next": "done", "handoff": "complete",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
 ]
 
@@ -248,6 +248,79 @@ def test_auto_advance_creates_a2a_when_skill_did_not_handoff(monkeypatch):
     assert dispatched and dispatched[0][0][1] == 777
 
 
+def _plain_node(**kw):
+    node = {"id": "qa", "skill": "qa-cli", "mode": "emit", "next": "sre",
+            "handoff": "a2a", "skip": [], "enabled": True}
+    node.update(kw)
+    return node
+
+
+def _transition_to(node, next_role="sre", next_id="sre", terminal=False):
+    return {"node": node, "next_node": {"id": next_id} if not terminal else None,
+            "next_id": next_id, "next_role": next_role,
+            "terminal": terminal, "handoff": node.get("handoff") or "a2a"}
+
+
+def test_auto_advance_requires_node_opt_in(monkeypatch):
+    """Issue #3688：节点未声明 auto_advance → 不兜底派发（回到技能自行交办语义）。"""
+    events, stages, stage_sets = [], [], []
+    dispatched = _patch_advance(
+        monkeypatch, stage="qa",
+        transition=_transition_to(_plain_node()),
+        events=events, stages=stages, stage_sets=stage_sets)
+
+    out = _auto_advance_after_complete(_task("qa"))
+
+    assert out["action"] == "none"
+    assert out["reason"] == "auto_advance_not_declared"
+    assert events == [] and stage_sets == [] and dispatched == []
+
+
+def test_auto_advance_runs_when_node_opts_in(monkeypatch):
+    """节点显式 auto_advance=True 时保留 #2118 兜底派发。"""
+    events, stages, stage_sets = [], [], []
+    node = _plain_node(auto_advance=True)
+    dispatched = _patch_advance(
+        monkeypatch, stage="qa", transition=_transition_to(node),
+        events=events, stages=stages, stage_sets=stage_sets)
+
+    out = _auto_advance_after_complete(_task("qa"))
+
+    assert out["action"] == "a2a"
+    assert out["next_role"] == "sre"
+    assert events and events[0]["agent_type"] == "sre"
+    assert events[0]["payload"]["auto_advance"] is True
+    assert stage_sets == [("sre", "sre")]
+    assert dispatched
+
+
+def test_auto_advance_accepts_string_flag(monkeypatch):
+    """场景编辑页/接口可能以字符串下发，"true"/1 同样视为开启。"""
+    events, stages, stage_sets = [], [], []
+    node = _plain_node(auto_advance="true")
+    _patch_advance(monkeypatch, stage="qa", transition=_transition_to(node),
+                   events=events, stages=stages, stage_sets=stage_sets)
+
+    out = _auto_advance_after_complete(_task("qa"))
+
+    assert out["action"] == "a2a"
+
+
+def test_terminal_pending_review_is_not_gated_by_opt_in(monkeypatch):
+    """末节点置 pending_review 属 Issue #656 既有语义，不受 auto_advance 开关影响。"""
+    events, stages, stage_sets = [], [], []
+    node = _plain_node(id="sre", skill="sre-cli", next="done", handoff="complete")
+    _patch_advance(monkeypatch, stage="sre",
+                   transition=_transition_to(node, next_role="done",
+                                             next_id="done", terminal=True),
+                   events=events, stages=stages, stage_sets=stage_sets)
+
+    out = _auto_advance_after_complete(_task("sre"))
+
+    assert out["action"] == "pending_review"
+    assert stage_sets == [("pending_review", "sre")]
+
+
 def test_auto_advance_skips_when_stage_already_advanced(monkeypatch):
     events, stages, stage_sets = [], [], []
     dispatched = _patch_advance(
@@ -423,3 +496,22 @@ def test_official_market_lookup_excludes_org_scope(monkeypatch):
             c = db.cursor()
             c.execute("DELETE FROM scene_market WHERE name='org-iso-2118'")
             db.commit()
+
+
+# ---------------------------------------------------- Issue #3688 opt-in
+def test_org_official_template_declares_auto_advance():
+    """组织官方模板必须显式声明 auto_advance，否则 #2118 兜底会在组织链条上失效。"""
+    from src.domains.mgmt.pipeline_config import ORG_SCENE_NODES
+    import json
+    import os
+
+    assert all(node.get("auto_advance") is True for node in ORG_SCENE_NODES)
+
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "..",
+                            "configs", "pipelines.json")
+    cfg = json.load(open(cfg_path, encoding="utf-8"))
+    org_nodes = cfg["scenes"]["org"]["nodes"]
+    assert all(node.get("auto_advance") is True for node in org_nodes)
+    # 标准模板保持缺省（回到技能自行交办语义），交付类节点不得隐式自动推进
+    default_nodes = cfg["scenes"]["default"]["nodes"]
+    assert all(node.get("auto_advance") is None for node in default_nodes)
