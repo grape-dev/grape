@@ -3078,12 +3078,6 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         return "", stage, exc
 
     _getters = repo_token_getters(provider)
-    # 显式 bot 闸的两个信号（仅 config-only 平台分支使用；_getters 分支自带存量四级
-    # fallback，不看这个闸）。这里必须**两个都给默认值**：外层 else 分支会引用它们，
-    # 少初始化一个就会在 gitcode/github 路径上抛 UnboundLocalError
-    # （实测 2026-11-21：github 仓直接报 "cannot access local variable '_has_bot_row'"）。
-    _has_bot_row = False
-    _gate_bot = False
     # 内部契约：_bot()/_user() 必须返回 (token, stage, exc) —— 下面按 3 元组解包。
     # B7 曾把这两个函数写成裸字符串，端点每次调用都会 ValueError（500）；
     # 2026-11-13 附带的用例 test_repo_token_getters_provider_keyed 现在锁住该契约。
@@ -3138,70 +3132,22 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
     else:
-        # 其余在册平台（gitee/gitlab…）：仓库级 bot token 走端口（token_storage_field），
-        # 用户 token 走 provider 无关解析（PAT→OAuth），零平台分支。
+        # 其余在册平台（gitee/gitlab…）：仓库级 bot token 与用户 token 都由
+        # **同一个执行凭据选择器**回答（`TokenResolver.resolve_exec_token`），零平台分支。
         #
-        # ── 2026-11-21 三次修订：闸判「value 非空」而不是「行存在」──
-        # bypass_path_b 一旦打开会把 RepoBot 与 GlobalBot 两级**同时**解锁。
-        # 若拿"行存在"当闸，以下两种形态会悄悄落到平台全局 bot：
-        #   ① rc 行被清空（value=''，行还在）
-        #   ② rc 值已失效/被撤销
-        # 而全局 bot 通常不是该私仓协作者 → git push 403；且因为拿到的是非空 token，
-        # 下面"失效即 424"的分支不会触发 —— 比 502 难查得多（看着走得通，身份错了）。
-        # 所以：闸 = value 非空；**开了闸就直取 rc value，不再经策略链**。
-        try:
-            from src.domains.mgmt.user.db import get_repo_credential_meta
-            _bot_meta = get_repo_credential_meta(rk, "bot") or {}
-            _bot_value = str(_bot_meta.get("value") or "")
-            _undecryptable = bool(_bot_meta.get("undecryptable"))
-        except Exception as _ge:
-            log.debug(f"git-credential explicit-bot gate lookup failed: {_ge}")
-            _bot_meta, _bot_value, _undecryptable = {}, "", False
-        # 两个信号分开：`_has_bot_row` 回答「管理员是否显式配了 bot」，`_gate_bot`
-        # 回答「这个值此刻能不能用」。混成一个会掉进两个坑之一：
-        #   用行存在判闸 → 值被清空时打开 bypass，落到全局 bot（身份错）
-        #   用 value 判一切 → 显式配了但值空时静默走策略链（同样是落全局 bot）
-        _has_bot_row = bool(_bot_meta)
-        _gate_bot = bool(_bot_value)
-
-        def _bot_expired(repo_key: str) -> bool:
-            """仓库级 bot 是否已被标记过期（managed_repos.bot_token_status）。
-
-            R18.2.2「过期短路」的原始落点就在这里：RepoBotToken._is_expired 读同一列。
-            走 rc 直取的路径必须自己调它，否则绕过短路，把过期 token 当可用发出去。
-            """
-            try:
-                from src.domains.mgmt.public import repo_bot_token_status_any
-                return str(repo_bot_token_status_any(repo_key) or "") == "expired"
-            except Exception as e:
-                log.debug(f"git-credential repo bot expiry lookup failed: {e}")
-                return False
-
+        # ── Issue #3713：这里曾自己直读 rc 行并做三段判定（empty/undecryptable/expired），
+        # 与策略链是两套实现 → 同一份 rc 行两条链给出两种答案：
+        #   换券链看得见 rc 行（守卫之外直读），建树链的 RepoBotToken._fetch 在 rc 读取
+        #   之前就按 path-B 返回空 → 私有 path-B 仓换券 200 / 建树 token 空 / refs=0。
+        # 现在三段判定只存在于选择器里（链首 `ExplicitRepoBotToken`），本路由只做渲染：
+        #   stage == "" → 用返回的 token；stage ∈ CREDENTIAL_STAGES → 424 + code + stage。
+        # bypass_path_b 仍然一行都不许出现：它会同时解锁 RepoBot 与 GlobalBot 两级，
+        # 把「仓库无 bot、平台有全局 bot」的 path-B 私仓推到全局 bot 身份上（403 且难查）。
         def _bot():
             try:
-                # 行存在但解不开：值与「无行」不可区分是历史缺陷（get_repo_credential_meta
-                # 曾把解密异常吞成 None）→ 会静默落到归属者。现在带 stage 上报，外层报 424。
-                if _undecryptable:
-                    return "", "undecryptable", None
-                if _gate_bot:
-                    # 过期短路必须保留（R18.2.2 原始要求，已落地在 managed_repos.bot_token_status：
-                    # RepoBotToken._is_expired → repo_bot_token_status_any == "expired"）。
-                    # 直取其值而不看状态 = 把过期 token 当可用发出去 → 上游 401、
-                    # 任务报「推送失败」，运维看不出该轮换凭据。这里补回短路：
-                    # 已标 expired → 视为不可用 → 外层 _has_bot_row 报 424。
-                    if _bot_expired(rk):
-                        return "", "expired", None
-                    # 只认显式配置的仓库 bot；不经 TokenResolver（它会顺带解锁全局 bot）
-                    return _bot_value, "rc_bot", None
-                if _has_bot_row:
-                    # 显式配了 bot 但值不可用（被清空）：不落全局 bot，
-                    # 由外层报 424 —— 身份不能混，修凭据是运维动作。
-                    return "", "empty", None
-                # 根本没配仓库 bot：path-A（host_user_id 空）不受守卫影响仍走全局 bot；
-                # path-B 跳过两级 bot，由归属者/会话用户兜底。
                 from src.kernel.token_resolver import TokenResolver, create_provider
-                _t = TokenResolver(create_provider(provider)).get_token(rk) or ""
-                return _t, ("strategy" if _t else ""), None
+                _sel = TokenResolver(create_provider(provider)).resolve_exec_token(rk)
+                return _sel.token, (_sel.stage or ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
 
@@ -3255,6 +3201,22 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             tok2, st2, ex2 = _session_user()
             return tok2, st2, (ex2 or ex)
 
+    def _raise_explicit_bot_unusable(stage: str):
+        """渲染选择器给的分类（Issue #3713：分类统一、措辞在本面）。
+
+        只在 `exc is None` 时调用——选择器**分类**（empty/undecryptable/expired）是
+        「显式配的凭据不能用」，必须显式失败；而 `_bot()` 抛异常（读库/造 provider 失败）
+        是另一回事，保持原语义：交给后面的 502 分支带 stage 上报（#1063）。
+        """
+        _why = ("密文无法解密（密钥不匹配或行被破坏）" if stage == "undecryptable"
+                else "已标记过期" if stage == "expired"
+                else "值为空或被撤销")
+        raise HTTPException(status_code=424, detail={
+            "code": "BOT_CREDENTIAL_INVALID",
+            "stage": stage,
+            "message": f"{_provider_display(provider)} 该仓库 bot 凭据不可用（{_why}），请轮换",
+        })
+
     if user.get("agent_type") == "chat":
         tok, stage, exc = _user(chat_first=True)
         if not tok:
@@ -3264,23 +3226,19 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 stage, exc = alt_stage, alt_exc
     else:
         tok, stage, exc = _bot()
-        if not tok and _has_bot_row:
-            # 该仓**显式**配了 rc bot 行，但取不到可用值 → 凭据失效/被撤销。
-            # 不静默降级到用户身份：否则「机器身份」和「用户身份」混在一根链上，
-            # 审计与提交署名都会失真，且下次排障看不出到底用的是谁。
-            _why = ("密文无法解密（密钥不匹配或行被破坏）" if stage == "undecryptable"
-                    else "已标记过期" if stage == "expired"
-                    else "值为空或被撤销")
-            raise HTTPException(status_code=424, detail={
-                "code": "BOT_CREDENTIAL_INVALID",
-                "stage": stage or "empty",
-                "message": f"{_provider_display(provider)} 该仓库 bot 凭据不可用（{_why}），请轮换",
-            })
+        if not tok and stage and exc is None:
+            # 选择器判定「显式 rc 行存在但不可用」→ 显式失败，不降级到用户身份
+            # （机器身份与用户身份混一根链，审计与提交署名都会失真）。
+            _raise_explicit_bot_unusable(stage)
         if not tok:
             alt, alt_stage, alt_exc = _user()
             tok = alt
             if not tok and not stage:
                 stage, exc = alt_stage, alt_exc
+    if not tok and stage and exc is None:
+        # chat 面优先会话用户（QA A9：聊天里必须是发起人身份），但会话用户也没有时，
+        # 「显式配的 rc 行不可用」比「未配置任何凭据」更准确——分类由选择器给。
+        _raise_explicit_bot_unusable(stage)
     if tok:
         log.debug("git_credential_ok", extra={
             "event": "git_credential_ok",

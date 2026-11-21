@@ -6041,6 +6041,33 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
     return _impl(user_id, org_id, personal_org)
 
 
+def dispatch_user_id_mode() -> str:
+    """派发身份开关（off/shadow/on，默认 on）——Issue #21 第 2 步。"""
+    from src.domains.mgmt.auth.dispatch_identity import current_mode
+
+    return current_mode().value
+
+
+def dispatch_identity(*, task_user_id="", account_name="", actor_name=""):
+    """派发侧认人（跨域消费者用）：返回 `DispatchIdentity` 值对象。
+
+    只有 `identity.applies` 为真（mode=on 且 id 非空）才写库/取令牌；
+    shadow（显式）只记观测日志，off 静默。
+    """
+    from src.domains.mgmt.auth.dispatch_identity import dispatch_identity as _impl
+
+    return _impl(task_user_id=task_user_id, account_name=account_name,
+                 actor_name=actor_name)
+
+
+def resolve_actor_user_id(*, task_user_id="", account_name="", actor_name=""):
+    """「这次该用谁的身份」纯解析（mode 只进结果，不决定是否生效）。"""
+    from src.domains.mgmt.auth.dispatch_identity import resolve_identity as _impl
+
+    return _impl(task_user_id=task_user_id, account_name=account_name,
+                 actor_name=actor_name)
+
+
 def user_can_access_repo(user_id, repo_key: str) -> bool:
     """宿主域能力：某用户是否可见（有权限的）某仓库。
 

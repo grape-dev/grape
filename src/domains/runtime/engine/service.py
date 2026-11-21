@@ -4976,6 +4976,16 @@ def fail_task(task_id, error, exit_code=-1):
                     _issue_id = task.get("issue_id") or ""
                     _comment_token = ""
 
+                    def _global_comment() -> str:
+                        """全局 bot 令牌（D37/S57 统一入口，按 provider 派生；失败降级空串）。"""
+                        try:
+                            from src.domains.mgmt.public import get_global_bot_token_for
+
+                            return get_global_bot_token_for(_expired_provider) or ""
+                        except Exception as _gce:  # noqa: BLE001 - 回帖失败不阻断收尾
+                            log.warning(f"fail_task: global comment token unavailable: {_gce}")
+                            return ""
+
                     # R18.6.9: 评论 token 通过 handler.get_comment_token() 获取
                     # handler 内部按级别差异化选择评论 token（含 fallback）
                     try:
@@ -4987,22 +4997,12 @@ def fail_task(task_id, error, exit_code=-1):
                         if _handler:
                             _comment_token = _handler.get_comment_token(_resolve_result) or ""
                         else:
-                            # 无 handler → fallback 到全局 bot token
-                            if _rk.startswith("github:"):
-                                from src.domains.mgmt.public import get_global_github_bot_token
-                                _comment_token = get_global_github_bot_token() or ""
-                            else:
-                                from src.domains.mgmt.public import _get_global_bot_token
-                                _comment_token = _get_global_bot_token() or ""
+                            # 无 handler → 全局 bot token（统一入口，按 provider 派生）
+                            _comment_token = _global_comment()
                     except Exception as _cte:
                         log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
-                        # fallback 到原有逻辑
-                        if _rk.startswith("github:"):
-                            from src.domains.mgmt.public import get_global_github_bot_token
-                            _comment_token = get_global_github_bot_token() or ""
-                        else:
-                            from src.domains.mgmt.public import _get_global_bot_token
-                            _comment_token = _get_global_bot_token() or ""
+                        # fallback：全局 bot 令牌；仍为空再用任务令牌
+                        _comment_token = _global_comment()
                         if not _comment_token:
                             _comment_token = _get_task_token(task) or ""
 

@@ -19,12 +19,20 @@ import inspect
 # ──────────────── D101S① 策略链四改三 ────────────────
 
 def test_d101s_1_strategy_chain_three_levels():
-    """策略链 = [RepoBot, GlobalBot, UserToken]（第 1 级 session 删除）。"""
-    from src.kernel.token_resolver import TokenResolver, RepoBotToken, GlobalBotToken, UserToken, create_provider
+    """策略链 = [显式 rc 行, RepoBot, GlobalBot, UserToken]（session 级已删除）。
+
+    Issue #3713 在链首加了 `ExplicitRepoBotToken`（只读 rc 行、不做 path-B 守卫、
+    不触碰 global bot）：本守卫的目标没变——**session 级不得复活**；
+    变的是目标态形状，故此处显式列出四级并锁住顺序（链序是身份语义的一部分）。
+    """
+    from src.kernel.token_resolver import (  # noqa: F401 - 符号存在性一并锁住
+        ExplicitRepoBotToken, GlobalBotToken, RepoBotToken, TokenResolver, UserToken,
+        create_provider,
+    )
     resolver = TokenResolver(create_provider("gitcode"))
     levels = [type(s).__name__ for s in resolver.strategies]
-    assert levels == ["RepoBotToken", "GlobalBotToken", "UserToken"], \
-        f"策略链不是三级目标态: {levels}"
+    assert levels == ["ExplicitRepoBotToken", "RepoBotToken", "GlobalBotToken", "UserToken"], \
+        f"策略链不是目标态（显式 rc 行 + 三级）: {levels}"
     # 链序注释同步（架构常量注释更新）
     src = inspect.getsource(type(resolver))
     assert "1 session 专属" not in src, "链序注释仍声明四级（T1 未完成）"

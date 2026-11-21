@@ -44,8 +44,19 @@ def _wire(monkeypatch, *, host_user_id: str = "owner-1", host_login: str = "owne
     monkeypatch.setattr(deps, "get_user_token_for", _get_user_token)
 
     class _EmptyResolver:
+        """Issue #3713：换券路由改问共享选择器（`resolve_exec_token`），假件必须同形。
+
+        「空」= 无显式 rc 行且整条链无 token（stage=""、token=""），于是落到用户档，
+        这里要锁的是**授权面**（chat 不得代签 owner），不是取券细节。
+        """
+
         def __init__(self, provider, *, bypass_path_b=False):
             pass
+
+        def resolve_exec_token(self, repo_key):
+            from src.kernel.token_resolver import TokenResult
+
+            return TokenResult(token="", level="", repo_key=repo_key)
 
         def get_token(self, repo_key):
             return ""

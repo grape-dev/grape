@@ -1,4 +1,4 @@
-"""git-credential 的 token 平面：显式 bot 闸 + 归属者兜底 + 可判定错误码。
+"""git-credential 的 token 平面：唯一选择器 + 归属者兜底 + 可判定错误码。
 
 背景（三层漂移，证据见 docs/weekly-11/git-credential-token-plane-revision.md）：
   · 初始设计 R2.1 是 `repo bot → global bot → host_user_id 用户 token`；
@@ -9,14 +9,19 @@
     `_user()` 只看会话用户（agent 的 tk_ 会话 user_id 常 0）→ PAT 分支被跳过 → 整条链断，
     且失败被伪装成 502。
 
-本组用例锁七件事：
-  1. `_bot()` 不得再调 `read_stored_token`，也不得裸传 bypass_path_b；
-  2. 闸是两个信号：`_has_bot_row`（显式意图）+ `_gate_bot`（值可用）；
-  3. 显式 bot 值可用 → 直取 rc 值，不经策略链（不会顺带解锁全局 bot）；
-  4. 显式 bot 行存在但值不可用 → 424 BOT_CREDENTIAL_INVALID，**不得**落全局 bot / 用户身份；
-  5. 无 bot 行 → devops 先归属者（host_user_id），再会话用户；chat 反过来（会话优先）；
-  6. 全空 → 424 CREDENTIAL_NOT_CONFIGURED（配置问题不再伪装成 502）；
-  7. 归属者查询抛错不打断整条链。
+2026-11-22（Issue #3713）第二层修订：`_bot()` 曾自己直读 rc 行并做三段判定
+（empty/undecryptable/expired），与策略链是两套实现 → 同一份 rc 行两条链两种答案
+（私有 path-B 仓换券 200 / 建树 token 空）。三段判定已上收到
+`TokenResolver.resolve_exec_token`，本路由只做**渲染**。用例因此改成
+「替换共享选择器 + 锁路由侧的档位/错误码」：
+
+  1. 源码锁：`_bot()` 必须调选择器，不得直读 rc 行/过期列，不得出现 bypass；
+  2. 选择器给出 token → 直接用它，不再解析用户凭据；
+  3. 选择器给出 stage（empty/undecryptable/expired）→ 424 BOT_CREDENTIAL_INVALID，
+     **不得**落全局 bot / 用户身份；
+  4. 选择器全空 → devops 先归属者（host_user_id），chat 反过来（会话优先）；
+  5. 全空且无归属者 → 424 CREDENTIAL_NOT_CONFIGURED（配置问题不再伪装成 502）；
+  6. 归属者查询抛错不打断整条链。
 """
 from __future__ import annotations
 
@@ -33,36 +38,24 @@ CHAT_USER = {"auth_type": "session_token", "id": "42", "username": "alice", "age
 
 
 @pytest.fixture()
-def resolver_spy(monkeypatch):
-    """替换 TokenResolver：记录是否被调用、bypass 取值、返回值可控。"""
+def selector(monkeypatch):
+    """替换**共享选择器**（`TokenResolver.resolve_exec_token`）：记录调用、结果可控。
+
+    `stage` 的取值域与 kernel 的 `CREDENTIAL_STAGES` 一致（分类只在那里定义）。
+    """
     import src.kernel.token_resolver as tr
 
-    class _Spy:
-        bypass_seen: list = []
-        token = ""
+    state = {"token": "", "stage": "", "calls": []}
 
-        def __init__(self, provider, *, bypass_path_b=False):
-            _Spy.bypass_seen.append(bool(bypass_path_b))
+    def _resolve(self, repo_key):
+        state["calls"].append(repo_key)
+        level = "rc_bot" if (state["token"] or state["stage"]) else ""
+        return tr.TokenResult(token=state["token"], level=level,
+                              provider=self.provider, repo_key=repo_key,
+                              stage=state["stage"])
 
-        def get_token(self, repo_key):
-            return _Spy.token
-
-    _Spy.bypass_seen = []
-    _Spy.token = ""
-    monkeypatch.setattr(tr, "TokenResolver", _Spy)
-    return _Spy
-
-
-def _set_bot_row(monkeypatch, value: str | None, row_exists: bool = True):
-    """value=None → 无行；value='' → 行存在但值被清空。"""
-    import src.domains.mgmt.user.db as udb
-
-    def _meta(repo_key, cred_type):
-        if not row_exists:
-            return None
-        return {"value": value or "", "id": "cred-1"}
-
-    monkeypatch.setattr(udb, "get_repo_credential_meta", _meta)
+    monkeypatch.setattr(tr.TokenResolver, "resolve_exec_token", _resolve)
+    return state
 
 
 def _set_host(monkeypatch, host_user_id: str, host_login: str = "owner-login"):
@@ -83,50 +76,59 @@ def _set_user_token(monkeypatch, value: str, calls: list | None = None):
     monkeypatch.setattr(deps, "get_user_token_for", _get)
 
 
-def test_source_never_calls_read_stored_token():
-    """源码锁：不得用 read_stored_token；bypass 不得裸传（必须走显式 bot 值直取）。"""
+# ── 1. 源码锁：三段判定只在选择器里 ─────────────────────────────────────
+def test_source_delegates_to_the_shared_selector():
+    """`_bot()` 必须调共享选择器；不得再自己读 rc 行/过期列，也不得开 bypass。"""
     src = inspect.getsource(repos_routes._repo_platform_token)
-    assert ".read_stored_token(" not in src, (
-        "git-credential 的 _bot() 仍在调 read_stored_token：逐策略 _fetch_stored 只读 OAuth、"
-        "且带 path-B 守卫 → gitee（只有 PAT）这条腿恒空")
-    assert "_has_bot_row" in src and "_gate_bot" in src, "闸必须区分「行存在」与「值可用」"
-    assert "bypass_path_b=True" not in src, "不得裸传 bypass：会把全局 bot 一并解锁"
+    assert "resolve_exec_token(" in src, (
+        "换券路由必须与建树链共用同一个选择器（Issue #3713 的唯一决定点）")
+    assert "get_repo_credential_meta(" not in src, (
+        "三段判定已上收到选择器，路由里不得再直读 rc 行（否则又是两套实现）")
+    assert "repo_bot_token_status_any(" not in src, (
+        "过期判定只保留在选择器（RepoBotToken/ExplicitRepoBotToken._is_expired）")
+    assert "bypass_path_b=True" not in src, (
+        "不得裸传 bypass：会同时解锁 RepoBot 与 GlobalBot 两级（身份越界）")
 
 
-def test_explicit_bot_value_returned_without_strategy_chain(monkeypatch, resolver_spy):
-    """显式 bot 值可用 → 直取 rc 值，不碰策略链（避免顺带解锁全局 bot）。"""
-    _set_bot_row(monkeypatch, "bot-token-value")
+# ── 2. 选择器给出 token → 直取 ─────────────────────────────────────────
+def test_selector_token_is_returned_without_user_resolution(selector, monkeypatch):
+    selector["token"] = "selector-bot-token"
     user_calls: list = []
     _set_user_token(monkeypatch, "user-pat", user_calls)
 
     tok = _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
 
-    assert tok == "bot-token-value"
-    assert resolver_spy.bypass_seen == [], "显式 bot 直取，不应构造 TokenResolver"
-    assert user_calls == [], "有 bot 时不该再解析用户凭据"
+    assert tok == "selector-bot-token"
+    assert selector["calls"] == ["gitee:o/r"], "选择器必须收到带平台前缀的 repo_key"
+    assert user_calls == [], "有可用 bot 时不该再解析用户凭据"
 
 
-def test_bot_row_with_empty_value_raises_424_and_no_global_leak(monkeypatch, resolver_spy):
-    """行存在但 value 被清空 → 424，绝不落全局 bot（否则身份错、403 难查）。"""
-    _set_bot_row(monkeypatch, "")
-    resolver_spy.token = "global-bot-should-not-be-used"
+# ── 3. stage → 424，不落全局 bot / 用户身份 ────────────────────────────
+@pytest.mark.parametrize("stage,why", [
+    ("empty", "值为空或被撤销"),
+    ("undecryptable", "密文无法解密"),
+    ("expired", "已标记过期"),
+])
+def test_stage_raises_424_with_the_same_classification(selector, monkeypatch, stage, why):
+    selector["stage"] = stage
     user_calls: list = []
     _set_user_token(monkeypatch, "user-pat", user_calls)
+    _set_host(monkeypatch, "5", "owner-login")
 
     with pytest.raises(HTTPException) as ei:
         _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
 
     assert ei.value.status_code == 424
     assert ei.value.detail["code"] == "BOT_CREDENTIAL_INVALID"
-    assert ei.value.detail["stage"] == "empty", "值被清空要能区分于「无行」"
-    assert resolver_spy.bypass_seen == [], "不得为拿全局 bot 构造 resolver"
-    assert user_calls == [], "bot 失效时不静默降级"
+    assert ei.value.detail["stage"] == stage, (
+        "换券面只渲染选择器给的分类——不得自己再判一遍")
+    assert why in ei.value.detail["message"]
+    assert user_calls == [], "显式 bot 行不可用时不得静默降级到用户身份"
 
 
-def test_no_bot_row_devops_prefers_owner(monkeypatch, resolver_spy):
-    """无 bot 行 + devops：先归属者（host_user_id）凭据 —— 路径 B 原始语义。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
+# ── 4. 选择器全空 → 用户档（devops 归属者优先 / chat 会话优先） ─────────
+def test_no_explicit_row_devops_prefers_owner(selector, monkeypatch):
+    """无显式配置 + devops：先归属者（host_user_id）凭据 —— 路径 B 原始语义。"""
     _set_host(monkeypatch, "5", "owner-login")
     user_calls: list = []
     _set_user_token(monkeypatch, "owner-pat", user_calls)
@@ -139,10 +141,8 @@ def test_no_bot_row_devops_prefers_owner(monkeypatch, resolver_spy):
     assert user_calls[0]["provider"] == "gitee"
 
 
-def test_no_bot_row_chat_prefers_session_user(monkeypatch, resolver_spy):
-    """无 bot 行 + chat：会话用户优先 —— 不能替仓库 owner 代签（否则权限放大）。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
+def test_no_explicit_row_chat_prefers_session_user(selector, monkeypatch):
+    """无显式配置 + chat：会话用户优先 —— 不能替仓库 owner 代签（否则权限放大）。"""
     _set_host(monkeypatch, "5", "owner-login")
     user_calls: list = []
     _set_user_token(monkeypatch, "session-pat", user_calls)
@@ -154,22 +154,8 @@ def test_no_bot_row_chat_prefers_session_user(monkeypatch, resolver_spy):
     assert user_calls[0]["username"] == "alice"
 
 
-def test_no_bot_row_path_a_uses_global_bot(monkeypatch, resolver_spy):
-    """无 bot 行 + path-A（host_user_id 空）：策略链正常给出全局 bot，12 个存量仓照旧活。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = "global-bot-token"
-    _set_host(monkeypatch, "")
-
-    tok = _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
-
-    assert tok == "global-bot-token"
-    assert resolver_spy.bypass_seen == [False], "无显式 bot 时不得开 bypass"
-
-
-def test_no_bot_no_owner_falls_back_to_session_user(monkeypatch, resolver_spy):
-    """无 bot、无归属者：落当前会话用户。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
+def test_no_explicit_row_no_owner_falls_back_to_session_user(selector, monkeypatch):
+    """无显式配置、无归属者：落当前会话用户。"""
     _set_host(monkeypatch, "")
     user_calls: list = []
     _set_user_token(monkeypatch, "session-pat", user_calls)
@@ -180,46 +166,9 @@ def test_no_bot_no_owner_falls_back_to_session_user(monkeypatch, resolver_spy):
     assert user_calls and user_calls[0]["user_id"] == "42"
 
 
-def _set_bot_expired(monkeypatch, expired: bool):
-    """managed_repos.bot_token_status：R18.2.2 过期短路的读侧。"""
-    import src.domains.mgmt.public as mp
-
-    monkeypatch.setattr(mp, "repo_bot_token_status_any",
-                        lambda repo_key: "expired" if expired else "")
-
-
-def test_bot_row_expired_raises_424(monkeypatch, resolver_spy):
-    """行存在 + 值非空 + bot_token_status='expired' → 424（保留原始过期短路）。"""
-    _set_bot_row(monkeypatch, "bot-token-value")
-    _set_bot_expired(monkeypatch, True)
-    resolver_spy.token = "global-bot-should-not-be-used"
-    user_calls: list = []
-    _set_user_token(monkeypatch, "user-pat", user_calls)
-
-    with pytest.raises(HTTPException) as ei:
-        _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
-
-    assert ei.value.status_code == 424
-    assert ei.value.detail["code"] == "BOT_CREDENTIAL_INVALID"
-    assert ei.value.detail["stage"] == "expired", "过期必须可区分，否则运维不知道该轮换"
-    assert resolver_spy.bypass_seen == []
-    assert user_calls == []
-
-
-def test_bot_row_not_expired_returns_value(monkeypatch, resolver_spy):
-    """状态为空（未标过期）→ 正常返回 bot 值，短路不误伤。"""
-    _set_bot_row(monkeypatch, "bot-token-value")
-    _set_bot_expired(monkeypatch, False)
-
-    tok = _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
-
-    assert tok == "bot-token-value"
-
-
-def test_all_empty_raises_424_not_502(monkeypatch, resolver_spy):
+# ── 5. 全空 → 424 CREDENTIAL_NOT_CONFIGURED ────────────────────────────
+def test_all_empty_raises_424_not_502(selector, monkeypatch):
     """全空 → 424 CREDENTIAL_NOT_CONFIGURED（配置问题不伪装成上游故障）。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
     _set_host(monkeypatch, "")
     _set_user_token(monkeypatch, "")
 
@@ -230,10 +179,9 @@ def test_all_empty_raises_424_not_502(monkeypatch, resolver_spy):
     assert ei.value.detail["code"] == "CREDENTIAL_NOT_CONFIGURED"
 
 
-def test_owner_username_falls_back_to_repo_owner(monkeypatch, resolver_spy):
+# ── 6. 归属者查询异常不打断整条链 ──────────────────────────────────────
+def test_owner_username_falls_back_to_repo_owner(selector, monkeypatch):
     """host_vcs_username 为空时回落仓库 owner 段（OAuth 档按 username 匹配要它）。"""
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
     _set_host(monkeypatch, "5", "")
     user_calls: list = []
     _set_user_token(monkeypatch, "owner-pat", user_calls)
@@ -244,12 +192,9 @@ def test_owner_username_falls_back_to_repo_owner(monkeypatch, resolver_spy):
     assert user_calls and user_calls[0]["username"] == "acme"
 
 
-def test_host_owner_lookup_failure_does_not_break_fallback(monkeypatch, resolver_spy):
+def test_host_owner_lookup_failure_does_not_break_fallback(selector, monkeypatch):
     """归属者查询抛错时继续落会话用户，不打断整条链。"""
     import src.domains.mgmt.user.db as udb
-
-    _set_bot_row(monkeypatch, None, row_exists=False)
-    resolver_spy.token = ""
 
     def _boom(repo_key):
         raise RuntimeError("db hiccup")
@@ -259,36 +204,6 @@ def test_host_owner_lookup_failure_does_not_break_fallback(monkeypatch, resolver
 
     tok = _repo_platform_token("o", "r", dict(SESSION_USER, id="7", username="bob"), "gitee")
     assert tok == "session-pat"
-
-def _set_bot_row_undecryptable(monkeypatch):
-    """行存在但密文解不开（密钥不匹配/行被破坏）——与「无行」必须区分。"""
-    import src.domains.mgmt.user.db as udb
-
-    monkeypatch.setattr(udb, "get_repo_credential_meta",
-                        lambda repo_key, cred_type: {"value": "", "id": "cred-1",
-                                                     "undecryptable": True})
-
-
-def test_bot_row_undecryptable_raises_424_with_stage(monkeypatch, resolver_spy):
-    """行存在但解不开 → 424 stage=undecryptable，不得静默降级到归属者/会话用户。
-
-    历史缺陷：get_repo_credential_meta 把解密异常吞成 None → 与「无行」不可区分
-    → 走 _user() 静默用归属者 PAT（D90 明令禁止的身份混用）。
-    """
-    _set_bot_row_undecryptable(monkeypatch)
-    resolver_spy.token = "global-bot-should-not-be-used"
-    _set_host(monkeypatch, "owner-1")
-    user_calls: list = []
-    _set_user_token(monkeypatch, "owner-pat-should-not-be-used", user_calls)
-
-    with pytest.raises(HTTPException) as ei:
-        _repo_platform_token("o", "r", dict(SESSION_USER), "gitee")
-
-    assert ei.value.status_code == 424
-    assert ei.value.detail["code"] == "BOT_CREDENTIAL_INVALID"
-    assert ei.value.detail["stage"] == "undecryptable"
-    assert user_calls == [], "解不开的 bot 行不得静默降级到用户身份"
-    assert resolver_spy.bypass_seen == [], "也不得落到策略链的全局 bot"
 
 
 def test_meta_distinguishes_undecryptable_from_missing_row(monkeypatch):

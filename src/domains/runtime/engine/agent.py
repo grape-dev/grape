@@ -3179,6 +3179,28 @@ def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
     return {"_error": f"{code}: {exc}", "_started": False}
 
 
+def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+    """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
+    继续跑 agent」，agent 拿不到工作区后自述「git 元数据只读」并交零交付结论，
+    任务仍 completed。真因是凭据（rc 行为空/解不开/过期）时，必须把分类带进
+    task errors，而不是渲染成 git 只读（与 #3632 平台未注册同一条阻断语义）。
+
+    Returns:
+        归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
+        （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
+        凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+    """
+    from src.domains.runtime.engine import repogit
+
+    reason = repogit.worktree_credential_error(repo_key)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
 async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -3343,10 +3365,18 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
-            repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=_get_task_token(task),
-                                          work_branch=_wb, task_id=tid,
-                                          strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            _wt = repogit.ensure_issue_worktree(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=_get_task_token(task),
+                work_branch=_wb, task_id=tid,
+                strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
+            # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
+            if not _wt:
+                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
+                if _cred_blocked:
+                    _res.dispose()
+                    return _cred_blocked
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")

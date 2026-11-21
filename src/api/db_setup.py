@@ -2757,7 +2757,7 @@ _LEGACY_DOMAIN_LABELS = {
     "202611150008": ("runtime",),
     "202611160007": ("runtime",),
     "202611160020": ("runtime",),
-    "202611170009": ("runtime",),
+    "202611220001": ("runtime",),
     "202611170043": ("runtime",),   # #2925 issue.title_fetched_at（issue 表在 runtime 库）
     "202611170045": ("runtime",),   # runtime_credentials.cred_type/platform
     # obs_llm_usage（只在 insight 库）
@@ -7999,7 +7999,7 @@ def _fn_chat_conversations_status_index() -> None:
 
 
 register_migration(
-    version="202611170009",
+    version="202611220001",
     name="chat-conversations-status-index",
     kind="safe",
     fn=_fn_chat_conversations_status_index,
@@ -8681,7 +8681,7 @@ register_migration(
     fn=_fn_retire_vcs_platforms_hidden,
 )
 # ===== Issue #2423 M1-b（#2423 移植）：env_extra 存量明文加密 backfill =====
-# （arch11 号系顺延——原 202611180001 与 runtime 域 cloud_sandboxes 迁移撞号，backfill 让位改 202611200003）
+# （arch11 号系顺延——原 202611180001 与 runtime 域 cloud_sandboxes 迁移撞号，backfill 让位改 202611220003）
 def _fn_migrate_env_extra_encryption_2423() -> None:
     """代理到 engine/service 的 backfill（迁移系统注册面在 db_setup，实现在域层）。"""
     from src.domains.runtime.engine.service import _fn_migrate_env_extra_encryption
@@ -8689,7 +8689,7 @@ def _fn_migrate_env_extra_encryption_2423() -> None:
 
 
 register_migration(
-    version="202611200003",
+    version="202611220003",
     name="issue2423-env-extra-encrypt-backfill",
     kind="backfill",
     fn=_fn_migrate_env_extra_encryption_2423,
@@ -8710,7 +8710,7 @@ def _fn_create_ov_credential_cells_2423() -> None:
 
 
 register_migration(
-    version="202611200004",
+    version="202611220004",
     name="issue2423-create-ov-credential-cells",
     kind="safe",
     fn=_fn_create_ov_credential_cells_2423,
@@ -8740,6 +8740,17 @@ _PLUGIN_DEFAULT_CATEGORIES = [
 ]
 
 
+# ── 2026-11-22 撞号换号（部署环境 8 条 ERROR：同号不同名，被台账永久判已执行）──
+# 旧号 → 新号（日期段顺延到 20261122，全仓/台账此前均未占用）：
+#   202611170009 chat-conversations-status-index        → 202611220001
+#   202611200002 plugin-create-seven-tables-b1          → 202611220002（并折入分类种子）
+#   202611200003 issue2423-env-extra-encrypt-backfill    → 202611220003
+#   202611200004 issue2423-create-ov-credential-cells    → 202611220004
+#   202611210004 session-token-key-column-width          → 202611220005
+# 换号后必须在目标库先核对 grape_t_schema_migrations 无这些新号（见
+# docs/weekly-11/migration-renumber-20261122.md 的只读核对 SQL）。
+
+
 def _fn_plugin_category_seed_b1() -> None:
     """插件分类种子（唯一键 + INSERT OR IGNORE，天然幂等可重复执行）。"""
     from src.kernel.session_manager import db, db_lock
@@ -8754,11 +8765,23 @@ def _fn_plugin_category_seed_b1() -> None:
         db.commit()
 
 
+def _fn_plugin_tables_and_seed_b1() -> None:
+    """建 7 张插件表，并补一次分类种子（幂等 INSERT OR IGNORE）。
+
+    为什么合成一条：target 上 202611200005（种子）可能早于建表执行并已盖章，
+    建表迁移重排号后若只建表，种子数据仍缺；把种子折进来可在同一次执行里补齐。
+    """
+    _fn_create_plugin_tables_b1()
+    # 种子失败必须抛出：迁移框架只在 fn 正常返回时盖章；吞掉异常会留下
+    # 「表建好了、分类没写」且不再重试的半状态（2026-11-22 评审 A2）。
+    _fn_plugin_category_seed_b1()
+
+
 register_migration(
-    version="202611200002",
+    version="202611220002",
     name="plugin-create-seven-tables-b1",
     kind="safe",
-    fn=_fn_create_plugin_tables_b1,
+    fn=_fn_plugin_tables_and_seed_b1,
 )
 
 
@@ -11339,7 +11362,7 @@ def _fn_session_token_unique_session_key() -> None:
 
     _ddl = "ALTER TABLE session_api_tokens MODIFY session_key VARCHAR(191) NOT NULL"
     _detail = {
-        "migration": "202611210004",
+        "migration": "202611220005",
         "ddl": _ddl,
         "db": os.environ.get("DEVOPS_DB_NAME", ""),
         "role": os.environ.get("GRAPE_PROCESS_ROLE", ""),
@@ -11352,7 +11375,7 @@ def _fn_session_token_unique_session_key() -> None:
             # （min_code_version 门槛 + MDL 处理）；门槛未过时跳过不盖章，下次启动重试。
             # 审计前后各一条（detail 只记结构信息）。
             _audit_ops_event("session_token_key_widen", {**_detail, "phase": "before"})
-            if not _destructive_ddl(c, _ddl, kind_hint="cleanup", version="202611210004"):
+            if not _destructive_ddl(c, _ddl, kind_hint="cleanup", version="202611220005"):
                 db.commit()
                 raise RuntimeError(
                     "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
@@ -11366,7 +11389,7 @@ def _fn_session_token_unique_session_key() -> None:
 
 
 register_migration(
-    version="202611210004",
+    version="202611220005",
     name="session-token-key-column-width",
     kind="cleanup",  # 含 MODIFY COLUMN：破坏性 DDL，走 min_code_version 门槛
     domains=("mgmt",),

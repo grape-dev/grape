@@ -1,4 +1,4 @@
-"""迁移 202611170009（chat_conversations 状态索引）的 MySQL 分支回归。
+"""迁移 202611220001（chat_conversations 状态索引）的 MySQL 分支回归。
 
 背景：SQLite 单测覆盖不到这条分支——`_mysql_backend()` 为假时走的是
 `CREATE INDEX IF NOT EXISTS`，而该形式在 MySQL 上直接 1064。修掉 1064 之后裸写

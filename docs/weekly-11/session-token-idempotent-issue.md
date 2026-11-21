@@ -140,7 +140,7 @@ UPDATE session_api_tokens SET repo_key=?, agent_type=?, user_id=?, token_sha256=
 -- DDL（src/api/db_setup.py）：唯一键列不能是 MySQL 的 TEXT 类型
 session_key VARCHAR(191) NOT NULL      -- 原 TEXT NOT NULL
 
--- 迁移 202611210004 session-token-key-column-width（kind=safe, domains=("mgmt",)）
+-- 迁移 202611220005 session-token-key-column-width（kind=safe, domains=("mgmt",)）
 MySQL:  ALTER TABLE session_api_tokens MODIFY session_key VARCHAR(191) NOT NULL
         仅此一步 —— 不去重、不建 uniq_session_key（早期版本做过，已撤销；见 §9）
 ```
@@ -219,7 +219,7 @@ reuse_or_issue_session_token_safe(env, *, log_scope, **kw)   # 诊断钩子异�
 
 ## 6. 边界
 
-- **不再**说「不改表结构」：本次新增迁移 202611210004（session_key 改 VARCHAR(191) + 去重 +
+- **不再**说「不改表结构」：本次新增迁移 202611220005（session_key 改 VARCHAR(191) + 去重 +
   补建 `uniq_session_key`）。改的是**补齐约束与其列类型**，用途是让 upsert 有键可命中；
   不删任何既有约束、不改语义、不改主键；
 - 入库仍是 sha256，明文只经 env 一次性下发；
@@ -232,7 +232,7 @@ reuse_or_issue_session_token_safe(env, *, log_scope, **kw)   # 诊断钩子异�
 
 ```
 当时做法   session_token_insert / rotate → INSERT ... ON CONFLICT(session_key) DO UPDATE
-           + 迁移 202611210004（去重 + CREATE UNIQUE INDEX uniq_session_key + TEXT→VARCHAR(191)）
+           + 迁移 202611220005（去重 + CREATE UNIQUE INDEX uniq_session_key + TEXT→VARCHAR(191)）
 问题       原设计允许多枚并存 —— 建表只有 id 主键；ix_sat_kind_key(kind, session_key) 非唯一
            （information_schema NON_UNIQUE=1）；set_expiry / shrink_active / delete_by_session
            全是 WHERE session_key=? 的批量写法；读侧只有 by_sha，没有「按 key 取一枚」。

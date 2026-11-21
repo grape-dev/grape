@@ -584,6 +584,27 @@ def _task_insert_row(_cols, **kw):
     return tuple(kw[c] for c in _cols)
 
 
+def _dispatch_ident(evt, repo_key: str) -> "tuple[str, str, str]":
+    """Issue #21 第 2 步：派发时解析 `(user_id, source, account_name)`。
+
+    账号解析沿用 `resolve_actor_account`（a2a_event：payload.account→actor→Issue creator；
+    其它：actor→payload.account→Issue creator）；是否**真正写库**由
+    `dispatch_identity` 背后的开关决定（默认 on 生效；shadow 只记日志返回空 id）。
+    纯函数式、异常不外抛：认人失败不得阻断派发。
+    """
+    if not isinstance(evt, dict):
+        return "", "", ""
+    try:
+        from src.domains.runtime.pipeline.dispatch_identity import identity_for_actor
+
+        account = resolve_actor_account(evt, repo_key) or ""
+        uid, source = identity_for_actor(account, str(evt.get("actor") or ""))
+        return uid, source, account
+    except Exception as e:  # noqa: BLE001 - 认人失败不得阻断派发
+        log.debug(f"dispatch identity skipped: {e}")
+        return "", "", ""
+
+
 def _takeover_issue_id(issue_id) -> str:
     """归一化 Issue 号用于接管判定（#N；伪 Issue / #0 / 空串返回空）。"""
     value = str(issue_id or "").strip()
@@ -652,6 +673,9 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     inst_name = runtime_instance_name(engine_id) or backend or ""
     now = datetime.now(timezone.utc).isoformat()
 
+    # Issue #21 第 2 步：派发身份按 id 认人（默认 on 写派发人 id；shadow/off 保持 0）
+    _dispatch_uid, _dispatch_src, _dispatch_acct = _dispatch_ident(evt, repo_key)
+
     # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
     # autopilot 不写 events 表，跳过这步
     if not skip_event_config:
@@ -701,8 +725,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
             event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
             agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
-            prompt="", cwd="", runtime_session_id="", event_type="", account="",
-            user_id=0, repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取,
+            prompt="", cwd="", runtime_session_id="", event_type="",
+            user_id=(_dispatch_uid or 0),  # Issue #21 第 2 步：on 模式写派发人 id，其它模式仍 0
+            account=(_dispatch_acct if _dispatch_uid else ""),
+            repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取,
             env_extra="{}", skill_files="{}", server_url="", issue_session_id="",
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,

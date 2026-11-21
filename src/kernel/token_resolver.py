@@ -9,17 +9,19 @@ Issue #372 R18: 统一 13 个散落函数为 TokenResolver 策略链。
     ├── GitCodeProvider
     └── GitHubProvider
   TokenStrategy (基类)
-    ├── RepoBotToken             (第 1 级)
-    ├── GlobalBotToken           (第 2 级)
-    └── UserToken                (第 3 级)
+    ├── ExplicitRepoBotToken     (第 1 级，Issue #3713 链首)
+    ├── RepoBotToken             (第 2 级)
+    ├── GlobalBotToken           (第 3 级)
+    └── UserToken                (第 4 级)
   TokenResult (数据类)
   TokenResolver (统一入口)
 
-三个语义入口:
+三个语义入口（+ Issue #3713 追加的选择器）:
   get_token()           — 获取可用执行 token（含过期短路）
   read_stored_token()   — 读取存储原始值（不过期检查、不刷新）
   resolve()             — 获取 TokenResult（token + level + provider）
   detect_and_mark_expired() — fail_task 401 统一检测 + 标记
+  resolve_exec_token()  — 唯一执行凭据选择器（换券面 + 建树面共用，带 stage 分类）
 """
 
 from abc import ABC, abstractmethod
@@ -740,16 +742,35 @@ def create_provider_from_repo_key(repo_key: str) -> VCSProvider:
     provider, _, _ = parse_repo_key(repo_key or "")
     return create_provider(provider)
 
+# 凭据不可用分类（Issue #3713）——**唯一一份**枚举，两个消费面各自渲染：
+#   换券面（HTTP）  424 + code + stage（前端/CLI 需区分该轮换还是该重新配置）
+#   任务面（worker）task errors 里的 `credential_<stage>`，不再一律渲染成「git 元数据只读」
+# 强统一成同一份 JSON 会把 HTTP 语义漏进 worker 任务上下文，所以只统一枚举。
+# 值空（empty）自 2026-11-22 起按「无行」处理，不再是显式失败分类；
+# 常量保留给既有对外文案/渲染表（历史 424 stage=empty 的措辞）。
+CREDENTIAL_STAGE_EMPTY = "empty"
+CREDENTIAL_STAGE_UNDECRYPTABLE = "undecryptable"
+CREDENTIAL_STAGE_EXPIRED = "expired"
+CREDENTIAL_STAGES = (CREDENTIAL_STAGE_EMPTY, CREDENTIAL_STAGE_UNDECRYPTABLE,
+                     CREDENTIAL_STAGE_EXPIRED)
+
+# 链首显式仓库 bot 行的级别标识（换券面 / 任务面 / 审计共用同一个词）
+EXPLICIT_REPO_BOT_LEVEL = "rc_bot"
+
+
 @dataclass
 class TokenResult:
     """token 获取结果，携带级别信息。"""
     token: str = ""               # token 字符串（向后兼容：薄包装取 .token 返回 str）
-    level: str = ""               # "session" / "repo_bot" / "global_bot" / "user"（执行链实际生效级别，受过期短路影响）
+    level: str = ""               # "rc_bot" / "repo_bot" / "global_bot" / "user"（执行链实际生效级别，受过期短路影响）
     provider: Optional[VCSProvider] = None  # VCSProvider 实例
     repo_key: str = ""            # 仓库标识
     expired: bool = False         # 是否已标记过期（用户 token status=4 时 expired=True 但仍返回 token）
     issue_id: str = ""            # R20.6.1: 自循环检测用——is_self_loop_actor 需要查 running task
     config_level: str = ""        # FR-10.3: 配置级别（不受过期短路影响，供自循环检测读取）
+    stage: str = ""               # Issue #3713: 显式失败分类（empty/undecryptable/expired），
+                                  # 空串 = 未失败。换券面渲染 424+stage，任务面渲染
+                                  # credential_<stage>（分类统一、渲染分离）。
 
 class TokenStrategy:
     """token 获取策略基类。每个子类代表 fallback 链中的一级。
@@ -809,6 +830,157 @@ class TokenStrategy:
     def level(self) -> str:
         """策略级别标识。子类覆盖。"""
         return ""
+
+class ExplicitRepoBotToken(TokenStrategy):
+    """第 1 级（Issue #3713 链首）：显式配置的仓库 bot 行
+    `grape_t_repo_credentials(repo_key, cred_type='bot')`。
+
+    为什么必须新增一级，而不是给 RepoBotToken 加开关（评审 #202773482 修正 2）：
+      · `RepoBotToken._fetch` 的 path-B 守卫在 rc 读取**之前**（`_is_path_b()` → return ""），
+        于是 path-B 私有仓在策略链里根本读不到这一行；而换券路由在守卫之外直读它。
+        同一份数据两个答案 → 换券 200、建树空 token、mirror refs=0、零交付仍 completed。
+      · 给策略链开 bypass 开关去落地「统一」会同时解锁 RepoBot 与 GlobalBot 两级
+        （见 TokenResolver.__init__）→ path-B 私仓拿到全局 bot 身份，
+        那不是修 bug，是开身份越界口子。
+
+    本级别只读这一行、不做 path-B 守卫（显式配置 = 显式意图），但**不**触碰 global bot：
+    行存在而不可用（空/解不开/过期）→ 显式失败（`stage()` 给出分类），不降级到任何身份。
+    """
+
+    error_code = "REPO_TOKEN_EXPIRED"   # 与 RepoBotToken 同一回写列（bot_token_status）
+
+    @property
+    def level(self) -> str:
+        return EXPLICIT_REPO_BOT_LEVEL
+
+    def _read_row(self, repo_key: str) -> Optional[dict]:
+        """读 rc 行（值 + 审计锚点 + 解不开标记）。无行返回 None。"""
+        try:
+            return _tokens.get_repo_credential_meta(repo_key, "bot")
+        except Exception as e:
+            log.warning(f"ExplicitRepoBotToken: rc read failed: {e}")
+            return None
+
+    def _fetch(self, repo_key: str) -> str:
+        """纯读 rc 值（不查过期——过期语义在 get_token/_is_expired）。"""
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return ""
+        row = self._read_row(repo_key)
+        if not row or row.get("undecryptable"):
+            return ""
+        value = str(row.get("value") or "")
+        if not value:
+            return ""
+        self._audit_hit(row, repo_key)
+        return value
+
+    def _is_expired(self, repo_key: str) -> bool:
+        """过期标记唯一来源：`managed_repos.bot_token_status == 'expired'`。
+
+        与 RepoBotToken._is_expired 读同一列——**不要**假定 rc 行内有独立过期字段，
+        否则守卫用例无法在旧码上构造出红（评审 #202773660 §二）。
+        """
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return False
+        try:
+            return _repos.repo_bot_token_status_any(repo_key) == "expired"
+        except Exception as e:
+            log.debug(f"ExplicitRepoBotToken._is_expired: {e}")
+        return False
+
+    def resolve(self, repo_key: str) -> "tuple[str, str]":
+        """一次读行 → `(可用值, stage)`：值为空且 stage 为空 = **无行**（交回原链）。
+
+        合并读的原因：`get_token` / `resolve` / `resolve_exec_token` 每次都要问链首，
+        先 `_fetch` 再 `stage` 会把同一条 rc 行查两遍（行缺失时也两遍）。
+        """
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return "", ""
+        row = self._read_row(repo_key)
+        if not row:
+            return "", ""
+        if row.get("undecryptable"):
+            return "", CREDENTIAL_STAGE_UNDECRYPTABLE
+        value = str(row.get("value") or "")
+        if not value:
+            # 空值 = 没有这行（840431a8b 定的契约）：写侧已改「空 → 删行」，存量空行
+            # （gitee 仓库的历史空占位）也只有落回原链才不误伤；判显式失败会让这些仓
+            # 424 / credential_empty —— 正是 6 个 gitee 仓库曾被卡死的形态。
+            return "", ""
+        if self._is_expired(repo_key):
+            # 过期 ≠ 配置坏了：基线语义是「跳过这一级、落到下一档」。
+            # 这里恢复该语义（2026-11-22 评审 C3）：否则一次标记滞后就把本来
+            # 能跑的任务判 failed。明细分两类——expired 降级，空/解不开才算显式失败。
+            log.warning(f"ExplicitRepoBotToken: rc row marked expired, skip to next level "
+                        f"repo={repo_key}（换凭据是运维动作；执行面不因此中断）")
+            return "", ""
+        self._audit_hit(row, repo_key)
+        return value, ""
+
+    def _audit_hit(self, row: dict, repo_key: str) -> None:
+        """D90-N4 bot token 消费审计（与 RepoBotToken 的 rc 命中同一 operation）。"""
+        try:
+            from src.kernel.persistence.credential_usage_log import log_usage
+            log_usage(row.get("id") or "", 0,
+                      credential_kind="repo_credentials",
+                      executor_context="token_resolve",
+                      operation="repo_bot_hit", repo_key=repo_key)
+        except Exception:
+            pass  # 审计失败不阻断
+
+    def expired(self, repo_key: str) -> bool:
+        """该仓显式 rc 行是否已被标记过期。
+
+        执行面（resolve/stage）把 expired 当「跳过本级」处理（C3），所以 stage 不再返回
+        expired；但**鉴权面**必须能把过期旧值挡在门外（read_stored_token 不查过期），
+        否则 A2A 会拿一枚已知过期的 token 去调上游。故单独暴露这一个查询。
+        """
+        return self._is_expired(repo_key)
+
+    def stage(self, repo_key: str) -> str:
+        """显式行的可用性分类：'' = 无行或可用；否则 empty/undecryptable/expired。
+
+        三态必须分开（换券路由曾把「无行」与「行存在但空」混成一个信号，踩过两次坑）：
+          · 无行      → ''，交回原链（path-A 仓库/全局 bot；path-B 归属者）；
+          · 解不开    → undecryptable（运维要换密钥/重建行，不是「没配」）；
+          · 值被清空  → 视同无行（写侧空值即删行；存量空行交回原链，840431a8b）；
+          · 已标过期  → 视同不可用但**不判失败**（跳过本级，落到下一档；C3）。
+        """
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return ""
+        row = self._read_row(repo_key)
+        if not row:
+            return ""
+        if row.get("undecryptable"):
+            return CREDENTIAL_STAGE_UNDECRYPTABLE
+        if not str(row.get("value") or ""):
+            return ""   # 空值 = 无行（840431a8b），交回原链
+        if self._is_expired(repo_key):
+            return ""   # 过期 = 跳过这一级（C3 回滚硬失败；由下一档兜底）
+        return ""
+
+    def mark_expired(self, repo_key: str):
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return
+        try:
+            _repos.set_repo_bot_token_status_any(repo_key, "expired")
+        except Exception as e:
+            log.warning(f"ExplicitRepoBotToken.mark_expired: {e}")
+
+    def clear_expired(self, repo_key: str):
+        repo_key = self._normalize_repo_key(repo_key)
+        if not repo_key:
+            return
+        try:
+            _repos.set_repo_bot_token_status_any(repo_key, "")
+        except Exception as e:
+            log.warning(f"ExplicitRepoBotToken.clear_expired: {e}")
+
 
 class RepoBotToken(TokenStrategy):
     """第 2 级：managed_repos.{token_storage_field}
@@ -1064,6 +1236,19 @@ def detect_and_mark_expired(repo_key: str) -> str:
         return ""
 
 
+def resolve_exec_token(repo_key: str) -> TokenResult:
+    """模块级便捷入口（Issue #3713）：按 repo_key 造 provider → 统一执行凭据选择器。
+
+    建树面（worker `repogit`）与换券面（mgmt 路由）都从这里取判定，避免再各写一遍。
+    provider 造不出来时返回空结果（stage 空 = 无法归因，交回上层原语义）。
+    """
+    try:
+        return TokenResolver(create_provider_from_repo_key(repo_key)).resolve_exec_token(repo_key)
+    except Exception as e:
+        log.warning(f"resolve_exec_token({repo_key}) failed: {e}")
+        return TokenResult(token="", level="", repo_key=repo_key or "")
+
+
 class TokenResolver:
     """token 获取统一入口。按优先级链执行策略，第一个返回非空 token 的策略胜出。
 
@@ -1076,7 +1261,7 @@ class TokenResolver:
     """
 
     def __init__(self, provider: VCSProvider):
-        """链序固定：仓库 bot → 全局 bot → 用户凭据，path-B 守卫全部保留。
+        """链序固定：显式仓库 bot 行 → 仓库 bot → 全局 bot → 用户凭据，path-B 守卫全部保留。
 
         **不提供 bypass_path_b**（2026-11-21 撤除）：一旦暴露这个参数，调用方很容易
         对 git-credential 这类路径裸传 True —— 那会把「仓库无 bot、平台有全局 bot」的
@@ -1095,20 +1280,98 @@ class TokenResolver:
         # source/cred_type 只是元数据（审计归因/观测分轨），不驱动排序
         # （动态排序会使命中序列不可比、挂账 #12 零命中判据失效）。
         self.strategies = [
+            # 0 显式配置的仓库 bot 行（#3713）→ 1 仓库 bot → 2 全局 bot → 3 用户凭据。
+            # 链首这一级只读 rc 行、不做 path-B 守卫：显式配置的意图必须优先于
+            # 「path-B 降级」策略，否则同一份数据在换券面/建树面会给出两种答案。
+            ExplicitRepoBotToken(provider),
             RepoBotToken(provider),
             GlobalBotToken(provider),
             UserToken(provider),
         ]
 
+    def _explicit_head(self):
+        """链首显式级（按 level 查，不按下标/类型——调用方会裁剪策略链）。"""
+        for strategy in self.strategies:
+            if strategy.level == EXPLICIT_REPO_BOT_LEVEL:
+                return strategy
+        return None
+
+    def _explicit_stage(self, repo_key: str) -> str:
+        """链首显式 rc 行的不可用分类（'' = 无行或可用）。"""
+        head = self._explicit_head()
+        return head.stage(repo_key) if head is not None else ""
+
+    def _explicit_resolve(self, repo_key: str) -> "tuple[str, str]":
+        """链首一次读行 → `(值, stage)`；无该级（链被裁剪）→ `("", "")`。"""
+        head = self._explicit_head()
+        if head is None:
+            return "", ""
+        return head.resolve(repo_key)
+
+    def resolve_exec_token(self, repo_key: str) -> TokenResult:
+        """唯一执行凭据选择器（Issue #3713）：换券面与建树面共用同一份判定。
+
+        语义（评审 #202773482 修正 2，落地形状）：
+          ① rc 行可用            → 用它（level=rc_bot）；
+          ② rc 行存在但不可用     → 显式失败（token 空 + stage 分类，**不降级**）；
+          ③ 无 rc 行             → 落原链（path-A 仓库/全局 bot；path-B 归属者），
+                                  身份守卫天然保留（不经 bypass_path_b）。
+
+        返回的 `stage` 是「分类」，各消费面自行渲染：
+          换券面 → HTTP 424 + code + stage；任务面 → task errors 的 `credential_<stage>`。
+        """
+        if not repo_key:
+            return TokenResult(token="", level="", provider=self.provider, repo_key="")
+        from src.kernel.repo_key import to_repo_key
+        repo_key = to_repo_key(repo_key)
+        if not repo_key:
+            return TokenResult(token="", level="", provider=self.provider, repo_key="")
+        head = self._explicit_head()
+        if head is not None:
+            explicit_token, stage = self._explicit_resolve(repo_key)
+            if stage:
+                return TokenResult(token="", level=EXPLICIT_REPO_BOT_LEVEL,
+                                   provider=self.provider, repo_key=repo_key,
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL, stage=stage)
+            if explicit_token:
+                return TokenResult(token=explicit_token, level=EXPLICIT_REPO_BOT_LEVEL,
+                                   provider=self.provider, repo_key=repo_key,
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL)
+        for strategy in self.strategies:
+            if strategy is head:
+                continue
+            token = strategy.get_token(repo_key)
+            if token:
+                return TokenResult(token=token, level=strategy.level,
+                                   provider=self.provider, repo_key=repo_key,
+                                   expired=strategy._is_expired(repo_key),
+                                   config_level=strategy.level)
+        return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key)
+
     def get_token(self, repo_key: str) -> str:
-        """获取可用执行 token。含过期短路。返回空串=无可用 token。"""
+        """获取可用执行 token。含过期短路。返回空串=无可用 token。
+
+        Issue #3713：链首显式 rc 行「存在但不可用」时**不落链**——这是显式失败语义
+        （修凭据是运维动作）。否则过期/被清空的行会被下两级悄悄顶替成别的身份。
+        """
         if not repo_key:
             return ""
         from src.kernel.repo_key import to_repo_key
         repo_key = to_repo_key(repo_key)
         if not repo_key:
             return ""
+        head = self._explicit_head()
+        if head is not None:
+            explicit_token, stage = self._explicit_resolve(repo_key)
+            if stage:
+                log.warning(f"TokenResolver.get_token: explicit repo bot credential unusable "
+                            f"({stage}) repo={repo_key} —— 不降级（身份不能混）")
+                return ""
+            if explicit_token:
+                return explicit_token
         for strategy in self.strategies:
+            if strategy is head:
+                continue
             token = strategy.get_token(repo_key)
             if token:
                 return token
@@ -1124,6 +1387,10 @@ class TokenResolver:
         4. 返回空串=该 repo 无任何 token 存储（不是"过期"，是"未配置"）
 
         供 A2A 鉴权（get_repo_bot_token_no_global）/ session 写入用。
+
+        Issue #3713 提醒：链首 rc 行同样参与本链（值可用即返回）。本函数**不**查过期
+        是写死的契约，所以「rc 行已标 expired 时不得把旧值当可用 token 发出去」这件事
+        由调用方（`get_repo_bot_token_no_global`）显式摘掉 rc/repo_bot 两级来做。
         """
         if not repo_key:
             return ""
@@ -1154,8 +1421,21 @@ class TokenResolver:
         repo_key = to_repo_key(repo_key)
         if not repo_key:
             return TokenResult(token="", level="", provider=self.provider, repo_key="")
+        head = self._explicit_head()
+        if head is not None:
+            explicit_token, stage = self._explicit_resolve(repo_key)
+            if stage:
+                return TokenResult(token="", level=EXPLICIT_REPO_BOT_LEVEL,
+                                   provider=self.provider, repo_key=repo_key,
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL, stage=stage)
+            if explicit_token:
+                return TokenResult(token=explicit_token, level=EXPLICIT_REPO_BOT_LEVEL,
+                                   provider=self.provider, repo_key=repo_key,
+                                   config_level=EXPLICIT_REPO_BOT_LEVEL)
         # FR-20.7: config_level 从胜出策略推算，不再单独调 resolve_config_level（避免两次策略链扫描）
         for strategy in self.strategies:
+            if strategy is head:
+                continue
             token = strategy.get_token(repo_key)
             if token:
                 expired = strategy._is_expired(repo_key)
@@ -1465,6 +1745,12 @@ def create_action_handler(result: TokenResult) -> TokenActionHandler:
     repo_bot / global_bot / user（session 分支随之消亡，防复活守卫见
     tests/test_d101s_session_cleanup.py）。
     """
+    if result.level == EXPLICIT_REPO_BOT_LEVEL:
+        # Issue #3713：链首新增的显式仓库 bot 级别。它与 repo_bot 共用
+        # `managed_repos.bot_token_status` 一列（mark_expired/clear_expired 落同一列、
+        # 回写 error_code 同为 REPO_TOKEN_EXPIRED），所以复用同一个 Handler；
+        # 若此处不映射，401/403 之后的过期回写对新级别**静默失效**。
+        return RepoBotTokenHandler()
     if result.level == "repo_bot":
         return RepoBotTokenHandler()
     elif result.level == "global_bot":

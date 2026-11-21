@@ -2157,12 +2157,29 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     R20.13.1: 改为调 TokenResolver.read_stored_token()——走统一策略链。
     R25.1: 跳过第 3 级 GlobalBotToken 策略，保持"no_global"语义。
     read_stored_token 契约：不检查过期、不触发 refresh、走缓存层。
+
+    Issue #3713（A2A/tasks 鉴权面收口）：鉴权面拿的是**可用性**语义，而
+    `read_stored_token` 契约明文「不检查过期」。链首新增 rc 行后，若这一面照旧，
+    过期 rc 行的旧值仍会被当成可用 token 发出去（「一边短路一边放行」）。
+    所以：rc 行存在但不可用（空/解不开/过期）时，把**会读这一行的两级**
+    （rc_bot 与 repo_bot——后者 `_fetch` 也优先读同一行）一并摘掉，回到「无行」语义，
+    由后续级别（归属者用户凭据）兜底；绝不把旧值发出去。
     """
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import (
+        ExplicitRepoBotToken,
+        TokenResolver,
+        create_provider_from_repo_key,
+    )
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R25.1: 跳过第 3 级 GlobalBotToken（保持"no_global"语义）
     resolver.strategies = [s for s in resolver.strategies if s.level != "global_bot"]
+    _head = ExplicitRepoBotToken(provider)
+    # 执行面：expired 已按「跳过本级」处理（stage 返回空）；鉴权面必须自己看过期，
+    # 否则 read_stored_token 会把已知过期的旧值当可用 token 发出去（C3 的配套）。
+    if _head.stage(repo_key) or _head.expired(repo_key):
+        resolver.strategies = [s for s in resolver.strategies
+                               if s.level not in ("rc_bot", "repo_bot")]
     return resolver.read_stored_token(repo_key)
 
 # Issue #345: 全局 bot token 内存缓存——TTL 60 秒
@@ -2431,14 +2448,45 @@ def get_repo_bot_token(repo_key: str = "") -> str:
 def get_task_token(task: dict) -> str:
     """Issue #372 R11.4: 获取 task 的 GitCode/GitHub token（公共函数）。
 
-    优先读 task 行的 repo_gitcode_token（路径 A 存入的 bot token）。
-    为空时（路径 B 托管）通过实时获取（带自动刷新）。
-    按 repo_key 前缀分流：github: → get_github_token，其他 → get_repo_token_with_refresh。
+    顺序（Issue #21 R1）：
+      ① task.repo_gitcode_token（历史行值）
+      ② 显式配置的仓库 bot 行（链首 rc_bot；不可用只告警，不在此硬失败）
+      ③ 派发身份个人令牌（默认 on）
+      ④ 原链：github: → get_github_token / 其他 → get_repo_token_with_refresh
+
     """
     tok = task.get("repo_gitcode_token") or ""
     if tok:
         return tok
     repo_key = task.get("repo_key") or ""
+    # ① 显式配置的仓库 bot 行优先（D101 后任务行不再存 bot token，
+    #    "任务自带的仓库 bot 令牌"的现行形态就是 rc 行）。用链首这一级精确读一次：
+    #    可用 → 直接用；不可用 → 记一条 warning 并继续往下（不在这里硬失败，
+    #    真因由建树面的 resolve_exec_token 归因，避免抢走失败分类）。
+    if repo_key:
+        try:
+            from src.kernel.token_resolver import (
+                ExplicitRepoBotToken, create_provider_from_repo_key)
+
+            _head = ExplicitRepoBotToken(create_provider_from_repo_key(repo_key))
+            _explicit_token, _explicit_stage = _head.resolve(repo_key)
+            if _explicit_token:
+                return _explicit_token
+            if _explicit_stage:
+                log.warning(f"get_task_token: explicit repo bot row unusable "
+                            f"({_explicit_stage}) repo={repo_key} —— 继续看派发身份/原链")
+        except Exception as e:  # noqa: BLE001 - 读 rc 失败不阻断取令牌
+            log.debug(f"get_task_token: explicit repo bot probe skipped: {e}")
+
+    # ② Issue #21 第 2 步：按派发身份取个人令牌（shadow/off 返回空 → 旧行为）
+    try:
+        from src.domains.mgmt.user.task_token_identity import user_identity_token
+
+        _identity_token, _ = user_identity_token(task, repo_key)
+        if _identity_token:
+            return _identity_token
+    except Exception as e:  # noqa: BLE001 - 认人失败不得影响取令牌
+        log.debug(f"get_task_token: dispatch identity step skipped: {e}")
     if repo_key:
         try:
             if repo_key.startswith("github:"):

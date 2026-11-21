@@ -1435,6 +1435,70 @@ def _reset_branch_to_baseline(base: str, branch: str, base_branch: str,
     return True
 
 
+# 凭据不可用分类 → 任务面措辞（Issue #3713）。分类枚举由 kernel 选择器给出
+# （`CREDENTIAL_STAGES`），这里只做「渲染」，不重复判定。
+_CREDENTIAL_STAGE_HINTS = {
+    "empty": "仓库 bot 凭据值为空或被撤销",
+    "undecryptable": "仓库 bot 凭据密文无法解密（密钥不匹配或行被破坏）",
+    "expired": "仓库 bot 凭据已标记过期",
+    "not_configured": "该仓库未配置任何可用凭据（无 bot，也无归属者/会话用户凭据）",
+}
+
+
+def repo_base_has_refs(repo_key: str) -> "bool | None":
+    """本地 bare 基线是否已有远端分支：True/False 可用，None = 基线不存在或探测失败。
+
+    为什么需要：`worktree add origin/main` 失败有两类完全不同原因 ——
+      · 空仓（远端 0 分支）：凭据再好也建不出树；
+      · 凭据缺失：取不到 token，mirror refs=0。
+    只看 token 是否为空会把前者也归因成凭据问题（Issue #21 第一层就是空仓）。
+    """
+    try:
+        base = repo_base_dir(repo_key)
+    except Exception:  # noqa: BLE001
+        return None
+    if not base or not os.path.isdir(base):
+        return None
+    r = _run_git(["-C", base, "for-each-ref", "--count=1", "--format=%(refname)",
+                  "refs/remotes/origin"], token="")
+    if r is None or r.returncode != 0:
+        return None
+    return bool((r.stdout or "").strip())
+
+
+def worktree_credential_error(repo_key: str) -> str:
+    """建树失败后的凭据归因（Issue #3713）：返回 `<code>: <message>`，否则空串。
+
+    为什么需要：token 取空 → mirror refs=0 → `git worktree add` 失败 → 平台只看得到
+    「git dir not found」→ `GRAPE_GIT_WRITABLE=false` → agent 自述「git 元数据只读」、
+    零交付仍 completed（与 #3711 同一条收口通道）。凭据才是真因时，必须把
+    **分类（stage）** 带进任务错误，而不是渲染成 git 只读。
+
+    判据（只做归因，不改既有语义）：
+      · 凭据可用（token 非空）→ 返回空串：建树失败原因在 git 侧，走原告警路径；
+      · 凭据不可用           → 返回 `credential_<stage>`，stage ∈ 选择器的分类枚举，
+                              无 rc 行且全链为空时用 not_configured。
+    """
+    if not repo_key:
+        return ""
+    # 空仓优先：远端 0 分支时凭据再好也建不出树 —— 先把事实说清，不归因到凭据
+    if repo_base_has_refs(repo_key) is False:
+        return ("empty_repo: 仓库还没有任何提交（远端 0 条分支）；"
+                "请先在仓库放置一个初始提交后再派任务（这不是凭据问题）")
+    try:
+        from src.kernel.token_resolver import resolve_exec_token
+        sel = resolve_exec_token(repo_key)
+    except Exception as e:  # noqa: BLE001 - 归因失败不得反过来打断任务
+        log.warning(f"repogit: credential attribution failed {repo_key}: {e}")
+        return ""
+    if getattr(sel, "token", ""):
+        return ""
+    stage = getattr(sel, "stage", "") or "not_configured"
+    hint = _CREDENTIAL_STAGE_HINTS.get(stage, "凭据不可用")
+    return (f"credential_{stage}: {hint}；建树取 token 失败，本轮无法 clone/fetch"
+            f"（真因在凭据，不在 git 目录权限）")
+
+
 def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str = "",
                           work_branch: str = "", task_id: str = "",
                           strict_override=None, delivery_branch: str = "",
