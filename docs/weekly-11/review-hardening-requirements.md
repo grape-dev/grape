@@ -120,3 +120,35 @@
   1061（索引已存在）、1091（待删列/键不存在）、1146（表不存在）。
 - 文档：`db_setup` 里旧的“只记 WARNING 返回 True（fail-open）”描述必须与实现一致
   （fail-closed），不得留反向说明。
+
+## R16 clone 派生只经契约，凭据不进 URL
+
+- 现状：mgmt 有三处自拼/直连 runtime 内部：
+  · `org_context_repo._clone_url` 内置 hosts 字典（与平台卡双真源）
+  · `user/repo_manager.py::_download_gitcode_tarball` 写死
+    `https://oauth2:{token}@gitcode.com/...`（平台写死 + token 进 URL）
+  · `routes/repos.py` 直接 `from src.domains.runtime.vcs.clone_endpoint import ...`
+- 要求：
+  · clone 地址 / 用户名 / Authorization 头只有 `runtime.vcs.clone_endpoint` 一个真源，
+    由 `runtime.public` 暴露契约（`clone_params` / `clone_url` / `username_for_token` /
+    `clone_auth_header` / `CloneEndpointError`）；
+  · 其它域禁止 `from src.domains.runtime.<内部>`（只允许 `runtime.public`）；
+  · token 一律经 `git -c http.extraheader=` 注入，不得出现在 URL、进程参数或日志里。
+- 验收：三处调用点用例（含“token 不出现在命令行”断言）+ 跨域直连棘轮（基线已有 3 处登记）。
+
+## R17 令牌登录名的字段回退
+
+- 现状：`clone_identity` 只读 `info["login"]`；GitLab `/user` 返回的是 `username`，
+  gitlab 方言 + `basic_password` 的卡会恒 `no_login`。
+- 要求：`login → username → name` 依次回退；失败信息写明三个字段。
+- 说明：gitlab 不在本轮需求内，此条按“方言健壮性”处理，不作为平台上线承诺。
+
+## R18 能力位与平台卡（评审第 2 条的更正结论）
+
+- 事实核对：`PlatformCard` **有** `capabilities` 字段（`platform_card.py:122`），
+  取值限定在 `_VALID_CAPABILITIES`（`<resource>.<op>` 形态）内；未知值构建期 fail-closed。
+  评审列的 6 个名字（check_runs_native 等）在本分支 grep=0，不存在。
+- 要求：新增能力 = 先在 `_VALID_CAPABILITIES` 登记 + 加消费端检查点（代码改动），
+  不存在“纯配卡”路径；管理端保存已在写库前用 `build_platform_card` 校验，
+  未知顶层键不会落库（文件/meta 直改由加载期整卡拒绝兜底）。
+- 动作：仅记录口径，不改代码（避免为不存在的字段造接口）。

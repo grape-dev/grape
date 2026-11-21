@@ -103,6 +103,11 @@ api/oauth_token.py::with_oauth_token
 | S20 | 任务日志读权限 | 本人 / 管理方可读；提报者与契约异常 403 | `test_task_logs_acl.py` S1–S7 |
 | S21 | DDL 目标态错误码 | 1051/1054/1146 也按幂等放行 | `test_destructive_ddl_stamp_scenarios.py::test_s5_*` |
 | S22 | 脱敏守卫自身 | 扫描跳过自身，不再自伤 | `test_public_docs_redaction.py` |
+| S23 | clone 地址派生 | org_context_repo 走 runtime.public.clone_url | `test_mgmt_clone_contract.py::test_s1` |
+| S24 | 模板克隆凭据 | 只用 extraheader，token 不进 URL | `::test_s2` |
+| S25 | 鉴权头按卡 | gitee=basic(owner)、github=x-access-token | `::test_s3` |
+| S26 | 登录名字段 | login → username → name | `::test_s4` |
+| S27 | 跨域直连棘轮 | mgmt 只允许 runtime.public（基线 3 处登记） | `::test_s5` / `::test_s6` |
 
 ## 6. 验证命令（一次一个文件）
 
@@ -276,4 +281,36 @@ _destructive_ddl 放行码（幂等重跑，不是失败）：
 ```
 tests/arch/test_public_docs_redaction.py 扫描本分支变更文件；
 黑名单字面量就在该文件里 → 必须跳过自身（SELF），否则守卫永远红。
+```
+
+## 19. clone 派生契约与凭据传输（R16/R17）
+
+```
+runtime.public 出口（新增）：
+  clone_params(repo_key) / clone_url(repo_key)
+  username_for_token(provider, token, repo_key)
+  clone_auth_header(repo_key, token)   → "Basic base64(user:token)"（用户名按卡 clone_auth 取）
+  CloneEndpointError（异常类再导出，调用方按类做错误分类）
+
+改后的三个调用点：
+  mgmt/org_context_repo._clone_url        → runtime.public.clone_url
+  mgmt/user/repo_manager._download_gitcode_tarball
+        → clone_url + `git -c http.extraheader=Authorization: <header> clone …`
+          （旧写法 https://oauth2:{token}@gitcode.com/… 同时写死平台并把 token 放进 URL）
+  mgmt/routes/repos.py                    → 契约 import（不再 import runtime.vcs.*）
+
+clone_identity 登录名：login → username → name（gitlab /user 用 username）
+
+不变式：
+  · 跨域只经 <owner>.public；mgmt 直连 runtime 内部的基线 3 处
+    （admin/repo_platform_routes、routes/plugins、routes/plugins_agent）登记棘轮
+  · 凭据不进 URL/进程参数/日志
+```
+
+## 20. 能力位（R18）事实更正
+
+```
+PlatformCard.capabilities 存在且校验严格（_VALID_CAPABILITIES = resource.op 枚举）；
+未知顶层键在加载期整卡拒绝、管理端保存期已在写库前校验 → 无“写卡即整卡消失”的 API 路径。
+评审列的 6 个 flag 在本分支不存在；新增能力需登记枚举 + 消费端检查点，属代码改动。
 ```

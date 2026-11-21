@@ -4455,6 +4455,20 @@ def managed_repo_host_user(repo_key: str) -> str:
     return str(row[0]) if row and row[0] else ""
 
 
+def get_github_token(repo_key: str) -> str:
+    """按仓库取 GitHub 平台 token（空=无；契约出口，runtime 不得直连 mgmt.user.db）。"""
+    from src.domains.mgmt.user.db import get_github_token as _impl
+
+    return _impl(repo_key)
+
+
+def get_repo_bot_token(repo_key: str) -> str:
+    """按仓库取 bot token（契约出口）。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
+
+    return _impl(repo_key)
+
+
 def user_can_manage_repo(user_id: Any, repo_key: str) -> bool:
     """该用户是否是仓库的**管理方**（托管人 host_user_id 或 user_repos.is_admin=1）。
 

@@ -260,11 +260,11 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
             log.debug(f"repo_platform_routes: mark bot status failed: {e}")
         # 令牌换过就把 clone 用户名缓存清掉（指纹变了本就会重解析，这里再兜一层旧明文键）
         try:
-            from src.domains.runtime.vcs.clone_identity import invalidate as _ci_invalidate
+            from src.domains.runtime import public as _runtime_public
 
-            _ci_invalidate(provider, body.token)
+            _runtime_public.invalidate_clone_identity(provider, body.token)
             if old_plain:
-                _ci_invalidate(provider, old_plain)
+                _runtime_public.invalidate_clone_identity(provider, old_plain)
         except Exception as e:  # noqa: BLE001
             log.debug(f"repo_platform_routes: clone_identity invalidate failed: {e}")
     # 轮换传播：path A 托管把平台 bot token 同时写成仓库 webhook 验签 token，

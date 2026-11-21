@@ -3284,7 +3284,10 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     # 用户名按平台卡 clone_auth 派生、地址同源——过去 username 恒 "x-access-token"，
     # 与 gitee 卡的 clone_auth=basic_password（真实账号 + 令牌当密码）不符，clone 必被拒。
     from src.kernel.repo_key import to_repo_key as _to_repo_key
-    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError, clone_params
+    from src.domains.runtime import public as _runtime_public
+
+    CloneEndpointError = _runtime_public.CloneEndpointError
+    clone_params = _runtime_public.clone_params
 
     _repo_key_obj = _to_repo_key(f"{p}:{_o}/{repo}")
     try:
@@ -3300,7 +3303,9 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     _username = _cp["username"]
     _username_src = ""
     try:
-        from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+        from src.domains.runtime import public as _runtime_public
+
+        _user_for_token = _runtime_public.username_for_token
 
         _username, _username_src = _user_for_token(p, token, _repo_key_obj)
     except Exception as e:  # noqa: BLE001 - 派生失败不阻断换券，回落卡值

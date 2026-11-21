@@ -692,11 +692,21 @@ def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
     _run_git(["init"], workdir)
 
 def _download_gitcode_tarball(source_repo, workdir, tmp, token):
-    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
+    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。
+
+    2026-11-22：地址与鉴权方式都改走 runtime 契约——旧实现把
+    `https://oauth2:{token}@gitcode.com/...` 写死平台，且把 token 拼进 URL
+    （进程列表/日志/错误信息泄漏面）。现在：地址=clone_params(clone_url)，
+    凭据=clone_auth_header → `git -c http.extraheader=` 注入。
+    """
     if not token:
         raise RuntimeError("GitCode 模板需要 Bot token 拉取")
-    url = f"https://oauth2:{token}@gitcode.com/{source_repo}.git"
-    _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+    from src.domains.runtime import public as _runtime_public
+
+    url = _runtime_public.clone_url(source_repo)
+    header = _runtime_public.clone_auth_header(source_repo, token)
+    _run_git(["-c", f"http.extraheader=Authorization: {header}",
+              "clone", "--quiet", "--depth", "1", url, workdir], tmp)
     shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
     _run_git(["init"], workdir)
 

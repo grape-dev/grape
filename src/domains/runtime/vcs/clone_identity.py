@@ -92,9 +92,11 @@ def _fetch_login(provider: str, token: str) -> str:
         raise CloneIdentityError(provider, reason, text[:200]) from exc
     if not isinstance(info, dict):
         raise CloneIdentityError(provider, "no_login", f"verify_token 返回 {type(info).__name__}")
-    login = str(info.get("login") or "").strip()
+    # 字段名按平台方言不同：github/gitcode/gitee 是 login，gitlab 的 /user 是 username，
+    # 个别平台用 name。只认 login 会让 gitlab 方言 + basic_password 的卡恒 no_login。
+    login = str(info.get("login") or info.get("username") or info.get("name") or "").strip()
     if not login:
-        raise CloneIdentityError(provider, "no_login", "上游 /user 未返回 login")
+        raise CloneIdentityError(provider, "no_login", "上游 /user 未返回 login/username")
     return login
 
 

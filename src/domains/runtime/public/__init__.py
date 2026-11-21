@@ -5120,6 +5120,62 @@ def ensure_repo_im_binding_schema(conn: Any) -> None:
 _ORG_BACKFILL_TABLES = ("events", "agent_tasks", "devops_agent_session", "issue")
 
 
+# ---------- clone 端点契约（clone_endpoint 单点派生的对外出口）----------
+# mgmt 等其它域要拼 clone 地址/用户名时只能走这里，禁止 import runtime.vcs.* 内部模块。
+try:  # 异常类一并导出，调用方按它做错误分类
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError  # noqa: F401
+except Exception:  # pragma: no cover - 极端导入失败时给出可捕获的替身
+    class CloneEndpointError(RuntimeError):  # type: ignore[no-redef]
+        pass
+
+
+def clone_params(repo_key: str) -> dict:
+    """按平台卡派生 clone 参数（provider/owner/repo/clone_url/clone_auth/username）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _impl
+
+    return _impl(repo_key)
+
+
+def clone_url(repo_key: str) -> str:
+    """仓库 clone 地址（平台卡派生的唯一实现）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_url as _impl
+
+    return _impl(repo_key)
+
+
+def username_for_token(provider: str, token: str, repo_key: str = "") -> tuple:
+    """令牌所属账号名（basic_password 平台用；返回 (username, source)）。"""
+    from src.domains.runtime.vcs.clone_identity import username_for_token as _impl
+
+    return _impl(provider, token, repo_key)
+
+
+def invalidate_clone_identity(provider: str, token: str = "") -> None:
+    """清掉令牌→login 解析缓存（令牌轮换后调用；契约出口，别域不得直连内部模块）。"""
+    from src.domains.runtime.vcs.clone_identity import invalidate as _impl
+
+    _impl(provider, token)
+
+
+def clone_auth_header(repo_key: str, token: str) -> str:
+    """git 传输用的 Authorization 头值（Basic base64(user:token)，按卡的 clone_auth 取用户名）。
+
+    为什么提供在契约里：mgmt 拼克隆命令时不能自己再实现一套 scheme/用户名派生
+    （那就是第二个真源），也不能把 token 拼进 URL（进程列表/日志泄漏面）。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _cp
+
+    p = _cp(repo_key)
+    scheme = str(p.get("clone_auth") or "x_access_token")
+    user = str(p.get("username") or "")
+    if not user:
+        user = "x-access-token" if scheme == "x_access_token" else (
+            "oauth2" if scheme == "oauth2" else str(p.get("owner") or ""))
+    import base64 as _b64
+
+    return "Basic " + _b64.b64encode(f"{user}:{token}".encode()).decode()
+
+
 def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:
     """按 repo_key→org_id 映射回填本域表的空 org_id（逐仓库 UPDATE，幂等）。"""
     out: dict[str, int] = {}
