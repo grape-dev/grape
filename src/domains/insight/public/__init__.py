@@ -40,6 +40,10 @@ _REPO_CRED_QUERIES: dict[str, str] = {
     "repo_cred_clear": (
         "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
         "WHERE repo_key=? AND cred_type=?"),
+    # 空值语义 = 没有这行（不是「有一行但是空的」）：凭据解析按档位下降，
+    # 空行会被「显式 bot 闸」判成「配了但不可用」→ 424，比缺行更难查。
+    "repo_cred_delete": (
+        "DELETE FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
     "repo_cred_nonempty_keys": (
         "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
         "AND value IS NOT NULL AND value!=''"),
@@ -219,6 +223,18 @@ def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
             # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
             c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
             return {"action": "updated_after_conflict", "id": 0}
+
+
+def delete_repo_credential_value(repo_key: str, cred_type: str) -> int:
+    """删除该仓库该类型的凭据行（返回删除行数）。
+
+    为什么需要：读写两侧对「空」必须同一语义。空值应该等于「没有这行」，
+    这样解析链会继续往下一档（平台 bot / 归属者），而不是被
+    「行存在但值为空」判成 `BOT_CREDENTIAL_INVALID stage=empty` 卡住。
+    """
+    with _any_tx() as c:
+        cur = c.execute(_any_sql("repo_cred_delete"), (repo_key, cred_type))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
 
 def upsert_repo_credentials(repo_key: str, items: list[tuple[str, str]],

@@ -5792,7 +5792,7 @@ def resolve_official_checker_skill(agent_type: str) -> dict | None:
         log.warning(f"resolve_official_checker_skill failed for {agent_type}: {e}")
         return None
 
-def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: str) -> None:
+def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: "str | None") -> None:
     """D98/D99/N4：grape_t_repo_credentials 幂等 upsert（UPDATE → rowcount==0 → INSERT）。
 
     供 add_managed_repo / _update_repo_bot_token 等写入口共用；
@@ -5805,6 +5805,12 @@ def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: str) -> Non
     调用方传入的 `c` 不再参与（跨库拓扑下本就不可能与本域写同事务）。
     """
     _now = time.strftime("%Y-%m-%d %H:%M:%S")
+    # 空值 = 没有这行：写空会留下「配了但不可用」的空行，git-credential 的显式 bot 闸
+    # 会把这种行判成 424 stage=empty 并停止下降（2026-11-21 实测：6 个 gitee 仓库的
+    # 空占位行就是这样来的）。所以清空/未配置一律走删除，让解析继续往下一档。
+    if not str(value or "").strip():
+        _insight_public.delete_repo_credential_value(repo_key, cred_type)
+        return
     _enc = _encrypt_repo_secret(value or "")
     _insight_public.upsert_repo_credential_value(repo_key, cred_type, _enc, _now)
 
