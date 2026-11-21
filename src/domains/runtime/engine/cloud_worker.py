@@ -1033,6 +1033,13 @@ async def _refresh_templates(client, config):
     try:
         templates = await client.get_templates()
         if not templates:
+            # [云 worker 领取修复] 空结果必须区分两种语义，调用方据此决定要不要覆盖
+            # 已注册清单（此前一律返回 []，一次 499/超时就把 _installed_live 清空 →
+            # 下一轮 register([]) → runtime_ids 归零 → 永不 claim）：
+            #   []        = 平台确实没有模板（真空）→ 返回空清单，允许同步清空
+            #   None/其他 = 拉取失败/未知        → 返回 None 哨兵，沿用上一份快照
+            if templates is None:
+                return None, set(), None
             return {}, set(), []
 
         new_runtimes = _expand_templates(templates)
@@ -1099,7 +1106,7 @@ async def _refresh_templates(client, config):
         raise  # [401 自杀修复] 凭据吊销向上传播——refresh loop 的 except 也要放行
     except Exception as e:
         log.warning(f"_refresh_templates failed: {e}")
-        return {}, set(), []
+        return None, set(), None
 
 
 async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed, device_name):
@@ -1233,7 +1240,11 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 # [身份锚定] 无条件同步 re-register 动态视图——改名时 rid 不变（锚命中 UPDATE），
                 # added 循环不触发（rid 已在心跳列表），旧版仅在 added 时同步会让 5min re-register
                 # 用旧名快照把引擎名写回（s14 被 re-register 覆盖回 s13 实测根因）
-                _installed_live[:] = _all_runtimes or []
+                # [云 worker 领取修复] 只有本次刷新拿到了真实的模板结果才覆盖已注册清单；
+                # None = 拉取失败/未知（含 499、超时、平台不可达），沿用上一份快照，
+                # 否则一次失败就会把清单清空 → register([]) → runtime_ids 归零 → 永不 claim。
+                if _all_runtimes is not None:
+                    _installed_live[:] = _all_runtimes
                 for _n, _rid in (_new_rid_by_name or {}).items():
                     if _rid and _rid not in runtime_ids:
                         runtime_ids.append(_rid)
