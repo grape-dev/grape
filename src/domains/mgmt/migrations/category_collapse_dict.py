@@ -17,6 +17,11 @@ domains=("mgmt",)：单库 / 测试不筛域、全量执行。
 """
 from __future__ import annotations
 
+#: 收敛后允许活跃的一级显式 id（it-rd/operations/other）：单一真源在
+#: src/kernel/category.py（runtime 侧重挂、api 层启动校验引用同一常量），
+#: 各域禁止再自行定义。
+from src.kernel.category import KEEP_L1_IDS
+
 KEEP_L1_SLUGS = ("it-rd", "operations", "other")
 
 
@@ -53,10 +58,6 @@ def collapse_category_dict() -> None:
         # 老分类废止：skill_category（老一级/二级分类表，归 mgmt）全部停用。
         c.execute("UPDATE skill_category SET is_active=0 WHERE is_active=1")
         db.commit()
-
-
-#: 收敛后允许活跃的一级显式 id（与 runtime 侧 KEEP_L1_IDS 对齐）。
-KEEP_L1_IDS = (1001, 1002, 1010)
 
 
 def verify_category_collapse(conn=None) -> list:

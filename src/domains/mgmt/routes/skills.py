@@ -556,17 +556,22 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
 
     skills = []
     skill_ids: list[int] = []
-    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突
+    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突。
+    # QA（#3648）：schema 缺列/缺表时分类名与分类树降级为空可接受，但禁止
+    # 裸 except 静默吞掉（Issue 事故形态之一就是「列表为空且无报错」），
+    # 必须 log.exception 留痕（堆栈进日志，可定位到具体缺失列/表）。
+    from src.kernel.config import log as _cat_log
     cat_map = {}
     try:
         for cat in list_skill_categories():
             cat_map[cat["id"]] = cat["name"]
     except Exception:
-        pass
+        _cat_log.exception("list_skills: list_skill_categories failed (分类名降级为空)")
     try:
         _cat_dict_map = {c["id"]: c for c in list_category_dict("skill")}
     except Exception:
         _cat_dict_map = {}
+        _cat_log.exception("list_skills: list_category_dict failed (分类路径降级为空)")
     total = 0
     try:
         total, _skill_rows = _rt_skills.skill_search(

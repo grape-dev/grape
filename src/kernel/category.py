@@ -10,6 +10,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+#: 分类收敛契约（Issue #3202 / #3648）单一真源：收敛后仅保留的一级分类显式 id
+#: （it-rd=1001 / operations=1002 / other=1010）。mgmt 域 grape_t_category_dict
+#: 停用判定、runtime 域 skill 重挂与 api 层启动校验共用，禁止各处再裸写字面量。
+KEEP_L1_IDS = (1001, 1002, 1010)
+
 
 def sync_category_target(new_l1: int, new_l2: int,
                           old_l1: int, old_l2: int) -> tuple[int, int]:

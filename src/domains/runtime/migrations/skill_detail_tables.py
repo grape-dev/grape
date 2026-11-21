@@ -22,6 +22,11 @@ domains=("runtime",)：三库模式由 runtime 进程执行
 """
 from __future__ import annotations
 
+#: skill 技能分类列（Issue #2761/#3648）：列迁移（本模块）、分类收敛后置校验
+#: （skill_category_collapse）、启动期总校验（db_setup.verify_migration_targets）
+#: 共用同一份清单，避免三处漂移。
+SKILL_CLASSIFICATION_COLUMNS = ("cat_l1_id", "cat_l2_id")
+
 
 def _column_exists(cur, table: str, column: str) -> bool:
     """PRAGMA 探测（sqlite 原生；MySQL 由 kernel mysql_compat 翻译，同 db_setup._ensure_column）。"""
@@ -50,11 +55,11 @@ def verify_skill_classification_columns(conn=None) -> list:
         raise RuntimeError(
             "skill 表不存在（分类列后置校验失败；不盖章，下次启动重试）")
     cols = {r[1] for r in rows}
-    missing = [col for col in ("cat_l1_id", "cat_l2_id") if col not in cols]
+    missing = [col for col in SKILL_CLASSIFICATION_COLUMNS if col not in cols]
     if missing:
         raise RuntimeError(
             f"skill 缺分类列 {missing}（列迁移未真正到位；不盖章，下次启动重试）")
-    return ["cat_l1_id", "cat_l2_id"]
+    return list(SKILL_CLASSIFICATION_COLUMNS)
 
 
 def ensure_skill_detail_schema() -> None:

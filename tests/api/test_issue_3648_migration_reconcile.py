@@ -225,6 +225,42 @@ def test_skill_columns_postcheck_detects_missing(tmp_path):
     conn.close()
 
 
+def test_skill_collapse_postcheck_flags_missing_columns(tmp_path):
+    """runtime 收敛后置校验分支 1：skill 缺分类列 → RuntimeError（不盖章）。"""
+    from src.domains.runtime.migrations.skill_category_collapse import (
+        verify_skill_category_collapse,
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "collapse.db"))
+    conn.execute("CREATE TABLE skill (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    with pytest.raises(RuntimeError, match="缺分类列"):
+        verify_skill_category_collapse(conn=conn)
+    conn.close()
+
+
+def test_skill_collapse_postcheck_flags_stale_l1_rows(tmp_path):
+    """runtime 收敛后置校验分支 2：仍有行挂非保留一级 → RuntimeError；
+    收敛（重挂 1010）后校验通过。"""
+    from src.domains.runtime.migrations.skill_category_collapse import (
+        verify_skill_category_collapse,
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "collapse2.db"))
+    conn.execute(
+        "CREATE TABLE skill (id INTEGER PRIMARY KEY, cat_l1_id INTEGER DEFAULT 0, "
+        "cat_l2_id INTEGER DEFAULT 0)")
+    conn.execute("INSERT INTO skill (id, cat_l1_id) VALUES (1, 2001)")
+    conn.execute("INSERT INTO skill (id, cat_l1_id) VALUES (2, 1001)")
+    conn.commit()
+    with pytest.raises(RuntimeError, match="已删除一级分类"):
+        verify_skill_category_collapse(conn=conn)
+    conn.execute("UPDATE skill SET cat_l1_id=1010 WHERE cat_l1_id=2001")
+    conn.commit()
+    verify_skill_category_collapse(conn=conn)  # 收敛后不再抛
+    conn.close()
+
+
 # ===== 4. list_skills 不再吞 schema 异常 =====
 
 def test_list_skills_propagates_schema_error(monkeypatch, caplog):
@@ -272,7 +308,59 @@ def test_verify_migration_targets_flags_extra_active_l1(tmp_path):
             "INSERT INTO grape_t_category_dict (id, level, is_active) VALUES (?,1,1)", (i,))
     conn.commit()
     failures = D.verify_migration_targets(conn=conn, domain="mgmt")
-    assert any("一级活跃分类" in f for f in failures), failures
+    assert any("一级活跃" in f for f in failures), failures
     with pytest.raises(RuntimeError):
         D.verify_migration_targets(conn=conn, domain="mgmt", raise_on_fail=True)
     conn.close()
+
+
+def test_verify_migration_targets_flags_missing_target_tables(tmp_path):
+    """QA：目标表整张缺失不能被 _table_present 包裹后静默 log.info 通过。"""
+    conn = sqlite3.connect(str(tmp_path / "empty.db"))
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    failures = D.verify_migration_targets(conn=conn, domain="mgmt")
+    assert any("表/列缺失" in f for f in failures), failures
+    failures = D.verify_migration_targets(conn=conn, domain="runtime")
+    assert any("skill 表不存在" in f for f in failures), failures
+    with pytest.raises(RuntimeError):
+        D.verify_migration_targets(conn=conn, domain="runtime", raise_on_fail=True)
+    # 两表都到位且达标 → 通过
+    conn.execute(
+        "CREATE TABLE grape_t_category_dict (id INTEGER PRIMARY KEY, level INTEGER, "
+        "is_active INTEGER)")
+    for i in (1001, 1002, 1010):
+        conn.execute(
+            "INSERT INTO grape_t_category_dict (id, level, is_active) VALUES (?,1,1)", (i,))
+    conn.execute(
+        "CREATE TABLE skill (id INTEGER PRIMARY KEY, cat_l1_id INTEGER DEFAULT 0, "
+        "cat_l2_id INTEGER DEFAULT 0)")
+    conn.commit()
+    assert D.verify_migration_targets(conn=conn) == []
+    conn.close()
+
+
+# ===== 7. 契约常量单一真源守卫（QA C-1：三份真源漂移） =====
+
+def test_keep_l1_ids_and_column_lists_have_single_source():
+    """[1001,1002,1010] / 分类列清单不得在多个模块各自定义（防三处漂移）。"""
+    import src.kernel.category as kcat
+    from src.domains.mgmt.migrations import category_collapse_dict as m
+    from src.domains.runtime.migrations import skill_category_collapse as r
+    from src.domains.runtime.migrations import skill_detail_tables as s
+
+    # KEEP_L1_IDS：mgmt / runtime 两侧必须引用 kernel 同一对象
+    assert m.KEEP_L1_IDS is kcat.KEEP_L1_IDS
+    assert r.KEEP_L1_IDS is kcat.KEEP_L1_IDS
+    assert list(kcat.KEEP_L1_IDS) == [1001, 1002, 1010]
+
+    # api 层启动校验必须委托属主域的校验函数，不再复制域内 SQL / id 字面量
+    # （字面量检查剥离 docstring：说明文字里的 1001/1002/1010 不算裸写）
+    import inspect
+    src_text = inspect.getsource(D.verify_migration_targets)
+    body_text = src_text.replace(D.verify_migration_targets.__doc__ or "", "")
+    assert "verify_category_collapse" in body_text
+    assert "verify_skill_classification_columns" in body_text
+    assert "1001" not in body_text, "api 层不得再裸写一级分类 id 字面量"
+    assert "PRAGMA" not in body_text, "api 层不得复制属主域的 PRAGMA 探测 SQL"
+    assert s.SKILL_CLASSIFICATION_COLUMNS == ("cat_l1_id", "cat_l2_id")

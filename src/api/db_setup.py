@@ -2186,7 +2186,10 @@ class Migration:
     # 执行后置校验（#3648）：fn 正常返回后、盖章前调用；不达标抛错 = 不盖章。
     # 同号不同名（跨分支 renumber 撞号）时也用它判定目标是否真的到位：
     # 校验通过 → 视为已执行；校验失败 → 重跑幂等 fn 再校验（禁止静默跳过）。
-    post_check: Optional[Callable[[], None]] = None
+    # 类型放宽为 Callable：实际校验函数可带 conn=None 关键字（供测试注入）、
+    # 可返回清单（如 verify_skill_classification_columns 返回列名列表），
+    # Callable[[], None] 与实现不符（QA：类型声明失真）。
+    post_check: Optional[Callable] = None
 
     def __post_init__(self):
         if self.kind not in MIGRATION_KINDS:
@@ -2877,7 +2880,7 @@ _LEGACY_DOMAIN_LABELS = {
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None,
                        domains: Optional[tuple] = None,
-                       post_check: Optional[Callable[[], None]] = None) -> Migration:
+                       post_check: Optional[Callable] = None) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。
 
     ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
@@ -4798,9 +4801,16 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                              raise_on_fail: bool = False) -> list:
     """启动期后置校验（Issue #3648）：台账之外再核对一次关键目标是否到位。
 
-    检查项（只检查当前库真实存在的表，域外对象由对应域进程负责）：
-    - mgmt（单库/不筛域）：`grape_t_category_dict` 一级活跃必须恰好 1001/1002/1010；
-    - runtime（单库/不筛域）：`skill` 必须含 `cat_l1_id` / `cat_l2_id`。
+    检查项（域内目标表必须存在——QA：整表缺失 = 迁移目标没建出来，
+    不能用 _table_present 包裹后静默 log.info 通过，必须判为失败）：
+    - mgmt（单库/不筛域）：分类字典表必须存在，且一级活跃必须恰好 KEEP_L1_IDS；
+    - runtime（单库/不筛域）：skill 表必须存在，且必须含 cat_l1_id / cat_l2_id。
+
+    实现口径：两个检查项各委托属主域迁移模块的后置校验函数（表缺失/
+    集合不对/缺列均以 RuntimeError 报出，这里转成失败清单），api 层不再
+    复制域内 SQL / id 字面量（tests/arch P0-2 棘轮 + QA C-1 单一真源）。
+    表整张缺失 = 迁移目标没建出来，同样判失败（QA：不允许 _table_present
+    包裹后静默 log.info 通过）。
 
     返回失败清单；`raise_on_fail=True` 时抛 RuntimeError。默认只 ERROR 留痕，
     避免把「已盖章但目标缺失」的历史库直接变成启动崩溃（迁移本身已在盖章前
@@ -4817,27 +4827,20 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
     if cur is not None:
         if dom in ("", "mgmt"):
             try:
-                if _table_present(cur, "grape_t_category_dict"):
-                    rows = cur.execute(
-                        "SELECT id FROM grape_t_category_dict "
-                        "WHERE level=1 AND is_active=1").fetchall()
-                    ids = sorted(int(r[0] or 0) for r in rows or [])
-                    if ids != [1001, 1002, 1010]:
-                        failures.append(
-                            f"mgmt 一级活跃分类={ids}（期望 [1001, 1002, 1010]）")
+                from src.domains.mgmt.migrations.category_collapse_dict import (
+                    verify_category_collapse,
+                )
+                verify_category_collapse(conn=conn)
             except Exception as e:  # noqa: BLE001
-                failures.append(f"mgmt 分类字典后置校验异常: {e}")
+                failures.append(f"mgmt 分类字典后置校验失败: {e}")
         if dom in ("", "runtime"):
             try:
-                if _table_present(cur, "skill"):
-                    cols = {r[1] for r in cur.execute(
-                        "PRAGMA table_info(skill)").fetchall() or []}
-                    missing = [c for c in ("cat_l1_id", "cat_l2_id")
-                               if c not in cols]
-                    if missing:
-                        failures.append(f"runtime skill 缺列 {missing}")
+                from src.domains.runtime.migrations.skill_detail_tables import (
+                    verify_skill_classification_columns,
+                )
+                verify_skill_classification_columns(conn=conn)
             except Exception as e:  # noqa: BLE001
-                failures.append(f"runtime skill 列后置校验异常: {e}")
+                failures.append(f"runtime skill 列后置校验失败: {e}")
     if failures:
         msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
         log.error(msg)

@@ -20,9 +20,13 @@ domains=("runtime",)：三库模式由 runtime 进程执行；单库 / 测试不
 """
 from __future__ import annotations
 
+#: 列清单复用 runtime 域列迁移模块的单一来源（QA：三处重复易漂移）。
+from .skill_detail_tables import SKILL_CLASSIFICATION_COLUMNS
+
 #: 种子显式 id（一级 = 1000+order）：it-rd=1001 / operations=1002 / other=1010。
-#: 与 mgmt 侧 KEEP_L1_SLUGS 一一对应（那边按 slug 停用，这边按 id 重挂）。
-KEEP_L1_IDS = (1001, 1002, 1010)
+#: 单一真源在 src/kernel/category.py（mgmt 侧停用判定引用同一常量，api 层
+#: 启动校验同样引用；跨域共享走 kernel，不直接 import mgmt 模块）。
+from src.kernel.category import KEEP_L1_IDS
 
 
 def collapse_skill_categories() -> None:
@@ -52,7 +56,7 @@ def verify_skill_category_collapse(conn=None) -> None:
     c = conn.cursor()
     rows = c.execute("PRAGMA table_info(skill)").fetchall()
     cols = {r[1] for r in rows or []}
-    missing = [col for col in ("cat_l1_id", "cat_l2_id") if col not in cols]
+    missing = [col for col in SKILL_CLASSIFICATION_COLUMNS if col not in cols]
     if missing:
         raise RuntimeError(
             f"skill 缺分类列 {missing}（分类列迁移未到位；不盖章，下次启动重试）")
