@@ -146,7 +146,8 @@ _SAFE_IDENT = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _ROWS_UNKNOWN = -1
 
 
-def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True) -> list[dict]:
+def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True,
+                        strict: bool = False) -> list[dict]:
     """列出本库里「归别域、但物理上是 BASE TABLE」的副本，并分类。
 
     - `empty_copy`     副本 0 行 → 数据在 owner 库，可安全清理（`drop_empty_copy`）
@@ -167,7 +168,11 @@ def audit_foreign_copies(conn, dbname: str, *, count_rows: bool = True) -> list[
         rows = conn.execute(
             "SELECT TABLE_NAME FROM information_schema.TABLES "
             "WHERE TABLE_SCHEMA=%s AND TABLE_TYPE='BASE TABLE'", (dbname,)).fetchall()
-    except Exception:  # noqa: BLE001 - 单库/测试环境没有 information_schema
+    except Exception as e:  # noqa: BLE001 - 单库/测试环境没有 information_schema
+        # QA 第 6 轮 Informational 3(a)：空结果不得冒充「干净」。strict=True 时把
+        # 「查不了」显式抛出去，让调用方不盖章、下次重试，而不是打一条 clean。
+        if strict:
+            raise RuntimeError(f"{dbname}: information_schema 不可用，无法审计: {e}") from e
         return []
     present = {str(r[0] or "").strip().lower() for r in rows}
     out: list[dict] = []

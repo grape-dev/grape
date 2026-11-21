@@ -11517,16 +11517,21 @@ def _fn_session_token_unique_session_key() -> None:
     }
     with db_lock:
         c = db.cursor()
+        _ddl_ran = False
         if _is_mysql_backend():
             # QA C3（2026-11-21）：MODIFY COLUMN 属破坏性 DDL，必须走 _destructive_ddl
             # （min_code_version 门槛 + MDL 处理）；门槛未过时跳过不盖章，下次启动重试。
+            # 审计前后各一条（detail 只记结构信息）。
+            _audit_ops_event("session_token_key_widen", {**_detail, "phase": "before"})
             if not _destructive_ddl(c, _ddl, kind_hint="cleanup", version="202611210004"):
                 db.commit()
                 raise RuntimeError(
                     "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
                     "session_key 列宽未对齐，跳过不盖章")
+            _ddl_ran = True
         db.commit()
-    _audit_ops_event("session_token_key_widen", {**_detail, "phase": "after"})
+    if _ddl_ran:
+        _audit_ops_event("session_token_key_widen", {**_detail, "phase": "after"})
     log.info("session_api_tokens: session_key 列宽对齐 VARCHAR(191)（不建唯一索引、不去重）")
 
 
@@ -11567,10 +11572,12 @@ def _fn_table_ownership_copy_audit() -> None:
         log.debug(f"[TABLE_OWNERSHIP_AUDIT] skip {dbname or '?'}: 判不出域，不做跨域副本审计")
         return
     try:
-        items = _own.audit_foreign_copies(db, dbname)
+        # strict=True：information_schema 不可用 → 抛错而不是返回空表。
+        # 空结果只代表「没有任何别域副本」，不能代表「没审计」。
+        items = _own.audit_foreign_copies(db, dbname, strict=True)
     except Exception as e:  # noqa: BLE001
-        log.warning(f"[TABLE_OWNERSHIP_AUDIT] failed on {dbname}: {e}")
-        return
+        log.warning(f"[TABLE_OWNERSHIP_AUDIT] 无法审计 {dbname}（不等于干净）: {e}")
+        raise  # 不盖章，下次启动重试
     if not items:
         # 与上面的 skip 区分：这里是**审过了且干净**，不是没审
         log.info(f"[TABLE_OWNERSHIP_AUDIT] {dbname} (owner={dom}): clean")
@@ -11598,6 +11605,7 @@ def _fn_table_ownership_copy_audit() -> None:
             raise RuntimeError(
                 "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
                 "本次不清理副本，跳过不盖章")
+        _failed: list[str] = []
         for i in empty:
             _detail = {
                 "migration": "202611210005",
@@ -11617,7 +11625,12 @@ def _fn_table_ownership_copy_audit() -> None:
                 _audit_ops_event("table_copy_cleanup", {**_detail, "phase": "after"})
                 log.warning(f"[TABLE_COPY_CLEANUP] dropped empty copy `{i['table']}` (owner={i['owner']})")
             except Exception as e:  # noqa: BLE001
+                _failed.append(f"{i['table']}: {e}")
                 log.warning(f"[TABLE_COPY_CLEANUP] skip `{i['table']}`: {e}")
+        if _failed:
+            # 有副本没删掉却照常返回 = 带着「已清理」的假象盖章（QA 第 6 轮
+            # Informational 5）。这里显式失败 → 不盖章，下次启动重试。
+            raise RuntimeError("table copy cleanup incomplete: " + "; ".join(_failed))
 
 
 register_migration(

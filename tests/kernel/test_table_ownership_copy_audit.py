@@ -214,3 +214,44 @@ def test_s13_cleanup_gate_blocked_does_not_stamp(monkeypatch):
         D._fn_table_ownership_copy_audit()
     assert "gate" in str(ei.value)
     assert conn.dropped == []
+
+
+def test_s14_cleanup_failure_does_not_stamp(monkeypatch):
+    """S14（QA Informational 5）：有副本没删掉 → 迁移抛错（不盖章），不谎称已清理。"""
+    from src.api import db_setup as D
+
+    conn = _FakeConn({TABLE: ("BASE TABLE", 0)}, "app_mgmt")
+    monkeypatch.setattr(D, "db", conn, raising=False)
+    monkeypatch.setenv("GRAPE_TABLE_COPY_CLEANUP", "1")
+    monkeypatch.setattr(D.log, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(D, "_audit_ops_event", lambda *a, **k: None)
+    monkeypatch.setattr(D, "_cleanup_gate_passed", lambda: True)
+    monkeypatch.setattr(own, "drop_empty_copy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError) as ei:
+        D._fn_table_ownership_copy_audit()
+    assert "incomplete" in str(ei.value)
+
+
+def test_s15_audit_unavailable_is_not_clean(monkeypatch):
+    """S15（QA Informational 3a）：information_schema 查不了 → 抛错，不伪装成 clean。"""
+    from src.api import db_setup as D
+
+    class _NoSchemaConn(_FakeConn):
+        def execute(self, sql, params=None):
+            if "information_schema" in sql:
+                raise RuntimeError("no information_schema")
+            return super().execute(sql, params)
+
+    conn = _NoSchemaConn({TABLE: ("BASE TABLE", 0)}, "app_mgmt")
+    monkeypatch.setattr(D, "db", conn, raising=False)
+    monkeypatch.setattr(D.log, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(D, "_audit_ops_event", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError) as ei:
+        D._fn_table_ownership_copy_audit()
+    assert "无法审计" in str(ei.value) or "information_schema" in str(ei.value)
+
+    # strict=False 仍保持旧行为（返回空表）——向后兼容
+    assert own.audit_foreign_copies(conn, "app_mgmt") == []

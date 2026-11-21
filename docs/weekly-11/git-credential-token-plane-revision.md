@@ -486,8 +486,20 @@ MODIFY   session_key VARCHAR(191) 不再裸发，同样走 _destructive_ddl。
 登记     两条迁移 kind: safe → cleanup（破坏性 DDL 语义）。
 ```
 
+补充（同轮 Informational 3a/5）：
+
+```
+MODIFY COLUMN  审计同样是前后各一条（phase=before 在 DDL 前、after 在提交后；
+               非 MySQL 后端不执行 DDL 时两条都不写）
+审计不可用     audit_foreign_copies 新增 strict=True：information_schema 查不了时抛错，
+               不再返回空表被上层当成 "clean"（SA5）。迁移据此不盖章、下次重试
+清理失败       有副本没删掉（权限/MDL/异常）→ 迁移抛错不盖章，
+               不再「跳过一张、照常盖章」地谎称已清理
+```
+
 用例：S10 断言 before/after 两条审计与行数；S12 断言门槛拦截时不 DROP；
-S13 断言清理门槛未过时迁移抛错（不盖章）且一张表都不删。
+S13 断言清理门槛未过时迁移抛错（不盖章）且一张表都不删；S14 断言清理失败不盖章；
+S15 断言审计不可用不等于 clean（strict=False 保持旧行为，向后兼容）。
 
 ### 10.3 B2（Critical，魔鬼数字）：行数未知要具名、要单独分类
 
