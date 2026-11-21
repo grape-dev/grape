@@ -94,6 +94,8 @@ api/oauth_token.py::with_oauth_token
 | S10 | 刷新成功但重试 401 | 打 status=4 + 重新授权 | `::test_s4` |
 | S11 | 重试路径的 repo_key | 底层 `_run_git` 收到 repo_key | `test_run_git_platform_auth.py::test_s7` |
 | S12 | linked push / 远端探测 | 两个调用点都传 repo_key | 同文件 `::test_s8` |
+| S14 | DDL + ownership 同进程 | 全绿（无全局污染） | `::test_s14` |
+| S15 | 测试恢复纪律 | 只用 monkeypatch | `::test_s15` |
 
 ## 6. 验证命令（一次一个文件）
 
@@ -137,7 +139,17 @@ tests/arch/test_silent_except_ratchet.py  2 failed —— 基线 dcb3759e7 同�
 tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate —— 基线同样失败
 ```
 
-## 9. 回滚
+## 9. 测试隔离纪律（R8）
+
+```
+禁止：orig = mod.global; mod.global = fake; ... finally: mod.global = orig
+  反例：tests/api/test_destructive_ddl_stamp_scenarios.py S3 曾把 _cleanup_gate_passed
+        恢复成另一个函数的原值（hasattr 恒真）→ 同进程 table_ownership s10 读假 gate 变红。
+一律：monkeypatch.setattr(mod, "global", fake)，由夹具恢复。
+守门用例：S14（同进程跑两个文件全绿）+ S15（源码里不得再出现手工赋值恢复）。
+```
+
+## 10. 回滚
 
 ```
 R1 顺序改动：单文件回退 settings.py（无数据影响）

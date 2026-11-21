@@ -50,3 +50,9 @@
   重试封装不得吞参数；远端探测失败与“分支未推送”必须可区分。
 - 验收：`_run_git_retry(repo_key=…)` 的行为用例（不是字符串搜索）断言底层收到 repo_key；
   worktree_guard 与 agent 的调用点有用例钉住。
+
+## R8 测试隔离纪律
+
+- 要求：测试不得手工改写并“恢复”模块级全局（`orig = mod.f; mod.f = ...; finally: mod.f = orig` 之类）。
+  一律用 pytest 的 monkeypatch 夹具恢复；同进程内多个测试文件必须互不影响。
+- 验收：DDL 场景与 table_ownership 场景同进程全绿；DDL 场景源码中不存在手工赋值全局的写法。
