@@ -26,7 +26,8 @@ from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
 from ...channel.channel import (
-    CancelContext, Channel, ChannelConfig, ChannelError, PermanentChannelError,
+    CancelContext, Channel, ChannelConfig, ChannelError,
+    ChannelRegistrationConflict, PermanentChannelError,
 )
 from ...channel.capability import Capability
 from ...channel.message import InboundMessage, OutboundMessage, SendResult
@@ -42,6 +43,43 @@ PERMANENT_WS_ERROR_CODES = ("10002", "10003", "10014")
 PING_INTERVAL = 120.0        # 应用层 PING 保活周期（lark-oapi SDK 同款）
 IDLE_RECONNECT_SECS = 300.0  # 空闲超时：5 分钟无用户消息 → 主动断开换新 URL
 SEEN_MAX = 2000              # A3：内存去重集上限（超出裁剪至一半）
+
+# 飞书 WS 关闭码 3001（registered too many connections）：飞书侧对该 app 的并发
+# 长连接注册数已到上限，拒绝本次注册。属可重试但需长退避的并发注册冲突，
+# 与普通断连（1006/1001 等）区分归因（Issue #3698）。
+WS_CLOSE_REGISTER_CONFLICT = 3001
+REGISTER_CONFLICT_CLOSE_CODES = frozenset({WS_CLOSE_REGISTER_CONFLICT})
+
+
+def _ws_close_code(exc: BaseException) -> Optional[int]:
+    """从异常链里取 WS 关闭码（websockets ConnectionClosed.code 或 Close.code）。"""
+    visited: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in visited:
+        visited.add(id(cur))
+        candidates = (
+            getattr(cur, "code", None),
+            getattr(getattr(cur, "rcvd", None), "code", None),
+            getattr(getattr(cur, "sent", None), "code", None),
+        )
+        for value in candidates:
+            if isinstance(value, int):
+                return value
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _ws_failure(app_id: str, exc: BaseException) -> ChannelError:
+    """传输层异常 → 契约异常：3001 归为并发注册冲突，其余为普通链路失败。
+
+    保留原始异常在 cause 链（``raise ... from exc``），真实 bug 仍可排查。
+    """
+    code = _ws_close_code(exc)
+    if code in REGISTER_CONFLICT_CLOSE_CODES:
+        return ChannelRegistrationConflict(
+            f"feishu ws register conflict: app={app_id} close_code={code} ({exc})")
+    return ChannelError(f"feishu ws failed: app={app_id} close_code={code} ({exc!r})")
+
 
 # 解析/帧辅助（原 feishu_async.py 抽出，见专题当前无 legacy 依赖）；
 # seen 去重持久化在中立 seen_store（BotContext 也用同一份实现）。
@@ -146,81 +184,93 @@ class FeishuChannel(Channel):
             pass
 
         # 协议级 ping 禁用（飞书不回协议级 pong）；保活由应用层 PING 负责
-        async with self._ws_connect(
-            ws_url, ping_interval=None, close_timeout=5,
-        ) as ws:
-            self._last_user_message_at = time.time()   # 空闲宽限期初始化（PITFALL）
-            ping_task = asyncio.get_running_loop().create_task(
-                self._ping_keepalive(ws, _ws_service_id, ctx))
-            try:
-                async for raw in ws:
-                    if ctx.cancelled:
-                        break
-                    if not isinstance(raw, bytes):
-                        continue
-                    try:
-                        frame = Frame()
-                        frame.ParseFromString(raw)
-                        ft = FrameType(frame.method)
-                    except Exception:
-                        continue
-
-                    if ft == FrameType.CONTROL:
-                        self._handle_control(ws, frame)
-                        continue
-                    if ft != FrameType.DATA:
-                        continue
-
-                    type_ = _get_header(frame.headers, "type")
-                    if type_ not in (MessageType.EVENT.value, MessageType.CARD.value):
-                        continue
-
-                    # ⚠️ payload 提取必须先于 ack：_build_ack_frame 会原位改写
-                    # frame.payload（legacy run_bot 同序：先解析后 ack）
-                    event_data: dict = {}
-                    try:
-                        event_data = json.loads(
-                            frame.payload.decode("utf-8") if frame.payload else "")
-                    except Exception:
-                        event_data = {}
-
-                    # ack 先行：无论消息是否被处理都必须回传，否则飞书反复重投
-                    # （解析失败也 ack，防重投死循环）
-                    try:
-                        await ws.send(_build_ack_frame(frame))
-                    except Exception as e:
-                        log.warning("[feishu:%s] send ack failed: %s", app_id, e)
-
-                    if not event_data:
-                        continue
-
-                    parsed = _parse_event(event_data)
-                    if not parsed or not parsed.get("text"):
-                        if type_ == MessageType.CARD.value:
-                            parsed = _parse_card_action(event_data)
-                        if not parsed or not parsed.get("text"):
-                            continue
-
-                    msg_id = parsed.get("message_id", "")
-                    if msg_id:
-                        if msg_id in seen:
-                            continue
-                        seen.add(msg_id)
-                        self._seen_persist(app_id, msg_id)
-                        if len(seen) > SEEN_MAX:
-                            seen = set(list(seen)[-int(SEEN_MAX / 2):])
-
-                    self._last_user_message_at = time.time()
-                    t = asyncio.get_running_loop().create_task(
-                        self._safe_handle(ctx, parsed, event_data))
-                    self._handler_tasks.add(t)
-                    t.add_done_callback(self._handler_tasks.discard)
-            finally:
-                ping_task.cancel()
+        try:
+            async with self._ws_connect(
+                ws_url, ping_interval=None, close_timeout=5,
+            ) as ws:
+                self._last_user_message_at = time.time()   # 空闲宽限期初始化（PITFALL）
+                ping_task = asyncio.get_running_loop().create_task(
+                    self._ping_keepalive(ws, _ws_service_id, ctx))
                 try:
-                    await ping_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                    async for raw in ws:
+                        if ctx.cancelled:
+                            break
+                        if not isinstance(raw, bytes):
+                            continue
+                        try:
+                            frame = Frame()
+                            frame.ParseFromString(raw)
+                            ft = FrameType(frame.method)
+                        except Exception:
+                            continue
+
+                        if ft == FrameType.CONTROL:
+                            self._handle_control(ws, frame)
+                            continue
+                        if ft != FrameType.DATA:
+                            continue
+
+                        type_ = _get_header(frame.headers, "type")
+                        if type_ not in (MessageType.EVENT.value, MessageType.CARD.value):
+                            continue
+
+                        # ⚠️ payload 提取必须先于 ack：_build_ack_frame 会原位改写
+                        # frame.payload（legacy run_bot 同序：先解析后 ack）
+                        event_data: dict = {}
+                        try:
+                            event_data = json.loads(
+                                frame.payload.decode("utf-8") if frame.payload else "")
+                        except Exception:
+                            event_data = {}
+
+                        # ack 先行：无论消息是否被处理都必须回传，否则飞书反复重投
+                        # （解析失败也 ack，防重投死循环）
+                        try:
+                            await ws.send(_build_ack_frame(frame))
+                        except Exception as e:
+                            log.warning("[feishu:%s] send ack failed: %s", app_id, e)
+
+                        if not event_data:
+                            continue
+
+                        parsed = _parse_event(event_data)
+                        if not parsed or not parsed.get("text"):
+                            if type_ == MessageType.CARD.value:
+                                parsed = _parse_card_action(event_data)
+                            if not parsed or not parsed.get("text"):
+                                continue
+
+                        msg_id = parsed.get("message_id", "")
+                        if msg_id:
+                            if msg_id in seen:
+                                continue
+                            seen.add(msg_id)
+                            self._seen_persist(app_id, msg_id)
+                            if len(seen) > SEEN_MAX:
+                                seen = set(list(seen)[-int(SEEN_MAX / 2):])
+
+                        self._last_user_message_at = time.time()
+                        t = asyncio.get_running_loop().create_task(
+                            self._safe_handle(ctx, parsed, event_data))
+                        self._handler_tasks.add(t)
+                        t.add_done_callback(self._handler_tasks.discard)
+                finally:
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+        except asyncio.CancelledError:
+            # 停机/租约让渡取消：原样放行（不得包成 ChannelError，否则会被误判为重连）
+            raise
+        except (ChannelError, PermanentChannelError):
+            raise                     # 已归一的契约异常原样透传
+        except Exception as e:
+            # Issue #3698：握手/接收循环里冒出的传输层异常（websockets
+            # ConnectionClosedError(3001 too many connections)、BrokenPipeError…）
+            # 必须在此归一为 ChannelError；否则会穿透到 Supervisor 的通用 except，
+            # 被打成 "channel crashed (unexpected)" 全栈 ERROR。
+            raise _ws_failure(app_id, e) from e
 
         if ctx.cancelled:
             return
