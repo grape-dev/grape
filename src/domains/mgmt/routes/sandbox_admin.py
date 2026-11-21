@@ -42,7 +42,7 @@ def _require_admin(user: dict):
             if user.get("username"):
                 c.execute("SELECT is_super FROM admin_accounts WHERE username=?", (user["username"],))
             else:
-                c.execute("SELECT a.is_super FROM admin_accounts a JOIN user_accounts u ON a.username=u.username WHERE u.id=?",
+                c.execute("SELECT a.is_super FROM admin_accounts a JOIN grape_accounts u ON a.username=u.username WHERE u.id=?",
                           (user["id"],))
             row = c.fetchone()
         if row and row[0]:

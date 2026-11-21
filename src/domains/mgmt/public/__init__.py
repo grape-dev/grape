@@ -1024,7 +1024,6 @@ _READ_QUERIES: dict[str, str] = {
     "grape_accounts_e047af": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s) LIMIT 1",
     # （`autopilot_tasks_e3fa0b` / `autopilot_subscriptions_13648d` 已下线：调度器改走
     #   `_ANY_QUERIES` 的 `autopilot_task_full_row` / `autopilot_subscribers_by_task`）
-    "user_accounts_e2eb04": "SELECT username FROM user_accounts WHERE id=%s",
     "scene_market_c969bb": "SELECT id, name FROM scene_market WHERE source='official'",
     "scene_market_0d2dd0": "SELECT id FROM scene_market WHERE name=%s AND source='official' LIMIT 1",
     # 用户映射（runtime / insight 代码读）
@@ -2256,7 +2255,8 @@ _ANY_QUERIES: dict[str, str] = {
     # 语句逐字照抄原兜底句（无 LIMIT、无 is_disabled/is_active 过滤：任务创建者即便是
     # 已停用账号也要回原名，由调用方的形态校验决定是否采用）。
     # 不可复用 `account_username_by_id`：那张表是登录账号，同 id 空间不同表。
-    "user_account_username_by_id": "SELECT username FROM user_accounts WHERE id=?",
+    # 历史 user_accounts 现网 0 行，读它只会返回空；统一读权威账号表
+    "user_account_username_by_id": "SELECT username FROM grape_accounts WHERE id=?",
     # ── 引擎 scope / claim 过滤取账号 id（runtime/engine/service.py 两处「lib 优先 + 本地兜底」）──
     # 原实现是双分支：lib 侧走 `grape_accounts_0b3fdc`（严格大小写）/ `grape_accounts_d0ac07`
     # （LOWER 双侧），兜底侧是调用方进程主库上的同一段 SQL —— 三库拓扑下进程库没有
@@ -3015,10 +3015,10 @@ def account_username_by_id_any(account_id: Any) -> str:
 
 
 def user_account_username_by_id_any(user_id: Any) -> str:
-    """按 id 取**个人账号** `user_accounts.username`（任意拓扑）；无行 / id 非法 → 空串。
+    """按 id 取账号用户名（任意拓扑，读 grape_accounts）；无行 / id 非法 → 空串。
 
-    与 `account_username_by_id_any` 的区别：那是登录账号 `grape_accounts`，这是个人账号
-    `user_accounts`，同 id 空间但两张表，不能互相顶替。
+    历史实现读的是已清退的 `user_accounts`（现网 0 行），永远返回空；
+    2026-11-22 起统一读权威账号表 grape_accounts；函数名保留以免改调用点。
 
     `id` 非法（0 / 非数字）→ 空串且**不查库**：原调用点（runtime/pipeline/account_env
     的 autopilot 任务创建者解析）在 `created_by=0` 的历史任务上正是这么短路的 —— 一次

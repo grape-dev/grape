@@ -215,3 +215,22 @@ configs/table_ownership.json: user_accounts 归属与禁读域（随表 DROP 一
 
 判据：现网该表 0 行 ⇒ 上述读路径当前返回空（已破，不是"改了才破"）；切到 grape_accounts
 前必须先把历史 created_by/user_id 的旧 id 回填成新 id（映射可用归档库 94 行 × 新表 username 闭合）。
+
+
+### 8.1 读路径清退（2026-11-22 第二批）
+
+```
+mgmt/public  "user_account_username_by_id" 的 SQL 改读 grape_accounts（函数名保留，调用点不改）
+             删除死键 "user_accounts_e2eb04"（无消费方）
+mgmt/routes  sandbox_admin 超管兜底 JOIN 改读 grape_accounts
+db_setup     删除两个死迁移函数（调用点早在 Issue #343 被注释）：
+             _migrate_create_personal_orgs / _migrate_data_to_personal_orgs
+             删除 default 账户迁移块、publish 列补列块、last_scene 补列块
+migrations_ddl 删除 4 个旧表常量与 5 条 ALTER
+kernel/db.py   表注册表去掉 user_accounts（与 table_ownership.json 保持一致）
+configs/table_ownership.json  去掉 user_accounts 的归属与跨域可见项
+```
+
+结果：src 里已无任何 SQL 触达该表（只剩一行历史注释）。
+语义变化只有一处：旧小整数 id 若只存在于旧表，现在解析为空 —— 与现网（旧表 0 行）此前表现一致，
+且 id 归一由数据侧负责。

@@ -666,121 +666,6 @@ def _migrate_add_org_id_columns():
         log.warning(f"org_id column migration failed: {e}")
 
 
-def _migrate_create_personal_orgs():
-    """为每个现有用户创建个人组织（幂等）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            users = c.execute(mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_CREATE_PERSONAL_ORGS).fetchall()
-            for uid, username in users:
-                existing = c.execute(
-                    mgmt_mig.SELECT_ORGANIZATION, (uid,)
-                ).fetchone()
-                if existing:
-                    continue
-                slug = f"personal-{uid}"
-                c.execute(
-                    mgmt_mig.INSERT_ORGANIZATION,
-                    ("默认工作空间", slug, uid)
-                )
-                org_id = c.lastrowid
-                c.execute(
-                    mgmt_mig.INSERT_IGNORE_ORG_MEMBER,
-                    (org_id, uid)
-                )
-            db.commit()
-            log.info("Personal organizations ensured for all users")
-    except Exception as e:
-        log.warning(f"Personal org creation migration failed: {e}")
-
-
-def _migrate_data_to_personal_orgs():
-    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id='' 的行）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-
-            # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
-            repos = c.execute(
-                mgmt_mig.SELECT_MANAGED_REPOS
-            ).fetchall()
-            for (repo_key,) in repos:
-                admin = c.execute(
-                    mgmt_mig.SELECT_USER_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG,
-                    (repo_key,)
-                ).fetchone()
-                if admin:
-                    uid = admin[0]
-                    org = c.execute(
-                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_2, (uid,)
-                    ).fetchone()
-                    if org:
-                        c.execute(mgmt_mig.UPDATE_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], repo_key))
-
-            # 2. runtime_credentials：scope=user 的按 owner_name 迁入
-            creds = c.execute(
-                runtime_mig.SELECT_RUNTIME_CREDENTIALS
-            ).fetchall()
-            for cid, owner_name, scope in creds:
-                if not owner_name or scope == "global":
-                    continue
-                user = c.execute(
-                    mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_name,)
-                ).fetchone()
-                if user:
-                    uid = user[0]
-                    org = c.execute(
-                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_3, (uid,)
-                    ).fetchone()
-                    if org:
-                        c.execute(runtime_mig.UPDATE_RUNTIME_CREDENTIALS, (org[0], cid))
-                        c.execute(runtime_mig.UPDATE_AGENT_RUNTIMES__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], cid))
-
-            # 3. skill：scope=user 的按 owner_id 迁入
-            skills = c.execute(
-                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG
-            ).fetchall()
-            for sid, owner_id, _ in skills:
-                try:
-                    uid = int(owner_id)
-                except (ValueError, TypeError):
-                    continue
-                org = c.execute(
-                    mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG, (uid,)
-                ).fetchone()
-                if org:
-                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], sid))
-
-            # 4. skill：scope=repo 的跟随 repo_key 迁移
-            repo_skills = c.execute(
-                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2
-            ).fetchall()
-            for sid, owner_id in repo_skills:
-                repo_org = c.execute(
-                    mgmt_mig.SELECT_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_id,)
-                ).fetchone()
-                if repo_org and repo_org[0]:
-                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2, (repo_org[0], sid))
-
-            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge（mgmt）
-            #    与 events / agent_tasks / devops_agent_session / issue（runtime）。
-            #    跨域关联子查询已拆成「mgmt 取映射 → 各域自己回填」（三库独立后无法单条 SQL 完成）。
-            try:
-                from src.domains.mgmt import public as _mgmt_pub_org  # noqa: PLC0415
-                from src.domains.runtime import public as _rt_pub_org  # noqa: PLC0415
-
-                _org_map = _mgmt_pub_org.repo_org_map()
-                _mgmt_pub_org.backfill_org_id_by_repo(_org_map)
-                _rt_pub_org.backfill_org_id_by_repo(_org_map)
-            except Exception as _e:
-                log.warning(f"org_id backfill failed: {_e}")
-
-            db.commit()
-            log.info("Data migrated to personal organizations")
-    except Exception as e:
-        log.warning(f"Data migration to personal orgs failed: {e}")
-
-
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
 # (seed_key, json_filename, actual_table_name)
@@ -6473,7 +6358,7 @@ def _migrate_tables():
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行(避免每次启动 DDL 触发元数据锁--启动变慢根因)
         _alter_skill_files_if_needed(),
         *runtime_mig.ALTERS_ENGINE_CREDENTIAL_COLUMNS,  # 表：runtime_credentials, agent_runtimes,
-        *mgmt_mig.ALTERS_USER_AND_KNOWLEDGE_COLUMNS,  # 表：user_accounts, agent_shared_knowledge,
+        *mgmt_mig.ALTERS_USER_AND_KNOWLEDGE_COLUMNS,  # 表：agent_shared_knowledge,
         *runtime_mig.ALTERS_SKILL_ENGINE_COLUMNS,  # 表：agent_tasks, agent_runtimes, runtime_health_scores, skill,
         *mgmt_mig.ALTERS_SCENE_COLUMNS,  # 表：devops_pipeline_scene, scene_skill_ref, scene_market,
         *runtime_mig.ALTERS_SCENE_CATEGORY_EVENT_SKIPPED,  # 表：scene_category, event_skipped,
@@ -6699,42 +6584,6 @@ def _migrate_tables():
         _migrate_global_bot_token_to_db()
     except Exception as e:
         log.warning(f"Issue #345: migrate global bot token to DB failed: {e}")
-    # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
-    # OAuth 配置迁移由 migrate_oauth_providers() 统一处理（user/db.py 模块加载时执行）
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(mgmt_mig.SELECT_USER_ACCOUNTS)
-            row = c.fetchone()
-            if row:
-                cols = [d[0] for d in c.description]
-                acc = dict(zip(cols, row))
-                # 迁移 default 账户中的 OAuth 配置到 meta 表（幂等）
-                _oauth_keys = [
-                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-                    ("github_oauth_client_id", "oauth_github_client_id"),
-                    ("github_oauth_client_secret", "oauth_github_client_secret"),
-                    # 不迁移 redirect_uri——D27 已废弃
-                ]
-                migrated = False
-                for src_key, meta_key in _oauth_keys:
-                    val = acc.get(src_key, "") or ""
-                    if val:
-                        c.execute(runtime_mig.SELECT_META__MIGRATE_TABLES, (meta_key,))
-                        if c.fetchone()[0] == 0:
-                            c.execute(runtime_mig.UPSERT_META__MIGRATE_TABLES,
-                                      (meta_key, val))
-                            migrated = True
-                # 删除 default 账户（OAuth 已收敛到 meta 表）
-                c.execute(mgmt_mig.DELETE_USER_ACCOUNTS)
-                db.commit()
-                if migrated:
-                    log.info("Migrated OAuth config from default account to meta table")
-                else:
-                    log.info("Deleted default account (no config to migrate)")
-    except Exception as e:
-        log.warning(f"Migrate/delete default account failed: {e}")
     # 迁移旧表 agent_sessions -> devops_agent_session(幂等)
     try:
         with db_lock:
@@ -6984,17 +6833,6 @@ def _migrate_tables():
         log.info("Added issue_agent_session.session_engine column")
     except Exception as e:
         log.warning(f"Add issue_agent_session.session_engine column failed: {e}")
-    # ===== user_accounts 发布仓库列(老库升级;CREATE TABLE 只影响新库,存量库须幂等补列)=====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
-            _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
-            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
-            db.commit()
-        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
-    except Exception as e:
-        log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
     try:
         with db_lock:
@@ -7238,15 +7076,6 @@ def _migrate_tables():
         log.info("Added event_action_filter.block_changes + vcs_source columns")
     except Exception as e:
         log.warning(f"Add event_action_filter columns failed: {e}")
-    # ===== Phase 2: user_accounts.last_scene (event-dispatch-redesign-v2.md 3.1) =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "user_accounts", "last_scene", "TEXT DEFAULT 'default'")
-            db.commit()
-        log.info("Added last_scene column to user_accounts")
-    except Exception as e:
-        log.warning(f"Add last_scene column failed: {e}")
     # ===== multi-task mode: issue_state 已停用（C5），仅补 issue/chat_messages 列 =====
     try:
         with db_lock:
