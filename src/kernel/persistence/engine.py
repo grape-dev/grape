@@ -15,18 +15,7 @@ from sqlalchemy.engine import Engine
 from src.kernel.config import log
 
 
-class DomainEngineUnavailable(RuntimeError):
-    """跨域 ORM：进程域 ≠ 目标域且缺少该域 DSN（三库拓扑漏配）。
-
-    为什么要抛而不是回落主库：回落会让跨域读静默打到本进程库（表不存在/空壳），
-    结果与“数据不存在”不可区分。抛出让 owner 契约打一次可见告警并降级。
-    """
-
-    def __init__(self, domain: str):
-        self.domain = domain
-        super().__init__(f"domain '{domain}' engine unavailable: GRAPE_DSN_{domain.upper()} missing")
-
-
+from src.kernel.db_registry import DomainUnavailable as DomainEngineUnavailable  # noqa: E402
 def get_db_url() -> str:
     """按 backend 返回连接 URL（与裸 SQL 路径同库）。"""
     from src.kernel.mysql_compat import get_db_backend, mysql_config
@@ -107,15 +96,12 @@ def get_domain_engine(domain: str) -> Engine:
     from src.kernel import db_registry
 
     key_domain = (domain or "").lower()
-    current = db_registry.current_domain()
-    # 单库拓扑（无进程域）或本域进程 → 主库就是对的
-    if not key_domain or not current or current == key_domain:
+    if not key_domain:
+        return get_engine()
+    # 连接归属只问一处：本域/单库 → 主库；跨域有 DSN → 域引擎；跨域缺 DSN → 抛（不回落）。
+    if db_registry.route_of(key_domain) == "local":
         return get_engine()
     dsn_url = db_registry.dsn_of(key_domain)
-    if not dsn_url:
-        # 三库拓扑下缺 DSN：绝不能回落主库（那会让跨域读静默查询另一张库）。
-        # 放宽不等于容错——显式表达“该域不可达”，由 owner 契约转成可见告警。
-        raise DomainEngineUnavailable(key_domain)
     # DSN 形态 mysql://user:pass@host:port/db → SQLAlchemy URL
     # 注意：DSN 里的 user/pass 可能已做 URL 编码（现网密码含 @ / : 等），
     # 必须先 unquote 再 quote_plus，否则会二次编码导致认证失败（实测 1045）。

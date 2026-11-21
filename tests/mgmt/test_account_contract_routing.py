@@ -18,8 +18,9 @@ from src.domains.mgmt.auth.dispatch_identity import service as svc
 
 @pytest.fixture()
 def routed(monkeypatch):
-    state = {"current": "runtime", "dsn": "mysql://u:p@h:3306/mgmt_db", "built": []}
+    state = {"lib": True, "current": "runtime", "dsn": "mysql://u:p@h:3306/mgmt_db", "built": []}
 
+    monkeypatch.setattr(db_registry, "lib_enabled", lambda: state["lib"])  # 三库拓扑
     monkeypatch.setattr(db_registry, "current_domain", lambda: state["current"])
     monkeypatch.setattr(db_registry, "dsn_of", lambda d: state["dsn"] if d == "mgmt" else "")
     monkeypatch.setattr(eng, "get_engine", lambda: "MAIN-ENGINE")
@@ -29,12 +30,16 @@ def routed(monkeypatch):
         return "DOMAIN-ENGINE"
 
     monkeypatch.setattr("sqlalchemy.create_engine", _create)
+    import src.kernel.persistence.engine as _e
+
+    with _e._engine_cache_lock:
+        _e._engine_cache.clear()
     return state
 
 
 def test_s1_single_db_uses_main_engine(routed):
     """单库拓扑（无进程域）→ 主库引擎。"""
-    routed["current"] = None
+    routed["lib"] = False
     assert eng.get_domain_engine("mgmt") == "MAIN-ENGINE"
     assert routed["built"] == []
 

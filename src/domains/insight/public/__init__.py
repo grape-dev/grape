@@ -125,40 +125,20 @@ __all__ = ["available", "record_api_latency", "record_merge_gate_log", "health"]
 
 @contextmanager
 def _any_cursor(write: bool = False):
-    """insight 表游标：自有 DSN 优先（autocommit），否则回落进程主库（持有 db_lock）。"""
-    if db_registry.uses_own_dsn("insight"):
-        with db_registry.cursor("insight") as c:
-            yield c
-        return
-    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+    """insight 表游标：连接归属由 kernel.route_of 决定（本域/单库→主库，跨域→域连接）。
 
-    with _plock:
-        c = _pdb.cursor()
+    缺 GRAPE_DSN_INSIGHT 时抛 DomainUnavailable —— 绝不回落进程主库，
+    否则 rc 行会被读/写到非 owner 库（用错的密钥加密，生成解不开的毒行）。
+    """
+    with db_registry.cursor_for("insight", write=write) as c:
         yield c
-        if write:
-            _pdb.commit()
 
 
 @contextmanager
 def _any_tx():
-    """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
-    if db_registry.uses_own_dsn("insight"):
-        with db_registry.transaction("insight") as c:
-            yield c
-        return
-    from src.kernel.session_manager import db as _pdb, db_lock as _plock
-
-    with _plock:
-        c = _pdb.cursor()
-        try:
-            yield c
-            _pdb.commit()
-        except Exception:
-            try:
-                _pdb.rollback()
-            except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                log.debug(f"insight public rollback skipped: {exc}")
-            raise
+    """多语句组合写：连接归属同上（域连接 → 真事务；主库 → 进程锁 + 提交）。"""
+    with db_registry.transaction_for("insight") as c:
+        yield c
 
 
 def _any_sql(name: str) -> str:

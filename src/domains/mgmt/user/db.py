@@ -48,16 +48,14 @@ class _OwnedCursor:
 class _MgmtDbProxy:
     """把 _mg_db.cursor()/commit()/rollback() 代理到 mgmt 域连接。
 
-    mgmt 进程内 current_domain()=='mgmt' → 主库（零回归）；其它进程走 GRAPE_DSN_MGMT；
-    单库/测试拓扑回落进程库并保留显式提交。
+    连接归属统一由 kernel.route_of("mgmt") 决定：
+      本域进程 / 单库拓扑 → 主库（零回归）；三库跨域 → GRAPE_DSN_MGMT；
+      三库缺 DSN → 抛 DomainUnavailable（不再静默回落主库）。
     """
 
     def cursor(self, *a, **kw):
         from src.kernel import db_registry
-        if db_registry.current_domain() == "mgmt":
-            from src.kernel.session_manager import db as _main
-            return _main.cursor(*a, **kw)
-        if db_registry.uses_own_dsn("mgmt"):
+        if db_registry.route_of("mgmt") == "domain":
             _conn = db_registry.new_connection("mgmt")
             return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
         from src.kernel.session_manager import db as _main
@@ -65,20 +63,14 @@ class _MgmtDbProxy:
 
     def commit(self):
         from src.kernel import db_registry
-        if db_registry.current_domain() == "mgmt":
-            from src.kernel.session_manager import db as _main
-            return _main.commit()
-        if db_registry.uses_own_dsn("mgmt"):
+        if db_registry.route_of("mgmt") == "domain":
             return None
         from src.kernel.session_manager import db as _main
         return _main.commit()
 
     def rollback(self):
         from src.kernel import db_registry
-        if db_registry.current_domain() == "mgmt":
-            from src.kernel.session_manager import db as _main
-            return _main.rollback()
-        if db_registry.uses_own_dsn("mgmt"):
+        if db_registry.route_of("mgmt") == "domain":
             try:
                 db_registry.domain_db("mgmt").rollback()
             except Exception as _e:
