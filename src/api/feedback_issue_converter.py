@@ -13,7 +13,9 @@
 - skill.scope='repo'/'user'/source='user' → 反馈所属 repo_key 的 <owner>/<repo>（以仓库 bot token 身份）
 
 幂等：以 (task_id, skill_name, title) 为组，同组只建一个 Issue；组内全部回写同一 issue_url。
-失败处理：异常仅记日志、不回写，下轮重试；连续失败可标记 skipped 供 admin 感知。
+失败处理：异常仅记日志、不回写，下轮重试；连续失败轮次持久化到
+`user_feedback.convert_fail_count`（Issue #3731），达阈值（默认 3，`FEEDBACK_CONVERT_FAIL_ESCALATE`）
+升级 ERROR 供 admin 感知，建单成功后清零。
 """
 
 import os
@@ -186,6 +188,43 @@ def _reclaim_stale_claims() -> int:
     return len(stale)
 
 
+# 连续失败升级 ERROR 的默认阈值（Issue #3731：每 tick 一条 WARNING 会淹没真实故障）
+_FAIL_ESCALATE_DEFAULT = 3
+
+
+def _fail_escalate_at() -> int:
+    """连续失败升级阈值（`FEEDBACK_CONVERT_FAIL_ESCALATE`，默认 3，最小 1）。"""
+    try:
+        return max(int(os.environ.get("FEEDBACK_CONVERT_FAIL_ESCALATE", "")
+                       or _FAIL_ESCALATE_DEFAULT), 1)
+    except Exception:
+        return _FAIL_ESCALATE_DEFAULT
+
+
+def _note_failure(fid, reason: str, provider: str = "", owner: str = "",
+                  repo: str = "") -> None:
+    """记一次转换失败：持久化连续轮次，达阈值升级 ERROR（Issue #3731）。
+
+    - 计数落 `user_feedback.convert_fail_count`（跨 worker 共享库可见、admin 可查），
+      写库失败不影响主流程（只丢可观测性，下一轮照常重试）；
+    - 日志保留原有可检索子串（`target resolve failed` / `create failed`），
+      Grafana 现有查询口径不变。
+    """
+    try:
+        times = _mgmt_public.feedback_bump_convert_fail(fid)
+    except Exception as e:
+        times = 0
+        log.warning(f"feedback→issue: failure counter bump failed fid={fid}: {e}")
+    threshold = _fail_escalate_at()
+    route = f"{provider}:{owner}/{repo}" if owner and repo else "-"
+    msg = (f"feedback→issue: {reason} "
+           f"(fid={fid}, route={route}, consecutive={times}/{threshold})")
+    if times and times >= threshold:
+        log.error(msg)
+    else:
+        log.warning(msg)
+
+
 def _find_existing_open_issue(provider, owner, repo, token, title):
     """目标仓里已存在同标题的开放 issue 就复用，返回单号或 None。
 
@@ -240,6 +279,7 @@ def _fetch_pending(limit: int):
         "event_seq": r[9], "issue_id": r[10], "issue_number": r[11] or '',
         "feedback_kind": r[12] or '',
         "source": r[13] or 'agent', "username": r[14] or '',
+        "convert_fail_count": int(r[15] or 0),
     } for r in rows]
 
 def convert_pending_feedback(limit: int = 20) -> dict:
@@ -267,15 +307,17 @@ def convert_pending_feedback(limit: int = 20) -> dict:
         try:
             provider, owner, repo, token = _resolve_target(first)
         except Exception as e:
-            log.warning(f"feedback→issue: skip fid={fid} (target resolve failed): {e}")
+            # 路由失败（如 parse_repo_key 解包崩溃）同样计入连败，达阈值升级 ERROR
+            _note_failure(fid, f"target resolve failed: {e}")
             result["skipped"] += 1
             continue
         if not owner or not repo:
+            _note_failure(fid, "target resolve failed: empty owner/repo", provider)
             result["skipped"] += 1
             continue
         if not token:
             # 无 bot token：官方仓库无全局 token / 仓库未托管 → 本轮跳过（下轮重试）
-            log.warning(f"feedback→issue: no bot token for fid={fid} (route={provider}:{owner}/{repo})")
+            _note_failure(fid, "no bot token", provider, owner, repo)
             result["skipped"] += 1
             continue
         # ① 抢先占位：抢不到说明别的 worker 正在处理这一行，本轮跳过
@@ -300,7 +342,7 @@ def convert_pending_feedback(limit: int = 20) -> dict:
         except Exception as e:
             _release(fid)  # ③ 失败必须清占位，否则该反馈永久卡死
             result["failed"] += 1
-            log.warning(f"feedback→issue: create failed fid={fid}: {e}")
+            _note_failure(fid, f"create failed: {e}", provider, owner, repo)
             continue
         number = issue.get("number")
         url = issue.get("url") or _issue_url(provider, owner, repo, number)
