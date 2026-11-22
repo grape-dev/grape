@@ -28,7 +28,7 @@ def test_s90_push_target_host_from_card_gitee(monkeypatch):
     """gitee 目标：remote add URL host 来自平台卡（不再 gitcode.com）。"""
     calls = []
     assert _push({"id": "t"}, provider="gitee",
-                 monkeypatch=monkeypatch, calls=calls) is True
+                 monkeypatch=monkeypatch, calls=calls).get("ok") is True
     remote = [c for c in calls if c[:2] == ["remote", "add"]]
     assert remote and "gitee.com/me/tgt.git" in remote[0][3]
     assert "gitcode.com" not in remote[0][3]
@@ -38,7 +38,7 @@ def test_s90_push_target_host_gitcode_parity(monkeypatch):
     """gitcode 目标：URL 逐字节语义不变（oauth2:user_tok@gitcode.com）。"""
     calls = []
     assert _push({"id": "t"}, provider="gitcode",
-                 monkeypatch=monkeypatch, calls=calls) is True
+                 monkeypatch=monkeypatch, calls=calls).get("ok") is True
     remote = [c for c in calls if c[:2] == ["remote", "add"]]
     assert remote and remote[0][3] == "https://oauth2:user_tok@gitcode.com/me/tgt.git"
 
@@ -47,7 +47,7 @@ def test_s90_push_target_github_legacy_branch(monkeypatch):
     """github 目标：存量分支行为不变（***@github.com）。"""
     calls = []
     assert _push({"id": "t"}, provider="github",
-                 monkeypatch=monkeypatch, calls=calls) is True
+                 monkeypatch=monkeypatch, calls=calls).get("ok") is True
     remote = [c for c in calls if c[:2] == ["remote", "add"]]
     assert remote and "github.com/me/tgt.git" in remote[0][3]
 
@@ -73,7 +73,8 @@ def test_s90_tarball_dispatch_github_source(monkeypatch):
         {"id": "t", "source": "git", "source_platform": "github",
          "clone_url": "https://github.com/o/r.git", "source_repo": "o/r"},
         "me", "tgt", "user_tok", bot_token="", provider="gitcode")
-    assert ok is True
+    assert isinstance(ok, dict) and ok.get("ok") is True
+    assert ok.get("pushed_to") == "main"
     assert dl and dl[0] == "https://api.github.com/repos/o/r/tarball"
 
 
@@ -97,7 +98,7 @@ def test_empty_repo_uses_plain_push_to_main(monkeypatch):
         calls.append(list(args))
         return ""
 
-    assert _push_with_git(monkeypatch, _run_git, provider="gitlab") is True
+    assert _push_with_git(monkeypatch, _run_git, provider="gitlab").get("ok") is True
     pushes = [c for c in calls if c and c[0] == "push"]
     assert len(pushes) == 1, f"普通 push 成功时不应再试其它路径: {pushes}"
     assert pushes[0][:3] == ["push", "-u", "origin"] and "HEAD:main" in pushes[0]
@@ -118,7 +119,7 @@ def test_existing_commit_escalates_to_force_then_protected_fallback(monkeypatch)
                 " ! [remote rejected] HEAD -> main (pre-receive hook declined)")
         return ""
 
-    assert _push_with_git(monkeypatch, _run_git) is True
+    assert _push_with_git(monkeypatch, _run_git).get("ok") is True
     pushes = [c for c in calls if c and c[0] == "push"]
     assert [p[:2] for p in pushes] == [["push", "-u"], ["push", "--force"], ["push", "-u"]], pushes
     assert any(x.startswith("HEAD:feat/init-from-template-") for x in pushes[2]), pushes[2]

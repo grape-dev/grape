@@ -850,15 +850,22 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             log.warning(
                 f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
                 f"模板代码已改推分支 '{pushed_to}'；请由人工/流水线合入默认分支")
-        return True
+        # 返回落点：调用方据此区分「模板已在 main」与「模板只在 feat 分支、main 为空」
+        return {"ok": True, "pushed_to": pushed_to}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 def _is_protected_branch_error(msg: str) -> bool:
-    """平台拒绝「向受保护默认分支强推」的错误文本判定（GitLab/GitHub/Gitee 口径）。"""
+    """平台拒绝「向受保护默认分支强推」的错误文本判定（GitLab/GitHub/Gitee 口径）。
+
+    只认受保护分支的**专有**文案：`pre-receive hook declined` 是 GitLab 所有 hook
+    拒绝（密钥扫描/提交策略/自定义规则）的通用后缀，单凭它会把手滑的拒绝也当成
+    「受保护分支」→ 静默退到一次性分支并吞掉真实错误。
+    """
     return any(k in (msg or "") for k in (
         "protected branch", "protected_branch",
-        "pre-receive hook declined", "not allowed to force push"))
+        "not allowed to force push",
+        "You are not allowed to push code to protected"))
 
 
 def _push_init_branch(workdir: str) -> str:

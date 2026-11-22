@@ -271,7 +271,7 @@ def test_card_driven_target_host_on_template_push(tmp_path, monkeypatch):
 
     ok = rm.push_template_to_repo({"source": "local", "id": "tmpl_cardhost"},
                                   "owner", "target", "user-tok", provider="acme")
-    assert ok is True
+    assert isinstance(ok, dict) and ok.get("ok") is True and ok.get("pushed_to") == "main"
     remote = [a for a in git_calls if a[:2] == ["remote", "add"]]
     assert remote, "应设置 push remote"
     push_url = remote[0][3]
