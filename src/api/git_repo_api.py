@@ -1396,6 +1396,34 @@ def create_issue_comment(owner: str, repo: str, number: int | str, body: Comment
     return resp
 
 
+@router.patch("/{owner}/{repo}/issues/{number}/comments/{comment_id}", operation_id="gitrepo_issues_comments_update",
+              summary="Update issue comment",
+              description="Updates an issue comment body by comment id (body required). Issue #3821: mirrors the pulls comment update self-correction capability. "
+                          "comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list response (compat form, resolved to note_id server-side); other forms return a readable 422.")
+def update_issue_comment(owner: str, repo: str, number: int | str, comment_id: str, body: CommentBody,
+                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    _release_guard_reject(user, operation=f"issues comment #{number}", target_issue=number,
+                          body=body.body or "")
+    _token = _repo_token(owner, repo, user, p)
+    note_id = _resolve_comment_note_id(p, owner, repo, number, comment_id, _token, scope="issues")
+    return _vcs_req(p, "PATCH",
+                    _vcs_url(owner, repo, _comment_write_subpath(p, "issues", note_id, number), None, p),
+                    _token, {"body": body.body})
+
+
+@router.delete("/{owner}/{repo}/issues/{number}/comments/{comment_id}", operation_id="gitrepo_issues_comments_delete",
+               summary="Delete issue comment",
+               description="Deletes an issue comment by comment id. Issue #3821: mirrors the pulls comment delete self-correction capability. "
+                           "comment_id accepts the numeric note_id or the hex id returned by the create/list response; other forms return a readable 422.")
+def delete_issue_comment(owner: str, repo: str, number: int | str, comment_id: str,
+                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    _token = _repo_token(owner, repo, user, p)
+    note_id = _resolve_comment_note_id(p, owner, repo, number, comment_id, _token, scope="issues")
+    return _vcs_req(p, "DELETE",
+                    _vcs_url(owner, repo, _comment_write_subpath(p, "issues", note_id, number), None, p),
+                    _token)
+
+
 # ===================== Pull Requests ==============
 @router.get("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_list", summary="List pull requests", description="Lists repository pull requests (state filter, paged).")
 def list_pulls(owner: str, repo: str, state: str = Query("open"),
@@ -1956,16 +1984,48 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     return resp
 
 
-def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
-                                  comment_id: str, token: str) -> str:
-    """Issue #623：pulls comments update 的 comment_id 兼容十六进制 id 与 note_id。
+def _first_digit_id(obj) -> str | None:
+    """从评论对象取数字 note_id（int 或纯数字 str），其余形态返回 None。"""
+    if not isinstance(obj, dict):
+        return None
+    rid = obj.get("id")
+    if isinstance(rid, bool):
+        return None
+    if isinstance(rid, int):
+        return str(rid)
+    if isinstance(rid, str) and rid.isdigit():
+        return rid
+    return None
 
-    - 纯数字串 → 数字 note_id，直传既有更新逻辑（向后兼容，行为不变）。
-    - 十六进制串（全 hex 字符且含 a-f 字母）→ create 响应同源主键：先经上游
-      GET /pulls/comments/{id}（该端点 id 为 string 形态）取数字 note_id；
-      失败再回退 GET /pulls/{number}/comments 按 discussion_id 匹配同一评论对象。
-    - 其余非法形态 → 422（明确错误信息，便于调用方自纠）。
+
+def _comment_scope_paths(p: str, scope: str, number: int | str) -> tuple[str, str]:
+    """评论 scope 的（单评论父路径, 列表路径）。
+
+    issues/pulls 均支持扁平单评论端点（/issues|pulls/comments/{id}）；GitLab 等
+    方言用带号路径（rewrite_path 再映射为 notes/{id}），由能力位切换。
     """
+    if scope == "issues":
+        list_path = f"/issues/{number}/comments"
+        single_base = "/issues/comments" if _pflag(p, "ISSUE_COMMENT_FLAT_PATH", True) else list_path
+        return single_base, list_path
+    list_path = f"/pulls/{number}/comments"
+    single_base = "/pulls/comments" if _pflag(p, "PR_COMMENT_FLAT_PATH", True) else list_path
+    return single_base, list_path
+
+
+def _comment_write_subpath(p: str, scope: str, note_id: str, number: int | str) -> str:
+    """评论 update/delete 的上游子路径（扁平 vs 带号形态，按 provider 能力位）。"""
+    if scope == "issues":
+        if _pflag(p, "ISSUE_COMMENT_FLAT_PATH", True):
+            return f"/issues/comments/{note_id}"
+        return f"/issues/{number}/comments/{note_id}"
+    if _pflag(p, "PR_COMMENT_FLAT_PATH", True):
+        return f"/pulls/comments/{note_id}"
+    return f"/pulls/{number}/comments/{note_id}"
+
+
+def _normalize_comment_id_or_422(comment_id: str) -> str:
+    """评论 id 形态归一：数字直传；十六进制返回原文；非法/空 → 可读 422。"""
     import re
     cid = (comment_id or "").strip()
     if not cid:
@@ -1977,84 +2037,161 @@ def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
         raise HTTPException(status_code=422, detail={
             "code": 422,
             "message": "comment_id 非法：仅支持 note_id（数字，推荐）或 create 响应返回的十六进制 id（兼容形态）"})
-    # 仅声明 PR_COMMENT_ID_HEX 的方言（gitcode/gitee v5 同族）存在 hex→note_id 解析语义；
-    # 缺省（github 等通用契约）评论 id 本就是数字，hex 形态直接拒绝。
-    if not _pflag(p, "PR_COMMENT_ID_HEX"):
-        raise HTTPException(status_code=422, detail={
-            "code": 422,
-            "message": f"comment_id={cid} 非法：{p} 的评论 id 为数字 note_id，不接受十六进制 id"})
+    return cid
 
-    def _first_digit_id(obj) -> str | None:
-        if not isinstance(obj, dict):
-            return None
-        rid = obj.get("id")
-        if isinstance(rid, bool):
-            return None
-        if isinstance(rid, int):
-            return str(rid)
-        if isinstance(rid, str) and rid.isdigit():
-            return rid
-        return None
 
+def _resolve_hex_note_id_in_scope(p: str, owner: str, repo: str, number: int | str,
+                                  cid: str, token: str, scope: str) -> str | None:
+    """在指定 scope（issues/pulls）把十六进制评论 id 解析为数字 note_id；失败返回 None。"""
+    single_base, list_path = _comment_scope_paths(p, scope, number)
     # ① 上游单评论查询（id 路径参数为 string 形态，可透传十六进制 id）
     try:
-        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/comments/{cid}", None, p), token)
+        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"{single_base}/{cid}", None, p), token)
         note_id = _first_digit_id(resp)
         if note_id:
             return note_id
     except HTTPException as e:
         if e.status_code in (401, 403):
             raise
-        log.warning(f"Issue #623 hex comment_id single lookup failed ({cid}): {e.detail}")
-    # ② 回退：PR 评论列表按 discussion_id（十六进制同源键）匹配同一评论对象
+        log.warning(f"Issue #3821 {scope} hex comment_id single lookup failed ({cid}): {e.detail}")
+    # ② 回退：评论列表按 id / discussion_id（十六进制同源键）匹配同一评论对象
     try:
-        items = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p), token)
+        items = _vcs_req(p, "GET", _vcs_url(owner, repo, list_path, None, p), token)
         if isinstance(items, list):
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                if str(it.get("discussion_id") or "").lower() == cid.lower():
+                _keys = {str(it.get("id") or "").lower(),
+                         str(it.get("discussion_id") or "").lower()}
+                if cid.lower() in _keys:
                     note_id = _first_digit_id(it)
                     if note_id:
                         return note_id
     except HTTPException as e:
-        log.warning(f"Issue #623 hex comment_id list fallback failed ({cid}): {e.detail}")
+        log.warning(f"Issue #3821 {scope} hex comment_id list fallback failed ({cid}): {e.detail}")
+    return None
+
+
+def _resolve_comment_note_id(p: str, owner: str, repo: str, number: int | str,
+                             comment_id: str, token: str, scope: str = "pulls") -> str:
+    """Issue #623/#3821：评论 id 兼容数字 note_id 与十六进制 id，按 scope 解析。
+
+    - 纯数字 → 直接返回（零额外请求）；
+    - 十六进制 → 先单评论查询，失败回退评论列表按 id/discussion_id 匹配；
+    - 不在声明 PR_COMMENT_ID_HEX 的方言 / 无法解析 → 可读 422。
+    """
+    cid = _normalize_comment_id_or_422(comment_id)
+    if cid.isdigit():
+        return cid
+    if not _pflag(p, "PR_COMMENT_ID_HEX"):
+        raise HTTPException(status_code=422, detail={
+            "code": 422,
+            "message": f"comment_id={cid} 非法：{p} 的评论 id 为数字 note_id，不接受十六进制 id"})
+    note_id = _resolve_hex_note_id_in_scope(p, owner, repo, number, cid, token, scope)
+    if note_id:
+        return note_id
     raise HTTPException(status_code=422, detail={
         "code": 422,
-        "message": f"comment_id={cid} 无法解析为 note_id：请改用列表响应中的数字 note_id（update --comment_id 支持数字 note_id 与 create 响应的十六进制 id）"})
+        "message": f"comment_id={cid} 无法解析为 {scope} note_id：该 id 在 {scope} 评论通道不存在或形态不匹配；"
+                   f"请改用列表响应中的数字 note_id（update --comment_id 支持数字 note_id 与 create 响应的十六进制 id）"})
+
+
+def _pull_comment_primary_scope(p: str) -> str:
+    """PR 评论创建同源通道：github=issues（issue 评论端点），其余=pulls。"""
+    return "issues" if _pr_comment_endpoint(p) == "issues" else "pulls"
+
+
+def _resolve_pull_comment_target(p: str, owner: str, repo: str, number: int,
+                                 comment_id: str, token: str) -> tuple[str, str]:
+    """pulls 评论 update/delete 解析：返回 (数字 note_id, 目标通道 scope)。
+
+    - 数字 id → 直传主通道（与 create 同源），零额外请求；note 类型不符时由
+      写入层按 Note type 400 回退另一通道。
+    - 十六进制 id → 在主通道与另一通道依次解析，命中即确定创建同源通道。
+    """
+    cid = _normalize_comment_id_or_422(comment_id)
+    primary = _pull_comment_primary_scope(p)
+    if cid.isdigit():
+        return cid, primary
+    if not _pflag(p, "PR_COMMENT_ID_HEX"):
+        raise HTTPException(status_code=422, detail={
+            "code": 422,
+            "message": f"comment_id={cid} 非法：{p} 的评论 id 为数字 note_id，不接受十六进制 id"})
+    secondary = "issues" if primary == "pulls" else "pulls"
+    for scope in (primary, secondary):
+        note_id = _resolve_hex_note_id_in_scope(p, owner, repo, number, cid, token, scope)
+        if note_id:
+            return note_id, scope
+    raise HTTPException(status_code=422, detail={
+        "code": 422,
+        "message": f"comment_id={cid} 无法解析为 note_id：issue/pulls 评论通道均未命中该 id；"
+                   f"请改用列表响应中的数字 note_id（update --comment_id 支持数字 note_id 与 create 响应的十六进制 id）"})
+
+
+def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
+                                  comment_id: str, token: str) -> str:
+    """向后兼容薄封装（Issue #623 原入口）：仅返回 note_id，不返回通道。"""
+    return _resolve_pull_comment_target(p, owner, repo, number, comment_id, token)[0]
+
+
+def _is_note_type_mismatch_400(exc: HTTPException) -> bool:
+    """识别上游「Note type is not correct」400（仅此错误允许通道回退）。"""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    detail = getattr(exc, "detail", None)
+    msg = str(detail.get("message") or "") if isinstance(detail, dict) else str(detail or "")
+    _m = msg.lower()
+    return "note type" in _m and "not correct" in _m
+
+
+def _write_pull_comment_note(p: str, method: str, owner: str, repo: str, number: int,
+                             note_id: str, token: str, scope: str,
+                             body: dict | None = None):
+    """Issue #3821：pulls 评论 update/delete 按创建同源通道写上游。
+
+    create 主通道为 /pulls/{n}/comments，merged PR 405 时回退 /issues/{n}/comments；
+    上游据此落 review 型（pull note）或 issue 型（issue note）。数字 note_id 无法
+    预知来源类型，先按主通道执行，仅在明确 400 "Note type is not correct" 时回退
+    另一通道；其他错误原样透传。十六进制 id 已在解析阶段确定通道，通常无需回退。
+    仅声明 PR_COMMENT_ID_HEX 的方言（gitcode/gitee v5 同族）启用通道回退。
+    """
+    scopes = [scope]
+    if _pflag(p, "PR_COMMENT_ID_HEX"):
+        _secondary = "issues" if scope == "pulls" else "pulls"
+        if _secondary != scope:
+            scopes.append(_secondary)
+    for _i, _scope in enumerate(scopes):
+        _sub = _comment_write_subpath(p, _scope, note_id, number)
+        try:
+            return _vcs_req(p, method, _vcs_url(owner, repo, _sub, None, p), token, body)
+        except HTTPException as _e:
+            if _i == len(scopes) - 1 or not _is_note_type_mismatch_400(_e):
+                raise
+            log.warning(f"Issue #3821 {method} {_sub} note type mismatch "
+                        f"→ fallback {_comment_write_subpath(p, scopes[_i + 1], note_id, number)}")
+    raise AssertionError("unreachable")
 
 
 @router.patch("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_update",
               summary="Update PR comment",
               description="Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. "
                           "Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment "
-                          "response (compat form, auto-mapped to note_id server-side); other forms return 422.")
+                          "response (compat form, auto-mapped to note_id server-side); other forms return 422. "
+                          "Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).")
 def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    # 上游 comment id 全局唯一（不含 PR number）：透传 PATCH /pulls/comments/{id}
-    # Issue #623：comment_id 兼容十六进制 id——解析为数字 note_id 后走既有更新逻辑
-    note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
-                                            _repo_token(owner, repo, user, p))
-    # 评论 id 路径形态：扁平 /pulls/comments/{id}（gitcode/gitee/github）
-    # vs 带 MR 号 /pulls/{number}/comments/{id}（gitlab → 模块 rewrite 成 notes/{id}）。
-    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
-             else f"/pulls/{number}/comments/{note_id}")
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, _csub, None, p),
-                    _repo_token(owner, repo, user, p), {"body": body.body})
+    _token = _repo_token(owner, repo, user, p)
+    note_id, scope = _resolve_pull_comment_target(p, owner, repo, number, comment_id, _token)
+    return _write_pull_comment_note(p, "PATCH", owner, repo, number, note_id, _token, scope,
+                                    {"body": body.body})
 
 
-@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams).")
+@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams). Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).")
 def delete_pull_comment(owner: str, repo: str, number: int, comment_id: str,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    # 上游 comment id 全局唯一（不含 PR number）：透传 DELETE /pulls/comments/{id}
-    # hex id（gitcode/gitee 32 位）先解析为数字 note_id——上游 DELETE 只认数字
-    # （hex 直传 400 Orchestration error）。数字 id 直传，零额外请求（向后兼容）。
-    note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
-                                            _repo_token(owner, repo, user, p))
-    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
-             else f"/pulls/{number}/comments/{note_id}")
-    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, _csub, None, p),
-                    _repo_token(owner, repo, user, p))
+    _token = _repo_token(owner, repo, user, p)
+    note_id, scope = _resolve_pull_comment_target(p, owner, repo, number, comment_id, _token)
+    return _write_pull_comment_note(p, "DELETE", owner, repo, number, note_id, _token, scope)
 
 
 def _normalize_pull_files_diff(resp):
