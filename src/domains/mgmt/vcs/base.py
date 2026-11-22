@@ -316,7 +316,8 @@ class GenericVcsProvider(VCSProvider):
         return True
 
     def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
+                    owner="", path="", auto_init: bool = False,
+                    default_branch: str = "") -> dict:
         """D42/S62 端口：建仓（POST /user/repos，指定 owner 时 /orgs/{owner}/repos）。
 
         generic 形态：query_token 走 form（Gitee 系 v5 写接口要求），
@@ -324,6 +325,11 @@ class GenericVcsProvider(VCSProvider):
         """
         data = {"name": name, "description": description or "",
                 "private": "true" if private else "false"}
+        if auto_init:
+            # 卡声明 create_repo_options 的平台（gitee 已实测生效）才透传
+            data["auto_init"] = "true"
+            if default_branch:
+                data["default_branch"] = default_branch
         if path:
             data["path"] = path
         form = self._card.api_auth == "query_token"

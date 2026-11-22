@@ -144,11 +144,19 @@ class GitLabProvider(GenericVcsProvider):
         return None
 
     def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
-        """建仓；owner 非空 = 建到指定组/子组（先解析 namespace_id）。"""
+                    owner="", path="", auto_init: bool = True, default_branch: str = "") -> dict:
+        """建仓；owner 非空 = 建到指定组/子组（先解析 namespace_id）。
+
+        auto_init=False（2026-11-22 B 方案）= 不生成初始 README：
+        空仓库首次 push 即快进，受保护的默认分支也允许维护者普通 push，
+        模板一键创建不再需要 --force 覆盖（此前写死 initialize_with_readme=True
+        导致 GitLab 上强推受保护 main 被 pre-receive 拒绝）。默认 True 保持存量语义。
+        """
         body = {"name": name, "description": description or "",
                 "visibility": "private" if private else "public",
-                "initialize_with_readme": True}
+                "initialize_with_readme": bool(auto_init)}
+        if default_branch and not auto_init:
+            body["default_branch"] = default_branch
         if path and path != name:
             body["path"] = path
         if owner:

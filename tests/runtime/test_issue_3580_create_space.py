@@ -184,3 +184,14 @@ def test_gitlab_create_repo_normalizes_full_name_and_owner():
     assert out["owner"] == "grp/sub"          # 组/子组必须保完整路径
     assert out["name"] == "proj"
     assert out["path_with_namespace"] == "grp/sub/proj"   # 原始字段保留
+
+
+def test_create_repo_auto_init_false_for_template_one_click():
+    """B 方案（2026-11-22）：一键创建传 auto_init=False → 不生成初始 README，
+    空仓库首次普通 push 即快进，受保护 main 也允许维护者推送。"""
+    fake = _FakeHttp(namespaces=[], group_by_path={})
+    out = _provider(fake).create_repo("tok", "proj", auto_init=False, default_branch="main")
+    assert out["full_name"].endswith("/proj")
+    body = [c for c in fake.calls if c[0] == "POST"][-1][2]
+    assert body["initialize_with_readme"] is False
+    assert body.get("default_branch") == "main"
