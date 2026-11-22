@@ -109,6 +109,14 @@ function ok(cond, name) {
   ok(/app\(\)\.showLogin\(\)/.test(vue), '横幅按钮回到登录视图')
   ok(/pollIntervalFor\(/.test(vue), '降频使用 pollGuard 间隔')
   ok(/isk-session-banner/.test(vue), '会话失效横幅进模板')
+  ok(
+    /function startPoll\(\) \{[\s\S]{0,240}?sessionExpired\.value = false/.test(vue),
+    'startPoll 复位失效态（登录恢复即重启）'
+  )
+  ok(
+    /function armPollTimer\(\) \{[\s\S]{0,160}?clearInterval\(pollTimer\)/.test(vue),
+    '挂表前清旧 timer（防双定时器）'
+  )
 
   // ---- 4. app.js 登录/登出收口 ----
   const app = fs.readFileSync(APP, 'utf8')
