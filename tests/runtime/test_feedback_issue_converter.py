@@ -377,3 +377,78 @@ class TestTitleClip:
             assert str(row[1]) == "77" and row[0]
         finally:
             _cleanup(fid)
+
+
+def _fail_count(fid):
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT convert_fail_count FROM user_feedback WHERE id=?", (fid,)).fetchone()
+    return int(row[0] or 0)
+
+
+class TestConvertFailureObservability:
+    """Issue #3731：连续失败轮次持久化（跨 worker 可查），达阈值升级 ERROR，成功后清零。"""
+
+    def test_consecutive_failure_escalates_to_error(self):
+        """同一 fid 连续 3 轮建单失败：前两轮 WARNING，第 3 轮 ERROR + 计数落库 3。"""
+        fid = _insert(source="agent", title="连败题", task_id="t-f1",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   side_effect=RuntimeError("boom")), \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None), \
+                 mock.patch.object(conv, "log") as lg:
+                conv.convert_pending_feedback(limit=10)
+                conv.convert_pending_feedback(limit=10)
+                assert lg.error.call_count == 0          # 未到阈值只 WARNING
+                assert _fail_count(fid) == 2
+                conv.convert_pending_feedback(limit=10)
+            assert lg.error.call_count == 1
+            assert "consecutive=3" in lg.error.call_args[0][0]
+            assert "create failed" in lg.error.call_args[0][0]
+            assert _fail_count(fid) == 3
+        finally:
+            _cleanup(fid)
+
+    def test_target_resolve_failure_is_counted_and_keeps_substring(self):
+        """路由解析崩溃（本次事故形态）也计入失败轮次，并保留可检索的 target resolve failed。"""
+        fid = _insert(source="agent", title="路由崩", task_id="t-f2",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_repo_target",
+                                   side_effect=ValueError(
+                                       "too many values to unpack (expected 2)")), \
+                 mock.patch.object(conv, "log") as lg:
+                res = conv.convert_pending_feedback(limit=10)
+            assert res["skipped"] == 1 and _fail_count(fid) == 1
+            assert "target resolve failed" in lg.warning.call_args[0][0]
+        finally:
+            _cleanup(fid)
+
+    def test_success_resets_fail_count(self):
+        """两轮失败后建单成功：计数清零、issue_url 回写（下一轮不再计入连败）。"""
+        fid = _insert(source="agent", title="先败后成", task_id="t-f3",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None):
+                with mock.patch.object(conv, "_create_provider_issue",
+                                       side_effect=RuntimeError("boom")):
+                    conv.convert_pending_feedback(limit=10)
+                    conv.convert_pending_feedback(limit=10)
+                assert _fail_count(fid) == 2
+                with mock.patch.object(conv, "_create_provider_issue",
+                                       return_value={"number": 91, "url": "u91"}):
+                    conv.convert_pending_feedback(limit=10)
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url FROM user_feedback WHERE id=?", (fid,)).fetchone()
+            assert row[0] == "u91"
+            assert _fail_count(fid) == 0
+        finally:
+            _cleanup(fid)
