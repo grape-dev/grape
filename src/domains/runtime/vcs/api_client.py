@@ -578,8 +578,15 @@ class VcsApiClient:
         page = 1
         _complete = False
         while page <= max_pages:
+            # 2026-11-22：路径按卡方言派生（此前硬编码 /repos/… 对 gitlab 是
+            # 不存在的路由，恒 404 → 查重被误报成「token 可能失效」）。
+            # GitLab 侧 state 取值是 opened（不是 open），列表返回裸数组。
             data = self._request(
-                "GET", f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}")
+                "GET",
+                self._generic_path(
+                    f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}",
+                    f"/issues?state=opened&per_page=50&page={page}",
+                ))
             if isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(_dedup_error_text(data))
