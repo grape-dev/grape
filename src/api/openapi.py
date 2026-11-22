@@ -9,6 +9,7 @@
 """
 from datetime import datetime, timezone
 import json
+import logging
 import os
 import re
 
@@ -22,6 +23,8 @@ from fastapi.routing import APIRoute
 from src.api.contract_versioning import build_changelog, load_contract_baseline
 
 _METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+log = logging.getLogger(__name__)
 
 # FastAPI 路由模板 `/contents/{path:path}` → OpenAPI 路径 `/contents/{path}`
 _PATH_PARAM_CONV = re.compile(r"\{(\w+):\w+\}")
@@ -643,8 +646,15 @@ def custom_openapi(app, check_baseline: bool = True):
     # Issue #2837（等价 #2783）：挂牌登记表 → deprecated / x-deprecated-since /
     # x-deprecated-replacement（挂牌态随契约发布，可从冻结发布快照机器读取；
     # 登记漂移在契约域 fail-fast）。空登记表时本调用是 no-op。
-    from src.domains.contracts.deprecation import apply_deprecation_markup
-    apply_deprecation_markup(schema)
+    # Issue #3756：登记表未随产物落盘时，读接口不应整体 500——本步单独降级，
+    # 根级打 x-degraded 并 WARNING；其余（attach_contract_meta / 完整性门禁）保持 fail-fast。
+    try:
+        from src.domains.contracts.deprecation import apply_deprecation_markup
+        apply_deprecation_markup(schema)
+    except Exception as _de:
+        schema.setdefault("x-degraded", "deprecation-registry-missing")
+        log.warning(
+            "openapi deprecation markup degraded (registry missing/unreadable): %s", _de)
     attach_contract_meta(schema)  # Issue #1863 ③：元信息透出（x-endpoint-count/x-groups/x-source-commit/x-generated-at）
     # Issue #1863/#2080/#2081：契约完整性 fail-fast——必需操作缺失/端点数偏离基线即拒出契约。
     # check_baseline=False 供测试/局部渲染上下文跳过（weekly 口径）；生产默认 True。

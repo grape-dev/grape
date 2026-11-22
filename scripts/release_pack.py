@@ -79,67 +79,57 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 
 # ---- 子包构建 ----
 
-def pack_backend(ts):
-    """后端: src/ (含 api/frontend shell 前端) + scripts/ + 仓库根文件 + configs example + requirements"""
-    out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+# Issue #3756：/openapi.json 渲染依赖的契约登记表——缺任一即不得出包。
+CONTRACTS_REQUIRED_FILES = (
+    "contracts/deprecated_endpoints.json",
+    "contracts/deprecated_exemptions.json",
+    "contracts/openapi_baseline.json",
+    "contracts/required_operations.json",
+)
+
+
+def assert_contracts_ready(root=ROOT):
+    """打包期断言：契约登记表必须随后端产物落盘（Issue #3756）。
+
+    缺失时会打出「运行期 /openapi.json 恒 500」的半套产物，故与 static-dist
+    缺件同口径 fail-loud（[FATAL] + exit 1）。
+    """
+    missing = [rel for rel in CONTRACTS_REQUIRED_FILES
+               if not os.path.isfile(os.path.join(root, rel))]
+    released_dir = os.path.join(root, "contracts", "released")
+    released = ([n for n in os.listdir(released_dir) if n.endswith(".json")]
+                if os.path.isdir(released_dir) else [])
+    if not released:
+        missing.append("contracts/released/*.json")
+    if missing:
+        print("[FATAL] 缺少契约登记表产物（后端将无法渲染 /openapi.json）：")
+        for rel in missing:
+            print(f"        {rel}")
+        print("        请确认发布基线携带完整 contracts/（如 arch-weekly-11-ljt），"
+              "或从代码仓同步 contracts/ 后重新打包。")
+        sys.exit(1)
+
+
+def _backend_file_items():
+    """后端包收集清单（不含 static-dist 构建校验，便于单测断言）。"""
     items = []
     # packaging/ 目录：worker 安装包不是预先打好的静态文件——src/kernel/worker_package.py
     # 在【部署根】读 packaging/legacy-entry-src/ 现拼 grape-worker.tar.gz。纯解包部署
     # （没有 git 检出、只解本包）时若包内无此目录，worker 安装接口直接 500
     # 「legacy 入口 shim 源缺失」，Windows/Linux worker 全部装不上，且只在
     # data/cache/worker-package 被重建后暴露（升级首日必现、平时被旧缓存掩盖）。
-    # 故这里 fail-loud，并整目录打进去（含 legacy-entry-src 全部 shim）。
+    # 存在性由 pack_backend 的 fail-loud 断言保证，这里只负责入包。
     packaging_dir = os.path.join(ROOT, "packaging")
-    _legacy_required = [
-        "legacy-entry-src/runtime/__init__.py",
-        "legacy-entry-src/runtime/agent.py",
-        "legacy-entry-src/runtime/cloud_worker.py",
-    ]
-    if not os.path.isdir(packaging_dir):
-        print(f"[FATAL] 缺少 packaging/ 目录：{packaging_dir}")
-        print("        该目录承载 worker 安装包的 legacy 入口 shim，缺它 GET /api/runtime/grape-worker.tar.gz 会 500")
-        sys.exit(1)
-    _missing = [f for f in _legacy_required if not os.path.isfile(os.path.join(packaging_dir, f))]
-    if _missing:
-        print(f"[FATAL] packaging/ 缺 {len(_missing)} 个 legacy 入口 shim 源：")
-        for f in _missing:
-            print(f"        packaging/{f}")
-        sys.exit(1)
-    items.append((packaging_dir, "packaging"))
+    if os.path.isdir(packaging_dir):
+        items.append((packaging_dir, "packaging"))
     # requirements*.txt：Issue #699 Phase 0 起依赖已并入 pyproject.toml，文件通常不存在；
     # 存在时顺手带上（老部署脚本仍有按 requirements 装依赖的路径）。
     for rf in ("requirements.txt", "requirements-worker.txt"):
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
             items.append((p, rf))
-    # src/ 目录
-    src_dir = os.path.join(ROOT, "src")
-    # R-2：Vue 前端产物（src/api/frontend/static-dist/）是本目录的一部分，但它由
-    # `npm run build` 生成且被 .gitignore 忽略——干净 checkout/构建机必须先构建。
-    # 缺它出包不会报错，只会让 shell/index.html 引用的 /static-vue/** 全部 404
-    # （页面退回空壳），属静默缺件，故这里 fail-loud。
-    dist_index = os.path.join(ROOT, "src", "api", "frontend", "static-dist", "index.html")
-    if not os.path.isfile(dist_index):
-        print("[FATAL] 缺少 Vue 前端构建产物: src/api/frontend/static-dist/index.html")
-        print("        打包前请先构建：cd src/api/frontend/app && npm ci && npm run build")
-        sys.exit(1)
-    # N-3：不止断言 index.html —— shell/index.html 引用的每个 /static-vue/** 都必须
-    # 在 static-dist 里存在，否则陈旧构建（缺新 chunk）会静默打出「半套 UI」的包。
-    dist_root = os.path.join(ROOT, "src", "api", "frontend", "static-dist")
-    shell_index = os.path.join(ROOT, "src", "api", "frontend", "shell", "index.html")
-    if os.path.isfile(shell_index):
-        with open(shell_index, encoding="utf-8") as fh:
-            refs = set(re.findall(r'(?:src|href)="(/static-vue/[^"?]+)', fh.read()))
-        missing = sorted(r for r in refs
-                         if not os.path.isfile(os.path.join(dist_root, r[len("/static-vue/"):])))
-        if missing:
-            print(f"[FATAL] static-dist 缺 {len(missing)} 个被 shell 引用的产物（构建过期）：")
-            for r in missing[:10]:
-                print(f"        {r}")
-            print("        请重新构建：cd src/api/frontend/app && npm ci && npm run build")
-            sys.exit(1)
-    items.append((src_dir, "src"))
+    # src/ 目录（含 api/frontend shell 前端）
+    items.append((os.path.join(ROOT, "src"), "src"))
     # scripts/ 目录 (install-worker.sh, sync_templates.sh, sync_skills.sh 等)
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
@@ -153,6 +143,11 @@ def pack_backend(ts):
     help_dir = os.path.join(ROOT, "help")
     if os.path.isdir(help_dir):
         items.append((help_dir, "help"))
+    # Issue #3756：契约登记表整目录（/openapi.json 渲染依赖
+    # contracts/deprecated_endpoints.json，缺则读接口恒 500）。
+    contracts_dir = os.path.join(ROOT, "contracts")
+    if os.path.isdir(contracts_dir):
+        items.append((contracts_dir, "contracts"))
     # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
     #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：硬编码本机绝对路径版）。
@@ -191,7 +186,63 @@ def pack_backend(ts):
     df = os.path.join(ROOT, "deploy", "Dockerfile")
     if os.path.isfile(df):
         items.append((df, "Dockerfile"))
-    make_subtar_gz(items, out)
+    return items
+
+
+def pack_backend(ts):
+    """后端: src/ (含 api/frontend shell 前端) + scripts/ + contracts/ + packaging/ + 仓库根文件
+    + configs example + requirements"""
+    out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    # packaging/ 目录：worker 安装包不是预先打好的静态文件——src/kernel/worker_package.py
+    # 在【部署根】读 packaging/legacy-entry-src/ 现拼 grape-worker.tar.gz。纯解包部署
+    # （没有 git 检出、只解本包）时若包内无此目录，worker 安装接口直接 500
+    # 「legacy 入口 shim 源缺失」，Windows/Linux worker 全部装不上，且只在
+    # data/cache/worker-package 被重建后暴露（升级首日必现、平时被旧缓存掩盖）。
+    # 故这里 fail-loud，并整目录打进去（含 legacy-entry-src 全部 shim）。
+    packaging_dir = os.path.join(ROOT, "packaging")
+    _legacy_required = [
+        "legacy-entry-src/runtime/__init__.py",
+        "legacy-entry-src/runtime/agent.py",
+        "legacy-entry-src/runtime/cloud_worker.py",
+    ]
+    if not os.path.isdir(packaging_dir):
+        print(f"[FATAL] 缺少 packaging/ 目录：{packaging_dir}")
+        print("        该目录承载 worker 安装包的 legacy 入口 shim，缺它 GET /api/runtime/grape-worker.tar.gz 会 500")
+        sys.exit(1)
+    _missing = [f for f in _legacy_required if not os.path.isfile(os.path.join(packaging_dir, f))]
+    if _missing:
+        print(f"[FATAL] packaging/ 缺 {len(_missing)} 个 legacy 入口 shim 源：")
+        for f in _missing:
+            print(f"        packaging/{f}")
+        sys.exit(1)
+    # R-2：Vue 前端产物（src/api/frontend/static-dist/）是本目录的一部分，但它由
+    # `npm run build` 生成且被 .gitignore 忽略——干净 checkout/构建机必须先构建。
+    # 缺它出包不会报错，只会让 shell/index.html 引用的 /static-vue/** 全部 404
+    # （页面退回空壳），属静默缺件，故这里 fail-loud。
+    dist_index = os.path.join(ROOT, "src", "api", "frontend", "static-dist", "index.html")
+    if not os.path.isfile(dist_index):
+        print("[FATAL] 缺少 Vue 前端构建产物: src/api/frontend/static-dist/index.html")
+        print("        打包前请先构建：cd src/api/frontend/app && npm ci && npm run build")
+        sys.exit(1)
+    # N-3：不止断言 index.html —— shell/index.html 引用的每个 /static-vue/** 都必须
+    # 在 static-dist 里存在，否则陈旧构建（缺新 chunk）会静默打出「半套 UI」的包。
+    dist_root = os.path.join(ROOT, "src", "api", "frontend", "static-dist")
+    shell_index = os.path.join(ROOT, "src", "api", "frontend", "shell", "index.html")
+    if os.path.isfile(shell_index):
+        with open(shell_index, encoding="utf-8") as fh:
+            refs = set(re.findall(r'(?:src|href)="(/static-vue/[^"?]+)', fh.read()))
+        missing = sorted(r for r in refs
+                         if not os.path.isfile(os.path.join(dist_root, r[len("/static-vue/"):])))
+        if missing:
+            print(f"[FATAL] static-dist 缺 {len(missing)} 个被 shell 引用的产物（构建过期）：")
+            for r in missing[:10]:
+                print(f"        {r}")
+            print("        请重新构建：cd src/api/frontend/app && npm ci && npm run build")
+            sys.exit(1)
+    # Issue #3756：登记表缺件即 FATAL（与 static-dist 缺产物同口径）。
+    assert_contracts_ready(ROOT)
+    make_subtar_gz(_backend_file_items(), out)
     return out
 
 # 种子表 — 导出 DDL + 数据
@@ -747,7 +798,7 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 
 | 子包 | 说明 | 部署位置 |
 |------|------|----------|
-| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
+| backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + contracts(契约登记表) + configs | /opt/grape/ |
 | database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据（= mgmt 域） | MySQL |
 | database/grape-db-{ts}-runtime.sql.gz / grape-db-{ts}-insight.sql.gz | 三库模式下的另两域（只导 DDL） | 各自实例 |
 | skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/.grape/skills/ + /opt/grape/configs/scenes/ |
