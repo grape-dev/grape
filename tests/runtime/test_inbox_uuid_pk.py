@@ -112,3 +112,26 @@ def test_legacy_autoincrement_table_is_migrated(sqlite_db):
 def test_ensure_on_fresh_table_does_not_migrate(sqlite_db):
     wi.ensure_webhook_inbox_table()
     assert wi.migrate_inbox_ids_to_uuid() is False
+
+def test_claims_follow_fifo_order_not_uuid_order(sqlite_db):
+    """UUID 主键不能把队列变成随机序：同仓事件必须按入队时间消费。"""
+    wi.ensure_webhook_inbox_table()
+    ids = []
+    for i in range(6):
+        r = wi.enqueue_webhook(repo_key=f"gitlab:group-a/repo-{i}", provider="gitlab",
+                               event_header="Push Hook", body=b"{}", headers={},
+                               delivery_id=f"fifo-{i}")
+        ids.append(str(r["id"]))
+        # 拉开 created_at，避免同秒并列导致断言依赖 id
+        import time as _t
+        _t.sleep(0.01)
+
+    claimed = []
+    while True:
+        item = wi.claim_next(f"worker-{len(claimed)}")
+        if not item:
+            break
+        claimed.append(str(item["id"]))
+        wi.finish_claim(item["id"], f"worker-{len(claimed) - 1}", ok=True)
+
+    assert claimed == ids, f"消费顺序应与入队顺序一致，实际 {claimed} != {ids}"

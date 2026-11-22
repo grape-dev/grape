@@ -156,7 +156,10 @@ def claim_next(owner: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> "dict 
             "WHERE ((status IN ('pending','failed') AND next_attempt_at<=?) "
             "       OR (status='processing' AND lease_expires_at<? AND lease_expires_at!='')) "
             "AND (claim_owner='' OR lease_expires_at<?) "
-            "ORDER BY id LIMIT 1", (now, now, now))
+            # 主键改 UUID 后不能再按 id 排序：随机序会打乱同仓事件顺序（closed 先于
+            # opened 被消费）。按 created_at（ISO 字面量，字典序=时间序）再按 id 兜底，
+            # 配合 idx_webhook_inbox_status_created(status, created_at) 走索引。
+            "ORDER BY created_at, id LIMIT 1", (now, now, now))
         row = c.fetchone()
         if not row:
             return None
