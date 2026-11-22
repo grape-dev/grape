@@ -63,7 +63,7 @@ FROZEN = {
     "autopilot-view.js": ("57", '63', "d9f08bfe9c71c495", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/repo-provider.js", "styles/bridge.css", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", ["lib/features.js", "lib/onboard.js", "views/ChatView.vue", "views/entries/chat-view.js"]),
     "dashboard-view.js": ("88", '64', "9ea09757ab1a6c3e", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/features.js", "lib/repo-provider.js", "styles/bridge.css", "views/DashboardView.vue", "views/entries/dashboard-view.js"]),
-    "event-view.js": ("63", '63', "03043b0b5ae0294e", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/EventView.vue", "views/entries/event-view.js"]),
+    "event-view.js": ("63", '64', "f21b5f1e4d2e8c5f", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/EventView.vue", "views/entries/event-view.js"]),
     "feedback-dialog.js": ("50", None, "6ab1db5105a856d4", ["views/FeedbackDialog.vue", "views/entries/feedback-dialog.js"]),
     "forgot-view.js": ("3", None, "127d7af7aacb43f7", ["views/ForgotView.vue", "views/entries/forgot-view.js"]),
     "im-channel.js": ("56", None, "7e3be425fca22f83", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "lib/onboard.js", "views/ImChannel.vue", "views/entries/im-channel.js"]),
@@ -79,10 +79,10 @@ FROZEN = {
     "plugins.js": ("56", None, "43423303f0a650e0", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/PluginMarketView.vue", "views/entries/plugins.js"]),
     "register-view.js": ("1", None, "3358ffefb36ef8d4", ["views/RegisterView.vue", "views/entries/register-view.js"]),
     "repos-view.js": ("65", None, "8b4dc3187fdf0539", ["lib/repo-provider.js", "views/LlmCredManager.vue", "views/ReposView.vue", "views/SettingsView.vue", "views/TemplatesView.vue", "views/entries/repos-view.js"]),
-    "runtimes-view.js": ("89", '68', "a20334bc5dc73834", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/features.js", "styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
-    "sandbox-view.js": ("13", '5', "05aa934f860284ff", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
+    "runtimes-view.js": ("89", '69', "59b2c67d575af805", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/features.js", "styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
+    "sandbox-view.js": ("13", '6', "921759d50d160b2b", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
     "scene-market.js": ("61", None, "867600ccf69f42f5", ["components/ui/AGButton.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
-    "skills-view.js": ("60", None, "4f263560c2f3de27", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SkillsView.vue", "views/entries/skills-view.js"]),
+    "skills-view.js": ("62", None, "0d981aa4c9092c26", ["components/ui/AGButton.vue", "components/ui/AGDrawer.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SkillsView.vue", "views/entries/skills-view.js"]),
 }
 
 
@@ -95,7 +95,7 @@ SHIPPED = {
     "autopilot-view.js": ("57", '63', "d9f08bfe9c71c495", '3703cf3224be5aaf'),
     "chat-view.js": ("63", None, "4fdaaae25a10f706", None),
     "dashboard-view.js": ("88", '64', "9ea09757ab1a6c3e", '42d5bf416e030d04'),
-    "event-view.js": ("63", '63', "03043b0b5ae0294e", 'fcdc82efa970915b'),
+    "event-view.js": ("63", '64', "f21b5f1e4d2e8c5f", 'ae11fc98d8c24bbd'),
     "feedback-dialog.js": ("50", None, "6ab1db5105a856d4", None),
     "forgot-view.js": ("3", None, "127d7af7aacb43f7", None),
     "im-channel.js": ("56", None, "7e3be425fca22f83", None),
@@ -111,10 +111,10 @@ SHIPPED = {
     "plugins.js": ("56", None, "43423303f0a650e0", None),
     "register-view.js": ("1", None, "3358ffefb36ef8d4", None),
     "repos-view.js": ("65", None, "8b4dc3187fdf0539", None),
-    "runtimes-view.js": ("89", '68', "a20334bc5dc73834", '52207501586aa60a'),
-    "sandbox-view.js": ("13", '5', "05aa934f860284ff", '506ed6396e00133f'),
+    "runtimes-view.js": ("89", '69', "59b2c67d575af805", '4df27387d7fb7a62'),
+    "sandbox-view.js": ("13", '6', "921759d50d160b2b", '84d2f965e8399fc2'),
     "scene-market.js": ("61", None, "867600ccf69f42f5", None),
-    "skills-view.js": ("60", None, "4f263560c2f3de27", None),
+    "skills-view.js": ("62", None, "0d981aa4c9092c26", None),
 }
 
 
