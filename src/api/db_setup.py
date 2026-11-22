@@ -11906,12 +11906,13 @@ _REPO_CRED_COLS = ("bot_gitcode_token", "gitcode_webhook_token",
                    "bot_gitlab_token", "gitlab_webhook_token")
 
 
-def _managed_repos_columns(c) -> "set[str]":
+def _managed_repos_columns_probe(c) -> "tuple[set[str], str]":
     """managed_repos 列集合探测（sqlite PRAGMA / MySQL information_schema 双方言）。
 
-    为什么不直接用 PRAGMA：三库 MySQL 拓扑下薄兼容游标不做 PRAGMA 方言翻译，
-    原样发给服务端即 1064，探列失败会被当成「无列」→ 回填静默零写入（Issue #2432
-    同族坑）。探不到一律按「无列」处理，调用方跳过该列并留痕。
+    返回 ``(columns, error)``：``error == ""`` 表示探测成功（``columns`` 可为空，
+    即库确实没有该表/列）；``error != ""`` 表示探测本身失败（驱动/权限/方言异常）。
+    二者必须区分——探列失败若被当成「无列」，回填/验证会静默零写入却报
+    ``coverage == 1.0``（Issue #2432 同族坑 + #3740 复审 Required）。
     """
     try:
         from src.kernel.session_manager import _is_mysql_backend
@@ -11924,15 +11925,27 @@ def _managed_repos_columns(c) -> "set[str]":
             rows = c.execute(
                 "SELECT COLUMN_NAME FROM information_schema.columns "
                 "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='managed_repos'").fetchall()
-            return {r[0] for r in rows}
-        except Exception as e:  # noqa: BLE001 - 探列失败按无列处理（调用方记 warning）
-            log.warning(f"managed_repos column probe failed: {e}")
-            return set()
+            return {r[0] for r in rows}, ""
+        except Exception as e:  # noqa: BLE001 - 探列失败显式上报，由调用方拒绝验证/盖章
+            msg = f"managed_repos column probe failed: {e}"
+            log.warning(msg)
+            return set(), msg
     try:
-        return {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+        return {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}, ""
     except Exception as e:  # noqa: BLE001
-        log.warning(f"managed_repos column probe failed: {e}")
-        return set()
+        msg = f"managed_repos column probe failed: {e}"
+        log.warning(msg)
+        return set(), msg
+
+
+def _managed_repos_columns(c) -> "set[str]":
+    """managed_repos 列集合探测（仅返回列名，探列失败按「无列」处理）。
+
+    供既有只读调用方使用；需要区分「探列失败 / 真的无列」的验证与盖章路径
+    必须改用 ``_managed_repos_columns_probe``（Issue #3740 复审 Required）。
+    """
+    cols, _error = _managed_repos_columns_probe(c)
+    return cols
 
 
 def backfill_repo_credentials_from_columns() -> int:
@@ -12008,8 +12021,10 @@ def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
     - 只填空：``INSERT OR IGNORE``，已有 rc 行（可能已轮换）绝不被列值覆盖。
     - dry-run：默认只算计划（``filled`` 恒 0），供 sre 先看影响面再 apply。
 
-    返回 ``{dry_run, scanned, would_fill, filled, per_column, missing}``；
-    ``missing`` = 持有 legacy bot 值但没有 rc bot 行的仓库（回填后应为空）。
+    返回 ``{dry_run, scanned, would_fill, filled, per_column, missing, probe_ok, error}``；
+    ``missing`` = 持有 legacy bot 值但没有 rc bot 行的仓库（回填后应为空）；
+    ``probe_ok=False`` = managed_repos 探列失败（``error`` 带原因），此档不可当作
+    「无缺口」消费——脚本必须失败退出（Issue #3740 复审 Required）。
     """
     from src.kernel.id_gen import uuid7_str
 
@@ -12020,6 +12035,8 @@ def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
         "filled": 0,           # 实际写入行数（dry-run 恒 0）
         "per_column": {},
         "missing": [],
+        "probe_ok": True,
+        "error": "",
     }
     try:
         from src.domains.mgmt.user.db import _decrypt_repo_secret, _encrypt_repo_secret
@@ -12032,7 +12049,11 @@ def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
     rc_bot = _rc_bot_repo_keys()
     with db_lock:
         c = db.cursor()
-        cols = _managed_repos_columns(c)
+        cols, probe_error = _managed_repos_columns_probe(c)
+        if probe_error:
+            report["probe_ok"] = False
+            report["error"] = probe_error
+            return report
         if not cols:
             return report
         for col in _REPO_BOT_TOKEN_COLS:
@@ -12080,21 +12101,29 @@ def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
 def verify_repo_bot_credential_backfill() -> dict:
     """回填验证报告：legacy bot 列与 rc bot 行的覆盖差（回落分支下线前置）。
 
-    返回 ``{legacy_repos, rc_bot_rows, missing, coverage, per_column}``：
+    返回 ``{legacy_repos, rc_bot_rows, missing, coverage, per_column, probe_ok, error}``：
     - ``legacy_repos``：持有非空 legacy bot 列的仓库数（回填源规模）
     - ``rc_bot_rows``：rc 中非空 bot 行数（回填目标现状）
     - ``missing``：持有 legacy 值但 rc 无 bot 行的仓库（回填缺口）
     - ``coverage``：``1 - len(missing)/legacy_repos``（无 legacy 值时记 1.0）
+    - ``probe_ok``：``False`` = managed_repos 探列失败，``coverage`` 强制 0.0——
+      **探列失败绝不能伪装成「无缺口、覆盖 1.0」**（Issue #3740 复审 Required）。
 
-    验收口径：回填后 ``missing`` 为空、``coverage == 1.0``；生产再叠加日志/审计观察
-    （``historical column fallback hit`` 归零、``repo_bot_hit_legacy_column`` 归零）。
+    验收口径：回填后 ``missing`` 为空、``coverage == 1.0``；生产下线判据再叠加
+    ``grape_repo_bot_legacy_fallback_total`` 窗口增量 == 0 且
+    ``repo_bot_hit_legacy_column`` 审计零命中（降噪后日志 1/1000 采样，不再作为判据）。
     """
     report: dict = {"legacy_repos": 0, "rc_bot_rows": 0, "missing": [],
-                    "coverage": 1.0, "per_column": {}}
+                    "coverage": 1.0, "per_column": {}, "probe_ok": True, "error": ""}
     rc_bot = _rc_bot_repo_keys()
     with db_lock:
         c = db.cursor()
-        cols = _managed_repos_columns(c)
+        cols, probe_error = _managed_repos_columns_probe(c)
+        if probe_error:
+            report["probe_ok"] = False
+            report["error"] = probe_error
+            report["coverage"] = 0.0
+            return report
         if not cols:
             return report
         report["rc_bot_rows"] = len(rc_bot)

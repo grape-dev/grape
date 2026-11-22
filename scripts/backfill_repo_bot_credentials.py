@@ -77,6 +77,13 @@ def main(argv=None) -> int:
 
     if args.stamp:
         verify = out.get("verify") or verify_repo_bot_credential_backfill()
+        if verify.get("probe_ok") is False:
+            out["stamp"] = {"skipped": True,
+                            "reason": "managed_repos 探列失败，拒绝盖章（无法证明回填完成）",
+                            "error": verify.get("error") or ""}
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            print("[error] managed_repos 探列失败，验证/盖章不可信，拒绝执行", file=sys.stderr)
+            return 2
         if verify.get("missing"):
             out["stamp"] = {"skipped": True,
                             "reason": "回填缺口非空，拒绝盖章（先 --apply）",
@@ -91,6 +98,13 @@ def main(argv=None) -> int:
 
     backfill = out.get("backfill") or {}
     verify = out.get("verify") or {}
+    # 探列失败 = 环境/驱动异常：回填与验证结果都不可信，必须失败退出而不是
+    # 把「零写入 + 空缺口」当成成功（Issue #3740 复审 Required）。
+    for label, payload in (("backfill", backfill), ("verify", verify)):
+        if payload.get("probe_ok") is False:
+            print(f"[error] {label}: managed_repos 探列失败，拒绝把空结果当成功: "
+                  f"{payload.get('error') or ''}", file=sys.stderr)
+            return 2
     if verify.get("missing"):
         print(f"[warn] 仍有 {len(verify['missing'])} 个仓库缺 rc bot 行", file=sys.stderr)
         return 1
