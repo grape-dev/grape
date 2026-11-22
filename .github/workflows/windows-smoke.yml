@@ -311,3 +311,12 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_1753_handoff_target_branch.py \
             tests/runtime/test_issue_329_cross_pipeline.py -v
+      - name: Issues mine COUNT domain routing tests (issue #3771)
+        # Issue #3771 QA 审查修复（Required）：新增用例 test_issue_3771_mine_count_domain.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758）。
+        # 用例锁 issue 表 COUNT 的 runtime 域路由、COUNT 失败 total=null 降级、
+        # per_page=0 零跨域读与 COUNT 单点收口静态守门；回退会让「我的需求」分页
+        # total/has_more 再次失真（生产 1,693 条/小时 WARNING），只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py -v
