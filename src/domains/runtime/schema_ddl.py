@@ -658,9 +658,9 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
 """
 
 # A7 残留：清扫/排障都按 status、时间过滤，补索引（主表与归档表各自）
-_WEBHOOK_INBOX_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_status_created "
-    "ON grape_t_webhook_inbox (status, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_archived "
-    "ON grape_t_webhook_inbox_archive (archived_at)",
+# MySQL 不支持 `CREATE INDEX IF NOT EXISTS`（MariaDB 才支持），所以索引不做成裸 DDL，
+# 由 ensure 侧先查 information_schema 再建（见 webhook_inbox._ensure_index）。
+_WEBHOOK_INBOX_INDEXES = (
+    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created", "(status, created_at)"),
+    ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived", "(archived_at)"),
 )

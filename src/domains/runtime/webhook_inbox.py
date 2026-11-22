@@ -321,15 +321,19 @@ def ensure_webhook_inbox_table() -> bool:
             c = db.cursor()
             c.execute(_WEBHOOK_INBOX_DDL)
             db.commit()
-        from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_INDEX_DDL
+        from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_INDEXES
 
         with db_lock:
             c = db.cursor()
-            for stmt in _WEBHOOK_INBOX_INDEX_DDL:
+            for table, name, cols in _WEBHOOK_INBOX_INDEXES:
                 try:
-                    c.execute(stmt)
-                except Exception as e:  # noqa: BLE001 - 索引已存在/数据库不支持
-                    log.debug(f"webhook inbox index skipped: {e}")
+                    c.execute("SELECT COUNT(*) FROM information_schema.statistics "
+                              "WHERE table_schema=DATABASE() AND table_name=? AND index_name=?",
+                              (table, name))
+                    if int((c.fetchone() or [0])[0] or 0) == 0:
+                        c.execute(f"CREATE INDEX {name} ON {table} {cols}")
+                except Exception as e:  # noqa: BLE001 - 建索引失败不阻断收件箱消费
+                    log.warning(f"webhook inbox index {name} skipped: {e}")
             db.commit()
         ensure_webhook_inbox_archive_table()
         return True
