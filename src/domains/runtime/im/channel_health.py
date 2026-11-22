@@ -48,6 +48,10 @@ PAUSE_ALERT_WINDOW_SECONDS = 3600.0
 PAUSE_STATE_TTL_SECONDS = 7200.0
 # 失败日志聚合窗口（Spec：每实例每小时 ≤1 条汇总）。
 LOG_WINDOW_SECONDS = 3600.0
+# 多主控下 peer 暂停态的刷新周期（PR #1983 审查 Required）：「全实例 1h 内均暂停」
+# 判定按该 TTL 重读 store——长跑进程的内存快照只到启动那一刻，跨主控 peer 之后
+# 写入的暂停行看不到会漏告警。单实例阈值仍走内存（本进程写侧，真源）。
+PEER_STATE_REFRESH_SECONDS = 30.0
 
 RECOVER_ACTIONS = ("relogin", "clear_pause", "retry_now")
 
@@ -270,7 +274,8 @@ class HourlyLogAggregator:
 
     契约：同一窗口内 `note()` 只计数、不输出；窗口滚动时返回**上窗口**的 1 条汇总
     （count / 首末时间 / 首条样本）。`flush()` 在渠道断开/停机时补输出当前窗口
-    （count>1 才输出，避免单次失败被延迟一小时）。
+    （count>=1：单次失败也立即落日志——PR #1983 审查 Required，原先 count>1
+    才输出会静默丢单次失败）。
     """
 
     def __init__(self, window_seconds: float = LOG_WINDOW_SECONDS,
@@ -304,10 +309,10 @@ class HourlyLogAggregator:
         return int(bucket["count"]) if bucket else 0
 
     def flush(self) -> list[dict]:
-        """输出并清空所有 count>1 的当前窗口（单次失败不延迟上报）。"""
+        """输出并清空所有未滚动窗口（count>=1，单次失败也立即落日志不丢）。"""
         out = []
         for key, bucket in list(self._buckets.items()):
-            if bucket["count"] > 1:
+            if bucket["count"] >= 1:
                 out.append(self._summary(key, bucket))
             self._buckets.pop(key, None)
         return out
@@ -359,6 +364,9 @@ class ChannelHealthTracker:
         self._installations_provider = installations_provider
         self._states: dict[str, ChannelHealthState] = {}
         self._loaded = False
+        # 本进程写过的安装（写侧真源，peer 刷新不覆盖）；上次 peer 重读 store 的时刻
+        self._local_ids: set[str] = set()
+        self._peer_refreshed_at = float("-inf")
 
     # ---------------- 状态读取
 
@@ -534,11 +542,35 @@ class ChannelHealthTracker:
 
     # ---------------- 内部
 
+    def _refresh_peers(self, now: float) -> None:
+        """按短 TTL 重读 store 里的 peer 状态（PR #1983 审查 Required）。
+
+        多主控/跨进程下 `_load()` 只在首次执行：别的实例之后写入的暂停行
+        内存快照看不到，「全实例均暂停」规则会漏告警。判该规则前按
+        `PEER_STATE_REFRESH_SECONDS` 重读 store；本进程写过的安装
+        （`_local_ids`）以内存为准，不被 store 旧值覆盖。
+        """
+        if self._store is None:
+            return
+        if now - self._peer_refreshed_at <= PEER_STATE_REFRESH_SECONDS:
+            return
+        self._peer_refreshed_at = now
+        try:
+            peers = self._store.load()
+        except Exception as e:
+            log.warning("[im-channel-health] peer state refresh failed: %s", e)
+            return
+        for inst, peer in peers.items():
+            if inst in self._local_ids:
+                continue
+            self._states[inst] = peer
+
     def _should_alert(self, state: ChannelHealthState, channel_type: str,
                       now: float) -> tuple[bool, str]:
         if state.consecutive_pauses >= PAUSE_ALERT_CONSECUTIVE:
             return True, (f"consecutive_pauses={state.consecutive_pauses} "
                           f"within={int(PAUSE_REPEAT_WINDOW_SECONDS)}s")
+        self._refresh_peers(now)      # peer 状态短 TTL 重读（多主控漏告警修复）
         population = self._population(channel_type)
         if len(population) >= 2:
             recent = 0
@@ -598,6 +630,8 @@ class ChannelHealthTracker:
     def _persist(self, state: ChannelHealthState) -> None:
         if self._store is None:
             return
+        # 写过的安装登记为「本进程写侧」：peer 刷新（_refresh_peers）不覆盖其内存态
+        self._local_ids.add(state.installation_id)
         try:
             self._store.upsert(state)
         except Exception as e:      # 仓储自身已兜底；这里再保一层，绝不打断渠道
@@ -699,6 +733,7 @@ def recover_channel(installation_id: str, action: str,
 __all__ = [
     "TABLE", "ALERT_RULE", "PAUSE_ALERT_CONSECUTIVE", "PAUSE_REPEAT_WINDOW_SECONDS",
     "PAUSE_ALERT_WINDOW_SECONDS", "PAUSE_STATE_TTL_SECONDS", "LOG_WINDOW_SECONDS",
+    "PEER_STATE_REFRESH_SECONDS",
     "RECOVER_ACTIONS", "ChannelHealthState", "ChannelHealthStore",
     "ChannelHealthTracker", "HourlyLogAggregator", "log_summary",
     "default_store", "health_rows", "recover_channel",

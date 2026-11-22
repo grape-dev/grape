@@ -378,7 +378,9 @@ async def _deliver(engine, target: dict, chat_id: str, card,
     health = getattr(engine, "health_tracker", None) if engine is not None else None
     if health is not None:
         try:
-            if health.is_paused(str(target.get("installation_id") or "")):
+            # 首次调用是全表 SELECT（同步 sqlite）→ 移出事件循环（PR #1983 审查 Optional）
+            if await asyncio.to_thread(health.is_paused,
+                                       str(target.get("installation_id") or "")):
                 return False, False, "channel_paused"
         except Exception as e:      # 健康态读失败 → fail-open，走原路径
             log.debug("[im-notify] health check skipped: %s", e)
@@ -519,7 +521,8 @@ async def _handle_target(target: dict, *, uid, kind: str, text: str,
     health = getattr(eng, "health_tracker", None) if eng is not None else None
     if health is not None:
         try:
-            if health.is_paused(inst):
+            # 同步 sqlite 读移出事件循环（PR #1983 审查 Optional）
+            if await asyncio.to_thread(health.is_paused, inst):
                 _bump("channel_paused")
                 skipped[ctype] = "channel_paused"
                 log.info("[im-notify] channel paused, delivery deferred inst=%s type=%s",
@@ -625,13 +628,18 @@ async def notify_user(user_id, kind: str, text: str, *,
         for target in pick
     ])
 
+    # 已成功的 target（installation → channel_type）。降级判定按 **installation** 区分
+    # 「其它渠道」（PR #1983 审查 Optional）：同一收件人另一条**同类型**健康微信实例
+    # 送达也是成功降级，不能按 channel_type 去重记成 no_fallback。
+    ok_by_inst = {str(t.get("installation_id") or ""): str(t.get("channel_type") or "")
+                  for t in pick if t.get("_sent")}
     sent = [c for t in pick for c in t.pop("_sent", [])]
     failed = [c for t in pick for c in t.pop("_failed", [])]
     skipped: dict = {}
     for t in pick:
         skipped.update(t.pop("_skipped", {}))
 
-    # Issue #3799：暂停渠道的降级记录——本次扇出里已成功的其它渠道即「改用 X 且成功」；
+    # Issue #3799：暂停渠道的降级记录——本次扇出里已成功的其它安装即「改用 X 且成功」；
     # 一个都没有 → no_fallback（内容留在 outbox pending，恢复后补投）。
     health = getattr(eng, "health_tracker", None) if eng is not None else None
     if health is not None:
@@ -640,11 +648,13 @@ async def notify_user(user_id, kind: str, text: str, *,
             inst = str(target.get("installation_id") or "")
             if not ctype or not inst or skipped.get(ctype) != "channel_paused":
                 continue
-            alt = next((c for c in sent if c and c != ctype), "")
+            alt = next((c for i2, c in ok_by_inst.items() if i2 != inst and c), "")
             if alt:
                 skipped[ctype] = f"channel_paused_degraded_to:{alt}"
             try:
-                health.record_degraded_delivery(inst, ctype, to=alt, ok=bool(alt))
+                # 事件循环内不做同步 sqlite 写（insert+commit）：与 outbox 侧口径一致
+                await asyncio.to_thread(health.record_degraded_delivery,
+                                        inst, ctype, to=alt, ok=bool(alt))
             except Exception as e:      # 降级记录失败不得影响通知结果
                 log.warning("[im-notify] record degradation failed inst=%s: %s", inst, e)
 

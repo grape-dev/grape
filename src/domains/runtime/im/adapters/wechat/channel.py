@@ -120,6 +120,9 @@ class WechatChannel(Channel):
         # 连接循环是否在跑（跨线程 request_retry 用；也让管理台能区分"没连上"）
         self._loop_running = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 是否正处于暂停等待（Issue #3799 审查 Optional）：健康渠道上的 retry_now
+        # 不置唤醒闸，避免闸滞留到下一次 ret=-14 跳过 1h 等待立即重试。
+        self._pause_wait_active = False
 
     def type(self) -> Type:
         return Type.WECHAT
@@ -184,6 +187,11 @@ class WechatChannel(Channel):
         """
         if not self._loop_running:
             return False
+        if not self._pause_wait_active:
+            # 渠道健康时无事可唤醒（PR #1983 审查 Optional）：不置闸——置了会滞留，
+            # 下一次 ret=-14 将跳过 1h 等待立即重试（账号级风控下有加重风险）。
+            # 返回 True：连接循环在跑，不向管理台报 channel_not_running。
+            return True
         self.retry_requests += 1
         loop = self._loop
         wake = self._retry_wake
@@ -279,6 +287,7 @@ class WechatChannel(Channel):
         self._record_pause(reason)
         if ctx.cancelled or self._pause_seconds <= 0:
             return False
+        self._pause_wait_active = True
         ctx_wait = asyncio.ensure_future(ctx.wait())
         retry_wait = asyncio.ensure_future(self._retry_wake.wait())
         retry_hit = False
@@ -293,6 +302,7 @@ class WechatChannel(Channel):
                     fut.cancel()
             # 唤醒闸只在本次等待结束后复位：等待期间到达的 retry（含 race）不丢。
             self._retry_wake.clear()
+            self._pause_wait_active = False
         if retry_hit and not ctx.cancelled:
             log.info("[wechat:%s] manual retry requested → resume polling now "
                      "(paused_for=%.0fs)", self._install_tag(),
@@ -449,6 +459,16 @@ class WechatChannel(Channel):
         self._handler_tasks.clear()
         await self._notify_stop()
         self._flush_log_agg()
+        # sender（可能被 CountingSender 透明包装）自己的聚合窗口也要收尾
+        # （PR #1983 审查 Required：sender 侧无 flush 调用点会丢最后一个窗口）。
+        inner = getattr(self._sender, "_inner", self._sender)
+        sender_flush = getattr(inner, "flush_log_agg", None)
+        if callable(sender_flush):
+            try:
+                sender_flush()
+            except Exception as e:
+                log.warning("[wechat:%s] sender log agg flush failed: %s",
+                            self._install_tag(), e)
 
     async def send(self, out: OutboundMessage) -> SendResult:
         return await self._sender.send(out)

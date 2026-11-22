@@ -177,6 +177,20 @@ class WechatSender:
         if summary is not None:
             log_summary("[wechat] notifystart/notifystop", summary)
 
+    def flush_log_agg(self) -> None:
+        """断开/停机收尾（PR #1983 审查 Required）：把未滚动窗口的失败汇总落日志。
+
+        sender 侧聚合器与 channel 侧是两个实例（channel.flush 只清自己的），
+        没有 flush 调用点时最后一个窗口的汇总永远不输出。
+        """
+        try:
+            summaries = self._log_agg.flush()
+        except Exception as e:
+            log.warning("[wechat] notify failure flush failed: %s", e)
+            return
+        for summary in summaries:
+            log_summary("[wechat] notifystart/notifystop", summary)
+
     # ---------------- 发送
 
     async def send(self, out: OutboundMessage) -> SendResult:

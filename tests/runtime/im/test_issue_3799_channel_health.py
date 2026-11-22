@@ -831,8 +831,12 @@ def test_wechat_sender_flush_outputs_pending_window(caplog):
     ch = WechatChannel(cfg, sender, client=BadClient(), log_agg=HourlyLogAggregator(
         window_seconds=3600, clock=FakeClock()))
 
+    async def run():
+        await ch._notify_start()                 # channel 侧聚合器计数
+        await sender.notify_start()             # sender 侧聚合器计数（须经 disconnect flush）
+
     with caplog.at_level("INFO"):
-        asyncio.run(ch._notify_start())          # 经 channel 的 client → sender 均计数
+        asyncio.run(run())
         asyncio.run(ch.disconnect())             # 断开收尾：两套聚合器都要 flush
     assert sender._log_agg.pending("wechat-sender", "notifystart") == 0, \
         "disconnect 后 sender 聚合器仍有未输出窗口"
