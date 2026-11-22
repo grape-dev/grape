@@ -7823,6 +7823,27 @@ def outbox_requeue_for_retry(out_track_id: str) -> bool:
     return _impl(out_track_id)
 
 
+def channel_health_rows() -> list:
+    """渠道健康快照（Issue #3799）：paused / last_pause_at / next_retry_at / 告警态。
+
+    管理台渠道卡片与告警面板的**唯一读口**（表 owner=runtime，跨域只能走本函数）。
+    """
+    from src.domains.runtime.im.channel_health import health_rows as _impl
+
+    return _impl()
+
+
+def channel_recover_channel(installation_id: str, action: str, engine=None) -> dict:
+    """人工恢复入口（Issue #3799）：`relogin / clear_pause / retry_now`。
+
+    返回 `{ok, action, installation_id, reason, health}`；无引擎的进程返回
+    `engine_unavailable`（不改状态，不假装成功）。
+    """
+    from src.domains.runtime.im.channel_health import recover_channel as _impl
+
+    return _impl(installation_id, action, engine=engine)
+
+
 def dingtalk_card_client(app_id: str, app_secret: str):
     """构造钉钉互动卡片实例客户端。"""
     from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient as _C

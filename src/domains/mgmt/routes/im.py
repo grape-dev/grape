@@ -146,6 +146,7 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
     finally:
         conn.close()
     counts = {str(r[0]): int(r[1]) for r in rows or []}
+    health_rows = _channel_health_map()
     return {
         "mode": mode,                                   # on | off（data/im_engine_mode 优先）
         "active_engine": "new" if eng is not None else "idle",  # 旧 legacy 链路已下线
@@ -160,6 +161,13 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
         "scan_interval_sec": 30,
         "notify": _notify_stats(),
         "outbox": _outbox_status(),
+        # Issue #3799：渠道风控暂停总览（明细见 GET /api/im/channels/health）
+        "channel_health": {
+            "paused": sum(1 for r in health_rows.values() if r.get("paused")),
+            "firing": sum(1 for r in health_rows.values()
+                          if r.get("alert_state") == "firing"),
+            "tracked": len(health_rows),
+        },
     }
 
 
@@ -227,7 +235,11 @@ def im_installations(
     repo: str = "",
     user: dict = Depends(get_current_user_or_api_key),
 ):
-    """安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。"""
+    """安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。
+
+    Issue #3799：每条安装带渠道健康字段（`paused / last_pause_at / next_retry_at /
+    consecutive_pauses / alert_state`），前端渠道卡片直接消费，无需二次请求。
+    """
     uid = str(user.get("id") or "")
     conn = _db_conn()
     try:
@@ -241,6 +253,7 @@ def im_installations(
     local_connected = _connected_ids()
     lease_owners = _lease_connected_owners()
     connected = set(local_connected) | set(lease_owners)
+    health_map = _channel_health_map()
     out = []
     for r in rows or []:
         inst_id, ctype, scope, owner, repo_key, config, status, updated = r
@@ -257,6 +270,7 @@ def im_installations(
                     check_repo_access(user, str(repo_key or ""))
                 except Exception:
                     continue
+        health = health_map.get(str(inst_id)) or {}
         out.append({
             "installation_id": inst_id,
             "channel_type": ctype,
@@ -269,8 +283,110 @@ def im_installations(
             "connected_on": str(_instance_id() if inst_id in local_connected
                                 else lease_owners.get(str(inst_id), "")),
             "updated_at": str(updated or ""),
+            # Issue #3799：渠道健康（未记录过的安装 → 默认 active）
+            "paused": bool(health.get("paused")),
+            "last_pause_at": health.get("last_pause_at", ""),
+            "next_retry_at": health.get("next_retry_at", ""),
+            "health": health,
         })
     return {"installations": out, "total": len(out)}
+
+
+def _channel_health_map() -> dict:
+    """渠道健康快照（Issue #3799）：表归 runtime，跨域只经 runtime public 读。"""
+    try:
+        from src.domains.runtime.public import channel_health_rows
+        rows = channel_health_rows() or []
+    except Exception as e:
+        log.warning(f"IM channel health snapshot read failed: {e}")
+        return {}
+    return {str(r.get("installation_id") or ""): r for r in rows if isinstance(r, dict)}
+
+
+class RecoverBody(BaseModel):
+    """人工恢复动作（Issue #3799）。"""
+
+    action: str = "retry_now"
+
+
+@router.get("/channels/health")
+def im_channel_health(user: dict = Depends(get_current_user_or_api_key)):
+    """渠道健康面板（Issue #3799）：paused / last_pause_at / next_retry_at / 告警态。
+
+    告警可检索入口之一：`alert_state=firing` + `alert_reason`（另见 ERROR 日志
+    `[im-channel-health] alert=wechat_channel_unavailable`）。
+    """
+    rows = _channel_health_map()
+    values = sorted(rows.values(),
+                    key=lambda r: r.get("last_pause_at_ts") or 0.0, reverse=True)
+    return {
+        "channels": values,
+        "total": len(values),
+        "paused": sum(1 for r in values if r.get("paused")),
+        "firing": sum(1 for r in values if r.get("alert_state") == "firing"),
+    }
+
+
+@router.post("/installations/{installation_id}/recover")
+def im_installation_recover(installation_id: str, body: RecoverBody,
+                            request: Request,
+                            user: dict = Depends(get_current_user_or_api_key)):
+    """人工恢复入口（Issue #3799）：`relogin / clear_pause / retry_now`。
+
+    - `retry_now`：唤醒渠道暂停等待，立即重新 getupdates（成功即 paused 清除）；
+    - `relogin`：同 retry_now + 打断扫描窗口（重连重新执行 notifystart）；
+    - `clear_pause`：只清暂停态/看板，不动连接。
+    无引擎进程（B/C/D）返回 409 `engine_unavailable`——不改状态、不假装成功。
+    """
+    action = (body.action or "").strip().lower()
+    if action not in ("relogin", "clear_pause", "retry_now"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "action 只支持 relogin / clear_pause / retry_now"})
+
+    conn = _db_conn()
+    try:
+        row = conn.execute(
+            "SELECT scope, owner_user_id, repo_key, channel_type "
+            "FROM grape_t_channel_installation WHERE id=?",
+            (installation_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "安装不存在"})
+    scope, owner, repo_key, channel_type = [str(x or "") for x in row[:4]]
+    uid = str(user.get("id") or "")
+    if scope == "user" and owner and uid and owner != uid:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作其他用户的安装"})
+    if scope == "repo":
+        check_repo_access(user, repo_key)
+
+    from src.domains.runtime.public import channel_health_rows, channel_recover_channel
+    res = channel_recover_channel(installation_id, action, engine=_engine())
+    if not res.get("ok") and res.get("reason") in ("engine_unavailable", "channel_not_running"):
+        message = ("本进程没有 IM 引擎（恢复需在主控/引擎进程执行）"
+                   if res.get("reason") == "engine_unavailable"
+                   else "该渠道在当前进程没有运行中的连接（租约在其它主控或已让渡），请稍后重试")
+        raise HTTPException(status_code=409, detail={
+            "code": 409, "message": message, "installation_id": installation_id,
+            "action": action, "reason": res.get("reason")})
+    log.info(f"IM engine: recover {installation_id} action={action} "
+             f"ok={res.get('ok')} reason={res.get('reason')} (by user={uid})")
+    _audit_im(user, request, f"channel_{action}", installation_id=installation_id,
+              channel_type=channel_type, scope=scope,
+              extra={"ok": bool(res.get("ok")), "reason": str(res.get("reason") or "")})
+    health = {}
+    try:
+        for item in channel_health_rows() or []:
+            if str(item.get("installation_id") or "") == installation_id:
+                health = item
+                break
+    except Exception as e:
+        log.warning(f"IM channel health read after recover failed: {e}")
+    return {"installation_id": installation_id, "channel_type": channel_type,
+            "action": action, "ok": bool(res.get("ok")),
+            "reason": str(res.get("reason") or ""),
+            "health": health or res.get("health") or {}}
 
 
 class NotifyTestBody(BaseModel):
