@@ -11610,6 +11610,66 @@ register_migration(
 )
 
 
+def _patrol_scan_indexes_post_check() -> None:
+    """Issue #3813 post_check：runtime 两条巡检索引在位（缺=不盖章）。"""
+    from src.domains.runtime.migrations.patrol_scan_indexes import (
+        verify_patrol_scan_indexes as _impl,
+    )
+    _impl()
+
+
+def _patrol_findings_indexes_post_check() -> None:
+    """Issue #3813 post_check：mgmt 两条 findings 索引在位（缺=不盖章）。"""
+    from src.domains.mgmt.migrations.patrol_findings_indexes import (
+        verify_patrol_findings_indexes as _impl,
+    )
+    _impl()
+
+
+def _fn_patrol_scan_indexes() -> None:
+    """Issue #3813：巡检候选扫描复合索引（events/agent_tasks，runtime 域）。
+
+    列序依据与 EXPLAIN 基线见
+    src/domains/runtime/migrations/patrol_scan_indexes.py 模块 docstring。
+    """
+    from src.domains.runtime.migrations.patrol_scan_indexes import (
+        ensure_patrol_scan_indexes as _impl,
+    )
+    _impl()
+
+
+def _fn_patrol_findings_indexes() -> None:
+    """Issue #3813：findings known-set / TTL 清理索引（grape_t_patrol_findings，mgmt 域）。"""
+    from src.domains.mgmt.migrations.patrol_findings_indexes import (
+        ensure_patrol_findings_indexes as _impl,
+    )
+    _impl()
+
+
+register_migration(
+    # Issue #3813 S52：巡检候选扫描的 events/agent_tasks 复合索引。列序依据
+    # （实测 EXPLAIN：等值列在前、范围列居中、排序/键集游标列在尾）标注在
+    # 迁移模块 docstring；post_check 保证「索引没建成但盖章」不可发生。
+    version="202611231001",
+    name="patrol-scan-composite-indexes",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_patrol_scan_indexes,
+    post_check=_patrol_scan_indexes_post_check,
+)
+
+
+register_migration(
+    # Issue #3813 S52：findings known-set covering 索引 + TTL 清理定位索引。
+    version="202611231002",
+    name="patrol-findings-scan-indexes",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_patrol_findings_indexes,
+    post_check=_patrol_findings_indexes_post_check,
+)
+
+
 register_migration(
     version="202611220005",
     name="session-token-key-column-width",
