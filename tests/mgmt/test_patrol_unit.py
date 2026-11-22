@@ -1460,9 +1460,13 @@ def test_s34_3_retention_bad_value_falls_back():
 
 
 def test_s34_4_run_once_reports_purged():
-    # UC34-4：run_patrol_once 回执带 purged 字段且清理随轮执行（审计可对账）
+    # UC34-4：run_patrol_once 回执带 purged 字段且清理随轮执行（审计可对账）。
+    # Issue #3813：S53 候选短路后「随轮」收窄为「有候选轮」——零候选轮 findings
+    # 集恒定、清理延迟到下个有候选轮（天级粒度无感）。本用例补探针 seam
+    # （_scan_probe_has_candidates）放行全路径，验证有候选轮的清理契约不变。
     with patch.object(patrol_mod, "patrol_runtime_config",
                       lambda: {"lookback_mode": "runtime"}), \
+         patch.object(patrol_mod, "_scan_probe_has_candidates", lambda c: True), \
          patch.object(patrol_mod, "detect_broken_chains", lambda c, known=None: []), \
          patch.object(patrol_mod, "detect_zombies", lambda known=None: []), \
          patch.object(patrol_mod, "derive_stalled_issues", lambda b: []), \
@@ -2287,6 +2291,7 @@ def test_s50_1_run_once_wires_detect_to_batch_insert():
         return 5
     with patch.object(patrol_mod, "patrol_runtime_config",
                       lambda: {"lookback_mode": "runtime"}), \
+         patch.object(patrol_mod, "_scan_probe_has_candidates", lambda c: True), \
          patch.object(patrol_mod, "detect_broken_chains", lambda c, known=None: [d1]), \
          patch.object(patrol_mod, "detect_zombies", lambda known=None: [z1]), \
          patch.object(patrol_mod, "derive_stalled_issues", lambda b: []), \
@@ -2357,6 +2362,7 @@ def test_s51_1_known_set_shared_within_round():
          patch.object(patrol_mod, "detect_zombies", _zombies), \
          patch.object(patrol_mod, "patrol_runtime_config",
                       lambda: {"lookback_mode": "runtime"}), \
+         patch.object(patrol_mod, "_scan_probe_has_candidates", lambda c: True), \
          patch.object(patrol_mod, "insert_findings_batch", lambda fs, chunk=500: 0), \
          patch.object(patrol_mod, "cleanup_terminal_findings", lambda d=-1: 0):
         patrol_mod.run_patrol_once()
