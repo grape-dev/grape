@@ -157,8 +157,8 @@ def test_sync_round_aggregates_misses_into_single_warning(caplog):
     # 新文案不得再命中 LogQL 验收字符串
     assert "not found in category_dict" not in msg
     assert "unresolved category slugs this round" in msg
-    assert "'skill-dev'×2" in msg  # 别名已解析 category_dict 路径，仅 scene_category 侧 2 次未命中
-    assert "'mystery-slug'×2" in msg  # 未知 slug：category_dict + scene_category 两条路径都未命中
+    assert "'skill-dev'×2 hits" in msg  # 别名已解析 category_dict 路径，仅 scene_category 侧 2 次未命中
+    assert "'mystery-slug'×2 hits" in msg  # 未知 slug：category_dict + scene_category 两条路径都未命中
     assert "legacy-a" in msg  # 样例场景名
     assert "not found in scene_category" not in msg
 

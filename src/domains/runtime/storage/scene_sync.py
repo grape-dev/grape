@@ -159,6 +159,43 @@ def _resolve_scene_category(scene_data: dict, miss_sink: dict | None = None,
         on_miss=_on_miss if miss_sink is not None else None)
 
 
+def _resolve_scene_category_id(scene_data: dict, miss_sink: dict | None = None,
+                               scene_name: str = "") -> int:
+    """按 scene.json 分类解析 `category_id`（scene_category 旧表口径）。
+
+    与 `_resolve_scene_category` 同口径：先直查后 legacy 别名；`category` 为 path 形态
+    （"l1/l2"）时**逐段解析**并取最深的命中段——原实现用整串查 `_cat_cache`，path 形态
+    恒未命中、每轮进聚合告警（PR #1982 审查 Optional）。全部未命中返回 0，调用方保留
+    库内旧值；`miss_sink` 提供时进轮级聚合（键取整串，与 category_dict 路径口径一致），
+    缺省保持原 WARNING（与 category_dict 路径对称）。
+    """
+    from src.kernel.category import (  # noqa: PLC0415
+        canonical_category_slug, scene_category_slug_values)
+
+    info = scene_data if isinstance(scene_data, dict) else {}
+    category_id = 0
+    for value in scene_category_slug_values(info) or ["general"]:
+        hit = _cat_cache.get(value, 0)
+        if not hit:
+            aliased = canonical_category_slug(value)
+            if aliased != value:
+                hit = _cat_cache.get(aliased, 0)
+        if hit:
+            category_id = hit  # 逐段覆盖：path 形态下更具体的段优先
+
+    if category_id:
+        return category_id
+    raw = str(info.get("category") or "general").strip() or "general"
+    if miss_sink is not None:
+        _record_unresolved(miss_sink, raw, scene_name)
+        logger.debug(f"Scene sync: {scene_name} category slug '{raw}' "
+                     f"unresolved in scene_category (aggregated per round)")
+    else:
+        logger.warning(f"Scene sync: {scene_name} category slug '{raw}' "
+                       f"not found in scene_category, category_id=0 (keep existing)")
+    return 0
+
+
 def _compute_scene_hash(scene_dir: str) -> str:
     """计算场景目录的内容 hash（遍历所有文件，按文件名排序，取完整 SHA-256）。"""
     if not os.path.isdir(scene_dir):
@@ -727,18 +764,9 @@ async def sync_official_scenes(repo_root: str | None = None):
                 content_hash = _compute_scene_hash(scene_path)
 
                 # e. category slug → id（category_id 走 scene_category 表口径）。
-                # Issue #3796：先直查后 legacy 别名（与 category_dict 路径同口径），
-                # 未命中只进轮级 sink（循环内 debug），轮末聚合 1 条 WARNING。
-                category_slug = scene_data.get("category", "general")
-                category_id = _cat_cache.get(category_slug, 0)
-                if category_id == 0:
-                    _aliased = canonical_category_slug(category_slug)
-                    if _aliased != category_slug:
-                        category_id = _cat_cache.get(_aliased, 0)
-                if category_id == 0:
-                    _record_unresolved(unresolved, category_slug, name)
-                    logger.debug(f"Scene sync: {name} category slug '{category_slug}' "
-                                 f"unresolved in scene_category (aggregated per round)")
+                # Issue #3796：先直查后 legacy 别名 + path 形态逐段解析（与 category_dict
+                # 路径同口径），未命中只进轮级 sink（循环内 debug），轮末聚合 1 条 WARNING。
+                category_id = _resolve_scene_category_id(scene_data, unresolved, name)
 
                 # f. 查 DB
                 version = scene_data.get("version", "1.0.0")
@@ -793,7 +821,7 @@ async def sync_official_scenes(repo_root: str | None = None):
         # 文案避开「not found in category_dict/scene_category」字面量，防 LogQL 误计）。
         if unresolved:
             _summary = ", ".join(
-                f"'{slug}'×{v['count']} (scenes: {', '.join(v['scenes'])})"
+                f"'{slug}'×{v['count']} hits (scenes: {', '.join(v['scenes'])})"
                 for slug, v in sorted(unresolved.items()))
             logger.warning(f"Scene sync: unresolved category slugs this round "
                            f"(kept existing categories): {_summary}")
