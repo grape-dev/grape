@@ -1231,8 +1231,11 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         # 回调后缀/全局 bot/webhook 三件套/db 列名/建 hook 鉴权参数均卡派生。
         from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
         _hcfg = get_hosting_provider_config(provider)
-        if "/webhook/" in webhook_url:
-            webhook_url = webhook_url.split("/webhook/", 1)[0] + _hcfg["webhook_url_suffix"]
+        # 2026-11-22 修：基址不含 "/webhook/" 段时（裸隧道基址即此形态）旧写法整段
+        # 不执行 → 平台 hook 落到 / 而非 /webhook/<provider>，回调必然 404。
+        # 统一走「按平台卡重建」（同 config_store 的单一来源），基址写不写路径都对。
+        from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+        webhook_url = _rebuild_wh_url(webhook_url, provider)
 
         # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
         import secrets as _secrets
@@ -1723,12 +1726,12 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                 "example": "http://<public-ip>/webhook/gitcode"
             }
         })
-    # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链），
-    # 不再做 gitcode→github 字符串替换——新平台取卡 webhook_path 自动正确。
-    from src.domains.mgmt.user.repo_manager import _webhook_path_from_card as _wh_path
-    _wh_suffix = _wh_path(provider, f"/webhook/{provider}")
-    if _wh_suffix and "/webhook/" in webhook_url:
-        webhook_url = webhook_url.split("/webhook/", 1)[0] + _wh_suffix
+    # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链）。
+    # 2026-11-22 修：旧写法「基址里没有 /webhook/ 段就整段跳过」，裸基址（如隧道
+    # 基址 https://<id>.hwtunnel.com）会建出缺平台路径的 hook → 平台回调 404
+    # （实锤 gitcode:xiaowu2119/yaw-accept-45691）。改为按平台卡重建，缺段自动补。
+    from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+    webhook_url = _rebuild_wh_url(webhook_url, provider)
 
     # B 批（2026-11-13）：托管配置/方言一次解析，下面两段按**方言**而非平台名分派
     from src.domains.mgmt.user.repo_manager import get_hosting_provider_config as _get_hcfg
@@ -2198,8 +2201,10 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
                 "example": "http://<public-ip>/webhook/gitcode"
             }
         })
-    if _cfg["webhook_url_suffix"] not in webhook_url:
-        webhook_url = webhook_url.replace("/webhook/gitcode", _cfg["webhook_url_suffix"])
+    # 2026-11-22 修：旧写法「基址里没有该后缀就 replace」在裸基址（无 /webhook/* 段）
+    # 上是空操作 → 修出来的 hook 缺平台路径。改为按平台卡重建，缺段自动补。
+    from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+    webhook_url = _rebuild_wh_url(webhook_url, _provider)
 
     # 1) bot 是否已是维护者（路径 A only；路径 B 跳过）
     bot_ok = True if _use_path_b else False
