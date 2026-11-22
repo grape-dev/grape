@@ -19,14 +19,18 @@ Issue #3580 复审（对齐 PR #1854 的两个实现点）：
 """
 from __future__ import annotations
 
+import os
 import ssl
 import urllib.error
 import urllib.request
 
 from src.kernel.config import log
 
-# 同时带 cfg/卡缓存：api_base → (ca_bundle, allow_redirects)
-_POLICY_CACHE: "dict[str, tuple[str, bool]]" = {}
+# 平台卡策略缓存：api_base → (解析时刻, ca_bundle, allow_redirects)。
+# 必须有 TTL：管理面改卡（ca_bundle / 方言）后若靠进程重启才生效，等于运维
+# 无法在线修 TLS/重定向策略（架构复审 P2-4）。60s 与卡本身的读取节奏同量级。
+_POLICY_TTL_SECONDS = int(os.environ.get("UPSTREAM_POLICY_TTL_SECONDS", "60"))
+_POLICY_CACHE: "dict[str, tuple[float, str, bool]]" = {}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -57,9 +61,11 @@ def policy_for(url: str) -> "tuple[str, bool]":
     key = _api_base_key(url)
     if not key:
         return "", True
+    import time as _time
+
     cached = _POLICY_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and (_time.time() - cached[0]) < _POLICY_TTL_SECONDS:
+        return cached[1], cached[2]
     ca_bundle, allow_redirects = "", True
     try:
         # 分层约束（check-arch R1 HARD）：kernel 只能经能力端口取平台卡——
@@ -78,7 +84,7 @@ def policy_for(url: str) -> "tuple[str, bool]":
     except Exception as e:  # noqa: BLE001
         log.debug(f"upstream_http: card policy lookup skipped: {e}")
         return "", True
-    _POLICY_CACHE[key] = (ca_bundle, allow_redirects)
+    _POLICY_CACHE[key] = (_time.time(), ca_bundle, allow_redirects)
     return ca_bundle, allow_redirects
 
 
