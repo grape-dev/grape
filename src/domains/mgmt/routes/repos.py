@@ -2067,7 +2067,21 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                     _mark("partial", "path_b_fallback", _HOST_PATH_B_FALLBACK_TEXT)
 
         # 4) webhook：路径 A 用 bot token 查/建；路径 B 用用户 token + 随机密钥
-        existing_id = _hcfg["find_webhook"](webhook_token, owner, repo_name, webhook_url)
+        try:
+            existing_id = _hcfg["find_webhook"](webhook_token, owner, repo_name, webhook_url)
+        except Exception as _fe:
+            # 查询现有 webhook 失败：绝不能当成"没有 hook"继续建（会重复挂同 URL 两条），
+            # 也要给出结构化失败而不是裸 500（GitLab 适配器已不再吞异常）。
+            log.warning(f"host: query existing webhook failed: {_fe}")
+            from src.domains.mgmt.user.db import set_host_status as _shs
+            _shs(repo_key, "webhook_missing", "query_webhook",
+                 _host_error_text(_classify_host_error(_fe)))
+            raise HTTPException(status_code=502, detail={
+                "code": 502, "error_code": "WEBHOOK_QUERY_FAILED",
+                "message": "查询现有 webhook 失败，未重复创建，请稍后重试托管",
+                "host_status": "webhook_missing", "missing": ["webhook"],
+                "step": "query_webhook",
+            })
         if existing_id:
             # Issue #372 R6.2: 路径 B 复用已有 webhook 时密钥不匹配 → 删旧重建
             if _use_path_b:
