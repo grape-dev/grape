@@ -300,8 +300,7 @@ async def create_from_template(body: CreateTemplateRequest,
         raise
     except Exception as e:
         msg = str(e)
-        # 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
-        if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
+        if _is_duplicate_repo_error(msg):
             repo_created = False  # 仓库已存在，尝试复用
             # 复用同名仓：try 内可能未走到 owner_login 赋值 → 单独取一次身份，
             # 否则下面的 full_name 会退化成 "/<name>"（历史潜在 500）。
@@ -334,7 +333,7 @@ async def create_from_template(body: CreateTemplateRequest,
         bot_token, _ = _load_global_bot_config(provider=provider)
         import asyncio, functools
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None,
+        _push_result = await loop.run_in_executor(None,
             functools.partial(push_template_to_repo, tpl, owner_space or owner_login, repo_name,
                               _used_token["v"], bot_token=bot_token, provider=provider,
                               user_id=user.get("id", "") or ""))
@@ -344,6 +343,10 @@ async def create_from_template(body: CreateTemplateRequest,
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {owner_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
         # Issue #3563：上游/git 异常短消息化——剥离内部 URL（原文仅落日志）
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {sanitize_upstream_error(e)}"})
+
+    # 模板落点：pushed_to != "main" 表示默认分支受保护、代码被推到一次性分支，
+    # 默认分支仍然是空的——不告知用户就等于假报"创建并托管成功"。
+    pushed_to = str((_push_result or {}).get("pushed_to") or "main") if isinstance(_push_result, dict) else "main"
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
     #    host_repo 是同步函数（含 GitCode HTTP 调用），用 to_thread 避免阻塞 event loop
@@ -388,6 +391,14 @@ async def create_from_template(body: CreateTemplateRequest,
             host_warning = "托管配置失败"
         msg += f"。⚠️ 重要提醒：请到仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
+    if pushed_to != "main":
+        # 模板代码只落到了特性分支：默认分支为空，必须显式告知
+        _branch_note = (f"模板代码已推送到分支 {pushed_to}（默认分支受保护，无法直接写入），"
+                        f"请人工或流水线把该分支合入默认分支后，仓库才有模板内容。")
+        msg = f"{msg}。⚠️ {_branch_note}"
+        host_warning = (host_warning + "；" + _branch_note) if host_warning else _branch_note
+        log.warning(f"template push landed on '{pushed_to}' instead of main: {full_name}")
+
     # 4. 异步首次托管引导（仅模板创建触发）
     #    仓库托管时 apply_default_scene_to_repo 已应用默认「通用开发」场景。
     #    如果模板自带 scene_id（如 hello-world），覆盖为模板对应的场景。
@@ -421,6 +432,7 @@ async def create_from_template(body: CreateTemplateRequest,
     from src.kernel.repo_key import to_repo_key as _to_rk
     return {"full_name": full_name, "webhook_id": webhook_id,
             "host_warning": host_warning,
+            "pushed_to": pushed_to,
             "message": msg,
             "provider": provider,
             "scene_id": tpl.get("scene_id") or ctx.get("scene_id") or "",
@@ -431,6 +443,21 @@ import json, os, re, asyncio
 from src.domains.mgmt.user.repo_manager import push_template_to_repo
 
 from src.api.deps import get_user_token_for
+
+def _is_duplicate_repo_error(msg: str) -> bool:
+    """同名仓库冲突判定（按平台真实报错文案）。
+
+    GitLab 对重名返回 400 + "has already been taken"，此前只认 409/422 与
+    "already exists"，于是 GitLab 的重名被当成上游故障 → 用户看到 502 而不是
+    "仓库已存在，正在复用"。
+    """
+    text = (msg or "").lower()
+    return any(k in text for k in (
+        "409", "422",
+        "already exists", "already been taken", "has already been taken",
+        "same name", "path already", "已存在", "已经存在", "重名",
+    ))
+
 
 def _apply_template_scene(repo_key: str, tpl_scene_id: str, user_id: str = "") -> str:
     """把模板自带场景应用到仓库并写 managed_repos.dev_scene，返回仓内副本真实 scene_id。

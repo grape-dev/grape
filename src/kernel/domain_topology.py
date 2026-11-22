@@ -18,11 +18,30 @@ DSN_ENV = {d: f"GRAPE_DSN_{d.upper()}" for d in DOMAINS}
 DB_ENV = {d: f"GRAPE_{d.upper()}_DB_NAME" for d in DOMAINS}
 
 
+def _db_from_dsn(dsn: str) -> str:
+    """从 DSN 取库名：mysql://u:p@h:3306/<db>?charset=… / postgres://…/<db>。"""
+    raw = (dsn or "").strip()
+    if not raw or "://" not in raw:
+        return ""
+    tail = raw.split("://", 1)[1]
+    if "/" not in tail:
+        return ""
+    path = tail.split("/", 1)[1]
+    return path.split("?", 1)[0].split("/", 1)[0].strip()
+
+
 def domain_dbs() -> dict[str, str]:
-    """env 里声明的域库名（未声明的不出现）。"""
+    """env 里声明的域库名（未声明的不出现）。
+
+    两处来源都要认：`GRAPE_<DOM>_DB_NAME`（显式库名）与 `GRAPE_DSN_<DOM>`（连接串）。
+    只认前者时，按 DSN 接线的部署会判定成单库 → 三库安全网（启动拒绝/视图自检/
+    跨域回落告警）全部静默失效，正是这道自检要防的"配置漏一项、代码静默换路径"。
+    """
     out: dict[str, str] = {}
     for dom, key in DB_ENV.items():
         name = (os.environ.get(key) or "").strip()
+        if not name:
+            name = _db_from_dsn(os.environ.get(DSN_ENV[dom]) or "")
         if name:
             out[dom] = name
     return out

@@ -342,6 +342,17 @@ class VcsApiClient:
         self.owner = strip_provider_prefix(owner)
         self.repo = repo
 
+    @property
+    def _project_path(self) -> str:
+        """GitLab project id 路径段：owner 可含子组斜杠（grp/sub/proj），
+
+        必须整体编码——只编码 repo 段会拼出 /projects/grp/sub%2Fproj，
+        GitLab 要的是 /projects/grp%2Fsub%2Fproj，否则 404。
+        其余平台（github/gitee/gitcode）没有子组，等价于旧拼法。
+        """
+        from urllib.parse import quote as _q
+        return _q(f"{self.owner}/{self.repo}", safe="")
+
     # === Issue 评论 ===
 
     def _ledger(self, content_type: str, content_id, issue_number, body: str = "") -> None:
@@ -421,7 +432,7 @@ class VcsApiClient:
         if card is None:
             return []
         if card.dialect == "gitlab":
-            _base = f"/projects/{self.owner}%2F{self.repo}/merge_requests/{pr_number}/notes"
+            _base = f"/projects/{self._project_path}/merge_requests/{pr_number}/notes"
         elif (getattr(card, "pr_comment_endpoint", "") or "pulls") == "issues":
             _base = f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments"
         else:
@@ -678,7 +689,7 @@ class VcsApiClient:
         """分支列表（D13 命令面，卡驱动分页）：[{name, protected}]。"""
         branches: list[dict] = []
         if self._dialect_is_gitlab():
-            path = f"/projects/{self.owner}%2F{self.repo}/repository/branches"
+            path = f"/projects/{self._project_path}/repository/branches"
         else:
             path = f"/repos/{self.owner}/{self.repo}/branches"
         page = 1
@@ -709,7 +720,7 @@ class VcsApiClient:
             return {"error": f"unsupported provider: {self.provider}"}
         if self._dialect_is_gitlab():
             def _fetch(page):
-                path = (f"/projects/{self.owner}%2F{self.repo}/merge_requests"
+                path = (f"/projects/{self._project_path}/merge_requests"
                         f"?state={state}&per_page=100&page={page}")
                 return self._request("GET", path)
         else:
@@ -770,7 +781,7 @@ class VcsApiClient:
         card = self._platform_card()
         if self._dialect_is_gitlab():
             return self._card_request("POST",
-                f"/projects/{self.owner}%2F{self.repo}/repository/branches",
+                f"/projects/{self._project_path}/repository/branches",
                 {"branch": branch_name, "ref": refs}, form=True)
         if card is not None and getattr(card, "branch_create_form", "form") == "refs_sha":
             base = refs or "main"
@@ -802,7 +813,7 @@ class VcsApiClient:
         from urllib.parse import quote
 
         if self._dialect_is_gitlab():
-            rinfo = self._card_request("GET", f"/projects/{self.owner}%2F{self.repo}")
+            rinfo = self._card_request("GET", f"/projects/{self._project_path}")
             default_branch = (
                 (rinfo or {}).get("default_branch", "main")
                 if isinstance(rinfo, dict) else "main"
@@ -810,7 +821,7 @@ class VcsApiClient:
             branch = ref or default_branch
             data = self._card_request(
                 "GET",
-                f"/projects/{self.owner}%2F{self.repo}/repository/files/"
+                f"/projects/{self._project_path}/repository/files/"
                 f"{quote(path, safe='')}?ref={branch}",
             )
             content = (data or {}).get("content", "") if isinstance(data, dict) else ""
@@ -849,10 +860,10 @@ class VcsApiClient:
         {"content": "", "endpoint": ""}（调用方语义=空 README）。
         """
         if self._dialect_is_gitlab():
-            rinfo = self._card_request("GET", f"/projects/{self.owner}%2F{self.repo}")
+            rinfo = self._card_request("GET", f"/projects/{self._project_path}")
             default_branch = (rinfo or {}).get("default_branch", "main") if isinstance(rinfo, dict) else "main"
             data = self._card_request("GET",
-                f"/projects/{self.owner}%2F{self.repo}/repository/files/README.md?ref={default_branch}")
+                f"/projects/{self._project_path}/repository/files/README.md?ref={default_branch}")
             content = (data or {}).get("content", "") if isinstance(data, dict) else ""
             if content:
                 try:
@@ -974,10 +985,10 @@ class VcsApiClient:
         """
         card = self._platform_card()
         if card and card.dialect == "gitlab" and gitlab_style is not None:
-            path = f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            path = f"/projects/{self._project_path}{gitlab_style}"
             return self._assert_gitlab_path(path)
         if not github_style and gitlab_style is not None:
-            path = f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+            path = f"/projects/{self._project_path}{gitlab_style}"
             return self._assert_gitlab_path(path)
         if card and card.dialect == "gitlab":
             # 漏传 gitlab_style 就是在拼一条 GitLab 不存在的 `/repos/...`：

@@ -166,16 +166,7 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
         # exists=False 但 broken≠空 = "配过、坏了"，前端要提示重配而不是当成没配。
         **{
-            f"{_p}_pat": (
-                {
-                    "exists": st["exists"],
-                    "login": st["login"],
-                    **({"workflows_write": st["workflows_write"]} if "workflows_write" in st else {}),
-                    **({"broken": st["broken"]} if st.get("broken") else {}),
-                }
-                if (st["exists"] or st.get("broken") or st.get("oauth_bound"))
-                else {}
-            )
+            f"{_p}_pat": _pat_public_payload(st)
             for _p, st in _pat_states.items()
         },
         # 新增（2026-11-18）：令牌来源单列一眼可见——PAT 与"登录授权"是两种形态，
@@ -203,6 +194,29 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
 # GET /credentials 已收敛为「凭据只回存在性」；需要查看/复制明文时走本接口：
 #   二次确认（重新输入 Grape 密码）+ 审计日志 + 明文仅当次返回（Cache-Control: no-store）
 #   + 高频取回告警（窗口内计数超阈值 → 429）。
+def _pat_public_payload(st: dict) -> dict:
+    """`<provider>_pat` 对外投影：存在性 + 登录名 + 到期三键（白名单唯一维护点）。
+
+    到期键（expires_at / expires_state / expires_in_days）由 _pat_state 经
+    CredentialExpiry 产出；若重建白名单时漏掉，前端读到的就是空对象，
+    "PAT 快过期"提醒永远不会出现（功能等于没上线）。
+    """
+    if not (st.get("exists") or st.get("broken") or st.get("oauth_bound")):
+        return {}
+    out = {"exists": st["exists"], "login": st["login"]}
+    if "workflows_write" in st:
+        out["workflows_write"] = st["workflows_write"]
+    if st.get("broken"):
+        out["broken"] = st["broken"]
+    if st.get("expires_at"):
+        out["expires_at"] = st["expires_at"]
+    if st.get("expires_state"):
+        out["expires_state"] = st["expires_state"]
+    if st.get("expires_in_days") is not None:
+        out["expires_in_days"] = st["expires_in_days"]
+    return out
+
+
 _REVEAL_WINDOW_SECONDS = 600      # 高频窗口：10 分钟
 
 _REVEAL_MAX_PER_WINDOW = 10       # 窗口内最大取回次数（第 11 次起告警并拒绝）

@@ -184,8 +184,10 @@ class GitLabProvider(GenericVcsProvider):
         try:
             return find_hook(self._card.api_base, api_token, owner, repo, webhook_url)
         except Exception as e:
+            # 查询失败 ≠ 没有 hook：吞成 None 会让托管流程再建一个重复 hook
+            # （GitLab 对同 URL 不去重，结果同一仓库挂两条、事件重复投递）。
             log.warning(f"gitlab find_existing_webhook failed {owner}/{repo}: {e}")
-            return None
+            raise
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
         # Issue #3580/R5：分页取全（100/页翻到底），不再只取第一页。
@@ -210,7 +212,7 @@ class GitLabProvider(GenericVcsProvider):
             group_access = ((perms.get("group_access") or {}).get("access_level", 0) or 0)
             out.append({
                 "full_name": full, "name": p.get("path", ""),
-                "owner": full.split("/")[0] if "/" in full else "",
+                "owner": full.rsplit("/", 1)[0] if "/" in full else "",
                 "is_admin": max(int(proj_access), int(group_access)) >= self._GL_MAINTAINER,
                 "html_url": p.get("web_url", ""),
             })

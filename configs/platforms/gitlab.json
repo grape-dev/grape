@@ -19,6 +19,7 @@
   },
   "name": "GitLab",
   "dialect": "gitlab",
+  "create_repo_options": true,
   "host": "gitlab.com",
   "webhook_path": "/webhook/gitlab",
   "event_header": "X-Gitlab-Event",

@@ -6,7 +6,10 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.kernel.config import log, WORKSPACE_DIR
 from src.domains.mgmt.user import db as user_db
-from src.domains.mgmt.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
+from src.domains.mgmt.user.repo_manager import (
+    fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo,
+    resolve_use_path_b,
+)
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_token_for, get_user_github_token_with_refresh, require_no_session_token, require_org_member
 from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
@@ -1240,10 +1243,13 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
         import secrets as _secrets
         _create_global_bot_token = _hcfg["bot_token"]
-        _use_path_b = not _create_global_bot_token
+        _use_path_b = resolve_use_path_b(_hcfg, _create_global_bot_token)
         _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
         try:
-            _wh_token = _create_global_bot_token or api_token  # P2-7: 路径 A 用 bot token，路径 B 用用户 token
+            # P2-7: 路径 A 用 bot token，路径 B 用用户 token。方言强制 B（如 gitlab_v4）时
+            # 即便配了全局 bot token 也不能拿它当 webhook 密钥——PAT 会随
+            # X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会让投递全 404。
+            _wh_token = api_token if _use_path_b else (_create_global_bot_token or api_token)
             existing_id = _host_call_with_ready_retry(
                 _hcfg["find_webhook"], _wh_token, owner, repo_name, webhook_url)
             repo_key = to_repo_key(full_name, provider=provider)
@@ -1677,10 +1683,14 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         if _pfx in _repo_listable_providers() and _powner and _prepo:
             _raw = f"{_powner}/{_prepo}"
             body.full_name = _raw
-    parts = _raw.split("/", 1)
-    if len(parts) != 2:
+    # GitLab 支持子组（grp/sub/proj）：owner 是最后一段之前的所有路径，
+    # 按第一个斜杠切会把 owner 落成 grp、repo 落成 sub/proj（托管行 owner 错）。
+    # 其余平台没有子组，rsplit 与 split 等价。
+    if "/" not in _raw:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
-    owner, repo_name = parts
+    owner, repo_name = _raw.rsplit("/", 1)
+    if not owner or not repo_name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
 
     # D44: 显式 provider > 仓库来源提示；仍无 → 按平台 token 可用性自动选择（github 优先，不以登录平台短路）
     _listable = _repo_listable_providers()
@@ -1948,7 +1958,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     # webhook 路径：方言强制（gitlab_v4 必须随机密钥）或没配 bot token 时走 B。
     # bot_token 本身仍用于「邀请 bot 协作者 + 仓库回帖凭据」，与 webhook 路径无关——
     # 此前把它置空来选路径，等于把「bot 出镜」一起关掉了。
-    _use_path_b = bool(_hcfg.get("webhook_path_b")) or not global_bot_token
+    _use_path_b = resolve_use_path_b(_hcfg, global_bot_token)
 
     if _use_path_b:
         # 路径 B：无全局 Bot Token，用用户 Token 建 webhook
@@ -2200,7 +2210,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
     # webhook 路径：方言强制（gitlab_v4 的随机密钥）或没配 bot token 时走 B；
     # bot_token 本身继续用于邀请协作者与回帖身份（与 webhook 路径无关）
-    _use_path_b = bool(_cfg.get("webhook_path_b")) or not bot_token
+    _use_path_b = resolve_use_path_b(_cfg, bot_token)
     import secrets as _secrets
     _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
 
@@ -2288,8 +2298,15 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     hid = None
     try:
         hid = _find_fn(_wh_token, owner, repo, webhook_url)
-    except Exception:
-        hid = None
+    except Exception as _fe:
+        # 查不到 ≠ 不存在：吞成 None 会再建一条重复 hook（同 URL 挂两条、重复投递）。
+        # 查询失败就如实报错，让人/重试处理，不猜。
+        log.warning(f"repair_host: query existing webhook failed: {_fe}")
+        _mark("webhook_missing", "query_webhook",
+              _host_error_text(_classify_host_error(_fe)))
+        return {"status": "error", "host_status": "webhook_missing",
+                "missing": ["webhook"], "step": "query_webhook",
+                "message": "查询现有 webhook 失败，未重复创建：请稍后重试修复"}
     if hid:
         # Issue #2126: 幂等修复——webhook 已存在时优先复用，仅检测到密钥不一致才删旧重建。
         from src.domains.mgmt.user.db import get_webhook_secret

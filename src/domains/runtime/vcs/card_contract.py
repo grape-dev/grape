@@ -202,7 +202,18 @@ class PlatformCardContractClient:
         if isinstance(payload, dict) and str(payload.get("error") or "").strip():
             raise PlatformCardUnavailableError(
                 f"{url}: {str(payload.get('error')).strip()}")
-        return {str(p): dict(raw) for p, raw in cards.items() if isinstance(raw, dict)}
+        # 空字符串列必须按"未配置"处理：表路径（card_projection）会省略空值列，
+        # 契约路径若原样透传，webhook_verify="" / branch_create_form="" 会被 Builder
+        # 判成非法枚举值而整卡拒绝（自建实例只写 dialect+host 时整卡丢失）。
+        out: dict[str, dict] = {}
+        for prov, raw in cards.items():
+            if not isinstance(raw, dict):
+                continue
+            out[str(prov)] = {
+                str(k): v for k, v in raw.items()
+                if not (isinstance(v, str) and v.strip() == "")
+            }
+        return out
 
 
 class PlatformCardContractServer:

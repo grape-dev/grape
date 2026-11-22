@@ -235,32 +235,63 @@ def inbox_stats() -> dict:
         return {str(r[0]): int(r[1]) for r in c.fetchall()}
 
 
+def _iso_to_epoch(value) -> float | None:
+    """created_at/updated_at 是 ISO 字符串（TEXT 列）；兼容历史 epoch 数字。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def inbox_metrics() -> dict:
-    """队列维度的可观测指标（A13）：积压深度、最老等待时长、租约过期、重试总量。"""
-    out = {"pending": 0, "claimed": 0, "dead": 0, "consumed": 0,
-           "oldest_pending_age_s": 0.0, "lease_expired": 0, "retries_total": 0}
+    """队列维度的可观测指标（A13）：积压深度、最老等待时长、租约过期、重试总量。
+
+    状态词表以生产者/消费者实际写入为准：pending / processing / failed / dead /
+    consumed。历史口径里的 `claimed` 在本实现中不存在（租约占用的行是
+    `processing`），照 `claimed` 查会恒为 0；`claimed` 仅作 processing 的别名保留，
+    便于既有看板过渡。
+    """
+    out = {"pending": 0, "processing": 0, "claimed": 0, "failed": 0,
+           "dead": 0, "consumed": 0,
+           "oldest_pending_age_s": 0.0, "lease_expired": 0, "retries_total": 0,
+           "open_rows": 0}
+    _OPEN = ("pending", "processing", "failed")
     try:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT status, COUNT(*) FROM grape_t_webhook_inbox GROUP BY status")
             for status, n in c.fetchall():
-                if str(status) in out:
-                    out[str(status)] = int(n)
+                key = str(status or "")
+                if key in out:
+                    out[key] = int(n)
+                elif key:
+                    out[key] = int(n)  # 未知状态也如实暴露，不静默丢弃
+            out["claimed"] = out["processing"]  # 别名（历史看板口径）
             c.execute("SELECT COUNT(*), COALESCE(SUM(attempts), 0) FROM grape_t_webhook_inbox "
-                      "WHERE status IN ('pending','claimed')")
+                      "WHERE status IN ('pending','processing','failed')")
             row = c.fetchone() or (0, 0)
             out["open_rows"] = int(row[0] or 0)
             out["retries_total"] = int(row[1] or 0)
-            c.execute("SELECT MIN(created_at) FROM grape_t_webhook_inbox WHERE status='pending'")
+            c.execute("SELECT MIN(created_at) FROM grape_t_webhook_inbox "
+                      "WHERE status IN ('pending','failed')")
             oldest = (c.fetchone() or [None])[0]
-            if oldest:
-                try:
-                    out["oldest_pending_age_s"] = max(0.0, time.time() - float(oldest))
-                except (TypeError, ValueError):
-                    out["oldest_pending_age_s"] = 0.0
+            epoch = _iso_to_epoch(oldest)
+            if epoch is not None:
+                out["oldest_pending_age_s"] = max(0.0, time.time() - epoch)
             c.execute("SELECT COUNT(*) FROM grape_t_webhook_inbox "
-                      "WHERE status='claimed' AND lease_expires_at<>'' AND lease_expires_at<?",
-                      (str(time.time()),))
+                      "WHERE status='processing' AND lease_expires_at<>'' AND lease_expires_at<?",
+                      (_now(),))
             out["lease_expired"] = int((c.fetchone() or [0])[0] or 0)
     except Exception as e:  # noqa: BLE001 - 指标失败绝不影响消费
         log.warning(f"webhook inbox metrics failed: {e}")
@@ -274,7 +305,8 @@ def emit_inbox_metrics() -> dict:
         from src.domains.insight import public as _insight
         if not _insight.available():
             return stats
-        for metric in ("pending", "claimed", "dead", "consumed",
+        # 状态口径与 inbox_metrics 一致（processing 是租约占用的真实状态）
+        for metric in ("pending", "processing", "failed", "dead", "consumed",
                        "open_rows", "retries_total", "lease_expired"):
             if metric in stats:
                 _insight.record_metric(f"webhook_inbox_{metric}", float(stats.get(metric) or 0),

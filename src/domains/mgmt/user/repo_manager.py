@@ -1072,6 +1072,21 @@ def get_hosting_provider_config(provider: str) -> dict:
     }
 
 
+def resolve_use_path_b(hcfg: dict, bot_token: str) -> bool:
+    """webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+
+    两个触发条件，缺一不可：
+    1. `webhook_path_b`（方言的**安全要求**，如 gitlab_v4：PAT 经 X-Gitlab-Token
+       会外泄给项目维护者）；
+    2. 没有可用的全局 bot token（路径 A 需要它当 webhook token）。
+
+    历史上调用点各自写 `not bot_token`，于是配上全局 bot token 后 GitLab 会把 PAT
+    当 webhook 密钥写进 hook，且 DB 侧密钥为空 → 所有投递 404。三个托管入口
+    （host / repair-host / create 内联托管）统一走本函数。
+    """
+    return bool((hcfg or {}).get("webhook_path_b")) or not (bot_token or "")
+
+
 def _setup_kwargs_fn(dialect: str):
     """返回 setup_webhook 鉴权参数构造器（入参 secret/wh_token/use_path_b）。"""
     def _github_style(secret: str, _wh_token: str, use_path_b: bool) -> dict:
