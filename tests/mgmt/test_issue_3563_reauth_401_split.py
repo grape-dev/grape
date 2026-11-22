@@ -187,7 +187,7 @@ class TestCreateFromTemplateReauth:
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"} if not seen_tokens.append(token) else {})
         monkeypatch.setattr(GitHubProvider, "create_repo",
-                            lambda self_, token, name, description="", private=False:
+                            lambda self_, token, name, description="", **kwargs:
                             {"full_name": f"gh_user_3563/{name}"} if not seen_tokens.append(token) else {})
         from src.domains.mgmt.routes import templates as templates_mod
         monkeypatch.setattr(templates_mod, "push_template_to_repo", lambda *a, **k: True)
@@ -209,7 +209,7 @@ class TestCreateFromTemplateReauth:
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
 
-        def _create_boom(self_, token, name, description="", private=False):
+        def _create_boom(self_, token, name, description="", **kwargs):
             raise RuntimeError("GitHub API POST https://api.github.com/user/repos failed (500): boom")
 
         monkeypatch.setattr(GitHubProvider, "create_repo", _create_boom)
@@ -228,7 +228,7 @@ class TestCreateFromTemplateReauth:
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
 
-        def _conflict(self_, token, name, description="", private=False):
+        def _conflict(self_, token, name, description="", **kwargs):
             raise RuntimeError("GitHub API POST /user/repos failed (422): already exists")
 
         monkeypatch.setattr(GitHubProvider, "create_repo", _conflict)
