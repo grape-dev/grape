@@ -1,3 +1,4 @@
+
 """VCS 平台适配器 —— 能力抽象（接口隔离原则）。
 
 一个平台适配器不再是一个 22 方法的巨型对象，而是四类能力的并集：
@@ -19,6 +20,19 @@ from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.token_resolver import _audit_source
 
+
+#: 单页长度。来源=厂商文档：GitHub / GitLab 列表接口的 `per_page` 上限均为 100
+#: （GitLab 默认 20、上限 100；GitHub 默认 30、上限 100），取平台允许的最大页长，
+#: 用于把「翻页次数」压到最少。登记于 docs/issue-3580/measurements.md「列表分页上限」。
+_PER_PAGE = 100
+#: 列表分页上限（沿用 base `kernel/token_resolver.py:387/443` 的历史值，不是新拍的数字）：
+#: per_page=100（GitHub/GitLab 文档的最大页长）→ 20 页 = 2000 条封顶。超出即停止翻页
+#: 并打 WARNING（列表会被截断，用户可能少看到仓库/协作者），口径登记于
+#: docs/issue-3580/measurements.md「列表分页上限」。
+_MAX_LIST_PAGES = 20
+_MAX_LIST_PAGES_WARN = (
+    "vcs list pagination hit the {pages}-page cap ({rows} rows): result truncated, "
+    "raise the cap or add search-based paging if this account really has more")
 
 class TokenCapability(ABC):
     """身份与凭据字段能力（token 链最小依赖面）。"""
@@ -387,8 +401,8 @@ class GenericVcsProvider(VCSProvider):
             # 降级不阻断：角色可能显示 Member（原行为），列表完整返回
             log.warning(f"fetch_repos_with_role: owner login fetch failed "
                         f"(fallback to permissions-only): {e}")
-        while page <= 20:
-            batch = self._http("GET", f"/user/repos?per_page=100&page={page}", api_token)
+        while page <= _MAX_LIST_PAGES:
+            batch = self._http("GET", f"/user/repos?per_page={_PER_PAGE}&page={page}", api_token)
             if not isinstance(batch, list) or not batch:
                 break
             for r in batch:
@@ -421,9 +435,11 @@ class GenericVcsProvider(VCSProvider):
                     "created_at": (r.get("created_at") or r.get("created_on")
                                    or r.get("created") or ""),
                 })
-            if len(batch) < 100:
+            if len(batch) < _PER_PAGE:
                 break
             page += 1
+        if page > _MAX_LIST_PAGES:
+            log.warning(_MAX_LIST_PAGES_WARN.format(pages=_MAX_LIST_PAGES, rows=len(out)))
         return out
 
     def get_collaborator_permission(self, api_token, owner, repo, username) -> "dict | str | None":
@@ -443,17 +459,19 @@ class GenericVcsProvider(VCSProvider):
         login 字段），调用方按 nick/login 匹配。存量平台子类委托覆写。
         """
         out, page = [], 1
-        while page <= 20:
+        while page <= _MAX_LIST_PAGES:
             batch = self._http("GET",
-                f"/repos/{owner}/{repo}/collaborators?per_page=100&page={page}", api_token)
+                f"/repos/{owner}/{repo}/collaborators?per_page={_PER_PAGE}&page={page}", api_token)
             if not isinstance(batch, list) or not batch:
                 break
             for c in batch:
                 if isinstance(c, dict):
                     out.append(c)
-            if len(batch) < 100:
+            if len(batch) < _PER_PAGE:
                 break
             page += 1
+        if page > _MAX_LIST_PAGES:
+            log.warning(_MAX_LIST_PAGES_WARN.format(pages=_MAX_LIST_PAGES, rows=len(out)))
         return out
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):

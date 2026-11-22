@@ -229,7 +229,9 @@ def _connect_own():
         database=os.environ.get("DEVOPS_DB_NAME", ""),
         charset="utf8mb4",
         autocommit=True,
-        connect_timeout=8,
+        # 与 mysql_compat 的连接口径一致（既有 10s）：启动期视图检查若更短，
+        # 多库拓扑下会被误判成网络故障而跳过一致性检查。
+        connect_timeout=10,
     )
 
 

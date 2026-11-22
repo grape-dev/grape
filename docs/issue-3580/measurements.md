@@ -107,3 +107,13 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://$HOST/api/v4/projects"
 # 2) 业务口径确认：提醒提前量是否仍按"一个迭代"（14 天）
 grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
 ```
+
+## 6. 常量来源 · 分页与上限（平台文档 / 部署口径，非本机实测）
+
+| 常量 | 位置 | 值 | 来源与说明 |
+|---|---|---|---|
+| `_WEBHOOK_MAX_BODY_BYTES` | `src/domains/runtime/routes/webhook.py` | 10 MB | ① 部署口径：边缘 nginx `client_max_body_size 10m`（应用上限不得高于边缘，否则两处口径分裂）；② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），10MB 覆盖 push/PR/issue 事件分布；③ 与附件 200MB 上限无关（附件走独立上传通道） |
+| `connect_timeout`（视图自检） | `src/kernel/domain_views.py` | 10s | 统一到 `mysql_compat` 的既有连接口径（10s）；启动期检查用更短超时会在多库拓扑下被误判成网络故障而跳过一致性检查 |
+| `_PER_PAGE` | `src/domains/mgmt/vcs/base.py` | 100 | 厂商文档：GitHub / GitLab 列表接口 `per_page` 上限均为 100 |
+| `_MAX_LIST_PAGES` | `src/domains/mgmt/vcs/base.py` | 20 | 沿用 base `src/kernel/token_resolver.py:387/443` 的历史值（provider 抽取时原样搬入）；100×20 = 2000 条封顶，触顶时打 WARNING 说明结果被截断 |
+| `_HOOKS_TREE_MAX_PAGES` | `src/api/git_repo_api.py` | 50 | 100×50 = 5000 条 hook 封顶，用于 hook 树遍历的上界保护 |
