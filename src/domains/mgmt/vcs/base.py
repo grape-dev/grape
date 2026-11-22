@@ -216,6 +216,9 @@ class GenericVcsProvider(VCSProvider):
         else:
             body = _json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        import time as _time
+        _t0 = _time.monotonic()
+        _log_path = path.split("?")[0]          # 不落 query（可能含 access_token）
         try:
             from src.kernel.upstream_http import open_with_policy as _open_policy
             with _open_policy(
@@ -223,13 +226,20 @@ class GenericVcsProvider(VCSProvider):
                     ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
                     allow_redirects=self._card.dialect != "gitlab",
             ) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
+                _payload = _json.loads(resp.read().decode("utf-8"))
+                log.info(f"vcs upstream {self._card.provider} {method} "
+                         f"{self._card.api_base}{_log_path} -> {getattr(resp, 'status', 200)} "
+                         f"{( _time.monotonic() - _t0) * 1000:.0f}ms")
+                return _payload
         except urllib.error.HTTPError as e:
             # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
             try:
                 _detail = e.read().decode("utf-8", "replace")[:300]
             except Exception:  # noqa: BLE001
                 _detail = ""
+            log.warning(f"vcs upstream {self._card.provider} {method} "
+                        f"{self._card.api_base}{_log_path} -> {e.code} "
+                        f"{( _time.monotonic() - _t0) * 1000:.0f}ms")
             raise RuntimeError(
                 f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
                 + (f" | {_detail}" if _detail else "")) from e
