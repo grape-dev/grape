@@ -13,6 +13,7 @@ import logging
 import sqlite3
 import time
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -24,8 +25,11 @@ from src.domains.runtime.im.channel.types import Type
 # ---------------------------------------------------------------- helpers
 
 class FakeClock:
-    def __init__(self, now: float = 1_700_000_000.0):
-        self.now = now
+    def __init__(self, now: Optional[float] = None):
+        # 默认跟真实时钟同量级：`to_dict()/health_rows()` 等读侧用真实 `time.time()`
+        # 判「暂停态是否超 TTL」（PR #1983 R2 复审 Nit），基准固定在过去会让时间
+        # 推进型断言变成「遗留暂停行」。
+        self.now = time.time() if now is None else now
 
     def __call__(self) -> float:
         return self.now
@@ -182,11 +186,12 @@ def test_stale_pause_row_not_treated_as_paused(health_db):
     from src.domains.runtime.im.channel_health import (
         PAUSE_STATE_TTL_SECONDS, ChannelHealthTracker, health_rows)
 
-    clock = FakeClock()
+    # 暂停发生在 TTL 之前（写库行本身已过期）：读侧（含管理台的真实时钟）都判 stale
+    clock = FakeClock(time.time() - PAUSE_STATE_TTL_SECONDS - 60)
     tracker = ChannelHealthTracker(store=_store(health_db), instance_id="host-1",
                                    clock=clock)
     tracker.record_pause("inst-1", "wechat", reason="ret=-14")
-    clock.advance(PAUSE_STATE_TTL_SECONDS + 1)
+    clock.advance(PAUSE_STATE_TTL_SECONDS + 1)      # 引擎侧也越过 TTL
     assert tracker.is_paused("inst-1") is False
     assert "inst-1" not in tracker.paused_ids()
 
@@ -1152,3 +1157,21 @@ def test_paused_deferral_logs_once_per_window(outbox_db, caplog):
     OB.release_sending(tid)                # 让该行马上又可认领（模拟下一轮）
     asyncio.run(consumer.run_once())
     assert _paused_logs() == [], "同窗口内重复刷「channel paused」INFO"
+
+
+def test_recover_action_wakes_deferred_paused_rows(outbox_db):
+    """Required 配套（PR #1983 R2 复审）：暂停行被推到渠道 next_retry_at（最长 1h）后，
+    人工 `retry_now/relogin/clear_pause` 提前恢复必须把行拉回「立刻可认领」——
+    否则「恢复后补投」实际要等到原暂停窗口结束。"""
+    from src.domains.runtime.im import channel_health
+    from src.domains.runtime.im import outbox as OB
+
+    eng, consumer, tids, ch = _seed_paused_outbox(outbox_db, count=1, pause_seconds=3600.0)
+    asyncio.run(consumer.run_once())
+    assert OB.claim_batch("owner-A") == [], "暂停窗口内不应认领"
+
+    res = channel_health.recover_channel("inst-1", "clear_pause",
+                                        tracker=eng.health_tracker)
+    assert res["ok"] is True
+    assert [r["out_track_id"] for r in OB.claim_batch("owner-A")] == tids, \
+        "人工恢复后 pending 行仍被 next_retry_at 挡在暂停窗口里（补投最长延迟 1h）"
