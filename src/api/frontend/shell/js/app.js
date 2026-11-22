@@ -585,11 +585,13 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
               if (h2.length <= 1) { nav('dash'); return; }
             }
             _restoreNavAfterLogin();
+            _resumeScenePollAfterLogin();
           });
         }, 400);
         return;
       }
       _restoreNavAfterLogin();
+      _resumeScenePollAfterLogin();
     });
   }
 
@@ -683,6 +685,9 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // Issue #600：离开/被踢时停掉流水线卡片轮询
     if (typeof stopPipePolling === 'function') stopPipePolling();
+    // Issue #3734：被踢时停掉需求看板轮询（此前只收口了 dashboard/pipe，tasks 仍在
+    // 每 30s 裸发 401 → 单日 2.8 万条噪声）；与 _refreshTimer/pipe 同一收口语义
+    if (typeof _stopScenePoll === 'function') _stopScenePoll();
     // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
     window._currentView = '';
     renderOAuthButtons();
@@ -820,6 +825,13 @@ function loadAgentTypes() {
     } else {
       // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
     }
+  }
+
+  // Issue #3734：登录恢复后回启 tasks 看板轮询。登出/被踢只切 DOM、不一定卸载
+  // Vue 组件（onMounted 不会重跑），因此由 showApp 链路显式回启；startPoll 自带
+  // 清旧 timer，重复调用不会产生双定时器。
+  function _resumeScenePollAfterLogin() {
+    if (window._currentView === 'tasks' && typeof _startScenePoll === 'function') _startScenePoll();
   }
 
   // 仓库平台关系刷新（D109 对象模型）：PAT / OAuth 绑定后关系行是服务端写的，

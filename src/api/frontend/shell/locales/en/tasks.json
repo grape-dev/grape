@@ -166,7 +166,9 @@
   },
   "board": {
     "refresh_failed_keep": "Board refresh failed, showing the last data",
-    "retry": "Retry"
+    "retry": "Retry",
+    "session_expired": "Session expired, please log in again",
+    "relogin": "Log in again"
   },
   "dispatch": {
     "title": "Dispatch details",

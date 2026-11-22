@@ -166,7 +166,9 @@
   },
   "board": {
     "refresh_failed_keep": "看板刷新失败，已保留上次数据",
-    "retry": "重试"
+    "retry": "重试",
+    "session_expired": "登录已失效，请重新登录",
+    "relogin": "重新登录"
   },
   "dispatch": {
     "title": "任务派发详情",
