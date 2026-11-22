@@ -72,3 +72,54 @@ CI 强校验），避免误伤线上启动。
 | 部署根无 `scenes/`（grape-skills 下发） | 校验脚本/启动校验对缺目录降级跳过 |
 | 聚合告警掩盖新增坏 slug | 聚合行输出完整 slug 列表 + CI/strict 校验前移拦截 |
 | 现有 test_scene_sync 用例依赖 `_cat_cache={"general":1}` 直查 | category_id 路径保持「先直查后别名」，直查命中行为不变 |
+
+## 审查修复（PR #1982 · QA Required/Optional/Nit）
+
+### Required：hash 幂等层挡住分类回填（Spec 验收第 2 条的真正落地路径）
+
+原方案只改了「解析」侧（别名 + 轮聚合），但写库侧 `upsert_scene_content*` 在
+`content_hash` 与库内一致时直接 `skipped`：线上存量旧 slug 场景的 `scene.json` 未改、
+hash 长期不变 → 每轮 skipped → `cat_l1_id/cat_l2_id` 永远停在收敛前旧值（告警会归零，
+但「场景分类停更」未修复）。
+
+修复分两层，缺一不可：
+
+1. **mgmt 写原语（`src/domains/mgmt/public/__init__.py`）**
+   - 抽出 `_scene_category_backfill_cols(payload, old_cat, old_l1, old_l2)`：只挑
+     「目标明确（非 0）且与库内不同」的分类列；未命中语义不变（列缺席/0 = 保留旧值）；
+     `cat_l1_id` 沿用 `sync_category_target`（一级变更且未给二级 → 重置旧二级）。
+   - `upsert_scene_content` / `upsert_scene_content_any` 的 hash 一致分支先比对分类目标：
+     不同 → **一次窄 UPDATE（只动分类列，内容列/`is_active` 不动）** 并返回
+     `action="backfilled"` + `backfilled=[列名]`；相同 → 仍 `skipped`（幂等语义不变）。
+2. **runtime 同步层（`scene_sync._persist_scene_row`）**
+   - 三库拓扑下写走 `cross_write`，键原为 `scene-upsert:{name}:{hash}` = **永久去重**：
+     存量场景每轮 `duplicate`，mgmt 侧 upsert 根本不执行 → 回填在线上跑不到。
+   - 新增 `_scene_upsert_key`：键含分类目标（`category_id`/`cat_l1_id`/`cat_l2_id`）→
+     目标变化换键、真实执行一次；同内容同目标仍去重（跨域写日志行不随轮次增长）。
+   - `backfilled` 单独计 `stats["backfilled"]` 并跳过 icon/ref 重建（内容未变）。
+
+验收口径：`sync_official_scenes(repo_root=...)` 全流程用例（**不 mock 持久化层**）断言
+「hash 未变 + 分类目标变更 → 库内 `cat_l1/cat_l2` 落 1xxx，第二轮幂等不再写」。
+
+### Optional
+
+- `category_id`（scene_category）路径对 path 形态分类**逐段解析**（原实现整串查恒未命中）。
+- 启动校验优先用运行时字典快照 `category_dict_active_map("scene")`，取不到回落种子口径，
+  日志/告警显式标注 `dict=` 来源（消除「校验用种子、运行时用 DB」的口径错位）。
+- `scripts/check_category_slugs.py`：缺 `scenes/` 输出 WARNING（不再静默通过）+
+  显式 `--allow-missing` 开关。
+
+### Nit
+
+- 聚合文案 `'slug'×N hits`（次数含两条路径，避免误读为场景数）。
+- `src/api/main.py` 去掉函数内 `import os as _os`，仓库根探测复用 `scene_sync._repo_root`。
+- 别名解析抽 `alias_target()` 纯函数（跟随别名链），`lookup_slug`/`canonical_category_slug`/
+  `validate_category_slugs` 共用，避免多处漂移。
+
+### 追加测试 seam
+
+- `test_issue_3796_scene_category_backfill`（mgmt，真 sqlite + lib 假游标）：回填/幂等/未命中/二级重置。
+- `test_issue_3796_scene_sync_category`：`sync_official_scenes` 真持久化回填 + 幂等键含分类目标 +
+  `_resolve_scene_category_id` path 拆段。
+- `test_issue_3796_category_aliases`：别名链、`dict_map` 快照。
+- `test_issue_3796_category_slug_startup` / `test_check_category_slugs`：DB 口径优先、缺目录 WARNING、`--allow-missing`。

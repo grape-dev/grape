@@ -41,3 +41,16 @@
 - [x] 新用例 + 既有 `tests/mgmt/test_scene_sync.py`（category=general 直查路径不回归）全绿
 - [x] 自审查（5 轴 + pre-pr 增量检查）
 - [x] 提交推送 `feat/issue-3796`、建 PR（base=arch-weekly-11-ljt）、Issue 评论告知、A2A QA
+
+## 切片 5：PR #1982 审查修复（Required + Optional + Nit）
+
+- [x] RED：`tests/mgmt/test_issue_3796_scene_category_backfill.py`（hash 相同 + 分类目标变更 →
+  窄 UPDATE；lib 路径只发分类列 UPDATE）、`tests/runtime/test_issue_3796_scene_sync_category.py`
+  （真持久化回填 + 第二轮幂等 + 幂等键含分类目标）、kernel/scripts/api 三处 Optional/Nit 断言
+- [x] GREEN：`src/domains/mgmt/public/__init__.py`（`_scene_category_backfill_cols` + backfilled）、
+  `src/domains/runtime/storage/scene_sync.py`（`_scene_upsert_key` / `backfilled` /
+  `_resolve_scene_category_id` path 拆段 / 聚合文案 hits）
+- [x] GREEN：`src/kernel/category.py`（`alias_target` + `dict_map` 快照参数）、
+  `scripts/check_category_slugs.py`（WARNING + `--allow-missing`）、`src/api/main.py`（DB 口径优先）
+- [x] 回归：issue 相关 4 套 + `tests/mgmt/test_scene_sync.py` + `tests/mgmt/test_issue2761_classification_tags.py`
+  （仅 2 个基线既有环境失败，与本次改动无关）；lint 棘轮 undefined-name 0/1、async-blocking 255/273、check-arch PASS
