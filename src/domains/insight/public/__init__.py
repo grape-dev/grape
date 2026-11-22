@@ -104,6 +104,26 @@ def record_merge_gate_log(repo_key: str, pr_number: int, phase: str, decision: s
         return new_id
 
 
+def record_metric(metric: str, value: float, dim_key: str = "global",
+                  repo_key: str = "", cnt: int = 0,
+                  resolution: str = "minute", bucket_start: str = "") -> None:
+    """通用指标落库（A13）：按 (resolution, bucket_start, metric, dim_key) 幂等累加。
+
+    运维面板/告警从 `obs_metric_rollup` 读，队列类指标（积压深度、租约过期数、
+    重试总量）由生产方在固定间隔导出，避免每笔投递都写指标表。
+    """
+    import datetime as _dt
+    bucket = bucket_start or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    with db_registry.cursor("insight") as c:
+        c.execute(
+            "INSERT INTO obs_metric_rollup "
+            "(resolution, bucket_start, metric, dim_key, repo_key, value, cnt) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE value=VALUES(value), cnt=VALUES(cnt), "
+            "updated_at=NOW()",
+            (resolution, bucket, metric, dim_key, repo_key, float(value), int(cnt)))
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("insight") as c:
@@ -115,7 +135,8 @@ def health() -> dict[str, Any]:
                 "dsn_configured": bool(db_registry.dsn_of("insight"))}
 
 
-__all__ = ["available", "record_api_latency", "record_merge_gate_log", "health"]
+__all__ = ["available", "record_api_latency", "record_merge_gate_log",
+           "record_metric", "health"]
 
 # ---------- 任意拓扑原语（自有 DSN 走 db_registry；单库/测试拓扑回落进程主库）----------
 #

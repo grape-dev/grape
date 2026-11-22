@@ -213,6 +213,57 @@ def inbox_stats() -> dict:
         return {str(r[0]): int(r[1]) for r in c.fetchall()}
 
 
+def inbox_metrics() -> dict:
+    """队列维度的可观测指标（A13）：积压深度、最老等待时长、租约过期、重试总量。"""
+    out = {"pending": 0, "claimed": 0, "dead": 0, "consumed": 0,
+           "oldest_pending_age_s": 0.0, "lease_expired": 0, "retries_total": 0}
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status, COUNT(*) FROM grape_t_webhook_inbox GROUP BY status")
+            for status, n in c.fetchall():
+                if str(status) in out:
+                    out[str(status)] = int(n)
+            c.execute("SELECT COUNT(*), COALESCE(SUM(attempts), 0) FROM grape_t_webhook_inbox "
+                      "WHERE status IN ('pending','claimed')")
+            row = c.fetchone() or (0, 0)
+            out["open_rows"] = int(row[0] or 0)
+            out["retries_total"] = int(row[1] or 0)
+            c.execute("SELECT MIN(created_at) FROM grape_t_webhook_inbox WHERE status='pending'")
+            oldest = (c.fetchone() or [None])[0]
+            if oldest:
+                try:
+                    out["oldest_pending_age_s"] = max(0.0, time.time() - float(oldest))
+                except (TypeError, ValueError):
+                    out["oldest_pending_age_s"] = 0.0
+            c.execute("SELECT COUNT(*) FROM grape_t_webhook_inbox "
+                      "WHERE status='claimed' AND lease_expires_at<>'' AND lease_expires_at<?",
+                      (str(time.time()),))
+            out["lease_expired"] = int((c.fetchone() or [0])[0] or 0)
+    except Exception as e:  # noqa: BLE001 - 指标失败绝不影响消费
+        log.warning(f"webhook inbox metrics failed: {e}")
+    return out
+
+
+def emit_inbox_metrics() -> dict:
+    """把队列指标导出到 insight（obs_metric_rollup）；insight 不可用则静默跳过。"""
+    stats = inbox_metrics()
+    try:
+        from src.domains.insight import public as _insight
+        if not _insight.available():
+            return stats
+        for metric in ("pending", "claimed", "dead", "consumed",
+                       "open_rows", "retries_total", "lease_expired"):
+            if metric in stats:
+                _insight.record_metric(f"webhook_inbox_{metric}", float(stats.get(metric) or 0),
+                                       dim_key="global")
+        _insight.record_metric("webhook_inbox_oldest_pending_age_s",
+                               float(stats.get("oldest_pending_age_s") or 0.0), dim_key="global")
+    except Exception as e:  # noqa: BLE001
+        log.debug(f"webhook inbox metrics export skipped: {e}")
+    return stats
+
+
 def worker_owner() -> str:
     return f"{os.environ.get('HOSTNAME', 'event')}:{os.getpid()}"
 
@@ -333,8 +384,15 @@ async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
     owner = worker_owner()
     log.info(f"webhook inbox worker started (owner={owner})")
     last_purge = time.time()
+    last_metrics = 0.0
     while True:
         try:
+            if time.time() - last_metrics >= 60:
+                last_metrics = time.time()
+                try:
+                    await asyncio.to_thread(emit_inbox_metrics)
+                except Exception as e:  # noqa: BLE001 - 指标导出失败不影响消费
+                    log.warning(f"webhook inbox metrics emit failed: {e}")
             if time.time() - last_purge >= PURGE_INTERVAL_SECONDS:
                 last_purge = time.time()
                 try:
@@ -345,7 +403,11 @@ async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
             if item is None:
                 await asyncio.sleep(poll_interval)
                 continue
-            await _run_with_lease(item, owner)
+            from src.kernel.otel import feature_span
+            with feature_span("webhook_inbox.consume", {
+                    "inbox.id": item.get("id") if isinstance(item, dict) else 0,
+                    "repo_key": (item or {}).get("repo_key", "") if isinstance(item, dict) else ""}):
+                await _run_with_lease(item, owner)
         except asyncio.CancelledError:
             raise
         except Exception as e:
