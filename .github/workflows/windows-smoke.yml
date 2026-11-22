@@ -506,3 +506,13 @@ jobs:
             tests/runtime/test_issue_993_branch_guard.py -v \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard
+      - name: "Skill sync distributed-lock contract tests (issue #3742)"
+        # Issue #3742 QA 审查修复（Required）：新增用例 test_issue_3742_lock_contract.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/#3167/#3490/#3699 均由
+        # QA 要求补齐）。契约用例覆盖 acquired 消费 / strict 模式 / TTL 单点派生 /
+        # 续期失败中止 OBS，并回归受影响的 skill sync 调度幂等用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3742_lock_contract.py -v
+          python -m pytest tests/runtime/test_skill_sync_scheduler_idempotent.py -v
