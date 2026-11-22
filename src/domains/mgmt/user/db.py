@@ -1809,6 +1809,32 @@ def set_host_status(repo_key: str, status: str = "", step: str = "", error: str 
 
 
 
+def get_managed_repo_owner_row(repo_key: str) -> "dict | None":
+    """读单行托管归属（repo_key/org_id/host_user_id/host_status/webhook_id）。
+
+    托管前置校验用（Issue #3580 G2）：判断该仓库是否已被他人/他组织托管。
+    不存在返回 None；读取异常按"无归属信息"返回 None（不阻断托管主流程）。
+    """
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = _mg_db.cursor()
+            c.execute(
+                "SELECT repo_key, repo_owner, repo_name, webhook_id, org_id, "
+                "host_user_id, host_status FROM managed_repos WHERE repo_key=? LIMIT 1",
+                (repo_key,))
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"Get managed repo owner row failed: {e}")
+        return None
+    if not row:
+        return None
+    return {"repo_key": row[0], "repo_owner": row[1], "repo_name": row[2],
+            "webhook_id": row[3], "org_id": row[4] or "", "host_user_id": row[5] or "",
+            "host_status": row[6] or ""}
+
+
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
     from src.kernel.repo_key import to_repo_key

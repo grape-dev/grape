@@ -1414,6 +1414,150 @@ def _host_status_marker(repo_key: str, scope: str = "host_repo"):
     return _mark
 
 
+def _host_owner_conflict(repo_key: str, user: dict, org_id: str = "") -> None:
+    """托管归属前置校验（Issue #3580 G2 方案 A / 对齐 PR #1854）。
+
+    已托管且 host_user_id 指向他人、或 org_id 属于别的组织 → 403。
+    同一用户/同一组织重复托管视为幂等重入（继续走后续流程，不额外建 hook）；
+    历史路径 A 托管（host_user_id 为空）不拦，保持存量语义。
+    """
+    from src.domains.mgmt.user.db import get_managed_repo_owner_row
+
+    row = get_managed_repo_owner_row(repo_key)
+    if not row:
+        return
+    uid = str((user or {}).get("id") or "")
+    row_uid = str(row.get("host_user_id") or "")
+    if row_uid and row_uid not in ("0", "None") and uid and row_uid != uid:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "REPO_HOSTED_BY_OTHER",
+            "message": "该仓库已由其他账号托管；如需转移请先解除托管"})
+    row_org = str(row.get("org_id") or "")
+    cur_org = "" if org_id in (None, "", 0, "0") else str(org_id)
+    if row_org and cur_org and row_org != cur_org:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "REPO_HOSTED_BY_OTHER_ORG",
+            "message": "该仓库已由其他组织托管；如需转移请先在原组织解除托管"})
+
+
+def _gitlab_host_precheck(provider: str, owner: str, repo_name: str, api_token: str) -> None:
+    """GitLab 托管前置校验（对齐 PR #1854，方案 A）。
+
+    GitLab 的 `/user` 只返回 username（没有 login 字段），也没有 v5 的
+    collaborators/permission 端点，所以不能复用 v5 段。这里走 provider 端口：
+    verify_token 取 username → get_collaborator_permission
+    （/projects/{path}/members/all/{uid}）判 access_level >= 40（Maintainer）。
+
+    失败语义与 v5 段一致：身份取不到/通道异常 → 502，权限不足 → 403。
+    """
+    from src.kernel.token_resolver import create_provider
+
+    try:
+        prov = create_provider(provider)
+        info = prov.verify_token(api_token) or {}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - 上游/凭据异常统一 502，原文只落日志
+        log.warning(f"host_repo gitlab identity failed: {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_IDENTITY_FAILED",
+            "message": "无法获取 GitLab 用户身份，请确认 PAT 有效且具备 api scope"})
+    login = str((info or {}).get("username") or (info or {}).get("login") or "").strip()
+    if not login:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_IDENTITY_FAILED",
+            "message": "无法获取当前用户身份"})
+    if login.lower() == str(owner or "").lower():
+        return
+    try:
+        perm = prov.get_collaborator_permission(api_token, owner, repo_name, login) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"host_repo gitlab permission check failed ({owner}/{repo_name}): {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_PERMISSION_CHECK_FAILED",
+            "message": "无法读取该 GitLab 仓库的成员权限"})
+    if not isinstance(perm, dict):
+        perm = {}
+    try:
+        level = int(perm.get("access_level") or 0)
+    except (TypeError, ValueError):
+        level = 0
+    if level < 40:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "PERMISSION_DENIED",
+            "message": "无权限托管该仓库：需要 Maintainer 及以上权限"})
+
+
+def _v5_host_precheck(provider: str, owner: str, repo_name: str, api_token: str,
+                      user: dict) -> None:
+    """v5 方言（gitcode/gitee）托管前置校验：身份 + 仓库管理员权限。
+
+    原 host_repo 内联段（Issue #383/#395 错误分流）抽成函数，只做机械搬移，
+    语义与报文逐字不变；新增 GitLab 方言后由调用点按 _dialect 分派。
+    """
+    from src.domains.mgmt.user.repo_manager import _check_collaborator_admin, _req
+    # B 批（2026-11-13）：v5 API 基址从平台卡派生（gitee/gitcode 同方言不同域）；
+    # 原硬编码 https://gitcode.com/api/v5 会让 gitee 仓的预检打错平台。
+    from src.domains.runtime.public import get_platform_card as _gpc_host
+    _pc_host = _gpc_host(provider)
+    _v5_base = ((_pc_host.api_base if _pc_host is not None else "")
+                or "https://gitcode.com/api/v5").rstrip("/")
+    try:
+        def _get_user(token):
+            return _req("GET", f"{_v5_base}/user", token)
+        user_data = with_oauth_token(user, provider, _get_user)
+        current_user = user_data.get("login", "")
+        if not current_user:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+
+        if current_user == owner:
+            is_admin = True
+        else:
+            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
+                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
+                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+                import urllib.parse as _up
+                _perm_url = f"{_v5_base}/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
+                _data = _req("GET", _perm_url, token)
+                _access_level = 0
+                try:
+                    _access_level = int(_data.get("access_level", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                if _access_level >= 40:
+                    return True
+                if str(_data.get("permission", "") or "").lower() == "admin":
+                    return True
+                _perm = _data.get("permissions") or {}
+                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
+            is_admin = with_oauth_token(user, provider, _check_admin)
+
+        if not is_admin:
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试"})
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
+        # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
+        # FR-5.2: 增强错误码——401/403 返回 TOKEN_PERMISSION_INSUFFICIENT 供前端映射
+        import re as _re
+        _m = _re.search(r'failed \((\d{3})\)', str(e))
+        _code = int(_m.group(1)) if _m else 0
+        log.warning(f"host_repo upstream failed: {e}")
+        if _code == 404:
+            # 仓库不存在/无权访问（业务语义 404，而非网关故障 502）
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
+        if _code in (401, 403):
+            # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
+                "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user_permission", e))
+    except Exception as e:
+        # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
+        log.warning(f"host_repo upstream failed: {e}")
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user", e))
+
+
 def _gitcode_webhook_502_detail(code: int, owner: str = "", repo_name: str = "") -> dict:
     """GitCode webhook 创建失败的结构化 502（401=token 失效 / 404=仓库不存在）。"""
     if code == 401:
@@ -1598,6 +1742,11 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     from src.domains.mgmt.user.repo_manager import _dialect_of as _dialect_of_provider
     _hcfg = _get_hcfg(provider)
     _dialect = _dialect_of_provider(provider)
+
+    # Issue #3580 G2（对齐 PR #1854）：托管归属前置校验（全体方言，只读 + 403）。
+    # 已托管给他人/他组织 → 403；同用户/同组织重复托管按幂等重入处理。
+    from src.kernel.repo_key import to_repo_key as _to_rk_pre
+    _host_owner_conflict(_to_rk_pre(body.full_name, provider=provider), user, _org_id)
 
     if not api_token:
         # B 批：文案按平台卡名派生（零平台分支，原 GitHub/GitCode 两套文案合并）
@@ -1814,67 +1963,13 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         webhook_token = global_bot_token
         _webhook_secret = ""
 
-    from src.domains.mgmt.user.repo_manager import _check_collaborator_admin, _req
-    # B 批（2026-11-13）：v5 API 基址从平台卡派生（gitee/gitcode 同方言不同域）；
-    # 原硬编码 https://gitcode.com/api/v5 会让 gitee 仓的预检打错平台。
-    from src.domains.runtime.public import get_platform_card as _gpc_host
-    _pc_host = _gpc_host(provider)
-    _v5_base = ((_pc_host.api_base if _pc_host is not None else "")
-                or "https://gitcode.com/api/v5").rstrip("/")
-    try:
-        def _get_user(token):
-            return _req("GET", f"{_v5_base}/user", token)
-        user_data = with_oauth_token(user, provider, _get_user)
-        current_user = user_data.get("login", "")
-        if not current_user:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-
-        if current_user == owner:
-            is_admin = True
-        else:
-            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
-                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
-                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
-                import urllib.parse as _up
-                _perm_url = f"{_v5_base}/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
-                _data = _req("GET", _perm_url, token)
-                _access_level = 0
-                try:
-                    _access_level = int(_data.get("access_level", 0) or 0)
-                except (TypeError, ValueError):
-                    pass
-                if _access_level >= 40:
-                    return True
-                if str(_data.get("permission", "") or "").lower() == "admin":
-                    return True
-                _perm = _data.get("permissions") or {}
-                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
-            is_admin = with_oauth_token(user, provider, _check_admin)
-
-        if not is_admin:
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试"})
-    except HTTPException:
-        raise
-    except RuntimeError as e:
-        # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
-        # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
-        # FR-5.2: 增强错误码——401/403 返回 TOKEN_PERMISSION_INSUFFICIENT 供前端映射
-        import re as _re
-        _m = _re.search(r'failed \((\d{3})\)', str(e))
-        _code = int(_m.group(1)) if _m else 0
-        log.warning(f"host_repo upstream failed: {e}")
-        if _code == 404:
-            # 仓库不存在/无权访问（业务语义 404，而非网关故障 502）
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
-        if _code in (401, 403):
-            # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
-                "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
-        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user_permission", e))
-    except Exception as e:
-        # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
-        log.warning(f"host_repo upstream failed: {e}")
-        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user", e))
+    # 前置身份/权限校验（Issue #3580 对齐 PR #1854）：按方言分派。
+    # gitlab_v4 走 provider 端口（/user 取 username、members/all 取权限）；
+    # github 已在上面独立分支返回；其余（gitcode/gitee v5）走原内联段。
+    if _dialect == "gitlab_v4":
+        _gitlab_host_precheck(provider, owner, repo_name, api_token)
+    else:
+        _v5_host_precheck(provider, owner, repo_name, api_token, user)
 
     try:
         from src.domains.mgmt.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, _RateLimitedError
@@ -1884,6 +1979,14 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
         # Issue #2126: 托管诊断落库助手
         _mark = _host_status_marker(repo_key)
+
+        # Issue #3580 G2（对齐 PR #1854）：GitLab 先落占位行（webhook_id=0），
+        # 建 hook 成功后由下方 add_managed_repo 覆盖为真实 id；并发由 repo_key
+        # 唯一键 + 入口的归属校验兜住，失败态由 _mark 记为 partial/failed。
+        if _dialect == "gitlab_v4":
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=0,
+                                     host_user_id=str(user["id"]), org_id=_org_id)
+            _mark("hosting", "reserve", "")
 
         # 1) 邀请 bot 为维护者（owner token 必需）→ 2) bot 接受 → 3) bot 自查权限
         # 原则：凡能查/能建一律 bot token；owner token 仅身份确认 + 本步邀请
