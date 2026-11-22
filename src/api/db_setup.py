@@ -11654,3 +11654,23 @@ register_migration(
     domains=("mgmt", "runtime", "insight"),
     fn=_fn_table_ownership_copy_audit,
 )
+
+
+# ===== 技能分类切换（统一字典 l1/l2 收口）——2026-11-22 三问题修复 =====
+# 背景：全量技能 cat_l1_id=0（挂靠从未落库）+ 老 skill_category 与新字典双轨并存。
+# 迁移 SQL 住属主域 migrations 下（跨域守卫 P0-2，QA A8/A11）：
+#   mgmt 侧 202611230001：字典补种「grape平台应用」(id 100109) + 老分类停用重申；
+#   runtime 侧 202611230002：74 个官方技能按 skill_name 挂 cat_l1_id/cat_l2_id
+#   （含组织仓库 AI 分析→测试与质量，2026-11-22 用户拍板）+ 老 category_id 清零。
+# 两条均为 kind=backfill + post_check（收敛可判定才盖章）；runtime 条探测前置
+# （官方技能空表时不做任何写、不盖章，等首轮 skill sync 后收敛）。
+
+from src.domains.mgmt.migrations.skill_category_cutover_dict import (
+    MIGRATION as _M_SKILL_CUTOVER_DICT,
+)
+register_migration(**_M_SKILL_CUTOVER_DICT)
+
+from src.domains.runtime.migrations.skill_category_cutover import (
+    MIGRATION as _M_SKILL_CUTOVER_MAP,
+)
+register_migration(**_M_SKILL_CUTOVER_MAP)

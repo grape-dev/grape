@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
 <script>
 (function(){var t=localStorage.getItem('grapeTheme');if(t!=='apple'){t='apple';localStorage.setItem('grapeTheme','apple');}document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m){document.documentElement.setAttribute('data-theme-mode',m);}})();
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='63';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='64';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -31,7 +31,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <div id="registerVueHost"></div>
 </div>
 
-<script src="/static/js/api.js?v=37"></script>
+<script src="/static/js/api.js?v=36"></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script>
     <script src="/static/js/auth.js?v=8"></script>
 <script>Auth.initI18n();</script>

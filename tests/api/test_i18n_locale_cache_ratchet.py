@@ -19,14 +19,14 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = "f2e23f27e88df126"
+LOCALE_FINGERPRINT = "af9370b7bda68a79"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    "index.html": ("83", "53"),
-    "admin.html": ("20261120-6", "20261114-23"),
-    "register.html": ("63", "45"),
-    "forgot.html": ("63", "45"),
+    "index.html": ("84", "53"),
+    "admin.html": ("20261122-2", "20261114-23"),
+    "register.html": ("64", "45"),
+    "forgot.html": ("64", "45"),
 }
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）
