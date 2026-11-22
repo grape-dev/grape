@@ -999,15 +999,16 @@ def _fn_migrate_env_extra_encryption() -> None:
     """
     import json as _json
 
-    from src.kernel.owner_db import db_pair
     from src.domains.runtime.engine.env_extra_security import (
-        encrypt_env_extra, record_env_extra_plaintext)
-    db, db_lock = db_pair("runtime")
+        encrypt_env_extra, record_env_extra_plaintext, runtime_agent_tasks_write)
     done, batches, failures = 0, 0, 0
     failed_ids: list[str] = []
     last_id = ""
     while True:
-        with db_lock:
+        # #3770 审查 R1：写通道走 runtime_agent_tasks_write——连接回落进程库（单库/同域
+        # 拓扑）时同持 session_manager.db_lock，与本仓 agent_tasks 写路径同一把锁；三库
+        # 拓扑继续 db_pair（owner DSN 连接 + owner_lock）。
+        with runtime_agent_tasks_write() as db:
             c = db.cursor()
             c.execute(
                 "SELECT id, env_extra FROM agent_tasks "
@@ -6530,8 +6531,16 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                         _rt_db.rollback()
                     except Exception:
                         pass
-                    log.error("sync_task_session_token: env_extra 加密失败，拒绝明文回写并判定任务失败 "
-                              f"task={task_id}: {_enc_e}")
+                    # #3770 审查（Optional）：rotate 已在 mgmt 库自提交，新 token 此刻有效
+                    # 但永远进不了 env 快照（违反「绝不制造未落库 token」）——按 session_key
+                    # 撤销（宽限期后失效），下次 sync 再轮换即收敛；撤销失败也绝不回明文。
+                    try:
+                        from src.kernel.auth_sdk.auth_token import revoke_session_token
+                        revoke_session_token(task_id)
+                    except Exception as _rvk_e:
+                        log.debug(f"sync_task_session_token: 撤销新签发 token 失败 task={task_id}: {_rvk_e}")
+                    log.error("sync_task_session_token: env_extra 加密失败，拒绝明文回写并判定任务失败"
+                              f"（已撤销本次轮换签发的 token） task={task_id}: {_enc_e}")
                     return ""
                 c.execute(
                     "UPDATE agent_tasks SET env_extra=? WHERE id=?",

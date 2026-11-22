@@ -12,10 +12,14 @@ M1（env_extra 落库加密）：
 - 读取兼容：信封解密；存量明文 JSON 直接解析并告警（迁移期降级，迁移后消除）。
 
 M1-c（Issue #3770，存量明文行收口）：
-- 读侧命中明文行**就地自愈**（重新加密后条件 UPDATE 回写，`AND env_extra NOT LIKE 'enc:v1:%'`
-  保证幂等/并发安全）；自愈失败或不可自愈（无行 id / 无 runtime 库）才告警；
+- 读侧命中明文行**就地自愈**（重新加密后条件 UPDATE 回写：`AND env_extra NOT LIKE 'enc:v1:%'`
+  + 原值 CAS `AND env_extra=?`，保证幂等/并发安全——不覆盖已加密行、不用旧快照覆盖并发新值）；
+  自愈失败或不可自愈（无行 id / 无 runtime 库）才告警；
 - 告警按 `(host, 行类型)` 节流——每进程每小时 ≤1 条，超限只计数；计数器
   `grape_env_extra_plaintext_rows_total{outcome}` 承担「不再刷屏但仍可见」；
+- outcome 口径（QA #3770 审查）：`healed` 仅在 UPDATE 真正改行（rowcount>0）时计；
+  rowcount=0（已被并发加密/删除/覆盖）计 `heal_skipped`；`report` 策略与无行 id 的读点
+  计 `report_only`（按设计不自愈）；`heal_failed` 只留给自愈真失败；
 - 文案指向真实 backfill `202611220003`（旧文案的 `202611130001` 是无关迁移），日志只输出
   键名/行 id，绝不输出值。
 """
@@ -25,6 +29,7 @@ import json
 import os
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 
 from src.kernel.config import log
 from src.kernel.scene_custom_env import is_secret_name
@@ -146,8 +151,8 @@ def _record_plaintext(outcome: str) -> None:
     try:
         from src.domains.insight.observability import record_env_extra_plaintext_row
         record_env_extra_plaintext_row(outcome)
-    except Exception:
-        pass
+    except Exception as _obs_e:  # noqa: BLE001 - 观测失败只降级为 debug 日志，不拖垮读链路
+        log.debug(f"env_extra plaintext 计数转发失败（outcome={outcome}）: {_obs_e}")
 
 
 def record_env_extra_write_refused() -> None:
@@ -160,29 +165,59 @@ def record_env_extra_plaintext(outcome: str) -> None:
     _record_plaintext(outcome)
 
 
+@contextmanager
+def runtime_agent_tasks_write():
+    """agent_tasks 写通道（#3770 heal / backfill 迁移共用；QA 审查 R1 锁错配修复）。
+
+    连接仍取 owner 域代理（`db_pair("runtime")`）：四进程拆分下 agent_tasks 归 runtime 域，
+    单库拓扑自动回落进程库。锁错配修复：回落进程库（`not db_registry.uses_own_dsn("runtime")`）
+    时，该连接就是 `session_manager.db`（autocommit=False 的共享连接）——全仓 agent_tasks
+    写路径（claim / sync_task_session_token 等）都以 `session_manager.db_lock` 串行
+    「多语句 + commit」，只持 owner_lock 的话，这里的 commit 可能把其它线程未完成的事务
+    一并提交。因此该拓扑下**同持** `session_manager.db_lock`（与 `_DomainDbProxy` 同款
+    口径，owner_lock → db_lock 单向获取，无反向持锁点故无死锁环）；三库拓扑
+    （uses_own_dsn）继续 db_pair 语义（owner DSN 连接 + owner_lock）。
+    """
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("runtime")
+    with ExitStack() as st:
+        st.enter_context(db_lock)
+        try:
+            from src.kernel import db_registry
+            if not db_registry.uses_own_dsn("runtime"):
+                from src.kernel.session_manager import db_lock as _process_db_lock
+                st.enter_context(_process_db_lock)
+        except Exception as _dom_e:  # noqa: BLE001 - 域判定失败按原 db_pair 语义执行（不阻断自愈）
+            log.debug(f"runtime_agent_tasks_write: domain 路由判定失败，按 owner_lock 执行: {_dom_e}")
+        yield db
+
+
 def heal_env_extra_plaintext_row(row_id: str, sealed: str, *,
-                                 row_kind: str = "agent_tasks") -> bool:
+                                 row_kind: str = "agent_tasks",
+                                 expected_raw: str | None = None) -> bool:
     """读侧就地自愈：把存量明文行改写为 `sealed`（enc:v1 信封）。
 
     幂等/并发安全：UPDATE 带 `AND env_extra NOT LIKE 'enc:v1:%'`——已被别的路径加密的行
-    不会被二次覆盖（返回 False）。返回是否真正改写了该行。异常由调用方捕获（自愈失败
+    不会被二次覆盖（返回 False）。`expected_raw`（读到该行时的原文）再叠加原值 CAS
+    `AND env_extra=?`——读与写之间该行被换成新明文（如刚轮换的 token）时不以旧快照覆盖
+    新值，交由下一次读重新自愈。返回是否真正改写了该行。异常由调用方捕获（自愈失败
     只影响观测，不影响读 env）。
 
-    连接用 owner 域代理（`owner_db("runtime")`）：四进程拆分下 agent_tasks 归 runtime 域，
-    单库拓扑自动回落进程库。
+    连接/锁走 ``runtime_agent_tasks_write()``（owner 域连接；回落进程库时同持
+    ``session_manager.db_lock``，见其 docstring）。
     """
     kind = (row_kind or "agent_tasks").strip() or "agent_tasks"
     if not row_id or not sealed or kind not in PLAINTEXT_ROW_KINDS:
         return False
-    from src.kernel.owner_db import db_pair
-    db, db_lock = db_pair("runtime")
-    with db_lock:
+    cas = " AND env_extra=?" if expected_raw is not None else ""
+    params = (sealed, row_id, expected_raw) if expected_raw is not None else (sealed, row_id)
+    with runtime_agent_tasks_write() as db:
         cur = db.cursor()
         cur.execute(
             "UPDATE agent_tasks SET env_extra=? WHERE id=? "
             "AND env_extra IS NOT NULL AND env_extra<>'' "
-            "AND env_extra NOT LIKE 'enc:v1:%'",
-            (sealed, row_id))
+            f"AND env_extra NOT LIKE 'enc:v1:%'{cas}",
+            params)
         changed = (getattr(cur, "rowcount", 0) or 0) > 0
         db.commit()
     return changed
@@ -239,16 +274,23 @@ def _handle_plaintext_row(raw: str, *, task_id: str, row_kind: str,
             err = type(e).__name__
         if sealed:
             try:
-                heal_env_extra_plaintext_row(task_id, sealed, row_kind=kind)
-                # 命中或已被并发路径加密（幂等 UPDATE 未命中）都算收敛，一次读只记一次 healed
-                _record_plaintext("healed")
+                changed = heal_env_extra_plaintext_row(
+                    task_id, sealed, row_kind=kind, expected_raw=raw)
+                if changed:
+                    # rowcount>0：本行确实被本次读改写为信封（QA #3770：healed 只计真改行）
+                    _record_plaintext("healed")
+                else:
+                    # rowcount=0：行已被并发路径加密/删除/覆盖——按 heal_skipped 计数
+                    # （不告警）；若被覆盖为新明文，下一次读会再次自愈
+                    _record_plaintext("heal_skipped")
                 return env
             except Exception as e:
                 err = type(e).__name__
         _plaintext_report("heal_failed", task_id=task_id, kind=kind, env=env, err=err)
         return env
-    # report 策略 / 无行 id（无 DB 写通道）：只计数 + 节流告警
-    _plaintext_report("heal_failed", task_id=task_id, kind=kind, env=env)
+    # report 策略 / 无行 id（无 DB 写通道）：按设计不自愈——计数 + 节流告警
+    # （QA #3770：与真失败分开计，heal_failed 不虚高）
+    _plaintext_report("report_only", task_id=task_id, kind=kind, env=env)
     return env
 
 
