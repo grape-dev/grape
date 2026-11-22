@@ -2373,6 +2373,16 @@ def set_meta_value(key: str, value: str) -> None:
 _CONV_COLS_SQL = ", ".join(_CONV_COLS)
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
 
+# Issue #3813：failed-dispatch LIKE 谓词单源（候选查询与探针共用；漂移=短路漏扫）
+_A2A_FAILED_DISPATCH_LIKE_PRED = (
+    "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_dispatch_exception]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
+    "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
+    "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
+    "OR result LIKE '%unclaimed%'")
+
 _ANY_QUERIES: dict[str, str] = {
     # ── 免鉴权健康端点的运行时就绪快照（insight/routes/health.py）──
     # `_READ_QUERIES` 里同名键是 %s 方言的 lib 专用版（单库拓扑经 db_registry.cursor
@@ -2827,18 +2837,38 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY e.seq DESC"),
     # 形态二/三：failed 且失败语义=派发失败/排队超时（结果文本已含
     # _fail_event 写入的 [code]；LIKE 预筛只用于减少跨库取数，最终归类仍在 patrol）。
+    # Issue #3813：LIKE 谓词提取为模块常量 _A2A_FAILED_DISPATCH_LIKE_PRED——
+    # 候选查询与 events_probe_failed_dispatch 探针共用同一谓词（防双源漂移：
+    # 探针谓词一旦与候选查询漂移，短路会把真候选判空=静默漏扫）。
     "patrol_a2a_failed_dispatch_rows": (
         "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result, "
         "payload, created_at, started_at, completed_at FROM events "
         "WHERE event_type='a2a_event' AND status='failed' AND ("
-        "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_dispatch_exception]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
-        "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
-        "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
-        "OR result LIKE '%unclaimed%') "
+        + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
         "ORDER BY seq DESC"),
+    # ===== Issue #3813：巡检候选存在性探针（S53 短路判定唯一事实源）=====
+    # 五路 LIMIT 1 有界索引查询（零候选轮次查询数=常量级，AC③）。形状与候选
+    # 查询逐谓词一致（仅收列到主键 + LIMIT 1）；全部命中
+    # idx_events_type_status_seq / idx_tasks_status_completed_id（EXPLAIN 可证）。
+    "events_probe_unclaimed": (
+        "SELECT e.seq FROM events e LEFT JOIN agent_tasks t ON t.event_seq = e.seq "
+        "WHERE e.event_type='a2a_event' AND e.status='running' "
+        "AND (e.runtime IS NULL OR e.runtime='') AND t.id IS NULL "
+        "ORDER BY e.seq DESC LIMIT 1"),
+    "events_probe_failed_dispatch": (
+        "SELECT seq FROM events WHERE event_type='a2a_event' AND status='failed' "
+        "AND (" + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
+        "ORDER BY seq DESC LIMIT 1"),
+    "tasks_probe_completed_cutoff": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND completed_at > ? "
+        "AND id > ? ORDER BY id LIMIT 1"),
+    "tasks_probe_completed_all": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND id > ? "
+        "ORDER BY id LIMIT 1"),
+    # running/queued 探针与候选查询同款内嵌字面量口径（tasks_running_rows 先例；
+    # sqlite mysql_compat 对 TEXT 等值的计划折叠一致，EXPLAIN 形状与候选查询可比）
+    "tasks_probe_running": "SELECT id FROM agent_tasks WHERE status='running' LIMIT 1",
+    "tasks_probe_queued": "SELECT id FROM agent_tasks WHERE status='queued' LIMIT 1",
     # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
     "task_recheck_row": (
         "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
@@ -3324,6 +3354,29 @@ def read_all_any(name: str, params: tuple = ()) -> list[Any]:
     with _any_cursor() as c:
         c.execute(_any_sql(name), params)
         return list(c.fetchall() or [])
+
+def named_query_sql(name: str) -> str:
+    """具名查询的原始 SQL 文本（Issue #3813 采样日志用：打印脱敏形状的事实源）。
+
+    只读、不执行；与 explain_named_query 共用 _any_sql 的 KeyError 口径。
+    """
+    return _any_sql(name)
+
+
+def explain_named_query(name: str, params: tuple = ()) -> list[tuple]:
+    """具名查询的执行计划（Issue #3813 slow scan 采样专用，只读不写）。
+
+    方言：SQLite 走 ``EXPLAIN QUERY PLAN``（列形状 id/parent/notused/detail），
+    MySQL 走 ``EXPLAIN``（多列，含 type/key/rows/Extra）——统一整行 tuple 返回，
+    由调用方做摘要与限长（本原语不裁剪、不解释，保持 DB 事实原样）。
+    未登记的具名查询抛 KeyError（与 read_*_any 同口径，不静默兜底）。
+    """
+    sql = _any_sql(name)
+    from src.kernel.session_manager import _is_mysql_backend
+    verb = "EXPLAIN" if _is_mysql_backend() else "EXPLAIN QUERY PLAN"
+    with _any_cursor() as c:
+        c.execute(f"{verb} {sql}", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
 
 
 def patrol_dispatch_stall_threshold_seconds() -> int:
