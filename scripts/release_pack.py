@@ -18,6 +18,14 @@
 import hashlib, os, re, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+# Issue #3756：必需契约文件清单的单一事实源（与 deploy_preflight.py 共用）。
+from src.domains.contracts.registry_files import (  # noqa: E402
+    CONTRACTS_REQUIRED_FILES,
+    REQUIRED_RELEASED_GLOB,
+)
 # 输出目录可用环境变量覆盖；默认放在仓库同级目录（不在脚本里写死部署机绝对路径）
 OUT_DIR = os.environ.get(
     "GRAPE_RELEASE_OUT_DIR",
@@ -80,12 +88,7 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 # Issue #3756：/openapi.json 渲染依赖的契约登记表——缺任一即不得出包。
-CONTRACTS_REQUIRED_FILES = (
-    "contracts/deprecated_endpoints.json",
-    "contracts/deprecated_exemptions.json",
-    "contracts/openapi_baseline.json",
-    "contracts/required_operations.json",
-)
+# 清单唯一定义在 src/domains/contracts/registry_files.py（打包/预检共用）。
 
 
 def assert_contracts_ready(root=ROOT):
@@ -100,7 +103,7 @@ def assert_contracts_ready(root=ROOT):
     released = ([n for n in os.listdir(released_dir) if n.endswith(".json")]
                 if os.path.isdir(released_dir) else [])
     if not released:
-        missing.append("contracts/released/*.json")
+        missing.append(REQUIRED_RELEASED_GLOB)
     if missing:
         print("[FATAL] 缺少契约登记表产物（后端将无法渲染 /openapi.json）：")
         for rel in missing:

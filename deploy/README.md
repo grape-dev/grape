@@ -31,6 +31,23 @@ systemctl restart grape-systemd@mgmt.service grape-systemd@event.service \
 | 2 | 存在未登记的同名多份基表 | 先定 owner（登记或清理），**不要重启** |
 | 1 | 仍有视图漂移 / 孤儿视图 | 按输出逐条处理，**不要重启** |
 
+## 发布包解包 → 预检（不可颠倒，Issue #3756）
+
+后端包解包到部署目录（如 `/opt/grape`）后，**先跑部署预检再起服务**：
+
+```bash
+tar xzf grape-backend-<ts>.tar.gz -C /opt/grape
+python3 /opt/grape/scripts/deploy_preflight.py \
+  --db-path /opt/grape/data/sessions.db --role mgmt \
+  --contracts-dir /opt/grape/contracts   # 默认也取 <repo>/contracts
+```
+
+预检的 `contracts_registry` 项要求 `contracts/` 整目录随包落盘：
+`deprecated_endpoints.json`、`deprecated_exemptions.json`、
+`openapi_baseline.json`、`required_operations.json` 与 `released/*.json`。
+缺任一件时预检以退出码 1 拦在启动前（运行期 `GET /openapi.json` 会 500 或降级），
+**不要跳过预检直接重启**。若契约目录不在默认位置，必须显式传 `--contracts-dir`。
+
 ## 清单文件
 
 | 文件 | 作用 |

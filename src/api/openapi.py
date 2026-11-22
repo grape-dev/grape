@@ -646,12 +646,17 @@ def custom_openapi(app, check_baseline: bool = True):
     # Issue #2837（等价 #2783）：挂牌登记表 → deprecated / x-deprecated-since /
     # x-deprecated-replacement（挂牌态随契约发布，可从冻结发布快照机器读取；
     # 登记漂移在契约域 fail-fast）。空登记表时本调用是 no-op。
-    # Issue #3756：登记表未随产物落盘时，读接口不应整体 500——本步单独降级，
-    # 根级打 x-degraded 并 WARNING；其余（attach_contract_meta / 完整性门禁）保持 fail-fast。
+    # Issue #3756：登记表**缺失/不可读**时，读接口不应整体 500——本步单独降级，
+    # 根级打 x-degraded 并 WARNING。只捕获 RegistryUnavailable：登记表损坏、
+    # 条目非法、挂牌位置漂移仍是数据面错误，继续 fail-fast（#2837 挂牌承诺）。
+    # import 也放在 try 之外：半套代码（模块缺失）不得被误吞成 200。
+    from src.domains.contracts.deprecation import (
+        RegistryUnavailable,
+        apply_deprecation_markup,
+    )
     try:
-        from src.domains.contracts.deprecation import apply_deprecation_markup
         apply_deprecation_markup(schema)
-    except Exception as _de:
+    except RegistryUnavailable as _de:
         schema.setdefault("x-degraded", "deprecation-registry-missing")
         log.warning(
             "openapi deprecation markup degraded (registry missing/unreadable): %s", _de)

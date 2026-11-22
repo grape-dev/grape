@@ -19,3 +19,11 @@
 1. `docs(#3756): 补充规格与方案设计`
 2. `test(#3756): 先写登记表缺失降级/打包/预检失败用例`（红）
 3. `fix(#3756): 打包纳入 contracts 并新增登记表降级与预检`（绿）
+
+## 复审整改（PR #1968 审查 R1/R2）
+
+| # | 切片 | 交付物 | 验证 |
+|---|------|--------|------|
+| R1 | 必需文件清单单一来源 | 新增 `src/domains/contracts/registry_files.py`；`release_pack.py` / `deploy_preflight.py` 共同引用 | 打包/预检清单一致用例；缺 `openapi_baseline.json` / `required_operations.json` → 预检 exit 1 |
+| R2 | 降级只表达「不可用」 | `deprecation.RegistryUnavailable`；`openapi.py` 仅捕获它 | 缺失 → 降级；损坏 / 漂移 → `RuntimeError` fail-fast |
+| Doc | 部署顺序 | `deploy/README.md` 写明「解包 → 预检 → 起服务」与 `--contracts-dir` | 文档核对 |

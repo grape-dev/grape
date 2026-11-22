@@ -28,6 +28,13 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+# Issue #3756：必需契约文件清单的单一事实源（与 release_pack.py 共用）。
+from src.domains.contracts.registry_files import (  # noqa: E402
+    CONTRACTS_DIR,
+    REQUIRED_REGISTRY_FILES,
+    REQUIRED_RELEASED_GLOB,
+)
+
 DOMAINS = ("mgmt", "runtime", "insight")
 
 # 每个域必须存在的表（本轮只收口 D109 平台对象 + 元数据表；后续可扩）
@@ -85,16 +92,18 @@ def check_role(role: str) -> Check:
     return c
 
 
-CONTRACTS_REQUIRED = ("deprecated_endpoints.json", "deprecated_exemptions.json")
-
-
 def check_contracts_registry(contracts_dir: str) -> Check:
-    """Issue #3756：契约登记表就位自检——缺件时 /openapi.json 会整体 500。"""
+    """Issue #3756：契约登记表就位自检——缺件时 /openapi.json 会整体 500。
+
+    必需文件清单与打包断言共用 `src.domains.contracts.registry_files`：缺
+    `openapi_baseline.json` / `required_operations.json` 时完整性门禁同样
+    fail-fast，预检必须在启动前拦下，不能只查弃用登记表两件。
+    """
     c = Check("contracts_registry")
     root = Path(contracts_dir)
     missing: list[str] = []
     invalid: list[str] = []
-    for name in CONTRACTS_REQUIRED:
+    for name in REQUIRED_REGISTRY_FILES:
         p = root / name
         if not p.is_file():
             missing.append(name)
@@ -114,9 +123,10 @@ def check_contracts_registry(contracts_dir: str) -> Check:
             parts.append("released/ 无 *.json 发布快照")
         return c.fail(
             f"契约登记表不就位（{root}）: " + "，".join(parts),
-            "发布产物须包含 contracts/ 整目录（deprecated_endpoints.json / "
-            "deprecated_exemptions.json / released/*.json）。请确认打包基线并重新打包/同步；"
-            "缺登记表时 /openapi.json 会降级或整体不可用。")
+            "发布产物须包含 " + CONTRACTS_DIR + "/ 整目录（"
+            + " / ".join(REQUIRED_REGISTRY_FILES) + " / " + REQUIRED_RELEASED_GLOB
+            + "）。请确认打包基线并重新打包/同步；缺登记表时 /openapi.json "
+            "会降级或整体不可用。")
     c.detail = f"{root}（released={len(released)}）"
     return c
 
