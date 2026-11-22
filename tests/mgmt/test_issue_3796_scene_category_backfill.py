@@ -137,6 +137,8 @@ def test_upsert_any_resets_child_when_l1_changes_on_backfill(scene_name):
 class _FakeCursor:
     """MySQL/lib 路径（%s 占位符）的假游标：只记录 SQL，不连库。"""
 
+    rowcount = 0  # 与原实现 UPDATE 后取 rowcount 的口径一致
+
     def __init__(self, row):
         self.row = row
         self.calls: list[tuple[str, tuple]] = []

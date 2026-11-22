@@ -395,6 +395,37 @@ _SCENE_FIELD_ALIASES: dict[str, str] = {
 }
 _SCENE_REQUIRED = ("name", "source", "scope")
 
+#: 分类列（Issue #3796）：内容 hash 未变时仍需比对的回填列
+_SCENE_CATEGORY_COLS = ("cat_l1_id", "cat_l2_id", "category_id")
+
+
+def _scene_category_backfill_cols(payload: dict[str, Any], old_category_id: int,
+                                  old_l1: int, old_l2: int) -> list[str]:
+    """内容未变（content_hash 相同）时仍需落库的分类列（Issue #3796）。
+
+    同步侧解析出的分类目标可能因 legacy 别名 / 字典收敛而与库内旧值不同；hash 幂等层
+    若直接 skipped，存量行分类就永不停更（PR #1982 审查 Required）。这里只挑出
+    「目标明确且与库内不同」的分类列，由调用方执行一次窄 UPDATE（不碰内容列）。
+
+    未命中语义不变（Skill/场景同一契约，Issue #2761）：分类列缺席或目标为 0 一律视为
+    「保留库内旧值」；`cat_l1_id` 沿用 `sync_category_target`（一级变更且来源未给二级时
+    重置旧二级），并在 payload 上就地写回收敛后的目标，供 UPDATE 取用。
+    """
+    changed: list[str] = []
+    if "cat_l1_id" in payload:
+        from src.kernel.category import sync_category_target  # noqa: PLC0415
+        l1, l2 = sync_category_target(payload.get("cat_l1_id"), payload.get("cat_l2_id"),
+                                      old_l1, old_l2)
+        payload["cat_l1_id"], payload["cat_l2_id"] = l1, l2
+        if int(l1 or 0) != int(old_l1 or 0):
+            changed.append("cat_l1_id")
+        if int(l2 or 0) != int(old_l2 or 0):
+            changed.append("cat_l2_id")
+    new_category_id = int(payload.get("category_id") or 0)
+    if new_category_id and new_category_id != int(old_category_id or 0):
+        changed.append("category_id")
+    return changed
+
 
 def _scene_where(scene_id: str | None, row_id: int | None, repo_key: str | None):
     """按（scene_id / id / repo_key 组合）定位场景行，返回 (where, params)。"""
@@ -636,21 +667,31 @@ def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "offi
                          scope: str = "official", repo_key: str = "", source_user_id: str = "") -> dict[str, Any]:
     """写入场景内容（只写内容列，**绝不触碰 is_active / is_featured**）。
 
-    返回 {"action": inserted|updated|skipped, "id": ..., "changed": n}。
-    幂等：payload 的 content_hash 与库内一致时直接 skipped。
+    返回 {"action": inserted|updated|skipped|backfilled, "id": ..., "changed": n}。
+    幂等：payload 的 content_hash 与库内一致时不写内容列；但分类目标与库内不同时
+    执行一次窄 UPDATE（只动分类列）并返回 backfilled（Issue #3796）。
     """
     # 历史键名（market_desc / tags_str）先映射成列名，否则这两列会被静默丢掉
     payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (payload or {}).items()}
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with db_registry.cursor("mgmt") as cur:
-        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id FROM scene_market "
-                    "WHERE name=%s AND source=%s LIMIT 1", (name, source))
+        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id, category_id "
+                    "FROM scene_market WHERE name=%s AND source=%s LIMIT 1", (name, source))
         row = cur.fetchone()
         if row:
             sid, old_hash, old_tags = row[0], (row[1] or ""), (row[2] or "")
             old_l1, old_l2 = (row[3] if len(row) > 3 else 0), (row[4] if len(row) > 4 else 0)
+            old_cat = row[5] if len(row) > 5 else 0
             if payload.get("content_hash") and payload.get("content_hash") == old_hash:
-                return {"action": "skipped", "id": sid, "changed": 0}
+                # Issue #3796：内容未变不等于分类可停更——只回填分类列，不动内容列
+                backfill = _scene_category_backfill_cols(payload, old_cat, old_l1, old_l2)
+                if not backfill:
+                    return {"action": "skipped", "id": sid, "changed": 0}
+                sets = ", ".join(f"{col}=%s" for col in backfill)
+                cur.execute(f"UPDATE scene_market SET {sets}, updated_at=NOW() WHERE id=%s",
+                            tuple(payload[col] for col in backfill) + (sid,))
+                return {"action": "backfilled", "id": sid, "changed": int(cur.rowcount or 0),
+                        "backfilled": backfill}
             if not cols:
                 return {"action": "skipped", "id": sid, "changed": 0}
             if "tags" in payload:
@@ -4033,7 +4074,7 @@ def replace_scene_skill_ref_any(scene_id: int, refs: list[dict[str, Any]]) -> di
 def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "official") -> dict[str, Any]:
     """按 content_hash 幂等的场景内容写入（任意拓扑，可移植方言）。
 
-    返回 {"action": inserted|updated|skipped, "id": int|0, "old_version": str|None}。
+    返回 {"action": inserted|updated|skipped|backfilled, "id": int|0, "old_version": str|None}。
     只写内容列：**绝不触碰** is_featured / like_count / source_user_id；UPDATE 时
     保留库内既有 is_active（admin 设置不被同步覆盖），INSERT 时按原实现落
     is_featured=0 / like_count=0 / source_user_id=0 / is_active=1。
@@ -4042,15 +4083,25 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
     content_hash = payload.get("content_hash") or ""
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with _any_tx() as c:
-        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id "
-                  "FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
+        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id, "
+                  "category_id FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
         row = c.fetchone()
         if row:
             sid, old_version, old_hash, preserved_active, old_tags = (
                 int(row[0]), row[1], (row[2] or ""), row[3], (row[4] or ""))
             old_l1, old_l2 = (row[5] if len(row) > 5 else 0), (row[6] if len(row) > 6 else 0)
+            old_cat = row[7] if len(row) > 7 else 0
             if old_hash == content_hash:
-                return {"action": "skipped", "id": sid, "old_version": old_version}
+                # Issue #3796：内容未变不等于分类可停更——只回填分类列，不动内容列
+                backfill = _scene_category_backfill_cols(payload, old_cat, old_l1, old_l2)
+                if not backfill:
+                    return {"action": "skipped", "id": sid, "old_version": old_version}
+                sets = ", ".join(f"{col}=?" for col in backfill)
+                c.execute(f"UPDATE scene_market SET {sets}, updated_at=datetime('now') "
+                          f"WHERE id=?", tuple(payload[col] for col in backfill) + (sid,))
+                return {"action": "backfilled", "id": sid, "old_version": old_version,
+                        "backfilled": backfill,
+                        "changed": int(getattr(c, "rowcount", 0) or 0)}
             if not cols:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
             if "tags" in payload:
