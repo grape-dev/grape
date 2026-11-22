@@ -35,8 +35,9 @@ LOGGER_NAME = "src.kernel.category"
 
 @pytest.fixture(autouse=True)
 def _reset_alias_state():
-    """隔离每进程去重集合，避免用例间/进程内残留互相污染。"""
+    """每个用例前清空每进程去重集合（跨模块用例已触发别名时也不串味），结束后恢复。"""
     saved = set(category_mod._alias_warned)
+    category_mod._alias_warned.clear()
     yield
     category_mod._alias_warned.clear()
     category_mod._alias_warned.update(saved)

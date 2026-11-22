@@ -32,6 +32,7 @@ import tempfile
 import zipfile
 
 import httpx
+from src.kernel.category import canonical_category_slug
 from src.kernel.config import log
 from src.kernel.owner_db import db_pair as _db_pair
 
@@ -127,15 +128,35 @@ def _refresh_category_dict_cache() -> None:
         logger.warning(f"Scene sync: category_dict map unavailable: {exc}")
 
 
-def _resolve_scene_category(scene_data: dict) -> tuple[int, int]:
+def _record_unresolved(sink: dict, slug: str, scene_name: str) -> None:
+    """按同步轮聚合未命中 slug（Issue #3796）：slug → {count, scenes 样例 ≤3}。
+
+    循环内的未命中只降 debug 进 sink，轮末由调用方发 1 条聚合 WARNING，
+    替代「每场景每 tick 一条」的刷屏（原 696 条/小时）。
+    """
+    entry = sink.setdefault(slug, {"count": 0, "scenes": []})
+    entry["count"] += 1
+    if scene_name and scene_name not in entry["scenes"] and len(entry["scenes"]) < 3:
+        entry["scenes"].append(scene_name)
+
+
+def _resolve_scene_category(scene_data: dict, miss_sink: dict | None = None,
+                            scene_name: str = "") -> tuple[int, int]:
     """按场景 JSON 的分类 slug 解析 (cat_l1_id, cat_l2_id)。
 
     解析口径统一在 src.kernel.category（与 skill_sync 共用）；未命中返回 (0, 0)，
-    由调用方保留库内旧值（不写 0 制造脏数据）。
+    由调用方保留库内旧值（不写 0 制造脏数据）。Issue #3796：
+    - legacy 别名在 lookup_slug 内生效（skill-dev/iac/general 等落收敛后 1xxx）；
+    - miss_sink 提供时未命中降 debug + 进 sink（轮末聚合告警），缺省保持原 WARNING。
     """
     from src.kernel.category import resolve_category_slugs  # noqa: PLC0415
-    return resolve_category_slugs(scene_data, _category_dict_cache,
-                                  logger=logger, label="Scene sync")
+
+    def _on_miss(slug: str) -> None:
+        _record_unresolved(miss_sink, slug, scene_name)  # type: ignore[arg-type]
+
+    return resolve_category_slugs(
+        scene_data, _category_dict_cache, logger=logger, label="Scene sync",
+        on_miss=_on_miss if miss_sink is not None else None)
 
 
 def _compute_scene_hash(scene_dir: str) -> str:
@@ -632,6 +653,10 @@ async def sync_official_scenes(repo_root: str | None = None):
 
         stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "stale_official": 0}
 
+        # Issue #3796：分类 slug 未命中按同步轮聚合（slug → {count, scenes 样例}），
+        # 轮末有未命中才发 1 条 WARNING；category_dict 与 scene_category 两条路径共用。
+        unresolved: dict[str, dict] = {}
+
         # P46.1 完成守卫 + 仓库场景集收集（与遍历同一份 listing）
         traversal_complete = True
         repo_scene_names = set()
@@ -700,11 +725,19 @@ async def sync_official_scenes(repo_root: str | None = None):
                 # d. content_hash
                 content_hash = _compute_scene_hash(scene_path)
 
-                # e. category slug → id
+                # e. category slug → id（category_id 走 scene_category 表口径）。
+                # Issue #3796：先直查后 legacy 别名（与 category_dict 路径同口径），
+                # 未命中只进轮级 sink（循环内 debug），轮末聚合 1 条 WARNING。
                 category_slug = scene_data.get("category", "general")
                 category_id = _cat_cache.get(category_slug, 0)
                 if category_id == 0:
-                    logger.warning(f"Scene sync: {name} category slug '{category_slug}' not found in scene_category, using 0 (unclassified)")
+                    _aliased = canonical_category_slug(category_slug)
+                    if _aliased != category_slug:
+                        category_id = _cat_cache.get(_aliased, 0)
+                if category_id == 0:
+                    _record_unresolved(unresolved, category_slug, name)
+                    logger.debug(f"Scene sync: {name} category slug '{category_slug}' "
+                                 f"unresolved in scene_category (aggregated per round)")
 
                 # f. 查 DB
                 version = scene_data.get("version", "1.0.0")
@@ -720,7 +753,7 @@ async def sync_official_scenes(repo_root: str | None = None):
                 _tag_items = [{"name": str(t).strip(), "source": "auto"}
                               for t in _raw_tags if str(t).strip()]
                 tags_json = encode_tags(_tag_items, limit=MAX_TAGS)
-                cat_l1_id, cat_l2_id = _resolve_scene_category(scene_data)
+                cat_l1_id, cat_l2_id = _resolve_scene_category(scene_data, unresolved, name)
                 author = scene_data.get("author", "")
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
                 preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
@@ -753,6 +786,15 @@ async def sync_official_scenes(repo_root: str | None = None):
                 stats["failed"] += 1
                 # P46.1 完成守卫：中途异常 → 仓库场景集不完整，跳过本轮 stale 检测
                 traversal_complete = False
+
+        # Issue #3796：轮末聚合未命中（每轮 ≤1 条 WARNING，slug→次数 + 样例场景；
+        # 文案避开「not found in category_dict/scene_category」字面量，防 LogQL 误计）。
+        if unresolved:
+            _summary = ", ".join(
+                f"'{slug}'×{v['count']} (scenes: {', '.join(v['scenes'])})"
+                for slug, v in sorted(unresolved.items()))
+            logger.warning(f"Scene sync: unresolved category slugs this round "
+                           f"(kept existing categories): {_summary}")
 
         # P46.1 stale 检测（只读，铁律 1.0：零 DB 写；守卫失败最坏=本轮没有报告）
         stats["stale_official"] = _detect_stale_official_scenes(repo_scene_names, traversal_complete)
