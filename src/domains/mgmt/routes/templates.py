@@ -159,9 +159,20 @@ def _create_repo_with_visibility_retry(adapter, token: str, repo_name: str, tpl:
     """
     kwargs = _create_auto_init_kwargs(adapter)
     desc = tpl.get("description", "")
+
+    def _create(private_flag: bool):
+        # 适配器约定：上游拒绝（重名/无权限/所属空间不存在）时**返回 {"error":...}**
+        # 而不抛异常（gitlab.py:165,172）。不判这一支会把「没建成」当成功：
+        # 后续 push 才失败 → 502 文案错、且 repo_created=True 会触发
+        # cleanup_stale_repo_data 清掉同名现有仓库的运行态（见 templates.py:396）。
+        res = adapter.create_repo(token, repo_name, description=desc, owner=owner_space,
+                                  private=private_flag, **kwargs)
+        if isinstance(res, dict) and res.get("error"):
+            raise RuntimeError(str(res["error"]))
+        return res
+
     try:
-        adapter.create_repo(token, repo_name, description=desc, owner=owner_space,
-                            private=private, **kwargs)
+        _create(private)
         return
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
@@ -169,8 +180,7 @@ def _create_repo_with_visibility_retry(adapter, token: str, repo_name: str, tpl:
                 k in msg for k in ("private group", "public project", "私有组")):
             raise
         log.info(f"create_from_template: 目标空间为私有组，改以私有仓库重试 ({owner_space})")
-    adapter.create_repo(token, repo_name, description=desc, owner=owner_space,
-                        private=True, **kwargs)
+    _create(True)
 
 
 def _pick_platform_token(user: dict) -> tuple[str, str]:
