@@ -52,3 +52,37 @@ def test_non_gitlab_provider_with_slash_is_not_whitelisted(no_orgs):
 
 def test_empty_owner_is_personal_space(no_orgs):
     ns.assert_owner_visible("gitlab", "tok", "")
+
+def test_self_hosted_provider_key_with_gitlab_dialect_is_allowed(no_orgs):
+    """自建实例的 provider key 是 gitlab-corp，判定必须按平台卡 dialect。"""
+    from src.domains.mgmt import vcs as vcs_mod
+    import src.domains.runtime.public as rt_public
+
+    class _Card:
+        dialect = "gitlab"
+
+    class _P:
+        def resolve_namespace(self, token, owner):
+            return {"id": 7, "path": owner}
+
+    monkeypatch_ok = no_orgs
+    monkeypatch_ok.setattr(rt_public, "get_platform_card", lambda p: _Card(), raising=True)
+    monkeypatch_ok.setattr(vcs_mod, "create_provider", lambda provider: _P())
+    ns.assert_owner_visible("gitlab-corp", "tok", "group-a/sub-a")
+
+
+def test_non_gitlab_dialect_self_hosted_is_still_rejected(no_orgs):
+    import src.domains.runtime.public as rt_public
+    from src.domains.mgmt import vcs as vcs_mod
+
+    class _Card:
+        dialect = "github"
+
+    class _P:
+        def resolve_namespace(self, token, owner):
+            return {"id": 7}
+
+    no_orgs.setattr(rt_public, "get_platform_card", lambda p: _Card(), raising=True)
+    no_orgs.setattr(vcs_mod, "create_provider", lambda provider: _P())
+    with pytest.raises(ns.NamespaceNotVisible):
+        ns.assert_owner_visible("gitlab-corp", "tok", "group-a/sub-a")

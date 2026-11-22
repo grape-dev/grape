@@ -336,6 +336,22 @@ def namespace_paths(provider: str, token: str, account: Mapping[str, Any] | None
     return paths
 
 
+def _is_gitlab_dialect(provider: str) -> bool:
+    """是否 GitLab 方言（按平台卡 dialect 判定，不能按 provider 名）。
+
+    自建实例的 provider key 是 `gitlab-corp` 这类名字，字面量比较会让子组校验
+    直接跳过精确解析路径 → 自建实例上建子组仓照样 400。
+    """
+    try:
+        from src.domains.runtime.public import get_platform_card as _gpc
+        card = _gpc(provider)
+        return bool(card is not None and getattr(card, "dialect", "") == "gitlab")
+    except Exception as e:  # noqa: BLE001 - 卡不可读时按非 gitlab 处理（保守拒绝）
+        from src.kernel.config import log as _log
+        _log.debug(f"_is_gitlab_dialect({provider}) failed: {e}")
+        return False
+
+
 def assert_owner_visible(provider: str, token: str, owner: str,
                          account: Mapping[str, Any] | None = None) -> None:
     """建仓前校验 owner ∈ 服务端清单（个人空间或该用户可见组织），否则拒绝。
@@ -352,7 +368,7 @@ def assert_owner_visible(provider: str, token: str, owner: str,
     # GitLab 的 /groups 只返回顶层组，子组（grp/sub）永远不在清单里；而建仓 API 支持
     # 按完整路径寻址。所以清单未命中时用 /groups/<full_path> 精确解析一次：解析得到
     # = token 对该子组可见（404/403 即不可见），与建仓同口径。否则"下拉选不了、手填被拒"。
-    if "/" in wanted and provider in ("gitlab",):
+    if "/" in wanted and _is_gitlab_dialect(provider):
         try:
             from src.domains.mgmt.vcs import create_provider as _cp
             if _cp(provider).resolve_namespace(token, wanted):
