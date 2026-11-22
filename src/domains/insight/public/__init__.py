@@ -107,21 +107,25 @@ def record_merge_gate_log(repo_key: str, pr_number: int, phase: str, decision: s
 def record_metric(metric: str, value: float, dim_key: str = "global",
                   repo_key: str = "", cnt: int = 0,
                   resolution: str = "minute", bucket_start: str = "") -> None:
-    """通用指标落库（A13）：按 (resolution, bucket_start, metric, dim_key) 幂等累加。
+    """通用指标落库（A13）：按 (resolution, bucket_start, metric, dim_key) 幂等覆盖。
 
-    运维面板/告警从 `obs_metric_rollup` 读，队列类指标（积压深度、租约过期数、
-    重试总量）由生产方在固定间隔导出，避免每笔投递都写指标表。
+    走 insight 既有的 ``metric_rollup.write_bucket`` —— 那里用 ``?`` 占位 +
+    ``ON CONFLICT ... DO UPDATE``，由兼容层翻译到 MySQL；直接写 MySQL 专有
+    ``ON DUPLICATE KEY UPDATE`` 会在 sqlite 模式（双后端）下语法报错（架构审查 B1）。
     """
-    import datetime as _dt
-    bucket = bucket_start or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M")
-    with db_registry.cursor("insight") as c:
-        c.execute(
-            "INSERT INTO obs_metric_rollup "
-            "(resolution, bucket_start, metric, dim_key, repo_key, value, cnt) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-            "ON DUPLICATE KEY UPDATE value=VALUES(value), cnt=VALUES(cnt), "
-            "updated_at=NOW()",
-            (resolution, bucket, metric, dim_key, repo_key, float(value), int(cnt)))
+    from datetime import datetime, timezone
+
+    from src.domains.insight.observability.metric_rollup import floor_bucket, write_bucket
+
+    if bucket_start:
+        try:
+            dt = datetime.fromisoformat(bucket_start.replace("Z", "+00:00"))
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    write_bucket(resolution, floor_bucket(dt, resolution),
+                 {dim_key or "global": {metric: (float(value), int(cnt))}})
 
 
 def health() -> dict[str, Any]:
