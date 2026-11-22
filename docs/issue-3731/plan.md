@@ -58,14 +58,21 @@ ALTER TABLE user_feedback ADD COLUMN convert_fail_count INTEGER NOT NULL DEFAULT
 转换器侧：
 
 ```python
-def _note_failure(fid, reason, provider="", owner="", repo="") -> None:
+def _note_failure(fid, reason, provider="", owner="", repo="", prev_count=0) -> None:
     times = _mgmt_public.feedback_bump_convert_fail(fid)      # 失败不阻塞主流程（try/except）
+    # prev_count：本轮自增前的持久化计数（_fetch_pending 读回），用于判定「跨越阈值」
     msg = f"feedback→issue: {reason} (fid={fid}, consecutive={times}/{threshold})"
-    log.error(msg) if times >= threshold else log.warning(msg)
+    log.error(msg) if _fail_is_escalation(times, prev_count) else log.warning(msg)
 ```
 
-- 三条失败路径（target resolve / 无 bot token / create failed）统一走 `_note_failure`，
-  **保留原有可检索子串** `target resolve failed` / `create failed`（Grafana 口径不变）。
+- 三条**真失败**路径（路由解析异常 / 无 bot token / create failed）统一走 `_note_failure`，
+  **保留原有可检索子串** `target resolve failed` / `create failed`（Grafana 口径不变）；
+- ERROR 只在「跨越阈值」那一轮发一次（`_fail_is_escalation`：`prev < threshold <= times`），
+  其后各轮回到 WARNING——否则单行永久卡死时每轮 1 条 ERROR（阈值 3 + interval 300s →
+  288 条/天），与「消除 20.7 万条噪声」的目标背反；
+- **策略跳过 / 不可路由不计连败**（`_feedback_routeable`）：`GRAPE_FEEDBACK_OFFICIAL_ISSUE=0`
+  的官方目标为空、repo/user 路由缺 `repo_key`，均为「有意不建单 / 数据缺失」而非转换失败，
+  只 skip 不计数，保持 Spec Out of Scope 的开关语义不变；
 - 阈值 `FEEDBACK_CONVERT_FAIL_ESCALATE`（默认 3，最小 1）。
 
 ## 关键设计决策
