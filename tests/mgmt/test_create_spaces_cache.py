@@ -26,7 +26,7 @@ def spy(monkeypatch):
 
     def _fake(provider, token):
         calls["n"] += 1
-        return {"provider": provider, "personal_login": "yangaiwu",
+        return {"provider": provider, "personal_login": "account-a",
                 "spaces": [{"path": "grp/sub", "name": "sub", "kind": "group"}]}
 
     monkeypatch.setattr(N, "_collect", _fake)

@@ -48,9 +48,9 @@ def test_precheck_owner_uses_username_field(monkeypatch):
     """GitLab /user 返回 username（无 login）→ 仓库 owner 本人直接放行，不查成员权限。"""
     from src.domains.mgmt.routes.repos import _gitlab_host_precheck
 
-    prov = _Prov(info={"id": 44646095, "username": "yangaiwu"})
+    prov = _Prov(info={"id": 44646095, "username": "account-a"})
     _patch_provider(monkeypatch, prov)
-    _gitlab_host_precheck("gitlab", "yangaiwu", "hello-fastapi-2", "tok")
+    _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "tok")
     assert prov.calls == [("verify_token", "tok")]
 
 
@@ -60,7 +60,7 @@ def test_precheck_non_maintainer_403(monkeypatch):
     prov = _Prov(info={"id": 1, "username": "someone"}, perm={"access_level": 30})
     _patch_provider(monkeypatch, prov)
     with pytest.raises(HTTPException) as ei:
-        _gitlab_host_precheck("gitlab", "yangaiwu", "hello-fastapi-2", "tok")
+        _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "tok")
     assert ei.value.status_code == 403
     assert isinstance(ei.value.detail, dict)
     assert ei.value.detail.get("error_code") == "PERMISSION_DENIED"
@@ -71,8 +71,8 @@ def test_precheck_maintainer_passes(monkeypatch):
 
     prov = _Prov(info={"id": 1, "username": "someone"}, perm={"access_level": 40})
     _patch_provider(monkeypatch, prov)
-    _gitlab_host_precheck("gitlab", "yangaiwu", "hello-fastapi-2", "tok")
-    assert ("perm", "yangaiwu", "hello-fastapi-2", "someone") in prov.calls
+    _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "tok")
+    assert ("perm", "account-a", "hello-fastapi-2", "someone") in prov.calls
 
 
 def test_precheck_no_member_row_403(monkeypatch):
@@ -82,7 +82,7 @@ def test_precheck_no_member_row_403(monkeypatch):
     prov = _Prov(info={"id": 1, "username": "someone"}, perm=None)
     _patch_provider(monkeypatch, prov)
     with pytest.raises(HTTPException) as ei:
-        _gitlab_host_precheck("gitlab", "yangaiwu", "private-repo", "tok")
+        _gitlab_host_precheck("gitlab", "account-a", "private-repo", "tok")
     assert ei.value.status_code == 403
 
 
@@ -92,7 +92,7 @@ def test_precheck_identity_failure_502(monkeypatch):
     prov = _Prov(boom="401 Unauthorized")
     _patch_provider(monkeypatch, prov)
     with pytest.raises(HTTPException) as ei:
-        _gitlab_host_precheck("gitlab", "yangaiwu", "hello-fastapi-2", "bad-token")
+        _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "bad-token")
     assert ei.value.status_code == 502
     assert isinstance(ei.value.detail, dict)
     assert ei.value.detail.get("error_code") == "GITLAB_IDENTITY_FAILED"
@@ -104,7 +104,7 @@ def test_precheck_empty_username_502(monkeypatch):
     prov = _Prov(info={"id": 1})          # 上游无 username/login
     _patch_provider(monkeypatch, prov)
     with pytest.raises(HTTPException) as ei:
-        _gitlab_host_precheck("gitlab", "yangaiwu", "hello-fastapi-2", "tok")
+        _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "tok")
     assert ei.value.status_code == 502
 
 
@@ -117,7 +117,7 @@ def _seed_row(repo_key, host_user_id="", org_id=""):
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
         c.execute("INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, "
                   "webhook_id, host_user_id, org_id) VALUES (?,?,?,?,0,?,?)",
-                  (repo_key, "yangaiwu", "r", "yangaiwu/r", host_user_id, org_id))
+                  (repo_key, "account-a", "r", "account-a/r", host_user_id, org_id))
         db.commit()
 
 
@@ -132,7 +132,7 @@ def _drop_row(repo_key):
 def test_owner_conflict_other_user_403():
     from src.domains.mgmt.routes.repos import _host_owner_conflict
 
-    rk = "gitlab:yangaiwu/conflict-a"
+    rk = "gitlab:account-a/conflict-a"
     _seed_row(rk, host_user_id="999")
     try:
         with pytest.raises(HTTPException) as ei:
@@ -147,7 +147,7 @@ def test_owner_conflict_other_user_403():
 def test_owner_conflict_same_user_ok():
     from src.domains.mgmt.routes.repos import _host_owner_conflict
 
-    rk = "gitlab:yangaiwu/conflict-b"
+    rk = "gitlab:account-a/conflict-b"
     _seed_row(rk, host_user_id="33")
     try:
         _host_owner_conflict(rk, {"id": 33}, "")      # 幂等重入不拦
@@ -158,7 +158,7 @@ def test_owner_conflict_same_user_ok():
 def test_owner_conflict_other_org_403():
     from src.domains.mgmt.routes.repos import _host_owner_conflict
 
-    rk = "gitlab:yangaiwu/conflict-c"
+    rk = "gitlab:account-a/conflict-c"
     _seed_row(rk, host_user_id="33", org_id="org-1")
     try:
         with pytest.raises(HTTPException) as ei:
@@ -173,4 +173,4 @@ def test_owner_conflict_other_org_403():
 def test_owner_conflict_no_row_ok():
     from src.domains.mgmt.routes.repos import _host_owner_conflict
 
-    _host_owner_conflict("gitlab:yangaiwu/never-hosted", {"id": 33}, "")
+    _host_owner_conflict("gitlab:account-a/never-hosted", {"id": 33}, "")

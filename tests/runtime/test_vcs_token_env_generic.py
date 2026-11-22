@@ -62,8 +62,8 @@ def test_acp_env_forwards_provider_tokens_and_context():
         "USER_GITLAB_TOKEN": "gl-user",
         "BOT_GITEE_TOKEN": "ge-token",
         "BOT_GITCODE_TOKEN": "gc-token",
-        "GRAPE_SERVER_URL": "http://192.168.0.227",
-        "REPO_FULL_NAME": "yangaiwu/hello-flask-3",
+        "GRAPE_SERVER_URL": "http://127.0.0.1",
+        "REPO_FULL_NAME": "account-a/demo-repo",
         "NO_COLOR": "1",
         "OPENAI_API_KEY": "sk-must-not-be-forwarded",
     }
@@ -72,7 +72,7 @@ def test_acp_env_forwards_provider_tokens_and_context():
     assert env["BOT_GITEE_TOKEN"] == "ge-token"
     assert env["USER_GITLAB_TOKEN"] == "gl-user"
     assert env["BOT_GITCODE_TOKEN"] == "gc-token"
-    assert env["GRAPE_SERVER_URL"] == "http://192.168.0.227"
+    assert env["GRAPE_SERVER_URL"] == "http://127.0.0.1"
     assert env["NO_COLOR"] == "1"
     assert env["_HERMES_BIN"] == "/opt/hermes/bin/hermes"
     assert "OPENAI_API_KEY" not in env, "非 VCS 密钥不进 ACP 白名单"

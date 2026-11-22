@@ -49,10 +49,10 @@ def _make(fake: _FakeHttp) -> GiteeProvider:
 
 
 def test_list_create_spaces_parses_orgs():
-    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "myfuture_1", "name": "MYFUTURE"},
+    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "MYFUTURE"},
                            {"id": 2, "login": "grape-org", "name": ""}])
     spaces = _make(fake).list_create_spaces("tok")
-    assert spaces == [{"path": "myfuture_1", "name": "MYFUTURE", "kind": "org"},
+    assert spaces == [{"path": "group-a", "name": "MYFUTURE", "kind": "org"},
                       {"path": "grape-org", "name": "grape-org", "kind": "org"}]
     assert fake.calls[0][1].startswith("/user/orgs")
 
@@ -62,20 +62,20 @@ def test_list_create_spaces_degrades_on_upstream_error():
 
 
 def test_resolve_namespace_hits_and_misses():
-    fake = _FakeHttp(by_login={"myfuture_1": {"id": 15542423, "login": "myfuture_1"}})
+    fake = _FakeHttp(by_login={"group-a": {"id": 15542423, "login": "group-a"}})
     p = _make(fake)
-    assert p.resolve_namespace("tok", "myfuture_1") == {"id": 15542423, "path": "myfuture_1"}
+    assert p.resolve_namespace("tok", "group-a") == {"id": 15542423, "path": "group-a"}
     assert p.resolve_namespace("tok", "") is None
     assert p.resolve_namespace("tok", "no-such-org") is None
 
 
 def test_listed_space_is_usable_for_create_repo():
     """同一事实源：下拉能列出的组织，建仓时走的正是 /orgs/{owner}/repos。"""
-    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "myfuture_1", "name": "MYFUTURE"}],
-                     by_login={"myfuture_1": {"id": 15542423, "login": "myfuture_1"}})
+    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "MYFUTURE"}],
+                     by_login={"group-a": {"id": 15542423, "login": "group-a"}})
     p = _make(fake)
     listed = [s["path"] for s in p.list_create_spaces("tok")]
-    assert listed == ["myfuture_1"]
+    assert listed == ["group-a"]
     out = p.create_repo("tok", "proj", owner=listed[0], private=True)
-    assert out["full_name"] == "myfuture_1/proj"
-    assert any(c[1].startswith("/orgs/myfuture_1/repos") for c in fake.calls)
+    assert out["full_name"] == "group-a/proj"
+    assert any(c[1].startswith("/orgs/group-a/repos") for c in fake.calls)

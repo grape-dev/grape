@@ -269,8 +269,8 @@ def platform_login(provider: str, token: str) -> str:
     """用 token 解析**平台侧**登录名（GitLab /user 是 username，其它平台是 login）。
 
     为什么必须问平台（2026-11-20 实锤）：owner 校验曾把「本系统账号名」当平台登录名，
-    `gvtest3` 的 gitlab 个人空间实为 `yangaiwu` —— 前端下拉里选个人空间会带
-    owner=yangaiwu，被服务端清单（个人项按 gvtest3 合成）判 NAMESPACE_NOT_VISIBLE 400，
+    `account-a` 的 gitlab 个人空间实为 `account-b` —— 前端下拉里选个人空间会带
+    owner=account-b，被服务端清单（个人项按 account-a 合成）判 NAMESPACE_NOT_VISIBLE 400，
     而 owner=""（隐含个人）却能成功。个人空间的权威身份只能来自平台本身。
     """
     try:

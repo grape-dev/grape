@@ -61,11 +61,11 @@ def test_s20_rebuild_webhook_url_bare_base(gitee_card):
 
     2026-11-22 线上实锤：create_new_repo / host_repo / repair_host 三处旧写法
     只在基址已含 "/webhook/" 时才替换 → 裸基址原样下发，平台侧 hook 落到 "/"
-    → nginx 只放行 /webhook/ → 回调 404（gitcode:xiaowu2119/yaw-accept-45691，
+    → nginx 只放行 /webhook/ → 回调 404（gitcode:org-a/repo-a，
     hook url 曾是 https://<隧道基址> 缺 /webhook/gitcode）。三处已统一走本函数。
     """
     from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider
-    bare = "https://uli5t7wk-18089.devbridge-s2.hwtunnel.com"
+    bare = "https://tunnel.example.com"
     assert _rebuild_webhook_url_for_provider(bare, "gitcode") == bare + "/webhook/gitcode"
     assert _rebuild_webhook_url_for_provider(bare + "/", "gitee") == bare + "/webhook/gitee"
     assert _rebuild_webhook_url_for_provider(bare, "github") == bare + "/webhook/github"

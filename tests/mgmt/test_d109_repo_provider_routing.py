@@ -31,10 +31,10 @@ def test_provider_resolved_from_user_repos_cache(monkeypatch):
     from src.domains.mgmt.user import db as user_db
 
     monkeypatch.setattr(user_db, "get_user_repos",
-                        _fake_repos([{"repo_key": "gitee:yang-aiwu-new/livefire-tpl-verify-1010"}]))
+                        _fake_repos([{"repo_key": "gitee:org-b/livefire-tpl-verify-1010"}]))
 
     assert repos_route._provider_from_user_repos(
-        {"id": "33", "username": "yangaiwu"}, "yang-aiwu-new/livefire-tpl-verify-1010") == "gitee"
+        {"id": "33", "username": "account-a"}, "org-b/livefire-tpl-verify-1010") == "gitee"
 
 
 def test_provider_cache_hint_requires_unique_hit(monkeypatch):
@@ -77,18 +77,18 @@ def test_generic_fetch_fills_owner_from_gitee_namespace():
         def _http(self, method, path, token, data=None, form=False):
             if path.startswith("/user/repos"):
                 return [
-                    {"full_name": "myfuture_1/innovation", "name": "innovation",
-                     "namespace": {"path": "myfuture_1"}, "permissions": {}},
-                    {"name": "solo", "namespace": {"path": "yang-aiwu-new"}},
+                    {"full_name": "group-a/innovation", "name": "innovation",
+                     "namespace": {"path": "group-a"}, "permissions": {}},
+                    {"name": "solo", "namespace": {"path": "org-b"}},
                 ]
             return {}
 
         def get_user_login(self, token):
-            return "yang-aiwu-new"
+            return "org-b"
 
     rows = _Prov().fetch_repos_with_role("tok")
-    assert rows[0]["owner"] == "myfuture_1"
+    assert rows[0]["owner"] == "group-a"
     assert rows[0]["is_admin"] is False          # 别人的命名空间 → 不是管理员
-    assert rows[1]["owner"] == "yang-aiwu-new"
+    assert rows[1]["owner"] == "org-b"
     assert rows[1]["is_admin"] is True            # owner == 我 → 管理员
-    assert rows[1]["full_name"] == "yang-aiwu-new/solo"   # 缺 full_name 时用 namespace 补
+    assert rows[1]["full_name"] == "org-b/solo"   # 缺 full_name 时用 namespace 补

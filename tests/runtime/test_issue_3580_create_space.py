@@ -141,7 +141,7 @@ def test_check_name_reads_gitlab_username_field(monkeypatch):
 
     class _Prov:
         def verify_token(self, token):
-            return {"id": 44646095, "username": "yangaiwu"}      # 无 login 键
+            return {"id": 44646095, "username": "account-a"}      # 无 login 键
 
     monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _Prov())
     # arch-weekly-11 侧身份获取经 with_oauth_token（过期 token 刷新重试）；
@@ -163,7 +163,7 @@ def test_check_name_reads_gitlab_username_field(monkeypatch):
     out = R.check_repo_name(name="proj", provider="gitlab", owner="",
                             user={"id": 1, "username": "gvtest"})
     assert out == {"exists": False}
-    assert seen["login"] == "yangaiwu"
+    assert seen["login"] == "account-a"
 
 
 def test_gitlab_create_repo_normalizes_full_name_and_owner():

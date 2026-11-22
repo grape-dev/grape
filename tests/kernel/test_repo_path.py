@@ -8,7 +8,7 @@ def test_accepts_flat_and_nested_paths():
     assert validate_repo_path("owner/repo") == "owner/repo"
     assert validate_repo_path("team/subgroup/project") == "team/subgroup/project"
     assert validate_repo_path("/owner/repo/") == "owner/repo"      # 首尾斜杠规范化
-    assert validate_repo_path("yangaiwu/demo.git") == "yangaiwu/demo.git"
+    assert validate_repo_path("account-a/demo.git") == "account-a/demo.git"
     assert validate_repo_path("小组/子组/项目") == "小组/子组/项目"     # GitLab 合法 Unicode
 
 

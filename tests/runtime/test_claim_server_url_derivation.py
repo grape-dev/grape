@@ -21,8 +21,8 @@ class _FakeRequest:
 
 
 def test_host_header_wins():
-    req = _FakeRequest({"host": "192.168.0.227"})
-    assert _request_base_url(req) == "http://192.168.0.227"
+    req = _FakeRequest({"host": "198.51.100.10"})
+    assert _request_base_url(req) == "http://198.51.100.10"
 
 
 def test_forwarded_proto_is_honoured():
@@ -31,8 +31,8 @@ def test_forwarded_proto_is_honoured():
 
 
 def test_forwarded_proto_list_takes_first():
-    req = _FakeRequest({"host": "h:8080", "x-forwarded-proto": "https,http"})
-    assert _request_base_url(req) == "https://h:8080"
+    req = _FakeRequest({"host": "h.example.com:8080", "x-forwarded-proto": "https,http"})
+    assert _request_base_url(req) == "https://h.example.com:8080"
 
 
 def test_no_host_returns_empty_for_fallback():
@@ -41,5 +41,5 @@ def test_no_host_returns_empty_for_fallback():
 
 
 def test_missing_forwarded_proto_falls_back_to_scheme():
-    req = _FakeRequest({"host": "10.0.0.5"}, scheme="https")
-    assert _request_base_url(req) == "https://10.0.0.5"
+    req = _FakeRequest({"host": "127.0.0.1"}, scheme="https")
+    assert _request_base_url(req) == "https://127.0.0.1"

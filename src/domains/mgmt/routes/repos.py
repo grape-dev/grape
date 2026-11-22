@@ -663,11 +663,11 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 可列仓平台 = 身份行 ∪ 凭据域 <p>_pat（统一入口 list_platform_links，A 批）：
     # PAT 是仓库执行凭据、不是身份绑定，只配 PAT 的账号同样可列仓。
     # token 不可用的平台不算"可列仓"（历史派生密钥解不出来 / 空 token）：否则必 401 重授权，
-    # 把本可渲染引导页的入口打成报错（2026-11-16 yangaiwu 现场）。
+    # 把本可渲染引导页的入口打成报错（2026-11-16 现场）。
     _links = list_platform_links(user["id"])
     # 2026-11-18：「用户声明过这个平台」与「这个平台的凭据现在可用」拆成两个集合。
     # 只用一个布尔会把"配置在但坏了"折叠成"没配置"，用户看到的是引导页 + 错误文案，
-    # 而库里凭据行和仓库缓存其实都在（yangaiwu 现场：6 条 PAT 解不开 → 整块列表失踪）。
+    # 而库里凭据行和仓库缓存其实都在（现场：6 条 PAT 解不开 → 整块列表失踪）。
     _declared_providers = {i["provider"] for i in _links if i.get("provider") in _listable}
     _bound_providers = {i["provider"] for i in _links
                         if i.get("provider") in _listable and i.get("token_usable", True)}
@@ -1729,7 +1729,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链）。
     # 2026-11-22 修：旧写法「基址里没有 /webhook/ 段就整段跳过」，裸基址（如隧道
     # 基址 https://<id>.hwtunnel.com）会建出缺平台路径的 hook → 平台回调 404
-    # （实锤 gitcode:xiaowu2119/yaw-accept-45691）。改为按平台卡重建，缺段自动补。
+    # （实锤 gitcode:org-a/repo-a）。改为按平台卡重建，缺段自动补。
     from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
     webhook_url = _rebuild_wh_url(webhook_url, provider)
 

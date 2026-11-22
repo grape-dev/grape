@@ -89,10 +89,10 @@ PUT 的实现链：`verify_token(token)`（GitLab → `GET /user`）→ 无 `id`
 实测（2026-11-22，gitlab.com PAT）：
 
 ```
-id       = 44646095
-username = yangaiwu
-name     = aiwu yang          ← 显示名，就在 /user 的 name 字段
-expires  = 2027-01-30  revoked = False
+id       = <user-id>
+username = <account>
+name     = <display-name>   ← 显示名，就在 /user 的 name 字段
+expires  = <expires-at>  revoked = False
 scopes   = [... read_repository, write_repository, read_api, api ...]
 ```
 

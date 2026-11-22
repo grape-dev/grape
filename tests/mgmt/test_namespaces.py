@@ -135,31 +135,31 @@ def test_gitlab_lister_uses_provider_spaces_port(monkeypatch):
 def test_personal_owner_uses_platform_login_not_local_username(monkeypatch):
     """个人空间必须按**平台登录名**认，不能拿本系统账号名当平台身份。
 
-    实锤（2026-11-20 线上）：gvtest3 绑定 gitlab PAT（平台登录 yangaiwu），
-    前端个人空间项 path=yangaiwu；check-name 传 owner=yangaiwu 被 400
-    NAMESPACE_NOT_VISIBLE（个人项按 gvtest3 合成），而 owner="" 反而成功。
+    实锤（2026-11-20 线上）：account-c 绑定 gitlab PAT（平台登录 account-a），
+    前端个人空间项 path=account-a；check-name 传 owner=account-a 被 400
+    NAMESPACE_NOT_VISIBLE（个人项按 account-c 合成），而 owner="" 反而成功。
     """
     from src.domains.mgmt.user import namespaces as ns_mod
     import src.kernel.token_resolver as tr
 
     class _Prov:
         def verify_token(self, token):
-            return {"username": "yangaiwu", "name": "aiwu yang"}   # GitLab /user 字段
+            return {"username": "account-a", "name": "aiwu yang"}   # GitLab /user 字段
 
         def list_create_spaces(self, token):
             return [{"path": "xiaowu3", "name": "xiaowu-群组", "kind": "group"}]
 
     monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: _Prov())
 
-    paths = ns_mod.namespace_paths("gitlab", "tok", {"login": "gvtest3"})
-    assert paths == {"yangaiwu", "xiaowu3"}
-    ns_mod.assert_owner_visible("gitlab", "tok", "yangaiwu", {"login": "gvtest3"})
-    ns_mod.assert_owner_visible("gitlab", "tok", "xiaowu3", {"login": "gvtest3"})
+    paths = ns_mod.namespace_paths("gitlab", "tok", {"login": "account-c"})
+    assert paths == {"account-a", "xiaowu3"}
+    ns_mod.assert_owner_visible("gitlab", "tok", "account-a", {"login": "account-c"})
+    ns_mod.assert_owner_visible("gitlab", "tok", "xiaowu3", {"login": "account-c"})
     with pytest.raises(NamespaceNotVisible):
-        ns_mod.assert_owner_visible("gitlab", "tok", "gitlab-org", {"login": "gvtest3"})
+        ns_mod.assert_owner_visible("gitlab", "tok", "gitlab-org", {"login": "account-c"})
     # 本系统账号名不再是有效 owner
     with pytest.raises(NamespaceNotVisible):
-        ns_mod.assert_owner_visible("gitlab", "tok", "gvtest3", {"login": "gvtest3"})
+        ns_mod.assert_owner_visible("gitlab", "tok", "account-c", {"login": "account-c"})
 
 
 def test_platform_login_falls_back_when_provider_unavailable(monkeypatch):

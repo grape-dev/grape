@@ -15,7 +15,7 @@ from src.domains.runtime import webhook_inbox as wi
 
 
 def _item(**kw):
-    base = {"id": 7, "repo_key": "gitlab:yangaiwu/demo", "headers": json.dumps({"x-gitlab-event": "Push Hook"}),
+    base = {"id": 7, "repo_key": "gitlab:account-a/demo", "headers": json.dumps({"x-gitlab-event": "Push Hook"}),
             "payload": "{}", "attempts": 0}
     base.update(kw)
     return base
@@ -46,7 +46,7 @@ def test_hosted_delivery_runs_and_is_consumed(monkeypatch):
 
     wi._consume_one(_item(), "owner-1", pipeline=_pipeline)
     assert seen["ok"] is True and seen["error"] == ""
-    assert seen["account"] == "yangaiwu/demo" and seen["repo"] == "gitlab:yangaiwu/demo"
+    assert seen["account"] == "account-a/demo" and seen["repo"] == "gitlab:account-a/demo"
     assert seen["headers"] == {"x-gitlab-event": "Push Hook"}
 
 
@@ -71,7 +71,7 @@ def test_hosting_recheck_fails_open_when_contract_unavailable(monkeypatch):
         raise RuntimeError("gsb down")
 
     monkeypatch.setattr(gsb, "get_service", _boom)
-    assert wi.is_still_hosted("gitlab:yangaiwu/demo") is True
+    assert wi.is_still_hosted("gitlab:account-a/demo") is True
 
 
 def test_hosting_recheck_reports_unmanaged(monkeypatch):
@@ -82,7 +82,7 @@ def test_hosting_recheck_reports_unmanaged(monkeypatch):
             return {}
 
     monkeypatch.setattr(gsb, "get_service", lambda _name: _Svc())
-    assert wi.is_still_hosted("gitlab:yangaiwu/demo") is False
+    assert wi.is_still_hosted("gitlab:account-a/demo") is False
 
 
 def test_lease_is_renewed_during_long_pipeline(monkeypatch):

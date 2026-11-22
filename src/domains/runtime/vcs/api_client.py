@@ -970,7 +970,7 @@ class VcsApiClient:
         旧实现把 "" 当"未给"，`get_repo_info()` 于是对 GitLab 请求 `/repos/o/r`
         ——那是**不存在的路由**，GitLab 恒回 404 且响应体是 404 页，
         查重/存在性判定永远得到「不存在」（线上 check-name 对真实存在的
-        yangaiwu/hello-fastapi-2 报 exists:false）。
+        account-a/hello-fastapi-2 报 exists:false）。
         """
         card = self._platform_card()
         if card and card.dialect == "gitlab" and gitlab_style is not None:

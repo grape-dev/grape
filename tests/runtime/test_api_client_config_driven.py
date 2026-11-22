@@ -189,9 +189,9 @@ def test_gitlab_repo_info_uses_projects_endpoint(gitlab_card, monkeypatch):
 
     回归（2026-11-20 线上）：`_generic_path(..., "")` 把空串当"未给"，于是
     get_repo_info 对 GitLab 请求了不存在的 `/repos/{o}/{r}` → 恒 404 →
-    查重永远得到「不存在」（真实存在的 yangaiwu/hello-fastapi-2 也被判为空）。
+    查重永远得到「不存在」（真实存在的 account-a/hello-fastapi-2 也被判为空）。
     """
-    client = VcsApiClient("gitlab", "tok", "yangaiwu", "hello-fastapi-2")
+    client = VcsApiClient("gitlab", "tok", "account-a", "hello-fastapi-2")
     seen = {}
 
     def _fake_request(method, path, data=None, form=False, timeout=30):
@@ -200,7 +200,7 @@ def test_gitlab_repo_info_uses_projects_endpoint(gitlab_card, monkeypatch):
 
     monkeypatch.setattr(client, "_request", _fake_request)
     client.get_repo_info()
-    assert seen["path"] == "/projects/yangaiwu%2Fhello-fastapi-2"
+    assert seen["path"] == "/projects/account-a%2Fhello-fastapi-2"
 
 
 def test_non_gitlab_dialect_keeps_github_style_repo_path(monkeypatch):
@@ -217,9 +217,9 @@ def test_gitlab_dialect_refuses_github_style_path(gitlab_card):
     """gitlab 卡下漏传 gitlab_style 必须报错，不能静默拼出 /repos/（否则 404 当「不存在」）。"""
     from src.domains.runtime.vcs.api_client import VcsPathContractError
 
-    client = VcsApiClient("gitlab", "tok", "yangaiwu", "demo")
+    client = VcsApiClient("gitlab", "tok", "account-a", "demo")
     with pytest.raises(VcsPathContractError):
-        client._generic_path("/repos/yangaiwu/demo/issues")
+        client._generic_path("/repos/account-a/demo/issues")
 
 
 def test_every_generic_path_call_site_declares_gitlab_form():
