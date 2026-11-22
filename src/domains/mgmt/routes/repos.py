@@ -1945,8 +1945,10 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     global_bot_token = _hcfg["bot_token"]
     global_bot_username = _hcfg["bot_username"]
 
-    # Issue #372: 全局 Bot Token 优先（路径 A），无则降级到用户 Token（路径 B）
-    _use_path_b = not global_bot_token
+    # webhook 路径：方言强制（gitlab_v4 必须随机密钥）或没配 bot token 时走 B。
+    # bot_token 本身仍用于「邀请 bot 协作者 + 仓库回帖凭据」，与 webhook 路径无关——
+    # 此前把它置空来选路径，等于把「bot 出镜」一起关掉了。
+    _use_path_b = bool(_hcfg.get("webhook_path_b")) or not global_bot_token
 
     if _use_path_b:
         # 路径 B：无全局 Bot Token，用用户 Token 建 webhook
@@ -1989,7 +1991,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         # Issue #372: 路径 B（无全局 bot token）跳过 bot 协作者流程
         # Issue #372 §16.1: 路径 A bot 协作者失败时降级到路径 B（不 raise 502）
         import secrets as _secrets
-        if not _use_path_b and api_token and global_bot_username and global_bot_token:
+        # collab token 与 webhook 路径解耦：gitlab_v4 的 bot_token 恒空（路径 B），
+        # 但 bot 仍应被邀为维护者并持有回帖凭据（此前因此变成"用户身份回帖"）。
+        if global_bot_token and api_token and global_bot_username:
             _mark("partial", "invite_bot", "")
             ok, add_err = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
@@ -2063,8 +2067,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _db_webhook_token = "" if _use_path_b else webhook_token
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                      **{_hcfg["db_token_field"]: _db_webhook_token,
-                                        _hcfg["db_bot_token_field"]: (global_bot_token if not _use_path_b else "")},
-                                     bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id,
+                                        _hcfg["db_bot_token_field"]: global_bot_token},
+                                     bot_username=global_bot_username, org_id=_org_id,
                                      host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
             _mark("")
             return _finalize_host_write(
@@ -2093,8 +2097,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         _db_webhook_token = "" if _use_path_b else webhook_token
         user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
                                  **{_hcfg["db_token_field"]: _db_webhook_token,
-                                    _hcfg["db_bot_token_field"]: (global_bot_token if not _use_path_b else "")},
-                                 bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id,
+                                    _hcfg["db_bot_token_field"]: global_bot_token},
+                                 bot_username=global_bot_username, org_id=_org_id,
                                  host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
         _mark("")
         return _finalize_host_write(
@@ -2171,8 +2175,9 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     bot_token = _cfg["bot_token"]
     bot_username = _cfg["bot_username"]
 
-    # Issue #372: 路径 B——无全局 bot token 时用用户 token 修复 webhook
-    _use_path_b = not bot_token
+    # webhook 路径：方言强制（gitlab_v4 的随机密钥）或没配 bot token 时走 B；
+    # bot_token 本身继续用于邀请协作者与回帖身份（与 webhook 路径无关）
+    _use_path_b = bool(_cfg.get("webhook_path_b")) or not bot_token
     import secrets as _secrets
     _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
 

@@ -1047,7 +1047,13 @@ def get_hosting_provider_config(provider: str) -> dict:
         # PAT/bot token（会随 X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会
         # 让所有投递 404）。gitlab_v4 家族因此强制走路径 B（随机密钥）：
         # bot_token 置空 → 所有调用点 _use_path_b=True。
-        "bot_token": "" if _wd == "gitlab_v4" else get_global_bot_token_for(provider),
+        # 单一 bot_token，按用途取用（不再"置空即路径 B"）：
+        #   bot_token      —— 全局 bot token：邀请协作者 + 落库回帖凭据 + 路径 A 的 webhook token
+        #   webhook_path_b —— webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+        # gitlab_v4 必须走 B（PAT 经 X-Gitlab-Token 会外泄给维护者），这是方言的安全
+        # 要求，不该连带关掉「邀 bot / bot 回帖」这两件与 webhook 无关的事。
+        "bot_token": get_global_bot_token_for(provider),
+        "webhook_path_b": _wd == "gitlab_v4",
         "bot_username": resolve_bot_username(provider),
         "find_webhook": _find_w,
         "setup_webhook": _setup_w,
