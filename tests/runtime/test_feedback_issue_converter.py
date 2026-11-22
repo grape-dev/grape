@@ -315,3 +315,63 @@ class TestRepoKeyRouteUnpack:
             assert conv._repo_bot_token("github:o/r") == "T:github:o/r"
             assert conv._repo_bot_token("o/r") == "T:o/r"
         assert providers == ["github", "gitcode"]
+
+
+class TestTitleClip:
+    """Issue #3731 根因 B：平台标题上限 200 字符，超长标题必须截断且查重同键。"""
+
+    @staticmethod
+    def _fake_provider_module(issues=None, seen=None):
+        class _Mod:
+            API_BASE = "https://example.invalid/api/v5"
+
+            @staticmethod
+            def request(method, url, token, payload=None):
+                if seen is not None:
+                    seen[method] = payload if payload is not None else url
+                if method == "GET":
+                    return list(issues or [])
+                return {"number": 88}
+
+        return _Mod
+
+    def test_long_title_clipped_before_create(self):
+        """350 字符标题投递前截断到 <=200 且带尾部省略号；短标题原样。"""
+        seen = {}
+        mod = self._fake_provider_module(seen=seen)
+        long_title = "长" * 350
+        with mock.patch.object(conv, "_provider_module", return_value=mod), \
+             mock.patch("src.domains.runtime.vcs.providers.translate_inbound",
+                        side_effect=lambda p, res, act, neutral, ctx: neutral):
+            conv._create_provider_issue("gitcode", "o", "r", "B", long_title, "body")
+            conv._create_provider_issue("gitcode", "o", "r", "B", "短标题", "body")
+        sent = seen["POST"]["title"]
+        assert len(sent) <= 200 and sent.endswith("…")
+        assert sent.startswith("长" * 10)
+
+    def test_clipped_title_reuse_existing_issue(self):
+        """超长标题截断后与目标仓已有单同键 → 复用不新建（查重与建单同口径）。"""
+        long_title = "超" * 350
+        clipped = "超" * 199 + "…"
+        fid = _insert(source="agent", title=long_title, task_id="t-clip-1",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        seen = {}
+        try:
+            mod = self._fake_provider_module(issues=[{"number": 77, "title": clipped}],
+                                             seen=seen)
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 99, "url": "u99"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_provider_module", return_value=mod):
+                conv.convert_pending_feedback(limit=10)
+            assert not m.called                       # 查重命中，未新建
+            assert "state=opened" in seen["GET"]
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url, issue_number FROM user_feedback WHERE id=?",
+                    (fid,)).fetchone()
+            assert str(row[1]) == "77" and row[0]
+        finally:
+            _cleanup(fid)
