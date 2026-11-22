@@ -232,3 +232,76 @@ def test_cli_dry_run_by_default(capsys):
     assert payload["backfill"]["filled"] == 0
     assert rk in payload["backfill"]["missing"]
     assert _rc_rows(rk) == {}, "默认路径不得写库"
+
+# ────────────────────────────────────────── 6. 探列失败不得伪装成「无缺口」
+
+_PROBE_FAIL = "managed_repos column probe failed: boom"
+
+
+def _drop_stamp_row():
+    from src.api.db_setup import REPO_BOT_BACKFILL_VERSION
+    with db_lock:
+        db.cursor().execute("DELETE FROM grape_t_schema_migrations WHERE version=?",
+                            (REPO_BOT_BACKFILL_VERSION,))
+        db.commit()
+
+
+def test_verify_probe_failure_is_not_fake_pass(monkeypatch):
+    """探列失败时 verify 必须报 probe_ok=False、coverage=0，不得报「1.0/无缺口」。"""
+    import src.api.db_setup as dbs
+
+    monkeypatch.setattr(dbs, "_managed_repos_columns_probe",
+                        lambda c: (set(), _PROBE_FAIL))
+    report = dbs.verify_repo_bot_credential_backfill()
+    assert report["probe_ok"] is False
+    assert "boom" in report["error"]
+    assert report["coverage"] == 0.0
+    assert report["missing"] == []
+
+
+def test_backfill_probe_failure_is_reported(monkeypatch):
+    """探列失败时回填报告必须 probe_ok=False（零写入不能被当成成功）。"""
+    import src.api.db_setup as dbs
+
+    monkeypatch.setattr(dbs, "_managed_repos_columns_probe",
+                        lambda c: (set(), _PROBE_FAIL))
+    report = dbs.backfill_repo_bot_token_columns_to_rc(dry_run=True)
+    assert report["probe_ok"] is False
+    assert report["filled"] == 0
+    assert "boom" in report["error"]
+
+
+def test_cli_stamp_refuses_when_column_probe_fails(monkeypatch, capsys):
+    """探列失败时 --verify --stamp 必须 exit 2 且不写台账（零写入不得盖章）。"""
+    import src.api.db_setup as dbs
+
+    _drop_stamp_row()
+    monkeypatch.setattr(dbs, "_managed_repos_columns_probe",
+                        lambda c: (set(), _PROBE_FAIL))
+    cli = _load_cli()
+    code = cli.main(["--verify", "--stamp"])
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):]) if "{" in out else {}
+
+    assert code == 2
+    assert payload["verify"]["probe_ok"] is False
+    assert payload["stamp"]["skipped"] is True
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT 1 FROM grape_t_schema_migrations WHERE version=?",
+            (dbs.REPO_BOT_BACKFILL_VERSION,)).fetchone()
+    assert row is None, "探列失败不得盖章"
+
+
+def test_cli_apply_probe_failure_exits_nonzero(monkeypatch, capsys):
+    """探列失败时 --apply 必须 exit 2（不能把零写入当成功）。"""
+    import src.api.db_setup as dbs
+
+    monkeypatch.setattr(dbs, "_managed_repos_columns_probe",
+                        lambda c: (set(), _PROBE_FAIL))
+    cli = _load_cli()
+    code = cli.main(["--apply"])
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):]) if "{" in out else {}
+    assert code == 2
+    assert payload["backfill"]["probe_ok"] is False

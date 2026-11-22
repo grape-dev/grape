@@ -243,3 +243,45 @@ def test_cache_ttl_is_clamped_to_spec_ceiling(monkeypatch):
     assert tr.repo_bot_token_cache_ttl() == 60.0
     monkeypatch.setenv("GRAPE_REPO_BOT_TOKEN_CACHE_TTL", "0")
     assert tr.repo_bot_token_cache_ttl() == 0.0
+
+# ────────────────────────────────────────── 5. rc 读失败不缓存 legacy 回落
+
+def test_rc_read_failure_does_not_cache_legacy(fake_ports, long_cache, monkeypatch):
+    """rc 读失败时仍回落 legacy 保可用，但结果不入缓存：下一次必须重试 rc。
+
+    复审 Required#3：瞬时 rc 故障若把 legacy 值缓存一个 TTL，过期 legacy token
+    会被冻结整个窗口；正确语义是「本次回落、下次重试权威源」。
+    """
+    rk = _rk("rcerr")
+    fake_ports["legacy"] = "tok-legacy"
+    calls = {"rc": 0}
+
+    def _rc_boom(repo_key, cred_type):
+        calls["rc"] += 1
+        raise RuntimeError("rc down")
+
+    monkeypatch.setattr(_tokens, "get_repo_credential_meta", _rc_boom)
+    strategy = _strategy(rk)
+
+    assert strategy.get_token(rk) == "tok-legacy"
+    assert strategy.get_token(rk) == "tok-legacy"
+    assert calls["rc"] == 2, "rc 读失败后的 legacy 结果不得缓存（须重试权威源）"
+    assert fake_ports["legacy_reads"] == 2
+
+
+def test_rc_recovery_after_error_is_immediately_visible(fake_ports, long_cache, monkeypatch):
+    """rc 故障恢复后立即命中新 rc 行：失败态未被缓存，不必等 TTL。"""
+    rk = _rk("rcrecover")
+    fake_ports["legacy"] = "tok-legacy"
+    calls = {"n": 0}
+
+    def _flaky_rc(repo_key, cred_type):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rc transient")
+        return {"value": "tok-rc-new", "id": "rc-id-2"}
+
+    monkeypatch.setattr(_tokens, "get_repo_credential_meta", _flaky_rc)
+    strategy = _strategy(rk)
+    assert strategy.get_token(rk) == "tok-legacy"
+    assert strategy.get_token(rk) == "tok-rc-new"
