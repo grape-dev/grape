@@ -745,9 +745,20 @@ def _user(uid=1234):
 
 
 def test_outbound_list_and_retry(outbox_db, clean_notify):
-    """/api/im/outbound 查询 + /api/im/outbound/{id}/retry 重发。"""
+    """/api/im/outbound 查询 + /api/im/outbound/{id}/retry 重发。
+
+    Issue #3799 审查（PR #1983）：outbound 明细按可见安装裁剪——
+    本测试的安装必须真实存在且属当前用户，行才可见。
+    """
     from src.domains.mgmt.routes import im as IM
     from src.domains.runtime.im import outbox as OB
+    import sqlite3 as _s3
+    conn = _s3.connect(outbox_db)
+    conn.execute(
+        "INSERT OR REPLACE INTO grape_t_channel_installation "
+        "(id, channel_type, scope, owner_user_id, status) VALUES ('inst-1','feishu','user','1234','active')")
+    conn.commit()
+    conn.close()
     tid = OB.out_track_id(8, "pending_review", "gitcode:o/r", 21, "feishu", "inst-1")
     OB.enqueue(out_track_id=tid, installation_id="inst-1", channel_type="feishu",
                channel_chat_id="oc_1",

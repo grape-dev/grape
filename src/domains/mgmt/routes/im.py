@@ -147,6 +147,10 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
         conn.close()
     counts = {str(r[0]): int(r[1]) for r in rows or []}
     health_rows = _channel_health_map()
+    # Issue #3799 审查：暂停总览同样按可见安装裁剪（不泄露全局其它用户渠道状态）
+    visible = _visible_installation_ids(user)
+    scoped_health = [r for r in health_rows.values()
+                     if str(r.get("installation_id") or "") in visible]
     return {
         "mode": mode,                                   # on | off（data/im_engine_mode 优先）
         "active_engine": "new" if eng is not None else "idle",  # 旧 legacy 链路已下线
@@ -163,10 +167,10 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
         "outbox": _outbox_status(),
         # Issue #3799：渠道风控暂停总览（明细见 GET /api/im/channels/health）
         "channel_health": {
-            "paused": sum(1 for r in health_rows.values() if r.get("paused")),
-            "firing": sum(1 for r in health_rows.values()
+            "paused": sum(1 for r in scoped_health if r.get("paused")),
+            "firing": sum(1 for r in scoped_health
                           if r.get("alert_state") == "firing"),
-            "tracked": len(health_rows),
+            "tracked": len(scoped_health),
         },
     }
 
@@ -193,6 +197,10 @@ def im_outbound(status: str = "", limit: int = 50,
             "code": 400, "message": "status 只支持 pending/sending/sent/failed/expired 或留空"})
     from src.domains.runtime.public import outbox_list_rows
     rows = outbox_list_rows(status=status, limit=limit)
+    # PR #1983 审查 Critical（同 /channels/health）：按可见安装裁剪，
+    # 不暴露其他用户/仓库渠道的投递明细。
+    visible = _visible_installation_ids(user)
+    rows = [r for r in rows if str(r.get("installation_id") or "") in visible]
     return {"outbound": rows, "total": len(rows)}
 
 
@@ -303,6 +311,48 @@ def _channel_health_map() -> dict:
     return {str(r.get("installation_id") or ""): r for r in rows if isinstance(r, dict)}
 
 
+def _visible_installation_ids(user: dict) -> set:
+    """当前用户可见的安装 id 集合（Issue #3799 审查 Critical：行级裁剪共用口径）。
+
+    user 轨按 `owner_user_id` 过滤（与 `im_installations` 一致），repo 轨按
+    `check_repo_access` 过滤（同仓库访问一次缓存）。`/channels/health` 与
+    `/outbound` 都用它裁剪结果——渠道健康/投递明细含安装级元数据，
+    不得对无权用户暴露（installation_id、暂停时间、告警原因等）。
+    """
+    uid = str(user.get("id") or "")
+    conn = _db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, scope, owner_user_id, repo_key FROM grape_t_channel_installation"
+        ).fetchall()
+    finally:
+        conn.close()
+    access_cache: dict[str, bool] = {}
+    out: set[str] = set()
+    for r in rows or []:
+        inst_id = str(r[0] or "")
+        scope = str(r[1] or "user")
+        owner = str(r[2] or "")
+        repo_key = str(r[3] or "")
+        if not inst_id:
+            continue
+        if scope == "user":
+            if uid and owner not in ("", uid):
+                continue
+        else:
+            key = repo_key or "<empty>"
+            if key not in access_cache:
+                try:
+                    check_repo_access(user, repo_key)
+                    access_cache[key] = True
+                except Exception:
+                    access_cache[key] = False
+            if not access_cache.get(key):
+                continue
+        out.add(inst_id)
+    return out
+
+
 class RecoverBody(BaseModel):
     """人工恢复动作（Issue #3799）。"""
 
@@ -315,9 +365,14 @@ def im_channel_health(user: dict = Depends(get_current_user_or_api_key)):
 
     告警可检索入口之一：`alert_state=firing` + `alert_reason`（另见 ERROR 日志
     `[im-channel-health] alert=wechat_channel_unavailable`）。
+
+    行级裁剪（PR #1983 审查 Critical）：只返回当前用户可见安装的行——
+    user 轨 owner 过滤、repo 轨仓库访问过滤，与 `/installations` 同口径。
     """
     rows = _channel_health_map()
-    values = sorted(rows.values(),
+    visible = _visible_installation_ids(user)
+    values = sorted((r for r in rows.values()
+                     if str(r.get("installation_id") or "") in visible),
                     key=lambda r: r.get("last_pause_at_ts") or 0.0, reverse=True)
     return {
         "channels": values,
