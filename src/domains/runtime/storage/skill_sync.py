@@ -24,6 +24,10 @@ from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skil
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
 
+# Issue #3742：外层 `skill_sync` 锁 TTL 单点来源——worker 的 CM、续期默认值与
+# 周期超时阈值（ttl/2）全部由此派生，避免 1800/900 硬编码各自漂移。
+SKILL_SYNC_LOCK_TTL = int(os.environ.get("SKILL_SYNC_LOCK_TTL", "600"))
+
 # Issue #3229：SKILL.md 等文本文件首部的 UTF-8 BOM 会让前端 frontmatter 正则失配，
 # 入库时统一剥离；_compute_skill_hash 对 BOM 不敏感，保证归一化后能命中 skip。
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -509,6 +513,13 @@ async def sync_official_skills() -> dict:
             logger.exception(f"skill sync: DB sync failed: {e}")
 
         # 3. OBS 同步：算 hash → 打包 → 上传
+        #    Issue #3742：上传前续期外层锁，避免长阶段（打包/上传）中途自然过期被接管。
+        try:
+            from src.kernel.lock import renew_lock as _renew_lock
+            if not await asyncio.to_thread(_renew_lock, "skill_sync", SKILL_SYNC_LOCK_TTL):
+                logger.debug("skill sync: outer lock renewal before OBS failed")
+        except Exception as e:
+            logger.warning(f"skill sync: outer lock renewal before OBS error: {e}")
         try:
             obs_result = await sync_official_skills_to_obs()
             result["obs_added"] = obs_result.get("added", 0)
@@ -540,11 +551,12 @@ async def sync_official_skills() -> dict:
         # §3.5 唯一清理点（含父目录，P45/§4.5 统一形式）——任何退出路径都执行
         if repo_root:
             shutil.rmtree(os.path.dirname(repo_root), ignore_errors=True)
-        # §6.3 超时观测：周期 > TTL/2（900s）提前 ERROR 告警（锁过期风险可观测）
+        # §6.3 超时观测：周期 > TTL/2（由 SKILL_SYNC_LOCK_TTL 派生）提前 ERROR 告警
         _elapsed = _time.monotonic() - _cycle_start
-        if _elapsed > 900:
-            logger.error(f"skill sync: cycle exceeded 900s ({_elapsed:.0f}s), "
-                         f"check TTL adjustment or stuck-cycle causes")
+        _threshold = SKILL_SYNC_LOCK_TTL / 2
+        if _elapsed > _threshold:
+            logger.error(f"skill sync: cycle exceeded {_threshold:.0f}s ({_elapsed:.0f}s), "
+                         f"check TTL adjustment ({SKILL_SYNC_LOCK_TTL}s) or stuck-cycle causes")
 
     return result
 
@@ -563,8 +575,11 @@ async def _skill_sync_worker(interval: float = 1800.0):
     _consecutive_failures = 0
     while True:
         try:
-            async with run_with_distributed_lock("skill_sync", ttl=1800):
-                await sync_official_skills()
+            async with run_with_distributed_lock("skill_sync", ttl=SKILL_SYNC_LOCK_TTL) as acquired:
+                if acquired:
+                    await sync_official_skills()
+                else:
+                    logger.debug("skill sync: skipped, another instance holds the lock")
             _consecutive_failures = 0
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
@@ -579,7 +594,7 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 
 
-async def _ensure_outer_lock(ttl: int = 1800) -> bool:
+async def _ensure_outer_lock(ttl: int = SKILL_SYNC_LOCK_TTL) -> bool:
     """续期外层 `skill_sync` 锁；续不上时按同一 holder 重抢一次。
 
     为什么需要重抢：同一进程里可能存在不止一个调度器（历史上 main / server_tasks /
@@ -588,18 +603,22 @@ async def _ensure_outer_lock(ttl: int = 1800) -> bool:
     B 在下一轮续期时就必然失败并放弃剩余步骤——日志表现为每轮一条
     `outer lock lost before scene step`，而场上其实只有一个存活进程。
 
-    重抢成功说明「行被自己人删了」（竞态）；抢不到说明锁真被别的实例接管，
-    这时确实该中止本轮剩余步骤。
+    重抢成功说明「行被自己人删了」（竞态，WARN，继续本轮）；续期与重抢都失败说明
+    锁真被别的实例接管（INFO，跳过本轮）；过程中抛异常说明锁服务异常（ERROR，跳过）。
     """
     from src.kernel.lock import acquire_lock as _al, renew_lock as _rn
 
-    if await asyncio.to_thread(_rn, "skill_sync", ttl):
-        return True
-    if await asyncio.to_thread(_al, "skill_sync", ttl):
-        logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
-        return True
-    logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
-    return False
+    try:
+        if await asyncio.to_thread(_rn, "skill_sync", ttl):
+            return True
+        if await asyncio.to_thread(_al, "skill_sync", ttl):
+            logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
+            return True
+        logger.info("skill sync: outer lock lost before scene step, skipped by another instance")
+        return False
+    except Exception:
+        logger.exception("skill sync: outer lock renew/re-acquire failed with error")
+        return False
 
 
 _scheduler_task: "asyncio.Task | None" = None

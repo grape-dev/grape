@@ -16,12 +16,17 @@ Usage in scheduler workers::
 
     async def _my_worker(interval=300):
         while True:
-            async with run_with_distributed_lock("my_task", ttl=600):
+            async with run_with_distributed_lock("my_task", ttl=600) as acquired:
+                if not acquired:
+                    # another worker is already doing the work — skip this cycle
+                    continue
                 do_work()
             await asyncio.sleep(interval)
 
-If the lock is not acquired (another worker holds it), the body is skipped
-silently — the other worker is already doing the work.
+Contract (Issue #3742): this context manager does **NOT** skip the body for
+you. When the lock is held by another worker it yields ``False``; the caller is
+responsible for checking the yielded value and skipping its own work. Passing
+``strict=True`` turns "not acquired" into a ``LockNotAcquired`` exception.
 """
 import asyncio
 import logging
@@ -32,25 +37,36 @@ from src.kernel.config import log
 logger = logging.getLogger(__name__)
 
 
+class LockNotAcquired(RuntimeError):
+    """Raised by ``run_with_distributed_lock(..., strict=True)`` when the lock is held."""
+
+
 @asynccontextmanager
-async def run_with_distributed_lock(lock_key: str, ttl: int = 300):
+async def run_with_distributed_lock(lock_key: str, ttl: int = 300, *, strict: bool = False):
     """Acquire a distributed lock before running the task body.
 
     Runs ``acquire_lock`` in a thread (it does blocking DB ops under db_lock).
-    If the lock is not acquired, the body is skipped (another worker has it).
+    The body is never skipped by this context manager: check the yielded value.
 
     Args:
         lock_key: unique key for this task (e.g. "scene_sync", "upload_cleanup")
         ttl: lock TTL in seconds (auto-expires if holder crashes)
+        strict: when True, raise ``LockNotAcquired`` instead of yielding ``False``
 
     Yields:
         bool: True if lock was acquired, False if another worker holds it.
+        With ``strict=True`` the False case raises instead of yielding.
+
+    Raises:
+        LockNotAcquired: only when ``strict=True`` and another worker holds the lock.
     """
     from src.kernel.lock import acquire_lock, release_lock
 
     acquired = await asyncio.to_thread(acquire_lock, lock_key, ttl)
     if not acquired:
         logger.debug(f"task_lock: {lock_key} held by another worker, skipping")
+        if strict:
+            raise LockNotAcquired(f"distributed lock {lock_key!r} is held by another worker")
         yield False
         return
     try:
