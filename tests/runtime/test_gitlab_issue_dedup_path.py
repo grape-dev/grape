@@ -24,7 +24,7 @@ def _no_title_cache(monkeypatch):
 
 
 def _client(provider, dialect, monkeypatch):
-    c = VcsApiClient(provider, "tok", "xiaowu3", "demo111")
+    c = VcsApiClient(provider, "tok", "group-a", "demo-a")
     monkeypatch.setattr(c, "_platform_card",
                         lambda: types.SimpleNamespace(dialect=dialect, issue_search=False))
     _no_title_cache(monkeypatch)
@@ -42,7 +42,7 @@ def test_gitlab_dedup_uses_project_scoped_issues(monkeypatch):
     assert c.find_open_issue_by_title("需求标题") is None
     assert seen, "应当至少请求一次 issues 列表"
     assert "/repos/" not in seen[0], f"gitlab 方言不允许 /repos 路径: {seen[0]}"
-    assert "/projects/xiaowu3%2Fdemo111/issues" in seen[0]
+    assert "/projects/group-a%2Fdemo-a/issues" in seen[0]
     assert "state=opened" in seen[0]
 
 
@@ -50,12 +50,12 @@ def test_gitlab_dedup_uses_project_scoped_issues(monkeypatch):
 def test_v5_dialects_keep_legacy_path(provider, monkeypatch):
     c, seen = _client(provider, "github", monkeypatch)
     assert c.find_open_issue_by_title("需求标题") is None
-    assert seen and seen[0].startswith("/repos/xiaowu3/demo111/issues")
+    assert seen and seen[0].startswith("/repos/group-a/demo-a/issues")
     assert "state=open&" in seen[0]
 
 
 def test_gitlab_dedup_finds_existing_iid(monkeypatch):
-    c = VcsApiClient("gitlab", "tok", "xiaowu3", "demo111")
+    c = VcsApiClient("gitlab", "tok", "group-a", "demo-a")
     monkeypatch.setattr(c, "_platform_card",
                         lambda: types.SimpleNamespace(dialect="gitlab", issue_search=False))
     _no_title_cache(monkeypatch)

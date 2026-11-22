@@ -78,7 +78,7 @@ def test_personal_namespace_not_duplicated(monkeypatch):
     _patch_provider(monkeypatch, [])
     _patch_registry(monkeypatch, refs=[
         NamespaceRef(provider="gitcode", path="me", name="me", kind="personal"),
-        NamespaceRef(provider="gitcode", path="signway", name="signway", kind="org"),
+        NamespaceRef(provider="gitcode", path="org-a", name="org-a", kind="org"),
     ])
     out = vns._collect("gitcode", "tok")
-    assert [s["path"] for s in out["spaces"]] == ["signway"]
+    assert [s["path"] for s in out["spaces"]] == ["org-a"]

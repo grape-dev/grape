@@ -51,7 +51,7 @@ def _run(monkeypatch, info, provider="gitlab"):
 def test_gitlab_username_only_is_accepted(monkeypatch):
     adapter, _ = None, None
     with pytest.raises(HTTPException) as ei:
-        _run(monkeypatch, {"id": 44646095, "username": "account-a"})   # GitLab: 无 login
+        _run(monkeypatch, {"id": 10000001, "username": "account-a"})   # GitLab: 无 login
     detail = str(ei.value.detail)
     assert "无法获取当前 gitlab 用户身份" not in detail
     # 身份取到后应推进到建仓步骤（我们的探针在这里抛错）

@@ -49,10 +49,10 @@ def _make(fake: _FakeHttp) -> GiteeProvider:
 
 
 def test_list_create_spaces_parses_orgs():
-    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "MYFUTURE"},
+    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "GROUP-A"},
                            {"id": 2, "login": "grape-org", "name": ""}])
     spaces = _make(fake).list_create_spaces("tok")
-    assert spaces == [{"path": "group-a", "name": "MYFUTURE", "kind": "org"},
+    assert spaces == [{"path": "group-a", "name": "GROUP-A", "kind": "org"},
                       {"path": "grape-org", "name": "grape-org", "kind": "org"}]
     assert fake.calls[0][1].startswith("/user/orgs")
 
@@ -71,7 +71,7 @@ def test_resolve_namespace_hits_and_misses():
 
 def test_listed_space_is_usable_for_create_repo():
     """同一事实源：下拉能列出的组织，建仓时走的正是 /orgs/{owner}/repos。"""
-    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "MYFUTURE"}],
+    fake = _FakeHttp(orgs=[{"id": 15542423, "login": "group-a", "name": "GROUP-A"}],
                      by_login={"group-a": {"id": 15542423, "login": "group-a"}})
     p = _make(fake)
     listed = [s["path"] for s in p.list_create_spaces("tok")]

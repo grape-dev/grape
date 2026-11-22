@@ -144,17 +144,17 @@ def test_personal_owner_uses_platform_login_not_local_username(monkeypatch):
 
     class _Prov:
         def verify_token(self, token):
-            return {"username": "account-a", "name": "aiwu yang"}   # GitLab /user 字段
+            return {"username": "account-a", "name": "Account A"}   # GitLab /user 字段
 
         def list_create_spaces(self, token):
-            return [{"path": "xiaowu3", "name": "xiaowu-群组", "kind": "group"}]
+            return [{"path": "group-a", "name": "Group A", "kind": "group"}]
 
     monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: _Prov())
 
     paths = ns_mod.namespace_paths("gitlab", "tok", {"login": "account-c"})
-    assert paths == {"account-a", "xiaowu3"}
+    assert paths == {"account-a", "group-a"}
     ns_mod.assert_owner_visible("gitlab", "tok", "account-a", {"login": "account-c"})
-    ns_mod.assert_owner_visible("gitlab", "tok", "xiaowu3", {"login": "account-c"})
+    ns_mod.assert_owner_visible("gitlab", "tok", "group-a", {"login": "account-c"})
     with pytest.raises(NamespaceNotVisible):
         ns_mod.assert_owner_visible("gitlab", "tok", "gitlab-org", {"login": "account-c"})
     # 本系统账号名不再是有效 owner

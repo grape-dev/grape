@@ -23,10 +23,10 @@ class _PrivateGroupAdapter:
 
 def test_private_group_error_retries_with_private():
     a = _PrivateGroupAdapter()
-    t._create_repo_with_visibility_retry(a, "tok", "proj", {"description": "d"}, "signway")
+    t._create_repo_with_visibility_retry(a, "tok", "proj", {"description": "d"}, "org-a")
     assert len(a.calls) == 2, a.calls
-    assert a.calls[0]["private"] is False and a.calls[0]["owner"] == "signway"
-    assert a.calls[1]["private"] is True and a.calls[1]["owner"] == "signway"
+    assert a.calls[0]["private"] is False and a.calls[0]["owner"] == "org-a"
+    assert a.calls[1]["private"] is True and a.calls[1]["owner"] == "org-a"
 
 
 def test_other_errors_are_not_retried():

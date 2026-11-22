@@ -141,7 +141,7 @@ def test_check_name_reads_gitlab_username_field(monkeypatch):
 
     class _Prov:
         def verify_token(self, token):
-            return {"id": 44646095, "username": "account-a"}      # 无 login 键
+            return {"id": 10000001, "username": "account-a"}      # 无 login 键
 
     monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _Prov())
     # arch-weekly-11 侧身份获取经 with_oauth_token（过期 token 刷新重试）；

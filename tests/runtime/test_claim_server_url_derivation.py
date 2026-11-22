@@ -1,7 +1,7 @@
 """claim 回连基址按「worker 实际访问地址」派生（2026-11-22）
 
 背景：任务行的 server_url 是建单进程视角算的（公网 IP / 回环），远端 worker
-可能根本连不上（实测 .213 → 124.70.82.58 返回 000，CLI 全 301）。修法不写死任何
+可能根本连不上（实测远端 worker → 公网地址返回 000，CLI 全 301）。修法不写死任何
 地址：claim 时用 worker 自己访问到的 Host / X-Forwarded-Proto 回填。
 """
 import pytest

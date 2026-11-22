@@ -48,7 +48,7 @@ def test_precheck_owner_uses_username_field(monkeypatch):
     """GitLab /user 返回 username（无 login）→ 仓库 owner 本人直接放行，不查成员权限。"""
     from src.domains.mgmt.routes.repos import _gitlab_host_precheck
 
-    prov = _Prov(info={"id": 44646095, "username": "account-a"})
+    prov = _Prov(info={"id": 10000001, "username": "account-a"})
     _patch_provider(monkeypatch, prov)
     _gitlab_host_precheck("gitlab", "account-a", "hello-fastapi-2", "tok")
     assert prov.calls == [("verify_token", "tok")]
