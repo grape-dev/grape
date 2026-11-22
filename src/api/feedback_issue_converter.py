@@ -132,7 +132,8 @@ _CLAIM_TTL = 600
 _CLAIM_ON = os.environ.get("FEEDBACK_CLAIM", "1") != "0"
 _DEDUP_ON = os.environ.get("FEEDBACK_TITLE_DEDUP", "1") != "0"
 
-# 平台标题上限（GitCode/GitHub/GitLab 均为 200 字符；超限建单直接 400）。
+# 平台标题上限（取保守上限 200 字符：GitCode 实测 400 `out of max length`；GitHub/GitLab
+# 亦在该量级，未逐一考证——截断只是防 400 兜底，不是精确契约）。
 _MAX_TITLE_LEN = 200
 _TITLE_ELLIPSIS = "…"
 
@@ -191,7 +192,6 @@ def _reclaim_stale_claims() -> int:
 # 连续失败升级 ERROR 的默认阈值（Issue #3731：每 tick 一条 WARNING 会淹没真实故障）
 _FAIL_ESCALATE_DEFAULT = 3
 
-
 def _fail_escalate_at() -> int:
     """连续失败升级阈值（`FEEDBACK_CONVERT_FAIL_ESCALATE`，默认 3，最小 1）。"""
     try:
@@ -201,14 +201,38 @@ def _fail_escalate_at() -> int:
         return _FAIL_ESCALATE_DEFAULT
 
 
+def _fail_is_escalation(times: int, prev: int) -> bool:
+    """本轮是否要发 ERROR：只在「跨越阈值」那一轮发（Issue #3731 QA Required）。
+
+    - 达阈值前（times < threshold）：WARNING；
+    - 恰好跨过阈值那一轮（prev < threshold <= times）：ERROR（admin 感知点）；
+    - 其后（prev >= threshold，即上一轮已在 ERROR 区间）：静默回 WARNING，
+      避免单行永久卡死时每轮一条 ERROR（阈值 3 + interval 300s → 288 条/天），
+      与「消除 20.7 万条噪声」的目标同向（计数仍照常落库可查）。
+    """
+    threshold = _fail_escalate_at()
+    if times < threshold:
+        return False
+    if prev < threshold:
+        return True
+    # 上一轮已在 ERROR 区间（prev >= threshold）：静默 WARNING（2 的幂降采样留作
+    # 后续调整，本期阈值后不再逐轮 ERROR，直接 False，保证「只在跨越那轮报一次」）
+    return False
+
+
 def _note_failure(fid, reason: str, provider: str = "", owner: str = "",
-                  repo: str = "") -> None:
-    """记一次转换失败：持久化连续轮次，达阈值升级 ERROR（Issue #3731）。
+                  repo: str = "", prev_count: int = 0) -> None:
+    """记一次转换失败：持久化连续轮次，跨阈值那轮升级 ERROR（Issue #3731）。
 
     - 计数落 `user_feedback.convert_fail_count`（跨 worker 共享库可见、admin 可查），
       写库失败不影响主流程（只丢可观测性，下一轮照常重试）；
+    - ERROR 只在「上一轮还未达阈值、本轮恰好达阈值」时发一次（`_fail_is_escalation`），
+      其后各轮回 WARNING，不逐轮刷屏；
     - 日志保留原有可检索子串（`target resolve failed` / `create failed`），
       Grafana 现有查询口径不变。
+
+    `prev_count` 为本轮自增**前**的持久化计数（调用方从 `_fetch_pending` 读回的
+    `convert_fail_count`），仅用于判定「跨越阈值」；拿不到（如首轮并发）按 0 处理。
     """
     try:
         times = _mgmt_public.feedback_bump_convert_fail(fid)
@@ -219,7 +243,7 @@ def _note_failure(fid, reason: str, provider: str = "", owner: str = "",
     route = f"{provider}:{owner}/{repo}" if owner and repo else "-"
     msg = (f"feedback→issue: {reason} "
            f"(fid={fid}, route={route}, consecutive={times}/{threshold})")
-    if times and times >= threshold:
+    if _fail_is_escalation(times, prev_count):
         log.error(msg)
     else:
         log.warning(msg)
@@ -234,11 +258,13 @@ def _find_existing_open_issue(provider, owner, repo, token, title):
     if not _DEDUP_ON:
         return None
     import urllib.parse
+    from src.domains.runtime.vcs.providers import translate_query_state
     mod = _provider_module(provider)
     # 查重键与建单侧同一入参（截断后标题），否则截断后长标题还会重复建单（Issue #3731）
     want = _norm_title(_clip_title(title))
-    # 开放态参数按平台取值：GitCode / GitLab 是 opened，GitHub 是 open（用错只会查不到，退化为不复用）
-    _state = "open" if provider == "github" else "opened"
+    # 开放态参数按平台卡方言取值（中性 open → GitCode/GitLab opened，GitHub/Gitee open；
+    # S87：不用平台字面量比较，与 git_repo_api.list_issues 同一口径）
+    _state = translate_query_state(provider, "open")
     for page in range(1, 11):
         url = (f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
                f"{urllib.parse.quote(repo, safe='')}/issues"
@@ -282,6 +308,31 @@ def _fetch_pending(limit: int):
         "convert_fail_count": int(r[15] or 0),
     } for r in rows]
 
+def _feedback_routeable(row, provider: str, owner: str, repo: str) -> bool:
+    """该行本轮是否「可路由」：区分策略跳过 / 不可路由与真失败（Issue #3731 QA Required）。
+
+    - 官方目标为空（`GRAPE_FEEDBACK_OFFICIAL_ISSUE=0` 或官方仓未配置）→ 策略跳过，
+      不是失败（Spec Out of Scope：开关关闭 = 有意不建单，行保留待开关打开）；
+    - repo/user 技能类或 user 反馈走仓库路由，但行上 `repo_key` 为空 → 不可路由
+      数据缺失（入选口径对 source='agent' 不看 repo_key，这类行永远解析不出
+      owner/repo），计连败只会永久 ERROR 刷屏——同样只跳过、不计数。
+    其余（路由解析出了目标）走正常建单链路，失败才计连败。
+    """
+    scope = (row.get("skill_scope") or "").lower()
+    kind = (row.get("feedback_kind") or "").lower()
+    is_user = (row.get("source") or "agent") == "user"
+    to_repo = is_user or (scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS)
+    if to_repo:
+        # 仓库路由：目标必须由行上的 repo_key 解出（缺 repo_key = 不可路由）
+        if not (row.get("repo_key") or "").strip():
+            log.info(f"feedback→issue: fid={row.get('id')} unroutable "
+                     f"(empty repo_key), skip without counting")
+            return False
+        return bool(owner and repo)
+    # 官方路由：空目标 = 策略关闭/未配置（_resolve_target 已记过 info 日志）
+    return bool(owner and repo)
+
+
 def convert_pending_feedback(limit: int = 20) -> dict:
     """扫描并转换待处理的反馈（agent + 带上下文的 user），返回统计 {converted, skipped, failed}。"""
     result = {"converted": 0, "skipped": 0, "failed": 0}
@@ -304,20 +355,24 @@ def convert_pending_feedback(limit: int = 20) -> dict:
     for key, group in groups.items():
         first = group[0]
         fid = first["id"]
+        prev_count = int(first.get("convert_fail_count") or 0)
         try:
             provider, owner, repo, token = _resolve_target(first)
         except Exception as e:
-            # 路由失败（如 parse_repo_key 解包崩溃）同样计入连败，达阈值升级 ERROR
-            _note_failure(fid, f"target resolve failed: {e}")
+            # 路由解析异常（如 parse_repo_key 解包崩溃）是真失败，计入连败，达阈值升级 ERROR
+            _note_failure(fid, f"target resolve failed: {e}", prev_count=prev_count)
             result["skipped"] += 1
             continue
-        if not owner or not repo:
-            _note_failure(fid, "target resolve failed: empty owner/repo", provider)
+        if not _feedback_routeable(first, provider, owner, repo):
+            # 策略跳过 / 不可路由（GRAPE_FEEDBACK_OFFICIAL_ISSUE=0 的官方目标、
+            # 或 agent 反馈缺 repo_key）：不是转换失败，不计连败、不升级 ERROR，
+            # 保持 Spec「Out of Scope：不改开关语义」（Issue #3731 QA Required）。
             result["skipped"] += 1
             continue
         if not token:
             # 无 bot token：官方仓库无全局 token / 仓库未托管 → 本轮跳过（下轮重试）
-            _note_failure(fid, "no bot token", provider, owner, repo)
+            _note_failure(fid, "no bot token", provider, owner, repo,
+                          prev_count=prev_count)
             result["skipped"] += 1
             continue
         # ① 抢先占位：抢不到说明别的 worker 正在处理这一行，本轮跳过
@@ -342,7 +397,8 @@ def convert_pending_feedback(limit: int = 20) -> dict:
         except Exception as e:
             _release(fid)  # ③ 失败必须清占位，否则该反馈永久卡死
             result["failed"] += 1
-            _note_failure(fid, f"create failed: {e}", provider, owner, repo)
+            _note_failure(fid, f"create failed: {e}", provider, owner, repo,
+                          prev_count=prev_count)
             continue
         number = issue.get("number")
         url = issue.get("url") or _issue_url(provider, owner, repo, number)
