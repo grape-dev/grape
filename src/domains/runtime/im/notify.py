@@ -525,6 +525,10 @@ async def _handle_target(target: dict, *, uid, kind: str, text: str,
             if await asyncio.to_thread(health.is_paused, inst):
                 _bump("channel_paused")
                 skipped[ctype] = "channel_paused"
+                # 在 **target** 上打标记（PR #1983 R2 复审 Optional）：`skipped` 是
+                # ctype 级汇总，同类型多安装时健康那条会被误判成暂停（并在收尾记一次
+                # 降级、覆盖 skipped 文案）。
+                target["_paused_reason"] = "channel_paused"
                 log.info("[im-notify] channel paused, delivery deferred inst=%s type=%s",
                          inst, ctype)
                 return
@@ -644,9 +648,12 @@ async def notify_user(user_id, kind: str, text: str, *,
     health = getattr(eng, "health_tracker", None) if eng is not None else None
     if health is not None:
         for target in pick:
+            # 按 target 标记判定（PR #1983 R2 复审 Optional）：同类型两条安装时
+            # ctype 级 `skipped` 分不清哪条被暂停，健康那条会被误记一次降级。
+            paused = str(target.pop("_paused_reason", "") or "")
             ctype = str(target.get("channel_type") or "")
             inst = str(target.get("installation_id") or "")
-            if not ctype or not inst or skipped.get(ctype) != "channel_paused":
+            if not ctype or not inst or paused != "channel_paused":
                 continue
             alt = next((c for i2, c in ok_by_inst.items() if i2 != inst and c), "")
             if alt:
