@@ -1806,7 +1806,11 @@ def vcs_user_login(provider: str, token: str) -> str:
     """token 持有者在该平台的登录名（卡驱动 /user；空串=无法确认）。"""
     from src.domains.mgmt.vcs import create_provider
     info = create_provider(provider).verify_token(token)
-    return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+    if not isinstance(info, dict):
+        return ""
+    # login 是跨平台口径；GitLab 原生字段是 username，适配器未归一的历史实现也要兼容
+    return str(info.get("login") or info.get("username") or "")
+
 
 
 def vcs_user_permission(provider: str, token: str, owner: str, repo: str, login: str) -> dict:

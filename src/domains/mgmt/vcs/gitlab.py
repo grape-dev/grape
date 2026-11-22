@@ -34,7 +34,12 @@ class GitLabProvider(GenericVcsProvider):
         info = self._http("GET", "/user", token)
         if not isinstance(info, dict) or not info:
             raise RuntimeError("GitLab token verify: empty user info")
-        return info
+        # GitLab /user 用 username，而跨平台调用方（解除托管、归属判定）统一读 login。
+        # 不归一会得到空登录名 → 仓主自己也无法解除托管（502 "无法获取当前用户身份"）。
+        out = dict(info)
+        if not out.get("login"):
+            out["login"] = str(out.get("username") or "")
+        return out
 
     def token_expiry(self, token: str) -> dict:
         """PAT 自身元数据（GitLab 15.4+ `/personal_access_tokens/self`）。
