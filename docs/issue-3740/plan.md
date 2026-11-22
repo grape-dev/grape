@@ -44,7 +44,7 @@ should_warn(repo_key, field):
 
 - 采样状态独立于缓存（缓存只减少存储读次数，采样按真实存储读判定，两者解耦）。
 - 未采样时降 `log.debug`（不丢定位能力，不淹告警面）。
-- 日志文本保持 `RepoBotToken: historical column fallback hit (rc miss) repo=… field=…` 不变——该字符串是回落分支下线判据与看板筛选锚点。
+- 日志文本保持 `RepoBotToken: historical column fallback hit (rc miss) repo=… field=…` 不变（仅作 grep 定位）。⚠️ 1/1000 采样会让「持续偶发回落」出现零告警，故**下线判据改为 counter `grape_repo_bot_legacy_fallback_total` 窗口增量 == 0 + `repo_bot_hit_legacy_column` 审计零命中**，日志不再是判据。
 
 ## 5. 回填路径
 

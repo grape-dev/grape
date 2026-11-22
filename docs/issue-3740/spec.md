@@ -19,7 +19,7 @@
 ## 3. 范围
 
 ### In Scope
-1. **降噪**：legacy 命中日志改为「每个 `(repo_key, field)` 首次必打 WARNING + 其后 1/1000 采样」，未命中采样降 DEBUG；日志文本保持原样（`historical column fallback hit` 是回落分支下线判据的 grep 锚点）。
+1. **降噪**：legacy 命中日志改为「每个 `(repo_key, field)` 首次必打 WARNING + 其后 1/1000 采样」，未命中采样降 DEBUG；日志文本保持原样便于 grep 定位，但采样会让「持续偶发回落」出现零告警，**日志不再作为下线判据**——判据 = counter 窗口增量 == 0 且 `repo_bot_hit_legacy_column` 审计零命中。
 2. **指标**：新增 counter `grape_repo_bot_legacy_fallback_total{provider,repo}`，与采样解耦、按实际 legacy 列存储读全量计数。
 3. **缓存**：`(repo_key, field)` 进程内短 TTL 缓存（TTL ≤60s，可环境变量关闭/调小），缓存最终解析结果（rc 命中 / legacy 命中 / 全空），同请求不再重复解析。
 4. **回填路径**：恢复丢失的 `backfill_repo_credentials_from_columns()`；新增 bot 列专用回填 `backfill_repo_bot_token_columns_to_rc()`（幂等、密文归一、可 dry-run）、验证 `verify_repo_bot_credential_backfill()`、盖章 `stamp_repo_bot_credential_backfill()`，并提供 CLI `scripts/backfill_repo_bot_credentials.py`。
@@ -42,10 +42,10 @@
 
 ## 5. 验收标准（映射）
 
-- [ ] legacy 回落日志首打 + 采样落地，日志文本不变（判据锚点保留）。
+- [ ] legacy 回落日志首打 + 采样落地，日志文本不变（仅作 grep 定位；下线判据改用 counter 窗口增量 + legacy 审计零命中）。
 - [ ] `grape_repo_bot_legacy_fallback_total{provider,repo}` 可查、按实际存储读全量计数、不随采样丢失。
 - [ ] 同请求/同 TTL 窗口内重复解析只打一次 DB、只打一条日志（缓存生效）。
-- [ ] 回填脚本可 dry-run / apply / verify / stamp；回填后 rc bot 行覆盖全部持有 legacy bot 值的仓库。
+- [ ] 回填脚本可 dry-run / apply / verify / stamp；回填后 rc bot 行覆盖全部持有 legacy bot 值的仓库；`managed_repos` 探列失败（`probe_ok=False`）时 verify/stamp 必须失败退出，不得以空缺口伪装通过。
 - [ ] 现有测试全绿（含恢复 `backfill_repo_credentials_from_columns` 后此前 import 失败的 3 个模块）。
 - [ ] 新增测试覆盖：采样（首打、采样比、状态隔离）、缓存（命中折叠、TTL 失效、轮换、主动失效）、指标计数、回填（幂等、dry-run 零写、盖章、验证报告）。
 
