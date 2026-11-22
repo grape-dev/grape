@@ -9,7 +9,9 @@
 """
 import asyncio
 import json
+import logging
 import sqlite3
+import time
 import uuid
 
 import pytest
@@ -171,9 +173,14 @@ def test_record_resume_clears_pause_and_resolves_alert(health_db):
 
 
 def test_stale_pause_row_not_treated_as_paused(health_db):
-    """进程崩溃留下的 paused 行超过 TTL 后不再当成暂停（否则通知永远被降级）。"""
+    """进程崩溃留下的 paused 行超过 TTL 后不再当成暂停（否则通知永远被降级）。
+
+    Nit（PR #1983 R2 复审）：对外快照口径也要与 `is_paused()` 一致——过期暂停行
+    `paused=False`（保留 `stale=True` 标记），否则管理台 `/channels/health` 的
+    paused 计数与渠道卡片长期显示「暂停」（崩溃进程遗留行永不消散）。
+    """
     from src.domains.runtime.im.channel_health import (
-        PAUSE_STATE_TTL_SECONDS, ChannelHealthTracker)
+        PAUSE_STATE_TTL_SECONDS, ChannelHealthTracker, health_rows)
 
     clock = FakeClock()
     tracker = ChannelHealthTracker(store=_store(health_db), instance_id="host-1",
@@ -182,6 +189,15 @@ def test_stale_pause_row_not_treated_as_paused(health_db):
     clock.advance(PAUSE_STATE_TTL_SECONDS + 1)
     assert tracker.is_paused("inst-1") is False
     assert "inst-1" not in tracker.paused_ids()
+
+    snap = tracker.state("inst-1")
+    assert snap["paused"] is False, "过期暂停行对外仍报 paused=True（看板与引擎分叉）"
+    assert snap["stale"] is True, "过期标识丢失：无法区分「暂停」与「状态过期」"
+    assert snap["last_pause_at"], "过期行仍需保留上次暂停时间供人工核对"
+
+    rows = [r for r in health_rows() if r.get("installation_id") == "inst-1"]
+    assert rows and rows[0]["paused"] is False and rows[0]["stale"] is True, \
+        "健康面板把过期暂停行仍计为暂停"
 
 
 def test_clear_pause_keeps_connection_but_resets_state(health_db):
@@ -972,16 +988,24 @@ def test_notify_user_degraded_to_same_type_other_installation(outbox_db):
     tracker.record_pause("inst-wx1", "wechat", reason="ret=-14")
     eng.health_tracker = tracker
 
-    targets = [{"installation_id": "inst-wx1", "channel_type": "wechat", "chat_id": "c-1"},
-               {"installation_id": "inst-wx2", "channel_type": "wechat", "chat_id": "c-2"}]
+    # 健康安装排在前面：Optional（PR #1983 R2 复审）——降级记录的目标判定原先按
+    # channel_type 级 `skipped` 汇总，同类型两条安装时健康那条也会被记 degraded。
+    targets = [{"installation_id": "inst-wx2", "channel_type": "wechat", "chat_id": "c-2"},
+               {"installation_id": "inst-wx1", "channel_type": "wechat", "chat_id": "c-1"}]
     notify_mod._reset_for_tests()
     res = asyncio.run(notify_mod.notify_user(1, "task", "hello", targets=targets,
                                              engine=eng, dedupe=False))
     assert res["sent"] == ["wechat"]
+    assert res["skipped"]["wechat"] == "channel_paused_degraded_to:wechat", \
+        "降级文案被健康安装的 skipped 覆盖"
     state = tracker.state("inst-wx1")
     assert state["last_degraded_ok"] is True, \
         "同类型不同安装已送达，仍被记成 no_fallback"
     assert state["last_degraded_to"] == "wechat"
+    healthy = tracker.state("inst-wx2")
+    assert healthy["degraded_count"] == 0, \
+        "健康安装被误记一次降级（按 ctype 级 skipped 判定，未按 target 标记）"
+    assert healthy["last_degraded_to"] == ""
 
 
 def test_request_retry_on_healthy_channel_does_not_arm_wake_gate(health_db):
@@ -993,3 +1017,138 @@ def test_request_retry_on_healthy_channel_does_not_arm_wake_gate(health_db):
     ch._loop_running = True
     assert ch.request_retry() is True          # 连接在跑 → 不报 channel_not_running
     assert ch._retry_wake.is_set() is False, "未暂停时置闸会滞留到下一次暂停"
+
+
+# ---------------------------------------------------------------- 9. R3（PR #1983 复审）
+
+def _epoch(value: str) -> float:
+    """'YYYY-MM-DD HH:MM:SS'（UTC）→ epoch 秒（断言释放后的 next_retry_at 用）。"""
+    from datetime import datetime, timezone
+    return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S") \
+        .replace(tzinfo=timezone.utc).timestamp()
+
+
+def test_first_pause_keeps_local_state_when_store_has_history_row(health_db):
+    """Critical（PR #1983 R2 复审）：store 里已有该安装的历史行（paused=0）时，
+    首次 `record_pause` 的 peer 短 TTL 重读**不得**把本次正在写入的状态对象换成
+    store 里新建的旧对象：否则库 `paused=1` 而内存 `paused=0` —— 通知不降级、
+    「连续 ≥2 次」永远停在 1、告警不再升级。"""
+    from src.domains.runtime.im.channel_health import (
+        ChannelHealthState, ChannelHealthTracker)
+
+    store = _store(health_db)
+    store.upsert(ChannelHealthState(installation_id="inst-1", channel_type="wechat",
+                                    instance_id="host-0", paused=False,
+                                    pause_count=3, consecutive_pauses=0,
+                                    updated_at=1_699_000_000.0))
+    clock = FakeClock(1_700_000_000.0)
+    alerts = []
+    tracker = ChannelHealthTracker(store=store, instance_id="host-1", clock=clock,
+                                   alert_sink=lambda s, r: alerts.append(r))
+
+    state = tracker.record_pause("inst-1", "wechat", reason="ret=-14")
+    assert state["paused"] is True
+    assert tracker.is_paused("inst-1") is True, \
+        "peer 重读用 store 旧对象覆盖了本次内存态（库暂停、内存健康）"
+    assert tracker.paused_ids() == {"inst-1"}
+    assert _store(health_db).get("inst-1").paused is True
+
+    clock.advance(3600)                     # repeat 窗口（2h）内的第二次暂停
+    second = tracker.record_pause("inst-1", "wechat", reason="ret=-14")
+    assert second["consecutive_pauses"] == 2, "连续暂停计数被 store 旧行重置"
+    assert second["alert_state"] == "firing"
+    assert alerts, "连续暂停告警未升级为 firing"
+    assert tracker.is_paused("inst-1") is True
+
+
+def _seed_paused_outbox(outbox_db, count: int = 1, pause_seconds: float = 3600.0):
+    """建安装 + 租约 + 暂停中的引擎，并入队 count 行 pending（消费者用例复用）。"""
+    from src.domains.runtime.im import outbox as OB
+    from src.domains.runtime.im.channel_health import ChannelHealthTracker
+    from tests.runtime.im.conftest import FakeChannel, FakeEngine
+
+    conn = sqlite3.connect(outbox_db)
+    conn.execute(
+        "INSERT INTO grape_t_channel_installation "
+        "(id, channel_type, scope, owner_user_id, status) "
+        "VALUES ('inst-1','wechat','user','1','active')")
+    conn.execute(
+        "INSERT OR REPLACE INTO grape_t_channel_lease "
+        "(lease_key, channel_type, installation_id, lease_owner, updated_at) VALUES (?,?,?,?,?)",
+        ("wechat:inst-1", "wechat", "inst-1", "owner-A", "2026-11-23 00:00:00"))
+    conn.commit()
+    conn.close()
+
+    clock = FakeClock(time.time())          # 与 outbox 的真实时钟同量级（next_retry_at 可比）
+    tracker = ChannelHealthTracker(store=_store(outbox_db), instance_id="owner-A",
+                                   clock=clock)
+    tracker.record_pause("inst-1", "wechat", reason="ret=-14",
+                         next_retry_at=clock.now + pause_seconds)
+    ch = FakeChannel()
+    eng = FakeEngine({"inst-1": ch})
+    eng.health_tracker = tracker
+    tids = []
+    for i in range(count):
+        tid = OB.out_track_id(1, "task", "gitcode:o/r", 5 + i, "wechat", "inst-1")
+        OB.enqueue(out_track_id=tid, installation_id="inst-1", channel_type="wechat",
+                   channel_chat_id="wx_1",
+                   payload={"kind": "task", "text": "x", "repo_key": "gitcode:o/r",
+                            "issue_number": 5 + i, "user_id": 1},
+                   expires_at=OB.new_expiry())
+        tids.append(tid)
+    return eng, OB.OutboxConsumer(eng, instance_id="owner-A"), tids, ch
+
+
+def test_released_paused_row_defers_claim_by_channel_retry_window(outbox_db):
+    """Required（PR #1983 R2 复审）：`channel_paused` 回 pending 时必须前移
+    `next_retry_at`（取渠道 next_retry_at 与 60s 的较大者），否则 1s 轮询每秒
+    认领+释放同一行（每行每轮 2 次 commit），1h 暂停即数千次无效写。"""
+    from src.domains.runtime.im import outbox as OB
+
+    eng, consumer, tids, ch = _seed_paused_outbox(outbox_db, count=1, pause_seconds=3600.0)
+    tid = tids[0]
+
+    asyncio.run(consumer.run_once())
+    assert ch.calls == 0, "暂停渠道不应真正 send"
+    row = OB.get_row(tid)
+    assert row["status"] == "pending"
+    delay = _epoch(row["next_retry_at"]) - time.time()
+    assert delay >= 3000, f"释放后 next_retry_at 未前移到渠道 next_retry_at（{delay:.0f}s）"
+    assert OB.claim_batch("owner-A") == [], "暂停行被立刻重新认领（1s 热循环未消除）"
+
+
+def test_released_paused_row_keeps_min_60s_backoff(outbox_db):
+    """Required（PR #1983 R2 复审）：渠道 next_retry_at 已到时，释放也要留 ≥60s
+    退避——不能立刻回落到「每秒认领」热循环。"""
+    from src.domains.runtime.im import outbox as OB
+
+    eng, consumer, tids, ch = _seed_paused_outbox(outbox_db, count=1, pause_seconds=0.0)
+    tid = tids[0]
+
+    asyncio.run(consumer.run_once())
+    row = OB.get_row(tid)
+    assert row["status"] == "pending"
+    delay = _epoch(row["next_retry_at"]) - time.time()
+    assert 50 <= delay <= 75, f"最小退避不在 60s 量级（{delay:.0f}s）"
+    assert OB.claim_batch("owner-A") == []
+
+
+def test_paused_deferral_logs_once_per_window(outbox_db, caplog):
+    """Required（PR #1983 R2 复审）：暂停期每次轮询都打一条 INFO 会在 1h 内刷数千条；
+    同一窗口且积压行数不变时只打一次。"""
+    from src.domains.runtime.im import outbox as OB
+
+    caplog.set_level(logging.INFO)
+    eng, consumer, tids, ch = _seed_paused_outbox(outbox_db, count=1)
+    tid = tids[0]
+
+    def _paused_logs() -> list:
+        return [r for r in caplog.records
+                if "[outbox] channel paused" in r.getMessage()]
+
+    asyncio.run(consumer.run_once())
+    assert len(_paused_logs()) == 1
+    caplog.clear()
+    OB.release_sending(tid)                # 让该行马上又可认领（模拟下一轮）
+    asyncio.run(consumer.run_once())
+    assert _paused_logs() == [], "同窗口内重复刷「channel paused」INFO"
