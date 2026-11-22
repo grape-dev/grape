@@ -32,36 +32,36 @@ def _run(monkeypatch, caplog, domain="mgmt"):
 
 
 def test_no_warning_in_single_db_topology(monkeypatch, caplog):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_mgmt")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_mgmt_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     assert _run(monkeypatch, caplog) == []
 
 
 def test_warns_when_three_db_topology_lacks_dsn(monkeypatch, caplog):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_insight")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_insight_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     records = _run(monkeypatch, caplog)
     assert len(records) == 1
     msg = records[0].getMessage()
-    assert "GRAPE_DSN_MGMT" in msg and "grape_dev_insight" in msg and "grape_dev_mgmt" in msg
+    assert "GRAPE_DSN_MGMT" in msg and "grape_insight_db" in msg and "grape_mgmt_db" in msg
 
 
 def test_warning_is_throttled_per_domain(monkeypatch, caplog):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_insight")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_insight_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     assert len(_run(monkeypatch, caplog)) == 1
     caplog.clear()
     assert _run(monkeypatch, caplog) == []          # 同一进程内不刷屏
 
 
 def test_no_warning_when_dsn_present(monkeypatch, caplog):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_insight")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
-    monkeypatch.setenv("GRAPE_DSN_MGMT", "mysql://u:p@127.0.0.1:3306/grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_insight_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
+    monkeypatch.setenv("GRAPE_DSN_MGMT", "mysql://u:p@127.0.0.1:3306/grape_mgmt_db")
     assert _run(monkeypatch, caplog) == []
 
 
 def test_same_domain_call_never_warns(monkeypatch, caplog):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_mgmt")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_mgmt_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     assert _run(monkeypatch, caplog, domain="mgmt") == []

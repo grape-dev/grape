@@ -24,17 +24,17 @@ def _clean_env(monkeypatch):
 
 
 def _three_db(monkeypatch, with_dsn=()):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_insight")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_insight_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     monkeypatch.setenv("GRAPE_RUNTIME_DB_NAME", "grape_dev_runtime")
-    monkeypatch.setenv("GRAPE_INSIGHT_DB_NAME", "grape_dev_insight")
+    monkeypatch.setenv("GRAPE_INSIGHT_DB_NAME", "grape_insight_db")
     for dom in with_dsn:
         monkeypatch.setenv(f"GRAPE_DSN_{dom.upper()}", f"mysql://u:p@h:3306/grape_dev_{dom}")
 
 
 def test_single_db_topology_is_quiet(monkeypatch):
-    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_mgmt")
-    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_dev_mgmt")
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_mgmt_db")
+    monkeypatch.setenv("GRAPE_MGMT_DB_NAME", "grape_mgmt_db")
     assert topo.multi_db_mode() is False
     assert topo.missing_dsns() == []
     assert topo.wiring_problems() == []
@@ -47,7 +47,7 @@ def test_three_db_missing_dsns_are_named(monkeypatch):
     assert topo.missing_dsns() == ["mgmt", "runtime"]
     problems = topo.wiring_problems()
     assert len(problems) == 2
-    assert "GRAPE_DSN_MGMT" in problems[0] and "grape_dev_mgmt" in problems[0]
+    assert "GRAPE_DSN_MGMT" in problems[0] and "grape_mgmt_db" in problems[0]
 
 
 def test_three_db_complete_wiring_passes(monkeypatch):
