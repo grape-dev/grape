@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import pytest  # noqa: E402
+import src.domains.mgmt.vcs as _vcs_mod  # create_provider 现居此模块
 from fastapi import HTTPException  # noqa: E402
 
 
@@ -40,7 +41,7 @@ class _Prov:
 
 def _patch_provider(monkeypatch, prov):
     import src.kernel.token_resolver as tr
-    monkeypatch.setattr(tr, "create_provider", lambda p: prov)
+    monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: prov)
 
 
 def test_precheck_owner_uses_username_field(monkeypatch):

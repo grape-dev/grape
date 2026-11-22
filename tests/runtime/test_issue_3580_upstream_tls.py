@@ -73,12 +73,11 @@ def test_ssl_context_with_system_bundle():
 
 
 def test_all_upstream_call_sites_use_the_policy_entry():
+    from src.domains.mgmt.vcs import base as vcs_base
     from src.domains.runtime.vcs import api_client
-    from src.domains.runtime.vcs.providers import gitlab
-    from src.kernel import token_resolver, vcs_gitlab_hooks
+    from src.kernel import vcs_gitlab_hooks
 
-    for fn in (token_resolver.GenericVcsProvider._http,
+    for fn in (vcs_base.GenericVcsProvider._http,
                api_client.VcsApiClient._do_request,
-               gitlab.request,
                vcs_gitlab_hooks._request):
         assert "open_with_policy" in inspect.getsource(fn), f"{fn} 未走上游统一入口"

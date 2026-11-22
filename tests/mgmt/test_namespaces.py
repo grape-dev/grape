@@ -7,6 +7,7 @@
 """
 import pytest
 
+import src.domains.mgmt.vcs as _vcs_mod  # create_provider 现居此模块
 from src.domains.mgmt.user.namespaces import (
     KIND_ORG,
     KIND_PERSONAL,
@@ -63,7 +64,7 @@ def test_gitee_lister_uses_card_http_capability(monkeypatch):
             return [{"login": "grp", "name": "GRP", "avatar_url": ""},
                     {"login": "", "name": "broken"}]
 
-    monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
+    monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: _Prov())
     refs = ns_mod.list_org_namespaces("gitee", "tok")
     assert [r.path for r in refs] == ["grp"] and refs[0].kind == KIND_ORG
 
@@ -126,7 +127,7 @@ def test_gitlab_lister_uses_provider_spaces_port(monkeypatch):
         def list_create_spaces(self, token):
             return [{"path": "grp/sub", "name": "SUB", "kind": "group"}]
 
-    monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
+    monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: _Prov())
     refs = ns_mod.list_org_namespaces("gitlab", "tok")
     assert [(r.path, r.kind) for r in refs] == [("grp/sub", KIND_ORG)]
 
@@ -148,7 +149,7 @@ def test_personal_owner_uses_platform_login_not_local_username(monkeypatch):
         def list_create_spaces(self, token):
             return [{"path": "xiaowu3", "name": "xiaowu-群组", "kind": "group"}]
 
-    monkeypatch.setattr(tr, "create_provider", lambda p: _Prov())
+    monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: _Prov())
 
     paths = ns_mod.namespace_paths("gitlab", "tok", {"login": "gvtest3"})
     assert paths == {"yangaiwu", "xiaowu3"}
@@ -169,7 +170,7 @@ def test_platform_login_falls_back_when_provider_unavailable(monkeypatch):
     def _boom(p):
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(tr, "create_provider", _boom)
+    monkeypatch.setattr(_vcs_mod, "create_provider", _boom)
     assert ns_mod.platform_login("gitlab", "tok") == ""
 
 

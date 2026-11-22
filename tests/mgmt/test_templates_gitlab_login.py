@@ -13,6 +13,7 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import pytest  # noqa: E402
+import src.domains.mgmt.vcs as _vcs_mod  # create_provider 现居此模块
 from fastapi import HTTPException  # noqa: E402
 
 from src.domains.mgmt.routes import templates as T  # noqa: E402
@@ -26,7 +27,7 @@ class _Adapter:
     def verify_token(self, token):
         return dict(self._info)
 
-    def create_repo(self, token, name, description=""):
+    def create_repo(self, token, name, description="", **kwargs):
         raise RuntimeError("PROBE-REACHED-CREATE-REPO")
 
 
@@ -39,9 +40,10 @@ def _run(monkeypatch, info, provider="gitlab"):
     monkeypatch.setattr(OT, "with_oauth_token", lambda user, prov, fn: fn("tok"))
     import src.kernel.token_resolver as TR
     adapter = _Adapter(info)
-    monkeypatch.setattr(TR, "create_provider", lambda p: adapter)
+    monkeypatch.setattr(_vcs_mod, "create_provider", lambda p: adapter)
     body = types.SimpleNamespace(template_id="tpl", provider=provider,
-                                 repo_name="demo-x", dev_scene="")
+                                 repo_name="demo-x", dev_scene="",
+                                 owner="", private=False)
     user = {"id": "33", "username": "yangaiwu", "login_provider": provider}
     return adapter, asyncio.run(T.create_from_template(body, user=user))
 
