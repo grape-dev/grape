@@ -2117,7 +2117,6 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         raise HTTPException(status_code=502, detail=_host_502_detail("host_setup", e))
 
 
-@router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
 def _bot_db_fields(cfg: dict, usable: "bool | None" = None) -> tuple:
     """仓库 bot 凭据落库口径（hosting 与 repair 共用）。
 
@@ -2133,6 +2132,7 @@ def _bot_db_fields(cfg: dict, usable: "bool | None" = None) -> tuple:
     return (tok, str(cfg.get("bot_username") or "")) if ok else ("", "")
 
 
+@router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
 def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 
