@@ -69,6 +69,23 @@ class TestReadOpencodeModelConfig:
         assert cfg["targets"] == []
         assert any("api_key" in w for w in cfg["warnings"])
 
+    def test_default_provider_target_ordered_first(self, tmp_path):
+        """探活固定打 targets[0] → default 模型所在网关必须排首位（多 provider 配置）。"""
+        cfg = {
+            "model": "second/m2",
+            "provider": {
+                "first": {"options": {"baseURL": "https://gw-one/v1", "apiKey": "k1"},
+                          "models": {"m1": {}}},
+                "second": {"options": {"baseURL": "https://gw-two/v1", "apiKey": "k2"},
+                           "models": {"m2": {}}},
+            },
+        }
+        path = tmp_path / "opencode.json"
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        parsed = engine_model.read_opencode_model_config(str(path), env={})
+        assert parsed["default_model"] == "m2"
+        assert parsed["targets"][0]["base_url"] == "https://gw-two/v1"
+
 
 class TestValidateEngineModel:
     def _fetch_missing(self):

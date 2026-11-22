@@ -646,6 +646,13 @@ def read_opencode_model_config(config_path: str | None = None,
     elif provider_id and provider_id not in providers:
         warnings.append("opencode provider '%s' not found; default model is not validated"
                         % provider_id)
+    else:
+        # 探活最小调用固定打 targets[0]——default 模型所在网关必须排首位
+        for idx, t in enumerate(targets):
+            if default_model in t["models"]:
+                if idx:
+                    targets.insert(0, targets.pop(idx))
+                break
     return {"config_path": path, "default_model": default_model,
             "targets": targets, "warnings": warnings}
 
