@@ -40,8 +40,15 @@ DEAD_RETENTION_DAYS = 7
 # 平台重投窗口一个量级，排障时仍可回看。
 PENDING_ARCHIVE_DAYS = 30
 # 归档本身也要有保留期，否则「只写不删」把无界增长从主表搬到归档表（复审 A7 残留）。
+# 180 天口径（审查 B2）：归档行只来自 dead 投递与超 30 天未消费的 pending，实测 330 条
+# 投递中这些行为 0，写入速率远低于主表；保留 180 天 = 最长活跃保留期 30 天的 6 倍，
+# 覆盖一个季度内的故障复盘窗口，同时让归档表保持有界。
+# 复核脚本与原始结果见 docs/issue-3580/measurements.md。
 ARCHIVE_RETENTION_DAYS = 180
 PURGE_INTERVAL_SECONDS = 3600
+# 60s 口径（审查 B2）：obs_metric_rollup 的 resolution='minute' 桶粒度就是 1 分钟，
+# 导出快于此间隔只会反复覆盖同一桶（白写），慢于它则面板出现空桶；取 60s 与之对齐。
+METRICS_INTERVAL_SECONDS = 60
 
 _DELIVERY_HEADERS = (
     "x-gitlab-event-uuid",
@@ -471,7 +478,7 @@ async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
     last_metrics = 0.0
     while True:
         try:
-            if time.time() - last_metrics >= 60:
+            if time.time() - last_metrics >= METRICS_INTERVAL_SECONDS:
                 last_metrics = time.time()
                 try:
                     await asyncio.to_thread(emit_inbox_metrics)

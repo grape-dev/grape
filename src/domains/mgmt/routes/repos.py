@@ -1993,9 +1993,14 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         import secrets as _secrets
         # collab token 与 webhook 路径解耦：gitlab_v4 的 bot_token 恒空（路径 B），
         # 但 bot 仍应被邀为维护者并持有回帖凭据（此前因此变成"用户身份回帖"）。
+        # bot 是否「真的可用」与 webhook 走哪条路径是两件事（审查三-1）：
+        # gitlab_v4 的 webhook 必须路径 B，但 bot 若能进这个仓就应落下 bot 凭据。
+        _bot_usable = False
         if global_bot_token and api_token and global_bot_username:
             _mark("partial", "invite_bot", "")
             ok, add_err = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
+            if ok:
+                _bot_usable = True
             if not ok:
                 # 兜底：add_collaborator 失败可能是已成员/已邀请，用 bot token 自查确认
                 try:
@@ -2014,6 +2019,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                     _mark("partial", "path_b_fallback", _HOST_PATH_B_FALLBACK_TEXT)
                 else:
                     if access_level >= 40:
+                        _bot_usable = True
                         log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer (access_level={access_level}) in {owner}/{repo_name}, continue")
                     else:
                         # §16.1: bot 权限不足 → 降级到路径 B（原 raise 502）
@@ -2067,8 +2073,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _db_webhook_token = "" if _use_path_b else webhook_token
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                      **{_hcfg["db_token_field"]: _db_webhook_token,
-                                        _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=not _use_path_b)[0]},
-                                     bot_username=_bot_db_fields(_hcfg, usable=not _use_path_b)[1],
+                                        _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
+                                     bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
                                      org_id=_org_id,
                                      host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
             _mark("")
@@ -2098,8 +2104,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         _db_webhook_token = "" if _use_path_b else webhook_token
         user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
                                  **{_hcfg["db_token_field"]: _db_webhook_token,
-                                    _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=not _use_path_b)[0]},
-                                 bot_username=_bot_db_fields(_hcfg, usable=not _use_path_b)[1],
+                                    _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
+                                 bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
                                  org_id=_org_id,
                                  host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
         _mark("")
