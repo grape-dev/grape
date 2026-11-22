@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 
 from src.kernel.config import log
 
@@ -24,16 +25,20 @@ _ANCHOR_RE = re.compile(r"(?i)(?<![a-z])issues?\s*#?\s*(\d+)")
 _REF_RE = re.compile(r"#(\d+)")
 
 # fail-open 计数：守卫因查询失败而静默放行时累加，便于从业务侧/日志观测失效。
+# 写路径运行在多线程（请求工作线程）下，`+=` 非原子，必须加锁避免并发少记。
 _FAIL_OPEN_STATS = {"count": 0}
+_FAIL_OPEN_LOCK = threading.Lock()
 
 
 def _record_fail_open(session_key: str, exc: Exception, mysql_backend: bool) -> None:
     """记录一次 fail-open（守卫未生效），保留 fail-open 语义不阻断写操作。"""
-    _FAIL_OPEN_STATS["count"] += 1
+    with _FAIL_OPEN_LOCK:
+        _FAIL_OPEN_STATS["count"] += 1
+        count = _FAIL_OPEN_STATS["count"]
     backend = "mysql" if mysql_backend else "sqlite"
     log.warning(
         f"release guard: task issue lookup fail-open (guard disabled) "
-        f"count={_FAIL_OPEN_STATS['count']} backend={backend} "
+        f"count={count} backend={backend} "
         f"session_key={session_key}: {exc}"
     )
 

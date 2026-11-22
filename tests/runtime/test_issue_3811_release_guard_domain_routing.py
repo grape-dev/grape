@@ -9,6 +9,7 @@
 import logging
 import sqlite3
 import tempfile
+import threading
 
 import pytest
 
@@ -44,6 +45,9 @@ def dual_sqlite_dbs(monkeypatch):
         return conn
 
     monkeypatch.setattr(sm, "_db_path", "")  # 跳过 SQLite 只读快路径，进入域路由分支
+    # 固定裸表名：schema mode 开启时 t_runtime() 会生成 rt_agent_tasks，与 fixture
+    # 建的 agent_tasks 不匹配（回落分支会查不到而 fail-open），故显式关闭灰度开关。
+    monkeypatch.delenv("GRAPE_SCHEMA_MODE", raising=False)
     yield _connect(mgmt_path), _connect(runtime_path), mgmt_path, runtime_path
 
 
@@ -63,7 +67,7 @@ def test_fallback_to_process_db_warns_cross_domain(dual_sqlite_dbs, monkeypatch,
     monkeypatch.setattr(sm, "db_lock", _NullLock())
     monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: False)
     monkeypatch.setattr(db_registry, "domain_db", lambda d: None)
-    monkeypatch.setattr(db_registry._local, "_warned_cross_runtime", False, raising=False)
+    monkeypatch.setattr(db_registry, "_warned_cross_domains", set())
 
     monkeypatch.setenv("DEVOPS_DB_NAME", "grape_prod_mgmt")
     monkeypatch.setenv("GRAPE_RUNTIME_DB_NAME", "grape_prod_runtime")
@@ -75,6 +79,25 @@ def test_fallback_to_process_db_warns_cross_domain(dual_sqlite_dbs, monkeypatch,
     guard_logs = [r.getMessage() for r in caplog.records if "[db-guard]" in r.getMessage()]
     assert guard_logs, "回落进程库必须打跨域降级告警"
     assert "runtime" in guard_logs[0] and "GRAPE_DSN_RUNTIME" in guard_logs[0]
+
+
+def test_cross_domain_warning_once_per_process(monkeypatch, caplog):
+    """回落告警去重应为每进程每域一次，跨请求线程不重复刷同一条。"""
+    monkeypatch.setattr(db_registry, "_warned_cross_domains", set())
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_prod_mgmt")
+    monkeypatch.setenv("GRAPE_RUNTIME_DB_NAME", "grape_prod_runtime")
+    monkeypatch.delenv("GRAPE_DSN_RUNTIME", raising=False)
+
+    with caplog.at_level(logging.ERROR):
+        db_registry.warn_if_cross_domain_fallback("runtime")
+        worker = threading.Thread(
+            target=db_registry.warn_if_cross_domain_fallback, args=("runtime",)
+        )
+        worker.start()
+        worker.join()
+
+    guard_logs = [r for r in caplog.records if "[db-guard]" in r.getMessage()]
+    assert len(guard_logs) == 1
 
 
 def test_fail_open_is_counted_and_logged(monkeypatch, caplog):
