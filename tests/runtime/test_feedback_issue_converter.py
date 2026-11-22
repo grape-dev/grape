@@ -147,12 +147,14 @@ class TestFeedbackIssueConverter:
         finally:
             _cleanup(fid)
 
-    def test_only_agent_pending_selected(self):
-        """仅 source='agent' AND issue_url='' 入选；user 反馈与已转反馈不转换。"""
+    def test_user_with_repo_key_converted_opinion_skipped(self):
+        """Issue #673 口径：带 repo_key 的 user 反馈转换；纯意见类（无 repo_key）与已转不入选。"""
         a = _insert(source="agent", title="agent的", task_id="t-6",
                     skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
         u = _insert(source="user", title="用户的", task_id="u-6",
                     skill_name="sk2", skill_scope="repo", repo_key="gitcode:o/r")
+        opinion = _insert(source="user", title="纯意见", task_id="u-6b",
+                          skill_name="", skill_scope="", repo_key="")
         done = _insert(source="agent", title="已转", task_id="t-6b",
                        skill_name="sk3", skill_scope="repo", repo_key="gitcode:o/r",
                        issue_url="u_done")
@@ -161,14 +163,16 @@ class TestFeedbackIssueConverter:
                                    return_value={"number": 15, "url": "u4"}) as m, \
                  mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
                  mock.patch.object(conv, "_repo_target",
-                                   return_value=("gitcode", "o", "r")):
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None):
                 conv.convert_pending_feedback(limit=10)
             titles_called = [c[0][4] for c in m.call_args_list]
             assert "agent的" in titles_called
-            assert "用户的" not in titles_called
+            assert "用户的" in titles_called      # 带仓库上下文的用户反馈同样建单（#673）
+            assert "纯意见" not in titles_called   # 无 repo_key 的意见类跳过
             assert "已转" not in titles_called
         finally:
-            _cleanup(a, u, done)
+            _cleanup(a, u, opinion, done)
 
     def test_deleted_excluded(self):
         """软删除的 agent 反馈不入选。"""
