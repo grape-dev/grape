@@ -349,6 +349,17 @@ def assert_owner_visible(provider: str, token: str, owner: str,
     visible = namespace_paths(provider, token, account)
     if wanted in visible:
         return
+    # GitLab 的 /groups 只返回顶层组，子组（grp/sub）永远不在清单里；而建仓 API 支持
+    # 按完整路径寻址。所以清单未命中时用 /groups/<full_path> 精确解析一次：解析得到
+    # = token 对该子组可见（404/403 即不可见），与建仓同口径。否则"下拉选不了、手填被拒"。
+    if "/" in wanted and provider in ("gitlab",):
+        try:
+            from src.domains.mgmt.vcs import create_provider as _cp
+            if _cp(provider).resolve_namespace(token, wanted):
+                return
+        except Exception as e:  # noqa: BLE001 - 解析失败按不可见处理（fail-closed）
+            from src.kernel.config import log as _log
+            _log.debug(f"assert_owner_visible: resolve_namespace({wanted}) failed: {e}")
     raise NamespaceNotVisible(
         f"{provider}: 所属空间 {wanted} 不在当前账号可用的空间清单内"
     )
