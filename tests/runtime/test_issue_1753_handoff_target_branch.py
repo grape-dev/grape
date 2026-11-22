@@ -11,6 +11,7 @@ Covers:
 import os
 import sys
 import json
+import logging
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_issue_1753_handoff_target_branch.db")
@@ -23,6 +24,7 @@ import pytest
 from src.api.db_setup import init_database
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
+from src.domains.runtime.engine import repogit as repogit_mod
 from src.api.session_store import (
     TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH,
     TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH,
@@ -49,6 +51,18 @@ def _clean():
         for _t in ("issue", "events", "devops_pipeline_scene", "event_active_guard"):
             c.execute(f"DELETE FROM {_t} WHERE repo_key=?", (REPO,))
         db.commit()
+
+
+@pytest.fixture(autouse=True)
+def _branch_list_unverifiable(monkeypatch):
+    """默认分支列表不可核实：交办校验保持场景原值，单测不触网。
+
+    覆盖分支列表的用例在自身内再次 setattr 覆盖本默认桩。
+    """
+    repogit_mod.invalidate_branch_list_cache()
+    monkeypatch.setattr(
+        repogit_mod, "list_repo_branches",
+        lambda repo_key, token="", refresh=False, remote_only=False: (None, ""))
 
 
 def _set_issue(repo_key, number, scene_id="", assignee=""):
@@ -342,3 +356,84 @@ def test_a2a_baseline_note_prepended_and_survives_truncation():
     assert "weekly-mys" in a2a["context"]
     # 独立字段兜底，便于派发/审计直接读取，不受 context 截断影响。
     assert "weekly-mys" in a2a["handoff_baseline_note"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #3758: 恢复 work_branch 存在性校验与回退（#1841 失效回归）
+# ---------------------------------------------------------------------------
+
+def test_webhook_repogit_symbol_import_smoke():
+    """导入冒烟：webhook 依赖的 repogit.resolve_work_branch 必须真实存在。
+
+    缺符号时本用例直接失败（而非交办时被 except Exception 吞成 WARNING）。
+    """
+    import src.domains.runtime.routes.webhook as webhook_mod
+
+    assert hasattr(repogit_mod, "resolve_work_branch")
+    assert callable(repogit_mod.resolve_work_branch)
+    assert webhook_mod.resolve_work_branch is repogit_mod.resolve_work_branch
+
+
+def test_resolve_work_branch_keeps_existing(monkeypatch):
+    monkeypatch.setattr(
+        repogit_mod, "list_repo_branches",
+        lambda *a, **k: ({"main", "weekly-10"}, "main"))
+    effective, note = repogit_mod.resolve_work_branch(REPO, "weekly-10")
+    assert effective == "weekly-10"
+    assert note == ""
+
+
+def test_resolve_work_branch_falls_back_when_configured_missing(monkeypatch, caplog):
+    monkeypatch.setattr(
+        repogit_mod, "list_repo_branches",
+        lambda *a, **k: ({"main", "weekly-10"}, "weekly-10"))
+    with caplog.at_level(logging.WARNING):
+        effective, note = repogit_mod.resolve_work_branch(REPO, "weekly-ghost")
+    assert effective == "weekly-10"
+    assert "weekly-ghost" in note and REPO in note and "weekly-10" in note
+    assert any("work_branch fallback" in r.getMessage() for r in caplog.records)
+
+
+def test_resolve_work_branch_unverifiable_keeps_configured(monkeypatch):
+    monkeypatch.setattr(repogit_mod, "list_repo_branches", lambda *a, **k: (None, ""))
+    effective, note = repogit_mod.resolve_work_branch(REPO, "weekly-ghost")
+    assert effective == "weekly-ghost"
+    assert note == ""
+
+
+def test_handoff_falls_back_when_scene_work_branch_missing(monkeypatch, caplog):
+    """配置分支不存在 → 交办使用回退分支并留 fallback 日志（#3758 核心回归）。"""
+    _set_issue(REPO, 211, "source-scene")
+    _set_scene(REPO, "target-scene", [{"id": "vod"}], {"work_branch": "weekly-ghost"})
+    monkeypatch.setattr(
+        repogit_mod, "list_repo_branches",
+        lambda *a, **k: ({"main", "weekly-10"}, "weekly-10"))
+    carried = {"source_issue_number": 211, "target_branch": "weekly-9"}
+    with caplog.at_level(logging.WARNING):
+        result = _cross_pipeline_handoff(
+            REPO, "211", "target-scene", "vod", carried, "", None,
+            "handoff", "org/test-1753", "org/test-1753")
+    assert result["ok"] is True
+
+    cc = _persisted_cc(211)
+    assert cc["target_branch"] == "weekly-10"
+    assert cc["target_branch_source"] == TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH
+    assert cc["target_branch_replaced"] == "weekly-9"
+    assert any("target scene work_branch fallback" in r.getMessage()
+               and "weekly-ghost" in r.getMessage() for r in caplog.records)
+
+
+def test_handoff_keeps_configured_when_branch_list_unverifiable(monkeypatch):
+    """分支不可核实（无 token/网络失败）→ 保持原配置，不误判回退。"""
+    _set_issue(REPO, 212, "source-scene")
+    _set_scene(REPO, "target-scene", [{"id": "vod"}], {"work_branch": "weekly-ghost"})
+    monkeypatch.setattr(repogit_mod, "list_repo_branches", lambda *a, **k: (None, ""))
+    carried = {"source_issue_number": 212, "target_branch": "weekly-9"}
+    result = _cross_pipeline_handoff(
+        REPO, "212", "target-scene", "vod", carried, "", None,
+        "handoff", "org/test-1753", "org/test-1753")
+    assert result["ok"] is True
+
+    cc = _persisted_cc(212)
+    assert cc["target_branch"] == "weekly-ghost"
+    assert cc["target_branch_replaced"] == "weekly-9"
