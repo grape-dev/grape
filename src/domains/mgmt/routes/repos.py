@@ -2423,6 +2423,8 @@ def set_repo_connection(provider: str, body: RepoConnectionBody,
     except Exception:
         pass
     log.info(f"repos connection: {provider} PAT bound for user={user['id']} login={login}")
+    log_audit("repos_connection_bind", user_id=user["id"], operator_id=user["id"],
+              detail={"provider": provider, "login": login, "source": "pat"})
     return {"provider": provider, "configured": True, "login": login, "source": "pat"}
 
 
@@ -2436,6 +2438,8 @@ def delete_repo_connection(provider: str, user: dict = Depends(require_no_sessio
         user_db.invalidate_user_repos(user["id"])
     except Exception:
         pass
+    log_audit("repos_connection_clear", user_id=user["id"], operator_id=user["id"],
+              detail={"provider": provider, "source": "pat"})
     return {"provider": provider, "configured": False}
 
 
