@@ -9,10 +9,12 @@
 import logging
 import sqlite3
 import tempfile
+
 import pytest
 
 from src.domains.runtime.vcs import release_guard
-from src.kernel import db_registry, session_manager as sm
+from src.kernel import db_registry
+from src.kernel import session_manager as sm
 
 
 class _NullLock:
