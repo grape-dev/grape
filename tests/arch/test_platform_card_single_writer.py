@@ -28,10 +28,12 @@ def test_admin_repository_is_the_only_card_writer():
         text = p.read_text(encoding="utf-8", errors="ignore")
         if "upsert_admin(" in text:
             hits.append(str(p.relative_to(REPO)))
-    assert hits == ["src/kernel/persistence/repositories_platform_object.py",
-                    "src/domains/mgmt/admin/platform_cards/repository.py"], (
-        f"upsert_admin 调用方应只有定义处 + 管理面仓储，实际: {hits}"
+    # 集合比较：目录枚举顺序随文件系统变化，列表相等会让同内容在不同机器上红/绿
+    assert set(hits) == {"src/kernel/persistence/repositories_platform_object.py",
+                         "src/domains/mgmt/admin/platform_cards/repository.py"}, (
+        f"upsert_admin 调用方应只有定义处 + 管理面仓储，实际: {sorted(hits)}"
     )
+    assert len(hits) == 2, f"存在重复出现的调用点文件: {sorted(hits)}"
 
 
 def test_admin_save_does_not_use_upsert_manual():
