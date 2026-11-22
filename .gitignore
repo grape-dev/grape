@@ -113,6 +113,7 @@ scripts/trigger_*.py
 scripts/upgrade_*.py
 !scripts/upgrade_autopilot_engine_uids.py
 scripts/verify_*.py
+!scripts/verify_nginx_upstream.py
 scripts/check-*-*.py
 !scripts/check-i18n-keys.py
 !scripts/check-css-vars.py

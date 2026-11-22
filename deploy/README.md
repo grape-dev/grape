@@ -1,5 +1,46 @@
 # 部署（四进程 / 分域库）
 
+## 网关端口事实源与上游归属（Issue #3764）
+
+四进程端口只有一个事实源：`scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT`
+（mgmt/event/worker/insight = 38081/38082/38083/38084），与
+`deploy/nginx-grape-cluster.conf`、`scripts/restart-four-process.sh`、
+`scripts/install-grape-systemd.sh` 完全一致。nginx 配置只允许引用这套端口，
+不得另起一套（历史上 `nginx-grape-four-process.conf` 曾是 38080–38083，
+`/api/runtime` 打到 38082 event，已在 Issue #3764 对齐）。
+
+| 配置 | 适用场景 | 入口 |
+|---|---|---|
+| `nginx-grape-cluster.conf` | 四进程同机部署（基线） | `:38080` 明文 |
+| `nginx-grape-four-process.conf` | 需要 443/SSL、按路径分流的四进程部署 | `:443`（80→443 跳转） |
+| `nginx-grape-compose.conf` | 容器编排内网反代（端口自洽） | compose 内网 |
+
+**关键约束**：`/api/runtime*`（含 `/api/runtime/install`、
+`/api/runtime/tasks/.../status`）的 `proxy_pass` 上游必须是 **worker** 进程端口
+（基线 38083）。指到业务 API 端口 8181 或其他进程端口会在 claim/install 上表现为
+405/502，且占满网关 error 日志。
+
+部署前与现网核查：
+
+```bash
+# 部署预检（无配置自动探测 /etc/nginx/conf.d/grape*.conf，探测不到则 skip）
+python3 scripts/deploy_preflight.py --db-path data/sessions.db --role mgmt \
+  --nginx-conf /etc/nginx/conf.d/grape.conf
+
+# 也可直接喂 nginx -T 转储（与 --nginx-conf 等价）
+nginx -T > /tmp/nginx-T.txt
+python3 scripts/deploy_preflight.py --nginx-dump /tmp/nginx-T.txt
+
+# 只读收敛校验（供 sre 在 001 执行，幂等无副作用；退出码 0 = 上游归属正确）
+python3 scripts/verify_nginx_upstream.py --nginx-conf /etc/nginx/conf.d/grape.conf
+
+# 过渡口径（如 001 仍为 8081–8084 / 8083）用 --ports 或 GRAPE_PROCESS_PORTS 覆盖
+python3 scripts/verify_nginx_upstream.py --ports mgmt=8081,event=8082,worker=8083,insight=8084
+```
+
+> `deploy/nginx-grape.conf` 是单入口历史上的 38080–38082 布局，不在上述四进程口径内，
+> 新部署请勿使用。
+
 ## 顺序（不可颠倒）：迁移 → 视图修复 → 复核 → 重启
 
 分域部署下，非归属库通过跨库视图读 owner 基表；视图列是**建视图时的快照**。
