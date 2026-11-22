@@ -153,9 +153,11 @@ def test_purge_only_touches_consumed_and_dead(monkeypatch):
     monkeypatch.setattr(wi, "db_lock", __import__("threading").Lock())
     out = wi.purge_finished()
     sql = " | ".join(s for s, _ in fake.log)
-    assert out == {"consumed": 3, "dead": 1}
+    assert out["consumed"] == 3 and out["dead"] == 1
+    assert "stale_pending" in out, "超期未消费的 pending 会被归档（A7）"
     assert "status='consumed'" in sql and "status='dead'" in sql
-    assert "pending" not in sql and "'failed'" not in sql, "pending/failed 不得被清理"
+    # pending/failed 只在超期（30 天）时才被搬走，保留期内不得清理
+    assert "created_at<?" in sql
     assert fake.committed == 1
 
 

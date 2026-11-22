@@ -319,6 +319,13 @@ def _ns_cache_key(provider: str, token: str, account: Mapping[str, Any] | None) 
     return f"{provider}|{hashlib.sha256(str(token or '').encode()).hexdigest()[:16]}|{acct}"
 
 
+def reset_namespace_cache() -> None:
+    """清空命名空间清单缓存（测试/管理面改组织后需要立刻看到新值）。"""
+    global _NS_CACHE
+    if _NS_CACHE is not None:
+        _NS_CACHE = None
+
+
 def namespace_paths(provider: str, token: str, account: Mapping[str, Any] | None = None) -> set[str]:
     key = _ns_cache_key(provider, token, account)
     cached = _ns_cache().get(key)

@@ -113,7 +113,12 @@ def open_with_policy(req, *, timeout: float = 30.0, ca_bundle: str = "",
     - `ca_bundle` 显式给定（调用方已拿到卡）优先；空则按 url 查卡策略；
     - `allow_redirects` 显式给定优先；None 则按 url 查卡策略。
     """
-    ca, policy_redirects = policy_for(req.full_url)
+    # 假请求替身（测试里常见的 `_Req` monkeypatch）没有 full_url：退回直接 urlopen，
+    # 保住"打桩 urllib.request.urlopen"这条既有通道；真实 urllib Request 不会被走到。
+    _url = getattr(req, "full_url", None)
+    if _url is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    ca, policy_redirects = policy_for(_url)
     ca = ca_bundle or ca
     follow = policy_redirects if allow_redirects is None else allow_redirects
     handlers: list = []

@@ -40,11 +40,16 @@ def test_gitlab_webhook_secret_required(monkeypatch):
 
 
 def test_gitlab_family_forces_secret_path(monkeypatch):
-    """get_hosting_provider_config 对 gitlab_v4 返回 bot_token='' → 调用点走路径 B。"""
+    """gitlab_v4 的 webhook 必须走路径 B（随机密钥），但 bot_token 不再被丢弃。
+
+    2026-11-23：原实现用「bot_token 置空」来表达路径 B，连带关掉了「邀请 bot
+    协作者 / bot 回帖凭据」。改为显式 webhook_path_b 后，两者互不影响。
+    """
     import src.domains.mgmt.user.db as _udb
     monkeypatch.setattr(_udb, "get_global_bot_token_for", lambda provider: "global-bot-token")
     cfg = rm.get_hosting_provider_config("gitlab")
-    assert cfg["bot_token"] == ""
+    assert cfg["webhook_path_b"] is True
+    assert cfg["bot_token"] == "global-bot-token"
 
 
 def test_remove_gitlab_webhook_404_idempotent(monkeypatch):

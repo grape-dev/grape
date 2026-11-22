@@ -335,10 +335,12 @@ class TestRepoManager:
              patch("src.domains.mgmt.user.repo_manager._git_has_changes", return_value=True):
             mock_git.side_effect = [""] * 20  # init/add/branch/commit/push 等
             ok = push_template_to_repo(tpl, "me", "hello-skill", "user_tok", bot_token="")
-            assert ok is True
+            assert isinstance(ok, dict) and ok.get("ok") is True  # 返回落点分支
             cmds = [c[0][0] if c and c[0] else [] for c in mock_git.call_args_list]
             assert ["init"] in cmds
-            assert ["push", "--force", "-u", "origin", "HEAD:main"] in cmds
+            # 2026-11-22 B+A 双层：空仓库先走普通 push 落 main，不再一上来就 --force
+            assert ["push", "-u", "origin", "HEAD:main"] in cmds
+            assert ["push", "--force", "-u", "origin", "HEAD:main"] not in cmds
 
     def test_push_git_template_falls_back_to_user_token(self):
         """git 模板：无 bot token 时回退用户 token，push URL 含 user token，不应抛错。"""
@@ -350,7 +352,7 @@ class TestRepoManager:
              patch("src.domains.mgmt.user.repo_manager._download_gitcode_tarball"):
             mock_git.side_effect = [""] * 20
             ok = push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
-            assert ok is True
+            assert isinstance(ok, dict) and ok.get("ok") is True  # 返回落点分支
             # D43: git 模板不再用 clone，改为 tarball 下载；验证 remote add 含 user token
             remote_calls = [c for c in mock_git.call_args_list if c[0][0] and c[0][0][0] == "remote" and c[0][0][1] == "add"]
             assert len(remote_calls) > 0, f"expected remote add, got: {mock_git.call_args_list}"
