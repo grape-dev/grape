@@ -391,7 +391,7 @@ def test_resolve_work_branch_falls_back_when_configured_missing(monkeypatch, cap
         effective, note = repogit_mod.resolve_work_branch(REPO, "weekly-ghost")
     assert effective == "weekly-10"
     assert "weekly-ghost" in note and REPO in note and "weekly-10" in note
-    assert any("work_branch fallback" in r.getMessage() for r in caplog.records)
+    assert any("does not exist in repo" in r.getMessage() for r in caplog.records)
 
 
 def test_resolve_work_branch_unverifiable_keeps_configured(monkeypatch):
