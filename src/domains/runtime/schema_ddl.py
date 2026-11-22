@@ -661,6 +661,9 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
 # MySQL 不支持 `CREATE INDEX IF NOT EXISTS`（MariaDB 才支持），所以索引不做成裸 DDL，
 # 由 ensure 侧先查 information_schema 再建（见 webhook_inbox._ensure_index）。
 _WEBHOOK_INBOX_INDEXES = (
-    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created", "(status, created_at)"),
+    # created_at 在 MySQL 侧是 TEXT（历史 DDL），TEXT 建索引必须给前缀长度，
+    # 否则 1170 "BLOB/TEXT column used in key specification without a key length"。
+    # 20 覆盖 ISO 时间戳的 'YYYY-MM-DDTHH:MM:SS'，对 range 过滤足够精确。
+    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created", "(status, created_at(20))"),
     ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived", "(archived_at)"),
 )
