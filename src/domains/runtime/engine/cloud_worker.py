@@ -492,6 +492,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
             _bot_key = bot_token_env_name(task.get("repo_key") or "")
         except Exception as _be:
             log.warning(f"bot token env name derive failed: {_be}")
+        if not _bot_tok:
+            # P2：无凭据运行必须可见（此前静默空值 → 沙箱 askpass 回声为空 →
+            # 推送 401 被误判成"token 失效/权限不足"，实测排查两轮）
+            log.warning(
+                f"cloud_worker: 任务 {task.get('id') or task.get('tid') or '-'} 无可用的"
+                f"仓库 bot 凭据（repo_key={task.get('repo_key') or '-'}，键={_bot_key}）"
+                f"——沙箱内 git push/PR 将不可用，请检查派发侧凭据注入")
         env[_bot_key] = _bot_tok
         if _bot_key != "BOT_GITCODE_TOKEN":
             # 升级期兜底：旧引擎 / bwrap 白名单仍按 gitcode 键名读
@@ -525,11 +532,15 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
     # （127.0.0.1:8081/8083）——对云沙箱无意义（沙箱内的 127.0.0.1 是沙箱自身，
     # 引擎调平台 API 全部 Connection refused，实测 round8 vod 结果）。云沙箱场景
     # 用 worker 自身的主控地址（CLOUD_WORKER_SERVER_URL，nginx 单入口）覆盖。
-    _cw_server = os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+    # 2026-11-22：worker 自身配置优先——它才是"我确实能连到主控"的实证。
+    # 任务行的 server_url 是建单进程视角算出来的（可能是公网/回环），远端 worker
+    # 未必可达（实测 .213 到公网 IP 000 不可达 → grape CLI 全 301）。
+    _cw_server = (os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+                  or os.environ.get("RUNTIME_SERVER_URL", ""))
     _task_server = task.get("server_url") or ""
-    _effective = _task_server
-    if _task_server and "127.0.0.1" in _task_server and _cw_server:
-        _effective = _cw_server
+    _effective = _cw_server or _task_server
+    if _effective and _task_server and _effective != _task_server:
+        log.info(f"cloud_worker: 回连基址以 worker 配置为准 {_task_server} -> {_effective}")
     if _effective:
         env["GRAPE_SERVER_URL"] = _effective
 
