@@ -217,7 +217,12 @@ async def create_from_template(body: CreateTemplateRequest,
         def _verify_login(t, _adapter=_prov_adapter):
             _used_token["v"] = t
             info = _adapter.verify_token(t)
-            return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+            if not isinstance(info, dict):
+                return ""
+            # GitLab /user 没有 login 字段（登录名在 username），只认 login 会让
+            # 一键创建在 GitLab 上恒 502「无法获取当前用户身份」。与 repos.py
+            # create-targets 的查重取身份口径保持一致。
+            return str(info.get("login") or info.get("username") or "")
         owner_login = with_oauth_token(user, provider, _verify_login)
         if not owner_login:
             # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
