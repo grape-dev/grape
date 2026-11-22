@@ -38,6 +38,7 @@ OFFICIAL_SKILL_L2_MAP = [
     ("blog-publish", "ops-content-goods"),
     ("blog-vod", "ops-content-goods"),
     ("build-debug", "it-rd-engineering"),
+    ("cce-terrapilot", "it-rd-infra"),  # CCE 容器部署/Terraform 规划（QA B2：dev official 在库）
     ("changelog-gen", "it-rd-ops-observability"),
     ("chat", "it-rd-grape-platform"),
     ("chat-cli", "it-rd-engineering"),
@@ -54,6 +55,7 @@ OFFICIAL_SKILL_L2_MAP = [
     ("domain-issue", "it-rd-ai-app"),
     ("domain-qa", "it-rd-ai-app"),
     ("domain-vod", "it-rd-ai-app"),
+    ("egress-test", "it-rd-test-quality"),  # QA B2：dev official 在库（出站域名声明验证）
     ("event-dialogue", "it-rd-engineering"),
     ("grape-skill-generator", "it-rd-grape-platform"),
     ("grape-skill-issue", "it-rd-grape-platform"),
@@ -110,13 +112,15 @@ OFFICIAL_SKILL_L2_MAP = [
 EXPECTED_DISTRIBUTION = {
     "it-rd-engineering": 29,
     "it-rd-ai-app": 14,
-    "it-rd-infra": 9,
+    # QA B2（PR #1955）：dev official 在库的 cce-terrapilot（CCE/Terraform 部署）
+    # 与 egress-test（出站域名声明验证）补进名单后 infra 9→10、test-quality 1→2。
+    "it-rd-infra": 10,
     "ops-content-goods": 7,
     "it-rd-grape-platform": 6,
     "it-rd-ops-observability": 4,
     "other-personal-life": 3,
     "it-rd-security-compliance": 1,
-    "it-rd-test-quality": 1,
+    "it-rd-test-quality": 2,
 }
 
 
@@ -172,14 +176,23 @@ def cutover_official_skills(conn=None) -> None:
     with db_lock:
         c = conn.cursor()
         for skill_name, l2_slug in OFFICIAL_SKILL_L2_MAP:
-            cur = c.execute(
-                "UPDATE skill SET cat_l1_id=?, cat_l2_id=? "
-                "WHERE skill_name=? AND scope='official'",
-                (int(l1_of_l2.get(l2_slug, 0)), int(id_by_slug[l2_slug]), skill_name))
-            n = int(getattr(cur, "rowcount", 0) or 0)
-            mapped += n
-            if not n:
+            # QA B1（PR #1955 原子回归）：MySQL 下值未变的 UPDATE rowcount=0（sqlite
+            # 为 1），用 rowcount 判「命中」会在二次运行时把全部挂靠行误判成未命中
+            # → 永久 raise 不盖章。改为「先读终值、不等才写、命中=行存在且终值正确」，
+            # 两种方言幂等语义一致。
+            row = c.execute(
+                "SELECT cat_l1_id, cat_l2_id FROM skill WHERE skill_name=? AND scope='official'",
+                (skill_name,)).fetchone()
+            if row is None:
                 missed.append(skill_name)
+                continue
+            want = (int(l1_of_l2.get(l2_slug, 0)), int(id_by_slug[l2_slug]))
+            if (int(row[0] or 0), int(row[1] or 0)) != want:
+                c.execute(
+                    "UPDATE skill SET cat_l1_id=?, cat_l2_id=? "
+                    "WHERE skill_name=? AND scope='official'",
+                    (want[0], want[1], skill_name))
+            mapped += 1
         # 老 category_id 清零与上游 202611210003 幂等重申（存量库可能已清）。
         c.execute("UPDATE skill SET category_id=0 WHERE category_id<>0")
         conn.commit()

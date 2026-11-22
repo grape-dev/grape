@@ -57,8 +57,9 @@ def test_map_entries_unique():
     assert len(names) == len(set(names)), "skill_name 重复：唯一性被破坏"
 
 
-def test_map_count_74():
-    assert len(OFFICIAL_SKILL_L2_MAP) == 74
+def test_map_count_76():
+    # 74 + QA B2 补的 cce-terrapilot / egress-test（PR #1955 原子回归拦截点）
+    assert len(OFFICIAL_SKILL_L2_MAP) == 76
 
 
 def test_all_l2_slugs_resolvable_in_seed():
