@@ -120,6 +120,39 @@ class CardOverrides:
                 next_map.pop(provider, None)
         return CardOverrides(next_map)
 
+    def prune_stale(self, base_lookup) -> "CardOverrides":
+        """清掉与基线卡等价的覆盖项（老版本升级后遗留的"改了不生效"来源）。
+
+        覆盖层只应保留"与基线确实不同"的键。文件卡随版本升级后，旧覆盖往往与新基线
+        取值相同却仍留在 meta 里：运行时它照样叠加（值为空串时还会盖掉新默认值），
+        表现为管理面改不动。返回值是新实例；基线条不出来的 provider 原样保留（人工处理）。
+        """
+        next_map: dict[str, dict] = {}
+        for provider, fields in self.by_provider.items():
+            try:
+                base = base_lookup(provider)
+            except Exception:  # noqa: BLE001 - 基线条不出来不该让读卡失败
+                base = None
+            if base is None:
+                next_map[provider] = dict(fields)
+                continue
+            kept = diff_card_fields(fields, base)
+            if kept:
+                next_map[provider] = kept
+        return CardOverrides(next_map)
+
+    def stale_providers(self, base_lookup) -> list[str]:
+        """与基线等价（升级残留）的 provider 列表，供一次性告警/运维清理。"""
+        out: list[str] = []
+        for provider, fields in self.by_provider.items():
+            try:
+                base = base_lookup(provider)
+            except Exception:  # noqa: BLE001
+                continue
+            if base is not None and not diff_card_fields(fields, base):
+                out.append(provider)
+        return sorted(out)
+
     # ── 应用 ────────────────────────────────────────────────────
     def apply_to(self, base_raws: dict) -> None:
         """把覆盖层叠加到卡 raw 字典（原地）。必须在文件/meta/表行之后叠。"""

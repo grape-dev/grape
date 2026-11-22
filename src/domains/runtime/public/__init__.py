@@ -7286,7 +7286,11 @@ def compute_card_overrides(submitted: dict, current_json: str = "") -> dict:
     from src.domains.runtime.vcs.card_overrides import CardOverrides
     from src.domains.runtime.vcs.platform_card import base_platform_card as _base
 
-    return CardOverrides.from_json(current_json).recompute(submitted, _base).by_provider
+    # prune_stale：升级后与新基线等价的旧覆盖一并清掉（否则"改了不生效"会一直留到人工清理）
+    return (CardOverrides.from_json(current_json)
+            .recompute(submitted, _base)
+            .prune_stale(_base)
+            .by_provider)
 
 
 def platform_card_overrides_meta_key() -> str:

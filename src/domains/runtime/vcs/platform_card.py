@@ -834,10 +834,41 @@ def _build_cards(include_overrides: bool = True) -> "dict[str, PlatformCard]":
     global _degraded_reason
     cards = assembler.build(builder=build_platform_card, error_type=PlatformCardError)
     _degraded_reason = assembler.last_degraded
+    if _ov_source is not None:
+        _warn_stale_overrides_once()
     if _degraded_reason:
         log.warning(f"platform_card: 装配降级 reason={_degraded_reason}"
                     "（取卡通道异常时不会退化成「平台未注册」）")
     return cards
+
+
+_STALE_OVERRIDE_WARNED = False
+
+
+def _warn_stale_overrides_once() -> None:
+    """一次性告警：meta 覆盖层里与当前文件卡等价的残留（升级后"改了不生效"）。
+
+    只在进程内报一次，不写库、不改优先级——真正的清理发生在管理面保存
+    （runtime.public.compute_card_overrides 里 prune_stale）。
+    """
+    global _STALE_OVERRIDE_WARNED
+    if _STALE_OVERRIDE_WARNED:
+        return
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        from src.domains.runtime.vcs.card_overrides import META_KEY, CardOverrides
+
+        ov = CardOverrides.from_json(_mgmt_public.get_meta_value(META_KEY) or "")
+        if not ov.by_provider:
+            return
+        stale = ov.stale_providers(lambda p: base_platform_card(p))
+        if stale:
+            _STALE_OVERRIDE_WARNED = True
+            log.warning("platform_card: meta 覆盖层存在与文件卡等价的残留 "
+                        f"{stale}——会在管理面下次保存时自动清理；"
+                        "如需立即清理，重新保存一次该平台卡即可")
+    except Exception as e:  # noqa: BLE001 - 诊断不影响读卡
+        log.debug(f"stale override check skipped: {e}")
 
 
 def _load_cards() -> None:
