@@ -52,7 +52,7 @@ outbox 消费者：_deliver 返回 reason=channel_paused → release_sending（�
 ### 3. 日志聚合（`HourlyLogAggregator`）
 
 - 键 `(instance, reason)`，窗口 3600s；同一窗口内只累加，**窗口滚动时**输出上窗口 1 条汇总
-  （`count` + 首条样本 + 时间范围）；`flush()` 在 disconnect/shutdown 时补输出当前窗口（count>1）。
+  （`count` + 首条样本 + 时间范围）；`flush()` 在 disconnect/shutdown 时补输出当前窗口（`count>=1`：单次失败也落日志，PR #1983 审查 Required）。
 - 落到 4 个失败点：`channel._notify_start/_notify_stop`、`WechatSender.notify_start/notify_stop`。
 
 ### 4. 降级路由（`notify.py`）
