@@ -2204,15 +2204,18 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if target_scene_id and issue_number:
             # Issue #2816 复审（判断项）：跨流水线派发的终态 guard 在 async 端点内
             # 用 executor 预判，避免 run_a2a_dispatch 在事件循环里同步读 VCS。
+            import asyncio as _aio_cross
             _cross_guard = None
             if not _force:
-                import asyncio as _aio_cross
                 from src.api.a2a_terminal_guard import guard_terminal_dispatch
                 _cross_guard = await _aio_cross.to_thread(
                     guard_terminal_dispatch, repo_key, issue_number,
                     target_node or "vod",
                     (payload if isinstance(payload, dict) else {}))
-            _redirect = _cross_pipeline_handoff(
+            # Issue #3758 R2：_cross_pipeline_handoff 内的 work_branch 校验会同步
+            # fetch --prune / 远端 HTTP，必须放到线程池执行，避免阻塞事件循环。
+            _redirect = await _aio_cross.to_thread(
+                _cross_pipeline_handoff,
                 repo_key, issue_number, target_scene_id, target_node or "vod",
                 carried_context, target_assignee, engine_config, context, repository, account,
                 source_seq=_source_seq, guard_state=_cross_guard,
