@@ -394,7 +394,7 @@ class TestConvertFailureObservability:
     """Issue #3731：连续失败轮次持久化（跨 worker 可查），达阈值升级 ERROR，成功后清零。"""
 
     def test_consecutive_failure_escalates_to_error(self):
-        """同一 fid 连续 3 轮建单失败：前两轮 WARNING，第 3 轮 ERROR + 计数落库 3。"""
+        """同一 fid 连续 3 轮建单失败：前两轮 WARNING，第 3 轮（跨越阈值）ERROR + 计数落库 3。"""
         fid = _insert(source="agent", title="连败题", task_id="t-f1",
                       skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
         try:
@@ -414,6 +414,84 @@ class TestConvertFailureObservability:
             assert "consecutive=3" in lg.error.call_args[0][0]
             assert "create failed" in lg.error.call_args[0][0]
             assert _fail_count(fid) == 3
+        finally:
+            _cleanup(fid)
+
+    def test_error_only_on_threshold_crossing_not_every_round(self):
+        """Issue #3731 QA Required：ERROR 只在跨越阈值那一轮发，其后每轮只 WARNING。
+
+        旧实现达阈值后每轮都 ERROR（阈值 3 + interval 300s → 单行 288 条/天）；
+        新实现用 `_fetch_pending` 读回的 `convert_fail_count`（prev）判定跨越。
+        """
+        fid = _insert(source="agent", title="节流题", task_id="t-f1b",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   side_effect=RuntimeError("boom")), \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None), \
+                 mock.patch.object(conv, "log") as lg:
+                for _ in range(7):
+                    conv.convert_pending_feedback(limit=10)
+            assert lg.error.call_count == 1, \
+                f"7 轮连败只应 1 条 ERROR（跨越轮），实际 {lg.error.call_count}"
+            assert "consecutive=3" in lg.error.call_args[0][0]
+            assert _fail_count(fid) == 7                 # 计数照常累计（可查）
+        finally:
+            _cleanup(fid)
+
+    def test_policy_skip_not_counted_as_failure(self):
+        """Issue #3731 QA Required：GRAPE_FEEDBACK_OFFICIAL_ISSUE=0 的策略跳过不计连败。
+
+        开关关闭是 Spec 声明 Out of Scope 的既定语义（行保留待开关打开），
+        计连败会让私有部署 3 轮后每轮 ERROR，等于变相改了开关语义。
+        """
+        fid = _insert(source="agent", title="开关题", task_id="t-f1c",
+                      skill_name="sk", skill_scope="official",
+                      repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "GRAPE_FEEDBACK_OFFICIAL_ISSUE", "0"), \
+                 mock.patch.object(conv, "log") as lg:
+                for _ in range(5):
+                    conv.convert_pending_feedback(limit=10)
+            assert _fail_count(fid) == 0                 # 策略跳过不计数
+            assert lg.error.call_count == 0
+        finally:
+            _cleanup(fid)
+
+    def test_unroutable_empty_repo_key_not_counted_as_failure(self):
+        """Issue #3731 QA Required：空 repo_key 的非 official agent 反馈不可路由，不计连败。
+
+        入选口径对 source='agent' 不看 repo_key，这类行永远解析不出 owner/repo；
+        计连败只会永久 ERROR 刷屏（每轮 1 条），不是真转换失败。
+        """
+        fid = _insert(source="agent", title="无键题", task_id="t-f1d",
+                      skill_name="sk", skill_scope="repo", repo_key="")
+        try:
+            with mock.patch.object(conv, "log") as lg:
+                for _ in range(5):
+                    conv.convert_pending_feedback(limit=10)
+            assert _fail_count(fid) == 0                 # 不可路由不计数
+            assert lg.error.call_count == 0
+        finally:
+            _cleanup(fid)
+
+    def test_real_failure_still_counts_and_escalates(self):
+        """真失败（如无 bot token）仍计数、达阈值升级一次 ERROR（回归护栏）。"""
+        fid = _insert(source="agent", title="无token题", task_id="t-f1e",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_repo_bot_token", return_value=""), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "log") as lg:
+                for _ in range(3):
+                    conv.convert_pending_feedback(limit=10)
+            assert _fail_count(fid) == 3                 # 真失败照常计数
+            assert lg.error.call_count == 1
+            assert "no bot token" in lg.error.call_args[0][0]
         finally:
             _cleanup(fid)
 
