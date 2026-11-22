@@ -36,32 +36,48 @@ def _startup_category_slug_check(scenes_dir: str | None = None):
     （1 条 INFO）。存在「字典无此 slug 且无别名」的 scene.json 时：
     - 默认 1 条聚合 WARNING（scene→slug 明细），不阻断启动；
     - CATEGORY_SLUG_STRICT=1 时 fail-fast（SystemExit 2），把配置错误拦在启动。
+
+    校验口径优先用运行时字典快照（DB `category_dict_active_map("scene")`，与同步解析
+    同一数据源），取不到（DB 未就绪/异常/空表）才回落种子口径
+    （`CATEGORY_DICT_SEED`，纯数据）——PR #1982 审查 Optional：两侧口径不同会让
+    「DB 停用/缺行」的 slug 在启动校验放行却在同步里恒未命中。
     """
-    import os as _os
     from src.kernel.config import log
     from src.kernel.category import validate_local_scenes_categories
 
     if scenes_dir is None:
-        cur = _os.path.dirname(_os.path.abspath(__file__))
-        while cur and cur != "/":
-            if _os.path.isdir(_os.path.join(cur, "configs")) or _os.path.isdir(_os.path.join(cur, "scripts")):
-                break
-            cur = _os.path.dirname(cur)
-        scenes_dir = _os.path.join(cur, "scenes")
+        # 仓库根探测复用 runtime 同步层的同一 helper（PR #1982 审查 Nit：不重复实现）
+        from src.domains.runtime.storage.scene_sync import _repo_root
+        scenes_dir = os.path.join(_repo_root(__file__), "scenes")
 
-    unknown = validate_local_scenes_categories(scenes_dir)
+    if not os.path.isdir(scenes_dir):
+        log.info("[CONFIG] scenes/ not shipped locally, scene category slug check skipped (Issue #3796)")
+        return
+
+    dict_map = None
+    dict_source = "seed"
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        dict_map = _mgmt_public.category_dict_active_map("scene") or None
+        if dict_map:
+            dict_source = "runtime-db"
+    except Exception as dict_err:  # noqa: BLE001
+        log.info(f"[CONFIG] runtime category dict unavailable ({dict_err}), "
+                 f"scene category slug check falls back to seed dict")
+
+    unknown = validate_local_scenes_categories(scenes_dir, dict_map=dict_map)
     if not unknown:
-        if _os.path.isdir(scenes_dir):
-            log.info("[CONFIG] scene category slugs validated OK (Issue #3796)")
-        else:
-            log.info("[CONFIG] scenes/ not shipped locally, scene category slug check skipped (Issue #3796)")
+        log.info(f"[CONFIG] scene category slugs validated OK "
+                 f"(dict={dict_source}, Issue #3796)")
         return
     detail = "; ".join(f"{scene}: {', '.join(slugs)}" for scene, slugs in sorted(unknown.items()))
-    if _os.environ.get("CATEGORY_SLUG_STRICT") == "1":
-        log.error(f"[CONFIG] scene category slugs unresolved (CATEGORY_SLUG_STRICT=1): {detail}")
+    if os.environ.get("CATEGORY_SLUG_STRICT") == "1":
+        log.error(f"[CONFIG] scene category slugs unresolved (CATEGORY_SLUG_STRICT=1): {detail} "
+                  f"— validated against {dict_source} dict; unset CATEGORY_SLUG_STRICT, "
+                  f"migrate scene.json to converged slugs, or add a LEGACY_CATEGORY_ALIASES alias")
         raise SystemExit(2)
     log.warning(f"[CONFIG] scene category slugs unresolved "
-                f"(aliased or migrate scenes/*/scene.json, Issue #3796): {detail}")
+                f"(dict={dict_source}; aliased or migrate scenes/*/scene.json, Issue #3796): {detail}")
 
 
 def _startup_security_check():
