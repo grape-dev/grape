@@ -749,3 +749,53 @@ def test_org_ops_have_english_summary_and_scope():
                 bad.append((method, path, op.get("x-token-scope")))
     assert org_ops >= 37
     assert not bad, bad[:10]
+
+
+# ===================== Issue #3756：登记表缺失时契约降级 =====================
+def test_custom_openapi_degrades_when_deprecation_registry_missing(tmp_path, monkeypatch):
+    """登记表缺失：custom_openapi 返回 schema（不抛），paths 非空且根级 x-degraded。"""
+    from src.domains.contracts import deprecation as dep
+
+    monkeypatch.setattr(dep, "DEPRECATED_ENDPOINTS_PATH",
+                        str(tmp_path / "missing_deprecated_endpoints.json"))
+    cached = app.openapi_schema
+    app.openapi_schema = None
+    try:
+        schema = openapi.custom_openapi(app, check_baseline=False)
+    finally:
+        app.openapi_schema = cached
+
+    assert schema.get("paths"), "降级契约不应为空"
+    assert schema.get("x-degraded") == "deprecation-registry-missing"
+
+
+def test_custom_openapi_keeps_deprecated_markup_when_registry_present(tmp_path, monkeypatch):
+    """登记表正常：deprecated 标注输出不变（回归红线，与 #2837 行为一致）。"""
+    import json
+    from src.domains.contracts import deprecation as dep
+
+    registry = {
+        "entries": [{
+            "operation_id": "a2a_status",
+            "method": "get",
+            "path": "/api/a2a/status",
+            "deprecated_since_release": 1,
+            "deprecated_since_date": "2026-11-22",
+            "replacement": "/api/a2a",
+        }]
+    }
+    reg = tmp_path / "deprecated_endpoints.json"
+    reg.write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(dep, "DEPRECATED_ENDPOINTS_PATH", str(reg))
+    cached = app.openapi_schema
+    app.openapi_schema = None
+    try:
+        schema = openapi.custom_openapi(app, check_baseline=False)
+    finally:
+        app.openapi_schema = cached
+
+    op = schema["paths"]["/api/a2a/status"]["get"]
+    assert op.get("deprecated") is True
+    assert op.get("x-deprecated-since") == 1
+    assert op.get("x-deprecated-replacement") == "/api/a2a"
+    assert schema.get("x-degraded") is None

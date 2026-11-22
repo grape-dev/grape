@@ -55,3 +55,42 @@ def test_packed_tar_filters_generated_but_keeps_checked_in_copy(tmp_path):
     assert "help/api/openapi.json" not in names, f"生成物不该入包: {names}"
     assert SHELL_OPENAPI in names, f"入库契约副本必须入包: {names}"
     assert "src/api/frontend/shell/js/app.js" in names
+
+
+# ===================== Issue #3756：契约登记表必须随后端包落盘 =====================
+def test_backend_file_items_include_contracts_dir():
+    """后端包收集项必须纳入 contracts/ 整目录（登记表随产物发布）。"""
+    items = rp._backend_file_items()
+    arcnames = {arc for _src, arc in items}
+    assert "contracts" in arcnames, f"后端包未纳入 contracts/: {sorted(arcnames)}"
+
+
+def test_assert_contracts_ready_passes_on_repo():
+    rp.assert_contracts_ready(_REPO_ROOT)
+
+
+def test_assert_contracts_ready_fatal_when_registry_missing(tmp_path, capsys):
+    """缺登记表 → 打包以 [FATAL] 失败（不得静默出包）。"""
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        rp.assert_contracts_ready(tmp_path)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "[FATAL]" in out
+    assert "deprecated_endpoints.json" in out
+
+
+def test_assert_contracts_ready_fatal_when_released_empty(tmp_path, capsys):
+    """关键文件齐备但 released/ 无快照 → 同样 FATAL。"""
+    import pytest
+
+    contracts = tmp_path / "contracts"
+    (contracts / "released").mkdir(parents=True)
+    for name in ("deprecated_endpoints.json", "deprecated_exemptions.json",
+                 "openapi_baseline.json", "required_operations.json"):
+        (contracts / name).write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        rp.assert_contracts_ready(tmp_path)
+    assert exc.value.code == 1
+    assert "[FATAL]" in capsys.readouterr().out

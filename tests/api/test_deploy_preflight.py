@@ -51,14 +51,18 @@ def _seed_db(path: Path, *, tables: bool = True, ledger_rows: bool = True,
     return path
 
 
-def _run(path: Path, role: str | None, *, json_out: bool = False) -> subprocess.CompletedProcess:
+def _run(path: Path, role: str | None, *, json_out: bool = False,
+         contracts_dir: Path | None = None) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items()
            if k not in ("GRAPE_PROCESS_ROLE", "DEVOPS_DB_NAME")
-           and not k.startswith("GRAPE_DSN_") and k != "GRAPE_DOMAIN_LIB"}
+           and not k.startswith("GRAPE_DSN_") and k != "GRAPE_DOMAIN_LIB"
+           and k != "GRAPE_CONTRACTS_DIR"}
     if role:
         env["GRAPE_PROCESS_ROLE"] = role
     env["DEVOPS_DB_BACKEND"] = "sqlite"
     cmd = [sys.executable, str(SCRIPT), "--db-path", str(path)]
+    if contracts_dir is not None:
+        cmd += ["--contracts-dir", str(contracts_dir)]
     if json_out:
         cmd.append("--json")
     return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
@@ -71,7 +75,8 @@ def test_preflight_passes_on_healthy_db(tmp_path):
     data = json.loads(r.stdout)
     assert data["pass"] is True
     assert {c["check"] for c in data["checks"]} >= {
-        "role_env", "db_reachable", "migration_ledger", "ledger_vs_registry", "owned_tables_exist"}
+        "role_env", "contracts_registry", "db_reachable", "migration_ledger",
+        "ledger_vs_registry", "owned_tables_exist"}
 
 
 def test_preflight_fails_when_ledger_claims_but_table_missing(tmp_path):
@@ -106,3 +111,13 @@ def test_preflight_fails_when_single_db_meta_missing(tmp_path):
     r = _run(db, "runtime")
     assert r.returncode == 1, r.stdout + r.stderr
     assert "meta" in r.stdout
+
+def test_preflight_fails_when_contracts_registry_missing(tmp_path):
+    """Issue #3756：契约登记表未随产物落盘 → 部署预检 exit 1（不得启动）。"""
+    db = _seed_db(tmp_path / "ok.db")
+    contracts = tmp_path / "contracts"
+    contracts.mkdir()
+    r = _run(db, "mgmt", contracts_dir=contracts)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "契约登记表" in r.stdout
+    assert "contracts" in r.stdout
