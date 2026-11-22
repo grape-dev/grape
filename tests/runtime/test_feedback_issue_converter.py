@@ -328,7 +328,8 @@ class TestTitleClip:
             @staticmethod
             def request(method, url, token, payload=None):
                 if seen is not None:
-                    seen[method] = payload if payload is not None else url
+                    seen.setdefault(method, []).append(
+                        payload if payload is not None else url)
                 if method == "GET":
                     return list(issues or [])
                 return {"number": 88}
@@ -345,9 +346,10 @@ class TestTitleClip:
                         side_effect=lambda p, res, act, neutral, ctx: neutral):
             conv._create_provider_issue("gitcode", "o", "r", "B", long_title, "body")
             conv._create_provider_issue("gitcode", "o", "r", "B", "短标题", "body")
-        sent = seen["POST"]["title"]
-        assert len(sent) <= 200 and sent.endswith("…")
-        assert sent.startswith("长" * 10)
+        long_sent, short_sent = seen["POST"][0]["title"], seen["POST"][1]["title"]
+        assert len(long_sent) <= 200 and long_sent.endswith("…")
+        assert long_sent.startswith("长" * 10)
+        assert short_sent == "短标题"
 
     def test_clipped_title_reuse_existing_issue(self):
         """超长标题截断后与目标仓已有单同键 → 复用不新建（查重与建单同口径）。"""
@@ -367,7 +369,7 @@ class TestTitleClip:
                  mock.patch.object(conv, "_provider_module", return_value=mod):
                 conv.convert_pending_feedback(limit=10)
             assert not m.called                       # 查重命中，未新建
-            assert "state=opened" in seen["GET"]
+            assert "state=opened" in seen["GET"][0]
             with db_lock:
                 row = db.cursor().execute(
                     "SELECT issue_url, issue_number FROM user_feedback WHERE id=?",

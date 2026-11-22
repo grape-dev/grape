@@ -101,12 +101,15 @@ def _create_provider_issue(provider: str, owner: str, repo: str, token: str,
 
     provider 调用方式与 git_repo_api 一致（provider 中性翻译 + 原生 URL + bot token），
     但走服务端身份（bot token），不走 session_only 透传端点。
+
+    Issue #3731：平台标题上限 200 字符（超限直接 400 `out of max length`，
+    该反馈随之每轮必败永久卡死），投递前统一按 `_clip_title()` 截断。
     """
     import urllib.parse
     from src.domains.runtime.vcs.providers import translate_inbound
     mod = _provider_module(provider)
     url = f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/issues"
-    neutral = {"title": title, "body": body, "assignee": ""}
+    neutral = {"title": _clip_title(title), "body": body, "assignee": ""}
     payload = translate_inbound(provider, "issues", "create", neutral,
                                 {"owner_repo": f"{owner}/{repo}"})
     resp = mod.request("POST", url, token, payload)
@@ -126,6 +129,22 @@ _CLAIM_PREFIX = "pending:"
 _CLAIM_TTL = 600
 _CLAIM_ON = os.environ.get("FEEDBACK_CLAIM", "1") != "0"
 _DEDUP_ON = os.environ.get("FEEDBACK_TITLE_DEDUP", "1") != "0"
+
+# 平台标题上限（GitCode/GitHub/GitLab 均为 200 字符；超限建单直接 400）。
+_MAX_TITLE_LEN = 200
+_TITLE_ELLIPSIS = "…"
+
+
+def _clip_title(title) -> str:
+    """按平台标题上限截断（Issue #3731 根因 B）。
+
+    超限时截掉尾部并补一个省略号，保证 `len(结果) <= _MAX_TITLE_LEN`：
+    建单侧与查重侧共用本函数，截断后同键才能命中复用，不会重复建单。
+    """
+    t = (title or "").strip()
+    if len(t) <= _MAX_TITLE_LEN:
+        return t
+    return t[: _MAX_TITLE_LEN - len(_TITLE_ELLIPSIS)] + _TITLE_ELLIPSIS
 
 
 def _norm_title(t):
@@ -177,7 +196,8 @@ def _find_existing_open_issue(provider, owner, repo, token, title):
         return None
     import urllib.parse
     mod = _provider_module(provider)
-    want = _norm_title(title)
+    # 查重键与建单侧同一入参（截断后标题），否则截断后长标题还会重复建单（Issue #3731）
+    want = _norm_title(_clip_title(title))
     # 开放态参数按平台取值：GitCode / GitLab 是 opened，GitHub 是 open（用错只会查不到，退化为不复用）
     _state = "open" if provider == "github" else "opened"
     for page in range(1, 11):
