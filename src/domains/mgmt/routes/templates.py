@@ -144,8 +144,8 @@ def _create_auto_init_kwargs(adapter) -> dict:
         import inspect
         if "auto_init" in inspect.signature(adapter.create_repo).parameters:
             return {"auto_init": False, "default_branch": "main"}
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:  # 自带签名不可探测：按"不传该选项"处理
+        log.debug(f"create_repo signature probe skipped: {e}")
     return {}
 
 
