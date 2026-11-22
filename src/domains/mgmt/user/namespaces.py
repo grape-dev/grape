@@ -294,8 +294,36 @@ def list_namespaces(provider: str, token: str, account: Mapping[str, Any] | None
     return compose_namespaces(provider, acct, org_rows)
 
 
+# F3（A4）：`assert_owner_visible` 在建仓/查重/一键创建三条路径上被调用，原实现每次
+# 都打 2 次上游（/user + 组织清单），/check-name 还会按候选名轮询 → 秒级时延。
+# 同一 (provider, token 身份) 的清单在 30s 内复用：陈旧窗口内新增组织不可见，
+# 用户重试/重开弹窗即可（与 mgmt/vcs/namespaces.py 的 create_targets 缓存同口径）。
+_NS_TTL_SECONDS = 30
+
+def _ns_cache():
+    from src.kernel.ttl_cache import TTLCache
+    global _NS_CACHE
+    if _NS_CACHE is None:
+        _NS_CACHE = TTLCache("user_namespace_paths", lambda: _NS_TTL_SECONDS)
+    return _NS_CACHE
+
+_NS_CACHE = None
+
+
+def _ns_cache_key(provider: str, token: str, account: Mapping[str, Any] | None) -> str:
+    import hashlib
+    acct = str((account or {}).get("login") or (account or {}).get("username") or "")
+    return f"{provider}|{hashlib.sha256(str(token or '').encode()).hexdigest()[:16]}|{acct}"
+
+
 def namespace_paths(provider: str, token: str, account: Mapping[str, Any] | None = None) -> set[str]:
-    return {ref.path for ref in list_namespaces(provider, token, account) if ref.path}
+    key = _ns_cache_key(provider, token, account)
+    cached = _ns_cache().get(key)
+    if cached is not None:
+        return set(cached)
+    paths = {ref.path for ref in list_namespaces(provider, token, account) if ref.path}
+    _ns_cache().set(key, paths)
+    return paths
 
 
 def assert_owner_visible(provider: str, token: str, owner: str,
