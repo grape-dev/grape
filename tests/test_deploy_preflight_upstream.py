@@ -141,6 +141,19 @@ def test_no_config_is_skip_not_fail():
     assert "skip" in c.detail
 
 
+def test_ports_override_supports_legacy_8083():
+    """001 过渡口径：--ports/GRAPE_PROCESS_PORTS 覆盖 worker=8083 后应通过。"""
+    conf = """
+    upstream grape_worker { server 127.0.0.1:8083; }
+    server { location /api/runtime/ { proxy_pass http://grape_worker; } }
+    """
+    assert not dp.check_upstream_role(conf).ok
+    ports = dp.parse_ports("worker=8083")
+    c = dp.check_upstream_role(conf, ports=ports)
+    assert c.ok, c.detail
+    assert "8083" in c.detail
+
+
 def test_nginx_conf_and_nginx_dump_are_equivalent(tmp_path):
     """--nginx-conf 与 --nginx-dump 两路输入语义等价。"""
     db = _seed_db(tmp_path / "ok.db")
