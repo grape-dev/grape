@@ -534,6 +534,8 @@
     "save": "Save",
     "configured_keep": "configured (leave empty to keep)",
     "config_overridden": "This platform is defined by its config file; this change takes effect as an admin override: {fields}. Restore the file value to drop the override.",
+    "card_taken_over": "This platform card is now taken over by the admin console (stored in DB): later config-file changes no longer apply automatically.",
+    "card_taken_over_fields": "; fields changed this time: {fields}",
     "config_same": "This platform is defined by its config file; this submission matches the file, so no override was recorded.",
     "not_configured": "not configured",
     "loading": "Loading…",

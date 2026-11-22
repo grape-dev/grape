@@ -411,9 +411,12 @@ async function saveCard(p) {
     const ovs = ((r && r.overrides) || {})[p.provider] || {}
     if (action === 'promoted') {
       const fields = Object.keys(ovs)
-      const base = t('page.card_taken_over',
+      const base = t('page.card_taken_over', {},
         '该平台卡已由管理面接管（定义落表）：配置文件之后的改动不会再自动覆盖')
-      cardError.value = fields.length ? `${base}；本次改动字段：${fields.join(', ')}` : base
+      cardError.value = fields.length
+        ? base + t('page.card_taken_over_fields', { fields: fields.join(', ') },
+            '；本次改动字段：{fields}')
+        : base
     }
   } catch (e) {
     const d = e.detail || {}
