@@ -237,6 +237,40 @@ class TestCreate:
             assert not data["host_warning"]  # 托管成功时不应有提醒
             assert "托管成功" in data["message"]  # 成功消息应包含"托管成功"
 
+    def test_owner_space_creates_under_namespace(self):
+        """一键创建支持「所属空间」：owner 透传 create_repo，full_name 用空间路径。"""
+        with patch.object(templates_mod, "_find_template",
+                          return_value={"template": {"id": "hello-skill", "source": "local",
+                                                     "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
+                                        "scene_id": "skill-dev"}), \
+             patch.object(GitCodeProvider, "get_user_login", return_value="test_tmpl"), \
+             patch.object(GitCodeProvider, "create_repo",
+                          return_value={"full_name": "grp/sub/hello-skill"}) as cr, \
+             patch.object(templates_mod, "push_template_to_repo", return_value=True), \
+             patch("src.domains.mgmt.routes.repos._assert_owner_visible", new=lambda *a, **k: None), \
+             patch("src.domains.mgmt.routes.repos.host_repo", new=_fake_host), \
+             patch("src.domains.mgmt.routes.scenes.apply_scene", new=_fake_apply_scene):
+            r = client.post("/api/project-templates/create",
+                            json={"template_id": "hello-skill", "repo_name": "", "owner": "grp/sub"},
+                            headers=_headers)
+            assert r.status_code == 200, r.text
+            assert r.json()["full_name"] == "grp/sub/hello-skill"
+            assert cr.call_args.kwargs.get("owner") == "grp/sub", "owner 必须透传到 create_repo"
+
+    def test_invalid_owner_space_rejected_before_upstream(self):
+        """非法空间路径 → 400，且不触达上游建仓（校验前置）。"""
+        with patch.object(templates_mod, "_find_template",
+                          return_value={"template": {"id": "hello-skill", "source": "local",
+                                                     "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
+                                        "scene_id": "skill-dev"}), \
+             patch.object(GitCodeProvider, "create_repo") as cr:
+            for bad in ("../etc", "/lead", "trail/", "a//b"):
+                r = client.post("/api/project-templates/create",
+                                json={"template_id": "hello-skill", "repo_name": "", "owner": bad},
+                                headers=_headers)
+                assert r.status_code == 400, f"{bad} 应被拒绝，实际 {r.status_code}"
+            assert not cr.called, "非法空间必须在建仓前拦截"
+
     def test_host_failure(self):
         """仓库已创建但托管失败 → 200 + host_warning 提醒（非致命）"""
         with patch.object(templates_mod, "_find_template",
