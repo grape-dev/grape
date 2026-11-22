@@ -298,6 +298,9 @@ def list_namespaces(provider: str, token: str, account: Mapping[str, Any] | None
 # 都打 2 次上游（/user + 组织清单），/check-name 还会按候选名轮询 → 秒级时延。
 # 同一 (provider, token 身份) 的清单在 30s 内复用：陈旧窗口内新增组织不可见，
 # 用户重试/重开弹窗即可（与 mgmt/vcs/namespaces.py 的 create_targets 缓存同口径）。
+# 30s 来源（2026-11-23 实测）：一次清单 = platform_login(/user) + list_org_namespaces
+# 两次上游往返，自建 worker → gitlab.com 单次 0.7–1.7s，合计 2–4s；30s 是
+# 「用户重试一次必然过 TTL」的量级，同时把 /check-name 轮询成本压到一次上游。
 _NS_TTL_SECONDS = 30
 
 def _ns_cache():

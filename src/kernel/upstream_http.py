@@ -30,6 +30,8 @@ from src.kernel.config import log
 # 必须有 TTL：管理面改卡（ca_bundle / 方言）后若靠进程重启才生效，等于运维
 # 无法在线修 TLS/重定向策略（架构复审 P2-4）。60s 与卡本身的读取节奏同量级。
 _POLICY_TTL_SECONDS = int(os.environ.get("UPSTREAM_POLICY_TTL_SECONDS", "60"))
+# 默认 timeout 30s 的来源与 mgmt/vcs/base.py 同口径（2026-11-23 实测：上游
+# /user p50≈0.97s、上界 1.74s；30s ≈ 17 倍余量）。
 _POLICY_CACHE: "dict[str, tuple[float, str, bool]]" = {}
 
 
