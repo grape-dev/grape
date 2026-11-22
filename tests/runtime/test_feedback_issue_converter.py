@@ -286,3 +286,32 @@ class TestFeedbackClaimAndTitleDedup:
             assert (row[0] or "") == ""              # 占位已清，下一轮可重试
         finally:
             _cleanup(fid)
+
+
+class TestRepoKeyRouteUnpack:
+    """Issue #3731 根因 A：`parse_repo_key()` 是三元组契约，2 元解包必抛 ValueError。"""
+
+    def test_repo_target_three_tuple_unpack(self):
+        """带前缀 / 裸键 / 空键三态均解出 (provider, owner, repo)。"""
+        assert conv._repo_target("gitcode:o/r") == ("gitcode", "o", "r")
+        assert conv._repo_target("github:o/r") == ("github", "o", "r")
+        assert conv._repo_target("o/r") == ("gitcode", "o", "r")
+        assert conv._repo_target("") == ("gitcode", "", "")
+
+    def test_repo_bot_token_provider_from_three_tuple(self):
+        """仓库 token 解析用三元组的 provider 定位平台模块（旧实现 2 元解包直接崩）。"""
+        providers = []
+
+        class _Mod:
+            @staticmethod
+            def bot_token(repo_key):
+                return f"T:{repo_key}"
+
+        def _pm(provider):
+            providers.append(provider)
+            return _Mod
+
+        with mock.patch.object(conv, "_provider_module", side_effect=_pm):
+            assert conv._repo_bot_token("github:o/r") == "T:github:o/r"
+            assert conv._repo_bot_token("o/r") == "T:o/r"
+        assert providers == ["github", "gitcode"]
