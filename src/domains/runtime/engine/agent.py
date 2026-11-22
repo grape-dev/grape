@@ -2889,8 +2889,22 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             if _ref_key:
                 raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
                 if raw:
-                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
-                    skill_files = {}
+                    # 2026-11-22 修（远端 worker 实测）：本分支位于上方 `if skill_zip_b64:`
+                    # 物化块**之后**，旧写法只赋值 skill_zip_b64/skill_files={} 等于
+                    # “取到 zip 却从不落盘”——实测日志「服务端代拉成功」紧接
+                    # 「bound skill 'vod-cli' not materialized anywhere ... refused」。
+                    # 就地物化；成功才走“无文本文件”分支，失败保留原 files 触发降级链。
+                    from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
+                    _ok_ref, _inst_ref, _reason_ref = materialize_skill_zip_atomic(
+                        skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
+                    _target_ref = task.get("skill") or ""
+                    if _ok_ref and (not _target_ref or _target_ref in _inst_ref):
+                        skill_zip_b64 = _b64.b64encode(raw).decode()
+                        skill_files = {}
+                        log.info(f"[skill] __obs_key__ zip 物化成功: skills={_inst_ref}")
+                    else:
+                        log.warning(f"[skill] __obs_key__ zip 物化未命中目标技能: "
+                                    f"ok={_ok_ref} installed={_inst_ref} reason={_reason_ref[:120]}")
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
             # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
