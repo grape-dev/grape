@@ -3,8 +3,14 @@
 覆盖（seam = 用户可见行为，不测内部细节）：
 - 写入收口：`sync_task_session_token` 轮换后 `agent_tasks.env_extra` 原文为 enc:v1 信封（无 tk_ 明文）；
   加密失败 → 任务失败（返回空串）且**不写回明文**，计数 write_refused；
+  写入侧清单（QA #3770 审查 R2 收全）：enqueue / sync_task_session_token /
+  `_create_direct_task` / `_create_failed_task` 全走 enc:v1（direct/failed 触发后
+  验收口径 SQL = 0）；
 - 读侧自愈：明文行经 `get_task` 读出后列原文变信封；重复读不重复计数（幂等）；自愈失败才告警；
+  自愈写通道在单库拓扑下同持 `session_manager.db_lock`（审查 R1 锁错配）；
+  CAS 防旧快照覆盖并发新值；rowcount=0 计 heal_skipped 不计 healed（审查 Optional 口径）；
 - 节流：同一 (host, 行类型) 每进程每小时 ≤1 条 WARNING，文案指向 202611220003 且只含键名/行 id；
+  report 策略 / 无行 id 读点计 report_only，不与真失败（heal_failed）混计；
 - backfill：口径「非空且非 enc:v1:」（含前导空格脏值）；失败行保留原值不置 NULL 且不死循环；
 - 指标：`grape_env_extra_plaintext_rows_total{outcome=...}` 已注册并可增长。
 """
@@ -177,6 +183,54 @@ def test_encryption_failure_fails_task_without_plaintext_fallback(monkeypatch, o
     assert "write_refused" in outcomes
 
 
+def test_direct_and_failed_task_rows_keep_acceptance_sql_zero():
+    """验收证据（QA #3770 审查 R2）：触发 direct/failed 任务后，验收口径 SQL = 0
+    ——写入侧清单收全，任何入口不再产生「非空且非 enc:v1:」的行。"""
+    from src.api import event_pipeline as ep
+    evt = {"type": "issue_opened", "issue_id": "#3770",
+           "repository": "gitcode:owner/test-3770-envextra"}
+
+    ep._create_failed_task(REPO, 9102, "coding", "", "i3770skill", skill_path="",
+                           skill_id=1, evt=evt, issue_id="#3770", runtime_id=0)
+    tid = ep._create_direct_task(REPO, 9103, "coding", "", "i3770skill", skill_path="",
+                                 engine_id=0, evt=evt, skip_event_config=True)
+    assert tid, "direct 任务行必须创建成功"
+
+    with db_lock:
+        c = db.cursor()
+        failed_raw = c.execute(
+            "SELECT env_extra FROM agent_tasks WHERE repo_key=? AND event_seq=9102",
+            (REPO,)).fetchone()[0]
+    assert failed_raw == "" or failed_raw.startswith(ENVELOPE_PREFIX), \
+        "failed 快照行不得落明文"
+    # 验收 SQL（spec Acceptance）：repo 范围内「非空且非 enc:v1:」行数必须为 0
+    with db_lock:
+        n = db.cursor().execute(
+            "SELECT COUNT(*) FROM agent_tasks WHERE repo_key=? "
+            "AND env_extra IS NOT NULL AND env_extra<>'' "
+            "AND env_extra NOT LIKE 'enc:v1:%'", (REPO,)).fetchone()[0]
+    assert n == 0, "direct/failed 快照行不得再产生明文 env_extra（写入侧不复发）"
+
+
+def test_direct_task_encrypt_failure_falls_back_to_empty_not_plaintext(
+        monkeypatch, outcomes):
+    """写入侧 fail-closed：direct 任务 env_extra 加密失败 → 落空串 + 计数
+    write_refused，任务行仍创建、绝不回落明文。"""
+    from src.api import event_pipeline as ep
+
+    def _boom(_env):
+        raise RuntimeError("kms down")
+
+    monkeypatch.setattr(service, "_encrypt_env_extra_for_write", _boom)
+
+    tid = ep._create_direct_task(REPO, 9104, "coding", "", "i3770skill", skill_path="",
+                                 engine_id=0, evt={"issue_id": "#3770"},
+                                 skip_event_config=True)
+    assert tid, "加密失败不应吞掉任务行（direct 行本无 env 数据，回退空串即可）"
+    assert _raw_env_extra(tid) == "", "加密失败不得回落明文（空串不在明文口径内）"
+    assert "write_refused" in outcomes
+
+
 # ---------- 读侧自愈 ----------
 
 def test_plaintext_row_healed_in_place_on_read(outcomes):
@@ -201,6 +255,69 @@ def test_heal_update_is_guarded_and_idempotent():
     assert heal_env_extra_plaintext_row(tid, sealed) is True
     assert _raw_env_extra(tid) == sealed
     assert heal_env_extra_plaintext_row(tid, sealed) is False, "已加密行不得被二次覆盖"
+
+
+def test_heal_cas_does_not_overwrite_concurrent_new_plaintext():
+    """QA #3770 审查 Optional：读后行被并发换成新明文（如 token 刚轮换）时，
+    自愈不得拿旧快照覆盖新值。"""
+    tid = _insert_plaintext_row(json.dumps({"A": "old"}))
+    raw_read = _raw_env_extra(tid)
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE agent_tasks SET env_extra=? WHERE id=?",
+            (json.dumps({"A": "new", "GRAPE_SESSION_TOKEN": "tk_new3770"}), tid))
+        db.commit()
+
+    changed = heal_env_extra_plaintext_row(
+        tid, encrypt_env_extra({"A": "old"}), expected_raw=raw_read)
+
+    assert changed is False, "CAS 未命中必须放弃覆盖（返回 False）"
+    assert "tk_new3770" in (_raw_env_extra(tid) or ""), "并发新值不得被旧快照覆盖"
+
+
+def test_heal_holds_session_db_lock_in_single_db_topology(monkeypatch):
+    """QA #3770 审查 R1（锁错配）：单库/同域拓扑下 heal 的写通道连接就是
+    session_manager.db（autocommit=False 共享连接），必须同持 session_manager.db_lock
+    ——否则 heal 的 commit 可能提交其它线程未完成的事务。"""
+    from src.kernel import db_registry
+    assert not db_registry.uses_own_dsn("runtime"), "本用例前提：单库拓扑（无 runtime 自有 DSN）"
+
+    import src.kernel.session_manager as sm
+    inner = sm.db_lock
+
+    class _RecordingLock:
+        def __init__(self):
+            self.enters = 0
+
+        def __enter__(self):
+            self.enters += 1
+            return inner.__enter__()
+
+        def __exit__(self, *a):
+            return inner.__exit__(*a)
+
+    rec = _RecordingLock()
+    monkeypatch.setattr(sm, "db_lock", rec)
+
+    tid = _insert_plaintext_row(json.dumps({"A": "1"}))
+    changed = heal_env_extra_plaintext_row(tid, encrypt_env_extra({"A": "1"}))
+
+    assert changed is True
+    assert rec.enters == 1, "heal 写通道必须进入 session_manager.db_lock（锁与连接同源）"
+    raw = _raw_env_extra(tid)
+    assert raw and raw.startswith(ENVELOPE_PREFIX)
+
+
+def test_heal_skipped_when_row_already_converged(monkeypatch, outcomes):
+    """QA #3770 审查 Optional：rowcount=0（行已被并发加密/删除/覆盖）计 heal_skipped，
+    不计 healed——healed 只计真正改写的行。"""
+    tid = _insert_plaintext_row(json.dumps({"A": "1"}))
+    monkeypatch.setattr(sec, "heal_env_extra_plaintext_row", lambda *a, **k: False)
+
+    env = decrypt_env_extra(json.dumps({"A": "1"}), task_id=tid)
+
+    assert env == {"A": "1"}, "未改行不影响本次读出"
+    assert outcomes == ["heal_skipped"], "rowcount=0 不计 healed 也不告警"
 
 
 def test_empty_object_plaintext_row_is_healed(outcomes):
@@ -241,7 +358,10 @@ def test_alert_throttled_per_host_and_row_kind(monkeypatch, outcomes):
         decrypt_env_extra(json.dumps({"K%d" % i: "v"}), plaintext_policy="report")
 
     assert len(logs.warnings) == 1, "同一 (host, 行类型) 每小时只允许 1 条 WARNING"
-    assert outcomes.count("heal_failed") == 5, "超限只计数，不丢数"
+    # QA #3770 审查 Optional：report 策略（按设计不自愈）计 report_only，
+    # 不与自愈真失败（heal_failed）混计——监控可区分「不自愈」与「失败」。
+    assert outcomes.count("report_only") == 5, "超限只计数，不丢数"
+    assert outcomes.count("heal_failed") == 0, "report 策略不得计入 heal_failed"
 
     # 换一台主机 → 各自可观测
     monkeypatch.setenv("GRAPE_HOSTNAME", "ecs-grape-master-002")
@@ -348,7 +468,8 @@ def test_plaintext_rows_counter_registered_and_increments():
 
     assert obs.ENV_EXTRA_PLAINTEXT_ROWS_METRIC == "grape_env_extra_plaintext_rows_total"
     assert set(obs.ENV_EXTRA_PLAINTEXT_OUTCOMES) == {
-        "healed", "heal_failed", "unparseable", "write_refused"}
+        "healed", "heal_skipped", "report_only",
+        "heal_failed", "unparseable", "write_refused"}
 
     before = obs.registry.get_sample_value(
         "grape_env_extra_plaintext_rows_total", {"outcome": "unparseable"}) or 0

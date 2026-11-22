@@ -509,6 +509,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends nginx
           nginx -v
           python -m pytest tests/contracts/test_issue_3847_gateway_graceful.py -v
+
       - name: Branch guard runtime resolution tests (issue #3579)
         # Issue #3579 QA 复审（工作流审查·变更验证 Required）：pre-push 守卫钩子的
         # 运行时解释器/模块解析用例此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245
@@ -593,3 +594,10 @@ jobs:
           python -m pytest tests/runtime/test_issue_3794_guard_purge.py \
             tests/api/test_issue_3794_event_seq_status_index.py \
             tests/api/test_migration_track_guard.py -v
+      - name: Env_extra plaintext heal + write-side regression tests (issue #3770)
+        # Issue #3770 QA 审查修复（Required）：新增用例 test_issue_3770_env_extra_plaintext.py
+        # 此前未接入 linux-backend 门禁（先例 #1790/#3699/#3758 均要求同 PR 补 step），
+        # 明文行自愈/写入侧收口/迁移失败保留策略回退只能靠人工 pytest，CI 绿≠用例执行。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_3770_env_extra_plaintext.py -v
