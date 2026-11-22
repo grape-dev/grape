@@ -43,7 +43,7 @@ outbox 消费者：_deliver 返回 reason=channel_paused → release_sending（�
 | 条件 | 判定 | 覆盖场景 |
 |------|------|----------|
 | 单实例连续 ≥2 次 | 距上次暂停 ≤ `PAUSE_REPEAT_WINDOW_SECONDS=7200` 内再次暂停 | 小时级「暂停→恢复→再暂停」循环 |
-| 全实例 1h 均暂停 | `PAUSE_ALERT_WINDOW=3600` 内 paused 数 == 已知微信安装数（≥2） | 本次 11 实例同时被风控的事故形态 |
+| 全实例 1h 均暂停 | `PAUSE_ALERT_WINDOW_SECONDS=3600` 内 paused 数 == 已知微信安装数（≥2） | 本次 11 实例同时被风控的事故形态 |
 | 首次单实例暂停 | 只记事件（WARNING + 健康表 + 管理台），`alert_state=pending` | 抑制单次抖动 |
 
 告警可检索：ERROR 日志 `[im-channel-health] alert=wechat_channel_unavailable inst=... type=wechat instance=... reason=...`
