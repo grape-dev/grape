@@ -31,11 +31,22 @@ def _write_scene(scenes_dir: str, name: str, category: str) -> None:
         json.dump({"name": name, "category": category}, f, ensure_ascii=False)
 
 
-def test_missing_scenes_dir_degrades_to_exit_zero(tmp_path, capsys):
+def test_missing_scenes_dir_warns_on_stderr(tmp_path, capsys):
+    """缺 scenes/ → 输出 WARNING（不静默通过），仍以 0 退出（本仓基线无该目录）。"""
     rc = gate.main(["--dir", str(tmp_path / "nope")])
-    out = capsys.readouterr().out
+    cap = capsys.readouterr()
     assert rc == 0
-    assert "skip" in out.lower() or "not found" in out.lower()
+    assert "WARNING" in cap.err
+    assert "not found" in cap.err.lower()
+
+
+def test_missing_scenes_dir_allow_missing_is_explicit(tmp_path, capsys):
+    """显式 --allow-missing：缺目录时降级为 INFO（CI/本地已在别处校验时使用）。"""
+    rc = gate.main(["--dir", str(tmp_path / "nope"), "--allow-missing"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "WARNING" not in cap.err
+    assert "--allow-missing" in cap.out
 
 
 def test_unknown_slug_fails_nonzero_with_detail(tmp_path, capsys):

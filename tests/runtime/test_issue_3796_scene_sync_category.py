@@ -317,3 +317,27 @@ def test_scene_sync_upsert_idempotency_key_tracks_category_target():
     assert k2 == scene_sync._scene_upsert_key(
         "scene-a", {"content_hash": "h1", "cat_l1_id": 1001, "cat_l2_id": 100109})
     assert "scene-a" in k1 and "h1" in k1
+
+
+# ===== category_id 路径逐段解析（PR #1982 审查 Optional）=====
+
+def test_resolve_scene_category_id_splits_path_form():
+    """category 用 path 形态（l1/l2）时 scene_category 逐段解析，不再整串恒未命中。"""
+    with patch.dict(scene_sync._cat_cache, {"it-rd-ai-app": 12}, clear=True):
+        assert scene_sync._resolve_scene_category_id({"category": "it-rd/it-rd-ai-app"}, {}, "s") == 12
+    # 段上走 legacy 别名（与 category_dict 路径同口径）
+    with patch.dict(scene_sync._cat_cache, {"it-rd-grape-platform": 15}, clear=True):
+        assert scene_sync._resolve_scene_category_id({"category": "it-rd/skill-dev"}, {}, "s") == 15
+    # 直查优先：同名自定义 id 不被别名抢占
+    with patch.dict(scene_sync._cat_cache, {"general": 3, "other-misc": 7}, clear=True):
+        assert scene_sync._resolve_scene_category_id({"category": "general"}, {}, "s") == 3
+
+
+def test_resolve_scene_category_id_default_and_miss_sink():
+    """无 category 时按 general 兜底；整串无段命中 → 0 + 记 sink（键为整串，聚合口径一致）。"""
+    with patch.dict(scene_sync._cat_cache, {"other-misc": 7}, clear=True):
+        assert scene_sync._resolve_scene_category_id({}, {}, "s") == 7
+    sink: dict = {}
+    with patch.dict(scene_sync._cat_cache, {"other-misc": 7}, clear=True):
+        assert scene_sync._resolve_scene_category_id({"category": "x/y"}, sink, "s") == 0
+    assert sink == {"x/y": {"count": 1, "scenes": ["s"]}}

@@ -72,3 +72,41 @@ def test_alias_resolved_slugs_pass(tmp_path, caplog):
         _startup_category_slug_check(scenes)
     assert any("validated OK" in r.getMessage() for r in _records(caplog, logging.INFO))
     assert not _records(caplog, logging.WARNING)
+
+
+def test_startup_uses_runtime_dict_snapshot(tmp_path, caplog, monkeypatch):
+    """启动校验优先用运行时字典口径（DB active map），与同步解析一致。"""
+    from unittest.mock import patch
+
+    from src.kernel.category import category_seed_dict_map
+
+    monkeypatch.delenv("CATEGORY_SLUG_STRICT", raising=False)
+    scenes = str(tmp_path / "scenes")
+    os.makedirs(scenes)
+    _write_scene(scenes, "ok-scene", "it-rd")
+    _write_scene(scenes, "alias-scene", "general")
+    # 快照缺 other-misc（模拟线上停用该行）→ general 的别名目标在运行时也解析不到
+    snapshot = {k: v for k, v in category_seed_dict_map().items() if k != "other-misc"}
+    with patch("src.domains.mgmt.public.category_dict_active_map", return_value=snapshot):
+        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+            _startup_category_slug_check(scenes)
+    warns = _records(caplog, logging.WARNING)
+    assert len(warns) == 1
+    assert "alias-scene" in warns[0].getMessage()
+    assert "general" in warns[0].getMessage()
+
+
+def test_startup_falls_back_to_seed_when_dict_unavailable(tmp_path, caplog, monkeypatch):
+    """字典快照取不到（DB 未就绪/异常）→ 回落种子口径，不因口径问题阻断启动。"""
+    from unittest.mock import patch
+
+    monkeypatch.delenv("CATEGORY_SLUG_STRICT", raising=False)
+    scenes = str(tmp_path / "scenes")
+    os.makedirs(scenes)
+    _write_scene(scenes, "alias-scene", "general")
+    with patch("src.domains.mgmt.public.category_dict_active_map",
+               side_effect=RuntimeError("no db")):
+        with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+            _startup_category_slug_check(scenes)
+    assert any("validated OK" in r.getMessage() for r in _records(caplog, logging.INFO))
+    assert not _records(caplog, logging.WARNING)

@@ -262,3 +262,38 @@ def test_validate_local_scenes_flags_unknown_and_passes_alias(tmp_path):
 
 def test_validate_local_scenes_missing_dir_returns_empty(tmp_path):
     assert validate_local_scenes_categories(str(tmp_path / "nope")) == {}
+
+
+# ===== 别名链单一真源（PR #1982 审查 Nit）：校验与解析共用同一解析函数 =====
+
+def test_alias_target_follows_multi_hop_chain(monkeypatch):
+    """多级别名链由同一纯函数解析：校验不会因为「二级别名」误报未知 slug。"""
+    from src.kernel.category import alias_target
+
+    monkeypatch.setitem(LEGACY_CATEGORY_ALIASES, "ai-legacy", "ai")
+    assert alias_target("ai-legacy") == "it-rd-ai-app"
+    assert alias_target("ai") == "it-rd-ai-app"
+    assert alias_target("it-rd") == "it-rd"
+    assert alias_target("") == ""
+    # lookup 走同一链
+    assert lookup_slug(category_seed_dict_map(), "ai-legacy") == (1001, 100102)
+
+
+def test_validate_category_slugs_uses_alias_chain(monkeypatch):
+    """校验与 lookup_slug 同口径：二级别名解析到的 slug 不得被判为未知。"""
+    monkeypatch.setitem(LEGACY_CATEGORY_ALIASES, "ai-legacy", "ai")
+    assert validate_category_slugs(["ai-legacy", "skill-dev"], category_seed_dict_map()) == []
+    assert validate_category_slugs(["ai-legacy", "no-such"], category_seed_dict_map()) == ["no-such"]
+
+
+def test_validate_local_scenes_accepts_explicit_dict_snapshot(tmp_path):
+    """启动/CI 可传入导出的字典快照（DB active 口径），缺省回落种子口径。"""
+    scenes = str(tmp_path / "scenes")
+    os.makedirs(scenes)
+    _write_scene(scenes, "scene-a", "it-rd")
+    _write_scene(scenes, "scene-b", "general")
+    # 快照里没有 other-misc（模拟线上 DB 停用该行）→ general 的别名目标未命中
+    snapshot = {k: v for k, v in category_seed_dict_map().items() if k != "other-misc"}
+    assert validate_local_scenes_categories(scenes, dict_map=snapshot) == {"scene-b": ["general"]}
+    # 缺省仍按种子口径（含 other-misc）→ 通过
+    assert validate_local_scenes_categories(scenes) == {}
