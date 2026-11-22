@@ -408,3 +408,15 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_vcs_api_client_log_redaction.py -v
+      - name: Release guard domain routing regression tests (issue #3811)
+        # Issue #3811 QA 审查修复（Required）：新增用例
+        # tests/runtime/test_issue_3811_release_guard_domain_routing.py 此前未接入
+        # linux-backend 门禁（先例 #1613/#1982/#2133/#2245/#3167/#3490/#3699/#3758
+        # 均由 QA 要求补齐）。三库拓扑下 release guard 若再次退化为裸 SQL 读 mgmt
+        # 库（1146 / 守卫 fail-open），CI 仍会绿而回归只能靠人工，故与既有 #2225
+        # release guard 用例一并纳入门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3811_release_guard_domain_routing.py \
+            tests/runtime/test_issue_2225_release_guard.py -v
