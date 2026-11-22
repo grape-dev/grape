@@ -570,6 +570,31 @@ CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
 )
 """
 
+_CHANNEL_HEALTH_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_health (
+    installation_id     VARCHAR(191) PRIMARY KEY,
+    channel_type        VARCHAR(32) NOT NULL DEFAULT '',
+    instance_id         VARCHAR(128) NOT NULL DEFAULT '',
+    paused              INTEGER NOT NULL DEFAULT 0,
+    last_pause_at       DOUBLE NOT NULL DEFAULT 0,
+    next_retry_at       DOUBLE NOT NULL DEFAULT 0,
+    pause_count         INTEGER NOT NULL DEFAULT 0,
+    consecutive_pauses  INTEGER NOT NULL DEFAULT 0,
+    last_pause_reason   VARCHAR(200) NOT NULL DEFAULT '',
+    last_resume_at      DOUBLE NOT NULL DEFAULT 0,
+    alert_state         VARCHAR(16) NOT NULL DEFAULT '',
+    alerted_at          DOUBLE NOT NULL DEFAULT 0,
+    alert_reason        VARCHAR(200) NOT NULL DEFAULT '',
+    degraded_count      INTEGER NOT NULL DEFAULT 0,
+    last_degraded_at    DOUBLE NOT NULL DEFAULT 0,
+    last_degraded_to    VARCHAR(32) NOT NULL DEFAULT '',
+    last_degraded_ok    INTEGER NOT NULL DEFAULT 0,
+    last_recover_action VARCHAR(32) NOT NULL DEFAULT '',
+    last_recover_at     DOUBLE NOT NULL DEFAULT 0,
+    updated_at          DOUBLE NOT NULL DEFAULT 0
+)
+"""
+
 _TAKEOVER_SESSIONS_DDL = """
 CREATE TABLE IF NOT EXISTS takeover_sessions (
     id                VARCHAR(64) PRIMARY KEY,

@@ -59,6 +59,7 @@
     "grape_accounts": "mgmt",
     "grape_im_instance": "runtime",
     "grape_t_channel_chat_session_binding": "mgmt",
+    "grape_t_channel_health": "runtime",
     "grape_t_channel_inbound_dedup": "mgmt",
     "grape_t_channel_inbound_message": "mgmt",
     "grape_t_channel_installation": "mgmt",

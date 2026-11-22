@@ -103,7 +103,9 @@ def test_engine_metric_field_set_is_canonical():
     """
     snap = EngineMetrics().snapshot()
     required = LEGACY_METRIC_KEYS | {"total_messages_degraded", "degraded_by_reason",
-                                     "reconnects"}
+                                     "reconnects",
+                                     # Issue #3799：渠道风控暂停（ret=-14）实例维度 + 告警计数
+                                     "channel_paused_by_instance", "channel_paused_alerts"}
     assert required <= set(snap)
     assert set(snap) == required
 

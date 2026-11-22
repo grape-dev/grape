@@ -81,6 +81,8 @@ from src.domains.runtime.schema_ddl import (
     _CHAT_MESSAGES_DDL,
     _GLOBAL_IM_BOT_CONFIG_DDL,
     _IM_INSTANCE_DDL,
+    # Issue #3799：渠道健康状态表（runtime 域，ret=-14 暂停可观测）
+    _CHANNEL_HEALTH_DDL,
     _VOD_CONVERSATIONS_DDL,
     _ISSUE_DDL,
     _AGENT_TASKS_DDL,
@@ -406,6 +408,9 @@ _NEW_TABLES = [
     ("grape_t_skill_file", _SKILL_FILE_DDL),
     ("grape_t_skill_comment", _SKILL_COMMENT_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
+    # Issue #3799：渠道健康状态（ret=-14 风控暂停）——runtime 域状态表，
+    # 管理台/告警与渠道写侧共用同一真源（进程重启后仍可见）。
+    ("grape_t_channel_health", _CHANNEL_HEALTH_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),

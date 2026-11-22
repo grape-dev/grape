@@ -271,6 +271,10 @@ def run_startup_migration(db_path: str) -> dict:
         # 渠道族 7 表全归 mgmt：仅 owner 域进程执行，别域跳过（见文件头说明）。
         if not _own_tbl.should_skip("grape_t_channel_installation"):
             migrations.ensure_channel_tables(conn)
+        # Issue #3799：渠道健康状态表归 runtime（别域只读，不建表）。
+        if not _own_tbl.should_skip("grape_t_channel_health"):
+            from src.domains.runtime.schema_ddl import _CHANNEL_HEALTH_DDL
+            conn.execute(_CHANNEL_HEALTH_DDL)
         try:
             mig004 = _load_migration_004()
             if mig004 is not None:
@@ -1045,6 +1049,25 @@ class ImEngine:
         self._bindings = SqliteBindingStore(db_path)
         # Issue #870：legacy 对齐健康计数器（received/sent/failed/reconnects/flap）
         self._metrics = EngineMetrics()
+        # Issue #3799：渠道健康状态机（ret=-14 风控暂停 → 状态/告警/降级共用同一真源）。
+        # store 懒取 IM 域库连接（与 outbox/租约同源），渠道侧暂停/恢复时写入，
+        # 管理台经 runtime public 读取。
+        from src.domains.runtime.im.channel_health import ChannelHealthStore, ChannelHealthTracker
+        self.health_tracker = ChannelHealthTracker(
+            store=ChannelHealthStore(),
+            metrics=self._metrics,
+            instance_id=self.instance_id,
+            installations_provider=self._channel_installations,
+        )
+
+    def _channel_installations(self) -> list:
+        """安装全集（判「全实例均暂停」用；读失败 → 空列表，退化为单实例阈值）。"""
+        try:
+            from src.domains.runtime.im.engine.installations import _list_installations_with_factory
+            return _list_installations_with_factory(lambda: _connect(self.db_path))
+        except Exception as e:
+            log.warning("[im-engine] health installations snapshot failed: %s", e)
+            return []
 
     # ---------------- 生命周期
 
@@ -1468,6 +1491,7 @@ class ImEngine:
             return WechatChannel(
                 cfg_, sender, client=client, route_registry=route_registry,
                 users=users, metrics=engine._metrics,
+                health=engine.health_tracker,        # Issue #3799：暂停状态机/告警
                 cursor_loader=_wechat_cursor_loader(db_path, app_id),
                 cursor_persist=_wechat_cursor_persist(db_path, app_id),
             )

@@ -45,6 +45,11 @@ class EngineMetrics:
         default_factory=lambda: {cause: 0 for cause in FLAP_CAUSES})
     degraded_by_reason: dict = field(
         default_factory=lambda: {reason: 0 for reason in DEGRADED_REASONS})
+    # Issue #3799：渠道风控暂停（ret=-14）按安装维度的暂停次数与告警次数。
+    # `session_paused_risk` 的实例维度展开——看板/告警按 instance 分桶，避免
+    # 「同一时刻只有总数、看不出是哪台/哪个渠道被风控」。
+    channel_paused_by_instance: dict = field(default_factory=dict)
+    channel_paused_alerts: int = 0
 
     def record_received(self) -> None:
         self.messages_received += 1
@@ -76,6 +81,20 @@ class EngineMetrics:
     def _bump(self, cause: str) -> None:
         self.flap_by_cause[cause] = self.flap_by_cause.get(cause, 0) + 1
 
+    def record_channel_paused(self, installation_id: str = "") -> None:
+        """Issue #3799：渠道被风控暂停一次 → 按安装维度 +1（`session_paused_risk`）。
+
+        注意：`degraded_by_reason["session_paused_risk"]` 由渠道侧
+        (`channel._record_degraded`) 记一次，这里不重复累加，避免同一暂停双计。
+        """
+        key = str(installation_id or "unknown")
+        self.channel_paused_by_instance[key] = \
+            self.channel_paused_by_instance.get(key, 0) + 1
+
+    def record_channel_alert(self, rule: str = "") -> None:
+        """Issue #3799：渠道不可用告警触发一次（按规则名汇总，当前只有一条规则）。"""
+        self.channel_paused_alerts += 1
+
     def snapshot(self) -> dict:
         """legacy 对齐键集合；缺失语义 = 0（不省略键）。"""
         return {
@@ -87,6 +106,9 @@ class EngineMetrics:
             "total_reconnects": self.reconnects,   # legacy 同名键（双发兼容）
             "flap_by_cause": dict(self.flap_by_cause),
             "degraded_by_reason": dict(self.degraded_by_reason),   # Issue #1095
+            # Issue #3799：渠道风控暂停（ret=-14）实例维度 + 告警计数
+            "channel_paused_by_instance": dict(self.channel_paused_by_instance),
+            "channel_paused_alerts": self.channel_paused_alerts,
         }
 
 

@@ -161,7 +161,9 @@ def test_record_resume_clears_pause_and_resolves_alert(health_db):
     assert state is not None
     assert state["paused"] is False
     assert state["alert_state"] == "resolved"
-    assert state["consecutive_pauses"] == 0
+    # consecutive_pauses = repeat 窗口（2h）内暂停次数，恢复不清零（否则小时级循环永不告警），
+    # 只有窗口外的长健康期才归零。
+    assert state["consecutive_pauses"] >= 1
     assert state["last_resume_at"]
     assert tracker.is_paused("inst-1") is False
     # 未暂停时再报恢复 → 不写库、不刷日志
@@ -193,6 +195,26 @@ def test_clear_pause_keeps_connection_but_resets_state(health_db):
     assert state["paused"] is False
     assert state["last_recover_action"] == "clear_pause"
     assert state["alert_state"] == "resolved"
+
+
+def test_alert_emits_searchable_error_log(health_db, caplog):
+    """告警必须可检索：ERROR 行带 alert=<rule>（Loki/日志告警共用同一判据）。"""
+    from src.domains.runtime.im.channel_health import ALERT_RULE, ChannelHealthTracker
+
+    clock = FakeClock()
+    tracker = ChannelHealthTracker(store=_store(health_db), instance_id="host-1",
+                                   clock=clock)
+    with caplog.at_level("INFO"):
+        tracker.record_pause("inst-1", "wechat", reason="ret=-14")
+        clock.advance(3600)
+        tracker.record_pause("inst-1", "wechat", reason="ret=-14")
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "第二次暂停未升级为 ERROR 告警"
+    assert any(f"alert={ALERT_RULE}" in r.getMessage() for r in errors)
+    assert any("wechat_channel_unavailable" in r.getMessage() for r in errors)
+    # 首次暂停只是事件（WARNING），不冒充告警
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("alert=pending" in r.getMessage() for r in warnings)
 
 
 # ---------------------------------------------------------------- 2. 日志聚合
@@ -271,9 +293,9 @@ def test_channel_pause_records_health_and_resume_clears_it(health_db):
     from src.domains.runtime.im.channel_health import ChannelHealthTracker
 
     clock = FakeClock()
-    tracker = ChannelHealthTracker(store=_store(health_db), instance_id="host-1",
-                                   clock=clock)
     metrics = FakeMetrics()
+    tracker = ChannelHealthTracker(store=_store(health_db), instance_id="host-1",
+                                   clock=clock, metrics=metrics)
 
     class Fetcher:
         def __init__(self):
@@ -291,12 +313,13 @@ def test_channel_pause_records_health_and_resume_clears_it(health_db):
     ch = WechatChannel(_cfg(), sender, update_fetcher=Fetcher(), metrics=metrics,
                        health=tracker, pause_seconds=0.01)
 
-    with pytest.raises(ChannelError):
-        asyncio.run(ch.connect(CancelContext()))
+    asyncio.run(ch.connect(CancelContext()))     # 暂停后自然结束连接（不抛 ChannelError）
 
     assert ch.session_paused == 1
     assert "session_paused_risk" in metrics.reasons
     assert metrics.channel_paused                        # per-instance 计数
+    assert tracker.is_paused(ch.health_key) is True
+    assert sender.stopped >= 1
 
 
 def test_channel_pause_then_successful_poll_resumes(health_db):
@@ -607,6 +630,20 @@ def test_im_installations_include_health_fields(outbox_db, monkeypatch):
     assert row["health"]["consecutive_pauses"] == 1
     assert row["paused"] is True
     assert row["last_pause_at"] and row["next_retry_at"]
+
+
+def test_im_channel_health_endpoint(outbox_db, monkeypatch):
+    from src.domains.mgmt.routes import im as im_routes
+    from src.domains.runtime.im import channel_health
+
+    tracker = channel_health.ChannelHealthTracker(store=channel_health.default_store(),
+                                                  instance_id="host-1", clock=FakeClock())
+    tracker.record_pause("inst-wx", "wechat", reason="ret=-14")
+    tracker.record_pause("inst-wx", "wechat", reason="ret=-14")
+
+    data = im_routes.im_channel_health(user={"id": "1234"})
+    assert data["total"] == 1 and data["paused"] == 1 and data["firing"] == 1
+    assert data["channels"][0]["installation_id"] == "inst-wx"
 
 
 def test_im_installation_recover_endpoint(outbox_db, monkeypatch):
