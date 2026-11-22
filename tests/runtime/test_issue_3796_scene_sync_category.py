@@ -210,3 +210,110 @@ def test_sync_round_direct_cat_cache_hit_wins_over_alias(caplog):
         _run_sync_round(zip_bytes, {"general": 3, "other-misc": 7}, captured)
     assert captured[0][1]["category_id"] == 3
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+# ===== 存量场景分类回填（PR #1982 审查 Required）：不 mock 持久化层 =====
+
+def _write_scene_dir(root: str, name: str, category: str) -> str:
+    d = os.path.join(root, "scenes", name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "scene.json"), "w", encoding="utf-8") as f:
+        json.dump({"name": name, "version": "1.0.0", "category": category, "nodes": _NODES},
+                  f, ensure_ascii=False)
+    return d
+
+
+def _scene_row(sid: int):
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT version, description, cat_l1_id, cat_l2_id, category_id, content_hash "
+                  "FROM scene_market WHERE id=?", (sid,))
+        return c.fetchone()
+
+
+def test_scene_sync_backfills_stale_category_without_content_change(tmp_path):
+    """存量旧 slug 场景（scene.json 未改 → hash 相同）同步一轮后分类落 1xxx。
+
+    持久化层（`_persist_scene_row` → mgmt public upsert）保持真实，只隔离下载与
+    运维副作用；第二轮分类已一致 → 幂等层不得再写（"仅执行一次"）。
+    """
+    import uuid
+
+    from src.domains.mgmt import public as mgmt_public
+    from src.kernel.session_manager import db, db_lock
+
+    name = "issue3796-stale-" + uuid.uuid4().hex[:6]
+    scene_dir = _write_scene_dir(str(tmp_path), name, "skill-dev")
+    content_hash = scene_sync._compute_scene_hash(scene_dir)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO scene_market (name, display_name, version, description, source, scope, "
+            "cat_l1_id, cat_l2_id, category_id, content_hash, is_active) "
+            "VALUES (?,?, '0.8.0', 'old', 'official', 'official', 1002, 100201, 9, ?, 1)",
+            (name, name, content_hash))
+        db.commit()
+        sid = c.lastrowid
+
+    seen_actions: list[str] = []
+    _orig_upsert = mgmt_public.upsert_scene_content_any
+
+    def _spy_upsert(scene_name, fields, source="official"):
+        res = _orig_upsert(scene_name, fields, source)
+        seen_actions.append(str(res.get("action") or ""))
+        return res
+
+    async def _run_round():
+        with patch("src.domains.mgmt.public.upsert_scene_content_any", side_effect=_spy_upsert):
+            with patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"):
+                with patch("src.domains.runtime.storage.scene_sync._refresh_category_dict_cache"):
+                    with patch.dict(scene_sync._cat_cache, {}, clear=True):
+                        with patch.dict(scene_sync._category_dict_cache, _seed_map(), clear=True):
+                            with patch("src.domains.runtime.storage.scene_sync._check_skills_exist",
+                                       return_value=[]):
+                                with patch("src.domains.runtime.storage.scene_sync._apply_scene_icon"):
+                                    with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                        with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
+                                            with patch("src.domains.runtime.storage.scene_sync._detect_stale_official_scenes",
+                                                       return_value=0):
+                                                await scene_sync.sync_official_scenes(repo_root=str(tmp_path))
+
+    try:
+        _run_async(_run_round())
+        row = _scene_row(sid)
+        assert row[2:4] == (1001, 100109), f"category not backfilled: {row}"
+        # 内容列未改（hash 未变 → 只回填分类列，version/description 保持库内值）
+        assert row[0:2] == ("0.8.0", "old"), f"content columns must stay untouched: {row}"
+        assert row[5] == content_hash
+        # 未命中路径的 category_id=0 不得覆盖库内旧值
+        assert row[4] == 9
+        assert seen_actions[-1] == "backfilled"
+
+        _run_async(_run_round())
+        assert seen_actions[-1] == "skipped", f"second round must be idempotent: {seen_actions}"
+        assert _scene_row(sid)[2:5] == (1001, 100109, 9)
+    finally:
+        with db_lock:
+            db.execute("DELETE FROM scene_market WHERE id=?", (sid,))
+            db.commit()
+
+
+def test_scene_sync_upsert_idempotency_key_tracks_category_target():
+    """三库拓扑幂等键须含分类目标：分类目标变化要能重新提交一次（不被永久去重）。
+
+    线上存量场景内容 hash 长期不变，若键只含 hash，跨域写在首次 applied 后每轮
+    duplicate → 分类回填永远不执行（PR #1982 审查 Required 的线上路径）。
+    """
+    base = {"content_hash": "h1", "category_id": 0}
+    k1 = scene_sync._scene_upsert_key("scene-a", {**base, "cat_l1_id": 1002, "cat_l2_id": 100201})
+    k2 = scene_sync._scene_upsert_key("scene-a", {**base, "cat_l1_id": 1001, "cat_l2_id": 100109})
+    k3 = scene_sync._scene_upsert_key("scene-a", {**base, "cat_l1_id": 1001, "cat_l2_id": 100109,
+                                                  "category_id": 5})
+    assert k1 != k2, "分类目标变化必须换键，否则跨域写永久去重、回填不执行"
+    assert k2 != k3
+    # 同内容同分类目标 → 键一致（保持「已 applied 的相同意图不重复写」的低日志量语义）
+    assert k2 == scene_sync._scene_upsert_key(
+        "scene-a", {"content_hash": "h1", "cat_l1_id": 1001, "cat_l2_id": 100109})
+    assert "scene-a" in k1 and "h1" in k1
