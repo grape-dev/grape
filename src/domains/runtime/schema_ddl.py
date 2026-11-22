@@ -635,7 +635,6 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
 # （同一 delivery 允许在主/归档各留一份），由 purge 每小时搬一次。
 _WEBHOOK_INBOX_ARCHIVE_DDL = """
 CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL DEFAULT '',
     delivery_id VARCHAR(128) NOT NULL,
@@ -653,6 +652,15 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     finished_at VARCHAR(32) NOT NULL DEFAULT '',
-    archived_at TEXT DEFAULT (datetime('now'))
+    archived_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(repo_key, delivery_id, archived_at)
 )
 """
+
+# A7 残留：清扫/排障都按 status、时间过滤，补索引（主表与归档表各自）
+_WEBHOOK_INBOX_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_status_created "
+    "ON grape_t_webhook_inbox (status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_archived "
+    "ON grape_t_webhook_inbox_archive (archived_at)",
+)

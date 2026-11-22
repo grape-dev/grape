@@ -29,6 +29,8 @@ DEAD_RETENTION_DAYS = 7
 # 超期仍未消费成功的 pending/failed 搬归档（A7 有界增长）；保留期取 30 天，大于
 # 平台重投窗口一个量级，排障时仍可回看。
 PENDING_ARCHIVE_DAYS = 30
+# 归档本身也要有保留期，否则「只写不删」把无界增长从主表搬到归档表（复审 A7 残留）。
+ARCHIVE_RETENTION_DAYS = 180
 PURGE_INTERVAL_SECONDS = 3600
 
 _DELIVERY_HEADERS = (
@@ -302,6 +304,16 @@ def ensure_webhook_inbox_table() -> bool:
             c = db.cursor()
             c.execute(_WEBHOOK_INBOX_DDL)
             db.commit()
+        from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_INDEX_DDL
+
+        with db_lock:
+            c = db.cursor()
+            for stmt in _WEBHOOK_INBOX_INDEX_DDL:
+                try:
+                    c.execute(stmt)
+                except Exception as e:  # noqa: BLE001 - 索引已存在/数据库不支持
+                    log.debug(f"webhook inbox index skipped: {e}")
+            db.commit()
         ensure_webhook_inbox_archive_table()
         return True
     except Exception as e:  # noqa: BLE001 - 建表失败由 worker 循环逐轮重试
@@ -375,7 +387,7 @@ async def _run_with_lease(item: dict, owner: str, *, pipeline=None,
     return await task
 
 
-_ARCHIVE_COLUMNS = ("id, repo_key, provider, delivery_id, event_header, payload, headers, "
+_ARCHIVE_COLUMNS = ("repo_key, provider, delivery_id, event_header, payload, headers, "
                     "status, attempts, max_attempts, claim_owner, claimed_at, lease_expires_at, "
                     "next_attempt_at, last_error, created_at, updated_at, finished_at")
 
@@ -422,10 +434,21 @@ def purge_finished(retention_hours: int = CONSUMED_RETENTION_HOURS,
             stale = c.rowcount if c.rowcount and c.rowcount > 0 else 0
         except Exception as e:  # noqa: BLE001
             log.warning(f"webhook inbox stale-pending archive failed: {e}")
+        archive_deleted = 0
+        try:
+            archived_before = (datetime.now(timezone.utc)
+                               - timedelta(days=ARCHIVE_RETENTION_DAYS)).isoformat()
+            c.execute("DELETE FROM grape_t_webhook_inbox_archive WHERE archived_at<?",
+                      (archived_before,))
+            archive_deleted = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        except Exception as e:  # noqa: BLE001 - 归档表缺失时跳过
+            log.debug(f"webhook inbox archive retention skipped: {e}")
         db.commit()
-    if consumed or dead or stale:
-        log.info(f"webhook inbox purged consumed={consumed} dead={dead} stale_pending={stale}")
-    return {"consumed": consumed, "dead": dead, "stale_pending": stale}
+    if consumed or dead or stale or archive_deleted:
+        log.info(f"webhook inbox purged consumed={consumed} dead={dead} "
+                 f"stale_pending={stale} archive_deleted={archive_deleted}")
+    return {"consumed": consumed, "dead": dead, "stale_pending": stale,
+            "archive_deleted": archive_deleted}
 
 
 async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
