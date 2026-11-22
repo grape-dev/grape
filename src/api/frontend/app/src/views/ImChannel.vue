@@ -443,6 +443,9 @@ function badgeOf(key) {
   const inst = live.value[key]
   const cfg = platformConfig(key)
   if (inst && inst.paused) return { tone: 'no', text: imt('badge_paused') }
+  // 过期暂停（进程崩溃遗留行）：后端已按 is_paused() 口径报 paused=False，
+  // 这里单独标「暂停状态过期」，避免看板把遗留行显示成健康或长期显示暂停。
+  if (inst && inst.stale) return { tone: 'no', text: imt('badge_stale') }
   if (inst && inst.connected) return { tone: 'ok', text: imt('badge_connected') }
   if (cfg && cfg.app_id) return { tone: 'no', text: inst ? imt('badge_configured_offline') : imt('badge_configured') }
   return { tone: 'no', text: imt('badge_none') }
@@ -495,6 +498,7 @@ function loadLive() {
           status: it.status,
           installation_id: it.installation_id || '',
           paused: !!it.paused,
+          stale: !!h.stale,
           last_pause_at: h.last_pause_at || it.last_pause_at || '',
           next_retry_at: h.next_retry_at || it.next_retry_at || '',
           alert_state: h.alert_state || '',

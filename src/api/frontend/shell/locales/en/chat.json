@@ -197,6 +197,7 @@
     "wechat_pin_label": "Verification code shown on your phone",
     "wechat_qr_close": "Close",
     "badge_paused": "Risk paused",
+    "badge_stale": "Pause expired",
     "paused_title": "Channel paused by risk control (WeChat ret=-14)",
     "paused_last": "Paused at",
     "paused_next": "Next retry",

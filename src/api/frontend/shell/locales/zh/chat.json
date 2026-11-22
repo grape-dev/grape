@@ -197,6 +197,7 @@
     "wechat_pin_label": "验证码（手机显示的数字）",
     "wechat_qr_close": "关闭",
     "badge_paused": "风控暂停",
+    "badge_stale": "暂停状态过期",
     "paused_title": "渠道被风控暂停（微信 ret=-14）",
     "paused_last": "暂停时间",
     "paused_next": "预计重试",

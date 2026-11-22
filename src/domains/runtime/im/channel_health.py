@@ -96,7 +96,12 @@ class ChannelHealthState:
     extra: dict = field(default_factory=dict)
 
     def to_dict(self, now: Optional[float] = None) -> dict:
-        """对外快照：ISO 时间串 + `paused` + `stale`（暂停态超 TTL 视为遗留）。"""
+        """对外快照：ISO 时间串 + `paused` + `stale`（暂停态超 TTL 视为遗留）。
+
+        `paused` 与 `is_paused()` 同口径（PR #1983 R2 复审 Nit）：超 TTL 的遗留暂停
+        行对外 `paused=False`，只保留 `stale=True` 标记——否则管理台 paused 计数与
+        渠道卡片长期显示「暂停」，而通知侧早已放过（崩溃进程遗留行永不消散）。
+        """
         now = float(now if now is not None else time.time())
         stale = bool(self.paused and self.last_pause_at
                      and now - self.last_pause_at > PAUSE_STATE_TTL_SECONDS)
@@ -104,7 +109,7 @@ class ChannelHealthState:
             "installation_id": self.installation_id,
             "channel_type": self.channel_type,
             "instance_id": self.instance_id,
-            "paused": bool(self.paused),
+            "paused": bool(self.paused and not stale),
             "stale": stale,
             "last_pause_at": _iso(self.last_pause_at),
             "last_pause_at_ts": float(self.last_pause_at or 0.0),
