@@ -827,7 +827,10 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         if _git_has_changes(workdir):
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
-        # D43: push 统一走 _run_git（可被测试 mock），超时 180s
+        # D43: push 统一走 _run_git（可被测试 mock），超时 180s。
+        # 来源（2026-11-23 实测）：主控 → gitlab.com 小仓（95KB）clone 2.48s、
+        # push 2.16s；按同量级带宽外推 180s 可覆盖约数百 MB 模板仓，约为实测的
+        # 80 倍余量，同时小于 CI 侧 10 分钟作业上限。
         # 2026-11-22（B + A 双层）：
         #   B：先走**普通 push**（空仓库/可快进 → 直接落在 main，不再覆盖平台初始提交）
         #   A：普通 push 不行（远端已有提交）才 --force；若平台拒绝受保护分支

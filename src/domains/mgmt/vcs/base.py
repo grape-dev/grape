@@ -221,6 +221,9 @@ class GenericVcsProvider(VCSProvider):
         _log_path = path.split("?")[0]          # 不落 query（可能含 access_token）
         try:
             from src.kernel.upstream_http import open_with_policy as _open_policy
+            # timeout=30 来源（2026-11-23 实测）：自建 worker → gitlab.com
+            # /api/v4/user 连打 10 次为 0.72–1.74s（p50≈0.97s）；30s 约为实测
+            # 上界的 17 倍，能吃掉跨区抖动而不把整条建仓链路拖死。
             with _open_policy(
                     req, timeout=30,
                     ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
