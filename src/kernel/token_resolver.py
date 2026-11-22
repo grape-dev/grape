@@ -113,6 +113,14 @@ class VCSProvider(ABC):
     def get_user_login(self, token: str) -> str:
         """获取 token 对应的用户名。"""
 
+    def token_expiry(self, token: str) -> dict:
+        """凭据自身有效期元数据（默认无：多数平台不提供）。
+
+        返回 {"expires_at": "YYYY-MM-DD", "scopes": [...], "revoked": bool} 或 {}。
+        有能力的平台（GitLab PAT）覆盖它；调用方（凭据绑定）按需取，读不到就落空。
+        """
+        return {}
+
     @abstractmethod
     def add_collaborator(self, api_token: str, owner: str, repo: str,
                          username: str, permission: str = "") -> bool:
@@ -195,6 +203,24 @@ class VCSProvider(ABC):
         """D44/S66 端口：拉仓库协作者列表（分页，平台原生字段）。"""
         return []
 
+    def list_create_spaces(self, api_token: str) -> "list[dict]":
+        """可建仓的「所属空间」清单（GitLab 组/子组；其它平台暂无 → 空 = 只有个人空间）。
+
+        返回 [{path, name, kind}]：`path` 可直接作为建仓 owner（GitLab 用 full_path，
+        含子组）。默认空实现——平台没有组织空间概念时，创建表单只渲染"个人空间"。
+        """
+        return []
+
+    def normalize_created_repo(self, raw: dict) -> dict:
+        """建仓响应 → 全平台同形的仓库身份（补 full_name/owner/name，原字段保留）。
+
+        平台差异收在对齐器里（`src.kernel.vcs.repo_ref`，按卡 dialect 注册）；这里
+        是给各 provider 的 create_repo 复用的通用钩子——路由层因此零平台分支。
+        """
+        from src.kernel.vcs.repo_ref import normalize_repo_payload
+
+        return normalize_repo_payload(self.provider_name, raw, getattr(self._card, "dialect", ""))
+
     def create_repo(self, api_token: str, name: str, description: str = "",
                     private: bool = False, owner: str = "", path: str = "") -> dict:
         """D42/S62 端口：在 token 用户名下建仓，返回平台 repo dict。
@@ -245,10 +271,22 @@ class GenericVcsProvider(VCSProvider):
             body = _json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            from src.kernel.upstream_http import open_with_policy as _open_policy
+            with _open_policy(
+                    req, timeout=30,
+                    ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
+                    allow_redirects=self._card.dialect != "gitlab",
+            ) as resp:
                 return _json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"{self._card.name} API {method} {path} failed ({e.code}): {e}") from e
+            # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
+            try:
+                _detail = e.read().decode("utf-8", "replace")[:300]
+            except Exception:  # noqa: BLE001
+                _detail = ""
+            raise RuntimeError(
+                f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
+                + (f" | {_detail}" if _detail else "")) from e
 
     def verify_token(self, token: str) -> dict:
         info = self._http("GET", "/user", token)
@@ -725,6 +763,11 @@ def create_provider(provider: str) -> VCSProvider:
     except Exception:
         card = None
     if card is not None:
+        # Issue #3580：gitlab 方言的实例卡（含自建 gitlab-corp）必须走
+        # GitLabProvider（/projects 寻址、PRIVATE-TOKEN、members/hooks 形态）；
+        # 纯卡驱动 GenericVcsProvider 只适用于 github 系 API 形态。
+        if getattr(card, "dialect", "") == "gitlab":
+            return GitLabProvider(card)
         return GenericVcsProvider(card)
     # D105i：逃逸口可观测——纯配卡平台静默落 GitCode 兜底 = 卡缺能力字段，
     # 是“github 系假设”类静默错误的源头，必须留痕而非无声吞掉
@@ -1837,8 +1880,10 @@ class GitLabProvider(GenericVcsProvider):
 
     _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
 
-    def __init__(self):
-        super().__init__(_require_card("gitlab"))
+    def __init__(self, card=None):
+        # Issue #3580：一实例一卡——允许传入任意 GitLab 实例卡（如 gitlab-corp）；
+        # 缺省仍取内置 gitlab 卡（存量行为不变，缺卡仍 fail-closed）。
+        super().__init__(card or _require_card("gitlab"))
 
     def _pid(self, owner, repo) -> str:
         import urllib.parse as _up
@@ -1849,6 +1894,25 @@ class GitLabProvider(GenericVcsProvider):
         if not isinstance(info, dict) or not info:
             raise RuntimeError("GitLab token verify: empty user info")
         return info
+
+    def token_expiry(self, token: str) -> dict:
+        """PAT 自身元数据（GitLab 15.4+ `/personal_access_tokens/self`）。
+
+        单独成方法而不是塞进 verify_token：校验身份的调用点不需要多打一次网络；
+        只有「绑定凭据」这类要落到期时间的调用方显式取（见 settings.py）。
+        读不到（旧版本/非 PAT/权限不足）返回 {}，不阻断绑定。
+        """
+        try:
+            pat = self._http("GET", "/personal_access_tokens/self", token)
+        except Exception:  # noqa: BLE001
+            return {}
+        if not isinstance(pat, dict) or not pat.get("expires_at"):
+            return {}
+        return {
+            "expires_at": str(pat.get("expires_at") or ""),
+            "scopes": pat.get("scopes") or [],
+            "revoked": bool(pat.get("revoked")),
+        }
 
     def get_user_login(self, token: str) -> str:
         # GitLab /user 字段 = username（非 login）
@@ -1881,28 +1945,96 @@ class GitLabProvider(GenericVcsProvider):
         except Exception:
             return False
 
+    def list_create_spaces(self, api_token: str) -> "list[dict]":
+        """GitLab：当前 token 能建仓的组（Developer=30 及以上）。
+
+        用 `/groups?min_access_level=30`（含用户所属的组）；子组不在默认返回里，
+        由创建表单允许直接填完整组路径（`grp/sub`）覆盖——建仓时按 full_path 精确
+        解析 namespace_id，等价于下拉里选中它。取组失败降级为空（不阻断个人空间建仓）。
+        """
+        try:
+            rows = self._http("GET", "/groups?min_access_level=30&per_page=100", api_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab list_create_spaces failed: {e}")
+            return []
+        out = []
+        for g in rows if isinstance(rows, list) else []:
+            if not isinstance(g, dict):
+                continue
+            path = str(g.get("full_path") or "")
+            if path:
+                out.append({"path": path, "name": str(g.get("name") or path), "kind": "group"})
+        return out
+
+    def _namespace_id(self, api_token: str, owner: str) -> int:
+        """组/子组完整路径 → namespace_id（GitLab 建仓只认数字 id，不认路径）。"""
+        import urllib.parse as _up
+
+        try:
+            rows = self._http("GET", f"/namespaces?search={_up.quote(owner, safe='')}&per_page=100",
+                              api_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab namespace lookup failed ({owner}): {e}")
+            return 0
+        for ns in rows if isinstance(rows, list) else []:
+            if not isinstance(ns, dict):
+                continue
+            if str(ns.get("full_path") or "").lower() == owner.lower():
+                try:
+                    return int(ns.get("id") or 0)
+                except Exception:  # noqa: BLE001
+                    return 0
+        return 0
+
     def create_repo(self, api_token, name, description="", private=False,
                     owner="", path="") -> dict:
+        """建仓；owner 非空 = 建到指定组/子组（先解析 namespace_id）。"""
+        body = {"name": name, "description": description or "",
+                "visibility": "private" if private else "public",
+                "initialize_with_readme": True}
+        if path and path != name:
+            body["path"] = path
         if owner:
-            # GitLab 组织空间建仓需要 namespace_id，未在本次范围内落地 → 显式失败
-            return {"error": "GitLab 暂不支持在指定命名空间创建仓库"}
-        return self._http("POST", "/projects", api_token,
-                          {"name": name, "description": description or "",
-                           "visibility": "private" if private else "public"})
+            ns_id = self._namespace_id(api_token, owner)
+            if not ns_id:
+                return {"error": f"所属空间不存在或无建仓权限: {owner}"}
+            body["namespace_id"] = ns_id
+        try:
+            info = self._http("POST", "/projects", api_token, body)
+        except Exception as e:  # noqa: BLE001
+            # 上游拒绝（token 无 create 权限 / 重名 / 组禁建）必须落 error dict：
+            # 抛异常会被路由当成 500，用户看不到原因。
+            return {"error": f"上游拒绝建仓: {e}"}
+        # Issue #3580（2026-11-20 实锤）：GitLab 建仓响应没有 full_name/owner
+        # （它叫 path_with_namespace，owner 在 namespace.full_path）。归一细节归
+        # `kernel.vcs.repo_ref` 的 GitLabRepoRefMapper（按卡 dialect 注册），这里
+        # 只调通用钩子——空 full_name 会让 to_repo_key("") 写出空 repo_key，托管
+        # 「成功」而回调一律 404 repository not managed。
+        return self.normalize_created_repo(info)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        hooks = self._http("GET", f"{self._pid(owner, repo)}/hooks?per_page=100", api_token)
-        if not isinstance(hooks, list):
+        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）
+        from src.kernel.vcs_gitlab_hooks import find_hook
+
+        try:
+            return find_hook(self._card.api_base, api_token, owner, repo, webhook_url)
+        except Exception as e:
+            log.warning(f"gitlab find_existing_webhook failed {owner}/{repo}: {e}")
             return None
-        for h in hooks:
-            if isinstance(h, dict) and h.get("url") == webhook_url:
-                return h.get("id")
-        return None
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        projects = self._http("GET", "/projects?membership=true&per_page=100", api_token)
-        if not isinstance(projects, list):
-            return []
+        # Issue #3580/R5：分页取全（100/页翻到底），不再只取第一页。
+        projects: list = []
+        page = 1
+        while True:
+            batch = self._http(
+                "GET", f"/projects?membership=true&per_page=100&page={page}", api_token)
+            if not isinstance(batch, list):
+                break
+            projects.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
         out = []
         for p in projects:
             if not isinstance(p, dict):
@@ -1942,26 +2074,20 @@ class GitLabProvider(GenericVcsProvider):
         return [{"login": m.get("username", ""), "id": m.get("id", 0)} for m in members if isinstance(m, dict)]
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        # GitLab 形态：POST /projects/:id/hooks，token=密钥 + 布尔位事件集
-        resp = self._http("POST", f"{self._pid(owner, repo)}/hooks", api_token, {
-            "url": webhook_url,
-            "token": webhook_secret,
-            "push_events": True,
-            "tag_push_events": True,
-            "issues_events": True,
-            "note_events": True,
-            "merge_requests_events": True,
-            "pipeline_events": False,
-            "wiki_page_events": True,
-            "release_events": True,
-        })
-        return int(resp.get("id", 0) or 0)
+        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）；
+        # GitLab 的 token 只能是共享密钥，缺省即报错、绝不复用 api_token。
+        from src.kernel.vcs_gitlab_hooks import setup_hook
+
+        return setup_hook(self._card.api_base, api_token, owner, repo, webhook_url, webhook_secret)
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
+        # Issue #3580 复审：收口到 kernel.vcs_gitlab_hooks；404 幂等（返回 True）
+        from src.kernel.vcs_gitlab_hooks import remove_hook
+
         try:
-            self._http("DELETE", f"{self._pid(owner, repo)}/hooks/{hook_id}", api_token)
-            return True
-        except Exception:
+            return remove_hook(self._card.api_base, api_token, owner, repo, hook_id)
+        except Exception as e:
+            log.warning(f"gitlab remove_webhook failed {owner}/{repo} hook={hook_id}: {e}")
             return False
 
 """Token 获取统一接口（策略模式 + 职责链）。

@@ -97,6 +97,8 @@ class RepoPlatformModel(Base):
     download_base = Column("download_base", Text, default="")
     user_images_base = Column("user_images_base", Text, default="")
     brand_color = Column("brand_color", Text, default="")
+    # Issue #3580：自建实例 TLS CA（PEM 绝对路径；空=系统 CA）
+    ca_bundle = Column("ca_bundle", Text, default="")
     source = Column("source", Text, default="config")
     config_hash = Column("config_hash", Text, default="")
     enabled = Column("enabled", Integer, default=1)

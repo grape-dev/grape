@@ -300,7 +300,7 @@
                 type="button"
                 class="cr-platform"
                 :class="{ 'cr-platform-act': createModal.provider === p.key }"
-                @click="createModal.provider = p.key"
+                @click="selectCreateProvider(p.key)"
               >
                 <span v-html="platformIcon(p.key, 18)"></span> {{ p.name }}
               </button>
@@ -321,6 +321,23 @@
               required
             />
             <p class="cr-hint">{{ t('repos.create.name_hint') }}</p>
+          </div>
+          <div class="create-repo-field">
+            <label for="crSpace">{{ t('repos.create.space_label') }}</label>
+            <select
+              id="crSpace"
+              v-model="createModal.space"
+              class="cr-space-select"
+              :disabled="createModal.spaceLoading"
+            >
+              <option value="">{{ t('repos.create.space_personal') }}</option>
+              <option v-for="sp in createModal.spaces" :key="sp.path" :value="sp.path">
+                {{ sp.path }}
+              </option>
+            </select>
+            <p v-if="createModal.spaces.length" class="cr-hint">
+              {{ t('repos.create.space_hint') }}
+            </p>
           </div>
           <div class="create-repo-field">
             <label for="crDesc">{{ t('repos.create.desc_label') }}</label>
@@ -427,6 +444,9 @@ const createModal = reactive({
   desc: '',
   vis: 'private',
   provider: '',
+  space: '',              // 所属空间：'' = 个人空间；GitLab 组/子组填 full_path
+  spaces: [],             // 该平台可建仓的空间（/repos/create-targets）
+  spaceLoading: false,
   submitting: false,
 })
 
@@ -922,11 +942,37 @@ function openCreateModal() {
   createModal.vis = 'private'
   createModal.submitting = false
   createModal.provider = platforms.value.length > 0 ? platforms.value[0].key : 'gitcode'
+  createModal.space = ''
+  createModal.spaces = []
+  loadCreateTargets(createModal.provider)
   createModal.open = true
   document.body.style.overflow = 'hidden'
   nextTick(() => {
     if (crNameRef.value) setTimeout(() => crNameRef.value.focus(), 60)
   })
+}
+function selectCreateProvider(key) {
+  if (createModal.provider === key) return
+  createModal.provider = key
+  createModal.space = ''            // 换平台时空间必须重置（路径属于具体实例）
+  createModal.spaces = []
+  loadCreateTargets(key)
+}
+function loadCreateTargets(provider) {
+  // Issue #3580：GitLab 实例可建仓在组/子组 → 空间下拉；其它平台返回空 = 只有个人空间
+  if (!provider) return
+  createModal.spaceLoading = true
+  G.API.get('/repos/create-targets?provider=' + encodeURIComponent(provider))
+    .then((d) => {
+      if (createModal.provider !== provider) return      // 期间切了平台，丢弃迟到响应
+      createModal.spaces = (d && d.spaces) || []
+    })
+    .catch(() => {
+      if (createModal.provider === provider) createModal.spaces = []
+    })
+    .finally(() => {
+      if (createModal.provider === provider) createModal.spaceLoading = false
+    })
 }
 function closeCreateModal() {
   createModal.open = false
@@ -937,7 +983,10 @@ function submitCreate() {
   if (!name) return G.app.showToast(t('repos.create.err_no_name'))
   if (createModal.submitting) return
   createModal.submitting = true
-  G.API.get('/repos/check-name?name=' + encodeURIComponent(name))
+  const _space = (createModal.space || '').trim()
+  G.API.get('/repos/check-name?name=' + encodeURIComponent(name)
+    + '&provider=' + encodeURIComponent(createModal.provider)
+    + '&owner=' + encodeURIComponent(_space))
     .then((check) => {
       if (check.exists) {
         createModal.submitting = false
@@ -951,6 +1000,7 @@ function submitCreate() {
           description: createModal.desc.trim(),
           visibility: createModal.vis,
           provider: createModal.provider,
+          owner: _space,
         },
         120000
       )

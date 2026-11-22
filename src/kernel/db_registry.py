@@ -190,6 +190,35 @@ def assert_role_database(role: str) -> None:
             raise SystemExit(6)
 
 
+def warn_if_cross_domain_fallback(domain: str) -> None:
+    """跨域读拿不到该域 DSN 时告警一次（禁止静默串到进程库）。
+
+    为什么必须响：三库拓扑下缺 GRAPE_DSN_<DOMAIN> 时，`domain_db()` 返回 None，
+    调用方"降级"到进程主库——同名表往往是**跨库视图**，视图是建视图时的列快照，
+    基表加列后非 owner 侧读该列就 1054、读新表就 1146，表现为 500
+    （2026-11-20 实锤：/api/dashboard/{owner}/{repo} 在 insight 进程读
+    insight.managed_repos 视图，缺 is_org_repo → 1054 → 500）。单库/共库拓扑下
+    `GRAPE_<DOMAIN>_DB_NAME == DEVOPS_DB_NAME`，不会触发本告警。
+    """
+    domain = (domain or "").lower()
+    if domain not in _VALID or domain == current_domain():
+        return
+    if dsn_of(domain):
+        return
+    expected = os.environ.get(f"GRAPE_{domain.upper()}_DB_NAME", "").strip()
+    actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
+    if not (expected and actual and expected != actual):
+        return
+    flag = f"_warned_cross_{domain}"
+    if getattr(_local, flag, False):
+        return
+    setattr(_local, flag, True)
+    log.error(
+        f"[db-guard] 跨域读 {domain} 缺 GRAPE_DSN_{domain.upper()}，回落到进程库 "
+        f"{actual}（owner 库应为 {expected}）：同名 VIEW 列漂移会变成 1054/1146 的 500"
+    )
+
+
 def dsn_of(domain: str) -> str:
     return os.environ.get(f"GRAPE_DSN_{domain.upper()}", "").strip()
 
@@ -362,6 +391,7 @@ def domain_db(domain: str):
     domain = (domain or "").lower()
     if domain not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
+    warn_if_cross_domain_fallback(domain)
     if domain in _forbidden:          # 配置/鉴权类错误：重试也不会好，永久停用
         return None
     if _retry_after.get(domain, 0.0) > time.monotonic():   # 临时失败按退避重试

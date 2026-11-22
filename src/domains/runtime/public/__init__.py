@@ -7274,6 +7274,35 @@ def build_platform_card(provider: str, raw: dict):
     return _impl(provider, raw)
 
 
+def card_field_overrides(submitted: dict, card) -> dict:
+    """管理面提交值与当前生效卡的字段差异（A2 覆盖层，只记变化过的键）。"""
+    from src.domains.runtime.vcs.platform_card import card_field_overrides as _impl
+
+    return _impl(submitted, card)
+
+
+def compute_card_overrides(submitted: dict, current_json: str = "") -> dict:
+    """管理面保存后该记的覆盖层（契约）：{provider: 提交整卡} + 现有 meta → 新覆盖。"""
+    from src.domains.runtime.vcs.card_overrides import CardOverrides
+    from src.domains.runtime.vcs.platform_card import base_platform_card as _base
+
+    return CardOverrides.from_json(current_json).recompute(submitted, _base).by_provider
+
+
+def platform_card_overrides_meta_key() -> str:
+    """覆盖层 meta 契约键（调用方不必硬编码字符串）。"""
+    from src.domains.runtime.vcs.card_overrides import META_KEY
+
+    return META_KEY
+
+
+def base_platform_card(provider: str):
+    """不含管理面覆盖层的卡（管理面保存时的 diff 基线）。"""
+    from src.domains.runtime.vcs.platform_card import base_platform_card as _impl
+
+    return _impl(provider)
+
+
 def module_for(provider: str):
     """取 provider 对应的 VCS 后端模块（providers 注册表口径）。"""
     from src.domains.runtime.vcs.providers import module_for as _impl

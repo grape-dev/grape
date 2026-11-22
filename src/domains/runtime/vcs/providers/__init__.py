@@ -63,6 +63,11 @@ def module_for(provider: str):
     """台阶3：provider → 模块消费面（_MODULES 优先，纯配卡平台落通用垫片）。
 
     无模块且无 resources 卡 → None（调用方 fail-fast）。
+
+    Issue #3580 复审：自建实例卡（如 gitlab-corp，无代码模块、无 resources 段）此前落
+    None → git-repo 网关对实例仓全量 502。现按**卡方言**回落到同族代码模块
+    （`card.dialect` 与 `_MODULES` 键同名），并套 `FamilyProviderModule` 代理把
+    API_BASE 换成卡上的实例 host——零新增平台字面量，内置四平台路径不变。
     """
     if provider in _MODULES:
         # D105-14 改动点 B：回退审计（零行为变更；_caller_context 用 frame 取
@@ -73,6 +78,11 @@ def module_for(provider: str):
     if card is not None and getattr(card, "resources", None):
         from .card_module import card_module_for
         return card_module_for(card)
+    if card is not None:
+        _family = _MODULES.get(str(getattr(card, "dialect", "") or ""))
+        if _family is not None:
+            from .family_module import family_module_for
+            return family_module_for(card, _family)
     return None
 
 

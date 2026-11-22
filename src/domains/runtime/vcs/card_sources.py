@@ -215,6 +215,30 @@ class OwnerTableCardSource(PlatformCardSource):
         return out
 
 
+class CardOverridesSource(PlatformCardSource):
+    """管理面覆盖层（meta `vcs_platform_overrides`，Issue #3580/A2）。
+
+    配置文件派生的表行（source=config）不允许管理面回写（下次导入按文件冲回），
+    所以管理台真正改过的字段单独记在这里，作为读卡链的**最后一层**叠加：
+    只含变化过的键，显式置空记 ""（键存在即尊重）。语义实现归
+    `card_overrides.CardOverrides`，本来源只负责取数与容错。
+    """
+
+    name = "overrides"
+
+    def __init__(self, read_text: Callable[[], str]):
+        self._read_text = read_text
+
+    def raws(self) -> "dict[str, dict]":
+        from src.domains.runtime.vcs.card_overrides import CardOverrides
+
+        try:
+            return CardOverrides.from_json(self._read_text() or "").by_provider
+        except Exception as e:  # noqa: BLE001 - 坏 JSON/DB 未就绪都不影响文件卡
+            log.warning(f"platform_card: vcs_platform_overrides 解析失败: {e}")
+            return {}
+
+
 class ServerContractCardSource(PlatformCardSource):
     """主控只读契约（`GET /api/runtime/platform-cards`，RUNTIME_TOKEN）。
 
@@ -272,7 +296,8 @@ class PlatformCardAssembler:
     def __init__(self, meta: MetaOverlaySource,
                  file_source: FileDirCardSource,
                  builtin: BuiltinCardSource,
-                 fallback_sources: "Iterable[PlatformCardSource]"):
+                 fallback_sources: "Iterable[PlatformCardSource]",
+                 overrides_source: PlatformCardSource | None = None):
         #: 本次装配的降级原因（"" = 所有来源都正常）。门面把它挂到卡缓存上，
         #: clone 端据此区分「取卡通道坏了」与「平台未注册」。
         self.last_degraded = ""
@@ -280,6 +305,9 @@ class PlatformCardAssembler:
         self.file_source = file_source
         self.builtin = builtin
         self.fallback_sources = tuple(fallback_sources)
+        #: 管理面覆盖层（Issue #3580/A2）：必须在表/契约之后叠——它记的是
+        #: 「相对配置文件改过的键」，表行整卡覆盖会把它冲掉。
+        self.overrides_source = overrides_source
 
     # ---- 1) raw 装配 --------------------------------------------------------
 
@@ -310,6 +338,17 @@ class PlatformCardAssembler:
                 base[provider] = dict(raw)
             log.info(f"platform cards from {source.name}: {sorted(raws)}")
             break
+
+        # 管理面覆盖层最后叠（A2）：只含变化过的键，显式置空为 ""
+        if self.overrides_source is not None:
+            _ov = self.overrides_source.raws()
+            for _p, _fields in _ov.items():
+                if _p in base and _fields:
+                    _merged = dict(base[_p])
+                    _merged.update(_fields)
+                    base[_p] = _merged
+            if _ov:
+                log.info(f"platform card overrides applied: {sorted(_ov)}")
         return base
 
     # ---- 2) 建卡（含非法回退） ----------------------------------------------
@@ -342,6 +381,7 @@ def default_assembler(config_dir: str,
                       read_meta: Callable[[], str] | None = None,
                       table_source: PlatformCardSource | None = None,
                       server_source: PlatformCardSource | None = None,
+                      overrides_source: PlatformCardSource | None = None,
                       ) -> PlatformCardAssembler:
     """按部署实况装配来源链（门面 `platform_card` 的唯一入口）。
 
@@ -362,7 +402,8 @@ def default_assembler(config_dir: str,
     builtin = BuiltinCardSource(defaults)
     fallbacks = [src for src in (table_source, server_source) if src is not None]
     return PlatformCardAssembler(meta=meta, file_source=file_source,
-                                 builtin=builtin, fallback_sources=fallbacks)
+                                 builtin=builtin, fallback_sources=fallbacks,
+                                 overrides_source=overrides_source)
 
 
 def _read_meta_via_mgmt() -> str:

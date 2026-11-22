@@ -2,7 +2,7 @@
 import os
 import re
 import time
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.kernel.config import log, WORKSPACE_DIR
 from src.domains.mgmt.user import db as user_db
@@ -1021,11 +1021,23 @@ def sync_repos(user: dict = Depends(require_org_member)):
 
 
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
-def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
-    """检查当前用户名下是否已存在同名仓库"""
-    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
+def check_repo_name(name: str,
+                    provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                    owner: str = Query("", description="所属空间路径（GitLab 可填组/子组），空=个人空间"),
+                    user: dict = Depends(require_no_session_token)):
+    """检查指定平台/空间下是否已存在同名仓库（Issue #3580：支持组/子组）。"""
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    _space = (owner or "").strip()
+    if _space and not _valid_space_path(_space):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间格式非法"})
+    _assert_owner_visible(provider, api_token, _space, user)
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
@@ -1042,7 +1054,10 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
             _used_token["v"] = t
             return create_provider(_p).verify_token(t)
         _uinfo = with_oauth_token(user, provider, _verify_identity)
-        login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
+        # GitLab /user 的登录名字段是 username（github/gitcode 是 login），
+        # 只认 login 会让 GitLab 个人空间查重直接 502「无法获取当前用户身份」。
+        login = str((_uinfo or {}).get("login", "") or (_uinfo or {}).get("username", "") or "") if isinstance(_uinfo, dict) else ""
+        login = _space or login          # 指定空间时按空间路径查重（子组仓不误判为占用）
         if not login:
             # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
@@ -1061,6 +1076,74 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {sanitize_upstream_error(e)}"})
 
 
+@router.get("/create-targets", operation_id="repos_create_targets",
+            summary="List spaces a repository can be created in",
+            description="Returns the personal namespace login plus provider-declared spaces "
+                        "(GitLab: groups the token can create projects in, full_path form). "
+                        "Providers without organisation namespaces return an empty list.")
+def list_create_targets(provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                        user: dict = Depends(require_no_session_token)):
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    from src.kernel.token_resolver import create_provider
+    _p = create_provider(provider)
+    login = ""
+    try:
+        login = str(_p.get_user_login(api_token) or "")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"create-targets: 取登录名失败 ({provider}): {e}")
+    try:
+        spaces = _p.list_create_spaces(api_token) if api_token else []
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"create-targets: 列空间失败 ({provider}): {e}")
+        spaces = []
+    return {"provider": provider, "personal_login": login, "spaces": spaces}
+
+
+def _assert_owner_visible(provider: str, api_token: str, owner: str, user: dict) -> None:
+    """owner 校验的 HTTP 适配：领域规则在 `mgmt.user.namespaces`，这里只映射错误码。"""
+    from src.domains.mgmt.user.namespaces import NamespaceNotVisible, assert_owner_visible
+
+    try:
+        assert_owner_visible(provider, api_token, owner,
+                             {"login": str(user.get("username") or "")})
+    except NamespaceNotVisible as exc:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "NAMESPACE_NOT_VISIBLE", "message": str(exc)})
+
+
+def _owner_from_full_name(full_name: str) -> str:
+    """建仓响应 full_name → owner（Issue #3580：子组仓 owner 是完整组路径）。
+
+    GitLab 子组仓 `full_name = grp/sub/proj`：取最后一段之前的完整路径
+    （按首个 `/` 切会把 owner 截成 grp → webhook 路径拼错、托管 404）。
+    """
+    _fn = str(full_name or "")
+    return _fn.rpartition("/")[0] if "/" in _fn else ""
+
+
+def _valid_space_path(value: str) -> bool:
+    """所属空间路径校验（Issue #3580）：GitLab 支持组/子组（`group/sub`）。
+
+    段级规则：非空、非点段、字符集限字母数字下划线连字符点; 禁首尾斜杠。其它平台只传单段
+    （组织名/登录名），同样被这条规则接受（零回归）。
+    """
+    import re as _re
+
+    if not value or value.startswith("/") or value.endswith("/"):
+        return False
+    for seg in value.split("/"):
+        if not seg or seg in (".", "..") or not _re.match(r"^[\w\-.]+$", seg):
+            return False
+    return True
+
+
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
@@ -1072,8 +1155,10 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     if not _re.match(r'^[\w\-\.]+$', name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
     owner = (body.owner or "").strip()
-    if owner and not _re.match(r'^[\w\-\.]+$', owner):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间只能包含字母、数字、下划线、连字符和点"})
+    if owner and not _valid_space_path(owner):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "所属空间格式非法（可填组/子组路径如 group/sub，段只能含字母数字下划线连字符点，禁 .. 与首尾斜杠）"})
     repo_path = (body.path or "").strip()
     if repo_path and not _re.match(r'^[\w\-\.]+$', repo_path):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库路径只能包含字母、数字、下划线、连字符和点"})
@@ -1093,6 +1178,10 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+
+    # 授权不猜（2026-11-20）：owner 是用户可控输入，前端下拉只是服务端清单的投影。
+    # 建仓前用**服务端自己拉的清单**校验；不匹配就拒，别把「是否越权」押给上游语义。
+    _assert_owner_visible(provider, api_token, owner, user)
 
     # B 批（2026-11-13）：建仓走 provider 端口（GitHub/GitCode/GitLab 各自实现），
     # 路由层不再按平台名分派 create_github_repo / create_repo。
@@ -1115,9 +1204,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     # GitCode 建仓响应不带 owner 字段（只有 namespace/human_name），此前 owner 落空
     # 导致 webhook 拼成 /repos//<name>/hooks → 404、托管永久 partial。统一从
     # full_name 兜底解析，github/gitcode/其它卡路径口径一致。
-    if not owner and "/" in full_name:
-        owner = full_name.split("/", 1)[0]
-    repo_name = repo_info.get("name") or (full_name.split("/", 1)[1] if "/" in full_name else name)
+    if not owner:
+        owner = _owner_from_full_name(full_name)
+    repo_name = repo_info.get("name") or (full_name.rpartition("/")[2] or name)
 
     try:
         def _fetch(token, _uid=user["id"], _p=provider):
@@ -2170,9 +2259,83 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
     } for r in repos]}
 
 
+class RepoConnectionBody(BaseModel):
+    """Issue #3580/R11：实例 PAT 连接（只落 user_credentials kind=pat）。"""
+    token: str = ""
+    login: str = ""
+
+
 class BotTokenBody(BaseModel):
     full_name: str
     bot_token: str = ""
+
+
+def _provider_card_or_404(provider: str):
+    from src.domains.runtime.public import get_platform_card
+    card = get_platform_card(provider)
+    if card is None:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": f"未注册的平台: {provider}"})
+    return card
+
+
+@router.get("/{provider}/connection", operation_id="repos_connection_get",
+            summary="Get platform PAT connection",
+            description="Issue #3580: returns whether the current user has a PAT for this platform instance. Never returns the token value.")
+def get_repo_connection(provider: str, user: dict = Depends(get_current_user_or_api_key)):
+    _provider_card_or_404(provider)
+    cfg = user_db.get_credential(user["id"], provider, kind="pat") or {}
+    return {
+        "provider": provider,
+        "configured": bool(str(cfg.get("token") or "")),
+        "login": str(cfg.get("login") or ""),
+        "source": "pat" if str(cfg.get("token") or "") else "",
+    }
+
+
+@router.put("/{provider}/connection", operation_id="repos_connection_put",
+            summary="Set platform PAT connection",
+            description="Issue #3580: validates the token against that platform instance and stores it as user_credentials(kind=pat). PAT is a repo-execution credential: no login identity / external_identities row is created.")
+def set_repo_connection(provider: str, body: RepoConnectionBody,
+                        user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    token = str(body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "token required"})
+    try:
+        from src.kernel.token_resolver import create_provider
+        info = create_provider(provider).verify_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": f"{provider} token 验证失败: {e}"})
+    if not isinstance(info, dict) or not info.get("id"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "TOKEN_INVALID",
+            "message": f"{provider} token 校验失败（无用户信息）"})
+    login = str(info.get("username") or info.get("login") or body.login or "")
+    cfg = {"token": token, "login": login}
+    if not user_db.set_credential(user["id"], provider, cfg, kind="pat"):
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+    # PAT 是仓库执行凭据，不产生登录身份（R11）：这里刻意不写 external_identities。
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    log.info(f"repos connection: {provider} PAT bound for user={user['id']} login={login}")
+    return {"provider": provider, "configured": True, "login": login, "source": "pat"}
+
+
+@router.delete("/{provider}/connection", operation_id="repos_connection_delete",
+               summary="Clear platform PAT connection",
+               description="Issue #3580: clears user_credentials(kind=pat) for the platform instance; login identities are untouched.")
+def delete_repo_connection(provider: str, user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    user_db.set_credential(user["id"], provider, {}, kind="pat")
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    return {"provider": provider, "configured": False}
 
 
 @router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token.")

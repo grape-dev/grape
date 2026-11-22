@@ -58,6 +58,9 @@ class _MgmtDbProxy:
         if db_registry.route_of("mgmt") == "domain":
             _conn = db_registry.new_connection("mgmt")
             return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        # 跨域读却拿不到 mgmt DSN → 会在进程库里读同名 VIEW（列快照过期即 1054）。
+        # 单库/共库拓扑下库名相同，不会告警。
+        db_registry.warn_if_cross_domain_fallback("mgmt")
         from src.kernel.session_manager import db as _main
         return _main.cursor(*a, **kw)
 

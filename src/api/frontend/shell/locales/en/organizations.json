@@ -27,10 +27,10 @@
     "repo_no_platform": "No bound GitCode / GitHub account detected. You can create the organization first and bind a repository later.",
     "repo_unbound": "Not bound",
     "repo_owner_label": "Owner (namespace)",
-    "repo_owner_personal": "Personal space",
+    "repo_owner_personal": "Personal account",
     "repo_owner_orgs": "Organization space",
     "repo_owner_personal_tag": "personal",
-    "repo_owner_hint": "The repository will be created under the selected account or organization space; organization spaces require create-repo permission on that platform.",
+    "repo_owner_hint": "The repository is created under the selected account or organization; organization spaces need create-repo permission on that platform.",
     "repo_owner_required": "Please select the repository namespace",
     "repo_name_label": "Repository name",
     "repo_name_placeholder": "e.g. org-eng-team",
@@ -48,7 +48,11 @@
     "repo_bind_first": "Bind your {name} account in account settings before creating an organization repository",
     "repo_path_github_hint": "On GitHub the repository path is always the repository name.",
     "repo_bind_action": "Bind",
-    "repo_provision_failed": "Organization created, but repository provisioning failed: {msg} (retry on the organization page)"
+    "repo_provision_failed": "Organization created, but repository provisioning failed: {msg} (retry on the organization page)",
+    "repo_owner_unknown": "Unrecognized namespaces (not selectable)",
+    "repo_owner_unknown_tag": "unrecognized type",
+    "repo_owner_none": "This account has no usable namespace (the platform may block personal repositories); bind an organization or ask an administrator.",
+    "repo_owner_no_personal": "This account cannot create repositories under itself; choose an organization."
   },
   "detail": {
     "back": "← Back to organizations",

@@ -997,16 +997,22 @@ def get_hosting_provider_config(provider: str) -> dict:
     _find_w, _setup_w, _remove_w = (
         functools.partial(_fn, api_base=_ab) for _fn in _family)
     return {
-        "bot_token": get_global_bot_token_for(provider),
+        # Issue #3580 复审：GitLab webhook 的 `token` 只能是共享密钥，绝不能复用
+        # PAT/bot token（会随 X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会
+        # 让所有投递 404）。gitlab_v4 家族因此强制走路径 B（随机密钥）：
+        # bot_token 置空 → 所有调用点 _use_path_b=True。
+        "bot_token": "" if _wd == "gitlab_v4" else get_global_bot_token_for(provider),
         "bot_username": resolve_bot_username(provider),
         "find_webhook": _find_w,
         "setup_webhook": _setup_w,
         "remove_webhook": _remove_w,
         # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
         "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
-        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
-        "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
-        "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）。
+        # Issue #3580：F4 终态卡显式空串 = 无物理列，凭据只落 rc 单表——
+        # 调用方必须传逻辑键 'webhook'/'bot'，不得派生不存在的平台列名。
+        "db_token_field": _pc.webhook_token_field or "webhook",
+        "db_bot_token_field": _pc.token_storage_field or "bot",
         # B 批（2026-11-13）：建 webhook 的鉴权参数按方言派生——Gitee 系用
         # webhook_password（路径 B=secret / 路径 A=token），GitHub 系用
         # webhook_secret（仅路径 B）。调用方零平台分支。
@@ -1170,12 +1176,57 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
     return hook_id
 
 
-# D105-19：webhook 三件套实现家族注册表（键=平台卡 webhook_dialect）。
-# 新增家族：实现 (find, setup, remove) 三件套（api_base 关键字参数）→ 表加一行
-# → platform_card._VALID_WEBHOOK_DIALECTS 加一项 → 新平台卡声明即启用。
+def _gitlab_pid(owner: str, repo: str) -> str:
+    """GitLab 项目标识（兼容垫片：实现已收口到 src.kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import project_path
+
+    return project_path(owner, repo)
+
+
+def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                                 api_base: str = "") -> "int | None":
+    """查已有同 URL 的 GitLab hook（Issue #3580；唯一实现源=kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import find_hook
+
+    try:
+        return find_hook(api_base, api_token, owner, repo, webhook_url)
+    except Exception as e:
+        # 查询失败不静默：调用方据此决定"复用 or 新建"，静默吞掉会重复建钩
+        log.warning(f"find_existing_gitlab_webhook failed {owner}/{repo}: {e}")
+        return None
+
+
+def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                         webhook_password: str = "", api_base: str = "") -> int:
+    """建 GitLab hook；密钥必填，**禁止**复用 api_token（Issue #3580 复审）。
+
+    实现收口到 src.kernel.vcs_gitlab_hooks.setup_hook（provider 侧同源委托），
+    此处只做 mgmt 侧异常类型适配。
+    """
+    from src.kernel.vcs_gitlab_hooks import GitLabHookError, setup_hook
+
+    try:
+        return setup_hook(api_base, api_token, owner, repo, webhook_url, webhook_password)
+    except GitLabHookError as e:
+        if e.status_code == 0:
+            # 入参/invariant 错误（缺密钥）：直接 RuntimeError，别伪装成上游 4xx
+            raise RuntimeError(e.message) from None
+        raise UpstreamAPIError(e.method, e.url, e.status_code, e.message, provider="GitLab") from None
+
+
+def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                          api_base: str = "") -> bool:
+    """删 GitLab hook；上游 404 视为幂等成功（Issue #3580 复审）。"""
+    from src.kernel.vcs_gitlab_hooks import remove_hook
+
+    return remove_hook(api_base, api_token, owner, repo, webhook_id)
+
+
 _WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
     "github_web": (find_existing_github_webhook, setup_github_webhook, remove_github_webhook),
     "gitee_v5": (find_existing_webhook, setup_webhook, remove_webhook),
+    # Issue #3580：GitLab v4 /projects/{id}/hooks 家族（自建实例复用）
+    "gitlab_v4": (find_existing_gitlab_webhook, setup_gitlab_webhook, remove_gitlab_webhook),
 }
 
 

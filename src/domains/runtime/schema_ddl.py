@@ -599,3 +599,33 @@ CREATE TABLE IF NOT EXISTS takeover_sessions (
     finished_at       TEXT DEFAULT ''
 )
 """
+
+# Issue #3580/P3：webhook 事件持久收件箱（入队与消费同在 Event 进程）。
+# 幂等键 = (repo_key, delivery_id)；delivery_id 取平台投递 ID 头，缺失则用 body sha256。
+# claim_owner + lease_expires_at 提供租约（进程崩溃后过期可被重放消费）。
+# Issue #3580 复审：last_error 曾写成 `TEXT NOT NULL DEFAULT ''` —— MySQL 下 TEXT 列
+# 带不了字面默认值（兼容层会剥掉），严格模式里任何不写该列的 INSERT 直接 1364。
+# 改可空 MEDIUMTEXT，入队显式写 ''；存量库由迁移 202611200004 收敛。
+_WEBHOOK_INBOX_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key VARCHAR(255) NOT NULL,
+    provider VARCHAR(64) NOT NULL DEFAULT '',
+    delivery_id VARCHAR(128) NOT NULL,
+    event_header VARCHAR(128) NOT NULL DEFAULT '',
+    payload MEDIUMTEXT NOT NULL,
+    headers TEXT NOT NULL DEFAULT '{}',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    claim_owner VARCHAR(128) NOT NULL DEFAULT '',
+    claimed_at VARCHAR(32) NOT NULL DEFAULT '',
+    lease_expires_at VARCHAR(32) NOT NULL DEFAULT '',
+    next_attempt_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_error MEDIUMTEXT DEFAULT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    finished_at VARCHAR(32) NOT NULL DEFAULT '',
+    UNIQUE(repo_key, delivery_id)
+)
+"""

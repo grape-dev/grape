@@ -46,6 +46,59 @@ def _expected_webhook_token(repo: str, provider: str) -> str:
         return ""
 
 
+def _webhook_web_url(payload: dict) -> str:
+    """从 webhook payload 提取仓库/项目 web URL（跨平台字段并集）。"""
+    if not isinstance(payload, dict):
+        return ""
+    project = payload.get("project")
+    if isinstance(project, dict) and project.get("web_url"):
+        return str(project.get("web_url") or "")
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        for key in ("html_url", "web_url", "url"):
+            if repository.get(key):
+                return str(repository.get(key) or "")
+    for key in ("web_url", "html_url"):
+        if payload.get(key):
+            return str(payload.get(key) or "")
+    return ""
+
+
+def _webhook_instance_mismatch(provider: str, payload: dict) -> bool:
+    """Issue #3580/R10：payload web_url 的 host 必须与平台卡 host 一致。
+
+    只做 host（含端口）强校验，防跨实例同名仓伪造投递；url 缺失时不判定
+    （旧平台形态兼容）。
+    """
+    import urllib.parse as _up
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    url = _webhook_web_url(payload)
+    if not url:
+        return False
+    card = get_platform_card(provider)
+    if card is None:
+        return False
+    try:
+        got = (_up.urlsplit(url).netloc or "").lower()
+    except Exception:
+        return True
+    return got != (card.host or "").lower()
+
+
+def persist_webhook_event(repo_key: str, provider: str, event_header: str,
+                          body: bytes, headers) -> dict:
+    """P3 统一入口：**所有**平台 webhook（gitcode/github 专用端点 + 通用路由）
+    验签通过后先持久化入队，再由 Event 进程 worker 幂等消费/重放。
+
+    入队失败抛异常——调用方必须转 500，让上游重投（at-least-once）；静默吞掉
+    等于丢事件。返回 {"id","status","duplicate"}。
+    """
+    from src.domains.runtime.webhook_inbox import enqueue_webhook
+
+    return enqueue_webhook(repo_key=repo_key, provider=provider,
+                           event_header=event_header, body=body, headers=headers)
+
+
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
     """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
 
@@ -841,6 +894,9 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
 # 误导健康探针/监控把 webhook 入口误判为成功。仅 POST 是合法的 webhook 入口方法。
 _WEBHOOK_REJECTED_METHODS = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 
+# Issue #3580：通用 webhook 载荷上限（超限 413，不落库/不消费）
+_WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024
+
 
 @router.api_route("/webhook/gitcode", methods=_WEBHOOK_REJECTED_METHODS,
                   include_in_schema=False, name="gitcode_webhook_method_reject")
@@ -920,10 +976,19 @@ async def gitcode_webhook(request: Request):
     # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
     import asyncio as _aio
     loop = _aio.get_event_loop()
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(request.headers),
-                                     account=repo, repo_key_override=f"gitcode:{repo}"))
-    log.info(f"Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：先持久化再 200（入队失败 → 500 让上游重投）
+    try:
+        _enq = persist_webhook_event(f"gitcode:{repo}", "gitcode", event_header,
+                                     body, dict(request.headers))
+    except Exception as _e:
+        log.warning(f"Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 @router.post("/webhook/github")
@@ -993,11 +1058,19 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         status_code = 200 if result.get("status") == "repo_deleted" else 500
         return JSONResponse(status_code=status_code, content=result)
 
-    import asyncio as _aio
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
-                                     account=repo, repo_key_override=f"github:{repo}"))
-    log.info(f"GitHub Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：与 gitcode 端点和通用路由同口径——先持久化再 200
+    try:
+        _enq = persist_webhook_event(f"github:{repo}", "github", event_header,
+                                     body, dict(headers))
+    except Exception as _e:
+        log.warning(f"GitHub Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"GitHub Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 def _resolve_a2a_repo_key(repository: str) -> str:
@@ -3083,7 +3156,6 @@ def _is_valid_issue_number(v) -> bool:
 @router.post("/webhook/{provider}")
 async def generic_vcs_webhook(provider: str, request: Request):
     """平台卡驱动 webhook：验签策略按卡（hmac / token_compare），事件经方言模板归一。"""
-    import asyncio as _aio
     from src.domains.runtime.vcs.adapter import get_backend, resolve_source_by_path
     from src.domains.runtime.vcs.platform_card import get_platform_card
 
@@ -3096,6 +3168,11 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=404, content={"code": 404, "message": "no backend for provider"})
 
     body = await request.body()
+    # Issue #3580 复审：webhook 载荷上限（与 GitLab 侧实务一致），防超大 body 打爆
+    # 入库与消费端内存；超限直接 413，不落库。
+    if len(body) > _WEBHOOK_MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={
+            "code": 413, "message": "webhook body too large"})
     headers = {k.lower(): v for k, v in request.headers.items()}
     event_header = headers.get(backend.event_header_key.lower(),
                                headers.get("x-gitcode-event", "unknown"))
@@ -3109,6 +3186,15 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
     if not repo:
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+    # Issue #3580/PR#1854 对齐：仓库全路径来自外部 payload，随后进 repo_key、托管查表
+    # 与工作目录 —— 段级校验（拒 `..`/空段/控制字符/各平台禁用字符），挡路径穿越。
+    from src.kernel.repo_path import RepoPathError, validate_repo_path
+    try:
+        repo = validate_repo_path(repo)
+    except RepoPathError as e:
+        log.warning(f"generic webhook rejected: invalid repository path provider={provider}: {e}")
+        return JSONResponse(status_code=400, content={
+            "code": 400, "message": "invalid repository path"})
 
     # 未托管仓库拒绝（与 gitcode 端点同语义：防幽灵 webhook）
     # 扫雷⑦（中危④）：显式传 provider——跨平台同名仓不互串预期 token
@@ -3142,10 +3228,28 @@ async def generic_vcs_webhook(provider: str, request: Request):
         log.info(f"generic webhook: provider={provider} repo={repo} repo-deleted handled: {_del_result.get('status')}")
         return JSONResponse(status_code=_code, content=_del_result)
 
-    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} verified, pipeline scheduled")
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, headers,
-                                      account=repo, repo_key_override=_repo_key))
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/R10：实例隔离——payload web_url 必须属于该卡实例
+    if _webhook_instance_mismatch(str(provider or "").lower(),
+                                  _raw_payload if isinstance(_raw_payload, dict) else {}):
+        log.warning(f"generic webhook rejected: web_url instance mismatch provider={provider} repo={repo}")
+        return JSONResponse(status_code=403, content={
+            "code": 403, "message": "web_url does not belong to this platform instance"})
+
+    # Issue #3580/P3：验签通过后先持久化再 200；Event 进程 worker 幂等消费/重放
+    try:
+        _enq = persist_webhook_event(_repo_key, str(provider or "").lower(),
+                                     event_header, body, headers)
+    except Exception as _e:
+        log.warning(f"generic webhook enqueue failed provider={provider} repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} "
+             f"persisted id={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    # Issue #3580 复审：对外契约保持既有 `status="ok"`（消费方/gate 依赖它），
+    # 入队信息以新增字段表达；重复投递只多 duplicate 标记。
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 async def _on_handoff_dispatch(event):

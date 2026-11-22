@@ -31,23 +31,55 @@ def from_repo_key(repo_key: str) -> str:
     return repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
 
 
+def _namespace_provider(provider: str) -> bool:
+    """该 provider 是否支持多级命名空间（provider/subgroup/repo）。
+
+    GitLab 家族：仓库全路径 = `<组>/<子组>/.../<仓>`，故 owner 段本身可能含 `/`。
+    Issue #3580 复审（对齐 PR #1854）：判据走平台卡方言（card.dialect == "gitlab"），
+    自建实例卡（如 gitlab-corp）与内置 gitlab 同族——不引入平台名字面量枚举。
+    卡不可用（未绑定端口/装载失败）时按不支持处理 = 存量语义零变化。
+    """
+    if not provider:
+        return False
+    try:
+        card = _vcs_cards.get_platform_card(provider)
+    except Exception:
+        return False
+    return bool(card is not None and getattr(card, "dialect", "") == "gitlab")
+
+
 def parse_repo_key(repo_key: str) -> tuple[str, str, str]:
-    """gitcode:owner/repo → (provider, owner, repo)。无前缀时 provider 默认 'gitcode'。"""
+    """gitcode:owner/repo → (provider, owner, repo)。无前缀时 provider 默认 'gitcode'。
+
+    GitLab 家族按**最后一段**切分（owner 可含子组）：`gitlab-corp:grp/sub/proj`
+    → ('gitlab-corp', 'grp/sub', 'proj')；其它平台保持首个 `/` 切分（零回归）。
+    """
     if not repo_key:
         return "gitcode", "", ""
     provider, _, owner_repo = repo_key.partition(":")
     if not owner_repo:
         provider, owner_repo = "gitcode", repo_key
+    provider = provider or "gitcode"
+    if _namespace_provider(provider):
+        owner, _, repo = owner_repo.rpartition("/")
+        return provider, owner, repo
     owner, _, repo = owner_repo.partition("/")
-    return provider or "gitcode", owner, repo
+    return provider, owner, repo
 
 
 def split_owner_repo(owner_repo: str) -> tuple[str, str]:
-    """owner/repo（或 gitcode:owner/repo）→ (owner, repo)，兼容带/不带前缀。"""
+    """owner/repo（或 gitcode:owner/repo）→ (owner, repo)，兼容带/不带前缀。
+
+    GitLab 家族按最后一段切分（子组命名空间）；其它平台首个 `/` 切分（零回归）。
+    """
     if not owner_repo:
         return "", ""
+    provider = ""
     if ":" in owner_repo:
-        owner_repo = owner_repo.split(":", 1)[-1]
+        provider, _, owner_repo = owner_repo.partition(":")
+    if _namespace_provider(provider):
+        owner, _, repo = owner_repo.rpartition("/")
+        return owner, repo
     owner, _, repo = owner_repo.partition("/")
     return owner, repo
 

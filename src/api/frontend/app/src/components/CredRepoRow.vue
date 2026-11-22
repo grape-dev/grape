@@ -19,6 +19,9 @@
       <div v-if="!hasPat && (patBroken || tokenSource === 'oauth')" class="cred-sub">
         {{ patBroken ? t('pat_broken_desc') : t('pat_oauth_desc') }}
       </div>
+      <div v-if="expiresNote" class="cred-sub" :class="(expiresState === 'expired' || expiresState === 'soon') ? 'cred-sub--danger' : ''">
+        {{ expiresNote }}
+      </div>
     </div>
     <div class="cred-btns">
       <button class="bt bt-s bt-p" @click="emit('configure', platform.provider)">
@@ -78,6 +81,10 @@
   line-height: 1.45;
   margin-top: 2px;
 }
+.cred-sub--danger {
+  /* PAT 到期（≤14 天）与已过期必须比普通副文案更显眼——过期后智能体任务会全 401 */
+  color: var(--r, #e5484d);
+}
 .cred-btns {
   display: flex;
   gap: 6px;
@@ -96,6 +103,10 @@ const props = defineProps({
   patBroken: { type: String, default: '' },
   tokenSource: { type: String, default: '' },
   oauthLogin: { type: String, default: '' },
+  // Issue #3580/PR#1854：PAT 到期提醒（后端 expires_state = ok|soon|expired|unknown）
+  patExpiresAt: { type: String, default: '' },
+  patExpiresState: { type: String, default: '' },
+  patExpiresDays: { type: Number, default: null },
 })
 const emit = defineEmits(['configure', 'clear'])
 
@@ -123,6 +134,23 @@ const badge = computed(function () {
   }
   return { text: t('pat_badge_none'), title: t('pat_badge_none_title'), cls: 'cred-badge--muted' }
 })
+const expiresNote = computed(function () {
+  // Issue #3580/PR#1854：只对「真的配了 PAT」且后端给了到期信息时提示；
+  // 到期前 14 天与已过期用红字，其余（ok）只在副文案里给到日期。
+  if (!props.hasPat || !props.patExpiresAt) return ''
+  const state = props.patExpiresState || 'unknown'
+  if (state === 'expired') {
+    return t('pat_expires_expired', { date: props.patExpiresAt })
+  }
+  if (state === 'soon') {
+    return t('pat_expires_soon', { date: props.patExpiresAt, days: props.patExpiresDays })
+  }
+  if (state === 'ok') {
+    return t('pat_expires_ok', { date: props.patExpiresAt })
+  }
+  return ''
+})
+
 const label = computed(function () {
   const l = typeof G.window.platformLabel === 'function' ? G.window.platformLabel(props.platform.provider) : ''
   return l || props.platform.name || props.platform.provider
