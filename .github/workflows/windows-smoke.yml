@@ -564,3 +564,17 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/kernel/test_issue_3732_domain_session.py -v
+
+      - name: "Scene category slug gate + alias/aggregation regression tests (issue #3796)"
+        # Issue #3796：分类收敛（#3202/#3648）后 scenes/*/scene.json 旧 slug 由
+        # kernel LEGACY_CATEGORY_ALIASES 过渡；「字典无此 slug 且无别名」的新坏 slug
+        # 由 CI 门禁（脚本）+ 回归用例拦截（先例 #2133/#2245/#3490：未接门禁只能
+        # 靠人工 pytest）。scenes/ 缺失时脚本降级退出 0（grape-skills 下发目录）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python3 scripts/check_category_slugs.py
+          python -m pytest tests/kernel/test_issue_3796_category_aliases.py \
+            tests/runtime/test_issue_3796_scene_sync_category.py \
+            tests/scripts/test_check_category_slugs.py \
+            tests/api/test_issue_3796_category_slug_startup.py -v

@@ -28,6 +28,42 @@ from src.domains.mgmt.routes import patrol
 
 bot_manager = None
 
+
+def _startup_category_slug_check(scenes_dir: str | None = None):
+    """Issue #3796：启动期校验 scenes/*/scene.json 分类 slug。
+
+    scenes/ 由 grape-skills 仓库随 ZIP 下发，部署根缺目录属正常 → 降级跳过
+    （1 条 INFO）。存在「字典无此 slug 且无别名」的 scene.json 时：
+    - 默认 1 条聚合 WARNING（scene→slug 明细），不阻断启动；
+    - CATEGORY_SLUG_STRICT=1 时 fail-fast（SystemExit 2），把配置错误拦在启动。
+    """
+    import os as _os
+    from src.kernel.config import log
+    from src.kernel.category import validate_local_scenes_categories
+
+    if scenes_dir is None:
+        cur = _os.path.dirname(_os.path.abspath(__file__))
+        while cur and cur != "/":
+            if _os.path.isdir(_os.path.join(cur, "configs")) or _os.path.isdir(_os.path.join(cur, "scripts")):
+                break
+            cur = _os.path.dirname(cur)
+        scenes_dir = _os.path.join(cur, "scenes")
+
+    unknown = validate_local_scenes_categories(scenes_dir)
+    if not unknown:
+        if _os.path.isdir(scenes_dir):
+            log.info("[CONFIG] scene category slugs validated OK (Issue #3796)")
+        else:
+            log.info("[CONFIG] scenes/ not shipped locally, scene category slug check skipped (Issue #3796)")
+        return
+    detail = "; ".join(f"{scene}: {', '.join(slugs)}" for scene, slugs in sorted(unknown.items()))
+    if _os.environ.get("CATEGORY_SLUG_STRICT") == "1":
+        log.error(f"[CONFIG] scene category slugs unresolved (CATEGORY_SLUG_STRICT=1): {detail}")
+        raise SystemExit(2)
+    log.warning(f"[CONFIG] scene category slugs unresolved "
+                f"(aliased or migrate scenes/*/scene.json, Issue #3796): {detail}")
+
+
 def _startup_security_check():
     """启动安全门禁（fail-closed）。
 
@@ -392,6 +428,12 @@ async def lifespan(app: FastAPI):
     except Exception as _relay_selfcheck_err:
         log.warning(f"[trace-relay] startup selfcheck skipped: {_relay_selfcheck_err}")
 
+    # Issue #3796：启动期场景分类 slug 校验（缺 scenes/ 降级跳过；strict fail-fast；
+    # 校验器自身异常不阻断启动）
+    try:
+        _startup_category_slug_check()
+    except Exception as _cat_err:
+        log.warning(f"scene category slug startup check skipped (non-fatal): {_cat_err}")
 
     # 四组进程任务启动器（设计 §5.1~5.4）。单进程并集模式：
     # - 僵尸事件回收/悬空任务回收/表维护由下方合并 sweep_loop + 组合表维护负责
