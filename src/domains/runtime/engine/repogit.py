@@ -774,6 +774,7 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
 _BRANCH_LIST_TTL = 90.0
 _BRANCH_LIST_FAIL_TTL = 30.0
 _BRANCH_MIRROR_TTL = 120.0
+_BRANCH_MIRROR_FETCH_TIMEOUT = 30
 _MAX_BRANCH_PAGES = 50
 _branch_list_cache = {}          # repo_key -> (ts, branches: set|None, default_branch)
 _branch_list_force_remote = set()
@@ -799,8 +800,13 @@ def _mirror_is_stale(repo_key: str) -> bool:
     return (time.time() - ts) > _BRANCH_MIRROR_TTL
 
 
-def _refresh_local_mirror(repo_key: str, token: str = "") -> bool:
-    """`fetch --prune` 刷新本地 bare mirror（含平台外新建/删除的分支）。"""
+def _refresh_local_mirror(repo_key: str, token: str = "",
+                          timeout: int = _BRANCH_MIRROR_FETCH_TIMEOUT) -> bool:
+    """`fetch --prune` 刷新本地 bare mirror（含平台外新建/删除的分支）。
+
+    timeout 默认短超时（20-30s）：本函数会被 A2A 交办链路调用，长超时 + 多次重试会
+    长时间占用线程（#3758 R2），不再沿用 git 写操作默认的 900s。
+    """
     base = repo_base_dir(repo_key)
     if not base or not os.path.isdir(base):
         return False
@@ -808,7 +814,7 @@ def _refresh_local_mirror(repo_key: str, token: str = "") -> bool:
         r = _run_git_retry(
             ["-C", base, "fetch", "--prune", "origin",
              "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"],
-            token=token)
+            token=token, timeout=timeout)
         if r is None or r.returncode != 0:
             log.warning(f"work_branch: refresh mirror failed repo={repo_key}: "
                         f"{(r.stderr if r else 'git exec failed')[:200]}")
@@ -904,9 +910,11 @@ def _branch_lookup_token(repo_key: str) -> str:
 
 def fetch_repo_branch_records(repo_key: str, token: str = "",
                               max_pages: int = _MAX_BRANCH_PAGES):
-    """经 VCS 分支列表 API 拉取分支记录（含 protected）。
+    """经 VCS 公开分支列表 API 拉取分支记录。
 
     返回 (records: list[dict]|None, truncated: bool)。None 表示请求失败/无 token。
+    只消费 ``VcsApiClient.list_branches`` 公开方法，私有路径/分页实现漂移由 API
+    客户端自身兜底，不在此复制（#3758 R1）；异常收窄为预期运行期失败。
     """
     from src.kernel.repo_key import parse_repo_key
     provider, owner, name = parse_repo_key(repo_key)
@@ -916,35 +924,16 @@ def fetch_repo_branch_records(repo_key: str, token: str = "",
     try:
         from src.domains.runtime.vcs.api_client import VcsApiClient
         client = VcsApiClient(provider, tok, owner, name)
-        path = client._generic_path(f"/repos/{owner}/{name}/branches",
-                                    "/repository/branches")
-        records = []
-        page = 1
-        while page <= max_pages:
-            data = client._card_or_legacy_get(f"{path}?per_page=100&page={page}")
-            if isinstance(data, dict) and data.get("error"):
-                raise RuntimeError(str(data.get("error")))
-            if not isinstance(data, list) or not data:
-                break
-            for b in data:
-                if isinstance(b, dict) and b.get("name"):
-                    records.append({"name": b["name"],
-                                    "protected": bool(b.get("protected", False))})
-                elif isinstance(b, str) and b:
-                    records.append({"name": b, "protected": False})
-            if len(data) < 100:
-                return records, False
-            page += 1
-        else:
-            return records, True
-        return records, False
-    except Exception as e:
+        records, truncated = client.list_branches(
+            max_pages=max_pages, per_page=100, with_truncation=True)
+        return records, truncated
+    except (OSError, RuntimeError, TimeoutError) as e:
         log.warning(f"work_branch: list branches failed repo={repo_key}: {e}")
         return None, False
 
 
 def _fetch_remote_default_branch(repo_key: str, token: str = "") -> str:
-    """经 VCS 仓库信息 API 读取默认分支；失败返回空串。"""
+    """经 VCS 方言正确的公开默认分支方法读取；失败返回空串。"""
     from src.kernel.repo_key import parse_repo_key
     provider, owner, name = parse_repo_key(repo_key)
     tok = token or _branch_lookup_token(repo_key)
@@ -952,10 +941,8 @@ def _fetch_remote_default_branch(repo_key: str, token: str = "") -> str:
         return ""
     try:
         from src.domains.runtime.vcs.api_client import VcsApiClient
-        info = VcsApiClient(provider, tok, owner, name).get_repo_info() or {}
-        if isinstance(info, dict) and not info.get("error"):
-            return str(info.get("default_branch") or "")
-    except Exception as e:
+        return VcsApiClient(provider, tok, owner, name).get_default_branch()
+    except (OSError, RuntimeError, TimeoutError) as e:
         log.warning(f"work_branch: read default branch failed repo={repo_key}: {e}")
     return ""
 
@@ -1006,13 +993,17 @@ def list_repo_branches(repo_key: str, token: str = "", refresh: bool = False,
 
 
 def pick_default_branch(branches: set, default_branch: str = "") -> str:
-    """选仓库默认分支：优先 API/mirror 报告的默认分支，其次 main/master，最后兜底。"""
+    """选仓库默认分支：优先 API/mirror 报告的默认分支，其次 main/master。
+
+    取不到可信默认分支时返回空串——**不回退到 `sorted(branches)[0]` 任意分支**
+    （#3758 R3：gitlab 方言默认分支读取曾为空，任意分支会被当作权威基线）。
+    """
     if default_branch and (not branches or default_branch in branches):
         return default_branch
     for cand in ("main", "master"):
         if branches and cand in branches:
             return cand
-    return sorted(branches)[0] if branches else (default_branch or "main")
+    return ""
 
 
 def _classify_work_branch(repo_key: str, branch: str, token: str = "",
@@ -1056,6 +1047,13 @@ def resolve_work_branch(repo_key: str, configured: str, token: str = "") -> tupl
     if exists:
         return cfg, ""
     fallback = pick_default_branch(branches, default)
+    if not fallback:
+        # 分支明确不存在，但无法确定可信默认分支：不选任意分支当权威基线，
+        # 保持原配置并标注未确认（#3758 R3）。
+        note = (f"configured work_branch '{cfg}' does not exist in repo {repo_key}; "
+                f"default branch unknown, keep configured value (unconfirmed)")
+        log.warning(note)
+        return cfg, note
     note = (f"configured work_branch '{cfg}' does not exist in repo {repo_key}; "
             f"fallback to default branch '{fallback}'")
     log.warning(note)

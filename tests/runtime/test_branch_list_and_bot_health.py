@@ -122,3 +122,42 @@ def test_s29_scenes_branch_list_uses_client_for_gitee(gitee_card, monkeypatch):
         out = list_repo_branches("o", "r", repo_key="gitee:o/r")
     assert out["branches"][0]["name"] == "main"
     assert captured[-1].url.startswith("https://gitee.com/api/v5/repos/o/r/branches")
+
+
+def test_s29_list_branches_truncation_signal(gitee_card, monkeypatch):
+    """#3758 R1：分页达到上限仍满页时返回截断信号，调用方不得当作「不存在」。"""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+
+    class _Req:
+        def __init__(self, url, data=None, method="", headers=None):
+            self.url = url
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "Request", _Req)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=30: _FakeResp(
+                            [{"name": "a"}, {"name": "b"}]))
+    c = VcsApiClient("gitee", "TK", "o", "r")
+    branches, truncated = c.list_branches(
+        max_pages=1, per_page=2, with_truncation=True)
+    assert [b["name"] for b in branches] == ["a", "b"]
+    assert truncated is True
+
+
+def test_s29_get_default_branch_github_dialect(gitee_card, monkeypatch):
+    """#3758 R3：默认分支读取走方言正确的公开方法（github 方言 /repos/...）。"""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+    captured = []
+
+    class _Req:
+        def __init__(self, url, data=None, method="", headers=None):
+            self.url = url
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "Request", _Req)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=30: (captured.append(req), _FakeResp(
+                            {"default_branch": "main"}))[1])
+    c = VcsApiClient("gitee", "TK", "o", "r")
+    assert c.get_default_branch() == "main"
+    assert captured[-1].url.startswith("https://gitee.com/api/v5/repos/o/r?")

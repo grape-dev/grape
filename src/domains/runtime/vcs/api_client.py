@@ -655,8 +655,15 @@ class VcsApiClient:
     # === 仓库信息 ===
 
 
-    def list_branches(self, max_pages: int = 5, per_page: int = 100) -> "list[dict]":
-        """分支列表（D13 命令面，卡驱动分页）：[{name, protected}]。"""
+    def list_branches(self, max_pages: int = 5, per_page: int = 100,
+                      with_truncation: bool = False):
+        """分支列表（D13 命令面，卡驱动分页）：[{name, protected}]。
+
+        ``with_truncation=True`` 时返回 ``(branches, truncated)``：达到分页上限仍满页，
+        说明列表被截断，调用方不能把「未命中」当作「分支确实不存在」（#3758）。
+        查询失败时 ``_request`` 返回 ``{"error": ...}``，此处显式抛出 ``RuntimeError``，
+        让调用方按预期运行期失败处理，而不是静默得到空列表。
+        """
         branches: list[dict] = []
         if self._dialect_is_gitlab():
             path = f"/projects/{self.owner}%2F{self.repo}/repository/branches"
@@ -665,15 +672,38 @@ class VcsApiClient:
         page = 1
         while page <= max_pages:
             data = self._card_or_legacy_get(f"{path}?per_page={per_page}&page={page}")
+            if isinstance(data, dict) and data.get("error"):
+                # 兼容旧调用方：默认形态失败返回空列表；需要区分「失败 vs 空仓库」的
+                # 调用方（with_truncation=True）显式拿到 RuntimeError。
+                if with_truncation:
+                    raise RuntimeError(str(data.get("error")))
+                break
             if not isinstance(data, list) or not data:
                 break
             for b in data:
                 branches.append({"name": b.get("name", ""),
                                  "protected": bool(b.get("protected", False))})
             if len(data) < per_page:
-                break
+                return (branches, False) if with_truncation else branches
             page += 1
-        return branches
+        truncated = page > max_pages
+        return (branches, truncated) if with_truncation else branches
+
+    def get_default_branch(self) -> str:
+        """读取仓库默认分支（方言正确，gitlab 走 project 编码路径）。
+
+        ``get_repo_info`` 的 gitlab 分支历史上返回 ``/repos/...``（GitLab 404），
+        导致默认分支读取为空并让回退落到任意分支（#3758 R3）。这里显式按方言
+        选择路径，取不到时返回空串，由调用方决定「不回退任意分支」。
+        """
+        if self._dialect_is_gitlab():
+            path = f"/projects/{self.owner}%2F{self.repo}"
+        else:
+            path = f"/repos/{self.owner}/{self.repo}"
+        info = self._request("GET", path)
+        if isinstance(info, dict) and not info.get("error"):
+            return str(info.get("default_branch") or "")
+        return ""
 
     def list_prs(self, state: str = "all", head: str = "",
                  max_pages: int = 20) -> list | dict:

@@ -437,3 +437,16 @@ def test_handoff_keeps_configured_when_branch_list_unverifiable(monkeypatch):
     cc = _persisted_cc(212)
     assert cc["target_branch"] == "weekly-ghost"
     assert cc["target_branch_replaced"] == "weekly-9"
+
+
+def test_resolve_work_branch_does_not_pick_arbitrary_branch(monkeypatch, caplog):
+    """默认分支不可确认时不得回退任意分支（#3758 R3 gitlab 方言缺陷回归）。"""
+    monkeypatch.setattr(
+        repogit_mod, "list_repo_branches",
+        lambda *a, **k: ({"alpha", "beta"}, ""))
+    with caplog.at_level(logging.WARNING):
+        effective, note = repogit_mod.resolve_work_branch(REPO, "weekly-ghost")
+    # 保持原配置并标注未确认，而不是把 sorted(branches)[0] 当权威基线。
+    assert effective == "weekly-ghost"
+    assert "default branch unknown" in note
+    assert any("default branch unknown" in r.getMessage() for r in caplog.records)
