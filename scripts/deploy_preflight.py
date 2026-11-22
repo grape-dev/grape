@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import re
 import sqlite3
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -50,6 +53,24 @@ REQUIRED_TABLES: dict[str, tuple[str, ...]] = {
 }
 
 LEDGER = "grape_t_schema_migrations"
+
+# 网关上游端口单一事实源（Issue #3764）：与 deploy/nginx-grape-cluster.conf、
+# scripts/restart-four-process.sh、scripts/install-grape-systemd.sh 的四进程布局一致。
+# 其余脚本/配置只引用，不复制；001 过渡口径（如 8081–8084）用 --ports /
+# GRAPE_PROCESS_PORTS 覆盖。
+UPSTREAM_ROLE_PORT = {"mgmt": 38081, "event": 38082, "worker": 38083, "insight": 38084}
+
+# location 前缀 → 期望进程角色。/api/runtime 为硬失败项，其余仅 warn。
+ROLE_LOCATION_HINTS: tuple[tuple[str, str], ...] = (
+    ("/api/runtime", "worker"),
+    ("/api/tasks", "worker"),
+    ("/api/webhook", "event"),
+    ("/api/a2a", "event"),
+    ("/api/dashboard", "insight"),
+    ("/api/obs", "insight"),
+    ("/api/search", "insight"),
+    ("/api/latency", "insight"),
+)
 
 
 class Check:
@@ -198,13 +219,254 @@ def check_tables(conn: sqlite3.Connection, role: str, split: bool) -> Check:
     return c
 
 
-def run(db_path: str, role: str, contracts_dir: str | None = None) -> list[Check]:
+@dataclass
+class UpstreamServer:
+    host: str
+    port: int
+    line: int
+
+
+@dataclass
+class NginxLocation:
+    modifier: str
+    pattern: str
+    proxies: list[tuple[str, int]]
+    line: int
+
+
+def _line_of(text: str, pos: int) -> int:
+    return text.count("\n", 0, pos) + 1
+
+
+def _find_block(text: str, open_pos: int) -> tuple[str, int]:
+    """从 `{` 之后开始做花括号配对，返回 (块内文本, 块内文本绝对起点)。"""
+    depth = 1
+    i = open_pos
+    while i < len(text) and depth:
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return text[open_pos:i - 1], open_pos
+
+
+def _split_host_port(token: str) -> tuple[str, int | None]:
+    token = token.strip()
+    if not token or token.startswith("unix:"):
+        return token, None
+    if token.startswith("["):
+        end = token.find("]")
+        if end == -1:
+            return token, None
+        host = token[1:end]
+        rest = token[end + 1:]
+        if rest.startswith(":"):
+            try:
+                return host, int(rest[1:])
+            except ValueError:
+                return host, None
+        return host, None
+    if ":" in token:
+        host, _, port = token.rpartition(":")
+        try:
+            return host, int(port)
+        except ValueError:
+            return token, None
+    return token, None
+
+
+def parse_upstreams(text: str) -> dict[str, list[UpstreamServer]]:
+    """解析 nginx `upstream <name> { server host:port; ... }` 块。"""
+    upstreams: dict[str, list[UpstreamServer]] = {}
+    for m in re.finditer(r"\bupstream\s+([A-Za-z0-9_.-]+)\s*\{", text):
+        body, body_start = _find_block(text, m.end())
+        servers: list[UpstreamServer] = []
+        for sm in re.finditer(r"\bserver\s+([^;]+);", body):
+            token = sm.group(1).split()[0]
+            host, port = _split_host_port(token)
+            if port is not None:
+                servers.append(UpstreamServer(host, port, _line_of(text, body_start + sm.start())))
+        upstreams[m.group(1)] = servers
+    return upstreams
+
+
+def parse_locations(text: str) -> list[NginxLocation]:
+    """解析 nginx `location [modifier] pattern { proxy_pass ...; }`。"""
+    locations: list[NginxLocation] = []
+    pattern = re.compile(r"\blocation\s+(?:([=]|\^~|~\*|~)\s+)?([^\s{]+)\s*\{")
+    for m in pattern.finditer(text):
+        body, body_start = _find_block(text, m.end())
+        proxies = [
+            (pm.group(1).strip(), _line_of(text, body_start + pm.start()))
+            for pm in re.finditer(r"\bproxy_pass\s+([^;]+);", body)
+        ]
+        locations.append(NginxLocation(
+            m.group(1) or "", m.group(2), proxies, _line_of(text, m.start())))
+    return locations
+
+
+def _normalized_pattern(loc: NginxLocation) -> str:
+    p = loc.pattern
+    if p.startswith("^"):
+        p = p[1:]
+    if p.startswith("~"):
+        p = p[1:]
+    if p.startswith("*"):
+        p = p[1:]
+    return p
+
+
+def _is_runtime_location(loc: NginxLocation) -> bool:
+    return _normalized_pattern(loc).startswith("/api/runtime")
+
+
+def _location_role(loc: NginxLocation) -> str | None:
+    p = _normalized_pattern(loc)
+    for key, role in ROLE_LOCATION_HINTS:
+        if p.startswith(key):
+            return role
+    return None
+
+
+def _resolve_proxy(raw: str, upstreams: dict[str, list[UpstreamServer]]
+                   ) -> tuple[list[UpstreamServer] | None, str]:
+    """把 proxy_pass 目标解析为上游 server 列表；返回 (servers, upstream 名/地址)。"""
+    m = re.match(r"https?://([^/;]+)", raw)
+    if not m:
+        return None, raw
+    authority = m.group(1)
+    if authority in upstreams:
+        return upstreams[authority], authority
+    host, port = _split_host_port(authority)
+    if port is None:
+        return None, authority
+    return [UpstreamServer(host, port, 0)], authority
+
+
+def check_upstream_role(conf_text: str | None, ports: dict[str, int] | None = None,
+                        source: str = "") -> Check:
+    """断言 /api/runtime* 的 proxy_pass 上游端口归属 worker。
+
+    未提供配置时 skip（ok=True），避免误伤无网关节点；配置中无 /api/runtime*
+    时同样 skip。错配或上游无法解析时 fail，detail 含 upstream 地址端口、
+    期望端口与 conf 行号，main() 据此返回非 0。
+    """
+    c = Check("nginx_upstream_role")
+    if not conf_text or not conf_text.strip():
+        c.detail = "skip: 未提供/未探测到 nginx 配置"
+        return c
+    role_ports = {**UPSTREAM_ROLE_PORT, **(ports or {})}
+    upstreams = parse_upstreams(conf_text)
+    locations = parse_locations(conf_text)
+    runtime_locs = [loc for loc in locations if _is_runtime_location(loc)]
+    if not runtime_locs:
+        c.detail = "skip: 配置中未发现 /api/runtime* location"
+        return c
+
+    expected = role_ports["worker"]
+    problems: list[str] = []
+    warnings: list[str] = []
+    for loc in runtime_locs:
+        for raw, line in loc.proxies:
+            servers, name = _resolve_proxy(raw, upstreams)
+            if servers is None:
+                problems.append(
+                    f"{loc.pattern} (L{loc.line}) proxy_pass {raw} (L{line}) "
+                    "无法解析上游（upstream 未定义或地址缺少端口）")
+                continue
+            for srv in servers:
+                if srv.port != expected:
+                    where = f"server L{srv.line}" if srv.line else f"L{line}"
+                    problems.append(
+                        f"{loc.pattern} (L{loc.line}) upstream={name} "
+                        f"server {srv.host}:{srv.port} ({where}) 期望 worker:{expected}")
+
+    for loc in locations:
+        if _is_runtime_location(loc):
+            continue
+        role = _location_role(loc)
+        if role is None:
+            continue
+        exp = role_ports[role]
+        for raw, line in loc.proxies:
+            servers, name = _resolve_proxy(raw, upstreams)
+            if servers is None:
+                warnings.append(f"{loc.pattern} (L{loc.line}) proxy_pass {raw} 无法解析上游")
+                continue
+            for srv in servers:
+                if srv.port != exp:
+                    warnings.append(
+                        f"{loc.pattern} (L{loc.line}) upstream={name} "
+                        f"{srv.host}:{srv.port} → 期望 {role}:{exp}")
+
+    if problems:
+        return c.fail(
+            "; ".join(problems),
+            "上游端口必须归属对应进程：/api/runtime* → worker。请对齐 "
+            "deploy/nginx-grape-cluster.conf（入口 38080；mgmt/event/worker/insight="
+            "38081/38082/38083/38084）；001 过渡口径可用 --ports 或 "
+            "GRAPE_PROCESS_PORTS 覆盖（如 worker=8083）。")
+    c.detail = f"{len(runtime_locs)} 个 /api/runtime* location 归属 worker:{expected}"
+    if warnings:
+        c.detail += "；warn: " + "; ".join(warnings)
+    return c
+
+
+def parse_ports(spec: str | None) -> dict[str, int]:
+    """解析 --ports / GRAPE_PROCESS_PORTS，如 `worker=8083` 或 `mgmt=8081,event=8082`。"""
+    ports: dict[str, int] = {}
+    if not spec or not spec.strip():
+        return ports
+    for part in re.split(r"[,;\s]+", spec.strip()):
+        if not part:
+            continue
+        if "=" in part:
+            role, value = part.split("=", 1)
+        elif ":" in part:
+            role, value = part.split(":", 1)
+        else:
+            raise ValueError(f"--ports/GRAPE_PROCESS_PORTS 项格式应为 role=port: {part!r}")
+        role = role.strip().lower()
+        if role not in UPSTREAM_ROLE_PORT:
+            raise ValueError(
+                f"未知进程角色: {role!r}（可选 {', '.join(UPSTREAM_ROLE_PORT)}）")
+        try:
+            ports[role] = int(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"端口非整数: {part!r}") from exc
+    return ports
+
+
+def load_nginx_text(conf_path: str | None = None, dump_path: str | None = None
+                    ) -> tuple[str | None, str]:
+    """读取 nginx 配置：显式 conf / nginx -T 转储 > GRAPE_NGINX_CONF > 常见探测路径。"""
+    if conf_path:
+        return Path(conf_path).read_text(encoding="utf-8", errors="replace"), f"conf:{conf_path}"
+    if dump_path:
+        return Path(dump_path).read_text(encoding="utf-8", errors="replace"), f"dump:{dump_path}"
+    env_path = (os.environ.get("GRAPE_NGINX_CONF") or "").strip()
+    if env_path:
+        return Path(env_path).read_text(encoding="utf-8", errors="replace"), f"conf:{env_path}"
+    for cand in sorted(glob.glob("/etc/nginx/conf.d/grape*.conf")):
+        try:
+            return Path(cand).read_text(encoding="utf-8", errors="replace"), f"conf:{cand}"
+        except OSError:
+            continue
+    return None, ""
+
+
+def run(db_path: str, role: str, contracts_dir: str | None = None, *,
+        nginx_text: str | None = None,
+        ports: dict[str, int] | None = None, nginx_source: str = "") -> list[Check]:
     checks: list[Check] = [
         check_role(role),
         check_contracts_registry(contracts_dir or str(REPO / "contracts")),
     ]
     db_check, conn = check_db(db_path)
     checks.append(db_check)
+    checks.append(check_upstream_role(nginx_text, ports=ports, source=nginx_source))
     if conn is None:
         return checks
     split = _split_topology()
@@ -225,19 +487,38 @@ def main() -> int:
                     default=os.environ.get("GRAPE_CONTRACTS_DIR") or str(REPO / "contracts"),
                     help="契约登记表目录（默认取 GRAPE_CONTRACTS_DIR 或 REPO/contracts）")
     ap.add_argument("--json", action="store_true", help="机器可读输出")
+    ap.add_argument("--nginx-conf", default="",
+                    help="nginx 配置文件路径（/api/runtime* 上游端口归属断言用）")
+    ap.add_argument("--nginx-dump", default="",
+                    help="`nginx -T` 转储文件路径（与 --nginx-conf 等价）")
+    ap.add_argument("--ports", default=os.environ.get("GRAPE_PROCESS_PORTS", ""),
+                    help="覆盖端口事实源，如 worker=8083 或 mgmt=8081,event=8082,...")
     args = ap.parse_args()
 
     if os.environ.get("DEVOPS_DB_BACKEND", "sqlite").lower() == "mysql":
         print("preflight: mysql 后端暂走 deploy_mysql_gate.py（本脚本覆盖 sqlite 单库/测试拓扑）",
               file=sys.stderr)
         return 2
+    try:
+        ports = parse_ports(args.ports)
+    except ValueError as exc:
+        print(f"preflight: {exc}", file=sys.stderr)
+        return 2
+    try:
+        nginx_text, nginx_source = load_nginx_text(
+            args.nginx_conf or None, args.nginx_dump or None)
+    except OSError as exc:
+        print(f"preflight: 读取 nginx 配置失败: {exc}", file=sys.stderr)
+        return 2
     db_path = args.db_path or str(REPO / "data" / "sessions.db")
-    checks = run(db_path, args.role, args.contracts_dir)
+    checks = run(db_path, args.role, args.contracts_dir, nginx_text=nginx_text,
+                 ports=ports, nginx_source=nginx_source)
     failed = [c for c in checks if not c.ok]
 
     if args.json:
-        print(json.dumps({"db": db_path, "role": args.role, "pass": not failed,
-                          "checks": [c.as_dict() for c in checks]}, ensure_ascii=False, indent=2))
+        print(json.dumps({"db": db_path, "role": args.role, "nginx_source": nginx_source,
+                          "pass": not failed, "checks": [c.as_dict() for c in checks]},
+                         ensure_ascii=False, indent=2))
     else:
         for c in checks:
             print(f"{'PASS' if c.ok else 'FAIL'}  {c.name:22s} {c.detail}")
