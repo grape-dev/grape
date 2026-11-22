@@ -150,7 +150,7 @@ def _autopilot_issue_ref(task_id) -> str:
     while n > 0:
         n, r = divmod(n - 1, 26)
         s = chr(ord("a") + r) + s
-    return f"autopilot-{s}"
+    return f"{_AUTOPILOT_ISSUE_ID_PREFIX}{s}"
 
 
 def _skip_autopilot_for_takeover(repo_key, task, exec_id) -> bool:
@@ -413,6 +413,10 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     if not _is_org_analysis:
         parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
     return "\n".join(parts)
+
+# Autopilot 任务来源标记（Issue #3744）：agent_tasks.issue_id 合成键前缀。
+# 与下方 event_seq 高位命名空间同为「任务来源」单一判定依据，供场景校正入口短路。
+_AUTOPILOT_ISSUE_ID_PREFIX = "autopilot-"
 
 # Autopilot 不使用 events 表，但 agent_tasks.event_seq 需要非 0 且不能与真实事件
 # 序号碰撞（历史实现直接传 exec_id，重放/已有 events 的库会命中旧事件状态，
@@ -763,7 +767,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 不同 autopilot 任务各持独立会话，互不排队。每次触发前清空续接指针 → 全新上下文开始。
     # 注意：清空必须走直接 UPDATE（update_issue_session 的空指针不覆盖），且只影响合成会话行，
     # 不触碰真实 issue 的会话（主流程不受影响）。
-    _synthetic_issue = f"autopilot-{task.get('id') or ''}"
+    _synthetic_issue = f"{_AUTOPILOT_ISSUE_ID_PREFIX}{task.get('id') or ''}"
     _isess = get_or_create_issue_session(repo_key, agent_type, _synthetic_issue)
     _autopilot_issue_session_id = _isess.get("id") or ""
     if _autopilot_issue_session_id:

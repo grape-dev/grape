@@ -6473,9 +6473,39 @@ _PR_SUB_ISSUE_ID_RE = re.compile(r"^#?pr_\d+_")
 
 _PR_SUB_PROMPT_MARKERS = ("本任务来自 PR 订阅场景", "## PR 审查任务")
 
+def _is_autopilot_task(issue_id: str = "", event_seq: int = 0) -> bool:
+    """判定任务是否来自 autopilot 调度（Issue #3744）。
+
+    autopilot 任务使用合成 issue_id（`autopilot-<字母>`）与高位合成 event_seq
+    （`_AUTOPILOT_EVENT_SEQ_BASE + exec_id`），设计上不写 events 表
+    （`skip_event_config=True`）。因此场景校正必须在入口按来源短路，不得查询 events
+    （否则每次必然查空并产生 WARNING）。
+
+    识别口径（常量单一来源 = scheduler，禁止硬编码观测值）：
+    - 主判据：`agent_tasks.issue_id` 前缀 `autopilot-`（任务级权威标记）；
+    - 辅助判据：`event_seq >= _AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底，
+      兼容历史/无 issue_id 的 autopilot 任务）。
+    """
+    _issue = str(issue_id or "")
+    try:
+        from src.domains.runtime.engine.scheduler import (
+            _AUTOPILOT_EVENT_SEQ_BASE, _AUTOPILOT_ISSUE_ID_PREFIX)
+    except Exception as e:
+        # 常量不可用时不误杀真实任务，保守按非 autopilot 处理
+        log.debug(f"[scene-env] autopilot source constants unavailable: {e}")
+        return False
+    if (_issue.startswith(_AUTOPILOT_ISSUE_ID_PREFIX)
+            and len(_issue) > len(_AUTOPILOT_ISSUE_ID_PREFIX)):
+        return True
+    try:
+        return bool(event_seq) and int(event_seq) >= int(_AUTOPILOT_EVENT_SEQ_BASE)
+    except (TypeError, ValueError):
+        return False
+
 def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                            event_type: str = "", title: str = "",
-                           prompt: str = ""):
+                           prompt: str = "", task_id: str = "",
+                           repo_key: str = ""):
     """判定任务是否属于 PR 订阅场景，返回三态（Issue #1745 复审修复）。
 
     - `True`：确认是 PR 订阅任务；
@@ -6488,6 +6518,8 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
     3. 事件标题为「PR 订阅」派发（真实关联 Issue 号 + a2a_event 的既有形态）；
     4. 关联 events 行的 event_type / title 命中 2/3；
     5. 事件行不可用（event_seq=0/缺失）时，回退任务 prompt 快照中的订阅标记。
+
+    `task_id` / `repo_key` 仅用于缺行告警的可定位字段（Issue #3744），不参与判定。
     """
     if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
         return True
@@ -6509,11 +6541,13 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                     "SELECT event_type, title FROM events WHERE seq=?",
                     (event_seq,)).fetchone()
         except Exception:
-            log.warning(f"[scene-env] events lookup failed for seq={event_seq}, "
+            log.warning(f"[scene-env] events lookup failed for seq={event_seq} "
+                        f"task={task_id or '-'} repo={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if not _row:
-            log.warning(f"[scene-env] events row missing for seq={event_seq}, "
+            log.warning(f"[scene-env] events row missing for seq={event_seq} "
+                        f"task={task_id or '-'} repo={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if (_row[0] or "") in PR_EVENT_TYPES:
@@ -6525,14 +6559,16 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
 
 def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
                              event_type: str = "", title: str = "",
-                             prompt: str = "") -> bool:
+                             prompt: str = "", task_id: str = "",
+                             repo_key: str = "") -> bool:
     """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
 
     保守口径：未判定（`None`）也视为 PR 订阅/需保留订阅场景，避免 PR 订阅任务被
     误校正为 Issue 场景而重现 #427。详见 `_pr_subscription_state` 三态说明。
     """
     return _pr_subscription_state(
-        issue_id, event_seq, event_type, title, prompt) is not False
+        issue_id, event_seq, event_type, title, prompt,
+        task_id, repo_key) is not False
 
 def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     """执行前用 Issue 归属场景校正任务快照中的 GRAPE_SCENE_ID（Issue #1745）。
@@ -6543,6 +6579,8 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
     `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
     PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
+    autopilot 任务（合成 issue_id / 高位合成 seq，设计上不写 events 表）在入口按来源
+    短路并保留快照（Issue #3744）；
     PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
     不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
 
@@ -6567,10 +6605,18 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _event_seq = _row[2] or 0
     _event_type = _row[3] or ""
     _prompt = _row[4] or ""
+    if _is_autopilot_task(_issue_id, _event_seq):
+        # autopilot 不写 events 表：入口短路，避免必然查空的 events 查询与 WARNING
+        log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
+                  f"issue={_issue_id or '-'} event_seq={_event_seq} "
+                  f"scene_reconciled=false reason=autopilot_source "
+                  f"snapshot_scene={_snapshot or '-'}")
+        return _snapshot
     if not _repo_key or not _issue_id:
         return _snapshot
     if _pr_subscription_state(_issue_id, _event_seq, _event_type,
-                              prompt=_prompt) is not False:
+                              prompt=_prompt, task_id=task_id,
+                              repo_key=_repo_key) is not False:
         return _snapshot
     _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
     if _authoritative is None:
