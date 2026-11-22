@@ -130,7 +130,7 @@
     "err_check_failed": "检查失败: {{msg}}",
     "space_label": "所属空间",
     "space_personal": "个人账号（Personal）",
-    "space_hint": "可在该实例的组/子组下建仓；留空则建到个人账号下。"
+    "space_hint": "留空 = 建到个人账号下；选中组织/组/子组则建在该空间下。"
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "仓库",

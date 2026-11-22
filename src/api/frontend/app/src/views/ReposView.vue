@@ -323,7 +323,16 @@
             <p class="cr-hint">{{ t('repos.create.name_hint') }}</p>
           </div>
           <div class="create-repo-field">
-            <label for="crSpace">{{ t('repos.create.space_label') }}</label>
+            <label for="crSpace"
+              >{{ t('repos.create.space_label')
+              }}<span
+                class="cr-help"
+                role="note"
+                :title="t('repos.create.space_hint')"
+                :aria-label="t('repos.create.space_hint')"
+                >?</span
+              ></label
+            >
             <select
               id="crSpace"
               v-model="createModal.space"
@@ -332,12 +341,9 @@
             >
               <option value="">{{ t('repos.create.space_personal') }}</option>
               <option v-for="sp in createModal.spaces" :key="sp.path" :value="sp.path">
-                {{ sp.path }}
+                {{ sp.name && sp.name !== sp.path ? `${sp.name}（${sp.path}）` : sp.path }}
               </option>
             </select>
-            <p v-if="createModal.spaces.length" class="cr-hint">
-              {{ t('repos.create.space_hint') }}
-            </p>
           </div>
           <div class="create-repo-field">
             <label for="crDesc">{{ t('repos.create.desc_label') }}</label>
@@ -1103,6 +1109,28 @@ defineExpose({
 </script>
 
 <style scoped>
+/* 所属空间说明改为问号图标（title 提示），不再占一整行文案 */
+.cr-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border: 1px solid var(--b);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--t3);
+  font-size: 10px;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+}
+.cr-help:hover {
+  border-color: var(--a);
+  color: var(--a);
+}
 .rv-head-right {
   display: flex;
   align-items: center;

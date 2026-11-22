@@ -130,7 +130,7 @@
     "err_check_failed": "Check failed: {{msg}}",
     "space_label": "Owner space",
     "space_personal": "Personal account",
-    "space_hint": "Create inside a group or subgroup of this instance; leave empty for your personal account."
+    "space_hint": "Leave empty to create under your personal account; pick an organization/group to create inside it."
   },
   "brand_sub": "Agentic DevOps",
   "repositories": "Repositories",
