@@ -355,6 +355,10 @@ class PlatformCardAssembler:
         if self.overrides_source is not None:
             _ov = self.overrides_source.raws()
             for _p, _fields in _ov.items():
+                # A 方案：表里已有该平台 → 表是唯一真源，老 meta 覆盖不得再叠加，
+                # 否则升级实例上"管理面改卡不生效"（本函数上面 338 行注释的口径）。
+                if _p in table_raws:
+                    continue
                 if _p in base and _fields:
                     _merged = dict(base[_p])
                     _merged.update(_fields)
