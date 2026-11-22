@@ -34,7 +34,7 @@ class PlatformRowRepository:
         return {c.name for c in RepoPlatformModel.__table__.columns}
 
     def upsert_cards(self, cards: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
-        """逐平台落手建行，返回 {provider: inserted|updated|config_owned}。
+        """逐平台落行，返回 {provider: inserted|updated|promoted}（A：表为真源）。
 
         行落库失败整体上抛（service 决定是否降级成非致命 rows_error）。
         """
@@ -48,6 +48,8 @@ class PlatformRowRepository:
         with Session(get_engine()) as session:
             for provider, fields in cards.items():
                 payload = {k: v for k, v in fields.items() if k in columns}
-                actions[provider] = RepoPlatformRepo.upsert_manual(session, provider, payload)
+                # A 方案：管理面是平台卡唯一写入口，改动必须落表（config 行会被
+                # 提升为 manual，此后导入器不再回灌——消灭「文件/meta/表」三真源）。
+                actions[provider] = RepoPlatformRepo.upsert_admin(session, provider, payload)
             session.commit()
         return actions

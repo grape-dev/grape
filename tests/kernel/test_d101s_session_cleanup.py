@@ -25,10 +25,8 @@ def test_d101s_1_strategy_chain_three_levels():
     不触碰 global bot）：本守卫的目标没变——**session 级不得复活**；
     变的是目标态形状，故此处显式列出四级并锁住顺序（链序是身份语义的一部分）。
     """
-    from src.kernel.token_resolver import (  # noqa: F401 - 符号存在性一并锁住
-        ExplicitRepoBotToken, GlobalBotToken, RepoBotToken, TokenResolver, UserToken,
-        create_provider,
-    )
+    from src.kernel.token_resolver import ExplicitRepoBotToken, GlobalBotToken, RepoBotToken, TokenResolver, UserToken
+    from src.domains.mgmt.vcs import create_provider
     resolver = TokenResolver(create_provider("gitcode"))
     levels = [type(s).__name__ for s in resolver.strategies]
     assert levels == ["ExplicitRepoBotToken", "RepoBotToken", "GlobalBotToken", "UserToken"], \

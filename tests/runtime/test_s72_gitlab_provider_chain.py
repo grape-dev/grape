@@ -16,7 +16,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
-from src.kernel.token_resolver import create_provider, GenericVcsProvider, GitLabProvider
+from src.domains.mgmt.vcs import create_provider, GenericVcsProvider, GitLabProvider
 
 
 @pytest.fixture(autouse=True)
@@ -194,6 +194,6 @@ def test_s72_fetch_repos_membership():
 
 def test_s72_gitcode_github_parity_unchanged():
     """特征锁：gitcode/github 不落 GitLabProvider（既有分派不变）。"""
-    from src.kernel.token_resolver import GitCodeProvider, GitHubProvider
+    from src.domains.mgmt.vcs import GitCodeProvider, GitHubProvider
     assert isinstance(create_provider("gitcode"), GitCodeProvider)
     assert isinstance(create_provider("github"), GitHubProvider)

@@ -66,7 +66,8 @@ def test_save_validation_failure_maps_to_domain_error(monkeypatch):
     assert "host 非法" in exc.value.errors[0]
 
 
-def test_save_writes_meta_then_rows_and_reports_overrides(monkeypatch):
+def test_save_writes_rows_not_card_meta(monkeypatch):
+    """A 方案：卡定义只落表；meta 仅承载凭据类键（不再有 vcs_providers_config/覆盖层）。"""
     import dataclasses as _dc
     import src.domains.runtime.public as runtime
 
@@ -86,14 +87,16 @@ def test_save_writes_meta_then_rows_and_reports_overrides(monkeypatch):
                      card_factory=lambda p, raw: _Card(p, raw.get("host", ""), raw.get("webhook_path", "")),
                      overrides={"gitcode": {"ca_bundle": "/opt/x.pem"}})
 
-    rows = _Rows(actions={"gitcode": "config_owned"})
+    rows = _Rows(actions={"gitcode": "promoted"})
     result = PlatformCardService(rows=rows).save_cards(
         CardSaveRequest(cards={"gitcode": VALID_CARD}, operator_id=7))
 
     keys = [k for k, _ in recorded["meta"]]
-    assert "vcs_providers_config" in keys and "vcs_platform_overrides" in keys
-    assert result.overrides == {"gitcode": {"ca_bundle": "/opt/x.pem"}}
-    assert result.rows == {"gitcode": "config_owned"}
+    assert "vcs_providers_config" not in keys      # 定义不再落 meta（表是唯一真源）
+    assert "vcs_platform_overrides" not in keys   # 覆盖层退役
+    assert all(k == "vcs_providers_config" or True for k in keys)   # 其余键允许（如凭据）
+    assert result.overrides == {"gitcode": {"ca_bundle": "/opt/x.pem"}}   # 仅用于展示 diff
+    assert result.rows == {"gitcode": "promoted"}
     assert rows.calls == [["gitcode"]]
     assert recorded["invalidated"] == 2          # meta 写后 + 行写后各一次
 

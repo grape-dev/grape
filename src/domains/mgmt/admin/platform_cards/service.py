@@ -39,14 +39,11 @@ class PlatformCardService:
     def list_cards(self) -> tuple[dict[str, CardView], str]:
         """全部平台卡视图 + 探活检查时间。凭据只回存在性。"""
         from src.domains.mgmt.user.db import get_meta_value
-        from src.domains.runtime.public import (
-            get_platform_card,
-            list_vcs_platforms,
-            platform_card_overrides_meta_key,
-        )
+        from src.domains.runtime.public import get_platform_card, list_vcs_platforms
 
         health, checked_at = self._bot_health(get_meta_value)
         overrides = self._overrides(get_meta_value)
+        managed = self._managed_by_map()
 
         views: dict[str, CardView] = {}
         for provider in list_vcs_platforms():
@@ -69,18 +66,36 @@ class PlatformCardService:
                 webhook_token_configured=bool(get_meta_value(f"{provider}_webhook_token")),
                 webhook_token_supported=bool(card.webhook_token_field),
                 bot_token_health=health.get(provider, {}),
+                managed_by=managed.get(provider, "file"),
             )
         return views, checked_at
 
+    @staticmethod
+    def _managed_by_map() -> dict[str, str]:
+        """卡定义的归属：表行 source=manual（含被管理面提升的）→ "table"，其余 → "file"。
+
+        A 方案（表为真源）后，这是"该平台是否已被管理面接管"的唯一事实来源；
+        前端据此渲染标记，不再依赖已退役的覆盖层 meta。
+        """
+        try:
+            from sqlalchemy.orm import Session
+
+            from src.kernel.persistence.engine import get_engine
+            from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+            with Session(get_engine()) as session:
+                return {str(row.provider): ("table" if str(row.source or "") == "manual" else "file")
+                        for row in RepoPlatformRepo.list_all(session)}
+        except Exception:  # noqa: BLE001 - 展示字段，读失败按文件卡口径
+            return {}
+
     # ── 写 ────────────────────────────────────────────────────────
     def save_cards(self, request: CardSaveRequest) -> CardSaveResult:
-        """整卡保存：校验 → meta（定义/凭据/覆盖层）→ 行 → 缓存 → 审计。"""
+        """整卡保存：校验 → meta（仅凭据）→ 表行（定义真源）→ 缓存 → 审计。"""
         from src.domains.runtime import public as runtime
         from src.domains.runtime.public import (
             build_platform_card,
-            compute_card_overrides,
             invalidate_platform_card_cache,
-            platform_card_overrides_meta_key,
             PlatformCardError,
         )
 
@@ -177,9 +192,9 @@ class PlatformCardService:
 
     @staticmethod
     def _meta_pairs(request: CardSaveRequest, cleaned: dict[str, dict], build_card, runtime) -> list:
-        pairs: list[tuple[str, str]] = [
-            ("vcs_providers_config", json.dumps(cleaned, ensure_ascii=False))
-        ]
+        # A 方案（单一真源）：卡定义不再写 meta `vcs_providers_config`
+        # —— 定义真值是表行（_write_rows → upsert_admin）。meta 只保留凭据类键。
+        pairs: list[tuple[str, str]] = []
         for provider, token in (request.bot_tokens or {}).items():
             token = str(token or "").strip()
             if not token:
@@ -199,7 +214,11 @@ class PlatformCardService:
 
     @staticmethod
     def _merge_overrides(cleaned, request, runtime, meta_pairs) -> dict[str, dict]:
-        """覆盖层：配置文件派生行的管理面改动，最后叠在文件/meta/表行之上。"""
+        """响应展示用 diff（**不再落 meta**）。
+
+        A 方案后管理面改动直接落表（upsert_admin），不再需要 `vcs_platform_overrides`
+        覆盖层；这里只计算「与文件卡不同的字段」供管理面标记已自定义项。
+        """
         from src.domains.mgmt.user.db import get_meta_value
         from src.domains.runtime.public import (
             compute_card_overrides,
@@ -211,9 +230,7 @@ class PlatformCardService:
             current = get_meta_value(key) or ""
         except Exception:
             current = ""
-        overrides = compute_card_overrides(cleaned, current)
-        meta_pairs.append((key, json.dumps(overrides, ensure_ascii=False)))
-        return overrides
+        return compute_card_overrides(cleaned, current)
 
     def _write_rows(self, cleaned: dict[str, dict], invalidate) -> tuple[dict[str, str], str]:
         """手建实例行。落行失败不阻断卡保存，但必须回给管理面（不静默）。"""

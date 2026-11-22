@@ -1878,7 +1878,8 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
 
     token = ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
     except Exception as _te:
         log.warning(f"A2A fallback: token resolver failed for {repo_key}: {_te}")
@@ -1891,7 +1892,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
                 from src.domains.mgmt.public import get_grape_account_by_id
                 _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
             if _username or _uid > 0:
-                from src.kernel.token_resolver import create_provider_from_repo_key
+                from src.domains.mgmt.public import create_provider_from_repo_key
                 token = create_provider_from_repo_key(repo_key).fetch_user_token(_username, _uid) or ""
         except Exception as _ue:
             log.warning(f"A2A fallback: user token fetch failed for {repo_key}: {_ue}")
@@ -2009,7 +2010,8 @@ def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
     _num = native_issue_number(issue_number)
     token = ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
     except Exception as _te:
         log.warning(f"A2A #755: token resolver failed for {repo_key}: {_te}")

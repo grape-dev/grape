@@ -319,14 +319,9 @@ class PlatformCardAssembler:
             self.file_source.raws()
             base = self.builtin.raws()
 
-        # meta：逐键覆盖（只覆盖它声明的键，缺席键落到基底卡值）
-        for provider, raw in self.meta.raws().items():
-            merged = dict(base.get(provider) or {})
-            merged.update(raw)
-            base[provider] = merged
-
-        # 表 / 契约：整卡覆盖已合并结果，文件独有平台仍保留（防表缺行致平台消失）
+        # 表 / 契约：整卡覆盖（D109 运行时真源；A 方案后是唯一权威）
         self.last_degraded = ""
+        table_raws: dict[str, dict] = {}
         for source in self.fallback_sources:
             raws = source.raws()
             _deg = str(getattr(source, "degraded", "") or "")
@@ -336,8 +331,25 @@ class PlatformCardAssembler:
                 continue
             for provider, raw in raws.items():
                 base[provider] = dict(raw)
+                table_raws[provider] = dict(raw)
             log.info(f"platform cards from {source.name}: {sorted(raws)}")
             break
+
+        # meta / 覆盖层：**只补表里没有的平台**（A 方案：表存在即为唯一真源）。
+        # 这条降级路径保留两个用途：① 表未就绪（导入器未跑）；② 测试注入卡。
+        # 表已有该平台时 meta 一律不参与，杜绝「改了不生效 / 双真源」的老坑。
+        for provider, raw in self.meta.raws().items():
+            if provider in table_raws:
+                continue
+            merged = dict(base.get(provider) or {})
+            merged.update(raw)
+            base[provider] = merged
+
+        if self.overrides_source is not None:
+            for provider, raw in self.overrides_source.raws().items():
+                if provider in table_raws:
+                    continue
+                base[provider] = {**(base.get(provider) or {}), **raw}
 
         # 管理面覆盖层最后叠（A2）：只含变化过的键，显式置空为 ""
         if self.overrides_source is not None:

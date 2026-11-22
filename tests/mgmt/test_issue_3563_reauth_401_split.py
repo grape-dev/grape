@@ -78,7 +78,7 @@ class TestCheckRepoNameReauth:
         _cleanup(self.user)
 
     def _patch_verify_401(self, monkeypatch):
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
 
         def _boom(self_, token):
             raise RuntimeError("GitHub API GET /user failed (401): Bad credentials")
@@ -102,7 +102,7 @@ class TestCheckRepoNameReauth:
 
     def test_valid_token_repo_exists_200(self, monkeypatch, patched_refresh_failure):
         """正常令牌回归：200 exists=true（现路径经 with_oauth_token，行为不变）。"""
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
         from src.domains.runtime.vcs.api_client import VcsApiClient
@@ -114,7 +114,7 @@ class TestCheckRepoNameReauth:
 
     def test_upstream_5xx_stays_502_sanitized(self, monkeypatch, patched_refresh_failure):
         """非 401 上游错误保留 502 语义，message 脱敏（剥内部 URL）。"""
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
         from src.domains.runtime.vcs.api_client import VcsApiClient
@@ -130,7 +130,7 @@ class TestCheckRepoNameReauth:
 
     def test_repo_404_means_not_exists(self, monkeypatch, patched_refresh_failure):
         """404 → exists=false（存在性语义回归）。"""
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
         from src.domains.runtime.vcs.api_client import VcsApiClient
@@ -162,7 +162,7 @@ class TestCreateFromTemplateReauth:
     def test_expired_token_returns_401_reauth_required(self, monkeypatch, patched_refresh_failure):
         """过期令牌 + 刷新不可用 → 401 reauth_required（此前 get_user_login 吞 401 → 502）。"""
         self._fake_template(monkeypatch)
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
 
         def _boom(self_, token):
             raise RuntimeError("GitHub API GET /user failed (401): Bad credentials")
@@ -182,7 +182,7 @@ class TestCreateFromTemplateReauth:
     def test_create_success_uses_refreshed_token(self, monkeypatch, patched_refresh_failure):
         """成功路径回归：身份经 verify_token、建仓用实际生效 token，200。"""
         self._fake_template(monkeypatch)
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         seen_tokens = []
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"} if not seen_tokens.append(token) else {})
@@ -205,7 +205,7 @@ class TestCreateFromTemplateReauth:
     def test_create_repo_5xx_sanitized_502(self, monkeypatch, patched_refresh_failure):
         """建仓 5xx：502 语义保留 + 消息脱敏（剥内部 URL）。"""
         self._fake_template(monkeypatch)
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
 
@@ -224,7 +224,7 @@ class TestCreateFromTemplateReauth:
     def test_create_repo_conflict_reuses_repo(self, monkeypatch, patched_refresh_failure):
         """同名冲突（422/already exists）→ 复用仓库继续 push/host → 200（冲突检测语义不变）。"""
         self._fake_template(monkeypatch)
-        from src.kernel.token_resolver import GitHubProvider
+        from src.domains.mgmt.vcs import GitHubProvider
         monkeypatch.setattr(GitHubProvider, "verify_token",
                             lambda self_, token: {"login": "gh_user_3563"})
 

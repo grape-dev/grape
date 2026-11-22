@@ -2184,7 +2184,8 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
             try:
                 _rk = task.get("repo_key") or ""
                 if _rk:
-                    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+                    from src.kernel.token_resolver import TokenResolver
+                    from src.domains.mgmt.public import create_provider_from_repo_key
                     _provider = create_provider_from_repo_key(_rk)
                     _resolver = TokenResolver(_provider)
                     # R21.12.6: 只查 DB 过期标记，不调 VCS API
@@ -4253,7 +4254,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             # 1. 系统回帖（R18.6.10: 走 handler.post_issue_comment()）
             if _issue_num and _repo_key:
                 try:
-                    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+                    from src.kernel.token_resolver import TokenResolver, create_action_handler
+                    from src.domains.mgmt.public import create_provider_from_repo_key
                     _p = create_provider_from_repo_key(_repo_key)
                     # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
                     _r = TokenResolver(_p).resolve_config_level(_repo_key)
@@ -4966,7 +4968,8 @@ def fail_task(task_id, error, exit_code=-1):
             _rk = task.get("repo_key") or ""
             if _rk:
                 # R18: 委托 TokenResolver 统一检测 + 标记
-                from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+                from src.kernel.token_resolver import TokenResolver
+                from src.domains.mgmt.public import create_provider_from_repo_key
                 _provider = create_provider_from_repo_key(_rk)
                 _resolver = TokenResolver(_provider)
                 _error_code = _resolver.detect_and_mark_expired(_rk)
@@ -5127,7 +5130,8 @@ def fail_task(task_id, error, exit_code=-1):
         try:
             _rk = task.get("repo_key") or ""
             if _rk:
-                from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+                from src.kernel.token_resolver import TokenResolver
+                from src.domains.mgmt.public import create_provider_from_repo_key
                 _provider = create_provider_from_repo_key(_rk)
                 _resolver = TokenResolver(_provider)
                 _has_token = _resolver.get_token(_rk)

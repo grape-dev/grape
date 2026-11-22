@@ -251,7 +251,7 @@ def test_web_url_instance_mismatch():
 # ---------------- P4：GitLab 实例发现分页 + Maintainer ----------------
 
 def test_gitlab_instance_pagination_and_maintainer():
-    from src.kernel.token_resolver import GitLabProvider
+    from src.domains.mgmt.vcs import GitLabProvider
     card = build_platform_card("gitlab-corp", _instance_raw())
     prov = GitLabProvider(card)
     pages = {}
@@ -296,7 +296,7 @@ def test_connection_route_pat_only_no_login_identity():
     fake_provider = MagicMock()
     fake_provider.verify_token.return_value = {"id": 7, "username": "alice"}
     try:
-        with patch("src.kernel.token_resolver.create_provider", return_value=fake_provider):
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=fake_provider):
             out = repos_routes.set_repo_connection(
                 "gitlab-corp", repos_routes.RepoConnectionBody(token="fake-token-3580"),
                 {"id": uid})

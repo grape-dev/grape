@@ -6677,3 +6677,24 @@ def org_dispatch_terminal_statuses() -> tuple[str, ...]:
     from src.domains.mgmt.org_dispatch import DISPATCH_TERMINAL as _impl
 
     return tuple(_impl)
+
+def create_provider(provider: str) -> Any:
+    """VCS 平台适配器工厂（跨域入口）。实现归 src.domains.mgmt.vcs。"""
+    from src.domains.mgmt.vcs import create_provider as _impl
+
+    return _impl(provider)
+
+
+def create_provider_from_repo_key(repo_key: str) -> Any:
+    """按 repo_key 前缀取 provider（跨域入口）。"""
+    from src.domains.mgmt.vcs import create_provider_from_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def create_repo_kwargs(provider: str, auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """建仓可选参数（卡能力位驱动；跨域入口）。"""
+    from src.domains.mgmt.vcs import create_repo_kwargs as _impl
+
+    return _impl(provider, auto_init=auto_init, default_branch=default_branch)

@@ -18,7 +18,8 @@ class CardView:
     """一张平台卡的回读视图。
 
     `raw` 是卡定义（整卡回写形态，`event_map`/`fields` 用别名键）；
-    `overrides` 是管理面相对配置文件覆盖的字段（空 = 与文件一致）；
+    `overrides` 是管理面相对基线卡不同的字段（仅展示用，A 方案后不再落库）；
+    `managed_by` = "table"（已被管理面接管，文件卡不再自动覆盖）| "file"（文件卡定义）；
     凭据只回存在性，永不回值。
     """
 
@@ -29,6 +30,7 @@ class CardView:
     webhook_token_configured: bool = False
     webhook_token_supported: bool = False
     bot_token_health: dict[str, Any] = field(default_factory=dict)
+    managed_by: str = "file"
 
     def as_dict(self) -> dict[str, Any]:
         out = dict(self.raw)
@@ -37,6 +39,7 @@ class CardView:
         out["webhook_token_configured"] = self.webhook_token_configured
         out["webhook_token_supported"] = self.webhook_token_supported
         out["bot_token_health"] = dict(self.bot_token_health)
+        out["managed_by"] = self.managed_by
         return out
 
 

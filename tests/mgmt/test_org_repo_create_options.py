@@ -94,7 +94,7 @@ def test_repo_namespaces_lists_account_and_orgs(monkeypatch):
             return {"login": "alice", "name": "Alice", "avatar_url": "https://a/1.png"}
 
     monkeypatch.setattr(orgs_route, "get_user_token_for", _tokens)
-    monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _Provider())
+    monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _Provider())
     monkeypatch.setattr(
         repo_manager,
         "fetch_org_namespaces",

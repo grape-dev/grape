@@ -377,7 +377,7 @@ class TestHostRepoUpstreamErrorMapping:
              patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
              patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]), \
              patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_FakeProv()), \
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_FakeProv()), \
              patch.object(repos_mod, "get_user_token_for", return_value="user_tok"), \
              patch.object(repos_mod, "_get_user_provider_and_token",
                           return_value=("gitcode", "user_tok")), \

@@ -16,7 +16,7 @@ from src.domains.runtime.routes import webhook as wh
 from src.domains.runtime.vcs.platform_card import build_platform_card
 from src.kernel import vcs_gitlab_hooks as hooks
 from src.kernel.session_manager import db, db_lock
-from src.kernel.token_resolver import GitLabProvider
+from src.domains.mgmt.vcs import GitLabProvider
 
 
 INSTANCE_CARD = {

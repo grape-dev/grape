@@ -325,4 +325,4 @@ class TestRepoManager:
 
 from src.domains.mgmt.routes import templates as templates_mod
 
-from src.kernel.token_resolver import GitCodeProvider
+from src.domains.mgmt.vcs import GitCodeProvider

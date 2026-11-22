@@ -123,7 +123,8 @@ def test_uc41_3_id_primary_key_semantics():
 
 def test_uc41_4_token_resolver_hits_rc():
     """RepoBotToken（cred_type='bot'）命中 rc——读链回归锁。"""
-    from src.kernel.token_resolver import RepoBotToken, create_provider
+    from src.kernel.token_resolver import RepoBotToken
+    from src.domains.mgmt.vcs import create_provider
     rk = _iso_rk()
     with db_lock:
         db.cursor().execute(

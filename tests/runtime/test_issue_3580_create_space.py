@@ -14,22 +14,28 @@ from __future__ import annotations
 import pytest
 
 from src.domains.mgmt.routes.repos import _owner_from_full_name, _valid_space_path
-from src.kernel.token_resolver import GitLabProvider
+from src.domains.mgmt.vcs import GitLabProvider
 
 
 class _FakeHttp:
-    def __init__(self, namespaces=None, groups=None, create_response=None):
+    def __init__(self, namespaces=None, groups=None, create_response=None,
+                 group_by_path=None):
         self.calls: list = []
         self.namespaces = namespaces if namespaces is not None else []
         self.groups = groups if groups is not None else []
+        self.group_by_path = group_by_path or {}
         self.create_response = create_response or {"id": 1, "full_name": "grp/sub/proj"}
 
     def __call__(self, method, path, token, data=None):
         self.calls.append((method, path, data))
-        if path.startswith("/namespaces"):
-            return self.namespaces
+        if path.startswith("/groups/"):          # 精确路径寻址（/groups/<urlencoded>）
+            import urllib.parse as _up
+
+            return self.group_by_path.get(_up.unquote(path[len("/groups/"):]), {})
         if path.startswith("/groups"):
             return self.groups
+        if path.startswith("/namespaces"):
+            return self.namespaces
         return self.create_response
 
 
@@ -40,17 +46,35 @@ def _provider(fake: _FakeHttp) -> GitLabProvider:
 
 
 def test_create_repo_resolves_namespace_for_subgroup():
-    fake = _FakeHttp(namespaces=[{"id": 42, "full_path": "grp/sub", "kind": "group"},
-                                 {"id": 7, "full_path": "grp", "kind": "group"}])
+    # 新口径（2026-11-22）：按 /groups/<urlencoded full_path> 精确解析；
+    # /namespaces?search= 只作兜底（含 "/" 的路径搜索返回 0 条，是子组 502 的根因）。
+    fake = _FakeHttp(namespaces=[{"id": 7, "full_path": "grp", "kind": "group"}],
+                     group_by_path={"grp/sub": {"id": 42, "full_path": "grp/sub"}})
     out = _provider(fake).create_repo("tok", "proj", owner="grp/sub", private=True)
     assert out["full_name"] == "grp/sub/proj"
     paths = [c[1] for c in fake.calls]
-    assert paths[0].startswith("/namespaces?search=grp%2Fsub")
+    assert paths[0] == "/groups/grp%2Fsub"          # 路径寻址优先
+    assert not any(str(p).startswith("/namespaces") for p in paths)  # 命中后不再兜底
     post = [c for c in fake.calls if c[0] == "POST"][-1]
     assert post[1] == "/projects"
     assert post[2]["namespace_id"] == 42          # 不是 7（前缀组），必须 full_path 精确匹配
     assert post[2]["visibility"] == "private"
     assert post[2]["initialize_with_readme"] is True
+
+
+def test_list_and_resolve_share_one_source_of_truth():
+    """列得出的必须建得成：list_create_spaces 的 path 能直接喂给 resolve_namespace。"""
+    spaces = [{"id": 1, "full_path": "grp", "name": "GRP"},
+              {"id": 2, "full_path": "grp/sub", "name": "SUB"}]
+    fake = _FakeHttp(groups=spaces,
+                     group_by_path={s["full_path"]: {"id": s["id"], "full_path": s["full_path"]}
+                                    for s in spaces})
+    p = _provider(fake)
+    listed = [x["path"] for x in p.list_create_spaces("tok")]
+    assert listed == ["grp", "grp/sub"]
+    for path in listed:
+        ns = p.resolve_namespace("tok", path)
+        assert ns and ns["path"] == path and ns["id"]
 
 
 def test_create_repo_without_owner_keeps_personal_path():
@@ -119,7 +143,7 @@ def test_check_name_reads_gitlab_username_field(monkeypatch):
         def verify_token(self, token):
             return {"id": 44646095, "username": "yangaiwu"}      # 无 login 键
 
-    monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _Prov())
+    monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _Prov())
     # arch-weekly-11 侧身份获取经 with_oauth_token（过期 token 刷新重试）；
     # 本用例只锁「GitLab username 字段」语义，包装层直接透传即可。
     monkeypatch.setattr(R, "with_oauth_token",

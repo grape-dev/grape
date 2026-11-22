@@ -50,7 +50,7 @@ class TestGlobalBotTokenSwap:
     def test_invalid_new_token_aborts(self):
         """R21.1.2 步骤 1: 新 token 无效 → 中止"""
         from src.domains.mgmt.admin.config_store import global_bot_token_swap
-        with patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")):
+        with patch("src.domains.mgmt.vcs.GitCodeProvider.verify_token", side_effect=RuntimeError("401")):
             global_bot_token_swap("gitcode", "bot_old", "invalid_new")
             # 无异常，静默返回
 
@@ -61,15 +61,15 @@ class TestGlobalBotTokenSwap:
         _fake_cursor = MagicMock()
         _fake_cursor.fetchall.return_value = [("gitcode:owner/repo", "old_bot_name")]
 
-        with patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "new_bot_name"}), \
+        with patch("src.domains.mgmt.vcs.GitCodeProvider.verify_token", return_value={"login": "new_bot_name"}), \
              patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
              patch("src.domains.mgmt.user.db.get_webhook_url", return_value="https://example.com/webhook/gitcode"), \
              patch("src.domains.mgmt.user.db._get_managed_webhook_id", return_value=123), \
-             patch("src.kernel.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
-             patch("src.kernel.token_resolver.GitCodeProvider.remove_webhook", return_value=True) as mock_rm_wh, \
-             patch("src.kernel.token_resolver.GitCodeProvider.setup_webhook", return_value=456) as mock_setup_wh, \
-             patch("src.kernel.token_resolver.GitCodeProvider.remove_collaborator", return_value=True) as mock_rm_bot:
+             patch("src.domains.mgmt.vcs.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
+             patch("src.domains.mgmt.vcs.GitCodeProvider.remove_webhook", return_value=True) as mock_rm_wh, \
+             patch("src.domains.mgmt.vcs.GitCodeProvider.setup_webhook", return_value=456) as mock_setup_wh, \
+             patch("src.domains.mgmt.vcs.GitCodeProvider.remove_collaborator", return_value=True) as mock_rm_bot:
             mock_db.cursor.return_value = _fake_cursor
             global_bot_token_swap("gitcode", "bot_old", "bot_new")
             # 验证邀请新 bot
@@ -88,7 +88,7 @@ class TestGlobalBotTokenSwap:
         _fake_cursor = MagicMock()
         _fake_cursor.fetchall.return_value = []  # 没有仓库
 
-        with patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "new_bot"}), \
+        with patch("src.domains.mgmt.vcs.GitCodeProvider.verify_token", return_value={"login": "new_bot"}), \
              patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"):
             mock_db.cursor.return_value = _fake_cursor
@@ -123,19 +123,22 @@ class TestGlobalBotTokenStrategyPerProvider:
 
     def test_gitcode_strategy_uses_gitcode_key(self):
         """R21.2.7: GitCodeProvider → global_gitcode_bot_token_status"""
-        from src.kernel.token_resolver import GlobalBotToken, GitCodeProvider
+        from src.kernel.token_resolver import GlobalBotToken
+        from src.domains.mgmt.vcs import GitCodeProvider
         strategy = GlobalBotToken(GitCodeProvider())
         assert strategy.provider.global_bot_status_meta_key() == "global_gitcode_bot_token_status"
 
     def test_github_strategy_uses_github_key(self):
         """R21.2.7: GitHubProvider → global_github_bot_token_status"""
-        from src.kernel.token_resolver import GlobalBotToken, GitHubProvider
+        from src.kernel.token_resolver import GlobalBotToken
+        from src.domains.mgmt.vcs import GitHubProvider
         strategy = GlobalBotToken(GitHubProvider())
         assert strategy.provider.global_bot_status_meta_key() == "global_github_bot_token_status"
 
     def test_gitcode_mark_expired_sets_gitcode_key(self):
         """R21.2.7: GitCode mark_expired → global_gitcode_bot_token_status=expired"""
-        from src.kernel.token_resolver import GlobalBotToken, GitCodeProvider
+        from src.kernel.token_resolver import GlobalBotToken
+        from src.domains.mgmt.vcs import GitCodeProvider
         strategy = GlobalBotToken(GitCodeProvider())
         with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
              patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):
@@ -144,7 +147,8 @@ class TestGlobalBotTokenStrategyPerProvider:
 
     def test_github_mark_expired_sets_github_key(self):
         """R21.2.7: GitHub mark_expired → global_github_bot_token_status=expired"""
-        from src.kernel.token_resolver import GlobalBotToken, GitHubProvider
+        from src.kernel.token_resolver import GlobalBotToken
+        from src.domains.mgmt.vcs import GitHubProvider
         strategy = GlobalBotToken(GitHubProvider())
         with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
              patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):

@@ -515,7 +515,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     "code": 400, "message": f"未注册的平台: {_p}（先在管理面配置平台卡）"})
             if _tok and not _is_placeholder(_tok):
                 try:
-                    from src.kernel.token_resolver import create_provider
+                    from src.domains.mgmt.vcs import create_provider
                     _provider = create_provider(_p)
                     _info = _provider.verify_token(_tok)
                 except HTTPException:
@@ -768,7 +768,8 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     from src.kernel.repo_key import to_repo_key
     _rk = to_repo_key(f"{owner}/{repo}")
     _provider = create_provider_from_repo_key(_rk)
@@ -793,7 +794,7 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
         from src.kernel.session_manager import db, db_lock
         # FR-21.4: 按 repo_key 前缀选列（D43/S63：列名卡派生）
         from src.kernel.repo_key import parse_repo_key
-        from src.kernel.token_resolver import create_provider as _cp_cfg
+        from src.domains.mgmt.vcs import create_provider as _cp_cfg
         _provider_name, _, _ = parse_repo_key(_rk)
         _token_col = _cp_cfg(_provider_name).token_storage_field()
         if _token_col:
@@ -891,7 +892,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
-        from src.kernel.token_resolver import create_provider_from_repo_key
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         _verified_login = ""
         try:

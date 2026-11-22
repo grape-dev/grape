@@ -138,7 +138,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     经 with_oauth_token 包一层：401/403(token) 预刷新+重试语义与存量一致
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)

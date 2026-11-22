@@ -1957,7 +1957,7 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
         log.warning(f"_rebuild_webhook_with_bot_token: cannot split repo_key {repo_key}")
         return ""
     # S58/D36：删旧/建新一律走适配器端口（create_provider），无平台分支
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     _old_hook_id = _get_managed_webhook_id(repo_key)
     if _old_hook_id:
         try:
@@ -2010,7 +2010,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     _related_repos = []
     try:
         # D38/S58：列名走适配器卡派生（内置卡=存量列名，config-only 平台=bot_<p>_token）
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _bot_token_col = create_provider(provider).token_storage_field()
         import re as _re
         # F4/D106：卡列空平台（gitee/gitlab 终态）无列可查——改查 grape_t_repo_credentials
@@ -2111,7 +2111,7 @@ def _repo_bot_token_value(repo_key: str) -> str:
     provider = parse_repo_key(repo_key or "")[0] or "gitcode"
     _col = ""
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _col = create_provider(provider).token_storage_field()
     except Exception:
         _col = ""
@@ -2186,11 +2186,8 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     （rc_bot 与 repo_bot——后者 `_fetch` 也优先读同一行）一并摘掉，回到「无行」语义，
     由后续级别（归属者用户凭据）兜底；绝不把旧值发出去。
     """
-    from src.kernel.token_resolver import (
-        ExplicitRepoBotToken,
-        TokenResolver,
-        create_provider_from_repo_key,
-    )
+    from src.kernel.token_resolver import ExplicitRepoBotToken, TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R25.1: 跳过第 3 级 GlobalBotToken（保持"no_global"语义）
@@ -2456,7 +2453,8 @@ def get_repo_bot_token(repo_key: str = "") -> str:
     """
     if not repo_key:
         return ""
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R18：跳过第 1 级 session token（DevopsAgentSessionToken）——D101 方案三该级
@@ -2486,8 +2484,8 @@ def get_task_token(task: dict) -> str:
     #    真因由建树面的 resolve_exec_token 归因，避免抢走失败分类）。
     if repo_key:
         try:
-            from src.kernel.token_resolver import (
-                ExplicitRepoBotToken, create_provider_from_repo_key)
+            from src.kernel.token_resolver import ExplicitRepoBotToken
+            from src.domains.mgmt.vcs import create_provider_from_repo_key
 
             _head = ExplicitRepoBotToken(create_provider_from_repo_key(repo_key))
             _explicit_token, _explicit_stage = _head.resolve(repo_key)
@@ -2681,7 +2679,8 @@ def get_repo_token_with_refresh(repo_key: str) -> str:
 
     R16.4: 过期短路——标记过期的 token 短路返回空串（用户 token status=4 除外，best-effort）。
     """
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     return TokenResolver(provider).get_token(repo_key)
 
@@ -2695,7 +2694,7 @@ def get_repo_token_for(repo_key: str) -> str:
     消费方（qa_gate/issues 路由/issue_vcs_index/event_pipeline）不再按
     平台名分叉选 getter——本函数自身也零平台分支。
     """
-    from src.kernel.token_resolver import create_provider_from_repo_key
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     _prov = create_provider_from_repo_key(repo_key)
     try:
         return _prov.resolve_repo_token(repo_key) or ""
@@ -2820,7 +2819,8 @@ def get_github_token(repo_key: str = "") -> str:
     - repo_key 非空 → bot token：managed_repos.bot_github_token → 全局 → 用户 token 降级
     - 无 repo_key → 空（用户级 token 走 get_user_github_token）
     """
-    from src.kernel.token_resolver import TokenResolver, create_provider
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider
     token = TokenResolver(create_provider("github")).get_token(repo_key)
     if token:
         return token
@@ -2856,7 +2856,7 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
             c = _mg_db.cursor()
             # D43/S63：列名与前缀子句卡/目录派生——token 列走适配器；
             # 默认平台（内置卡序首）含裸键（无前缀存量数据），其余平台按前缀
-            from src.kernel.token_resolver import create_provider as _cp_pb
+            from src.domains.mgmt.vcs import create_provider as _cp_pb
             _tok_col = _cp_pb(provider).token_storage_field()
             _prefix_clause = _path_b_prefix_clause(provider)
             # F4/D106: card column empty (gitee/gitlab final state) — path B determination changed to
@@ -2911,7 +2911,7 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
         except (ValueError, TypeError):
             _wh_id = 0
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _prov = create_provider(provider)
         _tok_col = _prov.token_storage_field()
         _wt_col = _prov.webhook_token_field()
@@ -3017,7 +3017,7 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
             # GitHub push 邀请制、generic 直加平台无确认步骤；调用方零平台分支）
             owner = repo["repo_owner"]
             repo_name = repo["repo_name"]
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.vcs import create_provider
             _prov = create_provider(provider)
             if not _prov.add_collaborator(host_token, owner, repo_name, bot_username):
                 skipped += 1
@@ -5723,7 +5723,7 @@ def clear_repo_bot_token(repo_key: str) -> bool:
     repo_key = to_repo_key(repo_key)
     provider = parse_repo_key(repo_key)[0]
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _col = create_provider(provider).token_storage_field()
     except Exception:
         _col = ""

@@ -46,7 +46,7 @@ def test_matrix_factory(provider):
     gitcode 本体返回 GitCodeProvider 是原生类（非兜底语义）；其余平台
     不得落 GitCodeProvider（配卡未生效误兜底的信号）。
     """
-    from src.kernel.token_resolver import GitCodeProvider, create_provider
+    from src.domains.mgmt.vcs import GitCodeProvider, create_provider
     p = create_provider(provider)
     assert p is not None
     assert p.provider_name == provider

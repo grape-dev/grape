@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 
 def _mk_resolver():
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     return create_provider("gitee")
 
 

@@ -253,7 +253,7 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
     平台差异由平台卡/Provider 子类承担，routes 不再持有平台分支；repo_key 前缀
     统一由 provider 派生（不再折叠 gitcode）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     repos = create_provider(provider).fetch_repos_with_role(api_token)
     if not repos:
         # FR-5.4: 空结果可能是 token scope 受限，记 warning
@@ -521,7 +521,8 @@ def _probe_stale_repos(user_id):
     # FR-1.2: 仓库 404 双信号交叉验证——用 bot token 二次确认
     # 用户 token 404 可能是权限问题而非仓库真删了，bot token 是 maintainer 有读权限
     if stale_keys:
-        from src.kernel.token_resolver import TokenResolver, create_provider
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.vcs import create_provider
         verified_deletes = []
         for repo_key, owner, repo_name in stale_keys:
             provider, _, _ = parse_repo_key(repo_key)
@@ -1044,7 +1045,7 @@ def check_repo_name(name: str,
     # Issue #3563：身份获取改经 with_oauth_token 包装——过期 token（上游 401）走
     # 刷新重试，仍失败统一 401 reauth_required（detail 带 provider，Spec v2），
     # 替代零信息量 502；其余上游异常剥离内部 URL 后短消息化（原文仅落日志）。
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.api.oauth_token import sanitize_upstream_error
     from src.domains.runtime.public import VcsApiClient
     try:
@@ -1091,19 +1092,11 @@ def list_create_targets(provider: str = Query("", description="目标平台，�
             user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
-    from src.kernel.token_resolver import create_provider
-    _p = create_provider(provider)
-    login = ""
-    try:
-        login = str(_p.get_user_login(api_token) or "")
-    except Exception as e:  # noqa: BLE001
-        log.warning(f"create-targets: 取登录名失败 ({provider}): {e}")
-    try:
-        spaces = _p.list_create_spaces(api_token) if api_token else []
-    except Exception as e:  # noqa: BLE001
-        log.warning(f"create-targets: 列空间失败 ({provider}): {e}")
-        spaces = []
-    return {"provider": provider, "personal_login": login, "spaces": spaces}
+    # 目标上下文（登录名 + 可建仓空间）：缓存是应用服务的横切能力，
+    # 路由只做参数整形（默认 1800s，meta/env 可配，0 = 不走缓存）。
+    from src.domains.mgmt.vcs import namespaces as _targets
+
+    return _targets.create_targets(provider, api_token)
 
 
 def _assert_owner_visible(provider: str, api_token: str, owner: str, user: dict) -> None:
@@ -1185,7 +1178,7 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
 
     # B 批（2026-11-13）：建仓走 provider 端口（GitHub/GitCode/GitLab 各自实现），
     # 路由层不再按平台名分派 create_github_repo / create_repo。
-    from src.kernel.token_resolver import create_provider, create_repo_kwargs
+    from src.domains.mgmt.vcs import create_provider, create_repo_kwargs
     try:
         repo_info = create_provider(provider).create_repo(
             api_token=api_token, name=name, description=body.description, private=private,
@@ -1450,7 +1443,7 @@ def _gitlab_host_precheck(provider: str, owner: str, repo_name: str, api_token: 
 
     失败语义与 v5 段一致：身份取不到/通道异常 → 502，权限不足 → 403。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
 
     try:
         prov = create_provider(provider)
@@ -2406,7 +2399,7 @@ def set_repo_connection(provider: str, body: RepoConnectionBody,
     if not token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "token required"})
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         info = create_provider(provider).verify_token(token)
     except Exception as e:
         raise HTTPException(status_code=502, detail={
@@ -2541,7 +2534,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=500, detail={"code": 500, "message": "仓库查询失败"})
 
     # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
-    from src.kernel.token_resolver import create_provider_from_repo_key
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     _vcs_provider = create_provider_from_repo_key(repo_key)
     try:
         user_data = _vcs_provider.verify_token(body.bot_token)
@@ -2654,7 +2647,7 @@ def _remove_old_bot_collaborator(repo_key: str, owner: str, repo_name: str,
     if not old_bot_username:
         return
     try:
-        from src.kernel.token_resolver import create_provider_from_repo_key
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         # 移除旧 bot 需要用 owner token（有仓库管理权限的 token）
         _remove_token = get_user_token_for(
@@ -3411,7 +3404,8 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         # 把「仓库无 bot、平台有全局 bot」的 path-B 私仓推到全局 bot 身份上（403 且难查）。
         def _bot():
             try:
-                from src.kernel.token_resolver import TokenResolver, create_provider
+                from src.kernel.token_resolver import TokenResolver
+                from src.domains.mgmt.vcs import create_provider
                 _sel = TokenResolver(create_provider(provider)).resolve_exec_token(rk)
                 return _sel.token, (_sel.stage or ""), None
             except Exception as e:

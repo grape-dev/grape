@@ -265,7 +265,7 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
         return cached
 
     def _verify() -> dict:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
 
         return create_provider(provider).verify_token(token) or {}
 

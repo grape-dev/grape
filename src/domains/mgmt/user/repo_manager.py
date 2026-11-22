@@ -1737,7 +1737,7 @@ def invite_permission_for(provider: str) -> str:
 
 def vcs_user_login(provider: str, token: str) -> str:
     """token 持有者在该平台的登录名（卡驱动 /user；空串=无法确认）。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     info = create_provider(provider).verify_token(token)
     return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
 

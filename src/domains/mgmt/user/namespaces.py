@@ -128,7 +128,7 @@ class _CardSpacesLister:
         self.provider = provider
 
     def list_orgs(self, token: str) -> list[NamespaceRef]:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
 
         spaces = create_provider(self.provider).list_create_spaces(token) or []
         return [
@@ -147,7 +147,7 @@ class _GiteeUserOrgsLister:
     provider = "gitee"
 
     def list_orgs(self, token: str) -> list[NamespaceRef]:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
 
         # Gitee 端口没有「组织空间」抽象方法，这里用其卡驱动的通用 HTTP 能力；
         # 取不到能力（非配置驱动 Provider）就返回空清单，不臆造。
@@ -274,7 +274,7 @@ def platform_login(provider: str, token: str) -> str:
     而 owner=""（隐含个人）却能成功。个人空间的权威身份只能来自平台本身。
     """
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
 
         info = create_provider(provider).verify_token(token) or {}
         if isinstance(info, dict):

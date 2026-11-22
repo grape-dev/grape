@@ -5,16 +5,18 @@ Issue #372 R18: 统一 13 个散落函数为 TokenResolver 策略链。
 设计文档: docs/weekly-08/token-config/04-token-resolver.md
 
 模块结构:
-  VCSProvider (ABC)
-    ├── GitCodeProvider
-    └── GitHubProvider
   TokenStrategy (基类)
-    ├── ExplicitRepoBotToken     (第 1 级，Issue #3713 链首)
-    ├── RepoBotToken             (第 2 级)
-    ├── GlobalBotToken           (第 3 级)
-    └── UserToken                (第 4 级)
+    ├── ExplicitRepoBotToken      (第 1 级，Issue #3713 链首)
+    ├── RepoBotToken              (第 2 级)
+    ├── GlobalBotToken            (第 3 级)
+    └── UserToken                 (第 4 级)
   TokenResult (数据类)
   TokenResolver (统一入口)
+  TokenActionHandler 家族 (回帖身份分派)
+
+职责边界（2026-11-22 归位）：本模块**只**负责 token 解析与身份分派。VCS 平台
+适配器（建仓/协作/webhook/命名空间清单）已迁到 src/domains/mgmt/vcs/providers.py；
+本模块通过 src/kernel/ports/vcs_provider.py 端口取得 provider，不 import 任何平台实现。
 
 三个语义入口（+ Issue #3713 追加的选择器）:
   get_token()           — 获取可用执行 token（含过期短路）
@@ -32,758 +34,12 @@ from typing import Optional
 
 from src.kernel.config import log
 from src.kernel.ports import accounts as _accounts
-from src.kernel.ports import im as _im
 from src.kernel.ports import pipeline as _pipeline
 from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
-
-def _supports_create_repo_kwargs(provider: str) -> bool:
-    """卡驱动能力位 `create_repo_options`：true = 适配器接受 auto_init/default_branch。
-
-    禁止 kernel 内二元平台字面量（platform-whitelist ratchet）；新平台只需在
-    configs/platforms/<provider>.json 声明该能力位即可获得建仓可选参数。
-    """
-    try:
-        card = _vcs_cards.get_platform_card(str(provider or "").lower())
-    except Exception as exc:
-        log.warning(f"create_repo_kwargs: platform card lookup failed provider={provider!r}: {exc}")
-        return False
-    return bool(card and getattr(card, "create_repo_options", False))
-
-
-def create_repo_kwargs(provider: str, auto_init: bool = False,
-                       default_branch: str = "") -> dict:
-    """建仓可选参数（仅卡声明 create_repo_options 的平台才透传）。
-
-    provider 差异收敛在 kernel 层，避免调用方（mgmt/repos.py）出现平台名比较。
-    """
-    if _supports_create_repo_kwargs(provider):
-        return {"auto_init": bool(auto_init),
-                "default_branch": (default_branch or "main")}
-    return {}
-
-
-def get_bot_identity_token(repo_key: str) -> str:
-    """回帖/评论专用：只解析 **bot 身份** token（仓库 bot → 全局 bot），不落用户 token。
-
-    为什么需要（2026-11-15 实测）：路径 B 仓库（managed_repos.host_user_id 非空，如
-    songspace/flask-blog）下，执行链按设计跳过 repo/global bot → 落到用户 token，
-    于是 agent 处理完的回帖都挂在用户账号名下。回帖语义要求「系统/agent 发言」，
-    必须以机器人账号（如 grace_bot）出镜；执行链（clone/推送）仍保持原优先级不变。
-    """
-    from src.kernel.repo_key import to_repo_key
-    rk = to_repo_key(repo_key or "")
-    if not rk:
-        return ""
-    try:
-        provider = create_provider_from_repo_key(rk)
-    except Exception as e:  # noqa: BLE001
-        log.debug(f"get_bot_identity_token: provider 解析失败 ({repo_key}): {e}")
-        return ""
-    for strat in (RepoBotToken(provider, bypass_path_b=True),
-                  GlobalBotToken(provider, bypass_path_b=True)):
-        try:
-            tok = strat.get_token(rk)
-        except Exception as e:  # noqa: BLE001
-            log.debug(f"get_bot_identity_token: {strat.level} 取 token 失败: {e}")
-            tok = ""
-        if tok:
-            return tok
-    return ""
-
-
-class VCSProvider(ABC):
-    """VCS 平台接口。GitCode / GitHub 各自实现。
-
-    策略类通过此接口调用平台能力，不硬编码 provider 分支。
-    """
-
-    @property
-    @abstractmethod
-    def provider_name(self) -> str:
-        """provider 标识: "gitcode" / "github"。"""
-
-    @abstractmethod
-    def verify_token(self, token: str) -> dict:
-        """验证 token 有效性，返回用户信息 dict（含 login 字段）。
-        token 无效时抛 RuntimeError。"""
-
-    @abstractmethod
-    def get_user_login(self, token: str) -> str:
-        """获取 token 对应的用户名。"""
-
-    def token_expiry(self, token: str) -> dict:
-        """凭据自身有效期元数据（默认无：多数平台不提供）。
-
-        返回 {"expires_at": "YYYY-MM-DD", "scopes": [...], "revoked": bool} 或 {}。
-        有能力的平台（GitLab PAT）覆盖它；调用方（凭据绑定）按需取，读不到就落空。
-        """
-        return {}
-
-    @abstractmethod
-    def add_collaborator(self, api_token: str, owner: str, repo: str,
-                         username: str, permission: str = "") -> bool:
-        """邀 bot 为协作者。幂等：已是协作者返回 True。
-        permission 缺省时用各适配器存量默认（Gitee 系 maintainer / GitHub push）。
-        """
-
-    def accept_collaborator_invite(self, bot_token: str, owner: str, repo: str) -> bool:
-        """D39/S59：接受协作者邀请（bot 被邀后生效）。
-
-        邀请制平台在适配器覆写；generic 直加平台（PUT 即成员）默认 True。
-        """
-
-        return True
-
-    @abstractmethod
-    def remove_collaborator(self, api_token: str, owner: str, repo: str,
-                            username: str) -> bool:
-        """移除协作者。best-effort，失败不阻断。"""
-
-    @abstractmethod
-    def setup_webhook(self, api_token: str, owner: str, repo: str,
-                      webhook_url: str, webhook_secret: str) -> int:
-        """创建 webhook，返回 webhook_id。"""
-
-    @abstractmethod
-    def remove_webhook(self, api_token: str, owner: str, repo: str,
-                       hook_id: str) -> bool:
-        """删除 webhook。"""
-
-    @abstractmethod
-    def token_storage_field(self) -> str:
-        """仓库级 bot token 存储列名。"""
-
-    @abstractmethod
-    def webhook_token_field(self) -> str:
-        """webhook token 存储列名。"""
-
-    @abstractmethod
-    def session_token_field(self) -> str:
-        """devops_agent_session token 列名。"""
-
-    @abstractmethod
-    def global_bot_meta_key(self) -> str:
-        """全局 bot token meta key。"""
-
-    @abstractmethod
-    def global_bot_status_meta_key(self) -> str:
-        """全局 bot token 过期状态 meta key（per-provider, R21.2）。"""
-
-    @abstractmethod
-    def pat_create_url(self) -> str:
-        """PAT 创建页链接。"""
-
-    @abstractmethod
-    def fetch_user_token(self, username: str, user_id: str) -> str:
-        """获取用户 token（带刷新）。
-        统一走 get_user_token_for(username, user_id, provider)。"""
-
-    def resolve_repo_token(self, repo_key: str) -> str:
-        """仓库 token 统一读链（2026-11-13 if/else 收口，基类默认能力）。
-
-        默认走 TokenResolver 标准策略链；owner-identity 回落由
-        GenericVcsProvider 按卡能力位 owner_identity_token_fallback 派生
-        （配置驱动，新平台卡内声明即得）。存量专用实现（如有）子类覆写。
-        """
-        from src.kernel.token_resolver import TokenResolver
-        return TokenResolver(self).get_token(repo_key) or ""
-
-    def get_collaborator_permission(self, api_token: str, owner: str,
-                                    repo: str, username: str) -> "dict | str | None":
-        """D42/S62 端口：查协作者权限（dict/str/None 三形态归一）。
-
-        默认 None（未实弹验证平台 → 调用方 fail-closed/不阻断语义）。
-        """
-        return None
-
-    def list_collaborators(self, api_token: str, owner: str,
-                           repo: str) -> "list[dict]":
-        """D44/S66 端口：拉仓库协作者列表（分页，平台原生字段）。"""
-        return []
-
-    def list_create_spaces(self, api_token: str) -> "list[dict]":
-        """可建仓的「所属空间」清单（GitLab 组/子组；其它平台暂无 → 空 = 只有个人空间）。
-
-        返回 [{path, name, kind}]：`path` 可直接作为建仓 owner（GitLab 用 full_path，
-        含子组）。默认空实现——平台没有组织空间概念时，创建表单只渲染"个人空间"。
-        """
-        return []
-
-    def normalize_created_repo(self, raw: dict) -> dict:
-        """建仓响应 → 全平台同形的仓库身份（补 full_name/owner/name，原字段保留）。
-
-        平台差异收在对齐器里（`src.kernel.vcs.repo_ref`，按卡 dialect 注册）；这里
-        是给各 provider 的 create_repo 复用的通用钩子——路由层因此零平台分支。
-        """
-        from src.kernel.vcs.repo_ref import normalize_repo_payload
-
-        return normalize_repo_payload(self.provider_name, raw, getattr(self._card, "dialect", ""))
-
-    def create_repo(self, api_token: str, name: str, description: str = "",
-                    private: bool = False, owner: str = "", path: str = "") -> dict:
-        """D42/S62 端口：在 token 用户名下建仓，返回平台 repo dict。
-
-        owner 非空 = 在指定组织/空间下建仓（平台实现支持时）；path 为仓库 URL 路径
-        （GitCode 特有，缺省等于 name）。默认不支持的实现返回 error dict（调用方按
-        error 处理）。
-        """
-        return {"error": f"create_repo unsupported for {self.provider_name}"}
-
-class GenericVcsProvider(VCSProvider):
-    """配置驱动通用平台实现（D15/K3）：能力全部来自仓库平台卡，零平台代码。
-
-    - verify_token/get_user_login：卡 api_base + /user + api_auth（query_token/bearer）
-    - collaborator/webhook：卡路径模板（github 系 REST 形态）
-    - fetch_user_token：D3 统一入口（OAuth 身份）→ user_credentials `<p>_pat`（批次 0 PAT 存储）
-    - token_storage_field 返回空串：仓库级 bot token 分列归批次 1（M1/M2）
-    """
-
-    def __init__(self, card):
-        self._card = card
-
-    @property
-    def provider_name(self) -> str:
-        return self._card.provider
-
-    def _http(self, method: str, path: str, token: str, data: dict | None = None,
-              form: bool = False) -> dict:
-        import json as _json
-        import urllib.request
-        import urllib.error
-        url = f"{self._card.api_base}{path}"
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self._card.api_auth == "query_token":
-            sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}access_token={token}"
-        elif self._card.api_auth == "private_token":
-            # S72：GitLab 系鉴权头 = PRIVATE-TOKEN（原 else 分支发 Bearer → 401）
-            headers["PRIVATE-TOKEN"] = token
-        else:
-            headers["Authorization"] = f"Bearer {token}"
-        if form and data:
-            # D41/D42：Gitee 系 v5 写接口实测要求 x-www-form-urlencoded（JSON 会 400）
-            import urllib.parse as _up
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-            body = _up.urlencode(data).encode()
-        else:
-            body = _json.dumps(data).encode() if data else None
-        req = urllib.request.Request(url, data=body, method=method, headers=headers)
-        try:
-            from src.kernel.upstream_http import open_with_policy as _open_policy
-            with _open_policy(
-                    req, timeout=30,
-                    ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
-                    allow_redirects=self._card.dialect != "gitlab",
-            ) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            # 带上游响应体：4xx 的 {"message": ...} 才是可行动的诊断（建仓被拒等）
-            try:
-                _detail = e.read().decode("utf-8", "replace")[:300]
-            except Exception:  # noqa: BLE001
-                _detail = ""
-            raise RuntimeError(
-                f"{self._card.name} API {method} {path} failed ({e.code}): {e}"
-                + (f" | {_detail}" if _detail else "")) from e
-
-    def verify_token(self, token: str) -> dict:
-        info = self._http("GET", "/user", token)
-        if not isinstance(info, dict) or not info:
-            raise RuntimeError(f"{self._card.name} token verify: empty user info")
-        return info
-
-    def resolve_repo_token(self, repo_key: str) -> str:
-        """仓库 token 统一读链（2026-11-13 if/else 收口，基类能力）：
-
-        标准策略链（TokenResolver：session→repo_bot→global→user(host_user_id)）
-        → 全空且卡声明 owner_identity_token_fallback=true 时，按仓库 owner
-        用户名查其该平台 identity token（D32-补丁语义下沉，原为
-        db.get_github_token 尾段专属回落）。
-
-        抽象口径：所有平台（含未来 config-only 新平台）经此单一入口获得
-        与原平台专属 getter 等价的能力面；新平台要回落语义只需卡内声明
-        owner_identity_token_fallback，零代码分支。
-        """
-        from src.kernel.token_resolver import TokenResolver
-        token = TokenResolver(self).get_token(repo_key)
-        if token:
-            return token
-        if not getattr(self._card, "owner_identity_token_fallback", False):
-            return ""
-        try:
-            from src.kernel.repo_key import to_repo_key, parse_repo_key
-            _rk = to_repo_key(repo_key, provider=self.provider_name)
-            if not _rk:
-                return ""
-            _p, owner, _name = parse_repo_key(_rk)
-            return self.fetch_owner_identity_token(owner)
-        except Exception as e:
-            log.warning(f"resolve_repo_token fallback failed (provider={self.provider_name}, "
-                        f"repo_key={repo_key}): {e}")
-        return ""
-
-    def fetch_owner_identity_token(self, owner: str) -> str:
-        """owner 的本平台 identity token（能力位 owner_identity_token_fallback
-        的执行体，基类默认按 external_identities 直查——OAuth 标准形态）。
-
-        平台有特殊解析（如 github 存量委托）时子类覆写。
-        """
-        if not owner:
-            return ""
-        try:
-            acc = _accounts.get_grape_account_by_username(owner)
-            if acc:
-                for ident in _accounts.get_user_identities_with_tokens(acc["id"]):
-                    if ident.get("provider") == self.provider_name and ident.get("access_token"):
-                        return ident["access_token"]
-        except Exception as e:
-            log.warning(f"fetch_owner_identity_token failed (provider={self.provider_name}, "
-                        f"owner={owner}): {e}")
-        return ""
-
-    def get_user_login(self, token: str) -> str:
-        return str(self.verify_token(token).get("login", ""))
-
-    def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
-        try:
-            self._http("PUT", f"/repos/{owner}/{repo}/collaborators/{username}", api_token,
-                       {"permission": permission})
-            return True
-        except Exception:
-            return False
-
-    def remove_collaborator(self, api_token, owner, repo, username):
-        try:
-            self._http("DELETE", f"/repos/{owner}/{repo}/collaborators/{username}", api_token)
-            return True
-        except Exception:
-            return False
-
-    def accept_collaborator_invite(self, bot_token, owner, repo) -> bool:
-        """D39/S59 端口：接受协作者邀请（bot 被邀后生效）。
-
-        形态由适配器内聚：generic 直加平台（PUT collaborators 即成员，
-        无邀请确认步骤）返回 True；邀请制平台在子类覆写走存量流程。
-        """
-        return True
-
-    def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
-        """D42/S62 端口：建仓（POST /user/repos，指定 owner 时 /orgs/{owner}/repos）。
-
-        generic 形态：query_token 走 form（Gitee 系 v5 写接口要求），
-        其余 JSON；返回平台 repo dict（full_name/owner/name 由调用方归一）。
-        """
-        data = {"name": name, "description": description or "",
-                "private": "true" if private else "false"}
-        if path:
-            data["path"] = path
-        form = self._card.api_auth == "query_token"
-        endpoint = f"/orgs/{owner}/repos" if owner else "/user/repos"
-        return self._http("POST", endpoint, api_token, data, form=form)
-
-    def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        """D42/S62 端口：查指向 webhook_url 的已有 webhook（id 或 None）。
-
-        FR-5.1 同语义：hooks 列表为空（token 权限不足）返回 None 不误判。
-        """
-        hooks = self._http("GET", f"/repos/{owner}/{repo}/hooks?per_page=100", api_token)
-        if not isinstance(hooks, list):
-            return None
-        ids = [h.get("id") for h in hooks if isinstance(h, dict)
-               and (h.get("url") == webhook_url or h.get("config", {}).get("url") == webhook_url)]
-        return ids[0] if ids else None
-
-    def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        """D42/S62 端口：拉用户仓库列表（含 is_admin 标注）。
-
-        generic 形态：GET /user/repos 分页；is_admin 取 permissions.admin。
-
-        D102-A（2026-11-08 实弹发现）：Gitee /user/repos 列表响应对 owner
-        仓库也不带可用 permissions.admin——纯 permissions 判定把仓库 owner
-        错标 Member。owner 兜底：owner.login == 当前用户 login（GET /user
-        一次取回）→ is_admin=True，与 permissions.admin 取或；login 拉取
-        失败降级纯 permissions 判定（不炸列表拉取）。非 owner 仓库判定
-        不变（permissions 缺失降级 False 不误报权限的原则保留）。
-
-        2026-11-13：补 created_at 回填。前端项目大厅按「已托管 > 已加入 > 其它」
-        排序、同级按 created_at 倒序，generic 平台不回填该字段时全部沉底
-        （gitee 实测 7 条落第 7/8 页，首屏永远看不到）。各平台字段名不同：
-        Gitee/GitHub/GitLab 用 created_at，个别实现用 created_on / created。
-        """
-        out, page = [], 1
-        # D102-A: owner 兜底基准 login（失败降级 None=纯 permissions 判定）
-        _my_login = ""
-        try:
-            _my_login = self.get_user_login(api_token)
-        except Exception as e:
-            # 降级不阻断：角色可能显示 Member（原行为），列表完整返回
-            log.warning(f"fetch_repos_with_role: owner login fetch failed "
-                        f"(fallback to permissions-only): {e}")
-        while page <= 20:
-            batch = self._http("GET", f"/user/repos?per_page=100&page={page}", api_token)
-            if not isinstance(batch, list) or not batch:
-                break
-            for r in batch:
-                if not isinstance(r, dict):
-                    continue
-                perms = r.get("permissions") or {}
-                _owner = (r.get("owner") or {}).get("login", "") if isinstance(r.get("owner"), dict) else ""
-                # Gitee v5 的仓库对象用 namespace 表示归属（owner 可能缺）；
-                # 取不到时再按 full_name 的命名空间段兜底。此前 owner 为空会让
-                # 角色判定（owner==我的 login ⇒ admin）全部落空、界面显示"我明明
-                # 是管理员"却读成 Member（2026-11-14 实锤）。
-                if not _owner:
-                    _ns = r.get("namespace")
-                    if isinstance(_ns, dict):
-                        _owner = _ns.get("path") or _ns.get("name") or ""
-                _full = r.get("full_name") or ""
-                if not _owner and "/" in _full:
-                    _owner = _full.split("/", 1)[0]
-                if not _full and _owner and r.get("name"):
-                    _full = f"{_owner}/{r.get('name')}"
-                # D102-A: owner 兜底 || permissions.admin（两者取或）
-                _is_admin = bool(perms.get("admin")) or (
-                    bool(_my_login) and _owner == _my_login)
-                out.append({
-                    "full_name": _full,
-                    "owner": _owner,
-                    "name": r.get("name") or "",
-                    "is_admin": _is_admin,
-                    "html_url": r.get("html_url") or "",
-                    "created_at": (r.get("created_at") or r.get("created_on")
-                                   or r.get("created") or ""),
-                })
-            if len(batch) < 100:
-                break
-            page += 1
-        return out
-
-    def get_collaborator_permission(self, api_token, owner, repo, username) -> "dict | str | None":
-        """D42/S62 端口：查协作者权限。
-
-        generic 平台权限形态未实弹验证，返回 None（调用方语义：不确定
-        不阻断，零危害默认）；存量平台子类覆写走原实现
-        （GitCode 返回 permission dict，GitHub 返回 role_name 字符串）。
-        """
-        return None
-
-    def list_collaborators(self, api_token, owner, repo) -> "list[dict]":
-        """D44/S66 端口：拉仓库协作者列表（IM 群成员映射同步消费）。
-
-        generic 形态：GET /repos/{owner}/{repo}/collaborators 分页
-        （github 系路径，卡驱动鉴权）；字段归一（login/name + 平台原生
-        login 字段），调用方按 nick/login 匹配。存量平台子类委托覆写。
-        """
-        out, page = [], 1
-        while page <= 20:
-            batch = self._http("GET",
-                f"/repos/{owner}/{repo}/collaborators?per_page=100&page={page}", api_token)
-            if not isinstance(batch, list) or not batch:
-                break
-            for c in batch:
-                if isinstance(c, dict):
-                    out.append(c)
-            if len(batch) < 100:
-                break
-            page += 1
-        return out
-
-    def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        # S70（实弹发现）：Gitee 系 v5（api_auth=query_token）的建钩必须带布尔位
-        # 事件集（issues_events/note_events 等）——events 列表是 GitHub 语义，
-        # gitee 全忽略 → issue/评论事件不投递（实弹 hook 建出 push-only）。
-        # 布尔位集合与 repo_manager 存量 GitCode 序列逐字节对齐（v5 家族同款）。
-        _body = {
-            "url": webhook_url, "secret": webhook_secret,
-            "events": ["push", "issues", "issue_comment", "pull_request"],
-        }
-        if getattr(self._card, "api_auth", "") == "query_token":
-            _body = {
-                "url": webhook_url,
-                "password": webhook_secret,
-                "push_events": True,
-                "issues_events": True,
-                "merge_requests_events": True,
-                "note_events": True,
-                "tag_push_events": True,
-                "build_events": True,
-                "project_events": True,
-                "wiki_events": True,
-                "release_events": True,
-            }
-        resp = self._http("POST", f"/repos/{owner}/{repo}/hooks", api_token, _body)
-        return int(resp.get("id", 0) or 0)
-
-    def setup_repo_webhook(self, bot_token, owner, repo, webhook_url):
-        """D38/S58 端口：托管仓库 webhook 创建（bot token 鉴权）。
-
-        凭据形态由适配器内聚（D36 同款"能力/形态在适配器，调用方零分支"）：
-        Gitee 系 v5 password=bot_token；GitHub secret=""（存量语义）；
-        卡平台走基座 generic 形态。调用方（user/db 升级链）只传
-        (bot_token, owner, repo, url)，不感知平台。
-        """
-        return self.setup_webhook(bot_token, owner, repo, webhook_url,
-                                  webhook_secret=bot_token)
-
-    def remove_webhook(self, api_token, owner, repo, hook_id):
-        try:
-            self._http("DELETE", f"/repos/{owner}/{repo}/hooks/{hook_id}", api_token)
-            return True
-        except Exception:
-            return False
-
-    def token_storage_field(self) -> str:
-        return self._card.token_storage_field
-
-    def webhook_token_field(self) -> str:
-        return self._card.webhook_token_field
-
-    def session_token_field(self) -> str:
-        return self._card.session_token_field
-
-    def global_bot_meta_key(self) -> str:
-        return self._card.global_bot_meta_key
-
-    def global_bot_status_meta_key(self) -> str:
-        return self._card.global_bot_status_meta_key
-
-    def pat_create_url(self) -> str:
-        return self._card.pat_create_url
-
-    def fetch_user_token(self, username: str, user_id: str) -> str:
-        """获取用户 token（带刷新）。解析序 = D10 拍板（无 flag，单序）：
-        ① <p>_pat（用户显式配置 = 明确意图，design.md:190）
-        ② OAuth 身份（PAT 缺席时兜底，D3 统一入口带刷新）
-        命中 level 落 log（分轨观测，P-8 决议口径）。
-
-        actor 语义（D90-N2③ 定性，2026-11-07）：user_id = 凭据归属者
-        （credential owner——路径 B 场景即 host_user_id，非 API 调用者）；
-        触发者审计走 credential_usage_log.initiating_actor_id 专列。
-        不要"修"成双参数——拆 owner/actor 是零消费方设计。
-        """
-        provider = self._card.provider
-        # —— ① PAT（用户显式配置）——
-        try:
-            cfg = _tokens.get_credential(user_id, provider, kind="pat") or {}
-            pat_token = str(cfg.get("token", "") or "")
-        except Exception:
-            pat_token = ""
-        # —— ② OAuth 身份（兜底，带刷新）——
-        from src.api.deps import get_user_token_for
-        oauth_token = get_user_token_for(username, user_id=user_id, provider=provider) or ""
-
-        if pat_token:
-            log.info(f"fetch_user_token hit: provider={provider} level=pat")
-            _audit_source(user_id, provider, "pat")
-            return pat_token
-        if oauth_token:
-            log.info(f"fetch_user_token hit: provider={provider} level=oauth (pat miss)")
-            _audit_source(user_id, provider, "oauth")
-            return oauth_token
-        return ""
-
-
-def _platform_card(provider: str):
-    """读平台卡；未绑定 vcs_cards 端口时返回 None。
-
-    主控进程由 assembly 层绑定端口；worker 进程的 MANIFEST 不含
-    ``src/api/contracts_wiring.py``，端口永远绑不上。kernel 层不得 import
-    domains（R1 架构守卫），所以这里不做「本域默认卡」兜底，而是把
-    「没有卡」交回上层：provider 构造抛 PortNotBound，token_service 那些
-    入口统一降级为空结果（worker 本来就不做 repo token 链）。
-    """
-    try:
-        return _vcs_cards.get_platform_card(provider)
-    except Exception:  # noqa: BLE001 - 端口未绑定/装配缺失都按无卡处理
-        return None
-
-
-def _require_card(provider: str):
-    """取卡；取不到时抛 PortNotBound（语义：本进程没有装配层）。"""
-    from src.kernel.ports._base import PortNotBound
-
-    card = _platform_card(provider)
-    if card is None:
-        raise PortNotBound(
-            f"kernel port 'vcs_cards' is not bound for provider {provider!r} "
-            "(no assembly layer in this process)")
-    return card
-
-
-class GitCodeProvider(GenericVcsProvider):
-    """GitCode 平台（D22：GenericVcsProvider 基座 + 存量委托覆盖）。
-
-    基座提供：verify_token（/user 卡鉴权）、存储字段（卡）、fetch_user_token
-    （D3 统一入口 → user_credentials PAT）。
-    覆盖仅保留协议验证过的存量委托：collaborator 邀请流与 webhook 创建
-    （v5 form/事件集语义，repo_manager 存量序列）——批次 1 验证后退役。
-    """
-
-    def __init__(self):
-        super().__init__(_require_card("gitcode"))
-
-    def get_user_login(self, token: str) -> str:
-        # D85 迁移修复：身份探测委托存量网络缝 repo_manager.get_user_gitcode_login
-        # （与 GitHubProvider 对称；verify_token 直连导致 mock 缝失效/实网调用）
-        return _repos.get_user_gitcode_login(token)
-
-    def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
-        ok, _err = _repos.add_collaborator(api_token, owner, repo, username, permission)
-        return ok
-
-    def remove_collaborator(self, api_token, owner, repo, username):
-        try:
-            _repos.remove_collaborator(api_token, owner, repo, username)
-            return True
-        except Exception:
-            return False
-
-    def accept_collaborator_invite(self, bot_token, owner, repo):
-        # D39/S59：存量邀请制语义（v5 邀请列表→匹配→接受）
-        return _repos.accept_invite_for_repo(bot_token, owner, repo)
-
-    def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="", auto_init=False, default_branch="main") -> dict:
-        # D42/S62：存量委托（v5 form 语义；owner=组织空间，path=仓库 URL 路径）
-        return _repos.create_repo(api_token=api_token, name=name, description=description,
-                                  private=private, owner=owner, path=path,
-                                  auto_init=auto_init, default_branch=default_branch)
-
-    def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        # D42/S62：存量委托（含 429/5xx 退避）
-        return _repos.find_existing_webhook(api_token, owner, repo, webhook_url)
-
-    def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        # D42/S62：存量委托（成员仓库+is_admin 标注）
-        return _repos.fetch_repos_with_role(api_token)
-
-    def get_collaborator_permission(self, api_token, owner, repo, username):
-        # D42/S62：存量委托（返回 permission dict，含 access_level）
-        return _repos.get_member_permission(api_token, owner, repo, username)
-
-    def list_collaborators(self, api_token, owner, repo):
-        # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        return _im._fetch_gitcode_collaborators(owner, repo, api_token)
-
-    def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        return _repos.setup_webhook(api_token, owner, repo, webhook_url, webhook_password=webhook_secret)
-
-    def setup_repo_webhook(self, bot_token, owner, repo, webhook_url):
-        # D38/S58：存量形态 v5 password=bot_token（形态在适配器，调用方零分支）
-        return _repos.setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
-
-    def remove_webhook(self, api_token, owner, repo, hook_id):
-        try:
-            _repos.remove_webhook(api_token, owner, repo, int(hook_id))
-            return True
-        except Exception:
-            return False
-
-class GitHubProvider(GenericVcsProvider):
-    """GitHub 平台（D22：GenericVcsProvider 基座 + 存量委托覆盖，同 GitCode 说明）。"""
-
-    def __init__(self):
-        super().__init__(_require_card("github"))
-        # resolve_repo_token/fetch_owner_identity_token 走 GenericVcsProvider 基类：
-        # 卡能力位 owner_identity_token_fallback=true（configs/platforms/github.json）
-        # 派生回落语义，基类默认实现按 provider_name="github" 查 external_identities
-        # ——与原 db.get_github_token 尾段（D32-补丁）同链等价。
-
-    def get_user_login(self, token: str) -> str:
-        return _repos.get_user_github_login(token)
-
-    def add_collaborator(self, api_token, owner, repo, username, permission="push"):
-        return _repos.add_github_collaborator(api_token, owner, repo, username, permission)
-
-    def remove_collaborator(self, api_token, owner, repo, username):
-        try:
-            _repos.remove_github_collaborator(api_token, owner, repo, username)
-            return True
-        except Exception:
-            return False
-
-    def accept_collaborator_invite(self, bot_token, owner, repo):
-        # D39/S59：存量邀请制语义（PATCH /user/repository_invitations）
-        return _repos.accept_github_invite(bot_token, owner, repo)
-
-    def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="", auto_init=False, default_branch="") -> dict:
-        # D42/S62：存量委托（owner=组织空间；GitHub 仓库路径恒等于 name，path 忽略）
-        return _repos.create_github_repo(api_token=api_token, name=name, description=description,
-                                         private=private, owner=owner, path=path,
-                                         auto_init=auto_init)
-
-    def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        # D42/S62：存量委托（FR-5.1 空列表=None 不误判）
-        return _repos.find_existing_github_webhook(api_token, owner, repo, webhook_url)
-
-    def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        # D42/S62：存量委托
-        return _repos.fetch_github_repos_with_role(api_token)
-
-    def get_collaborator_permission(self, api_token, owner, repo, username):
-        # D42/S62：存量委托（返回 role_name 字符串）
-        return _repos.get_github_collaborator_permission(api_token, owner, repo, username)
-
-    def list_collaborators(self, api_token, owner, repo):
-        # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        return _im._fetch_github_collaborators(owner, repo, api_token)
-
-    def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        return _repos.setup_github_webhook(api_token, owner, repo, webhook_url, webhook_secret)
-
-    def setup_repo_webhook(self, bot_token, owner, repo, webhook_url):
-        # D38/S58：存量形态 secret=""（bot token 不作 webhook 凭据，形态在适配器）
-        return _repos.setup_github_webhook(bot_token, owner, repo, webhook_url, "")
-
-    def remove_webhook(self, api_token, owner, repo, hook_id):
-        try:
-            _repos.remove_github_webhook(api_token, owner, repo, int(hook_id))
-            return True
-        except Exception:
-            return False
-
-def create_provider(provider: str) -> VCSProvider:
-    """根据 provider 标识创建 VCSProvider 实例（D22 统一工厂）。
-
-    - 覆盖层注册表（S72 收口：if 链→注册表，新增平台不再改本函数体）：
-      gitcode/github/gitlab = GenericVcsProvider 子类（方言偏离基座的显式
-      例外——gitcode/github 存量委托、gitlab /projects 形态）；
-    - config-only 平台（gitee 等）：GenericVcsProvider（纯卡驱动，零代码）；
-    - 未知 provider：GitCodeProvider（存量兜底语义不变）。
-    """
-    cls = _PROVIDER_OVERRIDES.get(provider)
-    if cls is not None:
-        return cls()
-    try:
-        card = _vcs_cards.get_platform_card(provider)
-    except Exception:
-        card = None
-    if card is not None:
-        # Issue #3580：gitlab 方言的实例卡（含自建 gitlab-corp）必须走
-        # GitLabProvider（/projects 寻址、PRIVATE-TOKEN、members/hooks 形态）；
-        # 纯卡驱动 GenericVcsProvider 只适用于 github 系 API 形态。
-        if getattr(card, "dialect", "") == "gitlab":
-            return GitLabProvider(card)
-        return GenericVcsProvider(card)
-    # D105i：逃逸口可观测——纯配卡平台静默落 GitCode 兜底 = 卡缺能力字段，
-    # 是“github 系假设”类静默错误的源头，必须留痕而非无声吞掉
-    log.warning("provider factory fallback: provider=%r has no card override/module, "
-                "returning GitCodeProvider (check platform card completeness)", provider)
-    return GitCodeProvider()
-
-def create_provider_from_repo_key(repo_key: str) -> VCSProvider:
-    """根据 repo_key 前缀创建 VCSProvider（D21 补：卡驱动工厂，消二分）。
-
-    repo_key 前缀 → create_provider 统一分派：config-only 平台（gitee 等）
-    返回 GenericVcsProvider（卡能力），存量三平台返回原类（行为不变）。
-    """
-    from src.kernel.repo_key import parse_repo_key
-    provider, _, _ = parse_repo_key(repo_key or "")
-    return create_provider(provider)
+from src.kernel.ports import vcs_provider as _vcs_provider
+from src.kernel.ports.vcs_provider import VCSProviderPort
 
 # 凭据不可用分类（Issue #3713）——**唯一一份**枚举，两个消费面各自渲染：
 #   换券面（HTTP）  424 + code + stage（前端/CLI 需区分该轮换还是该重新配置）
@@ -801,12 +57,41 @@ CREDENTIAL_STAGES = (CREDENTIAL_STAGE_EMPTY, CREDENTIAL_STAGE_UNDECRYPTABLE,
 EXPLICIT_REPO_BOT_LEVEL = "rc_bot"
 
 
+def get_bot_identity_token(repo_key: str) -> str:
+    """回帖/评论专用：只解析 **bot 身份** token（仓库 bot → 全局 bot），不落用户 token。
+
+    为什么需要（2026-11-15 实测）：路径 B 仓库（managed_repos.host_user_id 非空，如
+    songspace/flask-blog）下，执行链按设计跳过 repo/global bot → 落到用户 token，
+    于是 agent 处理完的回帖都挂在用户账号名下。回帖语义要求「系统/agent 发言」，
+    必须以机器人账号（如 grace_bot）出镜；执行链（clone/推送）仍保持原优先级不变。
+    """
+    from src.kernel.repo_key import to_repo_key
+    rk = to_repo_key(repo_key or "")
+    if not rk:
+        return ""
+    try:
+        provider = _vcs_provider.create_provider_from_repo_key(rk)
+    except Exception as e:  # noqa: BLE001
+        log.debug(f"get_bot_identity_token: provider 解析失败 ({repo_key}): {e}")
+        return ""
+    for strat in (RepoBotToken(provider, bypass_path_b=True),
+                  GlobalBotToken(provider, bypass_path_b=True)):
+        try:
+            tok = strat.get_token(rk)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"get_bot_identity_token: {strat.level} 取 token 失败: {e}")
+            tok = ""
+        if tok:
+            return tok
+    return ""
+
+
 @dataclass
 class TokenResult:
     """token 获取结果，携带级别信息。"""
     token: str = ""               # token 字符串（向后兼容：薄包装取 .token 返回 str）
     level: str = ""               # "rc_bot" / "repo_bot" / "global_bot" / "user"（执行链实际生效级别，受过期短路影响）
-    provider: Optional[VCSProvider] = None  # VCSProvider 实例
+    provider: Optional[VCSProviderPort] = None  # VCSProviderPort 实例
     repo_key: str = ""            # 仓库标识
     expired: bool = False         # 是否已标记过期（用户 token status=4 时 expired=True 但仍返回 token）
     issue_id: str = ""            # R20.6.1: 自循环检测用——is_self_loop_actor 需要查 running task
@@ -828,7 +113,7 @@ class TokenStrategy:
 
     error_code = ""  # 子类覆盖
 
-    def __init__(self, provider: VCSProvider):
+    def __init__(self, provider: VCSProviderPort):
         self.provider = provider
 
     def get_token(self, repo_key: str) -> str:
@@ -1044,7 +329,7 @@ class RepoBotToken(TokenStrategy):
 
     error_code = "REPO_TOKEN_EXPIRED"
 
-    def __init__(self, provider: VCSProvider, bypass_path_b: bool = False):
+    def __init__(self, provider: VCSProviderPort, bypass_path_b: bool = False):
         super().__init__(provider)
         self.bypass_path_b = bypass_path_b
 
@@ -1154,7 +439,7 @@ class GlobalBotToken(TokenStrategy):
 
     error_code = "GLOBAL_TOKEN_EXPIRED"
 
-    def __init__(self, provider: VCSProvider, bypass_path_b: bool = False):
+    def __init__(self, provider: VCSProviderPort, bypass_path_b: bool = False):
         super().__init__(provider)
         self.bypass_path_b = bypass_path_b
 
@@ -1282,7 +567,7 @@ def detect_and_mark_expired(repo_key: str) -> str:
     原先按模块函数导入必然 ImportError，这里补薄封装，口径与 service.fail_task R18 一致。
     """
     try:
-        _provider = create_provider_from_repo_key(repo_key)
+        _provider = _vcs_provider.create_provider_from_repo_key(repo_key)
         return TokenResolver(_provider).detect_and_mark_expired(repo_key) or ""
     except Exception as e:
         log.warning(f"detect_and_mark_expired({repo_key}) failed: {e}")
@@ -1296,7 +581,7 @@ def resolve_exec_token(repo_key: str) -> TokenResult:
     provider 造不出来时返回空结果（stage 空 = 无法归因，交回上层原语义）。
     """
     try:
-        return TokenResolver(create_provider_from_repo_key(repo_key)).resolve_exec_token(repo_key)
+        return TokenResolver(_vcs_provider.create_provider_from_repo_key(repo_key)).resolve_exec_token(repo_key)
     except Exception as e:
         log.warning(f"resolve_exec_token({repo_key}) failed: {e}")
         return TokenResult(token="", level="", repo_key=repo_key or "")
@@ -1313,7 +598,7 @@ class TokenResolver:
     - detect_and_mark_expired(): fail_task 401 统一检测 + 标记。
     """
 
-    def __init__(self, provider: VCSProvider):
+    def __init__(self, provider: VCSProviderPort):
         """链序固定：显式仓库 bot 行 → 仓库 bot → 全局 bot → 用户凭据，path-B 守卫全部保留。
 
         **不提供 bypass_path_b**（2026-11-21 撤除）：一旦暴露这个参数，调用方很容易
@@ -1812,7 +1097,7 @@ def create_action_handler(result: TokenResult) -> TokenActionHandler:
         return UserTokenHandler()
     return None
 
-def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
+def _post_comment_via_provider(provider: VCSProviderPort, repo_key: str,
                                 issue_num: str, body: str, token: str,
                                 agent_type: str = "agent") -> bool:
     """R18.6.10 辅助函数：通过 provider 接口发 Issue 评论。
@@ -1868,257 +1153,3 @@ def _audit_source(user_id: str, provider: str, source: str) -> None:
         pass  # 审计失败不阻断业务
 
 
-class GitLabProvider(GenericVcsProvider):
-    """GitLab 平台（S72/D47：GenericVcsProvider 基座 + /projects/:id 形态覆盖）。
-
-    实测驱动（2026-11-05）：基座 github 形态路径（/repos/{o}/{r}/...）对
-    GitLab 全断——GitLab REST 是 /projects/{owner}%2F{repo} 家族；/user 的
-    登录名字段是 username（非 login）；协作者是 project members（按
-    user_id）；建钩 body 带 token + 布尔位事件集（与 Gitee v5 同族教训）。
-    基座 _http 已补 private_token → PRIVATE-TOKEN 头（本类直接复用）。
-    """
-
-    _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
-
-    def __init__(self, card=None):
-        # Issue #3580：一实例一卡——允许传入任意 GitLab 实例卡（如 gitlab-corp）；
-        # 缺省仍取内置 gitlab 卡（存量行为不变，缺卡仍 fail-closed）。
-        super().__init__(card or _require_card("gitlab"))
-
-    def _pid(self, owner, repo) -> str:
-        import urllib.parse as _up
-        return f"/projects/{_up.quote(f'{owner}/{repo}', safe='')}"
-
-    def verify_token(self, token: str) -> dict:
-        info = self._http("GET", "/user", token)
-        if not isinstance(info, dict) or not info:
-            raise RuntimeError("GitLab token verify: empty user info")
-        return info
-
-    def token_expiry(self, token: str) -> dict:
-        """PAT 自身元数据（GitLab 15.4+ `/personal_access_tokens/self`）。
-
-        单独成方法而不是塞进 verify_token：校验身份的调用点不需要多打一次网络；
-        只有「绑定凭据」这类要落到期时间的调用方显式取（见 settings.py）。
-        读不到（旧版本/非 PAT/权限不足）返回 {}，不阻断绑定。
-        """
-        try:
-            pat = self._http("GET", "/personal_access_tokens/self", token)
-        except Exception:  # noqa: BLE001
-            return {}
-        if not isinstance(pat, dict) or not pat.get("expires_at"):
-            return {}
-        return {
-            "expires_at": str(pat.get("expires_at") or ""),
-            "scopes": pat.get("scopes") or [],
-            "revoked": bool(pat.get("revoked")),
-        }
-
-    def get_user_login(self, token: str) -> str:
-        # GitLab /user 字段 = username（非 login）
-        return str(self.verify_token(token).get("username", ""))
-
-    def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
-        try:
-            users = self._http("GET", f"/users?username={username}", api_token)
-            uid = 0
-            if isinstance(users, list) and users and isinstance(users[0], dict):
-                uid = int(users[0].get("id", 0) or 0)
-            if not uid:
-                return False
-            self._http("POST", f"{self._pid(owner, repo)}/members", api_token,
-                       {"user_id": uid, "access_level": self._GL_MAINTAINER})
-            return True
-        except Exception:
-            return False
-
-    def remove_collaborator(self, api_token, owner, repo, username):
-        try:
-            users = self._http("GET", f"/users?username={username}", api_token)
-            uid = 0
-            if isinstance(users, list) and users and isinstance(users[0], dict):
-                uid = int(users[0].get("id", 0) or 0)
-            if not uid:
-                return False
-            self._http("DELETE", f"{self._pid(owner, repo)}/members/{uid}", api_token)
-            return True
-        except Exception:
-            return False
-
-    def list_create_spaces(self, api_token: str) -> "list[dict]":
-        """GitLab：当前 token 能建仓的组（Developer=30 及以上）。
-
-        用 `/groups?min_access_level=30`（含用户所属的组）；子组不在默认返回里，
-        由创建表单允许直接填完整组路径（`grp/sub`）覆盖——建仓时按 full_path 精确
-        解析 namespace_id，等价于下拉里选中它。取组失败降级为空（不阻断个人空间建仓）。
-        """
-        try:
-            rows = self._http("GET", "/groups?min_access_level=30&per_page=100", api_token)
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"gitlab list_create_spaces failed: {e}")
-            return []
-        out = []
-        for g in rows if isinstance(rows, list) else []:
-            if not isinstance(g, dict):
-                continue
-            path = str(g.get("full_path") or "")
-            if path:
-                out.append({"path": path, "name": str(g.get("name") or path), "kind": "group"})
-        return out
-
-    def _namespace_id(self, api_token: str, owner: str) -> int:
-        """组/子组完整路径 → namespace_id（GitLab 建仓只认数字 id，不认路径）。"""
-        import urllib.parse as _up
-
-        try:
-            rows = self._http("GET", f"/namespaces?search={_up.quote(owner, safe='')}&per_page=100",
-                              api_token)
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"gitlab namespace lookup failed ({owner}): {e}")
-            return 0
-        for ns in rows if isinstance(rows, list) else []:
-            if not isinstance(ns, dict):
-                continue
-            if str(ns.get("full_path") or "").lower() == owner.lower():
-                try:
-                    return int(ns.get("id") or 0)
-                except Exception:  # noqa: BLE001
-                    return 0
-        return 0
-
-    def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
-        """建仓；owner 非空 = 建到指定组/子组（先解析 namespace_id）。"""
-        body = {"name": name, "description": description or "",
-                "visibility": "private" if private else "public",
-                "initialize_with_readme": True}
-        if path and path != name:
-            body["path"] = path
-        if owner:
-            ns_id = self._namespace_id(api_token, owner)
-            if not ns_id:
-                return {"error": f"所属空间不存在或无建仓权限: {owner}"}
-            body["namespace_id"] = ns_id
-        try:
-            info = self._http("POST", "/projects", api_token, body)
-        except Exception as e:  # noqa: BLE001
-            # 上游拒绝（token 无 create 权限 / 重名 / 组禁建）必须落 error dict：
-            # 抛异常会被路由当成 500，用户看不到原因。
-            return {"error": f"上游拒绝建仓: {e}"}
-        # Issue #3580（2026-11-20 实锤）：GitLab 建仓响应没有 full_name/owner
-        # （它叫 path_with_namespace，owner 在 namespace.full_path）。归一细节归
-        # `kernel.vcs.repo_ref` 的 GitLabRepoRefMapper（按卡 dialect 注册），这里
-        # 只调通用钩子——空 full_name 会让 to_repo_key("") 写出空 repo_key，托管
-        # 「成功」而回调一律 404 repository not managed。
-        return self.normalize_created_repo(info)
-
-    def find_existing_webhook(self, api_token, owner, repo, webhook_url):
-        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）
-        from src.kernel.vcs_gitlab_hooks import find_hook
-
-        try:
-            return find_hook(self._card.api_base, api_token, owner, repo, webhook_url)
-        except Exception as e:
-            log.warning(f"gitlab find_existing_webhook failed {owner}/{repo}: {e}")
-            return None
-
-    def fetch_repos_with_role(self, api_token) -> "list[dict]":
-        # Issue #3580/R5：分页取全（100/页翻到底），不再只取第一页。
-        projects: list = []
-        page = 1
-        while True:
-            batch = self._http(
-                "GET", f"/projects?membership=true&per_page=100&page={page}", api_token)
-            if not isinstance(batch, list):
-                break
-            projects.extend(batch)
-            if len(batch) < 100:
-                break
-            page += 1
-        out = []
-        for p in projects:
-            if not isinstance(p, dict):
-                continue
-            full = p.get("path_with_namespace") or ""
-            perms = (p.get("permissions") or {})
-            proj_access = ((perms.get("project_access") or {}).get("access_level", 0) or 0)
-            group_access = ((perms.get("group_access") or {}).get("access_level", 0) or 0)
-            out.append({
-                "full_name": full, "name": p.get("path", ""),
-                "owner": full.split("/")[0] if "/" in full else "",
-                "is_admin": max(int(proj_access), int(group_access)) >= self._GL_MAINTAINER,
-                "html_url": p.get("web_url", ""),
-            })
-        return out
-
-    def get_collaborator_permission(self, api_token, owner, repo, username):
-        try:
-            users = self._http("GET", f"/users?username={username}", api_token)
-            uid = 0
-            if isinstance(users, list) and users and isinstance(users[0], dict):
-                uid = int(users[0].get("id", 0) or 0)
-            if not uid:
-                return None
-            m = self._http("GET", f"{self._pid(owner, repo)}/members/all/{uid}", api_token)
-            if isinstance(m, dict):
-                lvl = int(m.get("access_level", 0) or 0)
-                return {"access_level": lvl, "permission": "admin" if lvl >= self._GL_MAINTAINER else ""}
-            return None
-        except Exception:
-            return None
-
-    def list_collaborators(self, api_token, owner, repo):
-        members = self._http("GET", f"{self._pid(owner, repo)}/members/all?per_page=100", api_token)
-        if not isinstance(members, list):
-            return []
-        return [{"login": m.get("username", ""), "id": m.get("id", 0)} for m in members if isinstance(m, dict)]
-
-    def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        # Issue #3580 复审：实现收口到 kernel.vcs_gitlab_hooks（与托管流程同源）；
-        # GitLab 的 token 只能是共享密钥，缺省即报错、绝不复用 api_token。
-        from src.kernel.vcs_gitlab_hooks import setup_hook
-
-        return setup_hook(self._card.api_base, api_token, owner, repo, webhook_url, webhook_secret)
-
-    def remove_webhook(self, api_token, owner, repo, hook_id):
-        # Issue #3580 复审：收口到 kernel.vcs_gitlab_hooks；404 幂等（返回 True）
-        from src.kernel.vcs_gitlab_hooks import remove_hook
-
-        try:
-            return remove_hook(self._card.api_base, api_token, owner, repo, hook_id)
-        except Exception as e:
-            log.warning(f"gitlab remove_webhook failed {owner}/{repo} hook={hook_id}: {e}")
-            return False
-
-"""Token 获取统一接口（策略模式 + 职责链）。
-
-Issue #372 R18: 统一 13 个散落函数为 TokenResolver 策略链。
-
-设计文档: docs/weekly-08/token-config/04-token-resolver.md
-
-模块结构:
-  VCSProvider (ABC)
-    ├── GitCodeProvider
-    └── GitHubProvider
-  TokenStrategy (基类)
-    ├── RepoBotToken             (第 1 级，D101 方案三后链首——原 session 级退役)
-    ├── GlobalBotToken           (第 2 级)
-    └── UserToken                (第 3 级)
-  TokenResult (数据类)
-  TokenResolver (统一入口)
-
-三个语义入口:
-  get_token()           — 获取可用执行 token（含过期短路）
-  read_stored_token()   — 读取存储原始值（不过期检查、不刷新）
-  resolve()             — 获取 TokenResult（token + level + provider）
-  detect_and_mark_expired() — fail_task 401 统一检测 + 标记
-"""
-
-# S72：方言覆盖层注册表——key=provider，value=GenericVcsProvider 子类。
-# 收敛为数据（消 if 链开闭点）：新平台的方言若偏离基座，注册一行；
-# 若不偏离（gitee），零注册零代码走卡。
-_PROVIDER_OVERRIDES = {
-    "gitcode": GitCodeProvider,
-    "github": GitHubProvider,
-    "gitlab": GitLabProvider,
-}

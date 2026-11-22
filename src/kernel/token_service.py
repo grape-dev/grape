@@ -10,7 +10,8 @@ R20.11: Repo.bot_token 改为调本模块的 get_repo_bot_token()，
 - 本模块是 service 层，可以 import TokenResolver + Repo
 - 策略类内部通过 provider 接口和 db 查询获取 token，不反向引用 Repo
 """
-from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+from src.kernel.ports import vcs_provider as _vcs_provider
+from src.kernel.token_resolver import TokenResolver
 
 try:  # 端口异常类型（worker 进程会真的抛到它）
     from src.kernel.ports._base import PortNotBound as _PortNotBound
@@ -28,7 +29,7 @@ def _provider_or_none(repo_key: str):
     git 类任务刷一条 warning。
     """
     try:
-        return create_provider_from_repo_key(repo_key)
+        return _vcs_provider.create_provider_from_repo_key(repo_key)
     except _PortNotBound:
         return None
 

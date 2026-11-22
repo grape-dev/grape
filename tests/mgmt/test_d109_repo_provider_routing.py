@@ -63,7 +63,7 @@ def test_provider_cache_hint_no_hit(monkeypatch):
 
 def test_generic_fetch_fills_owner_from_gitee_namespace():
     """Gitee v5 仓库对象用 namespace 表示归属；owner 缺失时不能让角色判定落空。"""
-    from src.kernel.token_resolver import GenericVcsProvider
+    from src.domains.mgmt.vcs import GenericVcsProvider
 
     class _Card:
         api_base = "https://gitee.com/api/v5"

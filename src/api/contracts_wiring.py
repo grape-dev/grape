@@ -36,6 +36,7 @@ from src.kernel.ports import (
     repos,
     tokens,
     vcs_cards,
+    vcs_provider,
 )
 
 log = logging.getLogger(__name__)
@@ -141,6 +142,10 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         "src.domains.mgmt.auth.providers",
         "src.domains.mgmt.public",
     ),
+    "vcs_provider": (
+        # 平台适配器行为实现（建仓/协作/webhook/命名空间）：职责归位后从 kernel 迁入
+        "src.domains.mgmt.vcs",
+    ),
     "vcs_cards": (
         "src.domains.runtime.vcs.platform_card",
         "src.domains.runtime.vcs.providers",
@@ -183,6 +188,7 @@ _PORTS = {
     "repos": repos,
     "accounts": accounts,
     "oauth": oauth,
+    "vcs_provider": vcs_provider,
     "vcs_cards": vcs_cards,
     "engines": engines,
     "im": im,

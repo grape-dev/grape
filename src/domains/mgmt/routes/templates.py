@@ -211,7 +211,7 @@ async def create_from_template(body: CreateTemplateRequest,
         # 仍失败统一 401 reauth_required（detail 带 provider，Spec v2）；get_user_login
         # 实现吞 401 返空（→502 无信息文案），故用 verify_token 让 401 穿透到刷新链。
         # 捕获实际使用的 token：刷新成功后外层 api_token 已过期，建仓必须用新 token。
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _prov_adapter = create_provider(provider)
         _used_token = {"v": api_token}
         def _verify_login(t, _adapter=_prov_adapter):

@@ -71,7 +71,7 @@ class TestT29AutoUpgradeAccept:
         ]), \
              patch("src.api.deps.get_user_token_for", return_value="ghp_token"), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov), \
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov), \
              patch("src.domains.mgmt.user.db._rebuild_webhook_with_bot_token", return_value="123") as mock_update:
             auto_upgrade_path_b_repos("github", "bot_token", "bot_user")
             _prov.add_collaborator.assert_called_once()
@@ -90,7 +90,7 @@ class TestT29AutoUpgradeAccept:
         ]), \
              patch("src.api.deps.get_user_token_for", return_value="gct_token"), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov), \
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov), \
              patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update:
             auto_upgrade_path_b_repos("gitcode", "bot_token", "bot_user")
             _prov.add_collaborator.assert_called_once()
@@ -110,7 +110,7 @@ class TestT29AutoUpgradeAccept:
         ]), \
              patch("src.api.deps.get_user_token_for", return_value="ghp_token"), \
              patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov), \
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov), \
              patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update:
             auto_upgrade_path_b_repos("github", "bot_token", "bot_user")
             mock_update.assert_not_called()

@@ -58,6 +58,28 @@ def orm_engine(monkeypatch):
     import src.kernel.persistence.engine as _eng_mod
 
     monkeypatch.setattr(_eng_mod, "get_engine", lambda: eng)
+
+    # A 方案（表为真源）：测试必须让「表就绪」成立，否则卡装配会走降级路径。
+    from src.domains.platform import importer as _imp
+
+    monkeypatch.setattr(_imp, "is_table_backed", lambda: True)
+
+    from src.kernel.gsb import provider as _gsb
+
+    class _MgmtSvc:
+        @staticmethod
+        def get_repo_platform_cards(enabled_only=True):
+            from sqlalchemy.orm import Session
+
+            from src.kernel.persistence.models_platform_object import RepoPlatformModel
+            from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+            with Session(eng) as session:
+                rows = RepoPlatformRepo.list_all(session, enabled_only=enabled_only)
+                cols = [c.name for c in RepoPlatformModel.__table__.columns]
+                return [{k: getattr(r, k, None) for k in cols} for r in rows]
+
+    monkeypatch.setattr(_gsb, "get_service", lambda name: _MgmtSvc())
     return eng
 
 
@@ -74,12 +96,15 @@ def _clean_meta():
     _wipe()
 
 
-def test_valid_instance_card_is_written_and_visible():
+def test_valid_instance_card_is_written_and_visible(orm_engine):
     body = VcsPlatformCardBody(cards={INSTANCE: _raw()})
     res = vcs_platforms_put(body, admin={"id": 1, "username": "admin"})
 
     assert res["cards"] == [INSTANCE]
-    assert INSTANCE in _cards_meta()
+    # A 方案：卡定义落表，不再写 meta `vcs_providers_config`
+    assert INSTANCE not in _cards_meta()
+    invalidate_platform_card_cache()
+    assert get_platform_card(INSTANCE) is not None
     invalidate_platform_card_cache()
     card = get_platform_card(INSTANCE)
     assert card is not None and card.api_base.endswith("/api/v4")
@@ -122,14 +147,17 @@ def test_duplicate_host_rejected():
     assert INSTANCE not in _cards_meta()
 
 
-def test_secret_channels_are_separate_from_card():
+def test_secret_channels_are_separate_from_card(orm_engine):
     """bot / webhook token 走独立通道，不进卡（Builder 会拒未知键）。"""
     body = VcsPlatformCardBody(cards={INSTANCE: _raw()},
                                bot_tokens={INSTANCE: "glpat-bot"}, webhook_tokens={INSTANCE: "whsec"})
     vcs_platforms_put(body, admin={"id": 1})
-    cards = _cards_meta()
-    assert INSTANCE in cards
-    assert "glpat-bot" not in json.dumps(cards, ensure_ascii=False)
+    from dataclasses import asdict
+
+    invalidate_platform_card_cache()
+    card = get_platform_card(INSTANCE)
+    assert card is not None
+    assert "glpat-bot" not in json.dumps(asdict(card), ensure_ascii=False)
     assert get_meta_value("global_bot_gitlab-corp_token") == "glpat-bot"
     assert get_meta_value("gitlab-corp_webhook_token") == "whsec"
 
@@ -179,9 +207,21 @@ def test_instance_row_is_manual_and_listed(orm_engine):
     providers = {str(p.get("provider")) for p in list_vcs_platforms_public()["platforms"]}
     assert INSTANCE in providers                  # 目录立即可见（不需要重启）
 
+    # A 方案：管理面接管的事实由表行 source 表达（前端据此显示标记，不再读 meta）
+    from src.domains.mgmt.admin.platform_cards.service import PlatformCardService
 
-def test_file_backed_provider_is_not_overwritten(orm_engine):
-    """configs/platforms/<p>.json 派生的行，管理面写卡不落 manual（防双真源）。"""
+    views, _checked = PlatformCardService().list_cards()
+    assert views[INSTANCE].managed_by == "table"
+    assert views["gitcode"].managed_by == "file"     # 文件派生、未被管理面接管
+
+
+def test_admin_save_promotes_file_backed_row(orm_engine):
+    """A 方案：管理面是唯一写入口——config 行被管理面保存后提升为 manual。
+
+    旧语义（config_owned 拦写）保护文件真源，代价是管理面改不动内建平台、
+    只能靠 meta 覆盖层，最终形成「文件/meta/表」三真源。改为：一旦管理面保存，
+    该行转 manual，导入器从此不再回灌；enabled/bot 凭据仍由各自入口保护。
+    """
     from sqlalchemy.orm import Session
 
     from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
@@ -196,10 +236,15 @@ def test_file_backed_provider_is_not_overwritten(orm_engine):
         "api_base": "https://gitcode.com/api/v5", "api_auth": "query_token",
         "webhook_path": "/webhook/gitcode", "event_header": "X-GitCode-Event",
         "webhook_verify": "hmac", "webhook_dialect": "gitee_v5", "clone_auth": "x_access_token"}})
+    with Session(orm_engine) as s:
+        RepoPlatformRepo.set_enabled(s, "gitcode", False)   # 保护字段：管理面保存不得改它
+        s.commit()
+
     res = vcs_platforms_put(body, admin={"id": 1})
-    assert res["rows"] == {"gitcode": "config_owned"}
+    assert res["rows"] == {"gitcode": "promoted"}
 
     with Session(orm_engine) as s:
         row = RepoPlatformRepo.get(s, "gitcode")
-        assert str(row.source) == "config"
-        assert str(row.name) == "GitCode"           # 文件派生行未被管理面改写
+        assert str(row.source) == "manual"          # 管理面接管，导入器不再回灌
+        assert str(row.name) == "GitCode-Edited"    # 管理面改动已落表
+        assert int(row.enabled) == 0                # enabled 属保护字段，不被卡保存覆盖

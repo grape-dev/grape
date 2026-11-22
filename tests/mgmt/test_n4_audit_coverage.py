@@ -33,7 +33,8 @@ def test_n4_1_rc_uuid_backfill_and_hit_audit():
         rid = row[0]
         assert len(rid) == 36 and rid.count("-") == 4
         # TokenResolver 命中（审计行落库）
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         resolver = TokenResolver(create_provider_from_repo_key(rk))
         resolver.strategies = [s for s in resolver.strategies if s.level == "repo_bot"]
         tok = resolver.get_token(rk)
@@ -64,7 +65,8 @@ def test_n4_2_historical_hit_audit_with_repo_key():
                 "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) "
                 "VALUES (?,?,?,?,?)", (rk, "n4b", "repo", "n4b/repo", "hist_tok_n4"))
             db.commit()
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         resolver = TokenResolver(create_provider_from_repo_key(rk))
         resolver.strategies = [s for s in resolver.strategies if s.level == "repo_bot"]
         tok = resolver.get_token(rk)

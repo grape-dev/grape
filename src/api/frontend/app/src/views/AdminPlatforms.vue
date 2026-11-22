@@ -404,17 +404,16 @@ async function saveCard(p) {
     editMode.value = false
     await loadCard(p.provider)
     await load()
-    // 配置驱动的平台（configs/platforms/<p>.json 导入行）管理面改不动：路由按
-    // 「双真源」策略只写 meta、不落行（rows: config_owned），旧页面照旧弹成功 →
-    // 运维以为 CA/下载基址改好了，实际启动导入即被配置文件冲回。这里必须明说。
+    // A 方案（表为运行时真源）：管理面保存会把该平台行提升为 manual（rows: promoted），
+    // 此后配置文件改动不再自动覆盖——这是接管语义，不是失败。必须明说，否则运维会
+    // 以为「改文件重启就生效」。回退方式：管理面改回 / 删除该平台行后由导入器重建。
     const action = ((r && r.rows) || {})[p.provider]
     const ovs = ((r && r.overrides) || {})[p.provider] || {}
-    if (action === 'config_owned') {
+    if (action === 'promoted') {
       const fields = Object.keys(ovs)
-      cardError.value = fields.length
-        ? t('page.config_overridden', '该平台由配置文件定义，本次改动已按管理面覆盖生效：{fields}；改回文件值即解除覆盖')
-            .replace('{fields}', fields.join(', '))
-        : t('page.config_same', '该平台由配置文件定义，本次提交与文件一致，未产生覆盖')
+      const base = t('page.card_taken_over',
+        '该平台卡已由管理面接管（定义落表）：配置文件之后的改动不会再自动覆盖')
+      cardError.value = fields.length ? `${base}；本次改动字段：${fields.join(', ')}` : base
     }
   } catch (e) {
     const d = e.detail || {}
