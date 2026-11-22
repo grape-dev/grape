@@ -145,6 +145,9 @@ def test_non_autopilot_missing_event_warns_with_context(monkeypatch):
     assert "t_3744_missing" in msg
     assert "3744998" in msg
     assert RK in msg
+    assert "task_id=" in msg
+    assert "event_seq=" in msg
+    assert "repo_key=" in msg
 
 
 # ===== 3. 回归：PR 订阅与普通 Issue 校正不变 =====

@@ -6542,12 +6542,14 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                     (event_seq,)).fetchone()
         except Exception:
             log.warning(f"[scene-env] events lookup failed for seq={event_seq} "
-                        f"task={task_id or '-'} repo={repo_key or '-'}, "
+                        f"task_id={task_id or '-'} event_seq={event_seq} "
+                        f"repo_key={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if not _row:
             log.warning(f"[scene-env] events row missing for seq={event_seq} "
-                        f"task={task_id or '-'} repo={repo_key or '-'}, "
+                        f"task_id={task_id or '-'} event_seq={event_seq} "
+                        f"repo_key={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if (_row[0] or "") in PR_EVENT_TYPES:
