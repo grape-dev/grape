@@ -10,10 +10,11 @@
 1. **counter 指标** ``grape_repo_bot_legacy_fallback_total{provider,repo}``：按
    **实际 legacy 列存储读**全量计数。日志可以采样，计数不能——「日志少」不等于
    「信息丢」，回落规模、回落仓库分布始终可查。
-2. **日志降噪判据**：每个 ``(repo_key, field)`` 首次回落必打 WARNING（新仓库异常
+2. **日志降噪**：每个 ``(repo_key, field)`` 首次回落必打 WARNING（新仓库异常
    第一时间可见），其后按 1/1000 采样打 WARNING，未命中采样降 DEBUG（保留定位
-   能力）。日志文本保持原样——``historical column fallback hit`` 是回落分支下线
-   判据与看板筛选的 grep 锚点。
+   能力）。日志文本保持原样，便于按原字符串 grep 定位；但采样会让「持续偶发回落」
+   出现零告警，故**日志不是下线判据**——下线判据 = counter 窗口增量 == 0 **且**
+   ``repo_bot_hit_legacy_column`` 审计零命中。
 
 分层约束：kernel 不能 import domains（check-arch R1 HARD），Prometheus 的
 CollectorRegistry 由 insight 域持有。这里沿用 ``src/kernel/org_metrics.py`` /

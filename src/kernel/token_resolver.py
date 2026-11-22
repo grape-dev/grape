@@ -76,8 +76,9 @@ _REPO_BOT_CACHE_DEFAULT_TTL = 60.0
 _REPO_BOT_CACHE_MAX_ENTRIES = 2048
 _repo_bot_cache: dict = {}
 
-# legacy 回落日志文本：保持不变（回落分支下线判据与看板筛选的 grep 锚点）；
-# 降噪只改「打不打」，不改「打什么」。
+# legacy 回落日志文本：保持不变（便于按原字符串 grep 定位）；降噪只改「打不打」，
+# 不改「打什么」。⚠️ 1/1000 采样后日志不再是下线判据——判据 = counter 窗口增量 == 0
+# 且 legacy 审计零命中（见下方回落分支 checklist）。
 _LEGACY_FALLBACK_LOG = ("RepoBotToken: historical column fallback hit "
                         "(rc miss) repo={repo_key} field={field}")
 
@@ -105,10 +106,15 @@ def _repo_bot_cache_get(key: tuple):
     return entry
 
 
+#: 不入缓存的解析来源：存储读失败（``error``）以及「rc 读失败后 legacy 回落」
+#: （``legacy_rc_error``）。两者都是瞬时故障态，缓存会把错误冻结一个 TTL 窗口。
+_UNCACHEABLE_SOURCES = frozenset({"error", "legacy_rc_error"})
+
+
 def _repo_bot_cache_put(key: tuple, source: str, value: str, cred_id: str = "") -> None:
-    """写缓存。``source='error'``（存储读失败）不入缓存——瞬时故障不该被冻结一个 TTL。"""
+    """写缓存。存储读失败 / rc 读失败后的 legacy 回落不入缓存——瞬时故障不该被冻结一个 TTL。"""
     ttl = repo_bot_token_cache_ttl()
-    if ttl <= 0 or source == "error":
+    if ttl <= 0 or source in _UNCACHEABLE_SOURCES:
         return
     if len(_repo_bot_cache) >= _REPO_BOT_CACHE_MAX_ENTRIES:
         now = time.monotonic()
@@ -475,9 +481,10 @@ class RepoBotToken(TokenStrategy):
     def _resolve_bot_token(self, repo_key: str, field: str) -> "tuple[str, str, str]":
         """真正解析 bot token，返回 ``(token, source, cred_id)``。
 
-        source ∈ {``rc``, ``legacy``, ``none``, ``error``}：``error`` = 存储读失败，
-        不写缓存（瞬时故障不该被冻结一个 TTL）；``none`` = rc miss 且 legacy 列空
-        （含 rc miss 标记，正是要缓存的那类重复解析）。
+        source ∈ {``rc``, ``legacy``, ``legacy_rc_error``, ``none``, ``error``}：
+        ``error`` = 存储读失败、``legacy_rc_error`` = rc 读失败后回落的 legacy 值——
+        二者均不写缓存（瞬时故障不该被冻结一个 TTL）；``none`` = rc miss 且 legacy
+        列空（含 rc miss 标记，正是要缓存的那类重复解析）。
         审计口径 =「一次实际存储读一行」：缓存命中不经过本函数，故写入随缓存降频
         （Issue #3740 明列的写放大待消除项）。
         """
@@ -513,13 +520,14 @@ class RepoBotToken(TokenStrategy):
         # repo_bot_hit 区分）：回填窗口内旧列消费不留审计盲区。
         # 退出 checklist（满足后本分支可删）：
         # ①回填迁移全量盖章 → ②写路径轮换置空存量列 → ③生产观察期
-        #   grape_repo_bot_legacy_fallback_total 窗口增量 == 0 且
-        #   repo_bot_hit_legacy_column 审计零命中（下线判据，Issue #3740）→
+        #   grape_repo_bot_legacy_fallback_total 窗口增量 == 0 **且** 审计
+        #   operation=repo_bot_hit_legacy_column 零命中（下线判据）→
         # ④删除本分支 + 评估 DROP COLUMN。
         #
-        # Issue #3740：counter 全量计数（日志可降噪，计数不可）；
-        # 日志降噪沿用基线 Issue #3897 口径（DEBUG 常态 + 每 (repo, field)
-        # 每小时 1 条 WARNING），日志文本不变（grep 定位/看板锚点）。
+        # Issue #3740：counter 全量计数（日志可降噪，计数不可）。日志降噪沿用
+        # 基线 Issue #3897 口径（DEBUG 常态 + 每 (repo, field) 每小时 1 条
+        # WARNING）；日志文本保持原样，仅用于 grep 定位——**日志不再是下线
+        # 判据**，判据只认 counter 窗口增量与审计零命中。
         # ------------------------------------------------------------------
         try:
             # managed_repos 归 mgmt：列名与语句都由归属域持有（本文件不再拼 SQL）。
@@ -540,7 +548,12 @@ class RepoBotToken(TokenStrategy):
                               repo_key=repo_key)
                 except Exception:
                     pass
-                return _tokens.repo_secret_decrypt(raw), "legacy", ""
+                # rc 读失败时仍回落 legacy 值（可用性优先），但**不缓存**：
+                # 瞬时 rc 故障不该把 legacy 结果冻结一个 TTL；下一次解析必须
+                # 重新尝试 rc，避免过期 legacy token 被缓存拖过一个窗口
+                # （复审 Required#3）。source 用独立标记，缓存层据此跳过。
+                return (_tokens.repo_secret_decrypt(raw),
+                        ("legacy_rc_error" if _rc_error else "legacy"), "")
             return "", ("error" if _rc_error else "none"), ""
         except Exception as e:
             log.warning(f"RepoBotToken._fetch: {e}")
