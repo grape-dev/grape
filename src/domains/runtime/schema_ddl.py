@@ -606,9 +606,12 @@ CREATE TABLE IF NOT EXISTS takeover_sessions (
 # Issue #3580 复审：last_error 曾写成 `TEXT NOT NULL DEFAULT ''` —— MySQL 下 TEXT 列
 # 带不了字面默认值（兼容层会剥掉），严格模式里任何不写该列的 INSERT 直接 1364。
 # 改可空 MEDIUMTEXT，入队显式写 ''；存量库由迁移 202611200004 收敛。
+# A12（Gate 7）：`id` 是投递句柄（claim/renew/finish 全按 id 定位，也对外返回），
+# **不得**用自增整数——主备重建/跨库搬迁/回绕后 inbox_id 不再全局唯一，日志与重试
+# 台账会指向另一条投递。改为客户端生成的 UUID（32 位 hex），入队即写入。
 _WEBHOOK_INBOX_DDL = """
 CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id VARCHAR(64) PRIMARY KEY,
     repo_key VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL DEFAULT '',
     delivery_id VARCHAR(128) NOT NULL,

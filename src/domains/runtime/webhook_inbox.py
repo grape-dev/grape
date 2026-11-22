@@ -72,6 +72,13 @@ def _redacted_headers(headers: dict) -> dict:
     return out
 
 
+def new_inbox_id() -> str:
+    """投递句柄（A12）：客户端生成、全局唯一、可跨库搬迁——不得用自增整数。"""
+    import uuid
+
+    return uuid.uuid4().hex
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -112,16 +119,19 @@ def enqueue_webhook(*, repo_key: str, provider: str, event_header: str,
         try:
             # Issue #3580 复审：显式写 last_error —— MySQL 下 TEXT 列带不了 DEFAULT ''，
             # 省略该列会在严格模式报 1364（SQLite 测不出来）。
+            # 主键由客户端生成（A12）：自增 id 在搬迁/回绕后不再全局唯一，
+            # 而 id 是对外投递句柄；这里入队即写入 UUID。
+            inbox_id = new_inbox_id()
             c.execute(
                 "INSERT INTO grape_t_webhook_inbox "
-                "(repo_key, provider, delivery_id, event_header, payload, headers, "
+                "(id, repo_key, provider, delivery_id, event_header, payload, headers, "
                 " status, attempts, max_attempts, next_attempt_at, last_error, "
                 " created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (repo_key, provider or "", did, event_header or "", payload,
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (inbox_id, repo_key, provider or "", did, event_header or "", payload,
                  headers_json, "pending", 0, int(max_attempts), now, "", now, now))
             db.commit()
-            return {"id": c.lastrowid, "status": "pending", "duplicate": False}
+            return {"id": inbox_id, "status": "pending", "duplicate": False}
         except Exception as e:
             # 并发同投递：唯一键冲突后读已有行（不静默吞掉其它错误）
             db.rollback()
@@ -176,7 +186,7 @@ def claim_next(owner: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> "dict 
         }
 
 
-def renew_claim(item_id: int, owner: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> bool:
+def renew_claim(item_id: str, owner: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> bool:
     """续租（长事件处理期间保活）。"""
     now = _now()
     with db_lock:
@@ -184,13 +194,13 @@ def renew_claim(item_id: int, owner: str, lease_seconds: int = DEFAULT_LEASE_SEC
         c.execute(
             "UPDATE grape_t_webhook_inbox SET lease_expires_at=?, updated_at=? "
             "WHERE id=? AND claim_owner=? AND status='processing'",
-            (_future(lease_seconds), now, int(item_id), owner))
+            (_future(lease_seconds), now, str(item_id), owner))
         ok = c.rowcount == 1
         db.commit()
         return ok
 
 
-def finish_claim(item_id: int, owner: str, *, ok: bool, error: str = "",
+def finish_claim(item_id: str, owner: str, *, ok: bool, error: str = "",
                  base_backoff: int = 5, max_backoff: int = 900) -> dict:
     """结束一次消费：成功→consumed；失败→退避重排/超限 dead。"""
     now = _now()
@@ -199,10 +209,10 @@ def finish_claim(item_id: int, owner: str, *, ok: bool, error: str = "",
         c.execute(
             "SELECT attempts, max_attempts FROM grape_t_webhook_inbox "
             "WHERE id=? AND claim_owner=? AND status='processing'",
-            (int(item_id), owner))
+            (str(item_id), owner))
         row = c.fetchone()
         if not row:
-            return {"id": int(item_id), "status": "lost"}
+            return {"id": str(item_id), "status": "lost"}
         attempts, max_attempts = int(row[0]), int(row[1])
         if ok:
             # 成功也保留 note（如「unhosted: skipped」）：这条投递为什么被消费掉，
@@ -211,9 +221,9 @@ def finish_claim(item_id: int, owner: str, *, ok: bool, error: str = "",
                 "UPDATE grape_t_webhook_inbox SET status='consumed', finished_at=?, "
                 "last_error=?, claim_owner='', lease_expires_at='', updated_at=? "
                 "WHERE id=? AND claim_owner=?",
-                (now, (error or "")[:2000], now, int(item_id), owner))
+                (now, (error or "")[:2000], now, str(item_id), owner))
             db.commit()
-            return {"id": int(item_id), "status": "consumed", "attempts": attempts}
+            return {"id": str(item_id), "status": "consumed", "attempts": attempts}
         attempts += 1
         status = "failed" if attempts < max_attempts else "dead"
         delay = min(max_backoff, base_backoff * (2 ** max(0, attempts - 1)))
@@ -222,9 +232,9 @@ def finish_claim(item_id: int, owner: str, *, ok: bool, error: str = "",
             "claim_owner='', lease_expires_at='', next_attempt_at=?, updated_at=? "
             "WHERE id=? AND claim_owner=?",
             (status, attempts, (error or "")[:2000], _future(delay), now,
-             int(item_id), owner))
+             str(item_id), owner))
         db.commit()
-        return {"id": int(item_id), "status": status, "attempts": attempts}
+        return {"id": str(item_id), "status": status, "attempts": attempts}
 
 
 def inbox_stats() -> dict:
@@ -337,6 +347,72 @@ def ensure_webhook_inbox_archive_table() -> bool:
         return False
 
 
+_INBOX_COLUMNS = (
+    "id", "repo_key", "provider", "delivery_id", "event_header", "payload", "headers",
+    "status", "attempts", "max_attempts", "claim_owner", "claimed_at", "lease_expires_at",
+    "next_attempt_at", "last_error", "created_at", "updated_at", "finished_at",
+)
+
+
+def migrate_inbox_ids_to_uuid() -> bool:
+    """把历史自增整数主键改写成 UUID（A12）。幂等：已是字符型主键即返回 False。
+
+    存量表（本 PR 早期版本建出）主键是 INTEGER AUTOINCREMENT，而 id 是对外投递句柄：
+    搬迁/回绕后不再全局唯一。这里就地改写——SQLite 走整表重建（INTEGER 主键存不了
+    文本），MySQL 走 ALTER + 逐行 UPDATE。行数很少（个位到百位），一次性成本可接受。
+    """
+    import uuid
+
+    from src.kernel.mysql_compat import get_db_backend
+
+    mysql = get_db_backend() == "mysql"
+    try:
+        with db_lock:
+            c = db.cursor()
+            if mysql:
+                c.execute("SELECT data_type FROM information_schema.columns "
+                          "WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",
+                          ("grape_t_webhook_inbox", "id"))
+                row = c.fetchone()
+            else:
+                c.execute("PRAGMA table_info(grape_t_webhook_inbox)")
+                row = next((r for r in c.fetchall() if str(r[1]) == "id"), None)
+                row = [str(row[2])] if row else None
+            col_type = str((row[0] if row else "") or "").lower()
+            if not col_type or "int" not in col_type:
+                return False          # 已是字符主键（或表不存在）
+            log.warning(f"webhook inbox: migrating legacy autoincrement id -> uuid "
+                        f"(current type {col_type})")
+            c.execute("SELECT " + ", ".join(_INBOX_COLUMNS) + " FROM grape_t_webhook_inbox")
+            rows = c.fetchall()
+            if mysql:
+                c.execute("ALTER TABLE grape_t_webhook_inbox MODIFY id VARCHAR(64) NOT NULL")
+                for r in rows:
+                    c.execute("UPDATE grape_t_webhook_inbox SET id=? WHERE id=?",
+                              (uuid.uuid4().hex, r[0]))
+            else:
+                from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_DDL
+
+                c.execute("ALTER TABLE grape_t_webhook_inbox RENAME TO grape_t_webhook_inbox_legacy")
+                c.execute(_WEBHOOK_INBOX_DDL)
+                placeholders = ",".join(["?"] * len(_INBOX_COLUMNS))
+                for r in rows:
+                    values = list(r)
+                    values[0] = uuid.uuid4().hex
+                    c.execute(f"INSERT INTO grape_t_webhook_inbox "
+                              f"({', '.join(_INBOX_COLUMNS)}) VALUES ({placeholders})", values)
+                c.execute("DROP TABLE grape_t_webhook_inbox_legacy")
+            db.commit()
+            return True
+    except Exception as e:  # noqa: BLE001 - 迁移失败不阻断消费（下次启动重试）
+        log.warning(f"webhook inbox id migration failed: {e}")
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def ensure_webhook_inbox_table() -> bool:
     """幂等建表（Event 进程启动、worker 起跑前调用）。
 
@@ -353,6 +429,8 @@ def ensure_webhook_inbox_table() -> bool:
             c = db.cursor()
             c.execute(_WEBHOOK_INBOX_DDL)
             db.commit()
+        # 历史自增主键先改写成 UUID（A12），再建归档表与索引
+        migrate_inbox_ids_to_uuid()
         # 归档表必须先建：索引遍历同时覆盖两张表，归档表缺失会让
         # idx_webhook_inbox_archived 报 "no such table" 被跳过（B1 同类静默缺口）。
         ensure_webhook_inbox_archive_table()
