@@ -61,6 +61,7 @@ _STATS: dict[str, int] = {
     "degraded_text": 0,       # 卡片降级为文本（无 RICH_CARD）
     "deduped": 0,
     "queued": 0,              # #2261：入队待租约持有实例接力（engine_down/offline 场景）
+    "channel_paused": 0,      # #3799：渠道被风控暂停 → 不投递（内容留 pending，恢复后补投）
 }
 
 
@@ -369,7 +370,18 @@ def _render(channel, channel_type: str, card, text_card=None) -> tuple[Any, bool
 
 async def _deliver(engine, target: dict, chat_id: str, card,
                    text_card=None) -> tuple[bool, bool, str]:
-    """(ok, degraded, reason)。单个渠道内重试 RETRY 次。"""
+    """(ok, degraded, reason)。单个渠道内重试 RETRY 次。
+
+    Issue #3799：发送前查渠道健康——暂停（ret=-14 风控）的渠道直接返回
+    `channel_paused`，不再把 outbox 行打成 failed（内容随行保留，恢复后补投）。
+    """
+    health = getattr(engine, "health_tracker", None) if engine is not None else None
+    if health is not None:
+        try:
+            if health.is_paused(str(target.get("installation_id") or "")):
+                return False, False, "channel_paused"
+        except Exception as e:      # 健康态读失败 → fail-open，走原路径
+            log.debug("[im-notify] health check skipped: %s", e)
     sup = getattr(engine, "supervisor", None)
     entry = getattr(sup, "_channels", {}).get(target["installation_id"]) if sup else None
     if not entry:
@@ -503,6 +515,19 @@ async def _handle_target(target: dict, *, uid, kind: str, text: str,
         # 行保持 pending（不置失败）：等租约持有者消费 —— 引擎不在本进程不是行的错
         return
 
+    # Issue #3799：暂停渠道不投递（先于认领判，行保持 pending，内容不丢）
+    health = getattr(eng, "health_tracker", None) if eng is not None else None
+    if health is not None:
+        try:
+            if health.is_paused(inst):
+                _bump("channel_paused")
+                skipped[ctype] = "channel_paused"
+                log.info("[im-notify] channel paused, delivery deferred inst=%s type=%s",
+                         inst, ctype)
+                return
+        except Exception as e:      # 健康态读失败 → fail-open，走原路径
+            log.debug("[im-notify] health check skipped inst=%s: %s", inst, e)
+
     # 内联投递前原子认领（QA #1314 M1）：pending → sending，与 1s 消费者互斥
     if OB is not None and track:
         try:
@@ -605,6 +630,23 @@ async def notify_user(user_id, kind: str, text: str, *,
     skipped: dict = {}
     for t in pick:
         skipped.update(t.pop("_skipped", {}))
+
+    # Issue #3799：暂停渠道的降级记录——本次扇出里已成功的其它渠道即「改用 X 且成功」；
+    # 一个都没有 → no_fallback（内容留在 outbox pending，恢复后补投）。
+    health = getattr(eng, "health_tracker", None) if eng is not None else None
+    if health is not None:
+        for target in pick:
+            ctype = str(target.get("channel_type") or "")
+            inst = str(target.get("installation_id") or "")
+            if not ctype or not inst or skipped.get(ctype) != "channel_paused":
+                continue
+            alt = next((c for c in sent if c and c != ctype), "")
+            if alt:
+                skipped[ctype] = f"channel_paused_degraded_to:{alt}"
+            try:
+                health.record_degraded_delivery(inst, ctype, to=alt, ok=bool(alt))
+            except Exception as e:      # 降级记录失败不得影响通知结果
+                log.warning("[im-notify] record degradation failed inst=%s: %s", inst, e)
 
     log.info("[im-notify] kind=%s user=%s issue=%s#%s sent=%s failed=%s skipped=%s",
              kind, uid, repo_key, issue_number, sent, failed, skipped)

@@ -713,6 +713,7 @@ class OutboxConsumer:
         from src.domains.runtime.im.notify import _deliver, build_cards_from_payload
         sent: list[str] = []
         failed: list[tuple[str, str]] = []
+        paused_skips: list[str] = []
         degraded_marks: list[dict] = []
         # 多渠并发投递（2026-11-18）：逐行顺序 await 会让先排到的渠道先到、另一个晚 1~2s，
         # 用户侧体感「不是同时收到」。这里按行并发，但同一 (installation, chat) 内用锁串行保序。
@@ -741,12 +742,23 @@ class OutboxConsumer:
                                            "conv": payload.get("conv_id") or "",
                                            "repo_key": payload.get("repo_key", ""),
                                            "issue_number": native_issue_number(payload.get("issue_number") or 0)})
+            elif reason == "channel_paused":
+                # Issue #3799：渠道被风控暂停 → 不算发送失败（不递增 attempt/退避），
+                # 行回 pending；恢复后下一轮自然补投，内容不丢。
+                paused_skips.append(row["out_track_id"])
             else:
                 failed.append((row["out_track_id"], reason or "send_failed"))
 
         # ---- 批量收尾（本批一次 commit，不再逐行）
         if sent:
             await asyncio.to_thread(mark_sent_many, sent)
+        if paused_skips:
+            for track in paused_skips:
+                try:
+                    await asyncio.to_thread(release_sending, track)
+                except Exception as e:
+                    log.warning("[outbox] release paused row failed track=%s: %s", track, e)
+            log.info("[outbox] channel paused, %d delivery(ies) deferred", len(paused_skips))
         if failed:
             statuses = await asyncio.to_thread(mark_failed_many, failed)
             for track, reason in failed:
