@@ -93,6 +93,24 @@ LEGACY_CATEGORY_ALIASES = {
 _alias_warned: set[str] = set()
 
 
+def alias_target(slug: str, max_hops: int = 4) -> str:
+    """旧 slug → 收敛后 slug（纯函数、无日志副作用；Issue #3796）。
+
+    跟随别名链（最多 max_hops 跳，防环），供 `lookup_slug` 与 `validate_category_slugs`
+    共用同一解析口径：后续引入多级别名时不必两处同步改（PR #1982 审查 Nit）。
+    无别名/空 slug 原样返回。
+    """
+    key = (slug or "").strip()
+    seen: set[str] = set()
+    for _ in range(max(1, int(max_hops))):
+        nxt = LEGACY_CATEGORY_ALIASES.get(key)
+        if not nxt or nxt == key or nxt in seen:
+            break
+        seen.add(key)
+        key = nxt
+    return key
+
+
 def canonical_category_slug(slug: str,
                             logger: logging.Logger | None = None) -> str:
     """旧 slug → 收敛后 slug；无别名原样返回（Issue #3796）。
@@ -103,8 +121,8 @@ def canonical_category_slug(slug: str,
     key = (slug or "").strip()
     if not key:
         return slug or ""
-    target = LEGACY_CATEGORY_ALIASES.get(key)
-    if not target:
+    target = alias_target(key)
+    if target == key:
         return key
     log = logger or logging.getLogger(__name__)
     if key not in _alias_warned:
@@ -242,8 +260,9 @@ def validate_category_slugs(slugs, dict_map: dict[str, dict[str, Any]]) -> list[
             continue
         if (dict_map or {}).get(slug):
             continue
-        target = LEGACY_CATEGORY_ALIASES.get(slug, "")
-        if target and (dict_map or {}).get(target):
+        # 与 lookup_slug 同一解析链（alias_target），别名链变化时两处不会漂移
+        target = alias_target(slug)
+        if target and target != slug and (dict_map or {}).get(target):
             continue
         unknown.append(slug)
     return unknown
@@ -300,15 +319,21 @@ def iter_scenes_category_slugs(scenes_dir: str) -> dict[str, list[str]]:
     return result
 
 
-def validate_local_scenes_categories(scenes_dir: str) -> dict[str, list[str]]:
+def validate_local_scenes_categories(scenes_dir: str,
+                                    dict_map: dict[str, dict[str, Any]] | None = None
+                                    ) -> dict[str, list[str]]:
     """校验 scenes/*/scene.json 的分类 slug，返回 {scene: [未知 slug]}（Issue #3796）。
 
-    供启动期（默认聚合 WARNING / CATEGORY_SLUG_STRICT=1 fail-fast）与 CI 门禁
-    共用；dict_map 用种子映射（无 DB 纯数据口径）。scenes_dir 缺失返回空 dict。
+    供启动期（默认聚合 WARNING / CATEGORY_SLUG_STRICT=1 fail-fast）与 CI 门禁共用。
+    `dict_map` 缺省用**种子口径**（`category_seed_dict_map()`，无 DB 纯数据）；
+    调用方（启动期/CI）可传入导出的运行时字典快照（DB `category_dict_active_map`），
+    与同步解析的实际口径对齐——两侧口径不同时，种子校验可能放行运行时未命中的 slug
+    （PR #1982 审查 Optional）。scenes_dir 缺失返回空 dict。
     """
     if not scenes_dir or not os.path.isdir(scenes_dir):
         return {}
-    dict_map = category_seed_dict_map()
+    if not dict_map:
+        dict_map = category_seed_dict_map()
     unknown: dict[str, list[str]] = {}
     for scene_name, slugs in iter_scenes_category_slugs(scenes_dir).items():
         bad = validate_category_slugs(slugs, dict_map)
