@@ -4871,7 +4871,7 @@ def fail_task(task_id, error, exit_code=-1):
                 from src.domains.runtime.engine.transient_retry import format_stream_failure_result
                 _retries = [e for e in _task_errors_json(task_id)
                             if isinstance(e, dict) and e.get("error_code") in
-                            ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+                            ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY", "CONFIG_ERROR")]
                 if _retries:
                     _ex = next((e for e in _retries
                                 if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
