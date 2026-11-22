@@ -353,21 +353,32 @@ def ensure_webhook_inbox_table() -> bool:
             c = db.cursor()
             c.execute(_WEBHOOK_INBOX_DDL)
             db.commit()
+        # 归档表必须先建：索引遍历同时覆盖两张表，归档表缺失会让
+        # idx_webhook_inbox_archived 报 "no such table" 被跳过（B1 同类静默缺口）。
+        ensure_webhook_inbox_archive_table()
         from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_INDEXES
 
         with db_lock:
             c = db.cursor()
-            for table, name, cols in _WEBHOOK_INBOX_INDEXES:
+            # 索引 SQL 必须在两个后端都能执行：MySQL 无 IF NOT EXISTS + TEXT 需前缀长度，
+            # SQLite 恰好相反（支持 IF NOT EXISTS、不支持前缀长度）。按后端择一，
+            # 任一后端静默跳过都会让 A7 的索引治理只在一边生效（评审 B1）。
+            from src.kernel.mysql_compat import get_db_backend
+
+            _mysql = get_db_backend() == "mysql"
+            for table, name, mysql_cols, sqlite_cols in _WEBHOOK_INBOX_INDEXES:
                 try:
-                    c.execute("SELECT COUNT(*) FROM information_schema.statistics "
-                              "WHERE table_schema=DATABASE() AND table_name=? AND index_name=?",
-                              (table, name))
-                    if int((c.fetchone() or [0])[0] or 0) == 0:
-                        c.execute(f"CREATE INDEX {name} ON {table} {cols}")
+                    if _mysql:
+                        c.execute("SELECT COUNT(*) FROM information_schema.statistics "
+                                  "WHERE table_schema=DATABASE() AND table_name=? AND index_name=?",
+                                  (table, name))
+                        if int((c.fetchone() or [0])[0] or 0) == 0:
+                            c.execute(f"CREATE INDEX {name} ON {table} {mysql_cols}")
+                    else:
+                        c.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} {sqlite_cols}")
                 except Exception as e:  # noqa: BLE001 - 建索引失败不阻断收件箱消费
                     log.warning(f"webhook inbox index {name} skipped: {e}")
             db.commit()
-        ensure_webhook_inbox_archive_table()
         return True
     except Exception as e:  # noqa: BLE001 - 建表失败由 worker 循环逐轮重试
         log.warning(f"webhook inbox ensure table failed: {e}")

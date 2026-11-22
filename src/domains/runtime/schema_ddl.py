@@ -657,13 +657,16 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
 )
 """
 
-# A7 残留：清扫/排障都按 status、时间过滤，补索引（主表与归档表各自）
-# MySQL 不支持 `CREATE INDEX IF NOT EXISTS`（MariaDB 才支持），所以索引不做成裸 DDL，
-# 由 ensure 侧先查 information_schema 再建（见 webhook_inbox._ensure_index）。
+# A7 残留：清扫/排障都按 status、时间过滤，补索引（主表与归档表各自）。
+# 两个后端的建索引语法不同，索引声明因此带两套列定义，由 ensure 侧按后端择一：
+#   MySQL  —— 不支持 `CREATE INDEX IF NOT EXISTS`，且 created_at 是 TEXT，前缀长度必填
+#             （否则 1170 "BLOB/TEXT column used in key specification without a key length"）；
+#   SQLite —— 支持 `IF NOT EXISTS`，但**不支持**前缀长度（created_at(20) 会被当作函数调用
+#             报 "no such function"）。只写 MySQL 一套会让 SQLite 下索引永不创建。
+# 形如 (表, 索引名, MySQL 列定义, SQLite 列定义)。
 _WEBHOOK_INBOX_INDEXES = (
-    # created_at 在 MySQL 侧是 TEXT（历史 DDL），TEXT 建索引必须给前缀长度，
-    # 否则 1170 "BLOB/TEXT column used in key specification without a key length"。
-    # 20 覆盖 ISO 时间戳的 'YYYY-MM-DDTHH:MM:SS'，对 range 过滤足够精确。
-    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created", "(status, created_at(20))"),
-    ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived", "(archived_at)"),
+    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created",
+     "(status, created_at(20))", "(status, created_at)"),
+    ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived",
+     "(archived_at)", "(archived_at)"),
 )
