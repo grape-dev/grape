@@ -368,16 +368,34 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     log.info(f"fetch_repos total: {len(repos)} repos (current_user={current_user})")
     return repos
 
-def get_user_gitcode_login(api_token: str) -> str:
-    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。"""
+def get_user_gitcode_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变。
+
+    status 口径：0=成功；>=400=上游 HTTP 状态码（401/403/5xx）；
+    -1=网络/未知失败。成功/失败各有独立日志行（provider、status、结果）。
+    """
     if not api_token:
-        return ""
+        return "", -1
     try:
         data = _req("GET", f"{API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_gitcode_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_gitcode_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_gitcode_login failed: {e}")
-        return ""
+        return "", -1
+
+def get_user_gitcode_login(api_token: str) -> str:
+    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变（20+ 调用点零改动）；
+    需要上游状态码的调用方改用 get_user_gitcode_login_status。
+    """
+    login, _status = get_user_gitcode_login_status(api_token)
+    return login
 
 def fetch_user_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
     """获取当前 token 用户的 GitCode 组织列表。
@@ -674,11 +692,21 @@ def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
     _run_git(["init"], workdir)
 
 def _download_gitcode_tarball(source_repo, workdir, tmp, token):
-    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
+    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。
+
+    2026-11-22：地址与鉴权方式都改走 runtime 契约——旧实现把
+    `https://oauth2:{token}@gitcode.com/...` 写死平台，且把 token 拼进 URL
+    （进程列表/日志/错误信息泄漏面）。现在：地址=clone_params(clone_url)，
+    凭据=clone_auth_header → `git -c http.extraheader=` 注入。
+    """
     if not token:
         raise RuntimeError("GitCode 模板需要 Bot token 拉取")
-    url = f"https://oauth2:{token}@gitcode.com/{source_repo}.git"
-    _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+    from src.domains.runtime import public as _runtime_public
+
+    url = _runtime_public.clone_url(source_repo)
+    header = _runtime_public.clone_auth_header(source_repo, token)
+    _run_git(["-c", f"http.extraheader=Authorization: {header}",
+              "clone", "--quiet", "--depth", "1", url, workdir], tmp)
     shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
     _run_git(["init"], workdir)
 
@@ -1222,16 +1250,30 @@ def probe_github_repo_create(api_token: str, owner: str = "", private: bool = Tr
     return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
 
 
-def get_user_github_login(api_token: str) -> str:
-    """获取当前 token 的 GitHub 登录用户名。"""
+def get_user_github_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变（同 GitCode 版）。"""
     if not api_token:
-        return ""
+        return "", -1
     try:
         data = _github_req("GET", f"{_GITHUB_API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_github_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_github_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_github_login failed: {e}")
-        return ""
+        return "", -1
+
+def get_user_github_login(api_token: str) -> str:
+    """获取当前 token 的 GitHub 登录用户名。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变；需要上游状态码的
+    调用方改用 get_user_github_login_status。
+    """
+    login, _status = get_user_github_login_status(api_token)
+    return login
 
 def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict | None:
     """获取 token 持有者对指定仓库的权限（GET /repos/{owner}/{repo}）。

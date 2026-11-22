@@ -108,6 +108,8 @@
   "create_failed": "创建失败",
   "session_expired": "会话过期，请重新登录",
   "gitcode_reauth_required": "GitCode 授权已过期，正在跳转重新授权...",
+  "github_reauth_required": "GitHub 授权已过期，正在跳转重新授权...",
+  "github_reauth_token_hint": "GitHub OAuth 未配置，请前往「账号设置 → 凭据」配置 GitHub Token",
   "request_failed": "请求失败 ({{status}})",
   "network_upload_error": "网络错误，上传失败",
   "unnamed_worker": "未命名设备",

@@ -45,6 +45,9 @@ EVENT_TYPES = frozenset({
     "admin_config_saved",            # admin 保存平台凭据配置
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
+    # 运维类破坏性 DDL 留痕（QA C3，2026-11-21）：启动期删副本表 / 列宽 MODIFY
+    "table_copy_cleanup",           # 别域副本表清理（detail: table/owner/rows/db/role/migration/phase）
+    "session_token_key_widen",      # session_api_tokens.session_key 列宽对齐（同一 detail 形状）
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
     "issue_reverted_to_pending_review",  # 需求属主撤销已完成需求回待审核（Issue #1408）
     "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）

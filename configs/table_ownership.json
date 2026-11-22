@@ -130,7 +130,6 @@
     "grape_t_task_proxy_tokens": "mgmt",
     "unified_user_mapping": "mgmt",
     "uploaded_files": "mgmt",
-    "user_accounts": "mgmt",
     "user_credentials": "mgmt",
     "user_feedback": "mgmt",
     "grape_t_user_llm_credentials": "mgmt",
@@ -621,10 +620,6 @@
       "runtime"
     ],
     "uploaded_files": [
-      "insight",
-      "runtime"
-    ],
-    "user_accounts": [
       "insight",
       "runtime"
     ],

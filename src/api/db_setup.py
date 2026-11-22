@@ -442,7 +442,9 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("session_api_tokens", """
 CREATE TABLE IF NOT EXISTS session_api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_key TEXT NOT NULL,
+    -- 唯一键列用定长类型：MySQL 的 TEXT 不能直接建 UNIQUE（BLOB/TEXT column used
+    -- in key specification without a key length），会话键是 task_id/conv_id，远短于 191。
+    session_key VARCHAR(191) NOT NULL,
     repo_key TEXT NOT NULL DEFAULT '',
     agent_type TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL DEFAULT 0,
@@ -662,121 +664,6 @@ def _migrate_add_org_id_columns():
             log.info("org_id columns ensured on all core tables")
     except Exception as e:
         log.warning(f"org_id column migration failed: {e}")
-
-
-def _migrate_create_personal_orgs():
-    """为每个现有用户创建个人组织（幂等）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            users = c.execute(mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_CREATE_PERSONAL_ORGS).fetchall()
-            for uid, username in users:
-                existing = c.execute(
-                    mgmt_mig.SELECT_ORGANIZATION, (uid,)
-                ).fetchone()
-                if existing:
-                    continue
-                slug = f"personal-{uid}"
-                c.execute(
-                    mgmt_mig.INSERT_ORGANIZATION,
-                    ("默认工作空间", slug, uid)
-                )
-                org_id = c.lastrowid
-                c.execute(
-                    mgmt_mig.INSERT_IGNORE_ORG_MEMBER,
-                    (org_id, uid)
-                )
-            db.commit()
-            log.info("Personal organizations ensured for all users")
-    except Exception as e:
-        log.warning(f"Personal org creation migration failed: {e}")
-
-
-def _migrate_data_to_personal_orgs():
-    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id='' 的行）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-
-            # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
-            repos = c.execute(
-                mgmt_mig.SELECT_MANAGED_REPOS
-            ).fetchall()
-            for (repo_key,) in repos:
-                admin = c.execute(
-                    mgmt_mig.SELECT_USER_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG,
-                    (repo_key,)
-                ).fetchone()
-                if admin:
-                    uid = admin[0]
-                    org = c.execute(
-                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_2, (uid,)
-                    ).fetchone()
-                    if org:
-                        c.execute(mgmt_mig.UPDATE_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], repo_key))
-
-            # 2. runtime_credentials：scope=user 的按 owner_name 迁入
-            creds = c.execute(
-                runtime_mig.SELECT_RUNTIME_CREDENTIALS
-            ).fetchall()
-            for cid, owner_name, scope in creds:
-                if not owner_name or scope == "global":
-                    continue
-                user = c.execute(
-                    mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_name,)
-                ).fetchone()
-                if user:
-                    uid = user[0]
-                    org = c.execute(
-                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_3, (uid,)
-                    ).fetchone()
-                    if org:
-                        c.execute(runtime_mig.UPDATE_RUNTIME_CREDENTIALS, (org[0], cid))
-                        c.execute(runtime_mig.UPDATE_AGENT_RUNTIMES__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], cid))
-
-            # 3. skill：scope=user 的按 owner_id 迁入
-            skills = c.execute(
-                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG
-            ).fetchall()
-            for sid, owner_id, _ in skills:
-                try:
-                    uid = int(owner_id)
-                except (ValueError, TypeError):
-                    continue
-                org = c.execute(
-                    mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG, (uid,)
-                ).fetchone()
-                if org:
-                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], sid))
-
-            # 4. skill：scope=repo 的跟随 repo_key 迁移
-            repo_skills = c.execute(
-                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2
-            ).fetchall()
-            for sid, owner_id in repo_skills:
-                repo_org = c.execute(
-                    mgmt_mig.SELECT_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_id,)
-                ).fetchone()
-                if repo_org and repo_org[0]:
-                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2, (repo_org[0], sid))
-
-            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge（mgmt）
-            #    与 events / agent_tasks / devops_agent_session / issue（runtime）。
-            #    跨域关联子查询已拆成「mgmt 取映射 → 各域自己回填」（三库独立后无法单条 SQL 完成）。
-            try:
-                from src.domains.mgmt import public as _mgmt_pub_org  # noqa: PLC0415
-                from src.domains.runtime import public as _rt_pub_org  # noqa: PLC0415
-
-                _org_map = _mgmt_pub_org.repo_org_map()
-                _mgmt_pub_org.backfill_org_id_by_repo(_org_map)
-                _rt_pub_org.backfill_org_id_by_repo(_org_map)
-            except Exception as _e:
-                log.warning(f"org_id backfill failed: {_e}")
-
-            db.commit()
-            log.info("Data migrated to personal organizations")
-    except Exception as e:
-        log.warning(f"Data migration to personal orgs failed: {e}")
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -2183,6 +2070,13 @@ class Migration:
     # 默认 mgmt = 历史行为；只碰 runtime 表的迁移必须标 ("runtime",)，否则
     # mgmt 进程会「加列被归属守卫跳过、预检又判未完成」永远不盖章。
     domains: tuple = ("mgmt",)
+    # 执行后置校验（#3648）：fn 正常返回后、盖章前调用；不达标抛错 = 不盖章。
+    # 同号不同名（跨分支 renumber 撞号）时也用它判定目标是否真的到位：
+    # 校验通过 → 视为已执行；校验失败 → 重跑幂等 fn 再校验（禁止静默跳过）。
+    # 类型放宽为 Callable：实际校验函数可带 conn=None 关键字（供测试注入）、
+    # 可返回清单（如 verify_skill_classification_columns 返回列名列表），
+    # Callable[[], None] 与实现不符（QA：类型声明失真）。
+    post_check: Optional[Callable] = None
 
     def __post_init__(self):
         if self.kind not in MIGRATION_KINDS:
@@ -2548,8 +2442,9 @@ def _org_columns_not_text(conn=None) -> list:
     """当前库里仍是数值型的 org 域列清单（迁移后校验用，不做 DDL）。
 
     用途：注册式迁移 `d105-org-domain-text-normalize`（QA 命名）转换完成后自查——
-    `_destructive_ddl()` 内部对非 MDL 异常只记 WARNING 并返回 True（fail-open），
-    所以「ALTER 没成功」不能靠它的返回值判定，必须落到列类型实查。
+    `_destructive_ddl()` 对非 MDL 异常**抛出**（fail-closed，迁移不盖章），
+    「已达目标态」的重复/缺失错误码（1050/1051/1054/1060/1061/1091/1146）才放行；
+    即便如此，「ALTER 是否真生效」仍应落到列类型实查。
 
     口径对称（QA I2）：两种后端都按 `_ORG_MYSQL_TEXT_COLS` 的同一份清单检查，
     organization.id 在 SQLite 分支同样纳入。
@@ -2863,7 +2758,7 @@ _LEGACY_DOMAIN_LABELS = {
     "202611150008": ("runtime",),
     "202611160007": ("runtime",),
     "202611160020": ("runtime",),
-    "202611170009": ("runtime",),
+    "202611220001": ("runtime",),
     "202611170043": ("runtime",),   # #2925 issue.title_fetched_at（issue 表在 runtime 库）
     "202611170045": ("runtime",),   # runtime_credentials.cred_type/platform
     # obs_llm_usage（只在 insight 库）
@@ -2872,7 +2767,8 @@ _LEGACY_DOMAIN_LABELS = {
 
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None,
-                       domains: Optional[tuple] = None) -> Migration:
+                       domains: Optional[tuple] = None,
+                       post_check: Optional[Callable] = None) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。
 
     ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
@@ -2895,10 +2791,13 @@ def register_migration(version: str, name: str, kind: str,
     5. renumber 前必须人工核对目标环境 grape_t_schema_migrations 现值
        （读写版本台账表的 version/name 两列）——测试连不了真实库，
        跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
+    6. 关键迁移（列存在性 / 收敛结果可判定）应传 post_check（Issue #3648）：
+       fn → post_check 通过才盖章；同号不同名时 post_check 失败会重跑幂等 fn 兜底。
     """
     # 未显式声明域时，套用存量补正表（见 _LEGACY_DOMAIN_LABELS 注释）
     _doms = tuple(domains) if domains else _LEGACY_DOMAIN_LABELS.get(version, ("mgmt",))
-    mig = Migration(version=version, name=name, kind=kind, fn=fn, domains=_doms)
+    mig = Migration(version=version, name=name, kind=kind, fn=fn, domains=_doms,
+                    post_check=post_check)
     # 撞号守卫（对齐 weekly-10 #1412）：runner 只按 version 判「已执行」不比对 name，
     # 源内同号后登记者将被永久跳过（跨线教训 202611040001/002 与 weekly-10 撞号，
     # 8082 实锤 #1011 两条被顶替跳过 → autopilot 500）。
@@ -4451,7 +4350,15 @@ def _destructive_ddl(c, ddl: str, *, kind_hint: str = "cleanup",
         if _is_mdl_timeout(e):
             _LEGACY_BLOCKED_DDL.append(f"{ddl}（MDL 超时）")
             raise _MdlWaitTimeout(str(e))
-        log.warning(f"_destructive_ddl failed（幂等可重试）: {ddl}: {e}")
+        # 已经处于目标状态 = 成功（重复删列/建列、列不存在等）：这类异常不阻断启动。
+        _code = getattr(e, "args", (None,))[0] if getattr(e, "args", None) else None
+        if isinstance(_code, int) and _code in (1050, 1051, 1054, 1060, 1061, 1091, 1146):
+            log.debug(f"_destructive_ddl already in target state: {ddl}: {e}")
+            return True
+        # 其它失败必须抛出：调用链约定「fn 正常返回 = 盖章」，吞掉异常会让
+        # 审计写成 after 且下次启动不再重试（2026-11-22 评审④：假绿）。
+        log.warning(f"_destructive_ddl failed, not stamped: {ddl}: {e}")
+        raise
     return True
 
 
@@ -4564,18 +4471,60 @@ def _ensure_migration_session_lock_timeout(seconds: int = 10) -> None:
         log.warning(f"SET SESSION lock_wait_timeout on migration session failed: {e}")
 
 
+_MIGRATION_DOMAINS = ("mgmt", "runtime", "insight")
+
+
+def _process_role() -> str:
+    """进程角色（server / event / worker / insight）。"""
+    for key in ("GRAPE_PROCESS_ROLE", "GRAPE_SERVICE_NAME"):
+        val = (os.environ.get(key) or "").strip().lower()
+        if val:
+            return val
+    return ""
+
+
 def current_migration_domain() -> str:
     """本进程负责的迁移域（只在三库分库模式下返回非空）。
 
-    - `GRAPE_DOMAIN_LIB=1`（三库模式，各域有独立 DSN）且 `GRAPE_MIGRATION_OWNER`
-      有值时才筛域；单库部署（含 sqlite / 单 MySQL 库）返回空串 = 跑全量，
-      行为与历史完全一致。
+    三级判定（2026-11-21 补齐后两级）：
+
+      ① `GRAPE_MIGRATION_OWNER` 显式声明 → 直接用（部署脚本的权威来源）；
+      ② 缺省/非法 → 由本进程库名推断（`<db_runtime>` → runtime）；
+      ③ 仍判不出 → 由进程角色映射（event → runtime / insight → insight / server → mgmt）。
+
+    **为什么必须补 ② ③**：owner 为空时本函数返回空串 = 不筛域，mgmt 进程会以
+    「全量迁移」形态把别域 DDL 建进自己的库，而 event/insight 的域迁移入口会直接
+    return（本域库永远拿不到该有的列和台账表）。实测后果：迁移 202611200006 把
+    `agent_runtimes.desired_plugins` 建进了 `<db_mgmt>`（该表 0 行），而
+    `<db_runtime>` 有 19 行却缺这一列 → 引擎注册连续 500 unknown column。
+    部署脚本漏一个 env 就能造成这种「盖章在错库、列没建」的假绿，必须由代码兜住。
+
+    - 单库部署（`GRAPE_DOMAIN_LIB` 非 1）仍返回空串 = 跑全量，历史行为不变。
     - 返回空串的语义是「不筛」，调用方据此决定是否按 `Migration.domains` 过滤。
     """
     if (os.environ.get("GRAPE_DOMAIN_LIB") or "").strip() not in ("1", "true", "yes"):
         return ""
     dom = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
-    return dom if dom in ("mgmt", "runtime", "insight") else ""
+    if dom in _MIGRATION_DOMAINS:
+        return dom
+    # ② 库名推断（DEVOPS_DB_NAME 优先，其次角色名）
+    try:
+        from src.kernel import db_registry as _dbreg
+
+        inferred = (_dbreg.current_domain() or "").strip().lower()
+        if inferred in _MIGRATION_DOMAINS:
+            return inferred
+    except Exception as e:  # noqa: BLE001 - 推断失败继续走角色映射
+        log.debug(f"current_migration_domain: db_registry 推断失败: {e}")
+    # ③ 角色映射
+    role = _process_role()
+    if role in ("server", "mgmt", "main"):
+        return "mgmt"
+    if role == "event":
+        return "runtime"
+    if role == "insight":
+        return "insight"
+    return ""
 
 
 def filter_migration_registry(registry: Optional[List[Migration]]) -> List["Migration"]:
@@ -4671,21 +4620,46 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         # 盖帽后重读（上面全量迁移可能已含注册表内的早期迁移语义，直接进入增量判定）
         applied = _applied_versions()
 
-    # 同号不同名守卫（Issue #1412）：撞号 ≠ 普通 checksum 漂移。
+    # 同号不同名守卫（Issue #1412 / #3648）：撞号 ≠ 普通 checksum 漂移。
     # 存量库可能已被其它分支的同号迁移盖章（name 不同），此时 pending 判定按
-    # version 会把它永久判「已执行」，本分支的迁移 fn 永不执行 —— 必须 ERROR 报出，
-    # 让 operator 能据此 renumber。行为仍是跳过不执行（fail-safe，不阻断启动）。
+    # version 会把它永久判「已执行」，本分支的迁移 fn 永不执行。处理策略：
+    #   · 迁移带 post_check → 先用后置校验判目标是否真的到位；
+    #       - 已到位：视为已执行（只留痕，不重复 ALTER）；
+    #       - 未到位：加入 reconcile 队列，重跑幂等 fn + 再校验，通过后才改盖新名。
+    #   · 无 post_check → 保留 fail-safe 跳过，但必须 ERROR 报出（禁止静默）。
+    # 本 Issue 的两条撞号迁移已 renumber 到未占用号（见 202611210001/2/3），
+    # 上面的 reconcile 是给历史库 / 后续跨分支撞号兜底。
+    _reconcile: List[Migration] = []
     for m in registry:
         if m.version not in applied:
             continue
         recorded_name = applied[m.version][0]
-        if recorded_name and recorded_name != m.name:
+        if not (recorded_name and recorded_name != m.name):
+            continue
+        if getattr(m, "post_check", None) is None:
             log.error(
                 f"迁移版本号撞号（同号不同名，非普通 checksum 漂移）: version={m.version} "
                 f"库内盖章名={recorded_name} 本次注册名={m.name}。该号在目标库已被其它分支的"
                 f"迁移占用，本次迁移会被判「已执行」而永久跳过、其 DDL 不会执行。"
                 f"修复指引：把本次迁移 renumber 到未占用号（日期+序号顺延），并先核对目标库 "
                 f"版本台账表 version/name 两列的现值。")
+            continue
+        try:
+            m.post_check()
+        except _NonOwnerObject as e:
+            log.error(
+                f"迁移撞号后置校验无法在本域执行: version={m.version} {m.name}: {e}；"
+                f"不重跑（由 owner 域进程收敛）")
+        except Exception as e:
+            log.error(
+                f"迁移版本号撞号且目标未到位（同号不同名）: version={m.version} "
+                f"库内盖章名={recorded_name} 本次注册名={m.name}，后置校验失败: {e}。"
+                f"将重跑幂等迁移并再次校验后再盖章（禁止静默跳过）。")
+            _reconcile.append(m)
+        else:
+            log.warning(
+                f"迁移版本号撞号（同号不同名）但目标已到位: version={m.version} "
+                f"库内盖章名={recorded_name} 本次注册名={m.name}；按已执行处理，不重复执行。")
 
     # checksum 漂移告警（fail-safe：不阻断不重跑；先于 pending 判定，0 pending 时也要查）
     for m in registry:
@@ -4698,6 +4672,12 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
                     f" recorded={recorded} current={current}")
 
     pending = [m for m in registry if m.version not in applied]
+    if _reconcile:
+        _seen = {m.version for m in pending}
+        pending.extend(m for m in _reconcile if m.version not in _seen)
+        pending.sort(key=lambda m: m.version)
+        log.error(f"grape_t_schema_migrations: {len(_reconcile)} 条撞号迁移目标未到位，"
+                  f"纳入本次重跑（{', '.join(m.version + ' ' + m.name for m in _reconcile)}）")
     if not pending:
         log.info("grape_t_schema_migrations: 0 pending（全部已盖章，启动迁移段收敛）")
         return
@@ -4726,6 +4706,17 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
             # backfill/cleanup 失败跳过不阻断启动（可用性优先，幂等下次续跑）
             log.warning(f"迁移 {mig.version} {mig.name}（{mig.kind}）失败，跳过不盖章: {e}")
             continue
+        # 后置校验（#3648）：执行成功 ≠ 目标到位。校验失败绝不盖章，下次启动重试。
+        if getattr(mig, "post_check", None) is not None:
+            try:
+                mig.post_check()
+            except _NonOwnerObject as e:
+                log.info(f"迁移 {mig.version} {mig.name} 后置校验非 owner 视图，跳过不盖章: {e}")
+                continue
+            except Exception as e:
+                log.error(
+                    f"迁移 {mig.version} {mig.name} 后置校验失败，不盖章（目标未到位，下次启动重试）: {e}")
+                continue
         duration_ms = int((_time_mod.monotonic() - started) * 1000)
         try:
             c = conn.cursor()
@@ -4742,6 +4733,60 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     if _DDL_MANUAL_REVIEW:
         for entry in _DDL_MANUAL_REVIEW:
             log.error(f"[Issue #536 DDL 人工处理清单] {entry}")
+
+
+def verify_migration_targets(conn=None, domain: Optional[str] = None,
+                             raise_on_fail: bool = False) -> list:
+    """启动期后置校验（Issue #3648）：台账之外再核对一次关键目标是否到位。
+
+    检查项（域内目标表必须存在——QA：整表缺失 = 迁移目标没建出来，
+    不能用 _table_present 包裹后静默 log.info 通过，必须判为失败）：
+    - mgmt（单库/不筛域）：分类字典表必须存在，且一级活跃必须恰好 KEEP_L1_IDS；
+    - runtime（单库/不筛域）：skill 表必须存在，且必须含 cat_l1_id / cat_l2_id。
+
+    实现口径：两个检查项各委托属主域迁移模块的后置校验函数（表缺失/
+    集合不对/缺列均以 RuntimeError 报出，这里转成失败清单），api 层不再
+    复制域内 SQL / id 字面量（tests/arch P0-2 棘轮 + QA C-1 单一真源）。
+    表整张缺失 = 迁移目标没建出来，同样判失败（QA：不允许 _table_present
+    包裹后静默 log.info 通过）。
+
+    返回失败清单；`raise_on_fail=True` 时抛 RuntimeError。默认只 ERROR 留痕，
+    避免把「已盖章但目标缺失」的历史库直接变成启动崩溃（迁移本身已在盖章前
+    post_check 拦截，不会产生新的假绿）。
+    """
+    conn = db if conn is None else conn
+    dom = (domain if domain is not None else current_migration_domain()) or ""
+    failures: list = []
+    try:
+        cur = conn.cursor()
+    except Exception as e:  # noqa: BLE001 - 连接不可用不阻断启动
+        failures.append(f"后置校验无法取得游标: {e}")
+        cur = None
+    if cur is not None:
+        if dom in ("", "mgmt"):
+            try:
+                from src.domains.mgmt.migrations.category_collapse_dict import (
+                    verify_category_collapse,
+                )
+                verify_category_collapse(conn=conn)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"mgmt 分类字典后置校验失败: {e}")
+        if dom in ("", "runtime"):
+            try:
+                from src.domains.runtime.migrations.skill_detail_tables import (
+                    verify_skill_classification_columns,
+                )
+                verify_skill_classification_columns(conn=conn)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"runtime skill 列后置校验失败: {e}")
+    if failures:
+        msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
+        log.error(msg)
+        if raise_on_fail:
+            raise RuntimeError(msg)
+    else:
+        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列）")
+    return failures
 
 
 def _now_iso() -> str:
@@ -4767,6 +4812,9 @@ def run_pending_migrations() -> None:
         # 执行器自身异常（版本表读不了等）→ 退回全量迁移（与历史行为一致的兜底）
         log.warning(f"run_pending_migrations 执行器异常，退回全量 _run_all_migrations: {e}")
         _run_all_migrations()
+    # Issue #3648：迁移段收口后再核对关键目标（列在 / 仅 3 个活跃一级）。
+    # 迁移自身已 post_check 不盖章；这里保证「已盖章历史库」也能在启动日志暴露漂移。
+    verify_migration_targets()
     # Issue #1011 In Scope 0：已盖章存量库迁移报告补写（幂等，失败不阻断启动）
     try:
         _backfill_missing_migration_reports()
@@ -4800,6 +4848,15 @@ def _warn_missing_migration_owner_if_multi_db(call_site: str = "pending") -> Non
         log.warning(f"迁移属主告警判定跳过（db_registry 不可用）: {_e}")
         return
     if (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip():
+        return
+    # 代码已能自行推断域（库名 → 角色）时，这不是错误，只是一条建议：
+    # 否则「env 漏配但实际筛域正确」的进程会一直刷 ERROR，把真问题淹掉
+    # （2026-11-21 实测：推断已把 mgmt 筛成 122→82 条，告警仍在报「不筛域跑全量」）。
+    _resolved = current_migration_domain()
+    if _resolved:
+        log.info(f"[migration-guard] GRAPE_MIGRATION_OWNER 未显式设置，已按本进程推断域="
+                 f"{_resolved}（库名/角色）；建议在启动脚本显式导出 —— "
+                 f"mgmt=mgmt / event=runtime / insight=insight / worker 留空")
         return
     _roles = {
         (os.environ.get("GRAPE_PROCESS_ROLE") or "").strip().lower(),
@@ -4835,9 +4892,14 @@ def run_domain_migrations() -> None:
     # Issue #3527：此处 owner 为空 → 直接 return，本进程未执行
     # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
     _warn_missing_migration_owner_if_multi_db("domain")
-    domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
+    # worker 与 event 共用 runtime 库，按设计不跑迁移（避免并发重复 DDL）。
+    # 这一跳必须在推断之前：库名推断会把 worker 也判成 runtime。
+    if _process_role() == "worker":
+        log.info("run_domain_migrations: 进程角色=worker，与 event 共库，跳过域迁移")
+        return
+    domain = current_migration_domain()
     if domain not in ("runtime", "insight"):
-        return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
+        return  # mgmt：init_database() 已经跑
     registry = [m for m in _MIGRATIONS if domain in (m.domains or ())]
     if not registry:
         log.info(f"{domain} 域无登记的迁移，跳过")
@@ -4850,6 +4912,8 @@ def run_domain_migrations() -> None:
     def _apply() -> None:
         _ensure_migration_session_lock_timeout()
         _run_migrations_with_conn(db, registry=registry, allow_legacy=False)
+        # Issue #3648：域库同样在启动期核对关键目标（只检查本域对象）。
+        verify_migration_targets(domain=domain)
         log.info(f"{domain} 域迁移完成（{len(registry)} 条登记）")
 
     try:
@@ -6303,7 +6367,7 @@ def _migrate_tables():
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行(避免每次启动 DDL 触发元数据锁--启动变慢根因)
         _alter_skill_files_if_needed(),
         *runtime_mig.ALTERS_ENGINE_CREDENTIAL_COLUMNS,  # 表：runtime_credentials, agent_runtimes,
-        *mgmt_mig.ALTERS_USER_AND_KNOWLEDGE_COLUMNS,  # 表：user_accounts, agent_shared_knowledge,
+        *mgmt_mig.ALTERS_USER_AND_KNOWLEDGE_COLUMNS,  # 表：agent_shared_knowledge,
         *runtime_mig.ALTERS_SKILL_ENGINE_COLUMNS,  # 表：agent_tasks, agent_runtimes, runtime_health_scores, skill,
         *mgmt_mig.ALTERS_SCENE_COLUMNS,  # 表：devops_pipeline_scene, scene_skill_ref, scene_market,
         *runtime_mig.ALTERS_SCENE_CATEGORY_EVENT_SKIPPED,  # 表：scene_category, event_skipped,
@@ -6529,42 +6593,6 @@ def _migrate_tables():
         _migrate_global_bot_token_to_db()
     except Exception as e:
         log.warning(f"Issue #345: migrate global bot token to DB failed: {e}")
-    # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
-    # OAuth 配置迁移由 migrate_oauth_providers() 统一处理（user/db.py 模块加载时执行）
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(mgmt_mig.SELECT_USER_ACCOUNTS)
-            row = c.fetchone()
-            if row:
-                cols = [d[0] for d in c.description]
-                acc = dict(zip(cols, row))
-                # 迁移 default 账户中的 OAuth 配置到 meta 表（幂等）
-                _oauth_keys = [
-                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-                    ("github_oauth_client_id", "oauth_github_client_id"),
-                    ("github_oauth_client_secret", "oauth_github_client_secret"),
-                    # 不迁移 redirect_uri——D27 已废弃
-                ]
-                migrated = False
-                for src_key, meta_key in _oauth_keys:
-                    val = acc.get(src_key, "") or ""
-                    if val:
-                        c.execute(runtime_mig.SELECT_META__MIGRATE_TABLES, (meta_key,))
-                        if c.fetchone()[0] == 0:
-                            c.execute(runtime_mig.UPSERT_META__MIGRATE_TABLES,
-                                      (meta_key, val))
-                            migrated = True
-                # 删除 default 账户（OAuth 已收敛到 meta 表）
-                c.execute(mgmt_mig.DELETE_USER_ACCOUNTS)
-                db.commit()
-                if migrated:
-                    log.info("Migrated OAuth config from default account to meta table")
-                else:
-                    log.info("Deleted default account (no config to migrate)")
-    except Exception as e:
-        log.warning(f"Migrate/delete default account failed: {e}")
     # 迁移旧表 agent_sessions -> devops_agent_session(幂等)
     try:
         with db_lock:
@@ -6814,17 +6842,6 @@ def _migrate_tables():
         log.info("Added issue_agent_session.session_engine column")
     except Exception as e:
         log.warning(f"Add issue_agent_session.session_engine column failed: {e}")
-    # ===== user_accounts 发布仓库列(老库升级;CREATE TABLE 只影响新库,存量库须幂等补列)=====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "user_accounts", "gitcode_publish_repo", "TEXT DEFAULT ''")
-            _ensure_column(c, "user_accounts", "github_publish_repo", "TEXT DEFAULT ''")
-            _ensure_column(c, "user_accounts", "github_login", "TEXT DEFAULT ''")
-            db.commit()
-        log.info("Added gitcode_publish_repo / github_publish_repo / github_login columns to user_accounts")
-    except Exception as e:
-        log.warning(f"Add user_accounts publish repo columns failed: {e}")
     # ===== managed_repos 部署URL列（weekly-01 合并） =====
     try:
         with db_lock:
@@ -7068,15 +7085,6 @@ def _migrate_tables():
         log.info("Added event_action_filter.block_changes + vcs_source columns")
     except Exception as e:
         log.warning(f"Add event_action_filter columns failed: {e}")
-    # ===== Phase 2: user_accounts.last_scene (event-dispatch-redesign-v2.md 3.1) =====
-    try:
-        with db_lock:
-            c = db.cursor()
-            _ensure_column(c, "user_accounts", "last_scene", "TEXT DEFAULT 'default'")
-            db.commit()
-        log.info("Added last_scene column to user_accounts")
-    except Exception as e:
-        log.warning(f"Add last_scene column failed: {e}")
     # ===== multi-task mode: issue_state 已停用（C5），仅补 issue/chat_messages 列 =====
     try:
         with db_lock:
@@ -8000,7 +8008,7 @@ def _fn_chat_conversations_status_index() -> None:
 
 
 register_migration(
-    version="202611170009",
+    version="202611220001",
     name="chat-conversations-status-index",
     kind="safe",
     fn=_fn_chat_conversations_status_index,
@@ -8682,7 +8690,7 @@ register_migration(
     fn=_fn_retire_vcs_platforms_hidden,
 )
 # ===== Issue #2423 M1-b（#2423 移植）：env_extra 存量明文加密 backfill =====
-# （arch11 号系顺延——原 202611180001 与 runtime 域 cloud_sandboxes 迁移撞号，backfill 让位改 202611200003）
+# （arch11 号系顺延——原 202611180001 与 runtime 域 cloud_sandboxes 迁移撞号，backfill 让位改 202611220003）
 def _fn_migrate_env_extra_encryption_2423() -> None:
     """代理到 engine/service 的 backfill（迁移系统注册面在 db_setup，实现在域层）。"""
     from src.domains.runtime.engine.service import _fn_migrate_env_extra_encryption
@@ -8690,7 +8698,7 @@ def _fn_migrate_env_extra_encryption_2423() -> None:
 
 
 register_migration(
-    version="202611200003",
+    version="202611220003",
     name="issue2423-env-extra-encrypt-backfill",
     kind="backfill",
     fn=_fn_migrate_env_extra_encryption_2423,
@@ -8711,7 +8719,7 @@ def _fn_create_ov_credential_cells_2423() -> None:
 
 
 register_migration(
-    version="202611200004",
+    version="202611220004",
     name="issue2423-create-ov-credential-cells",
     kind="safe",
     fn=_fn_create_ov_credential_cells_2423,
@@ -8741,6 +8749,17 @@ _PLUGIN_DEFAULT_CATEGORIES = [
 ]
 
 
+# ── 2026-11-22 撞号换号（部署环境 8 条 ERROR：同号不同名，被台账永久判已执行）──
+# 旧号 → 新号（日期段顺延到 20261122，全仓/台账此前均未占用）：
+#   202611170009 chat-conversations-status-index        → 202611220001
+#   202611200002 plugin-create-seven-tables-b1          → 202611220002（并折入分类种子）
+#   202611200003 issue2423-env-extra-encrypt-backfill    → 202611220003
+#   202611200004 issue2423-create-ov-credential-cells    → 202611220004
+#   202611210004 session-token-key-column-width          → 202611220005
+# 换号后必须在目标库先核对 grape_t_schema_migrations 无这些新号（见
+# docs/weekly-11/migration-renumber-20261122.md 的只读核对 SQL）。
+
+
 def _fn_plugin_category_seed_b1() -> None:
     """插件分类种子（唯一键 + INSERT OR IGNORE，天然幂等可重复执行）。"""
     from src.kernel.session_manager import db, db_lock
@@ -8755,11 +8774,23 @@ def _fn_plugin_category_seed_b1() -> None:
         db.commit()
 
 
+def _fn_plugin_tables_and_seed_b1() -> None:
+    """建 7 张插件表，并补一次分类种子（幂等 INSERT OR IGNORE）。
+
+    为什么合成一条：target 上 202611200005（种子）可能早于建表执行并已盖章，
+    建表迁移重排号后若只建表，种子数据仍缺；把种子折进来可在同一次执行里补齐。
+    """
+    _fn_create_plugin_tables_b1()
+    # 种子失败必须抛出：迁移框架只在 fn 正常返回时盖章；吞掉异常会留下
+    # 「表建好了、分类没写」且不再重试的半状态（2026-11-22 评审 A2）。
+    _fn_plugin_category_seed_b1()
+
+
 register_migration(
-    version="202611200002",
+    version="202611220002",
     name="plugin-create-seven-tables-b1",
     kind="safe",
-    fn=_fn_create_plugin_tables_b1,
+    fn=_fn_plugin_tables_and_seed_b1,
 )
 
 
@@ -10168,7 +10199,7 @@ def _fn_category_dict_and_tags() -> None:
 
     - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
     - scene_market 补 cat_l1_id / cat_l2_id（mgmt 域；skill 的三列同号需求
-      归 runtime 域，见 202611180003）；
+      归 runtime 域，见 202611210001）；
     - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
     - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
     """
@@ -10180,7 +10211,7 @@ def _fn_category_dict_and_tags() -> None:
             seed_category_dict()
         # skill 归 runtime 域（configs/table_ownership.json），本迁移只跑 mgmt 域：
         # 在这里补 skill 列会被归属守卫跳过、却因本迁移盖章而永久假绿 → 参考
-        # 202611180003（runtime 域）单独补。scene_market 归 mgmt，就地补。
+        # 202611210001（runtime 域，Issue #3648 renumber）单独补。scene_market 归 mgmt，就地补。
         for _tbl, _col, _ddl in (
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
@@ -10204,7 +10235,7 @@ register_migration(
     name="issue2761-category-dict-and-tags",
     kind="safe",
     # 显式标域：本迁移只碰 mgmt 属主的 grape_t_category_dict / scene_market；runtime 的
-    # skill 三列由 202611180003（runtime 域）负责。不标会被默认成 mgmt。
+    # skill 三列由 202611210001（runtime 域）负责。不标会被默认成 mgmt。
     domains=("mgmt",),
     fn=_fn_category_dict_and_tags,
 )
@@ -10228,16 +10259,29 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
+def _postcheck_skill_classification_columns() -> list:
+    """后置校验（Issue #3648）：委托 runtime 属主域模块，避免双份列清单漂移。"""
+    from src.domains.runtime.migrations.skill_detail_tables import (
+        verify_skill_classification_columns,
+    )
+    return verify_skill_classification_columns()
+
+
 # [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号：
 # 同一 version 的登记行名已被 issue2761-skill-classification-columns 占用，
 # ensure-cloud-sandboxes-in-runtime 因此被判「已执行」而从未真跑。按「已发布保持原号、
 # 只改未发布的」规则，本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。
+#
+# [Issue #3648 再 renumber] dev 三库的 202611180003 已被旧构建的
+# skill-intro-override-schema 盖章（同号不同名），本迁移被永久判已执行、skill 缺列。
+# 顺延到未占用号 202611210001，并加 post_check：列在才算执行成功（执行→校验→盖章）。
 register_migration(
-    version="202611180003",
+    version="202611210001",
     name="issue2761-skill-classification-columns",
     kind="safe",
     fn=_fn_skill_classification_columns,
     domains=("runtime",),
+    post_check=_postcheck_skill_classification_columns,
 )
 
 
@@ -10995,14 +11039,14 @@ register_migration(
 #   ② 按属主域各补一条幂等补正迁移，把已盖章库里缺失的列补上（存量库不会重跑老号）。
 _CATEGORY_COLUMN_PLANS = (
     # (属主域, 表, ((列, DDL), ...), 需重建视图的消费域)
-    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180003 补（基线自带），
+    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611210001 补（Issue #3648 renumber），
     # 在这里重复补只会与它抢写同一批列（架构复审 F3 / 基线 085f736a5）。
     ("mgmt", "scene_market",
      (("cat_l1_id", "INTEGER DEFAULT 0"), ("cat_l2_id", "INTEGER DEFAULT 0")),
      ("insight", "runtime")),
 )
 
-# skill 的消费域视图：列由 202611180003 补，但 MariaDB 视图列清单在 CREATE 时固化，
+# skill 的消费域视图：列由 202611210001 补，但 MariaDB 视图列清单在 CREATE 时固化，
 # 补列不会让既有视图自愈 —— 读 mgmt/insight 上的 skill 视图仍 1054。本迁移只重建视图。
 _SKILL_VIEW_OWNER = "runtime"
 _SKILL_VIEW_TABLE = "skill"
@@ -11046,10 +11090,12 @@ register_migration(
 # 这里只做注册引导（模式同 ensure_runtime_type_info_columns / drop_same_domain_links）。
 # 版本号沿革（rebase 改号记录见各模块 docstring）：1301/1302 曾用
 # 202611180001/002（基线占用）→ 202611181201/1202（基线守卫钉空）→ 202611181301/1302；
-# 1303 原用 202611180003（基线 issue2761-skill-classification-columns 占用）。
-# 分类收敛按属主拆两条：202611180004（mgmt：字典停用 + scene_market 重挂）、
-# 202611181304（runtime：skill 重挂 + 老分类废止）——QA A11：混在一条无 domains=
-# 声明的迁移里，三库拓扑下 runtime 库的收敛会被静默跳过。
+# 1303 原用 202611180003（基线 issue2761-skill-classification-columns 占用，该条已按
+# Issue #3648 改号到 202611210001）。
+# 分类收敛按属主拆两条：202611210002（mgmt：字典停用 + scene_market 重挂）、
+# 202611210003（runtime：skill 重挂 + 老分类废止）——QA A11：混在一条无 domains=
+# 声明的迁移里，三库拓扑下 runtime 库的收敛会被静默跳过。两条原用
+# 202611180004/202611181304，因 dev 库已被旧名盖章而按 #3648 改号，并各带 post_check。
 from src.domains.runtime.migrations.skill_detail_tables import (
     MIGRATION_SCHEMA as _M_SKILL_DETAIL_SCHEMA,
     MIGRATION_BACKFILL as _M_SKILL_DETAIL_BACKFILL,
@@ -11082,8 +11128,8 @@ def _fn_normalize_org_domain_text() -> None:
     只处理**本域库里存在**的表：三库拓扑下 mgmt 进程改 organization/org_member 等，
     runtime 进程改 runtime_credentials/agent_tasks 等，缺表按项跳过。
 
-    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常只记 WARNING 并返回 True，
-    单靠它的返回值会「ALTER 失败也盖章」（QA M3/I2）。发现仍有数值列 → ERROR +
+    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常抛出（不盖章），
+    只有「已达目标态」错误码放行；但放行不等于生效，仍以列类型实查为准（QA M3/I2）。发现仍有数值列 → ERROR +
     raise，执行器据此不盖章、下次启动重试——本函数属注册式迁移，存量库每次启动
     都会跑到（QA M2）。
     """
@@ -11240,6 +11286,22 @@ def _fn_create_org_repo_ai_table() -> None:
         db.commit()
 
 
+def _fn_personal_orgs_from_accounts(conn=None):
+    from src.domains.mgmt.migrations.personal_org_backfill import (
+        migrate_personal_orgs_from_accounts as _impl,
+    )
+
+    return _impl(conn)
+
+
+def _fn_runtime_org_backfill(conn=None):
+    from src.domains.runtime.migrations.org_id_backfill import (
+        migrate_runtime_org_ids as _impl,
+    )
+
+    return _impl(conn)
+
+
 register_migration(
     version="202611191120",
     name="create-org-repo-ai-table",
@@ -11281,3 +11343,215 @@ register_migration(
     domains=("mgmt", "runtime"),
     fn=_fn_rename_org_tables_and_uuid_pk,
 )
+
+
+def _audit_ops_event(event_type: str, detail: dict) -> None:
+    """运维类 DDL 的审计留痕（QA C3，2026-11-21）。
+
+    为什么需要：`GRAPE_TABLE_COPY_CLEANUP=1` 会在启动期 DROP 副本表，列宽 MODIFY
+    也是破坏性 DDL —— 只有一条可能被轮转掉的 warning，事后无法回答「哪次启动、
+    哪个进程、动了哪张表、当时多少行」。审计写 mgmt 审计链（哈希链），detail 只记
+    结构信息（表名/域/行数/库/角色/迁移号），不含任何数据内容。
+
+    审计失败不阻断 DDL：审计面 vs 可用性是两个口径，这里选择可用性优先并留 warning。
+    """
+    try:
+        from src.domains.mgmt.public import log_audit
+        log_audit(event_type, detail=dict(detail or {}))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[audit] {event_type} 写入失败（不影响 DDL）: {e}")
+
+
+def _fn_session_token_unique_session_key() -> None:
+    """session_api_tokens 列宽对齐（幂等）；**不再**去重、**不再**建唯一索引。
+
+    2026-11-21 我曾在此处把「同 key 可多行」收敛成单行（去重 + 建 uniq_session_key），
+    用来支撑当时的无条件 upsert。那是倒果为因，已撤销：
+
+      · 原设计允许多枚并存 —— 建表只有 id 主键；索引 ix_sat_kind_key(kind, session_key)
+        是非唯一的；session_token_set_expiry / shrink_active / delete_by_session 全是按 key
+        批量操作；读侧只有 by_sha，没有「按 key 取一枚」。
+      · chat 的 conv 级 key 正依赖这一点（同一会话多条消息各持一枚）。
+      · 现在 session_token_insert / rotate 是「裸 INSERT 优先 → 撞唯一键才降级 UPDATE」，
+        无唯一索引的库恢复多行，有索引的库兼容单行。
+
+    本迁移只保留 MySQL 侧 TEXT → VARCHAR(191) 的列宽对齐：部署侧**可能**已手工建了
+    uniq_session_key（实测 <db_mgmt> / <db_alt> 有），而 MySQL 不允许在
+    TEXT 上建唯一索引 —— 列宽不改会与该索引形态冲突。
+
+    已经跑过本迁移并且据此建过 uniq_session_key 的部署，保留现状即可（代码把它当「可能
+    存在的物理约束」兼容，不依赖它）。要还原成原设计形态，需人工确认后执行：
+        ALTER TABLE session_api_tokens DROP INDEX uniq_session_key
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+
+    _ddl = "ALTER TABLE session_api_tokens MODIFY session_key VARCHAR(191) NOT NULL"
+    _detail = {
+        "migration": "202611220005",
+        "ddl": _ddl,
+        "db": os.environ.get("DEVOPS_DB_NAME", ""),
+        "role": os.environ.get("GRAPE_PROCESS_ROLE", ""),
+    }
+    with db_lock:
+        c = db.cursor()
+        _ddl_ran = False
+        if _is_mysql_backend():
+            # QA C3（2026-11-21）：MODIFY COLUMN 属破坏性 DDL，必须走 _destructive_ddl
+            # （min_code_version 门槛 + MDL 处理）；门槛未过时跳过不盖章，下次启动重试。
+            # 审计前后各一条（detail 只记结构信息）。
+            _audit_ops_event("session_token_key_widen", {**_detail, "phase": "before"})
+            if not _destructive_ddl(c, _ddl, kind_hint="cleanup", version="202611220005"):
+                db.commit()
+                raise RuntimeError(
+                    "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
+                    "session_key 列宽未对齐，跳过不盖章")
+            _ddl_ran = True
+        db.commit()
+    if _ddl_ran:
+        _audit_ops_event("session_token_key_widen", {**_detail, "phase": "after"})
+    log.info("session_api_tokens: session_key 列宽对齐 VARCHAR(191)（不建唯一索引、不去重）")
+
+
+
+register_migration(
+    version="202611220006",
+    name="personal-orgs-from-accounts",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_personal_orgs_from_accounts,
+)
+
+
+register_migration(
+    version="202611220007",
+    name="runtime-org-id-backfill",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_runtime_org_backfill,
+)
+
+
+register_migration(
+    version="202611220005",
+    name="session-token-key-column-width",
+    kind="cleanup",  # 含 MODIFY COLUMN：破坏性 DDL，走 min_code_version 门槛
+    domains=("mgmt",),
+    fn=_fn_session_token_unique_session_key,
+)
+
+
+def _fn_table_ownership_copy_audit() -> None:
+    """审计本库里「归别域、却是 BASE TABLE」的表副本（2026-11-21）。
+
+    背景：契约层单点（跨域读只走 owner 域 public），但 DDL 层带历史副本 ——
+    非 owner 库里的同名 BASE TABLE 查起来成功返回 0 行、不报错，会被当成
+    「没配置/数据丢了」（本仓已误判两次）。这里把副本变成可观测。
+
+    默认**只告警不删**：
+      · 非 0 行副本可能是该部署的真源（实测 227：rc 基表在 runtime，清单却声明
+        owner=insight），自动删会直接丢数据；
+      · 0 行副本虽然安全，清理仍是运维动作，不该在启动里静默发生。
+    需要清理时显式开 `GRAPE_TABLE_COPY_CLEANUP=1`，且只删 0 行的那部分。
+    """
+    from src.kernel import table_ownership as _own
+
+    try:
+        row = db.execute("SELECT DATABASE()").fetchone()
+        dbname = str((row[0] if row else "") or "")
+    except Exception as e:  # noqa: BLE001 - 审计失败不阻断启动（本迁移不盖章也无害）
+        log.debug(f"[TABLE_OWNERSHIP_AUDIT] skip: {e}")
+        return
+    dom = _own._domain_from(dbname)
+    if not dom:
+        # 判不出域 = 单库部署 / 库名不含域标识 → 不做跨域副本审计（debug 说明，不让空结果冒充干净）
+        log.debug(f"[TABLE_OWNERSHIP_AUDIT] skip {dbname or '?'}: 判不出域，不做跨域副本审计")
+        return
+    try:
+        # strict=True：information_schema 不可用 → 抛错而不是返回空表。
+        # 空结果只代表「没有任何别域副本」，不能代表「没审计」。
+        items = _own.audit_foreign_copies(db, dbname, strict=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[TABLE_OWNERSHIP_AUDIT] 无法审计 {dbname}（不等于干净）: {e}")
+        raise  # 不盖章，下次启动重试
+    if not items:
+        # 与上面的 skip 区分：这里是**审过了且干净**，不是没审
+        log.info(f"[TABLE_OWNERSHIP_AUDIT] {dbname} (owner={dom}): clean")
+        return
+    empty = [i for i in items if i["kind"] == "empty_copy"]
+    diverge = [i for i in items if i["kind"] == "divergent_copy"]
+    unknown = [i for i in items if i["kind"] == "unknown_rows"]
+    log.warning(
+        f"[TABLE_OWNERSHIP_AUDIT] {dbname}: 别域副本 {len(items)} 张 "
+        f"(空 {len(empty)} / 非空 {len(diverge)} / 行数未知 {len(unknown)})；"
+        f"裸 SQL 会读到空表或旧数据且不报错，断言数据面请走 owner 域 public 原语")
+    for i in diverge:
+        log.warning(
+            f"[TABLE_OWNERSHIP_AUDIT] `{i['table']}` owner={i['owner']} 本库 {i['rows']} 行 "
+            f"→ 非空副本，可能该部署真源在此，需人工裁决后再迁，禁止自动删")
+    for i in unknown:
+        # 没数过 ≠ 空：不得进入 empty 清理队列（QA B2）
+        log.warning(
+            f"[TABLE_OWNERSHIP_AUDIT] `{i['table']}` owner={i['owner']} 行数未知 "
+            f"→ 不做任何自动处理（先人工确认）")
+    if os.environ.get("GRAPE_TABLE_COPY_CLEANUP", "").strip().lower() in ("1", "true", "on"):
+        # QA C3：清理前先过破坏性 DDL 门槛一次。门槛未过 → raise，让本迁移不盖章、
+        # 下次启动重试（不能在 try/except 里吞掉，否则会带着「已清理」的假象盖章）。
+        if not _cleanup_gate_passed():
+            raise RuntimeError(
+                "cleanup gate 未过（本实例版本低于 meta.min_code_version），"
+                "本次不清理副本，跳过不盖章")
+        _failed: list[str] = []
+        for i in empty:
+            _detail = {
+                "migration": "202611210005",
+                "table": i["table"],
+                "owner": i["owner"],
+                "rows": i["rows"],
+                "db": dbname,
+                "role": os.environ.get("GRAPE_PROCESS_ROLE", ""),
+            }
+            try:
+                # QA C3：DROP 走 _destructive_ddl（门槛 + MDL），前后各留一条审计；
+                # 门槛拦截时 drop_empty_copy 抛错 → 本迁移不盖章、下次启动重试。
+                _audit_ops_event("table_copy_cleanup", {**_detail, "phase": "before"})
+                _own.drop_empty_copy(
+                    db, i["table"],
+                    execute_ddl=lambda ddl: _destructive_ddl(db, ddl, kind_hint="cleanup"))
+                _audit_ops_event("table_copy_cleanup", {**_detail, "phase": "after"})
+                log.warning(f"[TABLE_COPY_CLEANUP] dropped empty copy `{i['table']}` (owner={i['owner']})")
+            except Exception as e:  # noqa: BLE001
+                _failed.append(f"{i['table']}: {e}")
+                log.warning(f"[TABLE_COPY_CLEANUP] skip `{i['table']}`: {e}")
+        if _failed:
+            # 有副本没删掉却照常返回 = 带着「已清理」的假象盖章（QA 第 6 轮
+            # Informational 5）。这里显式失败 → 不盖章，下次启动重试。
+            raise RuntimeError("table copy cleanup incomplete: " + "; ".join(_failed))
+
+
+register_migration(
+    version="202611210005",
+    name="table-ownership-copy-audit",
+    kind="cleanup",  # 显式开启时含 DROP TABLE：破坏性 DDL，走 min_code_version 门槛
+    domains=("mgmt", "runtime", "insight"),
+    fn=_fn_table_ownership_copy_audit,
+)
+
+
+# ===== 技能分类切换（统一字典 l1/l2 收口）——2026-11-22 三问题修复 =====
+# 背景：全量技能 cat_l1_id=0（挂靠从未落库）+ 老 skill_category 与新字典双轨并存。
+# 迁移 SQL 住属主域 migrations 下（跨域守卫 P0-2，QA A8/A11）：
+#   mgmt 侧 202611230001：字典补种「grape平台应用」(id 100109) + 老分类停用重申；
+#   runtime 侧 202611230002：74 个官方技能按 skill_name 挂 cat_l1_id/cat_l2_id
+#   （含组织仓库 AI 分析→测试与质量，2026-11-22 用户拍板）+ 老 category_id 清零。
+# 两条均为 kind=backfill + post_check（收敛可判定才盖章）；runtime 条探测前置
+# （官方技能空表时不做任何写、不盖章，等首轮 skill sync 后收敛）。
+
+from src.domains.mgmt.migrations.skill_category_cutover_dict import (
+    MIGRATION as _M_SKILL_CUTOVER_DICT,
+)
+register_migration(**_M_SKILL_CUTOVER_DICT)
+
+from src.domains.runtime.migrations.skill_category_cutover import (
+    MIGRATION as _M_SKILL_CUTOVER_MAP,
+)
+register_migration(**_M_SKILL_CUTOVER_MAP)

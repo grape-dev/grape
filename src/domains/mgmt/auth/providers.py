@@ -647,6 +647,19 @@ def _resp_body_snippet(resp, limit: int = 300) -> str:
         return ""
 
 
+def _mask_token_in_url(url: str) -> str:
+    """把 URL 里的 access_token 值打码（日志用；端点错误也要能定位，但不能落 token）。"""
+    import re as _re
+
+    return _re.sub(r"(access_token=)[^&\s]+", r"\1***", str(url or ""), flags=_re.I)
+
+
+#: userinfo 昵称的兜底候选字段（按卡的 name_field 取不到时依次尝试）。
+#: 2026-11-21 华为现场：卡上 name_field=nickName，而 GOpen.User.getInfo 返回的是其他键，
+#: 结果 external_name 恒空但登录算成功 —— 名字缺失不会报错，最难发现。
+_NAME_FALLBACK_FIELDS = ("displayName", "nickName", "name", "login", "userName")
+
+
 def _parse_oauth_error(resp) -> "tuple[str, str]":
     """从 token 端点 4xx 响应解析 (error, error_description)（RFC 6749 §5.2）。
 
@@ -703,10 +716,17 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
         _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
 
         resp = _req.get(user_url, headers=headers, timeout=15, proxies=_proxies)
-        resp.raise_for_status()
+        # 2026-11-21 华为现场：user_url 指错端点时上游回 500 HTML 页，raise_for_status
+        # 抛的异常里只有 URL，定位不到「端点错」还是「token 失效」。这里显式带上状态码、
+        # 打码后的端点与响应片段，才看得出是哪一类问题（token 不进日志）。
+        if resp.status_code >= 400:
+            log.warning(
+                f"Get user info for {provider} failed: HTTP {resp.status_code} "
+                f"url={_mask_token_in_url(user_url)} body={_resp_body_snippet(resp)}")
+            return None
         user_info = resp.json()
     except Exception as e:
-        log.warning(f"Get user info for {provider} failed: {e}")
+        log.warning(f"Get user info for {provider} failed: {type(e).__name__}: {e}")
         return None
 
     result = {
@@ -723,6 +743,25 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
 
     # P2-2: 渠道 /user 接口默认不返回 email 时，按渠道卡 emails_endpoint 补抓
     # 主邮箱（S89/D65 能力位；github 内置 /user/emails，其余渠道空=无补抓）。
+    _name = str(result.get("external_name") or "").strip()
+    if not _name:
+        # 卡的 name_field 配错时不要静默空名（华为现场：name_field=nickName 恒空）
+        _hit = ""
+        for _k in _NAME_FALLBACK_FIELDS:
+            _v = str(user_info.get(_k) or "").strip()
+            if _v:
+                result["external_name"] = _v
+                _hit = _k
+                break
+        if _hit:
+            log.warning(
+                f"userinfo: provider={provider} 卡 name_field={cfg['name_field']!r} 未命中，"
+                f"回落 {_hit!r}（疑似字段名配错，建议改平台卡）")
+        else:
+            log.warning(
+                f"userinfo: provider={provider} 无可用昵称字段 "
+                f"（响应键={sorted(str(k) for k in user_info)[:10]}，"
+                f"卡 name_field={cfg['name_field']!r}）")
     _emails_ep = _channel_emails_endpoint(provider, cfg)
     if _emails_ep and not result["email"]:
         try:

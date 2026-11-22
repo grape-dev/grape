@@ -17,17 +17,20 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 
 from src.kernel.config import log
 
 #: 单次取卡超时的**默认值**（秒）。来源优先级：
 #:   显式构造参数 > 环境变量 `GRAPE_PLATFORM_CARD_TIMEOUT` > 本常量。
-#: 依据：取卡位于 worktree 准备的关键路径上（拿不到卡就没有 clone 地址），
-#: 主控与 worker 同可用区内网往返实测 <100ms，2.0s ≈ 20× 余量；再放大只会拖住
-#: 任务准备（失败也要等满超时），再缩小会在主控 GC / 冷启动时误判"不可达"而
-#: 白白回落文件卡。可用环境变量按部署调整，不必改代码发版。
-_DEFAULT_CARD_TIMEOUT = 2.0
+#: 依据：取卡位于 worktree 准备的关键路径上（拿不到卡就没有 clone 地址）。
+#: 2026-11-21 从 2.0s 提到 10.0s：2s 在主控慢查询 / GC / 冷启动时会把"慢"判成
+#: "不可达"，而这次失败会被装配层当成「平台未注册」暴露给任务（见
+#: PlatformCardUnavailableError 的引入）。取卡只在缓存未命中时发生（300s 一次），
+#: 失败路径另有 1 次重试（_RETRY_DELAY），最坏等待 ≈ 10.0 × 2 + 0.5 ≈ 20.5s；
+#: 相对"把可用主控判成不可用、整批 clone 失败"，这个等待是可接受的代价。
+_DEFAULT_CARD_TIMEOUT = 10.0
 _TIMEOUT_ENV = "GRAPE_PLATFORM_CARD_TIMEOUT"
 _TIMEOUT_MAX = 30.0
 
@@ -60,6 +63,26 @@ class PlatformCardContractError(RuntimeError):
     """契约取卡失败（不可达 / 非 2xx / 响应格式非法）。"""
 
 
+class PlatformCardUnavailableError(PlatformCardContractError):
+    """取卡通道**本身**不可用：网络/超时、HTTP 5xx、或服务端显式回 `error`
+    （`platform_cards_unavailable` —— 主控读 mgmt 表失败）。
+
+    与「平台未注册」严格区分，这是两类完全不同的故障：
+      · 本异常  → 修链路（主控是否可达 / RUNTIME_TOKEN 是否有效 / 表是否可读）；
+      · 平台未注册（`PlatformCardMissingError.code=platform_not_registered`）
+        → 去配卡。
+    为什么必须区分（2026-11-21）：服务端一直以 `{"cards": {}, "error": ...}` 形式
+    报告故障（绝不 5xx），但客户端只取 `cards` 并把它当"没有卡"，装配层随即回落
+    到代码默认卡（不含 gitee），最终任务侧看到的是 `platform_not_registered` ——
+    把系统性故障伪装成"平台没注册"，排查方向被带偏。"""
+
+
+#: 取卡失败后的重试次数与间隔（仅对 `PlatformCardUnavailableError` 生效；
+#: 401/403/404 这类配置错不重试——重试不会让它变对）。
+_RETRY_ATTEMPTS = 2
+_RETRY_DELAY = 0.5
+
+
 class PlatformCardContractClient:
     """主控平台卡只读契约的客户端（worker 侧唯一取卡通道）。
 
@@ -68,8 +91,8 @@ class PlatformCardContractClient:
                   worker 的回连基址，与 A2A/tasks 同一口径）。
         token:    runtime 凭证；缺省读 `RUNTIME_TOKEN`。
         timeout: 单次取卡超时上限（秒）；缺省读 `GRAPE_PLATFORM_CARD_TIMEOUT`，
-                 再缺省用 `_DEFAULT_CARD_TIMEOUT`（2.0s）。取卡在任务准备关键
-                 路径上，宁可回落文件卡也不能拖住 worktree 准备。
+                 再缺省用 `_DEFAULT_CARD_TIMEOUT`（10.0s）。取卡在任务准备关键
+                 路径上；失败路径另有 1 次重试（`_RETRY_DELAY`），最坏等待约 20.5s。
         opener:  注入点（测试用），默认 `urllib.request.urlopen`。
     """
 
@@ -115,13 +138,32 @@ class PlatformCardContractClient:
     # ---- 契约调用 ------------------------------------------------------------
 
     def fetch_cards(self) -> dict[str, dict]:
-        """取回 {provider: 卡字段 raw}；失败抛 `PlatformCardContractError`。
+        """取回 `{provider: 卡字段 raw}`；失败抛 `PlatformCardContractError` 系。
 
         返回值里不含凭据列——由服务端契约端点保证（mgmt 原语的列白名单），
         客户端不做二次裁剪，避免出现第二份投影。
+
+        可重试的失败（网络 / 超时 / 5xx / 服务端 `error`）最多尝试
+        `_RETRY_ATTEMPTS` 次；不可重试的失败（401/403/404、响应格式非法）立即抛。
         """
         if not self.configured():
             raise PlatformCardContractError("未配置 RUNTIME_SERVER_URL / RUNTIME_TOKEN")
+        last: PlatformCardUnavailableError | None = None
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            try:
+                return self._fetch_once()
+            except PlatformCardUnavailableError as e:
+                last = e
+                if attempt >= _RETRY_ATTEMPTS:
+                    break
+                log.warning(f"platform-cards contract: 第 {attempt} 次取卡失败（{e}），"
+                            f"{_RETRY_DELAY}s 后重试")
+                time.sleep(_RETRY_DELAY)
+        assert last is not None
+        raise last
+
+    def _fetch_once(self) -> dict[str, dict]:
+        """单次契约调用（不含重试）。见 `fetch_cards` 的失败分类。"""
         url = f"{self.base_url}{self.PATH}"
         req = urllib.request.Request(
             url,
@@ -132,9 +174,20 @@ class PlatformCardContractClient:
             with self.opener(req, timeout=self.timeout) as resp:
                 status = getattr(resp, "status", None) or 200
                 body = resp.read().decode("utf-8", "replace") or "{}"
-        except Exception as e:  # noqa: BLE001 - 网络/超时/非 2xx 统一归类
-            raise PlatformCardContractError(f"{url}: {e}") from e
+        except urllib.error.HTTPError as e:
+            # urllib 对 4xx/5xx 是抛 HTTPError，不会返回 response.status ——
+            # 必须在这里分流，否则 401/403 会被归成“通道不可用”并触发无意义重试
+            # （2026-11-22 评审③：下面按 status 分类的分支曾是真传输永不到的死代码）。
+            code = int(getattr(e, "code", 0) or 0)
+            if code >= 500:
+                raise PlatformCardUnavailableError(f"{url}: HTTP {code}") from e
+            raise PlatformCardContractError(f"{url}: HTTP {code}") from e
+        except Exception as e:  # noqa: BLE001 - 网络/超时统一归类为"通道不可用"
+            raise PlatformCardUnavailableError(f"{url}: {e}") from e
         if not (200 <= int(status) < 300):
+            # 5xx = 主控自身故障（可重试）；4xx = 凭据/路径配置错（重试无意义）
+            if int(status) >= 500:
+                raise PlatformCardUnavailableError(f"{url}: HTTP {status}")
             raise PlatformCardContractError(f"{url}: HTTP {status}")
         try:
             payload = json.loads(body)
@@ -143,7 +196,14 @@ class PlatformCardContractClient:
         cards = payload.get("cards") if isinstance(payload, dict) else None
         if not isinstance(cards, dict):
             raise PlatformCardContractError(f"{url}: 响应缺 cards 字典")
+        # 服务端读表失败时回 `{"cards": {}, "error": "platform_cards_unavailable"}`。
+        # 必须当作"通道不可用"抛出，不能当"没有卡"——否则退化到代码默认卡后，
+        # 任务侧只会看到「平台未注册」。服务端的 error 优先于空 cards 判断。
+        if isinstance(payload, dict) and str(payload.get("error") or "").strip():
+            raise PlatformCardUnavailableError(
+                f"{url}: {str(payload.get('error')).strip()}")
         return {str(p): dict(raw) for p, raw in cards.items() if isinstance(raw, dict)}
+
 
 class PlatformCardContractServer:
     """平台卡契约的**服务端**（runtime 进程内）：把 mgmt 契约行整形成对外响应。

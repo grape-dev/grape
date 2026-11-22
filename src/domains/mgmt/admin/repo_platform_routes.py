@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 from src.domains.mgmt.admin.api_common import Depends, load_field_docs, EnabledBody, not_found, require_admin, uow_write
@@ -217,6 +218,28 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
     old_plain = platform_bot_old_token(provider) if body.token else ""
     token_enc = encrypt(body.token) if body.token else None
     username = body.username if body.username != "" else None
+    verified_login = ""
+    if token_enc is not None:
+        # 令牌即事实：存令牌时用平台 /user 回答「我是谁」，自动回填账号名。
+        # basic_password 平台（gitee）的 clone 用户名必须是**令牌所属账号 login**，
+        # 靠人手填必然出错（实测填组织名/grape 账号名 → git clone 恒 403）。
+        # 这里把约束变成派生：坏令牌当场 400（不静默入库），好令牌自动带回 login。
+        try:
+            from src.domains.mgmt.admin.config_store import verify_token as _verify_token
+
+            verified_login = str((_verify_token(provider, body.token) or {}).get("login") or "").strip()
+        except Exception as e:  # noqa: BLE001 - 上游拒绝/网络失败都算令牌不可用
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "TOKEN_INVALID",
+                "message": f"{provider} 令牌校验失败（无法确认所属账号）: {e}",
+            }) from e
+        if not username and verified_login:
+            username = verified_login
+        elif username and verified_login and username != verified_login:
+            # 人工值与令牌真实账号不一致：保留人工值（可能是刻意的别名），但必须留痕——
+            # basic_password 平台用这个值做 HTTP Basic 用户名，不一致就会 403。
+            log.warning(f"repo_platform_routes: {provider} bot_username={username!r} "
+                        f"与令牌所属账号 {verified_login!r} 不一致（basic_password 平台会 403）")
     if token_enc is None and username is None:
         return {"ok": True, "provider": provider, "changed": False}
     hit = {}
@@ -227,6 +250,23 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
     uow_write(_do)
     if not hit.get("ok"):
         raise not_found("repo-platforms", provider)
+    if verified_login:
+        # 验证结果落位：bot_token_status/checked_at 由"猜"变成"验过"，管理面直接可读。
+        try:
+            from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+            uow_write(lambda s: RepoPlatformRepo.mark_bot_status(s, provider, "ok"))
+        except Exception as e:  # noqa: BLE001 - 状态位写失败不影响令牌写入结果
+            log.debug(f"repo_platform_routes: mark bot status failed: {e}")
+        # 令牌换过就把 clone 用户名缓存清掉（指纹变了本就会重解析，这里再兜一层旧明文键）
+        try:
+            from src.domains.runtime import public as _runtime_public
+
+            _runtime_public.invalidate_clone_identity(provider, body.token)
+            if old_plain:
+                _runtime_public.invalidate_clone_identity(provider, old_plain)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"repo_platform_routes: clone_identity invalidate failed: {e}")
     # 轮换传播：path A 托管把平台 bot token 同时写成仓库 webhook 验签 token，
     # 换 token 必须刷已托管仓库，否则老仓库 webhook 立刻 403（D110 §7 R1）。
     if token_enc is not None:

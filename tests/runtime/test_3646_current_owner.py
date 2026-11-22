@@ -46,8 +46,8 @@ class TestInternalAccountPredicate:
     """内部 Agent 身份不得直接作为责任人展示。"""
 
     def test_gcw_prefix_is_internal(self):
-        """GitCode OAuth 自动登录名（#3644 的 gcw_3FZApeLT）→ 内部账号。"""
-        assert is_internal_agent_account("gcw_3FZApeLT") is True
+        """GitCode OAuth 自动登录名（#3644 的 gcw_0FAKEACCT）→ 内部账号。"""
+        assert is_internal_agent_account("gcw_0FAKEACCT") is True
         assert is_internal_agent_account("gcw_7pdiBkYp") is True
 
     def test_bot_usernames_from_config_are_internal(self):
@@ -80,11 +80,11 @@ class TestResolveCurrentOwner:
         assert resolve_current_owner(["alice", "bob"], ["carol"]) == "alice"
 
     def test_internal_assignee_skipped(self):
-        assert resolve_current_owner(["gcw_3FZApeLT", "alice"], []) == "alice"
+        assert resolve_current_owner(["gcw_0FAKEACCT", "alice"], []) == "alice"
         assert resolve_current_owner(["grape_bot"], ["songspace"], ["grape_bot"]) == "songspace"
 
     def test_all_internal_falls_back(self):
-        assert resolve_current_owner(["grape_bot"], ["gcw_3FZApeLT"], ["grape_bot"],
+        assert resolve_current_owner(["grape_bot"], ["gcw_0FAKEACCT"], ["grape_bot"],
                                      fallback="QA Agent") == "QA Agent"
 
     def test_empty_candidates_fall_back(self):
@@ -98,11 +98,11 @@ class TestCurrentOwnerResolution:
     """展示 seam：_get_issue_pipeline → current_owner（Issue #3644 事件链复现）。"""
 
     def test_issue_3644_gcw_actor_is_skipped_for_human_owner(self):
-        """#3644：qa 阶段 A2A 事件 actor 是内部账号 gcw_3FZApeLT → 责任人应为 songspace。"""
+        """#3644：qa 阶段 A2A 事件 actor 是内部账号 gcw_0FAKEACCT → 责任人应为 songspace。"""
         events = [
             _ev(1, "#1", "issue_opened", "vod", "新 Issue", "completed", "songspace"),
             _ev(2, "#1", "a2a_event", "issue", "A2A: → issue", "completed", "songspace"),
-            _ev(3, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_3FZApeLT"),
+            _ev(3, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0FAKEACCT"),
         ]
         p = _pipeline(events, stage_assignee="")
         assert p["current_owner"] == "songspace", p["current_owner"]
@@ -123,16 +123,16 @@ class TestCurrentOwnerResolution:
 
     def test_gcw_assignee_falls_back_to_human_actor(self):
         events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "songspace")]
-        p = _pipeline(events, stage_assignee="gcw_3FZApeLT")
+        p = _pipeline(events, stage_assignee="gcw_0FAKEACCT")
         assert p["current_owner"] == "songspace", p["current_owner"]
 
     def test_all_internal_falls_back_to_agent_display_name(self):
         """全为内部账号 → Agent 显示名，绝不输出原始内部账号。"""
         events = [
             _ev(1, "#1", "issue_opened", "issue", "T", "completed", "grape_bot"),
-            _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_3FZApeLT"),
+            _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0FAKEACCT"),
         ]
-        p = _pipeline(events, stage_assignee="gcw_3FZApeLT")
+        p = _pipeline(events, stage_assignee="gcw_0FAKEACCT")
         assert p["current_owner"] == "QA Agent", p["current_owner"]
         assert "gcw_" not in p["current_owner"]
 

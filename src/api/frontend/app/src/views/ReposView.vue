@@ -987,12 +987,17 @@ function submitCreate() {
             })
         })
         .catch((err) => {
-          G.app.showToast(t('repos.create.err_create_failed', { msg: err.message || err }))
           createModal.submitting = false
+          // Issue #3563（Spec v2 B3）：401 reauth——全局重授权流程已由 api.js
+          // 触发（provider 分流跳转/凭据页直达），不再透传「检查失败」文案
+          if (err && err.status === 401 && err.detail && err.detail.action === 'reauth_required') return
+          G.app.showToast(t('repos.create.err_create_failed', { msg: err.message || err }))
         })
     })
     .catch((err) => {
       createModal.submitting = false
+      // Issue #3563（Spec v2 B3）：401 reauth——同上，走全局重授权流程
+      if (err && err.status === 401 && err.detail && err.detail.action === 'reauth_required') return
       G.app.showToast(t('repos.create.err_check_failed', { msg: err.message || err }))
     })
 }

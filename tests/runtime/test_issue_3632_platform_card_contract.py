@@ -65,8 +65,10 @@ def test_contract_client_fetches_cards():
 def test_card_timeout_has_a_named_source(monkeypatch):
     """架构守护 §timeout：超时必须来自具名来源（常量/环境变量），不得是裸字面量。"""
     monkeypatch.delenv(card_contract._TIMEOUT_ENV, raising=False)
-    assert card_contract._DEFAULT_CARD_TIMEOUT == 2.0
-    assert card_contract.PlatformCardContractClient().timeout == 2.0
+    # 2026-11-21 由 2.0s 提到 10.0s：2s 在主控慢查询 / GC / 冷启动时会把「慢」判成
+    # 「不可达」，而那次失败会被装配层当成「平台未注册」暴露给任务。
+    assert card_contract._DEFAULT_CARD_TIMEOUT == 10.0
+    assert card_contract.PlatformCardContractClient().timeout == 10.0
 
     monkeypatch.setenv(card_contract._TIMEOUT_ENV, "0.5")
     assert card_contract.PlatformCardContractClient().timeout == 0.5, "环境变量必须生效"

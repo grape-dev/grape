@@ -797,5 +797,11 @@
   },
   "deeplink": {
     "repo_not_found": "Cannot open this link: the repository does not exist, is not managed, or you lack access"
+  },
+  "boot": {
+    "watchdog_title": "Still loading",
+    "watchdog_body": "The server is responding slowly after {secs} seconds. You can wait a bit longer, or retry below.",
+    "watchdog_retry": "Retry",
+    "watchdog_clear": "Clear cache & reload"
   }
 }

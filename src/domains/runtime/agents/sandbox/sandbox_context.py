@@ -40,7 +40,8 @@ class SandboxContext:
     skill_name: str = ""
     skill_id: int = 0
     repo_url: str = ""        # 仓库 clone URL（从 env_extra 提取）
-    bot_token: str = ""       # git clone 凭据（BOT_GITCODE_TOKEN）
+    bot_token: str = ""       # git clone 凭据（BOT_<PROVIDER>_TOKEN）
+    clone_username: str = ""  # clone 用户名（basic_password 平台按令牌解析出的账号 login）
     work_branch: str = ""     # 工作分支（GRAPE_WORK_BRANCH）
 
 
@@ -67,18 +68,49 @@ def build_context(task: dict) -> SandboxContext:
     _raw_env = task.get("env_extra") or "{}"
     if isinstance(_raw_env, str):
         try:
-            _env_extra = _json.loads(_raw_env)
-        except Exception:
-            pass
+            # #3649：env_extra 是 enc:v1 信封（#2423），必须解密；直接 json.loads
+            # 只会静默得到空 env，REPO_FULL_NAME/BOT token/工作分支全部丢失。
+            from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+            _env_extra = decrypt_env_extra(_raw_env)
+        except Exception as _e:
+            log.warning(f"build_context: env_extra decrypt failed: {_e}")
     elif isinstance(_raw_env, dict):
         _env_extra = _raw_env
 
-    repo_full_name = _env_extra.get("REPO_FULL_NAME") or task.get("repo_key") or ""
-    bot_token = _env_extra.get("BOT_GITCODE_TOKEN") or task.get("repo_gitcode_token") or ""
+    # 平台必须来自带前缀的 key：REPO_FULL_NAME 是裸全名（runbook 用），
+    # 单独用它会让 parse_repo_key 默认成 gitcode（gitee 仓被 clone 到 gitcode.com）。
+    repo_full_name = (_env_extra.get("REPO_KEY") or task.get("repo_key")
+                      or _env_extra.get("REPO_FULL_NAME") or "")
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
+
+        bot_token = (_bot_from_env(_env_extra, repo_full_name)
+                     or task.get("repo_gitcode_token") or "")
+    except Exception:
+        bot_token = _env_extra.get("BOT_GITCODE_TOKEN") or task.get("repo_gitcode_token") or ""
     work_branch = _env_extra.get("GRAPE_WORK_BRANCH", "")
-    # repo_key 格式：gitcode:owner/repo → owner/repo → URL
-    _repo_name = repo_full_name.split(":", 1)[-1] if ":" in repo_full_name else repo_full_name
-    repo_url = f"https://gitcode.com/{_repo_name}.git" if _repo_name else ""
+    # clone 地址单点派生（平台卡 host）。过去这里写死 gitcode.com，gitee/github/gitlab
+    # 仓会被当成 gitcode 仓去 clone；派生失败留空，由调用方按"无仓库"处理。
+    repo_url = ""
+    clone_username = ""
+    if repo_full_name:
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import clone_url as _clone_url
+
+            repo_url = _clone_url(repo_full_name)
+        except Exception as e:
+            log.warning(f"build_context: clone endpoint resolve failed ({repo_full_name}): {e}")
+        # 用户名：basic_password 平台（gitee）必须是令牌所属账号 login。
+        # 过去 ctx 只有 repo_url/bot_token，云沙箱侧只能回退 "bot" 这种占位名。
+        try:
+            from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+
+            clone_username, _cu_src = _user_for_token(
+                (repo_full_name.split(":", 1)[0] if ":" in repo_full_name else "gitcode"),
+                bot_token, repo_full_name)
+            log.debug(f"build_context: clone username source={_cu_src}")
+        except Exception as e:
+            log.warning(f"build_context: clone username resolve failed ({repo_full_name}): {e}")
 
     return SandboxContext(
         task_id=task.get("id") or "",
@@ -98,5 +130,6 @@ def build_context(task: dict) -> SandboxContext:
         skill_id=task.get("skill_id") or 0,
         repo_url=repo_url,
         bot_token=bot_token,
+        clone_username=clone_username,
         work_branch=work_branch,
     )

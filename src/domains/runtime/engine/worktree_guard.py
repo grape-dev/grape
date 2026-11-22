@@ -469,7 +469,8 @@ def _resolve_compare_ref(wt_dir: str, token: str = "", base_branch: str = "") ->
     return ""
 
 
-def _remote_branch_head(wt_dir: str, branch: str, token: str = "") -> tuple:
+def _remote_branch_head(wt_dir: str, branch: str, token: str = "",
+                        repo_key: str = "") -> tuple:
     """远端事实：`git ls-remote --heads origin refs/heads/<branch>` → (probed, sha)。
 
     probed=False 表示远端不可达/探测失败（无网络、无 origin、鉴权失败），调用方
@@ -479,7 +480,8 @@ def _remote_branch_head(wt_dir: str, branch: str, token: str = "") -> tuple:
     if not branch:
         return False, ""
     r = _run_git(["-C", wt_dir, "ls-remote", "--heads", "origin",
-                  f"refs/heads/{branch}"], token=token, timeout=_REMOTE_PROBE_TIMEOUT)
+                  f"refs/heads/{branch}"], token=token, timeout=_REMOTE_PROBE_TIMEOUT,
+                  repo_key=repo_key)
     if r is None or r.returncode != 0:
         return False, ""
     out = (r.stdout or "").strip()
@@ -487,7 +489,7 @@ def _remote_branch_head(wt_dir: str, branch: str, token: str = "") -> tuple:
 
 
 def _collect_unpushed(out: dict, wt_dir: str, token: str = "",
-                      base_branch: str = "") -> None:
+                      base_branch: str = "", repo_key: str = "") -> None:
     """填充 out 的 unpushed_count / lost_commits / compare_ref / remote_head。
 
     两步判定：
@@ -504,7 +506,8 @@ def _collect_unpushed(out: dict, wt_dir: str, token: str = "",
     ref = _resolve_compare_ref(wt_dir, token=token, base_branch=base_branch)
     out["compare_ref"] = ref
     range_arg = f"{ref}..HEAD" if ref else "HEAD --not --remotes"
-    cnt = _run_git(["-C", wt_dir, "rev-list", "--count"] + range_arg.split(), token=token)
+    cnt = _run_git(["-C", wt_dir, "rev-list", "--count"] + range_arg.split(), token=token,
+                   repo_key=repo_key)
     if cnt is None or cnt.returncode != 0:
         # 无法计数 → 保守视为有未推送内容（宁可多归档，不放过丢失）
         out["unpushed_count"] = -1
@@ -521,7 +524,8 @@ def _collect_unpushed(out: dict, wt_dir: str, token: str = "",
             out["lost_commits"] = [s for s in (lst.stdout or "").split()
                                    if s][:_MAX_LOST_COMMITS]
 
-    probed, remote_sha = _remote_branch_head(wt_dir, out["branch"], token=token)
+    probed, remote_sha = _remote_branch_head(wt_dir, out["branch"], token=token,
+                                             repo_key=repo_key)
     if not (probed and remote_sha):
         return  # 探测失败 / 远端无该分支 → 保留本地保守结论
     out["remote_head"] = remote_sha
@@ -549,7 +553,8 @@ def _collect_unpushed(out: dict, wt_dir: str, token: str = "",
         out["lost_commits"] = []
 
 
-def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> dict:
+def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "",
+                       repo_key: str = "") -> dict:
     """重置前置检查：未推送提交 + 白名单外的未提交/未跟踪改动。
 
     返回 {"risk", "dirty", "untracked", "unpushed_count", "lost_commits",
@@ -584,7 +589,8 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "") -> d
             out["branch"] = "" if name in ("", "HEAD") else name
 
         if head_sha:
-            _collect_unpushed(out, wt_dir, token=token, base_branch=base_branch)
+            _collect_unpushed(out, wt_dir, token=token, base_branch=base_branch,
+                              repo_key=repo_key)
 
         entries = _porcelain_entries_all(wt_dir, token=token)
         if entries is None:
@@ -782,7 +788,8 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
            "skipped": []}
     if not wt_dir or not os.path.isdir(wt_dir):
         return res
-    risk = collect_reset_risk(wt_dir, token=token, base_branch=base_branch)
+    risk = collect_reset_risk(wt_dir, token=token, base_branch=base_branch,
+                              repo_key=repo_key)
     res["risk"] = risk["risk"]
     if not risk["risk"]:
         return res

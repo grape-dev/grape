@@ -993,7 +993,7 @@ def probe_engines_now(user: dict = Depends(require_org_member)):
     return {"status": "accepted", "results": get_probe_results()}
 
 @router.get("/ops/error-logs/sources", operation_id="dashboard_ops_error_log_sources")
-async def get_error_log_sources(user: dict = Depends(require_org_member)):
+def get_error_log_sources(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。返回可用的日志来源列表（主控 + 各 worker）。"""
     import os as _os, glob as _glob2
     from src.kernel.config import LOG_DIR

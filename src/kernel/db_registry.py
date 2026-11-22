@@ -176,6 +176,19 @@ def assert_role_database(role: str) -> None:
         raise SystemExit(5)
     log.info(f"[db-guard] role={role} database={describe_connection()}")
 
+    # 跨域 DSN 自检（三库拓扑）：缺一个变量时，跨域读/写会显式失败而不是静默落错库；
+    # 这里把“少配”从运行期症状提前到启动日志。需要硬拦时设 GRAPE_3DB_STRICT_DSN=1。
+    missing = audit_required_domains()
+    if missing:
+        log.error(
+            f"[db-guard] role={role} 三库拓扑缺少 {', '.join(missing.values())}"
+            f"（受影响域：{', '.join(sorted(missing))}）—— 跨域访问会显式失败；"
+            f"仓库凭据等数据不会写到非 owner 库"
+        )
+        if os.environ.get("GRAPE_3DB_STRICT_DSN", "").strip().lower() in ("1", "true", "yes", "on"):
+            log.error(f"[db-guard] role={role} 拒绝启动：GRAPE_3DB_STRICT_DSN=1 且 DSNS 不全")
+            raise SystemExit(6)
+
 
 def dsn_of(domain: str) -> str:
     return os.environ.get(f"GRAPE_DSN_{domain.upper()}", "").strip()
@@ -406,6 +419,121 @@ def uses_own_dsn(domain: str) -> bool:
     return bool(lib_enabled() and dsn_of(domain) and domain_db(domain) is not None)
 
 
+class DomainUnavailable(RuntimeError):
+    """三库拓扑下无法访问某域：该域 DSN 缺失（**绝不回落进程主库**）。
+
+    为什么必须抛：回落会把该域的读/写静默打到本进程库 —— 读到的是另一张库里的
+    同名表（或空壳），写入则把数据落到非 owner 库并用错的密钥加密，生成再也解不开的行。
+    这类错误与“数据不存在”不可区分，只能靠显式失败 + 一次告警暴露。
+    """
+
+    def __init__(self, domain: str, detail: str = ""):
+        self.domain = (domain or "").lower()
+        self.detail = detail
+        super().__init__(
+            f"domain '{self.domain}' unavailable: "
+            + (detail or f"GRAPE_DSN_{self.domain.upper()} missing")
+        )
+
+
+def route_of(domain: str) -> str:
+    """全仓唯一的路由判定：该域的数据走哪条连接。
+
+    返回：
+      "domain" → 用该域自己的连接（有 GRAPE_DSN_<DOMAIN>）
+      "local"  → 用进程主库（本域进程，或单库拓扑）
+    其余（三库拓扑下缺 DSN 且非本域）→ 抛 DomainUnavailable。
+    """
+    d = (domain or "").lower()
+    if d not in _VALID:
+        raise ValueError(f"unknown domain: {d}")
+    if not lib_enabled():            # 单库拓扑：只有一个库，主库即所有域
+        return "local"
+    if d == current_domain():        # 本域进程：主库就是该域（零回归，不另开连接）
+        return "local"
+    if dsn_of(d):                    # 跨域且有 DSN：用该域连接
+        return "domain"
+    raise DomainUnavailable(d, f"GRAPE_DSN_{d.upper()} missing in a three-database topology")
+
+
+@contextmanager
+def cursor_for(domain: str, write: bool = False):
+    """按 route_of 取游标：域连接（未提交由连接自身 autocommit）或主库（带进程锁）。
+
+    域侧 public 模块一律用这个原语，禁止各自再写 ``uses_own_dsn ? DSN : 主库`` 的回落。
+    """
+    route = route_of(domain)
+    if route == "domain":
+        with cursor(domain) as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            if write:
+                _pdb.commit()
+        finally:
+            try:
+                c.close()
+            except Exception as _e:  # noqa: BLE001
+                log.debug(f"close local cursor failed: {_e}")
+
+
+@contextmanager
+def transaction_for(domain: str):
+    """按 route_of 取事务：域连接 → 独立非 autocommit 事务；主库 → 进程锁 + 显式提交。"""
+    route = route_of(domain)
+    if route == "domain":
+        with transaction(domain) as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            _pdb.commit()
+        except Exception:
+            try:
+                _pdb.rollback()
+            except Exception as _e:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                log.debug(f"local rollback failed: {_e}")
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception as _e:  # noqa: BLE001
+                log.debug(f"close local cursor failed: {_e}")
+
+
+def audit_required_domains(required: "list[str] | None" = None) -> dict:
+    """启动自检：三库拓扑下缺哪个域的 DSN（返回 {domain: env_name}）。
+
+    只在 lib_enabled()（GRAPE_DOMAIN_LIB=1）时检查；单库部署返回空。
+    每个进程都会调一次：把“少配一个变量”从运行时静默降级变成启动期可见告警。
+    """
+    if not lib_enabled():
+        return {}
+    missing = {}
+    for d in (required or sorted(_VALID)):
+        d = d.lower()
+        if d == current_domain():
+            continue
+        if not dsn_of(d):
+            missing[d] = f"GRAPE_DSN_{d.upper()}"
+    if missing:
+        log.error(
+            "three-database topology: missing %s — cross-domain access to %s will fail loudly "
+            "(no silent fallback to the process database)",
+            ", ".join(missing.values()), ", ".join(sorted(missing)),
+        )
+    return missing
+
+
 def new_connection(domain: str, autocommit: bool = True):
     """新建一条独立的域连接（不走共享缓存）。
 
@@ -544,6 +672,9 @@ def health() -> dict:
             out[d] = {"configured": bool(dsn_of(d)), "ok": True}
         except Exception as exc:  # noqa: BLE001
             out[d] = {"configured": bool(dsn_of(d)), "ok": False, "error": str(exc)[:120]}
+    missing = audit_required_domains()
+    if missing:
+        out["_missing_dsns"] = missing
     return out
 
 

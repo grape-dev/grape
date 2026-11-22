@@ -74,7 +74,9 @@ class TestAccountsRetired:
             assert u and u["username"] == uname
             from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
             assert get_grape_account_by_username(uname)["id"] == u["id"]
-            assert udb.get_user(u["id"]) is None  # 死表不再持有权威账号行
+            # 旧表读函数已随 user_accounts 清退删除（2026-11-22）：不再"查了返回空"，
+            # 而是根本不存在 —— 防止有人误以为它仍是可用读入口。
+            assert not hasattr(udb, "get_user")
         finally:
             _cleanup_user(uname)
 

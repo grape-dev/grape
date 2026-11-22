@@ -103,10 +103,10 @@ def test_get_task_returns_decrypted_env():
 def test_env_extra_migration_registered():
     from src.api import db_setup
     migs = {m.version: m for m in db_setup._MIGRATIONS}
-    assert "202611200003" in migs
-    assert migs["202611200003"].kind == "backfill"
-    assert callable(migs["202611200003"].fn)
-    assert migs["202611200003"].name == "issue2423-env-extra-encrypt-backfill"
+    assert "202611220003" in migs
+    assert migs["202611220003"].kind == "backfill"
+    assert callable(migs["202611220003"].fn)
+    assert migs["202611220003"].name == "issue2423-env-extra-encrypt-backfill"
 
 
 def test_env_extra_migration_encrypts_existing_plaintext_rows():

@@ -147,3 +147,13 @@ def repo_segment(owner: str, repo: str) -> str:
     import urllib.parse
     return (f"repos/{urllib.parse.quote(owner, safe='')}/"
             f"{urllib.parse.quote(repo, safe='')}")
+
+
+# ── 通道能力位（Issue #3632 后继：checks/status 通道不再按平台名分派）──
+# GitCode 无原生 check-runs，由 Actions v8 适配器映射成 check-run 语义。
+CHECK_RUNS_VIA_ACTIONS = True
+# 原生 combined status（Gitea 血统 v5 路径），ref 需先解析成 commit sha。
+STATUS_NATIVE = True
+STATUS_RESOLVE_SHA = True
+# PR↔Issue 关联有原生存储（issues 字段 / PATCH inner_issue_nums），支持解除。
+PR_ISSUE_LINK_NATIVE = True

@@ -97,11 +97,17 @@ def test_s29_bot_health_platforms_auto_extended(gitee_card):
         with db_lock:
             db.cursor().execute("DELETE FROM meta WHERE key='global_bot_gitee_token'")
             db.commit()
-    # 未配 token 的 config-only 平台不进巡检
-    with patch("src.domains.runtime.engine.bot_token_health._verify_bot_token",
-               side_effect=lambda p: {"healthy": True, "error": "", "error_type": ""}):
-        out = _verify_global_bot_token()
-        assert "gitee" not in out["platforms"]
+    # 未配 token 的 config-only 平台不进巡检。
+    # 注意：基集 = 提供商模块注册表（gitcode/github/gitee/gitlab 均已注册），
+    # 所以「只靠 meta token 才纳入」这条只能用未注册的假平台验证。
+    from src.domains.runtime.engine import bot_token_health as _bth
+    with patch("src.domains.runtime.vcs.platform_card.list_vcs_platforms",
+               return_value=["fakecardonly"]), \
+         patch("src.domains.mgmt.public.get_global_bot_token_for", return_value=""), \
+         patch.object(_bth, "_verify_bot_token",
+                      side_effect=lambda p: {"healthy": True, "error": "", "error_type": ""}):
+        out = _bth._verify_global_bot_token()
+        assert "fakecardonly" not in out["platforms"]
 
 
 def test_s29_scenes_branch_list_uses_client_for_gitee(gitee_card, monkeypatch):

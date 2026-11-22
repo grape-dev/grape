@@ -294,12 +294,13 @@ const API = (() => {
     if (!r.ok) {
       if (r.status === 401 && retryFn) {
         // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
-        // 但先检查是否是 GitCode OAuth 过期（不需要 JWT refresh，需要重新授权）
+        // 但先检查是否是 OAuth 平台过期（不需要 JWT refresh，需要重新授权）
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            // GitCode OAuth token 过期且 refresh_token 也失效——跳授权页
-            _redirectToGitcodeAuth();
-            throw new Error(err.detail.message);
+            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
+            // （GitHub 走 /auth/login/github；provider 缺省保持 GitCode 原行为）
+            _redirectToProviderAuth(err.detail);
+            throw _reauthError(err.detail);
           }
           // R1 fix: credential 401 on public auth endpoints — user has no token
           // or is hitting a public auth endpoint (login/refresh/exchange/associate).
@@ -320,11 +321,12 @@ const API = (() => {
         });
       }
       if (r.status === 401) {
-        // 没有 retryFn——检查是否 GitCode reauth，否则直接跳登录
+        // 没有 retryFn——检查是否 OAuth reauth，否则直接跳登录
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            _redirectToGitcodeAuth();
-            throw new Error(err.detail.message);
+            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
+            _redirectToProviderAuth(err.detail);
+            throw _reauthError(err.detail);
           }
           // P33 fix: don't clear token for public auth endpoint 401s
           var reqUrl = r.url || '';
@@ -399,6 +401,59 @@ const API = (() => {
     }).catch(() => {
       location.href = _langLoginUrl();    // R7: preserve language prefix
     });
+  }
+
+  // Issue #3563（Spec v2 B2）：401 reauth 按 detail.provider 分流。
+  // - provider 缺省 / gitcode：保持既有 _redirectToGitcodeAuth() 行为（回归安全）；
+  // - 其它平台（github/gitee/…）：路由到 GET /auth/login/<provider>；
+  //   GitHub 在 OAuth App 未配置（无 redirect_url / 400）时不跳空白授权页——
+  //   提示 + 直达「账号设置 → 凭据」的 GitHub Token 输入。
+  function _redirectToProviderAuth(detail) {
+    var provider = (detail && detail.provider) || '';
+    if (!provider || provider === 'gitcode') {
+      _redirectToGitcodeAuth();  // 缺省兜底 + GitCode 原行为（回归不变）
+      return;
+    }
+    if (_reauthRedirecting) return;
+    if (_isOnLoginPage()) return;
+    _reauthRedirecting = true;
+    API.get('/auth/login/' + provider).then(function (d) {
+      if (d && d.redirect_url) {
+        _toastReauth((detail && detail.message) || I18N.t('common.' + provider + '_reauth_required'));
+        location.href = d.redirect_url;
+      } else if (provider === 'github') {
+        _reauthGithubFallback();
+      } else {
+        _reauthRedirecting = false;
+        location.href = _langLoginUrl();
+      }
+    }).catch(function () {
+      if (provider === 'github') {
+        _reauthGithubFallback();
+      } else {
+        _reauthRedirecting = false;
+        location.href = _langLoginUrl();
+      }
+    });
+  }
+  function _reauthGithubFallback() {
+    _reauthRedirecting = false;  // 允许后续重试（如配置 token 后再触发）
+    _toastReauth(I18N.t('common.github_reauth_token_hint'));
+    try { location.hash = '#account/credentials'; } catch (e) { /* noop */ }
+  }
+  function _toastReauth(msg) {
+    try {
+      if (window.app && window.app.showToast) window.app.showToast(msg, 6000);
+    } catch (e) { /* noop */ }
+  }
+  // Issue #3563（Spec v2 B3）：401 reauth 抛出的错误携带 status/detail，
+  // 供入口页（repos/templates）先判 status/action 再决定提示，不再直塞 check_failed 文案。
+  function _reauthError(detail) {
+    var e = new Error((detail && detail.message) || I18N.t('common.request_failed', {status: 401}));
+    e.status = 401;
+    e.detail = detail || {};
+    e.reauth_required = true;
+    return e;
   }
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading

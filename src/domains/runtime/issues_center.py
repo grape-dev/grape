@@ -108,20 +108,43 @@ _rt_db = _DomainDbProxy()
 
 from src.kernel.session_manager import db, db_lock, get_chat_config, create_conversation, add_message
 
-def _require_session_repo_token(request: Request, repo_key: str) -> dict:
-    """notify 等 agent 动作端点鉴权：仅接受 `tk_` 会话 token，且仓库作用域必须匹配。
+def _require_session_repo_token(request: Request, repo_key: str, *, scene=None) -> dict:
+    """notify 等 agent 动作端点鉴权：仅接受 `tk_` 会话 token；**作用域按场景判定**。
 
-    不复用仓库级 bot token（webhook 同源、不属于三通道体系）——对外只认会话 token（tk_）。
-    会话 token 由执行期注入（event_pipeline 按 task_id/repo_key/agent_type 签发），
-    仓库作用域经 `verify_session_token_for_repo` 校验（同一仓库执行期的 agent 凭据才能调用）。
+    2026-11-22（#3713/#1946 收口）：原实现要求 `token.repo_key == 目标仓` 严格相等，
+    于是 chat 的伪作用域（`chat:<user_id>`）与跨仓下派永远 403 —— 现场表现为
+    「tasks notify 会话 token 仓库作用域不匹配」。现在改走 `scene_policy`：
+      · TASK_NOTIFY（默认）：task_plane —— 跨仓/伪作用域需「会话用户对目标仓有可见权」；
+      · 其它场景（如自省类）仍 repo_bound，同仓才能过。
+    不在本函数里再写作用域规则：场景 → 规则全部在策略表。
     """
-    from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token
+    from src.kernel.scene_policy import Scene, decide
+
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "需会话 token（tk_）"})
-    info = verify_session_token_for_repo(token, repo_key)
+    info = verify_session_token(token)
     if not info:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无效或仓库作用域不匹配"})
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无效"})
+
+    def _visible(target: str) -> bool:
+        """会话用户对目标仓是否有可见权（跨仓/伪作用域的唯一放行依据）。
+
+        能力由宿主域提供：`mgmt.public.user_can_access_repo`。runtime 不自己查
+        mgmt 的仓库/用户关系表 —— 3库4进程下 mgmt 库不在本进程，契约内部按
+        GRAPE_DSN_MGMT 路由（db_registry），这样单库/三库拓扑都不用改调用点。
+        """
+        from src.domains.mgmt.public import user_can_access_repo
+
+        return user_can_access_repo(info.get("user_id"), target)
+
+    _decision = decide(scene or Scene.TASK_NOTIFY, info.get("repo_key") or "", repo_key,
+                       access_check=_visible)
+    if not _decision.ok:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": _decision.code,
+            "message": f"会话 token 无权执行该操作（{_decision.message}）"})
     return info
 
 class TaskNotifyBody(BaseModel):
@@ -2006,10 +2029,10 @@ def _pr_vcs_client(repo_key: str):
             return None
         token = ""
         if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.public import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.public import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")
@@ -2030,10 +2053,10 @@ def _pr_vcs_client(repo_key: str):
             return None
         token = ""
         if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.public import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.public import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")

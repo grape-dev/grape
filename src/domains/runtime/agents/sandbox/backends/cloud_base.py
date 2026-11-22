@@ -455,15 +455,19 @@ class CloudSandboxBase:
     # ---- 仓库配置（通用接口）----
 
     def configure_repo(self, *, repo_url: str, bot_token: str,
-                       work_branch: str) -> None:
+                       work_branch: str, username: str = "") -> None:
         """配置仓库信息 + clone。子类 override 补 grape-cli 配置 + git clone。
         executor 调此方法，不直接设私有属性。
-        只管仓库通用三要素：repo_url / bot_token / work_branch。
+        只管仓库通用四要素：repo_url / bot_token / work_branch / username。
+        username 由 `vcs.clone_endpoint.clone_username` 按平台卡 clone_auth 派生
+        （gitee=真实账号名；gitcode/github=x-access-token；gitlab=oauth2），
+        子类传给 git 的 Basic/askpass，不再各自写常量。
         grape-cli server_url / token 由子类构造时从 config 设置。
         """
         self._repo_url = repo_url
         self._bot_token = bot_token
         self._work_branch = work_branch
+        self._clone_username = username
 
     @property
     def repo_dir(self) -> str:

@@ -560,17 +560,22 @@ def list_skills(user: dict = Depends(require_org_member),
 
     skills = []
     skill_ids: list[int] = []
-    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突
+    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突。
+    # QA（#3648）：schema 缺列/缺表时分类名与分类树降级为空可接受，但禁止
+    # 裸 except 静默吞掉（Issue 事故形态之一就是「列表为空且无报错」），
+    # 必须 log.exception 留痕（堆栈进日志，可定位到具体缺失列/表）。
+    from src.kernel.config import log as _cat_log
     cat_map = {}
     try:
         for cat in list_skill_categories():
             cat_map[cat["id"]] = cat["name"]
     except Exception:
-        pass
+        _cat_log.exception("list_skills: list_skill_categories failed (分类名降级为空)")
     try:
         _cat_dict_map = {c["id"]: c for c in list_category_dict("skill")}
     except Exception:
         _cat_dict_map = {}
+        _cat_log.exception("list_skills: list_category_dict failed (分类路径降级为空)")
     total = 0
     try:
         total, _skill_rows = _rt_skills.skill_search(
@@ -603,8 +608,16 @@ def list_skills(user: dict = Depends(require_org_member),
                 "tags": parse_tags(raw_tags, limit=SKILL_MAX_TAGS),
             })
             skill_ids.append(r[0])
-    except Exception:
-        pass
+    except Exception as _search_exc:
+        # Issue #3648：schema 故障（如 skill 缺 cat_l1_id）不得伪装成 200 空列表。
+        # 记录完整堆栈并显式 5xx；前端/运维能据此定位，而不是被误导成「没有技能」。
+        from src.kernel.config import log
+        log.exception("list_skills: skill_search failed (schema/query error): %s",
+                      _search_exc)
+        raise HTTPException(status_code=503, detail={
+            "code": 503,
+            "message": "技能列表查询失败（数据库 schema 或查询异常），请查看服务端日志",
+        }) from _search_exc
 
     # 批量查 liked_by_me
     liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids) if skill_ids else {}

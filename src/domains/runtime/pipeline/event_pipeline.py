@@ -584,6 +584,27 @@ def _task_insert_row(_cols, **kw):
     return tuple(kw[c] for c in _cols)
 
 
+def _dispatch_ident(evt, repo_key: str) -> "tuple[str, str, str]":
+    """Issue #21 第 2 步：派发时解析 `(user_id, source, account_name)`。
+
+    账号解析沿用 `resolve_actor_account`（a2a_event：payload.account→actor→Issue creator；
+    其它：actor→payload.account→Issue creator）；是否**真正写库**由
+    `dispatch_identity` 背后的开关决定（默认 on 生效；shadow 只记日志返回空 id）。
+    纯函数式、异常不外抛：认人失败不得阻断派发。
+    """
+    if not isinstance(evt, dict):
+        return "", "", ""
+    try:
+        from src.domains.runtime.pipeline.dispatch_identity import identity_for_actor
+
+        account = resolve_actor_account(evt, repo_key) or ""
+        uid, source = identity_for_actor(account, str(evt.get("actor") or ""))
+        return uid, source, account
+    except Exception as e:  # noqa: BLE001 - 认人失败不得阻断派发
+        log.debug(f"dispatch identity skipped: {e}")
+        return "", "", ""
+
+
 def _takeover_issue_id(issue_id) -> str:
     """归一化 Issue 号用于接管判定（#N；伪 Issue / #0 / 空串返回空）。"""
     value = str(issue_id or "").strip()
@@ -652,6 +673,9 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     inst_name = runtime_instance_name(engine_id) or backend or ""
     now = datetime.now(timezone.utc).isoformat()
 
+    # Issue #21 第 2 步：派发身份按 id 认人（默认 on 写派发人 id；shadow/off 保持 0）
+    _dispatch_uid, _dispatch_src, _dispatch_acct = _dispatch_ident(evt, repo_key)
+
     # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
     # autopilot 不写 events 表，跳过这步
     if not skip_event_config:
@@ -701,8 +725,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
             event_seq=seq, issue_id=issue_id, repo_key=repo_key or "",
             agent_type=agent_type or "", skill=skill_name or "", skill_id=skill_id or 0,
-            prompt="", cwd="", runtime_session_id="", event_type="", account="",
-            user_id=0, repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取,
+            prompt="", cwd="", runtime_session_id="", event_type="",
+            user_id=(_dispatch_uid or 0),  # Issue #21 第 2 步：on 模式写派发人 id，其它模式仍 0
+            account=(_dispatch_acct if _dispatch_uid else ""),
+            repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取,
             env_extra="{}", skill_files="{}", server_url="", issue_session_id="",
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
@@ -796,6 +822,9 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     _full_name, _owner, _repo_name = _derive(repository, repo_key)
     _resolved_account = resolve_actor_account(evt, repo_key)
     env_extra = {
+        # 沙箱 clone 必须知道平台：REPO_FULL_NAME 是剥前缀的裸名（runbook 拼 URL 用），
+        # 只有 REPO_KEY 带 provider 前缀；缺它时 sandbox 会按 parse_repo_key 默认 gitcode。
+        "REPO_KEY": repo_key,
         "REPO_FULL_NAME": _full_name,
 
         "REPO_OWNER": _owner,
@@ -4975,7 +5004,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 continue
             _r_push = repogit._run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_linked_token, timeout=120)
+                token=_linked_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 _log.warning(f"direct linked PR: push failed {_rk}: {_err}")
@@ -6657,6 +6686,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # （https://gitcode.com/$REPO_FULL_NAME.git）不会拼出 gitcode:owner/repo 形式的错误地址。
     from src.kernel.repo_key import from_repo_key as _frk721
     env_extra = {
+        "REPO_KEY": repo_key or repository,
         "REPO_FULL_NAME": _frk721(repository) or repository,
         "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
@@ -6762,12 +6792,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as _uid_e:
         from src.kernel.config import log as _uid_log
         _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
-    # #2790：与 enqueue 同口径——签发失败/上下文缺失写诊断（agent_tasks.errors）+ 显式日志，
-    # 不再静默降级；钩子自身异常由 safe 封装兜底记 error，不阻断派发。
-    from src.domains.runtime.engine.service import issue_and_inject_session_token_safe
-    issue_and_inject_session_token_safe(
+    # #2790 保留诊断口径；#990 改为复用任务快照（有效即复用、失效才轮换并回写
+    # agent_tasks.env_extra），不再每次派发新签一枚覆盖快照。
+    from src.domains.runtime.engine.service import reuse_or_issue_session_token_safe
+    reuse_or_issue_session_token_safe(
         env_extra, log_scope="Exec agent", session_key=task_id or f"d_{seq}",
-        repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid),
+        repo_key=repo_key, agent_type=agent_type, user_id=_tk_uid,
         task_id=task_id, scope="direct", context_log_level="error")
 
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；

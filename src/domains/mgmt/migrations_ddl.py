@@ -11,7 +11,6 @@
 """
 
 # ── 自 db_setup._migrate_create_personal_orgs() 下沉 ─────────────────
-SELECT_USER_ACCOUNTS__MIGRATE_CREATE_PERSONAL_ORGS = "SELECT id, username FROM user_accounts"
 SELECT_ORGANIZATION = "SELECT id FROM organization WHERE owner_id=? AND is_personal=1"
 INSERT_ORGANIZATION = "INSERT INTO organization (name, slug, owner_id, is_personal) VALUES (?, ?, ?, 1)"
 INSERT_IGNORE_ORG_MEMBER = "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')"
@@ -21,7 +20,6 @@ SELECT_MANAGED_REPOS = "SELECT repo_key FROM managed_repos WHERE org_id='' OR or
 SELECT_USER_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG = "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 LIMIT 1"
 SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_2 = "SELECT id FROM organization WHERE owner_id=? AND is_personal=1"
 UPDATE_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG = "UPDATE managed_repos SET org_id=? WHERE repo_key=?"
-SELECT_USER_ACCOUNTS__MIGRATE_DATA_TO_PERSONAL_ORG = "SELECT id FROM user_accounts WHERE username=?"
 SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_3 = "SELECT id FROM organization WHERE owner_id=? AND is_personal=1"
 SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG = "SELECT id FROM organization WHERE owner_id=? AND is_personal=1"
 SELECT_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG = "SELECT org_id FROM managed_repos WHERE repo_key=?"
@@ -224,14 +222,7 @@ UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_3 = "UPDATE agent_shared_knowle
 
 # ── 自 db_setup._migrate_tables() 下沉 ───────────────────────────────
 ALTERS_USER_AND_KNOWLEDGE_COLUMNS = (
-    # JWT 撤销——token_version 字段（改密码/logout 时 +1）
-    "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
-    # Issue #281: admin 禁用用户标记——独立于 token_version，心跳/登录不可绕过
-    "ALTER TABLE user_accounts ADD COLUMN is_disabled INTEGER DEFAULT 0",
-    # GitHub OAuth 集成——user_accounts 新增 github 字段
-    "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
-    "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
-    "ALTER TABLE user_accounts ADD COLUMN github_login TEXT DEFAULT ''",
+    # （user_accounts 列族 2026-11-22 随旧表清退删除）
     # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
     "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
     "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
@@ -289,8 +280,6 @@ UPDATE_MANAGED_REPOS__MIGRATE_TABLES_2 = (
     "UPDATE managed_repos SET bot_username=? "
     "WHERE bot_username=? AND repo_key LIKE 'github:%'"
 )
-SELECT_USER_ACCOUNTS = "SELECT * FROM user_accounts WHERE username='default'"
-DELETE_USER_ACCOUNTS = "DELETE FROM user_accounts WHERE username='default'"
 UPDATE_DEVOPS_PIPELINE_SCENE__MIGRATE_TABLES = "UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'"
 
 # ── 自 db_setup._rebuild_scene_market_unique() 下沉 ──────────────────

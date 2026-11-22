@@ -482,15 +482,30 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
         if task_env.get("USER_GITCODE_TOKEN"):
             env["USER_GITCODE_TOKEN"] = task_env["USER_GITCODE_TOKEN"]
     else:
-        # devops 事件任务：只注入 BOT_GITCODE_TOKEN，不注入 USER_GITCODE_TOKEN
-        env["BOT_GITCODE_TOKEN"] = task.get("repo_gitcode_token") or ""
+        # devops 事件任务：按平台派生 bot token 键（BOT_GITCODE_TOKEN / BOT_GITEE_TOKEN …），
+        # 不注入 USER_*_TOKEN。过去写死 gitcode 键 → gitee 仓库在沙箱侧 token 恒空 → 不 clone。
+        _bot_tok = task.get("repo_gitcode_token") or ""
+        _bot_key = "BOT_GITCODE_TOKEN"
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import bot_token_env_name
 
-    # env_extra（JSON 字符串 → dict）
-    import json as _json
+            _bot_key = bot_token_env_name(task.get("repo_key") or "")
+        except Exception as _be:
+            log.warning(f"bot token env name derive failed: {_be}")
+        env[_bot_key] = _bot_tok
+        if _bot_key != "BOT_GITCODE_TOKEN":
+            # 升级期兜底：旧引擎 / bwrap 白名单仍按 gitcode 键名读
+            env.setdefault("BOT_GITCODE_TOKEN", _bot_tok)
+
+    # env_extra（enc:v1 信封 → dict，#2423/#3649：直接 json.loads 会静默得到空 env）
     _env_extra = task.get("env_extra") or ""
     if _env_extra:
         try:
-            env.update(_json.loads(_env_extra) if isinstance(_env_extra, str) else _env_extra)
+            if isinstance(_env_extra, str):
+                from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+                env.update(decrypt_env_extra(_env_extra))
+            else:
+                env.update(_env_extra)
         except Exception:
             pass
 
@@ -635,7 +650,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
                 _sb._repo_url = _ctx.repo_url
                 _sb._bot_token = _ctx.bot_token
                 _sb._work_branch = _ctx.work_branch
-                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} bot_token={'yes' if _ctx.bot_token else 'no'}")
+                # clone 用户名（basic_password 平台必须是令牌所属账号 login）：
+                # 过去只注入 url/token/branch，云沙箱 askpass 回退 "bot" → gitee 必被拒。
+                if hasattr(_sb, "_clone_username"):
+                    setattr(_sb, "_clone_username", getattr(_ctx, "clone_username", "") or "")
+                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} "
+                         f"bot_token={'yes' if _ctx.bot_token else 'no'} "
+                         f"clone_user={getattr(_ctx, 'clone_username', '') or '-'}")
             else:
                 log.warning(f"{_engine_tag}repo info NOT set: hasattr_repo_url={hasattr(_sb, '_repo_url')} ctx_repo_url={_ctx.repo_url[:50] if _ctx.repo_url else '(empty)'}")
             _sb.__enter__()

@@ -5,7 +5,7 @@
 ## Objective
 
 - 修复流水线信息「当前责任人」把内部 Agent 执行账号当成人展示的问题：
-  Issue #3644 流水线显示 `当前责任人: gcw_3FZApeLT空闲`，实际责任人应为 `songspace`。
+  Issue #3644 流水线显示 `当前责任人: gcw_0FAKEACCT空闲`，实际责任人应为 `songspace`。
 - 用户价值：责任人可信 → 运维/交接能直接定位到人，不再对着机器账号找人。
 
 ## 现象与根因
@@ -15,9 +15,9 @@
   2. 事件 payload 里的 `assignee`；
   3. 最近一个有状态阶段（`status>0`）的最后一条事件 `actor` —— 仅判断是否在
      `bot_usernames` 名单内，命中则换 Agent 显示名，否则**原样输出 actor**。
-- #3644 实测事件链：`vod(songspace)` → `issue(songspace)` → `qa(gcw_3FZApeLT)`；
+- #3644 实测事件链：`vod(songspace)` → `issue(songspace)` → `qa(gcw_0FAKEACCT)`；
   qa 阶段的 A2A 事件 actor 是 Agent runtime 身份（GitCode OAuth 自动登录名
-  `gcw_*`），第 3 步没有过滤这类身份 → 直接展示 `gcw_3FZApeLT`。
+  `gcw_*`），第 3 步没有过滤这类身份 → 直接展示 `gcw_0FAKEACCT`。
 - 另一处数据缺口：`set_issue_stage()` 把 `assignee or ""` 无条件写回卡片行，
   而 A2A 推进路径（`engine/service.py`、`a2a_dispatch.py`）只传角色不传 assignee，
   于是**一次推进就把责任人抹成空串**；且 assignee 只在 `issue_opened` 初始化。
@@ -50,7 +50,7 @@
 ## 验收标准
 
 - [ ] 重新查看 Issue #3644 流水线，「当前责任人」显示 `songspace`
-- [ ] 不再出现 `gcw_3FZApeLT` 等内部账号作为责任人
+- [ ] 不再出现 `gcw_0FAKEACCT` 等内部账号作为责任人
 - [ ] 人类 assignee 优先；assignee 为 bot/内部账号时回退最近人类操作者
 - [ ] 全部为内部账号时显示 Agent 显示名而非原始账号
 - [ ] 现有测试通过（含本节新增用例）；前端「空闲/执行中」展示不受影响

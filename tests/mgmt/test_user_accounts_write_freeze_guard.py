@@ -19,7 +19,7 @@ import ast
 from pathlib import Path
 
 _TEST_DIR = Path(__file__).resolve().parent
-_SRC = _TEST_DIR.parent / "src"
+_SRC = _TEST_DIR.parents[1] / "src"   # tests/mgmt/x.py → 仓库根/src
 
 _TABLE = "user_accounts"
 
@@ -37,17 +37,9 @@ _DEPRECATED_WRITE_FUNCS = (
     "delete_user_account",
 )
 
-# 废弃读函数（本轮保留——读不违反铁律，存量库迁移重映射需要；登记防新增）
-_DEPRECATED_READ_FUNCS = (
-    "get_user",
-    "get_user_by_username",
-    "list_users",
-    "get_user_account",
-    "get_all_user_accounts",
-    "get_user_by_gitcode_id",
-    "get_user_by_github_id",
-    "verify_user",
-)
+# 废弃读函数登记簿：2026-11-22 起全部随 user_accounts 清退删除，
+# 现存名单为空 —— 若有人重新引入对旧表的读，请在评审里显式登记，不要静默加回。
+_DEPRECATED_READ_FUNCS: tuple[str, ...] = ()
 
 
 def _py_files():

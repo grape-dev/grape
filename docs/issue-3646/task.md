@@ -5,7 +5,7 @@
 | # | 切片 | 红（先提交失败测试） | 绿（最小实现） | 验收 |
 |---|------|---------------------|----------------|------|
 | 1 | 责任人过滤纯函数 | `tests/runtime/test_3646_current_owner.py::TestInternalAccountPredicate`、`TestResolveCurrentOwner` | 新增 `src/domains/runtime/pipeline/owner_display.py` | 判定矩阵（bot 名单 / `*_bot` / `gcw_*` / Agent 显示名 / worker 形态 / 真人）全绿 |
-| 2 | 流水线 current_owner 优先级 | `tests/runtime/test_3646_current_owner.py::TestCurrentOwnerResolution`（含 #3644 事件链：`gcw_3FZApeLT` 穿透到 `songspace`） | 重写 `routes/pipeline.py` 责任人解析块 | 人类 assignee 优先、内部账号不进展示位、全内部回退 Agent 显示名 |
+| 2 | 流水线 current_owner 优先级 | `tests/runtime/test_3646_current_owner.py::TestCurrentOwnerResolution`（含 #3644 事件链：`gcw_0FAKEACCT` 穿透到 `songspace`） | 重写 `routes/pipeline.py` 责任人解析块 | 人类 assignee 优先、内部账号不进展示位、全内部回退 Agent 显示名 |
 | 3 | assignee 不被推进抹掉 | `...::TestIssueAssigneeKeepsValue::test_stage_advance_keeps_assignee` | `session_store.set_issue_stage` 仅非空才写 assignee | 推进后 assignee 仍为原值 |
 | 4 | 指派/更新回填 assignee | `...::TestIssueAssigneeBackfill::test_backfill_when_empty` / `test_do_not_override_human` | `session_store.sync_issue_assignee` + `event_pipeline` 3.2 块接线 | 空值回填；含人类责任人时不覆盖 |
 

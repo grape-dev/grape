@@ -34,7 +34,7 @@ current_owner = _resolve_feishu_name_cached(human) if human else get_agent_displ
 ```
 
 - 阶段倒序扫描**不因最近 actor 是内部账号而提前结束**（原实现直接展示该 actor），
-  保证 #3644 能穿过 qa 的 `gcw_3FZApeLT` 落到 vod/issue 的 `songspace`；
+  保证 #3644 能穿过 qa 的 `gcw_0FAKEACCT` 落到 vod/issue 的 `songspace`；
 - 末位补「最早一条事件的操作者」：同阶段后续事件被内部账号改写时仍能回到建单人；
 - 全内部账号 → Agent 显示名（与旧口径一致），不输出原始账号；
 - 飞书昵称解析只对人类候选执行（内部账号不再进该解析链，省查询）。

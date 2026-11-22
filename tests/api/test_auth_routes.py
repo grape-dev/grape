@@ -23,6 +23,9 @@ client = TestClient(app)
 
 class _FakeReqResp:
     """模拟 requests.get/post 的返回值。"""
+
+    status_code = 200
+
     def __init__(self, payload: dict):
         self._payload = payload
 

@@ -2,7 +2,7 @@
 
 展示位只放**人**：Issue 的人类 assignee → 最近人类事件操作者。bot、Agent runtime
 身份与平台自动生成的登录名（`gcw_*`）都不直接进展示位——否则内部账号会顶替真实
-责任人（Issue #3644 的流水线曾显示 `gcw_3FZApeLT`，实际责任人应为 `songspace`）。
+责任人（Issue #3644 的流水线曾显示 `gcw_0FAKEACCT`，实际责任人应为 `songspace`）。
 
 本模块是纯函数（无 IO / 无 DB）：判定只看名字形态与传入的 bot 名单，
 展示层负责按优先级拼候选列表，便于单测与跨看板复用。
