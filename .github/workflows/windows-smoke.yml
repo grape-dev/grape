@@ -423,3 +423,16 @@ jobs:
           python -m pytest tests/runtime/test_issue_3811_release_guard_domain_routing.py \
             tests/runtime/test_issue_2225_release_guard.py \
             tests/kernel/test_db_registry_cross_domain_warning.py -v
+      - name: Repo bot token denoise + credential backfill tests (issue #3740)
+        # Issue #3740 QA 审查修复（Required#4）：新增两套用例（历史列回落日志限频/缓存/
+        # 指标 + bot 凭据回填/验证/盖章）此前未接入 CI 门禁（先例
+        # #1613/#2133/#2245/#3167/#3490/#3699），回退只能靠人工本地 pytest。
+        # 第三项为基线 Issue #3897 的回落日志限频用例：本单在 _fetch 上加缓存后，
+        # 其 FIXTURE 必须显式关缓存（TTL=0）才能观察「每次存储读」的限频语义，
+        # 一并纳入门禁防回归。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/kernel/test_issue3740_repo_bot_denoise.py \
+            tests/mgmt/test_issue3740_bot_cred_backfill.py \
+            tests/kernel/test_issue_3897_repobot_fallback_log.py -v
