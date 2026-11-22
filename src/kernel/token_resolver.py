@@ -15,7 +15,8 @@ Issue #372 R18: 统一 13 个散落函数为 TokenResolver 策略链。
   TokenActionHandler 家族 (回帖身份分派)
 
 职责边界（2026-11-22 归位）：本模块**只**负责 token 解析与身份分派。VCS 平台
-适配器（建仓/协作/webhook/命名空间清单）已迁到 src/domains/mgmt/vcs/providers.py；
+适配器（建仓/协作/webhook/命名空间清单）已迁到 src/domains/mgmt/vcs/（base.py +
+factory.py + 各平台 <dialect>.py）；
 本模块通过 src/kernel/ports/vcs_provider.py 端口取得 provider，不 import 任何平台实现。
 
 三个语义入口（+ Issue #3713 追加的选择器）:

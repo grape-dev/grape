@@ -3,7 +3,8 @@
 为什么有这一层
 --------------
 `VCSProvider` 家族的**平台 API 行为实现**（建仓 / 协作 / webhook / 命名空间清单）
-是外部集成业务，已迁到 `src/domains/mgmt/vcs/providers.py`（见该模块头注释）。
+是外部集成业务，已迁到 `src/domains/mgmt/vcs/`（base.py / factory.py / 各平台
+<dialect>.py；见 base.py 头注释）。
 kernel 只保留 token 链**真正用到**的最小方法面：一个 Protocol 加两个工厂函数。
 实现由装配层（src/api/contracts_wiring.py）在启动时绑定，依赖方向仍是
 kernel <- assembly -> domains，kernel 不 import 任何 domain 代码。
