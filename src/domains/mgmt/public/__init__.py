@@ -424,7 +424,8 @@ def _scene_category_backfill_cols(payload: dict[str, Any], old_category_id: int,
     new_category_id = int(payload.get("category_id") or 0)
     if new_category_id and new_category_id != int(old_category_id or 0):
         changed.append("category_id")
-    return changed
+    # 列序固定（_SCENE_CATEGORY_COLS）：UPDATE 的 SET/参数顺序不随分支顺序漂移
+    return [col for col in _SCENE_CATEGORY_COLS if col in changed]
 
 
 def _scene_where(scene_id: str | None, row_id: int | None, repo_key: str | None):

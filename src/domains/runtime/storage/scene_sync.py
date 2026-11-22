@@ -169,8 +169,7 @@ def _resolve_scene_category_id(scene_data: dict, miss_sink: dict | None = None,
     库内旧值；`miss_sink` 提供时进轮级聚合（键取整串，与 category_dict 路径口径一致），
     缺省保持原 WARNING（与 category_dict 路径对称）。
     """
-    from src.kernel.category import (  # noqa: PLC0415
-        canonical_category_slug, scene_category_slug_values)
+    from src.kernel.category import scene_category_slug_values  # noqa: PLC0415
 
     info = scene_data if isinstance(scene_data, dict) else {}
     category_id = 0
