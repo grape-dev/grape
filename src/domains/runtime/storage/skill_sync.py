@@ -499,34 +499,37 @@ async def sync_official_skills() -> dict:
             logger.exception(f"skill sync: remote sync failed: {e}")
 
         # 2. DB 同步：读本地 json → _sync_skills_to_db → P46.4 stale 检测（只读）
+        #    Issue #3742：写 DB 前先续期外层锁；续不上 → 中止本轮剩余步骤
+        #    （锁被其它实例接管后仍写 DB 就是双实例并发写）。
+        outer_lock_held = await _renew_stage_lock("DB sync step")
         db_sync_complete = False
-        try:
-            json_path = os.path.join(CONFIG_DIR, "skill-description.json")
-            if os.path.exists(json_path):
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                result["db_synced"] = _sync_skills_to_db(data)
-                db_sync_complete = True
-                # P46.4：以合并后 json 键集为准只读检测（铁律 1.0：零 DB 写）
-                result["stale_skill"] = _detect_stale_official_skills(set(data.keys()), db_sync_complete)
-        except Exception as e:
-            logger.exception(f"skill sync: DB sync failed: {e}")
+        if outer_lock_held:
+            try:
+                json_path = os.path.join(CONFIG_DIR, "skill-description.json")
+                if os.path.exists(json_path):
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    result["db_synced"] = _sync_skills_to_db(data)
+                    db_sync_complete = True
+                    # P46.4：以合并后 json 键集为准只读检测（铁律 1.0：零 DB 写）
+                    result["stale_skill"] = _detect_stale_official_skills(set(data.keys()), db_sync_complete)
+            except Exception as e:
+                logger.exception(f"skill sync: DB sync failed: {e}")
 
         # 3. OBS 同步：算 hash → 打包 → 上传
-        #    Issue #3742：上传前续期外层锁，避免长阶段（打包/上传）中途自然过期被接管。
-        try:
-            from src.kernel.lock import renew_lock as _renew_lock
-            if not await asyncio.to_thread(_renew_lock, "skill_sync", SKILL_SYNC_LOCK_TTL):
-                logger.debug("skill sync: outer lock renewal before OBS failed")
-        except Exception as e:
-            logger.warning(f"skill sync: outer lock renewal before OBS error: {e}")
-        try:
-            obs_result = await sync_official_skills_to_obs()
-            result["obs_added"] = obs_result.get("added", 0)
-            result["obs_updated"] = obs_result.get("updated", 0)
-            result["obs_skipped"] = obs_result.get("skipped", 0)
-        except Exception as e:
-            logger.exception(f"skill sync: OBS sync failed: {e}")
+        #    Issue #3742（QA Required）：上传前续期外层锁，避免长阶段（打包/上传）中途
+        #    自然过期被接管；续期失败（含异常分支）→ INFO + 中止本轮 OBS 与场景步骤，
+        #    否则锁已被其它实例接管仍会上传 OBS，与「单实例独占同步」目标冲突。
+        if outer_lock_held:
+            outer_lock_held = await _renew_stage_lock("OBS step")
+        if outer_lock_held:
+            try:
+                obs_result = await sync_official_skills_to_obs()
+                result["obs_added"] = obs_result.get("added", 0)
+                result["obs_updated"] = obs_result.get("updated", 0)
+                result["obs_skipped"] = obs_result.get("skipped", 0)
+            except Exception as e:
+                logger.exception(f"skill sync: OBS sync failed: {e}")
 
         # 4. R31 串行场景同步：skill 表已就绪，复用已下载的 repo_root。
         #    §6.3 外层锁续期（to_thread 卸载）：锁被抢 → 中止本轮剩余步骤。
@@ -535,7 +538,9 @@ async def sync_official_skills() -> dict:
             from src.kernel.lock import acquire_lock as _al, release_lock as _rl
             from src.domains.runtime.storage.scene_sync import sync_official_scenes
             # §6.3 外层锁续期（to_thread 卸载，与下方 acquire/release 一致）
-            if await _ensure_outer_lock():
+            if outer_lock_held:
+                outer_lock_held = await _renew_stage_lock("scene step")
+            if outer_lock_held:
                 scene_lock = await asyncio.to_thread(_al, "scene_sync", 300)
                 if not scene_lock:
                     logger.warning("skill sync: legacy scene_sync lock held, skipping scene step this cycle")
@@ -551,7 +556,9 @@ async def sync_official_skills() -> dict:
         # §3.5 唯一清理点（含父目录，P45/§4.5 统一形式）——任何退出路径都执行
         if repo_root:
             shutil.rmtree(os.path.dirname(repo_root), ignore_errors=True)
-        # §6.3 超时观测：周期 > TTL/2（由 SKILL_SYNC_LOCK_TTL 派生）提前 ERROR 告警
+        # §6.3 超时观测：周期 > TTL/2（由 SKILL_SYNC_LOCK_TTL 派生）提前 ERROR 告警。
+        #   监控关键字稳定为 `skill sync: cycle exceeded`，具体秒数随 TTL 派生
+        #   （默认 TTL=600 → 阈值 300s），告警规则请按关键字匹配而非秒数。
         _elapsed = _time.monotonic() - _cycle_start
         _threshold = SKILL_SYNC_LOCK_TTL / 2
         if _elapsed > _threshold:
@@ -594,17 +601,19 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 
 
-async def _ensure_outer_lock(ttl: int = SKILL_SYNC_LOCK_TTL) -> bool:
+async def _ensure_outer_lock(ttl: int = SKILL_SYNC_LOCK_TTL, stage: str = "scene step") -> bool:
     """续期外层 `skill_sync` 锁；续不上时按同一 holder 重抢一次。
 
     为什么需要重抢：同一进程里可能存在不止一个调度器（历史上 main / server_tasks /
     grape_server 三个入口各调一次 start_skill_sync_scheduler，而它并不幂等）。
     两个 worker 共用模块级的锁 holder，A 的 release 会按 holder 删掉 B 刚拿到的行，
     B 在下一轮续期时就必然失败并放弃剩余步骤——日志表现为每轮一条
-    `outer lock lost before scene step`，而场上其实只有一个存活进程。
+    `outer lock lost before <stage>`，而场上其实只有一个存活进程。
 
     重抢成功说明「行被自己人删了」（竞态，WARN，继续本轮）；续期与重抢都失败说明
     锁真被别的实例接管（INFO，跳过本轮）；过程中抛异常说明锁服务异常（ERROR，跳过）。
+
+    `stage` 仅用于日志定位（DB sync / OBS / scene step），不影响续期语义。
     """
     from src.kernel.lock import acquire_lock as _al, renew_lock as _rn
 
@@ -612,13 +621,26 @@ async def _ensure_outer_lock(ttl: int = SKILL_SYNC_LOCK_TTL) -> bool:
         if await asyncio.to_thread(_rn, "skill_sync", ttl):
             return True
         if await asyncio.to_thread(_al, "skill_sync", ttl):
-            logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
+            logger.warning(f"skill sync: outer lock re-acquired before {stage} (lock row was dropped)")
             return True
-        logger.info("skill sync: outer lock lost before scene step, skipped by another instance")
+        logger.info(f"skill sync: outer lock lost before {stage}, skipped by another instance")
         return False
     except Exception:
         logger.exception("skill sync: outer lock renew/re-acquire failed with error")
         return False
+
+
+async def _renew_stage_lock(stage: str) -> bool:
+    """Issue #3742：阶段开始前续期外层 `skill_sync` 锁，续不上即中止本轮剩余步骤。
+
+    锁被其它实例接管后仍继续上传 OBS / 写 DB 就是多实例并发写同一份产物，与
+    「单实例独占同步」目标冲突。因此续期失败（被接管 INFO / 锁服务异常 ERROR）一律
+    返回 False，由调用方跳过本轮 OBS、场景等剩余步骤（锁已不归本实例，无权续跑）。
+    """
+    if await _ensure_outer_lock(stage=stage):
+        return True
+    logger.info(f"skill sync: aborting remaining steps this cycle, outer lock lost before {stage}")
+    return False
 
 
 _scheduler_task: "asyncio.Task | None" = None
