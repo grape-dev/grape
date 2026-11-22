@@ -84,6 +84,35 @@ def pack_backend(ts):
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
+    # packaging/ 目录：worker 安装包不是预先打好的静态文件——src/kernel/worker_package.py
+    # 在【部署根】读 packaging/legacy-entry-src/ 现拼 grape-worker.tar.gz。纯解包部署
+    # （没有 git 检出、只解本包）时若包内无此目录，worker 安装接口直接 500
+    # 「legacy 入口 shim 源缺失」，Windows/Linux worker 全部装不上，且只在
+    # data/cache/worker-package 被重建后暴露（升级首日必现、平时被旧缓存掩盖）。
+    # 故这里 fail-loud，并整目录打进去（含 legacy-entry-src 全部 shim）。
+    packaging_dir = os.path.join(ROOT, "packaging")
+    _legacy_required = [
+        "legacy-entry-src/runtime/__init__.py",
+        "legacy-entry-src/runtime/agent.py",
+        "legacy-entry-src/runtime/cloud_worker.py",
+    ]
+    if not os.path.isdir(packaging_dir):
+        print(f"[FATAL] 缺少 packaging/ 目录：{packaging_dir}")
+        print("        该目录承载 worker 安装包的 legacy 入口 shim，缺它 GET /api/runtime/grape-worker.tar.gz 会 500")
+        sys.exit(1)
+    _missing = [f for f in _legacy_required if not os.path.isfile(os.path.join(packaging_dir, f))]
+    if _missing:
+        print(f"[FATAL] packaging/ 缺 {len(_missing)} 个 legacy 入口 shim 源：")
+        for f in _missing:
+            print(f"        packaging/{f}")
+        sys.exit(1)
+    items.append((packaging_dir, "packaging"))
+    # requirements*.txt：Issue #699 Phase 0 起依赖已并入 pyproject.toml，文件通常不存在；
+    # 存在时顺手带上（老部署脚本仍有按 requirements 装依赖的路径）。
+    for rf in ("requirements.txt", "requirements-worker.txt"):
+        p = os.path.join(ROOT, rf)
+        if os.path.isfile(p):
+            items.append((p, rf))
     # src/ 目录
     src_dir = os.path.join(ROOT, "src")
     # R-2：Vue 前端产物（src/api/frontend/static-dist/）是本目录的一部分，但它由
@@ -165,31 +194,69 @@ def pack_backend(ts):
     make_subtar_gz(items, out)
     return out
 
-def pack_database(ts):
-    """数据库: MySQL DDL + 种子数据 (用 pymysql 导出, 无需 mysqldump)"""
-    out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}.sql.gz")
+# 种子表 — 导出 DDL + 数据
+# 2026-10-14 账号体系/场景/模板补充：scene_category + skill_category（场景/技能市场分类，
+# 缺失则市场页空）、agent_type_runtime_pool（引擎池映射）、featured_templates（精选模板）、
+# meta 仅 execution_mode/pipeline_mode 两个系统键（运行模式，其余为环境私有数据不入包）。
+# 只对 mgmt 域生效：runtime/insight 域只导 DDL，避免把某个环境的运行数据带进发布包。
+SEED_TABLES = [
+    "admin_users", "admin_roles", "admin_permission_menus", "admin_role_menu_rel",
+    "agent_type", "skill", "event_route_config", "global_im_bot_config",
+    "flyway_schema_history",
+    "scene_category", "skill_category", "agent_type_runtime_pool",
+    "featured_templates",
+]
+
+def _parse_dsn(dsn):
+    """解析 mysql+pymysql://user:pass@host:port/db（也认 mysql://）为连接参数。"""
+    from urllib.parse import unquote
+    m = re.match(r"^mysql(?:\+pymysql)?://([^:/@]+)(?::([^@]*))?@([^:/]+)(?::(\d+))?/([^?/]+)", dsn or "")
+    if not m:
+        raise ValueError(f"无法解析 DSN（期望 mysql+pymysql://user:pass@host:3306/db）：{dsn!r}")
+    user, password, host, port, database = m.groups()
+    return {
+        "host": host,
+        "port": int(port or 3306),
+        "user": unquote(user),
+        "password": unquote(password or ""),
+        "database": database,
+    }
+
+def _three_db_cfgs():
+    """三库模式：从运行期同一套 DSN 环境变量取（/etc/grape/grape-3db.env 的 GRAPE_DSN_*）。
+
+    三库是 2.3.x 的部署事实（mgmt/runtime/insight 可分三台实例），发布包必须能分别导出；
+    未设置时返回空 dict，走老的 configs/db-backend.json 单库路径。
+    """
+    cfgs = {}
+    for dom in ("mgmt", "runtime", "insight"):
+        dsn = os.environ.get(f"GRAPE_DSN_{dom.upper()}", "").strip()
+        if dsn:
+            cfg = _parse_dsn(dsn)
+            cfg["domain"] = dom
+            cfg["database"] = os.environ.get(f"GRAPE_DB_NAME_{dom.upper()}", cfg["database"]) or cfg["database"]
+            cfgs[dom] = cfg
+    return cfgs
+
+def _export_domain(cfg, out, ts, seed_tables, meta_seed=False):
+    """导出单个域库：全表 DDL + 指定种子表数据（其余只导结构）。"""
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # 从 configs/db-backend.json 读连接信息
-    db_cfg = json.load(open(os.path.join(ROOT, "configs/db-backend.json")))
-    mysql = db_cfg.get("mysql", {})
-    host, port = mysql.get("host", "127.0.0.1"), mysql.get("port", 3306)
-    user, password, database = mysql.get("user", "root"), mysql.get("password", ""), mysql.get("database", "grape-dev-db")
+    host, port = cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3306))
+    user, password = cfg.get("user", "root"), cfg.get("password", "")
+    database = cfg.get("database") or cfg.get("name") or "grape-dev-db"
+    domain = cfg.get("domain", "mgmt")
 
     import pymysql
-    conn = pymysql.connect(host=host, port=port, user=user, password=password, database=database, charset="utf8mb4")
+    try:
+        conn = pymysql.connect(host=host, port=port, user=user, password=password,
+                               database=database, charset="utf8mb4", connect_timeout=10)
+    except Exception as e:
+        print(f"[FATAL] {domain} 域连不上 MySQL: {user}@{host}:{port}/{database} -> {e}")
+        sys.exit(1)
     cur = conn.cursor()
 
-    # 种子表 — 导出 DDL + 数据
-    # 2026-10-14 账号体系/场景/模板补充：scene_category + skill_category（场景/技能市场分类，
-    # 缺失则市场页空）、agent_type_runtime_pool（引擎池映射）、featured_templates（精选模板）、
-    # meta 仅 execution_mode/pipeline_mode 两个系统键（运行模式，其余为环境私有数据不入包）。
-    seed_tables = [
-        "admin_users", "admin_roles", "admin_permission_menus", "admin_role_menu_rel",
-        "agent_type", "skill", "event_route_config", "global_im_bot_config",
-        "flyway_schema_history",
-        "scene_category", "skill_category", "agent_type_runtime_pool",
-        "featured_templates",
-    ]
+    if seed_tables is None:
+        seed_tables = []
     # 机密表 — 只导 DDL, 不导数据
     # 2026-10-14 账号体系重构补充：grape_accounts / external_identities（D32 账号核心表）、
     # api_tokens / session_api_tokens / grape_t_task_proxy_tokens（会话与 API 凭据）、
@@ -228,19 +295,20 @@ def pack_database(ts):
     # meta 其余键为环境私有（会话指针等），不随包分发。
 
     lines = []
-    lines.append(f"-- Grape Database Export {ts}")
+    lines.append(f"-- Grape Database Export {ts} ({domain} domain: {database}@{host})")
     lines.append(f"-- Generated: {datetime.datetime.now().isoformat()}")
     lines.append("SET FOREIGN_KEY_CHECKS=0;")
     lines.append("SET NAMES utf8mb4;")
     lines.append("")
 
-    all_tables = seed_tables + schema_only_tables + runtime_tables
-    # 获取所有表名，确保不遗漏
+    # 以库内实际表为准：三库拆分后每域只持有自己那批表，写死的清单里必然有本域没有的
+    # （历史 bug：runtime 库没有 repo_platform_tokens，SHOW CREATE TABLE 直接 1146 崩）。
     cur.execute("SHOW TABLES")
     db_tables = [r[0] for r in cur.fetchall()]
+    _known = list(seed_tables) + schema_only_tables + runtime_tables
+    all_tables = [t for t in _known if t in db_tables]
     for t in db_tables:
         if t not in all_tables:
-            schema_only_tables.append(t)
             all_tables.append(t)
 
     for t in all_tables:
@@ -276,18 +344,20 @@ def pack_database(ts):
 
     # 2026-10-14：meta 系统键种子（execution_mode / pipeline_mode）——从当前库读取，
     # 缺失时用代码默认（plugin + auto）。保证新装环境与发布验证环境的运行模式一致。
-    try:
-        _mode_defaults = {"execution_mode": "auto", "pipeline_mode": "plugin"}
-        for _mk, _default in _mode_defaults.items():
-            cur.execute("SELECT `value` FROM meta WHERE `key`=%s", (_mk,))
-            _mr = cur.fetchone()
-            _mv = (_mr[0] if _mr and _mr[0] else _default)
-            _mv_escaped = _sql_escape_str(_mv)
-            lines.append(f"INSERT INTO `meta` (`key`, `value`) VALUES ('{_mk}', '{_mv_escaped}');")
-        lines.append("")
-    except Exception as _me:
-        # meta 表缺失等场景：跳过（db_setup 启动时会建表，运行模式回落代码默认）
-        pass
+    # 仅 mgmt 域写入：runtime/insight 的 meta（若存在）不是运行模式的真源。
+    if meta_seed:
+        try:
+            _mode_defaults = {"execution_mode": "auto", "pipeline_mode": "plugin"}
+            for _mk, _default in _mode_defaults.items():
+                cur.execute("SELECT `value` FROM meta WHERE `key`=%s", (_mk,))
+                _mr = cur.fetchone()
+                _mv = (_mr[0] if _mr and _mr[0] else _default)
+                _mv_escaped = _sql_escape_str(_mv)
+                lines.append(f"INSERT INTO `meta` (`key`, `value`) VALUES ('{_mk}', '{_mv_escaped}');")
+            lines.append("")
+        except Exception as _me:
+            # meta 表缺失等场景：跳过（db_setup 启动时会建表，运行模式回落代码默认）
+            pass
 
     lines.append("SET FOREIGN_KEY_CHECKS=1;")
     conn.close()
@@ -296,6 +366,52 @@ def pack_database(ts):
     with gzip.open(out, "wb") as f:
         f.write(sql_content.encode("utf-8"))
     return out
+
+def pack_database(ts):
+    """数据库子包：单库（老布局）或三库（2.3.x，mgmt/runtime/insight 各一份）。
+
+    三库模式下沿用运行期的 DSN 环境变量（source /etc/grape/grape-3db.env 即可），
+    文件名带域名后缀：grape-db-<ts>-{mgmt,runtime,insight}.sql.gz；同时复制一份
+    grape-db-<ts>.sql.gz（= mgmt），让老 INSTALL/解包习惯与新三库部署都能用。
+    种子数据只进 mgmt，runtime/insight 只导 DDL。
+    """
+    os.makedirs(os.path.join(OUT_DIR, "staging/database"), exist_ok=True)
+    three = _three_db_cfgs()
+    if three:
+        outs = []
+        for dom in ("mgmt", "runtime", "insight"):
+            cfg = three.get(dom)
+            if not cfg:
+                print(f"[FATAL] 三库模式缺 {dom} 域 DSN（GRAPE_DSN_{dom.upper()}）——"
+                      f"拒绝打出只带部分库的包；请 source /etc/grape/grape-3db.env")
+                sys.exit(1)
+            out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}-{dom}.sql.gz")
+            _export_domain(cfg, out, ts, SEED_TABLES if dom == "mgmt" else [], meta_seed=(dom == "mgmt"))
+            outs.append(out)
+            print(f"     {dom}: {cfg['user']}@{cfg['host']}/{cfg['database']} "
+                  f"-> {os.path.basename(out)} ({os.path.getsize(out) // 1024}KB)")
+        alias = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}.sql.gz")
+        shutil.copyfile(outs[0], alias)
+        return [alias] + outs
+
+    cfg_path = os.path.join(ROOT, "configs/db-backend.json")
+    if not os.path.isfile(cfg_path):
+        print(f"[FATAL] 既没有 GRAPE_DSN_* 三库 DSN，也没有 {cfg_path}")
+        sys.exit(1)
+    mysql = json.load(open(cfg_path)).get("mysql", {})
+    cfg = {
+        "host": mysql.get("host", "127.0.0.1"),
+        "port": mysql.get("port", 3306),
+        "user": mysql.get("user", "root"),
+        "password": mysql.get("password", ""),
+        "database": mysql.get("database", "grape-dev-db"),
+        "domain": "mgmt",
+    }
+    out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}.sql.gz")
+    print("[WARN] 单库模式（未设置 GRAPE_DSN_MGMT/RUNTIME/INSIGHT）：只导出主库；"
+          "2.3.x 三库部署请先 source /etc/grape/grape-3db.env 再打包")
+    _export_domain(cfg, out, ts, SEED_TABLES, meta_seed=True)
+    return [out]
 
 def pack_skills(ts):
     """skills: 从独立仓库 grape-dev/grape-skills 读取全量（skills + scenes）"""
@@ -471,6 +587,11 @@ mysql -h<HOST> -u<USER> -p -e "CREATE DATABASE IF NOT EXISTS <DB> CHARACTER SET 
 mysql -h<HOST> -u<USER> -p <DB> < grape-db-{ts}.sql
 ```
 
+> **2.3.x 三库（mgmt/runtime/insight 分实例）**：包内可能另带
+> `database/grape-db-{ts}-runtime.sql.gz` 与 `database/grape-db-{ts}-insight.sql.gz`
+> （只含 DDL，无种子数据），分别导入 runtime 实例的 runtime 库、insight 实例的 insight 库；
+> `grape-db-{ts}.sql.gz` 恒等于 mgmt 域。三库 DSN 写进 `/etc/grape/grape-3db.env`。
+
 ### 3.4 安装 Skills
 
 ```bash
@@ -555,7 +676,8 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 | 子包 | 说明 | 部署位置 |
 |------|------|----------|
 | backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
-| database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据 | MySQL |
+| database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据（= mgmt 域） | MySQL |
+| database/grape-db-{ts}-runtime.sql.gz / grape-db-{ts}-insight.sql.gz | 三库模式下的另两域（只导 DDL） | 各自实例 |
 | skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/.grape/skills/ + /opt/grape/configs/scenes/ |
 | templates/grape-templates-{ts}.tar.gz | 项目模板 (独立仓库) | /opt/grape/examples/ |
 | tools/grape-toolkit-{ts}.tar.gz | worker 运行时 + 注册脚本 | /opt/grape/ (worker 机) |
@@ -597,7 +719,8 @@ def main():
 
     print("[pack] 2/5 构建数据库子包...")
     db_pkg = pack_database(ts)
-    print(f"  -> {db_pkg} ({os.path.getsize(db_pkg) // 1024}KB)")
+    for _db in (db_pkg if isinstance(db_pkg, (list, tuple)) else [db_pkg]):
+        print(f"  -> {_db} ({os.path.getsize(_db) // 1024}KB)")
 
     print("[pack] 3/5 构建 skills 子包...")
     skills_pkg = pack_skills(ts)
@@ -642,11 +765,14 @@ def main():
         sha_lines.append(f"{sha256_file(install_md_path)}  {pkg_dir}/INSTALL.md")
         # 子包
         for subdir, pkg_file in sub_pkgs.items():
-            if pkg_file and os.path.isfile(pkg_file):
-                arcname = f"{pkg_dir}/{subdir}/{os.path.basename(pkg_file)}"
-                tar.add(pkg_file, arcname=arcname)
-                rel = f"{pkg_dir}/{subdir}/{os.path.basename(pkg_file)}"
-                sha_lines.append(f"{sha256_file(pkg_file)}  {rel}")
+            pkg_files = pkg_file if isinstance(pkg_file, (list, tuple)) else [pkg_file]
+            for _pf in pkg_files:
+                if not (_pf and os.path.isfile(_pf)):
+                    continue
+                arcname = f"{pkg_dir}/{subdir}/{os.path.basename(_pf)}"
+                tar.add(_pf, arcname=arcname)
+                rel = f"{pkg_dir}/{subdir}/{os.path.basename(_pf)}"
+                sha_lines.append(f"{sha256_file(_pf)}  {rel}")
         # SHA256SUMS
         sha_content = "\n".join(sorted(sha_lines)) + "\n"
         sha_path = os.path.join(OUT_DIR, "staging", "SHA256SUMS")
@@ -661,8 +787,11 @@ def main():
     print("[pack] 自检...")
     with tarfile.open(pkg_path) as tar:
         names = tar.getnames()
+    _db_files = [p for p in (db_pkg if isinstance(db_pkg, (list, tuple)) else [db_pkg]) if p]
+    _db_in_tar = [n for n in names if "/database/grape-db-" in n]
     checks = {
         "INSTALL.md": any("INSTALL.md" in n for n in names),
+        "database(files=%d/%d)" % (len(_db_in_tar), len(_db_files)): len(_db_in_tar) == len(_db_files) and len(_db_files) > 0,
         "SHA256SUMS": any("SHA256SUMS" in n for n in names),
         "backend": any("backend/" in n for n in names),
         "database": any("database/" in n for n in names),
