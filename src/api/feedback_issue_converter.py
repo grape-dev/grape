@@ -75,18 +75,21 @@ def _feedback_official_issue_enabled() -> bool:
     return GRAPE_FEEDBACK_OFFICIAL_ISSUE.lower() not in ("0", "false", "no")
 
 def _repo_target(repo_key: str):
-    """反馈所属仓库目标：返回 (provider, owner, repo)。"""
-    from src.kernel.repo_key import parse_repo_key, split_owner_repo
-    provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
-    provider = provider or "gitcode"
-    owner, repo = split_owner_repo(repo_key)
-    return (provider, owner or "", repo or "")
+    """反馈所属仓库目标：返回 (provider, owner, repo)。
+
+    Issue #3731：`parse_repo_key()` 契约是三元组，(provider, _) 二元解包必抛
+    `ValueError: too many values to unpack`；一次全解包同时拿到 owner/repo，
+    不再用 `split_owner_repo()` 二次解析（两处口径分叉正是本 bug 成因）。
+    空键时 parse_repo_key 已返回 ("gitcode","","")，保留 `or "gitcode"` 默认语义。
+    """
+    from src.kernel.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    return (provider or "gitcode", owner or "", repo or "")
 
 def _repo_bot_token(repo_key: str):
-    """反馈所属仓库 bot token（provider 模块解析）。"""
+    """反馈所属仓库 bot token（provider 模块解析，provider 取自三元组首段）。"""
     from src.kernel.repo_key import parse_repo_key
-    provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
-    provider = provider or "gitcode"
+    provider = parse_repo_key(repo_key)[0] or "gitcode"
     try:
         return _provider_module(provider).bot_token(repo_key) or ""
     except Exception:
