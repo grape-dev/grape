@@ -964,6 +964,22 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             _close_proc_pipes(proc)
 
 
+def _opencode_model_probe_error() -> str:
+    """opencode 探活前置：最小模型调用（Issue #3820）。
+
+    返回非空 = 配置模型名不在网关可用列表（含差异文案）；空 = 通过/不可校验（不误判）。
+    """
+    try:
+        from src.domains.runtime.engine import engine_model
+        ok, detail, error = engine_model.probe_engine_model_call("opencode")
+        if ok:
+            return ""
+        return error or str(detail.get("model_call") or "model config error")
+    except Exception as e:  # noqa: BLE001 - 探活失败不得拖垮其它引擎
+        log.warning(f"opencode model probe failed: {e}")
+        return ""
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -979,6 +995,12 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     # aishell-dsh 使用 ACP 模式探活（与实际任务执行路径一致：aishell acp，四步全真）
     if engine_name == "aishell-dsh":
         return _probe_aishell_dsh_acp(cli_path)
+    # Issue #3820：opencode 先做最小模型调用（max_tokens=1）——配置模型名不在网关
+    # 可用列表时直接 fail + 差异，运行时页 probe_error 提前暴露，不再等任务 404。
+    if engine_name.startswith("opencode"):
+        _model_err = _opencode_model_probe_error()
+        if _model_err:
+            return {"status": "fail", "latency": 0, "error": _model_err}
 
 
     cmd = _PROBE_COMMANDS.get(engine_name)
@@ -1683,6 +1705,31 @@ def _env_int(name, default):
         return int(default)
 
 
+def _validate_opencode_registration() -> str:
+    """注册阶段模型校验（Issue #3820）。
+
+    misaligned（配置模型名不在 `/v1/models` 可用列表）→ 返回差异文案并大声告警，
+    调用方据此把 healthy 置 False（= 拒绝健康注册，服务端不再派单）；
+    网关不可达/无配置/已关闭 → 返回空串放行（风险缓解：不误拒）。
+    """
+    try:
+        from src.domains.runtime.engine.registry import validate_registration_model
+        res = validate_registration_model("opencode")
+    except Exception as e:  # noqa: BLE001 - 校验自身故障不得阻断注册
+        log.warning(f"opencode model registration check failed: {e}")
+        return ""
+    status = res.get("status")
+    message = str(res.get("message") or "")
+    if status == "misaligned":
+        log.error(f"[model-check] opencode 拒绝健康注册：{message}")
+        return message or "opencode 配置模型名不在网关可用列表"
+    if status == "unreachable":
+        log.warning(f"[model-check] {message}")
+    elif status == "ok":
+        log.info(f"[model-check] {message}")
+    return ""
+
+
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
@@ -1712,6 +1759,11 @@ def _discover_local_runtimes() -> list[dict]:
         # hermes：ACP 握手通过才算真健康（失败只诊断，不自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
+        # Issue #3820：opencode 模型名 vs /v1/models 校验——misaligned → healthy=False
+        # （服务端 engine_select 只挑 healthy，等价拒绝健康注册）并输出差异。
+        if healthy and (r["name"] or "").lower().startswith("opencode"):
+            if _validate_opencode_registration():
+                healthy = False
         # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）
         from src.domains.runtime.engine.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
@@ -4790,6 +4842,34 @@ def _check_opencode_api_keys():
 
 
 
+def _check_opencode_model_alignment():
+    """启动早期模型名对齐校验（Issue #3820）。
+
+    配置模型名不在网关 key 的 `/v1/models` 可用列表 → 启动日志即输出「配置模型名 vs
+    可用列表」差异（后续 `_discover_local_runtimes` 会把该引擎以 healthy=False 注册，
+    等价拒绝健康注册）。网关不可达/无配置只告警，不阻断 worker 启动——同机其它引擎
+    与运维离线场景不受影响。
+    """
+    try:
+        from src.domains.runtime.engine.registry import validate_registration_model
+        res = validate_registration_model("opencode")
+    except Exception as e:  # noqa: BLE001 - 启动检查失败不得阻断 worker
+        log.warning(f"[model-check] opencode 模型校验执行失败（跳过）：{e}")
+        return
+    status = res.get("status")
+    message = str(res.get("message") or "")
+    if status == "misaligned":
+        log.error(f"[model-check] 配置模型名不在网关可用列表，opencode 将拒绝健康注册：{message}")
+        log.error("[model-check] 修复：把 ~/.config/opencode/opencode.json 的 model/provider "
+                  "改为可用列表中的模型，或换用覆盖该模型的 key")
+    elif status == "unreachable":
+        log.warning(f"[model-check] {message}")
+    elif status == "ok":
+        log.info(f"[model-check] {message}")
+    else:
+        log.info(f"[model-check] opencode 模型校验跳过：{message}")
+
+
 def _start_cli_version_check(log_sink=None):
     """Issue #2695（#2695 移植）：后台线程核对 grape CLI 版本，返回该线程（不阻塞 worker 启动）。
 
@@ -4851,6 +4931,8 @@ def main():
 
     # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
     _check_opencode_api_keys()
+    # Issue #3820：模型名 vs /v1/models 对齐校验（启动即暴露配置错误）
+    _check_opencode_model_alignment()
     # Issue #2423 M0（#2423 移植）：机器级静态 OV conf 检测（C2 混账号风险可见性；
     # 任务凭据已收敛服务端链路——env 无 OV 凭据 + tk_ 兑换，静态 conf 仅告警提示迁移）。
     try:

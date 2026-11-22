@@ -131,7 +131,10 @@ class TestDiscoverLocalRuntimes:
         with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "opencode", "cli_path": "/usr/bin/opencode", "installed": True}]):
             with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="opencode 1.0\n")):
-                out = ra._discover_local_runtimes()
+                # Issue #3820：注册校验会读宿主 ~/.config/opencode/opencode.json 并访问网关，
+                # 单测必须隔离宿主配置（否则健康的断言依赖机器环境）。
+                with patch.object(ra, "_validate_opencode_registration", return_value=""):
+                    out = ra._discover_local_runtimes()
         assert out[0]["name"] == "opencode"
         assert out[0]["healthy"] is True
         assert out[0]["version"] == "opencode 1.0"
