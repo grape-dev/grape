@@ -16,6 +16,9 @@ from src.api.pipeline_constants import (
     HANDOFF_RESULT_OK,
     HANDOFF_RESULT_REJECTED,
 )
+# Issue #3758：模块级导入 = 符号缺失时进程启动即失败（fail-fast）；
+# 不再在请求内 import 后被 except Exception 吞成静默 WARNING（#1841 失效根因）。
+from src.domains.runtime.engine.repogit import resolve_work_branch
 
 router = APIRouter(tags=["webhook"])
 
@@ -1373,14 +1376,16 @@ def _cross_pipeline_handoff(
         # Issue #1841：配置的 work_branch 可能已不存在于仓库，运行时注入的是校验后的
         # 生效分支；承接基线须与运行时 GRAPE_WORK_BRANCH 同源，故同样走校验回退。
         try:
-            from src.domains.runtime.engine.repogit import resolve_work_branch
             _target_branch_1753, _wb_note_1753 = resolve_work_branch(
                 repo_key, _target_branch_1753)
             if _wb_note_1753:
                 log.warning(f"A2A #1753: target scene work_branch fallback: {_wb_note_1753} "
                             f"(target scene={target_scene_id}, issue=#{issue_number})")
-        except Exception as _wb_err_1753:
-            log.warning(f"A2A #1753: validate target scene work_branch failed: {_wb_err_1753}")
+        except (OSError, RuntimeError, TimeoutError) as _wb_err_1753:
+            # 只管分支查询的预期运行期失败（网络/超时），保持原配置；
+            # ImportError/AttributeError 等代码缺陷不再被吞（模块级导入已 fail-fast）。
+            log.warning(f"A2A #1753: validate target scene work_branch failed, "
+                        f"keep configured: {_wb_err_1753}")
     if isinstance(carried_context, dict) and not _target_branch_1753 \
             and carried_context.get("target_branch_source") == TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH:
         carried_context["target_branch_source"] = TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH
