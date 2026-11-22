@@ -2229,6 +2229,29 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
+def _count_issues(where: str, params: list, label: str = "issues") -> int | None:
+    """issue 表行数统计（单一收口，Issue #3771）。
+
+    `issue` 归 runtime 域（`configs/table_ownership.json`），而本路由由 mgmt 进程服务：
+    直连进程库（`session_manager.db`）在三库拓扑下会打到 mgmt 库的同名视图（生产恒 1146），
+    异常再被吞成 0 → 分页 `total` / `has_more` 双双失真（1,693 条/小时 WARNING）。
+    取连接一律走 `_rt_db`（与 `_query_tasks`、`list_repo_issues` 同口径，三种拓扑都正确），
+    issue 表的任何 COUNT 都必须经过本函数，不再出现第三处裸 SQL。
+
+    COUNT 失败返回 None（不抛、不回 0）：调用方按 `issues_list` 既有降级口径返回
+    `total=None`，`has_more` 交给「本页是否满页」推断；WARNING 文案保留 `label` 前缀，
+    线上监控口径（`issues mine: count failed`）不受影响。
+    """
+    from src.kernel.session_manager import db_lock
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
+            return c.fetchone()[0]
+    except Exception as e:
+        log.warning(f"{label}: count failed: {e}")
+        return None
+
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses. Issue #2082 paging (semantics unified with issues_list/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), is clamped to a max of 100 and 0 means explicit full list. With per_page>0 the response carries total/page/per_page/has_more (total counts the filtered set).")
 def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
@@ -2320,17 +2343,19 @@ def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_inpu
     # Issue #2082（#2082 移植）：缺省 per_page 注入灰度默认；>0 真分页（COUNT + LIMIT/OFFSET）
     page, per_page = resolve_issues_page_params(page, per_page)
     if per_page > 0:
-        from src.kernel.session_manager import db, db_lock
-        _total = 0
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
-                _total = c.fetchone()[0]
-        except Exception as e:
-            log.warning(f"issues mine: count failed: {e}")
+        # Issue #3771：COUNT 必须走 runtime 域（_count_issues）；此前裸用
+        # session_manager.db.cursor() 在 mgmt 进程下打到 mgmt 库同名视图（恒 1146），
+        # 异常又被吞成 0 → total=0 / has_more 恒 false。
+        _total = _count_issues(where, params, label="issues mine")
         issues_out = _query_tasks(where, params, _order_by, include_user_id=False,
                                   limit=per_page, offset=(page - 1) * per_page)
+        if _total is None:
+            # COUNT 失败降级（与 issues_list 的 total=null 口径一致，Issue #2546/#2661）：
+            # 不回误导性的 0，has_more 按「本页是否满页」推断（最多多探一次空页）。
+            return {"issues": issues_out, "sort_order": sort_order, "mode": mode,
+                    "page": page, "per_page": per_page, "total": None,
+                    "has_more": len(issues_out) >= per_page}
+        # Issue #2082：total 与过滤后集合一致，has_more 按 offset+本页条数比较
         return {"issues": issues_out, "sort_order": sort_order, "mode": mode,
                 "page": page, "per_page": per_page, "total": _total,
                 "has_more": (page - 1) * per_page + len(issues_out) < _total}
@@ -2541,7 +2566,6 @@ def list_repo_issues(owner: str, repo: str,
         _pit.setdefault("creator", "")
     if per_page > 0:
         # ---- 真分页（Issue #926：PR 伪卡片并入统一窗口）----
-        from src.kernel.session_manager import db, db_lock
         # Issue #926 性能补丁（2026-11-04 压测）：q 走 `LOWER(title) LIKE '%kw%'`，前后
         # 通配符下任何普通索引都用不上——5 万行 COUNT 74ms、20 万行约 300ms，占一次搜索
         # 请求的大头。q 模式不返精确 total（total=null），has_more 按"本页是否满页"推断
@@ -2549,15 +2573,10 @@ def list_repo_issues(owner: str, repo: str,
         if q:
             _total = None
         else:
-            try:
-                with db_lock:
-                    c = _rt_db.cursor()
-                    c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
-                    _total = c.fetchone()[0]
-            except Exception as e:
-                log.warning(f"issues: count failed: {e}")
-                _total = 0
-            _total += len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
+            # Issue #3771：COUNT 收口到 _count_issues（runtime 域代理，issue 表归 runtime）；
+            # 失败仍按本接口既有语义落 0（+ PR 卡计入 total），对外行为不变。
+            _cnt = _count_issues(where, params)
+            _total = (0 if _cnt is None else _cnt) + len(pr_items)  # PR 卡计入 total（滚动累计口径一致）
         _offset = (page - 1) * per_page
         # 性能守卫（2026-11-04 压测）：default 模式第一排序键是状态优先级 CASE
         # （_status_order_sql），无法免排序；偏移越深单页越贵（issue 表 20 万行时
