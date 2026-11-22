@@ -695,6 +695,19 @@ def health_rows() -> list[dict]:
     return rows
 
 
+def _wake_pending_rows(installation_id: str) -> None:
+    """恢复成功后立即补投：清掉该安装 pending 行的暂停退避（best-effort）。
+
+    配套 `outbox.release_sending(retry_after=...)`：暂停行会被推到渠道
+    `next_retry_at`（最长 1h），人工恢复要把它拉回「立刻可认领」。
+    """
+    try:
+        from src.domains.runtime.im.outbox import wake_pending_rows
+        wake_pending_rows(installation_id)
+    except Exception as e:      # outbox 不可用/未迁移不影响恢复结果
+        log.debug("[im-channel-health] outbox wake skipped inst=%s: %s", installation_id, e)
+
+
 def recover_channel(installation_id: str, action: str,
                     engine: Any = None, tracker: Optional[ChannelHealthTracker] = None) -> dict:
     """人工恢复入口（管理台）：`relogin / clear_pause / retry_now`。
@@ -715,8 +728,10 @@ def recover_channel(installation_id: str, action: str,
         return {"ok": False, "reason": "engine_unavailable", "action": act,
                 "installation_id": inst}
     if act == "clear_pause":
+        state = tracker.clear_pause(inst)
+        _wake_pending_rows(inst)
         return {"ok": True, "action": act, "installation_id": inst, "reason": "",
-                "health": tracker.clear_pause(inst)}
+                "health": state}
 
     supervisor = getattr(engine, "supervisor", None) if engine is not None else None
     channel = None
@@ -741,6 +756,7 @@ def recover_channel(installation_id: str, action: str,
         return {"ok": False, "action": act, "installation_id": inst,
                 "reason": "channel_not_running"}
     state = tracker.mark_recover(inst, act)
+    _wake_pending_rows(inst)     # 提前唤醒：恢复后 pending 行不再等暂停窗口
     if act == "relogin" and supervisor is not None:
         kick = getattr(supervisor, "kick", None)
         if kick is not None:
