@@ -222,6 +222,31 @@ def _parse_dsn(dsn):
         "database": database,
     }
 
+# 连接超时：复用项目既有约定 src/kernel/mysql_compat.py 的 connect_timeout=10（该文件 4 处一致），
+# 只用于打包时把「域实例不可达」快速暴露；dev build-007 实测三域连接 7.8~10ms（同 VPC，3 次采样），
+# 10s 约为实测 p100 的 1000 倍，纯粹是失败上限而非正常路径预算。可用环境变量覆盖。
+DB_CONNECT_TIMEOUT = int(os.environ.get("GRAPE_PACK_DB_CONNECT_TIMEOUT", "10"))
+
+def _ownership_map():
+    """读 configs/table_ownership.json（唯一权威）：表名 -> 归属域。"""
+    p = os.path.join(ROOT, "configs", "table_ownership.json")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        return json.load(open(p)).get("tables", {}) or {}
+    except Exception as e:
+        print(f"[WARN] table_ownership.json 解析失败（按 mgmt 归属处理）：{e}")
+        return {}
+
+def _seed_tables_for(dom, ownership):
+    """种子表按 owner 域分发（A11 口径）；归属缺失的表按 mgmt。"""
+    return [t for t in SEED_TABLES if ownership.get(t, "mgmt") == dom]
+
+def _mask_host(h):
+    """日志/文件头里不打完整内网地址（合规审查 §1.1-1-5）。"""
+    parts = str(h).split(".")
+    return parts[0] + ".x.x.x" if len(parts) == 4 else "***"
+
 def _three_db_cfgs():
     """三库模式：从运行期同一套 DSN 环境变量取（/etc/grape/grape-3db.env 的 GRAPE_DSN_*）。
 
@@ -238,7 +263,7 @@ def _three_db_cfgs():
             cfgs[dom] = cfg
     return cfgs
 
-def _export_domain(cfg, out, ts, seed_tables, meta_seed=False):
+def _export_domain(cfg, out, ts, seed_tables, meta_seed=False, views_out=None):
     """导出单个域库：全表 DDL + 指定种子表数据（其余只导结构）。"""
     os.makedirs(os.path.dirname(out), exist_ok=True)
     host, port = cfg.get("host", "127.0.0.1"), int(cfg.get("port", 3306))
@@ -249,7 +274,7 @@ def _export_domain(cfg, out, ts, seed_tables, meta_seed=False):
     import pymysql
     try:
         conn = pymysql.connect(host=host, port=port, user=user, password=password,
-                               database=database, charset="utf8mb4", connect_timeout=10)
+                               database=database, charset="utf8mb4", connect_timeout=DB_CONNECT_TIMEOUT)
     except Exception as e:
         print(f"[FATAL] {domain} 域连不上 MySQL: {user}@{host}:{port}/{database} -> {e}")
         sys.exit(1)
@@ -295,20 +320,26 @@ def _export_domain(cfg, out, ts, seed_tables, meta_seed=False):
     # meta 其余键为环境私有（会话指针等），不随包分发。
 
     lines = []
-    lines.append(f"-- Grape Database Export {ts} ({domain} domain: {database}@{host})")
+    lines.append(f"-- Grape Database Export {ts} (domain: {domain}, schema: {database})")
     lines.append(f"-- Generated: {datetime.datetime.now().isoformat()}")
     lines.append("SET FOREIGN_KEY_CHECKS=0;")
     lines.append("SET NAMES utf8mb4;")
     lines.append("")
 
-    # 以库内实际表为准：三库拆分后每域只持有自己那批表，写死的清单里必然有本域没有的
-    # （历史 bug：runtime 库没有 repo_platform_tokens，SHOW CREATE TABLE 直接 1146 崩）。
-    cur.execute("SHOW TABLES")
+    # 只枚举【基表】：SHOW TABLES 会把跨域视图一起列出来（mysql 8 实测），对视图发
+    # DROP TABLE 会 1347「is not BASE TABLE」，在 CREATE VIEW 前写 DROP TABLE 还会让
+    # 空库导入撞 1146（视图引用的他域基表尚未导入）。视图另存一份 *-views.sql.gz。
+    cur.execute("SHOW FULL TABLES WHERE Table_type='BASE TABLE'")
     db_tables = [r[0] for r in cur.fetchall()]
+    cur.execute("SHOW FULL TABLES WHERE Table_type='VIEW'")
+    db_views = [r[0] for r in cur.fetchall()]
     _known = list(seed_tables) + schema_only_tables + runtime_tables
-    all_tables = [t for t in _known if t in db_tables]
-    for t in db_tables:
-        if t not in all_tables:
+    # 去重（agent_type_runtime_pool 同时出现在种子表与 schema_only 清单里）
+    seen = set()
+    all_tables = []
+    for t in [t for t in _known if t in db_tables] + db_tables:
+        if t not in seen:
+            seen.add(t)
             all_tables.append(t)
 
     for t in all_tables:
@@ -360,12 +391,36 @@ def _export_domain(cfg, out, ts, seed_tables, meta_seed=False):
             pass
 
     lines.append("SET FOREIGN_KEY_CHECKS=1;")
+
+    # 视图单独导出（不混在基表 SQL 里）：跨域视图引用他域基表，三份基表库都导完之后才能建，
+    # 所以单列 *-views.sql.gz；用 DROP VIEW（不是 DROP TABLE），且绝不对视图生成 INSERT。
+    v_sql = None
+    if views_out and db_views:
+        vlines = [f"-- Grape View Export {ts} (domain: {domain}, schema: {database})",
+                  "-- 导入建议：mysql -f（遇错继续）+ 重跑一次（幂等）；跨域视图互引时以 scripts/sync_domain_views.py 为准。",
+                  "SET FOREIGN_KEY_CHECKS=0;",
+                  "SET NAMES utf8mb4;", ""]
+        for v in db_views:
+            cur.execute(f"SHOW CREATE VIEW `{v}`")
+            row = cur.fetchone()
+            if row and row[1]:
+                # 去掉 DEFINER=`user`@`host`：口令无关，但会把打包机的内部账号/IP 带进发布包，
+                # 且换环境后该账号多半不存在（导入时 DEFINER 需要 SUPER/SET_USER_ID 权限）。
+                stmt = re.sub(r"DEFINER=`[^`]*`@`[^`]*`", "", row[1]).lstrip()
+                vlines.append(f"DROP VIEW IF EXISTS `{v}`;")
+                vlines.append(stmt + ";")
+                vlines.append("")
+        vlines.append("SET FOREIGN_KEY_CHECKS=1;")
+        v_sql = "\n".join(vlines)
     conn.close()
 
-    sql_content = "\n".join(lines)
     with gzip.open(out, "wb") as f:
-        f.write(sql_content.encode("utf-8"))
-    return out
+        f.write("\n".join(lines).encode("utf-8"))
+    if v_sql is not None:
+        os.makedirs(os.path.dirname(views_out), exist_ok=True)
+        with gzip.open(views_out, "wb") as f:
+            f.write(v_sql.encode("utf-8"))
+    return out, (views_out if v_sql is not None else None)
 
 def pack_database(ts):
     """数据库子包：单库（老布局）或三库（2.3.x，mgmt/runtime/insight 各一份）。
@@ -379,6 +434,7 @@ def pack_database(ts):
     three = _three_db_cfgs()
     if three:
         outs = []
+        ownership = _ownership_map()
         for dom in ("mgmt", "runtime", "insight"):
             cfg = three.get(dom)
             if not cfg:
@@ -386,12 +442,20 @@ def pack_database(ts):
                       f"拒绝打出只带部分库的包；请 source /etc/grape/grape-3db.env")
                 sys.exit(1)
             out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}-{dom}.sql.gz")
-            _export_domain(cfg, out, ts, SEED_TABLES if dom == "mgmt" else [], meta_seed=(dom == "mgmt"))
+            views_out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}-{dom}-views.sql.gz")
+            seeds = _seed_tables_for(dom, ownership)
+            _, vfile = _export_domain(cfg, out, ts, seeds, meta_seed=(ownership.get("meta", "mgmt") == dom),
+                                      views_out=views_out)
             outs.append(out)
-            print(f"     {dom}: {cfg['user']}@{cfg['host']}/{cfg['database']} "
-                  f"-> {os.path.basename(out)} ({os.path.getsize(out) // 1024}KB)")
+            if vfile:
+                outs.append(vfile)
+            print(f"     {dom}: {cfg['user']}@{_mask_host(cfg['host'])}/{cfg['database']} "
+                  f"-> {os.path.basename(out)} ({os.path.getsize(out) // 1024}KB)"
+                  + (f" + views ({os.path.getsize(vfile) // 1024}KB)" if vfile else "")
+                  + f"  种子表 {len(seeds)}")
         alias = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}.sql.gz")
-        shutil.copyfile(outs[0], alias)
+        mgmt_dump = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}-mgmt.sql.gz")
+        shutil.copyfile(mgmt_dump, alias)
         return [alias] + outs
 
     cfg_path = os.path.join(ROOT, "configs/db-backend.json")
@@ -410,8 +474,9 @@ def pack_database(ts):
     out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}.sql.gz")
     print("[WARN] 单库模式（未设置 GRAPE_DSN_MGMT/RUNTIME/INSIGHT）：只导出主库；"
           "2.3.x 三库部署请先 source /etc/grape/grape-3db.env 再打包")
-    _export_domain(cfg, out, ts, SEED_TABLES, meta_seed=True)
-    return [out]
+    views_out = os.path.join(OUT_DIR, f"staging/database/grape-db-{ts}-views.sql.gz")
+    _, vfile = _export_domain(cfg, out, ts, SEED_TABLES, meta_seed=True, views_out=views_out)
+    return [out] + ([vfile] if vfile else [])
 
 def pack_skills(ts):
     """skills: 从独立仓库 grape-dev/grape-skills 读取全量（skills + scenes）"""
@@ -588,9 +653,16 @@ mysql -h<HOST> -u<USER> -p <DB> < grape-db-{ts}.sql
 ```
 
 > **2.3.x 三库（mgmt/runtime/insight 分实例）**：包内可能另带
-> `database/grape-db-{ts}-runtime.sql.gz` 与 `database/grape-db-{ts}-insight.sql.gz`
-> （只含 DDL，无种子数据），分别导入 runtime 实例的 runtime 库、insight 实例的 insight 库；
-> `grape-db-{ts}.sql.gz` 恒等于 mgmt 域。三库 DSN 写进 `/etc/grape/grape-3db.env`。
+> `database/grape-db-{ts}-runtime.sql.gz` 与 `database/grape-db-{ts}-insight.sql.gz`，
+> 分别导入 runtime 实例的 runtime 库、insight 实例的 insight 库；`grape-db-{ts}.sql.gz` 恒等于 mgmt 域。
+> 各域种子数据按 `configs/table_ownership.json` 落到 owner 库（`skill`/`agent_type`/`scene_category`/
+> `global_im_bot_config`/`agent_type_runtime_pool` 属 runtime，`meta` 运行模式键也在 runtime）。
+> 三库 DSN 写进 `/etc/grape/grape-3db.env`。
+>
+> **含视图的域**（生产三库共 100+ 个跨域视图）另出一份 `database/grape-db-{ts}-<domain>-views.sql.gz`：
+> 视图引用他域基表，**必须三份基表库全部导完之后再导对应的 views 文件**，建议用 `mysql -f`（遇错继续）
+> 并重跑一遍（文件自身 `DROP VIEW IF EXISTS`，幂等），最终以 `information_schema.views` 计数核对；
+> 跨域视图互相引用时以 `scripts/sync_domain_views.py` 重建为准。基表 dump 里不会出现 `DROP TABLE` 打在视图上的情况。
 
 ### 3.4 安装 Skills
 
@@ -789,9 +861,21 @@ def main():
         names = tar.getnames()
     _db_files = [p for p in (db_pkg if isinstance(db_pkg, (list, tuple)) else [db_pkg]) if p]
     _db_in_tar = [n for n in names if "/database/grape-db-" in n]
+    # 基表 dump 里混进 CREATE VIEW = 视图被当基表导出（会对视图写 DROP TABLE → 导入 1347/1146）
+    _views_leak = []
+    for _f in _db_files:
+        if _f.endswith("-views.sql.gz"):
+            continue
+        try:
+            with gzip.open(_f, "rb") as fh:
+                if b" VIEW `" in fh.read():
+                    _views_leak.append(os.path.basename(_f))
+        except Exception:
+            pass
     checks = {
         "INSTALL.md": any("INSTALL.md" in n for n in names),
         "database(files=%d/%d)" % (len(_db_in_tar), len(_db_files)): len(_db_in_tar) == len(_db_files) and len(_db_files) > 0,
+        "db-base-only(no views mixed in)": not _views_leak,
         "SHA256SUMS": any("SHA256SUMS" in n for n in names),
         "backend": any("backend/" in n for n in names),
         "database": any("database/" in n for n in names),
