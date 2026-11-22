@@ -765,6 +765,24 @@
       "sources": [
         "桶B B4 契约登记：plugin 体系端点"
       ]
+    },
+    {
+      "operationId": "gitrepo_issues_comments_update",
+      "method": "patch",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}",
+      "command": "grape git-repo issues comments update",
+      "sources": [
+        "coding-cli@3.1.0"
+      ]
+    },
+    {
+      "operationId": "gitrepo_issues_comments_delete",
+      "method": "delete",
+      "path": "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}",
+      "command": "grape git-repo issues comments delete",
+      "sources": [
+        "coding-cli@3.1.0"
+      ]
     }
   ],
   "arch_note": "ported from weekly #2081; ops not in arch11 native rendering removed: orgs_ov_credential_delete, orgs_ov_credential_put, orgs_ov_credentials_list"

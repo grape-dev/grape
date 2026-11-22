@@ -1,6 +1,6 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 390,
+  "endpoint_count": 391,
   "min_endpoint_count": 351,
   "groups": [
     "a2a",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "PR #1847: plugin system + arch line reaches production; re-baseline groups/endpoint count (390 paths, +categories/org/sandbox groups) after intentional additions",
-  "source_commit": "c77202850"
+  "change_reason": "Issue #3821: add issues comment PATCH/DELETE (gitrepo_issues_comments_update/delete) on one new path; endpoint_count 390->391, git-repo group unchanged",
+  "source_commit": "7ea71f828"
 }

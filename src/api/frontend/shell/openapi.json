@@ -3671,6 +3671,188 @@
         "x-token-scope": "session_only"
       }
     },
+    "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}": {
+      "patch": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "Update issue comment",
+        "description": "Updates an issue comment body by comment id (body required). Issue #3821: mirrors the pulls comment update self-correction capability. comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list response (compat form, resolved to note_id server-side); other forms return a readable 422.",
+        "operationId": "gitrepo_issues_comments_update",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Number"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Comment Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      },
+      "delete": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "Delete issue comment",
+        "description": "Deletes an issue comment by comment id. Issue #3821: mirrors the pulls comment delete self-correction capability. comment_id accepts the numeric note_id or the hex id returned by the create/list response; other forms return a readable 422.",
+        "operationId": "gitrepo_issues_comments_delete",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Number"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Comment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      }
+    },
     "/api/git-repo/{owner}/{repo}/pulls": {
       "get": {
         "tags": [
@@ -4409,7 +4591,7 @@
           "git-repo"
         ],
         "summary": "Update PR comment",
-        "description": "Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment response (compat form, auto-mapped to note_id server-side); other forms return 422.",
+        "description": "Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment response (compat form, auto-mapped to note_id server-side); other forms return 422. Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).",
         "operationId": "gitrepo_pulls_comments_update",
         "parameters": [
           {
@@ -4497,7 +4679,7 @@
           "git-repo"
         ],
         "summary": "Delete PR comment",
-        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams).",
+        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams). Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).",
         "operationId": "gitrepo_pulls_comments_delete",
         "parameters": [
           {
@@ -34935,6 +35117,7 @@
       "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs",
       "/api/git-repo/{owner}/{repo}/commits/{ref}/status",
       "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean",
+      "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}",
       "/api/im/dingtalk/card-setup",
       "/api/im/installations",
       "/api/im/installations/{installation_id}",
@@ -35057,7 +35240,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 390,
+  "x-endpoint-count": 391,
   "x-groups": [
     "a2a",
     "agents",
@@ -35092,7 +35275,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "fcd672955",
-  "x-generated-at": "2026-11-22T14:24:20.186415+00:00",
-  "tags": []
+  "x-source-commit": "7ea71f828",
+  "x-generated-at": "2026-11-22T23:27:12.966403+00:00"
 }
