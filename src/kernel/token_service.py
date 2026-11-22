@@ -20,6 +20,9 @@ except Exception:  # noqa: BLE001 - 端口模块异常不阻断本模块导入
         pass
 
 
+_PORT_UNBOUND_WARNED = False
+
+
 def _provider_or_none(repo_key: str):
     """构造 provider；本进程没有装配层（端口未绑定）时返回 None。
 
@@ -31,6 +34,17 @@ def _provider_or_none(repo_key: str):
     try:
         return _vcs_provider.create_provider_from_repo_key(repo_key)
     except _PortNotBound:
+        # 架构复审 P2-6：worker 进程没有装配层时这条原来只有 debug 日志，
+        # 「回执身份/凭据归因」静默失效且没人知道。每进程只报一次，带进程名，
+        # 便于区分「本该有装配层却没绑上」与「worker 本来就不做 token 链」。
+        global _PORT_UNBOUND_WARNED
+        if not _PORT_UNBOUND_WARNED:
+            _PORT_UNBOUND_WARNED = True
+            import os as _os
+            log.warning(
+                "vcs_provider 端口未绑定：本进程拿不到平台适配器，"
+                "仓库 bot token / 回执身份归因在本进程不可用"
+                f"（pid={_os.getpid()} 进程={_os.environ.get('GRAPE_PROCESS') or _os.path.basename(_os.sys.argv[0] or '?')}）")
         return None
 
 
