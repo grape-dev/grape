@@ -517,6 +517,35 @@ def set_autopilot_engine_ids(task_id: int, engine_runtime_ids_json: str) -> int:
         return int(c.rowcount or 0)
 
 
+def set_autopilot_failure_state(task_id: int, consecutive_failures: int, last_error_code: str,
+                                offline_since: str, backoff_until: str, circuit_paused: int,
+                                updated_at: str) -> int:
+    """Issue #3800：写入环境性失败的退避/熔断状态（同一条 UPDATE 推进运行时间）。
+
+    `autopilot_tasks` 归 mgmt；runtime 调度器经 `cross_write` 意图通道调用本原语。
+    幂等语义：整行状态覆盖（同值重复执行 0 行变更），调用方可安全重试。
+    `backoff_until` 同时作为 `next_run_at`（对外展示「下次预计运行时间」即退避截止）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET last_run_at=%s, next_run_at=%s, "
+                  "consecutive_failures=%s, last_error_code=%s, offline_since=%s, "
+                  "backoff_until=%s, circuit_paused=%s, updated_at=%s WHERE id=%s",
+                  (updated_at, backoff_until or "", int(consecutive_failures or 0),
+                   last_error_code or "", offline_since or "", backoff_until or "",
+                   1 if circuit_paused else 0, updated_at, int(task_id)))
+        return int(c.rowcount or 0)
+
+
+def clear_autopilot_failure_state(task_id: int, next_run_at: str, updated_at: str) -> int:
+    """Issue #3800：清空退避/熔断状态（引擎恢复后自愈续跑），只推进 `next_run_at`。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET next_run_at=%s, consecutive_failures=0, "
+                  "last_error_code='', offline_since='', backoff_until='', circuit_paused=0, "
+                  "updated_at=%s WHERE id=%s",
+                  (next_run_at or "", updated_at, int(task_id)))
+        return int(c.rowcount or 0)
+
+
 # ---------- 知识库写原语（P3-5b：agent_shared_knowledge / scene_knowledge_ref / scene_skill_ref） ----------
 
 def upsert_baseline_knowledge(repo_key: str, display_name: str, description: str,
@@ -2203,15 +2232,27 @@ _ANY_QUERIES: dict[str, str] = {
         "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?"),
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
         "FROM autopilot_tasks WHERE id=?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (
         "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?"),
+    # Issue #3800：环境性失败的退避/熔断状态。运行时间与失败状态同一条 UPDATE 落库——
+    # 拆两次跨域写会出现「状态写了、下次运行时间没写」的半写窗口。占位符顺序即调用方
+    # 参数顺序（set/clear 各自成条，语义自解释）。
+    "autopilot_failure_state_set": (
+        "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, consecutive_failures=?, "
+        "last_error_code=?, offline_since=?, backoff_until=?, circuit_paused=?, updated_at=? "
+        "WHERE id=?"),
+    "autopilot_failure_state_clear": (
+        "UPDATE autopilot_tasks SET next_run_at=?, consecutive_failures=0, last_error_code='', "
+        "offline_since='', backoff_until='', circuit_paused=0, updated_at=? WHERE id=?"),
     # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
     # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
     "knowledge_obs_keys_scoped": (
@@ -2862,6 +2903,22 @@ def set_autopilot_run_info_any(task_id, last_run_at: str, next_run_at: str) -> i
     """回写 last_run_at / next_run_at / updated_at（updated_at 与原实现一致 = last_run_at）。"""
     return exec_any("autopilot_run_info_set",
                     (last_run_at, next_run_at, last_run_at, int(task_id)))
+
+
+def set_autopilot_failure_state_any(task_id, consecutive_failures, last_error_code,
+                                    offline_since, backoff_until, circuit_paused,
+                                    updated_at) -> int:
+    """Issue #3800：任意拓扑写退避/熔断状态（与 lib 原语同语义、同一条 UPDATE）。"""
+    return exec_any("autopilot_failure_state_set",
+                    (updated_at, backoff_until or "", int(consecutive_failures or 0),
+                     last_error_code or "", offline_since or "", backoff_until or "",
+                     1 if circuit_paused else 0, updated_at, int(task_id)))
+
+
+def clear_autopilot_failure_state_any(task_id, next_run_at, updated_at) -> int:
+    """Issue #3800：任意拓扑清空退避/熔断状态（引擎恢复自愈）。"""
+    return exec_any("autopilot_failure_state_clear",
+                    (next_run_at or "", updated_at, int(task_id)))
 
 
 # ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------

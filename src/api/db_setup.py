@@ -11555,3 +11555,38 @@ from src.domains.runtime.migrations.skill_category_cutover import (
     MIGRATION as _M_SKILL_CUTOVER_MAP,
 )
 register_migration(**_M_SKILL_CUTOVER_MAP)
+
+
+# ===== Autopilot 环境性失败退避/熔断（Issue #3800）=====
+# 材质回写与列名同源于属主域（跨域守卫 P0-2），这里只做登记：
+#   mgmt 侧 202611230003：autopilot_tasks 增 5 列（连续失败/错误码/离线起算/退避截止/熔断位）；
+#   runtime 侧 202611230004：autopilot_executions 增 error_code（失败分类落库）。
+# 两条均 kind=safe + post_check（列存在性可判定才盖章）。version/name/kind 用字面量
+# 登记（不用 `**_MIGRATION`），否则 tests/api/test_migration_track_guard.py 的
+# 版本号唯一性与格式守卫解析不出该条，会漏看。
+
+from src.domains.mgmt.migrations.autopilot_failure_state import (
+    add_failure_state_columns as _fn_autopilot_failure_state_columns,
+    verify_failure_state_columns as _post_autopilot_failure_state_columns,
+)
+register_migration(
+    version="202611230003",
+    name="autopilot-task-failure-state-columns",
+    kind="safe",
+    fn=_fn_autopilot_failure_state_columns,
+    domains=("mgmt",),
+    post_check=_post_autopilot_failure_state_columns,
+)
+
+from src.domains.runtime.migrations.autopilot_execution_error_code import (
+    add_error_code_column as _fn_autopilot_exec_error_code,
+    verify_error_code_column as _post_autopilot_exec_error_code,
+)
+register_migration(
+    version="202611230004",
+    name="autopilot-execution-error-code",
+    kind="safe",
+    fn=_fn_autopilot_exec_error_code,
+    domains=("runtime",),
+    post_check=_post_autopilot_exec_error_code,
+)

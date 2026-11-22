@@ -29,7 +29,9 @@ TID_BASE = 3800001
 TID_OFFLINE = TID_BASE          # 1h 退避 + 熔断 + 自愈
 TID_STALE = TID_BASE + 1        # 绑定 uid 悬空（BINDING_STALE）
 TID_IDS = TID_BASE + 2          # legacy id 池
-CLOCK_START = datetime(2026, 11, 23, 3, 5, 0, tzinfo=timezone(timedelta(hours=8)))
+# 起点取 :30 —— 60s cron 的「无 last_run」首轮判定要求距上次触发 < 60s，
+# 整分起点会让首轮被判 not-due（边界值 60 不满足 <），掩盖首派路径。
+CLOCK_START = datetime(2026, 11, 23, 3, 5, 30, tzinfo=timezone(timedelta(hours=8)))
 
 
 class FakeClock:
@@ -263,8 +265,8 @@ def test_engine_offline_hour_backoff_and_circuit(monkeypatch):
 
     assert _exec_count(TID_OFFLINE) <= 4, (
         f"1 小时新建 exec {_exec_count(TID_OFFLINE)} 条（修复前 60 条），退避序列={delays}")
-    assert [len(calls)] and _exec_count(TID_OFFLINE) == len(calls), (calls, _exec_count(TID_OFFLINE))
-    assert delays == [120, 240] or delays == [120, 240, 480] or delays == [], delays
+    assert _exec_count(TID_OFFLINE) == len(calls) == 4, (calls, _exec_count(TID_OFFLINE), delays)
+    assert delays == [120, 240, 480], f"退避序列应为 120/240/480s，实际 {delays}"
     state = _task_row(TID_OFFLINE)
     consecutive, code, offline_since, backoff_until, paused, next_run = state
     assert code == S.ERROR_ENGINE_OFFLINE, state
@@ -275,7 +277,7 @@ def test_engine_offline_hour_backoff_and_circuit(monkeypatch):
     task_id, exec_id, status, summary = alerts[0]
     assert task_id == TID_OFFLINE and status == "failed"
     assert S.ERROR_ENGINE_OFFLINE in summary, summary
-    assert "engine" in summary.lower(), summary
+    assert "i3800-offline-uid" in summary, f"告警须带绑定引擎信息: {summary}"
     # 熔断后不再派发（剩余 tick 全被暂停闸门拦住）
     assert decisions.count("dispatch") == len(calls), (decisions, calls)
     assert "paused" in decisions, decisions[-5:]

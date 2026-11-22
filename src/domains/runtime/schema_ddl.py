@@ -536,7 +536,10 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
     agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
     -- Feishu subscription notification: terminal-state notify idempotency guard
-    notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    notified        INTEGER NOT NULL DEFAULT 0,          -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    -- Issue #3800：失败分类（ENGINE_OFFLINE / BINDING_STALE / 空=普通失败）。调度收口据此
+    -- 决定走退避/熔断通道还是普通重试路径；落列而非解析 error 文案，避免文案改动断链。
+    error_code      TEXT DEFAULT ''
 )
 """
 

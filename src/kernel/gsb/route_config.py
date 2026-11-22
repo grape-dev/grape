@@ -80,6 +80,9 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "clear_user_mapping_feishu", "set_user_mapping_nickname",
         "delete_feishu_onboard_task", "mark_external_identity_expired",
         "set_autopilot_run_info", "set_autopilot_engine_ids",
+        # Issue #3800：环境性失败的退避/熔断状态写原语（lib 通道；*_any 见下方任意拓扑段）
+        "set_autopilot_failure_state", "clear_autopilot_failure_state",
+        "set_autopilot_failure_state_any", "clear_autopilot_failure_state_any",
         "upsert_baseline_knowledge", "ensure_scene_knowledge_ref",
         "delete_event_knowledge", "replace_scene_skill_ref", "upsert_scene_content",
         "set_scene_icon", "get_official_scene_id", "count_rows",
