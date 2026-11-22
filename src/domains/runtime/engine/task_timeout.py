@@ -122,7 +122,9 @@ def _task_env(task: Dict[str, Any]) -> Dict[str, str]:
     """解析 task 的 env_extra（坏 JSON → 空 dict）。"""
     try:
         from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
-        env = decrypt_env_extra(task.get("env_extra"))  # enc:v1 信封解密（#2423）
+        # #3770：带行 id → 存量明文行在该读点也能就地自愈（不只计数）
+        env = decrypt_env_extra(task.get("env_extra"),
+                                task_id=str(task.get("id") or ""))  # enc:v1 信封解密（#2423）
         return env if isinstance(env, dict) else {}
     except Exception:
         return {}

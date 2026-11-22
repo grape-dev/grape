@@ -1260,7 +1260,9 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     env: dict[str, Any] = {}
     try:
         from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
-        env = decrypt_env_extra(task.get("env_extra")) or {}  # enc:v1（#2423）
+        # #3770：带行 id → 存量明文行在该读点也能就地自愈（不只计数）
+        env = decrypt_env_extra(task.get("env_extra"),
+                                task_id=str(task.get("id") or "")) or {}  # enc:v1（#2423）
     except Exception:
         env = {}
     try:

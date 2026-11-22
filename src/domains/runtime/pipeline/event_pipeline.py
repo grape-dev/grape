@@ -727,6 +727,21 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         _snap = engine_ref_snapshot(engine_id, "")
     except Exception:
         _snap = (None, "", "")
+    # Issue #3770 审查 R2：写入侧收口——direct 快照行不再落明文 "{}"（命中验收口径
+    # 「非空且非 enc:v1:」）；空对象也落 enc:v1 信封，加密失败降级空串 + 计数
+    # write_refused，绝不回落明文。
+    try:
+        from src.domains.runtime.engine.service import _encrypt_env_extra_for_write
+        _env_sealed = _encrypt_env_extra_for_write({})
+    except Exception as _enc_e:
+        _env_sealed = ""
+        try:
+            from src.domains.runtime.engine.env_extra_security import (
+                record_env_extra_write_refused)
+            record_env_extra_write_refused()
+        except Exception as _cnt_e:
+            log.debug(f"create_direct_task: 计数 write_refused 失败 task={task_id}: {_cnt_e}")
+        log.error(f"create_direct_task: env_extra 加密失败，回退空串 task={task_id}: {_enc_e}")
     try:
         row = _task_insert_row(_TASK_COLUMNS_LIST,
             id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
@@ -736,7 +751,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             user_id=(_dispatch_uid or 0),  # Issue #21 第 2 步：on 模式写派发人 id，其它模式仍 0
             account=(_dispatch_acct if _dispatch_uid else ""),
             repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取,
-            env_extra="{}", skill_files="{}", server_url="", issue_session_id="",
+            env_extra=_env_sealed, skill_files="{}", server_url="", issue_session_id="",
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
@@ -844,6 +859,22 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     now = datetime.now(timezone.utc).isoformat()
     _reason = json.dumps(["无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎"][:500])
     _pool_tag = agent_type or "" if is_plugin_mode() else ""
+    # Issue #3770 审查 R2：失败快照行不再明文落库（failed 行不经 get_task 读，读侧自愈
+    # 覆盖不到，会长期留在明文口径）——env_extra 改落 enc:v1 信封（重派读该行时经
+    # decrypt_env_extra 还原）；加密失败回退空串 + 计数 write_refused，绝不回落明文。
+    try:
+        from src.domains.runtime.engine.service import _encrypt_env_extra_for_write
+        _env_sealed = _encrypt_env_extra_for_write(env_extra)
+    except Exception as _enc_e:
+        _env_sealed = ""
+        try:
+            from src.domains.runtime.engine.env_extra_security import (
+                record_env_extra_write_refused)
+            record_env_extra_write_refused()
+        except Exception as _cnt_e:
+            log.debug(f"create_failed_task: 计数 write_refused 失败 task={task_id}: {_cnt_e}")
+        log.error(f"create_failed_task: env_extra 加密失败，回退空串（快照 env 丢失，"
+                  f"重派将重建 env） task={task_id}: {_enc_e}")
     try:
         row = _task_insert_row(_TASK_COLUMNS_LIST,
             id=task_id, agent_session_id=agent_session_id, runtime_id=runtime_id,
@@ -853,7 +884,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             event_type=evt.get("type", "") or "",
             account=_resolved_account, user_id=0,
             repo_gitcode_token="",  # D101: 行值退役恒空，claim 现取
-            env_extra=json.dumps(env_extra), skill_files="{}", server_url="", issue_session_id="",
+            env_extra=_env_sealed, skill_files="{}", server_url="", issue_session_id="",
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",

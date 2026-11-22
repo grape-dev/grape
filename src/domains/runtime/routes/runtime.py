@@ -2385,6 +2385,17 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
     # ② 查最近 200 条消息（必须取"最新"而非"最早"，否则长任务接管时看到的
     #    是几小时前的任务开头，而不是当前进展。先按 seq DESC 取，再反转为正序阅读）
     messages = service.list_task_messages_recent(task_id, limit=200)
+    # Issue #3770（QA 审查 Optional）：env_extra 不再原样返回——信封行返回的是密文
+    # （接管重建实际已失效），明文行则把凭据直接给到 API。改走 decrypt_env_extra：
+    # 两种形态都还原为明文 JSON 串（类型不变，契约无感），顺带对存量明文行就地自愈。
+    try:
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        _env_ctx = decrypt_env_extra(env_extra, task_id=task_id)
+        env_extra = json.dumps(_env_ctx if isinstance(_env_ctx, dict) else {},
+                               ensure_ascii=False)
+    except Exception as _env_e:
+        log.warning(f"takeover_context: env_extra 解密失败，返回空对象 task={task_id}: {_env_e}")
+        env_extra = "{}"
     return {
         "task_id": task_id,
         "status": status,
