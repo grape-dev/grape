@@ -17,8 +17,13 @@ import time
 from src.kernel.config import log
 from src.kernel.ttl_cache import TTLCache
 
+# 数值来源（复审 B2）：冷路径每次要打 2 次上游（/user 取平台登录名 + 组织清单），
+# 2026-11-23 实测自建 worker → gitlab.com 单次 0.72–1.74s，合计 2–4s；1800s 缓存把
+# 建仓/查重链的重复成本摊薄到可忽略，同时把「组织成员变化」的最长可见延迟限定在
+# 30 分钟内（组织成员变更是低频运维动作，30 分钟内可见可接受）。
 DEFAULT_TTL_SECONDS = 1800
-_TTL_SOURCE_TTL = 30.0          # 配置源自身的短缓存，避免每请求打一次 DB meta
+# 30s：配置源（DB meta）自身的短缓存，避免每个请求打一次 DB。
+_TTL_SOURCE_TTL = 30.0
 _ttl_memo: tuple[float, int] = (0.0, DEFAULT_TTL_SECONDS)
 
 

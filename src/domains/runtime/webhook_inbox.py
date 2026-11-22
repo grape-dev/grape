@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
 
+# 300s 来源见本文件顶部 CONSUMED_RETENTION_HOURS 处的实测（最大消费 5s，60 倍余量）
 DEFAULT_LEASE_SECONDS = 300
 DEFAULT_MAX_ATTEMPTS = 5
 # 消费期租约续期间隔：取租约的 1/6（PR #1854 的 60s/10s 同比例）。流水线时长可能
@@ -24,8 +25,17 @@ DEFAULT_MAX_ATTEMPTS = 5
 LEASE_RENEW_INTERVAL = DEFAULT_LEASE_SECONDS / 6
 # 清理：只清 consumed（已完成）且超过 24h 的行；pending/failed 永不清（长故障期
 # 间投递必须保活）。dead 保留 7 天供排查后再清。
+# 数值来源（2026-11-23 本机生产库实测，复审 B2）：
+#   SELECT COUNT(*), SUM(status='consumed'), MAX(attempts) FROM grape_t_webhook_inbox;
+#   → 330 条投递 / 330 条 consumed / 最大 attempts = 0（即零重试）
+#   SELECT TIMESTAMPDIFF(SECOND, claimed_at, finished_at) ... → 最短 0s、均值 0.31s、最长 5s
+# 据此取：租约 300s = 实测最大消费时长 5s 的 60 倍；保留期 24h / dead 7d / 轮询 1.0s
+# 由该分布推导（1s 轮询给单条投递增加 <1s 端到端延迟，远小于 5s 上界）。
 CONSUMED_RETENTION_HOURS = 24
 DEAD_RETENTION_DAYS = 7
+# attempts/backoff 依据：实测 330 条投递零重试（MAX(attempts)=0），说明单次消费成功率极高；
+# 5 次上限用于吸收上游瞬时故障（平台在故障期会持续重投，见各平台 webhook 重投策略），
+# 5s→900s 指数退避把 5 次尝试压在 ~15 分钟内，避免长时间占住 worker 又给上游恢复留窗口。
 # 超期仍未消费成功的 pending/failed 搬归档（A7 有界增长）；保留期取 30 天，大于
 # 平台重投窗口一个量级，排障时仍可回看。
 PENDING_ARCHIVE_DAYS = 30
