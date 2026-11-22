@@ -15,6 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
+#: PAT「即将过期」提前量（天）。来源=业务口径，不是一个测量值：
+#: 迭代节奏为两周一次，14 天 = 正好覆盖一个轮换窗口，用户看到提醒后能在
+#: 下一次迭代开始前完成令牌轮换而不中断流水线；对 90 天有效期的 PAT，
+#: 提醒落在剩余 ~15.6% 处（噪声与提前量的折中）。口径登记见
+#: docs/issue-3580/measurements.md「常量来源 · PAT 提醒提前量」。
 SOON_DAYS = 14
 
 STATE_NONE = "none"

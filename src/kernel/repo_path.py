@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import re
 
+#: 单段（owner 或 repo）长度上限。来源=平台厂商文档：GitHub 仓库名上限 100 字符；
+#: GitLab/Gitee/GitCode 的同类限制不低于该值但不公开承诺更宽，故取四平台**最严**
+#: 的 100 作为通用上限（宁可拒掉超长名，也不向上游送出必然失败的路径）。
+#: 见 docs/issue-3580/measurements.md「常量来源 · 仓库路径长度上限」。
 MAX_SEGMENT_CHARS = 100
+#: 完整路径（owner/repo，含子组斜杠）长度上限。来源=平台厂商文档：GitLab 对项目
+#: 完整路径的校验上限是 255 字符；其余平台的 owner/repo 合计远低于该量级，
+#: 故 255 是四平台交集内的上界。超出即视为非法输入（RepoPathError）。
 MAX_PATH_CHARS = 255
 # 各平台（gitlab/github/gitee/gitcode）自身就禁止出现在 owner/repo 段里的字符：
 # 由它们决定 URL 与文件系统语义，出现即视为非法输入。

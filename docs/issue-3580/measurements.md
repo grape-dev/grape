@@ -85,3 +85,25 @@ PY
 
 - `push_template_to_repo` 大仓（>100MB）耗时分布：当前环境无大仓样本；
 - `A3` 50tps 压测、`A4` `/check-name` p95：需压测环境。
+## 5. 常量来源 · 平台/业务口径（非本地实测）
+
+以下常量无法在本机测量，来源为平台厂商文档或业务约定，登记在此供复核。
+
+| 常量 | 位置 | 值 | 来源 |
+|---|---|---|---|
+| `SOON_DAYS` | `src/domains/mgmt/user/credential_expiry.py` | 14 天 | 业务口径：迭代两周一次，14 天覆盖一个轮换窗口；对 90 天有效期 PAT 相当于剩余约 15.6% 时提醒 |
+| `MAX_SEGMENT_CHARS` | `src/kernel/repo_path.py` | 100 | 厂商文档：GitHub 仓库名上限 100 字符；其余在册平台不低于该量级，取四平台最严值 |
+| `MAX_PATH_CHARS` | `src/kernel/repo_path.py` | 255 | 厂商文档：GitLab 项目完整路径校验上限 255 字符；其余平台合计远低于此，取交集上界 |
+
+复核方式（只读，不改代码）：
+
+```bash
+# 1) 平台侧真实验证：超长名应被平台拒绝（示例为 GitLab，需维护者令牌）
+TOKEN=***; HOST=gitlab.example.com
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://$HOST/api/v4/projects" \
+  -H "PRIVATE-TOKEN: $TOKEN" --data "name=$(python3 -c 'print("a"*101)')"
+# 期望：400（name/path 超限），而非 201
+
+# 2) 业务口径确认：提醒提前量是否仍按"一个迭代"（14 天）
+grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
+```
