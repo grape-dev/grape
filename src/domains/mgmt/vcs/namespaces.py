@@ -60,7 +60,15 @@ _CACHE = TTLCache("vcs_create_targets", _resolve_ttl)
 
 
 def _collect(provider: str, api_token: str) -> dict:
-    """实时拉取：个人登录名 + 可建仓空间清单（上游往返 3~4s）。"""
+    """实时拉取：个人登录名 + 可建仓空间清单（上游往返 3~4s）。
+
+    空间清单以「创建项目组织页」同源的 user-namespaces 注册表兜底
+    （2026-11-22）：适配器 list_create_spaces 只有 gitee/gitlab 实现，
+    github/gitcode 在基类里恒返回 []，导致同一用户在「新建项目」能看到组织、
+    在「一键创建」下拉里却只有个人空间。注册表本身四平台齐备
+    （github /user/memberships/orgs、gitcode /users/orgs?admin=true），
+    故：适配器有数据用它，为空则回落注册表——gitee/gitlab 行为不变。
+    """
     from src.domains.mgmt.vcs import create_provider
 
     p = create_provider(provider)
@@ -74,6 +82,18 @@ def _collect(provider: str, api_token: str) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning(f"create-targets: 列空间失败 ({provider}): {e}")
         spaces = []
+    if not spaces and api_token:
+        try:
+            from src.domains.mgmt.user import namespaces as _user_ns
+            refs = _user_ns.list_namespaces(provider, api_token, {"login": login})
+            spaces = [{"path": str(ref.path), "name": str(ref.name or ref.path),
+                       "kind": str(ref.kind)} for ref in refs if str(ref.path or "")]
+        except Exception as e:  # noqa: BLE001 - 兜底失败不阻断个人空间建仓
+            log.warning(f"create-targets: 组织清单兜底失败 ({provider}): {e}")
+    # 个人空间由前端固定渲染「个人账号（Personal）」一行；注册表会把个人
+    # namespace 也列进来（path == login），这里剔除以免下拉出现重复项。
+    if login:
+        spaces = [s for s in spaces if str(s.get("path") or "") != login]
     return {"provider": provider, "personal_login": login, "spaces": spaces}
 
 
