@@ -828,10 +828,46 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
         # D43: push 统一走 _run_git（可被测试 mock），超时 180s
-        _run_git(["push", "--force", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+        # 2026-11-22（B + A 双层）：
+        #   B：先走**普通 push**（空仓库/可快进 → 直接落在 main，不再覆盖平台初始提交）
+        #   A：普通 push 不行（远端已有提交）才 --force；若平台拒绝受保护分支
+        #      强推，则退到一次性特性分支，绝不中断建仓。
+        pushed_to = "main"
+        try:
+            _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+        except RuntimeError as _e1:
+            if _is_protected_branch_error(str(_e1)):
+                pushed_to = _push_init_branch(workdir)
+            else:
+                try:
+                    _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
+                             workdir, timeout=180)
+                except RuntimeError as _e2:
+                    if not _is_protected_branch_error(str(_e2)):
+                        raise
+                    pushed_to = _push_init_branch(workdir)
+        if pushed_to != "main":
+            log.warning(
+                f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
+                f"模板代码已改推分支 '{pushed_to}'；请由人工/流水线合入默认分支")
         return True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+def _is_protected_branch_error(msg: str) -> bool:
+    """平台拒绝「向受保护默认分支强推」的错误文本判定（GitLab/GitHub/Gitee 口径）。"""
+    return any(k in (msg or "") for k in (
+        "protected branch", "protected_branch",
+        "pre-receive hook declined", "not allowed to force push"))
+
+
+def _push_init_branch(workdir: str) -> str:
+    """受保护分支兜底：把模板代码推到一次性特性分支，返回分支名（A 方案）。"""
+    import time as _time
+    branch = f"feat/init-from-template-{_time.strftime('%Y%m%d%H%M%S')}"
+    _run_git(["push", "-u", "origin", f"HEAD:{branch}"], workdir, timeout=180)
+    return branch
+
 
 def _run_git_has_origin(workdir: str) -> bool:
     try:

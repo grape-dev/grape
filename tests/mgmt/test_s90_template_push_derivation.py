@@ -75,3 +75,62 @@ def test_s90_tarball_dispatch_github_source(monkeypatch):
         "me", "tgt", "user_tok", bot_token="", provider="gitcode")
     assert ok is True
     assert dl and dl[0] == "https://api.github.com/repos/o/r/tarball"
+
+
+def _push_with_git(monkeypatch, run_git, provider="gitlab"):
+    from src.domains.mgmt.user import repo_manager as rm
+    monkeypatch.setattr(rm, "_run_git", run_git)
+    monkeypatch.setattr(rm, "_run_git_has_origin", lambda w: False)
+    monkeypatch.setattr(rm, "_git_has_changes", lambda w: True)
+    monkeypatch.setattr(rm, "_download_gitcode_tarball", lambda *a, **k: None)
+    monkeypatch.setattr(rm, "_download_and_extract_tarball", lambda *a, **k: None)
+    tpl = {"id": "t", "source": "git", "source_repo": "o/src",
+           "clone_url": "https://example.com/o/src.git"}
+    return rm.push_template_to_repo(tpl, "me", "tgt", "tok", provider=provider)
+
+
+def test_empty_repo_uses_plain_push_to_main(monkeypatch):
+    """B 方案：空仓库（无初始 commit）普通 push 即可落在 main，不出现 --force。"""
+    calls = []
+
+    def _run_git(args, *a, **k):
+        calls.append(list(args))
+        return ""
+
+    assert _push_with_git(monkeypatch, _run_git, provider="gitlab") is True
+    pushes = [c for c in calls if c and c[0] == "push"]
+    assert len(pushes) == 1, f"普通 push 成功时不应再试其它路径: {pushes}"
+    assert pushes[0][:3] == ["push", "-u", "origin"] and "HEAD:main" in pushes[0]
+    assert "--force" not in pushes[0]
+
+
+def test_existing_commit_escalates_to_force_then_protected_fallback(monkeypatch):
+    """远端已有提交：普通 push 失败 → 试 --force → 被保护分支拒绝 → 退到特性分支。"""
+    calls = []
+
+    def _run_git(args, *a, **k):
+        calls.append(list(args))
+        if args[:2] == ["push", "-u"] and "HEAD:main" in args:
+            raise RuntimeError("! [rejected]        main -> main (non-fast-forward)")
+        if args[:2] == ["push", "--force"]:
+            raise RuntimeError(
+                "remote: GitLab: You are not allowed to force push code to a protected branch on this project.\n"
+                " ! [remote rejected] HEAD -> main (pre-receive hook declined)")
+        return ""
+
+    assert _push_with_git(monkeypatch, _run_git) is True
+    pushes = [c for c in calls if c and c[0] == "push"]
+    assert [p[:2] for p in pushes] == [["push", "-u"], ["push", "--force"], ["push", "-u"]], pushes
+    assert any(x.startswith("HEAD:feat/init-from-template-") for x in pushes[2]), pushes[2]
+
+
+def test_other_push_errors_still_raise(monkeypatch):
+    """非保护分支类错误（鉴权失败）保持原样抛出，不被兜底吞掉。"""
+    def _run_git(args, *a, **k):
+        if args and args[0] == "push":
+            raise RuntimeError("fatal: Authentication failed for 'https://gitlab.com/me/tgt.git/'")
+        return ""
+
+    with pytest.raises(RuntimeError) as ei:
+        _push_with_git(monkeypatch, _run_git)
+    assert "Authentication failed" in str(ei.value)
