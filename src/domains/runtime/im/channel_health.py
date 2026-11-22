@@ -433,6 +433,10 @@ class ChannelHealthTracker:
         """记一次暂停：状态 → 连续计数 → 阈值判定 → 指标/告警/持久化。"""
         now = self._clock()
         state = self._state(installation_id, channel_type)
+        # 登记在 `_should_alert`（内部可能 `_refresh_peers`）之前：否则首次暂停时本安装
+        # 还没进 `_local_ids`，peer 重读会用 store 旧行新建的对象替换掉本次正在修改的
+        # 状态对象 → 库 paused=1 而内存 paused=0（PR #1983 R2 复审 Critical）。
+        self._mark_local(state.installation_id)
         repeat = bool(state.last_pause_at
                       and now - state.last_pause_at <= PAUSE_REPEAT_WINDOW_SECONDS)
         state.consecutive_pauses = (state.consecutive_pauses + 1) if repeat else 1
@@ -547,13 +551,24 @@ class ChannelHealthTracker:
 
     # ---------------- 内部
 
-    def _refresh_peers(self, now: float) -> None:
+    def _mark_local(self, installation_id: str) -> None:
+        """登记「本进程写侧」安装：peer 刷新不得覆盖其内存态（PR #1983 R2 复审）。
+
+        写侧真源 = 内存：`record_pause` 等入口在**修改前**登记，`_refresh_peers`
+        就不会把这台安装正在写入的状态对象换成 store 里读出来的新对象。
+        """
+        key = str(installation_id or "")
+        if key:
+            self._local_ids.add(key)
+
+    def _refresh_peers(self, now: float, keep: str = "") -> None:
         """按短 TTL 重读 store 里的 peer 状态（PR #1983 审查 Required）。
 
         多主控/跨进程下 `_load()` 只在首次执行：别的实例之后写入的暂停行
         内存快照看不到，「全实例均暂停」规则会漏告警。判该规则前按
         `PEER_STATE_REFRESH_SECONDS` 重读 store；本进程写过的安装
-        （`_local_ids`）以内存为准，不被 store 旧值覆盖。
+        （`_local_ids`）与调用栈上正在写入的安装（`keep`，PR #1983 R2 复审
+        Critical）以内存为准，不被 store 旧值覆盖。
         """
         if self._store is None:
             return
@@ -565,8 +580,9 @@ class ChannelHealthTracker:
         except Exception as e:
             log.warning("[im-channel-health] peer state refresh failed: %s", e)
             return
+        keep = str(keep or "")
         for inst, peer in peers.items():
-            if inst in self._local_ids:
+            if inst in self._local_ids or inst == keep:
                 continue
             self._states[inst] = peer
 
@@ -575,7 +591,8 @@ class ChannelHealthTracker:
         if state.consecutive_pauses >= PAUSE_ALERT_CONSECUTIVE:
             return True, (f"consecutive_pauses={state.consecutive_pauses} "
                           f"within={int(PAUSE_REPEAT_WINDOW_SECONDS)}s")
-        self._refresh_peers(now)      # peer 状态短 TTL 重读（多主控漏告警修复）
+        # peer 状态短 TTL 重读（多主控漏告警修复）；跳过本次正在写入的安装
+        self._refresh_peers(now, keep=state.installation_id)
         population = self._population(channel_type)
         if len(population) >= 2:
             recent = 0
