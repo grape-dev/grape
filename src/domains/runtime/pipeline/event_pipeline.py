@@ -5559,7 +5559,9 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         if _card is not None and _card.api_auth == "query_token":
             _path = f"/repos/{_c.owner}/{_c.repo}/pulls/{pr_number}/comments"
         elif _card is not None and _card.dialect == "gitlab":
-            _path = f"/projects/{_c.owner}%2F{_c.repo}/merge_requests/{pr_number}/notes"
+            # 子组仓库（grp/sub/proj）必须整体编码：半编码会拼出
+            # /projects/grp%2Fsub/proj → 404（回帖被吞成 warning）。复用客户端同一实现。
+            _path = (f"/projects/{_c._project_path}/merge_requests/{pr_number}/notes")
         else:
             _path = f"/repos/{_c.owner}/{_c.repo}/issues/{pr_number}/comments"
         _resp = _c._request("POST", _path, {"body": _comment})

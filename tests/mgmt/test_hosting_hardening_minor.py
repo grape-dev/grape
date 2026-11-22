@@ -71,3 +71,8 @@ def test_repair_host_reports_query_failure_instead_of_creating(monkeypatch):
     src = inspect.getsource(repos_mod)
     assert "query_webhook" in src
     assert "未重复创建" in src
+
+@pytest.mark.parametrize("msg", ["port 1409 refused", "commit 44229f", "id=4220"])
+def test_status_code_substrings_are_not_duplicates(msg):
+    """上游错误体里的数字不能被当成 409/422 重名信号。"""
+    assert _is_duplicate_repo_error(msg) is False

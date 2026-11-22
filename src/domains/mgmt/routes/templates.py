@@ -451,9 +451,14 @@ def _is_duplicate_repo_error(msg: str) -> bool:
     "already exists"，于是 GitLab 的重名被当成上游故障 → 用户看到 502 而不是
     "仓库已存在，正在复用"。
     """
+    import re as _re
+
     text = (msg or "").lower()
+    # 状态码必须成词：裸子串会把端口号/commit 前缀/id 里的 409、422 误判成重名
+    # （上游错误体常含 "1409" 之类），边界用 (?!\d) + (?<!\d)。
+    if _re.search(r"(?<!\d)(409|422)(?!\d)", text):
+        return True
     return any(k in text for k in (
-        "409", "422",
         "already exists", "already been taken", "has already been taken",
         "same name", "path already", "已存在", "已经存在", "重名",
     ))
