@@ -203,6 +203,15 @@ def test_heal_update_is_guarded_and_idempotent():
     assert heal_env_extra_plaintext_row(tid, sealed) is False, "已加密行不得被二次覆盖"
 
 
+def test_empty_object_plaintext_row_is_healed(outcomes):
+    """验收 SQL 口径是「非空且非 enc:v1:」——`{}` 也算明文行，必须收敛为信封。"""
+    tid = _insert_plaintext_row("{}")
+    task = service.get_task(tid)
+    assert task["env_extra"] == {}
+    assert _raw_env_extra(tid).startswith(ENVELOPE_PREFIX)
+    assert outcomes == ["healed"]
+
+
 def test_heal_failure_reports_and_keeps_row(monkeypatch, outcomes):
     plain = json.dumps({"SECRET_AK": "keep-3770"})
     tid = _insert_plaintext_row(plain)
@@ -296,6 +305,7 @@ def test_backfill_covers_non_empty_non_envelope_rows():
 def test_backfill_keeps_original_value_on_failure(monkeypatch, outcomes):
     logs = _Capture()
     monkeypatch.setattr(sec, "log", logs)
+    monkeypatch.setattr(service, "log", logs)   # 迁移告警从 service 侧发出
     bad = json.dumps({"SECRET_AK": "boom-3770"})
     bad_id = _insert_plaintext_row(bad)
     good_id = _insert_plaintext_row(json.dumps({"SECRET_AK": "ok-3770"}))
@@ -326,7 +336,9 @@ def test_backfill_registered_and_wraps_impl():
     assert "202611220003" in migs
     assert migs["202611220003"].kind == "backfill"
     assert migs["202611220003"].name == "issue2423-env-extra-encrypt-backfill"
-    assert "202611130001" not in migs
+    # 旧告警文案指向的 202611130001 是无关迁移（autopilot 修复）——按它执行「跑了也没用」
+    assert migs["202611130001"].name != "issue2423-env-extra-encrypt-backfill"
+    assert "autopilot" in migs["202611130001"].name
 
 
 # ---------- 指标 ----------

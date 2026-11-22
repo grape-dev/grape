@@ -688,6 +688,25 @@ NO_PROGRESS_SCAN_FAILURES = Counter(
 )
 
 
+# ===== env_extra 存量明文行（Issue #3770）=====
+# 读侧/迁移命中的存量明文凭据行按 outcome 计数：healed（已就地自愈）、heal_failed（自愈失败或
+# 不可自愈）、unparseable（坏值）、write_refused（写入侧加密失败、拒绝明文回落）。
+# 与告警节流（env_extra_security：(host, 行类型) 每小时 ≤1 条）配对——告警被节流时计数仍增长，
+# 因此「清零后不再增长」可以直接当收敛判据。
+
+ENV_EXTRA_PLAINTEXT_ROWS_METRIC = "grape_env_extra_plaintext_rows_total"
+
+ENV_EXTRA_PLAINTEXT_OUTCOMES = ("healed", "heal_failed", "unparseable", "write_refused")
+
+ENV_EXTRA_PLAINTEXT_ROWS = Counter(
+    ENV_EXTRA_PLAINTEXT_ROWS_METRIC,
+    "agent_tasks.env_extra 存量明文行事件：healed（就地自愈成功）/ heal_failed"
+    "（自愈失败或不可自愈）/ unparseable（坏值）/ write_refused（写侧拒绝明文回落）。",
+    ["outcome"],
+    registry=registry,
+)
+
+
 def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     """标签探活失败计数（`/api/runtime/runtime-tags-probe/signal` 的承接落点）。
 
@@ -704,6 +723,12 @@ def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
 def record_no_progress_scan_failure():
     """记录一次 no_progress 扫描失败（异常类型进日志，不进指标标签防高基数）。"""
     NO_PROGRESS_SCAN_FAILURES.inc()
+def record_env_extra_plaintext_row(outcome: str = "heal_failed"):
+    """env_extra 明文行计数（未知 outcome 归 unknown：不丢数、不加高基数标签）。"""
+    o = (outcome or "").strip().lower()
+    if o not in ENV_EXTRA_PLAINTEXT_OUTCOMES:
+        o = "unknown"
+    ENV_EXTRA_PLAINTEXT_ROWS.labels(outcome=o).inc()
 
 
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====

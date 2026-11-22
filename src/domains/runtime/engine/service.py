@@ -983,24 +983,37 @@ def _encrypt_env_extra_for_write(env: dict) -> str:
 
 
 def _fn_migrate_env_extra_encryption() -> None:
-    """backfill（#2423 移植）：存量 env_extra 明文 JSON 行批量加密（幂等，分批 1000 行）。
+    """backfill（#2423 移植；口径按 #3770 修正）：存量 env_extra 明文行批量加密（幂等，分批 1000 行）。
 
     Issue #2423 C3：enqueue_task 曾把凭据明文写入 agent_tasks.env_extra。新写入路径
-    已改 enc:v1 信封；本迁移把存量明文行（LIKE '{%'）逐行加密。读取兼容：
-    decrypt_env_extra 对存量明文降级解析并告警——即使迁移单批失败跳过，
-    读取不中断（幂等续跑收敛）。
+    已改 enc:v1 信封；本迁移把存量明文行逐行加密。
+
+    Issue #3770 修正两处：
+    - 选行口径改为「非空且非 `enc:v1:`」——旧口径 `LIKE '{%'` 会漏掉前导空格等脏值，
+      与验收 SQL（`env_extra<>'' AND env_extra NOT LIKE 'enc:v1:%'`）不一致；
+    - 失败行策略显式化：加密失败**保留原值**（旧实现置 NULL 会静默丢凭据）+ 计数 + 告警行 id，
+      留待人工介入；并用 keyset 分页（`id > last_id ORDER BY id`）保证失败行不会被本轮重复选中
+      （否则「保留原值」会让批次循环永远选到同一批行）。
+
+    读取兼容不依赖本迁移：decrypt_env_extra 对存量明文就地自愈/降级解析并节流告警。
     """
     import json as _json
 
-    from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.engine.env_extra_security import encrypt_env_extra
+    from src.kernel.owner_db import db_pair
+    from src.domains.runtime.engine.env_extra_security import (
+        encrypt_env_extra, record_env_extra_plaintext)
+    db, db_lock = db_pair("runtime")
     done, batches, failures = 0, 0, 0
+    failed_ids: list[str] = []
+    last_id = ""
     while True:
         with db_lock:
             c = db.cursor()
             c.execute(
                 "SELECT id, env_extra FROM agent_tasks "
-                "WHERE env_extra IS NOT NULL AND env_extra LIKE '{%' LIMIT 1000")
+                "WHERE env_extra IS NOT NULL AND env_extra<>'' "
+                "AND env_extra NOT LIKE 'enc:v1:%' AND id > ? ORDER BY id LIMIT 1000",
+                (last_id,))
             rows = c.fetchall()
             if not rows:
                 break
@@ -1008,18 +1021,26 @@ def _fn_migrate_env_extra_encryption() -> None:
                 try:
                     env = _json.loads(raw)
                     if not isinstance(env, dict):
-                        continue
+                        raise ValueError("env_extra 不是 JSON 对象")
                     c.execute("UPDATE agent_tasks SET env_extra=? WHERE id=?",
                               (encrypt_env_extra(env), row_id))
                     done += 1
+                    record_env_extra_plaintext("healed")
                 except Exception:
+                    # #3770：保留原值（不置 NULL）+ 计数 + 告警；本轮不再选中该行
                     failures += 1
-                    c.execute("UPDATE agent_tasks SET env_extra=NULL WHERE id=?", (row_id,))
+                    record_env_extra_plaintext("heal_failed")
+                    if len(failed_ids) < 20:
+                        failed_ids.append(str(row_id))
             db.commit()
             batches += 1
+            last_id = str(rows[-1][0])
     if done or failures:
-        log.info(f"[2423-migrate] env_extra encryption backfill: encrypted={done} "
-                 f"cleared={failures} batches={batches}")
+        log.info(f"[3770-migrate] env_extra encryption backfill: encrypted={done} "
+                 f"kept_failed={failures} batches={batches}")
+    if failures:
+        log.warning(f"[3770-migrate] env_extra 加密失败 {failures} 行，已保留原值（未置 NULL）: "
+                    f"rows={failed_ids} —— 需人工介入（密钥/脏值），修好后重跑 202611220003")
 
 
 def _collect_server_env(user_id, account, agent_type: str = ""):
@@ -2415,10 +2436,12 @@ def get_task(task_id) -> dict | None:
     _t = dict(zip(_cols + ["sandbox_provider", "runtime_type", "runtime_info", "runtime_name"], row))
     # Issue #2423 M1-b（#2423 移植）：get_task 出口解密 env_extra（enc:v1 信封 → dict；
     # 兼容存量明文 JSON 由 decrypt_env_extra 降级处理并告警）。
+    # Issue #3770：带上 task_id → 明文行在这里**就地自愈**（加密回写，幂等），
+    # 自愈失败才节流告警 + 计数。解密在 db_lock 之外执行，不会与写事务嵌套。
     try:
         from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
         if isinstance(_t.get("env_extra"), str) and _t["env_extra"]:
-            _t["env_extra"] = decrypt_env_extra(_t["env_extra"])
+            _t["env_extra"] = decrypt_env_extra(_t["env_extra"], task_id=_t.get("id") or task_id)
     except Exception:
         pass
     return _t
@@ -6452,7 +6475,11 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                 _raw_env = row[3]
                 try:
                     from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
-                    env = decrypt_env_extra(_raw_env) if _raw_env else {}
+                    # #3770：这里不自愈（plaintext_policy="report"）——本函数在下面会以加密态
+                    # 整行回写，嵌套写反而把 open 事务/owner 连接搞得更复杂；明文行按
+                    # (host, 行类型) 节流计数 + 告警，由本次加密回写或读侧自愈收敛。
+                    env = (decrypt_env_extra(_raw_env, task_id=task_id, plaintext_policy="report")
+                           if _raw_env else {})
                 except Exception as _env_e:
                     log.error(f"sync_task_session_token: env_extra 解析失败 task={task_id}: {_env_e}")
                     env = {}
@@ -6487,12 +6514,28 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                     session_key=task_id, repo_key=repo_key,
                     agent_type=agent_type, user_id=user_id, commit=False)
                 env["GRAPE_SESSION_TOKEN"] = new_token
-                # 注意：这里沿用明文回写（启动迁移 _fn_migrate_env_extra_encryption 会
-                # 重新加密）。改信封属于 #2423 的独立收口，不在本次数据丢失修复范围内——
-                # 但绝不因为格式问题丢掉任何变量。
+                # Issue #3770：回写必须走 enc:v1 信封——明文回写（旧实现的 json.dumps）
+                # 正是「迁移跑过后重启仍持续再生明文行」的根因（每次 token 轮换新增一条 C3 行）。
+                # 加密失败即任务失败（fail-closed）：既不写明文、也不回写半截 env。
+                try:
+                    from src.domains.runtime.engine.env_extra_security import (
+                        record_env_extra_write_refused)
+                    _sealed_env = _encrypt_env_extra_for_write(env)
+                except Exception as _enc_e:
+                    try:
+                        record_env_extra_write_refused()
+                    except Exception:
+                        pass
+                    try:
+                        _rt_db.rollback()
+                    except Exception:
+                        pass
+                    log.error("sync_task_session_token: env_extra 加密失败，拒绝明文回写并判定任务失败 "
+                              f"task={task_id}: {_enc_e}")
+                    return ""
                 c.execute(
                     "UPDATE agent_tasks SET env_extra=? WHERE id=?",
-                    (json.dumps(env, ensure_ascii=False), task_id),
+                    (_sealed_env, task_id),
                 )
                 _rt_db.commit()
                 return new_token
