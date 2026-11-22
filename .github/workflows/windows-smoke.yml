@@ -302,3 +302,12 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3699_trace_relay_noise.py -v
+      - name: A2A target scene work_branch validation tests (issue #3758)
+        # Issue #3758 QA 审查修复（Required）：work_branch 存在性校验回退回归用例
+        # 此前未接入 linux-backend 门禁（先例 #2133/#2245/#3167/#3490/#3699），
+        # #1841 曾静默失效，重构可再次打破而无人发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_1753_handoff_target_branch.py \
+            tests/runtime/test_issue_329_cross_pipeline.py -v
