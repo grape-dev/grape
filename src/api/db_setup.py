@@ -11876,3 +11876,263 @@ register_migration(
     domains=("mgmt",),
     post_check=_post_external_identities_relation,
 )
+
+# ============================================================================
+# Issue #3740：bot 凭据回填（managed_repos 历史列 → grape_t_repo_credentials）
+#
+# 根因背景：rc（cred_type='bot'）在生产的 gitcode/github 侧**从未被回填**——此前
+# 只注册了 gitee/gitlab 四列的回填迁移（202611150004），而 gitcode/github 的
+# bot_*_token 列没有回填入口，于是 RepoBotToken 的 rc 查询恒 miss、100% 走 legacy
+# 列回落（8,872 条 WARNING/h）。
+#
+# 执行权责：生产执行由 sre 环节承接（脚本 + 盖章 + 验证），本模块提供三个幂等原语，
+# 不注册自动迁移——回填写生产数据属高风险动作（写错可致全站 token 解析失败），
+# 必须走「先 dry-run → 备份 → apply → verify → stamp」的受控流程。
+# ============================================================================
+
+#: 回填盖章版本号（未在源码注册 register_migration：由脚本显式盖章，幂等；
+#: 与 `grape_t_schema_migrations` 中现有号无冲突，取当日最大号 + 1）
+REPO_BOT_BACKFILL_VERSION = "202611220001"
+REPO_BOT_BACKFILL_NAME = "backfill-repo-bot-token-columns-to-rc"
+
+#: bot 凭据列（cred_type='bot'）：四个平台一一对应
+_REPO_BOT_TOKEN_COLS = ("bot_gitcode_token", "bot_github_token",
+                        "bot_gitee_token", "bot_gitlab_token")
+
+#: 全部平台凭据列（bot + webhook，供 `backfill_repo_credentials_from_columns` 用）
+_REPO_CRED_COLS = ("bot_gitcode_token", "gitcode_webhook_token",
+                   "bot_github_token", "github_webhook_token",
+                   "bot_gitee_token", "gitee_webhook_token",
+                   "bot_gitlab_token", "gitlab_webhook_token")
+
+
+def _managed_repos_columns(c) -> "set[str]":
+    """managed_repos 列集合探测（sqlite PRAGMA / MySQL information_schema 双方言）。
+
+    为什么不直接用 PRAGMA：三库 MySQL 拓扑下薄兼容游标不做 PRAGMA 方言翻译，
+    原样发给服务端即 1064，探列失败会被当成「无列」→ 回填静默零写入（Issue #2432
+    同族坑）。探不到一律按「无列」处理，调用方跳过该列并留痕。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+
+        is_mysql = bool(_is_mysql_backend())
+    except Exception:  # noqa: BLE001 - 探不到后端就按 sqlite 口径试 PRAGMA
+        is_mysql = False
+    if is_mysql:
+        try:
+            rows = c.execute(
+                "SELECT COLUMN_NAME FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='managed_repos'").fetchall()
+            return {r[0] for r in rows}
+        except Exception as e:  # noqa: BLE001 - 探列失败按无列处理（调用方记 warning）
+            log.warning(f"managed_repos column probe failed: {e}")
+            return set()
+    try:
+        return {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"managed_repos column probe failed: {e}")
+        return set()
+
+
+def backfill_repo_credentials_from_columns() -> int:
+    """managed_repos 平台凭据列 → grape_t_repo_credentials 行（幂等：只填空）。
+
+    D99 归一映射：``bot_*_token`` → ``cred_type='bot'``、``*_webhook_token`` →
+    ``'webhook'``；行 id = UUID 主键首写。值按**原样拷贝**（列值与 rc 值同属 N3
+    通道加密形态，读侧解密口径一致；历史明文由读侧「明文兼容」覆盖）。
+
+    幂等：``INSERT OR IGNORE``（UNIQUE(repo_key, cred_type) 冲突即忽略），重复执行
+    零写入。列存在性守卫（双方言探测）：冷启动库无 gitee/gitlab 列时跳过零写入。
+
+    （Issue #3740：本函数在历史上的 squash 合并中丢失，而 `tests/mgmt/
+    test_s80_repo_credentials.py`、`test_s82_dualwrite_removal.py`、
+    `test_uc41_rc_schema.py` 一直 import 它——缺失即三处 ERROR。按 b439764fd
+    原形恢复，并把列探测改为双方言，避免 MySQL 拓扑静默零写入。）
+    """
+    from src.kernel.id_gen import uuid7_str
+
+    n = 0
+    per_col: dict = {}
+    with db_lock:
+        c = db.cursor()
+        cols = _managed_repos_columns(c)
+        if not cols:
+            return 0
+        for col in _REPO_CRED_COLS:
+            if col not in cols:
+                per_col[col] = 0      # 冷启动库无此列（F4 后新库只留 gitcode/github）
+                continue
+            cred_type = "bot" if col.startswith("bot_") else "webhook"
+            rows = c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall()
+            k = 0
+            for repo_key, val in rows:
+                cur = c.execute(
+                    insight_mig.INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS,
+                    (uuid7_str(), repo_key, cred_type, val or ""))
+                k += int(getattr(cur, "rowcount", 0) or 0)
+            per_col[col] = k
+            n += k
+        db.commit()
+    if n:
+        log.info(f"grape_t_repo_credentials backfill from managed_repos columns: "
+                 f"{per_col} (rows filled={n})")
+    return n
+
+
+def _rc_bot_repo_keys() -> "set[str]":
+    """rc 中已有非空 bot 行的仓库集合。
+
+    走 insight 域公开读写口（凭据表归 insight），不在 api 层裸读外域表——跨域读
+    清单门禁（scripts/p4/scan_cross_domain_reads.py）按裸 SQL 记账，本函数因此
+    无新增读点；三库拓扑下由 insight public 的任意拓扑游标决定落哪台库。
+    """
+    try:
+        from src.domains.insight import public as _insight_public
+
+        rows = _insight_public.list_repo_credential_rows()
+    except Exception as e:  # noqa: BLE001 - 读失败按「无 rc 行」处理（回填只填空，最坏多插幂等行）
+        log.warning(f"rc bot rows read failed: {e}")
+        return set()
+    return {r[1] for r in rows if len(r) > 4 and r[2] == "bot" and (r[3] or "")}
+
+
+def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
+    """bot 列专用回填：managed_repos 的 ``bot_*_token`` 四列 → rc ``cred_type='bot'``。
+
+    与 gitee/gitlab 回填同款语义，但覆盖**全部平台**的 bot 列（gitcode/github 正是
+    本次生产 100% legacy 回落的来源），并补上：
+
+    - 值归一：列值可能为 N3 密文或历史明文 → ``_decrypt``（明文直通）→ ``_encrypt``
+      统一回填为密文（与写路径同构，读侧零特判）；单行解密失败 raw-copy 不阻断整档。
+    - 只填空：``INSERT OR IGNORE``，已有 rc 行（可能已轮换）绝不被列值覆盖。
+    - dry-run：默认只算计划（``filled`` 恒 0），供 sre 先看影响面再 apply。
+
+    返回 ``{dry_run, scanned, would_fill, filled, per_column, missing}``；
+    ``missing`` = 持有 legacy bot 值但没有 rc bot 行的仓库（回填后应为空）。
+    """
+    from src.kernel.id_gen import uuid7_str
+
+    report: dict = {
+        "dry_run": bool(dry_run),
+        "scanned": 0,          # legacy 非空 (repo, col) 条目数
+        "would_fill": 0,       # 计划写入的 rc 行数（按仓库去重）
+        "filled": 0,           # 实际写入行数（dry-run 恒 0）
+        "per_column": {},
+        "missing": [],
+    }
+    try:
+        from src.domains.mgmt.user.db import _decrypt_repo_secret, _encrypt_repo_secret
+    except Exception as e:  # noqa: BLE001 - 加解密不可用则不做归一，宁可不动生产数据
+        log.warning(f"bot backfill: crypto import failed, skip: {e}")
+        return report
+
+    missing: "list[str]" = []
+    seen_missing: set = set()
+    rc_bot = _rc_bot_repo_keys()
+    with db_lock:
+        c = db.cursor()
+        cols = _managed_repos_columns(c)
+        if not cols:
+            return report
+        for col in _REPO_BOT_TOKEN_COLS:
+            filled_col = 0
+            report["per_column"][col] = 0
+            if col not in cols:
+                continue      # 冷启动库无该平台的物理列（F4 终态）
+            for repo_key, val in c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall():
+                report["scanned"] += 1
+                if repo_key in rc_bot:
+                    continue  # 已有 rc bot 行 = 权威，回填不覆盖
+                first_seen = repo_key not in seen_missing
+                if first_seen:
+                    seen_missing.add(repo_key)
+                    missing.append(repo_key)
+                    # (repo_key, 'bot') 一行唯一：计划行数 = 缺口仓库数
+                    report["would_fill"] += 1
+                if dry_run or not first_seen:
+                    # dry-run 只算计划；同仓库第二个 bot 列无新行可写
+                    continue
+                try:
+                    _norm = _encrypt_repo_secret(_decrypt_repo_secret(val or ""))
+                except Exception as _de:  # noqa: BLE001
+                    # 单行解密失败不阻断整档：保留列值原样回填（读侧明文兼容可读）
+                    log.warning(f"bot backfill: decrypt failed for {repo_key}.{col}, "
+                                f"raw copy: {_de}")
+                    _norm = val or ""
+                cur = c.execute(insight_mig.INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS,
+                                (uuid7_str(), repo_key, "bot", _norm))
+                wrote = int(getattr(cur, "rowcount", 0) or 0)
+                filled_col += wrote
+                report["filled"] += wrote
+            report["per_column"][col] = filled_col
+        if not dry_run:
+            db.commit()
+        else:
+            db.rollback()     # 只读扫描：不留下任何隐性写
+    report["missing"] = missing
+    if report["filled"]:
+        log.info(f"bot credential backfill -> grape_t_repo_credentials: "
+                 f"{report['per_column']} (rows filled={report['filled']})")
+    return report
+
+
+def verify_repo_bot_credential_backfill() -> dict:
+    """回填验证报告：legacy bot 列与 rc bot 行的覆盖差（回落分支下线前置）。
+
+    返回 ``{legacy_repos, rc_bot_rows, missing, coverage, per_column}``：
+    - ``legacy_repos``：持有非空 legacy bot 列的仓库数（回填源规模）
+    - ``rc_bot_rows``：rc 中非空 bot 行数（回填目标现状）
+    - ``missing``：持有 legacy 值但 rc 无 bot 行的仓库（回填缺口）
+    - ``coverage``：``1 - len(missing)/legacy_repos``（无 legacy 值时记 1.0）
+
+    验收口径：回填后 ``missing`` 为空、``coverage == 1.0``；生产再叠加日志/审计观察
+    （``historical column fallback hit`` 归零、``repo_bot_hit_legacy_column`` 归零）。
+    """
+    report: dict = {"legacy_repos": 0, "rc_bot_rows": 0, "missing": [],
+                    "coverage": 1.0, "per_column": {}}
+    rc_bot = _rc_bot_repo_keys()
+    with db_lock:
+        c = db.cursor()
+        cols = _managed_repos_columns(c)
+        if not cols:
+            return report
+        report["rc_bot_rows"] = len(rc_bot)
+        legacy: set = set()
+        for col in _REPO_BOT_TOKEN_COLS:
+            if col not in cols:
+                report["per_column"][col] = 0
+                continue
+            keys = {r[0] for r in c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall()}
+            report["per_column"][col] = len(keys)
+            legacy |= keys
+        report["legacy_repos"] = len(legacy)
+        report["missing"] = sorted(legacy - rc_bot)
+    if report["legacy_repos"]:
+        report["coverage"] = round(
+            1.0 - len(report["missing"]) / float(report["legacy_repos"]), 4)
+    return report
+
+
+def stamp_repo_bot_credential_backfill() -> dict:
+    """回填盖章：把 ``REPO_BOT_BACKFILL_VERSION`` 写进 ``grape_t_schema_migrations``。
+
+    回落分支下线 checklist ①「回填迁移全量盖章」的凭证——没有台账行，后续没人能
+    证明「存量值确实进过 rc」，删分支就是拿全站 token 解析冒险。幂等：已存在同号
+    台账行时不重写（``already=True``），避免覆盖首次执行时间。
+    """
+    stamped_at = _now_iso()
+    with db_lock:
+        c = db.cursor()
+        existing = c.execute(
+            mgmt_mig.SELECT_GRAPE_T_SCHEMA_MIGRATIONS + " WHERE version=?",
+            (REPO_BOT_BACKFILL_VERSION,)).fetchone()
+        already = existing is not None
+        if not already:
+            c.execute(
+                mgmt_mig.UPSERT_GRAPE_T_SCHEMA_MIGRATIONS,
+                (REPO_BOT_BACKFILL_VERSION, REPO_BOT_BACKFILL_NAME, "backfill",
+                 stamped_at, 0, _fn_checksum(backfill_repo_bot_token_columns_to_rc)))
+        db.commit()
+    return {"version": REPO_BOT_BACKFILL_VERSION, "name": REPO_BOT_BACKFILL_NAME,
+            "stamped_at": stamped_at, "already": already}

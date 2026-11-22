@@ -227,6 +227,8 @@ def test_cli_dry_run_by_default(capsys):
     out = capsys.readouterr().out
     payload = json.loads(out[out.index("{"):]) if "{" in out else {}
     assert code == 0
-    assert payload.get("dry_run") is True
-    assert payload.get("filled") == 0
+    assert payload.get("mode") == "dry-run"
+    assert payload["backfill"]["dry_run"] is True
+    assert payload["backfill"]["filled"] == 0
+    assert rk in payload["backfill"]["missing"]
     assert _rc_rows(rk) == {}, "默认路径不得写库"
