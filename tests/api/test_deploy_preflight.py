@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "deploy_preflight.py"
 
@@ -121,3 +123,41 @@ def test_preflight_fails_when_contracts_registry_missing(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert "契约登记表" in r.stdout
     assert "contracts" in r.stdout
+
+
+def _seed_contracts(path: Path, *, omit: str | None = None) -> Path:
+    """构造齐全的 contracts/ 目录（可指定缺哪一个必需文件）。"""
+    path.mkdir(parents=True)
+    (path / "released").mkdir()
+    (path / "released" / "2.2.0.json").write_text("{}", encoding="utf-8")
+    for name in ("deprecated_endpoints.json", "deprecated_exemptions.json",
+                 "openapi_baseline.json", "required_operations.json"):
+        if name == omit:
+            continue
+        (path / name).write_text("{}", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("omitted", ["openapi_baseline.json", "required_operations.json"])
+def test_preflight_fails_when_completeness_gate_input_missing(tmp_path, omitted):
+    """缺完整性门禁输入（baseline / required_operations）也必须预检拦下。
+
+    这两件缺失时弃用登记表仍齐备，旧预检会 PASS，但 custom_openapi 的完整性
+    门禁照样 fail-fast → /openapi.json 仍 500（Issue #3756 审查 R1）。
+    """
+    db = _seed_db(tmp_path / "ok.db")
+    contracts = _seed_contracts(tmp_path / "contracts", omit=omitted)
+    r = _run(db, "mgmt", contracts_dir=contracts)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert omitted in r.stdout
+
+
+def test_preflight_passes_when_contracts_complete(tmp_path):
+    """打包清单内的必需文件齐备 + released 快照存在 → 契约项通过。"""
+    db = _seed_db(tmp_path / "ok.db")
+    contracts = _seed_contracts(tmp_path / "contracts")
+    r = _run(db, "mgmt", contracts_dir=contracts, json_out=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    check = next(c for c in json.loads(r.stdout)["checks"]
+                 if c["check"] == "contracts_registry")
+    assert check["ok"] is True, check

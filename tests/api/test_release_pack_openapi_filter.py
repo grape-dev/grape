@@ -11,6 +11,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
@@ -69,10 +71,17 @@ def test_assert_contracts_ready_passes_on_repo():
     rp.assert_contracts_ready(_REPO_ROOT)
 
 
+def test_contracts_required_files_share_single_source():
+    """打包与预检共用同一份必需文件清单（Issue #3756 审查 R1）。"""
+    from src.domains.contracts.registry_files import CONTRACTS_REQUIRED_FILES
+
+    assert rp.CONTRACTS_REQUIRED_FILES == CONTRACTS_REQUIRED_FILES
+    assert "contracts/openapi_baseline.json" in CONTRACTS_REQUIRED_FILES
+    assert "contracts/required_operations.json" in CONTRACTS_REQUIRED_FILES
+
+
 def test_assert_contracts_ready_fatal_when_registry_missing(tmp_path, capsys):
     """缺登记表 → 打包以 [FATAL] 失败（不得静默出包）。"""
-    import pytest
-
     with pytest.raises(SystemExit) as exc:
         rp.assert_contracts_ready(tmp_path)
     assert exc.value.code == 1
