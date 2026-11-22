@@ -173,6 +173,12 @@ PENDING_NO_SESSION_TIMEOUT_SECONDS = int(
 
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
+# Issue #3772：no_progress 扫描连续失败计数（成功即清零）。
+# 扫描异常此前只打一条 WARNING 后 return 0 —— 检测停摆不可观测；连续 5 次
+# （扫描周期 60s，约 5 分钟）升级 ERROR，并配合 grape_no_progress_scan_failures_total。
+_NO_PROGRESS_SCAN_FAILURE_STREAK = 0
+_NO_PROGRESS_SCAN_FAILURE_ALERT_THRESHOLD = 5
+
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
 # 避免「回收器抢在真任务落库前判定终态」的竞态；时区解析规则同 _get_exec_agent_task。
 # 窗口来源：Issue #1546 中派发链路（pick_engine → enqueue_task → 回写 execution）的落库时延，
@@ -2428,6 +2434,28 @@ def _requeue_no_progress(task_id, started_at, diagnostic) -> bool:
         return False
 
 
+def _record_no_progress_scan_failure(exc: Exception) -> None:
+    """记录一次扫描失败：指标累加 + 连续计数，达到阈值升级 ERROR（Issue #3772）。"""
+    global _NO_PROGRESS_SCAN_FAILURE_STREAK
+    _NO_PROGRESS_SCAN_FAILURE_STREAK += 1
+    try:
+        from src.domains.insight.public import record_no_progress_scan_failure
+        record_no_progress_scan_failure()
+    except Exception as _me:
+        # 指标上报失败不得影响扫描主流程，但要留可诊断痕迹（非静默吞噬）。
+        log.debug(f"no_progress: record scan failure metric failed: {_me}")
+    if _NO_PROGRESS_SCAN_FAILURE_STREAK == _NO_PROGRESS_SCAN_FAILURE_ALERT_THRESHOLD:
+        log.error(
+            "no_progress: scan failed %d consecutive times; NO_PROGRESS detection is down "
+            "(last error: %s)", _NO_PROGRESS_SCAN_FAILURE_STREAK, exc)
+
+
+def _reset_no_progress_scan_failure_streak() -> None:
+    """扫描成功即清零连续失败计数。"""
+    global _NO_PROGRESS_SCAN_FAILURE_STREAK
+    _NO_PROGRESS_SCAN_FAILURE_STREAK = 0
+
+
 def _sweep_no_progress_tasks(now_epoch=None) -> int:
     """Issue #2793：running 无新日志/无进展超时自愈巡检。
 
@@ -2458,12 +2486,17 @@ def _sweep_no_progress_tasks(now_epoch=None) -> int:
         with db_lock:
             c = db.cursor()
             # 仅按 status 过滤，时间比较全部在 Python 侧（不在 SQL 内对时间列做函数运算）。
-            rows = list(c.execute(
+            # 显式 fetchall（不依赖 cursor 隐式迭代协议）：MySQLCompatCursor 曾缺
+            # __iter__ → list(cursor) 在 MySQL 后端必抛 TypeError，扫描整体失效（Issue #3772）。
+            c.execute(
                 "SELECT id, event_seq, runtime_id, started_at, skill, repo_key, env_extra, errors "
-                "FROM agent_tasks WHERE status='running'"))
+                "FROM agent_tasks WHERE status='running'")
+            rows = c.fetchall()
     except Exception as e:
         log.warning(f"no_progress: scan running tasks failed: {e}")
+        _record_no_progress_scan_failure(e)
         return 0
+    _reset_no_progress_scan_failure_streak()
     requeued = 0
     for row in rows or []:
         tid, evt_seq, _rt_id, started_at, skill, repo_key, env_extra, errors = row

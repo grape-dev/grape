@@ -282,3 +282,18 @@ groups:
         annotations:
           summary: "hermes ACP resume is being skipped"
           description: "host={{ $labels.host }} skipped resume {{ $value }} times in 15m because state.db stayed too large; session context is being lost. Check cleanup_total{result} and state.db bytes."
+
+      # Issue #3772：no_progress 无进展检测扫描连续失败
+      # 语义：扫描入口异常被吞后 return 0 = 本轮不检测；若只留 WARNING，检测停摆不可见
+      # （2026-11 实测 MySQLCompatCursor 缺迭代协议 → 4 台主控 243 条/小时恒失败）。
+      # 阈值：扫描周期 60s，5 分钟内累计 5 次失败 ≈ 连续停摆 5 个周期。
+      # 排查：scheduler 日志 "no_progress: scan running tasks failed"；确认 DB 后端
+      # cursor 迭代/上下文协议与 SQL 方言；修复后指标增量应归零。
+      - alert: GrapeNoProgressScanFailing
+        expr: increase(grape_no_progress_scan_failures_total[5m]) >= 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No-progress task scan is failing repeatedly"
+          description: "The no_progress sweep has failed at least 5 times in 5 minutes, so stuck running tasks may never be auto-requeued. Check master scheduler logs for 'no_progress: scan running tasks failed', then verify the DB backend cursor iteration/context protocol and SQL dialect."

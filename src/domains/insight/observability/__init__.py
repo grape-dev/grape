@@ -664,6 +664,15 @@ RUNTIME_TAGS_PROBE_FAILURES = Counter(
     registry=registry,
 )
 
+# Issue #3772：no_progress 无进展检测扫描失败计数。
+# 扫描入口异常此前仅一条 WARNING 后 return 0（本轮不检测），生产上看不出检测停摆。
+# 由 runtime scheduler 记录，deploy/alerts.yml GrapeNoProgressScanFailing 规则消费。
+NO_PROGRESS_SCAN_FAILURES = Counter(
+    "grape_no_progress_scan_failures_total",
+    "No-progress detection scan failures reported by the runtime scheduler.",
+    registry=registry,
+)
+
 
 def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     """标签探活失败计数（`/api/runtime/runtime-tags-probe/signal` 的承接落点）。
@@ -676,6 +685,11 @@ def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     if r not in RUNTIME_TAGS_PROBE_REASONS:
         r = "unknown"
     RUNTIME_TAGS_PROBE_FAILURES.labels(host=h, reason=r).inc()
+
+
+def record_no_progress_scan_failure():
+    """记录一次 no_progress 扫描失败（异常类型进日志，不进指标标签防高基数）。"""
+    NO_PROGRESS_SCAN_FAILURES.inc()
 
 
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
