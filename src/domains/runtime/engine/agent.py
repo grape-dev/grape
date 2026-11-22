@@ -3335,7 +3335,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
     _local_base = ""
     _old_server_url = task.get("server_url") or ""
-    if _is_local_worker or _worker_server_url_reachable(_rts, _old_server_url):
+    # 业务基址若是回环，即便回连基址一样也要进覆盖分支：这是两个不同的键，
+    # 任务行 server_url 已是本 worker 地址 ≠ 沙箱里 GRAPE_SERVER_URL 可用。
+    _business_loop = (("127.0.0.1" in (env.get("GRAPE_SERVER_URL") or ""))
+                      or ("localhost" in (env.get("GRAPE_SERVER_URL") or "")))
+    if _is_local_worker or _business_loop or _worker_server_url_reachable(_rts, _old_server_url):
         # 判定改为实测可达（2026-10-12 seq#552 复盘）：本地 worker 或内网 worker
         # （RUNTIME_SERVER_URL 直连可达，如内网 worker 直连主控内网地址 3ms）
         # 都覆盖为本 worker 直连地址；远程公网 worker（内网不可达）保持原
