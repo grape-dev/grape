@@ -2067,8 +2067,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _db_webhook_token = "" if _use_path_b else webhook_token
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                      **{_hcfg["db_token_field"]: _db_webhook_token,
-                                        _hcfg["db_bot_token_field"]: global_bot_token},
-                                     bot_username=global_bot_username, org_id=_org_id,
+                                        _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=not _use_path_b)[0]},
+                                     bot_username=_bot_db_fields(_hcfg, usable=not _use_path_b)[1],
+                                     org_id=_org_id,
                                      host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
             _mark("")
             return _finalize_host_write(
@@ -2097,8 +2098,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         _db_webhook_token = "" if _use_path_b else webhook_token
         user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
                                  **{_hcfg["db_token_field"]: _db_webhook_token,
-                                    _hcfg["db_bot_token_field"]: global_bot_token},
-                                 bot_username=global_bot_username, org_id=_org_id,
+                                    _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=not _use_path_b)[0]},
+                                 bot_username=_bot_db_fields(_hcfg, usable=not _use_path_b)[1],
+                                 org_id=_org_id,
                                  host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
         _mark("")
         return _finalize_host_write(
@@ -2116,6 +2118,21 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
 
 @router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
+def _bot_db_fields(cfg: dict, usable: "bool | None" = None) -> tuple:
+    """仓库 bot 凭据落库口径（hosting 与 repair 共用）。
+
+    只有 bot **确实可用**时才落 token + username：
+      · 有全局 bot 且已邀为协作者（usable=True）→ 写两者，回帖/推送走 bot；
+      · 没有全局 bot，或邀请失败回落路径 B（usable=False）→ 两者都留空，
+        让推送/回帖改走派发身份的用户 token。
+    只写 username 而不写 token 是最坏形态：回帖身份会去用一个空 token 的
+    「bot 账号」，把用户身份这条退路堵死。
+    """
+    tok = str(cfg.get("bot_token") or "")
+    ok = bool(tok) if usable is None else bool(usable and tok)
+    return (tok, str(cfg.get("bot_username") or "")) if ok else ("", "")
+
+
 def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 

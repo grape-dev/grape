@@ -2066,7 +2066,12 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     """
     _business_base = env.get("GRAPE_SERVER_URL") or ""
     _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
-    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    # 回环业务基址不是"显式业务基址"：远端 worker 的 pipeline 拿不到 worker 侧地址时
+    # 会写 http://127.0.0.1（沙箱内 127.0.0.1 是沙箱自己 → 全 301/拒绝连接，实测
+    # 2026-11-23 GitLab #9）。出现回环基址且本 worker 有非回环地址时必须覆盖。
+    _loopback_business = ("127.0.0.1" in _business_base) or ("localhost" in _business_base)
+    _single_address = (_loopback_business or (not _business_base)
+                       or _same_url_host(_business_base, _runtime_base))
     env["RUNTIME_SERVER_URL"] = local_base
     task["server_url"] = local_base
     if _single_address:

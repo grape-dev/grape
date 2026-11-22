@@ -48,3 +48,39 @@ def test_other_platforms_keep_webhook_path_a(stub_cards):
     cfg = rm.get_hosting_provider_config("gitcode")
     assert cfg["webhook_path_b"] is False
     assert cfg["bot_token"] == "bot-token-gitcode"
+
+def test_db_fields_with_global_bot(monkeypatch):
+    """场景B：有全局 bot → 落 token + username（回帖走 bot 身份）。"""
+    import src.domains.mgmt.user.db as _udb
+    from src.domains.mgmt.routes.repos import _bot_db_fields
+
+    monkeypatch.setattr(_udb, "get_global_bot_token_for", lambda p: "bot-token")
+    monkeypatch.setattr(rm, "resolve_bot_username", lambda p: "grape-bot")
+    cfg = rm.get_hosting_provider_config("gitlab")
+    tok, name = _bot_db_fields(cfg)
+    assert (tok, name) == ("bot-token", "grape-bot")
+
+
+def test_db_fields_with_user_pat_only(monkeypatch):
+    """场景A：没有全局 bot（只有用户 PAT）→ token/username 都留空，走用户身份。"""
+    import src.domains.mgmt.user.db as _udb
+    from src.domains.mgmt.routes.repos import _bot_db_fields
+
+    monkeypatch.setattr(_udb, "get_global_bot_token_for", lambda p: "")
+    monkeypatch.setattr(rm, "resolve_bot_username", lambda p: "grape-bot")
+    cfg = rm.get_hosting_provider_config("gitlab")
+    assert cfg["webhook_path_b"] is True            # webhook 仍走随机密钥
+    tok, name = _bot_db_fields(cfg)
+    assert (tok, name) == ("", ""), "无 bot token 时不得只写 username（会堵死用户身份回帖）"
+
+
+def test_bot_token_not_stored_when_invite_fell_back(monkeypatch):
+    """场景C：有全局 bot 但（如项目机器人跨项目被拒）邀请失败回落路径 B →
+    不得再落 bot token，否则推送会拿一个没有该仓权限的 token 去推。"""
+    import src.domains.mgmt.user.db as _udb
+    from src.domains.mgmt.routes.repos import _bot_db_fields
+
+    monkeypatch.setattr(_udb, "get_global_bot_token_for", lambda p: "project-bot-token")
+    monkeypatch.setattr(rm, "resolve_bot_username", lambda p: "project_bot")
+    cfg = rm.get_hosting_provider_config("gitlab")
+    assert _bot_db_fields(cfg, usable=False) == ("", "")
