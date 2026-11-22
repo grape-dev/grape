@@ -629,3 +629,30 @@ CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
     UNIQUE(repo_key, delivery_id)
 )
 """
+
+# Issue #3580 复审 A7：收件箱是纯追加的高写入表，dead/长期 pending 若只删不归档，
+# 故障排查就失去原始投递；若只留不删，单表无界增长。归档表与主表同构、无唯一键
+# （同一 delivery 允许在主/归档各留一份），由 purge 每小时搬一次。
+_WEBHOOK_INBOX_ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key VARCHAR(255) NOT NULL,
+    provider VARCHAR(64) NOT NULL DEFAULT '',
+    delivery_id VARCHAR(128) NOT NULL,
+    event_header VARCHAR(128) NOT NULL DEFAULT '',
+    payload MEDIUMTEXT NOT NULL,
+    headers TEXT NOT NULL DEFAULT '{}',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    claim_owner VARCHAR(128) NOT NULL DEFAULT '',
+    claimed_at VARCHAR(32) NOT NULL DEFAULT '',
+    lease_expires_at VARCHAR(32) NOT NULL DEFAULT '',
+    next_attempt_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_error MEDIUMTEXT DEFAULT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    finished_at VARCHAR(32) NOT NULL DEFAULT '',
+    archived_at TEXT DEFAULT (datetime('now'))
+)
+"""

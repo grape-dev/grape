@@ -26,6 +26,9 @@ LEASE_RENEW_INTERVAL = DEFAULT_LEASE_SECONDS / 6
 # 间投递必须保活）。dead 保留 7 天供排查后再清。
 CONSUMED_RETENTION_HOURS = 24
 DEAD_RETENTION_DAYS = 7
+# 超期仍未消费成功的 pending/failed 搬归档（A7 有界增长）；保留期取 30 天，大于
+# 平台重投窗口一个量级，排障时仍可回看。
+PENDING_ARCHIVE_DAYS = 30
 PURGE_INTERVAL_SECONDS = 3600
 
 _DELIVERY_HEADERS = (
@@ -268,6 +271,21 @@ def worker_owner() -> str:
     return f"{os.environ.get('HOSTNAME', 'event')}:{os.getpid()}"
 
 
+def ensure_webhook_inbox_archive_table() -> bool:
+    """幂等建归档表（与主表同源，Event 进程启动时建）。"""
+    from src.domains.runtime.schema_ddl import _WEBHOOK_INBOX_ARCHIVE_DDL
+
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(_WEBHOOK_INBOX_ARCHIVE_DDL)
+            db.commit()
+        return True
+    except Exception as e:  # noqa: BLE001 - 归档表建不出来不阻断主表消费
+        log.warning(f"webhook inbox archive table ensure failed: {e}")
+        return False
+
+
 def ensure_webhook_inbox_table() -> bool:
     """幂等建表（Event 进程启动、worker 起跑前调用）。
 
@@ -284,6 +302,7 @@ def ensure_webhook_inbox_table() -> bool:
             c = db.cursor()
             c.execute(_WEBHOOK_INBOX_DDL)
             db.commit()
+        ensure_webhook_inbox_archive_table()
         return True
     except Exception as e:  # noqa: BLE001 - 建表失败由 worker 循环逐轮重试
         log.warning(f"webhook inbox ensure table failed: {e}")
@@ -356,9 +375,19 @@ async def _run_with_lease(item: dict, owner: str, *, pipeline=None,
     return await task
 
 
+_ARCHIVE_COLUMNS = ("id, repo_key, provider, delivery_id, event_header, payload, headers, "
+                    "status, attempts, max_attempts, claim_owner, claimed_at, lease_expires_at, "
+                    "next_attempt_at, last_error, created_at, updated_at, finished_at")
+
+
 def purge_finished(retention_hours: int = CONSUMED_RETENTION_HOURS,
                    dead_days: int = DEAD_RETENTION_DAYS) -> dict:
-    """清理已完成/已判死的行；pending/failed 永不清（长故障期间投递要保活）。"""
+    """清理已完成/已判死的行；dead 与超期滞留的 pending 先归档再删（A7）。
+
+    pending/failed 在保留期内**不清**（长故障期间投递要保活）；超过
+    PENDING_ARCHIVE_DAYS 仍没消费成功的，说明上游已长期不可用或事件已失去
+    时效，搬进归档表而不是删除——排障时要能回看原始投递。
+    """
     consumed_before = (datetime.now(timezone.utc)
                        - timedelta(hours=retention_hours)).isoformat()
     dead_before = (datetime.now(timezone.utc) - timedelta(days=dead_days)).isoformat()
@@ -368,13 +397,35 @@ def purge_finished(retention_hours: int = CONSUMED_RETENTION_HOURS,
                   "WHERE status='consumed' AND finished_at!='' AND finished_at<?",
                   (consumed_before,))
         consumed = c.rowcount if c.rowcount and c.rowcount > 0 else 0
-        c.execute("DELETE FROM grape_t_webhook_inbox "
-                  "WHERE status='dead' AND updated_at<?", (dead_before,))
-        dead = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        dead = 0
+        try:
+            c.execute(f"INSERT INTO grape_t_webhook_inbox_archive ({_ARCHIVE_COLUMNS}) "
+                      "SELECT " + _ARCHIVE_COLUMNS + " FROM grape_t_webhook_inbox "
+                      "WHERE status='dead' AND updated_at<?", (dead_before,))
+            c.execute("DELETE FROM grape_t_webhook_inbox "
+                      "WHERE status='dead' AND updated_at<?", (dead_before,))
+            dead = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        except Exception as e:  # noqa: BLE001 - 归档表缺失时退回原删除行为
+            log.warning(f"webhook inbox archive unavailable, falling back to delete: {e}")
+            c.execute("DELETE FROM grape_t_webhook_inbox "
+                      "WHERE status='dead' AND updated_at<?", (dead_before,))
+            dead = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        stale_before = (datetime.now(timezone.utc)
+                        - timedelta(days=PENDING_ARCHIVE_DAYS)).isoformat()
+        stale = 0
+        try:
+            c.execute(f"INSERT INTO grape_t_webhook_inbox_archive ({_ARCHIVE_COLUMNS}) "
+                      "SELECT " + _ARCHIVE_COLUMNS + " FROM grape_t_webhook_inbox "
+                      "WHERE status IN ('pending','failed') AND created_at<?", (stale_before,))
+            c.execute("DELETE FROM grape_t_webhook_inbox "
+                      "WHERE status IN ('pending','failed') AND created_at<?", (stale_before,))
+            stale = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"webhook inbox stale-pending archive failed: {e}")
         db.commit()
-    if consumed or dead:
-        log.info(f"webhook inbox purged consumed={consumed} dead={dead}")
-    return {"consumed": consumed, "dead": dead}
+    if consumed or dead or stale:
+        log.info(f"webhook inbox purged consumed={consumed} dead={dead} stale_pending={stale}")
+    return {"consumed": consumed, "dead": dead, "stale_pending": stale}
 
 
 async def webhook_inbox_loop(poll_interval: float = 1.0) -> None:
