@@ -8096,7 +8096,9 @@ def reconcile_pipeline_progress(limit: int = 200,
         reconcile_pipeline_progress as _impl,
     )
 
-    return _impl(limit=limit, lookback_hours=lookback_hours)
+    # 契约口自带上限：手动入口可传大值，但单轮扫描不应无界占用 runtime 域。
+    bounded = max(1, min(int(limit or 200), 500))
+    return _impl(limit=bounded, lookback_hours=lookback_hours)
 
 
 async def create_task_via_issue(body: dict, user: dict | None = None) -> dict:

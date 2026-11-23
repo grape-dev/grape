@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -27,6 +28,20 @@ from src.kernel.config import log
 from src.kernel.repo_key import parse_repo_key, workspace_repo_dir
 
 _ORG_LOCKS: dict[str, threading.Lock] = {}
+
+# 表结构只随 migration 变化：同一进程/同一目标库只做一次建表 + 索引。
+# key 含目标库标识，测试切 DEVOPS_DB_PATH / 三库 DSN 时会重新建表。
+_ENSURE_LOCK = threading.Lock()
+_ENSURED_DB_KEYS: set[tuple] = set()
+_AI_ENSURED_DB_KEYS: set[tuple] = set()
+
+
+def _db_identity() -> tuple:
+    return (
+        os.environ.get("DEVOPS_DB_PATH", ""),
+        os.environ.get("GRAPE_DSN_MGMT", ""),
+        os.environ.get("DEVOPS_DB_BACKEND", ""),
+    )
 _GUARD = threading.Lock()
 _MAX_README = int(__import__("os").environ.get("ORG_REPO_MAP_README_CAP", "20000") or 20000)
 DEFAULT_RECALL_LIMIT = int(__import__("os").environ.get("ORG_REPO_MAP_RECALL_LIMIT", "3") or 3)
@@ -107,14 +122,29 @@ def _clip(text: str, limit: int = _MAX_README) -> str:
 def ensure_table() -> None:
     from src.domains.mgmt.schema_ddl import _ORG_REPO_MAP_DDL
 
-    with db_lock:
-        c = db.cursor()
-        c.execute(_ORG_REPO_MAP_DDL)
-        c.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_org_repo_map_org_repo "
-            "ON grape_t_org_repo_map(org_id, repo_key)"
-        )
-        db.commit()
+    key = _db_identity()
+    if key in _ENSURED_DB_KEYS:
+        return
+    try:
+        from src.kernel import table_ownership as _own
+
+        if _own.should_skip("grape_t_org_repo_map"):
+            _ENSURED_DB_KEYS.add(key)
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"org_repo_map ownership guard unavailable: {exc}")
+    with _ENSURE_LOCK:
+        if key in _ENSURED_DB_KEYS:
+            return
+        with db_lock:
+            c = db.cursor()
+            c.execute(_ORG_REPO_MAP_DDL)
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_org_repo_map_org_repo "
+                "ON grape_t_org_repo_map(org_id, repo_key)"
+            )
+            db.commit()
+        _ENSURED_DB_KEYS.add(key)
     try:
         ensure_ai_table()
     except Exception as exc:  # noqa: BLE001
@@ -122,20 +152,28 @@ def ensure_table() -> None:
 
 
 def ensure_ai_table() -> None:
-    """AI 分析台账表（与确定性地图分表；幂等）。"""
+    """AI 分析台账表（与确定性地图分表；幂等；同库同进程只建一次）。"""
     from src.domains.mgmt.schema_ddl import _ORG_REPO_AI_DDL
 
+    key = _db_identity()
+    if key in _AI_ENSURED_DB_KEYS:
+        return
     try:
         from src.kernel import table_ownership as _own
 
         if _own.should_skip("grape_t_org_repo_ai"):
+            _AI_ENSURED_DB_KEYS.add(key)
             return
     except Exception as exc:  # noqa: BLE001
         log.debug(f"org_repo_ai ownership guard unavailable: {exc}")
-    with db_lock:
-        c = db.cursor()
-        c.execute(_ORG_REPO_AI_DDL)
-        db.commit()
+    with _ENSURE_LOCK:
+        if key in _AI_ENSURED_DB_KEYS:
+            return
+        with db_lock:
+            c = db.cursor()
+            c.execute(_ORG_REPO_AI_DDL)
+            db.commit()
+        _AI_ENSURED_DB_KEYS.add(key)
 
 
 def get_ai_status(org_id: str, repo_key: str) -> dict:

@@ -30,7 +30,10 @@ from src.kernel.issue_ident import is_actionable_issue_number, native_issue_numb
 # 只补偿"近期"完成任务，避免首次上线把历史 Issue 全部推进。
 _DEFAULT_LOOKBACK_HOURS = 6
 # 同一任务两次尝试的最小间隔（秒）：避免 node_not_found 等场景每轮重复日志。
-_RETRY_SECONDS = 600
+try:
+    _RETRY_SECONDS = max(0, int(os.environ.get("PIPELINE_ADVANCE_RETRY_SECONDS", "600")))
+except (TypeError, ValueError):
+    _RETRY_SECONDS = 600
 _last_attempt: dict[str, float] = {}
 # 同进程单飞：Mgmt 入口存在两条 patrol_loop（server_tasks + lifespan 兜底），
 # 会同时进本函数；单飞让第二路直接跳过，避免重复扫描/抢同一任务。

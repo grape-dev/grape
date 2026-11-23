@@ -11,13 +11,18 @@ dispatch 的 ``plan_json`` 中。
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.kernel.config import log
 from src.kernel.repo_key import to_repo_key
 from src.domains.runtime import public as runtime_public
-from src.domains.mgmt.pipeline_config import get_scenes, scene_exists_in_repo
-from src.domains.mgmt.user.db import get_repo_scene, get_scene_recommend_config
+from src.domains.mgmt.pipeline_config import (
+    get_scenes,
+    get_scenes_for_repos,
+    scene_exists_in_repo,
+)
+from src.domains.mgmt.user.db import get_repo_scene
 from src.domains.mgmt.user.org_db import list_org_repos
 
 _MAX_PROBLEMS = 8
@@ -74,12 +79,14 @@ def _precheck(scene_id: str, repo_key: str, user: dict | None,
     return result
 
 
-def _recommend_config(repo_key: str, valid_scene_ids: set[str]) -> dict:
-    """智能推荐配置：只保留仍在该仓库场景集合内的规则/兜底。"""
+def _recommend_config(raw: str, valid_scene_ids: set[str]) -> dict:
+    """智能推荐配置：只保留仍在该仓库场景集合内的规则/兜底（输入为原始 JSON 串）。"""
     try:
-        cfg = get_scene_recommend_config(repo_key) or {}
-    except Exception as exc:  # noqa: BLE001 - 配置缺失不阻断目录
-        log.warning(f"org_dispatch_scene: recommend config failed repo={repo_key}: {exc}")
+        cfg = json.loads(raw or "{}") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception as exc:  # noqa: BLE001 - 配置损坏不阻断目录
+        log.warning(f"org_dispatch_scene: recommend config parse failed: {exc}")
         cfg = {}
     rules = []
     for rule in (cfg.get("rules") or [])[:_MAX_RULES]:
@@ -143,18 +150,21 @@ def scene_catalog(org_id: str, *, repo_key: str = "",
     if wanted and not rows:
         raise ValueError(f"target repository is not linked to this organization: {wanted}")
 
+    repo_keys = [str(row.get("repo_key") or "") for row in rows]
+    scenes_by_repo = get_scenes_for_repos(repo_keys)
     precheck_cache: dict[tuple, dict] = {}
     repos: list[dict] = []
     for row in sorted(rows, key=lambda r: str(r.get("full_name") or r.get("repo_key") or "")):
         key = str(row.get("repo_key") or "")
-        effective_default = get_repo_scene(key) or ""
-        scenes = get_scenes(repo_key=key) or []
+        effective_default = str(row.get("dev_scene") or "")
+        scenes = scenes_by_repo.get(key) or []
         valid_ids = {str(s.get("id") or "") for s in scenes if s.get("id")}
         repos.append({
             "repo_key": key,
             "full_name": str(row.get("full_name") or ""),
             "dev_scene": effective_default,
-            "scene_recommend_config": _recommend_config(key, valid_ids),
+            "scene_recommend_config": _recommend_config(
+                str(row.get("scene_recommend_config") or ""), valid_ids),
             "scenes": [
                 _scene_payload(
                     scene, repo_key=key, dev_scene=effective_default,

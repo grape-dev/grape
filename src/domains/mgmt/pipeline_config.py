@@ -542,6 +542,78 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
+def get_scenes_for_repos(repo_keys: list[str], *, minimal: bool = False) -> dict[str, list[dict]]:
+    """批量读取多个仓库的仓内场景（一次查询，供组织下派目录等 N 仓场景）。
+
+    与 ``get_scenes`` 的单仓口径一致（is_active=1、仓内副本），仅去掉分页/检索/
+    市场兜底——调用方只关心每个仓库自己的场景集合。列集合走进程内缓存
+    ``_get_scene_columns()``，不再逐仓 ``SHOW COLUMNS``。
+    """
+    keys = sorted({str(k or "").strip() for k in (repo_keys or []) if str(k or "").strip()})
+    if not keys:
+        return {}
+    cols = _get_scene_columns()
+    extra = [name for name in (
+        "display_name", "advanced_options", "created_by", "icon", "scene_type",
+        "pr_subscription_enabled", "linked_repos", "is_pinned", "pinned_at",
+    ) if name in cols]
+    select = ["scene_id", "repo_key", "name", "description", "nodes_json",
+              "onboarding", *extra]
+    db, lock = _db()
+    rows = []
+    with lock:
+        c = db.cursor()
+        placeholders = ",".join("?" * len(keys))
+        try:
+            c.execute(
+                f"SELECT {', '.join(select)} FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key IN ({placeholders}) "
+                "ORDER BY repo_key, scene_id",
+                tuple(keys),
+            )
+            rows = c.fetchall()
+        except Exception as exc:  # 查询失败按空场景处理，目录仍返回其它仓库
+            log.warning(f"get_scenes_for_repos failed repos={len(keys)}: {exc}")
+            return {}
+    out: dict[str, list[dict]] = {key: [] for key in keys}
+    for row in rows:
+        data = dict(zip(select, row))
+        repo_key = str(data.pop("repo_key") or "")
+        if not repo_key:
+            continue
+        try:
+            nodes = [] if minimal else (json.loads(data.get("nodes_json") or "[]") or [])
+        except Exception:
+            nodes = []
+        work_branch = "main"
+        try:
+            options = json.loads(data.get("advanced_options") or "{}") if "advanced_options" in data else {}
+            work_branch = str(options.get("work_branch") or "main")
+        except Exception:
+            pass
+        try:
+            linked_repos = (json.loads(data.get("linked_repos") or "[]") or []) if "linked_repos" in data else []
+        except Exception:
+            linked_repos = []
+        out.setdefault(repo_key, []).append({
+            "id": data.get("scene_id"), "name": data.get("name"),
+            "display_name": data.get("display_name") or data.get("name"),
+            "scope": "repo",
+            "description": data.get("description") or "",
+            "work_branch": work_branch or "main",
+            "created_by": data.get("created_by") or "",
+            "icon": data.get("icon") or "",
+            "nodes": nodes,
+            "onboarding": data.get("onboarding") or "repo-onboarding",
+            "scene_type": data.get("scene_type") or "standard",
+            "pr_subscription_enabled": int(data.get("pr_subscription_enabled") or 0),
+            "linked_repos": linked_repos,
+            "is_pinned": int(data.get("is_pinned") or 0),
+            "pinned_at": data.get("pinned_at") or "",
+        })
+    return out
+
+
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "",
                         use_cache: bool = True) -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -30,8 +31,8 @@ from src.domains.mgmt.user.org_db import db, db_lock, get_org, list_org_repos
 from src.domains.runtime import public as runtime_public
 from src.kernel.config import log
 
-ANALYSIS_CRON = "0 0 * * *"
-ANALYSIS_SKILL = "org-repo-analyzer"
+ANALYSIS_CRON = (os.environ.get("ORG_ANALYSIS_CRON") or "0 0 * * *").strip()
+ANALYSIS_SKILL = (os.environ.get("ORG_ANALYSIS_SKILL") or "org-repo-analyzer").strip()
 
 # Autopilot manual trigger 是 async；mgmt 侧的绑定钩子是同步线程，后台线程调用。
 # 用常驻事件循环而不是 asyncio.run：trigger_task_now 里 create_task(_execute_task)

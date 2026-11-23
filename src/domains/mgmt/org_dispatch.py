@@ -54,6 +54,8 @@ def _env_int(name: str, default: int) -> int:
 
 TARGET_TIMEOUT_SECONDS = _env_int("ORG_DISPATCH_TARGET_TIMEOUT", 7200)
 SWEEP_INTERVAL_SECONDS = _env_int("ORG_DISPATCH_SWEEP_INTERVAL", 60)
+# 单轮 sweep 的处理上限：避免积压时一次性扫全表、长时间占住 mgmt 请求线程
+SWEEP_BATCH_LIMIT = _env_int("ORG_DISPATCH_SWEEP_LIMIT", 200)
 # 单条下派结论上下文上限（默认 64KB）：避免多目标 × 多角色的摘要挤占注入预算
 DECISION_MAX_BYTES = _env_int("ORG_DECISION_MAX_BYTES", 65536)
 MAX_DISPATCH_TARGETS = _env_int("ORG_DISPATCH_MAX_TARGETS", 20)
@@ -1147,7 +1149,7 @@ def _timeout_targets(dispatch_id: str) -> None:
         db.commit()
 
 
-def _terminal_dispatches_pending_aggregate(c) -> list[int]:
+def _terminal_dispatches_pending_aggregate(c, limit: int = 200) -> list[int]:
     """终态批次中尚未完成聚合触发的 dispatch id（幂等键 dispatch_id+terminal_status）。
 
     除「从未抢占」外，也纳入「已抢占但事件 seq 仍为 0」的台账行：进程若在
@@ -1162,8 +1164,9 @@ def _terminal_dispatches_pending_aggregate(c) -> list[int]:
         "  ON a.dispatch_id=d.id AND a.terminal_status=d.status "
         f"WHERE d.status IN ({placeholders}) "
         "AND (a.id IS NULL OR a.seq=0 "
-        "     OR (a.comment_posted=0 AND a.error LIKE 'comment:%'))",
-        tuple(DISPATCH_TERMINAL),
+        "     OR (a.comment_posted=0 AND a.error LIKE 'comment:%')) "
+        "LIMIT ?",
+        (*DISPATCH_TERMINAL, max(1, int(limit))),
     )
     return [str(r[0] or "") for r in c.fetchall()]
 
@@ -1557,11 +1560,13 @@ def sweep_once() -> int:
             "SELECT id FROM grape_t_org_dispatch WHERE status IN ('dispatching','running','aggregating') "
             "UNION "
             "SELECT DISTINCT dispatch_id FROM grape_t_org_dispatch_target "
-            "WHERE status IN ('pending','creating','running')"
+            "WHERE status IN ('pending','creating','running') "
+            "LIMIT ?",
+            (SWEEP_BATCH_LIMIT,),
         )
         dispatch_ids = [str(r[0] or "") for r in c.fetchall()]
         # Issue #2251：已进入终态但尚未触发聚合收口的批次
-        pending_aggregate = _terminal_dispatches_pending_aggregate(c)
+        pending_aggregate = _terminal_dispatches_pending_aggregate(c, SWEEP_BATCH_LIMIT)
     from src.kernel import org_metrics
     org_metrics.set_dispatch_inflight(len(dispatch_ids))
     for dispatch_id in dispatch_ids:
