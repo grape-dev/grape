@@ -101,3 +101,11 @@ def test_create_custom_scene_persists_skill_id(scene_db):
     nodes = json.loads(row[0])
     assert nodes[0]["skill_id"] == 2756
     assert not nodes[1].get("skill_id")  # 解析不到保持原样
+
+
+def test_zero_skill_id_node_rebackfilled():
+    """`skill_id=0`（存量/老前端）→ 按名回填；只有非 0 的既有 id 才视为「已选」保留。"""
+    from src.domains.mgmt.pipeline_config import fill_scene_nodes_skill_id
+    nodes = [{"tag": "qa", "skill": "repo-qa", "skill_id": 0}]
+    out = fill_scene_nodes_skill_id(nodes, "gitcode:o/r", resolver=_resolve_fake)
+    assert out[0]["skill_id"] == 2756

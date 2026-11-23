@@ -236,6 +236,24 @@ def test_direct_verify_declares_official_fallback(tmp_path, monkeypatch):
     assert sv.get("actual") == "official-qa-checker"
 
 
+def test_direct_verify_without_skill_name_still_records_consistency(tmp_path):
+    """无绑定技能（skill_name 为空）→ 门禁仍落 `_skill_consistency`（基线 unbound ok=True）。
+
+    回归：verify 块若引用只在 `if skill_name:` 内定义的局部变量，空技能名时会抛
+    NameError 被 except 吞掉 → 键缺失 → direct 门禁退化为「verdict missing」。
+    """
+    from src.domains.runtime.engine import skill_materialize as sm
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
+    evt = {"_skill_id": 0, "_skill_path": ""}
+    _materialize_direct_workdir(str(tmp_path), "gitcode:acme/repo", "qa",
+                                "", evt, "", "prompt")
+    assert "_skill_materialize" not in evt  # 无绑定技能不物化
+    sv = evt.get(sm.SKILL_CONSISTENCY_KEY)
+    assert sv is not None, "无绑定技能时门禁结果缺失（verify 块 NameError 被吞）"
+    assert sv.get("ok") is True
+    assert sv.get("source") == "unbound"
+
+
 def test_direct_verify_missing_skill_still_refused(tmp_path, monkeypatch):
     """反向回归：技能真缺失 + 无明示回退 → 仍 fail-fast（local_cache 拒绝）。"""
     import src.kernel.config as cfg
