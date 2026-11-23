@@ -1335,6 +1335,27 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
             pass
 
 
+def _startup_engine_by_rid(client, ids, runtimes, device_name):
+    """启动注册后 rid → 引擎实例名：复用 agent 的按 name 配对，并对部分非法 id 落 partial 日志。
+
+    PR #2066 复审 Required：`client.register` 已改为逐条过滤非法 id，回包含非法 id 时
+    `ids` 可能比 `runtimes` 短，旧的 `zip(ids, runtimes)` 会错位把 rid 配给别的引擎
+    （`_backend_for_engine` 据此选后端，错位会把任务派给错误引擎）。`_refresh_templates`
+    与 agent 启动路径已统一为按回包明细 name 配对，此处第三处一并收敛。
+    """
+    from src.domains.runtime.engine.agent import (
+        _engine_by_rid_from_register, _register_partial_ids,
+    )
+    engine_by_rid = _engine_by_rid_from_register(client, ids, runtimes, device_name)
+    partial_ids = _register_partial_ids(client)
+    if partial_ids:
+        log.warning(
+            f"cloud_worker register reply carried invalid runtime id(s) {partial_ids}; "
+            f"mapped rids to engines by name, missing engine(s) will be backfilled "
+            f"by the periodic re-register")
+    return engine_by_rid
+
+
 def main():
     """cloud_worker 进程入口。
 
@@ -1647,10 +1668,9 @@ def main():
             json.dumps(sorted(runtimes, key=lambda r: r.get("name", "")), sort_keys=True).encode()
         ).hexdigest()
 
-        # rid → 引擎实例名
-        from src.domains.runtime.engine.instances import instance_name
-        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
-                         for rid, r in zip(ids, runtimes)}
+        # rid → 引擎实例名（PR #2066 复审 Required：按回包 name 配对，避免部分非法 id 时
+        # ids 比 runtimes 短导致 zip 错位；与 _refresh_templates / agent 启动路径同口径）
+        engine_by_rid = _startup_engine_by_rid(client, ids, runtimes, device)
         log.info(f"cloud_worker registered: {ids} -> {config['server_url']}, "
                  f"engines={list(engine_by_rid.values())}, "
                  f"provider={config['provider']}, "
