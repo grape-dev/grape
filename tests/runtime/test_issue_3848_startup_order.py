@@ -81,6 +81,21 @@ def test_cleanup_returns_zero_and_logs_debug_when_port_unbound(caplog):
     ), "应留下 debug 级的 deferred 记录（说明是时序而非故障）"
 
 
+def test_deferred_cleanup_counts_startup_degraded(caplog):
+    """deferred 也不能只靠日志：debug 之外须计入 startup_degraded{component=credential_usage_log}。
+
+    指标层存在的理由就是「启动期降级要么可巡检、要么只能 grep 日志」——usage_log 的
+    未绑分支同样属预期时序，必须与 card_source 对称打点，否则该维度生产上恒空。
+    """
+    reg, _metrics = _fresh_metric_registry()
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER):
+        assert cul.cleanup_expired_retention(force=True) == 0
+    assert reg.get_sample_value(
+        "grape_startup_degraded_total",
+        {"component": "credential_usage_log", "reason": "port_not_bound"},
+    ) == 1, "预期时序的 deferred 清理必须可巡检（与 card_source 同口径）"
+
+
 # ------------------------------------------------- 2) bind 钩子补跑（恰好一次）
 def test_bind_tokens_runs_startup_prune_exactly_once():
     """绑定 tokens 即补跑启动清理一次；replace=True 重绑不得重复 DELETE。"""
@@ -124,6 +139,21 @@ def test_startup_call_site_arms_cleanup_instead_of_running_it():
 
     tokens_port.bind(fake)
     assert len(fake.calls) == 1, "bind 之后由钩子补跑，恰好一次"
+
+
+def test_defer_runs_immediately_when_tokens_already_bound():
+    """时序二：本模块晚于装配层导入（tokens 已绑）→ 布防应立即补跑，不等下一次 bind。
+
+    与上一条互补——只测「未绑→bind 时补跑」会漏掉「已绑→defer 立即跑」这条路径
+    （测试/重复启动路径即走它）；该路径失效则已绑进程的启动清理永不执行。
+    """
+    fake = _FakeTokens(rows=2)
+    tokens_port.bind(fake)
+    assert len(fake.calls) == 1, "前序 bind 自身已补跑一次"
+
+    cul.reset_startup_prune_state()  # 模拟「本次启动的钩子未参与」的晚导入路径
+    cul.defer_startup_retention_cleanup()
+    assert len(fake.calls) == 2, "已绑端口下布防必须立即执行清理，而不是静默跳过"
 
 
 # --------------------------------------------- 4) card_sources 分流 + 打点
