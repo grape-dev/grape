@@ -205,13 +205,17 @@ class PlatformCardContractClient:
         # 空字符串列必须按"未配置"处理：表路径（card_projection）会省略空值列，
         # 契约路径若原样透传，webhook_verify="" / branch_create_form="" 会被 Builder
         # 判成非法枚举值而整卡拒绝（自建实例只写 dialect+host 时整卡丢失）。
+        # 例外：`SEMANTIC_EMPTY_KEYS`（凭据列）的空串是**声明**（该平台无物理列，
+        # S128 终态），与表投影共用同一常量，避免两侧各自实现漂移。
+        from src.domains.runtime.vcs.card_projection import SEMANTIC_EMPTY_KEYS
         out: dict[str, dict] = {}
         for prov, raw in cards.items():
             if not isinstance(raw, dict):
                 continue
             out[str(prov)] = {
                 str(k): v for k, v in raw.items()
-                if not (isinstance(v, str) and v.strip() == "")
+                if str(k) in SEMANTIC_EMPTY_KEYS
+                or not (isinstance(v, str) and v.strip() == "")
             }
         return out
 

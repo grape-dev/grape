@@ -330,8 +330,8 @@ class PlatformCardAssembler:
             if not raws:
                 continue
             for provider, raw in raws.items():
-                base[provider] = dict(raw)
-                table_raws[provider] = dict(raw)
+                base[provider] = dict(self._credential_fields_from_base(raw, base.get(provider)))
+                table_raws[provider] = dict(base[provider])
             log.info(f"platform cards from {source.name}: {sorted(raws)}")
             break
 
@@ -366,6 +366,40 @@ class PlatformCardAssembler:
             if _ov:
                 log.info(f"platform card overrides applied: {sorted(_ov)}")
         return base
+
+    # ---- 1b) 凭据列的「未声明」判定 ------------------------------------------
+
+    @staticmethod
+    def _credential_fields_from_base(raw: dict, base_raw: "dict | None") -> dict:
+        """表/契约卡覆盖文件卡时，两个凭据列字段按「未声明」语义回落到文件声明。
+
+        背景（S128/D106 终态）：`token_storage_field` / `webhook_token_field` 的空串
+        是**声明**——该平台没有 managed_repos 物理列，凭据只落 grape_t_repo_credentials。
+        而表行经 `row_to_card_raw` 投影时，NULL 列统一成 ""，于是「显式空串」与
+        「这行没配」在表里长得一样；整卡覆盖会把文件卡里的真实声明冲掉，Builder 随即
+        回退派生列名（`bot_gitee_token` / `gitee_webhook_token`），冷启动时把 S128 已
+        退役的 gitee/gitlab 四列重新建出来，写路径也重新双写回退役列。
+
+        口径（只为这两个键开例外，其余键的整卡覆盖语义不变）：
+        - 表/契约给了非空列名 → 以它为准（加卡即接入）；
+        - 表/契约给空串且文件卡声明了（含显式 ""）→ 用文件声明；
+        - 两边都没声明 → 丢掉该键，让 Builder 派生列名（gitcode/github 存量列语义）。
+        """
+        from src.domains.runtime.vcs.card_projection import SEMANTIC_EMPTY_KEYS
+
+        merged = dict(raw)
+        base = base_raw or {}
+        for key in SEMANTIC_EMPTY_KEYS:
+            value = merged.get(key)
+            undeclared = (key not in merged) or (
+                isinstance(value, str) and value.strip() == "")
+            if not undeclared:
+                continue
+            if key in base:
+                merged[key] = base[key]
+            else:
+                merged.pop(key, None)
+        return merged
 
     # ---- 2) 建卡（含非法回退） ----------------------------------------------
 
