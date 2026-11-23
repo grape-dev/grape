@@ -67,7 +67,12 @@ def _stub_queries(monkeypatch, items):
 
 
 def _patch_mgmt_topology(monkeypatch, cursor):
-    """模拟三库拓扑：进程域=mgmt，runtime 域有自有 DSN（每次取独立连接）。"""
+    """模拟三库拓扑：进程域=mgmt，runtime 域有自有 DSN（每次取独立连接）。
+
+    Issue #3826：路由判定收敛到内核 `db_registry.route_of()` 单一事实源后，本 seam 由
+    `uses_own_dsn` 迁到 `route_of` 的依赖面（`lib_enabled` / `current_domain` / `dsn_of`），
+    让用例走真实路由逻辑而不是绕开它。
+    """
     conn = _FakeConn(cursor)
     created = []
 
@@ -75,8 +80,10 @@ def _patch_mgmt_topology(monkeypatch, cursor):
         created.append(domain)
         return conn
 
+    monkeypatch.setattr(db_registry, "lib_enabled", lambda: True)
     monkeypatch.setattr(db_registry, "current_domain", lambda: "mgmt")
-    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: d == "runtime")
+    monkeypatch.setattr(db_registry, "dsn_of",
+                        lambda d: "mysql://u:p@h:3306/grape_prod_runtime" if d == "runtime" else "")
     monkeypatch.setattr(db_registry, "new_connection", _new_connection)
     return created
 
