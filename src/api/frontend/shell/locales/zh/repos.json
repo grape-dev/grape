@@ -23,6 +23,8 @@
     "welcome_sub": "选择一个工作项目，开启由 Agent 驱动的自动化 DevOps 之旅。",
     "stat_projects": "我的项目",
     "stat_hosted": "已托管",
+    "scope_hosted": "只看已托管",
+    "scope_hosted_title": "勾选时仅展示已托管仓库，取消勾选展示全部仓库",
     "empty_title": "未找到匹配的项目",
     "empty_desc": "试试更换关键词或筛选条件。",
     "friend": "朋友",

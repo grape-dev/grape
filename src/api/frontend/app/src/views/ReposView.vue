@@ -120,19 +120,19 @@
                 <div class="project-section-header-right">
                   <button
                     class="project-refresh-btn"
-                    :title="onlyHosted ? t('repos.lobby.scope_all_title') : t('repos.lobby.scope_hosted_title')"
-                    @click="toggleScope"
-                  >
-                    {{ onlyHosted ? t('repos.lobby.scope_all') : t('repos.lobby.scope_hosted') }}
-                  </button>
-                  <button
-                    class="project-refresh-btn"
                     :title="t('repos.lobby.refresh_title')"
                     :disabled="refreshing"
                     @click="refresh"
                   >
                     {{ refreshing ? t('repos.sync.syncing') : t('repos.lobby.refresh_btn') }}
                   </button>
+                  <label
+                    class="project-hosted-filter"
+                    :title="t('repos.lobby.scope_hosted_title')"
+                  >
+                    <input v-model="onlyHosted" type="checkbox" @change="onHostedFilterChange" />
+                    <span>{{ t('repos.lobby.scope_hosted') }}</span>
+                  </label>
                   <input
                     v-model="searchQuery"
                     class="project-search"
@@ -696,6 +696,9 @@ function initials(r) {
   return (r.name || '?').substring(0, 2).toUpperCase()
 }
 function onSearch() {
+  repoPage.value = 0
+}
+function onHostedFilterChange() {
   repoPage.value = 0
 }
 function goPage(dir) {

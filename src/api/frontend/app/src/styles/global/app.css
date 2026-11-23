@@ -59,6 +59,9 @@
 .project-refresh-btn{display:inline-flex;align-items:center;gap:6px;padding:4px 14px;border-radius:999px;border:1px solid color-mix(in srgb,var(--a) 42%,transparent);background:transparent;color:var(--a);font-size:12px;font-weight:600;cursor:pointer;transition:background .18s,color .18s,border-color .18s;white-space:nowrap}
 .project-refresh-btn:hover:not(:disabled){border-color:var(--a);background:var(--a);color:#fff}
 .project-refresh-btn:disabled{opacity:.6;cursor:not-allowed}
+.project-hosted-filter{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);cursor:pointer;user-select:none;white-space:nowrap}
+.project-hosted-filter input{accent-color:var(--a);width:14px;height:14px;cursor:pointer;margin:0}
+.project-hosted-filter:hover{color:var(--t)}
 .project-new-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 18px;border-radius:999px;border:none;background:var(--a);color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:background .18s,filter .18s;white-space:nowrap}
 .project-new-btn:hover{background:var(--ah);filter:brightness(1.06)}
 .project-new-btn:active{transform:scale(.97)}
