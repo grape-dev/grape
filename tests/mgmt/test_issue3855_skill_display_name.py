@@ -479,6 +479,17 @@ def test_convert_clamps_overlong_legacy_source_name(sdb, monkeypatch):
     assert len(written) <= skills_route.SKILL_DISPLAY_NAME_MAX
 
 
+def test_converted_display_name_exhausts_suffix_enumeration(monkeypatch):
+    # Issue #3855：去重后缀 ~2..~999 全部重名（枚举耗尽）时必须 409 失败，
+    # 不得静默返回一个已知与目标 scope 冲突的名称。
+    monkeypatch.setattr(skills_route, "_skill_display_name_conflict",
+                        lambda *a, **k: True)
+    with pytest.raises(skills_route.HTTPException) as exc:
+        skills_route._converted_display_name("user", "7", "技能", "技能")
+    assert exc.value.status_code == 409
+    assert "名称已存在" in str(exc.value.detail)
+
+
 # ===== 官方 30 分钟同步保留已录入名称 =====
 
 def _sync_official(monkeypatch, sdb, data):
