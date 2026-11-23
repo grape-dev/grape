@@ -821,6 +821,18 @@ Log "New agent started (pid $($workerProc.ProcessId)), waiting for registration.
 $regSoftDeadlineSec = 30          # 首轮软到期（= 原固定窗口长度）
 $regWindowSec = 60                # 硬上限（20 × 3s）
 $regIntervalSec = 3
+
+# Issue #3892 QA（数值证据）：以下三个运行参数全部具名登记，来源=运维约定（各注释写明依据）；
+# 修改任一值前先更新对应来源说明，禁止回落为内联裸字面量。
+$agentLogMaxLines = 400            # 单轮日志读取上限。来源=运维约定：轮询粒度 $regIntervalSec=3s，
+                                  # 实测冷盘+Defender 场景单轮新增行数远低于该值，400 仅作内存兜底
+                                  # （防止一次读进整份日志），截断只影响最旧的线索行。
+$whoamiTimeoutSec = 5              # 主控 whoami 交叉验证超时。来源=运维约定：whoami 为同机房主控
+                                  # 只读端点，正常响应亚秒级；5s 是异常网络下的上限，超时即静默降级
+                                  # 为纯日志判定、不阻断回滚主流程（catch 分支）。
+$heartbeatToleranceSec = 10        # 心跳时钟容差。来源=运维约定：安装机与主控均走 NTP，同步误差
+                                  # 典型亚秒级；心跳记录落库另有秒级间隔，10s 覆盖两层取整误差。
+
 # 注册在途迹象：注册 RPC 已发出 / 注册前启动进度 / 心跳相关（agent 启动序列的正常进度行）。
 # 只用 ASCII 关键字：Windows PowerShell 5.1 的 Get-Content 对无 BOM 的 UTF-8 日志按 ANSI 解码，
 # 中文关键字会乱码匹配不到（日志里的英文标记不受影响）。
@@ -838,7 +850,7 @@ $regFailedPattern = 'Register failed|RUNTIME_TOKEN rejected|register 401|credent
 # - 读不到（文件不存在/共享冲突）→ 返回空数组，调用方按「本轮暂无线索」回落进程存活判定；
 # - 只保留末尾 MaxLines 行：轮询粒度 3s，正常新增行远低于上限，但防止一次读进整份日志。
 function Get-NewAgentLogLines {
-    param($LogPath, [long]$Offset = 0, [int]$MaxLines = 400)
+    param($LogPath, [long]$Offset = 0, [int]$MaxLines = $agentLogMaxLines)
     if (-not (Test-Path $LogPath)) { return @() }
     $text = ""
     $fs = $null
@@ -902,7 +914,7 @@ function Test-RegistrationInFlight {
 function Test-MasterRuntimeRecentlySeen {
     param([datetime]$SinceUtc = [datetime]::UtcNow)
     try {
-        $who = Invoke-RestMethod -Uri "$Server/api/runtime/whoami" -TimeoutSec 5 -UseBasicParsing `
+        $who = Invoke-RestMethod -Uri "$Server/api/runtime/whoami" -TimeoutSec $whoamiTimeoutSec -UseBasicParsing `
             -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
     } catch {
         Log "Master heartbeat cross-check skipped (whoami unavailable: $($_.Exception.Message)) - using log-only judgement"
@@ -925,9 +937,9 @@ function Test-MasterRuntimeRecentlySeen {
         Log "Master heartbeat cross-check skipped (unparsable last_seen_at '$raw') - using log-only judgement"
         return $false
     }
-    # 容差 10s：安装器与主控时钟不可能完全同步；老 agent 在本轮启动前已被停掉，因此窗口内新增的
+    # 容差 $heartbeatToleranceSec：安装器与主控时钟不可能完全同步；老 agent 在本轮启动前已被停掉，因此窗口内新增的
     # 心跳只可能来自新 agent（含 daemon 重启后的重试实例）。
-    if ($seenUtc -ge $SinceUtc.AddSeconds(-10)) {
+    if ($seenUtc -ge $SinceUtc.AddSeconds(-$heartbeatToleranceSec)) {
         Log "Master reports a heartbeat within this upgrade window ($($seenUtc.ToString('u'))) - the new agent is reaching the controller"
         return $true
     }

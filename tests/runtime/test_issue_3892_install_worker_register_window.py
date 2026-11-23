@@ -277,7 +277,23 @@ class TestMasterCrossCheckDegrades:
         fn = fn[:fn.find("\n}\n") + 3]
         assert "api/runtime/whoami" in fn, "复用凭据下的既有只读端点（不新增主控接口）"
         assert 'Authorization = "Bearer $Token"' in fn
-        assert "-TimeoutSec 5" in fn
+        assert "-TimeoutSec $whoamiTimeoutSec" in fn, \
+            "whoami 超时应引用具名常量（数值证据 B2：来源见脚本内注释），不得内联裸字面量"
+
+    def test_cross_check_numeric_constants_are_named_and_sourced(self):
+        """B2（数值证据）：三个新增数值必须具名登记 + 注释写明来源（五源之一）。"""
+        text = _ps1()
+        for name, value in (("$agentLogMaxLines", 400), ("$whoamiTimeoutSec", 5), ("$heartbeatToleranceSec", 10)):
+            assert re.search(rf"^{re.escape(name)}\s*=\s*{value}\b", text, re.M), \
+                f"{name} 应为具名常量并保持现值 {value}"
+        region = _region(text)
+        # 调用点不得再出现裸字面量形态
+        assert "int]$MaxLines = 400" not in text, "param 默认值应引用 $agentLogMaxLines"
+        assert "AddSeconds(-10)" not in region, "心跳容差应引用 $heartbeatToleranceSec"
+        # 每个常量的登记注释须含来源说明
+        for name in ("$agentLogMaxLines", "$whoamiTimeoutSec", "$heartbeatToleranceSec"):
+            line = next(l for l in text.splitlines() if l.startswith(name))
+            assert "来源=" in line, f"{name} 行内注释必须登记数值来源（五源之一）"
 
     def test_cross_check_never_blocks_rollback(self):
         region = _region()
