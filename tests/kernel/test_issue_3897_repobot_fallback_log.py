@@ -9,6 +9,9 @@
   2. 默认降为 DEBUG；
   3. 同一 `(repo, field)` 只保留 1 条 WARNING / 小时（观测与下线判据 grep 仍可用）；
   4. 不同 repo 各自有 1 条 WARNING（不是全局只报一次，避免掩盖面）。
+
+全部走 port 桩（`_repos` / `_tokens`）：不依赖测试库表名（schema-mode 用例会把
+`managed_repos` 改名，造成顺序相关的假红），也不触发真实解密。
 """
 import os
 import sys
@@ -16,7 +19,8 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 
-from src.kernel.session_manager import db, db_lock
+import pytest
+
 from src.kernel import token_resolver as TR
 
 _REPO_A = "gitcode:issue3897a/repo"
@@ -25,47 +29,34 @@ _COL = "bot_gitcode_token"
 _TOKEN = "tok-3897-legacy"
 
 
-def _setup_repo(repo_key: str, value: str) -> None:
-    _o, _r = repo_key.split(":", 1)[1].split("/", 1)
-    with db_lock:
-        c = db.cursor()
-        cols = [r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()]
-        if _COL not in cols:
-            c.execute(f"ALTER TABLE managed_repos ADD COLUMN {_COL} TEXT DEFAULT ''")
-        c.execute(
-            "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, "
-            f"{_COL}) VALUES (?, ?, ?, ?, ?)",
-            (repo_key, _o, _r, f"{_o}/{_r}", value))
-        db.commit()
-
-
-def _clear_rate_limit():
-    TR._fallback_warn_at.clear()
-
-
 class _FakeProvider:
-    """最小 provider：只声明历史列（真 provider 的 LEGACY 列已随平台卡退役，
-    但存量生产部署仍有卡片声明该列——本用例锁的是回退分支自身的行为）。"""
+    """最小 provider：只声明历史列（本用例锁的是回退分支自身的行为）。"""
 
     def token_storage_field(self) -> str:
         return _COL
 
 
-def _strategy() -> "TR.RepoBotToken":
+@pytest.fixture
+def strategy(monkeypatch):
+    """把 port 层打桩：rc 恒 miss、历史列恒命中、解密恒等。"""
+    monkeypatch.setattr(TR._tokens, "get_repo_credential_meta", lambda rk, kind: None)
+    monkeypatch.setattr(TR._tokens, "get_host_user_id", lambda rk: "")
+    monkeypatch.setattr(TR._tokens, "repo_secret_decrypt", lambda raw: raw)
+    monkeypatch.setattr(TR._repos, "repo_bot_token_from_legacy_column_any",
+                        lambda rk, col: _TOKEN if col == _COL else "")
+    TR._fallback_warn_at.clear()
+
     s = TR.RepoBotToken.__new__(TR.RepoBotToken)
     s.provider = _FakeProvider()
     s.bypass_path_b = False
     return s
 
 
-def test_fallback_still_returns_token_and_warns_once_per_hour(caplog):
-    _setup_repo(_REPO_A, _TOKEN)
-    _clear_rate_limit()
+def test_fallback_still_returns_token_and_warns_once_per_hour(strategy, caplog):
     caplog.set_level("DEBUG")
 
-    strat = _strategy()
     for _ in range(5):
-        assert strat._fetch(_REPO_A) == _TOKEN, "降噪不得影响回退取值"
+        assert strategy._fetch(_REPO_A) == _TOKEN, "降噪不得影响回退取值"
 
     warns = [r for r in caplog.records
              if r.levelname == "WARNING" and "historical column fallback hit" in r.getMessage()]
@@ -76,15 +67,11 @@ def test_fallback_still_returns_token_and_warns_once_per_hour(caplog):
     assert _REPO_A in warns[0].getMessage() and _COL in warns[0].getMessage()
 
 
-def test_rate_limit_is_per_repo(caplog):
-    _setup_repo(_REPO_A, _TOKEN)
-    _setup_repo(_REPO_B, _TOKEN)
-    _clear_rate_limit()
+def test_rate_limit_is_per_repo(strategy, caplog):
     caplog.set_level("DEBUG")
 
-    strat = _strategy()
-    strat._fetch(_REPO_A)
-    strat._fetch(_REPO_B)
+    strategy._fetch(_REPO_A)
+    strategy._fetch(_REPO_B)
 
     warns = [r for r in caplog.records
              if r.levelname == "WARNING" and "historical column fallback hit" in r.getMessage()]
