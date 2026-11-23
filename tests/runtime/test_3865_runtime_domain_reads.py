@@ -173,7 +173,7 @@ def test_active_event_dedup_degrades_visibly(runtime_domain, caplog):
 
     assert seq == 0, "fail-open 语义保持（DB 抖动不全量阻断派发）"
     assert flags["dedup_unavailable"] is True
-    assert flags["runtime_domain_route"] == "domain"
+    assert "runtime_domain_route" not in flags, "拓扑标签只进日志，不进标记袋"
     logs = caplog.text
     assert "dedup_unavailable" in logs
     assert REPO_KEY in logs and "route=domain" in logs
@@ -424,8 +424,8 @@ class TestA2AGateDegradeEndpoint:
         detail = data.get("detail") or {}
         assert detail.get("cancel_check_unavailable") is True, data
         assert detail.get("dedup_unavailable") is True, data
-        # 本用例直接替换 cursor_for，处理拓扑标签按进程实际路由给出（单测 D 已断言 domain）
-        assert detail.get("runtime_domain_route") in ("local", "domain"), data
+        # PR #2002 R2 Optional：拓扑标签只进日志，响应 detail 不外泄
+        assert "runtime_domain_route" not in detail, data
 
     def _degraded_client(self, monkeypatch, *, stubs=None):
         """带「去重门禁降级」环境的 TestClient + 公共桩（分支覆盖用例共用）。"""
@@ -483,7 +483,7 @@ class TestA2AGateDegradeEndpoint:
         # 幂等命中在去重门禁之前返回，标记来自已执行的取消门禁；任一降级标记
         # 丢失都说明该分支绕过了 stamp（QA R2 的「统一出口」要求）。
         assert detail.get("cancel_check_unavailable") is True, data
-        assert detail.get("runtime_domain_route") in ("local", "domain"), data
+        assert "runtime_domain_route" not in detail, data
 
     def test_degraded_flags_reach_agent_disabled_403(self, monkeypatch):
         """agent disabled（403）分支必须带降级标记（PR #2002 R2 Required）。"""

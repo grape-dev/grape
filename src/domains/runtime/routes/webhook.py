@@ -566,7 +566,10 @@ def _a2a_gate_degraded(flag: str, *, repo_key: str = "", issue_id: str = "",
         _route = _dbreg.route_of("runtime")
     except Exception as _re:  # noqa: BLE001 - 路由标签本身失败也要给出原因
         _route = f"unavailable:{type(_re).__name__}"
-    marks = {flag: True, "runtime_domain_route": _route}
+    # PR #2002 R2（Optional）：拓扑标签（local/domain）只进日志，不并入响应 detail——
+    # 对外仅保留业务语义标记 dedup_unavailable / cancel_check_unavailable，
+    # 避免内部路由形态外泄（Spec 只定义这两枚标记）。
+    marks = {flag: True}
     log.warning(
         f"A2A: {flag} gate degraded — runtime domain read failed: "
         f"repo={repo_key} issue={issue_id} agent={agent} route={_route} "
