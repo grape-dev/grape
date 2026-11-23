@@ -7,7 +7,7 @@
 
 本脚本按与派发侧相同的解析口径（user→repo→official，`resolve_skill_id`）补 `skill_id`：
 - 默认 dry-run：逐节点打印对照清单（表 / 行 / scene / tag / skill / 解析 id / 归属档），不写库；
-- `--apply` 才写库，幂等（已有 skill_id 跳过；解析不到保持原样）；
+- `--apply` 才写库，幂等（已有非 0 skill_id 跳过；skill_id=0/缺省按名回填；解析不到保持原样）；
 - `--json` 输出结构化清单，便于人工确认后批量执行。
 
 用法：
@@ -160,6 +160,16 @@ def main() -> int:
         return 0
     affected = apply(pending)
     print(f"已回填 {affected} 行（幂等：可重复执行）。")
+    # 回填后校验（review）：apply 是逐行 UPDATE + 一次 commit，部分失败不回滚已写行；
+    # 因此重新 collect 一次，待写行必须为 0 才算完整成功，否则非 0 退出让灰度方复核。
+    _re_candidates, left_pending = collect()
+    left_unresolved = [c for c in _re_candidates if not c["resolved_skill_id"]]
+    if left_pending:
+        print(f"[warn] 回填后仍有 {len(left_pending)} 行待写（部分行写失败/并发写入），"
+              f"请按 stderr 的 [fail] 行复核后重跑 --apply；已写行不回滚（幂等可重跑）。",
+              file=sys.stderr)
+        return 1
+    print(f"校验：回填后待写行 0（解析不到 {len(left_unresolved)} 个节点保持原样）。")
     return 0
 
 

@@ -109,3 +109,49 @@ def test_zero_skill_id_node_rebackfilled():
     nodes = [{"tag": "qa", "skill": "repo-qa", "skill_id": 0}]
     out = fill_scene_nodes_skill_id(nodes, "gitcode:o/r", resolver=_resolve_fake)
     assert out[0]["skill_id"] == 2756
+
+
+# ── 存量回填脚本：apply 后重新 collect 校验（部分成功不静默）────────────
+
+def _load_backfill_module():
+    import importlib.util
+    from pathlib import Path
+    script = (Path(__file__).resolve().parents[2]
+              / "scripts" / "backfill_scene_nodes_skill_id.py")
+    spec = importlib.util.spec_from_file_location("backfill_3914_under_test", script)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_backfill_apply_verifies_no_pending_rows_left(monkeypatch, capsys):
+    """apply 成功且复检待写行=0 → 退出码 0，并打印校验结果。"""
+    import sys
+    mod = _load_backfill_module()
+    pending = [("devops_pipeline_scene", 1, "[]")]
+    calls = {"n": 0}
+
+    def _collect():
+        calls["n"] += 1
+        return ([], pending if calls["n"] == 1 else [])
+
+    monkeypatch.setattr(mod, "collect", _collect)
+    monkeypatch.setattr(mod, "apply", lambda p: len(p))
+    monkeypatch.setattr(sys, "argv", ["backfill", "--apply"])
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "校验：回填后待写行 0" in out
+
+
+def test_backfill_apply_reports_partial_failure(monkeypatch, capsys):
+    """部分行写失败（复检仍有待写行）→ 非 0 退出 + stderr 提示复核，不静默成功。"""
+    import sys
+    mod = _load_backfill_module()
+    pending = [("devops_pipeline_scene", 1, "[]")]
+    monkeypatch.setattr(mod, "collect", lambda: ([], pending))
+    monkeypatch.setattr(mod, "apply", lambda p: 0)
+    monkeypatch.setattr(sys, "argv", ["backfill", "--apply"])
+    assert mod.main() == 1
+    err = capsys.readouterr().err
+    assert "仍有 1 行待写" in err
