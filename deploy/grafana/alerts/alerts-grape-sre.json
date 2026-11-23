@@ -95,7 +95,7 @@
   {
    "orgID": 1,
    "ruleGroup": "grape-sre",
-   "title": "入口 5xx 超阈值（排除 RUM 反代）",
+   "title": "入口 5xx 超阈值（排除 RUM 反代，≥0.5%）",
    "condition": "C",
    "isPaused": false,
    "data": [
@@ -119,7 +119,7 @@
      "datasourceUid": "__expr__",
      "model": {
       "type": "math",
-      "expression": "$A > 10",
+      "expression": "$A > 0.5",
       "refId": "C",
       "intervalMs": 1000,
       "maxDataPoints": 43200
@@ -130,7 +130,7 @@
    "execErrState": "OK",
    "for": "5m",
    "annotations": {
-    "summary": "Server-side 5xx ratio above 10% (same threshold as deploy/alerts.yml GrapeHTTPErrorRateHigh), excluding the RUM relay route which answers 503 by design when no upstream is configured.",
+    "summary": "Server-side 5xx ratio above 0.5% (same threshold as deploy/alerts.yml GrapeHTTPErrorRateWarning), excluding the RUM relay route which answers 503 by design when no upstream is configured.",
     "runbook": "Open the entry SLO dashboard, sort routes by 5xx, then correlate with process logs."
    },
    "labels": {

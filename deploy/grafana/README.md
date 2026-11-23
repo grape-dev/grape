@@ -48,7 +48,7 @@ GRAFANA_URL=http://<sibling-host>:3000 bash deploy/grafana/import-dashboards.sh 
 |---|---|---|---|---|
 | 业务进程不可达 | `min by (job,host)(up{job=~"grape-.+-(mgmt\|event\|worker\|insight)"}) < 1` | 1m | P1 | `alerts.yml` 只看业务指标，不看进程/scrape 存活 |
 | 节点指标抓取掉线 | `min by (host)(up{job=~"grape-.+-node"}) < 1` | 2m | P2 | 同上，主机层盲区 |
-| 入口 5xx 超阈值（排除 RUM 反代） | 排除 `/faro/collect` 后 5xx 比例 > 10% | 5m | P1 | 阈值与 `alerts.yml` 的 `GrapeHTTPErrorRateHigh` 一致；差别只在于排除 `/faro/collect`（见下） |
+| 入口 5xx 超阈值（排除 RUM 反代） | 排除 `/faro/collect` 后 5xx 比例 ≥ 0.5% | 5m | P1 | 阈值与 `alerts.yml` 的 `GrapeHTTPErrorRateWarning`（0.5%）一致；差别只在于排除 `/faro/collect`（见下） |
 
 任务卡死、任务队列积压、任务失败率、DB 连接池使用率、DB 中断连接这五条已经在 `deploy/alerts.yml` 里，
 **不要在这里复制一份**（同一指标两套阈值必然漂移）。`alerts.yml` 没被加载的环境，按它的头部注释启用：
@@ -62,7 +62,8 @@ promtool check rules deploy/alerts.yml
 
 - 「错误预算剩余（99% · 7d）」的目标 99% 取自 `src/domains/insight/observability/slo.py` 的默认 `target`（0.99），
   窗口用 7 天（数据保留期内的滚动窗口），不是另外发明一个 SLO。
-- 「入口 5xx 超阈值」的 10% 与 `deploy/alerts.yml` 的 `GrapeHTTPErrorRateHigh` 同口径。
+- 「入口 5xx 超阈值」的 0.5% 与 `deploy/alerts.yml` 的 `GrapeHTTPErrorRateWarning` 同口径
+  （`alerts.yml` 的 Critical 为 2%；Grafana 侧这一条只覆盖排除 `/faro/collect` 的口径）。
 - `grape_db_*` 的聚合用 `max()`：这些值取自 MySQL `SHOW GLOBAL STATUS`，每个进程都会把同一份数字报一遍，
   用 `sum()` 会把真实值放大 N 倍（实测把 48/min 显示成 384/min）。
 

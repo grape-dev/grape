@@ -32,8 +32,9 @@ from src.domains.runtime import public as _rt_timeout
 _TIMEOUT_FAIL_SIGNATURE = _rt_timeout.timeout_fail_signature()
 
 # ===== 种子规则 =====
-# 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的
-# 数据缺失（kind='gap'）与突变检测（metric 以 _mutation 结尾）规则。
+# 与 deploy/alerts.yml 一一对应（seed_source 记原名）。Issue #3847 把原单条 10% 的
+# HTTP 5xx 规则拆成 warning 0.5% / critical 2% 两条（与发布门禁同阈值）。后 3 条是
+# P1-3 新增的数据缺失（kind='gap'）与突变检测（metric 以 _mutation 结尾）规则。
 # level='user'   → 用户面可见（按仓库维度）
 # level='platform' → 仅 L2/L3（DB/主机/全局引擎），用户面查询一律过滤掉
 # kind='metric'（默认）→ 走指标阈值求值；kind='gap' → 走 gap.py 的数据缺失探测
@@ -84,10 +85,20 @@ SEED_RULES: List[Dict[str, Any]] = [
         "description": "MySQL 中止连接 10 分钟内新增超过 5（平台级）",
     },
     {
-        "name": "http_error_rate_5xx", "kind": "metric", "level": "platform", "metric": "http_5xx_rate",
-        "comparator": "gt", "threshold": 0.1, "window_sec": 300, "for_sec": 300,
-        "severity": "warning", "seed_source": "GrapeHTTPErrorRateHigh",
-        "description": "HTTP 5xx 占比超过 10%（平台级）",
+        "name": "http_error_rate_5xx_warning", "kind": "metric", "level": "platform",
+        "metric": "http_5xx_rate",
+        "comparator": "gt", "threshold": 0.005, "window_sec": 300, "for_sec": 300,
+        "severity": "warning", "seed_source": "GrapeHTTPErrorRateWarning",
+        "description": "HTTP 5xx 占比超过 0.5%（发布窗口可容忍上限，与 deploy/alerts.yml "
+                       "GrapeHTTPErrorRateWarning / scripts/deploy-drain.sh 同口径）",
+    },
+    {
+        "name": "http_error_rate_5xx_critical", "kind": "metric", "level": "platform",
+        "metric": "http_5xx_rate",
+        "comparator": "gt", "threshold": 0.02, "window_sec": 300, "for_sec": 120,
+        "severity": "critical", "seed_source": "GrapeHTTPErrorRateCritical",
+        "description": "HTTP 5xx 占比超过 2%（需立即回滚，与 deploy/alerts.yml "
+                       "GrapeHTTPErrorRateCritical 同口径）",
     },
     # ----- P1-3：数据缺失（"该报数却没报"）-----
     {
@@ -191,6 +202,25 @@ def seed_rules() -> int:
     n = 0
     with db_lock:
         c = db.cursor()
+        # Issue #3847 迁移：原单条 10% 的 5xx 规则已拆成 0.5%/2% 两条。seed 只插不改，
+        # 旧库里会残留 10% 规则继续求值；仅在它仍是代码默认（threshold=0.1）时停用，
+        # 运维手工调过阈值的不动（保持「种子不覆盖用户配置」的约定）。
+        try:
+            c.execute("SELECT id, threshold FROM obs_alert_rules "
+                      "WHERE name='http_error_rate_5xx' AND enabled=1")
+            legacy = c.fetchone()
+            if legacy and abs(float(legacy[1]) - 0.1) < 1e-9:
+                c.execute(
+                    "UPDATE obs_alert_rules SET enabled=0, description=? WHERE id=? AND enabled=1",
+                    ("已弃用：Issue #3847 拆分为 http_error_rate_5xx_warning（0.5%）/"
+                     "http_error_rate_5xx_critical（2%），与 deploy/alerts.yml 对齐",
+                     legacy[0]))
+                if c.rowcount:
+                    log.warning("obs alert legacy rule http_error_rate_5xx disabled "
+                                "(split into warning 0.5% / critical 2%)")
+                    n += 1
+        except Exception as e:
+            log.warning(f"obs seed rule legacy migrate failed: {e}")
         for r in SEED_RULES:
             try:
                 c.execute("SELECT id FROM obs_alert_rules WHERE name=?", (r["name"],))

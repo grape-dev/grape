@@ -121,7 +121,8 @@ def test_seed_rules_idempotent_and_levels():
     rules = _rules_by_name()
     assert set(rules) >= {"task_stuck", "task_failure_rate", "task_queue_backlog",
                           "all_runtimes_offline", "db_pool_usage", "db_aborted_connects",
-                          "http_error_rate_5xx",
+                          # Issue #3847：5xx 拆分为 warning 0.5% / critical 2%
+                          "http_error_rate_5xx_warning", "http_error_rate_5xx_critical",
                           # P1-3：数据缺失 + 突变
                           "runtime_silent", "repo_silent", "task_success_rate_drop",
                           # Issue #463 P3：表体积
@@ -130,14 +131,17 @@ def test_seed_rules_idempotent_and_levels():
                           "task_timeout",
                           # Issue #1938：事件回报丢失补偿（用户面可见，仓库维度计数）
                           "cascade_compensation"}
-    assert len(al.list_rules()) == 14, "种子规则应为 14 条（9 指标 + 2 缺失 + 1 突变 + 2 表体积）"
+    assert len(al.list_rules()) == 15, "种子规则应为 15 条（9 指标 + 2 缺失 + 1 突变 + 2 表体积 + 1 补偿）"
     user_rules = {r["name"] for r in al.list_rules(level="user")}
     assert user_rules == {"task_stuck", "task_failure_rate", "task_queue_backlog",
                           "runtime_silent", "repo_silent", "task_success_rate_drop",
                           "task_timeout", "cascade_compensation"}
-    for name in ("db_pool_usage", "db_aborted_connects", "http_error_rate_5xx",
-                 "all_runtimes_offline"):
+    for name in ("db_pool_usage", "db_aborted_connects", "http_error_rate_5xx_warning",
+                 "http_error_rate_5xx_critical", "all_runtimes_offline"):
         assert rules[name]["level"] == "platform"
+    assert float(rules["http_error_rate_5xx_warning"]["threshold"]) == 0.005
+    assert float(rules["http_error_rate_5xx_critical"]["threshold"]) == 0.02
+    assert rules["http_error_rate_5xx_critical"]["severity"] == "critical"
     # 来源可追溯到 deploy/alerts.yml
     assert rules["task_stuck"]["seed_source"] == "GrapeTaskStuck"
     # P1-3：kind 与默认开关
