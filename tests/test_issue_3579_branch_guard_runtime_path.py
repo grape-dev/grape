@@ -105,9 +105,17 @@ def test_stable_module_root_recorded_for_deployed_install_root(tmp_path, monkeyp
 # ===================== QA 复审 Required：部署态优先加载链 =====================
 
 def _fake_guard(root, marker, rc=0):
-    """构造自包含守卫模块：hook_main 打印来源 marker 并返回 rc。"""
+    """构造自包含守卫模块：hook_main 打印来源 marker 并返回 rc。
+
+    Issue #3579 QA 复审 Required：``src`` 及各级父目录一并写入 ``__init__.py``，
+    使其成为**常规包**而非 namespace 目录。CI 先 ``pip install -e .[all,dev]``，
+    仓库 ``src`` 是常规包且会被加入 ``sys.path``；若部署态假守卫仍是 namespace
+    目录，同名常规包会抢先解析回仓库真实守卫，包导入兜底用例永不可达。
+    """
     module = root / "src" / "domains" / "runtime" / "engine" / "branch_guard.py"
     module.parent.mkdir(parents=True)
+    for rel in ("", "domains", "domains/runtime", "domains/runtime/engine"):
+        (root / "src" / rel / "__init__.py").write_text("", encoding="utf-8")
     module.write_text(
         "import sys\n"
         "def hook_main():\n"
@@ -306,7 +314,15 @@ def test_resolve_hook_interpreter_order(tmp_path, monkeypatch):
 # ===================== 模块缺失 fail-open（未记录稳定根时） =====================
 
 def test_missing_guard_module_fails_open(tmp_path, monkeypatch):
-    """未记录稳定根且 worktree 无模块 → 部署态包导入失败 → fail-open。"""
+    """未记录稳定根且 worktree 无模块 → 部署态包导入失败 → fail-open。
+
+    Issue #3579 QA 复审 Required：CI 先 ``pip install -e .[all,dev]``，仓库
+    ``src`` 常规包常驻 ``sys.path``；直接跑钩子会让包导入兜底命中真实守卫，
+    fail-open 断言变成依赖真实守卫的内部异常（本机未安装时才会真走缺模块路径）。
+    这里在 ``PYTHONPATH`` 前置一条与守卫同级、但缺 ``branch_guard.py`` 的
+    常规包链（``src``→``domains``→``runtime``→``engine``），模拟部署树缺模块；
+    每一级都由 blocker 自己命中，editable 安装的 finder 无法插队解析回仓库树。
+    """
     # issue 工作树内安装（不记录稳定根），保证任何环境（CI 检出）下行为一致
     issue_wt = tmp_path / "issues" / "123" / "coding"
     issue_wt.mkdir(parents=True)
@@ -314,11 +330,17 @@ def test_missing_guard_module_fails_open(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     hook = _install(repo)
 
-    r = _run_hook(hook, cwd=repo)
+    blocker = tmp_path / "no-guard-pkg"
+    for rel in ("", "domains", "domains/runtime", "domains/runtime/engine"):
+        (blocker / "src" / rel).mkdir(parents=True, exist_ok=True)
+        (blocker / "src" / rel / "__init__.py").write_text("", encoding="utf-8")
+
+    r = _run_hook(hook, cwd=repo, env=_hook_env(PYTHONPATH=str(blocker)))
 
     assert r.returncode == 0, r.stderr
     assert "fail-open" in r.stderr
     assert "branch_guard" in r.stderr
+    assert "ModuleNotFoundError" in r.stderr
 
 
 # ===================== fail-closed 正常路径 =====================
