@@ -155,6 +155,12 @@ services:
     volumes:
       # 四进程分流配置（upstream 指向 compose 服务名）
       - ./nginx-grape-compose.conf:/etc/nginx/conf.d/grape.conf:ro
+      # Issue #3847：grape.conf 内 include 的公共片段必须一并挂进容器，否则 nginx
+      # 启动即 [emerg] open() failed（include 路径相对 prefix /etc/nginx 解析）。
+      # 只能逐个挂载 .inc：整目录挂载会把 nginx-grape*.conf 一并纳入 conf.d/*.conf
+      # 的自动 include，产生重复 upstream / 重复 listen 冲突。
+      - ./nginx-grape-upstream.inc:/etc/nginx/conf.d/nginx-grape-upstream.inc:ro
+      - ./nginx-grape-upstream-keepalive.inc:/etc/nginx/conf.d/nginx-grape-upstream-keepalive.inc:ro
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
