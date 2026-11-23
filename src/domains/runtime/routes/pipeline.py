@@ -600,34 +600,58 @@ def get_pipeline(owner: str, repo: str,
     # （每次还做一次后端探测）单独就占 0.8s。
     _scene_filter = str(scene_id or "").strip()
     _need = 1 + max(int(history_offset or 0), 0) + int(history_limit)
-    try:
-        _win_ids, _issues_total, _failed_ids = _pipeline_window(_repo_keys, _scene_filter, _need)
-        _pushdown_ok = True
-    except Exception as _e:
-        log.warning(f"pipeline window pushdown failed, fallback to full load: {_e}")
-        _win_ids, _issues_total, _failed_ids, _pushdown_ok = [], None, None, False
-
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.otel import feature_span
+    with feature_span("pipeline.window_pushdown",
+                      {"repo_keys": len(_repo_keys), "need": _need,
+                       "scene_filter": 1 if _scene_filter else 0}) as _sp_win:
         try:
-            _where = ("repo_key IN ({}) AND issue_id NOT IN ('', '#0') "
-                      "AND event_type <> 'admin_action'").format(",".join("?" * len(_repo_keys)))
-            _params = list(_repo_keys)
-            if _pushdown_ok and _win_ids:
-                _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
-                _params += list(_win_ids)
-            from src.domains.runtime.schema_probe import column_exists as _col_exists
-            _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
-                           else "'' AS failed_node")
-            c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
-                f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
-            rows = c.fetchall()
-        except Exception as e:
-            # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
-            log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
-            rows = []
+            _win_ids, _issues_total, _failed_ids = _pipeline_window(_repo_keys, _scene_filter, _need)
+            _pushdown_ok = True
+        except Exception as _e:
+            log.warning(f"pipeline window pushdown failed, fallback to full load: {_e}")
+            _win_ids, _issues_total, _failed_ids, _pushdown_ok = [], None, None, False
+        if _sp_win is not None:
+            try:
+                _sp_win.set_attribute("pipeline.pushdown_ok", bool(_pushdown_ok))
+                _sp_win.set_attribute("pipeline.issues_total", int(_issues_total or 0))
+                _sp_win.set_attribute("pipeline.window_ids", len(_win_ids or []))
+            except Exception as _se:
+                log.debug(f"[pipeline] span attribute failed (window): {_se}")
+
+    with feature_span("pipeline.events_query",
+                      {"repo_keys": len(_repo_keys),
+                       "pushdown": 1 if _pushdown_ok else 0}) as _sp_ev:
+        with db_lock:
+            c = db.cursor()
+            try:
+                _where = ("repo_key IN ({}) AND issue_id NOT IN ('', '#0') "
+                          "AND event_type <> 'admin_action'").format(",".join("?" * len(_repo_keys)))
+                _params = list(_repo_keys)
+                if _pushdown_ok and _win_ids:
+                    _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
+                    _params += list(_win_ids)
+                from src.domains.runtime.schema_probe import column_exists as _col_exists
+                _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
+                               else "'' AS failed_node")
+                c.execute(
+                    "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
+                    "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
+                    f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
+                rows = c.fetchall()
+            except Exception as e:
+                # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
+                log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
+                try:
+                    if _sp_ev is not None:
+                        _sp_ev.set_attribute("pipeline.error", str(e)[:200])
+                except Exception as _se:
+                    log.debug(f"[pipeline] span attribute failed (error marker): {_se}")
+                rows = []
+        if _sp_ev is not None:
+            try:
+                _sp_ev.set_attribute("pipeline.event_rows", len(rows))
+            except Exception as _se:
+                log.debug(f"[pipeline] span attribute failed (rows): {_se}")
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
@@ -652,30 +676,37 @@ def get_pipeline(owner: str, repo: str,
             if is_native_issue_ident(iid):
                 _iss_nums.append(native_issue_number(iid))
         if _iss_nums:
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    # 一次查询同时获取 title + stage + scene_id + assignee 等
-                    c.execute(
-                        "SELECT issue_number, title, stage, owner_agent, assignee, "
-                        "scene_id, parent_issue_id, is_subtask_mode, status "
-                        "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
-                            ",".join("?" * len(_repo_keys)),
-                            ",".join("?" * len(_iss_nums))
-                        ),
-                        (*_repo_keys, *_iss_nums)
-                    )
-                    for r in c.fetchall():
-                        _iid = f"#{r[0]}"
-                        _title_map[_iid] = r[1] or ""
-                        _stage_map[_iid] = {
-                            "stage": r[2] or "", "owner_agent": r[3] or "",
-                            "assignee": r[4] or "", "scene_id": r[5] or "",
-                            "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
-                            "status": r[8] if len(r) > 8 else "",
-                        }
-            except Exception:
-                pass
+            with feature_span("pipeline.issue_batch",
+                              {"issue_nums": len(_iss_nums), "repo_keys": len(_repo_keys)}) as _sp_is:
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        # 一次查询同时获取 title + stage + scene_id + assignee 等
+                        c.execute(
+                            "SELECT issue_number, title, stage, owner_agent, assignee, "
+                            "scene_id, parent_issue_id, is_subtask_mode, status "
+                            "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
+                                ",".join("?" * len(_repo_keys)),
+                                ",".join("?" * len(_iss_nums))
+                            ),
+                            (*_repo_keys, *_iss_nums)
+                        )
+                        for r in c.fetchall():
+                            _iid = f"#{r[0]}"
+                            _title_map[_iid] = r[1] or ""
+                            _stage_map[_iid] = {
+                                "stage": r[2] or "", "owner_agent": r[3] or "",
+                                "assignee": r[4] or "", "scene_id": r[5] or "",
+                                "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
+                                "status": r[8] if len(r) > 8 else "",
+                            }
+                except Exception:
+                    pass
+                if _sp_is is not None:
+                    try:
+                        _sp_is.set_attribute("pipeline.issue_rows", len(_stage_map))
+                    except Exception as _se:
+                        log.debug(f"[pipeline] span attribute failed (issue rows): {_se}")
 
     # 场景配置缓存（同仓库内 scene_id 去重，消除 get_pipeline_config N+1）
     _pipe_cfg_cache = {}
