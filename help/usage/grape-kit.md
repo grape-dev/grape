@@ -1,4 +1,4 @@
-# 14. grape 插件：把 grape 装进你自己的 Agent
+# 15. grape 插件：把 grape 装进你自己的 Agent
 
 grape 官方插件把 Grape 平台能力带进你的 Agent。两种形态按你使用的 Agent 二选一：
 
