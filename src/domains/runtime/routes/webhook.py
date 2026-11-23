@@ -2327,7 +2327,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         issue_id=f"#{issue_number}")
                 except Exception as _tko_audit_e:
                     log.warning(f"A2A: takeover skip audit failed: {_tko_audit_e}")
-                return JSONResponse(status_code=409, content={
+                return _a2a_stamp_degraded(JSONResponse(status_code=409, content={
                     "status": "error", "code": 409,
                     "error": "already_taken_over", "skipped": "already_taken_over",
                     "takeover_id": _tko_sess.get("id") or "",
@@ -2337,7 +2337,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                 f"takeover={_tko_sess.get('id')}），禁止自动派发"),
                     "handoff_result": HANDOFF_RESULT_REJECTED,
                     "source_seq": _source_seq,
-                })
+                }), _a2a_degraded)
 
         # Issue #1948 / #1973：解析调用方自身事件 seq，供派发门禁精确排除自身
         # running 事件（下游 qa 打回上游 coding 时不能把自己判成「下游 running」自锁）。
@@ -2419,14 +2419,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             f"issue=#{issue_number} "
                             f"expected={_expected_repository} actual={repository} "
                             f"agent={agent_name} reason={_rm_reason}")
-                        return _a2a_skip_response(
+                        return _a2a_stamp_degraded(_a2a_skip_response(
                             "repo_mismatch", agent=agent_name, source_seq=_source_seq,
                             reason=_rm_reason,
                             detail={
                                 "issue_number": native_issue_number(issue_number),
                                 "expected_repository": _expected_repository,
                                 "actual_repository": repository,
-                            })
+                            }), _a2a_degraded)
             except Exception as _rm_e:
                 log.warning(f"A2A #2555: repo mismatch check failed: {_rm_e}")
 
@@ -2514,8 +2514,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 else:
                     log.info(f"A2A: idempotent hit key={_idem_key} seq={_existing['seq']} "
                              f"status={_existing_status}, return existing event")
-                    return _a2a_idempotent_hit_response(
-                        _existing, agent_name=agent_name, source_seq=_source_seq)
+                    return _a2a_stamp_degraded(_a2a_idempotent_hit_response(
+                        _existing, agent_name=agent_name, source_seq=_source_seq),
+                        _a2a_degraded)
 
         # PR 订阅模式拦截：PR 订阅触发的 QA 不允许 A2A（只做审查，不流转流水线）
         # 通过 session token 反查调用方 agent_tasks.issue_id：
@@ -2536,10 +2537,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         f"code=pr_subscription_a2a_disabled issue=#{issue_number} "
                         f"repository={repository} "
                         f"reason={_a2a_skip_reason('pr_subscription_a2a_disabled')}")
-                    return _a2a_skip_response(
+                    return _a2a_stamp_degraded(_a2a_skip_response(
                         "pr_subscription_a2a_disabled", agent=agent_name,
                         source_seq=_source_seq,
-                        detail={"issue_number": native_issue_number(issue_number)} if issue_number else {})
+                        detail={"issue_number": native_issue_number(issue_number)} if issue_number else {}),
+                        _a2a_degraded)
             except Exception as _prsub_e:
                 log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
@@ -2547,8 +2549,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         from src.api.session_store import is_agent_enabled
         if not is_agent_enabled(repo_key, agent_name):
             log.warning(f"A2A: agent '{agent_name}' disabled for repo={repo_key}, rejected")
-            return JSONResponse(status_code=403, content={"code": 403, "message": f"agent {agent_name} disabled",
-                                                          "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
+            return _a2a_stamp_degraded(JSONResponse(
+                status_code=403,
+                content={"code": 403, "message": f"agent {agent_name} disabled",
+                         "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}),
+                _a2a_degraded)
 
         # 场景节点校验：目标 agent 不在当前场景的 pipeline nodes 里 → 拦截（不创建事件）
         # 防止 agent skill 硬编码 A2A 目标（如 coding→qa）与自定义场景 pipeline 冲突
@@ -2559,7 +2564,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
                 _nis_reason = _a2a_skip_reason("not_in_scene", agent=agent_name)
                 log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} (nodes={_scene_node_ids})")
-                return _a2a_skip_response(
+                return _a2a_stamp_degraded(_a2a_skip_response(
                     "not_in_scene", agent=agent_name, source_seq=_source_seq,
                     status="skipped", status_code=409,
                     reason=_nis_reason,
@@ -2567,7 +2572,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     extra={
                         "scene": _scene_ck.get("scene_id"),
                         "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
-                    })
+                    }), _a2a_degraded)
 
         # Issue #2792（#2747 子单4，Spec 案 2）：前向跳步披露——零语义变更。
         # A2A 层仍「不干预」（agent 有权交办到任意目标含回滚），只把被越过的节点
@@ -2584,7 +2589,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if _skipped_nodes and _REJECT_FORWARD_SKIP:
             log.info(f"A2A #2792: forward skip rejected (issue=#{issue_number} "
                      f"agent={agent_name} skipped={_skipped_nodes})")
-            return JSONResponse(status_code=422, content={
+            return _a2a_stamp_degraded(JSONResponse(status_code=422, content={
                 "status": "skipped", "seq": 0, "agent": agent_name,
                 "skipped": "forward_skip_rejected",
                 "skipped_nodes": _skipped_nodes,
@@ -2592,7 +2597,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                            "A2A 前向越站被拒绝（案 1 已启用），请按场景节点顺序交办；"
                            "回滚/重派方向不受限制",
                 "handoff_result": HANDOFF_RESULT_REJECTED,
-                "source_seq": _source_seq})
+                "source_seq": _source_seq}), _a2a_degraded)
 
         # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     except HTTPException:
@@ -2618,11 +2623,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 result=f"A2A 请求处理异常（未派发）：{str(_a2a_e)[:200]}")
         except Exception as _te:
             log.warning(f"A2A: trace write failed: {_te}")
-        return JSONResponse(status_code=500, content={
+        return _a2a_stamp_degraded(JSONResponse(status_code=500, content={
             "code": 500, "message": f"a2a processing failed: {str(_a2a_e)[:150]}",
             "fingerprint": _fingerprint, "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq,
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
-        })
+        }), _a2a_degraded)
     try:
         from src.domains.runtime.pipeline.event_pipeline import _execute_agent
         from src.kernel.session_manager import db, db_lock
@@ -2710,7 +2715,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                 _reason,
                                 issue_id=f"#{issue_number}" if issue_number else "",
                                 scope_info=_ev)
-                            return JSONResponse(
+                            return _a2a_stamp_degraded(JSONResponse(
                                 status_code=400,
                                 content={"code": 400, "status": "failed",
                                          "seq": _fr.get("seq", 0),
@@ -2722,7 +2727,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                          "rebind_candidates": list(_ev.get("rebind_candidates") or []),
                                          "handoff_result": HANDOFF_RESULT_FAILED,
                                          "source_seq": _source_seq,
-                                         "message": _reason})
+                                         "message": _reason}), _a2a_degraded)
                         from src.domains.mgmt.public import resolve_skill_dispatch
                         _res = resolve_skill_dispatch(
                             _pipe_skill, _node_sid, repo_key=repo_key,
@@ -2847,11 +2852,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
                 except Exception as _tse:
                     log.warning(f"A2A #2816: storm detection failed: {_tse}")
-                return JSONResponse(
+                return _a2a_stamp_degraded(JSONResponse(
                     status_code=200,
                     content={**_terminal_content,
                              "handoff_result": HANDOFF_RESULT_REJECTED,
-                             "source_seq": int(_source_seq or 0)})
+                             "source_seq": int(_source_seq or 0)}), _a2a_degraded)
             _down = find_running_downstream(
                 repo_key, issue_number, agent_name, _guard_scene, _guard_nodes,
                 exclude_seq=_a2a_ref_seq)
@@ -2906,7 +2911,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             _a2a_degraded)
                     if not _dq_qseq:
                         log.error(f"A2A: downstream queue event store failed agent={agent_name} issue=#{issue_number}")
-                        return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
+                        return _a2a_stamp_degraded(JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq}), _a2a_degraded)
                     _advance_a2a_issue_stage(repo_key, issue_number, agent_name,
                                                  context=(context or "") if 'context' in dir() else "")
                     try:
@@ -2986,10 +2991,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                 f"creation (stage=sre, code=sre_subscribed "
                                 f"issue=#{issue_number} repository={repository} "
                                 f"reason={_a2a_skip_reason('sre_subscribed')})")
-                            return _a2a_skip_response(
+                            return _a2a_stamp_degraded(_a2a_skip_response(
                                 "sre_subscribed", agent=agent_name,
                                 source_seq=_source_seq,
-                                detail={"issue_number": native_issue_number(issue_number)})
+                                detail={"issue_number": native_issue_number(issue_number)}),
+                                _a2a_degraded)
             except Exception:
                 pass
 
@@ -3040,7 +3046,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _a2a_degraded)
                 if not _qseq:
                     log.error(f"A2A: queue event store failed for agent={agent_name}, issue=#{issue_number}")
-                    return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
+                    return _a2a_stamp_degraded(JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq}), _a2a_degraded)
                 # 审查修复①：覆盖「活跃判定 → 排队落库」竞态窗口——若前序在间隙内已终态，
                 # 终态钩子已在本次写入前执行完，排队行将无人派发；此处立即对账兜底。
                 try:
@@ -3139,11 +3145,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 "issue_id": f"#{issue_number}" if issue_number else "",
             }
             log.info(f"A2A: idempotent race hit key={_idem_key} seq={-seq}, return existing event")
-            return _a2a_idempotent_hit_response(
-                _dup, agent_name=agent_name, source_seq=_source_seq)
+            return _a2a_stamp_degraded(_a2a_idempotent_hit_response(
+                _dup, agent_name=agent_name, source_seq=_source_seq), _a2a_degraded)
         if not seq:
             log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")
-            return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
+            return _a2a_stamp_degraded(JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq}), _a2a_degraded)
         log.info(f"A2A: event created, seq={seq}")
 
         # Issue #2792：跳步事件已落库 → 在 Issue 上向用户显式提醒（失败不阻断交办）。

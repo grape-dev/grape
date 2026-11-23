@@ -440,9 +440,11 @@ class TestA2AGateDegradeEndpoint:
         app = FastAPI()
         app.include_router(webhook_mod.router)
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        # 去重门禁查询恒失败（dedup_unavailable 必置位）；其余 runtime 域读放行。
+        # 去重/取消门禁查询恒失败（dedup_unavailable / cancel_check_unavailable 必置位）；
+        # 其余 runtime 域读放行。
         monkeypatch.setattr(db_registry, "cursor_for", _selective_runtime_cursor(
-            ("event_type='a2a_event' AND status IN ('running','dispatched')",)))
+            ("event_type='a2a_event' AND status IN ('running','dispatched')",
+             "AND status='cancelled' LIMIT 1")))
         import src.api.session_store as session_store
         monkeypatch.setattr(webhook_mod, "_authorize_a2a", lambda *a, **k: {
             "user_id": 0, "username": "tester", "session_key": ""})
@@ -478,7 +480,10 @@ class TestA2AGateDegradeEndpoint:
         data = resp.json()
         assert data.get("idempotent") is True, data
         detail = data.get("detail") or {}
-        assert detail.get("dedup_unavailable") is True, "幂等命中分支不得丢降级标记"
+        # 幂等命中在去重门禁之前返回，标记来自已执行的取消门禁；任一降级标记
+        # 丢失都说明该分支绕过了 stamp（QA R2 的「统一出口」要求）。
+        assert detail.get("cancel_check_unavailable") is True, data
+        assert detail.get("runtime_domain_route") in ("local", "domain"), data
 
     def test_degraded_flags_reach_agent_disabled_403(self, monkeypatch):
         """agent disabled（403）分支必须带降级标记（PR #2002 R2 Required）。"""
@@ -497,7 +502,7 @@ class TestA2AGateDegradeEndpoint:
 
         assert resp.status_code == 403, resp.text
         detail = (resp.json() or {}).get("detail") or {}
-        assert detail.get("dedup_unavailable") is True, "403 分支不得丢降级标记: " + resp.text
+        assert detail.get("cancel_check_unavailable") is True, "403 分支不得丢降级标记: " + resp.text
 
     def test_degraded_flags_reach_not_in_scene_409(self, monkeypatch):
         """not_in_scene（409）分支必须带降级标记（PR #2002 R2 Required）。"""
@@ -513,7 +518,7 @@ class TestA2AGateDegradeEndpoint:
 
         assert resp.status_code == 409, resp.text
         detail = (resp.json() or {}).get("detail") or {}
-        assert detail.get("dedup_unavailable") is True, "409 分支不得丢降级标记: " + resp.text
+        assert detail.get("cancel_check_unavailable") is True, "409 分支不得丢降级标记: " + resp.text
 
     def test_degraded_flags_reach_event_store_failed_500(self, monkeypatch):
         """事件落库失败（500 早退）分支必须带降级标记（PR #2002 R2 Required）。"""
@@ -535,7 +540,8 @@ class TestA2AGateDegradeEndpoint:
 
         assert resp.status_code == 500, resp.text
         detail = (resp.json() or {}).get("detail") or {}
-        assert detail.get("dedup_unavailable") is True, "500 早退分支不得丢降级标记: " + resp.text
+        assert detail.get("cancel_check_unavailable") is True, "500 早退分支不得丢降级标记: " + resp.text
+        assert detail.get("dedup_unavailable") is True, resp.text
 
     def test_degraded_flags_reach_processing_failed_500(self, monkeypatch):
         """应用层异常（500 留痕早退）分支必须带降级标记（PR #2002 R2 Required）。"""
@@ -552,7 +558,7 @@ class TestA2AGateDegradeEndpoint:
 
         assert resp.status_code == 500, resp.text
         detail = (resp.json() or {}).get("detail") or {}
-        assert detail.get("dedup_unavailable") is True, "异常早退分支不得丢降级标记: " + resp.text
+        assert detail.get("cancel_check_unavailable") is True, "异常早退分支不得丢降级标记: " + resp.text
 
 
 # ── I. 静态守门：读点内不得再裸用 session_manager ────────────────────────────
