@@ -149,10 +149,18 @@ def test_card_field_overrides_only_reports_changed_keys():
     assert card_field_overrides(cleared, card2) == {"download_base": ""}
 
 
-def test_row_to_card_raw_drops_empty_columns():
-    """表行 → raw 不能把 NULL 的 "" 照抄进去：可选枚举列会被 Builder 整卡拒绝。"""
+def test_row_to_card_raw_drops_empty_columns(tmp_path):
+    """表行 → raw 不能把 NULL 的 "" 照抄进去：可选枚举列会被 Builder 整卡拒绝。
+
+    `ca_bundle` 走 `isfile` 强校验（platform_card._build_ca_bundle），所以用 tmp_path
+    造一个本地 PEM —— 写死 `/etc/pki/tls/cert.pem` 只在 centos 系评审机存在，ubuntu
+    CI 上会假红（架构守护 I1）。
+    """
     from src.domains.runtime.vcs.platform_card import row_to_card_raw
 
+    pem = tmp_path / "ca.pem"
+    pem.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    ca_bundle = str(pem)
     row = {
         "id": "x", "enabled": 1, "source": "config", "provider": "gitlab",
         "name": "GitLab", "dialect": "gitlab", "host": "gitlab.com",
@@ -160,7 +168,7 @@ def test_row_to_card_raw_drops_empty_columns():
         "webhook_path": "/webhook/gitlab", "event_header": "X-Gitlab-Event",
         "webhook_verify": "token_compare", "webhook_dialect": "gitlab_v4",
         "clone_auth": "oauth2", "branch_create_form": "", "issue_write_form": "",
-        "issue_search": 0, "ca_bundle": "/etc/pki/tls/cert.pem",
+        "issue_search": 0, "ca_bundle": ca_bundle,
     }
     raw = row_to_card_raw(row)
     assert "branch_create_form" not in raw          # 空串 = 未声明
@@ -168,7 +176,7 @@ def test_row_to_card_raw_drops_empty_columns():
     assert raw["issue_search"] == 0                 # 0 是有效值，不能被当空值丢掉
     assert "id" not in raw and "enabled" not in raw  # 非卡定义列
     card = build_platform_card("gitlab", raw)       # 以前这里会抛 PlatformCardError
-    assert card.ca_bundle == "/etc/pki/tls/cert.pem"
+    assert card.ca_bundle == ca_bundle
 
 
 def test_card_overrides_value_object_contract():
