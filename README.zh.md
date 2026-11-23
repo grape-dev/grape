@@ -25,7 +25,7 @@
   </p>
 
   <p>
-    <a href="https://railway.com/deploy/TEMPLATE_SLUG"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
   </p>
 
   <p>
