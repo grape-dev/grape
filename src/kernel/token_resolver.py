@@ -27,6 +27,9 @@ factory.py + 各平台 <dialect>.py）；
   resolve_exec_token()  — 唯一执行凭据选择器（换券面 + 建树面共用，带 stage 分类）
 """
 
+import threading
+import time
+
 from abc import ABC, abstractmethod
 
 from dataclasses import dataclass, field
@@ -321,6 +324,35 @@ class ExplicitRepoBotToken(TokenStrategy):
             log.warning(f"ExplicitRepoBotToken.clear_expired: {e}")
 
 
+# ── Issue #3897 D：RepoBotToken 历史列回退日志降噪 ─────────────────────────────
+# 生产 3.9 万条/小时 `historical column fallback hit (rc miss)`：token 解析是高频路径，
+# 每条历史数据命中都打 WARNING 会把真正的告警淹掉。降噪口径（验收：0 条/h 或 debug）：
+#   · 默认 DEBUG（仍可 `log.debug` 取证 / 灰度期临时调级别）；
+#   · 同一 `(repo_key, field)` 保留 1 条 WARNING / 小时——下线判据 grep 仍能拿到
+#     「还有哪些仓库在吃历史列」，不至于降噪后彻底失明；
+#   · 按 repo 限频（不是全局一次），避免一条日志掩盖受影响面。
+_FALLBACK_WARN_INTERVAL_SECONDS = 3600.0
+_fallback_warn_at: dict = {}
+_fallback_warn_lock = threading.Lock()
+
+
+def _legacy_fallback_log(repo_key: str, field: str) -> None:
+    """历史列命中日志：DEBUG 常态 + 每 (repo, field) 每小时最多 1 条 WARNING。"""
+    _key = (repo_key, field)
+    _now = time.monotonic()
+    with _fallback_warn_lock:
+        _last = _fallback_warn_at.get(_key, 0.0)
+        _should_warn = (_now - _last) >= _FALLBACK_WARN_INTERVAL_SECONDS
+        if _should_warn:
+            _fallback_warn_at[_key] = _now
+    _msg = (f"RepoBotToken: historical column fallback hit (rc miss) "
+            f"repo={repo_key} field={field}")
+    if _should_warn:
+        log.warning(_msg)
+    else:
+        log.debug(_msg)
+
+
 class RepoBotToken(TokenStrategy):
     """第 2 级：managed_repos.{token_storage_field}
 
@@ -385,9 +417,9 @@ class RepoBotToken(TokenStrategy):
             # 任意拓扑原语：自有 DSN → mgmt 连接；单库回落进程库（同一份语句）。
             raw = _repos.repo_bot_token_from_legacy_column_any(repo_key, field)
             if raw:
-                # 挂账 #12 观测：log.warning 即采集（下线判据 = grep 此日志零命中）
-                log.warning(f"RepoBotToken: historical column fallback hit "
-                            f"(rc miss) repo={repo_key} field={field}")
+                # 挂账 #12 观测 + Issue #3897 降噪：DEBUG 常态，WARNING 按 (repo, field)
+                # 每小时 1 条（下线判据 = grep 该 WARNING 仍有命中面，不再是逐次刷屏）。
+                _legacy_fallback_log(repo_key, field)
                 # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
                 # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
                 # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）

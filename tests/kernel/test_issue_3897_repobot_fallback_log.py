@@ -43,12 +43,27 @@ def _clear_rate_limit():
     TR._fallback_warn_at.clear()
 
 
+class _FakeProvider:
+    """最小 provider：只声明历史列（真 provider 的 LEGACY 列已随平台卡退役，
+    但存量生产部署仍有卡片声明该列——本用例锁的是回退分支自身的行为）。"""
+
+    def token_storage_field(self) -> str:
+        return _COL
+
+
+def _strategy() -> "TR.RepoBotToken":
+    s = TR.RepoBotToken.__new__(TR.RepoBotToken)
+    s.provider = _FakeProvider()
+    s.bypass_path_b = False
+    return s
+
+
 def test_fallback_still_returns_token_and_warns_once_per_hour(caplog):
     _setup_repo(_REPO_A, _TOKEN)
     _clear_rate_limit()
     caplog.set_level("DEBUG")
 
-    strat = TR.RepoBotToken(TR.create_provider("gitcode"))
+    strat = _strategy()
     for _ in range(5):
         assert strat._fetch(_REPO_A) == _TOKEN, "降噪不得影响回退取值"
 
@@ -67,7 +82,7 @@ def test_rate_limit_is_per_repo(caplog):
     _clear_rate_limit()
     caplog.set_level("DEBUG")
 
-    strat = TR.RepoBotToken(TR.create_provider("gitcode"))
+    strat = _strategy()
     strat._fetch(_REPO_A)
     strat._fetch(_REPO_B)
 
