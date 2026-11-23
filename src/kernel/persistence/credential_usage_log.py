@@ -163,8 +163,9 @@ def cleanup_expired_retention(force: bool = False) -> int:
 
     Issue #3848（启动次序）：启动链的这一次「兜底」原先在装配层 bind() 之前
     执行，tokens 端口未绑 → 每次启动必然空跑。现在分两类处理：未绑 = 预期
-    时序（debug 且 return 0，不推进 30 天节流），真异常 = 保持 WARNING；补跑
-    由 ``on_bind`` 钩子在 ``bind("tokens")`` 之后驱动（见本文末「启动期补跑」）。
+    时序（debug + ``startup_degraded{component=credential_usage_log}`` 打点且
+    return 0，不推进 30 天节流），真异常 = 保持 WARNING；补跑由 ``on_bind``
+    钩子在 ``bind("tokens")`` 之后驱动（见本文末「启动期补跑」）。
 
     DELETE 分批：两步查删（SELECT id LIMIT → DELETE IN 具体列表）——
     MySQL 禁 IN 子查询带 LIMIT（错误 1235），翻译层不重写该形态（复审
@@ -194,6 +195,10 @@ def cleanup_expired_retention(force: bool = False) -> int:
         # 端口未绑 = 启动期时序（bind() 还没跑），不是清理故障：不进 WARNING 巡检面，
         # 也不推进 30 天节流（否则绑定后的补跑会被自己刚写的节流状态挡掉）。
         from src.kernel.config import log
+        from src.kernel.startup_metrics import record_startup_degraded
+        # 预期时序同样必须可巡检：只留 debug 日志等于「只能 grep 日志发现」，而运维要区分
+        # 「这次启动降级了」正需要这条计数——与 card_source 同口径，WARNING 面只留给真故障。
+        record_startup_degraded("credential_usage_log", "port_not_bound")
         log.debug(f"usage_log retention cleanup deferred (kernel port not bound yet): {e}")
         return total
     except Exception as e:

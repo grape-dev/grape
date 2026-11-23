@@ -4,10 +4,12 @@
 启动期工作，在端口未绑时静默降级 —— 每次启动必然空跑，且只能靠 grep 日志发现。
 
 本文件锁四件事（红→绿）：
-  1. `credential_usage_log.cleanup_expired_retention` 在端口未绑时返回 0 且**只打
-     debug**（预期时序，不是故障），不再刷 `retention cleanup failed` WARNING；
+  1. `credential_usage_log.cleanup_expired_retention` 在端口未绑时返回 0、**只打
+     debug** 并计入 `startup_degraded{component=credential_usage_log}`（预期时序，
+     不是故障），不再刷 `retention cleanup failed` WARNING；
   2. `bind("tokens")` 之后由 `_base.on_bind` 钩子补跑一次保留期清理，`prune` **恰好
-     1 次**（`replace=True` 重绑不重复 DELETE）；
+     1 次**（`replace=True` 重绑不重复 DELETE）；已绑端口下布防（模块晚于装配层导入）
+     则立即补跑；
   3. 启动调用点只「布防」：bind 前不执行、bind 后执行（四条启动路径一处生效）；
   4. `card_sources` 端口未就绪与真读失败分流：未就绪 → debug + `startup_degraded`，
      真异常 → 保留 WARNING 并同样打点。
