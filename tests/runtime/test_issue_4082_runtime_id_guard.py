@@ -235,6 +235,37 @@ def test_probe_failure_reporter_emits_after_threshold():
     assert emitted[-1]["scene"] == "s-1"
 
 
+def test_probe_failure_logging_is_throttled(caplog):
+    """探活失败日志只打「首次 + 达阈值」，不逐轮刷（否则把 401 噪声换成日志噪声）。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    rep = guard.ProbeFailureReporter(threshold=3, emit_every=3, sink=lambda p: True, host="h-2")
+    with caplog.at_level("INFO"):
+        assert agent_mod._handle_tags_probe_result(rep, 9, "unauthorized") is False
+        first = caplog.text.count("unauthorized")
+        assert first >= 1
+        caplog.clear()
+        assert agent_mod._handle_tags_probe_result(rep, 9, "unauthorized") is False
+        assert caplog.text == ""      # 第 2 次：不出声
+        assert agent_mod._handle_tags_probe_result(rep, 9, "unauthorized") is False
+        assert "3 times in a row" in caplog.text   # 达阈值：告警行
+        caplog.clear()
+        assert agent_mod._handle_tags_probe_result(rep, 9, "unauthorized") is False
+        assert caplog.text == ""      # 阈值后普通轮次继续静默
+        assert agent_mod._handle_tags_probe_result(rep, 9, "") is False
+        assert "recovered" in caplog.text  # 成功恢复留一条信息日志
+
+
+def test_handle_tags_probe_result_flags_id_missing():
+    """id_missing 必须返回 True（触发强制重注册），其余失败不触发。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    rep = guard.ProbeFailureReporter(threshold=99, sink=lambda p: True, host="h-3")
+    assert agent_mod._handle_tags_probe_result(rep, 1, "no_tags") is False
+    assert agent_mod._handle_tags_probe_result(rep, 1, "not_found") is False
+    assert agent_mod._handle_tags_probe_result(rep, 0, "id_missing") is True
+
+
 def test_signal_sink_posts_to_master(monkeypatch, tmp_path):
     """sink 经 `POST /api/runtime/runtime-tags-probe/signal` 上报；失败落本地 JSONL 兜底。"""
     posted = []

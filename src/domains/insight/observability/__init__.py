@@ -575,7 +575,7 @@ def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
     reason 取值见 RUNTIME_TAGS_PROBE_REASONS；未知取值按 unknown 计数（不丢数）。
     host 用于按主机定位（15 台 worker 逐台补 id 的依据），detail 不进标签（防高基数）。
     """
-    h = (host or "").strip() or "unknown"
+    h = (host or "").strip()[:120] or "unknown"
     r = (reason or "").strip().lower()
     if r not in RUNTIME_TAGS_PROBE_REASONS:
         r = "unknown"

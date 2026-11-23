@@ -1332,19 +1332,23 @@ def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "")
     if not reason:
         reporter.observe("")
         return False
-    if reason == "id_missing":
-        log.error(f"{RUNTIME_ID_MISSING} rid={rid} engine={engine_name or '-'}: no valid "
-                  f"runtime id — tag probe/claim skipped (no HTTP), forcing re-register")
-    elif reason == "no_tags":
-        log.warning(f"runtime tags probe: rid={rid} engine={engine_name or '-'} registered "
-                    f"but has no tags (empty role_tags/scene_tags → dispatch has no basis)")
-    elif reason == "unauthorized":
-        log.error(f"runtime tags probe unauthorized: rid={rid} engine={engine_name or '-'} "
-                  f"(401 on probe = config/ownership mismatch, not credential revocation)")
-    elif reason == "not_found":
-        log.warning(f"runtime tags probe not_found: rid={rid} (runtime row deleted or in "
-                    f"re-derive window)")
-    if reporter.observe(reason):
+    # 先计数，再决定是否打详细日志：claim 循环每轮每引擎都探一次，逐次打日志同样是
+    # 噪声（原文「401 日志噪声」的另一种形态）。只在首次失败与达到告警阈值时出声。
+    due = reporter.observe(reason)
+    if reporter.consecutive == 1 or due:
+        if reason == "id_missing":
+            log.error(f"{RUNTIME_ID_MISSING} rid={rid} engine={engine_name or '-'}: no valid "
+                      f"runtime id — tag probe/claim skipped (no HTTP), forcing re-register")
+        elif reason == "no_tags":
+            log.warning(f"runtime tags probe: rid={rid} engine={engine_name or '-'} registered "
+                        f"but has no tags (empty role_tags/scene_tags → dispatch has no basis)")
+        elif reason == "unauthorized":
+            log.error(f"runtime tags probe unauthorized: rid={rid} engine={engine_name or '-'} "
+                      f"(401 on probe = config/ownership mismatch, not credential revocation)")
+        elif reason == "not_found":
+            log.warning(f"runtime tags probe not_found: rid={rid} (runtime row deleted or in "
+                        f"re-derive window)")
+    if due:
         log.error(f"runtime tags probe failed {reporter.consecutive} times in a row "
                   f"(rid={rid} engine={engine_name or '-'} reason={reason} host={reporter.host}) "
                   f"— failure signal reported to master")
