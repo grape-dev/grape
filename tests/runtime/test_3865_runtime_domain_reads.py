@@ -241,6 +241,37 @@ def test_issue_exists_in_db_degrades_with_structured_log(runtime_domain, caplog)
 # ── G. 降级标记必须落到响应体（detail），dict / JSONResponse 两种形态 ────────
 
 
+def test_duplicate_a2a_original_refs_reads_runtime_domain(runtime_domain):
+    """Required（QA R2）：duplicate_a2a 拦截的 original_event 回查同病收口。
+
+    `_duplicate_a2a_original_refs` 用 session_manager.db 读 events（runtime 域表），
+    三库下必 1146 → agent/status/created_at 静默为空，违反 #729 引用契约。
+    """
+    cur = runtime_domain(_FakeCursor(rows=[("coding", "running", "#5", "2026-11-23 10:00:00")]))
+
+    evt = wh._duplicate_a2a_original_refs(REPO_KEY, 42)
+
+    assert evt["agent"] == "coding", "原事件字段必须来自 runtime 域读取"
+    assert evt["status"] == "running"
+    assert evt["issue_id"] == "#5"
+    assert evt["created_at"] == "2026-11-23 10:00:00"
+    assert any("FROM events" in sql and "repo_key=?" in sql and "seq=?"
+               for sql, _ in cur.executed), cur.executed
+    assert cur.closed
+
+
+def test_duplicate_a2a_original_refs_degrades_visibly(runtime_domain, caplog):
+    """域读失败 → unavailable 引用标注仍生成（拦截响应不阻断），日志含定位字段。"""
+    runtime_domain(_FakeCursor(exc=RuntimeError(_ERR_1146)))
+
+    with caplog.at_level("WARNING"):
+        evt = wh._duplicate_a2a_original_refs(REPO_KEY, 42)
+
+    assert evt["agent"] == "" and evt["seq"] == 42
+    assert "task_ref" in evt and "result_ref" in evt
+    assert "route=" in caplog.text and "target_db=runtime" in caplog.text
+
+
 def test_stamp_degraded_json_response_content_length_matches_body():
     """Critical（QA R2）：重建 JSONResponse 时复制旧 content-length 会被 uvicorn 拒收。
 
