@@ -207,7 +207,9 @@ def _instance_card_providers() -> list[str]:
             continue
         try:
             card = vcs_cards.get_platform_card(provider)
-        except Exception:  # noqa: BLE001
+        except Exception as card_err:  # noqa: BLE001 - 单卡不可用不影响其余实例，留痕
+            from src.kernel.config import log as _log
+            _log.debug(f"instance providers: card lookup failed for {provider}: {card_err}")
             continue
         if card is not None and str(getattr(card, "dialect", "") or "") == "gitlab":
             out.append(provider)

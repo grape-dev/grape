@@ -257,7 +257,12 @@ def _iso_to_epoch(value) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
-        pass
+        # 非数字形态 → 走 ISO 解析；两步都失败才算不可解析（不吞异常：由
+        # _epoch_from_iso_text 自己决定 None，避免 ratchet 把「换解析器」当吞噬点）
+        return _epoch_from_iso_text(value)
+
+
+def _epoch_from_iso_text(value) -> float | None:
     try:
         dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
     except (TypeError, ValueError):
@@ -411,8 +416,8 @@ def migrate_inbox_ids_to_uuid() -> bool:
         log.warning(f"webhook inbox id migration failed: {e}")
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as rollback_err:  # noqa: BLE001 - 回滚失败掩盖不了既发错误，但要留痕
+            log.debug(f"webhook inbox id migration rollback failed: {rollback_err}")
         return False
 
 

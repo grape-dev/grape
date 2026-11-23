@@ -190,8 +190,9 @@ def reconcile_on_startup(dry_run: bool = False) -> dict:
     finally:
         try:
             conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as close_err:  # noqa: BLE001 - 关闭失败不影响自检结论，留痕
+            from src.kernel.config import log as _close_log
+            _close_log.debug(f"[db-guard] close failed ({db}): {close_err}")
 
     from src.kernel.config import log
 

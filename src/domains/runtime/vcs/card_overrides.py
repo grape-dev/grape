@@ -147,7 +147,9 @@ class CardOverrides:
         for provider, fields in self.by_provider.items():
             try:
                 base = base_lookup(provider)
-            except Exception:  # noqa: BLE001
+            except Exception as lookup_err:  # noqa: BLE001 - 基线不可得=无法判「残留」，留痕后跳过
+                from src.kernel.config import log as _log
+                _log.debug(f"stale_providers: baseline lookup failed for {provider}: {lookup_err}")
                 continue
             if base is not None and not diff_card_fields(fields, base):
                 out.append(provider)
