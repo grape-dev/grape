@@ -24,8 +24,9 @@ _LOG = "devops-bot"
 def _relay_app(monkeypatch, target: str = ""):
     from src.domains.runtime.routes import runtime as rt
 
-    monkeypatch.setattr(rt, "OTLP_RELAY_TARGET", target, raising=True)
-    monkeypatch.setattr(rt, "_relay_disabled_warned", False, raising=True)
+    # 目标值按请求现读环境变量（模块常量已移除，见 tests/runtime/test_trace_relay_env_and_metrics.py）
+    monkeypatch.setenv("OTLP_RELAY_TARGET", target)
+    monkeypatch.setattr(rt, "_relay_warn_ts", 0.0, raising=True)
     app = FastAPI()
     app.include_router(rt.router)
     app.dependency_overrides[rt._require_credential] = lambda: {"id": 1, "runtime_id": 1}
