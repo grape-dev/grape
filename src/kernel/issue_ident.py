@@ -21,6 +21,22 @@ _IDENT_RE = re.compile(r"[A-Z][A-Z0-9]*")
 # 长度上限：平台 ident 实际远小于此；超长视为垃圾输入（A2A 入口曾据此拒绝）
 MAX_IDENT_LEN = 32
 
+# Issue #4065：可回帖口径里，允许「平台原生字符串 ident」的 provider。
+# gitee 的评论路由是 `/issues/{ident}/notes`，字符串 ident（IK*）本来就是合法路径；
+# gitcode/github/gitlab 的 `/issues/{n}/comments` 只认数字，非数字恒 400「参数类型错误」。
+STRING_IDENT_PROVIDERS = ("gitee",)
+
+# Issue #4065：卡片主键（issue 表 issue_number 列是 TEXT 亲和）允许的合成键前缀。
+# autopilot 定时任务的统计回链键就是 `autopilot-<字母>`（scheduler._autopilot_issue_ref），
+# 它是 issue 表的真实主键 —— 判成非法等于把卡片刷新链一起打死。
+SYNTHETIC_CARD_PREFIX = "autopilot-"
+
+# Issue #4065：订阅伪 id（`pr_123`、`#pr_123_scene_id`）永不对应真实 Issue，也永不对应卡片。
+PSEUDO_IDENT_PREFIXES = ("pr_", "pr-")
+
+# 卡片主键字符域：数字 / 字母开头的紧凑标识（拒空白、分隔文本、URL 片段）
+_CARD_IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
+
 
 def normalize_issue_ident(value) -> str:
     """去首尾空白与全部前导 `#`，返回归一文本；非法形态返回 ""。
@@ -68,6 +84,65 @@ def is_actionable_issue_number(value) -> bool:
     if not norm:
         return False
     return norm != "0"
+
+
+def deliverable_comment_ident(value, provider: str = "") -> str:
+    """可回帖的 issue ident 归一（Issue #4065 唯一口径）。
+
+    结果评论投递链路只认「平台能接的编号」：
+
+    - 数字平台（gitcode/github/gitlab）：`/issues/{n}/comments` 只认数字，
+      非数字 ident（`autopilot-as`、`IKX1DL`、`pr_123`）恒 400「参数类型错误」；
+    - gitee：评论路由是 `/issues/{ident}/notes`，平台原生字符串 ident（`IK*`）合法。
+
+    返回可投递的归一文本；不可投递（伪 id / 垃圾 / 空 / `0` 占位）返回 ""。
+    调用方拿到 "" 必须短路，不得发起任何远程请求（#4065 契约）。
+    """
+    norm = normalize_issue_ident(value)
+    if not norm or norm == "0":
+        return ""
+    if norm.isdigit():
+        return norm
+    if (provider or "").strip().lower() in STRING_IDENT_PROVIDERS:
+        return norm
+    return ""
+
+
+def normalize_card_ident(value) -> str:
+    """卡片主键（issue 表 issue_number）归一（Issue #4065）。
+
+    可归一：纯数字、平台原生大写 ident（gitee `IK*`）、`autopilot-*` 合成键
+    （issue 表 TEXT 列的真实主键，定时任务统计回链键）。
+    不可归一（返回 ""）：`pr_*`/`pr-*` 订阅伪 id、空值、含空白/分隔文本、超长。
+
+    与评论口径分离的原因：`autopilot-*` 能查卡片但不能回帖；`IK*` 在 gitee 两者皆可。
+    """
+    if value is None:
+        return ""
+    t = str(value).strip().lstrip("#").strip()
+    if not t or len(t) > MAX_IDENT_LEN:
+        return ""
+    low = t.lower()
+    if low.startswith(PSEUDO_IDENT_PREFIXES):
+        return ""
+    if t.isdigit():
+        return t
+    if not _CARD_IDENT_RE.fullmatch(t):
+        return ""
+    if low.startswith(SYNTHETIC_CARD_PREFIX) or _IDENT_RE.fullmatch(t):
+        return t
+    return ""
+
+
+def card_ident_number(value):
+    """卡片主键的平台原生形态（Issue #4065）：数字 → int，ident/合成键 → str，不可归一 → None。
+
+    `_issue_num_or_ident` 等既有路径依赖「数字恒 int」（#995 契约），不得改成一律 str。
+    """
+    norm = normalize_card_ident(value)
+    if not norm:
+        return None
+    return int(norm) if norm.isdigit() else norm
 
 
 def is_valid_issue_number_input(value) -> bool:

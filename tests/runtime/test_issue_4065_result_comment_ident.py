@@ -170,7 +170,7 @@ class TestCardIdentNormalization:
         assert normalize_card_ident(raw) == expected
 
     @pytest.mark.parametrize("raw", ["pr_123", "#pr_123_scene_id", "", "   ", "a" * 40,
-                                    "autopilot as", "4065\n"])
+                                    "autopilot as", "4065 4066", "a/b"])
     def test_not_normalizable(self, raw):
         from src.kernel.issue_ident import normalize_card_ident
         assert normalize_card_ident(raw) == ""
@@ -367,10 +367,11 @@ class TestCommentMetrics:
     def test_thread_safe_streak_counter(self):
         from src.kernel import comment_metrics as cm
         cm.reset_streaks()
-        for _ in range(4):
-            threading.Thread(target=cm.observe_failure,
-                             args=("network", "gitcode:grape-dev/grape")).start()
-        for t in threading.enumerate():
-            if t is not threading.current_thread():
-                t.join()
-        assert cm.consecutive_failures("gitcode:grape-dev/grape") == 4
+        workers = [threading.Thread(target=cm.observe_failure,
+                                    args=("network", "gitcode:grape-dev/grape"))
+                   for _ in range(8)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=10)
+        assert cm.consecutive_failures("gitcode:grape-dev/grape") == 8
