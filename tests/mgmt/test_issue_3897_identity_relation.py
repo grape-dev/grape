@@ -247,3 +247,65 @@ def test_identity_relation_migration_creates_missing_table(tmp_path):
     M.ensure_identity_relation(conn)          # 幂等重跑
     assert M.verify_identity_relation(conn) is None
     conn.close()
+
+
+def test_migration_post_check_rejects_table_missing_columns(tmp_path):
+    """QA R2 Nit：「表在、列缺」不得盖章——post_check 必须断言三列齐全。
+
+    `_ensure_column` 未传 strict=True 时，MySQL 侧 INSTANT/INPLACE 均失败只登记
+    `_DDL_MANUAL_REVIEW` 并正常返回（2026-11-06 issue.vcs_exists 事故同态），
+    post_check 若只看「关系存在」会把列缺盖死成已完成 → 线上查询该列 1054 静默失败。
+    """
+    import sqlite3
+
+    from src.domains.mgmt.migrations import external_identities_relation as M
+
+    conn = sqlite3.connect(tmp_path / "id_cols.db")
+    # 存量基表但缺 status/unbound_at/token_expires_at 三列
+    conn.execute(
+        "CREATE TABLE external_identities "
+        "(id INTEGER PRIMARY KEY, provider TEXT, external_id TEXT)")
+    with pytest.raises(RuntimeError) as ei:
+        M.verify_identity_relation(conn)
+    for col in ("status", "unbound_at", "token_expires_at"):
+        assert col in str(ei.value), f"缺列 {col} 必须点名（否则无法定位补列失败）"
+    conn.close()
+
+
+def test_migration_column_ensure_is_strict(monkeypatch, tmp_path):
+    """QA R2 Nit：补列必须走 `_ensure_column(strict=True)`——失败即抛，不许静默盖章。"""
+    import sqlite3
+
+    from src.api import db_setup
+    from src.domains.mgmt.migrations import external_identities_relation as M
+
+    conn = sqlite3.connect(tmp_path / "id_strict.db")
+    conn.execute("CREATE TABLE external_identities (id INTEGER PRIMARY KEY)")
+
+    seen = {}
+
+    def _fail(c, tbl, col, ddl, **kwargs):
+        seen["strict"] = kwargs.get("strict")
+        raise RuntimeError("simulated: INSTANT 与 INPLACE,LOCK=NONE 均失败")
+
+    monkeypatch.setattr(db_setup, "_ensure_column", _fail)
+    with pytest.raises(RuntimeError):
+        M.ensure_identity_relation(conn)      # 抛错=不盖章，下次启动重试
+    assert seen.get("strict") is True, "_ensure_column 必须传 strict=True"
+    conn.close()
+
+
+def test_migration_post_check_accepts_view_without_columns(tmp_path):
+    """视图形态的列是建视图时的快照、归部署流程管（本迁移不 ALTER 视图）。
+
+    post_check 对 view 只断言关系存在——列断言仅针对基表形态。
+    """
+    import sqlite3
+
+    from src.domains.mgmt.migrations import external_identities_relation as M
+
+    conn = sqlite3.connect(tmp_path / "id_view.db")
+    conn.execute("CREATE TABLE _src_3897 (x INTEGER)")
+    conn.execute("CREATE VIEW external_identities AS SELECT x, x AS provider FROM _src_3897")
+    assert M.verify_identity_relation(conn) is None
+    conn.close()
