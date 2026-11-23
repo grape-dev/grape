@@ -422,3 +422,131 @@ def test_alerts_rule_for_repeated_busy():
     assert m, "缺少 repo dispatch busy 告警规则"
     block = text[m.start():]
     assert "increase(grape_repo_dispatch_busy_total" in block[:800], block[:800]
+
+# ------------- 切片 4：direct 派发共用租约入口（复审 Required）
+#
+# 复审 Required：同一把 repo-dispatch 租约在 enqueue_task 之外还有两条调用点
+# （autopilot DIRECT 引擎派发 / P1D-SRE 引擎恢复重派）仍走原语默认
+# attempts=20x0.05s（约 0.95s）——撞锁即判死。共用 acquire_repo_dispatch_lease
+# 入口（预算 = TTL+5s）后，busy 必须落瞬态分类（skipped + error_code /
+# SRE 收口 failed 留指纹可复重试），不得再退回 failed / raise RuntimeError。
+
+
+def _create_direct(seq, repo_key=RK):
+    from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
+    return _create_direct_task(
+        repo_key, seq, "issue", "codex", "issue", "", 1,
+        {"repo_key": repo_key, "issue_id": "", "payload": {}},
+        issue_id="#3963", skill_id=0, skip_event_config=True)
+
+
+def test_direct_task_waits_for_two_second_holder_then_succeeds():
+    """复审验收：持锁 2s 时 _create_direct_task 预算内等到租约并建任务。
+
+    修复前 direct 派发用原语默认 0.95s 抢同一把租约，持锁 2s 即返回空串（autopilot
+    记 failed「创建任务记录失败」、SRE 重试直接 raise），撞锁即判死。
+    """
+    assert L.acquire_lock(LEASE_KEY, ttl=30) is True
+    holder = threading.Thread(target=lambda: (time.sleep(2.0), L.release_lock(LEASE_KEY)))
+    holder.start()
+    t0 = time.monotonic()
+    tid = _create_direct(seq=900_000_201)
+    elapsed = time.monotonic() - t0
+    holder.join(5)
+    assert tid, "预算内应等到租约并建任务，而不是撞锁即判死"
+    assert elapsed >= 1.5, f"应等待持锁者释放，实际耗时秒数 = {elapsed:.3f}"
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT status FROM agent_tasks WHERE id=?", (tid,)).fetchone()
+    assert row and row[0] == "queued", row
+
+
+def test_direct_task_busy_raises_structured_transient(monkeypatch):
+    """预算耗尽 -> _create_direct_task 抛 RepoDispatchBusyError（瞬态），不再静默返回空串。"""
+    monkeypatch.setattr(service, "_REPO_DISPATCH_LEASE_WAIT_SECONDS", 0.2)
+    assert L.acquire_lock(LEASE_KEY, ttl=30) is True
+    try:
+        with pytest.raises(service.RepoDispatchBusyError) as ei:
+            _create_direct(seq=900_000_202)
+        assert ei.value.error_code == BUSY
+        assert f"task enqueue busy for repo {RK}" in str(ei.value), str(ei.value)
+    finally:
+        L.release_lock(LEASE_KEY)
+    assert _task_count() == 0, "busy 不得落任务行"
+
+
+def test_direct_task_uses_shared_lease_entry(monkeypatch):
+    """direct 派发走共用租约入口：预算/抖动/TTL 与 enqueue 同口径传给原语（防退回默认 0.95s）。"""
+    seen = {}
+
+    def _spy(key, ttl=60, attempts=20, interval=0.05, wait_seconds=None, jitter_ratio=0.0):
+        seen.update(key=key, ttl=ttl, wait_seconds=wait_seconds, jitter_ratio=jitter_ratio)
+        return True
+
+    monkeypatch.setattr(service, "acquire_lock_with_retry", _spy)
+    tid = _create_direct(seq=900_000_203)
+    assert tid
+    assert seen.get("key") == LEASE_KEY, "必须抢同一把 repo-dispatch 租约"
+    assert seen.get("ttl") == service._REPO_DISPATCH_LEASE_TTL, seen
+    assert seen.get("wait_seconds", 0) >= seen.get("ttl", 0), seen
+    assert seen.get("jitter_ratio") == service._REPO_DISPATCH_LEASE_JITTER_RATIO, seen
+
+
+def test_autopilot_direct_busy_writes_skipped_error_code(monkeypatch):
+    """调用点1（LOCAL 引擎）：autopilot DIRECT 派发撞锁 -> execution 落 skipped + error_code（非 failed）。"""
+    _mk_task(TID_BASE + 4, max_retry=0)
+    import src.domains.runtime.pipeline.event_pipeline as EP
+
+    def _raise_busy(*a, **k):
+        raise service.RepoDispatchBusyError(RK, waited_seconds=35.0)
+
+    monkeypatch.setattr(EP, "_create_direct_task", _raise_busy)
+    task = _task_dict(TID_BASE + 4)
+    exec_id = S._create_execution(TID_BASE + 4, "issue")
+    S._execute_autopilot_direct(
+        RK, task, exec_id, "issue", "", 0, "", "", "/tmp/i3963-ws", "prompt", "", "", {},
+        "issue3963/repo", {"repo_key": RK, "issue_id": "", "payload": {}})
+    row = [r for r in _exec_rows(TID_BASE + 4) if r[0] == exec_id][0]
+    assert row[1] == "skipped", f"busy 是瞬态，必须 skipped 交瞬态通道，实际 = {row}"
+    assert row[3] == BUSY, row
+    assert "task enqueue busy" in (row[2] or ""), row
+    _drop_task(TID_BASE + 4)
+
+
+def test_sre_redispatch_direct_busy_fails_with_fingerprint(monkeypatch):
+    """调用点2（SRE 重试）：直连派发撞锁 -> 收口文案保留 busy 指纹（failed 态可被下一轮 claim 复试）。"""
+    import src.domains.runtime.pr_merged_sre_retry as R
+    seq = 900_000_396
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM events WHERE seq=?", (seq,))
+        c.execute(
+            "INSERT INTO events (seq, repo_key, event_type, issue_id, agent_type, status, "
+            "created_at) VALUES (?,?,?,?,?,?,?)",
+            (seq, RK, "issue", "#3963", "issue", "failed", CLOCK_START.isoformat()))
+        db.commit()
+
+    def _raise_busy(p, engine_id, pool):
+        raise service.RepoDispatchBusyError(RK, waited_seconds=35.0)
+
+    monkeypatch.setattr(R, "_dispatch_picked", _raise_busy)
+    p = {"seq": seq, "repo_key": RK, "agent_type": "issue", "backend": "codex",
+         "skill_name": "issue", "skill_path": "", "skill_id": 0, "evt": {},
+         "issue_id": "#3963", "runtime_id": 1, "scene_id": 1, "scene_uid": 0}
+    assert R._redispatch(p, 1, "") is False
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT status, result FROM events WHERE seq=?", (seq,)).fetchone()
+    try:
+        assert row and row[0] == "failed", f"busy 收口必须回到 failed 供下一轮 claim：{row}"
+        assert "task enqueue busy for repo" in (row[1] or ""), row
+    finally:
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE seq=?", (seq,))
+            db.commit()
+
+
+def test_busy_fingerprint_is_shared_constant():
+    """复审 Optional 落地：busy 文案指纹两侧同源（scheduler 判定串 = service 异常文案子串）。"""
+    assert S._BUSY_LOG_FINGERPRINT == service.REPO_DISPATCH_BUSY_LOG_FINGERPRINT
+    assert S._BUSY_LOG_FINGERPRINT in str(service.RepoDispatchBusyError(RK))
