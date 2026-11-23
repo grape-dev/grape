@@ -229,6 +229,30 @@ def test_provision_failure_is_retryable(monkeypatch):
     assert retried["provision_status"] == "ready"
 
 
+def test_branch_failure_goes_pending_then_retries(monkeypatch):
+    """分支/token 瞬时失败降级 branches_pending，重试成功后可收敛到 ready。"""
+    import src.domains.mgmt.org_provision as provision
+    from src.domains.mgmt.user.org_db import get_org
+
+    _patch_successful_vcs(monkeypatch)
+
+    def _fail_branches(org, repo_key, **kwargs):
+        raise RuntimeError("VCS token missing after hosting")
+
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches", _fail_branches)
+    org_id = _seed_team_org()
+
+    pending = provision.provision_org(org_id)
+    assert pending["provision_status"] == "branches_pending"
+    assert "VCS token missing" in pending["provision_error"]
+    assert get_org(org_id)["provision_status"] == "branches_pending"
+
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
+    retried = provision.provision_org(org_id)
+    assert retried["provision_status"] == "ready"
+
+
 def test_provision_host_binding_enforces_org_quota(monkeypatch):
     from src.domains.mgmt.org_provision import provision_org
     from src.domains.mgmt.user.db import add_managed_repo

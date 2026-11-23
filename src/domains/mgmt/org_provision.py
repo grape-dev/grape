@@ -24,6 +24,8 @@ from src.domains.mgmt.user.org_db import (
     bind_managed_repo_to_org,
     bind_repo_as_org_repo,
     clear_org_repo_flag,
+    db as org_db,
+    db_lock as org_db_lock,
     fail_org_provision_attempt,
     get_managed_repo_binding,
     get_org,
@@ -776,8 +778,19 @@ def _provision_org_impl(org_id: str) -> dict:
             # 不再用后台 timer 抢跑，避免空仓首推把 grape-org 设成默认分支。
             _set_provision_fields(org_id, provision_status="branches_creating")
             org = get_org(org_id) or org
-            _ensure_org_repo_branches(
-                org, repo_key, enforce_default=created_repo)
+            try:
+                _ensure_org_repo_branches(
+                    org, repo_key, enforce_default=created_repo)
+            except Exception as branch_exc:  # noqa: BLE001 - 瞬时 VCS/token 失败可重试
+                message = _error_text(branch_exc)[:1000]
+                log.warning(f"org_provision branches pending org={org_id}: {message}")
+                _set_provision_fields(
+                    org_id,
+                    provision_status="branches_pending",
+                    provision_error=message,
+                )
+                _renew_org_lease(org_id)
+                return _serialize_org(get_org(org_id))
 
             _renew_org_lease(org_id)
             _set_provision_fields(
@@ -938,3 +951,44 @@ def start_provision(org_id: str) -> None:
         name=f"org-provision-{org_id}",
         daemon=True,
     ).start()
+
+
+def retry_pending_branch_provisions(limit: int = 5,
+                                    min_age_seconds: int = 300) -> int:
+    """巡检重试 `branches_pending` 组织（瞬时 VCS/token 失败，不永久 failed）。
+
+    只在 mgmt 的 org sweep 循环里调用；`start_provision` 自带租约与幂等，
+    并发/重复调用不会重复建仓。`min_age_seconds` 防止失败后立刻高频重试。
+    """
+    limit = max(1, min(int(limit or 5), 50))
+    try:
+        with org_db_lock:
+            rows = org_db.cursor().execute(
+                "SELECT id, updated_at FROM organization "
+                "WHERE provision_status='branches_pending' LIMIT ?",
+                (limit * 10,),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"retry_pending_branch_provisions query failed: {exc}")
+        return 0
+    now = datetime.now(timezone.utc)
+    picked: list[str] = []
+    for row in rows:
+        org_id, ts = str(row[0] or ""), str(row[1] or "")
+        if not org_id:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            dt = now  # 无法解析时间戳时视为已过期，交给租约/幂等兜底
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if (now - dt).total_seconds() < min_age_seconds:
+            continue
+        picked.append(org_id)
+        if len(picked) >= limit:
+            break
+    for org_id in picked:
+        log.info(f"org_provision retry pending branches org={org_id}")
+        start_provision(org_id)
+    return len(picked)

@@ -1607,6 +1607,12 @@ async def org_dispatch_sweep_loop() -> None:
             await asyncio.to_thread(maybe_purge_expired_org_records)
         except Exception as exc:
             log.warning(f"org-dispatch retention error: {exc}")
+        try:
+            from src.domains.mgmt.org_provision import retry_pending_branch_provisions
+
+            await asyncio.to_thread(retry_pending_branch_provisions)
+        except Exception as exc:
+            log.warning(f"org-provision branch retry error: {exc}")
 
 
 # ---------------------------------------------------------------------------
