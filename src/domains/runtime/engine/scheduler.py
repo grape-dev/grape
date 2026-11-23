@@ -2035,7 +2035,7 @@ async def _execute_task(task: dict):
                 log.warning(
                     f"Autopilot: task {task_id} exec {exec_id} environmental failure "
                     f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error} "
-                    f"retries_attempted={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"attempts={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
                     f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\"")
                 _env_failure = (exec_id, exec_error_code, exec_error)
                 break
@@ -2048,13 +2048,13 @@ async def _execute_task(task: dict):
                 attempt += 1
             else:
                 # Issue #3897：此前是 `error=failed after {max_retry} retries`——max_retry=0 时
-                # 既无原因也不解释为何不重试。现在恒带 cause + retries_attempted + retry_skip
+                # 既无原因也不解释为何不重试。现在恒带 cause + attempts（含首次执行）+ retry_skip
                 # （环境性失败/任务配置 max_retry=0/已达上限三种可读原因）。
                 log.error(
                     f"Autopilot task={task_id} exec={exec_id} status={exec_status} "
                     f"error_code={exec_error_code or ''} engine_ids={_task_binding_label(task)} "
                     f"consecutive_failures={int(task.get('consecutive_failures') or 0)} "
-                    f"retries_attempted={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"attempts={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
                     f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\" "
                     f"error={exec_error or '<no cause recorded by executor>'}")
                 break

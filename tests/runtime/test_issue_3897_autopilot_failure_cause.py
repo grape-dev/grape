@@ -12,7 +12,7 @@
   1. `_autopilot_failure_cause(exit_code, final_text)`：恒返回非空 cause（含 exit_code 与输出尾行）；
   2. 失败 exec 的 `autopilot_executions.error` 落结构化 cause（`_finalize_autopilot_task`）；
   3. `_retry_skip_reason(...)` 把「为什么 0 重试」写成可读原因，收口日志必须带
-     `retries_attempted=… max_retry=… retry_skip=…`。
+     `attempts=… max_retry=… retry_skip=…`（attempts 含首次执行）。
 """
 import os
 import sys

@@ -8,7 +8,8 @@
 2. `_finalize_autopilot_task`：`status != success` 时把该 cause 写入
    `autopilot_executions.error`（部署证据失败时用证据原因覆盖并保留 exit_code）。
 3. `_execute_task` 收口：`retries=N/M` 改为可解释字段——
-   `retries_attempted=<attempt+1>/<max_retry+1> max_retry=<n> retry_skip=<原因>`；
+   `attempts=<attempt+1>/<max_retry+1> max_retry=<n> retry_skip=<原因>`
+   （`attempts` 含首次执行，不是「重试次数」；口径已在字段名里写明）；
    原因取值：环境性失败码（不重试）/ `max_retry=0`（任务配置不重试）/
    `reached_max_retry`。日志同时带 `exit=<code>`（从 error 前缀解析或单独列）。
 4. 不改重试策略本身：本次只补可观测性，避免改动 #3800 退避/熔断语义。
@@ -25,12 +26,15 @@
    `DomainUnavailable` / `ProgrammingError`，同一 `op` 只 WARN 一次（带 remediation：
    `python3 scripts/domain_view_freshness.py --repair`），其余降 DEBUG 并按 `op` 计数；
    返回 `[]` 保持非致命。
-4. 启动自检：`schema_probe.relation_exists(cursor, table)`（MySQL 查
-   information_schema.tables，SQLite 查 sqlite_master）；`db_setup._check_identity_relations()`
+4. 启动自检：`schema_probe.relation_kind(cursor, table)`（返回 `table`/`view`/`None`，
+   MySQL 查 information_schema.tables，SQLite 查 sqlite_master）；`db_setup._check_identity_relations()`
    在 `init_database()` 迁移段后执行，缺失关系打 ERROR（含库名/route/remediation），
    存在打 INFO。失败不阻断启动。
 5. 部署侧：`scripts/view_create_missing_allowlist.txt` 补 `external_identities`、
    `grape_accounts`（owner=mgmt → runtime/insight 视图由 `--repair` 补建）。
+   前置条件：worker/event 进程必须可见 `GRAPE_DSN_MGMT`（或共享 `GRAPE_3DB_ENV`），
+   否则 `route_of("mgmt")` 抛 `DomainUnavailable` → 身份解析降级为 `[]`；
+   `db_setup._check_identity_domain()` 在启动自检里把该前置变成一条 ERROR（含 remediation）。
 6. 迁移 `202611230005`（mgmt 域）：存量库幂等补建 `external_identities` 基表 +
    缺列（status/unbound_at/token_expires_at），post_check 断言表存在——
    覆盖「代码已上线、老库 `_create_tables` 老轨已冻结、表未建」的漂移。

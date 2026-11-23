@@ -34,10 +34,12 @@
 
 ## 测试 seam
 
-- A：`scheduler._autopilot_failure_cause(exit_code, final_text)`、`_retry_skip_reason(...)`
-  纯函数 + `_execute_task` 收口日志字段（caplog 断言）。
-- B：`uow(domain="mgmt")`（公开 API）、`schema_probe.relation_exists`、
-  `db_setup._check_identity_relations`、`grape_account_db` 的 1146 一次性降级。
+- A：`scheduler._autopilot_failure_cause(exit_code, final_text)`（exit_code 缺失/非法按
+  `-1` + 注记容错，绝不抛）、`_retry_skip_reason(...)` 纯函数 +
+  `_finalize_autopilot_task` 落库 cause + `_execute_task` 收口日志字段（caplog 断言）。
+- B：`uow(domain="mgmt")`（公开 API）、`schema_probe.relation_kind`（基表/视图/缺失，双后端）、
+  `db_setup._check_identity_relations` / `_check_identity_domain`、
+  `grape_account_db` 的 1146 一次性降级。
 - C：Supervisor 循环（复用 `tests/runtime/im/test_supervisor_register_conflict.py` 的替身）、
   webhook 验签函数（TestClient）。
 - D：`RepoBotToken._fetch` 日志限频、飞书 channel endpoint 取用后 session 关闭。
