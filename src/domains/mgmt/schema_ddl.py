@@ -370,6 +370,9 @@ CREATE TABLE IF NOT EXISTS admin_accounts (
 )
 """
 
+# 新增列口径：org_repo_* 与 domains/mgmt/migrations/org_repo_create_options.py 的
+# ORG_REPO_COLUMN_DDL 对应。TEXT DEFAULT '' 在 MySQL 上会被静默丢掉默认值，存量库
+# 补列用 TEXT（无 DEFAULT），读侧统一 `or ''`，两栈行为等价。
 _ORGANIZATION_DDL = """
 CREATE TABLE IF NOT EXISTS organization (
     id              TEXT,

@@ -51,14 +51,23 @@ def ensure_org_repo_create_columns(conn=None) -> None:
 
 
 def verify_org_repo_create_columns(conn=None) -> list:
-    """后置校验：5 列必须全部在位，否则抛错（执行器不盖章）。"""
+    """后置校验：organization 表与 5 列必须全部在位，否则抛错（执行器不盖章）。
+
+    整表缺失不能静默通过（Issue #3648 口径）：这里与 mgmt 分类字典校验一致，
+    统一报「表/列缺失」，既让启动日志可检索，也避免临时库/半初始化库被当成
+    已收敛。仅在没有 organization 表的单测临时库才会触发，生产库恒存在。
+    """
     from src.kernel.session_manager import db
 
     if conn is None:
         conn = db
     c = conn.cursor()
     present = {str(r[1]) for r in c.execute("PRAGMA table_info(organization)").fetchall()}
+    if not present:
+        raise RuntimeError(
+            "organization 表/列缺失（仓库创建选项列后置校验失败）：表不存在")
     missing = [name for name, _ in ORG_REPO_COLUMN_DDL if name not in present]
     if missing:
-        raise RuntimeError(f"organization 缺仓库创建选项列: {missing}")
+        raise RuntimeError(
+            f"organization 表/列缺失（仓库创建选项列后置校验失败）：缺列 {missing}")
     return []
