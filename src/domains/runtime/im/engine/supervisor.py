@@ -46,7 +46,7 @@ REGISTER_CONFLICT_STABLE_SECS = 60.0
 # 不能落通用 except 打成全栈 ERROR（既污染 error 计数，也让 `channel crashed` 验收无法归零）。
 _TRANSPORT_ERRORS = (
     BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError,
-    asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError,
+    asyncio.IncompleteReadError, TimeoutError,   # TimeoutError 即 asyncio.TimeoutError（3.11+）
 )
 
 log = logging.getLogger(__name__)
