@@ -117,3 +117,58 @@ grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
 | `_PER_PAGE` | `src/domains/mgmt/vcs/base.py` | 100 | 厂商文档：GitHub / GitLab 列表接口 `per_page` 上限均为 100 |
 | `_MAX_LIST_PAGES` | `src/domains/mgmt/vcs/base.py` | 20 | 沿用 base `src/kernel/token_resolver.py:387/443` 的历史值（provider 抽取时原样搬入）；100×20 = 2000 条封顶，触顶时打 WARNING 说明结果被截断 |
 | `_HOOKS_TREE_MAX_PAGES` | `src/api/git_repo_api.py` | 50 | 100×50 = 5000 条 hook 封顶，用于 hook 树遍历的上界保护 |
+
+
+## 7. 清扫节奏与配置缓存（对应 `runtime/webhook_inbox.py`、`mgmt/vcs/namespaces.py`）
+
+### 7.1 `PURGE_INTERVAL_SECONDS = 3600`
+
+复核脚本（合成库，不碰生产数据）：建 `grape_t_webhook_inbox` + 归档表，按 1:1:1:1
+灌入「48h 前 consumed / 10 天前 dead / 40 天前 pending / 活跃 pending」，对
+`purge_finished()` 整体计时（DELETE + 归档 INSERT…SELECT + 再 DELETE）：
+
+| 主表行数 | 单次清扫耗时（多次取样） | 清扫后 主表 / 归档 |
+|---|---|---|
+| 400（生产 330 行的近邻） | 14.6 / 2.6 / 3.1 ms（median 3.1） | 100 / 200 |
+| 10,000 | 38.1 / 33.2 / 33.6 ms（median 33.6） | 2,500 / 5,000 |
+| 50,000 | 161.8 / 155.0 ms（median 158.4） | 12,500 / 25,000 |
+
+据此取 3600s：
+
+- 生产量级单次清扫约 3 ms；50k 行（现有投递量的 ~150 倍）也只有 ~0.16 s/小时，
+  频率再高收益不抵成本；
+- 3600s = 消费保留期 `CONSUMED_RETENTION_HOURS=24` 的 1/24 → 过期行最长滞留 1 小时，
+  相对 24h 桶的溢出 ≤4%；
+- 归档可见延迟 ≤1 小时，相对「30 天倒查」的排障窗口可忽略。
+
+```bash
+# 复跑口径（不改生产库）：sqlite 合成库 + 上面四类行，对 purge_finished() 计时
+DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=/tmp/inbox_bench.db \
+  python - <<'PY'
+# 灌 400/10k/50k 行 → time purge_finished() 三次 → 记录 median
+PY
+```
+
+### 7.2 `_TTL_SOURCE_TTL = 30.0`
+
+```python
+# 20 次读 DB meta（dev mgmt 库，只读）
+from src.domains.mgmt.user import db as user_db
+user_db.get_meta_value("create_spaces_cache_ttl_seconds")
+```
+
+实测（2026-11-23，dev mgmt 库，20 次）：min 0.50 / p50 0.55 / p95 0.70 / max 0.83 ms
+（当前未配置，返回空串）。
+
+据此取 30.0s：
+
+- 该常量缓存的是**配置源读取**（否则 create-targets 每个请求一次 DB 往返），不是上游调用；
+- 30s 把「管理面改 `create_spaces_cache_ttl_seconds` → 多实例生效」的延迟限定在 30 秒，
+  远小于默认 TTL 1800s，配置修改不会被长缓存掩盖；
+- 按 A3 的 50 tps 目标，30s 缓存把 meta 读从 50 次/秒降到 ≤1 次/30 秒，
+  DB 时间从约 27 ms/s 降到约 0.02 ms/s。
+
+| 常量 | 位置 | 值 | 来源 |
+|---|---|---|---|
+| `PURGE_INTERVAL_SECONDS` | `src/domains/runtime/webhook_inbox.py` | 3600s | 实测（7.1：3 ms@400 行、158 ms@50k 行）+ 推导（1h = 24h 保留桶的 1/24） |
+| `_TTL_SOURCE_TTL` | `src/domains/mgmt/vcs/namespaces.py` | 30.0s | 实测（7.2：p50 0.55 ms/次）+ 推导（配置生效延迟上限 30s，远小于 1800s 默认 TTL） |

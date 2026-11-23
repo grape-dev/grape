@@ -22,7 +22,10 @@ from src.kernel.ttl_cache import TTLCache
 # 建仓/查重链的重复成本摊薄到可忽略，同时把「组织成员变化」的最长可见延迟限定在
 # 30 分钟内（组织成员变更是低频运维动作，30 分钟内可见可接受）。
 DEFAULT_TTL_SECONDS = 1800
-# 30s：配置源（DB meta）自身的短缓存，避免每个请求打一次 DB。
+# 30s：配置源（DB meta）自身的短缓存，避免每个请求打一次 DB。审查 B2 补齐依据：
+# 实测 meta 读 p50 0.55 ms（20 次，dev mgmt 库）；30s 把「管理面改 TTL → 多实例生效」
+# 的延迟限定在 30s（远小于默认 TTL 1800s），50 tps 下把 meta 读从 50 次/秒降到
+# ≤1 次/30 秒。复跑口径见 docs/issue-3580/measurements.md §7.2。
 _TTL_SOURCE_TTL = 30.0
 _ttl_memo: tuple[float, int] = (0.0, DEFAULT_TTL_SECONDS)
 

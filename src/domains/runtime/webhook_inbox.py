@@ -45,6 +45,9 @@ PENDING_ARCHIVE_DAYS = 30
 # 覆盖一个季度内的故障复盘窗口，同时让归档表保持有界。
 # 复核脚本与原始结果见 docs/issue-3580/measurements.md。
 ARCHIVE_RETENTION_DAYS = 180
+# 清扫节奏 1h（审查 B2）：单次 purge 实测 3 ms（400 行）/ 158 ms（50k 行，约现有投递量
+# 的 150 倍），成本远低于收益；1h = 消费保留期 24h 的 1/24 → 过期行最长滞留 1 小时，
+# 相对 24h 桶的溢出 ≤4%。复跑口径见 measurements.md §7.1。
 PURGE_INTERVAL_SECONDS = 3600
 # 60s 口径（审查 B2）：obs_metric_rollup 的 resolution='minute' 桶粒度就是 1 分钟，
 # 导出快于此间隔只会反复覆盖同一桶（白写），慢于它则面板出现空桶；取 60s 与之对齐。
