@@ -81,7 +81,7 @@ def node_scope_check(node: dict, repo_key: str, scene_id: str = "",
     }
 
 
-def _dispatchable_roles(node) -> list:
+def dispatchable_roles(node) -> list:
     """节点落在可派发白名单内的全部目标名（id 或 tag 均产出）。
 
     Issue #3582 QA 复审（回归阻塞项 #955/#2118）：此前的 ``_dispatchable_role``
@@ -105,6 +105,17 @@ def _dispatchable_roles(node) -> list:
         if role and role in DISPATCHABLE_AGENTS and role not in roles:
             roles.append(role)
     return roles
+
+
+def empty_scene_targets(scene_id: str) -> dict:
+    """场景解析失败/解析异常时的空结果（与正常结果键结构同构，单一来源）。
+
+    供 ``resolve_scene_targets`` 空分支和调用方异常兜底共用，避免键结构在
+    多处复制后漂移（webhook except 分支曾重复字面量，Issue #3582 复审）。
+    """
+    return {"scene_id": scene_id, "cfg": None, "nodes": [],
+            "available_nodes": [], "valid_targets": [],
+            "target_reasons": {}}
 
 
 def resolve_scene_targets(scene_id: str, repo_key: str = "",
@@ -136,9 +147,7 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
     if cfg is None:
         cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
-        return {"scene_id": scene_id, "cfg": None, "nodes": [],
-                "available_nodes": [], "valid_targets": [],
-                "target_reasons": {}}
+        return empty_scene_targets(scene_id)
     resolved_id = cfg.get("scene_id") or scene_id
     nodes = attach_node_scope_checks(cfg.get("nodes") or [], repo_key,
                                      scene_id=resolved_id)
@@ -148,7 +157,7 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
     for item in nodes:
         if not isinstance(item, dict):
             continue
-        roles = _dispatchable_roles(item)
+        roles = dispatchable_roles(item)
         if not roles:
             # 展示用 tag（非白名单角色）与白名单外 id（org_*）不是可投递
             # 目标：既不进 valid_targets（POST /api/a2a 会按白名单 400

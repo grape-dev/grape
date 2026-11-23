@@ -164,12 +164,13 @@ def test_t6_scene_change_syncs_both_reads():
 # ===== Issue #3582 复审补充：标识别名一致 / 未解析口径 / 路由级契约 =====
 
 def test_t7_valid_targets_are_dispatchable_roles_only():
-    """AC1/AC2（复审 #202444109）：valid_targets 仅含实际可投递角色。
+    """AC1/AC2（复审 #202444109 / QA 复审 #955/#2118）：valid_targets 仅含实际可投递角色。
 
-    节点角色取 id 优先、tag 兜底（engine_select.node_agent_role），并与
-    DISPATCHABLE_AGENTS 取交集：展示用 tag 阶段名（可为中文）/ 非白名单角色
-    （如 chat）不进清单——它们会被 POST /api/a2a 的白名单校验 400 拒绝，
-    清单不得宣告 handoff 实际不收的目标。
+    节点角色取 ``id`` 与 ``tag`` 中**任一**落在 DISPATCHABLE_AGENTS 白名单内的
+    名字（id OR tag，非「id 优先、tag 兜底」；与基线
+    ``node_matches_agent_role`` 口径一致）：展示用 tag 阶段名（可为中文）/
+    非白名单角色（如 chat）不进清单——它们会被 POST /api/a2a 的白名单校验
+    400 拒绝，清单不得宣告 handoff 实际不收的目标。
     """
     _set_issue(7, "scene-3582")
     _set_scene("scene-3582", [
@@ -184,6 +185,23 @@ def test_t7_valid_targets_are_dispatchable_roles_only():
     assert _scene_node_check(REPO, 7, "coding")["in_scene"] is True
     assert _scene_node_check(REPO, 7, "开发编码")["in_scene"] is False
     assert _scene_node_check(REPO, 7, "chat")["in_scene"] is False
+
+
+def test_t7b_node_with_id_and_tag_both_dispatchable_emits_both_roles():
+    """口径固化（QA 复审）：id 与 tag 同时命中白名单时产出两个目标。
+
+    实现为 id OR tag（不是「id 优先、tag 兜底」）：``id=sre/tag=qa`` 的节点
+    同时产出 ``sre`` 与 ``qa``，二者均可作为 handoff 目标；与基线
+    ``node_matches_agent_role`` 的 id OR tag 放行一致，非回归。
+    """
+    _set_issue(70, "scene-3582")
+    _set_scene("scene-3582", [
+        {"id": "sre", "tag": "qa"},                # id 与 tag 均命中白名单
+    ])
+    detail = resolve_scene_targets("scene-3582", repo_key=REPO)
+    assert detail["valid_targets"] == ["sre", "qa"]
+    assert _scene_node_check(REPO, 70, "sre")["in_scene"] is True
+    assert _scene_node_check(REPO, 70, "qa")["in_scene"] is True
 
 
 def test_t8_unresolved_skill_kept_dispatchable_by_compat_policy():

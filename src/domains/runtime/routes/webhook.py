@@ -1484,7 +1484,8 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     "conflict_reason"}。
     """
     from src.api.scene_targets import (
-        _dispatchable_roles as _node_dispatchable_roles,
+        dispatchable_roles,
+        empty_scene_targets,
         resolve_scene_targets,
     )
     from src.api.session_store import get_issue_scene
@@ -1497,10 +1498,8 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     try:
         _res = resolve_scene_targets(_scene_id, repo_key=repo_key)
     except Exception:
-        # 解析异常的空集合与 resolver 的空结果同构（常量/键复用，不再散落字面量）
-        _res = {"scene_id": _scene_id, "cfg": None, "nodes": [],
-                "available_nodes": [], "valid_targets": [],
-                "target_reasons": {}}
+        # 解析异常的空集合复用 resolver 空结果（键结构单一来源，不再散落字面量）
+        _res = empty_scene_targets(_scene_id)
     nodes = (_res.get("cfg") or {}).get("nodes") or []
     valid_targets = list(_res.get("valid_targets") or [])
     available_nodes = _res.get("available_nodes") or []
@@ -1509,7 +1508,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     matched = next(
         (n for n in available_nodes
          if isinstance(n, dict) and (n.get("id") == target or target in
-                                     _node_dispatchable_roles(n))),
+                                     dispatchable_roles(n))),
         None,
     )
     in_scene = target in valid_targets or matched is not None

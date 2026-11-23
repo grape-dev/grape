@@ -2358,27 +2358,6 @@ def audit_scene_skill_scope(repo: str = "", limit: int = Query(default=200, ge=1
         ) if violations else "只读体检：未发现技能 scope 冲突。",
     }
 
-def _scene_node_scope_check(node: dict, repo_key: str, scene_id: str = "",
-                            cache: dict | None = None) -> dict:
-    """单节点技能可解析性前置判定（Issue #1721 / #1758）。
-
-    Issue #3582：判定逻辑收敛到 ``src.api.scene_targets``（与 a2a handoff
-    同一解析函数），此处仅保留兼容委托。
-    """
-    from src.api.scene_targets import node_scope_check
-    return node_scope_check(node, repo_key, scene_id, cache=cache)
-
-
-def _attach_scene_node_scope_checks(nodes: list, repo_key: str,
-                                    scene_id: str = "") -> list:
-    """为场景节点附加 resolvable/scope_check（Issue #1721，纯增量）。
-
-    Issue #3582：收敛到 ``src.api.scene_targets``（单一数据源），此处仅
-    保留兼容委托。
-    """
-    from src.api.scene_targets import attach_node_scope_checks
-    return attach_node_scope_checks(nodes, repo_key, scene_id=scene_id)
-
 
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand). Issue #1721/#1758: each node additionally exposes resolvable (bool) and scope_check{ok,skill,actual_scope,expected_scope,reason}; resolvable=false means the node skill conflicts with the repo scene scope under the single judge (scene_skill_scope.evaluate): a user-scope skill is rejected even when explicitly bound by an active skill_id or owned by the caller, and an invalid/inactive skill_id falls back to name resolution. Issue #3582: `nodes` is the full scene definition (including disabled/unresolvable nodes) for display and diagnosis; the dispatchable set is `available_nodes` / `valid_targets` (same resolver as a2a handoff, so every listed target is accepted without 409). `valid_targets` contains each valid node's dispatchable role names — any name among the node id or display tag that falls in the platform dispatchable agent whitelist (org/legacy scenes: id=org_*/tag=issue yields `issue`), matching exactly what POST /api/a2a accepts.")
 def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):

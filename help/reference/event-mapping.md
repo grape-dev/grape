@@ -123,7 +123,7 @@ GitHub Webhook 通过 `X-GitHub-Event` 请求头标识事件类型，payload 含
 
 - **豁免去重**：A2A 事件不参与 Issue 级别的事件去重（同一 Issue 可多次 A2A 交办不同 Agent）
 - **信任域**：A2A 鉴权支持关联仓库信任域（同场景关联仓库或相同 bot token 的仓库间可互调）
-- **场景节点校验**：目标 Agent 必须在当前 Issue 场景的 pipeline nodes 内，否则跳过（`not_in_scene`）
+- **场景节点校验**：目标 Agent 必须在当前 Issue 场景的可用派发目标（`available_nodes`/`valid_targets`）内，否则跳过（`not_in_scene`；`conflict_reason` 细分 `node_disabled`/`skill_unresolvable`）。`nodes` 为场景定义全量，不作为派发依据（Issue #3582）
 - **触发方式**：Agent 执行完成后通过 `GRAPE_SERVER_URL/api/a2a` 端点提交
 
 ---
@@ -185,7 +185,7 @@ Grape 根据统一事件类型路由到对应 Agent 处理：
 | `self_loop` | 自循环检测（bot 创建的事件不再触发 bot 自身） |
 | `label_only_change` | Issue 仅标签变更，无实质内容变化 |
 | `no_agent_session` | 仓库未配置 Agent（无 devops_agent_session 绑定） |
-| `not_in_scene` | 目标 Agent 不在当前场景的 pipeline nodes 内 |
+| `not_in_scene` | 目标 Agent 不在当前场景的可用派发目标（`available_nodes`/`valid_targets`）内（`conflict_reason` 细分 `node_disabled`/`skill_unresolvable`） |
 | `no_commit_on_pr_update` | PR 更新但无新 commit（不触发 QA 审查） |
 | `agent_disabled` | 目标 Agent 被禁用 |
 | `no_skill_config` | 仓库未配置 Skill |
