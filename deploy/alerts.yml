@@ -78,6 +78,21 @@ groups:
           summary: "HTTP 5xx error rate > 10%"
           description: "More than 10% of HTTP requests are returning 5xx errors."
 
+      # Issue #3969：nginx 层 /api/runtime/ 502 率 >1%/5min
+      # 语义：worker 重启/不可达时网关直接 502，runtime 控制面（心跳/注册/认领/任务态/
+      # 消息/完成/标签）整体不可用。应用层 5xx 告警看不到「网关根本没转发出去」的 502，
+      # 故在 nginx access.log 派生指标上单独设阈值（基线事故 1,178 次/91s）。
+      - alert: GrapeRuntime502RateHigh
+        expr: |
+          sum(rate(nginx_upstream_502_total{path=~"/api/runtime/.*"}[5m])) /
+          clamp_min(sum(rate(nginx_upstream_requests_total{path=~"/api/runtime/.*"}[5m])), 1) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nginx /api/runtime/ 502 rate > 1%"
+          description: "{{ $value | humanizePercentage }} of /api/runtime/* requests returned 502 in the last 5 minutes — worker upstream restart/unreachable or gateway failover failure. Check nginx-gateway error log and worker /readyz."
+
       # 队列积压
       - alert: GrapeTaskQueueBacklog
         expr: grape_task_queued > 10

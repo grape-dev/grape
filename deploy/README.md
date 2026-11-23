@@ -157,3 +157,25 @@ overlayfs copy-up 可能以「删旧建新」替换 `data/sessions.db-wal` / `-s
 1. 数据目录落持久卷（compose 已挂 `grape-data:/app/data`；裸容器用 `DEVOPS_DB_PATH`
    指到卷内路径），不要让 WAL/SHM 落在容器可写层；
 2. 反复触发时可用 `DEVOPS_DB_JOURNAL_MODE=truncate|delete` 规避（默认 `wal` 不变）。
+
+## 滚动重启 SOP（Issue #3969）
+
+**目标**：单台 worker 重启/升级不再引发 `/api/runtime/*` 全量 502。基线事故为
+91s 内 1,178 次 502（详见 [`docs/deployment/worker-restart-slo.md`](../docs/deployment/worker-restart-slo.md)）。
+
+前置：
+- 网关 worker upstream 已配置多上游（`/etc/nginx/conf.d/grape-worker-peers.conf`
+  注入对等主控 worker 端点）+ `proxy_next_upstream`；`nginx -t` 通过。
+- worker systemd 单元已启用 `ExecStop` 摘流脚本与 `ExecStartPost` readiness 门禁；
+  `/tmp/grape-worker-draining` 标记存在时 `/readyz` 返回 503。
+
+步骤（**逐台**执行，禁止多台并行）：
+1. `systemctl restart grape-worker-server`（ExecStop 会先摘流 → 等待 ≥5s 排空 →
+   SIGTERM；启动后 `ExecStartPost` 轮询 `/readyz`）。
+2. 观察该台 5 分钟窗口内 `/api/runtime/` 的 502 计数（Loki / `nginx_upstream_502_total`）。
+3. **等 502 归零且无新 502 再处理下一台**；若 5min 502 率 >1%，触发
+   `GrapeRuntime502RateHigh` 告警，暂停滚动并排查上游可达性/readiness。
+4. 全部完成后复核 `/readyz`、runtime 心跳与在线引擎数回到基线。
+
+注：滚动重启只用 `systemctl restart`，不要用 `scripts/restart-four-process.sh`
+强杀（会绕过摘流，见脚本自身提示）。

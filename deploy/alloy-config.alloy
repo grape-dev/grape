@@ -25,7 +25,48 @@ local.file_match "grape_logs" {
 
 loki.source.file "grape_logs" {
   targets    = local.file_match.grape_logs.targets
+  forward_to = [loki.process.nginx_502.receiver]
+}
+
+// Issue #3969：从 nginx access.log 派生 /api/runtime/ 502 率指标（复用现有日志采集链路，
+// 不新增 exporter）。status/path 作为指标 label，供 alerts.yml 计算 >1%/5min 告警。
+// access.log 默认 combined 格式：remote_addr - user [time] "METHOD PATH HTTP/x" status bytes ...
+loki.process "nginx_502" {
   forward_to = [loki.write.default.receiver]
+
+  stage.match {
+    selector = "{job=\"nginx-access\"}"
+    stage.regex {
+      expression = "^(?P<remote_addr>\\S+) \\S+ \\S+ \\[(?P<time>[^\\]]+)\\] \\\"(?P<method>\\S+) (?P<path>\\S+)[^\\\"]*\\\" (?P<status>\\d{3}) (?P<bytes>\\S+)"
+    }
+    stage.labels {
+      values = { status = "", path = "" }
+    }
+  }
+
+  stage.match {
+    selector = "{job=\"nginx-access\"} |~ \"/api/runtime/\""
+    stage.metrics {
+      metric.counter {
+        name        = "nginx_upstream_requests_total"
+        description = "nginx requests to worker runtime control plane"
+        match_all   = false
+        action      = "inc"
+      }
+    }
+  }
+
+  stage.match {
+    selector = "{job=\"nginx-access\"} |~ \" 502 \""
+    stage.metrics {
+      metric.counter {
+        name        = "nginx_upstream_502_total"
+        description = "nginx 502 responses (upstream refused/unavailable)"
+        match_all   = false
+        action      = "inc"
+      }
+    }
+  }
 }
 
 loki.write "default" {
