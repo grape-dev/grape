@@ -1,0 +1,49 @@
+# Grape 网关 502 告警规则（Loki ruler 格式）——Issue #3847
+#
+# 为什么放在 Loki 而不是 Prometheus（PR #1998 审查整改）：
+#   nginx 产生的 502 只进访问日志（deploy/alloy-config.alloy 的
+#   `{__path__ = "/var/log/nginx/access.log", job = "nginx-access"}` → Loki），
+#   不进应用侧 `grape_http_requests_total`（该指标只统计应用进程自己处理的请求）。
+#   原先把网关 502 规则挂在应用指标上，事故时段（1,173 次 502）该指标恒为 0 —— 规则
+#   结构上不可能触发。应用侧上游 5xx 分级规则仍保留在 deploy/alerts.yml。
+#
+# 使用方式（Loki ruler）：
+#   ruler:
+#     storage:
+#       type: local
+#       local:
+#         rule_path: /loki/rules
+#     ring: ...
+#   把本文件放入 Loki 的规则目录（或 `loki -config.file` 指向的 ruler 目录）后 reload。
+#   校验：`promtool check rules` 不适用于 LogQL，可用 `logcli` 手工跑 expr 验证。
+#
+# 阈值口径：0.5% = 发布窗口可容忍上限（与 scripts/deploy-drain.sh 的
+# GATEWAY_502_THRESHOLD=0.005 同源），2% = 必须立即回滚。
+# 分母用 count_over_time 计数日志行（Loki 的 rate() 返回字节数，不能当请求数用）；
+# 低流量时段配合 `for:` 持续时间窗抑噪，单条偶发 502 不会立刻告警。
+groups:
+  - name: grape-gateway
+    rules:
+      - alert: GrapeGateway502RateWarning
+        expr: |
+          sum(count_over_time({job="nginx-access"} |~ "\" 502 " [5m]))
+          /
+          clamp_min(sum(count_over_time({job="nginx-access"}[5m])), 1) > 0.005
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway 502 rate > 0.5% (nginx access log)"
+          description: "More than 0.5% of nginx access-log requests are 502 in the last 5m (baseline ~0.08%); gateway→upstream connections are being cut during reload/drain."
+
+      - alert: GrapeGateway502RateCritical
+        expr: |
+          sum(count_over_time({job="nginx-access"} |~ "\" 502 " [5m]))
+          /
+          clamp_min(sum(count_over_time({job="nginx-access"}[5m])), 1) > 0.02
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway 502 rate > 2% (nginx access log)"
+          description: "More than 2% of nginx access-log requests are 502 in the last 5m; roll back the release and check upstream drain/keepalive."

@@ -92,30 +92,12 @@ groups:
           summary: "HTTP 5xx error rate > 2%"
           description: "More than 2% of HTTP requests are returning 5xx errors; roll back the release."
 
-      # 网关 502 速率——单独成规则，发布/摘流窗口的典型故障信号（Issue #3847）。
-      # 502 通常表示网关到健康 upstream 的连接被切断（reload/进程退出），
-      # 与上游业务 5xx 区分开，便于发布门禁与值班快速定位。
-      - alert: GrapeGateway502RateWarning
-        expr: |
-          sum(rate(grape_http_requests_total{status="502"}[5m])) /
-          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.005
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Gateway 502 rate > 0.5%"
-          description: "More than 0.5% of requests are 502 (gateway→upstream connection reset during reload/drain)."
-
-      - alert: GrapeGateway502RateCritical
-        expr: |
-          sum(rate(grape_http_requests_total{status="502"}[5m])) /
-          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.02
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Gateway 502 rate > 2%"
-          description: "More than 2% of requests are 502; upstream drain/reload is cutting healthy connections."
+      # 网关 502 告警在 Loki 侧（deploy/loki-rules.yml，Issue #3847 审查整改）：
+      # nginx 产生的 502 只落在 /var/log/nginx/access.log（alloy-config.alloy 的
+      # job="nginx-access" → Loki），不进应用侧 grape_http_requests_total —— 事故时段
+      # （1,173 次 502）该指标恒为 0，挂在应用指标上的网关 502 规则结构上不会触发。
+      # 应用侧可见的上游 5xx 由上面两条 GrapeHTTPErrorRate* 覆盖；网关 502 请用
+      # deploy/loki-rules.yml 的 GrapeGateway502RateWarning / Critical（阈值同为 0.5%/2%）。
 
       # Issue #3969：nginx 层 /api/runtime/ 502 率 >1%/5min
       # 语义：worker 重启/不可达时网关直接 502，runtime 控制面（心跳/注册/认领/任务态/
