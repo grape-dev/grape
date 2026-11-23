@@ -935,6 +935,7 @@
 
 <script setup>
 import { providerFromRepoKey, repoKeyOf } from '../lib/repo-provider.js'
+import { stripRepoPrefix } from '../lib/repo-key.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const G = globalThis
@@ -1723,7 +1724,7 @@ function loadDetail(id) {
 function loadBranches(repoKeyRaw, target) {
   const repoKey = repoKeyRaw || ''
   if (!repoKey) return
-  const rk = repoKey.replace(/^(gitcode|github):/, '')
+  const rk = stripRepoPrefix(repoKey)
   const parts = rk.split('/')
   if (parts.length !== 2) return
   API()
@@ -2189,10 +2190,7 @@ function dispatchFinding(execId, f) {
   dispatchDlg.sceneId = ''
   dispatchDlg.submitting = false
   // 从详情 task 取 repo_key（详情页不在 currentRepo 上下文）
-  const repo = String((detail.value && detail.value.repo_key) || '').replace(
-    /^(gitcode|github):/,
-    ''
-  )
+  const repo = stripRepoPrefix((detail.value && detail.value.repo_key) || '')
   API()
     .get('/scenes?repo=' + encodeURIComponent(repo))
     .then(function (d) {
@@ -2417,10 +2415,10 @@ function engineDisplayName(e) {
 }
 // Issue #486：表单对应仓库 full_name（无平台前缀）；编辑态用原任务仓库，新建用当前仓库
 function formRepoKey() {
-  let rk = (dlg.repoKey || '').replace(/^(gitcode|github):/, '')
+  let rk = stripRepoPrefix(dlg.repoKey || '')
   if (!rk) {
     const cur = currentRepo()
-    rk = String((cur && (cur.repoKey || cur.fullName)) || '').replace(/^(gitcode|github):/, '')
+    rk = stripRepoPrefix((cur && (cur.repoKey || cur.fullName)) || '')
   }
   return rk.split('/').length === 2 ? rk : ''
 }

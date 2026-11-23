@@ -3,7 +3,8 @@
  *
  * 迁移说明（2026-11-11）：原测试沙箱执行 legacy issues.js 的 _renderTaskActionsInline
  * 与 _isRepoAdmin393；Vue 迁移后改为 isRepoAdmin computed + 模板按钮。断言保留原语义：
- *   1. isRepoAdmin 读 repo_member_cache，repo_key 前缀(github:/gitcode:)与 bare/full_name 均可匹配
+ *   1. isRepoAdmin 读 repo_member_cache，repo_key 任意平台前缀（github:/gitcode:/gitee:…）
+ *      经统一 stripRepoPrefix 归一后，repo_key / bare / full_name 均可匹配
  *   2. 非 completed/cancelled 才渲染管理员确认按钮（两处入口：看板详情 + 详情页）
  *   3. 非 admin → disabled + admin_only_hint 提示；admin → 主色按钮
  *   4. 点击走 POST /issues/{id}/admin-confirm-done
@@ -29,7 +30,11 @@ check('isRepoAdmin 读 repo_member_cache 并归一化 repo_key', function () {
   assert.ok(i > 0, '应存在 isRepoAdmin computed');
   const body = VIEW.slice(i, i + 900);
   assert.ok(body.indexOf("repo_member_cache") >= 0, '应读 localStorage 的 repo_member_cache');
-  assert.ok(/replace\(\/\^\(github\|gitcode\):\//.test(body), '应去掉 github:/gitcode: 前缀');
+  assert.ok(/stripRepoPrefix\(rk\)/.test(body), '应用统一前缀剥离（任意平台，含 gitee/gitlab）');
+  assert.ok(
+    /import \{ stripRepoPrefix \} from '\.\.\/lib\/repo-key\.js'/.test(VIEW),
+    '前缀剥离应走 lib/repo-key.js 共享实现，禁止写死平台枚举',
+  );
   assert.ok(/r\.repo_key === rk/.test(body), '应按 repo_key 匹配');
   assert.ok(/r\.full_name === bare/.test(body), '应按 full_name 匹配');
 });

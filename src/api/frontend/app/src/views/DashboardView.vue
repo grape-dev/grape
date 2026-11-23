@@ -1296,6 +1296,7 @@
 
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
+import { stripRepoPrefix as stripRepoPrefixShared } from '../lib/repo-key.js'
 import { pluginsEnabled } from '../lib/features.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
@@ -1990,7 +1991,9 @@ function currentRepo() {
   return app().currentRepo ? app().currentRepo() : null
 }
 function stripRepoPrefix(rk) {
-  return String(rk || '').replace(/^(gitcode|github):/, '')
+  // 统一走 lib/repo-key.js（平台目录驱动，gitee/gitlab 前缀同样剥离）；
+  // 此前这里自留一份 `^(gitcode|github):` 实现，把壳里的通用版本遮掉了。
+  return stripRepoPrefixShared(rk)
 }
 // Issue #393fc76e9：分支接口显式携带平台（repo_key），避免同名仓被 user_repos 的
 // github: 记录带偏（托管仓被误判 → 分支只剩 main）。仅在当前仓库与查询 owner/repo
@@ -3821,7 +3824,7 @@ const scenePipeFailed = computed(
 function loadScenePipePage(sceneId, page) {
   if (!sceneId) return
   const repo = (dashData.value && dashData.value.repo) || ''
-  const bare = String(repo).replace(/^(gitcode|github):/, '')
+  const bare = stripRepoPrefix(repo)
   if (bare.indexOf('/') < 0) return
   const p = Math.max(0, parseInt(page, 10) || 0)
   pipePage.value = p
