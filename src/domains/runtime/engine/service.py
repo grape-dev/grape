@@ -4517,6 +4517,12 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}), **_err_kw)
+    # Issue #4023：任务成功完成即打断「同 issue 连续失败」链（下一轮失败重新计数）。
+    if exit_code == 0 and task:
+        try:
+            _reset_baseline_failure(task.get("issue_id"))
+        except Exception:
+            pass
     # 新会话续接指针回写——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     # 引擎守卫（B2）：usage.engine 为本次执行引擎（worker done 事件带上），回写时
@@ -5101,6 +5107,113 @@ def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
     return f"执行失败：{_raw}", "请参考任务详情或 worker 日志排障"
 
 
+# ---------------------------------------------------------------------------
+# Issue #4023：失败日志出口单行化 + 完整错误结构化落库 + 同因连续失败打点
+#
+# 背景：`Task failed ... err={str(error)[:120]}` 恰好切在 expected_baseline=，让
+# WorkspaceBaselineError 承诺的六要素在唯一运行日志出口失效（#2514 回归）。
+# 口径：
+# - 基线异常 → repogit.WorkspaceBaselineError.format_one_line()，固定七要素、不截断；
+# - 其他异常 → 上限放宽到 `GRAPE_FAILURE_LOG_LIMIT`（默认 500，下限 400），
+#   超限显式追加 `…(truncated N chars)`，避免「半截单词无标记」误导；
+# - 完整错误（JSON 优先）写入 agent_tasks.errors，字段名与 to_dict() 一致；
+# - 同 issue 连续同 reason 失败达阈值 → ERROR 打点 `baseline_mismatch_repeat`
+#   （阈值 `GRAPE_BASELINE_REPEAT_THRESHOLD` 默认 3，窗口
+#   `GRAPE_BASELINE_REPEAT_WINDOW_SECONDS` 默认 3600）。
+# ---------------------------------------------------------------------------
+_BASELINE_REPEAT_THRESHOLD_DEFAULT = 3
+_BASELINE_REPEAT_WINDOW_DEFAULT_SECONDS = 3600.0
+_GENERIC_FAILURE_LOG_LIMIT_DEFAULT = 500
+_baseline_failure_state = {}
+_baseline_failure_lock = threading.Lock()
+
+
+def _baseline_repeat_threshold() -> int:
+    try:
+        return max(1, int(os.environ.get("GRAPE_BASELINE_REPEAT_THRESHOLD", "") or
+                          _BASELINE_REPEAT_THRESHOLD_DEFAULT))
+    except Exception:
+        return _BASELINE_REPEAT_THRESHOLD_DEFAULT
+
+
+def _baseline_repeat_window_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("GRAPE_BASELINE_REPEAT_WINDOW_SECONDS", "") or
+                              _BASELINE_REPEAT_WINDOW_DEFAULT_SECONDS))
+    except Exception:
+        return _BASELINE_REPEAT_WINDOW_DEFAULT_SECONDS
+
+
+def _generic_failure_log_limit() -> int:
+    try:
+        return max(400, int(os.environ.get("GRAPE_FAILURE_LOG_LIMIT", "") or
+                            _GENERIC_FAILURE_LOG_LIMIT_DEFAULT))
+    except Exception:
+        return _GENERIC_FAILURE_LOG_LIMIT_DEFAULT
+
+
+def _format_failure_error(error):
+    """失败日志文本 + 结构化字段（Issue #4023）。
+
+    - WorkspaceBaselineError 对象 → format_one_line() / to_dict()（同源、不截断）；
+    - worker 上报字符串（client.fail 只回传 str(error)）→ 识别基线前缀原样保留，
+      并按 key=value 还原结构化字段；
+    - 其他异常 → 放宽上限，超限追加 `…(truncated N chars)`。
+
+    返回 (log_text, structured|None)。
+    """
+    from src.domains.runtime.engine.repogit import (
+        WorkspaceBaselineError, parse_baseline_error_text,
+    )
+    if isinstance(error, WorkspaceBaselineError):
+        return error.format_one_line(), error.to_dict()
+    text = str(error or "")
+    fields = parse_baseline_error_text(text)
+    if fields:
+        return text, fields
+    limit = _generic_failure_log_limit()
+    if len(text) > limit:
+        return f"{text[:limit]}…(truncated {len(text) - limit} chars)", None
+    return text, None
+
+
+def _record_baseline_failure(issue, reason) -> dict:
+    """同 issue 连续同因失败计数（reason 变化或超窗即重置）。
+
+    返回本次计数与是否达阈值；跨进程不做聚合，打点语义为「单进程连续 N 次」，
+    跨进程聚合交由日志采集侧（与 Spec 风险声明一致）。
+    """
+    key = str(issue or "-")
+    r = str(reason or "unknown")
+    now = time.time()
+    window = _baseline_repeat_window_seconds()
+    threshold = _baseline_repeat_threshold()
+    with _baseline_failure_lock:
+        st = _baseline_failure_state.get(key)
+        if (not st or st.get("reason") != r
+                or (now - float(st.get("last_at") or 0)) > window):
+            st = {"reason": r, "count": 0, "first_at": now}
+        st["count"] += 1
+        st["last_at"] = now
+        _baseline_failure_state[key] = st
+        return {
+            "issue": key,
+            "reason": r,
+            "count": st["count"],
+            "first_at": st["first_at"],
+            "last_at": st["last_at"],
+            "window_seconds": window,
+            "threshold": threshold,
+            "triggered": st["count"] >= threshold,
+        }
+
+
+def _reset_baseline_failure(issue) -> None:
+    """任务成功完成时清空该 issue 的连续失败链。"""
+    with _baseline_failure_lock:
+        _baseline_failure_state.pop(str(issue or "-"), None)
+
+
 def fail_task(task_id, error, exit_code=-1):
     # MR-2（2026-11-05）：task.finish span（fail 终态，与 complete_task 同款串联）
     try:
@@ -5219,12 +5332,21 @@ def fail_task(task_id, error, exit_code=-1):
     # TRANSIENT_RETRY_EXHAUSTED（分类/次数/摘要）写入 errors，直接覆盖会
     # 洗掉诊断记录（部署实测 V5 抓到）。追加侧语义见 transient_retry._append_task_error
     # （append 最新记录 + errs[-5:]，无头部保护需求——与判死合并的首条保护是不同场景）。
-    _fail_errors = json.dumps([str(error)] if error else [])
+    # Issue #4023：完整错误结构化落库（JSON 优先）——基线异常把 to_dict() 字段
+    # 与错误码一并写入 errors；其他异常保持原始文本，兼容既有消费方。
+    _err_log, _err_struct = _format_failure_error(error)
+    _new_err = str(error) if error else ""
+    if _err_struct is not None:
+        _new_err = {"error_code": "WORKSPACE_BASELINE_MISMATCH",
+                    "message": _err_log}
+        _new_err.update(_err_struct)
+    _fail_errors = json.dumps([_new_err] if _new_err else [])
     try:
         _prior = _task_errors_json(task_id)
         if _prior:
             # 保留既有结构化记录（dict 的 TRANSIENT_RETRY_* 诊断），原文去重合并
-            _merged = [str(error)] + [e for e in _prior if e != str(error)][:4]
+            _merged = ([_new_err] if _new_err else []) + [
+                e for e in _prior if e != _new_err and e != str(error)][:4]
             _fail_errors = json.dumps(_merged[:5])
     except Exception:
         pass
@@ -5513,7 +5635,33 @@ def fail_task(task_id, error, exit_code=-1):
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
     _ft = get_task(task_id) or {}
-    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
+    log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={_err_log}")
+    # Issue #4023：同 issue 同 reason 连续失败打点——达阈值升级 ERROR 并带
+    # `baseline_mismatch_repeat` 标记（含次数/窗口/首次与最近发生时间/全字段）。
+    if _err_struct:
+        try:
+            _repeat = _record_baseline_failure(
+                _err_struct.get("issue"), _err_struct.get("reason"))
+            if _repeat.get("triggered"):
+                _first_iso = datetime.fromtimestamp(
+                    _repeat["first_at"], timezone.utc).isoformat()
+                _last_iso = datetime.fromtimestamp(
+                    _repeat["last_at"], timezone.utc).isoformat()
+                log.error(
+                    "baseline_mismatch_repeat issue=#{} reason={} count={} threshold={} "
+                    "window_s={:.0f} first_at={} last_at={} path={} expected_baseline={} "
+                    "actual_head={} ahead={} behind={} requested_baseline={}".format(
+                        _repeat.get("issue"), _repeat.get("reason"),
+                        _repeat.get("count"), _repeat.get("threshold"),
+                        _repeat.get("window_seconds") or 0, _first_iso, _last_iso,
+                        _err_struct.get("path", ""),
+                        _err_struct.get("expected_baseline", ""),
+                        _err_struct.get("actual_head", ""),
+                        _err_struct.get("ahead", ""),
+                        _err_struct.get("behind", ""),
+                        _err_struct.get("requested_baseline", "")))
+        except Exception as _re:
+            log.warning(f"fail_task: baseline repeat alert failed: {_re}")
     # 可观察性埋点：任务失败
     try:
         from src.domains.insight.public import record_task_terminal, record_task_failed
