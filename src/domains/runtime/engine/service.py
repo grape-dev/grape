@@ -1436,6 +1436,13 @@ _REPO_DISPATCH_LEASE_JITTER_RATIO = 0.2  # 抖动防多实例同刻齐抢（仅�
 _REPO_DISPATCH_LEASE_RETRY_INTERVAL = 0.25
 
 
+# Issue #3963（复审）：busy 文案指纹提为共享常量——scheduler 侧回推分类
+# （_enqueue_failure_code/_classify_env_error）依赖该字面子串；两侧各自维护时
+# 文案漂移会让「存量库缺 error_code 列」的回推静默失效（busy 又退回 0 重试即
+# failed）。改名等于让既有 Loki 查询失明，必须与异常文案同源。
+REPO_DISPATCH_BUSY_LOG_FINGERPRINT = "task enqueue busy for repo"
+
+
 class RepoDispatchBusyError(RuntimeError):
     """同仓 enqueue 等待 repo-dispatch 租约预算耗尽（瞬态可重试，非永久失败）。
 
@@ -1449,7 +1456,41 @@ class RepoDispatchBusyError(RuntimeError):
     def __init__(self, repo_key: str, waited_seconds: float = 0.0):
         self.repo_key = repo_key or ""
         self.waited_seconds = float(waited_seconds or 0.0)
-        super().__init__(f"task enqueue busy for repo {repo_key}")
+        super().__init__(f"{REPO_DISPATCH_BUSY_LOG_FINGERPRINT} {repo_key}")
+
+
+def acquire_repo_dispatch_lease(repo_key: str) -> tuple[str, float]:
+    "同仓派发租约获取：enqueue_task 与 direct 派发（_create_direct_task）的共用入口。"
+    # Issue #3963（复审 Required）：LOCAL 引擎派发 / 事件直发 / SRE 重试此前各持一份
+    # 「默认 0.95s 抢锁、抢不到即判死」的内联调用。本入口统一等待预算 = TTL + 余量
+    # （AC：有效等待 >= 租约 TTL，持锁者崩溃后最晚 TTL 过期可接管残留租约），
+    # 间隔 _REPO_DISPATCH_LEASE_RETRY_INTERVAL + 抖动，全部调用点同口径排队等待。
+    # 返回 (lease_key, waited_seconds)：lease_key 供调用方 finally 中 release
+    # （空 repo_key 返回 ("", 0.0)，调用方按空键跳过释放）；预算耗尽抛
+    # RepoDispatchBusyError（瞬态分类，调用方走 #3963 瞬态通道，不判永久失败）。
+    # 埋点（wait 直方图 / busy 计数）在本入口完成，全部调用点同口径上报。
+    dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
+    if not dispatch_lease_key:
+        return "", 0.0
+    _lease_t0 = time.monotonic()
+    _lease_ok = acquire_lock_with_retry(
+        dispatch_lease_key, ttl=_REPO_DISPATCH_LEASE_TTL,
+        interval=_REPO_DISPATCH_LEASE_RETRY_INTERVAL,
+        wait_seconds=_REPO_DISPATCH_LEASE_WAIT_SECONDS,
+        jitter_ratio=_REPO_DISPATCH_LEASE_JITTER_RATIO)
+    _lease_waited = time.monotonic() - _lease_t0
+    try:
+        from src.domains.insight.public import (
+            record_repo_dispatch_busy, record_repo_dispatch_lease_wait)
+        record_repo_dispatch_lease_wait(repo_key, _lease_waited)
+        if not _lease_ok:
+            record_repo_dispatch_busy(repo_key)
+    except Exception as _obs_e:
+        # 埋点绝不拖垮入队主链路（可观测性铁律）；显式 debug 记录而非静默吞
+        log.debug(f"repo dispatch lease metrics skipped: {_obs_e}")
+    if not _lease_ok:
+        raise RepoDispatchBusyError(repo_key, waited_seconds=_lease_waited)
+    return dispatch_lease_key, _lease_waited
 
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
@@ -1707,27 +1748,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _snap = (None, "", "")
     # 组织派发租约（a85f72d33）：同仓库 enqueue 串行化，避免 dispatch 双写竞争
     # Issue #3963：等待预算与租约 TTL 对齐（不再固定 0.95s 即判 busy）——同仓并发
-    # enqueue 排队等待；预算耗尽才抛结构化 REPO_DISPATCH_BUSY（瞬态，调度侧重试/requeue）。
-    dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
-    if dispatch_lease_key:
-        _lease_t0 = time.monotonic()
-        _lease_ok = acquire_lock_with_retry(
-            dispatch_lease_key, ttl=_REPO_DISPATCH_LEASE_TTL,
-            interval=_REPO_DISPATCH_LEASE_RETRY_INTERVAL,
-            wait_seconds=_REPO_DISPATCH_LEASE_WAIT_SECONDS,
-            jitter_ratio=_REPO_DISPATCH_LEASE_JITTER_RATIO)
-        _lease_waited = time.monotonic() - _lease_t0
-        try:
-            from src.domains.insight.public import (
-                record_repo_dispatch_busy, record_repo_dispatch_lease_wait)
-            record_repo_dispatch_lease_wait(repo_key, _lease_waited)
-            if not _lease_ok:
-                record_repo_dispatch_busy(repo_key)
-        except Exception as _obs_e:
-            # 埋点绝不拖垮入队主链路（可观测性铁律）；显式 debug 记录而非静默吞
-            log.debug(f"repo dispatch lease metrics skipped: {_obs_e}")
-        if not _lease_ok:
-            raise RepoDispatchBusyError(repo_key, waited_seconds=_lease_waited)
+    # enqueue 排队等待；预算耗尽抛结构化 REPO_DISPATCH_BUSY（瞬态，调度侧重试/requeue）。
+    # 复审 Required：租约获取/埋点/异常分类收口在 acquire_repo_dispatch_lease，
+    # 与 direct 派发（event_pipeline._create_direct_task）共用同一口径。
+    dispatch_lease_key, _ = acquire_repo_dispatch_lease(repo_key)
     try:
         with db_lock:
             c = _rt_db.cursor()

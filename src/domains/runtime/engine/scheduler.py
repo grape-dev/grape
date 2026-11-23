@@ -56,8 +56,12 @@ _ENV_FAILURE_CODES = (ERROR_ENGINE_OFFLINE, ERROR_BINDING_STALE)
 # 排队冲突升级成任务被暂停，恰是本单要消灭的「定时任务丢失」。
 # 瞬态通道：独立预算（不消耗 max_retry 的 attempt）、短退避 1/2/4s、预算耗尽 requeue
 # 下一 tick（execution 记 skipped + error_code，不置 failed、不推进失败计数）。
-ERROR_REPO_DISPATCH_BUSY = "REPO_DISPATCH_BUSY"
-_BUSY_LOG_FINGERPRINT = "task enqueue busy for repo"   # service 侧稳定文案（Loki 同源）
+# 复审（#3963 Optional 落地）：错误码与文案指纹改为从 service 共享（同源防漂移）——
+# service 抛出方（RepoDispatchBusyError）与本模块判定方各自维护字面量时，文案
+# 漂移会让「存量库缺 error_code 列」的指纹回推静默失效。本地名保持不变，引用零改动。
+from src.domains.runtime.engine.service import (
+    REPO_DISPATCH_BUSY as ERROR_REPO_DISPATCH_BUSY,
+    REPO_DISPATCH_BUSY_LOG_FINGERPRINT as _BUSY_LOG_FINGERPRINT)
 _BUSY_RETRY_BUDGET = 3                                 # 同 tick 内的瞬态重试次数
 _BUSY_RETRY_DELAYS = (1, 2, 4)                         # 秒：短退避基数
 _BUSY_RETRY_JITTER_RATIO = 0.2                         # 抖动：避免多实例同刻齐抢
@@ -612,11 +616,26 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     # 创建 agent_tasks 记录（用 autopilot 专属 seq 命名空间，skip_event_config=True 不写 events 表）
     # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
     # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
-    task_id = _create_direct_task(
-        repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
-        "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
-        issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
-    )
+    # Issue #3963（复审 Required）：direct 派发撞 repo-dispatch 租约时
+    # _create_direct_task 抛 RepoDispatchBusyError（瞬态）——与 REMOTE 入队同口径
+    # 落 skipped + error_code，交给 _execute_task 瞬态通道（不消耗 attempt /
+    # 超预算 requeue 下一 tick），不再「创建任务记录失败」记 failed（撞锁即判死）。
+    try:
+        task_id = _create_direct_task(
+            repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
+            "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
+            issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
+        )
+    except Exception as _dt_e:
+        _dt_code = _enqueue_failure_code(_dt_e)
+        _dt_status = "skipped" if _dt_code == ERROR_REPO_DISPATCH_BUSY else "failed"
+        if _dt_code == ERROR_REPO_DISPATCH_BUSY:
+            log.warning(f"Autopilot exec {exec_id}: direct dispatch busy (transient, retryable): {_dt_e}")
+        else:
+            log.error(f"Autopilot exec {exec_id}: _create_direct_task failed: {_dt_e}")
+        _update_execution_result(exec_id, _dt_status, error=f"直发建任务异常: {_dt_e}",
+                                 error_code=_dt_code)
+        return
     if not task_id:
         log.warning(f"Autopilot exec {exec_id}: _create_direct_task failed")
         _update_execution_result(exec_id, "failed", error="创建任务记录失败")

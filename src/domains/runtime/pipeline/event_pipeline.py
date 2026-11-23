@@ -709,12 +709,14 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     dispatch_lease_key = ""
     dispatch_lease = False
     if repo_key:
-        from src.kernel.lock import acquire_lock_with_retry, repo_dispatch_lease_key
-        dispatch_lease_key = repo_dispatch_lease_key(repo_key)
-        dispatch_lease = acquire_lock_with_retry(dispatch_lease_key, ttl=30)
-        if not dispatch_lease:
-            log.error(f"create_direct_task: dispatch lease busy for repo={repo_key}")
-            return ""
+        # Issue #3963（复审 Required）：direct 派发与 enqueue_task 共用同一把
+        # repo-dispatch 租约的获取入口 acquire_repo_dispatch_lease（预算 = TTL+5s，
+        # 不再默认 0.95s 撞锁即判死）；预算耗尽抛 RepoDispatchBusyError（瞬态分类），
+        # 由调用方走 #3963 瞬态通道：autopilot 记 skipped + error_code，
+        # SRE 重试按 busy 指纹收口 failed 留待下一轮 claim 复试。
+        from src.domains.runtime.engine.service import acquire_repo_dispatch_lease
+        dispatch_lease_key, _ = acquire_repo_dispatch_lease(repo_key)
+        dispatch_lease = True
 
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名；未迁移旧库/引擎已删不阻断）
     try:
