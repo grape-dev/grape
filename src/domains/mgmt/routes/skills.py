@@ -148,8 +148,11 @@ def _skill_display_name_conflict(scope: str, owner_id: str, name: str,
                                  exclude_id: int | None = None) -> bool:
     """同 scope 内显示名称是否重复（去首尾空格 + 大小写不敏感）。
 
-    只约束 display_name（源名称兜底不参与）；跨 scope 允许同名。比较留在
-    Python 侧 casefold，规避 MySQL/SQLite LOWER/TRIM 语义差异（含 Unicode）。
+    决策（Issue #3855 spec §7.1/§8.2）：只约束用户录入的 display_name 列；
+    空名存量行回退展示的源名称不纳入重名约束，历史源名称天然重复按 §8.2
+    接受（按 id 区分）。因此同 scope 可能出现「有效展示名相同」的存量行，
+    这是需求明确允许的口径，而非漏检。跨 scope 允许同名；比较留在 Python
+    侧 casefold，规避 MySQL/SQLite LOWER/TRIM 语义差异（含 Unicode）。
     """
     target = _normalize_skill_display_name(name).casefold()
     if not target:
@@ -186,32 +189,45 @@ def _validate_skill_display_name(raw, *, scope: str, owner_id: str,
     return name
 
 
+def _converted_display_name(scope: str, owner_id: str, source_display,
+                            source_name) -> str:
+    """转换/复制新行的有效展示名：≤20 且同 scope 不重名。
+
+    源自定义名称优先；缺省或超长时回退源名称并截断到上限，避免存量超长源名称
+    作为 display_name 写入新行绕过 20 字约束；目标 scope 重名时追加 `~N` 后缀。
+    （重名约束仍只针对 display_name 列，见 `_skill_display_name_conflict`。）
+    """
+    candidate = (_normalize_skill_display_name(source_display)
+                 or _normalize_skill_display_name(source_name))
+    if not candidate:
+        candidate = "技能"
+    if len(candidate) > SKILL_DISPLAY_NAME_MAX:
+        candidate = candidate[:SKILL_DISPLAY_NAME_MAX].strip()
+    if not candidate:
+        candidate = "技能"
+    if not _skill_display_name_conflict(scope, owner_id, candidate):
+        return candidate
+    for seq in range(2, 1000):
+        suffix = f"~{seq}"
+        head = candidate[:SKILL_DISPLAY_NAME_MAX - len(suffix)].rstrip()
+        trial = f"{head}{suffix}" if head else suffix.lstrip("~")
+        if not _skill_display_name_conflict(scope, owner_id, trial):
+            return trial
+    return candidate
+
+
 def _is_official_skill_admin(user: dict) -> bool:
     """官方技能显示名称编辑权限：仅平台管理员（admin_accounts）可改。
 
     CONTRIBUTING §7「不弱化鉴权」：官方技能为部署内置物，不能任意登录用户改名。
-    只信任认证依赖解析出的管理台身份（JWT role=admin，由
-    `get_current_user_or_api_key_or_admin` 复核 admin_accounts token_version 后
-    置 token_type='admin'）；**禁止**用 username 跨账户体系匹配——grape_accounts
-    与 admin_accounts 完全独立，同名普通账号不能借此取得改名权。再按
-    admin_accounts id 复核一次（查询失败 / 记录不存在一律 fail-closed）。
+    只信任认证依赖解析出的管理台身份：`require_admin` /
+    `get_current_user_or_api_key_or_admin` 已校验 JWT role=admin 且
+    admin_accounts token_version 一致后才置 `token_type='admin'`，此处直接复用
+    该已解析身份，不再重复查库。**禁止**用 username 跨账户体系匹配——
+    grape_accounts 与 admin_accounts 完全独立，同名普通账号不能借此取得改名权。
     """
-    if not isinstance(user, dict):
-        return False
-    if str(user.get("token_type") or "") != "admin":
-        return False
-    uid = user.get("id")
-    try:
-        _uid = int(uid)
-    except (TypeError, ValueError):
-        return False
-    if not _uid:
-        return False
-    try:
-        from src.domains.mgmt.admin.db import get_admin_token_version
-        return int(get_admin_token_version(_uid)) >= 0
-    except Exception:  # noqa: BLE001 - fail-closed
-        return False
+    return (isinstance(user, dict)
+            and str(user.get("token_type") or "") == "admin")
 
 
 def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
@@ -1054,6 +1070,11 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     tags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
 
     # 归属校验
+    # Issue #3855：管理台 JWT（token_type='admin'）能力仅限官方技能改名/详情；
+    # admin_accounts.id 与 grape_accounts.id 是两套独立序列，若放行到 user/repo
+    # 分支会按撞号 id 读到他人私有技能（confused deputy），故非 official 一律拒绝。
+    if str(user.get("token_type") or "") == "admin" and scope != "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "管理台账号仅可访问官方技能"})
     if scope == "user" and owner_id != str(user["id"]):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该技能"})
     if scope == "repo":
@@ -1708,7 +1729,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
 @router.patch("/{skill_id}", operation_id="skills_patch_meta",
               summary="Skill metadata edit without re-uploading the package",
-              description="Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
+              description="Issue #3202: updates tags/summary/description/category/agent_type in place. Issue #3855: official skills allow display_name edits by platform admins only (other fields and non-admin callers 403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
 def patch_skill_meta(skill_id: int, body: dict = Body(...),
                      user: dict = Depends(require_no_session_token_or_admin)):
     """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
@@ -1743,6 +1764,12 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
         if _non_name:
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": "官方技能仅允许修改显示名称"})
+    elif str(user.get("token_type") or "") == "admin":
+        # Issue #3855：管理台 JWT 只允许改官方技能名称。admin_accounts.id 与
+        # grape_accounts.id 独立自增，撞号时不能按 owner_id/托管仓库放行到
+        # user/repo 技能（否则管理员可改他人技能元信息）。
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "管理台账号仅可修改官方技能名称"})
     elif skill_scope == "user" and owner_id != str(user.get("id")):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
     elif skill_scope == "repo":
@@ -1959,13 +1986,12 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
             src_zip = get_skill_zip_bytes(src_key) or b""
         content_hash = _src_hash or (hashlib.sha256(src_zip).hexdigest() if src_zip else "")
         # Issue #3855：复制/转换保留源自定义显示名称（新建行不再回退 skill_name）。
-        # 目标 scope 内若与既有名称重复，则回退源名称，避免绕过同 scope 唯一性。
+        # 显式计算有效展示名：≤20 字上限 + 目标 scope 唯一，避免存量超长源名称
+        # 因传 display_name=None 回填而绕过长度限制写入新行。
         _src_detail = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_rec["id"]),))
         _src_display = (_src_detail[1] if _src_detail and len(_src_detail) > 1 else "") or ""
-        _target_display = None
-        if _src_display.strip() and not _skill_display_name_conflict(
-                dst_scope, dst_owner, _src_display):
-            _target_display = _src_display
+        _target_display = _converted_display_name(
+            dst_scope, dst_owner, _src_display, skill_name)
         skill_id = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
                                     skill_rec.get("description", ""), dst_key, user_id,
                                     skill_rec.get("category_id", 0), content_hash,
