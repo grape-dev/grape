@@ -906,7 +906,8 @@ def fill_scene_nodes_skill_id(nodes: list, repo_key: str = "", user_id: int = 0,
     无法锁定用户选择档位）；落 id 后走 #979 的权威 id 直查。
 
     语义：
-    - 节点已有 skill_id → 保留（不覆盖前端显式选择）；
+    - 节点已有**非 0** skill_id → 保留（不覆盖前端显式选择）；``skill_id=0`` 或缺省
+      → 视为「未存 id」按名解析回填（存量/老前端只落 0 的节点正需回填）；
     - 无技能名 / 非 dict 节点 → 原样返回；
     - 有技能名无 id → 按 name 解析回填；解析不到保持原样（派发时按名降级 + warning，
       与 #979 存量回填同口径）。
@@ -922,6 +923,8 @@ def fill_scene_nodes_skill_id(nodes: list, repo_key: str = "", user_id: int = 0,
             out.append(n)
             continue
         _name = str(n.get("skill") or "").strip()
+        # 只认 truthy 的既有 skill_id 为「已存」：0/缺省 → 按名回填（0 不是有效选择，
+        # 与 docstring 语义一致）；非数值的脏值保持原样不覆盖（不猜前端意图）。
         if not _name or n.get("skill_id"):
             out.append(n)
             continue
