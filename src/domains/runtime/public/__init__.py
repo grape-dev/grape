@@ -2955,6 +2955,13 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_category_tags_update": (
         "UPDATE skill SET cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') "
         "WHERE id=?"),
+    # Issue #3976：原地改 scope——只改归属与对象键，id/版本行/场景引用不变。
+    "skill_scope_move_update": (
+        "UPDATE skill SET scope=?, owner_id=?, file_path=?, updated_by=?, "
+        "updated_at=datetime('now') WHERE id=?"),
+    # Issue #3976：在线保存 SKILL.md——只刷内容指纹，不写版本表（版本号不递增）。
+    "skill_content_hash_update": (
+        "UPDATE skill SET content_hash=?, updated_at=datetime('now') WHERE id=?"),
     "skill_row_create_ignore": (
         "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, "
         "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),
