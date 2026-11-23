@@ -119,12 +119,7 @@ def _domain_route_label(domain: str) -> str:
         return f"unavailable:{type(_e).__name__}"
 
 
-def _host_label() -> str:
-    """降级日志的主机名（容器内 uname 偶发不可用，取不到留空）。"""
-    try:
-        return os.uname().nodename
-    except Exception:  # noqa: BLE001 - 仅日志字段
-        return ""
+from src.kernel.db_registry import host_label as _host_label  # PR #2002 R2 Nit：收敛 kernel 单点
 
 
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用

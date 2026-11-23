@@ -544,12 +544,7 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
     return JSONResponse(status_code=status_code, content=content)
 
 
-def _host_label() -> str:
-    """Issue #3865：降级告警的主机名（取不到留空，不影响主流程）。"""
-    try:
-        return os.uname().nodename
-    except Exception:  # noqa: BLE001 - 仅日志字段
-        return ""
+from src.kernel.db_registry import host_label as _host_label  # PR #2002 R2 Nit：收敛 kernel 单点
 
 
 def _a2a_gate_degraded(flag: str, *, repo_key: str = "", issue_id: str = "",

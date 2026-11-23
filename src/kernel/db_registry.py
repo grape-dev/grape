@@ -456,6 +456,17 @@ def route_of(domain: str) -> str:
     raise DomainUnavailable(d, f"GRAPE_DSN_{d.upper()} missing in a three-database topology")
 
 
+def host_label() -> str:
+    """降级告警用的主机名（PR #2002 R2 Nit：原 service/webhook 各定义一份）。
+
+    取不到留空——纯日志字段，绝不能影响主流程。
+    """
+    try:
+        return os.uname().nodename
+    except Exception:  # noqa: BLE001 - 仅日志字段
+        return ""
+
+
 @contextmanager
 def cursor_for(domain: str, write: bool = False):
     """按 route_of 取游标：域连接（未提交由连接自身 autocommit）或主库（带进程锁）。
