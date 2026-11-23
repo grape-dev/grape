@@ -1,7 +1,8 @@
 # 数值来源与复核方式（webhook 收件箱 / 命名空间清单 / 上游超时）
 
 > 目的：把「这些魔法数字哪来的」变成可独立复核的产物（架构审查 B2）。
-> 本文件记录取值时的**实测 SQL 与结果**；任何人可对生产库重跑同一查询核对。
+> 本文件记录取值时的**实测命令与结果**；样本取自部署实例的只读查询（已脱敏），
+> 任何人可用文中脚本复跑核对。不含真实主机名、账号或凭据。
 
 ## 1. 收件箱消费耗时与重试（对应 `runtime/webhook_inbox.py`）
 
@@ -25,7 +26,7 @@ FROM (
 ) t;
 ```
 
-实测结果（2026-11-23，生产库快照）：
+实测结果（2026-11-23，部署实例只读快照）：
 
 | 指标 | 值 |
 |---|---|
@@ -56,7 +57,7 @@ for i in $(seq 1 10); do
 done
 ```
 
-实测结果（2026-11-23，自建 worker 出口）：0.72s / 0.77s / 0.77s / 0.96s / 0.96s /
+实测结果（2026-11-23，自建实例出口）：0.72s / 0.77s / 0.77s / 0.96s / 0.96s /
 0.97s / 1.09s / 1.12s / 1.16s / 1.74s —— p50 ≈ 0.97s，上界 1.74s。
 
 据此取值：
@@ -108,11 +109,11 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST "https://$HOST/api/v4/projects"
 grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
 ```
 
-## 6. 常量来源 · 分页与上限（平台文档 / 部署口径，非本机实测）
+## 6. 常量来源 · 分页与上限（平台文档 / 入口约定，非本机实测）
 
 | 常量 | 位置 | 值 | 来源与说明 |
 |---|---|---|---|
-| `_WEBHOOK_MAX_BODY_BYTES` | `src/domains/runtime/routes/webhook.py` | 10 MB | ① 部署口径：边缘 nginx `client_max_body_size 10m`（应用上限不得高于边缘，否则两处口径分裂）；② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），10MB 覆盖 push/PR/issue 事件分布；③ 与附件 200MB 上限无关（附件走独立上传通道） |
+| `_WEBHOOK_MAX_BODY_BYTES` | `src/domains/runtime/routes/webhook.py` | 10 MB | ① 入口约定：应用入口代理的请求体上限即 10 MB（应用上限不得高于入口代理，否则两处口径分裂）；② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），10MB 覆盖 push/PR/issue 事件分布；③ 与附件 200MB 上限无关（附件走独立上传通道） |
 | `connect_timeout`（视图自检） | `src/kernel/domain_views.py` | 10s | 统一到 `mysql_compat` 的既有连接口径（10s）；启动期检查用更短超时会在多库拓扑下被误判成网络故障而跳过一致性检查 |
 | `_PER_PAGE` | `src/domains/mgmt/vcs/base.py` | 100 | 厂商文档：GitHub / GitLab 列表接口 `per_page` 上限均为 100 |
 | `_MAX_LIST_PAGES` | `src/domains/mgmt/vcs/base.py` | 20 | 沿用 base `src/kernel/token_resolver.py:387/443` 的历史值（provider 抽取时原样搬入）；100×20 = 2000 条封顶，触顶时打 WARNING 说明结果被截断 |
@@ -123,26 +124,26 @@ grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
 
 ### 7.1 `PURGE_INTERVAL_SECONDS = 3600`
 
-复核脚本（合成库，不碰生产数据）：建 `grape_t_webhook_inbox` + 归档表，按 1:1:1:1
+复核脚本（合成库，不碰任何实例数据）：建 `grape_t_webhook_inbox` + 归档表，按 1:1:1:1
 灌入「48h 前 consumed / 10 天前 dead / 40 天前 pending / 活跃 pending」，对
 `purge_finished()` 整体计时（DELETE + 归档 INSERT…SELECT + 再 DELETE）：
 
 | 主表行数 | 单次清扫耗时（多次取样） | 清扫后 主表 / 归档 |
 |---|---|---|
-| 400（生产 330 行的近邻） | 14.6 / 2.6 / 3.1 ms（median 3.1） | 100 / 200 |
+| 400（部署实例投递量级） | 14.6 / 2.6 / 3.1 ms（median 3.1） | 100 / 200 |
 | 10,000 | 38.1 / 33.2 / 33.6 ms（median 33.6） | 2,500 / 5,000 |
 | 50,000 | 161.8 / 155.0 ms（median 158.4） | 12,500 / 25,000 |
 
 据此取 3600s：
 
-- 生产量级单次清扫约 3 ms；50k 行（现有投递量的 ~150 倍）也只有 ~0.16 s/小时，
+- 该量级单次清扫约 3 ms；50k 行（约 150 倍余量）也只有 ~0.16 s/小时，
   频率再高收益不抵成本；
 - 3600s = 消费保留期 `CONSUMED_RETENTION_HOURS=24` 的 1/24 → 过期行最长滞留 1 小时，
   相对 24h 桶的溢出 ≤4%；
 - 归档可见延迟 ≤1 小时，相对「30 天倒查」的排障窗口可忽略。
 
 ```bash
-# 复跑口径（不改生产库）：sqlite 合成库 + 上面四类行，对 purge_finished() 计时
+# 复跑口径（不改实例数据）：sqlite 合成库 + 上面四类行，对 purge_finished() 计时
 DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=/tmp/inbox_bench.db \
   python - <<'PY'
 # 灌 400/10k/50k 行 → time purge_finished() 三次 → 记录 median
