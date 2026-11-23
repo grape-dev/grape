@@ -367,13 +367,22 @@ def _connect(db_path: str):
                 _IM_DB_CONN = MySQLCompatDB(**_cfg)
             return _SharedConn(_IM_DB_CONN)
         return _SharedConn(_shared_db())
+    # Issue #3588：SQLite 短连接包 stale-aware 代理——overlayfs 下 WAL/SHM 被删旧
+    # 建新替换时，execute 捕获 disk I/O error 等失效异常后自动换新连接重放语句，
+    # outbox 仓储函数（enqueue/claim_batch/mark_* 等）零改动获得失效重连。
+    # 连接打开失败仍按 base 行为留痕后抛出（保留 #3251 的可观测语义）。
     try:
-        conn = sqlite3.connect(db_path)
+        from src.kernel.db_health import SelfHealingSQLiteDB
+
+        def _new_conn():
+            c = sqlite3.connect(db_path)
+            c.execute("PRAGMA busy_timeout=5000")
+            return c
+
+        return SelfHealingSQLiteDB(_new_conn, db_path)
     except sqlite3.Error as e:
         _note_db_open_failure(db_path, e)
         raise
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
 
 
 def _is_mysql_backend() -> bool:
