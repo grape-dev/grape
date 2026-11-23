@@ -320,3 +320,12 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py -v
+      - name: Startup port-binding order regression tests (issue #3848)
+        # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
+        # 用例锁启动期端口依赖工作的次序：PortNotBound 不得再被吞成 WARNING、on_bind
+        # 钩子绑定即补跑且恰好一次、once 闸与 startup_degraded 打点不作废；回退会让
+        # 「每次启动空跑 + 刷 WARNING」重新出现，只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3848_startup_order.py -v
