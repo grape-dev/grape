@@ -9827,6 +9827,15 @@
               "type": "integer",
               "title": "Rid"
             }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
+            }
           }
         ],
         "requestBody": {
@@ -9899,6 +9908,15 @@
               "type": "string",
               "title": "Tag"
             }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
+            }
           }
         ],
         "requestBody": {
@@ -9968,6 +9986,15 @@
             "schema": {
               "type": "string",
               "title": "Tag"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
             }
           }
         ],
@@ -14001,7 +14028,7 @@
           "skills"
         ],
         "summary": "Skill metadata edit without re-uploading the package",
-        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
+        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. Issue #3855: official skills allow display_name edits by platform admins only (other fields and non-admin callers 403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
         "operationId": "skills_patch_meta",
         "parameters": [
           {
@@ -14057,7 +14084,7 @@
             "accessToken": []
           }
         ],
-        "x-token-scope": "user_only"
+        "x-token-scope": "user_or_admin"
       }
     },
     "/api/skills/convert": {
@@ -19709,7 +19736,7 @@
           "runtime"
         ],
         "summary": "Set role tags",
-        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache.",
+        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).",
         "operationId": "runtime_tags_set",
         "parameters": [
           {
@@ -19719,6 +19746,15 @@
             "schema": {
               "type": "integer",
               "title": "Runtime Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
             }
           }
         ],
@@ -30637,6 +30673,17 @@
             "type": "boolean",
             "title": "Clear Category",
             "default": false
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
           }
         },
         "type": "object",
@@ -35885,7 +35932,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "5e11e52fb",
-  "x-generated-at": "2026-11-23T13:05:13.804874+00:00",
+  "x-source-commit": "ccadfb425",
+  "x-generated-at": "2026-11-23T15:01:13.272165+00:00",
   "tags": []
 }
