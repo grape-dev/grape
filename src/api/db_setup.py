@@ -11686,3 +11686,24 @@ register_migration(
     domains=("runtime",),
     post_check=_post_autopilot_exec_error_code,
 )
+
+
+# ===== 存量 custom_fields 保留前缀清理（Issue #4066）=====
+# 写侧此前不校验 autopilot custom_fields，非法/保留条目长期留库、每次执行刷
+# `custom env ... rejected` WARNING。SQL 住属主域 migrations 下（跨域守卫 P0-2）：
+#   mgmt 侧 202611240001：清理 autopilot_tasks.custom_fields 与
+#   devops_pipeline_scene.advanced_options.custom_fields 的非法条目（幂等 + post_check）。
+# 字面量登记 version/name/kind，供 tests/api/test_migration_track_guard.py 解析。
+
+from src.domains.mgmt.migrations.autopilot_custom_fields_cleanup import (
+    cleanup_invalid_custom_fields as _fn_autopilot_cf_cleanup,
+    verify_custom_fields_clean as _post_autopilot_cf_cleanup,
+)
+register_migration(
+    version="202611240001",
+    name="autopilot-custom-fields-cleanup",
+    kind="cleanup",
+    fn=_fn_autopilot_cf_cleanup,
+    domains=("mgmt",),
+    post_check=_post_autopilot_cf_cleanup,
+)
