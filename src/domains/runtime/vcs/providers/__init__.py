@@ -9,7 +9,9 @@ provider 由 token repo_key 前缀决定；每 provider 一个模块，新增 pr
      走模块，行为零变更；
   3) 两者皆无 → ValueError。
 module_for(provider) 同时为纯配卡平台（卡有 resources 段）生成通用模块垫片
-（card_module.CardProviderModule），URL/request/token 消费面同样免模块。
+（card_module.CardProviderModule），URL/request/token 消费面同样免模块；
+无 resources 段但方言与内置模块同名（自建实例卡）则套 FamilyProviderModule 代理，
+属性委托族模块、API_BASE 取卡上的 host。
 """
 import re
 
@@ -62,7 +64,8 @@ def _card(provider: str):
 def module_for(provider: str):
     """台阶3：provider → 模块消费面（_MODULES 优先，纯配卡平台落通用垫片）。
 
-    无模块且无 resources 卡 → None（调用方 fail-fast）。
+    无模块且无 resources 卡 → None（调用方 fail-fast）；但卡方言能套到同族代码模块
+    （自建实例，`gitlab-corp` 一类）时返回 FamilyProviderModule 代理，API_BASE 取卡。
 
     Issue #3580 复审：自建实例卡（如 gitlab-corp，无代码模块、无 resources 段）此前落
     None → git-repo 网关对实例仓全量 502。现按**卡方言**回落到同族代码模块
