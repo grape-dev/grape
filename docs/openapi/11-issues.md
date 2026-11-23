@@ -23,6 +23,11 @@
 > - **task complete ≠ Issue 完结**：`POST /api/tasks/complete` 完成的是某次引擎执行（对应 Event 的 `event_seq`），
 >   不代表需求完结；需求完结以「最后节点 complete → pending_review → 审核 → done」判断（`confirm-done` / `status` 操作）。
 > - 接口中的 `task_status` 字段即 `issue.status`（需求中心状态）。
+> - **审核点态 `review_status`（Issue #4024）**：`pending-review` 置位、`status get`、
+>   `detail/pipeline` 的 `review_status` 共用同一事实源与派生规则
+>   `derive_review_status(issue.stage, issue.status)`，按 `issue.id` 定位同一行；
+>   枚举 `pending_review / completed / cancelled / awaiting_input / in_progress / unknown`。
+>   新增该字段不改变 `status` 的任务态枚举语义。
 
 ---
 
@@ -245,10 +250,13 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{issue_id}` int |
-| 出参 | `{"id", "status", "repo_key", "issue_number", "title", "completed_reason", "completed_at"}` |
+| 出参 | `{"id", "status", "repo_key", "issue_number", "title", "completed_reason", "completed_at", "stage", "review_status"}` |
 | 返回 | 200；404 需求不存在；401 |
 
 > 供 CLI `grape issues wait` 轮询至终态（completed/cancelled）。
+> `status` 保持任务态枚举；`review_status` 为审核点态（Issue #4024），由本行
+> `issue.stage` + `issue.status` 经 `derive_review_status` 派生，与 `pending-review`
+> 置位响应、`detail/pipeline.review_status` 同源，置位后立即读回即为 `pending_review`。
 
 ### PUT /api/issues/{issue_id}/status — 状态迁移
 
@@ -263,6 +271,21 @@ Issue 对象字段：
 > 流转：active→processing→awaiting_input→pending_review→completed/cancelled；终态不可改。
 > **写状态仅限用户本人（JWT / `grape_`）**：`status` 是可被用户高优先级覆盖的「需求中心状态」，若允许 `tk_`
 > 会话 token（Agent 执行期）修改，可能与 pipeline 推进的 `stage` 冲突，造成状态不一致、干扰任务执行。
+
+### POST /api/issues/{issue_id}/pending-review — Agent 置位阶段审核点
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **session_only**（`tk_` 会话；devops agent，repo 匹配） |
+| Path | `{issue_id}` int（纯数字内部 id，`issue.id`） |
+| Body | `{"review_points": "...", "references": "..."}`（`review_points` 必填） |
+| 出参 | `{"ok": true, "issue_id", "status", "review_status", "changed", "idempotent"}` |
+| 返回 | 200；400 空 issue_id / review_points 缺失；403 非 devops / repo 不匹配；404 |
+
+> 迁移 `active/processing/awaiting_input → pending_review`，不改 `stage`；重复调用幂等
+> （`changed:false` + `idempotent:true`）。`status` 回读落库真值；`review_status` 与
+> `GET /status`、`detail/pipeline.review_status` 同源（`derive_review_status`），
+> 保证置位响应与立即读回一致（Issue #4024）。
 
 ### POST /api/issues/{issue_id}/confirm-done — 确认完成
 
