@@ -41,15 +41,12 @@ def _table_exists(c, table: str) -> bool:
 
 
 def is_invalid_custom_field(f) -> bool:
-    """单条 custom_field 是否非法（与写侧 `custom_env_error` 同口径）。"""
-    from src.kernel.scene_custom_env import is_upper_name, is_reserved_name
+    """单条 custom_field 是否非法（与写侧 `custom_env_error` 同口径，含空名）。"""
+    from src.kernel.scene_custom_env import custom_env_error
 
     if not isinstance(f, dict):
         return True
-    name = str(f.get("name") or "").strip()
-    if not name:
-        return True
-    return (not is_upper_name(name)) or is_reserved_name(name)
+    return bool(custom_env_error(str(f.get("name") or "")))
 
 
 def _clean_fields(raw_fields):
@@ -113,18 +110,17 @@ def _clean_scene_options(c, log) -> int:
 
 def cleanup_invalid_custom_fields(conn=None) -> None:
     """一次性清理两处存量 custom_fields 的非法条目（幂等）。"""
+    from contextlib import nullcontext
+
     from src.kernel.config import log
 
     if conn is None:
         from src.kernel.session_manager import db, db_lock
 
-        conn = db
-        with db_lock:
-            c = conn.cursor()
-            _tasks = _clean_autopilot_tasks(c, log)
-            _scenes = _clean_scene_options(c, log)
-            conn.commit()
+        conn, lock = db, db_lock
     else:
+        lock = nullcontext()
+    with lock:
         c = conn.cursor()
         _tasks = _clean_autopilot_tasks(c, log)
         _scenes = _clean_scene_options(c, log)
