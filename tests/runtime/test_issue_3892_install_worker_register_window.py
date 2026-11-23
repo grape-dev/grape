@@ -290,10 +290,15 @@ class TestMasterCrossCheckDegrades:
         # 调用点不得再出现裸字面量形态
         assert "int]$MaxLines = 400" not in text, "param 默认值应引用 $agentLogMaxLines"
         assert "AddSeconds(-10)" not in region, "心跳容差应引用 $heartbeatToleranceSec"
-        # 每个常量的登记注释须含来源说明
+        # 每个常量的登记注释须按五源 undecided 形态登记（B2 复审整改条件 2：
+        # 来源=五源登记：<undecided: 需要何种测量>，先例 DEDUP_SUFFIX_MAX），
+        # 且不得再以「运维约定」等非五源口径登记、不得声称未经测量的「实测」。
         for name in ("$agentLogMaxLines", "$whoamiTimeoutSec", "$heartbeatToleranceSec"):
             line = next(l for l in text.splitlines() if l.startswith(name))
-            assert "来源=" in line, f"{name} 行内注释必须登记数值来源（五源之一）"
+            assert re.search(r"来源=五源登记：<undecided:\s*需要.+测量", line), \
+                f"{name} 行内注释必须按五源 undecided 形态登记（来源=五源登记：<undecided: 需要何种测量>）"
+            assert "运维约定" not in line and "实测" not in line, \
+                f"{name} 登记不得使用非五源口径或未测量的断言"
 
     def test_cross_check_never_blocks_rollback(self):
         region = _region()

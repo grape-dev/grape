@@ -822,16 +822,18 @@ $regSoftDeadlineSec = 30          # 首轮软到期（= 原固定窗口长度）
 $regWindowSec = 60                # 硬上限（20 × 3s）
 $regIntervalSec = 3
 
-# Issue #3892 QA（数值证据）：以下三个运行参数全部具名登记，来源=运维约定（各注释写明依据）；
-# 修改任一值前先更新对应来源说明，禁止回落为内联裸字面量。
-$agentLogMaxLines = 400            # 单轮日志读取上限。来源=运维约定：轮询粒度 $regIntervalSec=3s，
-                                  # 实测冷盘+Defender 场景单轮新增行数远低于该值，400 仅作内存兜底
-                                  # （防止一次读进整份日志），截断只影响最旧的线索行。
-$whoamiTimeoutSec = 5              # 主控 whoami 交叉验证超时。来源=运维约定：whoami 为同机房主控
-                                  # 只读端点，正常响应亚秒级；5s 是异常网络下的上限，超时即静默降级
-                                  # 为纯日志判定、不阻断回滚主流程（catch 分支）。
-$heartbeatToleranceSec = 10        # 心跳时钟容差。来源=运维约定：安装机与主控均走 NTP，同步误差
-                                  # 典型亚秒级；心跳记录落库另有秒级间隔，10s 覆盖两层取整误差。
+# Issue #3892 QA（数值证据 B2）：以下三个运行参数全部具名登记，来源=五源登记（undecided 形态，
+# 与 base tip 对 DEDUP_SUFFIX_MAX 的登记先例同款：按 undecided: 登记需要何种测量）。
+# 修改任一值前先更新对应登记，禁止回落为内联裸字面量。
+$agentLogMaxLines = 400            # 来源=五源登记：<undecided: 需要 3s 轮询窗口内 agent 日志单轮新增行数分布的测量>。
+                                  # 现仅为防一次读进整份日志的内存兜底工程护栏（无业务口径）；截断只影响
+                                  # 最旧的线索行，线索不足时由「进程/daemon 存活判定」降级路径兜底。
+$whoamiTimeoutSec = 5              # 来源=五源登记：<undecided: 需要主控 /api/runtime/whoami 的 P95/P99 响应延迟测量>。
+                                  # 现仅为异常网络下的超时护栏；超时即静默降级为纯日志判定，
+                                  # 不阻断回滚主流程（catch 分支）。
+$heartbeatToleranceSec = 10        # 来源=五源登记：<undecided: 需要安装机与主控 NTP 时钟偏移分布的测量>。
+                                  # 现仅为覆盖心跳落库秒级取整误差的护栏；交叉验证当前恒走跳过分支
+                                  # （/whoami 尚未返回 last_seen_at），故该容差不影响生产行为。
 
 # 注册在途迹象：注册 RPC 已发出 / 注册前启动进度 / 心跳相关（agent 启动序列的正常进度行）。
 # 只用 ASCII 关键字：Windows PowerShell 5.1 的 Get-Content 对无 BOM 的 UTF-8 日志按 ANSI 解码，
