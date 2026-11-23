@@ -2808,6 +2808,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - local_engines：discover_backends() 本机扫描（沙箱内通常全空）
     - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
+    - degraded / engines_unavailable_reason：runtime 域读失败时置 true 并给出原因码
+      （`query_failed` / `runtime_domain_unavailable`）；此时 needs_worker 语义不变，
+      由前端依据 degraded 区分「确实无引擎」与「查询失败」，不做误引导。
     """
     from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
     from src.domains.runtime.engine.executor import discover_backends
@@ -2823,9 +2826,17 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     # repo 匹配值：单一真源等值匹配（engine_onboarding_repo_key）——带前缀原样、
     # 裸形态查 managed_repos 定唯一前缀。不做多形态撒网 IN（跨平台同名仓库泄漏）。
     _rk = engine_onboarding_repo_key(repo or "")
+    # Issue #3857：agent_runtimes / runtime_credentials 属 runtime 域，此前用进程主库
+    # （持进程锁的 session_manager 连接）读取——三库拓扑下 mgmt 进程主库没有这两张表，必 1146；
+    # 异常被下面 except 吞成 WARNING，remote 恒空、needs_worker 恒 true（4 台主控约
+    # 216 条/小时）。改走内核唯一路由 `cursor_for("runtime")`：domain → 域连接；
+    # local → 进程主库（单库拓扑/本域进程零回归）；三库缺 DSN → DomainUnavailable
+    # （绝不静默回落 mgmt）。只读查询，无需事务提交。
+    degraded = False
+    degraded_reason = ""
     try:
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             # 判定语义：本端点回答"该用户是否还有可用的执行引擎"——
             # global（本组织内免提示）+ 本人 user-scope + 本人名下所有 repo-scope
             # （不限当前 repo）。repo_key 用于 remote_engines 的上下文过滤（展示）。
@@ -2860,7 +2871,22 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
             else:
                 remote = [e for e in _all if e.get("scope") != "repo"]
     except Exception as e:
-        log.warning(f"engine-onboarding: query agent_runtimes failed: {e}")
+        degraded = True
+        degraded_reason = "query_failed"
+        # 路由定位字段（同 #3826/#3865 口径）：单行日志即可回答「本进程连的是哪个库」，
+        # 避免「旧进程未重启」与「仍在打 mgmt 库」两种根因在日志上同形。
+        _route = "unknown"
+        try:
+            _route = _dbreg.route_of("runtime")
+        except _dbreg.DomainUnavailable:
+            _route = "unavailable"
+            degraded_reason = "runtime_domain_unavailable"
+        except Exception as _re:  # noqa: BLE001 - 仅日志字段
+            _route = f"unknown:{type(_re).__name__}"
+        log.warning(
+            f"engine-onboarding: agent_runtimes read degraded ({degraded_reason}) — "
+            f"route={_route} target_db=runtime pid={os.getpid()} "
+            f"host={_dbreg.host_label()}: {e}")
 
     local_usable = [e["name"] for e in local if e.get("installed")]
     needs_worker = not local_usable and not _user_visible
@@ -2872,6 +2898,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
         "local_engines": local,
         "remote_engines": remote,
         "needs_worker": needs_worker,
+        # Issue #3857：查询失败不再与「确实无引擎」同形——前端据此抑制误引导
+        "degraded": degraded,
+        "engines_unavailable_reason": degraded_reason,
     }
 
 

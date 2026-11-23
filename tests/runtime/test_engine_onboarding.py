@@ -1,13 +1,30 @@
 """一键部署引擎接入引导 — 单元/集成测试（spec.md E1-E4）
 
 GET /api/runtime/engine-onboarding：编排入口，复用既有凭据/安装/注册协议。
-所有 DB 操作 mock，不连真实数据库；discover_backends patch 控制安装态。
+DB 走桩（不连真实数据库）；discover_backends patch 控制安装态。
+
+Issue #3857：端点查询已收口到内核 `cursor_for("runtime")`（三库下域连接、单库回落
+进程库），本文件的 DB seam 随之上移——不再 patch 进程库 `db` / `db_lock`。
 """
+from contextlib import contextmanager
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 _BASE = "https://workspace.example.com"
+
+
+def _runtime_cursor(make_cursor):
+    """cursor_for("runtime") 替身：每次调用产出 make_cursor() 的游标并关闭。"""
+    @contextmanager
+    def _cf(domain, write=False):
+        assert domain == "runtime", "engine-onboarding 只能读 runtime 域"
+        c = make_cursor()
+        try:
+            yield c
+        finally:
+            getattr(c, "close", lambda: None)()
+    return _cf
 
 
 def _none_installed():
@@ -36,9 +53,7 @@ def _call_onboarding(discover_result, runtime_rows, username="alice", repo=""):
 
     with patch.object(db_mod, "get_server_base_url", return_value=_BASE), \
          patch.object(executor_mod, "discover_backends", return_value=discover_result), \
-         patch("src.domains.runtime.routes.runtime.db_lock"), \
-         patch("src.domains.runtime.routes.runtime.db") as db_fake:
-        db_fake.cursor.return_value = cursor
+         patch("src.kernel.db_registry.cursor_for", _runtime_cursor(lambda: cursor)):
         return runtime_engine_onboarding(repo=repo, user={"username": username})
 
 
@@ -111,14 +126,9 @@ class TestEngineOnboarding:
         cur.execute("INSERT INTO managed_repos VALUES ('gitcode:owner/myrepo')")
         conn.commit()
 
-        class _Lock:
-            def __enter__(self): return None
-            def __exit__(self, *a): return False
-
         with patch.object(db_mod, "get_server_base_url", return_value=_BASE), \
              patch.object(executor_mod, "discover_backends", return_value=_none_installed()), \
-             patch("src.domains.runtime.routes.runtime.db_lock", _Lock()), \
-             patch("src.domains.runtime.routes.runtime.db", conn):
+             patch("src.kernel.db_registry.cursor_for", _runtime_cursor(conn.cursor)):
             # 仓库上下文（契约：规范带前缀形态）
             # bob 视角（repo 上下文）：本人 repo worker 计入判定与展示
             r_repo = runtime_engine_onboarding(repo="gitcode:owner/myrepo", user={"username": "bob", "id": 8})
