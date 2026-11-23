@@ -1005,7 +1005,11 @@ def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
             from src.domains.runtime.vcs.api_client import VcsApiClient
             from src.kernel.repo_key import parse_repo_key
             provider, owner, name = parse_repo_key(org_repo_key)
-            VcsApiClient(provider, token, owner, name).post_issue_comment(issue_number, body)
+            # post_issue_comment 的网络/上游失败以 {"error": ...} 返回（不抛异常）；
+            # 必须显式判错，否则会把「评论未发出」记成已发并落 comment_posted=1。
+            _resp = VcsApiClient(provider, token, owner, name).post_issue_comment(issue_number, body)
+            if isinstance(_resp, dict) and _resp.get("error"):
+                raise RuntimeError(str(_resp.get("error"))[:300])
             comment_posted = True
             log.info(f"org-aggregate: comment posted repo={org_repo_key} "
                      f"issue=#{issue_number} dispatch={dispatch_id} status={terminal_status}")

@@ -271,6 +271,9 @@ def org_e2e(isolated_db, monkeypatch):
 
     monkeypatch.setattr(org_provision, "create_new_repo", _fake_create_new_repo)
     monkeypatch.setattr(org_provision, "host_repo", _fake_host_repo)
+    # 分支就绪是真实 git/VCS 网络动作；集成用例在 adapter 层跳过（编排语义另测）。
+    monkeypatch.setattr(org_provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     # orgs 路由默认后台线程 provision → 改为同步，保证确定性
     monkeypatch.setattr(orgs_route, "start_provision", org_provision.provision_org)
     # 关联仓库的 maintainer 校验是外部 VCS 权限调用 → 放行
@@ -279,6 +282,8 @@ def org_e2e(isolated_db, monkeypatch):
     # bot token（VCS 凭据 adapter）
     monkeypatch.setattr(user_db, "get_gitcode_token", lambda repo_key="", user_id=0: E2E_BOT_TOKEN)
     monkeypatch.setattr(user_db, "get_github_token", lambda repo_key="", user_id=0: E2E_BOT_TOKEN)
+    # org_dispatch 现在走统一入口 get_repo_bot_token（provider 由 repo_key 派生）。
+    monkeypatch.setattr(user_db, "get_repo_bot_token", lambda repo_key="": E2E_BOT_TOKEN)
 
     # 子 Issue 远端建单 / 查重（VCS adapter）——create_task_via_issue 其余逻辑保持真实
     child_seq = itertools.count(90001)

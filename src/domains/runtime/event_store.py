@@ -24,21 +24,11 @@ def _events_columns(c) -> set:
     global _EVENTS_COLUMNS_CACHE
     if _EVENTS_COLUMNS_CACHE is not None:
         return _EVENTS_COLUMNS_CACHE
-    cols: set = set()
-    for sql in (
-        "SELECT COLUMN_NAME FROM information_schema.columns "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='events'",
-        "PRAGMA table_info(events)",
-    ):
-        try:
-            rows = c.execute(sql).fetchall() or []
-            if rows:
-                # information_schema: COLUMN_NAME 在 0；PRAGMA: 列名在 1
-                cols = {(r[0] if isinstance(r[0], str) else r[1]) for r in rows}
-                break
-        except Exception as e:  # noqa: BLE001 - 后端不支持该方言时换下一种
-            log.debug(f"_events_columns: {sql.split()[0]} 不可用: {e}")
-            continue
+    # 探列单一入口（kernel.ddl_safety）：PRAGMA（compat 翻译）+ 裸 MySQL
+    # information_schema 回退。原实现自己拼两种方言，PR #2009 I2 收敛。
+    from src.kernel.ddl_safety import table_columns
+
+    cols = set(table_columns(c, "events"))
     _EVENTS_COLUMNS_CACHE = cols
     return cols
 
