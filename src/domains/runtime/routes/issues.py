@@ -1348,7 +1348,7 @@ def _fetch_pending_issue_row(issue_id: int, user_id):
 
 @router.post("/{issue_id}/pipeline/trigger", operation_id="issues_trigger_pending_pipeline",
              summary="Trigger pending issue pipeline",
-             description="Issue #3621: triggers the pipeline for an issue created with `trigger_pipeline=false` (stage=created), reusing the issue_opened sync trigger path. Idempotent: 409 when stage is not created or the issue already has pipeline events. User-only.")
+              description="Issue #3621: triggers the pipeline for an issue created with `trigger_pipeline=false` (stage=created), reusing the issue_opened sync trigger path. Idempotent: 409 when stage is not created or the issue already has pipeline events. User-only. Issue #3913 (QA C3): a successful trigger writes an audit log entry (`issue_pipeline_triggered_from_created`, detail carries repo_key/issue_id/issue_number/from_stage=created/to_stage=vod/actor/seq; audit failure only warns and never blocks the trigger).")
 async def trigger_pending_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """对 trigger_pipeline=false 建出的挂单执行首次触发入链（幂等，不重复入链）。"""
     from src.domains.runtime.issues_center import trigger_pending_issue_pipeline
@@ -1359,7 +1359,8 @@ async def trigger_pending_issue(issue_id: int, user: dict = Depends(require_no_s
     if not repo_key or not issue_number:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求缺少仓库/编号，无法触发"})
     result = await trigger_pending_issue_pipeline(
-        repo_key, issue_number, actor=(user.get("username") or "").strip())
+        repo_key, issue_number, actor=(user.get("username") or "").strip(),
+        operator_id=user.get("id", 0) or 0, route_issue_id=issue_id)
     return {**result, "issue_id": issue_id}
 
 

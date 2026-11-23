@@ -292,6 +292,68 @@ class TestLaterTriggerOfCreatedIssue:
         assert _event_count("#200") == 1
 
 
+class TestTriggerAuditTrail:
+    """Issue #3913（QA C3）：挂单首次触发入链必须留审计，审计失败不阻断主链路。"""
+
+    @staticmethod
+    def _pipeline_landing_event(seq):
+        def _fake(raw, headers, account=None, repo_key_override=None):
+            with db_lock:
+                c = db.cursor()
+                c.execute("INSERT INTO events (repo_key, issue_id, event_type, agent_type, status, title, created_at) "
+                          "VALUES (?,?,?,?,?,?,datetime('now'))",
+                          (REPO, "#200", "issue_opened", "vod", "completed", "Issue3621 Test Task"))
+                db.commit()
+            return {"seq": seq}
+        return _fake
+
+    @_fresh
+    def test_trigger_success_writes_audit_with_required_detail(self):
+        """触发成功：写 issue_pipeline_triggered_from_created，detail 携带仓/单/阶段/actor/seq"""
+        from src.api.issues_center import trigger_pending_issue_pipeline
+
+        assert _create({"trigger_pipeline": False})["created"] is True
+        audits = []
+
+        with patch("src.domains.mgmt.public.log_audit",
+                   side_effect=lambda *a, **k: audits.append((a, k))), \
+             patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline",
+                   side_effect=self._pipeline_landing_event(103)):
+            result = asyncio.run(trigger_pending_issue_pipeline(
+                REPO, 200, actor="tester", operator_id=42, route_issue_id=77))
+        assert result["ok"] is True
+        assert result["stage"] == "vod"
+        assert len(audits) == 1, "成功触发应写一条审计"
+        args, kwargs = audits[0]
+        assert args[0] == "issue_pipeline_triggered_from_created"
+        assert kwargs.get("operator_id") == 42
+        detail = kwargs.get("detail") or {}
+        assert detail.get("repo_key") == REPO
+        assert detail.get("issue_id") == 77
+        assert detail.get("issue_number") == 200
+        assert detail.get("from_stage") == "created"
+        assert detail.get("to_stage") == "vod"
+        assert detail.get("actor") == "tester"
+        assert detail.get("seq") == 103
+
+    @_fresh
+    def test_audit_failure_warns_but_never_blocks_trigger(self):
+        """审计写入抛错：仅 warning 降级，触发主链路照常成功（QA C3：审计失败不阻断）"""
+        from src.api.issues_center import trigger_pending_issue_pipeline
+
+        assert _create({"trigger_pipeline": False})["created"] is True
+        with patch("src.domains.mgmt.public.log_audit",
+                   side_effect=RuntimeError("audit sink down")), \
+             patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline",
+                   side_effect=self._pipeline_landing_event(104)):
+            result = asyncio.run(trigger_pending_issue_pipeline(
+                REPO, 200, actor="tester", operator_id=42, route_issue_id=77))
+        assert result["ok"] is True
+        assert result["stage"] == "vod"
+        assert _stage_of("#200") == "vod"
+        assert _event_count("#200") == 1
+
+
 class TestHttpEntryLayer:
     @_fresh
     def test_trigger_route_wires_pending_trigger(self):

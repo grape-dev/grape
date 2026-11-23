@@ -141,6 +141,8 @@ Issue 对象字段：
 | 返回 | 200 成功；400 已取消/已完成不可触发；404 需求不存在；409 stage 非 `created` 或已有流水线事件（幂等，不重复入链）；502 触发失败/未落事件（无事件时已回滚为 `stage=created`，可重试） |
 
 > 仅对 `trigger_pipeline=false` 建出的挂单（`stage=created`）生效；复用建单直发的 `issue_opened` 同步触发路径，触发成功后 stage 切到 `vod`，事件形态与直接建单一致。stage 校验、事件计数与 `created→vod` 认领在同一锁/事务内完成（条件 UPDATE，并发触发仅一个成功）。
+>
+> 审计留痕（Issue #3913 / QA C3）：触发成功会写一条审计日志，事件 `issue_pipeline_triggered_from_created`，detail 携带 `repo_key` / `issue_id` / `issue_number` / `from_stage=created` / `to_stage=vod` / `actor` / `seq`（发起触发的用户名与 uid 经 `operator_id` 传入）。审计写入失败仅降级为 warning，不阻断触发主链路。
 
 ---
 

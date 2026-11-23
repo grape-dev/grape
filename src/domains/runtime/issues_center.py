@@ -3953,7 +3953,7 @@ def _claim_pending_issue_created(repo_key: str, issue_num, issue_id: str):
     """
     with db_lock:
         c = _rt_db.cursor()
-        c.execute("SELECT stage, title, created_by, assignee, status FROM issue "
+        c.execute("SELECT stage, title, created_by, assignee, status, id FROM issue "
                   "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
                   (repo_key, str(issue_num)))
         _row = c.fetchone()
@@ -3996,7 +3996,9 @@ def _pending_issue_status_row(repo_key: str, issue_num):
         return c.fetchone()
 
 
-async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = "") -> dict:
+async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = "",
+                                         operator_id: "str | int" = 0,
+                                         route_issue_id: int = 0) -> dict:
     """Issue #3621：对 ``trigger_pipeline=false`` 建出的挂单（stage=created）首次触发入链。
 
     复用建单直发的 issue_opened 同步触发路径（``_issue_opened_pipeline_trigger``），
@@ -4030,6 +4032,23 @@ async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = 
                                                      "message": f"Issue #{issue_num} 已被其它触发认领，不重复入链"})
     _title = str(_row[1] or "")
     _creator = (str(_row[2] or "") or actor or "").strip()
+    _db_issue_id = int(_row[5] or 0)
+
+    def _audit_triggered(seq: int) -> None:
+        """QA C3（#3913）：created→vod 首次触发入链留审计；失败仅告警不阻断。"""
+        try:
+            from src.domains.mgmt.public import log_audit
+            log_audit("issue_pipeline_triggered_from_created",
+                      operator_id=(operator_id or 0),
+                      detail={"repo_key": repo_key,
+                              "issue_id": (route_issue_id or _db_issue_id),
+                              "issue_number": issue_num,
+                              "from_stage": "created", "to_stage": "vod",
+                              "actor": (actor or _creator or ""),
+                              "seq": int(seq or 0)})
+        except Exception as _ae:
+            log.warning(f"trigger_pending: audit log failed for #{issue_num}: {_ae}")
+
     # 3) 走同一同步触发路径；失败/未落事件 → 回滚为 created 以便重试
     try:
         _pipe_result = await _issue_opened_pipeline_trigger(
@@ -4038,6 +4057,7 @@ async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = 
         # run_pipeline 可能已落事件后才抛错：事件已存在即视为入链成功（不误报失败）
         if _pending_trigger_event_count(repo_key, issue_num):
             log.warning(f"trigger_pending: pipeline raised after event landed for #{issue_num}: {_e}")
+            _audit_triggered(0)
             return {"ok": True, "issue_number": issue_num, "stage": "vod", "seq": 0}
         _rolled = _rollback_pending_issue_trigger(repo_key, issue_num)
         log.warning(f"trigger_pending: pipeline raised for #{issue_num}, rolled_back={_rolled}: {_e}")
@@ -4055,6 +4075,7 @@ async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = 
             "message": ("流水线未落事件，已回滚为待触发状态，可重试" if _rolled
                         else "流水线未落事件，请检查流水线事件后再试")})
     log.info(f"trigger_pending: triggered pipeline for #{issue_num}, seq={_seq}")
+    _audit_triggered(_seq)
     return {"ok": True, "issue_number": issue_num, "stage": "vod", "seq": _seq}
 
 
