@@ -163,7 +163,9 @@ groups:
 
       # Issue #4082：worker 标签探活连续失败（runtime 在线但拿不到标签 → 派发依据为空）
       # 语义：worker 以 host+reason 上报连续 N 次探活失败（N=RUNTIME_TAGS_PROBE_ALERT_AFTER，
-      # 默认 3）；reason 区分 id_missing（未注册/注册回包未回填真实 id，本条缺陷主犯）/
+      # 默认 3）；每条上报本身已代表「≥3 次连续失败」（之后每 3 次再报），故 15m 内出现
+      # ≥1 次上报即告警（for: 5m 去抖），而非累计 ≥3 次上报（那需约 9 次连续失败）。
+      # reason 区分 id_missing（未注册/注册回包未回填真实 id，本条缺陷主犯）/
       # unauthorized（401，凭据或归属不对，**不是**凭据吊销）/ not_found（runtime 行已删）/
       # no_tags（已注册但一个标签都没有，引擎 role_tags/scene_tags 为空）/
       # other（契约外失败如 HTTP 403/422，worker 归并桶，原始 reason 见 worker/服务端日志）。
@@ -172,7 +174,7 @@ groups:
       # 控制台「引擎标签」是否有配置；reason=id_missing 时核对 GRAPE_RUNTIME_ID 与注册回包。
       # reason=unknown 不参与本告警：那是服务端兜底桶（连 worker 都没能归类），只计数不告警，避免噪声。
       - alert: GrapeRuntimeTagsProbeFailing
-        expr: sum by (host, reason) (increase(grape_runtime_tags_probe_failure_total{reason!="unknown"}[15m])) >= 3
+        expr: sum by (host, reason) (increase(grape_runtime_tags_probe_failure_total{reason!="unknown"}[15m])) >= 1
         for: 5m
         labels:
           severity: warning
