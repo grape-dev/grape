@@ -33,6 +33,16 @@
 - [x] 调用方无需轮询/重试即可确认置位生效；其它状态写路径同样即时可见。
 - [x] 新增回归测试覆盖写后即读与口径一致；相关测试无回归（既有基线失败除外）。
 
+## Affected Modules（QA 复审同步，路径以 canonical 为准）
+- `src/domains/runtime/routes/issues.py` — 列表缓存命中核对（短 TTL 状态快照 + 写代校验）、
+  `_task_status_map` / `_issue_stage_map` 确定性排序、`issues status get` 共用 status 归一 accessor、
+  detail 与独立 `/pipeline` 内嵌业务状态按内部主键回读。
+- `src/domains/runtime/issues_center.py` — 新增 `issue_status_text`（共用 status 归一 accessor）、
+  `read_issue_business_status_by_id`（按内部主键回读 stage/status）。
+- `src/kernel/mysql_compat.py` — `MySQLCompatDB.total_changes`（sqlite 写代计数等价物，
+  供快照写代校验在 MySQL 后端同样生效）。
+- （旧路径 `src/api/issues_center.py` 为兼容别名，指向 canonical `src/domains/runtime/issues_center.py`。）
+
 ## Risks & Mitigations
 | Risk | Impact | Mitigation |
 |------|--------|------------|
@@ -40,3 +50,17 @@
 | 回读异常导致返回过期数据 | High | fail-closed：核对失败按缓存过期处理、重算 |
 | 详情改口径影响既有消费方 | Med | 旧字段 `task_status` 语义不变，仅新增 `status` 别名；pipeline 同步同源 |
 | 同号多行（镜像仓库）歧义 | Med | 详情优先按内部主键；map 回退按 `repo_keys` 顺序首个命中（确定性） |
+
+## QA 复审修复记录（PR #2046 两轮审查低危项）
+- Standards-1：缓存命中核对改「短 TTL(1s) 状态快照 + 连接写代校验（`db.total_changes`）」——
+  并发命中复用同一快照不再逐请求抢全局 db_lock；本进程任何写入改变写代 → 下次核对整窗刷新，
+  read-your-writes 不因 TTL 削弱；跨进程/外部写入由 1s TTL 兜底。
+- Standards-2：`_task_status_map` 出口统一 `or ''` 归一（status 列可空），缓存与回读恒可比。
+- Standards-3：`_task_status_map` / `_issue_stage_map` 补 `ORDER BY CASE repo_key`（repo_keys
+  优先级 + id）——docstring「首个命中」与实际取行一致，`setdefault` 不再取任意行。
+- Standards-4：`issues status get` 与 `_read_issue_status_by_id` 共用 `issue_status_text` accessor。
+- Spec-1：detail 内嵌 pipeline 与独立 `/pipeline` 的 `issue_stage`/`issue_task_status` 同步按
+  内部主键回读（`read_issue_business_status_by_id`），与顶层钉同一权威行。
+- Spec-2：补 review-pass / review-reject / confirm-done 写后即读、fail-closed（回读异常重算）、
+  行删除失效、快照合并/写代刷新用例。
+- Spec-3：Affected Modules 修正为 canonical `src/domains/runtime/issues_center.py`。

@@ -187,3 +187,196 @@ def test_detail_status_get_and_list_agree_after_write():
     assert listed["status"] == listed["task_status"] == detail["task_status"] == status_body["status"]
     # 同响应内 pipeline 业务状态与顶层 task_status 同源，不得相反
     assert detail.get("pipeline", {}).get("issue_task_status") == detail["task_status"], detail.get("pipeline")
+    # QA Spec-1：独立 /pipeline 接口与 detail 同按内部主键回读，issue_task_status 口径一致
+    p = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/13/pipeline", headers=ctx.jwt)
+    assert p.status_code == 200, p.text
+    assert p.json().get("issue_task_status") == detail["task_status"], p.json()
+    assert p.json().get("issue_stage"), p.json()
+
+
+# ---------------------------------------------------------------- QA 复审补充用例
+
+def _seed_mirror_rows(ctx, number, status_a, status_b):
+    """镜像 repo_key 同号多行：gitcode: 行（优先）与 github: 行。返回 gitcode 行主键。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, "
+            "task_description, status, stage, owner_agent) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_UID["id"], "grape_bot", ctx.repo_key, number, _TOPIC, "d", status_a, "qa", "qa"))
+        _primary = c.lastrowid
+        c.execute(
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, "
+            "task_description, status, stage, owner_agent) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_UID["id"], "grape_bot", f"github:{ctx.owner}/{ctx.repo}", number,
+             _TOPIC, "d", status_b, "sre", "sre"))
+        db.commit()
+    return _primary
+
+
+def test_mirror_repo_rows_pin_same_authoritative_row():
+    """QA Spec-1：镜像 repo 同号多行时，detail/pipeline 各字段钉同一权威行。"""
+    ctx = _Ctx("d")
+    number = 21
+    primary_id = _seed_mirror_rows(ctx, number, "active", "completed")
+
+    d = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/{number}", headers=ctx.jwt)
+    assert d.status_code == 200, d.text
+    detail = d.json()
+    # 顶层 stage/status 与 task_status 来自 repo_keys 优先级首个命中行（gitcode:）
+    assert detail["issue_id"] == primary_id, detail
+    assert detail["task_status"] == "active", detail
+    assert detail["stage"] == "qa", detail
+    # pipeline 内嵌业务状态按同一内部主键回读，不得读到 github: 行的 completed/sre
+    _pipe = detail.get("pipeline") or {}
+    assert _pipe.get("issue_task_status") == "active", _pipe
+    assert _pipe.get("issue_stage") == "qa", _pipe
+
+    # 独立 /pipeline 同样主键化：issue_stage/issue_task_status 与 detail 一致
+    p = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/{number}/pipeline", headers=ctx.jwt)
+    assert p.status_code == 200, p.text
+    _pj = p.json()
+    assert _pj.get("issue_task_status") == "active", _pj
+    assert _pj.get("issue_stage") == "qa", _pj
+
+
+def test_review_pass_reject_then_list_sees_new_status():
+    """QA Spec-2：review-pass / review-reject 写路径同样写后即读（不依赖失效钩子）。"""
+    ctx = _Ctx("e")
+    card_id = ctx.seed(number=15)
+    ctx.list_items()  # 预热缓存
+    ctx.set_pending_review(card_id)
+
+    r = client.post(f"/api/issues/{card_id}/review-pass",
+                    headers=ctx.session, json={"target": "processing"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["changed"] is True and body["status"] == "processing", body
+    item = ctx.find(ctx.list_items(), 15)
+    assert item is not None and item["status"] == "processing", item
+
+    # 再置 pending_review 后打回（review-reject target=processing）
+    ctx.set_pending_review(card_id)
+    r = client.post(f"/api/issues/{card_id}/review-reject",
+                    headers=ctx.session, json={"target": "processing", "reason": "需要修改"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["changed"] is True and body["status"] == "processing", body
+    for _ in range(3):
+        item = ctx.find(ctx.list_items(), 15)
+        assert item is not None and item["status"] == "processing", item
+    d = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/15", headers=ctx.jwt)
+    assert d.status_code == 200 and d.json()["task_status"] == "processing", d.text
+
+
+def test_confirm_done_then_list_sees_completed():
+    """QA Spec-2：confirm-done（人工确认完成）写路径写后即读。"""
+    ctx = _Ctx("f")
+    card_id = ctx.seed(number=16)
+    ctx.list_items()  # 预热缓存
+
+    r = client.post(f"/api/issues/{card_id}/confirm-done",
+                    headers=ctx.jwt, json={"confirmation": "verified"})
+    assert r.status_code == 200, r.text
+    item = ctx.find(ctx.list_items(), 16)
+    assert item is not None and item["status"] == "completed", item
+
+
+def test_freshness_check_exception_falls_back_to_recompute(monkeypatch):
+    """QA Spec-2：回读异常必须 fail-closed 重算，绝不能返回过期缓存。"""
+    ctx = _Ctx("g")
+    card_id = ctx.seed(number=17, status="active")
+    ctx.list_items()  # 预热缓存（status=active）
+
+    # 直接 SQL 改状态（模拟任意外部写路径），再让核对函数抛异常：
+    # `_cached_list_is_current` 必须 fail-closed 判过期 → 重算读到新值
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE issue SET status='processing' WHERE id=?", (card_id,))
+        db.commit()
+
+    from src.domains.runtime.routes import issues as _routes
+    def _boom(_ids):
+        raise RuntimeError("simulated readback failure")
+    monkeypatch.setattr(_routes, "_issue_status_by_ids", _boom)
+    try:
+        item = ctx.find(ctx.list_items(), 17)
+        assert item is not None and item["status"] == "processing", item
+    finally:
+        monkeypatch.undo()
+
+
+def test_row_deleted_invalidates_warmed_cache():
+    """QA Spec-2：缓存行被删除后，列表必须重算并下掉该卡片（不得继续返回旧卡）。"""
+    ctx = _Ctx("h")
+    card_id = ctx.seed(number=18, status="active")
+    ctx.list_items()  # 预热缓存
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM issue WHERE id=?", (card_id,))
+        db.commit()
+
+    item = ctx.find(ctx.list_items(), 18)
+    assert item is None, item
+
+
+def test_status_snapshot_collapses_repeated_checks(monkeypatch):
+    """QA Standards-1：快照窗口内重复核对只回读 1 次 DB（不逐请求抢全局 db_lock），
+    且写入后（写代变化）下一次核对整窗刷新——写后即读不因快照削弱。"""
+    from src.domains.runtime.routes import issues as _routes
+    ctx = _Ctx("i")
+    card_id = ctx.seed(number=19, status="active")
+
+    # 重置快照窗口，确保本用例从空快照开始
+    with _routes._issue_status_snapshot_lock:
+        _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})
+
+    class _CountingRtDb:
+        def __init__(self, real):
+            self._real = real
+            self.queries = 0
+        def cursor(self, *a, **k):
+            outer = self
+            class _CountingCursor:
+                def __init__(s, cur):
+                    s._cur = cur
+                def execute(s, sql, params=()):
+                    outer.queries += 1
+                    return s._cur.execute(sql, params)
+                def __getattr__(s, n):
+                    return getattr(s._cur, n)
+            return _CountingCursor(self._real.cursor(*a, **k))
+        def __getattr__(self, n):
+            return getattr(self._real, n)
+
+    _proxy = _CountingRtDb(_routes._rt_db)
+    monkeypatch.setattr(_routes, "_rt_db", _proxy)
+    try:
+        # 6 次并发看板刷新同页核对 → 1 次回读（快照复用，QA 原目标「6 并发削成 1 次」）
+        for _ in range(6):
+            out = _routes._issue_status_by_ids([card_id])
+            assert out.get(card_id) == "active", out
+        assert _proxy.queries == 1, _proxy.queries
+
+        # 写入后（total_changes 变化）下一次核对必须刷新并读到新值
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE issue SET status='processing' WHERE id=?", (card_id,))
+            db.commit()
+        out = _routes._issue_status_by_ids([card_id])
+        assert out.get(card_id) == "processing", out
+        assert _proxy.queries == 2, _proxy.queries
+
+        # 行删除后：快照刷新记 None → 判漂移（由上层重算）
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM issue WHERE id=?", (card_id,))
+            db.commit()
+        out = _routes._issue_status_by_ids([card_id])
+        assert out.get(card_id) is None, out
+    finally:
+        monkeypatch.undo()
+    # 清快照，避免影响后续用例
+    with _routes._issue_status_snapshot_lock:
+        _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})

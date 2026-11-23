@@ -134,8 +134,11 @@ from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
                                    _set_issue_pending_review_with_prior,
-                                   _read_issue_status)
-                                   _read_issue_status, _read_issue_status_by_id),
+                                   _read_issue_status, _read_issue_status_by_id,
+                                   issue_status_text, read_issue_business_status_by_id,
+                                   read_issue_row_by_id)
+
+from src.api.issues_center import cancel_issue_rows
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -413,17 +416,22 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
         _num_clause = f" AND issue_number IN ({','.join('?' * len(numbers))})"
         _num_params = list(numbers)
     # 1. issue 单表（权威）
+    # Issue #4022 QA Spec-1：同号多行（镜像 repo_key）按 repo_keys 优先级 ORDER BY +
+    # 首个命中（覆盖写），与 `_task_status_map` 同一确定性取行口径——detail 的
+    # internal_id 与 status 才能钉在同一行，pipeline 内嵌业务状态按同一主键回读。
+    _order_sql, _order_params = _repo_key_priority_order(repo_keys)
     try:
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
                 f"SELECT id, issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override, org_id "
-                f"FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
-                repo_keys + _num_params)
+                f"FROM issue WHERE repo_key IN ({placeholders}){_num_clause} "
+                f"ORDER BY {_order_sql}",
+                repo_keys + _num_params + _order_params)
             for r in c.fetchall():
                 n = str(r[1])
-                if not n:
+                if not n or n in out:
                     continue
                 out[n] = {
                     "issue_id": f"#{n}", "internal_id": r[0], "stage": r[2], "owner_agent": r[3],
@@ -467,12 +475,24 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
         log.warning(f"issues: load issue_state failed: {e}")
     return out
 
+def _repo_key_priority_order(repo_keys: list[str]) -> tuple:
+    """`ORDER BY CASE repo_key WHEN ? THEN i ...` 子句 + 参数（Issue #4022 QA Standards-3）。
+
+    同号多行（镜像 repo_key）时按 `repo_keys` 顺序确定优先级：repo_keys[0] 最先命中，
+    同级再按内部主键 id 升序（写入先后），保证「首个命中」不随查询行序漂移。
+    """
+    _when = " ".join(f"WHEN ? THEN {_i}" for _i in range(len(repo_keys)))
+    return (f"CASE repo_key {_when} ELSE {len(repo_keys)} END, id ASC", list(repo_keys))
+
+
 def _task_status_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_number → tasks.status（任务中心状态）。
 
     numbers（Issue #4022）：可选 issue_number 集合，非空时按集合收窄（详情只取目标 Issue）。
-    同号多行（镜像 repo_key）时按 repo_keys 顺序**首个命中**为准（`setdefault`），
-    与「单条 Issue 只认一张卡」的读口径一致；不因查询行序漂移出相反读数。
+    同号多行（镜像 repo_key）时按 repo_keys 顺序**首个命中**为准（`setdefault` +
+    SQL `ORDER BY` 按 repo_keys 优先级排序，QA Standards-3：docstring 承诺与
+    实际取行一致，不因无排序导致 setdefault 取任意行）；status 列可空，
+    出口统一 `or ''` 归一（QA Standards-2），与回读侧 "" 恒可比。
     """
     from src.kernel.session_manager import db, db_lock
     out = {}
@@ -482,13 +502,15 @@ def _task_status_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     if numbers:
         _num_clause = f" AND issue_number IN ({','.join('?' * len(numbers))})"
         _num_params = list(numbers)
+    _order_sql, _order_params = _repo_key_priority_order(repo_keys)
     with db_lock:
         c = _rt_db.cursor()
         try:
-            c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
-                      list(repo_keys) + _num_params)
+            c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders}){_num_clause} "
+                      f"ORDER BY {_order_sql}",
+                      list(repo_keys) + _num_params + _order_params)
             for r in c.fetchall():
-                out.setdefault(str(r[0]), r[1])
+                out.setdefault(str(r[0]), r[1] or "")
         except Exception as e:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
@@ -1009,13 +1031,15 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
     _stage = (row[8] or "")
     # Issue #2072: 数值形态归一为 int，字母 ident（gitee IKSQ4O）原样透传
     # （与 _query_tasks / 详情 _assemble_issue 同口径，禁止无条件 int() 强转）
+    # Issue #4022 QA Standards-4：status 出口与 `_read_issue_status_by_id` 共用同一
+    # 归一 accessor（列可空 None → ""，统一 strip），不再直读 row[1] 造成口径分裂。
     from src.domains.runtime.vcs.api_client import _native_issue_number
     # Issue #4063：status 是权威源；review_point.status 为同一行的派生只读投影，
     # detail.task_status/review_point.status 与本接口在读位上恒等。
     # 与 _review_point_readonly 同口径：归一空白后再判 pending_review（避免尾随空白误判）。
     _in_place = ((row[1] or "") or "").strip() == "pending_review"
     return {
-        "id": row[0], "status": row[1], "repo_key": row[2],
+        "id": row[0], "status": issue_status_text(row[1]), "repo_key": row[2],
         "issue_number": _native_issue_number(row[3]),
         "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
         "review_point": {
@@ -2784,26 +2808,77 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
 
 _ISSUE_STATUS_REFRESH_CHUNK = 500
 
+# Issue #4022 QA Standards-1：缓存命中的核对走「短 TTL 状态快照 + 连接写代校验」——
+# 快照窗口内（且连接写计数未变）直接复用，不逐请求抢全局 db_lock，保住
+# `@_cached_repo_list`「6 并发削成 1 次」的目标；窗口默认 1s，仅兜底连接写代探测
+# 覆盖不到的外部写入（跨进程），本进程内任何 issue.status 写入都会改变
+# `db.total_changes` → 下一次核对即整窗刷新，read-your-writes 语义不受 TTL 削弱。
+_ISSUE_STATUS_SNAPSHOT_TTL = 1.0
+_issue_status_snapshot_lock = _th_cache.Lock()
+_issue_status_snapshot: dict = {"ts": 0.0, "changes": -1, "data": {}}
+
 
 def _issue_status_by_ids(ids: list[int]) -> dict:
     """按内部主键批量回读权威 issue.status（只取 2 列，分块 IN 走主键索引）。
 
     Issue #4022：列表结果缓存命中时用它核对卡片状态是否已漂移；任何 status 写路径
-    都无需逐个接入缓存失效钩子就能保证「写后即读」。
+    都无需逐个接入缓存失效钩子就能保证「写后即读」。QA Standards-1 改造：
+    命中快照窗口（短 TTL + `db.total_changes` 写代一致）时零 SQL 复用，
+    并发看板刷新不再逐请求串行抢全局 db_lock；快照值 None = 该主键行已删除
+    （由 `_cached_list_is_current` 判漂移重算）。
     """
-    from src.kernel.session_manager import db_lock
-    out: dict = {}
+    from src.kernel.session_manager import db, db_lock
     _ids = sorted({int(i) for i in ids})
-    for _start in range(0, len(_ids), _ISSUE_STATUS_REFRESH_CHUNK):
-        _part = _ids[_start:_start + _ISSUE_STATUS_REFRESH_CHUNK]
+    if not _ids:
+        return {}
+    # 连接写代（本进程自上次快照以来的 INSERT/UPDATE/DELETE 计数）——无 db_lock 读取，
+    # 仅 int 属性访问；变化 → 快照必然过期（fail-safe 方向），宁可多刷一次。
+    _total = getattr(db, "total_changes", None)
+    _now = _time_cache.time()
+    with _issue_status_snapshot_lock:
+        _reuse = (
+            _total is not None
+            and _total == _issue_status_snapshot["changes"]
+            and (_now - _issue_status_snapshot["ts"]) < _ISSUE_STATUS_SNAPSHOT_TTL
+        )
+        _missing = [i for i in _ids if i not in _issue_status_snapshot["data"]]
+    if _reuse and not _missing:
+        with _issue_status_snapshot_lock:
+            return {i: _issue_status_snapshot["data"].get(i) for i in _ids}
+    _rows: list = []
+    _queried = _missing if _reuse else _ids
+    _total_after = None
+    for _start in range(0, len(_queried), _ISSUE_STATUS_REFRESH_CHUNK):
+        _part = _queried[_start:_start + _ISSUE_STATUS_REFRESH_CHUNK]
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
                 f"SELECT id, status FROM issue WHERE id IN ({','.join('?' * len(_part))})",
                 _part)
-            for _r in c.fetchall():
-                out[int(_r[0])] = (_r[1] or "")
-    return out
+            _rows.extend(c.fetchall())
+            if _start + _ISSUE_STATUS_REFRESH_CHUNK >= len(_queried):
+                # 与 SELECT 同一 db_lock 临界区内取写代：锁前的写入已同时体现在
+                # 行集与计数里，锁后的写入会让计数变化 → 下次核对整窗刷新。
+                _total_after = getattr(db, "total_changes", None)
+    with _issue_status_snapshot_lock:
+        if not _reuse:
+            # 整窗重建：本次未回读到的主键记 None（行已删除，恒判漂移 → 重算）
+            _issue_status_snapshot["data"] = {i: None for i in _ids}
+            _issue_status_snapshot["ts"] = _now
+            _issue_status_snapshot["changes"] = _total_after
+            for _r in _rows:
+                _issue_status_snapshot["data"][int(_r[0])] = (_r[1] or "")
+        elif _total_after == _total:
+            # 仅补查快照缺失的主键（新翻页）且窗口内无写入 → 合并，窗口不变
+            for _r in _rows:
+                _issue_status_snapshot["data"][int(_r[0])] = (_r[1] or "")
+            for i in _queried:
+                if i not in _issue_status_snapshot["data"]:
+                    _issue_status_snapshot["data"][i] = None
+        else:
+            # 补查期间有写入（写代变化）→ 作废窗口，下一次核对整窗刷新
+            _issue_status_snapshot["ts"] = 0.0
+        return {i: _issue_status_snapshot["data"].get(i) for i in _ids}
 
 
 def _cached_list_is_current(payload) -> bool:
@@ -2811,7 +2886,9 @@ def _cached_list_is_current(payload) -> bool:
 
     - 只核对缓存响应里出现的 issue 卡片（按主键回读，O(页大小) 而非全仓扫描）；
     - 任一卡片 status 漂移 / 行已删除 → 判定缓存过期，由调用方重算；
-    - 回读异常 → 保守重算（fail-closed），绝不把可能过期的状态当作一致返回。
+    - 回读异常 → 保守重算（fail-closed），绝不把可能过期的状态当作一致返回；
+    - QA Standards-1：回读走短 TTL 状态快照（`_issue_status_by_ids`），并发命中
+      复用同一快照，不逐请求抢全局 db_lock。
     """
     try:
         _items = payload.get("issues") if isinstance(payload, dict) else None
@@ -3296,7 +3373,14 @@ def get_issue_detail(owner: str, repo: str, number: str,
         # /mine 同口径），id 行 stage 为空时不得把已归一值覆盖回空串；仅非空时生效。
         # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
         base["stage"] = _id_stage or "vod"
-    # Issue #4022：pipeline 内嵌业务状态与顶层 task_status 同源（避免同响应内两处相反读数）。
+    # Issue #4022 QA Spec-1：pipeline 内嵌业务状态（issue_stage/issue_task_status）同步
+    # 按内部主键回读（镜像 repo 同号多行时与顶层 stage/status 钉同一权威行），
+    # 顶层 task_status 非空时仍以它为准，消除同响应内两处相反读数。
+    if base.get("issue_id"):
+        _by_id_stage, _by_id_status = read_issue_business_status_by_id(base["issue_id"])
+        if _by_id_stage or _by_id_status:
+            _biz_stage = _by_id_stage or _biz_stage
+            _biz_status = _by_id_status or _biz_status
     if base.get("task_status"):
         _biz_status = base["task_status"]
     enrich_pipeline_business_status(
@@ -3338,15 +3422,16 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     else:
         pipeline = _pipeline_from_archive(repo_keys, num) or {
             "issue": {"number": number}, "summary": "", "status": "unknown", "segments": []}
+    _stage_map = _issue_stage_map(repo_keys, [num])
     if not pipeline.get("segments"):
         # Issue #3891：与主资源共用解析助手（本端点只读，backfill=False）——
         # 外部托管仓既有 issue（内部未登记、issue_id=null）不再 404，
         # 返回 200 + 空 pipeline，并用 `diagnostics` 让「存在但无 pipeline 数据」可判别。
-        stage_map = _issue_stage_map(repo_keys)
-        if not num or num not in stage_map:
+        # Issue #4022：stage_map 收窄到目标 Issue（[num]），与 detail 同口径。
+        if not num or num not in _stage_map:
             _resolved = _resolve_issue_presence(
                 owner, repo, repo_keys, number, user,
-                stage_map=stage_map, group_map=group_map, backfill=False)
+                stage_map=_stage_map, group_map=group_map, backfill=False)
             if _resolved["state"] != "exists":
                 raise _detail_404("issue_not_found" if _resolved["state"] == "missing"
                                   else "internal_sync_missing", number)
@@ -3360,8 +3445,7 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
                     "has_pipeline_data": False,
                     "reason": "issue_unregistered",
                     "source": "vcs",
-                }
-    # Issue #539：叠加需求级业务状态 + 各段任务/结果引用（旧字段语义不变，新增字段可选）
+                }    # Issue #539：叠加需求级业务状态 + 各段任务/结果引用（旧字段语义不变，新增字段可选）
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
     _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
@@ -3371,6 +3455,16 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     _id_pair = _issue_stage_status_by_id(_canonical_id)
     if _id_pair is not None:
         _biz_stage, _biz_status = _id_pair
+    else:
+        # Issue #4022 QA Spec-1：独立 /pipeline 同步主键化——按内部主键回读权威行
+        # （与 detail 顶层/内嵌 pipeline 同一行），镜像 repo 同号多行不再按 number 首行漂移。
+        # #4024 未命中规范行时的兜底：以 stage_map 行 internal_id 单源化。
+        _internal_id = (_stage_map.get(num) or {}).get("internal_id")
+        if _internal_id:
+            _by_id_stage, _by_id_status = read_issue_business_status_by_id(_internal_id)
+            if _by_id_stage or _by_id_status:
+                _biz_stage = _by_id_stage or _biz_stage
+                _biz_status = _by_id_status or _biz_status
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))

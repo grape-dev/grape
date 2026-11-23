@@ -1274,6 +1274,17 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
 # Issue #1599：审核动作未命中原因分类所依赖的终态集合
 _ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
 
+def issue_status_text(raw) -> str:
+    """issue.status 列的统一出口归一（Issue #4022 QA Standards-2/-4：共用 accessor）。
+
+    status 列可空（schema DDL `TEXT DEFAULT 'active'` 不排除 NULL）：None/空 → ""，
+    统一 strip，避免「缓存 None vs 回读 ""」恒不等的口径分裂。所有读侧
+    （`issues status get` / `_read_issue_status` / `_read_issue_status_by_id` /
+    列表缓存核对）共用本函数，保证同一行读数恒同值。
+    """
+    return ((raw if raw is not None else "") or "").strip()
+
+
 def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
     """回读 issue 表真实 status（空串 = 无行或回读失败，由调用方兜底）。
 
@@ -1286,12 +1297,12 @@ def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
         if c is not None:
             c.execute(_sql, _args)
             _r = c.fetchone()
-            return ((_r[0] if _r else "") or "").strip()
+            return issue_status_text(_r[0] if _r else "")
         with db_lock:
             _cur = _rt_db.cursor()
             _cur.execute(_sql, _args)
             _r = _cur.fetchone()
-        return ((_r[0] if _r else "") or "").strip()
+        return issue_status_text(_r[0] if _r else "")
     except Exception as _e:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
@@ -1308,10 +1319,30 @@ def _read_issue_status_by_id(issue_id) -> str:
             c = _rt_db.cursor()
             c.execute("SELECT status FROM issue WHERE id=?", (issue_id,))
             _r = c.fetchone()
-        return ((_r[0] if _r else "") or "").strip()
+        return issue_status_text(_r[0] if _r else "")
     except Exception as _e:
         log.warning(f"read issue status by id failed #{issue_id}: {_e}")
         return ""
+
+def read_issue_business_status_by_id(issue_id) -> tuple:
+    """按内部主键回读需求级 `(stage, status)`（空串 = 无行或回读失败，由调用方兜底）。
+
+    Issue #4022 QA Spec-1：镜像 repo 同号多行时，`detail` 顶层 stage/status 已统一
+    按内部主键取行，内嵌 pipeline 的 `issue_stage`/`issue_task_status` 与独立
+    `/pipeline` 接口也必须按同一主键行回读，消除「按 number 首行」与
+    「按内部主键」取到不同行的口径分裂。
+    """
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT stage, status FROM issue WHERE id=?", (issue_id,))
+            _r = c.fetchone()
+        if not _r:
+            return ("", "")
+        return ((_r[0] or ""), issue_status_text(_r[1]))
+    except Exception as _e:
+        log.warning(f"read issue business status by id failed #{issue_id}: {_e}")
+        return ("", "")
 
 def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
     """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。

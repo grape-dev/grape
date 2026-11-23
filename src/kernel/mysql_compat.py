@@ -874,6 +874,14 @@ class MySQLCompatCursor:
         self.description = cur.description
         self._rows = None
         self._idx = 0
+        # Issue #4022：sqlite3.Connection.total_changes 等价物——写语句（按行数）累加
+        # 连接级写代计数，供读侧「状态快照 + 写代校验」判定快照是否仍新鲜。
+        # 计数器在执行点累加（与 sqlite 一致，不依赖 commit），只增不减。
+        if not _is_read_only_statement(t):
+            try:
+                self._conn._bump_total_changes(max(int(getattr(cur, "rowcount", 0) or 0), 1))
+            except Exception:
+                pass
         return self
 
     def executemany(self, sql: str, seq_of_params):
@@ -941,8 +949,25 @@ class MySQLCompatDB:
         self._local = threading.local()
         self._lock = threading.RLock()  # 兼容层内部兜底锁
         self._pool = None  # PooledDB instance (lazy init)
+        self._total_changes = 0  # sqlite3 total_changes 等价写代计数（Issue #4022）
         self._pool_disabled = os.environ.get("DB_POOL_DISABLED", "").lower() in ("1", "true", "yes")
         _DB_INSTANCES.add(self)
+
+    def _bump_total_changes(self, n: int):
+        """累加写代计数（cursor 执行写语句时调用；跨池连接共享同一计数器）。"""
+        with self._lock:
+            self._total_changes += max(int(n or 0), 0)
+
+    @property
+    def total_changes(self) -> int:
+        """sqlite3.Connection.total_changes 兼容属性（Issue #4022）。
+
+        自连接建立以来的累计写行数：任何写语句都会使其变化——读侧状态快照
+        （routes/issues.py `_issue_status_by_ids`）用它判定「自上次快照以来是否
+        有写入」，写后即读不因 TTL 削弱；语义与 sqlite（执行点计数）一致。
+        """
+        with self._lock:
+            return self._total_changes
 
     def _ensure_pool(self):
         """Lazy-init the connection pool (called once on first use)."""
