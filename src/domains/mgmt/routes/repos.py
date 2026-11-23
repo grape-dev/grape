@@ -3421,6 +3421,22 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     from src.api.auth_caps import REPO_SESSION, has_capability
     if not has_capability(user, REPO_SESSION):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    from src.kernel.repo_key import to_repo_key
+
+    # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
+    # 禁止再手工拼前缀，否则会得到双前缀导致 managed_repos 精确匹配不到 → 502。
+    from src.domains.mgmt.user.repo_manager import repo_token_getters
+    # QA C2（2026-11-13）：has_user_id 在 base 就只有使用没有 import（既有缺陷），
+    # 本批把 outlet 从 else 分支扩散到 _getters 主路径 → NameError 被 except 吞成
+    # 空 token（用户凭据解析全线失效）。这里显式绑定。
+    from src.kernel.user_ids import has_user_id
+    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
+    if str(user.get("auth_type") or "") == "takeover":
+        # Issue #3620 复审（2026-11-23）：tko_ 仓级严格校验必须先于场景策略判定——
+        # 同是拒绝也由更具体的仓级口径出「仅限其任务仓库」消息，此前被前置场景
+        # 策略遮蔽（交叉仓/换平台返回通用「仓库作用域不匹配/平台不匹配」），2 条
+        # #3620 用例红。语义不变：校验内容与顺序仅在 takeover 分支内前移。
+        _ensure_takeover_repo_scope(user, rk)
     # 作用域判定统一收敛到场景策略（src/kernel/scene_policy.py，2026-11-22）：
     # 场景 = GIT_CREDENTIAL（repo_bound + 同平台；`chat:<uid>`/空作用域直接拒绝并给
     # SESSION_NOT_REPO_BOUND，提示调用方先绑仓）。策略表是唯一真源，调用点只声明场景。
@@ -3434,18 +3450,6 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         raise HTTPException(status_code=403, detail={
             "code": 403, "error_code": _scope.code,
             "message": f"无权使用该仓库的 git 凭据（{_scope.message}）"})
-    from src.kernel.repo_key import to_repo_key
-
-    # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
-    # 禁止再手工拼前缀，否则会得到双前缀导致 managed_repos 精确匹配不到 → 502。
-    from src.domains.mgmt.user.repo_manager import repo_token_getters
-    # QA C2（2026-11-13）：has_user_id 在 base 就只有使用没有 import（既有缺陷），
-    # 本批把 outlet 从 else 分支扩散到 _getters 主路径 → NameError 被 except 吞成
-    # 空 token（用户凭据解析全线失效）。这里显式绑定。
-    from src.kernel.user_ids import has_user_id
-    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
-    if str(user.get("auth_type") or "") == "takeover":
-        _ensure_takeover_repo_scope(user, rk)
     _start = time.monotonic()
 
     def _fail(stage: str, exc: Exception):
