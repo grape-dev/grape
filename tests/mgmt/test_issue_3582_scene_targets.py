@@ -208,7 +208,7 @@ def _client_and_managed_repo(monkeypatch):
     app.dependency_overrides[get_user_or_none] = lambda: user
     app.dependency_overrides[get_current_user_or_api_key] = lambda: user
     monkeypatch.setattr(user_db, "get_managed_repos",
-                        lambda uid: [{"repo_key": REPO}])
+                        lambda *a, **k: [{"repo_key": REPO}])
     monkeypatch.setattr(store, "is_agent_enabled", lambda *a, **k: True)
     with db_lock:
         c = db.cursor()
