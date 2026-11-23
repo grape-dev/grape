@@ -5177,13 +5177,18 @@ def _format_failure_error(error):
     return text, None
 
 
+def _baseline_issue_key(issue) -> str:
+    """失败打点/重置统一用的 issue key（去掉入队侧 `#` 前缀，两侧归一后可比）。"""
+    return str(issue or "-").strip().lstrip("#") or "-"
+
+
 def _record_baseline_failure(issue, reason) -> dict:
     """同 issue 连续同因失败计数（reason 变化或超窗即重置）。
 
     返回本次计数与是否达阈值；跨进程不做聚合，打点语义为「单进程连续 N 次」，
     跨进程聚合交由日志采集侧（与 Spec 风险声明一致）。
     """
-    key = str(issue or "-")
+    key = _baseline_issue_key(issue)
     r = str(reason or "unknown")
     now = time.time()
     window = _baseline_repeat_window_seconds()
@@ -5209,9 +5214,9 @@ def _record_baseline_failure(issue, reason) -> dict:
 
 
 def _reset_baseline_failure(issue) -> None:
-    """任务成功完成时清空该 issue 的连续失败链。"""
+    """任务成功完成时清空该 issue 的连续失败链（key 归一与打点侧一致）。"""
     with _baseline_failure_lock:
-        _baseline_failure_state.pop(str(issue or "-"), None)
+        _baseline_failure_state.pop(_baseline_issue_key(issue), None)
 
 
 def fail_task(task_id, error, exit_code=-1):

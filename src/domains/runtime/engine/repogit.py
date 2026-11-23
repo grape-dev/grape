@@ -164,6 +164,9 @@ def parse_baseline_error_text(text) -> dict:
             fields[key] = m.group(1)
     if fields.get("issue"):
         fields["issue"] = fields["issue"].lstrip("#")
+    # requested_baseline 仅在发生基线回退时才出现在文本里；与 to_dict() 恒含该 key
+    # 对齐，避免 errors JSON 在 requested == expected 时缺字段。
+    fields.setdefault("requested_baseline", "")
     for key in ("ahead", "behind"):
         val = fields.get(key)
         if val == "unknown":

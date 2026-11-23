@@ -114,6 +114,14 @@ class TestBaselineErrorFormatting:
         err = _baseline_error()
         assert parse_baseline_error_text(str(err)) == err.to_dict()
 
+    def test_parse_requested_equals_expected_round_trips_to_dict(self):
+        err = WorkspaceBaselineError(3564, PATH, "arch-weekly-11-ljt",
+                                     "feat/issue-3564@abc123", 2, 5, "diverged")
+        parsed = parse_baseline_error_text(str(err))
+        assert parsed == err.to_dict()
+        assert parsed["requested_baseline"] == "", \
+            "requested == expected 时 errors JSON 仍须含 requested_baseline 字段"
+
 
 class TestFailureErrorFormatting:
     def test_baseline_string_kept_full_and_structured(self):
@@ -213,3 +221,24 @@ class TestBaselineRepeatAlert:
         rec = service._record_baseline_failure("3564", "diverged")
         assert rec["count"] == 1
         assert rec["triggered"] is False
+
+class TestBaselineFailureKeyNormalization:
+    def test_success_reset_with_hash_prefix_clears_chain(self):
+        for _ in range(2):
+            service._record_baseline_failure("3564", "diverged")
+        rec = service._record_baseline_failure("3564", "diverged")
+        assert rec["count"] == 3
+        assert rec["triggered"] is True
+
+        service._reset_baseline_failure("#3564")
+
+        rec = service._record_baseline_failure("3564", "diverged")
+        assert rec["count"] == 1, "成功后失败链须清空，再次失败应从 1 重新计数"
+        assert rec["triggered"] is False
+
+    def test_issue_key_normalizes_hash_prefix(self):
+        assert service._baseline_issue_key("#3564") == "3564"
+        assert service._baseline_issue_key("3564") == "3564"
+        assert service._baseline_issue_key(" #3564 ") == "3564"
+        assert service._baseline_issue_key("") == "-"
+        assert service._baseline_issue_key(None) == "-"
