@@ -361,7 +361,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
 
     # 责任人（Issue #3646）：**只展示人类**。优先级 ① issue_state.assignee（GitCode 真实指派）
     # → ② 事件 payload 的 assignee → ③ 最近一次人类事件操作者；bot / Agent runtime 身份 /
-    # `gcw_*` 自动登录名一律过滤（#3644 曾因此把内部账号 gcw_0FAKEACCT 当成人展示），
+    # `gcw_*` 自动登录名一律过滤（#3644 曾因此把内部账号 gcw_0000 当成人展示），
     # 全为内部账号时回退当前阶段 Agent 显示名，绝不输出原始内部账号。
     current_owner = ""
     # _st 已在上方从 stage_map 获取
