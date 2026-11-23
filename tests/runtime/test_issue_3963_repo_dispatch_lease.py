@@ -14,7 +14,6 @@
 调度侧执行全部打桩，不连生产库、不起 agent。
 """
 import asyncio
-import json
 import os
 import re
 import sys
@@ -30,7 +29,6 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from src.kernel.session_manager import db, db_lock
 from src.kernel import lock as L
-from src.domains.mgmt import public as mgmt_public
 from src.domains.runtime.engine import service
 from src.domains.runtime.engine import scheduler as S
 
@@ -278,13 +276,7 @@ def _task_dict(tid):
     return next(t for t in S._get_enabled_tasks() if t["id"] == tid)
 
 
-def _task_dict_from_row(tid):
-    row = mgmt_public.autopilot_task_row_any(tid)
-    _task = _task_dict(tid)
-    return _task if _task else row
-
-
-def _fake_agent_busy_then(calls, busy_times, then="success"):
+def _fake_agent_busy_then(calls, busy_times, then="success", fail_error=""):
     """模拟远端派发：前 busy_times 次入队撞锁（skipped + busy 分类），之后成功/失败。"""
 
     def _fake(repo_key, task, exec_id):
@@ -297,7 +289,7 @@ def _fake_agent_busy_then(calls, busy_times, then="success"):
         elif then == "success":
             S._update_execution_result(exec_id, "success", result="ok")
         else:
-            S._update_execution_result(exec_id, "failed", error="永久失败")
+            S._update_execution_result(exec_id, "failed", error=fail_error)
 
     return _fake
 
@@ -372,11 +364,16 @@ def test_busy_budget_exhausted_defers_to_next_tick(monkeypatch, caplog):
 
 
 def test_permanent_failure_still_fails_with_max_retry_zero(monkeypatch, caplog):
-    """回归：非 busy 的普通失败仍按原语义落 failed（瞬态通道不得吞掉真失败）。"""
+    """回归：非 busy 的普通失败仍按原语义落 failed（瞬态通道不得吞掉真失败）。
+
+    `error` 为空的失败正是线上 `failed after 0 retries` 的来源（#3963 现象行），
+    这里锁定它会照旧出现——证明修复只吞掉 busy，不是把失败面整片消音。
+    """
     import logging
     _mk_task(TID_BASE + 2, max_retry=0)
     calls = []
-    monkeypatch.setattr(S, "_execute_autopilot_agent", _fake_agent_busy_then(calls, 0, "failed"))
+    monkeypatch.setattr(S, "_execute_autopilot_agent",
+                        _fake_agent_busy_then(calls, 0, "failed", fail_error=""))
     task = _task_dict(TID_BASE + 2)
     with caplog.at_level(logging.DEBUG):
         asyncio.run(S._execute_task(task))
