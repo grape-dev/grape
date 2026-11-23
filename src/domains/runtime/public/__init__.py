@@ -1404,6 +1404,13 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     # Issue #646：uid 派生轨道写回（UPDATE 路径）
                     c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
                               (_engine_uid, rid))
+                # Issue #3396 后续：本机发现的 UPDATE 分支原先不补角色行 —— 引擎一旦
+                # 只剩派生行就再也回不来（A7 fail-closed）。这里按「角色行为空才补」补齐。
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_u
+                    _ensure_rc_u(c, rid, now_iso=now_iso)
+                except Exception as _ercu:
+                    log.warning(f"upsert_local_runtimes role caps ensure (update) failed (runtime={rid}): {_ercu}")
                 # Issue #1208：本机直连引擎补三维度派生标签（否则 selector 圈池恒不命中）
                 _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
                 out["upserted"] += 1
@@ -1451,12 +1458,14 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                 _seed_roles_l = [t for t in dict.fromkeys(_seed_roles_l) if t in _KAR_L]
             except Exception:
                 _seed_roles_l = []
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-            if not c.fetchone():
-                for _t in (_seed_roles_l or ["all"]):
-                    c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                              "enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                              (rid, _t, now_iso, now_iso))
+            # Issue #3396 后续：只按「角色行是否为空」判定（派生行 engine:/scene:/scope: 不算），
+            # 空则按声明/all 补齐 —— 见 engine/role_caps.py（原判定用 LIMIT 1 任意行，
+            # 派生行在表里就再也不会补 all，导致空角色引擎 fail-closed 且永不恢复）。
+            try:
+                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                _ensure_rc(c, rid, declared=_seed_roles_l, user_set=0, now_iso=now_iso)
+            except Exception as _erc:
+                log.warning(f"upsert_local_runtimes role caps ensure failed (runtime={rid}): {_erc}")
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]

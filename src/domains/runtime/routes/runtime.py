@@ -689,15 +689,14 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             except Exception:
                 _declared = []
             _seeded = seed_role_caps_from_declared(c, rid, _declared, _user_set)
-            if not _seeded and not _user_set:
-                c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-                if not c.fetchone():
-                    _now_ec = datetime.now(timezone.utc).isoformat()
-                    c.execute(
-                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                        "VALUES (?, 'all', 1, 50, 1, ?, ?)",
-                        (rid, _now_ec, _now_ec))
-                    log.info(f"runtime_register: default 'all' capability seeded rid={rid}")
+            # Issue #3396 后续：补齐判定只看角色行（旧口径用「任意一行」→ 派生行会
+            # 永久挡住补 all）。声明非法/为空 → 补 all；UI 手工清空（user_set）→ 不动。
+            if not _seeded:
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set)
+                except Exception as _erc:
+                    log.warning(f"runtime_register: role caps ensure failed rid={rid}: {_erc}")
             # Issue #646：标签行同步 engine_uid（引用切换，孤儿防护）
             try:
                 c.execute(
@@ -965,15 +964,26 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                         # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
                         _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
                                  engine_type=_et_hb)
-                        # Issue #3396 A8b：心跳链兜底——存量行 role_tags 有声明但能力行仍是
-                        # 自动补的 'all' 时改写为声明集合（user_set/非 all 角色行不覆盖）
-                        if not (_hb_row[6] or 0) and (_hb_row[5] or "").strip():
+                        # Issue #3396 后续：心跳兜底改成「角色行为空就补」——
+                        # 有声明按声明（A8b 声明即收窄），无声明补 all。
+                        # 旧条件要求 role_tags 非空，未声明的引擎被清空后永远补不回来。
+                        if not (_hb_row[6] or 0):
                             try:
-                                _p_decl = json.loads(_hb_row[5])
-                                if isinstance(_p_decl, list):
-                                    seed_role_caps_from_declared(c, _rid, _p_decl, 0)
+                                _p_decl = json.loads(_hb_row[5] or "[]")
+                                if not isinstance(_p_decl, list):
+                                    _p_decl = []
+                            except Exception:
+                                _p_decl = []
+                            try:
+                                # 两步：①声明即收窄（只有自动 all 时改写为声明集合）；
+                                # ②角色行为空才补（有声明按声明，无声明补 all）。
+                                _seeded = (seed_role_caps_from_declared(c, _rid, _p_decl, 0)
+                                           if _p_decl else [])
+                                if not _seeded:
+                                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
+                                    _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=0)
                             except Exception as _sde:
-                                log.warning(f"heartbeat role caps seed failed (runtime={_rid}): {_sde}")
+                                log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
             except Exception as _at_e:
                 log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:

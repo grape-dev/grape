@@ -1,13 +1,12 @@
 """Issue #3396 改动④：PUT /runtimes/{id}/tags 写权限收紧（A5 权限矩阵）。
 
-矩阵（用户裁定）：
-- 引擎凭据所有者本人（owner_name 匹配）→ 200
-- 凭据归属组织 owner/admin → 200
-- 平台管理员（admin_accounts 身份）→ 200（含本机直连 credential_id=0）
-- 其他登录用户 / 仓库语境管理员（与机器无归属关系）→ 403
-- 本机直连（credential_id=0）非平台管理员 → 403
-- session_token（tk_）→ 403
+矩阵（2026-11-23 用户裁定：放开为「任何已登录用户可改」）：
+- 任意登录用户（JWT / API key）→ 200，不限归属（原先仅 owner/org admin/平台管理员）
+- 本机直连（credential_id=0）→ 任意登录用户 200（原先仅平台管理员）
+- session_token（tk_）→ 403（账户/平台管理语义，仍拒绝）
+- 不存在的 runtime → 404
 - 读接口 GET /runtimes/{id}/role-tags 保持全员可读 → 200
+- 审计（engine_tag_change）与 tags_user_set=1 语义不变：放开的是“谁能改”
 """
 import hashlib
 import json
@@ -112,10 +111,13 @@ class TestPutTagsPermissionMatrix:
         assert r.status_code == 200, r.text
         assert r.json()["tags"] == ["chat"]
 
-    def test_other_user_forbidden(self):
+    def test_other_user_can_write(self):
+        """放开后：与凭据无归属关系的登录用户同样可改（可用性优先，审计照记）。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         r = _put_tags(_client_as(_other_user()), rid)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert r.json()["tags"] == ["chat"]
+        assert any(a.get("operator") == "mallory" for a in _tag_audits(rid)), _tag_audits(rid)
 
     def test_platform_admin_can_write(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
@@ -135,10 +137,11 @@ class TestPutTagsPermissionMatrix:
         r = _put_tags(_client_as(_other_user()), rid)
         assert r.status_code == 200, r.text
 
-    def test_local_direct_non_admin_forbidden(self):
+    def test_local_direct_any_user_allowed(self):
+        """放开后：本机直连引擎也不再限定平台管理员。"""
         rid = _mk_engine(credential=False)
-        r = _put_tags(_client_as(_owner_user()), rid)
-        assert r.status_code == 403, r.text
+        r = _put_tags(_client_as(_other_user()), rid)
+        assert r.status_code == 200, r.text
 
     def test_local_direct_platform_admin_allowed(self):
         rid = _mk_engine(credential=False)
@@ -256,15 +259,15 @@ class TestSettingsTagWritePermissionMatrix:
         assert any(a.get("action") == "add" and a.get("tag") == "chat"
                    and a.get("operator") == "owner_alice" for a in audits), audits
 
-    def test_other_user_forbidden_on_settings_writes(self):
+    def test_other_user_can_write_on_settings(self):
+        """放开后：settings 三个写端点同样对任意登录用户开放，且审计照记。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         client = _client_as(_other_user())
-        before = _engine_tags(rid)
-        assert _settings_tags(client, "post", rid, tag="chat").status_code == 403
-        assert _settings_tags(client, "put", rid, tag="all").status_code == 403
-        assert _settings_tags(client, "delete", rid, tag="all").status_code == 403
-        assert _engine_tags(rid) == before
-        assert _tag_audits(rid) == []
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
+        assert ("chat", 1) in _engine_tags(rid)
+        assert _settings_tags(client, "delete", rid, tag="chat").status_code == 200
+        assert ("chat", 1) not in _engine_tags(rid)
+        assert any(a.get("operator") == "mallory" for a in _tag_audits(rid)), _tag_audits(rid)
 
     def test_platform_admin_can_write_via_settings(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
@@ -277,9 +280,9 @@ class TestSettingsTagWritePermissionMatrix:
                 "is_platform_admin": False}
         assert _settings_tags(_client_as(user), "post", rid, tag="chat").status_code == 403
 
-    def test_local_direct_non_admin_forbidden_on_settings(self):
+    def test_local_direct_any_user_allowed_on_settings(self):
         rid = _mk_engine(credential=False)
-        assert _settings_tags(_client_as(_owner_user()), "post", rid, tag="chat").status_code == 403
+        assert _settings_tags(_client_as(_other_user()), "post", rid, tag="chat").status_code == 200
 
     def test_owner_update_and_delete_via_settings_audited(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)

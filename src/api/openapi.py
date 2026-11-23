@@ -80,8 +80,9 @@ _PUBLIC_AUTH_DEPS = frozenset({
     # Issue #3855：官方技能改名/详情同时服务普通用户与管理台 JWT（admin_accounts）。
     "get_current_user_or_api_key_or_admin",
     "get_user_or_none",  # a2a 软认证（JWT/session/api key 任一；None 交给内部 bot 鉴权）
-    # Issue #3396：角色标签写权限收紧依赖（平台管理员 JWT / 用户认证二选一，
-    # session_token 体内拒绝）——挂载端点对外（PUT /runtimes/{id}/tags）
+    # Issue #3396：角色标签写权限依赖（平台管理员 JWT / 用户认证二选一，
+    # session_token 体内拒绝）——挂载端点对外（PUT /runtimes/{id}/tags）。
+    # 2026-11-23 裁定放开为「任意登录用户可改」，依赖名与 token_scope 不变。
     "_resolve_user_or_platform_admin",
 })
 
