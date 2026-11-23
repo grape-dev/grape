@@ -784,13 +784,21 @@ def _migrate_repo_key_tables():
             log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
 
 def _cleanup_usage_log_retention() -> None:
-    """N4-p2：usage_log 保留期清理（启动链 force=True 重启即对齐；运行期
-    由 log_usage 惰性触发 + 30 天节流承接）。异常全吞（清理失败不阻断启动）。"""
+    """N4-p2：usage_log 保留期清理的**启动布防点**（Issue #3848 启动次序）。
+
+    本函数原先直接 ``cleanup_expired_retention(force=True)``，但 init_db 是模块导入期
+    执行的——那时装配层（src/api/contracts_wiring.py）还没 bind tokens 端口，清理每次
+    启动必然空跑，并刷一条 ``retention cleanup failed: kernel port 'tokens' is not
+    bound`` WARNING（30 天节流的「重启即对齐」承诺因此长期失效）。
+
+    现在只「布防」：端口已绑则立即跑一次，未绑则由 kernel 端口的 ``on_bind`` 钩子在
+    ``bind("tokens")`` 之后补跑——本调用点一处覆盖 init/worker/event/insight 四条启动
+    路径。清理失败仍不阻断启动。
+    """
     try:
-        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
-        _rc_n = cleanup_expired_retention(force=True)
-        if _rc_n:
-            log.info(f"usage_log retention cleanup: {_rc_n} rows")
+        from src.kernel.persistence.credential_usage_log import (
+            defer_startup_retention_cleanup)
+        defer_startup_retention_cleanup()
     except Exception:
         pass
 
