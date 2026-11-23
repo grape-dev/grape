@@ -39,6 +39,8 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+# Issue #4082：runtime_id 守卫的结构化错误（id 缺失/非法时不发请求）
+from src.domains.runtime.engine.runtime_id_guard import RuntimeIdMissingError, RUNTIME_ID_MISSING
 from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
@@ -1315,6 +1317,40 @@ async def _reregister_cycle(client, installed, device_name, *, now, last_reregis
     return _state
 
 
+def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "") -> bool:
+    """Issue #4082：标签探活结果归因（返回 True 表示需要强制重注册）。
+
+    - 成功 → 清零连续失败计数；
+    - no_tags / unauthorized / not_found → WARNING/ERROR 日志（打掉「静默为空」），
+      连续失败达阈值（默认 3）时按 host/reason 上报主控指标并告警（节流防刷）；
+    - id_missing → ERROR + 结构化 `RUNTIME_ID_MISSING`，返回 True 让调用方退避重试注册。
+
+    为什么归因而不是简单 `except: tags=[]`：无标签是**稳态**（已注册但未配置），
+    401 是配置/归属问题，两者都需要显式可观测，而不是被吞成空列表后表现为
+    「runtime 在线但永远不派单」。
+    """
+    if not reason:
+        reporter.observe("")
+        return False
+    if reason == "id_missing":
+        log.error(f"{RUNTIME_ID_MISSING} rid={rid} engine={engine_name or '-'}: no valid "
+                  f"runtime id — tag probe/claim skipped (no HTTP), forcing re-register")
+    elif reason == "no_tags":
+        log.warning(f"runtime tags probe: rid={rid} engine={engine_name or '-'} registered "
+                    f"but has no tags (empty role_tags/scene_tags → dispatch has no basis)")
+    elif reason == "unauthorized":
+        log.error(f"runtime tags probe unauthorized: rid={rid} engine={engine_name or '-'} "
+                  f"(401 on probe = config/ownership mismatch, not credential revocation)")
+    elif reason == "not_found":
+        log.warning(f"runtime tags probe not_found: rid={rid} (runtime row deleted or in "
+                    f"re-derive window)")
+    if reporter.observe(reason):
+        log.error(f"runtime tags probe failed {reporter.consecutive} times in a row "
+                  f"(rid={rid} engine={engine_name or '-'} reason={reason} host={reporter.host}) "
+                  f"— failure signal reported to master")
+    return reason == "id_missing"
+
+
 def _worker_probe_once():
     """同步执行一轮引擎探测，结果写入 _worker_probe_results。
 
@@ -2103,6 +2139,8 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
         # 探测路径与 CLI 心跳同款路由前缀（/api/runtime/runtimes/0/tags）：不带凭据返回
         # 401/404 都证明"路由可达"（HTTP 层有响应）；curl 000（超时/拒连/DNS 失败）= 不可达。
         # 实测：正确地址 401，坏地址 :3000 与不存在域名 000。
+        # Issue #4082：服务端对非法 id（0）改为 400 invalid runtime_id——仍是 HTTP 响应，
+        # 语义不变（能拿到状态码即路由可达）；这里的 0 是「永不存在的 id」，不是真实探活对象。
         probe_url = rts.rstrip("/") + "/api/runtime/runtimes/0/tags"
         r = _subprocess.run(
             ["curl", "-sS", "--connect-timeout", "1", "--max-time", "2",
@@ -4060,6 +4098,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     last_reregister = asyncio.get_running_loop().time()
     last_fast_discover = last_reregister
     engine_by_rid = engine_by_rid or {}
+    # Issue #4082：标签探活连续失败上报器（按 host/reason，阈值内不出声防刷）。
+    # 无标签是稳态、401 是配置问题、id_missing 是注册态缺失——三者都要显式可观测。
+    from src.domains.runtime.engine.runtime_id_guard import ProbeFailureReporter
+    _tags_probe_reporter = ProbeFailureReporter(
+        scene=(os.environ.get("GRAPE_SCENE_ID") or "").strip())
 
     # 自动升级状态
     pending_upgrade = False
@@ -4114,16 +4157,34 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             log.warning("cloud worker: runtime_ids is empty — no engine to claim; "
                         "waiting for template refresh to register cloud engines")
         random.shuffle(_shuffled_rids)
+        # Issue #4082：本轮任一次 id_missing → 本轮结束后强制重注册（退避，见下方）
+        _reregister_due = False
         for rid in _shuffled_rids:
             try:
                 # Tags from server DB (single source of truth, managed via console)
                 # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}
                 _claim_resp = None
                 _db_tags = []
+                _probe_reason = ""
                 try:
-                    _db_tags = await client.get_tags(rid)
-                except Exception:
-                    _db_tags = []
+                    # Issue #4082：探活带失败归因（id_missing 不发请求 / no_tags /
+                    # unauthorized / not_found），不再 `except: tags=[]` 吞掉一切。
+                    # 测试 Fake / 旧客户端无 probe_tags 时回落 get_tags（无归因）。
+                    _probe = getattr(client, "probe_tags", None)
+                    if _probe is not None:
+                        _db_tags, _probe_reason = await _probe(rid)
+                    else:
+                        _db_tags = await client.get_tags(rid)
+                except Exception as _pe:
+                    _db_tags, _probe_reason = [], "network"
+                    log.warning(f"runtime tags probe rid={rid} error: {_pe}")
+                if _handle_tags_probe_result(_tags_probe_reporter, rid, _probe_reason,
+                                             engine_by_rid.get(rid, "")):
+                    _reregister_due = True
+                if _probe_reason == "id_missing":
+                    # id 非法时 claim/claim_by_tag 同样会被守卫拦下（零 HTTP），
+                    # 本轮直接换下一个 rid，重注册由本轮末尾统一触发（退避）
+                    continue
                 if _db_tags:
                     for _tag in _db_tags:
                         _resp = await client.claim_by_tag(rid, _tag,
@@ -4144,6 +4205,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     elif _legacy_resp and _legacy_resp.get("scan_request") and not _claim_resp:
                         _claim_resp = _legacy_resp
             except Exception as e:
+                if isinstance(e, RuntimeIdMissingError):
+                    # Issue #4082：claim/claim_by_tag 守卫命中（非法 id 零 HTTP）——
+                    # 归因为 id_missing 并标记本轮结束后强制重注册（退避）
+                    _handle_tags_probe_result(_tags_probe_reporter, rid, "id_missing",
+                                              engine_by_rid.get(rid, ""))
+                    _reregister_due = True
+                    continue
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
@@ -4439,6 +4507,33 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         hermes_active_tids.discard(_tid)
 
             asyncio.create_task(_wrap())
+
+        # ---- Issue #4082：本轮命中 RUNTIME_ID_MISSING → 强制重注册（退避重试）----
+        # 为什么放在本轮末尾而不是循环里：重注册会改写 runtime_ids（原地更新），
+        # 在遍历 `_shuffled_rids` 中途换列表会让本轮后续 rid 指向已失效的集合；
+        # 一并只做一次注册，避免多个非法 rid 触发多轮注册风暴。
+        if _reregister_due:
+            log.warning("runtime tags probe/claim hit RUNTIME_ID_MISSING this round — "
+                        "forcing re-register to backfill the real runtime id")
+            _imrc = await _reregister_cycle(
+                client, installed, device_name, now=asyncio.get_running_loop().time(),
+                last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+                cli_version=_read_local_worker_version(), force=True)
+            if _imrc["did"] and _imrc["ok"]:
+                _new_ids = _imrc["runtime_ids"]
+                if _new_ids is not None:
+                    runtime_ids[:] = _new_ids
+                if _imrc["engine_by_rid"]:
+                    engine_by_rid = _imrc["engine_by_rid"]
+                installed = _imrc["installed"]
+                last_reregister = _imrc["last_reregister"]
+                last_fast_discover = _imrc["last_fast_scan"]
+                _tags_probe_reporter.observe("")   # 取回 id：探活连续失败计数清零
+            else:
+                _id_backoff = min(30 * (2 ** max(0, heartbeat_fail_streak)), 300)
+                log.warning(f"re-register for missing runtime id failed, "
+                            f"backing off {_id_backoff:.0f}s")
+                await asyncio.sleep(_id_backoff)
 
         # ---- 凭据吊销信号（_wrap 是独立 task，异常不穿透主循环——用 Event 传递）----
         if _credential_revoked.is_set():
