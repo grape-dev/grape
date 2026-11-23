@@ -1492,6 +1492,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # worker 侧（agent.py）识别 __obs_key__ 后按 ② 的路径拉 zip；只有无 _okey 的
     # 本地目录技能（约 1%）仍走原样全量内联兜底。
     _skill_obs_key = ""
+    # Issue #3914 B：解析出的权威 skill_id 回写任务行列——入队时把「按名解析」结果只用在
+    # skill_files/路径上，列仍存调用方入参（PR 订阅传 0 → 列恒 0），direct evt 重建因此无源。
+    _resolved_skill_id = 0
     if skill:
         try:
             from src.domains.mgmt.public import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
@@ -1512,6 +1515,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                 _path = get_skill_path(_sid) if _sid else (skill_path or "")
                 _okey = get_skill_object_key(_sid) if _sid else ""
+            # Issue #3914 B：id 直查 / 名字降级的解析结果统一回写（0 保持既有降级语义）
+            _resolved_skill_id = int(_sid or 0)
             # 本地目录存在 → 打包（仅无 OBS 键的兜底路径；有 _okey 时跳过本地打包——
             # OBS zip 是权威源且内容一致，本地再打一份就是双写）
             if _path and os.path.isdir(os.path.dirname(_path)) and not _okey:
@@ -1686,7 +1691,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 "runtime_id": runtime_id,
                 "event_seq": event_seq,
                 "issue_id": issue_id or "", "repo_key": repo_key or "",
-                "agent_type": agent_type or "", "skill": skill or "", "skill_id": skill_id or 0,
+                "agent_type": agent_type or "", "skill": skill or "",
+                # Issue #3914 B：解析出的权威 id 优先落列（PR 订阅等调用方传 0 时不再恒 0）
+                "skill_id": _resolved_skill_id or (skill_id or 0),
                 "prompt": prompt, "cwd": cwd or "", "runtime_session_id": runtime_session_id or "",
                 "event_type": event_type or "", "account": account or "", "user_id": user_id or 0,
                 "repo_gitcode_token": repo_gitcode_token or "", "user_gitcode_token": user_gitcode_token or "",
