@@ -114,6 +114,16 @@ def build_app(
 
     _attach_request_log(app)
 
+    # 连接池僵死防护（2026-11-23 mgmt 全站僵死事故）：线程上限收敛到 ≤ 池上限、
+    # 请求收尾归还被粘住的连接、池饱和时打 ERROR + dump 线程栈。
+    try:
+        from src.kernel.config import log as _guard_log
+        from src.kernel.db_pool_guard import install_guard
+        _guard_log.info(f"db-pool-guard: {install_guard(app)}")
+    except Exception as _ge:  # noqa: BLE001 - 防护层失败不得挡住启动
+        from src.kernel.config import log as _guard_log
+        _guard_log.warning(f"db-pool-guard 装载失败: {_ge}")
+
     # 可选 tracing，两条路径互斥、新路径优先：
     #  - 新路径 OTEL_EXPORTER_OTLP_ENDPOINT → src/kernel/otel.py：FastAPI + requests
     #    + db.query + task.* 全套 span（service.name 认 GRAPE_TRACE_SERVICE）；
@@ -454,6 +464,11 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             _db = describe_connection()
         except Exception as _e:  # noqa: BLE001
             _db = {"error": str(_e)}
+        try:
+            from src.kernel.mysql_compat import pool_stats_all
+            _pools = pool_stats_all()
+        except Exception as _e:  # noqa: BLE001
+            _pools = [{"error": str(_e)}]
         return {
             "status": "ok",
             "service": service_name,
@@ -461,6 +476,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,
+            "db_pool": _pools,
         }
 
     if not readiness:

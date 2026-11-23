@@ -114,7 +114,6 @@ class TestScenesListPagination:
 class TestWithPipelinePagination:
     """Behavioral contract: /scenes/with-pipeline stays page-aligned, probe fields removed."""
 
-    @pytest.mark.skip(reason="legacy 静态页模块已随 Vue 迁移删除（本 PR 移除 src/api/static/js/pages/*）：被测对象不存在，断言改写到 Vue 源需另立专项")
     def test_t2_01_paged_with_pipeline(self):
         """with-pipeline honors page/page_size and returns total."""
         from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
@@ -138,7 +137,6 @@ class TestWithPipelinePagination:
         assert len(resp["scenes"]) == 25
         assert resp.get("total") == 25
 
-    @pytest.mark.skip(reason="legacy 静态页模块已随 Vue 迁移删除（本 PR 移除 src/api/static/js/pages/*）：被测对象不存在，断言改写到 Vue 源需另立专项")
     def test_t2_03_engine_probe_fields_removed(self):
         """Issue #501: offline_nodes/sre_unbound/all_offline 已移出 with-pipeline。
 
@@ -381,7 +379,6 @@ class TestPagingIntegrity:
         assert len(r25["scenes"]) == 1
         assert r26["scenes"] == [] and r26["total"] == 25
 
-    @pytest.mark.skip(reason="legacy 静态页模块已随 Vue 迁移删除（本 PR 移除 src/api/static/js/pages/*）：被测对象不存在，断言改写到 Vue 源需另立专项")
     def test_t2_05_paged_nodes_match_full_version(self):
         """分页 enrich 对齐：分页返回的某场景 nodes 与全量返回的同场景 nodes 完全一致。"""
         from src.kernel.session_manager import db, db_lock
@@ -487,7 +484,6 @@ class TestSceneSearch:
         assert p3["scenes"] == [] and p3["total"] == 6
         assert len(set(ids)) == 6
 
-    @pytest.mark.skip(reason="legacy 静态页模块已随 Vue 迁移删除（本 PR 移除 src/api/static/js/pages/*）：被测对象不存在，断言改写到 Vue 源需另立专项")
     def test_t6_05_with_pipeline_same_q_semantics(self):
         """with-pipeline 与 /scenes 同 q 语义：同命中集、同 total。"""
         from src.domains.mgmt.routes.scenes import list_scenes, list_scenes_with_pipeline
@@ -711,13 +707,13 @@ class TestReviewFollowups:
 
     def test_t10_01_limit_offset_parameterized(self):
         """LIMIT/OFFSET 用占位符传参（与同函数其余参数化风格一致）。"""
-        pc = open(os.path.join(sys_path_root, "src", "api", "pipeline_config.py"), encoding="utf-8").read()
+        pc = open(os.path.join(sys_path_root, "src", "domains", "mgmt", "pipeline_config.py"), encoding="utf-8").read()
         assert '" LIMIT ? OFFSET ?"' in pc
         assert "LIMIT {int(limit)}" not in pc, "内插 LIMIT 残留"
 
     def test_t10_02_search_where_single_source(self):
         """q 过滤 WHERE 片段由 _scene_search_where 单一构建，_query 与 _count 共用。"""
-        pc = open(os.path.join(sys_path_root, "src", "api", "pipeline_config.py"), encoding="utf-8").read()
+        pc = open(os.path.join(sys_path_root, "src", "domains", "mgmt", "pipeline_config.py"), encoding="utf-8").read()
         assert "def _scene_search_where(" in pc
         fn_query = pc.split("def _query_scenes_from_db")[1].split("def ")[0]
         fn_count = pc.split("def _count_scenes_from_db")[1].split("def ")[0]
