@@ -66,17 +66,56 @@ groups:
           summary: "MySQL aborted connections"
           description: "{{ $value }} connections aborted in the last 10 minutes."
 
-      # HTTP 5xx 错误率
-      - alert: GrapeHTTPErrorRateHigh
+      # HTTP 5xx 错误率——分级（Issue #3847）
+      # 背景：发布/热加载窗口 5xx 率 1.63%（基线 0.077%）时旧单阈值 10% 完全哑火。
+      # 分级：warning ≥0.5%（发布窗口可容忍上限），critical ≥2%（需立即回滚）。
+      # 阈值常量与 scripts/deploy-drain.sh 的 GATEWAY_502_THRESHOLD=0.005 保持一致。
+      - alert: GrapeHTTPErrorRateWarning
         expr: |
           sum(rate(grape_http_requests_total{status=~"5.."}[5m])) /
-          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.1
+          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.005
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "HTTP 5xx error rate > 10%"
-          description: "More than 10% of HTTP requests are returning 5xx errors."
+          summary: "HTTP 5xx error rate > 0.5%"
+          description: "More than 0.5% of HTTP requests are returning 5xx errors (baseline ~0.08%)."
+
+      - alert: GrapeHTTPErrorRateCritical
+        expr: |
+          sum(rate(grape_http_requests_total{status=~"5.."}[5m])) /
+          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.02
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP 5xx error rate > 2%"
+          description: "More than 2% of HTTP requests are returning 5xx errors; roll back the release."
+
+      # 网关 502 速率——单独成规则，发布/摘流窗口的典型故障信号（Issue #3847）。
+      # 502 通常表示网关到健康 upstream 的连接被切断（reload/进程退出），
+      # 与上游业务 5xx 区分开，便于发布门禁与值班快速定位。
+      - alert: GrapeGateway502RateWarning
+        expr: |
+          sum(rate(grape_http_requests_total{status="502"}[5m])) /
+          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.005
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway 502 rate > 0.5%"
+          description: "More than 0.5% of requests are 502 (gateway→upstream connection reset during reload/drain)."
+
+      - alert: GrapeGateway502RateCritical
+        expr: |
+          sum(rate(grape_http_requests_total{status="502"}[5m])) /
+          clamp_min(sum(rate(grape_http_requests_total[5m])), 1) > 0.02
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway 502 rate > 2%"
+          description: "More than 2% of requests are 502; upstream drain/reload is cutting healthy connections."
 
       # Issue #3969：nginx 层 /api/runtime/ 502 率 >1%/5min
       # 语义：worker 重启/不可达时网关直接 502，runtime 控制面（心跳/注册/认领/任务态/

@@ -28,6 +28,11 @@ TimeoutStartSec=120
 TimeoutStopSec=90
 Restart=always
 RestartSec=5
+# Issue #3847：优雅退出——SIGTERM 先让 uvicorn 排空在途请求，45s 后仍未退出才强杀。
+# 与 nginx 的 worker_shutdown_timeout 30s 对齐（systemd 多留 15s 余量）。
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target

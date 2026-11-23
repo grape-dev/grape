@@ -1,0 +1,23 @@
+# Issue #3847：网关发布/热加载窗口 502 风暴加固——公共反代重试与连接复用片段。
+#
+# 用法：在每个 `server { }` 内 include（location 可覆盖本文件的默认值）：
+#   include conf.d/nginx-grape-upstream.inc;
+#
+# 背景：10:12–10:14 发布窗口内网关对健康 upstream 回 1,173 次 502（5xx 率 1.63%，
+# 基线 0.077%），而同一时段上游 `GET /api/health`、`/static/openapi.json` 仍 200。
+# 根因是 reload/摘流瞬间在途请求与 keepalive 连接被切断：网关既未重试，也复用了
+# 对端已关闭的连接。本片段统一开启「失败重试下一个 upstream」并让 HTTP/1.1 长连接
+# 真正可复用；upstream 侧 keepalive 参数见 nginx-grape-upstream-keepalive.inc。
+#
+# keepalive 对齐：客户端侧 65s < upstream 侧 90s（见 keepalive.inc），
+# 保证网关不会复用对端已按更短超时关闭的连接。
+
+keepalive_timeout 65s;                 # 客户端侧 keepalive，须小于 upstream 侧 90s
+proxy_http_version 1.1;                # upstream keepalive 仅 HTTP/1.1 生效
+proxy_set_header Connection "";        # 清除 Connection: close，启用长连接复用
+
+# 发布窗口内上游被重启/摘流时，对健康上游自动重试一次（tries 2 = 首次 + 1 次重试）。
+# 只对连接类错误与 502/503 重试，避免把业务 4xx 放大成重复写请求。
+proxy_next_upstream error timeout http_502 http_503;
+proxy_next_upstream_tries 2;
+proxy_next_upstream_timeout 10s;

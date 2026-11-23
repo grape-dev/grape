@@ -212,3 +212,35 @@ promtool check rules deploy/alerts.yml
 # Prometheus 侧确认指标出现，且 2m 内 502 增量 >50 时 GrapeRuntime502Burst 触发；
 # 5m 率 >1% 时 GrapeRuntime502RateHigh 触发。
 ```
+
+## 网关发布窗口优雅摘流（Issue #3847）
+
+发布/热加载窗口内曾出现网关对健康 upstream 的 502 风暴（10:12–10:14 共 1,173 次、
+5xx 率 1.63%，基线 0.077%）。修复由三部分组成，部署时必须一起下发：
+
+1. **公共 nginx 片段**（放到 `/etc/nginx/conf.d/`，与网关配置同目录）：
+   - `nginx-grape-upstream.inc`：每个 `server { }` 内 `include`，提供
+     `proxy_next_upstream error timeout http_502 http_503` + `tries 2`、
+     `proxy_http_version 1.1`、`Connection ""` 与客户端 `keepalive_timeout 65s`。
+   - `nginx-grape-upstream-keepalive.inc`：每个 `upstream { }` 内 `include`，提供
+     `keepalive` / `keepalive_timeout 90s`（必须大于客户端侧 65s）。
+   - 四份模板（单机 / `-cluster` / `-four-process` / `-compose`）已接入上述 include。
+2. **nginx 优雅退出**：把 `nginx-worker-shutdown.inc` 手动 include 到主
+   `/etc/nginx/nginx.conf` 的 **main 上下文**（`worker_processes` 之后、`events` 之前），
+   设置 `worker_shutdown_timeout 30s`；`deploy/systemd/*.service` 已补
+   `KillSignal=SIGTERM` / `KillMode=mixed` / `TimeoutStopSec=45` 与之对齐。
+3. **发布流程与门禁**：`scripts/deploy-drain.sh` 按「摘流 → 排空 → 退出」执行，
+   重启后采样 `/api/health`、`/api/runtime/heartbeat`、`/static/openapi.json`，
+   502 率 > 0.5%（`GATEWAY_502_THRESHOLD=0.005`）自动回滚。发布前可 `--dry-run` 预演：
+
+   ```bash
+   GATEWAY_DRAIN_CMD='<摘流钩子>' GATEWAY_STOP_CMD='systemctl restart grape-server' \
+     bash scripts/deploy-drain.sh --dry-run --unit grape-server
+   ```
+
+   告警侧 `deploy/alerts.yml` 已把 5xx 由单阈值 10% 收紧为分级 0.5%/2%，并新增
+   网关 502 速率规则，阈值与脚本保持一致。
+
+> 注意：生产 502 记录落在 `127.0.0.1:8081/8083`，而仓库模板为 `38081/38083`。
+> 下发前请先 `nginx -T` 确认生产实际加载的配置与端口映射；若生产另有旁路配置，
+> 需同时完成「生产配置与仓库模板对齐」，避免改到未被加载的文件。
