@@ -571,10 +571,18 @@ def _a2a_gate_degraded(flag: str, *, repo_key: str = "", issue_id: str = "",
     return marks
 
 
+_ENTITY_HEADERS = ("content-length", "content-type")
+
+
 def _a2a_stamp_degraded(resp, degraded: dict | None):
     """Issue #3865：把门禁降级标记并入响应 `detail`（dict / JSONResponse 两态）。
 
     无降级时原样返回（不复制、不改写），保证既有响应对象语义零变化。
+    PR #2002 R2（Critical）：重建 JSONResponse 时只透传非实体头——`content-length`
+    是被打标前旧 body 的长度，直接复制会使「头里的长度 < 实际 body」，uvicorn
+    抛 `RuntimeError: Response content longer than Content-Length`，客户端只收到
+    截断 JSON。剔除 `content-length` / `content-type` 让 Starlette 按新 body 重算，
+    其余自定义头原样透传。
     """
     if not degraded:
         return resp
@@ -594,8 +602,14 @@ def _a2a_stamp_degraded(resp, degraded: dict | None):
             detail = {}
             content["detail"] = detail
         detail.update(degraded)
+        _kept = {}
+        for _hk, _hv in resp.raw_headers:
+            _hk = _hk.decode("latin-1", "replace")
+            if _hk.lower() in _ENTITY_HEADERS:
+                continue
+            _kept.setdefault(_hk, _hv.decode("latin-1", "replace"))
         return JSONResponse(status_code=resp.status_code, content=content,
-                            headers=dict(resp.headers))
+                            headers=_kept)
     if isinstance(resp, dict):
         detail = resp.get("detail")
         if not isinstance(detail, dict):
