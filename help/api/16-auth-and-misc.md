@@ -362,6 +362,12 @@
 
 参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
 
+### GET /api/orgs/{org_id}/dispatch/scene-catalog — org_dispatches_scene_catalog
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
 ### GET /api/orgs/{org_id}/knowledge — org_knowledge_list
 
 > scope：`user_only`
@@ -471,6 +477,18 @@
 参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
 
 ### GET /api/orgs/{org_id}/repo-map/recall — org_repo_map_recall
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### GET /api/orgs/{org_id}/repo-map/summary — org_repo_map_summary
+
+> scope：`dual`
+
+参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
+
+### POST /api/orgs/{org_id}/repo-map/sync — org_repo_map_sync
 
 > scope：`dual`
 
