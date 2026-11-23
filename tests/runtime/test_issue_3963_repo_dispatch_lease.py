@@ -297,6 +297,9 @@ def _fake_agent_busy_then(calls, busy_times, then="success", fail_error=""):
 def test_busy_is_not_env_failure_code():
     """busy 不得复用环境性失败通道（60s 退避 + 连续 3 次熔断会把秒级争用升级成任务停用）。"""
     assert S.ERROR_REPO_DISPATCH_BUSY == BUSY
+    # 跨模块字面量漂移看护：service 抛出码与 scheduler 判定码必须是同一个
+    assert service.REPO_DISPATCH_BUSY == S.ERROR_REPO_DISPATCH_BUSY
+    assert service.RepoDispatchBusyError.error_code == S.ERROR_REPO_DISPATCH_BUSY
     assert BUSY not in S._ENV_FAILURE_CODES
     assert S._BUSY_RETRY_BUDGET >= 1
 
