@@ -302,6 +302,15 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
             if (r[4] or 0) and _probe not in ("ok", "pending", ""):
                 # 认领侧对远端的附加关（既有口径，Issue #1487 未改）：probe 失败 = 引擎跑不了活
                 continue
+            # Issue #3928 R2：池可达性统一叠加后端健康态（与 claim_allowed 同一把尺子）——
+            # 否则 degraded/unavailable 实例会被算成「池里有可达引擎」，任务入队后
+            # 派发选中又被认领拒绝，空转到 stale 判死。
+            try:
+                from src.domains.runtime.engine import backend_health as _bh_reach
+                if not _bh_reach.claim_allowed(eid, cursor=c):
+                    continue
+            except Exception:
+                pass
             # 有 tag 能力？
             c.execute(
                 "SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
@@ -798,6 +807,13 @@ def _check_pool_selector_reachable(selector: dict, tag: str, repo_key: str = "",
                 continue
             if (probe or "") not in ("ok", "pending", ""):
                 continue
+            # Issue #3928 R2：selector 池可达性与认领闸门同尺（见 _check_pool_engines_reachable）
+            try:
+                from src.domains.runtime.engine import backend_health as _bh_sel
+                if not _bh_sel.claim_allowed(rid, cursor=c):
+                    continue
+            except Exception:
+                pass
             if not _selector_match(selector, load_engine_tags(c, rid)):
                 continue
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
@@ -2410,7 +2426,7 @@ def get_task(task_id) -> dict | None:
 
 def _has_verified_executor(probe_status: str, worker_version: str,
                            credential_id: int = 0, installed=None, healthy=None,
-                           backend_status: str = "") -> bool:
+                           backend_status: str = "", cooldown_gate_passed: bool = False) -> bool:
     """引擎是否有可信的执行器（可安全参与任务认领）。
 
     本机 CLI 探测注册的引擎 worker_version 为空；在探活通过之前它们只是"展示用"
@@ -2435,7 +2451,12 @@ def _has_verified_executor(probe_status: str, worker_version: str,
                "degraded", "unavailable"):
         return False
     if _bs in ("degraded", "unavailable"):
-        return False
+        # Issue #3928 R1：degraded 的准入由 claim_allowed 的短冷却/半开把关（degraded
+        # 不改写 healthy，#1982 阈值语义保留），冷却结束后必须允许一次真实试探才能
+        # 自愈；调用方已通过冷却闸门时不再二次硬拒。unavailable（明确缺 CLI）保持硬拒
+        # ——它同时把 healthy 置 0，需 ok 探活才恢复。
+        if not (cooldown_gate_passed and _bs == "degraded"):
+            return False
     # healthy 显式为 0 的实例不得认领（远端心跳/探活已判定跑不了活）；
     # healthy=None 保留旧兼容（老库缺列 / 老调用方未传）。
     if healthy is not None and not bool(healthy):
@@ -2459,10 +2480,12 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
         c = _rt_db.cursor()
         try:
             # Issue #3928：runtime 级熔断 / 后端不可用 → 不参与认领（冷却后半开）。
+            _cooldown_gate_passed = False
             try:
                 from src.domains.runtime.engine import backend_health as _bh_tag
                 if not _bh_tag.claim_allowed(runtime_id, cursor=c):
                     return None
+                _cooldown_gate_passed = True
             except Exception as _bhe:
                 log.warning(f"claim_by_tag: backend health gate failed for {runtime_id}: {_bhe}")
             # 1. 校验标签能力 + 获取引擎 scope
@@ -2519,7 +2542,8 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
             if not _has_verified_executor(_probe_status, _worker_version,
                                           credential_id=_cred_id,
                                           installed=_installed, healthy=_healthy,
-                                          backend_status=_backend_status):
+                                          backend_status=_backend_status,
+                                          cooldown_gate_passed=_cooldown_gate_passed):
                 log.warning(f"claim_by_tag: runtime={runtime_id} has no verified executor "
                             f"(probe={_probe_status or '-'}, worker_version=-), skip claiming")
                 return None

@@ -15,7 +15,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 from src.kernel.config import log
-from src.kernel.owner_db import owner_db, owner_lock
+from src.kernel.owner_db import owner_db
 from src.domains.runtime.engine.backend_capability import (
     BLOCKING_STATUSES,
     STATUS_AVAILABLE,
@@ -28,6 +28,14 @@ from src.domains.runtime.engine.backend_capability import (
 CIRCUIT_COOLDOWN_SECONDS = max(1, int(os.environ.get("RUNTIME_BACKEND_CIRCUIT_SECONDS", "300")))
 CIRCUIT_COOLDOWN_MAX_SECONDS = max(
     CIRCUIT_COOLDOWN_SECONDS, int(os.environ.get("RUNTIME_BACKEND_CIRCUIT_MAX_SECONDS", "3600")))
+# QA 复审 R1（Issue #3928）：degraded（命令在但探活/spawn 失败）同样必须开一次短冷却，
+# 冷却结束走半开试探——否则单次瞬时探活失败就会让引擎拒领到下一次 ok 探活（600s），
+# 相对 #1982「连续 2 次 fail 才 healthy=0」是可用性回归。
+DEGRADED_COOLDOWN_SECONDS = max(
+    1, int(os.environ.get("RUNTIME_BACKEND_DEGRADED_SECONDS", "120")))
+DEGRADED_COOLDOWN_MAX_SECONDS = max(
+    DEGRADED_COOLDOWN_SECONDS,
+    int(os.environ.get("RUNTIME_BACKEND_DEGRADED_MAX_SECONDS", "600")))
 
 
 def _now_iso() -> str:
@@ -65,6 +73,15 @@ def _runtime_row(c, runtime_id: int):
 def _cooldown_seconds(fail_count: int) -> int:
     n = max(1, int(fail_count or 1))
     return min(CIRCUIT_COOLDOWN_SECONDS * (2 ** (n - 1)), CIRCUIT_COOLDOWN_MAX_SECONDS)
+
+
+def _degraded_cooldown_seconds(strikes: int) -> int:
+    """degraded 短冷却（指数退避，封顶 DEGRADED_COOLDOWN_MAX_SECONDS）。
+
+    首次 120s（远小于 600s 探活周期），连续 degraded 逐次翻倍到 600s 封顶。
+    """
+    n = max(1, int(strikes or 1))
+    return min(DEGRADED_COOLDOWN_SECONDS * (2 ** (n - 1)), DEGRADED_COOLDOWN_MAX_SECONDS)
 
 
 def observe_capability(c, runtime_id: int, status: str, reason: str = "",
@@ -118,13 +135,39 @@ def observe_capability(c, runtime_id: int, status: str, reason: str = "",
                     "backend_checked_at=?, healthy=0 WHERE id=?",
                     (status, reason, checked_at, runtime_id))
         elif status == STATUS_DEGRADED:
-            # 命令在但探活/spawn 失败：摘除认领资格（backend_status 闸门），但不改写
-            # healthy —— 保留 #1982 的 spawn_failed 独立计数/阈值语义（偶发资源紧张
+            # 命令在但探活/spawn 失败：摘除认领资格（backend_status 闸门），但**不改写
+            # healthy** —— 保留 #1982 的 spawn_failed 独立计数/阈值语义（偶发资源紧张
             # 不立即摘除，持续失败由既有阈值降级）。
-            c.execute(
-                "UPDATE agent_runtimes SET backend_status=?, backend_reason=?, "
-                "backend_checked_at=? WHERE id=?",
-                (status, reason, checked_at, runtime_id))
+            # QA 复审 R1：同时开一次短冷却（120s 起、封顶 600s），冷却结束放行一次半开
+            # 试探；探活 ok / 任务真实执行成功即恢复。这样偶发失败最多让引擎停领一个
+            # 短窗口，不会一直等到 600s 后的下一次 ok 探活（可用性回归）。
+            _now = datetime.now(timezone.utc)
+            _until_ts = _ts(until) if until else None
+            _active = _until_ts is not None and _until_ts > _now.timestamp()
+            if not _active:
+                _strikes = int(fail_count or 0) + 1
+                _cooldown = _degraded_cooldown_seconds(_strikes)
+                _until = (_now + timedelta(seconds=_cooldown)).isoformat()
+                c.execute(
+                    "UPDATE agent_runtimes SET backend_status=?, backend_reason=?, "
+                    "backend_checked_at=?, circuit_open_until=?, circuit_fail_count=?, "
+                    "circuit_half_open=0 WHERE id=?",
+                    (status, reason, checked_at, _until, _strikes, runtime_id))
+                log.warning(
+                    f"ENGINE_BACKEND_DEGRADED: runtime_id={runtime_id} engine={name} "
+                    f"reason={str(reason)[:240]} strikes={_strikes} cooldown={_cooldown}s "
+                    f"circuit_open_until={_until} (excluded from claiming until cooldown ends)")
+                _audit(c, runtime_id, name, "backend_degraded",
+                       {"reason": str(reason)[:500], "strikes": _strikes,
+                        "cooldown_seconds": _cooldown, "circuit_open_until": _until})
+            else:
+                # 已有冷却窗口在飞：只刷新原因，不重复计数/告警，也不缩短窗口
+                #（spawn 失败开的 unavailable 熔断不得被一次 degraded 观测降级为更短窗口）
+                _write_status = prev_status if prev_status in BLOCKING_STATUSES else status
+                c.execute(
+                    "UPDATE agent_runtimes SET backend_status=?, backend_reason=?, "
+                    "backend_checked_at=? WHERE id=?",
+                    (_write_status, reason, checked_at, runtime_id))
         else:  # unknown：不摘除（防探针故障导致全量停摆）
             c.execute(
                 "UPDATE agent_runtimes SET backend_status=?, backend_reason=?, "
@@ -167,7 +210,18 @@ def _db():
 
 
 def _lock():
-    return owner_lock("runtime")
+    """与 runtime 域既有约定同锁（QA 复审 Optional）。
+
+    单库/本域拓扑下 ``owner_db("runtime")`` 回落 session_manager.db，域内其余代码
+    （service.py / recovery.py / transient_retry.py）统一用 db_lock；若这里另用
+    owner_lock 就是「同一连接两把锁」，多语句事务可能交错提交。三库自有 DSN 时
+    用 db_registry.domain_lock("runtime")（与该连接配套）。
+    """
+    from src.kernel import db_registry
+    if db_registry.uses_own_dsn("runtime"):
+        return db_registry.domain_lock("runtime")
+    from src.kernel.session_manager import db_lock
+    return db_lock
 
 
 def note_backend_failure(runtime_id: int, reason: str = "") -> dict:
@@ -188,6 +242,25 @@ def note_backend_failure(runtime_id: int, reason: str = "") -> dict:
             return {}
 
 
+def claim_eligible(status: str, until: str, half, now: float | None = None) -> bool:
+    """认领闸门纯判定（Issue #3928 R2：认领 / 池可达性 / 派发候选共用同一把尺子）。
+
+    - 非 blocking 状态 → 放行；
+    - blocking（degraded/unavailable）且无冷却窗口 → 拒绝（注册/心跳会补开冷却）；
+    - 冷却期内 → 拒绝；冷却结束且未占半开位 → 放行一次试探。
+    """
+    _now = datetime.now(timezone.utc).timestamp() if now is None else float(now)
+    _status = (status or "").strip().lower()
+    if _status not in BLOCKING_STATUSES:
+        return True
+    if not until:
+        return False
+    until_ts = _ts(until)
+    if until_ts is not None and until_ts > _now:
+        return False
+    return int(half or 0) == 0
+
+
 def claim_allowed(runtime_id: int, now: float | None = None, cursor=None) -> bool:
     """认领闸门：blocking 状态在冷却期内拒绝；冷却结束仅放行一次半开试探。"""
     _now = datetime.now(timezone.utc).timestamp() if now is None else now
@@ -202,16 +275,7 @@ def claim_allowed(runtime_id: int, now: float | None = None, cursor=None) -> boo
     if not row:
         return True
     _name, status, _reason, _checked, until, _fail_count, half, _healthy = row
-    status = (status or "").strip().lower()
-    if status not in BLOCKING_STATUSES:
-        return True
-    if not until:
-        # 已观测为不可用但冷却尚未落库：保守拒绝（注册/心跳会补开冷却）
-        return False
-    until_ts = _ts(until)
-    if until_ts is not None and until_ts > _now:
-        return False
-    return int(half or 0) == 0
+    return claim_eligible(status, until, half, _now)
 
 
 def note_claim_started(c, runtime_id: int) -> None:
@@ -231,16 +295,34 @@ def note_claim_started(c, runtime_id: int) -> None:
                  f"reason={str(reason or '')[:200]}")
 
 
-def note_claim_outcome(c, runtime_id: int, backend_failed: bool = False) -> None:
-    """认领任务结果：后端失败 → 续开冷却；成功/非后端失败 → 释放半开并恢复可用。"""
+def note_claim_outcome(c, runtime_id: int, backend_failed: bool = False,
+                       executed: bool = True) -> None:
+    """认领任务结果：后端失败 → 续开冷却；真实执行成功 → 释放半开并恢复可用。
+
+    ``executed=False`` 表示任务在 spawn **之前**就失败（skill_mismatch / prompt 为空 /
+    skill 未配置 / workspace baseline / credential_* 等），并未验证后端可执行性
+    （QA 复审 R3）：此时不得释放熔断，只复位半开占位并续一小段冷却，避免热循环。
+    """
     if backend_failed:
         _open_circuit_in_tx(c, runtime_id, "backend unavailable during task execution")
         return
     row = _runtime_row(c, runtime_id)
     if not row:
         return
-    name, status, _reason, _checked, until, _fail_count, half, healthy = row
+    name, status, _reason, _checked, until, fail_count, _half, _healthy = row
     status = (status or "").strip().lower()
+    if not executed:
+        # 未取得真实执行证据：不释放，复位半开并沿用短冷却，避免「探活前无限卡半开」
+        if status in BLOCKING_STATUSES or until:
+            _cooldown = _degraded_cooldown_seconds(int(fail_count or 1))
+            _until = (datetime.now(timezone.utc)
+                      + timedelta(seconds=_cooldown)).isoformat()
+            c.execute(
+                "UPDATE agent_runtimes SET circuit_half_open=0, circuit_open_until=? "
+                "WHERE id=?", (_until, runtime_id))
+            log.info(f"ENGINE_BACKEND_HOLD: runtime_id={runtime_id} engine={name} "
+                     f"status={status or '-'} (no execution evidence, circuit kept)")
+        return
     if status not in BLOCKING_STATUSES and not until:
         return
     c.execute(

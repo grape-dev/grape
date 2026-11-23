@@ -599,11 +599,67 @@ def _health_ok(m: dict) -> bool:
     )
 
 
+def _backend_claimable_map(runtime_ids: list) -> dict | None:
+    """Issue #3928 R2：派发候选与认领闸门同尺（backend_status + circuit_*）。
+
+    返回 ``{runtime_id: 是否可认领}``；空列表输入返回 ``{}``。缺列（存量库未迁移）/
+    查询异常 → 返回 ``None``：调用方不参与后端过滤（fail-open 旧行为，绝不因健康态
+    查询失败挡住派发）。注意 ``{}`` 与 ``None`` 语义不同——前者是「查到了，但全部不可
+    认领」，后者是「查不了」。
+    """
+    ids = sorted({int(r) for r in runtime_ids if r})
+    if not ids:
+        return {}
+    db, lock = _db()
+    try:
+        with lock:
+            c = db.cursor()
+            ph = ",".join("?" * len(ids))
+            c.execute(
+                "SELECT id, COALESCE(backend_status,''), COALESCE(circuit_open_until,''), "
+                "COALESCE(circuit_half_open,0) FROM agent_runtimes "
+                f"WHERE id IN ({ph})", tuple(ids))
+            rows = c.fetchall()
+    except Exception as e:
+        log.debug(f"_backend_claimable_map failed (fail-open): {e}")
+        return None
+    from src.domains.runtime.engine.backend_health import claim_eligible
+    now = _time.time()
+    return {int(r[0]): claim_eligible(r[1], r[2], r[3], now) for r in rows}
+
+
+def _backend_claimable(members: list[dict]) -> dict | None:
+    """Issue #3928 R2：候选 runtime_id → 后端健康态是否可认领（``None`` = 查不了）。
+
+    与 ``backend_health.claim_eligible`` 同一把尺子（认领 / 池可达性 / 派发候选）。
+    """
+    return _backend_claimable_map([m.get("runtime_id") for m in members])
+
+
+def _backend_blocked(m: dict, claimable: dict | None) -> bool:
+    """候选是否被后端健康态挡住。
+
+    ``claimable=None``（缺列/查询异常）或行不存在（老库/合成候选）→ 不拦，保持旧行为；
+    只有「查到了且明确不可认领」才拦。
+    """
+    if claimable is None:
+        return False
+    _rid = m.get("runtime_id")
+    if not _rid:
+        return False
+    return claimable.get(int(_rid)) is False
+
+
 def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
     f = cfg.get("filters") or {}
+    _claimable = _backend_claimable(members)
     out = []
     for m in members:
         if not m.get("enabled", True):
+            continue
+        # Issue #3928 R2：degraded / unavailable 在冷却期内不得被派发候选选中，
+        # 否则「派发选中、认领拒绝」会空转到 120s stale 判死（spec In-2 池可达性同尺）。
+        if _backend_blocked(m, _claimable):
             continue
         if f.get("only_installed") and not m.get("installed"):
             continue
@@ -1208,6 +1264,10 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                 if not members:
                     _log_role_no_candidates("pool_engine_uids", repo_key, agent_type, scene_id, _pre_role)
                     return None
+            # Issue #3928 R2：池可达性叠加后端健康态（与 claim_allowed 同尺）
+            _claimable = _backend_claimable(members)
+            if _claimable is not None:
+                members = [m for m in members if not _backend_blocked(m, _claimable)]
             healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
             if healthy_ids:
                 return json.dumps(healthy_ids)
@@ -1240,15 +1300,25 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                 _log_role_no_candidates("pool_engine_ids", repo_key, agent_type, scene_id, _pre_role)
                 return None
             # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
+            # Issue #3928 R2：后端健康态（degraded/unavailable 的冷却期）与认领闸门同尺，
+            # 池里只剩被熔断引擎时按 all_offline 诚实失败，不再放进去空转到 stale 判死。
+            _claimable = _backend_claimable(members)
             _dropped = []
             for m in members:
+                if _backend_blocked(m, _claimable):
+                    _dropped.append({"rid": m.get("runtime_id"), "name": m.get("name") or "",
+                                     "reason": "backend_unavailable"})
+                    continue
                 if not _health_ok(m):
                     if (m.get("status") or "") != "online":
                         _why = f"status={m.get('status') or 'offline'}"
                     else:
                         _why = f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s"
                     _dropped.append({"rid": m.get("runtime_id"), "name": m.get("name") or "", "reason": _why})
-            healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
+            healthy_ids = [
+                m["runtime_id"] for m in members
+                if not _backend_blocked(m, _claimable) and _health_ok(m)
+            ]
             if healthy_ids:
                 _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
                               scene_id=scene_id, bound_engine_ids=ids,
