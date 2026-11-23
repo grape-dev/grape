@@ -53,7 +53,9 @@ def setup_module():
         c.execute("DELETE FROM grape_accounts WHERE username='i3891_user'")
         db.commit()
     from src.domains.mgmt.auth import grape_account_db
-    _uid = grape_account_db.create_grape_account("i3891_user", email=None, password="pw123")
+    # 测试账户口令用随机值（不写字面量）：避免开源增量敏感扫描把假口令误报为凭据
+    _uid = grape_account_db.create_grape_account(
+        "i3891_user", email=None, password=uuid.uuid4().hex)
     if not _uid:
         _uid = grape_account_db.get_grape_account_by_username("i3891_user")
     _cleanup()
