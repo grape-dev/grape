@@ -216,10 +216,9 @@ if (Test-Path $srcDir) {
 # restore_upgrade_backup: 恢复备份的旧代码并重启 agent（回滚函数，与 Linux 对齐）
 function restore_upgrade_backup {
     Log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting old agent !!!"
-    # Issue #3892：回滚结果（旧版本标识 + 备份目录）留给结尾提示复用——回滚后不得再打印
+    # Issue #3892：回滚结果（恢复到的旧版本标识）留给结尾提示复用——回滚后不得再打印
     # 成功完成提示，必须如实告知「回滚到了哪个版本、备份在哪、下一步怎么重试」。
     $script:rolledBackVersion = "unknown"
-    $script:rollbackBackupDir = $upgradeBackupDir
     $backupSrc = Join-Path $upgradeBackupDir "src"
     if (-not (Test-Path $backupSrc)) {
         Log "Rollback failed: no backup ($upgradeBackupDir missing, maybe fresh install) - worker stays offline, manual intervention needed"
@@ -768,6 +767,17 @@ $workerLog = Join-Path $workerLogDir "devops-bot.log"
 $agentStartUtc = [datetime]::UtcNow
 # 结尾提示分支依据（Issue #3892）：installed / rolled_back / rollback_failed
 $installOutcome = "installed"
+# Issue #3892（QA 审查 Required）：devops-bot.log 是 append-only——安装器既不截断也不轮转，上一轮
+# 运行残留的 Traceback / Register failed / worker exiting 会一直留在文件里。若等待期间只读
+# `-Tail 40`，新 agent 在第一秒就会读到上轮的失败行、被立即判死回滚，重试升级会长期循环回滚。
+# 因此启动新 agent 前先采样日志字节长度作为水位，此后只扫描水位之后新增的内容
+# （与 install-worker.sh 的 _LOG_OFFSET + `tail -c +offset` 口径一致）。
+# 取不到长度（文件不存在/无权限）时水位为 0，等价于从文件头读——与旧行为一致，不会更差。
+$agentLogOffset = 0L
+if (Test-Path $workerLog) {
+    $existingLog = Get-Item $workerLog -ErrorAction SilentlyContinue
+    if ($existingLog) { $agentLogOffset = [long]$existingLog.Length }
+}
 
 Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
 
@@ -815,14 +825,48 @@ $regIntervalSec = 3
 # 只用 ASCII 关键字：Windows PowerShell 5.1 的 Get-Content 对无 BOM 的 UTF-8 日志按 ANSI 解码，
 # 中文关键字会乱码匹配不到（日志里的英文标记不受影响）。
 $regInFlightPattern = 'registering with|register(ing)? (runtime|engine)|/register|heartbeat|contract guard|codearts tasks dir|Killed existing worker|engine discovery|engine probe'
-# 硬失败迹象：注册被拒 / 凭据被吊销 / 启动异常退出 → 不必等满窗口。
-$regFailedPattern = 'Register failed|RUNTIME_TOKEN rejected|register 401|credential revoked|Traceback|SystemExit|worker exiting'
+# 硬失败迹象：只保留「注册被明确拒绝 / 凭据被吊销」这类真正致命、且 agent 自己会退出进程的标记。
+# 不再收 Traceback / SystemExit / worker exiting 这类泛化关键字（QA 审查 Required）：
+# 单个引擎探针、skills 扫描或 sandbox 失败也会打 Traceback，但主进程随后仍可能正常注册；
+# 用泛化关键字会把「本可注册成功」的启动短路成回滚。进程/daemon 真退出由下方的存活采样兜底。
+$regFailedPattern = 'Register failed|RUNTIME_TOKEN rejected|register 401|credential revoked'
+
+# 只读「本轮新增」的日志行（Issue #3892 QA 审查 Required）：以启动前采样的字节长度
+# （$agentLogOffset）为水位，从水位往后读，上一轮残留的行一律不计入判定。
+# - 文件被轮转/截断（当前长度 < 水位）→ 退化为从 0 读，避免把整份新文件当空；
+# - 以 FileShare.ReadWrite 打开：agent 正在追加写，不能独占；
+# - 读不到（文件不存在/共享冲突）→ 返回空数组，调用方按「本轮暂无线索」回落进程存活判定；
+# - 只保留末尾 MaxLines 行：轮询粒度 3s，正常新增行远低于上限，但防止一次读进整份日志。
+function Get-NewAgentLogLines {
+    param($LogPath, [long]$Offset = 0, [int]$MaxLines = 400)
+    if (-not (Test-Path $LogPath)) { return @() }
+    $text = ""
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($fs.Length -lt $Offset) { $Offset = 0 }
+        [void]$fs.Seek($Offset, [System.IO.SeekOrigin]::Begin)
+        # 日志是 UTF-8；判定只用 ASCII 关键字，起始处可能被切在半个多字节字符上也无关紧要。
+        $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8, $false)
+        $text = $reader.ReadToEnd()
+    } catch {
+        return @()
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    if (-not $text) { return @() }
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne "" })
+    if ($lines.Count -gt $MaxLines) { $lines = @($lines[($lines.Count - $MaxLines)..($lines.Count - 1)]) }
+    return $lines
+}
 
 # 采样：新 agent 进程 / 本安装目录的 daemon 是否还活着。daemon 会在 worker 崩溃后重启进程，
 # 所以「进程暂时消失但 daemon 还在」仍算在途，不能据此判死。
+# 按安装目录过滤（QA 审查 Optional）：同机可能存在多个 grape 安装（不同 -Dir），
+# 只按 src.domains.runtime.engine.agent 命令行匹配会把别的安装的 agent 当成本轮新进程。
 function Test-NewAgentProcessAlive {
     $proc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        Test-GrapeAgentProcess $_
+        (Test-GrapeAgentProcess $_) -and $_.CommandLine -like "*$Dir*"
     } | Select-Object -First 1
     return [bool]$proc
 }
@@ -835,17 +879,17 @@ function Test-WorkerDaemonAlive {
 }
 
 # 30s 软到期时的「注册在途」判定（Issue #3892）：决定续等至 60s，还是立即进入回滚判定。
-# 优先级：
-#   1. 日志出现硬失败迹象 → 不在途（不空等）；
-#   2. 日志出现注册在途迹象 → 在途；
-#   3. 日志暂无判定线索（冷盘+Defender 首扫时 30s 内可能一行都还没落盘）→ 以「进程或 daemon 仍存活」为准；
-#   4. 日志无迹象且进程与 daemon 都已消失 → 不在途。
+# 只看本轮新增日志（$NewLog 由 Get-NewAgentLogLines 按水位读出），优先级：
+#   1. 本轮新增日志出现硬失败迹象 → 不在途（不空等）；
+#   2. 本轮新增日志出现注册在途迹象 → 在途；
+#   3. 本轮暂无判定线索（冷盘+Defender 首扫时 30s 内可能一行都还没落盘）→ 以「进程或 daemon 仍存活」为准；
+#   4. 无迹象且进程与 daemon 都已消失 → 不在途。
 function Test-RegistrationInFlight {
-    param($LogPath, [bool]$AgentProcessAlive = $false, [bool]$DaemonAlive = $false)
-    if (Test-Path $LogPath) {
-        $tail = Get-Content $LogPath -Tail 60 -ErrorAction SilentlyContinue
-        if ($tail -match $regFailedPattern) { return $false }
-        if ($tail -match $regInFlightPattern) { return $true }
+    param([string[]]$NewLog = @(), [bool]$AgentProcessAlive = $false, [bool]$DaemonAlive = $false)
+    $newText = @($NewLog) -join "`n"
+    if ($newText) {
+        if ($newText -match $regFailedPattern) { return $false }
+        if ($newText -match $regInFlightPattern) { return $true }
     }
     return ($AgentProcessAlive -or $DaemonAlive)
 }
@@ -894,24 +938,26 @@ function Test-MasterRuntimeRecentlySeen {
 $regOk = $false
 $regElapsed = 0
 $regSoftChecked = $false
+# 本轮是否已观测到硬失败（Issue #3892 QA 审查 Required）：硬失败必须跳过主控心跳交叉验证。
+$regHardFailed = $false
 while ($regElapsed -lt $regWindowSec) {
-    if (Test-Path $workerLog) {
-        $logContent = Get-Content $workerLog -Tail 40 -ErrorAction SilentlyContinue
-        if ($logContent -match "RuntimeAgent registered") {
-            $regOk = $true
-            break
-        }
-        if ($logContent -match $regFailedPattern) {
-            Log "Registration failure detected in log at ${regElapsed}s - stopping the wait early"
-            break
-        }
+    # 只读水位之后的新增行：上一轮残留的 registered / Register failed 不得参与本轮判定。
+    $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
+    if ($logContent -match "RuntimeAgent registered") {
+        $regOk = $true
+        break
+    }
+    if ($logContent -match $regFailedPattern) {
+        $regHardFailed = $true
+        Log "Registration failure detected in log at ${regElapsed}s - stopping the wait early"
+        break
     }
     if ($regElapsed -ge $regSoftDeadlineSec -and -not $regSoftChecked) {
-        # 首轮 30s 到期：先读日志尾部判定注册是否在途，有迹象续等至 60s，无迹象立即进入回滚判定。
+        # 首轮 30s 到期：先看本轮新增日志判定注册是否在途，有迹象续等至 60s，无迹象立即进入回滚判定。
         $regSoftChecked = $true
         $regProcAlive = Test-NewAgentProcessAlive
         $regDaemonAlive = Test-WorkerDaemonAlive
-        if (Test-RegistrationInFlight -LogPath $workerLog -AgentProcessAlive $regProcAlive -DaemonAlive $regDaemonAlive) {
+        if (Test-RegistrationInFlight -NewLog $logContent -AgentProcessAlive $regProcAlive -DaemonAlive $regDaemonAlive) {
             Log "Not registered at ${regElapsed}s yet, but the new agent is still starting (in flight) - extending the wait to ${regWindowSec}s"
         } else {
             Log "Not registered at ${regElapsed}s and no registration progress in flight - stopping the wait early"
@@ -924,16 +970,19 @@ while ($regElapsed -lt $regWindowSec) {
 
 if (-not $regOk) {
     # 窗口末尾补检一次：最后一轮日志采样落在 57s，59-60s 才落盘的注册行不能被漏判
-    # （否则在窗口边界上仍会误杀健康新版本）。
-    if (Test-Path $workerLog) {
-        $logContent = Get-Content $workerLog -Tail 40 -ErrorAction SilentlyContinue
-        if ($logContent -match "RuntimeAgent registered") { $regOk = $true }
-    }
+    # （否则在窗口边界上仍会误杀健康新版本）。同样只看本轮新增行。
+    $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
+    if ($logContent -match "RuntimeAgent registered") { $regOk = $true }
     # 交叉验证：主控若能看到本 runtime 在窗口内的心跳，说明新 agent 已连上主控（日志尾部滞后），
     # 不回滚；查询不可用时函数内部静默降级为纯日志判定。
-    if (-not $regOk -and (Test-MasterRuntimeRecentlySeen -SinceUtc $agentStartUtc)) {
+    # 但硬失败必须跳过交叉验证（QA 审查 Required）：硬失败常在 10s 内发生，而老 agent 在停进程前
+    # 的最后一次心跳仍落在 10s 容差窗内，会被误读成「新 agent 已连上主控」→ 取消回滚并打出
+    # 安装完成提示，把失败掩盖成成功。此时必须按日志结论回滚。
+    if (-not $regOk -and -not $regHardFailed -and (Test-MasterRuntimeRecentlySeen -SinceUtc $agentStartUtc)) {
         Log "Master heartbeat cross-check passed - treating the new agent as registered despite the missing log line"
         $regOk = $true
+    } elseif (-not $regOk -and $regHardFailed) {
+        Log "Master heartbeat cross-check skipped (hard registration failure in this round) - rolling back"
     }
 }
 
