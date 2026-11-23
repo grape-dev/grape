@@ -412,6 +412,11 @@ def test_direct_materialize_local_cache_leftover_refused(tmp_path, monkeypatch):
     # direct 端：绑定未物化 + 工位缓存残留其它流水线技能 → ok=False（调用方拒绝派发）
     import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    # Issue #3914 D：direct 门禁与 worker 同口径（明示回退 → declared_fallback 放行）。
+    # 本用例语义是「无任何回退时的缓存残留拒绝」，需屏蔽按 agent_type 的官方检查器
+    # 回退（否则环境里存在 qa 检查器时 status=fallback，走的是 declared_fallback 分支）。
+    monkeypatch.setattr("src.domains.mgmt.public.resolve_official_checker_skill",
+                        lambda at: None)
     skill_dir = tmp_path / ".skills"
     _mk_skill(str(skill_dir), "casegen-prep")
     from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
@@ -430,6 +435,9 @@ def test_direct_materialize_engine_native_leftover_refused(tmp_path, monkeypatch
     # 与 worker 门（_skill_consistency_gate）扫描口径一致。
     import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    # Issue #3914 D：屏蔽 agent_type 官方检查器回退，保持「无明示回退」前提（见上）
+    monkeypatch.setattr("src.domains.mgmt.public.resolve_official_checker_skill",
+                        lambda at: None)
     skill_dir = str(tmp_path / ".skills")
     native = str(tmp_path / "native")
     os.makedirs(skill_dir, exist_ok=True)
@@ -455,6 +463,9 @@ def test_direct_materialize_engine_native_same_skill_allowed(tmp_path, monkeypat
     # source=engine_native、actual=bound（不因原生目录存在而误拒）。
     import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    # Issue #3914 D：屏蔽 agent_type 官方检查器回退，保持「无明示回退」前提（见上）
+    monkeypatch.setattr("src.domains.mgmt.public.resolve_official_checker_skill",
+                        lambda at: None)
     skill_dir = str(tmp_path / ".skills")
     native = str(tmp_path / "native")
     os.makedirs(skill_dir, exist_ok=True)
