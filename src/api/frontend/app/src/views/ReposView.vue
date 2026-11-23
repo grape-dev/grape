@@ -130,7 +130,7 @@
                     class="project-hosted-filter"
                     :title="t('repos.lobby.scope_hosted_title')"
                   >
-                    <input v-model="onlyHosted" type="checkbox" @change="onHostedFilterChange" />
+                    <input v-model="onlyHosted" type="checkbox" @change="resetPage" />
                     <span>{{ t('repos.lobby.scope_hosted') }}</span>
                   </label>
                   <input
@@ -138,7 +138,7 @@
                     class="project-search"
                     type="text"
                     :placeholder="'🔍 ' + t('repos.lobby.search_placeholder')"
-                    @input="onSearch"
+                    @input="resetPage"
                   />
                   <button
                     class="project-new-btn"
@@ -695,10 +695,7 @@ function showAllRepos() {
 function initials(r) {
   return (r.name || '?').substring(0, 2).toUpperCase()
 }
-function onSearch() {
-  repoPage.value = 0
-}
-function onHostedFilterChange() {
+function resetPage() {
   repoPage.value = 0
 }
 function goPage(dir) {
