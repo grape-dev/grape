@@ -108,6 +108,7 @@ from src.domains.runtime import migrations_ddl as runtime_mig
 from src.domains.insight import migrations_ddl as insight_mig
 from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
+from src.kernel import ddl_safety as _ddl_safety
 
 # ====== 新表 DDL ======
 
@@ -876,35 +877,11 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
-def _strip_null_default(ddl: str) -> str:
-    """Issue #1546 修复：仅剥离尾部 `DEFAULT NULL`（与可空列的隐式默认完全等价）；
-    其它显式默认值（0/'' 等）原样保留——剥掉会改变历史行语义。"""
-    import re as _re
-    return _re.sub(r"\s+DEFAULT\s+NULL\s*$", "", (ddl or "").strip(), flags=_re.IGNORECASE)
-
-def _strip_text_default(ddl: str) -> str:
-    """剥离 TEXT 族的显式 DEFAULT（如 `TEXT DEFAULT ''`）。
-
-    2026-11-12 实测（MySQL 8.0.43）：带 DEFAULT 的 TEXT 列 INSTANT 与
-    INPLACE,LOCK=NONE 均不支持（1845），而 MySQL 接受语法后又**静默丢弃默认值**
-    （column_default 为 NULL）——语义上本就等价于无默认。剥离后即可用 INSTANT 补列，
-    避免「迁移盖章、列未建」的假绿（线上 202611120004 即此形态）。
-    """
-    import re as _re
-    d = (ddl or "").strip()
-    if not _re.search(r"\b(?:TINY|MEDIUM|LONG)?TEXT\b", d, _re.IGNORECASE):
-        return ddl
-    return _re.sub(r"\s+DEFAULT\s+.*$", "", d, flags=_re.IGNORECASE)
-
-
-
-class _NonOwnerObject(Exception):
-    """目标表在当前库中是视图（非 owner 域库）——跳过该条迁移且**不盖章**。
-
-    库按域拆分后，同一张表只有在 owner 库才是基表；其它域库拿到的是跨库只读视图。
-    视图既不能 ALTER、列又是快照，所以补列只能由 owner 库进程执行。抛这个异常
-    让执行器「跳过不盖章」，等 owner 库补齐后其它库自然收敛，而不是把版本号盖死。
-    """
+# DDL 安全带的纯函数/异常已下沉 kernel（PR #2009 I1）：db_setup 保留同名别名，
+# 既有调用点、测试与「执行器捕获本模块异常类」的约定都不变。
+_strip_null_default = _ddl_safety.strip_null_default
+_strip_text_default = _ddl_safety.strip_text_default
+_NonOwnerObject = _ddl_safety.NonOwnerObject
 
 
 def _base_table_present(c, tbl: str) -> bool:
@@ -1011,123 +988,30 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    raise_on_guard: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
+    实现已下沉 `src.kernel.ddl_safety.ensure_column`（PR #2009 I1：域模块不再
+    domains→api 反向依赖）；这里保留兼容包装，注入本模块的域守卫、人工处理清单、
+    MDL 等待异常，既有调用点与测试（monkeypatch `_owned_skip`）语义不变。
+
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
 
-    Issue #536 DDL 安全带（仅 MySQL 后端，SQLite 原样）：
-    1. 首选 ``ALGORITHM=INSTANT``（8.0 加可空列默认 INSTANT，不锁表）；
-    2. INSTANT 不支持 → 降级重试 ``ALGORITHM=INPLACE, LOCK=NONE``（显式声明，
-       做不到就报错而非默默锁全表）；
-    2.5 带 ``DEFAULT NULL`` 的 TEXT/MEDIUMTEXT 列上述两者都不支持（Issue #1546 实测）→
-       剥离该默认值后重试两者（与可空列隐式默认等价，不改历史行语义）；
-    3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
-       注意：此处不抛异常，调用方迁移仍会盖章 → 该列不会自动重试，只能另行补一条
-       幂等修复迁移（参考 202611090002）。
-
-    allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
-    补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
-    不加此开关时会被安全策略挡下导致列永远建不出来。
-
-    strict=True（注册式迁移专用）：所有降级分支都失败时 **raise** 而不是只记人工
-    清单后正常返回。理由：迁移执行器约定「fn 正常返回=盖章」，若这里静默返回，
-    列没建成也会盖死版本号，下次启动不再重试，线上表现为查询该列 1054 且接口
-    静默返回空 —— 与 2026-11-06 issue.vcs_exists 事故同态（QA 审查 M1）。
+    参数语义：
+    - allow_copy=True（小表迁移专用）：INSTANT/INPLACE 都不支持时允许默认算法 COPY；
+    - strict=True（注册式迁移专用）：所有降级分支失败时 raise，fn 抛错=不盖章；
+    - raise_on_guard=True：域归属守卫跳过时 raise（默认保持历史静默 False）。
     """
-    if not force and _owned_skip(tbl, "ensure column"):
-        # 2026-11-18 事故（category_dict 迁移 202611171846）：进程域判定不出/不是属主时
-        # 这里静默 return False，调用方 fn 正常返回 → 迁移照样盖章 → 列永不创建也不重试，
-        # 线上表现是 /api/runtime/scene-tags 500 `Unknown column 'cat_l1_id'`。
-        # ⚠️ 默认保持静默：存量 14 个 strict=True 调用点里有 7 条迁移的属主域与注册域不一致，
-        # 全局改成抛错会把它们一起引爆。需要「跳过即失败」的迁移显式传 raise_on_guard=True。
-        if raise_on_guard:
-            raise RuntimeError(
-                f"_ensure_column({tbl}.{col}) 被域归属守卫跳过（本进程非该表属主），"
-                f"raise_on_guard=True 拒绝静默盖章——迁移应在属主域执行或改用 force=True")
-        return False
-    cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
-    if col in cols:
-        return
-    if not _is_base_table(c, tbl):
-        # 非 owner 库的视图：ALTER 必然 1347，且视图列是建视图时快照 —— 必须由
-        # owner 库补列 + 重建视图。**跳过且不盖章**（抛给迁移执行器，下次启动重试），
-        # 否则版本被盖死、列永不创建，线上表现为查询该列 1054 静默失败。
-        raise _NonOwnerObject(
-            f"{tbl}.{col}: 当前库中是视图（非 owner），需 owner 库补列并重建视图后重试")
-    base_sql = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {ddl}"
-    if not _mysql_backend():
-        c.execute(base_sql)
-        return
-    # MySQL：INSTANT → INPLACE,LOCK=NONE → 人工清单（绝不静默 COPY）
-    try:
-        c.execute(f"{base_sql}, ALGORITHM=INSTANT")
-        return
-    except Exception as _instant_err:
-        if _is_mdl_timeout(_instant_err):
-            # QA Minor：INSTANT 失败若因 MDL 超时（1205）是「被阻塞」而非「不支持」，
-            # 不降级重试——直接转 _MdlWaitTimeout 由执行器跳过不盖章（legacy 路径
-            # 记入 _LEGACY_BLOCKED_DDL，阻止盖帽待下次重试）。
-            _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-            raise _MdlWaitTimeout(str(_instant_err))
-        log.warning(f"_ensure_column({tbl}.{col}) ALGORITHM=INSTANT failed: {_instant_err}，"
-                    f"降级重试 ALGORITHM=INPLACE, LOCK=NONE")
-    try:
-        c.execute(f"{base_sql}, ALGORITHM=INPLACE, LOCK=NONE")
-        return
-    except Exception as _inplace_err:
-        if _is_mdl_timeout(_inplace_err):
-            _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-            raise _MdlWaitTimeout(str(_inplace_err))
-        # Issue #1546 修复（2026-11-09）：带 DEFAULT NULL 的 TEXT/MEDIUMTEXT 列在 MySQL 上
-        # INSTANT 与 INPLACE,LOCK=NONE 均不支持；此前直接落人工清单后正常返回 → 迁移照样盖章、
-        # 列永不创建也不重试（SQLite 全绿，生产运行时才 1054）。DEFAULT NULL 与可空列隐式默认
-        # 等价，剥离后重试，既能把列补上、又不必退到 COPY 锁全表。
-        _ddl_nd = _strip_null_default(ddl)
-        if _ddl_nd != ddl:
-            _base_nd = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_nd}"
-            for _algo_nd in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
-                try:
-                    c.execute(f"{_base_nd}, {_algo_nd}")
-                    log.info(f"_ensure_column({tbl}.{col}) 剥离 DEFAULT NULL 后补列成功（{_algo_nd}）")
-                    return
-                except Exception as _nd_err:
-                    if _is_mdl_timeout(_nd_err):
-                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-                        raise _MdlWaitTimeout(str(_nd_err))
-                    _inplace_err = _nd_err
-        # TEXT 族的显式 DEFAULT（例如 202611100001 的 "TEXT DEFAULT ''"）在 MySQL 上
-        # INSTANT/INPLACE 均不支持，且 MySQL 会静默丢弃该默认值——剥离后重试即可补列。
-        _ddl_td = _strip_text_default(ddl)
-        if _ddl_td != ddl and _ddl_td != _ddl_nd:
-            _base_td = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_td}"
-            for _algo_td in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
-                try:
-                    c.execute(f"{_base_td}, {_algo_td}")
-                    log.info(f"_ensure_column({tbl}.{col}) 剥离 TEXT 默认值后补列成功（{_algo_td}）")
-                    return
-                except Exception as _td_err:
-                    if _is_mdl_timeout(_td_err):
-                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-                        raise _MdlWaitTimeout(str(_td_err))
-                    _inplace_err = _td_err
-        if allow_copy:
-            _copy_sql = base_sql.replace(ddl, _ddl_td) if _ddl_td != ddl else base_sql
-            try:
-                c.execute(_copy_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
-                log.info(f"_ensure_column({tbl}.{col}) INPLACE 不支持 → 已按默认算法(COPY)补列")
-                return
-            except Exception as _copy_err:
-                entry = (f"{tbl}.{col}: INSTANT/INPLACE/默认算法(COPY) 均失败 "
-                         f"({_copy_err})——需人工处理")
-                _DDL_MANUAL_REVIEW.append(entry)
-                log.error(f"_ensure_column MANUAL REVIEW: {entry}")
-                if strict:
-                    raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
-                return
-        entry = (f"{tbl}.{col}: INSTANT 与 INPLACE,LOCK=NONE 均失败 "
-                 f"(INPLACE err={_inplace_err})——需人工处理，未静默 COPY")
-        _DDL_MANUAL_REVIEW.append(entry)
-        log.error(f"_ensure_column MANUAL REVIEW: {entry}")
-        if strict:
-            raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
+    return _ddl_safety.ensure_column(
+        c, tbl, col, ddl,
+        allow_copy=allow_copy, strict=strict, force=force,
+        raise_on_guard=raise_on_guard,
+        guard=_owned_skip,
+        is_base_table=_is_base_table,
+        mysql_backend=_mysql_backend,
+        manual_review=_DDL_MANUAL_REVIEW,
+        blocked_ddl=_LEGACY_BLOCKED_DDL,
+        non_owner_exc=_NonOwnerObject,
+        mdl_exc=_MdlWaitTimeout,
+        is_mdl_timeout_fn=_is_mdl_timeout,
+    )
 
 
 def _rename_column_if_exists(c, tbl: str, old: str, new: str):
@@ -4219,14 +4103,10 @@ def _fn_checksum(fn: Callable[[], None]) -> str:
         return ""
 
 
-class _MdlWaitTimeout(Exception):
-    """MySQL MDL 等待超时（错误码 1205 / Lock wait timeout）——跳过该条迁移不盖章。"""
-
-
-def _is_mdl_timeout(err: Exception) -> bool:
-    s = str(err).lower()
-    return ("lock wait timeout" in s or "1205" in s
-            or "metadata lock" in s or "metadata_locks" in s)
+# PR #2009 I1：MDL 异常与判定下沉 kernel，db_setup 只保留同名别名；
+# 域迁移（kernel.ensure_column 默认实现）与本模块抛/捕获的是同一组类。
+_MdlWaitTimeout = _ddl_safety.MdlWaitTimeout
+_is_mdl_timeout = _ddl_safety.is_mdl_timeout
 
 
 def _query_mdl_holders(err: Exception) -> str:

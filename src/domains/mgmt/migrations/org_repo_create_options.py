@@ -37,7 +37,7 @@ def ensure_org_repo_create_columns(conn=None) -> None:
     """幂等补齐 organization 的 5 个仓库创建选项列；失败抛错不盖章。"""
     from contextlib import nullcontext
 
-    from src.api.db_setup import _ensure_column
+    from src.kernel.ddl_safety import ensure_column
     from src.kernel.session_manager import db, db_lock
 
     if conn is None:
@@ -45,8 +45,8 @@ def ensure_org_repo_create_columns(conn=None) -> None:
     with (db_lock if conn is db else nullcontext()):
         c = conn.cursor()
         for name, ddl in ORG_REPO_COLUMN_DDL:
-            _ensure_column(c, "organization", name, ddl,
-                           allow_copy=True, strict=True, raise_on_guard=True)
+            ensure_column(c, "organization", name, ddl,
+                          allow_copy=True, strict=True, raise_on_guard=True)
         conn.commit()
 
 
@@ -57,12 +57,13 @@ def verify_org_repo_create_columns(conn=None) -> list:
     统一报「表/列缺失」，既让启动日志可检索，也避免临时库/半初始化库被当成
     已收敛。仅在没有 organization 表的单测临时库才会触发，生产库恒存在。
     """
+    from src.kernel.ddl_safety import table_columns
     from src.kernel.session_manager import db
 
     if conn is None:
         conn = db
     c = conn.cursor()
-    present = {str(r[1]) for r in c.execute("PRAGMA table_info(organization)").fetchall()}
+    present = set(table_columns(c, "organization"))
     if not present:
         raise RuntimeError(
             "organization 表/列缺失（仓库创建选项列后置校验失败）：表不存在")
