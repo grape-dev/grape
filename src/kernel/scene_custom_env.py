@@ -40,7 +40,12 @@ _SCOPE_SET = set(_SCOPE_AGENTS)
 
 def is_reserved_name(name: str) -> bool:
     """变量名是否与系统保留环境变量冲突（GRAPE_ 前缀 + 显式集合）。"""
-    return name.startswith("GRAPE_") or name in _RESERVED_ENV_NAMES
+    # BOT_/USER_ 是平台凭据命名空间（BOT_GITEE_TOKEN 等）：不允许场景自定义覆盖，
+    # 否则新平台的 token 键不在显式集合里就成了可被覆盖的空位。
+    return (name.startswith("GRAPE_")
+            or name.startswith("BOT_")
+            or name.startswith("USER_")
+            or name in _RESERVED_ENV_NAMES)
 
 
 def is_upper_name(name: str) -> bool:

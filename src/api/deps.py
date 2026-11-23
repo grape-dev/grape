@@ -128,6 +128,13 @@ def invalidate_user_cache(uid: str) -> None:
     """主动失效用户状态缓存（密码重置/禁用/登出时调用）。"""
     _user_status_cache.pop(uid, None)
 
+
+def extract_api_token(request) -> str:
+    """``_extract_api_token`` 公开别名（Issue #2084，#2084 移植：幂等层跨模块复用，
+    不外引下划线私有符号）。"""
+    return _extract_api_token(request)
+
+
 def _extract_api_token(request) -> str:
     """三通道取值：Authorization: Bearer / PRIVATE-TOKEN header / ?access_token= query。"""
     auth = request.headers.get("authorization", "")
@@ -341,6 +348,16 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "Session token not allowed on this endpoint (account/platform management)"})
     return user
+
+
+def require_org_api_user(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """组织运行态 API 鉴权：允许 JWT / API Key / 任务会话 token（dual）。
+
+    组织流水线技能需要在 worker 会话 token 下调用组织仓库与下派接口。该依赖只负责
+    放行三类凭据；具体路由仍必须执行组织成员/管理员校验以及仓库或目标范围校验。
+    """
+    return user
+
 
 def require_jwt_only(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """高敏感账号管理端点鉴权 = 需要 `interactive_only` 能力（仅 JWT）。

@@ -116,6 +116,8 @@ scripts/check-*-*.py
 !scripts/check-health-contract.py
 !scripts/check-destructive-ddl.py
 !scripts/check-openapi-endpoints.py
+# Issue #2837（等价 #2783）：文档面门禁（进入 check-all.sh，须入库）
+!scripts/check-api-docs.py
 # Issue #2462 A3：跨域读查询名闭包门禁（进入 check-all.sh，须入库）
 !scripts/check_lib_query_names.py
 # Issue #2227：grape CLI 能力漂移守卫（进入 check-all.sh，须入库）
@@ -130,6 +132,16 @@ configs/admin.env
 logs/
 examples/
 skills/
+# .grape/skills 仅白名单化随仓库分发的资产（org 组织技能、qa/dev-workflow 存量技能）；
+# 运行时写入的 custom/、repo/ 等目录不落库，避免误提交（Issue #2118 复审）。
+!.grape/skills/
+.grape/skills/*
+!.grape/skills/dev-workflow/
+!.grape/skills/dev-workflow/**
+!.grape/skills/org/
+!.grape/skills/org/**
+!.grape/skills/qa/
+!.grape/skills/qa/**
 trace_*.py
 diag_*.py
 configs/scene-sync.json

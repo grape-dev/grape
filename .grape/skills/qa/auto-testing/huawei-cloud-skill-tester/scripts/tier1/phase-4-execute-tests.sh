@@ -1,0 +1,708 @@
+#!/usr/bin/env bash
+# phase-4-execute-tests.sh — 用例执行
+# 只读自动执行；写操作仅在 ALLOW_WRITES=1 时执行（详见 SKILL.md 边界表）
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/chain-verify.sh"
+
+PHASE_NUM=4
+PHASE_NAME="test-execution"
+
+run_phase4() {
+  local skill_dir="$1"
+  local skill_name; skill_name=$(basename "$skill_dir")
+
+  header "Phase 4: 执行 — $skill_name"
+
+  check_phase_deps "$skill_dir" 4 || return 1
+
+  # DRYRUN mode (user-selected option 3 — no credentials): skip the credential
+  # check and generate a dryrun result. Every live case is marked 'dryrun',
+  # NEVER 'pass', so a credential-less run can never masquerade as a real pass.
+  if is_dryrun; then
+    info "DRYRUN 模式（用户三选项之 3）：跳过凭证检查与真实 API 调用，用例标记为 dryrun"
+    local p3_file; p3_file=$(phase_file "$skill_dir" 3)
+    local dry_py_tmp; dry_py_tmp=$(mktemp)
+    cat > "$dry_py_tmp" << 'PYEOF'
+import json, sys
+
+p3 = json.load(open(sys.argv[1]))
+cases = p3.get('result', {}).get('functional_cases', []) + p3.get('result', {}).get('api_cases', [])
+DRY_NOTE = '[DRYRUN] 无有效凭证，未调用真实华为云 API（用户在 issue 评论选择 dryrun/mock 模式）'
+exec_results = []
+for tc in cases:
+    exec_results.append({
+        'tc_id': tc.get('id', 'TC-??'),
+        'name': tc.get('name', ''),
+        'type': tc.get('type', ''),
+        'command': tc.get('command', ''),
+        'status': 'dryrun',
+        'duration_s': 0,
+        'output_snippet': DRY_NOTE,
+        'error': None,
+        'resource_changes': [],
+        'user_confirmed': False,
+    })
+total = len(cases)
+result = {
+    'mode': 'dryrun',
+    'execution_results': exec_results,
+    'statistics': {'total': total, 'pass': 0, 'fail': 0, 'warn': 0, 'skip': 0, 'error': 0, 'dryrun': total, 'pass_rate': 0.0},
+    'all_resources_changed': [],
+    'manual_test_items': [],
+    'doc_gap_issues': [],
+}
+print(json.dumps(result, indent=2, ensure_ascii=False))
+PYEOF
+    local dry_json
+    dry_json=$(python3 "$dry_py_tmp" "$p3_file")
+    rm -f "$dry_py_tmp"
+    local dts; dts=$(timestamp)
+    local dst; dst=$(date +%s)
+    local dry_total; dry_total=$(echo "$dry_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['statistics']['total'])")
+    local tmp_dj; tmp_dj=$(mktemp)
+    echo "$dry_json" > "$tmp_dj"
+    local dry_sum_py; dry_sum_py=$(mktemp)
+    cat > "$dry_sum_py" << 'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+r = {
+    "phase": 4, "phase_name": "test-execution", "tier": 1,
+    "target": {"type": "single_skill", "skills": [sys.argv[2]]},
+    "timestamp": sys.argv[3],
+    "execution_meta": {"duration_s": int(sys.argv[4]), "retry_count": 0, "user_confirmed": False,
+                       "mode": "dryrun",
+                       "note": "DRYRUN/选项3：无凭证，未调用真实 API，所有用例标记为 dryrun（非 pass）"},
+    "result": data,
+    "summary": {"verdict": "dryrun", "pass_checks": 0, "fail_checks": 0, "warn_checks": 0}
+}
+print(json.dumps(r, indent=2, ensure_ascii=False))
+PYEOF
+    ensure_test_files_dir "$skill_dir" > /dev/null
+    local dry_dur=$(( $(date +%s) - dst ))
+    python3 "$dry_sum_py" "$tmp_dj" "$skill_name" "$dts" "$dry_dur" > "$(phase_file "$skill_dir" 4)"
+    rm -f "$dry_sum_py" "$tmp_dj"
+    echo ""
+    info "DRYRUN 完成: ${dry_total} 个用例标记为 dryrun（0 pass）— 报告将显式标注该模式"
+    return 0
+  fi
+
+  # Force AK/SK check before any SDK/CLI execution
+  step "检查 AK/SK 凭证..."
+  set +e
+  ensure_ak_sk
+  cred_rc=$?
+  set -e
+  if [ $cred_rc -ne 0 ]; then
+      if [ $cred_rc -eq 77 ]; then
+        # Credentials required but not provided — the three-option guide has
+        # been emitted to stderr by ensure_ak_sk(). The calling agent (or
+        # human) MUST post those options to the user in the issue comment and
+        # wait for their choice: ① export env vars (machine owner) ② grape
+        # 通用设置 ③ DRYRUN_MODE=1 dryrun/mock continue. Do NOT ask the user
+        # to type or paste AK/SK in chat. See SKILL.md "Agent Protocol".
+        fail "AK/SK 凭证缺失（exit 77 — 详见 stderr 中的三选项引导）"
+        fail "  sentinel: $CRED_REQUEST_SENTINEL"
+        fail "  调用方应在 issue 评论中向用户提供三选项：①机器 export 环境变量 ②grape 通用设置"
+        fail "  ③DRYRUN_MODE=1 以 dryrun/mock 继续；配置完成后用 --phase 4 或 --resume 重跑"
+        fail "  禁止直接索要 AK/SK 明文"
+        return 77
+      fi
+      fail "AK/SK 凭证检查失败（exit=$cred_rc）"
+      return 1
+    fi
+
+  local ts; ts=$(timestamp)
+  local start_ts; start_ts=$(date +%s)
+
+  local p3_file; p3_file=$(phase_file "$skill_dir" 3)
+
+  # Read test cases from Phase 3
+  local tc_f
+  local tc_read_py_tmp; tc_read_py_tmp=$(mktemp)
+  cat > "$tc_read_py_tmp" << 'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+func = d.get('result', {}).get('functional_cases', [])
+api = d.get('result', {}).get('api_cases', [])
+print(json.dumps(func + api, indent=2))
+PYEOF
+  tc_f=$(python3 "$tc_read_py_tmp" "$p3_file")
+  rm -f "$tc_read_py_tmp"
+
+  # Write test cases to temp file to avoid heredoc quoting issues
+  local tc_tmp; tc_tmp=$(mktemp)
+  echo "$tc_f" > "$tc_tmp"
+
+  # Write Python execution script to temp file
+  local py_tmp; py_tmp=$(mktemp)
+  # 共享占位符替换模块(phase-3/4 单一维护点)
+  export PLACEHOLDER_UTILS="$SCRIPT_DIR/lib/placeholder-utils.py"
+  cat > "$py_tmp" << 'PYEXEC'
+import json, subprocess, sys, time, os, re
+
+# 加载共享占位符替换逻辑(见 lib/placeholder-utils.py)
+exec(open(os.environ.get('PLACEHOLDER_UTILS', '')).read())
+
+cases_f = sys.argv[1]
+skill_root = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.dirname(cases_f))
+cases = json.load(open(cases_f))
+exec_results = []
+all_resources = []
+
+pass_count = 0
+fail_count = 0
+skip_count = 0
+error_count = 0
+
+for tc in cases:
+    tc_id = tc.get('id', 'TC-??')
+    is_write = tc.get('is_write', False)
+    executor = tc.get('executor', 'unknown')
+    name = tc.get('name', '')
+
+    print(f"\n  执行: {tc_id} - {name}")
+
+    entry = {
+        'tc_id': tc_id,
+        'name': name,
+        'type': tc.get('type', ''),
+        'command': tc.get('command', ''),
+        'status': 'skip',
+        'duration_s': 0,
+        'output_snippet': '',
+        'error': None,
+        'resource_changes': [],
+        'user_confirmed': False
+    }
+
+    # 兜底: 复用共享 replace_placeholders(与 phase-3 同源, 单一维护点)
+    if tc.get('command'):
+        tc['command'] = replace_placeholders(tc['command'], skill_root)
+        entry['command'] = tc['command']
+
+    # 交互式/模板命令不实际执行 → skip (而非 fail)
+    cmd_chk = tc.get('command', '').strip().lower()
+    _hc = re.match(r'^hcloud\s+(\S+)', cmd_chk)
+    if cmd_chk == 'hcloud' or (_hc and _hc.group(1) in ('configure', 'help', '--help', '-h', '--version')):
+        entry['status'] = 'skip'
+        entry['output_snippet'] = f'交互式/帮助命令 (hcloud {_hc.group(1)}), 非交互模式不可执行, 跳过'
+        skip_count += 1
+        print(f"    ⏭️ SKIP-交互/帮助命令 (hcloud {_hc.group(1)})")
+        exec_results.append(entry)
+        continue
+    if re.search(r'\[\s*--[a-z-]+=\.\.\.', cmd_chk) or re.search(r'\[\s*--key=value', cmd_chk) \
+       or re.search(r'--cli-region=\s*(?:\s|$)', cmd_chk) \
+       or re.search(r'\{endpoint\}|\{url\}|\{host\}|https?://\{', cmd_chk) \
+       or re.search(r'\{[a-z_]+\}', cmd_chk):
+        entry['status'] = 'skip'
+        entry['output_snippet'] = '模板命令(占位符未解析), 跳过'
+        skip_count += 1
+        print(f"    ⏭️ SKIP-模板命令: {tc.get('command', '')[:60]}")
+        exec_results.append(entry)
+        continue
+
+    if is_write:
+        risk = tc.get('risk_level', 'high')
+        print(f"    ⚠️  写操作 [{risk}] — 命令: {tc.get('command', 'N/A')[:80]}")
+        print(f"    预期: {tc.get('expected', 'N/A')[:80]}")
+
+        # ALLOW_WRITES gate: write cases only execute when explicitly enabled
+        # (ALLOW_WRITES=1), mirroring phase-6 and the SKILL.md boundary table.
+        # Skipped write cases keep status=skip and record no resource_changes.
+        allow_writes = os.environ.get('ALLOW_WRITES', '0') == '1'
+        if not allow_writes:
+            entry['status'] = 'skip'
+            entry['output_snippet'] = '写操作已跳过 (ALLOW_WRITES=0)'
+            skip_count += 1
+            print(f"    ⏭️ SKIP-写操作 (ALLOW_WRITES=0)")
+            exec_results.append(entry)
+            continue
+
+        print(f"    非交互模式: 使用已通过 env var 设定的 AK/SK 凭证执行写操作 (ALLOW_WRITES=1)")
+        entry['user_confirmed'] = True
+
+    executor_type = executor
+    start_t = time.time()
+
+    try:
+        if executor_type == 'cli':
+            cmd_text = tc.get('command', tc.get('description', ''))
+            # replace_placeholders already ran at the top of the loop (line 108),
+            # handling {region}, <region>, /path/to/xxx, {id}, [--key=value ...], etc.
+            # The redundant regex cleanup below was removed to avoid double-processing
+            # conflicts that corrupt multi-line commands and strip valid params.
+            # Remove leading/trailing pipes and whitespace that might leak from table extraction
+            cmd_text = cmd_text.strip().lstrip('|').strip()
+            if cmd_text and len(cmd_text) > 5:
+                r = subprocess.run(
+                    ['bash', '-c', cmd_text],
+                    capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_CLI', '30')),
+                    env=os.environ
+                )
+                _trunc = int(os.environ.get('OUTPUT_TRUNC_CLI', '1000'))
+                _trunc_err = int(os.environ.get('OUTPUT_TRUNC_ERR', '300'))
+                output = (r.stdout[:_trunc] + r.stderr[:_trunc_err]).strip()
+                if tc.get('type') in ('negative', '负向'):
+                    # 负向用例: CLI 正确拒绝未知参数 = pass; 静默接受 = fail。
+                    # hcloud KooCLI 对 USE_ERROR 等错误返回码为 0 (rc==0 但输出含错误提示),
+                    # 因此增加文本兜底: rc==0 但输出含 [USE_ERROR]/is not supported/format
+                    # 等错误特征时, 同样视为 CLI 已拒绝未知参数 → pass。
+                    if r.returncode != 0:
+                        status = 'pass'
+                        error_detail = None
+                    else:
+                        _neg_out = (output or '').lower()
+                        _neg_reject_pats = ('[use_error]', 'use_error', 'is not supported',
+                                            'not supported', 'unrecognized', 'parameter format',
+                                            'format error', 'format incorrect', 'invalid parameter',
+                                            'invalid option', 'unknown option', 'unknown parameter',
+                                            'invalid value', 'not found', '参数格式', '不支持')
+                        if any(p in _neg_out for p in _neg_reject_pats):
+                            status = 'pass'
+                            error_detail = f'负向用例: hcloud rc=0 但输出含错误提示(已拒绝未知参数): {output[:200]}'
+                        else:
+                            status = 'fail'
+                            error_detail = '负向用例: 命令未拒绝未知参数(--invalid-flag-xyz), 报错质量差'
+                    # 负向用例不做 CLI error pattern 复查
+                else:
+                    status = 'pass' if r.returncode == 0 else 'fail'
+                    if r.returncode != 0:
+                        error_detail = (r.stderr[:200] or r.stdout[:200]).strip()
+                    else:
+                        error_detail = None
+                        # Even with return code 0, check output for CLI error patterns (e.g. hcloud USE_ERROR)
+                        out_lower = output.lower()
+                        _cli_err_patterns = json.loads(os.environ.get('CLI_ERROR_PATTERNS', '[]'))
+                        if any(kw in out_lower for kw in _cli_err_patterns):
+                            status = 'warn'
+                            error_detail = f'CLI returned error in output (rc=0): {output[:200]}'
+                        elif not output.strip():
+                            # 输出质量判定(#62-010): 返回码 0 但无任何输出 → 无法确认用户需求被满足
+                            status = 'warn'
+                            error_detail = '返回码 0 但输出为空, 无法确认需求被满足, 建议人工核实'
+            else:
+                output = f"命令为空: {cmd_text}"
+                status = 'fail'
+                error_detail = "命令内容为空，无法执行"
+        elif executor_type == 'sdk':
+            cmd_text = tc.get('command', '')
+            method_name = tc.get('method_name', '')
+            # If command starts with python3 -c, run as bash (it's a one-liner, not a snippet)
+            if cmd_text.startswith('python3 -c ') or cmd_text.startswith('python3  -c '):
+                r = subprocess.run(
+                    ['bash', '-c', cmd_text],
+                    capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_CLI', '30')),
+                    env=os.environ
+                )
+                _trunc = int(os.environ.get('OUTPUT_TRUNC_SDK', '2000'))
+                _trunc_err = int(os.environ.get('OUTPUT_TRUNC_ERR', '500'))
+                output = (r.stdout[:_trunc] + '\n' + r.stderr[:_trunc_err]).strip()
+                status = 'pass' if r.returncode == 0 else 'fail'
+                error_detail = (r.stderr[:300] or r.stdout[:300]).strip() if r.returncode != 0 else None
+            # Real SDK execution: write the full Python snippet to a temp file and run it
+            elif cmd_text and ('import' in cmd_text or 'client.' in cmd_text or 'from ' in cmd_text):
+                # The command field contains a complete executable Python snippet
+                sdk_tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+                try:
+                    sdk_tmp.write(cmd_text)
+                    sdk_tmp.close()
+                    r = subprocess.run(
+                        ['python3', sdk_tmp.name],
+                        capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_SDK', '60')),
+                        env=os.environ
+                    )
+                    output = (r.stdout[:2000] + '\n' + r.stderr[:500]).strip()
+                    status = 'pass' if r.returncode == 0 else 'fail'
+                    if r.returncode != 0:
+                        error_detail = (r.stderr[:300] or r.stdout[:300]).strip()
+                    else:
+                        error_detail = None
+                except Exception as e:
+                    output = f"SDK执行异常: {str(e)[:300]}"
+                    status = 'fail'
+                    error_detail = output
+                finally:
+                    try:
+                        os.unlink(sdk_tmp.name)
+                    except OSError:
+                        pass
+            else:
+                # Fallback: try dynamic SDK call for known methods
+                try:
+                    import importlib
+                    # Parse method_name from tc metadata or command text
+                    if not method_name:
+                        m = re.match(r'(\w+)\s*(?:\((.*?)\))?', cmd_text.strip())
+                        method_name = m.group(1) if m else ''
+
+                    # Canonical SDK method map is in scripts/lib/config.sh (SERVICES_SDK).
+                    # This inline dict is a fallback for dynamic SDK execution.
+                    # Keep in sync with config.sh when adding new services.
+                    svc_map = {
+                        'list_sub_customer_coupons': ('bss', 'v2', 'ListSubCustomerCouponsRequest'),
+                        'list_customer_coupon_change_records': ('bss', 'v2', 'ListCustomerCouponChangeRecordsRequest'),
+                        'list_stored_value_cards': ('bss', 'v2', 'ListStoredValueCardsRequest'),
+                        'list_order_coupons_by_order_id': ('bss', 'v2', 'ListOrderCouponsByOrderIdRequest'),
+                        'list_coupon_quotas': ('bss', 'v2', 'ListCouponQuotasRequest'),
+                        'reclaim_partner_coupons': ('bss', 'v2', 'ReclaimPartnerCouponsRequest'),
+                        'create_partner_coupons': ('bss', 'v2', 'CreatePartnerCouponsRequest'),
+                        'list_servers_details': ('ecs', 'v2', 'ListServersDetailsRequest'),
+                        'show_server': ('ecs', 'v2', 'ShowServerRequest'),
+                        'create_servers': ('ecs', 'v2', 'CreateServersRequest'),
+                        'delete_servers': ('ecs', 'v2', 'DeleteServersRequest'),
+                        'list_flavors': ('ecs', 'v2', 'ListFlavorsRequest'),
+                    }
+                    if method_name in svc_map:
+                        svc, ver, req_cls = svc_map[method_name]
+                        mod = importlib.import_module(f'huaweicloudsdk{svc}.{ver}')
+                        client_cls_name = svc[0].upper() + svc[1:] + 'Client'
+                        client_class = getattr(mod, client_cls_name)
+                        from huaweicloudsdkcore.auth.credentials import BasicCredentials, GlobalCredentials
+                        ak, sk = '', ''
+                        for k, v in os.environ.items():
+                            u = k.upper()
+                            if not (u.startswith('HUAWEI') or u.startswith('HW') or u.startswith('HWC')): continue
+                            if 'ACCESS_KEY' in u or u.endswith('_AK') or u == 'AK': ak = v or ak
+                            if 'SECRET_KEY' in u or u.endswith('_SK') or u == 'SK': sk = v or sk
+                        if svc == 'bss':
+                            domain_id = os.environ.get('HUAWEI_DOMAIN_ID', '')
+                            cred = GlobalCredentials().with_ak(ak).with_sk(sk).with_domain_id(domain_id)
+                            _region = os.environ.get('HUAWEI_REGION', 'cn-north-4')
+                            client = client_class.new_builder() \
+                                .with_credentials(cred) \
+                                .with_region(_region) \
+                                .build()
+                        else:
+                            cred = BasicCredentials(ak, sk)
+                            _region = os.environ.get('HUAWEI_REGION', 'cn-north-4')
+                            region_kw = {f'{svc}_region': _region}
+                            client = client_class.new_builder() \
+                                .with_credentials(cred) \
+                                .with_region(**region_kw) \
+                                .build()
+                        req_class = getattr(mod, req_cls)
+                        request = req_class()
+                        method = getattr(client, method_name)
+                        resp = method(request)
+                        resp_dict = resp.to_dict() if hasattr(resp, 'to_dict') else str(resp)
+                        output = json.dumps(resp_dict, indent=2, ensure_ascii=False)[:2000]
+                        status = 'pass'
+                    else:
+                        output = f"未知SDK方法: {method_name}，请添加映射或提供完整Python代码"
+                        status = 'fail'
+                except ImportError as e:
+                    output = f"SDK导入失败: {str(e)[:200]}"
+                    # ModuleNotFoundError → 环境依赖缺失(非 skill 逻辑错误),
+                    # 明确标注, 提示在 SKILL.md 声明依赖(#53-002)
+                    if 'No module named' in str(e):
+                        _m = re.search(r"No module named '([\w\.]+)'", str(e))
+                        _dep = _m.group(1) if _m else '未知'
+                        output = f"环境依赖缺失: 需安装 {_dep} (pip install {_dep}) — 建议在 SKILL.md 依赖说明中声明"
+                    status = 'fail'
+                except Exception as e:
+                    output = f"SDK执行失败: {str(e)[:300]}"
+                    status = 'fail'
+        elif executor_type == 'script':
+            cmd_text = tc.get('command', '')
+            # Handle both "python3 scripts/coupon.py list ..." and "bash scripts/test-cli-commands.sh"
+            if cmd_text.startswith('python3 ') and 'scripts/' in cmd_text:
+                script_part = cmd_text.replace('python3 ', '', 1).strip()
+                script_path = os.path.join(skill_root, script_part.split()[0])
+                script_args = ' '.join(script_part.split()[1:]) if len(script_part.split()) > 1 else ''
+                if os.path.isfile(script_path):
+                    # _posix: bash -c consumes backslashes in unquoted Windows paths
+                    # (C:\Users\x -> C:Usersx); use POSIX form, the python shim
+                    # converts it back to native before the interpreter runs.
+                    full_cmd = f'python3 {_posix(script_path)} {script_args}'.strip()
+                    r = subprocess.run(['bash', '-c', full_cmd], capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_SDK', '60')), env=os.environ)
+                    output = (r.stdout[:1000] + '\n' + r.stderr[:500]).strip()
+                    status = 'pass' if r.returncode == 0 else 'fail'
+                else:
+                    output = f"脚本未找到: {script_path}"
+                    status = 'fail'
+            else:
+                script_part = cmd_text.replace('Run script: bash ', '').replace(' [args]', '').strip()
+                script_path = os.path.join(skill_root, script_part)
+                if not os.path.isfile(script_path):
+                    script_path = os.path.join(skill_root, 'scripts', os.path.basename(script_part))
+                if os.path.isfile(script_path):
+                    r = subprocess.run(['bash', script_path, skill_root], capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_SDK', '60')))
+                    output = (r.stdout[:1000] + '\n' + r.stderr[:500]).strip()
+                    status = 'pass' if r.returncode == 0 else 'fail'
+                else:
+                    output = f"脚本未找到: {script_path}"
+                    status = 'fail'
+        else:
+            # Unknown executor: try running command text as shell command
+            cmd_text = tc.get('command', '')
+            if cmd_text.strip() and len(cmd_text) > 10:
+                r = subprocess.run(
+                    ['bash', '-c', cmd_text],
+                    capture_output=True, text=True, timeout=int(os.environ.get('TIMEOUT_CLI', '30')),
+                    env={**__import__('os').environ}
+                )
+                output = (r.stdout[:500] + r.stderr[:200]).strip()
+                status = 'pass' if r.returncode == 0 else 'fail'
+            else:
+                output = f"未知执行器 {executor_type}，命令为空"
+                status = 'fail'
+            # Also fix empty CLI command
+            if executor_type == 'cli' and '命令为空' in output:
+                status = 'fail'
+
+        elapsed = round(time.time() - start_t, 2)
+        entry['duration_s'] = elapsed
+        entry['output_snippet'] = output[:300]
+
+        if status == 'pass':
+            entry['status'] = 'pass'
+            pass_count += 1
+            print(f"    ✅ PASS ({elapsed}s)")
+        else:
+            # Classify SDK/CLI errors: param validation → warn, auth → fail, other → fail
+            err_text = output[:500].lower()
+            _param_err_kw = json.loads(os.environ.get('PARAM_ERROR_KEYWORDS', '[]'))
+            _auth_err_kw = json.loads(os.environ.get('AUTH_ERROR_KEYWORDS', '[]'))
+            is_param_error = any(kw in err_text for kw in _param_err_kw)
+            is_auth_error = any(kw in err_text for kw in _auth_err_kw)
+            if is_param_error and not is_auth_error:
+                entry['status'] = 'warn'
+                # Extract missing param hints from error
+                missing_params = []
+                for m in re.finditer(r'(\w+)\s+cannot be none|(\w+)\s+cannot be empty|missing\s+(\w+)|field required.*?(\w+)', err_text):
+                    missing_params.append(m.group(1) or m.group(2) or m.group(3) or m.group(4))
+                # Also extract from request.PARAM = '' pattern in command
+                cmd_text = tc.get('command', '')
+                for m in re.finditer(r'request\.(\w+)\s*=\s*[\'\"]{2}', cmd_text):
+                    missing_params.append(m.group(1))
+                missing_params = list(dict.fromkeys(missing_params))  # dedupe
+                entry['error'] = f'[参数校验] {output[:200]}'
+                entry['missing_params'] = missing_params
+                entry['manual_test_hint'] = f"需手工测试: API 需要业务数据参数 {missing_params}，请提供真实值后重试"
+                skip_count += 1
+                print(f"    ⚠️ WARN-参数校验 ({elapsed}s): {output[:80]}")
+                if missing_params:
+                    print(f"    📋 需手工测试: 缺少业务参数 {missing_params}")
+            else:
+                entry['status'] = 'fail'
+                entry['error'] = output[:300]
+                fail_count += 1
+                print(f"    ❌ FAIL ({elapsed}s): {output[:100]}")
+
+        if is_write and status == 'pass':
+            resource_change = {
+                'resource_type': tc.get('endpoint', 'unknown').split('/')[-1] if tc.get('endpoint') else f'resource_{tc_id}',
+                'resource_id': f'demo-{tc_id.lower()}-{int(time.time())}',
+                'change_type': 'created' if 'create' in tc.get('name', '').lower() else ('deleted' if 'delete' in tc.get('name', '').lower() else 'modified'),
+                'cleanup_method': {
+                    'type': executor_type,
+                    'command': tc.get('command', '')[:100]
+                },
+                'cleanup_required': True
+            }
+            entry['resource_changes'] = [resource_change]
+            all_resources.append(resource_change)
+
+    except subprocess.TimeoutExpired:
+        entry['status'] = 'error'
+        entry['error'] = '执行超时'
+        entry['duration_s'] = 30
+        error_count += 1
+        print(f"    ⏰ 超时")
+    except Exception as e:
+        entry['status'] = 'error'
+        entry['error'] = str(e)[:200]
+        error_count += 1
+        print(f"    ❌ 异常: {str(e)[:100]}")
+
+    exec_results.append(entry)
+
+total = len(cases)
+pass_rate = round(pass_count / total * 100, 1) if total > 0 else 0
+
+# Collect manual test hints
+manual_test_items = []
+for r in exec_results:
+    if r.get('status') == 'warn' and r.get('manual_test_hint'):
+        manual_test_items.append({
+            'tc_id': r['tc_id'],
+            'name': r.get('name', ''),
+            'missing_params': r.get('missing_params', []),
+            'hint': r['manual_test_hint'],
+            'command': r.get('command', '')[:200],
+        })
+
+if manual_test_items:
+    print(f"\n{'='*60}")
+    print(f"📋 以下 {len(manual_test_items)} 个用例因缺少业务数据需手工测试:")
+    print(f"{'='*60}")
+    for i, item in enumerate(manual_test_items, 1):
+        params_str = ', '.join(item['missing_params']) if item['missing_params'] else '未知参数'
+        print(f"  {i}. {item['tc_id']}: {item['name']}")
+        print(f"     缺少参数: {params_str}")
+        print(f"     命令: {item['command'][:120]}")
+    print(f"{'='*60}")
+    print(f"💡 提示: 请提供真实业务数据后手工执行上述命令，或在 templates/test-defaults.json 中配置 request_defaults")
+
+# 文档缺口分析(#007): warn/skip 用例中, SKILL.md 声明了但命令实际不支持的参数
+doc_gap_issues = []
+try:
+    with open(os.path.join(skill_root, 'SKILL.md'), encoding='utf-8') as _md_f:
+        _md_text = _md_f.read()
+except Exception:
+    _md_text = ''
+for r in exec_results:
+    if r.get('status') not in ('warn', 'skip'):
+        continue
+    err = str(r.get('error') or r.get('output_snippet') or '')
+    m = re.search(r'Invalid parameter:?\s*--?([\w-]+)', err) or \
+        re.search(r'Unsupported (?:parameter|option)[^:]*:?\s*--?([\w-]+)', err)
+    if m:
+        flag = '--' + m.group(1).split('=')[0]
+        if flag in _md_text and flag not in [g['param'] for g in doc_gap_issues]:
+            doc_gap_issues.append({
+                'tc_id': r['tc_id'],
+                'param': flag,
+                'detail': f'{flag} 出现在 SKILL.md 中, 但命令执行不被支持 (用例命令: {r.get("command", "")[:80]})'
+            })
+            print(f"    📋 文档缺口: SKILL.md 声明 {flag} 但实际命令不支持 → 建议修正 SKILL.md")
+
+result = {
+    'execution_results': exec_results,
+    'statistics': {
+        'total': total,
+        'pass': pass_count,
+        'fail': fail_count,
+        'skip': skip_count,
+        'error': error_count,
+        'pass_rate': pass_rate
+    },
+    'all_resources_changed': all_resources,
+    'manual_test_items': manual_test_items,
+    'doc_gap_issues': doc_gap_issues
+}
+
+print("\n\n---JSON_START---")
+print(json.dumps(result, indent=2, ensure_ascii=False))
+print("---JSON_END---")
+PYEXEC
+
+  local results
+  results=$(python3 "$py_tmp" "$tc_tmp" "$skill_dir")
+  rm -f "$py_tmp"
+  rm -f "$tc_tmp"
+
+  # Extract the JSON from stdout between markers
+  local json_output
+  json_output=$(echo "$results" | sed -n '/---JSON_START---/,/---JSON_END---/p' | grep -v 'JSON_START\|JSON_END')
+
+  local end_ts; end_ts=$(date +%s)
+  local duration=$((end_ts - start_ts))
+
+  # Parse statistics
+  local pass_count; pass_count=$(echo "$json_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['statistics']['pass'])")
+  local fail_count; fail_count=$(echo "$json_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['statistics']['fail'])")
+  local skip_count; skip_count=$(echo "$json_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['statistics']['skip'])")
+  local total_count; total_count=$(echo "$json_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['statistics']['total'])")
+
+  local verdict="pass"
+  [ "$fail_count" -gt 0 ] && verdict="partial"
+  [ "$fail_count" -eq "$total_count" ] && verdict="fail"
+
+  local tmp_json; tmp_json=$(mktemp)
+  echo "$json_output" > "$tmp_json"
+  local summary_py_tmp; summary_py_tmp=$(mktemp)
+  cat > "$summary_py_tmp" << 'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    exec_data = json.load(f)
+r = {
+    "phase": int(sys.argv[2]),
+    "phase_name": sys.argv[3],
+    "tier": 1,
+    "target": {"type": "single_skill", "skills": [sys.argv[4]]},
+    "timestamp": sys.argv[5],
+    "execution_meta": {"duration_s": int(sys.argv[6]), "retry_count": 0, "user_confirmed": True},
+    "result": exec_data,
+    "summary": {"verdict": sys.argv[7], "pass_checks": int(sys.argv[8]), "fail_checks": int(sys.argv[9]), "warn_checks": int(sys.argv[10])}
+}
+print(json.dumps(r, indent=2, ensure_ascii=False))
+PYEOF
+  ensure_test_files_dir "$skill_dir" > /dev/null
+  python3 "$summary_py_tmp" "$tmp_json" "$PHASE_NUM" "$PHASE_NAME" "$skill_name" "$ts" "$duration" "$verdict" "$pass_count" "$fail_count" "$skip_count" > "$(phase_file "$skill_dir" 4)"
+  rm -f "$summary_py_tmp"
+  rm -f "$tmp_json"
+
+  echo ""
+  info "执行统计: ${pass_count}P / ${fail_count}F / ${skip_count}S / 共${total_count}条"
+
+  # Print manual test hints from warn cases
+  local manual_count; manual_count=$(echo "$json_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('manual_test_items',[])))" 2>/dev/null || echo 0)
+  if [ "$manual_count" -gt 0 ]; then
+    echo ""
+    echo "============================================================"
+    echo "📋 以下 ${manual_count} 个用例因缺少业务数据需手工测试:"
+    echo "============================================================"
+    local manual_tmp; manual_tmp=$(mktemp "${TMPDIR:-/tmp}/manual_test_XXXXXX.json")
+    echo "$json_output" > "$manual_tmp"
+    local manual_display_py_tmp; manual_display_py_tmp=$(mktemp)
+    cat > "$manual_display_py_tmp" << 'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+for i, item in enumerate(d.get('manual_test_items', []), 1):
+    params = ', '.join(item.get('missing_params', [])) or '未知参数'
+    tc = item.get('tc_id', '')
+    name = item.get('name', '')
+    cmd = item.get('command', '')[:120]
+    print(f'  {i}. {tc}: {name}')
+    print(f'     缺少参数: {params}')
+    print(f'     命令: {cmd}')
+PYEOF
+    python3 "$manual_display_py_tmp" "$manual_tmp"
+    rm -f "$manual_display_py_tmp"
+    rm -f "$manual_tmp"
+    echo "============================================================"
+    echo "💡 提示: 请提供真实业务数据后手工执行上述命令，或在 templates/test-defaults.json 中配置 request_defaults"
+  fi
+}
+
+# Parse args: getopts for -s, pre-filter --skill (getopts can't handle --long)
+SKILL_DIRS=()
+_rest=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skill) SKILL_DIRS+=("$2"); shift 2 ;;
+    --skill=*) SKILL_DIRS+=("${1#--skill=}"); shift ;;
+    --help|-h) echo "用法: $(basename "$0") [-s <dir>]... [--skill <dir>]... [<dir>...]"; exit 0 ;;
+    *) _rest+=("$1"); shift ;;
+  esac
+done
+set -- ${_rest[@]+"${_rest[@]}"}
+OPTIND=1
+while getopts ":s:h" opt; do
+  case $opt in
+    s) SKILL_DIRS+=("$OPTARG") ;;
+    h) echo "用法: $(basename "$0") [-s <dir>]... [--skill <dir>]... [<dir>...]"; exit 0 ;;
+    \?) ;;
+  esac
+done
+shift $((OPTIND-1))
+for arg in "$@"; do SKILL_DIRS+=("$arg"); done
+
+for skill_dir in "${SKILL_DIRS[@]}"; do
+  set +e
+  run_phase4 "$skill_dir"
+  rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    exit $rc  # propagate exit code (77 for cred request, 1 for other errors)
+  fi
+  echo ""
+done
+
+pass "Phase 4: 执行全部完成"

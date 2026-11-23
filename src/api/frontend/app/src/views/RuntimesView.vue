@@ -623,7 +623,7 @@
           </div>
         </div>
         <!-- 本地技能 -->
-        <div class="rtv-ed-sec rtv-ed-last">
+        <div class="rtv-ed-sec">
           <div class="rtv-ed-sechead">
             <span
               >{{ t('label.local_skill_list') }}
@@ -661,6 +661,64 @@
               <div class="rtv-sk-desc">{{ edSkillDesc(s) }}</div>
             </div>
           </div>
+        </div>
+        <!-- Issue #3169：插件面板（installed_plugins 版本/指纹/自检 + desired_plugins 协商状态） -->
+        <div v-if="showPlugins" class="rtv-ed-sec rtv-ed-last">
+          <div class="rtv-ed-sechead">
+            <span>
+              {{ t('label.plugin_panel') }}
+              <span class="rtv-skcount">{{
+                t('label.plugin_count_paren', { count: rtvPluginInstalled.length })
+              }}</span>
+              <span
+                v-if="rtvPluginHealth && rtvPluginHealth.healthy"
+                class="rtv-plugin-badge rtv-plugin-badge--ok"
+                >✓ {{ t('label.plugin_selfcheck_ok') }}</span
+              >
+              <span
+                v-else-if="rtvPluginHealth && rtvPluginHealth.missing.length"
+                class="rtv-plugin-badge rtv-plugin-badge--miss"
+                >⚠ {{ t('label.plugin_missing', { count: rtvPluginHealth.missing.length }) }}</span
+              >
+            </span>
+            <button class="bt bt-o" :disabled="rtvPluginLoading" @click="loadRtPlugins(engineDetail)">
+              {{ rtvPluginLoading ? '⟳' : '⟳ ' + t('action.refresh') }}
+            </button>
+          </div>
+          <div v-if="rtvPluginLoading" class="rtv-muted">{{ t('empty.loading') }}</div>
+          <template v-else>
+            <div v-if="rtvPluginError === 'repo_required'" class="rtv-muted">
+              {{ t('empty.plugin_repo_required') }}
+            </div>
+            <div v-else-if="!rtvPluginInstalled.length" class="rtv-muted">
+              {{ t('empty.no_installed_plugin') }}
+            </div>
+            <div v-else class="rtv-plugin-list">
+              <div v-for="p in rtvPluginInstalled" :key="p.name" class="rtv-plugin-item">
+                <div class="rtv-plugin-name">
+                  {{ p.name }}
+                  <span class="rtv-plugin-ver">v{{ p.version || '—' }}</span>
+                  <span
+                    :class="['rtv-plugin-hbadge', p.health === 'ok' ? '--ok' : p.health === 'fail' ? '--fail' : '']"
+                    >{{ p.health || 'unknown' }}</span
+                  >
+                </div>
+                <div class="rtv-plugin-fp" :title="p.fingerprint || ''">
+                  {{ p.fingerprint ? p.fingerprint.slice(0, 16) + '…' : '—' }}
+                </div>
+              </div>
+            </div>
+            <!-- desired_plugins 协商状态 -->
+            <div v-if="rtvPluginDesired.length" class="rtv-plugin-desired">
+              <div class="rtv-plugin-desired-h">{{ t('label.plugin_desired') }}</div>
+              <span
+                v-for="d in rtvPluginDesired"
+                :key="d"
+                :class="['rtv-plugin-dpill', rtvPluginHealth && rtvPluginHealth.missing.includes(d) ? '--miss' : '--ok']"
+                >{{ d }}</span
+              >
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -1187,8 +1245,11 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { pluginsEnabled } from '@/lib/features'
 
 const G = globalThis
+// Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
+const showPlugins = pluginsEnabled()
 
 // ═══ 常量（与老代码一致） ═══
 // 配色：Tailwind 600（亮色）/ 400（暗色）双档，全部走页面内 CSS 变量，
@@ -1197,7 +1258,7 @@ const RUNTIME_COLOR = {
   online: 'var(--rtv-ok)',
   recently_lost: 'var(--rtv-warn)',
   offline: 'var(--t3)',
-  about_to_gc: 'var(--rtv-bad)',
+  about_to_gc: 'var(--bar-bad)',
 }
 const HEALTH_NAMES = {
   online: 'online',
@@ -1328,12 +1389,12 @@ function isAbnormalEngine(rt) {
 }
 function abnormalBorderColor(rt) {
   const h = rt.health || rt.status || 'offline'
-  if (h === 'about_to_gc' || h === 'offline') return 'var(--r)'
+  if (h === 'about_to_gc' || h === 'offline') return 'var(--bar-bad)'
   if (rt.health_abnormal !== undefined && rt.health_abnormal !== null) {
-    return rt.health_abnormal === true ? 'var(--r)' : ''
+    return rt.health_abnormal === true ? 'var(--bar-bad)' : ''
   }
   if ((rt.health_consecutive_failures || 0) > 0 || rt.health_heartbeat_alive === false)
-    return 'var(--r)'
+    return 'var(--bar-bad)'
   return ''
 }
 // Issue #498：worker 版本落后是独立提示（琥珀标签），不参与异常描边
@@ -1420,6 +1481,12 @@ function currentRepo() {
 function repoQs() {
   const repo = currentRepo()
   return repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : ''
+}
+// Issue #3169 P1-2：插件端点按 repo_key 鉴权（JWT 空 repo_key → 403），
+// 与壳层 currentRepo 同源，不放宽后端作用域校验。
+function repoKeyValue() {
+  const repo = currentRepo()
+  return repo ? repo.repoKey || repo.fullName || '' : ''
 }
 function healthLabel(h) {
   return t('health.' + (HEALTH_NAMES[h] || 'offline'))
@@ -1567,7 +1634,7 @@ function platformDisabled(x) {
   // B5：沙箱引擎卡看 is_sandbox，凭据卡看 cred_type（后端两路字段）
   return !!((x.cred_type === 'sandbox' || x.is_sandbox) && x.platform_enabled === false)
 }
-const ABNORMAL_RING = 'var(--sh), 0 0 0 1px var(--r)'
+const ABNORMAL_RING = 'var(--sh), var(--ring)'
 function cardLeftBorder(h, rt) {
   // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
   if (rt && isAbnormalEngine(rt)) {
@@ -1575,7 +1642,7 @@ function cardLeftBorder(h, rt) {
     if (red) return { borderLeft: '3px solid ' + red, boxShadow: ABNORMAL_RING }
   }
   // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
-  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626', boxShadow: ABNORMAL_RING }
+  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
   // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
   return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
 }
@@ -1991,6 +2058,69 @@ function renderEngineDetail(rt) {
   edMaxConcurrent.value = rt.max_concurrent || 20
   edSkillQuery.value = ''
   ensureSceneTags()
+  // Issue #3169：打开引擎详情即拉插件 installed/desired 数据（协商面板）
+  loadRtPlugins(rt)
+}
+
+// ═══ Issue #3169：插件面板（installed_plugins 版本/指纹/自检 + desired_plugins 协商状态）═══
+// 契约（!1666）：
+//   - GET /api/plugins/agent/installed?runtime_id={id} → B5 物化/引擎自报/C1 注册表降级链，
+//     条目含 name/version/capabilities/hooks/status/health/fingerprint
+//   - GET /api/plugins/agent-defaults → agent-description.json 各 agent 类型种子默认
+//   - desired 派生口径（对齐后端 desired_plugins_for_tags）：引擎角色标签（agent_tags，
+//     排除 'all'）∪ 各类型默认插件；'all'/无标签不注入种子
+//   - 协商健康口径（对齐后端 derive_plugin_health）：missing = desired - installed；
+//     healthy = missing 为空（多装 extra 不扣健康）
+const rtvPluginInstalled = ref([])
+const rtvPluginDesired = ref([])
+const rtvPluginHealth = ref(null)
+const rtvPluginLoading = ref(false)
+const rtvPluginError = ref('')
+
+function loadRtPlugins(rt) {
+  if (!showPlugins) return
+  if (!rt || rt.id === undefined) return
+  rtvPluginLoading.value = true
+  rtvPluginError.value = ''
+  const rid = rt.id
+  const rk = repoKeyValue()
+  const qs =
+    '?runtime_id=' +
+    encodeURIComponent(rid) +
+    (rk ? '&repo_key=' + encodeURIComponent(rk) : '')
+  let loadErr = ''
+  const installedP = API()
+    .get('/plugins/agent/installed' + qs)
+    .then(function (d) {
+      return (d && d.plugins) || []
+    })
+    .catch(function () {
+      loadErr = rk ? 'load_failed' : 'repo_required'
+      return []
+    })
+  // desired_plugins 由 runtime 详情接口下发（Spec 四.4：身份标签种子 ∪ 控制台远装期望）；
+  // 列表项未带该字段时回查详情，避免前端自行按 agent-defaults 重算而漏控制台来源。
+  const desiredP = Array.isArray(rt.desired_plugins)
+    ? Promise.resolve(rt.desired_plugins)
+    : API()
+        .get('/settings/agent-runtimes/' + encodeURIComponent(rid) + repoQs())
+        .then(function (d) {
+          return (d && d.desired_plugins) || []
+        })
+        .catch(function () {
+          return []
+        })
+  Promise.all([installedP, desiredP]).then(function (r) {
+    // 先复位加载态，再做详情切换守卫（否则切走后按钮永久卡 ⟳）
+    rtvPluginLoading.value = false
+    if (!engineDetail.value || engineDetail.value.id !== rid) return
+    rtvPluginError.value = loadErr
+    rtvPluginInstalled.value = r[0]
+    rtvPluginDesired.value = r[1]
+    const installedNames = new Set(r[0].map(function (p) { return p.name }))
+    const missing = r[1].filter(function (d) { return !installedNames.has(d) })
+    rtvPluginHealth.value = { missing: missing, healthy: missing.length === 0 }
+  })
 }
 function closeEngineDetail() {
   engineDetail.value = null
@@ -2720,9 +2850,14 @@ function onDocClick(e) {
 }
 
 // ═══ 生命周期 ═══
+// #3355 复审：插件市场保存凭据/参数后广播——已打开的插件面板即时重拉（无需手动 ⟳）
+function onPluginConfigSaved() {
+  if (engineDetail.value) loadRtPlugins(engineDetail.value)
+}
 onMounted(function () {
   G.window._currentView = 'runtimes' // app.js nav 契约（已设，防御）
   document.addEventListener('click', onDocClick)
+  G.window.addEventListener('grape:plugin-config-saved', onPluginConfigSaved)
   try {
     grapeUsername = JSON.parse(G.localStorage.getItem('user') || '{}').username || ''
   } catch (e) {
@@ -2735,6 +2870,7 @@ onMounted(function () {
 })
 onBeforeUnmount(function () {
   document.removeEventListener('click', onDocClick)
+  G.window.removeEventListener('grape:plugin-config-saved', onPluginConfigSaved)
   stopDevspaceAuto()
 })
 </script>
@@ -2787,6 +2923,9 @@ onBeforeUnmount(function () {
   --rtv-tg-coding: #2563eb;
   --rtv-tg-qa: #7c3aed;
   --rtv-tg-sre: #ca8a04;
+  /* 异常描边语义：浅色档与旧口径等价（整卡 1px 红环 + 3px 纯红条） */
+  --ring: 0 0 0 1px var(--r);
+  --bar-bad: var(--r);
   min-height: 100%;
 }
 /* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
@@ -2794,20 +2933,20 @@ onBeforeUnmount(function () {
  * 取值与 legacy apple-theme 暗色档逐项对齐；键位与 bridge.css 同源——
  * data-theme-mode="dark" 无条件深色，"auto" 才跟随系统偏好。 */
 :root[data-theme-mode='dark'] .rtv {
-  --bg: #000;
-  --c: #1c1c1e;
-  --b: #38383a;
-  --t: #f5f5f7;
-  --t1: #f5f5f7;
-  --t2: #aeaeb2;
-  --t3: #8e8e93;
+  --bg: #232326;
+  --c: #303033;
+  --b: #3e3e42;
+  --t: #ececf1;
+  --t1: #ececf1;
+  --t2: rgba(235, 235, 245, 0.7);
+  --t3: rgba(235, 235, 245, 0.62);
   --a: #0a84ff;
   --ah: #409cff;
   --g: #30d158;
   --y: #ff9f0a;
   --r: #ff453a;
-  --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --chip-bg: #2c2c2e;
+  --sh: 0 1px 2px rgba(0, 0, 0, 0.34);
+  --chip-bg: rgba(255, 255, 255, 0.09);
   --rtv-ok: #34d399;
   --rtv-warn: #fbbf24;
   --rtv-bad: #f87171;
@@ -2833,6 +2972,9 @@ onBeforeUnmount(function () {
   --rtv-tg-coding: #60a5fa;
   --rtv-tg-qa: #a78bfa;
   --rtv-tg-sre: #facc15;
+  /* 2026-11-20：深底上 #ff453a 全不透明 1px 环=霓虹，环降到 40%，左条 55%↔卡片 */
+  --ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);
+  --bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));
 }
 
 /* 暗色档：危险按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」。
@@ -2865,20 +3007,20 @@ onBeforeUnmount(function () {
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] .rtv {
-    --bg: #000;
-    --c: #1c1c1e;
-    --b: #38383a;
-    --t: #f5f5f7;
-    --t1: #f5f5f7;
-    --t2: #aeaeb2;
-    --t3: #8e8e93;
+    --bg: #232326;
+    --c: #303033;
+    --b: #3e3e42;
+    --t: #ececf1;
+    --t1: #ececf1;
+    --t2: rgba(235, 235, 245, 0.7);
+    --t3: rgba(235, 235, 245, 0.62);
     --a: #0a84ff;
     --ah: #409cff;
     --g: #30d158;
     --y: #ff9f0a;
     --r: #ff453a;
-    --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
-    --chip-bg: #2c2c2e;
+    --sh: 0 1px 2px rgba(0, 0, 0, 0.34);
+    --chip-bg: rgba(255, 255, 255, 0.09);
     --rtv-ok: #34d399;
     --rtv-warn: #fbbf24;
     --rtv-bad: #f87171;
@@ -2904,6 +3046,8 @@ onBeforeUnmount(function () {
     --rtv-tg-coding: #60a5fa;
     --rtv-tg-qa: #a78bfa;
     --rtv-tg-sre: #facc15;
+    --ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);
+    --bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));
   }
   :root[data-theme-mode='auto'] .rtv .bt-p {
     background: color-mix(in srgb, var(--a) 18%, transparent) !important;
@@ -3074,15 +3218,18 @@ onBeforeUnmount(function () {
   line-height: 1.4;
   white-space: nowrap;
 }
+/* 一键加回（2026-11-20）：原先实心 accent 药丸夹在一排「淡底+同色字」状态徽章中间，
+   不是一套语言（暗色下实心 #0a84ff 也最跳）。改回徽章同族：淡底 + 同色字 + 同色环。 */
 .rtv-readd {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   padding: 2px 10px;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 999px;
-  background: var(--a);
-  color: #fff;
+  background: color-mix(in srgb, var(--a) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 32%, transparent);
+  color: var(--a);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -3090,7 +3237,8 @@ onBeforeUnmount(function () {
   cursor: pointer;
 }
 .rtv-readd:hover {
-  filter: brightness(1.08);
+  background: color-mix(in srgb, var(--a) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 52%, transparent);
 }
 /* B5：沙箱平台禁用徽标 */
 .rtv-pdisabled {
@@ -3580,10 +3728,12 @@ onBeforeUnmount(function () {
 /* 暗色下 14% 淡底在近黑卡片上看不清，抬到 20%（同色系，不加饱和） */
 :root[data-theme-mode='dark'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
   background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tag, var(--t3)) 38%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme-mode='auto'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
     background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tag, var(--t3)) 38%, transparent);
   }
 }
 /* 弹窗通用 */
@@ -3764,6 +3914,99 @@ onBeforeUnmount(function () {
   font-size: 11px;
   color: var(--t3);
   margin-top: 2px;
+}
+/* Issue #3169：插件面板 */
+.rtv-plugin-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+.rtv-plugin-badge--ok {
+  background: rgba(28, 164, 76, 0.12);
+  color: var(--g);
+}
+.rtv-plugin-badge--miss {
+  background: rgba(212, 156, 15, 0.12);
+  color: var(--y);
+}
+.rtv-plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.rtv-plugin-item {
+  padding: 8px 12px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rtv-plugin-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--t);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rtv-plugin-ver {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--t3);
+}
+.rtv-plugin-hbadge {
+  font-size: 9px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--t3);
+}
+.rtv-plugin-hbadge--ok {
+  background: rgba(28, 164, 76, 0.12);
+  color: var(--g);
+}
+.rtv-plugin-hbadge--fail {
+  background: rgba(220, 40, 40, 0.1);
+  color: var(--r);
+}
+.rtv-plugin-fp {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--t3);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rtv-plugin-desired {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.rtv-plugin-desired-h {
+  font-size: 11px;
+  color: var(--t3);
+  margin-right: 2px;
+}
+.rtv-plugin-dpill {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.rtv-plugin-dpill--ok {
+  background: rgba(28, 164, 76, 0.1);
+  color: var(--g);
+}
+.rtv-plugin-dpill--miss {
+  background: rgba(212, 156, 15, 0.12);
+  color: var(--y);
 }
 /* 技能详情 */
 .rtv-skilldetail {
@@ -4274,5 +4517,82 @@ onBeforeUnmount(function () {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* 暗色观感校准（2026-11-20）
+ * 浅色档的几何与蓝紫渐变是主人 11-12 亲口裁定的「旧页风格」，由
+ * tests/js/test_runtimes_legacy_style_guard.js 钉住 —— 本段一律用
+ * :root[data-theme-mode=…] .rtv 前缀只覆盖暗色档，浅色档一个字节都不动。
+ * 校准三件事：①卡片比页面底亮一档（#303033 on #232326），不再是「凹进去」；
+ * ②去掉暗底上的霓虹渐变+蓝色外发光，改实心 accent + 静音投影；
+ * ③压回两处硬编码浅底（#dbeafe / #f1f5f9）与蓝色描边，避免暗色下闪白块。 */
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn,
+:root[data-theme-mode='dark'] .rtv .rtv-sb-ic,
+:root[data-theme-mode='dark'] .rtv .rtv-dev-head {
+  background: var(--a);
+  box-shadow: none;
+}
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.34);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-addbtn:hover {
+  background: var(--ah);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sb-opt-ic {
+  background: color-mix(in srgb, var(--a) 22%, var(--c));
+}
+:root[data-theme-mode='dark'] .rtv .rtv-cred-disabled {
+  background: rgba(255, 255, 255, 0.05);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sb-opt:hover {
+  border-color: var(--a);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-readd {
+  /* 深底上实心 #0a84ff 字色只有 2.9:1，按 iOS 深色 tinted chip 口径提亮字色 */
+  background: color-mix(in srgb, var(--a) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 38%, transparent);
+  color: color-mix(in srgb, var(--a) 55%, #fff);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-modal-ov {
+  background: rgba(0, 0, 0, 0.55);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-side-ov {
+  background: rgba(0, 0, 0, 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn,
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-ic,
+  :root[data-theme-mode='auto'] .rtv .rtv-dev-head {
+    background: var(--a);
+    box-shadow: none;
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.34);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-addbtn:hover {
+    background: var(--ah);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-opt-ic {
+    background: color-mix(in srgb, var(--a) 22%, var(--c));
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-cred-disabled {
+    background: rgba(255, 255, 255, 0.05);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sb-opt:hover {
+    border-color: var(--a);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-readd {
+    background: color-mix(in srgb, var(--a) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--a) 38%, transparent);
+    color: color-mix(in srgb, var(--a) 55%, #fff);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-modal-ov {
+    background: rgba(0, 0, 0, 0.55);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-side-ov {
+    background: rgba(0, 0, 0, 0.45);
+  }
 }
 </style>

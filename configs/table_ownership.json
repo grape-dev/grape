@@ -74,6 +74,8 @@
     "grape_t_patrol_findings": "mgmt",
     "grape_t_repo_credentials": "insight",
     "grape_t_repo_platforms": "mgmt",
+    "grape_t_webhook_inbox": "runtime",
+    "grape_t_webhook_inbox_archive": "runtime",
     "grape_t_schema_migrations": "mgmt",
     "grape_t_system_credentials": "runtime",
     "grape_t_user_repo_platform_link": "mgmt",
@@ -98,6 +100,13 @@
     "obs_slo_snapshots": "insight",
     "org_invitation": "mgmt",
     "org_member": "mgmt",
+    "grape_t_org_context": "mgmt",
+    "grape_t_org_context_snapshot": "mgmt",
+    "grape_t_org_dispatch": "mgmt",
+    "grape_t_org_dispatch_aggregate": "mgmt",
+    "grape_t_org_dispatch_target": "mgmt",
+    "grape_t_org_repo_map": "mgmt",
+    "grape_t_org_repo_ai": "mgmt",
     "organization": "mgmt",
     "outbound_content_ledger": "mgmt",
     "pipeline_instances": "mgmt",
@@ -123,7 +132,6 @@
     "grape_t_task_proxy_tokens": "mgmt",
     "unified_user_mapping": "mgmt",
     "uploaded_files": "mgmt",
-    "user_accounts": "mgmt",
     "user_credentials": "mgmt",
     "user_feedback": "mgmt",
     "grape_t_user_llm_credentials": "mgmt",
@@ -614,10 +622,6 @@
       "runtime"
     ],
     "uploaded_files": [
-      "insight",
-      "runtime"
-    ],
-    "user_accounts": [
       "insight",
       "runtime"
     ],

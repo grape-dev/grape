@@ -26,6 +26,13 @@ from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
 from src.kernel.config import log
+from src.kernel.owner_db import db_pair
+
+# 本文件属 runtime 域，IM 引擎由 mgmt 进程启动执行：bot_seen_messages /
+# global_im_bot_config / chat_agent_session / devops_agent_session 都是 runtime 基表，
+# 进程本域连接会 1146（bot 去重、lease、凭证加载全断）。绑 runtime owner 代理：
+# 单库/无 DSN 拓扑自动回落 session_manager.db，零回归。
+db, db_lock = db_pair("runtime")
 
 from src.domains.runtime.im.lark_md import to_lark_elements
 
@@ -71,7 +78,6 @@ def _card_text_parts(text: str, budget: int = FEISHU_CARD_TEXT_CHARS) -> list[st
 
 def _load_seen_msg_ids(app_id: str) -> set:
     try:
-        from src.kernel.session_manager import db, db_lock
         cutoff = time.time() - _SEEN_MSG_TTL
         with db_lock:
             c = db.cursor()
@@ -83,7 +89,6 @@ def _load_seen_msg_ids(app_id: str) -> set:
 
 def _persist_seen_msg_id(app_id: str, message_id: str):
     try:
-        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("INSERT OR IGNORE INTO bot_seen_messages (app_id, message_id, seen_at) VALUES (?,?,?)",
@@ -94,7 +99,6 @@ def _persist_seen_msg_id(app_id: str, message_id: str):
 
 def _cleanup_seen_msg_ids(app_id: str):
     try:
-        from src.kernel.session_manager import db, db_lock
         cutoff = time.time() - _SEEN_MSG_TTL
         with db_lock:
             c = db.cursor()
@@ -866,7 +870,7 @@ class FeishuAsync:
         try:
             # D44/S66：协作者拉取统一走适配器端口（存量平台子类委托原实现，
             # generic/config-only 平台卡驱动自动正确，无平台名分支）
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.public import create_provider
             collabs = create_provider(provider).list_collaborators(api_token, owner, repo)
         except Exception as e:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")
@@ -1191,7 +1195,6 @@ async def _disable_bot(app_id: str):
     同时释放 lease（遗漏修复 3）——防止 lease 脏数据。
     """
     try:
-        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE global_im_bot_config SET is_active=0, lease_token=NULL, lease_expires_at=NULL, lease_owner=NULL, lease_acquired_at=NULL WHERE bot_app_id=?", (app_id,))
@@ -1299,7 +1302,6 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 # 问题 A：重连后检查 lease 是否还在自己手里
                 if ctx._lease_token:
                     try:
-                        from src.kernel.session_manager import db, db_lock
                         with db_lock:
                             c = db.cursor()
                             c.execute(
@@ -1652,7 +1654,6 @@ class BotManager:
           以 global_im_bot_config 登记为准。
         - load_eligible_bots 时确保所有 bot 登记到 global_im_bot_config（遗漏修复 4）
         """
-        from src.kernel.session_manager import db, db_lock
 
         bots: dict[str, str] = {}  # app_id -> bot_type（先去重）
         secrets: dict[str, str] = {}  # app_id -> secret

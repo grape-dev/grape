@@ -138,7 +138,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     经 with_oauth_token 包一层：401/403(token) 预刷新+重试语义与存量一致
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
@@ -294,17 +294,43 @@ def list_scenes(user: dict = Depends(require_no_session_token), repo: str = "",
     return {"scenes": scenes, "total": total}
 
 
-@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
-def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; always returns total; carries card fields (icon/scope/created_by/pin) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.")
+def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = "",
+                              page: Optional[int] = Query(default=None, ge=1),
+                              page_size: int = Query(default=20, ge=1, le=100),
+                              q: str = Query(default="", max_length=100),
+                              sort: str = Query(default="id", pattern="^(id|latest)$")):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
-    
+
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
+
+    分页（与 /scenes 同参数同语义，前端项目场景页的翻页依赖这里）：
+    - 不带 page：全量返回（老调用方零改动，向后兼容）
+    - page>=1：SQL LIMIT/OFFSET + ORDER BY（含置顶序），total 走 COUNT
+    - 技能显示名解析（enrich）只跑当前页，不再为看不到的页付解析成本
+    - q/sort 与 /scenes 完全同参同语义（name/display_name/description LIKE + 置顶序）
     """
     from src.api.pipeline_config import get_scenes, get_pipeline_config, _count_scenes_from_db
     from src.kernel.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
-    scene_list = get_scenes(repo_key=repo_key)
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 int/None——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    # total 恒返回（COUNT 不拉 nodes_json）；不带 page 时与数组长度一致
+    _total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scene_list = get_scenes(repo_key=repo_key, limit=page_size, offset=_start,
+                                q=q, sort=sort)
+    else:
+        scene_list = get_scenes(repo_key=repo_key, q=q, sort=sort)
 
     # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
     # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
@@ -345,7 +371,10 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "is_pinned": int(s.get("is_pinned") or 0),
                        "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
-    _total = len(result)
+    # total 用 COUNT 的结果（不带 page 时与数组长度一致；带 page 时是全量总数，
+    # 不能再取 len(result) —— 那是当前页条数，会让前端分页条永远只显示 1 页）
+    if not _total:
+        _total = len(result)
     return {"scenes": result, "total": _total}
 
 
@@ -599,6 +628,63 @@ def _normalize_scene_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]
     return normalize_category_pair(cat_l1_id, cat_l2_id)
 
 
+def _collect_plugin_credential_requirements(nodes: list, user_id: int | str = 0) -> list[dict]:
+    """收集场景插件中"凭据未配置"的协商清单（Issue #1089 挂点①，应用场景时弹凭据配置）。
+
+    继承链合并生效（Issue #1089 验收3，A4 #1082 契约 seam）：
+    - 插件集合 = merge_plugin_scopes(node=节点级多选, agent=Agent 类型种子默认
+      （按节点 tag 读取 agent-description.json agent.plugins，挂点③）)，
+      高优先级作用域标记来源；repo/personal 级插件声明源归 A4 #1082；
+    - 凭据值 = resolve_plugin_credentials(name, personal=user_credentials
+      provider=plugin:{name}) 键级覆盖合并（repo/agent/node 级凭据源暂无
+      存储入口，缺省为空 → 等价个人级直取，为后续作用域来源预留统一合并点）。
+
+    - 跨作用域/跨节点去重；未注册插件（插件市场未上架）视为软引用，不阻塞应用；
+    - 逐字段对比插件 credentials 声明与合并后配置，给出 missing_fields
+      （含可选字段，供弹窗完整展示）与 required_fields。
+    """
+    from src.domains.mgmt.user.db import get_credential
+    from src.domains.mgmt.plugins.registry import get_plugin
+    from src.domains.mgmt.plugins.resolver import (
+        get_agent_plugins, merge_plugin_scopes, resolve_plugin_credentials)
+    node_plugins: list[str] = []
+    agent_plugins: list[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        for p in node.get("plugins") or []:
+            if isinstance(p, str) and p.strip():
+                node_plugins.append(p.strip())
+        tag = (node.get("tag") or "").strip().lower()
+        if tag:
+            agent_plugins.extend(get_agent_plugins(tag))
+    requirements = []
+    for entry in merge_plugin_scopes(node=node_plugins, agent=agent_plugins):
+        name = entry["name"]
+        plugin = get_plugin(name)
+        if not plugin:
+            continue  # 软引用：未注册插件不阻塞
+        declared = plugin.get("credentials") or []
+        if not declared:
+            continue
+        configured = resolve_plugin_credentials(
+            name, personal=get_credential(user_id, f"plugin:{name}") or {})
+        missing = [
+            {"key": f["key"], "label": f.get("label") or f["key"],
+             "required": bool(f.get("required", False))}
+            for f in declared
+            if not str(configured.get(f["key"], "") or "").strip()
+        ]
+        if missing:
+            requirements.append({
+                "plugin": name,
+                "display_name": plugin.get("display_name") or name,
+                "missing_fields": missing,
+                "required_fields": [f["key"] for f in missing if f["required"]],
+            })
+    return requirements
+
+
 def _parse_scene_skills(nodes_json: str) -> list[str]:
     """从 nodes_json 提取技能名称列表"""
     try:
@@ -624,7 +710,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                        cat_l1_id: int = 0, cat_l2_id: int = 0):
     """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
-    scope: official / repo，空=全部。
+    scope: official / repo / org；空=普通市场（不返回 org 系统模板）。
     repo: scope=repo 时按 repo_key 过滤（owner/repo 格式）。
     """
     from src.domains.mgmt.user.db import (list_scene_market, batch_scene_liked,
@@ -894,6 +980,12 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
+    if (scene.get("scope") or "").lower() == "org":
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "ORG_SCENE_PROTECTED",
+            "message": "组织流水线模板由组织 provisioning 自动创建，不能从场景市场应用",
+        })
 
     # repo_key：优先用传入的（保留 provider 前缀），否则默认 gitcode:
     if not repo_key:
@@ -984,10 +1076,17 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         log.warning(f"apply_market_scene: merge preset custom fields failed: {_e}")
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
-    return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
+    # Issue #1089 挂点①：应用市场场景时按模板 nodes.plugins 协商插件凭据
+    try:
+        credential_required = _collect_plugin_credential_requirements(nodes, user.get("id", 0))
+    except Exception as _e:
+        log.warning(f"apply_market_scene: collect plugin credential requirements failed: {_e}")
+        credential_required = []
+    return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id,
+            "credential_required": credential_required}
 
 @router.get("/market/{market_id}/experience-check", operation_id="scenes_market_experience_check", summary="Market scene experience pre-check", description="Pre-check before experiencing: {repo_exists, scene_applied, full_name, scene_name}.")
-async def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
+def check_market_scene_experience(market_id: int, user: dict = Depends(require_no_session_token)):
     """体验前检查：项目仓库是否已存在 + 是否已应用过此场景。
 
     返回: {"repo_exists": bool, "scene_applied": bool, "full_name": str, "scene_name": str}
@@ -1650,15 +1749,15 @@ class UpdateMarketSceneRequest(BaseModel):
 @router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
 def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
                         user: dict = Depends(require_no_session_token)):
-    """更新用户自定义场景（scope != 'official'）。"""
+    """更新用户自定义场景（source != 'official'）。"""
     from src.domains.mgmt.user.db import (update_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
 
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-    if scene.get("scope") == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可编辑"})
+    if scene.get("source") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方/系统场景不可编辑"})
 
     # Issue #955：市场场景更新同样校验节点 id 角色枚举（与 create 口径一致）
     if body.nodes:
@@ -1737,15 +1836,15 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
 
 @router.delete("/market/{market_id}", operation_id="scenes_market_delete", summary="Delete market scene", description="Hard-deletes a custom market scene (scope != official).")
 def delete_market_scene(market_id: int, user: dict = Depends(require_no_session_token)):
-    """硬删除用户自定义场景（scope != 'official'）。"""
+    """硬删除用户自定义场景（source != 'official'）。"""
     from src.domains.mgmt.user.db import (delete_scene_market, get_scene_market_by_id,
                              delete_uploaded_file, get_uploaded_files_by_ref)
 
     scene = get_scene_market_by_id(market_id)
     if not scene:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在"})
-    if scene.get("scope") == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方场景不可删除"})
+    if scene.get("source") == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方/系统场景不可删除"})
 
     # 删除关联的图标文件
     old_files = get_uploaded_files_by_ref("scene_market", market_id)
@@ -2130,6 +2229,7 @@ class SceneNodeInput(BaseModel):
     skip: list = []
     enabled: bool = True
     engine_runtime_ids: list = []
+    plugins: list = []  # Issue #1089 挂点①：节点级插件多选（软引用，应用场景时协商凭据）
     # Issue #1208：uid 池（D12 姊妹字段，与 ids 双非空拒绝）+ selector 标签池
     # （三模式同 node 互斥，D7；保存端为权威校验点）
     engine_runtime_uids: list = []
@@ -2496,7 +2596,7 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
             opts, parse_error = {}, True
     return created_by, opts, (row[2] or ""), parse_error
 
-def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
+def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: str = ""):
     """返回「当前用户在该仓库可选引擎 id（按角色）」查询闭包。
 
     口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
@@ -2507,7 +2607,7 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     try:
         from src.domains.mgmt.user.org_db import is_org_personal
         if org_id and not is_org_personal(org_id):
-            _filter_org = int(org_id)
+            _filter_org = str(org_id)
     except Exception:
         _filter_org = 0
     _cache: dict = {}
@@ -2536,7 +2636,8 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
             if _rid in _seen:
                 continue
             _seen.add(_rid)
-            if _filter_org and int(e.get("org_id") or 0) != _filter_org:
+            # Issue #2265：global 引擎（org_id=''）平台共享，团队组织场景也可绑定
+            if _filter_org and str(e.get("org_id") or "") and str(e.get("org_id")) != _filter_org:
                 continue
             _ids_out.append(_rid)
         _cache[role] = _ids_out
@@ -3096,6 +3197,13 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
 
     log.info(f"Scene applied: scene={body.scene_id}, repo={repo_key}, updated={updated} agents")
 
+    # Issue #1089 挂点①：节点插件凭据协商（应用场景时弹凭据配置；软引用不阻塞）
+    try:
+        credential_required = _collect_plugin_credential_requirements(nodes, user.get("id", 0))
+    except Exception as _e:
+        log.warning(f"apply_scene: collect plugin credential requirements failed: {_e}")
+        credential_required = []
+
     return {
         "message": f"场景 '{cfg.get('name', body.scene_id)}' 已应用",
         "updated": updated,
@@ -3103,6 +3211,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
         "applied": applied_cnt,
         "skipped": skipped_cnt,
         "failed": failed_cnt,
+        "credential_required": credential_required,
     }
 
 def app_current_repo():

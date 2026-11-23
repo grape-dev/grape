@@ -8,7 +8,8 @@
     "backend": "opencode",
     "order_num": 1,
     "subscribe_events": [],
-    "enable": true
+    "enable": true,
+    "plugins": []
   },
   "issue": {
     "name": "Issue Agent",
@@ -19,7 +20,8 @@
     "backend": "opencode",
     "order_num": 2,
     "subscribe_events": [],
-    "enable": true
+    "enable": true,
+    "plugins": []
   },
   "coding": {
     "name": "Coding Agent",
@@ -30,7 +32,8 @@
     "backend": "opencode",
     "order_num": 3,
     "subscribe_events": [],
-    "enable": true
+    "enable": true,
+    "plugins": []
   },
   "qa": {
     "name": "QA Agent",
@@ -41,7 +44,8 @@
     "backend": "opencode",
     "order_num": 4,
     "subscribe_events": [],
-    "enable": true
+    "enable": true,
+    "plugins": []
   },
   "sre": {
     "name": "SRE Agent",
@@ -52,6 +56,7 @@
     "backend": "opencode",
     "order_num": 5,
     "subscribe_events": [],
-    "enable": true
+    "enable": true,
+    "plugins": []
   }
 }

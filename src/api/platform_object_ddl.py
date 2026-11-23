@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     clone_auth          TEXT NOT NULL DEFAULT '',      -- clone 凭据形态：x_access_token | oauth2 | basic_password
     issue_write_form    TEXT NOT NULL DEFAULT '',      -- 建/关 Issue 端点形态：repo_path | owner_param（Gitee=owner_param）
     branch_create_form  TEXT NOT NULL DEFAULT '',      -- 建分支形态：form | refs_sha
+    create_repo_options INTEGER NOT NULL DEFAULT 0,   -- 1=适配器接受 auto_init/default_branch（建仓可选参数）
     issue_search        INTEGER NOT NULL DEFAULT 0,    -- 1=支持原生 issue 搜索端点（布尔，非枚举）
     git_tree_family     TEXT NOT NULL DEFAULT '',      -- 文件树/内容 API 族：github_api | （空=不支持）
     pr_comment_endpoint TEXT NOT NULL DEFAULT '',      -- PR 评论端点族：issues（借 issue 评论接口）| 空=专用端点
@@ -73,6 +74,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     download_base       TEXT NOT NULL DEFAULT '',      -- 归档/文件下载基址（展示用）
     user_images_base    TEXT NOT NULL DEFAULT '',      -- 用户图片基址（展示用）
     brand_color         TEXT NOT NULL DEFAULT '',      -- 品牌色（展示用）
+    ca_bundle           TEXT NOT NULL DEFAULT '',      -- Issue #3580：实例 TLS CA（PEM 绝对路径，仅 git 传输）
     source              TEXT NOT NULL DEFAULT 'config',-- 行来源：config | manual
     config_hash         TEXT NOT NULL DEFAULT '',      -- 规范化内容 hash（行级）
     enabled             INTEGER NOT NULL DEFAULT 1,    -- 运行时开关（DB 权威）

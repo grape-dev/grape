@@ -21,7 +21,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
-from src.kernel.token_resolver import GenericVcsProvider, GitCodeProvider, GitHubProvider, create_provider
+from src.domains.mgmt.vcs import GenericVcsProvider, GitCodeProvider, GitHubProvider, create_provider
 
 
 GITEE_CARD = {
@@ -147,7 +147,7 @@ def test_s62_host_repo_gitcode_parity():
     """gitcode 托管：行为锁——setup_webhook(password=bot token)、列名/入参不变。"""
     import src.domains.mgmt.routes.repos as repos_mod
     fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
-    from src.kernel.token_resolver import GitCodeProvider
+    from src.domains.mgmt.vcs import GitCodeProvider
     with patch.object(repos_mod, "get_user_token_for", return_value="utok"), \
             patch.object(repos_mod, "with_oauth_token", side_effect=lambda u, p, fn, *a, **k: fn("utok")), \
             patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://wh/webhook/gitcode"), \
@@ -191,7 +191,7 @@ def test_s62_host_repo_gitee_provider_ports(gitee_card):
     mock_prov.webhook_token_field.return_value = "gitee_webhook_token"
     with patch.object(repos_mod, "get_user_token_for", return_value="gtok"), \
             patch.object(repos_mod, "with_oauth_token", side_effect=lambda u, p, fn, *a, **k: fn("gtok")), \
-            patch("src.kernel.token_resolver.create_provider", return_value=mock_prov) as m_cp, \
+            patch("src.domains.mgmt.vcs.create_provider", return_value=mock_prov) as m_cp, \
             patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://wh/webhook/gitee"), \
             patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="ggbt"), \
             patch("src.domains.mgmt.user.repo_manager.resolve_bot_username", return_value="ggb"), \
@@ -216,7 +216,7 @@ def test_s62_fetch_and_cache_gitee(gitee_card):
     mock_prov = MagicMock()
     mock_prov.fetch_repos_with_role.return_value = [
         {"full_name": "acme/web", "name": "web", "owner": "acme", "is_admin": True}]
-    with patch("src.kernel.token_resolver.create_provider", return_value=mock_prov):
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=mock_prov):
         repos = repos_mod._fetch_and_cache(1, "T", "gitee")
     assert repos[0]["repo_key"] == "gitee:acme/web"
 

@@ -192,7 +192,11 @@ def _task_item(row: Dict[str, Any], tokens: Dict[str, Dict[str, int]],
     wait = round((disp - enq).total_seconds(), 1) if (disp and enq) else None
     failure = ""
     if status in ("failed", "cancelled"):
-        raw = (row.get("errors") or row.get("stderr") or row.get("result_text") or "")
+        # #2790/#2747：errors 同时承载 token 诊断（diagnostic=True），诊断不得抢占真实
+        # 失败原因——与 friendly_failure_hint 同口径过滤后再回退 stderr/result_text。
+        from src.domains.runtime import public as runtime_public
+        _errors = runtime_public.strip_task_diagnostics(row.get("errors") or "")
+        raw = (_errors or row.get("stderr") or row.get("result_text") or "")
         failure = str(raw).strip().replace("\n", " ")[:300]
     item = {
         "id": row.get("id"), "agent_type": row.get("agent_type") or "",

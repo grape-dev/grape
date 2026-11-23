@@ -105,6 +105,13 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         }
         if isinstance(_cfg, dict) and "workflows_write" in _cfg:
             out["workflows_write"] = _cfg["workflows_write"]
+        if _pat_tok:
+            # Issue #3580/PR#1854：到期判定统一走域值对象 CredentialExpiry
+            # （绑定落库 expires_at；这里只投影状态，前端不再自己算天数）。
+            from src.domains.mgmt.user.credential_expiry import CredentialExpiry
+            _exp = str(_cfg.get("expires_at") or "")
+            if _exp:
+                out.update(CredentialExpiry.parse(_exp).as_payload())
         if _diag.get("credential_error"):
             # PAT 行在但读不出来（密钥变更/记录损坏）：不能报"没配置"，否则用户
             # 会去重新配一遍而不知道旧记录坏了（也会让"清不掉"更难解释）。
@@ -159,16 +166,7 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
         # exists=False 但 broken≠空 = "配过、坏了"，前端要提示重配而不是当成没配。
         **{
-            f"{_p}_pat": (
-                {
-                    "exists": st["exists"],
-                    "login": st["login"],
-                    **({"workflows_write": st["workflows_write"]} if "workflows_write" in st else {}),
-                    **({"broken": st["broken"]} if st.get("broken") else {}),
-                }
-                if (st["exists"] or st.get("broken") or st.get("oauth_bound"))
-                else {}
-            )
+            f"{_p}_pat": _pat_public_payload(st)
             for _p, st in _pat_states.items()
         },
         # 新增（2026-11-18）：令牌来源单列一眼可见——PAT 与"登录授权"是两种形态，
@@ -196,6 +194,29 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
 # GET /credentials 已收敛为「凭据只回存在性」；需要查看/复制明文时走本接口：
 #   二次确认（重新输入 Grape 密码）+ 审计日志 + 明文仅当次返回（Cache-Control: no-store）
 #   + 高频取回告警（窗口内计数超阈值 → 429）。
+def _pat_public_payload(st: dict) -> dict:
+    """`<provider>_pat` 对外投影：存在性 + 登录名 + 到期三键（白名单唯一维护点）。
+
+    到期键（expires_at / expires_state / expires_in_days）由 _pat_state 经
+    CredentialExpiry 产出；若重建白名单时漏掉，前端读到的就是空对象，
+    "PAT 快过期"提醒永远不会出现（功能等于没上线）。
+    """
+    if not (st.get("exists") or st.get("broken") or st.get("oauth_bound")):
+        return {}
+    out = {"exists": st["exists"], "login": st["login"]}
+    if "workflows_write" in st:
+        out["workflows_write"] = st["workflows_write"]
+    if st.get("broken"):
+        out["broken"] = st["broken"]
+    if st.get("expires_at"):
+        out["expires_at"] = st["expires_at"]
+    if st.get("expires_state"):
+        out["expires_state"] = st["expires_state"]
+    if st.get("expires_in_days") is not None:
+        out["expires_in_days"] = st["expires_in_days"]
+    return out
+
+
 _REVEAL_WINDOW_SECONDS = 600      # 高频窗口：10 分钟
 
 _REVEAL_MAX_PER_WINDOW = 10       # 窗口内最大取回次数（第 11 次起告警并拒绝）
@@ -508,25 +529,36 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     "code": 400, "message": f"未注册的平台: {_p}（先在管理面配置平台卡）"})
             if _tok and not _is_placeholder(_tok):
                 try:
-                    from src.kernel.token_resolver import create_provider
-                    _info = create_provider(_p).verify_token(_tok)
+                    from src.domains.mgmt.vcs import create_provider
+                    _provider = create_provider(_p)
+                    _info = _provider.verify_token(_tok)
                 except HTTPException:
                     raise
                 except Exception as _ve:
                     raise HTTPException(status_code=502, detail={
                         "code": 502, "message": f"{_p} token 验证失败: {_ve}"})
-                if not isinstance(_info, dict) or not _info.get("login") or not _info.get("id"):
+                _info_login = str((_info or {}).get("login") or (_info or {}).get("username") or "") if isinstance(_info, dict) else ""
+                _info_id = str((_info or {}).get("id") or "") if isinstance(_info, dict) else ""
+                if not _info_login or not _info_id:
                     raise HTTPException(status_code=400, detail={
                         "code": 400, "error_code": "TOKEN_INVALID",
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
-                _ext_id = str(_info.get("id"))
-                _ext_login = str(_info.get("login", ""))
+                _ext_id = _info_id
+                _ext_login = _info_login
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
                 # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
                 # 凭据写进 B 账号」的半转移态，也就不再需要 409 与转移票据。
                 # 平台登录名来源 = 凭据域 config.login（list_platform_links 并集读）。
                 _pat_cfg = {"token": _tok, "login": _ext_login}
+                try:
+                    _exp_meta = _provider.token_expiry(_tok) or {}
+                except Exception:  # noqa: BLE001 - 取不到到期信息不影响绑定
+                    _exp_meta = {}
+                if _exp_meta.get("expires_at"):
+                    # Issue #3580/PR#1854：PAT 到期时间落库（config_json，不加列）。
+                    # 没有它只能等 401 才发现过期——那时智能体任务已经失败。
+                    _pat_cfg["expires_at"] = str(_exp_meta["expires_at"])
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
                 # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
@@ -750,7 +782,8 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     from src.kernel.repo_key import to_repo_key
     _rk = to_repo_key(f"{owner}/{repo}")
     _provider = create_provider_from_repo_key(_rk)
@@ -775,7 +808,7 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
         from src.kernel.session_manager import db, db_lock
         # FR-21.4: 按 repo_key 前缀选列（D43/S63：列名卡派生）
         from src.kernel.repo_key import parse_repo_key
-        from src.kernel.token_resolver import create_provider as _cp_cfg
+        from src.domains.mgmt.vcs import create_provider as _cp_cfg
         _provider_name, _, _ = parse_repo_key(_rk)
         _token_col = _cp_cfg(_provider_name).token_storage_field()
         if _token_col:
@@ -846,43 +879,64 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             "code": 403, "error_code": "PERMISSION_DENIED",
             "message": "无权限操作，请联系托管人或管理员"
         })
+    def _assert_bot_username_free(name: str) -> None:
+        """FR-12.3：bot 用户名与真人账号冲突检查（**写之前**做）。
+
+        旧实现先 update_managed_repo_bot_token 再校验，冲突时返回 400，
+        但令牌已经落库 —— 半写状态（2026-11-22 评审补强①）。
+        """
+        if not name:
+            return
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+        try:
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                _c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) "
+                           "AND status=1 LIMIT 1", (name,))
+                if _c.fetchone():
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "BOT_USERNAME_CONFLICT",
+                        "message": f"Bot 用户名 '{name}' 与真人账号冲突，该用户的操作将被自循环过滤静默忽略"
+                    })
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 查询失败不阻断
+
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
-        from src.kernel.token_resolver import create_provider_from_repo_key
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
+        _verified_login = ""
         try:
-            _vcs_provider.verify_token(token)
+            _info = _vcs_provider.verify_token(token) or {}
+            _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": "Bot Token 无效，请检查后重试"
             })
+        # 先校验最终会写下去的用户名（显式值优先，其次令牌所属账号），再写令牌
+        _assert_bot_username_free((body.bot_username or _verified_login or "").strip())
         _result = update_managed_repo_bot_token(repo_key, token)
         if not _result.get("ok"):
             raise HTTPException(status_code=404, detail={
                 "code": 404, "error_code": "REPO_NOT_FOUND",
                 "message": "仓库不存在或写入失败"
             })
+        # 存令牌顺手回填账号名：basic_password 平台（gitee）的 clone 用户名必须是
+        # 令牌所属账号 login，让平台自己回答「我是谁」，不再要求用户手填。
+        if _verified_login and not body.bot_username:
+            body.bot_username = _verified_login
+            _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
     else:
         _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
-        # FR-12.3: bot 用户名与真人账号冲突检查
-        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
-        try:
-            with _sm_dl:
-                _c = _sm_db.cursor()
-                _c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (body.bot_username,))
-                if _c.fetchone():
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400, "error_code": "BOT_USERNAME_CONFLICT",
-                        "message": f"Bot 用户名 '{body.bot_username}' 与真人账号冲突，该用户的操作将被自循环过滤静默忽略"
-                    })
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # 查询失败不阻断
+        # 冲突校验已在上面的写令牌之前完成（无令牌、只改用户名时在此校验）
+        if not (body.bot_token and not _is_placeholder(body.bot_token)):
+            _assert_bot_username_free(body.bot_username.strip())
         update_managed_repo_bot_username(repo_key, body.bot_username)
     # FR-20.11: 返回 warning + related_repos
     _response = {"message": "GitCode Repo 配置已更新"}
@@ -1056,7 +1110,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
             # （与当前查看组织不同），但仓库级设备对仓库成员可见（#277 仓库隔离口径），
             # 可见性最终由 _visible_credential 的 repo_key in user_repos 判定收敛，不越权。
-            if rt_org_id != _org_filter_key:
+            # Issue #2265：org_id='' 的 global 引擎是平台共享资源，团队组织也应可见；
+            # 仅隔离属于其它组织的引擎。repo scope 维持既有豁免。
+            if rt_org_id and rt_org_id != _org_filter_key:
                 _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
                 if _cred_early.get("scope") != "repo":
                     continue
@@ -1195,7 +1251,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _devices_cred_map = {k: v for k, v in cred_map.items()
                              if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                              or v.get("scope") == "repo"}
-        _devices_cached = [rt for rt in cached if _org_key(rt) == _org_filter_key
+        _devices_cached = [rt for rt in cached if not _org_key(rt) or _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1726,7 +1782,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     if _filter_org_id:
         # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
-        _local_runtimes = [rt for rt in _local_runtimes if _org_key(rt) == _org_filter_key
+        _local_runtimes = [rt for rt in _local_runtimes if not _org_key(rt) or _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
                     if not _org_unassigned(v) and _org_key(v) == _org_filter_key
@@ -1842,17 +1898,49 @@ def user_db_get_backend_agents_alias():
     from src.domains.mgmt.user import db as user_db
     return user_db.get_backend_agents()
 
-@router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
+def _runtime_desired_plugins(rt: dict) -> list[str]:
+    """引擎详情下发 desired_plugins（Issue #3169 P2，Spec 四.4）。
+
+    口径与后端 derive_plugin_health 同源：角色标签 → Agent 类型种子默认
+    （resolver.desired_plugins_for_tags）∪ 控制台远程安装期望
+    （agent_runtimes.desired_plugins，挂点④）。前端直接消费本字段，
+    不再自行按 agent-defaults 重算，避免漏掉控制台来源而多报 missing。
+    """
+    from src.domains.mgmt.plugins.resolver import (
+        desired_plugins_for_tags, normalize_plugin_names)
+    out: set[str] = set()
+    try:
+        out.update(desired_plugins_for_tags(rt.get("agent_tags") or []))
+    except Exception:
+        pass
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT desired_plugins FROM agent_runtimes WHERE id=?",
+                (rt.get("id"),)).fetchone()
+        if row and row[0]:
+            data = json.loads(row[0])
+            out.update(normalize_plugin_names(
+                [(p.get("name") if isinstance(p, dict) else p) for p in data]))
+    except Exception:
+        pass
+    return sorted(out)
+
+
+@router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner/desired_plugins). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
 def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
     """单引擎详情（Issue #364）：按 agent_runtimes.id 精确返回。
 
     复用 get_agent_runtimes 的全量可见性过滤与字段派生（page_size=0 全量口径），
     保证详情与 Engines 列表可见性 100% 一致（credential scope + org 隔离 +
     repo 过滤 + 已删除用户/已吊销凭据过滤），未命中/不可见统一 404。
+    Issue #3169：详情额外下发 desired_plugins（插件面板协商口径）。
     """
     result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
     for rt in result.get("runtimes", []):
         if rt.get("id") == rid:
+            rt["desired_plugins"] = _runtime_desired_plugins(rt)
             return rt
     raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
 

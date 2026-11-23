@@ -139,8 +139,9 @@ def _engine_scope_extra(repo_bare: str, account_id) -> tuple[str, list]:
 
 
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
-                         task_id: str = ""):
+                         task_id: str = "", error: str = ""):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
+    Issue #2547：error 非空时写入 payload（失败留痕附失败原因，与主流程结果对齐）。
 
     追加 admin_action 审计事件（status=completed，不参与业务流转，仅留痕）。
     Issue #1312：继承目标事件的真实 repo_key / issue_id，避免审计事件被兜底成
@@ -192,6 +193,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                 "target_event_seq": target_seq,
                 "target_task_id": task_id,
                 "related": _related,
+                **({"error": error} if error else {}),
             },
             status="completed",
         )
@@ -289,21 +291,63 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
             "output": _structured,
             "logs": agent_logs or [],
         }
-    # 前后同 agent_type 同仓库事件 seq（供前端箭头导航，Issue #224: 增加 repo_key 过滤避免跨仓库导航）
+    # 前后导航 seq（供前端箭头）
+    # Issue #224 原口径 = 同 repo + 同 agent_type。实测在真实仓库里等于「跨需求乱跳」：
+    # 同一 agent 在不同需求之间来回串，用户在 EVENT 详情页点箭头根本不知道会去哪。
+    # 2026-11-20 主人口径：优先「同需求」（repo_key + issue_id）内的前后事件，且跨 agent_type
+    # 一起串（一个需求的事件本来就是 vod→issue→coding→qa→sre 一条链，串起来才叫"同需求"）。
+    # issue_id 为空（""/#0，非需求事件，如手工/管理类事件）时回退 #224 旧口径，避免把无关事件串成链。
     try:
         agent_type = row[5] or ""
         repo_key = row[1] or ""
+        issue_scope = (row[2] or "").strip()
+        if issue_scope in ("", "#0", "0"):
+            issue_scope = ""
+        prev_seq = next_seq = None
+        prev_agent = next_agent = ""
+        nav_scope = "agent"
         with db_lock:
             c2 = db.cursor()
-            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
-            prev_seq = c2.fetchone()[0]
-            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
-            next_seq = c2.fetchone()[0]
+            if issue_scope:
+                nav_scope = "issue"
+                # 历史行可能存 "#123"，也可能存裸 "123" —— 两种形态都算同一需求。
+                # 两种都查：当前行是裸形态时，也要能命中 #N 形态的历史行（反之亦然）。
+                _bare = issue_scope.lstrip("#")
+                _keys = tuple(dict.fromkeys((issue_scope, "#" + _bare, _bare)))
+                _phs = ",".join("?" for _ in _keys)
+                c2.execute(
+                    "SELECT seq, agent_type FROM events WHERE seq < ? AND repo_key=? "
+                    f"AND issue_id IN ({_phs}) ORDER BY seq DESC LIMIT 1",
+                    (seq, repo_key, *_keys))
+                _r = c2.fetchone()
+                if _r:
+                    prev_seq, prev_agent = _r[0], _r[1] or ""
+                c2.execute(
+                    "SELECT seq, agent_type FROM events WHERE seq > ? AND repo_key=? "
+                    f"AND issue_id IN ({_phs}) ORDER BY seq ASC LIMIT 1",
+                    (seq, repo_key, *_keys))
+                _r = c2.fetchone()
+                if _r:
+                    next_seq, next_agent = _r[0], _r[1] or ""
+            else:
+                c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
+                prev_seq = c2.fetchone()[0]
+                c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
+                next_seq = c2.fetchone()[0]
         result["prev_seq"] = prev_seq if prev_seq else 0
         result["next_seq"] = next_seq if next_seq else 0
+        # 目标事件的 agent_type / 判定口径：前端 tooltip 要用「上一条是谁」而不是当前事件的 agent
+        result["prev_agent"] = prev_agent
+        result["next_agent"] = next_agent
+        result["nav_scope"] = nav_scope
+        result["nav_issue_id"] = issue_scope
     except Exception:
         result["prev_seq"] = 0
         result["next_seq"] = 0
+        result["prev_agent"] = ""
+        result["next_agent"] = ""
+        result["nav_scope"] = "agent"
+        result["nav_issue_id"] = ""
     # M4：archive 结构化产出——优先 events.structured_output（weekly-05）；无则回退 event.json 段
     if "archive" not in result:
         try:
@@ -469,17 +513,10 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                 (seq,))
             tr3 = c4.fetchone()
             if tr3:
-                _task_errors = []
-                if tr3[6]:
-                    try:
-                        _parsed = json.loads(tr3[6])
-                        if isinstance(_parsed, list):
-                            _task_errors = [str(e)[:500] for e in _parsed
-                                            if str(e).strip()][:5]
-                        else:
-                            _task_errors = [str(tr3[6])[:500]]
-                    except (json.JSONDecodeError, TypeError):
-                        _task_errors = [str(tr3[6])[:500]]
+                # #2790/#2747：errors 里的诊断条目（diagnostic=True）不冒充失败原因，
+                # 与 friendly_failure_hint / trace.failure_reason 同一口径。
+                from src.domains.runtime.public import summarize_task_errors
+                _task_errors = summarize_task_errors(tr3[6], limit=5)
                 task_info = {
                     "task_id": tr3[0], "task_status": tr3[1], "runtime_id": tr3[2] or 0,
                     "runtime_session_id": tr3[3] or "", "task_created_at": tr3[4] or "",
@@ -755,9 +792,12 @@ def _mark_event_redispatched(seq: int, new_seq, channel: str):
     """
     from src.api.event_store import reset_event_terminal, update_event_complete
     reset_event_terminal(seq)
+    # Issue #2547（QA 复审判断项）：无新事件接管的调用点显式传 None（不再以 0 作
+    # 魔法哨兵）；new_seq 为 None/0 均按「无新事件接管」如实标注。
+    _ref = f" 新 seq={new_seq} 接管" if new_seq else " 无新事件接管"
     update_event_complete(
         seq, "cancelled", exit_code=None,
-        result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
+        result=f"事件已重新派发（{channel}{_ref}，原事件已取消）")
 
 
 def _reissue_task_session_token(task_id: str) -> str:
@@ -811,6 +851,13 @@ def _redispatch_success(task_id, event_seq, token_reissued=None, **extra) -> dic
     return resp
 
 
+# Issue #2517：redispatch 内部通道——takeover abort 的原子重派跳过用户级 30s 幂等门。
+# 防抖挡的是 UI 手动重复点击；接管让渡的重派是同一用户动作（abort）的后半段，
+# 不应被拦（实测：409 后 abort 回执仍成功、节点停在 cancelled、链静默断裂）。
+# 特权位用**显式参数** skip_debounce 承载（#2678 复审观察 6）：只有服务内调用能传 True，
+# 公共 HTTP 路由的函数签名里没有该参数（query 里塞 skip_debounce 无效），外部无法放宽防抖。
+
+
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
@@ -822,6 +869,159 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
     local_only=True（本机重试）：强制使用原 task.runtime_id 同机重跑，
     跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
+
+    Issue #2547：入队失败一律显式 409/500（事件留可读失败原因），回执 task_id
+    只为真实任务 id 或 null（附 note），不再用 "(new)" 占位冒充成功。
+    """
+    # Issue #587：重派操作强制审计留痕；Issue #2547：留痕点移至出口并与主流程结果
+    # 对齐——成功记 redispatch（带真实 task_id），失败记 redispatch_failed（附原因），
+    # 不再把失败重派记为成功。主流程任何失败（含入队失败/引擎不可用/被拦）也必须留痕。
+    # QA 复审 Spec-3：非 HTTP 异常裸抛同样兜底记审计后原样抛出。
+    try:
+        _result = _redispatch_event(seq=seq, local_only=local_only, user=user, skip_debounce=False)
+    except HTTPException as _he:
+        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
+                            error=str(_he.detail)[:200])
+        raise
+    except Exception as _e:
+        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
+                            error=f"{type(_e).__name__}: {_e}"[:200])
+        raise
+    _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch", user,
+                        task_id=str((_result or {}).get("task_id") or ""))
+    return _result
+
+
+def redispatch_event_internal(seq: int, user: dict):
+    """内部重派通道（仅限服务内调用）：显式跳过 30s 用户级幂等门，其余语义与公共通道一致。
+
+    HTTP 路由不暴露 skip_debounce，公共 API 的防抖行为不变（Issue #2517）。
+    Issue #2547：出口审计与公共通道同款（成功/失败留痕对齐主流程结果）。
+    """
+    try:
+        _result = _redispatch_event(seq=seq, local_only=False, user=user, skip_debounce=True)
+    except HTTPException as _he:
+        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
+                            error=str(_he.detail)[:200])
+        raise
+    except Exception as _e:
+        _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch_failed", user,
+                            error=f"{type(_e).__name__}: {_e}"[:200])
+        raise
+    _audit_admin_action(_redispatch_audit_repo_key(seq), seq, "redispatch", user,
+                        task_id=str((_result or {}).get("task_id") or ""))
+    return _result
+
+
+def _redispatch_audit_repo_key(seq: int) -> str:
+    """redispatch 出口审计留痕用的 repo_key 提取（成功/失败路径共享，QA 复审判断项收敛）。"""
+    try:
+        return (_load_event(seq) or {}).get("repo_key", "") or ""
+    except Exception:
+        return ""
+
+
+def _enqueue_task_verified(seq: int, **enqueue_kwargs) -> str:
+    """Issue #2547：重派入队三段式收口——失败不吞 / 回执真实 / 入队后置校验。
+
+    enqueue_task 任何未真正入队的路径一律显式失败（消除「回 200 + task_id="(new)"」
+    把入队失败伪装成成功的回执，#1797 seq=68048、#1947 seq=68046 生产实测形态）：
+    - ValueError（可判定失败：路由缺失 runtime_id/pool_agent_type、缺 agent_session_id、
+      #653 空池守卫等）→ 409（对齐仓库既有约定）；
+    - 其它异常（DB 写失败等不可判定失败）→ 500；
+    - 返回空 task_id（契约破坏：enqueue_task 成功必返回真实 id）→ 500；
+    - 后置校验：SELECT agent_tasks 断言新任务存在且 status ∈ {queued, pending, running}，
+      不满足视为「入队未生效」→ 500。
+
+    失败时事件回写可读原因（update_event_status result）+ meta redispatch:error:{seq}。
+    completed/cancelled 事件的 result 回写会被终态保护拦截（Issue #130 保护语义保持），
+    合规留因通道为 meta + HTTP detail 双通道。
+    调用点均位于 reset_event_terminal 之前（先校验再重置），失败时事件保持原终态语义。
+    """
+    from src.domains.runtime.engine.service import enqueue_task, is_task_claimable
+    from src.api.event_store import update_event_status
+
+    def _fail(reason: str, code: int):
+        log.warning(f"[redispatch] seq={seq} enqueue not effective: {reason}")
+        try:
+            update_event_status(seq, "failed", result=reason)
+        except Exception as ue:
+            log.warning(f"[redispatch] seq={seq} failure-reason write failed: {ue}")
+        try:
+            from src.domains.mgmt.user.db import set_meta_value
+            set_meta_value(f"redispatch:error:{seq}", reason)
+        except Exception as me:
+            log.warning(f"[redispatch] seq={seq} failure-reason meta write failed: {me}")
+        raise HTTPException(status_code=code, detail={"code": code, "message": reason})
+
+    try:
+        _new_task_id = enqueue_task(**enqueue_kwargs)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        _fail(f"重派入队失败: {e}", 409)
+    except Exception as e:
+        _fail(f"重派入队异常: {e}", 500)
+    if not _new_task_id:
+        _fail("重派入队失败: enqueue_task 未返回任务 id（入队未生效）", 500)
+    from src.kernel.session_manager import db_lock
+    _row = None
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT status FROM agent_tasks WHERE id=?", (_new_task_id,))
+            _row = c.fetchone()
+    except Exception as e:
+        _fail(f"重派后置校验异常: {e}", 500)
+    _task_status = (_row[0] or "") if _row else ""
+    if not _row or not is_task_claimable(_task_status):
+        _fail(f"重派后置校验失败: 新任务 {_new_task_id} 未落库或状态不可认领"
+              f"（status={_task_status or 'missing'}）", 500)
+    return _new_task_id
+
+
+def _build_enqueue_kwargs(old: dict, *, runtime_id: int, cwd: str, env_extra,
+                          issue_session_id: str, plugin: bool,
+                          pool_agent_type=None, pool_engine_ids: str = "",
+                          pool_selector: str = "") -> dict:
+    """Issue #2547（QA 复审判断项）：local_only 同机重试与终态重建两处
+    _enqueue_task_verified 调用点共享的快照入队字段组装（约 15 字段 Data Clump
+    收敛为单一来源）。语义与源线一致：pool_tag 绑定 plugin 模式；pool_agent_type
+    缺省跟随 pool_tag，显式空串表示不传池路由。
+    [Issue #1208 补漏 2026-11-18] pool_selector/pool_engine_source 随旧任务快照
+    透传——selector/uid 池场景重派后退化为广播抢单会失去圈池语义（见调用点注释）。"""
+    _pool_tag = (old.get("agent_type") or "") if plugin else ""
+    return dict(
+        agent_session_id=old.get("agent_session_id") or "",
+        runtime_id=runtime_id,
+        event_seq=old.get("event_seq"),
+        issue_id=old.get("issue_id") or "#0",
+        repo_key=old.get("repo_key") or "",
+        agent_type=old.get("agent_type") or "",
+        skill=old.get("skill") or "",
+        skill_id=old.get("skill_id") or 0,
+        prompt=old.get("prompt") or "",
+        cwd=cwd,
+        runtime_session_id=old.get("runtime_session_id") or "",
+        event_type=old.get("event_type") or "",
+        account=old.get("account") or "",
+        user_id=old.get("user_id") or 0,
+        repo_gitcode_token=old.get("repo_gitcode_token") or "",
+        env_extra=env_extra,
+        server_url=old.get("server_url") or "",
+        issue_session_id=issue_session_id,
+        pool_tag=_pool_tag,
+        pool_agent_type=_pool_tag if pool_agent_type is None else pool_agent_type,
+        pool_engine_ids=pool_engine_ids,
+        pool_selector=pool_selector,
+        pool_engine_source=old.get("pool_engine_source") or "",
+    )
+
+def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
+                      skip_debounce: bool = False):
+    """重派实现（公共路由 redispatch_event 与内部通道 redispatch_event_internal 共用）。
+
+    skip_debounce=True 只允许服务内调用传入（takeover abort 的原子重派）；HTTP 路径恒为 False。
     """
     import json as _json
     from src.kernel.session_manager import db_lock
@@ -835,7 +1035,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if _last:
             import time as _time
             try:
-                if _time.time() - float(_last) < 30:
+                if _time.time() - float(_last) < 30 and not skip_debounce:
                     raise HTTPException(status_code=409, detail={"code": 409, "message": "已重新派发过，请 30s 后再试"})
             except ValueError:
                 pass
@@ -849,6 +1049,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     # 1.0）归属校验：仅仓库归属人（managed_repos）可重派
     from src.api.deps import check_repo_access
     check_repo_access(user, evt.get("repo_key", "") or "")
+
+    # Issue #2547：旧版入口审计留痕已移至出口包装（成功 redispatch/失败 redispatch_failed
+    # 与主流程结果对齐，入口不再写——避免失败重派被记成成功）。
 
     # Issue #3201：接管 active 期间"重派"同样统一拦截（spec 目标第 1 段点名重派）。
     # 判定放在归属校验之后、任何建 task / 起 agent 分支之前：queued 复用直跑、local_only
@@ -875,9 +1078,6 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 "message": "接管进行中，已拦截重派（already_taken_over）",
                 "takeover_id": _tko_sess.get("id") or "",
             })
-
-    # Issue #587：重派操作强制审计留痕（actor/time/target_event/动作）
-    _audit_admin_action(evt.get("repo_key", "") or "", seq, "redispatch", user)
 
     # 1.0a）Issue #453 修复点 3：自循环被拦事件禁止重派（S7）——重派不得复活被拦事件。
     # 双源判定：① event_skipped 留痕（self_loop / self_loop_path_b / outbound_ledger_hit，
@@ -938,7 +1138,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
         # Issue #600：原事件标记 cancelled（被新任务接管，非失败态），避免流水线卡片残留失败
         try:
-            _mark_event_redispatched(seq, "(new)", "onboarding 重建任务")
+            _mark_event_redispatched(seq, None, "onboarding 重建任务")
         except Exception:
             pass
         try:
@@ -950,7 +1150,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if not (_res or {}).get("ok"):
             raise HTTPException(status_code=409, detail={"code": 409,
                 "message": f"引导重派失败：{(_res or {}).get('reason', 'unknown')}"})
-        return _redispatch_success("(new)", (_res or {}).get("seq", 0), original_seq=seq)
+        # Issue #2547：引导重派为任务级自愈（无新 agent 任务）——回执 task_id=None
+        # + note 说明，不再用 "(new)" 占位冒充任务 id。
+        return _redispatch_success(None, (_res or {}).get("seq", 0), original_seq=seq,
+                                   note="onboarding 重派走任务级自愈重建，不产生新 agent 任务（task_id 为空）")
 
     # 2) 查关联任务
     task_id = ""
@@ -1074,35 +1277,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 双池互斥由 enqueue_task 单点收口兜底（见 service.enqueue_task）。
         _pool_ids_l = old.get("pool_engine_ids") or ""
         _pool_sel_l = old.get("pool_selector") or ""
-        _new_task_id = enqueue_task(
-            agent_session_id=old.get("agent_session_id") or "",
-            runtime_id=_orig_rid,
-            event_seq=old.get("event_seq"),
-            issue_id=old.get("issue_id") or "#0",
-            repo_key=old.get("repo_key") or "",
-            agent_type=old.get("agent_type") or "",
-            skill=old.get("skill") or "",
-            skill_id=old.get("skill_id") or 0,
-            prompt=old.get("prompt") or "",
-            cwd=_cwd,
-            runtime_session_id=old.get("runtime_session_id") or "",
-            event_type=old.get("event_type") or "",
-            account=old.get("account") or "",
-            user_id=old.get("user_id") or 0,
-            repo_gitcode_token=old.get("repo_gitcode_token") or "",
-            env_extra=_rebuild_env,
-            server_url=old.get("server_url") or "",
-            issue_session_id=_sid,
-            pool_tag=old.get("agent_type") or "" if _is_plugin_mode() else "",
-            # [#1208 selector 重派修复 2026-11-11] 透传池三快照字段——原路径只拷
-            # pool_tag，selector/uid 池场景重派后 pool_selector 丢空、退化为广播抢单
-            # （实测 t_9db5dc22d459 selector+s2(25) → 重派 t_71bf707a1555 空选择器
-            # 被本机 2 抢走：沙箱场景静默失去圈池+隔离语义）。透传后 claim 按原
-            # selector 圈池，与首次派发同一把尺子（同源 selector_candidate_engines）。
-            pool_selector=_pool_sel_l,
-            pool_engine_ids=_pool_ids_l,
-            pool_engine_source=old.get("pool_engine_source") or "",
-        )
+        # Issue #2547：失败不吞——同机重试入队三段式收口（异常/未入队显式 409/500，
+        # 成功回执真实 task_id；字段组装收敛 _build_enqueue_kwargs 单一来源）
+        _new_task_id = _enqueue_task_verified(
+            seq, **_build_enqueue_kwargs(
+                old, runtime_id=_orig_rid, cwd=_cwd, env_extra=_rebuild_env,
+                issue_session_id=_sid, plugin=_is_plugin_mode(),
+                pool_agent_type="", pool_engine_ids=_pool_ids_l,
+                pool_selector=_pool_sel_l))
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
             try:
@@ -1141,7 +1323,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             pass
         log.info(f"[redispatch] seq={seq} local_only: same-machine retry on rid={_orig_rid} task={_new_task_id} by={user.get('username','')}")
         _mark_reissue_success(seq)
-        return _redispatch_success(_new_task_id or "(new)", seq, local_only=True,
+        return _redispatch_success(_new_task_id, seq, local_only=True,
                                    token_reissued=bool(_tok_reissued))
 
     # 3) 分支处理
@@ -1624,36 +1806,25 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                     account=old.get("account") or "",
                                     issue_number=old.get("issue_id") or "",
                                     scene_id_override=_redispatch_scene_override(evt))
-                _new_task_id = enqueue_task(
-                    agent_session_id=old.get("agent_session_id") or "",
-                    runtime_id=_rid,
-                    event_seq=old.get("event_seq"),
-                    issue_id=old.get("issue_id") or "#0",
-                    repo_key=old.get("repo_key") or "",
-                    agent_type=old.get("agent_type") or "",
-                    skill=old.get("skill") or "",
-                    skill_id=old.get("skill_id") or 0,
-                    prompt=old.get("prompt") or "",
-                    cwd=_cwd,
-                    runtime_session_id=old.get("runtime_session_id") or "",
-                    event_type=old.get("event_type") or "",
-                    account=old.get("account") or "",
-                    user_id=old.get("user_id") or 0,
-                    repo_gitcode_token=old.get("repo_gitcode_token") or "",
-                    env_extra=_rebuild_env,
-                    server_url=old.get("server_url") or "",
-                    issue_session_id=_sid,
-                    pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
-                    pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
-                    pool_engine_ids=_pool_ids_253,
-                    # [Issue #1208 补漏 2026-11-18] selector 与 id/uid 池三列互斥，此处已按
-                    # 场景现行配置成对解析（selector 模式=id 池空；id/uid 模式=selector 空），
-                    # 原「快照 selector 原样透传」会让场景改模式后的重派任务互斥死锁或退化成广播
-                    pool_selector=_rp_sel_253,
-                    pool_engine_source=old.get("pool_engine_source") or "",
-                )
+                # Issue #2547：失败不吞——终态重建入队三段式收口（异常/未入队显式
+                # 409/500 + 后置校验；字段组装收敛 _build_enqueue_kwargs 单一来源）
+                # pool 三字段按 [#1208 补漏 2026-11-18] 成对解析口径透传
+                # （selector 模式=id 池空；id/uid 模式=selector 空），快照 selector
+                # 原样透传会让场景改模式后的重派任务互斥死锁或退化成广播。
+                _new_task_id = _enqueue_task_verified(
+                    seq, **_build_enqueue_kwargs(
+                        old, runtime_id=_rid, cwd=_cwd, env_extra=_rebuild_env,
+                        issue_session_id=_sid, plugin=is_plugin_mode(),
+                        pool_engine_ids=_pool_ids_253,
+                        pool_selector=_rp_sel_253))
+                # Issue #2547 QA Spec-2：出口防御守卫——收口被旁路/契约破坏（返回空）
+                # 直落出口时，先于 reset_event_terminal 与幂等时间戳触发 500，事件保持
+                # 原终态语义，不再产生「悬挂 running + 500」。
+                if not _new_task_id:
+                    raise HTTPException(status_code=500, detail={"code": 500,
+                        "message": f"重派出出口缺少有效任务 id（seq={seq}，入队收口被旁路）"})
                 # Issue #521：终态重建的实际有效任务 = 新任务，回执不得再返回旧（终态）task_id
-                _effective_task_id = _new_task_id or "(new)"
+                _effective_task_id = _new_task_id
                 # If local direct engine, trigger direct execution (no worker will claim)
                 # Issue #253 改动1 守卫：_rid=0 时禁止触发直跑。runtime_credential_id(0) 返回 None，
                 # None or 0 → _cid=0 → _is_local_direct 误判 True → 空 engine_id=0 直跑。
@@ -1712,7 +1883,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             pass
                         from src.api.event_store import mark_event_redispatch_of as _mark_redisp
                         _mark_redisp(seq, seq)
-                        return _redispatch_success("(new)", seq)
+                        # Issue #2547：该路径产出新事件（A2A 重入），无新 agent 任务可指
+                        return _redispatch_success(None, seq,
+                                                   note="重派走事件重建（同 seq 重入），无新 agent 任务")
                     else:
                         raise HTTPException(status_code=409, detail={"code": 409,
                             "message": "重派失败：PR订阅场景引擎不可用或无QA节点"})
@@ -1764,7 +1937,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             pass
                         from src.api.event_store import mark_event_redispatch_of as _mark_redisp
                         _mark_redisp(_new_seq, seq)
-                        return _redispatch_success("(new)", _new_seq, original_seq=seq)
+                        return _redispatch_success(None, _new_seq, original_seq=seq,
+                                                   note="重派走 A2A 事件重建（新 seq 接管），无新 agent 任务")
                     else:
                         raise HTTPException(status_code=409, detail={"code": 409,
                             "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
@@ -1813,7 +1987,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         pass
                     from src.api.event_store import mark_event_redispatch_of as _mark_redisp
                     _mark_redisp(_rp_result.get("seq", 0) or seq, seq)
-                    return _redispatch_success("(new)", _rp_result.get("seq", 0), original_seq=seq)
+                    return _redispatch_success(None, _rp_result.get("seq", 0), original_seq=seq,
+                                               note="重派走 run_pipeline 事件重建，无新 agent 任务")
                 else:
                     raise HTTPException(status_code=409, detail={"code": 409,
                         "message": f"重派失败：run_pipeline 未成功（{_rp_result.get('event_type', 'unknown')}）"})
@@ -1838,9 +2013,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     except Exception:
         pass
 
-    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id or '(new)'} by={user.get('username','')}")
+    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id} by={user.get('username','')}")
     _mark_reissue_success(seq)
-    return _redispatch_success(_effective_task_id or "(new)", seq,
+    # Issue #2547：回执真实——只返回真实任务 id；空则 None（附 note），不再 "(new)" 占位
+    if not _effective_task_id:
+        return _redispatch_success(None, seq,
+                                   note="重派未产生新 agent 任务（事件级/引导级重建路径）",
+                                   token_reissued=bool(_tok_reissued))
+    return _redispatch_success(_effective_task_id, seq,
                                token_reissued=bool(_tok_reissued))
 
 
@@ -2849,7 +3029,8 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
     issue_id = evt["issue_id"]
     if not issue_id:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "事件无关联 Issue，无法流程回退"})
-    from src.api.session_store import get_issue_stage, set_issue_stage
+    from src.api.session_store import get_issue_stage
+    from src.domains.runtime.issues_center import set_issue_stage_with_pending_review_notify as set_issue_stage_with_notify
     allowed = {"vod": 0, "issue": 1, "coding": 2, "qa": 3, "sre": 4, "done": 5}
     to_stage = body.to_stage or "vod"
     if to_stage not in allowed:
@@ -2858,7 +3039,8 @@ def flow_reset(seq: int, body: FlowResetBody, request: Request):
     if allowed.get(to_stage, 0) >= allowed.get(cur, 0):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"只能回退到更早阶段（当前 {cur}）"})
     cancelled = _cancel_issue_tasks(evt["repo_key"], issue_id)
-    set_issue_stage(evt["repo_key"], issue_id, to_stage, evt["agent_type"])
+    # Issue #2419（#2419 移植）：流程回退入审核点 → 通知包装（真实变更才推 🔎 卡片）
+    set_issue_stage_with_notify(evt["repo_key"], issue_id, to_stage, evt["agent_type"])
     # 对话产出：线程留痕（🔄 流程操作）
     _add_thread_message(seq, evt["repo_key"], issue_id, evt["agent_type"], "system",
                         f"🔄 流程干预：回退到 {to_stage} 阶段，取消 {cancelled} 个任务")

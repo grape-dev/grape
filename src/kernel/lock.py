@@ -60,6 +60,23 @@ def renew_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
     return _pipeline.renew_distributed_lock(lock_key, _h, ttl, int(time.time()))
 
 
+def repo_dispatch_lease_key(repo_key: str) -> str:
+    """跨实例串行化仓库派发入队与组织解绑。"""
+    return f"repo-dispatch:{repo_key or ''}"
+
+
+def acquire_lock_with_retry(lock_key: str, ttl: int = 60, attempts: int = 20,
+                            interval: float = 0.05) -> bool:
+    """短等待抢锁；调用方负责在 finally 中 release。"""
+    attempts = max(1, int(attempts))
+    for attempt in range(attempts):
+        if acquire_lock(lock_key, ttl=ttl):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(max(0.0, float(interval)))
+    return False
+
+
 def cleanup_expired_locks():
     """清理过期锁（后台定时调用，5 分钟一次）。
 

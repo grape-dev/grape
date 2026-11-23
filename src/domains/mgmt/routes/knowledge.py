@@ -89,6 +89,20 @@ def _check_repo_member(user: dict, repo_key: str):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "权限校验失败"})
 
 
+_ORG_SCOPE = "org"
+
+
+def _reject_org_scope(row: dict):
+    """组织知识（scope='org'）只能走 /api/orgs/{id}/knowledge，旧端点一律 404。
+
+    Issue #2150 PR #1278 审查：组织知识复用 agent_shared_knowledge 后，旧
+    /api/knowledge/{id} 详情无成员校验、PUT/DELETE 只校验 created_by，可跨组织
+    读取正文并绕过 org 角色与生命周期（deprecated/archived 不可改）规则。
+    """
+    if (row or {}).get("scope") == _ORG_SCOPE:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+
+
 @router.get("", operation_id="knowledge_list", summary="List knowledge (paged)", description="Unified knowledge list: paged rows from DB only (stats live in a separate endpoint).")
 def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          repo: str = Query("", description="repo_key"),
@@ -105,9 +119,9 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
 
     from src.kernel.session_manager import db, db_lock
 
-    # 构建 WHERE 条件
-    where = "WHERE repo_key=?"
-    params = [repo_key]
+    # 构建 WHERE 条件（组织知识 scope='org' 由 /api/orgs/{id}/knowledge 独占，旧看板不展示）
+    where = "WHERE repo_key=? AND (scope IS NULL OR scope<>?)"
+    params = [repo_key, _ORG_SCOPE]
     if source:
         where += " AND source=?"
         params.append(source)
@@ -206,8 +220,8 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
             "SUM(CASE WHEN source='agent' THEN 1 ELSE 0 END),"
             "SUM(CASE WHEN source='manual' THEN 1 ELSE 0 END),"
             "SUM(CASE WHEN id NOT IN (SELECT DISTINCT knowledge_id FROM scene_knowledge_ref WHERE enabled=1) THEN 1 ELSE 0 END) "
-            "FROM agent_shared_knowledge WHERE repo_key=?",
-            (repo_key,)
+            "FROM agent_shared_knowledge WHERE repo_key=? AND (scope IS NULL OR scope<>?)",
+            (repo_key, _ORG_SCOPE)
         ).fetchone()
     return {
         "system": stats_row[0] or 0,
@@ -342,6 +356,7 @@ def _check_ref_permission(knowledge_id: int, user: dict):
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    _reject_org_scope(row)
     if row["source"] == "manual":
         if row["created_by"] != user.get("username"):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
@@ -573,6 +588,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    _reject_org_scope(row)
 
     content = read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
@@ -629,6 +645,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    _reject_org_scope(row)
     if row["source"] != "manual":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可编辑"})
     if row["created_by"] != user.get("username"):
@@ -677,6 +694,7 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
     row = _get_knowledge_by_id(knowledge_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "知识不存在"})
+    _reject_org_scope(row)
     if row["source"] != "manual":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "系统生成的知识不可删除"})
     if row["created_by"] != user.get("username"):

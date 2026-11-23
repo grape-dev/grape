@@ -19,12 +19,6 @@ from src.kernel.ports import PortNotBound
 REPO = "gitcode:probe/errsurf"
 
 
-@pytest.fixture(autouse=True)
-def _bind(monkeypatch):
-    """种子与读取绑定同一个连接（全树收集时其它模块会换库）。"""
-    monkeypatch.setattr(svc, "db", svc.db, raising=False)
-
-
 def _cleanup():
     db, lock = svc.db, svc.db_lock
     with lock:
@@ -208,7 +202,7 @@ def test_list_and_get_session_endpoints_are_200(client):
     assert got.json()["session"]["id"] == sid
 
 
-UUID_USER = "aebb29af-64b1-40ce-84fc-02ba3e335066"
+UUID_USER = "00000000-0000-4000-8000-0000000000aa"  # 合成 uuid（RFC 4122 v4 形态）
 
 
 def _as(client, uid, name="uuid-user"):

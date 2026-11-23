@@ -13,6 +13,18 @@ Grape 是 MIT 许可的开源项目，托管（官方运行）与自托管（你
 | 开始方式 | 注册后连仓库 | 本目录的两条安装路径 |
 | 前提 | 无 | Docker，或 Python 3.10+（Agent CLI 另装） |
 | 边界 | 不能改代码、不能离线 | 可改代码、可离线、升级自理 |
+## 接入你的 Agent：装 grape 插件
+
+无论走哪条路径，**平台跑起来之后，让你的 Agent 连上 Grape 靠的是官方插件**：
+
+| 插件 | 宿主 | 形态 |
+|---|---|---|
+| grape-kit（`@grape-dev/grape-kit`） | OpenCode / Codex / CodeArts / WorkBuddy / openclaw | MCP 协议 · 36 工具 |
+| grape-dsh（`@grape-dev/dsh-grape`） | DeepSeek Harness (dsh) | 专用插件 · 33 工具 + 侧边栏面板 |
+
+一条口令即可让 Agent 自动安装：**根据 https://www.grapedev.cn/skills.md 为我安装 Grape 平台的插件（按我的宿主选 grape-kit 或 grape-dsh）与全部官方技能。**
+
+安装、宿主差异与自检详见使用指南的 [grape 插件](../usage/grape-kit.md) 一节。
 
 ## 两条安装路径怎么选
 

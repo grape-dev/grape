@@ -10,8 +10,6 @@
 
 import hashlib
 
-import pytest
-
 from src.kernel.a2a_context import a2a_context_key, a2a_event_context_key
 
 

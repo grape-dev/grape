@@ -237,6 +237,12 @@ def test_platform_bot_endpoint_writes_encrypted_and_clears(session, monkeypatch)
     monkeypatch.setattr(engine_mod, "get_engine", lambda: session.get_bind())
     monkeypatch.setattr(R, "uow_write", lambda fn: (fn(session), session.commit()))
 
+    # 本分支起：存令牌会用平台 /user 回答「我是谁」（28c9d6f6c）。测试不出网，
+    # 所以在这里打桩校验结果；断言不变。
+    import src.domains.mgmt.admin.config_store as CS
+
+    monkeypatch.setattr(CS, "verify_token", lambda p, t: {"login": "gitee-bot"})
+
     out = R.set_platform_bot("gitee", R.BotBody(username="gitee-bot", token="tok-1"),
                              admin={"username": "t"})
     assert out["bot"]["token_present"] is True and "token" not in out["bot"]
@@ -334,7 +340,7 @@ def test_is_ciphertext_distinguishes_plaintext_from_ciphertext():
     from src.domains.mgmt.auth.credential_crypto import encrypt, is_ciphertext
 
     assert not is_ciphertext("")
-    assert not is_ciphertext("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+    assert not is_ciphertext("ghp_abcdefghijklmnopqrstuvwxyz0123456789")  # secrets-check: allow
     assert not is_ciphertext("gitcode-token:with-colon:inside")
     assert is_ciphertext(encrypt("ghp_real"))
 

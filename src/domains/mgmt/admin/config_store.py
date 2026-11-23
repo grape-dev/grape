@@ -613,7 +613,7 @@ def verify_token(provider: str, token: str) -> dict:
     api_base/api_auth 按平台卡）——任何已配平台可用，gitcode/github
     存量行为由内置卡对齐。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     user_data = create_provider(provider).verify_token(token)
     if not isinstance(user_data, dict):
         raise RuntimeError(f"verify_token({provider}): empty user info")
@@ -650,7 +650,7 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     R21.1.4: 失败时仓库保持旧状态，记录 warning。
     R21.1.5: 过期标记已在 save_config 中清除（R16.3.2）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.kernel.session_manager import db, db_lock
     from src.domains.mgmt.user.db import get_webhook_url, _get_managed_webhook_id
     from src.kernel.repo_key import split_owner_repo

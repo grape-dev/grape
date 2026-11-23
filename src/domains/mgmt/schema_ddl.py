@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
+    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription | org
     is_pinned   INTEGER NOT NULL DEFAULT 0,
     pinned_at   VARCHAR(32) DEFAULT NULL,
     UNIQUE (scene_id, repo_key)
@@ -271,7 +271,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
     preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
     is_active   INTEGER DEFAULT 1,
-    scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
+    scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo/org
     repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
     created_by  VARCHAR(64) DEFAULT '',
     updated_by  VARCHAR(64) DEFAULT '',
@@ -382,6 +382,18 @@ CREATE TABLE IF NOT EXISTS organization (
     settings        TEXT DEFAULT '{}',
     max_members     INTEGER DEFAULT 50,
     max_workers     INTEGER DEFAULT 10,
+    max_repos       INTEGER DEFAULT 20,
+    org_repo_key    TEXT DEFAULT '',
+    org_repo_provider TEXT DEFAULT '',
+    org_repo_owner  TEXT DEFAULT '',
+    org_repo_name   TEXT DEFAULT '',
+    org_repo_path   TEXT DEFAULT '',
+    org_repo_private INTEGER DEFAULT 1,
+    org_scene_id    TEXT DEFAULT '',
+    provision_status TEXT DEFAULT 'none',
+    provision_error TEXT DEFAULT '',
+    provisioned_at  TEXT DEFAULT '',
+    provision_attempt TEXT DEFAULT '',
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now'))
 )"""
@@ -798,3 +810,144 @@ OFFICIAL_SANDBOX_DOMAINS: tuple[tuple[str, str, str, str, int], ...] = (
     ("api.github.com", "PATCH", "*", "https", 443),
     ("api.github.com", "DELETE", "*", "https", 443),
 )
+# ===== Issue #2112：组织需求跨仓下派 =====
+# 下派批次：一个组织需求 → N 个目标仓库子 Issue 的编排单元。
+_ORG_DISPATCH_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_dispatch (
+    id                TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    org_id            TEXT NOT NULL DEFAULT '',
+    org_issue_number  TEXT NOT NULL DEFAULT '',
+    org_repo_key      TEXT NOT NULL DEFAULT '',
+    scene_id          TEXT DEFAULT '',
+    status            TEXT NOT NULL DEFAULT 'planning',
+    plan_json         TEXT DEFAULT '{}',
+    context_json      TEXT DEFAULT '{}',
+    context_hash      TEXT DEFAULT '',
+    idempotency_key   TEXT DEFAULT NULL,
+    created_by        TEXT NOT NULL DEFAULT '',
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# 下派目标：每个 (dispatch, repo) 唯一，承载子 Issue 与终态；UNIQUE 为幂等上界。
+_ORG_DISPATCH_TARGET_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_dispatch_target (
+    id                TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    dispatch_id       TEXT NOT NULL,
+    repo_key          TEXT NOT NULL,
+    scene_id          TEXT DEFAULT '',
+    child_issue_number TEXT DEFAULT '',
+    child_task_id     INTEGER DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'pending',
+    done_when         TEXT NOT NULL DEFAULT 'issue_done',  -- issue_done / pr_merged / task_terminal
+    pr_number         INTEGER DEFAULT 0,
+    error             TEXT DEFAULT '',
+    started_at        TEXT DEFAULT NULL,
+    finished_at       TEXT DEFAULT NULL,
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now')),
+    UNIQUE (dispatch_id, repo_key)
+)
+"""
+
+# Issue #2251：聚合触发幂等台账（dispatch_id + terminal_status 唯一）。
+# sweeper 首次发现批次进入终态时 INSERT OR IGNORE 抢占，只有抢占成功者写收口评论
+# 并持久化 aggregate_recheck 事件；重复 sweep / 多实例并发都只触发一次。
+_ORG_DISPATCH_AGGREGATE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_dispatch_aggregate (
+    id                TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    dispatch_id       TEXT NOT NULL,
+    terminal_status   TEXT NOT NULL DEFAULT '',
+    status            TEXT NOT NULL DEFAULT 'pending',  -- pending / finalized / triggered
+    seq               INTEGER DEFAULT 0,                -- 聚合重排事件 seq
+    comment_posted    INTEGER NOT NULL DEFAULT 0,
+    issue_status      TEXT DEFAULT '',                  -- 本次收口后组织 Issue 状态
+    error             TEXT DEFAULT '',
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now')),
+    UNIQUE (dispatch_id, terminal_status)
+)
+"""
+
+# ===== 组织上下文快照（下派 L3 快照引用）=====
+# 正文落平台快照目录，DB 只存 manifest（路径/哈希/大小），不存正文。
+_ORG_CONTEXT_SNAPSHOT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_context_snapshot (
+    id            TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    org_id        TEXT NOT NULL DEFAULT '',
+    demand_id     TEXT NOT NULL DEFAULT '',      -- 组织需求 Issue 编号
+    dispatch_id   TEXT NOT NULL DEFAULT '',      -- 下派批次
+    storage_path  TEXT NOT NULL DEFAULT '',        -- 相对 WORKSPACE_DIR 的快照目录
+    files_json    TEXT NOT NULL DEFAULT '{}',      -- manifest：{rel: {size,hash,source,storage}}
+    content_hash  TEXT NOT NULL DEFAULT '',
+    total_bytes   INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT DEFAULT (datetime('now'))
+)
+"""
+
+
+# ===== Issue #2150：组织上下文（brief/policy/decision）存储 =====
+# 每 org 每 kind 仅 1 条 active：由发布事务内行锁降级旧 active 实现（MySQL 无部分唯一索引）。
+# 正文直接落 content 列（上下文片段，非知识库正文，后者走 file_path/obs_key 索引）。
+_ORG_CONTEXT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_context (
+    id               TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    org_id           TEXT NOT NULL DEFAULT '',
+    kind             TEXT NOT NULL DEFAULT 'brief',       -- brief / policy / decision
+    ctx_key          TEXT NOT NULL DEFAULT 'default',     -- 同 kind 内条目身份（版本序列）
+    title            TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL DEFAULT '',
+    lifecycle_status TEXT NOT NULL DEFAULT 'draft',       -- draft / active / deprecated
+    version          INTEGER NOT NULL DEFAULT 1,          -- 同 (org,kind,ctx_key) 递增
+    owner_id         TEXT NOT NULL DEFAULT '',
+    valid_until      TEXT NOT NULL DEFAULT '',
+    created_by       TEXT NOT NULL DEFAULT '',
+    updated_by       TEXT NOT NULL DEFAULT '',
+    created_at       TEXT DEFAULT (datetime('now')),
+    updated_at       TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# ===== 组织仓库地图（Issue #2112 组织能力路由）=====
+_ORG_REPO_MAP_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_repo_map (
+    id             TEXT PRIMARY KEY,           -- uuid（32 hex，Python 侧生成，禁自增）
+    org_id         TEXT NOT NULL DEFAULT '',
+    repo_key       TEXT NOT NULL DEFAULT '',
+    full_name      TEXT DEFAULT '',
+    is_org_repo    INTEGER DEFAULT 0,
+    status         TEXT DEFAULT 'none',
+    purpose        TEXT DEFAULT '',
+    domains_json   TEXT DEFAULT '[]',
+    keywords_json  TEXT DEFAULT '[]',
+    interfaces_json TEXT DEFAULT '[]',
+    depends_on_json TEXT DEFAULT '[]',
+    not_owns_json  TEXT DEFAULT '[]',
+    confidence     REAL DEFAULT 0,
+    source_commit  TEXT DEFAULT '',
+    summary_md     TEXT DEFAULT '',
+    error          TEXT DEFAULT '',
+    analyzed_at    TEXT DEFAULT '',
+    updated_at     TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# ===== 组织仓库 AI 分析运行/结果台账（与确定性地图分表，避免互相清空）=====
+_ORG_REPO_AI_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_repo_ai (
+    org_id         TEXT NOT NULL DEFAULT '',
+    repo_key       TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT '',     -- queued / running / succeeded / failed / skipped
+    result_json    TEXT DEFAULT '',              -- 模型回传的原始结构化结果
+    error          TEXT DEFAULT '',
+    engine_id      INTEGER DEFAULT 0,
+    source_commit  TEXT DEFAULT '',
+    result_hash    TEXT DEFAULT '',
+    triggered_by   TEXT DEFAULT '',              -- link / schedule / manual
+    analyzed_at    TEXT DEFAULT '',
+    created_at     TEXT DEFAULT (datetime('now')),
+    updated_at     TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (org_id, repo_key)
+)
+"""

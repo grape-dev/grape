@@ -31,8 +31,15 @@ _VALID_ISSUE_WRITE_FORM = {"repo_path", "owner_param"}
 _VALID_BRANCH_CREATE_FORM = {"form", "refs_sha"}
 _VALID_WEBHOOK_VERIFY = ("hmac", "token_compare")
 # D105-19：托管 webhook 形态（分派 webhook 三件套的实现家族）
-_VALID_WEBHOOK_DIALECTS = ("github_web", "gitee_v5")
+# Issue #3580：gitlab_v4 = GitLab /projects/{id}/hooks 家族（自建实例可复用）
+_VALID_WEBHOOK_DIALECTS = ("github_web", "gitee_v5", "gitlab_v4")
 _VALID_CLONE_AUTH = ("x_access_token", "oauth2", "basic_password")
+
+# 一实例一卡（Issue #3580）：卡名即 provider。仅允许字母/数字/下划线/短横线，
+# 长度受限；显式拒绝 `@`（避免把账号/实例语法混进 provider 前缀）。
+_PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# host 为裸主机名（可带合法端口），不含 scheme/路径/内嵌凭据。
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$")
 
 
 @dataclass(frozen=True)
@@ -61,11 +68,17 @@ class PlatformCard:
     # D105-19：平台默认 workflows 写权限（三态回退位，替代 provider=="github" 硬分派）。
     # github=False（App token 无 workflow scope，push 前删 .github/workflows）；其余平台 True。
     workflows_write: bool = True
+    # 建仓可选参数（auto_init/default_branch）能力位：卡驱动替代 kernel 内
+    # 二元 provider 字面量分叉。true = 该平台适配器接受这两个可选参数。
+    create_repo_options: bool = False
     clone_auth: str = "x_access_token"  # x_access_token | oauth2 | basic_password
     token_env: str = ""               # BOT_<PROVIDER>_TOKEN 环境变量名（空=派生）
     bot_username: str = ""            # B2：bot 身份（空=无 bot 协作能力）
     user_images_base: str = ""        # 平台编辑器图片附件基址（空=该平台无此机制）
     download_base: str = ""           # 仓库 ZIP 下载基址（github=codeload，gitcode=raw）
+    # Issue #3580：自建/私有实例的 TLS CA（PEM 绝对路径，仅 git 传输使用）。
+    # 空=使用系统 CA；改卡即生效，不引入环境变量。
+    ca_bundle: str = ""
     issue_search: bool = False        # D36/S56：有无 issue 搜索端点（策略能力位，非平台名）
     issue_write_form: str = "repo_path"  # D41/S61：issue 写端点形态（repo_path=存量 /repos/{o}/{r}/issues；owner_param=gitee /repos/{o}/issues+repo 入 body，实弹观测）
     branch_create_form: str = "form"     # D44/S66：建分支形态（form=Gitee 系 v5 POST /branches {branch_name,refs}；refs_sha=GitHub 查 sha→POST /git/refs，存量两形态）
@@ -131,6 +144,27 @@ class PlatformCardError(ValueError):
     """平台卡构建失败（校验 invariant 不满足）。"""
 
 
+class PlatformCardMissingError(ValueError):
+    """provider 未注册（三条来源全断：表/契约、文件卡、代码默认都没有）。
+
+    Issue #3632：未知 provider 原先抛裸 ValueError，被上层与"工作区 git 目录
+    不可写"混为一谈，任务以 completed/exit 0 收尾却没有任何仓库。带上稳定的
+    `code` 让上游按"平台未注册"分桶上报，不再伪装成权限问题。
+    """
+
+    code = "platform_not_registered"
+
+    def __init__(self, provider: str, detail: str = "", code: str | None = None):
+        # code 可覆盖类属性：取卡通道不可用时传 platform_card_contract_unavailable，
+        # 让上游按「修链路」而不是「配卡」分流（2026-11-21）。
+        if code:
+            self.code = code
+        self.provider = provider
+        base = (f"{provider!r} 未注册为仓库平台（no platform card）："
+                f"表/契约、configs/platforms 文件、代码内置默认三处都没有该平台")
+        super().__init__(f"{base}{('；' + detail) if detail else ''}")
+
+
 def _build_brand_color(provider: str, raw: dict) -> str:
     """台阶2：brand_color 校验（#RRGGBB 十六进制；空串=未配置合法）。"""
     c = str(raw.get("brand_color") or "").strip()
@@ -139,6 +173,64 @@ def _build_brand_color(provider: str, raw: dict) -> str:
     if len(c) != 7 or c[0] != "#" or any(ch not in "0123456789abcdefABCDEF" for ch in c[1:]):
         raise PlatformCardError(f"{provider}: brand_color 必须是 #RRGGBB 十六进制色值: {c!r}")
     return c
+
+
+def _validate_provider_name(provider: str) -> None:
+    """Issue #3580/R2：卡名即 provider，一实例一卡。
+
+    只允许 `[A-Za-z0-9_-]`、长度 1..64；显式拒绝 `@`（账号/实例语法不得混入
+    provider 前缀），并给出「每实例一卡」的可执行提示。
+    """
+    if "@" in (provider or ""):
+        raise PlatformCardError(
+            f"provider 名不得包含 '@'（每实例一卡）：{provider!r}——"
+            "请为每个自建 GitLab 实例单独建卡，如 gitlab-corp")
+    if not provider or not _PROVIDER_NAME_RE.match(provider):
+        raise PlatformCardError(
+            f"provider 名非法: {provider!r}（仅允许 [A-Za-z0-9_-]，长度 1..64）")
+
+
+def _validate_host(provider: str, host: str) -> None:
+    """Issue #3580/R3：host 为裸主机名（可带合法端口），不含 scheme/路径/凭据。"""
+    if not host or not _HOST_RE.match(host) or ".." in host:
+        raise PlatformCardError(f"{provider}: host 非法: {host!r}（应为裸主机名，可带端口）")
+
+
+def _validate_instance_url(provider: str, name: str, url: str, *, required: bool) -> None:
+    """Issue #3580/R3：实例 URL 必须 https、无内嵌凭据/query/fragment/`..`。"""
+    if not url:
+        if required:
+            raise PlatformCardError(f"{provider}: {name} 不能为空")
+        return
+    import urllib.parse as _up
+    try:
+        parts = _up.urlsplit(url)
+    except Exception:
+        raise PlatformCardError(f"{provider}: {name} 非法: {url!r}")
+    if parts.scheme != "https":
+        raise PlatformCardError(f"{provider}: {name} 必须使用 https: {url!r}")
+    if not parts.hostname:
+        raise PlatformCardError(f"{provider}: {name} 缺少主机名: {url!r}")
+    if parts.username or parts.password or "@" in parts.netloc:
+        raise PlatformCardError(f"{provider}: {name} 不得内嵌凭据: {url!r}")
+    if parts.query or parts.fragment:
+        raise PlatformCardError(f"{provider}: {name} 不得包含 query/fragment: {url!r}")
+    path = parts.path or ""
+    if ".." in path.split("/"):
+        raise PlatformCardError(f"{provider}: {name} 不得包含 '..' 路径段: {url!r}")
+
+
+def _build_ca_bundle(provider: str, raw: dict) -> str:
+    """Issue #3580/R4：ca_bundle 为 PEM 绝对路径（空=系统 CA）。"""
+    raw_ca = str(raw.get("ca_bundle") or "").strip()
+    if not raw_ca:
+        return ""
+    import os as _os
+    if "\x00" in raw_ca or not _os.path.isabs(raw_ca):
+        raise PlatformCardError(f"{provider}: ca_bundle 必须是绝对路径: {raw_ca!r}")
+    if not _os.path.isfile(raw_ca):
+        raise PlatformCardError(f"{provider}: ca_bundle 文件不存在: {raw_ca!r}")
+    return raw_ca
 
 
 # 台阶3：resources 段合法键（声明化资源 API 映射）
@@ -351,25 +443,47 @@ def _opt_bool(raw: dict, key: str) -> "bool | None":
     return None
 
 
+# 覆盖层领域对象在 card_overrides.py（值对象 + 纯函数），表行投影在 card_projection.py。
+# 这里保留同名薄壳：卡域的历史公开面（被 admin/测试直接引用），实现只此一份。
+from src.domains.runtime.vcs.card_overrides import (  # noqa: E402
+    CardOverrides as _CardOverrides,
+    diff_card_fields as _diff_card_fields,
+)
+
+
+def card_field_overrides(submitted: dict, card: "PlatformCard") -> dict:
+    """管理面提交值与基线卡的字段差异（A2 覆盖层，只记变化过的键）。"""
+    return _diff_card_fields(submitted, card)
+
+
+def apply_card_overrides(base_raws: dict, overrides: dict) -> None:
+    """把覆盖层叠加到卡 raw（原地）。必须在文件/meta/表行之后叠。"""
+    _CardOverrides.from_mapping(overrides).apply_to(base_raws)
+
+
 def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     """Builder：dict → PlatformCard，校验失败抛 PlatformCardError（S18 校验面）。"""
-    if not provider or not isinstance(provider, str) or not provider.replace("_", "").isalnum():
+    if not isinstance(provider, str):
         raise PlatformCardError(f"provider 名非法: {provider!r}")
+    _validate_provider_name(provider)
     if not isinstance(raw, dict):
         raise PlatformCardError(f"{provider}: 配置必须是对象")
     dialect = raw.get("dialect", "github")
     if dialect not in _VALID_DIALECTS:
         raise PlatformCardError(f"{provider}: dialect 必须是 {'/'.join(_VALID_DIALECTS)}，得到 {dialect!r}")
     host = str(raw.get("host") or "").strip()
-    if not host or "/" in host or " " in host:
-        raise PlatformCardError(f"{provider}: host 非法: {host!r}")
+    _validate_host(provider, host)
     webhook_path = str(raw.get("webhook_path") or f"/webhook/{provider}")
     if not webhook_path.startswith("/webhook/") or len(webhook_path) <= len("/webhook/"):
         raise PlatformCardError(f"{provider}: webhook_path 必须形如 /webhook/<name>: {webhook_path!r}")
-    api_base = str(raw.get("api_base") or f"https://{host}").strip().rstrip("/")
-    if not api_base.startswith(("http://", "https://")):
-        raise PlatformCardError(f"{provider}: api_base 非法: {api_base!r}")
-    api_auth = raw.get("api_auth", "query_token" if dialect == "github" else "bearer_header")
+    api_base = str(raw.get("api_base") or _dialect_default(dialect, "api_base", host)
+                   or f"https://{host}").strip().rstrip("/")
+    _validate_instance_url(provider, "api_base", api_base, required=True)
+    download_base = str(raw.get("download_base") or _dialect_default(dialect, "download_base", host)
+                        or "").strip().rstrip("/")
+    _validate_instance_url(provider, "download_base", download_base, required=False)
+    api_auth = (raw.get("api_auth") or _dialect_default(dialect, "api_auth", host)
+                or ("query_token" if dialect == "github" else "bearer_header"))
     if api_auth not in _VALID_API_AUTH:
         raise PlatformCardError(f"{provider}: api_auth 必须是 {'/'.join(_VALID_API_AUTH)}")
     webhook_verify = raw.get("webhook_verify", "hmac" if dialect == "github" else "token_compare")
@@ -378,10 +492,12 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     # D105-19：webhook 形态（github_web/gitee_v5）。必须卡显式声明——同为 github
     # API 方言的 gitcode/gitee webhook 形态实为 v5，从 dialect 派生会静默换家族，
     # 故不做缺省推导；未声明时托管消费侧 fail-closed（显式报错，不猜）。
-    webhook_dialect = str(raw.get("webhook_dialect") or "")
+    webhook_dialect = str(raw.get("webhook_dialect")
+                          or _dialect_default(dialect, "webhook_dialect", host) or "")
     if webhook_dialect and webhook_dialect not in _VALID_WEBHOOK_DIALECTS:
         raise PlatformCardError(f"{provider}: webhook_dialect 必须是 {'/'.join(_VALID_WEBHOOK_DIALECTS)}: {webhook_dialect!r}")
-    clone_auth = raw.get("clone_auth", "x_access_token")
+    clone_auth = (raw.get("clone_auth") or _dialect_default(dialect, "clone_auth", host)
+                  or "x_access_token")
     if clone_auth not in _VALID_CLONE_AUTH:
         raise PlatformCardError(f"{provider}: clone_auth 必须是 {'/'.join(_VALID_CLONE_AUTH)}")
     token_env = str(raw.get("token_env") or "").strip()
@@ -416,17 +532,21 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         dialect=dialect,
         host=host,
         webhook_path=webhook_path,
-        event_header=str(raw.get("event_header") or f"X-{provider.capitalize()}-Event"),
+        event_header=str(raw.get("event_header")
+                         or _dialect_default(dialect, "event_header", host)
+                         or f"X-{provider.capitalize()}-Event"),
         api_base=api_base,
         api_auth=api_auth,
         webhook_verify=webhook_verify,
         webhook_dialect=webhook_dialect,
         workflows_write=bool(raw.get("workflows_write", True)),
+        create_repo_options=bool(raw.get("create_repo_options", False)),
         clone_auth=clone_auth,
         token_env=token_env,
         bot_username=str(raw.get("bot_username") or ""),
         user_images_base=str(raw.get("user_images_base") or ""),
-        download_base=str(raw.get("download_base") or ""),
+        download_base=download_base,
+        ca_bundle=_build_ca_bundle(provider, raw),
         issue_search=bool(raw.get("issue_search", False)),
         issue_write_form=str(raw.get("issue_write_form", "repo_path")),
         branch_create_form=str(raw.get("branch_create_form", "form")),
@@ -458,7 +578,11 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
         global_bot_meta_key=str(raw.get("global_bot_meta_key") or f"global_bot_{provider}_token"),
         global_bot_status_meta_key=str(raw.get("global_bot_status_meta_key")
                                        or f"global_{provider}_bot_token_status"),
+        # 方言默认优先：GitLab 17.0 起 PAT 页从 /profile/personal_access_tokens 迁到
+        # /-/user_settings/personal_access_tokens（旧路由移除后是 404），gitcode/gitee 仍是
+        # /profile/...，所以不能一个模板套所有方言。
         pat_create_url=str(raw.get("pat_create_url")
+                           or _dialect_default(dialect, "pat_create_url", host)
                            or f"https://{host}/profile/personal_access_tokens"),
         brand_color=_build_brand_color(provider, raw),
         legacy_token_symbol=str(raw.get("legacy_token_symbol") or "").strip(),
@@ -469,6 +593,30 @@ def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     )
 
 
+# Issue #3580 复审：方言族默认值——自建实例只给 dialect + host 即可接入。
+# 为什么只有 gitlab：该方言当前只有 gitlab_v4 一族 webhook（1:1 映射），按方言推导
+# 不会换族；github 方言下 gitcode/gitee 实为 gitee_v5（D105-19 因此禁止推导）。
+# 只补「键缺席」的字段，卡里显式给值一律优先（少数自建实例 API 前缀不同可覆盖）。
+_DIALECT_DEFAULTS: dict[str, dict] = {
+    "gitlab": {
+        "api_base": "https://{host}/api/v4",
+        "api_auth": "private_token",
+        "clone_auth": "oauth2",
+        "webhook_dialect": "gitlab_v4",
+        "event_header": "X-Gitlab-Event",
+        "download_base": "https://{host}",
+        # GitLab 17.0（2024-05）删除了 /profile/personal_access_tokens 旧路由，
+        # PAT 页迁到 /-/user_settings/personal_access_tokens（自建实例同构）。
+        "pat_create_url": "https://{host}/-/user_settings/personal_access_tokens",
+    },
+}
+
+
+def _dialect_default(dialect: str, key: str, host: str) -> str:
+    tpl = str((_DIALECT_DEFAULTS.get(dialect) or {}).get(key) or "")
+    return tpl.replace("{host}", host) if tpl else ""
+
+
 # 内置默认：三平台与现状行为一致（D14 存量回归锁的基线）
 _DEFAULT_CARDS_RAW: dict[str, dict] = {
     "gitcode": {
@@ -477,6 +625,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
         "webhook_path": "/webhook/gitcode", "event_header": "X-GitCode-Event",
         "api_base": "https://gitcode.com/api/v5", "api_auth": "query_token",
         "webhook_verify": "hmac", "clone_auth": "x_access_token",
+        "create_repo_options": True,
         "bot_username": "my_grape_bot",
         "user_images_base": "https://raw.gitcode.com/user-images",
         "download_base": "https://raw.gitcode.com",
@@ -484,6 +633,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
     "github": {
         "name": "GitHub", "dialect": "github", "host": "github.com",
         "webhook_dialect": "github_web", "workflows_write": False,
+        "create_repo_options": True,
         "issue_search": True, "branch_create_form": "refs_sha",
         "webhook_path": "/webhook/github", "event_header": "X-GitHub-Event",
         "api_base": "https://api.github.com", "api_auth": "token_header",
@@ -495,6 +645,7 @@ _DEFAULT_CARDS_RAW: dict[str, dict] = {
     },
     "gitlab": {
         "name": "GitLab", "dialect": "gitlab", "host": "gitlab.com",
+        "webhook_dialect": "gitlab_v4",
         "webhook_path": "/webhook/gitlab", "event_header": "X-Gitlab-Event",
         "api_base": "https://gitlab.com/api/v4", "api_auth": "private_token",
         "webhook_verify": "token_compare", "clone_auth": "oauth2",
@@ -509,6 +660,10 @@ _CACHE: dict[str, PlatformCard] = {}
 _cache_lock = threading.Lock()
 _cache_ts: float = 0.0
 _CACHE_TTL = 300.0
+#: 最近一次装配是否降级（"" = 正常）。取值见 card_sources 的 degraded：
+#: "contract_unavailable" / "contract_error" / "contract_empty"。
+#: 与卡缓存同生命周期（_load_cards 每次重建都会覆盖），读它的人就是读卡的人。
+_degraded_reason: str = ""
 _loaded = False
 
 
@@ -563,47 +718,69 @@ def _builtin_raws_from_dir(dir_path: str) -> "dict[str, dict]":
 
 
 _TABLE_SKIP = {"id", "provider", "source", "config_hash", "created_at", "updated_at", "enabled"}
-# 跨域读原语返回的列（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）
+# 契约列**镜像**（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）。
+# Issue #3632 起运行时不再用本清单做投影——列白名单只由 mgmt 契约/owner 原语
+# 提供（避免第二份投影漂移）；此常量只作为静态锚点，供
+# tests/runtime/test_platform_config_keys_accepted.py 校验两侧清单不漂移。
 _PLATFORM_CARD_COLUMNS = (
     "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
     "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
-    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "issue_write_form", "branch_create_form", "create_repo_options", "issue_search",
+    "git_tree_family",
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 # 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
 
 
+def _table_source() -> "object":
+    """表来源（owner 域 `grape_t_repo_platforms`）——列投影口径由本模块持有。
+
+    来源本身的"判据收口/留痕/失败回落"在 `card_sources.OwnerTableCardSource`；
+    这里只负责把"非卡字段"清单（`_TABLE_SKIP`）喂给它；列白名单由
+    mgmt 契约（`get_repo_platform_cards`）/ owner 原语单一提供，不再复制一份。
+    """
+    from src.domains.runtime.vcs.card_sources import OwnerTableCardSource
+
+    return OwnerTableCardSource(skip_columns=_TABLE_SKIP)
+
+
+def _server_source() -> "object":
+    """契约来源（worker 引擎进程→主控 `/api/runtime/platform-cards`）。"""
+    from src.domains.runtime.vcs.card_sources import ServerContractCardSource
+
+    return ServerContractCardSource()
+
+
+def row_to_card_raw(row: dict) -> dict:
+    """表行 → 卡 raw 的公开面（实现在 card_projection：空值列省略，假值保留）。
+
+    Issue #3580：管理面/测试直接引用；卡域公开面保持薄壳，实现只此一份。
+    """
+    from src.domains.runtime.vcs.card_projection import row_to_card_raw as _impl
+
+    return _impl(row, _PLATFORM_CARD_COLUMNS, _TABLE_SKIP)
+
+
 def _raws_from_table() -> dict:
-    """D109：表就绪后从 grape_t_repo_platforms（+caps）构造平台卡 raw。
+    """D109 表卡 raw（委托 `OwnerTableCardSource`，保留模块级薄壳以兼容既有调用/测试）。
 
     未就绪 / 读失败 → 空 dict，调用方保持「meta > 文件 > 代码兜底」原路径。
+
+    Issue #3632（第 1/2 层）：原实现第一句是 `if not is_table_backed(): return {}`
+    —— 静默返回空字典，调用方看到的是"这个平台没有卡"，不是"读卡失败"；而
+    `is_table_backed()` 的判据是**本进程的库**，在无 mgmt DSN 的 worker/engine
+    进程里恒假，于是表卡路径对该进程永久关闭。现在判据收口到 owner 域并由
+    来源对象留痕（debug 带 owner_dsn 状态），不可用即让位给契约来源。
     """
-    try:
-        from src.domains.platform.public import is_table_backed
+    return _table_source().raws()
 
-        if not is_table_backed():
-            return {}
-        # 平台对象表归 mgmt 域：拆库拓扑下必须走 mgmt public 原语（lib 命名查询），
-        # 不能在本进程库里 ORM 直读——那是另一份空/陈旧副本（三库四进程守护）。
-        from src.domains.mgmt import public as _mgmt_public
 
-        out: dict[str, dict] = {}
-        # 这里**保留** enabled_only：disabled 平台不用表行覆盖卡，卡仍从
-        # configs/platforms/*.json 解析 → "用户面不提供"不等于"内网不可用"
-        # （方言/host/托管链路还要能工作）。与用户面目录的判据是两件事。
-        for row in _mgmt_public.repo_platform_cards(enabled_only=True):
-            out[str(row.get("provider") or "")] = {
-                col: row.get(col) or ""
-                for col in _PLATFORM_CARD_COLUMNS
-                if col not in _TABLE_SKIP
-            }
-        return {k: v for k, v in out.items() if k}
-    except Exception as e:
-        log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
-        return {}
+def _raws_from_server() -> dict:
+    """契约卡 raw（委托 `ServerContractCardSource`；无 RUNTIME_TOKEN 时为空且不吵）。"""
+    return _server_source().raws()
 
 
 def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
@@ -613,8 +790,15 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
             for p, raw in _builtin_raws_from_dir(dir_path).items()}
 
 
-def _build_cards() -> "dict[str, PlatformCard]":
-    """无锁构建平台卡（meta > 文件 > 代码兜底 > DB 表）。
+def _build_cards(include_overrides: bool = True) -> "dict[str, PlatformCard]":
+    """无锁构建平台卡（meta > 文件 > 代码兜底 > 表/契约）。
+
+    Issue #3632：装配逻辑收进 `card_sources.PlatformCardAssembler`——本函数只做
+    "把本模块的原料与几个来源接上"，优先级链与回落语义都在装配器里各由一类
+    对象承担（策略模式），加新来源不再改这里的分支。
+
+    Issue #3580/A2：`include_overrides=False` 跳过管理面覆盖层——管理面保存时
+    用它做 diff 基线，避免把上一轮覆盖当成基线（`base_platform_card`）。
 
     2026-11-19：**调用本函数时不得持有 `_cache_lock`**。函数内部经
     `get_meta_value()` / `_raws_from_table()` 会走到 `runtime.public._any_cursor`，
@@ -624,55 +808,67 @@ def _build_cards() -> "dict[str, PlatformCard]":
     全站卡死的 ABBA 死锁（thread dump 实证：一边卡 platform_card.py:620，
     另一边卡 runtime/public._any_cursor）。
     """
-    cards: dict[str, PlatformCard] = {}
-    raw_cfg = ""
-    try:
-        from src.domains.mgmt import public as user_db
-        raw_cfg = user_db.get_meta_value("vcs_providers_config") or ""
-    except Exception as e:  # DB 未就绪（测试/启动早期）→ 走默认
-        log.debug(f"platform_card: read meta failed ({e}), using defaults")
-    # S83/D59 优先级链：meta（admin 运行时覆盖）> configs/platforms/ 文件
-    # （内置默认载体，每平台一个文件）> _DEFAULT_CARDS_RAW（代码兜底，
-    # 目录缺失时才用）。
-    # D105-19：meta 对文件卡是【逐键覆盖】——meta 只覆盖它声明的键，缺席键
-    # 落到文件卡值。存量 meta 常是整卡全量 dump（admin UI 保存形态），若做
-    # 整卡替换，代码/文件新增的卡字段（如 webhook_dialect）会被 stale dump
-    # 静默抹掉，导致托管消费侧 fail-closed。显式置空语义不变（键存在即尊重）。
-    if os.path.isdir(_CONFIGS_DIR):
-        _base_raws = _builtin_raws_from_dir(_CONFIGS_DIR)
-    else:
-        log.warning(f"platform_card: 配置目录缺失 {_CONFIGS_DIR}，回退代码内置默认")
-        _base_raws = {p: dict(raw) for p, raw in _DEFAULT_CARDS_RAW.items()}
-    if raw_cfg:
-        try:
-            data = json.loads(raw_cfg)
-            for provider, raw in (data or {}).items():
-                _merged = dict(_base_raws.get(provider) or {})
-                _merged.update(raw or {})
-                _base_raws[provider] = _merged
-        except Exception as e:
-            log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
-    # D109：表就绪后 DB 表为运行时真源——表内 provider 覆盖 meta/文件合并结果；
-    # 文件独有平台仍保留（防表缺行致平台消失）。
-    _tbl_raws = _raws_from_table()
-    if _tbl_raws:
-        for _p, _raw in _tbl_raws.items():
-            _base_raws[_p] = dict(_raw)
-        log.info(f"platform cards from table: {sorted(_tbl_raws)}")
-    cards = {}
-    for provider, raw in _base_raws.items():
-        try:
-            cards[provider] = build_platform_card(provider, raw)
-        except PlatformCardError as e:
-            # meta 合并产物非法：退回纯文件卡（meta 覆盖被拒），不静默丢平台
-            _fb = (_builtin_raws_from_dir(_CONFIGS_DIR).get(provider)
-                   if os.path.isdir(_CONFIGS_DIR) else None)
-            if _fb is not None:
-                log.warning(f"platform_card: {provider} meta 合并卡非法（{e}），回退文件卡")
-                cards[provider] = build_platform_card(provider, _fb)
-            else:
-                log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
+    from src.domains.runtime.vcs.card_sources import (
+        CardOverridesSource,
+        ServerContractCardSource,
+        default_assembler,
+    )
+
+    _ov_source = None
+    if include_overrides:
+        # A2：管理面覆盖层（meta `vcs_platform_overrides`）作为装配链最后一层
+        from src.domains.mgmt import public as _mgmt_public
+        from src.domains.runtime.vcs.card_overrides import META_KEY as _OV_KEY
+
+        _ov_source = CardOverridesSource(
+            lambda: _mgmt_public.get_meta_value(_OV_KEY) or "")
+
+    assembler = default_assembler(
+        _CONFIGS_DIR,
+        _builtin_raws_from_dir,
+        _DEFAULT_CARDS_RAW,
+        table_source=_table_source(),
+        server_source=ServerContractCardSource(),
+        overrides_source=_ov_source,
+    )
+    global _degraded_reason
+    cards = assembler.build(builder=build_platform_card, error_type=PlatformCardError)
+    _degraded_reason = assembler.last_degraded
+    if _ov_source is not None:
+        _warn_stale_overrides_once()
+    if _degraded_reason:
+        log.warning(f"platform_card: 装配降级 reason={_degraded_reason}"
+                    "（取卡通道异常时不会退化成「平台未注册」）")
     return cards
+
+
+_STALE_OVERRIDE_WARNED = False
+
+
+def _warn_stale_overrides_once() -> None:
+    """一次性告警：meta 覆盖层里与当前文件卡等价的残留（升级后"改了不生效"）。
+
+    只在进程内报一次，不写库、不改优先级——真正的清理发生在管理面保存
+    （runtime.public.compute_card_overrides 里 prune_stale）。
+    """
+    global _STALE_OVERRIDE_WARNED
+    if _STALE_OVERRIDE_WARNED:
+        return
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        from src.domains.runtime.vcs.card_overrides import META_KEY, CardOverrides
+
+        ov = CardOverrides.from_json(_mgmt_public.get_meta_value(META_KEY) or "")
+        if not ov.by_provider:
+            return
+        stale = ov.stale_providers(lambda p: base_platform_card(p))
+        if stale:
+            _STALE_OVERRIDE_WARNED = True
+            log.warning("platform_card: meta 覆盖层存在与文件卡等价的残留 "
+                        f"{stale}——会在管理面下次保存时自动清理；"
+                        "如需立即清理，重新保存一次该平台卡即可")
+    except Exception as e:  # noqa: BLE001 - 诊断不影响读卡
+        log.debug(f"stale override check skipped: {e}")
 
 
 def _load_cards() -> None:
@@ -696,6 +892,28 @@ def invalidate_platform_card_cache() -> None:
     with _cache_lock:
         _loaded = False
     log.info("platform card cache invalidated")
+
+
+def platform_card_degraded_reason() -> str:
+    """最近一次装配的降级原因（"" = 正常）。
+
+    clone 端在 `get_platform_card()` 返回 None 时用它区分两类故障：
+      · 非空（contract_unavailable / contract_error）→ 取卡通道坏了，修链路；
+      · 空 → 真的没有这张卡，去配卡。
+    """
+    return _degraded_reason
+
+
+def base_platform_card(provider: str) -> "PlatformCard | None":
+    """不带管理面覆盖层的卡（= 配置文件 + meta + 表行的结果）。
+
+    管理面保存时用它做 diff 基线：与它相同 → 不产生覆盖（等于「改回文件值」，
+    覆盖自动解除）；不同 → 只记变化的键。用生效卡做基线会把上一轮覆盖当成基线，
+    清空后仍留一条 `字段: ""` 的永久覆盖。
+    """
+    if not provider:
+        return None
+    return (_build_cards(include_overrides=False) or {}).get(provider)
 
 
 def get_platform_card(provider: str) -> "PlatformCard | None":

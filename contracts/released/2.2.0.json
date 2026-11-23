@@ -1,0 +1,1599 @@
+{
+  "release_index": 1,
+  "version": "2.2.0",
+  "frozen_at": "2026-11-17T00:48:34.516945+00:00",
+  "paths": {
+    "/api/auth/change-password": {
+      "post": {
+        "operationId": "change_password_api_auth_change_password_post"
+      }
+    },
+    "/api/auth/set-password/send-code": {
+      "post": {
+        "operationId": "set_password_send_code_api_auth_set_password_send_code_post"
+      }
+    },
+    "/api/auth/set-password": {
+      "post": {
+        "operationId": "set_password_api_auth_set_password_post"
+      }
+    },
+    "/api/auth/change-email/send-code": {
+      "post": {
+        "operationId": "change_email_send_code_api_auth_change_email_send_code_post"
+      }
+    },
+    "/api/auth/change-email": {
+      "post": {
+        "operationId": "change_email_api_auth_change_email_post"
+      }
+    },
+    "/api/auth/delete-account/send-code": {
+      "post": {
+        "operationId": "delete_account_send_code_api_auth_delete_account_send_code_post"
+      }
+    },
+    "/api/auth/delete-account/oauth/{provider}": {
+      "get": {
+        "operationId": "delete_account_via_oauth_api_auth_delete_account_oauth__provider__get"
+      }
+    },
+    "/api/auth/delete-account": {
+      "post": {
+        "operationId": "delete_account_api_auth_delete_account_post"
+      }
+    },
+    "/api/auth/bind/{provider}": {
+      "get": {
+        "operationId": "bind_provider_api_auth_bind__provider__get"
+      },
+      "delete": {
+        "operationId": "unbind_provider_api_auth_bind__provider__delete"
+      }
+    },
+    "/api/auth/identities": {
+      "get": {
+        "operationId": "get_identities_api_auth_identities_get"
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "grape_auth_me"
+      }
+    },
+    "/api/auth/profile": {
+      "get": {
+        "operationId": "auth_profile"
+      },
+      "put": {
+        "operationId": "grape_auth_update_profile"
+      }
+    },
+    "/api/auth/transfer-context": {
+      "get": {
+        "operationId": "grape_auth_transfer_context"
+      }
+    },
+    "/api/auth/transfer-bind": {
+      "post": {
+        "operationId": "transfer_bind_api_auth_transfer_bind_post"
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "auth_logout"
+      }
+    },
+    "/api/repos/member": {
+      "get": {
+        "operationId": "repos_member"
+      }
+    },
+    "/api/repos/sync": {
+      "post": {
+        "operationId": "repos_sync"
+      }
+    },
+    "/api/repos/check-name": {
+      "get": {
+        "operationId": "repos_check_name"
+      }
+    },
+    "/api/repos/create": {
+      "post": {
+        "operationId": "repos_create"
+      }
+    },
+    "/api/repos/host": {
+      "post": {
+        "operationId": "repos_host"
+      }
+    },
+    "/api/repos/{owner}/{repo}/repair-host": {
+      "post": {
+        "operationId": "repos_repair_host"
+      }
+    },
+    "/api/repos/managed": {
+      "get": {
+        "operationId": "repos_managed"
+      }
+    },
+    "/api/repos/bot-token/{owner}/{repo_name}": {
+      "get": {
+        "operationId": "repos_bot_token_get"
+      }
+    },
+    "/api/repos/bot-token": {
+      "put": {
+        "operationId": "repos_bot_token_set"
+      }
+    },
+    "/api/repos/deploy-url": {
+      "put": {
+        "operationId": "repos_deploy_url_set"
+      }
+    },
+    "/api/repos/deploy-url/{owner}/{repo_name}": {
+      "get": {
+        "operationId": "repos_deploy_url"
+      }
+    },
+    "/api/repos/migrate-orgs": {
+      "get": {
+        "operationId": "repos_migrate_orgs"
+      }
+    },
+    "/api/repos/migrate": {
+      "post": {
+        "operationId": "repos_migrate"
+      }
+    },
+    "/api/repos/remove": {
+      "post": {
+        "operationId": "repos_remove"
+      }
+    },
+    "/api/repos/{owner}/{repo}/project-info": {
+      "get": {
+        "operationId": "repos_project_info"
+      }
+    },
+    "/api/repos/{owner}/{repo}/scene-recommend-config": {
+      "get": {
+        "operationId": "repos_scene_recommend_config_get"
+      },
+      "put": {
+        "operationId": "repos_scene_recommend_config_set"
+      }
+    },
+    "/api/repos/{owner}/{repo}/git-credential": {
+      "get": {
+        "operationId": "repos_git_credential"
+      }
+    },
+    "/api/repos/{owner}/{repo}/workspace": {
+      "get": {
+        "operationId": "repos_workspace"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}": {
+      "get": {
+        "operationId": "gitrepo_repo"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/branches": {
+      "get": {
+        "operationId": "gitrepo_branches"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/commits": {
+      "get": {
+        "operationId": "gitrepo_commits"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/tree": {
+      "get": {
+        "operationId": "gitrepo_tree"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/contents": {
+      "get": {
+        "operationId": "gitrepo_contents_root"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/contents/{path}": {
+      "get": {
+        "operationId": "gitrepo_contents"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/labels": {
+      "get": {
+        "operationId": "gitrepo_labels_list"
+      },
+      "post": {
+        "operationId": "gitrepo_labels_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/milestones": {
+      "get": {
+        "operationId": "gitrepo_milestones"
+      },
+      "post": {
+        "operationId": "gitrepo_milestones_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/milestones/{number}": {
+      "patch": {
+        "operationId": "gitrepo_milestones_update"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/issues": {
+      "get": {
+        "operationId": "gitrepo_issues_list"
+      },
+      "post": {
+        "operationId": "gitrepo_issues_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/issues/{number}": {
+      "get": {
+        "operationId": "gitrepo_issues_get"
+      },
+      "patch": {
+        "operationId": "gitrepo_issues_update"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/issues/{number}/close": {
+      "post": {
+        "operationId": "gitrepo_issues_close"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/issues/{number}/comments": {
+      "get": {
+        "operationId": "gitrepo_issues_comments_list"
+      },
+      "post": {
+        "operationId": "gitrepo_issues_comments_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls": {
+      "get": {
+        "operationId": "gitrepo_pulls_list"
+      },
+      "post": {
+        "operationId": "gitrepo_pulls_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}": {
+      "get": {
+        "operationId": "gitrepo_pulls_get"
+      },
+      "patch": {
+        "operationId": "gitrepo_pulls_update"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}/issues/{issue_number}": {
+      "delete": {
+        "operationId": "gitrepo_pulls_issues_unlink"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}/merge": {
+      "put": {
+        "operationId": "gitrepo_pulls_merge"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}/comments": {
+      "get": {
+        "operationId": "gitrepo_pulls_comments_list"
+      },
+      "post": {
+        "operationId": "gitrepo_pulls_comments_create"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}/comments/{comment_id}": {
+      "patch": {
+        "operationId": "gitrepo_pulls_comments_update"
+      },
+      "delete": {
+        "operationId": "gitrepo_pulls_comments_delete"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/pulls/{number}/files": {
+      "get": {
+        "operationId": "gitrepo_pulls_files"
+      }
+    },
+    "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean": {
+      "post": {
+        "operationId": "gitrepo_issue_artifacts_clean"
+      }
+    },
+    "/api/dashboard/efficiency": {
+      "get": {
+        "operationId": "dashboard_efficiency",
+        "deprecated": true
+      }
+    },
+    "/api/dashboard/ops/engine-select-explain": {
+      "get": {
+        "operationId": "dashboard_ops_engine_select_explain"
+      }
+    },
+    "/api/dashboard/efficiency/board": {
+      "get": {
+        "operationId": "dashboard_efficiency_board"
+      }
+    },
+    "/api/dashboard/efficiency/daily": {
+      "get": {
+        "operationId": "dashboard_efficiency_daily"
+      }
+    },
+    "/api/dashboard/efficiency/issues": {
+      "get": {
+        "operationId": "dashboard_efficiency_issues"
+      }
+    },
+    "/api/dashboard/ops/overview": {
+      "get": {
+        "operationId": "dashboard_ops_overview"
+      }
+    },
+    "/api/dashboard/ops/probe-now": {
+      "get": {
+        "operationId": "dashboard_ops_probe_now"
+      }
+    },
+    "/api/dashboard/ops/error-logs/sources": {
+      "get": {
+        "operationId": "dashboard_ops_error_log_sources"
+      }
+    },
+    "/api/dashboard/ops/error-logs": {
+      "get": {
+        "operationId": "dashboard_ops_error_logs"
+      }
+    },
+    "/api/dashboard/ops/timeline": {
+      "get": {
+        "operationId": "dashboard_ops_timeline"
+      }
+    },
+    "/api/dashboard/ops/a2a-health": {
+      "get": {
+        "operationId": "dashboard_ops_a2a_health"
+      }
+    },
+    "/api/dashboard/{owner}/{repo}": {
+      "get": {
+        "operationId": "dashboard_repo"
+      }
+    },
+    "/api/agents/{name}/{owner}/{repo}": {
+      "get": {
+        "operationId": "agents_detail"
+      },
+      "put": {
+        "operationId": "agents_update"
+      }
+    },
+    "/api/agents/{name}/{owner}/{repo}/clean": {
+      "post": {
+        "operationId": "agents_clean"
+      }
+    },
+    "/api/events/detail/{seq}": {
+      "get": {
+        "operationId": "events_detail"
+      }
+    },
+    "/api/events/{seq}/terminate": {
+      "post": {
+        "operationId": "events_terminate"
+      }
+    },
+    "/api/events/{seq}/redispatch": {
+      "post": {
+        "operationId": "events_redispatch"
+      }
+    },
+    "/api/events/{seq}/a2a-redo/scene": {
+      "get": {
+        "operationId": "events_a2a_redo_scene"
+      }
+    },
+    "/api/events/{seq}/a2a-redo": {
+      "post": {
+        "operationId": "events_a2a_redo"
+      }
+    },
+    "/api/events/{seq}/thread": {
+      "get": {
+        "operationId": "events_thread"
+      }
+    },
+    "/api/events/{seq}/chat": {
+      "delete": {
+        "operationId": "events_chat_delete"
+      },
+      "post": {
+        "operationId": "events_chat_send"
+      }
+    },
+    "/api/events/{seq}/knowledge/{scope}": {
+      "delete": {
+        "operationId": "events_knowledge_delete"
+      }
+    },
+    "/api/events/{seq}/chat/stream": {
+      "post": {
+        "operationId": "events_chat_stream"
+      }
+    },
+    "/api/events/{seq}/chat/submit": {
+      "post": {
+        "operationId": "events_chat_submit"
+      }
+    },
+    "/api/events/chat/task/{task_id}/status": {
+      "get": {
+        "operationId": "events_chat_task_status"
+      }
+    },
+    "/api/events/chat/task/{task_id}/stream": {
+      "get": {
+        "operationId": "events_chat_task_stream"
+      }
+    },
+    "/api/events/{owner}/{repo}": {
+      "get": {
+        "operationId": "events_list"
+      }
+    },
+    "/api/chat/conversations": {
+      "get": {
+        "operationId": "chat_conversations"
+      },
+      "post": {
+        "operationId": "chat_conversations_create"
+      }
+    },
+    "/api/chat/conversations/{conv_id}": {
+      "delete": {
+        "operationId": "chat_conversations_delete"
+      }
+    },
+    "/api/chat/conversations/ensure-issue": {
+      "post": {
+        "operationId": "chat_conversations_ensure_issue"
+      }
+    },
+    "/api/chat/messages/{conv_id}": {
+      "get": {
+        "operationId": "chat_messages"
+      }
+    },
+    "/api/chat/messages/{msg_id}/recall": {
+      "post": {
+        "operationId": "chat_recall_message"
+      }
+    },
+    "/api/chat/send": {
+      "post": {
+        "operationId": "chat_send"
+      }
+    },
+    "/api/chat/send/stream": {
+      "post": {
+        "operationId": "chat_send_stream"
+      }
+    },
+    "/api/chat/feedback": {
+      "post": {
+        "operationId": "chat_feedback"
+      }
+    },
+    "/api/chat/config": {
+      "get": {
+        "operationId": "chat_config_get"
+      },
+      "put": {
+        "operationId": "chat_config_update"
+      }
+    },
+    "/api/chat/submit": {
+      "post": {
+        "operationId": "chat_submit"
+      }
+    },
+    "/api/chat/task/{task_id}/stream": {
+      "get": {
+        "operationId": "chat_task_stream"
+      }
+    },
+    "/api/chat/send/async": {
+      "post": {
+        "operationId": "chat_send_async"
+      }
+    },
+    "/api/chat/task/{task_id}/status": {
+      "get": {
+        "operationId": "chat_task_status"
+      }
+    },
+    "/api/chat/im/wechat/login/start": {
+      "post": {
+        "operationId": "chat_wechat_login_start"
+      }
+    },
+    "/api/chat/im/wechat/login/status": {
+      "get": {
+        "operationId": "chat_wechat_login_status"
+      }
+    },
+    "/api/settings/credentials": {
+      "get": {
+        "operationId": "settings_credentials_get"
+      },
+      "put": {
+        "operationId": "settings_credentials_update"
+      }
+    },
+    "/api/settings/credentials/reveal": {
+      "post": {
+        "operationId": "settings_credentials_reveal"
+      }
+    },
+    "/api/settings/api-keys": {
+      "get": {
+        "operationId": "settings_keys"
+      },
+      "post": {
+        "operationId": "settings_key_create"
+      }
+    },
+    "/api/settings/api-keys/{key_id}": {
+      "delete": {
+        "operationId": "settings_key_delete"
+      }
+    },
+    "/api/settings/notifications": {
+      "get": {
+        "operationId": "settings_notifications_get"
+      },
+      "put": {
+        "operationId": "settings_notifications_update"
+      }
+    },
+    "/api/settings/gitcode-repo/{owner}/{repo}": {
+      "get": {
+        "operationId": "settings_gitcode_repo_get"
+      },
+      "put": {
+        "operationId": "settings_gitcode_repo_update"
+      }
+    },
+    "/api/settings/oauth": {
+      "get": {
+        "operationId": "settings_oauth_get"
+      },
+      "put": {
+        "operationId": "settings_oauth_update"
+      }
+    },
+    "/api/settings/oauth-github": {
+      "get": {
+        "operationId": "settings_oauth_github_get"
+      },
+      "put": {
+        "operationId": "settings_oauth_github_update"
+      }
+    },
+    "/api/settings/agent-runtimes": {
+      "get": {
+        "operationId": "settings_agent_runtimes"
+      }
+    },
+    "/api/settings/runtime-devices": {
+      "get": {
+        "operationId": "settings_runtime_devices"
+      }
+    },
+    "/api/settings/backend-agents": {
+      "get": {
+        "operationId": "settings_backend_agents"
+      }
+    },
+    "/api/settings/agent-runtimes/{rid}": {
+      "get": {
+        "operationId": "settings_agent_runtime_detail"
+      }
+    },
+    "/api/settings/agent-runtimes/{rid}/health-reset": {
+      "post": {
+        "operationId": "settings_agent_runtime_health_reset"
+      }
+    },
+    "/api/settings/agent-runtimes/{rid}/readd": {
+      "post": {
+        "operationId": "settings_agent_runtime_readd"
+      }
+    },
+    "/api/settings/agent-runtimes/refresh": {
+      "post": {
+        "operationId": "settings_agent_runtimes_refresh"
+      }
+    },
+    "/api/settings/backend-agents/refresh": {
+      "post": {
+        "operationId": "settings_backend_agents_refresh"
+      }
+    },
+    "/api/settings/runtime-credentials": {
+      "get": {
+        "operationId": "settings_runtime_credentials"
+      },
+      "post": {
+        "operationId": "settings_runtime_credential_create"
+      }
+    },
+    "/api/settings/runtime-credentials/{cid}": {
+      "put": {
+        "operationId": "settings_runtime_credential_rename"
+      }
+    },
+    "/api/settings/runtime-credentials/{cid}/scope": {
+      "put": {
+        "operationId": "settings_runtime_credential_scope"
+      }
+    },
+    "/api/settings/runtime-credentials/{cid}/revoke": {
+      "post": {
+        "operationId": "settings_runtime_credential_revoke"
+      }
+    },
+    "/api/settings/execution-mode": {
+      "get": {
+        "operationId": "settings_execution_mode_get"
+      },
+      "put": {
+        "operationId": "settings_execution_mode_set"
+      }
+    },
+    "/api/settings/pipeline-mode": {
+      "get": {
+        "operationId": "settings_pipeline_mode_get"
+      },
+      "put": {
+        "operationId": "settings_pipeline_mode_set"
+      }
+    },
+    "/api/settings/agent-runtimes/{rid}/tags": {
+      "get": {
+        "operationId": "settings_engine_tags"
+      },
+      "post": {
+        "operationId": "settings_engine_tag_create"
+      }
+    },
+    "/api/settings/agent-runtimes/{rid}/tags/{tag}": {
+      "put": {
+        "operationId": "settings_engine_tag_update"
+      },
+      "delete": {
+        "operationId": "settings_engine_tag_delete"
+      }
+    },
+    "/api/settings/event-action-filters": {
+      "get": {
+        "operationId": "settings_event_action_filters"
+      },
+      "post": {
+        "operationId": "settings_event_action_rule_create"
+      }
+    },
+    "/api/settings/event-action-filters/{rule_id}": {
+      "put": {
+        "operationId": "settings_event_action_rule_update"
+      },
+      "delete": {
+        "operationId": "settings_event_action_rule_delete"
+      }
+    },
+    "/api/skills": {
+      "get": {
+        "operationId": "skills_list"
+      }
+    },
+    "/api/skills/{skill_id}/like": {
+      "post": {
+        "operationId": "skills_like_toggle"
+      }
+    },
+    "/api/skills/featured": {
+      "get": {
+        "operationId": "skills_featured"
+      }
+    },
+    "/api/skills/agent-stats": {
+      "get": {
+        "operationId": "skills_agent_stats"
+      }
+    },
+    "/api/skills/stats": {
+      "get": {
+        "operationId": "skills_stats"
+      }
+    },
+    "/api/skills/categories": {
+      "get": {
+        "operationId": "skills_categories"
+      }
+    },
+    "/api/skills/search": {
+      "get": {
+        "operationId": "skills_search"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/download": {
+      "get": {
+        "operationId": "skills_download"
+      }
+    },
+    "/api/skills/by-id/{skill_id}": {
+      "get": {
+        "operationId": "skills_detail"
+      },
+      "delete": {
+        "operationId": "skills_delete"
+      }
+    },
+    "/api/skills/upload": {
+      "post": {
+        "operationId": "skills_upload"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/update": {
+      "post": {
+        "operationId": "skills_update"
+      }
+    },
+    "/api/skills/convert": {
+      "post": {
+        "operationId": "skills_convert"
+      }
+    },
+    "/api/skills/{skill_id}/sub": {
+      "get": {
+        "operationId": "skills_sub_list"
+      }
+    },
+    "/api/skills/{skill_id}/sub/{sub_name}": {
+      "get": {
+        "operationId": "skills_sub_get"
+      }
+    },
+    "/api/skills/package-sub/{pkg_id}/{sub_name}": {
+      "get": {
+        "operationId": "skills_package_sub_get"
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "search_global"
+      }
+    },
+    "/api/pipeline/{owner}/{repo}": {
+      "get": {
+        "operationId": "pipeline_get"
+      }
+    },
+    "/api/a2a/status": {
+      "get": {
+        "operationId": "a2a_status"
+      }
+    },
+    "/api/a2a": {
+      "post": {
+        "operationId": "a2a_handoff"
+      }
+    },
+    "/api/pipeline/handoff": {
+      "post": {
+        "operationId": "pipeline_handoff"
+      }
+    },
+    "/api/scenes": {
+      "get": {
+        "operationId": "scenes_list"
+      },
+      "post": {
+        "operationId": "scenes_create"
+      }
+    },
+    "/api/scenes/with-pipeline": {
+      "get": {
+        "operationId": "scenes_with_pipeline"
+      }
+    },
+    "/api/scenes/market/categories": {
+      "get": {
+        "operationId": "scenes_market_categories"
+      }
+    },
+    "/api/scenes/market": {
+      "get": {
+        "operationId": "scenes_market_list"
+      },
+      "post": {
+        "operationId": "scenes_market_create"
+      }
+    },
+    "/api/scenes/market/{market_id}": {
+      "get": {
+        "operationId": "scenes_market_detail"
+      },
+      "put": {
+        "operationId": "scenes_market_update"
+      },
+      "delete": {
+        "operationId": "scenes_market_delete"
+      }
+    },
+    "/api/scenes/market/{market_id}/applied": {
+      "get": {
+        "operationId": "scenes_market_applied"
+      }
+    },
+    "/api/scenes/market/{market_id}/apply": {
+      "post": {
+        "operationId": "scenes_market_apply"
+      }
+    },
+    "/api/scenes/market/{market_id}/experience-check": {
+      "get": {
+        "operationId": "scenes_market_experience_check"
+      }
+    },
+    "/api/scenes/market/{market_id}/experience": {
+      "post": {
+        "operationId": "scenes_market_experience"
+      }
+    },
+    "/api/scenes/market/{market_id}/like": {
+      "post": {
+        "operationId": "scenes_market_like_toggle"
+      }
+    },
+    "/api/scenes/branches/{owner}/{repo}": {
+      "get": {
+        "operationId": "scenes_branches"
+      },
+      "post": {
+        "operationId": "scenes_branch_create"
+      }
+    },
+    "/api/scenes/check-name": {
+      "get": {
+        "operationId": "scenes_check_name"
+      }
+    },
+    "/api/scenes/market/icon-upload": {
+      "post": {
+        "operationId": "scenes_market_icon_upload"
+      }
+    },
+    "/api/scenes/skill-scope-audit": {
+      "get": {
+        "operationId": "scenes_skill_scope_audit"
+      }
+    },
+    "/api/scenes/{scene_id}": {
+      "get": {
+        "operationId": "scenes_detail"
+      },
+      "put": {
+        "operationId": "scenes_update"
+      },
+      "delete": {
+        "operationId": "scenes_delete"
+      }
+    },
+    "/api/scenes/skills/{agent_type}": {
+      "get": {
+        "operationId": "scenes_skills_for_agent"
+      }
+    },
+    "/api/scenes/{scene_id}/copy": {
+      "post": {
+        "operationId": "scenes_copy"
+      }
+    },
+    "/api/scenes/apply/{owner}/{repo}": {
+      "post": {
+        "operationId": "scenes_apply"
+      }
+    },
+    "/api/scenes/{scene_id}/advanced-options": {
+      "get": {
+        "operationId": "scenes_advanced_options_get"
+      },
+      "put": {
+        "operationId": "scenes_advanced_options_set"
+      }
+    },
+    "/api/scenes/{scene_id}/advanced-options/reveal": {
+      "post": {
+        "operationId": "scenes_advanced_options_reveal"
+      }
+    },
+    "/api/scenes/{scene_id}/deploy-url": {
+      "get": {
+        "operationId": "scenes_deploy_url_get"
+      },
+      "put": {
+        "operationId": "scenes_deploy_url_set"
+      }
+    },
+    "/api/scenes/{scene_id}/engine-status": {
+      "get": {
+        "operationId": "scenes_engine_status"
+      }
+    },
+    "/api/scenes/{scene_id}/pin": {
+      "post": {
+        "operationId": "scenes_pin"
+      }
+    },
+    "/api/project-templates": {
+      "get": {
+        "operationId": "project_templates_list"
+      }
+    },
+    "/api/project-templates/{template_id}/readme": {
+      "get": {
+        "operationId": "project_template_readme"
+      }
+    },
+    "/api/project-templates/{template_id}/preview": {
+      "get": {
+        "operationId": "project_template_preview"
+      }
+    },
+    "/api/project-templates/create": {
+      "post": {
+        "operationId": "project_template_create"
+      }
+    },
+    "/api/tasks/notify": {
+      "post": {
+        "operationId": "tasks_notify"
+      }
+    },
+    "/api/tasks/complete": {
+      "post": {
+        "operationId": "tasks_complete"
+      }
+    },
+    "/api/tasks/current": {
+      "get": {
+        "operationId": "tasks_current"
+      }
+    },
+    "/api/issues/{issue_id}/start": {
+      "post": {
+        "operationId": "issues_start"
+      }
+    },
+    "/api/issues/{issue_id}/status": {
+      "get": {
+        "operationId": "issues_status_get"
+      },
+      "put": {
+        "operationId": "issues_status"
+      }
+    },
+    "/api/issues/{issue_id}/confirm-done": {
+      "post": {
+        "operationId": "issues_confirm_done"
+      }
+    },
+    "/api/issues/{issue_id}/admin-confirm-done": {
+      "post": {
+        "operationId": "issues_admin_confirm_done"
+      }
+    },
+    "/api/issues/{issue_id}/cancel": {
+      "post": {
+        "operationId": "issues_cancel"
+      }
+    },
+    "/api/issues/{issue_id}/resume": {
+      "post": {
+        "operationId": "issues_resume"
+      }
+    },
+    "/api/issues/{issue_id}/pipeline": {
+      "get": {
+        "operationId": "issues_pipeline_detail"
+      }
+    },
+    "/api/issues/{issue_id}/handoff/targets": {
+      "get": {
+        "operationId": "issues_handoff_targets"
+      }
+    },
+    "/api/issues/{issue_id}/handoff": {
+      "post": {
+        "operationId": "issues_handoff"
+      }
+    },
+    "/api/issues/{issue_id}/clarifications": {
+      "get": {
+        "operationId": "issues_clarifications"
+      }
+    },
+    "/api/issues/{issue_id}/awaiting-input": {
+      "post": {
+        "operationId": "issues_awaiting-input"
+      }
+    },
+    "/api/issues/{issue_id}/pending-review": {
+      "post": {
+        "operationId": "issues_pending-review"
+      }
+    },
+    "/api/issues/{issue_id}/review-pass": {
+      "post": {
+        "operationId": "issues_review-pass"
+      }
+    },
+    "/api/issues/{issue_id}/review-reject": {
+      "post": {
+        "operationId": "issues_review-reject"
+      }
+    },
+    "/api/issues/{issue_id}/clarify": {
+      "post": {
+        "operationId": "issues_clarify"
+      }
+    },
+    "/api/issues/{issue_id}/attachments": {
+      "post": {
+        "operationId": "issues_upload_attachment"
+      },
+      "get": {
+        "operationId": "issues_list_attachments"
+      }
+    },
+    "/api/issues/{issue_id}/attachments/{filename}": {
+      "delete": {
+        "operationId": "issues_delete_attachment"
+      }
+    },
+    "/api/issues/mine": {
+      "get": {
+        "operationId": "issues_mine"
+      }
+    },
+    "/api/issues/{owner}/{repo}": {
+      "get": {
+        "operationId": "issues_list"
+      },
+      "post": {
+        "operationId": "issues_create"
+      }
+    },
+    "/api/issues/{owner}/{repo}/{number}": {
+      "get": {
+        "operationId": "issues_detail"
+      }
+    },
+    "/api/issues/{owner}/{repo}/{number}/events": {
+      "get": {
+        "operationId": "issues_events"
+      }
+    },
+    "/api/issues/{owner}/{repo}/{number}/pipeline": {
+      "get": {
+        "operationId": "issues_pipeline"
+      }
+    },
+    "/api/issues/{issue_id}/production-release": {
+      "post": {
+        "operationId": "issues_production_release"
+      },
+      "get": {
+        "operationId": "issues_production_release_list"
+      }
+    },
+    "/api/runtime/admin/event-bus": {
+      "get": {
+        "operationId": "runtime_event_bus"
+      }
+    },
+    "/api/runtime/admin/machine-health": {
+      "get": {
+        "operationId": "runtime_machine_health"
+      }
+    },
+    "/api/runtime/admin/machine-health/{runtime_id}": {
+      "get": {
+        "operationId": "runtime_machine_health_detail"
+      }
+    },
+    "/api/runtime/admin/batch-recover": {
+      "post": {
+        "operationId": "runtime_batch_recover"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/tags": {
+      "put": {
+        "operationId": "runtime_tags_set"
+      }
+    },
+    "/api/runtime/tasks/{task_id}/status": {
+      "get": {
+        "operationId": "runtime_task_status"
+      }
+    },
+    "/api/runtime/issues/takeover-context": {
+      "get": {
+        "operationId": "runtime_takeover_context"
+      }
+    },
+    "/api/runtime/tasks/{task_id}/detail": {
+      "get": {
+        "operationId": "runtime_task_detail"
+      }
+    },
+    "/api/runtime/tasks/{task_id}/cancel": {
+      "post": {
+        "operationId": "runtime_task_cancel"
+      }
+    },
+    "/api/runtime/tasks/{task_id}/converge-event": {
+      "post": {
+        "operationId": "runtime_task_converge_event"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/tasks": {
+      "get": {
+        "operationId": "runtime_tasks_list"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/sessions": {
+      "get": {
+        "operationId": "runtime_sessions_list"
+      }
+    },
+    "/api/runtime/credentials/{cid}/tasks": {
+      "get": {
+        "operationId": "runtime_credential_tasks"
+      }
+    },
+    "/api/runtime/engine-onboarding": {
+      "get": {
+        "operationId": "runtime_engine_onboarding"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/refresh-skills": {
+      "post": {
+        "operationId": "runtime_refresh_skills"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/role-tags": {
+      "get": {
+        "operationId": "runtime_role_tags"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/max-concurrent": {
+      "put": {
+        "operationId": "runtime_max_concurrent_set"
+      }
+    },
+    "/api/runtime/scene-tags": {
+      "get": {
+        "operationId": "runtime_scene_tags_list"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/scene-tags": {
+      "get": {
+        "operationId": "runtime_scene_tags_get"
+      },
+      "put": {
+        "operationId": "runtime_scene_tags_set"
+      }
+    },
+    "/api/runtime/runtimes/{runtime_id}/alias": {
+      "put": {
+        "operationId": "runtime_alias_set"
+      }
+    },
+    "/api/takeover/sessions": {
+      "post": {
+        "operationId": "takeover_start"
+      },
+      "get": {
+        "operationId": "takeover_list"
+      }
+    },
+    "/api/takeover/sessions/{session_id}": {
+      "get": {
+        "operationId": "takeover_get"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/progress": {
+      "post": {
+        "operationId": "takeover_progress"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/attach": {
+      "post": {
+        "operationId": "takeover_attach"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/request-finish": {
+      "post": {
+        "operationId": "takeover_request_finish"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/finish": {
+      "post": {
+        "operationId": "takeover_finish"
+      }
+    },
+    "/api/takeover/sessions/{session_id}/abort": {
+      "post": {
+        "operationId": "takeover_abort"
+      }
+    },
+    "/api/feishu/onboard/start": {
+      "post": {
+        "operationId": "feishu_onboard_start"
+      }
+    },
+    "/api/feishu/onboard/status": {
+      "get": {
+        "operationId": "feishu_onboard_status"
+      }
+    },
+    "/api/feishu/onboard/cancel": {
+      "post": {
+        "operationId": "feishu_onboard_cancel"
+      }
+    },
+    "/api/task-logs/{task_id}/info": {
+      "get": {
+        "operationId": "task_logs_info"
+      }
+    },
+    "/api/task-logs/{task_id}/messages": {
+      "get": {
+        "operationId": "task_logs_messages"
+      }
+    },
+    "/api/task-logs/{task_id}/stream": {
+      "get": {
+        "operationId": "task_logs_stream"
+      }
+    },
+    "/api/knowledge": {
+      "get": {
+        "operationId": "knowledge_list"
+      }
+    },
+    "/api/knowledge/stats": {
+      "get": {
+        "operationId": "knowledge_stats"
+      }
+    },
+    "/api/knowledge/entry": {
+      "post": {
+        "operationId": "knowledge_entry_create"
+      }
+    },
+    "/api/knowledge/{knowledge_id}": {
+      "get": {
+        "operationId": "knowledge_detail"
+      },
+      "put": {
+        "operationId": "knowledge_update"
+      },
+      "delete": {
+        "operationId": "knowledge_delete"
+      }
+    },
+    "/api/knowledge/{knowledge_id}/refs": {
+      "get": {
+        "operationId": "knowledge_refs_list"
+      },
+      "post": {
+        "operationId": "knowledge_ref_create"
+      }
+    },
+    "/api/knowledge/{knowledge_id}/refs/batch": {
+      "post": {
+        "operationId": "knowledge_add_refs_batch"
+      }
+    },
+    "/api/knowledge/ref/{ref_id}": {
+      "put": {
+        "operationId": "knowledge_ref_update"
+      },
+      "delete": {
+        "operationId": "knowledge_ref_delete"
+      }
+    },
+    "/api/devstage/config": {
+      "get": {
+        "operationId": "devstage_config_get"
+      },
+      "put": {
+        "operationId": "devstage_config_update"
+      }
+    },
+    "/api/devstage/templates": {
+      "get": {
+        "operationId": "devstage_templates"
+      }
+    },
+    "/api/devstage/specs": {
+      "get": {
+        "operationId": "devstage_specs"
+      }
+    },
+    "/api/devstage/environments": {
+      "get": {
+        "operationId": "devstage_environments"
+      },
+      "post": {
+        "operationId": "devstage_environment_create"
+      }
+    },
+    "/api/devstage/environments/{action}": {
+      "post": {
+        "operationId": "devstage_environment_action"
+      }
+    },
+    "/api/devstage/environments/{devstage_id}": {
+      "delete": {
+        "operationId": "devstage_environment_delete"
+      }
+    },
+    "/api/feedback/context/{event_seq}": {
+      "get": {
+        "operationId": "feedback_context"
+      }
+    },
+    "/api/feedback": {
+      "post": {
+        "operationId": "feedback_submit"
+      }
+    },
+    "/api/feedback/{fid}": {
+      "delete": {
+        "operationId": "feedback_delete"
+      }
+    },
+    "/api/feedback/mine": {
+      "get": {
+        "operationId": "feedback_mine"
+      }
+    },
+    "/api/feedback/upload": {
+      "post": {
+        "operationId": "feedback_upload"
+      }
+    },
+    "/api/orgs": {
+      "get": {
+        "operationId": "orgs_list"
+      },
+      "post": {
+        "operationId": "orgs_create"
+      }
+    },
+    "/api/orgs/{org_id}": {
+      "get": {
+        "operationId": "orgs_detail"
+      },
+      "put": {
+        "operationId": "orgs_update"
+      },
+      "delete": {
+        "operationId": "orgs_delete"
+      }
+    },
+    "/api/orgs/search/users": {
+      "get": {
+        "operationId": "orgs_search_users"
+      }
+    },
+    "/api/orgs/{org_id}/members": {
+      "get": {
+        "operationId": "orgs_members_list"
+      },
+      "post": {
+        "operationId": "orgs_members_add"
+      }
+    },
+    "/api/orgs/{org_id}/members/{user_id}": {
+      "patch": {
+        "operationId": "orgs_members_update"
+      },
+      "delete": {
+        "operationId": "orgs_members_remove"
+      }
+    },
+    "/api/orgs/{org_id}/leave": {
+      "post": {
+        "operationId": "orgs_leave"
+      }
+    },
+    "/api/obs/overview": {
+      "get": {
+        "operationId": "obs_overview"
+      }
+    },
+    "/api/obs/alerts": {
+      "get": {
+        "operationId": "obs_alerts"
+      }
+    },
+    "/api/obs/alerts/{event_id}/silence": {
+      "post": {
+        "operationId": "obs_alert_silence"
+      }
+    },
+    "/api/obs/alerts/rules/{rule_id}/toggle": {
+      "post": {
+        "operationId": "obs_alert_rule_toggle"
+      }
+    },
+    "/api/obs/alerts/rules/{rule_id}/threshold": {
+      "post": {
+        "operationId": "obs_alert_rule_threshold"
+      }
+    },
+    "/api/obs/alerts/rules/{rule_id}/notify": {
+      "post": {
+        "operationId": "obs_alert_rule_notify"
+      }
+    },
+    "/api/obs/alerts/test-notify": {
+      "post": {
+        "operationId": "obs_alert_test_notify"
+      }
+    },
+    "/api/obs/logs": {
+      "get": {
+        "operationId": "obs_logs"
+      }
+    },
+    "/api/obs/logs/sources": {
+      "get": {
+        "operationId": "obs_logs_sources"
+      }
+    },
+    "/api/obs/trace/{trace}": {
+      "get": {
+        "operationId": "obs_trace"
+      }
+    },
+    "/api/obs/trace": {
+      "get": {
+        "operationId": "obs_trace_by_issue"
+      }
+    },
+    "/api/obs/trace/stamp": {
+      "post": {
+        "operationId": "obs_trace_stamp"
+      }
+    },
+    "/api/obs/runtimes/history": {
+      "get": {
+        "operationId": "obs_runtime_history"
+      }
+    },
+    "/api/obs/events": {
+      "get": {
+        "operationId": "obs_events"
+      }
+    },
+    "/api/obs/events/failed-result-gap": {
+      "get": {
+        "operationId": "obs_events_failed_result_gap"
+      }
+    },
+    "/api/obs/metrics/series": {
+      "get": {
+        "operationId": "obs_metrics_series"
+      }
+    },
+    "/api/obs/slo": {
+      "get": {
+        "operationId": "obs_slo_list"
+      }
+    },
+    "/api/obs/slo/{slo_id}": {
+      "get": {
+        "operationId": "obs_slo_detail"
+      }
+    },
+    "/api/obs/tokens/engines": {
+      "get": {
+        "operationId": "obs_tokens_engines"
+      }
+    },
+    "/api/obs/tokens/tasks": {
+      "get": {
+        "operationId": "obs_tokens_tasks"
+      }
+    },
+    "/api/obs/tokens/issues/{issue_id}/stages": {
+      "get": {
+        "operationId": "obs_tokens_issue_stages"
+      }
+    },
+    "/api/obs/tokens/stages": {
+      "get": {
+        "operationId": "obs_tokens_stages"
+      }
+    },
+    "/api/patrol/findings": {
+      "get": {
+        "operationId": "grape_t_patrol_findings_list"
+      }
+    },
+    "/api/patrol/findings/{finding_id}/dismiss": {
+      "post": {
+        "operationId": "grape_t_patrol_findings_dismiss"
+      }
+    },
+    "/api/patrol/scan": {
+      "post": {
+        "operationId": "patrol_scan_run"
+      }
+    },
+    "/api/im/status": {
+      "get": {
+        "operationId": "im_engine_status_api_im_status_get"
+      }
+    },
+    "/api/im/outbound": {
+      "get": {
+        "operationId": "im_outbound_api_im_outbound_get"
+      }
+    },
+    "/api/im/outbound/{out_track_id}/retry": {
+      "post": {
+        "operationId": "im_outbound_retry_api_im_outbound__out_track_id__retry_post"
+      }
+    },
+    "/api/im/installations": {
+      "get": {
+        "operationId": "im_installations_api_im_installations_get"
+      }
+    },
+    "/api/im/notify-test": {
+      "post": {
+        "operationId": "im_notify_test_api_im_notify_test_post"
+      }
+    },
+    "/api/im/installations/{installation_id}": {
+      "put": {
+        "operationId": "im_set_installation_status_api_im_installations__installation_id__put"
+      }
+    },
+    "/api/im/dingtalk/card-setup": {
+      "get": {
+        "operationId": "im_dingtalk_card_setup_api_im_dingtalk_card_setup_get"
+      },
+      "post": {
+        "operationId": "im_dingtalk_card_setup_save_api_im_dingtalk_card_setup_post"
+      }
+    }
+  }
+}

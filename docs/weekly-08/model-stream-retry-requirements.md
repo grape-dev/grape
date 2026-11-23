@@ -26,7 +26,8 @@
 ## R52 幂等/副作用闸门（零副作用放大）
 
 - 写操作证据 = 结构化产出（actions+conclusion）或 tool_uses 中有真实写操作
-  （POST /comments、POST /pulls、A2A handoff）——复用假完成硬门槛（event_pipeline evaluate 路径）的同一套证据检测。
+  （POST /comments、POST /pulls、A2A handoff、git push；git push 含 `grape git push` /
+  repogit 包装，`--dry-run` 仅豁免其所在子命令、echo/printf 打印文本不算——Issue #2793）——复用假完成硬门槛（event_pipeline evaluate 路径）的同一套证据检测。
 - 有写操作证据的任务失败一律不自动重试（可能已发评论/PR，重跑=重复提交），留给人工。
 - 重试本身走终态幂等契约：只拦截 running 状态任务；已终态任务跳过（与 #369/fail_task 既有幂等保护一致）。
 

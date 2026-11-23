@@ -405,3 +405,16 @@ class MgmtServiceLocal(MgmtService):
             out.append({"platform": platform, "external_id": external,
                         "user_id": uid, "matched": bool(uid)})
         return out
+
+    # ---- Issue #3632：平台卡跨域只读 ----
+
+    def get_repo_platform_cards(self, enabled_only: bool = True) -> list:
+        """平台卡行（本实现在 mgmt 域内，读自有库真源）。
+
+        复用 `mgmt.public.repo_platform_cards`（lib 命名查询 `repo_platform_cards`
+        / `repo_platform_cards_all`）：单一真源、单一列白名单，本类不另写 SQL、
+        不做二次投影（否则就成了第二份会漂移的口径）。
+        """
+        from src.domains.mgmt import public as _public  # noqa: PLC0415
+
+        return _public.repo_platform_cards(enabled_only=bool(enabled_only))

@@ -32,6 +32,7 @@
     "organizations": "Organizations",
     "autopilot": "Automation",
     "obs_cockpit": "Operations Cockpit",
+    "plugins": "Plugin Market",
     "sandbox": "Cloud Sandbox"
   },
   "sidebar": {
@@ -357,7 +358,10 @@
     "back_to_website": "Back to website",
     "add_new": "Add new repository",
     "pick_first": "Pick a repository from the dropdown first",
-    "forbidden": "No access to this repository; back to the repository lobby"
+    "forbidden": "No access to this repository; back to the repository lobby",
+    "org_repo": "Organization repo",
+    "org_group": "Organization",
+    "org_project": "Organization project"
   },
   "toast": {
     "theme_switched_default": "Switched to Default theme",
@@ -746,7 +750,10 @@
     "pat_badge_oauth": "Supplied by OAuth",
     "pat_broken_desc": "This PAT record cannot be decrypted (key changed or record corrupted). Re-enter the PAT to restore the repo list",
     "pat_oauth_desc": "No PAT configured for this platform; repo access comes from the OAuth login. Configure a PAT if you need a separate credential",
-    "transfer_need_reauth": "Binding transferred. Authorize once more to enable the repo list"
+    "transfer_need_reauth": "Binding transferred. Authorize once more to enable the repo list",
+    "pat_expires_ok": "PAT expires on {date}",
+    "pat_expires_soon": "PAT expires in {days} days ({date}) - rotate it soon",
+    "pat_expires_expired": "PAT expired on {date}; repo sync and agent tasks will fail until you rotate it"
   },
   "error": {
     "TOKEN_EXPIRED": "Your token has expired or been revoked. Please re-bind your token in Settings.",
@@ -793,5 +800,11 @@
   },
   "deeplink": {
     "repo_not_found": "Cannot open this link: the repository does not exist, is not managed, or you lack access"
+  },
+  "boot": {
+    "watchdog_title": "Still loading",
+    "watchdog_body": "The server is responding slowly after {secs} seconds. You can wait a bit longer, or retry below.",
+    "watchdog_retry": "Retry",
+    "watchdog_clear": "Clear cache & reload"
   }
 }

@@ -913,7 +913,10 @@ def is_user_allowed(provider: str, login: str) -> bool:
 
 
 # ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======
-_OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat", "auto")
+# org：组织流水线三节点技能（Issue #2118）随仓库提交在 .grape/skills/org/，不属于
+# sync_skills.sh 的官方技能目录（SKILL_AGENT_DIRS 不含 org，部署不会删除），
+# 因此必须在此登记，否则 sid=0 时官方内置包兜底失效。
+_OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat", "auto", "org")
 
 
 def resolve_official_skill_path(skill_name: str) -> str:

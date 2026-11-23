@@ -253,6 +253,16 @@ async def start_mgmt_tasks(app) -> dict:
         log.warning(f"Patrol loop start failed: {e}")
     h["patrol_task"] = _patrol_task
 
+    # Issue #2112：组织需求跨仓下派汇总 sweeper（60s；仅 Mgmt 进程持有，避免多进程重复推进）
+    _org_dispatch_sweep_task = None
+    try:
+        from src.domains.mgmt.org_dispatch import org_dispatch_sweep_loop
+        _org_dispatch_sweep_task = asyncio.create_task(org_dispatch_sweep_loop())
+        log.info("Org dispatch sweeper started (Mgmt)")
+    except Exception as e:
+        log.warning(f"Org dispatch sweeper start failed: {e}")
+    h["org_dispatch_sweep_task"] = _org_dispatch_sweep_task
+
     # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
     try:
         from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
@@ -379,6 +389,14 @@ async def stop_mgmt_tasks(app, h: dict) -> None:
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
+    _org_dispatch_sweep_task = h.get("org_dispatch_sweep_task")
+    if _org_dispatch_sweep_task:
+        _org_dispatch_sweep_task.cancel()
+        try:
+            await asyncio.wait_for(_org_dispatch_sweep_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
     _active_tracker_task = h.get("active_tracker_task")
     if _active_tracker_task:
         _active_tracker_task.cancel()
@@ -443,6 +461,17 @@ async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
         except Exception as e:
             log.warning(f"Event sweeper loop start failed: {e}")
 
+    # Issue #3580/P3：webhook 事件持久收件箱消费 worker（先入队、再消费、可重放）
+    try:
+        from src.domains.runtime.webhook_inbox import webhook_inbox_loop, ensure_webhook_inbox_table
+        # 表归 Event 进程（runtime 库）独占：共享台账是 mgmt 的跨库视图，迁移不会在
+        # 本域执行 → 起 worker 前先 IF NOT EXISTS 自建（幂等，缺失时否则入队 1146 → 全量 500）
+        ensure_webhook_inbox_table()
+        h["webhook_inbox_task"] = asyncio.create_task(webhook_inbox_loop())
+        log.info("Webhook inbox worker started (1s poll)")
+    except Exception as e:
+        log.warning(f"Webhook inbox worker start failed: {e}")
+
     # Issue #345: 全局 bot token 健康探活——每 5 分钟探活，集群下分布式锁保证单实例执行
     try:
         from src.domains.runtime.engine.bot_token_health import start_bot_token_health
@@ -461,6 +490,14 @@ async def stop_event_tasks(app, h: dict) -> None:
             await asyncio.wait_for(_t, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    _wi = h.get("webhook_inbox_task")
+    if _wi:
+        _wi.cancel()
+        try:
+            await asyncio.wait_for(_wi, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError) as _e:
+            # Issue #3580 复审：取消/超时不静默（静默 except ratchet）
+            log.debug(f"webhook inbox worker shutdown: {type(_e).__name__}")
 
 
 # ===========================================================================

@@ -32,7 +32,9 @@ _forbidden: set[str] = set()         # 永久禁用（配置/鉴权类错误：�
 _retry_after: dict[str, float] = {}  # 临时失败的退避时间点（monotonic 秒）
 _RETRY_BACKOFF_S = 5.0
 #: 缓存连接的存活校验节流：空闲超过该秒数才 ping，避免每次取连接都多一次往返。
-_PING_IDLE_SECONDS = 30.0
+_PING_IDLE_SECONDS = float(os.environ.get("DB_PING_IDLE_SECONDS", "30"))
+#: 探活 ping 的 socket 超时（秒）：死连接上裸 ping 会挂死，必须设上限。
+_PING_TIMEOUT_SECONDS = float(os.environ.get("DB_PING_TIMEOUT_SECONDS", "3"))
 # 连接一次失败就永久禁用整个域，是 2026-11-15 事故的放大器：
 # 本地 runtime MySQL 打满 max_connections（1040）后，mgmt 进程把 runtime 拉黑，
 # 之后所有跨域读（meta / scene_category / skill）静默回落到进程库 → 满屏 1146。
@@ -174,6 +176,48 @@ def assert_role_database(role: str) -> None:
         raise SystemExit(5)
     log.info(f"[db-guard] role={role} database={describe_connection()}")
 
+    # 跨域 DSN 自检（三库拓扑）：缺一个变量时，跨域读/写会显式失败而不是静默落错库；
+    # 这里把“少配”从运行期症状提前到启动日志。需要硬拦时设 GRAPE_3DB_STRICT_DSN=1。
+    missing = audit_required_domains()
+    if missing:
+        log.error(
+            f"[db-guard] role={role} 三库拓扑缺少 {', '.join(missing.values())}"
+            f"（受影响域：{', '.join(sorted(missing))}）—— 跨域访问会显式失败；"
+            f"仓库凭据等数据不会写到非 owner 库"
+        )
+        if os.environ.get("GRAPE_3DB_STRICT_DSN", "").strip().lower() in ("1", "true", "yes", "on"):
+            log.error(f"[db-guard] role={role} 拒绝启动：GRAPE_3DB_STRICT_DSN=1 且 DSNS 不全")
+            raise SystemExit(6)
+
+
+def warn_if_cross_domain_fallback(domain: str) -> None:
+    """跨域读拿不到该域 DSN 时告警一次（禁止静默串到进程库）。
+
+    为什么必须响：三库拓扑下缺 GRAPE_DSN_<DOMAIN> 时，`domain_db()` 返回 None，
+    调用方"降级"到进程主库——同名表往往是**跨库视图**，视图是建视图时的列快照，
+    基表加列后非 owner 侧读该列就 1054、读新表就 1146，表现为 500
+    （2026-11-20 实锤：/api/dashboard/{owner}/{repo} 在 insight 进程读
+    insight.managed_repos 视图，缺 is_org_repo → 1054 → 500）。单库/共库拓扑下
+    `GRAPE_<DOMAIN>_DB_NAME == DEVOPS_DB_NAME`，不会触发本告警。
+    """
+    domain = (domain or "").lower()
+    if domain not in _VALID or domain == current_domain():
+        return
+    if dsn_of(domain):
+        return
+    expected = os.environ.get(f"GRAPE_{domain.upper()}_DB_NAME", "").strip()
+    actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
+    if not (expected and actual and expected != actual):
+        return
+    flag = f"_warned_cross_{domain}"
+    if getattr(_local, flag, False):
+        return
+    setattr(_local, flag, True)
+    log.error(
+        f"[db-guard] 跨域读 {domain} 缺 GRAPE_DSN_{domain.upper()}，回落到进程库 "
+        f"{actual}（owner 库应为 {expected}）：同名 VIEW 列漂移会变成 1054/1146 的 500"
+    )
+
 
 def dsn_of(domain: str) -> str:
     return os.environ.get(f"GRAPE_DSN_{domain.upper()}", "").strip()
@@ -280,12 +324,44 @@ class _CompatConn:
 
 
 def _new_conn(domain: str, autocommit: bool = True):
+    """建域连接：带 keepalive 与读写超时兜底（与 MySQLCompatDB 同一套阈值）。
+
+    跨网段链路会静默丢弃空闲长连接（对端 ACK 过、包没到库）：没有 keepalive 和
+    读超时的话，复用时查询会挂在 socket 读上几十秒到几分钟，并拖住整个域。
+    """
     import pymysql
+
+    from src.kernel.mysql_compat import (_DB_READ_TIMEOUT, _DB_WRITE_TIMEOUT,
+                                         _enable_tcp_keepalive)
 
     cfg = parse_dsn(dsn_of(domain))
     # connect_timeout=8s：pymysql 默认 10s，收紧 2s 与域读超时 10s 留余量
-    conn = pymysql.connect(autocommit=autocommit, connect_timeout=8, **cfg)
+    conn = pymysql.connect(autocommit=autocommit, connect_timeout=8,
+                           read_timeout=_DB_READ_TIMEOUT,
+                           write_timeout=_DB_WRITE_TIMEOUT, **cfg)
+    _enable_tcp_keepalive(conn)
     return _CompatConn(conn)
+
+
+def _bounded_ping(conn, timeout: float) -> None:
+    """带 socket 超时的 ping(reconnect=True)。
+
+    裸 ping 在死连接上同样会挂死（等内核 keepalive / NAT RST），所以探活必须自己
+    有时间上限；超时即抛，由调用方丢弃重建。
+    """
+    sock = getattr(conn, "_sock", None)
+    prev = None
+    try:
+        if sock is not None:
+            prev = sock.gettimeout()
+            sock.settimeout(timeout)
+        conn.ping(reconnect=True)
+    finally:
+        if sock is not None and prev is not None:
+            try:
+                sock.settimeout(prev)
+            except Exception:
+                pass
 
 
 def _needs_liveness_check(domain: str) -> bool:
@@ -315,6 +391,7 @@ def domain_db(domain: str):
     domain = (domain or "").lower()
     if domain not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
+    warn_if_cross_domain_fallback(domain)
     if domain in _forbidden:          # 配置/鉴权类错误：重试也不会好，永久停用
         return None
     if _retry_after.get(domain, 0.0) > time.monotonic():   # 临时失败按退避重试
@@ -328,7 +405,8 @@ def domain_db(domain: str):
         # 这里按空闲节流 ping(reconnect=True)：断开时 pymysql 自动重连。
         if _needs_liveness_check(domain):
             try:
-                conns[domain].ping(reconnect=True)
+                # 探活必须带超时：死连接上的裸 ping 会挂几十秒到几分钟
+                _bounded_ping(conns[domain], _PING_TIMEOUT_SECONDS)
                 _mark_alive(domain)
             except Exception as _e:  # noqa: BLE001 - ping 失败即丢弃重建
                 log.debug(f"domain conn {domain} ping failed, reconnecting: {_e}")
@@ -369,6 +447,121 @@ def domain_db(domain: str):
 def uses_own_dsn(domain: str) -> bool:
     """该域是否在用"自己的 DSN"（即表名必须裸写、不能再跨 schema）。"""
     return bool(lib_enabled() and dsn_of(domain) and domain_db(domain) is not None)
+
+
+class DomainUnavailable(RuntimeError):
+    """三库拓扑下无法访问某域：该域 DSN 缺失（**绝不回落进程主库**）。
+
+    为什么必须抛：回落会把该域的读/写静默打到本进程库 —— 读到的是另一张库里的
+    同名表（或空壳），写入则把数据落到非 owner 库并用错的密钥加密，生成再也解不开的行。
+    这类错误与“数据不存在”不可区分，只能靠显式失败 + 一次告警暴露。
+    """
+
+    def __init__(self, domain: str, detail: str = ""):
+        self.domain = (domain or "").lower()
+        self.detail = detail
+        super().__init__(
+            f"domain '{self.domain}' unavailable: "
+            + (detail or f"GRAPE_DSN_{self.domain.upper()} missing")
+        )
+
+
+def route_of(domain: str) -> str:
+    """全仓唯一的路由判定：该域的数据走哪条连接。
+
+    返回：
+      "domain" → 用该域自己的连接（有 GRAPE_DSN_<DOMAIN>）
+      "local"  → 用进程主库（本域进程，或单库拓扑）
+    其余（三库拓扑下缺 DSN 且非本域）→ 抛 DomainUnavailable。
+    """
+    d = (domain or "").lower()
+    if d not in _VALID:
+        raise ValueError(f"unknown domain: {d}")
+    if not lib_enabled():            # 单库拓扑：只有一个库，主库即所有域
+        return "local"
+    if d == current_domain():        # 本域进程：主库就是该域（零回归，不另开连接）
+        return "local"
+    if dsn_of(d):                    # 跨域且有 DSN：用该域连接
+        return "domain"
+    raise DomainUnavailable(d, f"GRAPE_DSN_{d.upper()} missing in a three-database topology")
+
+
+@contextmanager
+def cursor_for(domain: str, write: bool = False):
+    """按 route_of 取游标：域连接（未提交由连接自身 autocommit）或主库（带进程锁）。
+
+    域侧 public 模块一律用这个原语，禁止各自再写 ``uses_own_dsn ? DSN : 主库`` 的回落。
+    """
+    route = route_of(domain)
+    if route == "domain":
+        with cursor(domain) as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            if write:
+                _pdb.commit()
+        finally:
+            try:
+                c.close()
+            except Exception as _e:  # noqa: BLE001
+                log.debug(f"close local cursor failed: {_e}")
+
+
+@contextmanager
+def transaction_for(domain: str):
+    """按 route_of 取事务：域连接 → 独立非 autocommit 事务；主库 → 进程锁 + 显式提交。"""
+    route = route_of(domain)
+    if route == "domain":
+        with transaction(domain) as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            _pdb.commit()
+        except Exception:
+            try:
+                _pdb.rollback()
+            except Exception as _e:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                log.debug(f"local rollback failed: {_e}")
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception as _e:  # noqa: BLE001
+                log.debug(f"close local cursor failed: {_e}")
+
+
+def audit_required_domains(required: "list[str] | None" = None) -> dict:
+    """启动自检：三库拓扑下缺哪个域的 DSN（返回 {domain: env_name}）。
+
+    只在 lib_enabled()（GRAPE_DOMAIN_LIB=1）时检查；单库部署返回空。
+    每个进程都会调一次：把“少配一个变量”从运行时静默降级变成启动期可见告警。
+    """
+    if not lib_enabled():
+        return {}
+    missing = {}
+    for d in (required or sorted(_VALID)):
+        d = d.lower()
+        if d == current_domain():
+            continue
+        if not dsn_of(d):
+            missing[d] = f"GRAPE_DSN_{d.upper()}"
+    if missing:
+        log.error(
+            "three-database topology: missing %s — cross-domain access to %s will fail loudly "
+            "(no silent fallback to the process database)",
+            ", ".join(missing.values()), ", ".join(sorted(missing)),
+        )
+    return missing
 
 
 def new_connection(domain: str, autocommit: bool = True):
@@ -509,6 +702,9 @@ def health() -> dict:
             out[d] = {"configured": bool(dsn_of(d)), "ok": True}
         except Exception as exc:  # noqa: BLE001
             out[d] = {"configured": bool(dsn_of(d)), "ok": False, "error": str(exc)[:120]}
+    missing = audit_required_domains()
+    if missing:
+        out["_missing_dsns"] = missing
     return out
 
 

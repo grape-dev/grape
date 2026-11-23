@@ -14,6 +14,10 @@ from .hwcloud import HwcloudBackend
 from .aishell_acp import AishellDshACPBackend
 
 _bwrap_fail_notified = False
+_SESSION_AUTH_FILE_GLOB = ".grape-sess-*.tok"
+# 正常任务最长也远低于该阈值；只有崩溃后长期残留的 token 才会被清扫，
+# 避免同 cwd 并发任务仍在运行时被后续任务误删。
+_SESSION_AUTH_FILE_STALE_SECONDS = 6 * 60 * 60
 
 
 def _note_bwrap_fail_once(message: str) -> None:
@@ -28,6 +32,48 @@ def _note_bwrap_fail_once(message: str) -> None:
         return
     _bwrap_fail_notified = True
     log.warning(message)
+
+
+def _cleanup_session_auth_file(cwd: str, auth_file: "str | None",
+                               task_started_at: "float | None" = None) -> None:
+    """清理本任务凭据文件，并按 mtime 清扫崩溃残留。
+
+    只允许直接删除 prepare_env 明确返回并由 _auth_state 记录的本任务文件；cwd 下
+    其他新文件可能属于重叠执行的另一任务，必须保留。SIGKILL 不会执行 finally，
+    因此额外清扫超过陈旧阈值的同名前缀文件，作为后续任务的兜底。
+    """
+    if auth_file:
+        try:
+            os.unlink(auth_file)
+        except OSError:
+            pass
+    if not cwd or not os.path.isdir(cwd):
+        return
+    import glob as _glob
+    cutoff = (task_started_at if task_started_at is not None else time.time()) \
+        - _SESSION_AUTH_FILE_STALE_SECONDS
+    for _stale in _glob.glob(os.path.join(cwd, _SESSION_AUTH_FILE_GLOB)):
+        try:
+            if os.path.getmtime(_stale) < cutoff:
+                os.unlink(_stale)
+        except OSError:
+            pass
+
+
+def _call_prepare_env(prepare_env, env: dict, cwd: str):
+    """调用 prepare_env；兼容尚未接收 cwd 的自定义 runtime 旧签名。"""
+    import inspect
+    try:
+        params = inspect.signature(prepare_env).parameters.values()
+    except (TypeError, ValueError):
+        return prepare_env(env, cwd=cwd)
+    accepts_cwd = any(
+        param.name == "cwd" or param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in params
+    )
+    if accepts_cwd:
+        return prepare_env(env, cwd=cwd)
+    return prepare_env(env)
 
 
 def _find_hermes_bin(venv_py: str = "", sandbox_mode: bool = False) -> str:
@@ -732,6 +778,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
     from src.domains.runtime.agents.aishell_acp import AishellDshACPBackend
 
     label = f"{agent_label} " if agent_label else ""
+    task_started_at = time.time()
 
     acp = AishellDshACPBackend()
     env = acp.get_env(account=account, user_id=user_id)
@@ -801,24 +848,7 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
             else:
                 yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
     finally:
-        # prepare_env 在 cwd 下创建的 token 文件：任务结束即清（仅清 cwd 下的，
-        # /tmp fallback 的不主动删，避免误删并发任务文件）。
-        # QA 架构守护 C-2 补强：finally 只清记录在 _auth_file 的那个文件——进程被
-        # kill/超时后 finally 不执行、文件残留 → 平台收尾 git add -A 会把 token 提交
-        # 进任务分支。追加 glob 兜底：扫 cwd 下所有 .grape-sess-*.tok 一并清掉
-        # （同前缀专属命名空间，不会误删其它文件）。
-        if cwd and os.path.isdir(cwd):
-            import glob as _glob
-            for _stale in _glob.glob(os.path.join(cwd, ".grape-sess-*.tok")):
-                try:
-                    os.unlink(_stale)
-                except OSError:
-                    pass
-        elif _auth_file and _auth_file.startswith(os.sep):
-            try:
-                os.unlink(_auth_file)
-            except OSError:
-                pass
+        _cleanup_session_auth_file(cwd, _auth_file, task_started_at)
 
 
 def _assemble_env(env: dict, *, kind: str, label: str = "",
@@ -956,7 +986,13 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 if provider == "openai" and cfg.get("api_key"):
                     env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
-            log.warning(f"Failed to inject user credentials: {e}")
+            from src.kernel.db_errors import missing_schema
+            if missing_schema(e):
+                # worker 本地库 user_credentials 缺 kind 列：任务照常跑（token 由
+                # claim 现取注入），只记 debug，不再每个任务刷一条 WARNING。
+                log.debug(f"user credential injection skipped (no local schema): {e}")
+            else:
+                log.warning(f"Failed to inject user credentials: {e}")
 
 # ── 运行时环境变量注入契约（Issue #2395）──────────────────────────────────
 # 四个变量在 VOD/Issue/Coding/QA 各引擎路径必须口径一致：
@@ -1082,12 +1118,16 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  agent_label: str = "",
                  repo_key: str = "",
                  max_exec_seconds: int = 600) -> Generator:
-    """流式执行 Agent（执行作用域包装）。
+    """流式执行 Agent（public wrapper）。
+
+    dsh 在通用 CLI 分支创建的 token 文件必须在整个生成器生命周期结束后清理，
+    包括正常完成、异常退出和调用方提前关闭生成器的路径。
 
     Issue #1982：为本轮所有引擎子进程建立 fd 收口作用域——正常结束由
     _untrack_proc 关闭管道；异常/cancel/requeue/消费方提前中断/GeneratorExit
     由 finally 兜底 terminate + 关闭 stdin/stdout/stderr，避免 pipe fd 泄漏。
     """
+    _auth_state: dict = {"started_at": time.time()}
     prev_scope = _scope_procs()
     _exec_scope.procs = set()
     _exec_scope.reader_threads = set()
@@ -1098,8 +1138,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             env_extra=env_extra, bot_token=bot_token, user_token=user_token,
             agent_name=agent_name, agent_label=agent_label,
             repo_key=repo_key, max_exec_seconds=max_exec_seconds,
+            _auth_state=_auth_state,
         )
     finally:
+        if _auth_state.get("prepare_env_attempted"):
+            _cleanup_session_auth_file(
+                cwd, _auth_state.get("auth_file"), _auth_state.get("started_at"))
         _close_exec_scope(prev_scope)
 
 
@@ -1111,7 +1155,8 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
                        agent_name: str = "",
                        agent_label: str = "",
                        repo_key: str = "",
-                       max_exec_seconds: int = 600) -> Generator:
+                       max_exec_seconds: int = 600,
+                       _auth_state: dict | None = None) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
     **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，
@@ -1179,10 +1224,15 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
     # 绕过它 subprocess 服务的 /TOKEN/i scrub。必须放在 env_extra 之后：
     # token 是任务级的，get_env() 执行时它还不在 env 里（#948 曾写在 get_env 里，
     # 读到的永远是空串，临时文件从未生成）。
+    _auth_file = None
     try:
         _prepare_env = getattr(backend, "prepare_env", None)
         if callable(_prepare_env):
-            _prepare_env(env)
+            if _auth_state is not None:
+                _auth_state["prepare_env_attempted"] = True
+            _auth_file = _call_prepare_env(_prepare_env, env, cwd)
+            if _auth_state is not None:
+                _auth_state["auth_file"] = _auth_file
     except Exception as _pe:
         log.warning(f"{label}prepare_env failed: {_pe}")
 
@@ -2017,6 +2067,40 @@ class _PtyExecHandleAdapter:
         return self._exit_code
 
 
+_ACP_CONTEXT_ENV_KEYS = (
+    "GRAPE_SERVER_URL", "GRAPE_SESSION_TOKEN", "GRAPE_CLI_MODE",
+    "REPO_FULL_NAME", "REPO_NAME", "ACCOUNT", "ISSUE_NUMBER",
+    "PR_NUMBER", "DEVOPS_EVENT_TYPE", "AGENT_NAME", "GRAPE_SCENE_ID",
+    "GIT_ASKPASS", "GRAPE_WORK_BRANCH",
+)
+
+_ACP_PLAIN_ENV_KEYS = ("NO_COLOR", "TERM", "HERMES_YOLO_MODE", "PYTHONUNBUFFERED")
+
+
+def _build_acp_envs(sandbox_envs: dict, proc_env: dict) -> dict:
+    """hermes ACP 进程环境：沙箱基础 env + 上下文变量 + **任意平台** VCS 凭据。
+
+    历史坑（2026-11-22）：这里曾把 VCS 凭据枚举成 BOT_GITCODE_TOKEN /
+    BOT_GITHUB_TOKEN 两个键，后加的 gitee/gitlab 即便在 proc_env 里有值也会被裁掉，
+    沙箱里 askpass 回声为空 → push 401。凭据键是平台知识，必须按谓词转发：
+    任何 BOT_<PROVIDER>_TOKEN / USER_<PROVIDER>_TOKEN（含末级 BOT_TOKEN）都放行，
+    新增平台不再改本文件。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import is_vcs_token_env
+
+    env = dict(sandbox_envs or {})
+    for _k in _ACP_PLAIN_ENV_KEYS:
+        if _k in proc_env:
+            env[_k] = proc_env[_k]
+    for _k in _ACP_CONTEXT_ENV_KEYS:
+        if _k in proc_env:
+            env[_k] = proc_env[_k]
+    for _k, _v in (proc_env or {}).items():
+        if is_vcs_token_env(_k):
+            env[_k] = _v
+    return env
+
+
 def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
                        label, max_exec_seconds, use_session_id):
     """云沙箱执行路径——通过 SDK run_command 在远端沙箱内执行 agent。
@@ -2067,20 +2151,50 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
     _refresh_thread.start()
 
     # 从 proc_env 补充仓库参数（manager.prepare 没传这些）
-    repo_full_name = proc_env.get("REPO_FULL_NAME", "")
-    bot_token = proc_env.get("BOT_GITCODE_TOKEN", "")
+    # 平台必须来自带前缀的 REPO_KEY：REPO_FULL_NAME 是剥前缀裸名（runbook 用），
+    # 单独用它会让 parse_repo_key 默认 provider=gitcode（gitee 仓被 clone 到 gitcode.com，
+    # 令牌键也回落 BOT_GITCODE_TOKEN）。与 sandbox_context 同一判定顺序。
+    repo_full_name = proc_env.get("REPO_KEY") or proc_env.get("REPO_FULL_NAME", "")
+    # bot token 键按平台派生（过去写死 BOT_GITCODE_TOKEN：gitee 仓在沙箱里恒空 → 不 clone）
+    try:
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bot_from_env
+
+        bot_token = _bot_from_env(proc_env, repo_full_name)
+    except Exception as _bt_err:
+        log.warning(f"{label}bot token env derive failed: {_bt_err}")
+        from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _fallback_bot
+        bot_token = _fallback_bot(proc_env, repo_full_name)
     work_branch = proc_env.get("GRAPE_WORK_BRANCH", "")
 
     # 通过通用接口配置仓库（不直接设私有属性，不 isinstance 分叉）
     if repo_full_name and bot_token:
-        # 去掉 repo_key 前缀（gitcode:owner/repo → owner/repo）
-        _repo_name = repo_full_name.split(":", 1)[-1] if ":" in repo_full_name else repo_full_name
-        repo_url = f"https://gitcode.com/{_repo_name}.git"
+        # clone 三要素（地址/鉴权形态/用户名）单点派生：这里过去写死
+        # https://gitcode.com/{repo}.git，gitee/github/gitlab 仓会被当成 gitcode
+        # 仓去 clone，失败与"仓库不存在"不可区分。
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import clone_params
+
+            _cp = clone_params(repo_full_name)
+            repo_url = _cp["clone_url"]
+            _clone_username = _cp["username"]
+            # basic_password 平台（gitee）：用户名必须是令牌所属账号 login。
+            # 有令牌就现场解析（带本地缓存），解析失败回落卡值——别再依赖人手填准。
+            try:
+                from src.domains.runtime.vcs.clone_identity import username_for_token as _user_for_token
+
+                _clone_username, _cu_src = _user_for_token(_cp["provider"], bot_token, repo_full_name)
+                log.info(f"{label}clone username source={_cu_src}")
+            except Exception as _cu_err:  # noqa: BLE001
+                log.warning(f"{label}clone username dynamic failed: {_cu_err}")
+        except Exception as e:
+            log.warning(f"{label}clone endpoint resolve failed for {repo_full_name}: {e}")
+            repo_url, _clone_username = "", ""
         try:
             sandbox.configure_repo(
                 repo_url=repo_url,
                 bot_token=bot_token,
                 work_branch=work_branch,
+                username=_clone_username,
             )
         except Exception as e:
             log.warning(f"{label}cloud sandbox repo clone failed: {e}")
@@ -2136,7 +2250,8 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
         log.info(f"{label}hermes bin: venv_py={_venv_py!r} hermes_bin={_hermes_bin!r} _init_envs_keys={list(_sandbox_envs.keys())}")
 
         # 脱敏——和 PTY/run_command 路径一致
-        _tokens = [t for t in (proc_env.get("BOT_GITCODE_TOKEN", ""), proc_env.get("USER_GITCODE_TOKEN", "")) if t]
+        from src.domains.runtime.vcs.clone_endpoint import vcs_token_values as _vcs_tokens
+        _tokens = _vcs_tokens(proc_env)
         _redact_engine = None
         if _tokens:
             from src.domains.runtime.agents.sandbox.redact import RedactEngine
@@ -2146,20 +2261,8 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
                 return text
             return _redact_engine.redact(str(text)).text
 
-        # 构建 hermes acp 进程环境变量：_init_envs（含 HERMES_CUSTOM_API_KEY 等）
-        _acp_envs = dict(_sandbox_envs)
-        # 合并 proc_env 中的非敏感变量（NO_COLOR, TERM 等）
-        for _k in ("NO_COLOR", "TERM", "HERMES_YOLO_MODE", "PYTHONUNBUFFERED"):
-            if _k in proc_env:
-                _acp_envs[_k] = proc_env[_k]
-        # 合并 grape CLI / 任务上下文变量（env_extra 注入的，grape CLI 和 skill 脚本依赖）
-        for _k in ("GRAPE_SERVER_URL", "GRAPE_SESSION_TOKEN", "GRAPE_CLI_MODE",
-                   "REPO_FULL_NAME", "REPO_NAME", "ACCOUNT", "ISSUE_NUMBER",
-                   "PR_NUMBER", "DEVOPS_EVENT_TYPE", "AGENT_NAME", "GRAPE_SCENE_ID",
-                   "BOT_GITCODE_TOKEN", "BOT_GITHUB_TOKEN", "GIT_ASKPASS",
-                   "GRAPE_WORK_BRANCH"):
-            if _k in proc_env:
-                _acp_envs[_k] = proc_env[_k]
+        # 构建 hermes acp 进程环境变量：沙箱基础 env + 上下文变量 + 任意平台 VCS 凭据
+        _acp_envs = _build_acp_envs(_sandbox_envs, proc_env)
 
         # [USP] Transport 分派收编——adapter.build_transport 注册表分派，
         # supports_pty() if-else 分叉消失（平台自决 PTY vs 文件轮询）
@@ -2383,7 +2486,8 @@ def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
             return
 
     # 脱敏——和 bwrap 路径一致（RedactEngine）
-    _tokens = [t for t in (proc_env.get("BOT_GITCODE_TOKEN", ""), proc_env.get("USER_GITCODE_TOKEN", "")) if t]
+    from src.domains.runtime.vcs.clone_endpoint import vcs_token_values as _vcs_tokens2
+    _tokens = _vcs_tokens2(proc_env)
     _redact_engine = None
     if _tokens:
         from src.domains.runtime.agents.sandbox.redact import RedactEngine

@@ -23,11 +23,116 @@ c.lastrowid / c.rowcount / c.description / PRAGMA table_info / sqlite_master 查
 import json
 import os
 import re
+import socket
 import threading
+import time
+import weakref
 
 import pymysql
 
 from src.kernel.config import log
+
+# ── 长连接健活参数（2026-11 生产实测：mgmt 进程全站卡顿 40~100s）─────────────
+# 现象：MySQL 侧 processlist 全 Sleep（查询没到过），客户端线程全停在 pymysql
+# `_read_bytes`；点「编辑」触发的 /dashboard + /scenes/with-pipeline 一起排队，
+# 浏览器 30s 放弃 → 499。原因是跨网段链路上的池化长连接被中间设备静默丢弃
+# （对端 ACK 过、包没到 DB），复用时既没有存活校验也没有读超时，只能等内核
+# keepalive（默认 7200s）或 NAT 侧 RST 才解锁。
+# 修法：连接建立时打开短周期 TCP keepalive；借出前按空闲阈值做**带超时的** ping；
+# 读/写加兜底超时。全部可用环境变量调参，便于线上按需回退。
+_DB_PING_IDLE_SECONDS = float(os.environ.get("DB_PING_IDLE_SECONDS", "5"))
+_DB_PING_TIMEOUT_SECONDS = float(os.environ.get("DB_PING_TIMEOUT_SECONDS", "3"))
+_DB_READ_TIMEOUT = int(os.environ.get("DB_READ_TIMEOUT", "120"))
+_DB_WRITE_TIMEOUT = int(os.environ.get("DB_WRITE_TIMEOUT", "120"))
+_DB_TCP_KEEPALIVE = os.environ.get("DB_TCP_KEEPALIVE", "1").lower() in ("1", "true", "yes")
+
+# ── 连接池僵死防护（2026-11-23 mgmt 进程全站僵死事故）────────────────────────
+# 事故形状：连接池上限 16（DB_POOL_MAX_CONNECTIONS）< anyio 工作线程上限 40。
+# 慢语句把 16 条连接占满后，dbutils 的 blocking=True 会让**所有**后续借连接
+# 的线程（含跑事件循环的主线程）无限期阻塞在 PooledDB._wait_lock 上 ——
+# 主线程一卡，uvicorn 连静态文件都不再响应，进程活着但整站静默。
+# 修法：① 借连接改成短轮询 + 超时快速失败（带池水位日志，不再永久挂死）；
+#      ② 全部实例登记到弱引用表，供请求收尾兜底归还 / 池水位巡检 / 健康检查。
+_DB_POOL_WAIT_TIMEOUT = float(os.environ.get("DB_POOL_WAIT_TIMEOUT", "15"))
+_DB_POOL_WARN_WAIT = float(os.environ.get("DB_POOL_WARN_WAIT", "3"))
+_DB_INSTANCES: "weakref.WeakSet" = weakref.WeakSet()
+
+# 只读语句首关键字：认 CTE(WITH)/EXPLAIN/DESCRIBE，且允许 SQL 以注释开头。
+# 原实现只按 lstrip 前缀判 SELECT/SHOW/PRAGMA —— 带注释或 WITH 开头的只读语句
+# 不会被 commit，池化连接就一直粘在该线程的 thread-local 上不归还。
+_READ_ONLY_LEADING = ("SELECT", "SHOW", "PRAGMA", "DESCRIBE", "DESC", "EXPLAIN", "WITH")
+
+
+def _strip_sql_leading_noise(sql: str) -> str:
+    """剥掉 SQL 开头的空白与注释（-- # /* */），用于判断语句类型。"""
+    s = (sql or "").lstrip()
+    while True:
+        if s.startswith("--") or s.startswith("#"):
+            nl = s.find("\n")
+            s = "" if nl < 0 else s[nl + 1:].lstrip()
+            continue
+        if s.startswith("/*"):
+            end = s.find("*/")
+            s = "" if end < 0 else s[end + 2:].lstrip()
+            continue
+        return s
+
+
+def _is_read_only_statement(sql: str) -> bool:
+    """只读语句判定（决定执行后是否自动 commit 归还连接）。"""
+    head = _strip_sql_leading_noise(sql)
+    if not head:
+        return False
+    tok = re.split(r"[\s(]", head, 1)[0].upper()
+    return tok in _READ_ONLY_LEADING
+
+
+def release_all_thread_connections() -> int:
+    """把**当前线程**在每个库实例上借的池连接都还回池，返回归还条数。"""
+    n = 0
+    for inst in list(_DB_INSTANCES):
+        try:
+            if inst.release_thread_connection():
+                n += 1
+        except Exception:  # noqa: BLE001 - 兜底清理不得抛
+            pass
+    return n
+
+
+def pool_stats_all() -> list:
+    """所有已建池实例的水位快照（进程内视角）。"""
+    out = []
+    for inst in list(_DB_INSTANCES):
+        try:
+            out.append(inst.pool_stats())
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _enable_tcp_keepalive(conn) -> None:
+    """给已建立连接开短周期 TCP keepalive（默认 60s 起探、10s 间隔、3 次判死）。"""
+    if not _DB_TCP_KEEPALIVE:
+        return
+    sock = getattr(conn, "_sock", None)
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, val in (("TCP_KEEPIDLE", int(os.environ.get("DB_TCP_KEEPIDLE", "60"))),
+                         ("TCP_KEEPINTVL", int(os.environ.get("DB_TCP_KEEPINTVL", "10"))),
+                         ("TCP_KEEPCNT", int(os.environ.get("DB_TCP_KEEPCNT", "3")))):
+            if hasattr(socket, opt):
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+    except Exception as e:  # noqa: BLE001 - keepalive 失败不影响连接可用
+        log.debug(f"mysql_compat: enable tcp keepalive failed: {e}")
+
+
+def _pymysql_connect(**kwargs):
+    """PooledDB creator：建连 + 打开 keepalive（池内每条连接都走这里）。"""
+    conn = pymysql.connect(**kwargs)
+    _enable_tcp_keepalive(conn)
+    return conn
 
 # ====== 配置读取 ======
 
@@ -508,7 +613,10 @@ def _backtick_key(sql: str) -> str:
     def _protect(mm):
         placeholders.append(mm.group(0))
         return f"__KWP{len(placeholders) - 1}__"
-    pat = re.compile(r"\b(?:PRIMARY|UNIQUE|FOREIGN|INDEX)\s+KEY\b", re.I)
+    # ON DUPLICATE KEY 是 MySQL 的 upsert 关键字（由 _CONFLICT_UPSERT_RE 翻译产生），
+    # 不能被当成 meta 表的 key 列加反引号 —— 否则得到 `ON DUPLICATE `key` UPDATE` → 1064
+    # （2026-11-21 实测：meta upsert 首次上 MySQL 就炸在这里）。
+    pat = re.compile(r"\b(?:(?:PRIMARY|UNIQUE|FOREIGN|INDEX)\s+KEY|ON\s+DUPLICATE\s+KEY)\b", re.I)
     sql2 = pat.sub(_protect, sql)
     out, in_str, i = [], None, 0
     while i < len(sql2):
@@ -706,12 +814,29 @@ class MySQLCompatCursor:
         _otel_span = None
         try:
             from src.kernel.otel import start_db_span
-            _otel_span = start_db_span(t)
+            # db.name 让三库（mgmt/runtime/insight）在 trace 里分得开；连不上就留空
+            _dbn = ""
+            try:
+                _dbn = (getattr(self._conn, "_cfg", None) or {}).get("database", "")
+            except Exception:
+                _dbn = ""
+            _otel_span = start_db_span(t, db_name=_dbn)
         except Exception:
             _otel_span = None
         try:
             cur.execute(t, params)
-        finally:
+        except Exception as _otel_exc:
+            # 失败也要把 span 收干净并标成 error（原来走 finally 只 end()，
+            # 排障时看着像成功的一跳）
+            if _otel_span is not None:
+                try:
+                    from src.kernel.otel import end_db_span
+                    end_db_span(_otel_span, rowcount=None, exc=_otel_exc)
+                except Exception:
+                    pass
+                _otel_span = None
+            raise
+        else:
             if _otel_span is not None:
                 try:
                     from src.kernel.otel import end_db_span
@@ -721,8 +846,9 @@ class MySQLCompatCursor:
         # autocommit=False：SELECT 也会隐式开启事务，同线程连接复用时
         # 后续 SELECT 看到旧 MVCC 快照（/repo 返回老列表根因）。
         # 只读语句执行后自动 commit 释放事务，保持读一致性。
-        _is_read_only = t.lstrip().upper().startswith(("SELECT", "SHOW", "PRAGMA"))
-        if _is_read_only:
+        # 判定收口到 _is_read_only_statement：兼容注释开头 / WITH(CTE) / EXPLAIN，
+        # 否则这类只读语句不 commit，池化连接会一直粘在该线程上不归还。
+        if _is_read_only_statement(t):
             self._conn.commit()
         self._pycur = cur
         self.rowcount = cur.rowcount
@@ -798,6 +924,7 @@ class MySQLCompatDB:
         self._lock = threading.RLock()  # 兼容层内部兜底锁
         self._pool = None  # PooledDB instance (lazy init)
         self._pool_disabled = os.environ.get("DB_POOL_DISABLED", "").lower() in ("1", "true", "yes")
+        _DB_INSTANCES.add(self)
 
     def _ensure_pool(self):
         """Lazy-init the connection pool (called once on first use)."""
@@ -811,11 +938,14 @@ class MySQLCompatDB:
             return
         try:
             self._pool = PooledDB(
-                creator=pymysql,
+                creator=_pymysql_connect,
                 mincached=int(os.environ.get("DB_POOL_MIN", "2")),
                 maxcached=int(os.environ.get("DB_POOL_MAX_CACHED", "16")),
                 maxconnections=int(os.environ.get("DB_POOL_MAX_CONNECTIONS", "32")),
-                blocking=True,
+                # blocking=False：池满立刻抛 TooManyConnectionsError，由
+                # _borrow_pooled_conn 短轮询 + 超时快速失败。原来的 blocking=True
+                # 会让线程（包括事件循环主线程）无限期挂在池锁上，全站静默。
+                blocking=False,
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -824,6 +954,16 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
+                # 借出时 ping(reconnect=True)：DB 重启 / NAT 静默丢流后自动换新连接，
+                # 而不是把死连接交给业务查询（否则查询读 socket 挂死几十秒~几分钟）
+                ping=1,
+                # REPEATABLE READ 下，只读不 commit 的线程会让池化连接的读快照
+                # 冻结在首次 SELECT（登录 state: 签发线程 INSERT+commit 落库成功，
+                # 校验线程沿用老快照 → 3 秒后仍 NOT FOUND，登录永远 state_invalid）。
+                # READ COMMITTED 与代码的显式事务/行锁用法兼容（同 SQLite 语义）。
+                init_command="SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
             )
             log.info("MySQLCompatDB: connection pool initialized "
                      f"(min={os.environ.get('DB_POOL_MIN', '2')}, "
@@ -832,6 +972,109 @@ class MySQLCompatDB:
         except Exception as e:
             log.warning(f"MySQLCompatDB: pool init failed ({e}), falling back to per-thread connection")
             self._pool_disabled = True
+
+    def _conn_alive(self, conn) -> bool:
+        """借出前健活校验（带 socket 超时，避免 ping 自己挂死）。
+
+        只在空闲超过 _DB_PING_IDLE_SECONDS 时做一次，正常请求不会多一次往返。
+        ping 失败/超时即判死交给调用方丢弃重取 —— 死连接若直接拿去执行查询，
+        读会挂在 socket 上几十秒到几分钟（2026-11 生产全站卡顿的机制：
+        对端 ACK 过、包没到 DB，MySQL 侧 processlist 只有 Sleep）。
+        """
+        last = float(getattr(self._local, "conn_alive_at", 0.0) or 0.0)
+        if time.time() - last < _DB_PING_IDLE_SECONDS:
+            return True
+        sock = getattr(conn, "_sock", None)
+        prev = None
+        try:
+            if sock is not None:
+                prev = sock.gettimeout()
+                sock.settimeout(_DB_PING_TIMEOUT_SECONDS)
+            conn.ping(reconnect=True)
+            self._local.conn_alive_at = time.time()
+            return True
+        except Exception as e:  # noqa: BLE001 - 判死即重建
+            log.warning(f"MySQLCompatDB: 池化连接失活，丢弃重建: {e}")
+            return False
+        finally:
+            if sock is not None and prev is not None:
+                try:
+                    sock.settimeout(prev)
+                except Exception:
+                    pass
+
+    def _drop_local_conn(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        self._local.conn_alive_at = 0.0
+        if conn is not None:
+            try:
+                conn.close()  # 池化包装 close() = 归还；死连接由池在借出时剔除
+            except Exception:
+                pass
+
+    def _borrow_pooled_conn(self):
+        """从池借一条连接：短轮询 + 超时快速失败（替代 dbutils 的无限阻塞）。
+
+        池满（并发语句 > maxconnections）时不再让线程永久挂死：
+        - 等待超过 DB_POOL_WARN_WAIT（默认 3s）先打一条 WARNING + 池水位；
+        - 超过 DB_POOL_WAIT_TIMEOUT（默认 15s）抛 TimeoutError，让请求快速 500，
+          而不是把事件循环和整站一起拖死。
+        """
+        deadline = time.monotonic() + _DB_POOL_WAIT_TIMEOUT
+        started = time.monotonic()
+        warned = False
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("connection pool not initialized")
+        while True:
+            try:
+                return pool.connection()
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ not in ("TooManyConnectionsError", "TooManyConnections"):
+                    raise
+                waited = time.monotonic() - started
+                if waited >= _DB_POOL_WAIT_TIMEOUT:
+                    st = self.pool_stats()
+                    log.error(
+                        f"MySQLCompatDB[{self._cfg.get('database', '')}]: 借连接超时 "
+                        f"{_DB_POOL_WAIT_TIMEOUT:.0f}s（池已满 in_use={st.get('in_use')}/"
+                        f"{st.get('max')}），本次请求快速失败以免拖死整个进程")
+                    raise TimeoutError(
+                        f"db pool exhausted ({st.get('in_use')}/{st.get('max')}) "
+                        f"after {_DB_POOL_WAIT_TIMEOUT:.0f}s")
+                if not warned and waited >= _DB_POOL_WARN_WAIT:
+                    warned = True
+                    st = self.pool_stats()
+                    log.warning(
+                        f"MySQLCompatDB[{self._cfg.get('database', '')}]: 等待池连接 "
+                        f"{waited:.1f}s（in_use={st.get('in_use')}/{st.get('max')}）")
+                time.sleep(0.05)
+
+    def pool_stats(self) -> dict:
+        """连接池水位（进程内视角）：in_use / idle / max。"""
+        p = self._pool
+        base = {"database": self._cfg.get("database", ""), "enabled": p is not None}
+        if p is None:
+            base.update({"max": 0, "in_use": 0, "idle": 0})
+            return base
+        try:
+            idle = len(getattr(p, "_idle_cache", []) or [])
+            total = int(getattr(p, "_connections", 0) or 0)
+            mx = int(getattr(p, "_maxconnections", 0) or 0)
+            base.update({"max": mx, "in_use": max(total - idle, 0), "idle": idle})
+        except Exception:  # noqa: BLE001
+            base.update({"max": 0, "in_use": 0, "idle": 0})
+        return base
+
+    def release_thread_connection(self) -> bool:
+        """把本线程借的池连接还回池（幂等）。请求收尾兜底用。"""
+        if self._pool is None:
+            return False
+        if getattr(self._local, "conn", None) is None:
+            return False
+        self._drop_local_conn()
+        return True
 
     def _raw_cursor(self):
         """Get a raw pymysql cursor.
@@ -854,15 +1097,19 @@ class MySQLCompatDB:
             # Borrowing once per thread (not per cursor) ensures multi-statement
             # transactions (db.execute×N + db.commit) share one connection.
             conn = getattr(self._local, "conn", None)
+            if conn is not None and not self._conn_alive(conn):
+                self._drop_local_conn()
+                conn = None
             if conn is None:
-                conn = self._pool.connection()
+                conn = self._borrow_pooled_conn()
                 self._local.conn = conn
+                self._local.conn_alive_at = time.time()
             return conn.cursor()
 
         # Fallback: per-thread bare connection (legacy)
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = pymysql.connect(
+            conn = _pymysql_connect(
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -871,12 +1118,14 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
             )
             self._local.conn = conn
         try:
             conn.ping(reconnect=True)
         except Exception:
-            conn = pymysql.connect(
+            conn = _pymysql_connect(
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -885,6 +1134,8 @@ class MySQLCompatDB:
                 charset=self._cfg.get("charset", "utf8mb4"),
                 autocommit=False,
                 connect_timeout=10,
+                read_timeout=_DB_READ_TIMEOUT,
+                write_timeout=_DB_WRITE_TIMEOUT,
             )
             self._local.conn = conn
         return conn.cursor()
@@ -968,6 +1219,8 @@ def _dedicated_connect_params(cfg: dict) -> dict:
         "charset": cfg.get("charset", "utf8mb4"),
         "autocommit": False,
         "connect_timeout": 10,
+        "read_timeout": _DB_READ_TIMEOUT,
+        "write_timeout": _DB_WRITE_TIMEOUT,
     }
 
 

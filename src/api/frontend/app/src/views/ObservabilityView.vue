@@ -114,31 +114,35 @@
               <h2>{{ t('worker_monitor') }}</h2>
               <span class="obv-sec-sub">{{
                 t('online_count', {
-                  count: (opsWorkers.online || 0) + '/' + (opsWorkers.total || 0),
+                  count: (opsWorkers.online === null ? '—' : opsWorkers.online) +
+                    '/' + (opsWorkers.total === null ? '—' : opsWorkers.total),
                 })
               }}</span>
+              <span v-if="opsStale" class="ts t3" style="margin-left: 8px; color: var(--o)">
+                {{ opsFailedAt ? t('obs_stale_since', { time: opsFailedAt }) : t('obs_partial') }}
+              </span>
             </div>
             <div class="obv-kpirow">
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('worker_total') }}</div>
-                <div class="obv-kpiv" style="color: var(--a)">{{ opsWorkers.total || 0 }}</div>
+                <div class="obv-kpiv" style="obv-kpiv">{{ kpiVal(opsWorkers.total) }}</div>
               </div>
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('online') }}</div>
-                <div class="obv-kpiv" style="color: var(--g)">{{ opsWorkers.online || 0 }}</div>
+                <div class="obv-kpiv" style="obv-kpiv">{{ kpiVal(opsWorkers.online) }}</div>
               </div>
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('offline') }}</div>
-                <div class="obv-kpiv" style="color: var(--t3)">{{ opsWorkers.offline || 0 }}</div>
+                <div class="obv-kpiv" style="obv-kpiv">{{ kpiVal(opsWorkers.offline) }}</div>
               </div>
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('engine_total') }}</div>
-                <div class="obv-kpiv" style="color: var(--pu)">{{ opsRuntimes.total || 0 }}</div>
+                <div class="obv-kpiv" style="color: var(--pu)">{{ kpiVal(opsRuntimes.total) }}</div>
               </div>
             </div>
             <div class="obv-wkgrid">
               <div v-if="!sortedWorkers.length" class="ts t2" style="padding: 12px">
-                {{ t('no_remote_worker') }}
+                {{ opsWorkers.total === null ? t('obs_no_data') : t('no_remote_worker') }}
               </div>
               <div v-for="wk in pageWorkers" :key="wkKey(wk)" class="obv-wkcard">
                 <div class="obv-wk-head">
@@ -2581,8 +2585,16 @@ function refreshObs(isAuto) {
       .catch(() => null),
   ]).then(function (results) {
     const [ops, realtime] = results
-    opsData.value = ops
-    rtData.value = realtime
+    // 失败不要覆盖上一份有效快照：旧实现在这里直接赋值 null/error，于是
+    // realOps 退回 fallbackOps，而 fallback 的 workers 是硬编码 0 —— 表现为
+    // worker 卡片「一会儿全 0、一会儿正常」。现在保留旧值并标记失败时间。
+    if (ops && !ops.error) {
+      opsData.value = ops
+      opsFailedAt.value = ''
+    } else if (opsData.value) {
+      opsFailedAt.value = new Date().toLocaleTimeString('zh-CN')
+    }
+    if (realtime && !realtime.error) rtData.value = realtime
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN')
     if (section.value === 'devices' || tab.value === 'tasks') loadTokCols()
     if (isAuto && section.value === 'inspect' && tab.value === 'events') eventSoftRefresh()
@@ -2613,11 +2625,36 @@ function fallbackOps(realtime) {
       by_mode: {},
       list: [],
     },
-    workers: { total: 0, online: 0, offline: 0, list: [] },
+    // 未知（不是「0 台」）：拿不到 overview 时卡片显示 —，不再画成 0。
+    workers: null,
   }
 }
-const opsWorkers = computed(() => (realOps.value || {}).workers || {})
-const opsRuntimes = computed(() => (realOps.value || {}).runtimes || {})
+const opsDegraded = computed(() => {
+  const d = (realOps.value || {}).degraded
+  return Array.isArray(d) ? d : []
+})
+// null 表示「这一块没拿到数据」，与「真的 0 台」区分开（后端 degraded 段同理）
+const opsWorkers = computed(() => {
+  const cur = realOps.value || {}
+  const w = cur.workers
+  if (!w || opsDegraded.value.indexOf('workers') >= 0) {
+    return { total: null, online: null, offline: null, list: [] }
+  }
+  return w
+})
+const opsRuntimes = computed(() => {
+  const cur = realOps.value || {}
+  const r = cur.runtimes
+  if (!r || opsDegraded.value.indexOf('runtimes') >= 0) {
+    return { total: null, online: null, offline: null, list: [], by_mode: {} }
+  }
+  return r
+})
+const opsFailedAt = ref('')
+const opsStale = computed(() => !!opsFailedAt.value || opsDegraded.value.length > 0)
+function kpiVal(v) {
+  return v === null || v === undefined ? '—' : v
+}
 const taskStats = computed(() => ((realOps.value || {}).tasks || {}).issue_stats || {})
 const sortedWorkers = computed(() =>
   (opsWorkers.value.list || [] || []).slice().sort((a, b) => {

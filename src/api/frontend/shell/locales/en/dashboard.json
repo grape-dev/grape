@@ -196,6 +196,7 @@
   "host_repair_request_failed": "Repair request failed: ",
   "host_unknown_error": "Unknown error",
   "list_sep": ", ",
+  "label_plugins": "Plugins",
   "selector_mode_tag": "Match by tags",
   "selector_mode_engine": "Pick engine instances",
   "selector_tag_hint": "Match by tags: declare engine tags (type/scope/scene); new engines join the pool automatically and retired ones need no rebinding. Best for teams that keep scaling.",

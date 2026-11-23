@@ -161,7 +161,7 @@ def _quiet_remote_hooks(monkeypatch):
     monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
     monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
     monkeypatch.setattr("src.domains.runtime.engine.service._handle_vod_recommend_complete", lambda *a, **k: None)
-    monkeypatch.setattr("src.kernel.token_resolver.create_provider_from_repo_key", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.mgmt.vcs.create_provider_from_repo_key", lambda *a, **k: None)
 
 
 def test_complete_task_sre_registers(_quiet_remote_hooks):

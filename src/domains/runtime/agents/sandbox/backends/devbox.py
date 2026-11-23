@@ -324,8 +324,10 @@ class DevBoxSandbox(CloudSandboxBase):
         if "exists" in _out:
             log.info(f"[devbox] repo already cloned at {self._REPO_DIR}, skip")
             return
-        # 写 GIT_ASKPASS 脚本——git 调用时从环境变量读 token
-        _askpass_script = '#!/bin/sh\ncase "$1" in\nUsername*) echo "bot";; \nPassword*) echo "$GIT_BOT_TOKEN";; \nesac\n'
+        # 写 GIT_ASKPASS 脚本——git 调用时从环境变量读用户名与 token（都不落脚本/命令行）
+        # 用户名不能写死 "bot"：gitee 的 clone_auth=basic_password 要求真实账号名，
+        # 由 executor 经 clone_endpoint.clone_username 派生后传进来（GIT_BOT_USERNAME）。
+        _askpass_script = '#!/bin/sh\ncase "$1" in\nUsername*) echo "$GIT_BOT_USERNAME";; \nPassword*) echo "$GIT_BOT_TOKEN";; \nesac\n'
         self._sandbox.files.write("/tmp/_git_askpass.sh", _askpass_script)
         # P1-1 修复：走 run_cmd（background=True + 重连），不走 cmds.run
         self.run_cmd("chmod +x /tmp/_git_askpass.sh", timeout=5)
@@ -339,7 +341,8 @@ class DevBoxSandbox(CloudSandboxBase):
         _clone_ec, _clone_out = self.run_cmd(
             f"GIT_ASKPASS=/tmp/_git_askpass.sh git clone --depth 1 {branch_arg} {_shlex.quote(self._repo_url)} {self._REPO_DIR}",
             timeout=120,
-            envs={"GIT_BOT_TOKEN": self._bot_token},
+            envs={"GIT_BOT_TOKEN": self._bot_token,
+                  "GIT_BOT_USERNAME": getattr(self, "_clone_username", "") or "bot"},
         )
         if _clone_ec != 0:
             log.error(f"[devbox] git clone failed exit={_clone_ec} output={_clone_out[:200]}")
@@ -454,10 +457,10 @@ class DevBoxSandbox(CloudSandboxBase):
     # 之后 _clone_repo 在 configure_repo 内部触发。create_sandbox 阶段沙箱刚创建，
     # repo 信息尚未可用。
 
-    def configure_repo(self, *, repo_url, bot_token, work_branch):
+    def configure_repo(self, *, repo_url, bot_token, work_branch, username=""):
         super().configure_repo(
             repo_url=repo_url, bot_token=bot_token,
-            work_branch=work_branch,
+            work_branch=work_branch, username=username,
         )
         # grape-cli 配置在 _init_sandbox step5 已完成（__enter__ 阶段），此处不重复调用
         if self._sandbox and self._repo_url and self._bot_token:

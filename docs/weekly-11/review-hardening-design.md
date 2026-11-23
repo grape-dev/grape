@@ -1,0 +1,316 @@
+# 评审补强四条 —— 设计
+
+对应需求：`review-hardening-requirements.md`（R1–R5）。
+
+## 1. settings：校验前移（R1）
+
+代码：`src/domains/mgmt/routes/settings.py`
+
+```
+_assert_bot_username_free(name)        # 新增局部函数：查 grape_accounts，命中即 400
+  冲突 → HTTPException(400, BOT_USERNAME_CONFLICT)
+  查询异常 → 放行（不因基础设施失败阻断配置）
+
+顺序（唯一正确序）：
+  1 verify_token → _verified_login
+  2 effective = body.bot_username or _verified_login
+  3 _assert_bot_username_free(effective)      ← 校验
+  4 update_managed_repo_bot_token(...)        ← 写令牌
+  5 update_managed_repo_bot_username(...)     ← 写用户名
+无令牌路径（只改用户名）：写用户名之前同样调用 _assert_bot_username_free。
+```
+
+为什么校验“最终值”而不是 `body.bot_username`：自动回填发生在令牌校验之后、写之前，
+只看请求体里的名字会漏掉“令牌所属账号与真人同名”的冲突。
+
+## 2. 写冻结守卫路径（R2）
+
+代码：`tests/mgmt/test_user_accounts_write_freeze_guard.py`
+
+```
+_SRC = _TEST_DIR.parents[1] / "src"
+   tests/mgmt/x.py → parents[1] = 仓库根
+（原 .parent/"src" → tests/src，不存在 → 扫 0 文件 → 恒绿）
+```
+
+GC1–GC3 的形状不变（INSERT / UPDATE / DELETE `user_accounts`），只是终于打在真实源码上。
+
+## 3. 全仓扫描 + 数据流断言（R3）
+
+代码：`tests/runtime/test_clone_endpoint_multiplatform.py`
+
+```
+正则：https://(gitcode|gitee|github)\.com/  命中且同行含 ".git" → 视为自拼仓库地址
+扫描范围：src/**/*.py
+棘轮：_KNOWN_CLONE_HOST_LITERALS
+  · repo_manager.py / org_context_repo.py —— 存量自拼（待收口，不在本轮）
+  · main.py / server_common.py / executor.py / event_pipeline.py / scene_sync.py /
+    repo.py / worker_package.py —— runbook 文案里的示例地址（文本，非构造）
+数据流断言：
+  build_context({"repo_key":"gitee:a/b","env_extra":{"REPO_KEY":"gitee:a/b","REPO_FULL_NAME":"a/b"}})
+  → repo_url 必须是 https://gitee.com/a/b.git
+```
+
+为什么按“同行含 .git”收敛：只看 host 字面量会把 API 地址、webhook 展示、帮助文案全部误报；
+真正危险的是“据此拼仓库地址”。数据流断言补上“值被覆盖”这类字面量扫描抓不到的情况。
+
+## 4. OAuth 退避与重授权（R4）
+
+代码：`src/domains/mgmt/user/db.py`、`src/api/oauth_token.py`
+
+```
+db.py
+  _REFRESH_MIN_INTERVAL_S = 60
+  _REFRESH_LAST[(user_id, provider)] = monotonic()      # 刷新成功后记录
+  refresh_oauth_token() 入口：
+      若距上次成功刷新 < 60s → 不调 OAuth，返回库里现有 access_token（不轮换 refresh_token）
+  mark_identity_reauth_required(user_id, provider, reason)
+       UPDATE external_identities SET status=4 ... WHERE status=1
+       invalid_grant/400 与 post-refresh-401 共用
+
+api/oauth_token.py::with_oauth_token
+  预刷新 → 请求 → token 错误 → refresh → 重试
+  重试仍 token 错误 → mark_identity_reauth_required(..., "post_refresh_401") → 提示重新授权
+```
+
+不变式：
+- 同一身份 60s 内最多一次 OAuth 往返（防轮换风暴）；
+- “刷新有效但上游拒绝”必须落 status=4，而不是无限重试；
+- 退避只影响 `refresh_oauth_token`，不影响读路径（预刷新命中退避时用现有 token 继续）。
+
+## 5. 场景矩阵
+
+| 编号 | 场景 | 期望 | 用例 |
+|---|---|---|---|
+| S1 | 存令牌且用户名与真人冲突 | 400，令牌与用户名都不变 | `test_settings_bot_username_order.py::test_conflict_check_precedes_both_writes` |
+| S2 | 只改用户名（无令牌）冲突 | 400，用户名不变 | 同上 `::test_no_write_before_the_early_check_for_tokenless_updates` |
+| S3 | 冻结守卫扫真实源码 | 通过（零写语句） | `test_user_accounts_write_freeze_guard.py` |
+| S4 | gitee/github/gitlab clone | 各自平台 host | `test_sandbox_clone_provider.py` S1–S3 |
+| S5 | REPO_KEY 与裸名并存 | 取带前缀 key | 同文件 S4 + `test_clone_endpoint_multiplatform.py::test_sandbox_clone_uses_the_prefixed_key_not_the_bare_name` |
+| S6 | 全仓新增自拼地址 | 扫描红 | `::test_repo_wide_no_new_hardcoded_clone_hosts` |
+| S7 | 60s 内重复刷新 | 不调 OAuth，返回现有 token | `test_oauth_refresh_backoff.py::test_s1` |
+| S8 | 退避到期 | 正常刷新并记录时间戳 | `::test_s2` |
+| S9 | 打 status=4 | SQL 参数与提交正确 | `::test_s3` |
+| S10 | 刷新成功但重试 401 | 打 status=4 + 重新授权 | `::test_s4` |
+| S11 | 重试路径的 repo_key | 底层 `_run_git` 收到 repo_key | `test_run_git_platform_auth.py::test_s7` |
+| S12 | linked push / 远端探测 | 两个调用点都传 repo_key | 同文件 `::test_s8` |
+| S14 | DDL + ownership 同进程 | 全绿（无全局污染） | `::test_s14` |
+| S15 | 测试恢复纪律 | 只用 monkeypatch | `::test_s15` |
+| S16 | 云沙箱 executor 平台判定 | REPO_KEY 优先（与 sandbox_context 同序） | `test_sandbox_clone_provider.py::test_s6` |
+| S17 | 脱敏红线 | 本分支变更文件零真实账号/库名/个人路径 | `test_public_docs_redaction.py` |
+| S18 | 个人组织回填（mgmt） | 缺组织才建、slug 冲突退后缀、停用账号跳过、幂等 | `test_org_backfill_migrations.py` S1–S5 |
+| S19 | org_id 回填（runtime） | 凭证/引擎/技能/仓库维表回填，跨域走契约 | 同文件 S6–S9 |
+| S20 | 任务日志读权限 | 本人 / 管理方可读；提报者与契约异常 403 | `test_task_logs_acl.py` S1–S7 |
+| S21 | DDL 目标态错误码 | 1051/1054/1146 也按幂等放行 | `test_destructive_ddl_stamp_scenarios.py::test_s5_*` |
+| S22 | 脱敏守卫自身 | 扫描跳过自身，不再自伤 | `test_public_docs_redaction.py` |
+| S23 | clone 地址派生 | org_context_repo 走 runtime.public.clone_url | `test_mgmt_clone_contract.py::test_s1` |
+| S24 | 模板克隆凭据 | 只用 extraheader，token 不进 URL | `::test_s2` |
+| S25 | 鉴权头按卡 | gitee=basic(owner)、github=x-access-token | `::test_s3` |
+| S26 | 登录名字段 | login → username → name | `::test_s4` |
+| S27 | 跨域直连棘轮 | mgmt 只允许 runtime.public（基线 3 处登记） | `::test_s5` / `::test_s6` |
+
+## 6. 验证命令（一次一个文件）
+
+```
+PY=<venv>/bin/python
+$PY -m pytest tests/mgmt/test_settings_bot_username_order.py -q
+$PY -m pytest tests/mgmt/test_user_accounts_write_freeze_guard.py -q
+$PY -m pytest tests/runtime/test_clone_endpoint_multiplatform.py -q
+$PY -m pytest tests/mgmt/test_oauth_refresh_backoff.py -q
+$PY -m pytest tests/mgmt/test_oauth_reauth_scenarios.py -q
+$PY -m pytest tests/arch/test_public_docs_redaction.py -q
+$PY -m pytest tests/mgmt/test_org_backfill_migrations.py -q
+$PY -m pytest tests/runtime/test_sandbox_clone_provider.py -q
+$PY -m pytest tests/mgmt/test_issue_3563_reauth_401_split.py -q
+$PY -m pytest tests/mgmt/test_issue_3563_github_token_refresh.py -q
+```
+
+## 7. 传输凭据的调用点清单（R6）
+
+```
+必须传 repo_key 的调用点（网络动作）：
+  repogit._run_git_retry → _run_git         （重试路径；旧实现死参数）
+  repogit 基线 fetch / _branch_vs_baseline fetch / ls-remote
+  branch_guard.guarded_push
+  event_pipeline 直连 PR push（repo_key=_rk）
+  agent.py linked-repo push（repo_key=_rk）
+  worktree_guard：collect_reset_risk → _collect_unpushed → _remote_branch_head（ls-remote）
+  project_info/builder 两处 fetch
+
+本地动作（rev-parse/diff/show-ref）不传也能过，但传了无害；不列入验收。
+
+不变式：
+  · 重试封装必须透传 repo_key（否则“同源”只在首次尝试成立）；
+  · 远端探测失败必须与“分支未推送”区分（probed=False 回退本地判定）；
+  · 派生失败（clone_params 异常）回落 x_access_token，并留 warning。
+```
+
+## 8. 已知失败登记
+
+```
+tests/arch/test_silent_except_ratchet.py  2 failed —— 基线 dcb3759e7 同样失败
+  （基线 json 计数落后于代码：repogit 3→5、mysql_compat 7→9、db_registry 未登记）
+  属既有失败；本分支未新增静默 except（逐文件比对与基线计数一致），不改断言、不上调基线。
+tests/mgmt/test_user_db.py::TestAliases::test_aliases_delegate —— 基线同样失败
+```
+
+## 9. 云沙箱 executor 的平台判定（R9）
+
+```
+src/domains/runtime/agents/executor.py::_run_cloud_sandbox
+  repo_full_name = proc_env.get("REPO_KEY") or proc_env.get("REPO_FULL_NAME", "")
+  → clone_params(repo_full_name) 得到 clone_url / clone_auth / username
+  → bot_token_from_env(proc_env, repo_full_name) 得到对应平台的 BOT_<PROVIDER>_TOKEN
+
+为什么顺序不能反：派发侧 env_extra 的 REPO_FULL_NAME 是剥前缀裸名（runbook 拼 URL 用），
+cloud_worker 先写的带前缀 repo_key 随后被 env.update(env_extra) 覆盖；只读裸名 →
+parse_repo_key 默认 gitcode → 非 gitcode 仓 clone 到错平台、令牌键也错。
+
+不变式：任何“从 task/env 推平台”的位置都必须先读 REPO_KEY；
+REPO_FULL_NAME 只用于拼展示/runbook URL。
+```
+
+## 10. 脱敏约定（R10）
+
+| 真实值类型 | 占位符 | 示例 |
+|---|---|---|
+| 个人目录 | `<venv>` / `<home>` | `PY=<venv>/bin/python` |
+| 账号名（含平台账号） | `<ACCOUNT>` / `<platform_account>` | `gitee:<ACCOUNT>/demo` |
+| 库名 | `<db_mgmt>` / `<db_insight>` | `--mgmt-dsn mysql://…/<db_mgmt>` |
+| 备份目录 | `<BACKUP_DIR>` | 脚本默认 `RC_BACKUP_DIR` 或相对目录 `./backup-rc-<ts>` |
+| 主机/IP | `<host_a>` / `<server_ip>` / `<public_ip>` | 运维文档 |
+| 测试夹具仓 | `acme/<repo>` | `gitee:acme/demo` |
+
+守门用例：`tests/arch/test_public_docs_redaction.py` —— 只扫**本分支变更文件**
+（`git diff --name-only <merge-base>...HEAD`），基线历史命中登记在 allowlist。
+
+## 11. 提交署名（R11）
+
+```
+author/committer/Signed-off-by = grape-bot <bot@grapedev.cn>
+历史遗留个人署名：合入前用 filter-branch 重写（本轮已清洗 2 个 commit），
+重写后所有 sha 变化，PR head 与 QA 历史的 sha 需重新对账。
+```
+
+## 12. 测试隔离纪律（R8）
+
+```
+禁止：orig = mod.global; mod.global = fake; ... finally: mod.global = orig
+  反例：tests/api/test_destructive_ddl_stamp_scenarios.py S3 曾把 _cleanup_gate_passed
+        恢复成另一个函数的原值（hasattr 恒真）→ 同进程 table_ownership s10 读假 gate 变红。
+一律：monkeypatch.setattr(mod, "global", fake)，由夹具恢复。
+守门用例：S14（同进程跑两个文件全绿）+ S15（源码里不得再出现手工赋值恢复）。
+```
+
+## 13. 回滚
+
+```
+R1 顺序改动：单文件回退 settings.py（无数据影响）
+R2/R3 只用例改动：回退测试文件
+R4：回退 db.py 的 _REFRESH_LAST/mark_identity_reauth_required 与 oauth_token.py 的调用；
+    已写入的 status=4 行需要人工按绑定关系恢复（重新授权即恢复，属常规流程）
+```
+
+## 14. 个人组织 / org_id 回填迁移（R12）
+
+```
+为什么恢复：删 user_accounts 时把 _migrate_create_personal_orgs 与
+_migrate_data_to_personal_orgs 整段删了；后者第 1/3/4/5 段不依赖废表，
+删掉后“存量 org_id 为空”的行永不再修（新写入已带 org_id）。
+
+拆分（owner 域各管各的表）：
+  mgmt  src/domains/mgmt/migrations/personal_org_backfill.py   版本 202611220006
+    · 账号源 grape_accounts(status=1)
+    · 缺个人组织才建：slug=personal-<id>，冲突退 personal-<id>-<username[:8]>
+    · org_member 补 owner 行
+    · managed_repos.org_id 空 → 按 user_repos.is_admin 找管理员 → 其个人组织
+  runtime  src/domains/runtime/migrations/org_id_backfill.py     版本 202611220007
+    · runtime_credentials(scope<>global) 按 owner_name → 个人组织（mgmt 契约解析）
+    · agent_runtimes 跟随 credential_id
+    · skill scope=user → owner_id 用户；scope=repo → owner_id 当 repo_key
+    · 其它跟随 repo_key 的表：repo_org_map() 取映射，
+      mgmt.public.backfill_org_id_by_repo / runtime.public.backfill_org_id_by_repo 各回各库
+
+不变式：
+  · 不读 user_accounts（写冻结守卫 + 表归属清单）；
+  · 幂等：只处理空 org_id；已填不覆盖；
+  · 失败抛出 → 不盖章 → 下次启动重试（与 DDL 盖章纪律一致）；
+  · 跨域解析失败只告警并跳过该行，不猜、不跨库直写。
+```
+
+## 15. 组织机构回填迁移的验证与回滚
+
+```
+回滚：撤销 202611220006/007 两个 register_migration 与两个迁移模块（数据只补空值，回滚无副作用）。
+验证：一次一文件
+  tests/mgmt/test_org_backfill_migrations.py        9 passed
+  tests/kernel/test_migration_no_baseline_version_collision.py
+    1 failed —— 基线 dcb3759e7 同样失败（既有撞号锁红，非本轮）
+```
+
+## 16. 任务日志读权限（R14）
+
+```
+src/domains/runtime/routes/task_logs.py::_require_task_access
+  1 session_token / api_key → 豁免（作用域已限定）
+  2 agent_tasks.user_id == 当前用户 → 本人，放行
+  3 其余：只放行仓库管理方
+      mgmt.public.user_can_manage_repo(uid, repo_key)
+        = managed_repos.host_user_id == uid 或 user_repos.is_admin=1
+      契约异常 → 按无权（fail-closed），403 + error_code=TASK_LOG_FORBIDDEN
+  4 无 repo_key 且非本人 → 403
+
+为什么不能沿用 check_repo_access：它以“能看见仓库”为判据，外部 issue 提报者
+也有 user_repos 可见行；而任务日志与 diff 是代码泄漏面，必须按“管理方”收紧。
+```
+
+## 17. DDL 目标态错误码与文档纠偏（R15）
+
+```
+_destructive_ddl 放行码（幂等重跑，不是失败）：
+  1050 表已存在 · 1051 表不存在 · 1054 列不存在 · 1060 列已存在
+  1061 索引已存在 · 1091 待删列/键不存在 · 1146 表不存在
+其余异常 → raise（迁移不盖章、下次启动重试）
+
+文档纠偏：db_setup 内两处 docstring 原写“只记 WARNING 并返回 True（fail-open）”，
+与实现相反，已统一为 fail-closed + 目标态清单。
+```
+
+## 18. 脱敏守卫自身（S22）
+
+```
+tests/arch/test_public_docs_redaction.py 扫描本分支变更文件；
+黑名单字面量就在该文件里 → 必须跳过自身（SELF），否则守卫永远红。
+```
+
+## 19. clone 派生契约与凭据传输（R16/R17）
+
+```
+runtime.public 出口（新增）：
+  clone_params(repo_key) / clone_url(repo_key)
+  username_for_token(provider, token, repo_key)
+  clone_auth_header(repo_key, token)   → "Basic base64(user:token)"（用户名按卡 clone_auth 取）
+  CloneEndpointError（异常类再导出，调用方按类做错误分类）
+
+改后的三个调用点：
+  mgmt/org_context_repo._clone_url        → runtime.public.clone_url
+  mgmt/user/repo_manager._download_gitcode_tarball
+        → clone_url + `git -c http.extraheader=Authorization: <header> clone …`
+          （旧写法 https://oauth2:{token}@gitcode.com/… 同时写死平台并把 token 放进 URL）
+  mgmt/routes/repos.py                    → 契约 import（不再 import runtime.vcs.*）
+
+clone_identity 登录名：login → username → name（gitlab /user 用 username）
+
+不变式：
+  · 跨域只经 <owner>.public；mgmt 直连 runtime 内部的基线 3 处
+    （admin/repo_platform_routes、routes/plugins、routes/plugins_agent）登记棘轮
+  · 凭据不进 URL/进程参数/日志
+```
+
+## 20. 能力位（R18）事实更正
+
+```
+PlatformCard.capabilities 存在且校验严格（_VALID_CAPABILITIES = resource.op 枚举）；
+未知顶层键在加载期整卡拒绝、管理端保存期已在写库前校验 → 无“写卡即整卡消失”的 API 路径。
+评审列的 6 个 flag 在本分支不存在；新增能力需登记枚举 + 消费端检查点，属代码改动。
+```

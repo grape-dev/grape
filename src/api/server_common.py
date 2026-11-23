@@ -25,6 +25,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRoute
 
 from src.api.version_check import ensure_python_version
+# Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
+from src.api.frontend_flags import apply_feature_flags
+# Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
+from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
 from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
                                trace_id_var, user_var)
@@ -110,12 +114,31 @@ def build_app(
 
     _attach_request_log(app)
 
-    # 可选 tracing：GRAPE_OTLP_ENDPOINT 启用后，FastAPI/requests 自动埋点，
-    # span 经 Alloy:4317 转发到 Tempo（未启用时零开销）
+    # 连接池僵死防护（2026-11-23 mgmt 全站僵死事故）：线程上限收敛到 ≤ 池上限、
+    # 请求收尾归还被粘住的连接、池饱和时打 ERROR + dump 线程栈。
     try:
-        from src.domains.insight.observability.tracing import setup_tracing, instrument_fastapi_app
-        setup_tracing(service_default=f"grape-{title.lower().split(' ')[0]}")
-        instrument_fastapi_app(app)
+        from src.kernel.config import log as _guard_log
+        from src.kernel.db_pool_guard import install_guard
+        _guard_log.info(f"db-pool-guard: {install_guard(app)}")
+    except Exception as _ge:  # noqa: BLE001 - 防护层失败不得挡住启动
+        from src.kernel.config import log as _guard_log
+        _guard_log.warning(f"db-pool-guard 装载失败: {_ge}")
+
+    # 可选 tracing，两条路径互斥、新路径优先：
+    #  - 新路径 OTEL_EXPORTER_OTLP_ENDPOINT → src/kernel/otel.py：FastAPI + requests
+    #    + db.query + task.* 全套 span（service.name 认 GRAPE_TRACE_SERVICE）；
+    #  - 旧路径 GRAPE_OTLP_ENDPOINT → insight/observability/tracing.py：只有 FastAPI
+    #    + requests，没有 DB/任务 span（保留兼容，别的环境仍在用）。
+    try:
+        from src.kernel.otel import otel_enabled as _kernel_otel_enabled
+        from src.kernel.otel import instrument_fastapi as _kernel_instrument
+        _role = title.lower().split(" ")[0]
+        if _kernel_otel_enabled():
+            _kernel_instrument(app, f"grape-{_role}")
+        else:
+            from src.domains.insight.observability.tracing import setup_tracing, instrument_fastapi_app
+            setup_tracing(service_default=f"grape-{_role}")
+            instrument_fastapi_app(app)
     except Exception as e:
         log.warning(f"tracing setup skipped: {e}")
 
@@ -378,6 +401,19 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # 启动自检（#3580 复盘）：多库拓扑下"跨域依赖缺失"必须当场拒绝启动，不能
+        # 靠调用方各自降级——缺 GRAPE_DSN_<DOMAIN> 时跨域读会回落进程库，读到的是
+        # 同名 VIEW（列快照），基表加列即 1054 的 500（/api/dashboard/* 实锤）。
+        from src.kernel.domain_topology import assert_cross_domain_wiring as _assert_wiring
+        _assert_wiring()
+        # 视图新鲜度：只修本库视图，修不掉（列仍缺/权限不足）→ 严格模式 exit 7。
+        try:
+            from src.kernel.domain_views import reconcile_on_startup as _reconcile_views
+            _reconcile_views()
+        except SystemExit:
+            raise
+        except Exception as _view_err:  # noqa: BLE001
+            _log.error(f"three-database mode: view freshness check failed: {_view_err}")
         # kernel 端口绑定与建表/迁移无关，三库模式同样必须执行：insight 角色
         # （dashboard 等按 repo_key 取权限的入口）若拿不到 vcs_cards 端口，
         # repo_key 的平台前缀候选集会退化成空，非默认前缀仓库一律 403。
@@ -428,13 +464,19 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             _db = describe_connection()
         except Exception as _e:  # noqa: BLE001
             _db = {"error": str(_e)}
+        try:
+            from src.kernel.mysql_compat import pool_stats_all
+            _pools = pool_stats_all()
+        except Exception as _e:  # noqa: BLE001
+            _pools = [{"error": str(_e)}]
         return {
             "status": "ok",
             "service": service_name,
-            "version": "2.2.0",
+            "version": CONTRACT_VERSION,
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,
+            "db_pool": _pools,
         }
 
     if not readiness:
@@ -515,7 +557,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         now_ts = _time2.time()
         result = {
             "status": "ok",
-            "version": "2.2.0",
+            "version": CONTRACT_VERSION,
             "pid": _os2.getpid(),
         }
         try:
@@ -782,7 +824,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     }).then(function(d){
       try {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem('repo_member_cache');
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');
@@ -835,6 +877,8 @@ document.documentElement.classList.remove('i18n-loading');})();
             html = html.replace('</head>', head_inject + '</head>', 1)
             html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
             html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
+            # Issue #3395：注入前端功能开关（flag=0 时移除侧边栏插件入口整块）
+            html = apply_feature_flags(html)
             return html
 
         def _serve_auth_page(filename: str) -> HTMLResponse:
@@ -842,6 +886,34 @@ document.documentElement.classList.remove('i18n-loading');})();
                 html = f.read()
             html = _inject_email_configured(html)
             return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+        # 官网落地页优先（114 预览形态，对齐生产 www：/=落地页，/app=平台）。
+        # 目录不存在时全部 miss，行为与未改动前完全一致（生产零影响）。
+        _LANDING_DIR = os.environ.get("GRAPE_LANDING_DIR", "")
+
+        # docs 站（生产由 nginx 伺服；114 预览：GRAPE_DOCS_DIR 指向 build-docs.py 生成物）
+        _DOCS_DIR = os.environ.get("GRAPE_DOCS_DIR", "")
+
+        def _landing_file(rel: str):
+            if rel == "docs" or rel.startswith("docs/"):
+                if not _DOCS_DIR or not os.path.isdir(_DOCS_DIR):
+                    return None
+                droot = os.path.realpath(_DOCS_DIR)
+                dfull = os.path.realpath(os.path.join(droot, rel[5:] or "index.html"))
+                if dfull != droot and not dfull.startswith(droot + os.sep):
+                    return None
+                if os.path.isdir(dfull):
+                    dfull = os.path.join(dfull, "index.html")
+                return dfull if os.path.isfile(dfull) else None
+            if not _LANDING_DIR or not os.path.isdir(_LANDING_DIR):
+                return None
+            root = os.path.realpath(_LANDING_DIR)
+            full = os.path.realpath(os.path.join(root, rel))
+            if full != root and not full.startswith(root + os.sep):
+                return None
+            if os.path.isdir(full):
+                full = os.path.join(full, "index.html")
+            return full if os.path.isfile(full) else None
 
         def _spa_response():
             with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
@@ -851,6 +923,10 @@ document.documentElement.classList.remove('i18n-loading');})();
 
         @app.get("/")
         async def serve_spa():
+            _lf = _landing_file("index.html")
+            if _lf:
+                from fastapi.responses import FileResponse as _LFR
+                return _LFR(_lf)
             return _spa_response()
 
         @app.get("/register")
@@ -867,6 +943,10 @@ document.documentElement.classList.remove('i18n-loading');})();
             from fastapi import HTTPException
             if path.startswith("api/") or path.startswith("static/"):
                 raise HTTPException(status_code=404)
+            _lf = _landing_file(os.path.join("en", path, "index.html") if not path else os.path.join("en", path))
+            if _lf:
+                from fastapi.responses import FileResponse as _LFR
+                return _LFR(_lf)
             if path == "register":
                 return _serve_auth_page("register.html")
             if path == "forgot":
@@ -923,10 +1003,32 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
+    # 官网落地页（grape-website）优先：文件存在则直接伺服（对齐生产 www 形态：/=落地页，/app=平台）。
+    _LANDING_DIR = os.environ.get("GRAPE_LANDING_DIR", "/root/grape-website-preview")
+
+    def _landing_candidate(path: str):
+        _df = _landing_file(path if not path.endswith("/") else path + "index.html")
+        if _df:
+            return _df
+        if not os.path.isdir(_LANDING_DIR):
+            return None
+        rel = os.path.join(path, "index.html") if (not path or path.endswith("/")) else path
+        root = os.path.realpath(_LANDING_DIR)
+        full = os.path.realpath(os.path.join(root, rel))
+        if full != root and not full.startswith(root + os.sep):
+            return None
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        return full if os.path.isfile(full) else None
+
     @app.get("/{path:path}")
     async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
             raise HTTPException(status_code=404)
+        _lf = _landing_candidate(path)
+        if _lf:
+            from fastapi.responses import FileResponse as _LandingFR
+            return _LandingFR(_lf)
         if not os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:

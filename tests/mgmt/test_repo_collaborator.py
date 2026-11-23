@@ -252,8 +252,8 @@ def test_set_repo_bot_token_updates_username():
          patch.object(repos_mod, "update_managed_repo_bot_username") as mock_upd_username, \
          patch("src.kernel.session_manager.db") as mock_db, \
          patch("src.kernel.session_manager.db_lock"), \
-         patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
-         patch("src.kernel.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
+         patch("src.domains.mgmt.vcs.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
+         patch("src.domains.mgmt.vcs.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
          patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.get_user_token_for", return_value="owner_tok"), \
          patch("src.api.deps.check_repo_access"):
@@ -283,7 +283,7 @@ def test_set_repo_bot_token_invalid_token_returns_400():
 
     with patch("src.kernel.session_manager.db") as mock_db, \
          patch("src.kernel.session_manager.db_lock"), \
-         patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
+         patch("src.domains.mgmt.vcs.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
          patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.check_repo_access"), \
          patch.object(repos_mod, "update_managed_repo_bot_token") as mock_upd:
@@ -343,7 +343,7 @@ def test_remove_managed_repo_removes_collaborators():
             return [{"repo_key": "gitcode:owner/repo", "full_name": "owner/repo",
                      "bot_gitcode_token": "repo_tok", "bot_username": "repo-bot-login"}]
 
-        from src.kernel.token_resolver import GitCodeProvider
+        from src.domains.mgmt.vcs import GitCodeProvider
         with patch.object(GitCodeProvider, "get_user_login", return_value="owner"), \
                 patch("src.api.deps.get_user_token_for", return_value="user_tok"), \
                 patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
@@ -403,7 +403,7 @@ def test_fetch_repos_uses_permission_field_no_nplus1():
     assert by_name["org/repo-member"] is False   # permission.admin=false -> member
 
 def _host_repo_mocks():
-    from src.kernel.token_resolver import GitCodeProvider
+    from src.domains.mgmt.vcs import GitCodeProvider
     return [
         patch.object(repos_mod_import(), "get_user_token_for", return_value="user_tok"),
         patch.object(repos_mod_import(), "with_oauth_token",

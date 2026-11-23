@@ -17,11 +17,12 @@ const fs = require('fs');
 // ── 极简 DOM mock ──
 function makeDom() {
   const elements = {};
-  const ids = ['tbOrgName', 'tbOrgBtn', 'tbOrgMenu', 'orgSelect', 'pageTitle', 'repoTitle', 'toast'];
+  const ids = ['tbOrgName', 'tbOrgBtn', 'tbOrgMenu', 'orgSelect', 'pageTitle', 'repoTitle', 'toast', 'pageContent'];
   for (const id of ids) {
     elements[id] = {
       _id: id,
       style: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
       innerHTML: '',
       textContent: id === 'tbOrgName' ? '我的组织' : '',
       value: '',
@@ -82,7 +83,13 @@ function loadApp(dom, storage, api) {
   global.localStorage = storage;
   global.API = api;
   global.I18N = { t: (k) => { if (k === 'organizations.my_orgs') return '我的组织'; if (k === 'organizations.switch_org.success') return '已切换组织'; return k; } };
-  global.window = { _currentView: '', addEventListener: () => {}, dispatchEvent: () => {} };
+  global.window = {
+    _currentView: '',
+    location: { hash: '' },
+    history: { pushState: () => {}, replaceState: () => {} },
+    addEventListener: () => {},
+    dispatchEvent: () => {},
+  };
   global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
   global.setTimeout = setTimeout;
   global.sessionStorage = makeStorage();

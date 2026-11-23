@@ -405,7 +405,8 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "", default_branch: st
             os.makedirs(work, exist_ok=True)
             # 提供了默认分支但 mirror 可能无该 ref → 先单独拉取再 worktree add
             if default_branch:
-                _r = _run_git(["--git-dir", base, "fetch", "origin", default_branch], token=token, timeout=300)
+                _r = _run_git(["--git-dir", base, "fetch", "origin", default_branch],
+                              token=token, timeout=300, repo_key=repo_key)
             add_code = 1
             for br in _cand:
                 add_code, out, err = _run(["git", "--git-dir", base, "worktree", "add", "--force", work, br], timeout=900)
@@ -432,7 +433,8 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "", default_branch: st
                 break
         if target:
             name = target[len("origin/"):] if target.startswith("origin/") else target
-            _r = _run_git(["-C", work, "fetch", "origin", name], token=token, timeout=300)
+            _r = _run_git(["-C", work, "fetch", "origin", name], token=token, timeout=300,
+                          repo_key=repo_key)
             if _r and _r.returncode != 0:
                 log.warning(f"project-info worktree fetch {name} failed {repo_key}: {(_r.stderr or '')[:200]}")
             prev = _rev("HEAD")

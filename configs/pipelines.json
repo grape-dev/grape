@@ -1,5 +1,51 @@
 {
   "scenes": {
+    "org": {
+      "name": "组织任务下派",
+      "scene_type": "org",
+      "nodes": [
+        {
+          "id": "org_intake",
+          "tag": "issue",
+          "skill": "org-intake-cli",
+          "name": "组织需求接收",
+          "mode": "emit",
+          "next": "org_dispatch",
+          "handoff": "a2a",
+          "skip": [],
+          "enabled": true,
+          "auto_advance": true,
+          "engine_runtime_ids": []
+        },
+        {
+          "id": "org_dispatch",
+          "tag": "coding",
+          "skill": "org-dispatch-cli",
+          "name": "组织任务派发",
+          "mode": "emit",
+          "next": "org_aggregate",
+          "handoff": "a2a",
+          "skip": [],
+          "enabled": true,
+          "auto_advance": true,
+          "engine_runtime_ids": []
+        },
+        {
+          "id": "org_aggregate",
+          "tag": "qa",
+          "skill": "org-aggregate-cli",
+          "name": "组织结果聚合",
+          "mode": "emit",
+          "next": "done",
+          "handoff": "complete",
+          "skip": [],
+          "enabled": true,
+          "auto_advance": true,
+          "engine_runtime_ids": []
+        }
+      ],
+      "onboarding": "repo-onboarding"
+    },
     "default": {
       "name": "通用开发",
       "nodes": [

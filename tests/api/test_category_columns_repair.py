@@ -17,7 +17,7 @@
   2. **默认（不传）仍保持静默跳过** —— 存量 14 个 `strict=True` 调用点里有 7 条迁移
      的属主域与注册域不一致，全局改语义会把它们一起引爆；
   3. `202611181200` 按 mgmt 域幂等补 `scene_market` 两列；`202611181201` 不再存在
-     （补 skill 列归基线 `202611180003`，视图重建随功能摘除）；
+     （补 skill 列归 runtime 迁移 `202611210001`（#3648 renumber），视图重建随功能摘除）；
   4. `scene_market.tags` 旧逗号串回填失败必须抛错（原来吞掉 = 列在、数据没收敛、
      永不重试）。
 """
@@ -70,7 +70,7 @@ def test_repair_migration_registered_mgmt_only():
 
 
 def test_repair_plan_is_mgmt_only():
-    """skill 三列由基线 202611180003（runtime 域）负责，本 PR 不得再补一遍。"""
+    """skill 三列由 runtime 迁移 202611210001（#3648 改号）负责，本 PR 不得再补一遍。"""
     plans = {p[0]: p for p in D._CATEGORY_COLUMN_PLANS}
     assert set(plans) == {"mgmt"}
     assert {c for c, _ in plans["mgmt"][2]} == {"cat_l1_id", "cat_l2_id"}
@@ -158,8 +158,13 @@ def test_ensure_column_keeps_its_docstring():
 
 
 def test_skill_columns_are_owned_by_baseline_migration():
-    """基线补 skill 三列的迁移必须存在且带 runtime 域（本 PR 依赖它）。"""
+    """补 skill 三列的迁移必须存在且带 runtime 域（本 PR 依赖它）。
+
+    Issue #3648：原号 202611180003 已被旧名 skill-intro-override-schema 盖章，
+    迁移改号到 202611210001 并带 post_check（列在才算执行成功）。
+    """
     reg = {m.version: m for m in D._MIGRATIONS}
-    assert "202611180003" in reg, "基线补 skill 列的迁移不见了（rebase 冲突可能吞掉它）"
-    assert reg["202611180003"].domains == ("runtime",)
-    assert reg["202611180003"].name.endswith("skill-classification-columns")
+    assert "202611210001" in reg, "补 skill 列的迁移不见了（rebase 冲突可能吞掉它）"
+    assert reg["202611210001"].domains == ("runtime",)
+    assert reg["202611210001"].name.endswith("skill-classification-columns")
+    assert callable(reg["202611210001"].post_check)

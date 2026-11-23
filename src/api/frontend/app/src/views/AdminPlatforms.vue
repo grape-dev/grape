@@ -28,6 +28,44 @@
       <p v-if="!loading && !platforms.length" class="ap-hint">{{ t('page.platforms_empty') }}</p>
       <p v-if="loading" class="ap-hint">{{ t('page.loading') }}</p>
       <p v-if="error" class="ap-err">{{ error }}</p>
+
+      <!-- Issue #3580/PR#1854：新增平台卡（自建实例一实例一卡：克隆现有同族卡改 id/host/base） -->
+      <div class="ap-group">
+        <div class="ap-row clickable" @click="openAdd()">
+          <div class="ap-main">
+            <div class="ap-title">＋ {{ t('page.add_card', '新增平台卡') }}</div>
+            <div class="ap-desc">{{ t('page.add_card_desc', '为自建实例新建一张卡（如 gitlab-corp）：克隆现有同族卡后改 id/host/API 基址') }}</div>
+          </div>
+          <span class="ap-chev">›</span>
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">{{ t('page.add_from', '基于') }}</span>
+          <select v-model="addForm.from" class="ap-input">
+            <option v-for="p in platforms" :key="p.provider" :value="p.provider">{{ p.name || p.provider }}</option>
+          </select>
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">provider id</span>
+          <input v-model="addForm.provider" class="ap-input" :placeholder="t('page.add_id_ph', 'gitlab-corp（小写字母开头，字母数字下划线短横）')" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">{{ t('page.add_name', '显示名') }}</span>
+          <input v-model="addForm.name" class="ap-input" placeholder="GitLab (corp)" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">host</span>
+          <input v-model="addForm.host" class="ap-input" placeholder="gitlab.corp.example" />
+        </div>
+        <div v-if="addOpen" class="ap-row">
+          <span class="ap-label">api_base</span>
+          <input v-model="addForm.api_base" class="ap-input" placeholder="https://gitlab.corp.example/api/v4" />
+        </div>
+        <div v-if="addOpen" class="ap-add">
+          <span class="ap-hint">{{ addError }}</span>
+          <button class="ap-btn" :disabled="addSaving" @click="saveAdd()">{{ t('page.save', '保存') }}</button>
+          <button class="ap-btn ap-btn-ghost" @click="cancelAdd()">{{ t('page.cancel', '取消') }}</button>
+        </div>
+      </div>
     </template>
 
     <!-- 详情 -->
@@ -72,6 +110,43 @@
           <span class="ap-label">{{ f }}<AGHelp v-bind="docRow(f)" readonly /></span>
           <span class="ap-val mono">{{ fmt(current[f]) }}</span>
         </div>
+      </div>
+
+      <!-- 平台卡高级配置：/admin/repo-platforms 的列表投影不含 ca_bundle/download_base/
+           存储字段等，所以私有 CA 在旧页面上根本没有落点（2026-11-20 用户实测
+           "管理台看不到配 CA 的地方"）。这里按平台卡 GET 的整卡展示并允许编辑，保存时整卡
+           回写（未展示字段原样带回），避免手抄白名单漏字段导致的静默降级。
+           文案必须平台无关：这块按卡渲染，gitcode/gitee/github/gitlab/自建实例共用一套，
+           把某个平台的语义（例如 GitLab 私有 CA）写死进文案，其它平台点进来就是错的。 -->
+      <div class="ap-sect">
+        {{ t('page.sec_card', '平台卡（高级）') }}
+        <AGHelp
+          :title="t('page.sec_card', '平台卡（高级）')"
+          :what="t('page.card_what', '平台卡的完整定义：私有 CA（ca_bundle，PEM 绝对路径，空=系统 CA）、PAT 创建页地址、下载基址、存储字段等都在这里；私有 CA 只对走 HTTPS 校验的实例有意义。')"
+          values="PUT /api/admin/vcs-platforms"
+          :note="t('page.card_note', '保存时以整卡回写，未展示的字段不会丢。改 host/api_base 前先确认实例可达；配置文件定义的平台，改动会落成管理面覆盖。')"
+        />
+        <button class="ap-btn" @click="editMode ? cancelEdit() : startEdit()">
+          {{ editMode ? t('page.cancel') : t('page.edit', '编辑') }}
+        </button>
+      </div>
+      <div class="ap-group">
+        <div v-for="f in EDIT_FIELDS" :key="f" class="ap-row">
+          <span class="ap-label">{{ f }}</span>
+          <input
+            v-if="editMode"
+            v-model="editForm[f]"
+            class="ap-input"
+            :placeholder="f === 'ca_bundle' ? t('page.ca_ph', '/path/to/corp-ca.pem（空=系统 CA）') : ''"
+          />
+          <span v-else class="ap-val mono">{{ fmt(cardVal(f)) }}</span>
+        </div>
+        <div v-if="cardLoading" class="ap-row"><span class="ap-hint">{{ t('page.loading') }}</span></div>
+        <div v-if="editMode" class="ap-add">
+          <span class="ap-hint">{{ cardError }}</span>
+          <button class="ap-btn" @click="saveCard(current)">{{ t('page.save', '保存') }}</button>
+        </div>
+        <div v-else-if="cardError" class="ap-row"><span class="ap-err">{{ cardError }}</span></div>
       </div>
 
       <!-- 平台 bot（D110）：一平台一个 bot，落 grape_t_repo_platforms.bot_token_enc。
@@ -189,6 +264,165 @@ function back() {
 function open(p) {
   error.value = ''
   selected.value = p.provider
+  editMode.value = false
+  cardError.value = ''
+  loadCard(p.provider)
+}
+
+// ── 平台卡（高级）：整卡读 → 整卡回写 ───────────────────────────────────────
+// 列表投影(/repo-platforms)只带用户面需要的键，ca_bundle/download_base/存储字段都不在，
+// 所以编辑必须以 /admin/vcs-platforms 的整卡为底稿，保存时把未编辑字段原样带回。
+const EDIT_FIELDS = ['name', 'dialect', 'host', 'api_base', 'api_auth', 'webhook_path',
+  'event_header', 'webhook_verify', 'webhook_dialect', 'clone_auth', 'download_base',
+  'ca_bundle', 'pat_create_url', 'brand_color']
+// 只读派生键：不是卡字段，回写会被 Builder 判未知键整卡拒绝
+const CARD_DROP = new Set(['provider', 'source', 'config_hash', 'enabled',
+  'bot_token_configured', 'bot_token_health', 'webhook_token_configured',
+  'webhook_token_supported', 'token_env'])
+const card = ref(null)
+const cardLoading = ref(false)
+const cardError = ref('')
+const editMode = ref(false)
+const editForm = reactive({})
+
+function cardVal(f) {
+  const c = card.value || {}
+  if (f in c) return c[f]
+  return current.value ? current.value[f] : ''
+}
+
+async function loadCard(provider) {
+  cardLoading.value = true
+  cardError.value = ''
+  try {
+    const r = await props.api('/vcs-platforms')
+    card.value = (r.cards || {})[provider] || null
+    if (!card.value) cardError.value = t('page.card_missing', '该平台没有平台卡（仅表投影），高级配置不可编辑')
+  } catch (e) {
+    cardError.value = `${t('page.load_failed')}：${e.message || e}`
+  } finally {
+    cardLoading.value = false
+  }
+}
+
+function startEdit() {
+  if (!card.value) return
+  cardError.value = ''
+  for (const f of EDIT_FIELDS) editForm[f] = card.value[f] === undefined || card.value[f] === null ? '' : String(card.value[f])
+  editMode.value = true
+}
+
+function cancelEdit() {
+  editMode.value = false
+  cardError.value = ''
+}
+
+// ── 新增平台卡（自建实例：克隆同族卡 → 新 provider id）──────────────────────────
+// Issue #3580/PR#1854：PR 侧用 GRAPE_GITLAB_INSTANCES + gitlab@corp 一行 env 加实例；
+// 我们的真源是平台卡，所以补一个「克隆现有卡」入口——不硬编码方言默认值
+// （私有 CA/api_auth/webhook_verify 这些差异全跟着模板卡走），只要求改 id/host/api_base。
+const addOpen = ref(false)
+const addSaving = ref(false)
+const addError = ref('')
+const addForm = reactive({ from: '', provider: '', name: '', host: '', api_base: '' })
+
+function openAdd() {
+  addError.value = ''
+  addForm.from = addForm.from || (platforms.value[0] && platforms.value[0].provider) || ''
+  addForm.provider = ''
+  addForm.name = ''
+  addForm.host = ''
+  addForm.api_base = ''
+  addOpen.value = true
+}
+
+function cancelAdd() {
+  addOpen.value = false
+  addError.value = ''
+}
+
+async function saveAdd() {
+  addError.value = ''
+  const id = String(addForm.provider || '').trim().toLowerCase()
+  if (!/^[a-z][a-z0-9_-]{0,39}$/.test(id)) {
+    addError.value = t('page.add_bad_id', 'provider id 非法：小写字母开头，仅字母/数字/下划线/短横，≤40 字符')
+    return
+  }
+  if (platforms.value.some((p) => p.provider === id)) {
+    addError.value = t('page.add_exists', '该 provider id 已存在')
+    return
+  }
+  addSaving.value = true
+  try {
+    const r0 = await props.api('/vcs-platforms')
+    const src = ((r0 && r0.cards) || {})[addForm.from]
+    if (!src) throw new Error(t('page.add_no_template', '模板卡不可用（所选平台没有平台卡）'))
+    const base = {}
+    for (const k of Object.keys(src)) {
+      if (CARD_DROP.has(k)) continue
+      const v = src[k]
+      if (v === null || v === undefined) continue
+      base[k] = v
+    }
+    base.name = String(addForm.name || id).trim()
+    if (addForm.host) base.host = String(addForm.host).trim()
+    if (addForm.api_base) base.api_base = String(addForm.api_base).trim()
+    // 新实例的钩子路径必须带自己的 id，否则与模板卡抢同一个 /webhook/<provider>
+    base.webhook_path = `/webhook/${id}`
+    // 令牌创建页直达链接是模板平台的官方地址，自建实例不能继承
+    delete base.pat_create_url
+    const r = await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [id]: base } } })
+    addOpen.value = false
+    await load()
+    if (r && r.errors && r.errors.length) {
+      addError.value = r.errors.join('；')
+      return
+    }
+    const created = platforms.value.find((p) => p.provider === id)
+    if (created) open(created)
+  } catch (e) {
+    const d = e.detail || {}
+    addError.value = d.errors ? d.errors.join('；') : d.message || e.message || String(e)
+  } finally {
+    addSaving.value = false
+  }
+}
+
+async function saveCard(p) {
+  cardError.value = ''
+  const base = {}
+  const src = card.value || {}
+  for (const k of Object.keys(src)) {
+    if (CARD_DROP.has(k)) continue
+    const v = src[k]
+    if (v === null || v === undefined) continue
+    base[k] = v
+  }
+  for (const f of EDIT_FIELDS) base[f] = (editForm[f] || '').trim()
+  try {
+    const r = await props.api('/vcs-platforms', { method: 'PUT', body: { cards: { [p.provider]: base } } })
+    editMode.value = false
+    await loadCard(p.provider)
+    await load()
+    // A 方案（表为运行时真源）：管理面保存会把该平台行提升为 manual（rows: promoted），
+    // 此后配置文件改动不再自动覆盖——这是接管语义，不是失败。必须明说，否则运维会
+    // 以为「改文件重启就生效」。回退方式：管理面改回 / 删除该平台行后由导入器重建。
+    const action = ((r && r.rows) || {})[p.provider]
+    const ovs = ((r && r.overrides) || {})[p.provider] || {}
+    if (action === 'promoted') {
+      const fields = Object.keys(ovs)
+      const base = t('page.card_taken_over', {},
+        '该平台卡已由管理面接管（定义落表）：配置文件之后的改动不会再自动覆盖')
+      cardError.value = fields.length
+        ? base + t('page.card_taken_over_fields', { fields: fields.join(', ') },
+            '；本次改动字段：{fields}')
+        : base
+    }
+  } catch (e) {
+    const d = e.detail || {}
+    const detail = d.errors ? d.errors.join('；') : d.message || e.message || e
+    cardError.value = `${t('page.save_failed')}：${detail}`
+  }
 }
 
 function docRow(field) {

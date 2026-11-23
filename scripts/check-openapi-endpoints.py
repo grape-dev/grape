@@ -18,6 +18,11 @@
 
 --require-baseline：基线缺失/不可读时直接 FAIL（CI 必用，杜绝静默跳过版本间比对）。
 --update-baseline：全部校验通过后，把当前渲染契约写回基线文件（发布构建时刷新基线用）。
+--change-note：基线刷新的评审说明（写入基线文件留痕；不是观察期放行口）。
+Issue #2837 删侧观察期：端点删除另须先挂牌（contracts/deprecated_endpoints.json）并经
+一个发布期（基准 contracts/released/ 冻结快照 release_index），--change-note 自由文本
+说明不能绕过观察期；机制生效前的历史下架走 contracts/deprecated_exemptions.json
+（只减不增）。
 退出码：0 通过；1 校验失败。
 """
 import argparse
@@ -27,6 +32,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.domains.contracts import deprecation as contract_gate  # Issue #2837 删侧观察期共用核
 
 # 7 个核心工作流端点：全部 Agent 技能的 A2A 交办与 tasks 结构化收尾依赖
 # （丢失即 `grape a2a handoff` / `grape tasks complete` 不渲染，P0 全平台断链）。
@@ -160,6 +167,32 @@ def check_baseline_subset(current_paths: dict, baseline_paths: dict,
     return []
 
 
+def run_deprecation_gate(current_paths: dict, require_released: bool) -> list:
+    """删侧观察期门禁（Issue #2837，等价 #2783）：基准 = release_index 最大的已发布快照。
+
+    判定：快照有、当前契约无的端点，须 ① 已挂牌且经一个发布期（快照带机器可读
+    x-deprecated-since 标记），或 ② 在存量豁免白名单（pre_mechanism，只减不增）；
+    否则红。--update-baseline 通道在写基线前先行调用本函数（自由文本 --change-note
+    不是放行口）；--require-baseline 下缺发布快照即红（观察期基准不得静默缺失）。
+    """
+    try:
+        snapshot = contract_gate.latest_released_snapshot()
+    except RuntimeError as e:
+        return [f"released contract snapshots unreadable: {e}"]
+    if snapshot is None:
+        if require_released:
+            return [
+                "released contract snapshot missing: contracts/released/ — the "
+                "deprecation observation window needs the frozen snapshot of the "
+                "last release (release_index basis, Issue #2837); freeze one with "
+                "`python scripts/regenerate_openapi.py --release-snapshot` at "
+                "release time"]
+        return []
+    return contract_gate.check_deprecation_gate(
+        current_paths, snapshot["paths"],
+        contract_gate.current_release_index())
+
+
 def load_baseline(path: str):
     """读取基线契约文件，返回 (paths, version) 或 (None, None)。
 
@@ -225,7 +258,7 @@ def check_checked_in_copy(current_paths: dict, copy_path: str) -> list:
     ]
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="CI OpenAPI contract endpoint completeness check (Issue #897)")
     parser.add_argument(
@@ -239,7 +272,11 @@ def main() -> int:
         "--update-baseline", action="store_true",
         help="write the current rendered contract back to the baseline file "
              "after all checks pass (refresh at release build time)")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--change-note", default="",
+        help="contract change note recorded into the baseline file (audit trail; "
+             "it does not bypass the deprecation observation window)")
+    args = parser.parse_args(argv)
 
     schema = build_current_contract()
     current_paths = schema.get("paths", {})
@@ -262,12 +299,23 @@ def main() -> int:
             "(version-diff check cannot run; commit the released contract "
             "snapshot or pass the correct --baseline path)")
 
+    # Issue #2837：删侧观察期门禁——normal 模式与 --update-baseline 模式都先行判定；
+    # 写基线发生在 errors 检查之后，自由文本 --change-note 无法吸收未挂牌/未满期删除。
+    errors.extend(run_deprecation_gate(current_paths, args.require_baseline))
+
     print(f"OpenAPI contract check: {len(current_paths)} paths, version={current_version}")
     if baseline_paths:
         print(f"  baseline: {args.baseline} ({len(baseline_paths)} paths, "
               f"version={baseline_version})")
     else:
         print("  baseline: none (version-diff check skipped)")
+    try:
+        snapshot = contract_gate.latest_released_snapshot()
+    except RuntimeError:
+        snapshot = None
+    if snapshot is not None:
+        print(f"  released snapshot: {snapshot['version']} "
+              f"(release_index={snapshot['release_index']})")
     for ep in CORE_WORKFLOW_ENDPOINTS:
         mark = "OK" if ep in current_paths else "MISSING"
         print(f"  [{mark}] {ep}")
@@ -279,9 +327,8 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 1
     if args.update_baseline:
-        with open(args.baseline, "w", encoding="utf-8") as f:
-            json.dump(schema, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        from src.kernel.help_page_gen import write_contract_baseline
+        write_contract_baseline(schema, args.baseline, change_reason=args.change_note)
         print(f"  baseline updated: {args.baseline} "
               f"({len(current_paths)} paths, version={current_version})")
     print("OK: OpenAPI contract endpoint completeness check passed")

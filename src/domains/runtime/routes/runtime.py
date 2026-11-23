@@ -469,7 +469,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 多行历史脏数据时取 MAX(id)（与 scope 切换去重「保留最新行」口径一致，
             # 重复行已由上方 merge_duplicate_engine_rows 合并）。
 
-            c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+            c.execute("SELECT id, scope, owner_id, repo_key, org_id, desired_plugins FROM agent_runtimes "
                       "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
                       (credential_id, name))
             row = c.fetchone()
@@ -491,6 +491,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             _ri_type = (rt.get("runtime_type") or "").strip() or ("cloud" if _ri_platform else "local")
             if row:
                 rid = row[0]
+                _row_desired_json = row[5] or "[]"
 
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
@@ -592,9 +593,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                          _model_name, "worker_report" if _model_name else "",
                          datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
+                _row_desired_json = "[]"
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
-            # 存量行可离线重算（002 重派生迁移消费）；未迁移旧库缺列时降级跳过。
+            # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。
             try:
                 c.execute(
                     "UPDATE agent_runtimes SET engine_type=?, provider_id=?, template_id=?, "
@@ -626,8 +628,8 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     pass
             # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
             # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
-            from src.domains.mgmt.public import sync_agent_tags
-            sync_agent_tags(rid)
+            from src.domains.mgmt.routes.settings import _sync_agent_tags
+            _sync_agent_tags(rid, c)
             # Issue #1208：三维度派生标签（engine:/scope:/scene:）落 capabilities 冒号行
             # + JSON 快照刷新（selector 圈池数据底座；注册链先写，心跳链幂等收敛）
             try:
@@ -643,8 +645,32 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                       engine_type=_et)
             except Exception as _at_e:
                 log.warning(f"runtime_register: agent_tags derive failed for {rid}: {_at_e}")
+            # Issue #1089 挂点③：Agent 类型种子默认安装——按引擎角色标签下发
+            # desired_plugins（'all'/无标签不注入种子），worker 协商补装。
+            _desired_plugins: list[str] = []
+            try:
+                from src.domains.mgmt.plugins.resolver import desired_plugins_for_tags as _dpft
+                _tags = []
+                if isinstance(rt.get("role_tags"), list):
+                    _tags = [str(t).strip().lower() for t in rt["role_tags"] if str(t).strip()]
+                if not _tags:
+                    _ec = c.execute(
+                        "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
+                    _tags = [r[0] for r in _ec if r and r[0]]
+                _desired_plugins = _dpft(_tags)
+            except Exception as _dp_err:
+                log.warning(f"runtime_register: desired_plugins resolve failed: {_dp_err}")
+            # 挂点④：合并控制台远程安装的期望插件（agent_runtimes.desired_plugins）
+            try:
+                _console_desired = json.loads(_row_desired_json) if _row_desired_json else []
+                if isinstance(_console_desired, list):
+                    _desired_plugins = sorted(set(_desired_plugins) | {
+                        str(n).strip() for n in _console_desired if str(n).strip()})
+            except Exception:
+                pass
             # Issue #646：返回双带 id+uid（新 worker 用 uid 落历史；旧版 worker 忽略 uid，混跑兼容）
-            registered.append({"id": rid, "name": name, "engine_uid": _engine_uid})
+            registered.append({"id": rid, "name": name,
+                               "desired_plugins": _desired_plugins, "engine_uid": _engine_uid})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
     # 验证完整链路：网络+签名+读取；空库返回空，worker 声明能力 false）
@@ -1103,8 +1129,32 @@ def _attach_skill_obs(task: dict) -> None:
         log.warning(f"attach skill_obs failed: {e}")
 
 
+def _request_base_url(request) -> str:
+    """按 worker 实际访问到的地址派生回连基址（不写死任何 IP）。
+
+    worker 能看到我们用哪个 Host，反过来我们也可以用它——claim 请求本身就是
+    "worker 能到达的地址"的实证。反向代理场景取 X-Forwarded-Proto，缺省 http。
+    """
+    if request is None:
+        return ""
+    try:
+        host = (request.headers.get("host") or "").strip()
+        if not host:
+            return ""
+        proto = (request.headers.get("x-forwarded-proto") or "").strip()
+        if not proto:
+            try:
+                proto = request.url.scheme or "http"
+            except Exception:
+                proto = "http"
+        proto = proto.split(",")[0].strip() or "http"
+        return f"{proto}://{host}"
+    except Exception:
+        return ""
+
+
 @router.post("/runtimes/{runtime_id}/tasks/claim")
-def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
+def runtime_claim(runtime_id: int, request: Request, body: RuntimeClaimBody | None = None,
                         credential_id: int = Depends(_require_credential)):
     """按 runtime_id 拉取队首任务或 null（确定路由 D3 + 串行槽 D9）。
 
@@ -1136,6 +1186,12 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
         except Exception:
             pass
     if task:
+        _base = _request_base_url(request)
+        if _base:
+            _prev = str(task.get("server_url") or "")
+            if _prev and _prev != _base:
+                log.info(f"claim: server_url 按 worker 实际访问地址回填 {_prev} -> {_base}")
+            task["server_url"] = _base
         if body and body.prefer_fallback:
             task["mode"] = "server-fetch"
         else:
@@ -3160,9 +3216,9 @@ def runtime_whoami(cred: CredentialContext = Depends(_require_credential_ctx)):
     设计不变量：本响应永不包含凭证类字段（token/api_key）——泄露面为零。
     凭据吊销后本端点 401（安装脚本据此在第一步报"凭据无效或已吊销"）。
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    # runtime_credentials 归 runtime 域：具名域游标（三库拓扑下 mgmt 进程库只有旧
+    # 视图/旧副本，cred_type/credential_uid 列不在——#646 后缺列即 1054）。
+    with _domain_cursor("runtime") as c:
         c.execute(
             "SELECT name, cred_type, platform, credential_uid FROM runtime_credentials WHERE id=? AND status='active'",
             (cred.id,))
@@ -3273,6 +3329,8 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
     """
     _task_user_id = _check_task_access(task_id, cred)
     _now = datetime.now(timezone.utc).isoformat()
+    # 表 owner=runtime（configs/table_ownership.json）。本端点在 runtime 域进程内运行，
+    # 写走进程主库即属主库，不做跨域写；读侧（列表/kill/计数）才需按域解析兜底历史落库。
     try:
         with db_lock:
             c = db.cursor()
@@ -3343,6 +3401,98 @@ def _fetch_across_domains(sql: str, params=(), domains=("runtime", "mgmt")) -> l
     return []
 
 
+def _fetch_across_domains_with_hit(sql: str, params=(), domains=("runtime", "mgmt")) -> tuple:
+    """同 _fetch_across_domains，但额外返回命中域：(rows, hit_domain)。
+
+    Issue #3527：kill 的台账写必须跟随读侧落点——rows 非空时
+    hit_domain 即数据所在域（runtime 表 1146 回退到历史 mgmt 时为 "mgmt"）。
+    读语义与 _fetch_across_domains 完全一致：表不存在才换域，其余异常原样抛出。
+    """
+    from src.kernel.bulk_read import reader
+
+    last = None
+    for dom in domains:
+        try:
+            with reader(dom) as c:
+                c.execute(sql, params)
+                rows = c.fetchall() or []
+            return rows, dom
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "1146" not in msg and "doesn't exist" not in msg:
+                raise
+            last = e
+    if last is not None:
+        raise last
+    return [], (domains[0] if domains else "")
+
+
+def _mark_sandbox_killed_on_domain(domain: str, sandbox_id: str, now_iso: str) -> int:
+    """在指定域写 kill 台账（state='killed'），返回 UPDATE rowcount。
+
+    Issue #3527：写侧跟随读侧定位的域——
+    - 该域有自有 DSN（三库拓扑）→ db_registry.new_connection 独立域连接
+      （不复用进程级缓存连接，避免跨线程 InterfaceError；autocommit，用完即关）；
+    - 域连接不可用（单库 / 视图期 / SQLite）→ 回落进程主库（与读侧 reader 的回落
+      语义一致），持 db_lock 并 commit。
+    表不存在（1146 / doesn't exist）按 0 行返回，交由调用方回退另一域；
+    其余异常原样抛出，不静默。
+    """
+    from src.kernel import session_manager as _sm
+
+    _sql = ("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? "
+            "WHERE sandbox_id=?")
+    conn = None
+    try:
+        from src.kernel import db_registry as _dbreg
+        conn = _dbreg.new_connection(domain, autocommit=True)
+    except Exception:  # noqa: BLE001 - 无自有 DSN/连接失败按不可用处理，回落进程主库
+        conn = None
+
+    def _rowcount(cur) -> int:
+        try:
+            return int(cur.rowcount)
+        except Exception:  # noqa: BLE001 - 无 rowcount 视为未确认更新，交由调用方回退
+            return 0
+
+    if conn is not None:
+        c = None
+        try:
+            c = conn.cursor()
+            c.execute(_sql, (now_iso, sandbox_id))
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    with _sm.db_lock:
+        c = _sm.db.cursor()
+        try:
+            c.execute(_sql, (now_iso, sandbox_id))
+            _sm.db.commit()
+            return _rowcount(c)
+        except Exception as e:  # noqa: BLE001
+            if "1146" in str(e) or "doesn't exist" in str(e):
+                return 0
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 @router.get("/cloud-sandboxes", operation_id="runtime_cloud_sandboxes", summary="List cloud sandboxes",
             description="Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.")
 def runtime_list_cloud_sandboxes(
@@ -3360,22 +3510,12 @@ def runtime_list_cloud_sandboxes(
 
     extra_conditions = []
     extra_params = []
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    from src.kernel.bulk_read import reader
-
-    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
-    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
-    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
-    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
-    # 三库拓扑：沙箱/owner/provider 配置与 agent_tasks/agent_runtimes/runtime_credentials
-    # 分属不同域库，单条跨域 JOIN 必然 1146（beta 实测：进程库是 grape_beta_runtime）。
-    # 改为「沙箱分页查询 + runtime 侧富化」两段读，分页/计数/排序只由沙箱单表决定；
-    # 每段用 _fetch_across_domains 按域重试，避免把表的实际落库位置写死。
+    # 归属（configs/table_ownership.json）：grape_t_cloud_sandboxes 归 runtime，
+    # user_accounts / grape_t_sandbox_provider_config 归 mgmt；agent_tasks /
+    # agent_runtimes / runtime_credentials 归 runtime。单条跨域 JOIN 在分库下必然
+    # 1146，故拆成「沙箱单表分页计数 + runtime 侧富化 + mgmt public 补 owner/provider
+    # 名」；每段用 _fetch_across_domains 按域重试（runtime 优先，仅 1146 时回退
+    # mgmt），既不把表的历史落库位置写死，也不让历史空表遮蔽 owner 域的真实行。
     q = (q or "").strip()
     if q:
         # 事件号（t.event_seq）不在沙箱表上：先在任务域解析成 task_id 集合，再回沙箱表过滤。
@@ -3402,7 +3542,9 @@ def runtime_list_cloud_sandboxes(
         extra_conditions.append("s.state=?")
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
-    _domains = ("mgmt", "runtime")
+    # 沙箱表 owner=runtime：域序必须 runtime 优先，否则会先读历史 mgmt 空表 → total=0
+    # 遮蔽真实数据（Issue #3527）。保留 mgmt 作为 1146 回退，兼容迁移前的历史落库位置。
+    _domains = ("runtime", "mgmt")
     # 原 SQL 有两个跨域 LEFT JOIN（user_accounts / sandbox_provider_config 都归 mgmt）。
     # JOIN 要求同库，三库拓扑下必须拆：这里只查本域单表，两个 mgmt 列留 NULL 占位，
     # 由下面的富化段批量补齐（列数与顺序保持不变，下游下标不动）。
@@ -3501,16 +3643,17 @@ def runtime_list_cloud_sandboxes(
 def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_session_token)):
     """[沙箱迁移] 强杀云沙箱。BOLA 校验后调 provider.kill_sandbox。"""
     from src.api.deps import check_repo_access
-    with db_lock:
-        c = db.cursor()
-        # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
-        # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
-        # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
-        # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
-        # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform
-        c.execute("SELECT provider, state, repo_key, provider_id "
-                  "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,))
-        row = c.fetchone()
+    # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
+    # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
+    # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
+    # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
+    # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform。
+    # 表 owner=runtime：读按域解析（runtime 优先，1146 回退历史 mgmt/单库形态），
+    # 不再假定进程主库一定有表；状态写跟随读侧命中的域（见下方 UPDATE 回退链）。
+    _kill_rows, _hit_domain = _fetch_across_domains_with_hit(
+        "SELECT provider, state, repo_key, provider_id "
+        "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,), ("runtime", "mgmt"))
+    row = _kill_rows[0] if _kill_rows else None
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "sandbox not found"})
     _platform_key = ""
@@ -3535,11 +3678,30 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
         if hasattr(provider, 'kill_sandbox'):
             success = provider.kill_sandbox(sandbox_id)
             if success:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
-                              (datetime.now(timezone.utc).isoformat(), sandbox_id))
-                    db.commit()
+                # Issue #3527：写侧跟随读侧定位——先写读命中的域，
+                # 0 行（1146/行不在该域）回退另一域；两域都 0 行 → 报可见错误，
+                # 不再「provider 已杀、台账停留 running 且静默返回 killed」。
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                _updated = 0
+                _write_err = None
+                _zero_rowcount = False
+                for _dom in (_hit_domain,) + tuple(
+                        d for d in ("runtime", "mgmt") if d != _hit_domain):
+                    try:
+                        _updated = _mark_sandbox_killed_on_domain(_dom, sandbox_id, _now_iso)
+                    except Exception as _e:  # noqa: BLE001 - 单域写失败继续试另一域
+                        _write_err = _e
+                        continue
+                    if _updated:
+                        break
+                    _zero_rowcount = True
+                if not _updated:
+                    _reason = "rowcount=0" if _zero_rowcount else "no confirmed row"
+                    if _write_err is not None:
+                        _reason += f"; domain write error: {_write_err}"
+                    _msg = (f"provider killed sandbox {sandbox_id} but ledger row "
+                            f"update failed in runtime/mgmt domains ({_reason})")
+                    raise HTTPException(status_code=500, detail={"code": 500, "message": _msg})
                 return {"status": "killed"}
             return {"status": "kill_failed"}
         raise HTTPException(status_code=500, detail={"code": 500, "message": "provider has no kill_sandbox method"})
@@ -3641,19 +3803,22 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 表归 mgmt：SQL 在 mgmt public 一份
-    from src.domains.mgmt import public as _mg_own
-    if not _mg_own.sandbox_provider_owned_by(provider_id, cred.id):
+    # 归属：grape_t_sandbox_provider_config 归 mgmt，跨域读写一律经 mgmt public
+    # （sandbox_provider_owned_by / sandbox_provider_max_sandboxes），本文件不直查该表；
+    # grape_t_cloud_sandboxes 归 runtime，读保留域解析（1146 回退 mgmt 历史落库位置）。
+    from src.domains.mgmt.public import (sandbox_provider_max_sandboxes,
+                                         sandbox_provider_owned_by)
+
+    if not sandbox_provider_owned_by(provider_id, cred.id):
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
-                  (provider_id,))
-        active_count = c.fetchone()[0] or 0
-        from src.domains.mgmt import public as _mg_max
-        max_sandboxes = _mg_max.sandbox_provider_max_sandboxes(provider_id) or 10
-    return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
+    max_sandboxes = sandbox_provider_max_sandboxes(provider_id) or 10
+    _cnt_rows = _fetch_across_domains(
+        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
+        "WHERE provider_id=? AND state IN ('creating','running')",
+        (provider_id,), ("runtime", "mgmt"))
+    active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
+    return {"active_count": active_count, "max_sandboxes": max_sandboxes}
 
 
 @router.get("/cloud-runtimes", operation_id="runtime_cloud_runtimes",
@@ -3951,3 +4116,73 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
     return {"provider_id": pid, "templates_upserted": _tpl_upserted,
             "engines_detected": _engines_bound, "status": "ok"}
 
+try:
+    from prometheus_client import Counter as _PC
+    from src.domains.insight.observability import registry as _obs_registry
+    _relay_total = _PC("grape_trace_relay_requests_total",
+                       "Trace relay requests forwarded to LGTM",
+                       ["status"], registry=_obs_registry)
+except Exception:
+    _relay_total = None
+
+
+
+class ContractGuardSignalBody(BaseModel):
+    """Issue #2085（#1297 移植）：worker contract_guard 失败信号上报。
+
+    outcome=degraded（检出 CLI 契约缓存退化/缺失）| rebuild_failed（从主控重建失败）；
+    host/pid/ts 仅供服务端日志甄别（worker 侧 http_alert_sink 就地补充）。
+    """
+    outcome: str
+    detail: str = ""
+    host: str = ""
+    pid: int = 0
+    ts: float = 0
+
+
+@router.get("/platform-cards", operation_id="runtime_platform_cards")
+def runtime_platform_cards(credential_id: int = Depends(_require_credential)):
+    """Issue #3632：平台卡契约端点（worker/engine 进程取卡的唯一通道）。
+
+    为什么需要这条端点：`grape_t_repo_platforms` 归 mgmt 域，而 worker 引擎进程
+    的启动环境只有 `RUNTIME_TOKEN`（没有任何 `GRAPE_DSN_*`）。平台卡在它那里
+    原先三条来源全断（本进程表被就绪门挡、configs/platforms 不随包发布、代码
+    默认没有 gitee）→ worktree 解析不出 clone 地址 → 静默降级只读 → 任务
+    "completed"却没有仓库。
+
+    职责划分（都不在本路由里）：
+      * 跨域取数 = `mgmt.get_repo_platform_cards` 契约（单点宿存，凭据列不出域）；
+      * 响应整形 / 失败降级 = `card_contract.PlatformCardContractServer`；
+      * worker 侧消费 / 回落策略 = `card_contract.PlatformCardContractClient`
+        + `card_sources.ServerContractCardSource`。
+    路由只做鉴权 + 委派。
+    """
+    from src.domains.runtime.vcs.card_contract import PlatformCardContractServer
+
+    return PlatformCardContractServer().snapshot()
+
+
+@router.post("/contract-guard/signal", operation_id="runtime_contract_guard_signal")
+def runtime_contract_guard_signal(body: ContractGuardSignalBody,
+                                  credential_id: int = Depends(_require_credential)):
+    """Issue #2085（#1297 移植）：承接 worker contract_guard 失败信号 → observability 指标出口。
+
+    worker 检出 CLI 契约缓存退化（outcome=degraded）或从主控重建失败
+    （outcome=rebuild_failed）时上报，服务端计数
+    grape_contract_guard_failures_total{outcome=...}，经 /metrics 暴露给
+    deploy/alerts.yml 的 GrapeContractGuardFailed 规则。承接失败只记日志
+    不报错（worker 侧另有本地兜底落点）。
+    """
+    from src.domains.insight.observability import (CONTRACT_GUARD_OUTCOMES,
+                                                   record_contract_guard_failure)
+    outcome = (body.outcome or "").strip().lower()
+    if outcome not in CONTRACT_GUARD_OUTCOMES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid outcome"})
+    try:
+        record_contract_guard_failure(outcome, body.detail)
+    except Exception as e:
+        log.warning(f"contract guard signal record failed: {e}")
+    if body.detail:
+        log.info(f"contract guard signal: outcome={outcome} host={body.host or '?'}"
+                 f" detail={body.detail[:200]}")
+    return {"status": "ok"}

@@ -46,6 +46,59 @@ def _expected_webhook_token(repo: str, provider: str) -> str:
         return ""
 
 
+def _webhook_web_url(payload: dict) -> str:
+    """从 webhook payload 提取仓库/项目 web URL（跨平台字段并集）。"""
+    if not isinstance(payload, dict):
+        return ""
+    project = payload.get("project")
+    if isinstance(project, dict) and project.get("web_url"):
+        return str(project.get("web_url") or "")
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        for key in ("html_url", "web_url", "url"):
+            if repository.get(key):
+                return str(repository.get(key) or "")
+    for key in ("web_url", "html_url"):
+        if payload.get(key):
+            return str(payload.get(key) or "")
+    return ""
+
+
+def _webhook_instance_mismatch(provider: str, payload: dict) -> bool:
+    """Issue #3580/R10：payload web_url 的 host 必须与平台卡 host 一致。
+
+    只做 host（含端口）强校验，防跨实例同名仓伪造投递；url 缺失时不判定
+    （旧平台形态兼容）。
+    """
+    import urllib.parse as _up
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+    url = _webhook_web_url(payload)
+    if not url:
+        return False
+    card = get_platform_card(provider)
+    if card is None:
+        return False
+    try:
+        got = (_up.urlsplit(url).netloc or "").lower()
+    except Exception:
+        return True
+    return got != (card.host or "").lower()
+
+
+def persist_webhook_event(repo_key: str, provider: str, event_header: str,
+                          body: bytes, headers) -> dict:
+    """P3 统一入口：**所有**平台 webhook（gitcode/github 专用端点 + 通用路由）
+    验签通过后先持久化入队，再由 Event 进程 worker 幂等消费/重放。
+
+    入队失败抛异常——调用方必须转 500，让上游重投（at-least-once）；静默吞掉
+    等于丢事件。返回 {"id","status","duplicate"}。
+    """
+    from src.domains.runtime.webhook_inbox import enqueue_webhook
+
+    return enqueue_webhook(repo_key=repo_key, provider=provider,
+                           event_header=event_header, body=body, headers=headers)
+
+
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
     """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
 
@@ -109,6 +162,12 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
 
 from src.api.a2a_context import a2a_context_key as _a2a_context_key
 from src.api.a2a_context import a2a_event_context_key as _a2a_event_context_key
+from src.api.a2a_skip_nodes import (
+    REJECT_FORWARD_SKIP as _REJECT_FORWARD_SKIP,
+    attach_skipped_nodes as _attach_skipped_nodes,
+    build_skipped_nodes_notice as _build_skipped_nodes_notice,
+    compute_skipped_nodes as _compute_skipped_nodes,
+)
 
 
 def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
@@ -299,7 +358,8 @@ def _a2a_force_resend_hint() -> str:
             "the idempotency window key is issue+scene+agent.")
 
 
-def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str) -> None:
+def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str,
+                               context: str = "") -> None:
     """A2A 交办后把 Issue 归属推进到目标 agent（末节点 → pending_review）。
 
     Issue #1973（复审 c）：排队分支此前在 stage 推进之前直接返回，补派后 Issue
@@ -311,18 +371,12 @@ def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str) -> No
         _current_stage = _stage_info["stage"] if _stage_info else ""
         _pipeline_next = {}
         try:
-            import os as _os, json as _json
-            from src.api.session_store import get_issue_scene
-            _scene_id, _ = get_issue_scene(repo_key, f"#{issue_number}") or ("default", 0)
-            _pipe_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
-                                       "configs", "pipelines.json")
-            with open(_pipe_path, "r", encoding="utf-8") as _f:
-                _pipes = _json.load(_f)
-            _scene = _pipes.get("scenes", {}).get(_scene_id) or _pipes.get("scenes", {}).get("default") or {}
-            for _node in (_scene.get("nodes") or []):
-                _pipeline_next[_node.get("id", "")] = _node.get("next", "")
-        except Exception:
-            pass
+            # Issue #2118：不能直读 configs/pipelines.json——组织等仓库级自定义场景
+            # 只存在于 DB/场景市场，必须经 get_pipeline_config 并按 repo_key 解析。
+            _pipeline_next = _scene_node_order(repo_key, issue_number)
+        except Exception as _cfg_err:
+            log.warning(f"A2A: pipeline next-node resolution failed: {_cfg_err}")
+            _pipeline_next = {}
         _stage_order = list(_pipeline_next.keys())
     except Exception as _pe:
         log.warning(f"A2A: pipeline order check failed: {_pe}")
@@ -339,7 +393,13 @@ def _advance_a2a_issue_stage(repo_key: str, issue_number, agent_name: str) -> No
             # 不做跳步修正——agent 有权 A2A 到任意目标 agent（含回滚），
             # pipeline 顺序由 skill 逻辑保证，A2A 层不干预。
             _stage = agent_name if agent_name in ("vod", "issue", "coding", "qa", "sre", "pending_review", "done") else "issue"
-        set_issue_stage(repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None)
+        # Issue #1211 缺口 2（#2419 移植）：换用带通知的 set_issue_stage 包装——stage 真实变更为
+        # pending_review（末节点完成等待人工审核）时同步触发待审核通知，
+        # A2A context 作为审核点透传；其余语义与 set_issue_stage 一致。
+        from src.domains.runtime.issues_center import set_issue_stage_with_pending_review_notify
+        set_issue_stage_with_pending_review_notify(
+            repo_key, f"#{issue_number}", _stage, agent_name, a2a_seq=None,
+            review_points=(context or "").strip() or "流水线末节点已完成，请审核确认交付结果")
         log.info(f"A2A: issue_state updated issue=#{issue_number} stage={_stage} owner={agent_name}")
     except Exception as _e:
         log.warning(f"A2A: issue_state update failed: {_e}")
@@ -635,18 +695,24 @@ def _handoff_result_of(status: str, seq, skipped: bool = False) -> str:
 
 
 def _augment_a2a_dispatch_response(result, agent_name: str, issue_number,
-                                   source_seq: int = 0) -> dict:
+                                   source_seq: int = 0, skipped_nodes=None) -> dict:
     """Issue #1691：成功派发响应补 `event`（seq/status/agent/issue_id）。
 
     与幂等/排队响应口径一致，CLI 可直接读取下游派发状态，无需再猜 seq=0/ok 的语义。
     门槛以派发结果自身的 `seq>0` 为准：`run_a2a_dispatch` 在 auto-select 无引擎 /
     异常时会先 `_fail_event(seq)` 把已建事件置 failed，再返回 `{"status":"ok","seq":0}`，
     此时不得补 `event.status=running`，须保持与事件库真实状态一致。
+
+    Issue #2792：`skipped_nodes` 非空时回传，调用方/前端无需再回查事件 payload；
+    空集合不落键（与 payload 口径一致）。
     """
     if isinstance(result, dict):
         result.setdefault("source_seq", int(source_seq or 0))
         result.setdefault("handoff_result", _handoff_result_of(
             result.get("status"), result.get("seq"), bool(result.get("skipped"))))
+        _skipped = [str(n).strip() for n in (skipped_nodes or []) if str(n).strip()]
+        if _skipped:
+            result.setdefault("skipped_nodes", _skipped)
     if isinstance(result, dict) and result.get("status") == "ok":
         dispatch_seq = result.get("seq")
         if isinstance(dispatch_seq, int) and dispatch_seq > 0:
@@ -675,6 +741,76 @@ def _a2a_source_event_seq(session_info) -> int:
     except Exception as e:
         log.warning(f"A2A: resolve source event seq failed: {e}")
     return 0
+
+
+def _resolve_a2a_current_stage(repo_key: str, issue_number) -> str:
+    """Issue #2792：读 A2A 交办「之前」的 Issue 阶段（跳步差集的起点）。
+
+    必须在 `_advance_a2a_issue_stage` 之前调用——阶段一推进，起点就变成目标
+    节点，差集恒为空，跳步就再也算不出来。读不到时返回空串（降级不标注）。
+    """
+    try:
+        from src.api.session_store import get_issue_stage
+        _st = get_issue_stage(repo_key, f"#{issue_number}")
+        return str((_st or {}).get("stage") or "")
+    except Exception as e:
+        log.warning(f"A2A #2792: read stage for skipped_nodes failed: {e}")
+        return ""
+
+
+def _skipped_nodes_notice_timeout() -> float:
+    """Issue #2792：提醒投递的硬超时（秒，env 可调，默认 5）。
+
+    提醒是「异常路径的附加动作」，不能让一次无响应的 VCS 外呼把 A2A 交办拖住——
+    Spec 要求失败不阻断，超时即按失败处理并告警。
+    """
+    try:
+        return max(0.1, float(os.environ.get("GRAPE_A2A_SKIPPED_NOTICE_TIMEOUT", "5")))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+async def _notify_skipped_nodes(repo_key: str, repository: str, issue_number,
+                                target_agent: str, skipped_nodes, scene_id: str = "") -> bool:
+    """Issue #2792：前向跳步的用户可见提醒（Issue 评论）。
+
+    Spec 实现路径 3：`skipped_nodes` 非空时经既有 VCS 评论能力在 Issue 上提醒，
+    **失败不阻断交办**（仅告警）。投递放到线程里执行 + 硬超时，避免阻塞事件循环；
+    调用方 await 它，保证响应返回时提醒已发出或已判失败（不含"既没发也没报错"的窗口）。
+
+    先判 bot 身份再投递：没有 bot token 就**不发**——否则一次异常交办会同步触发一次
+    无凭据外呼（拖慢交办，且评论会挂到错误身份下）。这类降级只告警。
+    """
+    notice = _build_skipped_nodes_notice(
+        issue_number, target_agent, skipped_nodes, scene_id=scene_id)
+    if not notice:
+        return False
+    _bot_tok = ""
+    try:
+        from src.kernel.token_service import get_bot_identity_token
+        _bot_tok = get_bot_identity_token(repo_key) or ""
+    except Exception as e:
+        log.warning(f"A2A #2792: resolve bot identity for notice failed "
+                    f"issue=#{issue_number}: {e}")
+    if not _bot_tok:
+        log.warning(f"A2A #2792: skipped_nodes notice skipped (no bot identity) "
+                    f"issue=#{issue_number} target={target_agent} skipped={skipped_nodes}")
+        return False
+    try:
+        import asyncio as _aio
+        from src.domains.runtime.pipeline.event_pipeline import _post_issue_comment_ledgered
+        await _aio.wait_for(
+            _aio.to_thread(
+                _post_issue_comment_ledgered, repository or repo_key, str(issue_number),
+                notice, _bot_tok, repo_key),
+            timeout=_skipped_nodes_notice_timeout())
+        log.info(f"A2A #2792: skipped_nodes notice posted issue=#{issue_number} "
+                 f"target={target_agent} skipped={skipped_nodes}")
+        return True
+    except Exception as e:
+        log.warning(f"A2A #2792: skipped_nodes notice failed issue=#{issue_number} "
+                    f"target={target_agent} skipped={skipped_nodes}: {e}")
+        return False
 
 
 def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
@@ -758,6 +894,16 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
 # 误导健康探针/监控把 webhook 入口误判为成功。仅 POST 是合法的 webhook 入口方法。
 _WEBHOOK_REJECTED_METHODS = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 
+# Issue #3580：通用 webhook 载荷上限（超限 413，不落库/不消费）。
+# 取值来源（登记于 docs/issue-3580/measurements.md §4/§6）：
+#   ① 方向约束：应用上限必须**低于**入口代理上限（仓内部署配置 `deploy/nginx-*.conf`
+#      分别为 50m / 200m），否则超限请求在代理层就被 413，两处口径分裂；
+#   ② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），在册平台均不超过它；
+#   ③ 与附件 200MB 上限无关：附件走独立上传通道，不经过本入口。
+# 10MB 本身是**安全默认值**（25MB 的 40%，给流式解析留内存余量），不是实测值：
+# 当前环境 inbox 表为空、无投递样本可量，定稿前调整请按 §4 待决策条目补测。
+_WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024
+
 
 @router.api_route("/webhook/gitcode", methods=_WEBHOOK_REJECTED_METHODS,
                   include_in_schema=False, name="gitcode_webhook_method_reject")
@@ -837,10 +983,19 @@ async def gitcode_webhook(request: Request):
     # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
     import asyncio as _aio
     loop = _aio.get_event_loop()
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(request.headers),
-                                     account=repo, repo_key_override=f"gitcode:{repo}"))
-    log.info(f"Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：先持久化再 200（入队失败 → 500 让上游重投）
+    try:
+        _enq = persist_webhook_event(f"gitcode:{repo}", "gitcode", event_header,
+                                     body, dict(request.headers))
+    except Exception as _e:
+        log.warning(f"Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 @router.post("/webhook/github")
@@ -910,11 +1065,19 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         status_code = 200 if result.get("status") == "repo_deleted" else 500
         return JSONResponse(status_code=status_code, content=result)
 
-    import asyncio as _aio
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
-                                     account=repo, repo_key_override=f"github:{repo}"))
-    log.info(f"GitHub Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/P3：与 gitcode 端点和通用路由同口径——先持久化再 200
+    try:
+        _enq = persist_webhook_event(f"github:{repo}", "github", event_header,
+                                     body, dict(headers))
+    except Exception as _e:
+        log.warning(f"GitHub Webhook: enqueue failed repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"GitHub Webhook: pipeline queued for repo={repo}, event={event_header}, "
+             f"inbox={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 def _resolve_a2a_repo_key(repository: str) -> str:
@@ -1045,11 +1208,50 @@ class A2AHandoffBody(BaseModel):
                     "用于审计交棒来源段与幂等键派生；兼容 payload.source_event_seq / payload.source_seq。")
 
 
+
+def _scene_node_order(repo_key: str, issue_number, default_scene_id: str = "default") -> dict:
+    """Issue 场景的节点推进表（repo_key 感知，角色键 alias）。
+
+    Issue #2118：A2A 阶段推进不能直读 configs/pipelines.json——组织场景等
+    仓库级自定义场景只存在于 DB/场景市场，必须经 `get_pipeline_config`
+    并按 repo_key 解析，否则取不到节点导致 stage/pending_review 判断失准。
+
+    返回 {角色键: 下一节点角色键}，角色键同时包含 id 与 tag（org 场景
+    id=org_intake、tag=issue，阶段推进按 tag 记录，必须能互查）。下一节点
+    角色优先取 tag（A2A agent 白名单只接受 issue/coding/qa 等 tag），
+    终态统一为 "done"。
+    """
+    from src.api.pipeline_config import get_pipeline_config, node_role
+    from src.api.session_store import get_issue_scene
+    _scene_id = default_scene_id
+    try:
+        _sid, _ = get_issue_scene(repo_key, f"#{issue_number}")
+        _scene_id = _sid or default_scene_id
+    except Exception:
+        _scene_id = default_scene_id
+    _cfg = get_pipeline_config(_scene_id or "default", repo_key=repo_key) or {}
+    _nodes = [n for n in (_cfg.get("nodes") or []) if isinstance(n, dict)]
+    _by_id = {str(n.get("id") or ""): n for n in _nodes if n.get("id")}
+    order = {}
+    for n in _nodes:
+        _nid = str(n.get("id") or "").strip()
+        _nxt = str(n.get("next") or "").strip()
+        _nxt_node = _by_id.get(_nxt)
+        _target = "done" if (not _nxt or _nxt.lower() in ("done", "complete", "end")) else node_role(_nxt_node or {"id": _nxt})
+        if _nid:
+            order[_nid] = _target
+        _tag = str(n.get("tag") or "").strip()
+        if _tag and _tag != _nid:
+            order.setdefault(_tag, _target)
+    return order
+
 def _node_id(node) -> str:
     """节点标识兜底：优先 id，兼容仅有 tag 的存量节点（Issue #2427）。"""
     if not isinstance(node, dict):
         return ""
     return str(node.get("id") or node.get("tag") or "")
+
+
 
 
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
@@ -1061,7 +1263,9 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     返回一致节点集合（修复 404 vs 409 nodes 口径分歧）。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
-    返回 {"scene_id", "nodes", "in_scene"}。
+    Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
+    id=org_* / tag=issue|coding|qa 时 A2A 以 tag 交办不应被误判 not_in_scene。
+    返回 {"scene_id", "nodes", "in_scene", "node"}。
     """
     from src.api.pipeline_config import get_pipeline_config
     from src.api.session_store import get_issue_scene
@@ -1076,10 +1280,16 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
         nodes = (_cfg or {}).get("nodes") or []
     except Exception:
         nodes = []
+    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    _matched = next(
+        (n for n in nodes if isinstance(n, dict) and node_matches_agent_role(n, agent_name)),
+        None,
+    )
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
-        "in_scene": any(_node_id(n) == agent_name for n in nodes),
+        "in_scene": _matched is not None,
+        "node": _matched,
     }
 
 
@@ -1565,7 +1775,7 @@ def _cross_pipeline_handoff(
                         "timed-out POST /api/a2a to check whether the handoff event was already "
                         "created before retrying. Accepts JWT/session token/API key (public) "
                         "plus internal bot-token.")
-async def a2a_status_endpoint(request: Request,
+def a2a_status_endpoint(request: Request,
                               repository: str = "",
                               issue_number: str = "",
                               agent: str = "",
@@ -1675,7 +1885,8 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
 
     token = ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
     except Exception as _te:
         log.warning(f"A2A fallback: token resolver failed for {repo_key}: {_te}")
@@ -1688,7 +1899,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
                 from src.domains.mgmt.public import get_grape_account_by_id
                 _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
             if _username or _uid > 0:
-                from src.kernel.token_resolver import create_provider_from_repo_key
+                from src.domains.mgmt.public import create_provider_from_repo_key
                 token = create_provider_from_repo_key(repo_key).fetch_user_token(_username, _uid) or ""
         except Exception as _ue:
             log.warning(f"A2A fallback: user token fetch failed for {repo_key}: {_ue}")
@@ -1806,7 +2017,8 @@ def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
     _num = native_issue_number(issue_number)
     token = ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
     except Exception as _te:
         log.warning(f"A2A #755: token resolver failed for {repo_key}: {_te}")
@@ -2289,6 +2501,31 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
                     })
 
+        # Issue #2792（#2747 子单4，Spec 案 2）：前向跳步披露——零语义变更。
+        # A2A 层仍「不干预」（agent 有权交办到任意目标含回滚），只把被越过的节点
+        # 算成 skipped_nodes 落进事件 payload 并提醒用户。口径见 a2a_skip_nodes：
+        # 回滚/相邻顺推/阶段不可解析/场景声明内 skip 全返回空 = 既有语义零变化。
+        _skipped_nodes: list = []
+        if issue_number:
+            _skipped_nodes = _compute_skipped_nodes(
+                _scene_ck.get("nodes") or [],
+                _resolve_a2a_current_stage(repo_key, issue_number),
+                agent_name)
+        # 案 1 开关位（默认关闭）：打开后前向越站直接 422 拒绝、不建事件、不发提醒。
+        # 回滚方向 `_skipped_nodes` 恒为空，故不受本开关影响（Spec：回滚不受限）。
+        if _skipped_nodes and _REJECT_FORWARD_SKIP:
+            log.info(f"A2A #2792: forward skip rejected (issue=#{issue_number} "
+                     f"agent={agent_name} skipped={_skipped_nodes})")
+            return JSONResponse(status_code=422, content={
+                "status": "skipped", "seq": 0, "agent": agent_name,
+                "skipped": "forward_skip_rejected",
+                "skipped_nodes": _skipped_nodes,
+                "message": f"forward skip rejected (skipped_nodes={_skipped_nodes}): "
+                           "A2A 前向越站被拒绝（案 1 已启用），请按场景节点顺序交办；"
+                           "回滚/重派方向不受限制",
+                "handoff_result": HANDOFF_RESULT_REJECTED,
+                "source_seq": _source_seq})
+
         # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     except HTTPException:
         raise
@@ -2589,7 +2826,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         # 幂等复用行不得把自身计入阻塞（目标活跃事件查询会看到它）。
                         _reuse_blocking = [s for s in _dq_blocking if s != _reused_seq]
                         # 排队成功即把 Issue 归属推进到目标 agent（补派后不残留阻塞下游）。
-                        _advance_a2a_issue_stage(repo_key, issue_number, agent_name)
+                        _advance_a2a_issue_stage(repo_key, issue_number, agent_name,
+                                                 context=(context or "") if 'context' in dir() else "")
                         return _queued_a2a_response(
                             agent_name, issue_number,
                             reason="downstream_running", scene_id=_guard_scene,
@@ -2600,7 +2838,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     if not _dq_qseq:
                         log.error(f"A2A: downstream queue event store failed agent={agent_name} issue=#{issue_number}")
                         return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
-                    _advance_a2a_issue_stage(repo_key, issue_number, agent_name)
+                    _advance_a2a_issue_stage(repo_key, issue_number, agent_name,
+                                                 context=(context or "") if 'context' in dir() else "")
                     try:
                         from src.domains.runtime.pipeline.event_pipeline import reconcile_queued_a2a
                         reconcile_queued_a2a(repo_key)
@@ -2656,7 +2895,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # 不做跳步修正、不做回退取消：stage-owner 机制保证最新归属的 agent 负责处理
         #（issue-comment-stage-owner-routing-design.md）；旧的 A2A 发起方早已完成其交办。
         if issue_number:
-            _advance_a2a_issue_stage(repo_key, issue_number, agent_name)
+            _advance_a2a_issue_stage(repo_key, issue_number, agent_name,
+                                                 context=(context or "") if 'context' in dir() else "")
 
         # 订阅感知 A2A 去重（event-routing-subscription-design.md §2.6）：
         # SRE 已配置订阅 → PR 合并事件触发的 A2A 交办视为重复，只推进 stage、不创建任务。
@@ -2786,7 +3026,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _a2a_title = f"A2A: {agent_name}"
         # Issue #476：源事件 seq（触发本次交办的调用方事件；无 session 时为 0）。
 # Issue #1948 / #1973：已在派发门禁前解析，复用同一值，保证门禁排除与落库引用一致。
-        _a2a_payload = {"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "source_seq": _source_seq, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}
+        _a2a_payload = _attach_skipped_nodes({"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "source_seq": _source_seq, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}, _skipped_nodes)
         if issue_number and not _force:
             # Issue #1770（审查 P4）：门禁复查 + 事件落库在同一 db_lock 内原子完成，
             # 消除并发同键「查询都未命中 → 双落库」的 TOCTOU。
@@ -2833,6 +3073,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
         log.info(f"A2A: event created, seq={seq}")
 
+        # Issue #2792：跳步事件已落库 → 在 Issue 上向用户显式提醒（失败不阻断交办）。
+        if _skipped_nodes:
+            await _notify_skipped_nodes(
+                repo_key, repository, issue_number, agent_name,
+                _skipped_nodes, scene_id=_event_scene)
+
         # Issue #1770：短时间窗内同 Issue 同目标 agent 多次派发 → 告警日志（编排抖动观测）。
         if issue_number:
             try:
@@ -2854,7 +3100,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             guard_state=(_terminal if (issue_number and not _force) else None),
         )
         return _augment_a2a_dispatch_response(
-            _dispatch_result, agent_name, issue_number, source_seq=_source_seq)
+            _dispatch_result, agent_name, issue_number, source_seq=_source_seq,
+            skipped_nodes=_skipped_nodes)
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
@@ -2918,7 +3165,6 @@ def _is_valid_issue_number(v) -> bool:
 @router.post("/webhook/{provider}")
 async def generic_vcs_webhook(provider: str, request: Request):
     """平台卡驱动 webhook：验签策略按卡（hmac / token_compare），事件经方言模板归一。"""
-    import asyncio as _aio
     from src.domains.runtime.vcs.adapter import get_backend, resolve_source_by_path
     from src.domains.runtime.vcs.platform_card import get_platform_card
 
@@ -2931,6 +3177,11 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=404, content={"code": 404, "message": "no backend for provider"})
 
     body = await request.body()
+    # Issue #3580 复审：webhook 载荷上限（与 GitLab 侧实务一致），防超大 body 打爆
+    # 入库与消费端内存；超限直接 413，不落库。
+    if len(body) > _WEBHOOK_MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={
+            "code": 413, "message": "webhook body too large"})
     headers = {k.lower(): v for k, v in request.headers.items()}
     event_header = headers.get(backend.event_header_key.lower(),
                                headers.get("x-gitcode-event", "unknown"))
@@ -2944,6 +3195,15 @@ async def generic_vcs_webhook(provider: str, request: Request):
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
     if not repo:
         return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+    # Issue #3580/PR#1854 对齐：仓库全路径来自外部 payload，随后进 repo_key、托管查表
+    # 与工作目录 —— 段级校验（拒 `..`/空段/控制字符/各平台禁用字符），挡路径穿越。
+    from src.kernel.repo_path import RepoPathError, validate_repo_path
+    try:
+        repo = validate_repo_path(repo)
+    except RepoPathError as e:
+        log.warning(f"generic webhook rejected: invalid repository path provider={provider}: {e}")
+        return JSONResponse(status_code=400, content={
+            "code": 400, "message": "invalid repository path"})
 
     # 未托管仓库拒绝（与 gitcode 端点同语义：防幽灵 webhook）
     # 扫雷⑦（中危④）：显式传 provider——跨平台同名仓不互串预期 token
@@ -2977,10 +3237,28 @@ async def generic_vcs_webhook(provider: str, request: Request):
         log.info(f"generic webhook: provider={provider} repo={repo} repo-deleted handled: {_del_result.get('status')}")
         return JSONResponse(status_code=_code, content=_del_result)
 
-    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} verified, pipeline scheduled")
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, headers,
-                                      account=repo, repo_key_override=_repo_key))
-    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
+    # Issue #3580/R10：实例隔离——payload web_url 必须属于该卡实例
+    if _webhook_instance_mismatch(str(provider or "").lower(),
+                                  _raw_payload if isinstance(_raw_payload, dict) else {}):
+        log.warning(f"generic webhook rejected: web_url instance mismatch provider={provider} repo={repo}")
+        return JSONResponse(status_code=403, content={
+            "code": 403, "message": "web_url does not belong to this platform instance"})
+
+    # Issue #3580/P3：验签通过后先持久化再 200；Event 进程 worker 幂等消费/重放
+    try:
+        _enq = persist_webhook_event(_repo_key, str(provider or "").lower(),
+                                     event_header, body, headers)
+    except Exception as _e:
+        log.warning(f"generic webhook enqueue failed provider={provider} repo={repo}: {_e}")
+        return JSONResponse(status_code=500, content={
+            "code": 500, "message": "event store failed, retry webhook"})
+    log.info(f"generic webhook: provider={provider} repo={repo} event={event_header} "
+             f"persisted id={_enq.get('id')} duplicate={_enq.get('duplicate')}")
+    # Issue #3580 复审：对外契约保持既有 `status="ok"`（消费方/gate 依赖它），
+    # 入队信息以新增字段表达；重复投递只多 duplicate 标记。
+    return {"status": "ok", "seq": 0, "inbox_id": _enq.get("id"),
+            "duplicate": bool(_enq.get("duplicate")),
+            "event_type": event_header, "message": "event persisted"}
 
 
 async def _on_handoff_dispatch(event):

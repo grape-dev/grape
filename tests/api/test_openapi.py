@@ -71,7 +71,14 @@ EXPECTED_PUBLIC = {
     "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
     "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
     "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
+    # Issue #3580：平台 PAT 连接与建仓空间清单（前端"平台凭据/一键创建"直接调用）
+    "repos_connection_get": ("get", "/api/repos/{provider}/connection"),
+    "repos_connection_put": ("put", "/api/repos/{provider}/connection"),
+    "repos_connection_delete": ("delete", "/api/repos/{provider}/connection"),
+    "repos_create_targets": ("get", "/api/repos/create-targets"),
     "auth_platform_links": ("get", "/api/auth/platform-links"),
+    # 误完成回退端点（arch-weekly-11 新增，实现已带 operation_id/summary/security）
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     # [rebase 2026-11-12] uuid+沙箱+#1208 线新增对外端点（42 个：沙箱管理/凭据/LLM 凭据/绑定/selector 预览）
     "external_api_audit_query": ("get", "/admin/sandbox/external-api-audit/{task_id}"),
     "runtime_cloud_sandbox_kill": ("delete", "/api/runtime/cloud-sandboxes/{sandbox_id}"),
@@ -237,6 +244,7 @@ EXPECTED_PUBLIC = {
     "issues_pipeline_detail": ("get", "/api/issues/{issue_id}/pipeline"),
     "issues_production_release": ("post", "/api/issues/{issue_id}/production-release"),
     "issues_production_release_list": ("get", "/api/issues/{issue_id}/production-release"),
+    "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),
     "issues_resume": ("post", "/api/issues/{issue_id}/resume"),
     "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
     "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
@@ -277,6 +285,7 @@ EXPECTED_PUBLIC = {
     "obs_trace": ("get", "/api/obs/trace/{trace}"),
     "obs_trace_by_issue": ("get", "/api/obs/trace"),
     "obs_trace_stamp": ("post", "/api/obs/trace/stamp"),
+    "orgs_audit": ("get", "/api/orgs/{org_id}/audit"),
     "orgs_create": ("post", "/api/orgs"),
     "orgs_delete": ("delete", "/api/orgs/{org_id}"),
     "orgs_detail": ("get", "/api/orgs/{org_id}"),
@@ -286,6 +295,19 @@ EXPECTED_PUBLIC = {
     "orgs_members_list": ("get", "/api/orgs/{org_id}/members"),
     "orgs_members_remove": ("delete", "/api/orgs/{org_id}/members/{user_id}"),
     "orgs_members_update": ("patch", "/api/orgs/{org_id}/members/{user_id}"),
+    "orgs_repo_namespaces": ("get", "/api/orgs/repo-namespaces"),
+    "org_repo_map_list": ("get", "/api/orgs/{org_id}/repo-map"),
+    "org_repo_map_analyze_all": ("post", "/api/orgs/{org_id}/repo-map/analyze"),
+    "org_repo_map_recall": ("get", "/api/orgs/{org_id}/repo-map/recall"),
+    "org_repo_map_detail": ("get", "/api/orgs/{org_id}/repo-map/{repo_key}"),
+    "org_repo_map_analyze_one": ("post", "/api/orgs/{org_id}/repo-map/{repo_key}/analyze"),
+    "org_repo_analysis_targets": ("get", "/api/orgs/{org_id}/repo-analysis/targets"),
+    "org_repo_analysis_context": ("get", "/api/orgs/{org_id}/repo-analysis/context/{repo_key}"),
+    "org_repo_analysis_docs": ("get", "/api/orgs/{org_id}/repo-analysis/docs"),
+    "org_repo_map_ai_result": ("post", "/api/orgs/{org_id}/repo-map/{repo_key}/ai-result"),
+    "org_repo_analysis_run": ("post", "/api/orgs/{org_id}/repo-analysis/run"),
+    "org_repo_analysis_status": ("get", "/api/orgs/{org_id}/repo-analysis/status"),
+    "org_repo_analysis_automation_ensure": ("post", "/api/orgs/{org_id}/repo-analysis/automation/ensure"),
     "orgs_search_users": ("get", "/api/orgs/search/users"),
     "orgs_update": ("put", "/api/orgs/{org_id}"),
     "pipeline_handoff": ("post", "/api/pipeline/handoff"),
@@ -438,6 +460,82 @@ EXPECTED_PUBLIC = {
     "tasks_notify": ("post", "/api/tasks/notify"),
     "transfer_bind_api_auth_transfer_bind_post": ("post", "/api/auth/transfer-bind"),
     "unbind_provider_api_auth_bind__provider__delete": ("delete", "/api/auth/bind/{provider}"),
+    # 组织（org）特性 + weekly-11 期间新增的公开端点：一并锁进契约白名单
+    # （此前 EXPECTED_PUBLIC 与实现漂移，本表补齐后该门禁重新可拦回归）。
+    "auth_platform_links": ("get", "/api/auth/platform-links"),
+    "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
+    "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
+    "org_context_create": ("post", "/api/orgs/{org_id}/context"),
+    "org_context_delete": ("delete", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_context_deprecate": ("post", "/api/orgs/{org_id}/context/{ctx_id}/deprecate"),
+    "org_context_get": ("get", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_context_list": ("get", "/api/orgs/{org_id}/context"),
+    "org_context_publish": ("post", "/api/orgs/{org_id}/context/{ctx_id}/publish"),
+    "org_context_update": ("put", "/api/orgs/{org_id}/context/{ctx_id}"),
+    "org_dispatches_cancel": ("post", "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel"),
+    "org_dispatches_context": ("get", "/api/orgs/{org_id}/dispatches/{dispatch_id}/context"),
+    "org_dispatches_create": ("post", "/api/orgs/{org_id}/dispatches"),
+    "org_dispatches_detail": ("get", "/api/orgs/{org_id}/dispatches/{dispatch_id}"),
+    "org_dispatches_list": ("get", "/api/orgs/{org_id}/dispatches"),
+    "org_dispatches_target_retry": ("post", "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry"),
+    "org_knowledge_archive": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive"),
+    "org_knowledge_create": ("post", "/api/orgs/{org_id}/knowledge"),
+    "org_knowledge_delete": ("delete", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_knowledge_deprecate": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate"),
+    "org_knowledge_get": ("get", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_knowledge_list": ("get", "/api/orgs/{org_id}/knowledge"),
+    "org_knowledge_publish": ("post", "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish"),
+    "org_knowledge_update": ("put", "/api/orgs/{org_id}/knowledge/{knowledge_id}"),
+    "org_repos_available": ("get", "/api/orgs/{org_id}/repos/available"),
+    "org_repos_bind": ("post", "/api/orgs/{org_id}/repos"),
+    "org_repos_bind_batch": ("post", "/api/orgs/{org_id}/repos/batch"),
+    "org_repos_list": ("get", "/api/orgs/{org_id}/repos"),
+    "org_repos_transfer": ("post", "/api/orgs/{org_id}/repos/{repo_key}/transfer"),
+    "org_repos_unbind": ("delete", "/api/orgs/{org_id}/repos/{repo_key}"),
+    "orgs_provision_get": ("get", "/api/orgs/{org_id}/provision"),
+    "orgs_provision_manual_bind": ("put", "/api/orgs/{org_id}/provision/repo"),
+    "orgs_provision_retry": ("post", "/api/orgs/{org_id}/provision/retry"),
+    "takeover_abort": ("post", "/api/takeover/sessions/{session_id}/abort"),
+    "takeover_attach": ("post", "/api/takeover/sessions/{session_id}/attach"),
+    "takeover_finish": ("post", "/api/takeover/sessions/{session_id}/finish"),
+    "takeover_get": ("get", "/api/takeover/sessions/{session_id}"),
+    "takeover_list": ("get", "/api/takeover/sessions"),
+    "takeover_progress": ("post", "/api/takeover/sessions/{session_id}/progress"),
+    "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
+    "takeover_start": ("post", "/api/takeover/sessions"),
+    # ---- 插件体系（grape-kit）对外端点登记：这 30 条由插件面新增，原先漏登记，
+    #      锁进清单后任何新增/改名都会红（QA review：EXPECTED_PUBLIC 登记缺口）。
+    #      组级基线 contracts/openapi_baseline.json 已按受控通道重定基。
+    "gitrepo_checks_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs"),
+    "gitrepo_statuses_list": ("get", "/api/git-repo/{owner}/{repo}/commits/{ref}/status"),
+    "orgs_ov_credential_delete": ("delete", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credential_put": ("put", "/api/orgs/{org_id}/ov-credentials/{user_id}"),
+    "orgs_ov_credentials_list": ("get", "/api/orgs/{org_id}/ov-credentials"),
+    "plugin_market_validate": ("post", "/api/plugin-market/validate"),
+    "plugin_market_validate_package": ("post", "/api/plugin-market/validate-package"),
+    "plugins_agent_installed": ("get", "/api/plugins/agent/installed"),
+    "plugins_agent_report_missing": ("post", "/api/plugins/agent/report-missing"),
+    "plugins_categories": ("get", "/api/plugins/categories"),
+    "plugins_config_get": ("get", "/api/plugins/{name}/config"),
+    "plugins_config_put": ("put", "/api/plugins/{name}/config"),
+    "plugins_detail": ("get", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_download": ("get", "/api/plugins/by-id/{plugin_id}/download"),
+    "plugins_like_toggle": ("post", "/api/plugins/{plugin_id}/like"),
+    "plugins_list": ("get", "/api/plugins"),
+    "plugins_market_delete": ("delete", "/api/plugins/by-id/{plugin_id}"),
+    "plugins_rollback": ("post", "/api/plugins/by-id/{plugin_id}/rollback"),
+    "plugins_runtime_agent_defaults": ("get", "/api/plugins/agent-defaults"),
+    "plugins_runtime_bundled_skills": ("get", "/api/plugins/{name}/skills"),
+    "plugins_runtime_detail": ("get", "/api/plugins/{name}"),
+    "plugins_runtime_get_credentials": ("get", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_install": ("post", "/api/plugins/install"),
+    "plugins_runtime_list": ("get", "/api/plugins/installed"),
+    "plugins_runtime_save_credentials": ("post", "/api/plugins/{name}/credentials"),
+    "plugins_runtime_uninstall": ("delete", "/api/plugins/{name}"),
+    "plugins_search": ("get", "/api/plugins/search"),
+    "plugins_upload": ("post", "/api/plugins/upload"),
+    "plugins_validate_consistency": ("post", "/api/plugins/validate-consistency"),
+    "plugins_versions": ("get", "/api/plugins/by-id/{plugin_id}/versions"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -461,8 +559,11 @@ def test_docs_endpoints_accessible():
     assert client.get("/openapi.json").status_code == 200
 
 def test_contract_version_and_security_schemes():
+    from src.api.contract_versioning import CONTRACT_VERSION
+
     s = _schema()
-    assert s["info"]["version"] == "2.2.0"
+    # Issue #2784：版本号改为单一来源（从现网递进的预发布版，禁跳版）
+    assert s["info"]["version"] == CONTRACT_VERSION
     schemes = s["components"]["securitySchemes"]
     assert set(schemes) == {"apiKey", "privateKey", "accessToken"}
     assert schemes["apiKey"]["scheme"] == "bearer"
@@ -632,3 +733,24 @@ from src.domains.mgmt.auth import grape_account_db
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
+
+
+def test_org_ops_have_english_summary_and_scope():
+    """组织功能契约：summary 必须 ASCII（CLI --help 要求），且 scope 合法。"""
+    schema = app.openapi()
+    bad = []
+    org_ops = 0
+    for path, methods in schema.get("paths", {}).items():
+        if not path.startswith("/api/orgs"):
+            continue
+        for method, op in methods.items():
+            if not isinstance(op, dict):
+                continue
+            org_ops += 1
+            summary = op.get("summary") or ""
+            if not summary or any(ord(ch) > 127 for ch in summary):
+                bad.append((method, path, summary))
+            if op.get("x-token-scope") not in ("user_only", "session_only", "dual"):
+                bad.append((method, path, op.get("x-token-scope")))
+    assert org_ops >= 37
+    assert not bad, bad[:10]

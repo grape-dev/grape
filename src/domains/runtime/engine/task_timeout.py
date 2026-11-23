@@ -48,6 +48,21 @@ DEFAULT_TIMEOUT_RETRIES = 1
 #: 重试前退避间隔（秒）
 DEFAULT_RETRY_BACKOFF_SEC = 30.0
 
+#: Issue #2793：running 无新日志/无进展超时自愈默认阈值（秒）。实测假死表现为
+#: 6 分钟仅 1 条日志后无产出；600s 不误伤常见长命令静默，且可按 skill/repo 调低。
+DEFAULT_NO_PROGRESS_TIMEOUT_SEC = 600.0
+
+#: Issue #2793：单任务无进展自动重派次数上限（与 timeout_retries 对齐，防雪崩）。
+DEFAULT_NO_PROGRESS_RETRIES = 1
+
+#: Issue #2793：无进展自愈总开关（false = 整体回滚，仅留诊断不重派）。
+DEFAULT_NO_PROGRESS_ENABLED = True
+
+#: Issue #2793：无进展阈值/重派次数的任务级显式 env（手动调参，最高优先）。
+_NO_PROGRESS_TIMEOUT_ENV = "RUNTIME_NO_PROGRESS_TIMEOUT"
+_NO_PROGRESS_RETRIES_ENV = "RUNTIME_NO_PROGRESS_RETRIES"
+_NO_PROGRESS_ENABLED_ENV = "RUNTIME_NO_PROGRESS_ENABLED"
+
 #: 超时 fail 消息签名（PR #722 审查建议集中定义）：worker 侧超时 kill 上报
 #: `task timed out after {N}s`，alerts.py / metric_rollup.py 的 M3 观测按此
 #: LIKE 过滤聚合——签名常量集中在此，避免双处硬编码后消息改版导致指标静默失效。
@@ -106,14 +121,19 @@ def _positive_number(raw: Any) -> Optional[float]:
 def _task_env(task: Dict[str, Any]) -> Dict[str, str]:
     """解析 task 的 env_extra（坏 JSON → 空 dict）。"""
     try:
-        env = json.loads(task.get("env_extra") or "{}")
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        env = decrypt_env_extra(task.get("env_extra"))  # enc:v1 信封解密（#2423）
         return env if isinstance(env, dict) else {}
     except Exception:
         return {}
 
 
-def _lookup(cfg: Dict[str, Any], section: str, key: str) -> Optional[float]:
-    """配置段查找：key 归一（去空白、skill/repo 大小写不敏感比较）。"""
+def _section_entry(cfg: Dict[str, Any], section: str, key: str) -> Any:
+    """配置段原始条目查找（含大小写不敏感兜底）。缺省/无该段 → None。
+
+    条目既可以是旧的标量超时值，也可以是 Issue #2793 引入的 dict 形态
+    （如 `{"timeout": 7200, "no_progress_timeout_sec": 300}`），由调用方按需取值。
+    """
     if not key:
         return None
     sect = cfg.get(section)
@@ -121,12 +141,22 @@ def _lookup(cfg: Dict[str, Any], section: str, key: str) -> Optional[float]:
         return None
     v = sect.get(key)
     if v is None:
-        # 大小写不敏感兜底（skill 名/仓库名大小写漂移时仍可命中）
         kl = key.strip().lower()
         for k, kv in sect.items():
             if str(k).strip().lower() == kl:
                 v = kv
                 break
+    return v
+
+
+def _lookup(cfg: Dict[str, Any], section: str, key: str) -> Optional[float]:
+    """配置段查找：key 归一（去空白、skill/repo 大小写不敏感比较）。
+
+    条目为 dict 时取 `timeout` 键（Issue #2793 扩展形态），兼容旧的标量写法。
+    """
+    v = _section_entry(cfg, section, key)
+    if isinstance(v, dict):
+        v = v.get("timeout")
     return _positive_number(v)
 
 
@@ -220,3 +250,125 @@ def retry_backoff_sec(cfg: Optional[Dict[str, Any]] = None) -> float:
     if v2 is not None:
         return v2
     return DEFAULT_RETRY_BACKOFF_SEC
+
+
+# ── Issue #2793：无进展（假死）自愈配置链 ────────────────────────────────
+#
+# 优先级（高 → 低）：
+#   1. 任务级 env_extra（RUNTIME_NO_PROGRESS_TIMEOUT / _RETRIES / _ENABLED）
+#   2. per_skill[skill] 的 dict 条目字段（no_progress_timeout_sec 等）
+#   3. per_repo[repo_key] 的 dict 条目字段
+#   4. 配置文件顶层 no_progress_timeout_sec / no_progress_retries / no_progress_enabled
+#   5. 进程 env 同名变量
+#   6. 默认值（600s / 1 次 / 开启）
+# 非法值（0/负/NaN/非数字/坏 JSON）一律静默回退下一层，坏配置不得拖垮主链路。
+
+
+def _flag(raw: Any) -> Optional[bool]:
+    """宽松解析布尔开关；无法识别 → None（调用方回退下一层）。"""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+    return None
+
+
+def _non_negative_int(raw: Any) -> Optional[int]:
+    """非负整数才有效（负数/NaN/非法字符串 → None）。"""
+    try:
+        iv = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return iv if iv >= 0 else None
+
+
+def _no_progress_field_from_entry(entry: Any, field: str) -> Any:
+    """per_skill/per_repo 条目中的无进展字段；旧标量条目无该字段 → None。"""
+    if isinstance(entry, dict):
+        return entry.get(field)
+    return None
+
+
+def no_progress_timeout_sec(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None
+                            ) -> Tuple[float, str]:
+    """解析单任务「无进展」静默阈值（秒）。返回 (timeout, source)。"""
+    if cfg is None:
+        cfg = load_timeout_config()
+    tenv = _task_env(task)
+    v = _positive_number(tenv.get(_NO_PROGRESS_TIMEOUT_ENV))
+    if v is not None:
+        return v, "task-env"
+
+    skill = str(task.get("skill") or "").strip()
+    repo = str(task.get("repo_key") or "").strip()
+    for section, key in (("per_skill", skill), ("per_repo", repo)):
+        entry = _section_entry(cfg, section, key)
+        v = _positive_number(_no_progress_field_from_entry(entry, "no_progress_timeout_sec"))
+        if v is not None:
+            return v, f"{section.replace('_', '-')}:{key}"
+
+    v = _positive_number(cfg.get("no_progress_timeout_sec"))
+    if v is not None:
+        return v, "config"
+    v = _positive_number(os.environ.get(_NO_PROGRESS_TIMEOUT_ENV))
+    if v is not None:
+        return v, f"env:{_NO_PROGRESS_TIMEOUT_ENV}"
+    return DEFAULT_NO_PROGRESS_TIMEOUT_SEC, "default"
+
+
+def no_progress_retries(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> int:
+    """解析单任务无进展自动重派次数上限（0 = 只诊断不重派）。"""
+    if cfg is None:
+        cfg = load_timeout_config()
+    tenv = _task_env(task)
+    v = _non_negative_int(tenv.get(_NO_PROGRESS_RETRIES_ENV))
+    if v is not None:
+        return v
+
+    skill = str(task.get("skill") or "").strip()
+    repo = str(task.get("repo_key") or "").strip()
+    for section, key in (("per_skill", skill), ("per_repo", repo)):
+        entry = _section_entry(cfg, section, key)
+        v = _non_negative_int(_no_progress_field_from_entry(entry, "no_progress_retries"))
+        if v is not None:
+            return v
+
+    v = _non_negative_int(cfg.get("no_progress_retries"))
+    if v is not None:
+        return v
+    v = _non_negative_int(os.environ.get(_NO_PROGRESS_RETRIES_ENV))
+    if v is not None:
+        return v
+    return DEFAULT_NO_PROGRESS_RETRIES
+
+
+def no_progress_enabled(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """解析无进展自愈总开关（false = 只留诊断、不重派，用于误杀回滚）。"""
+    if cfg is None:
+        cfg = load_timeout_config()
+    tenv = _task_env(task)
+    v = _flag(tenv.get(_NO_PROGRESS_ENABLED_ENV))
+    if v is not None:
+        return v
+
+    skill = str(task.get("skill") or "").strip()
+    repo = str(task.get("repo_key") or "").strip()
+    for section, key in (("per_skill", skill), ("per_repo", repo)):
+        entry = _section_entry(cfg, section, key)
+        v = _flag(_no_progress_field_from_entry(entry, "no_progress_enabled"))
+        if v is not None:
+            return v
+
+    v = _flag(cfg.get("no_progress_enabled"))
+    if v is not None:
+        return v
+    v = _flag(os.environ.get(_NO_PROGRESS_ENABLED_ENV))
+    if v is not None:
+        return v
+    return DEFAULT_NO_PROGRESS_ENABLED

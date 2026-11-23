@@ -18,8 +18,10 @@ import sys
 
 log = logging.getLogger(__name__)
 
-# 合并后的对外契约版本（bump 触发 CLI 自动刷新契约）
-CONTRACT_VERSION = "2.2.2"
+# 合并后的对外契约版本（bump 触发 CLI 自动刷新契约）。
+# Issue #2784：改为单一来源——本文件此前写死 2.2.2，与各进程入口的 2.2.0 漂移，
+# 且 2.2.2 相对现网 2.2.0 本身就是跳版。
+from src.api.contract_versioning import CONTRACT_VERSION  # noqa: F401  (re-export 供既有调用方)
 
 ENTRY_MODULES = {
     "mgmt": "src.api.grape_server",
@@ -120,6 +122,18 @@ def dump_contract(app) -> int:
     from src.kernel.help_page_gen import write_openapi_contract
 
     schema = build_contract(app)
+    # 磁盘上已有、但本轮合并渲染缺失的 path（多为其它进程暂时不可达的运维端点）
+    # 不能因完整性保护导致新端点永远写不进去：合并时保留磁盘既有条目，新契约优先。
+    try:
+        from src.kernel.help_page_gen import OPENAPI_STATIC_PATH
+
+        if OPENAPI_STATIC_PATH.exists():
+            disk = json.loads(OPENAPI_STATIC_PATH.read_text(encoding="utf-8"))
+            for _path, _ops in (disk.get("paths") or {}).items():
+                if _path not in (schema.get("paths") or {}):
+                    schema.setdefault("paths", {})[_path] = _ops
+    except Exception as e:
+        log.warning("OpenAPI merge: preserve disk-only paths failed: %s", e)
     n = len(schema.get("paths") or {})
     own_n = len((custom_openapi(app).get("paths") or {}))
     write_openapi_contract(schema)

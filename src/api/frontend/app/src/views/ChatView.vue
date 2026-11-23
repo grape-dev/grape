@@ -199,6 +199,29 @@
               <path d="M2 12l10 5 10-5" />
             </svg>
           </button>
+          <button
+            v-if="showPlugins"
+            id="chatPluginBtn"
+            :class="['chat-inpicker-btn', { active: pickerOpen === 'plugin' }]"
+            :title="t('plugin_config_tip')"
+            @click="togglePicker('plugin')"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                d="M10 3a2 2 0 0 1 2 2v1h2a2 2 0 0 1 2 2v2h1a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-1v2a2 2 0 0 1-2 2h-2v1a2 2 0 0 1-4 0v-1H8a2 2 0 0 1-2-2v-2H5a2 2 0 0 1 0-4h1V8a2 2 0 0 1 2-2h2V5a2 2 0 0 1 2-2z"
+              />
+            </svg>
+            <span v-if="selectedPlugins.length" class="cv__plugin-count">{{
+              selectedPlugins.length
+            }}</span>
+          </button>
           <button class="bt bt-p" @click="sendChatStream">{{ t('send') }}</button>
         </div>
       </div>
@@ -264,6 +287,53 @@
                 </svg>
               </span>
             </div>
+          </div>
+        </div>
+        <div
+          v-else-if="showPlugins && pickerOpen === 'plugin'"
+          class="chat-picker-pop cv__pop show"
+          :style="pickerStyle"
+        >
+          <div class="cv__pop-label">
+            {{ t('plugin_label') }}
+            <span class="cv__plugin-hint">{{ t('plugin_multi_hint') }}</span>
+          </div>
+          <!-- #3355：installed 拉取失败整体降级市场全量时提示「清单可能含未安装」 -->
+          <div v-if="degradedMarket" class="cv__plugin-degraded">⚠️ {{ t('plugin.degraded_hint') }}</div>
+          <div class="cv__pop-list">
+            <div v-if="pluginLoading" class="cv__pop-hint">{{ tc('loading') }}</div>
+            <div v-else-if="!pluginItems.length" class="cv__pop-hint">
+              {{ t('plugin.no_installed') }}
+            </div>
+            <div
+              v-for="p in pluginItems"
+              :key="p.name"
+              :class="['chat-picker-item', { active: selectedPlugins.includes(p.name) }]"
+              @click="togglePlugin(p.name)"
+            >
+              <span class="cv__pop-name">{{ p.display_name || p.name }}</span>
+              <span v-if="p._source === 'installed'" class="cv__plugin-src cv__plugin-src-inst"
+                >✓ {{ t('plugin.source_installed') }}</span
+              >
+              <span v-else class="cv__plugin-src">🛒 {{ t('plugin.source_market') }}</span>
+              <span class="cv__plugin-ver">v{{ p.version || '—' }}</span>
+              <svg
+                v-if="selectedPlugins.includes(p.name)"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--a)"
+                stroke-width="3"
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </div>
+          </div>
+          <div v-if="selectedPlugins.length" class="cv__plugin-footer">
+            <button class="bt bt-o bt-s" @click="selectedPlugins = []">{{
+              t('plugin.clear')
+            }}</button>
           </div>
         </div>
         <div v-else class="chat-picker-pop cv__pop show" :style="pickerStyle">
@@ -398,10 +468,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { pluginsEnabled } from '@/lib/features'
 import { ONBOARD_POLL_MS } from '@/lib/onboard.js'
 
 const G = globalThis
 const uid = Math.random().toString(36).slice(2, 8)
+// Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
+const showPlugins = pluginsEnabled()
 
 // ── I18N（chat.* 命名空间；规避 t(key) 返回 key 本身的陷阱）──
 function t(key, params) {
@@ -437,6 +510,16 @@ const DEFAULTS = {
   skill_config_tip: '选择技能',
   engine_label: '引擎',
   skill_label: '技能',
+  // Issue #3169：插件多选
+  plugin_config_tip: '选择插件',
+  plugin_label: '插件',
+  plugin_multi_hint: '可多选，随会话上下文提交',
+  'plugin.no_installed': '暂无已安装插件，去插件市场安装',
+  'plugin.clear': '清除全部',
+  // #3355：双源合并来源徽标 + 降级提示
+  'plugin.source_installed': '已安装',
+  'plugin.source_market': '市场',
+  'plugin.degraded_hint': '清单可能含未安装插件',
   current_engine: '当前',
   'skill.default_official': '默认（官方技能）',
   'skill.no_repo_skill': '此仓库暂无 Chat 技能',
@@ -1037,7 +1120,7 @@ function switchConversation(convId) {
   if (currentConvId.value !== convId) {
     // 切会话即中止上一个会话的 SSE：不中止会白占连接与定时器（事件已被 isOwnerConv 丢弃）；
     // 任务态留在 storedTask，切回时由 resume 逻辑重新订阅。
-    if (streamAbort) { try { streamAbort.abort() } catch (e) {} streamAbort = null }
+    if (streamAbort) { try { streamAbort.abort() } catch (e) { /* 已中止/不可中止则忽略 */ } streamAbort = null }
     streaming.value = null
     if (currentConvId.value) saveDraft(currentConvId.value, draft.value)
     draft.value = ''
@@ -1178,24 +1261,24 @@ function doSend() {
   streaming.value = { elId: tid, stepText: '' }
   nextTick(scrollBody)
   const hasMedia = imgs.length > 0 || !!vid
-  G.API.post(
-    '/chat/submit',
-    {
-      message: msg || '请帮我分析这些图片',
-      repo_key: repoKeyOf(),
-      conversation_id: convId,
-      image_data:
-        imgs.length > 0
-          ? JSON.stringify(
-              imgs.map(function (i) {
-                return i.data
-              })
-            )
-          : '',
-      video_data: vid || '',
-    },
-    hasMedia ? 120000 : undefined
-  )
+  // Issue #3169：多选插件随会话上下文提交（plugins=选中插件名数组；后端 C2 能力清单注入生效）
+  const submitBody = {
+    message: msg || '请帮我分析这些图片',
+    repo_key: repoKeyOf(),
+    conversation_id: convId,
+    image_data:
+      imgs.length > 0
+        ? JSON.stringify(
+            imgs.map(function (i) {
+              return i.data
+            })
+          )
+        : '',
+    video_data: vid || '',
+  }
+  if (showPlugins && selectedPlugins.value.length)
+    submitBody.plugins = selectedPlugins.value.slice()
+  G.API.post('/chat/submit', submitBody, hasMedia ? 120000 : undefined)
     .then(function (r) {
       const cid = r.conversation_id || convId
       if (r.status === 'error') {
@@ -1291,7 +1374,7 @@ async function startStream(taskId, elId, convId) {
           /* ignore：与老代码同款静默降级 */
         }
       })
-      if (!isOwnerConv()) { try { ac.abort() } catch (e) {} break }
+      if (!isOwnerConv()) { try { ac.abort() } catch (e) { /* 已中止/不可中止则忽略 */ } break }
       nextTick(scrollBody)
     }
     // SSE 结束仍无 done（异常断流）→ 保留任务态供切回恢复
@@ -1316,7 +1399,12 @@ const skillLoading = ref(false)
 // 旧实现既没加 .show 也没给定位 → 点了按钮 DOM 虽在、屏幕上一片空白。
 const pickerStyle = ref({})
 function positionPicker() {
-  const btnId = pickerOpen.value === 'skill' ? 'chatSkillBtn' : 'chatModelBtn'
+  const btnId =
+    pickerOpen.value === 'skill'
+      ? 'chatSkillBtn'
+      : pickerOpen.value === 'plugin'
+        ? 'chatPluginBtn'
+        : 'chatModelBtn'
   const btn = document.getElementById(btnId)
   if (!btn) return
   const r = btn.getBoundingClientRect()
@@ -1336,15 +1424,16 @@ function onPickerResize() {
 function togglePicker(type) {
   pickerOpen.value = pickerOpen.value === type ? null : type
   if (pickerOpen.value === 'skill') loadSkillItems()
+  if (pickerOpen.value === 'plugin') loadPluginItems()
   if (pickerOpen.value) nextTick(positionPicker)
 }
-// 点浮层与两个触发按钮之外的地方关闭（捕获阶段，不阻挡按钮自身事件）
+// 点浮层与触发按钮之外的地方关闭（捕获阶段，不阻挡按钮自身事件）
 function onPickerDocClick(ev) {
   if (!pickerOpen.value) return
   const t = ev.target
   if (!t || typeof t.closest !== 'function') return
   if (t.closest('.chat-picker-pop')) return
-  if (t.closest('#chatModelBtn') || t.closest('#chatSkillBtn')) return
+  if (t.closest('#chatModelBtn') || t.closest('#chatSkillBtn') || t.closest('#chatPluginBtn')) return
   closePicker()
 }
 function switchSkillScope(s) {
@@ -1396,6 +1485,70 @@ function loadSkillItems() {
       skillItems.value = []
       skillLoading.value = false
     })
+}
+
+// ── Issue #3169：插件多选；#3355 数据源口径：installed 骨架 ∪ 市场列表按 name 去重合并 ──
+const pluginItems = ref([])
+const pluginLoading = ref(false)
+const selectedPlugins = ref([])
+const degradedMarket = ref(false)
+
+// 双源合并：installed 为骨架（保留 version/来源徽标），市场列表补齐缺失条目；
+// 按 name 去重（installed 优先），市场补充项标注 _source='market'
+function mergePluginItems(installed, market) {
+  const out = (installed || []).map(function (p) {
+    return Object.assign({}, p, { _source: 'installed' })
+  })
+  const names = {}
+  out.forEach(function (p) {
+    names[p.name] = true
+  })
+  ;(market || []).forEach(function (p) {
+    if (p && p.name && !names[p.name]) {
+      out.push(Object.assign({}, p, { _source: 'market' }))
+      names[p.name] = true
+    }
+  })
+  return out
+}
+
+function loadPluginItems() {
+  if (!showPlugins) return
+  pluginLoading.value = true
+  degradedMarket.value = false
+  G.API.get('/plugins/installed')
+    .then(function (inst) {
+      const installed = (inst && inst.plugins) || []
+      // 市场列表补齐骨架（修复 C1 注册表未就绪时空列表）
+      G.API.get('/plugins?page=1&page_size=100')
+        .then(function (mkt) {
+          pluginItems.value = mergePluginItems(installed, (mkt && mkt.plugins) || [])
+          pluginLoading.value = false
+        })
+        .catch(function () {
+          // 市场列表不可用 → 仅展示 installed 骨架
+          pluginItems.value = mergePluginItems(installed, [])
+          pluginLoading.value = false
+        })
+    })
+    .catch(function () {
+      // 仅 installed 失败 → 整体降级市场全量，浮层提示「清单可能含未安装」
+      G.API.get('/plugins?page=1&page_size=100')
+        .then(function (d) {
+          pluginItems.value = mergePluginItems([], (d && d.plugins) || [])
+          degradedMarket.value = true
+          pluginLoading.value = false
+        })
+        .catch(function () {
+          pluginItems.value = []
+          pluginLoading.value = false
+        })
+    })
+}
+function togglePlugin(name) {
+  const i = selectedPlugins.value.indexOf(name)
+  if (i >= 0) selectedPlugins.value.splice(i, 1)
+  else selectedPlugins.value.push(name)
 }
 function saveModelConfig(b) {
   const repo = currentRepo()
@@ -2026,5 +2179,66 @@ onMounted(function () {
 .chat-body :deep(a:hover),
 .conv-item :deep(a:hover) {
   text-decoration: underline;
+}
+
+/* Issue #3169：插件多选按钮徽标 + picker 浮层内插件行修饰 */
+.cv__plugin-count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--a);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+#chatPluginBtn {
+  position: relative;
+}
+.cv__plugin-hint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--t3);
+  margin-left: 6px;
+}
+.cv__plugin-ver {
+  font-size: 10px;
+  color: var(--t3);
+  margin-left: auto;
+  margin-right: 2px;
+}
+/* #3355：来源徽标 + 降级提示 */
+.cv__plugin-src {
+  font-size: 9px;
+  color: var(--t3);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.cv__plugin-src-inst {
+  color: var(--g);
+  background: rgba(52, 199, 89, 0.1);
+}
+.cv__plugin-degraded {
+  font-size: 10px;
+  color: var(--y);
+  background: rgba(212, 156, 15, 0.08);
+  border-radius: 8px;
+  padding: 4px 10px;
+  margin: 2px 12px 6px;
+}
+.cv__plugin-footer {
+  padding: 8px;
+  border-top: 1px solid var(--b);
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

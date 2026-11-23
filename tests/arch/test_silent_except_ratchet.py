@@ -334,7 +334,9 @@ EXEMPT_FILES: dict = {
     ('domains/runtime/engine/cloud_worker.py', 'except (Exception, _aio.CancelledError):'): 2,
     ('domains/runtime/engine/cloud_worker.py', 'except (Exception, _aio.CancelledError, _aio.TimeoutError):'): 1,
     ('domains/runtime/engine/cloud_worker.py', 'except (Exception, asyncio.CancelledError):'): 2,
-    ('domains/runtime/engine/cloud_worker.py', 'except Exception:'): 18,
+    # QA G-6（PR #1847）：泄漏看护 add / 批末 kill / 看护超时三处已改为 log.debug 留痕，
+    # 该形态登记数随之 18 → 16（不得整体上调基线抵消，只按下调收口）
+    ('domains/runtime/engine/cloud_worker.py', 'except Exception:'): 16,
     ('domains/runtime/engine/cloud_worker.py', 'except asyncio.CancelledError:'): 1,
     ('domains/runtime/engine/cloud_worker.py', 'except asyncio.TimeoutError:'): 1,
 

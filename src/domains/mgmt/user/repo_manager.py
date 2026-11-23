@@ -11,6 +11,17 @@ from src.kernel.config import log
 # /api/v5/user 仍在 api.gitcode.com 上可用（auth.py 单独使用）。
 API_BASE = "https://gitcode.com/api/v5"
 
+class UpstreamTimeoutError(RuntimeError):
+    """上游 Git 平台 API 请求超时（Issue #1940，#2084 移植）。
+
+    继承 RuntimeError：既有 ``except RuntimeError`` 调用点零改动兼容；
+    ``str()`` 保持 "Cannot reach GitCode API: ..." / "Cannot reach GitHub API: ..." 格式。
+
+    语义：请求已发出、响应未按时返回——上游可能已受理并落地（写操作不可盲重试），
+    供写链路分流（写 504 uncertain / 读 502 维持）。
+    """
+
+
 class UpstreamAPIError(RuntimeError):
     """上游 Git 平台 API 返回 >=400（Issue #549）：携带真实 status_code / message。
 
@@ -31,21 +42,40 @@ class UpstreamAPIError(RuntimeError):
             f"{provider} API {method} {url} failed ({self.status_code}): {self.message}"
         )
 
+def upstream_timeout_seconds(default: float = 25.0) -> float:
+    """上游 Git 平台请求超时（秒）——Issue #2084（#2084 移植）超时错开。
+
+    - `GRAPE_UPSTREAM_TIMEOUT_SECONDS` 环境变量可调（运行时逐次读取，改配置即时生效）；
+    - 默认 25s **严格小于** CLI 客户端 30s：上游慢响应时服务端先超时返回
+      可判定的 504 uncertain + request_id + 回读指引（#1940 写超时语义），
+      而不是与客户端 30s 同值竞速让调用方先本地断开（eval-F10「客户端先断」）；
+    - 非法值/非正值回落默认（配置错误不打瘫上游客户端）。
+    """
+    raw = os.environ.get("GRAPE_UPSTREAM_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
 def _req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
         if method == "GET":
-            resp = _requests.get(url, headers=headers, timeout=30)
+            resp = _requests.get(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "POST":
-            resp = _requests.post(url, json=body, headers=headers, timeout=30)
+            resp = _requests.post(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "DELETE":
-            resp = _requests.delete(url, headers=headers, timeout=30)
+            resp = _requests.delete(url, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PUT":
-            resp = _requests.put(url, json=body, headers=headers, timeout=30)
+            resp = _requests.put(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         elif method == "PATCH":
-            resp = _requests.patch(url, json=body, headers=headers, timeout=30)
+            resp = _requests.patch(url, json=body, headers=headers, timeout=upstream_timeout_seconds())
         else:
             raise ValueError(f"Unsupported method: {method}")
         if resp.status_code >= 400:
@@ -171,7 +201,7 @@ def _req_query(method: str, path: str, token: str, params: dict | None = None,
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
@@ -338,19 +368,37 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     log.info(f"fetch_repos total: {len(repos)} repos (current_user={current_user})")
     return repos
 
-def get_user_gitcode_login(api_token: str) -> str:
-    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。"""
+def get_user_gitcode_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变。
+
+    status 口径：0=成功；>=400=上游 HTTP 状态码（401/403/5xx）；
+    -1=网络/未知失败。成功/失败各有独立日志行（provider、status、结果）。
+    """
     if not api_token:
-        return ""
+        return "", -1
     try:
         data = _req("GET", f"{API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_gitcode_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_gitcode_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_gitcode_login failed: {e}")
-        return ""
+        return "", -1
 
-def fetch_user_orgs(api_token: str) -> list[dict]:
-    """获取当前 token 用户拥有的 GitCode 组织列表。
+def get_user_gitcode_login(api_token: str) -> str:
+    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变（20+ 调用点零改动）；
+    需要上游状态码的调用方改用 get_user_gitcode_login_status。
+    """
+    login, _status = get_user_gitcode_login_status(api_token)
+    return login
+
+def fetch_user_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
+    """获取当前 token 用户的 GitCode 组织列表。
 
     Issue #543：迁移目标组织下拉框数据源。
     返回 [{"login", "name", "avatar_url"}, ...]（login 为组织账号名，用作 target_owner）。
@@ -358,6 +406,8 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
 
     GitCode 无 /user/orgs 端点（404），需先获取用户 login，
     再走 /users/{login}/orgs 查组织列表。
+    admin_only=True 时改走 /users/orgs?admin=true（仅返回当前用户可管理的组织，
+    用于「创建组织仓库」的所有者下拉，避免列出无建仓权限的空间）。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
@@ -373,7 +423,10 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
     orgs: list[dict] = []
     page = 1
     while True:
-        url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
+        if admin_only:
+            url = f"{API_BASE}/users/orgs?per_page=50&page={page}&admin=true"
+        else:
+            url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
         data = _req("GET", url, api_token)
         items = data if isinstance(data, list) else []
         if not items and isinstance(data, dict):
@@ -399,42 +452,206 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
             break
     return orgs
 
-def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
-    """在 token 用户个人名下创建一个空仓库（POST /api/v5/user/repos）。
 
+def fetch_github_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
+    """获取当前 token 用户可建仓的 GitHub 组织（创建组织仓库的所有者下拉）。
+
+    优先 /user/memberships/orgs（带 role；admin_only 时只保留 role=admin，
+    即拥有组织级建仓/管理权限的组织），该端点 404/权限不足时回落到 /user/orgs。
+    返回 [{"login", "name", "avatar_url"}, ...]。
+    """
+    if not api_token:
+        raise RuntimeError("GitHub API Token 未配置")
+
+    orgs: list[dict] = []
+    memberships_ok = False
+    page = 1
+    try:
+        while True:
+            url = (f"{_GITHUB_API_BASE}/user/memberships/orgs"
+                   f"?state=active&per_page=100&page={page}")
+            data = _github_req("GET", url, api_token)
+            items = data if isinstance(data, list) else []
+            if not items:
+                break
+            memberships_ok = True
+            for m in items:
+                if not isinstance(m, dict):
+                    continue
+                role = str(m.get("role") or "").lower()
+                if admin_only and role and role != "admin":
+                    continue
+                org = m.get("organization") if isinstance(m.get("organization"), dict) else m
+                login = org.get("login") or ""
+                if not login:
+                    continue
+                orgs.append({
+                    "login": login,
+                    "name": org.get("name") or login,
+                    "avatar_url": org.get("avatar_url") or "",
+                })
+            if len(items) < 100:
+                break
+            page += 1
+            if page > 10:  # 安全上限（1000 组织）
+                break
+    except Exception as exc:
+        # memberships 端点依赖 read:org 等 scope；失败时回落 /user/orgs（若 token 本身
+        # 无效，回落也会失败并上抛，由路由层标记 connected=false）。
+        log.warning(f"fetch_github_orgs memberships fallback: {exc}")
+        memberships_ok = False
+        orgs = []
+
+    if memberships_ok:
+        return orgs
+
+    # 回落：/user/orgs（无 role 字段，只能按成员关系列出）
+    page = 1
+    while True:
+        url = f"{_GITHUB_API_BASE}/user/orgs?per_page=100&page={page}"
+        items = _github_req("GET", url, api_token)
+        if not isinstance(items, list) or not items:
+            break
+        for o in items:
+            if not isinstance(o, dict):
+                continue
+            login = o.get("login") or ""
+            if not login:
+                continue
+            orgs.append({
+                "login": login,
+                "name": o.get("name") or login,
+                "avatar_url": o.get("avatar_url") or "",
+            })
+        if len(items) < 100:
+            break
+        page += 1
+        if page > 10:
+            break
+    return orgs
+
+
+# 支持「在组织空间创建仓库」的平台 → 组织列表抓取实现。
+# 逐行单平台键：平台能力表驱动，新增平台只需在此登记，路由层零平台分支。
+_ORG_NAMESPACE_FETCHERS = {
+    "gitcode": fetch_user_orgs,
+    "github": fetch_github_orgs,
+}
+
+
+def org_namespace_providers() -> list[str]:
+    """支持选择所属空间（个人/组织）的 provider 列表。"""
+    return sorted(_ORG_NAMESPACE_FETCHERS)
+
+
+def fetch_org_namespaces(provider: str, api_token: str) -> list[dict]:
+    """按 provider 抓取当前用户可创建仓库的组织空间列表（未登记平台返回 []）。"""
+    fetcher = _ORG_NAMESPACE_FETCHERS.get(str(provider or "").lower())
+    if fetcher is None:
+        return []
+    return fetcher(api_token, admin_only=True)
+
+
+def create_repo(api_token: str, name: str, description: str = "", private: bool = False,
+                owner: str = "", path: str = "", auto_init: bool = False,
+                default_branch: str = "main") -> dict:
+    """创建空仓库（POST /api/v5/user/repos，指定 owner 时 POST /api/v5/orgs/{owner}/repos）。
+
+    owner 为空 = 在 token 用户个人空间创建；owner 为组织 path 时在组织空间创建。
+    path/GitCode 仓库 URL 路径，缺省与 name 一致。
     返回 GitCode 仓库信息（含 full_name / html_url 等）。同名仓库冲突时抛 RuntimeError。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
     if not name:
         raise RuntimeError("仓库名不能为空")
+    owner = (owner or "").strip()
+    repo_path = (path or "").strip() or name
     body = {
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
-        "default_branch": "main",
+        "auto_init": bool(auto_init),
+        "default_branch": (default_branch or "main"),
         "repository_type": "code",
-        "path": name,
+        "path": repo_path,
     }
-    result = _req("POST", f"{API_BASE}/user/repos", api_token, body)
+    endpoint = (f"{API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
+                if owner else f"{API_BASE}/user/repos")
+    result = _req("POST", endpoint, api_token, body)
     full_name = result.get("full_name", "")
     if not full_name and result.get("name"):
-        full_name = f"{get_user_gitcode_login(api_token)}/{result.get('name')}"
+        if owner:
+            full_name = f"{owner}/{result.get('name')}"
+        else:
+            full_name = f"{get_user_gitcode_login(api_token)}/{result.get('name')}"
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+def set_default_branch(api_token: str, owner: str, repo: str, branch: str,
+                       provider: str = "gitcode") -> bool:
+    """把已存在分支设为仓库默认分支（新组织仓库 grape-repo-knowledge 收口）。
+
+    GitHub/GitCode 建仓时对自定义 default_branch 支持不一致；统一在建出首个分支后
+    通过平台 API 校正。失败只返回 False，由调用方 best-effort 记录。
+    """
+    branch = (branch or "").strip()
+    if not (api_token and owner and repo and branch):
+        return False
+    prov = (provider or "gitcode").strip().lower()
+    try:
+        if prov == "github":
+            _github_req("PATCH", f"{_GITHUB_API_BASE}/repos/{owner}/{repo}",
+                        api_token, {"default_branch": branch})
+            return True
+        if prov == "gitcode":
+            _req("PATCH", f"{API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+                          f"{urllib.parse.quote(repo, safe='')}",
+                 api_token, {"default_branch": branch})
+            return True
+    except Exception as exc:
+        log.warning(f"set default branch failed provider={prov} {owner}/{repo} -> {branch}: {exc}")
+    return False
+
+
+def delete_gitcode_repo(api_token: str, owner: str, repo: str) -> bool:
+    """删除 GitCode 仓库（DELETE /api/v5/repos/{owner}/{repo}）。
+
+    Issue #2261：删除组织时回收该组织自动创建的仓库。仅允许对「组织自动仓库」
+    调用；用户手工关联的仓库绝不能走这里（删组织不应删用户的远端仓库）。
+    """
+    if not (api_token and owner and repo):
+        raise RuntimeError("delete repo: token/owner/repo 不能为空")
+    _req("DELETE", f"{API_BASE}/repos/{owner}/{repo}", api_token)
+    return True
+
+
+def delete_github_repo(api_token: str, owner: str, repo: str) -> bool:
+    """删除 GitHub 仓库（DELETE /repos/{owner}/{repo}）。语义同 delete_gitcode_repo。"""
+    if not (api_token and owner and repo):
+        raise RuntimeError("delete repo: token/owner/repo 不能为空")
+    _github_req("DELETE", f"https://api.github.com/repos/{owner}/{repo}", api_token)
+    return True
+
 
 def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
     try:
+        import os as _os
+        _env = dict(_os.environ)
+        # 一律非交互：没有 TTY/credential helper 时让 git 立刻失败并给出明确
+        # 错误，而不是尝试读密码（线上曾出现 "No such device or address"）
+        _env["GIT_TERMINAL_PROMPT"] = "0"
+        _env["GIT_ASKPASS"] = ""
         p = subprocess.run(
-            ["git"] + args,
+            ["git", "-c", "credential.helper="] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_env,
         )
     except FileNotFoundError:
         raise RuntimeError("服务器未安装 git CLI")
@@ -475,11 +692,21 @@ def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
     _run_git(["init"], workdir)
 
 def _download_gitcode_tarball(source_repo, workdir, tmp, token):
-    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
+    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。
+
+    2026-11-22：地址与鉴权方式都改走 runtime 契约——旧实现把
+    `https://oauth2:{token}@gitcode.com/...` 写死平台，且把 token 拼进 URL
+    （进程列表/日志/错误信息泄漏面）。现在：地址=clone_params(clone_url)，
+    凭据=clone_auth_header → `git -c http.extraheader=` 注入。
+    """
     if not token:
         raise RuntimeError("GitCode 模板需要 Bot token 拉取")
-    url = f"https://oauth2:{token}@gitcode.com/{source_repo}.git"
-    _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+    from src.domains.runtime import public as _runtime_public
+
+    url = _runtime_public.clone_url(source_repo)
+    header = _runtime_public.clone_auth_header(source_repo, token)
+    _run_git(["-c", f"http.extraheader=Authorization: {header}",
+              "clone", "--quiet", "--depth", "1", url, workdir], tmp)
     shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
     _run_git(["init"], workdir)
 
@@ -569,21 +796,22 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             _pc_wf = _gpc(provider)
             _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
         _wf_denied = not _wf
+        # push 目标 URL：任何分支都必须携带真实 token。
+        # 历史 bug：受限分支（_wf_denied）曾拼 `https://***@host/...` —— 字面量
+        # "***" 当用户名、没有密码，子进程里没有 credential helper/TTY，
+        # git 直接报 `could not read Password for 'https://***@host':
+        # No such device or address`，模板代码 100% 写不进去（线上 502：
+        # 「仓库已创建但模板代码写入失败」）。
+        # 删 .github/workflows 的目的正是「用受限 token 也能推上去」，所以
+        # token 必须照常携带。
+        target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
-            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被
-            # 拒绝——怪癖以卡 workflows_write=False 声明（github 内置卡）。
-            # push URL 沿用存量 "***" 置换形态（不携带真实 token，鉴权走 git
-            # credential helper），host 已从 github 卡派生。
-            target_url = f"https://***@{_tgt_host}/{owner_login}/{target_repo}.git"
+            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+            # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
                 log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
-        else:
-            # gitcode 家族存量 clone 鉴权形态（oauth2 前缀）保持逐字节不变；
-            # host 已卡派生（修复真二分缺陷：gitee 等目标此前被硬编码推到
-            # gitcode.com）
-            target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
@@ -599,11 +827,57 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         if _git_has_changes(workdir):
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
-        # D43: push 统一走 _run_git（可被测试 mock），超时 180s
-        _run_git(["push", "--force", "-u", "origin", "HEAD:main"], workdir, timeout=180)
-        return True
+        # D43: push 统一走 _run_git（可被测试 mock），超时 180s。
+        # 来源（2026-11-23 实测）：主控 → gitlab.com 小仓（95KB）clone 2.48s、
+        # push 2.16s；按同量级带宽外推 180s 可覆盖约数百 MB 模板仓，约为实测的
+        # 80 倍余量，同时小于 CI 侧 10 分钟作业上限。
+        # 2026-11-22（B + A 双层）：
+        #   B：先走**普通 push**（空仓库/可快进 → 直接落在 main，不再覆盖平台初始提交）
+        #   A：普通 push 不行（远端已有提交）才 --force；若平台拒绝受保护分支
+        #      强推，则退到一次性特性分支，绝不中断建仓。
+        pushed_to = "main"
+        try:
+            _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+        except RuntimeError as _e1:
+            if _is_protected_branch_error(str(_e1)):
+                pushed_to = _push_init_branch(workdir)
+            else:
+                try:
+                    _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
+                             workdir, timeout=180)
+                except RuntimeError as _e2:
+                    if not _is_protected_branch_error(str(_e2)):
+                        raise
+                    pushed_to = _push_init_branch(workdir)
+        if pushed_to != "main":
+            log.warning(
+                f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
+                f"模板代码已改推分支 '{pushed_to}'；请由人工/流水线合入默认分支")
+        # 返回落点：调用方据此区分「模板已在 main」与「模板只在 feat 分支、main 为空」
+        return {"ok": True, "pushed_to": pushed_to}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+def _is_protected_branch_error(msg: str) -> bool:
+    """平台拒绝「向受保护默认分支强推」的错误文本判定（GitLab/GitHub/Gitee 口径）。
+
+    只认受保护分支的**专有**文案：`pre-receive hook declined` 是 GitLab 所有 hook
+    拒绝（密钥扫描/提交策略/自定义规则）的通用后缀，单凭它会把手滑的拒绝也当成
+    「受保护分支」→ 静默退到一次性分支并吞掉真实错误。
+    """
+    return any(k in (msg or "") for k in (
+        "protected branch", "protected_branch",
+        "not allowed to force push",
+        "You are not allowed to push code to protected"))
+
+
+def _push_init_branch(workdir: str) -> str:
+    """受保护分支兜底：把模板代码推到一次性特性分支，返回分支名（A 方案）。"""
+    import time as _time
+    branch = f"feat/init-from-template-{_time.strftime('%Y%m%d%H%M%S')}"
+    _run_git(["push", "-u", "origin", f"HEAD:{branch}"], workdir, timeout=180)
+    return branch
+
 
 def _run_git_has_origin(workdir: str) -> bool:
     try:
@@ -769,21 +1043,48 @@ def get_hosting_provider_config(provider: str) -> dict:
     _find_w, _setup_w, _remove_w = (
         functools.partial(_fn, api_base=_ab) for _fn in _family)
     return {
+        # Issue #3580 复审：GitLab webhook 的 `token` 只能是共享密钥，绝不能复用
+        # PAT/bot token（会随 X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会
+        # 让所有投递 404）。gitlab_v4 家族因此强制走路径 B（随机密钥）：
+        # bot_token 置空 → 所有调用点 _use_path_b=True。
+        # 单一 bot_token，按用途取用（不再"置空即路径 B"）：
+        #   bot_token      —— 全局 bot token：邀请协作者 + 落库回帖凭据 + 路径 A 的 webhook token
+        #   webhook_path_b —— webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+        # gitlab_v4 必须走 B（PAT 经 X-Gitlab-Token 会外泄给维护者），这是方言的安全
+        # 要求，不该连带关掉「邀 bot / bot 回帖」这两件与 webhook 无关的事。
         "bot_token": get_global_bot_token_for(provider),
+        "webhook_path_b": _wd == "gitlab_v4",
         "bot_username": resolve_bot_username(provider),
         "find_webhook": _find_w,
         "setup_webhook": _setup_w,
         "remove_webhook": _remove_w,
         # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
         "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
-        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
-        "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
-        "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）。
+        # Issue #3580：F4 终态卡显式空串 = 无物理列，凭据只落 rc 单表——
+        # 调用方必须传逻辑键 'webhook'/'bot'，不得派生不存在的平台列名。
+        "db_token_field": _pc.webhook_token_field or "webhook",
+        "db_bot_token_field": _pc.token_storage_field or "bot",
         # B 批（2026-11-13）：建 webhook 的鉴权参数按方言派生——Gitee 系用
         # webhook_password（路径 B=secret / 路径 A=token），GitHub 系用
         # webhook_secret（仅路径 B）。调用方零平台分支。
         "setup_webhook_kwargs": _setup_kwargs_fn(_wd),
     }
+
+
+def resolve_use_path_b(hcfg: dict, bot_token: str) -> bool:
+    """webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+
+    两个触发条件，缺一不可：
+    1. `webhook_path_b`（方言的**安全要求**，如 gitlab_v4：PAT 经 X-Gitlab-Token
+       会外泄给项目维护者）；
+    2. 没有可用的全局 bot token（路径 A 需要它当 webhook token）。
+
+    历史上调用点各自写 `not bot_token`，于是配上全局 bot token 后 GitLab 会把 PAT
+    当 webhook 密钥写进 hook，且 DB 侧密钥为空 → 所有投递 404。三个托管入口
+    （host / repair-host / create 内联托管）统一走本函数。
+    """
+    return bool((hcfg or {}).get("webhook_path_b")) or not (bot_token or "")
 
 
 def _setup_kwargs_fn(dialect: str):
@@ -851,7 +1152,7 @@ def _github_req(method: str, url: str, token: str = "", body: dict | None = None
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=upstream_timeout_seconds()) as resp:
             raw = resp.read().decode()
             if raw.strip():
                 return json.loads(raw)
@@ -942,25 +1243,155 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
     return hook_id
 
 
-# D105-19：webhook 三件套实现家族注册表（键=平台卡 webhook_dialect）。
-# 新增家族：实现 (find, setup, remove) 三件套（api_base 关键字参数）→ 表加一行
-# → platform_card._VALID_WEBHOOK_DIALECTS 加一项 → 新平台卡声明即启用。
+def _gitlab_pid(owner: str, repo: str) -> str:
+    """GitLab 项目标识（兼容垫片：实现已收口到 src.kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import project_path
+
+    return project_path(owner, repo)
+
+
+def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                                 api_base: str = "") -> "int | None":
+    """查已有同 URL 的 GitLab hook（Issue #3580；唯一实现源=kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import find_hook
+
+    try:
+        return find_hook(api_base, api_token, owner, repo, webhook_url)
+    except Exception as e:
+        # 查询失败不静默：调用方据此决定"复用 or 新建"，静默吞掉会重复建钩
+        log.warning(f"find_existing_gitlab_webhook failed {owner}/{repo}: {e}")
+        return None
+
+
+def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                         webhook_password: str = "", api_base: str = "") -> int:
+    """建 GitLab hook；密钥必填，**禁止**复用 api_token（Issue #3580 复审）。
+
+    实现收口到 src.kernel.vcs_gitlab_hooks.setup_hook（provider 侧同源委托），
+    此处只做 mgmt 侧异常类型适配。
+    """
+    from src.kernel.vcs_gitlab_hooks import GitLabHookError, setup_hook
+
+    try:
+        return setup_hook(api_base, api_token, owner, repo, webhook_url, webhook_password)
+    except GitLabHookError as e:
+        if e.status_code == 0:
+            # 入参/invariant 错误（缺密钥）：直接 RuntimeError，别伪装成上游 4xx
+            raise RuntimeError(e.message) from None
+        raise UpstreamAPIError(e.method, e.url, e.status_code, e.message, provider="GitLab") from None
+
+
+def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                          api_base: str = "") -> bool:
+    """删 GitLab hook；上游 404 视为幂等成功（Issue #3580 复审）。"""
+    from src.kernel.vcs_gitlab_hooks import remove_hook
+
+    return remove_hook(api_base, api_token, owner, repo, webhook_id)
+
+
 _WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
     "github_web": (find_existing_github_webhook, setup_github_webhook, remove_github_webhook),
     "gitee_v5": (find_existing_webhook, setup_webhook, remove_webhook),
+    # Issue #3580：GitLab v4 /projects/{id}/hooks 家族（自建实例复用）
+    "gitlab_v4": (find_existing_gitlab_webhook, setup_gitlab_webhook, remove_gitlab_webhook),
 }
 
 
-def get_user_github_login(api_token: str) -> str:
-    """获取当前 token 的 GitHub 登录用户名。"""
+def _github_token_scopes(api_token: str) -> str | None:
+    """经典 PAT 的 x-oauth-scopes；细粒度 PAT / 读取失败返回 None。
+
+    细粒度 PAT 不返回该响应头（权限由细粒度权限集控制，无法从这里自查）。
+    """
+    req = urllib.request.Request(
+        f"{_GITHUB_API_BASE}/user",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Grape-DevOps",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.headers.get("x-oauth-scopes")
+    except Exception:
+        return None
+
+
+def probe_github_repo_create(api_token: str, owner: str = "", private: bool = True
+                             ) -> "tuple[bool | None, str]":
+    """无副作用探测 GitHub token 是否有建仓权限。
+
+    返回 (结论, 说明)：False=确定无权限；True=可建仓；None=无法判定（调用方不应阻断）。
+
+    - 经典 PAT：读 x-oauth-scopes；私有仓需 repo，公开仓 repo/public_repo 均可。
+    - 细粒度 PAT：GitHub 没有权限自查端点。用一次「非法仓库名」的 POST 触发权限层：
+      403 → 无权限；422 → 有权限（请求体校验在权限之后，不会真正建仓）。
+    """
     if not api_token:
-        return ""
+        return False, "未配置 GitHub Token"
+    scopes = _github_token_scopes(api_token)
+    if scopes is not None:
+        if "repo" in scopes:
+            return True, ""
+        if "public_repo" in scopes and not private:
+            return True, ""
+        return False, (
+            "当前 GitHub 经典 PAT 缺少建仓权限：私有仓库需要 repo scope，"
+            "公开仓库至少需要 public_repo scope。请更新 Token 后重试"
+        )
+
+    login = get_user_github_login(api_token)
+    target = (owner or "").strip()
+    if target and login and target.lower() == login.lower():
+        target = ""
+    endpoint = (
+        f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(target, safe='')}/repos"
+        if target else f"{_GITHUB_API_BASE}/user/repos"
+    )
+    try:
+        # 名字含空格必定非法：有权限时 422，无权限时权限层先返回 403；不会产生仓库
+        _github_req("POST", endpoint, api_token,
+                    {"name": "invalid repo name with spaces", "private": True,
+                     "auto_init": False})
+    except RuntimeError as e:
+        msg = str(e)
+        if "403" in msg:
+            return False, (
+                "当前 GitHub 凭据没有创建仓库权限：细粒度 PAT 需 "
+                "Repository creation（或 Administration）Read and write，"
+                "且 Repository access 选 All repositories；经典 PAT 需 repo scope。"
+                "请更新 Token 后重试，或先在 GitHub 手动建仓再关联"
+            )
+        if "422" in msg:
+            return True, ""
+        return None, f"GitHub 权限探测失败（不阻断创建）：{msg[:160]}"
+    return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
+
+
+def get_user_github_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变（同 GitCode 版）。"""
+    if not api_token:
+        return "", -1
     try:
         data = _github_req("GET", f"{_GITHUB_API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_github_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_github_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_github_login failed: {e}")
-        return ""
+        return "", -1
+
+def get_user_github_login(api_token: str) -> str:
+    """获取当前 token 的 GitHub 登录用户名。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变；需要上游状态码的
+    调用方改用 get_user_github_login_status。
+    """
+    login, _status = get_user_github_login_status(api_token)
+    return login
 
 def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict | None:
     """获取 token 持有者对指定仓库的权限（GET /repos/{owner}/{repo}）。
@@ -1066,23 +1497,43 @@ def check_github_is_collaborator(api_token: str, owner: str, repo: str, username
         log.warning(f"check_github_is_collaborator failed: {e}")
         return False
 
-def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
-    """在 token 用户个人名下创建一个空仓库。"""
+def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False,
+                       owner: str = "", path: str = "", auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """创建空仓库（个人空间 POST /user/repos，指定 owner 时 POST /orgs/{owner}/repos）。
+
+    GitHub 的仓库路径恒等于仓库名，path 参数仅为与服务端统一签名而保留（忽略）。
+    """
     if not api_token:
         raise RuntimeError("GitHub API Token 未配置")
+    owner = (owner or "").strip()
+    # 所选 owner 是当前 token 用户本人时走个人空间：GitHub 的
+    # POST /orgs/{login}/repos 对个人账号恒 404（创建组织弹窗默认选中的就是
+    # 「个人」空间，曾导致 GitHub 组织仓库 provisioning 直接失败）。
+    if owner and get_user_github_login(api_token).strip().lower() == owner.lower():
+        owner = ""
     body = {
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
+        "auto_init": bool(auto_init),
     }
+    endpoint = (f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
+                if owner else f"{_GITHUB_API_BASE}/user/repos")
     try:
-        result = _github_req("POST", f"{_GITHUB_API_BASE}/user/repos", api_token, body)
+        result = _github_req("POST", endpoint, api_token, body)
     except RuntimeError as e:
         if "403" in str(e) and "Resource not accessible by integration" in str(e):
             # 检测 installation 状态，区分"未安装"和"权限不足"
             _hint = _github_check_installation(api_token)
             raise RuntimeError(_hint) from e
+        if "403" in str(e) and "Resource not accessible by personal access token" in str(e):
+            # 细粒度 PAT 权限模型：建仓需要 Administration=write（组织仓库还需授予该组织）
+            raise RuntimeError(
+                "当前 GitHub 凭据是细粒度 PAT，缺少创建仓库权限（需 Administration: Write；"
+                "在组织下建仓还需为该组织授权）。请到设置页更新 GitHub Token 后重试；"
+                "或先在 GitHub 手动创建仓库，再用组织页「添加关联仓库」绑定"
+            ) from e
         raise
     full_name = result.get("full_name", "")
     if not full_name:
@@ -1353,9 +1804,13 @@ def invite_permission_for(provider: str) -> str:
 
 def vcs_user_login(provider: str, token: str) -> str:
     """token 持有者在该平台的登录名（卡驱动 /user；空串=无法确认）。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     info = create_provider(provider).verify_token(token)
-    return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+    if not isinstance(info, dict):
+        return ""
+    # login 是跨平台口径；GitLab 原生字段是 username，适配器未归一的历史实现也要兼容
+    return str(info.get("login") or info.get("username") or "")
+
 
 
 def vcs_user_permission(provider: str, token: str, owner: str, repo: str, login: str) -> dict:

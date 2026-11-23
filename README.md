@@ -172,3 +172,6 @@ Vulnerability reporting and the security model of agent execution: [SECURITY.md]
 ## License
 
 MIT.
+
+
+Engine model-name ↔ gateway key alignment convention (hermes `/v1/models`): [docs/deployment/model-gateway-alignment.md](docs/deployment/model-gateway-alignment.md).

@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover - worker 无 web 框架
     Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
+from src.kernel.issue_ident import native_issue_number
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -264,6 +265,160 @@ def task_brief(task_id: int) -> tuple | None:
         row = c.fetchone()
         return tuple(row) if row else None
 
+
+def issue_brief(repo_key: str, issue_number) -> dict[str, Any] | None:
+    """单 Issue 基础信息（跨域只读口，供 mgmt 组织编排使用）。"""
+    num = native_issue_number(issue_number)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, repo_key, issue_number, title, task_description, status, stage, "
+            "scene_id, parent_issue_number FROM issue "
+            "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+            (repo_key, num),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0] or 0),
+        "repo_key": str(row[1] or ""),
+        "issue_number": native_issue_number(row[2]),
+        "title": str(row[3] or ""),
+        "task_description": str(row[4] or ""),
+        "status": str(row[5] or ""),
+        "stage": str(row[6] or ""),
+        "scene_id": str(row[7] or ""),
+        "parent_issue_number": native_issue_number(row[8]),
+    }
+
+
+def recent_issues(repo_key: str, limit: int = 100) -> list[dict[str, Any]]:
+    """某仓库最近 Issue（跨域只读口，供组织上下文渲染）。"""
+    limit = max(1, min(int(limit or 100), 500))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT issue_number, title, task_description, status, stage, created_at "
+            "FROM issue WHERE repo_key=? ORDER BY issue_number DESC LIMIT ?",
+            (repo_key, limit),
+        )
+        rows = c.fetchall()
+    return [
+        {
+            "issue_number": native_issue_number(r[0]),
+            "title": str(r[1] or ""),
+            "description": str(r[2] or ""),
+            "status": str(r[3] or ""),
+            "stage": str(r[4] or ""),
+            "created_at": str(r[5] or ""),
+        }
+        for r in rows
+    ]
+
+
+def latest_task_status(repo_key: str, issue_id: str) -> str:
+    """某 Issue 最新 agent_task 状态；无任务返回空串。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT status FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        row = c.fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def latest_event_brief(repo_key: str, issue_id: str) -> dict[str, Any] | None:
+    """某 Issue 最新事件（seq/event_type/status/result）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT seq, event_type, status, result FROM events "
+            "WHERE repo_key=? AND issue_id=? ORDER BY seq DESC LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "seq": int(row[0] or 0),
+        "event_type": str(row[1] or ""),
+        "status": str(row[2] or ""),
+        "result": str(row[3] or ""),
+    }
+
+
+def event_payload(seq: int) -> dict[str, Any] | None:
+    """按 seq 取事件 payload（跨域只读口）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (int(seq),))
+        row = c.fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def has_inflight_repo(repo_key: str) -> bool:
+    """某仓库是否仍有在途任务（解绑/迁移前守卫）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? "
+            "AND status IN ('queued','dispatched','running','pending_self_report') LIMIT 1",
+            (repo_key,),
+        )
+        return bool(c.fetchone())
+
+
+def has_inflight(repo_key: str, issue_id: str) -> bool:
+    """Issue 是否还有在途任务/事件（避免把正在重试的目标误判失败）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('pending','queued','dispatched','running') LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        if c.fetchone():
+            return True
+        c.execute(
+            "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','running') LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        return bool(c.fetchone())
+
+
+def cancel_inflight_tasks(repo_key: str, issue_id: str) -> int:
+    """取消某 Issue 在途任务（跨域写；返回影响行数）。"""
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','dispatched','running')",
+            (repo_key, str(issue_id)),
+        )
+        return int(c.rowcount or 0)
+
+
+def inflight_tasks(repo_key: str, issue_id: str) -> list[tuple]:
+    """某 Issue 在途任务 (id, event_seq)，供跨域取消/重试使用。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','dispatched','running')",
+            (repo_key, str(issue_id)),
+        )
+        return [tuple(r) for r in c.fetchall()]
+
+
+def clear_event_active_guard(repo_key: str, issue_id: str) -> int:
+    """清某 Issue 的活跃事件守卫（跨域写；返回影响行数）。"""
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=?",
+            (repo_key, str(issue_id)),
+        )
+        return int(c.rowcount or 0)
 
 # 相关技能候选池大小：热度前 N 进打分池（与 mgmt 路由 _RELATED_POOL_SIZE 同值；
 # 全库技能 ~10² 量级，300 覆盖全部活跃技能。QA B2：裸数字须具名+来源）。
@@ -1850,7 +2005,10 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 账号注销前置：在制任务数（src/domains/mgmt/routes/grape_auth.py；agent_tasks 本域）
            "inflight_task_count_any",
            # 派发前 runtime_id 有效性（src/api/pipeline_executor.py；agent_runtimes 本域）
-           "runtime_heartbeat_alive_any"]
+           "runtime_heartbeat_alive_any",
+           # 组织下派/上下文跨域写口（A10/A11 整改）
+           "cancel_issue_core", "cancel_task", "cancel_direct_task", "run_pipeline",
+           "run_git", "clone_auth_scheme_for", "storage_save_bytes", "storage_delete_object"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2665,8 +2823,10 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
         "AND event_type='a2a_event'"),
     "event_a2a_created_agent": (
+        # Issue #2118 复审：failed 的 a2a_event 不算「已交棒证据」——自动推进/重排
+        # 事件派发失败时仍会被巡检当成交棒成功，导致真断链被漏报、Issue 静默停链。
         "SELECT created_at, agent_type FROM events WHERE repo_key=? AND issue_id=? "
-        "AND event_type='a2a_event'"),
+        "AND event_type='a2a_event' AND COALESCE(status,'') != 'failed'"),
     # A2A 派发门禁（api/a2a_dispatch_guard.py）读路径：events / event_skipped 归本域。
     # 列序与原 SQL 逐字一致（调用方按下标解包）；谓词/排序/条数上限照抄原语句。
     "a2a_window_dedup_rows": (
@@ -2872,6 +3032,14 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
         "pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')"),
     # meta 写
+    # 单语句 upsert（2026-11-21）：存在性由主键回答，不靠 UPDATE 的 rowcount。
+    # MySQL 的 UPDATE 返回「实际改变的行数」，同值重写 = 0 → 旧的两段式会误判
+    # 「这行不存在」再去 INSERT → 1062 meta.PRIMARY（实测：每次启动刷一条）。
+    # ON CONFLICT(key) 由方言层翻译成 ON DUPLICATE KEY UPDATE（mysql_compat）。
+    # `key` 是 MySQL 保留字，列名必须加反引号（否则 1064 near '`key` UPDATE …'）；
+    # 反引号在 SQLite 侧同样合法，一套 SQL 两边都能跑。
+    "meta_upsert": "INSERT INTO meta (`key`, value) VALUES (?, ?) "
+                   "ON CONFLICT(`key`) DO UPDATE SET value=excluded.value",
     "meta_upsert_update": "UPDATE meta SET value=? WHERE key=?",
     "meta_upsert_insert": "INSERT INTO meta (key, value) VALUES (?, ?)",
     "meta_insert_absent": "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
@@ -3845,11 +4013,14 @@ def get_meta_value_any(key: str) -> str:
 
 
 def set_meta_value_any(key: str, value: str) -> None:
-    """写 meta 配置值（任意拓扑）：UPDATE→INSERT 两段式幂等 upsert。"""
+    """写 meta 配置值（任意拓扑）：**单语句**幂等 upsert。
+
+    存在性只由主键回答，不看 UPDATE 的 rowcount（MySQL 计「实际改变的行」，
+    同值重写返回 0；SQLite 计「匹配行」——同一份两段式实现在 SQLite 上全绿、
+    在 MySQL 上必炸，2026-11-21 每次启动一条 1062 实测为证）。
+    """
     with _any_cursor(write=True) as c:
-        cur = c.execute(_any_sql("meta_upsert_update"), (value, key))
-        if not getattr(cur, "rowcount", 0):
-            c.execute(_any_sql("meta_upsert_insert"), (key, value))
+        c.execute(_any_sql("meta_upsert"), (key, value))
 
 
 def set_meta_if_absent(key: str, value: str) -> bool:
@@ -4496,6 +4667,38 @@ def trace_runtime_label(runtime_id: int) -> dict[str, str]:
     return {"engine": str(row[0] or ""), "device": str(row[1] or "")}
 
 
+def strip_task_diagnostics(errors_raw) -> str:
+    """去掉 agent_tasks.errors 里 diagnostic=True 的条目（#2790 token 诊断等）。
+
+    `errors` 既是诊断通道又是失败原因来源：诊断条目不得抢占「真实原因」。
+    实现唯一权威在 runtime 域（`service._strip_task_diagnostics`），此处只做
+    **跨域公共原语**转发——insight（trace）/ routes（事件详情）不再各写一份口径。
+    解析失败 / 非 JSON / 非 list → 原样返回（历史兼容）。
+    """
+    from src.domains.runtime.engine.service import _strip_task_diagnostics
+    return _strip_task_diagnostics(errors_raw)
+
+
+def summarize_task_errors(errors_raw, limit: int = 5) -> list[str]:
+    """任务失败归因摘要：`agent_tasks.errors` → 展示用字符串列表（最多 limit 条）。
+
+    事件详情 `task_errors`（#494）用：诊断条目先按统一口径滤掉，再逐条 str 截断 500；
+    非 JSON 纯文本原样透传，空值 → 空列表。
+    """
+    _kept = strip_task_diagnostics(errors_raw)
+    if not _kept:
+        return []
+    try:
+        _parsed = json.loads(str(_kept))
+    except (ValueError, TypeError):
+        return [str(_kept)[:500]]
+    if isinstance(_parsed, list):
+        _out = [str(e)[:500] for e in _parsed if str(e).strip()]
+    else:
+        _out = [str(_kept)[:500]]
+    return _out[:max(0, int(limit))]
+
+
 def trace_events_by_seq(seqs) -> list[dict[str, Any]]:
     """同一流水线的事件上下文（seq 候选集，按 seq 升序）。
 
@@ -4915,6 +5118,62 @@ def ensure_repo_im_binding_schema(conn: Any) -> None:
 
 #: 跟随 repo_key 的 runtime 表（固定白名单：不接受调用方传表名）
 _ORG_BACKFILL_TABLES = ("events", "agent_tasks", "devops_agent_session", "issue")
+
+
+# ---------- clone 端点契约（clone_endpoint 单点派生的对外出口）----------
+# mgmt 等其它域要拼 clone 地址/用户名时只能走这里，禁止 import runtime.vcs.* 内部模块。
+try:  # 异常类一并导出，调用方按它做错误分类
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError  # noqa: F401
+except Exception:  # pragma: no cover - 极端导入失败时给出可捕获的替身
+    class CloneEndpointError(RuntimeError):  # type: ignore[no-redef]
+        pass
+
+
+def clone_params(repo_key: str) -> dict:
+    """按平台卡派生 clone 参数（provider/owner/repo/clone_url/clone_auth/username）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _impl
+
+    return _impl(repo_key)
+
+
+def clone_url(repo_key: str) -> str:
+    """仓库 clone 地址（平台卡派生的唯一实现）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_url as _impl
+
+    return _impl(repo_key)
+
+
+def username_for_token(provider: str, token: str, repo_key: str = "") -> tuple:
+    """令牌所属账号名（basic_password 平台用；返回 (username, source)）。"""
+    from src.domains.runtime.vcs.clone_identity import username_for_token as _impl
+
+    return _impl(provider, token, repo_key)
+
+
+def invalidate_clone_identity(provider: str, token: str = "") -> None:
+    """清掉令牌→login 解析缓存（令牌轮换后调用；契约出口，别域不得直连内部模块）。"""
+    from src.domains.runtime.vcs.clone_identity import invalidate as _impl
+
+    _impl(provider, token)
+
+
+def clone_auth_header(repo_key: str, token: str) -> str:
+    """git 传输用的 Authorization 头值（Basic base64(user:token)，按卡的 clone_auth 取用户名）。
+
+    为什么提供在契约里：mgmt 拼克隆命令时不能自己再实现一套 scheme/用户名派生
+    （那就是第二个真源），也不能把 token 拼进 URL（进程列表/日志泄漏面）。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _cp
+
+    p = _cp(repo_key)
+    scheme = str(p.get("clone_auth") or "x_access_token")
+    user = str(p.get("username") or "")
+    if not user:
+        user = "x-access-token" if scheme == "x_access_token" else (
+            "oauth2" if scheme == "oauth2" else str(p.get("owner") or ""))
+    import base64 as _b64
+
+    return "Basic " + _b64.b64encode(f"{user}:{token}".encode()).decode()
 
 
 def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:
@@ -7015,6 +7274,39 @@ def build_platform_card(provider: str, raw: dict):
     return _impl(provider, raw)
 
 
+def card_field_overrides(submitted: dict, card) -> dict:
+    """管理面提交值与当前生效卡的字段差异（A2 覆盖层，只记变化过的键）。"""
+    from src.domains.runtime.vcs.platform_card import card_field_overrides as _impl
+
+    return _impl(submitted, card)
+
+
+def compute_card_overrides(submitted: dict, current_json: str = "") -> dict:
+    """管理面保存后该记的覆盖层（契约）：{provider: 提交整卡} + 现有 meta → 新覆盖。"""
+    from src.domains.runtime.vcs.card_overrides import CardOverrides
+    from src.domains.runtime.vcs.platform_card import base_platform_card as _base
+
+    # prune_stale：升级后与新基线等价的旧覆盖一并清掉（否则"改了不生效"会一直留到人工清理）
+    return (CardOverrides.from_json(current_json)
+            .recompute(submitted, _base)
+            .prune_stale(_base)
+            .by_provider)
+
+
+def platform_card_overrides_meta_key() -> str:
+    """覆盖层 meta 契约键（调用方不必硬编码字符串）。"""
+    from src.domains.runtime.vcs.card_overrides import META_KEY
+
+    return META_KEY
+
+
+def base_platform_card(provider: str):
+    """不含管理面覆盖层的卡（管理面保存时的 diff 基线）。"""
+    from src.domains.runtime.vcs.platform_card import base_platform_card as _impl
+
+    return _impl(provider)
+
+
 def module_for(provider: str):
     """取 provider 对应的 VCS 后端模块（providers 注册表口径）。"""
     from src.domains.runtime.vcs.providers import module_for as _impl
@@ -7201,6 +7493,21 @@ def probe_aishell_dsh_acp(cli_path: str) -> dict:
 _probe_aishell_dsh_acp = probe_aishell_dsh_acp
 
 
+def probe_hermes_acp(cli_path: str) -> dict:
+    """探测 hermes ACP 引擎可用性（initialize + session/new + prompt 三步）。
+
+    单源：与 worker 侧同一实现。insight 的 engine_probe 曾自带一份只发
+    initialize 的浅探活 —— provider 侧错误（模型不存在等）只在 prompt 阶段
+    暴露，于是控制台一路显示 ok 而 worker 报 fail（实测 112 次 fail 对 0 次）。
+    """
+    from src.domains.runtime.engine.agent import _probe_hermes_acp as _impl
+
+    return _impl(cli_path)
+
+
+_probe_hermes_acp = probe_hermes_acp
+
+
 def discover_backends() -> list[dict]:
     """枚举已注册的 Agent 执行后端（含 installed/cli_path 探测结果）。"""
     from src.domains.runtime.agents.executor import discover_backends as _impl
@@ -7329,6 +7636,24 @@ async def trigger_task_now(task_id: int) -> dict:
     from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
 
     return await _impl(task_id)
+
+
+def seed_official_skill_if_missing(skill_name: str, display_name: str, description: str,
+                                   agent_type: str, skill_path: str) -> bool:
+    """启动期补齐官方技能行（幂等；skill 表归 runtime 域）。"""
+    from src.domains.runtime.storage.skill_sync import seed_official_skill_if_missing as _impl
+
+    return _impl(skill_name, display_name, description, agent_type, skill_path)
+
+
+async def trigger_task_now_with_params(task_id: int, params: dict | None = None) -> dict:
+    """立即触发一次任务调度，并把本次参数注入 prompt（组织 AI 分析单次运行）。
+
+    scheduler.trigger_task_now 是 async；本函数供 mgmt 域通过 public 调用。
+    """
+    from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
+
+    return await _impl(task_id, params or {})
 
 
 def normalize_dedup_level(raw) -> str:
@@ -7672,3 +7997,77 @@ def is_plugin_mode() -> bool:
     from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _impl
 
     return _impl()
+
+
+# ── 组织下派/上下文场景的跨域写口（A10/A11 整改，2026-11-19）──────────────
+# mgmt 的组织编排需要终止子任务、重触发流水线、把正文写 OBS、复用代码仓
+# git 工作副本。此前直接 import runtime 内部实现（issue_cancel / engine.service /
+# event_pipeline / storage / engine.repogit 私有函数），跨域契约隐式化。
+# 这里收敛为 public 具名入口，实现仍只有一份；调用方只依赖本模块。
+
+
+def cancel_issue_core(issue_id, *, user_id=None):
+    """取消一个 Issue 及其在途/未完成任务（与 runtime 内部同语义）。"""
+    from src.domains.runtime.issue_cancel import cancel_issue_core as _impl
+
+    return _impl(issue_id, user_id=user_id)
+
+
+def cancel_task(task_id) -> None:
+    """把指定 agent 任务置为 cancelled（引擎侧取消入口）。"""
+    from src.domains.runtime.engine.service import cancel_task as _impl
+
+    return _impl(task_id)
+
+
+def cancel_direct_task(seq: int) -> bool:
+    """取消排队/运行中的 direct 任务（按事件 seq）。"""
+    from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task as _impl
+
+    return _impl(seq)
+
+
+def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
+                 repo_key_override: str = "", replay: bool = False) -> dict:
+    """事件处理管道入口（内部触发场景复用，Issue #2118 重试路径）。"""
+    from src.domains.runtime.pipeline.event_pipeline import run_pipeline as _impl
+
+    return _impl(raw_body, headers, account=account,
+                 repo_key_override=repo_key_override, replay=replay)
+
+
+def run_git(args: list, token: str = "", timeout: int = 900,
+            scheme: str = "x_access_token"):
+    """以平台鉴权方式执行 git 命令（返回 CompletedProcess 或 None）。"""
+    from src.domains.runtime.engine.repogit import _run_git as _impl
+
+    return _impl(args, token=token, timeout=timeout, scheme=scheme)
+
+
+def clone_auth_scheme_for(repo_key: str) -> str:
+    """仓库 clone 使用的鉴权注入方案标识（gitcode/github 各有口径）。"""
+    from src.domains.runtime.engine.repogit import _clone_auth_scheme_for as _impl
+
+    return _impl(repo_key)
+
+
+def storage_save_bytes(obs_key: str, data: bytes) -> bool:
+    """写对象存储；未配置存储后端时返回 False（调用方降级本地）。"""
+    from src.domains.runtime.storage import get_storage
+
+    storage = get_storage()
+    if storage is None:
+        return False
+    storage.save_bytes(obs_key, data)
+    return True
+
+
+def storage_delete_object(obs_key: str) -> bool:
+    """删除对象存储对象（幂等）；未配置存储后端时返回 False。"""
+    from src.domains.runtime.storage import get_storage
+
+    storage = get_storage()
+    if storage is None:
+        return False
+    storage.delete_object(obs_key)
+    return True

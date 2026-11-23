@@ -23,7 +23,7 @@ import functools as _ft_cache
 import threading as _th_cache
 import time as _time_cache
 
-from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile, Request
 
 from pydantic import BaseModel
 
@@ -445,9 +445,11 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
         # id（GitCode 侧 id）不可混用。无 issue 卡片行（过渡期兜底）时为 null。
         "issue_id": stage.get("internal_id"),
         "title": title_map.get(number) or stage.get("issue_id") or f"Issue #{number}",
-        "stage": stage.get("stage", "vod"),
+        # Issue #2111（#1214 移植）：枚举字段出口归一（or 兜 None/空串）——与 /mine 出口（_query_tasks
+        # 空值归一 vod）同口径同值，消除 detail/mine 出口 stage 分歧（#1214 遗留）。
+        "stage": stage.get("stage") or "vod",
         "task_status": status_map.get(number, ""),
-        "owner_agent": stage.get("owner_agent", "vod"),
+        "owner_agent": stage.get("owner_agent") or "vod",
         "scene_id": stage.get("scene_id", ""),
         "assignee": stage.get("assignee", ""),
         "is_subtask_mode": stage.get("is_subtask_mode") or 0,
@@ -694,7 +696,7 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
             "segments": segments}
 
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session", description="Opens the Issue conversation entry: validates ownership and returns the current status without flipping it. User-only (front-end navigation preflight).")
-async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
 
     user_only：纯前端导航预检（确认可访问 + 取当前状态），Agent 执行期（tk_ 会话）无此场景；
@@ -847,6 +849,11 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
             log.warning(f"issue-status: revert audit log failed (issue={issue_id}): {_e}")
         log.info(f"Issue #{issue_id} reverted completed → pending_review by user {user.get('id', 0)} "
                  f"(role={_actor_role})")
+    # Issue #2419 修复项 2：状态真实迁移入审核点（pending_review / awaiting_input）→ 推飞书卡片
+    # （同状态重写 cur==ns 非真实变更，不通知——幂等守卫）
+    if ns in ("pending_review", "awaiting_input") and cur != ns:
+        from src.domains.runtime.issues_center import maybe_notify_review_point_status
+        maybe_notify_review_point_status(row[2], row[3], ns)
     return {"ok": True, "issue_id": issue_id, "status": ns}
 
 class _IssueConfirmBody(BaseModel):
@@ -1012,7 +1019,7 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         return ""
 
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
-async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
+def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage
     from src.kernel.session_manager import db, db_lock
@@ -1089,7 +1096,7 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
                          "(owner/admin via VCS permission API, cf. #377), then status -> completed, stage -> done, "
                          "syncs related pipeline tasks to terminal state, writes an audit log, and closes the VCS "
                          "issue (degraded, non-blocking). Idempotent in terminal state; non-admin -> 403.")
-async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_no_session_token)):
+def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_no_session_token)):
     """Issue #393: 仓库 admin 成员确认需求完成（人工终审）。
 
     与开发者 confirm-done 的区别：
@@ -1168,38 +1175,9 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = _rt_db.cursor()
-        c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
-                  (issue_id, user["id"]))
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        status, repo_key, issue_number = row[0], row[1], row[2]
-        _issue_id = f"#{issue_number}" if issue_number else ""
-        if status == 'cancelled':
-            # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
-            # 防止残留 awaiting_input 行继续出现在待澄清列表；并同步终止其残留 agent_tasks。
-            if repo_key and issue_number:
-                _cancel_issue_agents(c, repo_key, _issue_id)
-                cancel_issue_rows(c, repo_key, issue_number)
-                _rt_db.commit()
-            return {"ok": True, "already_cancelled": True}
-        if status == 'completed':
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
-        _cancelled_agents = _cancel_issue_agents(c, repo_key, _issue_id)
-        # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
-        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成/已取消行保持终态不受影响。
-        if repo_key and issue_number:
-            cancel_issue_rows(c, repo_key, issue_number)
-        else:
-            c.execute(
-                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
-                (issue_id,))
-        _rt_db.commit()
-    log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
-    return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
+    from src.domains.runtime.issue_cancel import cancel_issue_core
+
+    return cancel_issue_core(issue_id, user_id=user["id"])
 
 @router.post("/{issue_id}/resume", operation_id="issues_resume", summary="Resume cancelled issue", description="Resumes a cancelled requirement from its pre-cancel stage.")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -1288,8 +1266,74 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
+@router.post("/{issue_id}/reopen", operation_id="issues_reopen", summary="Reopen completed issue", description="Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.")
+def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """把误标完成的需求退回「处理中」（2026-11-20 主人口径 B）。
+
+    与 `resume`（cancelled→processing，自动续派）的区别：
+    - 只回状态 + 清完成信息 + **清空 stage**，不自动 A2A 派发，避免点一下就消耗引擎；
+      续跑由用户在事件页手动「重派」决定从哪一步开始；
+    - stage 必须清空：UI 的 `mapStatusL` 把 `stage='done'` 直接判成「已完成」，
+      留着 done 即使 status 已是 processing 也仍然显示已完成（等于按钮没生效）。
+    不碰平台 Issue（GitCode/GitHub issue 不重新打开）——#1408 撤销路径同口径。
+    """
+    from src.kernel.session_manager import db_lock
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "SELECT status, repo_key, issue_number, stage, completed_at "
+            "FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
+            (issue_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+        cur_status, repo_key, issue_number, cur_stage, prev_completed_at = row[0], row[1], row[2], row[3], row[4]
+        if cur_status != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 400, "message": "仅已完成需求可回到处理中"})
+        # Issue #1741 口径：同一 repo_key+issue_number 可能有多行，全量幂等回退（不插新卡）。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status='completed'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE id=? AND status='completed'",
+                (issue_id,))
+        if c.rowcount == 0:
+            # 并发下已被别的进程改走 → 与 _write_issue_status 同口径按 409 让前端刷新
+            _rt_db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
+        _rt_db.commit()
+    try:
+        from src.domains.mgmt.public import log_audit
+        log_audit("issue_reopened_from_completed", operator_id=user.get("id", 0) or 0,
+                  detail={
+                      "repo_key": repo_key,
+                      "issue_id": issue_id,
+                      "issue_number": issue_number,
+                      "from_status": cur_status,
+                      "to_status": "processing",
+                      "from_stage": cur_stage or "",
+                      "to_stage": "",
+                      "prev_completed_at": prev_completed_at or "",
+                      "auto_redispatch": False,
+                  })
+    except Exception as _e:
+        log.warning(f"issue-reopen: audit log failed (issue={issue_id}): {_e}")
+    log.info(f"Issue #{issue_id} reopened completed → processing by user {user.get('id', 0)} "
+             f"(stage cleared, no auto redispatch)")
+    return {"ok": True, "issue_id": issue_id, "status": "processing", "stage": ""}
+
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config
@@ -1654,7 +1698,7 @@ async def issue_terminal_disposition(issue_id: int, body: IssueTerminalDispositi
 
 
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
-async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
     from src.api.issues_center import _get_task_issue_info, _find_agent_task_ids
     from src.kernel.session_manager import db, db_lock
@@ -1846,10 +1890,45 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
             "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}
 
+# ===== Issue #2695（#2695 移植）：pending-review 的 issue_id 前置校验（空/非法 → 400，不再误导性 405/422）=====
+
+_INVALID_ISSUE_ID_MSG = "invalid issue_id"
+
+
+def _invalid_issue_id() -> HTTPException:
+    """统一错误体（与平台 `{code,message}` 约定一致）。"""
+    return HTTPException(status_code=400,
+                         detail={"code": 400, "message": _INVALID_ISSUE_ID_MSG})
+
+
+def _require_numeric_issue_id(request: Request) -> None:
+    """路由级前置校验（依赖）：原始路径段必须是纯数字。
+
+    Issue #2695：调用方常把「内部需求卡片 id 之外的脏值」（空段/`abc`/`#pr_1`…）
+    当成 issue_id 传入。此类请求此前要么被 FastAPI 的 int 注解拦成 422、要么空段
+    根本不匹配任何路由而落到 SPA 兜底返回 405（无 detail），调用方无法自诊断。
+    这里在路由入口前置成 400 + `invalid issue_id`，语义明确且不影响合法 id 链路。
+    """
+    _raw = str((request.path_params or {}).get("issue_id", "") or "")
+    if not re.fullmatch(r"[0-9]+", _raw):
+        raise _invalid_issue_id()
+
+
+# 空 issue_id 形态：`/api/issues//pending-review`（prefix + "//pending-review"）——
+# 路径段为空时 `/{issue_id}/pending-review` 模板不匹配，需独立条目才能给出 400 而非 SPA 兜底 405。
+# 不进契约（include_in_schema=False）：它不是新增对外能力，只是同一端点的非法入参响应。
+@router.post("//pending-review", include_in_schema=False,
+             summary="issues pending-review with empty issue_id → 400 invalid issue_id")
+async def issue_pending_review_empty_id():
+    """Issue #2695：空 issue_id（`/api/issues//pending-review`）→ 400 invalid issue_id。"""
+    raise _invalid_issue_id()
+
+
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。issue_id 必须是纯数字内部 id（Issue #2695：空/非数字在入口前置返回 400 invalid issue_id，不是 GitCode issue number）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
+                               _issue_id_check: None = Depends(_require_numeric_issue_id),
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
     from src.api.issues_center import _ensure_task_conversation
@@ -1900,6 +1979,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
 class _ReviewPassBody(BaseModel):
     target: str = "processing"   # processing | done
     evidence: str = ""
+    pr_number: int = 0           # Issue #1211（#1211 移植）：QA 审查的 PR 号（透传待合入通知；缺省自动扫描关联 open PR）
 
 class _ReviewRejectBody(BaseModel):
     target: str = "processing"   # processing | awaiting_input
@@ -1929,7 +2009,8 @@ async def issue_review_pass(issue_id: int, body: _ReviewPassBody,
             "message": "agent 不能直接完成需求（target=done 已禁用）；请调用 review-pass target=processing 让需求进入 pending_review，由人工确认完成",
             "reason": "agent_finalize_forbidden"})
     _out = _review_pass(it["repo_key"], it["issue_number"],
-                        target=body.target or "processing", evidence=body.evidence or "")
+                        target=body.target or "processing", evidence=body.evidence or "",
+                        pr_number=body.pr_number or 0)
     _result, _reason = _review_outcome(_out)
     _st = _read_issue_status(it["repo_key"], it["issue_number"]) or it["status"]
     return {"ok": True, "issue_id": it["id"], "status": _st,
@@ -2148,8 +2229,8 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
-@router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses.")
-async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
+@router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses. Issue #2082 paging (semantics unified with issues_list/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), is clamped to a max of 100 and 0 means explicit full list. With per_page>0 the response carries total/page/per_page/has_more (total counts the filtered set).")
+def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
@@ -2158,20 +2239,24 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     creators: str = Query("", description="按创建人过滤(逗号分隔, Issue #805；前端 mine 分支同款参数，此前被静默丢弃)"),
                     statuses: str = Query("", description="多状态过滤(逗号分隔；Issue #926 列表同款)。与单 status 二选一，同时给出时以 statuses 为准"),
                     q: str = Query("", max_length=200, description="Issue #926：标题/编号模糊搜索（服务端过滤；前端 mine 分支已下推 &q=，此前被静默丢弃）"),
-                    per_page: int = Query(0, ge=0, le=200, description="服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"),
-                    page: int = Query(1, ge=1, description="服务端分页：页码（per_page>0 时生效）"),
+                    page: int = Query(1, ge=1, description="页码（1-based，per_page>0 时生效）"),
+                    per_page: int | None = Query(None, ge=0, description="每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量；上限 100，超限夹取"),
                     user: dict = Depends(require_org_member)):
     """我的需求列表（需求中心·个人维度）。
 
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
     （scene/stage/is_running/agent_statuses）。
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
+
+    Issue #2082（#2082 移植）：per_page>0（含缺省注入的默认 20）真分页，响应含
+    total/page/per_page/has_more（total 与过滤后集合一致）；per_page=0
+    显式全量（legacy 形态 {issues, sort_order, mode}，现状一致）。
     Issue #827: 过滤口径由单一 user_id 扩为 user_id OR created_by OR assignee（绑定集合兜底），
     移交后 user_id 被清零时创建人仍可见。
     """
     from src.api.issues_center import (_query_tasks, _build_assignee_filter, _build_creator_filter,
-                                       _get_gitcode_user_by_user_id)
-    from src.domains.mgmt.public import is_org_personal
+                                       resolve_issues_page_params, _get_gitcode_user_by_user_id)
+    from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2232,27 +2317,25 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
         # Issue #926：与 issues_list / _merge_sort_items 同源（_status_order_sql），
         # 修复旧版仅 3 桶（active/processing/else）与 Python 4 级优先序口径不一致
         _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
-    issues_out = _query_tasks(where, params, _order_by, include_user_id=False,
-                              limit=per_page or None,
-                              offset=((page - 1) * per_page) if per_page else 0)
-    # 分页元数据（per_page>0 时；全量模式不破坏旧响应结构）
-    _out = {"issues": issues_out, "sort_order": sort_order, "mode": mode}
-    if per_page:
-        from src.kernel.session_manager import db_lock as _db_lock
+    # Issue #2082（#2082 移植）：缺省 per_page 注入灰度默认；>0 真分页（COUNT + LIMIT/OFFSET）
+    page, per_page = resolve_issues_page_params(page, per_page)
+    if per_page > 0:
+        from src.kernel.session_manager import db, db_lock
+        _total = 0
         try:
-            with _db_lock:
-                c = _rt_db.cursor()
+            with db_lock:
+                c = db.cursor()
                 c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
-                _total = int(c.fetchone()[0])
-        except Exception:
-            _total = len(issues_out)
-        _out.update({
-            "total": _total,
-            "page": page,
-            "per_page": per_page,
-            "has_more": (page * per_page) < _total,
-        })
-    return _out
+                _total = c.fetchone()[0]
+        except Exception as e:
+            log.warning(f"issues mine: count failed: {e}")
+        issues_out = _query_tasks(where, params, _order_by, include_user_id=False,
+                                  limit=per_page, offset=(page - 1) * per_page)
+        return {"issues": issues_out, "sort_order": sort_order, "mode": mode,
+                "page": page, "per_page": per_page, "total": _total,
+                "has_more": (page - 1) * per_page + len(issues_out) < _total}
+    issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
+    return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
 _STATUS_PRIORITY = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3}
 
@@ -2336,7 +2419,7 @@ def _cached_repo_list(ttl: float = 5.0):
     return deco
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #2082 paging (semantics unified with issues_mine/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), clamped to max 100 (over-limit clamped, not rejected), 0 means explicit full list; `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
 @_cached_repo_list(5.0)
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
@@ -2346,9 +2429,9 @@ def list_repo_issues(owner: str, repo: str,
                      creators: str = Query("", description="按创建人筛选(逗号分隔, Issue #805)"),
                      q: str = Query("", max_length=200, description="Issue #926：标题/编号模糊搜索（服务端过滤）"),
                      statuses: str = Query("", max_length=200, description="Issue #926：多状态筛选（逗号分隔 issue.status）"),
-                     page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
-                     per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
-                     recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
+                     page: int = Query(1, ge=1, description="页码（1-based，per_page>0 时生效）"),
+                     per_page: int | None = Query(None, ge=0, description="每页条数；缺省=默认 20（ISSUES_DEFAULT_PER_PAGE 可调，置 0 回退 legacy 全量）；0=显式全量（终态不再截断）；上限 100，超限夹取"),
+                     recent_terminal: int | None = Query(None, ge=0, description="全量模式下终态(completed/cancelled)保留的最近条数；缺省=30（显式 per_page=0 的全量逃生口缺省=0 不截断）；0=全量"),
                      include_deleted: int = Query(0, ge=0, le=1, description="Issue #995：默认过滤 VCS 侧已确认删除的卡片（回写 vcs_exists=0 且已核验）；1=审计模式返回并标记。未核验卡片按存在处理（fail-open 不隐藏）。"),
                      user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
@@ -2370,8 +2453,8 @@ def list_repo_issues(owner: str, repo: str,
     - Issue #926：q（标题/编号 LIKE）与 statuses（逗号分隔多状态）为服务端过滤，
       PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
-    from src.domains.mgmt.public import is_org_personal
+    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter, resolve_issues_page_params
+    from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2431,6 +2514,21 @@ def list_repo_issues(owner: str, repo: str,
     _order_by = f"created_at {_order_dir}"
     if mode == "default":
         _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
+
+    # Issue #2082（#2082 移植）：缺省 per_page 注入灰度默认（默认 20；开关置 0 → legacy per_page=0 路径）。
+
+    # 显式 per_page=0 = 全量逃生口 → recent_terminal 缺省联动为 0（终态不截断，真正全量）；
+
+    # 未显式传 per_page（含开关置 0 的 legacy 回退）→ recent_terminal 维持缺省 30（现状一致）。
+
+    _per_page_explicit = per_page is not None
+
+    page, per_page = resolve_issues_page_params(page, per_page)
+
+    if recent_terminal is None:
+
+        recent_terminal = 0 if (_per_page_explicit and per_page == 0) else 30
+
 
     _total = None
     _page_row_count = None
@@ -2577,6 +2675,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
+    from src.api.org_context import validate_org_scene_entry
     _body = body or {}
     # D107/B2 补口（2026-11-11 实弹发现）：默认 repo_key 是裸名（{owner}/{repo}），
     # 建单链 _is_github 按前缀分流——裸名恒走 gitcode 链，github 仓（托管或 member）
@@ -2586,12 +2685,20 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     if ":" not in _rk_in:
         from src.domains.mgmt.public import _resolve_repo_key as _resolve_rk
         _rk_in = _resolve_rk(f"{owner}/{repo}")
+    # Issue #2118：组织场景入口校验（org-only 模板只能由组织上下文使用）
+    _repo_key = _rk_in
+    _scene_id = _body.get("scene_id", "") or ""
+    validate_org_scene_entry(
+        _repo_key,
+        _scene_id,
+        str(user.get("org_id") or ""),
+    )
     b = TaskCreateBody(
-        repo_key=_rk_in,
+        repo_key=_repo_key,
         title=_body.get("title", "") or "",
         description=_body.get("description", "") or "",
         assignee=_body.get("assignee", "") or "",
-        scene_id=_body.get("scene_id", "") or "",
+        scene_id=_scene_id,
         is_subtask_mode=int(_body.get("is_subtask_mode") or 0),
         attachments=_body.get("attachments") or [],
     )
@@ -2791,7 +2898,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
             description="Lists production release tasks for the issue with status, result branch "
                         "(deployed_success/deploy_failed/not_executed), failure reason and binding "
                         "elements (candidate SHA / target env / evidence / approval source).")
-async def list_production_releases(issue_id: int, user: dict = Depends(require_no_session_token)):
+def list_production_releases(issue_id: int, user: dict = Depends(require_no_session_token)):
     """Issue #627: 查询发布子单列表（状态/结果三分支/失败原因/绑定要素随行返回）。"""
     from src.api.session_store import list_release_subissues
     from src.kernel.session_manager import db, db_lock
@@ -2808,7 +2915,7 @@ async def list_production_releases(issue_id: int, user: dict = Depends(require_n
             "releases": releases, "total": len(releases)}
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config

@@ -14,7 +14,7 @@
 | **时间格式** | 一律 ISO 8601 UTC（如 `2026-09-16T08:00:00Z`） |
 | **ID 前缀口径** | `t_` = Agent 执行实例 / task_id（agent_tasks.id）；`tk_` = 会话 token；`grape_` = 用户级 API Key；`rta_` = 运行时凭据；`seq` = 事件序号；**`issue_id` / `issue.id` = 需求卡片 id**（`/api/issues` 创建与 notify 返回的 `task_id` 即此值，主字段为 `issue_id`）；`{number}` = 平台 issue 编号 |
 | **repo_key 口径** | 统一表达式 `[gitcode:|github:]owner/repo`；对外入参写 `owner/repo`（无前缀）时由服务端按托管记录判定前缀 |
-| **CLI 命令映射** | CLI 命令名由契约 `operation_id` 派生（`<tag> <verb>`，如 `scenes_list` → `grape scenes list`），**并非 HTTP 路径字面量**；`grape <cmd> --help` 可查实际对应路径 |
+| **CLI 命令映射** | CLI 命令名由契约 `operation_id` 派生（`<tag> <verb>`，如 `scenes_list` → `grape scenes list`），**并非 HTTP 路径字面量**；`grape <cmd> --help` 可查实际对应路径。**命令面边界（#2237，#1302 移植）**：`grape commands` 除契约命令外，还按契约 `/openapi.json` 的 `info["x-grape-local-cli-commands"]` 字段派生列示本地命令（`grape git`、`grape refresh`、`grape commands`、`grape tasks wait`，行尾带 `[local]` 标注；均无 HTTP 语义、不进契约 operation 集）；本地/非契约命令以 `grape <group> --help` 为准（单一事实源：`src/kernel/help_docs_sync.py` 的 `KNOWN_LOCAL_CLI_COMMANDS`，经契约 info 字段发布） |
 | **SSE** | 事件格式 `data: {…}\n\n`；流终止固定 `data: {"done": true}`；异常 `data: {"error": {"code", "message"}}`；请求头 `Accept: text/event-stream` |
 | **限流/重试** | 429 时先 1s 退避，最多重试 3 次；幂等操作可无惧重放 |
 
@@ -58,7 +58,7 @@
 | [13 Settings](13-settings.md) | 全部（凭据/API Key/通知/OAuth/引擎/rta 凭据/mode/规则） | user_only |
 | [14 Runtime](14-runtime.md) | 全部（健康度/任务/会话/标签/凭据聚合） | user_only |
 | [15 DevStage](15-devstage.md) | 全部（环境 CRUD/开机/关机） | user_only |
-| [16 Auth+Misc](16-auth-and-misc.md) | 全部（profile/logout/dashboard/pipeline/search/templates/feishu-onboard） | user_only |
+| [16 Auth+Misc](16-auth-and-misc.md) | 全部（profile/logout/dashboard/pipeline/search/templates/feishu-onboard/org-audit） | user_only |
 | [17 Feedback](17-feedback.md) | `POST /api/feedback`（Submit） | dual（Agent tk_ 场景） |
 | | `mine` / `context` / `delete` / `upload` | user_only |
 | | `list` / `stats` / `{fid}/status`（管理） | admin-only（不进契约） |
@@ -82,7 +82,7 @@
 14. [Settings 设置接口（/api/settings）](13-settings.md)
 15. [Runtime 运行时接口（/api/runtime）](14-runtime.md)
 16. [DevStage 开发环境（/api/devstage）](15-devstage.md)
-17. [Auth/Misc 账号与全局（/api/auth · dashboard · pipeline · search · project-templates · feishu）](16-auth-and-misc.md)
+17. [Auth/Misc 账号与全局（/api/auth · dashboard · pipeline · search · project-templates · feishu · orgs/{id}/audit）](16-auth-and-misc.md)
 18. [Feedback 意见反馈（/api/feedback）](17-feedback.md)
 19. [Patrol 巡检异常清单（/api/patrol）](18-patrol.md)
 

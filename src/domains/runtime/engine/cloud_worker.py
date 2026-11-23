@@ -418,7 +418,7 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
 
     和 agent.py 的 _execute_task 区别：
     - 不走 _remap_cwd（沙箱内 cwd 由 _run_cloud_sandbox 修正）
-    - 不走 git worktree（沙箱内 _clone_repo 已做）
+    - 不走 git worktree（仓库代码由 agent 自行获取：模板预置或 grape CLI git-repo）
     - 不走 codearts data dir
     - 每环节新建，任务结束主动 kill（不再 __exit__ refresh）
     - LLM key 从 /env API 获取（不查 DB）
@@ -482,15 +482,37 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
         if task_env.get("USER_GITCODE_TOKEN"):
             env["USER_GITCODE_TOKEN"] = task_env["USER_GITCODE_TOKEN"]
     else:
-        # devops 事件任务：只注入 BOT_GITCODE_TOKEN，不注入 USER_GITCODE_TOKEN
-        env["BOT_GITCODE_TOKEN"] = task.get("repo_gitcode_token") or ""
+        # devops 事件任务：按平台派生 bot token 键（BOT_GITCODE_TOKEN / BOT_GITEE_TOKEN …），
+        # 不注入 USER_*_TOKEN。过去写死 gitcode 键 → gitee 仓库在沙箱侧 token 恒空 → 不 clone。
+        _bot_tok = task.get("repo_gitcode_token") or ""
+        _bot_key = "BOT_GITCODE_TOKEN"
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import bot_token_env_name
 
-    # env_extra（JSON 字符串 → dict）
-    import json as _json
+            _bot_key = bot_token_env_name(task.get("repo_key") or "")
+        except Exception as _be:
+            log.warning(f"bot token env name derive failed: {_be}")
+        if not _bot_tok:
+            # P2：无凭据运行必须可见（此前静默空值 → 沙箱 askpass 回声为空 →
+            # 推送 401 被误判成"token 失效/权限不足"，实测排查两轮）
+            log.warning(
+                f"cloud_worker: 任务 {task.get('id') or task.get('tid') or '-'} 无可用的"
+                f"仓库 bot 凭据（repo_key={task.get('repo_key') or '-'}，键={_bot_key}）"
+                f"——沙箱内 git push/PR 将不可用，请检查派发侧凭据注入")
+        env[_bot_key] = _bot_tok
+        if _bot_key != "BOT_GITCODE_TOKEN":
+            # 升级期兜底：旧引擎 / bwrap 白名单仍按 gitcode 键名读
+            env.setdefault("BOT_GITCODE_TOKEN", _bot_tok)
+
+    # env_extra（enc:v1 信封 → dict，#2423/#3649：直接 json.loads 会静默得到空 env）
     _env_extra = task.get("env_extra") or ""
     if _env_extra:
         try:
-            env.update(_json.loads(_env_extra) if isinstance(_env_extra, str) else _env_extra)
+            if isinstance(_env_extra, str):
+                from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+                env.update(decrypt_env_extra(_env_extra))
+            else:
+                env.update(_env_extra)
         except Exception:
             pass
 
@@ -510,11 +532,15 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
     # （127.0.0.1:8081/8083）——对云沙箱无意义（沙箱内的 127.0.0.1 是沙箱自身，
     # 引擎调平台 API 全部 Connection refused，实测 round8 vod 结果）。云沙箱场景
     # 用 worker 自身的主控地址（CLOUD_WORKER_SERVER_URL，nginx 单入口）覆盖。
-    _cw_server = os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+    # 2026-11-22：worker 自身配置优先——它才是"我确实能连到主控"的实证。
+    # 任务行的 server_url 是建单进程视角算出来的（可能是公网/回环），远端 worker
+    # 未必可达（实测 .213 到公网 IP 000 不可达 → grape CLI 全 301）。
+    _cw_server = (os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+                  or os.environ.get("RUNTIME_SERVER_URL", ""))
     _task_server = task.get("server_url") or ""
-    _effective = _task_server
-    if _task_server and "127.0.0.1" in _task_server and _cw_server:
-        _effective = _cw_server
+    _effective = _cw_server or _task_server
+    if _effective and _task_server and _effective != _task_server:
+        log.info(f"cloud_worker: 回连基址以 worker 配置为准 {_task_server} -> {_effective}")
     if _effective:
         env["GRAPE_SERVER_URL"] = _effective
 
@@ -635,7 +661,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
                 _sb._repo_url = _ctx.repo_url
                 _sb._bot_token = _ctx.bot_token
                 _sb._work_branch = _ctx.work_branch
-                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} bot_token={'yes' if _ctx.bot_token else 'no'}")
+                # clone 用户名（basic_password 平台必须是令牌所属账号 login）：
+                # 过去只注入 url/token/branch，云沙箱 askpass 回退 "bot" → gitee 必被拒。
+                if hasattr(_sb, "_clone_username"):
+                    setattr(_sb, "_clone_username", getattr(_ctx, "clone_username", "") or "")
+                log.info(f"{_engine_tag}repo info set from ctx: repo_url={_ctx.repo_url[:50]} "
+                         f"bot_token={'yes' if _ctx.bot_token else 'no'} "
+                         f"clone_user={getattr(_ctx, 'clone_username', '') or '-'}")
             else:
                 log.warning(f"{_engine_tag}repo info NOT set: hasattr_repo_url={hasattr(_sb, '_repo_url')} ctx_repo_url={_ctx.repo_url[:50] if _ctx.repo_url else '(empty)'}")
             _sb.__enter__()
@@ -1012,6 +1044,13 @@ async def _refresh_templates(client, config):
     try:
         templates = await client.get_templates()
         if not templates:
+            # [云 worker 领取修复] 空结果必须区分两种语义，调用方据此决定要不要覆盖
+            # 已注册清单（此前一律返回 []，一次 499/超时就把 _installed_live 清空 →
+            # 下一轮 register([]) → runtime_ids 归零 → 永不 claim）：
+            #   []        = 平台确实没有模板（真空）→ 返回空清单，允许同步清空
+            #   None/其他 = 拉取失败/未知        → 返回 None 哨兵，沿用上一份快照
+            if templates is None:
+                return None, set(), None
             return {}, set(), []
 
         new_runtimes = _expand_templates(templates)
@@ -1078,7 +1117,7 @@ async def _refresh_templates(client, config):
         raise  # [401 自杀修复] 凭据吊销向上传播——refresh loop 的 except 也要放行
     except Exception as e:
         log.warning(f"_refresh_templates failed: {e}")
-        return {}, set(), []
+        return None, set(), None
 
 
 async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed, device_name):
@@ -1102,6 +1141,9 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
     # [探测重试 2026-11-04] 模板探测失败计数（run_loop 里注册后首轮赋值；refresh loop
     # 依据它决定是否重跑 provider 上报+探测）
     _probe_fail_count = 0
+    # [新模板看护 2026-11-20 用户裁定] 平台侧模板 id 快照（provider 键 → id 集合）：
+    # refresh 循环每 60s 轻量 list_templates 对比，发现新增 → set 探测唤醒事件。
+    _last_platform_tids: dict = {}
 
     async def _template_refresh_loop():
         nonlocal _whoami_401_streak, _whoami_tick, _probe_fail_count
@@ -1118,6 +1160,67 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 await _refresh_provider_configs(client)
                 _fail_streak = 0
                 # [探测重试] 由 _amain 内 _probe_retry_loop 负责（跨函数作用域不可达）
+                # [新模板看护 2026-11-20] 平台侧模板 id 集合变更检测（轻量元数据扫描，
+                # 不建箱）：与 _report_providers_once 同款 list_templates 调用。发现新增
+                # id → set config["probe_watch_trigger"] 唤醒探测循环（负缓存挡已探模板，
+                # 只建箱探测新增 id）。扫描失败不更新该 provider 的快照（瞬时故障不
+                # 掩盖下轮变更）；首轮只建快照不触发（启动探测批已覆盖）。
+                _evt = config.get("probe_watch_trigger")
+                if _evt is not None:
+                    _seen: dict = {}
+                    for _pc in list((_provider_configs or {}).values()):
+                        _ep = (_pc.get("api_url") or _pc.get("endpoint") or "").strip()
+                        _pk = (_pc.get("name") or _ep or "").strip()
+                        if not _pk:
+                            continue
+                        _old_ids = _last_platform_tids.get(_pk)
+                        if not _ep:
+                            _seen[_pk] = _old_ids or set()
+                            continue
+                        try:
+                            from src.domains.runtime.agents.sandbox.backends import get_adapter as _ga
+                            _ad = _ga(_pc.get("platform", ""))
+                            if not _ad or not hasattr(_ad, "list_templates"):
+                                _seen[_pk] = _old_ids or set()
+                                continue
+                            _extra_cfg = _pc.get("extra_config") or {}
+                            # to_thread：list_templates 是同步网络调用——本循环 60s 一轮
+                            # （_report_providers_once 的同款调用频次低得多），阻塞事件循环
+                            # 会拖心跳/claim 调度。
+                            _scan = await asyncio.to_thread(_ad.list_templates, {
+                                "api_url": _ep,
+                                "api_key": _pc.get("api_key", ""),
+                                **({"gateway_ip": _extra_cfg["gateway_ip"]}
+                                   if _extra_cfg.get("gateway_ip") else {}),
+                                **({"gateway_url": _extra_cfg["gateway_url"]}
+                                   if _extra_cfg.get("gateway_url") else {}),
+                            })
+                            if _scan is None:
+                                # SDK 未装：不可扫描——保留旧快照
+                                _seen[_pk] = _old_ids or set()
+                                continue
+                            _seen[_pk] = {(t.get("template_id") or "").strip()
+                                          for t in (_scan or [])
+                                          if (t.get("template_id") or "").strip()}
+                        except Exception as _se:
+                            # 扫描失败：沿用旧快照——平台恢复后新增 id 仍能被 diff 出
+                            _seen[_pk] = _old_ids or set()
+                            log.debug(f"[engine-probe] watch scan failed for {_pk}: {_se}")
+                    _new_tids = set()
+                    for _pk, _ids in _seen.items():
+                        if _pk in _last_platform_tids:
+                            _new_tids |= (_ids - _last_platform_tids[_pk])
+                    # provider 消失 → 清其快照（回来时重新基线，不误触发）
+                    for _pk in list(_last_platform_tids.keys()):
+                        if _pk not in _seen:
+                            del _last_platform_tids[_pk]
+                    _last_platform_tids.clear()
+                    _last_platform_tids.update(_seen)
+                    if _new_tids:
+                        log.info(f"[engine-probe] watch: {len(_new_tids)} new platform "
+                                 f"template id(s) detected, waking probe loop: "
+                                 f"{sorted(t[:16] for t in _new_tids)}")
+                        _evt.set()
                 # ---- whoami: 改名跟随/身份守护/401 自杀（spec §6.2/§6.3）----
                 _whoami_tick += 1
                 if _whoami_tick % 5 == 0:
@@ -1148,7 +1251,11 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 # [身份锚定] 无条件同步 re-register 动态视图——改名时 rid 不变（锚命中 UPDATE），
                 # added 循环不触发（rid 已在心跳列表），旧版仅在 added 时同步会让 5min re-register
                 # 用旧名快照把引擎名写回（s14 被 re-register 覆盖回 s13 实测根因）
-                _installed_live[:] = _all_runtimes or []
+                # [云 worker 领取修复] 只有本次刷新拿到了真实的模板结果才覆盖已注册清单；
+                # None = 拉取失败/未知（含 499、超时、平台不可达），沿用上一份快照，
+                # 否则一次失败就会把清单清空 → register([]) → runtime_ids 归零 → 永不 claim。
+                if _all_runtimes is not None:
+                    _installed_live[:] = _all_runtimes
                 for _n, _rid in (_new_rid_by_name or {}).items():
                     if _rid and _rid not in runtime_ids:
                         runtime_ids.append(_rid)
@@ -1251,7 +1358,7 @@ def main():
     except Exception as e:
         log.warning(f"sandbox init failed: {e}")
 
-    async def _probe_templates_engines(adapter, pcfg, tpl_list, device) -> list:
+    async def _probe_templates_engines(adapter, pcfg, tpl_list, device) -> tuple[list, int]:
         """[引擎探测 spec §2.5] 建箱层全量探测：逐模板建箱 → 白名单扫描 → kill。
 
         即建即杀（幂等，与模板检查同款）；单模板失败不拖垮整批；探测在
@@ -1259,8 +1366,13 @@ def main():
         串行逐模板（建箱本身就是平台资源消费，探测箱不并发）。
         [模板上限 2026-11-04] 单批最多 PROBE_TEMPLATES_MAX（默认 8）——防模板
         爆炸串行探测数小时（每箱 20-40s，8 个 ≈ 3-5min）。超出的截断跳过并告警
-        （返回列表不含它们 → 调用方计为失败 → 重试循环下轮会再探）。
-        返回 [{\"template_id\", engines: [...]}]（探测不到引擎的模板不进列表）。
+        （计入失败 → 重试循环下轮会再探）。
+        返回 (结果列表, 失败计数)。结果列表 [{"template_id", engines: [...]}]
+        ——探测成功但无引擎的模板也进列表（engines=[]），由调用方原样上报
+        （服务端空 engines 不落 binding）并写负缓存 ok=true（[2026-11-20 用户裁定]
+        无引擎模板探完即成功，不再重探——此前不进列表导致对账公式永远差 1、
+        重试循环永不停、每 1800s 白费一轮建箱）。失败计数 = 建箱探测异常的模板数
+        + 本轮截断未探的模板数（不含无引擎的成功探测）。
         """
         import asyncio as _aio
         import time as _time_mod
@@ -1286,13 +1398,16 @@ def main():
                      f"templates already probed OK, skipping them")
         _tid_list = [t for t in _tid_list
                      if not _neg_cache.get((t.get("template_id") or "").strip(), {}).get("ok")]
-        if len(_tid_list) > _max:
-            log.warning(f"[engine-probe] template count {len(_tid_list)} > cap {_max} "
-                        f"(PROBE_TEMPLATES_MAX) — probing first {_max} this round, rest "
-                        f"deferred to the retry loop")
+        _pre_cap = len(_tid_list)
+        if _pre_cap > _max:
+            log.warning(f"[engine-probe] template count {_pre_cap} > cap {_max} "
+                         f"(PROBE_TEMPLATES_MAX) — probing first {_max} this round, rest "
+                         f"deferred to the retry loop")
             _tid_list = _tid_list[:_max]
+        _deferred = _pre_cap - len(_tid_list)
         tpl_list = _tid_list
         out = []
+        _probe_failed = 0   # 建箱探测异常计数（不含无引擎的成功探测）
         _leak_watch: set = set()  # 本批触碰过的 sandbox_id（批末清扫验证）
         _total = len([t for t in (tpl_list or []) if (t.get("template_id") or "").strip()])
         log.info(f"[engine-probe] start: {_total} templates, ~20-40s each (creates a "
@@ -1352,8 +1467,8 @@ def main():
                         # 兜底记录 sid——批末清扫用（kill 语义成功但平台未终止的箱）
                         try:
                             _leak_watch.add(getattr(inst, "sandbox_id", "") or "")
-                        except Exception:
-                            pass
+                        except Exception as _lw_e:
+                            log.debug(f"[engine-probe] leak-watch add failed: {_lw_e}")
                 finally:
                     pass  # enter 失败路径由 cloud_base.__enter__ 自 _do_kill 兜底
                 return engines
@@ -1377,6 +1492,7 @@ def main():
                         log.warning(f"[engine-probe] [{_done}/{_total}] template {_tid[:24]} probe "
                                     f"failed ({_dt:.0f}s): {_pe}")
                         _engines = None
+                        _probe_failed += 1
                         break
                     _bo = _res_backoffs[min(_res_attempt, len(_res_backoffs) - 1)]
                     log.warning(f"[engine-probe] [{_done}/{_total}] 130597 resource busy "
@@ -1389,6 +1505,10 @@ def main():
                     log.info(f"[engine-probe] [{_done}/{_total}] {pcfg.get('name', '?')} template "
                              f"{_tid[:24]}: {[e['engine'] for e in _engines]} ({_dt:.0f}s)")
                 else:
+                    # [2026-11-20] 探测成功但无引擎——进结果列表（engines=[]）：
+                    # 上报给服务端（空 engines 不落 binding、模板照常登记）+
+                    # 写负缓存 ok=true（下轮看护模式不再建箱重探）。
+                    out.append({"template_id": _tid, "engines": []})
                     log.info(f"[engine-probe] [{_done}/{_total}] {pcfg.get('name', '?')} template "
                              f"{_tid[:24]}: no engines ({_dt:.0f}s)")
         # [批末清扫 2026-11-06] 本批触碰过的箱逐个验证：仍存活→connect+kill（最多 3 轮）。
@@ -1411,8 +1531,9 @@ def main():
                             try:
                                 _Sb.connect(_sid, config=_cfg).kill()
                                 _alive.append(_sid)
-                            except Exception:
-                                pass  # connect 404=已销毁
+                            except Exception as _sk_e:
+                                # connect 404=已销毁；其余（网络抖动）留痕后继续扫
+                                log.debug(f"[engine-probe] sweep kill {_sid} failed: {_sk_e}")
                     if not _alive:
                         break
                     _leak_watch = set(_alive)
@@ -1448,8 +1569,9 @@ def main():
             out.append({"template_id": _tid,
                         "engines": [{"engine": e, "version": "", "source": "cache"}
                                     for e in (_hit.get("engines") or [])]})
-        log.info(f"[engine-probe] done: {len(out)}/{_total} templates with engines")
-        return out
+        log.info(f"[engine-probe] done: {len(out)}/{_total} templates probed OK this round, "
+                 f"{_probe_failed + _deferred} pending (failed/deferred)")
+        return out, _probe_failed + _deferred
 
     from src.domains.runtime.engine.client import RuntimeClient
 
@@ -1560,15 +1682,15 @@ def main():
                     _failed += 1
                 # [引擎探测 spec] 建箱层全量探测：每模板建箱 → 白名单 --version → kill（即建即杀）
                 # 前提: adapter 声明 probe_engines 能力（MANIFEST 双向断言保证实现存在）
-                _tpl_engines = []
+                # [对账改精确计数 2026-11-20 用户裁定] 探测函数返回 (结果, 失败计数)：
+                # 失败=建箱异常+截断未探；无引擎模板探完即成功（engines=[] 进结果并
+                # 写负缓存 ok=true）——不再用"扫描数-有引擎数"差值对账（真无引擎模板
+                # 永远差 1 → 重试循环永不停 → 每 1800s 白探一轮建箱）。
+                _tpl_engines: list = []
                 if _adapter and "probe_engines" in getattr(_adapter, "MANIFEST", {}).get("capabilities", []):
-                    _probe_pre = len([t for t in (_tpl_list or []) if (t.get("template_id") or "").strip()])
-                    _tpl_engines = await _probe_templates_engines(
+                    _tpl_engines, _probe_failed_cnt = await _probe_templates_engines(
                         _adapter, _pcfg, _tpl_list, device)
-                    # [失败对账] 探测返回的"有引擎模板数" < 扫描到的模板数 = 有模板
-                    # 未探完（130597 失败/无引擎/截断）——计入失败让重试循环接手。
-                    # 注: 真无引擎的模板会永远差 1（重试会重探——幂等, 只是多花一轮）。
-                    _failed += max(0, _probe_pre - len(_tpl_engines))
+                    _failed += _probe_failed_cnt
                 try:
                     _rep = await client.sandbox_provider_report(
                         platform=_pcfg.get("platform", ""),
@@ -1605,21 +1727,41 @@ def main():
         _probe_fail_count = await _report_providers_once()
 
         # [探测重试 2026-11-04] 失败重试任务：上轮有模板探测失败（130597 资源不足等）
-        # → 每 120s 重跑（指数退避），全成功自然退出。幂等性：detected
+        # → 每 120s 重跑（指数退避），全成功转入看护模式。幂等性：detected
         # binding 三元组 UPSERT + 模板登记幂等——重跑无副作用。修复"启动探测失败后
         # binding 永缺"缺口（.17 实例 22 实证）。
         # [退避加大 2026-11-10 用户裁定] 封顶 600s → 1800s（PROBE_RETRY_MAX_BACKOFF 可调），
         # 且连续 3 轮无进展（pending 不降——平台资源持续不足/不可达）直接跳到封顶，
         # 消掉对平台每 10 分钟一轮的无效冲击；有进展（部分模板探成）时保持指数节奏，
         # 短间隔快速收敛。
+        # [新模板看护 2026-11-20 用户裁定] 全成功后循环不再退出——转入看护模式，由
+        # 60s _template_refresh_loop 顺路做轻量 list_templates 扫描，发现平台侧模板
+        # id 集合变化 → set config["probe_watch_trigger"] 事件唤醒本循环重跑
+        # _report_providers_once（负缓存挡住已探模板，只建箱探测新增 id）。事件等待
+        # 带 PROBE_WATCH_INTERVAL（默认 600s）超时兜底——refresh 循环扫描自身失败
+        # （平台不可达等）不丢发现机会。修复「重试循环退出后新模板永不被自动发现、
+        # 只能重启 worker」缺口（此前唯一的自动发现机制是'真无引擎模板永远差 1'的
+        # 病态重试，本批已消）。
         _probe_max_backoff = int(os.environ.get("PROBE_RETRY_MAX_BACKOFF", "1800"))
+        _probe_watch_interval = int(os.environ.get("PROBE_WATCH_INTERVAL", "600"))
+        _watch_evt: asyncio.Event = config.setdefault("probe_watch_trigger", asyncio.Event())
         async def _probe_retry_loop():
             _backoff = 120
             _pending = _probe_fail_count
             _last_pending = None
             _stall_rounds = 0
-            while _pending:
-                await asyncio.sleep(_backoff)
+            while True:
+                if _pending:
+                    await asyncio.sleep(_backoff)
+                else:
+                    # 看护模式：等 refresh 循环的模板变更事件（60s 扫描发现新模板即刻
+                    # 触发）；超时兜底重跑一轮，防 refresh 扫描链路自身故障漏检。
+                    try:
+                        await asyncio.wait_for(_watch_evt.wait(), timeout=_probe_watch_interval)
+                    except asyncio.TimeoutError as _to_e:
+                        # 看护超时属正常节拍（refresh 未发现新模板）：留痕而非静默
+                        log.debug(f"[engine-probe] watch wait timed out: {_to_e}")
+                    _watch_evt.clear()
                 _pending = await _report_providers_once()
                 if _pending:
                     if _last_pending is not None and _pending >= _last_pending:
@@ -1638,7 +1780,11 @@ def main():
                              + (f" (stalled {_stall_rounds} rounds, max backoff)" if _stall_rounds >= 3 else ""))
                 else:
                     _backoff = 120
-            log.info("[engine-probe] all templates probed OK, retry loop exited")
+                    _stall_rounds = 0
+                    _last_pending = None
+                    log.info(f"[engine-probe] all pending cleared; watching for new "
+                             f"templates via refresh-loop scan (event-triggered, "
+                             f"{_probe_watch_interval}s timeout fallback)")
 
         asyncio.create_task(_probe_retry_loop())
 

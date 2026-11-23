@@ -778,7 +778,11 @@ class BwrapSandbox:
                                 "CODEARTS_CLI_AK", "CODEARTS_CLI_SK",
                                 # 华为云 AK/SK——agent 需要 OBS 操作
                                 "HUAWEICLOUD_SDK_AK", "HUAWEICLOUD_SDK_SK"}
-                if k not in _SAFE_TOKENS:
+                # 平台派生 token 键（BOT_GITEE_TOKEN / BOT_GITLAB_TOKEN …）同样放行：
+                # 白名单无法枚举未来平台，命名约定 BOT_/USER_ + _TOKEN 才是判据。
+                _is_platform_token = (
+                    (k.startswith("BOT_") or k.startswith("USER_")) and k.endswith("_TOKEN"))
+                if k not in _SAFE_TOKENS and not _is_platform_token:
                     env.pop(k, None)
         return env
 

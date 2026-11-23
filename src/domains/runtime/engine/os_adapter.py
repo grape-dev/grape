@@ -46,7 +46,7 @@ def version_file() -> str:
 
 def pid_file() -> str:
     """worker.pid 文件路径（单实例保护）。"""
-    return os.path.join(config_dir(), "worker.pid")
+    return os.path.join(config_dir(), os.environ.get("GRAPE_WORKER_PID_NAME", "worker.pid"))
 
 
 def kill_existing_worker() -> bool:

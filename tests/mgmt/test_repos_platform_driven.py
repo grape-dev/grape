@@ -84,8 +84,9 @@ def test_hosting_unsupported_platform_is_explicit():
     impl = repos_mod._hosting_implemented_providers()
     # 2026-11-13 B 批：gitee 接入（gitee_v5 方言，api_base 卡派生，实弹 host/repair/remove 200）
     assert {"gitcode", "github", "gitee"} <= set(impl)
-    # 未声明 HOSTING_FULL_FLOW 的平台必须仍在集合外（host 走 422 显式拒绝）
-    assert "gitlab" not in impl
+    # 本轮把 GitLab 托管接进全流程（HOSTING_FULL_FLOW），因此它现在应当在集合内；
+    # 未声明该能力位的平台仍需在集合外（host 走 422 显式拒绝），由上面的子集断言兜住。
+    assert "gitlab" in impl
 
 
 # ─────────── 3. git 传输：平台集合/域名卡驱动 ───────────

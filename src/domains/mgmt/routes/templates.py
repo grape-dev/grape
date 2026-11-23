@@ -128,6 +128,59 @@ class CreateTemplateRequest(BaseModel):
     template_id: str
     repo_name: str = ""
     provider: str = ""  # 平台卡 provider（gitcode/gitee/gitlab/…），空时按卡目录 ∩ 已绑定平台自动选
+    owner: str = ""     # 所属空间（个人空间留空；组/子组填 path），与 /repos/create 的 owner 同语义
+    private: bool = False  # 可见性：false=公开 true=私有（与 /repos/create 的 visibility 同语义）
+
+
+def _create_auto_init_kwargs(adapter) -> dict:
+    """一键创建建仓参数（B 方案）：不生成初始 commit。
+
+    空仓库首次 push 是快进（非 force），受保护默认分支也允许维护者普通 push，
+    从而模板代码能直接落在 main，与「新建项目」路径口径一致。
+    仅当适配器签名接受 auto_init 时传参（GitLab 方言接受；其它平台走各自默认，
+    行为不变）。
+    """
+    try:
+        import inspect
+        if "auto_init" in inspect.signature(adapter.create_repo).parameters:
+            return {"auto_init": False, "default_branch": "main"}
+    except (TypeError, ValueError) as e:  # 自带签名不可探测：按"不传该选项"处理
+        log.debug(f"create_repo signature probe skipped: {e}")
+    return {}
+
+
+def _create_repo_with_visibility_retry(adapter, token: str, repo_name: str, tpl: dict,
+                                       owner_space: str, private: bool = False) -> None:
+    """建仓 + 「私有组不许建公开项目」重试（2026-11-22）。
+
+    选到私有组织/组时，平台拒绝把仓库建成公开（实测 GitCode：
+    `Cannot create public project under private group`）。此时以 private=True
+    重试一次——失败即未建仓，重试无副作用；其它错误照旧抛出。
+    """
+    kwargs = _create_auto_init_kwargs(adapter)
+    desc = tpl.get("description", "")
+
+    def _create(private_flag: bool):
+        # 适配器约定：上游拒绝（重名/无权限/所属空间不存在）时**返回 {"error":...}**
+        # 而不抛异常（gitlab.py:165,172）。不判这一支会把「没建成」当成功：
+        # 后续 push 才失败 → 502 文案错、且 repo_created=True 会触发
+        # cleanup_stale_repo_data 清掉同名现有仓库的运行态（见 templates.py:396）。
+        res = adapter.create_repo(token, repo_name, description=desc, owner=owner_space,
+                                  private=private_flag, **kwargs)
+        if isinstance(res, dict) and res.get("error"):
+            raise RuntimeError(str(res["error"]))
+        return res
+
+    try:
+        _create(private)
+        return
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if not owner_space or not any(
+                k in msg for k in ("private group", "public project", "私有组")):
+            raise
+        log.info(f"create_from_template: 目标空间为私有组，改以私有仓库重试 ({owner_space})")
+    _create(True)
 
 
 def _pick_platform_token(user: dict) -> tuple[str, str]:
@@ -200,30 +253,70 @@ async def create_from_template(body: CreateTemplateRequest,
     if not _REPO_NAME_RE.match(repo_name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名只能包含字母、数字、下划线和短横线"})
 
+    # 2026-11-22 能力补齐：一键创建支持「所属空间」选择。
+    # 口径与 /repos/create 完全一致：空 = 个人空间；非空 = 组/子组 path（GitLab），
+    # 服务端清单校验（不把越权判断押给上游语义）。
+    owner_space = (body.owner or "").strip()
+    if owner_space:
+        from src.domains.mgmt.routes.repos import _valid_space_path, _assert_owner_visible
+        if not _valid_space_path(owner_space):
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "所属空间格式非法（可填组/子组路径如 group/sub，段只能含字母数字下划线连字符点，禁 .. 与首尾斜杠）"})
+        _assert_owner_visible(provider, api_token, owner_space, user)
+
     # 1. 创建空仓库（用户个人名下）。同名已存在时不视为致命错误：
     #    继续走 push + 托管流程（空仓库可复用；非空仓库 push 冲突时再报错）
+    from src.api.oauth_token import with_oauth_token, sanitize_upstream_error
     repo_created = False
+    owner_login = ""   # 2026-11-22：提前初始化——同名复用分支可能未经过 try 内赋值
+    _used_token = {"v": api_token}   # 提前初始化：异常分支也要用刷新后的 token
     try:
         # D44/S66：建仓+取 login 统一走适配器端口（存量平台子类委托原实现，
         # config-only 平台卡驱动自动正确，无平台名分支）
-        from src.kernel.token_resolver import create_provider
+        # Issue #3563：身份获取改经 with_oauth_token——过期 token（上游 401）刷新重试，
+        # 仍失败统一 401 reauth_required（detail 带 provider，Spec v2）；get_user_login
+        # 实现吞 401 返空（→502 无信息文案），故用 verify_token 让 401 穿透到刷新链。
+        # 捕获实际使用的 token：刷新成功后外层 api_token 已过期，建仓必须用新 token。
+        from src.domains.mgmt.vcs import create_provider
         _prov_adapter = create_provider(provider)
-        owner_login = _prov_adapter.get_user_login(api_token)
+        def _verify_login(t, _adapter=_prov_adapter):
+            _used_token["v"] = t
+            info = _adapter.verify_token(t)
+            if not isinstance(info, dict):
+                return ""
+            # GitLab /user 没有 login 字段（登录名在 username），只认 login 会让
+            # 一键创建在 GitLab 上恒 502「无法获取当前用户身份」。与 repos.py
+            # create-targets 的查重取身份口径保持一致。
+            return str(info.get("login") or info.get("username") or "")
+        owner_login = with_oauth_token(user, provider, _verify_login)
         if not owner_login:
+            # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法获取当前 {provider} 用户身份"})
-        _prov_adapter.create_repo(api_token, repo_name, description=tpl.get("description", ""))
+        _create_repo_with_visibility_retry(
+            _prov_adapter, _used_token["v"], repo_name, tpl, owner_space, body.private)
         repo_created = True
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e)
-        # 同名仓库冲突：HTTP 409/422 + "already exists"/"same name"/"已存在"
-        if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
+        if _is_duplicate_repo_error(msg):
             repo_created = False  # 仓库已存在，尝试复用
+            # 复用同名仓：try 内可能未走到 owner_login 赋值 → 单独取一次身份，
+            # 否则下面的 full_name 会退化成 "/<name>"（历史潜在 500）。
+            if not owner_login:
+                try:
+                    from src.domains.mgmt.vcs import create_provider as _cp_dup
+                    _info = _cp_dup(provider).verify_token(_used_token["v"]) or {}
+                    owner_login = str(_info.get("login") or _info.get("username") or "")
+                except Exception:
+                    owner_login = ""
         else:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
+            # Issue #3563：上游异常短消息化——剥离内部 API URL（原文仅落日志）
+            log.warning(f"create_from_template: create repo failed (provider={provider}, user={user.get('id', '')}): {e}")
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {sanitize_upstream_error(e)}"})
 
-    full_name = f"{owner_login}/{repo_name}"
+    full_name = f"{owner_space or owner_login or user.get('username', '')}/{repo_name}"
 
     # 建仓/复用成功后、push 模板代码与 host 之前立刻失效 user_repos 缓存：
     # 新仓库需马上进入「未托管」栏（即便后续 push/host 失败，仓库已真实存在，
@@ -235,19 +328,25 @@ async def create_from_template(body: CreateTemplateRequest,
         log.warning(f"create_from_template: invalidate user_repos failed: {_inv_e}")
 
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
+    # Issue #3563：用 with_oauth_token 实际生效的 token（刷新成功后外层 api_token 已过期）
     try:
         bot_token, _ = _load_global_bot_config(provider=provider)
         import asyncio, functools
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None,
-            functools.partial(push_template_to_repo, tpl, owner_login, repo_name,
-                              api_token, bot_token=bot_token, provider=provider,
+        _push_result = await loop.run_in_executor(None,
+            functools.partial(push_template_to_repo, tpl, owner_space or owner_login, repo_name,
+                              _used_token["v"], bot_token=bot_token, provider=provider,
                               user_id=user.get("id", "") or ""))
     except Exception as e:
         log.warning(f"template push failed: {e}")
         if not repo_created:
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {owner_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
+        # Issue #3563：上游/git 异常短消息化——剥离内部 URL（原文仅落日志）
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {sanitize_upstream_error(e)}"})
+
+    # 模板落点：pushed_to != "main" 表示默认分支受保护、代码被推到一次性分支，
+    # 默认分支仍然是空的——不告知用户就等于假报"创建并托管成功"。
+    pushed_to = str((_push_result or {}).get("pushed_to") or "main") if isinstance(_push_result, dict) else "main"
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
     #    host_repo 是同步函数（含 GitCode HTTP 调用），用 to_thread 避免阻塞 event loop
@@ -292,6 +391,14 @@ async def create_from_template(body: CreateTemplateRequest,
             host_warning = "托管配置失败"
         msg += f"。⚠️ 重要提醒：请到仓库设置 → 成员管理，将机器人账号（{bot_username}）添加为维护者，然后手动托管仓库以完成自动化配置。"
 
+    if pushed_to != "main":
+        # 模板代码只落到了特性分支：默认分支为空，必须显式告知
+        _branch_note = (f"模板代码已推送到分支 {pushed_to}（默认分支受保护，无法直接写入），"
+                        f"请人工或流水线把该分支合入默认分支后，仓库才有模板内容。")
+        msg = f"{msg}。⚠️ {_branch_note}"
+        host_warning = (host_warning + "；" + _branch_note) if host_warning else _branch_note
+        log.warning(f"template push landed on '{pushed_to}' instead of main: {full_name}")
+
     # 4. 异步首次托管引导（仅模板创建触发）
     #    仓库托管时 apply_default_scene_to_repo 已应用默认「通用开发」场景。
     #    如果模板自带 scene_id（如 hello-world），覆盖为模板对应的场景。
@@ -303,7 +410,7 @@ async def create_from_template(body: CreateTemplateRequest,
         # owner_login 来自 get_user_gitcode_login/get_user_github_login（VCS /user 接口）
         # 下游 create_standard_task 用 assignee=owner 调 VCS API 指派 Issue，需要平台 login
         # 下游 _get_user_id_by_gitcode(owner, repo_key) 查 um 平台列，也需要平台 login
-        owner = owner_login or user.get("username", "")
+        owner = owner_space or owner_login or user.get("username", "")
         # 仓库是全新创建时，清理同名旧仓库可能残留的 DB 数据
         # （旧仓库若被用户在 GitCode 网页直接删除、未走解除托管，
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）
@@ -325,6 +432,7 @@ async def create_from_template(body: CreateTemplateRequest,
     from src.kernel.repo_key import to_repo_key as _to_rk
     return {"full_name": full_name, "webhook_id": webhook_id,
             "host_warning": host_warning,
+            "pushed_to": pushed_to,
             "message": msg,
             "provider": provider,
             "scene_id": tpl.get("scene_id") or ctx.get("scene_id") or "",
@@ -335,6 +443,26 @@ import json, os, re, asyncio
 from src.domains.mgmt.user.repo_manager import push_template_to_repo
 
 from src.api.deps import get_user_token_for
+
+def _is_duplicate_repo_error(msg: str) -> bool:
+    """同名仓库冲突判定（按平台真实报错文案）。
+
+    GitLab 对重名返回 400 + "has already been taken"，此前只认 409/422 与
+    "already exists"，于是 GitLab 的重名被当成上游故障 → 用户看到 502 而不是
+    "仓库已存在，正在复用"。
+    """
+    import re as _re
+
+    text = (msg or "").lower()
+    # 状态码必须成词：裸子串会把端口号/commit 前缀/id 里的 409、422 误判成重名
+    # （上游错误体常含 "1409" 之类），边界用 (?!\d) + (?<!\d)。
+    if _re.search(r"(?<!\d)(409|422)(?!\d)", text):
+        return True
+    return any(k in text for k in (
+        "already exists", "already been taken", "has already been taken",
+        "same name", "path already", "已存在", "已经存在", "重名",
+    ))
+
 
 def _apply_template_scene(repo_key: str, tpl_scene_id: str, user_id: str = "") -> str:
     """把模板自带场景应用到仓库并写 managed_repos.dev_scene，返回仓内副本真实 scene_id。

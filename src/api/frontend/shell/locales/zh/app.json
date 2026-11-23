@@ -32,6 +32,7 @@
     "organizations": "组织管理",
     "autopilot": "自动化",
     "obs_cockpit": "运行驾驶舱",
+    "plugins": "插件市场",
     "sandbox": "云沙箱"
   },
   "sidebar": {
@@ -357,7 +358,10 @@
     "back_to_website": "返回官网",
     "add_new": "新增仓库托管",
     "pick_first": "请先在仓库下拉里选择一个仓库",
-    "forbidden": "没有该仓库的访问权限，已切回仓库大厅"
+    "forbidden": "没有该仓库的访问权限，已切回仓库大厅",
+    "org_repo": "组织仓库",
+    "org_group": "组织",
+    "org_project": "组织项目"
   },
   "toast": {
     "theme_switched_default": "已切换到默认风格",
@@ -746,7 +750,10 @@
     "pat_badge_oauth": "由登录授权提供",
     "pat_broken_desc": "这条 PAT 记录无法解密（密钥变更或记录损坏），请重配 PAT 后仓库列表即可恢复",
     "pat_oauth_desc": "该平台没有配置 PAT，仓库访问由登录授权（OAuth）提供；如需独立凭据请配置 PAT",
-    "transfer_need_reauth": "绑定已转移，请再授权一次以启用仓库列表"
+    "transfer_need_reauth": "绑定已转移，请再授权一次以启用仓库列表",
+    "pat_expires_ok": "PAT 到期日 {date}",
+    "pat_expires_soon": "PAT 将在 {days} 天后过期（{date}），请尽快重新配置",
+    "pat_expires_expired": "PAT 已于 {date} 过期，仓库同步与智能体任务会全部失败，请重新配置"
   },
   "error": {
     "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",
@@ -793,5 +800,11 @@
   },
   "deeplink": {
     "repo_not_found": "无法通过该链接进入：仓库不存在、未托管或你没有权限"
+  },
+  "boot": {
+    "watchdog_title": "页面还在加载",
+    "watchdog_body": "服务端响应较慢，已等待 {secs} 秒。可以再等一下，或点下方按钮重试。",
+    "watchdog_retry": "重试",
+    "watchdog_clear": "清除缓存并重载"
   }
 }

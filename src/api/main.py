@@ -16,10 +16,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api import server_common
-
-from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
+from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit, org_analysis
 from src.domains.mgmt.routes import categories as categories_routes
-
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 
 from src.domains.insight.routes import dashboard, search, health, latency, observability
@@ -323,6 +321,12 @@ def _start_obs_sample_task():
                 if _nc:
                     log.info(f"Observability logs cleaned: {_nc} rows")
                     _obs_loops.beat("obs_log_cleanup")
+                    # 插件调用审计留存（#1091 C3）：同挂点小时限流清理（14 天）
+                    from src.domains.insight.observability import plugin_audit as _plugin_audit_mod
+                    _npc = await asyncio.to_thread(_plugin_audit_mod.maybe_cleanup)
+                    if _npc:
+                        log.info(f"Plugin call logs cleaned: {_npc} rows")
+                        _obs_loops.beat("plugin_audit_cleanup")
                 _obs_loops.beat("obs_sample")
             except Exception as e:
                 _obs_loops.fail("obs_sample", e)
@@ -502,6 +506,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
+    # 官方插件同步（#1084 B1）：复用 skill_sync 同步模式（json 权威 → DB → OBS）
+    try:
+        from src.domains.runtime.storage.plugin_sync import start_plugin_sync_scheduler
+        start_plugin_sync_scheduler()
+    except Exception as e:
+        log.warning(f"Plugin sync scheduler start failed: {e}")
+
     # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
     try:
         from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
@@ -565,6 +576,12 @@ async def lifespan(app: FastAPI):
         _outbox_mod.stop_outbox_consumer(app)
     except Exception as _oe:
         log.warning(f"IM outbox consumer stop failed: {_oe}")
+    # 官方插件同步：优雅关闭定时任务（#1084）
+    try:
+        from src.domains.runtime.storage.plugin_sync import stop_plugin_sync_scheduler
+        await stop_plugin_sync_scheduler()
+    except Exception:
+        pass
     await server_tasks.stop_insight_tasks(app, _insight_h)
     await server_tasks.stop_worker_tasks(app, _worker_h)
     await server_tasks.stop_event_tasks(app, _event_h)
@@ -583,10 +600,12 @@ async def lifespan(app: FastAPI):
 
 
 from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口（控制字符转义）
+# Issue #2784：契约版本号单一来源（从现网递进 + a/b/rc 预发布双轨）
+from src.api.contract_versioning import CONTRACT_VERSION
 
 app = server_common.build_app(
     title="Agentic DevOps API",
-    version="2.2.0",
+    version=CONTRACT_VERSION,
     lifespan=lifespan,
     default_response_class=SafeJSONResponse,
 )
@@ -615,7 +634,17 @@ app.include_router(events.router)
 
 app.include_router(chat.router)
 
+from src.domains.mgmt.routes.plugin_exec import router as plugin_exec_router
 app.include_router(settings.router)
+app.include_router(plugin_exec_router)
+
+# 插件市场三张路由（arch 移植，总纲 #1078）：B1 货架 /api/plugins、C2 Agent 协商、A1 L0 发布门禁
+from src.domains.mgmt.routes.plugins import router as plugins_router
+from src.domains.mgmt.routes.plugins_agent import router as plugins_agent_router
+from src.domains.mgmt.routes.plugin_market import router as plugin_market_router
+app.include_router(plugins_router)
+app.include_router(plugins_agent_router)  # Issue #1090 C2/D1-a：Agent 侧协商端点
+app.include_router(plugin_market_router)  # Issue #1079：上传/上架前 L0 强校验门禁
 
 app.include_router(skills.router)
 
@@ -662,7 +691,14 @@ app.include_router(autopilot.router)
 from src.domains.mgmt.routes import sandbox_admin
 app.include_router(sandbox_admin.router)
 app.include_router(orgs.router)
-
+app.include_router(org_repos.router)
+app.include_router(org_dispatches.router)
+# 组织上下文 + 组织知识库（Issue #2150）
+app.include_router(org_context_store.router)
+app.include_router(org_knowledge.router)
+# 组织审计只读查询（Issue #2260）
+app.include_router(org_audit.router)
+app.include_router(org_analysis.router)
 app.include_router(community.router)
 
 app.include_router(observability.router)
@@ -827,6 +863,11 @@ install_request_middleware(app)
 
 install_health_endpoints(app, service_name="server")
 
+
+
+# 可选官网静态站挂载（WEBSITE_DIR 设置时在 /website/* 提供，测试机预览用；默认关闭）
+from src.api.website_mount import install_website_routes
+install_website_routes(app)
 
 install_spa_routes(app)
 

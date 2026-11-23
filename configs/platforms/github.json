@@ -8,6 +8,7 @@
     "issue_search": "是否支持 issue 搜索端点（false=代理层走列表过滤）",
     "branch_create_form": "建分支形态：form=POST /branches，refs_sha=先查 base sha 再 POST /git/refs",
     "workflows_write": "是否允许写 .github/workflows（凭据级三态覆盖的默认值）",
+    "create_repo_options": "建仓可选参数（auto_init/default_branch）能力位；true=该平台适配器接受这两个可选参数",
     "pr_comment_endpoint": "PR 评论端点族：issues=借 issue 评论接口，空=专用端点",
     "pr_labels_via_issues": "标签是否走 issues 接口（true=issues/labels）",
     "git_tree_family": "文件树/内容 API 族：github_api=git/trees 风格",
@@ -28,6 +29,7 @@
   "webhook_dialect": "github_web",
   "workflows_write": false,
   "clone_auth": "x_access_token",
+  "create_repo_options": true,
   "download_base": "https://codeload.github.com",
   "pat_create_url": "https://github.com/settings/tokens",
   "pr_comment_endpoint": "issues",
@@ -36,5 +38,6 @@
   "owner_identity_token_fallback": true,
   "brand_color": "#24292f",
   "legacy_token_symbol": "get_user_github_token_with_refresh",
-  "bot_username": ""
+  "bot_username": "",
+  "issue_write_form": "repo_path"
 }

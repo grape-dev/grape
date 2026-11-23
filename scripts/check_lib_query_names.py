@@ -396,6 +396,12 @@ def collect_registry(domain: str) -> DomainRegistry | None:
         for name, value in vars(module).items()
         if not name.startswith("_") and callable(value)
     } - PROBE_NAMES
+    # PEP 562 懒导出类（如 runtime.public 的 `_LAZY_CLASS_ATTRS`）：名字不在模块
+    # vars 中，但显式登记在懒导出表里，属于公开契约面。门禁必须承认这份登记，
+    # 否则 `runtime_public.VcsApiClient` 一类跨域引用会被误判为「未登记名字」。
+    _lazy_attrs = getattr(module, "_LAZY_CLASS_ATTRS", None)
+    if isinstance(_lazy_attrs, dict):
+        functions |= {str(name) for name in _lazy_attrs if not str(name).startswith("_")}
     queries = getattr(module, QUERY_REGISTRY_ATTR, None)
     return DomainRegistry(
         functions=functions,

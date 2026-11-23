@@ -623,8 +623,13 @@ def test_contract_methods_registry_sync():
         actual = set(getattr(cls, "__abstractmethods__", ()))
         assert actual == set(route_config.CONTRACT_METHODS[service]), service
     total = sum(len(v) for v in route_config.CONTRACT_METHODS.values())
-    # 23 基线 + P2 补齐（N1–N5/N11/N12 runtime 7 + N6/N8/N9/N10 mgmt 4）
-    assert total == 38  # 34 + 本轮 mgmt→runtime/insight 迁移的 4 个契约方法
+    # 组成：mgmt 12 + runtime 27 + insight 8 = 47
+    # 演进：23 基线 → +P2 补齐（N1–N5/N11/N12 runtime 7 + N6/N8/N9/N10 mgmt 4）
+    #      → +Issue #3632 平台卡跨域只读（mgmt.get_repo_platform_cards）
+    #      → +Issue #3054 用户业务数据移交（runtime reconcile_engine_references /
+    #        user_business_table_counts / transfer_user_business_data）
+    # 该常量只作快照计数（真门禁是上面的逐服务等价断言），ABC 面变化时同步更新。
+    assert total == 47
 
 
 def test_public_primitives_registry_sync():

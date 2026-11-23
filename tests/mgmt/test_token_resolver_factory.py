@@ -35,8 +35,8 @@ def gitee_card():
 # ---------------------------------------------------------------- S23
 
 def test_s23_create_provider_factory(gitee_card):
-    from src.kernel.token_resolver import create_provider, GenericVcsProvider
-    from src.kernel.token_resolver import GitCodeProvider, GitHubProvider
+    from src.domains.mgmt.vcs import create_provider, GenericVcsProvider
+    from src.domains.mgmt.vcs import GitCodeProvider, GitHubProvider
     # config-only 平台 → GenericVcsProvider
     p = create_provider("gitee")
     assert isinstance(p, GenericVcsProvider)
@@ -51,13 +51,13 @@ def test_s23_create_provider_factory(gitee_card):
     assert isinstance(create_provider("gitcode"), GitCodeProvider)
     assert isinstance(create_provider("github"), GitHubProvider)
     # D22 修正：gitlab 走卡驱动 Generic（此前错误回退 GitCodeProvider）
-    from src.kernel.token_resolver import GenericVcsProvider as _Gen
+    from src.domains.mgmt.vcs import GenericVcsProvider as _Gen
     assert isinstance(create_provider("gitlab"), _Gen)
     assert create_provider("gitlab").provider_name == "gitlab"
 
 
 def test_s23_verify_token_hits_card_endpoint(gitee_card, monkeypatch):
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     seen = {}
 
     class _FakeResp:
@@ -90,7 +90,7 @@ def test_s23_verify_token_hits_card_endpoint(gitee_card, monkeypatch):
 
 def test_s23_pat_fetch_from_user_credentials(gitee_card):
     """D15 批次 0 PAT 存储：无 OAuth 身份时从 user_credentials <p>_pat 取。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.mgmt.auth.grape_account_db import create_grape_account
     acc = create_grape_account(username=f"s23_{uuid.uuid4().hex[:8]}", email="", password="pw")
     assert acc
@@ -135,7 +135,7 @@ def _clear_oauth_providers():
 
 def test_s24_login_channel_changes_do_not_affect_repo_axis(gitee_card):
     """增删 gitee 登录渠道卡不影响仓库平台卡解析/取 PAT（两轴独立）。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.mgmt.auth.providers import get_provider
 
     _clear_oauth_providers()
@@ -192,8 +192,8 @@ def test_s24_repo_card_changes_do_not_affect_login_axis():
 
 def test_s34_create_provider_from_repo_key_card_driven(gitee_card):
     """审阅缺口修复：repo_key 前缀 → 卡驱动工厂（gitee 拿 Generic，不再是 GitCode）。"""
-    from src.kernel.token_resolver import create_provider_from_repo_key, GenericVcsProvider
-    from src.kernel.token_resolver import GitCodeProvider, GitHubProvider
+    from src.domains.mgmt.vcs import create_provider_from_repo_key, GenericVcsProvider
+    from src.domains.mgmt.vcs import GitCodeProvider, GitHubProvider
     assert isinstance(create_provider_from_repo_key("gitee:o/r"), GenericVcsProvider)
     assert create_provider_from_repo_key("gitee:o/r").provider_name == "gitee"
     # 存量回归：三平台原类 + 裸 key 默认 gitcode

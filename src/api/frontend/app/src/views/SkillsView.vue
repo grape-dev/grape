@@ -6,6 +6,7 @@
       <div class="seg-bar sk__seg">
         <a @click="G.app.nav('scene-market')">🏪 {{ tt('scenes_tab') }}</a>
         <a class="ac">⚙ {{ tt('skills_tab') }}</a>
+        <a v-if="showPlugins" @click="G.app.nav('plugins')">🧩 {{ tt('plugins_tab') }}</a>
       </div>
       <div class="sk__intro">
         <b class="sk__intro-b">{{ tt('scenes_tab') }}</b>
@@ -732,81 +733,94 @@
       </template>
     </AGModal>
 
-    <!-- ═══ Issue #3202：免传包编辑元信息（仓库/个人技能） ═══ -->
-    <AGModal
+    <!-- ═══ Issue #3202：免传包编辑元信息（2026-11-22 方案一：右侧抽屉 + 分区卡片，摘要独立行、五槽逐行全宽） ═══ -->
+    <AGDrawer
       :open="metaCtx.open"
       :title="tt('edit_meta') + (metaCtx.name ? ' — ' + metaCtx.name : '')"
+      :subtitle="editMetaSubtitle"
+      wide
       @close="metaCtx.open = false"
     >
-      <div class="sk__form">
-        <div class="srow sk__srow">
-          <label>{{ tt2('upload.agent_type') }}</label>
-          <AGSelect v-model="metaCtx.agentType" :options="agentOpts" class="sk__f1" />
-        </div>
-        <div class="srow sk__srow">
-          <label>{{ tt('upload_cat_l1') }}</label>
-          <AGSelect v-model="metaCtx.catL1" :options="l1Opts" class="sk__f1" />
-        </div>
-        <div class="srow sk__srow">
-          <label>{{ tt('upload_cat_l2') }}</label>
-          <AGSelect v-model="metaCtx.catL2" :options="metaL2Opts" class="sk__f1" />
-        </div>
-        <div class="srow sk__srow">
-          <label>{{ tt('upload_tags') }}</label>
-          <div class="sk__f1 sk__chip-input">
-            <span v-for="(t, i) in metaCtx.tagsArr" :key="'mt' + i" class="sk__chip sk__chip--edit">
-              {{ t.name }}<a class="sk__chip-x" @click="removeTag(metaCtx, i)">×</a>
-            </span>
-            <input
-              v-if="metaCtx.tagsArr.length < SKILL_MAX_TAGS"
-              v-model="metaCtx.tagDraft"
-              class="sk__chip-entry"
-              :placeholder="tt('upload_tags_ph')"
-              @keydown="onTagKeydown($event, metaCtx)"
-              @blur="commitTag(metaCtx)"
-            />
+      <div class="sk__form sk__meta-form">
+        <div class="sk__grp">
+          <div class="sk__grp-title">{{ tt('edit_grp_base') }}</div>
+          <div class="sk__fld">
+            <label>{{ tt2('upload.agent_type') }}</label>
+            <AGSelect v-model="metaCtx.agentType" :options="agentOpts" />
+          </div>
+          <div class="sk__fld">
+            <label>{{ tt('upload_summary') }}</label>
+            <div class="sk__summary-fld">
+              <input
+                v-model="metaCtx.summary"
+                :maxlength="SKILL_SUMMARY_MAX"
+                :placeholder="tt('upload_summary_ph')"
+              />
+              <span class="sk__counter">{{ (metaCtx.summary || '').length }}/50</span>
+            </div>
+          </div>
+          <div class="sk__fld">
+            <label>{{ tt('field_description') }}</label>
+            <textarea v-model="metaCtx.description" class="sk__textarea" rows="5"></textarea>
           </div>
         </div>
-        <div class="srow sk__srow">
-          <label>{{ tt('upload_summary') }}</label>
-          <div class="sk__f1 sk__summary-fld">
-            <input
-              v-model="metaCtx.summary"
-              :maxlength="SKILL_SUMMARY_MAX"
-              class="sk__f1"
-              :placeholder="tt('upload_summary_ph')"
-            />
-            <span class="sk__counter">{{ (metaCtx.summary || '').length }}/50</span>
+
+        <div class="sk__grp">
+          <div class="sk__grp-title">{{ tt('edit_grp_class') }}</div>
+          <div class="sk__grp-2col">
+            <div class="sk__fld">
+              <label>{{ tt('upload_cat_l1') }}</label>
+              <AGSelect v-model="metaCtx.catL1" :options="l1Opts" />
+            </div>
+            <div class="sk__fld">
+              <label>{{ tt('upload_cat_l2') }}</label>
+              <AGSelect v-model="metaCtx.catL2" :options="metaL2Opts" />
+            </div>
+          </div>
+          <div class="sk__fld">
+            <label>{{ tt('upload_tags') }}</label>
+            <div class="sk__chip-input">
+              <span v-for="(t, i) in metaCtx.tagsArr" :key="'mt' + i" class="sk__chip sk__chip--edit">
+                {{ t.name }}<a class="sk__chip-x" @click="removeTag(metaCtx, i)">×</a>
+              </span>
+              <input
+                v-if="metaCtx.tagsArr.length < SKILL_MAX_TAGS"
+                v-model="metaCtx.tagDraft"
+                class="sk__chip-entry"
+                :placeholder="tt('upload_tags_ph')"
+                @keydown="onTagKeydown($event, metaCtx)"
+                @blur="commitTag(metaCtx)"
+              />
+            </div>
           </div>
         </div>
-        <div class="sk__file-fld">
-          <label>{{ tt('field_description') }}</label>
-          <textarea v-model="metaCtx.description" class="sk__textarea" rows="4"></textarea>
-        </div>
-        <div class="sk__intro-edit">
-          <div class="sk__intro-edit-title">{{ tt('skill_intro') }}（{{ tt('intro_edit_hint') }}）</div>
-          <div class="srow sk__srow">
+
+        <div class="sk__grp">
+          <div class="sk__grp-title">
+            {{ tt('skill_intro') }}<span class="sk__grp-hint">{{ tt('intro_edit_hint') }}</span>
+          </div>
+          <div class="sk__fld">
             <label>{{ tt('ov_scope') }}</label>
-            <textarea v-model="metaCtx.intro.scope" class="sk__textarea sk__textarea--sm" rows="2"></textarea>
+            <textarea v-model="metaCtx.intro.scope" class="sk__textarea sk__textarea--sm" rows="3"></textarea>
           </div>
-          <div class="srow sk__srow">
+          <div class="sk__fld">
             <label>{{ tt('ov_steps') }}</label>
-            <textarea v-model="metaCtx.intro.steps" class="sk__textarea sk__textarea--sm" rows="2"></textarea>
+            <textarea v-model="metaCtx.intro.steps" class="sk__textarea sk__textarea--sm" rows="3"></textarea>
           </div>
-          <div class="srow sk__srow">
+          <div class="sk__fld">
             <label>{{ tt('ov_products') }}</label>
-            <textarea v-model="metaCtx.intro.products" class="sk__textarea sk__textarea--sm" rows="2"></textarea>
+            <textarea v-model="metaCtx.intro.products" class="sk__textarea sk__textarea--sm" rows="3"></textarea>
           </div>
-          <div class="srow sk__srow">
+          <div class="sk__fld">
             <label>{{ tt('ov_constraints') }}</label>
-            <textarea v-model="metaCtx.intro.constraints" class="sk__textarea sk__textarea--sm" rows="2"></textarea>
+            <textarea v-model="metaCtx.intro.constraints" class="sk__textarea sk__textarea--sm" rows="3"></textarea>
           </div>
-          <div class="srow sk__srow">
+          <div class="sk__fld">
             <label>{{ tt('ov_review') }}</label>
             <textarea
               v-model="metaCtx.intro.review"
               class="sk__textarea sk__textarea--sm"
-              rows="2"
+              rows="3"
               :placeholder="tt('ov_review_ph')"
             ></textarea>
           </div>
@@ -820,17 +834,17 @@
           metaCtx.busy ? tt2('action.saving') : tt2('action.save')
         }}</AGButton>
       </template>
-    </AGModal>
+    </AGDrawer>
 
-    <!-- ═══ 删除确认弹窗 ═══ -->
+    <!-- ═══ 删除确认弹窗（标题带技能名插值；正文不再重复问句） ═══ -->
     <AGModal
       :open="deleteCtx.open"
-      :title="tc2('skills.confirm.delete_skill')"
+      :title="tc2('skills.confirm.delete_skill', { name: deleteCtx.skill ? (deleteCtx.skill.display_name || deleteCtx.skill.name || '') : '' })"
       @close="deleteCtx.open = false"
     >
       <div class="sk__conf">
         <div class="sk__conf-ic">🗑</div>
-        <h3>{{ tc2('skills.confirm.delete_skill') }}</h3>
+        <h3>{{ deleteCtx.skill ? (deleteCtx.skill.display_name || deleteCtx.skill.name) : '' }}</h3>
         <div class="sk__conf-desc">{{ tt('delete_skill_tip') }}</div>
       </div>
       <template #footer>
@@ -873,9 +887,13 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import AGButton from '@/components/ui/AGButton.vue'
 import AGModal from '@/components/ui/AGModal.vue'
+import AGDrawer from '@/components/ui/AGDrawer.vue'
 import AGSelect from '@/components/ui/AGSelect.vue'
+import { pluginsEnabled } from '@/lib/features'
 
 const G = globalThis
+// Issue #3395：插件市场前端入口开关（服务端注入 window.__FEATURES__，默认开）
+const showPlugins = pluginsEnabled()
 
 // app.js 契约：renderSkillDetail(d) 入口注入完整数据对象（含 huawei-cloud 分包）
 const props = defineProps({ initialDetail: { type: Object, default: null } })
@@ -896,8 +914,8 @@ function tc(key) {
   const v = G.I18N.t(full)
   return v && v !== full ? v : key === 'back' ? '返回' : key
 }
-function tc2(key) {
-  const v = G.I18N.t(key)
+function tc2(key, vars) {
+  const v = G.I18N.t(key, vars)
   return v && v !== key ? v : '确认删除此技能？'
 }
 function th(key) {
@@ -907,6 +925,7 @@ function th(key) {
 }
 const KEY_DEFAULTS = {
   scenes_tab: '场景',
+  plugins_tab: '插件',
   skills_tab: '技能',
   market_intro_scene: '是多个技能按开发流程组合的开发模式',
   market_intro_skill: '是单个 Agent 的能力包',
@@ -922,6 +941,8 @@ const KEY_DEFAULTS = {
   upload_summary: '摘要（必填，≤50 字）',
   upload_summary_ph: '一句话说明用途，不要使用 → 或 -> 流程链',
   edit_meta: '编辑信息',
+  edit_grp_base: '基本信息',
+  edit_grp_class: '分类与标签',
   field_description: '概述',
   tag_limit: '标签最多 5 个',
   tag_too_long: '单个标签最多 12 个字符',
@@ -1329,7 +1350,8 @@ function stale() {
 }
 
 function loadCategories() {
-  if (categories.value.length) return
+  // Issue #3648：去掉原有的会话级分类缓存。
+  // 管理员收敛分类后整页仍显示旧结构；进入视图 / 切 tab 时重新拉取。
   G.API.get('/skills/categories')
     .then(function (d) {
       categories.value = d.categories || []
@@ -2398,6 +2420,7 @@ const metaCtx = reactive({
   open: false,
   id: 0,
   name: '',
+  scope: 'user',
   agentType: '',
   catL1: '0',
   catL2: '0',
@@ -2407,6 +2430,12 @@ const metaCtx = reactive({
   description: '',
   intro: { scope: '', steps: '', products: '', constraints: '', review: '' },
   busy: false,
+})
+// 抽屉头部的归属上下文：scope · 仓库 · 元信息编辑不覆盖 SKILL.md 正文
+const editMetaSubtitle = computed(function () {
+  var scopeLabel = metaCtx.scope === 'repo' ? td('scope_repo') : td('scope_user')
+  var repoPart = metaCtx.scope === 'repo' && currentRepo.value ? ' · ' + currentRepo.value : ''
+  return scopeLabel + repoPart
 })
 const metaL2Opts = computed(function () {
   var hit = catTree.value.filter(function (c) {
@@ -2428,6 +2457,7 @@ function askEditMeta(s) {
   metaCtx.open = true
   metaCtx.id = s && s.id
   metaCtx.name = (s && (s.display_name || s.name)) || ''
+  metaCtx.scope = (s && s.scope) || 'user'
   metaCtx.agentType = (s && s.agent_type) || ''
   metaCtx.catL1 = String((s && s.cat_l1_id) || 0)
   metaCtx.catL2 = String((s && s.cat_l2_id) || 0)
@@ -2958,24 +2988,99 @@ onMounted(function () {
 .sk__textarea:focus {
   border-color: var(--a);
 }
-.sk__intro-edit {
-  margin-top: 6px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--hairline);
+/* ── 编辑信息抽屉（2026-11-22 方案一）：分区卡片 + label 上置 ── */
+.sk__meta-form {
+  gap: 14px;
 }
-.sk__intro-edit-title {
-  margin-bottom: 8px;
+/* 抽屉内控件加大一档（2026-11-22 用户拍板：摘要单独一行、五槽逐行全宽、框加大） */
+.sk__meta-form .sk__textarea {
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  border-radius: 8px;
+}
+.sk__meta-form .sk__textarea--sm {
+  min-height: 74px;
+}
+.sk__meta-form .sk__summary-fld input {
+  height: 40px;
+  padding: 0 12px;
+  font-size: 13px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  background: var(--bg);
+  outline: none;
+  flex: 1;
+  color: var(--t);
+}
+.sk__meta-form .sk__summary-fld input:focus {
+  border-color: var(--a);
+}
+.sk__meta-form .sk__chip-input {
+  min-height: 40px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.sk__meta-form .sk__fld > label {
+  font-size: 12px;
+  color: var(--t2);
+  font-weight: 600;
+}
+/* scoped 样式打不进子组件内部 select：必须 :deep() 穿透（AGSelect 内部原生 select） */
+.sk__meta-form :deep(.a-select select) {
+  min-height: 40px;
+  font-size: 13px;
+  border-radius: 8px;
+}
+.sk__grp {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--hairline, var(--b));
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--bg);
+}
+.sk__grp + .sk__grp {
+  padding-top: 14px;
+  border-top: 1px solid var(--b);
+}
+.sk__grp-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--t2);
+}
+.sk__grp-hint {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--t3);
+}
+.sk__grp-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+}
+.sk__fld {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.sk__fld > label {
+  font-size: 11px;
+  color: var(--t2);
+}
+.sk__fld .sk__summary-fld {
+  flex: 1;
 }
 .sk__textarea--sm {
   font-size: 12px;
   line-height: 1.5;
   min-height: 44px;
-}
-.sk__intro-edit .srow textarea {
-  flex: 1;
 }
 .sk__title-row {
   display: flex;

@@ -96,8 +96,6 @@ class CubeSandboxInstance(CloudSandboxBase):
         self._sandbox_id: str = ""
         self._template_id = template_id
         self._init_envs: dict = {}
-        self._grape_server_url: str = self._config.get("grape_server_url", "")
-        self._grape_cli_token: str = self._config.get("grape_cli_token", "")
         self._repo_url: str = ""
         self._bot_token: str = ""
         self._work_branch: str = work_branch  # BUG-17 修复：显式初始化
@@ -332,7 +330,7 @@ class CubeSandboxInstance(CloudSandboxBase):
         返回 (exit_code, stdout_tail)。
 
         每次调用用唯一 ID 生成独立文件名，防止并发调用互相覆盖
-        （_init_sandbox 的 pip install 和 _clone_repo 的 git clone 同时用此方法）。
+        （建箱期已无 pip/git 长命令；保留给任务期物化等场景）。
         """
         import time as _time
         import uuid as _uuid
@@ -462,14 +460,15 @@ touch {marker_done}
 
     # ---- 仓库配置 override ----
 
-    def configure_repo(self, *, repo_url, bot_token, work_branch):
+    def configure_repo(self, *, repo_url, bot_token, work_branch, username=""):
         super().configure_repo(
             repo_url=repo_url, bot_token=bot_token,
-            work_branch=work_branch,
+            work_branch=work_branch, username=username,
         )
-        # grape-cli 配置从构造时 config 传入的 _grape_server_url/_grape_cli_token 读
-        if self._sandbox and self._repo_url and self._bot_token:
-            self._clone_repo()
+        # 工作目录就绪：repo/.skills 无条件保证——skill/知识物化与 {{SKILL_DIR}}
+        # 占位替换只依赖 _REPO_DIR/_SKILL_DIR 路径状态，与是否克隆仓库无关。
+        if self._sandbox:
+            self._ensure_workspace_dirs()
 
     @property
     def repo_dir(self):
@@ -543,107 +542,27 @@ touch {marker_done}
         _ec, _out = self.run_cmd("echo $HOME", timeout=5)
         return _out.strip() or "/root"
 
-    def _configure_grape_cli(self) -> None:
-        """配置 grape-cli server URL + token。
+    def _ensure_workspace_dirs(self) -> None:
+        """建 repo/skill 工作目录并设置 _REPO_DIR/_SKILL_DIR。
 
-        BUG-6 修复：所有 cmds.run 调用改为 self.run_cmd（走 background=True + 重连机制）。
-        体验-6 修复：先追加 PATH 再执行 grape config（与 DevBox 顺序对齐）。
+        平台不再建箱期克隆仓库（见 configure_repo）：路径状态由此方法
+        无条件保证（幂等）——mkdir -p 不依赖 .git 存在，skill/知识物化
+        与 {{SKILL_DIR}} 替换只依赖这两个属性。
         """
-        import shlex as _shlex
-        # 先追加 PATH（与 DevBox 顺序对齐——先确保 grape 在 PATH 中再执行 config）
-        _path_export = "export PATH=$PATH:/tmp/pylibs/bin"
-        self.run_cmd(
-            f"grep -q '/tmp/pylibs/bin' ~/.bashrc 2>/dev/null || echo '{_path_export}' >> ~/.bashrc",
-            timeout=5,
-        )
-        self.run_cmd(
-            f"grep -q '/tmp/pylibs/bin' ~/.bash_profile 2>/dev/null || echo '{_path_export}' >> ~/.bash_profile",
-            timeout=5,
-        )
-        self.run_cmd(
-            f"grep -q '/tmp/pylibs/bin' ~/.profile 2>/dev/null || echo '{_path_export}' >> ~/.profile",
-            timeout=5,
-        )
-        # 再配置 grape-cli
-        self.run_cmd(
-            f"grape config set-server {_shlex.quote(self._grape_server_url)}",
-            timeout=10,
-        )
-        if self._grape_cli_token:
-            self.run_cmd(
-                "grape config set-token $GRAPE_TOKEN",
-                envs={"GRAPE_TOKEN": self._grape_cli_token},
-                timeout=10,
-            )
-        log.info(f"[cubesandbox] grape-cli configured for {self._sandbox_id}")
-
-    def _clone_repo(self) -> None:
-        """git clone 仓库 + 配置凭据。
-
-        使用 GIT_ASKPASS 脚本注入 token——token 不出现在命令行/进程列表，
-        只存在于环境变量 + 脚本文件中。gitcode 不支持 credential helper 方式，
-        GIT_ASKPASS 是 git 官方推荐的凭据注入机制。
-
-        幂等：已 clone（_REPO_DIR 已设）则跳过。
-        """
-        if getattr(self, "_REPO_DIR", ""):  # 幂等——已 clone 则跳过
+        if getattr(self, "_REPO_DIR", ""):
             return
-        if not self._sandbox or not self._repo_url or not self._bot_token:
-            log.warning(f"[cubesandbox] _clone_repo skipped: sandbox={'yes' if self._sandbox else 'no'} repo_url={'yes' if self._repo_url else 'no'} bot_token={'yes' if self._bot_token else 'no'}")
-            return
-        import shlex as _shlex
         _repo_dir = "/home/user/repo"
-        # 写 GIT_ASKPASS 脚本——git 调用时从环境变量读 token
-        _askpass_script = '#!/bin/sh\ncase "$1" in\nUsername*) echo "bot";; \nPassword*) echo "$GIT_BOT_TOKEN";; \nesac\n'
-        self._sandbox.files.write("/tmp/_git_askpass.sh", _askpass_script)
-        self.run_cmd("chmod +x /tmp/_git_askpass.sh", timeout=5)
-        self.run_cmd(
-            'git config --global user.name "Grape Bot" && '
-            'git config --global user.email "bot@grape.local"',
-            timeout=10,
-        )
-        # 合并命令：clone。通过 _run_long_command 绕过 60s deadline。
-        # [沙箱迁移] git 缺失时不再 apt 安装（实测 CubeSandbox 沙箱 apt >10min 必超时）——
-        # 先探测 git；有 git 走 git clone（P1-1: -b branch），没有直接 dulwich 降级。
-        _branch_arg = f"-b {_shlex.quote(self._work_branch)}" if self._work_branch else ""
-        _git_ec, _git_out = self.run_cmd("command -v git && echo has || echo none", timeout=5)
-        if "has" in (_git_out or ""):
-            _clone_cmd = (
-                f"GIT_ASKPASS=/tmp/_git_askpass.sh git clone --depth 1 {_branch_arg} {_shlex.quote(self._repo_url)} {_repo_dir}"
-            )
-            _exit_code, _stdout_tail = self._run_long_command(
-                _clone_cmd, timeout=300, poll_interval=10,
-                envs={"GIT_BOT_TOKEN": self._bot_token},
-            )
-        else:
-            log.info(f"[cubesandbox] git not preinstalled, using dulwich fallback directly for {self._sandbox_id}")
-            _exit_code, _stdout_tail = -1, "git not installed (skip apt, dulwich path)"
-        # [沙箱迁移] clone 降级链：镜像未预装 git 且 apt-get install 极慢（实测 CubeSandbox
-        # 某些沙箱 apt >10min，clone 300s 必超）→ 二级降级 dulwich（纯 Python git 实现，
-        # pip 秒装，git smart HTTP 协议对 gitcode 可用）。降级目录结构与 clone 一致
-        # （含 .git，引擎侧 git 命令可续用），_REPO_DIR/_SKILL_DIR 不变。
-        _dir_ec, _dir_out = self.run_cmd(f"test -d {_repo_dir}/.git && echo git || echo missing", timeout=5)
-        if "git" not in (_dir_out or ""):
-            _branch_arg_d = f", branch='{self._work_branch}'" if self._work_branch else ""
-            _dulwich_cmd = (
-                "python3 -m pip install -q dulwich >/dev/null 2>&1; "
-                f"python3 -c \"from dulwich.porcelain import clone; "
-                f"clone('{self._repo_url}', '{_repo_dir}', depth=1{_branch_arg_d})\" >/dev/null 2>&1"
-            )
-            _tar_ec, _tar_tail = self._run_long_command(_dulwich_cmd, timeout=280, poll_interval=10)
-            _check_ec, _check_out = self.run_cmd(f"test -f {_repo_dir}/HEAD && echo ok || echo fail", timeout=5)
-            if _tar_ec != 0 or "ok" not in (_check_out or ""):
-                log.error(f"[cubesandbox] dulwich fallback failed exit={_tar_ec} check={_check_out} stderr={(_tar_tail or '')[:200]}")
-                raise RuntimeError(f"git clone failed (exit={_exit_code}): {(_stdout_tail or '')[:200]}; "
-                                   f"dulwich fallback also failed: {(_tar_tail or '')[:150]}")
-            log.info(f"[cubesandbox] repo fetched via dulwich fallback (git unavailable/slow) for {self._sandbox_id}")
-        elif _exit_code != 0:
-            _stderr = _stdout_tail or ""
-            log.error(f"[cubesandbox] git clone failed exit={_exit_code} stderr={_stderr[:200]}")
-            raise RuntimeError(f"git clone failed (exit={_exit_code}): {_stderr[:200]}")
+        self.run_cmd(f"mkdir -p {_repo_dir}/.skills", timeout=10)
         self._REPO_DIR = _repo_dir
         self._SKILL_DIR = f"{_repo_dir}/.skills"
-        log.info(f"[cubesandbox] repo cloned for {self._sandbox_id}")
+        log.info(f"[cubesandbox] workspace dirs ensured: repo_dir={_repo_dir} for {self._sandbox_id}")
+
+    def _is_repo_cloned(self) -> bool:
+        """仓库是否已克隆（repo 目录下存在 .git）。"""
+        if not self._sandbox:
+            return False
+        _ec, _out = self.run_cmd("test -d /home/user/repo/.git && echo yes || echo no", timeout=5)
+        return "yes" in (_out or "")
 
     def send_stdin(self, data: str | bytes) -> None:
         """CubeSandbox 不支持交互式 stdin。

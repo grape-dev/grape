@@ -25,6 +25,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# #2789：外部继承的 PYTHONPATH 会遮蔽安装目录的 src，安装全程先清空。
+if (Test-Path Env:PYTHONPATH) { Remove-Item Env:PYTHONPATH }
+
 # Issue #429: pip 版本检查提示（stderr，如 "[notice] A new release of pip is available"）
 # 在 Stop 模式下经 2>$null/2>&1 重定向会被包装成错误记录并终止脚本。从源头禁用该提示；
 # 各 pip 调用点另有 EAP 防御层（Invoke-PipQuiet），双保险。
@@ -498,7 +501,9 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
 # [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [worker] extra 同源——补 cubesandbox/
 # requests/cryptography（沙箱平台 SDK / 网络代理 / 凭据加密），与 install-worker.sh 对齐。
-$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography")
+# 2026-11-20：补 fastapi——pyproject [worker] 与 WORKER_DEPS 已声明，脚本硬列表漏了，
+# Windows 装机后任务链路 `stream failed: No module named 'fastapi'`（实测 11-19 21:36/21:38）。
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography", "fastapi")
 $pyprojectFile = Join-Path $Dir "pyproject.toml"
 if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL
@@ -609,18 +614,77 @@ try {
 Log "Config written to $EnvFile (token + controller address)"
 
 
-# 清理遗留模块目录（arch 分支已把 src/runtime、src/agent、src/user 迁到 src/domains/*；
-# 解压是覆盖式，旧目录会残留并被 import 优先命中，导致旧 agent 崩溃/协议不匹配）
-foreach ($legacy in @("runtime", "agent", "user")) {
-    $legacyPath = Join-Path (Join-Path $Dir "src") $legacy
-    if ((Test-Path $legacyPath) -and -not (Test-Path (Join-Path $Dir "src\domains\runtime\engine\agent.py"))) {
-        Log "Skip legacy cleanup (canonical agent missing, keep as-is): src\$legacy"
-        continue
+# 清理遗留模块目录（arch 分支已把 src/runtime、src/agent、src/user、src/auth、
+# src/observability 等顶层模块迁到 src/domains|src/kernel；解压是覆盖式，旧目录
+# 会残留并被 import 优先命中，导致旧 agent 崩溃/协议不匹配）。
+# 白名单制：src/ 下不在 canonical 清单内的目录一律删除 —— 以后再加历史模块
+# 不用回来改脚本（硬列表漏一个就留一份污染）。
+$srcRoot = Join-Path $Dir "src"
+$keepDirs = @("api", "domains", "kernel", "runtime")  # runtime = 包内 legacy 入口 shim
+$canonicalAgent = Join-Path $srcRoot "domains\runtime\engine\agent.py"
+if (-not (Test-Path $canonicalAgent)) {
+    Log "Skip legacy cleanup (canonical agent missing, keep as-is)"
+} elseif (Test-Path $srcRoot) {
+    foreach ($item in (Get-ChildItem -Path $srcRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($keepDirs -contains $item.Name) { continue }
+        try { Remove-Item -Recurse -Force $item.FullName; Log "Removed legacy module dir: src\$($item.Name)" }
+        catch { Log "Warning: failed to remove legacy dir src\$($item.Name) (non-blocking)" }
     }
-    if (Test-Path $legacyPath) {
-        try { Remove-Item -Recurse -Force $legacyPath; Log "Removed legacy module dir: src\$legacy" }
-        catch { Log "Warning: failed to remove legacy dir src\$legacy (non-blocking)" }
+
+    # src/runtime 有两种含义：旧版本的真实模块目录（残留污染）与包内注入的 legacy
+    # 入口 shim（供没重跑安装脚本、仍用 `-m src.runtime.agent` 的设备）。整体删掉再
+    # 从包里重解三个 shim 文件，"包里发"与"设备上留"才一致。
+    # 顺序：先解到临时目录验证齐全，再删旧目录、再拷回 —— 包内缺 shim（老包）时
+    # 宁可保留现状，也不把设备上的入口删空。
+    $runtimeDir = Join-Path $srcRoot "runtime"
+    $shimStage = Join-Path $env:TEMP "grape-shim-$(Get-Random)"
+    $shimNames = @("__init__.py", "agent.py", "cloud_worker.py")
+    try {
+        New-Item -ItemType Directory -Path $shimStage -Force | Out-Null
+        foreach ($shim in $shimNames) {
+            & tar -xzf $TmpPkg -C $shimStage --strip-components=2 "grape-worker/src/runtime/$shim" 2>$null
+        }
+        $staged = @($shimNames | Where-Object { Test-Path (Join-Path (Join-Path $shimStage "runtime") $_) })
+        if ($staged.Count -eq $shimNames.Count) {
+            if (Test-Path $runtimeDir) {
+                try { Remove-Item -Recurse -Force $runtimeDir }
+                catch { Log "Warning: failed to clear src\runtime (non-blocking)" }
+            }
+            New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+            foreach ($shim in $shimNames) {
+                Copy-Item -Path (Join-Path (Join-Path $shimStage "runtime") $shim) -Destination (Join-Path $runtimeDir $shim) -Force
+            }
+            Log "Restored legacy entry shim: src\runtime (agent.py/cloud_worker.py)"
+        } else {
+            Log ("Warning: package has no complete src\runtime shim ({0}/{1}); kept existing dir as-is" -f $staged.Count, $shimNames.Count)
+        }
+    } catch {
+        Log "Warning: legacy shim refresh failed (non-blocking): $($_.Exception.Message)"
+    } finally {
+        try { Remove-Item -Recurse -Force $shimStage -ErrorAction SilentlyContinue } catch { }
     }
+}
+
+
+# ===== Issue #2545: hermes model config alignment gate (before restart) =====
+$_hermes_home = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$HOME\.hermes" }
+if (Test-Path "$_hermes_home\config.yaml") {
+    Log "Validating hermes model config against gateway /v1/models ($_hermes_home\config.yaml, Issue #2545)..."
+    # Issue #429/#2545：Stop 模式下原生命令 stderr 会终止脚本——调用前临时切 EAP=Continue
+    # cwd 必须是安装目录，否则 `-m src.domains...` 找不到模块（Linux 侧等价写法是 cd $INSTALL_DIR）
+    $_prev_eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    Push-Location $Dir
+    try {
+        & $VenvPy -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
+        $_gate_exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $_prev_eap
+        Pop-Location
+    }
+    if ($_gate_exit -ne 0) { Fail "hermes model config validation FAILED: model name(s) not in gateway /v1/models (fix config.yaml or switch key; see docs/deployment/model-gateway-alignment.md)" }
+    Log "hermes model config validation passed"
+} else {
+    Log "No hermes config found, skipping model validation"
 }
 
 # ===== 6. 生成启动脚本并启动 =====
@@ -750,3 +814,5 @@ Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windo
 Log "Install complete! Verify registration:"
 Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"
 Log "  Controller WebUI Workers page should show device $Device"
+
+

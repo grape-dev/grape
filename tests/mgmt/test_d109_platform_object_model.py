@@ -225,7 +225,7 @@ def test_ddl_is_idempotent():
     conn.close()
 
 def test_migration_function_creates_tables_and_backfills_columns(monkeypatch, tmp_path):
-    """迁移本体（202611170009）：建五表 + rc 补 created_at/derived_from，幂等可重跑。"""
+    """迁移本体（平台对象模型建表）：建五表 + rc 补 created_at/derived_from，幂等可重跑。"""
     import sqlite3
 
     import src.kernel.session_manager as sm

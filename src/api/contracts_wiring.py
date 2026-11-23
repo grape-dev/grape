@@ -29,12 +29,14 @@ from typing import Any, Callable, Sequence
 from src.kernel.ports import (
     accounts,
     engines,
+    plugins,
     im,
     oauth,
     pipeline,
     repos,
     tokens,
     vcs_cards,
+    vcs_provider,
 )
 
 log = logging.getLogger(__name__)
@@ -140,6 +142,10 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         "src.domains.mgmt.auth.providers",
         "src.domains.mgmt.public",
     ),
+    "vcs_provider": (
+        # 平台适配器行为实现（建仓/协作/webhook/命名空间）：职责归位后从 kernel 迁入
+        "src.domains.mgmt.vcs",
+    ),
     "vcs_cards": (
         "src.domains.runtime.vcs.platform_card",
         "src.domains.runtime.vcs.providers",
@@ -155,6 +161,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         # ensure_default_backend / get_local_direct_runtime_id）只在该模块；排最后，
         # 前面候选先命中，既有符号解析不变。
         "src.domains.mgmt.user.db",
+    ),
+    "plugins": (
+        "src.domains.runtime.engine.plugin_state",
     ),
     "im": (
         "src.domains.runtime.im.feishu_async",
@@ -179,10 +188,12 @@ _PORTS = {
     "repos": repos,
     "accounts": accounts,
     "oauth": oauth,
+    "vcs_provider": vcs_provider,
     "vcs_cards": vcs_cards,
     "engines": engines,
     "im": im,
     "pipeline": pipeline,
+    "plugins": plugins,
 }
 
 

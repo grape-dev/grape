@@ -8,11 +8,16 @@ from typing import TYPE_CHECKING
 
 from src.kernel.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_path
 from src.api.chat_session_env import chat_repo_env
-from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.kernel.token_service import is_auth_401_error
+from src.kernel.owner_db import db_pair
 from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
+
+# 本文件属 runtime 域，但 VOD IM 引擎由 mgmt 进程启动执行；devops_agent_session /
+# vod_conversations / agent_runtimes 都是 runtime 基表，进程本域连接会 1146。
+# 绑 runtime owner 代理（单库/无 DSN 自动回落 session_manager.db，零回归）。
+db, db_lock = db_pair("runtime")
 
 
 if TYPE_CHECKING:

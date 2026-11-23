@@ -244,8 +244,10 @@ def _require_task_access(task_id: str, user: dict):
 
     - session_token / api_key：作用域已限定，与 check_repo_access 同口径豁免；
     - 本人：agent_tasks.user_id == 当前用户 id（任务创建者）；
-    - 仓库协作者：任务带 repo_key 时走 check_repo_access（managed_repos 归属）；
-    - 其余（非本人且无 repo_key 归属）→ 403 fail-closed。
+    - 仓库管理方：任务带 repo_key 时，托管人（managed_repos.host_user_id）或
+      user_repos.is_admin=1 才可读（**不是** check_repo_access 的“可见即读”）——
+      外部 issue 提报者能看见仓库，但不能读日志与 diff；
+    - 其余（非本人且非管理方/无 repo_key）→ 403 fail-closed。
     """
     from src.domains.runtime.engine.service import get_task
     task = get_task(task_id)
@@ -258,7 +260,20 @@ def _require_task_access(task_id: str, user: dict):
         return task
     repo_key = task.get("repo_key") or ""
     if repo_key:
-        from src.api.deps import check_repo_access
-        check_repo_access(user, repo_key)
-        return task
+        # 收紧：能“看见”仓库（check_repo_access 口径，含外部 issue 提报者的
+        # user_repos 可见行）不等于能读任务的日志与 diff。日志/代码泄漏面更大，
+        # 因此非本人时只放行仓库管理方（托管人 / is_admin）；判定不出按无权（fail-closed）。
+        from src.domains.mgmt import public as _mgmt
+
+        try:
+            _can_read = bool(_mgmt.user_can_manage_repo(user.get("id"), repo_key))
+        except Exception as _e:  # noqa: BLE001 - 判定不出 = 无权（fail-closed）
+            log.warning(f"task logs: manage check failed ({repo_key}): {_e}")
+            _can_read = False
+        if _can_read:
+            return task
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "TASK_LOG_FORBIDDEN",
+            "message": "仅任务本人或仓库管理员可读任务日志",
+        })
     raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该任务"})

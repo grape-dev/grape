@@ -90,7 +90,9 @@ def compute_node_statuses(nodes, issue_events, current_stage,
     if repo_key and issue_id:
         try:
             from src.domains.runtime.engine.takeover import active_takeover_for
-            _tko = active_takeover_for(repo_key, issue_id)
+            # 只读形态：流水线列表/详情是 GET 读路径，不能在这里落库自愈
+            # （N 个 issue = N 次写库 + N+1 查询，见 PR #1869 架构审查 M1）。
+            _tko = active_takeover_for(repo_key, issue_id, readonly=True)
             if _tko:
                 takeover_agent = str(_tko.get("agent_type") or "")
         except Exception as e:
@@ -108,6 +110,13 @@ def compute_node_statuses(nodes, issue_events, current_stage,
     for n in nodes:
         nid = n.get("id", "")
         latest_event = events_by_agent.get(nid)
+        # Issue #2268：组织场景节点 id 是 org_intake/org_dispatch/org_aggregate，
+        # 但事件 agent_type 记录的是节点 tag（issue/coding/qa）。只按 id 匹配时
+        # 组织流水线三个节点永远查不到事件 → 全部灰色「待处理」。
+        if not latest_event:
+            _tag = str(n.get("tag") or "").strip()
+            if _tag and _tag != nid:
+                latest_event = events_by_agent.get(_tag)
 
         if latest_event:
             # 有事件：按最新 event 状态映射

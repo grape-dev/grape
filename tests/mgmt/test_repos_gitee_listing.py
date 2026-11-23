@@ -41,7 +41,7 @@ def test_fetch_and_cache_delegates_to_provider_port():
     mock_prov = MagicMock()
     mock_prov.fetch_repos_with_role.return_value = [
         {"full_name": "acme/web", "name": "web", "owner": "acme", "is_admin": True}]
-    with patch("src.kernel.token_resolver.create_provider", return_value=mock_prov) as m_factory:
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=mock_prov) as m_factory:
         out = repos._fetch_and_cache(1, "T", "gitee")
     m_factory.assert_called_once_with("gitee")
     mock_prov.fetch_repos_with_role.assert_called_once_with("T")

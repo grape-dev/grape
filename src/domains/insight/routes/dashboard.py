@@ -575,6 +575,28 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         _task_org_filter = " AND org_id=?"
         _task_org_params = [_filter_org_id]
 
+    _degraded: list[str] = []
+
+    def _note(_section: str, _exc: Exception) -> None:
+        """记录本次响应里哪一段被降级成 0。
+
+        原来各段是 `except Exception: pass`：查询失败时计数器保持 0，而且一条
+        日志都不留。前端拿到的就是「全 0」，用户既分不清「这台机器真的没有
+        worker」还是「这次查询失败」，事后也查不到。这里一次响应只记一条
+        warning，并把段名放进返回体的 degraded 字段，让前端能显示「未知」。
+        """
+        if _section not in _degraded:
+            _degraded.append(_section)
+        try:
+            import logging as _logging
+
+            _logging.getLogger("devops-bot").warning(
+                "ops/overview section %s degraded to empty: %s: %s",
+                _section, type(_exc).__name__, _exc)
+        except Exception:  # noqa: BLE001 - 日志本身不能拖垮响应
+            pass
+
+
     with db_lock:
         c = db.cursor()
 
@@ -585,8 +607,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             for status, count in _rt_dash.dashboard_task_status_counts(_repo_params, _filter_org_id):
                 if status in task_status_counts:
                     task_status_counts[status] = count
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
         # --- Issue 级别统计（一个 issue = 一个任务）---
         issue_stats = {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
@@ -602,8 +624,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             issue_stats["in_progress"] = (_issue_status_map.get("running", 0) +
                                           _issue_status_map.get("dispatched", 0) +
                                           _issue_status_map.get("queued", 0))
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
         # --- in_progress（dispatched + running）---
         in_progress = task_status_counts["dispatched"] + task_status_counts["running"]
@@ -617,8 +639,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     "started_at": normalize_event_time(r[3]), "repo_key": r[4] or "",
                     "issue_id": r[5] or "", "event_seq": r[6] or 0,
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
         # --- 最近 failed 任务（最近 20 条）---
         failed_tasks = []
@@ -641,8 +663,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     "exit_code": r[9],
                     "errors": _errors,
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
         # --- 按来源（agent_type）分组排队/运行数 ---
         task_by_source = {}
@@ -656,8 +678,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     task_by_source[key]["queued"] += count
                 elif status in ("dispatched", "running"):
                     task_by_source[key]["running"] += count
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
         # --- worker（凭据）列表 + 资源指标 ---
         # 本机直连引擎（credential_id=0）用 psutil 采集本机资源
@@ -697,8 +719,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             except Exception:
                 _local_tmp = 0.0
             _local_load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("workers", _e)
 
         worker_list = []
         worker_online = 0
@@ -732,8 +754,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("workers", _e)
 
         # 补充本机直连设备（credential_id=0 的引擎不在 runtime_credentials 表中）
         try:
@@ -771,8 +793,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                             w["bandwidth_mbps"] = _local_bw_mbps
                             w["load_avg"] = _local_load
                             break
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("workers", _e)
 
         # 查所有 runtime（引擎），关联 worker 信息
         runtimes_online = 0
@@ -784,8 +806,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         try:
             for row in _rt_dash.dashboard_running_counts(_filter_org_id):
                 _running_counts[row[0]] = row[1]
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("runtimes", _e)
         # 查每个引擎已完成任务的平均耗时（秒）
         _avg_durations = {}
         # 引擎探测结果（每 10 分钟 CLI 测试对话）
@@ -794,8 +816,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             # sqlite strftime / MySQL TIMESTAMPDIFF 的方言回落留在 owner 域
             for row in _rt_dash.dashboard_avg_durations(_filter_org_id):
                 _avg_durations[row[0]] = round(row[1] or 0, 1) if row[1] else 0
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("runtimes", _e)
         try:
             for r in _rt_dash.dashboard_runtime_rows(_filter_org_id):
                 rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rc_name, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
@@ -904,8 +926,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     runtime_list[-1]["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
                 except Exception:
                     runtime_list[-1]["health_score"] = None
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("runtimes", _e)
 
         # --- 今日任务统计（UTC 日期前缀匹配 created_at ISO 时间戳）---
         today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -915,8 +937,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     today_prefix, _repo_params, _filter_org_id):
                 if status in today_stats:
                     today_stats[status] = count
-        except Exception:
-            pass
+        except Exception as _e:
+            _note("tasks", _e)
 
     return {
         "timestamp": now_iso,
@@ -943,6 +965,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             "offline": worker_total - worker_online,
             "list": worker_list,
         },
+        # 本次响应里哪些段被降级成 0（查询失败）。前端据此区分「真的没有」
+        # 与「没拿到」，不再把失败画成 0。
+        "degraded": list(_degraded),
     }
 
 
@@ -968,7 +993,7 @@ def probe_engines_now(user: dict = Depends(require_org_member)):
     return {"status": "accepted", "results": get_probe_results()}
 
 @router.get("/ops/error-logs/sources", operation_id="dashboard_ops_error_log_sources")
-async def get_error_log_sources(user: dict = Depends(require_org_member)):
+def get_error_log_sources(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。返回可用的日志来源列表（主控 + 各 worker）。"""
     import os as _os, glob as _glob2
     from src.kernel.config import LOG_DIR
@@ -1642,9 +1667,12 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                     continue
                 _seen_ids.add(_rid)
                 _deduped.append(e)
-            # 组织隔离过滤
+            # 组织隔离过滤（Issue #2265）：global 引擎（org_id=''）是平台共享资源，
+            # 团队组织同样可见/可用；只隔离「属于其它组织」的引擎。
             if _filter_org_id:
-                _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
+                _deduped = [e for e in _deduped
+                            if not str(e.get("org_id") or "")
+                            or str(e.get("org_id")) == str(_filter_org_id)]
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      # Issue #1208：本机直连无凭据 device_name，展示名用 host_name 兜底（与设置页同口径）
                                      "name": instance_name(e["name"],

@@ -281,12 +281,13 @@ const API = (() => {
     if (!r.ok) {
       if (r.status === 401 && retryFn) {
         // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
-        // 但先检查是否是 GitCode OAuth 过期（不需要 JWT refresh，需要重新授权）
+        // 但先检查是否是 OAuth 平台过期（不需要 JWT refresh，需要重新授权）
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            // GitCode OAuth token 过期且 refresh_token 也失效——跳授权页
-            _redirectToGitcodeAuth();
-            throw new Error(err.detail.message);
+            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
+            // （GitHub 走 /auth/login/github；provider 缺省保持 GitCode 原行为）
+            _redirectToProviderAuth(err.detail);
+            throw _reauthError(err.detail);
           }
           // R1 fix: credential 401 on public auth endpoints — user has no token
           // or is hitting a public auth endpoint (login/refresh/exchange/associate).
@@ -307,11 +308,12 @@ const API = (() => {
         });
       }
       if (r.status === 401) {
-        // 没有 retryFn——检查是否 GitCode reauth，否则直接跳登录
+        // 没有 retryFn——检查是否 OAuth reauth，否则直接跳登录
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            _redirectToGitcodeAuth();
-            throw new Error(err.detail.message);
+            // Issue #3563（Spec v2 B2）：按 detail.provider 分流重授权
+            _redirectToProviderAuth(err.detail);
+            throw _reauthError(err.detail);
           }
           // P33 fix: don't clear token for public auth endpoint 401s
           var reqUrl = r.url || '';
@@ -382,6 +384,59 @@ const API = (() => {
     }).catch(() => {
       location.href = _langLoginUrl();    // R7: preserve language prefix
     });
+  }
+
+  // Issue #3563（Spec v2 B2）：401 reauth 按 detail.provider 分流。
+  // - provider 缺省 / gitcode：保持既有 _redirectToGitcodeAuth() 行为（回归安全）；
+  // - 其它平台（github/gitee/…）：路由到 GET /auth/login/<provider>；
+  //   GitHub 在 OAuth App 未配置（无 redirect_url / 400）时不跳空白授权页——
+  //   提示 + 直达「账号设置 → 凭据」的 GitHub Token 输入。
+  function _redirectToProviderAuth(detail) {
+    var provider = (detail && detail.provider) || '';
+    if (!provider || provider === 'gitcode') {
+      _redirectToGitcodeAuth();  // 缺省兜底 + GitCode 原行为（回归不变）
+      return;
+    }
+    if (_reauthRedirecting) return;
+    if (_isOnLoginPage()) return;
+    _reauthRedirecting = true;
+    API.get('/auth/login/' + provider).then(function (d) {
+      if (d && d.redirect_url) {
+        _toastReauth((detail && detail.message) || I18N.t('common.' + provider + '_reauth_required'));
+        location.href = d.redirect_url;
+      } else if (provider === 'github') {
+        _reauthGithubFallback();
+      } else {
+        _reauthRedirecting = false;
+        location.href = _langLoginUrl();
+      }
+    }).catch(function () {
+      if (provider === 'github') {
+        _reauthGithubFallback();
+      } else {
+        _reauthRedirecting = false;
+        location.href = _langLoginUrl();
+      }
+    });
+  }
+  function _reauthGithubFallback() {
+    _reauthRedirecting = false;  // 允许后续重试（如配置 token 后再触发）
+    _toastReauth(I18N.t('common.github_reauth_token_hint'));
+    try { location.hash = '#account/credentials'; } catch (e) { /* noop */ }
+  }
+  function _toastReauth(msg) {
+    try {
+      if (window.app && window.app.showToast) window.app.showToast(msg, 6000);
+    } catch (e) { /* noop */ }
+  }
+  // Issue #3563（Spec v2 B3）：401 reauth 抛出的错误携带 status/detail，
+  // 供入口页（repos/templates）先判 status/action 再决定提示，不再直塞 check_failed 文案。
+  function _reauthError(detail) {
+    var e = new Error((detail && detail.message) || I18N.t('common.request_failed', {status: 401}));
+    e.status = 401;
+    e.detail = detail || {};
+    e.reauth_required = true;
+    return e;
   }
 
   // fetch 超时封装：30s 后 abort，防止后端 hang 导致前端永久 loading
@@ -461,6 +516,155 @@ const API = (() => {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: h}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout))));
   }
 
+  // 组织工作台统一错误映射：后端保留结构化 error_code，前端负责展示可读、可本地化的提示。
+  function localizeOrgError(e) {
+    e = e || {};
+    var code = String(e.error_code || '').toUpperCase();
+    var status = Number(e.status || 0);
+    var key = {
+      PERMISSION_DENIED: 'organizations.errors.permission_denied',
+      REPO_ALREADY_BOUND: 'organizations.errors.repo_already_bound',
+      ORG_REPO_PROTECTED: 'organizations.errors.org_repo_protected',
+      ORG_REPO_QUOTA_EXCEEDED: 'organizations.errors.quota_exceeded',
+      DISPATCH_IN_PROGRESS: 'organizations.errors.dispatch_in_progress',
+      TARGET_RETRY_IN_PROGRESS: 'organizations.errors.dispatch_in_progress',
+      INVALID_TARGET: 'organizations.errors.invalid_target',
+      INVALID_REPO: 'organizations.errors.invalid_target',
+      INVALID_ORG_CONTEXT: 'organizations.errors.invalid_target',
+      NO_TARGET_SCENE: 'organizations.errors.invalid_target',
+      // Issue #2236：组织上下文 / 知识库写操作错误码（#2150 后端契约）
+      INVALID_CONTEXT_KIND: 'organizations.errors.invalid_kind',
+      INVALID_NAME: 'organizations.errors.invalid_name',
+      INVALID_CONTENT: 'organizations.errors.invalid_content',
+      CONTENT_TOO_LARGE: 'organizations.errors.content_too_large',
+      SENSITIVE_CONTENT_REJECTED: 'organizations.errors.sensitive_rejected',
+      INVALID_STATUS_TRANSITION: 'organizations.errors.invalid_transition',
+      PUBLISH_BUSY: 'organizations.errors.publish_busy',
+    }[code];
+    if (!key && status === 403) key = 'organizations.errors.forbidden';
+    if (!key && status === 409) key = 'organizations.errors.conflict';
+    if (!key && status === 404) key = 'organizations.errors.not_found';
+    if (!key) return e.message || I18N.t('common.request_failed', {status: status});
+    var localized = I18N.t(key);
+    return (localized && localized !== key) ? localized : (e.message || localized || key);
+  }
+
+  function _orgCatch(promise) {
+    return promise.catch(function(e) {
+      e.message = localizeOrgError(e);
+      throw e;
+    });
+  }
+
+  function _orgRepoPath(repoKey) {
+    return String(repoKey || '').split('/').map(encodeURIComponent).join('/');
+  }
+
+  var orgRepos = {
+    list: function(orgId) {
+      return _orgCatch(_get('/orgs/' + orgId + '/repos'));
+    },
+    bind: function(orgId, repoKey) {
+      return _orgCatch(_post('/orgs/' + orgId + '/repos', {repo_key: repoKey || ''}));
+    },
+    unbind: function(orgId, repoKey) {
+      return _orgCatch(_del('/orgs/' + orgId + '/repos/' + _orgRepoPath(repoKey) + '?confirm=true'));
+    },
+    transfer: function(orgId, repoKey, targetOrgId) {
+      return _orgCatch(_post(
+        '/orgs/' + orgId + '/repos/' + _orgRepoPath(repoKey) + '/transfer',
+        {target_org_id: Number(targetOrgId || 0)}
+      ));
+    },
+  };
+
+  // Issue #2236：列表过滤参数按契约（context: kind/status；knowledge: kind/status/tag/q）拼接，
+  // 空值不发送，避免后端把空串当作过滤条件。
+  function _orgFilterQuery(filters) {
+    var f = filters || {};
+    var names = ['kind', 'status', 'tag', 'q'];
+    var parts = [];
+    for (var i = 0; i < names.length; i++) {
+      var value = f[names[i]];
+      if (value === undefined || value === null || value === '') continue;
+      parts.push(names[i] + '=' + encodeURIComponent(String(value)));
+    }
+    return parts.length ? '?' + parts.join('&') : '';
+  }
+
+  var orgContext = {
+    list: function(orgId, filters) {
+      return _orgCatch(_get('/orgs/' + orgId + '/context' + _orgFilterQuery(filters)));
+    },
+    get: function(orgId, ctxId) {
+      return _orgCatch(_get('/orgs/' + orgId + '/context/' + ctxId));
+    },
+    create: function(orgId, payload) {
+      return _orgCatch(_post('/orgs/' + orgId + '/context', payload || {}));
+    },
+    update: function(orgId, ctxId, payload) {
+      return _orgCatch(_put('/orgs/' + orgId + '/context/' + ctxId, payload || {}));
+    },
+    publish: function(orgId, ctxId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/context/' + ctxId + '/publish', {}));
+    },
+    deprecate: function(orgId, ctxId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/context/' + ctxId + '/deprecate', {}));
+    },
+    remove: function(orgId, ctxId) {
+      return _orgCatch(_del('/orgs/' + orgId + '/context/' + ctxId));
+    },
+  };
+
+  var orgKnowledge = {
+    list: function(orgId, filters) {
+      return _orgCatch(_get('/orgs/' + orgId + '/knowledge' + _orgFilterQuery(filters)));
+    },
+    get: function(orgId, knowledgeId) {
+      return _orgCatch(_get('/orgs/' + orgId + '/knowledge/' + knowledgeId));
+    },
+    create: function(orgId, payload) {
+      return _orgCatch(_post('/orgs/' + orgId + '/knowledge', payload || {}));
+    },
+    update: function(orgId, knowledgeId, payload) {
+      return _orgCatch(_put('/orgs/' + orgId + '/knowledge/' + knowledgeId, payload || {}));
+    },
+    publish: function(orgId, knowledgeId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/knowledge/' + knowledgeId + '/publish', {}));
+    },
+    deprecate: function(orgId, knowledgeId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/knowledge/' + knowledgeId + '/deprecate', {}));
+    },
+    archive: function(orgId, knowledgeId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/knowledge/' + knowledgeId + '/archive', {}));
+    },
+    remove: function(orgId, knowledgeId) {
+      return _orgCatch(_del('/orgs/' + orgId + '/knowledge/' + knowledgeId));
+    },
+  };
+
+  var orgDispatches = {
+    list: function(orgId, limit) {
+      var n = Number(limit || 50);
+      return _orgCatch(_get('/orgs/' + orgId + '/dispatches?limit=' + n));
+    },
+    detail: function(orgId, dispatchId) {
+      return _orgCatch(_get('/orgs/' + orgId + '/dispatches/' + dispatchId));
+    },
+    create: function(orgId, payload) {
+      return _orgCatch(_post('/orgs/' + orgId + '/dispatches', payload || {}));
+    },
+    cancel: function(orgId, dispatchId) {
+      return _orgCatch(_post('/orgs/' + orgId + '/dispatches/' + dispatchId + '/cancel', {}));
+    },
+    retryTarget: function(orgId, dispatchId, repoKey) {
+      return _orgCatch(_post(
+        '/orgs/' + orgId + '/dispatches/' + dispatchId + '/targets/' + _orgRepoPath(repoKey) + '/retry',
+        {}
+      ));
+    },
+  };
+
   // ===== 方案B：前端 API 时延埋点 + 批量上报 =====
   // Worker 轮询路径不上报（高频内部请求，非用户页面加载）
   var _LATENCY_SKIP_PREFIXES = ['/runtime/runtimes/', '/runtime/heartbeat', '/runtime/tasks/', '/latency/report'];
@@ -517,6 +721,11 @@ const API = (() => {
     put: _put,
     patch: _patch,
     del: _del,
+    localizeOrgError: localizeOrgError,
+    orgRepos: orgRepos,
+    orgDispatches: orgDispatches,
+    orgContext: orgContext,       // Issue #2236: 组织上下文（brief/policy/decision）
+    orgKnowledge: orgKnowledge,   // Issue #2236: 组织知识库
     deleteFeedback: deleteFeedback,  // Issue #177: 删除反馈封装
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用
     // R6: Export getRaw for blob downloads / SSE streams that need raw Response

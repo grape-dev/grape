@@ -117,6 +117,11 @@
     "recent_models_desc": "Top 3 by usage",
     "recent_models_empty": "No usage records",
     "model_used_count": "{{count}} calls",
+    "plugin_panel": "Plugins",
+    "plugin_count_paren": " ({count} installed)",
+    "plugin_selfcheck_ok": "plugin self-check passed",
+    "plugin_missing": "{count} desired plugin(s) missing",
+    "plugin_desired": "Desired plugins (desired_plugins)",
     "sandbox_platform": "Sandbox Platform",
     "sandbox_template": "Template",
     "platform_disabled": "Disabled",
@@ -134,7 +139,9 @@
     "no_engines_title": "No engines",
     "no_engines_sub": "No engines or devices attached in this organization yet",
     "worker_guide_title": "Attach your first engine device",
-    "worker_guide_sub": "Add a device from any machine with an agent engine installed — the panel guides you through credential creation and the install command"
+    "worker_guide_sub": "Add a device from any machine with an agent engine installed — the panel guides you through credential creation and the install command",
+    "no_installed_plugin": "No plugins installed on this engine",
+    "plugin_repo_required": "Select a repository in the sidebar to view plugins"
   },
   "time": {
     "not_online": "Not online",

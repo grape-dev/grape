@@ -37,6 +37,7 @@ ALLOWED_MGMT_PATHS = {
     "/internal/accounts/{account_id}",
     "/internal/knowledge/{knowledge_id}",
     "/internal/user-mapping",
+    "/internal/platform-cards",
     "/internal/repos/{repo_key:path}",
     "/internal/xwrite/apply",
 }

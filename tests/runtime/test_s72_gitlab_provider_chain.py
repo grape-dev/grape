@@ -16,7 +16,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
-from src.kernel.token_resolver import create_provider, GenericVcsProvider, GitLabProvider
+from src.domains.mgmt.vcs import create_provider, GenericVcsProvider, GitLabProvider
 
 
 @pytest.fixture(autouse=True)
@@ -63,8 +63,12 @@ def test_s72_private_token_header():
         req.update({"url": url, "headers": headers or {}})
         return orig(url, data=data, method=method, headers=headers or {}, **kw)
 
+    # Issue #3580 复审：上游 HTTP 收口到 src.kernel.upstream_http.open_with_policy（私有 CA /
+    # 不跟随重定向），patch 点随之迁移；断言仍锁 PRIVATE-TOKEN 头与"不发 Bearer"。
+    import src.kernel.upstream_http as _uh
     with patch.object(_ur, "Request", side_effect=_spy), \
-         patch.object(_ur, "urlopen", return_value=FakeResp({"id": 1, "username": "u"})):
+         patch.object(_uh, "open_with_policy",
+                      return_value=FakeResp({"id": 1, "username": "u"})):
         p2 = create_provider("gitlab")
         p2._http("GET", "/user", "glpat-1")
     assert req["headers"].get("PRIVATE-TOKEN") == "glpat-1", (
@@ -95,17 +99,26 @@ def test_s72_get_user_login_gitlab_field():
 
 
 def test_s72_webhook_projects_path_and_flags():
-    """建钩：POST /projects/{o}%2F{r}/hooks + token + 布尔位事件集（GitLab 形态）。"""
+    """建钩：/projects/{o}%2F{r}/hooks + token + 布尔位事件集（GitLab 形态）。
+
+    口径更新（Issue #3580 复审）：GitLab hooks 实现已收口到
+    `src/kernel/vcs_gitlab_hooks.py`，provider 侧只做委托，故拦截点由
+    `GenericVcsProvider._http` 改为 `vcs_gitlab_hooks._request`（断言改为完整 URL）。
+    """
+    from src.kernel import vcs_gitlab_hooks as _hooks
+
     p = _prov()
     calls = []
-    with patch.object(GenericVcsProvider, "_http", side_effect=_capture(calls)) as m:
-        hid = p.setup_webhook("T", "acme", "web", "http://wh", webhook_secret="sec")
-    assert hid == 42
-    c = m.call_args
-    path = c.args[1] if len(c.args) > 1 else ""
-    assert "/projects/acme%2Fweb/hooks" in str(path), (
-        f"gitlab hook path should be /projects/:id family, got {path}")
-    body = c.args[3] if len(c.args) > 3 else (c.kwargs.get("data") or {})
+
+    def _fake(method, url, token="", body=None, timeout=30):
+        calls.append({"method": method, "url": url, "body": body})
+        return {"id": 42}
+
+    with patch.object(_hooks, "_request", side_effect=_fake):
+        assert p.setup_webhook("T", "acme", "web", "http://wh", webhook_secret="sec") == 42
+    c = calls[0]
+    assert "/projects/acme%2Fweb/hooks" in c["url"], c["url"]
+    body = c["body"]
     assert body.get("url") == "http://wh"
     assert body.get("token") == "sec"
     assert body.get("push_events") is True
@@ -115,21 +128,24 @@ def test_s72_webhook_projects_path_and_flags():
 
 
 def test_s72_find_and_remove_webhook_projects_path():
+    """查/删钩（实现已收口到 kernel.vcs_gitlab_hooks）：路径同上，删除按 id 定位。"""
+    from src.kernel import vcs_gitlab_hooks as _hooks
+
     p = _prov()
     calls = []
 
-    def _fake(method, path, token, data=None, form=False):
-        calls.append({"method": method, "path": path})
+    def _fake(method, url, token="", body=None, timeout=30):
+        calls.append({"method": method, "url": url})
         if method == "GET":
             return [{"id": 7, "url": "http://wh"}, {"id": 8, "url": "http://other"}]
         return {}
 
-    with patch.object(GenericVcsProvider, "_http", side_effect=_fake):
+    with patch.object(_hooks, "_request", side_effect=_fake):
         assert p.find_existing_webhook("T", "acme", "web", "http://wh") == 7
         ok = p.remove_webhook("T", "acme", "web", 7)
     assert ok is True
-    assert "projects/acme%2Fweb/hooks" in calls[0]["path"]
-    assert "projects/acme%2Fweb/hooks/7" in calls[1]["path"]
+    assert "projects/acme%2Fweb/hooks" in calls[0]["url"]
+    assert "projects/acme%2Fweb/hooks/7" in calls[1]["url"]
 
 
 def test_s72_create_repo_projects():
@@ -178,6 +194,6 @@ def test_s72_fetch_repos_membership():
 
 def test_s72_gitcode_github_parity_unchanged():
     """特征锁：gitcode/github 不落 GitLabProvider（既有分派不变）。"""
-    from src.kernel.token_resolver import GitCodeProvider, GitHubProvider
+    from src.domains.mgmt.vcs import GitCodeProvider, GitHubProvider
     assert isinstance(create_provider("gitcode"), GitCodeProvider)
     assert isinstance(create_provider("github"), GitHubProvider)

@@ -12,6 +12,9 @@ except Exception:  # noqa: BLE001
     fcntl = None
 
 from src.kernel.config import log
+# Issue #2695（#2695 移植）：部署门常量复用 kernel.cli_version 单一事实源
+#（worker_package/安装脚本/启动核对三方共用同一对象，禁止各自硬编码）。
+from src.kernel.cli_version import GRAPE_CLI_MIN_VERSION  # noqa: F401  re-export for packager/tests
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 CACHE_DIR = os.path.join(ROOT, "data", "cache", "worker-package")
@@ -120,6 +123,11 @@ MANIFEST = [
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra
     "pyproject.toml",
+    # Issue #3632：**不把 configs/ 打进 worker 包**。曾评估"文件卡随包下发"作为
+    # 第三条来源（文件卡是新平台纯配置接入的载体），但包内容门禁明确禁止
+    # configs 出现在包里（防服务端配置/凭据随包扩散到每台机器），而
+    # `GET /api/runtime/platform-cards` 契约通道已覆盖同一需求（worker 取卡
+    # 不依赖文件系统），故不推翻该安全决定。文件卡仍由运维按需铺到部署目录。
     # Issue #666 (M4): 随包下发 codegraph 离线安装脚本（降级/离线环境的预装入口）
     "scripts/install-codegraph.sh",
 ]
@@ -458,6 +466,10 @@ def _scan_pythons() -> dict[str, str]:
     mac/win 平台由 wheels 矩阵与 ps1 覆盖，不入包。
     """
     found: dict[str, str] = {}
+    # 版本钉定：wheels 按 _UV_INSTALL_REQUEST 的版本下载，捆绑解释器必须同版本，
+    # 否则二进制轮子 ABI 对不上（生产 aarch64 曾因机器上多装了个 3.14 而串成 cp314）。
+    _pinned_ver = _uv_request_version()
+    exact: dict[str, str] = {}
     try:
         if os.path.isdir(UV_PYTHON_DIR):
             for d in os.listdir(UV_PYTHON_DIR):
@@ -478,9 +490,28 @@ def _scan_pythons() -> dict[str, str]:
                     continue
                 if arch not in found or _py_ver_key(full) > _py_ver_key(found[arch]):
                     found[arch] = full
+                if (_pinned_ver and _py_ver_key(full)[:2] == _pinned_ver
+                        and (arch not in exact or _py_ver_key(full) > _py_ver_key(exact[arch]))):
+                    exact[arch] = full
     except Exception as e:
         log.warning(f"worker_package: scan python dir failed: {e}")
+    # 钉定版本优先；某架构没有该版本时才保留「最高版本」的结果
+    for _arch, _root in exact.items():
+        if found.get(_arch) != _root:
+            log.info(
+                "worker_package: bundling %s python %s (pinned to %s, was %s)",
+                _arch, _py_ver_key(_root), _UV_INSTALL_REQUEST, _py_ver_key(found[_arch]))
+        found[_arch] = _root
     return found
+
+
+def _uv_request_version() -> tuple[int, int] | None:
+    """`_UV_INSTALL_REQUEST`（如 "3.12"）→ (3, 12)；解析失败返回 None。"""
+    try:
+        parts = str(_UV_INSTALL_REQUEST).split(".")
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
 
 
 def _find_pythons() -> dict[str, str]:

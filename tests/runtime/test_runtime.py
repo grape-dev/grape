@@ -40,6 +40,20 @@ class TestEnqueue:
         assert t["status"] == "queued"
         assert json.loads(t["env_extra"])["K"] == "v"
 
+    def test_enqueue_uses_repo_dispatch_lease(self, monkeypatch):
+        from src.kernel.lock import repo_dispatch_lease_key
+
+        seen_keys = []
+
+        def _busy(key, ttl=30):
+            seen_keys.append(key)
+            return False
+
+        monkeypatch.setattr(service, "acquire_lock_with_retry", _busy)
+        with pytest.raises(RuntimeError, match="task enqueue busy"):
+            _enqueue(seq=8)
+        assert seen_keys == [repo_dispatch_lease_key("gitcode:test/repo")]
+
     def test_packs_skill_files(self):
         import os
         from src.kernel.config import SKILLS_DIR

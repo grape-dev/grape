@@ -12,10 +12,11 @@
 from src.kernel.user_ids import has_user_id
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Any
 
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.config import log
-from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError, UpstreamTimeoutError
 from src.domains.runtime import public as _runtime_public
 from src.domains.runtime.vcs.providers import (
     translate_inbound,
@@ -23,7 +24,67 @@ from src.domains.runtime.vcs.providers import (
 )
 from src.domains.runtime.vcs.providers import _MODULES as _PROVIDER_MODULES
 
-router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
+# Issue #2084（#2084 移植）：写路由幂等键体系——Idempotency-Key 头 + idempotency_keys 表
+#（replay 回放 / 422 同键异指纹冲突 / 409 并发同键 / 504 接管窗口 / TTL / 无键 passthrough）。
+from src.domains.mgmt.idempotency import (MSG_IDEMPOTENCY_IN_FLIGHT,
+                                           MSG_IDEMPOTENCY_KEY_CONFLICT,
+                                           IdempotentAPIRoute)
+
+router = APIRouter(prefix="/api/git-repo", tags=["git-repo"], route_class=IdempotentAPIRoute)
+
+
+def _write_idempotency_contract() -> dict:
+    """Issue #2084（#2084 移植）：写路由契约增补（openapi_extra 合并进 operation）。
+
+    - `Idempotency-Key` header 参数：调用方（CLI/Agent）按契约感知可传幂等键；
+    - responses 补 504/409/422（此前仅默认 200，错误语义不进生成契约）：
+      * 504：写上游超时（#1940）——uncertain + request_id + 回读指引
+        （服务端超时 GRAPE_UPSTREAM_TIMEOUT_SECONDS，默认 25s < 客户端 30s）；
+      * 409：并发同键 in_flight（幂等键）；
+      * 422：同键异指纹 idempotency_key_conflict 与请求体校验失败并列。
+    """
+    return {
+        "parameters": [{
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": False,
+            "description": "Optional idempotency key (Issue #2084): with this header a "
+                           "duplicate write replays the first response instead of executing "
+                           "again; concurrent same-key requests get 409 idempotency_in_flight; "
+                           "the same key with a different request body gets 422 "
+                           "idempotency_key_conflict. Reuse the same key for retries of the "
+                           "same logical operation.",
+            "schema": {"type": "string", "maxLength": 255},
+        }],
+        "responses": {
+            "504": {
+                "description": "Upstream write timeout - landing state uncertain "
+                               "(Issue #1940, server timeout GRAPE_UPSTREAM_TIMEOUT_SECONDS, "
+                               "default 25s < client 30s, Issue #2084). Do NOT blind-retry: "
+                               "read back first; retry only after confirming the write did not land.",
+                "content": {"application/json": {"example": {"detail": {
+                    "code": 504, "uncertain": True,
+                    "request_id": "<echoed X-Request-ID>",
+                    "message": "写请求上游超时，落地状态不确定：先回读核对，已落地禁止重试；"
+                               "确认未落地才重试"}}}},
+            },
+            "409": {
+                "description": "A request with the same Idempotency-Key is still in flight "
+                                "(Issue #2084): the upstream write executes only once.",
+                "content": {"application/json": {"example": {"detail": {
+                    "code": 409, "reason": "idempotency_in_flight",
+                    "message": MSG_IDEMPOTENCY_IN_FLIGHT}}}},
+            },
+            "422": {
+                "description": "Unprocessable Entity - either request body validation failed, "
+                                "or the Idempotency-Key was reused with a different request body "
+                                "(Issue #2084: idempotency_key_conflict).",
+                "content": {"application/json": {"example": {"detail": {
+                    "code": 422, "reason": "idempotency_key_conflict",
+                    "message": MSG_IDEMPOTENCY_KEY_CONFLICT}}}},
+            },
+        },
+    }
 
 # 完整 sha（40-hex，git object id）：tree 接口直连免存在性预校验（Issue #734）
 import re as _re
@@ -472,6 +533,14 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
         _mapped = _path_map.get("/" + _head)
         if _mapped:
             _sub = str(_mapped) + (("/" + _rest) if _rest else "")
+    # 模块级子路径重写钩子（可选）：PATH_MAP 只映首段，尾段方言差异（gitlab 的
+    # /comments→/notes、/files→/changes）由 provider 模块自己收口，代理层零平台分支。
+    _rewrite = getattr(mod, "rewrite_path", None)
+    if callable(_rewrite):
+        try:
+            _sub = _rewrite(_sub) or _sub
+        except Exception as e:  # noqa: BLE001 - 钩子异常不阻断 URL 构造
+            log.warning(f"vcs_url rewrite_path failed ({provider}, {_sub}): {e}")
     # Issue #714：subpath 以 / 为分隔逐段 percent-encode（+→%2B、中文→UTF-8、空格→%20），
     # / 保留路径分隔语义；纯 ASCII 段（/branches、issue 编号等）编码后不变，存量行为零变更。
     url = base + "/".join(urllib.parse.quote(seg, safe="") for seg in _sub.split("/"))
@@ -480,6 +549,62 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
         if q:
             url += "?" + q
     return url
+
+
+def _repo_path_hooks(p: str) -> "tuple[Any, str]":
+    """仓库树/文件内容的「URL 构造 + 返回归一」钩子解析（Issue #3580 复审，对齐 PR #1854）。
+
+    返回 (hooks_module, api_base)；无钩子 → (None, "")，调用方走原 /git/trees、/contents 语义。
+
+    解析序（两跳都不含平台名字面量分支）：
+      ① provider 代码模块自带钩子（`tree_url`/`dir_url`/`file_url`/`normalize_*`）——
+         内置 gitlab 卡即此路，api_base 取模块常量；
+      ② 卡方言同族（`card.dialect == "gitlab"`）——自建实例卡（gitlab-corp 等）走纯配卡
+         垫片模块，没有钩子，故按方言回落到同族模块的构造器，**api_base 取卡**
+         （一实例一 host，绝不能退回 gitlab.com）；
+      ③ 其余平台 → 无钩子。
+    """
+    mod = _provider_module(p)
+    if mod is not None and callable(getattr(mod, "tree_url", None)):
+        return mod, str(getattr(mod, "API_BASE", "") or "")
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        card = get_platform_card(p)
+    except Exception:
+        card = None
+    if card is not None and str(getattr(card, "dialect", "") or "") == "gitlab":
+        from src.domains.runtime.vcs.providers import gitlab as _gl_mod
+        return _gl_mod, str(getattr(card, "api_base", "") or "")
+    return None, ""
+
+
+# 树/目录翻页上限：100 条/页 × 50 页 = 5000 条目封顶（无界枚举护栏）。
+# 口径（登记于 docs/issue-3580/measurements.md §4/§6）：仅作上界保护，**不是实测分布**——
+# 大仓 hook/子树条目规模未测量；推导锚点 = 用户面列表封顶 2000 条（`_PER_PAGE` ×
+# `_MAX_LIST_PAGES`）的 2.5 倍。触顶由 `_hooks_paged` 打 WARNING，不静默截断。
+_HOOKS_TREE_MAX_PAGES = 50
+
+
+def _hooks_paged(hooks, url_fn, p: str, token: str, *args) -> Any:
+    """按页拉取（上游 per_page 满页就继续），返回归一后的条目列表。"""
+    per_page = int(getattr(hooks, "_PER_PAGE", 100) or 100)
+    _norm = getattr(hooks, "normalize_tree", None)
+    out: list = []
+    page = 1
+    truncated = True
+    while page <= _HOOKS_TREE_MAX_PAGES:
+        batch = _vcs_req(p, "GET", url_fn(*args, page=page, per_page=per_page), token)
+        if not isinstance(batch, list):
+            return batch                      # 上游错误包络原样透传（不吞成空列表）
+        out.extend(_norm(batch) if callable(_norm) else batch)
+        if len(batch) < per_page:
+            truncated = False
+            break
+        page += 1
+    if truncated:
+        log.warning(f"hooks/tree listing truncated at {_HOOKS_TREE_MAX_PAGES} pages "
+                    f"({len(out)} entries, per_page={per_page})")
+    return out
 
 
 def _issue_write_url(owner: str, repo: str, number, p: str) -> str:
@@ -522,6 +647,22 @@ def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None
         msg = e.message or f"{provider} API 上游错误 ({e.status_code})"
         raise HTTPException(status_code=e.status_code,
                             detail={"code": e.status_code, "message": msg})
+    except UpstreamTimeoutError as e:
+        log.warning(f"Git repo API {method} {url} upstream timeout: {e}")
+        if method != "GET":
+            # 写超时（Issue #1940，#2084 移植）：落地状态不确定 → 504 + uncertain + request_id
+            # + 回读核对指引；读超时维持 502（读操作落地态无副作用）。
+            from src.kernel.config import request_id_var
+            rid = request_id_var.get()
+            raise HTTPException(status_code=504, detail={
+                "code": 504,
+                "uncertain": True,
+                "request_id": rid,
+                "message": "写请求上游超时，落地状态不确定：先回读核对（如 issues comments list），"
+                           "已落地禁止重试；确认未落地才可用新键或原键重试",
+            })
+        raise HTTPException(status_code=502, detail={"code": 502,
+                                                     "message": f"{provider} API 调用失败: {str(e)[:120]}"})
     except Exception as e:
         log.warning(f"Git repo API {method} {url} failed: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
@@ -592,6 +733,18 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
     depth = (depth or "single").strip().lower()
     ref = (ref or "").strip()
 
+    # GitLab 方言族（含自建实例卡）：上游是 /repository/tree，不是 git/trees/{ref}
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None:
+        if not ref:
+            ref = _default_ref(p, owner, repo, user)
+        _recursive = depth == "recursive"
+        if _recursive and not getattr(_hooks, "TREE_RECURSIVE", False):
+            raise HTTPException(status_code=400, detail={"code": 400,
+                "message": f"该平台（{p}）暂不支持递归树，请用单层或 Git 仓库等效接口"})
+        return _hooks_paged(_hooks, getattr(_hooks, "tree_url"), p, _repo_token(owner, repo, user, p),
+                            _api_base, owner, repo, ref, _recursive)
+
     # 单层
     if depth != "recursive":
         if not ref:
@@ -633,10 +786,17 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
     """解析默认分支（ref 空时）：S89/D65 树家族卡派生——github_api 族读仓库详情
     default_branch，v5 系用 branches[0]。无平台枚举。"""
     try:
-        if _tree_family(p) == "github_api":
+        # Issue #3580 实测：GitLab 方言族的 tree/files 接口**不接受 ref=HEAD**
+        # （上游 404 Tree/Commit Not Found）→ 必须先取项目 default_branch。
+        # hooks 族（dialect=gitlab 有 tree_url）优先读项目详情；github_api 族同款；
+        # v5 系（gitcode/gitee）沿用 branches[0]。
+        _hooks_mod, _ = _repo_path_hooks(p)
+        if _tree_family(p) == "github_api" or _hooks_mod is not None:
             data = _vcs_req(p, "GET", _vcs_url(owner, repo, "", None, p), _repo_token(owner, repo, user, p))
             if isinstance(data, dict) and data.get("default_branch"):
                 return data["default_branch"]
+        if _hooks_mod is not None:
+            return "main"
         else:
             data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/branches", {"per_page": 1}, p),
                             _repo_token(owner, repo, user, p))
@@ -708,6 +868,12 @@ def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
 def list_root_contents(owner: str, repo: str, ref: str = Query("", description="分支/引用"),
                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """取仓库根目录条目列表（空 path → GitCode contents 返回根目录数组）。"""
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None and not (ref or "").strip():
+        ref = _default_ref(p, owner, repo, user)      # GitLab 不接受 ref=HEAD
+    if _hooks is not None:
+        return _hooks_paged(_hooks, getattr(_hooks, "dir_url"), p, _repo_token(owner, repo, user, p),
+                            _api_base, owner, repo, "", ref)
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/", {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
@@ -715,6 +881,23 @@ def list_root_contents(owner: str, repo: str, ref: str = Query("", description="
 @router.get("/{owner}/{repo}/contents/{path:path}", operation_id="gitrepo_contents", summary="Repository contents: dir listing or file content (base64)", description="Repository contents via the Git provider: empty/root or directory returns an entry list; a file returns base64 content.")
 def get_file_content(owner: str, repo: str, path: str = "", ref: str = Query("", description="分支/引用"),
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # GitLab 方言族：/contents/{path} 无对应端点。先按**文件**取（/repository/files/{path}），
+    # 上游 404 说明是目录 → 回落目录列表（/repository/tree?path=），与网关「文件/目录同端点」
+    # 语义对齐（PR #1854 的 contents 404 回退同口径）。
+    _hooks, _api_base = _repo_path_hooks(p)
+    if _hooks is not None:
+        if not (ref or "").strip():
+            ref = _default_ref(p, owner, repo, user)  # GitLab 不接受 ref=HEAD
+        _token = _repo_token(owner, repo, user, p)
+        try:
+            data = _vcs_req(p, "GET", getattr(_hooks, "file_url")(_api_base, owner, repo, path, ref), _token)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            return _hooks_paged(_hooks, getattr(_hooks, "dir_url"), p, _token,
+                                _api_base, owner, repo, path, ref)
+        _norm = getattr(_hooks, "normalize_file", None)
+        return _norm(data, path) if callable(_norm) else data
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/contents/" + path, {"ref": ref}, p),
                     _repo_token(owner, repo, user, p))
 
@@ -725,7 +908,7 @@ def list_labels(owner: str, repo: str, user: dict = Depends(get_current_user_or_
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/labels", operation_id="gitrepo_labels_create", summary="Create label", description="Creates a repository label (name required, color optional).")
+@router.post("/{owner}/{repo}/labels", operation_id="gitrepo_labels_create", summary="Create label", description="Creates a repository label (name required, color optional).", openapi_extra=_write_idempotency_contract())
 def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
     # 色值形态按 provider 契约开关派生（无平台枚举）：
@@ -905,41 +1088,96 @@ def _milestone_due_on(provider: str, due_on: str, *, required: bool = False) -> 
     return due
 
 
+# Issue #2082（#2082 移植）：milestones 服务端分页——上游翻页拉全量的每页条数（provider
+# 上限 100 夹取）与安全页数上限（100 × 20 = 2000 条，超出仅告警返回已拉部分，与 branches q 扫描同模式）
+_MILESTONES_FETCH_PER_PAGE = 100
+_MILESTONES_FETCH_MAX_PAGES = 20
+
+
+def _milestones_envelope_schema() -> dict:
+    """Issue #2082（#2082 移植）：milestones 出参契约（openapi_extra 合并进默认 200）。
+
+    默认信封 {milestones,total,page,per_page,has_more}（D3 决策：信封为默认）；
+    `shape=array` 兼容期保留顶层数组（与 tree shape 同先例）→ 契约声明 oneOf(array, object)。
+    """
+    return {"responses": {"200": {"content": {"application/json": {"schema": {"oneOf": [
+        {"type": "object", "properties": {
+            "milestones": {"type": "array", "items": {}},
+            "total": {"type": "integer"},
+            "page": {"type": "integer"},
+            "per_page": {"type": "integer"},
+            "has_more": {"type": "boolean"}}},
+        {"type": "array", "items": {}},
+    ]}}}}}}
+
+
 @router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones",
             summary="List milestones",
             description="Lists repository milestones (state filter: open/closed/all). "
-                        "Issue #900: optional page/per_page pass through to the provider "
-                        "(upstream default small page silently truncated long lists; use per_page=100 for the full set). "
-                        "per_page larger than 100 is clamped to 100, not rejected. "
-                        "Optional title filter narrows by milestone title. "
-                        "When page/per_page are omitted they are not sent upstream (provider defaults apply, "
-                        "preserving pre-#900 request URLs). "
+                        "Issue #2082 paging (semantics unified with issues_list/issues_mine): "
+                        "page is 1-based; per_page defaults to 20, is clamped to a max of 100 "
+                        "and 0 means explicit full list. The server fetches all upstream pages "
+                        "(per_page=100 each) and slices locally, so `total`/`has_more` reflect "
+                        "the full filtered set — long lists are no longer silently truncated. "
+                        "Default response is the envelope {milestones, total, page, per_page, "
+                        "has_more}; `shape=array` keeps the legacy top-level array (full list) "
+                        "for one compatibility version. "
+                        "Optional title filter narrows by milestone title (server-side). "
                         "Returned items' `state` field is normalized to open/closed "
-                        "(upstream `active`/`opened` is mapped to `open`).")
+                        "(upstream `active`/`opened` is mapped to `open`).",
+            openapi_extra=_milestones_envelope_schema())
 def list_milestones(owner: str, repo: str, state: str = Query("all",
                     description="Filter: open/closed/all (upstream rejects other values)"),
-                    page: int = Query(None, ge=1,
-                                      description="Page number (1-based); omitted = provider default"),
-                    per_page: int = Query(None, ge=1,
-                                          description="Page size, clamped to 100 when larger; "
-                                                      "omitted = provider default"),
+                    page: int = Query(1, ge=1, description="页码（1-based）"),
+                    per_page: int = Query(20, ge=0, description="每页条数；默认 20；0=显式全量；上限 100，超限夹取"),
+                    shape: str = Query("envelope", pattern="^(array|envelope)$",
+                                       description="出参形态：envelope={milestones,total,page,per_page,has_more}（默认）；"
+                                                   "array=顶层数组全量（兼容期逃生口，jq '.[]' 直接可用）"),
                     title: str = Query("", description="Optional filter by milestone title"),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    # Issue #900：分页/过滤参数仅在调用方显式提供时透传上游（_vcs_url 过滤空值），
-    # 无参请求 URL 与 #900 之前完全一致（向后兼容）；per_page 超上限钳制而非 422。
-    params = {"state": state}
-    if page is not None:
-        params["page"] = page
-    if per_page is not None:
-        params["per_page"] = min(per_page, _MILESTONES_MAX_PER_PAGE)
+    """Issue #2082（#2082 移植）：milestones 服务端分页（终结透传 provider 默认导致的静默截断）。
+
+    - 上游逐页拉全量（每页 per_page=100 夹取，短页终止，安全上限 20 页）
+    - total/has_more 基于全量过滤集合 → 不再静默截断
+    - per_page=0 → 显式全量（逃生口）；超 100 夹取 100（不 400，防流水线中断）
+    - shape=array → 顶层数组全量（#1804 兼容期，`jq '.[]'` 零回归）
+    - arch11 适配：保留 title 过滤（服务端在信封切页前应用）
+    """
+    token = _repo_token(owner, repo, user, p)
+    page = max(1, int(page))
+    per_page = max(0, min(int(per_page), _MILESTONES_FETCH_PER_PAGE))
+    items: list = []
+    for page_no in range(1, _MILESTONES_FETCH_MAX_PAGES + 1):
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones",
+                                           {"state": state, "page": page_no,
+                                            "per_page": _MILESTONES_FETCH_PER_PAGE}, p),
+                        token)
+        if not isinstance(data, list):
+            # 上游非 list（空体/异常形态）→ 视为空集合终止（与 labels #1837 同归一思路）
+            break
+        items.extend(data)
+        if len(data) < _MILESTONES_FETCH_PER_PAGE:
+            break
+    else:
+        log.warning(f"gitrepo_milestones: upstream fetch hit page cap "
+                    f"({_MILESTONES_FETCH_MAX_PAGES}) for {owner}/{repo}")
     if title:
-        params["title"] = title
-    data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", params, p),
-                    _repo_token(owner, repo, user, p))
-    return _normalize_milestone_states(data)
+        _tl = title.strip().lower()
+        items = [it for it in items if _tl in str((it or {}).get("title") or "").lower()]
+    items = _normalize_milestone_states(items)
+    if shape == "array":
+        # 兼容期（D3）：顶层数组=全量（旧 `jq '.[]'` 调用方零回归，且不再被 provider 默认静默截断）
+        return items
+    total = len(items)
+    if per_page <= 0:
+        return {"milestones": items, "total": total, "page": 1, "per_page": 0, "has_more": False}
+    window = items[(page - 1) * per_page: page * per_page]
+    has_more = (page - 1) * per_page + len(window) < total
+    return {"milestones": window, "total": total, "page": page, "per_page": per_page,
+            "has_more": has_more}
 
 
-@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; due_on is REQUIRED on GitCode/Gitee — those upstreams reject an empty due_on with 400, intercepted locally with a readable 400 — and optional on GitHub, ISO datetime). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).")
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; due_on is REQUIRED on GitCode/Gitee — those upstreams reject an empty due_on with 400, intercepted locally with a readable 400 — and optional on GitHub, ISO datetime). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).", openapi_extra=_write_idempotency_contract())
 def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #632（对齐 #577）：字段语义一致 → 直调透传（同 labels 模式）；due_on 走
@@ -952,7 +1190,7 @@ def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
     return _normalize_milestone_states(data)
 
 
-@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open). GitCode caveat (live-fire evidence): its PATCH requires non-empty title AND due_on on every update (partial updates get upstream 400 'title must not be empty' / 'due_on must not be empty') — pass the full field set when updating GitCode milestones.")
+@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open). GitCode caveat (live-fire evidence): its PATCH requires non-empty title AND due_on on every update (partial updates get upstream 400 'title must not be empty' / 'due_on must not be empty') — pass the full field set when updating GitCode milestones.", openapi_extra=_write_idempotency_contract())
 def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     payload = {k: v for k, v in
@@ -974,9 +1212,8 @@ def list_issues(owner: str, repo: str, state: str = Query("open"),
                     _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/issues", operation_id="gitrepo_issues_create", summary="Create issue", description="Creates an issue (title/body/assignee).")
-def create_issue(owner: str, repo: str, body: IssueCreateBody,
-                 user: dict = Depends(get_current_user_or_api_key),
+@router.post("/{owner}/{repo}/issues", operation_id="gitrepo_issues_create", summary="Create issue", description="Creates an issue (title/body/assignee).", openapi_extra=_write_idempotency_contract())
+def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
     # Issue #372 §30: issue body 追加 grape-auto-comment 标记
     _body = body.body or ""
@@ -1020,7 +1257,7 @@ def get_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get
     return _normalize_issue_milestone(resp)
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update an issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.")
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update an issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.", openapi_extra=_write_idempotency_contract())
 def update_issue(owner: str, repo: str, number: int | str, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
@@ -1207,7 +1444,7 @@ def update_issue(owner: str, repo: str, number: int | str, body: IssueUpdateBody
     return resp
 
 
-@router.post("/{owner}/{repo}/issues/{number}/close", operation_id="gitrepo_issues_close", summary="Close issue", description="Closes an issue on the Git provider. Provider-adapted: GitHub PATCH state=closed; GitCode PATCH state=close with the required repo/title (title auto-fetched). Returns the updated issue, or 502 if the provider does not apply the close.")
+@router.post("/{owner}/{repo}/issues/{number}/close", operation_id="gitrepo_issues_close", summary="Close issue", description="Closes an issue on the Git provider. Provider-adapted: GitHub PATCH state=closed; GitCode PATCH state=close with the required repo/title (title auto-fetched). Returns the updated issue, or 502 if the provider does not apply the close.", openapi_extra=_write_idempotency_contract())
 def close_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     """关闭 Issue（对外接口，供 grape-cli / agent 使用）。平台差异复用 VcsApiClient.close_issue（#209 实测）：
@@ -1229,7 +1466,7 @@ def list_issue_comments(owner: str, repo: str, number: int | str, user: dict = D
                     _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
+@router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).", openapi_extra=_write_idempotency_contract())
 def create_issue_comment(owner: str, repo: str, number: int | str, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #2225 P1（QA 裁定 11-16）：评论正文落上游前过一致性断言——目标 Issue 或正文
@@ -1268,9 +1505,8 @@ def list_pulls(owner: str, repo: str, state: str = Query("open"),
                     _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base). Provider-adapted: gitcode inner_issue_nums; github Closes #N body.")
-def create_pull(owner: str, repo: str, body: PRCreateBody,
-                user: dict = Depends(get_current_user_or_api_key),
+@router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base). Provider-adapted: gitcode inner_issue_nums; github Closes #N body.", openapi_extra=_write_idempotency_contract())
+def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
     # Issue #372 §30: PR body 追加 grape-auto-comment 标记（与 create_issue_comment 一致）
     _body = body.body or ""
@@ -1404,7 +1640,7 @@ def get_pull(owner: str, repo: str, number: int | str, user: dict = Depends(get_
     return _detail
 
 
-@router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.")
+@router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.", openapi_extra=_write_idempotency_contract())
 def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: PR body 追加 grape-auto-comment 标记
@@ -1459,10 +1695,12 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
                       user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #728：关联解除端点（幂等、双参数显式校验——PR 号 + Issue 号均为路径参数）。
     _token = _repo_token(owner, repo, user, p)
-    if p != "gitcode":
-        # GitHub 等无原生 PR↔Issue 关联存储（其关联仅为 body 文本引用），幂等 no-op。
+    if not _pflag(p, "PR_ISSUE_LINK_NATIVE"):
+        # 无原生 PR↔Issue 关联存储的平台（GitHub / GitLab / Gitee）幂等 no-op。
+        # 判定走能力位，不再比较平台名（过去 gitcode 以外的平台一律落这里）。
         return {"unlinked": False, "pr_number": number, "issue_number": issue_number,
-                "reason": f"provider {p} has no native PR-Issue association"}
+                "reason": f"provider {p} has no native PR-Issue association "
+                          f"(PR_ISSUE_LINK_NATIVE=false)"}
     # 1. GET PR 详情，校验关联存在（不存在 → 幂等成功，不发 PATCH）
     pr = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token)
     _issues = pr.get("issues") if isinstance(pr, dict) else None
@@ -1896,7 +2134,11 @@ def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, bod
     # Issue #623：comment_id 兼容十六进制 id——解析为数字 note_id 后走既有更新逻辑
     note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
                                             _repo_token(owner, repo, user, p))
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
+    # 评论 id 路径形态：扁平 /pulls/comments/{id}（gitcode/gitee/github）
+    # vs 带 MR 号 /pulls/{number}/comments/{id}（gitlab → 模块 rewrite 成 notes/{id}）。
+    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
+             else f"/pulls/{number}/comments/{note_id}")
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, _csub, None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
@@ -1908,7 +2150,9 @@ def delete_pull_comment(owner: str, repo: str, number: int, comment_id: str,
     # （hex 直传 400 Orchestration error）。数字 id 直传，零额外请求（向后兼容）。
     note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
                                             _repo_token(owner, repo, user, p))
-    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
+    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
+             else f"/pulls/{number}/comments/{note_id}")
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, _csub, None, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -1959,6 +2203,112 @@ def _normalize_pull_files_diff(resp):
 
 
 
+
+# ===== PR files 顶层 diff 别名投影（Issue #1786，#1790/#1786 移植）=====
+
+_PULL_FILES_BINARY_EXTENSIONS = frozenset((
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tif", "tiff", "psd", "ai",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+    "zip", "gz", "bz2", "xz", "tar", "tgz", "7z", "rar", "jar", "war", "ear",
+    "exe", "dll", "so", "dylib", "bin", "obj", "o", "a", "lib", "class", "pyc", "pyd",
+    "ttf", "otf", "woff", "woff2", "eot",
+    "mp3", "wav", "flac", "ogg", "mp4", "avi", "mov", "mkv", "webm", "wmv",
+    "sqlite", "db", "iso", "dmg",
+))
+
+
+def _iter_pull_file_dicts(resp):
+    """Issue #731/#1786 共用防御 prologue：只产出响应中 dict 形态的文件对象。
+
+    非列表响应整体透传（调用方直接 ``return resp``），非 dict 条目跳过——两函数的
+    list/dict 防御语义保持不变（QA 判断项：重复防御 prologue 收敛为单点）。
+    """
+    if isinstance(resp, list):
+        for item in resp:
+            if isinstance(item, dict):
+                yield item
+
+
+def _any_flag_true(*objs, keys):
+    """多个对象上任意键名标记为 ``True``（too_large/binary 对双 dict 双键名重复展开收敛）。"""
+    return any(obj.get(key) is True for obj in objs for key in keys)
+
+
+# #1765 patch.reason 已知前缀 → #1786 枚举（同源同语义；未知文本不据此误标，回落标记探测）
+_PULL_FILES_REASON_PREFIX_MAP = (
+    ("too_large", ("too_large",)),
+    ("binary", ("binary",)),
+    ("empty_file", ("empty_file", "empty", "unchanged")),
+    ("upstream_missing", ("no_diff", "upstream_missing")),
+)
+
+
+def _pull_file_diff_unavailable_reason(item: dict, patch: dict) -> str:
+    """Issue #1786: 单文件补丁不可用原因判定（恒返回枚举值之一）。
+
+    判定优先沿用上游显式标记，未知情况不误标具体原因（兜底 ``upstream_missing``
+    为事实性描述：上游未返回可用补丁）：
+
+    1. ``patch.reason`` 前缀映射（#1765 同源：too_large/binary/empty/unchanged/
+       no_diff 等已知前缀直接映射，未知文本不据此误标）
+    2. ``too_large`` —— 上游标记 ``patch.too_large`` / 顶层 ``too_large``
+    3. ``binary``    —— 上游标记 ``patch.binary``/``binary_file``，或已知二进制扩展名探测
+    4. ``empty_file`` —— 新增/未变更且行数**在位且为零**（零字节文件，无内容变更）；
+       行数字段缺失 ≠ 零行（QA 收紧：未知情况不误标，回落事实枚举）
+    5. ``upstream_missing`` —— 兜底：上游未返回可用补丁
+    """
+    reason = patch.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        low = reason.strip().lower()
+        for enum, prefixes in _PULL_FILES_REASON_PREFIX_MAP:
+            if low.startswith(prefixes):
+                return enum
+        # 未知 reason 文本：不据此误标，回落到标记探测
+    if _any_flag_true(item, patch, keys=("too_large",)):
+        return "too_large"
+    if _any_flag_true(item, patch, keys=("binary", "binary_file")):
+        return "binary"
+    filename = str(item.get("filename") or "")
+    if filename and filename.rsplit(".", 1)[-1].lower() in _PULL_FILES_BINARY_EXTENSIONS:
+        return "binary"
+    additions = item.get("additions")
+    deletions = item.get("deletions")
+    if (str(item.get("status") or "") in ("added", "unchanged")
+            and additions is not None and deletions is not None
+            and not additions and not deletions):
+        return "empty_file"
+    return "upstream_missing"
+
+
+def _project_pull_files_diff(resp):
+    """Issue #1786: project top-level ``diff`` alias + ``diff_unavailable_reason``.
+
+    Pure projection applied after Issue #731 normalization (diff content unified to
+    ``.patch.diff``): every file object gets a top-level ``diff`` string strictly equal
+    to ``.patch.diff`` (may be empty when no patch is available), so consumers reading
+    ``.diff`` — the common expectation for PR line-level review — no longer fall back to
+    double ``contents`` calls. When the diff is unavailable the entry also carries
+    ``diff_unavailable_reason`` (enum, mutually exclusive with a non-empty diff, never a
+    silent empty string). The ``patch`` object itself is left untouched (``.patch.diff``
+    / ``.patch.reason`` consumers keep zero regression; Issue #1744 keeps the object
+    shape as intentional design).
+
+    无 diff 条目的 reason 由 ``_pull_file_diff_unavailable_reason`` 判定，其契约恒返回
+    枚举之一（``upstream_missing`` 为事实兜底），互斥不变量「无 diff ⇒ 必有枚举 reason」
+    由测试断言兜底，投影层不再保留不可达的 else 告警分支（QA 判断项：删除不可达防御）。
+    """
+    for item in _iter_pull_file_dicts(resp):
+        patch = item.get("patch")
+        diff = patch.get("diff") if isinstance(patch, dict) else ""
+        item["diff"] = diff if isinstance(diff, str) else ""
+        item.pop("diff_unavailable_reason", None)
+        if item["diff"]:
+            continue
+        item["diff_unavailable_reason"] = _pull_file_diff_unavailable_reason(
+            item, patch if isinstance(patch, dict) else {})
+    return resp
+
+
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",
             description="Lists files changed in a pull request. Issue #585: page/per_page pass through to the provider "
                         "(GitHub default per_page=30 silently truncated large PRs; default here is per_page=100). "
@@ -1975,7 +2325,8 @@ def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=
     resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
                                        {"page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
-    return _normalize_pull_files_diff(resp)
+    # Issue #1786（#1790/#1786 移植）：归一化后纯投影——顶层 diff 别名 + diff_unavailable_reason
+    return _project_pull_files_diff(_normalize_pull_files_diff(resp))
 
 
 # ── Issue #996：产物预检/清理（由 weekly-10 迁入） ──
@@ -2037,3 +2388,327 @@ def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int | str, bod
 
 
 # ===================== Pull Requests =====================
+
+
+# ===================== CI 检查状态（Issue #2035，#2035 移植：checks list / statuses list 只读端点）=====
+
+def _vcs_404_detail(code: str, message: str, owner: str, repo: str, ref: str,
+                    path: str | None = None) -> dict:
+    """git-repo 组统一 404 detail 包络（Issue #1871/#2035 QA 复审去重共体）：
+    code 语义可判定，回显 owner/repo/ref（contents 组另回显请求 path）。"""
+    detail = {"code": code, "message": message, "owner": owner, "repo": repo, "ref": ref}
+    if path is not None:
+        detail["path"] = path
+    return detail
+
+
+# gitcode Actions v8 适配常量（Issue #2035，#2035 移植）。
+# Actions v8 一族）：checks 通道 = Actions v8 runs（head_sha 过滤）+ per-run jobs 映射为
+# GitHub check-run 语义；statuses 通道 = v5 Gitea 系 combined status 路径透传。
+# 降级语义显式三态（Spec 关键设计决策）：404 ref_not_found（ref 不存在）/ 403 透传
+# （无权限）/ 200 total_count=0（通道正常、该提交无 checks）——不静默把上游错误吞成空列表。
+# runs 逐页扫描：短页终止；病态仓库（大量历史 runs）不拖垮 checks 通道。
+_GITCODE_ACTIONS_API_BASE = "https://api.gitcode.com/api/v8"
+_ACTIONS_RUNS_PER_PAGE = 100
+_ACTIONS_RUNS_SCAN_MAX_PAGES: int = 10
+_ACTIONS_RUNS_SCAN_PER_PAGE: int = 100
+
+# GitCode Actions 状态 → GitHub check-run (status, conclusion) 语义对齐（Spec：双 provider
+# 字段语义一致；conclusion=failure 与 status=in_progress 必须可区分）
+_CHECK_STATUS_MAP = {
+    "RUNNING": ("in_progress", None),
+    "QUEUED": ("queued", None),
+    "PENDING": ("queued", None),
+    "WAITING": ("queued", None),
+    "PAUSED": ("in_progress", None),
+    "SUSPEND": ("in_progress", None),
+    "COMPLETED": ("completed", "success"),
+    "SUCCESS": ("completed", "success"),
+    "FAILED": ("completed", "failure"),
+    "FAILURE": ("completed", "failure"),
+    "CANCELED": ("completed", "cancelled"),
+    "CANCELLED": ("completed", "cancelled"),
+    "IGNORED": ("completed", "skipped"),
+    "SKIPPED": ("completed", "skipped"),
+}
+
+
+def _checks_404(code: str, message: str, owner: str, repo: str, ref: str):
+    """checks/statuses 组统一 404 包络（Issue #2035）：code 可判定
+    （ref_not_found / checks_unavailable / statuses_unavailable），回显 owner/repo/ref。
+    与 `_contents_404` 共体 `_vcs_404_detail`（QA 复审去重，仅差 path 字段）。"""
+    raise HTTPException(status_code=404,
+                        detail=_vcs_404_detail(code, message, owner, repo, ref))
+
+
+def _gitcode_actions_url(owner: str, repo: str, subpath: str, params: dict | None = None) -> str:
+    """GitCode Actions v8 URL（与 v5 不同版本前缀，故不复用 _vcs_url 的 API_BASE）。"""
+    import urllib.parse
+    url = (f"{_GITCODE_ACTIONS_API_BASE}/repos/"
+           f"{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}{subpath}")
+    if params:
+        q = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
+        if q:
+            url += "?" + q
+    return url
+
+
+def _ref_to_commit_sha(p: str, owner: str, repo: str, ref: str, token: str) -> str | None:
+    """ref（分支/引用/sha）解析为 commit sha（Issue #2035，checks/statuses 通道 GitCode 侧共用）。
+
+    - 统一经 `/commits?sha={ref}&per_page=1` 取首条 commit 的 sha（#643 同思路：query
+      形态免斜杠 ref 切分）——完整 40-hex sha 同样过存在性探测（Issue #2035 QA 复审③：
+      伪 sha 必须归一 404 ref_not_found 而非静默 200 total_count=0 / statuses_unavailable，
+      三态承诺对全部 ref 成立，对齐 GitHub 原生 404；与 tree #734 直连口径不同——
+      tree 的 ref 可为 tree sha，commits?sha= 预校验必 404，而此处 ref 语义为 commit）。
+    - 空列表/坏结构 → None（ref 不存在，由调用方归一 404）。
+    - 上游 404（GitCode 对坏 ref 直接 404）由调用方捕获归类为 ref_not_found。
+    """
+    data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", {"sha": ref, "per_page": 1}, p), token)
+    if isinstance(data, list):
+        if data and isinstance(data[0], dict):
+            return data[0].get("sha") or None
+        return None
+    if isinstance(data, dict):
+        return data.get("sha") or None
+    return None
+
+
+def _commit_sha_or_404(provider: str, owner: str, repo: str, ref: str, token: str) -> str:
+    """checks/statuses 组共用前置（Issue #2035 QA 复审④去重）：ref → commit sha。
+
+    `_ref_to_commit_sha`（全部 ref 含完整 sha 过存在性探测）失败路径统一归一
+    404 ref_not_found：解析返回 None（空列表/坏结构）或上游 404（GitCode 对坏
+    ref 直接 404）；其余上游状态按 #549 原样透传。返回生效 commit sha。
+    """
+    ref = (ref or "").strip()
+    try:
+        sha = _ref_to_commit_sha(provider, owner, repo, ref, token)
+    except HTTPException as e:
+        if getattr(e, "status_code", None) == 404:
+            _checks_404("ref_not_found", f"ref not found: {ref}", owner, repo, ref)
+        raise
+    if not sha:
+        _checks_404("ref_not_found", f"ref not found: {ref}", owner, repo, ref)
+    return sha
+
+
+def _map_actions_check(raw_status) -> tuple[str, str | None]:
+    """GitCode Actions 状态 → GitHub check-run (status, conclusion)。
+
+    未知非空值原样小写、conclusion=None；空/缺失状态显式 `unknown`（Issue #2035 QA
+    复审②：不伪造 in_progress——QA 归因不能把「未知」误读为「进行中」）。
+    """
+    key = str(raw_status or "").strip().upper()
+    if key in _CHECK_STATUS_MAP:
+        return _CHECK_STATUS_MAP[key]
+    if key:
+        return (key.lower(), None)
+    return ("unknown", None)
+
+
+def _actions_check_entry(run: dict, job: dict | None) -> dict:
+    """run(+job) → GitHub check-run 语义条目（name/status/conclusion/details_url 必有，
+    details_url 上游未提供时为空串——不伪造 URL，调用方以 run_id 定位）。"""
+    job = job or {}
+    status, conclusion = _map_actions_check(job.get("status") or run.get("status"))
+    details_url = (job.get("html_url") or run.get("html_url")
+                   or job.get("url") or run.get("url") or "")
+    return {
+        "id": job.get("id") or run.get("workflow_run_id"),
+        "name": job.get("name") or run.get("workflow_name") or "",
+        "status": status,
+        "conclusion": conclusion,
+        "details_url": details_url or "",
+        "message": job.get("message") or "",
+        "workflow_name": run.get("workflow_name") or "",
+        "run_id": run.get("workflow_run_id"),
+        "run_number": run.get("run_number"),
+        "job_id": job.get("id"),
+        "head_sha": run.get("head_sha") or "",
+        "start_time": job.get("start_time") or run.get("start_time"),
+        "end_time": job.get("end_time") or run.get("end_time"),
+    }
+
+
+def _gitcode_checks_for_sha(owner: str, repo: str, ref: str, token: str) -> dict:
+    """GitCode check-runs 适配（Issue #2035）：Actions v8 runs 按 head_sha 过滤 + per-run jobs。
+
+    - ref 经 `_commit_sha_or_404(provider, ...)` 存在性探测并解析为 commit sha
+      （分支名/斜杠 ref/完整 sha 统一口径，伪 sha → 404 ref_not_found）。
+    - runs 逐页扫描（per_page=100，短页终止，封顶 _ACTIONS_RUNS_SCAN_MAX_PAGES 页——
+      封顶命中显式回传 scan_truncated=true，不冒充全量）。
+    - 每 run 拉取 jobs 映射为 check 条目；无 jobs（或 run 竞态消失）→ run 级条目。
+    - 上游 403/5xx 按 #549 原样透传；runs 通道 404 → checks_unavailable（ref 已解析存在，
+      区分「无 checks」与「通道不可用」不靠静默空列表）。
+    """
+    ref = (ref or "").strip()
+    target_sha = _commit_sha_or_404("gitcode", owner, repo, ref, token)
+
+    runs: list = []
+    scan_truncated = False
+    try:
+        for _page_no in range(1, _ACTIONS_RUNS_SCAN_MAX_PAGES + 1):
+            data = _vcs_req("gitcode", "GET",
+                           _gitcode_actions_url(owner, repo, "/actions/runs",
+                                                 {"per_page": _ACTIONS_RUNS_PER_PAGE,
+                                                  "page": _page_no}), token)
+            items = data.get("workflow_runs") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            if not isinstance(items, list):
+                items = []
+            runs.extend(r for r in items
+                        if isinstance(r, dict) and r.get("head_sha") == target_sha)
+            if len(items) < _ACTIONS_RUNS_PER_PAGE:
+                break
+        else:
+            scan_truncated = True
+            log.warning(f"gitrepo_checks_list: actions runs scan hit page cap "
+                        f"({_ACTIONS_RUNS_SCAN_MAX_PAGES}) for {owner}/{repo} ref={ref}")
+    except HTTPException as e:
+        if getattr(e, "status_code", None) == 404:
+            _checks_404("checks_unavailable",
+                        f"GitCode Actions 通道不可用或未启用（ref 已解析存在）: {ref}",
+                        owner, repo, ref)
+        raise
+
+    check_runs: list = []
+    for run in runs:
+        rid = run.get("workflow_run_id")
+        jobs: list = []
+        try:
+            jobs_resp = _vcs_req("gitcode", "GET",
+                                 _gitcode_actions_url(owner, repo, f"/actions/runs/{rid}/jobs"),
+                                 token)
+            jobs = jobs_resp.get("jobs") if isinstance(jobs_resp, dict) else []
+        except HTTPException as e:
+            if getattr(e, "status_code", None) != 404:
+                raise
+            jobs = []  # run 竞态消失（扫描窗口内被删）→ 保留 run 级条目，不吞整个列表
+        if isinstance(jobs, list) and jobs:
+            check_runs.extend(_actions_check_entry(run, j) for j in jobs if isinstance(j, dict))
+        else:
+            check_runs.append(_actions_check_entry(run, None))
+
+    out = {
+        "total_count": len(check_runs),
+        "check_runs": check_runs,
+        "provider": "gitcode",
+        "source": "actions",
+        "head_sha": target_sha,
+        "ref": ref,
+    }
+    if scan_truncated:
+        out["scan_truncated"] = True
+    return out
+
+
+@router.get("/{owner}/{repo}/commits/{ref:path}/check-runs", operation_id="gitrepo_checks_list",
+            summary="List commit check runs (CI checks)",
+            description="Lists CI check runs for a commit ref/head sha (read-only; Issue #2035). "
+                        "GitHub: passthrough of the native `GET /repos/{owner}/{repo}/commits/{ref}/check-runs` "
+                        "(response shape = GitHub check-runs: total_count + check_runs[]{name,status,conclusion,details_url,...}). "
+                        "GitCode: no native check-runs API — adapted from the Actions v8 API "
+                        "(runs filtered by head_sha + per-run jobs), mapped to the same field semantics: "
+                        "conclusion=failure (e.g. secret-scan failed) is distinguishable from status=in_progress "
+                        "(checks still running). Degradation semantics are explicit and never silently empty: "
+                        "404 detail.code=ref_not_found (ref does not exist), 404 checks_unavailable "
+                        "(Actions channel unavailable for the repo), 403 passthrough (no permission), "
+                        "200 total_count=0 (channel OK, this commit simply has no checks). "
+                        "Prefer the PR head sha as ref (from `git-repo pulls get`) — on the GitCode "
+                        "channel every ref (branch names, slash refs, and full 40-hex shas) is "
+                        "existence-verified and resolved to its head commit sha: non-existent refs "
+                        "(including well-formed but fake shas) → 404 ref_not_found, matching "
+                        "GitHub-native behavior.")
+def list_check_runs(owner: str, repo: str, ref: str,
+                    user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    """QA 守卫复核归因通道（Issue #2035）：mergeable_state=unstable 可归因到具体 check 名。"""
+    token = _repo_token(owner, repo, user, p)
+    # 通道能力位分派（Issues #3632 后继）：原生 check-runs / Actions 适配器 / 无通道。
+    # 不许 "else 默认走 gitcode"——那会把 gitee/gitlab 仓的 checks 打到 gitcode 上，
+    # 读到的可能是同名仓的数据，也可能只拿到 404（都不可诊断）。
+    if _pflag(p, "CHECK_RUNS_NATIVE"):
+        _cref = ref
+        if _pflag(p, "CHECK_RUNS_RESOLVE_SHA"):
+            _cref = _commit_sha_or_404(p, owner, repo, ref, token)
+        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{_cref}/check-runs", None, p), token)
+    if _pflag(p, "CHECK_RUNS_VIA_ACTIONS"):
+        return _gitcode_checks_for_sha(owner, repo, ref, token)
+    _checks_404("checks_unavailable",
+                f"{p} 未声明 check-runs 通道（CHECK_RUNS_NATIVE / CHECK_RUNS_VIA_ACTIONS 均为假）",
+                owner, repo, ref)
+
+
+@router.get("/{owner}/{repo}/commits/{ref:path}/status", operation_id="gitrepo_statuses_list",
+            summary="List commit statuses (combined)",
+            description="Lists commit statuses (combined status) for a commit ref/head sha (read-only; Issue #2035). "
+                        "GitHub: passthrough of the native `GET /repos/{owner}/{repo}/commits/{ref}/status` "
+                        "(combined: {state, total_count, sha, statuses[]{state,context,target_url,description,...}}; "
+                        "a commit with no statuses returns 200 with total_count=0). "
+                        "GitCode: passthrough of the Gitea-lineage combined status path "
+                        "(`/api/v5/repos/{owner}/{repo}/commits/{sha}/status`) after resolving the ref "
+                        "to a commit sha — every ref (branch names, slash refs, and full 40-hex shas) "
+                        "is existence-verified, so non-existent refs (including well-formed but fake "
+                        "shas) → 404 ref_not_found. "
+                        "Degradation semantics are explicit and distinguishable: 404 detail.code=ref_not_found "
+                        "(ref does not exist), 404 statuses_unavailable (no status records or the platform has no "
+                        "status channel for this repo — verified against a resolved ref), 403 passthrough (no "
+                        "permission). Never silently returns an empty list to mask upstream errors.")
+def list_commit_statuses(owner: str, repo: str, ref: str,
+                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    """commit status 只读通道（Issue #2035）：与 checks 互补；通道由平台卡能力位决定。"""
+    token = _repo_token(owner, repo, user, p)
+    if not _pflag(p, "STATUS_NATIVE"):
+        # 无 combined status 通道的平台（gitee / gitlab）显式 404：语义可判定，
+        # 且不再回落到 gitcode（回落会读到别的平台的仓）。
+        _checks_404("statuses_unavailable",
+                    f"{p} 无 commit status 通道（能力位 STATUS_NATIVE=false）", owner, repo, ref)
+    _ref = (ref or "").strip()
+    if _pflag(p, "STATUS_RESOLVE_SHA"):
+        # v5 系 status 端点要 commit sha（分支名直连会 404），先做存在性解析。
+        _ref = _commit_sha_or_404(p, owner, repo, _ref, token)
+    try:
+        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{_ref}/status", None, p), token)
+    except HTTPException as e:
+        if getattr(e, "status_code", None) != 404:
+            raise
+        _d = getattr(e, "detail", None)
+        _up_msg = str(_d.get("message", "")) if isinstance(_d, dict) else str(_d or "")
+        log.warning(f"gitrepo_statuses_list: upstream 404 for {owner}/{repo} ref={_ref} "
+                    f"({p}): {_up_msg}")
+        _checks_404("statuses_unavailable",
+                    f"{p} commit status 通道不可用或该提交无 status 记录: {_ref}",
+                    owner, repo, ref)
+
+# ===================== 多级命名空间（Issue #3580 复审，对齐 PR #1854） =====================
+# GitLab 子组仓库的全路径是 `<组>/<子组>/<仓>`：两段式 `/{owner}/{repo}` 路由无法
+# 寻址（owner 段自身含 `/`）。这里在既有两段式路由**全部注册之后**追加同名端点的
+# `{owner:path}` 变体——星网址点贪婪匹配，必须后注册，且按路径长度降序，否则
+# `/{owner:path}/{repo}` 会抢走 `/{owner}/{repo}/tree` 这类更具体的路由。
+# 两种形态：
+#   /api/git-repo/{owner:path}/{repo}/...       斜杠直连（与 GitLab 全路径同形）
+#   /api/git-repo/{owner:path}/{repo}/-/...     GitLab 风格 `/-/` 分隔
+# operation_id 加后缀且 include_in_schema=False：OpenAPI 文档与 CLI 命令面零变化，
+# 只有 HTTP 层多出可达路径（判据与现状一致：两段式路径仍走原路由）。
+_NAMESPACE_ROUTE_PREFIX = "/api/git-repo/{owner}/{repo}"
+
+_namespace_route_seed = sorted(list(router.routes), key=lambda r: len(r.path), reverse=True)
+for _suffix, _opsuffix in (("/-", "_separated_namespace"), ("", "_namespace")):
+    # 两遍：`/-/` 变体必须先注册——星网址点贪婪，否则 "/<组>/<子组>/<仓>/-/tree"
+    # 会被斜杠直连形态的 /{owner:path}/{repo}/tree 抢走（repo 段被判成 "-"）。
+    for _route in _namespace_route_seed:
+        _rpath = str(getattr(_route, "path", "") or "")
+        if not _rpath.startswith(_NAMESPACE_ROUTE_PREFIX):
+            continue
+        _relative = _rpath[len("/api/git-repo"):]
+        _ns_path = _relative.replace("/{owner}/{repo}", "/{owner:path}/{repo}" + _suffix, 1)
+        if _ns_path == _relative:
+            continue                      # 非两段式形态（防御：前缀命中但结构不符）
+        router.add_api_route(
+            _ns_path,
+            _route.endpoint,
+            methods=list(_route.methods or ["GET"]),
+            operation_id=(_route.operation_id or _route.name) + _opsuffix,
+            summary=_route.summary,
+            description=_route.description,
+            include_in_schema=False,
+        )

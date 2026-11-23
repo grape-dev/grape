@@ -1,13 +1,17 @@
-"""分类收敛（runtime 侧）：skill 挂载重挂 + 老分类废止（迁移 202611181304）。
+"""分类收敛（runtime 侧）：skill 挂载重挂 + 老分类废止（迁移 202611210003）。
 
 一级分类收敛为 IT研发/运营域/其他（用户决策，Issue #3202 系）。收敛拆成两条
 域内迁移，各自只写属主表（QA A11：原实现把 runtime 表的 UPDATE 混在无
 domains= 声明的 mgmt 迁移里，三库拓扑下 runtime 库上的收敛被静默跳过）：
 
-- mgmt 侧（202611180004，src/domains/mgmt/migrations/category_collapse_dict.py）：
+- mgmt 侧（202611210002，src/domains/mgmt/migrations/category_collapse_dict.py）：
   停用 grape_t_category_dict 的被删一级及其二级 + scene_market.cat_l1_id 重挂 1010；
 - runtime 侧（本模块）：skill.cat_l1_id 重挂 1010 + 老 skill.category_id 清零
-  （skill_category 表归 mgmt，其停用在 mgmt 侧 202611180004 一并执行）。
+  （skill_category 表归 mgmt，其停用在 mgmt 侧 202611210002 一并执行）。
+
+Issue #3648：本迁移原用 202611181304，与同批 renumber 一起顺延到 202611210003
+（排在技能分类列迁移 202611210001 之后），并加 post_check：列在 + cat_l1_id 已收敛
+才算执行成功（执行→校验→盖章）。
 
 skill 归 runtime、skill_category 归 mgmt（table_ownership），SQL 各住属主域
 migrations 下（跨域守卫 P0-2：api 层直写他域表 = 新增跨域引用）。
@@ -16,9 +20,13 @@ domains=("runtime",)：三库模式由 runtime 进程执行；单库 / 测试不
 """
 from __future__ import annotations
 
+#: 列清单复用 runtime 域列迁移模块的单一来源（QA：三处重复易漂移）。
+from .skill_detail_tables import SKILL_CLASSIFICATION_COLUMNS
+
 #: 种子显式 id（一级 = 1000+order）：it-rd=1001 / operations=1002 / other=1010。
-#: 与 mgmt 侧 KEEP_L1_SLUGS 一一对应（那边按 slug 停用，这边按 id 重挂）。
-KEEP_L1_IDS = (1001, 1002, 1010)
+#: 单一真源在 src/kernel/category.py（mgmt 侧停用判定引用同一常量，api 层
+#: 启动校验同样引用；跨域共享走 kernel，不直接 import mgmt 模块）。
+from src.kernel.category import KEEP_L1_IDS
 
 
 def collapse_skill_categories() -> None:
@@ -28,20 +36,45 @@ def collapse_skill_categories() -> None:
         c = db.cursor()
         marks = ",".join(str(i) for i in KEEP_L1_IDS)
         # 指向被删一级的 skill 行归入 1010（其他）；指向保留一级 / 0 的不动。
-        # 列由基线迁移 202611180003（runtime 域）保证存在。
+        # 列由基线迁移 202611210001（runtime 域）保证存在。
         c.execute(
             f"UPDATE skill SET cat_l1_id=1010 "
             f"WHERE cat_l1_id<>0 AND cat_l1_id NOT IN ({marks})")
         # 老分类废止：skill.category_id 清零。
-        # （skill_category 表归 mgmt，其停用由 mgmt 侧 202611180004 执行。）
+        # （skill_category 表归 mgmt，其停用由 mgmt 侧 202611210002 执行。）
         c.execute("UPDATE skill SET category_id=0 WHERE category_id<>0")
         db.commit()
 
 
+def verify_skill_category_collapse(conn=None) -> None:
+    """后置校验（Issue #3648）：skill 分类列存在且 cat_l1_id 只落在保留一级。
+
+    缺列 = 列迁移未到位（不盖章）；仍有指向非保留一级的行 = 收敛未生效（不盖章）。
+    """
+    if conn is None:
+        from src.kernel.session_manager import db as conn
+    c = conn.cursor()
+    rows = c.execute("PRAGMA table_info(skill)").fetchall()
+    cols = {r[1] for r in rows or []}
+    missing = [col for col in SKILL_CLASSIFICATION_COLUMNS if col not in cols]
+    if missing:
+        raise RuntimeError(
+            f"skill 缺分类列 {missing}（分类列迁移未到位；不盖章，下次启动重试）")
+    marks = ",".join(str(i) for i in KEEP_L1_IDS)
+    stale = c.execute(
+        f"SELECT COUNT(*) FROM skill WHERE cat_l1_id<>0 AND cat_l1_id NOT IN ({marks})"
+    ).fetchone()
+    if stale and int(stale[0] or 0) > 0:
+        raise RuntimeError(
+            f"skill 仍有 {int(stale[0])} 行挂在已删除一级分类"
+            "（收敛未生效；不盖章，下次启动重试）")
+
+
 MIGRATION = {
-    "version": "202611181304",
+    "version": "202611210003",
     "name": "category-collapse-three-domains-runtime",
     "kind": "safe",
     "fn": collapse_skill_categories,
     "domains": ("runtime",),
+    "post_check": verify_skill_category_collapse,
 }

@@ -10,7 +10,7 @@ let _app = null
 function mount(props) {
   const el = document.getElementById('pageContent')
   if (!el) return
-  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  if (_app) { try { _app.unmount() } catch (e) { /* 未挂载/已卸载则忽略 */ } _app = null }
   el.innerHTML = ''
   _app = createApp(ChatView, props || {})
   _app.mount(el)

@@ -1,4 +1,4 @@
-# 7. 运行时与引擎
+# 8. 运行时与引擎
 
 ## 引擎类型
 
@@ -7,6 +7,10 @@
 | opencode | OpenCode CLI，AI 编码助手 | Coding/Issue/QA Agent |
 | hermes | Hermes Agent，支持 ACP 协议 | VOD/Chat/SRE Agent |
 | codearts | 华为云 CodeArts CLI | 特定 CI/CD 场景 |
+
+> hermes 引擎部署硬性约定：模型名必须与 key 所属网关 `/v1/models` 可用列表对齐
+> （换 key/换网关须同步换模型名并自检），详见
+> [部署规范：hermes 模型名与网关 key 可用列表对齐](../../docs/deployment/model-gateway-alignment.md)（Issue #2545）。
 
 ## Worker 管理
 

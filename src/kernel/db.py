@@ -55,7 +55,7 @@ _MGMT_TABLES = (
     "grape_im_instance", "bot_seen_messages", "repo_im_group_binding", "autopilot_tasks",
     "autopilot_executions", "autopilot_subscriptions", "oauth_states",
     # 4.1 附加/兼容表
-    "user_credentials", "user_accounts", "outbound_content_ledger",
+    "user_credentials", "outbound_content_ledger",
     "grape_t_credential_reveal_log", "grape_t_schema_migrations", "unified_user_mapping",
 )
 _RUNTIME_TABLES = (

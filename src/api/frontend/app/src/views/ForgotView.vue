@@ -261,7 +261,6 @@ function resetPassword() {
   const e = ($('forgotEmail') || {}).value.trim()
   const c = ($('forgotCode') || {}).value.trim()
   const np = ($('forgotNewPass') || {}).value.trim()
-  const npc = ($('forgotNewPassConfirm') || {}).value.trim()
   let valid = true
   if (!Auth.submitValidate('forgotCode', (v) => (v ? (v.length !== 6 ? t('app.login.err_code_format', '验证码为 6 位数字') : null) : t('app.login.err_code_required', '请输入验证码')))) valid = false
   if (!Auth.submitValidate('forgotNewPass', (v) => (v ? newPwdRule(v) : t('app.login.err_new_password_required', '请输入新密码')))) valid = false

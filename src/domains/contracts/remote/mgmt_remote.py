@@ -64,3 +64,9 @@ class MgmtServiceRemote(MgmtService):
 
     def get_user_mapping_batch(self, keys: list) -> list:
         return self.client.post("/internal/user-mapping", json_data={"keys": list(keys or [])})
+
+    # ---- Issue #3632：平台卡跨域只读 ----
+
+    def get_repo_platform_cards(self, enabled_only: bool = True) -> list:
+        return self.client.get("/internal/platform-cards",
+                               params={"enabled_only": "1" if enabled_only else "0"}) or []

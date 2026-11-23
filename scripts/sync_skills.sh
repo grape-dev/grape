@@ -5,7 +5,7 @@
 #
 # 作用：
 #   1. 从 grape-skills 仓库拉取官方技能（skills/<agent_type>/<skill>）
-#   2. 铺入 .grape/skills/（保留运行时目录 custom/、repo/）
+#   2. 铺入 .grape/skills/（保留运行时目录 custom/、repo/ 与仓库内置 org/）
 #   3. 铺入 skill-description.json（官方技能清单，供 DB seed / sync-official）
 #   4. 铺入官方场景（scenes/<scene_name>/scene.json + README.md + icon.*）
 #      到 configs/scenes/（官方场景库与技能同仓；scene_sync 运行时另有远程同步）
@@ -35,6 +35,8 @@ echo "[sync-skills] fetch ${SKILLS_REPO}@${SKILLS_REF}"
 git clone --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" "$STAGE/skills-repo" >/dev/null 2>&1
 
 # 1) 官方技能 → .grape/skills/<agent>/（只清官方技能，保留 custom/ repo/ 运行时目录）
+#    注意：org/ 为随本仓库提交的组织流水线技能（Issue #2118），不在 SKILL_AGENT_DIRS 内，
+#    本脚本既不覆盖也不删除；禁止把 org 加入该数组，否则会清空仓库内组织技能。
 for d in "${SKILL_AGENT_DIRS[@]}"; do
   rm -rf "$ROOT_DIR/.grape/skills/$d"
   if [ -d "$STAGE/skills-repo/skills/$d" ]; then

@@ -25,3 +25,16 @@
 - **不加 `cred_slot`**：同仓同种类多凭据（如多 bot）是未来需求，出现时走单表轻迁移（加列/换键），当前卡 schema 与写路径零预留。
 - 写路径唯一权威入口：`add_managed_repo`（归一逻辑键 `bot`/`webhook` 或存量列名别名）/ `_update_repo_bot_token` / admin `config_store` 轮换 / `db_setup` 回填迁移——新写入点须走 D90 契约评审。
 - 写 rc 成功后**同一事务**置空 managed_repos 对应平台 token 列（渐进收敛，见 D106 设计分片；SQL 精确限定 `UPDATE managed_repos`——meta 表存在同名全局键 `gitcode_webhook_token`，严禁误伤）。
+
+## 一实例一卡（Issue #3580）
+
+自建 GitLab 等需要独立 host/凭据的实例**每实例一张卡**，卡文件名即 provider：
+
+- 卡名仅 `[A-Za-z0-9_-]`、长度 1..64，显式拒绝 `@`（不得把账号语法混入前缀）；
+- `host` 为裸主机名（可带合法端口），`api_base` / `download_base` 必须 https，
+  且不得包含内嵌凭据、query、fragment、`..` 路径段；
+- `ca_bundle` = 自建实例 TLS CA 的 PEM **绝对路径**（空=系统 CA），仅由 git 传输
+  注入 `http.sslCAInfo`；改卡即生效，不引入环境变量；
+- `repo_key` = `<卡名>:<group>/<sub>/<repo>`，`parse_repo_key` 原样保留多级路径；
+- GitLab 实例卡声明 `dialect="gitlab"`、`api_auth="private_token"`、
+  `webhook_dialect="gitlab_v4"`、`webhook_verify="token_compare"`、`clone_auth="oauth2"`。

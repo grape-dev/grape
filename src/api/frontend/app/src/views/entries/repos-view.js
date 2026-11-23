@@ -17,7 +17,7 @@ let _root = null // mount() return value = root component public instance (has d
 function mount(props) {
   const el = document.getElementById('pageContent')
   if (!el) return null
-  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  if (_app) { try { _app.unmount() } catch (e) { /* 未挂载/已卸载则忽略 */ } _app = null }
   el.innerHTML = ''
   _app = createApp(ReposView, props || {})
   _root = _app.mount(el)

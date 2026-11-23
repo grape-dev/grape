@@ -4,7 +4,119 @@ Issue #1667：排队（queue）语义需要在前序事件终态后重新派发�
 把原 webhook.py 内联的派发逻辑抽到本模块，避免 webhook ↔ event_pipeline
 循环依赖，并保证正常路径与排队路径使用同一套派发实现。
 """
+import json
+
 from src.kernel.config import log
+from src.kernel.issue_ident import is_actionable_issue_number, native_issue_number
+
+
+def _resolve_event_payload(event, evt) -> dict:
+    """取 listener 事件对应的持久化 payload（优先 DB，兜底嵌套 evt.payload）。
+
+    Issue #2118 复审：`run_a2a_dispatch` 在 plugin/queue_remote 路径只把 handoff
+    入队就返回，真正失败由本 listener 后置处理。此时复核 stage_guard／是否为聚合
+    重排事件必须以持久化 payload 为准（嵌套 evt 只是快照，可能缺后续写入字段）。
+    """
+    dragged = {}
+    if isinstance(evt, dict) and isinstance(evt.get("payload"), dict):
+        dragged = dict(evt["payload"])
+    seq = int(getattr(event, "seq", 0) or 0)
+    if not seq:
+        return dragged
+    try:
+        from src.domains.runtime import public as _runtime_public
+
+        loaded = _runtime_public.event_payload(seq)
+        if loaded:
+            dragged.update(loaded)
+    except Exception as exc:
+        log.warning(f"agent/handoff listener: load event payload failed seq={seq}: {exc}")
+    return dragged
+
+
+def _advance_auto_advance_stage(event, evt) -> None:
+    """Issue #2118 复审：自动推进事件在下游确认接受派发后才推进 stage。
+
+    仅当事件携带 auto-advance stage_guard，且当前 stage 仍等于 guard.from
+    （调用方未提前写）时，才把 stage 推进到 guard.to；人工/其它路径已改 stage 时
+    不覆盖。失败路径不在此处理，由 `_fail_event` 统一留痕并保持原 stage。
+    """
+    payload = _resolve_event_payload(event, evt)
+    guard = payload.get("stage_guard") if isinstance(payload, dict) else None
+    if not isinstance(guard, dict):
+        return
+    from_stage = str(guard.get("from") or "").strip()
+    to_stage = str(guard.get("to") or "").strip()
+    repo_key = getattr(event, "repo_key", "") or ""
+    issue_id = getattr(event, "issue_id", "") or ""
+    if not from_stage or not to_stage or from_stage == to_stage or not repo_key or not issue_id:
+        return
+    try:
+        from src.api.session_store import get_issue_stage, set_issue_stage
+        cur = (get_issue_stage(repo_key, issue_id) or {}).get("stage") or ""
+        if cur != from_stage:
+            log.info(f"agent/handoff listener: auto-advance stage not '{from_stage}' "
+                     f"(now='{cur}'), skip advance seq={getattr(event, 'seq', 0)}")
+            return
+        set_issue_stage(repo_key, issue_id, to_stage, to_stage, a2a_seq=getattr(event, "seq", 0))
+        log.info(f"agent/handoff listener: auto-advance stage {from_stage}->{to_stage} "
+                 f"issue={issue_id} seq={getattr(event, 'seq', 0)}")
+    except Exception as exc:
+        log.warning(f"agent/handoff listener: auto-advance stage failed "
+                    f"issue={issue_id}: {exc}")
+
+
+def _record_dispatch_not_confirmed(event, payload: dict, evt, target_agent: str,
+                                   node_id: str, reason: str, code: str,
+                                   phase: str) -> None:
+    """listener 未确认成功派发（failed/blocked/异常）的统一收口。
+
+    Issue #2118 复审（Critical）：plugin/queue_remote 路径下 `run_a2a_dispatch`
+    只代表「handoff 已发/已入队」，真正的 `dispatch_node` 结果只在 listener 可见。
+    聚合重排事件（payload.aggregate_recheck）失败时必须走
+    `_requeue_or_degrade_aggregate_recheck`，否则退避重排/耗尽转 pending_review
+    的承诺在异步路径失效，组织 Issue 会静默停在 qa。其余事件仍走 `_fail_event`
+    留痕并保持/回滚 stage。
+    """
+    seq = int(getattr(event, "seq", 0) or 0)
+    repo_key = getattr(event, "repo_key", "") or ""
+    issue_id = getattr(event, "issue_id", "") or ""
+    state = _resolve_event_payload(event, evt)
+    if state.get("aggregate_recheck"):
+        try:
+            from src.domains.runtime.pipeline.event_pipeline import (
+                _requeue_or_degrade_aggregate_recheck,
+            )
+            _requeue_or_degrade_aggregate_recheck(
+                seq, repo_key,
+                target_agent or getattr(event, "agent_type", "") or "",
+                issue_id, state, reason, code,
+            )
+            return
+        except Exception as exc:
+            log.warning(f"agent/handoff listener: aggregate recheck requeue failed "
+                        f"seq={seq}: {exc}")
+    try:
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
+        _ref_seq = ((payload or {}).get("evt") or {}).get("ref_seq") \
+            or (payload or {}).get("ref_seq") or 0
+        _fail_event(
+            seq, reason,
+            diag={
+                "code": code,
+                "target_stage": target_agent,
+                "target_node": node_id,
+                "phase": phase,
+                "ref_seq": _ref_seq,
+            },
+        )
+    except Exception as exc:
+        log.warning(f"agent/handoff listener _fail_event failed: {exc}")
+        try:
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "failed")
+        except Exception:
+            pass
 
 
 async def _on_handoff_dispatch(event):
@@ -46,55 +158,45 @@ async def _on_handoff_dispatch(event):
             user_id=scene_user_id,
         )
         log.info(f"agent/handoff listener: result={result}")
-        if result.get("status") == "failed":
+        status = str((result or {}).get("status") or "").lower()
+        if status == "failed":
             # Issue #476：listener 失败统一走 _fail_event（原裸 update_event_status 无诊断字段）
             _err = result.get("error") or result.get("errors") or "dispatch_node 返回 failed"
             if isinstance(_err, list):
                 _err = "; ".join(str(x) for x in _err)
-            try:
-                from src.domains.runtime.pipeline.event_pipeline import _fail_event
-                _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
-                _fail_event(
-                    event.seq,
-                    f"A2A 交办派发失败（target={target_agent}, node={node_id}）：{str(_err)[:200]}",
-                    diag={
-                        "code": "a2a_dispatch_failed",
-                        "target_stage": target_agent,
-                        "target_node": node_id,
-                        "phase": "dispatch",
-                        "ref_seq": _ref_seq,
-                    },
-                )
-            except Exception as _fe:
-                log.warning(f"agent/handoff listener _fail_event failed: {_fe}")
-                try:
-                    from src.api.event_store import update_event_status
-                    update_event_status(event.seq, "failed")
-                except Exception:
-                    pass
+            _record_dispatch_not_confirmed(
+                event, payload, evt, target_agent, node_id,
+                f"A2A 交办派发失败（target={target_agent}, node={node_id}）：{str(_err)[:200]}",
+                "a2a_dispatch_failed", "dispatch",
+            )
+        elif status == "dispatched":
+            # Issue #2118 复审：自动推进事件在 plugin 事件驱动路径下，run_a2a_dispatch
+            # 只因「handoff 事件已发」就返回 ok；真正的 dispatch_node 结果只在 listener
+            # 可见。因此 stage 推进必须落在这里（确认下游已接受派发），而非调用方提前写。
+            _advance_auto_advance_stage(event, evt)
+        else:
+            # blocked/未知：节点未实际派发，绝不能推进 stage（否则 stage 指向从未
+            # 运行的下游）；统一留痕，聚合重排事件仍按退避重排/降级。
+            log.warning(f"agent/handoff listener: dispatch not confirmed "
+                        f"status={status or 'unknown'} target={target_agent} node={node_id}")
+            _record_dispatch_not_confirmed(
+                event, payload, evt, target_agent, node_id,
+                f"A2A 交办未确认派发（target={target_agent}, node={node_id}, "
+                f"status={status or 'unknown'}）：{str(result)[:150]}",
+                "a2a_dispatch_blocked", "dispatch",
+            )
     except Exception as e:
         log.warning(f"agent/handoff listener failed: {e}")
-        try:
-            from src.domains.runtime.pipeline.event_pipeline import _fail_event
-            _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
-            _fail_event(
-                event.seq,
-                f"A2A 交办派发异常（target={target_agent}, node={node_id}）：{str(e)[:200]}",
-                diag={
-                    "code": "a2a_dispatch_exception",
-                    "target_stage": target_agent,
-                    "target_node": node_id,
-                    "phase": "exception",
-                    "ref_seq": _ref_seq,
-                },
-            )
-        except Exception as _fe2:
-            log.warning(f"agent/handoff listener _fail_event failed (exception path): {_fe2}")
-            try:
-                from src.api.event_store import update_event_status
-                update_event_status(event.seq, "failed")
-            except Exception:
-                pass
+        # Issue #2118 复审（Critical）：异常路径只调用共享收口，由
+        # _record_dispatch_not_confirmed 内部决定「重排」或「终态失败」。
+        # 此前在收口之后又无条件 _fail_event，会把刚写回的 queued 重排事件
+        # 立即覆盖为 failed（event_store 终态保护只拦终态覆盖终态，不拦
+        # queued->failed），导致退避重排与耗尽转 pending_review 全部失效。
+        _record_dispatch_not_confirmed(
+            event, payload, evt, target_agent, node_id,
+            f"A2A 交办派发异常（target={target_agent}, node={node_id}）：{str(e)[:200]}",
+            "a2a_dispatch_exception", "exception",
+        )
 
 
 def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
@@ -264,7 +366,11 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                 _aio.run(bus.emit(handoff_event))
 
             log.info(f"A2A (plugin): agent/handoff emitted for {agent_name}, seq={seq}, mode={mode}")
-            return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "event-driven"}
+            # async=True：仅表示 handoff 事件已发出，dispatch_node 结果稍后由 listener
+            # 决定。自动推进调用方据此推迟 stage 写入（Issue #2118 复审），避免
+            # listener 后置 failed 时 stage 已指向从未运行的下游。
+            return {"status": "ok", "seq": seq, "agent": agent_name,
+                    "mode": "event-driven", "async": True}
     except Exception as e:
         log.warning(f"A2A plugin event-driven path failed: {e}, falling back to legacy dispatch")
 
@@ -282,8 +388,26 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             # Issue #653：场景解析失败曾是静默回退「default」的旁路（节点查不到 → 全局池），必须留痕
             log.warning(f"A2A: get_issue_scene failed for repo={repo_key} "
                         f"issue=#{issue_number}: {_se653}")
-    engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
-                            scene_id=_a2a_scene, user_id=_a2a_scene_uid)
+    # Issue #2791（评审 P1）：legacy 兜底路径（非 plugin / plugin 事件驱动异常回退）
+    # 同样「定向优先」——命中即锁定 `engine_config.runtime_id`，不跑 pick_engine、
+    # 也不过场景池门（场景池全灭也不否定派发）；未命中才落到既有池选择。
+    # 解析实现单点在 engine_select.resolve_directive_engine，本处不复制判定。
+    _directive = None
+    try:
+        from src.domains.runtime.engine.engine_select import resolve_directive_engine
+        _directive = resolve_directive_engine(
+            (evt.get("payload") or {}).get("engine_config"), repo_key, agent_name)
+    except Exception as _dir_e:
+        log.warning(f"A2A: resolve engine_config directive failed: {_dir_e}")
+        _directive = None
+    if _directive and _directive.get("hit"):
+        engine_id = _directive["runtime_id"]
+        log.info(f"A2A (directed): engine_config.runtime_id={engine_id} "
+                 f"({_directive.get('engine_name') or '-'}) locked, "
+                 f"pick_engine/scene pool skipped, seq={seq}")
+    else:
+        engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
+                                scene_id=_a2a_scene, user_id=_a2a_scene_uid)
     if engine_id is None:
         log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
         # Issue #418：早退统一走 _fail_event，回写 result/exit_code/completed_at
@@ -348,12 +472,29 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                 return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
         except Exception as _gate_e:
             log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
-        _bcast_task_id = _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
-                               skill_name or agent_name, evt,
-                               skill_id, skill_path or "", engine_id,
-                               f"#{issue_number}" if issue_number else "",
-                               pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
-                               pool_selector=_pool_sel_a2a)
+        _enq_args = (
+            repo_key, seq, agent_name, _be, skill_name or agent_name, evt,
+            skill_id, skill_path or "", engine_id,
+            f"#{issue_number}" if issue_number else "",
+        )
+        try:
+            _bcast_task_id = _enqueue_pipeline_task(
+                *_enq_args,
+                pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
+                pool_selector=_pool_sel_a2a,
+            )
+        except TypeError as _te:
+            # 混合版本滚动升级：a2a_dispatch 已带 pool_selector，但进程内 event_pipeline
+            # 仍是旧签名。selector 为空时降级为普通入队；非空 selector 不能丢语义，继续抛。
+            if "pool_selector" not in str(_te) or _pool_sel_a2a:
+                raise
+            log.warning(
+                "A2A: enqueue module does not accept pool_selector; "
+                "fallback without selector (mixed-version process)")
+            _bcast_task_id = _enqueue_pipeline_task(
+                *_enq_args,
+                pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
+            )
         # Issue #3201：接管守门命中时入队返回空串 → 按 skipped 返回，不得误报 ok。
         if not _bcast_task_id:
             log.info(f"A2A (plugin broadcast): skipped {agent_name}, seq={seq} "
@@ -427,3 +568,106 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                     "reason": "already_taken_over"}
         log.info(f"A2A: enqueued task for {agent_name}, seq={seq}, engine={engine_id}, mode={kind}")
     return {"status": "ok", "seq": seq, "agent": agent_name}
+
+
+# ===== Issue #2251: 组织下派终态 → 幂等触发 org_aggregate（aggregate_recheck）=====
+
+def trigger_org_aggregate(dispatch: dict, targets: list[dict] | None,
+                          terminal_status: str) -> dict:
+    """批次进入终态时幂等持久化一条 org_aggregate 重排事件。
+
+    - 幂等键：``org_agg:<dispatch_id>:<terminal_status>``（events 唯一索引兜底，
+      重复 sweep / 多实例并发都只落一条）；
+    - 事件以 ``status='queued'`` 持久化（``aggregate_recheck=true``），由巡检
+      ``reconcile_queued_a2a`` 按 ``_not_before`` 派发，进程重启不丢；
+    - 派发失败沿用 #2118 的退避重排 / 耗尽转 pending_review 路径。
+
+    返回 ``{"status": "queued"|"dedup"|"skipped", "seq": N}``。
+    """
+    from datetime import datetime, timezone
+
+    from src.api.event_store import append_event, find_event_by_idempotency_key
+    from src.config import log
+    from src.kernel.repo_key import from_repo_key
+
+    repo_key = str((dispatch or {}).get("org_repo_key") or "")
+    # D105/A12：org issue 编号是平台原生 ident（数字或 Gitee IK* 字符串），
+    # 不能用 int() 收口；dispatch.id 是 TEXT uuid，保持字符串。
+    issue_number = native_issue_number((dispatch or {}).get("org_issue_number") or "")
+    dispatch_id = str((dispatch or {}).get("id") or "")
+    scene_id = str((dispatch or {}).get("scene_id") or "") or "default"
+    if not repo_key or not is_actionable_issue_number(issue_number) or not dispatch_id:
+        return {"status": "skipped", "seq": 0}
+
+    idem = f"org_agg:{dispatch_id}:{str(terminal_status or '')}"[:128]
+    existing = find_event_by_idempotency_key(repo_key, idem)
+    if existing:
+        return {"status": "dedup", "seq": int(existing.get("seq") or 0)}
+
+    from src.api.pipeline_config import get_pipeline_transition, node_role
+    transition = get_pipeline_transition(scene_id, "org_aggregate", repo_key=repo_key) or {}
+    node = transition.get("node") or {}
+    role = node_role(node) or "qa"
+    repository = from_repo_key(repo_key) or repo_key
+    context = (
+        f"组织下派 #{dispatch_id} 已进入终态 {terminal_status}，请聚合各目标结果并收口组织 Issue"
+    )
+    payload = {
+        "repository": repository,
+        "account": repository,
+        "issue_number": str(issue_number),
+        "pr_number": "",
+        "context": context[:500],
+        "aggregate_recheck": True,
+        "aggregate_round": 1,
+        "org_id": str((dispatch or {}).get("org_id") or ""),
+        "dispatch_id": dispatch_id,
+        "terminal_status": str(terminal_status or ""),
+        "ref_seq": 0,
+        # 到点即可由巡检派发（sweeper 已确认批次终态）
+        "_not_before": datetime.now(timezone.utc).isoformat(),
+    }
+    _evt = {
+        "type": "a2a_event", "repository": repository, "account": repository,
+        "issue_id": f"#{issue_number}", "issue_number": str(issue_number),
+        "payload": {k: v for k, v in payload.items() if k != "_a2a_queue"},
+        "_a2a_context": context,
+    }
+    payload["_a2a_queue"] = {
+        "existing_seq": 0,
+        "dispatch": {
+            "skill_name": str(node.get("skill") or ""),
+            "skill_id": int(node.get("skill_id") or 0),
+            "skill_path": str(node.get("skill_path") or ""),
+            "runtime_id": 0,
+            "backend": "",
+            "evt": _evt,
+        },
+    }
+    try:
+        seq = append_event(
+            repo_key=repo_key, event_type="a2a_event",
+            title=f"组织聚合重排：dispatch #{dispatch_id} 终态 {terminal_status}",
+            issue_id=f"#{issue_number}", source="a2a", agent_type=role,
+            summary=f"A2A: → {role} (org aggregate recheck)",
+            payload=payload, status="queued", scene_id=scene_id,
+            idempotency_key=idem,
+        )
+    except Exception as exc:
+        log.warning(f"org-aggregate: persist recheck event failed dispatch={dispatch_id}: {exc}")
+        return {"status": "skipped", "seq": 0}
+    # Issue #2270：批次终态时才触发聚合节点，这里同步把组织 Issue stage 推进到
+    # 聚合角色（qa）。此前依赖 org_dispatch 节点提前 A2A 来推进 stage；改为「等
+    # 批次终态」后，必须由触发方负责 stage，否则聚合任务完成时 stage 仍是 coding，
+    # auto-advance 会因 stage 不匹配而跳过 finalize/pending_review。
+    try:
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{issue_number}", role, "org_aggregate")
+    except Exception as exc:
+        log.warning(f"org-aggregate: set issue stage failed issue=#{issue_number}: {exc}")
+    if seq <= 0:
+        # 撞幂等键：已有事件（负 seq），不再触发
+        return {"status": "dedup", "seq": abs(int(seq))}
+    log.info(f"org-aggregate: queued recheck event seq={seq} dispatch={dispatch_id} "
+             f"status={terminal_status} role={role} scene={scene_id}")
+    return {"status": "queued", "seq": int(seq)}

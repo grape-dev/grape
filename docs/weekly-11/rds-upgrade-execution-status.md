@@ -38,10 +38,16 @@
 
 ## 2. 量化基线（本次实测）
 
+> ⚠️ **本节是 2026-11-14 割接前的量化基线快照，不代表当前状态。**
+> 当前（2026-11-22 实测）：三库 `information_schema.views` 均为 **0**
+> —— mgmt 109 / runtime 71 / insight 21，全部是 BASE TABLE；跨域读已改走 domain-lib
+> （`src/kernel/domain_read.py`，`GRAPE_<DOMAIN>_READ_VIA_LIB` + 各自 DSN 直连），不再依赖跨库视图。
+> 下文「122 个跨域视图」只用于说明 P0 阶段的清理规模，勿当作现存对象引用。
+
 | 指标 | 数值 | 采集命令 |
 | --- | --- | --- |
 | 三库基表 | 102（唯一表名 101；`grape_t_merge_gate_log` 在 insight/runtime 各有一份，按 disposition 判给 insight） | `scripts/rds_cutover_check.py --mode baseline` |
-| 三库跨域视图 | **122**（mgmt 30 / runtime 34 / insight 58；P0 已删 60 个零引用视图） | `information_schema.views` + `view-allowlist.txt` |
+| 三库跨域视图（割接前快照，现存量 0） | **122**（mgmt 30 / runtime 34 / insight 58；P0 已删 60 个零引用视图） | `information_schema.views` + `view-allowlist.txt` |
 | 视图覆盖的非本域表 | 91 张；其中 30 张（60 视图）代码零跨域引用，已于 2026-11-14 删除 | `docs/weekly-11/backup/p0-prune-dryrun.txt`、`no-view-tables.txt` |
 | 代码外域表引用 | 68 张表 / 1232 处跨域（`表×消费域` 135 对）；含归属域共 2711 处 | `scripts/foreign_table_refs.py --owner configs/table_ownership.json` |
 | 域×域分布 | api→mgmt 252 / api→runtime 388；mgmt→runtime 193；kernel→mgmt 88、→runtime 89 | `docs/weekly-11/dependency-matrix.md` |

@@ -70,10 +70,38 @@ _PROBE_COMMANDS = {
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
     "dsh": ["dsh", "headless", "hello"],
+    # AtomCode：worker 侧探针（此前缺此条目 → 每 10 分钟上报
+    # `skip: unknown engine: atomcode`，调度层无法判断健康）。可选开关
+    # （--ephemeral/--no-tools）由 _probe_engine_worker 按 CLI help 能力追加。
+    "atomcode": ["atomcode", "-p", "Reply OK"],
 }
 _PROBE_TIMEOUT = 30
-_ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
+# ACP 探活超时（Issue：Windows 实测 hermes 冷启动 initialize/session/new 会到
+# 20~23s；旧的 15s 会让冷启动机器周期性误报「ACP initialize no response」）。
+# 默认 30s，可用 RUNTIME_ACP_PROBE_TIMEOUT 覆盖（5~300s）。
+_ACP_PROBE_TIMEOUT = 30
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
+
+
+def _acp_probe_timeout() -> float:
+    """ACP initialize/session/new 超时（秒）：env RUNTIME_ACP_PROBE_TIMEOUT 可调。
+
+    非法值/越界回落默认并对 WARNING 一次，避免静默用了错的预算。
+    """
+    raw = (os.environ.get("RUNTIME_ACP_PROBE_TIMEOUT") or "").strip()
+    if not raw:
+        return float(_ACP_PROBE_TIMEOUT)
+    try:
+        val = float(raw)
+    except ValueError:
+        log.warning(f"RUNTIME_ACP_PROBE_TIMEOUT={raw!r} not numeric, "
+                    f"using default {_ACP_PROBE_TIMEOUT}s")
+        return float(_ACP_PROBE_TIMEOUT)
+    if not (5.0 <= val <= 300.0):
+        log.warning(f"RUNTIME_ACP_PROBE_TIMEOUT={raw!r} out of range [5, 300], "
+                    f"using default {_ACP_PROBE_TIMEOUT}s")
+        return float(_ACP_PROBE_TIMEOUT)
+    return val
 # Issue #423: _read_response 防御性行数上限（保险丝，防失控流）。真正终止条件是 deadline；
 # 会话通知量是动态值（三步探活实测 prompt 响应前 36 行），行数上限不得与其耦合。
 _ACP_READ_MAX_LINES = 500
@@ -249,6 +277,23 @@ def _close_proc_pipes(proc, label: str = "") -> None:
 
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
+# Issue #2791（P1-13）：首探时延窗口。worker 安装/启动完成（注册成功、或重注册拾起
+# 「起机后新装的引擎」）属于「安装完成事件」，必须立即探测，失败按指数退避重试，
+# 把「安装完成 → 首探 ok」压进 60s（P95）。此前只有注册时的一次性探测 + 600s 周期，
+# 新装引擎实测要等约 10 分钟才第一次被判 ok（母单 #2747 P1-13）。
+_PROBE_RETRY_BASE = float(os.environ.get("RUNTIME_PROBE_RETRY_BASE", "4"))
+_PROBE_RETRY_MAX = float(os.environ.get("RUNTIME_PROBE_RETRY_MAX", "20"))
+_PROBE_FIRST_WINDOW = float(os.environ.get("RUNTIME_PROBE_FIRST_WINDOW", "60"))
+
+# Issue #2791（评审 P2）：窗口起点必须贴近「安装完成」而不是「检测到安装」。
+# 重注册周期（RUNTIME_REREGISTER_INTERVAL，默认 300s）是防 id 静默失效的兜底节奏，
+# 拿它做「新装引擎」的唯一发现手段，install→首探 ok 最坏 = 300 + 60 秒（> 60s 口径）。
+# 于是再加一档廉价发现（只查 PATH，不跑 CLI/握手，15s 量级）：命中新装引擎即立即
+# 重注册 + 进首探窗口，install→ok 上界 ≈ 发现间隔 + 窗口首个尝试点（t=0）。
+_FAST_DISCOVER_INTERVAL = float(os.environ.get("RUNTIME_FAST_DISCOVER_INTERVAL", "15"))
+# 定期重注册间隔（防服务端重启后 runtime id 静默失效）
+_REREGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
+
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
 #   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
@@ -273,7 +318,65 @@ _worker_probe_started = False
 _last_sent_probe_fingerprint: dict = {}
 
 
+def _acp_error_detail(resp: dict) -> str:
+    """JSON-RPC error 的完整原因：message + data.details 原样拼接。
+
+    hermes 把 provider 侧错误（模型不存在等）包装成
+    {"code": -32603, "message": "Internal error",
+     "data": {"details": "admitted_turn_failed"}}，
+    只上报 message 会让平台侧完全无从判断——data.details 才是可检索的线索。
+    """
+    err = (resp or {}).get("error") or {}
+    if not isinstance(err, dict):
+        return str(err)[:400]
+    msg = str(err.get("message") or "")
+    data = err.get("data")
+    details = ""
+    if isinstance(data, dict):
+        details = str(data.get("details") or data.get("reason") or "")
+    elif data:
+        details = str(data)
+    if details and details not in msg:
+        return f"{msg} [details={details}]"[:400]
+    return msg[:400]
+
+
+def _acp_stderr_tail(proc) -> str:
+    """terminate 后取 stderr 尾部（单行化，供探活结果上报）。"""
+    try:
+        _out = proc.stderr.read() or b""
+        _text = _out if isinstance(_out, str) else _out.decode("utf-8", "replace")
+        return _text.strip().replace("\n", " | ")[-300:]
+    except Exception:  # noqa: BLE001 - 诊断信息取不到不影响结论
+        return ""
+
+
 def _probe_hermes_acp(cli_path: str) -> dict:
+    """hermes ACP 探活（冷启动失败重试一次）。
+
+    Windows 实测：机器冷启动时 initialize/session/new 会跑到 20~23s，恰好超过
+    旧的 15s 预算，于是连续 3 次探活都在 15.0s 处报 no response、把健康的
+    hermes 判成离线。这里两件事：
+      1. 单步超时改成 env 可调（默认 30s，见 _acp_probe_timeout）
+      2. 只在「no response / timeout」（= 可能是冷启动）时重试一次；
+         provider 侧错误（模型不存在、认证失败）重试没有意义，直接返回。
+    """
+    result = _probe_hermes_acp_once(cli_path)
+    if result.get("status") == "fail" and any(
+            k in str(result.get("error", "")) for k in ("no response", "timeout")):
+        retry = _probe_hermes_acp_once(cli_path)
+        if retry.get("status") != "fail":
+            retry["output"] = (str(retry.get("output", "")) +
+                               " (retried after cold-start timeout)").strip()
+            retry["latency"] = round(float(retry.get("latency", 0) or 0), 1)
+            return retry
+        # 两次都失败：把第一次的原因保留下来（第二次可能只是排队更久）
+        retry["error"] = f"{retry.get('error', '')} | first attempt: {result.get('error', '')}"
+        return retry
+    return result
+
+
+def _probe_hermes_acp_once(cli_path: str) -> dict:
     """hermes ACP 模式探活：initialize + session/new + 轻量 prompt，端到端验证引擎可用性。
 
     1. 启动 hermes acp 子进程（和实际任务执行路径一致）
@@ -385,7 +488,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                "params": {"protocolVersion": 1,
                           "clientInfo": {"name": "grape-probe", "version": "1.0"},
                           "capabilities": {}}})
-        _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
+        _step_timeout = _acp_probe_timeout()
+        _init_resp = _read_response(1, _step_timeout)
         if not _init_resp:
             latency = round(_time_mod.time() - start, 1)
             _stderr = ""
@@ -411,10 +515,10 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         _probe_cwd = _tempfile.mkdtemp(prefix="hermes-probe-")
         _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
                "params": {"cwd": _probe_cwd, "mcpServers": []}})
-        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        _new_resp = _read_response(2, _step_timeout)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
         _sid = (_new_resp.get("result") or {}).get("sessionId", "")
         if not _sid:
@@ -440,7 +544,10 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     "error": f"ACP prompt no response (provider/model unreachable?): {_stderr}"}
         if "error" in _prompt_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = _prompt_resp["error"].get("message", str(_prompt_resp["error"]))[:200]
+            _err = _acp_error_detail(_prompt_resp)
+            _tail = _acp_stderr_tail(proc)
+            if _tail:
+                _err = f"{_err} | stderr: {_tail}"
             return {"status": "fail", "latency": latency,
                     "error": f"ACP prompt error: {_err}"}
 
@@ -458,7 +565,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
 
     except _subprocess.TimeoutExpired:
         latency = round(_time_mod.time() - start, 1)
-        return {"status": "fail", "latency": latency, "error": f"timeout ({_ACP_PROBE_TIMEOUT + _ACP_PROMPT_TIMEOUT}s)"}
+        return {"status": "fail", "latency": latency,
+                "error": f"timeout ({_acp_probe_timeout() + _ACP_PROMPT_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "hermes CLI not found"}
     except OSError as e:
@@ -597,10 +705,11 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
                "params": {"protocolVersion": 1,
                           "clientInfo": {"name": "grape-probe", "version": "1.0"},
                           "capabilities": {}}})
-        _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
+        _step_timeout = _acp_probe_timeout()
+        _init_resp = _read_response(1, _step_timeout)
         if not _init_resp or "error" in _init_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _init_resp else _init_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _init_resp else _acp_error_detail(_init_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP initialize: {_err}"}
 
         # 2. session/new（hwcloud 必须先建会话；mcpServers 必须空数组）
@@ -610,10 +719,10 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         _probe_cwd = _tempfile.mkdtemp(prefix="hwcloud-probe-")
         _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
                "params": {"cwd": _probe_cwd, "mcpServers": []}})
-        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        _new_resp = _read_response(2, _step_timeout)
         if not _new_resp or "error" in _new_resp:
             latency = round(_time_mod.time() - start, 1)
-            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            _err = "no response" if not _new_resp else _acp_error_detail(_new_resp)
             return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
         _sid = (_new_resp.get("result") or {}).get("sessionId", "")
 
@@ -877,6 +986,19 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
     if cli_path:
         cmd = [cli_path] + cmd[1:]
+    # AtomCode：--ephemeral/--no-tools 只在 CLI 支持时追加（5.0.4 没有这些
+    # 开关，盲目传会 exit=2 把健康引擎误报成 fail）。
+    if engine_name == "atomcode":
+        try:
+            from src.domains.runtime.engine.atomcode import cli_help_text as _atom_help
+            _ah = _atom_help(cmd[0])
+            if _ah:
+                if "--no-tools" in _ah:
+                    cmd.append("--no-tools")
+                if "--ephemeral" in _ah:
+                    cmd.append("--ephemeral")
+        except Exception as _ae:  # noqa: BLE001 - 探测失败按基础参数探
+            log.debug(f"atomcode probe capability detection skipped: {_ae}")
     # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
     # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
     _probe_env = None
@@ -916,6 +1038,261 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
 
 
+def _probe_backoff_seconds(fail_streak: int, base: float | None = None,
+                           cap: float | None = None) -> float:
+    """首探失败第 N 次重试前的等待秒数（指数退避 + 封顶，防止风暴式重试）。
+
+    Issue #2791（P1-13）：`base * 2^(N-1)`，上限 `cap`。封顶让单次等待既不超窗、
+    也不会高频重试（安装脚本竞态里探测本身要起 CLI 进程，不宜秒级连打）。
+    """
+    _b = _PROBE_RETRY_BASE if base is None else base
+    _c = _PROBE_RETRY_MAX if cap is None else cap
+    if fail_streak <= 0:
+        return 0.0
+    return min(_b * (2 ** (fail_streak - 1)), _c)
+
+
+def _probe_first_window_plan(window: float | None = None, base: float | None = None,
+                             cap: float | None = None) -> list:
+    """首探窗口的尝试时间表（相对「安装完成」时刻的累计偏移，首个元素恒为 0）。
+
+    t=0 立即首探（事件驱动，不等周期）；其后按指数退避排点，最后一个点仍落在窗口内。
+    可观测性/可测性都落在这份纯函数上：窗口内尝试点数、每次间隔、封顶。
+    """
+    _w = _PROBE_FIRST_WINDOW if window is None else window
+    _plan = [0.0]
+    _t = 0.0
+    _streak = 0
+    while True:
+        _streak += 1
+        _next = _t + _probe_backoff_seconds(_streak, base=base, cap=cap)
+        if _next > _w:
+            break
+        _plan.append(_next)
+        _t = _next
+    return _plan
+
+
+def _probe_engines_first_window(engines, reason: str = "install", window: float | None = None,
+                                probe_fn=None, sleep_fn=None, now_fn=None) -> dict:
+    """安装/启动完成事件驱动的首探窗口：立即探测 → 失败指数退避重试 → ok 即停。
+
+    失败不放弃（交给周期探活 600s），只在窗口内尽量把首探 ok 逼出来：
+    每次重试都有上限等待，窗口尽头停止，避免探测线程与安装脚本抢资源。
+    probe_fn/sleep_fn/now_fn 可注入（纯调度，测试不依赖真实 CLI 与挂钟）。
+    """
+    _w = _PROBE_FIRST_WINDOW if window is None else window
+    _probe = probe_fn or (lambda eng: _probe_engine_worker(eng["name"], eng.get("cli_path", "")))
+    _sleep = sleep_fn or _time_mod.sleep
+    _now = now_fn or _time_mod.monotonic
+    _iso = lambda: _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
+
+    results = {}
+    pending = {}
+    for eng in engines or []:
+        _name = eng.get("name") or ""
+        if not _name:
+            continue
+        if not eng.get("installed"):
+            # 未安装不是「首探失败」：置 skip，不进重试（装完会由重注册拾起）
+            results[_name] = {"status": "skip", "latency": 0, "last_probe": _iso(),
+                              "error": "not installed"}
+            continue
+        pending[_name] = eng
+
+    if pending:
+        log.info(f"worker engine probe (first window/{reason}): probing {sorted(pending)} immediately "
+                 f"(retry backoff base={_PROBE_RETRY_BASE}s cap={_PROBE_RETRY_MAX}s window={_w}s)")
+    _t0 = _now()
+    # 单一时间表：窗口循环只消费 _probe_first_window_plan 的排点（不在此另算退避），
+    # 免得「计划表」与「实跑表」两份推导各自漂移（评审判断项）。
+    _plan = _probe_first_window_plan(window=_w)
+    _attempt = 0
+    try:
+        for _idx, _point in enumerate(_plan):
+            _attempt += 1
+            for _name in list(pending):
+                _res = None
+                try:
+                    _res = dict(_probe(pending[_name]) or {})
+                except Exception as _pe:
+                    _res = {"status": "fail", "latency": 0, "error": str(_pe)[:200]}
+                _res["last_probe"] = _iso()
+                results[_name] = _res
+                if _res.get("status") == "ok":
+                    pending.pop(_name, None)
+            if not pending:
+                break
+            if _idx + 1 >= len(_plan):
+                log.info(f"worker engine probe (first window/{reason}): {sorted(pending)} still not ok "
+                         f"after {_now() - _t0:.0f}s ({_attempt} attempts), "
+                         f"hand over to periodic probe ({_PROBE_INTERVAL}s)")
+                break
+            _delay = _plan[_idx + 1] - _point
+            if (_now() - _t0) + _delay > _w:
+                log.info(f"worker engine probe (first window/{reason}): {sorted(pending)} still not ok "
+                         f"after {_now() - _t0:.0f}s, hand over to periodic probe ({_PROBE_INTERVAL}s)")
+                break
+            _sleep(_delay)
+    except Exception as _we:
+        log.warning(f"worker engine probe (first window/{reason}) error: {_we}")
+    finally:
+        try:
+            with _worker_probe_lock:
+                _worker_probe_results.update(results)
+        except Exception:
+            pass
+    return results
+
+
+def _start_first_probe_window(engines, reason: str = "install"):
+    """把首探窗口放到后台线程（不阻塞 worker 启动与心跳）。"""
+    _list = [e for e in (engines or []) if e.get("name")]
+    if not _list:
+        return None
+    _t = _threading.Thread(target=_probe_engines_first_window, args=(_list,),
+                           kwargs={"reason": reason}, daemon=True,
+                           name="worker-engine-first-probe")
+    _t.start()
+    return _t
+
+
+def _new_engines(prev_installed, installed) -> list:
+    """比对两次发现结果，取出「新出现且已安装」的引擎（= 安装完成事件）。"""
+    _prev = {e.get("name") for e in (prev_installed or []) if e.get("name")}
+    return [e for e in (installed or []) if e.get("name") and e.get("installed")
+            and e.get("name") not in _prev]
+
+
+def _probe_after_reregister(prev_installed, installed):
+    """重注册拾起新装引擎后立即触发首探（否则要等 600s 周期，实测约 10 分钟才可派发）。"""
+    try:
+        _new = _new_engines(prev_installed, installed)
+        if not _new:
+            return []
+        log.info(f"worker engine probe: newly installed engine(s) {[e['name'] for e in _new]} "
+                 f"detected on re-register, triggering first probe window immediately")
+        _start_first_probe_window(_new, reason="install")
+        return _new
+    except Exception as e:
+        log.warning(f"worker first-probe after re-register failed: {e}")
+        return []
+
+
+def _scan_installed_cheap() -> list:
+    """廉价安装发现：只走 PATH 查找（`discover_runtimes`），不起 CLI 进程。
+
+    与 `_discover_local_runtimes`（会跑 `<cli> --version`、hermes 可能做 ACP 握手，
+    单个引擎最长 20s）刻意分开：SUB-60s 的发现节奏只能用这份廉价数据判「装没装」，
+    版本/健康度由随后的重注册（全量发现）补齐。
+    """
+    from src.domains.runtime.engine.registry import discover_runtimes
+    return [{"name": r.get("name"), "installed": bool(r.get("installed")),
+             "cli_path": r.get("cli_path") or ""}
+            for r in (discover_runtimes() or []) if r.get("name")]
+
+
+def _is_cloud_worker_mode() -> bool:
+    """本进程是否 cloud_worker（云沙箱 worker）。
+
+    两个信号任一为真即算：`GRAPE_RUNTIME_MODE`（cloud_worker.main() 首行设置）或
+    `CLOUD_WORKER_PROVIDER`（安装脚本注入，cloud_worker._load_config 读它）。
+    """
+    if (os.environ.get("GRAPE_RUNTIME_MODE", "") or "").strip().lower() == "cloud_worker":
+        return True
+    return bool((os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip())
+
+
+# [云 worker 可观测性] 「领取列表为空」告警的节流间隔（秒）。
+# 数值来源：与既有心跳/巡检节奏对齐的运维约定——一次空窗不应刷成多行噪声，
+# 又不能长到让「注册正常但不领取」这类回归长时间静默；排障时可用
+# RUNTIME_EMPTY_IDS_WARN_INTERVAL 覆盖（调小到个位数即可逐轮观察）。
+EMPTY_IDS_WARN_INTERVAL_DEFAULT = 60.0
+
+
+def _empty_ids_warn_interval() -> float:
+    """告警节流间隔（秒）：env 可覆盖，非法/非正值回落到默认。"""
+    _raw = (os.environ.get("RUNTIME_EMPTY_IDS_WARN_INTERVAL", "") or "").strip()
+    if _raw:
+        try:
+            _v = float(_raw)
+            if _v > 0:
+                return _v
+        except (TypeError, ValueError):
+            pass
+    return EMPTY_IDS_WARN_INTERVAL_DEFAULT
+
+
+def _fast_install_triggered(installed, scan_fn=None) -> list:
+    """快速发现：返回本次扫描命中的「新装引擎」（空 = 无安装完成事件）。
+
+    扫描异常不触发（宁可按周期兜底，也不因一次扫描失败抖动重注册）。
+
+    [云 worker 修复] 云模式下直接返回空：云引擎的清单来自平台模板（四段式名字
+    `engine:template:provider:pid`），和本地 PATH 扫描出来的本机引擎名永远不可能
+    相等，用本地扫描判「新装引擎」会每 15s 命中一次 → 空注册风暴并挤掉领取节奏。
+    云引擎的增减由 cloud_worker 的模板刷新循环负责。
+    """
+    if scan_fn is None and _is_cloud_worker_mode():
+        return []
+    try:
+        _scan = scan_fn() if scan_fn is not None else _scan_installed_cheap()
+    except Exception as e:
+        log.warning(f"worker engine discovery (cheap scan) failed: {e}")
+        return []
+    return _new_engines(installed, _scan)
+
+
+async def _reregister_cycle(client, installed, device_name, *, now, last_reregister,
+                            last_fast_scan, cli_version: str = "", force: bool = False,
+                            fast_interval: float | None = None,
+                            reregister_interval: float | None = None,
+                            scan_fn=None, reregister_fn=None, probe_fn=None) -> dict:
+    """两档重注册决策 + 执行（worker 主循环的单点实现）。
+
+    - 周期档：`now-last_reregister >= RUNTIME_REREGISTER_INTERVAL`（防 id 静默失效）；
+    - 安装档：`now-last_fast_scan >= RUNTIME_FAST_DISCOVER_INTERVAL` 且廉价发现命中
+      「新装引擎」→ 立即重注册（拾起新引擎 runtime id）并触发首探窗口；
+    - force 档：心跳连续失败（调用方已判定必须重注册）→ 不再看时钟直接执行。
+
+    只有安装档命中（周期档未到期）才做廉价扫描，避免每轮主循环都扫 PATH。
+    返回 dict：did / triggered_by(periodic|install|"") / ok / runtime_ids /
+    engine_by_rid / installed / last_reregister / last_fast_scan。
+    """
+    _fast_iv = _FAST_DISCOVER_INTERVAL if fast_interval is None else fast_interval
+    _rr_iv = _REREGISTER_INTERVAL if reregister_interval is None else reregister_interval
+    _state = {"did": False, "triggered_by": "", "ok": True,
+              "runtime_ids": None, "engine_by_rid": None, "installed": installed,
+              "last_reregister": last_reregister, "last_fast_scan": last_fast_scan}
+
+    _periodic = (now - last_reregister) >= _rr_iv
+    _install_event = False
+    if not (force or _periodic) and (now - last_fast_scan) >= _fast_iv:
+        _state["last_fast_scan"] = now
+        _install_event = bool(_fast_install_triggered(installed, scan_fn=scan_fn))
+        if _install_event:
+            log.info(f"worker engine discovery: new engine installed after startup "
+                     f"({(_fast_iv)}s cadence), re-registering immediately")
+    if not (force or _periodic or _install_event):
+        return _state
+
+    _state.update({"did": True,
+                   "triggered_by": "forced" if force else ("periodic" if _periodic else "install")})
+    _rereg = reregister_fn or _reregister
+    _rr = await _rereg(client, installed, device_name, cli_version=cli_version)
+    if _rr is not None:
+        runtime_ids, engine_by_rid, _installed = _rr
+        _state.update({"runtime_ids": runtime_ids, "engine_by_rid": engine_by_rid,
+                       "installed": _installed})
+        _probe = probe_fn or _probe_after_reregister
+        _probe(installed, _installed)
+    else:
+        _state["ok"] = False
+    _state["last_reregister"] = now
+    _state["last_fast_scan"] = now
+    return _state
+
+
 def _worker_probe_once():
     """同步执行一轮引擎探测，结果写入 _worker_probe_results。
 
@@ -941,6 +1318,28 @@ def _worker_probe_once():
             log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
     except Exception as e:
         log.warning(f"worker engine probe (initial) error: {e}")
+
+
+def _probe_after_registration(installed) -> list:
+    """「启动完成事件」：立即一轮探测，未 ok 的引擎进首探窗口（Issue #2791 / P1-13）。
+
+    先同步探测一轮（首个心跳必须带 probe 观测，服务端才能纠正 healthy），
+    再对没 ok 的引擎按指数退避在 60s 窗口内重试——不再干等 600s 周期探测。
+    返回进了首探窗口的引擎列表（空 = 全部已 ok）。
+    """
+    try:
+        _worker_probe_once()
+    except Exception as e:
+        log.warning(f"worker probe after registration failed: {e}")
+    try:
+        _not_ok = [r for r in (installed or []) if r.get("installed")
+                   and (_worker_probe_results.get(r.get("name")) or {}).get("status") != "ok"]
+        if _not_ok:
+            _start_first_probe_window(_not_ok, reason="startup")
+            return _not_ok
+    except Exception as _pfw:
+        log.warning(f"worker first-probe window (startup) failed to start: {_pfw}")
+    return []
 
 
 def _worker_probe_loop():
@@ -1705,7 +2104,12 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     """
     _business_base = env.get("GRAPE_SERVER_URL") or ""
     _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
-    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    # 回环业务基址不是"显式业务基址"：远端 worker 的 pipeline 拿不到 worker 侧地址时
+    # 会写 http://127.0.0.1（沙箱内 127.0.0.1 是沙箱自己 → 全 301/拒绝连接，实测
+    # 2026-11-23 GitLab #9）。出现回环基址且本 worker 有非回环地址时必须覆盖。
+    _loopback_business = ("127.0.0.1" in _business_base) or ("localhost" in _business_base)
+    _single_address = (_loopback_business or (not _business_base)
+                       or _same_url_host(_business_base, _runtime_base))
     env["RUNTIME_SERVER_URL"] = local_base
     task["server_url"] = local_base
     if _single_address:
@@ -2111,7 +2515,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
     cwd = task.get("cwd") or ""
     if not cwd or not _os.path.isdir(cwd):
         return
-    for _sub in (".skills", ".project-info", ".knowledge"):
+    for _sub in (".skills", ".project-info", ".knowledge", ".org-context"):
         _p = _os.path.join(cwd, _sub)
         try:
             if _os.path.isdir(_p):
@@ -2256,7 +2660,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             from src.domains.runtime.engine.repogit import _run_git
             _r_push = _run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_token, timeout=120)
+                token=_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 log.warning(f"linked PR: push failed {_rk}: {_err}")
@@ -2528,8 +2932,22 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             if _ref_key:
                 raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
                 if raw:
-                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
-                    skill_files = {}
+                    # 2026-11-22 修（远端 worker 实测）：本分支位于上方 `if skill_zip_b64:`
+                    # 物化块**之后**，旧写法只赋值 skill_zip_b64/skill_files={} 等于
+                    # “取到 zip 却从不落盘”——实测日志「服务端代拉成功」紧接
+                    # 「bound skill 'vod-cli' not materialized anywhere ... refused」。
+                    # 就地物化；成功才走“无文本文件”分支，失败保留原 files 触发降级链。
+                    from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
+                    _ok_ref, _inst_ref, _reason_ref = materialize_skill_zip_atomic(
+                        skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
+                    _target_ref = task.get("skill") or ""
+                    if _ok_ref and (not _target_ref or _target_ref in _inst_ref):
+                        skill_zip_b64 = _b64.b64encode(raw).decode()
+                        skill_files = {}
+                        log.info(f"[skill] __obs_key__ zip 物化成功: skills={_inst_ref}")
+                    else:
+                        log.warning(f"[skill] __obs_key__ zip 物化未命中目标技能: "
+                                    f"ok={_ok_ref} installed={_inst_ref} reason={_reason_ref[:120]}")
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
             # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
@@ -2800,6 +3218,46 @@ async def _execute_task(client, task, engine_name: str = ""):
             return await _execute_task_impl(client, task, engine_name)
 
 
+def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
+    """Issue #3632：平台未注册时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：这段行为是本次修复最关键的一条（"平台未注册"曾经只
+    WARNING 一条就放行 agent，agent 拿不到 clone 地址后自述"git 只读降级交付"，
+    任务 completed/exit 0、工作区空）。把"判定 → 结构化错误 + 明确日志"从
+    执行流程里抽出来，才能被用例直接锁住，而不是靠读代码确认。
+
+    Returns:
+        `{"_error": "<code>: <message>", "_started": False}` —— 由 `_wrap` 上报
+        failed，任务**不进入** Agent 执行（与 WorkspaceBaselineError 同一条阻断语义）。
+    """
+    code = getattr(exc, "code", "platform_not_registered")
+    log.error(f"task {tid} blocked by platform card: code={code} "
+              f"repo_key={repo_key or ''} err={exc}")
+    return {"_error": f"{code}: {exc}", "_started": False}
+
+
+def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+    """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
+    继续跑 agent」，agent 拿不到工作区后自述「git 元数据只读」并交零交付结论，
+    任务仍 completed。真因是凭据（rc 行为空/解不开/过期）时，必须把分类带进
+    task errors，而不是渲染成 git 只读（与 #3632 平台未注册同一条阻断语义）。
+
+    Returns:
+        归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
+        （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
+        凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+    """
+    from src.domains.runtime.engine import repogit
+
+    reason = repogit.worktree_credential_error(repo_key)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
 async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -2880,7 +3338,8 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
 
     env = {}
     try:
-        env = json.loads(task.get("env_extra") or "{}")
+        from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+        env = decrypt_env_extra(task.get("env_extra"))  # enc:v1 信封解密（#2423）
     except Exception:
         pass
     # Fetch latest env (AK/SK) from server DB — overrides stale snapshot
@@ -2914,7 +3373,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
     _local_base = ""
     _old_server_url = task.get("server_url") or ""
-    if _is_local_worker or _worker_server_url_reachable(_rts, _old_server_url):
+    # 业务基址若是回环，即便回连基址一样也要进覆盖分支：这是两个不同的键，
+    # 任务行 server_url 已是本 worker 地址 ≠ 沙箱里 GRAPE_SERVER_URL 可用。
+    _business_loop = (("127.0.0.1" in (env.get("GRAPE_SERVER_URL") or ""))
+                      or ("localhost" in (env.get("GRAPE_SERVER_URL") or "")))
+    if _is_local_worker or _business_loop or _worker_server_url_reachable(_rts, _old_server_url):
         # 判定改为实测可达（2026-10-12 seq#552 复盘）：本地 worker 或内网 worker
         # （RUNTIME_SERVER_URL 直连可达，如内网 worker 直连主控内网地址 3ms）
         # 都覆盖为本 worker 直连地址；远程公网 worker（内网不可达）保持原
@@ -2957,20 +3420,36 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # Issue #2514：基线分叉/不可达 → WorkspaceBaselineError 在此显式阻断（不静默复用错基线），
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
+    from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
-            repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=_get_task_token(task),
-                                          work_branch=_wb, task_id=tid,
-                                          strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            _wt = repogit.ensure_issue_worktree(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=_get_task_token(task),
+                work_branch=_wb, task_id=tid,
+                strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
+            # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
+            if not _wt:
+                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
+                if _cred_blocked:
+                    _res.dispose()
+                    return _cred_blocked
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
         _res.dispose()
         return {"_error": str(_wb_err), "_started": False}
+    except _PlatformCardMissing as _pc_err:
+        # Issue #3632：平台未注册（三条卡来源全断）≠ 工作区 git 不可写。
+        # 原先这里只 WARNING 一条就放行 agent，agent 拿不到 clone 地址 → 自述
+        # "git 只读降级交付" → 任务 completed/exit 0，工作区空、无 PR、无 QA 交办。
+        # 现在显式阻断并把 code 带进任务错误（构造逻辑见 platform_card_block_result）。
+        _res.dispose()
+        return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
@@ -3066,9 +3545,25 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     try:
         know_files = json.loads(task.get("knowledge_files") or "{}")
         know_file_urls = json.loads(task.get("knowledge_file_urls") or "{}")
-        await _materialize_files(client, tid, know_files, know_file_urls, know_dir,
-                                 tag="knowledge")
+        # 组织快照单独物化到 .org-context/，不混入普通 .knowledge/
+        org_prefix = "org-context/"
+        org_files = {k[len(org_prefix):]: v for k, v in know_files.items()
+                     if str(k).startswith(org_prefix)}
+        org_urls = {k[len(org_prefix):]: v for k, v in know_file_urls.items()
+                    if str(k).startswith(org_prefix)}
+        regular_files = {k: v for k, v in know_files.items()
+                         if not str(k).startswith(org_prefix)}
+        regular_urls = {k: v for k, v in know_file_urls.items()
+                        if not str(k).startswith(org_prefix)}
+        if regular_files or regular_urls:
+            await _materialize_files(client, tid, regular_files, regular_urls,
+                                     know_dir, tag="knowledge")
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+        if org_files or org_urls:
+            org_dir = _os.path.join(cwd, ".org-context")
+            await _materialize_files(client, tid, org_files, org_urls,
+                                     org_dir, tag="org-context")
+            prompt = prompt.replace("{{ORG_CONTEXT_DIR}}", org_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
 
@@ -3462,6 +3957,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     # hermes_active_tids 承担；旧实现用 int 计数且只在正常收尾里 -= 1，
     # 三条提前 return 路径会永久泄漏，攒够次数后这台 hermes 再也不接活。
     last_heartbeat = 0.0
+    _empty_ids_warn_at = 0.0  # 云模式「领取列表为空」告警的上次触发时刻（节流见 _empty_ids_warn_interval）
+    _empty_ids_warn_interval_s = _empty_ids_warn_interval()
 
     async def _purge_active_task(tid: str) -> None:
         """清掉本地一条残留活跃记录（代次已变 / 看门狗判定幽灵时用）。
@@ -3507,8 +4004,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         name="worker-presence-heartbeat")
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
-    RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
+    RE_REGISTER_INTERVAL = _REREGISTER_INTERVAL
     last_reregister = asyncio.get_running_loop().time()
+    last_fast_discover = last_reregister
     engine_by_rid = engine_by_rid or {}
 
     # 自动升级状态
@@ -3525,7 +4023,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     VERSION_CHECK_INTERVAL = float(os.environ.get("RUNTIME_VERSION_CHECK_INTERVAL", "3600"))
 
     while True:
-        # ---- 定期重注册（防 id 静默失效）----
+        # ---- 重注册：周期兜底（防 id 静默失效）+ 安装完成事件（SUB-60s 发现）----
+        # 决策与执行单点在 _reregister_cycle，本处只搬运状态。
         now = asyncio.get_running_loop().time()
         # ---- Issue #2514：派发前 workspace 巡检（节流）----
         # worktree list 对账 + prune + 回收「无活跃任务且超 GRAPE_WORKSPACE_TTL_HOURS」的
@@ -3533,17 +4032,35 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         if now - _workspace_patrol_last >= _workspace_patrol_interval():
             _workspace_patrol_last = now
             await _patrol_workspaces_active(active_task_objs)
-        if now - last_reregister >= RE_REGISTER_INTERVAL:
-            _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-            if _rr is not None:
-                runtime_ids, _new_ebr, installed = _rr
-                if _new_ebr:
-                    engine_by_rid = _new_ebr
-                heartbeat_fail_streak = 0
-            last_reregister = asyncio.get_running_loop().time()
+        _rrc = await _reregister_cycle(
+            client, installed, device_name, now=now,
+            last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+            cli_version=_read_local_worker_version(),
+            reregister_interval=RE_REGISTER_INTERVAL)
+        last_reregister = _rrc["last_reregister"]
+        last_fast_discover = _rrc["last_fast_scan"]
+        if _rrc["did"] and _rrc["ok"]:
+            # [云 worker 领取修复] 必须原地更新，不能重新绑定。
+            # cloud_worker 的模板刷新后台任务持有的是同一个 list 对象
+            # （_cloud_run_loop 把 ids 传进来，refresh 循环 runtime_ids.append/remove），
+            # 一旦这里 runtime_ids = 新 list，后台后续 append 全部落进被遗弃的旧 list，
+            # 模板后落的云引擎永远进不了领取列表 → get_tags/claim 一次都不发。
+            _new_ids = _rrc["runtime_ids"]
+            if _new_ids is not None:
+                runtime_ids[:] = _new_ids
+            if _rrc["engine_by_rid"]:
+                engine_by_rid = _rrc["engine_by_rid"]
+            installed = _rrc["installed"]
+            heartbeat_fail_streak = 0
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
+        if not _shuffled_rids and _is_cloud_worker_mode() and (now - _empty_ids_warn_at) >= _empty_ids_warn_interval_s:
+            # 云 worker 没有 rid 就等于「谁都不会来领」——此前完全静默，只能靠服务端
+            # 0 条 claim 反推。节流 60s，人肉看日志即可发现。
+            _empty_ids_warn_at = now
+            log.warning("cloud worker: runtime_ids is empty — no engine to claim; "
+                        "waiting for template refresh to register cloud engines")
         random.shuffle(_shuffled_rids)
         for rid in _shuffled_rids:
             try:
@@ -3693,7 +4210,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         pass
                     return
-                _result = None
+                # 哨兵：区分「真的超时」与「执行函数返回 None」。旧实现两者共用
+                # None，导致 2 秒就结束的任务被上报成 "task timed out after 7200.0s"，
+                # 真实原因（引擎根本没给结果）被这句假超时掩埋。
+                _TIMED_OUT = object()
+                _result = _TIMED_OUT
                 _timeout_attempts = 0  # Issue #516 M2：超时触发的尝试次数（观测/fail 消息用）
                 try:
                     if _test_execute is not None:
@@ -3725,7 +4246,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     f"child processes and failing" +
                                     (", will retry" if _will_retry else ""))
                                 _kill_stale_engine(t, _backend_for_engine(e))
-                                _result = None  # timeout → 重试或最终走 fail 路径
+                                _result = _TIMED_OUT  # timeout → 重试或最终走 fail 路径
                             finally:
                                 # MR-2：task.execute span 收口（本轮执行结束，含超时路径）
                                 _es = t.pop("__exec_span__", None)
@@ -3788,7 +4309,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     try:
                         if isinstance(_result, dict) and _result.get("_error"):
                             await _do_report("failed", _result["_error"], -1)
-                        elif _result is None:
+                        elif _result is _TIMED_OUT:
                             # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发。
                             # Issue #516 M2：保留 "timed out after" 签名（M3 观测聚合依赖），
                             # 追加尝试数（含自动重试）便于排障。
@@ -3796,6 +4317,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             if _timeout_attempts > 1:
                                 _to_msg += f" (attempts: {_timeout_attempts}, retries: {_retry_max})"
                             await _do_report("failed", _to_msg, -1)
+                        elif _result is None:
+                            # 执行函数正常返回 None：引擎没有产出任何结果（未启动、提前
+                            # 退出、沙箱执行函数没回包）。这不是超时，以前会被报成
+                            # "task timed out after {N}s"，把真实原因彻底掩埋。
+                            _eng = str(e or "").strip() or "unknown"
+                            await _do_report(
+                                "failed",
+                                f"task produced no result (engine={_eng}, no output, "
+                                f"no exit code reported)", -1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
@@ -3905,13 +4435,22 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-                if _rr is not None:
-                    runtime_ids, _new_ebr, installed = _rr
-                    if _new_ebr:
-                        engine_by_rid = _new_ebr
+                # Issue #2791：与周期档共用同一实现（force 档）；新装引擎同样立即进首探窗口
+                _hbrc = await _reregister_cycle(
+                    client, installed, device_name, now=asyncio.get_running_loop().time(),
+                    last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+                    cli_version=_read_local_worker_version(), force=True)
+                if _hbrc["ok"]:
+                    # 同上：原地更新，保住 refresh 后台任务持有的同一 list 引用
+                    _new_ids = _hbrc["runtime_ids"]
+                    if _new_ids is not None:
+                        runtime_ids[:] = _new_ids
+                    if _hbrc["engine_by_rid"]:
+                        engine_by_rid = _hbrc["engine_by_rid"]
+                    installed = _hbrc["installed"]
                     heartbeat_fail_streak = 0
-                    last_reregister = asyncio.get_running_loop().time()
+                    last_reregister = _hbrc["last_reregister"]
+                    last_fast_discover = _hbrc["last_fast_scan"]
                 else:
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
@@ -4329,6 +4868,30 @@ def _check_opencode_api_keys():
         )
 
 
+
+def _start_cli_version_check(log_sink=None):
+    """Issue #2695（#2695 移植）：后台线程核对 grape CLI 版本，返回该线程（不阻塞 worker 启动）。
+
+    - 线程为 daemon：worker 退出不被它拖住；
+    - 核对失败/版本未知只 warn，不阻断启动；
+    - `log_sink` 缺省回落 `log.warning`（测试可注入收集器）。
+    """
+    say = log_sink or (lambda m: log.warning(m))
+
+    def _run():
+        try:
+            from src.domains.runtime.engine.cli_version_guard import check as _cli_version_check
+            out = _cli_version_check(log=say)
+            if out.get("status") == "ok":
+                log.info(f"grape CLI version check ok: {out.get('version')}")
+        except Exception as e:  # 任何异常都不得影响 worker 启动
+            log.warning(f"grape CLI version check failed (non-blocking): {e}")
+
+    t = _threading.Thread(target=_run, name="grape-cli-version-check", daemon=True)
+    t.start()
+    return t
+
+
 def main():
     # Windows: 确保 stderr/stdout 使用 UTF-8 编码（避免 GBK 中文乱码）
     if sys.platform == "win32":
@@ -4367,6 +4930,32 @@ def main():
 
     # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
     _check_opencode_api_keys()
+    # Issue #2423 M0（#2423 移植）：机器级静态 OV conf 检测（C2 混账号风险可见性；
+    # 任务凭据已收敛服务端链路——env 无 OV 凭据 + tk_ 兑换，静态 conf 仅告警提示迁移）。
+    try:
+        from src.domains.runtime.engine.env_extra_security import warn_static_ov_conf_once
+        warn_static_ov_conf_once()
+    except Exception:
+        pass
+    # Issue #2695（#2695 移植）：worker 侧 grape CLI 版本核对（grape-cli #1634 的 issue_id 本地拦截是否在位）。
+    # 走后台 daemon 线程：探活要起子进程（最坏秒级），不得占用 main 的启动关键路径。
+    # warn-only：探活失败/版本未知不误报，功能门未发布时不告警（见 cli_version_guard）。
+    _start_cli_version_check()
+
+    # Issue #1616/#2085（#1297 移植）：CLI 契约缓存完整性检查（退化即从主控重建缓存
+    # 并告警，禁止静默进入 runtime-only 命令缺失态），失败信号经 http_alert_sink
+    # 上报主控 observability 管线（退化/重建失败分开计数；上报失败落
+    # ~/.grape/contract-guard-alerts.jsonl 本地兜底）。warn-only：不阻断 worker 启动。
+    try:
+        from src.domains.runtime.engine.contract_guard import (GUARD_DISABLE_ENV, http_alert_sink,
+                                                        run_startup_check)
+        if (os.environ.get(GUARD_DISABLE_ENV, "") or "").strip().lower() not in ("1", "true", "yes"):
+            _guard = run_startup_check(log=lambda m: log.warning(m),
+                                       alert_sink=http_alert_sink(base_url=server, token=token))
+            if _guard.get("status") == "rebuilt":
+                log.info(f"contract guard: {_guard.get('detail')}")
+    except Exception as _ge:
+        log.warning(f"contract guard startup check failed: {_ge}")
 
     # 清理上次崩溃残留的 codearts 临时目录（方案 G: per-task 独立数据目录）
     import shutil as _sh
@@ -4467,7 +5056,9 @@ def main():
             await client.recover_orphans(rid)
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
-        await asyncio.to_thread(_worker_probe_once)
+        # Issue #2791（P1-13）：注册 = 「启动完成事件」——没 ok 的引擎进首探窗口退避重试，
+        # 而不是干等 600s 周期探测。决策/重试链单点在 _probe_after_registration。
+        await asyncio.to_thread(_probe_after_registration, installed)
 
         # Issue #2514：worker 启动巡检——worktree 对账 + prune + 跨 Issue 残留回收
         #（启动语境无活跃任务，active_dirs 为空；在跑任务由服务端 orphan 恢复后另行保护）。

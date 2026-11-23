@@ -508,7 +508,7 @@ def test_execute_task_stops_on_skipped_without_retry(monkeypatch):
 
     created: list[int] = []
 
-    def _create_execution(task_id, agent_type):
+    def _create_execution(task_id, agent_type, params_json=""):  # 上游新增 params_json 形参
         exec_id = 770500 + len(created)
         created.append(exec_id)
         with db_lock:

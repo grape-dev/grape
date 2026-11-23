@@ -139,14 +139,16 @@ Closes #37"
 ``` 
 # 好
 feat(skill): add xxx skill description
-fix(issue-37): fix template auth bug
-docs: add bilingual README
+fix(issue-37): 修复模板鉴权缺陷
+docs: 新增双语 README
 ```
 ```bash
 # 不好
 # "update stuff"、大提交混着 UI+DB+文档、没有 issue 引用、没有说明
-# 中文 commit message
 ```
+
+> 注：本节曾要求「提交信息统一使用英文」，与仓库全中文提交的既有实践长期冲突
+> （Issue #2547 QA 复审 Standards 硬违规项裁决为「修订文档」，基线实践保持不变）。
 
 ## 6. MR 描述模板
 
@@ -204,6 +206,25 @@ CI 会在每次 MR push 自动执行：lint + 单测 + 覆盖率门槛 + 构建�
    - `weekly-0X` 是内部发布号；**对外建议再用 SemVer `vX.Y.Z` 指向同一 commit**（生产环境、第三方引用都以 SemVer 为准）。
 4. **发布产物**：用 Grape `changelog-gen` Skill（或手写）生成 changelog；写 release notes；关联本期收编的 Issue。
 5. **归档**：将当周 weekly 分支归档（`git branch -d weekly-01`），tag 永久保留；**不要 delete tag**。
+
+### 9.1 契约版本号策略
+
+对外契约（`/openapi.json` 的 `info.version`）的版本号只有一个事实源：
+`src/api/contract_versioning.py::CONTRACT_VERSION`。进程入口、契约聚合、健康探针、
+部署脚本都不得自带一份版本字面量（`tests/api/test_contract_version_guard.py` 扫
+`src/api/` 全包，命中即红）。
+
+- **禁跳版**：新版本必须是现网发布快照（`help/api/openapi-baseline.json`）的合法递进，
+  禁止出现「2.2.0 → 2.5.0」这类从未上过现网的跳版号——跳版号会让 CLI 收到一次伪升级提醒。
+- **预发布后缀**：测试线契约必须带 `a`/`b`/`rc` 后缀（例 `2.3.0a1`），现网契约去掉后缀；
+  CLI 靠后缀区分测试契约与现网契约，不带后缀即视为现网。
+- **变更通知入口**：契约根 `x-changelog` 给出相对现网快照的 `added` / `removed` / `deprecated`，
+  bump 版本与刷新基线 `help/api/openapi-baseline.json` 必须在同一次发布构建里完成。
+- **测试契约通道**：预发布契约只在测试通道（域名按部署环境注入，见 `deploy/README.md`
+  「契约版本与测试契约通道」节）可查，不得对现网用户发布。
+
+判据与实现位置：`src/api/contract_versioning.py`（`check_successor` / `is_prerelease`）、
+门禁 `tests/api/test_contract_version_guard.py`。
 
 ## 10. 紧急 Hotfix 通道
 

@@ -884,6 +884,34 @@
       </div>
     </div>
 
+    <!-- ═══ 执行日志弹窗（与事件详情页同一套 UI：ev__tl-*） ═══ -->
+    <Teleport to="body">
+      <div v-if="logDlg.open" class="ev__tl-overlay" @click.self="closeLog()">
+        <div class="ev__tl-box" :class="{ 'ev__tl-box--fs': logDlg.fs }">
+          <div class="ev__tl-hdr">
+            <span class="ev__tl-title"
+              >{{ tt('exec.log_title_realtime') }}
+              <span class="ev__tl-sub">· {{ logDlg.title }}</span></span
+            >
+            <span class="ev__tl-status" v-html="logDlg.statusHtml"></span>
+            <button class="ev__tl-btn" @click="copyLog()">{{ tt('exec.log_copy') }}</button>
+            <button class="ev__tl-btn" @click="logDlg.fs = !logDlg.fs">
+              {{ logDlg.fs ? tt('exec.log_fs_exit') : tt('exec.log_fs') }}
+            </button>
+            <button class="ev__tl-btn" @click="closeLog()">{{ tt('exec.log_close') }}</button>
+          </div>
+          <div class="ev__tl-info" v-html="logDlg.infoHtml"></div>
+          <div ref="logBody" class="ev__tl-body">
+            <div v-if="logDlg.loading" class="apv-muted">{{ tt('exec.log_loading') }}</div>
+            <div v-else-if="!logDlg.html && !logDlg.lines.length" class="apv-muted">
+              {{ tt('exec.log_empty') }}
+            </div>
+            <div v-else v-html="logDlg.html || escapedPlainLog"></div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- ═══ 行 kebab 菜单 ═══ -->
     <Teleport to="body">
       <div
@@ -1810,11 +1838,259 @@ function toggleExecDetail(e) {
     }
   }
 }
-// 日志按钮：调批8 event-view 的 window.openTaskLog（跨模块契约）
-function openTaskLog(e) {
-  if (G.window.openTaskLog && e.agent_task_id) {
-    G.window.openTaskLog(e.agent_task_id, tt('exec.log_title', { id: e.id }))
+// ═══ 执行日志弹窗（与事件详情页 EventView 的 ev__tl-* 完全同一套视觉/交互） ═══
+const logDlg = reactive({
+  open: false,
+  taskId: '',
+  execId: null,
+  title: '',
+  status: '',
+  statusHtml: '',
+  infoHtml: '',
+  html: '',
+  lines: [],
+  loading: false,
+  fs: false,
+})
+const escapedPlainLog = computed(function () {
+  return logDlg.lines
+    .map(function (l) {
+      return '<div style="margin-bottom:8px">' + escHtml(l) + '</div>'
+    })
+    .join('')
+})
+let logTimer = null
+let logSince = 0
+let logInfoLoaded = false
+
+function escHtml(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+function logTimeHtml(t) {
+  if (!t) return ''
+  const str = String(t)
+  const m = str.indexOf('T') >= 0 ? str.split('T')[1] : str
+  return '<span style="color:#7a85a0;margin-right:6px">' + escHtml(m.substring(0, 8)) + '</span>'
+}
+// 与 EventView.tlLine 同款：图标/配色/工具输入块
+function logMsgHtml(m) {
+  const type = m.type || ''
+  if (type === 'tool_use') {
+    let inputHtml = ''
+    try {
+      inputHtml =
+        '<div style="margin:4px 0 4px 24px;white-space:pre-wrap;word-break:break-all;color:#b8c2d6;font-size:13px">' +
+        escHtml(JSON.stringify(m.input || {}, null, 2)) +
+        '</div>'
+    } catch (e) {
+      /* ignore */
+    }
+    return (
+      '<div style="margin-bottom:8px">' +
+      logTimeHtml(m.time) +
+      '🔧 <span style="color:#5b9eff;font-weight:600">' +
+      escHtml(m.tool || 'tool') +
+      '</span>' +
+      inputHtml +
+      '</div>'
+    )
   }
+  const icon =
+    type === 'error'
+      ? '❌'
+      : type === 'task:retry'
+        ? '↻'
+        : type === 'reasoning'
+          ? '🤔'
+          : type === 'step_start'
+            ? '▶'
+            : type === 'step_finish'
+              ? '✅'
+              : type === 'text'
+                ? '💬'
+                : '·'
+  const color =
+    type === 'error'
+      ? '#ff5b5b'
+      : type === 'task:retry'
+        ? '#f0a741'
+        : type === 'reasoning'
+          ? '#a0aac0'
+          : '#e0e6f0'
+  return (
+    '<div style="margin-bottom:8px">' +
+    logTimeHtml(m.time) +
+    icon +
+    ' <span style="color:' +
+    color +
+    ';white-space:pre-wrap;word-break:break-all">' +
+    escHtml(m.content || m.tool || '') +
+    '</span></div>'
+  )
+}
+function logStatusHtml(st) {
+  const color =
+    st === 'success'
+      ? '#2ecc71'
+      : st === 'failed'
+        ? '#ff5b5b'
+        : st === 'running' || st === 'dispatched'
+          ? '#5b9eff'
+          : '#8a94a6'
+  return '<span style="color:' + color + '">●</span> ' + escHtml(st || '')
+}
+function logScrollToEnd() {
+  setTimeout(function () {
+    const el = document.querySelector('.ev__tl-body')
+    if (el) el.scrollTop = el.scrollHeight
+  }, 0)
+}
+function logLoadInfo(tid) {
+  API()
+    .get('/task-logs/' + encodeURIComponent(tid) + '/info')
+    .then(function (info) {
+      if (!info || !logDlg.open || logDlg.taskId !== tid) return
+      const bits = []
+      if (info.agent_name) {
+        bits.push(
+          '🤖 ' +
+            escHtml(info.agent_name) +
+            (info.agent_version
+              ? ' <span style="color:var(--t3)">v' + escHtml(info.agent_version) + '</span>'
+              : '')
+        )
+      }
+      if (info.device_name) bits.push('🖥 ' + escHtml(info.device_name))
+      if (info.last_ip) bits.push('🌐 ' + escHtml(info.last_ip))
+      if (info.owner_name) bits.push('👤 ' + escHtml(info.owner_name))
+      if (info.spec) bits.push('⚙️ ' + escHtml(info.spec))
+      if (info.model) bits.push('🧠 ' + escHtml(info.model))
+      if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
+      if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
+      logDlg.infoHtml = bits
+        .map(function (b) {
+          return '<span>' + b + '</span>'
+        })
+        .join('')
+      if (info.status) {
+        logDlg.status = info.status
+        logDlg.statusHtml = logStatusHtml(info.status)
+      }
+      logInfoLoaded = true
+    })
+    .catch(function () {
+      /* 静默降级，与 EventView 一致 */
+    })
+}
+function pollLog() {
+  if (!logDlg.open || !logDlg.taskId) return
+  const tid = logDlg.taskId
+  API()
+    .get('/task-logs/' + encodeURIComponent(tid) + '/messages?since=' + logSince)
+    .then(function (d) {
+      if (!logDlg.open || logDlg.taskId !== tid) return
+      const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
+      logDlg.loading = false
+      if (msgs.length) {
+        logSince = msgs[msgs.length - 1].seq
+        let add = ''
+        msgs.forEach(function (m) {
+          const line = logMsgHtml(m)
+          if (line) add += line
+        })
+        if (add) {
+          logDlg.html += add
+          logScrollToEnd()
+        }
+      }
+    })
+    .catch(function (e) {
+      logDlg.loading = false
+      if (!logDlg.html) {
+        logDlg.lines.push((e && e.message) || String(e))
+      }
+    })
+  API()
+    .get('/runtime/tasks/' + encodeURIComponent(tid) + '/status')
+    .then(function (d) {
+      if (!logDlg.open || logDlg.taskId !== tid) return
+      if (d && d.status) {
+        logDlg.status = d.status
+        logDlg.statusHtml = logStatusHtml(d.status)
+        if (d.status !== 'running' && d.status !== 'dispatched') {
+          stopLogTimer()
+          if (!logInfoLoaded) logLoadInfo(tid)
+        }
+      }
+    })
+    .catch(function () {})
+}
+function stopLogTimer() {
+  if (logTimer) {
+    clearInterval(logTimer)
+    logTimer = null
+  }
+}
+// 日志按钮：页面内弹窗（不依赖 event-view 的 window.openTaskLog）
+function openTaskLog(e) {
+  if (!e || !e.agent_task_id) return
+  closeLog()
+  logDlg.open = true
+  logDlg.taskId = e.agent_task_id
+  logDlg.execId = e.id
+  logDlg.title = tt('exec.log_title', { id: e.id })
+  logDlg.status = e.status || ''
+  logDlg.statusHtml = logStatusHtml(e.status || '')
+  logDlg.html = ''
+  logDlg.lines = []
+  logDlg.infoHtml = ''
+  logDlg.loading = true
+  logDlg.fs = false
+  logSince = 0
+  logInfoLoaded = false
+  logLoadInfo(e.agent_task_id)
+  pollLog()
+  logTimer = setInterval(pollLog, 2000)
+}
+function closeLog() {
+  logDlg.open = false
+  logDlg.taskId = ''
+  logDlg.html = ''
+  logDlg.lines = []
+  logDlg.infoHtml = ''
+  logDlg.loading = false
+  logDlg.fs = false
+  logSince = 0
+  stopLogTimer()
+}
+function copyLog() {
+  const box = document.querySelector('.ev__tl-body')
+  const text = box ? box.innerText : ''
+  if (!text) return
+  const nav = G.window.navigator
+  if (nav && nav.clipboard && nav.clipboard.writeText) {
+    nav.clipboard.writeText(text).then(
+      function () {
+        app().showToast(tt('exec.log_copied'))
+      },
+      function () {}
+    )
+    return
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    app().showToast(tt('exec.log_copied'))
+  } catch (err) {}
+  ta.remove()
 }
 function startLogPoll(e) {
   if (logPollTimers[e.id]) clearInterval(logPollTimers[e.id])
@@ -1823,7 +2099,7 @@ function startLogPoll(e) {
     API()
       .get('/task-logs/' + e.agent_task_id + '/messages?since=' + since)
       .then(function (d) {
-        const msgs = d.messages || []
+        const msgs = Array.isArray(d) ? d : ((d && d.messages) || [])
         if (!msgs.length) return
         since = msgs[msgs.length - 1].seq
         const lines = msgs
@@ -2350,6 +2626,7 @@ onMounted(function () {
 onBeforeUnmount(function () {
   document.removeEventListener('click', onDocClick)
   stopAllLogPolls()
+  closeLog()
 })
 </script>
 
@@ -3510,5 +3787,101 @@ onBeforeUnmount(function () {
 .apv-dup-note {
   margin-top: 2px;
   color: var(--t3, #86868b);
+}
+
+/* 执行日志弹窗（与 EventView 的 ev__tl-* 同一套样式，作用域互不影响） */
+.ev__tl-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ev__tl-box {
+  width: min(960px, 94vw);
+  height: min(720px, 90vh);
+  background: var(--bg, #11151c);
+  border: 1px solid var(--b, #2a3140);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+.ev__tl-box--fs {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  border: none;
+}
+.ev__tl-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--b, #2a3140);
+  flex-shrink: 0;
+}
+.ev__tl-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.ev__tl-sub {
+  color: var(--t3);
+  font-weight: 400;
+}
+.ev__tl-status {
+  font-size: 11px;
+  margin-left: auto;
+}
+.ev__tl-btn {
+  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
+  background: transparent;
+  color: var(--a);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s;
+}
+.ev__tl-btn:hover {
+  background: var(--a);
+  border-color: var(--a);
+  color: var(--on-accent);
+}
+.ev__tl-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--b, #2a3140);
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--t2, #8a94a6);
+}
+.ev__tl-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: #000;
+  color: var(--on-accent);
+  padding: 14px 18px;
+  font-size: 15px;
+  font-family:
+    'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Source Code Pro', 'SF Mono', Consolas,
+    'Liberation Mono', Menlo, monospace;
+  line-height: 1.75;
+  letter-spacing: 0.2px;
+}
+.ev__tl-body .apv-muted {
+  color: #8b96a8;
 }
 </style>
