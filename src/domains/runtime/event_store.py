@@ -1028,7 +1028,9 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     _FALLBACK_REASON = "[E-FAIL-NODIAG] 事件置 failed 但未携带诊断信息（update_event_status 裸调用，见 #476）"
     from datetime import datetime, timezone as _tz
     _notify_repo = _notify_issue = _notify_agent = ""
-    with db_lock:
+    # Issue #3927 审查 R1 复审：终态保护与 update_event_complete 共用 event_lock(seq)，
+    # 锁序固定 db_lock → event_lock（与 complete 的 _write_guard → event_lock 一致）。
+    with db_lock, event_lock(seq):
         try:
             c = db.cursor()
             if status in _TERMINAL:

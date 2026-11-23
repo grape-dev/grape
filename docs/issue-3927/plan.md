@@ -59,11 +59,13 @@ claim 等待的是 `session_manager.db_lock`，而 complete 路径原本在锁�
 事件侧拆锁对 claim 无收益。`update_task_status` 拆为：
 
 - db_lock 短临界区：终态判定 + status/completed_at/exit_code 小写 + 级联收敛 + commit；
-- 大字段（result_text/usage_json/errors/stderr）：锁释放后单条 UPDATE 短写，
-  MySQL 免锁、SQLite/单库保留短临界区（同 `_write_guard` 口径），失败只记日志
-  （事件侧 structured_output 为权威产出且有 pending 自愈兜底）。
-- 同任务串行由 db_lock 短临界区 + 单条原子 UPDATE 保证；终态幂等判定在锁内完成，
-  只有终态赢家会写大字段。
+- **大字段先行（审查 R5 复审）**：result_text/usage_json/errors/stderr 在终态提交
+  **之前**锁外单条 UPDATE 短写（MySQL 免锁、SQLite/单库保留短临界区），
+  `WHERE status NOT IN (终态)` 防覆盖并发终态赢家；保证「terminal ⇒ 大字段已写」，
+  消除「终态已提交、大字段写崩溃/失败即永久丢失用户可见结果」窗口。
+- 大字段写失败登记 `_task_big_pending` 标记；重复调用（worker 重试/巡检带 payload）
+  在终态短路上补写并清标记（`pending_task_big_count()` 可观测）。
+- 同任务终态幂等判定在 db_lock 内完成，只有终态赢家会写终态小字段。
 
 **灰度验证步骤（发布前必做）**：
 1. 用本 PR 的慢锁埋点观察灰度实例：`db_lock slow wait/hold lock=db_lock
@@ -72,7 +74,8 @@ claim 等待的是 `session_manager.db_lock`，而 complete 路径原本在锁�
 2. 判定 17–50s 命中哪把锁：若 claim 的 wait 主要落在 `lock=db_lock` 且
    holder_stack 指向 `update_task_status/complete_task` 大字段写 → 本节拆分生效
    后应显著下降；若仍命中其它 db_lock 持有方（chat 路由等），按同一模式另行拆分。
-3. `pending_payload_count()` 应长期为 0；非 0 说明 payload 短写持续失败，需排查。
+3. `pending_payload_count()` / `pending_task_big_count()` 应长期为 0；非 0 说明
+   payload / agent_tasks 大字段短写持续失败，需排查。
 
 **回滚步骤**：异常时 revert 本 PR 即回到基线锁语义（无独立开关）；灰度期可先设
 `COMPLETE_A2A_ASYNC=0` 关闭异步推进，再评估是否整 PR 回退（≤15 分钟内可完成）。
@@ -112,6 +115,13 @@ A2A 派发本身早已在 `db_lock` 释放后执行，本改动进一步把「�
 - **混合锁口径约束（审查 R1）**：任何新增的事件终态写路径都必须经
   `update_event_complete`（或至少 `event_lock(seq)`），禁止绕过事件锁直写
   events.status 终态值；redispatch 重置经 `reset_event_terminal`。
+  **复审补充**：`update_event_status`、`_cascade_event_terminal`、
+  `mark_task_takeover`、`_set_task_late_result` 四条直写路径也已纳入
+  `event_lock(seq)`（锁序 `db_lock → event_lock`），与 complete 对同 seq 互斥，
+  终态保护/takeover 保护不再有交错窗口。
+- **拆写持久性约束（审查 R5）**：`update_task_status` 必须「先大字段、后终态」，
+  保证 terminal ⇒ result_text/usage_json/errors/stderr 已写；大字段失败登记
+  `_task_big_pending` 并由重复调用/巡检补写，不允许终态任务永久缺用户可见结果。
 
 ## 6. 测试
 
@@ -122,6 +132,9 @@ A2A 派发本身早已在 `db_lock` 释放后执行，本改动进一步把「�
 - 重复 complete 幂等且不改首写大字段；
 - 大字段写阻塞时全局锁可获取（MySQL 拓扑）；
 - 混合锁口径：带/不带 task_id 的终态写者同 seq 互斥（R1）；
+- 跨写者事件锁：update_event_status / 级联终态 / takeover / late-result 与
+  complete 对同 seq 互斥（R1 复审）；
+- update_task_status 大字段先于终态写入、失败 pending 补写（R5 复审）；
 - payload 失败 pending 自愈补写（R2）；
 - SQLite 拓扑 payload 写保留短临界区（R4）；
 - 并发 3 complete + 1 claim：claim 的 db_lock 不随 complete 线性排队

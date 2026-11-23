@@ -2922,6 +2922,24 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
                             triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
                             task_status: str = "", task_result_text: str = None,
                             task_id: str = ""):
+    """Issue #3927 审查 R1 复审：级联终态写纳入 event_lock(seq)。
+
+    与 `update_event_complete`/`update_event_status` 共用同一把事件维度锁，
+    `SELECT status → UPDATE` 对同 seq 的 complete 写者原子；锁序仍
+    db_lock（调用方持有）→ event_lock，无交叉死锁面。
+    """
+    from src.kernel.lock_instrument import event_lock
+    with event_lock(event_seq):
+        return _cascade_event_terminal_impl(
+            cursor, event_seq, status, exit_code=exit_code,
+            triggered_by=triggered_by, task_status=task_status,
+            task_result_text=task_result_text, task_id=task_id)
+
+
+def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code: int = None,
+                                 triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
+                                 task_status: str = "", task_result_text: str = None,
+                                 task_id: str = ""):
     """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
@@ -3009,7 +3027,9 @@ def mark_task_takeover(task_id: str) -> dict:
     seq = task.get("event_seq") or 0
     if not seq:
         return {"status": "no_event", "task_id": task_id}
-    with db_lock:
+    # Issue #3927 审查 R1 复审：接管写与 complete 共用 event_lock(seq)，锁序 db_lock → event_lock。
+    from src.kernel.lock_instrument import event_lock
+    with db_lock, event_lock(seq):
         c = _rt_db.cursor()
         c.execute("SELECT status FROM events WHERE seq=?", (seq,))
         row = c.fetchone()
@@ -3085,8 +3105,34 @@ def converge_event_to_task(task_id: str) -> dict:
 
 _TASK_STATUS_SMALL_COLS = ("exit_code",)
 # 大字段列：可达数十 MB（complete 全量 result_text / usage_json / errors / stderr）。
-# Issue #3927 审查 R5：移出 db_lock 短临界区，在锁释放后短写（拆分同事件侧模式）。
+# Issue #3927 审查 R5：移出 db_lock 短临界区，但必须**先于终态提交**写入
+# （order：大字段 → 终态小字段），消除「终态已提交、大字段写崩溃/失败即永久丢失」窗口。
 _TASK_STATUS_BIG_COLS = ("result_text", "usage_json", "errors", "stderr")
+
+# Issue #3927 审查 R5 复审：大字段写失败登记 pending（重复调用/巡检带 payload 时补写）。
+_task_big_pending_guard = threading.Lock()
+_task_big_pending: set[str] = set()
+
+
+def _task_big_mark_pending(task_id: str) -> None:
+    with _task_big_pending_guard:
+        _task_big_pending.add(str(task_id))
+
+
+def _task_big_is_pending(task_id: str) -> bool:
+    with _task_big_pending_guard:
+        return str(task_id) in _task_big_pending
+
+
+def _task_big_clear_pending(task_id: str) -> None:
+    with _task_big_pending_guard:
+        _task_big_pending.discard(str(task_id))
+
+
+def pending_task_big_count() -> int:
+    """待补写 agent_tasks 大字段的任务数（观测/测试/巡检用）。"""
+    with _task_big_pending_guard:
+        return len(_task_big_pending)
 
 
 def _task_write_lockfree() -> bool:
@@ -3098,28 +3144,38 @@ def _task_write_lockfree() -> bool:
         return False
 
 
-def _write_task_big_fields(task_id: str, cols: dict) -> None:
+def _write_task_big_fields(task_id: str, cols: dict, only_nonterminal: bool = True) -> bool:
     """Issue #3927 审查 R5：agent_tasks 大字段短写（db_lock 释放后执行）。
 
-    单条 UPDATE + commit，终态已先行落库（读侧兼容「终态先行、大字段补齐」）。
+    **先写大字段、后写终态**：调用方在终态提交前调用本函数，保证
+    「terminal ⇒ 大字段已写」不变式；`only_nonterminal=True` 时 UPDATE 带
+    `status NOT IN (终态)` 条件，避免并发终态赢家被后到大字段覆盖。
+
     MySQL 拓扑不持进程锁；SQLite/单库共享连接保留 db_lock 短临界区
-    （commit 为连接级语义，防跨线程事务交错）。失败只记日志——事件侧
-    structured_output 已含完整产出并有 pending 自愈兜底。
+    （commit 为连接级语义，防跨线程事务交错）。返回是否写成功；失败由调用方
+    登记 pending（重复调用带 payload 时补写）。
     """
     try:
         sets = ", ".join(f"{col}=?" for col in cols)
         params = [cols[col] for col in cols] + [task_id]
+        sql = f"UPDATE agent_tasks SET {sets} WHERE id=?"
+        if only_nonterminal:
+            marks = ",".join("?" for _ in TASK_TERMINAL_STATUSES)
+            sql += f" AND status NOT IN ({marks})"
+            params += list(TASK_TERMINAL_STATUSES)
         if _task_write_lockfree():
             c = _rt_db.cursor()
-            c.execute(f"UPDATE agent_tasks SET {sets} WHERE id=?", params)
+            c.execute(sql, params)
             _rt_db.commit()
         else:
             with db_lock:
                 c = _rt_db.cursor()
-                c.execute(f"UPDATE agent_tasks SET {sets} WHERE id=?", params)
+                c.execute(sql, params)
                 _rt_db.commit()
+        return True
     except Exception as _e:
         log.warning(f"update_task_status: write big fields failed for {task_id}: {_e}")
+        return False
 
 
 def update_task_status(task_id, status, **kw):
@@ -3128,15 +3184,40 @@ def update_task_status(task_id, status, **kw):
     Issue #1938：可选关键字 ``cascade_trigger``（``update_task_status`` / ``sweeper``）
     用于给事件级联收敛补偿归因，不落 agent_tasks 列（不在 SQL 列清单内，安全忽略）。
 
-    Issue #3927（审查 R5）：claim 排队 17–50s 的锁口径是本 db_lock——complete 路径
-    原本在锁内写全量 result_text/usage_json（可达数十 MB）+ 级联。现拆为：
+    Issue #3927（审查 R5，复审修订）：claim 排队 17–50s 的锁口径是本 db_lock——
+    complete 路径原本在锁内写全量 result_text/usage_json（可达数十 MB）+ 级联。现拆为：
     - db_lock 短临界区：终态判定 + status/completed_at/exit_code 小写 + 级联收敛；
-    - 大字段（result_text/usage_json/errors/stderr）：锁释放后单条 UPDATE 短写，
-      MySQL 拓扑免锁、SQLite/单库保留短临界区（同事件侧 `_write_guard` 口径）。
+    - 大字段（result_text/usage_json/errors/stderr）：在终态提交**之前**锁外短写
+      （MySQL 免锁、SQLite/单库保留短临界区），失败登记 pending 并在重复调用
+      携带 payload 时补写——保证「terminal ⇒ 大字段已写」不再有永久丢失窗口。
     `lock_owner("update_task_status:<id>")` 提供灰度归因（指标 owner 粗化，日志全量）。
     """
     _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
     from src.kernel.lock_instrument import lock_owner
+    _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
+    # ① 终态判定（短临界区）：已终态 → 仅在 pending 且本次带 payload 时补写大字段。
+    with lock_owner(f"update_task_status:{task_id}"), db_lock:
+        c = _rt_db.cursor()
+        c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if not row:
+            return
+        if row[0] in TASK_TERMINAL_STATUSES:
+            if _big_cols and _task_big_is_pending(task_id):
+                if _write_task_big_fields(task_id, _big_cols, only_nonterminal=False):
+                    _task_big_clear_pending(task_id)
+                    log.info(f"update_task_status: backfilled pending big fields "
+                             f"for terminal task {task_id}")
+            return
+    # ② 大字段先写（终态提交之前，锁外；失败登记 pending，终态仍可落库并由下次补写）。
+    _big_ok = True
+    if _big_cols:
+        _big_ok = _write_task_big_fields(task_id, _big_cols, only_nonterminal=True)
+        if not _big_ok:
+            _task_big_mark_pending(task_id)
+            log.warning(f"update_task_status: big fields write failed, terminal still "
+                        f"committed; pending backfill for task {task_id}")
+    # ③ 终态/小字段 + 级联（短临界区；重新判定，并发终态赢家先行则短路）。
     with lock_owner(f"update_task_status:{task_id}"), db_lock:
         c = _rt_db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
@@ -3199,11 +3280,8 @@ def update_task_status(task_id, status, **kw):
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         _rt_db.commit()
-    # Issue #3927 审查 R5：大字段在 db_lock 释放后短写——claim/heartbeat 不再被
-    # complete 的全量 result_text/usage 写串行阻塞；终态幂等判定已在锁内完成。
-    _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
-    if _big_cols:
-        _write_task_big_fields(task_id, _big_cols)
+    if _big_cols and _big_ok:
+        _task_big_clear_pending(task_id)
     # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
     # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
     if _cascaded_seq:
@@ -4710,13 +4788,16 @@ def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
 def _set_task_late_result(task_id: str, task: dict, result_text: str, status: str):
     """补挂/提升：更新 agent_tasks 与关联 event 的结果存储（无副作用重放）。"""
     _now_iso = datetime.now(timezone.utc).isoformat()
-    with db_lock:
+    _event_seq = task.get("event_seq") or 0
+    # Issue #3927 审查 R1 复审：late-result 终态写与 complete 共用 event_lock(seq)，
+    # 锁序固定 db_lock → event_lock（无事件时锁 event:0，仅同进程无事件任务附加串行）。
+    from src.kernel.lock_instrument import event_lock
+    with db_lock, event_lock(_event_seq):
         c = _rt_db.cursor()
         c.execute(
             "UPDATE agent_tasks SET status=?, result_text=?, exit_code=CASE WHEN ?='completed' THEN 0 ELSE exit_code END, "
             "completed_at=? WHERE id=? AND status IN ('completed','failed')",
             (status, result_text, status, _now_iso, task_id))
-        _event_seq = task.get("event_seq")
         if _event_seq:
             c.execute(
                 "UPDATE events SET status=?, structured_output=?, result=?, completed_at=? WHERE seq=?",

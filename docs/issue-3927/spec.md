@@ -19,9 +19,11 @@ claim / claim-by-tag / heartbeat-v2 / tags 的排队等待回到秒级。
    全局锁（审查 R2）；payload 写失败登记 pending，重复 complete 短路时自愈补写。
    MySQL（每线程/池化连接）无锁并行；SQLite/单库共享连接保留 `_write_guard`
    短临界区防跨线程事务交错（审查 R4）。
-3. **update_task_status 大字段拆分（审查 R5）**：claim 等待的 `session db_lock`
-   短临界区只剩终态判定 + status/completed_at/exit_code 小写 + 级联；
-   result_text/usage_json/errors/stderr 大字段锁释放后单条 UPDATE 短写。
+3. **update_task_status 大字段拆分（审查 R5，复审修订）**：claim 等待的
+   `session db_lock` 短临界区只剩终态判定 + status/completed_at/exit_code 小写 +
+   级联；result_text/usage_json/errors/stderr 大字段在终态提交**之前**锁外短写
+   （`WHERE status NOT IN (终态)`），保证「terminal ⇒ 大字段已写」；写失败登记
+   `_task_big_pending`，重复调用/巡检补写。
    claim / claim_by_tag / update_task_status 加 `lock_owner` 归因埋点，
    灰度前据此确认 17–50s 命中哪把锁（验证步骤见 plan.md §2b）。
 4. **refresh 改造**：`_fetch_task_stats` 改为「快照读 + 锁外聚合」，
@@ -46,9 +48,12 @@ claim / claim-by-tag / heartbeat-v2 / tags 的排队等待回到秒级。
 
 - 并发 3 complete + 1 claim：claim 不随 complete 线性增长（update_task_status
   大字段拆分口径，并发回归用例守护）。
-- 混合锁口径：传/不传 task_id 的终态写者对同一 seq 互斥，首写终态不被覆盖。
+- 混合锁口径：传/不传 task_id 的终态写者对同一 seq 互斥，首写终态不被覆盖；
+  update_event_status / 级联终态 / takeover / late-result 与 complete 同 seq 互斥。
 - 同一任务重复 complete 幂等快速返回，不覆盖首写终态/大字段；payload 首写失败
   时重复 complete 可自愈补写。
+- update_task_status 大字段先于终态提交；大字段失败仍登记 pending 并在重复调用
+  时补写（terminal 任务不永久缺 result_text/usage_json/errors/stderr）。
 - 大字段写阻塞时全局 `db_lock` 仍可立即获取（MySQL 拓扑；SQLite/单库保留
   `_write_guard` 短临界区，其内只有终态/payload 短 UPDATE）。
 - refresh 聚合计算期间全局锁可立即获取（锁外聚合）。

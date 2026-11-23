@@ -288,6 +288,197 @@ class TestMixedLockScope:
         assert row[1] == "writer-A", "首写终态 result 被后到写者覆盖"
 
 
+class TestCrossWriterEventLock:
+    """审查 R1 复审：cascade/takeover/late-result/update_event_status 与 complete 共用
+    event_lock(seq)，同一 seq 的终态写者必须互斥。"""
+
+    def test_update_event_status_blocks_on_event_lock(self, es_db):
+        import src.domains.runtime.event_store as es
+        from src.kernel.lock_instrument import event_lock
+
+        _insert_event(es_db, 3927101, status="running")
+        done = threading.Event()
+
+        def _write():
+            es.update_event_status(3927101, "failed", result="late-fail")
+            done.set()
+
+        with event_lock(3927101):
+            t = threading.Thread(target=_write, daemon=True)
+            t.start()
+            time.sleep(0.25)
+            row = es_db.execute("SELECT status FROM events WHERE seq=3927101").fetchone()
+            assert row[0] == "running", \
+                "update_event_status 未参与 event_lock（可与 complete 交错覆盖终态）"
+        t.join(2.0)
+        assert done.is_set()
+        row = es_db.execute("SELECT status FROM events WHERE seq=3927101").fetchone()
+        assert row[0] == "failed"
+
+    def _svc_conn(self):
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        conn.execute(
+            "CREATE TABLE events ("
+            "seq INTEGER PRIMARY KEY, repo_key TEXT, issue_id TEXT, event_type TEXT, "
+            "agent_type TEXT, status TEXT, result TEXT, exit_code INTEGER, "
+            "completed_at TEXT, agent_logs TEXT, structured_output TEXT, scene_id TEXT, "
+            "cascade_reason TEXT, report_missing INTEGER, triggered_by TEXT, "
+            "cascade_task_status TEXT, cascade_prev_event_status TEXT)")
+        conn.execute(
+            "CREATE TABLE agent_tasks ("
+            "id TEXT PRIMARY KEY, status TEXT, event_seq INTEGER DEFAULT 0, "
+            "runtime_id INTEGER DEFAULT 0, result_text TEXT, usage_json TEXT, "
+            "errors TEXT, stderr TEXT, completed_at TEXT, exit_code INTEGER)")
+        conn.execute(
+            "INSERT INTO events (seq, repo_key, issue_id, event_type, agent_type, status) "
+            "VALUES (3927102, 'gitcode:o/r', '#3927', 'a2a_event', 'coding', 'cancelled')")
+        conn.execute(
+            "INSERT INTO events (seq, repo_key, issue_id, event_type, agent_type, status) "
+            "VALUES (3927103, 'gitcode:o/r', '#3927', 'a2a_event', 'coding', 'running')")
+        conn.execute(
+            "INSERT INTO agent_tasks (id, status, event_seq) VALUES ('3927-take', 'failed', 3927102)")
+        conn.commit()
+        return conn
+
+    def test_takeover_and_late_result_block_on_event_lock(self, monkeypatch):
+        from src.domains.runtime.engine import service as svc
+        from src.kernel.lock_instrument import event_lock
+
+        conn = self._svc_conn()
+        monkeypatch.setattr(svc, "_rt_db", conn)
+        monkeypatch.setattr(
+            svc, "get_task",
+            lambda tid: {"id": tid, "event_seq": 3927102, "status": "failed"})
+        try:
+            with event_lock(3927102):
+                t_take = threading.Thread(
+                    target=lambda: svc.mark_task_takeover("3927-take"), daemon=True)
+                t_take.start()
+                t_late = threading.Thread(
+                    target=lambda: svc._set_task_late_result(
+                        "3927-take", {"event_seq": 3927102},
+                        '{"actions":["a"],"conclusion":"c"}', "completed"),
+                    daemon=True)
+                t_late.start()
+                time.sleep(0.25)
+                row = conn.execute(
+                    "SELECT status FROM events WHERE seq=3927102").fetchone()
+                assert row[0] == "cancelled", \
+                    "takeover / late-result 未参与 event_lock（与 complete 交错覆盖终态）"
+            t_take.join(2.0)
+            t_late.join(2.0)
+        finally:
+            conn.close()
+
+    def test_cascade_terminal_blocks_on_event_lock(self, monkeypatch):
+        from src.domains.runtime.engine import service as svc
+        from src.kernel.lock_instrument import event_lock
+
+        conn = self._svc_conn()
+        monkeypatch.setattr(svc, "_rt_db", conn)
+        done = threading.Event()
+
+        def _cascade():
+            svc._cascade_event_terminal(conn.cursor(), 3927103, "completed", exit_code=0)
+            conn.commit()
+            done.set()
+
+        try:
+            with event_lock(3927103):
+                t = threading.Thread(target=_cascade, daemon=True)
+                t.start()
+                time.sleep(0.25)
+                row = conn.execute(
+                    "SELECT status FROM events WHERE seq=3927103").fetchone()
+                assert row[0] == "running", \
+                    "级联终态写未参与 event_lock（与 complete 交错覆盖终态）"
+            t.join(2.0)
+            assert done.is_set()
+            row = conn.execute("SELECT status FROM events WHERE seq=3927103").fetchone()
+            assert row[0] == "completed"
+        finally:
+            conn.close()
+
+
+class TestTaskBigFieldsOrdering:
+    """审查 R5 复审：先写大字段、后写终态，消除「终态已提交、大字段丢失」窗口。"""
+
+    def _conn(self):
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        conn.execute(
+            "CREATE TABLE agent_tasks ("
+            "id TEXT PRIMARY KEY, status TEXT, event_seq INTEGER DEFAULT 0, "
+            "runtime_id INTEGER DEFAULT 0, result_text TEXT, usage_json TEXT, "
+            "errors TEXT, stderr TEXT, completed_at TEXT, exit_code INTEGER)")
+        conn.execute(
+            "INSERT INTO agent_tasks (id, status, event_seq) VALUES ('3927-order', 'running', 0)")
+        conn.commit()
+        return conn
+
+    def test_big_fields_written_before_terminal(self, monkeypatch):
+        from src.domains.runtime.engine import service as svc
+
+        conn = self._conn()
+        monkeypatch.setattr(svc, "_rt_db", conn)
+        seen = {}
+
+        def _big(task_id, cols, only_nonterminal=True):
+            row = conn.execute(
+                "SELECT status FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            seen["status"] = row[0]
+            conn.execute("UPDATE agent_tasks SET result_text=? WHERE id=?",
+                         (cols.get("result_text"), task_id))
+            conn.commit()
+            return True
+
+        monkeypatch.setattr(svc, "_write_task_big_fields", _big)
+        try:
+            svc.update_task_status("3927-order", "completed", exit_code=0,
+                                   result_text="final-result")
+            assert seen.get("status") == "running", \
+                "大字段在终态提交之后才写（崩溃则终态任务永久缺 result_text）"
+            row = conn.execute(
+                "SELECT status, result_text FROM agent_tasks WHERE id='3927-order'"
+            ).fetchone()
+            assert row[0] == "completed"
+            assert row[1] == "final-result"
+        finally:
+            conn.close()
+
+    def test_big_field_failure_marks_pending_and_heals(self, monkeypatch):
+        from src.domains.runtime.engine import service as svc
+
+        conn = self._conn()
+        monkeypatch.setattr(svc, "_rt_db", conn)
+        orig = svc._write_task_big_fields
+
+        def _fail(task_id, cols, only_nonterminal=True):
+            return False
+
+        monkeypatch.setattr(svc, "_write_task_big_fields", _fail)
+        try:
+            svc.update_task_status("3927-order", "completed", exit_code=0,
+                                   result_text="healed-result")
+            row = conn.execute(
+                "SELECT status, result_text FROM agent_tasks WHERE id='3927-order'"
+            ).fetchone()
+            assert row[0] == "completed"
+            assert svc.pending_task_big_count() == 1, \
+                "大字段写失败未登记 pending（无补写路径）"
+
+            monkeypatch.setattr(svc, "_write_task_big_fields", orig)
+            svc.update_task_status("3927-order", "completed", exit_code=0,
+                                   result_text="healed-result")
+            row = conn.execute(
+                "SELECT status, result_text FROM agent_tasks WHERE id='3927-order'"
+            ).fetchone()
+            assert row[0] == "completed", "补写路径不应改终态"
+            assert row[1] == "healed-result", "pending 大字段未在重复调用时补写"
+            assert svc.pending_task_big_count() == 0, "补写成功后未清 pending 标记"
+        finally:
+            conn.close()
+
+
 class TestSqliteTopologyGuard:
     """审查 R4：SQLite/单库共享连接下，终态+payload 写必须保留进程级短临界区。"""
 
@@ -400,7 +591,7 @@ class TestClaimNotBlockedByComplete:
         entered = []
         proceed = threading.Event()
 
-        def _slow_big_fields(task_id, cols):
+        def _slow_big_fields(task_id, cols, only_nonterminal=True):
             entered.append(task_id)
             proceed.wait(2.0)
             return True
