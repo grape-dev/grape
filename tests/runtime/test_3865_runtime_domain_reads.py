@@ -241,6 +241,36 @@ def test_issue_exists_in_db_degrades_with_structured_log(runtime_domain, caplog)
 # ── G. 降级标记必须落到响应体（detail），dict / JSONResponse 两种形态 ────────
 
 
+def test_stamp_degraded_json_response_content_length_matches_body():
+    """Critical（QA R2）：重建 JSONResponse 时复制旧 content-length 会被 uvicorn 拒收。
+
+    降级标记使 body 变长，而旧头仍是替换前的长度 → 服务端
+    `RuntimeError: Response content longer than Content-Length`，客户端收到截断
+    JSON。重建时必须剔除实体头（content-length/content-type），让 Starlette 按新
+    body 重算。
+    """
+    resp = wh._a2a_skip_response("duplicate_a2a", agent="coding", source_seq=0,
+                                 detail={"existing_seq": 9})
+    stamped = wh._a2a_stamp_degraded(
+        resp, {"dedup_unavailable": True, "runtime_domain_route": "domain"})
+    assert stamped is not resp, "降级时必须重建响应（改 body 后头体一致）"
+    headers = {k.lower(): v for k, v in stamped.headers.items()}
+    assert int(headers["content-length"]) == len(stamped.body), (
+        f"content-length({headers['content-length']}) 必须等于新 body 长度"
+        f"({len(stamped.body)})，否则响应被 uvicorn 截断")
+    assert headers["content-type"] == "application/json"
+    # 非实体头（自定义追踪头）必须透传，不能因重建丢失
+    import io
+    import json as _json
+    from fastapi.responses import JSONResponse as _JR
+    _raw = _JR(status_code=200, content={"detail": {}},
+               headers={"x-a2a-trace": "req-42"})
+    _stamped = wh._a2a_stamp_degraded(_raw, {"dedup_unavailable": True})
+    assert _stamped.headers.get("x-a2a-trace") == "req-42", "自定义头不得丢失"
+    _h = {k.lower(): v for k, v in _stamped.headers.items()}
+    assert int(_h["content-length"]) == len(_stamped.body)
+
+
 def test_stamp_degraded_into_dict_and_json_response():
     from fastapi.responses import JSONResponse
 
