@@ -508,7 +508,7 @@ def test_org_repo_repair_migration_registered_with_post_check():
     """防再犯的修复迁移必须存在，且带 post_check、注册在属主域 mgmt。"""
     from src.api import db_setup
 
-    mig = next(m for m in db_setup._MIGRATIONS if m.version == "202611230003")
+    mig = next(m for m in db_setup._MIGRATIONS if m.version == "202611230012")
     assert mig.name == "repair-org-repo-create-options"
     assert "mgmt" in mig.domains
     assert callable(mig.fn)

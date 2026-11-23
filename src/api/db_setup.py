@@ -11059,7 +11059,7 @@ from src.domains.mgmt.migrations.org_repo_create_options import (
 )
 
 register_migration(
-    version="202611230003",
+    version="202611230012",
     name="repair-org-repo-create-options",
     kind="safe",
     domains=("mgmt",),

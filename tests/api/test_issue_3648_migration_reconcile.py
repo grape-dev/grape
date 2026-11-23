@@ -326,7 +326,7 @@ def test_verify_migration_targets_flags_missing_target_tables(tmp_path):
     assert any("skill 表不存在" in f for f in failures), failures
     with pytest.raises(RuntimeError):
         D.verify_migration_targets(conn=conn, domain="runtime", raise_on_fail=True)
-    # 三处目标都到位且达标 → 通过（organization 是 202611230003 的补列目标）
+    # 三处目标都到位且达标 → 通过（organization 是 202611230012 的补列目标）
     conn.execute(
         "CREATE TABLE grape_t_category_dict (id INTEGER PRIMARY KEY, level INTEGER, "
         "is_active INTEGER)")
