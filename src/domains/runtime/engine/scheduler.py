@@ -556,19 +556,31 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         **resolve_task_server_env(engine_id),
     }
     # 注入 custom_fields（自定义环境变量）和 work_branch
+    # Issue #4066：不再逐条 WARNING（一条执行会把整批 custom_fields 刷成多行噪声），
+    # 改为一次执行一条 info 汇总（injected/skipped + 变量名）。非法/保留项写侧已 400
+    # 拒绝，这里只兜底存量数据；平台已注入的键（如 GRAPE_ORG_ID）不由任务覆盖。
     _task_custom_fields = task.get("custom_fields") or ""
     if _task_custom_fields:
+        _cf_injected: list = []
+        _cf_skipped: list = []
         try:
             _cf_list = json.loads(_task_custom_fields) if isinstance(_task_custom_fields, str) else _task_custom_fields
             from src.kernel.scene_custom_env import is_upper_name, is_reserved_name
-            for _f in _cf_list:
-                _fname = (_f.get("name") or "").strip()
-                if not _fname or not is_upper_name(_fname) or is_reserved_name(_fname):
-                    log.warning(f"Autopilot exec {exec_id}: custom env '{_fname}' rejected")
+            for _f in (_cf_list or []):
+                _fname = (_f.get("name") or "").strip() if isinstance(_f, dict) else ""
+                if (not _fname or not is_upper_name(_fname)
+                        or is_reserved_name(_fname) or _fname in env_extra):
+                    _cf_skipped.append(_fname)
                     continue
                 env_extra[_fname] = str(_f.get("value", ""))
+                _cf_injected.append(_fname)
         except Exception as _e:
             log.warning(f"Autopilot exec {exec_id}: inject custom_fields failed: {_e}")
+        if _cf_injected or _cf_skipped:
+            log.info(
+                f"Autopilot exec {exec_id}: custom env injected={len(_cf_injected)} "
+                f"skipped={len(_cf_skipped)} names={','.join(_cf_injected)} "
+                f"skipped_names={','.join(n for n in _cf_skipped if n)}")
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch

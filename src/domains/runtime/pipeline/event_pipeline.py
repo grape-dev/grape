@@ -4572,6 +4572,10 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
             scope = normalize_scope(f.get("scope"))
             if agent_type and "all" not in scope and agent_type not in scope:
                 continue
+            # Issue #4066：平台已注入的键（如按事件/组织注入的 GRAPE_ORG_ID）优先，
+            # 场景 custom_fields 不得覆盖平台上下文（白名单变量放开后的安全边界）。
+            if name in env_extra:
+                continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
         # 注意：本函数内不得再写 `from src.kernel.config import log`——局部 import
