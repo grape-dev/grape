@@ -38,6 +38,8 @@ services:
       - ../.grape/skills:/app/.grape/skills
       - ../examples:/app/examples
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: &default-logging
       driver: json-file
       options:
@@ -74,6 +76,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -107,6 +111,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -137,6 +143,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -162,6 +170,8 @@ services:
       - ./nginx-grape-upstream.inc:/etc/nginx/conf.d/nginx-grape-upstream.inc:ro
       - ./nginx-grape-upstream-keepalive.inc:/etc/nginx/conf.d/nginx-grape-upstream-keepalive.inc:ro
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health"]

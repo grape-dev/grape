@@ -13,6 +13,7 @@ keepalive 32;                # 每个 upstream 保活的空闲连接数
 keepalive_timeout 90s;       # 90s > 客户端侧 65s，留出安全余量
 keepalive_requests 1000;     # 单连接最大复用次数，避免长寿命连接累积状态
 
-# ⚠️ 池是「每 peer」的：模板为让 proxy_next_upstream 生效而同址声明了 2 个 peer，
-# 因此对同一后端进程最多 64 条空闲连接。后端连接数紧张时把 keepalive 降到 16
-# （2 × 16 = 32，与单 peer 时持平），不要同时调大。
+# ⚠️ keepalive 池按对端地址（sockaddr）复用：模板为让 proxy_next_upstream 生效而
+# 同址声明了 2 个 peer，但对同一后端仍**共用同一池**，空闲连接上限还是 keepalive 32
+# （不是 2 × 32 = 64）；同址双 peer 只影响重试，不放大连接数。
+# 后端连接数紧张时把 keepalive 降到 16（再小会明显增加握手开销）。

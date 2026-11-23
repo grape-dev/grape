@@ -233,12 +233,23 @@ promtool check rules deploy/alerts.yml
    - ⚠️ **重试需要 ≥2 个 peer**：nginx 不会把请求重投给同一 peer，单 peer upstream
      下 `tries 2` 是空转。四份模板因此把本机地址声明为两个同址 peer（发布窗口内被
      切断的 GET 可在进程恢复后命中第二次尝试）；多实例部署请改成真实多副本地址。
-2. **nginx 优雅退出**：把 `nginx-worker-shutdown.inc` 手动 include 到主
+2. **nginx 优雅退出**：`nginx-worker-shutdown.inc` 必须 include 到主
    `/etc/nginx/nginx.conf` 的 **main 上下文**（`worker_processes` 之后、`events` 之前），
    设置 `worker_shutdown_timeout 30s`；`deploy/systemd/*.service` 已补
    `KillSignal=SIGTERM` / `KillMode=mixed` / `TimeoutStopSec=45` 与之对齐。
+   - **原生部署用脚本下发**（幂等，含 `nginx -t` 守卫，失败自动回滚）：
+     ```bash
+     sudo bash deploy/install-nginx-grape-gateway.sh --dry-run   # 预演
+     sudo bash deploy/install-nginx-grape-gateway.sh             # 拷贝 3 个片段 + 补 main include + nginx -t + reload
+     ```
+     重复执行不会改动内容；`nginx -t` 失败会恢复原主配置并删除本次新拷入的片段。
+   - **Compose 部署**：容器内是 nginx 官方镜像，`worker_shutdown_timeout` 属 main 上下文、
+     不能放 `conf.d`；该镜像默认 `STOPSIGNAL SIGQUIT`，`docker stop/restart` 即优雅退出，
+     无需额外 include。所有服务的排空窗口由 `docker-compose.yml` 的
+     `stop_grace_period: 45s` 覆盖（与 systemd `TimeoutStopSec=45` 对齐）。
+     若需自定义 main 配置，请另挂载完整 `nginx.conf` 并自行 include 该片段。
 3. **发布流程与门禁**：`scripts/deploy-drain.sh` 按「摘流 → 排空 → 退出」执行，
-   重启后采样 `/api/health`、`/api/runtime/heartbeat`、`/static/openapi.json`，
+   采样 `/api/health`、`/api/runtime/heartbeat`、`/static/openapi.json`；
    失败率 > 0.5%（`GATEWAY_502_THRESHOLD=0.005`）且失败样本 ≥
    `GATEWAY_MIN_FAILURES`（默认 3）自动回滚。发布前可 `--dry-run` 预演：
 
@@ -247,14 +258,24 @@ promtool check rules deploy/alerts.yml
      bash scripts/deploy-drain.sh --dry-run --unit grape-server
    ```
 
+   - **失败率口径 = 5xx（502/503/504…）+ 连接失败**：验收目标是「窗口内 5xx ≤0.5%」，
+     只认 502 会把上游过载/超时的 503/504 风暴当成健康（`GATEWAY_502_THRESHOLD`
+     是历史变量名，按 5xx 计）。
    - **fail-closed**：未配置 `GATEWAY_DRAIN_CMD` 时拒绝重启（exit 3），确无需摘流的
      单实例直连场景才显式设 `GATEWAY_ALLOW_UNDRAINED=1`；摘流/重启命令失败立即中止。
    - **连接失败计入失败率**：采样时 curl 非 0 退出或 `000`（网关整体不可用）计为失败，
-     不会被当成「0 次 502」放行；全部样本均失败时无视最小失败数直接回滚。
+     不会被当成「0 次 502」放行；全部样本均失败时**先于最小样本判定**直接回滚
+     （缩窗/少路径采到 3 个样本全失败也不会因「样本不足 30」放行）。
+   - **窗口按墙钟计时 + 提前短路**：`GATEWAY_GATE_WINDOW_SECONDS` 是真实秒数，不是
+     「循环次数 × 间隔」（curl `-m 5` 超时场景下旧口径会把 60s 窗口拖成约 16 分钟）；
+     失败率与失败样本数一达标就立即判定回滚，不跑满窗口。
+   - **采样覆盖切流瞬间**：采样器在重启（`GATEWAY_STOP_CMD`）之前后台启动、与重启并行，
+     切流/重启窗口内的失败会被采到；采样器异常无输出时门禁自动前台补采一次。
    - 单个偶发 502 不回滚：180 样本窗口下 1 次 502 即 0.56%，基线 0.077% 时会误判成
      发布故障，故比率达标还要求失败样本数达阈值。
-   - 告警侧：应用侧 5xx 分级（0.5%/2%）在 `deploy/alerts.yml`；**网关 502 规则改到
-     `deploy/loki-rules.yml`**（nginx 502 只进 access.log → Loki，应用指标
+   - 告警侧：应用侧 5xx 分级（0.5%/2%）在 `deploy/alerts.yml`，Insight 种子规则
+     （`http_error_rate_5xx_warning` / `_critical`）与 Grafana SRE 规则同口径；**网关 502
+     规则在 `deploy/loki-rules.yml`**（nginx 502 只进 access.log → Loki，应用指标
      `grape_http_requests_total` 看不到），需由 Loki ruler 加载，阈值同为 0.5%/2%。
 
 > 注意：生产 502 记录落在 `127.0.0.1:8081/8083`，而仓库模板为 `38081/38083`。

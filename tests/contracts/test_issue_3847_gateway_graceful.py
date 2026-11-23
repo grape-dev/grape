@@ -289,6 +289,20 @@ def test_compose_does_not_mount_whole_conf_dir():
             pytest.fail(f"{COMPOSE}: 不应整目录挂载 {src} → {dst}（会重复加载所有 nginx-grape*.conf）")
 
 
+def test_compose_services_have_graceful_stop_window():
+    """compose 路径的优雅退出：给 SIGTERM 排空留窗口（与 systemd TimeoutStopSec=45 对齐）。
+
+    容器里 worker_shutdown_timeout 属 main 上下文、不能放 conf.d；nginx 官方镜像默认
+    STOPSIGNAL SIGQUIT（优雅退出），后端进程则依赖 stop_grace_period 不被过早 SIGKILL。
+    """
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(_read(COMPOSE))
+    for name in ("grape-server", "grape-event-server", "grape-worker-server",
+                 "grape-insight-server", "nginx"):
+        svc = data["services"][name]
+        assert svc.get("stop_grace_period") == "45s", f"{COMPOSE}: {name} 未设置 45s 排空窗口"
+
+
 # ---------------------------------------------------------------------------
 # systemd 优雅退出
 # ---------------------------------------------------------------------------
@@ -343,6 +357,10 @@ case "${FAKE_MODE:-ok}" in
   503)   printf '503'; exit 0 ;;
   504)   printf '504'; exit 0 ;;
   slow)  sleep 1; printf '200'; exit 0 ;;   # 慢响应：验证窗口按墙钟而非迭代次数计时
+  mixed503)                       # 503,200,503,503,200：3/5 失败（非全失败）
+    n=$(cat "${FAKE_COUNTER}" 2>/dev/null || echo 0)
+    n=$((n+1)); echo "$n" > "${FAKE_COUNTER}"
+    case "$n" in 1|3|4) printf '503' ;; *) printf '200' ;; esac; exit 0 ;;
   one502)
     n=$(cat "${FAKE_COUNTER}" 2>/dev/null || echo 0)
     n=$((n+1)); echo "$n" > "${FAKE_COUNTER}"
@@ -443,10 +461,11 @@ def test_gate_rolls_back_on_non_502_5xx_storm(tmp_path, code):
 
 def test_gate_failure_rate_counts_all_5xx_samples(tmp_path):
     """失败率口径 = 5xx（含 502）+ 连接失败，而非仅 502+连接失败。"""
-    proc, _, _ = _run_drain(tmp_path, mode="503", samples=4)
+    proc, _, rollback_marker = _run_drain(tmp_path, mode="mixed503", samples=5)
     m = re.search(r"失败率 ([0-9.]+) > 阈值", proc.stderr)
     assert m, f"未见失败率判定输出：\n{proc.stdout}\n{proc.stderr}"
     assert float(m.group(1)) > 0.5, f"503 未计入失败率：{m.group(1)}"
+    assert rollback_marker.exists()
 
 
 def test_gate_all_5xx_below_min_samples_still_rolls_back(tmp_path):
@@ -487,15 +506,15 @@ def test_gate_window_is_wall_clock_not_loop_iterations(tmp_path):
     """采样窗口必须按墙钟计时，而不是「迭代次数 × 间隔」。
 
     修复前每轮只把 elapsed 加一个 GATEWAY_SAMPLE_INTERVAL，与 curl 实际耗时无关：
-    每样本 1s × 3 路径、配置窗口 2s 时，实际要跑 2 轮 ×(3+1)s = 8s；默认 60s 窗口
+    每样本 1s × 3 路径、配置窗口 3s 时，实际要跑 3 轮 ×(3+1)s = 12s；默认 60s 窗口
     若 curl 全部超时（-m 5）则约 60×(15+1)=960s 才判定，回滚被延迟到 16 分钟。
     """
     env = {"GATEWAY_HEALTH_PATHS": "/a /b /c"}
     started = time.time()
-    proc, _, _ = _run_drain(tmp_path, mode="slow", samples=2, extra_env=env)
+    proc, _, _ = _run_drain(tmp_path, mode="slow", samples=3, extra_env=env)
     elapsed = time.time() - started
     assert proc.returncode == 0, proc.stderr
-    assert elapsed < 6, f"窗口 2s 实际耗时 {elapsed:.1f}s（按迭代次数计时的旧行为）"
+    assert elapsed < 8, f"窗口 3s 实际耗时 {elapsed:.1f}s（按迭代次数计时的旧行为约 12s）"
 
 
 def test_gate_short_circuits_early_on_failure(tmp_path):
@@ -524,7 +543,9 @@ def test_sampling_starts_before_restart_covers_cutover_window(tmp_path):
     assert sample_log.exists() and stop_stamp.exists()
     first_sample = int(sample_log.read_text().split()[0])
     stop_at = int(stop_stamp.read_text().split()[0])
-    assert first_sample < stop_at, "首个采样晚于重启——切流瞬间的失败没有被覆盖"
+    assert first_sample - stop_at < 200_000_000, (
+        "首个采样晚于重启——切流瞬间的失败没有被覆盖"
+    )
 
 
 def test_drain_dry_run_executes_nothing(tmp_path):
@@ -586,10 +607,12 @@ def _seed_rules():
     import ast
     tree = ast.parse(_read(ALERTS_PY))
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name) and t.id == "SEED_RULES":
-                    return ast.literal_eval(node.value)
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id == "SEED_RULES":
+                return ast.literal_eval(node.value)
     raise AssertionError(f"{ALERTS_PY}: 未见 SEED_RULES 定义")
 
 
