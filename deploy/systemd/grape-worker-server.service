@@ -11,9 +11,19 @@ Environment=GRAPE_PROCESS_ROLE=worker
 Environment=GRAPE_PORT=38082
 Environment=GRAPE_LOCAL_CLAIMER=1
 Environment=RUNTIME_MAX_CONCURRENT_TASKS=20
+# Issue #3969：停机先摘流排空、启动 readiness 门禁（见同目录 grape-worker-*.sh）
+Environment=GRAPE_DRAIN_FILE=/tmp/grape-worker-draining
+Environment=GRAPE_DRAIN_SECONDS=5
+Environment=GRAPE_WORKER_PORT=38082
 EnvironmentFile=/etc/grape/grape.env
 ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_worker_server:app \
     --host 0.0.0.0 --port 38082 --workers 2
+# 停机：先标记 draining + 等待排空（≥5s），systemd 随后才 SIGTERM uvicorn。
+ExecStop=/opt/grape/deploy/systemd/grape-worker-drain.sh
+# 启动：轮询 /readyz；`-` 前缀允许超时仅告警，避免 Restart=always 重启风暴。
+ExecStartPost=-/opt/grape/deploy/systemd/grape-worker-ready.sh
+TimeoutStartSec=120
+TimeoutStopSec=90
 Restart=always
 RestartSec=5
 

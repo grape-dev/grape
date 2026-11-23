@@ -461,11 +461,14 @@ def init_process_db() -> None:
     _load_accounts()
 
 
-def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = False) -> None:
+def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = False,
+                  drain_file: "str | None" = None) -> None:
     """Liveness / readiness health endpoints.
 
     - /health: liveness（loopback 内网专用，外网 403）；返回 service 名便于四进程区分
     - /healthz + /readyz + /health/realtime + /metrics: Mgmt 进程独占（readiness=True）
+    - drain_file（Issue #3969）：停机摘流标记存在时 /readyz 立即 503 not_ready，
+      供 systemd ExecStartPost/ExecStop 与发布编排判定；未传则不做摘流判定。
     """
     _PROCESS_STARTED_AT = _dt.now(_tz.utc).isoformat()
 
@@ -517,8 +520,20 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         if cached and now < _readiness_cache["expires_at"]:
             return cached
 
+        # Issue #3969：排空期优先判 not_ready，且短路 DB 探测（停机中不再服务新流量）。
+        if drain_file and os.path.exists(drain_file):
+            resp = JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "checks": {"draining": "draining"}},
+            )
+            _readiness_cache["result"] = resp
+            _readiness_cache["expires_at"] = now + _READINESS_CACHE_TTL
+            return resp
+
         from src.kernel.session_manager import db, db_lock
         checks = {"db": "ok", "tables": "ok"}
+        if drain_file:
+            checks["draining"] = "false"
         status = "ok"
         http_status = 200
         try:

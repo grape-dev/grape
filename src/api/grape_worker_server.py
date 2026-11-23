@@ -19,9 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from src.api import server_common, server_tasks
+from src.api import drain_state, server_common, server_tasks
 # Issue #2784：契约版本号单一来源（勿再写死字面量）
 from src.api.contract_versioning import CONTRACT_VERSION
 
@@ -29,6 +30,9 @@ from src.api.contract_versioning import CONTRACT_VERSION
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from src.kernel.config import log
+
+    # Issue #3969：清理上次停机残留的排空标记，避免重启后 /readyz 永久 not_ready。
+    drain_state.clear_drain()
 
     # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
@@ -88,4 +92,18 @@ server_common.attach_internal_routes(app, "runtime")
 from src.kernel.gsb.router import init_gsb
 init_gsb(app, "worker")
 
-server_common.attach_health(app, service_name="worker-server", readiness=False)
+# Issue #3969：启用 readiness（/healthz+/readyz），并挂停机摘流端点。
+# systemd ExecStop 先 POST /internal/drain（仅回环；nginx 已 deny /internal/），
+# 标记落盘后 /readyz 转 503，再等待排空窗口，最后才 SIGTERM。
+@app.post("/internal/drain")
+async def internal_drain(request: Request):
+    if not server_common.is_loopback(request):
+        return JSONResponse(status_code=403, content={"error": "forbidden"})
+    drain_state.begin_drain()
+    return {"status": "draining", "drain_seconds": drain_state.drain_seconds()}
+
+
+server_common.attach_health(
+    app, service_name="worker-server", readiness=True,
+    drain_file=drain_state.drain_file_path() if drain_state.is_configured() else None,
+)
