@@ -142,3 +142,61 @@ def test_reregister_payload_includes_uninstalled_engine_for_marking(monkeypatch)
     assert client.payload and client.payload[0]["name"] == "codearts"
     assert client.payload[0]["installed"] is False
     assert client.payload[0]["backend_capability"]["status"] == "unavailable"
+
+
+def test_reregister_keeps_snapshot_when_scan_returns_only_uninstalled(monkeypatch):
+    """QA 复审 Optional：多引擎主机瞬时全 installed=false 不得把整机 runtime 摘除。"""
+    from src.domains.runtime.engine import agent as ra
+
+    class _FakeClient:
+        payload = None
+
+        async def reset_session(self):
+            return None
+
+        async def register(self, runtimes, **_kw):
+            self.payload = runtimes
+            return [], ""
+
+    client = _FakeClient()
+    monkeypatch.delenv("CLOUD_WORKER_PROVIDER", raising=False)
+    monkeypatch.setattr(ra, "_discover_local_runtimes", lambda: [
+        {"name": "codearts", "installed": False, "healthy": False, "cli_path": "",
+         "version": "", "backend_capability": {"status": "unavailable", "reason": "not found"}},
+        {"name": "opencode", "installed": False, "healthy": False, "cli_path": "",
+         "version": "", "backend_capability": {"status": "unavailable", "reason": "not found"}},
+    ])
+    out = asyncio.run(ra._reregister(
+        client, prev_installed=[{"name": "codearts", "installed": True},
+                                {"name": "opencode", "installed": True}],
+        device_name="d-3928"))
+    assert out is None, "瞬时全未安装不得把整机 runtime 摘除"
+    assert client.payload is None, "沿用快照时不应发起注册"
+
+
+def test_reregister_still_reports_single_engine_cli_removed(monkeypatch):
+    """单引擎主机唯一 CLI 被移除仍需上报（17641 根因链路，不能当扫描抖动放过）。"""
+    from src.domains.runtime.engine import agent as ra
+
+    class _FakeClient:
+        payload = None
+
+        async def reset_session(self):
+            return None
+
+        async def register(self, runtimes, **_kw):
+            self.payload = runtimes
+            return [], ""
+
+    client = _FakeClient()
+    monkeypatch.delenv("CLOUD_WORKER_PROVIDER", raising=False)
+    monkeypatch.setattr(ra, "_discover_local_runtimes", lambda: [
+        {"name": "codearts", "installed": False, "healthy": False, "cli_path": "",
+         "version": "", "backend_capability": {"status": "unavailable", "reason": "not found"}},
+    ])
+    out = asyncio.run(ra._reregister(
+        client, prev_installed=[{"name": "codearts", "installed": True}],
+        device_name="d-3928"))
+    assert out == ([], {}, [])
+    assert client.payload and client.payload[0]["installed"] is False
+    assert client.payload[0]["backend_capability"]["status"] == "unavailable"

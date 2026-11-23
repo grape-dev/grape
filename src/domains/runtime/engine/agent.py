@@ -4048,10 +4048,19 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
             _discovered = _discover_local_runtimes()
             installed = [r for r in _discovered if r.get("installed")]
             _register_payload = _discovered
-        # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
-        if not (_register_payload if _register_payload is not None else installed) and prev_installed:
-            log.warning("re-scan found no engines while snapshot had "
-                        f"{len(prev_installed)}; keeping snapshot (transient scan?)")
+        # S3：重扫「已安装」为空（快照曾有已安装引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）。
+        # QA 复审 Optional：判空必须按「已安装数」而不是 payload 非空——C1 载荷按设计带
+        # installed=false 条目（供服务端标记 CLI 已被移除的存量实例），若按 payload 判空，
+        # 一次扫描抖动导致「全 installed=false」时会把该 worker 的整机 runtime 置
+        # installed=0/healthy=0 并熔断，只能等下一轮扫描自愈。
+        # 边界：仅当快照里曾有多台已安装引擎（≥2）才按瞬时抖动处理；单引擎主机
+        # 「唯一 CLI 被移除」与扫描抖动无法区分，仍按 17641 根因链路如实上报（否则
+        # 存量行永远 healthy=1 继续认领）。
+        _installed_now = [r for r in (installed or []) if r.get("installed")]
+        _prev_installed_count = sum(1 for r in (prev_installed or []) if r.get("installed"))
+        if not _installed_now and _prev_installed_count >= 2:
+            log.warning("re-scan found no installed engines while snapshot had "
+                        f"{_prev_installed_count}; keeping snapshot (transient scan?)")
             return None
         _ls = _scan_local_skills()
         _payload = installed if _register_payload is None else _register_payload

@@ -495,3 +495,12 @@ jobs:
             tests/runtime/test_issue_993_branch_guard.py -v \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard
+
+      - name: Engine backend capability + claim gate + failover regression tests (issue #3928)
+        # Issue #3928 QA 复审修复（Required R5）：新增 5 个 test_issue_3928_*.py 与改写后的
+        # test_claim_executor_guard.py 此前未接入 linux-backend 门禁（先例 #2133/#2245/
+        # #3167/#3490/#3699/#3758/#3771/#3848 均由 QA 要求补齐）。缺 CLI 准入、degraded
+        # 冷却/半开、派发-认领同尺、重派熔断与跨引擎告警的实现漂移只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3928_*.py tests/runtime/test_claim_executor_guard.py -v
