@@ -1307,30 +1307,37 @@ def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
 
-def _read_issue_status_by_id(issue_id) -> str:
-    """按内部主键回读 issue.status（空串 = 无行或回读失败，由调用方兜底）。
+def _read_issue_status_by_id(issue_id):
+    """按内部主键回读 issue.status；无行或回读失败 → None（调用方保留兜底值）。
 
     Issue #4022：`issues detail` 的 `task_status` 与 `issues status get` 的 `status`
     统一从同一权威行（内部主键）派生。此前 detail 走按 issue_number 聚合的 map，
     镜像 repo_key 下同号多行时可能取到另一行，出现同一 Issue 读数相反的假象。
+    返回 None 而非 ""：区分「权威行不存在/读失败」（可回退兜底）与「权威行 status
+    为空」（必须返回空，不能透出镜像行值，QA 复审低危项）。
     """
     try:
         with db_lock:
             c = _rt_db.cursor()
             c.execute("SELECT status FROM issue WHERE id=?", (issue_id,))
             _r = c.fetchone()
-        return issue_status_text(_r[0] if _r else "")
+        if not _r:
+            return None
+        return issue_status_text(_r[0])
     except Exception as _e:
         log.warning(f"read issue status by id failed #{issue_id}: {_e}")
-        return ""
+        return None
 
 def read_issue_business_status_by_id(issue_id) -> tuple:
-    """按内部主键回读需求级 `(stage, status)`（空串 = 无行或回读失败，由调用方兜底）。
+    """按内部主键回读需求级 `(found, stage, status)`（无行/读失败 → `(False, "", "")`）。
 
     Issue #4022 QA Spec-1：镜像 repo 同号多行时，`detail` 顶层 stage/status 已统一
     按内部主键取行，内嵌 pipeline 的 `issue_stage`/`issue_task_status` 与独立
     `/pipeline` 接口也必须按同一主键行回读，消除「按 number 首行」与
     「按内部主键」取到不同行的口径分裂。
+
+    `found` 让调用方区分「行不存在（可保留聚合兜底）」与「行存在但 status 为空
+    （必须覆盖为空，QA 复审低危项：空权威 status 不得内嵌镜像行值）」。
     """
     try:
         with db_lock:
@@ -1338,11 +1345,11 @@ def read_issue_business_status_by_id(issue_id) -> tuple:
             c.execute("SELECT stage, status FROM issue WHERE id=?", (issue_id,))
             _r = c.fetchone()
         if not _r:
-            return ("", "")
-        return ((_r[0] or ""), issue_status_text(_r[1]))
+            return (False, "", "")
+        return (True, (_r[0] or ""), issue_status_text(_r[1]))
     except Exception as _e:
         log.warning(f"read issue business status by id failed #{issue_id}: {_e}")
-        return ("", "")
+        return (False, "", "")
 
 def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
     """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。
@@ -5207,7 +5214,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         item = {
             "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": _issue_number,
             "title": r[4] or "", "task_description": r[5] or "",
-            "conversation_id": r[6] or "", "status": r[7],
+            "conversation_id": r[6] or "", "status": issue_status_text(r[7]),
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
             "is_subtask_mode": r[11] or 0,
             "parent_issue_number": r[12] or 0,

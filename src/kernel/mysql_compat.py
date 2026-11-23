@@ -87,6 +87,30 @@ def _is_read_only_statement(sql: str) -> bool:
     return tok in _READ_ONLY_LEADING
 
 
+# Issue #4022 QA Standards-1/-2：issue.status 专用写代判定——只有真正影响
+# 快照所含 status 的语句才推进计数，events/agent_tasks 等高频写不再让
+# 列表缓存核对必须进 db_lock 回读（削峰目标不被无关写退化）。
+_ISSUE_ROW_WRITE_RE = re.compile(
+    r"^(?:INSERT\s+(?:IGNORE\s+|OR\s+\w+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM)\s+"
+    r"[\"`\[]?issue\b",
+    re.IGNORECASE)
+_ISSUE_UPDATE_RE = re.compile(
+    r"^UPDATE\s+[\"`\[]?issue\b\s+SET\b", re.IGNORECASE)
+_ISSUE_STATUS_SET_RE = re.compile(r"\bstatus\s*=", re.IGNORECASE)
+
+
+def _is_issue_status_write(sql: str) -> bool:
+    """判断写语句是否改变 issue 行的 status（含增删行：行存在性也影响快照）。"""
+    head = _strip_sql_leading_noise(sql)
+    if not head:
+        return False
+    if _ISSUE_ROW_WRITE_RE.match(head):
+        return True
+    if _ISSUE_UPDATE_RE.match(head):
+        return bool(_ISSUE_STATUS_SET_RE.search(head))
+    return False
+
+
 def release_all_thread_connections() -> int:
     """把**当前线程**在每个库实例上借的池连接都还回池，返回归还条数。"""
     n = 0
@@ -882,6 +906,13 @@ class MySQLCompatCursor:
                 self._conn._bump_total_changes(max(int(getattr(cur, "rowcount", 0) or 0), 1))
             except Exception:
                 pass
+            # Issue #4022 QA Standards-1：另记 issue.status 专用写代，供列表状态快照
+            # 判定是否仍新鲜（events/agent_tasks 等无关写不再误判过期）。
+            try:
+                if _is_issue_status_write(t):
+                    self._conn._bump_issue_status_write()
+            except Exception:
+                pass
         return self
 
     def executemany(self, sql: str, seq_of_params):
@@ -950,6 +981,9 @@ class MySQLCompatDB:
         self._lock = threading.RLock()  # 兼容层内部兜底锁
         self._pool = None  # PooledDB instance (lazy init)
         self._total_changes = 0  # sqlite3 total_changes 等价写代计数（Issue #4022）
+        # Issue #4022 QA Standards-1：issue.status 专用写代（只统计影响 issue 行
+        # status 的写，events/agent_tasks 高频写不推进），避免列表状态快照被无关写刷爆。
+        self._issue_status_write_gen = 0
         self._pool_disabled = os.environ.get("DB_POOL_DISABLED", "").lower() in ("1", "true", "yes")
         _DB_INSTANCES.add(self)
 
@@ -957,6 +991,22 @@ class MySQLCompatDB:
         """累加写代计数（cursor 执行写语句时调用；跨池连接共享同一计数器）。"""
         with self._lock:
             self._total_changes += max(int(n or 0), 0)
+
+    def _bump_issue_status_write(self):
+        """推进 issue.status 专用写代（Issue #4022；仅影响 issue 行 status 的写调用）。"""
+        with self._lock:
+            self._issue_status_write_gen += 1
+
+    @property
+    def issue_status_write_generation(self) -> int:
+        """issue.status 专用写代（Issue #4022 QA Standards-1/-2）。
+
+        与 `total_changes` 不同：只有 INSERT/REPLACE/DELETE issue 行或 SET status 的
+        UPDATE 才推进，events/agent_tasks 等高频写不会让列表状态快照失效。读侧
+        （routes/issues.py `_issue_status_by_ids`）优先用它判定快照新鲜度。
+        """
+        with self._lock:
+            return self._issue_status_write_gen
 
     @property
     def total_changes(self) -> int:

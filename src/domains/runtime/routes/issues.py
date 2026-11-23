@@ -444,6 +444,8 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     except Exception as e:
         log.warning(f"issues: load issue table failed: {e}")
     # 2. issue_state 兜底（无 issue 卡片行但仍有 issue_state 的过渡期数据）
+    #    Issue #4022 QA Standards-3：与 issue 表同一 ORDER BY——同号多行（镜像 repo_key）
+    #    按 repo_keys 优先级 + id 升序取行，过渡期兜底也不随查询行序漂移。
     _iid_clause = ""
     _iid_params: list = []
     if numbers:
@@ -456,8 +458,9 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
             c.execute(
                 f"SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
-                f"FROM issue_state WHERE repo_key IN ({placeholders}){_iid_clause}",
-                repo_keys + _iid_params)
+                f"FROM issue_state WHERE repo_key IN ({placeholders}){_iid_clause} "
+                f"ORDER BY {_order_sql}",
+                repo_keys + _iid_params + _order_params)
             for r in c.fetchall():
                 # Issue #4341：兜底键与 `issue` 单表同形（完整 ident），
                 # 否则同号在两源落成不同键（`#IKXR3B` 曾成 "3"），兜底行永远补不进。
@@ -709,8 +712,10 @@ def _assemble_issue(repo_keys: list[str], number: str, stage_map: dict, status_m
     _task_status = status_map.get(number, "")
     _internal_id = stage.get("internal_id")
     if _internal_id:
+        # 权威行（内部主键）存在时以其 status 为准（含空串）；None = 行不存在/读失败
+        # 才回退聚合 map（QA 复审：空权威 status 不得透出镜像行值）。
         _by_id = _read_issue_status_by_id(_internal_id)
-        if _by_id:
+        if _by_id is not None:
             _task_status = _by_id
     # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
     # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
@@ -2809,13 +2814,35 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
 _ISSUE_STATUS_REFRESH_CHUNK = 500
 
 # Issue #4022 QA Standards-1：缓存命中的核对走「短 TTL 状态快照 + 连接写代校验」——
-# 快照窗口内（且连接写计数未变）直接复用，不逐请求抢全局 db_lock，保住
-# `@_cached_repo_list`「6 并发削成 1 次」的目标；窗口默认 1s，仅兜底连接写代探测
-# 覆盖不到的外部写入（跨进程），本进程内任何 issue.status 写入都会改变
-# `db.total_changes` → 下一次核对即整窗刷新，read-your-writes 语义不受 TTL 削弱。
+# 快照窗口内（且写代未变）直接复用，不逐请求抢全局 db_lock，保住
+# `@_cached_repo_list`「6 并发削成 1 次」的目标；窗口默认 1s，仅兜底写代探测
+# 覆盖不到的外部写入（跨进程）。写代必须与 `_rt_db` 的读连接同源：
+#   - 读走进程主库（runtime 域进程 / 单库拓扑）→ 用主库 status 专用写代
+#     （MySQL 兼容层 `issue_status_write_generation`，否则回退 `total_changes`）；
+#   - 读走 runtime 自有 DSN（三库拓扑 mgmt 进程）→ 每次 new_connection，主库
+#     `total_changes` 反映不到该连接的写入 → 返回 None，禁用快照复用（每次回读），
+#     read-your-writes 不依赖 1s TTL 兜底（QA 复审阻断项）。
 _ISSUE_STATUS_SNAPSHOT_TTL = 1.0
 _issue_status_snapshot_lock = _th_cache.Lock()
 _issue_status_snapshot: dict = {"ts": 0.0, "changes": -1, "data": {}}
+
+
+def _runtime_status_write_gen():
+    """返回与 `_rt_db` 读连接同源的 issue.status 写代；None = 无法可靠跟踪。
+
+    QA 复审阻断项：三库拓扑下 `_rt_db.cursor()` 返回 runtime 自有 DSN 的新连接，
+    而进程主库 `db.total_changes` 不计其写入。此时必须禁用快照复用，否则置位后
+    1s 内列表缓存命中会复用旧快照，AC「首次读回即见」不成立。
+    """
+    from src.kernel import db_registry
+    if (db_registry.current_domain() != "runtime"
+            and db_registry.uses_own_dsn("runtime")):
+        return None
+    from src.kernel.session_manager import db as _main
+    _gen = getattr(_main, "issue_status_write_generation", None)
+    if _gen is not None:
+        return _gen
+    return getattr(_main, "total_changes", None)
 
 
 def _issue_status_by_ids(ids: list[int]) -> dict:
@@ -2823,17 +2850,17 @@ def _issue_status_by_ids(ids: list[int]) -> dict:
 
     Issue #4022：列表结果缓存命中时用它核对卡片状态是否已漂移；任何 status 写路径
     都无需逐个接入缓存失效钩子就能保证「写后即读」。QA Standards-1 改造：
-    命中快照窗口（短 TTL + `db.total_changes` 写代一致）时零 SQL 复用，
-    并发看板刷新不再逐请求串行抢全局 db_lock；快照值 None = 该主键行已删除
-    （由 `_cached_list_is_current` 判漂移重算）。
+    命中快照窗口（短 TTL + 同源写代一致）时零 SQL 复用，并发看板刷新不再逐请求
+    串行抢全局 db_lock；写代无法与读连接同源（三库 own-DSN）时禁用复用、每次回读。
+    快照值 None = 该主键行已删除（由 `_cached_list_is_current` 判漂移重算）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
     _ids = sorted({int(i) for i in ids})
     if not _ids:
         return {}
-    # 连接写代（本进程自上次快照以来的 INSERT/UPDATE/DELETE 计数）——无 db_lock 读取，
+    # 写代（issue.status 专用，本进程自上次快照以来的相关写计数）——无 db_lock 读取，
     # 仅 int 属性访问；变化 → 快照必然过期（fail-safe 方向），宁可多刷一次。
-    _total = getattr(db, "total_changes", None)
+    _total = _runtime_status_write_gen()
     _now = _time_cache.time()
     with _issue_status_snapshot_lock:
         _reuse = (
@@ -2859,7 +2886,7 @@ def _issue_status_by_ids(ids: list[int]) -> dict:
             if _start + _ISSUE_STATUS_REFRESH_CHUNK >= len(_queried):
                 # 与 SELECT 同一 db_lock 临界区内取写代：锁前的写入已同时体现在
                 # 行集与计数里，锁后的写入会让计数变化 → 下次核对整窗刷新。
-                _total_after = getattr(db, "total_changes", None)
+                _total_after = _runtime_status_write_gen()
     with _issue_status_snapshot_lock:
         if not _reuse:
             # 整窗重建：本次未回读到的主键记 None（行已删除，恒判漂移 → 重算）
@@ -2867,11 +2894,11 @@ def _issue_status_by_ids(ids: list[int]) -> dict:
             _issue_status_snapshot["ts"] = _now
             _issue_status_snapshot["changes"] = _total_after
             for _r in _rows:
-                _issue_status_snapshot["data"][int(_r[0])] = (_r[1] or "")
+                _issue_status_snapshot["data"][int(_r[0])] = issue_status_text(_r[1])
         elif _total_after == _total:
             # 仅补查快照缺失的主键（新翻页）且窗口内无写入 → 合并，窗口不变
             for _r in _rows:
-                _issue_status_snapshot["data"][int(_r[0])] = (_r[1] or "")
+                _issue_status_snapshot["data"][int(_r[0])] = issue_status_text(_r[1])
             for i in _queried:
                 if i not in _issue_status_snapshot["data"]:
                     _issue_status_snapshot["data"][i] = None
@@ -2901,7 +2928,7 @@ def _cached_list_is_current(payload) -> bool:
             _id = _it.get("id")
             if _id is None or not str(_id).isdigit():
                 continue
-            _pairs.append((int(_id), _it.get("status") or ""))
+            _pairs.append((int(_id), issue_status_text(_it.get("status"))))
         if not _pairs:
             return True
         _live = _issue_status_by_ids([p[0] for p in _pairs])
@@ -3374,15 +3401,14 @@ def get_issue_detail(owner: str, repo: str, number: str,
         # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
         base["stage"] = _id_stage or "vod"
     # Issue #4022 QA Spec-1：pipeline 内嵌业务状态（issue_stage/issue_task_status）同步
-    # 按内部主键回读（镜像 repo 同号多行时与顶层 stage/status 钉同一权威行），
-    # 顶层 task_status 非空时仍以它为准，消除同响应内两处相反读数。
+    # 按内部主键回读（镜像 repo 同号多行时与顶层 stage/status 钉同一权威行）。
+    # QA 复审低危项：`found` 为真即覆盖 status（含空串），不得在权威 status 为空时
+    # 透出另一镜像行/兜底值；stage 允许在权威为空时保留兜底。
     if base.get("issue_id"):
-        _by_id_stage, _by_id_status = read_issue_business_status_by_id(base["issue_id"])
-        if _by_id_stage or _by_id_status:
+        _found, _by_id_stage, _by_id_status = read_issue_business_status_by_id(base["issue_id"])
+        if _found:
             _biz_stage = _by_id_stage or _biz_stage
-            _biz_status = _by_id_status or _biz_status
-    if base.get("task_status"):
-        _biz_status = base["task_status"]
+            _biz_status = _by_id_status
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
@@ -3458,13 +3484,14 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     else:
         # Issue #4022 QA Spec-1：独立 /pipeline 同步主键化——按内部主键回读权威行
         # （与 detail 顶层/内嵌 pipeline 同一行），镜像 repo 同号多行不再按 number 首行漂移。
+        # QA 复审低危项：`found` 为真即覆盖 status（含空串），stage 允许保留兜底。
         # #4024 未命中规范行时的兜底：以 stage_map 行 internal_id 单源化。
         _internal_id = (_stage_map.get(num) or {}).get("internal_id")
         if _internal_id:
-            _by_id_stage, _by_id_status = read_issue_business_status_by_id(_internal_id)
-            if _by_id_stage or _by_id_status:
+            _found, _by_id_stage, _by_id_status = read_issue_business_status_by_id(_internal_id)
+            if _found:
                 _biz_stage = _by_id_stage or _biz_stage
-                _biz_status = _by_id_status or _biz_status
+                _biz_status = _by_id_status
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))

@@ -380,3 +380,99 @@ def test_status_snapshot_collapses_repeated_checks(monkeypatch):
     # 清快照，避免影响后续用例
     with _routes._issue_status_snapshot_lock:
         _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})
+
+
+# ---------------------------------------------------------------- QA 复审补充（三库拓扑 + 空权威状态）
+
+class _CountingRtDb:
+    """统计 `_rt_db.cursor()` 执行次数的测试替身（校验是否复用快照）。"""
+
+    def __init__(self, real):
+        self._real = real
+        self.queries = 0
+
+    def cursor(self, *a, **k):
+        outer = self
+
+        class _CountingCursor:
+            def __init__(s, cur):
+                s._cur = cur
+
+            def execute(s, sql, params=()):
+                outer.queries += 1
+                return s._cur.execute(sql, params)
+
+            def __getattr__(s, n):
+                return getattr(s._cur, n)
+
+        return _CountingCursor(self._real.cursor(*a, **k))
+
+    def __getattr__(self, n):
+        return getattr(self._real, n)
+
+
+def test_own_dsn_topology_never_reuses_stale_status_snapshot(monkeypatch):
+    """QA 复审阻断项：三库拓扑（mgmt 进程 + runtime 自有 DSN）下写代与读连接不同源。
+
+    `_rt_db.cursor()` 每次返回新的 runtime 连接，进程主库写代反映不到它；此时
+    状态快照必须禁用复用（每次回读），否则置位后 1s 内列表缓存命中会复用旧快照，
+    AC「首次读回即见」不成立。本用例同时钉住 `_runtime_status_write_gen()` 返回 None。
+    """
+    import sqlite3
+    from src.kernel import db_registry
+    from src.domains.runtime.routes import issues as _routes
+
+    ctx = _Ctx("j")
+    card_id = ctx.seed(number=20, status="active")
+    _path = os.path.abspath(os.environ["DEVOPS_DB_PATH"])
+
+    # 模拟三库拓扑：进程域=mgmt，runtime 用自有 DSN（跨域 new_connection 取独立连接）
+    monkeypatch.setattr(db_registry, "current_domain", lambda: "mgmt")
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: d == "runtime")
+    monkeypatch.setattr(db_registry, "new_connection",
+                        lambda d, autocommit=True: sqlite3.connect(_path, check_same_thread=False))
+
+    with _routes._issue_status_snapshot_lock:
+        _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})
+
+    _proxy = _CountingRtDb(_routes._rt_db)
+    monkeypatch.setattr(_routes, "_rt_db", _proxy)
+    try:
+        assert _routes._runtime_status_write_gen() is None
+
+        # 同页连续两次核对：写代不可同源 → 禁用快照复用，每次回读（2 次查询）
+        assert _routes._issue_status_by_ids([card_id]) == {card_id: "active"}
+        assert _routes._issue_status_by_ids([card_id]) == {card_id: "active"}
+        assert _proxy.queries == 2, _proxy.queries
+
+        # 主库写 status（不改变 runtime 自有连接写代）后立即核对，必须见新值
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE issue SET status='pending_review' WHERE id=?", (card_id,))
+            db.commit()
+        assert _routes._issue_status_by_ids([card_id]) == {card_id: "pending_review"}
+        assert _proxy.queries == 3, _proxy.queries
+    finally:
+        monkeypatch.undo()
+        with _routes._issue_status_snapshot_lock:
+            _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})
+
+
+def test_empty_authoritative_status_not_leaked_from_mirror_row():
+    """QA 复审低危项：权威行 status 为空时，内嵌/独立 pipeline 不得透出镜像行值。"""
+    ctx = _Ctx("k")
+    number = 22
+    primary_id = _seed_mirror_rows(ctx, number, "", "completed")
+
+    d = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/{number}", headers=ctx.jwt)
+    assert d.status_code == 200, d.text
+    detail = d.json()
+    assert detail["issue_id"] == primary_id, detail
+    # 顶层与内嵌 pipeline 均以权威行（空 status）为准，不得显示 github: 行的 completed
+    assert detail["task_status"] == "" and detail["status"] == "", detail
+    _pipe = detail.get("pipeline") or {}
+    assert _pipe.get("issue_task_status") == "", _pipe
+
+    p = client.get(f"/api/issues/{ctx.owner}/{ctx.repo}/{number}/pipeline", headers=ctx.jwt)
+    assert p.status_code == 200, p.text
+    assert p.json().get("issue_task_status") == "", p.json()

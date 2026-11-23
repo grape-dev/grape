@@ -13,9 +13,10 @@ cancel / resume / 后台结单等）无需逐个接入失效钩子即可写后�
 ## 改动点
 | 模块 | 改动 |
 |------|------|
-| `src/domains/runtime/routes/issues.py` | 新增 `_issue_status_by_ids`（主键批量回读 status）、`_cached_list_is_current`（缓存命中核对）；`_cached_repo_list` 命中时核对、漂移/异常即重算；`_task_status_map` 支持 `numbers` 收窄 + `setdefault` 确定性；`_assemble_issue` 按内部主键取 `task_status` 并新增 `status` 别名；详情改用收窄 status map 且 pipeline 业务状态与顶层同源 |
-| `src/domains/runtime/issues_center.py` | 新增 `_read_issue_status_by_id`（内部主键回读权威 status，供详情统一口径） |
-| `tests/runtime/test_issue_4022_read_your_writes.py` | 新增回归：缓存预热后置位即读、连续多次不抖动、任意写路径即时可见、list/detail/status get 口径一致 |
+| `src/domains/runtime/routes/issues.py` | 新增 `_issue_status_by_ids`（主键批量回读 status）、`_cached_list_is_current`（缓存命中核对）；`_cached_repo_list` 命中时核对、漂移/异常即重算；`_task_status_map` 支持 `numbers` 收窄 + `setdefault` 确定性；`_assemble_issue` 按内部主键取 `task_status` 并新增 `status` 别名；详情改用收窄 status map 且 pipeline 业务状态与顶层同源；`_runtime_status_write_gen` 保证写代与 `_rt_db` 读连接同源（own-DSN 拓扑禁用快照复用）；`_issue_stage_map` issue_state 兜底补 ORDER BY |
+| `src/domains/runtime/issues_center.py` | 新增 `_read_issue_status_by_id`（内部主键回读权威 status，无行/异常返回 None）、`read_issue_business_status_by_id` 返回 `(found, stage, status)`；`_query_tasks` 列表出口 status 归一 |
+| `src/kernel/mysql_compat.py` | 新增 issue.status 专用写代 `issue_status_write_generation`（仅影响 issue 行 status 的写推进），供快照新鲜度判定，避免 events/agent_tasks 写误判过期 |
+| `tests/runtime/test_issue_4022_read_your_writes.py` | 新增回归：缓存预热后置位即读、连续多次不抖动、任意写路径即时可见、list/detail/status get 口径一致；三库 own-DSN 拓扑写后即见、空权威 status 不泄露镜像行 |
 | `docs/issue-4022/*` | Spec / Plan / Task |
 
 ## 关键决策
@@ -25,7 +26,9 @@ cancel / resume / 后台结单等）无需逐个接入失效钩子即可写后�
 | 核对失败 | fail-closed 重算 | 宁可多查一次也不返回可能过期的状态 |
 | 详情 status 口径 | 内部主键回读 + `status` 别名 | 与 `issues status get` 同行同语句；新增字段兼容旧消费方 |
 | 同号多行 map | `repo_keys` 顺序首个命中（`setdefault`） | 消除查询行序漂移导致的相反读数；主键路径已优先 |
-| pipeline 业务状态 | 顶层 `task_status` 非空时同源覆盖 | 避免同一 detail 响应中两处状态相反 |
+| pipeline 业务状态 | 权威行存在时无条件按内部主键覆盖（含空值） | 避免同一 detail 响应中两处状态相反，且空权威 status 不得透出镜像行 |
+| 快照写代来源 | 必须与 `_rt_db` 读连接同源；own-DSN 跨域拓扑禁用复用 | 三库拓扑下进程主库 `total_changes` 覆盖不到 runtime 自有连接，复用会破坏写后即读 |
+| 写代粒度 | issue.status 专用写代（MySQL 兼容层），否则回退 `total_changes` | events/agent_tasks 等无关写不再让列表快照失效，保住并发削峰目标 |
 
 ## 风险与缓解
 - 缓存命中多一次查询：主键 IN、2 列、分批，分页默认 20 条，成本可忽略；分块上限 500。

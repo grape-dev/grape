@@ -39,8 +39,9 @@
   detail 与独立 `/pipeline` 内嵌业务状态按内部主键回读。
 - `src/domains/runtime/issues_center.py` — 新增 `issue_status_text`（共用 status 归一 accessor）、
   `read_issue_business_status_by_id`（按内部主键回读 stage/status）。
-- `src/kernel/mysql_compat.py` — `MySQLCompatDB.total_changes`（sqlite 写代计数等价物，
-  供快照写代校验在 MySQL 后端同样生效）。
+- `src/kernel/mysql_compat.py` — 新增 `MySQLCompatDB.issue_status_write_generation`（issue.status
+  专用写代，只统计影响 issue 行 status 的 INSERT/REPLACE/DELETE 与 SET status 的 UPDATE），
+  `total_changes` 保留为通用连接写计数。
 - （旧路径 `src/api/issues_center.py` 为兼容别名，指向 canonical `src/domains/runtime/issues_center.py`。）
 
 ## Risks & Mitigations
@@ -64,3 +65,20 @@
 - Spec-2：补 review-pass / review-reject / confirm-done 写后即读、fail-closed（回读异常重算）、
   行删除失效、快照合并/写代刷新用例。
 - Spec-3：Affected Modules 修正为 canonical `src/domains/runtime/issues_center.py`。
+
+## QA 复审修复记录（PR #2046 round 2 @ d6019e502 → 本轮）
+- Standards 阻断（写代来源错配）：新增 `_runtime_status_write_gen()`——写代必须与 `_rt_db`
+  读连接同源。三库拓扑（mgmt 进程 + `uses_own_dsn(runtime)`）下 `_rt_db.cursor()` 每次取新
+  runtime 连接，进程主库 `total_changes` 不计其写入 → 返回 None、禁用状态快照复用（每次回读），
+  「首次读回即见」不再依赖 1s TTL；读走进程主库时用 issue.status 专用写代，否则回退 `total_changes`。
+- Standards 判断项（削峰退化）：MySQL 兼容层新增 issue.status 专用写代，events/agent_tasks
+  等无关高频写不再让快照失效。
+- Standards 判断项（列表出口归一）：`_query_tasks` 出口 `status` 改用 `issue_status_text`，
+  与 detail/status get/快照核对同口径；快照值同样归一。
+- Standards 判断项（issue_state 兜底排序）：`_issue_stage_map` 的 issue_state 兜底查询补同一
+  `ORDER BY CASE repo_key ... , id ASC`，过渡期同号多行取行确定。
+- Spec 低危（空权威 status）：`read_issue_business_status_by_id` 改为返回 `(found, stage, status)`，
+  `_read_issue_status_by_id` 无行/异常返回 None（区分「无行」与「权威值为空」）；detail 内嵌
+  pipeline 与独立 `/pipeline` 在权威行存在时无条件按权威 status 覆盖（含空串），不再透出镜像行值。
+- Spec 测试补强：新增三库 own-DSN 拓扑用例（写代不可同源 → 每次回读、写后即见）与
+  空权威 status 不被镜像行泄露用例。
