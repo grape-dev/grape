@@ -375,3 +375,63 @@ class TestCommentMetrics:
         for w in workers:
             w.join(timeout=10)
         assert cm.consecutive_failures("gitcode:grape-dev/grape") == 8
+
+
+# =====================================================================
+# 5. 执行完成回帖调用路径接线（QA R1：生产调用点必须传 task_id/seq）
+# =====================================================================
+
+class TestExecDoneCallPathWiring:
+    """经 _execute_agent_inner 抽出的执行完成回帖入口（生产同一路径）验证双保险接线。
+
+    旧实现调用 _post_result_to_issue 不传 task_id/seq，_task_real_issue_number
+    两者皆空直接返回 ""，合成键任务即使事件 payload 带真实号也解析不到。
+    """
+
+    STRUCTURED = json.dumps({"actions": ["x"], "conclusion": "巡检结论：一切正常"})
+
+    def test_exec_done_call_path_uses_real_issue_number(self, monkeypatch):
+        """生产调用路径：合成键 issue_id + 事件 payload 带真实号 → 回帖到真实号。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        tid, seq = "t_4065_wire", 4065003
+        _seed_task(tid, "autopilot-ax", seq=seq)
+        _seed_event(seq, "autopilot-ax", {"issue_number": "4065"})
+
+        sent = []
+        monkeypatch.setattr(ep, "_list_issue_comments_card", lambda *a, **k: [])
+        monkeypatch.setattr(ep, "_post_issue_comment_ledgered",
+                            lambda repository, num, *a, **k: sent.append(num) or True)
+
+        ep._post_result_to_issue_from_exec_done(
+            "grape-dev/grape", "autopilot-ax", self.STRUCTURED, "tok", "sre",
+            GITCODE_RK, task_id=tid, seq=seq, evt={})
+        assert sent == ["4065"], "生产调用路径应凭事件 payload 的真实 issue_number 回帖"
+        assert not _records(tid, "RESULT_COMMENT_SKIPPED")
+
+    def test_exec_done_call_path_without_real_number_falls_back(self, monkeypatch):
+        """生产调用路径：合成键 issue_id 且 payload 无真实号 → 落 RESULT_CARD_FALLBACK。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        tid, seq = "t_4065_wire2", 4065004
+        _seed_task(tid, "autopilot-az", seq=seq)
+        _seed_event(seq, "autopilot-az", {"issue_number": "autopilot-az"})
+
+        sent = []
+        monkeypatch.setattr(ep, "_list_issue_comments_card", lambda *a, **k: [])
+        monkeypatch.setattr(ep, "_post_issue_comment_ledgered",
+                            lambda repository, num, *a, **k: sent.append(num) or True)
+
+        ep._post_result_to_issue_from_exec_done(
+            "grape-dev/grape", "autopilot-az", self.STRUCTURED, "tok", "sre",
+            GITCODE_RK, task_id=tid, seq=seq, evt={})
+        assert sent == [], "无真实号不得投递评论"
+        assert _records(tid, "RESULT_COMMENT_SKIPPED"), "应留痕 RESULT_COMMENT_SKIPPED"
+        assert _records(tid, "RESULT_CARD_FALLBACK"), "结果应落卡片/事件流兜底"
+
+    def test_exec_done_call_path_pr_sub_skipped(self, monkeypatch):
+        """PR 订阅伪 issue_id（evt._pr_sub_pr_number）不进 Issue 回帖。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        monkeypatch.setattr(ep, "_post_result_to_issue",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应回帖 Issue")))
+        ep._post_result_to_issue_from_exec_done(
+            "grape-dev/grape", "#pr_123_scene_id", self.STRUCTURED, "tok", "sre",
+            GITCODE_RK, task_id="", seq=None, evt={"_pr_sub_pr_number": "123"})
