@@ -8,11 +8,15 @@
 覆盖两层：
 1. 静态守卫（Linux CI 恒可跑）：窗口常量（30s 软到期 / 60s 硬上限 / 3s 粒度）、注册判据、
    在途/硬失败迹象、快速失败路径未被放宽、结束提示分支（回滚路径不得出现 `Install complete!`）、
-   回滚前主控交叉验证的静默降级。
-2. 行为用例（本机有 pwsh 时才跑，CI 无 PowerShell 自动 skip）：把脚本里的注册等待整段
+   回滚前主控交叉验证的静默降级、日志水位（只读本轮新增行）与硬失败跳过交叉验证。
+2. 行为用例（本机有 pwsh 时才跑）：把脚本里的注册等待整段
    （Issue #3892 标记 → 文件末尾）原样抽到 harness 里，用桩替换 Start-Sleep/Get-CimInstance/
    Invoke-RestMethod，按秒推进模拟日志，验证四条验收：慢注册不被回滚、在途迹象续等到 60s、
-   无迹象/硬失败立即停等、回滚路径提示如实。
+   无迹象/硬失败立即停等、回滚路径提示如实；以及 append-only 历史日志（上一轮 Traceback /
+   Register failed / registered）不参与本轮判定、硬失败不被主控心跳翻案。
+
+CI 门禁：本文件已接入 `.github/workflows/windows-smoke.yml` 的 `windows-smoke` job
+（windows-latest 自带 pwsh），否则 10 条行为用例在无 PowerShell 的环境恒 skip、回归无门禁。
 """
 import os
 import re
@@ -61,11 +65,11 @@ class TestRegisterWindowWidth:
         assert "Agent alive but not registered after 30s" not in text, \
             "回滚日志不应再写死 30s（实际等待时长改为按 $regElapsed 输出）"
 
-    def test_registration_marker_still_matched_through_log_tail(self):
+    def test_registration_marker_still_matched_in_new_lines(self):
         region = _region()
         assert '"RuntimeAgent registered"' in region, "注册判据标记不得改动"
-        assert "Get-Content $workerLog -Tail 40 -ErrorAction SilentlyContinue" in region, \
-            "日志读取沿用 Get-Content -Tail + ErrorAction SilentlyContinue 既有模式"
+        assert "Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset" in region, \
+            "注册判定沿用日志读取，但只读本轮水位之后的新增行"
 
 
 # ── 2. 在途 / 硬失败迹象 ───────────────────────────────────────────────
@@ -110,11 +114,71 @@ class TestInFlightJudgement:
         region = _region()
         fn = region[region.find("function Test-RegistrationInFlight"):]
         fn = fn[:fn.find("\n}\n") + 3]
-        assert "Test-Path $LogPath" in fn
+        assert "$NewLog" in fn, "在途判定只看调用方给的本轮新增行"
         assert "-match $regFailedPattern" in fn
         assert "-match $regInFlightPattern" in fn
         assert "$AgentProcessAlive" in fn and "$DaemonAlive" in fn, \
             "无日志线索时必须回落到进程/daemon 存活判定（否则 35s 慢注册仍会被误杀）"
+
+
+# ── 2b. 历史日志隔离（QA 审查 Required#1）─────────────────────────────
+class TestStaleLogIsolation:
+    """devops-bot.log 是 append-only（安装器不截断/不轮转），上一轮残留的 Traceback /
+    Register failed 必须被水位挡在本轮判定之外，否则新 agent 在 0s 就被判死回滚。"""
+
+    def test_log_offset_sampled_before_agent_start(self):
+        text = _ps1()
+        anchor = text.find("$workerLog = Join-Path $workerLogDir")
+        assert anchor != -1
+        offset = text.find("$agentLogOffset = 0L", anchor)
+        start = text.find('Start-Process -FilePath "powershell.exe"', anchor)
+        assert offset != -1 and start != -1 and offset < start, \
+            "必须在启动新 agent 之前采样日志水位（否则上轮残留行会参与本轮判定）"
+
+    def test_wait_loop_reads_only_new_lines(self):
+        region = _region()
+        assert "Get-NewAgentLogLines" in region and "-Offset $agentLogOffset" in region
+        assert "Get-Content $workerLog -Tail 40" not in region, \
+            "注册判定不得再读整份日志尾部（历史失败行会让新 agent 0s 被判死）"
+        assert "Get-Content $LogPath -Tail 60" not in region, \
+            "在途判定同样必须只看本轮新增行（历史 Register failed 会把 30s 软到期判成不在途）"
+
+    def test_incremental_reader_tolerates_writer_and_rotation(self):
+        region = _region()
+        fn = region[region.find("function Get-NewAgentLogLines"):]
+        fn = fn[:fn.find("\n}\n") + 3]
+        assert "FileShare]::ReadWrite" in fn, "agent 正在追加写，读取不能独占文件"
+        assert "if ($fs.Length -lt $Offset) { $Offset = 0 }" in fn, "轮转/截断后应退化为从 0 读"
+        assert "StreamReader" in fn
+        assert "return @()" in fn, "读不到（文件缺失/共享冲突）应返回空行集，交给存活判定兜底"
+
+    def test_hard_failure_pattern_excludes_generic_markers(self):
+        region = _region()
+        m = re.search(r"^\$regFailedPattern\s*=\s*'([^']*)'", region, re.M)
+        assert m, "应声明 $regFailedPattern"
+        pattern = m.group(1)
+        for generic in ("Traceback", "SystemExit", "worker exiting"):
+            assert generic not in pattern, \
+                f"{generic} 属泛化关键字（单个引擎探针失败也会打 Traceback），会短路掉可成功的启动"
+        assert "Register failed" in pattern and "credential revoked" in pattern
+
+    def test_hard_failure_skips_master_cross_check(self):
+        """硬失败在 10s 内发生时，老 agent 的最后心跳仍在容差窗内 → 必须跳过交叉验证。"""
+        region = _region()
+        assert "$regHardFailed = $true" in region, "硬失败必须留下本轮标记"
+        call = region.find("Test-MasterRuntimeRecentlySeen -SinceUtc")
+        assert call != -1
+        guard = region.rfind("if (-not $regOk", 0, call)
+        assert guard != -1 and guard < call
+        guard_line = region[guard:region.find("\n", guard)]
+        assert "$regHardFailed" in guard_line, "交叉验证调用点必须排除硬失败分支"
+
+    def test_process_alive_scoped_to_install_dir(self):
+        region = _region()
+        fn = region[region.find("function Test-NewAgentProcessAlive"):]
+        fn = fn[:fn.find("\n}\n") + 3]
+        assert "$Dir" in fn, \
+            "同机可能有多份 grape 安装，只按 agent 命令行匹配会把别的安装判成本轮进程仍存活"
 
 
 # ── 3. 快速失败路径不变 ────────────────────────────────────────────────
@@ -236,7 +300,12 @@ function Get-CimInstance {
     param($ClassName, $Filter, $ErrorAction)
     if ($Filter -like "*python.exe*") {
         if ($env:HARNESS_PROC_ALIVE -eq "1") {
-            return [pscustomobject]@{ ProcessId = 4242; CommandLine = "python -m src.domains.runtime.engine.agent" }
+            # ExecutablePath/CommandLine 都带安装目录：实现侧按 $Dir 过滤（QA 审查 Optional）
+            return [pscustomobject]@{
+                ProcessId = 4242
+                ExecutablePath = "/harness/venv/Scripts/python.exe"
+                CommandLine = "/harness/venv/Scripts/python.exe -m src.domains.runtime.engine.agent"
+            }
         }
         return $null
     }
@@ -274,10 +343,14 @@ function Start-Sleep {
     if ($failAt -gt 0 -and $script:tick -ge $failAt) {
         Add-Content -Path $env:HARNESS_LOG -Value "Register failed (check RUNTIME_TOKEN / server URL)"
     }
+    $tracebackAt = [int]$env:HARNESS_TRACEBACK_AT_SEC
+    if ($tracebackAt -gt 0 -and $script:tick -ge $tracebackAt) {
+        Add-Content -Path $env:HARNESS_LOG -Value "Traceback (most recent call last):"
+        Add-Content -Path $env:HARNESS_LOG -Value "  engine probe failed: opencode not installed (continuing)"
+    }
 }
 function restore_upgrade_backup {
     $script:rolledBackVersion = "0.9.9-old"
-    $script:rollbackBackupDir = $upgradeBackupDir
     return [bool]::Parse($env:HARNESS_ROLLBACK_OK)
 }
 """
@@ -290,24 +363,31 @@ def _build_harness(tmp_path, region: str) -> str:
         "$Token = 'rta_harness'\n"
         "$startScript = '/harness/start-worker.ps1'\n"
         "$Device = 'worker-harness'\n"
+        "$Dir = '/harness'\n"
         "$upgradeBackupDir = '/harness/.upgrade-backup'\n"
         "$workerLog = $env:HARNESS_LOG\n"
         "$workerProc = [pscustomobject]@{ ProcessId = 4242 }\n"
         "$agentStartUtc = [datetime]::UtcNow\n"
         "$installOutcome = 'installed'\n"
+        # 真脚本在 Start-Process 之前采样水位；harness 在脚本启动时采样，等价于「上一轮日志已落盘」。
+        "$agentLogOffset = if (Test-Path $env:HARNESS_LOG) { [long](Get-Item $env:HARNESS_LOG).Length } else { [long]0 }\n"
     )
     body = prefix + HARNESS_PRELUDE + "\n" + region + "\n"
     body += 'Write-Output ("RESULT regOk=$regOk elapsed=$regElapsed outcome=$installOutcome version=$rolledBackVer")\n'
     return body
 
 
-def _run_harness(tmp_path, env_overrides: dict):
+def _run_harness(tmp_path, env_overrides: dict, pre_log=None):
     region = _region()
     script = os.path.join(str(tmp_path), "harness.ps1")
     with open(script, "w", encoding="utf-8") as f:
         f.write(_build_harness(tmp_path, region))
     log_path = os.path.join(str(tmp_path), "devops-bot.log")
-    if env_overrides.pop("_create_log", True):
+    if pre_log is not None:
+        # 上一轮运行残留的日志：harness 在启动时按文件长度采样水位，这些行本轮不应参与判定。
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("".join(line + "\n" for line in pre_log))
+    elif env_overrides.pop("_create_log", True):
         open(log_path, "w").close()
     env = dict(os.environ)
     env.update({
@@ -319,6 +399,7 @@ def _run_harness(tmp_path, env_overrides: dict):
         "HARNESS_REGISTER_AT_SEC": "0",
         "HARNESS_INFLIGHT_AT_SEC": "0",
         "HARNESS_FAIL_AT_SEC": "0",
+        "HARNESS_TRACEBACK_AT_SEC": "0",
     })
     env.update({k: str(v) for k, v in env_overrides.items()})
     proc = subprocess.run([PWSH, "-NoProfile", "-File", script],
@@ -408,3 +489,47 @@ class TestRegisterWindowBehaviour:
         res = _run_harness(tmp_path, {"HARNESS_WHOAMI": "stale"})
         assert res["regOk"] is False
         assert res["outcome"] == "rolled_back"
+
+    # ── QA 审查 Required#1/#2 的行为回归 ──────────────────────────────
+
+    def test_previous_run_failure_lines_do_not_kill_this_round(self, tmp_path):
+        """Required#1：append-only 日志里上一轮残留的 Traceback / Register failed /
+        worker exiting 必须被水位挡掉——36s 才注册的新 agent 不得在 0s 被判死回滚。"""
+        stale = [
+            "Traceback (most recent call last):",
+            '  File "agent.py", line 1, in <module>',
+            "SystemExit: 1",
+            "Register failed (check RUNTIME_TOKEN / server URL)",
+            "worker exiting (code 42)",
+        ]
+        res = _run_harness(tmp_path, {"HARNESS_REGISTER_AT_SEC": 36}, pre_log=stale)
+        assert res["regOk"] is True, res["stdout"]
+        assert res["elapsed"] >= 36, "不得因历史失败行提前停等"
+        assert res["outcome"] == "installed"
+        assert "Install complete!" in res["stdout"]
+        assert "stopping the wait early" not in res["stdout"]
+
+    def test_stale_registered_line_is_not_accepted(self, tmp_path):
+        """Required#1 反向：历史 registered 行不得顶替本轮注册（否则回滚场景会误报升级成功）。"""
+        res = _run_harness(tmp_path, {"HARNESS_REGISTER_AT_SEC": 0, "HARNESS_WHOAMI": "offline",
+                                      "HARNESS_PROC_ALIVE": "1"},
+                           pre_log=["RuntimeAgent registered: ['old'] -> http://master"])
+        assert res["regOk"] is False, res["stdout"]
+        assert res["outcome"] == "rolled_back"
+        assert "Install complete!" not in res["stdout"]
+
+    def test_nonfatal_traceback_does_not_short_circuit_wait(self, tmp_path):
+        """Required#1：本轮新增的 Traceback（引擎探针失败等非致命）不再被当硬失败短路。"""
+        res = _run_harness(tmp_path, {"HARNESS_TRACEBACK_AT_SEC": 6, "HARNESS_REGISTER_AT_SEC": 36})
+        assert res["regOk"] is True, res["stdout"]
+        assert "stopping the wait early" not in res["stdout"]
+
+    def test_hard_failure_not_masked_by_master_heartbeat(self, tmp_path):
+        """Required#2：硬失败必须跳过主控交叉验证——老 agent 在 10s 容差窗内的心跳不得
+        把已失败的本轮翻成「已注册」并打印 Install complete!。"""
+        res = _run_harness(tmp_path, {"HARNESS_FAIL_AT_SEC": 9, "HARNESS_WHOAMI": "fresh"})
+        assert res["regOk"] is False, res["stdout"]
+        assert res["elapsed"] <= 12
+        assert res["outcome"] == "rolled_back"
+        assert "cross-check skipped (hard registration failure" in res["stdout"]
+        assert "Install complete!" not in res["stdout"]
