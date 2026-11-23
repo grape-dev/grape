@@ -35,7 +35,7 @@ FROZEN = {
         'faro.js': '8',
         'feedback-dialog.js': '50',
         'host-status.js': '1',
-        'im-channel.js': '56',
+        'im-channel.js': '57',
         'issues-view.js': '70',
         'knowledge-view.js': '49',
         'login-view.js': '2',
