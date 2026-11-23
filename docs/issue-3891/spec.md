@@ -31,7 +31,10 @@
    404 body 增量补 `error_code`（保留 `code`/`message`，向后兼容）。
 5. `/pipeline` 解析**只读**：不触发 `ensure_issue_task` 补建内部行（避免轮询写入放大），
    补建仍只在主资源 detail 路径发生（`backfill=True`）。
-6. 测试：新增 `tests/runtime/test_issue_3891_pipeline_shared_resolution.py`，覆盖
+6. 顺手修复同路径存量红测：`test_issue_667_detail_fallback` 断言的 `synced_by_fallback`
+   存在性标志此前只有死变量赋值、从未进入响应；本次在「刚经 VCS 核实并补建」分支恢复该标志
+   （仅该次响应出现，后续命中内部行不再出现）。
+7. 测试：新增 `tests/runtime/test_issue_3891_pipeline_shared_resolution.py`，覆盖
    编号 42/119–125 两端一致、真不存在 404 可判别、已登记 issue 不回归、`/pipeline` 不写库；
    既有 `test_issues_api.py::TestIssuePipeline` 保持通过（补 patch 防真实外呼）。
 
