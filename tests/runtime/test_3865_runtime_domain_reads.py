@@ -435,7 +435,7 @@ class TestA2AGateDegradeEndpoint:
     (svc, ("collect_knowledge_files",)),
     (wh, ("_has_active_a2a_event", "_active_a2a_event_seqs", "_queued_a2a_events",
           "_a2a_issue_cancelled", "_issue_exists_in_db",
-          "_resolve_cross_repo_issue_number")),
+          "_resolve_cross_repo_issue_number", "_duplicate_a2a_original_refs")),
 ])
 def test_read_paths_no_longer_touch_session_manager(mod, names):
     for name in names:

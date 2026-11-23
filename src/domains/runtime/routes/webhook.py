@@ -281,10 +281,12 @@ def _duplicate_a2a_original_refs(repo_key: str, existing_seq: int) -> dict:
     )
     evt = {"seq": existing_seq, "agent": "", "status": "",
            "issue_id": "", "created_at": ""}
+    # PR #2002 R2（Required）：events 属 runtime 域表，session_manager.db 在三库
+    # 拓扑下必 1146 → agent/status/created_at 静默为空，违反 #729 引用契约。
+    # 改走 cursor_for("runtime")；失败保留 unavailable 引用语义（拦截响应不阻断）。
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             c.execute(
                 "SELECT agent_type, status, issue_id, created_at FROM events "
                 "WHERE repo_key=? AND seq=? LIMIT 1",
@@ -295,7 +297,15 @@ def _duplicate_a2a_original_refs(repo_key: str, existing_seq: int) -> dict:
                    "status": row[1] or "", "issue_id": row[2] or "",
                    "created_at": row[3] or ""}
     except Exception as _re:
-        log.warning(f"A2A #729: load original event failed seq={existing_seq}: {_re}")
+        try:
+            from src.kernel import db_registry as _dbreg
+            _route = _dbreg.route_of("runtime")
+        except Exception as _rr:  # noqa: BLE001 - 仅日志字段
+            _route = f"unavailable:{type(_rr).__name__}"
+        log.warning(
+            f"A2A #729: load original event failed seq={existing_seq}: "
+            f"runtime domain read failed (route={_route} target_db=runtime "
+            f"pid={os.getpid()} host={_host_label()}): {_re}")
     pair = (load_segment_task_refs([repo_key], [existing_seq]) or {}).get(existing_seq)
     if pair:
         evt["task_ref"] = pair[0]
