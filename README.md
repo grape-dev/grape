@@ -25,6 +25,10 @@
   </p>
 
   <p>
+    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+  </p>
+
+  <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> ·
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/wechat.svg" width="18" height="18" alt="WeChat">&nbsp;WeChat</a>
   </p>
@@ -156,6 +160,16 @@ The first sign-in, platform-facing configuration and deployment are covered in *
 | --- | --- | --- |
 | **Configure OAuth app credentials** | GitCode / GitHub sign-in returns 400 (`not_configured`) and the buttons stay grey | Fill `client_id` / `client_secret` for both providers in `configs/oauth-providers.json`; the callback must be `https://<domain>/api/auth/callback/{gitcode,github}` |
 | **Configure the public base URL** | Falls back to `localhost:3000`; OAuth callbacks cannot reach the service and login/hosting fail | Set `server_base_url` and `webhook_url` in `configs/server-config.json` to the public address |
+
+## Deploy in production
+
+Prefer not to run a server? The **Deploy on Railway** button at the top of this page provisions a hosted
+instance straight from this repository — it builds the image, attaches the data volume and generates the
+public domain, and you fill in exactly one field (`LLM_API_KEY`). Third-party sign-in needs your own OAuth
+application credentials afterwards (admin console → `Config Center → Login channels`).
+
+Running it yourself is equally supported: see **[SETUP.HUMAN.md](SETUP.HUMAN.md)** and
+[docs/0-to-1-checklist.md](docs/0-to-1-checklist.md).
 
 ## Community
 
