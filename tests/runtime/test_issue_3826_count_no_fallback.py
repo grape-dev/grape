@@ -29,7 +29,7 @@ import pytest
 from src.domains.runtime.routes import issues as rt
 from src.kernel import db_registry
 
-_RUNTIME_DSN = "mysql://rt_user:S3cretPwd@10.0.0.9:3306/grape_prod_runtime?charset=utf8mb4"
+_RUNTIME_DSN = "mysql://rt_user:dummyDsnPass@10.0.0.9:3306/grape_prod_runtime?charset=utf8mb4"
 _PROCESS_DB = "grape_prod_mgmt"
 
 
@@ -189,7 +189,7 @@ def test_count_failure_log_carries_route_target_pid_host(monkeypatch, caplog):
     assert f"pid={os.getpid()}" in text, f"pid 缺失: {text}"
     assert f"host={socket.gethostname()}" in text, f"host 缺失: {text}"
     # 脱敏硬约束：日志会被集中采集/转贴，不得出现账号口令或完整 DSN
-    assert "S3cretPwd" not in text, "口令泄漏进日志"
+    assert "dummyDsnPass" not in text, "口令泄漏进日志"
     assert "rt_user" not in text, "账号泄漏进日志"
     assert "mysql://" not in text, "完整 DSN 泄漏进日志"
 
