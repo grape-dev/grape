@@ -55,10 +55,13 @@ git bundle create /tmp/issue-3383-polluted-head.bundle HEAD@{1}   # 在覆盖前
 1. **按 Issue 隔离分配 worktree**：任务派发时 workdir 一律为
    `grape-workspaces/{provider}/{owner}/{repo}/issues/<N>/<agent>`
    （`get_agent_workdir`，同 Issue 复用、跨 Issue 硬隔离）；
-2. **启动一致性校验（fail-fast）**：任务启动入口
-   （worker：`dependency_check.validate_task_dependencies`；
-   direct：`direct_executor._execute_agent_inner`）校验 workdir 中的
-   `issues/<N>` 编号与任务 Issue 编号一致，不一致立即中止并输出
-   含双方编号的显式错误（错误码 `WORKDIR_ISSUE_MISMATCH`），不静默继续；
+2. **启动一致性校验（fail-fast）**：worker 任务启动入口
+   `dependency_check.validate_task_dependencies`（第 6 项）调用
+   `worktree_guard.validate_workdir_issue_consistency`，校验 workdir 中的
+   `issues/<N>` 标识与任务 Issue 标识一致，不一致立即中止并输出含双方标识的
+   显式错误，不静默继续。
+   direct 路径（`direct_executor._execute_agent_inner`）不做该校验：其
+   workdir 由本任务 `issue_id` 经 `get_agent_workdir` 同源派生，不存在外部
+   错配入口；错配风险统一由 worker 派发入口拦截；
 3. 相关根因边界：worktree 静态预置错配见 Issue #3377（彼为配置错配，
    本条为并发争用，两者分别修复）。
