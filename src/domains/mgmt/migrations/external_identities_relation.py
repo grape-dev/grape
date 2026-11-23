@@ -15,8 +15,9 @@ Issue #3897 B 组：生产 `grape_prod_runtime.external_identities` 不存在（
 非 owner 进程内 `CREATE VIEW ... owner_schema.table` 会破坏「谁拥有谁写」边界，
 并由部署流程（迁移 → `domain_view_freshness.py --repair` → 重启）统一保证。
 
-失败语义：DDL 失败直接抛出（执行器约定「抛错=不盖章，下次启动重试」）；
-post_check 断言当前库存在同名关系（基表或视图）才盖章。
+失败语义：补列走 `_ensure_column(strict=True)`——DDL 所有降级分支失败直接抛出
+（执行器约定「抛错=不盖章，下次启动重试」，与 2026-11-06 issue.vcs_exists 事故教训对齐）；
+post_check 断言当前库存在同名关系（基表或视图），基表形态还需三列齐全才盖章。
 """
 from __future__ import annotations
 
@@ -49,23 +50,39 @@ def ensure_identity_relation(conn=None) -> None:
             c.execute(_EXTERNAL_IDENTITIES_DDL)
         if kind != "view":
             for col, ddl in COLUMNS:
-                ds._ensure_column(c, TABLE, col, ddl)
+                # strict=True（QA R2 Nit）：所有降级分支失败时 raise 而非只记
+                # _DDL_MANUAL_REVIEW 后正常返回——执行器约定「fn 正常返回=盖章」，
+                # 静默返回会把「列没建成」盖死成已完成（issue.vcs_exists 事故同态）。
+                ds._ensure_column(c, TABLE, col, ddl, strict=True)
         conn.commit()
 
 
 def verify_identity_relation(conn=None) -> None:
-    """后置校验：当前库必须存在 external_identities（基表或跨域视图），否则不盖章。"""
-    from src.domains.runtime.schema_probe import relation_kind
+    """后置校验：当前库必须存在 external_identities（基表或跨域视图），否则不盖章。
+
+    QA R2 Nit：基表形态还需 status/unbound_at/token_expires_at 三列齐全——
+    「表在、列缺」线上同样表现为查询该列 1054 静默失败，不能盖章；
+    视图形态的列是建视图时的快照、归部署流程（view_ddl_builder）管，
+    仅断言关系存在。
+    """
+    from src.domains.runtime.schema_probe import column_exists, relation_kind
     from src.kernel.config import log
     from src.kernel.session_manager import db
 
     if conn is None:
         conn = db
-    kind = relation_kind(conn.cursor(), TABLE)
+    c = conn.cursor()
+    kind = relation_kind(c, TABLE)
     if kind is None:
         raise RuntimeError(
             f"202611230005 post_check 未收敛：{TABLE} 在当前库不存在"
             f"（owner 库补表失败；非 owner 库需 scripts/domain_view_freshness.py --repair）")
+    if kind != "view":
+        missing = [col for col, _ in COLUMNS if not column_exists(c, TABLE, col)]
+        if missing:
+            raise RuntimeError(
+                f"202611230005 post_check 未收敛：{TABLE} 缺列 {missing}"
+                f"（补列失败未盖章，下次启动重试；MySQL 侧查 _DDL_MANUAL_REVIEW 清单）")
     log.info(f"202611230005 post_check 通过：{TABLE} 形态={kind}")
 
 
