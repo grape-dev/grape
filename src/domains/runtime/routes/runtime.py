@@ -4355,17 +4355,23 @@ def runtime_tags_probe_signal(body: RuntimeTagsProbeSignalBody,
     （防每轮刷爆），服务端按 host/reason 计数，`deploy/alerts.yml` 的
     `GrapeRuntimeTagsProbeFailing` 规则消费。承接失败只记日志不报错——告警链路故障
     不得影响 worker 探活主链路（worker 侧另有本地 JSONL 兜底落点）。
+
+    PR #2066 审查 Optional ③：契约外 reason **不再 400**——与 `observability`
+    「未知 reason 归 `unknown` 不丢数」口径统一（旧行为下新版本 worker 新增的 reason 会被
+    HTTP 层拒绝，只剩本地 JSONL 兜底，指标直接缺数）。
     """
     from src.domains.insight.observability import (RUNTIME_TAGS_PROBE_REASONS,
                                                    record_runtime_tags_probe_failure)
     reason = (body.reason or "").strip().lower()
-    if reason not in RUNTIME_TAGS_PROBE_REASONS:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid reason"})
     try:
         record_runtime_tags_probe_failure(body.host, reason, body.detail)
     except Exception as e:
         log.warning(f"runtime tags probe signal record failed: {e}")
-    log.warning(f"runtime tags probe failure signal: host={body.host or '?'} reason={reason} "
+    if reason not in RUNTIME_TAGS_PROBE_REASONS:
+        log.warning(f"runtime tags probe signal with reason outside the contract: "
+                    f"reason={reason or '?'} host={body.host or '?'} — counted as 'unknown'")
+    log.warning(f"runtime tags probe failure signal: host={body.host or '?'} reason={reason or '?'} "
+                f"raw_detail={(body.detail or '')[:200]} "
                 f"runtime_id={body.runtime_id or '-'} consecutive={body.consecutive} "
-                f"scene={body.scene or '-'} code={body.code or '-'} detail={(body.detail or '')[:200]}")
+                f"scene={body.scene or '-'} code={body.code or '-'}")
     return {"status": "ok"}

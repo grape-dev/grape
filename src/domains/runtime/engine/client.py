@@ -71,6 +71,9 @@ class RuntimeClient:
         self._uid_by_rid = {}    # runtime_id -> engine_uid（register 响应 / 本地持久化）
         self._v2_enabled = True  # 空白 404/405 判定对端为旧服务端后置 False（记忆，不再每轮撞 v2）
         self.last_register_detail = []
+        # Issue #4082：最近一次注册回包里被判定非法的 runtime id 原始值（逐条过滤后仍保留
+        # 合法 id；调用方据此把下次重注册提前，补齐错 id 的引擎）
+        self.last_register_invalid_ids: list[str] = []
         self._load_engine_uids()
 
     # ------------------------------------------------------------------
@@ -359,8 +362,10 @@ class RuntimeClient:
         self.last_register_detail = _detail
         # Issue #4082：注册回包必须回填**真实 id**——非法 id（0/None/"abc"）不再作为
         # runtime_ids 兜底。0 是非法 id，放行就会让后续探活/心跳拼出 /runtimes/0/*
-        # 恒 401（生产 15 台 worker 正是这条路径静默失败）。这里按「注册失败」返回空
-        # ids，调用方（_reregister/_register_failed）走退避重试注册，直到拿到真实 id。
+        # 恒 401（生产 15 台 worker 正是这条路径静默失败）。
+        # PR #2066 审查 Optional ①：**逐条过滤**，不因一个异常 id 把整响应判死——同响应里的
+        # 合法 id 照常回填（否则单个引擎错 id 会让全部引擎离线到下次注册成功）；非法项
+        # 仍作为「注册未完成」信号挂在 `last_register_invalid_ids`，由调用方缩短重注册间隔补齐。
         ids: list[int] = []
         invalid_ids: list[str] = []
         for r in _detail:
@@ -369,12 +374,12 @@ class RuntimeClient:
                 invalid_ids.append(str(r.get("id")))
             else:
                 ids.append(rid)
+        self.last_register_invalid_ids = invalid_ids
         if invalid_ids:
             err = missing_runtime_id_error(",".join(invalid_ids), context="register_reply")
             log.error(f"{RUNTIME_ID_MISSING} {err.message} — register reply carried "
-                      f"{len(invalid_ids)} invalid runtime id(s); treating registration as "
-                      f"failed (retry with backoff): {invalid_ids}")
-            return [], (data.get("probe_url") or "")
+                      f"{len(invalid_ids)} invalid runtime id(s); kept {len(ids)} valid id(s) "
+                      f"and scheduling re-register for the rest: {invalid_ids}")
         # Issue #1011：register 响应双带 {id, engine_uid} → uid 映射 + 本地持久化
         # （重启后 claim 不依赖服务端 id 记忆；旧服务端无 engine_uid 字段静默忽略）
         try:

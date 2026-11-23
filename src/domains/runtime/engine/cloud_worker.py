@@ -1094,9 +1094,34 @@ async def _refresh_templates(client, config):
             # register 返回 ids 与 _changed 顺序一致；只回填「新增」条目
             # （老条目 rid 已在心跳列表，重复 append 会致心跳重复）
             _added_names = {r["name"] for r in _changed} - _old_names
-            for r, rid in zip(_changed, _ids or []):
-                if r["name"] in _added_names:
-                    _new_rid_by_name[r["name"]] = rid
+            # Issue #4082（PR #2066 审查 Optional ①）：回包里若有非法 id，client 已逐条过滤，
+            # `_ids` 不再与 `_changed` 位置一一对应——此时改按回包明细的 name 配对，避免 zip 错位
+            # 把 rid 配给别的引擎（老行为是整包失败，不会错配；新行为必须保证不错配）。
+            from src.domains.runtime.engine.agent import _register_partial_ids
+            from src.domains.runtime.engine.runtime_id_guard import parse_runtime_id
+            _partial = _register_partial_ids(client)
+            if _partial:
+                _detail = getattr(client, "last_register_detail", None)
+                _rid_by_name = {}
+                for _d in (_detail if isinstance(_detail, (list, tuple)) else []):
+                    if not isinstance(_d, dict):
+                        continue
+                    _rid = parse_runtime_id(_d.get("id"))
+                    _nm = str(_d.get("name") or "").strip().lower()
+                    if _nm and _rid is not None:
+                        _rid_by_name[_nm] = _rid
+                _added_lc = {str(n).strip().lower() for n in _added_names}
+                for r in _changed:
+                    _nm = str(r["name"]).strip().lower()
+                    if _nm in _added_lc and _nm in _rid_by_name:
+                        _new_rid_by_name[r["name"]] = _rid_by_name[_nm]
+                log.warning(f"template refresh: register reply carried invalid runtime id(s) "
+                            f"{_partial}; mapped new rids by name and will re-register to "
+                            f"backfill the rest")
+            else:
+                for r, rid in zip(_changed, _ids or []):
+                    if r["name"] in _added_names:
+                        _new_rid_by_name[r["name"]] = rid
 
         if _deleted:
             _offline_runtimes = [{"name": n, "version": "", "healthy": False,

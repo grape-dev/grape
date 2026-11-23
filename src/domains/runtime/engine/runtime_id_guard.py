@@ -13,7 +13,9 @@
    带 host/context/原始值，供日志与上报甄别「未注册 vs 配置缺失」；
 3. `ProbeFailureReporter` + `tag_probe_signal_sink`：标签探活失败按 host/reason 上报主控
    （服务端计 `grape_runtime_tags_probe_failure_total{host,reason}`，`deploy/alerts.yml`
-   的 `GrapeRuntimeTagsProbeFailing` 规则消费）。**连续失败达阈值才发一次**，防每轮刷爆。
+   的 `GrapeRuntimeTagsProbeFailing` 规则消费）。**连续失败达阈值才发一次**，防每轮刷爆；
+   **一个实例只代表一个引擎（一条 rid）**——多引擎主机上共享实例会被同轮其它引擎的成功清零，
+   连败永远到不了阈值；契约外 reason（`http_403` 等）归 `other` 桶计数并留日志，不再静默。
 
 口径与服务端 `src/domains/insight/observability` 为自包含双实现（worker 包闭包内没有
 `src.domains.insight`），由 `tests/runtime/test_issue_4082_runtime_id_guard.py` 锁定。
@@ -31,9 +33,14 @@ log = logging.getLogger("devops-bot")
 # 结构化错误码（日志/信号/告警共用同一口径，禁止散落字符串）
 RUNTIME_ID_MISSING = "RUNTIME_ID_MISSING"
 
+# 契约外失败（`http_403`/`http_422` 等）的归并桶：不再静默丢弃——计入连败、照样上报，
+# 真实 reason 随信号（`raw_reason`）与日志带出，服务端按 other 计数与告警。
+OTHER_REASON = "other"
+
 # 探活失败归因口径：未注册(id_missing) / 无权限(unauthorized) / 行已删(not_found) /
-# 已注册但无标签(no_tags)。与服务端 RUNTIME_TAGS_PROBE_REASONS 同口径（漂移看护）。
-PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags")
+# 已注册但无标签(no_tags) / 契约外失败(other)。与服务端 RUNTIME_TAGS_PROBE_REASONS
+# 同口径（漂移看护）。
+PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags", OTHER_REASON)
 
 # 网络类失败不进标签探活指标（连通性由心跳指标负责），仅日志可诊断
 NETWORK_REASON = "network"
@@ -181,38 +188,65 @@ class ProbeFailureReporter:
     为什么不在每次失败都发：claim 循环每轮每引擎都探一次标签，无标签是**稳态**
     （已注册但未配置标签），逐次上报会把指标打成噪声。阈值（默认 3）+ 每 N 次重复
     既能证明「连续失败」，又能把噪声压到可告警的量级。
+
+    **一个实例只代表一个引擎（一条 `rid`）**：多引擎 worker 上多个引擎同轮探活，共享
+    一个实例时任一引擎的成功（`observe("")`）会把其它引擎的连败清零，「1 失败 + 1 成功」
+    交替就永远到不了阈值（告警对多引擎主机失效）。实例的创建/回收由调用方按 rid 维护
+    （`agent.tags_probe_reporter_for` / `agent.prune_tags_probe_reporters`）。
     """
 
     def __init__(self, *, threshold: int | None = None, emit_every: int | None = None,
-                 sink=None, host: str = "", scene: str = ""):
+                 sink=None, host: str = "", scene: str = "", rid: int | None = None):
         self.threshold = max(1, int(threshold if threshold is not None else _alert_after()))
         self.emit_every = max(1, int(emit_every if emit_every is not None else self.threshold))
         self.sink = sink if sink is not None else tag_probe_signal_sink()
         self.host = host or socket.gethostname()
         self.scene = scene
+        self.rid = rid
         self.consecutive = 0
         self.last_reason = ""
+        self.last_raw_reason = ""
         self.emitted = 0
+        self._logged_reasons: set[str] = set()
+
+    def _log_reason_once(self, reason: str, why: str):
+        """同一 reason 每个实例只出声一次（既不静默，也不把日志刷成噪声，最多记 64 种）。"""
+        if reason in self._logged_reasons or len(self._logged_reasons) >= 64:
+            return
+        self._logged_reasons.add(reason)
+        log.warning(f"runtime tags probe: {why} (rid={self.rid if self.rid is not None else '-'} "
+                    f"reason={reason} host={self.host})")
 
     def observe(self, reason: str) -> bool:
         """记录一次探活结果；返回 True 表示本次应发信号。
 
         - 空 reason（成功）→ 计数清零，返回 False；
-        - 网络类失败 → 不计连续失败（连通性另有心跳指标），返回 False；
-        - 其它 → 连续计数 +1，命中阈值/重复窗口才发信号。
+        - 网络类失败（`network`）→ 不计连续失败（连通性另有心跳指标），但每个实例留一条日志；
+        - 契约内 reason → 连续计数 +1，命中阈值/重复窗口才发信号；
+        - 契约外 reason（`http_403`/`http_422`…）→ 归 `other` 桶计入连败并照样上报，
+          原始 reason 落一次日志 + 随信号带出（`raw_reason`），不再静默丢弃。
         """
         reason = (reason or "").strip().lower()
         if not reason:
             if self.consecutive:
                 log.info(f"runtime tags probe recovered after {self.consecutive} consecutive "
-                         f"failure(s) host={self.host} last_reason={self.last_reason or '-'}")
+                         f"failure(s) host={self.host} rid={self.rid if self.rid is not None else '-'}"
+                         f" last_reason={self.last_reason or '-'}")
             self.consecutive = 0
             self.last_reason = ""
+            self.last_raw_reason = ""
             return False
-        if reason == NETWORK_REASON or reason not in PROBE_REASONS:
+        if reason == NETWORK_REASON:
+            # 连通性由心跳指标负责，这里不计连败——但「完全无痕」同样是问题，留一条线索
+            self._log_reason_once(reason, "network failure not counted (connectivity is "
+                                          "tracked by the heartbeat metric)")
             return False
+        bucket = reason if reason in PROBE_REASONS else OTHER_REASON
+        if bucket == OTHER_REASON and reason != OTHER_REASON:
+            self._log_reason_once(reason, f"non-contract failure counted as '{OTHER_REASON}'")
         self.consecutive += 1
-        self.last_reason = reason
+        self.last_reason = bucket
+        self.last_raw_reason = reason
         due = self.consecutive == self.threshold or \
             (self.consecutive > self.threshold and
              (self.consecutive - self.threshold) % self.emit_every == 0)
@@ -222,11 +256,14 @@ class ProbeFailureReporter:
         payload = {
             "host": self.host,
             "scene": self.scene,
-            "reason": reason,
+            "reason": bucket,
+            "raw_reason": "" if bucket == reason else reason,
+            "runtime_id": "" if self.rid is None else str(self.rid),
             "consecutive": self.consecutive,
-            "code": RUNTIME_ID_MISSING if reason == "id_missing" else "",
+            "code": RUNTIME_ID_MISSING if bucket == "id_missing" else "",
             "detail": f"runtime tags probe failed {self.consecutive} times in a row "
-                      f"(reason={reason}, host={self.host})",
+                      f"(reason={bucket}"
+                      f"{'' if bucket == reason else f', raw_reason={reason}'}, host={self.host})",
         }
         try:
             self.sink(payload)
@@ -235,6 +272,6 @@ class ProbeFailureReporter:
         return True
 
     def snapshot(self) -> dict:
-        return {"host": self.host, "consecutive": self.consecutive,
-                "last_reason": self.last_reason, "emitted": self.emitted,
-                "threshold": self.threshold}
+        return {"host": self.host, "rid": self.rid, "consecutive": self.consecutive,
+                "last_reason": self.last_reason, "last_raw_reason": self.last_raw_reason,
+                "emitted": self.emitted, "threshold": self.threshold}

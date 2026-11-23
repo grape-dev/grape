@@ -12,6 +12,10 @@
 | 6 | 指标承接 | `test_probe_failure_signal_metric` | `observability.record_runtime_tags_probe_failure` + `POST /runtime-tags-probe/signal` |
 | 7 | 连续失败告警 | `test_alerts_rule_present` | `deploy/alerts.yml` `GrapeRuntimeTagsProbeFailing` |
 | 8 | 文档 | — | `docs/issue-4082/{spec,plan,task}.md` |
+| 9 | 多引擎 reporter 隔离（PR #2066 审查 Required） | `test_probe_reporters_are_isolated_per_rid` / `test_two_engines_with_different_reasons_both_alert` / `test_prune_reporters_drops_stale_rids_and_keeps_live_counts` | `agent.tags_probe_reporter_for` / `prune_tags_probe_reporters`，主循环改按 rid 建 reporter |
+| 10 | 注册部分回填（审查 Optional ①） | `test_register_keeps_valid_ids_when_some_are_invalid` / `test_reregister_cycle_schedules_retry_on_partial_ids` | `client.register` 逐条过滤 + `_PARTIAL_ID_REREGISTER_BACKOFF` |
+| 11 | 契约外 reason（审查 Optional ②） | `test_non_contract_reason_counted_as_other_and_logged_once` / `test_network_reason_logged_but_not_counted` | `ProbeFailureReporter` 归 `other` 桶 + 每 reason 一次日志 |
+| 12 | 信号端点 reason 口径统一（审查 Optional ③） | `test_probe_failure_signal_endpoint_records_metric`（未知 reason → 200 + unknown 计数） | `record_runtime_tags_probe_failure` 兜底口径，去掉 400 |
 
 ## 验证命令
 

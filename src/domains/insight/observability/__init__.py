@@ -551,11 +551,14 @@ def record_contract_guard_failure(outcome: str, detail: str = ""):
 # - unauthorized：401（凭据/归属不对，**不是**凭据吊销）；
 # - not_found：404（runtime 行已被删或重建窗口）；
 # - no_tags：已注册但一个标签都没有（引擎派发依据为空，需运维补标签）。
+# - other：契约外失败（`http_403`/`http_422` 等），worker 侧归并、原始 reason 随信号
+#   `raw_reason`/detail 与日志带出——既不让非预期失败静默，也不给指标加高基数标签。
+# - unknown：连 worker 都没能归类的 reason（服务端兜底，不丢数，但不参与告警以避噪声）。
 # 与 worker `src/domains/runtime/engine/runtime_id_guard.PROBE_REASONS` 为自包含双实现
 # （worker 包闭包内没有 insight 域），口径由 Issue #4082 测试锁定。
 RUNTIME_TAGS_PROBE_FAILURES_METRIC = "grape_runtime_tags_probe_failure_total"
 
-RUNTIME_TAGS_PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags")
+RUNTIME_TAGS_PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags", "other")
 
 RUNTIME_TAGS_PROBE_FAILURES = Counter(
     RUNTIME_TAGS_PROBE_FAILURES_METRIC,
@@ -563,7 +566,8 @@ RUNTIME_TAGS_PROBE_FAILURES = Counter(
     "id_missing = worker has no valid runtime id (registration not backfilled), "
     "unauthorized = 401 on probe (config/ownership, not revocation), "
     "not_found = runtime row deleted or in re-derive window, "
-    "no_tags = registered engine without any claimable tags.",
+    "no_tags = registered engine without any claimable tags, "
+    "other = non-contract failure (e.g. HTTP 403/422) bucketed by the worker.",
     ["host", "reason"],
     registry=registry,
 )

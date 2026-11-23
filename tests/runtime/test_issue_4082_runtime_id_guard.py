@@ -516,7 +516,7 @@ def test_reregister_cycle_schedules_retry_on_partial_ids():
 
     state = asyncio.run(agent_mod._reregister_cycle(
         _C(), [{"name": "coding", "installed": True}], "dev",
-        now=1000.0, last_reregister=1000.0, last_fast_scan=1000.0,
+        now=1600.0, last_reregister=1000.0, last_fast_scan=1000.0,
         reregister_interval=300, fast_interval=15,
         reregister_fn=_fake_rereg, probe_fn=lambda *a, **k: None))
 
@@ -524,4 +524,4 @@ def test_reregister_cycle_schedules_retry_on_partial_ids():
     assert state["partial_invalid_ids"] == ["0"]
     assert 0 < agent_mod._PARTIAL_ID_REREGISTER_BACKOFF < 300
     # 下次重注册 = now + backoff（而非等满 300s 周期）
-    assert state["last_reregister"] == 1000.0 - 300 + agent_mod._PARTIAL_ID_REREGISTER_BACKOFF
+    assert state["last_reregister"] == 1600.0 - 300 + agent_mod._PARTIAL_ID_REREGISTER_BACKOFF

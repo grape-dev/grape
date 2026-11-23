@@ -16,7 +16,7 @@
 
 ```python
 RUNTIME_ID_MISSING = "RUNTIME_ID_MISSING"
-PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags")
+PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags", "other")
 
 def parse_runtime_id(raw) -> int | None      # 仅接受正整数（bool/浮点/字符串数字均收敛）
 def is_valid_runtime_id(raw) -> bool
@@ -40,8 +40,10 @@ def tag_probe_signal_sink(...)               # 复用 contract_guard.http_alert_
   - **401 不再抛 `CredentialRevokedError`**（标签探活 401 是配置/归属问题，不是凭据吊销，
     否则 worker 会被误杀；凭据吊销由 heartbeat/register 判定）。
   - `get_tags()` 保留，改为 `probe_tags` 的薄包装（返回 tags），兼容既有调用方/测试 Fake。
-- `register()`：只接受正整数 id；出现非法 id → 落 `RUNTIME_ID_MISSING` 结构化日志并返回 `([], probe_url)`，
-  让调用方按「有引擎但无 id」走失败退避重试注册（去 0 兜底）。
+- `register()`：只接受正整数 id（去 0 兜底）；**逐条过滤**——部分 id 非法时保留同响应里的合法 id
+  并返回 `(合法 ids, probe_url)`，非法项记 `RUNTIME_ID_MISSING` 日志 + `last_register_invalid_ids`，
+  由 `_reregister_cycle` 把下次重注册提前到 `RUNTIME_PARTIAL_ID_REREGISTER_BACKOFF`（默认 60s）后补齐
+  （PR #2066 审查 Optional ①：不再因单个异常 id 丢弃全部合法 id）。
 - `heartbeat()`：过滤非法 `runtime_ids`；过滤后为空 → 不发请求，落 `RUNTIME_ID_MISSING` 并返回 `None`。
 
 ### 2.3 `agent.py` 主循环
@@ -50,7 +52,11 @@ def tag_probe_signal_sink(...)               # 复用 contract_guard.http_alert_
   - `reason == ""` → 正常（连续失败计数清零）；
   - 其它 reason → 连续失败 +1，达到阈值（`RUNTIME_TAGS_PROBE_ALERT_AFTER`，默认 3）时
     发一次信号（`tag_probe_signal_sink`）+ ERROR 日志；每再累计 N 次再发一次（防刷）；
-  - `id_missing` → 立即触发 `_reregister_cycle(force=True)`（退避重试注册，避免每轮空转）。
+  - `id_missing` → 立即触发 `_reregister_cycle(force=True)`（退避重试注册，避免每轮空转）；
+  - 契约外 reason（`http_403` 等）→ 归 `other` 桶计入连败并上报（原始 reason 落一次日志）；
+  - **连败计数按 rid 隔离**（`tags_probe_reporter_for` / `prune_tags_probe_reporters`）：一个
+    reporter 只代表一个引擎，重注册换 id 时回收消失 rid 的实例——否则同轮其它引擎的成功会把
+    本引擎的连败清零，多引擎主机上告警永不触发（PR #2066 审查 Required）。
 - `RuntimeIdMissingError` 在 claim 路径上单独捕获：结构化日志 + 计一次 `id_missing` + force 重注册。
 
 ## 3. 服务端（`src/domains/runtime/routes/`）
@@ -67,15 +73,19 @@ def tag_probe_signal_sink(...)               # 复用 contract_guard.http_alert_
 
 - `observability/__init__.py` 新增 `RUNTIME_TAGS_PROBE_FAILURES = Counter("grape_runtime_tags_probe_failure_total", ..., ["host","reason"])`
   与 `record_runtime_tags_probe_failure(host, reason)`（未知 reason → `unknown`，不丢数）。
+- reason 口径 = `id_missing` / `unauthorized` / `not_found` / `no_tags` / `other`（契约外失败归并桶，
+  原始 reason 随 `raw_reason`/detail 与日志带出）。
 - `runtime.py` 新增 `POST /runtime-tags-probe/signal`（rta_ 凭据，worker 协议端点）：
-  校验 `reason` 合法（否则 400），承接后计数 + 记录 host 日志。
+  **不因 reason 非法而拒收**——未知 reason 与 `record_runtime_tags_probe_failure` 同口径归 `unknown`
+  计数并留 WARNING（PR #2066 审查 Optional ③：旧行为 400 会让新版本 worker 的新 reason 只落本地
+  JSONL、指标缺数）。
 
 ### 3.3 告警
 
 - `deploy/alerts.yml` 新增 `GrapeRuntimeTagsProbeFailing`：
   `sum by (host, reason) (increase(grape_runtime_tags_probe_failure_total[15m])) >= 3`，`for: 5m`；
   annotations 给出「未注册(id_missing) / 凭据或归属不对(unauthorized) / 行已删(not_found) /
-  已注册但无标签(no_tags)」的排查指引。
+  已注册但无标签(no_tags) / 契约外失败(other)」的排查指引；`reason="unknown"`（服务端兜底桶）只计数不告警。
 
 ## 4. 存量 15 台主机（运维）
 

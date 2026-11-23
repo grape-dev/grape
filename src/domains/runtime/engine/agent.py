@@ -296,6 +296,12 @@ _FAST_DISCOVER_INTERVAL = float(os.environ.get("RUNTIME_FAST_DISCOVER_INTERVAL",
 # 定期重注册间隔（防服务端重启后 runtime id 静默失效）
 _REREGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
 
+# Issue #4082（PR #2066 审查 Optional ①）：注册回包部分 id 非法时不把整响应判死——
+# 合法 id 已上线，但**缩短下次重注册**（不等满周期）以尽快补齐错 id 的引擎；
+# 60s 远大于主循环周期又不至于变成注册风暴。
+_PARTIAL_ID_REREGISTER_BACKOFF = float(
+    os.environ.get("RUNTIME_PARTIAL_ID_REREGISTER_BACKOFF", "60"))
+
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
 #   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
@@ -1267,6 +1273,16 @@ def _fast_install_triggered(installed, scan_fn=None) -> list:
     return _new_engines(installed, _scan)
 
 
+def _register_partial_ids(client) -> list:
+    """读取最近一次 register 回包里被逐条过滤掉的非法 id（Issue #4082 / PR #2066 审查 Optional ①）。
+
+    测试 Fake / 旧客户端没有该属性（MagicMock 取到的是别的对象）→ 返回空表，
+    调用方按「整包注册成功」的旧语义处理。
+    """
+    raw = getattr(client, "last_register_invalid_ids", None)
+    return [str(x) for x in raw] if isinstance(raw, (list, tuple, set)) else []
+
+
 async def _reregister_cycle(client, installed, device_name, *, now, last_reregister,
                             last_fast_scan, cli_version: str = "", force: bool = False,
                             fast_interval: float | None = None,
@@ -1287,6 +1303,7 @@ async def _reregister_cycle(client, installed, device_name, *, now, last_reregis
     _rr_iv = _REREGISTER_INTERVAL if reregister_interval is None else reregister_interval
     _state = {"did": False, "triggered_by": "", "ok": True,
               "runtime_ids": None, "engine_by_rid": None, "installed": installed,
+              "partial_invalid_ids": [],
               "last_reregister": last_reregister, "last_fast_scan": last_fast_scan}
 
     _periodic = (now - last_reregister) >= _rr_iv
@@ -1308,13 +1325,62 @@ async def _reregister_cycle(client, installed, device_name, *, now, last_reregis
         runtime_ids, engine_by_rid, _installed = _rr
         _state.update({"runtime_ids": runtime_ids, "engine_by_rid": engine_by_rid,
                        "installed": _installed})
+        # Issue #4082（PR #2066 审查 Optional ①）：回包里部分 id 非法 → 合法 id 已照常
+        # 上线，但把下次重注册提前到 backoff 后（不停等满周期），尽快补齐缺 id 的引擎。
+        _partial = _register_partial_ids(client)
+        _state["partial_invalid_ids"] = _partial
+        if _partial:
+            log.warning(f"register reply carried {len(_partial)} invalid runtime id(s) {_partial}; "
+                        f"kept valid ids {runtime_ids}, re-registering in "
+                        f"{min(_rr_iv, _PARTIAL_ID_REREGISTER_BACKOFF):.0f}s to backfill them")
         _probe = probe_fn or _probe_after_reregister
         _probe(installed, _installed)
     else:
         _state["ok"] = False
     _state["last_reregister"] = now
     _state["last_fast_scan"] = now
+    if _state.get("partial_invalid_ids"):
+        # 部分回填：把「下次周期重注册到期时刻」提前到 backoff 之后（见常量注释）
+        _state["last_reregister"] = now - _rr_iv + min(_rr_iv, _PARTIAL_ID_REREGISTER_BACKOFF)
     return _state
+
+
+def tags_probe_reporter_for(reporters: dict, rid, *, scene: str = "", make=None):
+    """取（或创建）**该 rid 专属**的标签探活连败上报器（Issue #4082 / PR #2066 审查）。
+
+    为什么必须按 rid 隔离：`_run_loop` 一轮里对所有引擎各探一次标签，`ProbeFailureReporter`
+    的连败计数是「连续失败才告警」的唯一依据。共享一个实例时，同一轮里**任一引擎成功**
+    的 `observe("")` 会把其它引擎的连败清零——多引擎主机上「1 个引擎失败 + 1 个引擎成功」
+    交替出现，失败引擎的计数永远回到 0，达不到阈值，`GrapeRuntimeTagsProbeFailing`
+    告警对多引擎主机完全失效。
+
+    `reporters` 由调用方按 rid 持有；`make` 仅用于测试注入（返回已配置好的 reporter）。
+    """
+    rep = reporters.get(rid)
+    if rep is None:
+        if make is not None:
+            rep = make()
+        else:
+            from src.domains.runtime.engine.runtime_id_guard import ProbeFailureReporter
+            rep = ProbeFailureReporter(scene=scene)
+        if getattr(rep, "rid", None) is None:
+            rep.rid = rid       # 信号里带 rid，多引擎主机可定位到具体引擎
+        reporters[rid] = rep
+    return rep
+
+
+def prune_tags_probe_reporters(reporters: dict, live_ids) -> list:
+    """回收已消失 rid 的上报器（重注册换 id 后调用），返回被回收的 rid 列表。
+
+    - 防字典无界增长（云 worker 模板反复刷新 id）；
+    - 旧 rid 的连败计数随实例一起丢弃，不给已下线的引擎补发告警；
+    - **存活 rid 的计数保留**——别的 rid 重注册/成功不得清零它（这正是共享单例的缺陷）。
+    """
+    live = {str(x) for x in (live_ids or [])}
+    dropped = [rid for rid in list(reporters) if str(rid) not in live]
+    for rid in dropped:
+        reporters.pop(rid, None)
+    return dropped
 
 
 def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "") -> bool:
@@ -1323,11 +1389,16 @@ def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "")
     - 成功 → 清零连续失败计数；
     - no_tags / unauthorized / not_found → WARNING/ERROR 日志（打掉「静默为空」），
       连续失败达阈值（默认 3）时按 host/reason 上报主控指标并告警（节流防刷）；
+    - 契约外 reason（`http_403`/`http_422` 等）→ 归 reporter 的 `other` 桶计入连败并告警，
+      这里补一条带原始 reason 的日志；
     - id_missing → ERROR + 结构化 `RUNTIME_ID_MISSING`，返回 True 让调用方退避重试注册。
 
     为什么归因而不是简单 `except: tags=[]`：无标签是**稳态**（已注册但未配置），
     401 是配置/归属问题，两者都需要显式可观测，而不是被吞成空列表后表现为
     「runtime 在线但永远不派单」。
+
+    ⚠️ `reporter` 必须是**该 rid 专属**实例（见 `tags_probe_reporter_for`）：共享实例会让
+    同轮其它引擎的成功把本引擎的连败清零，多引擎主机上告警就永远不触发。
     """
     if not reason:
         reporter.observe("")
@@ -1348,6 +1419,14 @@ def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "")
         elif reason == "not_found":
             log.warning(f"runtime tags probe not_found: rid={rid} (runtime row deleted or in "
                         f"re-derive window)")
+        else:
+            # PR #2066 审查 Optional ②：契约外失败不静默——归 other 桶计数，达阈值时带原始
+            # reason 出声（首次失败已由 reporter 的 _log_reason_once 记过，不重复刷）
+            if due:
+                log.warning(f"runtime tags probe rid={rid} engine={engine_name or '-'} kept "
+                            f"failing with non-contract reason={reason} "
+                            f"(counted as '{reporter.last_reason}', "
+                            f"{reporter.consecutive} in a row)")
     if due:
         log.error(f"runtime tags probe failed {reporter.consecutive} times in a row "
                   f"(rid={rid} engine={engine_name or '-'} reason={reason} host={reporter.host}) "
@@ -4102,11 +4181,16 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     last_reregister = asyncio.get_running_loop().time()
     last_fast_discover = last_reregister
     engine_by_rid = engine_by_rid or {}
-    # Issue #4082：标签探活连续失败上报器（按 host/reason，阈值内不出声防刷）。
+    # Issue #4082：标签探活连续失败上报器——**每个 rid 一个**（阈值内不出声防刷）。
     # 无标签是稳态、401 是配置问题、id_missing 是注册态缺失——三者都要显式可观测。
-    from src.domains.runtime.engine.runtime_id_guard import ProbeFailureReporter
-    _tags_probe_reporter = ProbeFailureReporter(
-        scene=(os.environ.get("GRAPE_SCENE_ID") or "").strip())
+    # ⚠️ 不能用一个共享实例：同轮任一引擎成功探活会把其它引擎的连败清零，多引擎主机上
+    # 告警永远不触发（PR #2066 审查 Required）。创建/回收见 tags_probe_reporter_for /
+    # prune_tags_probe_reporters。
+    _tags_probe_scene = (os.environ.get("GRAPE_SCENE_ID") or "").strip()
+    _tags_probe_reporters: dict = {}
+
+    def _tags_probe_reporter(rid):
+        return tags_probe_reporter_for(_tags_probe_reporters, rid, scene=_tags_probe_scene)
 
     # 自动升级状态
     pending_upgrade = False
@@ -4151,6 +4235,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 engine_by_rid = _rrc["engine_by_rid"]
             installed = _rrc["installed"]
             heartbeat_fail_streak = 0
+            # 重注册换过 id：回收消失 rid 的探活上报器（存活 rid 的连败计数保留）
+            prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
@@ -4182,7 +4268,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 except Exception as _pe:
                     _db_tags, _probe_reason = [], "network"
                     log.warning(f"runtime tags probe rid={rid} error: {_pe}")
-                if _handle_tags_probe_result(_tags_probe_reporter, rid, _probe_reason,
+                if _handle_tags_probe_result(_tags_probe_reporter(rid), rid, _probe_reason,
                                              engine_by_rid.get(rid, "")):
                     _reregister_due = True
                 if _probe_reason == "id_missing":
@@ -4212,7 +4298,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 if isinstance(e, RuntimeIdMissingError):
                     # Issue #4082：claim/claim_by_tag 守卫命中（非法 id 零 HTTP）——
                     # 归因为 id_missing 并标记本轮结束后强制重注册（退避）
-                    _handle_tags_probe_result(_tags_probe_reporter, rid, "id_missing",
+                    _handle_tags_probe_result(_tags_probe_reporter(rid), rid, "id_missing",
                                               engine_by_rid.get(rid, ""))
                     _reregister_due = True
                     continue
@@ -4532,7 +4618,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 installed = _imrc["installed"]
                 last_reregister = _imrc["last_reregister"]
                 last_fast_discover = _imrc["last_fast_scan"]
-                _tags_probe_reporter.observe("")   # 取回 id：探活连续失败计数清零
+                # 取回 id：回收已消失 rid 的上报器（旧连败随实例丢弃；**存活 rid 的计数保留**，
+                # 别的引擎重注册不得清零本引擎的连败——共享单例正是这个缺陷）。
+                prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
             else:
                 _id_backoff = min(30 * (2 ** max(0, heartbeat_fail_streak)), 300)
                 log.warning(f"re-register for missing runtime id failed, "
@@ -4602,6 +4690,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     heartbeat_fail_streak = 0
                     last_reregister = _hbrc["last_reregister"]
                     last_fast_discover = _hbrc["last_fast_scan"]
+                    prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
                 else:
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
