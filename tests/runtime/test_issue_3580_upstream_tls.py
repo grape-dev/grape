@@ -35,8 +35,15 @@ def cards(monkeypatch):
     }
     monkeypatch.setattr("src.domains.runtime.vcs.platform_card.get_platform_card",
                         lambda p: cards.get(p))
+    # 端口面两个符号都要打桩：`policy_for` 走的是 `kernel.ports.vcs_cards`，
+    # 不是 domains 模块。只打 list_vcs_platforms 时，get_platform_card 仍会落回
+    # 端口绑定——端口在本文件之前被别的用例解绑/替换过就抛 PortNotBound，被
+    # `policy_for` 吞成 ("", True)，于是全量跑时本文件的断言假红、单文件跑全绿
+    # （P2 测试隔离：`tests/kernel/test_upstream_policy_cache_ttl.py` 之后即可复现）。
     monkeypatch.setattr("src.kernel.ports.vcs_cards.list_vcs_platforms",
                         lambda: list(cards.keys()))
+    monkeypatch.setattr("src.kernel.ports.vcs_cards.get_platform_card",
+                        lambda p: cards.get(p))
     uh.reset_cache()
     yield cards
     uh.reset_cache()
