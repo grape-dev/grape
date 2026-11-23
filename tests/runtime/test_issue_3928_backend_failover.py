@@ -189,3 +189,16 @@ def test_non_backend_failure_releases_half_open(monkeypatch):
         assert until == "" and fail_count == 0 and half == 0
     finally:
         _cleanup(cid)
+
+
+def test_backend_failure_classification():
+    assert backend_failover.is_backend_unavailable_error(
+        "engine exit_code=-1, errors: codearts not found")
+    assert backend_failover.is_backend_unavailable_error(
+        "engine startup failed: [Errno 2] No such file or directory: 'codearts'")
+    assert backend_failover.is_backend_unavailable_error(
+        "codearts engine startup failed: serve exited 1")
+    assert not backend_failover.is_backend_unavailable_error(
+        "tests failed: 2 assertions")
+    assert not backend_failover.is_backend_unavailable_error(
+        "skill package not found")

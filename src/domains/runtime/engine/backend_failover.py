@@ -31,7 +31,9 @@ def is_backend_unavailable_error(text: str) -> bool:
         return False
     if is_missing_cli_error(s):
         return True
-    return bool(_STARTUP_RE.search(s) and is_missing_cli_error(s))
+    # 引擎启动器/pre_exec 明确失败（spawn failed / engine startup failed）：换健康
+    # 同类型实例通常可恢复（缺二进制、本机资源/配置坏）；业务失败不走本通道。
+    return bool(_STARTUP_RE.search(s))
 
 
 def _db():

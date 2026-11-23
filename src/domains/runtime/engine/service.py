@@ -2413,15 +2413,17 @@ def _has_verified_executor(probe_status: str, worker_version: str,
                            backend_status: str = "") -> bool:
     """引擎是否有可信的执行器（可安全参与任务认领）。
 
-    本机 CLI 探测注册的引擎 worker_version 为空；在探活通过（probe_status=ok）
-    之前它们只是"展示用"条目，认领后任务会零输出挂死（event seq=9491 事故）。
+    本机 CLI 探测注册的引擎 worker_version 为空；在探活通过之前它们只是"展示用"
+    条目，认领后任务会零输出挂死（event seq=9491 事故）。
 
     本机直连（credential_id=0）例外口径（Issue #592 对齐 origin/weekly-10）：
     本机探活结果**不落库**（save_agent_runtimes 只写 installed/version/healthy，
     probe_status 仅由远端 worker 上报写入），因此本机行的 probe_status 恒为 pending。
-    若仍按 probe_status 判定，闸门会永久拒领所有本机引擎（实测 95k+ 条
-    "has no verified executor ... skip claiming"）。改为按 installed+healthy 判定：
-    既放行真实可用的本机引擎，也保留「未安装 / 探活失败(healthy=0) 不得认领」的 9491 保护。
+    按 installed+healthy 判定：放行真实可用的本机引擎，保留「未安装 / 探活失败」保护。
+
+    Issue #3928：probe_status 的 fail/failed/spawn_failed/model_unreachable 与
+    backend_status 的 degraded/unavailable、healthy=0 一律拒绝认领（worker_version
+    不再短路放行）；pending/unknown 保留旧兼容，避免老 worker 全量停摆。
     """
     # Issue #3928：后端能力为 degraded/unavailable → 认领即失败，必须先挡在闸门外。
     # 同时收紧 #2133 的 probe 黑名单：worker 实际上报 ``fail``（不是 ``failed``），

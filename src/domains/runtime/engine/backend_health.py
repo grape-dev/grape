@@ -167,8 +167,7 @@ def _db():
 
 
 def _lock():
-    from src.kernel.owner_db import owner_lock as _owner_lock
-    return _owner_lock("runtime")
+    return owner_lock("runtime")
 
 
 def note_backend_failure(runtime_id: int, reason: str = "") -> dict:
