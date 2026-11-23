@@ -4863,7 +4863,6 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                 return ("dir", _skill_local)
             return ("none", f"skill source not found for {skill_name}")
 
-        _mat_fb = None  # Issue #3914 D：本次物化的明示回退信息（无回退/未物化 → None）
         if skill_name:
             from src.domains.runtime.engine.skill_materialize import (
                 materialize_skill_with_fallback, write_skill_fallback)
@@ -4894,12 +4893,6 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                 skill_type=agent_type, skill_id=lambda: _primary_meta.get("skill_id") or 0)
             # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
             evt["_skill_materialize"] = _mat
-            # Issue #3914 D：明示回退（#617 官方检查器）→ 记录替身技能名，供门禁判
-            # declared_fallback（与 worker 侧 task["skill_fallback"] 同口径）；
-            # degraded（真缺失）不记录 → 门禁保持既有 fail-fast。
-            if _mat.get("status") == "fallback" and _mat.get("skill_name"):
-                _mat_fb = {"skill_name": _mat["skill_name"],
-                           "skill_id": _mat.get("skill_id") or 0}
             if _mat.get("status") in ("fallback", "degraded"):
                 _id_hint = ""
                 if _mat.get("skill_id"):
@@ -4939,8 +4932,13 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             # 时把替身技能名传给门禁（declared_fallback），否则门禁会按「本地缓存残留」拒绝，
             # 而 worker 侧同样场景是靠 task["skill_fallback"] 放行的（口径不一致 → QA 断链）。
             # degraded（真缺失）不传 → 既有 fail-fast（[skill_mismatch]）保持不变。
+            # ⚠️ 物化结果一律从 evt 取（已在上方写入）：skill_name 为空时本次不物化，
+            # 此时不能引用 `if skill_name:` 块内的局部变量（否则 NameError 被下方 except
+            # 吞掉 → 一致性结论不落 evt → 门禁退化为 verdict missing）。
+            _mat = evt.get("_skill_materialize") or {}
             _mat_fb = None
-            if (_mat.get("status") == "fallback") and _mat.get("skill_name"):
+            if (isinstance(_mat, dict) and _mat.get("status") == "fallback"
+                    and _mat.get("skill_name")):
                 _mat_fb = {"skill_name": _mat["skill_name"],
                            "skill_id": _mat.get("skill_id") or 0}
             evt[SKILL_CONSISTENCY_KEY] = verify_skill_execution_consistency(
