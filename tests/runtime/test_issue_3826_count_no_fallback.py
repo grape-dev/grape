@@ -215,11 +215,22 @@ def test_count_failure_log_reports_local_route(monkeypatch, caplog):
 
 # ── ③ 拓扑棘轮：代理只认内核 route_of ──────────────────────────────────────
 def test_domain_proxy_uses_kernel_route_of_only():
-    src = inspect.getsource(rt._DomainDbProxy)
-    assert 'route_of("runtime")' in src, "代理未走内核唯一路由判定"
-    assert "uses_own_dsn" not in src, (
+    """棘轮：代理内的**代码**只认内核 `route_of`，不得再出现 `uses_own_dsn` 回落判定。
+
+    用 AST 取属性访问（docstring 里说明历史缺陷不算违规），避免"注释写了根因就红"。
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(rt._DomainDbProxy)))
+    attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+
+    assert "route_of" in attrs, "代理未走内核唯一路由判定 db_registry.route_of"
+    assert "uses_own_dsn" not in attrs, (
         "_DomainDbProxy 仍有自己的回落判定（uses_own_dsn ? DSN : 主库），"
         "与 db_registry.route_of 契约并存 → Issue #3826 根因")
+    assert "current_domain" not in attrs, (
+        "代理仍在用 current_domain 自行分支——路由判定应收敛到 route_of")
 
 
 # ── ④ 全仓 COUNT 审计：无第三处裸 SQL ──────────────────────────────────────
