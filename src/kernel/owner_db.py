@@ -27,9 +27,11 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from src.kernel.lock_instrument import InstrumentedLock
+
 _VALID = ("mgmt", "runtime", "insight")
 
-_locks: dict[str, threading.RLock] = {}
+_locks: dict[str, InstrumentedLock] = {}
 _locks_guard = threading.Lock()
 
 
@@ -159,18 +161,18 @@ def owner_db(domain: str) -> _OwnerDB:
     return _proxies[dom]
 
 
-def owner_lock(domain: str) -> threading.RLock:
-    """该域配套的进程级可重入锁。"""
+def owner_lock(domain: str) -> InstrumentedLock:
+    """该域配套的进程级可重入锁（Issue #3927：带慢锁观测）。"""
     dom = (domain or "").strip().lower()
     if dom not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
     with _locks_guard:
         if dom not in _locks:
-            _locks[dom] = threading.RLock()
+            _locks[dom] = InstrumentedLock(f"owner:{dom}")
         return _locks[dom]
 
 
-def db_pair(domain: str) -> tuple[_OwnerDB, threading.RLock]:
+def db_pair(domain: str) -> tuple[_OwnerDB, InstrumentedLock]:
     """便捷组合：`db, db_lock = db_pair("insight")`。"""
     return owner_db(domain), owner_lock(domain)
 

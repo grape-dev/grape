@@ -4,6 +4,7 @@ from datetime import datetime
 from src.kernel.owner_db import db_pair
 
 db, db_lock = db_pair("runtime")
+from src.kernel.lock_instrument import task_lock, lock_owner
 from src.kernel.config import log
 from src.kernel.issue_ident import is_actionable_issue_number, normalize_issue_ident  # Issue #3055
 from src.kernel.time_utils import normalize_event_time
@@ -1195,13 +1196,52 @@ def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
             log.warning(f"Failed to update event config {seq}: {e}")
 
 
+def _write_event_payload_fields(seq: int, agent_logs, structured_output) -> None:
+    """Issue #3927：agent_logs / structured_output 大字段独立短写。
+
+    与终态字段拆事务、且不持进程级 db_lock：序列化（可能是几十 MB 的 dumps）
+    在锁外完成，最终只发一条 UPDATE。MySQL 走每线程连接、SQLite 单条 UPDATE+commit
+    由驱动层串行化，因此去掉进程锁不会破坏单语句原子性。
+
+    失败只记日志、不回滚已落库的终态字段——读侧兼容「终态先行、大字段补齐」，
+    幂等重放（同任务再次 complete）可在终态保护之外由巡检补齐。
+    """
+    try:
+        _logs_json = json.dumps(agent_logs or [])
+    except Exception as e:  # noqa: BLE001 - 大字段脏数据不阻断终态
+        log.warning(f"Event {seq}: serialize agent_logs failed: {e}")
+        return
+    _structured_json = None
+    if structured_output is not None:
+        try:
+            _structured_json = json.dumps(structured_output, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Event {seq}: serialize structured_output failed: {e}")
+    try:
+        c = db.cursor()
+        cols = _events_columns(c)
+        if "structured_output" in cols and _structured_json is not None:
+            c.execute("UPDATE events SET agent_logs=?, structured_output=? WHERE seq=?",
+                      (_logs_json, _structured_json, seq))
+        else:
+            c.execute("UPDATE events SET agent_logs=? WHERE seq=?", (_logs_json, seq))
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Event {seq}: write payload fields failed: {e}")
+
+
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = "",
                           structured_output: dict = None,
                           revive_from_timeout_failed: bool = False,
-                          allow_from_takeover: bool = False):
+                          allow_from_takeover: bool = False,
+                          task_id: str = ""):
     """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result, structured_output）
+
+    Issue #3927：`task_id` 非空时终态写改用**任务级锁** `t_<task_id>`（同任务串行、
+    跨任务并行），全局 db_lock 只在未传 task_id 的旧调用面保留。终态字段 UPDATE
+    与 agent_logs/structured_output 大字段拆成两个事务/两次短写，锁内只剩单条 UPDATE。
 
     幂等保护：终态事件不允许被其他终态覆盖。
     - 已 completed 的事件不允许被 failed 覆盖（防止 complete→fail 竞态）。
@@ -1225,63 +1265,66 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
     _is_terminal = status in ("completed", "failed", "cancelled")
     _agent_type = _repo_key = _issue_id = ""
     _terminal_written = False
-    with db_lock:
-        try:
-            c = db.cursor()
-            # 检查当前状态：已终态的事件不允许被其他终态覆盖
-            c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
-            row = c.fetchone()
-            # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
-            # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
-            # （finish/abort，allow_from_takeover=True）能落终态。
-            if row and row[0] == "takeover" and status in ("completed", "failed", "cancelled"):
-                if not allow_from_takeover:
-                    log.info(f"Event {seq} is taken over by a human, skip {status} overwrite")
-                    return
-                log.info(f"Event {seq}: takeover -> {status} (by takeover service)")
-            if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
-                _revive_ok = (revive_from_timeout_failed
-                              and row[0] == "failed" and status == "completed")
-                if not _revive_ok:
-                    log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
-                    return
-                log.info(f"Event {seq}: failed -> completed via timeout revive "
-                         f"(Issue #1071 narrow gate)")
-            # Issue #1503：终态写入 result 兜底（与 completed_at 兜底同层）。
-            # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
-            if _is_terminal and not (result or "").strip():
-                _ec = exit_code if exit_code is not None else "?"
-                result = f"{status} (exit_code={_ec})"
-                log.info(f"Event {seq}: terminal write with empty result, "
-                         f"backfilled default summary (#1503)")
-            _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
-            cols = _events_columns(c)
-            # Issue #2432: the node that failed is the event's own agent_type,
-            # read from the row selected above (arch layout keeps it in `row`).
-            if row:
-                _agent_type = str(row[1] or "")
-                _repo_key = str(row[2] or "")
-                _issue_id = str(row[3] or "")
-            # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
-            _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
-            _failed_sql = "" if not _set_failed_node else ", failed_node=?"
-            _failed_param = () if not _set_failed_node else (_agent_type,)
-            if "structured_output" in cols and _structured is not None:
+    _write_payload = False
+    # Issue #3927：complete 终态写只持任务级锁；未传 task_id 的旧调用面保持全局锁。
+    _lock_cm = task_lock(task_id) if task_id else db_lock
+    _owner_label = f"complete:{task_id or seq}"
+    with lock_owner(_owner_label):
+        with _lock_cm:
+            try:
+                c = db.cursor()
+                # 检查当前状态：已终态的事件不允许被其他终态覆盖
+                c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
+                row = c.fetchone()
+                # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
+                # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
+                # （finish/abort，allow_from_takeover=True）能落终态。
+                if row and row[0] == "takeover" and status in ("completed", "failed", "cancelled"):
+                    if not allow_from_takeover:
+                        log.info(f"Event {seq} is taken over by a human, skip {status} overwrite")
+                        return
+                    log.info(f"Event {seq}: takeover -> {status} (by takeover service)")
+                if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
+                    _revive_ok = (revive_from_timeout_failed
+                                  and row[0] == "failed" and status == "completed")
+                    if not _revive_ok:
+                        log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
+                        return
+                    log.info(f"Event {seq}: failed -> completed via timeout revive "
+                             f"(Issue #1071 narrow gate)")
+                # Issue #1503：终态写入 result 兜底（与 completed_at 兜底同层）。
+                # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
+                if _is_terminal and not (result or "").strip():
+                    _ec = exit_code if exit_code is not None else "?"
+                    result = f"{status} (exit_code={_ec})"
+                    log.info(f"Event {seq}: terminal write with empty result, "
+                             f"backfilled default summary (#1503)")
+                cols = _events_columns(c)
+                # Issue #2432: the node that failed is the event's own agent_type,
+                # read from the row selected above (arch layout keeps it in `row`).
+                if row:
+                    _agent_type = str(row[1] or "")
+                    _repo_key = str(row[2] or "")
+                    _issue_id = str(row[3] or "")
+                # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
+                _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
+                _failed_sql = "" if not _set_failed_node else ", failed_node=?"
+                _failed_param = () if not _set_failed_node else (_agent_type,)
+                # Issue #3927：锁内只写终态字段；agent_logs/structured_output 走锁外短写。
                 c.execute(
-                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
-                    "result=?, structured_output=?" + _failed_sql + " WHERE seq=?",
-                    (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result, _structured) + _failed_param + (seq,))
-            else:
-                c.execute(
-                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
+                    "UPDATE events SET status=?, exit_code=?, duration=?, completed_at=?, "
                     "result=?" + _failed_sql + " WHERE seq=?",
-                    (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result) + _failed_param + (seq,))
-            db.commit()
-            _terminal_written = True
-        except Exception as e:
-            log.warning(f"Failed to update event complete {seq}: {e}")
+                    (status, exit_code, duration, completed_at, result)
+                    + _failed_param + (seq,))
+                db.commit()
+                _terminal_written = True
+                _write_payload = "structured_output" in cols
+            except Exception as e:
+                log.warning(f"Failed to update event complete {seq}: {e}")
+    # Issue #3927：大字段字段锁外补写（仅终态写者执行；重复 complete 已在上面短路）。
+    if _terminal_written:
+        _write_event_payload_fields(seq, agent_logs,
+                                    structured_output if _write_payload else None)
     # Issue #2432：失败终态（执行失败/超时/重试耗尽）→ 异步通知飞书群，异常不阻断
     if _terminal_written and status == "failed" and _repo_key:
         _notify_pipeline_failure(_repo_key, _issue_id, _agent_type, seq)

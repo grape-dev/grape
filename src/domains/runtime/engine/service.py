@@ -4134,6 +4134,46 @@ def _create_auto_advance_a2a(task: dict, next_role: str, scene_id: str,
     return _seq
 
 
+def _auto_advance_async_enabled() -> bool:
+    """Issue #3927：complete 的 A2A 自动推进是否卸载到后台线程（M3 灰度开关）。
+
+    默认关闭以保持既有同步语义（技能/测试按 stage 同步回写断言）；生产灰度阶段
+    设 `COMPLETE_A2A_ASYNC=1` 后，A2A 派发不再占用 complete 请求线程。
+    """
+    return os.environ.get("COMPLETE_A2A_ASYNC", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _run_auto_advance_after_complete(task: dict, output: dict | None,
+                                     result_text: str) -> dict:
+    try:
+        _adv = _auto_advance_after_complete(task, output=output,
+                                            result_text=result_text or "")
+        if _adv.get("action") in ("a2a", "recheck"):
+            log.info(f"complete_task: auto-advanced issue={task.get('issue_id')} "
+                     f"agent={task.get('agent_type')} action={_adv.get('action')} "
+                     f"next={_adv.get('next_role')} round={_adv.get('round')} "
+                     f"seq={_adv.get('seq')}")
+        return _adv
+    except Exception as _e:  # noqa: BLE001 - 自动推进失败不阻断终态
+        log.warning(f"complete_task: auto-advance failed: {_e}")
+        return {"action": "none", "reason": f"error: {_e}"}
+
+
+def _schedule_auto_advance_after_complete(task: dict, output: dict | None,
+                                          result_text: str):
+    """Issue #3927：锁外/请求线程外执行 auto-advance（A2A 外呼不占 complete 线程）。"""
+    if _auto_advance_async_enabled():
+        threading.Thread(
+            target=_run_auto_advance_after_complete,
+            args=(task, output, result_text or ""),
+            name=f"auto-advance:{task.get('id') or task.get('event_seq') or '?'}",
+            daemon=True,
+        ).start()
+        return None
+    return _run_auto_advance_after_complete(task, output, result_text or "")
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None,
                   revive_from_timeout_failed: bool = False):
     """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。
@@ -4235,23 +4275,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                                   result=_result_show,
                                   structured_output=output or None,
                                   revive_from_timeout_failed=(
-                                      revive_from_timeout_failed and status == "completed"))
+                                      revive_from_timeout_failed and status == "completed"),
+                                  task_id=task_id)
             # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
             # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
             # failed 阻断回退 pending_review 保留人工 confirm done 路径）
             # Issue #2118：按 next/handoff 统一推进（组织节点 id != tag 时也能命中），
             # 未显式 A2A 交办时自动派发下一节点，避免流水线停在当前节点。
             if status == "completed" and task.get("issue_id"):
-                try:
-                    _adv = _auto_advance_after_complete(task, output=output,
-                                                        result_text=result_text or "")
-                    if _adv.get("action") in ("a2a", "recheck"):
-                        log.info(f"complete_task: auto-advanced issue={task.get('issue_id')} "
-                                 f"agent={task.get('agent_type')} action={_adv.get('action')} "
-                                 f"next={_adv.get('next_role')} round={_adv.get('round')} "
-                                 f"seq={_adv.get('seq')}")
-                except Exception as _e:
-                    log.warning(f"complete_task: auto-advance failed: {_e}")
+                # Issue #3927：A2A 派发已移出 db_lock；灰度开关下发到后台线程，
+                # 避免网络外呼长尾继续占用 complete 请求线程。
+                _schedule_auto_advance_after_complete(task, output, result_text or "")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     # 疑似提前结束：标记落到 agent_tasks.errors（任务详情可见）；状态仍是 completed。
@@ -4953,7 +4987,8 @@ def fail_task(task_id, error, exit_code=-1):
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=(_result_show or (error or ""))[:200])
+                                  result=(_result_show or (error or ""))[:200],
+                                  task_id=task_id)
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")
     # Issue #403：耗尽判死时 errors 合并而非覆盖——上方 retry 检查已把
