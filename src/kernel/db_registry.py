@@ -124,18 +124,27 @@ ROLE_DOMAIN = {
 }
 
 
-def expected_db_name(role: str) -> str:
-    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
-    domain = ROLE_DOMAIN.get((role or "").strip().lower())
-    if not domain:
-        return ""
-    dsn = dsn_of(domain)
+def database_of(domain: str) -> str:
+    """该域 DSN path 里的库名（脱敏：不含账号/口令/主机）；缺 DSN 或解析失败返回空串。
+
+    日志与启动自检用（`route=domain` 时"实际打到哪个库"）。`expected_db_name` 复用本函数，
+    不再各写一份 `parse_dsn` 解析。
+    """
+    dsn = dsn_of((domain or "").lower())
     if not dsn:
         return ""
     try:
         return (parse_dsn(dsn).get("database") or "").strip()
     except Exception:
         return ""
+
+
+def expected_db_name(role: str) -> str:
+    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
+    domain = ROLE_DOMAIN.get((role or "").strip().lower())
+    if not domain:
+        return ""
+    return database_of(domain)
 
 
 def describe_connection() -> dict:

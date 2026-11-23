@@ -18,6 +18,8 @@ import re
 
 import asyncio
 
+import socket
+
 import copy as _copy_cache
 import functools as _ft_cache
 import threading as _th_cache
@@ -61,17 +63,34 @@ class _DomainDbProxy:
 
     需求中心的 issue / issue_state / events / agent_tasks 都在 runtime 域，但该路由由
     mgmt 进程服务。三库模式下 mgmt 进程的主库是本域库，直连进程库会撞「表不存在」；
-    这里按域取连接（own DSN 优先，单库回落进程库），写路径仍应走 runtime public 原语。
+    这里按域取连接，判定**只认内核 `db_registry.route_of("runtime")`**（全仓唯一事实源）：
+
+    - `domain` → 该域自有连接（`new_connection`，用完即关）
+    - `local`  → 进程主库（单库拓扑 / 本域进程）
+    - 其余     → `DomainUnavailable`（三库拓扑缺 `GRAPE_DSN_RUNTIME`），**绝不回落主库**
+
+    Issue #3826：此前这里自带 `uses_own_dsn(...) ? DSN : session_manager.db` 回落分支，与
+    内核契约并存 → 缺 DSN 时静默打 mgmt 库（生产 `Table 'grape_prod_mgmt.issue' doesn't
+    exist`），且与「旧进程未重启」在日志上完全同形，导致 #3771 验收反复失效。
     """
+
+    def _route(self) -> "str | None":
+        """`route_of("runtime")` 的薄包装；域不可用返回 `None`（**绝不回落主库**）。
+
+        `commit()/rollback()` 用本判定：域不可用时并未取到任何连接，no-op 即可——在 `except`
+        里再抛 `DomainUnavailable` 会把调用方真正的异常掩盖掉。`cursor()` 不吞异常，
+        让 `DomainUnavailable` 上抛，由调用方显式降级（如 `_count_issues` → `total=None`）。
+        """
+        from src.kernel import db_registry
+        try:
+            return db_registry.route_of("runtime")
+        except db_registry.DomainUnavailable as _e:
+            log.debug(f"runtime domain unavailable (no fallback to process db): {_e}")
+            return None
 
     def cursor(self, *a, **kw):
         from src.kernel import db_registry
-        # 本进程主库已经是 runtime 库时直接用主库：session_manager.db 是成熟的
-        # MySQL 兼容层（方言翻译 + 连接池），换轻量连接只会引入方言差异。
-        if db_registry.current_domain() == "runtime":
-            from src.kernel.session_manager import db as _main
-            return _main.cursor(*a, **kw)
-        if db_registry.uses_own_dsn("runtime"):
+        if db_registry.route_of("runtime") == "domain":
             # 每次取一条独立连接：共享连接绑线程，跨线程复用会 InterfaceError(0, '')
             _conn = db_registry.new_connection("runtime")
             return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
@@ -79,28 +98,25 @@ class _DomainDbProxy:
         return _main.cursor(*a, **kw)
 
     def commit(self):
-        from src.kernel import db_registry
         # 必须与 cursor() 的取连接分支一致：runtime 域进程走 session_manager.db 的
         # autocommit=False 线程级连接，这里若 return None 会让写事务一直悬着——行锁不释放、
         # 新写入的行（如 enqueue 的任务）对其它连接不可见，随后任何 rollback 直接丢掉。
-        if db_registry.current_domain() == "runtime":
-            from src.kernel.session_manager import db as _main
-            return _main.commit()
-        if db_registry.uses_own_dsn("runtime"):
+        _route = self._route()
+        if _route != "local":
             return None
         from src.kernel.session_manager import db as _main
         return _main.commit()
 
     def rollback(self):
-        from src.kernel import db_registry
-        if db_registry.current_domain() == "runtime":
-            from src.kernel.session_manager import db as _main
-            return _main.rollback()
-        if db_registry.uses_own_dsn("runtime"):
+        _route = self._route()
+        if _route is None:
+            return None
+        if _route == "domain":
+            from src.kernel import db_registry
             try:
                 db_registry.domain_db("runtime").rollback()
             except Exception as _e:
-                log.debug(f"cursor close failed: {_e}")
+                log.debug(f"domain rollback failed: {_e}")
             return None
         from src.kernel.session_manager import db as _main
         return _main.rollback()
@@ -2229,6 +2245,33 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
         return {"ok": True, "message": "已删除"}
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
+def _count_failure_context() -> str:
+    """COUNT 失败日志附带的连接事实：`route` / `target_db` / `pid` / `host`（脱敏）。
+
+    为什么需要（Issue #3826）：驱动异常文本里的 schema 名（如 `grape_prod_mgmt.issue`）是线上
+    唯一线索，而「旧进程未重启」与「新代码仍打 mgmt 库」两种根因的日志完全同形，验收无法分流。
+    补上路由判定与目标库名后，单行日志即可回答「这台主机、这个进程连的是哪个库」。
+
+    脱敏硬约束：只取域路由与 DSN 的库名（`database_of`），绝不输出完整 DSN / 账号 / 口令。
+    """
+    from src.kernel import db_registry
+    route, target_db = "unknown", "-"
+    try:
+        route = db_registry.route_of("runtime")
+    except db_registry.DomainUnavailable:
+        # 三库拓扑缺 GRAPE_DSN_RUNTIME：连目标都没有——这本身就是结论（不是回落 mgmt）
+        route = "unavailable"
+    except Exception as _e:
+        log.debug(f"route_of('runtime') failed while logging count failure: {_e}")
+    else:
+        if route == "domain":
+            target_db = db_registry.database_of("runtime") or "-"
+        else:  # local：进程主库（单库拓扑或本域进程）
+            target_db = os.environ.get("DEVOPS_DB_NAME", "").strip() or "(process main)"
+    return (f"route={route} target_db={target_db} "
+            f"pid={os.getpid()} host={socket.gethostname()}")
+
+
 def _count_issues(where: str, params: list, label: str = "issues") -> int | None:
     """issue 表行数统计（单一收口，Issue #3771）。
 
@@ -2249,7 +2292,7 @@ def _count_issues(where: str, params: list, label: str = "issues") -> int | None
             c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
             return c.fetchone()[0]
     except Exception as e:
-        log.warning(f"{label}: count failed: {e}")
+        log.warning(f"{label}: count failed: {e} [{_count_failure_context()}]")
         return None
 
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses. Issue #2082 paging (semantics unified with issues_list/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), is clamped to a max of 100 and 0 means explicit full list. With per_page>0 the response carries total/page/per_page/has_more (total counts the filtered set).")
