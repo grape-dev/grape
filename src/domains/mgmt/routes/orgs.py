@@ -149,18 +149,17 @@ def _normalize_repo_create_options(body: CreateOrgBody, user: dict) -> dict:
                 400, "VCS_TOKEN_MISSING",
                 f"当前账号未绑定 {provider} 平台凭据，无法在该平台创建组织仓库",
             )
-        if provider == "github":
-            # 建组织前先探测建仓权限：没权限直接报错，不创建组织再异步失败
-            # （2026-11-19 现场：细粒度 PAT 无建仓权限，组织建出来了但仓库没了）。
-            from src.domains.mgmt.user.repo_manager import probe_github_repo_create
+        # 建组织前先探测建仓权限：没权限直接报错，不创建组织再异步失败
+        # （2026-11-19 现场：细粒度 PAT 无建仓权限，组织建出来了但仓库没了）。
+        from src.domains.mgmt.user.repo_manager import probe_repo_create
 
-            can_create, reason = probe_github_repo_create(
-                token, owner=owner, private=bool(body.repo_private))
-            if can_create is False:
-                raise _error(
-                    400, "VCS_REPO_CREATE_FORBIDDEN",
-                    f"无法在 GitHub 创建组织仓库：{reason}",
-                )
+        can_create, reason = probe_repo_create(
+            provider, token, owner=owner, private=bool(body.repo_private))
+        if can_create is False:
+            raise _error(
+                400, "VCS_REPO_CREATE_FORBIDDEN",
+                f"无法在 {provider} 创建组织仓库：{reason}",
+            )
 
     return {
         "org_repo_provider": provider,
@@ -240,9 +239,9 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
         user.get("username", ""), user_id=str(user.get("id") or ""), provider=provider)
     name = provider
     try:
-        from src.domains.runtime import public as runtime_public
+        from src.domains.runtime.public import get_platform_card
 
-        card = runtime_public.get_platform_card(provider)
+        card = get_platform_card(provider)
         if card is not None and getattr(card, "name", ""):
             name = card.name
     except Exception:

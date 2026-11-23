@@ -31,6 +31,10 @@ class CreateDispatchBody(BaseModel):
     title: str = ""
     description: str = ""
     scene_id: str = ""
+    # 每个 target 的场景推荐（repo_key -> scene_id）；批次级 scene_id 仅作兼容兜底。
+    target_scenes: dict[str, str] = Field(default_factory=dict)
+    # AI 选择理由（repo_key -> reason），落 plan_json 供审计。
+    scene_reasons: dict[str, str] = Field(default_factory=dict)
     # Issue #2251：完成判定口径 issue_done（默认）/ pr_merged / task_terminal
     done_when: str = "issue_done"
 
@@ -49,10 +53,36 @@ async def create(org_id: str, body: CreateDispatchBody,
         title=body.title or "",
         description=body.description or "",
         scene_id=body.scene_id or "",
+        target_scenes=dict(body.target_scenes or {}),
+        scene_reasons=dict(body.scene_reasons or {}),
         user=user,
         done_when=body.done_when or "issue_done",
     )
     return JSONResponse(status_code=status, content=payload)
+
+
+@router.get("/{org_id}/dispatch/scene-catalog",
+            operation_id="org_dispatches_scene_catalog",
+            summary="Read linked repository scene catalog for dispatch")
+def scene_catalog(org_id: str, repo_key: str = "", include: str = "",
+                  user: dict = Depends(require_org_api_user)):
+    """组织下派前的场景目录：只返回关联仓库的场景元数据，不返回敏感配置。
+
+    ``repo_key`` 为空返回全部关联仓库（排除组织自动仓库）；``include=executable``
+    额外返回每个场景的可执行性预检查结果。
+    """
+    _require_team_org(org_id)
+    _require_member(user["id"], org_id)
+    if include not in ("", "executable"):
+        raise _error(400, "INVALID_INCLUDE", "include must be empty or 'executable'")
+    from src.domains.mgmt import org_dispatch_scene
+
+    try:
+        return org_dispatch_scene.scene_catalog(
+            org_id, repo_key=repo_key,
+            include_executable=(include == "executable"), user=user)
+    except ValueError as exc:
+        raise _error(400, "INVALID_TARGET", str(exc))
 
 
 @router.get("/{org_id}/dispatches", operation_id="org_dispatches_list",

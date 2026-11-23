@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from src.api.pipeline_config import create_org_scene
+from src.domains.mgmt.pipeline_config import create_org_scene
 from src.domains.mgmt.auth.audit import log_audit
 from src.domains.mgmt.org_dispatch import DISPATCH_IN_FLIGHT
 from src.domains.mgmt.routes.repos import (
@@ -24,6 +24,8 @@ from src.domains.mgmt.user.org_db import (
     bind_managed_repo_to_org,
     bind_repo_as_org_repo,
     clear_org_repo_flag,
+    db as org_db,
+    db_lock as org_db_lock,
     fail_org_provision_attempt,
     get_managed_repo_binding,
     get_org,
@@ -36,7 +38,7 @@ from src.kernel.lock import acquire_lock, release_lock, renew_lock
 from src.kernel.repo_key import from_repo_key, to_repo_key
 
 
-_ORG_LOCKS: dict[int, threading.Lock] = {}
+_ORG_LOCKS: dict[str, threading.RLock] = {}
 _ORG_LOCKS_GUARD = threading.Lock()
 # rationale（数值登记 docs/org-pipeline/org-runtime-budget.md §2）：组织供给一次包含
 # 建仓 + 建场景 + 首次绑定，需求 Issue #2403 的目标 P95 供给时长 < 10min；租约取 600s
@@ -50,11 +52,13 @@ class _LeaseLost(RuntimeError):
     pass
 
 
-def _org_lock(org_id: str) -> threading.Lock:
+def _org_lock(org_id: str) -> threading.RLock:
+    # provisioning 内需要同步调用 org-context/analysis 同步（它们会再次获取同一
+    # org 锁），必须可重入，否则同一线程自锁。
     with _ORG_LOCKS_GUARD:
         lock = _ORG_LOCKS.get(org_id)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _ORG_LOCKS[org_id] = lock
         return lock
 
@@ -262,7 +266,7 @@ def _create_org_repo(org: dict) -> str:
                 private=private,
                 visibility="private" if private else "public",
                 auto_init=False,
-                default_branch="grape-repo-knowledge",
+                default_branch="main",
                 host_after_create=False,
                 provider=options["provider"],
                 owner=options["owner"],
@@ -365,19 +369,26 @@ def _host_org_repo(org: dict, repo_key: str) -> None:
     _renew_org_lease(org["id"])
 
 
-def _ensure_org_scene(org: dict, repo_key: str) -> str:
+def _ensure_org_scene(org: dict, repo_key: str, *,
+                      fallback_branch: str = "main") -> str:
     _renew_org_lease(org["id"])
     scene_id = org.get("org_scene_id") or ""
     if not scene_id:
         scene_id = f"custom-org-{uuid.uuid4()}"
         _set_provision_fields(org["id"], org_scene_id=scene_id)
     owner_user = _owner_user(org)
+    from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+    work_branch = resolve_org_repo_default_branch(
+        org, repo_key, fallback=fallback_branch or ORG_REPO_DEFAULT_BRANCH)
     create_org_scene(
         scene_id=scene_id,
         org_name=org.get("name") or "",
         repo_key=repo_key,
         created_by=owner_user.get("username") or "",
         org_id=str(org["id"] or ""),
+        work_branch=work_branch,
     )
     # 组织仓库默认场景 = 组织场景：保证直接在组织仓库开 Issue 时 issue_opened 能进入
     # org_intake，而不是回落到 vod/智能推荐。
@@ -387,8 +398,89 @@ def _ensure_org_scene(org: dict, repo_key: str) -> str:
         set_repo_scene(repo_key, scene_id)
     except Exception as exc:
         log.warning(f"org_provision set default scene failed org={org['id']}: {exc}")
+    # 任务可能先于场景创建（_bind_org_repo 早于 _ensure_org_scene）：场景落库后
+    # 再 ensure 一次，让每日分析任务拿到场景上的真实 work_branch。
+    try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.ensure_analysis_automation(
+            str(org["id"]), actor_id=owner_user.get("id") or "")
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log.warning(f"org_provision ensure analysis branch failed org={org['id']}: {exc}")
     _renew_org_lease(org["id"])
     return scene_id
+
+
+def _ensure_org_repo_branches(org: dict, repo_key: str, *,
+                              enforce_default: bool = True) -> None:
+    """同步创建 main + grape-org；两条就绪才允许组织进入 ready。
+
+    新组织仓库：
+    - ``main``：默认分支，保持空仓，留给组织自己开发；
+    - ``grape-org``：Grape 托管内容唯一分支（组织上下文/知识/仓库地图/AI 结果）。
+    必须在 provisioning 的 org 锁内调用：上下文同步会再次获取同一把 RLock。
+    """
+    from src.domains.mgmt.org_context_repo import (
+        ORG_REPO_COMBINED_BRANCH,
+        ORG_REPO_DEFAULT_BRANCH,
+        sync_org_analysis_to_repo,
+        sync_org_context_to_repo,
+    )
+    from src.domains.mgmt.pipeline_config import set_org_scene_work_branch
+    from src.domains.mgmt.user.repo_manager import set_default_branch
+    from src.domains.runtime import public as runtime_public
+    from src.kernel.repo_key import parse_repo_key
+
+    org_id = str(org.get("id") or "")
+    if not org_id or not repo_key:
+        raise RuntimeError("org repo missing")
+
+    sync_org_context_to_repo(org_id)
+    sync_org_analysis_to_repo(org_id)
+
+    owner_user = _owner_user(org)
+    provider, token = _resolve_repo_provider(org, owner_user)
+    if not token:
+        raise RuntimeError("VCS token missing after hosting")
+    _prov, owner, name = parse_repo_key(repo_key)
+    provider = provider or _prov
+    client = runtime_public.VcsApiClient(provider, token, owner, name)
+    info = client.get_repo_info() or {}
+    if info.get("error"):
+        raise RuntimeError(f"repo info failed: {str(info.get('error'))[:200]}")
+    names = {str(b.get("name") or "") for b in (client.list_branches() or [])}
+    if enforce_default and ORG_REPO_DEFAULT_BRANCH not in names:
+        raise RuntimeError(
+            f"default branch {ORG_REPO_DEFAULT_BRANCH} missing (branches={sorted(names)})")
+    for required in (ORG_REPO_COMBINED_BRANCH,):
+        if required not in names:
+            raise RuntimeError(
+                f"branch {required} missing (branches={sorted(names)})")
+
+    current_default = str(info.get("default_branch") or "")
+    expected_default = ORG_REPO_DEFAULT_BRANCH if enforce_default else (
+        current_default or ORG_REPO_DEFAULT_BRANCH)
+    if expected_default in names and current_default != expected_default:
+        if not set_default_branch(token, owner, name, expected_default, provider=provider):
+            raise RuntimeError(
+                f"set default branch failed: {current_default} -> {expected_default}")
+    elif enforce_default and current_default != ORG_REPO_DEFAULT_BRANCH:
+        raise RuntimeError(
+            f"unexpected default branch {current_default!r}, expected {ORG_REPO_DEFAULT_BRANCH}")
+
+    scene_id = str(org.get("org_scene_id") or "")
+    if scene_id:
+        # 场景/任务使用 grape-org：一处即可读到组织上下文与仓库地图。
+        work_branch = (ORG_REPO_COMBINED_BRANCH
+                       if ORG_REPO_COMBINED_BRANCH in names else expected_default)
+        set_org_scene_work_branch(scene_id, repo_key, work_branch)
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(
+                org_id, actor_id=org.get("owner_id") or "")
+        except Exception as exc:  # noqa: BLE001 - 任务补建失败不推翻已建分支
+            log.warning(f"org_provision ensure analysis task failed org={org_id}: {exc}")
 
 
 def _normalize_repo_key(raw: str) -> str:
@@ -400,8 +492,11 @@ def _normalize_repo_key(raw: str) -> str:
     if ":" in text:
         provider, text = text.split(":", 1)
         provider = provider.strip().lower()
-        if provider not in ("gitcode", "github"):
-            raise _error(400, "INVALID_REPO", "repo_key provider 仅支持 gitcode/github")
+        from src.domains.runtime.public import get_platform_card
+
+        if get_platform_card(provider) is None:
+            raise _error(400, "INVALID_REPO",
+                         f"repo_key provider 未登记平台卡: {provider}")
         text = text.strip()
     parts = text.split("/")
     if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
@@ -415,12 +510,7 @@ def _delete_vcs_repo(repo_key: str, token: str) -> None:
     from src.kernel.repo_key import parse_repo_key
 
     provider, owner, name = parse_repo_key(repo_key or "")
-    if provider == "github":
-        repo_manager.delete_github_repo(token, owner, name)
-    elif provider == "gitcode":
-        repo_manager.delete_gitcode_repo(token, owner, name)
-    else:
-        raise RuntimeError(f"provider {provider!r} 暂不支持删除仓库（仅 gitcode/github）")
+    repo_manager.delete_repo_for_provider(provider, token, owner, name)
 
 
 def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> dict:
@@ -665,6 +755,7 @@ def _provision_org_impl(org_id: str) -> dict:
             )
             org = get_org(org_id) or org
             repo_key = org.get("org_repo_key") or ""
+            created_repo = not bool(repo_key)
             if not repo_key:
                 _set_provision_fields(org_id, provision_status="repo_creating")
                 org = get_org(org_id) or org
@@ -677,7 +768,29 @@ def _provision_org_impl(org_id: str) -> dict:
 
             org = get_org(org_id) or org
             _set_provision_fields(org_id, provision_status="scene_creating")
-            _ensure_org_scene(org, repo_key)
+            from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+            _ensure_org_scene(
+                org, repo_key,
+                fallback_branch=ORG_REPO_DEFAULT_BRANCH)
+
+            # 「分支建好才算组织创建完成」：同步建 main（空仓）+ grape-org，再置 ready。
+            # 不再用后台 timer 抢跑，避免空仓首推把 grape-org 设成默认分支。
+            _set_provision_fields(org_id, provision_status="branches_creating")
+            org = get_org(org_id) or org
+            try:
+                _ensure_org_repo_branches(
+                    org, repo_key, enforce_default=created_repo)
+            except Exception as branch_exc:  # noqa: BLE001 - 瞬时 VCS/token 失败可重试
+                message = _error_text(branch_exc)[:1000]
+                log.warning(f"org_provision branches pending org={org_id}: {message}")
+                _set_provision_fields(
+                    org_id,
+                    provision_status="branches_pending",
+                    provision_error=message,
+                )
+                _renew_org_lease(org_id)
+                return _serialize_org(get_org(org_id))
 
             _renew_org_lease(org_id)
             _set_provision_fields(
@@ -687,14 +800,7 @@ def _provision_org_impl(org_id: str) -> dict:
                 provisioned_at=_utc_now(),
             )
             _refresh_org_overview(org_id)
-            # 组织仓库建好后把 org-context/（README/规则/画像/架构/知识/仓库地图）
-            # 推到默认分支：否则新仓是空仓，GitHub 页面只有一个空仓库没有任何目录。
-            try:
-                from src.domains.mgmt.org_context_repo import schedule_sync
-
-                schedule_sync(org_id)
-            except Exception as _sync_e:
-                log.warning(f"org_provision schedule context sync failed org={org_id}: {_sync_e}")
+            
         except _LeaseLost:
             log.warning(f"org_provision lease lost org={org_id}")
             try:
@@ -772,7 +878,7 @@ def _refresh_org_overview(org_id: str) -> None:
         scene_id = org.get("org_scene_id") or ""
         nodes: list = []
         try:
-            from src.api.pipeline_config import get_pipeline_config
+            from src.domains.mgmt.pipeline_config import get_pipeline_config
 
             cfg = get_pipeline_config(scene_id, repo_key=org.get("org_repo_key") or "") or {}
             nodes = cfg.get("nodes") or []
@@ -845,3 +951,44 @@ def start_provision(org_id: str) -> None:
         name=f"org-provision-{org_id}",
         daemon=True,
     ).start()
+
+
+def retry_pending_branch_provisions(limit: int = 5,
+                                    min_age_seconds: int = 300) -> int:
+    """巡检重试 `branches_pending` 组织（瞬时 VCS/token 失败，不永久 failed）。
+
+    只在 mgmt 的 org sweep 循环里调用；`start_provision` 自带租约与幂等，
+    并发/重复调用不会重复建仓。`min_age_seconds` 防止失败后立刻高频重试。
+    """
+    limit = max(1, min(int(limit or 5), 50))
+    try:
+        with org_db_lock:
+            rows = org_db.cursor().execute(
+                "SELECT id, updated_at FROM organization "
+                "WHERE provision_status='branches_pending' LIMIT ?",
+                (limit * 10,),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"retry_pending_branch_provisions query failed: {exc}")
+        return 0
+    now = datetime.now(timezone.utc)
+    picked: list[str] = []
+    for row in rows:
+        org_id, ts = str(row[0] or ""), str(row[1] or "")
+        if not org_id:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            dt = now  # 无法解析时间戳时视为已过期，交给租约/幂等兜底
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if (now - dt).total_seconds() < min_age_seconds:
+            continue
+        picked.append(org_id)
+        if len(picked) >= limit:
+            break
+    for org_id in picked:
+        log.info(f"org_provision retry pending branches org={org_id}")
+        start_provision(org_id)
+    return len(picked)

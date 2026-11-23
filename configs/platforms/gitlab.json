@@ -27,6 +27,7 @@
   "api_auth": "private_token",
   "webhook_verify": "token_compare",
   "clone_auth": "oauth2",
+  "branch_create_form": "form",
   "download_base": "https://gitlab.com",
   "brand_color": "#FC6D26",
   "token_storage_field": "",

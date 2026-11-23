@@ -142,7 +142,10 @@ def _normalize_repo_key(body: BindRepoBody) -> str:
     provider = "gitcode"
     if ":" in raw:
         maybe_provider, rest = raw.split(":", 1)
-        if maybe_provider in ("gitcode", "github"):
+        maybe_provider = maybe_provider.strip().lower()
+        from src.domains.runtime.public import get_platform_card
+
+        if get_platform_card(maybe_provider) is not None:
             provider = maybe_provider
             raw = rest
     parts = raw.split("/", 1)
@@ -423,6 +426,35 @@ def recall_org_repo_map(org_id: str, q: str = "", limit: int = 3,
     from src.domains.mgmt.org_repo_map import recall_targets
 
     return recall_targets(org_id, q, limit=limit)
+
+
+@router.get("/{org_id}/repo-map/summary", operation_id="org_repo_map_summary",
+            summary="Get the aggregate repository map summary")
+def get_org_repo_map_summary(org_id: str, user: dict = Depends(require_org_api_user)):
+    _require_member(user["id"], org_id)
+    _require_team_org(org_id)
+    from src.domains.mgmt.org_repo_map import repo_map_summary
+
+    return repo_map_summary(org_id)
+
+
+@router.post("/{org_id}/repo-map/sync", operation_id="org_repo_map_sync",
+             summary="Ensure repository map documents exist in the org repository")
+def sync_org_repo_map(org_id: str, user: dict = Depends(require_org_api_user)):
+    _require_member(user["id"], org_id)
+    _require_team_org(org_id)
+    from src.domains.mgmt.org_context_repo import ensure_repo_map_summary_file
+    from src.domains.mgmt.org_repo_map import repo_map_summary
+
+    ok = ensure_repo_map_summary_file(org_id)
+    log_audit(
+        "org_repo_map_sync",
+        user_id=str(user["id"]), operator_id=str(user["id"]),
+        detail={"org_id": org_id, "ok": bool(ok)},
+    )
+    data = repo_map_summary(org_id)
+    return {"ok": bool(ok), "branch": data.get("branch"),
+            "path": data.get("path"), "url": data.get("url")}
 
 
 @router.get("/{org_id}/repo-map/{repo_key:path}", operation_id="org_repo_map_detail",

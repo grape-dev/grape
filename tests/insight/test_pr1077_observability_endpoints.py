@@ -66,7 +66,8 @@ def test_faro_collect_proxies_to_configured_upstream(monkeypatch):
 def _relay_app(monkeypatch, target: str, max_body: int | None = None):
     from src.domains.runtime.routes import runtime as rt
 
-    monkeypatch.setattr(rt, "OTLP_RELAY_TARGET", target, raising=True)
+    # 目标值按请求现读环境变量（模块常量已移除，见 tests/runtime/test_trace_relay_env_and_metrics.py）
+    monkeypatch.setenv("OTLP_RELAY_TARGET", target)
     if max_body is not None:
         monkeypatch.setenv("GRAPE_TRACE_RELAY_MAX_BODY", str(max_body))
     app = FastAPI()

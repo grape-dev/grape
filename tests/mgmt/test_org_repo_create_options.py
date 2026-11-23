@@ -313,6 +313,10 @@ def test_provision_uses_selected_provider_namespace_and_path(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create)
     monkeypatch.setattr(provision, "host_repo", _fake_host)
+    # 本用例只验证建仓选项透传；分支同步需要真实 VCS token/网络，单测统一桩掉。
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: None)
 
     result = provision.provision_org(org["id"])
 
@@ -393,3 +397,33 @@ def test_create_org_rejects_github_without_create_permission(monkeypatch):
         orgs_route._normalize_repo_create_options(body, {"id": UID, "username": USERNAME})
     assert ei.value.status_code == 400
     assert ei.value.detail.get("error_code") == "VCS_REPO_CREATE_FORBIDDEN"
+
+
+def test_github_create_repo_applies_custom_default_branch(monkeypatch):
+    """GitHub 建仓不支持 default_branch：必须先 auto_init 再改名并 PATCH 默认分支。"""
+    from src.domains.mgmt.user import repo_manager
+
+    calls = []
+
+    def _fake_req(method, url, token="", body=None):
+        calls.append({"method": method, "url": url, "body": body})
+        if method == "GET" and url.endswith("/user"):
+            return {"login": "Misheng-chenyan"}
+        if method == "POST" and url.endswith("/orgs/acme/repos"):
+            return {"full_name": "acme/team-workspace", "default_branch": "main"}
+        return {}
+
+    monkeypatch.setattr(repo_manager, "_github_req", _fake_req)
+
+    result = repo_manager.create_github_repo(
+        "tk", "team-workspace", "desc", private=True, owner="acme",
+        default_branch="grape-repo-knowledge")
+
+    assert result["default_branch"] == "grape-repo-knowledge"
+    create = next(c for c in calls if c["url"].endswith("/orgs/acme/repos"))
+    assert create["body"]["auto_init"] is True
+    rename = next(c for c in calls if c["url"].endswith("/branches/main/rename"))
+    assert rename["body"] == {"new_name": "grape-repo-knowledge"}
+    patch = next(c for c in calls if c["method"] == "PATCH"
+                 and c["url"].endswith("/repos/acme/team-workspace"))
+    assert patch["body"] == {"default_branch": "grape-repo-knowledge"}

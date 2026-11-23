@@ -542,6 +542,78 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
+def get_scenes_for_repos(repo_keys: list[str], *, minimal: bool = False) -> dict[str, list[dict]]:
+    """批量读取多个仓库的仓内场景（一次查询，供组织下派目录等 N 仓场景）。
+
+    与 ``get_scenes`` 的单仓口径一致（is_active=1、仓内副本），仅去掉分页/检索/
+    市场兜底——调用方只关心每个仓库自己的场景集合。列集合走进程内缓存
+    ``_get_scene_columns()``，不再逐仓 ``SHOW COLUMNS``。
+    """
+    keys = sorted({str(k or "").strip() for k in (repo_keys or []) if str(k or "").strip()})
+    if not keys:
+        return {}
+    cols = _get_scene_columns()
+    extra = [name for name in (
+        "display_name", "advanced_options", "created_by", "icon", "scene_type",
+        "pr_subscription_enabled", "linked_repos", "is_pinned", "pinned_at",
+    ) if name in cols]
+    select = ["scene_id", "repo_key", "name", "description", "nodes_json",
+              "onboarding", *extra]
+    db, lock = _db()
+    rows = []
+    with lock:
+        c = db.cursor()
+        placeholders = ",".join("?" * len(keys))
+        try:
+            c.execute(
+                f"SELECT {', '.join(select)} FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key IN ({placeholders}) "
+                "ORDER BY repo_key, scene_id",
+                tuple(keys),
+            )
+            rows = c.fetchall()
+        except Exception as exc:  # 查询失败按空场景处理，目录仍返回其它仓库
+            log.warning(f"get_scenes_for_repos failed repos={len(keys)}: {exc}")
+            return {}
+    out: dict[str, list[dict]] = {key: [] for key in keys}
+    for row in rows:
+        data = dict(zip(select, row))
+        repo_key = str(data.pop("repo_key") or "")
+        if not repo_key:
+            continue
+        try:
+            nodes = [] if minimal else (json.loads(data.get("nodes_json") or "[]") or [])
+        except Exception:
+            nodes = []
+        work_branch = "main"
+        try:
+            options = json.loads(data.get("advanced_options") or "{}") if "advanced_options" in data else {}
+            work_branch = str(options.get("work_branch") or "main")
+        except Exception:
+            pass
+        try:
+            linked_repos = (json.loads(data.get("linked_repos") or "[]") or []) if "linked_repos" in data else []
+        except Exception:
+            linked_repos = []
+        out.setdefault(repo_key, []).append({
+            "id": data.get("scene_id"), "name": data.get("name"),
+            "display_name": data.get("display_name") or data.get("name"),
+            "scope": "repo",
+            "description": data.get("description") or "",
+            "work_branch": work_branch or "main",
+            "created_by": data.get("created_by") or "",
+            "icon": data.get("icon") or "",
+            "nodes": nodes,
+            "onboarding": data.get("onboarding") or "repo-onboarding",
+            "scene_type": data.get("scene_type") or "standard",
+            "pr_subscription_enabled": int(data.get("pr_subscription_enabled") or 0),
+            "linked_repos": linked_repos,
+            "is_pinned": int(data.get("is_pinned") or 0),
+            "pinned_at": data.get("pinned_at") or "",
+        })
+    return out
+
+
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "",
                         use_cache: bool = True) -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.
@@ -876,8 +948,13 @@ def create_custom_scene(scene_id: str, name: str, description: str,
 
 
 def create_org_scene(scene_id: str, org_name: str, repo_key: str,
-                     created_by: str = "", org_id: str = "") -> int:
-    """Create or update the default organization scene definition."""
+                     created_by: str = "", org_id: str = "",
+                     work_branch: str = "main") -> int:
+    """Create or update the default organization scene definition.
+
+    ``work_branch`` 必须是组织仓库可用的工作分支（新仓先 main，provisioning
+    建好 grape-org 后回填为汇总分支）；调用方无法解析时默认 main。
+    """
     db_id = create_custom_scene(
         scene_id=scene_id,
         name=f"组织任务下派 - {org_name or 'Organization'}",
@@ -903,7 +980,7 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
                 opts = {}
             if not isinstance(opts, dict):
                 opts = {}
-            opts["work_branch"] = "main"
+            opts["work_branch"] = str(work_branch or "main").strip() or "main"
             c.execute(
                 "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=datetime('now') "
                 "WHERE scene_id=? AND repo_key=?",
@@ -921,6 +998,47 @@ def create_org_scene(scene_id: str, org_name: str, repo_key: str,
             raise RuntimeError(f"create_org_scene advanced_options failed: {exc}") from exc
     invalidate_scene_cache(scene_id, repo_key)
     return db_id
+
+
+def set_org_scene_work_branch(scene_id: str, repo_key: str, work_branch: str) -> bool:
+    """幂等校正组织场景工作分支（同步/默认分支落定后回填）。"""
+    scene_id = str(scene_id or "").strip()
+    repo_key = str(repo_key or "").strip()
+    branch = str(work_branch or "").strip()
+    if not (scene_id and repo_key and branch):
+        return False
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            row = c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? LIMIT 1",
+                (scene_id, repo_key),
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                opts = json.loads((row[0] if row else "") or "{}")
+            except Exception:
+                opts = {}
+            if not isinstance(opts, dict):
+                opts = {}
+            if str(opts.get("work_branch") or "") == branch:
+                return True
+            opts["work_branch"] = branch
+            c.execute(
+                "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=datetime('now') "
+                "WHERE scene_id=? AND repo_key=?",
+                (json.dumps(opts, ensure_ascii=False), scene_id, repo_key),
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log.warning(f"set_org_scene_work_branch failed scene={scene_id} repo={repo_key}: {exc}")
+            return False
+    invalidate_scene_cache(scene_id, repo_key)
+    return True
 
 
 def _try_set_created_by(c, row_id: int, created_by: str):

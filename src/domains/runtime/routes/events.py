@@ -948,7 +948,7 @@ def _enqueue_task_verified(seq: int, **enqueue_kwargs) -> str:
         except Exception as ue:
             log.warning(f"[redispatch] seq={seq} failure-reason write failed: {ue}")
         try:
-            from src.domains.mgmt.user.db import set_meta_value
+            from src.domains.mgmt.public import set_meta_value
             set_meta_value(f"redispatch:error:{seq}", reason)
         except Exception as me:
             log.warning(f"[redispatch] seq={seq} failure-reason meta write failed: {me}")

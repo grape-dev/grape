@@ -1,7 +1,7 @@
 """组织需求跨仓下派编排（Issue #2112）。
 
 职责：下派批次状态机、目标场景解析、子 Issue 建单（复用
-``src.api.issues_center.create_task_via_issue``）、单目标取消/重试、状态汇总 sweeper。
+``runtime public create_task_via_issue``）、单目标取消/重试、状态汇总 sweeper。
 
 设计约束（见 docs/issue-2112/plan.md）：
 - 建单不复制：一律经 ``create_task_via_issue``，内部身份 + 目标仓库 bot token；
@@ -54,6 +54,8 @@ def _env_int(name: str, default: int) -> int:
 
 TARGET_TIMEOUT_SECONDS = _env_int("ORG_DISPATCH_TARGET_TIMEOUT", 7200)
 SWEEP_INTERVAL_SECONDS = _env_int("ORG_DISPATCH_SWEEP_INTERVAL", 60)
+# 单轮 sweep 的处理上限：避免积压时一次性扫全表、长时间占住 mgmt 请求线程
+SWEEP_BATCH_LIMIT = _env_int("ORG_DISPATCH_SWEEP_LIMIT", 200)
 # 单条下派结论上下文上限（默认 64KB）：避免多目标 × 多角色的摘要挤占注入预算
 DECISION_MAX_BYTES = _env_int("ORG_DECISION_MAX_BYTES", 65536)
 MAX_DISPATCH_TARGETS = _env_int("ORG_DISPATCH_MAX_TARGETS", 20)
@@ -92,15 +94,38 @@ def _normalize_targets(targets: list[str]) -> list[str]:
     return out
 
 
+def _normalize_target_scenes(raw: dict[str, str] | None, targets: list[str]) -> dict[str, str]:
+    """只保留属于本批 targets 的非空场景推荐。"""
+    allowed = set(targets)
+    out: dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        repo_key = to_repo_key(str(key or "").strip())
+        scene_id = str(value or "").strip()
+        if not repo_key or not scene_id:
+            continue
+        if repo_key not in allowed:
+            log.warning(f"org-dispatch: ignore target_scenes for non-target {repo_key}")
+            continue
+        out[repo_key] = scene_id
+    return out
+
+
+def _normalize_scene_reasons(raw: dict[str, str] | None,
+                             targets: list[str]) -> dict[str, str]:
+    allowed = set(targets)
+    out: dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        repo_key = to_repo_key(str(key or "").strip())
+        reason = str(value or "").strip()
+        if repo_key in allowed and reason:
+            out[repo_key] = reason[:500]
+    return out
+
+
 def _issue_url(repo_key: str, issue_number) -> str:
-    provider, owner, name = parse_repo_key(repo_key)
-    host = {
-        "github": "github.com",
-        "gitcode": "gitcode.com",
-        "gitee": "gitee.com",
-        "gitlab": "gitlab.com",
-    }.get(provider, "gitcode.com")
-    return f"https://{host}/{owner}/{name}/issues/{native_issue_number(issue_number)}"
+    from src.domains.mgmt import repo_web_urls
+
+    return repo_web_urls.issue_url(repo_key, issue_number)
 
 
 def _normalize_done_when(value: str, *, allow_default: bool = False) -> str:
@@ -233,16 +258,15 @@ def _pr_evidence(c, repo_key: str, issue_number) -> tuple[bool, int]:
 
 
 def _repo_bot_token(repo_key: str) -> str:
-    """按 provider 取目标仓库 bot token；未配置返回空串（不抛错）。"""
-    provider, _, _ = parse_repo_key(repo_key)
+    """取目标仓库 bot token（统一入口：provider 由 repo_key 派生、跳过 session 级）。
+
+    不用 provider 二元分支：gitee/gitlab 等卡驱动平台同样能取到；也不走
+    get_gitcode_token（第一优先级是 agent session token，scope 可能受限）。
+    """
     try:
-        if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_repo_bot_token
 
-            return get_github_token(repo_key=repo_key) or ""
-        from src.domains.mgmt.user.db import get_gitcode_token
-
-        return get_gitcode_token(repo_key=repo_key) or ""
+        return get_repo_bot_token(repo_key) or ""
     except Exception as exc:
         log.warning(f"org-dispatch: load bot token failed repo={repo_key}: {exc}")
         return ""
@@ -306,6 +330,8 @@ def _dispatch_payload(d: dict) -> dict:
         "scene_id": d["scene_id"] or "",
         "status": d["status"],
         "targets_requested": plan.get("targets") or [],
+        "target_scenes": plan.get("target_scenes") or {},
+        "scene_reasons": plan.get("scene_reasons") or {},
         "title": plan.get("title") or "",
         "context": context,
         "context_hash": d["context_hash"] or "",
@@ -315,18 +341,18 @@ def _dispatch_payload(d: dict) -> dict:
     }
 
 
-def _target_payload(t: dict) -> dict:
+def _target_payload(t: dict, dispatch_payload: dict | None = None) -> dict:
     scene_id = t["scene_id"] or ""
     scene_name = ""
     if scene_id:
         try:
-            from src.api.pipeline_config import get_pipeline_config
+            from src.domains.mgmt.pipeline_config import get_pipeline_config
 
             cfg = get_pipeline_config(scene_id, repo_key=t["repo_key"]) or {}
             scene_name = str(cfg.get("display_name") or cfg.get("name") or "")
         except Exception:
             scene_name = ""
-    return {
+    payload = {
         "repo_key": t["repo_key"],
         "scene_id": scene_id,
         "scene_name": scene_name,
@@ -339,6 +365,14 @@ def _target_payload(t: dict) -> dict:
         "started_at": t["started_at"],
         "finished_at": t["finished_at"],
     }
+    if dispatch_payload:
+        requested = (dispatch_payload.get("target_scenes") or {}).get(t["repo_key"]) or ""
+        reason = (dispatch_payload.get("scene_reasons") or {}).get(t["repo_key"]) or ""
+        if requested:
+            payload["scene_requested"] = requested
+        if reason:
+            payload["scene_reason"] = reason
+    return payload
 
 
 def get_dispatch_detail(org_id: str, dispatch_id: str) -> dict:
@@ -349,7 +383,7 @@ def get_dispatch_detail(org_id: str, dispatch_id: str) -> dict:
             raise _error(404, "ORG_REPO_NOT_FOUND", "Dispatch not found")
         targets = _get_target_rows(c, dispatch_id)
     payload = _dispatch_payload(d)
-    payload["targets"] = [_target_payload(t) for t in targets]
+    payload["targets"] = [_target_payload(t, payload) for t in targets]
     return payload
 
 
@@ -362,7 +396,7 @@ def get_dispatch_snapshot(dispatch_id: str) -> dict:
             return {}
         targets = _get_target_rows(c, str(dispatch_id))
     payload = _dispatch_payload(d)
-    payload["targets"] = [_target_payload(t) for t in targets]
+    payload["targets"] = [_target_payload(t, payload) for t in targets]
     return payload
 
 
@@ -409,28 +443,38 @@ def list_dispatches(org_id: str, limit: int = 50, offset: int = 0,
 # 场景解析
 # ---------------------------------------------------------------------------
 
-def _resolve_target_scene(repo_key: str, requested_scene_id: str = "") -> str:
-    """4 档解析目标仓库场景；解析不到返回空串。"""
-    from src.api.pipeline_config import get_scenes, scene_exists_in_repo
-    from src.domains.mgmt.user.db import get_repo_scene
+def _dispatch_plan(dispatch: dict) -> dict:
+    try:
+        plan = json.loads(dispatch.get("plan_json") or "{}")
+        return plan if isinstance(plan, dict) else {}
+    except Exception:
+        return {}
 
-    if requested_scene_id and scene_exists_in_repo(requested_scene_id, repo_key):
-        return requested_scene_id
-    try:
-        repo_scene = get_repo_scene(repo_key) or ""
-    except Exception as exc:
-        log.warning(f"org-dispatch: get_repo_scene failed repo={repo_key}: {exc}")
-        repo_scene = ""
-    if repo_scene and scene_exists_in_repo(repo_scene, repo_key):
-        return repo_scene
-    try:
-        scenes = get_scenes(repo_key=repo_key) or []
-    except Exception as exc:
-        log.warning(f"org-dispatch: get_scenes failed repo={repo_key}: {exc}")
-        scenes = []
-    if len(scenes) == 1:
-        return str(scenes[0].get("id") or "")
-    return ""
+
+def _requested_target_scene(dispatch: dict, repo_key: str) -> str:
+    """单个 target 的显式场景：per-target 优先，批次级 scene_id 兼容兜底。"""
+    plan = _dispatch_plan(dispatch)
+    target_scenes = plan.get("target_scenes") or {}
+    if isinstance(target_scenes, dict):
+        picked = str(target_scenes.get(repo_key) or "").strip()
+        if picked:
+            return picked
+    return str(dispatch.get("scene_id") or "").strip()
+
+
+def _resolve_target_scene_detail(repo_key: str, requested_scene_id: str = "",
+                                 *, user: dict | None = None) -> dict:
+    """解析目标仓库场景；显式推荐不可执行时回退默认/唯一场景。"""
+    from src.domains.mgmt.org_dispatch_scene import resolve_target_scene_detail
+
+    return resolve_target_scene_detail(repo_key, requested_scene_id, user=user)
+
+
+def _resolve_target_scene(repo_key: str, requested_scene_id: str = "",
+                          *, user: dict | None = None) -> str:
+    """4 档解析目标仓库场景；解析不到返回空串（兼容旧调用方）。"""
+    resolved = _resolve_target_scene_detail(repo_key, requested_scene_id, user=user)
+    return str(resolved.get("scene_id") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -502,14 +546,26 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                               org_title: str = "",
                               description: str, context: dict | str | None,
                               actor_id: str, operator_name: str,
-                              snapshot_id: int = 0) -> dict:
+                              snapshot_id: int = 0,
+                              actor_user: dict | None = None) -> dict:
     """为单个目标创建/复用子 Issue，返回更新后的 target 行。"""
-    from src.api.issues_center import TaskCreateBody, create_task_via_issue
-
     repo_key = target["repo_key"]
-    scene_id = _resolve_target_scene(repo_key, dispatch.get("scene_id") or "")
+    requested_scene = _requested_target_scene(dispatch, repo_key)
+    import asyncio
+    resolved = await asyncio.to_thread(
+        _resolve_target_scene_detail, repo_key, requested_scene, user=actor_user)
+    scene_id = str(resolved.get("scene_id") or "")
     if not scene_id:
-        return _mark_target_failed(target["id"], "NO_TARGET_SCENE: Target repository has no available scene")
+        _warnings = [str(w) for w in (resolved.get("warnings") or []) if str(w).strip()]
+        _detail = "；".join(_warnings[:3])
+        _msg = "NO_TARGET_SCENE: Target repository has no available scene"
+        if _detail:
+            _msg = f"{_msg}（{_detail}）"
+        return _mark_target_failed(target["id"], _msg[:500])
+    log.info(
+        f"org-dispatch: target scene resolved dispatch={dispatch.get('id')} "
+        f"repo={repo_key} requested={requested_scene or '-'} scene={scene_id} "
+        f"source={resolved.get('source') or '-'}")
 
     token = _repo_bot_token(repo_key)
     if not token:
@@ -520,19 +576,19 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
     child_description = (description or "")
     if scope_md:
         child_description = child_description.rstrip() + "\n" + scope_md
-    body = TaskCreateBody(
-        repo_key=repo_key,
-        title=child_title,
-        description=_child_description(
+    body = {
+        "repo_key": repo_key,
+        "title": child_title,
+        "description": _child_description(
             dispatch["org_repo_key"], native_issue_number(dispatch["org_issue_number"]),
             org_title or title, child_description, context,
             org_id=str(dispatch.get("org_id") or ""),
             dispatch_id=str(dispatch.get("id") or "")),
-        assignee="",
-        scene_id=scene_id,
-        is_subtask_mode=0,
-        org_context_snapshot_id=str(snapshot_id or ""),
-    )
+        "assignee": "",
+        "scene_id": scene_id,
+        "is_subtask_mode": 0,
+        "org_context_snapshot_id": str(snapshot_id or ""),
+    }
     _, owner, _ = parse_repo_key(repo_key)
     internal_user = {
         "id": actor_id,
@@ -550,8 +606,9 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                 "dispatch_id": str(dispatch.get("id") or ""),
                 "org_issue": native_issue_number(dispatch.get("org_issue_number")),
         }):
-            result = await create_task_via_issue(body, user=internal_user)
-        issue_number = int(result.get("issue_number") or 0)
+            result = await runtime_public.create_task_via_issue(body, user=internal_user)
+        # gitee 的 issue 标识是字符串（IK...）：保持原生形态，禁止 int() 强转。
+        issue_number = native_issue_number(result.get("issue_number"))
         created = bool(result.get("created", True))
         task_id = int(result.get("task_id") or result.get("issue_id") or 0)
     except HTTPException as exc:
@@ -560,7 +617,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         if not reused:
             msg = detail.get("message") or str(exc.detail or exc)
             return _mark_target_failed(target["id"], f"CREATE_FAILED: {msg}"[:500])
-        issue_number = int(reused)
+        issue_number = native_issue_number(reused)
         task_id = 0
         created = False
         log.info(f"org-dispatch: reuse child issue #{issue_number} repo={repo_key} "
@@ -569,7 +626,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         log.warning(f"org-dispatch: create child issue failed repo={repo_key}: {exc}")
         return _mark_target_failed(target["id"], f"CREATE_FAILED: {exc}"[:500])
 
-    if issue_number <= 0:
+    if not is_actionable_issue_number(issue_number):
         return _mark_target_failed(target["id"], "CREATE_FAILED: 建单结果缺少 issue_number")
 
     with db_lock:
@@ -633,11 +690,21 @@ def _mark_target_failed(target_id: str, error: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _lookup_org_issue(org_id: str, org_issue_number) -> dict | None:
-    """组织需求必须位于该组织关联仓库（org_id 权威来自 managed_repos）。"""
+    """组织需求必须位于该组织关联仓库（org_id 权威来自 managed_repos）。
+
+    组织仓库（``is_org_repo=1``）优先：同一组织下多个关联仓库常见相同
+    issue_number（各仓 #1），按 full_name 顺序遍历会先命中子仓库，导致批次
+    ``org_repo_key`` 指向子仓库——聚合评论/状态归一就写到子仓 Issue 上。
+    """
     from src.domains.mgmt.user.org_db import list_org_repos
 
     num = native_issue_number(org_issue_number)
-    for repo in list_org_repos(org_id) or []:
+    repos = list_org_repos(org_id) or []
+    repos.sort(key=lambda r: (
+        0 if str(r.get("is_org_repo") or "0") in ("1", "True", "true") else 1,
+        str(r.get("full_name") or ""),
+    ))
+    for repo in repos:
         repo_key = str(repo.get("repo_key") or "")
         if not repo_key:
             continue
@@ -699,6 +766,8 @@ def _find_same_dispatch(c, org_id: str, org_issue_number,
 async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
                           context: dict | str | None, title: str, description: str,
                           scene_id: str, user: dict,
+                          target_scenes: dict[str, str] | None = None,
+                          scene_reasons: dict[str, str] | None = None,
                           done_when: str = DONE_WHEN_ISSUE_DONE) -> tuple[dict, int]:
     """创建下派批次并逐目标建子 Issue。返回 (payload, http_status)。"""
     targets = _normalize_targets(targets)
@@ -747,6 +816,8 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
             "No target repository met the confidence threshold; specify targets explicitly or enrich the repository map" + _hint,
         )
     _validate_targets(org_id, targets)
+    target_scenes = _normalize_target_scenes(target_scenes, targets)
+    scene_reasons = _normalize_scene_reasons(scene_reasons, targets)
 
     actor_id = str((user or {}).get("id") or "")
     operator_name = str((user or {}).get("username") or "")
@@ -760,6 +831,8 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
         "org_title": org_title,
         "description": description or "",
         "scene_id": scene_id or "",
+        "target_scenes": target_scenes,
+        "scene_reasons": scene_reasons,
     }
     if routing:
         _plan_obj["routing"] = routing
@@ -848,6 +921,7 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
         "org_repo_key": org_issue.get("repo_key") or "",
         "targets": targets,
         "scene_id": scene_id or "",
+        "target_scenes": target_scenes,
     })
 
     for target in target_rows:
@@ -857,6 +931,7 @@ async def create_dispatch(org_id: str, *, org_issue_number, targets: list[str],
                 description=description, context=context, actor_id=actor_id,
                 operator_name=operator_name,
                 snapshot_id=str((dispatch or {}).get("_snapshot_id") or ""),
+                actor_user=user,
             )
         except Exception as exc:
             log.warning(f"org-dispatch: target {target['repo_key']} failed: {exc}")
@@ -1074,7 +1149,7 @@ def _timeout_targets(dispatch_id: str) -> None:
         db.commit()
 
 
-def _terminal_dispatches_pending_aggregate(c) -> list[int]:
+def _terminal_dispatches_pending_aggregate(c, limit: int = 200) -> list[int]:
     """终态批次中尚未完成聚合触发的 dispatch id（幂等键 dispatch_id+terminal_status）。
 
     除「从未抢占」外，也纳入「已抢占但事件 seq 仍为 0」的台账行：进程若在
@@ -1089,8 +1164,9 @@ def _terminal_dispatches_pending_aggregate(c) -> list[int]:
         "  ON a.dispatch_id=d.id AND a.terminal_status=d.status "
         f"WHERE d.status IN ({placeholders}) "
         "AND (a.id IS NULL OR a.seq=0 "
-        "     OR (a.comment_posted=0 AND a.error LIKE 'comment:%'))",
-        tuple(DISPATCH_TERMINAL),
+        "     OR (a.comment_posted=0 AND a.error LIKE 'comment:%')) "
+        "LIMIT ?",
+        (*DISPATCH_TERMINAL, max(1, int(limit))),
     )
     return [str(r[0] or "") for r in c.fetchall()]
 
@@ -1172,9 +1248,8 @@ def _maybe_trigger_terminal_aggregate(dispatch_id: str, status: str) -> None:
         return
     record = {"status": "finalized", "error": ""}
     try:
-        from src.api.issues_center import finalize_org_issue_aggregation
-
-        finalized = finalize_org_issue_aggregation(dispatch, targets, status)
+        finalized = runtime_public.finalize_org_issue_aggregation(
+            dispatch, targets, status)
         record["comment_posted"] = 1 if finalized.get("comment_posted") else 0
         record["issue_status"] = str(finalized.get("issue_status") or "")
         record["status"] = str(finalized.get("action") or "finalized")
@@ -1184,9 +1259,7 @@ def _maybe_trigger_terminal_aggregate(dispatch_id: str, status: str) -> None:
         log.warning(f"org-dispatch: finalize org issue failed dispatch={dispatch_id}: {exc}")
         record["error"] = str(exc)[:500]
     try:
-        from src.api.a2a_dispatch import trigger_org_aggregate
-
-        triggered = trigger_org_aggregate(dispatch, targets, status)
+        triggered = runtime_public.trigger_org_aggregate(dispatch, targets, status)
         if triggered.get("seq"):
             record["seq"] = int(triggered["seq"])
     except Exception as exc:
@@ -1202,22 +1275,21 @@ def _target_task_digests(target: dict) -> list[tuple[dict, dict]]:
     一个子 Issue 常有 coding/qa/sre 多次执行：分别保留「改了什么 / 验证了什么 /
     部署了什么」，只取最新一条会丢掉实现细节。
     """
-    from src.api.event_store import get_issue_task_digests, get_latest_task_digest
     from src.kernel.context_digest import build_digest
 
     t = target or {}
     repo_key = str(t.get("repo_key") or "")
     issue_no = native_issue_number(t.get("child_issue_number"))
     issue_ref = f"#{issue_no}" if issue_no else ""
-    memories = get_issue_task_digests(repo_key, issue_ref, limit=3)
+    memories = runtime_public.get_issue_task_digests(repo_key, issue_ref, limit=3)
     task_ref = str(t.get("child_task_id") or "")
     if task_ref.startswith("t_"):
-        selected = get_latest_task_digest(repo_key, "", task_id=task_ref)
+        selected = runtime_public.get_latest_task_digest(repo_key, "", task_id=task_ref)
         if selected and selected.get("task_id") not in {
                 m.get("task_id") for m in memories}:
             memories.insert(0, selected)
     if not memories:
-        latest = get_latest_task_digest(repo_key, issue_ref)
+        latest = runtime_public.get_latest_task_digest(repo_key, issue_ref)
         if latest:
             memories = [latest]
     out: list[tuple[dict, dict]] = []
@@ -1488,11 +1560,13 @@ def sweep_once() -> int:
             "SELECT id FROM grape_t_org_dispatch WHERE status IN ('dispatching','running','aggregating') "
             "UNION "
             "SELECT DISTINCT dispatch_id FROM grape_t_org_dispatch_target "
-            "WHERE status IN ('pending','creating','running')"
+            "WHERE status IN ('pending','creating','running') "
+            "LIMIT ?",
+            (SWEEP_BATCH_LIMIT,),
         )
         dispatch_ids = [str(r[0] or "") for r in c.fetchall()]
         # Issue #2251：已进入终态但尚未触发聚合收口的批次
-        pending_aggregate = _terminal_dispatches_pending_aggregate(c)
+        pending_aggregate = _terminal_dispatches_pending_aggregate(c, SWEEP_BATCH_LIMIT)
     from src.kernel import org_metrics
     org_metrics.set_dispatch_inflight(len(dispatch_ids))
     for dispatch_id in dispatch_ids:
@@ -1533,6 +1607,12 @@ async def org_dispatch_sweep_loop() -> None:
             await asyncio.to_thread(maybe_purge_expired_org_records)
         except Exception as exc:
             log.warning(f"org-dispatch retention error: {exc}")
+        try:
+            from src.domains.mgmt.org_provision import retry_pending_branch_provisions
+
+            await asyncio.to_thread(retry_pending_branch_provisions)
+        except Exception as exc:
+            log.warning(f"org-provision branch retry error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1653,9 +1733,7 @@ def _cancel_inflight_agents(repo_key: str, issue_number) -> int:
             pass
         try:
             if at_seq:
-                from src.api.event_store import update_event_status
-
-                update_event_status(at_seq, "cancelled")
+                runtime_public.update_event_status(at_seq, "cancelled")
         except Exception:
             pass
     if running:
@@ -1670,7 +1748,9 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
     """重新触发已存在子 Issue 的目标仓库场景。
 
     复用 pipeline 入口（issue_opened 原生 payload + 内部触发标记），不新建 Issue；
-    先清该 Issue 的活跃守卫，避免重试被旧 running 事件挡住。
+    先清该 Issue 的活跃守卫，避免重试被旧 running 事件挡住。事件头与载荷按平台卡
+    的 `webhook_dialect` 派生（GitHub/GitLab/Gitee 各有自己的事件族），不再按
+    provider 二元分支写死 X-GitHub-Event / X-Gitcode-Event。
     """
     provider, owner, name = parse_repo_key(repo_key)
     num = native_issue_number(issue_number)
@@ -1678,7 +1758,21 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
         runtime_public.clear_event_active_guard(repo_key, f"#{num}")
     except Exception:
         pass
-    if provider == "github":
+    card = None
+    try:
+        from src.domains.runtime.public import get_platform_card
+
+        card = get_platform_card(provider)
+    except Exception as exc:  # noqa: BLE001 - 卡缺失按不可触发处理，不误用别家协议
+        log.warning(f"org-dispatch: platform card lookup failed provider={provider!r}: {exc}")
+    dialect = str(getattr(card, "webhook_dialect", "") or "").strip().lower()
+    header_name = str(getattr(card, "event_header", "") or "").strip()
+    if not header_name or dialect not in ("github_web", "gitee_v5", "gitlab_v4"):
+        log.warning(f"org-dispatch: cannot trigger child issue provider={provider!r} "
+                    f"dialect={dialect!r} (platform card missing/unsupported)")
+        return {"ok": False, "seq": 0,
+                "reason": "platform_card_webhook_dialect_unavailable"}
+    if dialect == "github_web":
         payload = {
             "action": "opened",
             "issue": {"number": num, "title": "", "user": {}},
@@ -1686,7 +1780,17 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
             "sender": {},
             "_grape_internal_trigger": True,
         }
-        headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
+        header_value = "issues"
+    elif dialect == "gitlab_v4":
+        payload = {
+            "object_kind": "issue",
+            "object_attributes": {"iid": num, "title": "", "action": "open",
+                                  "state": "opened"},
+            "project": {"path_with_namespace": f"{owner}/{name}"},
+            "user": {},
+            "_grape_internal_trigger": True,
+        }
+        header_value = "Issue Hook"
     else:
         payload = {
             "object_kind": "issue",
@@ -1695,7 +1799,8 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
             "user": {},
             "_grape_internal_trigger": True,
         }
-        headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
+        header_value = "issue_opened"
+    headers = {"Content-Type": "application/json", header_name: header_value}
     result = runtime_public.run_pipeline(
         json.dumps(payload).encode(), headers,
         account=repo_key, repo_key_override=repo_key)
@@ -1749,8 +1854,13 @@ async def retry_target(org_id: str, dispatch_id: str, repo_key: str, *, user: di
 
     if native_issue_number(target["child_issue_number"]):
         issue_number = native_issue_number(target["child_issue_number"])
-        scene_id = target["scene_id"] or _resolve_target_scene(
-            repo_key, dispatch.get("scene_id") or "")
+        scene_id = str(target["scene_id"] or "")
+        if not scene_id:
+            _requested = _requested_target_scene(dispatch, repo_key)
+            import asyncio
+            _resolved = await asyncio.to_thread(
+                _resolve_target_scene_detail, repo_key, _requested, user=user)
+            scene_id = str(_resolved.get("scene_id") or "")
         if not scene_id:
             _mark_target_failed(str(target["id"] or ""), "NO_TARGET_SCENE: Target repository has no available scene")
             _aggregate_dispatch(dispatch_id, actor_id=actor_id)
@@ -1799,6 +1909,7 @@ async def retry_target(org_id: str, dispatch_id: str, repo_key: str, *, user: di
             description=plan.get("description") or "", context=context,
             actor_id=actor_id,
             operator_name=str((user or {}).get("username") or ""),
+            actor_user=user,
         )
 
     _aggregate_dispatch(dispatch_id, actor_id=actor_id)

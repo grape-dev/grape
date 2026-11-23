@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 392,
-  "min_endpoint_count": 352,
+  "endpoint_count": 396,
+  "min_endpoint_count": 356,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "合并 arch-weekly-11-yaw 分支：新增 /api/repos/create-targets 与 /api/repos/{provider}/connection 两个对外端点（Issue #3580 建仓空间/连接状态），其余端点与 arch-weekly-11 基线一致",
-  "source_commit": "79e23de5a"
+  "change_reason": "merge arch-weekly-11 80b1b8e92: keep yaw create-targets/connection endpoints together with org scene-catalog/repo-map/patrol endpoints",
+  "source_commit": "084561b20"
 }

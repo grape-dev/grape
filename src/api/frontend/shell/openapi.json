@@ -25089,6 +25089,110 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/orgs/{org_id}/repo-map/summary": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get the aggregate repository map summary",
+        "operationId": "org_repo_map_summary",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map/sync": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Ensure repository map documents exist in the org repository",
+        "operationId": "org_repo_map_sync",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
     "/api/orgs/{org_id}/repo-map/{repo_key}": {
       "get": {
         "tags": [
@@ -25316,6 +25420,79 @@
               "type": "string",
               "default": "",
               "title": "Org Issue Number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/dispatch/scene-catalog": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read linked repository scene catalog for dispatch",
+        "description": "组织下派前的场景目录：只返回关联仓库的场景元数据，不返回敏感配置。\n\n``repo_key`` 为空返回全部关联仓库（排除组织自动仓库）；``include=executable``\n额外返回每个场景的可执行性预检查结果。",
+        "operationId": "org_dispatches_scene_catalog",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Include"
             }
           }
         ],
@@ -28790,6 +28967,57 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/patrol/pipeline-advance": {
+      "post": {
+        "tags": [
+          "patrol"
+        ],
+        "summary": "Run one deterministic pipeline advance round",
+        "description": "Manually run the DB-driven convergence pass: completed tasks whose Issue stage is still the completed agent are advanced by scene next/handoff (idempotent, independent of skills or in-process completion hooks). Does not require an explicit agent handoff; safe to call repeatedly.",
+        "operationId": "patrol_pipeline_advance_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineAdvanceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/im/status": {
       "get": {
         "tags": [
@@ -30602,6 +30830,20 @@
             "type": "string",
             "title": "Scene Id",
             "default": ""
+          },
+          "target_scenes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Target Scenes"
+          },
+          "scene_reasons": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Scene Reasons"
           },
           "done_when": {
             "type": "string",
@@ -32760,6 +33002,28 @@
           "pinned"
         ],
         "title": "PinSceneRequest"
+      },
+      "PipelineAdvanceBody": {
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "title": "Limit",
+            "default": 200
+          },
+          "lookback_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lookback Hours"
+          }
+        },
+        "type": "object",
+        "title": "PipelineAdvanceBody"
       },
       "PluginInstallBody": {
         "properties": {
@@ -35184,152 +35448,14 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [
-      "/admin/sandbox/audit/{task_id}",
-      "/admin/sandbox/audit/{task_id}/alerts",
-      "/admin/sandbox/config",
-      "/admin/sandbox/config/{config_id}",
-      "/admin/sandbox/external-api-audit/{task_id}",
-      "/admin/sandbox/paths",
-      "/admin/sandbox/paths/{path_id}",
-      "/admin/sandbox/whitelist",
-      "/admin/sandbox/whitelist/{rule_id}",
-      "/api/auth/platform-links",
-      "/api/categories/tree",
-      "/api/chat/im/wechat/login/start",
-      "/api/chat/im/wechat/login/status",
-      "/api/dashboard/efficiency",
-      "/api/dashboard/efficiency/board",
-      "/api/dashboard/efficiency/daily",
-      "/api/dashboard/efficiency/issues",
-      "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs",
-      "/api/git-repo/{owner}/{repo}/commits/{ref}/status",
-      "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean",
-      "/api/im/dingtalk/card-setup",
-      "/api/im/installations",
-      "/api/im/installations/{installation_id}",
-      "/api/im/notify-test",
-      "/api/im/outbound",
-      "/api/im/outbound/{out_track_id}/retry",
-      "/api/im/status",
-      "/api/issues/{issue_id}/reopen",
-      "/api/issues/{issue_id}/terminal-disposition",
-      "/api/orgs/repo-namespaces",
-      "/api/orgs/{org_id}/audit",
-      "/api/orgs/{org_id}/context",
-      "/api/orgs/{org_id}/context/{ctx_id}",
-      "/api/orgs/{org_id}/context/{ctx_id}/deprecate",
-      "/api/orgs/{org_id}/context/{ctx_id}/publish",
-      "/api/orgs/{org_id}/dispatches",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/context",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry",
-      "/api/orgs/{org_id}/knowledge",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish",
-      "/api/orgs/{org_id}/ov-credentials",
-      "/api/orgs/{org_id}/ov-credentials/{user_id}",
-      "/api/orgs/{org_id}/provision",
-      "/api/orgs/{org_id}/provision/repo",
-      "/api/orgs/{org_id}/provision/retry",
-      "/api/orgs/{org_id}/repo-analysis/automation/ensure",
-      "/api/orgs/{org_id}/repo-analysis/context/{repo_key}",
-      "/api/orgs/{org_id}/repo-analysis/docs",
-      "/api/orgs/{org_id}/repo-analysis/run",
-      "/api/orgs/{org_id}/repo-analysis/status",
-      "/api/orgs/{org_id}/repo-analysis/targets",
-      "/api/orgs/{org_id}/repo-map",
-      "/api/orgs/{org_id}/repo-map/analyze",
-      "/api/orgs/{org_id}/repo-map/recall",
-      "/api/orgs/{org_id}/repo-map/{repo_key}",
-      "/api/orgs/{org_id}/repo-map/{repo_key}/ai-result",
-      "/api/orgs/{org_id}/repo-map/{repo_key}/analyze",
-      "/api/orgs/{org_id}/repos",
-      "/api/orgs/{org_id}/repos/available",
-      "/api/orgs/{org_id}/repos/batch",
-      "/api/orgs/{org_id}/repos/{repo_key}",
-      "/api/orgs/{org_id}/repos/{repo_key}/transfer",
-      "/api/pipeline/handoff",
-      "/api/plugin-market/validate",
-      "/api/plugin-market/validate-package",
-      "/api/plugins",
-      "/api/plugins/agent-defaults",
-      "/api/plugins/agent/installed",
-      "/api/plugins/agent/report-missing",
-      "/api/plugins/by-id/{plugin_id}",
-      "/api/plugins/by-id/{plugin_id}/download",
-      "/api/plugins/by-id/{plugin_id}/rollback",
-      "/api/plugins/by-id/{plugin_id}/versions",
-      "/api/plugins/categories",
-      "/api/plugins/install",
-      "/api/plugins/installed",
-      "/api/plugins/search",
-      "/api/plugins/upload",
-      "/api/plugins/validate-consistency",
-      "/api/plugins/{name}",
-      "/api/plugins/{name}/config",
-      "/api/plugins/{name}/credentials",
-      "/api/plugins/{name}/skills",
-      "/api/plugins/{plugin_id}/like",
-      "/api/repos/create-targets",
-      "/api/repos/{provider}/connection",
-      "/api/runtime/admin/sandbox/engines",
-      "/api/runtime/cloud-sandboxes",
-      "/api/runtime/cloud-sandboxes/{sandbox_id}",
-      "/api/runtime/issues/takeover-context",
-      "/api/runtime/tasks/{task_id}/detail",
-      "/api/scenes/engine-selector-preview",
-      "/api/scenes/skill-scope-audit",
-      "/api/scenes/tag-suggest",
-      "/api/scenes/{scene_id}/advanced-options/reveal",
-      "/api/scenes/{scene_id}/copy",
-      "/api/scenes/{scene_id}/pin",
-      "/api/settings/agent-runtimes/{rid}/readd",
-      "/api/settings/llm-credentials",
-      "/api/settings/llm-credentials/repo",
-      "/api/settings/llm-credentials/repo/{cred_id}",
-      "/api/settings/llm-credentials/repo/{cred_id}/toggle",
-      "/api/settings/llm-credentials/{cred_id}",
-      "/api/settings/llm-engine-types",
-      "/api/settings/sandbox-engines",
-      "/api/settings/sandbox-platforms",
-      "/api/settings/sandbox-provider-configs",
-      "/api/settings/sandbox-provider-configs/{provider}",
-      "/api/settings/sandbox-providers",
-      "/api/settings/sandbox-providers/{provider_id}",
-      "/api/settings/sandbox-providers/{provider_id}/health",
-      "/api/settings/sandbox-providers/{provider_id}/scan-templates",
-      "/api/settings/sandbox-providers/{provider_id}/toggle",
-      "/api/settings/sandbox-templates",
-      "/api/settings/sandbox-templates/{tpl_id}",
-      "/api/settings/sandbox-templates/{tpl_id}/bind-engine",
-      "/api/settings/sandbox-templates/{tpl_id}/bind-engine/{engine_type}",
-      "/api/settings/sandbox-templates/{tpl_id}/check",
-      "/api/settings/sandbox-templates/{tpl_id}/toggle",
-      "/api/skills/by-id/{skill_id}/comments",
-      "/api/skills/by-id/{skill_id}/files",
-      "/api/skills/by-id/{skill_id}/related",
-      "/api/skills/by-id/{skill_id}/versions",
-      "/api/skills/tag-suggest",
-      "/api/skills/{skill_id}",
-      "/api/takeover/sessions",
-      "/api/takeover/sessions/{session_id}",
-      "/api/takeover/sessions/{session_id}/abort",
-      "/api/takeover/sessions/{session_id}/attach",
-      "/api/takeover/sessions/{session_id}/finish",
-      "/api/takeover/sessions/{session_id}/progress",
-      "/api/takeover/sessions/{session_id}/request-finish"
-    ],
+    "added": [],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 392,
+  "x-endpoint-count": 396,
   "x-groups": [
     "a2a",
     "agents",
@@ -35364,7 +35490,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "ed4b75b90",
-  "x-generated-at": "2026-11-22T20:39:51.225438+00:00",
-  "tags": []
+  "x-source-commit": "084561b20",
+  "x-generated-at": "2026-11-23T02:07:53.820333+00:00"
 }

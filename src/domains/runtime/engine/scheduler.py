@@ -63,6 +63,10 @@ ZOMBIE_YOUNG_GRACE_SECONDS = int(os.environ.get("ZOMBIE_YOUNG_GRACE_SECONDS", "1
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
 
+# 组织仓库 AI 分析受管任务使用的 skill（与 mgmt.org_analysis.ANALYSIS_SKILL 同值）。
+# 跨域不直接 import mgmt 常量，避免 runtime→mgmt 依赖；仅用于 prompt 输出要求判定。
+_ORG_ANALYSIS_SKILL = "org-repo-analyzer"
+
 
 def _autopilot_issue_ref(task_id) -> str:
     """P8-consistency：autopilot 任务（agent_type='issue'）的 issue 统计回链键。
@@ -334,15 +338,9 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
         parts.append("")
 
     _run_params = task.get("_run_params") or {}
-    _is_org_analysis = False
-    try:
-        for _f in json.loads(task.get("custom_fields") or "[]"):
-            if str(_f.get("name") or "") == "GRAPE_MANAGED_BY" and \
-                    str(_f.get("value") or "") == "org-analysis":
-                _is_org_analysis = True
-                break
-    except Exception as _ce:  # noqa: BLE001
-        log.debug(f"Autopilot custom_fields parse skipped: {_ce}")
+    # 组织分析任务不再用 custom_fields 里的 GRAPE_MANAGED_BY 标记（GRAPE_* 是保留
+    # 环境变量，前端不可保存、执行侧也不注入）。受管身份改由 skill 判定。
+    _is_org_analysis = str(task.get("skill_name") or "") == _ORG_ANALYSIS_SKILL
     if _run_params:
         parts.append("\n## 本次运行参数（JSON）\n")
         parts.append("```json")

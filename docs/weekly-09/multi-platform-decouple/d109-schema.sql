@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     workflows_write     INTEGER NOT NULL DEFAULT 0,    -- 1=允许写 .github/workflows（能力位；第二批迁能力矩阵）
     legacy_token_symbol TEXT NOT NULL DEFAULT '',      -- 历史 token 取用函数名（deps.py PEP 562 动态解析用；兼容垫片，勿删）
     pat_create_url       TEXT NOT NULL DEFAULT '',     -- PAT 创建页直达链接（原 caps 字段，2026-11-14 合表）
+    ca_bundle            TEXT NOT NULL DEFAULT '',     -- Issue #3580：实例 TLS CA（PEM 绝对路径，仅 git 传输）
     token_storage_field  TEXT NOT NULL DEFAULT '',     -- managed_repos bot token 物理列名（''=无）
     webhook_token_field  TEXT NOT NULL DEFAULT '',     -- managed_repos webhook token 物理列名（''=无）
     bot_username         TEXT NOT NULL DEFAULT '',     -- 配置声明的默认 bot 账号名

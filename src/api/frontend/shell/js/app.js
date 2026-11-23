@@ -194,12 +194,19 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
   // 能回到来源需求，而不是先卡在目标仓 Dashboard）。
   function _applyRepoState(repo) {
     if (!repo || !repo.fullName) return null;
-    const parts = String(repo.fullName).split('/');
-    if (parts.length < 2) return null;
+    // 平台前缀归一：调用方可能把 repo_key（"gitee:owner/repo"）直接当 full_name 传进来。
+    // 前缀一旦落进 currentRepo，顶栏「当前项目」和仓库级接口的 owner 段都会带前缀，
+    // 所以在这里（唯一的只改上下文入口）统一剥掉，而不是靠各调用方自己记得剥。
+    const _full = stripRepoPrefix(String(repo.fullName));
+    const _seg = _full.split('/');
+    if (_seg.length < 2) return null;
+    const _owner = stripRepoPrefix(String(repo.owner || '')) ||
+      (_seg.length === 2 ? _seg[0] : _seg.slice(0, -1).join('/'));
+    const _name = repo.name || (_seg.length === 2 ? _seg[1] : _seg[_seg.length - 1]);
     const state = {
-      fullName: String(repo.fullName),
-      owner: repo.owner || parts[0],
-      name: repo.name || parts[1],
+      fullName: _full,
+      owner: _owner,
+      name: _name,
       repoKey: repo.repoKey || repo.repo_key || '',
     };
     if (repo.isOrgRepo !== undefined) state.isOrgRepo = !!repo.isOrgRepo;
@@ -252,6 +259,23 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
     try {
       const r = JSON.parse(sessionStorage.getItem('currentRepo'));
       if (r && r.fullName) {
+        // 平台前缀自愈：历史快照 / 未走 _applyRepoState 的写入方（Vue chunk 直写
+        // sessionStorage）可能把 repo_key 当 fullName 存成 "gitee:owner/repo"。
+        // 读取时统一剥掉，否则顶栏「当前项目」会显示带前缀的仓库名，工作台请求的
+        // owner 段也跟着带前缀——刷新恰好被仓库清单重新解析才「自己好了」。
+        const _bareFull = stripRepoPrefix(String(r.fullName));
+        if (_bareFull !== String(r.fullName)) {
+          r.fullName = _bareFull;
+          const _bs = _bareFull.split('/');
+          if (_bs.length === 2) {
+            r.owner = _bs[0];
+            r.name = _bs[1];
+          } else if (_bs.length > 2) {
+            r.owner = _bs.slice(0, -1).join('/');
+            r.name = _bs[_bs.length - 1];
+          }
+          sessionStorage.setItem('currentRepo', JSON.stringify(r));
+        }
         // GitCode 仓库 name 是显示名（可≠URL path，如 shelltest 显示 skillstest）——
         // 所有 API 路径/链接都用 owner/name 拼接，必须强制 URL 语义（fullName 拆分），
         // 否则旧脏 name 导致 /api/pipeline/{owner}/{name} 查空（见 repo_manager.fetch_repos_with_role）
@@ -469,9 +493,16 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
     try {
       const owner = repo.owner || String(repo.full_name || '').split('/')[0] || '';
       const name = repo.name || String(repo.full_name || '').split('/')[1] || '';
+      const _rawFull = String(repo.full_name || '');
+      const _bareFull = stripRepoPrefix(_rawFull) || (stripRepoPrefix(owner) + '/' + name);
+      // owner 以剥净后的全称反推（GitLab 子组 owner 可含 '/'，不能只取首段）
+      const _ownerBare = (name && _bareFull.length > name.length + 1) &&
+        _bareFull.slice(-(name.length + 1)) === '/' + name
+        ? _bareFull.slice(0, -(name.length + 1))
+        : stripRepoPrefix(owner);
       const state = {
-        fullName: repo.full_name || (owner + '/' + name),
-        owner: owner,
+        fullName: _bareFull,
+        owner: _ownerBare,
         name: name,
         repoKey: repo.repo_key || ''
       };
@@ -1595,15 +1626,25 @@ function loadAgentTypes() {
     }
 
     var _knownOrg = (window._orgMetaById || {})[String(orgId)];
-    if (_knownOrg) {
+    // 元信息缓存命中还不够：必须以 __orgsList（_ensureOrgContext 的真源）为准。
+    // 新建组织可能先进了 _orgMetaById，但 __orgsList 还是创建前的旧列表；
+    // 此时走快路径会让 _ensureOrgContext 判定 id 无效 → 回落个人空间。
+    var _knownInList = (window.__orgsList || []).some(function(o) {
+      return String(o && o.id) === String(orgId);
+    });
+    if (_knownOrg && _knownInList) {
       if (!_knownOrg.is_personal) { _enterTeamOrgWorkbench(); return; }
       _loadOrgReposForSwitch(true);
       return;
     }
     // 组织信息还没缓存（例如从其它页面直接切）：补一次 /orgs 再决定落点。
+    // 必须同步刷新 window.__orgsList：否则 _ensureOrgContext / _updateTbOrgName
+    // 仍读创建前的旧列表，判定新 org id 无效后回落到个人组织，并把
+    // current_org_id 覆写为个人组织（创建组织后“回到个人空间”的根因）。
     API.get('/orgs').then(function(orgs) {
-      _cacheOrgs(orgs);
-      var target = (orgs || []).find(function(o) { return String(o.id) === String(orgId); });
+      window.__orgsList = orgs || [];
+      _cacheOrgs(window.__orgsList);
+      var target = (window.__orgsList).find(function(o) { return String(o.id) === String(orgId); });
       if (target && !target.is_personal) { _enterTeamOrgWorkbench(); return; }
       _loadOrgReposForSwitch(true);
     }).catch(function() { _loadOrgReposForSwitch(true); });
@@ -1836,12 +1877,13 @@ function loadAgentTypes() {
       goToRepos();
       return;
     }
-    const parts = val.split('/');
-    const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
-    const _isOrg = !!(window._managedRepoFlags && window._managedRepoFlags[val]);
-    const _repoOrgId = (window._managedRepoOrgMap && window._managedRepoOrgMap[val]) || '';
+    const _val = stripRepoPrefix(val);
+    const parts = _val.split('/');
+    const _rk = (window._managedRepoMap && window._managedRepoMap[_val]) || '';
+    const _isOrg = !!(window._managedRepoFlags && window._managedRepoFlags[_val]);
+    const _repoOrgId = (window._managedRepoOrgMap && window._managedRepoOrgMap[_val]) || '';
     sessionStorage.setItem('currentRepo', JSON.stringify({
-      fullName: val, owner: parts[0], name: parts[1], repoKey: _rk,
+      fullName: _val, owner: parts[0], name: parts[1], repoKey: _rk,
       isOrgRepo: _isOrg, orgId: _repoOrgId
     }));
     // 已有组织上下文（含个人）时不要被仓库归属反向改写：个人空间允许选择
@@ -1852,7 +1894,7 @@ function loadAgentTypes() {
     _syncAppPath(parts[0], parts[1]);   // 路径跟随仓库，深链分享不会指错仓
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
-    if (sel) sel.value = val;
+    if (sel) sel.value = _val;
     _updateRepoOrgBadge();
     _updateTbOrgName();
     nav('dash');

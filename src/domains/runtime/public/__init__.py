@@ -1914,7 +1914,10 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("runtime"))}
 
 
-__all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_session', 'update_agent_session_fields', 'delete_agent_sessions', 'update_issue_agent_session_fields', "available", "list_runtimes", "list_runtimes_rows", "get_runtime",
+__all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
+           'finalize_org_issue_aggregation', 'get_issue_task_digests',
+           'get_latest_task_digest', 'update_event_status', 'trigger_org_aggregate',
+           'ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_session', 'update_agent_session_fields', 'delete_agent_sessions', 'update_issue_agent_session_fields', "available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
@@ -7134,6 +7137,14 @@ def node_matches_agent_role(node, role) -> bool:
     return _impl(node, role)
 
 
+def precheck_scene(scene_id: str, repo_key: str = "", user: dict | None = None,
+                   explicit: bool = True) -> dict:
+    """场景可执行性预校验（只读；供 mgmt 下派场景目录复用同一把尺子）。"""
+    from src.domains.runtime.scene_precheck import precheck_scene as _impl
+
+    return _impl(scene_id, repo_key, user=user, explicit=explicit)
+
+
 def selector_candidate_engines(selector: dict, agent_type: str, repo_key: str = "",
                                user_id: int = 0) -> tuple:
     """selector 候选集 + 分层排除原因（入队即时校验）。"""
@@ -8071,3 +8082,75 @@ def storage_delete_object(obs_key: str) -> bool:
         return False
     storage.delete_object(obs_key)
     return True
+
+
+def reconcile_pipeline_progress(limit: int = 200,
+                                lookback_hours: float | None = None) -> dict:
+    """确定性流水线推进对账（跨域契约口）。
+
+    供 mgmt 侧 patrol / 手动接口调用：任务 completed 但 Issue.stage 未前进时，
+    按场景 next/handoff 幂等推进。实现见 runtime 域 ``pipeline_reconcile``；
+    本函数是对外契约面，调用方不得直接 import 域内部模块（H3）。
+    """
+    from src.domains.runtime.engine.pipeline_reconcile import (
+        reconcile_pipeline_progress as _impl,
+    )
+
+    # 契约口自带上限：手动入口可传大值，但单轮扫描不应无界占用 runtime 域。
+    bounded = max(1, min(int(limit or 200), 500))
+    return _impl(limit=bounded, lookback_hours=lookback_hours)
+
+
+async def create_task_via_issue(body: dict, user: dict | None = None) -> dict:
+    """统一建单契约口（mgmt 组织下派等跨域调用；内部走 runtime issues_center）。"""
+    from src.domains.runtime.issues_center import (
+        TaskCreateBody,
+        create_task_via_issue as _impl,
+    )
+
+    return await _impl(TaskCreateBody(**(body or {})), user=user or {})
+
+
+def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
+                                   terminal_status: str, **kwargs) -> dict:
+    """组织 Issue 聚合收口契约口（mgmt 下派 sweeper 跨域调用）。"""
+    from src.domains.runtime.issues_center import (
+        finalize_org_issue_aggregation as _impl,
+    )
+
+    return _impl(dispatch, targets, terminal_status, **kwargs)
+
+
+def get_issue_task_digests(repo_key: str, issue_id: str = "",
+                           agent_types: tuple = ("coding", "qa", "sre", "issue", "vod"),
+                           limit: int = 3) -> list[dict]:
+    """任务结构化产出摘要契约口（组织聚合回填）。"""
+    from src.domains.runtime.event_store import get_issue_task_digests as _impl
+
+    return _impl(repo_key, issue_id, agent_types=agent_types, limit=limit)
+
+
+def get_latest_task_digest(repo_key: str, issue_id: str = "",
+                           task_id: str = "") -> dict:
+    """单任务结构化产出摘要契约口（组织聚合回填）。"""
+    from src.domains.runtime.event_store import get_latest_task_digest as _impl
+
+    return _impl(repo_key, issue_id, task_id=task_id)
+
+
+def update_event_status(seq: int, status: str, result: str = "",
+                        exit_code: int | None = None):
+    """事件状态写契约口（mgmt 取消/重试目标时跨域写）。"""
+    from src.domains.runtime.event_store import update_event_status as _impl
+
+    return _impl(seq, status, result=result, exit_code=exit_code)
+
+
+def trigger_org_aggregate(dispatch: dict, targets: list[dict] | None,
+                          terminal_status: str) -> dict:
+    """组织批次终态 → 幂等持久化聚合重排事件（跨域契约口）。"""
+    from src.domains.runtime.a2a_aggregate import (
+        trigger_org_aggregate as _impl,
+    )
+
+    return _impl(dispatch, targets, terminal_status)
