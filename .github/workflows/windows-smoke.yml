@@ -436,3 +436,18 @@ jobs:
           python -m pytest tests/kernel/test_issue3740_repo_bot_denoise.py \
             tests/mgmt/test_issue3740_bot_cred_backfill.py \
             tests/kernel/test_issue_3897_repobot_fallback_log.py -v
+
+      - name: Gateway release-window 502 hardening tests (issue #3847)
+        # Issue #3847 QA 审查修复（Required）：本用例此前未接入 linux-backend 门禁
+        # （先例 #1613/#2133/#2245/#3167/#3490/#3699/#3758/#3771）。
+        # 用例覆盖 compose include 挂载、upstream peer 数量、每个反代 location 的
+        # Connection 重设、deploy-drain.sh 的 fail-closed 与失败率门禁失败语义；
+        # 其中 keepalive 复用 / Upgrade 映射 / 502 重试是**真实 nginx 行为断言**，
+        # 缺 nginx 时这些用例会 skip（门禁等于失效），故此处显式安装 nginx。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx
+          nginx -v
+          python -m pytest tests/contracts/test_issue_3847_gateway_graceful.py -v
