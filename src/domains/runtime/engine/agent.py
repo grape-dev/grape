@@ -1192,11 +1192,49 @@ def _scan_installed_cheap() -> list:
             for r in (discover_runtimes() or []) if r.get("name")]
 
 
+def _is_cloud_worker_mode() -> bool:
+    """本进程是否 cloud_worker（云沙箱 worker）。
+
+    两个信号任一为真即算：`GRAPE_RUNTIME_MODE`（cloud_worker.main() 首行设置）或
+    `CLOUD_WORKER_PROVIDER`（安装脚本注入，cloud_worker._load_config 读它）。
+    """
+    if (os.environ.get("GRAPE_RUNTIME_MODE", "") or "").strip().lower() == "cloud_worker":
+        return True
+    return bool((os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip())
+
+
+# [云 worker 可观测性] 「领取列表为空」告警的节流间隔（秒）。
+# 数值来源：与既有心跳/巡检节奏对齐的运维约定——一次空窗不应刷成多行噪声，
+# 又不能长到让「注册正常但不领取」这类回归长时间静默；排障时可用
+# RUNTIME_EMPTY_IDS_WARN_INTERVAL 覆盖（调小到个位数即可逐轮观察）。
+EMPTY_IDS_WARN_INTERVAL_DEFAULT = 60.0
+
+
+def _empty_ids_warn_interval() -> float:
+    """告警节流间隔（秒）：env 可覆盖，非法/非正值回落到默认。"""
+    _raw = (os.environ.get("RUNTIME_EMPTY_IDS_WARN_INTERVAL", "") or "").strip()
+    if _raw:
+        try:
+            _v = float(_raw)
+            if _v > 0:
+                return _v
+        except (TypeError, ValueError):
+            pass
+    return EMPTY_IDS_WARN_INTERVAL_DEFAULT
+
+
 def _fast_install_triggered(installed, scan_fn=None) -> list:
     """快速发现：返回本次扫描命中的「新装引擎」（空 = 无安装完成事件）。
 
     扫描异常不触发（宁可按周期兜底，也不因一次扫描失败抖动重注册）。
+
+    [云 worker 修复] 云模式下直接返回空：云引擎的清单来自平台模板（四段式名字
+    `engine:template:provider:pid`），和本地 PATH 扫描出来的本机引擎名永远不可能
+    相等，用本地扫描判「新装引擎」会每 15s 命中一次 → 空注册风暴并挤掉领取节奏。
+    云引擎的增减由 cloud_worker 的模板刷新循环负责。
     """
+    if scan_fn is None and _is_cloud_worker_mode():
+        return []
     try:
         _scan = scan_fn() if scan_fn is not None else _scan_installed_cheap()
     except Exception as e:
@@ -3919,6 +3957,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     # hermes_active_tids 承担；旧实现用 int 计数且只在正常收尾里 -= 1，
     # 三条提前 return 路径会永久泄漏，攒够次数后这台 hermes 再也不接活。
     last_heartbeat = 0.0
+    _empty_ids_warn_at = 0.0  # 云模式「领取列表为空」告警的上次触发时刻（节流见 _empty_ids_warn_interval）
+    _empty_ids_warn_interval_s = _empty_ids_warn_interval()
 
     async def _purge_active_task(tid: str) -> None:
         """清掉本地一条残留活跃记录（代次已变 / 看门狗判定幽灵时用）。
@@ -4000,7 +4040,14 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         last_reregister = _rrc["last_reregister"]
         last_fast_discover = _rrc["last_fast_scan"]
         if _rrc["did"] and _rrc["ok"]:
-            runtime_ids = _rrc["runtime_ids"]
+            # [云 worker 领取修复] 必须原地更新，不能重新绑定。
+            # cloud_worker 的模板刷新后台任务持有的是同一个 list 对象
+            # （_cloud_run_loop 把 ids 传进来，refresh 循环 runtime_ids.append/remove），
+            # 一旦这里 runtime_ids = 新 list，后台后续 append 全部落进被遗弃的旧 list，
+            # 模板后落的云引擎永远进不了领取列表 → get_tags/claim 一次都不发。
+            _new_ids = _rrc["runtime_ids"]
+            if _new_ids is not None:
+                runtime_ids[:] = _new_ids
             if _rrc["engine_by_rid"]:
                 engine_by_rid = _rrc["engine_by_rid"]
             installed = _rrc["installed"]
@@ -4008,6 +4055,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
+        if not _shuffled_rids and _is_cloud_worker_mode() and (now - _empty_ids_warn_at) >= _empty_ids_warn_interval_s:
+            # 云 worker 没有 rid 就等于「谁都不会来领」——此前完全静默，只能靠服务端
+            # 0 条 claim 反推。节流 60s，人肉看日志即可发现。
+            _empty_ids_warn_at = now
+            log.warning("cloud worker: runtime_ids is empty — no engine to claim; "
+                        "waiting for template refresh to register cloud engines")
         random.shuffle(_shuffled_rids)
         for rid in _shuffled_rids:
             try:
@@ -4388,7 +4441,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     last_reregister=last_reregister, last_fast_scan=last_fast_discover,
                     cli_version=_read_local_worker_version(), force=True)
                 if _hbrc["ok"]:
-                    runtime_ids = _hbrc["runtime_ids"]
+                    # 同上：原地更新，保住 refresh 后台任务持有的同一 list 引用
+                    _new_ids = _hbrc["runtime_ids"]
+                    if _new_ids is not None:
+                        runtime_ids[:] = _new_ids
                     if _hbrc["engine_by_rid"]:
                         engine_by_rid = _hbrc["engine_by_rid"]
                     installed = _hbrc["installed"]
