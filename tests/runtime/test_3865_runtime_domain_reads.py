@@ -427,6 +427,133 @@ class TestA2AGateDegradeEndpoint:
         # 本用例直接替换 cursor_for，处理拓扑标签按进程实际路由给出（单测 D 已断言 domain）
         assert detail.get("runtime_domain_route") in ("local", "domain"), data
 
+    def _degraded_client(self, monkeypatch, *, stubs=None):
+        """带「去重门禁降级」环境的 TestClient + 公共桩（分支覆盖用例共用）。"""
+        import os
+
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+        from src.domains.runtime.routes import webhook as webhook_mod
+
+        self._clean()
+        self._seed_repo()
+        app = FastAPI()
+        app.include_router(webhook_mod.router)
+        monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
+        # 去重门禁查询恒失败（dedup_unavailable 必置位）；其余 runtime 域读放行。
+        monkeypatch.setattr(db_registry, "cursor_for", _selective_runtime_cursor(
+            ("event_type='a2a_event' AND status IN ('running','dispatched')",)))
+        import src.api.session_store as session_store
+        monkeypatch.setattr(webhook_mod, "_authorize_a2a", lambda *a, **k: {
+            "user_id": 0, "username": "tester", "session_key": ""})
+        monkeypatch.setattr(session_store, "is_agent_enabled", lambda *a, **k: True)
+        monkeypatch.setattr(webhook_mod, "_scene_node_check",
+                            lambda *a, **k: {"in_scene": True, "scene_id": "", "nodes": []})
+        monkeypatch.setattr(webhook_mod, "run_a2a_dispatch",
+                            lambda *a, **k: {"status": "ok", "seq": 1})
+        for name, fn in (stubs or {}).items():
+            monkeypatch.setattr(webhook_mod, name, fn)
+        return TestClient(app)
+
+    def test_degraded_flags_reach_idempotent_hit_branch(self, monkeypatch):
+        """幂等命中（200 + idempotent）分支必须带降级标记（PR #2002 R2 Required）。"""
+        client = self._degraded_client(monkeypatch)
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO events (repo_key, issue_id, event_type, agent_type, title,"
+                " status, idempotency_key) VALUES"
+                " ('gitcode:owner/repo', '#5', 'a2a_event', 'coding', 'seeded',"
+                " 'completed', 'idem-3865-hit')")
+            db.commit()
+
+        resp = client.post("/api/a2a", json={
+            "agent": "coding",
+            "payload": {"repository": "owner/repo", "account": "owner/repo",
+                        "issue_number": "5", "pr_number": "", "context": "idem-hit"},
+            "idempotency_key": "idem-3865-hit",
+        })
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data.get("idempotent") is True, data
+        detail = data.get("detail") or {}
+        assert detail.get("dedup_unavailable") is True, "幂等命中分支不得丢降级标记"
+
+    def test_degraded_flags_reach_agent_disabled_403(self, monkeypatch):
+        """agent disabled（403）分支必须带降级标记（PR #2002 R2 Required）。"""
+        import src.api.session_store as session_store
+        def _throw_not_reached(*a, **k):
+            raise AssertionError("disabled 分支不应走到派发")
+        client = self._degraded_client(monkeypatch, stubs={
+            "run_a2a_dispatch": _throw_not_reached})
+        monkeypatch.setattr(session_store, "is_agent_enabled", lambda *a, **k: False)
+
+        resp = client.post("/api/a2a", json={
+            "agent": "coding",
+            "payload": {"repository": "owner/repo", "account": "owner/repo",
+                        "issue_number": "5", "pr_number": "", "context": "disabled"},
+        })
+
+        assert resp.status_code == 403, resp.text
+        detail = (resp.json() or {}).get("detail") or {}
+        assert detail.get("dedup_unavailable") is True, "403 分支不得丢降级标记: " + resp.text
+
+    def test_degraded_flags_reach_not_in_scene_409(self, monkeypatch):
+        """not_in_scene（409）分支必须带降级标记（PR #2002 R2 Required）。"""
+        client = self._degraded_client(monkeypatch, stubs={
+            "_scene_node_check": lambda *a, **k: {
+                "in_scene": False, "scene_id": "scene-x", "nodes": []}})
+
+        resp = client.post("/api/a2a", json={
+            "agent": "coding",
+            "payload": {"repository": "owner/repo", "account": "owner/repo",
+                        "issue_number": "5", "pr_number": "", "context": "not-in-scene"},
+        })
+
+        assert resp.status_code == 409, resp.text
+        detail = (resp.json() or {}).get("detail") or {}
+        assert detail.get("dedup_unavailable") is True, "409 分支不得丢降级标记: " + resp.text
+
+    def test_degraded_flags_reach_event_store_failed_500(self, monkeypatch):
+        """事件落库失败（500 早退）分支必须带降级标记（PR #2002 R2 Required）。"""
+        def _no_event(*a, **k):
+            return 0
+        def _throw_not_reached(*a, **k):
+            raise AssertionError("落库失败分支不应走到派发")
+        client = self._degraded_client(monkeypatch, stubs={
+            "run_a2a_dispatch": _throw_not_reached})
+        import src.domains.runtime.event_store as event_store_impl
+        monkeypatch.setattr(event_store_impl, "append_event", _no_event)
+
+        resp = client.post("/api/a2a", json={
+            "agent": "coding",
+            "payload": {"repository": "owner/repo", "account": "owner/repo",
+                        "issue_number": "5", "pr_number": "", "context": "store-fail"},
+            "force": True,
+        })
+
+        assert resp.status_code == 500, resp.text
+        detail = (resp.json() or {}).get("detail") or {}
+        assert detail.get("dedup_unavailable") is True, "500 早退分支不得丢降级标记: " + resp.text
+
+    def test_degraded_flags_reach_processing_failed_500(self, monkeypatch):
+        """应用层异常（500 留痕早退）分支必须带降级标记（PR #2002 R2 Required）。"""
+        def _boom(*a, **k):
+            raise RuntimeError("seeded processing failure")
+        client = self._degraded_client(monkeypatch, stubs={
+            "_scene_node_check": _boom})
+
+        resp = client.post("/api/a2a", json={
+            "agent": "coding",
+            "payload": {"repository": "owner/repo", "account": "owner/repo",
+                        "issue_number": "5", "pr_number": "", "context": "processing-fail"},
+        })
+
+        assert resp.status_code == 500, resp.text
+        detail = (resp.json() or {}).get("detail") or {}
+        assert detail.get("dedup_unavailable") is True, "异常早退分支不得丢降级标记: " + resp.text
+
 
 # ── I. 静态守门：读点内不得再裸用 session_manager ────────────────────────────
 
