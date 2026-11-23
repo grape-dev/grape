@@ -23,8 +23,8 @@
 Issue #441 口径）——与 aishell-dsh「insight import agent 实现」单源先例
 一致；insight 侧 hwcloud 探活缺口（原落命令表报 skip）随派发自然修复。
 
-参考: docs/todo/2026-11-13-p0-引擎接入解耦实施回执.md「探活两档保留裁定」；
-实现单源先例 src/domains/runtime/engine/agent.py:_probe_aishell_dsh_acp。
+参考: P0 引擎接入解耦 spec「探活两档保留裁定」（深探合一收分派知识、浅探
+参数走 descriptor）；实现单源先例 agent.py:_probe_aishell_dsh_acp。
 """
 from __future__ import annotations
 
@@ -42,6 +42,38 @@ _ACP_IMPLS: dict[str, tuple[str, str]] = {
     "hwcloud_acp": ("src.domains.runtime.engine.agent", "_probe_hwcloud_acp"),
     "aishell_dsh_acp": ("src.domains.runtime.engine.agent", "_probe_aishell_dsh_acp"),
 }
+
+# 显式 args 钩子表：token → (模块, 函数)，入参 (cmd, optional_flags)，返回
+# 追加可选参数后的 cmd。可选参数按 CLI help 能力探测追加（Issue #3511 口径：
+# 5.0.4 等旧版 CLI 收到不认识的开关会 exit=2，把健康引擎误报成 fail）。
+_ARGS_HOOKS: dict[str, tuple[str, str]] = {
+    "atomcode_help_flags": ("src.domains.runtime.engine.probe_dispatch",
+                            "_append_optional_flags_by_help"),
+}
+
+
+def _append_optional_flags_by_help(cmd: list[str], optional_flags: list[str]) -> list[str]:
+    """按 CLI help 文本决定是否追加可选开关（help 探测不到 = 保持基础参数）。
+
+    通用实现（非 atomcode 专属知识）：optional_flags 里每个开关，仅当 CLI
+    --help 输出包含该开关文本时追加——新引擎无需写 quirk 代码，声明
+    probe.args_hook + probe.optional_flags 即可。
+    """
+    import subprocess as _sp
+    try:
+        proc = _sp.run([cmd[0], "--help"], capture_output=True, text=True,
+                       timeout=15, stdin=_sp.DEVNULL)
+        help_text = ((proc.stdout or "") + (proc.stderr or "")) if proc.returncode == 0 else ""
+    except Exception:  # noqa: BLE001 - 探测失败只是没有能力信息
+        return cmd
+    if not help_text:
+        return cmd
+    out = list(cmd)
+    for flag in optional_flags or []:
+        if flag in help_text and flag not in out:
+            out.append(flag)
+    return out
+
 
 # 显式 env 钩子表：token → (模块, 函数)，返回进程环境增量 dict。
 _ENV_HOOKS: dict[str, tuple[str, str]] = {
@@ -97,6 +129,16 @@ def probe_deep(engine_name: str, cli_path: str = "") -> dict:
     cmd = list(probe["command"])
     if cli_path:
         cmd = [cli_path] + cmd[1:]
+    args_hook = probe.get("args_hook")
+    if args_hook:
+        if args_hook not in _ARGS_HOOKS:
+            return {"status": "fail", "latency": 0,
+                    "error": f"probe.args_hook 未注册: {args_hook!r}"}
+        try:
+            hook = _load_hook(_ARGS_HOOKS, args_hook)
+            cmd = hook(cmd, probe.get("optional_flags") or [])
+        except Exception as e:  # noqa: BLE001 - 钩子失败按基础参数探
+            log.warning(f"{engine_name} probe args hook failed: {e}")
     env = None
     hook_token = probe.get("env_hook")
     if hook_token:
@@ -126,6 +168,17 @@ def probe_deep(engine_name: str, cli_path: str = "") -> dict:
                 "error": f"timeout ({_PROBE_TIMEOUT}s)"}
     except FileNotFoundError:
         return {"status": "fail", "latency": 0, "error": "CLI not found"}
+    except OSError as e:
+        # spawn 三态：资源类 spawn 失败（EMFILE/ENOMEM 等）单独成态——消费方
+        # service.py 认领闸门与 recovery 连续失败告警依赖 spawn_failed 拦截派单
+        # （与 ACP 分支 agent.py:585/767/956 同口径，判定统一走 acp_bootstrap）。
+        from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
+        latency = round(time.time() - start, 1)
+        _msg = f"{type(e).__name__}: {e}"[:200]
+        if _is_spawn_failure(e):
+            return {"status": "spawn_failed", "latency": latency,
+                    "error": f"spawn failed: {_msg}"}
+        return {"status": "fail", "latency": latency, "error": _msg}
     except Exception as e:
         return {"status": "fail", "latency": round(time.time() - start, 1), "error": str(e)[:200]}
 

@@ -4,8 +4,9 @@
 descriptor 派生数据——显示层不再硬编码引擎名/颜色，新增引擎=落一份
 descriptor JSON，前端零改动（spec 验收 A8/B6）。
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from src.api.deps import require_org_member
 from src.domains.runtime.engine.descriptor import get_registry
 
 router = APIRouter(prefix="/api/engines", tags=["engines"])
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/api/engines", tags=["engines"])
             description="Read-only engine metadata derived from engine descriptors "
                         "(canonical/aliases/protocol/display/probe). New engines ship "
                         "one descriptor JSON and appear here automatically.")
-def engines_meta():
+def engines_meta(user: dict = Depends(require_org_member)):
     reg = get_registry()
     engines = []
     for canonical, d in reg.all().items():

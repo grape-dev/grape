@@ -59,10 +59,30 @@ def test_registry_drift_detected(monkeypatch):
 
 
 def test_prefix_map_drift_detected(monkeypatch):
-    from src.domains.runtime.engine import instances
-    monkeypatch.setitem(instances.ENGINE_CANONICAL_PREFIXES, "drift-prefix", "hermes")
+    """prefix 面：descriptor 派生与冻结基线漂移必须红（基线推进是刻意动作）。"""
+    import scripts.engine_descriptor_drift as drift_mod
+    frozen = dict(drift_mod._FROZEN_PREFIX)
+    frozen["drift-prefix"] = "hermes"
+    monkeypatch.setattr(drift_mod, "_FROZEN_PREFIX", frozen)
     drifts = collect_drift()
-    assert any("prefix" in d for d in drifts), f"prefix map 漂移未检出: {drifts}"
+    assert any("prefix map 漂移" in d for d in drifts), f"prefix map 漂移未检出: {drifts}"
+
+
+def test_known_cli_drift_detected(monkeypatch):
+    """known 面 cli 值漂移（改名/漏传）必须红——cli 不得再拿 pip 名自比。"""
+    from src.domains.runtime.agents import executor
+    real = executor.discover_backends
+
+    def fake_discover():
+        results = real()
+        for r in results:
+            if r["name"] == "hermes":
+                r["cli"] = "wrong-cli"
+        return results
+
+    monkeypatch.setattr(executor, "discover_backends", fake_discover)
+    drifts = collect_drift()
+    assert any("discover/known cli" in d for d in drifts), f"known cli 漂移未检出: {drifts}"
 
 
 def test_device_known_drift_detected(monkeypatch):

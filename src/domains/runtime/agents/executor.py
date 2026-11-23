@@ -477,6 +477,7 @@ def discover_backends() -> list[dict]:
         results.append({
             "name": name,
             "installed": installed,
+            "cli": info["cli"],
             "cli_path": cli_path if installed else "",
             "pip_package": info["pip"],
         })

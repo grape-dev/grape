@@ -31,8 +31,11 @@ def test_s1_registry_schema_validation_rejects_bad_file(tmp_path):
     """schema 校验的负路径：坏 descriptor 必须被拒（不是静默加载）。"""
     bad = tmp_path / "bad-engine.json"
     bad.write_text('{"canonical": "bad-engine", "protocol": "bogus"}', encoding="utf-8")
-    with pytest.raises(AssertionError):
+    from src.domains.runtime.engine.descriptor import DescriptorValidationError
+    # [复审 R6] assert → 显式异常（python -O 下 assert 失效）；校验须带文件路径
+    with pytest.raises(DescriptorValidationError) as ei:
         EngineDescriptorRegistry(str(tmp_path))
+    assert str(bad) in str(ei.value), "校验异常须携带 descriptor 文件路径"
 
 
 def test_s1_executor_registration_consistent(engine):

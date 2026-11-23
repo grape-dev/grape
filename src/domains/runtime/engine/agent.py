@@ -72,12 +72,10 @@ import datetime as _datetime
 # 运行时派生（原静态表缺 atomcode=worker 探活盲区；insight 侧镜像表缺 dsh/cursor
 # ——两侧互补缺口实证，双表自此同源零漂移）。ACP 三引擎（hermes/hwcloud/
 # aishell-dsh）由 _probe_engine_worker 名字分支握手探活，不在表。
-def _descriptor_probe_commands():
-    from src.domains.runtime.engine.descriptor import get_registry
-    return get_registry().probe_commands()
-
-_PROBE_COMMANDS = _descriptor_probe_commands()
-_PROBE_TIMEOUT = 30
+# [P0b B5 复审 R9] 旧模块级命令表 _PROBE_COMMANDS/_PROBE_TIMEOUT 已删——
+# 深探参数单源在 descriptor（probe.command），运行时由 probe_dispatch 派发；
+# 模块级缓存还会在 import 时触发 registry 加载（探活命令查询走
+# probe_dispatch.probe_deep，无名字分支）。
 # ACP 探活超时（Issue：Windows 实测 hermes 冷启动 initialize/session/new 会到
 # 20~23s；旧的 15s 会让冷启动机器周期性误报「ACP initialize no response」）。
 # 默认 30s，可用 RUNTIME_ACP_PROBE_TIMEOUT 覆盖（5~300s）。

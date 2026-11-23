@@ -9,7 +9,7 @@
   engine_probe._probe_engine、local_probe.py 的 hermes probe_args 覆盖；
 - insight 侧 hwcloud 探活缺口（原落命令表报 skip）随派发自然修复。
 
-参考: docs/todo/2026-11-13-p0-引擎接入解耦实施回执.md「探活两档保留裁定」。
+参考: P0 引擎接入解耦 spec「探活两档保留裁定」（deep/light 两档分离）。
 """
 import pytest
 
@@ -170,3 +170,97 @@ class TestConsumersDelegate:
 
 def _fake_acp_impl(cli_path):
     return {"status": "ok", "via": "impl"}
+
+
+# ── 复审整改：spawn 三态 + atomcode 可选参数 help 能力探测 ─────────────
+
+class TestSpawnFailedThreeState:
+    """R2：cli_run 资源类 spawn 失败须单独成态（认领闸门/告警链消费）。"""
+
+    def _probe_with_run_raising(self, monkeypatch, exc):
+        from src.domains.runtime.engine import probe_dispatch
+
+        def _raise(cmd, **kw):
+            raise exc
+
+        monkeypatch.setattr(probe_dispatch.subprocess, "run", _raise)
+        return probe_dispatch.probe_deep("codex", cli_path="/usr/local/bin/codex")
+
+    def test_spawn_failure_status(self, monkeypatch):
+        import errno
+        r = self._probe_with_run_raising(
+            monkeypatch, OSError(errno.EMFILE, "too many open files"))
+        assert r["status"] == "spawn_failed", r
+        assert "spawn failed" in r["error"]
+
+    def test_non_spawn_os_failure_stays_fail(self, monkeypatch):
+        r = self._probe_with_run_raising(monkeypatch, OSError("boom"))
+        assert r["status"] == "fail", r
+
+    def test_consumer_gate_uses_spawn_failed(self):
+        """消费方语义：service 认领闸门挡 spawn_failed（不挡普通 fail）。"""
+        import inspect
+        from src.domains.runtime.engine import service
+        src = inspect.getsource(service)
+        assert "spawn_failed" in src, \
+            "engine service 须消费 spawn_failed 态（认领闸门拦截派单）"
+
+
+class TestAtomcodeArgsHook:
+    """R3：可选参数按 CLI help 能力追加（5.0.4 等旧版盲传会 exit=2 误报 fail）。"""
+
+    def _probe_with_help(self, monkeypatch, help_text):
+        from src.domains.runtime.engine import probe_dispatch
+        seen = {}
+
+        class _Res:
+            returncode = 0
+            stdout = "OK"
+            stderr = ""
+
+        class _HelpRes:
+            returncode = 0
+            stdout = help_text
+            stderr = ""
+
+        def _fake_run(cmd, **kw):
+            if "--help" in cmd:
+                return _HelpRes()
+            seen["cmd"] = list(cmd)
+            return _Res()
+
+        monkeypatch.setattr(probe_dispatch.subprocess, "run", _fake_run)
+        r = probe_dispatch.probe_deep("atomcode", cli_path="atomcode")
+        return r, seen.get("cmd")
+
+    def test_flags_appended_when_supported(self, monkeypatch):
+        r, cmd = self._probe_with_help(monkeypatch, "--ephemeral --no-tools")
+        assert r["status"] == "ok"
+        assert "--ephemeral" in cmd and "--no-tools" in cmd, cmd
+
+    def test_flags_omitted_when_unsupported(self, monkeypatch):
+        """help 无这些开关（如 5.0.4）→ 保持基础参数，不误报。"""
+        r, cmd = self._probe_with_help(monkeypatch, "--prompt-file <PATH>")
+        assert r["status"] == "ok"
+        assert "--ephemeral" not in cmd and "--no-tools" not in cmd, cmd
+
+    def test_help_probe_unavailable_keeps_base_args(self, monkeypatch):
+        """help 探测失败（CLI 缺失）不收紧基础参数（老环境行为不回归）。"""
+        from src.domains.runtime.engine import probe_dispatch
+
+        def _raise(cmd, **kw):
+            if "--help" in cmd:
+                raise FileNotFoundError("no cli")
+            return type("_R", (), {"returncode": 0, "stdout": "OK", "stderr": ""})()
+
+        monkeypatch.setattr(probe_dispatch.subprocess, "run", _raise)
+        r = probe_dispatch.probe_deep("atomcode", cli_path="atomcode")
+        assert r["status"] == "ok"
+
+    def test_descriptor_declares_args_hook(self):
+        from src.domains.runtime.engine.descriptor import get_registry
+        d = get_registry().get("atomcode")
+        assert d["probe"].get("args_hook") == "atomcode_help_flags"
+        assert d["probe"]["command"] == ["atomcode", "-p", "Reply OK"], \
+            "版本相关可选开关不得固化进 probe.command"
+        assert set(d["probe"].get("optional_flags", [])) == {"--no-tools", "--ephemeral"}

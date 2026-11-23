@@ -136,7 +136,7 @@
 import { ref, computed } from 'vue'
 import AGCard from '@/components/ui/AGCard.vue'
 import AGButton from '@/components/ui/AGButton.vue'
-import { engineDotOf, loadEngineMeta } from '@/lib/engineMeta.js'
+import { loadEngineMeta } from '@/lib/engineMeta.js'
 
 const G = globalThis
 
@@ -217,16 +217,6 @@ const rawTotal = computed(function () {
   const raw = m.value.total_events_raw
   if (raw === undefined || raw === null) return totalEvents.value
   return raw || 0
-})
-const engineText = computed(function () {
-  return (
-    props.data.backend ||
-    (props.data.backends && props.data.backends.length ? props.data.backends.join(', ') : '')
-  )
-})
-const engineDot = computed(function () {
-  // [P0b B6/C08-A2] 颜色与类型判定读 /api/engines/meta（descriptor 派生），前端零硬编码
-  return engineDotOf(engineText.value)
 })
 const highlightId = computed(function () {
   return props.data.highlight_issue_id || ''

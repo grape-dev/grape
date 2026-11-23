@@ -728,8 +728,7 @@ app.add_middleware(
 # ===== Issue #3757：路由注册清单唯一性 =====
 # 本文件的用户面路由以 526 行起的单一清单为唯一事实源（append-only）；唯一性由装配
 # 末尾的 assert_route_registry_unique(app) 在启动期 fail-fast 校验。
-# [P0b B3] engines.router（/api/engines/meta）按 append-only 追加于此：
-app.include_router(engines.router)  # /api/engines/meta（P0b B3/B6，arch-4p 缺口修复）
+# [P0b B3] engines.router 已在上方单一清单内（584 行），此处不再重复挂载。
 
 metrics_middleware(app)
 

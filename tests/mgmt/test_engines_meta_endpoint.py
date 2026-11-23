@@ -19,9 +19,19 @@ from src.api.main import app
 client = TestClient(app)
 
 
-def test_engines_meta_returns_descriptor_data():
+@pytest.fixture
+def member_client():
+    """A9 鉴权：端点须组织成员凭据，测试客户端统一走成员身份覆写。"""
+    from src.api.deps import get_current_user_or_api_key
+    user = {"id": "1", "username": "engmeta_t", "auth_type": "jwt", "org_id": "1"}
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: user
+    yield client
+    app.dependency_overrides.clear()
+
+
+def test_engines_meta_returns_descriptor_data(member_client):
     """/api/engines/meta 返回 descriptor 派生的引擎元数据（含颜色/别名）。"""
-    r = client.get("/api/engines/meta")
+    r = member_client.get("/api/engines/meta")
     assert r.status_code == 200
     data = r.json()
     engines = {e["canonical"]: e for e in data["engines"]}
@@ -36,14 +46,40 @@ def test_engines_meta_returns_descriptor_data():
     assert engines["hermes"]["protocol"] == "acp"
 
 
-def test_engines_meta_matches_registry_exactly():
+def test_engines_meta_matches_registry_exactly(member_client):
     """端点输出与 registry 全集一致（新引擎落 descriptor 即自动出现在 meta）。"""
     from src.domains.runtime.engine.descriptor import get_registry
-    r = client.get("/api/engines/meta")
+    r = member_client.get("/api/engines/meta")
     got = {e["canonical"] for e in r.json()["engines"]}
     assert got == set(get_registry().all().keys())
 
 
-def test_engines_meta_is_readonly():
+def test_engines_meta_is_readonly(member_client):
     """只读端点：非 GET 方法 405。"""
-    assert client.post("/api/engines/meta").status_code == 405
+    assert member_client.post("/api/engines/meta").status_code == 405
+
+
+def test_engines_meta_requires_auth():
+    """A9 鉴权双态：匿名 401/403 拒绝；组织成员 200。
+
+    架构守护复审 R 项：本端点初版无 Depends(require_org_member)，且旧测试用
+    无凭据 TestClient 断言 200——把「匿名可读引擎清单」写进契约。修复后：
+    无凭据拒绝 + 有凭据 200。
+    """
+    from src.api.main import app as _app
+    from src.api.deps import get_current_user_or_api_key
+
+    # 1) 匿名（无依赖覆写、无凭据）→ 必须拒绝
+    r = client.get("/api/engines/meta")
+    assert r.status_code in (401, 403), \
+        f"/api/engines/meta 匿名请求应被鉴权拒绝，got {r.status_code}"
+
+    # 2) 组织成员 → 200
+    user = {"id": "1", "username": "engmeta_t", "auth_type": "jwt", "org_id": "1"}
+    _app.dependency_overrides[get_current_user_or_api_key] = lambda: user
+    try:
+        r2 = client.get("/api/engines/meta")
+        assert r2.status_code == 200, f"成员凭据应 200，got {r2.status_code}: {r2.text[:200]}"
+        assert r2.json()["engines"]
+    finally:
+        _app.dependency_overrides.clear()

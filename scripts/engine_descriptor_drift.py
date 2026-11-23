@@ -6,8 +6,10 @@
     pytest tests/runtime/test_engine_descriptor_drift.py  # 单测（含人为造漂移）
 
 对账面（散布静态值 vs descriptor 派生）：
-1. executor.discover_backends 的 known 值域+cli/pip ←→ reg.discover_map()
-2. instances.ENGINE_CANONICAL_PREFIXES ←→ reg.prefix_map()
+1. executor.discover_backends 的 known 值域+cli/pip ←→ reg.discover_map()（cli 面
+   依赖 executor 结果行携带 discover.cli——消费证据，不是 pip 换名自比）
+2. reg.prefix_map() ←→ _FROZEN_PREFIX 静态冻结基线（instances 前缀表已派生，
+   自比恒真，真漂移靠冻结基线）
 3. mgmt/user/db.py ensure_default_runtime 的 _KNOWN 源码字符串 ←→ device_known 集
    （该白名单是函数内局部变量，无运行时符号——按源码文本比对，同 drift 语义）
 4. 探活派发一致性：descriptor probe.impl/probe.env_hook ←→ probe_dispatch
@@ -30,6 +32,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from src.domains.runtime.engine.descriptor import get_registry
 
 
+# prefix 冻结基线（drift 面 2）：与 reg.prefix_map() 全量比对。引擎键/别名
+# 变更 = 刻意的基线推进（改 descriptor 必须同步改这里），漏改即红——这就是
+# 「新增引擎漏配即红」承诺的落点。注意：基线变更须在 commit message 里显式说明。
+_FROZEN_PREFIX: dict[str, str] = {
+    # opencode 为 is_default 引擎，不在 prefix_map（未知名 fallback，见 descriptor.py）
+    "hermes": "hermes",
+    "hwcloud": "hwcloud",
+    "aishell": "hwcloud",
+    "aishell-dsh": "aishell-dsh",
+    "codex": "codex",
+    "codearts": "codearts",
+    "dsh": "dsh",
+    "atomcode": "atomcode",
+    "mock-acp": "mock-acp",
+}
+
+
 def collect_drift() -> list[str]:
     """收集全部漂移项（空列表 = 零漂移）。"""
     problems: list[str] = []
@@ -39,8 +58,8 @@ def collect_drift() -> list[str]:
     # 1. executor known 表
     import src.domains.runtime.engine.registry  # noqa: F401 先触发（绕开循环导入）
     from src.domains.runtime.agents import executor
-    known = {r["name"]: {"cli": r["pip_package"], "pip": r["pip_package"],
-                         "cli_name": r["name"]} for r in executor.discover_backends()}
+    known = {r["name"]: {"cli": r.get("cli", ""), "pip": r.get("pip_package", "")}
+             for r in executor.discover_backends()}
     if set(known.keys()) != all_engines:
         problems.append(f"discover/known 值域漂移: known={sorted(known)} "
                         f"descriptor={sorted(all_engines)}")
@@ -49,16 +68,25 @@ def collect_drift() -> list[str]:
         # known 的 cli 字段在 discover 结果里是 cli_path，不在时回退 pip 名——
         # 值级对账以 discover_map 的 cli/pip 为准
         for name, info in want.items():
+            got_cli = known.get(name, {}).get("cli", "")
+            if got_cli != info["cli"]:
+                problems.append(f"discover/known cli 漂移: {name} known={got_cli!r} "
+                                f"descriptor={info['cli']!r}")
             got_pip = known.get(name, {}).get("pip", "")
             if got_pip != info["pip"]:
                 problems.append(f"discover/known pip 漂移: {name} known={got_pip!r} "
                                 f"descriptor={info['pip']!r}")
 
-    # 2. instances 前缀表
+    # 2. prefix 面：对静态冻结基线（instances.ENGINE_CANONICAL_PREFIXES 已由
+    #    prefix_map() 派生，与派生源自比恒真——真漂移探测改为对冻结基线比对，
+    #    引擎名/别名变更必须显式更新 _FROZEN_PREFIX，漏更新即红）。
     from src.domains.runtime.engine import instances
-    if reg.prefix_map() != instances.ENGINE_CANONICAL_PREFIXES:
-        problems.append(f"prefix map 漂移: instances={instances.ENGINE_CANONICAL_PREFIXES} "
+    if reg.prefix_map() != _FROZEN_PREFIX:
+        problems.append(f"prefix map 漂移: frozen={_FROZEN_PREFIX} "
                         f"descriptor={reg.prefix_map()}")
+    if instances.ENGINE_CANONICAL_PREFIXES != reg.prefix_map():
+        problems.append("instances.ENGINE_CANONICAL_PREFIXES 与 descriptor 派生不一致"
+                        "（派生链断裂，须检查 instances.py）")
 
     # 3. db.py _KNOWN 源码白名单（device_known）
     from src.domains.mgmt.user import db as user_db
@@ -76,6 +104,9 @@ def collect_drift() -> list[str]:
         hook = d["probe"].get("env_hook")
         if hook and hook not in probe_dispatch._ENV_HOOKS:
             problems.append(f"probe.env_hook 未注册: {c}={hook!r}")
+        args_hook = d["probe"].get("args_hook")
+        if args_hook and args_hook not in probe_dispatch._ARGS_HOOKS:
+            problems.append(f"probe.args_hook 未注册: {c}={args_hook!r}")
 
     # 5. engine_strategies.ENGINE_REGISTRY vs sandbox_installable
     from src.domains.runtime.agents.sandbox.backends import engine_strategies

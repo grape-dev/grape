@@ -38,6 +38,10 @@ _USAGE_MODES = ("none", "event_stream", "hermes_cumulative",
                 "aishell_dsh_watermark")  # arch 基线二期解析轨（M1 记录水位），融合保留
 
 _singleton: "EngineDescriptorRegistry | None" = None
+
+
+class DescriptorValidationError(ValueError):
+    """descriptor JSON schema 校验失败（携带文件路径，可定位）。"""
 _singleton_lock = threading.Lock()
 
 
@@ -62,32 +66,46 @@ class EngineDescriptorRegistry:
             with open(path, encoding="utf-8") as f:
                 d = json.load(f)
             canonical = d.get("canonical") or fname[:-5]
-            assert canonical == fname[:-5], f"descriptor 文件名须等于 canonical: {path}"
-            self._validate(d)
+            if canonical != fname[:-5]:
+                raise DescriptorValidationError(
+                    f"{path}: descriptor 文件名须等于 canonical（got {canonical!r}）")
+            self._validate(d, path)
             self._by_canonical[canonical] = d
             for alias in d.get("aliases", []):
                 self._by_alias[alias] = canonical
 
     @staticmethod
-    def _validate(d: dict) -> None:
-        """schema 校验（L0 段①：纯文件，CI 恒跑）。"""
-        assert d.get("protocol") in _PROTOCOLS, f"protocol 值域: {d.get('protocol')}"
-        assert "cli" in d.get("discover", {}), "discover.cli 必备"
-        assert "name" in d.get("display", {}), "display.name 必备"
+    def _validate(d: dict, path: str) -> None:
+        """schema 校验（L0 段①：纯文件，CI 恒跑）。
+
+        显式异常（非 assert）：`python -O` 下 assert 整体失效，且裸
+        AssertionError 无文件上下文——校验必须带 descriptor 文件路径可定位。
+        """
+        def _err(msg: str) -> None:
+            raise DescriptorValidationError(f"{path}: {msg}")
+
+        if d.get("protocol") not in _PROTOCOLS:
+            _err(f"protocol 值域: {d.get('protocol')}")
+        if "cli" not in d.get("discover", {}):
+            _err("discover.cli 必备")
+        if "name" not in d.get("display", {}):
+            _err("display.name 必备")
         probe = d.get("probe", {})
-        assert probe.get("mode") in _PROBE_MODES, f"probe.mode 值域: {probe.get('mode')}"
-        assert "command" in probe, "probe.command 必备"
+        if probe.get("mode") not in _PROBE_MODES:
+            _err(f"probe.mode 值域: {probe.get('mode')}")
+        if "command" not in probe:
+            _err("probe.command 必备")
         # [B5 两档齐备] 深探实现与浅探参数齐备性：防「深探有配置浅探没有」
         # （或反之）的半接入。
-        if probe.get("mode") == "acp_handshake":
-            assert probe.get("impl"), "probe.mode=acp_handshake 须有 probe.impl（分派器实现 token）"
+        if probe.get("mode") == "acp_handshake" and not probe.get("impl"):
+            _err("probe.mode=acp_handshake 须有 probe.impl（分派器实现 token）")
         if probe.get("light_args") is not None:
-            assert isinstance(probe["light_args"], list) and probe["light_args"], \
-                "probe.light_args 须为非空列表"
-        assert isinstance(d.get("capabilities", {}).get("sandbox_installable"), bool), \
-            "capabilities.sandbox_installable 必备布尔"
-        assert d.get("usage", {}).get("mode") in _USAGE_MODES, \
-            f"usage.mode 值域: {d.get('usage', {}).get('mode')}"
+            if not (isinstance(probe["light_args"], list) and probe["light_args"]):
+                _err("probe.light_args 须为非空列表")
+        if not isinstance(d.get("capabilities", {}).get("sandbox_installable"), bool):
+            _err("capabilities.sandbox_installable 必备布尔")
+        if d.get("usage", {}).get("mode") not in _USAGE_MODES:
+            _err(f"usage.mode 值域: {d.get('usage', {}).get('mode')}")
 
     # ── 查询 ────────────────────────────────────────────────────
 

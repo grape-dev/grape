@@ -3330,7 +3330,7 @@ const engModalAll = computed(() => (agentEngines.value[engineModal.agentType] ||
 const engModalAvailTypes = computed(() => {
   // [B6 尾/C08-A2] 类型归并读后端 annotate 的 page_type（insight agent_engines 单源派生），前端零引擎名判定
   const types = []
-  engModalVisible.value.forEach(function (e) {
+  engModalAll.value.forEach(function (e) {
     const tn = e.page_type || ''
     if (tn && !types.includes(tn)) types.push(tn)
   })
@@ -3365,10 +3365,7 @@ const engModalFiltered = computed(() => {
         .toLowerCase()
       if (!hay.includes(q)) return false
     }
-    if (engineModal.filterType) {
-      const ename = (e.name || '').toLowerCase()
-      if (!ename.includes(engineModal.filterType)) return false
-    }
+    if (engineModal.filterType && (e.page_type || '') !== engineModal.filterType) return false
     if (engineModal.filterScope && (e.scope || 'global') !== engineModal.filterScope) return false
     if (engineModal.filterScene.length) {
       const stags = e.scene_tags || []
