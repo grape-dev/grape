@@ -55,6 +55,10 @@ _CIRCUIT_MIN_OFFLINE_SECONDS = 300        # 熔断附加门槛：离线持续 �
 # 既有 Loki 查询按该指纹聚合（生产 Grafana：`|= "all offline (Issue #259)"`），
 # ERROR 行内必须保留这段字面子串——改名会让历史看板/告警规则失明。
 _OFFLINE_LOG_FINGERPRINT = "all offline (Issue #259)"
+# Issue #3827：`autopilot_executions.error_code` 落库失败（存量库缺列 1054）时的
+# 分类兜底。本条与 `_binding_failure_code` 的 BINDING_STALE 文案同源（本模块常量），
+# 仅在「列读不到 -> error_code 为空」时按稳定指纹回推分类，不让缺列把退避链路整条断掉。
+_STALE_LOG_FINGERPRINT = "not found in agent_runtimes"
 
 
 def _scheduler_now() -> datetime:
@@ -1146,8 +1150,29 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
         log.warning(f"Autopilot: update execution {exec_id} failed: {e}")
 
 
+def _classify_env_error(error_code: str, error: str) -> str:
+    """Issue #3827：`error_code` 为空时按稳定指纹回推环境性失败分类。
+
+    仅用于「列缺失/旧写入方没写 error_code」的存量库兜底：显式分类永远优先，
+    普通失败（文案不含环境性指纹）保持原样。指纹是本模块 `_binding_failure_code`
+    自己产出的字面子串（Loki 看板同源），不是随手解析的第三方文案。
+    """
+    if error_code:
+        return error_code
+    _err = error or ""
+    if _OFFLINE_LOG_FINGERPRINT in _err:
+        return ERROR_ENGINE_OFFLINE
+    if _STALE_LOG_FINGERPRINT in _err:
+        return ERROR_BINDING_STALE
+    return ""
+
+
 def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
-    """读执行记录终态三元组 (status, error, error_code)；老库缺 error_code 列时回落。"""
+    """读执行记录终态三元组 (status, error, error_code)；老库缺 error_code 列时回落。
+
+    缺列回落路径不再把分类丢弃（Issue #3827）：`error_code` 缺失时按稳定指纹从
+    `error` 回推 ENGINE_OFFLINE / BINDING_STALE，保证退避/熔断链路不被缺列整条断掉。
+    """
     try:
         with db_lock:
             c = db.cursor()
@@ -1159,10 +1184,12 @@ def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
                 row = c.execute(
                     "SELECT status, error FROM autopilot_executions WHERE id=?",
                     (exec_id,)).fetchone()
-                return ((row[0] if row else "unknown"),
-                        (row[1] if row else "") or "", "")
-        return ((row[0] if row else "unknown"), (row[1] if row else "") or "",
-                ((row[2] if len(row) > 2 else "") or ""))
+                _err = (row[1] if row else "") or ""
+                return ((row[0] if row else "unknown"), _err,
+                        _classify_env_error("", _err))
+        _err = (row[1] if row else "") or ""
+        _code = (row[2] if len(row) > 2 else "") or ""
+        return ((row[0] if row else "unknown"), _err, _classify_env_error(_code, _err))
     except Exception as e:
         log.warning(f"Autopilot: read execution {exec_id} state failed: {e}")
         return ("unknown", "", "")
@@ -1562,7 +1589,8 @@ def _handle_environmental_failure(task: dict, exec_id: int, error_code: str, err
         _error_line = f"{_error_line} {_OFFLINE_LOG_FINGERPRINT}".strip()
     log.error(
         f"Autopilot task={task_id} exec={exec_id} status=failed error_code={error_code} "
-        f"engine_ids={_task_binding_label(task)} consecutive_failures={consecutive} "
+        f"engine_ids={_task_binding_label(task)} n={consecutive} "
+        f"consecutive_failures={consecutive} "
         f"offline_seconds={int(offline_seconds)} circuit_paused={int(bool(circuit_paused))} "
         f"backoff_until={next_run} error={_error_line or '(no detail)'}")
     if should_alert:
