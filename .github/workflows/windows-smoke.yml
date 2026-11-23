@@ -347,3 +347,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3848_startup_order.py -v
+      - name: Result comment ident routing tests (issue #4065)
+        # Issue #4065 QA 审查修复（Required）：新增用例 test_issue_4065_result_comment_ident.py
+        # 与 test_issue_4065_issue_card_ident.py 此前未接入 linux-backend 门禁（先例
+        # #1613/#2133/#2245/#3167/#3490/#3699/#3758/#3771/#3848 均由 QA 要求补齐）。
+        # 用例锁结果回帖 ident 归一（autopilot-*/IK*/pr_* 零远程 400）、真实号双保险
+        # （执行完成调用路径传 task_id/seq、payload 带真实号凭真实号回帖）、
+        # 失败/跳过指标与卡片端点 int→str 契约；回退会让合成键任务结果评论恒 400，
+        # 只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_4065_result_comment_ident.py \
+            tests/api/test_issue_4065_issue_card_ident.py -v

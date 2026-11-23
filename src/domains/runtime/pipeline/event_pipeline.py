@@ -5678,6 +5678,52 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         log.warning(f"Post all subtasks done failed: {e}")
 
 
+def _post_result_to_issue_from_exec_done(repository, issue_id, result_text, repo_gitcode_token,
+                                         agent_type, repo_key, task_id, seq, evt):
+    """执行完成 → 自动回帖 Issue（从 _execute_agent_inner 收尾段抽出，Issue #4065 QA R1）。
+
+    Issue #4065 双保险接线：调用 _post_result_to_issue 必须带 task_id/seq——
+    合成键任务（issue_id=autopilot-*）本身不是 issue 号，但任务/事件记录
+    （events.payload）往往带真实 issue_number；不传则 _task_real_issue_number
+    直接返回 ""，生产上永远解析不到真实号，结果只能落卡片/事件流兜底。
+    PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖。
+    """
+    _issue_num = _issue_num_from(issue_id)
+    if not (_issue_num and repo_gitcode_token):
+        return
+    try:
+        # 直连执行路径无结构化 agent_result：#1545 策略按无结论处理
+        _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                              agent_result=False, task_id=task_id, seq=seq)
+    except Exception as _pe:
+        # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
+        log.warning(f"Exec agent: post result to issue failed: {_pe}")
+        if task_id:
+            try:
+                with db_lock:
+                    c = _rt_db.cursor()
+                    c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                    _row = c.fetchone()
+                    _errs = []
+                    if _row and _row[0]:
+                        try:
+                            _errs = json.loads(_row[0])
+                            if not isinstance(_errs, list):
+                                _errs = [str(_row[0])]
+                        except (json.JSONDecodeError, TypeError):
+                            _errs = [str(_row[0])]
+                    _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
+                    if not _has_rpf:
+                        _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
+                        # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                        _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
+                        c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
+                        _rt_db.commit()
+            except Exception:
+                pass
+        # R20.3.3: 回帖失败不影响 task 状态（task 仍标记 completed）
+
+
 def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
                         agent_type: str, repo_key: str = "", *, agent_result: bool = False,
                         task_id: str = "", seq=None):
@@ -7347,38 +7393,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
     # PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖
     if new_status == "completed" and result_text and issue_id and not evt.get("_pr_sub_pr_number"):
-        _issue_num = _issue_num_from(issue_id)
-        if _issue_num and repo_gitcode_token:
-            try:
-                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
-                                  agent_result=False)  # 直连执行路径无结构化 agent_result：#1545 策略按无结论处理
-            except Exception as _pe:
-                # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
-                log.warning(f"Exec agent: post result to issue failed: {_pe}")
-                if task_id:
-                    try:
-                        with db_lock:
-                            c = _rt_db.cursor()
-                            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
-                            _row = c.fetchone()
-                            _errs = []
-                            if _row and _row[0]:
-                                try:
-                                    _errs = json.loads(_row[0])
-                                    if not isinstance(_errs, list):
-                                        _errs = [str(_errs)]
-                                except (json.JSONDecodeError, TypeError):
-                                    _errs = [str(_row[0])]
-                            _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
-                            if not _has_rpf:
-                                _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
-                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
-                                _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
-                                c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
-                                _rt_db.commit()
-                    except Exception:
-                        pass
-                # R20.3.3: 回帖失败不影响 task 状态（task 仍标记 completed）
+        _post_result_to_issue_from_exec_done(repository, issue_id, result_text, repo_gitcode_token,
+                                             agent_type, repo_key, task_id, seq, evt)
     # PR 订阅场景 → 回帖到 PR 评论
     if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
         _pr_num = str(evt["_pr_sub_pr_number"])
