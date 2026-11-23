@@ -31,4 +31,15 @@
 ## 收尾
 
 - [x] 自审查（5 轴 + 开源前置增量检查）
-- [ ] 建 PR（base=`arch-weekly-11-ljt`）+ Issue 评论 + A2A QA
+- [x] 建 PR（base=`arch-weekly-11-ljt`）+ Issue 评论 + A2A QA（PR #2042）
+
+## 复审修复（PR #2042 审查意见，2026-11-23）
+
+- [x] Required 1：direct 派发（_create_direct_task）与 enqueue_task 共用租约获取入口
+      acquire_repo_dispatch_lease（预算 = TTL+5s）；预算耗尽抛 RepoDispatchBusyError（瞬态），
+      autopilot DIRECT 派发撞锁落 skipped + error_code 交瞬态通道（不再 failed「创建任务记录失败」），
+      SRE 重试按 busy 指纹收口 failed 留待下一轮 claim 复试；红/绿验证：旧实现下 5 用例失败 →
+      实现合入后 24 passed。
+- [x] Required 2：test_issue_3963_repo_dispatch_lease.py（24 例）接入 lock-regression.yml 门禁。
+- [x] Optional 落地：busy 文案指纹提为 service 共享常量 REPO_DISPATCH_BUSY_LOG_FINGERPRINT
+      （scheduler import 同源），加交叉断言用例；plan.md「35s」口径补「不含 db_lock 等待」。

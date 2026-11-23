@@ -85,7 +85,7 @@ acquire_lock_with_retry(lock_key, ttl=60, attempts=20, interval=0.05,
 | 风险 | 缓解 |
 |---|---|
 | 抢锁等待变长拖慢入队线程 | 预算上限 TTL+5s；超预算即 requeue，不阻塞调用方线程池长期占用；抖动防同刻齐抢 |
-| 长持锁（#3927）时入队最长等待 35s；chat/events 的 async 路由也走同一 enqueue，极端场景会阻塞事件循环 | 预算有硬上限（不会无限等）；正常临界区毫秒级，只有 #3927 级长持锁才逼近上限——该场景本身已是全局阻塞态，本单把它从「立即判死」改成「有界排队」，并在 Issue 评论标注风险 |
+| 长持锁（#3927）时入队预算上限 35s（不含单次尝试内的 db_lock 等待：#3927 级 17-50s 长持锁下一次尝试即可越过 35s，同步 chat/events 路由整段占用事件循环会比上限更久）；chat/events 的 async 路由也走同一 enqueue，极端场景会阻塞事件循环 | 预算有硬上限（不会无限等）；正常临界区毫秒级，只有 #3927 级长持锁才逼近上限——该场景本身已是全局阻塞态，本单把它从「立即判死」改成「有界排队」，并在 Issue 评论标注风险 |
 | `lock.py` 公共原语外溢 | `wait_seconds` 默认 None 保持旧路径，回归用例锁定 `attempts/interval` 语义 |
 | 载入 `skipped` 会被误当接管跳过 | 语义上同为「非失败、本 tick 不重试」；区分靠 `error_code=REPO_DISPATCH_BUSY` 与 error 文案（管理台按 error_code 区分「排队冲突/执行失败」） |
 | 指标标签基数 | 仅 `repo` 一维（与既有 per-repo 指标一致） |
