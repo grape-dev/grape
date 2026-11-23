@@ -79,7 +79,7 @@ class RuntimeServiceRemote(RuntimeService):
                              json_data={"repo_keys": list(repo_keys or [])})
         return int((r or {}).get("count") or 0)
 
-    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+    def get_issue_card(self, repo_key: str, issue_number: "int | str") -> dict:
         # repo_key 含 ':' 和 '/'，不能进路径段（会被 URL 解析切碎 → 404）
         return self.client.get(
             "/internal/issues/card",

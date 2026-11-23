@@ -10,7 +10,7 @@ MgmtServiceRemote / InsightServiceRemote 调用。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from src.kernel.gsb.provider import get_local_service as _get_local
 
@@ -99,13 +99,30 @@ async def get_inflight_task_count(body: dict) -> dict:
 
 
 @router.get("/issues/card", operation_id="runtime_issue_card_get", include_in_schema=False)
-async def get_issue_card(repo_key: str, issue_number: int) -> dict:
+async def get_issue_card(repo_key: str, issue_number: str) -> dict:
     """供 RuntimeServiceRemote.get_issue_card() 调用（issue 单表权威卡片）。
 
     repo_key 形如 ``gitcode:owner/repo``，含 ``:`` 和 ``/`` —— 放进路径参数会被
     URL 切碎成多段导致 404（实测）。这里用 query 参数，与 get_chat_conversations 同款。
+
+    Issue #4065：`issue_number` 由 int 改为 str 并在入口先归一（与 #3999 的 stage 解析
+    降级口径统一）。此前 FastAPI 强转 int 失败 → 裸 422（`autopilot-*` 244 条/小时，
+    不可读）。现在：
+    - 可归一（数字 / 平台原生 ident `IK*` / `autopilot-*` 合成键）→ 正常查卡片；
+    - 不可归一（`pr_*` 订阅伪 id、空、含分隔文本、超长）→ 400 + 可读原因，不进查询层。
     """
-    return _get_local("runtime").get_issue_card(repo_key, issue_number)
+    from src.kernel.issue_ident import normalize_card_ident
+
+    _ident = normalize_card_ident(issue_number)
+    if not _ident:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error": "invalid_issue_ident",
+            "message": (f"issue_number 需为数字 / 平台 ident / autopilot-* 合成键，"
+                        f"无法归一为卡片主键（收到 {issue_number!r}）"),
+            "issue_number": issue_number,
+        })
+    return _get_local("runtime").get_issue_card(repo_key, _ident)
 
 
 @router.post("/issues/{repo_key}/{issue_number}/state", operation_id="runtime_issue_state_update", include_in_schema=False)

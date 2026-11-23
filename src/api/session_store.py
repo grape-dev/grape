@@ -769,13 +769,14 @@ def _issue_num_or_ident(issue_id) -> "int | str | None":
     原样 str 返回；空/None 返回 None。此前 set_issue_stage/_sync_issue_fields
     等保存路径一律 int() 强转，字符串 ident 必炸被 except 吞掉 → stage/scene/
     status 静默不落库（gitee confirm-done 后 stage 恒 'vod' 的写入点）。
+
+    Issue #4065：卡片主键口径收敛到 `card_ident_number`——`autopilot-*` 合成键
+    （issue 表真实主键）照常可查/可写；`pr_*` 订阅伪 id / 空 / 含分隔文本一律
+    None（此前原样透传，使 get_issue_stage 拿伪 id 打卡片端点 → 244 条/小时 422）。
     """
-    _raw = str(issue_id or "").lstrip("#")
-    if not _raw:
-        return None
     # Issue #3055：判定/强转统一走内核唯一入口（数字→int，ident→str）
-    from src.kernel.issue_ident import native_issue_number
-    return native_issue_number(_raw)
+    from src.kernel.issue_ident import card_ident_number
+    return card_ident_number(issue_id)
 
 
 def _scene_binding_active(repo_key: str, scene_id: str) -> bool:
