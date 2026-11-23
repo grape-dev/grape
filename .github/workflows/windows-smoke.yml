@@ -537,3 +537,12 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_3742_lock_contract.py -v
           python -m pytest tests/runtime/test_skill_sync_scheduler_idempotent.py -v
+      - name: Migration registry uniqueness gate tests (issue #3846)
+        # Issue #3846：register_migration 注册表同一 version 重复登记即失败，
+        # 撞号迁移必须带 post_check 才能进 reconcile（无 post_check 仅 ERROR 永久跳过）。
+        # 注册表唯一性门禁此前只有 AST 静态守卫（test_migration_track_guard），
+        # 看不见 **dict 展开登记的域迁移；本步补运行时注册表唯一性 + 探针自证，
+        # 先例同 #3771/#3758/#3699。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/api/test_issue_3846_cloud_sandboxes_migration.py -v
