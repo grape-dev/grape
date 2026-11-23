@@ -129,6 +129,52 @@ _FILE_PATH_MAX = 512         # grape_t_skill_file.path VARCHAR(512)
 _COMMENT_NAME_MAX = 128     # grape_t_skill_comment.user_name VARCHAR(128)
 # 评论分页缺省 20（UI「加载更多」步长），上限见 _COMMENT_PAGE_MAX。
 _COMMENT_PAGE_DEFAULT = 20
+# Issue #3855：显示名称独立于 SKILL.md frontmatter name，最长 20 个 Unicode 码点
+# （汉字/字母/数字/空格/emoji 各计 1，去除首尾空格后计数）。
+SKILL_DISPLAY_NAME_MAX = 20
+
+
+def _normalize_skill_display_name(raw) -> str:
+    """去首尾空格；None 归一为空串（必填/长度校验由 _validate 负责）。"""
+    return str(raw if raw is not None else "").strip()
+
+
+def _skill_display_name_conflict(scope: str, owner_id: str, name: str,
+                                 exclude_id: int | None = None) -> bool:
+    """同 scope 内显示名称是否重复（去首尾空格 + 大小写不敏感）。
+
+    只约束 display_name（源名称兜底不参与）；跨 scope 允许同名。比较留在
+    Python 侧 casefold，规避 MySQL/SQLite LOWER/TRIM 语义差异（含 Unicode）。
+    """
+    target = _normalize_skill_display_name(name).casefold()
+    if not target:
+        return False
+    rows = _rt_skills.read_all_any(
+        "skill_display_names_by_scope", (scope or "", owner_id or ""))
+    for row in rows or []:
+        row_id = int(row[0] or 0)
+        if exclude_id and row_id and row_id == int(exclude_id):
+            continue
+        if _normalize_skill_display_name(row[1]).casefold() == target:
+            return True
+    return False
+
+
+def _validate_skill_display_name(raw, *, scope: str, owner_id: str,
+                                 exclude_id: int | None = None) -> str:
+    """校验显示名称：必填、≤20 Unicode 码点、同 scope 去重。
+
+    错误语义：空值/仅空格/超长 → 400；同 scope 重名 → 409「名称已存在」。
+    """
+    name = _normalize_skill_display_name(raw)
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "名称不能为空"})
+    if len(name) > SKILL_DISPLAY_NAME_MAX:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"名称不能超过 {SKILL_DISPLAY_NAME_MAX} 个字符"})
+    if _skill_display_name_conflict(scope, owner_id, name, exclude_id=exclude_id):
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "名称已存在"})
+    return name
 
 
 def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
@@ -1169,8 +1215,14 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                        category_id: int = Form(0), cat_l1_id: int = Form(0),
                        cat_l2_id: int = Form(0), tags: str = Form(""),
                        summary: "str | None" = Form(None), change_note: str = Form(""),
-                       clear_category: bool = Form(False)):
-    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
+                       clear_category: bool = Form(False),
+                       display_name: "str | None" = Form(None)):
+    """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。
+
+    Issue #3855：display_name 为新增技能必填名称（表单必传）。为兼容无名称的
+    历史 API 调用，缺省（None）时回退源名称；显式传入空串/仅空格/超长/同 scope
+    重名均阻断保存。
+    """
     # 直接调用（非 FastAPI 注入）时 Form 默认值不是 bool，避免误判为「清空分类」
     if not isinstance(clear_category, bool):
         clear_category = False
@@ -1272,6 +1324,12 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             db_scope = "repo" if scope == "repo" else "user"
             _existing = _rt_skills.read_one_any(
                 "skill_id_by_owner_scope", (skill_name, db_scope, owner))
+            _target_display = None
+            # 直接调用（非 FastAPI 注入）时缺省值是 Form 对象而非 None，按未传处理。
+            if isinstance(display_name, str):
+                _target_display = _validate_skill_display_name(
+                    display_name, scope=db_scope, owner_id=owner,
+                    exclude_id=int(_existing[0]) if _existing else None)
             target_version = (_next_skill_version(int(_existing[0]), incoming_version)
                               if _existing else (incoming_version or "1.0.0"))
             try:
@@ -1290,7 +1348,8 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                 content_hash = hashlib.sha256(zip_bytes).hexdigest()
                 skill_id = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
                                             description, object_key, str(user["id"]),
-                                            category_id, content_hash)
+                                            category_id, content_hash,
+                                            display_name=_target_display)
                 if not skill_id:
                     if _prev_bytes is not None:
                         storage.save_bytes(object_key, _prev_bytes)   # 恢复旧对象（DB 行未动）
@@ -1569,7 +1628,8 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
             content_hash = hashlib.sha256(zip_bytes).hexdigest()
             new_id = upsert_skill_obs(skill_scope, owner_id, skill_name, new_agent_type,
                                       description, object_key, str(user["id"]),
-                                      new_category_id, content_hash)
+                                      new_category_id, content_hash,
+                                      display_name=None)  # #3855：保留已录入名称，为空才回填源名称
             if not new_id or int(new_id) != int(skill_id):
                 if _prev_bytes is not None:
                     storage.save_bytes(object_key, _prev_bytes)  # 回滚旧对象（DB 行未动）
@@ -1611,13 +1671,16 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
                      user: dict = Depends(require_no_session_token)):
     """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
 
-    权限对齐 delete/update：official 403；user 需本人；repo 需当前用户托管该仓库。
+    权限对齐 delete/update：user 需本人；repo 需当前用户托管该仓库。
+    Issue #3855：official 技能仅放开 display_name（其余元信息维持 403）；
+    user/repo 在既有字段白名单上追加 display_name。
     版本号不变（不写 grape_t_skill_version），仅刷新 updated_at。
     """
     row = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
     skill_name = row[0] or ""
+    cur_display = row[1] or ""
     cur_desc = row[2] or ""
     cur_agent = row[3] or ""
     skill_scope = row[5] or "user"
@@ -1627,25 +1690,36 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
     cur_l2 = int(row[13] or 0) if len(row) > 13 else 0
     cur_tags = row[14] if len(row) > 14 else ""
 
+    body = body if isinstance(body, dict) else {}
     if skill_scope == "official":
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许修改"})
-    if skill_scope == "user" and owner_id != str(user.get("id")):
+        # 官方技能只放开名称编辑；任何其它元信息字段仍拒绝。
+        _non_name = sorted(set(body) - {"display_name"})
+        if _non_name:
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "官方技能仅允许修改显示名称"})
+    elif skill_scope == "user" and owner_id != str(user.get("id")):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
-    if skill_scope == "repo":
+    elif skill_scope == "repo":
         from src.domains.mgmt.user.db import get_user_repos
         user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
         if owner_id not in user_repo_keys:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
 
-    body = body if isinstance(body, dict) else {}
     allowed = {"tags", "summary", "description", "category_id",
-               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category", "intro"}
+               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category", "intro",
+               "display_name"}
     unknown = sorted(set(body) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail={
             "code": 400, "message": f"不支持更新的字段：{'、'.join(unknown)}"})
     if not any(k in body for k in allowed):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "没有可更新的字段"})
+
+    new_display = cur_display
+    if "display_name" in body:
+        new_display = _validate_skill_display_name(
+            body.get("display_name"), scope=skill_scope, owner_id=owner_id,
+            exclude_id=int(skill_id))
 
     extra = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))
     cur_summary = (extra[0] if extra else "") or ""
@@ -1724,7 +1798,7 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
 
     _rt_skills.exec_any("skill_meta_patch_update", (
         new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),
-        int(target_l2 or 0), tags_json, new_summary,
+        int(target_l2 or 0), tags_json, new_summary, new_display,
         str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX], int(skill_id)))
     # C3 非查询操作审计：元信息免传包更新留痕（detail 只记字段名，不记值）
     from src.domains.mgmt.auth import audit as _skill_audit
@@ -1740,6 +1814,7 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
         "message": f"技能 {skill_name} 信息已更新",
         "skill_id": int(skill_id),
         "summary": new_summary,
+        "display_name": new_display,
         "tags": parse_tags(tags_json, limit=SKILL_MAX_TAGS),
         "agent_type": new_agent,
         "category_id": int(new_category_id or 0),

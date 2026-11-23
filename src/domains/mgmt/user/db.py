@@ -1291,7 +1291,8 @@ def get_skill_current_version(skill_id) -> int:
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
-                     category_id: int = 0, content_hash: str = "") -> int | None:
+                     category_id: int = 0, content_hash: str = "",
+                     display_name: str | None = None) -> int | None:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
     scope: user/repo；owner: user_id 或 repo_key。
@@ -1299,6 +1300,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
     Issue #444: 新增 content_hash 参数（UPDATE/INSERT 补写 content_hash 列，
     读时校验据此感知跨进程覆盖更新）；返回值改为 int | None（技能主键 id，
     失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
+    Issue #3855: 新增 display_name 参数。显式非空值直接写入（新增/编辑录入的名称）；
+    None（既有调用方/重新上传）表示「保留行内已有非空 display_name，为空才回填源名称」，
+    避免重新上传把用户录入的名称冲回 SKILL.md 源名称。
     """
     try:
         from src.domains.runtime import public as _rt  # noqa: PLC0415
@@ -1307,6 +1311,14 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 "skill_id_by_owner_scope",
                 (skill_name, "repo" if scope == "repo" else "user", owner))
             if row:
+                # Issue #3855：显式传入的名称优先；缺省时保留行内已有非空名称，
+                # 为空则回填源名称（= skill_name），杜绝重新上传覆盖用户命名。
+                _incoming_name = (display_name or "").strip() if display_name is not None else ""
+                if _incoming_name:
+                    _target_name = _incoming_name
+                else:
+                    _current_name = (row[1] or "").strip() if len(row) > 1 else ""
+                    _target_name = _current_name or skill_name
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
                 from src.kernel import cross_write as _xw_uso
@@ -1318,17 +1330,17 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                         _rt_uso_ok, "runtime", "skill_obs_update",
                         f"skill-obs:{row[0]}:{(content_hash or '')[:12]}",
                         {"skill_id": int(row[0]), "object_key": object_key,
-                         "display_name": skill_name, "agent_type": agent_type or "",
+                         "display_name": _target_name, "agent_type": agent_type or "",
                          "description": description or "", "category_id": category_id,
                          "updated_by": created_by or "", "content_hash": content_hash or ""},
                         lambda: _rt_uso_ok.update_skill_obs(
-                            int(row[0]), object_key, skill_name, agent_type or "",
+                            int(row[0]), object_key, _target_name, agent_type or "",
                             description or "", category_id, created_by or "",
                             content_hash or ""), log)
                 if not _uso_done:
                     _rt.exec_any(
                         "skill_obs_update",
-                        (object_key, skill_name, agent_type or "", description or "",
+                        (object_key, _target_name, agent_type or "", description or "",
                          category_id, created_by or "", content_hash or "", row[0]))
                 _mg_db.commit()
                 return int(row[0])
@@ -1343,7 +1355,8 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
 
                 def _apply_usi() -> None:
                     _usi_out["id"] = _rt_usi_ok.insert_skill(
-                        skill_name, skill_name, description or "", agent_type or "",
+                        skill_name, (display_name or "").strip() or skill_name,
+                        description or "", agent_type or "",
                         object_key, scope, owner, created_by or "", created_by or "",
                         category_id, content_hash or "")
 
@@ -1360,9 +1373,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 return int(_usi_out.get("id") or 0)
             _rt.exec_any(
                 "skill_obs_insert",
-                (skill_name, skill_name, description or "", agent_type or "",
-                 object_key, scope, owner, created_by or "", created_by or "", category_id,
-                 content_hash or ""))
+                (skill_name, (display_name or "").strip() or skill_name, description or "",
+                 agent_type or "", object_key, scope, owner, created_by or "",
+                 created_by or "", category_id, content_hash or ""))
             _mg_db.commit()
             _new = _rt.read_one_any(
                 "skill_id_by_owner_scope",

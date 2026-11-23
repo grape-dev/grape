@@ -2915,7 +2915,11 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_id_official": (
         "SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1"),
     "skill_id_by_owner_scope": (
-        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+        "SELECT id, display_name FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+    # Issue #3855：同 scope 重名校验取该 scope 下全部 active 行，比较留 Python 侧
+    # （去首尾空格 + casefold），避免依赖 MySQL/SQLite 各异的 LOWER/TRIM 语义。
+    "skill_display_names_by_scope": (
+        "SELECT id, display_name FROM skill WHERE scope=? AND owner_id=? AND is_active=1"),
     "skill_scope_repo_owner": (
         "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
         "AND is_active=1 LIMIT 1"),
@@ -2959,8 +2963,8 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
     "skill_meta_patch_update": (
         "UPDATE skill SET description=?, agent_type=?, category_id=?, cat_l1_id=?, "
-        "cat_l2_id=?, tags=?, summary=?, updated_by=?, updated_at=datetime('now') "
-        "WHERE id=?"),
+        "cat_l2_id=?, tags=?, summary=?, display_name=?, updated_by=?, "
+        "updated_at=datetime('now') WHERE id=?"),
     "skill_download_inc": (
         "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
     "skill_intro_override_update": (
