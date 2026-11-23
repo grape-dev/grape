@@ -482,6 +482,81 @@ class TestCompatCursor:
         assert "`name`(191)" in last_sql
 
 
+class TestIssueStatusWriteGeneration:
+    """Issue #4022：issue.status 专用写代在 schema 模式（前缀/限定表名）下仍能推进。
+
+    `Cursor.execute` 先把 SQL 过 `qualify_sql`：MySQL 下 `issue` → `grape_runtime.issue`，
+    SQLite 下 → `rt_issue`。写代判定必须识别这些改写后的表名，否则置位后状态快照
+    永不失效（read-your-writes 退化为 1s TTL）。
+    """
+
+    @staticmethod
+    def _cursor_with_raw():
+        raw = MagicMock()
+        raw.rowcount = 1
+        db = mc.MySQLCompatDB(host="h")
+        db._raw_cursor = MagicMock(return_value=raw)
+        return db, db.cursor(), raw
+
+    def test_mysql_schema_qualified_issue_writes_detected(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_SCHEMA_MODE", "1")
+        monkeypatch.setenv("DEVOPS_DB_BACKEND", "mysql")
+        from src.kernel.db import qualify_sql
+        for raw_sql in ("UPDATE issue SET status=? WHERE id=?",
+                        "INSERT INTO issue (status) VALUES (?)",
+                        "DELETE FROM issue WHERE id=?"):
+            qualified = qualify_sql(raw_sql)
+            assert "grape_runtime.issue" in qualified, qualified
+            assert mc._is_issue_status_write(qualified) is True, qualified
+
+    def test_sqlite_prefix_issue_writes_detected(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_SCHEMA_MODE", "1")
+        monkeypatch.setenv("DEVOPS_DB_BACKEND", "sqlite")
+        from src.kernel.db import qualify_sql
+        for raw_sql in ("UPDATE issue SET status=? WHERE id=?",
+                        "INSERT INTO issue (status) VALUES (?)",
+                        "DELETE FROM issue WHERE id=?"):
+            qualified = qualify_sql(raw_sql)
+            assert "rt_issue" in qualified, qualified
+            assert mc._is_issue_status_write(qualified) is True, qualified
+
+    @pytest.mark.parametrize("sql", [
+        "UPDATE rt_issue SET title=? WHERE id=?",          # 未写 status
+        "UPDATE rt_issue_state SET status=? WHERE id=?",   # 非 issue 表
+        "INSERT INTO rt_issue_state (status) VALUES (?)",
+        "DELETE FROM rt_events WHERE id=?",
+        "SELECT * FROM rt_issue",
+    ])
+    def test_non_issue_or_non_status_writes_ignored(self, sql):
+        assert mc._is_issue_status_write(sql) is False, sql
+
+    @pytest.mark.parametrize("sql", [
+        "UPDATE `grape_runtime`.`issue` SET status=%s WHERE id=%s",
+        "UPDATE `rt_issue` SET status=? WHERE id=?",
+        "REPLACE INTO `grape_runtime`.issue (status) VALUES (%s)",
+    ])
+    def test_quoted_and_schema_qualified_issue_writes_detected(self, sql):
+        assert mc._is_issue_status_write(sql) is True, sql
+
+    def test_cursor_advances_dedicated_generation_only_for_issue_writes(self, monkeypatch):
+        for backend in ("mysql", "sqlite"):
+            monkeypatch.setenv("GRAPE_SCHEMA_MODE", "1")
+            monkeypatch.setenv("DEVOPS_DB_BACKEND", backend)
+            db, cur, _raw = self._cursor_with_raw()
+            assert db.issue_status_write_generation == 0
+            cur.execute("UPDATE issue SET status=? WHERE id=?", ("pending_review", 1))
+            assert db.issue_status_write_generation == 1, backend
+            cur.execute("INSERT INTO issue (status) VALUES (?)", ("active",))
+            assert db.issue_status_write_generation == 2, backend
+            cur.execute("DELETE FROM issue WHERE id=?", (1,))
+            assert db.issue_status_write_generation == 3, backend
+
+            before = db.issue_status_write_generation
+            cur.execute("INSERT INTO events (repo_key) VALUES (?)", ("x",))
+            cur.execute("UPDATE issue SET title=? WHERE id=?", ("t", 1))
+            assert db.issue_status_write_generation == before, backend
+
+
 class TestCompatDB:
     def test_raw_cursor_connects_on_first_use(self):
         db = mc.MySQLCompatDB(host="10.0.0.1", port=3306, user="u", password="p", database="d")

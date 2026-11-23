@@ -87,16 +87,39 @@ def _is_read_only_statement(sql: str) -> bool:
     return tok in _READ_ONLY_LEADING
 
 
-# Issue #4022 QA Standards-1/-2：issue.status 专用写代判定——只有真正影响
-# 快照所含 status 的语句才推进计数，events/agent_tasks 等高频写不再让
-# 列表缓存核对必须进 db_lock 回读（削峰目标不被无关写退化）。
+# Issue #4022：issue.status 专用写代判定——只有真正影响快照所含 status 的
+# 语句才推进计数，events/agent_tasks 等高频写不会让列表状态快照失效。
+# 注意：Cursor.execute 在执行前已经过 `qualify_sql`，schema 模式下 `issue` 会被
+# 改写为 `grape_runtime.issue`（MySQL）或 `rt_issue`（SQLite 前缀）。因此判定不能
+# 直接匹配裸表名，必须先取 SQL 中的目标表标识并归一为逻辑名再比较。
+_WRITE_TARGET_RE = r"(?P<table>[^\s(,;]+)"
 _ISSUE_ROW_WRITE_RE = re.compile(
     r"^(?:INSERT\s+(?:IGNORE\s+|OR\s+\w+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM)\s+"
-    r"[\"`\[]?issue\b",
+    + _WRITE_TARGET_RE,
     re.IGNORECASE)
 _ISSUE_UPDATE_RE = re.compile(
-    r"^UPDATE\s+[\"`\[]?issue\b\s+SET\b", re.IGNORECASE)
+    r"^UPDATE\s+" + _WRITE_TARGET_RE, re.IGNORECASE)
 _ISSUE_STATUS_SET_RE = re.compile(r"\bstatus\s*=", re.IGNORECASE)
+_SCHEMA_TABLE_PREFIXES = ("rt_", "mgmt_", "ins_")
+
+
+def _logical_table_name(token: str) -> str:
+    """把带引号/schema 限定/分 Schema 前缀的表标识归一为逻辑表名。
+
+    `grape_runtime.issue` / `` `grape_runtime`.`issue` `` / `rt_issue` / `issue`
+    都归一为 `issue`；`issue_state`、`rt_issue_state` 归一为 `issue_state`，不会
+    与 `issue` 混淆（前缀只在词首且整段剥离后精确比较）。
+    """
+    name = (token or "").strip()
+    if not name:
+        return ""
+    if "." in name:
+        name = name.rsplit(".", 1)[-1]
+    name = name.strip().strip("`\"[]").strip().lower()
+    for _prefix in _SCHEMA_TABLE_PREFIXES:
+        if name.startswith(_prefix):
+            return name[len(_prefix):]
+    return name
 
 
 def _is_issue_status_write(sql: str) -> bool:
@@ -104,9 +127,11 @@ def _is_issue_status_write(sql: str) -> bool:
     head = _strip_sql_leading_noise(sql)
     if not head:
         return False
-    if _ISSUE_ROW_WRITE_RE.match(head):
+    m = _ISSUE_ROW_WRITE_RE.match(head)
+    if m and _logical_table_name(m.group("table")) == "issue":
         return True
-    if _ISSUE_UPDATE_RE.match(head):
+    m = _ISSUE_UPDATE_RE.match(head)
+    if m and _logical_table_name(m.group("table")) == "issue":
         return bool(_ISSUE_STATUS_SET_RE.search(head))
     return False
 

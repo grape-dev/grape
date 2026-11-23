@@ -138,8 +138,6 @@ from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    issue_status_text, read_issue_business_status_by_id,
                                    read_issue_row_by_id)
 
-from src.api.issues_center import cancel_issue_rows
-
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
 def _num_from_issue_id(issue_id: str) -> str:
@@ -3405,7 +3403,7 @@ def get_issue_detail(owner: str, repo: str, number: str,
     # QA 复审低危项：`found` 为真即覆盖 status（含空串），不得在权威 status 为空时
     # 透出另一镜像行/兜底值；stage 允许在权威为空时保留兜底。
     if base.get("issue_id"):
-        _found, _by_id_stage, _by_id_status = read_issue_business_status_by_id(base["issue_id"])
+        _found, _by_id_stage, _by_id_status = read_issue_row_by_id(base["issue_id"])
         if _found:
             _biz_stage = _by_id_stage or _biz_stage
             _biz_status = _by_id_status
@@ -3488,7 +3486,7 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
         # #4024 未命中规范行时的兜底：以 stage_map 行 internal_id 单源化。
         _internal_id = (_stage_map.get(num) or {}).get("internal_id")
         if _internal_id:
-            _found, _by_id_stage, _by_id_status = read_issue_business_status_by_id(_internal_id)
+            _found, _by_id_stage, _by_id_status = read_issue_row_by_id(_internal_id)
             if _found:
                 _biz_stage = _by_id_stage or _biz_stage
                 _biz_status = _by_id_status

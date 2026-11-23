@@ -322,11 +322,20 @@ def test_row_deleted_invalidates_warmed_cache():
 
 
 def test_status_snapshot_collapses_repeated_checks(monkeypatch):
-    """QA Standards-1：快照窗口内重复核对只回读 1 次 DB（不逐请求抢全局 db_lock），
-    且写入后（写代变化）下一次核对整窗刷新——写后即读不因快照削弱。"""
+    """快照窗口内重复核对只回读 1 次 DB（不逐请求抢全局 db_lock）。
+
+    写新鲜度由 issue.status **专用写代**判定（不是 sqlite total_changes）：
+    - 无关表写入（events 等）使 total_changes 变化但专用写代不变 → 快照仍复用；
+    - issue 行写使专用写代推进 → 下一次核对整窗刷新，写后即读不因快照削弱。
+    """
     from src.domains.runtime.routes import issues as _routes
     ctx = _Ctx("i")
     card_id = ctx.seed(number=19, status="active")
+
+    # 本用例用可控的专用写代替身，直接验证「专用写代」语义（sqlite 主库无该属性时
+    # 实现回退 total_changes，无法覆盖专用计数器本身）。
+    _gen = {"n": 0}
+    monkeypatch.setattr(_routes, "_runtime_status_write_gen", lambda: _gen["n"])
 
     # 重置快照窗口，确保本用例从空快照开始
     with _routes._issue_status_snapshot_lock:
@@ -353,26 +362,41 @@ def test_status_snapshot_collapses_repeated_checks(monkeypatch):
     _proxy = _CountingRtDb(_routes._rt_db)
     monkeypatch.setattr(_routes, "_rt_db", _proxy)
     try:
-        # 6 次并发看板刷新同页核对 → 1 次回读（快照复用，QA 原目标「6 并发削成 1 次」）
+        # 6 次并发看板刷新同页核对 → 1 次回读（快照复用，原目标「6 并发削成 1 次」）
         for _ in range(6):
             out = _routes._issue_status_by_ids([card_id])
             assert out.get(card_id) == "active", out
         assert _proxy.queries == 1, _proxy.queries
 
-        # 写入后（total_changes 变化）下一次核对必须刷新并读到新值
+        # 无关表写入：total_changes 变化但专用写代不变 → 快照继续复用（不误判过期）
+        raw_changes_before = db.total_changes
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO events (repo_key, event_type, status) VALUES (?,?,?)",
+                (ctx.repo_key, "unrelated_write", "completed"))
+            db.commit()
+        assert db.total_changes > raw_changes_before
+        out = _routes._issue_status_by_ids([card_id])
+        assert out.get(card_id) == "active", out
+        assert _proxy.queries == 1, _proxy.queries
+
+        # issue.status 写入：专用写代推进 → 下一次核对必须整窗刷新并读到新值
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE issue SET status='processing' WHERE id=?", (card_id,))
             db.commit()
+        _gen["n"] += 1
         out = _routes._issue_status_by_ids([card_id])
         assert out.get(card_id) == "processing", out
         assert _proxy.queries == 2, _proxy.queries
 
-        # 行删除后：快照刷新记 None → 判漂移（由上层重算）
+        # 行删除（专用写代推进）：快照刷新记 None → 判漂移（由上层重算）
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM issue WHERE id=?", (card_id,))
             db.commit()
+        _gen["n"] += 1
         out = _routes._issue_status_by_ids([card_id])
         assert out.get(card_id) is None, out
     finally:
@@ -380,6 +404,33 @@ def test_status_snapshot_collapses_repeated_checks(monkeypatch):
     # 清快照，避免影响后续用例
     with _routes._issue_status_snapshot_lock:
         _routes._issue_status_snapshot.update({"ts": 0.0, "changes": -1, "data": {}})
+
+
+def test_runtime_status_write_gen_prefers_dedicated_counter(monkeypatch):
+    """`_runtime_status_write_gen` 在可用时取 issue.status 专用写代，而非 total_changes。"""
+    from src.kernel import db_registry, session_manager
+    from src.domains.runtime.routes import issues as _routes
+
+    class _FakeMainDb:
+        issue_status_write_generation = 7
+        total_changes = 999
+
+    monkeypatch.setattr(db_registry, "current_domain", lambda: "runtime")
+    monkeypatch.setattr(session_manager, "db", _FakeMainDb())
+    assert _routes._runtime_status_write_gen() == 7
+
+
+def test_runtime_status_write_gen_falls_back_to_total_changes(monkeypatch):
+    """无专用写代（如 sqlite）时回退 total_changes，保证写后即读不失效。"""
+    from src.kernel import db_registry, session_manager
+    from src.domains.runtime.routes import issues as _routes
+
+    class _FakeMainDb:
+        total_changes = 42
+
+    monkeypatch.setattr(db_registry, "current_domain", lambda: "runtime")
+    monkeypatch.setattr(session_manager, "db", _FakeMainDb())
+    assert _routes._runtime_status_write_gen() == 42
 
 
 # ---------------------------------------------------------------- QA 复审补充（三库拓扑 + 空权威状态）

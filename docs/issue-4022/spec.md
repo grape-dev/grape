@@ -38,7 +38,8 @@
   `_task_status_map` / `_issue_stage_map` 确定性排序、`issues status get` 共用 status 归一 accessor、
   detail 与独立 `/pipeline` 内嵌业务状态按内部主键回读。
 - `src/domains/runtime/issues_center.py` — 新增 `issue_status_text`（共用 status 归一 accessor）、
-  `read_issue_business_status_by_id`（按内部主键回读 stage/status）。
+  `read_issue_row_by_id`（单一主键回读 accessor，返回 `(found, stage, status)`；
+  `_read_issue_status_by_id` / `read_issue_business_status_by_id` 为薄包装）。
 - `src/kernel/mysql_compat.py` — 新增 `MySQLCompatDB.issue_status_write_generation`（issue.status
   专用写代，只统计影响 issue 行 status 的 INSERT/REPLACE/DELETE 与 SET status 的 UPDATE），
   `total_changes` 保留为通用连接写计数。
@@ -82,3 +83,16 @@
   pipeline 与独立 `/pipeline` 在权威行存在时无条件按权威 status 覆盖（含空串），不再透出镜像行值。
 - Spec 测试补强：新增三库 own-DSN 拓扑用例（写代不可同源 → 每次回读、写后即见）与
   空权威 status 不被镜像行泄露用例。
+## QA 复审修复记录（PR #2046 round 3 @ 21b575141 → 本轮）
+- Standards 阻断（schema 模式写代永不推进）：`_is_issue_status_write` 不再直接匹配裸
+  `issue`，改为取目标表标识后归一（剥离 schema 限定 / 反引号 / `rt_|mgmt_|ins_` 前缀）再
+  精确比较；`GRAPE_SCHEMA_MODE=1` 下 `grape_runtime.issue` / `rt_issue` 的 UPDATE/INSERT/
+  DELETE 均正确推进 `issue_status_write_generation`。
+- Standards 判断项（专用写代缺 MySQL 侧用例）：新增 `tests/kernel/test_mysql_compat.py::
+  TestIssueStatusWriteGeneration`，覆盖 MySQL schema 限定名与 SQLite 前缀名下的写代推进，
+  以及无关表/非 status 写不推进。
+- Standards 判断项（主键回读重复 helper）：合并为单一 `read_issue_row_by_id`，两个旧入口
+  改为薄包装（不再各自维护一份 SQL/失败契约）。
+- Spec 测试说服力：快照用例改用可控的专用写代替身，验证「无关表写使 `total_changes` 变化
+  但专用写代不变时仍复用快照」与「issue 写推进专用写代后整窗刷新」；另补专用写代优先于
+  `total_changes` 的选择逻辑用例。

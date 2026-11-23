@@ -1307,37 +1307,17 @@ def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
 
-def _read_issue_status_by_id(issue_id):
-    """按内部主键回读 issue.status；无行或回读失败 → None（调用方保留兜底值）。
+def read_issue_row_by_id(issue_id) -> tuple:
+    """按内部主键回读需求权威行，返回 `(found, stage, status)`（单次查询）。
 
-    Issue #4022：`issues detail` 的 `task_status` 与 `issues status get` 的 `status`
-    统一从同一权威行（内部主键）派生。此前 detail 走按 issue_number 聚合的 map，
-    镜像 repo_key 下同号多行时可能取到另一行，出现同一 Issue 读数相反的假象。
-    返回 None 而非 ""：区分「权威行不存在/读失败」（可回退兜底）与「权威行 status
-    为空」（必须返回空，不能透出镜像行值，QA 复审低危项）。
-    """
-    try:
-        with db_lock:
-            c = _rt_db.cursor()
-            c.execute("SELECT status FROM issue WHERE id=?", (issue_id,))
-            _r = c.fetchone()
-        if not _r:
-            return None
-        return issue_status_text(_r[0])
-    except Exception as _e:
-        log.warning(f"read issue status by id failed #{issue_id}: {_e}")
-        return None
+    Issue #4022：`issues detail` 顶层、内嵌 pipeline、独立 `/pipeline` 与
+    `issues status get` 全部从同一权威行（内部主键）派生，镜像 repo_key 下同号
+    多行时不会出现同一 Issue 读数相反。
 
-def read_issue_business_status_by_id(issue_id) -> tuple:
-    """按内部主键回读需求级 `(found, stage, status)`（无行/读失败 → `(False, "", "")`）。
-
-    Issue #4022 QA Spec-1：镜像 repo 同号多行时，`detail` 顶层 stage/status 已统一
-    按内部主键取行，内嵌 pipeline 的 `issue_stage`/`issue_task_status` 与独立
-    `/pipeline` 接口也必须按同一主键行回读，消除「按 number 首行」与
-    「按内部主键」取到不同行的口径分裂。
-
-    `found` 让调用方区分「行不存在（可保留聚合兜底）」与「行存在但 status 为空
-    （必须覆盖为空，QA 复审低危项：空权威 status 不得内嵌镜像行值）」。
+    `found=False`（无行/回读异常）时返回 `(False, "", "")`，调用方可回退聚合兜底；
+    `found=True` 且 status 为空串表示「权威行存在但 status 为空」，调用方必须覆盖
+    为空，不得透出镜像行值。status 经 `issue_status_text` 统一归一（None → ""，
+    统一 strip），与列表/status get 出口同口径。
     """
     try:
         with db_lock:
@@ -1348,8 +1328,23 @@ def read_issue_business_status_by_id(issue_id) -> tuple:
             return (False, "", "")
         return (True, (_r[0] or ""), issue_status_text(_r[1]))
     except Exception as _e:
-        log.warning(f"read issue business status by id failed #{issue_id}: {_e}")
+        log.warning(f"read issue row by id failed #{issue_id}: {_e}")
         return (False, "", "")
+
+
+def _read_issue_status_by_id(issue_id):
+    """按内部主键回读 issue.status；无行或回读失败 → None（调用方保留兜底值）。
+
+    与 `read_issue_row_by_id` 共用同一查询/归一逻辑，仅把「行不存在/读失败」
+    折叠为 None，便于 detail 顶层区分「可回退兜底」与「权威值为空串」。
+    """
+    _found, _stage, _status = read_issue_row_by_id(issue_id)
+    return _status if _found else None
+
+
+def read_issue_business_status_by_id(issue_id) -> tuple:
+    """按内部主键回读 `(found, stage, status)`；兼容别名，等同 `read_issue_row_by_id`。"""
+    return read_issue_row_by_id(issue_id)
 
 def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
     """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。

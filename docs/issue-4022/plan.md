@@ -14,7 +14,7 @@ cancel / resume / 后台结单等）无需逐个接入失效钩子即可写后�
 | 模块 | 改动 |
 |------|------|
 | `src/domains/runtime/routes/issues.py` | 新增 `_issue_status_by_ids`（主键批量回读 status）、`_cached_list_is_current`（缓存命中核对）；`_cached_repo_list` 命中时核对、漂移/异常即重算；`_task_status_map` 支持 `numbers` 收窄 + `setdefault` 确定性；`_assemble_issue` 按内部主键取 `task_status` 并新增 `status` 别名；详情改用收窄 status map 且 pipeline 业务状态与顶层同源；`_runtime_status_write_gen` 保证写代与 `_rt_db` 读连接同源（own-DSN 拓扑禁用快照复用）；`_issue_stage_map` issue_state 兜底补 ORDER BY |
-| `src/domains/runtime/issues_center.py` | 新增 `_read_issue_status_by_id`（内部主键回读权威 status，无行/异常返回 None）、`read_issue_business_status_by_id` 返回 `(found, stage, status)`；`_query_tasks` 列表出口 status 归一 |
+| `src/domains/runtime/issues_center.py` | 新增 `read_issue_row_by_id`（单一主键回读 accessor，返回 `(found, stage, status)`；`_read_issue_status_by_id` / `read_issue_business_status_by_id` 为薄包装）；`_query_tasks` 列表出口 status 归一 |
 | `src/kernel/mysql_compat.py` | 新增 issue.status 专用写代 `issue_status_write_generation`（仅影响 issue 行 status 的写推进），供快照新鲜度判定，避免 events/agent_tasks 写误判过期 |
 | `tests/runtime/test_issue_4022_read_your_writes.py` | 新增回归：缓存预热后置位即读、连续多次不抖动、任意写路径即时可见、list/detail/status get 口径一致；三库 own-DSN 拓扑写后即见、空权威 status 不泄露镜像行 |
 | `docs/issue-4022/*` | Spec / Plan / Task |
