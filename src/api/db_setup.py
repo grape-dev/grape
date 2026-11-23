@@ -2389,7 +2389,7 @@ def _normalize_org_domain_text(conn) -> int:
     rebuilt = False
 
     # ① organization.id 主键（TEXT PK 重建，owner_id 随批）
-    _cols = c.execute("PRAGMA table_info(organization)").fetchall()
+    _cols = _ddl_safety.table_info_rows(c, "organization")
     if _cols:
         _decl = next((r[2] or "" for r in _cols if r[1] == "id"), None)
         if _decl is not None and _decl.strip().upper() != "TEXT":
@@ -2398,7 +2398,7 @@ def _normalize_org_domain_text(conn) -> int:
 
     # ② 引用列 TEXT 亲和归一（保值）
     for table, col in _ORG_DOMAIN_TEXT_COLS:
-        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        _cols = _ddl_safety.table_info_rows(c, table)
         if not _cols:
             continue
         _decl = next((r[2] or "" for r in _cols if r[1] == col), None)
@@ -2414,7 +2414,7 @@ def _normalize_org_domain_text(conn) -> int:
 
     # ③ 哨兵改写：0 → ''（''=全局/未归属；对齐 owner 列 ''=unowned 口径）
     for table, col in _ORG_SENTINEL_COLS:
-        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        _cols = _ddl_safety.table_info_rows(c, table)
         if not _cols or not any(r[1] == col for r in _cols):
             continue
         changed += c.execute(
