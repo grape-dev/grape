@@ -2035,7 +2035,10 @@ def _user_repo_keys(user: dict) -> set[str]:
     try:
         from src.domains.mgmt.user.db import get_user_repos
         return {r["repo_key"] for r in (get_user_repos(user.get("id")) or [])}
-    except Exception:  # noqa: BLE001 - 仓库读取失败按「无托管」处理（403 兜底）
+    except Exception as e:  # noqa: BLE001 - 仓库读取失败按「无托管」处理（403 兜底）
+        from src.kernel.config import log as _repo_log
+        _repo_log.warning(
+            f"读取用户 {user.get('id')} 托管仓库失败，按无托管处理: {e}")
         return set()
 
 
@@ -2155,98 +2158,49 @@ def _normalize_ai_meta(raw_text: str) -> dict:
         val = str(intro_in.get(key) or "").strip()
         if val:
             intro[key] = val[:_INTRO_TEXT_MAX]
+    tags = _normalize_ai_tags(data.get("tags"))
+    # 合法 JSON 但字段全空：返回空 dict，让上层按 502 处理，避免前端误报「AI 已填写」。
+    if not summary and not description and not intro and not tags:
+        return {}
     return {
         "summary": summary,
         "description": description,
         "intro": intro,
-        "tags": _normalize_ai_tags(data.get("tags")),
+        "tags": tags,
     }
 
 
 def _platform_llm_chat(prompt: str, max_tokens: int = 1200) -> str:
-    """调用平台既有 LLM（复用 autopilot 的 hermes config 读取口径），返回文本内容。"""
-    import urllib.request
-    import yaml
+    """调用平台既有 LLM（公共封装 `src/kernel/llm.py`），返回文本内容。"""
     from src.kernel.config import log as _log
+    from src.kernel.llm import LLMConfigError, LLMRequestError, chat_completion
 
-    hermes_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
-    cfg_path = os.path.join(hermes_home, "config.yaml")
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            hermes_cfg = yaml.safe_load(f) or {}
-    except Exception as e:  # noqa: BLE001 - 配置缺失按 503 提示
-        raise HTTPException(status_code=503, detail={"code": 503, "message": f"无法读取 LLM 配置: {e}"})
-
-    model_cfg = hermes_cfg.get("model", {}) or {}
-    base_url = str(model_cfg.get("base_url", "")).rstrip("/")
-    model_name = str(model_cfg.get("model") or "deepseek-v4.1-flash-1017")
-    raw_key = str(model_cfg.get("api_key", "") or "")
-    api_key = ""
-    if raw_key.startswith("${") and raw_key.endswith("}"):
-        api_key = os.environ.get(raw_key[2:-1], "")
-    elif raw_key:
-        api_key = raw_key
-    if not api_key or not base_url:
-        for fb in hermes_cfg.get("fallback_providers", []) or []:
-            fb_url = str(fb.get("base_url", "")).rstrip("/")
-            key_env = str(fb.get("key_env", "") or "")
-            fb_key = os.environ.get(key_env, "") if key_env else str(fb.get("api_key", "") or "")
-            if fb_url and fb_key and not api_key:
-                base_url = base_url or fb_url
-                api_key = fb_key
-                model_name = str(fb.get("model") or model_name)
-                break
-    if not base_url or not api_key or not model_name:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不完整（缺 base_url/api_key/model）"})
-
-    body_json = json.dumps({
-        "model": model_name,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-        "thinking": {"type": "disabled"},
-    }).encode("utf-8")
-    req = urllib.request.Request(f"{base_url}/chat/completions", data=body_json, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:  # noqa: BLE001 - 网络/上游失败统一 502 由前端提示
+        return chat_completion(prompt, max_tokens=max_tokens)
+    except LLMConfigError as e:  # 配置缺失/不完整 → 503
+        raise HTTPException(status_code=503, detail={"code": 503, "message": str(e)})
+    except LLMRequestError as e:  # 网络/上游失败 → 502 由前端提示
         _log.warning(f"skill ai-fill LLM call failed: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"AI 填写失败: {e}"})
-    return ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
 
 
-@router.post("/by-id/{skill_id}/convert", operation_id="skills_convert_scope",
-             summary="Convert skill scope in place (user ↔ repo)",
-             description="Issue #3976: moves a skill between personal(user) and repo scope in place, keeping the skill id, version history, scene references and likes. official skills are read-only.")
-def convert_skill_scope(skill_id: int, body: ConvertScopeRequest,
-                        user: dict = Depends(require_no_session_token)):
-    """原地改 scope：复制存储对象 → 更新归属 → 删除旧对象；失败回滚新对象。"""
-    row = _rt_skills.read_one_any("skill_meta_row", (int(skill_id),))
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
-    skill_name, scope, _owner_id, user_id = _require_skill_write_access(row, user)
-    target = (body.target_scope or "").strip()
-    if target not in ("user", "repo"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "目标作用域必须为 user 或 repo"})
-    if target == scope:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "技能已处于目标作用域，无需转换"})
-    if scope not in ("user", "repo"):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能为只读，不允许转换"})
+def _resolve_convert_target(target: str, body_repo: str, user: dict) -> tuple[str, str]:
+    """校验目标 scope 并解析目标 owner，返回 (target_owner, repo_label)。"""
+    user_id = str(user.get("id") or "")
+    if target != "repo":
+        return user_id, ""
+    repo = (body_repo or "").strip()
+    if not repo:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "转为仓库技能必须指定目标仓库"})
+    target_owner = _resolve_repo_key(repo, strict=True)
+    if target_owner not in _user_repo_keys(user):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该仓库的技能"})
+    return target_owner, repo
 
-    if target == "repo":
-        repo = (body.repo or "").strip()
-        if not repo:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "转为仓库技能必须指定目标仓库"})
-        target_owner = _resolve_repo_key(repo, strict=True)
-        if target_owner not in _user_repo_keys(user):
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作该仓库的技能"})
-    else:
-        target_owner = user_id
 
-    # 目标 scope 同名去重（排除自身）
+def _assert_convert_uniqueness(skill_id: int, skill_name: str, target: str,
+                               target_owner: str) -> None:
+    """目标 scope 的同名/显示名唯一性校验（原地保留 id，排除自身）。"""
     if target == "user":
         existing = _rt_skills.read_one_any("skill_id_user_owner", (skill_name, target_owner))
     else:
@@ -2255,15 +2209,16 @@ def convert_skill_scope(skill_id: int, body: ConvertScopeRequest,
         target_label = "个人" if target == "user" else "该仓库"
         raise HTTPException(status_code=409, detail={
             "code": 409, "message": f"{target_label}已存在同名技能「{skill_name}」"})
-
-    # 显示名在目标 scope 的唯一性（原地保留 id，不做改名）
     _disp_row = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
     if _disp_row and len(_disp_row) > 1 and (_disp_row[1] or "").strip():
         _validate_skill_display_name(str(_disp_row[1]), scope=target,
                                      owner_id=target_owner, exclude_id=int(skill_id))
 
-    from src.domains.runtime.public import (get_skill_storage, skill_key,
-                                            zip_cache_put, mem_cache_invalidate)
+
+def _copy_skill_object_for_move(skill_id: int, skill_name: str, target: str,
+                                target_owner: str):
+    """把技能包复制到目标 scope 的对象键，返回 (storage, src_key, dst_key)。"""
+    from src.domains.runtime.public import get_skill_storage, skill_key
     from src.domains.mgmt.user.db import get_skill_object_key
     storage = get_skill_storage()
     if storage is None:
@@ -2278,6 +2233,44 @@ def convert_skill_scope(skill_id: int, body: ConvertScopeRequest,
         raise HTTPException(status_code=409, detail={"code": 409, "message": "目标存储键与源相同，无法转换"})
     if not storage.copy_object(src_key, dst_key):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能包复制失败: {src_key} -> {dst_key}"})
+    return storage, src_key, dst_key
+
+
+def _drop_source_and_warm_cache(storage, src_key: str, dst_key: str, skill_id: int) -> None:
+    """删除源对象并回填目标缓存（缓存失败不影响主流程）。"""
+    from src.domains.runtime.public import zip_cache_put, mem_cache_invalidate
+    storage.delete_object(src_key)
+    mem_cache_invalidate(src_key)
+    mem_cache_invalidate(dst_key)
+    try:
+        new_bytes = storage.read_bytes(dst_key)
+        if new_bytes:
+            zip_cache_put(dst_key, new_bytes, hashlib.sha256(new_bytes).hexdigest(), int(skill_id))
+    except Exception:  # noqa: BLE001, S110 - 缓存写失败不影响主流程
+        pass
+
+
+@router.post("/by-id/{skill_id}/convert", operation_id="skills_convert_scope",
+             summary="Convert skill scope in place (user ↔ repo)",
+             description="Issue #3976: moves a skill between personal(user) and repo scope in place, keeping the skill id, version history, scene references and likes. official skills are read-only.")
+def convert_skill_scope(skill_id: int, body: ConvertScopeRequest,
+                        user: dict = Depends(require_no_session_token)):
+    """原地改 scope：校验 → 复制存储对象 → 更新归属 → 删除旧对象；失败回滚新对象。"""
+    row = _rt_skills.read_one_any("skill_meta_row", (int(skill_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    skill_name, scope, _owner_id, user_id = _require_skill_write_access(row, user)
+    target = (body.target_scope or "").strip()
+    if target not in ("user", "repo"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "目标作用域必须为 user 或 repo"})
+    if target == scope:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "技能已处于目标作用域，无需转换"})
+    if scope not in ("user", "repo"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能为只读，不允许转换"})
+
+    target_owner, repo = _resolve_convert_target(target, body.repo, user)
+    _assert_convert_uniqueness(skill_id, skill_name, target, target_owner)
+    storage, src_key, dst_key = _copy_skill_object_for_move(skill_id, skill_name, target, target_owner)
 
     actor = str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX]
     try:
@@ -2287,23 +2280,15 @@ def convert_skill_scope(skill_id: int, body: ConvertScopeRequest,
         storage.delete_object(dst_key)
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能归属更新失败: {e}"})
 
-    storage.delete_object(src_key)
-    mem_cache_invalidate(src_key)
-    mem_cache_invalidate(dst_key)
-    try:
-        _new_bytes = storage.read_bytes(dst_key)
-        if _new_bytes:
-            zip_cache_put(dst_key, _new_bytes, hashlib.sha256(_new_bytes).hexdigest(), int(skill_id))
-    except Exception:  # noqa: BLE001, S110 - 缓存写失败不影响主流程
-        pass
+    _drop_source_and_warm_cache(storage, src_key, dst_key, skill_id)
 
     from src.domains.mgmt.auth import audit as _skill_audit
     _skill_audit.log_audit("skill_scope_converted",
                            user_id=user_id, operator_id=user_id,
                            detail={"skill_id": int(skill_id), "from": scope, "to": target})
-    label = f"仓库 {body.repo}" if target == "repo" else "个人技能"
+    label = f"仓库 {repo}" if target == "repo" else "个人技能"
     return {"message": f"技能 {skill_name} 已原地转换为{label}", "skill_id": int(skill_id),
-            "scope": target, "repo": body.repo if target == "repo" else ""}
+            "scope": target, "repo": repo}
 
 
 @router.put("/by-id/{skill_id}/content", operation_id="skills_save_content",
@@ -2340,11 +2325,18 @@ def save_skill_content(skill_id: int, body: SkillContentRequest,
 
     storage.save_bytes(object_key, new_zip)
     content_hash = hashlib.sha256(new_zip).hexdigest()
+    _hash_row = _rt_skills.read_one_any("skill_hash_by_id", (int(skill_id),))
+    old_hash = (_hash_row[1] if _hash_row and len(_hash_row) > 1 else "") or ""
     try:
         _rt_skills.exec_any("skill_content_hash_update", (content_hash, int(skill_id)))
         _replace_skill_files(int(skill_id), _list_zip_entries(new_zip))
-    except Exception as e:  # noqa: BLE001 - DB 失败回滚旧 zip
+    except Exception as e:  # noqa: BLE001 - DB 失败回滚 zip 字节 + 内容指纹 + 文件表
         storage.save_bytes(object_key, prev_bytes)
+        try:
+            _rt_skills.exec_any("skill_content_hash_update", (old_hash, int(skill_id)))
+            _replace_skill_files(int(skill_id), _list_zip_entries(prev_bytes))
+        except Exception:  # noqa: BLE001, S110 - 回滚尽力而为，不掩盖原始错误
+            pass
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"SKILL.md 保存失败: {e}"})
 
     from src.domains.runtime.public import zip_cache_put, mem_cache_invalidate
@@ -2387,7 +2379,8 @@ async def ai_fill_skill_meta(skill_id: int, user: dict = Depends(require_no_sess
     raw = await asyncio.to_thread(_platform_llm_chat, prompt)
     meta = _normalize_ai_meta(raw)
     if not meta:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "AI 填写失败：模型返回无法解析"})
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": "AI 填写失败：模型未返回有效字段"})
     return meta
 
 

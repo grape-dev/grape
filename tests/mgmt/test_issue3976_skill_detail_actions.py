@@ -322,3 +322,166 @@ def test_convert_scope_request_defaults_and_models():
     req = skills_route.ConvertScopeRequest(target_scope="user")
     assert req.repo == ""
     assert skills_route.SkillContentRequest(content="x").content == "x"
+
+# ===== 补充覆盖（QA 复审：方向/鉴权/边界/回滚/不落库） =====
+
+def test_convert_scope_repo_to_user_moves_back_in_place(sdb, monkeypatch):
+    old_key = "obs/repo-org/r/conv.zip"
+    sid = _seed(sdb, name="back-skill", scope="repo", owner="gitcode:org/r", file_path=old_key)
+    storage = _MemStorage()
+    storage.objects[old_key] = _make_zip("back-skill")
+    _patch_storage(monkeypatch, storage)
+    _patch_repos(monkeypatch, {"gitcode:org/r"})
+
+    res = skills_route.convert_skill_scope(
+        sid, skills_route.ConvertScopeRequest(target_scope="user"), user={"id": "7"})
+
+    assert res["scope"] == "user" and res["skill_id"] == sid
+    row = sdb["conn"].execute(
+        "SELECT scope, owner_id, file_path FROM skill WHERE id=?", (sid,)).fetchone()
+    assert row[0] == "user" and row[1] == "7"
+    assert row[2] != old_key and row[2] in storage.objects
+    assert old_key not in storage.objects
+
+
+def test_convert_scope_rejects_foreign_skill_and_unmanaged_repo(sdb, monkeypatch):
+    _patch_repos(monkeypatch, {"gitcode:org/r"})
+    foreign_user = _seed(sdb, name="foreign-user", scope="user", owner="9", file_path="obs/f1.zip")
+    with pytest.raises(HTTPException) as ei:
+        skills_route.convert_skill_scope(
+            foreign_user, skills_route.ConvertScopeRequest(target_scope="repo", repo="org/r"),
+            user={"id": "7"})
+    assert ei.value.status_code == 403
+
+    foreign_repo = _seed(sdb, name="foreign-repo", scope="repo", owner="gitcode:other/x",
+                         file_path="obs/f2.zip")
+    with pytest.raises(HTTPException) as ei2:
+        skills_route.convert_skill_scope(
+            foreign_repo, skills_route.ConvertScopeRequest(target_scope="user"), user={"id": "7"})
+    assert ei2.value.status_code == 403
+
+    mine = _seed(sdb, name="mine-user", scope="user", owner="7", file_path="obs/f3.zip")
+    with pytest.raises(HTTPException) as ei3:
+        skills_route.convert_skill_scope(
+            mine, skills_route.ConvertScopeRequest(target_scope="repo", repo="org/unmanaged"),
+            user={"id": "7"})
+    assert ei3.value.status_code == 403
+
+
+def test_convert_scope_missing_skill_returns_404(sdb):
+    with pytest.raises(HTTPException) as ei:
+        skills_route.convert_skill_scope(
+            999999, skills_route.ConvertScopeRequest(target_scope="user"), user={"id": "7"})
+    assert ei.value.status_code == 404
+
+
+def test_convert_scope_db_failure_rolls_back_new_object(sdb, monkeypatch):
+    old_key = "obs/user-7/rollback.zip"
+    sid = _seed(sdb, name="rollback-skill", scope="user", owner="7", file_path=old_key)
+    storage = _MemStorage()
+    storage.objects[old_key] = _make_zip("rollback-skill")
+    rt = _patch_storage(monkeypatch, storage)
+    _patch_repos(monkeypatch, {"gitcode:org/r"})
+
+    real_exec = rt.exec_any
+
+    def _boom(name, params=()):
+        if name == "skill_scope_move_update":
+            raise RuntimeError("db down")
+        return real_exec(name, params)
+
+    monkeypatch.setattr(rt, "exec_any", _boom)
+    with pytest.raises(HTTPException) as ei:
+        skills_route.convert_skill_scope(
+            sid, skills_route.ConvertScopeRequest(target_scope="repo", repo="org/r"),
+            user={"id": "7"})
+    assert ei.value.status_code == 502
+    # 归属未改、源对象仍在、目标副本已回滚
+    row = sdb["conn"].execute(
+        "SELECT scope, owner_id, file_path FROM skill WHERE id=?", (sid,)).fetchone()
+    assert tuple(row) == ("user", "7", old_key)
+    assert old_key in storage.objects
+    assert list(storage.objects) == [old_key]
+
+
+def test_save_skill_md_rejects_foreign_missing_and_oversize(sdb, monkeypatch):
+    foreign = _seed(sdb, name="foreign-md", scope="user", owner="9", file_path="obs/x1.zip")
+    with pytest.raises(HTTPException) as ei:
+        skills_route.save_skill_content(
+            foreign, skills_route.SkillContentRequest(content="# x"), user={"id": "7"})
+    assert ei.value.status_code == 403
+
+    with pytest.raises(HTTPException) as ei2:
+        skills_route.save_skill_content(
+            999999, skills_route.SkillContentRequest(content="# x"), user={"id": "7"})
+    assert ei2.value.status_code == 404
+
+    sid = _seed(sdb, name="big-md", scope="user", owner="7", file_path="obs/x2.zip")
+    oversize = "x" * (skills_route._SKILL_MD_MAX_BYTES + 1)
+    with pytest.raises(HTTPException) as ei3:
+        skills_route.save_skill_content(
+            sid, skills_route.SkillContentRequest(content=oversize), user={"id": "7"})
+    assert ei3.value.status_code == 400
+
+
+def test_save_skill_md_db_failure_rolls_back_hash_and_bytes(sdb, monkeypatch):
+    key = "obs/user-7/hashrollback.zip"
+    sid = _seed(sdb, name="hash-rollback", scope="user", owner="7", file_path=key)
+    prev_zip = _make_zip("hash-rollback", "# old")
+    storage = _MemStorage()
+    storage.objects[key] = prev_zip
+    rt = _patch_storage(monkeypatch, storage)
+    monkeypatch.setattr(rt, "skill_md_content", lambda k, n: "# old")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("file table down")
+
+    monkeypatch.setattr(skills_route, "_replace_skill_files", _boom)
+    with pytest.raises(HTTPException) as ei:
+        skills_route.save_skill_content(
+            sid, skills_route.SkillContentRequest(content="# new"), user={"id": "7"})
+    assert ei.value.status_code == 502
+    assert storage.objects[key] == prev_zip
+    assert sdb["conn"].execute(
+        "SELECT content_hash FROM skill WHERE id=?", (sid,)).fetchone()[0] == "oldhash"
+
+
+def test_ai_fill_empty_body_returns_400(sdb, monkeypatch):
+    sid = _seed(sdb, name="ai-empty-body", scope="user", owner="7", file_path="obs/ai3.zip")
+    rt = _patch_storage(monkeypatch, _MemStorage())
+    monkeypatch.setattr(rt, "skill_md_content", lambda k, n: "   ")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(skills_route.ai_fill_skill_meta(sid, user={"id": "7"}))
+    assert ei.value.status_code == 400
+
+
+def test_ai_fill_all_empty_fields_returns_502(sdb, monkeypatch):
+    sid = _seed(sdb, name="ai-all-empty", scope="user", owner="7", file_path="obs/ai4.zip")
+    rt = _patch_storage(monkeypatch, _MemStorage())
+    monkeypatch.setattr(rt, "skill_md_content", lambda k, n: "# body")
+    monkeypatch.setattr(skills_route, "_platform_llm_chat", lambda prompt, max_tokens=1200: (
+        '{"summary":"","description":"","intro":{"scope":"","steps":"","products":"",'
+        '"constraints":"","review":""},"tags":[]}'))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(skills_route.ai_fill_skill_meta(sid, user={"id": "7"}))
+    assert ei.value.status_code == 502
+
+
+def test_ai_fill_all_five_slots_and_does_not_persist(sdb, monkeypatch):
+    sid = _seed(sdb, name="ai-five", scope="user", owner="7", file_path="obs/ai5.zip")
+    rt = _patch_storage(monkeypatch, _MemStorage())
+    monkeypatch.setattr(rt, "skill_md_content", lambda k, n: "# body")
+    monkeypatch.setattr(skills_route, "_platform_llm_chat", lambda prompt, max_tokens=1200: (
+        '{"summary":"摘要","description":"描述","intro":{"scope":"适用范围","steps":"步骤",'
+        '"products":"产物","constraints":"约束","review":"评审"},"tags":["标签A"]}'))
+
+    before = sdb["conn"].execute(
+        "SELECT description, summary, content_hash, updated_at FROM skill WHERE id=?",
+        (sid,)).fetchone()
+    res = asyncio.run(skills_route.ai_fill_skill_meta(sid, user={"id": "7"}))
+    assert set(res["intro"]) == set(skills_route._AI_INTRO_KEYS)
+    assert res["intro"]["review"] == "评审"
+    after = sdb["conn"].execute(
+        "SELECT description, summary, content_hash, updated_at FROM skill WHERE id=?",
+        (sid,)).fetchone()
+    assert tuple(after) == tuple(before)
