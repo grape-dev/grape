@@ -107,6 +107,17 @@ SQL 会打到错误的库，得到 `ERROR 1146 (table doesn't exist)`，而这�
 后续批次应为其补 provenance（来源批次/是否废弃）或直接裁剪，禁止用 `information_schema`
 快照覆盖 manifest——那会把「历史建表位置」当归属，重演本文件开头记录的漂移。
 
+## 登记：webhook 收件箱两表（2026-11-23，runtime）
+
+| 表 | 归属 | 代码消费域实测 | SQL 落点 | DDL 落点 |
+|---|---|---|---|---|
+| `grape_t_webhook_inbox` | **runtime** | runtime（`src/domains/runtime/webhook_inbox.py`，唯一读写方） | runtime | runtime `schema_ddl.py`（`_WEBHOOK_INBOX_DDL`） |
+| `grape_t_webhook_inbox_archive` | **runtime** | runtime（同上，purge 归档 + 保留期清理） | runtime | runtime `schema_ddl.py`（`_WEBHOOK_INBOX_ARCHIVE_DDL`） |
+
+依据：两表均由 runtime 域独占读写（`src/api/db_setup.py` 只做建表/迁移，不含业务 SQL），
+非本域无消费者，故无跨域契约需求。补登记前 manifest 对二者无判定，
+`foreign_table_refs.py` 把它们当「未登记表」跳过——与文件开头记录的 19 张漂移同源。
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `configs/table_ownership.json`，再同步本文件与 manifest，最后跑

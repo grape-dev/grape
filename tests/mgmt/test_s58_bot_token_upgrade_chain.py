@@ -213,7 +213,7 @@ def test_s58_rebuild_webhook_uses_provider_port(gitee_card):
     try:
         mock_prov = MagicMock()
         mock_prov.setup_repo_webhook.return_value = 42
-        with patch("src.kernel.token_resolver.create_provider", return_value=mock_prov) as mcp, \
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=mock_prov) as mcp, \
                 patch("src.domains.mgmt.user.db.get_webhook_url", return_value="https://srv/webhook/gitee"):
             got = udb._rebuild_webhook_with_bot_token(rk, "tok", "gitee")
         assert got == "42"
@@ -287,8 +287,8 @@ def test_s58_structure_no_platform_literals_in_upgrade_chain():
 
 def test_s58_provider_has_setup_repo_webhook_port():
     """适配器端口契约：三类 provider 均暴露 setup_repo_webhook（凭据形态内聚）。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     for p in ("gitcode", "github"):
         assert callable(getattr(create_provider(p), "setup_repo_webhook", None)), p
-    from src.kernel.token_resolver import GenericVcsProvider
+    from src.domains.mgmt.vcs import GenericVcsProvider
     assert callable(getattr(GenericVcsProvider, "setup_repo_webhook", None))

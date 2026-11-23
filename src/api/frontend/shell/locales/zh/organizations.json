@@ -27,10 +27,10 @@
     "repo_no_platform": "暂未检测到已绑定的 GitCode / GitHub 账号，可先创建组织，稍后在组织详情中手动关联仓库",
     "repo_unbound": "未绑定",
     "repo_owner_label": "所有者（所属空间）",
-    "repo_owner_personal": "个人空间",
+    "repo_owner_personal": "个人账号（Personal）",
     "repo_owner_orgs": "组织空间",
     "repo_owner_personal_tag": "个人",
-    "repo_owner_hint": "仓库将创建在所选账号或组织空间下；组织空间需要对应平台的建仓权限。",
+    "repo_owner_hint": "仓库将创建在所选账号或组织下；组织空间需要平台侧的建仓权限。",
     "repo_owner_required": "请选择仓库所属空间",
     "repo_name_label": "项目名称",
     "repo_name_placeholder": "如：rd-team",
@@ -48,7 +48,11 @@
     "repo_bind_first": "请先到账号设置绑定 {name} 平台后再创建组织仓库",
     "repo_path_github_hint": "GitHub 的项目路径与项目名称一致，不可单独修改。",
     "repo_bind_action": "去绑定",
-    "repo_provision_failed": "组织已创建，但组织仓库创建失败：{msg}（可在组织页重试）"
+    "repo_provision_failed": "组织已创建，但组织仓库创建失败：{msg}（可在组织页重试）",
+    "repo_owner_unknown": "未识别的空间（不可选）",
+    "repo_owner_unknown_tag": "类型未识别",
+    "repo_owner_none": "该账号当前没有可用建仓空间（平台可能限制个人建仓），请绑定组织或联系管理员",
+    "repo_owner_no_personal": "该账号不支持在个人名下建仓，请选择组织"
   },
   "detail": {
     "back": "← 返回组织列表",

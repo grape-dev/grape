@@ -13,10 +13,13 @@
     "download_base": "仓库归档/文件下载基址",
     "token_storage_field": "显式空串=无 managed_repos 物理列，凭据走 grape_t_repo_credentials 单表",
     "webhook_token_field": "同上（webhook 凭据）",
-    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用；留空=该平台无 bot 身份）"
+    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用；留空=该平台无 bot 身份）",
+    "webhook_dialect": "托管 webhook 形态：gitlab_v4=/projects/{id}/hooks 家族（自建实例复用）",
+    "ca_bundle": "自建实例 TLS CA：PEM 绝对路径，仅 git 传输注入 http.sslCAInfo；空=系统 CA"
   },
   "name": "GitLab",
   "dialect": "gitlab",
+  "create_repo_options": true,
   "host": "gitlab.com",
   "webhook_path": "/webhook/gitlab",
   "event_header": "X-Gitlab-Event",
@@ -30,5 +33,9 @@
   "token_storage_field": "",
   "webhook_token_field": "",
   "bot_username": "",
-  "issue_write_form": "repo_path"
+  "branch_create_form": "form",
+  "issue_write_form": "repo_path",
+  "webhook_dialect": "gitlab_v4",
+  "ca_bundle": "",
+  "pat_create_url": "https://gitlab.com/-/user_settings/personal_access_tokens"
 }

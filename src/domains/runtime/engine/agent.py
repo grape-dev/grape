@@ -2104,7 +2104,12 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     """
     _business_base = env.get("GRAPE_SERVER_URL") or ""
     _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
-    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    # 回环业务基址不是"显式业务基址"：远端 worker 的 pipeline 拿不到 worker 侧地址时
+    # 会写 http://127.0.0.1（沙箱内 127.0.0.1 是沙箱自己 → 全 301/拒绝连接，实测
+    # 2026-11-23 GitLab #9）。出现回环基址且本 worker 有非回环地址时必须覆盖。
+    _loopback_business = ("127.0.0.1" in _business_base) or ("localhost" in _business_base)
+    _single_address = (_loopback_business or (not _business_base)
+                       or _same_url_host(_business_base, _runtime_base))
     env["RUNTIME_SERVER_URL"] = local_base
     task["server_url"] = local_base
     if _single_address:
@@ -2927,8 +2932,22 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             if _ref_key:
                 raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
                 if raw:
-                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
-                    skill_files = {}
+                    # 2026-11-22 修（远端 worker 实测）：本分支位于上方 `if skill_zip_b64:`
+                    # 物化块**之后**，旧写法只赋值 skill_zip_b64/skill_files={} 等于
+                    # “取到 zip 却从不落盘”——实测日志「服务端代拉成功」紧接
+                    # 「bound skill 'vod-cli' not materialized anywhere ... refused」。
+                    # 就地物化；成功才走“无文本文件”分支，失败保留原 files 触发降级链。
+                    from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
+                    _ok_ref, _inst_ref, _reason_ref = materialize_skill_zip_atomic(
+                        skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
+                    _target_ref = task.get("skill") or ""
+                    if _ok_ref and (not _target_ref or _target_ref in _inst_ref):
+                        skill_zip_b64 = _b64.b64encode(raw).decode()
+                        skill_files = {}
+                        log.info(f"[skill] __obs_key__ zip 物化成功: skills={_inst_ref}")
+                    else:
+                        log.warning(f"[skill] __obs_key__ zip 物化未命中目标技能: "
+                                    f"ok={_ok_ref} installed={_inst_ref} reason={_reason_ref[:120]}")
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
             # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
@@ -3354,7 +3373,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
     _local_base = ""
     _old_server_url = task.get("server_url") or ""
-    if _is_local_worker or _worker_server_url_reachable(_rts, _old_server_url):
+    # 业务基址若是回环，即便回连基址一样也要进覆盖分支：这是两个不同的键，
+    # 任务行 server_url 已是本 worker 地址 ≠ 沙箱里 GRAPE_SERVER_URL 可用。
+    _business_loop = (("127.0.0.1" in (env.get("GRAPE_SERVER_URL") or ""))
+                      or ("localhost" in (env.get("GRAPE_SERVER_URL") or "")))
+    if _is_local_worker or _business_loop or _worker_server_url_reachable(_rts, _old_server_url):
         # 判定改为实测可达（2026-10-12 seq#552 复盘）：本地 worker 或内网 worker
         # （RUNTIME_SERVER_URL 直连可达，如内网 worker 直连主控内网地址 3ms）
         # 都覆盖为本 worker 直连地址；远程公网 worker（内网不可达）保持原

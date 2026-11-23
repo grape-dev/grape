@@ -387,7 +387,10 @@
                   accountInitial(currentOwner)
                 }}</span>
                 <select v-model="createForm.repo_owner" class="repo-path__owner">
-                  <optgroup :label="t('create.repo_owner_personal')">
+                  <optgroup
+                    v-if="personalNamespaces.length"
+                    :label="t('create.repo_owner_personal')"
+                  >
                     <option
                       v-for="ns in personalNamespaces"
                       :key="'u-' + ns.login"
@@ -404,7 +407,29 @@
                       {{ ns.name || ns.login }}（{{ ns.login }}）
                     </option>
                   </optgroup>
+                  <optgroup
+                    v-if="unknownNamespaces.length"
+                    :label="t('create.repo_owner_unknown')"
+                  >
+                    <option
+                      v-for="ns in unknownNamespaces"
+                      :key="'x-' + ns.login"
+                      :value="ns.login"
+                      disabled
+                    >
+                      {{ ns.name || ns.login }}（{{ t('create.repo_owner_unknown_tag') }}）
+                    </option>
+                  </optgroup>
+                  <option v-if="!providerNamespaces.length" value="" disabled>
+                    {{ t('create.repo_owner_none') }}
+                  </option>
                 </select>
+                <p
+                  v-if="providerNamespaces.length && !personalNamespaces.length && orgNamespaces.length"
+                  class="repo-path__hint"
+                >
+                  {{ t('create.repo_owner_no_personal') }}
+                </p>
                 <span class="repo-path__sep">/</span>
                 <input
                   v-if="createForm.repo_provider === 'gitcode'"
@@ -1047,14 +1072,21 @@ const currentNamespaceProvider = computed(() => {
     ) || null
   )
 })
-const personalNamespaces = computed(() => {
-  const p = currentNamespaceProvider.value
-  return ((p && p.namespaces) || []).filter((ns) => ns.type !== 'org')
-})
-const orgNamespaces = computed(() => {
-  const p = currentNamespaceProvider.value
-  return ((p && p.namespaces) || []).filter((ns) => ns.type === 'org')
-})
+// 命名空间分类用**白名单**：个人是最宽的权限面，未知类型绝不能默认落进个人桶
+// （fail-safe defaults）。后端下发归一 kind（personal/org/unknown），这里同时认
+// 历史字面量 user（个人）/ group（GitLab 组织）。
+const PERSONAL_KINDS = ['personal', 'user']
+const ORG_KINDS = ['org', 'group']
+function nsKind(ns) {
+  const kind = String((ns && ns.type) || '').toLowerCase()
+  if (PERSONAL_KINDS.indexOf(kind) >= 0) return 'personal'
+  if (ORG_KINDS.indexOf(kind) >= 0) return 'org'
+  return 'unknown'
+}
+const providerNamespaces = computed(() => (currentNamespaceProvider.value && currentNamespaceProvider.value.namespaces) || [])
+const personalNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'personal'))
+const orgNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'org'))
+const unknownNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'unknown'))
 const currentOwner = computed(() => {
   const p = currentNamespaceProvider.value
   const list = (p && p.namespaces) || []
@@ -1083,8 +1115,9 @@ function selectProvider(p) {
   }
   createForm.repo_provider = p.provider
   const namespaces = p.namespaces || []
-  const personal = namespaces.find((ns) => ns.type !== 'org')
-  createForm.repo_owner = (personal && personal.login) || (namespaces[0] && namespaces[0].login) || ''
+  const personal = namespaces.find((ns) => nsKind(ns) === 'personal')
+  const firstOrg = namespaces.find((ns) => nsKind(ns) === 'org')
+  createForm.repo_owner = (personal && personal.login) || (firstOrg && firstOrg.login) || ''
   if (!repoNameTouched.value) {
     createForm.repo_name = autoRepoName.value
     repoPathTouched.value = false

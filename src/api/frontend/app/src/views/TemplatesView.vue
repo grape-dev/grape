@@ -244,16 +244,58 @@
           </div>
         </div>
         <div class="tv-modal-foot">
-          <div class="tv-foot-left">
-            <label class="ts t2 tv-repo-label">{{ t('templates.repo_name') }}</label>
-            <input v-model="modal.repoName" class="tv-repo-input" />
-            <select v-if="bindings.length > 1" v-model="modal.provider" class="tv-provider">
-              <option v-for="b in bindings" :key="b" :value="b">
-                {{ platformName(b) }}
-              </option>
-            </select>
+          <div class="tv-create-form">
+            <div v-if="bindings.length > 1" class="tv-field">
+              <label class="tv-field-label" for="tvProvider">{{ t('repos.create.platform_label') }}</label>
+              <select id="tvProvider" v-model="modal.provider" class="tv-field-input" @change="onProviderChange">
+                <option v-for="b in bindings" :key="b" :value="b">
+                  {{ platformName(b) }}
+                </option>
+              </select>
+            </div>
+            <div class="tv-field">
+              <label class="tv-field-label" for="tvSpace">
+                {{ t('repos.create.space_label') }}
+                <span
+                  class="tv-help"
+                  role="note"
+                  :title="t('repos.create.space_hint')"
+                  :aria-label="t('repos.create.space_hint')"
+                  >?</span
+                >
+              </label>
+              <select
+                id="tvSpace"
+                v-model="modal.space"
+                class="tv-field-input"
+                :disabled="modal.spaceLoading"
+              >
+                <option value="">{{ t('repos.create.space_personal') }}</option>
+                <option v-for="sp in modal.spaces" :key="sp.path" :value="sp.path">
+                  {{ sp.name && sp.name !== sp.path ? `${sp.name}（${sp.path}）` : sp.path }}
+                </option>
+              </select>
+            </div>
           </div>
-          <div class="tv-foot-right">
+          <div class="tv-create-row">
+            <div class="tv-field tv-field-grow">
+              <label class="tv-field-label" for="tvRepoName">{{ t('templates.repo_name') }}</label>
+              <input
+                id="tvRepoName"
+                v-model="modal.repoName"
+                class="tv-field-input"
+                autocomplete="off"
+                maxlength="64"
+              />
+            </div>
+            <div class="tv-field tv-field-vis">
+              <label class="tv-field-label" for="tvPrivate">{{ t('repos.create.vis_label') }}</label>
+              <select id="tvPrivate" v-model="modal.private" class="tv-field-input">
+                <option :value="false">{{ t('repos.create.vis_public') }}</option>
+                <option :value="true">{{ t('repos.create.vis_private') }}</option>
+              </select>
+            </div>
+            <div class="tv-foot-right">
             <button v-if="tplUrl(modal.t)" class="bt bt-o bt-s" @click="openUrl(tplUrl(modal.t))">
               {{ t('templates.view_source') }}
             </button>
@@ -272,6 +314,7 @@
                   : t('templates.create_from_template_arrow')
               }}
             </button>
+          </div>
           </div>
         </div>
         <div v-if="modal.progress.pct !== null" class="tv-progress">
@@ -554,6 +597,10 @@ const modal = reactive({
   t: {},
   repoName: '',
   provider: '',
+  space: '',            // 所属空间：'' = 个人空间；GitLab 组/子组填 full path
+  spaces: [],           // /repos/create-targets 返回的可建仓空间（仅 GitLab 类实例非空）
+  spaceLoading: false,
+  private: false,       // 可见性：false=公开 true=私有（与新建项目表单同语义）
   readme: '',
   fetchedPreview: '',
   highlights: [],
@@ -572,6 +619,11 @@ function openCreate(tp) {
   modal.t = tp
   modal.repoName = tp.default_repo_name || tp.id
   modal.provider = bindings.value.length > 0 ? bindings.value[0] : ''
+  modal.space = ''
+  modal.spaces = []
+  modal.spaceLoading = false
+  modal.private = false
+  loadSpaces(modal.provider)
   modal.readme = ''
   modal.fetchedPreview = ''
   modal.highlights = highlightsOf(tp)
@@ -622,9 +674,36 @@ function stopProgressTimer() {
   }
 }
 
+function onProviderChange() {
+  // 换平台时空间必须重置：路径属于具体实例（与 ReposView 同口径）
+  modal.space = ''
+  modal.spaces = []
+  loadSpaces(modal.provider)
+}
+
+function loadSpaces(provider) {
+  if (!provider) return
+  modal.spaceLoading = true
+  const asked = provider
+  G.API.get('/repos/create-targets?provider=' + encodeURIComponent(provider))
+    .then((d) => {
+      if (modal.provider !== asked) return   // 期间切了平台：丢弃迟到响应
+      modal.spaces = (d && d.spaces) || []
+    })
+    .catch(() => {
+      if (modal.provider === asked) modal.spaces = []
+    })
+    .finally(() => {
+      if (modal.provider === asked) modal.spaceLoading = false
+    })
+}
+
 function findAvailableRepoName(baseName, attempt, maxAttempt, onFound, onError) {
   const candidate = attempt === 0 ? baseName : baseName + '-' + (attempt + 1)
-  G.API.get('/repos/check-name?name=' + encodeURIComponent(candidate))
+  const qs = '/repos/check-name?name=' + encodeURIComponent(candidate)
+    + '&provider=' + encodeURIComponent(modal.provider || '')
+    + '&owner=' + encodeURIComponent(modal.space || '')
+  G.API.get(qs)
     .then((check) => {
       if (!check.exists) onFound(candidate)
       else if (attempt < maxAttempt)
@@ -662,7 +741,8 @@ function doCreate() {
       setProgress(25, tOr('templates.progress_creating', t('templates.progress_creating_repo')))
       G.API.post(
         '/project-templates/create',
-        { template_id: tp.id, repo_name: repoName, provider },
+        { template_id: tp.id, repo_name: repoName, provider, owner: (modal.space || '').trim(),
+          private: !!modal.private },
         300000
       )
         .then((r) => {
@@ -839,7 +919,7 @@ defineExpose({ findTemplateById, openCreate })
    全局 §23 的规则带 !important，这里用 :root 前缀 + !important 压过它。 */
 :root .tv-modal,
 :root .tv-fork-modal {
-  border-radius: 12px !important;
+  border-radius: 16px !important;
   background: var(--glass-solid) !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
@@ -853,7 +933,7 @@ defineExpose({ findTemplateById, openCreate })
   max-width: 900px;
   margin: 0 auto;
   padding: 0;
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1070,13 +1150,181 @@ defineExpose({ findTemplateById, openCreate })
   border-radius: 6px;
 }
 .tv-modal-foot {
-  padding: 14px 32px;
+  padding: 14px 32px 18px;
   flex-shrink: 0;
   border-top: 1px solid var(--hairline);
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC',
+    'Microsoft YaHei', system-ui, sans-serif;
+  letter-spacing: -0.01em;
+}
+/* ===== Apple 风：inset grouped 表单 =====
+   1) 平台/空间 一张分组卡，每行「标签左、控件右」，行间 hairline 分隔
+   2) 仓库名 + 按钮 第二行；按钮 pill 形状
+   窄屏（<640px）行内标签折叠为上下排，不挤压控件。 */
+.tv-create-form,
+.tv-create-row {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.tv-create-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+.tv-create-form .tv-field + .tv-field {
+  border-left: 1px solid var(--hairline);
+}
+.tv-create-row {
+  display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
+  padding: 12px 18px;
+}
+.tv-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 18px;
+  min-height: 50px;
+  box-sizing: border-box;
+}
+.tv-field-grow {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  min-height: 0;
+}
+.tv-field-vis {
+  flex: 0 0 auto;
+  min-width: 132px;
+}
+.tv-field-label {
+  flex: 0 0 auto;
+  min-width: 84px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--t2);
+  white-space: nowrap;
+}
+.tv-field-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--t);
+  outline: none;
+  box-sizing: border-box;
+  transition:
+    border-color 0.18s,
+    box-shadow 0.18s 0.01s,
+    background 0.18s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.tv-field-input:hover {
+  border-color: var(--b);
+}
+input.tv-field-input::placeholder {
+  color: var(--t3);
+}
+.tv-field-input:focus {
+  background: var(--c);
+  border-color: var(--a);
+  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--a) 16%, transparent);
+}
+.tv-field-input:disabled {
+  opacity: 0.55;
+}
+select.tv-field-input {
+  background-image: linear-gradient(45deg, transparent 50%, var(--t3) 50%),
+    linear-gradient(135deg, var(--t3) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) calc(50% + 1px),
+    calc(100% - 10px) calc(50% + 1px);
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+.tv-field-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--t3);
+}
+.tv-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border: 1px solid var(--b);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--t3);
+  font-size: 10px;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+}
+.tv-help:hover {
+  border-color: var(--a);
+  color: var(--a);
+}
+.tv-modal-foot .bt {
+  border-radius: 980px;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 18px;
+  line-height: 32px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  transition:
+    transform 0.12s ease,
+    background 0.18s,
+    border-color 0.18s;
+}
+.tv-modal-foot .bt:active {
+  transform: scale(0.98);
+}
+@media (max-width: 640px) {
+  .tv-create-form {
+    grid-template-columns: 1fr;
+  }
+  .tv-create-form .tv-field + .tv-field {
+    border-left: 0;
+    border-top: 1px solid var(--hairline);
+  }
+  .tv-field {
+    flex-wrap: wrap;
+  }
+  .tv-create-row {
+    flex-wrap: wrap;
+  }
+  .tv-foot-right {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .tv-field-vis {
+    flex: 1 0 100%;
+  }
 }
 .tv-foot-left {
   flex: 1;
@@ -1129,8 +1377,10 @@ defineExpose({ findTemplateById, openCreate })
 .tv-foot-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 10px;
   flex-shrink: 0;
+  padding-left: 4px;
 }
 .tv-create-btn {
   padding: 8px 24px;
@@ -1138,7 +1388,7 @@ defineExpose({ findTemplateById, openCreate })
 .tv-fork-modal {
   width: 100%;
   max-width: 460px;
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;

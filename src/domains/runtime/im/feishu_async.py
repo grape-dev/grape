@@ -870,7 +870,7 @@ class FeishuAsync:
         try:
             # D44/S66：协作者拉取统一走适配器端口（存量平台子类委托原实现，
             # generic/config-only 平台卡驱动自动正确，无平台名分支）
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.public import create_provider
             collabs = create_provider(provider).list_collaborators(api_token, owner, repo)
         except Exception as e:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")

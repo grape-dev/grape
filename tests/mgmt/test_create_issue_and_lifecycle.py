@@ -171,7 +171,7 @@ def test_s31_builtin_providers_card_path(monkeypatch):
 # ---------------------------------------------------------------- S19 补：GenericVcsProvider 命令层
 
 def test_s19_generic_provider_collaborator_and_webhook(gitee_card, monkeypatch):
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     captured = _capture(monkeypatch)
     p = create_provider("gitee")
     assert p.add_collaborator("TK", "o", "r", "botuser", "maintainer")
@@ -213,7 +213,7 @@ def test_s10_password_revocation_does_not_touch_repo_creds(gitee_card):
         increment_token_version(acc["id"])
         assert get_token_version(acc["id"]) == v0 + 1       # JWT 域确实吊销了
         assert get_user_token_for(acc["username"], acc["id"], "gitcode") == "at_oauth"
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         assert create_provider("gitee").fetch_user_token(acc["username"], acc["id"]) == "pat_s10"
     finally:
         with db_lock:

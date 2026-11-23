@@ -186,7 +186,8 @@ def test_s128_backfill_then_rotation_blanks_and_resolver_reads_rc():
     """F4 主链路：存量列值 → 回填迁移 → 写路径轮换置空 → resolver 仅凭 rc 取 token。"""
     from src.api.db_setup import backfill_gitee_gitlab_token_columns_to_rc
     from src.domains.mgmt.user.db import add_managed_repo, _encrypt_repo_secret
-    from src.kernel.token_resolver import RepoBotToken, create_provider
+    from src.kernel.token_resolver import RepoBotToken
+    from src.domains.mgmt.vcs import create_provider
 
     _ensure_gl_cols()  # 模拟存量升级库（四列在）
     rk = f"gitee:{_NS}o3/r3"

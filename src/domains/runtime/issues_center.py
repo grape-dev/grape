@@ -131,8 +131,8 @@ def _require_session_repo_token(request: Request, repo_key: str, *, scene=None) 
     def _visible(target: str) -> bool:
         """会话用户对目标仓是否有可见权（跨仓/伪作用域的唯一放行依据）。
 
-        能力由宿主域提供：`mgmt.public.user_can_access_repo`。runtime 不自己 JOIN
-        managed_repos/user_repos —— 3库4进程下 mgmt 库不在本进程，契约内部按
+        能力由宿主域提供：`mgmt.public.user_can_access_repo`。runtime 不自己连托管仓库表
+        —— 3库4进程下 mgmt 库不在本进程，契约内部按
         GRAPE_DSN_MGMT 路由（db_registry），这样单库/三库拓扑都不用改调用点。
         """
         from src.domains.mgmt.public import user_can_access_repo

@@ -74,7 +74,8 @@ def _setup_repo(repo_key, col_val, rc_val, col="bot_gitee_token", cred="bot"):  
 def test_s80b_repobottoken_reads_repo_credentials_first():
     """flag on：grape_t_repo_credentials 有值优先（即使与列不同）；flag off：回落列。"""
     import os
-    from src.kernel.token_resolver import RepoBotToken, create_provider
+    from src.kernel.token_resolver import RepoBotToken
+    from src.domains.mgmt.vcs import create_provider
     _setup_repo("s80b:o1/r1", "col-tok", "rc-tok")
     s = RepoBotToken(create_provider("gitee"))
     # S82：rc 唯一权威（无条件，列=历史回落）
@@ -90,7 +91,8 @@ def test_s80b_repobottoken_fallback_to_column_when_rc_empty():
     gitee 上，测的是一条已经被 D106 退役的分支）。
     """
     import os
-    from src.kernel.token_resolver import RepoBotToken, create_provider
+    from src.kernel.token_resolver import RepoBotToken
+    from src.domains.mgmt.vcs import create_provider
     _setup_repo("gitcode:o2/r2", "col-tok-2", None, col="bot_gitcode_token")
     s = RepoBotToken(create_provider("gitcode"))
     assert s._fetch("gitcode:o2/r2") == "col-tok-2"  # rc 空回落列（历史数据）

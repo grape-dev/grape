@@ -22,7 +22,7 @@ import pytest
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.vcs.platform_card import build_platform_card, invalidate_platform_card_cache
 from src.domains.runtime.vcs.api_client import VcsApiClient
-from src.kernel.token_resolver import create_provider, GenericVcsProvider
+from src.domains.mgmt.vcs import create_provider, GenericVcsProvider
 
 
 def _client(provider, token="T", owner="acme", repo="web"):
@@ -267,7 +267,7 @@ def test_s66_repo_roles_admin_check_via_port():
     from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
     user = {"id": 7, "username": "u7"}
     # github 路径：端口返回 "admin" 字符串 → admin
-    with patch("src.kernel.token_resolver.create_provider") as m_cp, \
+    with patch("src.domains.mgmt.vcs.create_provider") as m_cp, \
          patch("src.domains.mgmt.auth.repo_roles._get_platform_login", return_value="someone"), \
          patch("src.api.oauth_token.with_oauth_token",
                side_effect=lambda user, provider, fn, *a, **k: fn("TOK")):
@@ -275,7 +275,7 @@ def test_s66_repo_roles_admin_check_via_port():
         assert get_repo_admin_identity(user, "github:o/r") is not None
         assert m_cp.call_args.args[0] == "github"
     # gitee（generic）路径：端口返回 None → fail-closed
-    with patch("src.kernel.token_resolver.create_provider") as m_cp, \
+    with patch("src.domains.mgmt.vcs.create_provider") as m_cp, \
          patch("src.domains.mgmt.auth.repo_roles._get_platform_login", return_value="someone"), \
          patch("src.api.oauth_token.with_oauth_token",
                side_effect=lambda user, provider, fn, *a, **k: fn("TOK")):

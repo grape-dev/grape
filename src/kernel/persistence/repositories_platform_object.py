@@ -215,6 +215,72 @@ class RepoPlatformRepo:
         return _upsert_config_row(session, RepoPlatformModel, provider, fields, config_hash)
 
     @staticmethod
+    def upsert_manual(session: Session, provider: str, fields: dict) -> str:
+        """管理面新增/编辑「手建实例行」（Issue #3580 复审）。
+
+        与 `upsert_from_config` 的差异：
+        - 新建行 `source='manual'`：导入器永不覆盖（`_upsert_config_row` 见 manual 即
+          `manual_kept`），`mark_orphaned` 也不会把它软删；
+        - 已存在 manual 行 → 更新定义字段（`_PROTECTED` 里的 enabled / bot 三件照旧跳过）；
+        - 已存在 config / orphaned 行（来自 `configs/platforms/<p>.json`）→ 返回
+          `config_owned` 且**不写**：该 provider 的定义真源是配置文件，管理面改它
+          会造双真源（下次启动导入即被冲回）。
+
+        返回动作：inserted | updated | config_owned。
+        """
+        row = session.execute(
+            select(RepoPlatformModel).where(RepoPlatformModel.provider == provider)
+        ).scalar_one_or_none()
+        if row is None:
+            row = RepoPlatformModel(id=uuid7_str(), provider=provider,
+                                    source="manual", config_hash="")
+            setattr(row, "enabled", _default_enabled(provider))
+            _apply_fields(row, fields)
+            session.add(row)
+            session.flush()
+            return "inserted"
+        if str(getattr(row, "source", "") or "") != "manual":
+            return "config_owned"
+        _apply_fields(row, fields)
+        setattr(row, "updated_at", _now())
+        session.flush()
+        return "updated"
+
+    @staticmethod
+    def upsert_admin(session: Session, provider: str, fields: dict) -> str:
+        """管理面保存平台卡（单一写入口；A 方案：表是运行时真源）。
+
+        与 `upsert_from_config` 的差异：
+        - 管理面改动**必须落表**，否则就退回「meta 覆盖层 + 文件双真源」的老路；
+        - 行存在且 source=config（文件派生）→ 转移为 manual 并写入：导入器见 manual
+          即 `manual_kept`，此后文件卡不再覆盖运维在管理面的改动（这是"表为真源"
+          的语义锚点，也是避免双真源的关键）；
+        - `_PROTECTED`（enabled / bot 三件）照旧跳过——启用态与 bot 凭据有独立入口。
+
+        返回动作：inserted | updated | promoted。
+        """
+        row = session.execute(
+            select(RepoPlatformModel).where(RepoPlatformModel.provider == provider)
+        ).scalar_one_or_none()
+        if row is None:
+            row = RepoPlatformModel(id=uuid7_str(), provider=provider,
+                                    source="manual", config_hash="")
+            setattr(row, "enabled", _default_enabled(provider))
+            _apply_fields(row, fields)
+            session.add(row)
+            session.flush()
+            return "inserted"
+        promoted = str(getattr(row, "source", "") or "") != "manual"
+        if promoted:
+            # config/orphaned → manual：管理面接管定义，导入器不再回灌
+            setattr(row, "source", "manual")
+            setattr(row, "config_hash", "")
+        _apply_fields(row, fields)
+        setattr(row, "updated_at", _now())
+        session.flush()
+        return "promoted" if promoted else "updated"
+
+    @staticmethod
     def mark_orphaned(session: Session, present_providers: Iterable[str]) -> list[str]:
         return _mark_orphaned(session, RepoPlatformModel, present_providers)
 

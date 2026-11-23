@@ -172,10 +172,13 @@ def test_token_service_degrades_when_port_unbound(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("kernel port 'tokens' is not bound. The assembly layer")),
         raising=False)
-    # 端口未绑定时 provider 构造/fetch 都会抛 PortNotBound，统一降级
+    # 端口未绑定时 provider 构造/fetch 都会抛 PortNotBound，统一降级。
+    # 2026-11-23：实现在 token_service 内改走 ports.vcs_provider（符号已迁移），
+    # 老用例 patch 的 token_service.create_provider_from_repo_key 不再存在 → 改在这里打桩。
     from src.kernel.ports._base import PortNotBound
+    import src.kernel.ports.vcs_provider as _vcs_port
     monkeypatch.setattr(
-        token_service, "create_provider_from_repo_key",
+        _vcs_port, "create_provider_from_repo_key",
         lambda _rk: (_ for _ in ()).throw(PortNotBound("tokens")))
 
     res = token_service.resolve_repo_config_level("gitcode/grape-dev/grape")

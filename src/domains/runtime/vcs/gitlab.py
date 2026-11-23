@@ -122,4 +122,8 @@ class GitLabBackend(VcsBackend):
         return ""
 
     def get_collaborators_url(self, owner: str, repo: str) -> str:
-        return f"https://gitlab.com/api/v4/projects/{owner}%2F{repo}/members"
+        """协作者端点：跟卡走（自建实例不能用 gitlab.com），owner/repo 整体编码。"""
+        from urllib.parse import quote as _q
+
+        base = str(getattr(self._card, "api_base", "") or "").rstrip("/")
+        return f"{base}/projects/{_q(f'{owner}/{repo}', safe='')}/members"

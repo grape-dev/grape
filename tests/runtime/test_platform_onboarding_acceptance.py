@@ -135,12 +135,12 @@ def test_a3_resource_api_undeclared_op_rejected(foo_platform):
 # ---------------------------------------------------------------------------
 def test_a4_create_provider_card_driven(foo_platform):
     """第④面：create_provider 卡驱动，不落 GitCodeProvider 存量兜底。"""
-    from src.kernel.token_resolver import GitCodeProvider, create_provider
+    from src.domains.mgmt.vcs import GitCodeProvider, create_provider
     p = create_provider("foo")
     assert p is not None
     assert p.provider_name == "foo"
     assert not isinstance(p, GitCodeProvider)
-    from src.kernel.token_resolver import GenericVcsProvider
+    from src.domains.mgmt.vcs import GenericVcsProvider
     assert isinstance(p, GenericVcsProvider)
 
 
@@ -152,7 +152,7 @@ def test_a5_create_repo_card_path(foo_platform, monkeypatch):
     卡 api_base/api_auth 决定形态）。HTTP 层 mock 为平台返回 dict——
     断言返回非 error dict（卡驱动路径形态），离线可重复。
     """
-    from src.kernel.token_resolver import GenericVcsProvider, create_provider
+    from src.domains.mgmt.vcs import GenericVcsProvider, create_provider
 
     captured = {}
 

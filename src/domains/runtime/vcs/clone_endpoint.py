@@ -33,6 +33,8 @@ CLI 一次券            mgmt/routes/repos.py::git-credential         用户名�
 """
 from __future__ import annotations
 
+import re
+
 from src.kernel.config import log
 
 #: 平台卡缺 `clone_auth` 时的缺省（与 build_platform_card 的缺省一致）。
@@ -249,3 +251,35 @@ def bot_token_from_env(env: dict, repo_key: str) -> str:
                     f"请检查派发侧是否按卡 token_env 注入")
         return legacy
     return ""
+
+
+# ── VCS token 环境变量：通用判定（2026-11-22）────────────────────────────────
+# 背景：执行器（hermes ACP）的 env 转发白名单与日志脱敏列表曾把平台写死成
+# gitcode/github 两个键。后加 gitee/gitlab 后，密钥能派生、能注入，却在转发时被
+# 裁掉（沙箱里取不到 token → push 401），脱敏时也被漏掉（token 会落进日志）。
+# 这里提供单一判定源：任何 BOT_<PROVIDER>_TOKEN / USER_<PROVIDER>_TOKEN 都算
+# VCS 凭据，新增平台无需再改任何名单。
+_VCS_TOKEN_ENV_RE = re.compile(r"^(?:BOT|USER)_(?:[A-Z0-9]+_)*TOKEN$")
+
+
+def is_vcs_token_env(name: str) -> bool:
+    """是否 VCS 平台凭据环境变量（BOT_*/USER_* + _TOKEN）。"""
+    return bool(_VCS_TOKEN_ENV_RE.match(str(name or "")))
+
+
+def vcs_token_env_names(repo_key: str) -> tuple[str, str]:
+    """该仓库对应平台的 (bot 键, user 键)；均按平台卡派生。"""
+    bot = bot_token_env_name(repo_key)
+    user = ("USER_" + bot[len("BOT_"):]) if bot.startswith("BOT_") else ""
+    return bot, user
+
+
+def vcs_token_values(env: dict) -> list[str]:
+    """env 中所有 VCS 凭据值（用于日志脱敏，覆盖全部平台而非仅 gitcode/github）。"""
+    out: list[str] = []
+    for key, value in (env or {}).items():
+        if is_vcs_token_env(key) and value:
+            text = str(value)
+            if text and text not in out:
+                out.append(text)
+    return out

@@ -243,7 +243,8 @@ def _get_task_repo_token(repo_key: str) -> str:
     if not repo_key:
         return ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         provider = create_provider_from_repo_key(repo_key)
         result = TokenResolver(provider).resolve(repo_key)
         # level == "user" → 路径 D 用户 token，不写入 task 行
@@ -344,7 +345,8 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
         return False
     # 条件 1: 路径 B 仓库（level == "user"）
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         _config_result = TokenResolver(_provider).resolve_config_level(repo_key)
         if _config_result.level != "user":
@@ -2101,7 +2103,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
             return result
         try:
-            from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+            from src.kernel.token_resolver import TokenResolver, create_action_handler
+            from src.domains.mgmt.public import create_provider_from_repo_key
             _provider = create_provider_from_repo_key(repo_key)
             _resolver = TokenResolver(_provider)
             _config_result = _resolver.resolve_config_level(repo_key)
@@ -5556,7 +5559,9 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         if _card is not None and _card.api_auth == "query_token":
             _path = f"/repos/{_c.owner}/{_c.repo}/pulls/{pr_number}/comments"
         elif _card is not None and _card.dialect == "gitlab":
-            _path = f"/projects/{_c.owner}%2F{_c.repo}/merge_requests/{pr_number}/notes"
+            # 子组仓库（grp/sub/proj）必须整体编码：半编码会拼出
+            # /projects/grp%2Fsub/proj → 404（回帖被吞成 warning）。复用客户端同一实现。
+            _path = (f"/projects/{_c._project_path}/merge_requests/{pr_number}/notes")
         else:
             _path = f"/repos/{_c.owner}/{_c.repo}/issues/{pr_number}/comments"
         _resp = _c._request("POST", _path, {"body": _comment})

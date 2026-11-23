@@ -118,7 +118,7 @@ def test_s50_config_store_verify_token_card_driven(gitee_card):
             assert token == "tok-x"
             return {"login": "bob", "name": "Bob B"}
 
-    with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()):
         out = config_store.verify_token("gitee", "tok-x")
     assert out == {"provider": "gitee", "login": "bob", "name": "Bob B"}
 
@@ -134,7 +134,7 @@ def test_s50_config_store_verify_token_gitee_real_card(gitee_card):
         seen["auth"] = self._card.api_auth
         return {"login": "bob", "name": "Bob"}
 
-    with patch("src.kernel.token_resolver.GenericVcsProvider._http", _fake_http):
+    with patch("src.domains.mgmt.vcs.GenericVcsProvider._http", _fake_http):
         out = config_store.verify_token("gitee", "tok-x")
     assert out["provider"] == "gitee" and out["login"] == "bob"
     assert seen["url"] == "https://gitee.com/api/v5/user"

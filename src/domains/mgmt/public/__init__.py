@@ -1821,7 +1821,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
     "repo_platform_cards_all": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
@@ -1830,7 +1830,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms ORDER BY provider"),
     "repo_platform_bot_status_set": (
         "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "
@@ -2562,7 +2562,7 @@ _PLATFORM_CARD_COLUMNS = (
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 
 
@@ -6692,3 +6692,24 @@ def org_dispatch_terminal_statuses() -> tuple[str, ...]:
     from src.domains.mgmt.org_dispatch import DISPATCH_TERMINAL as _impl
 
     return tuple(_impl)
+
+def create_provider(provider: str) -> Any:
+    """VCS 平台适配器工厂（跨域入口）。实现归 src.domains.mgmt.vcs。"""
+    from src.domains.mgmt.vcs import create_provider as _impl
+
+    return _impl(provider)
+
+
+def create_provider_from_repo_key(repo_key: str) -> Any:
+    """按 repo_key 前缀取 provider（跨域入口）。"""
+    from src.domains.mgmt.vcs import create_provider_from_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def create_repo_kwargs(provider: str, auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """建仓可选参数（卡能力位驱动；跨域入口）。"""
+    from src.domains.mgmt.vcs import create_repo_kwargs as _impl
+
+    return _impl(provider, auto_init=auto_init, default_branch=default_branch)

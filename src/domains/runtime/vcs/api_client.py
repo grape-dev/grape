@@ -311,6 +311,15 @@ def _native_issue_number(n):
     return native_issue_number(n)
 
 
+class VcsPathContractError(ValueError):
+    """平台方言的路径契约被违反（例：gitlab 卡下拼出 /repos/ 前缀）。
+
+    为什么用异常而不是告警：对方平台对不存在的路由会回 404，而 404 在业务层
+    被解读成「资源不存在」——查重、探活、删除感知会全部静默失效（2026-11-20
+    实锤：GitLab 重名预检恒返回「可用」）。宁可 500 暴露，也不要假阴性。
+    """
+
+
 class VcsApiClient:
     """统一 VCS API 客户端：Issue 评论 / PR 操作 / 文件读写。
 
@@ -332,6 +341,17 @@ class VcsApiClient:
         from src.kernel.repo_key import strip_provider_prefix
         self.owner = strip_provider_prefix(owner)
         self.repo = repo
+
+    @property
+    def _project_path(self) -> str:
+        """GitLab project id 路径段：owner 可含子组斜杠（grp/sub/proj），
+
+        必须整体编码——只编码 repo 段会拼出 /projects/grp/sub%2Fproj，
+        GitLab 要的是 /projects/grp%2Fsub%2Fproj，否则 404。
+        其余平台（github/gitee/gitcode）没有子组，等价于旧拼法。
+        """
+        from urllib.parse import quote as _q
+        return _q(f"{self.owner}/{self.repo}", safe="")
 
     # === Issue 评论 ===
 
@@ -412,7 +432,7 @@ class VcsApiClient:
         if card is None:
             return []
         if card.dialect == "gitlab":
-            _base = f"/projects/{self.owner}%2F{self.repo}/merge_requests/{pr_number}/notes"
+            _base = f"/projects/{self._project_path}/merge_requests/{pr_number}/notes"
         elif (getattr(card, "pr_comment_endpoint", "") or "pulls") == "issues":
             _base = f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments"
         else:
@@ -443,9 +463,12 @@ class VcsApiClient:
         if card is None:
             return self._unsupported()
         if self._dialect_is_gitlab():
-            data = {"title": title, "description": body}
-            if assignee:
-                data["assignee_id"] = assignee
+            data: dict = {"title": title, "description": body}
+            # Issue #3580 复审：GitLab 只认数值 assignee_ids——用户名先解析成 id，
+            # 解析不到就放弃指派（不把用户名原样塞进 assignee_id 让上游 400/静默忽略）。
+            _ids = self._gitlab_assignee_ids(assignee)
+            if _ids:
+                data["assignee_ids"] = _ids
         else:
             data = {"title": title, "body": body}
             if assignee:
@@ -566,8 +589,15 @@ class VcsApiClient:
         page = 1
         _complete = False
         while page <= max_pages:
+            # 2026-11-22：路径按卡方言派生（此前硬编码 /repos/… 对 gitlab 是
+            # 不存在的路由，恒 404 → 查重被误报成「token 可能失效」）。
+            # GitLab 侧 state 取值是 opened（不是 open），列表返回裸数组。
             data = self._request(
-                "GET", f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}")
+                "GET",
+                self._generic_path(
+                    f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}",
+                    f"/issues?state=opened&per_page=50&page={page}",
+                ))
             if isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(_dedup_error_text(data))
@@ -659,7 +689,7 @@ class VcsApiClient:
         """分支列表（D13 命令面，卡驱动分页）：[{name, protected}]。"""
         branches: list[dict] = []
         if self._dialect_is_gitlab():
-            path = f"/projects/{self.owner}%2F{self.repo}/repository/branches"
+            path = f"/projects/{self._project_path}/repository/branches"
         else:
             path = f"/repos/{self.owner}/{self.repo}/branches"
         page = 1
@@ -690,7 +720,7 @@ class VcsApiClient:
             return {"error": f"unsupported provider: {self.provider}"}
         if self._dialect_is_gitlab():
             def _fetch(page):
-                path = (f"/projects/{self.owner}%2F{self.repo}/merge_requests"
+                path = (f"/projects/{self._project_path}/merge_requests"
                         f"?state={state}&per_page=100&page={page}")
                 return self._request("GET", path)
         else:
@@ -711,6 +741,33 @@ class VcsApiClient:
         card = self._platform_card()
         return bool(card is not None and card.dialect == "gitlab")
 
+    def _gitlab_assignee_ids(self, assignee: str) -> list:
+        """GitLab 指派：用户名 → assignee_ids（Issue #3580 复审，对齐 PR #1854）。
+
+        GitLab 写接口只认**数值 user id**（`assignee_ids`），传用户名会被上游 400/忽略。
+        解析序：纯数字入参直接采用（历史调用点传 id 的形态零回归）→ 否则
+        `GET /users?username=<名字>` 精确匹配后取 id。解析不到只告警并放弃指派，
+        不阻断建 Issue（指派是可选语义，PR 上游同口径）。
+        """
+        _raw = str(assignee or "").strip()
+        if not _raw:
+            return []
+        if _raw.isdigit():
+            return [int(_raw)]
+        from urllib.parse import quote as _quote
+        try:
+            users = self._request("GET", f"/users?username={_quote(_raw)}")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"gitlab assignee resolve failed ({_raw}): {e}")
+            return []
+        for u in users if isinstance(users, list) else []:
+            if not isinstance(u, dict):
+                continue
+            if str(u.get("username", "")).lower() == _raw.lower() and u.get("id"):
+                return [int(u["id"])]
+        log.warning(f"gitlab assignee not found: {_raw}")
+        return []
+
     def create_branch(self, branch_name: str, refs: str = "main") -> dict:
         """D44/S66：创建分支（方言模板，零平台名分支）。
 
@@ -724,7 +781,7 @@ class VcsApiClient:
         card = self._platform_card()
         if self._dialect_is_gitlab():
             return self._card_request("POST",
-                f"/projects/{self.owner}%2F{self.repo}/repository/branches",
+                f"/projects/{self._project_path}/repository/branches",
                 {"branch": branch_name, "ref": refs}, form=True)
         if card is not None and getattr(card, "branch_create_form", "form") == "refs_sha":
             base = refs or "main"
@@ -756,7 +813,7 @@ class VcsApiClient:
         from urllib.parse import quote
 
         if self._dialect_is_gitlab():
-            rinfo = self._card_request("GET", f"/projects/{self.owner}%2F{self.repo}")
+            rinfo = self._card_request("GET", f"/projects/{self._project_path}")
             default_branch = (
                 (rinfo or {}).get("default_branch", "main")
                 if isinstance(rinfo, dict) else "main"
@@ -764,7 +821,7 @@ class VcsApiClient:
             branch = ref or default_branch
             data = self._card_request(
                 "GET",
-                f"/projects/{self.owner}%2F{self.repo}/repository/files/"
+                f"/projects/{self._project_path}/repository/files/"
                 f"{quote(path, safe='')}?ref={branch}",
             )
             content = (data or {}).get("content", "") if isinstance(data, dict) else ""
@@ -803,10 +860,10 @@ class VcsApiClient:
         {"content": "", "endpoint": ""}（调用方语义=空 README）。
         """
         if self._dialect_is_gitlab():
-            rinfo = self._card_request("GET", f"/projects/{self.owner}%2F{self.repo}")
+            rinfo = self._card_request("GET", f"/projects/{self._project_path}")
             default_branch = (rinfo or {}).get("default_branch", "main") if isinstance(rinfo, dict) else "main"
             data = self._card_request("GET",
-                f"/projects/{self.owner}%2F{self.repo}/repository/files/README.md?ref={default_branch}")
+                f"/projects/{self._project_path}/repository/files/README.md?ref={default_branch}")
             content = (data or {}).get("content", "") if isinstance(data, dict) else ""
             if content:
                 try:
@@ -915,14 +972,36 @@ class VcsApiClient:
                                     timeout=timeout)
         return self._do_request(url, method, data, headers=headers, timeout=timeout)
 
-    def _generic_path(self, github_style: str, gitlab_style: str = "") -> str:
-        """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。"""
+    def _generic_path(self, github_style: str, gitlab_style: "str | None" = None) -> str:
+        """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。
+
+        `gitlab_style` 的 None/"" 语义必须区分（2026-11-20 实锤）：
+        - 未给（None）= 该端点没有 GitLab 专属形态，沿用 github_style；
+        - 显式给 ""（如仓库根 `/projects/{owner}%2F{repo}`）= 用 GitLab 形态。
+        旧实现把 "" 当"未给"，`get_repo_info()` 于是对 GitLab 请求 `/repos/o/r`
+        ——那是**不存在的路由**，GitLab 恒回 404 且响应体是 404 页，
+        查重/存在性判定永远得到「不存在」（线上 check-name 对真实存在的
+        account-a/hello-fastapi-2 报 exists:false）。
+        """
         card = self._platform_card()
-        if card and card.dialect == "gitlab" and gitlab_style:
-            return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
-        if not github_style and gitlab_style:
-            return f"/projects/{self.owner}%2F{self.repo}{gitlab_style}"
+        if card and card.dialect == "gitlab" and gitlab_style is not None:
+            path = f"/projects/{self._project_path}{gitlab_style}"
+            return self._assert_gitlab_path(path)
+        if not github_style and gitlab_style is not None:
+            path = f"/projects/{self._project_path}{gitlab_style}"
+            return self._assert_gitlab_path(path)
+        if card and card.dialect == "gitlab":
+            # 漏传 gitlab_style 就是在拼一条 GitLab 不存在的 `/repos/...`：
+            # 静默 404 会被上层解读成「不存在」，比报错危险得多（查重/探活全失效）。
+            raise VcsPathContractError(
+                f"{self.provider}: gitlab 方言端点必须给出 gitlab_style"
+                f"（收到 github 形态 {github_style!r}）")
         return github_style
+
+    def _assert_gitlab_path(self, path: str) -> str:
+        if path.startswith("/repos/"):
+            raise VcsPathContractError(f"{self.provider}: gitlab 路径不得以 /repos/ 开头: {path}")
+        return path
 
     def _unsupported(self) -> dict:
         return {"error": f"unsupported provider: {self.provider}"}
@@ -965,7 +1044,9 @@ class VcsApiClient:
                 from src.domains.mgmt.user.repo_manager import upstream_timeout_seconds
                 if timeout == 30:
                     timeout = upstream_timeout_seconds()
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                # Issue #3580：上游 HTTP 唯一入口（平台卡私有 CA + 带 token 请求不跟随重定向）
+                from src.kernel.upstream_http import open_with_policy as _open_policy
+                with _open_policy(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                     if _span is not None:
                         _span.set_attribute("http.status_code", 200)

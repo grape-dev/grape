@@ -2,11 +2,14 @@
 import os
 import re
 import time
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.kernel.config import log, WORKSPACE_DIR
 from src.domains.mgmt.user import db as user_db
-from src.domains.mgmt.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
+from src.domains.mgmt.user.repo_manager import (
+    fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo,
+    resolve_use_path_b,
+)
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_token_for, get_user_github_token_with_refresh, require_no_session_token, require_org_member
 from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
@@ -253,7 +256,7 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
     平台差异由平台卡/Provider 子类承担，routes 不再持有平台分支；repo_key 前缀
     统一由 provider 派生（不再折叠 gitcode）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     repos = create_provider(provider).fetch_repos_with_role(api_token)
     if not repos:
         # FR-5.4: 空结果可能是 token scope 受限，记 warning
@@ -521,7 +524,8 @@ def _probe_stale_repos(user_id):
     # FR-1.2: 仓库 404 双信号交叉验证——用 bot token 二次确认
     # 用户 token 404 可能是权限问题而非仓库真删了，bot token 是 maintainer 有读权限
     if stale_keys:
-        from src.kernel.token_resolver import TokenResolver, create_provider
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.vcs import create_provider
         verified_deletes = []
         for repo_key, owner, repo_name in stale_keys:
             provider, _, _ = parse_repo_key(repo_key)
@@ -662,11 +666,11 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 可列仓平台 = 身份行 ∪ 凭据域 <p>_pat（统一入口 list_platform_links，A 批）：
     # PAT 是仓库执行凭据、不是身份绑定，只配 PAT 的账号同样可列仓。
     # token 不可用的平台不算"可列仓"（历史派生密钥解不出来 / 空 token）：否则必 401 重授权，
-    # 把本可渲染引导页的入口打成报错（2026-11-16 yangaiwu 现场）。
+    # 把本可渲染引导页的入口打成报错（2026-11-16 现场）。
     _links = list_platform_links(user["id"])
     # 2026-11-18：「用户声明过这个平台」与「这个平台的凭据现在可用」拆成两个集合。
     # 只用一个布尔会把"配置在但坏了"折叠成"没配置"，用户看到的是引导页 + 错误文案，
-    # 而库里凭据行和仓库缓存其实都在（yangaiwu 现场：6 条 PAT 解不开 → 整块列表失踪）。
+    # 而库里凭据行和仓库缓存其实都在（现场：6 条 PAT 解不开 → 整块列表失踪）。
     _declared_providers = {i["provider"] for i in _links if i.get("provider") in _listable}
     _bound_providers = {i["provider"] for i in _links
                         if i.get("provider") in _listable and i.get("token_usable", True)}
@@ -1021,18 +1025,30 @@ def sync_repos(user: dict = Depends(require_org_member)):
 
 
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
-def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
-    """检查当前用户名下是否已存在同名仓库"""
-    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
+def check_repo_name(name: str,
+                    provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                    owner: str = Query("", description="所属空间路径（GitLab 可填组/子组），空=个人空间"),
+                    user: dict = Depends(require_no_session_token)):
+    """检查指定平台/空间下是否已存在同名仓库（Issue #3580：支持组/子组）。"""
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    _space = (owner or "").strip()
+    if _space and not _valid_space_path(_space):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间格式非法"})
+    _assert_owner_visible(provider, api_token, _space, user)
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
     # Issue #3563：身份获取改经 with_oauth_token 包装——过期 token（上游 401）走
     # 刷新重试，仍失败统一 401 reauth_required（detail 带 provider，Spec v2），
     # 替代零信息量 502；其余上游异常剥离内部 URL 后短消息化（原文仅落日志）。
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.api.oauth_token import sanitize_upstream_error
     from src.domains.runtime.public import VcsApiClient
     try:
@@ -1042,7 +1058,10 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
             _used_token["v"] = t
             return create_provider(_p).verify_token(t)
         _uinfo = with_oauth_token(user, provider, _verify_identity)
-        login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
+        # GitLab /user 的登录名字段是 username（github/gitcode 是 login），
+        # 只认 login 会让 GitLab 个人空间查重直接 502「无法获取当前用户身份」。
+        login = str((_uinfo or {}).get("login", "") or (_uinfo or {}).get("username", "") or "") if isinstance(_uinfo, dict) else ""
+        login = _space or login          # 指定空间时按空间路径查重（子组仓不误判为占用）
         if not login:
             # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
@@ -1061,6 +1080,66 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {sanitize_upstream_error(e)}"})
 
 
+@router.get("/create-targets", operation_id="repos_create_targets",
+            summary="List spaces a repository can be created in",
+            description="Returns the personal namespace login plus provider-declared spaces "
+                        "(GitLab: groups the token can create projects in, full_path form). "
+                        "Providers without organisation namespaces return an empty list.")
+def list_create_targets(provider: str = Query("", description="目标平台，空=按已绑令牌自动选择"),
+                        user: dict = Depends(require_no_session_token)):
+    if provider:
+        api_token = get_user_token_for(user["username"], user_id=str(user.get("id") or ""),
+                                       provider=provider)
+    else:
+        provider, api_token = _get_user_provider_and_token(
+            user["username"], user.get("login_provider", ""), user.get("id", 0))
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
+    # 目标上下文（登录名 + 可建仓空间）：缓存是应用服务的横切能力，
+    # 路由只做参数整形（默认 1800s，meta/env 可配，0 = 不走缓存）。
+    from src.domains.mgmt.vcs import namespaces as _targets
+
+    return _targets.create_targets(provider, api_token)
+
+
+def _assert_owner_visible(provider: str, api_token: str, owner: str, user: dict) -> None:
+    """owner 校验的 HTTP 适配：领域规则在 `mgmt.user.namespaces`，这里只映射错误码。"""
+    from src.domains.mgmt.user.namespaces import NamespaceNotVisible, assert_owner_visible
+
+    try:
+        assert_owner_visible(provider, api_token, owner,
+                             {"login": str(user.get("username") or "")})
+    except NamespaceNotVisible as exc:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "NAMESPACE_NOT_VISIBLE", "message": str(exc)})
+
+
+def _owner_from_full_name(full_name: str) -> str:
+    """建仓响应 full_name → owner（Issue #3580：子组仓 owner 是完整组路径）。
+
+    GitLab 子组仓 `full_name = grp/sub/proj`：取最后一段之前的完整路径
+    （按首个 `/` 切会把 owner 截成 grp → webhook 路径拼错、托管 404）。
+    """
+    _fn = str(full_name or "")
+    return _fn.rpartition("/")[0] if "/" in _fn else ""
+
+
+def _valid_space_path(value: str) -> bool:
+    """所属空间路径校验（Issue #3580）：GitLab 支持组/子组（`group/sub`）。
+
+    段级规则：非空、非点段、字符集限字母数字下划线连字符点; 禁首尾斜杠。其它平台只传单段
+    （组织名/登录名），同样被这条规则接受（零回归）。
+    """
+    import re as _re
+
+    if not value or value.startswith("/") or value.endswith("/"):
+        return False
+    for seg in value.split("/"):
+        if not seg or seg in (".", "..") or not _re.match(r"^[\w\-.]+$", seg):
+            return False
+    return True
+
+
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
@@ -1072,8 +1151,10 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     if not _re.match(r'^[\w\-\.]+$', name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
     owner = (body.owner or "").strip()
-    if owner and not _re.match(r'^[\w\-\.]+$', owner):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间只能包含字母、数字、下划线、连字符和点"})
+    if owner and not _valid_space_path(owner):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "所属空间格式非法（可填组/子组路径如 group/sub，段只能含字母数字下划线连字符点，禁 .. 与首尾斜杠）"})
     repo_path = (body.path or "").strip()
     if repo_path and not _re.match(r'^[\w\-\.]+$', repo_path):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库路径只能包含字母、数字、下划线、连字符和点"})
@@ -1094,9 +1175,13 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
+    # 授权不猜（2026-11-20）：owner 是用户可控输入，前端下拉只是服务端清单的投影。
+    # 建仓前用**服务端自己拉的清单**校验；不匹配就拒，别把「是否越权」押给上游语义。
+    _assert_owner_visible(provider, api_token, owner, user)
+
     # B 批（2026-11-13）：建仓走 provider 端口（GitHub/GitCode/GitLab 各自实现），
     # 路由层不再按平台名分派 create_github_repo / create_repo。
-    from src.kernel.token_resolver import create_provider, create_repo_kwargs
+    from src.domains.mgmt.vcs import create_provider, create_repo_kwargs
     try:
         repo_info = create_provider(provider).create_repo(
             api_token=api_token, name=name, description=body.description, private=private,
@@ -1115,9 +1200,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     # GitCode 建仓响应不带 owner 字段（只有 namespace/human_name），此前 owner 落空
     # 导致 webhook 拼成 /repos//<name>/hooks → 404、托管永久 partial。统一从
     # full_name 兜底解析，github/gitcode/其它卡路径口径一致。
-    if not owner and "/" in full_name:
-        owner = full_name.split("/", 1)[0]
-    repo_name = repo_info.get("name") or (full_name.split("/", 1)[1] if "/" in full_name else name)
+    if not owner:
+        owner = _owner_from_full_name(full_name)
+    repo_name = repo_info.get("name") or (full_name.rpartition("/")[2] or name)
 
     try:
         def _fetch(token, _uid=user["id"], _p=provider):
@@ -1149,16 +1234,22 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         # 回调后缀/全局 bot/webhook 三件套/db 列名/建 hook 鉴权参数均卡派生。
         from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
         _hcfg = get_hosting_provider_config(provider)
-        if "/webhook/" in webhook_url:
-            webhook_url = webhook_url.split("/webhook/", 1)[0] + _hcfg["webhook_url_suffix"]
+        # 2026-11-22 修：基址不含 "/webhook/" 段时（裸隧道基址即此形态）旧写法整段
+        # 不执行 → 平台 hook 落到 / 而非 /webhook/<provider>，回调必然 404。
+        # 统一走「按平台卡重建」（同 config_store 的单一来源），基址写不写路径都对。
+        from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+        webhook_url = _rebuild_wh_url(webhook_url, provider)
 
         # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
         import secrets as _secrets
         _create_global_bot_token = _hcfg["bot_token"]
-        _use_path_b = not _create_global_bot_token
+        _use_path_b = resolve_use_path_b(_hcfg, _create_global_bot_token)
         _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
         try:
-            _wh_token = _create_global_bot_token or api_token  # P2-7: 路径 A 用 bot token，路径 B 用用户 token
+            # P2-7: 路径 A 用 bot token，路径 B 用用户 token。方言强制 B（如 gitlab_v4）时
+            # 即便配了全局 bot token 也不能拿它当 webhook 密钥——PAT 会随
+            # X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会让投递全 404。
+            _wh_token = api_token if _use_path_b else (_create_global_bot_token or api_token)
             existing_id = _host_call_with_ready_retry(
                 _hcfg["find_webhook"], _wh_token, owner, repo_name, webhook_url)
             repo_key = to_repo_key(full_name, provider=provider)
@@ -1325,6 +1416,150 @@ def _host_status_marker(repo_key: str, scope: str = "host_repo"):
     return _mark
 
 
+def _host_owner_conflict(repo_key: str, user: dict, org_id: str = "") -> None:
+    """托管归属前置校验（Issue #3580 G2 方案 A / 对齐 PR #1854）。
+
+    已托管且 host_user_id 指向他人、或 org_id 属于别的组织 → 403。
+    同一用户/同一组织重复托管视为幂等重入（继续走后续流程，不额外建 hook）；
+    历史路径 A 托管（host_user_id 为空）不拦，保持存量语义。
+    """
+    from src.domains.mgmt.user.db import get_managed_repo_owner_row
+
+    row = get_managed_repo_owner_row(repo_key)
+    if not row:
+        return
+    uid = str((user or {}).get("id") or "")
+    row_uid = str(row.get("host_user_id") or "")
+    if row_uid and row_uid not in ("0", "None") and uid and row_uid != uid:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "REPO_HOSTED_BY_OTHER",
+            "message": "该仓库已由其他账号托管；如需转移请先解除托管"})
+    row_org = str(row.get("org_id") or "")
+    cur_org = "" if org_id in (None, "", 0, "0") else str(org_id)
+    if row_org and cur_org and row_org != cur_org:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "REPO_HOSTED_BY_OTHER_ORG",
+            "message": "该仓库已由其他组织托管；如需转移请先在原组织解除托管"})
+
+
+def _gitlab_host_precheck(provider: str, owner: str, repo_name: str, api_token: str) -> None:
+    """GitLab 托管前置校验（对齐 PR #1854，方案 A）。
+
+    GitLab 的 `/user` 只返回 username（没有 login 字段），也没有 v5 的
+    collaborators/permission 端点，所以不能复用 v5 段。这里走 provider 端口：
+    verify_token 取 username → get_collaborator_permission
+    （/projects/{path}/members/all/{uid}）判 access_level >= 40（Maintainer）。
+
+    失败语义与 v5 段一致：身份取不到/通道异常 → 502，权限不足 → 403。
+    """
+    from src.domains.mgmt.vcs import create_provider
+
+    try:
+        prov = create_provider(provider)
+        info = prov.verify_token(api_token) or {}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - 上游/凭据异常统一 502，原文只落日志
+        log.warning(f"host_repo gitlab identity failed: {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_IDENTITY_FAILED",
+            "message": "无法获取 GitLab 用户身份，请确认 PAT 有效且具备 api scope"})
+    login = str((info or {}).get("username") or (info or {}).get("login") or "").strip()
+    if not login:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_IDENTITY_FAILED",
+            "message": "无法获取当前用户身份"})
+    if login.lower() == str(owner or "").lower():
+        return
+    try:
+        perm = prov.get_collaborator_permission(api_token, owner, repo_name, login) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"host_repo gitlab permission check failed ({owner}/{repo_name}): {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "error_code": "GITLAB_PERMISSION_CHECK_FAILED",
+            "message": "无法读取该 GitLab 仓库的成员权限"})
+    if not isinstance(perm, dict):
+        perm = {}
+    try:
+        level = int(perm.get("access_level") or 0)
+    except (TypeError, ValueError):
+        level = 0
+    if level < 40:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "PERMISSION_DENIED",
+            "message": "无权限托管该仓库：需要 Maintainer 及以上权限"})
+
+
+def _v5_host_precheck(provider: str, owner: str, repo_name: str, api_token: str,
+                      user: dict) -> None:
+    """v5 方言（gitcode/gitee）托管前置校验：身份 + 仓库管理员权限。
+
+    原 host_repo 内联段（Issue #383/#395 错误分流）抽成函数，只做机械搬移，
+    语义与报文逐字不变；新增 GitLab 方言后由调用点按 _dialect 分派。
+    """
+    from src.domains.mgmt.user.repo_manager import _check_collaborator_admin, _req
+    # B 批（2026-11-13）：v5 API 基址从平台卡派生（gitee/gitcode 同方言不同域）；
+    # 原硬编码 https://gitcode.com/api/v5 会让 gitee 仓的预检打错平台。
+    from src.domains.runtime.public import get_platform_card as _gpc_host
+    _pc_host = _gpc_host(provider)
+    _v5_base = ((_pc_host.api_base if _pc_host is not None else "")
+                or "https://gitcode.com/api/v5").rstrip("/")
+    try:
+        def _get_user(token):
+            return _req("GET", f"{_v5_base}/user", token)
+        user_data = with_oauth_token(user, provider, _get_user)
+        current_user = user_data.get("login", "")
+        if not current_user:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+
+        if current_user == owner:
+            is_admin = True
+        else:
+            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
+                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
+                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+                import urllib.parse as _up
+                _perm_url = f"{_v5_base}/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
+                _data = _req("GET", _perm_url, token)
+                _access_level = 0
+                try:
+                    _access_level = int(_data.get("access_level", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                if _access_level >= 40:
+                    return True
+                if str(_data.get("permission", "") or "").lower() == "admin":
+                    return True
+                _perm = _data.get("permissions") or {}
+                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
+            is_admin = with_oauth_token(user, provider, _check_admin)
+
+        if not is_admin:
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试"})
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
+        # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
+        # FR-5.2: 增强错误码——401/403 返回 TOKEN_PERMISSION_INSUFFICIENT 供前端映射
+        import re as _re
+        _m = _re.search(r'failed \((\d{3})\)', str(e))
+        _code = int(_m.group(1)) if _m else 0
+        log.warning(f"host_repo upstream failed: {e}")
+        if _code == 404:
+            # 仓库不存在/无权访问（业务语义 404，而非网关故障 502）
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
+        if _code in (401, 403):
+            # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
+                "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user_permission", e))
+    except Exception as e:
+        # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
+        log.warning(f"host_repo upstream failed: {e}")
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user", e))
+
+
 def _gitcode_webhook_502_detail(code: int, owner: str = "", repo_name: str = "") -> dict:
     """GitCode webhook 创建失败的结构化 502（401=token 失效 / 404=仓库不存在）。"""
     if code == 401:
@@ -1448,10 +1683,14 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         if _pfx in _repo_listable_providers() and _powner and _prepo:
             _raw = f"{_powner}/{_prepo}"
             body.full_name = _raw
-    parts = _raw.split("/", 1)
-    if len(parts) != 2:
+    # GitLab 支持子组（grp/sub/proj）：owner 是最后一段之前的所有路径，
+    # 按第一个斜杠切会把 owner 落成 grp、repo 落成 sub/proj（托管行 owner 错）。
+    # 其余平台没有子组，rsplit 与 split 等价。
+    if "/" not in _raw:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
-    owner, repo_name = parts
+    owner, repo_name = _raw.rsplit("/", 1)
+    if not owner or not repo_name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
 
     # D44: 显式 provider > 仓库来源提示；仍无 → 按平台 token 可用性自动选择（github 优先，不以登录平台短路）
     _listable = _repo_listable_providers()
@@ -1497,18 +1736,23 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                 "example": "http://<public-ip>/webhook/gitcode"
             }
         })
-    # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链），
-    # 不再做 gitcode→github 字符串替换——新平台取卡 webhook_path 自动正确。
-    from src.domains.mgmt.user.repo_manager import _webhook_path_from_card as _wh_path
-    _wh_suffix = _wh_path(provider, f"/webhook/{provider}")
-    if _wh_suffix and "/webhook/" in webhook_url:
-        webhook_url = webhook_url.split("/webhook/", 1)[0] + _wh_suffix
+    # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链）。
+    # 2026-11-22 修：旧写法「基址里没有 /webhook/ 段就整段跳过」，裸基址（如隧道
+    # 基址 https://<id>.tunnel.example.com）会建出缺平台路径的 hook → 平台回调 404
+    # （实锤 gitcode:org-a/repo-a）。改为按平台卡重建，缺段自动补。
+    from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+    webhook_url = _rebuild_wh_url(webhook_url, provider)
 
     # B 批（2026-11-13）：托管配置/方言一次解析，下面两段按**方言**而非平台名分派
     from src.domains.mgmt.user.repo_manager import get_hosting_provider_config as _get_hcfg
     from src.domains.mgmt.user.repo_manager import _dialect_of as _dialect_of_provider
     _hcfg = _get_hcfg(provider)
     _dialect = _dialect_of_provider(provider)
+
+    # Issue #3580 G2（对齐 PR #1854）：托管归属前置校验（全体方言，只读 + 403）。
+    # 已托管给他人/他组织 → 403；同用户/同组织重复托管按幂等重入处理。
+    from src.kernel.repo_key import to_repo_key as _to_rk_pre
+    _host_owner_conflict(_to_rk_pre(body.full_name, provider=provider), user, _org_id)
 
     if not api_token:
         # B 批：文案按平台卡名派生（零平台分支，原 GitHub/GitCode 两套文案合并）
@@ -1711,8 +1955,10 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     global_bot_token = _hcfg["bot_token"]
     global_bot_username = _hcfg["bot_username"]
 
-    # Issue #372: 全局 Bot Token 优先（路径 A），无则降级到用户 Token（路径 B）
-    _use_path_b = not global_bot_token
+    # webhook 路径：方言强制（gitlab_v4 必须随机密钥）或没配 bot token 时走 B。
+    # bot_token 本身仍用于「邀请 bot 协作者 + 仓库回帖凭据」，与 webhook 路径无关——
+    # 此前把它置空来选路径，等于把「bot 出镜」一起关掉了。
+    _use_path_b = resolve_use_path_b(_hcfg, global_bot_token)
 
     if _use_path_b:
         # 路径 B：无全局 Bot Token，用用户 Token 建 webhook
@@ -1725,67 +1971,13 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         webhook_token = global_bot_token
         _webhook_secret = ""
 
-    from src.domains.mgmt.user.repo_manager import _check_collaborator_admin, _req
-    # B 批（2026-11-13）：v5 API 基址从平台卡派生（gitee/gitcode 同方言不同域）；
-    # 原硬编码 https://gitcode.com/api/v5 会让 gitee 仓的预检打错平台。
-    from src.domains.runtime.public import get_platform_card as _gpc_host
-    _pc_host = _gpc_host(provider)
-    _v5_base = ((_pc_host.api_base if _pc_host is not None else "")
-                or "https://gitcode.com/api/v5").rstrip("/")
-    try:
-        def _get_user(token):
-            return _req("GET", f"{_v5_base}/user", token)
-        user_data = with_oauth_token(user, provider, _get_user)
-        current_user = user_data.get("login", "")
-        if not current_user:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-
-        if current_user == owner:
-            is_admin = True
-        else:
-            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
-                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
-                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
-                import urllib.parse as _up
-                _perm_url = f"{_v5_base}/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
-                _data = _req("GET", _perm_url, token)
-                _access_level = 0
-                try:
-                    _access_level = int(_data.get("access_level", 0) or 0)
-                except (TypeError, ValueError):
-                    pass
-                if _access_level >= 40:
-                    return True
-                if str(_data.get("permission", "") or "").lower() == "admin":
-                    return True
-                _perm = _data.get("permissions") or {}
-                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
-            is_admin = with_oauth_token(user, provider, _check_admin)
-
-        if not is_admin:
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试"})
-    except HTTPException:
-        raise
-    except RuntimeError as e:
-        # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
-        # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
-        # FR-5.2: 增强错误码——401/403 返回 TOKEN_PERMISSION_INSUFFICIENT 供前端映射
-        import re as _re
-        _m = _re.search(r'failed \((\d{3})\)', str(e))
-        _code = int(_m.group(1)) if _m else 0
-        log.warning(f"host_repo upstream failed: {e}")
-        if _code == 404:
-            # 仓库不存在/无权访问（业务语义 404，而非网关故障 502）
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
-        if _code in (401, 403):
-            # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
-                "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
-        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user_permission", e))
-    except Exception as e:
-        # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
-        log.warning(f"host_repo upstream failed: {e}")
-        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user", e))
+    # 前置身份/权限校验（Issue #3580 对齐 PR #1854）：按方言分派。
+    # gitlab_v4 走 provider 端口（/user 取 username、members/all 取权限）；
+    # github 已在上面独立分支返回；其余（gitcode/gitee v5）走原内联段。
+    if _dialect == "gitlab_v4":
+        _gitlab_host_precheck(provider, owner, repo_name, api_token)
+    else:
+        _v5_host_precheck(provider, owner, repo_name, api_token, user)
 
     try:
         from src.domains.mgmt.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, _RateLimitedError
@@ -1796,14 +1988,29 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         # Issue #2126: 托管诊断落库助手
         _mark = _host_status_marker(repo_key)
 
+        # Issue #3580 G2（对齐 PR #1854）：GitLab 先落占位行（webhook_id=0），
+        # 建 hook 成功后由下方 add_managed_repo 覆盖为真实 id；并发由 repo_key
+        # 唯一键 + 入口的归属校验兜住，失败态由 _mark 记为 partial/failed。
+        if _dialect == "gitlab_v4":
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=0,
+                                     host_user_id=str(user["id"]), org_id=_org_id)
+            _mark("hosting", "reserve", "")
+
         # 1) 邀请 bot 为维护者（owner token 必需）→ 2) bot 接受 → 3) bot 自查权限
         # 原则：凡能查/能建一律 bot token；owner token 仅身份确认 + 本步邀请
         # Issue #372: 路径 B（无全局 bot token）跳过 bot 协作者流程
         # Issue #372 §16.1: 路径 A bot 协作者失败时降级到路径 B（不 raise 502）
         import secrets as _secrets
-        if not _use_path_b and api_token and global_bot_username and global_bot_token:
+        # collab token 与 webhook 路径解耦：gitlab_v4 的 bot_token 恒空（路径 B），
+        # 但 bot 仍应被邀为维护者并持有回帖凭据（此前因此变成"用户身份回帖"）。
+        # bot 是否「真的可用」与 webhook 走哪条路径是两件事（审查三-1）：
+        # gitlab_v4 的 webhook 必须路径 B，但 bot 若能进这个仓就应落下 bot 凭据。
+        _bot_usable = False
+        if global_bot_token and api_token and global_bot_username:
             _mark("partial", "invite_bot", "")
             ok, add_err = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
+            if ok:
+                _bot_usable = True
             if not ok:
                 # 兜底：add_collaborator 失败可能是已成员/已邀请，用 bot token 自查确认
                 try:
@@ -1822,6 +2029,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                     _mark("partial", "path_b_fallback", _HOST_PATH_B_FALLBACK_TEXT)
                 else:
                     if access_level >= 40:
+                        _bot_usable = True
                         log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer (access_level={access_level}) in {owner}/{repo_name}, continue")
                     else:
                         # §16.1: bot 权限不足 → 降级到路径 B（原 raise 502）
@@ -1859,7 +2067,21 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                     _mark("partial", "path_b_fallback", _HOST_PATH_B_FALLBACK_TEXT)
 
         # 4) webhook：路径 A 用 bot token 查/建；路径 B 用用户 token + 随机密钥
-        existing_id = _hcfg["find_webhook"](webhook_token, owner, repo_name, webhook_url)
+        try:
+            existing_id = _hcfg["find_webhook"](webhook_token, owner, repo_name, webhook_url)
+        except Exception as _fe:
+            # 查询现有 webhook 失败：绝不能当成"没有 hook"继续建（会重复挂同 URL 两条），
+            # 也要给出结构化失败而不是裸 500（GitLab 适配器已不再吞异常）。
+            log.warning(f"host: query existing webhook failed: {_fe}")
+            from src.domains.mgmt.user.db import set_host_status as _shs
+            _shs(repo_key, "webhook_missing", "query_webhook",
+                 _host_error_text(_classify_host_error(_fe)))
+            raise HTTPException(status_code=502, detail={
+                "code": 502, "error_code": "WEBHOOK_QUERY_FAILED",
+                "message": "查询现有 webhook 失败，未重复创建，请稍后重试托管",
+                "host_status": "webhook_missing", "missing": ["webhook"],
+                "step": "query_webhook",
+            })
         if existing_id:
             # Issue #372 R6.2: 路径 B 复用已有 webhook 时密钥不匹配 → 删旧重建
             if _use_path_b:
@@ -1875,8 +2097,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _db_webhook_token = "" if _use_path_b else webhook_token
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                      **{_hcfg["db_token_field"]: _db_webhook_token,
-                                        _hcfg["db_bot_token_field"]: (global_bot_token if not _use_path_b else "")},
-                                     bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id,
+                                        _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
+                                     bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
+                                     org_id=_org_id,
                                      host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
             _mark("")
             return _finalize_host_write(
@@ -1905,8 +2128,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         _db_webhook_token = "" if _use_path_b else webhook_token
         user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
                                  **{_hcfg["db_token_field"]: _db_webhook_token,
-                                    _hcfg["db_bot_token_field"]: (global_bot_token if not _use_path_b else "")},
-                                 bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id,
+                                    _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
+                                 bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
+                                 org_id=_org_id,
                                  host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
         _mark("")
         return _finalize_host_write(
@@ -1921,6 +2145,21 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             pass
         log.warning(f"host_repo failed (outer): {e}")
         raise HTTPException(status_code=502, detail=_host_502_detail("host_setup", e))
+
+
+def _bot_db_fields(cfg: dict, usable: "bool | None" = None) -> tuple:
+    """仓库 bot 凭据落库口径（hosting 与 repair 共用）。
+
+    只有 bot **确实可用**时才落 token + username：
+      · 有全局 bot 且已邀为协作者（usable=True）→ 写两者，回帖/推送走 bot；
+      · 没有全局 bot，或邀请失败回落路径 B（usable=False）→ 两者都留空，
+        让推送/回帖改走派发身份的用户 token。
+    只写 username 而不写 token 是最坏形态：回帖身份会去用一个空 token 的
+    「bot 账号」，把用户身份这条退路堵死。
+    """
+    tok = str(cfg.get("bot_token") or "")
+    ok = bool(tok) if usable is None else bool(usable and tok)
+    return (tok, str(cfg.get("bot_username") or "")) if ok else ("", "")
 
 
 @router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
@@ -1983,8 +2222,9 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     bot_token = _cfg["bot_token"]
     bot_username = _cfg["bot_username"]
 
-    # Issue #372: 路径 B——无全局 bot token 时用用户 token 修复 webhook
-    _use_path_b = not bot_token
+    # webhook 路径：方言强制（gitlab_v4 的随机密钥）或没配 bot token 时走 B；
+    # bot_token 本身继续用于邀请协作者与回帖身份（与 webhook 路径无关）
+    _use_path_b = resolve_use_path_b(_cfg, bot_token)
     import secrets as _secrets
     _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
 
@@ -2013,8 +2253,10 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
                 "example": "http://<public-ip>/webhook/gitcode"
             }
         })
-    if _cfg["webhook_url_suffix"] not in webhook_url:
-        webhook_url = webhook_url.replace("/webhook/gitcode", _cfg["webhook_url_suffix"])
+    # 2026-11-22 修：旧写法「基址里没有该后缀就 replace」在裸基址（无 /webhook/* 段）
+    # 上是空操作 → 修出来的 hook 缺平台路径。改为按平台卡重建，缺段自动补。
+    from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
+    webhook_url = _rebuild_wh_url(webhook_url, _provider)
 
     # 1) bot 是否已是维护者（路径 A only；路径 B 跳过）
     bot_ok = True if _use_path_b else False
@@ -2070,8 +2312,15 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     hid = None
     try:
         hid = _find_fn(_wh_token, owner, repo, webhook_url)
-    except Exception:
-        hid = None
+    except Exception as _fe:
+        # 查不到 ≠ 不存在：吞成 None 会再建一条重复 hook（同 URL 挂两条、重复投递）。
+        # 查询失败就如实报错，让人/重试处理，不猜。
+        log.warning(f"repair_host: query existing webhook failed: {_fe}")
+        _mark("webhook_missing", "query_webhook",
+              _host_error_text(_classify_host_error(_fe)))
+        return {"status": "error", "host_status": "webhook_missing",
+                "missing": ["webhook"], "step": "query_webhook",
+                "message": "查询现有 webhook 失败，未重复创建：请稍后重试修复"}
     if hid:
         # Issue #2126: 幂等修复——webhook 已存在时优先复用，仅检测到密钥不一致才删旧重建。
         from src.domains.mgmt.user.db import get_webhook_secret
@@ -2170,9 +2419,87 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
     } for r in repos]}
 
 
+class RepoConnectionBody(BaseModel):
+    """Issue #3580/R11：实例 PAT 连接（只落 user_credentials kind=pat）。"""
+    token: str = ""
+    login: str = ""
+
+
 class BotTokenBody(BaseModel):
     full_name: str
     bot_token: str = ""
+
+
+def _provider_card_or_404(provider: str):
+    from src.domains.runtime.public import get_platform_card
+    card = get_platform_card(provider)
+    if card is None:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": f"未注册的平台: {provider}"})
+    return card
+
+
+@router.get("/{provider}/connection", operation_id="repos_connection_get",
+            summary="Get platform PAT connection",
+            description="Issue #3580: returns whether the current user has a PAT for this platform instance. Never returns the token value.")
+def get_repo_connection(provider: str, user: dict = Depends(get_current_user_or_api_key)):
+    _provider_card_or_404(provider)
+    cfg = user_db.get_credential(user["id"], provider, kind="pat") or {}
+    return {
+        "provider": provider,
+        "configured": bool(str(cfg.get("token") or "")),
+        "login": str(cfg.get("login") or ""),
+        "source": "pat" if str(cfg.get("token") or "") else "",
+    }
+
+
+@router.put("/{provider}/connection", operation_id="repos_connection_put",
+            summary="Set platform PAT connection",
+            description="Issue #3580: validates the token against that platform instance and stores it as user_credentials(kind=pat). PAT is a repo-execution credential: no login identity / external_identities row is created.")
+def set_repo_connection(provider: str, body: RepoConnectionBody,
+                        user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    token = str(body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "token required"})
+    try:
+        from src.domains.mgmt.vcs import create_provider
+        info = create_provider(provider).verify_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": f"{provider} token 验证失败: {e}"})
+    if not isinstance(info, dict) or not info.get("id"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "TOKEN_INVALID",
+            "message": f"{provider} token 校验失败（无用户信息）"})
+    login = str(info.get("username") or info.get("login") or body.login or "")
+    cfg = {"token": token, "login": login}
+    if not user_db.set_credential(user["id"], provider, cfg, kind="pat"):
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+    # PAT 是仓库执行凭据，不产生登录身份（R11）：这里刻意不写 external_identities。
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    log.info(f"repos connection: {provider} PAT bound for user={user['id']} login={login}")
+    log_audit("repos_connection_bind", user_id=user["id"], operator_id=user["id"],
+              detail={"provider": provider, "login": login, "source": "pat"})
+    return {"provider": provider, "configured": True, "login": login, "source": "pat"}
+
+
+@router.delete("/{provider}/connection", operation_id="repos_connection_delete",
+               summary="Clear platform PAT connection",
+               description="Issue #3580: clears user_credentials(kind=pat) for the platform instance; login identities are untouched.")
+def delete_repo_connection(provider: str, user: dict = Depends(require_no_session_token)):
+    _provider_card_or_404(provider)
+    user_db.set_credential(user["id"], provider, {}, kind="pat")
+    try:
+        user_db.invalidate_user_repos(user["id"])
+    except Exception:
+        pass
+    log_audit("repos_connection_clear", user_id=user["id"], operator_id=user["id"],
+              detail={"provider": provider, "source": "pat"})
+    return {"provider": provider, "configured": False}
 
 
 @router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token.")
@@ -2275,7 +2602,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=500, detail={"code": 500, "message": "仓库查询失败"})
 
     # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
-    from src.kernel.token_resolver import create_provider_from_repo_key
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     _vcs_provider = create_provider_from_repo_key(repo_key)
     try:
         user_data = _vcs_provider.verify_token(body.bot_token)
@@ -2388,7 +2715,7 @@ def _remove_old_bot_collaborator(repo_key: str, owner: str, repo_name: str,
     if not old_bot_username:
         return
     try:
-        from src.kernel.token_resolver import create_provider_from_repo_key
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         # 移除旧 bot 需要用 owner token（有仓库管理权限的 token）
         _remove_token = get_user_token_for(
@@ -3145,7 +3472,8 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         # 把「仓库无 bot、平台有全局 bot」的 path-B 私仓推到全局 bot 身份上（403 且难查）。
         def _bot():
             try:
-                from src.kernel.token_resolver import TokenResolver, create_provider
+                from src.kernel.token_resolver import TokenResolver
+                from src.domains.mgmt.vcs import create_provider
                 _sel = TokenResolver(create_provider(provider)).resolve_exec_token(rk)
                 return _sel.token, (_sel.stage or ""), None
             except Exception as e:

@@ -36,7 +36,7 @@ def fake_verify(monkeypatch):
         def verify_token(self, tok):
             return {"id": f"{NS}ext1", "login": "lg1", "name": "LG"}
 
-    monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _P())
+    monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _P())
 
 
 def _save(platform, value):

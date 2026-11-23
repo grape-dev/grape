@@ -391,6 +391,19 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # 启动自检（#3580 复盘）：多库拓扑下"跨域依赖缺失"必须当场拒绝启动，不能
+        # 靠调用方各自降级——缺 GRAPE_DSN_<DOMAIN> 时跨域读会回落进程库，读到的是
+        # 同名 VIEW（列快照），基表加列即 1054 的 500（/api/dashboard/* 实锤）。
+        from src.kernel.domain_topology import assert_cross_domain_wiring as _assert_wiring
+        _assert_wiring()
+        # 视图新鲜度：只修本库视图，修不掉（列仍缺/权限不足）→ 严格模式 exit 7。
+        try:
+            from src.kernel.domain_views import reconcile_on_startup as _reconcile_views
+            _reconcile_views()
+        except SystemExit:
+            raise
+        except Exception as _view_err:  # noqa: BLE001
+            _log.error(f"three-database mode: view freshness check failed: {_view_err}")
         # kernel 端口绑定与建表/迁移无关，三库模式同样必须执行：insight 角色
         # （dashboard 等按 repo_key 取权限的入口）若拿不到 vcs_cards 端口，
         # repo_key 的平台前缀候选集会退化成空，非默认前缀仓库一律 403。
@@ -795,7 +808,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     }).then(function(d){
       try {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem('repo_member_cache');
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');

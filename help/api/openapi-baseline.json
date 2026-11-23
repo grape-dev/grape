@@ -949,6 +949,86 @@
               "type": "string",
               "title": "Name"
             }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "目标平台，空=按已绑令牌自动选择",
+              "default": "",
+              "title": "Provider"
+            },
+            "description": "目标平台，空=按已绑令牌自动选择"
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "所属空间路径（GitLab 可填组/子组），空=个人空间",
+              "default": "",
+              "title": "Owner"
+            },
+            "description": "所属空间路径（GitLab 可填组/子组），空=个人空间"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/repos/create-targets": {
+      "get": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "List spaces a repository can be created in",
+        "description": "Returns the personal namespace login plus provider-declared spaces (GitLab: groups the token can create projects in, full_path form). Providers without organisation namespaces return an empty list.",
+        "operationId": "repos_create_targets",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "目标平台，空=按已绑令牌自动选择",
+              "default": "",
+              "title": "Provider"
+            },
+            "description": "目标平台，空=按已绑令牌自动选择"
           }
         ],
         "responses": {
@@ -1193,6 +1273,171 @@
           }
         ],
         "x-token-scope": "dual"
+      }
+    },
+    "/api/repos/{provider}/connection": {
+      "get": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Get platform PAT connection",
+        "description": "Issue #3580: returns whether the current user has a PAT for this platform instance. Never returns the token value.",
+        "operationId": "repos_connection_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "put": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Set platform PAT connection",
+        "description": "Issue #3580: validates the token against that platform instance and stores it as user_credentials(kind=pat). PAT is a repo-execution credential: no login identity / external_identities row is created.",
+        "operationId": "repos_connection_put",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepoConnectionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "repos"
+        ],
+        "summary": "Clear platform PAT connection",
+        "description": "Issue #3580: clears user_credentials(kind=pat) for the platform instance; login identities are untouched.",
+        "operationId": "repos_connection_delete",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
       }
     },
     "/api/repos/bot-token/{owner}/{repo_name}": {
@@ -30991,6 +31236,16 @@
             "type": "string",
             "title": "Provider",
             "default": ""
+          },
+          "owner": {
+            "type": "string",
+            "title": "Owner",
+            "default": ""
+          },
+          "private": {
+            "type": "boolean",
+            "title": "Private",
+            "default": false
           }
         },
         "type": "object",
@@ -32928,6 +33183,23 @@
           "full_name"
         ],
         "title": "RepoAction"
+      },
+      "RepoConnectionBody": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "login": {
+            "type": "string",
+            "title": "Login",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "RepoConnectionBody",
+        "description": "Issue #3580/R11：实例 PAT 连接（只落 user_credentials kind=pat）。"
       },
       "RepoLLMCredentialBody": {
         "properties": {
@@ -35177,145 +35449,8 @@
   "x-changelog": {
     "version": "2.3.0a1",
     "added": [
-      "/admin/sandbox/audit/{task_id}",
-      "/admin/sandbox/audit/{task_id}/alerts",
-      "/admin/sandbox/config",
-      "/admin/sandbox/config/{config_id}",
-      "/admin/sandbox/external-api-audit/{task_id}",
-      "/admin/sandbox/paths",
-      "/admin/sandbox/paths/{path_id}",
-      "/admin/sandbox/whitelist",
-      "/admin/sandbox/whitelist/{rule_id}",
-      "/api/auth/platform-links",
-      "/api/categories/tree",
-      "/api/chat/im/wechat/login/start",
-      "/api/chat/im/wechat/login/status",
-      "/api/dashboard/efficiency",
-      "/api/dashboard/efficiency/board",
-      "/api/dashboard/efficiency/daily",
-      "/api/dashboard/efficiency/issues",
-      "/api/git-repo/{owner}/{repo}/commits/{ref}/check-runs",
-      "/api/git-repo/{owner}/{repo}/commits/{ref}/status",
-      "/api/git-repo/{owner}/{repo}/issues/{number}/artifacts/clean",
-      "/api/im/dingtalk/card-setup",
-      "/api/im/installations",
-      "/api/im/installations/{installation_id}",
-      "/api/im/notify-test",
-      "/api/im/outbound",
-      "/api/im/outbound/{out_track_id}/retry",
-      "/api/im/status",
-      "/api/issues/{issue_id}/reopen",
-      "/api/issues/{issue_id}/terminal-disposition",
-      "/api/orgs/repo-namespaces",
-      "/api/orgs/{org_id}/audit",
-      "/api/orgs/{org_id}/context",
-      "/api/orgs/{org_id}/context/{ctx_id}",
-      "/api/orgs/{org_id}/context/{ctx_id}/deprecate",
-      "/api/orgs/{org_id}/context/{ctx_id}/publish",
-      "/api/orgs/{org_id}/dispatch/scene-catalog",
-      "/api/orgs/{org_id}/dispatches",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/context",
-      "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry",
-      "/api/orgs/{org_id}/knowledge",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate",
-      "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish",
-      "/api/orgs/{org_id}/ov-credentials",
-      "/api/orgs/{org_id}/ov-credentials/{user_id}",
-      "/api/orgs/{org_id}/provision",
-      "/api/orgs/{org_id}/provision/repo",
-      "/api/orgs/{org_id}/provision/retry",
-      "/api/orgs/{org_id}/repo-analysis/automation/ensure",
-      "/api/orgs/{org_id}/repo-analysis/context/{repo_key}",
-      "/api/orgs/{org_id}/repo-analysis/docs",
-      "/api/orgs/{org_id}/repo-analysis/run",
-      "/api/orgs/{org_id}/repo-analysis/status",
-      "/api/orgs/{org_id}/repo-analysis/targets",
-      "/api/orgs/{org_id}/repo-map",
-      "/api/orgs/{org_id}/repo-map/analyze",
-      "/api/orgs/{org_id}/repo-map/recall",
-      "/api/orgs/{org_id}/repo-map/summary",
-      "/api/orgs/{org_id}/repo-map/sync",
-      "/api/orgs/{org_id}/repo-map/{repo_key}",
-      "/api/orgs/{org_id}/repo-map/{repo_key}/ai-result",
-      "/api/orgs/{org_id}/repo-map/{repo_key}/analyze",
-      "/api/orgs/{org_id}/repos",
-      "/api/orgs/{org_id}/repos/available",
-      "/api/orgs/{org_id}/repos/batch",
-      "/api/orgs/{org_id}/repos/{repo_key}",
-      "/api/orgs/{org_id}/repos/{repo_key}/transfer",
-      "/api/patrol/pipeline-advance",
-      "/api/pipeline/handoff",
-      "/api/plugin-market/validate",
-      "/api/plugin-market/validate-package",
-      "/api/plugins",
-      "/api/plugins/agent-defaults",
-      "/api/plugins/agent/installed",
-      "/api/plugins/agent/report-missing",
-      "/api/plugins/by-id/{plugin_id}",
-      "/api/plugins/by-id/{plugin_id}/download",
-      "/api/plugins/by-id/{plugin_id}/rollback",
-      "/api/plugins/by-id/{plugin_id}/versions",
-      "/api/plugins/categories",
-      "/api/plugins/install",
-      "/api/plugins/installed",
-      "/api/plugins/search",
-      "/api/plugins/upload",
-      "/api/plugins/validate-consistency",
-      "/api/plugins/{name}",
-      "/api/plugins/{name}/config",
-      "/api/plugins/{name}/credentials",
-      "/api/plugins/{name}/skills",
-      "/api/plugins/{plugin_id}/like",
-      "/api/runtime/admin/sandbox/engines",
-      "/api/runtime/cloud-sandboxes",
-      "/api/runtime/cloud-sandboxes/{sandbox_id}",
-      "/api/runtime/issues/takeover-context",
-      "/api/runtime/tasks/{task_id}/detail",
-      "/api/scenes/engine-selector-preview",
-      "/api/scenes/skill-scope-audit",
-      "/api/scenes/tag-suggest",
-      "/api/scenes/{scene_id}/advanced-options/reveal",
-      "/api/scenes/{scene_id}/copy",
-      "/api/scenes/{scene_id}/pin",
-      "/api/settings/agent-runtimes/{rid}/readd",
-      "/api/settings/llm-credentials",
-      "/api/settings/llm-credentials/repo",
-      "/api/settings/llm-credentials/repo/{cred_id}",
-      "/api/settings/llm-credentials/repo/{cred_id}/toggle",
-      "/api/settings/llm-credentials/{cred_id}",
-      "/api/settings/llm-engine-types",
-      "/api/settings/sandbox-engines",
-      "/api/settings/sandbox-platforms",
-      "/api/settings/sandbox-provider-configs",
-      "/api/settings/sandbox-provider-configs/{provider}",
-      "/api/settings/sandbox-providers",
-      "/api/settings/sandbox-providers/{provider_id}",
-      "/api/settings/sandbox-providers/{provider_id}/health",
-      "/api/settings/sandbox-providers/{provider_id}/scan-templates",
-      "/api/settings/sandbox-providers/{provider_id}/toggle",
-      "/api/settings/sandbox-templates",
-      "/api/settings/sandbox-templates/{tpl_id}",
-      "/api/settings/sandbox-templates/{tpl_id}/bind-engine",
-      "/api/settings/sandbox-templates/{tpl_id}/bind-engine/{engine_type}",
-      "/api/settings/sandbox-templates/{tpl_id}/check",
-      "/api/settings/sandbox-templates/{tpl_id}/toggle",
-      "/api/skills/by-id/{skill_id}/comments",
-      "/api/skills/by-id/{skill_id}/files",
-      "/api/skills/by-id/{skill_id}/related",
-      "/api/skills/by-id/{skill_id}/versions",
-      "/api/skills/tag-suggest",
-      "/api/skills/{skill_id}",
-      "/api/takeover/sessions",
-      "/api/takeover/sessions/{session_id}",
-      "/api/takeover/sessions/{session_id}/abort",
-      "/api/takeover/sessions/{session_id}/attach",
-      "/api/takeover/sessions/{session_id}/finish",
-      "/api/takeover/sessions/{session_id}/progress",
-      "/api/takeover/sessions/{session_id}/request-finish"
+      "/api/repos/create-targets",
+      "/api/repos/{provider}/connection"
     ],
     "removed": [],
     "deprecated": [
@@ -35323,7 +35458,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 394,
+  "x-endpoint-count": 396,
   "x-groups": [
     "a2a",
     "agents",
@@ -35358,8 +35493,8 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "6ece534d0",
-  "x-generated-at": "2026-11-20T12:12:06.132026+00:00",
-  "change_reason": "org multi-scene selection + deterministic pipeline advance (patrol pipeline-advance endpoint)",
-  "updated_at": "2026-11-20T12:12:06.133426+00:00"
+  "x-source-commit": "084561b20",
+  "x-generated-at": "2026-11-23T02:07:42.001490+00:00",
+  "change_reason": "merge arch-weekly-11 80b1b8e92: keep yaw create-targets/connection endpoints together with org scene-catalog/repo-map/patrol endpoints",
+  "updated_at": "2026-11-23T02:07:42.003027+00:00"
 }

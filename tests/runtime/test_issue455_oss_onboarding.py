@@ -333,7 +333,7 @@ class TestGithubHostPermissionPrecheck:
     def test_upstream_403_returns_403_permission_denied(self, monkeypatch):
         self._base_mocks(monkeypatch)
         # D85: 403/404 语义用例——异常从端口层抛（host_repo 状态码匹配依赖它）
-        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+        monkeypatch.setattr("src.domains.mgmt.vcs.GitHubProvider.get_user_login",
             lambda self, token: (_ for _ in ()).throw(RuntimeError("GitHub API GET https://api.github.com/user failed (403): Forbidden")))
         def _gh_req(method, url, token=""):
             raise RuntimeError("GitHub API GET " + url + " failed (403): Forbidden")
@@ -348,7 +348,7 @@ class TestGithubHostPermissionPrecheck:
     def test_upstream_404_returns_404(self, monkeypatch):
         self._base_mocks(monkeypatch)
         # D85: 404 语义——异常从端口层抛（host_repo 状态码匹配 → REPO_NOT_FOUND）
-        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+        monkeypatch.setattr("src.domains.mgmt.vcs.GitHubProvider.get_user_login",
             lambda self, token: (_ for _ in ()).throw(RuntimeError("GitHub API GET https://api.github.com/user failed (404): Not Found")))
 
         def _gh_req(method, url, token=""):
@@ -391,7 +391,7 @@ class TestGithubHostPermissionPrecheck:
         # D85 迁移注记: 网络类异常必须从端口层抛——repo_manager.get_user_github_login
         # 会吞 RuntimeError 返回空（身份空 → 502），host 的"网络错 skip 放行"分支
         # 收不到异常。端口层抛无状态码 RuntimeError → host 网络分支放行（issue455 语义）
-        monkeypatch.setattr("src.kernel.token_resolver.GitHubProvider.get_user_login",
+        monkeypatch.setattr("src.domains.mgmt.vcs.GitHubProvider.get_user_login",
             lambda self, token: (_ for _ in ()).throw(RuntimeError("Cannot reach GitHub API: timed out")))
         r = self._host()
         assert r.status_code == 200, r.text  # 网络类：无法确认权限，交由下游既有流程

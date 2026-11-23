@@ -45,7 +45,7 @@ def test_s34_agent_repo_key_candidates(gitee_card):
 def test_s35_session_token_column_from_card(gitee_card):
     """会话 token 列按 provider 从卡派生：gitee → repo_gitee_token（列不存在于 DDL，
     但列名派生正确——批次 1 列族落地后即可用）；存量回归。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     assert create_provider("github").session_token_field() == "repo_github_token"
     assert create_provider("gitcode").session_token_field() == "repo_gitcode_token"
     assert create_provider("gitee").session_token_field() == "repo_gitee_token"

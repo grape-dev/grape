@@ -71,6 +71,11 @@ EXPECTED_PUBLIC = {
     "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
     "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
     "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
+    # Issue #3580：平台 PAT 连接与建仓空间清单（前端"平台凭据/一键创建"直接调用）
+    "repos_connection_get": ("get", "/api/repos/{provider}/connection"),
+    "repos_connection_put": ("put", "/api/repos/{provider}/connection"),
+    "repos_connection_delete": ("delete", "/api/repos/{provider}/connection"),
+    "repos_create_targets": ("get", "/api/repos/create-targets"),
     "auth_platform_links": ("get", "/api/auth/platform-links"),
     # 误完成回退端点（arch-weekly-11 新增，实现已带 operation_id/summary/security）
     "issues_reopen": ("post", "/api/issues/{issue_id}/reopen"),

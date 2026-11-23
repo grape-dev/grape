@@ -75,7 +75,7 @@ def user():
 
 def _github_verify(monkeypatch, *, accept_token: str, login: str = "gh_user_3563"):
     """verify_token：只有 accept_token 能拿到 login，其它一律上游 401。"""
-    from src.kernel.token_resolver import GitHubProvider
+    from src.domains.mgmt.vcs import GitHubProvider
     seen: list[str] = []
 
     def _verify(self_, token):

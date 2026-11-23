@@ -4250,7 +4250,7 @@ function openBetaApply() {
         return r.json();
       }).then(function(t) {
         localStorage.setItem('token', t.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem('repo_member_cache');
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');
@@ -4390,7 +4390,7 @@ function openBetaApply() {
         return r.json();
       }).then(d => {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem(REPO_CACHE_KEY);
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');
@@ -4418,7 +4418,7 @@ function openBetaApply() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '46');
+      localStorage.setItem('app_cache_ver', '47');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择+组织上下文——防止切换账号后看到旧数据或 403
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -4453,7 +4453,7 @@ function openBetaApply() {
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '46');
+      localStorage.setItem('app_cache_ver', '47');
     }
 
     const token = localStorage.getItem('token');
