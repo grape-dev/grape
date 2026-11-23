@@ -39,7 +39,7 @@ def _mk_admin():
 
 def _mk_user(username=None):
     username = username or f"i3855usr{uuid.uuid4().hex[:8]}"
-    acc = grape_account_db.create_grape_account(username, email=None, password="pw12345")
+    acc = grape_account_db.create_grape_account(username, email=None, password="pw")
     if not acc:
         acc = grape_account_db.get_grape_account_by_username(username)
     uid = acc["id"]
