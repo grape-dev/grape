@@ -48,7 +48,7 @@
 1. [x] 新增 `src/api/scene_targets.py`（解析 + enabled/resolvable 过滤）
 2. [x] `scenes detail` 收敛调用 + 响应新增 `valid_targets`
 3. [x] `webhook._scene_node_check` 收敛调用 + 409 结构化
-4. [x] `scenes.py` 私有辅助函数改为兼容委托（防口径漂移回潮）
+4. [x] 删除 `scenes.py` 私有辅助函数（已无调用，避免兼容委托造成的口径漂移回潮）
 5. [x] 新增测试 `tests/mgmt/test_issue_3582_scene_targets.py`（T1-T6，
    覆盖同源一致 / 合法节点全放行 / 409 reason+targets / 禁用同步拦截 /
    不可解析同步拦截 / 场景变更两处同步）

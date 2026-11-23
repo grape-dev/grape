@@ -384,7 +384,7 @@ class TestA2A400StructuredFields:
             app.dependency_overrides[get_user_or_none] = lambda: {
                 "id": 1, "username": "alice", "auth_type": "jwt"}
             monkeypatch.setattr(user_db, "get_managed_repos",
-                                lambda uid: [{"repo_key": repo}])
+                                lambda *a, **k: [{"repo_key": repo}])
             monkeypatch.setattr(wh, "_issue_exists_in_db", lambda *a, **k: True)
             monkeypatch.setattr(wh, "_scene_node_check", lambda *a, **k: {
                 "in_scene": True, "scene_id": scene_id,

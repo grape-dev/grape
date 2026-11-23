@@ -290,12 +290,13 @@ class TestNotInSceneEndpoint:
         assert data["ok"] is False
         assert data["skipped"] == "not_in_scene"
         assert data["reason"] and "目标 Agent" in data["reason"]
-        assert data["detail"] == {"agent": "coding"}
+        assert data["detail"] == {"agent": "coding", "conflict_reason": "not_in_scene"}
         assert data["status"] == "skipped"
         assert data["handoff_result"] == "rejected"
         # Issue #2427：scene 与 message 同源携带 scene_id
         assert data["scene"] == "scene-2427"
         assert "scene=scene-2427" in data["message"]
+        assert "nodes=[]" in data["message"]
 
     def test_not_in_scene_with_non_empty_nodes_keeps_409(self):
         """Issue #2555/#2427：场景有节点但缺目标 agent 时仍是 409 skip，不得退化为 500。
@@ -317,8 +318,9 @@ class TestNotInSceneEndpoint:
         data = resp.json()
         assert data["ok"] is False
         assert data["skipped"] == "not_in_scene"
-        assert data["detail"] == {"agent": "coding"}
+        assert data["detail"] == {"agent": "coding", "conflict_reason": "not_in_scene"}
         assert data["handoff_result"] == "rejected"
+        assert "scene=scene-2427" in data["message"]
         assert "nodes=['vod', 'issue']" in data["message"]
 
     def test_node_id_falls_back_to_tag(self):
