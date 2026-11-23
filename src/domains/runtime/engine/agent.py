@@ -988,6 +988,29 @@ def _opencode_model_probe_error() -> str:
         return ""
 
 
+def _attach_backend_capability(result: dict, engine_name: str) -> dict:
+    """Issue #3928：给 probe_results 附后端能力态（服务端据此摘除缺 CLI 实例）。
+
+    能力态由探针结果映射（不重复起子进程）：ok→available、缺 CLI/未安装→unavailable、
+    spawn_failed/其它 fail→degraded、未纳管引擎→unknown。
+    """
+    try:
+        from src.domains.runtime.engine.backend_capability import (
+            STATUS_AVAILABLE, status_from_probe)
+        ps = str(result.get("status") or "").lower()
+        if ps == "ok":
+            status = STATUS_AVAILABLE
+        else:
+            status = status_from_probe(engine_name, ps, result.get("error", ""))
+        result["backend_status"] = status
+        result["backend_reason"] = ("" if status == STATUS_AVAILABLE
+                                    else str(result.get("error") or "")[:240])
+    except Exception as e:
+        result.setdefault("backend_status", "unknown")
+        result.setdefault("backend_reason", f"capability mapping failed: {e}"[:240])
+    return result
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -1125,8 +1148,9 @@ def _probe_engines_first_window(engines, reason: str = "install", window: float 
             continue
         if not eng.get("installed"):
             # 未安装不是「首探失败」：置 skip，不进重试（装完会由重注册拾起）
-            results[_name] = {"status": "skip", "latency": 0, "last_probe": _iso(),
-                              "error": "not installed"}
+            _skip_res = {"status": "skip", "latency": 0, "last_probe": _iso(),
+                         "error": "not installed"}
+            results[_name] = _attach_backend_capability(_skip_res, _name)
             continue
         pending[_name] = eng
 
@@ -1147,6 +1171,7 @@ def _probe_engines_first_window(engines, reason: str = "install", window: float 
                     _res = dict(_probe(pending[_name]) or {})
                 except Exception as _pe:
                     _res = {"status": "fail", "latency": 0, "error": str(_pe)[:200]}
+                _attach_backend_capability(_res, _name)
                 _res["last_probe"] = _iso()
                 results[_name] = _res
                 if _res.get("status") == "ok":
@@ -1444,15 +1469,16 @@ def _worker_probe_once():
         engines = _discover_local_runtimes()
         for eng in engines:
             if not eng.get("installed"):
+                _skip = {"status": "skip", "latency": 0,
+                         "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
+                         "error": "not installed"}
+                _attach_backend_capability(_skip, eng["name"])
                 with _worker_probe_lock:
-                    _worker_probe_results[eng["name"]] = {
-                        "status": "skip", "latency": 0,
-                        "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
-                        "error": "not installed",
-                    }
+                    _worker_probe_results[eng["name"]] = _skip
                 continue
             log.info(f"worker engine probe: testing {eng['name']}...")
             result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+            _attach_backend_capability(result, eng["name"])
             result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
             with _worker_probe_lock:
                 _worker_probe_results[eng["name"]] = result
@@ -1497,15 +1523,16 @@ def _worker_probe_loop():
             engines = _discover_local_runtimes()
             for eng in engines:
                 if not eng.get("installed"):
+                    _skip = {"status": "skip", "latency": 0,
+                             "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
+                             "error": "not installed"}
+                    _attach_backend_capability(_skip, eng["name"])
                     with _worker_probe_lock:
-                        _worker_probe_results[eng["name"]] = {
-                            "status": "skip", "latency": 0,
-                            "last_probe": _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z",
-                            "error": "not installed",
-                        }
+                        _worker_probe_results[eng["name"]] = _skip
                     continue
                 log.info(f"worker engine probe: testing {eng['name']}...")
                 result = _probe_engine_worker(eng["name"], eng.get("cli_path", ""))
+                _attach_backend_capability(result, eng["name"])
                 result["last_probe"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat() + "Z"
                 with _worker_probe_lock:
                     _worker_probe_results[eng["name"]] = result
@@ -1925,8 +1952,15 @@ def _discover_local_runtimes() -> list[dict]:
         from src.domains.runtime.engine.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
         _dn = ENGINE_DISPLAY_NAMES.get(_et, "")
+        try:
+            from src.domains.runtime.engine.backend_capability import probe_engine_capability
+            _cap = probe_engine_capability(r["name"], cli)
+        except Exception as _ce:
+            _cap = {"status": "unknown", "reason": f"probe failed: {_ce}",
+                    "engine": r["name"], "command": "", "executable": ""}
         out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
-                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+                    "version": version, "healthy": healthy, "cli_path": cli,
+                    "installed": r.get("installed", False), "backend_capability": _cap})
     return out
 
 
@@ -3992,8 +4026,10 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         # 云条目按 name 锚定注册（UPDATE 分支）拿回原 rid，心跳即刻恢复。
         _cloud_prev = [r for r in (prev_installed or [])
                        if (r.get("runtime_type") or "") == "cloud"]
+        _register_payload = None
         if _cloud_prev:
             installed = list(prev_installed)
+            _register_payload = installed
         elif (os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip():
             # [云模式锚定 2026-11-16] cloud_worker 的 runtime.env 恒有 CLOUD_WORKER_PROVIDER——
             # 模板列表是云 worker 的唯一引擎源，不做本地重发现。fresh 实例实锤（aw11 E-02）：
@@ -4001,16 +4037,25 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
             # _cloud_prev 为空 → 走 C1 本地发现 → 本机引擎误注到沙箱凭据下 + 顶掉
             # runtime_ids，且模板落地后不可自愈（云条目永远进不了 prev_installed）。
             installed = list(prev_installed or [])
+            _register_payload = installed
         else:
-            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
-            installed = [r for r in _discover_local_runtimes() if r.get("installed")]
+            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）。
+            # Issue #3928：注册载荷带上 discovered 全量（含 installed=false）——
+            # 服务端只更新已存在的 runtime 行（不建幽灵行），用于把「曾经安装、
+            # 后来 CLI 被移除/不在 PATH」的存量实例标记为 unavailable 并熔断；
+            # 旧实现把 installed=false 过滤掉 → 存量行永远 healthy=1 继续认领
+            #（17641 codearts-cred0 根因）。
+            _discovered = _discover_local_runtimes()
+            installed = [r for r in _discovered if r.get("installed")]
+            _register_payload = _discovered
         # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
-        if not installed and prev_installed:
+        if not (_register_payload if _register_payload is not None else installed) and prev_installed:
             log.warning("re-scan found no engines while snapshot had "
                         f"{len(prev_installed)}; keeping snapshot (transient scan?)")
             return None
         _ls = _scan_local_skills()
-        ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
+        _payload = installed if _register_payload is None else _register_payload
+        ids, _probe = await client.register(_payload, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
@@ -4020,9 +4065,11 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
             log.info(f"re-registered successfully, new runtime ids: {ids}")
             return ids, engine_by_rid, installed
         if not installed:
-            # C1：无引擎为正常状态——注册成功，ids 为空
-            log.info("re-registered with no engines installed (normal state); "
-                     "engines will auto-register once installed")
+            # C1：无引擎为正常状态——注册成功，ids 为空。
+            # Issue #3928：payload 可能含 installed=false 的存量引擎（本轮已由服务端
+            # 标记 unavailable），这里仍按「无可用引擎」返回，不把它们放进心跳列表。
+            log.info("re-registered with no installed engines (normal state); "
+                     "stale/unavailable runtime rows were marked offline-capable")
             return [], {}, []
         log.warning("re-register returned empty ids despite installed engines")
     except CredentialRevokedError:

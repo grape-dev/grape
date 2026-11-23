@@ -25,7 +25,7 @@
    - `claim` / `claim_by_tag` / 池可达性判定统一加熔断闸门。
    - `fail_task` 先走后端 failover，再走原有瞬时重试；`complete_task` 成功释放熔断。
 5. 存储
-   - 新列同时进 `schema_ddl`（新库）与注册式幂等迁移 202611230005（存量）。
+   - 新列同时进 `schema_ddl`（新库）与注册式幂等迁移 202611240003（存量）。
 
 ## 测试 seam
 - 探针：纯函数 `probe_engine_capability`（注入 which/clock）。

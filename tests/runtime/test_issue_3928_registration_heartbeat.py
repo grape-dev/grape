@@ -1,4 +1,5 @@
 """Issue #3928：注册/心跳上报后端能力，缺 CLI 立即不可用并告警；恢复自动放行。"""
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -97,17 +98,47 @@ def test_heartbeat_unavailable_degrades_then_ok_recovers():
                       "last_probe": "2026-11-23T10:00:01+00:00",
                       "error": "not installed",
                       "backend_status": "unavailable"}}
-        runtime_heartbeat(HeartbeatBody(runtime_ids=[rid], probe_results=obs),
-                          FakeRequest(), credential_id=cid)
+        asyncio.run(runtime_heartbeat(HeartbeatBody(runtime_ids=[rid], probe_results=obs),
+                                      FakeRequest(), credential_id=cid))
         healthy, _installed, bstatus, _reason, until = _row(rid)
         assert healthy == 0 and bstatus == "unavailable" and until
 
         ok = {name: {"status": "ok", "latency": 1.0,
                      "last_probe": "2026-11-23T10:10:01+00:00",
                      "error": "", "backend_status": "available"}}
-        runtime_heartbeat(HeartbeatBody(runtime_ids=[rid], probe_results=ok),
-                          FakeRequest(), credential_id=cid)
+        asyncio.run(runtime_heartbeat(HeartbeatBody(runtime_ids=[rid], probe_results=ok),
+                                      FakeRequest(), credential_id=cid))
         healthy, _installed, bstatus, _reason, until = _row(rid)
         assert healthy == 1 and bstatus == "available" and until == ""
     finally:
         _cleanup(cid)
+
+
+def test_reregister_payload_includes_uninstalled_engine_for_marking(monkeypatch):
+    """根因回归：CLI 丢失后 must 仍把 installed=false 条目发给服务端标记 unavailable。"""
+    from src.domains.runtime.engine import agent as ra
+
+    class _FakeClient:
+        last_register_detail = None
+
+        async def reset_session(self):
+            return None
+
+        async def register(self, runtimes, **_kw):
+            self.payload = runtimes
+            return [], ""
+
+    client = _FakeClient()
+    monkeypatch.delenv("CLOUD_WORKER_PROVIDER", raising=False)
+    monkeypatch.setattr(ra, "_discover_local_runtimes", lambda: [{
+        "name": "codearts", "installed": False, "healthy": False, "cli_path": "",
+        "version": "", "backend_capability": {
+            "status": "unavailable", "reason": "codearts CLI not found in PATH"},
+    }])
+    out = asyncio.run(ra._reregister(
+        client, prev_installed=[{"name": "codearts", "installed": True}],
+        device_name="d-3928"))
+    assert out == ([], {}, []), "无可用引擎仍是正常状态，不放进心跳列表"
+    assert client.payload and client.payload[0]["name"] == "codearts"
+    assert client.payload[0]["installed"] is False
+    assert client.payload[0]["backend_capability"]["status"] == "unavailable"

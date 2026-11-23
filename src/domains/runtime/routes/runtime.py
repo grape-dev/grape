@@ -488,9 +488,32 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 不在此列（向后兼容——旧包误报 True 需 worker 升级后才被此层拦截）。
             _inst_raw = rt.get("installed")
             if _inst_raw is not None and str(_inst_raw).strip().lower() in ("false", "0"):
-                c.execute("UPDATE agent_runtimes SET installed=0 "
-                          "WHERE credential_id=? AND lower(name)=?",
-                          (credential_id, name))
+                # Issue #3928 根因修复：旧实现只写 installed=0 就 continue，既不改
+                # healthy 也不记录后端能力，CLI 被移除后的存量行一直 healthy=1 继续认领
+                #（17641 codearts-cred0 缺 CLI 的注册侧成因）。现在同步标记不可用并熔断。
+                _cap0 = rt.get("backend_capability") if isinstance(rt.get("backend_capability"), dict) else {}
+                _cap0_status = str(_cap0.get("status") or "unavailable").strip().lower()
+                _cap0_reason = str(_cap0.get("reason") or "backend CLI not found / engine not installed")
+                _cap0_checked = str(_cap0.get("checked_at") or datetime.now(timezone.utc).isoformat())
+                _row0 = c.execute(
+                    "SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? "
+                    "ORDER BY id DESC LIMIT 1", (credential_id, name)).fetchone()
+                if _row0:
+                    _rid0 = _row0[0]
+                    try:
+                        from src.domains.runtime.engine import backend_health as _bh_reg
+                        _bh_reg.observe_capability(c, _rid0, _cap0_status,
+                                                   _cap0_reason, _cap0_checked)
+                    except Exception as _bhe:
+                        log.warning(f"register: capability observe failed for runtime={_rid0}: {_bhe}")
+                    c.execute("UPDATE agent_runtimes SET installed=0, healthy=0, "
+                              "backend_status=?, backend_reason=?, backend_checked_at=? "
+                              "WHERE id=?", (_cap0_status, _cap0_reason, _cap0_checked, _rid0))
+                else:
+                    # 无存量行 = 从未成功注册过，不可能被认领；不告警避免每轮注册刷屏。
+                    log.debug(
+                        f"register: engine {name} not installed/unavailable "
+                        f"(credential={credential_id}); no runtime row to mark")
                 continue
             _ls_json = skills_by_name.get(name, "[]")
             # Issue #646：engine_uid 优先查找（UUIDv5 稳定键，表重建 uid 不漂移）；
@@ -658,6 +681,17 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                          datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
                 _row_desired_json = "[]"
+            # Issue #3928：注册上报的后端能力落库（available 清熔断；unavailable
+            # 立即 healthy=0 + 熔断；degraded 仅挡认领，保留 #1982 healthy 语义）。
+            try:
+                _cap = rt.get("backend_capability")
+                if isinstance(_cap, dict) and _cap.get("status"):
+                    from src.domains.runtime.engine import backend_health as _bh_reg2
+                    _bh_reg2.observe_capability(
+                        c, rid, str(_cap.get("status")), str(_cap.get("reason") or ""),
+                        str(_cap.get("checked_at") or ""))
+            except Exception as _cap_e:
+                log.warning(f"register: backend capability apply failed for {name}: {_cap_e}")
             # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
             # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
             # 存量行可离线重算（002 重派派生迁移消费）；未迁移旧库缺列时降级跳过。
@@ -829,6 +863,22 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             (_pstatus, _platency, _plast, _perror, _pname, credential_id)
                         )
                         continue
+                    # Issue #3928：新观测落后端能力态（缺 CLI 立即 healthy=0 + 熔断；
+                    # ok 清熔断；degraded 只挡认领不碰 #1982 healthy 阈值）。
+                    if _prid:
+                        try:
+                            _cap_status = str(_pdata.get("backend_status") or "").strip().lower()
+                            _cap_reason = str(_pdata.get("backend_reason") or _perror or "")
+                            if not _cap_status:
+                                from src.domains.runtime.engine.backend_capability import (
+                                    status_from_probe as _status_from_probe)
+                                _cap_status = _status_from_probe(_pname, _pstatus, _perror)
+                            if _cap_status:
+                                from src.domains.runtime.engine import backend_health as _bh_hb
+                                _bh_hb.observe_capability(c, _prid, _cap_status, _cap_reason, _plast)
+                        except Exception as _cap_e:
+                            log.warning(f"runtime heartbeat capability observe failed "
+                                        f"(runtime={_prid}): {_cap_e}")
                     # 新观测（last_probe 不同 / 旧 Worker 无 last_probe 回退 now 每次不同）：
                     # probe_status 联动 healthy：ok→升级（纠正 --version 误判），fail→降级（实际不能干活）
                     # skip/pending/refused 不动 healthy，保留 --version 的结果
