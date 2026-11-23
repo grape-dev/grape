@@ -331,13 +331,16 @@ def test_finish_dispatches_via_real_http_chain(client, monkeypatch):
         seq = 93834
         _mark_cascade_synthesized(seq)
 
-        # 场景走真实解析（coding→qa），仅隔离内部基址指向本地端点
+        # 场景走真实解析（coding→qa），仅隔离派发基址指向本地端点。
+        # #3910 修复后派发优先走 resolve_a2a_base（服务映射），_internal_base_url 仅是回退——
+        # 两个入口都指向本地端点，保证无论走哪条路都由真实 HTTP 承接。
         _patch_scene(monkeypatch, [{"id": "coding", "tag": "coding", "next": "qa"}])
         monkeypatch.setattr(svc, "_internal_base_url", lambda *a, **k: f"http://127.0.0.1:{port}")
-        # 派发优先按 A2A 服务映射取址（_a2a_dispatch_base）：这里把映射也指向本地端点，
-        # 否则部署配置里的 server_base_url 会先命中，真实 HTTP 链走不到本测试服务器。
-        monkeypatch.setattr("src.kernel.prompt_builder.resolve_a2a_base",
-                            lambda *a, **k: f"http://127.0.0.1:{port}")
+        import src.kernel.prompt_builder as pb
+        # #3910 v2 派发取址走 resolve_a2a_base_with_source（返回 (base, source) 元组），
+        # stub 为可信任显式来源，直连本地端点。
+        monkeypatch.setattr(pb, "resolve_a2a_base_with_source",
+                            lambda *a, **k: (f"http://127.0.0.1:{port}", "explicit_a2a_api_url"))
 
         r = client.post(f"/api/takeover/sessions/{sid}/finish", json={
             "outcome": "completed",

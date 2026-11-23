@@ -1720,18 +1720,53 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
     return next_agent, False
 
 
-_INTERNAL_BASE_CACHE = ""
+# 业务/general 内部基址（health-only；bundle env 的 GRAPE_SERVER_URL 回退用）。
+_BUSINESS_BASE_CACHE = ""
+# A2A 派发基址：只缓存「/api/health 可达 + POST /api/a2a 路由可用」双重校验通过的基址。
+_A2A_DISPATCH_BASE_CACHE = ""
+
+
+def _dedupe_bases(values: list[str]) -> list[str]:
+    """候选基址去重（保序）；只保留 http:// / https:// 绝对地址。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        b = (v or "").strip().rstrip("/")
+        if b.startswith(("http://", "https://")) and b not in seen:
+            seen.add(b)
+            out.append(b)
+    return out
+
+
+def _base_is_loopback(base: str) -> bool:
+    """基址是否指向本机回环（localhost / 127.0.0.0/8 / ::1）。
+
+    本机 worker 同样 ``runtime_id>0``，其回连基址是 ``127.0.0.1:<本进程端口>``；
+    这类基址旁通常还有同机其它进程（如 event 38082）可派发，必须按本机候选重选，
+    不能当作远程 worker 只做 best-effort。
+    """
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit((base or "").strip()).hostname or "").strip().lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in ("localhost", "::1"):
+        return True
+    return host.startswith("127.")
 
 
 def _internal_base_url(runtime_id: int = 0) -> str:
-    """内部自调用的基址。
+    """内部业务自调用的基址（health-only）。
 
     本机任务优先 127.0.0.1；端口不能信任 config（本地实测 GRAPE_PORT 未设时 config 给 3000，
     但 uvicorn 实际跑在 8000）——所以按候选端口探活 /api/health，取第一个通的并缓存。
+    A2A 派发不走这里（见 ``_a2a_dispatch_base``）：业务 API 与 A2A 可能不在同一进程。
     """
-    global _INTERNAL_BASE_CACHE
-    if _INTERNAL_BASE_CACHE:
-        return _INTERNAL_BASE_CACHE
+    global _BUSINESS_BASE_CACHE
+    if _BUSINESS_BASE_CACHE:
+        return _BUSINESS_BASE_CACHE
     if int(runtime_id or 0) <= 0:
         import httpx
         cands: list[str] = []
@@ -1744,18 +1779,13 @@ def _internal_base_url(runtime_id: int = 0) -> str:
         except Exception as _e:
             log.debug(f"takeover.py best-effort skipped: {_e}")
         cands += ["http://127.0.0.1:8000", "http://127.0.0.1:3000"]
-        seen: set[str] = set()
-        for base in cands:
-            base = base.rstrip("/")
-            if base in seen:
-                continue
-            seen.add(base)
+        for base in _dedupe_bases(cands):
             try:
                 # 2.5s：finish 时同进程可能正持着 db_lock（health 若查库会排队），
                 # 0.8s 会把「自己在忙」误判成「端口不通」
                 r = httpx.get(f"{base}/api/health", timeout=2.5)
                 if r.status_code < 500:
-                    _INTERNAL_BASE_CACHE = base
+                    _BUSINESS_BASE_CACHE = base
                     log.info(f"takeover: internal base = {base}")
                     return base
             except Exception as _e:
@@ -1764,36 +1794,214 @@ def _internal_base_url(runtime_id: int = 0) -> str:
         # 本机任务：探活全失败也只用本机地址，绝不回退公网/配置域名
         # （实测 config 的 worker_connect_url = http://localhost:3000，本机没人监听）
         # 兜底端口取本部署的既定端口 8000（systemd uvicorn --port 8000）。
-        _INTERNAL_BASE_CACHE = "http://127.0.0.1:8000"
-        log.warning(f"takeover: health probe all failed, fallback {_INTERNAL_BASE_CACHE}")
-        return _INTERNAL_BASE_CACHE
+        _BUSINESS_BASE_CACHE = "http://127.0.0.1:8000"
+        log.warning(f"takeover: health probe all failed, fallback {_BUSINESS_BASE_CACHE}")
+        return _BUSINESS_BASE_CACHE
     try:
         from src.kernel.prompt_builder import _resolve_server_url
         base = (_resolve_server_url(int(runtime_id or 0)) or "").rstrip("/")
     except Exception:
         base = ""
     if base:
-        _INTERNAL_BASE_CACHE = base
+        _BUSINESS_BASE_CACHE = base
     return base or f"http://127.0.0.1:{_local_port()}"
 
 
-def _a2a_dispatch_base(runtime_id: int = 0) -> str:
-    """A2A 派发基址：优先按服务映射解析，回退本机内部基址（Issue #19 根因）。
+def _dispatch_base_candidates() -> list[str]:
+    """A2A 派发基址候选（显式内部地址 > 服务端口映射 > 注册表 > 本进程端口 > 兜底）。
 
-    四进程拓扑下 `/api/a2a` 只挂在 event 角色（38082），而 `_internal_base_url()`
-    探活的是"本进程自己的端口"（mgmt 38081）→ 派发固定 405，handoff_seq 永远 0。
-    平台已有 `resolve_a2a_base()` 按服务映射解析（显式 task_a2a_api_url > 网关
-    `/a2a` 前缀 > server_base_url），指向的正是 A2A 实际监听处；解析为空
-    （单测/未配置）时再回退 `_internal_base_url()`，保持历史行为。
+    服务端口映射/环境变量名与 ``src.kernel.gsb.client`` 同源（直接导入
+    ``_FALLBACK_PORT`` / ``_ENV_URL_MAP``，不另存一份表），避免两处漂移；注册表来源
+    复用 ``list_instances()``。本函数只补充 A2A 派发特有的环境变量优先级与角色遍历
+    顺序。角色顺序优先取 A2A 实际挂载角色（event），避免本进程（如 mgmt）的 health-only
+    候选抢在正确端口之前命中，导致 POST /api/a2a 拿 405。
     """
+    cands: list[str] = []
+    for v in (os.environ.get("GRAPE_INTERNAL_URL"),
+              os.environ.get("GRAPE_A2A_PORT"), os.environ.get("GRAPE_EVENT_PORT"),
+              os.environ.get("EVENT_PORT")):
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
     try:
-        from src.kernel.prompt_builder import resolve_a2a_base
-        base = (resolve_a2a_base(int(runtime_id or 0)) or "").strip()
-        if base:
-            return base.rstrip("/")
+        from src.kernel.gsb.client import _ENV_URL_MAP as _role_env_urls
+        from src.kernel.gsb.client import _FALLBACK_PORT as _role_ports
+    except Exception:
+        _role_env_urls, _role_ports = {}, {}
+    roles = ("event", "runtime", "worker", "mgmt", "insight")
+    for role in roles:
+        env_key = _role_env_urls.get(role)
+        v = os.environ.get(env_key) if env_key else None
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
+        port = _role_ports.get(role)
+        if port:
+            cands.append(f"http://127.0.0.1:{port}")
+    for role in roles:
+        try:
+            from src.kernel.gsb.registry import list_instances
+            for row in list_instances(role):
+                base = (row.get("base_url") or "").rstrip("/")
+                if base:
+                    cands.append(base)
+        except Exception as _e:
+            log.debug(f"takeover.py best-effort skipped: {_e}")
+            break
+    for v in (os.environ.get("PORT"), os.environ.get("GRAPE_PORT")):
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
+    try:
+        cands.append(f"http://127.0.0.1:{_local_port()}")
+    except Exception as _e:
+        log.debug(f"takeover.py best-effort skipped: {_e}")
+    cands += ["http://127.0.0.1:8000", "http://127.0.0.1:3000"]
+    return _dedupe_bases(cands)
+
+
+def _probe_dispatchable(base: str, timeout: float = 2.5) -> tuple[bool, str]:
+    """双重校验候选基址：``/api/health`` 可达 且 ``POST /api/a2a`` 路由存在。
+
+    只有 POST 能区分「无路由 404/405」与「端点存在但缺参 400」。辅助进程的
+    health 可能 200 但没有 a2a 路由（如 mgmt / insight），这类候选必须排除。
+    返回 ``(是否可派发, 诊断串)``，诊断串含端口/状态码，供 warning 观测。
+    """
+    import httpx
+    base = (base or "").rstrip("/")
+    if not base:
+        return False, "empty base"
+    try:
+        h = httpx.get(f"{base}/api/health", timeout=timeout)
+        h_code = int(h.status_code)
+    except Exception as e:
+        return False, f"health unreachable: {e}"
+    if h_code >= 500:
+        return False, f"health HTTP {h_code}"
+    try:
+        # 空 payload：真实端点返回 400（端点存在、不落账），无路由返回 404/405。
+        p = httpx.post(f"{base}/api/a2a", json={}, timeout=min(timeout, 1.5))
+        p_code = int(p.status_code)
+    except Exception as e:
+        return False, f"health HTTP {h_code}; a2a unreachable: {e}"
+    if p_code in (404, 405):
+        return False, f"health HTTP {h_code} but a2a route missing HTTP {p_code}"
+    if 300 <= p_code < 400:
+        return False, f"health HTTP {h_code} but a2a redirected HTTP {p_code}"
+    if p_code >= 500:
+        return False, f"health HTTP {h_code} but a2a route error HTTP {p_code}"
+    return True, f"health HTTP {h_code}, a2a HTTP {p_code}"
+
+
+def _select_local_a2a_base(preferred: list[str] | None,
+                           excluded: set[str]) -> str:
+    """本机扫描 A2A 候选并重选（只缓存双重校验通过的基址）。
+
+    命中进程级缓存/``preferred``（本机 worker 的回连基址）优先，其次扫描
+    ``_dispatch_base_candidates()``；405/404 候选排除并输出 warning；全部不可派发时
+    不缓存错误基址，仅本次回退本机既定端口，由调用方按失败语义上报。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
+    if cached and cached not in excluded:
+        return cached
+    for base in _dedupe_bases(list(preferred or []) + _dispatch_base_candidates()):
+        if base in excluded:
+            continue
+        ok, detail = _probe_dispatchable(base)
+        if ok:
+            _A2A_DISPATCH_BASE_CACHE = base
+            log.info(f"takeover: a2a dispatch base = {base} ({detail})")
+            return base
+        log.warning(f"takeover: skip a2a dispatch candidate {base} ({detail})")
+    fallback = f"http://127.0.0.1:{_local_port()}"
+    if fallback.rstrip("/") in excluded:
+        fallback = "http://127.0.0.1:8000"
+    log.warning(f"takeover: no dispatchable a2a candidate; fallback {fallback} (not cached)")
+    return fallback
+
+
+def _a2a_internal_base(runtime_id: int = 0, exclude: set[str] | None = None) -> str:
+    """内部派发基址（只缓存双重校验通过的基址）。
+
+    ``runtime_id > 0`` 既可能是远程 worker，也可能是本机 worker（``last_ip=127.0.0.1``
+    或 ``credential_id=0``）。判据组合 ``_runtime_is_local()`` 与回连基址是否回环：
+    - 本机 worker：与 ``runtime_id=0`` 一致，把回连基址并进本机候选做 health + POST
+      双重校验并重选（405 后排除坏基址也能换到同机 event 端口）；
+    - 真远程 worker：本机 127.0.0.1 候选不可达，只校验回连基址，通过则缓存，
+      不可派发则 warning 并最佳努力返回该基址（不缓存），由外层按失败上报。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
+    if int(runtime_id or 0) > 0:
+        try:
+            from src.kernel.prompt_builder import (_resolve_server_url,
+                                                   _runtime_is_local)
+            base = (_resolve_server_url(int(runtime_id)) or "").rstrip("/")
+            local = _runtime_is_local(int(runtime_id))
+        except Exception:
+            base, local = "", None
+        # locality 未知（None）时以回环地址为判据，避免把本机 worker 误当远程。
+        is_local_worker = bool(local) or _base_is_loopback(base)
+        if not is_local_worker:
+            if base:
+                if base in excluded:
+                    # 405 重选时被排除：远程没有其它 A2A 进程可换，返回原基址让调用方上报
+                    log.warning(f"takeover: no alternative remote a2a base; keep {base}")
+                    return base
+                ok, detail = _probe_dispatchable(base)
+                if ok:
+                    _A2A_DISPATCH_BASE_CACHE = base
+                    log.info(f"takeover: a2a dispatch base = {base} ({detail})")
+                    return base
+                log.warning(f"takeover: skip a2a dispatch candidate {base} ({detail})")
+                # 远程 worker：本机 127.0.0.1 候选不可达，仍按回连基址最佳努力派发（不缓存）
+                log.warning(f"takeover: a2a dispatch base {base} unverified; "
+                            "best-effort use remote server_url (not cached)")
+                return base
+            return f"http://127.0.0.1:{_local_port()}"
+        # 本机 worker 回环：回连基址并入候选，扫描重选而不是 best-effort 打坏地址
+        return _select_local_a2a_base([base] if base else [], excluded)
+    return _select_local_a2a_base([], excluded)
+
+
+def _a2a_dispatch_base(runtime_id: int = 0, exclude: set[str] | None = None) -> str:
+    """A2A 派发基址：显式配置可信，``server_url`` 回退必须双重校验。
+
+    与开放 PR !2020 协同：保留其「task_a2a_api_url > 网关 /a2a 前缀 >
+    server_base_url」显式优先顺序。差异（Issue #3910）：
+    - ``explicit_a2a_api_url`` / ``gateway_prefix_a2a`` 可信任，直接返回；
+    - ``runtime_server_url_fallback`` 不可信任（四进程下常是本进程 mgmt 端口），
+      本机需做 health + POST /api/a2a 双重校验，不可派发则 warning 并排除后扫描候选；
+      ``runtime_id>0`` 同样交由 ``_a2a_internal_base`` 区分本机 worker（回环基址，
+      扫描重选）与真远程 worker（仅校验回连基址、best-effort）。
+    ``exclude`` 用于 405 后排除坏基址重选。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
+    try:
+        from src.kernel.prompt_builder import (A2A_TRUSTED_BASE_SOURCES,
+                                               resolve_a2a_base_with_source)
+        base, source = resolve_a2a_base_with_source(int(runtime_id or 0))
+        base = (base or "").strip().rstrip("/")
+        if base and base not in excluded and source in A2A_TRUSTED_BASE_SOURCES:
+            return base
+        if int(runtime_id or 0) > 0:
+            # 远程 worker：server_url 回连基址在 _a2a_internal_base 内校验
+            return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
+        cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
+        if cached and cached not in excluded:
+            # 已双重校验过的基址优先于不可信任的回退，避免每次 finish 重复探活+405 warning
+            return cached
+        if base and base not in excluded:
+            ok, detail = _probe_dispatchable(base)
+            if ok:
+                _A2A_DISPATCH_BASE_CACHE = base
+                log.info(f"takeover: a2a dispatch base = {base} ({source}; {detail})")
+                return base
+            log.warning(f"takeover: skip a2a dispatch candidate {base} "
+                        f"(source={source}; {detail})")
+            excluded.add(base)
     except Exception as _e:  # noqa: BLE001 — 解析失败必须回退，不能阻断派发
-        log.debug(f"takeover: resolve_a2a_base skipped: {_e}")
-    return _internal_base_url(int(runtime_id or 0)).rstrip("/")
+        log.debug(f"takeover: resolve_a2a_base_with_source skipped: {_e}")
+    return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
 
 
 def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context: str,
@@ -1801,10 +2009,13 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
                    base_url: str = "") -> dict:
     """派发下一节点（内部 HTTP 调 /api/a2a，与 resume 同路径；失败可重试）。
 
-    目标地址一律取 ``_internal_base_url()``（本机探活得出的内部基址）。
+    目标地址取 ``_a2a_dispatch_base()``：显式 A2A 配置优先，回退路径做
+    health + POST /api/a2a 双重校验（避免命中无 a2a 路由的辅助服务端口）。
+    405 命中时清缓存、在候选集内排除坏基址重选并重试一次。
     调用方传入的 base_url 来自 ``request.base_url``，可被 Host 头伪造，
     用作 SSRF 跳板会把调用方凭据发给攻击者控制的主机，因此这里显式忽略。
     """
+    global _A2A_DISPATCH_BASE_CACHE
     import httpx
     base = _a2a_dispatch_base(int(runtime_id or 0)).rstrip("/")
     url = f"{base.rstrip('/')}/api/a2a"
@@ -1828,6 +2039,18 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
                     seq = 0
                 return {"ok": True, "seq": seq, "status": r.status_code}
             last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            if int(r.status_code) == 405 and attempt == 1:
+                # 缓存/竞态导致仍命中无 a2a 路由的基址：清缓存，排除坏基址后重选重试一次
+                _A2A_DISPATCH_BASE_CACHE = ""
+                new_base = _a2a_dispatch_base(int(runtime_id or 0),
+                                              exclude={base}).rstrip("/")
+                if new_base and new_base != base:
+                    log.warning(f"takeover: a2a dispatch 405 at {base}; "
+                                f"retry with reselected base {new_base}")
+                    base = new_base
+                    url = f"{base}/api/a2a"
+                    continue
+                log.warning(f"takeover: a2a dispatch 405 at {base}; no alternative candidate")
         except Exception as e:
             last_err = str(e)
         if attempt == 1:
@@ -1945,18 +2168,21 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             _sess_view = dict(sess)
             _sess_view["skipped_dispatches"] = _skipped_count
             return {"ok": True, "changed": False, "status": sess.get("status"),
-                    "session": _sess_view,
-                    "skipped_dispatches": _skipped_count,
-                    "skipped_message": _skipped_message}
-        _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
-                       auth_headers=auth_headers, base_url=base_url)
+                    "session": sess}
+        retry_ok = _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
+                                  auth_headers=auth_headers, base_url=base_url)
         _sess_view = get_session(session_id) or sess
         _sess_view = dict(_sess_view)
         _sess_view["skipped_dispatches"] = _skipped_count
-        return {"ok": True, "changed": False, "status": sess.get("status"),
-                "session": _sess_view,
-                "skipped_dispatches": _skipped_count,
-                "skipped_message": _skipped_message}
+        out = {"ok": bool(retry_ok), "changed": False, "status": sess.get("status"),
+               "session": _sess_view,
+               "skipped_dispatches": _skipped_count,
+               "skipped_message": _skipped_message}
+        if not retry_ok:
+            # 补派发失败：不得呈现为干净成功（Spec 验收：handoff.ok=false 时不伪装 ok:true）
+            out["partial"] = True
+            out["warnings"] = ["handoff_retry_failed"]
+        return out
 
     outcome = (outcome or "completed").lower()
     if outcome not in ("completed", "failed"):
@@ -2050,10 +2276,12 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
 
     # ④ 可选派发下一节点
     handoff_result: dict = {"ok": False, "skipped": True}
+    handoff_attempted = False
+    handoff_target = ""
     if outcome == "completed" and not is_done and handoff == "a2a":
         target = (next_agent_resolved or "").strip()
+        handoff_target = target
         if not target:
-            # 断链点可视化：stage 推进后无下一节点可派发，不得静默成功。
             handoff_result = {"ok": False, "skipped": True, "reason": "next_agent_unresolved"}
             log.warning(f"takeover: finish {session_id} advanced but no next agent resolved "
                         f"(agent={agent_type or '-'})")
@@ -2063,10 +2291,11 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
                      f"status={existing['status']}")
             handoff_result = {"ok": True, "skipped": True, "reason": "already_dispatched",
                               "seq": existing["seq"]}
-        if target and not handoff_result.get("seq"):
+        if not handoff_result.get("seq") and target:
             ctx = (f"由用户 {user.get('username') or ''} 在本机接管完成节点 {agent_type}；"
                    f"summary: {summary or ''}；evidence: {evidence or ''}；"
                    f"files: {', '.join(files_written or [])}")
+            handoff_attempted = True
             handoff_result = _dispatch_next(repo_key=repo_key, issue_number=issue_number,
                                             next_agent=target, context=ctx,
                                             runtime_id=int(sess.get("runtime_id") or 0),
@@ -2084,23 +2313,37 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             except Exception as _e:
                 log.debug(f"takeover.py best-effort skipped: {_e}")
 
+    # ⑤ 外层失败语义：真实派发失败时不得返回干净成功（降级 partial + 强 warnings）
+    out_warnings: list[str] = []
+    out_ok = True
+    if handoff_attempted and not handoff_result.get("ok"):
+        out_ok = False
+        err = str(handoff_result.get("error") or "unknown")[:300]
+        out_warnings.append(f"handoff_failed:target={handoff_target or '-'};error={err}")
+        log.warning(f"takeover: finished PARTIAL {session_id} — handoff to "
+                    f"{handoff_target or '-'} failed: {err}")
+
     log.info(f"takeover: finished {session_id} event={outcome} next={next_agent_resolved or '-'} "
              f"handoff_ok={handoff_result.get('ok')} done={is_done} skipped={_skipped_count}")
     _sess_view = get_session(session_id) or sess
     _sess_view = dict(_sess_view)
     _sess_view["skipped_dispatches"] = _skipped_count
-    return {"ok": True, "changed": True, "status": ST_FINISHED,
-            "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
-            "next_agent": next_agent_resolved or next_agent,
-            "backfilled": _backfilled,
-            "handoff": handoff_result, "session": _sess_view,
-            "skipped_dispatches": _skipped_count,
-            "skipped_message": _skipped_message}
+    out = {"ok": out_ok, "changed": True, "status": ST_FINISHED,
+           "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
+           "next_agent": next_agent_resolved or next_agent,
+           "backfilled": _backfilled,
+           "handoff": handoff_result, "session": _sess_view,
+           "skipped_dispatches": _skipped_count,
+           "skipped_message": _skipped_message}
+    if out_warnings:
+        out["partial"] = True
+        out["warnings"] = out_warnings
+    return out
 
 
 def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str = "",
-                   auth_headers: dict | None = None, base_url: str = "") -> None:
-    """finish 之后补派发（幂等键 = session_id + next_agent）。"""
+                   auth_headers: dict | None = None, base_url: str = "") -> bool:
+    """finish 之后补派发（幂等键 = session_id + next_agent）。返回是否派发成功。"""
     target = (sess.get("next_agent") if sess.get("next_agent") else "") or next_agent
     if not target:
         target, _ = _advance_stage(sess.get("repo_key") or "", _issue_num(sess.get("issue_id") or ""),
@@ -2110,17 +2353,23 @@ def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str
                                            _issue_num(sess.get("issue_id") or ""),
                                            sess.get("agent_type") or "")
     if not target or target == "done":
-        return
+        return True
     ctx = f"由用户 {user.get('username') or ''} 接管完成节点 {sess.get('agent_type')}；summary: {summary}"
     res = _dispatch_next(repo_key=sess.get("repo_key") or "", issue_number=_issue_num(sess.get("issue_id") or ""),
                          next_agent=target, context=ctx,
                          runtime_id=int(sess.get("runtime_id") or 0), auth_headers=auth_headers,
                          base_url=base_url)
     if res.get("ok"):
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE takeover_sessions SET handoff_seq=? WHERE id=?", (int(res.get("seq") or 0), sess["id"]))
-            db.commit()
+        seq = int(res.get("seq") or 0)
+        if seq > 0:
+            # 只有真实 seq 才算派发进展：seq=0 无进展，若落库会让幂等键误以为已交接。
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE takeover_sessions SET handoff_seq=? WHERE id=?", (seq, sess["id"]))
+                db.commit()
+        return True
+    log.warning(f"takeover: retry handoff to {target} failed: {res.get('error')}")
+    return False
 
 
 def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch: bool = True) -> dict:

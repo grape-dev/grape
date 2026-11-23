@@ -238,6 +238,109 @@ def test_finish_advances_and_dispatches(client, monkeypatch):
     assert r2.json()["changed"] is False
 
 
+def test_finish_marks_partial_when_handoff_fails(client, monkeypatch):
+    """#3910：handoff.ok=false 时 finish 外层不得返回干净 ok:true（降级 partial + 强 warnings）。"""
+    _seed(issue_number=5, task_id="t_flow_5", seq=9005)
+    sid = _start(client, issue=5).json()["takeover_id"]
+
+    monkeypatch.setattr(svc, "_advance_stage", lambda *a, **k: ("qa", False))
+    monkeypatch.setattr(svc, "_dispatch_next",
+                        lambda **kw: {"ok": False, "error": "HTTP 405: no a2a route"})
+
+    r = client.post(f"/api/takeover/sessions/{sid}/finish",
+                    json={"outcome": "completed", "summary": "完成", "handoff": "a2a"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False, "派发失败不得伪装成干净成功"
+    assert body["partial"] is True and body["warnings"], "必须降级 partial 并写强 warnings"
+    assert body["handoff"]["ok"] is False
+    assert any("handoff_failed" in w for w in body["warnings"])
+
+    # 外层语义只改返回体：事件终态与会话收尾仍按 completed 落地（失败可据 warnings 告警）
+    assert _get("SELECT status FROM events WHERE seq=9005")[0] == "completed"
+    assert _get("SELECT status FROM takeover_sessions WHERE id=?", (sid,))[0] == "finished"
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0]
+
+
+def test_finish_retry_handoff_failure_stays_partial(client, monkeypatch):
+    """#3910：幂等补派发（_retry_handoff）仍失败时同样降级 partial，不得伪装成功。"""
+    _seed(issue_number=6, task_id="t_flow_6", seq=9006)
+    sid = _start(client, issue=6).json()["takeover_id"]
+
+    monkeypatch.setattr(svc, "_advance_stage", lambda *a, **k: ("qa", False))
+    monkeypatch.setattr(svc, "_dispatch_next",
+                        lambda **kw: {"ok": False, "error": "HTTP 405: no a2a route"})
+
+    r = client.post(f"/api/takeover/sessions/{sid}/finish",
+                    json={"outcome": "completed", "summary": "完成", "handoff": "a2a"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False and r.json()["partial"] is True
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0]
+
+    # 幂等重试：已 finished 且 handoff_seq 为空 → 触发补派发；再次失败必须仍是 partial
+    r2 = client.post(f"/api/takeover/sessions/{sid}/finish",
+                     json={"outcome": "completed", "handoff": "a2a"})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["changed"] is False
+    assert body["ok"] is False and body["partial"] is True
+    assert "handoff_retry_failed" in body["warnings"]
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0]
+
+
+def test_finish_retry_handoff_success_records_seq(client, monkeypatch):
+    """#3910：幂等补派发成功时记真实 handoff_seq 并返回 ok。"""
+    _seed(issue_number=8, task_id="t_flow_8", seq=9008)
+    sid = _start(client, issue=8).json()["takeover_id"]
+
+    monkeypatch.setattr(svc, "_advance_stage", lambda *a, **k: ("qa", False))
+    state = {"ok": False}
+
+    def _dispatch(**kw):
+        if state["ok"]:
+            return {"ok": True, "seq": 9208}
+        return {"ok": False, "error": "HTTP 405: no a2a route"}
+
+    monkeypatch.setattr(svc, "_dispatch_next", _dispatch)
+
+    r = client.post(f"/api/takeover/sessions/{sid}/finish",
+                    json={"outcome": "completed", "summary": "完成", "handoff": "a2a"})
+    assert r.status_code == 200 and r.json()["ok"] is False
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0]
+
+    state["ok"] = True
+    r2 = client.post(f"/api/takeover/sessions/{sid}/finish",
+                     json={"outcome": "completed", "handoff": "a2a"})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["ok"] is True and body["changed"] is False
+    assert body["status"] == "finished"
+    assert _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0] == 9208
+
+
+
+def test_finish_retry_handoff_zero_seq_does_not_record(client, monkeypatch):
+    """#3910：补派发 ok 但 seq=0 无实际进展，不得写 handoff_seq（否则幂等键误判已交接）。"""
+    _seed(issue_number=10, task_id="t_flow_10", seq=9010)
+    sid = _start(client, issue=10).json()["takeover_id"]
+
+    monkeypatch.setattr(svc, "_advance_stage", lambda *a, **k: ("qa", False))
+    monkeypatch.setattr(svc, "_dispatch_next", lambda **kw: {"ok": True, "seq": 0})
+
+    r = client.post(f"/api/takeover/sessions/{sid}/finish",
+                    json={"outcome": "completed", "summary": "完成", "handoff": "a2a"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0], \
+        "首次派发 seq=0 无进展，不得写 handoff_seq"
+
+    # 幂等重试仍 seq=0：同样不落库，保留下次补派发机会
+    r2 = client.post(f"/api/takeover/sessions/{sid}/finish",
+                     json={"outcome": "completed", "handoff": "a2a"})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["changed"] is False
+    assert not _get("SELECT handoff_seq FROM takeover_sessions WHERE id=?", (sid,))[0]
+
 
 def test_finish_writes_structured_output_like_worker(client, monkeypatch):
     """事件详情页「Agent 处理记录与答复结论」要拿到与 worker 同构的 5 字段结构化产出。"""
