@@ -935,6 +935,18 @@ function Test-MasterRuntimeRecentlySeen {
     return $false
 }
 
+# 本轮新增日志的注册状态判定（Issue #3892 复审 Required）：等待循环与窗口末尾补检必须复用
+# 同一段判定，避免末尾补检只认 registered、漏掉 58-60s 才落盘的硬失败行。
+# registered 优先于 hard_failed：同一批新增行里注册成功与失败关键字并存（例如失败后重试成功）时，
+# 以成功为准；仅当无注册成功行且命中硬失败关键字时才判硬失败。
+function Get-RegistrationStateFromLog {
+    param([string[]]$NewLog = @())
+    $newText = @($NewLog) -join "`n"
+    if ($newText -match "RuntimeAgent registered") { return "registered" }
+    if ($newText -match $regFailedPattern) { return "hard_failed" }
+    return "none"
+}
+
 $regOk = $false
 $regElapsed = 0
 $regSoftChecked = $false
@@ -943,11 +955,12 @@ $regHardFailed = $false
 while ($regElapsed -lt $regWindowSec) {
     # 只读水位之后的新增行：上一轮残留的 registered / Register failed 不得参与本轮判定。
     $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
-    if ($logContent -match "RuntimeAgent registered") {
+    $regState = Get-RegistrationStateFromLog -NewLog $logContent
+    if ($regState -eq "registered") {
         $regOk = $true
         break
     }
-    if ($logContent -match $regFailedPattern) {
+    if ($regState -eq "hard_failed") {
         $regHardFailed = $true
         Log "Registration failure detected in log at ${regElapsed}s - stopping the wait early"
         break
@@ -969,10 +982,18 @@ while ($regElapsed -lt $regWindowSec) {
 }
 
 if (-not $regOk) {
-    # 窗口末尾补检一次：最后一轮日志采样落在 57s，59-60s 才落盘的注册行不能被漏判
-    # （否则在窗口边界上仍会误杀健康新版本）。同样只看本轮新增行。
+    # 窗口末尾补检一次：最后一轮日志采样落在 57s，59-60s 才落盘的行不能被漏判
+    # （否则在窗口边界上仍会误杀健康新版本/漏掉硬失败）。同样只看本轮新增行，
+    # 并复用循环同一段判定（Issue #3892 复审 Required）：58-60s 才落盘的硬失败行
+    # 必须同样置 $regHardFailed，绝不能留给主控心跳交叉验证翻案。
     $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
-    if ($logContent -match "RuntimeAgent registered") { $regOk = $true }
+    $regState = Get-RegistrationStateFromLog -NewLog $logContent
+    if ($regState -eq "registered") {
+        $regOk = $true
+    } elseif ($regState -eq "hard_failed") {
+        $regHardFailed = $true
+        Log "Registration failure detected in log at ${regWindowSec}s window end - stopping before cross-check"
+    }
     # 交叉验证：主控若能看到本 runtime 在窗口内的心跳，说明新 agent 已连上主控（日志尾部滞后），
     # 不回滚；查询不可用时函数内部静默降级为纯日志判定。
     # 但硬失败必须跳过交叉验证（QA 审查 Required）：硬失败常在 10s 内发生，而老 agent 在停进程前

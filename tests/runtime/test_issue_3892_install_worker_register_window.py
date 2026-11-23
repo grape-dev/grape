@@ -16,7 +16,7 @@
    Register failed / registered）不参与本轮判定、硬失败不被主控心跳翻案。
 
 CI 门禁：本文件已接入 `.github/workflows/windows-smoke.yml` 的 `windows-smoke` job
-（windows-latest 自带 pwsh），否则 10 条行为用例在无 PowerShell 的环境恒 skip、回归无门禁。
+（windows-latest 自带 pwsh），否则 15 条行为用例在无 PowerShell 的环境恒 skip、回归无门禁。
 """
 import os
 import re
@@ -199,9 +199,25 @@ class TestFastFailUnchanged:
 
     def test_hard_failure_short_circuits_wait(self):
         region = _region()
-        idx = region.find('if ($logContent -match $regFailedPattern)')
-        assert idx != -1, "等待循环内应识别硬失败迹象"
-        assert "stopping the wait early" in region[idx:idx + 400]
+        # 复审后等待循环与窗口末尾补检共用 Get-RegistrationStateFromLog 同一段判定（Issue #3892 复审 Required）：
+        # registered 优先、其次 hard_failed；两处调用点都必须经过它，不能各写各的 -match。
+        assert "function Get-RegistrationStateFromLog" in region, "应抽出统一的注册状态判定函数"
+        fidx = region.find("function Get-RegistrationStateFromLog")
+        body = region[fidx:fidx + 700]
+        assert 'if ($newText -match "RuntimeAgent registered") { return "registered" }' in body, \
+            "注册成功行优先于硬失败行（失败后重试成功不能被判死）"
+        assert 'if ($newText -match $regFailedPattern) { return "hard_failed" }' in body, \
+            "统一判定必须匹配硬失败关键字"
+        calls = region.count("Get-RegistrationStateFromLog -NewLog")
+        assert calls == 2, f"等待循环与窗口末尾补检都应复用统一判定（实际 {calls} 处）"
+        loop = region.find("while ($regElapsed -lt $regWindowSec)")
+        hard = region.find('if ($regState -eq "hard_failed")', loop)
+        assert hard != -1 and "stopping the wait early" in region[hard:hard + 400]
+        # 末尾补检同样必须先判硬失败并置 $regHardFailed，再谈交叉验证（复审 Required 残留）。
+        tail = region.find("窗口末尾补检一次")
+        thard = region.find('if ($regState -eq "hard_failed")', tail)
+        assert thard != -1 and "$regHardFailed = $true" in region[thard:thard + 400], \
+            "末尾补检发现硬失败必须置 $regHardFailed 以跳过交叉验证"
 
 
 # ── 4. 结束提示分支 ────────────────────────────────────────────────────
@@ -533,3 +549,16 @@ class TestRegisterWindowBehaviour:
         assert res["outcome"] == "rolled_back"
         assert "cross-check skipped (hard registration failure" in res["stdout"]
         assert "Install complete!" not in res["stdout"]
+
+    def test_hard_failure_at_window_edge_not_masked_by_master_heartbeat(self, tmp_path):
+        """复审 Required#2 残留：等待循环最后一次采样落在 57s，58-60s 才落盘的硬失败行
+        只能由窗口末尾补检看到——末尾补检必须同样置 $regHardFailed，绝不能让主控心跳
+        交叉验证把「Register failed」翻成「已注册」并打印 Install complete!。"""
+        for fail_at in (59, 60):
+            res = _run_harness(tmp_path, {"HARNESS_FAIL_AT_SEC": fail_at, "HARNESS_WHOAMI": "fresh"})
+            assert res["regOk"] is False, f"FAIL_AT_SEC={fail_at}: {res['stdout']}"
+            assert res["elapsed"] == 60, f"FAIL_AT_SEC={fail_at}: 窗口末尾补检前不应提前停等"
+            assert res["outcome"] == "rolled_back", f"FAIL_AT_SEC={fail_at}: {res['stdout']}"
+            assert "cross-check skipped (hard registration failure" in res["stdout"], \
+                f"FAIL_AT_SEC={fail_at}: 末尾补检发现硬失败后必须跳过交叉验证"
+            assert "Install complete!" not in res["stdout"]
