@@ -25,6 +25,10 @@
   </p>
 
   <p>
+    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+  </p>
+
+  <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="加入社区群"><img src="assets/community/feishu.svg" width="18" height="18" alt="飞书">&nbsp;飞书</a> ·
     <a href="https://www.grapedev.cn/community.html?cat=join" title="加入社区群"><img src="assets/community/wechat.svg" width="18" height="18" alt="微信">&nbsp;微信</a>
   </p>
@@ -156,6 +160,14 @@ git clone https://gitcode.com/grape-dev/grape.git ; python grape/quickstart.py
 | --- | --- | --- |
 | **配置 OAuth 应用凭据** | GitCode / GitHub 登录返回 400（`not_configured`），登录按钮灰 | `configs/oauth-providers.json` 填两个 provider 的 `client_id` / `client_secret`，回调须为 `https://<域名>/api/auth/callback/{gitcode,github}` |
 | **配置对外可访问基址** | 回退 `localhost:3000`，OAuth 回调无法回访，登录与托管不可用 | `configs/server-config.json` 的 `server_base_url` 与 `webhook_url` 改成对外地址 |
+
+## 生产部署
+
+不想自己跑服务器？用本页顶部的 **Deploy on Railway** 按钮即可从本仓库一键起一套托管实例 —— 它会构建镜像、
+挂载数据卷、生成公网域名，你只需要填一个字段（`LLM_API_KEY`）。之后第三方登录还需要你自己的 OAuth 应用凭据
+（管理后台 → `配置中心 → 登录渠道`）。
+
+自己部署同样支持：见 **[SETUP.HUMAN.md](SETUP.HUMAN.md)** 与 [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md)。
 
 ## 社区与贡献
 
