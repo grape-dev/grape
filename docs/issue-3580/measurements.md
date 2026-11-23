@@ -86,6 +86,12 @@ PY
 
 - `push_template_to_repo` 大仓（>100MB）耗时分布：当前环境无大仓样本；
 - `A3` 50tps 压测、`A4` `/check-name` p95：需压测环境。
+- `_WEBHOOK_MAX_BODY_BYTES`（10 MB）：**非实测**。当前环境 inbox 表为空、无投递载荷样本可量；仓内部署配置
+  `deploy/nginx-*.conf` 的入口上限为 50m / 200m（均高于应用上限，方向约束成立），平台硬上限 GitHub 25MB。
+  10 MB 作为安全默认值，定稿前如需收紧/放宽，按「投递载荷 P95/P99」测量后再调。
+- `_HOOKS_TREE_MAX_PAGES`（50 页 → 5000 条）：**非实测**。大仓 hook / 子树条目规模未测量；当前值仅作无界枚举
+  护栏，推导锚点为用户面列表封顶 2000 条（`_PER_PAGE × _MAX_LIST_PAGES`）的 2.5 倍。触顶会在 `_hooks_paged`
+  打 WARNING（`hooks/tree listing truncated`），可据此观察是否需要上调。
 ## 5. 常量来源 · 平台/业务口径（非本地实测）
 
 以下常量无法在本机测量，来源为平台厂商文档或业务约定，登记在此供复核。
@@ -113,11 +119,11 @@ grep -n "SOON_DAYS" src/domains/mgmt/user/credential_expiry.py
 
 | 常量 | 位置 | 值 | 来源与说明 |
 |---|---|---|---|
-| `_WEBHOOK_MAX_BODY_BYTES` | `src/domains/runtime/routes/webhook.py` | 10 MB | ① 入口约定：应用入口代理的请求体上限即 10 MB（应用上限不得高于入口代理，否则两处口径分裂）；② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），10MB 覆盖 push/PR/issue 事件分布；③ 与附件 200MB 上限无关（附件走独立上传通道） |
+| `_WEBHOOK_MAX_BODY_BYTES` | `src/domains/runtime/routes/webhook.py` | 10 MB | ① 方向约束：应用上限必须低于入口代理上限（仓内 `deploy/nginx-*.conf` 为 50m / 200m），否则超限请求在代理层先 413、两处口径分裂；② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），在册平台均不超过它；③ 与附件 200MB 上限无关。**10 MB 本身是安全默认值（25MB 的 40%），非实测——见 §4** |
 | `connect_timeout`（视图自检） | `src/kernel/domain_views.py` | 10s | 统一到 `mysql_compat` 的既有连接口径（10s）；启动期检查用更短超时会在多库拓扑下被误判成网络故障而跳过一致性检查 |
 | `_PER_PAGE` | `src/domains/mgmt/vcs/base.py` | 100 | 厂商文档：GitHub / GitLab 列表接口 `per_page` 上限均为 100 |
 | `_MAX_LIST_PAGES` | `src/domains/mgmt/vcs/base.py` | 20 | 沿用 base `src/kernel/token_resolver.py:387/443` 的历史值（provider 抽取时原样搬入）；100×20 = 2000 条封顶，触顶时打 WARNING 说明结果被截断 |
-| `_HOOKS_TREE_MAX_PAGES` | `src/api/git_repo_api.py` | 50 | 100×50 = 5000 条 hook 封顶，用于 hook 树遍历的上界保护 |
+| `_HOOKS_TREE_MAX_PAGES` | `src/api/git_repo_api.py` | 50 页 | 无界枚举护栏：`_PER_PAGE(100) × 50` = 5000 条封顶；锚点 = 用户面列表封顶 2000（`_PER_PAGE × _MAX_LIST_PAGES`）的 2.5 倍；触顶由 `_hooks_paged` 打 WARNING。**非实测——见 §4** |
 
 
 ## 7. 清扫节奏与配置缓存（对应 `runtime/webhook_inbox.py`、`mgmt/vcs/namespaces.py`）

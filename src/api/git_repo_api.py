@@ -578,7 +578,11 @@ def _repo_path_hooks(p: str) -> "tuple[Any, str]":
     return None, ""
 
 
-_HOOKS_TREE_MAX_PAGES = 50      # 树/目录翻页上限（100 条/页 → 5000 条目）
+# 树/目录翻页上限：100 条/页 × 50 页 = 5000 条目封顶（无界枚举护栏）。
+# 口径（登记于 docs/issue-3580/measurements.md §4/§6）：仅作上界保护，**不是实测分布**——
+# 大仓 hook/子树条目规模未测量；推导锚点 = 用户面列表封顶 2000 条（`_PER_PAGE` ×
+# `_MAX_LIST_PAGES`）的 2.5 倍。触顶由 `_hooks_paged` 打 WARNING，不静默截断。
+_HOOKS_TREE_MAX_PAGES = 50
 
 
 def _hooks_paged(hooks, url_fn, p: str, token: str, *args) -> Any:
@@ -587,14 +591,19 @@ def _hooks_paged(hooks, url_fn, p: str, token: str, *args) -> Any:
     _norm = getattr(hooks, "normalize_tree", None)
     out: list = []
     page = 1
+    truncated = True
     while page <= _HOOKS_TREE_MAX_PAGES:
         batch = _vcs_req(p, "GET", url_fn(*args, page=page, per_page=per_page), token)
         if not isinstance(batch, list):
             return batch                      # 上游错误包络原样透传（不吞成空列表）
         out.extend(_norm(batch) if callable(_norm) else batch)
         if len(batch) < per_page:
+            truncated = False
             break
         page += 1
+    if truncated:
+        log.warning(f"hooks/tree listing truncated at {_HOOKS_TREE_MAX_PAGES} pages "
+                    f"({len(out)} entries, per_page={per_page})")
     return out
 
 

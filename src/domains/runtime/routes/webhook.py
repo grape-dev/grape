@@ -895,12 +895,13 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
 _WEBHOOK_REJECTED_METHODS = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
 
 # Issue #3580：通用 webhook 载荷上限（超限 413，不落库/不消费）。
-# 取值来源（非实测，登记于 docs/issue-3580/measurements.md「webhook 载荷上限」）：
-#   ① 部署口径：边缘 nginx `client_max_body_size 10m`（部署配置），应用上限不得高于它，
-#      否则超限请求在边缘就被 413，两处口径分裂；
-#   ② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），10MB 覆盖 push/PR/issue
-#      等事件的实际分布，同时给流式解析留足内存余量；
+# 取值来源（登记于 docs/issue-3580/measurements.md §4/§6）：
+#   ① 方向约束：应用上限必须**低于**入口代理上限（仓内部署配置 `deploy/nginx-*.conf`
+#      分别为 50m / 200m），否则超限请求在代理层就被 413，两处口径分裂；
+#   ② 平台口径：GitHub 单次投递载荷硬上限 25MB（厂商文档），在册平台均不超过它；
 #   ③ 与附件 200MB 上限无关：附件走独立上传通道，不经过本入口。
+# 10MB 本身是**安全默认值**（25MB 的 40%，给流式解析留内存余量），不是实测值：
+# 当前环境 inbox 表为空、无投递样本可量，定稿前调整请按 §4 待决策条目补测。
 _WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024
 
 
