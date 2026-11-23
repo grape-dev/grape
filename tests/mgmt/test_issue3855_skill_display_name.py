@@ -446,6 +446,39 @@ def test_convert_preserves_source_display_name(sdb, monkeypatch):
     assert captured.get("display_name") == "自定义名"
 
 
+def test_convert_clamps_overlong_legacy_source_name(sdb, monkeypatch):
+    # 存量源名称可超过 20 字：convert 回退时不得把超长名称写进新行 display_name。
+    long_name = "存量超长技能名称" * 4
+    assert len(long_name) > skills_route.SKILL_DISPLAY_NAME_MAX
+    _seed(sdb, name=long_name, display_name="", file_path="obs/long.zip")
+    storage = _MemStorage()
+    storage.objects["obs/long.zip"] = _make_zip(long_name)
+    import src.domains.mgmt.user.db as user_db
+    import src.domains.runtime.public as rt
+    monkeypatch.setattr(rt, "get_skill_storage", lambda: storage)
+    monkeypatch.setattr(rt, "zip_cache_get_with_hash",
+                        lambda k: (storage.objects.get(k), ""))
+    monkeypatch.setattr(rt, "zip_cache_put", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "mem_cache_invalidate", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "get_skill_zip_bytes", lambda k: storage.objects.get(k))
+    captured = {}
+
+    def _spy_upsert(*args, **kwargs):
+        captured.update(kwargs)
+        return 456
+
+    monkeypatch.setattr(user_db, "upsert_skill_obs", _spy_upsert)
+
+    skills_route.convert_skill(
+        body=skills_route.ConvertSkillRequest(
+            skill_name=long_name, repo="gitcode:org/cv-repo",
+            source_scope="user"),
+        user={"id": "7", "auth_type": "api_key"})
+    written = captured.get("display_name")
+    assert written == long_name[:skills_route.SKILL_DISPLAY_NAME_MAX]
+    assert len(written) <= skills_route.SKILL_DISPLAY_NAME_MAX
+
+
 # ===== 官方 30 分钟同步保留已录入名称 =====
 
 def _sync_official(monkeypatch, sdb, data):

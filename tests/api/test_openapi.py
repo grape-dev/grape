@@ -598,12 +598,12 @@ def test_public_ops_have_operation_id_summary_security():
 
 # ===================== x-token-scope 强制（openapi-x-token-scope-design.md §3.2/§五） =====================
 def test_public_ops_have_x_token_scope():
-    """L2：每个公开 op 必须有合法 x-token-scope（user_only/session_only/dual），不允许遗漏。"""
+    """L2：每个公开 op 必须有合法 x-token-scope（user_only/user_or_admin/session_only/dual），不允许遗漏。"""
     s = _schema()
     for path, ops in s["paths"].items():
         for method, op in ops.items():
             scope = op.get("x-token-scope")
-            assert scope in {"user_only", "session_only", "dual"},                 f"缺 x-token-scope: {method} {path} -> {scope!r}"
+            assert scope in {"user_only", "user_or_admin", "session_only", "dual"},                 f"缺 x-token-scope: {method} {path} -> {scope!r}"
 
 def test_x_token_scope_consistency():
     """L3：session_only 覆盖表与前缀规则 ↔ 契约双相一致；抽查 user_only/dual 命中。"""
@@ -649,6 +649,10 @@ def test_x_token_scope_consistency():
                          "/api/feedback/mine": "get", "/api/feedback/{fid}": "delete"}
     for path, method in user_only_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "user_only",             f"期望 user_only: {method} {path}"
+
+    # Issue #3855：PATCH 技能元信息允许管理台 JWT（仅官方改名），
+    # 普通 session token 仍拒绝 → 独立标 user_or_admin，不再误标 user_only。
+    assert s["paths"]["/api/skills/{skill_id}"]["patch"]["x-token-scope"] == "user_or_admin"
 
     dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post",
                     "/api/skills": "get",
@@ -754,7 +758,7 @@ def test_org_ops_have_english_summary_and_scope():
             summary = op.get("summary") or ""
             if not summary or any(ord(ch) > 127 for ch in summary):
                 bad.append((method, path, summary))
-            if op.get("x-token-scope") not in ("user_only", "session_only", "dual"):
+            if op.get("x-token-scope") not in ("user_only", "user_or_admin", "session_only", "dual"):
                 bad.append((method, path, op.get("x-token-scope")))
     assert org_ops >= 37
     assert not bad, bad[:10]

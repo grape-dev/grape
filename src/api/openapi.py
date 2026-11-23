@@ -115,8 +115,9 @@ def route_is_public(route) -> bool:
 def token_scope(route) -> str | None:
     """推导对外路由的 token 作用域（`x-token-scope`）：
 
-    - 依赖链命中 `require_no_session_token` / `require_no_session_token_or_admin`
-      → user_only（D 类管理端点；后者额外放行管理台 JWT，Issue #3855）
+    - 依赖链命中 `require_no_session_token_or_admin` → user_or_admin
+      （D 类管理端点 + 管理台 JWT；session token 仍拒绝，Issue #3855）
+    - 依赖链命中 `require_no_session_token` → user_only
     - operation_id 在 `_SESSION_ONLY_OPERATIONS` 或路径前缀命中
       `_SESSION_ONLY_PATH_PREFIXES`                          → session_only（git-repo 传输/凭据）
     - 依赖链命中 `get_current_user_or_api_key` / `get_current_user_or_api_key_or_admin`
@@ -130,7 +131,9 @@ def token_scope(route) -> str | None:
     path = getattr(route, "path", "") or ""
     if op_id in _SESSION_ONLY_OPERATIONS or path.startswith(_SESSION_ONLY_PATH_PREFIXES):
         return "session_only"
-    if "require_no_session_token" in names or "require_no_session_token_or_admin" in names:
+    if "require_no_session_token_or_admin" in names:
+        return "user_or_admin"
+    if "require_no_session_token" in names:
         return "user_only"
     if names & _PUBLIC_AUTH_DEPS:
         return "dual"

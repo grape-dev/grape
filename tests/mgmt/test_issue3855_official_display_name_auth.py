@@ -60,6 +60,19 @@ def _mk_official_skill(display_name="旧官方名"):
     return sid, name
 
 
+def _mk_private_skill(owner_id, scope="user", display_name="私有技能"):
+    name = f"i3855-private-{uuid.uuid4().hex[:8]}"
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+            "skill_path, scope, owner_id, is_active) VALUES (?,?,?,?,?,?,?,1)",
+            (name, display_name, "私有技能", "coding", name, scope, owner_id))
+        db.commit()
+        sid = c.lastrowid
+    return sid, name
+
+
 def _display(sid):
     with db_lock:
         row = db.cursor().execute(
@@ -137,3 +150,28 @@ def test_detail_can_edit_display_name_by_identity():
         assert r_user.json().get("can_edit_display_name") is False
     finally:
         _cleanup(sid, admin_id, [uid])
+
+def test_admin_cannot_patch_non_official_skill_on_id_collision():
+    # admin_accounts.id 与 grape_accounts.id 独立自增；用同号 owner_id 构造撞号场景，
+    # 管理台 JWT 不得借 owner_id 比较滑入 user 技能（非 official 一律 403）。
+    admin_id, _admin_name, admin_tok = _mk_admin()
+    sid, _name = _mk_private_skill(owner_id=str(admin_id), scope="user",
+                                   display_name="受害者技能")
+    try:
+        r = _patch(sid, {"display_name": "管理员越权改名"}, admin_tok)
+        assert r.status_code == 403, r.text
+        assert _display(sid) == "受害者技能"
+    finally:
+        _cleanup(sid, admin_id, [])
+
+
+def test_admin_cannot_read_non_official_skill_on_id_collision():
+    admin_id, _admin_name, admin_tok = _mk_admin()
+    sid, _name = _mk_private_skill(owner_id=str(admin_id), scope="user",
+                                   display_name="受害者技能")
+    try:
+        r = _client.get(f"/api/skills/by-id/{sid}",
+                        headers={"Authorization": f"Bearer {admin_tok}"})
+        assert r.status_code == 403, r.text
+    finally:
+        _cleanup(sid, admin_id, [])

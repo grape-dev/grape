@@ -6,9 +6,11 @@
 |---|---|---|
 | 重名约束层级 | 业务层校验（Python casefold） | 存量不清洗、跨 scope 允许；不动 UNIQUE(skill_name, scope, owner_id) |
 | 重名比较 | 去首尾空格 + casefold，Python 侧比较；内部空格不折叠 | 规避 MySQL/SQLite LOWER/TRIM 语义差异，含 Unicode；与附件口径一致 |
+| 重名范围 | 仅比较 `display_name` 列；空名存量行的源名称兜底展示不参与 | 附件 §7.1 明确源名称不纳入重名约束、§8.2 接受存量源名重复；同 scope 展示重名属既定口径 |
+| 转换名称 | 显式计算有效展示名：源自定义名优先，超长截断到 20，同 scope 重名追加 `~N` | 避免 `display_name=None` 回填超长源名称绕过长度上限 |
 | 官方重名取数 | scope-only（忽略 owner_id） | 官方行 owner_id 历史并存 `''` 与 `0` |
 | 长度口径 | 去首尾空格后 `len()`（Unicode 码点） | 汉字/字母/数字/空格/emoji 各计 1 |
-| 官方技能编辑 | 仅放开 display_name，且限平台管理员；其余字段 403 | 附件附录默认口径 + CONTRIBUTING §7「不弱化鉴权」 |
+| 官方技能编辑 | 仅放开 display_name，且限平台管理员；管理台 JWT 不得改/读非 official 技能；其余字段 403 | 附件附录默认口径 + CONTRIBUTING §7「不弱化鉴权」；admin/grape 两套 id 独立，防撞号越权 |
 | 重新上传语义 | `upsert_skill_obs(display_name=None)` 保留非空名称，空回填源名称 | 不覆盖用户命名，兼容既有调用方 |
 | 上传必填 | Form 显式传入时强校验；字段缺省按历史调用回退源名称 | 前端必传，同时不破坏既有上传测试/客户端 |
 | 错误码 | 必填/超长 400；重名 409 | 与既有同名冲突（409）一致 |
