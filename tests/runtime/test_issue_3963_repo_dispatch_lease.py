@@ -314,6 +314,29 @@ def test_classify_env_error_recovers_busy_from_fingerprint():
     assert S._classify_env_error("", "入队异常: other") == ""
 
 
+def test_remote_dispatch_writes_busy_error_code(monkeypatch):
+    """AC：入队撞锁时执行记录落 error_code=REPO_DISPATCH_BUSY，且状态是 skipped（非 failed）。"""
+    _mk_task(TID_BASE + 3, max_retry=0)
+    import src.api.session_store as store
+    monkeypatch.setattr(store, "get_or_create_agent_session", lambda *a, **k: {"id": "sess-i3963"})
+    monkeypatch.setattr(store, "get_or_create_issue_session", lambda *a, **k: {"id": ""})
+
+    def _raise_busy(**kwargs):
+        raise service.RepoDispatchBusyError(RK, waited_seconds=35.0)
+
+    monkeypatch.setattr(service, "enqueue_task", _raise_busy)
+    task = _task_dict(TID_BASE + 3)
+    exec_id = S._create_execution(TID_BASE + 3, "issue")
+    S._execute_autopilot_remote(
+        RK, task, exec_id, "issue", "", 0, "", "", "/tmp/i3963-ws", "prompt", "", "", "",
+        "issue3963/repo", {"repo_key": RK, "issue_id": "", "payload": {}})
+    row = [r for r in _exec_rows(TID_BASE + 3) if r[0] == exec_id][0]
+    assert row[1] == "skipped", row
+    assert row[3] == BUSY, row
+    assert "task enqueue busy" in (row[2] or ""), row
+    _drop_task(TID_BASE + 3)
+
+
 def test_busy_does_not_consume_attempt_with_max_retry_zero(monkeypatch):
     """AC：max_retry=0 的任务遇 busy 仍成功派发（busy 走独立预算，不吃掉唯一 attempt）。"""
     _mk_task(TID_BASE, max_retry=0)
