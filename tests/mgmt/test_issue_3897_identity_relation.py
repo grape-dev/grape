@@ -143,6 +143,23 @@ def test_non_relation_errors_keep_existing_warning(monkeypatch, caplog):
     assert "identity read degraded" not in text
 
 
+def test_business_does_not_exist_text_not_treated_as_schema_drift(monkeypatch, caplog):
+    """「user does not exist」这类业务文案不得被误判成缺表降级。"""
+    caplog.set_level("DEBUG")
+    G._degraded_identity_ops.clear()
+    G._degraded_identity_warned.clear()
+
+    @contextmanager
+    def _boom(*args):
+        raise RuntimeError("user does not exist")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(G, "_uow", _boom)
+    assert G.get_user_identities("u1") == []
+    assert "Get user identities failed" in caplog.text
+    assert "identity read degraded" not in caplog.text
+
+
 # ---------------------------------------------------------------- 3. relation 探针
 
 def test_relation_kind_detects_existing_and_missing_sqlite():

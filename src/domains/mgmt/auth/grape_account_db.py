@@ -26,10 +26,17 @@ _degraded_identity_lock = threading.Lock()
 
 
 def _is_missing_identity_relation(exc: BaseException) -> bool:
-    """是否「关系缺失 / 域不可用」（1146、Unknown table、DomainUnavailable）。"""
+    """是否「identity 关系缺失 / 域不可用」（1146、Unknown table、DomainUnavailable）。
+
+    只认关系级信号（1146 / 域不可用 / 明确指向 external_identities 的缺表文案），
+    避免把「user does not exist」这类业务文案误降级成 schema 漂移。
+    """
     msg = str(exc).lower()
-    return ("1146" in msg or "doesn't exist" in msg or "does not exist" in msg
-            or "unknown table" in msg or "domain 'mgmt' unavailable" in msg)
+    if "1146" in msg or "domain 'mgmt' unavailable" in msg:
+        return True
+    return ("external_identities" in msg
+            and ("doesn't exist" in msg or "does not exist" in msg
+                 or "unknown table" in msg))
 
 
 def _degrade_identity_read(op: str, exc: BaseException) -> None:
