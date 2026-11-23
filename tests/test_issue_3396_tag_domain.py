@@ -41,6 +41,10 @@ class TestBackendTagRules:
         assert "chat" in AGENT_TAGS
         assert AGENT_TAGS == {"vod", "issue", "coding", "qa", "sre", "chat"}
 
+    def test_agent_tags_single_source(self):
+        """值域不得有第二份字面量：AGENT_TAGS 必须是 engine_select.KNOWN_AGENT_ROLES 本体。"""
+        assert AGENT_TAGS is KNOWN_AGENT_ROLES, "AGENT_TAGS 与 KNOWN_AGENT_ROLES 已分叉"
+
     def test_six_roles_collapse_to_all(self):
         # A3：6 角色全选自动折叠为全能
         assert _apply_tag_rules(["vod", "issue", "coding", "qa", "sre", "chat"]) == ["all"]

@@ -184,3 +184,17 @@ def test_ui_set_roles_not_overwritten_without_user_flag():
         db.commit()
     _register(client, token, "b3396r-dev7", {"name": "hermes", "role_tags": ["sre"]})
     assert _role_caps(rid) == ["coding", "qa"], _role_caps(rid)
+
+
+def test_seed_reads_single_role_source(monkeypatch):
+    """播种值域与 AGENT_TAGS 同源：临时给它加一个角色，声明即被播种（不被第二份字面量过滤）。"""
+    from src.domains.runtime.routes import runtime as _rt
+    monkeypatch.setattr(_rt, "AGENT_TAGS", set(_rt.AGENT_TAGS) | {"demo-role"}, raising=True)
+    client = _client()
+    token = _make_token("b3396r-9")
+    rid = _register(client, token, "b3396r-dev9", {"name": "codearts", "role_tags": ["demo-role"]})
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
+    tags = sorted(r[0] for r in rows if ":" not in r[0])
+    assert tags == ["demo-role"], tags

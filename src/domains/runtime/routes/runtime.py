@@ -22,6 +22,9 @@ from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+# Issue #3396：角色标签值域唯一来源 = engine_select.KNOWN_AGENT_ROLES（Issue #955 角色全集）。
+# 本模块不再维护第二份字面量：两份不同步会让新角色被静默过滤/误折叠。
+from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as AGENT_TAGS
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
 # Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
@@ -104,7 +107,8 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
         return 1 if reported else 0
 
 
-_ROLE_SEED_KNOWN = frozenset({"coding", "issue", "qa", "vod", "chat", "sre"})
+# 角色值域唯一来源：文件头部的 AGENT_TAGS（= engine_select.KNOWN_AGENT_ROLES 别名）。
+# 播种在调用期取值，本模块不再维护第二份字面量——两份不同步会让新角色被静默过滤。
 
 
 def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> list:
@@ -138,13 +142,13 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         if user_set:
             return []
         tags = [str(t).strip().lower() for t in (declared or []) if str(t).strip()]
-        tags = [t for t in dict.fromkeys(tags) if t in _ROLE_SEED_KNOWN]
+        tags = [t for t in dict.fromkeys(tags) if t in AGENT_TAGS]
         if not tags:
             return []
         rows = c.execute(
             "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
         cur = [r[0] for r in rows]
-        cur_roles = [t for t in cur if t == "all" or t in _ROLE_SEED_KNOWN]
+        cur_roles = [t for t in cur if t == "all" or t in AGENT_TAGS]
         if cur_roles and set(cur_roles) - {"all"}:
             return []  # 已有非 all 角色行 → 不覆盖
         if cur_roles:
@@ -3044,9 +3048,8 @@ def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depe
 
 # ===== Engine 角色标签 =====
 
-# Issue #3396：角色标签值域单点常量（与前端 RuntimesView.vue 的 RT_TAG_OPTIONS
-# / 场景可用角色默认表对账锁定）。chat 补进值域（6 角色），'all' 为折叠态不在此列。
-AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat"}
+# Issue #3396：AGENT_TAGS 在文件头部由 engine_select.KNOWN_AGENT_ROLES 别名而来
+# （值域单点常量；'all' 为折叠态不在此列，前端 RT_TAG_OPTIONS 由测试对账锁定）。
 
 
 def _apply_tag_rules(tags: list[str]) -> list[str]:
