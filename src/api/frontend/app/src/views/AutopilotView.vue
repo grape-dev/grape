@@ -2613,18 +2613,10 @@ const detachedEngineKeys = computed(() => {
   return Array.from(selectedEngines).filter((k) => !visible.has(k))
 })
 const engAvailTypes = computed(() => {
+  // [B6 尾/C08-A2] 类型归并读后端 annotate 的 page_type（单源派生），前端零引擎名判定
   const types = []
   engines.value.forEach(function (e) {
-    const n = (e.name || '').toLowerCase()
-    const tn = n.includes('hermes')
-      ? 'hermes'
-      : n.includes('opencode')
-        ? 'opencode'
-        : n.includes('codearts')
-          ? 'codearts'
-          : n.includes('codex')
-            ? 'codex'
-            : ''
+    const tn = e.page_type || ''
     if (tn && !types.includes(tn)) types.push(tn)
   })
   return types

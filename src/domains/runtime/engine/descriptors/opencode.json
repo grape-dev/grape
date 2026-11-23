@@ -1,0 +1,35 @@
+{
+  "canonical": "opencode",
+  "aliases": [],
+  "protocol": "ndjson",
+  "discover": {
+    "cli": "opencode",
+    "pip": "opencode"
+  },
+  "display": {
+    "name": "OpenCode",
+    "dot_color": "#3b82f6",
+    "device_types": true,
+    "icon": "/static/img/engines/opencode.png"
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "opencode",
+      "run",
+      "hello"
+    ]
+  },
+  "model_config_path": "~/.config/opencode/opencode.json",
+  "usage_retry": false,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": true,
+    "im_session_valid": true
+  },
+  "is_default": true,
+  "usage": {
+    "mode": "opencode_watermark"
+  },
+  "sandbox": {}
+}

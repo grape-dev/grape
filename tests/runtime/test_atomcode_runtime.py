@@ -262,7 +262,8 @@ def test_sandbox_mounts_only_prompt_readonly(fake_cli, tmp_path, monkeypatch):
 
 def test_registration_skills_and_usage(monkeypatch, tmp_path):
     from src.domains.runtime.agents.executor import discover_backends, get_backend
-    from src.domains.runtime.engine.agent import _backend_for_engine, _PROBE_COMMANDS
+    from src.domains.runtime.engine.agent import _backend_for_engine
+    from src.domains.runtime.engine.descriptor import get_registry
     from src.domains.runtime.engine.os_adapter import engine_skill_dirs
     from src.domains.runtime.engine.engine_select import engine_role_tags
     from src.domains.runtime.engine.usage_collect import UsageCollector
@@ -273,8 +274,9 @@ def test_registration_skills_and_usage(monkeypatch, tmp_path):
     assert discovered["pip_package"] == "@atomgit.com/atomcode"
     assert isinstance(get_backend("atomcode"), AtomCodeRuntime)
     assert _backend_for_engine("atomcode-worker-1") == "atomcode"
-    assert "--ephemeral" in _PROBE_COMMANDS["atomcode"]
-    assert "--no-tools" in _PROBE_COMMANDS["atomcode"]
+    probe_cmds = get_registry().probe_commands()  # [B5] 表已消，经 registry 派生
+    assert "--ephemeral" in probe_cmds["atomcode"]
+    assert "--no-tools" in probe_cmds["atomcode"]
     # Issue #658 修订（2026-11-03 用户裁定）：引擎角色不按类型默认映射，
     # 仅显式声明 role_tags 时才硬过滤——atomcode 默认不限角色。
     assert engine_role_tags("atomcode") is None
@@ -299,14 +301,16 @@ def test_server_side_registration_is_complete():
     任一处漏登记 → 引擎已注册却无法按类型筛选 / 探活恒为 skip。
     """
     from src.domains.mgmt.routes.settings import _device_engine_types, _engine_type_of
-    from src.domains.insight.observability.engine_probe import _PROBE_COMMANDS, _probe_engine
+    from src.domains.runtime.engine.descriptor import get_registry
+    from src.domains.insight.observability.engine_probe import _probe_engine
 
     assert _engine_type_of({"name": "atomcode-worker-1"}) == "atomcode"
     assert _engine_type_of({"name": "atomcode"}) == "atomcode"
     assert _device_engine_types({"runtimes": [{"name": "atomcode-w1"}]}) == ["atomcode"]
 
-    assert "atomcode" in _PROBE_COMMANDS
-    probe = _PROBE_COMMANDS["atomcode"]
+    probe_cmds = get_registry().probe_commands()  # [B5] 表已消，经 registry 派生
+    assert "atomcode" in probe_cmds
+    probe = probe_cmds["atomcode"]
     assert "--ephemeral" in probe and "--no-tools" in probe
     # 有命令模板就不能是 skip（否则探活恒 skip，引擎永远显示未探活）
     assert _probe_engine("atomcode", "")["status"] != "skip"

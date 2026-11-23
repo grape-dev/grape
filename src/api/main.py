@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api import drain_state, server_common
-from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit, org_analysis
+from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit, org_analysis, engines
 from src.domains.mgmt.routes import categories as categories_routes
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 
@@ -720,6 +720,8 @@ app.include_router(chat.router)
 
 from src.domains.mgmt.routes.plugin_exec import router as plugin_exec_router
 app.include_router(settings.router)
+app.include_router(engines.router)  # [P0b B3/B6] /api/engines/meta 只读元数据（descriptor 派生）
+
 app.include_router(plugin_exec_router)
 
 # 插件市场三张路由（arch 移植，总纲 #1078）：B1 货架 /api/plugins、C2 Agent 协商、A1 L0 发布门禁

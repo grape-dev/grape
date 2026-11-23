@@ -247,7 +247,10 @@ def _run_executor_once(popen_cmds):
 
     with patch("src.domains.runtime.agents.executor.subprocess.Popen", side_effect=fake_popen), \
          patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
-        events = list(stream_runtime("p", os.getcwd(), "", "issue"))
+        # [P0a 契约修正] backend_name 显式 "opencode"：原传 "" 走 get_backend
+        # fallback opencode 暗雷（executor.py:253-272，P0a 已改为显式报错）——
+        # 该 fallback 正是 P0a 要消灭的静默跑错引擎路径，测试改传显式名。
+        events = list(stream_runtime("p", os.getcwd(), "", "issue", "opencode"))
     assert [d for et, d in events if et == "done"], "应产出 done 事件"
 
 

@@ -280,26 +280,33 @@ class UsageCollector:
 
     # -------------------------------------------------- 生命周期
 
+    def _usage_mode(self) -> str:
+        """[B5] 账本分派模式来自 descriptor（alias 归一：aishell→hwcloud）。"""
+        from src.domains.runtime.engine.descriptor import get_registry
+        return get_registry().usage_mode(self.engine)
+
     def start(self) -> None:
         """任务开始前调用:记累计型账本的基线。失败静默降级。"""
         self._started = True
         try:
-            if self.engine == "aishell-dsh":
-                # M1（QA #1230）：resume 复用同一 session_id 时全量解析会重复计入
-                # 历史轮次——start 记水位（会话文件已存在的记录条数），finish 只
-                # 解析水位之后部分（对齐 hwcloud 按字节偏移的先例）。新会话文件
-                # 不存在时水位为 0（全量即增量，行为不变）。
-                self._baseline = {"aishell_dsh_records": _aishell_records_so_far(self.cwd, self.session_id)}
-                return
-            if self.engine == "hermes":
-                # Issue #3904：按账本路径快照（overlay + 共享候选），保证回退发生在
-                # start() 之后时 finish 仍能对上同一本账的基线。
+            # [B5] 账本分派模式来自 descriptor（alias 归一：aishell→hwcloud）；
+            # 键语义随基线 #3904/M1 对齐：hermes 落 hermes_by_path（路径快照，回退后
+            # finish 仍对同一本账），aishell-dsh 落水位键 aishell_dsh_records。
+            mode = self._usage_mode()
+            if mode == "hermes_cumulative":
                 self._baseline = {"hermes_by_path": self._hermes_snapshot()}
-            elif self.engine in ("hwcloud", "aishell"):
-                # aishell 是 hwcloud 的换名,采集路径一致
+            elif mode == "hwcloud_offset":
                 self._baseline = {"hwcloud": self._hwcloud_offset()}
-            elif self.engine == "opencode":
+            elif mode == "opencode_watermark":
                 self._baseline = {"opencode": self._opencode_watermark()}
+            elif mode == "aishell_dsh_watermark":
+                # 二期解析轨（arch 基线已落地）：M1（QA #1230）——resume 复用同一
+                # session_id 时全量解析会重复计入历史轮次，start 记水位（会话
+                # 文件已存在的记录条数），finish 只解析水位之后部分（对齐 hwcloud
+                # 按字节偏移的先例）。新会话文件不存在时水位为 0。
+                self._baseline = {"aishell_dsh_records": _aishell_records_so_far(self.cwd, self.session_id)}
+            # event_stream: 每轮增量由 feed 喂入,无需基线。
+            # none: 无 token 账本——不落基线、不误入 hwcloud/aishell 别名分支。
         except Exception as e:
             log.warning(f"usage_collect: baseline failed engine={self.engine}: {e}")
             self._baseline = {}
@@ -336,20 +343,22 @@ class UsageCollector:
         if session_id:
             self.session_id = session_id
         try:
-            if self.engine == "aishell-dsh":
+            mode = self._usage_mode()
+            if mode == "event_stream":
+                return self._fed
+            if mode == "opencode_watermark":
+                return self._opencode_usage()
+            if mode == "hermes_cumulative":
+                return self._hermes_usage()
+            if mode == "hwcloud_offset":
+                return self._hwcloud_usage()
+            if mode == "aishell_dsh_watermark":
                 # 二期解析轨：session.v4.jsonl.zstd 全量解析（zstd 三级依赖 + fail-open），
                 # resume 场景按 start() 水位截取增量（M1）
                 recs = parse_aishell_session_usage(self.cwd, self.session_id)
                 _skip = int((self._baseline or {}).get("aishell_dsh_records") or 0)
                 return recs[_skip:] if _skip > 0 else recs
-            if self.engine in ("codex", "atomcode"):
-                return self._fed
-            if self.engine == "opencode":
-                return self._opencode_usage()
-            if self.engine == "hermes":
-                return self._hermes_usage()
-            if self.engine in ("hwcloud", "aishell"):
-                return self._hwcloud_usage()
+            # none: 无账本——不误入 hwcloud/aishell 别名分支（防归因混账）。
             return []
         except Exception as e:
             log.warning(f"usage_collect: finish failed engine={self.engine}: {e}")

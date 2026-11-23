@@ -529,7 +529,7 @@ from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
     feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community,
     patrol, org_context_store, org_knowledge, org_audit, org_analysis,
-    categories as categories_routes,
+    categories as categories_routes, engines,
 )
 
 app.include_router(grape_auth.router)
@@ -578,6 +578,10 @@ app.include_router(patrol.router)
 from src.domains.mgmt.routes import im as im_router
 
 app.include_router(im_router.router)
+
+# 引擎元数据只读路由（P0b B3/B6，arch-4p 缺口修复: 此前只挂单体 main.py，
+# 四进程现网 /api/engines/meta 404 → 前端 _ENGINE_META 恒空态。E2E C05 步3 实证）
+app.include_router(engines.router)
 
 # Admin 管理后台（/api/admin/*）
 from src.domains.mgmt.admin.routes import router as admin_router
@@ -724,6 +728,8 @@ app.add_middleware(
 # ===== Issue #3757：路由注册清单唯一性 =====
 # 本文件的用户面路由以 526 行起的单一清单为唯一事实源（append-only）；唯一性由装配
 # 末尾的 assert_route_registry_unique(app) 在启动期 fail-fast 校验。
+# [P0b B3] engines.router（/api/engines/meta）按 append-only 追加于此：
+app.include_router(engines.router)  # /api/engines/meta（P0b B3/B6，arch-4p 缺口修复）
 
 metrics_middleware(app)
 

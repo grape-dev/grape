@@ -304,6 +304,7 @@
               </div>
             </div>
             <div v-html="reviewBannerHtml"></div>
+            <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
               <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -684,6 +685,7 @@
           </div>
         </div>
         <div v-html="reviewBannerHtml"></div>
+        <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
           <div class="isk-attach-list">
@@ -1849,6 +1851,53 @@ const detailCardHtml = computed(() => {
       ${tk.completed_at ? `<div class="isk-row"><span>${esc(td('detail.completed_at'))}</span><b>${esc(fmtLocal(tk.completed_at).substring(0, 16))}</b></div>` : ''}
       ${tk.task_description ? `<div class="isk-row isk-row-col isk-row-last"><span style="margin-bottom:4px">${esc(td('detail.no_description') || '任务描述')}</span><div class="isk-desc">${esc(tk.task_description)}</div></div>` : ''}
     </div>`
+})
+
+// ═══════════ Agent 节点状态卡（Issue #126 等价） ═══════════
+const agentStatusCardHtml = computed(() => {
+  const tk = detailTarget.value
+  if (!tk || !(tk.agent_statuses || []).length) return ''
+  const sm = {
+    pending: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '○',
+      label: t('agent_status.pending'),
+    },
+    running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
+    completed: { color: 'var(--g)', bg: 'var(--g)', icon: '✓', label: t('agent_status.completed') },
+    failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
+    cancelled: {
+      color: 'var(--t3)',
+      bg: 'var(--chip-bg)',
+      icon: '⊘',
+      label: t('agent_status.cancelled'),
+    },
+  }
+  const statuses = tk.agent_statuses
+  let html =
+    '<div class="isk-card"><div class="isk-card-tt">' + esc(t('agent_status.title')) + '</div>'
+  html += '<div class="isk-nodebar">'
+  statuses.forEach(function (s, i) {
+    const si = sm[s.status] || sm.pending
+    const isRunningS = s.status === 'running'
+    const isCompletedS = s.status === 'completed'
+    const isFailedS = s.status === 'failed'
+    const pulseStyle = isRunningS ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
+    const seq = s.latest_seq
+    const clickable = (isRunningS || isCompletedS || isFailedS) && seq
+    const clickAttr = clickable ? ` data-isk-jump="${seq}" style="cursor:pointer"` : ''
+    html += `<div class="isk-node"${clickAttr}>`
+    html += `<div class="isk-node-dot" style="background:${si.bg}${pulseStyle}">${si.icon}</div>`
+    html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
+    html += '</div>'
+    if (i < statuses.length - 1) {
+      const lineCol = isCompletedS ? 'var(--g)' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
+      html += `<div class="isk-node-line" style="background:${lineCol}"></div>`
+    }
+  })
+  html += '</div></div>'
+  return html
 })
 
 // ═══════════ Issue #539：需求级业务状态 + SRE 验收结论 ═══════════

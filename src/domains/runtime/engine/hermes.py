@@ -54,6 +54,12 @@ class HermesRuntime(AgentRuntime):
         from src.domains.runtime.agents.hermes_acp import HermesACPBackend
         return HermesACPBackend()
 
+    # [P0a A3] 本机路径 ACP 能力钩子：executor.stream_agent 按 callable(acp_backend)
+    # 分派统一 _stream_acp（不再按引擎名）。hermes 本机执行恒走 ACP。
+    def acp_backend(self):
+        from src.domains.runtime.agents.hermes_acp import HermesACPBackend
+        return HermesACPBackend()
+
     def _probe_cli_flag(self) -> bool:
         """探测当前 hermes 是否支持 --cli（一次性，带锁缓存）。
 

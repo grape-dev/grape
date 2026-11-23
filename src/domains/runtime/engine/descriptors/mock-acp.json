@@ -1,0 +1,33 @@
+{
+  "canonical": "mock-acp",
+  "aliases": [],
+  "protocol": "acp",
+  "discover": {
+    "cli": "mock-acp",
+    "pip": ""
+  },
+  "display": {
+    "name": "Mock ACP",
+    "dot_color": "#10b981",
+    "device_types": true
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "python3",
+      "scripts/mock_acp_engine.py",
+      "--version"
+    ]
+  },
+  "model_config_path": "",
+  "usage_retry": false,
+  "device_known": false,
+  "capabilities": {
+    "sandbox_installable": false,
+    "im_session_valid": false
+  },
+  "usage": {
+    "mode": "none"
+  },
+  "sandbox": {}
+}

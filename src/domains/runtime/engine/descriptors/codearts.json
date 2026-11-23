@@ -1,0 +1,34 @@
+{
+  "canonical": "codearts",
+  "aliases": [],
+  "protocol": "ndjson",
+  "discover": {
+    "cli": "codearts",
+    "pip": "codearts-cli"
+  },
+  "display": {
+    "name": "CodeArts",
+    "dot_color": "#f59e0b",
+    "device_types": true,
+    "icon": "/static/img/engines/codearts.jpg"
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "codearts",
+      "run",
+      "hello"
+    ],
+    "env_hook": "codearts_probe_env"
+  },
+  "model_config_path": "~/.codeartsdoer/codearts_cli.json",
+  "usage_retry": false,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": true
+  },
+  "usage": {
+    "mode": "none"
+  },
+  "sandbox": {}
+}

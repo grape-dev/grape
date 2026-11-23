@@ -17,8 +17,10 @@
 - 模型选择用 env AISHELL_DSH_MODEL 覆盖（原样 option value 字符串）；
   未设置时跳过 trial 默认值自动选第一个非 trial 路由，profile 已配好则不干预
 
-凭据/复用边界（同 hwcloud_acp 模式）：客户端类复制自 hwcloud_acp._ACPSimpleClient
-（仓库惯例：各引擎自持一份，适配各自协议差异），适配 aishell 的 content[] 输出块。
+凭据/复用边界（同 hwcloud_acp 模式）：客户端自 acp_client.py 单源 import
+（P0-1/A5 迁移，2026-11-13；此前经 hwcloud_acp 间接复用，「各引擎自持一份」
+的仓库惯例已废——复制路线在引入 acp_client 单源时终结），适配 aishell 的
+content[] 输出块。
 """
 from __future__ import annotations
 
@@ -33,9 +35,11 @@ from typing import Generator
 
 log = logging.getLogger(__name__)
 
-# 复用 hwcloud_acp 的通用件（请求客户端 / 超时 / 辅助函数）
+# 复用件分两层（P0-1/A5 单源化后）：
+# - 客户端基类直连单源 acp_client（机制层）；
+# - quirk 辅助函数（超时/_done_result/sessionId）仍复用 hwcloud_acp（语义同构）。
+from src.domains.runtime.agents.acp_client import _ACPSimpleClient  # noqa: E402
 from src.domains.runtime.agents.hwcloud_acp import (  # noqa: E402
-    _ACPSimpleClient,
     _done_result,
     _extract_session_id,
     _global_timeout_for,
@@ -55,6 +59,11 @@ class AishellDshACPBackend:
     name = "aishell-dsh"
     binary = "aishell"
     prompt_via_stdin = False  # ACP 模式不用 stdin 传 prompt，用 JSON-RPC
+
+    # [P0a A3] 本机路径 ACP 能力钩子：executor.stream_agent 按 callable(acp_backend)
+    # 分派统一 _stream_acp（不再按引擎名）。本 backend 自身就是 ACP 后端 → 返回 self。
+    def acp_backend(self):
+        return self
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         # ACP 模式不用 CLI 参数传 prompt；保留接口以兼容 AgentRuntime 契约

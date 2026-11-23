@@ -1,0 +1,30 @@
+{
+  "canonical": "cursor",
+  "aliases": [],
+  "protocol": "ghost",
+  "discover": {
+    "cli": "cursor",
+    "pip": "cursor"
+  },
+  "display": {
+    "name": "Cursor",
+    "dot_color": ""
+  },
+  "probe": {
+    "mode": "cli_run",
+    "command": [
+      "cursor",
+      "run",
+      "hello"
+    ]
+  },
+  "model_config_path": "",
+  "usage_retry": false,
+  "device_known": true,
+  "capabilities": {
+    "sandbox_installable": false
+  },
+  "usage": {
+    "mode": "none"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "canonical": "hwcloud",
+  "aliases": [
+    "aishell"
+  ],
+  "protocol": "acp",
+  "discover": {
+    "cli": "hwcloud",
+    "pip": ""
+  },
+  "display": {
+    "name": "AIShell",
+    "dot_color": "",
+    "page_type": "aishell",
+    "icon": "/static/img/engines/AIShell.svg"
+  },
+  "probe": {
+    "mode": "acp_handshake",
+    "command": [
+      "hwcloud",
+      "serve",
+      "--acp"
+    ],
+    "impl": "hwcloud_acp"
+  },
+  "model_config_path": "",
+  "usage_retry": true,
+  "device_known": false,
+  "capabilities": {
+    "sandbox_installable": true
+  },
+  "usage": {
+    "mode": "hwcloud_offset"
+  },
+  "sandbox": {
+    "probe_cli": "aishell"
+  }
+}
