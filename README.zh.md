@@ -100,7 +100,28 @@ Agent 任务的 59% 集中于流水线两端：VOD 将模糊需求收敛为可�
 
 ## 五、快速开始
 
-两种装法，任选其一 —— 交给 Agent，还是自己动手。
+三种装法，任选其一 —— 一键托管部署（Railway）、交给 Agent，或者自己动手。
+
+### 一键托管部署（Railway）
+
+<!-- TODO(publish): 模板发布后把 TEMPLATE_SLUG 换成 Railway 给的 slug（railway.com/deploy/<slug>），
+     其余内容无需改动。 -->
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/TEMPLATE_SLUG)
+
+Railway 会从这个仓库构建镜像、挂载数据卷并生成公网域名。你只需要填**一个**字段：`LLM_API_KEY`（模型服务的 key）。
+其余变量已预置或自动生成 —— `JWT_SECRET` 由 `${{secret(64)}}` 生成，`LLM_PROVIDER` 默认 `openrouter`，
+`LLM_BASE_URL` / `LLM_MODEL` 留空即走 provider 预设。
+
+首次启动后自检：
+
+| 检查项 | 期望结果 |
+| --- | --- |
+| `GET /api/health` | 返回 `200`，且 `server_base_url_configured: true` 指向生成的域名（不是 `localhost`）|
+| 登录页 | 正常渲染，底部第三方登录区在 |
+| `Settings → Volumes` | 已挂载 `/app/data`，重新部署后数据不丢 |
+
+第三方登录要等你配好自己的 OAuth 应用凭据（管理后台 → `配置中心 → 登录渠道`）才会启用；
+需要登记的回调地址是 `https://<你的域名>/api/auth/callback/<provider>`。
 
 ### ① 让 Agent 装（推荐）
 
