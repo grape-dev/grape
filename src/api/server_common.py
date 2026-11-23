@@ -30,8 +30,8 @@ from src.api.frontend_flags import apply_feature_flags
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
 from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
-from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
-                               trace_id_var, user_var)
+from src.kernel.config import (issue_var, path_var, request_id_var, repo_var, seq_var,
+                               span_id_var, trace_id_var, user_var)
 
 __all__ = [
     "ensure_python_version",
@@ -258,6 +258,7 @@ def _attach_request_log(app: FastAPI) -> None:
 
         # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
         path = request.url.path
+        token_path = path_var.set(path)
         _repo = ""
         _path_parts = path.strip("/").split("/")
         if len(_path_parts) >= 4 and _path_parts[0] == "api":
@@ -382,6 +383,7 @@ def _attach_request_log(app: FastAPI) -> None:
                     except Exception as _exc:
                         log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
+            path_var.reset(token_path)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
             issue_var.reset(token_issue)
