@@ -136,6 +136,10 @@ _COMMENT_PAGE_DEFAULT = 20
 # Issue #3855：显示名称独立于 SKILL.md frontmatter name，最长 20 个 Unicode 码点
 # （汉字/字母/数字/空格/emoji 各计 1，去除首尾空格后计数）。
 SKILL_DISPLAY_NAME_MAX = 20
+# Issue #3855：复用/转换写路径 ~N 后缀去重枚举上界。
+# 五源登记：DEDUP_SUFFIX_MAX = <undecided: 需要同 scope 同名变体规模测量>。
+# 现为防死循环的工程护栏（无业务口径），耗尽即 409，绝不静默返回重名值。
+DEDUP_SUFFIX_MAX = 999
 
 
 def _normalize_skill_display_name(raw) -> str:
@@ -206,10 +210,8 @@ def _converted_display_name(scope: str, owner_id: str, source_display,
         candidate = "技能"
     if not _skill_display_name_conflict(scope, owner_id, candidate):
         return candidate
-    # ~N 去重枚举：2..999 仅为防死循环的工程护栏（同 scope 同名变体 ≥998 属异常规模，
-    # 正常业务不触达），非业务口径——「允许多少同名变体」无既定上限，故耗尽即视为
-    # 目标 scope 名称空间已占用，显式 409 失败，而非静默返回一个已知重名的名称。
-    for seq in range(2, 1000):
+    # ~N 去重枚举（上界见 DEDUP_SUFFIX_MAX 五源登记）：耗尽仍重名即 409，不静默返回重名值。
+    for seq in range(2, DEDUP_SUFFIX_MAX + 1):
         suffix = f"~{seq}"
         head = candidate[:SKILL_DISPLAY_NAME_MAX - len(suffix)].rstrip()
         trial = f"{head}{suffix}" if head else suffix.lstrip("~")
