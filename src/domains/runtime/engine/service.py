@@ -1515,7 +1515,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                 _path = get_skill_path(_sid) if _sid else (skill_path or "")
                 _okey = get_skill_object_key(_sid) if _sid else ""
-            # Issue #3914 B：id 直查 / 名字降级的解析结果统一回写（0 保持既有降级语义）
+            # Issue #3914 B：id 直查 / 名字降级的解析结果统一回写（0 保持既有降级语义）。
+            # 优先级（review 确认项）：本函数解析出的**有效** id 优先于调用方显式入参——
+            # 调用方 id 有效时二者相同（① 直接用它）；调用方 id 已失效（技能被删/停用）时
+            # 以按名重解析的结果落列，避免任务行留一个悬空 id 让 direct evt 重建取到空路径。
             _resolved_skill_id = int(_sid or 0)
             # 本地目录存在 → 打包（仅无 OBS 键的兜底路径；有 _okey 时跳过本地打包——
             # OBS zip 是权威源且内容一致，本地再打一份就是双写）

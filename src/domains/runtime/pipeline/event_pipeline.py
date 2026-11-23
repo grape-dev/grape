@@ -4845,6 +4845,9 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                     _zip = get_skill_zip_bytes(_okey_bridge)
                     if _zip:
                         return ("zip", _zip)
+                    # 行为变化（review 确认项）：任务行已写明 OBS 键但拉取失败 → 直接
+                    # ("none", ...) 交给物化回退链（degraded/FALLBACK.md 指引），**不再**
+                    # 退化为「按名找官方目录」——按名找回的是另一份内容，属静默换源。
                     return ("none", f"skill zip unavailable: {_okey_bridge}")
                 from src.kernel.config import resolve_official_skill_path as _resolve_skill_path
                 _real_skill_md = _resolve_skill_path(skill_name or "")
