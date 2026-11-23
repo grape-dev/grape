@@ -170,6 +170,26 @@ def test_registry_versions_unique():
     assert not dups, f"register_migration 注册表版本号重复: {dups}"
 
 
+# ===== 5. 验收主场景：存量库旧行保留，新号 pending 执行后盖章 =====
+
+def test_existing_ledger_old_row_preserved_new_row_stamped(tmp_path, monkeypatch):
+    """存量库（202611180001=issue2761 旧行在）启动：新号 pending 执行、旧行保留、
+    台账新增 202611230010=ensure-cloud-sandboxes-in-runtime，表与三索引真实在位。"""
+    conn = sqlite3.connect(str(tmp_path / "mig.db"))
+    try:
+        conn.execute(D._SCHEMA_MIGRATIONS_DDL)
+        _stale_stamp(conn, OLD_VERSION, STAMPED_OTHER_NAME)   # 存量库历史盖章行
+        from src.kernel import session_manager as sm
+        monkeypatch.setattr(sm, "db", conn)   # fn/post_check 缺省走模块级连接
+        D._run_migrations_with_conn(conn, registry=[D.Migration(**mig.MIGRATION)])
+        assert _ledger_name(conn, OLD_VERSION) == STAMPED_OTHER_NAME, "存量旧行被误改/误删"
+        assert _ledger_name(conn, NEW_VERSION) == MIG_NAME, "新号未盖章"
+        assert mig._postcheck_cloud_sandboxes(conn=conn) == list(mig.INDEX_NAMES), \
+            "迁移执行后表与三索引未在位"
+    finally:
+        conn.close()
+
+
 def test_duplicate_registration_reports_error_and_is_detectable(caplog):
     """门禁探针：人为重复登记同号 → 守卫报 ERROR，且唯一性检查能检出（CI 判红）。"""
     snapshot = list(D._MIGRATIONS)
