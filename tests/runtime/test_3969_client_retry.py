@@ -88,7 +88,7 @@ class TestRetryBudget:
         sleeps = AsyncMock()
         # 起点 0s，之后每次采样都超过 1s 预算
         with patch.object(asyncio, "sleep", new=sleeps), \
-             patch.object(client_mod.time, "monotonic",
+             patch.object(client_mod, "_monotonic",
                           side_effect=[0.0] + [10.0] * 10):
             assert _run(c._request("GET", "/api/x", retries=4)) is None
         assert sleeps.await_count == 0

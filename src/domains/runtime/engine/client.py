@@ -4,7 +4,7 @@
 终态回调（complete/fail）带指数退避（4s→8s→…→64s），仅 5xx/408/429 重试。
 runtime_gone（404）→ 清理本地 → 幂等重注册。
 """
-import asyncio, json, logging, os, time
+import asyncio, json, logging, os, random, time
 
 from src.domains.runtime.engine.runtime_id_guard import (
     RUNTIME_ID_MISSING,
@@ -14,6 +14,43 @@ from src.domains.runtime.engine.runtime_id_guard import (
 )
 
 log = logging.getLogger("devops-bot")
+
+# Issue #3969：退避收敛参数。抖动（默认 ±20%）分散多 worker 的重试时点，避免主控/网关
+# 重启后同一秒惊群；总时长上限（默认 90s，0=不限）防止重试链把心跳真空拉长到被判离线。
+_DEFAULT_RETRY_JITTER = 0.2
+_DEFAULT_RETRY_BUDGET_SECONDS = 90.0
+
+
+def _client_retry_jitter() -> float:
+    """退避抖动比例（`GRAPE_CLIENT_RETRY_JITTER`，0~0.5，默认 0.2）。"""
+    raw = os.environ.get("GRAPE_CLIENT_RETRY_JITTER", "")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_RETRY_JITTER
+    return min(0.5, max(0.0, val))
+
+
+def _client_retry_budget() -> float:
+    """单次请求重试总时长上限（`GRAPE_CLIENT_RETRY_BUDGET_SECONDS`，默认 90s，0=不限）。"""
+    raw = os.environ.get("GRAPE_CLIENT_RETRY_BUDGET_SECONDS", "")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_RETRY_BUDGET_SECONDS
+    return max(0.0, val)
+
+
+def _monotonic() -> float:
+    """可替换的单调时钟（测试用；避免 patch 全局 time 影响事件循环）。"""
+    return time.monotonic()
+
+
+def _next_backoff(base: float, cap: float, jitter: "float | None" = None) -> float:
+    """下一次退避秒数：`min(base, cap)` 加 ±jitter 抖动。"""
+    j = _client_retry_jitter() if jitter is None else jitter
+    d = min(float(base), float(cap))
+    return max(0.0, d * (1.0 - j + 2.0 * j * random.random()))
 
 
 class RetryableError(Exception):
@@ -67,6 +104,11 @@ class RuntimeClient:
         self._max_connections = max_connections
         # Issue #975：最近一次 _request 的 HTTP 错误（status=0 表示网络错误/重试耗尽）
         self.last_http_error = None
+        # Issue #3969：请求级连续失败计数。单次 502 被退避重试覆盖即清零；只有「重试
+        # 耗尽 / 网络错误」才 +1，避免瞬时抖动被当成离线证据。
+        self.consecutive_failures = 0
+        # 心跳连续失败次数（按心跳「轮次」计，一轮内部可能已含多次传输级重试）。
+        self.heartbeat_fail_streak = 0
         # Issue #1011：worker v2-first（uid 寻址）状态
         self._uid_by_rid = {}    # runtime_id -> engine_uid（register 响应 / 本地持久化）
         self._v2_enabled = True  # 空白 404/405 判定对端为旧服务端后置 False（记忆，不再每轮撞 v2）
@@ -260,6 +302,14 @@ class RuntimeClient:
         self._connector = None
         self._session = None
 
+    def _note_success(self) -> None:
+        """请求成功：清空连续失败计数（单次瞬时故障不算失败）。"""
+        self.consecutive_failures = 0
+
+    def _note_failure(self) -> None:
+        """重试耗尽 / 网络错误：连续失败计数 +1（单次 502 若被重试覆盖不会走到这里）。"""
+        self.consecutive_failures += 1
+
     async def _request(self, method: str, path: str, body=None, retries: int = 4,
                        error_sink: dict | None = None, session=None) -> dict | None:
         """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。
@@ -276,6 +326,8 @@ class RuntimeClient:
         私有的 dict，错误同时写入 sink 与 last_http_error（后者仅为兼容保留）。
         """
         self.last_http_error = None
+        _started = _monotonic()
+        _budget = _client_retry_budget()
 
         def _record(status: int, text: str):
             _err = {"status": status, "text": text}
@@ -311,6 +363,7 @@ class RuntimeClient:
                         else:
                             log.warning(f"RuntimeClient {method} {path} -> {resp.status}: {txt}")
                         return None
+                    self._note_success()
                     if resp.status == 204:
                         return {}
                     try:
@@ -324,21 +377,23 @@ class RuntimeClient:
                 _record(404, "runtime gone")
                 return None  # 调用方处理重注册
             except RetryableError:
-                if attempt >= retries:
+                if attempt >= retries or (_budget > 0 and _monotonic() - _started >= _budget):
                     log.warning(f"RuntimeClient {method} {path} retries exhausted")
                     _record(0, "retries exhausted")
+                    self._note_failure()
                     return None
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_next_backoff(delay, 64))
                 delay = min(delay * 2, 64)
                 attempt += 1
             except (asyncio.CancelledError, KeyboardInterrupt):
                 raise
             except Exception as e:
                 log.warning(f"RuntimeClient {method} {path} error: {e}")
-                if attempt >= retries:
+                if attempt >= retries or (_budget > 0 and _monotonic() - _started >= _budget):
                     _record(0, str(e)[:200])
+                    self._note_failure()
                     return None
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_next_backoff(delay, 64))
                 delay = min(delay * 2, 64)
                 attempt += 1
 
@@ -625,8 +680,9 @@ class RuntimeClient:
         if _uids and self._v2_enabled:
             payload["engine_uids"] = _uids
             status, data, text = await self._request_raw(
-                "POST", "/api/runtime/heartbeat-v2", payload, retries=1)
+                "POST", "/api/runtime/heartbeat-v2", payload, retries=2)
             if status == 200:
+                self.heartbeat_fail_streak = 0
                 return data
             if self._is_blank_not_found(status, data, text):
                 self._v2_enabled = False
@@ -634,9 +690,19 @@ class RuntimeClient:
             else:
                 log.warning(f"heartbeat-v2 failed (status={status}) -> fallback v1")
             payload.pop("engine_uids", None)
-        result = await self._request("POST", "/api/runtime/heartbeat", payload, retries=2,
+        result = await self._request("POST", "/api/runtime/heartbeat", payload, retries=3,
                                      session=_hb)
+        # Issue #3969：单次 502 已被 _request 的退避重试覆盖（返回非 None 即成功），
+        # 只有整轮重试耗尽才算一次心跳失败，避免瞬时抖动直接判离线。
+        if result is None:
+            self.heartbeat_fail_streak += 1
+        else:
+            self.heartbeat_fail_streak = 0
         return result
+
+    def heartbeat_offline(self, threshold: int = 3) -> bool:
+        """连续失败达到阈值（默认 3 个心跳轮次）才认为离线。"""
+        return self.heartbeat_fail_streak >= max(1, int(threshold))
 
     async def claim(self, runtime_id: int, supports_obs_url: bool = False,
                     prefer_fallback: bool = False) -> dict | None:
