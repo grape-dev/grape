@@ -184,7 +184,11 @@ def _sync_skills_to_db(data: dict) -> int:
                      old_cat, old_l1, old_l2, old_tags) = row
                     # Issue #3855：已录入且非空的显示名称不被源名称覆盖；仅空值回填源名称。
                     # 官方技能改名人编辑后，30 分钟同步不得回退为 SKILL.md name。
-                    target_display = (str(old_display or "").strip()) or source_display
+                    # 存量非空名称原样保留（不清洗）：历史 " Name " 不能在这里被 strip 改写，
+                    # 仅 None/""/纯空白视为空值回填源名称。
+                    _raw_old_display = "" if old_display is None else str(old_display)
+                    target_display = (source_display if not _raw_old_display.strip()
+                                      else _raw_old_display)
                     # 一级变更时才重置二级（一级未变且来源未给二级时保留旧二级，
                     # 避免「未命中不覆盖旧值」与跨父级脏数据两种问题）
                     from src.kernel.category import sync_category_target  # noqa: PLC0415

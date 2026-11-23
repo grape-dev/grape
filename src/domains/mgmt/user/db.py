@@ -1317,8 +1317,10 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 if _incoming_name:
                     _target_name = _incoming_name
                 else:
-                    _current_name = (row[1] or "").strip() if len(row) > 1 else ""
-                    _target_name = _current_name or skill_name
+                    # Issue #3855：存量非空名称原样保留（不清洗），历史 " Name " 不得被
+                    # strip 静默改写；仅 None/""/纯空白视为空值回填源名称。
+                    _current_name = "" if (len(row) <= 1 or row[1] is None) else str(row[1])
+                    _target_name = _current_name if _current_name.strip() else skill_name
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
                 from src.kernel import cross_write as _xw_uso

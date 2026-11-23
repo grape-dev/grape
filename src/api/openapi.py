@@ -74,6 +74,8 @@ def _iter_routes(route):
 # 视为「对外安全路由」的认证依赖名（契约收录范围）
 _PUBLIC_AUTH_DEPS = frozenset({
     "get_current_user_or_api_key",
+    # Issue #3855：官方技能改名/详情同时服务普通用户与管理台 JWT（admin_accounts）。
+    "get_current_user_or_api_key_or_admin",
     "get_user_or_none",  # a2a 软认证（JWT/session/api key 任一；None 交给内部 bot 鉴权）
 })
 
@@ -113,10 +115,12 @@ def route_is_public(route) -> bool:
 def token_scope(route) -> str | None:
     """推导对外路由的 token 作用域（`x-token-scope`）：
 
-    - 依赖链命中 `require_no_session_token`                → user_only（156 处 D 类管理端点）
+    - 依赖链命中 `require_no_session_token` / `require_no_session_token_or_admin`
+      → user_only（D 类管理端点；后者额外放行管理台 JWT，Issue #3855）
     - operation_id 在 `_SESSION_ONLY_OPERATIONS` 或路径前缀命中
       `_SESSION_ONLY_PATH_PREFIXES`                          → session_only（git-repo 传输/凭据）
-    - 依赖链命中 `get_current_user_or_api_key` / `get_user_or_none` → dual
+    - 依赖链命中 `get_current_user_or_api_key` / `get_current_user_or_api_key_or_admin`
+      / `get_user_or_none`                                   → dual
     - 其余（依赖链无对外认证）                               → None（不进契约或未知）
     """
     if not isinstance(route, APIRoute):
@@ -126,7 +130,7 @@ def token_scope(route) -> str | None:
     path = getattr(route, "path", "") or ""
     if op_id in _SESSION_ONLY_OPERATIONS or path.startswith(_SESSION_ONLY_PATH_PREFIXES):
         return "session_only"
-    if "require_no_session_token" in names:
+    if "require_no_session_token" in names or "require_no_session_token_or_admin" in names:
         return "user_only"
     if names & _PUBLIC_AUTH_DEPS:
         return "dual"
