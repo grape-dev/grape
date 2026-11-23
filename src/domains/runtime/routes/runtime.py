@@ -3133,10 +3133,35 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
 # - worker 的 OTLP/HTTP exporter 指向 {RUNTIME_SERVER_URL}/api/runtime/traces（既有通道+Bearer）
 # - 本端点透传 body（protobuf/json/gzip 原样，零解析）→ OTLP_RELAY_TARGET/v1/traces
 # - 鉴权复用 _require_credential（与 claim 同款）；失败透传状态码，业务零影响
-OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
+# 目标值按请求现读环境变量（不要恢复成模块级常量）：
+#   ① 模块导入时快照 env，运维改了 OTLP_RELAY_TARGET 却没重启进程，端点会一直回
+#      503「trace relay disabled」，nginx 日志里只有一行 503，分不清「没配」和
+#      「配了没重启」。
+#   ② 换一种不带该 env 的启动方式（自定义 EnvironmentFile / 手工起进程）同样会
+#      静默回 503。现读后 env 变更立即生效；真没配时降级 503 并留一条限频告警。
+def _relay_target() -> str:
+    return (os.environ.get("OTLP_RELAY_TARGET") or "").strip()
+
+
+_relay_warn_ts = 0.0
+
+
+def _warn_relay_disabled() -> None:
+    """未配置中继时每 10 分钟告警一次（worker 出口 5~20s 一批，逐条告警会刷屏）。"""
+    global _relay_warn_ts
+    now = datetime.now(timezone.utc).timestamp()
+    if now - _relay_warn_ts < 600:
+        return
+    _relay_warn_ts = now
+    log.warning("trace relay disabled: OTLP_RELAY_TARGET 未配置，worker trace 出口返回 "
+                "503（仅影响 trace 上报，不影响业务）")
+
 
 from fastapi.responses import Response as _RelayResponse
 
+# 同名 Counter 在本文件历史上被定义过两次（第二处重复注册抛 ValueError，except 把
+# _relay_total 置 None），结果是中继一直在转发、指标却只有 HELP/TYPE 没有任何样本。
+# 只保留本处定义；创建失败要留痕，不能再静默降级。
 _relay_total = None
 try:
     from prometheus_client import Counter as _PC
@@ -3144,8 +3169,10 @@ try:
     _relay_total = _PC("grape_trace_relay_requests_total",
                        "Trace relay requests forwarded to LGTM",
                        ["status"], registry=_obs_public.prometheus_registry())
-except Exception:
+except Exception as _relay_metric_e:  # noqa: BLE001
     _relay_total = None
+    log.warning(f"trace relay counter unavailable: "
+                f"{type(_relay_metric_e).__name__}: {_relay_metric_e}")
 
 
 @router.post("/traces", operation_id="runtime_traces_relay",
@@ -3157,7 +3184,9 @@ except Exception:
                          "asynchronously, zero business impact).")
 async def runtime_traces_relay(request: Request,
                                credential_id: int = Depends(_require_credential)):
-    if not OTLP_RELAY_TARGET:
+    target = _relay_target()
+    if not target:
+        _warn_relay_disabled()
         return _RelayResponse(status_code=503,
                               content='{"detail":"trace relay disabled"}',
                               media_type="application/json")
@@ -3181,7 +3210,7 @@ async def runtime_traces_relay(request: Request,
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as hc:
-            r = await hc.post(OTLP_RELAY_TARGET.rstrip("/") + "/v1/traces",
+            r = await hc.post(target.rstrip("/") + "/v1/traces",
                               content=body, headers=fwd_headers)
         if _relay_total is not None:
             try:
@@ -4115,16 +4144,6 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
              f"templates={_tpl_upserted} engines_detected={_engines_bound} owner={_owner_name}")
     return {"provider_id": pid, "templates_upserted": _tpl_upserted,
             "engines_detected": _engines_bound, "status": "ok"}
-
-try:
-    from prometheus_client import Counter as _PC
-    from src.domains.insight.observability import registry as _obs_registry
-    _relay_total = _PC("grape_trace_relay_requests_total",
-                       "Trace relay requests forwarded to LGTM",
-                       ["status"], registry=_obs_registry)
-except Exception:
-    _relay_total = None
-
 
 
 class ContractGuardSignalBody(BaseModel):
