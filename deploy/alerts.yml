@@ -160,3 +160,20 @@ groups:
         annotations:
           summary: "Result comment posting keeps failing (repo={{ $labels.repo_key }})"
           description: "repo {{ $labels.repo_key }} has {{ $value }} consecutive result-comment post failures — not transient. Verify the repo bot credentials (bot identity token), the repo's existence/visibility, and whether the ident form is still deliverable. Check logs for 'RESULT_COMMENT_ALERT'."
+
+      # Issue #4082：worker 标签探活连续失败（runtime 在线但拿不到标签 → 派发依据为空）
+      # 语义：worker 以 host+reason 上报连续 N 次探活失败（N=RUNTIME_TAGS_PROBE_ALERT_AFTER，
+      # 默认 3）；reason 区分 id_missing（未注册/注册回包未回填真实 id，本条缺陷主犯）/
+      # unauthorized（401，凭据或归属不对，**不是**凭据吊销）/ not_found（runtime 行已删）/
+      # no_tags（已注册但一个标签都没有，引擎 role_tags/scene_tags 为空）。
+      # 排查：worker 日志 "RUNTIME_ID_MISSING" 与 "runtime tags probe"；
+      # ~/.grape/runtime-tags-probe-alerts.jsonl（存在即上报链路自身不可用）；
+      # 控制台「引擎标签」是否有配置；reason=id_missing 时核对 GRAPE_RUNTIME_ID 与注册回包。
+      - alert: GrapeRuntimeTagsProbeFailing
+        expr: sum by (host, reason) (increase(grape_runtime_tags_probe_failure_total{reason!="unknown"}[15m])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Runtime tags probe failing repeatedly (host={{ $labels.host }}, reason={{ $labels.reason }})"
+          description: "A worker reported >=3 consecutive runtime tags probe failures in 15m (reason={{ $labels.reason }}): id_missing = no valid runtime id (registration reply not backfilled, check GRAPE_RUNTIME_ID), unauthorized = 401 on probe (config/ownership, not credential revocation), not_found = runtime row deleted or in re-derive window, no_tags = registered engine without claimable tags (empty role_tags/scene_tags breaks dispatch). Check worker logs for RUNTIME_ID_MISSING / 'runtime tags probe', ~/.grape/runtime-tags-probe-alerts.jsonl fallback, and console engine tags."

@@ -16,6 +16,9 @@ from src.domains.runtime.engine.health import apply_runtime_state
 from src.kernel.config import log
 from src.kernel.domain_db import cursor as _domain_cursor
 
+# Issue #4082：`/runtimes/{runtime_id}/*` 非法 id 统一 400 的路由类
+from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
+
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
@@ -159,7 +162,9 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         return []
 
 
-router = APIRouter(prefix="/api/runtime", tags=["runtime"])
+router = APIRouter(prefix="/api/runtime", tags=["runtime"],
+                   # Issue #4082：`/runtimes/{runtime_id}/*` 非法 id 统一 400（先于鉴权/参数校验）
+                   route_class=RuntimeIdGuardRoute)
 
 # Worker 包下载并发限制（防止多 worker 同时下载占满带宽）
 _PKG_DOWNLOAD_LIMIT = int(os.environ.get("PKG_DOWNLOAD_MAX_CONCURRENT", "5"))
@@ -4276,6 +4281,23 @@ class ContractGuardSignalBody(BaseModel):
     ts: float = 0
 
 
+class RuntimeTagsProbeSignalBody(BaseModel):
+    """Issue #4082：worker 标签探活失败信号（按 host/reason 计数）。
+
+    reason 取值见 `RUNTIME_TAGS_PROBE_REASONS`（id_missing/unauthorized/not_found/no_tags）；
+    host/pid/ts 仅供服务端日志甄别（worker sink 就地补充）；runtime_id/detail 只进日志。
+    """
+    host: str = ""
+    reason: str
+    runtime_id: str = ""
+    consecutive: int = 0
+    code: str = ""
+    detail: str = ""
+    scene: str = ""
+    pid: int = 0
+    ts: float = 0
+
+
 @router.get("/platform-cards", operation_id="runtime_platform_cards")
 def runtime_platform_cards(credential_id: int = Depends(_require_credential)):
     """Issue #3632：平台卡契约端点（worker/engine 进程取卡的唯一通道）。
@@ -4321,4 +4343,29 @@ def runtime_contract_guard_signal(body: ContractGuardSignalBody,
     if body.detail:
         log.info(f"contract guard signal: outcome={outcome} host={body.host or '?'}"
                  f" detail={body.detail[:200]}")
+    return {"status": "ok"}
+
+
+@router.post("/runtime-tags-probe/signal", operation_id="runtime_tags_probe_signal")
+def runtime_tags_probe_signal(body: RuntimeTagsProbeSignalBody,
+                              credential_id: int = Depends(_require_credential)):
+    """Issue #4082：承接 worker 标签探活失败信号 → `grape_runtime_tags_probe_failure_total`。
+
+    worker 侧（`runtime_id_guard.ProbeFailureReporter`）在连续 N 次探活失败后上报一次
+    （防每轮刷爆），服务端按 host/reason 计数，`deploy/alerts.yml` 的
+    `GrapeRuntimeTagsProbeFailing` 规则消费。承接失败只记日志不报错——告警链路故障
+    不得影响 worker 探活主链路（worker 侧另有本地 JSONL 兜底落点）。
+    """
+    from src.domains.insight.observability import (RUNTIME_TAGS_PROBE_REASONS,
+                                                   record_runtime_tags_probe_failure)
+    reason = (body.reason or "").strip().lower()
+    if reason not in RUNTIME_TAGS_PROBE_REASONS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid reason"})
+    try:
+        record_runtime_tags_probe_failure(body.host, reason, body.detail)
+    except Exception as e:
+        log.warning(f"runtime tags probe signal record failed: {e}")
+    log.warning(f"runtime tags probe failure signal: host={body.host or '?'} reason={reason} "
+                f"runtime_id={body.runtime_id or '-'} consecutive={body.consecutive} "
+                f"scene={body.scene or '-'} code={body.code or '-'} detail={(body.detail or '')[:200]}")
     return {"status": "ok"}

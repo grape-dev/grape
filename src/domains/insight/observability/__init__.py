@@ -545,6 +545,43 @@ def record_contract_guard_failure(outcome: str, detail: str = ""):
     CONTRACT_GUARD_FAILURES.labels(outcome=o).inc()
 
 
+# Issue #4082：worker 标签探活失败信号（`/api/runtime/runtime-tags-probe/signal` 承接）。
+# 口径：
+# - id_missing：worker 拿不到真实 runtime id（注册回包未回填/配置缺失）——本条缺陷的主犯；
+# - unauthorized：401（凭据/归属不对，**不是**凭据吊销）；
+# - not_found：404（runtime 行已被删或重建窗口）；
+# - no_tags：已注册但一个标签都没有（引擎派发依据为空，需运维补标签）。
+# 与 worker `src/domains/runtime/engine/runtime_id_guard.PROBE_REASONS` 为自包含双实现
+# （worker 包闭包内没有 insight 域），口径由 Issue #4082 测试锁定。
+RUNTIME_TAGS_PROBE_FAILURES_METRIC = "grape_runtime_tags_probe_failure_total"
+
+RUNTIME_TAGS_PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags")
+
+RUNTIME_TAGS_PROBE_FAILURES = Counter(
+    RUNTIME_TAGS_PROBE_FAILURES_METRIC,
+    "Runtime tags probe failure signals reported by workers, by host and reason: "
+    "id_missing = worker has no valid runtime id (registration not backfilled), "
+    "unauthorized = 401 on probe (config/ownership, not revocation), "
+    "not_found = runtime row deleted or in re-derive window, "
+    "no_tags = registered engine without any claimable tags.",
+    ["host", "reason"],
+    registry=registry,
+)
+
+
+def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
+    """标签探活失败计数（`/api/runtime/runtime-tags-probe/signal` 的承接落点）。
+
+    reason 取值见 RUNTIME_TAGS_PROBE_REASONS；未知取值按 unknown 计数（不丢数）。
+    host 用于按主机定位（15 台 worker 逐台补 id 的依据），detail 不进标签（防高基数）。
+    """
+    h = (host or "").strip() or "unknown"
+    r = (reason or "").strip().lower()
+    if r not in RUNTIME_TAGS_PROBE_REASONS:
+        r = "unknown"
+    RUNTIME_TAGS_PROBE_FAILURES.labels(host=h, reason=r).inc()
+
+
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====
 
 DB_THREADS_CONNECTED = Gauge(
