@@ -635,6 +635,23 @@ def delete_github_repo(api_token: str, owner: str, repo: str) -> bool:
     return True
 
 
+# 仓库删除能力注册表：一个平台一行，避免调用方写 `if provider == ...` 分叉。
+# 值存函数名而非函数对象：测试/装配层 monkeypatch 同名函数时仍能生效。
+_REPO_DELETE_IMPL = {}
+_REPO_DELETE_IMPL["gitcode"] = "delete_gitcode_repo"
+_REPO_DELETE_IMPL["github"] = "delete_github_repo"
+
+
+def delete_repo_for_provider(provider: str, api_token: str,
+                             owner: str, repo: str) -> bool:
+    """按 provider 派发仓库删除；未登记平台抛错（调用方决定是否降级）。"""
+    name = _REPO_DELETE_IMPL.get(str(provider or "").strip().lower())
+    fn = globals().get(name) if name else None
+    if fn is None:
+        raise RuntimeError(f"provider {provider!r} 暂不支持删除仓库")
+    return fn(api_token, owner, repo)
+
+
 def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
@@ -1366,6 +1383,21 @@ def probe_github_repo_create(api_token: str, owner: str = "", private: bool = Tr
             return True, ""
         return None, f"GitHub 权限探测失败（不阻断创建）：{msg[:160]}"
     return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
+
+
+# 建仓权限探测能力注册表（同上：实现绑定集中在一处，调用方零平台分支）。
+_REPO_CREATE_PROBES = {}
+_REPO_CREATE_PROBES["github"] = "probe_github_repo_create"
+
+
+def probe_repo_create(provider: str, api_token: str, owner: str = "",
+                      private: bool = True) -> "tuple[bool | None, str]":
+    """按 provider 探测建仓权限；未登记平台返回 (None, '')，不阻断创建。"""
+    name = _REPO_CREATE_PROBES.get(str(provider or "").strip().lower())
+    fn = globals().get(name) if name else None
+    if fn is None:
+        return None, ""
+    return fn(api_token, owner=owner, private=private)
 
 
 def get_user_github_login_status(api_token: str) -> tuple[str, int]:

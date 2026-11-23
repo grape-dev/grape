@@ -131,9 +131,10 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
     work_branch = _scene_work_branch(scene_id, org_repo_key)
     if not work_branch:
         from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+        from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
 
         work_branch = resolve_org_repo_default_branch(
-            org, org_repo_key, fallback="main")
+            org, org_repo_key, fallback=ORG_REPO_DEFAULT_BRANCH)
     name = managed_task_name(org)
     now = datetime.now(timezone.utc).isoformat()
     next_run = _next_run(ANALYSIS_CRON)

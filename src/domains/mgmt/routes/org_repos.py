@@ -142,7 +142,10 @@ def _normalize_repo_key(body: BindRepoBody) -> str:
     provider = "gitcode"
     if ":" in raw:
         maybe_provider, rest = raw.split(":", 1)
-        if maybe_provider in ("gitcode", "github"):
+        maybe_provider = maybe_provider.strip().lower()
+        from src.domains.runtime import public as runtime_public
+
+        if runtime_public.get_platform_card(maybe_provider) is not None:
             provider = maybe_provider
             raw = rest
     parts = raw.split("/", 1)

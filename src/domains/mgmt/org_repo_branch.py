@@ -14,9 +14,13 @@ from src.kernel.repo_key import parse_repo_key
 
 
 def resolve_org_repo_default_branch(org: dict, repo_key: str, *,
-                                    fallback: str = "main") -> str:
-    """读取组织仓库的默认分支；失败/空值返回 ``fallback``。"""
+                                    fallback: str = "") -> str:
+    """读取组织仓库的默认分支；失败/空值返回 ``fallback``（缺省为统一常量）。"""
     repo_key = str(repo_key or "").strip()
+    if not fallback:
+        from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+        fallback = ORG_REPO_DEFAULT_BRANCH
     if not repo_key:
         return fallback
     try:

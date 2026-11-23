@@ -376,9 +376,10 @@ def _ensure_org_scene(org: dict, repo_key: str, *,
         _set_provision_fields(org["id"], org_scene_id=scene_id)
     owner_user = _owner_user(org)
     from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
 
     work_branch = resolve_org_repo_default_branch(
-        org, repo_key, fallback=fallback_branch or "main")
+        org, repo_key, fallback=fallback_branch or ORG_REPO_DEFAULT_BRANCH)
     create_org_scene(
         scene_id=scene_id,
         org_name=org.get("name") or "",
@@ -489,8 +490,11 @@ def _normalize_repo_key(raw: str) -> str:
     if ":" in text:
         provider, text = text.split(":", 1)
         provider = provider.strip().lower()
-        if provider not in ("gitcode", "github"):
-            raise _error(400, "INVALID_REPO", "repo_key provider 仅支持 gitcode/github")
+        from src.domains.runtime import public as runtime_public
+
+        if runtime_public.get_platform_card(provider) is None:
+            raise _error(400, "INVALID_REPO",
+                         f"repo_key provider 未登记平台卡: {provider}")
         text = text.strip()
     parts = text.split("/")
     if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
@@ -504,12 +508,7 @@ def _delete_vcs_repo(repo_key: str, token: str) -> None:
     from src.kernel.repo_key import parse_repo_key
 
     provider, owner, name = parse_repo_key(repo_key or "")
-    if provider == "github":
-        repo_manager.delete_github_repo(token, owner, name)
-    elif provider == "gitcode":
-        repo_manager.delete_gitcode_repo(token, owner, name)
-    else:
-        raise RuntimeError(f"provider {provider!r} 暂不支持删除仓库（仅 gitcode/github）")
+    repo_manager.delete_repo_for_provider(provider, token, owner, name)
 
 
 def delete_org_with_cleanup(org_id: str, *, delete_remote_repo: bool = True) -> dict:
@@ -771,7 +770,7 @@ def _provision_org_impl(org_id: str) -> dict:
 
             _ensure_org_scene(
                 org, repo_key,
-                fallback_branch=(ORG_REPO_DEFAULT_BRANCH if created_repo else "main"))
+                fallback_branch=ORG_REPO_DEFAULT_BRANCH)
 
             # 「分支建好才算组织创建完成」：同步建 main（空仓）+ grape-org，再置 ready。
             # 不再用后台 timer 抢跑，避免空仓首推把 grape-org 设成默认分支。

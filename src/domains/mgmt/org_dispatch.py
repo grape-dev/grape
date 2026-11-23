@@ -121,14 +121,9 @@ def _normalize_scene_reasons(raw: dict[str, str] | None,
 
 
 def _issue_url(repo_key: str, issue_number) -> str:
-    provider, owner, name = parse_repo_key(repo_key)
-    host = {
-        "github": "github.com",
-        "gitcode": "gitcode.com",
-        "gitee": "gitee.com",
-        "gitlab": "gitlab.com",
-    }.get(provider, "gitcode.com")
-    return f"https://{host}/{owner}/{name}/issues/{native_issue_number(issue_number)}"
+    from src.domains.mgmt import repo_web_urls
+
+    return repo_web_urls.issue_url(repo_key, issue_number)
 
 
 def _normalize_done_when(value: str, *, allow_default: bool = False) -> str:
@@ -261,16 +256,15 @@ def _pr_evidence(c, repo_key: str, issue_number) -> tuple[bool, int]:
 
 
 def _repo_bot_token(repo_key: str) -> str:
-    """按 provider 取目标仓库 bot token；未配置返回空串（不抛错）。"""
-    provider, _, _ = parse_repo_key(repo_key)
+    """取目标仓库 bot token（统一入口：provider 由 repo_key 派生、跳过 session 级）。
+
+    不用 provider 二元分支：gitee/gitlab 等卡驱动平台同样能取到；也不走
+    get_gitcode_token（第一优先级是 agent session token，scope 可能受限）。
+    """
     try:
-        if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_repo_bot_token
 
-            return get_github_token(repo_key=repo_key) or ""
-        from src.domains.mgmt.user.db import get_gitcode_token
-
-        return get_gitcode_token(repo_key=repo_key) or ""
+        return get_repo_bot_token(repo_key) or ""
     except Exception as exc:
         log.warning(f"org-dispatch: load bot token failed repo={repo_key}: {exc}")
         return ""
@@ -555,7 +549,9 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
     """为单个目标创建/复用子 Issue，返回更新后的 target 行。"""
     repo_key = target["repo_key"]
     requested_scene = _requested_target_scene(dispatch, repo_key)
-    resolved = _resolve_target_scene_detail(repo_key, requested_scene, user=actor_user)
+    import asyncio
+    resolved = await asyncio.to_thread(
+        _resolve_target_scene_detail, repo_key, requested_scene, user=actor_user)
     scene_id = str(resolved.get("scene_id") or "")
     if not scene_id:
         _warnings = [str(w) for w in (resolved.get("warnings") or []) if str(w).strip()]
@@ -609,7 +605,8 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                 "org_issue": native_issue_number(dispatch.get("org_issue_number")),
         }):
             result = await runtime_public.create_task_via_issue(body, user=internal_user)
-        issue_number = int(result.get("issue_number") or 0)
+        # gitee 的 issue 标识是字符串（IK...）：保持原生形态，禁止 int() 强转。
+        issue_number = native_issue_number(result.get("issue_number"))
         created = bool(result.get("created", True))
         task_id = int(result.get("task_id") or result.get("issue_id") or 0)
     except HTTPException as exc:
@@ -618,7 +615,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         if not reused:
             msg = detail.get("message") or str(exc.detail or exc)
             return _mark_target_failed(target["id"], f"CREATE_FAILED: {msg}"[:500])
-        issue_number = int(reused)
+        issue_number = native_issue_number(reused)
         task_id = 0
         created = False
         log.info(f"org-dispatch: reuse child issue #{issue_number} repo={repo_key} "
@@ -627,7 +624,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
         log.warning(f"org-dispatch: create child issue failed repo={repo_key}: {exc}")
         return _mark_target_failed(target["id"], f"CREATE_FAILED: {exc}"[:500])
 
-    if issue_number <= 0:
+    if not is_actionable_issue_number(issue_number):
         return _mark_target_failed(target["id"], "CREATE_FAILED: 建单结果缺少 issue_number")
 
     with db_lock:
@@ -1740,7 +1737,9 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
     """重新触发已存在子 Issue 的目标仓库场景。
 
     复用 pipeline 入口（issue_opened 原生 payload + 内部触发标记），不新建 Issue；
-    先清该 Issue 的活跃守卫，避免重试被旧 running 事件挡住。
+    先清该 Issue 的活跃守卫，避免重试被旧 running 事件挡住。事件头与载荷按平台卡
+    的 `webhook_dialect` 派生（GitHub/GitLab/Gitee 各有自己的事件族），不再按
+    provider 二元分支写死 X-GitHub-Event / X-Gitcode-Event。
     """
     provider, owner, name = parse_repo_key(repo_key)
     num = native_issue_number(issue_number)
@@ -1748,7 +1747,19 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
         runtime_public.clear_event_active_guard(repo_key, f"#{num}")
     except Exception:
         pass
-    if provider == "github":
+    card = None
+    try:
+        card = runtime_public.get_platform_card(provider)
+    except Exception as exc:  # noqa: BLE001 - 卡缺失按不可触发处理，不误用别家协议
+        log.warning(f"org-dispatch: platform card lookup failed provider={provider!r}: {exc}")
+    dialect = str(getattr(card, "webhook_dialect", "") or "").strip().lower()
+    header_name = str(getattr(card, "event_header", "") or "").strip()
+    if not header_name or dialect not in ("github_web", "gitee_v5", "gitlab_v4"):
+        log.warning(f"org-dispatch: cannot trigger child issue provider={provider!r} "
+                    f"dialect={dialect!r} (platform card missing/unsupported)")
+        return {"ok": False, "seq": 0,
+                "reason": "platform_card_webhook_dialect_unavailable"}
+    if dialect == "github_web":
         payload = {
             "action": "opened",
             "issue": {"number": num, "title": "", "user": {}},
@@ -1756,7 +1767,17 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
             "sender": {},
             "_grape_internal_trigger": True,
         }
-        headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
+        header_value = "issues"
+    elif dialect == "gitlab_v4":
+        payload = {
+            "object_kind": "issue",
+            "object_attributes": {"iid": num, "title": "", "action": "open",
+                                  "state": "opened"},
+            "project": {"path_with_namespace": f"{owner}/{name}"},
+            "user": {},
+            "_grape_internal_trigger": True,
+        }
+        header_value = "Issue Hook"
     else:
         payload = {
             "object_kind": "issue",
@@ -1765,7 +1786,8 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
             "user": {},
             "_grape_internal_trigger": True,
         }
-        headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
+        header_value = "issue_opened"
+    headers = {"Content-Type": "application/json", header_name: header_value}
     result = runtime_public.run_pipeline(
         json.dumps(payload).encode(), headers,
         account=repo_key, repo_key_override=repo_key)
@@ -1822,7 +1844,9 @@ async def retry_target(org_id: str, dispatch_id: str, repo_key: str, *, user: di
         scene_id = str(target["scene_id"] or "")
         if not scene_id:
             _requested = _requested_target_scene(dispatch, repo_key)
-            _resolved = _resolve_target_scene_detail(repo_key, _requested, user=user)
+            import asyncio
+            _resolved = await asyncio.to_thread(
+                _resolve_target_scene_detail, repo_key, _requested, user=user)
             scene_id = str(_resolved.get("scene_id") or "")
         if not scene_id:
             _mark_target_failed(str(target["id"] or ""), "NO_TARGET_SCENE: Target repository has no available scene")

@@ -16,7 +16,6 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import quote
 
 from src.domains.mgmt.user.org_db import (
     db,
@@ -42,7 +41,8 @@ REPO_MAP_SUMMARY_PATH = "org-context/repo-map/repo-map-summary.md"
 
 _STOPWORDS = {
     "the", "and", "for", "with", "from", "this", "that", "http", "https", "www",
-    "com", "org", "github", "gitcode", "readme", "md", "src", "main", "test",
+    "com", "org", "github",
+    "gitcode", "readme", "md", "src", "main", "test",
     "tests", "docs", "doc", "true", "false", "none", "null", "license", "usage",
     "安装", "使用", "项目", "仓库", "服务", "说明", "介绍", "功能", "模块",
     "project", "capabilities", "capability", "tech", "stack", "supported",
@@ -976,20 +976,10 @@ def _repo_summary_path(repo_key: str) -> str:
 
 
 def _repo_file_url(repo_key: str, path: str, ref: str) -> str:
-    """仓库内文件的浏览器可访问地址（跨平台差异收敛在本函数）。"""
-    provider, owner, name = parse_repo_key(str(repo_key or ""))
-    if not (provider and owner and name and path):
-        return ""
-    host = {
-        "gitcode": "gitcode.com",
-        "github": "github.com",
-        "gitee": "gitee.com",
-        "gitlab": "gitlab.com",
-    }.get(provider, "gitcode.com")
-    ref = quote(str(ref or "").strip() or "main", safe="")
-    rel = quote(str(path).lstrip("/"), safe="/")
-    blob_segment = {"gitlab": "-/blob"}.get(provider, "blob")
-    return f"https://{host}/{owner}/{name}/{blob_segment}/{ref}/{rel}"
+    """仓库内文件的浏览器可访问地址（平台卡 host/dialect 驱动，见 repo_web_urls）。"""
+    from src.domains.mgmt import repo_web_urls
+
+    return repo_web_urls.file_url(repo_key, path, ref)
 
 
 def _summary_file_meta(org_id: str) -> dict:

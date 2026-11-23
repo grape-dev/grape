@@ -185,6 +185,7 @@ def client(monkeypatch):
 
     monkeypatch.setattr(issues_center, "create_task_via_issue", fake)
     monkeypatch.setattr(user_db, "get_gitcode_token", lambda repo_key="", user_id=0: "bot-token-ok")
+    monkeypatch.setattr(user_db, "get_repo_bot_token", lambda repo_key="": "bot-token-ok")
     monkeypatch.setattr(
         org_dispatch, "_trigger_child_issue",
         lambda repo_key, issue_number, scene_id: triggers.append(
@@ -331,6 +332,10 @@ def test_bot_token_missing_isolated(client, monkeypatch):
     monkeypatch.setattr(
         user_db, "get_gitcode_token",
         lambda repo_key="", user_id=0: "" if repo_key == TARGET_B else "bot-token-ok",
+    )
+    monkeypatch.setattr(
+        user_db, "get_repo_bot_token",
+        lambda repo_key="": "" if repo_key == TARGET_B else "bot-token-ok",
     )
 
     resp = _create(api, org_id, [TARGET_A, TARGET_B])
@@ -764,6 +769,10 @@ def test_retry_rebuild_preserves_description(client, monkeypatch):
         user_db, "get_gitcode_token",
         lambda repo_key="", user_id=0: "" if repo_key == TARGET_B else "bot-token-ok",
     )
+    monkeypatch.setattr(
+        user_db, "get_repo_bot_token",
+        lambda repo_key="": "" if repo_key == TARGET_B else "bot-token-ok",
+    )
     resp = api.post(
         f"/api/orgs/{org_id}/dispatches",
         json={"org_issue_number": ORG_ISSUE, "targets": [TARGET_A, TARGET_B],
@@ -780,6 +789,9 @@ def test_retry_rebuild_preserves_description(client, monkeypatch):
     # 修复 token 后重试 → 重建子单，保留原目标范围描述
     monkeypatch.setattr(
         user_db, "get_gitcode_token", lambda repo_key="", user_id=0: "bot-token-ok",
+    )
+    monkeypatch.setattr(
+        user_db, "get_repo_bot_token", lambda repo_key="": "bot-token-ok",
     )
     retry = api.post(
         f"/api/orgs/{org_id}/dispatches/{did}/targets/{TARGET_B}/retry"
