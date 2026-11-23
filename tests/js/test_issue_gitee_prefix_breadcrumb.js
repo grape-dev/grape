@@ -50,7 +50,7 @@ function extractFn(src, name) {
   const { stripRepoPrefix } = await loadLib();
 
   // 1. 任意平台前缀都剥离（这是本次修复的核心：不再只认 github/gitcode）
-  assert.strictEqual(stripRepoPrefix('gitee:yang-aiwu-new/demo'), 'yang-aiwu-new/demo');
+  assert.strictEqual(stripRepoPrefix('gitee:acme-team/demo'), 'acme-team/demo');
   assert.strictEqual(stripRepoPrefix('gitlab:grp/sub/proj'), 'grp/sub/proj');
   assert.strictEqual(stripRepoPrefix('gitcode:a/b'), 'a/b');
   assert.strictEqual(stripRepoPrefix('github:a/b'), 'a/b');
@@ -95,10 +95,10 @@ function extractFn(src, name) {
     removeItem: (k) => { delete sessionStore[k]; },
   };
   sessionStore.currentRepo = JSON.stringify({
-    fullName: 'gitee:yang-aiwu-new/demo',
-    owner: 'gitee:yang-aiwu-new',
+    fullName: 'gitee:acme-team/demo',
+    owner: 'gitee:acme-team',
     name: 'demo',
-    repoKey: 'gitee:yang-aiwu-new/demo',
+    repoKey: 'gitee:acme-team/demo',
   });
   const shellStrip = new Function(
     extractFn(appSrc, 'stripRepoPrefix') + '\nreturn stripRepoPrefix;'
@@ -108,13 +108,13 @@ function extractFn(src, name) {
     extractFn(appSrc, 'currentRepo') + '\nreturn currentRepo;'
   )(shellStrip, fakeSession);
   const r = currentRepo();
-  assert.strictEqual(r.fullName, 'yang-aiwu-new/demo', 'fullName 未剥净');
-  assert.strictEqual(r.owner, 'yang-aiwu-new', 'owner 未剥净');
+  assert.strictEqual(r.fullName, 'acme-team/demo', 'fullName 未剥净');
+  assert.strictEqual(r.owner, 'acme-team', 'owner 未剥净');
   assert.strictEqual(r.name, 'demo', 'name 被改坏');
-  assert.strictEqual(r.repoKey, 'gitee:yang-aiwu-new/demo', 'repoKey 必须保留前缀');
+  assert.strictEqual(r.repoKey, 'gitee:acme-team/demo', 'repoKey 必须保留前缀');
   // 自愈要落盘：再次读取不应依赖内存
   const again = JSON.parse(sessionStore.currentRepo);
-  assert.strictEqual(again.fullName, 'yang-aiwu-new/demo', '剥净结果未回写 sessionStorage');
+  assert.strictEqual(again.fullName, 'acme-team/demo', '剥净结果未回写 sessionStorage');
 
   // 6. 干净快照不受影响（幂等）+ GitLab 子组 owner 反推正确
   sessionStore.currentRepo = JSON.stringify({
