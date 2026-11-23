@@ -150,8 +150,12 @@ def _skill_display_name_conflict(scope: str, owner_id: str, name: str,
     target = _normalize_skill_display_name(name).casefold()
     if not target:
         return False
-    rows = _rt_skills.read_all_any(
-        "skill_display_names_by_scope", (scope or "", owner_id or ""))
+    if (scope or "") == "official":
+        # 官方档 owner_id 历史存在 '' 与 0 两种写法，唯一性边界只按 scope 取数。
+        rows = _rt_skills.read_all_any("skill_display_names_by_official_scope")
+    else:
+        rows = _rt_skills.read_all_any(
+            "skill_display_names_by_scope", (scope or "", owner_id or ""))
     for row in rows or []:
         row_id = int(row[0] or 0)
         if exclude_id and row_id and row_id == int(exclude_id):
@@ -176,6 +180,40 @@ def _validate_skill_display_name(raw, *, scope: str, owner_id: str,
     if _skill_display_name_conflict(scope, owner_id, name, exclude_id=exclude_id):
         raise HTTPException(status_code=409, detail={"code": 409, "message": "名称已存在"})
     return name
+
+
+def _is_official_skill_admin(user: dict) -> bool:
+    """官方技能显示名称编辑权限：仅平台管理员（admin_accounts）可改。
+
+    CONTRIBUTING §7「不弱化鉴权」：官方技能为部署内置物，不能任意登录用户改名。
+    admin_accounts 与 user_accounts 独立（见 mgmt/admin/db.py）；部分部署用同名
+    普通账号关联管理员身份，故按 username 或 join user_accounts 两种口径核对。
+    任何查询失败一律 fail-closed（返回 False），宁拒绝不放行。
+    """
+    if not isinstance(user, dict):
+        return False
+    if user.get("is_admin"):
+        return True
+    username = str(user.get("username") or "").strip()
+    uid = str(user.get("id") or "").strip()
+    if not username and not uid:
+        return False
+    from src.kernel.session_manager import db as _db
+    from src.kernel.session_manager import db_lock as _db_lock
+    try:
+        with _db_lock:
+            c = _db.cursor()
+            if username:
+                c.execute(
+                    "SELECT 1 FROM admin_accounts WHERE LOWER(username)=LOWER(?)",
+                    (username,))
+            else:
+                c.execute(
+                    "SELECT 1 FROM admin_accounts a JOIN user_accounts u "
+                    "ON a.username=u.username WHERE u.id=?", (uid,))
+            return bool(c.fetchone())
+    except Exception:  # noqa: BLE001 - fail-closed
+        return False
 
 
 def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
@@ -499,6 +537,9 @@ def _decorate_skill_detail(payload: dict, user: dict, scope: str, content: str) 
     payload["created_by"] = (extra[4] if extra else "") or ""
     payload["updated_by"] = (extra[5] if extra else "") or ""
     payload["summary"] = _clean_summary(summary or payload.get("description") or "")
+    # Issue #3855：前端编辑入口与后端鉴权同源——官方技能仅管理员可改名。
+    payload["can_edit_display_name"] = (
+        scope != "official") or _is_official_skill_admin(user)
     # 概览 Tab 技能介绍人工改写（issue：概览可编辑）——JSON 解析失败按空处理
     try:
         _ov = _rt_skills.read_one_any("skill_intro_override_by_id", (sid,))
@@ -1695,7 +1736,11 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
 
     body = body if isinstance(body, dict) else {}
     if skill_scope == "official":
-        # 官方技能只放开名称编辑；任何其它元信息字段仍拒绝。
+        # 官方技能改名为管理员专属操作（否则任意 JWT/API Key 可改名官方技能）；
+        # 且只放开名称编辑，任何其它元信息字段仍拒绝。
+        if not _is_official_skill_admin(user):
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "官方技能仅管理员可修改名称"})
         _non_name = sorted(set(body) - {"display_name"})
         if _non_name:
             raise HTTPException(status_code=403, detail={

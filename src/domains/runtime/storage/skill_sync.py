@@ -157,7 +157,8 @@ def _sync_skills_to_db(data: dict) -> int:
         from src.kernel.tags import MAX_TAGS, encode_tags, merge_tags  # noqa: PLC0415
         for skill_name, info in data.items():
             try:
-                display_name = info.get("name", skill_name)
+                # Issue #3855：源名称 = SKILL.md/清单 name，仅作展示兜底。
+                source_display = str(info.get("name") or skill_name).strip() or skill_name
                 description = info.get("description", "")
                 agent_type = info.get("agent_type", "")
                 skill_path_val = info.get("path", skill_name)
@@ -181,6 +182,9 @@ def _sync_skills_to_db(data: dict) -> int:
                 if row:
                     (old_display, old_desc, old_agent, old_path, old_fp, old_sub,
                      old_cat, old_l1, old_l2, old_tags) = row
+                    # Issue #3855：已录入且非空的显示名称不被源名称覆盖；仅空值回填源名称。
+                    # 官方技能改名人编辑后，30 分钟同步不得回退为 SKILL.md name。
+                    target_display = (str(old_display or "").strip()) or source_display
                     # 一级变更时才重置二级（一级未变且来源未给二级时保留旧二级，
                     # 避免「未命中不覆盖旧值」与跨父级脏数据两种问题）
                     from src.kernel.category import sync_category_target  # noqa: PLC0415
@@ -190,7 +194,7 @@ def _sync_skills_to_db(data: dict) -> int:
                                 if "tags" in info else (old_tags or ""))
                     # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
                     fp_nonempty = old_fp and old_fp != ""
-                    changed = (old_display != display_name or old_desc != description
+                    changed = (old_display != target_display or old_desc != description
                                or old_agent != agent_type or old_sub != sub_scene
                                or old_cat != category_id
                                or int(old_l1 or 0) != int(l1_id or 0)
@@ -201,19 +205,19 @@ def _sync_skills_to_db(data: dict) -> int:
                         if fp_nonempty:
                             c.execute(
                                 "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, sub_scene, category_id,
+                                (target_display, description, agent_type, sub_scene, category_id,
                                  l1_id, l2_id, new_tags, skill_name)
                             )
                         else:
                             c.execute(
                                 "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, skill_path_val, sub_scene,
+                                (target_display, description, agent_type, skill_path_val, sub_scene,
                                  category_id, l1_id, l2_id, new_tags, skill_name)
                             )
                 else:
                     c.execute(
                         "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id, cat_l1_id, cat_l2_id, tags) VALUES (?,?,?,?,?,'official','','',?,?,?,?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path_val,
+                        (skill_name, source_display, description, agent_type, skill_path_val,
                          sub_scene, category_id, new_l1, new_l2, tags_json or "")
                     )
                 count += 1

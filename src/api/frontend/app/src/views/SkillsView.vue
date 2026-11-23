@@ -360,6 +360,7 @@
               {{ tt('download_skill') }}
             </button>
             <button
+              v-if="detail.scope !== 'official' || detail.can_edit_display_name"
               class="skd-btn"
               @click="askEditMeta(detail)"
             >
@@ -602,7 +603,7 @@
               class="sk__f1"
               :placeholder="tt('upload_display_name_ph')"
             />
-            <span class="sk__counter">{{ displayNameLen(uploadForm.displayName) }}/20</span>
+            <span class="sk__counter">{{ displayNameLen(uploadForm.displayName) }}/{{ SKILL_DISPLAY_NAME_MAX }}</span>
           </div>
         </div>
         <div class="srow sk__srow">
@@ -761,7 +762,7 @@
                 v-model="metaCtx.displayName"
                 :placeholder="tt('upload_display_name_ph')"
               />
-              <span class="sk__counter">{{ displayNameLen(metaCtx.displayName) }}/20</span>
+              <span class="sk__counter">{{ displayNameLen(metaCtx.displayName) }}/{{ SKILL_DISPLAY_NAME_MAX }}</span>
             </div>
           </div>
           <div class="sk__fld">
@@ -1112,6 +1113,7 @@ const FEAT_GRADIENT = {
 }
 const agentList = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'auto']
 //: 技能标签上限（Issue #3202；场景市场仍为 3）
+const SKILL_DISPLAY_NAME_MAX = 20
 const SKILL_MAX_TAGS = 5
 const SKILL_MAX_TAG_LEN = 12
 const SKILL_SUMMARY_MAX = 120
@@ -2332,7 +2334,7 @@ function validateDisplayName(v) {
     G.app.showToast(tt('display_name_required'))
     return ''
   }
-  if (displayNameLen(t) > 20) {
+  if (displayNameLen(t) > SKILL_DISPLAY_NAME_MAX) {
     G.app.showToast(tt('display_name_too_long'))
     return ''
   }

@@ -18,7 +18,6 @@ import pytest
 
 from src.domains.mgmt.routes import skills as skills_route
 
-
 _SKILL_DDL = """
 CREATE TABLE IF NOT EXISTS skill (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,8 +77,8 @@ def sdb(monkeypatch):
 
     db_obj = _DB()
     lock = threading.RLock()
-    import src.kernel.session_manager as sm
     import src.domains.mgmt.user.db as user_db
+    import src.kernel.session_manager as sm
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", lock)
     monkeypatch.setattr(user_db, "db", db_obj)
@@ -178,6 +177,13 @@ def test_cross_scope_same_name_allowed(sdb):
         "同名", scope="repo", owner_id="gitcode:o/r") == "同名"
 
 
+def test_internal_spaces_are_significant(sdb):
+    # 需求口径：仅去首尾空格 + 大小写不敏感，内部空格不折叠。
+    _seed(sdb, name="inner-space", display_name="a b")
+    assert skills_route._validate_skill_display_name(
+        "ab", scope="user", owner_id="7") == "ab"
+
+
 def test_duplicate_excludes_self(sdb):
     sid = _seed(sdb, name="self-dup", display_name="Self Name")
     assert skills_route._validate_skill_display_name(
@@ -210,7 +216,9 @@ def test_patch_boundary_and_unicode(sdb):
     assert getattr(ei.value, "status_code", 0) == 400
 
 
-def test_patch_official_allows_display_name_only(sdb):
+def test_patch_official_allows_display_name_only(sdb, monkeypatch):
+    # 官方改名仅管理员：显式打 is_admin 标记，绕开真实 admin_accounts 依赖。
+    monkeypatch.setattr(skills_route, "_is_official_skill_admin", lambda user: True)
     sid = _seed(sdb, name="official-skill", scope="official", owner="",
                 display_name="官方旧名", agent_type="official")
     r = _patch(sid, {"display_name": "官方新名"}, user_id="7")
@@ -224,6 +232,28 @@ def test_patch_official_allows_display_name_only(sdb):
     with pytest.raises(Exception) as ei:
         _patch(sid, {"display_name": "另一个名", "summary": "混合"}, user_id="7")
     assert getattr(ei.value, "status_code", 0) == 403
+
+
+def test_patch_official_requires_admin(sdb, monkeypatch):
+    monkeypatch.setattr(skills_route, "_is_official_skill_admin", lambda user: False)
+    sid = _seed(sdb, name="official-no-admin", scope="official", owner="",
+                display_name="官方旧名", agent_type="official")
+    with pytest.raises(Exception) as ei:
+        _patch(sid, {"display_name": "越权改名"}, user_id="7")
+    assert getattr(ei.value, "status_code", 0) == 403
+    assert _display(sdb, sid) == "官方旧名"
+
+
+def test_official_duplicate_ignores_owner_id_variant(sdb):
+    # 官方行 owner_id 历史并存 '' 与 0，重名取数必须 scope-only。
+    _seed(sdb, name="official-owner-empty", scope="official", owner="",
+          display_name="官方同名")
+    _seed(sdb, name="official-owner-zero", scope="official", owner="0",
+          display_name="另一个官方名")
+    with pytest.raises(Exception) as ei:
+        skills_route._validate_skill_display_name(
+            "官方同名", scope="official", owner_id="0")
+    assert getattr(ei.value, "status_code", 0) == 409
 
 
 def test_patch_cross_scope_same_name_allowed(sdb):
@@ -357,6 +387,41 @@ def test_upload_persists_display_name(sdb, monkeypatch):
         agent_type="coding", category_id=0, cat_l1_id=0, cat_l2_id=0,
         tags="", summary="摘要", display_name="  上传名称  "))
     assert captured.get("display_name") == "上传名称"
+
+
+# ===== 官方 30 分钟同步保留已录入名称 =====
+
+def _sync_official(monkeypatch, sdb, data):
+    import threading as _threading
+
+    import src.domains.mgmt.public as mgmt_public
+    from src.domains.runtime.storage import skill_sync
+    from src.kernel import owner_db
+
+    lock = _threading.RLock()
+    monkeypatch.setattr(owner_db, "db_pair", lambda domain: (sdb["conn"], lock))
+    monkeypatch.setattr(skill_sync, "_resolve_skill_category", lambda info, dm: (0, 0))
+    monkeypatch.setattr(mgmt_public, "skill_category_active_map", dict)
+    monkeypatch.setattr(mgmt_public, "category_dict_active_map", lambda *a, **k: {})
+    return skill_sync._sync_skills_to_db(data)
+
+
+def test_official_sync_preserves_manual_display_name(sdb, monkeypatch):
+    sid = _seed(sdb, name="official-sync", scope="official", owner="",
+                display_name="人工官方名", description="旧概述", agent_type="official")
+    _sync_official(monkeypatch, sdb, {
+        "official-sync": {"name": "源名称", "description": "新概述",
+                          "agent_type": "official"}})
+    assert _display(sdb, sid) == "人工官方名"
+
+
+def test_official_sync_backfills_source_name_when_empty(sdb, monkeypatch):
+    sid = _seed(sdb, name="official-empty-sync", scope="official", owner="",
+                display_name="", description="旧概述", agent_type="official")
+    _sync_official(monkeypatch, sdb, {
+        "official-empty-sync": {"name": "源名称", "description": "新概述",
+                                "agent_type": "official"}})
+    assert _display(sdb, sid) == "源名称"
 
 
 # ===== 存量回退展示（display_name 为空 → 源名称） =====

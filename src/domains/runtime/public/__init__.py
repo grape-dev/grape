@@ -2940,6 +2940,10 @@ _ANY_QUERIES: dict[str, str] = {
     # （去首尾空格 + casefold），避免依赖 MySQL/SQLite 各异的 LOWER/TRIM 语义。
     "skill_display_names_by_scope": (
         "SELECT id, display_name FROM skill WHERE scope=? AND owner_id=? AND is_active=1"),
+    # 官方技能 owner_id 历史存在 '' 与 0 两种写法（plugins/registry.py 曾用 0），
+    # 重名校验必须只按 scope 取数，不能把 owner_id 当作官方档的过滤条件。
+    "skill_display_names_by_official_scope": (
+        "SELECT id, display_name FROM skill WHERE scope='official' AND is_active=1"),
     "skill_scope_repo_owner": (
         "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
         "AND is_active=1 LIMIT 1"),
