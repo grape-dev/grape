@@ -846,7 +846,6 @@
             ></textarea>
           </div>
         </div>
-        </div>
       </div>
       <template #footer>
         <AGButton size="sm" variant="plain" @click="metaCtx.open = false">{{
