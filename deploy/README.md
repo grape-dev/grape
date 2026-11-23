@@ -225,21 +225,37 @@ promtool check rules deploy/alerts.yml
    - `nginx-grape-upstream-keepalive.inc`：每个 `upstream { }` 内 `include`，提供
      `keepalive` / `keepalive_timeout 90s`（必须大于客户端侧 65s）。
    - 四份模板（单机 / `-cluster` / `-four-process` / `-compose`）已接入上述 include。
+   - ⚠️ **新增/修改反代 location 时必须自带 `proxy_set_header Connection "";`**：
+     location 内只要出现任一条 `proxy_set_header`，server 级（片段里）的 Connection
+     设置就整体失效，upstream 侧会重新收到 `Connection: close`、keepalive 退化为
+     每请求新建连接。WS/SSE 升级类 location 用模板头部的 `map $http_upgrade
+     $grape_connection_upgrade` 条件切换（普通请求为空值）。
+   - ⚠️ **重试需要 ≥2 个 peer**：nginx 不会把请求重投给同一 peer，单 peer upstream
+     下 `tries 2` 是空转。四份模板因此把本机地址声明为两个同址 peer（发布窗口内被
+     切断的 GET 可在进程恢复后命中第二次尝试）；多实例部署请改成真实多副本地址。
 2. **nginx 优雅退出**：把 `nginx-worker-shutdown.inc` 手动 include 到主
    `/etc/nginx/nginx.conf` 的 **main 上下文**（`worker_processes` 之后、`events` 之前），
    设置 `worker_shutdown_timeout 30s`；`deploy/systemd/*.service` 已补
    `KillSignal=SIGTERM` / `KillMode=mixed` / `TimeoutStopSec=45` 与之对齐。
 3. **发布流程与门禁**：`scripts/deploy-drain.sh` 按「摘流 → 排空 → 退出」执行，
    重启后采样 `/api/health`、`/api/runtime/heartbeat`、`/static/openapi.json`，
-   502 率 > 0.5%（`GATEWAY_502_THRESHOLD=0.005`）自动回滚。发布前可 `--dry-run` 预演：
+   失败率 > 0.5%（`GATEWAY_502_THRESHOLD=0.005`）且失败样本 ≥
+   `GATEWAY_MIN_FAILURES`（默认 3）自动回滚。发布前可 `--dry-run` 预演：
 
    ```bash
    GATEWAY_DRAIN_CMD='<摘流钩子>' GATEWAY_STOP_CMD='systemctl restart grape-server' \
      bash scripts/deploy-drain.sh --dry-run --unit grape-server
    ```
 
-   告警侧 `deploy/alerts.yml` 已把 5xx 由单阈值 10% 收紧为分级 0.5%/2%，并新增
-   网关 502 速率规则，阈值与脚本保持一致。
+   - **fail-closed**：未配置 `GATEWAY_DRAIN_CMD` 时拒绝重启（exit 3），确无需摘流的
+     单实例直连场景才显式设 `GATEWAY_ALLOW_UNDRAINED=1`；摘流/重启命令失败立即中止。
+   - **连接失败计入失败率**：采样时 curl 非 0 退出或 `000`（网关整体不可用）计为失败，
+     不会被当成「0 次 502」放行；全部样本均失败时无视最小失败数直接回滚。
+   - 单个偶发 502 不回滚：180 样本窗口下 1 次 502 即 0.56%，基线 0.077% 时会误判成
+     发布故障，故比率达标还要求失败样本数达阈值。
+   - 告警侧：应用侧 5xx 分级（0.5%/2%）在 `deploy/alerts.yml`；**网关 502 规则改到
+     `deploy/loki-rules.yml`**（nginx 502 只进 access.log → Loki，应用指标
+     `grape_http_requests_total` 看不到），需由 Loki ruler 加载，阈值同为 0.5%/2%。
 
 > 注意：生产 502 记录落在 `127.0.0.1:8081/8083`，而仓库模板为 `38081/38083`。
 > 下发前请先 `nginx -T` 确认生产实际加载的配置与端口映射；若生产另有旁路配置，
