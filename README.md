@@ -100,7 +100,30 @@ Monthly average agent tasks per day: 171 -> 200 -> 901 -> 3,072, a further 3.4x 
 
 ## 5. Quick Start
 
-Two install paths — pick one: hand it to an agent, or do it yourself.
+Three install paths — pick one: one-click hosted deploy on Railway, hand it to an agent, or do it yourself.
+
+### One-click hosted deploy (Railway)
+
+<!-- TODO(publish): once the template is published, replace TEMPLATE_SLUG with the slug Railway issues
+     (railway.com/deploy/<slug>). Every other value below is already correct. -->
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/TEMPLATE_SLUG)
+
+Railway builds the image from this repository, attaches the data volume and generates your public domain.
+You fill **one** field: `LLM_API_KEY` (a model-provider key). Everything else is pre-set or generated —
+`JWT_SECRET` comes from `${{secret(64)}}`, `LLM_PROVIDER` defaults to `openrouter`, and `LLM_BASE_URL` /
+`LLM_MODEL` stay empty to use the provider preset.
+
+Verify the first boot:
+
+| Check | Expected |
+| --- | --- |
+| `GET /api/health` | `200` and `server_base_url_configured: true`, pointing at the generated domain rather than `localhost` |
+| Sign-in page | renders normally, with the third-party sign-in area present |
+| `Settings → Volumes` | mounted at `/app/data`, so data survives a redeploy |
+
+Third-party sign-in stays disabled until you register your own OAuth app (admin console →
+`Config Center → Login channels`). The callback URL to register is
+`https://<your-domain>/api/auth/callback/<provider>`.
 
 ### ① Let an agent install it (recommended)
 
