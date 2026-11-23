@@ -13,7 +13,11 @@ from src.domains.mgmt.user import db as user_db
 
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 
-from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+from src.api.deps import (get_current_user_or_api_key,
+                          get_current_user_or_api_key_or_admin,
+                          require_no_session_token,
+                          require_no_session_token_or_admin,
+                          require_org_member)
 from src.kernel.tags import (MAX_TAG_LEN, encode_tags, oversized_tags,
                              parse_tags, prepare_tags, suggest_tags)
 
@@ -186,32 +190,26 @@ def _is_official_skill_admin(user: dict) -> bool:
     """官方技能显示名称编辑权限：仅平台管理员（admin_accounts）可改。
 
     CONTRIBUTING §7「不弱化鉴权」：官方技能为部署内置物，不能任意登录用户改名。
-    admin_accounts 与 user_accounts 独立（见 mgmt/admin/db.py）；部分部署用同名
-    普通账号关联管理员身份，故按 username 或 join user_accounts 两种口径核对。
-    任何查询失败一律 fail-closed（返回 False），宁拒绝不放行。
+    只信任认证依赖解析出的管理台身份（JWT role=admin，由
+    `get_current_user_or_api_key_or_admin` 复核 admin_accounts token_version 后
+    置 token_type='admin'）；**禁止**用 username 跨账户体系匹配——grape_accounts
+    与 admin_accounts 完全独立，同名普通账号不能借此取得改名权。再按
+    admin_accounts id 复核一次（查询失败 / 记录不存在一律 fail-closed）。
     """
     if not isinstance(user, dict):
         return False
-    if user.get("is_admin"):
-        return True
-    username = str(user.get("username") or "").strip()
-    uid = str(user.get("id") or "").strip()
-    if not username and not uid:
+    if str(user.get("token_type") or "") != "admin":
         return False
-    from src.kernel.session_manager import db as _db
-    from src.kernel.session_manager import db_lock as _db_lock
+    uid = user.get("id")
     try:
-        with _db_lock:
-            c = _db.cursor()
-            if username:
-                c.execute(
-                    "SELECT 1 FROM admin_accounts WHERE LOWER(username)=LOWER(?)",
-                    (username,))
-            else:
-                c.execute(
-                    "SELECT 1 FROM admin_accounts a JOIN user_accounts u "
-                    "ON a.username=u.username WHERE u.id=?", (uid,))
-            return bool(c.fetchone())
+        _uid = int(uid)
+    except (TypeError, ValueError):
+        return False
+    if not _uid:
+        return False
+    try:
+        from src.domains.mgmt.admin.db import get_admin_token_version
+        return int(get_admin_token_version(_uid)) >= 0
     except Exception:  # noqa: BLE001 - fail-closed
         return False
 
@@ -1006,7 +1004,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
-def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key),
+def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key_or_admin),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——支持技能 id 或技能名（Issue #630）。
 
@@ -1712,7 +1710,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
               summary="Skill metadata edit without re-uploading the package",
               description="Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
 def patch_skill_meta(skill_id: int, body: dict = Body(...),
-                     user: dict = Depends(require_no_session_token)):
+                     user: dict = Depends(require_no_session_token_or_admin)):
     """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
 
     权限对齐 delete/update：user 需本人；repo 需当前用户托管该仓库。
@@ -1960,9 +1958,18 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         if src_zip is None:
             src_zip = get_skill_zip_bytes(src_key) or b""
         content_hash = _src_hash or (hashlib.sha256(src_zip).hexdigest() if src_zip else "")
+        # Issue #3855：复制/转换保留源自定义显示名称（新建行不再回退 skill_name）。
+        # 目标 scope 内若与既有名称重复，则回退源名称，避免绕过同 scope 唯一性。
+        _src_detail = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_rec["id"]),))
+        _src_display = (_src_detail[1] if _src_detail and len(_src_detail) > 1 else "") or ""
+        _target_display = None
+        if _src_display.strip() and not _skill_display_name_conflict(
+                dst_scope, dst_owner, _src_display):
+            _target_display = _src_display
         skill_id = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
                                     skill_rec.get("description", ""), dst_key, user_id,
-                                    skill_rec.get("category_id", 0), content_hash)
+                                    skill_rec.get("category_id", 0), content_hash,
+                                    display_name=_target_display)
         if not skill_id:
             storage.delete_object(dst_key)
             raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})

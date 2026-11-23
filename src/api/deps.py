@@ -318,6 +318,31 @@ def require_admin(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
 
+
+def get_current_user_or_api_key_or_admin(request: Request) -> dict:
+    """业务 API 认证入口 + 管理台 JWT 兜底（Issue #3855）。
+
+    普通用户 JWT / API Key / 会话 token 按 `get_current_user_or_api_key` 原样解析；
+    Bearer 若是合法管理台 JWT（role=admin + admin_accounts token_version 校验），
+    则以 `token_type='admin'` 返回管理台身份（不进入 grape_accounts 查询）。
+
+    为什么单独开一个入口：admin JWT 的 sub 是 admin_accounts id，与 grape_accounts
+    完全独立，走 get_current_user 必然 401；但不能把 admin 身份塞进通用
+    `get_current_user_or_api_key`，否则管理台 token 会顺带获得普通用户能力位。
+    只有同时服务普通用户与管理员的端点（官方技能改名/详情）才使用本依赖。
+    """
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        # 管理台 JWT 先走 require_admin（role=admin + admin_accounts token_version），
+        # 避免把 admin id 误送 grape_accounts 查询；非 admin / 非法 token 回落常规链路。
+        if token and not token.startswith(("tk_", "grape_", "tko_")):
+            from src.kernel.auth_sdk.jwt_utils import verify_access_token
+            _payload = verify_access_token(token)
+            if _payload and _payload.get("role") == TOKEN_TYPE_ADMIN:
+                return require_admin(authorization=auth)
+    return get_current_user_or_api_key(request)
+
 def require_user_or_takeover(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """允许"用户身份"或"接管 token"（tko_）。
 
@@ -343,6 +368,22 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     session_token（tk_）与 takeover（tko_）都没有 user_scope → 403；API Key / JWT / internal 放行。
     保留函数名是为了不动 30+ 处既有 import 与路由签名。
     """
+    from src.api.auth_caps import USER_SCOPE, has_capability
+    if not has_capability(user, USER_SCOPE):
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "Session token not allowed on this endpoint (account/platform management)"})
+    return user
+
+
+def require_no_session_token_or_admin(
+        user: dict = Depends(get_current_user_or_api_key_or_admin)) -> dict:
+    """`require_no_session_token` + 管理台 JWT（Issue #3855）。
+
+    常规用户/API Key 维持 user_scope 能力校验；管理台 JWT（token_type='admin'）
+    直接放行，供官方技能改名这类「管理员专属」端点复用同一路由。
+    """
+    if str(user.get("token_type") or "") == TOKEN_TYPE_ADMIN:
+        return user
     from src.api.auth_caps import USER_SCOPE, has_capability
     if not has_capability(user, USER_SCOPE):
         raise HTTPException(status_code=403, detail={"code": 403,

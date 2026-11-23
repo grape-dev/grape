@@ -234,14 +234,22 @@ def test_patch_official_allows_display_name_only(sdb, monkeypatch):
     assert getattr(ei.value, "status_code", 0) == 403
 
 
-def test_patch_official_requires_admin(sdb, monkeypatch):
-    monkeypatch.setattr(skills_route, "_is_official_skill_admin", lambda user: False)
+def test_patch_official_requires_admin(sdb):
+    # 不 monkeypatch 鉴权：普通用户身份（无 token_type=admin）必须被真实规则拒绝。
     sid = _seed(sdb, name="official-no-admin", scope="official", owner="",
                 display_name="官方旧名", agent_type="official")
     with pytest.raises(Exception) as ei:
         _patch(sid, {"display_name": "越权改名"}, user_id="7")
     assert getattr(ei.value, "status_code", 0) == 403
     assert _display(sdb, sid) == "官方旧名"
+
+
+def test_is_official_skill_admin_rejects_username_only_and_user_token():
+    # 仅凭同名 username 或普通 user token 不得取得官方改名权（不查库也应直接 False）。
+    assert skills_route._is_official_skill_admin({"id": "7", "username": "admin",
+                                                  "auth_type": "jwt"}) is False
+    assert skills_route._is_official_skill_admin({"id": "7", "username": "admin",
+                                                  "token_type": "user"}) is False
 
 
 def test_official_duplicate_ignores_owner_id_variant(sdb):
@@ -302,6 +310,15 @@ def test_upsert_backfills_source_name_for_legacy_empty_row(sdb):
     assert _display(sdb, sid) == "legacy-empty"
 
 
+def test_upsert_preserves_legacy_padded_display_name_verbatim(sdb):
+    # 存量非空名称不清洗：历史 " Name " 不得被 strip 静默改写。
+    from src.domains.mgmt.user.db import upsert_skill_obs
+    sid = _seed(sdb, name="legacy-padded", display_name=" Name ")
+    assert upsert_skill_obs(
+        "user", "7", "legacy-padded", "coding", "d", "key", "7", 0, "h") == sid
+    assert _display(sdb, sid) == " Name "
+
+
 class _MemStorage:
     def __init__(self):
         self.objects = {}
@@ -312,6 +329,16 @@ class _MemStorage:
     def save_bytes(self, key, data):
         self.objects[key] = data
         return key
+
+    def copy_object(self, src, dst):
+        if src not in self.objects:
+            return False
+        self.objects[dst] = self.objects[src]
+        return True
+
+    def delete_object(self, key):
+        self.objects.pop(key, None)
+        return True
 
     def backend_name(self):
         return "test"
@@ -389,6 +416,36 @@ def test_upload_persists_display_name(sdb, monkeypatch):
     assert captured.get("display_name") == "上传名称"
 
 
+def test_convert_preserves_source_display_name(sdb, monkeypatch):
+    # Issue #3855：复制/转换到新 scope 时保留源自定义名称，不再回退 skill_name。
+    sid = _seed(sdb, name="convert-skill", display_name="自定义名",
+                file_path="obs/src.zip")
+    storage = _MemStorage()
+    storage.objects["obs/src.zip"] = _make_zip("convert-skill")
+    import src.domains.mgmt.user.db as user_db
+    import src.domains.runtime.public as rt
+    monkeypatch.setattr(rt, "get_skill_storage", lambda: storage)
+    monkeypatch.setattr(rt, "zip_cache_get_with_hash",
+                        lambda k: (storage.objects.get(k), ""))
+    monkeypatch.setattr(rt, "zip_cache_put", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "mem_cache_invalidate", lambda *a, **k: None)
+    monkeypatch.setattr(rt, "get_skill_zip_bytes", lambda k: storage.objects.get(k))
+    captured = {}
+
+    def _spy_upsert(*args, **kwargs):
+        captured.update(kwargs)
+        return 123
+
+    monkeypatch.setattr(user_db, "upsert_skill_obs", _spy_upsert)
+
+    skills_route.convert_skill(
+        body=skills_route.ConvertSkillRequest(
+            skill_name="convert-skill", repo="gitcode:org/cv-repo",
+            source_scope="user"),
+        user={"id": "7", "auth_type": "api_key"})
+    assert captured.get("display_name") == "自定义名"
+
+
 # ===== 官方 30 分钟同步保留已录入名称 =====
 
 def _sync_official(monkeypatch, sdb, data):
@@ -422,6 +479,16 @@ def test_official_sync_backfills_source_name_when_empty(sdb, monkeypatch):
         "official-empty-sync": {"name": "源名称", "description": "新概述",
                                 "agent_type": "official"}})
     assert _display(sdb, sid) == "源名称"
+
+
+def test_official_sync_preserves_legacy_padded_display_name_verbatim(sdb, monkeypatch):
+    # 存量非空名称不清洗：30 分钟同步不得把 " Name " strip 成 "Name"。
+    sid = _seed(sdb, name="official-padded-sync", scope="official", owner="",
+                display_name=" Name ", description="旧概述", agent_type="official")
+    _sync_official(monkeypatch, sdb, {
+        "official-padded-sync": {"name": "源名称", "description": "新概述",
+                                 "agent_type": "official"}})
+    assert _display(sdb, sid) == " Name "
 
 
 # ===== 存量回退展示（display_name 为空 → 源名称） =====
