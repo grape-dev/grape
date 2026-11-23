@@ -297,6 +297,108 @@ def test_engine_offline_hour_backoff_and_circuit(monkeypatch):
     _clean()
 
 
+def test_legacy_ids_hour_backoff_and_circuit(monkeypatch):
+    """Issue #3827：legacy id 池（task 83 的 17877 路径）与 uid 池同构——60s cron 离线
+    1 小时同样 ≤4 条 exec、退避序列 120/240/480s、熔断告警恰好 1 次。"""
+    _clean()
+    rid = _mk_engine("i3827_legacy", "i3827-legacy-uid", healthy=False)
+    _mk_task(TID_IDS, ids=[rid])
+    clock = FakeClock()
+    monkeypatch.setattr(S, "_scheduler_now", clock)
+    calls = []
+    monkeypatch.setattr(S, "_execute_autopilot_agent", _fake_agent_offline(calls))
+    alerts = []
+    monkeypatch.setattr(S, "_notify_subscribers",
+                        lambda task_id, exec_id, status, summary, findings:
+                        alerts.append((task_id, exec_id, status, summary)))
+
+    decisions = []
+
+    def _tick():
+        tasks = {t["id"]: t for t in S._get_enabled_tasks()}
+        task = tasks.get(TID_IDS)
+        assert task is not None
+        row = mgmt_public.autopilot_task_last_run_any(TID_IDS)
+        decision = S._scan_task_once(task, row[0] if row else "")
+        decisions.append(decision)
+        if decision == "dispatch":
+            asyncio.run(S._execute_task(task))
+        return decision
+
+    assert _tick() == "dispatch"
+    delays = []
+    for _ in range(60):
+        clock.advance(60)
+        if _tick() == "dispatch":
+            nxt = _task_row(TID_IDS)[5]
+            delays.append(int(round((datetime.fromisoformat(nxt) - clock()).total_seconds())))
+
+    assert _exec_count(TID_IDS) <= 4, (
+        f"legacy id 路径 1 小时新建 exec {_exec_count(TID_IDS)} 条，退避序列={delays}")
+    assert _exec_count(TID_IDS) == len(calls) == 4, (calls, _exec_count(TID_IDS), delays)
+    assert delays == [120, 240, 480], f"legacy id 退避序列应为 120/240/480s，实际 {delays}"
+    consecutive, code, offline_since, backoff_until, paused, next_run = _task_row(TID_IDS)
+    assert code == S.ERROR_ENGINE_OFFLINE, (code, consecutive)
+    assert consecutive >= 3 and int(paused) == 1, (consecutive, paused)
+    assert offline_since and backoff_until, (offline_since, backoff_until)
+    assert len(alerts) == 1, f"legacy id 同因告警应恰好 1 次，实际 {len(alerts)} 次: {alerts}"
+    assert str(rid) in alerts[0][3] or "i3827" in alerts[0][3], alerts[0]
+
+    _set_engine_healthy(rid, True)
+
+    def _fake_agent_success(repo_key, task, exec_id):
+        calls.append(exec_id)
+        S._update_execution_result(exec_id, "success", result="ok")
+
+    monkeypatch.setattr(S, "_execute_autopilot_agent", _fake_agent_success)
+    clock.advance(60)
+    assert _tick() == "dispatch", "legacy id 引擎恢复后应在下一 tick 自动续跑"
+    assert int(_task_row(TID_IDS)[4]) == 0, _task_row(TID_IDS)
+    assert int(_task_row(TID_IDS)[0]) == 0, _task_row(TID_IDS)
+    _clean()
+
+
+def test_missing_error_code_column_falls_back_to_text_classification(monkeypatch):
+    """Issue #3827：`autopilot_executions.error_code` 缺列/旧写入方未落码时，
+    从稳定指纹回推 ENGINE_OFFLINE，退避链路照常生效（不再每 60s 新建 exec）。"""
+    _clean()
+    rid = _mk_engine("i3827_nocode", "i3827-nocode-uid", healthy=False)
+    _mk_task(TID_BASE + 3, uids=["i3827-nocode-uid"])
+    tid = TID_BASE + 3
+    clock = FakeClock()
+    monkeypatch.setattr(S, "_scheduler_now", clock)
+    calls = []
+
+    def _fake_agent_no_code(repo_key, task, exec_id):
+        calls.append(exec_id)
+        # 模拟缺列写入方：只落 error 文案，不写 error_code
+        S._update_execution_result(
+            exec_id, "failed",
+            error=f"task engines ['i3827-nocode-uid'] {S._OFFLINE_LOG_FINGERPRINT}")
+
+    monkeypatch.setattr(S, "_execute_autopilot_agent", _fake_agent_no_code)
+    monkeypatch.setattr(S, "_notify_subscribers", lambda *a, **k: None)
+
+    tasks = {t["id"]: t for t in S._get_enabled_tasks()}
+    row = mgmt_public.autopilot_task_last_run_any(tid)
+    assert S._scan_task_once(tasks[tid], row[0] if row else "") == "dispatch"
+    asyncio.run(S._execute_task(tasks[tid]))
+
+    consecutive, code, offline_since, backoff_until, paused, next_run = _task_row(tid)
+    assert code == S.ERROR_ENGINE_OFFLINE, (
+        f"缺列时应从指纹回推 ENGINE_OFFLINE，实际 {code!r}: {_task_row(tid)}")
+    assert consecutive == 1 and backoff_until, _task_row(tid)
+    assert _exec_count(tid) == 1, _exec_count(tid)
+
+    clock.advance(30)
+    tasks = {t["id"]: t for t in S._get_enabled_tasks()}
+    row = mgmt_public.autopilot_task_last_run_any(tid)
+    assert S._scan_task_once(tasks[tid], row[0] if row else "") == "backoff"
+    assert _exec_count(tid) == 1, "退避窗口内不得新建 exec"
+    _set_engine_healthy(rid, True)
+    _clean()
+
+
 def test_binding_stale_alerts_on_first_dispatch(monkeypatch):
     """绑定 uid 在 agent_runtimes 中不存在：首派即告警（重绑指引）+ 进退避通道。"""
     _clean()
