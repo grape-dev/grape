@@ -96,9 +96,13 @@ HTTP_REQUEST_DURATION = Histogram(
 # 这里把它们的收集器注册进本模块的 registry，/metrics 才能带出来。
 from src.kernel.gsb.metrics import install as _install_gsb_metrics
 from src.kernel.org_metrics import install as _install_org_metrics
+from src.kernel.startup_metrics import install as _install_startup_metrics
 
 _install_gsb_metrics(registry)
 _install_org_metrics(registry)
+# Issue #3848：启动期降级（component/reason 两维度）——把「本来只能 grep 日志」的
+# 启动降级变成可巡检指标；未安装前 record 是 no-op。
+_install_startup_metrics(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
