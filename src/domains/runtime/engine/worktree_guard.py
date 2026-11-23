@@ -50,12 +50,6 @@ from src.kernel.config import log
 
 BASELINE_SUFFIX = ".fidelity.json"
 
-# Issue #3441：workdir 路径中的 Issue 标识段（issues/<segment>，兼容新旧两种布局——
-# 新 {provider}/{owner}/{repo}/issues/{segment}/{agent} 与过渡期 {repo}/{agent}/issues/{segment}）。
-# segment 为目录名原样字符串：与 get_agent_workdir/_issue_num_from 同口径，允许非数字标识
-# （PR 订阅伪 id #pr_<PR>_<scene> 生成 issues/pr_257_default/<agent>、Gitee 字符串 Issue 标识）。
-_WORKDIR_ISSUE_RE = re.compile(r"(?:^|[\\/])issues[\\/]([^\\/]+)(?:[\\/]|$)")
-
 # 产物路径白名单：这些前缀下的文件是可清理产物（复测清理对象），不做指纹保真
 _ARTIFACT_DIR_PREFIXES = (
     "dist/", "build/", "out/", "node_modules/", "__pycache__/",
@@ -1052,6 +1046,23 @@ def mark_reset_record_consumed(repo_key: str, issue_num, agent_type: str,
     return True
 
 
+def _parse_issue_segment(parts: list) -> tuple:
+    """按尾部布局锚定解析 `issues/<segment>`（Issue #3441）。
+
+    返回 (issue_segment, identity_parts, legacy)：
+    - 新 `{...}/issues/{segment}/{agent}`：`parts[-3] == "issues"`；
+    - 过渡期 `{...}/issues/{segment}`：`parts[-2] == "issues"`。
+
+    仅从路径尾部锚定，避免路径中更早出现的名为 `issues` 的目录/仓库段被误取；
+    不匹配 → (None, [], False)。`identity_parts` 为 `issues` 之前的部分。
+    """
+    if len(parts) >= 3 and parts[-3] == "issues":
+        return parts[-2], parts[:-3], False
+    if len(parts) >= 3 and parts[-2] == "issues":
+        return parts[-1], parts[:-3], True
+    return None, [], False
+
+
 def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
     """从 issue workdir 绝对路径解析 (repo_key, issue_num, agent_type)。
 
@@ -1079,24 +1090,20 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
             identity = parts[:-4]
             if not issue_part.isdigit():
                 return "", "", ""
-        elif len(parts) >= 5 and parts[-3] == "issues":
-            # {..}/issues/{n}/{agent}
-            agent, issue_part = parts[-1], parts[-2]
-            identity = parts[:-3]
         elif len(parts) >= 4 and parts[-3] == "prs":
             # issue-less PR {..}/prs/<p>/{agent}
             agent, issue_part = parts[-1], parts[-2]
             identity = parts[:-3]
             if not issue_part.isdigit():
                 return "", "", ""
-        elif len(parts) >= 4 and parts[-2] == "issues":
-            # 过渡期旧布局 {repo}/{agent}/issues/{n}
-            agent, issue_part = parts[-3], parts[-1]
-            identity = parts[:-3]
-            if not issue_part.isdigit():
-                return "", "", ""
         else:
-            return "", "", ""
+            issue_part, identity, legacy = _parse_issue_segment(parts)
+            if issue_part is None:
+                return "", "", ""
+            # 新布局 {..}/issues/{n}/{agent}；过渡期旧布局 {repo}/{agent}/issues/{n}
+            agent = parts[-3] if legacy else parts[-1]
+            if legacy and not issue_part.isdigit():
+                return "", "", ""
         if not is_git_agent(agent):
             return "", "", ""
         if len(identity) == 3:
@@ -1116,14 +1123,19 @@ def extract_workdir_issue_num(path: str) -> str:
     """从 workdir 路径提取 `issues/<segment>` 段中的 Issue 标识（Issue #3441）。
 
     兼容新布局 {provider}/{owner}/{repo}/issues/{segment}/{agent} 与过渡期
-    {repo}/{agent}/issues/{segment}（正则只锚 issues/<segment> 段，两种布局均命中）。
+    {repo}/{agent}/issues/{segment}，与 parse_issue_workdir 复用同一
+    `_parse_issue_segment`（尾部锚定，避免更早出现的 issues 段被误取）。
     segment 取目录名原样字符串（非纯数字，与 get_agent_workdir 派生口径一致：
     PR 订阅伪 id `pr_257_default`、Gitee 字符串 Issue 标识等均可解析）。
     无法解析出标识 → 返回 ''。
     """
     try:
-        m = _WORKDIR_ISSUE_RE.search(str(path or ""))
-        return m.group(1) if m else ""
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        parts = [p for p in raw.replace("\\", "/").split("/") if p]
+        issue_part, _, _ = _parse_issue_segment(parts)
+        return issue_part or ""
     except Exception:
         return ""
 

@@ -82,6 +82,25 @@ class TestExtractWorkdirIssueNum:
         assert extract_workdir_issue_num(
             "/ws/test/coding/issues/IABC123") == "IABC123"
 
+    def test_earlier_issues_segment_not_misparsed(self):
+        # 尾部布局锚定：更早出现的名为 issues 的目录/仓库段不得被误取
+        assert extract_workdir_issue_num(
+            "/ws/issues/repo/gitcode/org/test/issues/3383/coding") == "3383"
+        assert extract_workdir_issue_num(
+            "/ws/issues/repo/test/coding/issues/3383") == "3383"
+
+    def test_trailing_separator_tolerated(self):
+        assert extract_workdir_issue_num(
+            "/ws/gitcode/org/test/issues/3383/coding/") == "3383"
+
+    def test_consistent_with_parse_issue_workdir(self):
+        # 同一路径两种解析口径一致（复用同一尾部锚定解析）
+        from src.domains.runtime.engine.worktree_guard import parse_issue_workdir
+        path = "/root/grape-workspaces/gitcode/org/test/issues/3383/coding"
+        assert extract_workdir_issue_num(path) == "3383"
+        assert parse_issue_workdir(
+            path, "/root/grape-workspaces") == ("gitcode:org/test", "3383", "coding")
+
 
 class TestValidateWorkdirIssueConsistency:
     def test_match_passes(self):
