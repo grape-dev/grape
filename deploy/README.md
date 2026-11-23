@@ -95,7 +95,7 @@ systemctl restart grape-systemd@mgmt.service grape-systemd@event.service \
 #    DEVOPS_DB_PASSWORD 写原文（mysql_compat 不解码）
 
 # 3) 每个库按「单库模式 + 归属守卫关闭」一次建齐（幂等，可重复跑）
-python scripts/bootstrap_3db.py --env-file /root/.grape-3db.env        # 加 --check 只体检
+python scripts/bootstrap_3db.py --env-file ~/.grape-3db.env        # 加 --check 只体检
 
 # 4) 起四进程：mgmt/event/worker/insight，端口 38081-38084，
 #    GRAPE_MIGRATION_OWNER 分别 mgmt / runtime / 空 / insight

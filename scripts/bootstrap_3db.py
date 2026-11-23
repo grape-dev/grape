@@ -22,9 +22,9 @@
 
 用法：
     # 三个库都建（DSN 从 env 文件读，建议 600 权限）
-    python scripts/bootstrap_3db.py --env-file /root/.grape-3db.env
+    python scripts/bootstrap_3db.py --env-file ~/.grape-3db.env
     # 只查三个库的状态，不动数据
-    python scripts/bootstrap_3db.py --env-file /root/.grape-3db.env --check
+    python scripts/bootstrap_3db.py --env-file ~/.grape-3db.env --check
 """
 import argparse
 import os
@@ -55,15 +55,23 @@ def load_env_file(path: str) -> dict:
 
 
 def _parse_dsn(dsn: str) -> dict:
-    from urllib.parse import unquote, urlparse
-    u = urlparse(dsn)
-    return {
-        "host": u.hostname or "127.0.0.1",
-        "port": u.port or 3306,
-        "user": unquote(u.username or ""),
-        "password": unquote(u.password or ""),
-        "database": (u.path or "/").lstrip("/").split("?")[0],
-    }
+    """DSN 解析复用 kernel 单源（``src/kernel/db_registry.py::parse_dsn``）。
+
+    返回键：host/port/user/password/database/charset——pymysql 直收。
+    """
+    sys.path.insert(0, str(REPO))
+    from src.kernel.db_registry import parse_dsn
+    return parse_dsn(dsn)
+
+
+def _mask_secrets(text: str, conn_kwargs: dict) -> str:
+    """落盘前掩掉口令：先替换明文口令，再兜底掩 mysql://user:pass@ 形态的 DSN。"""
+    import re
+    out = text
+    _pw = str(conn_kwargs.get("password") or "")
+    if _pw:
+        out = out.replace(_pw, "***")
+    return re.sub(r"((?:mysql|mysql\+pymysql)://[^:/\s]+:)[^@/\s]+(@)", r"\1***\2", out)
 
 
 def _db_state(conn_kwargs: dict) -> dict:
@@ -143,7 +151,12 @@ def bootstrap_one(env: dict, dsn_key: str, dry_run: bool) -> int:
                        capture_output=True, text=True)
     Path("/tmp").mkdir(exist_ok=True)
     log = Path(f"/tmp/grape-bootstrap-{conn_kwargs['database']}.log")
-    log.write_text(r.stdout + r.stderr, encoding="utf-8")
+    # 子进程 traceback 可能带出 DSN/口令：落盘前掩码 + 0600 限权（PR 人工复核项）
+    log.write_text(_mask_secrets(r.stdout + r.stderr, conn_kwargs), encoding="utf-8")
+    try:
+        os.chmod(log, 0o600)
+    except OSError:
+        pass
     if r.returncode != 0 or "BOOTSTRAP_OK" not in r.stdout:
         tail = "\n".join((r.stdout + r.stderr).splitlines()[-12:])
         print(f"[bootstrap] FAIL {conn_kwargs['database']} (rc={r.returncode})，日志 {log}:\n{tail}",
@@ -157,7 +170,7 @@ def bootstrap_one(env: dict, dsn_key: str, dry_run: bool) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="三库模式冷启动 bootstrap")
-    ap.add_argument("--env-file", default="/root/.grape-3db.env",
+    ap.add_argument("--env-file", default=os.path.expanduser("~/.grape-3db.env"),
                     help="含 GRAPE_DSN_MGMT/RUNTIME/INSIGHT 的 env 文件（建议 600）")
     ap.add_argument("--check", action="store_true", help="只检查三个库状态，不建表")
     ap.add_argument("--dry-run", action="store_true", help="打印将做的事，不落库")
