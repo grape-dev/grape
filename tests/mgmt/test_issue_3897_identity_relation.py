@@ -194,6 +194,31 @@ def test_startup_self_check_never_raises(caplog):
     assert db_setup._check_identity_relations(relation_kind=_boom) == []
 
 
+def test_startup_self_check_reports_mgmt_domain_unavailable(monkeypatch, caplog):
+    """QA R1 Optional：三库拓扑下 worker/event 看不到 GRAPE_DSN_MGMT 时必须启动即可诊断。
+
+    `uow("mgmt")` 已固定域路由，缺 DSN 时 `route_of("mgmt")` 抛 DomainUnavailable，
+    被 identity 读降级为 `[]`（等同「无身份」）。部署前置靠启动日志暴露：ERROR 含域名与
+    DSN 变量名（remediation 指向 GRAPE_DSN_MGMT / GRAPE_3DB_ENV），且不阻断启动。
+    """
+    from src.api import db_setup
+    from src.kernel import db_registry
+
+    def _unavailable(domain):
+        raise db_registry.DomainUnavailable(
+            domain, "GRAPE_DSN_MGMT missing in a three-database topology")
+
+    monkeypatch.setattr(db_registry, "route_of", _unavailable)
+
+    caplog.set_level("WARNING")
+    assert db_setup._check_identity_relations(relation_kind=lambda c, t: "table") == []
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert msgs, "mgmt 域不可用必须打 ERROR（否则 worker/event 静默降级为无身份）"
+    joined = " ".join(msgs)
+    assert "mgmt" in joined
+    assert "GRAPE_DSN_MGMT" in joined
+
+
 def test_identity_uow_sites_use_mgmt_domain():
     """棘轮：grape_account_db 的 identity 读走 mgmt 域，禁止再落回进程主库。"""
     import inspect

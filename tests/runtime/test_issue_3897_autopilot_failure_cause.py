@@ -51,6 +51,13 @@ def _exec_error(exec_id: int) -> str:
     return (row[0] if row else "") or ""
 
 
+def _exec_status(exec_id: int) -> str:
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT status FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
+    return (row[0] if row else "") or ""
+
+
 # ---------------------------------------------------------------- 1. cause 纯函数
 
 def test_failure_cause_carries_exit_code_and_output_tail():
@@ -72,6 +79,26 @@ def test_failure_cause_truncates_long_output():
     assert len(cause) < 1000
 
 
+def test_failure_cause_tolerates_missing_exit_code():
+    """QA R1 Required：done event 的 exit_code 可为 None（CommandResult 初值）。
+
+    修复前 `int(None)` 抛 TypeError，异常从 `_finalize_autopilot_task` 逃逸 →
+    exec 行停留 running、结果/订阅/用量收尾全跳过。契约：容错映射 -1 且保留
+    「未上报」注记（与真实返回 -1 可区分）。
+    """
+    cause = S._autopilot_failure_cause(None, "agent log\nError: boom")
+    assert cause.strip()
+    assert "exit_code=-1" in cause
+    assert "None" in cause
+    assert "Error: boom" in cause
+
+
+def test_failure_cause_tolerates_non_numeric_exit_code():
+    cause = S._autopilot_failure_cause("not-a-code", "boom")
+    assert "exit_code=-1" in cause
+    assert "boom" in cause
+
+
 # ---------------------------------------------------------------- 2. 落库 cause
 
 def test_finalize_writes_failure_cause_into_execution_row(monkeypatch):
@@ -89,6 +116,29 @@ def test_finalize_writes_failure_cause_into_execution_row(monkeypatch):
     err = _exec_error(exec_id)
     assert err, "失败 exec 必须落 cause（修复前恒为空，日志回落到 failed after 0 retries）"
     assert "exit_code=1" in err
+    assert "Error: boom" in err
+
+
+def test_finalize_with_none_exit_code_reaches_terminal_state(monkeypatch):
+    """QA R1 Required 回归：exit_code=None 时收尾不得抛异常，exec 必须离开 running。
+
+    修复前 `_autopilot_failure_cause(None, ...)` 抛 TypeError，从 `_finalize_autopilot_task`
+    逃逸（:917/:934 无 try 包裹）：exec 行停留 running，`_update_execution_result` /
+    订阅通知 / 用量收尾全部跳过。
+    """
+    _clean()
+    exec_id = EXEC_BASE + 2
+    _mk_exec(exec_id)
+
+    monkeypatch.setattr("src.domains.runtime.engine.service.update_task_status",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr(S, "_notify_subscribers", lambda *a, **kw: None)
+
+    S._finalize_autopilot_task(str(TASK_ID), exec_id, None, "agent log\nError: boom")
+
+    assert _exec_status(exec_id) == "failed"
+    err = _exec_error(exec_id)
+    assert "exit_code=-1" in err
     assert "Error: boom" in err
 
 
