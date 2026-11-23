@@ -389,7 +389,7 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: |
-          python -m pytest tests/test_issue_3579_branch_guard_runtime_path.py \
+          python -m pytest tests/runtime/test_issue_3579_branch_guard_runtime_path.py \
             tests/test_issue_2028_branch_guard_fail_open.py \
             tests/runtime/test_issue_2292_branch_guard_canonical_lock.py \
             tests/runtime/test_issue_2314_branch_guard_fast_forward.py \

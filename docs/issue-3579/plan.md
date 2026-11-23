@@ -4,7 +4,7 @@
 | 文件 | 改动 |
 |------|------|
 | `src/domains/runtime/engine/branch_guard.py` | 模板 2028-08；`_hook_module_relpath`/`_hook_runtime_entry_code`（部署态优先加载链）；新增 `_stable_module_root`（issue 工作树安装不记录根）；`_resolve_hook_interpreter` 改为 GRAPE_PYTHON → VIRTUAL_ENV → .venv → PATH 顺序；`_existing_hook_usable` 三 marker 校验、存在性按记录根统一 |
-| `tests/test_issue_3579_branch_guard_runtime_path.py` | 解释器缺失/模块缺失/正常 fail-closed/存量升级回归 + QA 复审用例（部署态优先 2 例、sys.path 清洗、稳定根分类 3 例、解释器顺序 3 例、校验路径统一） |
+| `tests/runtime/test_issue_3579_branch_guard_runtime_path.py` | 解释器缺失/模块缺失/正常 fail-closed/存量升级回归 + QA 复审用例（部署态优先 2 例、sys.path 清洗、稳定根分类 3 例、解释器顺序 3 例、校验路径统一） |
 | `tests/test_issue_2028_branch_guard_fail_open.py` | 模板断言：不再固化 `sys.executable`，改校验相对模块路径 |
 | `tests/runtime/test_issue_2292_branch_guard_canonical_lock.py` | 模块 marker 断言改为相对路径 |
 | `tests/runtime/test_issue_2933_readonly_log_failopen.py` | 版本断言更新为 2028-08 |
