@@ -5496,6 +5496,32 @@ _IDENTITY_RELATIONS = ("external_identities", "grape_accounts")
 _IDENTITY_RELATION_REMEDIATION = (
     "python3 scripts/domain_view_freshness.py --repair "
     "（owner=mgmt 补建跨域视图；存量 mgmt 库缺基表时由迁移 202611230005 补建）")
+#: identity 读写的 owner 域（`grape_account_db` / `identity_lifecycle` 固定 `uow("mgmt")`）。
+_IDENTITY_DOMAIN = "mgmt"
+_IDENTITY_DOMAIN_REMEDIATION = (
+    "worker/event 进程需可见 GRAPE_DSN_MGMT（三库拓扑下不共享该 DSN 时请用 "
+    "GRAPE_3DB_ENV drop-in 统一下发）；缺 DSN 时 mgmt 域不可用，身份解析会降级为 []"
+    "（等同「无身份」，用户绑定/PAT 回填全部失效）")
+
+
+def _check_identity_domain() -> str:
+    """启动期自检：identity owner 域（mgmt）是否可路由。
+
+    Issue #3897 QA R1：identity 读写已固定 `uow("mgmt")`，三库拓扑下
+    `route_of("mgmt")` 在缺 `GRAPE_DSN_MGMT` 时抛 `DomainUnavailable`，被降级成
+    返回 `[]` —— 表现为「用户突然没有身份」，且只在业务日志里零星可见。
+    该检查把部署前置（DSN 可见性）变成启动那一刻的一条 ERROR（含 remediation），
+    不阻断启动：返回路由结果（"local"/"domain"），不可用时返回空串。
+    """
+    try:
+        from src.kernel.db_registry import route_of
+        return route_of(_IDENTITY_DOMAIN)
+    except Exception as _e:
+        log.error(
+            "schema self-check: identity domain '%s' unavailable (%s): starts degraded, "
+            "identity lookups return []; remediation: %s",
+            _IDENTITY_DOMAIN, _e, _IDENTITY_DOMAIN_REMEDIATION)
+        return ""
 
 
 def _check_identity_relations(relation_kind=None) -> list[str]:
@@ -5514,6 +5540,9 @@ def _check_identity_relations(relation_kind=None) -> list[str]:
 
     probe = relation_kind or _default_probe
     missing: list[str] = []
+    # Issue #3897 QA R1：先确认 owner 域可路由（缺 DSN → ERROR + remediation），
+    # 再探测关系是否存在；两者都不阻断启动。
+    _domain_route = _check_identity_domain()
     try:
         from src.kernel.db_registry import current_domain, database_of
         _db_label = database_of(current_domain() or "") or os.environ.get("DEVOPS_DB_NAME", "")
@@ -5530,12 +5559,14 @@ def _check_identity_relations(relation_kind=None) -> list[str]:
         return []
     if missing:
         log.error(
-            "schema self-check: identity relation(s) missing in db=%s: %s "
+            "schema self-check: identity relation(s) missing in db=%s (domain=%s route=%s): %s "
             "(身份解析将 1146/降级); remediation: %s",
-            _db_label or "current", ",".join(missing), _IDENTITY_RELATION_REMEDIATION)
+            _db_label or "current", _IDENTITY_DOMAIN, _domain_route or "unavailable",
+            ",".join(missing), _IDENTITY_RELATION_REMEDIATION)
     else:
-        log.info("schema self-check: identity relations present in db=%s (%s)",
-                 _db_label or "current", ",".join(_IDENTITY_RELATIONS))
+        log.info("schema self-check: identity relations present in db=%s (domain=%s route=%s) (%s)",
+                 _db_label or "current", _IDENTITY_DOMAIN, _domain_route or "unavailable",
+                 ",".join(_IDENTITY_RELATIONS))
     return missing
 
 

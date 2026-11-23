@@ -38,6 +38,8 @@ _MAX_RETRY_DELAY = 300    # 秒：退避上限
 
 # Issue #3897：失败 exec 的 cause 里 agent 输出尾行截断长度（单行日志可读、可 grep）
 _AUTOPILOT_CAUSE_TAIL_MAX = 300
+# Issue #3897 QA R1：exit_code 缺失/不可解析时的占位码（cause 里另带注记，与真实 -1 可区分）
+_AUTOPILOT_EXIT_CODE_UNKNOWN = -1
 
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
@@ -897,7 +899,26 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
         _update_execution_result(exec_id, _status, error=f"入队异常: {e}", error_code=_code)
 
-def _autopilot_failure_cause(exit_code: int, final_text: str) -> str:
+def _coerce_exit_code(exit_code) -> tuple[int, str]:
+    """归一化 exec 的 exit_code：None/非法值 → ``(-1, 注记)``。
+
+    Issue #3897 QA R1：上游 done 事件的 exit_code 可能为 None（`CommandResult.exit_code`
+    初值，见 src/domains/runtime/agents/executor.py:2632），也可能被序列化成字符串。
+    原先 `int(exit_code)` 直接抛 TypeError，从 `_finalize_autopilot_task` 无 try 包裹的
+    收尾路径逃逸 → exec 行停留 running，结果/订阅/用量收尾全被跳过。
+    返回 ``(code, note)``：note 非空表示「退出码未上报/不可解析」，让 cause 可区分
+    「agent 明确返回 -1」与「根本没拿到退出码」。
+    """
+    if exit_code is None:
+        return _AUTOPILOT_EXIT_CODE_UNKNOWN, "exit_code unavailable: executor reported None"
+    try:
+        return int(exit_code), ""
+    except (TypeError, ValueError):
+        return (_AUTOPILOT_EXIT_CODE_UNKNOWN,
+                f"exit_code unavailable: non-numeric {str(exit_code)[:40]!r}")
+
+
+def _autopilot_failure_cause(exit_code, final_text: str, note: str = "") -> str:
     """失败 exec 的结构化 cause（恒非空）：`exit_code=<n>; output=<agent 输出尾行>`。
 
     Issue #3897（生产 Loki：`Autopilot: task 83 exec <id> failed after 0 retries`）：
@@ -905,6 +926,9 @@ def _autopilot_failure_cause(exit_code: int, final_text: str) -> str:
     字面量 `failed after N retries` —— 既没有失败原因，也不解释为什么 max_retry=0
     一次都不重试。本函数保证「失败必有 cause」：输出为空时也给出可辨识的空输出标记，
     让日志能直接区分「agent 报错」与「agent 什么都没产出」。
+
+    ``note`` 由调用方传入已归一化的注记（如 None → -1）；直接传入原始值也可——
+    内部同样走 `_coerce_exit_code`，绝不因 None/非数字退出码抛异常。
     """
     _lines = [ln.strip() for ln in str(final_text or "").splitlines() if ln.strip()]
     tail = _lines[-1] if _lines else ""
@@ -912,7 +936,12 @@ def _autopilot_failure_cause(exit_code: int, final_text: str) -> str:
         tail = "<no output: agent produced no stdout/stderr>"
     if len(tail) > _AUTOPILOT_CAUSE_TAIL_MAX:
         tail = tail[:_AUTOPILOT_CAUSE_TAIL_MAX] + "…"
-    return f"exit_code={int(exit_code)}; output={tail}"
+    _code, _note = _coerce_exit_code(exit_code)
+    _note = note or _note
+    _head = f"exit_code={_code}"
+    if _note:
+        _head += f" ({_note})"
+    return f"{_head}; output={tail}"
 
 
 def _retry_skip_reason(max_retry: int, attempt: int, error_code: str) -> str:
@@ -932,8 +961,14 @@ def _retry_skip_reason(max_retry: int, attempt: int, error_code: str) -> str:
     return f"retries available ({int(attempt)}/{_max} used)"
 
 
-def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
-    """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
+def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code, final_text: str):
+    """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。
+
+    Issue #3897 QA R1：入参 exit_code 允许为 None（done 事件 exit_code 可为 None）。
+    本函数是先落终态再发通知的收尾路径，中途异常会让 exec 永远停留 running，
+    故先归一化（None/非法 → -1 + 注记），再走原有逻辑。
+    """
+    exit_code, _code_note = _coerce_exit_code(exit_code)
     # 更新 agent_tasks 状态（用 task_id 精确更新）
     # L1（2026-10-17）：改为统一终态入口 update_task_status，其内部完成
     #   release_busy_slot（防 busy_slots 泄漏 → 本机引擎误判满载）＋ events 状态同步。
@@ -965,7 +1000,8 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
     status = "success" if exit_code == 0 else "failed"
     # Issue #3897：失败必须落 cause（exit_code + agent 输出尾行）。此前失败行 error 恒为空，
     # 调度收口只能打 `failed after N retries`，生产 task 83 每分钟一条、无法自诊断。
-    _ev_error = "" if status == "success" else _autopilot_failure_cause(exit_code, final_text)
+    _ev_error = ("" if status == "success"
+                 else _autopilot_failure_cause(exit_code, final_text, _code_note))
     if status == "success":
         # Issue #537 P1-1：部署类任务收口前做落地证据校验（版本指纹/健康检查）。
         # 校验失败 → 收口 failed 带 evidence 详情（纵深防御，防 false-success 也防 false-failed）。
@@ -982,7 +1018,7 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
             status = "failed"
             # Issue #3897：证据失败也是失败，cause 同时带证据原因与 agent 输出尾行。
             _ev_error = (f"deploy_evidence: {_evd.get('reason', '部署证据校验未通过')}; "
-                         f"{_autopilot_failure_cause(exit_code, final_text)}")
+                         f"{_autopilot_failure_cause(exit_code, final_text, _code_note)}")
             log.info(f"Autopilot exec {exec_id}: deploy evidence failed -> {status} ({_evd.get('reason')})")
     _update_execution_result(exec_id, status,
                              result=_result_summary,
