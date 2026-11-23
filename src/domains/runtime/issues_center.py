@@ -1005,7 +1005,11 @@ def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
             from src.domains.runtime.vcs.api_client import VcsApiClient
             from src.kernel.repo_key import parse_repo_key
             provider, owner, name = parse_repo_key(org_repo_key)
-            VcsApiClient(provider, token, owner, name).post_issue_comment(issue_number, body)
+            # post_issue_comment 的网络/上游失败以 {"error": ...} 返回（不抛异常）；
+            # 必须显式判错，否则会把「评论未发出」记成已发并落 comment_posted=1。
+            _resp = VcsApiClient(provider, token, owner, name).post_issue_comment(issue_number, body)
+            if isinstance(_resp, dict) and _resp.get("error"):
+                raise RuntimeError(str(_resp.get("error"))[:300])
             comment_posted = True
             log.info(f"org-aggregate: comment posted repo={org_repo_key} "
                      f"issue=#{issue_number} dispatch={dispatch_id} status={terminal_status}")
@@ -2980,6 +2984,10 @@ def _resolve_user_chat_bot(bm, user_id: str):
     log.info(f"[im-notify] resolve user={user_id} bot={app_id} ok")
     return BotContext(app_id=app_id, app_secret=secret, bot_type="chat_bot")
 
+# Issue #3621：stage=created 挂单态的 owner_agent 哨兵——非真实流水线节点，
+# 避免 UI/生命周期消费方把 "created" 误当归属节点展示（stage 与 owner 不复用同名值）。
+_STAGE_CREATED_OWNER = "pending_trigger"
+
 class TaskCreateBody(BaseModel):
     repo_key: str = ""
     title: str = ""
@@ -2989,6 +2997,10 @@ class TaskCreateBody(BaseModel):
     is_subtask_mode: int = 0
     # 内部字段：组织下派子任务的组织上下文快照引用（不参与普通建单）
     org_context_snapshot_id: str = ""
+
+    # Issue #3621：可选开关（默认 true 零破坏）。false = 只建单 + 同步平台 Issue，
+    # 跳过流水线启动（stage=created 挂单，后续经 trigger_pending_issue_pipeline 首次触发入链）
+    trigger_pipeline: bool = True
 
 class TaskStatusBody(BaseModel):
     status: str = ""
@@ -3850,6 +3862,227 @@ def _knowledge_warm_budget() -> float:
 _knowledge_warm_tasks: set = set()
 
 
+async def _issue_opened_pipeline_trigger(repo_key: str, owner: str, rname: str, issue_num,
+                                          title: str, creator_login: str, is_github: bool) -> dict:
+    """Issue #3621：issue_opened 同步触发共用路径（建单直发与挂单后续首次触发复用同一实现）。
+
+    方案 D（duplicate-issue-opened-event-fix-design.md）：按平台发原生 payload，
+    使补发事件与对应平台真实 webhook 形态一致（可读性/排查 + 去重指纹一致），
+    不再对 GitCode 也发 GitHub 格式合成 payload 造成「GitHub 事件」误判。
+    Issue #343/#649: pipeline 创建人 = 创建者 external_login（creator_login），
+    与 assignee 解耦——不传 assignee 时创建人字段仍正确，不再回填 assignee。
+    Issue #453：内部同步触发标记（跳过台账判定）——payload 为内部构造，非 webhook
+    回流；台账检查会命中并拦掉触发，_grape_internal_trigger 让读侧跳过台账判定
+    （同步触发是我们自己要开工，与 webhook 回流去重语义相反）。
+    扫雷⑩ S3：调用方多为 async 处理器，run_pipeline 同步全量执行会阻塞事件循环
+    ——to_thread 卸载到线程池，语义保持同步等待完成。
+    返回 run_pipeline 结果 dict（含 seq）。
+    """
+    import json as _pipe_json
+    _assign = creator_login or ""
+    if is_github:
+        _pipe_payload = {
+            "action": "opened",
+            # D102-O 同族收口：issue number 原生保形（gitee 等平台为字符串
+            # ident，int() 强转会炸同步触发——实弹 IKTVZQ）；流水线进程内
+            # ident 链已字符串化（D102-G），此处直传原生形态
+            "issue": {"number": issue_num, "title": title,
+                      "user": {"login": _assign} if _assign else {}},
+            "repository": {"full_name": f"{owner}/{rname}"},
+            "sender": {"login": _assign} if _assign else {},
+        }
+        _pipe_headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
+    else:
+        _pipe_payload = {
+            "object_kind": "issue",
+            "object_attributes": {"iid": issue_num, "title": title,
+                                  "action": "open"},
+            "project": {"path_with_namespace": f"{owner}/{rname}"},
+            "user": {"username": _assign} if _assign else {},
+        }
+        _pipe_headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
+    _pipe_payload["_grape_internal_trigger"] = True
+    from src.domains.runtime.pipeline.event_pipeline import run_pipeline
+    return await asyncio.to_thread(
+        run_pipeline, _pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
+        account=repo_key, repo_key_override=repo_key)
+
+
+def _pending_trigger_event_count(repo_key: str, issue_num) -> int:
+    """挂单触发相关事件的计数（runtime 域连接；用于失败/成功后的落地校验）。
+
+    Issue #3621 复审：仅统计触发类事件（Issue/PR 实体事件），排除仓库订阅等
+    旁路事件——否则订阅事件会误判 409「已有流水线事件」。
+    """
+    from src.domains.runtime.vcs.event_types import ALL_ISSUE_EVENTS, ALL_PR_EVENTS
+    _types = tuple(set(ALL_ISSUE_EVENTS) | set(ALL_PR_EVENTS))
+    _ph = ",".join("?" * len(_types))
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(f"SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=? "
+                  f"AND event_type IN ({_ph})",
+                  (repo_key, f"#{issue_num}", *_types))
+        return int(c.fetchone()[0] or 0)
+
+
+def _rollback_pending_issue_trigger(repo_key: str, issue_num) -> bool:
+    """触发失败时回滚已认领的 created→vod（仅当仍为 vod 且未落事件）；返回是否回滚。
+
+    与认领同在 ``db_lock`` + runtime 域连接上完成，回滚后该单可再次触发（不卡死）。
+    Issue #3621 复审：run_pipeline 内 set_issue_stage 可能已把 status 同步为 processing，
+    无事件回滚时须一并恢复 status=active；但 cancelled/completed 为终态，不复活。
+    """
+    with db_lock:
+        c = _rt_db.cursor()
+        # 复审：仅触发类事件落地才视为入链成功不回滚（旁路/订阅事件不阻断回滚）
+        if _pending_trigger_event_count(repo_key, issue_num):
+            return False
+        c.execute(
+            "UPDATE issue SET stage='created', owner_agent=?, "
+            "status=CASE WHEN status IN ('cancelled','completed') THEN status ELSE 'active' END, "
+            "updated_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND stage='vod'",
+            (_STAGE_CREATED_OWNER, repo_key, str(issue_num)))
+        _rolled = c.rowcount
+        _rt_db.commit()
+    return bool(_rolled)
+
+
+def _claim_pending_issue_created(repo_key: str, issue_num, issue_id: str):
+    """同步临界区：Issue stage/status 校验 + 事件计数 + CAS 认领 created→vod。
+
+    Issue #3621：逻辑与原来同锁同事务，唯一变化是**不在 async 函数里直接持 db_lock**
+    （同步阻塞锁会卡住事件循环，async-blocking 棘轮 A6/A7）；调用方用 asyncio.to_thread。
+    返回 (issue_row, claimed_rowcount)。
+    """
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute("SELECT stage, title, created_by, assignee, status, id FROM issue "
+                  "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+                  (repo_key, str(issue_num)))
+        _row = c.fetchone()
+        if not _row:
+            raise HTTPException(status_code=404, detail={"code": 404,
+                                                         "message": f"Issue #{issue_num} 需求卡片不存在，无法触发"})
+        _stage = str(_row[0] or "")
+        _status = str(_row[4] or "")
+        if _status in ("cancelled", "completed"):
+            raise HTTPException(status_code=400, detail={"code": 400,
+                                                         "message": f"Issue #{issue_num} status={_status}，终态需求不可触发"})
+        if _stage != "created":
+            raise HTTPException(status_code=409, detail={"code": 409,
+                                                         "message": f"Issue #{issue_num} 当前 stage={_stage or '未知'}，仅未入链的挂单（stage=created）可触发"})
+        c.execute("SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=?", (repo_key, issue_id))
+        _evt_count = int(c.fetchone()[0] or 0)
+        if _evt_count:
+            # 复核：仅触发类事件才算入链（排除仓库订阅等旁路事件，防误判 409）
+            _evt_count = _pending_trigger_event_count(repo_key, issue_num)
+        if _evt_count:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                                                         "message": f"Issue #{issue_num} 已有流水线事件，不重复入链"})
+        # 条件 UPDATE 认领：并发下仅一个请求能把 created 切到 vod；
+        # status 并发取消窗口由 CAS 条件兜底（取消只改 status 不改 stage）
+        c.execute("UPDATE issue SET stage='vod', owner_agent='vod', updated_at=datetime('now') "
+                  "WHERE repo_key=? AND issue_number=? AND stage='created' "
+                  "AND status NOT IN ('cancelled','completed')",
+                  (repo_key, str(issue_num)))
+        _claimed = c.rowcount
+        _rt_db.commit()
+    return _row, _claimed
+
+
+def _pending_issue_status_row(repo_key: str, issue_num):
+    """同步读：认领失败后回查 issue.status（用于区分并发取消 400 / 并发触发 409）。"""
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+                  (repo_key, str(issue_num)))
+        return c.fetchone()
+
+
+async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = "",
+                                         operator_id: "str | int" = 0,
+                                         route_issue_id: int = 0) -> dict:
+    """Issue #3621：对 ``trigger_pipeline=false`` 建出的挂单（stage=created）首次触发入链。
+
+    复用建单直发的 issue_opened 同步触发路径（``_issue_opened_pipeline_trigger``），
+    触发后行为与直接建单一致（stage 切换到 vod、产生同形态 issue_opened 事件）。
+    幂等/一致性保护：
+    - stage 非 ``created`` → 409（已入链/已收敛，不重复入链）
+    - status 为 ``cancelled``/``completed`` → 400（终态不可触发；Issue #3621 复审：
+      状态校验并入同锁认领，与并发取消窗口原子互斥）
+    - 该 issue 已存在触发类流水线事件 → 409（防重复触发产生重复事件）
+    - stage/status 校验、事件计数、`created→vod` 认领在同一锁/事务内完成；认领是
+      条件 UPDATE（CAS，含 status NOT IN ('cancelled','completed')），并发触发/并发
+      取消仅一个成功，其余 400/409，不会重复入链
+    - 触发失败（抛错或未落事件）→ 回滚为 stage=created（无事件时，status 恢复
+      active、保留终态），可重试，不卡死
+    """
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
+    repo_key = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(repo_key)
+    _issue_id = f"#{issue_num}"
+    # 1) 状态/事件校验 + 2) 原子认领 created→vod（同一 db_lock/事务；用 runtime 域连接）
+    # 事件循环保护：db_lock 是同步阻塞资源，放到线程里跑，避免卡住 async 处理链（async-blocking 棘轮 A6）
+    _row, _claimed = await asyncio.to_thread(
+        _claim_pending_issue_created, repo_key, issue_num, _issue_id)
+    if not _claimed:
+        # 认领失败：并发取消 → 400；并发触发/其它 → 409
+        _cur = await asyncio.to_thread(_pending_issue_status_row, repo_key, issue_num)
+        if _cur and str(_cur[0] or "") in ("cancelled", "completed"):
+            raise HTTPException(status_code=400, detail={"code": 400,
+                                                         "message": f"Issue #{issue_num} status={_cur[0]}，终态需求不可触发"})
+        raise HTTPException(status_code=409, detail={"code": 409,
+                                                     "message": f"Issue #{issue_num} 已被其它触发认领，不重复入链"})
+    _title = str(_row[1] or "")
+    _creator = (str(_row[2] or "") or actor or "").strip()
+    _db_issue_id = int(_row[5] or 0)
+
+    def _audit_triggered(seq: int) -> None:
+        """QA C3（#3913）：created→vod 首次触发入链留审计；失败仅告警不阻断。"""
+        try:
+            from src.domains.mgmt.public import log_audit
+            log_audit("issue_pipeline_triggered_from_created",
+                      operator_id=(operator_id or 0),
+                      detail={"repo_key": repo_key,
+                              "issue_id": (route_issue_id or _db_issue_id),
+                              "issue_number": issue_num,
+                              "from_stage": "created", "to_stage": "vod",
+                              "actor": (actor or _creator or ""),
+                              "seq": int(seq or 0)})
+        except Exception as _ae:
+            log.warning(f"trigger_pending: audit log failed for #{issue_num}: {_ae}")
+
+    # 3) 走同一同步触发路径；失败/未落事件 → 回滚为 created 以便重试
+    try:
+        _pipe_result = await _issue_opened_pipeline_trigger(
+            repo_key, owner, rname, issue_num, _title, _creator, repo_key.startswith("github:"))
+    except Exception as _e:
+        # run_pipeline 可能已落事件后才抛错：事件已存在即视为入链成功（不误报失败）
+        if _pending_trigger_event_count(repo_key, issue_num):
+            log.warning(f"trigger_pending: pipeline raised after event landed for #{issue_num}: {_e}")
+            _audit_triggered(0)
+            return {"ok": True, "issue_number": issue_num, "stage": "vod", "seq": 0}
+        _rolled = _rollback_pending_issue_trigger(repo_key, issue_num)
+        log.warning(f"trigger_pending: pipeline raised for #{issue_num}, rolled_back={_rolled}: {_e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "message": ("流水线触发失败，已回滚为待触发状态，可重试" if _rolled
+                        else "流水线触发失败，请检查流水线事件后再试")})
+    _seq = int((_pipe_result or {}).get("seq", 0) or 0)
+    _evt_after = _pending_trigger_event_count(repo_key, issue_num)
+    if not _evt_after:
+        _rolled = _rollback_pending_issue_trigger(repo_key, issue_num)
+        log.warning(f"trigger_pending: no event after pipeline for #{issue_num}, rolled_back={_rolled}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "message": ("流水线未落事件，已回滚为待触发状态，可重试" if _rolled
+                        else "流水线未落事件，请检查流水线事件后再试")})
+    log.info(f"trigger_pending: triggered pipeline for #{issue_num}, seq={_seq}")
+    _audit_triggered(_seq)
+    return {"ok": True, "issue_number": issue_num, "stage": "vod", "seq": _seq}
+
+
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
@@ -4222,7 +4455,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）；org 归属由 ensure_issue_task 统一以仓库为准
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
                                 subtask_mode=_auto_subtask_mode,
-                                owner_user_id=str(user.get("id") or ""))
+                                owner_user_id=str(user.get("id") or ""),
+                                # Issue #3621：创建人身份落 created_by，供挂单后续首次触发复用
+                                creator=_creator_login)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     _snap_id = str(getattr(body, "org_context_snapshot_id", "") or "")
@@ -4258,7 +4493,18 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # Issue #89: 同步触发 pipeline 事件，不依赖 webhook（webhook 异步可能丢事件）
     # 新建 Issue 时直接创建 issue_opened 事件 → VOD Agent 处理
     # 复用已有 Issue 时创建 a2a_event 事件 → issue Agent 处理
-    if created:
+    # Issue #3621：trigger_pipeline=false 时只建单不触发流水线（stage=created 挂单）
+    _trigger_pipeline = bool(getattr(body, "trigger_pipeline", True))
+    # Issue #3621：trigger_pipeline=false 时只建单不触发流水线（stage=created 挂单）
+    if created and not _trigger_pipeline:
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{issue_num}", "created", _STAGE_CREATED_OWNER,
+                            assignee=assignee or "")
+            log.info(f"create_task: pipeline skipped for #{issue_num} (trigger_pipeline=false)")
+        except Exception as _e:
+            log.warning(f"create_task: set created stage failed: {_e}")
+    elif created:
         try:
             from src.api.session_store import set_issue_stage
             # 初始化 issue_state（vod 阶段）
@@ -4332,12 +4578,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
         except Exception as _e:
             log.warning(f"create_task: sync pipeline trigger failed: {_e}")
-
-    # task_id 语义 = 需求卡片 issue.id（issues_center P2：主字段 issue_id，兼容保留 task_id）
     return {"ok": True, "issue_id": task_id, "task_id": task_id,
             "issue_number": issue_num, "created": created,
             "assignee": assignee, "is_subtask_mode": _auto_subtask_mode,
-            "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
+            "trigger_pipeline": bool(_trigger_pipeline),
+            "message": ("任务已创建（挂单，未触发流水线）" if (created and not _trigger_pipeline)
+                        else ("任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"))}
 
 _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
 

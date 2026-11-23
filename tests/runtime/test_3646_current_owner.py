@@ -46,8 +46,8 @@ class TestInternalAccountPredicate:
     """内部 Agent 身份不得直接作为责任人展示。"""
 
     def test_gcw_prefix_is_internal(self):
-        """GitCode OAuth 自动登录名（#3644 的 gcw_0FAKEACCT）→ 内部账号。"""
-        assert is_internal_agent_account("gcw_0FAKEACCT") is True
+        """GitCode OAuth 自动登录名（#3644 的 gcw_0000）→ 内部账号。"""
+        assert is_internal_agent_account("gcw_0000") is True
         assert is_internal_agent_account("gcw_7pdiBkYp") is True
 
     def test_bot_usernames_from_config_are_internal(self):
@@ -59,12 +59,12 @@ class TestInternalAccountPredicate:
 
     def test_bot_suffix_does_not_kill_human_logins(self):
         """裸 endswith('bot') 会误杀真人账号，形态规则必须带分隔符。"""
-        for name in ("abbot", "robot", "talbot", "songspace", "Jason7602"):
+        for name in ("abbot", "robot", "talbot", "alice", "Jason7602"):
             assert is_internal_agent_account(name) is False, name
 
     def test_agent_display_and_runtime_shapes_are_internal(self):
-        for name in ("QA Agent", "Coding Agent", "hermes-worker-ecs-grape-de-0005",
-                     "aishell-dsh-worker-ecs-grape-wo-0002"):
+        for name in ("QA Agent", "Coding Agent", "hermes-worker-host-0005",
+                     "aishell-dsh-worker-host-0002"):
             assert is_internal_agent_account(name) is True, name
 
     def test_empty_is_not_internal(self):
@@ -80,11 +80,11 @@ class TestResolveCurrentOwner:
         assert resolve_current_owner(["alice", "bob"], ["carol"]) == "alice"
 
     def test_internal_assignee_skipped(self):
-        assert resolve_current_owner(["gcw_0FAKEACCT", "alice"], []) == "alice"
-        assert resolve_current_owner(["grape_bot"], ["songspace"], ["grape_bot"]) == "songspace"
+        assert resolve_current_owner(["gcw_0000", "alice"], []) == "alice"
+        assert resolve_current_owner(["grape_bot"], ["alice"], ["grape_bot"]) == "alice"
 
     def test_all_internal_falls_back(self):
-        assert resolve_current_owner(["grape_bot"], ["gcw_0FAKEACCT"], ["grape_bot"],
+        assert resolve_current_owner(["grape_bot"], ["gcw_0000"], ["grape_bot"],
                                      fallback="QA Agent") == "QA Agent"
 
     def test_empty_candidates_fall_back(self):
@@ -98,14 +98,14 @@ class TestCurrentOwnerResolution:
     """展示 seam：_get_issue_pipeline → current_owner（Issue #3644 事件链复现）。"""
 
     def test_issue_3644_gcw_actor_is_skipped_for_human_owner(self):
-        """#3644：qa 阶段 A2A 事件 actor 是内部账号 gcw_0FAKEACCT → 责任人应为 songspace。"""
+        """#3644：qa 阶段 A2A 事件 actor 是内部账号 gcw_0000 → 责任人应为 alice。"""
         events = [
-            _ev(1, "#1", "issue_opened", "vod", "新 Issue", "completed", "songspace"),
-            _ev(2, "#1", "a2a_event", "issue", "A2A: → issue", "completed", "songspace"),
-            _ev(3, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0FAKEACCT"),
+            _ev(1, "#1", "issue_opened", "vod", "新 Issue", "completed", "alice"),
+            _ev(2, "#1", "a2a_event", "issue", "A2A: → issue", "completed", "alice"),
+            _ev(3, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0000"),
         ]
         p = _pipeline(events, stage_assignee="")
-        assert p["current_owner"] == "songspace", p["current_owner"]
+        assert p["current_owner"] == "alice", p["current_owner"]
 
     def test_human_assignee_wins_over_human_actor(self):
         events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "bob")]
@@ -115,34 +115,34 @@ class TestCurrentOwnerResolution:
     def test_bot_assignee_falls_back_to_human_actor(self):
         """assignee 为 bot（机器人接管）→ 不能当责任人，回退最近人类操作者。"""
         events = [
-            _ev(1, "#1", "issue_opened", "vod", "T", "completed", "songspace"),
+            _ev(1, "#1", "issue_opened", "vod", "T", "completed", "alice"),
             _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "grape_bot"),
         ]
         p = _pipeline(events, stage_assignee="grape_bot")
-        assert p["current_owner"] == "songspace", p["current_owner"]
+        assert p["current_owner"] == "alice", p["current_owner"]
 
     def test_gcw_assignee_falls_back_to_human_actor(self):
-        events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "songspace")]
-        p = _pipeline(events, stage_assignee="gcw_0FAKEACCT")
-        assert p["current_owner"] == "songspace", p["current_owner"]
+        events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "alice")]
+        p = _pipeline(events, stage_assignee="gcw_0000")
+        assert p["current_owner"] == "alice", p["current_owner"]
 
     def test_all_internal_falls_back_to_agent_display_name(self):
         """全为内部账号 → Agent 显示名，绝不输出原始内部账号。"""
         events = [
             _ev(1, "#1", "issue_opened", "issue", "T", "completed", "grape_bot"),
-            _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0FAKEACCT"),
+            _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "gcw_0000"),
         ]
-        p = _pipeline(events, stage_assignee="gcw_0FAKEACCT")
+        p = _pipeline(events, stage_assignee="gcw_0000")
         assert p["current_owner"] == "QA Agent", p["current_owner"]
         assert "gcw_" not in p["current_owner"]
 
     def test_agent_display_name_actor_is_internal(self):
         events = [
-            _ev(1, "#1", "issue_opened", "vod", "T", "completed", "songspace"),
+            _ev(1, "#1", "issue_opened", "vod", "T", "completed", "alice"),
             _ev(2, "#1", "a2a_event", "qa", "A2A: → qa", "running", "QA Agent"),
         ]
         p = _pipeline(events, stage_assignee="")
-        assert p["current_owner"] == "songspace", p["current_owner"]
+        assert p["current_owner"] == "alice", p["current_owner"]
 
     def test_human_actor_payload_assignee_used_over_actors(self):
         events = [
@@ -154,10 +154,10 @@ class TestCurrentOwnerResolution:
 
     def test_human_owner_resolved_to_feishu_nickname(self):
         """人类责任人仍走飞书昵称解析（解析口径不变）。"""
-        events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "songspace")]
-        p = _pipeline(events, stage_assignee="songspace",
-                      feishu=lambda u, *a: "吕军涛" if u == "songspace" else u)
-        assert p["current_owner"] == "吕军涛"
+        events = [_ev(1, "#1", "issue_opened", "issue", "T", "completed", "alice")]
+        p = _pipeline(events, stage_assignee="alice",
+                      feishu=lambda u, *a: "Alice" if u == "alice" else u)
+        assert p["current_owner"] == "Alice"
 
 
 @pytest.fixture(autouse=True)
@@ -185,12 +185,12 @@ class TestIssueAssigneeKeepsValue:
     """阶段推进（A2A handoff）不得把已有责任人抹成空串。"""
 
     def test_stage_advance_keeps_assignee(self):
-        ss.set_issue_stage(RK, "#7", "vod", "vod", assignee="songspace")
+        ss.set_issue_stage(RK, "#7", "vod", "vod", assignee="alice")
         ss.set_issue_stage(RK, "#7", "qa", "qa")  # A2A 推进：不携带 assignee
-        assert ss.get_issue_assignee(RK, "#7") == "songspace"
+        assert ss.get_issue_assignee(RK, "#7") == "alice"
 
     def test_explicit_assignee_still_overwrites(self):
-        ss.set_issue_stage(RK, "#7", "vod", "vod", assignee="songspace")
+        ss.set_issue_stage(RK, "#7", "vod", "vod", assignee="alice")
         ss.set_issue_stage(RK, "#7", "qa", "qa", assignee="alice")
         assert ss.get_issue_assignee(RK, "#7") == "alice"
 
@@ -204,19 +204,19 @@ class TestIssueAssigneeBackfill:
 
     def test_backfill_when_empty(self):
         ss.set_issue_stage(RK, "#7", "coding", "coding")
-        assert ss.sync_issue_assignee(RK, "#7", "songspace") is True
-        assert ss.get_issue_assignee(RK, "#7") == "songspace"
+        assert ss.sync_issue_assignee(RK, "#7", "alice") is True
+        assert ss.get_issue_assignee(RK, "#7") == "alice"
 
     def test_do_not_override_existing_human(self):
-        ss.set_issue_stage(RK, "#7", "coding", "coding", assignee="songspace")
+        ss.set_issue_stage(RK, "#7", "coding", "coding", assignee="alice")
         assert ss.sync_issue_assignee(RK, "#7", "grape_bot") is False
-        assert ss.get_issue_assignee(RK, "#7") == "songspace"
+        assert ss.get_issue_assignee(RK, "#7") == "alice"
 
     def test_empty_assignee_is_noop(self):
-        ss.set_issue_stage(RK, "#7", "coding", "coding", assignee="songspace")
+        ss.set_issue_stage(RK, "#7", "coding", "coding", assignee="alice")
         assert ss.sync_issue_assignee(RK, "#7", "") is False
-        assert ss.get_issue_assignee(RK, "#7") == "songspace"
+        assert ss.get_issue_assignee(RK, "#7") == "alice"
 
     def test_no_card_row_is_not_reported_as_backfilled(self):
         """无卡片行 → 不假装回填成功（对账口径），也不抛异常。"""
-        assert ss.sync_issue_assignee(RK, "#404", "songspace") is False
+        assert ss.sync_issue_assignee(RK, "#404", "alice") is False

@@ -132,6 +132,49 @@ def prune_db_backups(path: str, keep: int | None = None) -> int:
         return 0
 
 
+def _sqlite_journal_mode() -> str:
+    """SQLite journal 模式（Issue #3588 overlayfs 兼容选项）。
+
+    环境变量 DEVOPS_DB_JOURNAL_MODE 可选 wal|truncate|delete|memory 等
+    sqlite 合法值，默认 wal（与历史行为一致，不改默认）。overlayfs 容器
+    若 WAL/SHM copy-up 失效反复触发，可显式改为 truncate/delete 规避。
+    """
+    mode = (os.environ.get("DEVOPS_DB_JOURNAL_MODE") or "").strip().lower()
+    if mode:
+        log.info("SQLite journal_mode override via DEVOPS_DB_JOURNAL_MODE=%s", mode)
+        return mode
+    return "wal"
+
+
+def _build_sqlite_db(path: str):
+    """构建一条完整初始化的 SQLite 主连接（connect + PRAGMA 重放 + schema 包装）。
+
+    接受路径参数：惰性代理在建连时解析 DEVOPS_DB_PATH 后传入。
+
+    db_health 自愈代理在 WAL/SHM 失效（overlayfs 删旧建新替换）后用本工厂
+    重建连接：PRAGMA 与 SchemaSQLiteDB 包装必须随连接重放，否则重建后的
+    连接行为与启动时不一致（Issue #3588）。
+    """
+    conn = sqlite3.connect(path, check_same_thread=False)
+    # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
+    try:
+        conn.execute(f"PRAGMA journal_mode={_sqlite_journal_mode()}")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=FULL")  # FULL: commit 时 fsync WAL 到磁盘
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception as e:
+        log.warning(f"SQLite pragma setup failed: {e}")
+    # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_ 前缀，
+    # 业务代码经 kernel/db.qualify_sql 运行时改写，零改动无感。
+    try:
+        from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
+        if schema_mode_enabled():
+            conn = SchemaSQLiteDB(conn)
+    except Exception as e:
+        log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+    return conn
+
+
 # ── 惰性连接（PEP 562 风格的代理）───────────────────────────────────────────────
 #
 # 历史实现在这里**模块级**建连：`import src.kernel.session_manager` 的瞬间就打开
@@ -191,26 +234,13 @@ class _LazyDB:
                 os.makedirs(parent, exist_ok=True)
             except Exception:
                 pass
-        # timeout 保持 sqlite3 默认 5s（PRAGMA busy_timeout=5000 也是 5s）。
-        # 曾试过 30s，整域跑时每个拿不到锁的用例要多等 25s，累积到十几分钟看着像死锁。
-        real = sqlite3.connect(path, check_same_thread=False)
-        # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
-        try:
-            real.execute("PRAGMA journal_mode=WAL")
-            real.execute("PRAGMA busy_timeout=5000")
-            real.execute("PRAGMA synchronous=FULL")
-            real.execute("PRAGMA foreign_keys=ON")
-        except Exception as e:
-            log.warning(f"SQLite pragma setup failed: {e}")
-        # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_
-        try:
-            from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
-            if schema_mode_enabled():
-                real = SchemaSQLiteDB(real)
-                log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
-        except Exception as e:
-            log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
-        return real
+        # Issue #3588：主连接包自愈代理——WAL/SHM 被 overlayfs 删旧建新替换后，
+        # 持久 fd 指向已删除 inode → disk I/O error 持续 500；代理检测（异常 +
+        # inode 周期校验双条件）后自动重建连接，factory=完整初始化（PRAGMA 与
+        # Schema 包装随连接重放）。446 处调用点均为 `from session_manager import
+        # db` 的对象引用传递，代理一经建立即全局生效。
+        from src.kernel.db_health import wrap_with_health_tracking
+        return wrap_with_health_tracking(lambda: _build_sqlite_db(path), path)
 
     def get(self):
         """返回真实连接（必要时建立）。"""

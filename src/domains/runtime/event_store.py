@@ -26,21 +26,11 @@ def _events_columns(c) -> set:
     global _EVENTS_COLUMNS_CACHE
     if _EVENTS_COLUMNS_CACHE is not None:
         return _EVENTS_COLUMNS_CACHE
-    cols: set = set()
-    for sql in (
-        "SELECT COLUMN_NAME FROM information_schema.columns "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='events'",
-        "PRAGMA table_info(events)",
-    ):
-        try:
-            rows = c.execute(sql).fetchall() or []
-            if rows:
-                # information_schema: COLUMN_NAME 在 0；PRAGMA: 列名在 1
-                cols = {(r[0] if isinstance(r[0], str) else r[1]) for r in rows}
-                break
-        except Exception as e:  # noqa: BLE001 - 后端不支持该方言时换下一种
-            log.debug(f"_events_columns: {sql.split()[0]} 不可用: {e}")
-            continue
+    # 探列单一入口（kernel.ddl_safety）：PRAGMA（compat 翻译）+ 裸 MySQL
+    # information_schema 回退。原实现自己拼两种方言，PR #2009 I2 收敛。
+    from src.kernel.ddl_safety import table_columns
+
+    cols = set(table_columns(c, "events"))
     _EVENTS_COLUMNS_CACHE = cols
     return cols
 
@@ -1358,7 +1348,16 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                         if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
                             _revive_ok = (revive_from_timeout_failed
                                           and row[0] == "failed" and status == "completed")
-                            if not _revive_ok:
+                            # Issue #3834：接管 finish 是用户授权的终态写入。若让渡时 cancel_task
+                            # 已把事件级联收敛成 cancelled（cascade 合成补偿），而 mark_task_takeover
+                            # 未把状态拉回 takeover（老实例/写入竞态），旧实现会在这里静默跳过 →
+                            # 事件仍是补偿文案、无 structured_output，下一节点永远不派发。
+                            # 窄口子：仅接管服务（allow_from_takeover=True）且 cancelled→completed/failed 放行。
+                            # #3834 复审③：failed 也对称放行——接管失败时事件同样停在让渡期 cancelled，
+                            # 不放行会留下「接口返回 failed、库里却还是 cancelled+合成补偿文案」的口径分裂。
+                            _takeover_ok = (allow_from_takeover
+                                            and row[0] == "cancelled" and status in ("completed", "failed"))
+                            if not (_revive_ok or _takeover_ok):
                                 log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
                                 # R2 自愈：首写 payload 失败登记过 pending → 重复 complete
                                 # 终态短路时补写大字段（清标记；仍不覆盖终态字段）。
@@ -1367,9 +1366,12 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                                         _payload_clear_pending(seq)
                                         log.info(f"Event {seq}: backfilled pending payload on duplicate complete")
                                 return
-                            log.info(f"Event {seq}: failed -> completed via timeout revive "
-                                     f"(Issue #1071 narrow gate)")
-                        # Issue #1503：终态写入 result 兜底（与 completed_at 兜底同层）。
+                            if _takeover_ok:
+                                log.info(f"Event {seq}: cancelled -> {status} via takeover finish "
+                                         f"(Issue #3834 authorized revive)")
+                            else:
+                                log.info(f"Event {seq}: failed -> completed via timeout revive "
+                                         f"(Issue #1071 narrow gate)")
                         # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
                         if _is_terminal and not (result or "").strip():
                             _ec = exit_code if exit_code is not None else "?"

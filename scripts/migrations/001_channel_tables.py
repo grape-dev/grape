@@ -64,7 +64,8 @@ def _ensure_legacy_unique_index(conn) -> None:
         会把 COALESCE(NULLIF(repo_key,''), owner_user_id) 拆坏），故显式判存在后直发。
     """
     idx = "uk_channel_installation_legacy"
-    if isinstance(conn, sqlite3.Connection):
+    from src.kernel.db_health import is_sqlite_conn  # 自愈代理接入后 SQLite 判别统一走它
+    if is_sqlite_conn(conn):
         conn.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {idx} ON grape_t_channel_installation"
             "(legacy_app_id, scope, COALESCE(NULLIF(repo_key,''), owner_user_id))"

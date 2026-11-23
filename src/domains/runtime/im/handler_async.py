@@ -38,7 +38,7 @@ from src.kernel.owner_db import db_pair
 # 三库独立（weekly-11 拆库）后，本文件属 runtime 域，但 IM 引擎由 **mgmt 进程**启动并执行
 # （grape_server.py → engine_wiring.start_im_engine）。chat_conversations / issue /
 # chat_agent_session / repo_im_group_binding 都是 runtime 基表，用进程本域连接会得到
-# `1146 Table 'grape_mgmt.chat_conversations' doesn't exist`——飞书 /repo 选仓库、
+# `1146 Table '<mgmt 库>.chat_conversations' doesn't exist`——飞书 /repo 选仓库、
 # 自然语言绑仓库、/task 进任务会话全断。故 db/db_lock 一律绑 runtime owner 代理
 # （与 insight 可观测性模块同口径，见 src/kernel/owner_db.py）：单库/无 DSN 拓扑
 # 自动回落 session_manager.db，零回归。

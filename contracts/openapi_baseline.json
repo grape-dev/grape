@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 399,
-  "min_endpoint_count": 359,
+  "endpoint_count": 400,
+  "min_endpoint_count": 360,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "merge: sync arch-weekly-11 2cf3036bf into arch-weekly-11-ljt (union of both branches' endpoint additions; 399 paths)",
-  "source_commit": "16d47d6ec"
+  "change_reason": "merge: sync arch-weekly-11 (63f1317be) into arch-weekly-11-ljt — union of both branches' endpoint additions",
+  "source_commit": "d6308c884"
 }

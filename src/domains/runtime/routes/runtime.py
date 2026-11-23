@@ -1622,14 +1622,21 @@ def _claim_body_v1(body: RuntimeClaimBodyV2 | None) -> RuntimeClaimBody | None:
 
 @router.post("/runtimes/uid/{engine_uid}/tasks/claim")
 def runtime_claim_v2(engine_uid: str, body: RuntimeClaimBodyV2 | None = None,
-                     credential_id: int = Depends(_require_credential)):
+                     credential_id: int = Depends(_require_credential),
+                     request: Request = None):  # type: ignore[assignment]
     """Issue #1011 v2 claim：按 engine_uid 认领（uid 失效回退 body.runtime_id）。
 
     寻址键转换后直接调 v1 runtime_claim（服务层语义零漂移）；
     payload 与 v1 一致双带 id+uid 三键（engine_uid/engine_name_snapshot/pool_engine_uids）。
+
+    v1 签名是 (runtime_id, request, body, credential_id)，这里必须把 request 原样透传：
+    缺参时位置参数错位（body 收到 credential_id 这个 int），每次 uid claim 都 500
+    `'int' object has no attribute 'expected_task_id'`，引擎只能退回 claim-by-tag。
+    request 放在末位并允许 None：单元测试直接调用本函数时不传 Request，
+    `_request_base_url(None)` 返回空串，不影响认领语义。
     """
     rid = _resolve_runtime_by_uid(engine_uid, body.runtime_id if body else 0, credential_id)
-    return runtime_claim(rid, _claim_body_v1(body), credential_id)
+    return runtime_claim(rid, request, _claim_body_v1(body), credential_id)
 
 
 @router.post("/runtimes/uid/{engine_uid}/tasks/claim-by-tag/{tag}")

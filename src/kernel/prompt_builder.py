@@ -1325,7 +1325,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                               runtime_id: int = 0, backend_name: str = "",
                               user_info: str = "", skills: list = None,
                               account: str = "", has_valid_session: bool = False,
-                              plugins: list = None) -> str:
+                              plugins: list | None = None) -> str:
     """统一通用 Chat prompt（Web / 飞书共用，方案 B：以简洁英文结构为准）。
 
     原 _build_chat_prompt（web）与旧 build_general_chat_prompt（飞书）二合一：
@@ -1396,7 +1396,8 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
 
 def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
                             account: str = "", runtime_id: int = 0, user_info: str = "",
-                            has_valid_session: bool = False, plugins: list = None) -> str:
+                            has_valid_session: bool = False,
+                            plugins: list | None = None) -> str:
     """Issue 会话独立 prompt：围绕该 Issue 展开讨论（咨询/评审/澄清/解读）。
 
     原 build_task_chat_prompt（决策 R1 重命名）；语义从「任务澄清」放宽为
@@ -1965,22 +1966,37 @@ def resolve_service_base_env(runtime_id: int = 0) -> dict:
     runtime_url = _resolve_server_url(runtime_id)
     return _build_service_base_env(business_url, business_source, runtime_url)
 
+def resolve_a2a_base_with_source(runtime_id: int = 0) -> tuple[str, str]:
+    """A2A 控制面基址及命中来源（Issue #1858 / #3910）。
+
+    与 ``resolve_a2a_base`` 同源，额外返回来源标签，供派发方判断可信度：
+    - ``explicit_a2a_api_url`` / ``gateway_prefix_a2a``：运维显式配置或网关前缀，
+      可信任，无需可达性探测；
+    - ``runtime_server_url_fallback``：回退 ``RUNTIME_SERVER_URL``，四进程下可能落在
+      本进程（如 mgmt 38081）而非 A2A 所在进程，派发方必须再做 health + POST /api/a2a
+      双重校验（见 ``takeover._a2a_dispatch_base``）。
+    本函数只做解析，不触发任何网络探测。
+    """
+    try:
+        explicit = _tokens.get_task_service_api_url_explicit("a2a")
+        if explicit:
+            return explicit.rstrip("/"), "explicit_a2a_api_url"
+        gateway = _tokens.get_task_gateway_base_url()
+        if gateway:
+            return (_join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES["a2a"]),
+                    "gateway_prefix_a2a")
+    except Exception:
+        pass
+    return (_resolve_server_url(runtime_id) or "").rstrip("/"), "runtime_server_url_fallback"
+
+
 def resolve_a2a_base(runtime_id: int = 0) -> str:
     """A2A 控制面基址（平台侧 handoff/status 自调用用，Issue #1858）。
 
     仅解析 A2A 显式配置 > 聚合网关 `/a2a` 前缀 > `RUNTIME_SERVER_URL` 回退，
     不触发业务 API 可达性探测——重派/续办的诊断路径无需业务端点在线。
     """
-    try:
-        explicit = _tokens.get_task_service_api_url_explicit("a2a")
-        if explicit:
-            return explicit.rstrip("/")
-        gateway = _tokens.get_task_gateway_base_url()
-        if gateway:
-            return _join_base_prefix(gateway, _SERVICE_GATEWAY_PREFIXES["a2a"])
-    except Exception:
-        pass
-    return (_resolve_server_url(runtime_id) or "").rstrip("/")
+    return resolve_a2a_base_with_source(runtime_id)[0]
 
 def _comment_media_texts(evt) -> list[str]:
     """Issue #1748：仅在 issue_comment 事件收集评论文本（Spec 限定评论事件）。
@@ -2101,6 +2117,10 @@ _BUSINESS_API_PATH_PREFIXES = ("/api/issues", "/api/git-repo")
 # 默认按服务注入；可选聚合网关按前缀路由。三面来源均单独记录，不借用
 # GRAPE_SERVER_URL 的标签冒充，任务 env 中通过 GRAPE_BASE_URL_SOURCES 可追溯。
 _SERVICE_GATEWAY_PREFIXES = {"vcs": "/vcs", "issue": "/issue", "a2a": "/a2a"}
+
+# A2A 派发可信任来源（运维显式配置/网关前缀）；其余来源（runtime_server_url_fallback）
+# 需在派发侧做 health + POST /api/a2a 双重校验（Issue #3910）。
+A2A_TRUSTED_BASE_SOURCES = ("explicit_a2a_api_url", "gateway_prefix_a2a")
 
 # Issue #1748: 评论媒体附件（user-attachments）采集+分析结果缓存（repo+issue+评论文本指纹维度）
 _COMMENT_MEDIA_CACHE: dict = {}

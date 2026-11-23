@@ -80,6 +80,13 @@
     {
       "domain": "mgmt",
       "method": "GET",
+      "path": "/internal/platform-cards",
+      "operation_id": "mgmt_platform_cards",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
       "path": "/internal/repos/{repo_key}",
       "operation_id": "mgmt_repo_bundle",
       "summary": ""
@@ -346,7 +353,7 @@
   ],
   "counts": {
     "insight": 9,
-    "mgmt": 12,
+    "mgmt": 13,
     "runtime": 28
   }
 }

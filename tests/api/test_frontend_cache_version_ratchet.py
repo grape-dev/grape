@@ -45,7 +45,7 @@ FROZEN = {
         'observability-view.js': '59',
         'onboarding-view.js': '9',
         'organizations.js': '83',
-        'pipeline.js': '57',
+        'pipeline.js': '58',
         'platform-icons.js': '2',
         'plugins.js': '57',
         'pwd-blocklist.js': '3',
@@ -80,7 +80,6 @@ FROZEN = {
         'pwd-blocklist.js': '3',
     },
 }
-
 # 日期型版本模块：交给 i18n_locale_cache_ratchet 的「下界 + 指纹」守护
 DATE_VERSIONED = {
     "i18n.js",

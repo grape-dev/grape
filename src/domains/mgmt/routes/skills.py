@@ -6,6 +6,7 @@ import io as _io
 import hashlib, os, re, tempfile, zipfile, json, shutil, stat as _stat
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Query, Body
+from typing import Annotated
 from pydantic import BaseModel
 
 from src.domains.mgmt.user import db as user_db
@@ -524,10 +525,37 @@ def _version_from_content(content: str) -> str:
     return "—"
 
 
-@router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(require_org_member),
-                repo: str = Query("", description="仓库参数，格式为 owner/repo（可带 provider 前缀，如 gitcode:owner/repo）"),
-                scope: str = "",                agent_type: str = "", category_id: int = 0,
+# Issue #1790（#1790/#1786 移植）：repo 参数三态区分（未传 / 合规 owner/repo / 不合规）。
+# 2026-11-20 修复：合并冲突时定义被吃掉、只留下调用 → list_skills NameError 500。
+REPO_PARAM_FORMAT_MESSAGE = "repo 参数格式应为 owner/repo"
+REPO_PARAM_PROVIDER_PREFIXES = ("gitcode", "github")
+
+
+def _validate_repo_param(repo: str) -> None:
+    """Issue #1790：repo 参数三态区分（未传 / 合规 owner/repo / 不合规）。
+
+    裸仓库名等不合规格式此前被当作「无仓库过滤」静默回退官方列表，
+    调用方无法区分「该仓库无仓库级技能」与「参数格式错误」，改显式 400。
+    合法格式 = owner/repo（仅可带 gitcode:/github: 白名单前缀）；其余前缀
+    （foo:owner/repo）、空前缀（:owner/repo）或残留冒号（a:b:c/d）均 400。
+    owner/repo 拆分复用 src.kernel.repo_key.split_owner_repo（QA 复审：消除手写重复）。
+    """
+    from src.kernel.repo_key import split_owner_repo
+    if not repo:
+        return
+    body, prefix_ok = repo, True
+    if ":" in repo:
+        prefix, _, body = repo.partition(":")
+        prefix_ok = prefix in REPO_PARAM_PROVIDER_PREFIXES and ":" not in body
+    owner, repo_name = split_owner_repo(body)
+    if not prefix_ok or not owner or not repo_name or "/" in repo_name:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": REPO_PARAM_FORMAT_MESSAGE})
+
+
+@router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging. Issue #1790: repo param format = owner/repo (optional gitcode:/github: provider prefix); bare repo names and other malformed values return 400 with a format hint instead of silently falling back to the official list.")
+def list_skills(user: dict = Depends(require_org_member), repo: Annotated[str, Query(description="仓库过滤，格式 owner/repo（可带 gitcode:/github: 前缀）；裸仓库名等不合规值返回 400（Issue #1790）")] = "", scope: str = "",                agent_type: str = "", category_id: int = 0,
                 cat_l1_id: int = 0, cat_l2_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。

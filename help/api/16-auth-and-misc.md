@@ -248,6 +248,12 @@
 
 参数与响应字段以 `/openapi.json` 为准；组织类错误返回 `detail.error_code`。
 
+错误码：
+
+- `409 ORG_SLUG_EXISTS`：slug 已存在（不会再与「写库失败」混用同一个 409）；
+- `500 ORG_CREATE_FAILED`：组织写库失败。组织行与 provisioning 初始状态/仓库选项
+  在同一条 INSERT 写入，失败不会留下 `provision_status=NULL` 的半成品。
+
 ### GET /api/orgs/repo-namespaces — orgs_repo_namespaces
 
 > scope：`user_only`
