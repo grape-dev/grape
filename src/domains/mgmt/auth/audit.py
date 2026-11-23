@@ -9,7 +9,11 @@ import json
 import re
 
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
+# 审计表归 mgmt 域：worker/event 进程调用时必须走 owner 连接，否则会写进
+# 进程本库（runtime）——三库下要么 1146 被吞，要么拆断审计哈希链。
+from src.kernel.owner_db import db_pair
+
+db, db_lock = db_pair("mgmt")
 
 
 # 事件类型
@@ -58,6 +62,7 @@ EVENT_TYPES = frozenset({
     "org_repo_bind",                # 组织关联托管仓库
     "org_repo_map_analyze",         # 组织仓库地图：单仓分析
     "org_repo_map_analyze_all",     # 组织仓库地图：全量分析
+    "org_repo_map_sync",            # 组织仓库地图：显式同步汇总文档到 grape-org
     "org_repo_ai_result",           # 组织仓库 AI 分析结果回写（worker / 手动）
     "org_repo_analysis_run",        # 组织 AI 分析手动触发（单仓/全量）
     "org_repo_analysis_automation_ensure",  # 组织 AI 分析每日自动任务开启
@@ -75,6 +80,7 @@ EVENT_TYPES = frozenset({
     "dispatch_partial_failed",      # 下派存在失败目标（含全部失败）
     "dispatch_cancelled",           # 下派被取消
     "target_retried",               # 单目标重试（复用既有子 Issue）
+    "dispatch_needs_review",        # 下派批次等待人工复核
     # Issue #2150：组织上下文与组织知识库（未登记会被静默丢弃）
     "org_context_create",           # 组织上下文创建（draft）
     "org_context_update",           # 组织上下文更新
@@ -235,6 +241,7 @@ _DISPATCH_EVENT_TYPES = frozenset({
     "dispatch_partial_failed",
     "dispatch_cancelled",
     "target_retried",
+    "dispatch_needs_review",
 })
 
 # 组织审计事件全集（唯一来源：EVENT_TYPES 白名单 + 下派事件），查询只允许命中此集合

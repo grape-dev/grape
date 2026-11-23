@@ -53,10 +53,15 @@ def _problem_payload(problems: list) -> list[dict]:
 
 
 def _precheck(scene_id: str, repo_key: str, user: dict | None,
-              cache: dict[str, dict] | None = None) -> dict:
-    """可执行性预校验；异常按 fail-open（与建单侧 precheck 同一语义）。"""
-    if cache is not None and scene_id in cache:
-        return cache[scene_id]
+              cache: dict[tuple, dict] | None = None) -> dict:
+    """可执行性预校验；异常按 fail-open（与建单侧 precheck 同一语义）。
+
+    缓存键必须含 repo_key：预校验结果依赖仓库级引擎/技能绑定，同一个 scene_id
+    在不同仓库的结论可能不同（场景副本 / 关联仓共用模板时）。
+    """
+    _key = (str(repo_key or ""), str(scene_id or ""))
+    if cache is not None and _key in cache:
+        return cache[_key]
     try:
         result = runtime_public.precheck_scene(
             scene_id, repo_key, user=user, explicit=True)
@@ -65,7 +70,7 @@ def _precheck(scene_id: str, repo_key: str, user: dict | None,
             f"org_dispatch_scene: precheck failed scene={scene_id} repo={repo_key}: {exc}")
         result = {"ok": True, "problems": [], "warnings": [f"precheck failed: {exc}"]}
     if cache is not None:
-        cache[scene_id] = result
+        cache[_key] = result
     return result
 
 
@@ -96,7 +101,7 @@ def _recommend_config(repo_key: str, valid_scene_ids: set[str]) -> dict:
 
 def _scene_payload(scene: dict, *, repo_key: str, dev_scene: str,
                    include_executable: bool, user: dict | None,
-                   precheck_cache: dict[str, dict]) -> dict:
+                   precheck_cache: dict[tuple, dict]) -> dict:
     scene_id = str(scene.get("id") or "")
     item = {
         "scene_id": scene_id,
@@ -138,7 +143,7 @@ def scene_catalog(org_id: str, *, repo_key: str = "",
     if wanted and not rows:
         raise ValueError(f"target repository is not linked to this organization: {wanted}")
 
-    precheck_cache: dict[str, dict] = {}
+    precheck_cache: dict[tuple, dict] = {}
     repos: list[dict] = []
     for row in sorted(rows, key=lambda r: str(r.get("full_name") or r.get("repo_key") or "")):
         key = str(row.get("repo_key") or "")
@@ -172,7 +177,7 @@ def resolve_target_scene_detail(repo_key: str, requested_scene_id: str = "",
     requested = str(requested_scene_id or "").strip()
     warnings: list[str] = []
     problems: list[dict] = []
-    precheck_cache: dict[str, dict] = {}
+    precheck_cache: dict[tuple, dict] = {}
 
     def _usable(scene_id: str) -> bool:
         nonlocal problems

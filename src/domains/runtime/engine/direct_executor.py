@@ -1053,20 +1053,24 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.info(f"Exec agent: auto-advance issue={issue_id} agent={agent_type} "
                          f"action={_adv.get('action')} next={_adv.get('next_role')} "
                          f"round={_adv.get('round')} seq={_adv.get('seq')}")
-                try:
-                    from src.domains.mgmt import public as mgmt_public
-                    mgmt_public.log_audit(
-                        "issue_pipeline_advanced",
-                        user_id="0", operator_id="0",
-                        detail={"source": "exec", "task_id": task_id or "",
-                                "repo_key": repo_key, "issue_id": issue_id,
-                                "from": agent_type,
-                                "to": _adv.get("next_role") or "",
-                                "action": _adv.get("action") or "",
-                                "seq": _adv.get("seq") or 0},
-                    )
-                except Exception as _ae:
-                    log.warning(f"Exec agent: auto-advance audit failed issue={issue_id}: {_ae}")
+                # 与 pipeline_reconcile 同口径：只有真正新建了事件（seq>0）才算推进；
+                # append_event 撞幂等键返回负 seq、recheck 无 seq 都不落审计。
+                _adv_seq = int(_adv.get("seq") or 0)
+                if _adv.get("action") in ("a2a", "recheck") and _adv_seq > 0:
+                    try:
+                        from src.domains.mgmt import public as mgmt_public
+                        mgmt_public.log_audit(
+                            "issue_pipeline_advanced",
+                            user_id="0", operator_id="0",
+                            detail={"source": "exec", "task_id": task_id or "",
+                                    "repo_key": repo_key, "issue_id": issue_id,
+                                    "from": agent_type,
+                                    "to": _adv.get("next_role") or "",
+                                    "action": _adv.get("action") or "",
+                                    "seq": _adv_seq},
+                        )
+                    except Exception as _ae:
+                        log.warning(f"Exec agent: auto-advance audit failed issue={issue_id}: {_ae}")
         except Exception as _e:
             log.warning(f"Exec agent: auto-advance failed issue={issue_id}: {_e}")
 

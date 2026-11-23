@@ -575,7 +575,7 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
     # 不在 Mgmt 的 patrol 循环里执行 runtime 逻辑（四进程职责严格归位）。
     try:
         async def _pipeline_advance_loop():
-            from src.domains.runtime.engine.pipeline_reconcile import (
+            from src.domains.runtime.public import (
                 reconcile_pipeline_progress,
             )
             await asyncio.sleep(30)
@@ -583,19 +583,19 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
                 try:
                     stats = await asyncio.to_thread(reconcile_pipeline_progress)
                     try:
-                        from src.domains.insight.observability import loops
-                        loops.beat("pipeline_advance")
-                    except Exception:
-                        pass
+                        from src.domains.insight.public import obs_loop_beat
+                        obs_loop_beat("pipeline_advance")
+                    except Exception as _loop_e:
+                        log.debug(f"pipeline_advance loop beat failed: {_loop_e}")
                     if stats.get("advanced"):
                         log.info(f"Pipeline advance loop: advanced={stats['advanced']} "
                                  f"scanned={stats.get('scanned', 0)}")
                 except Exception as e:
                     try:
-                        from src.domains.insight.observability import loops
-                        loops.fail("pipeline_advance", e)
-                    except Exception:
-                        pass
+                        from src.domains.insight.public import obs_loop_fail
+                        obs_loop_fail("pipeline_advance", e)
+                    except Exception as _loop_e:
+                        log.debug(f"pipeline_advance loop fail record failed: {_loop_e}")
                     log.warning(f"Pipeline advance loop failed: {e}")
                 await asyncio.sleep(300)
 

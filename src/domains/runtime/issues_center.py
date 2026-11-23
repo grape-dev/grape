@@ -1038,7 +1038,7 @@ def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
         target_status, reason = "pending_review", ""
 
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         if reason:
             c.execute(
                 "UPDATE issue SET status=?, completed_reason=?, completed_at=datetime('now') "
@@ -1053,7 +1053,7 @@ def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
                 "('active','processing','awaiting_input','pending_review')",
                 (target_status, org_repo_key, issue_number),
             )
-        db.commit()
+        _rt_db.commit()
         _changed = c.rowcount > 0
         c.execute(
             "SELECT status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
@@ -4228,13 +4228,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _snap_id = str(getattr(body, "org_context_snapshot_id", "") or "")
     if _snap_id:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute(
                 "UPDATE issue SET org_context_snapshot_id=? "
                 "WHERE repo_key=? AND issue_number=?",
                 (_snap_id, repo_key, issue_num),
             )
-            db.commit()
+            _rt_db.commit()
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
     if _auto_subtask_mode:
         try:
