@@ -86,3 +86,31 @@
 6. **未解析口径注明**：技能名不在 skill 表时 `scene_skill_scope.evaluate`
    按存量兼容返回 ok=True（source=unresolved），此类节点仍进入可用清单；
    新增 T8 固化该口径。
+
+## QA 复审回归修订（2026-11-23，PR #1871 第二轮）
+
+针对 QA 新基线两轴复审 2 阻塞 + 2 部分的处理：
+
+1. **组织/存量场景回归（阻塞，#955/#2118）**：`_dispatchable_role` 复用
+   `node_agent_role`（id 优先）导致 `id=org_intake/tag=issue` 节点被整体
+   丢弃、`valid_targets=[]`、POST /api/a2a 交办 issue/coding/qa 全 409。
+   改为 `_dispatchable_roles`：节点 `id` 与 `tag` 中**任一**落在
+   `DISPATCHABLE_AGENTS` 白名单的名字均产出目标；`_scene_node_check`
+   恢复基线兼容的 `node` 键与可用节点 id 直达别名（org_* 按 id 命中），
+   `tests/runtime/test_issue_2118_org_pipeline_flow.py` 原样通过；
+   新增 T13 组织场景路由级用例（POST issue/coding/qa 不 409、sre 409）。
+2. **409 契约回归（阻塞）**：恢复经 `_a2a_skip_response` 的 409 组装——
+   `ok/reason/detail/agent/handoff_result/source_seq` 字段齐全；`skipped`
+   **保持稳定枚举 `not_in_scene`**（旧消费方与 help 文档按此字面判定），
+   粒度归因（node_disabled / skill_unresolvable）放 `conflict_reason`；
+   同步更新 T10 断言。
+3. **AC4 跨进程缓存（部分，接受为已知限制）**：写路径（set_scene_nodes /
+   scene_nodes_write_by_id）已在本进程立即失效 `get_pipeline_config`
+   缓存；webhook（event 进程）与 scenes detail（mgmt/api 进程）各持进程级
+   缓存，跨进程场景定义变更后的最长陈旧窗口仍为 TTL 60s（无跨进程失效
+   通道）——已在 `scene_targets.py` 模块 docstring 明确登记为已知限制，
+   同进程内两处读取口径恒一致，跨进程 TTL 窗口后自动收敛。
+4. **available_nodes 与 valid_targets 一致性（部分，随 1 修复）**：
+   组织节点按 tag 产出角色后同时进入 `available_nodes` 与 `valid_targets`
+   （此前 org 节点因角色为空被整体跳过，两侧清单与实际接受集合不一致）；
+   T13 断言组织场景下两清单与 POST 接受集合一致。

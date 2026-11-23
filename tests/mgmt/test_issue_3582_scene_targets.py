@@ -258,16 +258,22 @@ def test_t10_route_a2a_409_structured_reason_and_targets(monkeypatch):
         data = r.json()
         assert data["conflict_reason"] == "not_in_scene"
         assert data["valid_targets"] == ["coding"]
-        # 复审 #202444109（AC3）：skipped 与 conflict_reason 对齐（旧契约恒为
-        # not_in_scene，与机读归因矛盾；机读消费方以 conflict_reason 为准）
-        assert data["skipped"] == data["conflict_reason"] == "not_in_scene"
+        # QA 复审回归（阻塞项）：skipped 保持稳定枚举 not_in_scene（旧消费方
+        # 与 help 文档按此字面判定），粒度归因放 conflict_reason；
+        # 既有 409 契约字段（ok/reason/detail）经 _a2a_skip_response 补齐。
+        assert data["skipped"] == "not_in_scene"
+        assert data["ok"] is False
+        assert data["reason"] and isinstance(data["detail"], dict)
+        assert data["handoff_result"] == "rejected"
 
         r2 = client.post("/api/a2a", json={"agent": "qa", "payload": payload})
         assert r2.status_code == 409, r2.text
         data2 = r2.json()
+        # 粒度归因在 conflict_reason；skipped 仍是稳定枚举 not_in_scene
         assert data2["conflict_reason"] == "node_disabled"
-        assert data2["skipped"] == data2["conflict_reason"] == "node_disabled"
+        assert data2["skipped"] == "not_in_scene"
         assert data2["valid_targets"] == ["coding"]
+        assert data2["ok"] is False and data2["reason"]
     finally:
         app.dependency_overrides.clear()
 
@@ -361,3 +367,95 @@ def test_t12b_set_scene_nodes_write_path_invalidates_cache(monkeypatch):
         scene_id="scene-3582", repo_key=REPO)
     assert out["action"] == "updated"
     assert invalidated == [("scene-3582", REPO)]
+
+
+# ===== Issue #3582 QA 复审回归（2026-11-23）：组织/存量场景 #955/#2118 =====
+
+ORG_SCENE_NODES = [
+    {"id": "org_intake", "tag": "issue", "skill": "org-intake-cli",
+     "enabled": True, "next": "org_dispatch", "handoff": "a2a"},
+    {"id": "org_dispatch", "tag": "coding", "skill": "org-dispatch-cli",
+     "enabled": True, "next": "org_aggregate", "handoff": "a2a"},
+    {"id": "org_aggregate", "tag": "qa", "skill": "org-aggregate-cli",
+     "enabled": True, "next": "done", "handoff": "complete"},
+]
+
+
+def test_t13_org_scene_tag_roles_resolve_and_route_accepts(monkeypatch):
+    """QA 阻塞项 1/4（#955/#2118）：id 非白名单、tag 为角色的组织节点
+    按 tag 产出目标；available_nodes / valid_targets / POST 接受集合一致；
+    POST /api/a2a 交办 issue/coding/qa 不再 409（此前 valid_targets=[]）。"""
+    _set_issue(13, "org-scene-3582")
+    _set_scene("org-scene-3582", ORG_SCENE_NODES)
+    detail = resolve_scene_targets("org-scene-3582", repo_key=REPO)
+    # 组织节点按 tag 落在白名单的名字产出目标，与 POST 接受集合一致
+    assert detail["valid_targets"] == ["issue", "coding", "qa"]
+    # available_nodes 与 valid_targets 一致：每个可用节点都产出目标
+    assert [n["id"] for n in detail["available_nodes"]] == [
+        "org_intake", "org_dispatch", "org_aggregate"]
+    # _scene_node_check：tag 交办命中 + node 键恢复 + org id 直达别名
+    for role, node_id in (("issue", "org_intake"),
+                           ("coding", "org_dispatch"),
+                           ("qa", "org_aggregate")):
+        ck = _scene_node_check(REPO, 13, role)
+        assert ck["in_scene"] is True, role
+        assert ck["node"]["id"] == node_id, role
+        assert ck["valid_targets"] == ["issue", "coding", "qa"]
+    assert _scene_node_check(REPO, 13, "org_dispatch")["in_scene"] is True
+    ck_sre = _scene_node_check(REPO, 13, "sre")
+    assert ck_sre["in_scene"] is False
+    assert ck_sre["conflict_reason"] == "not_in_scene"
+    assert ck_sre["node"] is None
+
+    # 路由级（QA 要求）：POST /api/a2a 对组织场景 tag 角色全部接受
+    client, app = _client_and_managed_repo(monkeypatch)
+    import src.api.a2a_terminal_guard as _tg
+    monkeypatch.setattr(_tg, "guard_terminal_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.routes.webhook.run_a2a_dispatch",
+                        lambda *a, **k: {"status": "ok", "seq": 0})
+    try:
+        for target in ("issue", "coding", "qa"):
+            rr = client.post("/api/a2a", json={"agent": target, "payload": {
+                "repository": "org/issue3582", "issue_number": "13",
+                "context": f"t13 org {target}"}})
+            assert rr.status_code not in (400, 409), (target, rr.status_code, rr.text)
+        # 场景外目标仍 409，skipped 保持稳定枚举 not_in_scene
+        r409 = client.post("/api/a2a", json={"agent": "sre", "payload": {
+            "repository": "org/issue3582", "issue_number": "13",
+            "context": "t13 org sre"}})
+        assert r409.status_code == 409, r409.text
+        body = r409.json()
+        assert body["skipped"] == "not_in_scene"
+        assert body["conflict_reason"] == "not_in_scene"
+        assert body["valid_targets"] == ["issue", "coding", "qa"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_t13b_org_scene_409_contract_fields_restored(monkeypatch):
+    """QA 阻塞项 2：组织场景 409 经 _a2a_skip_response 组装——ok/reason/
+    detail/handoff_result/source_seq 齐全，skipped=not_in_scene 稳定枚举。"""
+    _set_issue(14, "org-scene-3582")
+    _set_scene("org-scene-3582", [
+        ORG_SCENE_NODES[0],
+        dict(ORG_SCENE_NODES[2], enabled=False),   # org_aggregate/tag=qa 禁用
+    ])
+    client, app = _client_and_managed_repo(monkeypatch)
+    try:
+        r = client.post("/api/a2a", json={"agent": "qa", "payload": {
+            "repository": "org/issue3582", "issue_number": "14",
+            "context": "t13b disabled org qa"}})
+        assert r.status_code == 409, r.text
+        body = r.json()
+        # skipped 稳定枚举 + 粒度归因分离（node_disabled 只出现在 conflict_reason）
+        assert body["skipped"] == "not_in_scene"
+        assert body["conflict_reason"] == "node_disabled"
+        assert body["ok"] is False
+        assert body["reason"]
+        assert isinstance(body["detail"], dict)
+        assert body["detail"]["conflict_reason"] == "node_disabled"
+        assert body["handoff_result"] == "rejected"
+        assert body["source_seq"] == 0
+        assert body["valid_targets"] == ["issue"]
+    finally:
+        app.dependency_overrides.clear()

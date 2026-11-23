@@ -8,13 +8,23 @@
   pipelines.json → default，含进程级缓存）；
 - 过滤口径统一：``enabled``（节点未启用不在可用清单）+ ``resolvable``
   （``scene_skill_scope.evaluate`` 单一判定器）；
-- 目标标识口径统一（复审 #202444109）：节点角色取 ``id`` 优先、``tag``
-  兜底（``engine_select.node_agent_role``），并与平台可派发白名单
-  ``DISPATCHABLE_AGENTS`` 取交集——``valid_targets`` 只含实际可投递角色，
-  与 POST /api/a2a 的接受集合一致（展示用 tag 阶段名不可作为 handoff 目标，
-  否则清单会宣告被 400 拒绝的名字）；
+- 目标标识口径统一（复审 #202444109 + QA 复审回归 #955/#2118）：
+  节点的 ``id`` 与 ``tag`` 中**任一**落在平台可派发白名单
+  ``DISPATCHABLE_AGENTS`` 的名字均产出目标——组织/存量场景
+  （id=org_intake/tag=issue）按 tag 照常产出 ``issue``，标准场景
+  （id=coding/tag=中文阶段名）按 id 产出 ``coding``；
+  ``valid_targets`` 只含实际可投递角色，与 POST /api/a2a 的接受集合
+  一致（展示用 tag 阶段名不在白名单时不可作为 handoff 目标，否则
+  清单会宣告被 400 拒绝的名字）；
 - 不可派发目标的 ``conflict_reason`` 归因也在此产出（``target_reasons``），
   webhook 仅做投影，不再二次判定；原因字面量以本模块常量为单一来源。
+
+已知限制（Issue #3582 复审 AC4，QA 裁定接受为已知限制）：写路径
+（set_scene_nodes / scene_nodes_write_by_id）已在**本进程**立即失效
+``get_pipeline_config`` 缓存；但 webhook（event 进程）与 scenes detail
+（mgmt/api 进程）各持进程级缓存，**跨进程**场景定义变更后的最长陈旧窗口
+仍为缓存 TTL 60s（无跨进程失效通道）——同一进程内两处读取口径恒一致，
+跨进程在 TTL 窗口后自动收敛。
 """
 
 from __future__ import annotations
@@ -71,21 +81,30 @@ def node_scope_check(node: dict, repo_key: str, scene_id: str = "",
     }
 
 
-def _dispatchable_role(node) -> str:
-    """节点的实际可投递角色名；非可派发白名单角色返回空串。
+def _dispatchable_roles(node) -> list:
+    """节点落在可派发白名单内的全部目标名（id 或 tag 均产出）。
 
-    Issue #3582 复审（阻塞项 AC1/AC2）：``valid_targets`` 必须等于
-    POST /api/a2a 实际接受的目标集合。场景写侧 ``tag`` 是展示用阶段名
-    （可为中文等任意值，scenes.py::_validate_scene_node_roles），不是可投递
-    角色；因此节点角色复用 ``engine_select.node_agent_role``（id 优先、tag
-    兜底——与 handoff/引擎选择的匹配口径同一实现），再与
-    ``DISPATCHABLE_AGENTS`` 取交集，保证清单内每个名字都能通过 POST 的
-    白名单 400 校验。
+    Issue #3582 QA 复审（回归阻塞项 #955/#2118）：此前的 ``_dispatchable_role``
+    复用 ``engine_select.node_agent_role``（id 优先、tag 仅 id 为空时兜底），
+    导致组织/存量场景 ``id=org_intake/tag=issue`` 这类节点被整体丢弃——
+    ``valid_targets=[]``，POST /api/a2a 交办 issue/coding/qa 全部 409。
+
+    修复口径（与基线 ``node_matches_agent_role`` 的 id OR tag 放行对齐）：
+    - 依次检查 ``id``、``tag``，凡落在 ``DISPATCHABLE_AGENTS`` 白名单内的
+      名字均产出（去重、保持出现顺序）；
+    - 展示用 tag（中文阶段名）与白名单外的 id（org_*）自然不产出——它们
+      会被 POST /api/a2a 的白名单校验 400 拒绝，不得进清单；
+    - 标准场景 id=coding/tag=中文 与存量 tag-only 节点口径不变。
     """
     from src.api.pipeline_constants import DISPATCHABLE_AGENTS
-    from src.domains.runtime.engine.engine_select import node_agent_role
-    role = node_agent_role(node)
-    return role if role in DISPATCHABLE_AGENTS else ""
+    if not isinstance(node, dict):
+        return []
+    roles: list = []
+    for name in (node.get("id"), node.get("tag")):
+        role = str(name or "").strip()
+        if role and role in DISPATCHABLE_AGENTS and role not in roles:
+            roles.append(role)
+    return roles
 
 
 def resolve_scene_targets(scene_id: str, repo_key: str = "",
@@ -100,8 +119,8 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
       调用方按清单交办时应使用 ``valid_targets`` / ``available_nodes``。
     - ``available_nodes``：可用节点（enabled 且 resolvable），按场景定义顺序；
     - ``valid_targets``：当前有效派发目标清单——可用节点的可投递角色名
-      （id 优先、tag 兜底，与 DISPATCHABLE_AGENTS 取交集后去重，按场景
-      定义顺序），即 POST /api/a2a 实际接受的目标集合；
+      （id 或 tag 中落在 ``DISPATCHABLE_AGENTS`` 白名单内的名字，去重，
+      按场景定义顺序），即 POST /api/a2a 实际接受的目标集合；
     - ``target_reasons``：不可派发角色 → 冲突原因（node_disabled /
       skill_unresolvable），供 409 ``conflict_reason`` 直接投影；不在场景内
       的目标由调用方回退为 not_in_scene。
@@ -129,21 +148,24 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
     for item in nodes:
         if not isinstance(item, dict):
             continue
-        role = _dispatchable_role(item)
-        if not role:
-            # 展示用 tag（非白名单角色）不是可投递目标：既不进 valid_targets
-            # （POST /api/a2a 会按白名单 400 拒绝），也不进 target_reasons
-            # （handoff 到达 _scene_node_check 的目标必先通过 400 白名单）。
+        roles = _dispatchable_roles(item)
+        if not roles:
+            # 展示用 tag（非白名单角色）与白名单外 id（org_*）不是可投递
+            # 目标：既不进 valid_targets（POST /api/a2a 会按白名单 400
+            # 拒绝），也不进 target_reasons（handoff 到达 _scene_node_check
+            # 的目标必先通过 400 白名单）。
             continue
         enabled = item.get("enabled", True) is not False
         resolvable = bool(item.get("resolvable"))
         if enabled and resolvable:
             available_nodes.append(item)
-            if role not in valid_targets:
-                valid_targets.append(role)
+            for role in roles:
+                if role not in valid_targets:
+                    valid_targets.append(role)
             continue
         reason = REASON_NODE_DISABLED if not enabled else REASON_SKILL_UNRESOLVABLE
-        target_reasons[role] = reason
+        for role in roles:
+            target_reasons[role] = reason
     return {"scene_id": resolved_id, "cfg": cfg, "nodes": nodes,
             "available_nodes": available_nodes,
             "valid_targets": valid_targets, "target_reasons": target_reasons}

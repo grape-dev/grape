@@ -1469,16 +1469,24 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     `scenes detail` 同一解析函数、同一过滤口径（enabled + resolvable），
     保证「scenes detail 清单内的合法节点」handoff 均放行；禁用/技能不可
     解析节点不出现在有效目标集合（两处同步生效）。
-    Issue #3582 复审（#202444109）：valid_targets 仅含实际可投递角色（id 优先、
-    tag 兜底，与 DISPATCHABLE_AGENTS 交集），conflict_reason 由 resolver 直接
-    产出（常量单一来源），此处仅投影，不再二次遍历节点判定。
+    Issue #3582 复审（#202444109）：valid_targets 仅含实际可投递角色
+    （id 或 tag 中落在 DISPATCHABLE_AGENTS 白名单的名字），conflict_reason
+    由 resolver 直接产出（常量单一来源），此处仅投影。
+    Issue #3582 QA 复审回归（#955/#2118，阻塞项修复）：组织/存量场景
+    `id=org_*/tag=issue|coding|qa` 节点按 tag 产出目标——A2A 以 tag 交办
+    issue/coding/qa 不再被误判 not_in_scene；同时**恢复基线兼容的
+    `node` 键与 id 直达别名**（`node_matches_agent_role` 口径）：可用节点
+    的 id（如 org_dispatch）仍可命中（基线 `test_scene_node_check_matches_org_tag`
+    依赖该语义），展示用 tag（非白名单）依旧不可命中。
     解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
     → 空时回退 default。
-    Issue #2118：节点匹配按 id 或 tag（node_matches_agent_role），组织场景
-    id=org_* / tag=issue|coding|qa 时 A2A 以 tag 交办不应被误判 not_in_scene。
-    返回 {"scene_id", "nodes", "in_scene", "valid_targets", "conflict_reason"}。
+    返回 {"scene_id", "nodes", "in_scene", "node", "valid_targets",
+    "conflict_reason"}。
     """
-    from src.api.scene_targets import resolve_scene_targets
+    from src.api.scene_targets import (
+        _dispatchable_roles as _node_dispatchable_roles,
+        resolve_scene_targets,
+    )
     from src.api.session_store import get_issue_scene
     _scene_id = "default"
     try:
@@ -1495,8 +1503,16 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
                 "target_reasons": {}}
     nodes = (_res.get("cfg") or {}).get("nodes") or []
     valid_targets = list(_res.get("valid_targets") or [])
+    available_nodes = _res.get("available_nodes") or []
     target = str(agent_name or "")
-    in_scene = target in valid_targets
+    # 基线兼容（#2118）：目标命中可用节点的 id（org_* 直达别名）也算在场景内。
+    matched = next(
+        (n for n in available_nodes
+         if isinstance(n, dict) and (n.get("id") == target or target in
+                                     _node_dispatchable_roles(n))),
+        None,
+    )
+    in_scene = target in valid_targets or matched is not None
     conflict_reason = ""
     if not in_scene:
         target_reasons = _res.get("target_reasons") or {}
@@ -1505,6 +1521,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
         "scene_id": _scene_id,
         "nodes": nodes,
         "in_scene": in_scene,
+        "node": matched,
         "valid_targets": valid_targets,
         "conflict_reason": conflict_reason,
     }
@@ -2810,8 +2827,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # node_disabled / skill_unresolvable）+ valid_targets（当前
                 # 有效目标清单，与 scenes detail 同一解析函数产出），调用方
                 # 可据此修正目标后重试；沿用 #2555 单点收口的 skip 响应。
-                # skipped 保持稳定枚举 not_in_scene（旧消费方与 help 文档均按
-                # 此字面判定），粒度归因放 conflict_reason。
+                # QA 复审回归：`skipped` 保持稳定枚举 not_in_scene（旧消费方与
+                # help 文档均按此字面判定），粒度归因放 conflict_reason；
+                # 409 契约字段（ok/reason/detail/agent/handoff_result/source_seq）齐全。
                 _reason = _scene_ck.get("conflict_reason") or REASON_NOT_IN_SCENE
                 _valid = list(_scene_ck.get("valid_targets") or [])
                 _scene_node_ids = [_node_id(n) for n in (_scene_ck.get("nodes") or [])]
