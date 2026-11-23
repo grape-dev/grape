@@ -74,7 +74,7 @@ class _DomainDbProxy:
     exist`），且与「旧进程未重启」在日志上完全同形，导致 #3771 验收反复失效。
     """
 
-    def _route(self) -> "str | None":
+    def _route(self) -> str | None:
         """`route_of("runtime")` 的薄包装；域不可用返回 `None`（**绝不回落主库**）。
 
         `commit()/rollback()` 用本判定：域不可用时并未取到任何连接，no-op 即可——在 `except`
@@ -2270,7 +2270,6 @@ def _count_failure_context() -> str:
             target_db = os.environ.get("DEVOPS_DB_NAME", "").strip() or "(process main)"
     return (f"route={route} target_db={target_db} "
             f"pid={os.getpid()} host={socket.gethostname()}")
-
 
 def _count_issues(where: str, params: list, label: str = "issues") -> int | None:
     """issue 表行数统计（单一收口，Issue #3771）。

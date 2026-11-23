@@ -317,9 +317,17 @@ jobs:
         # 用例锁 issue 表 COUNT 的 runtime 域路由、COUNT 失败 total=null 降级、
         # per_page=0 零跨域读与 COUNT 单点收口静态守门；回退会让「我的需求」分页
         # total/has_more 再次失真（生产 1,693 条/小时 WARNING），只能靠人工 pytest 发现。
+        #
+        # Issue #3826（#3771 回归未闭环，Required）：同一步追加
+        # test_issue_3826_count_no_fallback.py —— 三库拓扑缺 GRAPE_DSN_RUNTIME 时不得回落
+        # mgmt 主库（DomainUnavailable）、COUNT 失败日志必须自带 route/target_db/pid/host，
+        # 另含「代理只认 route_of」拓扑棘轮与全仓 COUNT 站点审计守门。旧实现的自有回落分支
+        # 是生产仍刷 `Table 'grape_prod_mgmt.issue' doesn't exist` 的代码侧根因，回退即复发。
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py -v
+        run: |
+          python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py \
+            tests/runtime/test_issue_3826_count_no_fallback.py -v
       - name: Startup port-binding order regression tests (issue #3848)
         # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
