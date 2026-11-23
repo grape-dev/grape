@@ -6,7 +6,7 @@
 
 规则：
 1. 变量名统一大写（[A-Z][A-Z0-9_]*）；
-2. 不与系统保留变量冲突（GRAPE_* 前缀 + _RESERVED_ENV_NAMES 集合）；
+2. 不与系统保留变量冲突（GRAPE_* 前缀——`_PLATFORM_MANAGED_ENV` 白名单除外——+ _RESERVED_ENV_NAMES 集合）；
 3. 密钥判定：命名约定后缀自动识别 + 手动 is_secret 覆盖；
 4. 注入范围 scope：agent 名数组，默认 ["all"]，支持多选。
 """
@@ -26,6 +26,19 @@ _RESERVED_ENV_NAMES = {
     "RUNTIME_SERVER_URL",
 }
 
+# 平台前缀下允许自定义注入的白名单（Issue #4066 收窄保留语义）。
+#
+# 历史实现对「任何 GRAPE_ 前缀」一律判保留，导致定时任务/场景确实需要配置的
+# GRAPE_ANALYSIS_MODE / GRAPE_ORG_ID / GRAPE_MANAGED_BY 被执行侧静默丢弃
+# （配置意图 ≠ 运行实际，且每次执行刷 rejected WARNING）。
+# 白名单**显式枚举三精确名**：前缀仍默认保留，新增项必须在此显式登记 +
+# 通过敏感名单回归，避免「一放就全放开」。
+_PLATFORM_MANAGED_ENV = frozenset({
+    "GRAPE_ANALYSIS_MODE",   # 组织仓库分析模式（all/single）
+    "GRAPE_ORG_ID",          # 组织上下文
+    "GRAPE_MANAGED_BY",      # 托管归属（历史标记）
+})
+
 # 密钥命名约定后缀：名称匹配任一后缀（大小写不敏感）→ 自动判定为 secret
 _SECRET_SUFFIXES = (
     "_KEY", "_SK", "_SECRET", "_TOKEN", "_PASSWORD", "_PWD", "_CREDENTIALS",
@@ -39,10 +52,16 @@ _SCOPE_SET = set(_SCOPE_AGENTS)
 
 
 def is_reserved_name(name: str) -> bool:
-    """变量名是否与系统保留环境变量冲突（GRAPE_ 前缀 + 显式集合）。"""
+    """变量名是否与系统保留环境变量冲突（GRAPE_ 前缀白名单外 + 显式集合）。
+
+    Issue #4066：`GRAPE_` 前缀不再一律保留——`_PLATFORM_MANAGED_ENV` 内的三个
+    精确名（分析模式/组织上下文/托管归属）允许任务与场景自定义注入；其余
+    `GRAPE_*`（含 SESSION_TOKEN/API_TOKEN/WORK_BRANCH/SERVER_URL/SCENE_ID 等）
+    仍判保留。
+    """
     # BOT_/USER_ 是平台凭据命名空间（BOT_GITEE_TOKEN 等）：不允许场景自定义覆盖，
     # 否则新平台的 token 键不在显式集合里就成了可被覆盖的空位。
-    return (name.startswith("GRAPE_")
+    return ((name.startswith("GRAPE_") and name not in _PLATFORM_MANAGED_ENV)
             or name.startswith("BOT_")
             or name.startswith("USER_")
             or name in _RESERVED_ENV_NAMES)
