@@ -43,13 +43,18 @@ DEFAULT_PROBE_TTL = float(os.environ.get("RUNTIME_BACKEND_PROBE_TTL", "300"))
 _CACHE: dict[tuple[str, str], dict] = {}
 _CACHE_LOCK = threading.Lock()
 
+# QA 复审 R4（Issue #3928）：失败文案会拼接引擎 stderr 尾部（agent.py fail_task），
+# 裸 ``no such file`` / ``not installed`` 会把任务内任意命令缺失误判为「后端不可用」
+# → requeue + 给健康引擎开熔断、错误码被改写成 BACKEND_UNAVAILABLE_* 掩盖真因。
+# 这里只认「引擎命令自身解析不到」的明确形态。
 _MISSING_CLI_RE = re.compile(
-    r"(cli\s+not\s+found|not\s+found\s+in\s+path|"
-    r"no\s+such\s+file(?:\s+or\s+directory)?|\bnot\s+installed\b)",
-    re.I)
+    r"(cli\s+not\s+found|not\s+found\s+in\s+path)", re.I)
 _COMMAND_NOT_FOUND_RE = re.compile(
     r"\b(?:codearts|opencode|hermes|hwcloud|aishell|codex|dsh|atomcode|cursor)"
-    r"\s+not\s+found\b", re.I)
+    r"(?:\s+cli)?\s*(?::\s*|\s+)(?:command\s+)?not\s+found\b", re.I)
+#: worker 探针自述「未安装」（skip 的固定 reason）：探针上下文可信，只用于探针映射，
+#: 不参与任务失败文案判定（避免「包未安装 / 命令缺失」被误判为后端不可用）。
+_PROBE_NOT_INSTALLED_RE = re.compile(r"^\s*not\s+installed\s*$", re.I)
 
 
 def canonical_engine_type(engine_name: str) -> str:
@@ -152,7 +157,9 @@ def status_from_probe(engine_name: str, probe_status: str, error: str = "") -> s
     if ps in ("fail", "failed"):
         return STATUS_UNAVAILABLE if is_missing_cli_error(err) else STATUS_DEGRADED
     if ps == "skip":
-        return STATUS_UNAVAILABLE if is_missing_cli_error(err) else STATUS_UNKNOWN
+        if is_missing_cli_error(err) or _PROBE_NOT_INSTALLED_RE.match(err):
+            return STATUS_UNAVAILABLE
+        return STATUS_UNKNOWN
     return STATUS_UNKNOWN
 
 

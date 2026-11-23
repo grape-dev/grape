@@ -202,3 +202,59 @@ def test_backend_failure_classification():
         "tests failed: 2 assertions")
     assert not backend_failover.is_backend_unavailable_error(
         "skill package not found")
+
+
+# ── QA 复审 R3：只有「引擎真实执行过」的证据才释放熔断 ──────────
+
+def test_has_execution_evidence_classification():
+    assert backend_failover.has_execution_evidence("tests failed: 2 assertions", 1) is True
+    assert backend_failover.has_execution_evidence("engine exit_code=2, errors: boom", 2) is True
+    for _text, _code in (
+        ("[skill_mismatch] bound skill sources disagree", -1),
+        ("dependency check failed: prompt is empty (task=t)", -1),
+        ("dependency check failed: skill not configured (task=t)", -1),
+        ("workspace baseline mismatch: issue=#1 path=/x", -1),
+        ("credential_not_configured: 凭据不可用", -1),
+        ("platform_not_registered: 仓库未注册", -1),
+        ("empty_repo: 仓库还没有任何提交", -1),
+    ):
+        assert backend_failover.has_execution_evidence(_text, _code) is False, _text
+
+
+def test_pre_spawn_failure_does_not_release_circuit(monkeypatch):
+    monkeypatch.setenv("GRAPE_BACKEND_FAILOVER_MAX", "2")
+    cid = _insert_credential()
+    rid = _insert_runtime(cid, "codearts-cred0", healthy=0, probe_status="fail",
+                          backend_status="unavailable")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE agent_runtimes SET circuit_open_until=?, circuit_fail_count=1 "
+                      "WHERE id=?",
+                      ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), rid))
+            c.execute("UPDATE agent_runtimes SET circuit_half_open=1 WHERE id=?", (rid,))
+            db.commit()
+        tid = _insert_task(rid)
+        out = backend_failover.handle_task_failure(
+            tid, service.get_task(tid),
+            "[skill_mismatch] bound skill sources disagree: task.skill='a' env='b'", -1)
+        assert out == "not_backend"
+        _healthy, bstatus, _reason, _until, _fail, half = _runtime_row(rid)
+        assert bstatus == "unavailable", "spawn 前失败没有验证后端，不得恢复可用"
+        assert backend_health.claim_allowed(rid) is False
+        assert half == 0, "半开占位须复位，避免永久卡死"
+    finally:
+        _cleanup(cid)
+
+
+def test_failover_max_reads_env_at_call_time(monkeypatch):
+    monkeypatch.setenv("GRAPE_BACKEND_FAILOVER_MAX", "1")
+    cid = _insert_credential()
+    bad = _insert_runtime(cid, "codearts-cred0")
+    try:
+        tid = _insert_task(bad, attempts=1)
+        out = backend_failover.handle_task_failure(
+            tid, service.get_task(tid), "codearts not found", -1)
+        assert out == "exhausted", "上限必须在调用期读 env（attempts=1/max=1 应判超限）"
+    finally:
+        _cleanup(cid)
