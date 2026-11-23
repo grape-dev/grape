@@ -207,13 +207,16 @@ def _converted_display_name(scope: str, owner_id: str, source_display,
         candidate = "技能"
     if not _skill_display_name_conflict(scope, owner_id, candidate):
         return candidate
+    # ~N 去重枚举：2..999 仅为防死循环的工程护栏（同 scope 同名变体 ≥998 属异常规模，
+    # 正常业务不触达），非业务口径——「允许多少同名变体」无既定上限，故耗尽即视为
+    # 目标 scope 名称空间已占用，显式 409 失败，而非静默返回一个已知重名的名称。
     for seq in range(2, 1000):
         suffix = f"~{seq}"
         head = candidate[:SKILL_DISPLAY_NAME_MAX - len(suffix)].rstrip()
         trial = f"{head}{suffix}" if head else suffix.lstrip("~")
         if not _skill_display_name_conflict(scope, owner_id, trial):
             return trial
-    return candidate
+    raise HTTPException(status_code=409, detail={"code": 409, "message": "名称已存在"})
 
 
 def _is_official_skill_admin(user: dict) -> bool:
