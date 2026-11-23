@@ -15,7 +15,9 @@ grape 官方插件把 Grape 平台能力带进你的 Agent。两种形态按你�
 
 **口令安装**——把这句粘贴给你的 Agent，它按 README 步骤完成安装与配置：
 
-> 请阅读https://gitcode.com/grape-dev/grape-kit/blob/dev/README.md，按照步骤为我安装并配置grape-kit
+> 请阅读https://gitcode.com/grape-dev/grape-kit/blob/main/README.md，按照步骤为我安装并配置grape-kit
+>
+> 若上面的链接被 WAF 拦截（HTTP 418），换 raw 地址：https://raw.gitcode.com/grape-dev/grape-kit/raw/main/README.md
 
 **npm 安装**（Node ≥ 20）：
 
@@ -57,3 +59,4 @@ npm i @grape-dev/grape-dsh
 ```
 
 安装与配置步骤见[源码仓库](https://gitcode.com/grape-dev/grape-dsh)。
+

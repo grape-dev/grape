@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 396,
-  "min_endpoint_count": 356,
+  "endpoint_count": 397,
+  "min_endpoint_count": 357,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "merge arch-weekly-11 80b1b8e92: keep yaw create-targets/connection endpoints together with org scene-catalog/repo-map/patrol endpoints",
-  "source_commit": "084561b20"
+  "change_reason": "sync: arch-weekly-11 into arch11-weekly-1102-zrr — adds issues_trigger_pending_pipeline (#3621), contract 396->397",
+  "source_commit": "12d7adf31"
 }

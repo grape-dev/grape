@@ -261,6 +261,11 @@ def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
 # 语义：用户在本地交互式会话里接手一条正在跑的任务（见设计文档 §2）。
 # - 前缀 `tko_` + kind='takeover'，与 worker 的 `tk_`（kind='worker'）**互不通用**：
 #   两个 verify 各自带 kind 过滤，拿错前缀一律 None。
+# - 但「互不通用」只约束 verify 的 kind 过滤，不约束能力位：两者都是 repo 域会话凭据，
+#   `src/api/auth_caps.CAPABILITIES` 里 repo_session 均为 True（agent_self 仅 tk_）。
+#   因此 git-credential / workspace / git-repo 传输等 repo 域端点统一按
+#   `has_capability(user, REPO_SESSION)` 判定，**禁止再硬编码 auth_type == 'session_token'**
+#   （Issue #3620：该硬编码曾把 tko_ 挡在 git-credential 外）。tko_ 另做 repo_key 仓级校验。
 # - session_key = 'takeover:<task_id>'：独立命名空间 —— cancel 时服务的
 #   revoke_session_token(task_id) 只命中 worker 行，不会把接管 token 缩短到 180 秒。
 # - 作用域与任务同 repo/agent；TTL 12h，可续到 24h；finish/abort 立即 DELETE。

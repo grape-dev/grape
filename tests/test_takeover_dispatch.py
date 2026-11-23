@@ -43,6 +43,10 @@ def test_dispatch_ignores_caller_base_url_and_uses_internal(monkeypatch):
 
     monkeypatch.setattr("httpx.post", _post)
     monkeypatch.setattr(svc, "_internal_base_url", lambda *a, **kw: "http://127.0.0.1:8000")
+    # 本用例验证"忽略调用方 base_url、只走内部基址"：显式清空服务映射，
+    # 否则部署配置里的 server_base_url 会先命中（见 test_dispatch_prefers_a2a_service_mapping）。
+    monkeypatch.setattr("src.kernel.prompt_builder.resolve_a2a_base", lambda *a, **kw: "")
+    svc._INTERNAL_BASE_CACHE = ""
     res = svc._dispatch_next(repo_key="gitcode:o/r", issue_number="7", next_agent="issue",
                              context="由用户完成 vod", runtime_id=0,
                              auth_headers={"private-token": "grape_x"},
@@ -80,3 +84,38 @@ def test_probe_picks_reachable_candidate(monkeypatch):
     before = len(seen)
     assert svc._internal_base_url(0) == "http://127.0.0.1:8000"
     assert len(seen) == before
+
+def test_dispatch_prefers_a2a_service_mapping(monkeypatch):
+    """四进程拓扑：/api/a2a 在 event 角色，派发必须走服务映射而不是本角色端口。#19"""
+    calls = {}
+
+    def _post(url, **kw):
+        calls["url"] = url
+        return _Resp(200, {"ok": True, "response": {"seq": 19}})
+
+    monkeypatch.setattr("httpx.post", _post)
+    monkeypatch.setattr(svc, "_internal_base_url", lambda *a, **kw: "http://127.0.0.1:38081")
+    monkeypatch.setattr("src.kernel.prompt_builder.resolve_a2a_base",
+                        lambda *a, **kw: "http://127.0.0.1:38082")
+    svc._INTERNAL_BASE_CACHE = ""
+    res = svc._dispatch_next(repo_key="gitcode:o/r", issue_number="62", next_agent="qa",
+                             context="由用户完成 coding", runtime_id=0, auth_headers={})
+    assert res == {"ok": True, "seq": 19, "status": 200}
+    assert calls["url"] == "http://127.0.0.1:38082/api/a2a", \
+        "A2A 派发必须按服务映射取址，不能落在本角色端口（mgmt 38081 只有 GET，会 405）"
+
+
+def test_dispatch_falls_back_to_internal_when_mapping_empty(monkeypatch):
+    calls = {}
+
+    def _post(url, **kw):
+        calls["url"] = url
+        return _Resp(200, {"ok": True, "response": {"seq": 20}})
+
+    monkeypatch.setattr("httpx.post", _post)
+    monkeypatch.setattr(svc, "_internal_base_url", lambda *a, **kw: "http://127.0.0.1:8000")
+    monkeypatch.setattr("src.kernel.prompt_builder.resolve_a2a_base", lambda *a, **kw: "")
+    svc._INTERNAL_BASE_CACHE = ""
+    svc._dispatch_next(repo_key="gitcode:o/r", issue_number="7", next_agent="qa",
+                       context="x", runtime_id=0, auth_headers={})
+    assert calls["url"] == "http://127.0.0.1:8000/api/a2a"

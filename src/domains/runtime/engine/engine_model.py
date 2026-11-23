@@ -116,7 +116,7 @@ def _split_key_value(s: str) -> tuple[str, str]:
     return "", ""
 
 
-def _parse_scalar_or_flow(s: str):
+def _parse_scalar_or_flow(s: str, warnings: list | None = None):
     s = s.strip()
     if s.startswith("{") and s.endswith("}"):
         inner = s[1:-1].strip()
@@ -127,19 +127,34 @@ def _parse_scalar_or_flow(s: str):
             k, v = _split_key_value(item)
             if not k:
                 raise ValueError(f"cannot parse flow mapping item: {item!r}")
-            result[_unquote(k)] = _parse_scalar_or_flow(v)
+            result[_unquote(k)] = _parse_scalar_or_flow(v, warnings)
         return result
     if s.startswith("[") and s.endswith("]"):
-        raise ValueError("fallback parser does not support flow sequences")
+        # Issue #3874：流式列表同样降级为非阻断 warning（返回空串占位）。
+        msg = ("fallback parser cannot parse YAML flow sequences (value: %r); "
+               "that value is skipped and model validation may be incomplete" % s)
+        if warnings is not None:
+            warnings.append(msg)
+        else:
+            # 调用方未传列表时也必须留信号，不得静默丢弃（Issue #3874 审查建议）
+            sys.stderr.write(f"Warning: {msg}\n")
+        return ""
     return _unquote(s)
 
 
-def _fallback_parse(text: str) -> dict:
+def _fallback_parse(text: str, warnings: list | None = None) -> dict:
     """降级 YAML 解析器：覆盖 hermes config.yaml 实际子集。
 
     支持：缩进嵌套映射 / 标量 / 内联 {k: v} 流映射 / 注释；不支持列表、锚点等
-    ——遇到即抛 ValueError，由上层按「无法校验」告警（worker 安装不受阻）。
+    ——遇到列表改为记录 warning 并跳过该块（Issue #3874：无法校验 ≠ 配置错误，
+    不再抛异常阻断 worker 安装），由上层输出非阻断提示。
+
+    warnings 为 None 时内部自建列表并把降级提示写 stderr（Issue #3874 审查建议：
+    调用方漏传列表时不得整块静默丢弃、无任何信号）。
     """
+    emit_to_stderr = warnings is None
+    if warnings is None:
+        warnings = []
     lines = []
     for raw in text.splitlines():
         content = _strip_comment(raw.rstrip("\n"))
@@ -159,12 +174,18 @@ def _fallback_parse(text: str) -> dict:
             if cur_indent > indent:
                 raise ValueError(f"unexpected indent at line: {content!r}")
             if content.startswith("- "):
-                raise ValueError("fallback parser does not support sequences")
+                warnings.append(
+                    "fallback parser cannot parse YAML sequences (line: %r); "
+                    "that block is skipped and model validation may be incomplete" % content)
+                i += 1
+                while i < len(lines) and lines[i][0] > cur_indent:
+                    i += 1
+                continue
             k, v = _split_key_value(content)
             if not k:
                 raise ValueError(f"cannot parse line: {content!r}")
             if v:
-                result[_unquote(k)] = _parse_scalar_or_flow(v)
+                result[_unquote(k)] = _parse_scalar_or_flow(v, warnings)
                 i += 1
             else:
                 if i + 1 < len(lines) and lines[i + 1][0] > cur_indent:
@@ -178,15 +199,22 @@ def _fallback_parse(text: str) -> dict:
     if not lines:
         return {}
     parsed, _ = parse_block(0, lines[0][0])
+    if emit_to_stderr:
+        for w in warnings:
+            sys.stderr.write(f"Warning: {w}\n")
     return parsed
 
 
-def parse_hermes_config(text: str) -> dict:
-    """解析 hermes config.yaml 文本为 dict（pyyaml 优先，降级解析器兜底）。"""
+def parse_hermes_config(text: str, warnings: list | None = None) -> dict:
+    """解析 hermes config.yaml 文本为 dict（pyyaml 优先，降级解析器兜底）。
+
+    warnings（可选）由调用方传入列表：降级解析器遇到不支持的 YAML 结构（列表等）
+    时不抛异常，而是向其追加非阻断 warning（Issue #3874）。
+    """
     if _yaml is not None:
         loaded = _yaml.safe_load(text)
         return loaded if isinstance(loaded, dict) else {}
-    return _fallback_parse(text)
+    return _fallback_parse(text, warnings)
 
 
 # ===== 模型名/网关提取 =====
@@ -246,9 +274,10 @@ def read_hermes_model_config(hermes_home: str | None = None, env: dict | None = 
     config_path = os.path.join(home, "config.yaml")
     if not os.path.isfile(config_path):
         return None
+    parse_warnings: list[str] = []
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            cfg = parse_hermes_config(f.read())
+            cfg = parse_hermes_config(f.read(), parse_warnings)
     except Exception as e:
         return {"config_path": config_path, "default_model": "", "targets": [],
                 "warnings": [f"cannot parse config.yaml ({e}); validation skipped"]}
@@ -273,7 +302,7 @@ def read_hermes_model_config(hermes_home: str | None = None, env: dict | None = 
         targets.append(t)
         return t
 
-    warnings: list[str] = []
+    warnings: list[str] = list(parse_warnings)
     if default_model:
         t = _target(base_url, api_key)
         if t:

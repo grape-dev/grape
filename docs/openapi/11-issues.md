@@ -75,7 +75,7 @@ Issue 对象字段：
 | `vcs_check` | string | 卡片级校验结果：`ok`=已确认存在/已确认删除；`unavailable`=该校验失败或单卡复核 unknown（fail-open，卡片未隐藏） |
 | `title` | string | 标题 |
 | `status` | string | 需求中心状态（active/processing/awaiting_input/pending_review/completed/cancelled） |
-| `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done） |
+| `stage` | string | pipeline 阶段（vod/issue/coding/qa/sre/pending_review/done；Issue #3621 起另有 `created`=建单未触发流水线的挂单态） |
 | `assignee` | string | 责任人（GitCode 用户名） |
 | `scene_id` / `scene_name` / `scene_source` | string | 开发场景（vod / repo_default） |
 | `is_running` | bool | 是否有运行中的 agent |
@@ -107,6 +107,7 @@ Issue 对象字段：
 | `assignee` | string | 否 | 责任人 GitCode 用户名，默认当前用户 |
 | `scene_id` | string | 否 | 关联场景 ID |
 | `is_subtask_mode` | int | 否 | 0/1 多任务模式 |
+| `trigger_pipeline` | bool | 否 | Issue #3621：是否在建单后立即触发流水线，默认 `true`（现有行为不变）；`false` = 只建单 + 同步平台 Issue，不触发流水线（stage=created 挂单，后续经 `POST /api/issues/{issue_id}/pipeline/trigger` 首次触发入链） |
 
 出参：
 
@@ -119,11 +120,27 @@ Issue 对象字段：
   "created": true,
   "assignee": "Jason7602",
   "is_subtask_mode": 0,
+  "trigger_pipeline": true,
   "message": "任务已创建（Issue 已同步）"
 }
 ```
 
-> `issue_id`（= `task_id` 兼容别名）为**需求卡片 id（issue.id）**，非执行实例 id。返回：200 成功；400 仓库/标题/描述缺失；409 同标题 Issue 已存在；502 建 GitCode Issue 失败。
+> `issue_id`（= `task_id` 兼容别名）为**需求卡片 id（issue.id）**，非执行实例 id。返回：200 成功；400 仓库/标题/描述缺失（`trigger_pipeline` 非布尔同样 400）；409 同标题 Issue 已存在；502 建 GitCode Issue 失败。
+>
+> `trigger_pipeline=false` 时返回 `message` 为「任务已创建（挂单，未触发流水线）」，stage 落 `created`；后续首次触发入链用下方 `POST /api/issues/{issue_id}/pipeline/trigger`（幂等：stage 非 created 或已有事件 → 409，不重复入链）。
+
+---
+
+## POST /api/issues/{issue_id}/pipeline/trigger — 触发挂单首次入链（Issue #3621）
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **user_only**（`require_no_session_token`；session token 不可用） |
+| Path | `{issue_id}` = 需求卡片 id（`issue.id`，非平台 issue number） |
+| 出参 | `{ok: true, issue_id, issue_number, stage: "vod", seq}` |
+| 返回 | 200 成功；400 已取消/已完成不可触发；404 需求不存在；409 stage 非 `created` 或已有流水线事件（幂等，不重复入链）；502 触发失败/未落事件（无事件时已回滚为 `stage=created`，可重试） |
+
+> 仅对 `trigger_pipeline=false` 建出的挂单（`stage=created`）生效；复用建单直发的 `issue_opened` 同步触发路径，触发成功后 stage 切到 `vod`，事件形态与直接建单一致。stage 校验、事件计数与 `created→vod` 认领在同一锁/事务内完成（条件 UPDATE，并发触发仅一个成功）。
 
 ---
 

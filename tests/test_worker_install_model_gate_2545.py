@@ -71,12 +71,38 @@ class TestInstallWorkerPs1ModelGate:
         first_kill = text.index("Stop-Process")
         assert gate < first_kill, "模型配置门必须在停旧 daemon/worker 之前执行"
 
-    def test_misaligned_exits_install_with_failure(self):
-        """ps1：退出码非 0 → Fail 结束安装（硬失败语义，与 sh 一致）。"""
+    def test_misaligned_warns_and_continues(self):
+        """ps1：退出码非 0 → 输出 Warning 并继续安装（Issue #3874 软门语义）。
+
+        无法校验（缺 pyyaml / 不支持 sequences / 网关不可达）不等于配置错误，
+        不应阻断 worker onboard；显式逃生口是 -SkipEngineCheck。
+        """
         text = self._text()
         gate = text.index(f"-m {CHECK_CMD}")
-        seg = text[gate:gate + 1200]
-        assert "Fail" in seg, "校验失败必须 Fail（exit 1）结束安装"
+        seg = text[gate:gate + 1400]
+        assert "Warning: hermes model config validation FAILED" in seg, "校验失败必须输出 warning"
+        assert 'Fail "hermes model config validation' not in seg, "校验失败不得再硬 Fail 中止安装"
+
+    def test_skip_engine_check_switch_supported(self):
+        """ps1：支持 -SkipEngineCheck，跳过 hermes 校验仅注册 opencode（Issue #3874）。"""
+        text = self._text()
+        assert "$SkipEngineCheck" in text, "缺少 -SkipEngineCheck 参数声明"
+        assert "Skipping hermes model config validation" in text
+
+    def test_skip_log_uses_powershell_switch_syntax(self):
+        """ps1：跳过日志必须写 -SkipEngineCheck（bash 式 --skip-engine-check 照抄会失败）。"""
+        text = self._text()
+        skip_line = next(ln for ln in text.splitlines()
+                         if "Skipping hermes model config validation" in ln)
+        assert "-SkipEngineCheck" in skip_line, skip_line
+        assert "--skip-engine-check" not in text, "日志文案不得使用 bash 式参数名"
+
+    def test_skip_engine_check_guards_validation_block(self):
+        """ps1：SkipEngineCheck 分支必须先于 config.yaml 校验块，跳过校验。"""
+        text = self._text()
+        skip = text.index("if ($SkipEngineCheck)")
+        gate = text.index(f"-m {CHECK_CMD}")
+        assert skip < gate, "SkipEngineCheck 分支必须位于校验调用之前"
 
     def test_skips_when_no_hermes_config(self):
         """ps1：无 config.yaml → 跳过（降级）。"""
@@ -111,6 +137,13 @@ class TestModelGatewayAlignmentDoc:
         text = self._text()
         assert "换 key" in text or "更换 key" in text
         assert "自检" in text
+
+    def test_doc_documents_windows_soft_gate_and_skip_switch(self):
+        """Issue #3874 审查 Required：文档须记录 ps1 软门（不中止）与 -SkipEngineCheck。"""
+        text = self._text()
+        assert "-SkipEngineCheck" in text, "文档缺少 -SkipEngineCheck 说明"
+        assert "non-blocking" in text, "文档缺少 ps1 校验失败不中止安装（non-blocking）语义"
+        assert "失败即中止安装" not in text, "文档不得统一描述为失败即中止（与 ps1 软门冲突）"
 
     def test_doc_contains_selfcheck_commands(self):
         """自检命令：engine_model --check 与 curl /v1/models 两种方式。"""

@@ -188,6 +188,12 @@ ALTERS_SESSION_EVENT_COLUMNS = (
     "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
     "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
     "ALTER TABLE events ADD COLUMN entity_type TEXT DEFAULT ''",
+    # Issue #1938：级联收敛补偿归因列（cascade.py 读侧依赖；老库补列幂等）
+    "ALTER TABLE events ADD COLUMN cascade_reason TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN report_missing INTEGER DEFAULT 0",
+    "ALTER TABLE events ADD COLUMN triggered_by TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN cascade_task_status TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN cascade_prev_event_status TEXT DEFAULT ''",
     "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
     # ===== 发布配置(skill-publish v1.1)=====
     # ===== OBS 技能库(obs-skill-storage-design.md §4)=====

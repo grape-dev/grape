@@ -1242,11 +1242,24 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
                 _revive_ok = (revive_from_timeout_failed
                               and row[0] == "failed" and status == "completed")
-                if not _revive_ok:
+                # Issue #3834：接管 finish 是用户授权的终态写入。若让渡时 cancel_task
+                # 已把事件级联收敛成 cancelled（cascade 合成补偿），而 mark_task_takeover
+                # 未把状态拉回 takeover（老实例/写入竞态），旧实现会在这里静默跳过 →
+                # 事件仍是补偿文案、无 structured_output，下一节点永远不派发。
+                # 窄口子：仅接管服务（allow_from_takeover=True）且 cancelled→completed/failed 放行。
+                # #3834 复审③：failed 也对称放行——接管失败时事件同样停在让渡期 cancelled，
+                # 不放行会留下「接口返回 failed、库里却还是 cancelled+合成补偿文案」的口径分裂。
+                _takeover_ok = (allow_from_takeover
+                                and row[0] == "cancelled" and status in ("completed", "failed"))
+                if not (_revive_ok or _takeover_ok):
                     log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
                     return
-                log.info(f"Event {seq}: failed -> completed via timeout revive "
-                         f"(Issue #1071 narrow gate)")
+                if _takeover_ok:
+                    log.info(f"Event {seq}: cancelled -> {status} via takeover finish "
+                             f"(Issue #3834 authorized revive)")
+                else:
+                    log.info(f"Event {seq}: failed -> completed via timeout revive "
+                             f"(Issue #1071 narrow gate)")
             # Issue #1503：终态写入 result 兜底（与 completed_at 兜底同层）。
             # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
             if _is_terminal and not (result or "").strip():

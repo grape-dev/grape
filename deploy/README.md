@@ -77,3 +77,55 @@ systemctl restart grape-systemd@mgmt.service grape-systemd@event.service \
   为 `false`、清单为空，属预期降级，不是故障。
 - 规则全文（禁跳版、预发布后缀、单一事实源、`x-changelog` 通知）见
   [`CONTRIBUTING.md` §9.1「契约版本号策略」](../CONTRIBUTING.md)。
+
+## 三库模式冷启动（全新实例）
+
+四进程 + 三库（`grape_mgmt` / `grape_runtime` / `grape_insight`）在**三个空库**上不能直接起：
+`GRAPE_DOMAIN_LIB=1` 只跑登记的增量迁移，基表来自历史单库时代的 legacy 轨道；而 legacy 建表会被
+表归属守卫按域跳过（`meta` 属 runtime，mgmt 进程不建），随后 `_seed_from_json` 写 `meta` 直接
+`(1146) Table '...meta' doesn't exist` 启动失败（2026-11-20 实测）。
+
+冷启动按这个顺序：
+
+```bash
+# 1) 三个空库（utf8mb4）
+#    CREATE DATABASE grape_mgmt|grape_runtime|grape_insight CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+# 2) env 文件（建议 chmod 600）：GRAPE_DOMAIN_LIB=1 + 三条 DSN（口令 URL 编码，parse_dsn 会 unquote）
+#    DEVOPS_DB_PASSWORD 写原文（mysql_compat 不解码）
+
+# 3) 每个库按「单库模式 + 归属守卫关闭」一次建齐（幂等，可重复跑）
+python scripts/bootstrap_3db.py --env-file /root/.grape-3db.env        # 加 --check 只体检
+
+# 4) 起四进程：mgmt/event/worker/insight，端口 38081-38084，
+#    GRAPE_MIGRATION_OWNER 分别 mgmt / runtime / 空 / insight
+```
+
+`scripts/bootstrap_3db.py` 会先体检版本台账形状再动手。**被旧的 `scripts/migrate_schemas.py`
+改过的库不能用**：那是 schema-split 工具把 `grape_t_schema_migrations` 建成了
+`(table_name, target_schema, migrated_at)`，与应用要的 `(version, name, ...)` 形状不同，
+`CREATE TABLE IF NOT EXISTS` 会静默跳过 → 版本表读不了 → 退回 legacy → 同样死在 `meta`。
+脚本对这类库直接 FAIL 并给处置指引（换新库，或人工改名后重跑并确认迁移重跑的影响）。
+
+## 四进程模式下接入 worker（执行器）
+
+三库/四进程拓扑里 `/api/runtime/*` 挂在 **worker 进程**（默认 38083），不在 mgmt：
+`RUNTIME_SERVER_URL` 指错进程时，注册会拿到 `405 Method Not Allowed`、认领也 405，日志像
+「平台不处理任务」。正确取值：
+
+```
+RUNTIME_SERVER_URL=http://<host>:38083     # worker 进程：register / claim / heartbeat / install
+GRAPE_BASE_URL=http://<host>:38081         # mgmt 进程：业务 API（issue / artifacts / settings）
+```
+
+凭据作用域决定能领到哪些任务（`service.claim_by_tag` 的 scope 隔离）：
+
+- `scope=global`（机器级，凭据名=主机名）：可领任意 `queued` 任务 —— 一台机器给整个实例当执行器时用它；
+- `scope=user`（个人）：只领 `agent_tasks.user_id` 等于该用户的任务；
+- `scope=repo`：只领 `owner_id` 对应仓库的任务。
+
+生成方式（明文只回一次）：`POST /api/settings/runtime-credentials {"name": "...", "scope": "global"}`。
+
+> 已知缺口：网页手工建单落下来的 `agent_tasks.user_id` 目前是 `'0'`（未归属），
+> 因此 `scope=user` 的引擎**永远领不到**这类任务，表现为任务一直 `queued`。机器级 worker
+> 请用 `scope=global`；归属修复另行跟进（需先定建单侧 creator 写入口径）。

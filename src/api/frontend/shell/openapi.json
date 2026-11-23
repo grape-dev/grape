@@ -2004,7 +2004,7 @@
           "repos"
         ],
         "summary": "One-shot git platform credential (CLI internal, TTL)",
-        "description": "One-shot short-lived platform credential for local git via CLI (in-process, never persisted). gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only.",
+        "description": "One-shot short-lived platform credential for local git via CLI (in-process, never persisted). gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Repo-session-only (tk_ worker / tko_ takeover).",
         "operationId": "repos_git_credential",
         "parameters": [
           {
@@ -12713,7 +12713,7 @@
           "skills"
         ],
         "summary": "List skills",
-        "description": "Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.",
+        "description": "Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging. Issue #1790: repo param format = owner/repo (optional gitcode:/github: provider prefix); bare repo names and other malformed values return 400 with a format hint instead of silently falling back to the official list.",
         "operationId": "skills_list",
         "parameters": [
           {
@@ -12722,9 +12722,11 @@
             "required": false,
             "schema": {
               "type": "string",
+              "description": "仓库过滤，格式 owner/repo（可带 gitcode:/github: 前缀）；裸仓库名等不合规值返回 400（Issue #1790）",
               "default": "",
               "title": "Repo"
-            }
+            },
+            "description": "仓库过滤，格式 owner/repo（可带 gitcode:/github: 前缀）；裸仓库名等不合规值返回 400（Issue #1790）"
           },
           {
             "name": "scope",
@@ -14641,7 +14643,7 @@
           "scenes"
         ],
         "summary": "List scenes with pipeline",
-        "description": "Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.",
+        "description": "Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; always returns total; carries card fields (icon/scope/created_by/pin) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.",
         "operationId": "scenes_with_pipeline",
         "parameters": [
           {
@@ -14652,6 +14654,57 @@
               "type": "string",
               "default": "",
               "title": "Repo"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(id|latest)$",
+              "default": "id",
+              "title": "Sort"
             }
           }
         ],
@@ -17692,6 +17745,59 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/pipeline/trigger": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Trigger pending issue pipeline",
+        "description": "Issue #3621: triggers the pipeline for an issue created with `trigger_pipeline=false` (stage=created), reusing the issue_opened sync trigger path. Idempotent: 409 when stage is not created or the issue already has pipeline events. User-only.",
+        "operationId": "issues_trigger_pending_pipeline",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/pipeline": {
       "get": {
         "tags": [
@@ -18872,7 +18978,7 @@
           "issues"
         ],
         "summary": "Create issue (unified entry)",
-        "description": "Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode.",
+        "description": "Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?, trigger_pipeline? (default true; false = create without triggering pipeline, stage=created).",
         "operationId": "issues_create",
         "parameters": [
           {
@@ -35448,14 +35554,16 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [],
+    "added": [
+      "/api/issues/{issue_id}/pipeline/trigger"
+    ],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 396,
+  "x-endpoint-count": 397,
   "x-groups": [
     "a2a",
     "agents",
@@ -35490,6 +35598,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "084561b20",
-  "x-generated-at": "2026-11-23T02:07:53.820333+00:00"
+  "x-source-commit": "12d7adf31",
+  "x-generated-at": "2026-11-23T08:22:28.430359+00:00"
 }

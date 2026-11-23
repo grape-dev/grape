@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT '',
-    failed_node TEXT DEFAULT ''
+    failed_node TEXT DEFAULT '',
+    cascade_reason TEXT DEFAULT '',
+    report_missing INTEGER DEFAULT 0,
+    triggered_by TEXT DEFAULT '',
+    cascade_task_status TEXT DEFAULT '',
+    cascade_prev_event_status TEXT DEFAULT ''
 )
 """
 

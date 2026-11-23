@@ -7,6 +7,8 @@ name: windows-smoke
 # Issue #536 QA-Impt 修复：linux-backend 增加 DDL 安全带卡点——显式目标分支
 # 运行 scripts/check-destructive-ddl.py + Issue #536 新增 pytest 用例，
 # 危险 DDL 回归不再依赖人工本地执行。
+# Issue #3874 PR #2003 审查修复（Required）：Windows worker onboard 三段修复的
+# 新增用例接入 windows-smoke 门禁（依赖清单/wheels 平台覆盖 × 降级解析器 × ps1 软门）。
 on:
   push:
     branches: ["**"]
@@ -29,6 +31,14 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py tests/runtime/test_windows_euid_guard.py tests/runtime/test_worker_windows_deps.py -v
+      - name: "Worker onboard dependency + model gate tests (issue #3874)"
+        # Issue #3874 PR #2003 审查修复（Required）：三段修复的新增用例此前未接入
+        # 任何 CI job，回归只能靠人工 pytest（先例 #1613/#1982/#2133/#2245/#3490）。
+        # 覆盖依赖清单同源 + bundled wheels 平台标签（含 win_amd64）、YAML sequences
+        # 降级为非阻断 warning、install-worker.ps1 校验软门与 -SkipEngineCheck。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3874_worker_onboard.py tests/test_engine_model_2545.py tests/test_worker_install_model_gate_2545.py -v
 
   linux-backend:
     runs-on: ubuntu-latest

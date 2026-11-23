@@ -406,6 +406,171 @@ def downstream_event_exists(repo_key: str, issue_id: str, agent_type: str, since
         return None
 
 
+#: 接管 finish 回填真实结论时的补偿归因触发路径（cascade.py 展示层按此区分来源）
+TRIGGER_TAKEOVER_FINISH = "takeover_finish"
+
+
+def _event_columns(c) -> set:
+    """events 表列清单（统一走 event_store 的跨库探测，避免各处重复实现）。"""
+    from src.domains.runtime.event_store import _events_columns
+    return _events_columns(c)
+
+
+def _mark_issue_done(repo_key: str, issue_number: str, reason: str = "takeover_done") -> None:
+    """把 Issue 收敛到完成态（stage=done / status=completed），供场景链末节点复用。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE issue SET status='completed', stage='done', completed_at=?, "
+                      "completed_reason=? WHERE repo_key=? AND issue_number=?",
+                      (_now_iso(), reason, repo_key, native_issue_number(issue_number)))
+            db.commit()
+    except Exception as e:
+        log.warning(f"takeover: mark issue done failed: {e}")
+
+
+def event_conclusion_snapshot(event_seq: int) -> dict:
+    """读事件在接管 finish 写入前的结论状态（用于判定是否属于级联补偿事件）。
+
+    返回 ``{status, result, cascade_reason}``；缺列 / 查询失败降级为空值。
+    """
+    _out = {"status": "", "result": "", "cascade_reason": ""}
+    if not event_seq:
+        return _out
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = _event_columns(c)
+            _has_reason = "cascade_reason" in cols
+            _sel = "status, result" + (", cascade_reason" if _has_reason else "")
+            row = c.execute(f"SELECT {_sel} FROM events WHERE seq=?", (int(event_seq),)).fetchone()
+        if row:
+            _out["status"] = str(row[0] or "")
+            _out["result"] = str(row[1] or "")
+            _out["cascade_reason"] = str(row[2] or "") if _has_reason and len(row) > 2 else ""
+    except Exception as e:
+        log.warning(f"takeover: conclusion snapshot failed seq={event_seq}: {e}")
+    return _out
+
+
+def mark_backfilled_conclusion(event_seq: int, *, prev: dict,
+                               prev_task_status: str = "cancelled") -> bool:
+    """接管 finish 交回真实结论后，把级联补偿归因改判为「已回填真实结论」。
+
+    Issue #3834：让渡时 cancel_task 会把事件收敛成 REASON_SYNTHESIZED（合成补偿，
+    is_agent_conclusion=false）。接管 finish 写入的是用户/本地 agent 的真实结论，
+    等价于「原始回报丢失但结论已回填」→ 归因改为 REASON_BACKFILLED，事件重新具备
+    真实 Agent 结论资格（展示层 :func:`cascade.display_meta` 据此计入 A2A 链）。
+    非补偿事件（普通接管）不做任何改写。
+    """
+    from src.domains.runtime.engine import cascade as _cascade
+    _prev_status = str((prev or {}).get("status") or "")
+    _prev_result = str((prev or {}).get("result") or "")
+    _prev_reason = str((prev or {}).get("cascade_reason") or "")
+    _is_cascade = _cascade.is_compensation_state(event_status=_prev_status,
+                                                 result_text=_prev_result,
+                                                 cascade_reason=_prev_reason)
+    if not (event_seq and _is_cascade):
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = _event_columns(c)
+            # #3834 复审④：cascade_task_status / cascade_prev_event_status 属于
+            # cancel 收敛时记录的「原始现场」，改判只补空缺、不覆盖既有值——
+            # 避免把 cancel 时记录的 running/dispatched 冲成快照期的 takeover/cancelled。
+            _values = (
+                ("cascade_reason", _cascade.REASON_BACKFILLED),
+                ("report_missing", 1),
+                ("triggered_by", TRIGGER_TAKEOVER_FINISH),
+                ("cascade_task_status", (prev_task_status or "")[:32]),
+                ("cascade_prev_event_status", (_prev_status or "")[:32]),
+            )
+            _present = {}
+            if "cascade_task_status" in cols and "cascade_prev_event_status" in cols:
+                _prow = c.execute(
+                    "SELECT cascade_task_status, cascade_prev_event_status FROM events WHERE seq=?",
+                    (int(event_seq),)).fetchone()
+                if _prow:
+                    _present = {"cascade_task_status": str(_prow[0] or ""),
+                                "cascade_prev_event_status": str(_prow[1] or "")}
+            _sets, _params = [], []
+            for k, v in _values:
+                if k not in cols:
+                    continue
+                if k in _present and _present[k]:
+                    continue
+                _sets.append(f"{k}=?")
+                _params.append(v)
+            if not _sets:
+                # 归因列一个都不缺时也视为成功（幂等）
+                return True
+            c.execute(f"UPDATE events SET {', '.join(_sets)} WHERE seq=?",
+                      _params + [int(event_seq)])
+            db.commit()
+        log.info(f"takeover: event {event_seq} conclusion backfilled "
+                 f"(prev={_prev_status or '-'}, trigger={TRIGGER_TAKEOVER_FINISH})")
+        return True
+    except Exception as e:
+        log.warning(f"takeover: backfill conclusion attr failed seq={event_seq}: {e}")
+        return False
+
+
+def _next_agent_from_scene(repo_key: str, issue_number: str,
+                           current_agent: str) -> tuple[str, bool]:
+    """按场景节点链再解析一次下一节点（id 优先、tag 兜底两口径，覆盖非标准节点写法）。
+
+    返回 ``(next_agent, is_done)``：末节点（``next=done``）会把 Issue 收敛为完成态并返回
+    ``("done", True)``，避免「stage 推进成功却无下一节点」的静默断链。
+    """
+    try:
+        from src.api.pipeline_config import get_next_node
+        from src.api.session_store import get_issue_scene
+        from src.api.pipeline_constants import DISPATCHABLE_AGENTS
+        from src.domains.runtime.engine.engine_select import node_matches_agent_role
+        scene_id = ""
+        try:
+            sc = get_issue_scene(repo_key, f"#{issue_number}")
+            scene_id = (sc[0] if sc and sc[0] else "") or ""
+        except Exception:
+            scene_id = ""
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(scene_id or "default", repo_key=repo_key) or {}
+        for n in cfg.get("nodes") or []:
+            if not node_matches_agent_role(n, current_agent):
+                continue
+            _next = (n.get("next") or "").strip()
+            if not _next:
+                return "", False
+            if _next == "done":
+                _mark_issue_done(repo_key, issue_number)
+                return "done", True
+            nxt = get_next_node(scene_id or "default", n.get("id") or current_agent)
+            _target = (_next if not nxt else (nxt.get("id") or _next))
+            # #3834 复审⑤：next 字符串必须落在可派发集合（标准 agent 角色 or 本场景节点 id/tag）
+            # 内才返回，否则按未解析处理——不把不存在的 agent 派出去制造静默黑洞。
+            _valid = set(DISPATCHABLE_AGENTS) | {
+                (x.get("id") or "").strip() for x in cfg.get("nodes") or []
+            } | {(x.get("tag") or "").strip() for x in cfg.get("nodes") or []}
+            if (_target or "") not in _valid:
+                log.warning(f"takeover: scene next '{_target}' is not dispatchable, "
+                             f"treated as unresolved")
+                return "", False
+            return _target, False
+    except Exception as e:
+        log.warning(f"takeover: scene next-agent fallback failed: {e}")
+    return "", False
+
+
+def assert_no_active_takeover(repo_key: str, issue_id: str, agent_type: str = "") -> None:
+    """防重做守卫：接管中的节点禁止任何派发（A2A / a2a-redo / issues-resume 调用）。"""
+    sess = active_takeover_for(repo_key, issue_id, agent_type)
+    if sess:
+        raise TakeoverError(409, "already_taken_over",
+                            f"Issue {issue_id} 正被 {sess.get('username') or '用户'} 接管中（"
+                            f"takeover={sess.get('id')}），禁止再次派发")
+
+
 # ----------------------------------------------------------------------------- bundle
 
 def _issue_row(repo_key: str, issue_number: str) -> dict:
@@ -1545,15 +1710,7 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
     if not next_agent:
         return "", False          # 场景里找不到该节点：不动 stage，交给人
     if next_agent == "done":
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE issue SET status='completed', stage='done', completed_at=?, "
-                          "completed_reason='takeover_done' WHERE repo_key=? AND issue_number=?",
-                          (_now_iso(), repo_key, native_issue_number(issue_number)))
-                db.commit()
-        except Exception as e:
-            log.warning(f"takeover: mark issue done failed: {e}")
+        _mark_issue_done(repo_key, issue_number)
         return "done", True
     try:
         # owner_agent 记录"现在轮到谁"，写 takeover 会让需求中心显示成不存在的 agent
@@ -1620,6 +1777,25 @@ def _internal_base_url(runtime_id: int = 0) -> str:
     return base or f"http://127.0.0.1:{_local_port()}"
 
 
+def _a2a_dispatch_base(runtime_id: int = 0) -> str:
+    """A2A 派发基址：优先按服务映射解析，回退本机内部基址（Issue #19 根因）。
+
+    四进程拓扑下 `/api/a2a` 只挂在 event 角色（38082），而 `_internal_base_url()`
+    探活的是"本进程自己的端口"（mgmt 38081）→ 派发固定 405，handoff_seq 永远 0。
+    平台已有 `resolve_a2a_base()` 按服务映射解析（显式 task_a2a_api_url > 网关
+    `/a2a` 前缀 > server_base_url），指向的正是 A2A 实际监听处；解析为空
+    （单测/未配置）时再回退 `_internal_base_url()`，保持历史行为。
+    """
+    try:
+        from src.kernel.prompt_builder import resolve_a2a_base
+        base = (resolve_a2a_base(int(runtime_id or 0)) or "").strip()
+        if base:
+            return base.rstrip("/")
+    except Exception as _e:  # noqa: BLE001 — 解析失败必须回退，不能阻断派发
+        log.debug(f"takeover: resolve_a2a_base skipped: {_e}")
+    return _internal_base_url(int(runtime_id or 0)).rstrip("/")
+
+
 def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context: str,
                    runtime_id: int, auth_headers: dict | None,
                    base_url: str = "") -> dict:
@@ -1630,7 +1806,7 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
     用作 SSRF 跳板会把调用方凭据发给攻击者控制的主机，因此这里显式忽略。
     """
     import httpx
-    base = _internal_base_url(int(runtime_id or 0)).rstrip("/")
+    base = _a2a_dispatch_base(int(runtime_id or 0)).rstrip("/")
     url = f"{base.rstrip('/')}/api/a2a"
     body = {"agent": next_agent,
             "payload": {"repository": repo_key.split(":", 1)[-1],
@@ -1803,7 +1979,10 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     }
 
     # ① 事件终态
+    # 先快照让渡阶段的补偿状态：finish 写入真实结论后据此把归因改判为「已回填」
+    _pre_conclusion = event_conclusion_snapshot(event_seq) if event_seq else {}
     event_status = ""
+    _backfilled = False
     if event_seq:
         try:
             update_event_complete(event_seq, outcome, result=(summary or "")[:4000],
@@ -1812,11 +1991,34 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             event_status = outcome
         except Exception as e:
             raise TakeoverError(500, "event_finalize_failed", f"事件终态写入失败：{e}")
+        if outcome == "completed":
+            # Issue #3834：让渡补偿事件不再以「系统合成补偿（is_agent_conclusion=false）」身份
+            # 留在链上——真实结论由接管 finish 回填，归因改判 REASON_BACKFILLED。
+            # 复审⑥：结果可观测——非补偿事件为 False（无需改判）；补偿事件改判失败也如实
+            # 返回 False，调用方/审计可据此发现「completed 但归因仍 synthesized」的半状态。
+            _backfilled = bool(mark_backfilled_conclusion(
+                event_seq, prev=_pre_conclusion, prev_task_status="cancelled"))
 
-    # ② stage 推进 / Issue 完成
+    # ② stage 推进 / Issue 完成（stage 写入与派发目标必须同源）
     next_agent_resolved, is_done = "", False
     if outcome == "completed":
         next_agent_resolved, is_done = _advance_stage(repo_key, issue_number, agent_type)
+        # 场景节点写法非标准（id/tag 对不上）时补一次节点链解析，避免 stage 推进成功
+        # 却因为没有下一节点而静默断链（Issue #3834 断链点）；末节点会在此收敛为完成。
+        if not next_agent_resolved and not is_done:
+            next_agent_resolved, is_done = _next_agent_from_scene(repo_key, issue_number, agent_type)
+        # 场景链与请求都无目标时才回落到请求 next_agent；一旦回落，stage 与派发目标同步落库。
+        if not next_agent_resolved and not is_done:
+            _req_target = (next_agent or "").strip()
+            if _req_target and _req_target != "done":
+                next_agent_resolved = _req_target
+        if next_agent_resolved and not is_done:
+            try:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", next_agent_resolved,
+                                next_agent_resolved)
+            except Exception as e:
+                log.warning(f"takeover: set_issue_stage({next_agent_resolved}) failed: {e}")
     # next_step 只有推进后才知道 → 补一次 events.structured_output（update_event_complete
     # 对终态事件是幂等跳过，不能二次覆盖，所以这里直接改结构化列）
     if event_seq and next_agent_resolved and _structured.get("next_step") != next_agent_resolved:
@@ -1849,14 +2051,19 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     # ④ 可选派发下一节点
     handoff_result: dict = {"ok": False, "skipped": True}
     if outcome == "completed" and not is_done and handoff == "a2a":
-        target = (next_agent or next_agent_resolved or "").strip()
+        target = (next_agent_resolved or "").strip()
+        if not target:
+            # 断链点可视化：stage 推进后无下一节点可派发，不得静默成功。
+            handoff_result = {"ok": False, "skipped": True, "reason": "next_agent_unresolved"}
+            log.warning(f"takeover: finish {session_id} advanced but no next agent resolved "
+                        f"(agent={agent_type or '-'})")
         existing = downstream_event_exists(repo_key, issue_number, target, int(sess.get("event_seq") or 0)) if target else None
         if existing:
             log.info(f"takeover: skip handoff to {target} — already dispatched seq={existing['seq']} "
                      f"status={existing['status']}")
             handoff_result = {"ok": True, "skipped": True, "reason": "already_dispatched",
                               "seq": existing["seq"]}
-        if not handoff_result.get("seq"):
+        if target and not handoff_result.get("seq"):
             ctx = (f"由用户 {user.get('username') or ''} 在本机接管完成节点 {agent_type}；"
                    f"summary: {summary or ''}；evidence: {evidence or ''}；"
                    f"files: {', '.join(files_written or [])}")
@@ -1885,6 +2092,7 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     return {"ok": True, "changed": True, "status": ST_FINISHED,
             "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
             "next_agent": next_agent_resolved or next_agent,
+            "backfilled": _backfilled,
             "handoff": handoff_result, "session": _sess_view,
             "skipped_dispatches": _skipped_count,
             "skipped_message": _skipped_message}
@@ -1895,9 +2103,12 @@ def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str
     """finish 之后补派发（幂等键 = session_id + next_agent）。"""
     target = (sess.get("next_agent") if sess.get("next_agent") else "") or next_agent
     if not target:
-        # 从场景重新推一次
         target, _ = _advance_stage(sess.get("repo_key") or "", _issue_num(sess.get("issue_id") or ""),
                                    sess.get("agent_type") or "")
+    if not target:
+        target, _ = _next_agent_from_scene(sess.get("repo_key") or "",
+                                           _issue_num(sess.get("issue_id") or ""),
+                                           sess.get("agent_type") or "")
     if not target or target == "done":
         return
     ctx = f"由用户 {user.get('username') or ''} 接管完成节点 {sess.get('agent_type')}；summary: {summary}"

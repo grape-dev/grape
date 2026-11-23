@@ -1332,6 +1332,37 @@ def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
              f"(stage cleared, no auto redispatch)")
     return {"ok": True, "issue_id": issue_id, "status": "processing", "stage": ""}
 
+def _fetch_pending_issue_row(issue_id: int, user_id):
+    """同步读：取挂单的 repo_key/issue_number（db_lock 临界区）。
+
+    事件循环保护：不在 async 函数里直接持 db_lock（async-blocking 棘轮 A6）；
+    调用方用 asyncio.to_thread。
+    """
+    from src.kernel.session_manager import db_lock
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
+                  (issue_id, user_id))
+        return c.fetchone()
+
+
+@router.post("/{issue_id}/pipeline/trigger", operation_id="issues_trigger_pending_pipeline",
+             summary="Trigger pending issue pipeline",
+             description="Issue #3621: triggers the pipeline for an issue created with `trigger_pipeline=false` (stage=created), reusing the issue_opened sync trigger path. Idempotent: 409 when stage is not created or the issue already has pipeline events. User-only.")
+async def trigger_pending_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """对 trigger_pipeline=false 建出的挂单执行首次触发入链（幂等，不重复入链）。"""
+    from src.domains.runtime.issues_center import trigger_pending_issue_pipeline
+    row = await asyncio.to_thread(_fetch_pending_issue_row, issue_id, user["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    repo_key, issue_number = row[0], row[1]
+    if not repo_key or not issue_number:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求缺少仓库/编号，无法触发"})
+    result = await trigger_pending_issue_pipeline(
+        repo_key, issue_number, actor=(user.get("username") or "").strip())
+    return {**result, "issue_id": issue_id}
+
+
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
@@ -2666,7 +2697,29 @@ def list_repo_issues(owner: str, repo: str,
                 "has_more": (_page_row_count or 0) >= per_page}
     return {"issues": issues, "total": len(issues)}
 
-@router.post("/{owner}/{repo}", operation_id="issues_create", summary="Create issue (unified entry)", description="Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode.")
+def _parse_bool_field(value, field_name: str, default: bool = False) -> bool:
+    """显式布尔解析（不把字符串 "false" 强转成 True）。
+
+    Issue #3621：建单入口的 trigger_pipeline 可选开关按此口径解析；
+    兼容 JSON bool 与常见字符串/数字写法，其它取值 → 400。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        _v = value.strip().lower()
+        if _v in ("true", "1", "yes", "on"):
+            return True
+        if _v in ("false", "0", "no", "off"):
+            return False
+    raise HTTPException(status_code=400, detail={
+        "code": 400, "message": f"{field_name} 需为布尔值（true/false）"})
+
+
+@router.post("/{owner}/{repo}", operation_id="issues_create", summary="Create issue (unified entry)", description="Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?, trigger_pipeline? (default true; false = create without triggering pipeline, stage=created).")
 async def create_issue(owner: str, repo: str, body: dict = None,
                        user: dict = Depends(require_org_member)):
     """创建 Issue（对外唯一创建入口）：建 GitCode Issue + 建档 + 触发 pipeline。
@@ -2693,6 +2746,9 @@ async def create_issue(owner: str, repo: str, body: dict = None,
         _scene_id,
         str(user.get("org_id") or ""),
     )
+    # Issue #3621：trigger_pipeline 可选布尔（缺省 true，保持既有行为零破坏）
+    _trigger_pipeline = _parse_bool_field(
+        _body.get("trigger_pipeline"), "trigger_pipeline", True)
     b = TaskCreateBody(
         repo_key=_repo_key,
         title=_body.get("title", "") or "",
@@ -2701,6 +2757,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
         scene_id=_scene_id,
         is_subtask_mode=int(_body.get("is_subtask_mode") or 0),
         attachments=_body.get("attachments") or [],
+        trigger_pipeline=_trigger_pipeline,
     )
     return await create_task_via_issue(b, user)
 

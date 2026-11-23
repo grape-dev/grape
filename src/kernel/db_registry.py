@@ -360,8 +360,8 @@ def _bounded_ping(conn, timeout: float) -> None:
         if sock is not None and prev is not None:
             try:
                 sock.settimeout(prev)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 恢复超时失败不影响探活结论
+                log.debug(f"db_registry: restore socket timeout failed: {e}")
 
 
 def _needs_liveness_check(domain: str) -> bool:
