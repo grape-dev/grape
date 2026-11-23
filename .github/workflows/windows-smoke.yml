@@ -39,6 +39,15 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3874_worker_onboard.py tests/test_engine_model_2545.py tests/test_worker_install_model_gate_2545.py -v
+      - name: Worker install register-window tests (issue #3892)
+        # Issue #3892 QA 审查修复（Required#3）：新增用例
+        # tests/runtime/test_issue_3892_install_worker_register_window.py 此前未接入 CI，
+        # 其中 15 条 pwsh 行为用例在没有 PowerShell 的环境恒 skip，回归等于无门禁。
+        # windows-latest 自带 pwsh，静态守卫 + 行为用例全部生效（历史日志水位、
+        # 硬失败跳过主控交叉验证、回滚提示分支都在此被拦截）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3892_install_worker_register_window.py -v
 
 
   linux-backend:

@@ -66,13 +66,13 @@
     ASCII 约束、软到期分支、进程存活回落且按安装目录过滤、硬失败跳过交叉验证、快速失败路径未变、
     `Install complete!` 唯一且只在成功分支、回滚提示含版本/备份/重试、回滚函数上报恢复版本、
     交叉验证静默降级。
-  - 行为用例（14 条，需 pwsh）：把「Issue #3892 标记 → 文件末尾」整段原样抽进 harness，
+  - 行为用例（15 条，需 pwsh）：把「Issue #3892 标记 → 文件末尾」整段原样抽进 harness，
     桩替换 `Start-Sleep`/`Get-CimInstance`/`Invoke-RestMethod`，按秒推进模拟日志，验证
     36s/48s/57s 慢注册不被回滚、无迹象且进程死亡 30s 停等、硬失败短路、回滚提示无 `Install complete!`、
     交叉验证生效与降级；以及 append-only 历史日志（上一轮 Traceback / Register failed /
     registered）不参与本轮判定、本轮非致命 Traceback 不短路、硬失败不被主控心跳翻案。
   - CI 门禁：本文件已接入 `.github/workflows/windows-smoke.yml` 的 `windows-smoke` job
-    （windows-latest 自带 pwsh），否则 14 条行为用例在无 PowerShell 的环境恒 skip（QA 审查 Required）。
+    （windows-latest 自带 pwsh），否则 15 条行为用例在无 PowerShell 的环境恒 skip（QA 审查 Required）。
 
 ## 影响面与风险
 
