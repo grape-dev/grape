@@ -611,3 +611,29 @@ def test_startup_engine_by_rid_falls_back_to_position_without_detail():
     engine_by_rid = agent_mod._engine_by_rid_from_register(_C(), [7, 8], installed, "dev")
     assert "coding" in engine_by_rid[7]
     assert "qa" in engine_by_rid[8]
+
+
+# ---------------------------------------------------------------- 切片⑪：云 worker 启动注册配对（PR #2066 复审 Required）
+
+def test_cloud_worker_startup_pairs_by_name_and_logs_partial(caplog):
+    """云 worker 启动注册：回包部分非法（ids 比 runtimes 短）时按 name 配对，并落 partial 日志。
+
+    旧实现 `zip(ids, runtimes)` 在 client.register 逐条过滤后会把 rid 配给错位的引擎
+    （7→coding / 8→qa），进而 `_backend_for_engine` 选错后端。本用例锁死「按 name 配对 +
+    非法 id 需重注册」这两点。
+    """
+    from src.domains.runtime.engine import cloud_worker as cw
+
+    class _C:
+        # 回包：id=7 是 qa，id=0 非法，id=8 是 coding；runtimes 顺序 [coding, qa]
+        last_register_detail = [{"id": 7, "name": "qa"}, {"id": 0, "name": "bad"},
+                                {"id": 8, "name": "coding"}]
+        last_register_invalid_ids = ["0"]
+
+    runtimes = [{"name": "coding", "installed": True},
+                {"name": "qa", "installed": True}]
+    with caplog.at_level("WARNING"):
+        engine_by_rid = cw._startup_engine_by_rid(_C(), [7, 8], runtimes, "dev")
+    assert "qa" in engine_by_rid[7]
+    assert "coding" in engine_by_rid[8]
+    assert "invalid runtime id" in caplog.text
