@@ -5485,7 +5485,59 @@ def init_database():
     # 幂等 DDL（列已存在跳过）与盖章迁移语义解耦，每次启动执行。
     # （D44/S64 函数体在合并 squash 时一度丢失，2026-11-13 按 b439764fd 原形恢复。）
     _ensure_platform_storage_columns()
-    # MySQL with session_manager
+    # Issue #3897：启动期 schema 自检——跨域身份关系（external_identities 基表/视图）
+    # 缺失时立刻可诊断（生产曾出现「代码已上线、runtime 库视图未建」→ 每次身份解析 1146）。
+    # 失败不阻断启动（自检只负责可见性，修复交给迁移/部署脚本）。
+    _check_identity_relations()
+
+
+#: 启动自检覆盖的跨域身份关系（owner=mgmt；非 owner 库形态为跨域视图）。
+_IDENTITY_RELATIONS = ("external_identities", "grape_accounts")
+_IDENTITY_RELATION_REMEDIATION = (
+    "python3 scripts/domain_view_freshness.py --repair "
+    "（owner=mgmt 补建跨域视图；存量 mgmt 库缺基表时由迁移 202611230005 补建）")
+
+
+def _check_identity_relations(relation_kind=None) -> list[str]:
+    """启动期自检：当前库是否具备身份域关系（基表或跨域视图）。
+
+    Issue #3897：`external_identities` 在生产 `grape_prod_runtime` 缺失（1146），
+    属于「代码已上线、跨域视图未补建」的 schema 漂移。迁移只会补 owner 基表，
+    非 owner 库的视图由部署脚本 `scripts/domain_view_freshness.py --repair` 建
+    （补建清单在 `scripts/view_create_missing_allowlist.txt`）。
+    本自检把这种漂移在**启动那一刻**变成一条可 grep 的 ERROR（含库名与修复命令），
+    不再等业务请求逐条刷 WARNING。
+
+    返回缺失关系名列表（便于测试/运维断言）；探测异常只 WARN，绝不抛。
+    """
+    from src.domains.runtime.schema_probe import relation_kind as _default_probe
+
+    probe = relation_kind or _default_probe
+    missing: list[str] = []
+    try:
+        from src.kernel.db_registry import current_domain, database_of
+        _db_label = database_of(current_domain() or "") or os.environ.get("DEVOPS_DB_NAME", "")
+    except Exception:
+        _db_label = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            for _table in _IDENTITY_RELATIONS:
+                if probe(c, _table) is None:
+                    missing.append(_table)
+    except Exception as _e:
+        log.warning(f"schema self-check (identity relations) skipped: {_e}")
+        return []
+    if missing:
+        log.error(
+            "schema self-check: identity relation(s) missing in db=%s: %s "
+            "(身份解析将 1146/降级); remediation: %s",
+            _db_label or "current", ",".join(missing), _IDENTITY_RELATION_REMEDIATION)
+    else:
+        log.info("schema self-check: identity relations present in db=%s (%s)",
+                 _db_label or "current", ",".join(_IDENTITY_RELATIONS))
+    return missing
+
 
 def _migrate_event_status_pending():
     """事件状态语义迁移（docs/weekly-07/seq-2310-health-gate-stuck-design.md §6.5.4）。
@@ -11706,4 +11758,18 @@ register_migration(
     fn=_fn_autopilot_cf_cleanup,
     domains=("mgmt",),
     post_check=_post_autopilot_cf_cleanup,
+)
+
+# ===== external_identities 关系补齐（Issue #3897 B 组）=====
+from src.domains.mgmt.migrations.external_identities_relation import (
+    ensure_identity_relation as _fn_external_identities_relation,
+    verify_identity_relation as _post_external_identities_relation,
+)
+register_migration(
+    version="202611230005",
+    name="external-identities-relation",
+    kind="safe",
+    fn=_fn_external_identities_relation,
+    domains=("mgmt",),
+    post_check=_post_external_identities_relation,
 )
