@@ -317,7 +317,7 @@ def _seed_credential():
 
 
 def test_probe_failure_signal_endpoint_records_metric():
-    """POST 信号 → 服务端按 host/reason 计数；非法 reason 400；无凭据 401。"""
+    """POST 信号 → 服务端按 host/reason 计数；未知 reason 归 unknown 不丢数；无凭据 401。"""
     from src.domains.insight.observability import (RUNTIME_TAGS_PROBE_FAILURES,
                                                    RUNTIME_TAGS_PROBE_FAILURES_METRIC,
                                                    registry)
@@ -338,9 +338,14 @@ def test_probe_failure_signal_endpoint_records_metric():
     text = generate_latest(registry).decode("utf-8")
     assert f'{RUNTIME_TAGS_PROBE_FAILURES_METRIC}{{host="dev-1",reason="id_missing"}}' in text
 
-    r_bad = client.post(guard.SIGNAL_PATH, json={"host": "dev-1", "reason": "bogus"},
-                        headers=headers)
-    assert r_bad.status_code == 400
+    # 审查意见 Optional ③：未知 reason 与 observability「归 unknown 不丢数」口径统一——
+    # 端点接受并计 unknown（不再 400），否则新版本 worker 新增 reason 会被 HTTP 层丢掉。
+    _unknown_before = RUNTIME_TAGS_PROBE_FAILURES.labels(host="dev-1", reason="unknown")._value.get()
+    r_unknown = client.post(guard.SIGNAL_PATH, json={"host": "dev-1", "reason": "bogus"},
+                            headers=headers)
+    assert r_unknown.status_code == 200, r_unknown.text
+    assert RUNTIME_TAGS_PROBE_FAILURES.labels(host="dev-1", reason="unknown")._value.get() \
+        == _unknown_before + 1
     r_noauth = client.post(guard.SIGNAL_PATH, json={"host": "dev-1", "reason": "no_tags"})
     assert r_noauth.status_code == 401
 
@@ -373,3 +378,150 @@ def test_alerts_yml_has_runtime_tags_probe_rule():
     assert rule["labels"]["severity"] in ("warning", "critical")
     annotations = " ".join(str(v) for v in (rule.get("annotations") or {}).values())
     assert "id_missing" in annotations and "no_tags" in annotations  # 排查指引含 reason 语义
+
+
+# ---------------------------------------------------------------- 切片⑥：多引擎隔离（PR #2066 审查 Required）
+#
+# 缺陷：`_run_loop` 里一个 `ProbeFailureReporter` 被该 worker 的所有 rid/引擎共享，
+# 同一轮任一引擎成功探活（observe("")）就把其它引擎的连败计数清零。多引擎主机上
+# 「1 个引擎失败 + 1 个引擎成功」交替 → 连败永远回到 0 → 达不到阈值 → 新增的
+# GrapeRuntimeTagsProbeFailing 告警对多引擎主机完全失效。
+
+def test_probe_reporters_are_isolated_per_rid():
+    """多引擎主机：A 引擎每轮失败、B 引擎每轮成功——A 的连败不被 B 的成功清零。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    emitted = []
+    reporters = {}
+
+    def _make():
+        return guard.ProbeFailureReporter(
+            threshold=3, emit_every=3, host="h-multi",
+            sink=lambda p: emitted.append(p) or True)
+
+    for _ in range(3):
+        # 同一轮：rid=11 持续失败、rid=22 持续成功（旧实现下 22 的成功会清零 11 的计数）
+        agent_mod._handle_tags_probe_result(
+            agent_mod.tags_probe_reporter_for(reporters, 11, make=_make), 11, "no_tags")
+        agent_mod._handle_tags_probe_result(
+            agent_mod.tags_probe_reporter_for(reporters, 22, make=_make), 22, "")
+
+    assert [p["reason"] for p in emitted] == ["no_tags"], \
+        "多引擎交替时失败引擎必须仍能达到阈值并上报"
+    assert reporters[11].consecutive == 3
+    assert reporters[22].consecutive == 0 and reporters[22].emitted == 0
+    assert emitted[0]["runtime_id"] == "11"   # 信号带 rid：多引擎主机可定位到具体引擎
+
+
+def test_two_engines_with_different_reasons_both_alert():
+    """两个引擎各自连败（no_tags / unauthorized）→ 各自达成阈值，互不吞并。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    emitted = []
+    reporters = {}
+
+    def _make():
+        return guard.ProbeFailureReporter(threshold=2, emit_every=2, host="h-multi2",
+                                          sink=lambda p: emitted.append(p) or True)
+
+    for _ in range(2):
+        for rid, reason in ((11, "no_tags"), (22, "unauthorized"), (33, "")):
+            agent_mod._handle_tags_probe_result(
+                agent_mod.tags_probe_reporter_for(reporters, rid, make=_make), rid, reason)
+
+    assert sorted((p["reason"], p["runtime_id"]) for p in emitted) == \
+        [("no_tags", "11"), ("unauthorized", "22")]
+
+
+def test_prune_reporters_drops_stale_rids_and_keeps_live_counts():
+    """重注册换 id 后清掉旧 rid 的上报器：防字典无界增长，也不让旧连败复活告警。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    reporters = {}
+
+    def _make():
+        return guard.ProbeFailureReporter(threshold=9, sink=lambda p: True, host="h-prune")
+
+    rep11 = agent_mod.tags_probe_reporter_for(reporters, 11, make=_make)
+    rep11.observe("no_tags")
+    rep11.observe("no_tags")
+    agent_mod.tags_probe_reporter_for(reporters, 22, make=_make)
+
+    assert agent_mod.prune_tags_probe_reporters(reporters, [11, 44]) == [22]
+    assert set(reporters) == {11}
+    assert reporters[11].consecutive == 2   # 存活 rid 的连败计数不被别的 rid 影响
+
+
+# ---------------------------------------------------------------- 切片⑦：契约外 reason 不再静默（Optional ②）
+
+def test_non_contract_reason_counted_as_other_and_logged_once(caplog):
+    """`http_403`/`http_422` 等契约外失败：计入 other 桶（可告警）+ 原始 reason 首次落 WARNING。"""
+    emitted = []
+    rep = guard.ProbeFailureReporter(threshold=2, emit_every=2, host="h-other",
+                                     sink=lambda p: emitted.append(p) or True)
+    with caplog.at_level("WARNING"):
+        assert rep.observe("http_403") is False
+        assert "http_403" in caplog.text          # 原始 reason 不丢：至少落一次日志
+        caplog.clear()
+        assert rep.observe("http_403") is True    # 计入连败 → 达阈值照样上报
+        assert caplog.text == ""                  # 同一 reason 不逐轮刷日志
+    assert guard.OTHER_REASON == "other"
+    assert emitted[0]["reason"] == "other"
+    assert emitted[0]["raw_reason"] == "http_403"     # 契约外的真实 reason 随信号带出
+
+
+def test_network_reason_logged_but_not_counted(caplog):
+    """network（连通性另有心跳指标）不计连败，但首次出现留一条线索日志。"""
+    rep = guard.ProbeFailureReporter(threshold=2, sink=lambda p: True, host="h-net")
+    with caplog.at_level("INFO"):
+        assert rep.observe("network") is False
+        assert "network" in caplog.text
+        caplog.clear()
+        assert rep.observe("network") is False
+        assert caplog.text == ""                  # 只首次出声
+    assert rep.consecutive == 0
+
+
+# ---------------------------------------------------------------- 切片⑧：注册部分回填（Optional ①）
+
+def test_register_keeps_valid_ids_when_some_are_invalid(monkeypatch, caplog):
+    """回包中部分 id 非法：保留同响应的合法 id（不整体判失败），并标记需再注册。"""
+    c = _mk_client()
+
+    async def _fake_request(method, path, body=None, retries=4, **kw):
+        return {"runtimes": [{"id": 7, "name": "coding"},
+                             {"id": 0, "name": "qa"},
+                             {"id": "abc", "name": "vod"}],
+                "probe_url": "http://p"}
+
+    monkeypatch.setattr(c, "_request", _fake_request)
+    with caplog.at_level("WARNING"):
+        ids, probe = asyncio.run(c.register([{"name": "coding", "installed": True}]))
+    assert ids == [7]                 # 合法 id 不被同响应里的非法 id 连带丢弃
+    assert probe == "http://p"
+    assert "RUNTIME_ID_MISSING" in caplog.text
+    assert c.last_register_invalid_ids == ["0", "abc"]   # 仍需重注册的信号
+
+
+def test_reregister_cycle_schedules_retry_on_partial_ids():
+    """部分回填：合法 id 照常上线，但把下次重注册提前到 backoff 后（补齐缺失引擎）。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    class _C:
+        last_register_detail = []
+        last_register_invalid_ids = ["0"]
+
+    async def _fake_rereg(client, installed, device_name, cli_version=""):
+        return [7], {7: "coding"}, installed
+
+    state = asyncio.run(agent_mod._reregister_cycle(
+        _C(), [{"name": "coding", "installed": True}], "dev",
+        now=1000.0, last_reregister=1000.0, last_fast_scan=1000.0,
+        reregister_interval=300, fast_interval=15,
+        reregister_fn=_fake_rereg, probe_fn=lambda *a, **k: None))
+
+    assert state["runtime_ids"] == [7]
+    assert state["partial_invalid_ids"] == ["0"]
+    assert 0 < agent_mod._PARTIAL_ID_REREGISTER_BACKOFF < 300
+    # 下次重注册 = now + backoff（而非等满 300s 周期）
+    assert state["last_reregister"] == 1000.0 - 300 + agent_mod._PARTIAL_ID_REREGISTER_BACKOFF
