@@ -156,7 +156,11 @@ class TestPrSubscriptionUserId:
 
 class TestLegacySceneCompat:
     def test_name_only_node_degrades_same_as_before(self, caplog):
-        """老场景（仅 skill_name）：结果与 resolve_skill_id 名字解析一致 + warning。"""
+        """老场景（存量行只存 skill_name）：结果与 resolve_skill_id 名字解析一致 + warning。
+
+        Issue #3914 E 之后保存链路「存名必存 id」（create_custom_scene 会回填 skill_id），
+        故老场景行必须直接写库模拟——经保存链路写入的节点已带 id，不再代表存量形态。
+        """
         ua = _mk_user()
         sname = f"legacy979_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:org/test979"
@@ -165,9 +169,14 @@ class TestLegacySceneCompat:
             sid_r = _insert_scope_skill(sname, "repo", rk)
             sid_o = _insert_scope_skill(sname, "official", "")
             nodes = [{"id": "n1", "tag": "issue", "skill": sname, "enabled": True}]
-            db_id = create_custom_scene(scene_id=scene_id, name=scene_id, description="",
-                                        repo_key=rk, nodes=nodes)
-            assert db_id
+            # 直接写库：模拟 Issue #3914 E 之前落库的「只存名字」存量场景
+            with db_lock:
+                db.cursor().execute(
+                    "INSERT INTO devops_pipeline_scene "
+                    "(scene_id, name, description, repo_key, nodes_json, is_active, created_by, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,1,?,?,?)",
+                    (scene_id, scene_id, "", rk, json.dumps(nodes), "", "now", "now"))
+                db.commit()
             # 节点无 skill_id → 0（老场景）
             assert event_pipeline.resolve_scene_node_skill_id(rk, "issue", scene_id=scene_id) == 0
             with caplog.at_level("WARNING"):
