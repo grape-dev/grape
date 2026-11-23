@@ -130,3 +130,33 @@ groups:
         annotations:
           summary: "Worker contract guard failed (contract degradation or rebuild failure)"
           description: "Contract guard reported failures in the last 10 minutes (outcome label: degraded = CLI contract cache degradation detected, rebuild_failed = full-contract rebuild from master failed). Risk: business command groups (git-repo/issues/scenes/a2a/knowledge/repos) may vanish from CLI. Check worker logs for 'contract guard', ~/.grape/contract-guard-alerts.jsonl fallback file, and master /static/openapi.json reachability."
+
+      # Issue #4065：任务结果评论投递失败（reason 枚举：non_numeric_ident/http_4xx/
+      # http_5xx/network/unknown）
+      # 语义：agent 任务跑完但结果评论发不出去 → 用户与看板看不到结论（此前只有一条
+      # WARNING，1 小时 7 次结果静默丢失）。任何 reason 的失败增量都要人看一眼：
+      # non_numeric_ident 说明仍有非数字 ident 漏过归一（不该出现，出现即回归）；
+      # http_4xx 多为 token/权限/参数形态；http_5xx 为上游故障。
+      # 排查：日志 grep "failed to post result comment" / "RESULT_COMMENT_SKIPPED"。
+      - alert: GrapeResultCommentPostFailed
+        expr: increase(grape_comment_post_failed_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Result comment post failed (reason={{ $labels.reason }})"
+          description: "{{ $value }} result comments failed to post in the last 10 minutes (reason={{ $labels.reason }}). Risk: task results are invisible to users and the dashboard. Check worker/master logs for 'failed to post result comment' and the target repo credentials."
+
+      # Issue #4065：同一仓库结果评论连续失败（默认阈值 5，GRAPE_COMMENT_POST_FAIL_ALERT_THRESHOLD）
+      # 语义：**连续**失败 = 不是偶发抖动而是链路坏了（token 失效/仓库被删/ident 形态错），
+      # 成功投递即清零。达阈值时进程内同时打 ERROR 结构化行
+      # `RESULT_COMMENT_ALERT consecutive=N threshold=N reason=...`（worker 不暴露
+      # /metrics，Loki 侧靠这行兜底）。
+      - alert: GrapeResultCommentPostConsecutiveFailures
+        expr: grape_comment_post_consecutive_failures >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Result comment posting keeps failing (repo={{ $labels.repo_key }})"
+          description: "repo {{ $labels.repo_key }} has {{ $value }} consecutive result-comment post failures — not transient. Verify the repo bot credentials (bot identity token), the repo's existence/visibility, and whether the ident form is still deliverable. Check logs for 'RESULT_COMMENT_ALERT'."

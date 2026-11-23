@@ -97,12 +97,18 @@ HTTP_REQUEST_DURATION = Histogram(
 from src.kernel.gsb.metrics import install as _install_gsb_metrics
 from src.kernel.org_metrics import install as _install_org_metrics
 from src.kernel.startup_metrics import install as _install_startup_metrics
+# Issue #4065：结果评论投递指标（grape_comment_post_failed_total{reason} /
+# grape_comment_post_skipped_total{reason} / grape_comment_post_consecutive_failures）。
+# 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
+# （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
+from src.kernel.comment_metrics import install as _install_comment_metrics
 
 _install_gsb_metrics(registry)
 _install_org_metrics(registry)
 # Issue #3848：启动期降级（component/reason 两维度）——把「本来只能 grep 日志」的
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
+_install_comment_metrics(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
