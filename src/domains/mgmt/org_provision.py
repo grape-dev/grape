@@ -490,9 +490,9 @@ def _normalize_repo_key(raw: str) -> str:
     if ":" in text:
         provider, text = text.split(":", 1)
         provider = provider.strip().lower()
-        from src.domains.runtime import public as runtime_public
+        from src.domains.runtime.public import get_platform_card
 
-        if runtime_public.get_platform_card(provider) is None:
+        if get_platform_card(provider) is None:
             raise _error(400, "INVALID_REPO",
                          f"repo_key provider 未登记平台卡: {provider}")
         text = text.strip()

@@ -239,9 +239,9 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
         user.get("username", ""), user_id=str(user.get("id") or ""), provider=provider)
     name = provider
     try:
-        from src.domains.runtime import public as runtime_public
+        from src.domains.runtime.public import get_platform_card
 
-        card = runtime_public.get_platform_card(provider)
+        card = get_platform_card(provider)
         if card is not None and getattr(card, "name", ""):
             name = card.name
     except Exception:

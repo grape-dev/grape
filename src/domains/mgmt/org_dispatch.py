@@ -1749,7 +1749,9 @@ def _trigger_child_issue(repo_key: str, issue_number, scene_id: str) -> dict:
         pass
     card = None
     try:
-        card = runtime_public.get_platform_card(provider)
+        from src.domains.runtime.public import get_platform_card
+
+        card = get_platform_card(provider)
     except Exception as exc:  # noqa: BLE001 - 卡缺失按不可触发处理，不误用别家协议
         log.warning(f"org-dispatch: platform card lookup failed provider={provider!r}: {exc}")
     dialect = str(getattr(card, "webhook_dialect", "") or "").strip().lower()

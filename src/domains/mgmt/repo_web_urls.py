@@ -15,9 +15,9 @@ from src.kernel.repo_key import parse_repo_key
 
 def _platform_card(provider: str):
     try:
-        from src.domains.runtime import public as runtime_public
+        from src.domains.runtime.public import get_platform_card
 
-        return runtime_public.get_platform_card(str(provider or "").lower())
+        return get_platform_card(str(provider or "").lower())
     except Exception:  # noqa: BLE001 - 链接派生失败不阻断业务
         return None
 
