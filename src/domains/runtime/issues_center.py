@@ -1296,6 +1296,23 @@ def _read_issue_status(repo_key: str, issue_number: int, c=None) -> str:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
 
+def _read_issue_status_by_id(issue_id) -> str:
+    """按内部主键回读 issue.status（空串 = 无行或回读失败，由调用方兜底）。
+
+    Issue #4022：`issues detail` 的 `task_status` 与 `issues status get` 的 `status`
+    统一从同一权威行（内部主键）派生。此前 detail 走按 issue_number 聚合的 map，
+    镜像 repo_key 下同号多行时可能取到另一行，出现同一 Issue 读数相反的假象。
+    """
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT status FROM issue WHERE id=?", (issue_id,))
+            _r = c.fetchone()
+        return ((_r[0] if _r else "") or "").strip()
+    except Exception as _e:
+        log.warning(f"read issue status by id failed #{issue_id}: {_e}")
+        return ""
+
 def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
     """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。
 

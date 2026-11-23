@@ -135,6 +135,7 @@ from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review,
                                    _set_issue_pending_review_with_prior,
                                    _read_issue_status)
+                                   _read_issue_status, _read_issue_status_by_id),
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -466,17 +467,28 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
         log.warning(f"issues: load issue_state failed: {e}")
     return out
 
-def _task_status_map(repo_keys: list[str]) -> dict:
-    """仓库内 issue_number → tasks.status（任务中心状态）。"""
+def _task_status_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
+    """仓库内 issue_number → tasks.status（任务中心状态）。
+
+    numbers（Issue #4022）：可选 issue_number 集合，非空时按集合收窄（详情只取目标 Issue）。
+    同号多行（镜像 repo_key）时按 repo_keys 顺序**首个命中**为准（`setdefault`），
+    与「单条 Issue 只认一张卡」的读口径一致；不因查询行序漂移出相反读数。
+    """
     from src.kernel.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
+    _num_clause = ""
+    _num_params: list = []
+    if numbers:
+        _num_clause = f" AND issue_number IN ({','.join('?' * len(numbers))})"
+        _num_params = list(numbers)
     with db_lock:
         c = _rt_db.cursor()
         try:
-            c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders})", repo_keys)
+            c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
+                      list(repo_keys) + _num_params)
             for r in c.fetchall():
-                out[str(r[0])] = r[1]
+                out.setdefault(str(r[0]), r[1])
         except Exception as e:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
@@ -670,6 +682,14 @@ def _assemble_issue(repo_keys: list[str], number: str, stage_map: dict, status_m
     stage = stage_map.get(number) or {}
     events = _issue_group_events(group_map, repo_keys, number)
     latest = events[-1] if events else None
+    # Issue #4022：`task_status` 与 `issues status get` 的 `status` 同源——
+    # 卡片行存在时按内部主键回读权威 status（不受镜像 repo_key 同号多行/聚合 map 影响）。
+    _task_status = status_map.get(number, "")
+    _internal_id = stage.get("internal_id")
+    if _internal_id:
+        _by_id = _read_issue_status_by_id(_internal_id)
+        if _by_id:
+            _task_status = _by_id
     # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
     # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
     # Issue #3055：数字→int（#995/#2072 契约），平台 ident 原样 str
@@ -693,7 +713,10 @@ def _assemble_issue(repo_keys: list[str], number: str, stage_map: dict, status_m
         # Issue #2111（#1214 移植）：枚举字段出口归一（or 兜 None/空串）——与 /mine 出口（_query_tasks
         # 空值归一 vod）同口径同值，消除 detail/mine 出口 stage 分歧（#1214 遗留）。
         "stage": stage.get("stage") or "vod",
-        "task_status": status_map.get(number, ""),
+        "task_status": _task_status,
+        # Issue #4022：显式 `status` 别名 = `task_status`，与 issues list / status get 同口径，
+        # 调用方无需在两个字段名间做映射（新增字段，旧字段语义不变）。
+        "status": _task_status,
         "owner_agent": stage.get("owner_agent") or "vod",
         "scene_id": stage.get("scene_id", ""),
         "assignee": stage.get("assignee", ""),
@@ -2759,6 +2782,61 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
                or _needle in str(it.get("issue_number") or "")]
     return out
 
+_ISSUE_STATUS_REFRESH_CHUNK = 500
+
+
+def _issue_status_by_ids(ids: list[int]) -> dict:
+    """按内部主键批量回读权威 issue.status（只取 2 列，分块 IN 走主键索引）。
+
+    Issue #4022：列表结果缓存命中时用它核对卡片状态是否已漂移；任何 status 写路径
+    都无需逐个接入缓存失效钩子就能保证「写后即读」。
+    """
+    from src.kernel.session_manager import db_lock
+    out: dict = {}
+    _ids = sorted({int(i) for i in ids})
+    for _start in range(0, len(_ids), _ISSUE_STATUS_REFRESH_CHUNK):
+        _part = _ids[_start:_start + _ISSUE_STATUS_REFRESH_CHUNK]
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(
+                f"SELECT id, status FROM issue WHERE id IN ({','.join('?' * len(_part))})",
+                _part)
+            for _r in c.fetchall():
+                out[int(_r[0])] = (_r[1] or "")
+    return out
+
+
+def _cached_list_is_current(payload) -> bool:
+    """校验缓存响应的卡片 status 是否仍与权威 issue 行一致（Issue #4022）。
+
+    - 只核对缓存响应里出现的 issue 卡片（按主键回读，O(页大小) 而非全仓扫描）；
+    - 任一卡片 status 漂移 / 行已删除 → 判定缓存过期，由调用方重算；
+    - 回读异常 → 保守重算（fail-closed），绝不把可能过期的状态当作一致返回。
+    """
+    try:
+        _items = payload.get("issues") if isinstance(payload, dict) else None
+        if not isinstance(_items, list) or not _items:
+            return True
+        _pairs = []
+        for _it in _items:
+            if not isinstance(_it, dict) or _it.get("is_pr_event"):
+                continue
+            _id = _it.get("id")
+            if _id is None or not str(_id).isdigit():
+                continue
+            _pairs.append((int(_id), _it.get("status") or ""))
+        if not _pairs:
+            return True
+        _live = _issue_status_by_ids([p[0] for p in _pairs])
+        for _id, _cached in _pairs:
+            if _live.get(_id) is None or _live.get(_id) != _cached:
+                return False
+        return True
+    except Exception as _e:  # noqa: BLE001 - 核对失败按缓存过期处理（重算，绝不能返回可能过期的状态）
+        log.warning(f"issues: cached list freshness check failed, recompute: {_e}")
+        return False
+
+
 def _cached_repo_list(ttl: float = 5.0):
     """需求中心列表的短 TTL 结果缓存。
 
@@ -2768,12 +2846,22 @@ def _cached_repo_list(ttl: float = 5.0):
     看门狗（症状：需求中心一直「加载中」→「加载失败: request aborted or timed out」）。
     彻底解法是把 DB 访问换成连接池（架构级改造），这里先用 5s 结果缓存把并发削成 1 次。
 
+    Issue #4022：命中缓存时按主键核对卡片 status（`_cached_list_is_current`），
+    与权威行不一致立即重算——修复 pending-review 置位返回 changed:true 后
+    首次 `issues list` 仍读回 active 的 read-your-writes 抖动。
+
     key 含 user 标识：不同用户看到的需求集合不同，不能跨用户复用。
     （此装饰器曾在 clarify to_thread 提交中被误删，QA G1 判 BLOCKED；此处恢复。）
     """
     def deco(fn):
         _cache: dict = {}
         _lock = _th_cache.Lock()
+
+        def _fresh_hit(_key, _now):
+            _hit = _cache.get(_key)
+            if _hit and (_now - _hit[0]) < ttl and _cached_list_is_current(_hit[1]):
+                return _copy_cache.deepcopy(_hit[1])
+            return None
 
         @_ft_cache.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -2784,15 +2872,14 @@ def _cached_repo_list(ttl: float = 5.0):
                 tuple(str(a) for a in args),
                 tuple(sorted((k, str(v)) for k, v in kwargs.items() if k != "user")),
             )
-            _now = _time_cache.time()
-            _hit = _cache.get(_key)
-            if _hit and (_now - _hit[0]) < ttl:
-                return _copy_cache.deepcopy(_hit[1])
+            _hit = _fresh_hit(_key, _time_cache.time())
+            if _hit is not None:
+                return _hit
             with _lock:
-                _hit = _cache.get(_key)
                 _now = _time_cache.time()
-                if _hit and (_now - _hit[0]) < ttl:
-                    return _copy_cache.deepcopy(_hit[1])
+                _hit = _fresh_hit(_key, _now)
+                if _hit is not None:
+                    return _hit
                 _res = fn(*args, **kwargs)
                 _cache[_key] = (_now, _copy_cache.deepcopy(_res))
                 if len(_cache) > 64:
@@ -3122,7 +3209,8 @@ def get_issue_detail(owner: str, repo: str, number: str,
     # 非数字（IK*/#IK*）原样透传给 ledger 查找（number: int 会 422 拒掉 gitee ident）。
     num = _normalize_issue_number(number)
     stage_map = _issue_stage_map(repo_keys)
-    status_map = _task_status_map(repo_keys)
+    # Issue #4022：详情只取目标 Issue 的 status（收窄 + 同号行按 repo_keys 顺序首个命中）。
+    status_map = _task_status_map(repo_keys, [num])
     group_map = _group_events_by_issue(repo_keys)
     title_map = _issue_title_map(repo_keys)
     # Issue #3891：存在性解析抽成共用助手——`/pipeline` 与本端点对同一编号同口径裁决，
@@ -3151,6 +3239,7 @@ def get_issue_detail(owner: str, repo: str, number: str,
             "title": (_vi.get("title") or f"Issue #{number}"),
             "stage": "vod",
             "task_status": "",
+            "status": "",
             "owner_agent": "vod",
             "scene_id": "",
             "assignee": _asg,
@@ -3173,7 +3262,7 @@ def get_issue_detail(owner: str, repo: str, number: str,
         raise _detail_404("issue_not_found" if _resolved["state"] == "missing" else "internal_sync_missing", number)
     if _resolved["synced"]:
         stage_map = _issue_stage_map(repo_keys)
-        status_map = _task_status_map(repo_keys)
+        status_map = _task_status_map(repo_keys, [num])
         group_map = _group_events_by_issue(repo_keys)
         title_map = _issue_title_map(repo_keys)
     base = _assemble_issue(repo_keys, num, stage_map, status_map, group_map, title_map)
@@ -3207,6 +3296,9 @@ def get_issue_detail(owner: str, repo: str, number: str,
         # /mine 同口径），id 行 stage 为空时不得把已归一值覆盖回空串；仅非空时生效。
         # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
         base["stage"] = _id_stage or "vod"
+    # Issue #4022：pipeline 内嵌业务状态与顶层 task_status 同源（避免同响应内两处相反读数）。
+    if base.get("task_status"):
+        _biz_status = base["task_status"]
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
