@@ -39,6 +39,11 @@ echo "=== Running all contract checks ==="
 # 须 `--update-baseline` 并在 PR 中说明理由（维护流程见
 # docs/lib-3db/read-inventory-diff.md）。
 "$PY" scripts/p4/scan_cross_domain_reads.py --check || exit 1
+# Issue #3857：进程库连接棘轮（PG1）——runtime/insight 域代码用进程主库连接查本域表，
+# 在 mgmt 进程里会撞 1146（engine-onboarding 读 agent_runtimes 即此族），静态跨域扫描按
+# 「文件域 × 表归属」判不出来（两者同为 runtime）。此前只接在 rds_gate.sh（三库收口门禁），
+# CI 的 check-all 完全不跑 → 新调用点可静默合入。基线按「文件 → 处数」允许下降、禁止上升。
+"$PY" scripts/scan_pgconn.py --check || exit 1
 # Issue #897：契约端点完整性卡点——核心工作流端点（/api/a2a、/api/tasks/* 等）
 # 不得从 OpenAPI 契约丢失（v2.2.0 曾被子集落盘覆盖，CLI 命令组不渲染）。
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，

@@ -184,8 +184,8 @@ def test_cursor_for_is_recognized_as_domain_source(tmp_path):
 def test_check_all_wires_pgconn_ratchet():
     """门禁必须真正接入 check-all。
 
-    Issue #3857 复盘点：脚本与 `--check` 都对，但只在 `rds_gate.sh` 里被
-    `| tail -2` 吞掉退出码、CI 完全不跑——engine-onboarding 这类新读点就这样漏过。
+    Issue #3857 复盘点：脚本与 `--check` 都对，但只在 `rds_gate.sh`（三库收口门禁）里
+    接线，CI 的 check-all 完全不跑——engine-onboarding 这类新读点因此可静默合入。
     """
     path = os.path.join(ROOT, "scripts", "check-all.sh")
     with open(path, encoding="utf-8") as fh:
