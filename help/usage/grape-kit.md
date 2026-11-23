@@ -1,11 +1,11 @@
-# 13. grape 插件：把 grape 装进你自己的 Agent
+# 14. grape 插件：把 grape 装进你自己的 Agent
 
 grape 官方插件把 Grape 平台能力带进你的 Agent。两种形态按你使用的 Agent 二选一：
 
 | 插件 | 适配对象 |
 |---|---|
 | **grape-kit**（`@grape-dev/grape-kit`） | 主流 Agent：OpenCode / CodeArts / WorkBuddy / openclaw |
-| **grape-dsh**（`@grape-dev/dsh-grape`） | dsh（DeepSeek Harness）的专门适配 |
+| **grape-dsh**（`@grape-dev/grape-dsh`） | dsh（DeepSeek Harness）的专门适配 |
 
 > ⚠️ **凭据安全**：两种插件的 Token 都只在环境变量（`GRAPE_API_TOKEN` / `GRAPE_BASE_URL`）或 `~/.grape/config.json`（权限 600）中提供，不写入任何 Agent 配置文件明文区。
 
@@ -48,12 +48,12 @@ grape 插件对 dsh（DeepSeek Harness）的专门适配。随 dsh 获得 33 个
 
 **口令安装**：
 
-> 请阅读https://gitcode.com/grape-dev/grape-dsh/blob/main/README.md，按照步骤为我安装并配置grape
+> 请阅读https://gitcode.com/grape-dev/grape-dsh/blob/main/README.md，按照步骤为我安装并配置grape-dsh
 
 **npm 安装**：
 
 ```bash
-npm i @grape-dev/dsh-grape
+npm i @grape-dev/grape-dsh
 ```
 
 安装与配置步骤见[源码仓库](https://gitcode.com/grape-dev/grape-dsh)。
