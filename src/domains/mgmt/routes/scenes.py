@@ -1682,7 +1682,9 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # Issue #2761：一/二级分类必须存在且层级匹配（二级归属一级）
     cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
 
-    nodes_json = json.dumps(body.nodes, ensure_ascii=False)
+    # Issue #3914 E：存名必存 id（市场模板 scope 强制 repo → user_id=0）
+    from src.api.pipeline_config import fill_scene_nodes_skill_id as _fill_scene_skill_ids_c
+    nodes_json = json.dumps(_fill_scene_skill_ids_c(body.nodes, repo_key), ensure_ascii=False)
     tag_items, overflow = prepare_tags(body.tags)
     if overflow:
         raise HTTPException(status_code=400, detail={
@@ -1768,7 +1770,11 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     if body.nodes:
         _validate_scene_skill_scope(body.nodes, scene.get("repo_key", ""))
 
-    nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
+    # Issue #3914 E：存名必存 id（沿用市场行自身 repo_key / scope；update 无 repo 入参）
+    from src.api.pipeline_config import fill_scene_nodes_skill_id as _fill_scene_skill_ids_u
+    nodes_json = (json.dumps(
+        _fill_scene_skill_ids_u(body.nodes, scene.get("repo_key", "") or ""),
+        ensure_ascii=False) if body.nodes else "")
 
     # 图标文件落定
     if body.file_id:
