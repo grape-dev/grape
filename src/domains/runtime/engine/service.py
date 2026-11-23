@@ -1838,8 +1838,13 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
         deterministic_only=True（Issue #699 Phase 3，local_claimer 确定性认领用）：
     只认领 runtime_id 绑定到本引擎的定向 queued 任务，跳过 legacy 池兜底；
     默认 False，行为与历史完全一致。
+
+    Issue #3927（审查 R5）：claim 的锁口径归因——`lock_owner("claim")` 使
+    db_lock 的慢等待/持有指标可按 claim 与 complete/update_task_status 区分，
+    灰度前据此确认 17–50s 排队命中的是哪把锁/哪个 owner。
     """
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    with lock_owner("claim"), db_lock:
         c = _rt_db.cursor()
         try:
             # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
@@ -2325,9 +2330,12 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
 
     scope=global → 可认领所有仓库的 queued 任务
     scope=repo   → 只认领 owner_id 对应仓库的 queued 任务
-    scope=user   → 只认领该用户创建的 queued 任务
+    scope=user   → 只认领该用户创建的任务
+
+    Issue #3927（审查 R5）：同 claim，lock_owner 归因 db_lock 慢等待的持有方。
     """
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    with lock_owner("claim_by_tag"), db_lock:
         c = _rt_db.cursor()
         try:
             # 1. 校验标签能力 + 获取引擎 scope
@@ -3075,14 +3083,61 @@ def converge_event_to_task(task_id: str) -> dict:
             "cascade_prev_event_status": (_after_row[5] if _after_row else "") or ""}
 
 
+_TASK_STATUS_SMALL_COLS = ("exit_code",)
+# 大字段列：可达数十 MB（complete 全量 result_text / usage_json / errors / stderr）。
+# Issue #3927 审查 R5：移出 db_lock 短临界区，在锁释放后短写（拆分同事件侧模式）。
+_TASK_STATUS_BIG_COLS = ("result_text", "usage_json", "errors", "stderr")
+
+
+def _task_write_lockfree() -> bool:
+    """大字段短写是否免进程锁：MySQL/池化连接每语句独立事务；SQLite 保守持锁。"""
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        return _is_mysql_backend()
+    except Exception:
+        return False
+
+
+def _write_task_big_fields(task_id: str, cols: dict) -> None:
+    """Issue #3927 审查 R5：agent_tasks 大字段短写（db_lock 释放后执行）。
+
+    单条 UPDATE + commit，终态已先行落库（读侧兼容「终态先行、大字段补齐」）。
+    MySQL 拓扑不持进程锁；SQLite/单库共享连接保留 db_lock 短临界区
+    （commit 为连接级语义，防跨线程事务交错）。失败只记日志——事件侧
+    structured_output 已含完整产出并有 pending 自愈兜底。
+    """
+    try:
+        sets = ", ".join(f"{col}=?" for col in cols)
+        params = [cols[col] for col in cols] + [task_id]
+        if _task_write_lockfree():
+            c = _rt_db.cursor()
+            c.execute(f"UPDATE agent_tasks SET {sets} WHERE id=?", params)
+            _rt_db.commit()
+        else:
+            with db_lock:
+                c = _rt_db.cursor()
+                c.execute(f"UPDATE agent_tasks SET {sets} WHERE id=?", params)
+                _rt_db.commit()
+    except Exception as _e:
+        log.warning(f"update_task_status: write big fields failed for {task_id}: {_e}")
+
+
 def update_task_status(task_id, status, **kw):
     """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2).
 
     Issue #1938：可选关键字 ``cascade_trigger``（``update_task_status`` / ``sweeper``）
     用于给事件级联收敛补偿归因，不落 agent_tasks 列（不在 SQL 列清单内，安全忽略）。
+
+    Issue #3927（审查 R5）：claim 排队 17–50s 的锁口径是本 db_lock——complete 路径
+    原本在锁内写全量 result_text/usage_json（可达数十 MB）+ 级联。现拆为：
+    - db_lock 短临界区：终态判定 + status/completed_at/exit_code 小写 + 级联收敛；
+    - 大字段（result_text/usage_json/errors/stderr）：锁释放后单条 UPDATE 短写，
+      MySQL 拓扑免锁、SQLite/单库保留短临界区（同事件侧 `_write_guard` 口径）。
+    `lock_owner("update_task_status:<id>")` 提供灰度归因（指标 owner 粗化，日志全量）。
     """
     _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    with lock_owner(f"update_task_status:{task_id}"), db_lock:
         c = _rt_db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
@@ -3098,7 +3153,7 @@ def update_task_status(task_id, status, **kw):
             # running 任务写成 completed_at=启动时刻，干扰终态判断/展示）。
             sets.append("completed_at=?")
             params.append(kw.get("completed_at") or datetime.now(timezone.utc).isoformat())
-        for col in ("exit_code", "result_text", "errors", "stderr", "usage_json"):
+        for col in _TASK_STATUS_SMALL_COLS:
             if col in kw:
                 sets.append(f"{col}=?")
                 params.append(kw[col])
@@ -3144,6 +3199,11 @@ def update_task_status(task_id, status, **kw):
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         _rt_db.commit()
+    # Issue #3927 审查 R5：大字段在 db_lock 释放后短写——claim/heartbeat 不再被
+    # complete 的全量 result_text/usage 写串行阻塞；终态幂等判定已在锁内完成。
+    _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
+    if _big_cols:
+        _write_task_big_fields(task_id, _big_cols)
     # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
     # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
     if _cascaded_seq:
