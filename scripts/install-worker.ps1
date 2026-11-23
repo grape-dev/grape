@@ -671,10 +671,17 @@ $_hermes_home = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$HOME\.hermes
 if (Test-Path "$_hermes_home\config.yaml") {
     Log "Validating hermes model config against gateway /v1/models ($_hermes_home\config.yaml, Issue #2545)..."
     # Issue #429/#2545：Stop 模式下原生命令 stderr 会终止脚本——调用前临时切 EAP=Continue
+    # cwd 必须是安装目录，否则 `-m src.domains...` 找不到模块（Linux 侧等价写法是 cd $INSTALL_DIR）
     $_prev_eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & "$VenvPython" -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
-    $ErrorActionPreference = $_prev_eap
-    if ($LASTEXITCODE -ne 0) { Fail "hermes model config validation FAILED: model name(s) not in gateway /v1/models (fix config.yaml or switch key; see docs/deployment/model-gateway-alignment.md)" }
+    Push-Location $Dir
+    try {
+        & $VenvPy -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
+        $_gate_exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $_prev_eap
+        Pop-Location
+    }
+    if ($_gate_exit -ne 0) { Fail "hermes model config validation FAILED: model name(s) not in gateway /v1/models (fix config.yaml or switch key; see docs/deployment/model-gateway-alignment.md)" }
     Log "hermes model config validation passed"
 } else {
     Log "No hermes config found, skipping model validation"
