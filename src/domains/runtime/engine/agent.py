@@ -1214,11 +1214,49 @@ def _scan_installed_cheap() -> list:
             for r in (discover_runtimes() or []) if r.get("name")]
 
 
+def _is_cloud_worker_mode() -> bool:
+    """本进程是否 cloud_worker（云沙箱 worker）。
+
+    两个信号任一为真即算：`GRAPE_RUNTIME_MODE`（cloud_worker.main() 首行设置）或
+    `CLOUD_WORKER_PROVIDER`（安装脚本注入，cloud_worker._load_config 读它）。
+    """
+    if (os.environ.get("GRAPE_RUNTIME_MODE", "") or "").strip().lower() == "cloud_worker":
+        return True
+    return bool((os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip())
+
+
+# [云 worker 可观测性] 「领取列表为空」告警的节流间隔（秒）。
+# 数值来源：与既有心跳/巡检节奏对齐的运维约定——一次空窗不应刷成多行噪声，
+# 又不能长到让「注册正常但不领取」这类回归长时间静默；排障时可用
+# RUNTIME_EMPTY_IDS_WARN_INTERVAL 覆盖（调小到个位数即可逐轮观察）。
+EMPTY_IDS_WARN_INTERVAL_DEFAULT = 60.0
+
+
+def _empty_ids_warn_interval() -> float:
+    """告警节流间隔（秒）：env 可覆盖，非法/非正值回落到默认。"""
+    _raw = (os.environ.get("RUNTIME_EMPTY_IDS_WARN_INTERVAL", "") or "").strip()
+    if _raw:
+        try:
+            _v = float(_raw)
+            if _v > 0:
+                return _v
+        except (TypeError, ValueError):
+            pass
+    return EMPTY_IDS_WARN_INTERVAL_DEFAULT
+
+
 def _fast_install_triggered(installed, scan_fn=None) -> list:
     """快速发现：返回本次扫描命中的「新装引擎」（空 = 无安装完成事件）。
 
     扫描异常不触发（宁可按周期兜底，也不因一次扫描失败抖动重注册）。
+
+    [云 worker 修复] 云模式下直接返回空：云引擎的清单来自平台模板（四段式名字
+    `engine:template:provider:pid`），和本地 PATH 扫描出来的本机引擎名永远不可能
+    相等，用本地扫描判「新装引擎」会每 15s 命中一次 → 空注册风暴并挤掉领取节奏。
+    云引擎的增减由 cloud_worker 的模板刷新循环负责。
     """
+    if scan_fn is None and _is_cloud_worker_mode():
+        return []
     try:
         _scan = scan_fn() if scan_fn is not None else _scan_installed_cheap()
     except Exception as e:
@@ -2118,7 +2156,12 @@ def _apply_local_worker_base_override(env: dict, task: dict, local_base: str):
     """
     _business_base = env.get("GRAPE_SERVER_URL") or ""
     _runtime_base = task.get("server_url") or env.get("RUNTIME_SERVER_URL") or ""
-    _single_address = (not _business_base) or _same_url_host(_business_base, _runtime_base)
+    # 回环业务基址不是"显式业务基址"：远端 worker 的 pipeline 拿不到 worker 侧地址时
+    # 会写 http://127.0.0.1（沙箱内 127.0.0.1 是沙箱自己 → 全 301/拒绝连接，实测
+    # 2026-11-23 GitLab #9）。出现回环基址且本 worker 有非回环地址时必须覆盖。
+    _loopback_business = ("127.0.0.1" in _business_base) or ("localhost" in _business_base)
+    _single_address = (_loopback_business or (not _business_base)
+                       or _same_url_host(_business_base, _runtime_base))
     env["RUNTIME_SERVER_URL"] = local_base
     task["server_url"] = local_base
     if _single_address:
@@ -2941,8 +2984,22 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
             if _ref_key:
                 raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
                 if raw:
-                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
-                    skill_files = {}
+                    # 2026-11-22 修（远端 worker 实测）：本分支位于上方 `if skill_zip_b64:`
+                    # 物化块**之后**，旧写法只赋值 skill_zip_b64/skill_files={} 等于
+                    # “取到 zip 却从不落盘”——实测日志「服务端代拉成功」紧接
+                    # 「bound skill 'vod-cli' not materialized anywhere ... refused」。
+                    # 就地物化；成功才走“无文本文件”分支，失败保留原 files 触发降级链。
+                    from src.domains.runtime.engine.skill_materialize import materialize_skill_zip_atomic
+                    _ok_ref, _inst_ref, _reason_ref = materialize_skill_zip_atomic(
+                        skill_dir, raw, baseline_dir="", scope=_skill_scope, meta=_skill_meta)
+                    _target_ref = task.get("skill") or ""
+                    if _ok_ref and (not _target_ref or _target_ref in _inst_ref):
+                        skill_zip_b64 = _b64.b64encode(raw).decode()
+                        skill_files = {}
+                        log.info(f"[skill] __obs_key__ zip 物化成功: skills={_inst_ref}")
+                    else:
+                        log.warning(f"[skill] __obs_key__ zip 物化未命中目标技能: "
+                                    f"ok={_ok_ref} installed={_inst_ref} reason={_reason_ref[:120]}")
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
             # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
@@ -3368,7 +3425,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
     _local_base = ""
     _old_server_url = task.get("server_url") or ""
-    if _is_local_worker or _worker_server_url_reachable(_rts, _old_server_url):
+    # 业务基址若是回环，即便回连基址一样也要进覆盖分支：这是两个不同的键，
+    # 任务行 server_url 已是本 worker 地址 ≠ 沙箱里 GRAPE_SERVER_URL 可用。
+    _business_loop = (("127.0.0.1" in (env.get("GRAPE_SERVER_URL") or ""))
+                      or ("localhost" in (env.get("GRAPE_SERVER_URL") or "")))
+    if _is_local_worker or _business_loop or _worker_server_url_reachable(_rts, _old_server_url):
         # 判定改为实测可达（2026-10-12 seq#552 复盘）：本地 worker 或内网 worker
         # （RUNTIME_SERVER_URL 直连可达，如内网 worker 直连主控内网地址 3ms）
         # 都覆盖为本 worker 直连地址；远程公网 worker（内网不可达）保持原
@@ -3948,6 +4009,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     # hermes_active_tids 承担；旧实现用 int 计数且只在正常收尾里 -= 1，
     # 三条提前 return 路径会永久泄漏，攒够次数后这台 hermes 再也不接活。
     last_heartbeat = 0.0
+    _empty_ids_warn_at = 0.0  # 云模式「领取列表为空」告警的上次触发时刻（节流见 _empty_ids_warn_interval）
+    _empty_ids_warn_interval_s = _empty_ids_warn_interval()
 
     async def _purge_active_task(tid: str) -> None:
         """清掉本地一条残留活跃记录（代次已变 / 看门狗判定幽灵时用）。
@@ -4029,7 +4092,14 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         last_reregister = _rrc["last_reregister"]
         last_fast_discover = _rrc["last_fast_scan"]
         if _rrc["did"] and _rrc["ok"]:
-            runtime_ids = _rrc["runtime_ids"]
+            # [云 worker 领取修复] 必须原地更新，不能重新绑定。
+            # cloud_worker 的模板刷新后台任务持有的是同一个 list 对象
+            # （_cloud_run_loop 把 ids 传进来，refresh 循环 runtime_ids.append/remove），
+            # 一旦这里 runtime_ids = 新 list，后台后续 append 全部落进被遗弃的旧 list，
+            # 模板后落的云引擎永远进不了领取列表 → get_tags/claim 一次都不发。
+            _new_ids = _rrc["runtime_ids"]
+            if _new_ids is not None:
+                runtime_ids[:] = _new_ids
             if _rrc["engine_by_rid"]:
                 engine_by_rid = _rrc["engine_by_rid"]
             installed = _rrc["installed"]
@@ -4037,6 +4107,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
+        if not _shuffled_rids and _is_cloud_worker_mode() and (now - _empty_ids_warn_at) >= _empty_ids_warn_interval_s:
+            # 云 worker 没有 rid 就等于「谁都不会来领」——此前完全静默，只能靠服务端
+            # 0 条 claim 反推。节流 60s，人肉看日志即可发现。
+            _empty_ids_warn_at = now
+            log.warning("cloud worker: runtime_ids is empty — no engine to claim; "
+                        "waiting for template refresh to register cloud engines")
         random.shuffle(_shuffled_rids)
         for rid in _shuffled_rids:
             try:
@@ -4417,7 +4493,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     last_reregister=last_reregister, last_fast_scan=last_fast_discover,
                     cli_version=_read_local_worker_version(), force=True)
                 if _hbrc["ok"]:
-                    runtime_ids = _hbrc["runtime_ids"]
+                    # 同上：原地更新，保住 refresh 后台任务持有的同一 list 引用
+                    _new_ids = _hbrc["runtime_ids"]
+                    if _new_ids is not None:
+                        runtime_ids[:] = _new_ids
                     if _hbrc["engine_by_rid"]:
                         engine_by_rid = _hbrc["engine_by_rid"]
                     installed = _hbrc["installed"]

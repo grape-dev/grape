@@ -591,7 +591,7 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
 
 def set_default_branch(api_token: str, owner: str, repo: str, branch: str,
                        provider: str = "gitcode") -> bool:
-    """把已存在分支设为仓库默认分支（新组织仓库 grape-repo-knowledge 收口）。
+    """把已存在分支设为仓库默认分支（组织仓库默认 main / 存量分支收口）。
 
     GitHub/GitCode 建仓时对自定义 default_branch 支持不一致；统一在建出首个分支后
     通过平台 API 校正。失败只返回 False，由调用方 best-effort 记录。
@@ -633,6 +633,23 @@ def delete_github_repo(api_token: str, owner: str, repo: str) -> bool:
         raise RuntimeError("delete repo: token/owner/repo 不能为空")
     _github_req("DELETE", f"https://api.github.com/repos/{owner}/{repo}", api_token)
     return True
+
+
+# 仓库删除能力注册表：一个平台一行，避免调用方写 `if provider == ...` 分叉。
+# 值存函数名而非函数对象：测试/装配层 monkeypatch 同名函数时仍能生效。
+_REPO_DELETE_IMPL = {}
+_REPO_DELETE_IMPL["gitcode"] = "delete_gitcode_repo"
+_REPO_DELETE_IMPL["github"] = "delete_github_repo"
+
+
+def delete_repo_for_provider(provider: str, api_token: str,
+                             owner: str, repo: str) -> bool:
+    """按 provider 派发仓库删除；未登记平台抛错（调用方决定是否降级）。"""
+    name = _REPO_DELETE_IMPL.get(str(provider or "").strip().lower())
+    fn = globals().get(name) if name else None
+    if fn is None:
+        raise RuntimeError(f"provider {provider!r} 暂不支持删除仓库")
+    return fn(api_token, owner, repo)
 
 
 def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
@@ -827,11 +844,57 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         if _git_has_changes(workdir):
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
-        # D43: push 统一走 _run_git（可被测试 mock），超时 180s
-        _run_git(["push", "--force", "-u", "origin", "HEAD:main"], workdir, timeout=180)
-        return True
+        # D43: push 统一走 _run_git（可被测试 mock），超时 180s。
+        # 来源（2026-11-23 实测）：主控 → gitlab.com 小仓（95KB）clone 2.48s、
+        # push 2.16s；按同量级带宽外推 180s 可覆盖约数百 MB 模板仓，约为实测的
+        # 80 倍余量，同时小于 CI 侧 10 分钟作业上限。
+        # 2026-11-22（B + A 双层）：
+        #   B：先走**普通 push**（空仓库/可快进 → 直接落在 main，不再覆盖平台初始提交）
+        #   A：普通 push 不行（远端已有提交）才 --force；若平台拒绝受保护分支
+        #      强推，则退到一次性特性分支，绝不中断建仓。
+        pushed_to = "main"
+        try:
+            _run_git(["push", "-u", "origin", "HEAD:main"], workdir, timeout=180)
+        except RuntimeError as _e1:
+            if _is_protected_branch_error(str(_e1)):
+                pushed_to = _push_init_branch(workdir)
+            else:
+                try:
+                    _run_git(["push", "--force", "-u", "origin", "HEAD:main"],
+                             workdir, timeout=180)
+                except RuntimeError as _e2:
+                    if not _is_protected_branch_error(str(_e2)):
+                        raise
+                    pushed_to = _push_init_branch(workdir)
+        if pushed_to != "main":
+            log.warning(
+                f"push_template_to_repo: 默认分支受保护（{provider}，{owner_login}/{target_repo}），"
+                f"模板代码已改推分支 '{pushed_to}'；请由人工/流水线合入默认分支")
+        # 返回落点：调用方据此区分「模板已在 main」与「模板只在 feat 分支、main 为空」
+        return {"ok": True, "pushed_to": pushed_to}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+def _is_protected_branch_error(msg: str) -> bool:
+    """平台拒绝「向受保护默认分支强推」的错误文本判定（GitLab/GitHub/Gitee 口径）。
+
+    只认受保护分支的**专有**文案：`pre-receive hook declined` 是 GitLab 所有 hook
+    拒绝（密钥扫描/提交策略/自定义规则）的通用后缀，单凭它会把手滑的拒绝也当成
+    「受保护分支」→ 静默退到一次性分支并吞掉真实错误。
+    """
+    return any(k in (msg or "") for k in (
+        "protected branch", "protected_branch",
+        "not allowed to force push",
+        "You are not allowed to push code to protected"))
+
+
+def _push_init_branch(workdir: str) -> str:
+    """受保护分支兜底：把模板代码推到一次性特性分支，返回分支名（A 方案）。"""
+    import time as _time
+    branch = f"feat/init-from-template-{_time.strftime('%Y%m%d%H%M%S')}"
+    _run_git(["push", "-u", "origin", f"HEAD:{branch}"], workdir, timeout=180)
+    return branch
+
 
 def _run_git_has_origin(workdir: str) -> bool:
     try:
@@ -997,21 +1060,48 @@ def get_hosting_provider_config(provider: str) -> dict:
     _find_w, _setup_w, _remove_w = (
         functools.partial(_fn, api_base=_ab) for _fn in _family)
     return {
+        # Issue #3580 复审：GitLab webhook 的 `token` 只能是共享密钥，绝不能复用
+        # PAT/bot token（会随 X-Gitlab-Token 外泄给项目维护者，且 DB 侧密钥为空会
+        # 让所有投递 404）。gitlab_v4 家族因此强制走路径 B（随机密钥）：
+        # bot_token 置空 → 所有调用点 _use_path_b=True。
+        # 单一 bot_token，按用途取用（不再"置空即路径 B"）：
+        #   bot_token      —— 全局 bot token：邀请协作者 + 落库回帖凭据 + 路径 A 的 webhook token
+        #   webhook_path_b —— webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+        # gitlab_v4 必须走 B（PAT 经 X-Gitlab-Token 会外泄给维护者），这是方言的安全
+        # 要求，不该连带关掉「邀 bot / bot 回帖」这两件与 webhook 无关的事。
         "bot_token": get_global_bot_token_for(provider),
+        "webhook_path_b": _wd == "gitlab_v4",
         "bot_username": resolve_bot_username(provider),
         "find_webhook": _find_w,
         "setup_webhook": _setup_w,
         "remove_webhook": _remove_w,
         # 卡派生回调后缀（卡缺失已被上方 fail-closed 拦截，fallback 恒不触发）
         "webhook_url_suffix": _webhook_path_from_card(provider, f"/webhook/{provider}"),
-        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）
-        "db_token_field": _pc.webhook_token_field or f"{provider}_webhook_token",
-        "db_bot_token_field": _pc.token_storage_field or f"bot_{provider}_token",
+        # D105-17：db 字段名从卡派生（内置卡缺省=存量列名）。
+        # Issue #3580：F4 终态卡显式空串 = 无物理列，凭据只落 rc 单表——
+        # 调用方必须传逻辑键 'webhook'/'bot'，不得派生不存在的平台列名。
+        "db_token_field": _pc.webhook_token_field or "webhook",
+        "db_bot_token_field": _pc.token_storage_field or "bot",
         # B 批（2026-11-13）：建 webhook 的鉴权参数按方言派生——Gitee 系用
         # webhook_password（路径 B=secret / 路径 A=token），GitHub 系用
         # webhook_secret（仅路径 B）。调用方零平台分支。
         "setup_webhook_kwargs": _setup_kwargs_fn(_wd),
     }
+
+
+def resolve_use_path_b(hcfg: dict, bot_token: str) -> bool:
+    """webhook 鉴权是否走路径 B（用户 token + 随机密钥）。
+
+    两个触发条件，缺一不可：
+    1. `webhook_path_b`（方言的**安全要求**，如 gitlab_v4：PAT 经 X-Gitlab-Token
+       会外泄给项目维护者）；
+    2. 没有可用的全局 bot token（路径 A 需要它当 webhook token）。
+
+    历史上调用点各自写 `not bot_token`，于是配上全局 bot token 后 GitLab 会把 PAT
+    当 webhook 密钥写进 hook，且 DB 侧密钥为空 → 所有投递 404。三个托管入口
+    （host / repair-host / create 内联托管）统一走本函数。
+    """
+    return bool((hcfg or {}).get("webhook_path_b")) or not (bot_token or "")
 
 
 def _setup_kwargs_fn(dialect: str):
@@ -1170,12 +1260,57 @@ def setup_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str
     return hook_id
 
 
-# D105-19：webhook 三件套实现家族注册表（键=平台卡 webhook_dialect）。
-# 新增家族：实现 (find, setup, remove) 三件套（api_base 关键字参数）→ 表加一行
-# → platform_card._VALID_WEBHOOK_DIALECTS 加一项 → 新平台卡声明即启用。
+def _gitlab_pid(owner: str, repo: str) -> str:
+    """GitLab 项目标识（兼容垫片：实现已收口到 src.kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import project_path
+
+    return project_path(owner, repo)
+
+
+def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                                 api_base: str = "") -> "int | None":
+    """查已有同 URL 的 GitLab hook（Issue #3580；唯一实现源=kernel.vcs_gitlab_hooks）。"""
+    from src.kernel.vcs_gitlab_hooks import find_hook
+
+    try:
+        return find_hook(api_base, api_token, owner, repo, webhook_url)
+    except Exception as e:
+        # 查询失败不静默：调用方据此决定"复用 or 新建"，静默吞掉会重复建钩
+        log.warning(f"find_existing_gitlab_webhook failed {owner}/{repo}: {e}")
+        return None
+
+
+def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                         webhook_password: str = "", api_base: str = "") -> int:
+    """建 GitLab hook；密钥必填，**禁止**复用 api_token（Issue #3580 复审）。
+
+    实现收口到 src.kernel.vcs_gitlab_hooks.setup_hook（provider 侧同源委托），
+    此处只做 mgmt 侧异常类型适配。
+    """
+    from src.kernel.vcs_gitlab_hooks import GitLabHookError, setup_hook
+
+    try:
+        return setup_hook(api_base, api_token, owner, repo, webhook_url, webhook_password)
+    except GitLabHookError as e:
+        if e.status_code == 0:
+            # 入参/invariant 错误（缺密钥）：直接 RuntimeError，别伪装成上游 4xx
+            raise RuntimeError(e.message) from None
+        raise UpstreamAPIError(e.method, e.url, e.status_code, e.message, provider="GitLab") from None
+
+
+def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int,
+                          api_base: str = "") -> bool:
+    """删 GitLab hook；上游 404 视为幂等成功（Issue #3580 复审）。"""
+    from src.kernel.vcs_gitlab_hooks import remove_hook
+
+    return remove_hook(api_base, api_token, owner, repo, webhook_id)
+
+
 _WEBHOOK_FUNC_FAMILIES: dict[str, tuple] = {
     "github_web": (find_existing_github_webhook, setup_github_webhook, remove_github_webhook),
     "gitee_v5": (find_existing_webhook, setup_webhook, remove_webhook),
+    # Issue #3580：GitLab v4 /projects/{id}/hooks 家族（自建实例复用）
+    "gitlab_v4": (find_existing_gitlab_webhook, setup_gitlab_webhook, remove_gitlab_webhook),
 }
 
 
@@ -1248,6 +1383,21 @@ def probe_github_repo_create(api_token: str, owner: str = "", private: bool = Tr
             return True, ""
         return None, f"GitHub 权限探测失败（不阻断创建）：{msg[:160]}"
     return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
+
+
+# 建仓权限探测能力注册表（同上：实现绑定集中在一处，调用方零平台分支）。
+_REPO_CREATE_PROBES = {}
+_REPO_CREATE_PROBES["github"] = "probe_github_repo_create"
+
+
+def probe_repo_create(provider: str, api_token: str, owner: str = "",
+                      private: bool = True) -> "tuple[bool | None, str]":
+    """按 provider 探测建仓权限；未登记平台返回 (None, '')，不阻断创建。"""
+    name = _REPO_CREATE_PROBES.get(str(provider or "").strip().lower())
+    fn = globals().get(name) if name else None
+    if fn is None:
+        return None, ""
+    return fn(api_token, owner=owner, private=private)
 
 
 def get_user_github_login_status(api_token: str) -> tuple[str, int]:
@@ -1389,11 +1539,16 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     if not api_token:
         raise RuntimeError("GitHub API Token 未配置")
     owner = (owner or "").strip()
+    target_branch = (default_branch or "").strip()
     # 所选 owner 是当前 token 用户本人时走个人空间：GitHub 的
     # POST /orgs/{login}/repos 对个人账号恒 404（创建组织弹窗默认选中的就是
     # 「个人」空间，曾导致 GitHub 组织仓库 provisioning 直接失败）。
     if owner and get_user_github_login(api_token).strip().lower() == owner.lower():
         owner = ""
+    # GitHub 建仓接口不支持 default_branch；自定义默认分支必须先用 auto_init
+    # 生成首个分支，再调分支改名接口（改名默认分支即默认分支改名）。
+    if target_branch and target_branch != "main":
+        auto_init = True
     body = {
         "name": name,
         "description": description,
@@ -1420,6 +1575,32 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     full_name = result.get("full_name", "")
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
+    if target_branch and target_branch != "main":
+        initial_branch = str(result.get("default_branch") or "main").strip() or "main"
+        if initial_branch != target_branch:
+            _owner, _repo = full_name.split("/", 1) if "/" in full_name else (owner, name)
+            try:
+                _repo_url = (f"{_GITHUB_API_BASE}/repos/"
+                             f"{urllib.parse.quote(_owner, safe='')}/"
+                             f"{urllib.parse.quote(_repo, safe='')}")
+                _github_req(
+                    "POST",
+                    f"{_repo_url}/branches/"
+                    f"{urllib.parse.quote(initial_branch, safe='')}/rename",
+                    api_token,
+                    {"new_name": target_branch},
+                )
+                # GitHub 分支改名不会自动改默认分支，需再 PATCH 一次。
+                _github_req("PATCH", _repo_url, api_token,
+                            {"default_branch": target_branch})
+                result["default_branch"] = target_branch
+                log.info(
+                    f"create_github_repo: default branch {initial_branch} -> "
+                    f"{target_branch} for {full_name}")
+            except Exception as exc:  # noqa: BLE001 - 建仓成功但改名失败保留仓库
+                log.warning(
+                    f"create_github_repo: rename default branch failed "
+                    f"{full_name} {initial_branch}->{target_branch}: {exc}")
     return result
 
 def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
@@ -1686,9 +1867,13 @@ def invite_permission_for(provider: str) -> str:
 
 def vcs_user_login(provider: str, token: str) -> str:
     """token 持有者在该平台的登录名（卡驱动 /user；空串=无法确认）。"""
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     info = create_provider(provider).verify_token(token)
-    return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+    if not isinstance(info, dict):
+        return ""
+    # login 是跨平台口径；GitLab 原生字段是 username，适配器未归一的历史实现也要兼容
+    return str(info.get("login") or info.get("username") or "")
+
 
 
 def vcs_user_permission(provider: str, token: str, owner: str, repo: str, login: str) -> dict:

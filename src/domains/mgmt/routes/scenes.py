@@ -138,7 +138,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     经 with_oauth_token 包一层：401/403(token) 预刷新+重试语义与存量一致
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
@@ -294,17 +294,43 @@ def list_scenes(user: dict = Depends(require_no_session_token), repo: str = "",
     return {"scenes": scenes, "total": total}
 
 
-@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
-def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; always returns total; carries card fields (icon/scope/created_by/pin) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.")
+def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = "",
+                              page: Optional[int] = Query(default=None, ge=1),
+                              page_size: int = Query(default=20, ge=1, le=100),
+                              q: str = Query(default="", max_length=100),
+                              sort: str = Query(default="id", pattern="^(id|latest)$")):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
-    
+
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
+
+    分页（与 /scenes 同参数同语义，前端项目场景页的翻页依赖这里）：
+    - 不带 page：全量返回（老调用方零改动，向后兼容）
+    - page>=1：SQL LIMIT/OFFSET + ORDER BY（含置顶序），total 走 COUNT
+    - 技能显示名解析（enrich）只跑当前页，不再为看不到的页付解析成本
+    - q/sort 与 /scenes 完全同参同语义（name/display_name/description LIKE + 置顶序）
     """
     from src.api.pipeline_config import get_scenes, get_pipeline_config, _count_scenes_from_db
     from src.kernel.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
-    scene_list = get_scenes(repo_key=repo_key)
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 int/None——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    # total 恒返回（COUNT 不拉 nodes_json）；不带 page 时与数组长度一致
+    _total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scene_list = get_scenes(repo_key=repo_key, limit=page_size, offset=_start,
+                                q=q, sort=sort)
+    else:
+        scene_list = get_scenes(repo_key=repo_key, q=q, sort=sort)
 
     # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
     # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
@@ -345,7 +371,10 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "is_pinned": int(s.get("is_pinned") or 0),
                        "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
-    _total = len(result)
+    # total 用 COUNT 的结果（不带 page 时与数组长度一致；带 page 时是全量总数，
+    # 不能再取 len(result) —— 那是当前页条数，会让前端分页条永远只显示 1 页）
+    if not _total:
+        _total = len(result)
     return {"scenes": result, "total": _total}
 
 

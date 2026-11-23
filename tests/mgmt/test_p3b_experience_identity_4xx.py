@@ -104,7 +104,7 @@ class TestIdentityMissing409:
             def get_user_login(self, token):
                 return ""
 
-        monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _FakeProv())
+        monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _FakeProv())
         monkeypatch.setattr(
             "src.domains.runtime.vcs.platform_card.get_platform_card",
             lambda p: type("C", (), {"name": "GitCode"})(),

@@ -104,6 +104,30 @@ def record_merge_gate_log(repo_key: str, pr_number: int, phase: str, decision: s
         return new_id
 
 
+def record_metric(metric: str, value: float, dim_key: str = "global",
+                  repo_key: str = "", cnt: int = 0,
+                  resolution: str = "minute", bucket_start: str = "") -> None:
+    """通用指标落库（A13）：按 (resolution, bucket_start, metric, dim_key) 幂等覆盖。
+
+    走 insight 既有的 ``metric_rollup.write_bucket`` —— 那里用 ``?`` 占位 +
+    ``ON CONFLICT ... DO UPDATE``，由兼容层翻译到 MySQL；直接写 MySQL 专有
+    ``ON DUPLICATE KEY UPDATE`` 会在 sqlite 模式（双后端）下语法报错（架构审查 B1）。
+    """
+    from datetime import datetime, timezone
+
+    from src.domains.insight.observability.metric_rollup import floor_bucket, write_bucket
+
+    if bucket_start:
+        try:
+            dt = datetime.fromisoformat(bucket_start.replace("Z", "+00:00"))
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    write_bucket(resolution, floor_bucket(dt, resolution),
+                 {dim_key or "global": {metric: (float(value), int(cnt))}})
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("insight") as c:
@@ -115,7 +139,8 @@ def health() -> dict[str, Any]:
                 "dsn_configured": bool(db_registry.dsn_of("insight"))}
 
 
-__all__ = ["available", "record_api_latency", "record_merge_gate_log", "health"]
+__all__ = ["available", "record_api_latency", "record_merge_gate_log",
+           "record_metric", "health"]
 
 # ---------- 任意拓扑原语（自有 DSN 走 db_registry；单库/测试拓扑回落进程主库）----------
 #
@@ -634,6 +659,18 @@ def obs_loop_snapshot() -> list:
     """观测后台循环健康快照（进程内）。"""
     from src.domains.insight.observability import loops as _impl
     return _impl.snapshot()
+
+
+def obs_loop_beat(name: str) -> None:
+    """跨域契约口：标记某个后台循环本轮正常（mgmt 触发 runtime 对账等）。"""
+    from src.domains.insight.observability import loops as _impl
+    _impl.beat(str(name))
+
+
+def obs_loop_fail(name: str, err: Any = "") -> None:
+    """跨域契约口：标记某个后台循环本轮失败。"""
+    from src.domains.insight.observability import loops as _impl
+    _impl.fail(str(name), err)
 
 
 def obs_silent_targets(include_retired: bool = True) -> dict:

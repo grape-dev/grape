@@ -786,7 +786,9 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import {
+  ref, shallowRef, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { stripRepoPrefix } from '../lib/repo-key.js'
 import {
   boardFrameKey,
   createBoardRound,
@@ -1003,7 +1005,7 @@ function vcsUrl(repoKey, path) {
   return G._vcsUrl ? G._vcsUrl(repoKey, path) : ''
 }
 function bareRepo(rk) {
-  return String(rk || '').replace(/^(github|gitcode):/, '')
+  return stripRepoPrefix(rk)
 }
 // Issue #805：卡片上展示的「人」——需求卡是创建人（creator），PR 伪卡是触发人（assignee）。
 // 回退链：creator → assignee，兼容旧库里 created_by 为空的行。
@@ -2045,7 +2047,7 @@ function jumpToPipePage() {
   app().nav('pipe', issueNum ? String(issueNum) : undefined)
 }
 function setRepoFromKey(repoKeyRaw) {
-  const rk = String(repoKeyRaw).replace(/^(github|gitcode):/, '')
+  const rk = stripRepoPrefix(repoKeyRaw)
   const parts = rk.split('/')
   if (parts.length < 2) return
   G.sessionStorage.setItem(
@@ -2474,7 +2476,7 @@ const isRepoAdmin = computed(function () {
     const cached = JSON.parse(G.localStorage.getItem('repo_member_cache') || 'null')
     const repos = (cached && cached.repos) || []
     const rk = String(tk.repo_key || '')
-    const bare = rk.replace(/^(github|gitcode):/, '')
+    const bare = stripRepoPrefix(rk)
     const hit = repos.find(function (r) {
       return r.repo_key === rk || r.repo_key === bare || r.full_name === bare
     })

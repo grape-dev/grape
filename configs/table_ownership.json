@@ -75,6 +75,8 @@
     "grape_t_patrol_findings": "mgmt",
     "grape_t_repo_credentials": "insight",
     "grape_t_repo_platforms": "mgmt",
+    "grape_t_webhook_inbox": "runtime",
+    "grape_t_webhook_inbox_archive": "runtime",
     "grape_t_schema_migrations": "mgmt",
     "grape_t_system_credentials": "runtime",
     "grape_t_user_repo_platform_link": "mgmt",

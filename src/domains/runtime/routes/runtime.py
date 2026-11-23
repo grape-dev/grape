@@ -1129,8 +1129,32 @@ def _attach_skill_obs(task: dict) -> None:
         log.warning(f"attach skill_obs failed: {e}")
 
 
+def _request_base_url(request) -> str:
+    """按 worker 实际访问到的地址派生回连基址（不写死任何 IP）。
+
+    worker 能看到我们用哪个 Host，反过来我们也可以用它——claim 请求本身就是
+    "worker 能到达的地址"的实证。反向代理场景取 X-Forwarded-Proto，缺省 http。
+    """
+    if request is None:
+        return ""
+    try:
+        host = (request.headers.get("host") or "").strip()
+        if not host:
+            return ""
+        proto = (request.headers.get("x-forwarded-proto") or "").strip()
+        if not proto:
+            try:
+                proto = request.url.scheme or "http"
+            except Exception:
+                proto = "http"
+        proto = proto.split(",")[0].strip() or "http"
+        return f"{proto}://{host}"
+    except Exception:
+        return ""
+
+
 @router.post("/runtimes/{runtime_id}/tasks/claim")
-def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
+def runtime_claim(runtime_id: int, request: Request, body: RuntimeClaimBody | None = None,
                         credential_id: int = Depends(_require_credential)):
     """按 runtime_id 拉取队首任务或 null（确定路由 D3 + 串行槽 D9）。
 
@@ -1162,6 +1186,12 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
         except Exception:
             pass
     if task:
+        _base = _request_base_url(request)
+        if _base:
+            _prev = str(task.get("server_url") or "")
+            if _prev and _prev != _base:
+                log.info(f"claim: server_url 按 worker 实际访问地址回填 {_prev} -> {_base}")
+            task["server_url"] = _base
         if body and body.prefer_fallback:
             task["mode"] = "server-fetch"
         else:

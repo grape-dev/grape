@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -30,11 +31,8 @@ from src.domains.mgmt.user.org_db import db, db_lock, get_org, list_org_repos
 from src.domains.runtime import public as runtime_public
 from src.kernel.config import log
 
-ANALYSIS_CRON = "0 0 * * *"
-ANALYSIS_SKILL = "org-repo-analyzer"
-MANAGED_FIELDS = [
-    {"name": "GRAPE_MANAGED_BY", "value": "org-analysis"},
-]
+ANALYSIS_CRON = (os.environ.get("ORG_ANALYSIS_CRON") or "0 0 * * *").strip()
+ANALYSIS_SKILL = (os.environ.get("ORG_ANALYSIS_SKILL") or "org-repo-analyzer").strip()
 
 # Autopilot manual trigger 是 async；mgmt 侧的绑定钩子是同步线程，后台线程调用。
 # 用常驻事件循环而不是 asyncio.run：trigger_task_now 里 create_task(_execute_task)
@@ -76,14 +74,6 @@ def managed_task_name(org: dict) -> str:
     return (f"组织仓库 AI 分析 - {label}")[:100]
 
 
-def _managed_custom_fields(org_id: str, mode: str = "all") -> str:
-    fields = list(MANAGED_FIELDS) + [
-        {"name": "GRAPE_ORG_ID", "value": str(org_id)},
-        {"name": "GRAPE_ANALYSIS_MODE", "value": mode},
-    ]
-    return json.dumps(fields, ensure_ascii=False)
-
-
 def _next_run(cron_expr: str) -> str:
     try:
         from croniter import croniter
@@ -113,6 +103,22 @@ def _analysis_instruction(org_id: str) -> str:
     )
 
 
+def _scene_work_branch(scene_id: str, repo_key: str) -> str:
+    """读组织场景上的 work_branch；场景未建/查询失败返回空串。"""
+    scene_id = str(scene_id or "")
+    if not scene_id:
+        return ""
+    try:
+        from src.domains.mgmt.pipeline_config import get_scenes
+
+        for scene in get_scenes(repo_key=repo_key) or []:
+            if str(scene.get("id") or "") == scene_id:
+                return str(scene.get("work_branch") or "")
+    except Exception as exc:  # noqa: BLE001 - 场景未就绪时由调用方兜底
+        log.debug(f"org_analysis: scene work_branch unavailable org scene={scene_id}: {exc}")
+    return ""
+
+
 def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
     """幂等创建/校正组织仓库上的每日分析任务，返回 task_id（0=不适用）。"""
     org = get_org(str(org_id)) or {}
@@ -122,11 +128,22 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
     if not org_repo_key:
         return 0
     ensure_ai_table()
+    scene_id = str(org.get("org_scene_id") or "")
+    work_branch = _scene_work_branch(scene_id, org_repo_key)
+    if not work_branch:
+        from src.domains.mgmt.org_repo_branch import resolve_org_repo_default_branch
+        from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+        work_branch = resolve_org_repo_default_branch(
+            org, org_repo_key, fallback=ORG_REPO_DEFAULT_BRANCH)
     name = managed_task_name(org)
     now = datetime.now(timezone.utc).isoformat()
     next_run = _next_run(ANALYSIS_CRON)
     instruction = _analysis_instruction(str(org_id))
-    custom_fields = _managed_custom_fields(str(org_id), "all")
+    # 不把 GRAPE_MANAGED_BY / GRAPE_ORG_ID / GRAPE_ANALYSIS_MODE 写进 custom_fields：
+    # GRAPE_* 是保留环境变量，前端自定义配置页会标红并拒绝保存，执行侧也会拒绝注入。
+    # org_id/mode 已由任务指令 + 本次运行参数提供；受管任务识别走 skill_name
+    # （见 scheduler._build_autopilot_prompt）。custom_fields 留给用户自行配置。
     engine_ids: list[int] = []
     owner_id = str(org.get("owner_id") or "")
     try:
@@ -158,12 +175,14 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
         ).fetchone()
         if row:
             task_id = int(row[0])
+            # custom_fields 不参与 ensure 更新：保留用户为该自动化配置的自定义变量，
+            # 也避免把历史内部字段重新写回。
             c.execute(
                 "UPDATE autopilot_tasks SET name=?, instruction=?, cron=?, enabled=1, "
-                "next_run_at=?, custom_fields=?, engine_runtime_ids=?, updated_at=? "
-                "WHERE id=?",
-                (name, instruction, ANALYSIS_CRON, next_run, custom_fields,
-                 engine_ids_json, now, task_id),
+                "next_run_at=?, engine_runtime_ids=?, work_branch=?, "
+                "updated_at=? WHERE id=?",
+                (name, instruction, ANALYSIS_CRON, next_run,
+                 engine_ids_json, work_branch, now, task_id),
             )
             db.commit()
             return task_id
@@ -172,9 +191,9 @@ def ensure_analysis_task(org_id: str, *, actor_id: str | int = 0) -> int:
             "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, "
             "enabled, last_run_at, next_run_at, created_at, updated_at, created_by, "
             "engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids) "
-            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, ?, '', '')",
+            "VALUES (?, ?, 'issue', ?, ?, ?, 1, 1, '', ?, ?, ?, ?, ?, '', ?, '')",
             (name, org_repo_key, instruction, ANALYSIS_SKILL, ANALYSIS_CRON,
-             next_run, now, now, created_by, engine_ids_json, custom_fields),
+             next_run, now, now, created_by, engine_ids_json, work_branch),
         )
         db.commit()
         task_id = int(c.lastrowid or 0)
@@ -366,7 +385,7 @@ def status_for_repo(org_id: str, repo_key: str) -> dict:
 
 def analysis_docs(org_id: str) -> dict:
     """供下派流水线读取的 AI 分析文档（DB 权威，分支只是镜像）。"""
-    from src.domains.mgmt.org_context_repo import ORG_REPO_ANALYSIS_BRANCH
+    from src.domains.mgmt.org_context_repo import ORG_REPO_COMBINED_BRANCH
     from src.domains.mgmt.org_repo_map import get_map, list_repo_map
 
     repos = []
@@ -386,4 +405,4 @@ def analysis_docs(org_id: str) -> dict:
             "analyzed_at": item.get("analyzed_at") or "",
             "summary_md": str(m.get("summary_md") or "")[:16000],
         })
-    return {"org_id": str(org_id), "branch": ORG_REPO_ANALYSIS_BRANCH, "repos": repos}
+    return {"org_id": str(org_id), "branch": ORG_REPO_COMBINED_BRANCH, "repos": repos}

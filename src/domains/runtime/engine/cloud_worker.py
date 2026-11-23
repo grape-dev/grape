@@ -492,6 +492,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
             _bot_key = bot_token_env_name(task.get("repo_key") or "")
         except Exception as _be:
             log.warning(f"bot token env name derive failed: {_be}")
+        if not _bot_tok:
+            # P2：无凭据运行必须可见（此前静默空值 → 沙箱 askpass 回声为空 →
+            # 推送 401 被误判成"token 失效/权限不足"，实测排查两轮）
+            log.warning(
+                f"cloud_worker: 任务 {task.get('id') or task.get('tid') or '-'} 无可用的"
+                f"仓库 bot 凭据（repo_key={task.get('repo_key') or '-'}，键={_bot_key}）"
+                f"——沙箱内 git push/PR 将不可用，请检查派发侧凭据注入")
         env[_bot_key] = _bot_tok
         if _bot_key != "BOT_GITCODE_TOKEN":
             # 升级期兜底：旧引擎 / bwrap 白名单仍按 gitcode 键名读
@@ -525,11 +532,15 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
     # （127.0.0.1:8081/8083）——对云沙箱无意义（沙箱内的 127.0.0.1 是沙箱自身，
     # 引擎调平台 API 全部 Connection refused，实测 round8 vod 结果）。云沙箱场景
     # 用 worker 自身的主控地址（CLOUD_WORKER_SERVER_URL，nginx 单入口）覆盖。
-    _cw_server = os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+    # 2026-11-22：worker 自身配置优先——它才是"我确实能连到主控"的实证。
+    # 任务行的 server_url 是建单进程视角算出来的（可能是公网/回环），远端 worker
+    # 未必可达（实测 .213 到公网 IP 000 不可达 → grape CLI 全 301）。
+    _cw_server = (os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+                  or os.environ.get("RUNTIME_SERVER_URL", ""))
     _task_server = task.get("server_url") or ""
-    _effective = _task_server
-    if _task_server and "127.0.0.1" in _task_server and _cw_server:
-        _effective = _cw_server
+    _effective = _cw_server or _task_server
+    if _effective and _task_server and _effective != _task_server:
+        log.info(f"cloud_worker: 回连基址以 worker 配置为准 {_task_server} -> {_effective}")
     if _effective:
         env["GRAPE_SERVER_URL"] = _effective
 
@@ -1033,6 +1044,13 @@ async def _refresh_templates(client, config):
     try:
         templates = await client.get_templates()
         if not templates:
+            # [云 worker 领取修复] 空结果必须区分两种语义，调用方据此决定要不要覆盖
+            # 已注册清单（此前一律返回 []，一次 499/超时就把 _installed_live 清空 →
+            # 下一轮 register([]) → runtime_ids 归零 → 永不 claim）：
+            #   []        = 平台确实没有模板（真空）→ 返回空清单，允许同步清空
+            #   None/其他 = 拉取失败/未知        → 返回 None 哨兵，沿用上一份快照
+            if templates is None:
+                return None, set(), None
             return {}, set(), []
 
         new_runtimes = _expand_templates(templates)
@@ -1099,7 +1117,7 @@ async def _refresh_templates(client, config):
         raise  # [401 自杀修复] 凭据吊销向上传播——refresh loop 的 except 也要放行
     except Exception as e:
         log.warning(f"_refresh_templates failed: {e}")
-        return {}, set(), []
+        return None, set(), None
 
 
 async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed, device_name):
@@ -1233,7 +1251,11 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 # [身份锚定] 无条件同步 re-register 动态视图——改名时 rid 不变（锚命中 UPDATE），
                 # added 循环不触发（rid 已在心跳列表），旧版仅在 added 时同步会让 5min re-register
                 # 用旧名快照把引擎名写回（s14 被 re-register 覆盖回 s13 实测根因）
-                _installed_live[:] = _all_runtimes or []
+                # [云 worker 领取修复] 只有本次刷新拿到了真实的模板结果才覆盖已注册清单；
+                # None = 拉取失败/未知（含 499、超时、平台不可达），沿用上一份快照，
+                # 否则一次失败就会把清单清空 → register([]) → runtime_ids 归零 → 永不 claim。
+                if _all_runtimes is not None:
+                    _installed_live[:] = _all_runtimes
                 for _n, _rid in (_new_rid_by_name or {}).items():
                     if _rid and _rid not in runtime_ids:
                         runtime_ids.append(_rid)

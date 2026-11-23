@@ -102,6 +102,7 @@ from src.domains.runtime.schema_ddl import (
     _CUL_DDL,
     _SC_DDL,
     _TAKEOVER_SESSIONS_DDL,
+    _WEBHOOK_INBOX_DDL,
 )
 
 from src.domains.mgmt import migrations_ddl as mgmt_mig
@@ -395,6 +396,7 @@ _NEW_TABLES = [
     ("pipeline_instances", _PIPELINE_INSTANCES_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
+    ("grape_t_webhook_inbox", _WEBHOOK_INBOX_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
     ("engine_capabilities", _ENGINE_CAPABILITIES_DDL),
     ("event_action_filter", _EVENT_ACTION_FILTER_DDL),
@@ -818,6 +820,9 @@ def _create_tables():
         # obs_runtime_samples：资源曲线按 (引擎, 时间) 取；SLO 可用率按时间扫 online
         "CREATE INDEX IF NOT EXISTS idx_obs_sample_rt ON obs_runtime_samples(runtime_id, sampled_at)",
         "CREATE INDEX IF NOT EXISTS idx_obs_sample_time ON obs_runtime_samples(sampled_at)",
+        # Issue #3580：webhook 收件箱消费查询（status + 到期时间 + 租约）走索引，避免 1s 轮询全表扫
+        "CREATE INDEX IF NOT EXISTS idx_webhook_inbox_claim "
+        "ON grape_t_webhook_inbox(status, next_attempt_at, lease_expires_at)",
         # obs_slo / obs_slo_snapshots：燃尽曲线按 (SLO, 桶) 取
         "CREATE INDEX IF NOT EXISTS idx_obs_slo_enabled ON obs_slo(enabled, scope_type)",
         "CREATE INDEX IF NOT EXISTS idx_obs_slo_snap ON obs_slo_snapshots(slo_id, bucket_start)",
@@ -8307,6 +8312,71 @@ register_migration(
 )
 
 
+def _fn_strip_org_analysis_reserved_fields() -> None:
+    """清掉组织分析自动化里的系统保留 custom_fields（幂等）。
+
+    历史 ensure_analysis_task 会写入 GRAPE_MANAGED_BY / GRAPE_ORG_ID /
+    GRAPE_ANALYSIS_MODE。GRAPE_* 是保留环境变量：前端自定义配置页标红、保存被拒，
+    执行侧也拒绝注入（日志 `custom env ... rejected`）。现在 org_id/mode 由任务
+    指令和本次运行参数提供，受管身份走 skill_name；这些字段不再生成，存量行在此
+    一次性删除。
+    """
+    _names = {"GRAPE_MANAGED_BY", "GRAPE_ORG_ID", "GRAPE_ANALYSIS_MODE"}
+    from src.kernel.mysql_compat import get_db_backend
+
+    with db_lock:
+        c = db.cursor()
+        if get_db_backend() == "mysql":
+            _tbl = c.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=DATABASE() AND table_name='autopilot_tasks'"
+            ).fetchone()
+        else:
+            _tbl = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='autopilot_tasks'"
+            ).fetchone()
+        if not _tbl:
+            log.info("202611201700 autopilot_tasks 不存在，跳过")
+            return
+        rows = c.execute(
+            "SELECT id, custom_fields FROM autopilot_tasks "
+            "WHERE custom_fields LIKE '%GRAPE%'"
+        ).fetchall()
+        changed = 0
+        for _task_id, _raw in rows:
+            try:
+                fields = json.loads(_raw or "[]")
+            except Exception:
+                continue
+            if not isinstance(fields, list):
+                continue
+            cleaned = [
+                f for f in fields
+                if not (isinstance(f, dict)
+                        and str(f.get("name") or "").strip() in _names)
+            ]
+            if len(cleaned) == len(fields):
+                continue
+            c.execute(
+                "UPDATE autopilot_tasks SET custom_fields=? WHERE id=?",
+                (json.dumps(cleaned, ensure_ascii=False) if cleaned else "", _task_id),
+            )
+            changed += 1
+        db.commit()
+    if changed:
+        log.info(f"202611201700 已清理 {changed} 个自动化任务的保留 custom_fields")
+
+
+register_migration(
+    version="202611201700",
+    name="strip-org-analysis-reserved-custom-fields",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_strip_org_analysis_reserved_fields,
+)
+
+
 # 已盖章迁移的源码（含 docstring）是 checksum 冻结面：改动会让每次启动报"漂移"。
 # 因此下面的原 docstring 保持盖章时的原文；与事实不符之处在此更正：
 #   - meta 的 global_bot_*_token 是**历史明文**，本迁移会把它原样搬进 bot_token_enc
@@ -11306,6 +11376,120 @@ def _fn_runtime_org_backfill(conn=None):
 
     return _impl(conn)
 
+
+def _fn_add_platform_ca_bundle() -> None:
+    """Issue #3580：grape_t_repo_platforms 增 ca_bundle（实例 TLS CA，PEM 绝对路径）。
+
+    部署补强（2026-11-20，arch-weekly-11-yaw）：原版本号 202611200001 已被
+    takeover-sessions-user-id-uuid-v1（PR #1869，11:08 落库）先行盖帽——三库台账
+    同号不同名 → 本迁移永久判「已执行」，列永不落地；mgmt public 的
+    repo_platform_cards 查询带 ca_bundle 直接 1054，平台卡整体回落文件（DB 覆盖/
+    enabled 开关全失效）。renumber 到空号 202611200002，并加 strict + 落地回验：
+    印章只在列真正存在后写。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    with _lock:
+        c = _db.cursor()
+        _ensure_column(c, "grape_t_repo_platforms", "ca_bundle",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True,
+                       strict=True, force=True)
+        _db.commit()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+        if "ca_bundle" not in cols:
+            raise RuntimeError("grape_t_repo_platforms.ca_bundle missing after migration")
+
+
+register_migration(
+    version="202611200002",
+    name="add-platform-ca-bundle",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_add_platform_ca_bundle,
+)
+
+
+def _fn_create_webhook_inbox_table() -> None:
+    """Issue #3580/P3 部署缺口：grape_t_webhook_inbox 只登记在冻结老轨 _NEW_TABLES。
+
+    存量库（已盖 legacy-stamp）启动完全不跑 _create_tables() → 表永不创建 →
+    Event 进程 enqueue_webhook 每次 1054/1146 → 通用 webhook 全量 500（事件进不来）。
+    与 patrol-findings、merge-gate-log 同因，改走 register_migration；表归 runtime 域
+    （入队/消费同在 Event 进程），三库模式取 owner 连接，单库回落进程库。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    conn = _migration_conn("runtime", default=_db)
+    with (_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            c.execute(_WEBHOOK_INBOX_DDL)
+        conn.commit()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            raise RuntimeError("grape_t_webhook_inbox missing after migration")
+
+
+register_migration(
+    version="202611200003",
+    name="create-webhook-inbox-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_webhook_inbox_table,
+)
+
+
+def _fn_webhook_inbox_last_error_nullable() -> None:
+    """Issue #3580 复审：把 last_error 收敛成可空列（MySQL 独有 1364 的存量库修法）。
+
+    建表 DDL 原为 `last_error TEXT NOT NULL DEFAULT ''`：MySQL 不接受 TEXT 字面默认值，
+    兼容层剥掉默认值后列变成 NOT NULL 无默认，严格模式里任何不写该列的 INSERT 直接
+    1364（实测：webhook 入队每次 500；SQLite 全套测试测不出来）。新装库由修好的 DDL
+    直接建成可空 MEDIUMTEXT，本迁移负责把**已盖 202611200003 章的存量库**收敛过来。
+
+    SQLite 侧的字面默认值合法、无需改动（早退即视为已满足）；非 owner 库与跨库视图
+    跳过（视图列是 owner 建视图时的快照，不能在本库 ALTER）。
+    """
+    from src.kernel.session_manager import db as _db, db_lock as _lock
+
+    conn = _migration_conn("runtime", default=_db)
+    with (_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "grape_t_webhook_inbox"):
+            return                      # 本库没有该表（非 owner 域）→ 无需收敛
+        if not _is_base_table(c, "grape_t_webhook_inbox"):
+            return                      # 跨库可更新视图：列快照由 owner 域重建
+        if not _mysql_backend():
+            return                      # SQLite 的字面默认值合法
+        sql_nullable = (
+            "SELECT IS_NULLABLE FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_webhook_inbox' "
+            "AND COLUMN_NAME='last_error'")
+        row = c.execute(sql_nullable).fetchone()
+        if not row:
+            raise RuntimeError("grape_t_webhook_inbox.last_error missing")
+        if str(row[0]).upper() == "YES":
+            return                      # 已收敛（幂等：二次启动零写入）
+        if not _destructive_ddl(
+                c, "ALTER TABLE grape_t_webhook_inbox MODIFY last_error MEDIUMTEXT NULL",
+                kind_hint="cleanup"):
+            raise RuntimeError(
+                "webhook inbox last_error 放宽被 cleanup 门槛拦下"
+                "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+        row = c.execute(sql_nullable).fetchone()   # _destructive_ddl 失败只告警，必须复验
+        if str((row or [""])[0]).upper() != "YES":
+            raise RuntimeError(
+                "webhook inbox last_error MODIFY 未生效（仍非空）→ 本次不盖章，下版本重试")
+        conn.commit()
+        log.info("webhook inbox last_error: TEXT NOT NULL -> MEDIUMTEXT NULL")
+
+
+register_migration(
+    version="202611200004",
+    name="webhook-inbox-last-error-nullable",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_webhook_inbox_last_error_nullable,
+)
 
 register_migration(
     version="202611191120",

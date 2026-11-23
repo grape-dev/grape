@@ -98,7 +98,8 @@ def test_s82_update_keeps_rc_authoritative():
 def test_s82_repobottoken_rc_first_unconditional():
     """RepoBotToken：rc 优先不再需要 flag（默认即 rc 权威）。"""
     from src.domains.mgmt.user.db import add_managed_repo
-    from src.kernel.token_resolver import RepoBotToken, create_provider
+    from src.kernel.token_resolver import RepoBotToken
+    from src.domains.mgmt.vcs import create_provider
     add_managed_repo("gitee:s82o3/r3", "o", "r", webhook_id=1,
                      **{"bot_gitee_token": "rc-authoritative"})
     s = RepoBotToken(create_provider("gitee"))
@@ -154,7 +155,7 @@ def test_s82_global_swap_updates_rc():
     with db_lock:
         db.cursor().execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('webhook_url', 'http://wh.test')")
         db.commit()
-    with patch("src.kernel.token_resolver.create_provider", return_value=_FakeProv()):
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=_FakeProv()):
         global_bot_token_swap("gitee", "old-tok", "new-global")
     rc = _rc("gitee:s82o6/r6")
     assert rc.get("bot") == "new-global", f"全局换发未同步 rc: {rc}"

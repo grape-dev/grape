@@ -82,6 +82,8 @@ def test_schema_has_org_repo_create_columns():
 
 
 def test_repo_namespaces_lists_account_and_orgs(monkeypatch):
+    from src.domains.mgmt.user.namespaces import reset_namespace_cache
+    reset_namespace_cache()  # 30s 清单缓存会跨用例串味
     from src.domains.mgmt.routes import orgs as orgs_route
     from src.domains.mgmt.user import repo_manager
 
@@ -94,15 +96,27 @@ def test_repo_namespaces_lists_account_and_orgs(monkeypatch):
             return {"login": "alice", "name": "Alice", "avatar_url": "https://a/1.png"}
 
     monkeypatch.setattr(orgs_route, "get_user_token_for", _tokens)
-    monkeypatch.setattr("src.kernel.token_resolver.create_provider", lambda p: _Provider())
-    monkeypatch.setattr(
-        repo_manager,
-        "fetch_org_namespaces",
-        lambda provider, token: [
-            {"login": "acme", "name": "Acme", "avatar_url": ""},
-            {"login": "alice", "name": "Alice", "avatar_url": ""},
-        ],
-    )
+    monkeypatch.setattr("src.domains.mgmt.vcs.create_provider", lambda p: _Provider())
+    # 组织清单已迁到命名空间端口（namespaces._registry），不再经
+    # repo_manager.fetch_org_namespaces；测试按新端口打桩。
+    import src.domains.mgmt.user.namespaces as _ns
+
+    class _Lister:
+        def list_orgs(self, token):
+            assert token == "tk-gitcode"
+            return [
+                _ns.NamespaceRef(provider="gitcode", path="acme", name="Acme",
+                                 avatar_url="", kind=_ns.KIND_ORG),
+                _ns.NamespaceRef(provider="gitcode", path="alice", name="Alice",
+                                 avatar_url="", kind=_ns.KIND_ORG),
+            ]
+
+    class _Empty:
+        def list_orgs(self, token):
+            return []
+
+    monkeypatch.setattr(_ns, "_registry", lambda: {
+        "gitcode": _Lister(), "github": _Empty(), "gitlab": _Empty(), "gitee": _Empty()})
 
     client, app = _api()
     try:
@@ -115,7 +129,8 @@ def test_repo_namespaces_lists_account_and_orgs(monkeypatch):
     assert providers["gitcode"]["connected"] is True
     assert providers["gitcode"]["account"]["login"] == "alice"
     assert [ns["login"] for ns in providers["gitcode"]["namespaces"]] == ["alice", "acme"]
-    assert [ns["type"] for ns in providers["gitcode"]["namespaces"]] == ["user", "org"]
+    # 命名空间端口把个人桶统一成 "personal"（旧契约写作 "user"）
+    assert [ns["type"] for ns in providers["gitcode"]["namespaces"]] == ["personal", "org"]
     assert providers["github"]["connected"] is False
     assert providers["github"]["namespaces"] == []
 
@@ -298,6 +313,10 @@ def test_provision_uses_selected_provider_namespace_and_path(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create)
     monkeypatch.setattr(provision, "host_repo", _fake_host)
+    # 本用例只验证建仓选项透传；分支同步需要真实 VCS token/网络，单测统一桩掉。
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: None)
 
     result = provision.provision_org(org["id"])
 
@@ -378,3 +397,33 @@ def test_create_org_rejects_github_without_create_permission(monkeypatch):
         orgs_route._normalize_repo_create_options(body, {"id": UID, "username": USERNAME})
     assert ei.value.status_code == 400
     assert ei.value.detail.get("error_code") == "VCS_REPO_CREATE_FORBIDDEN"
+
+
+def test_github_create_repo_applies_custom_default_branch(monkeypatch):
+    """GitHub 建仓不支持 default_branch：必须先 auto_init 再改名并 PATCH 默认分支。"""
+    from src.domains.mgmt.user import repo_manager
+
+    calls = []
+
+    def _fake_req(method, url, token="", body=None):
+        calls.append({"method": method, "url": url, "body": body})
+        if method == "GET" and url.endswith("/user"):
+            return {"login": "Misheng-chenyan"}
+        if method == "POST" and url.endswith("/orgs/acme/repos"):
+            return {"full_name": "acme/team-workspace", "default_branch": "main"}
+        return {}
+
+    monkeypatch.setattr(repo_manager, "_github_req", _fake_req)
+
+    result = repo_manager.create_github_repo(
+        "tk", "team-workspace", "desc", private=True, owner="acme",
+        default_branch="grape-repo-knowledge")
+
+    assert result["default_branch"] == "grape-repo-knowledge"
+    create = next(c for c in calls if c["url"].endswith("/orgs/acme/repos"))
+    assert create["body"]["auto_init"] is True
+    rename = next(c for c in calls if c["url"].endswith("/branches/main/rename"))
+    assert rename["body"] == {"new_name": "grape-repo-knowledge"}
+    patch = next(c for c in calls if c["method"] == "PATCH"
+                 and c["url"].endswith("/repos/acme/team-workspace"))
+    assert patch["body"] == {"default_branch": "grape-repo-knowledge"}

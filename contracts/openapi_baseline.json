@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 391,
-  "min_endpoint_count": 351,
+  "endpoint_count": 399,
+  "min_endpoint_count": 359,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "Issue #3821: add issues comment PATCH/DELETE (gitrepo_issues_comments_update/delete) on one new path; endpoint_count 390->391, git-repo group unchanged",
-  "source_commit": "7ea71f828"
+  "change_reason": "merge: sync arch-weekly-11 2cf3036bf into arch-weekly-11-ljt (union of both branches' endpoint additions; 399 paths)",
+  "source_commit": "16d47d6ec"
 }

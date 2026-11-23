@@ -9,7 +9,7 @@
 
 1. 关联仓库后自动 AI 分析 → 复用现有绑定钩子（`_bind_one` 已经会调度 `analyze_repo`），把确定性分析替换/扩展为“一次性 AI 分析任务”，运行时用现有 `pick_engine` 的随机选择能力。
 2. 组织仓库每天 0 点自动分析 → 复用现有 Autopilot 定时任务（`autopilot_tasks` + scheduler），在关联仓库时幂等 ensure 一个受管任务。
-3. 分析输出放独立分支 → 扩展现有 `sync_org_context_to_repo` 的 git 同步能力，输出到 `grape-repo-analysis` 分支（建议 orphan 分支），不碰主分支。
+3. 分析输出统一进 `grape-org` 内容分支 → 扩展现有 `sync_org_context_to_repo` 的 git 同步能力；`main` 保持空仓，不写任何 Grape 内容。
 4. 下派时直接基于输出文档分析 → 在组织流水线的 `org_dispatch` 节点里读取分析分支文档，用当前引擎做 AI 匹配，再走现有 `org dispatches create` 显式 targets 契约；后端保留确定性召回作为兜底。
 
 关键原则：
@@ -31,7 +31,7 @@
                    └─ POST /orgs/{id}/repo-map/{repo}/ai-result
                          ├─ 校验 JSON schema → 写 grape_t_org_repo_map（覆盖旧结果）
                          ├─ 审计（engine / runtime / source_commit / result_hash）
-                         └─ sync_org_analysis_to_repo(org)  # 需求 3：推 grape-repo-analysis 分支
+                         └─ sync_org_analysis_to_repo(org)  # 需求 3：推 grape-org 分支
 
 每天 00:00（Autopilot 任务）
   └─ org-repo-analysis-runner skill
@@ -40,7 +40,7 @@
 
 组织下派流水线
   org_intake → org_dispatch
-                 ├─ 读取 grape-repo-analysis 分支的分析文档
+                 ├─ 读取 grape-org 分支的分析文档
                  ├─ 引擎（AI）生成 targets + 理由 + acceptance
                  └─ org dispatches create（显式 targets，plan 保留理由，可审计）
 ```
@@ -146,7 +146,7 @@
   调用 grape org analysis run-all --org_id <ORG_ID> --trigger schedule。
   该命令会检查组织关联仓库；没有关联仓库时直接退出，不执行任何分析。
   ```
-- `custom_fields`：`[{"name":"GRAPE_ORG_ID","value":"<org_id>"},{"name":"GRAPE_MANAGED_BY","value":"org-analysis"}]`
+- `custom_fields`：空（org_id/mode 由任务指令与本次运行参数提供；受管身份按 `skill_name` 识别。不再写 `GRAPE_*` 系统保留变量）
 - `created_by`：组织 owner（确保 skill/凭据可见性）
 - `enabled=1`
 
@@ -181,24 +181,22 @@
 
 | 用途 | 分支名 | 说明 |
 |---|---|---|
-| 新建组织自动仓库的默认分支 | `grape-repo-knowledge` | 新组织 provisioning 首次 push 即建立；替代现有的 `main` |
-| AI 分析输出分支 | `grape-repo-analysis` | orphan 分支，只放分析产物，与默认分支完全隔离 |
-| 既有组织仓库 | 保持现状（多数是 `main`） | 不做破坏性改名；代码按仓库实际默认分支解析 |
+| 新建组织自动仓库的默认分支 | `main` | 保持空仓，留给组织自己开发；Grape 不写任何内容 |
+| Grape 托管内容分支 | `grape-org` | 唯一写入目标：组织上下文/知识/需求目录/仓库地图/AI 结果都放这里 |
+| 既有组织仓库 | 一次性迁移 | 旧 `grape-repo-knowledge` / `grape-repo-analysis` 只读合并进 `grape-org`，不再继续推送 |
 
 实现要点：
 
-1. `org_provision._create_org_repo()` 的 `default_branch` 改为 `grape-repo-knowledge`；`create_new_repo` 需要把 `auto_init/default_branch` 真正传给 provider（当前部分适配器会忽略）。
-2. 跨平台兜底：GitHub/GitCode 对“建仓时指定 default_branch”支持不一致，因此**首次 push 到 `grape-repo-knowledge` 后，再调用 provider API 把仓库默认分支设为 `grape-repo-knowledge`**（GitHub `PATCH /repos/{o}/{r}`，GitCode 对应接口）。
-3. `org_context_repo.sync_org_context_to_repo()` 不再硬编码 `main`：
-   - 空仓 / `HEAD`（unborn）→ 用 `grape-repo-knowledge`；
-   - 已有仓库 → 用 `git rev-parse --abbrev-ref HEAD` 的实际分支，保持兼容。
-4. 新增 `org_repo_default_branch(org)` 帮助函数，所有读取组织仓库文件的路径（`get_file`、`git-repo contents`、webhook 默认分支等）显式传 `ref`，不要在业务代码里散落 `"main"`。
-5. 分支保护：`grape-repo-knowledge` 与 `grape-repo-analysis` 都纳入组织仓库的受保护分支策略（禁止强推/删除；`grape-repo-analysis` 允许后端受控推送）。
-6. 迁移策略：只对**新建**组织仓库启用 `grape-repo-knowledge`；存量组织仓库保留原默认分支，避免改默认分支导致 webhook/深链/缓存失效。
+1. `org_provision._create_org_repo()` 使用 `default_branch="main"` + `auto_init=False`；若平台建出完全空仓，同步时补一个**空提交**建立 `main`（不写 README/文件）。
+2. `sync_org_context_to_repo()` 固定写 `grape-org`；清理旧上下文文件时保留 `org-context/repo-map/`（地图由分析同步独占维护）。
+3. `sync_org_analysis_to_repo()` 也写 `grape-org`，只覆盖 `org-context/repo-map/`，保留同分支上的上下文/知识文件。
+4. 两条同步共用同一工作副本与组织级内容锁，避免并发推同一分支产生 non-fast-forward。
+5. 迁移策略：首次写入 `grape-org` 时，如果该分支不存在，则一次性读取旧 `grape-repo-knowledge`/`grape-repo-analysis` 文件并集作为初始内容；之后不再写旧分支。
+6. 分支保护：`main` 与 `grape-org` 纳入组织仓库保护策略；`grape-org` 允许后端受控推送。
 
 ### 5.1 分支形态
 
-建议：`grape-repo-analysis`（orphan 分支，完全隔离主分支历史）。
+`grape-org` 是唯一 Grape 内容分支，组织上下文、知识、需求目录与仓库地图共存。
 
 - 内容：
   ```
@@ -207,18 +205,18 @@
   org-context/repo-map/<provider>/<owner>/<repo>.md
   org-context/analysis/<run_id>.json        # 可选：结构化结果存档
   ```
-- 不包含代码、不包含 `org-context/rules.md|profile.md|repos/<...>/context.md` 等主分支上下文（这些继续留在 main）。
+- 不包含组织业务代码；`main` 保持空仓，留给组织自己开发。
 
-> 如果团队更希望“整个 org-context 镜像都放分支”，可改成 `org-context` orphan 分支，主分支只保留代码；但影响面更大，建议先只迁 AI 分析产物。
+> `org-context/repo-map/` 与 `org-context/rules.md|profile.md|repos/<...>/context.md` 同分支共存，互不覆盖。
 
 ### 5.2 写入方式
 
 新增 `sync_org_analysis_to_repo(org_id)`（mgmt 域，可复用 `org_context_repo.py` 的工具函数）：
 
-- 独立工作副本：`workspace/<org_repo>/grape-repo-analysis-sync`，避免污染代码 agent 的 bare/worktree。
-- 首次：`git clone --depth 1` 后 `checkout --orphan grape-repo-analysis`，清空 index，写文件，push。
-- 后续：`fetch origin grape-repo-analysis --depth 1` → `reset --hard FETCH_HEAD` → 写文件 → commit → push `HEAD:refs/heads/grape-repo-analysis`。
-- commit message：`chore(grape-repo-analysis): refresh AI repo map (YYYY-MM-DD HH:MM)`。
+- 独立工作副本：`workspace/<org_repo>/grape-content-sync`，避免污染代码 agent 的 bare/worktree。
+- 首次：`git clone --depth 1` 后创建/切换 `grape-org`，写文件，push；存量仓从旧内容分支一次性迁移。
+- 后续：`fetch origin grape-org --depth 1` → `checkout -B grape-org FETCH_HEAD` → 只覆盖对应目录 → commit → push `HEAD:refs/heads/grape-org`。
+- commit message：`chore(grape-org): refresh AI repo map (YYYY-MM-DD HH:MM)`。
 - 无变化不提交。
 - 失败只告警，DB 仍是权威源；下次分析/定时任务会重试。
 
@@ -228,7 +226,7 @@
 
 - 阶段 1：保留 main 的既有文件，但停止更新（新增开关 `ORG_CONTEXT_SYNC_REPO_MAP=0`）；
 - 阶段 2：一次性清理 main 上的 `org-context/repo-map/`（单独提交，便于回滚）；
-- 所有消费者改读 `grape-repo-analysis` 分支。
+- 所有消费者改读 `grape-org` 分支。
 
 ## 6. 需求 4：下派流水线直接使用分析文档
 
@@ -244,10 +242,10 @@ org_intake (issue / org-intake-cli)
 
 扩展 `org-dispatch-cli`（或新增 `org-dispatch-ai` 技能）：
 
-1. 读取 `grape-repo-analysis` 分支：
+1. 读取 `grape-org` 分支：
    - `org-context/repo-map/index.json`
    - 各仓 `repo-map/*.md`
-   （通过现有 `git-repo contents --ref grape-repo-analysis` 或 `VcsApiClient.get_file(ref=...)`）
+   （通过现有 `git-repo contents --ref grape-org` 或 `VcsApiClient.get_file(ref=...)`）
 2. 把「组织需求正文 + 仓库地图摘要」交给当前运行的引擎，要求输出：
    - `targets`（repo_key 列表）
    - 每个 target 的匹配理由
@@ -378,7 +376,7 @@ created_at
 
 - AI 技能 + 结果回调 API + DB 字段
 - `org_analysis.py` 单仓触发 + 随机引擎选择
-- `sync_org_analysis_to_repo` + `grape-repo-analysis` 分支
+- `sync_org_analysis_to_repo` + `grape-org` 分支
 - 手动 API 在 org 123 的 3 个测试仓验证
 
 ### P1（自动化，1 天）
@@ -390,7 +388,7 @@ created_at
 
 ### P2（下派联动，1–2 天）
 
-- `org-dispatch-cli` 读取 `grape-repo-analysis` 分支 + AI 选仓
+- `org-dispatch-cli` 读取 `grape-org` 分支 + AI 选仓
 - 显式 targets + 理由写回 plan/context
 - 确定性 `recall_targets` 兜底与阈值调整
 
@@ -404,7 +402,7 @@ created_at
 
 1. **引擎池口径**：分析允许哪些运行时？建议只允许组织场景绑定的健康运行时；是否允许全部可见运行时需要确认。
 2. **每日任务形态**：受管 Autopilot 任务（用户可见、可手动触发）是否符合预期？还是希望后台隐藏任务？
-3. **分支策略**：确认 `grape-repo-knowledge`（新建组织仓库默认分支）与 `grape-repo-analysis`（AI 输出 orphan 分支）这两个名字；存量组织仓库是否保持原默认分支？是否要把旧 `main` 上的 `org-context/repo-map/` 清理掉？
+3. **分支策略**：新建组织仓库保留空 `main`，所有 Grape 内容写 `grape-org`；存量旧内容分支一次性迁移后停止写入。
 4. **人工编辑**：AI 覆盖是否会覆盖人工维护的 `REPO_MAP.md`？建议 AI 只写 `org-context/repo-map/`，人工文件优先/只读。
 5. **成本**：链接即分析可能频繁触发；建议 30–60s 去抖 + 同仓合并；是否只对“有代码变更”的仓库重跑（按 source_commit 判断）。
 6. **下派 AI 的确定性**：AI 选仓结果需要保留理由并可人工覆盖；是否允许 AI 在低置信度时退回“人工选择 targets”。
@@ -412,7 +410,7 @@ created_at
 
 ## 13. 验收标准（建议）
 
-- 关联任意仓库后 2 分钟内出现一条 AI 分析运行记录，成功后在 `grape-repo-analysis` 分支看到对应 Markdown，旧结果被覆盖。
+- 关联任意仓库后 2 分钟内出现一条 AI 分析运行记录，成功后在 `grape-org` 分支看到对应 Markdown，旧结果被覆盖。
 - 组织仓库自动化列表存在每日 0 点任务；无关联仓库时执行结果明确为 skipped。
 - 手动/定时/链接三种触发均幂等，不产生重复运行。
 - 组织下派时，dispatch plan 中有 targets 与 AI 匹配理由；低置信度不静默下派全部仓库。
@@ -421,7 +419,7 @@ created_at
 
 已落地（本地 `feat/org-repo-map-ai` 分支，未推送）：
 
-- 分支命名：新建组织仓库默认分支 `grape-repo-knowledge`；AI 产物分支 `grape-repo-analysis`（orphan，独立工作副本同步）。
+- 分支命名：新建组织仓库默认分支 `main`（空仓）；Grape 内容统一写 `grape-org`（上下文/知识/地图共存，单工作副本串行同步）。
 - AI 分析编排：`src/domains/mgmt/org_analysis.py` + `routes/org_analysis.py`（targets/context/docs/status/run/ensure/ai-result）。
 - 运行时执行：Autopilot 任务 + 单次运行参数（`autopilot_executions.params_json`），任务级 `engine_runtime_ids` 健康候选随机选引擎。
 - 技能：`.grape/skills/qa/org-repo-analyzer/`（只读、结构化 JSON、HTTP 回传）。

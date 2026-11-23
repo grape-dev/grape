@@ -93,6 +93,8 @@ def test_analyze_repo_builds_summary_and_mirror(monkeypatch):
     files = mod.repo_map_markdown_files(org["id"])
     assert "org-context/repo-map/README.md" in files
     assert "org-context/repo-map/index.json" in files
+    assert "org-context/repo-map/repo-map-summary.md" in files
+    assert "订单域主服务" in files["org-context/repo-map/repo-map-summary.md"]
     assert (
         "org-context/repo-map/repos/gitcode/map-org/order-service/summary.md" in files
     )
@@ -200,3 +202,150 @@ def test_recall_targets_matches_multiple_repos_via_chinese_ngram(monkeypatch):
     assert len(result["targets"]) >= 2
     assert "gitcode:map-org/inventory-service" in result["targets"]
     assert REPO_KEY in result["targets"]
+
+
+def test_repo_map_summary_covers_all_linked_repos():
+    """汇总文件必须列出所有关联仓库（未分析也要出现），供 UI 卡片与分支查看。"""
+    from src.domains.mgmt import org_repo_map as mod
+    from src.domains.mgmt.user.db import add_managed_repo
+
+    org = _seed()
+    add_managed_repo("gitcode:map-org/user-service", "map-org", "user-service",
+                     webhook_id=2, org_id=org["id"])
+
+    summary = mod.repo_map_summary(org["id"])
+    assert summary["path"] == "org-context/repo-map/repo-map-summary.md"
+    assert REPO_KEY in summary["markdown"]
+    assert "gitcode:map-org/user-service" in summary["markdown"]
+    assert summary["summary"]["total"] == 2
+
+    files = mod.repo_map_markdown_files(org["id"])
+    assert summary["path"] in files
+    assert files[summary["path"]] == summary["markdown"].rstrip("\n") + "\n"
+
+
+def test_repo_map_file_url_for_content_branch():
+    from src.domains.mgmt.org_repo_map import _repo_file_url
+
+    assert _repo_file_url(
+        "gitcode:map-org/org-context",
+        "org-context/repo-map/repo-map-summary.md",
+        "grape-org",
+    ) == ("https://gitcode.com/map-org/org-context/blob/grape-org/"
+          "org-context/repo-map/repo-map-summary.md")
+    assert _repo_file_url(
+        "github:map-org/org-context",
+        "org-context/repo-map/repo-map-summary.md",
+        "grape-org",
+    ) == ("https://github.com/map-org/org-context/blob/grape-org/"
+          "org-context/repo-map/repo-map-summary.md")
+
+
+def test_repo_map_exposes_summary_links_for_ui_buttons():
+    """关联仓库能力卡与汇总卡都需要可直接跳转的组织仓库文件 URL。"""
+    from src.domains.mgmt import org_repo_map as mod
+
+    org = _seed()
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE organization SET org_repo_key=? WHERE id=?",
+                  ("gitcode:map-org/org-context", org["id"]))
+        db.commit()
+    mod.save_ai_result(org["id"], REPO_KEY, {
+        "repo_key": REPO_KEY,
+        "full_name": "map-org/order-service",
+        "purpose": "订单域主服务",
+        "confidence": 0.8,
+    }, triggered_by="test")
+
+    data = mod.list_repo_map(org["id"])
+    row = data["repos"][0]
+    assert row["summary_path"] == (
+        "org-context/repo-map/repos/gitcode/map-org/order-service/summary.md")
+    assert row["summary_branch"] == "grape-org"
+    assert row["summary_url"].endswith(
+        "/blob/grape-org/org-context/repo-map/repos/gitcode/map-org/order-service/summary.md")
+    assert data["summary_file"]["path"] == "org-context/repo-map/repo-map-summary.md"
+    assert data["summary_file"]["branch"] == "grape-org"
+    assert data["summary_file"]["url"].endswith(
+        "/blob/grape-org/org-context/repo-map/repo-map-summary.md")
+
+
+def test_content_branch_migrates_legacy_and_keeps_context_and_map(monkeypatch, tmp_path):
+    """旧 knowledge/analysis 只迁移一次；后续地图同步写 grape-org 并保留上下文。"""
+    import subprocess
+
+    import src.api.deps as deps
+    import src.domains.mgmt.auth.grape_account_db as account_db
+    import src.kernel.repo_key as repo_key_mod
+    from src.domains.mgmt import org_context_repo as mod
+
+    org = _seed()
+    org_repo_key = "gitcode:map-org/org-repo"
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE organization SET org_repo_key=? WHERE id=?",
+                  (org_repo_key, org["id"]))
+        db.commit()
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)],
+                   check=True, capture_output=True)
+    work = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(work)], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+
+    def _git(*args, **kwargs):
+        command = args[0] if len(args) == 1 and isinstance(args[0], list) else list(args)
+        return subprocess.run(["git", *command], check=False,
+                              capture_output=True, text=True)
+
+    (work / "README.md").write_text("main\n", encoding="utf-8")
+    _git("-C", str(work), "add", ".")
+    _git("-C", str(work), "commit", "-m", "main")
+    _git("-C", str(work), "push", "origin", "main")
+    _git("-C", str(work), "checkout", "-B", "grape-repo-knowledge")
+    (work / "org-context").mkdir()
+    (work / "org-context" / "rules.md").write_text("rules\n", encoding="utf-8")
+    _git("-C", str(work), "add", ".")
+    _git("-C", str(work), "commit", "-m", "knowledge")
+    _git("-C", str(work), "push", "origin", "grape-repo-knowledge")
+    _git("-C", str(work), "checkout", "--orphan", "grape-repo-analysis")
+    for name in ("README.md", "org-context"):
+        path = work / name
+        if path.is_dir():
+            import shutil
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    (work / "org-context" / "repo-map").mkdir(parents=True)
+    (work / "org-context" / "repo-map" / "README.md").write_text("map\n", encoding="utf-8")
+    _git("-C", str(work), "add", "-A")
+    _git("-C", str(work), "commit", "-m", "analysis")
+    _git("-C", str(work), "push", "origin", "grape-repo-analysis")
+
+    monkeypatch.setattr(mod, "_clone_url", lambda key: str(remote))
+    monkeypatch.setattr(repo_key_mod, "workspace_repo_dir",
+                        lambda key: str(tmp_path / "workspace"))
+    monkeypatch.setattr(mod.runtime_public, "run_git", _git)
+    monkeypatch.setattr(account_db, "get_grape_account_by_id",
+                        lambda uid: {"username": "tester"})
+    monkeypatch.setattr(deps, "get_user_token_for_repo", lambda *a, **k: "token")
+
+    assert mod.sync_org_analysis_to_repo(org["id"]) is True
+    tree = subprocess.run(
+        ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "grape-org"],
+        check=True, capture_output=True, text=True).stdout
+    assert "org-context/rules.md" in tree
+    assert "org-context/repo-map/README.md" in tree
+    assert "org-context/repo-map/repo-map-summary.md" in tree
+
+    # 上下文同步再次写 grape-org 时，不能删掉同分支上的仓库地图。
+    assert mod.sync_org_context_to_repo(org["id"]) is True
+    tree = subprocess.run(
+        ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "grape-org"],
+        check=True, capture_output=True, text=True).stdout
+    assert "org-context/repo-map/repo-map-summary.md" in tree
+    assert "org-context/repo-map/README.md" in tree

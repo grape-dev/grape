@@ -1,6 +1,7 @@
 """组织仓库 AI 分析编排（单仓/全量/每日任务/输出分支命名）。"""
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -69,8 +70,9 @@ def _seed_org():
 def test_branch_names():
     from src.domains.mgmt import org_context_repo
 
-    assert org_context_repo.ORG_REPO_DEFAULT_BRANCH == "grape-repo-knowledge"
-    assert org_context_repo.ORG_REPO_ANALYSIS_BRANCH == "grape-repo-analysis"
+    assert org_context_repo.ORG_REPO_DEFAULT_BRANCH == "main"
+    assert org_context_repo.ORG_REPO_COMBINED_BRANCH == "grape-org"
+    assert org_context_repo.ORG_REPO_CONTENT_BRANCH == "grape-org"
 
 
 def test_save_ai_result_overwrites_and_records_status():
@@ -262,3 +264,100 @@ def test_analysis_routes_write_audit_logs(monkeypatch):
         else:
             assert parsed.get("trigger") == "manual"
     assert got == expected, f"missing audit types: {expected - got}"
+
+
+def test_analysis_task_does_not_store_reserved_custom_fields():
+    """自动创建的分析任务不能把 GRAPE_* 写进 custom_fields（前端保存会报保留冲突）。"""
+    from src.domains.mgmt import org_analysis
+    from src.kernel.scene_custom_env import is_reserved_name
+
+    org = _seed_org()
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT custom_fields FROM autopilot_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    fields = json.loads((row[0] if row else "") or "[]")
+    assert fields == []
+    assert not [f for f in fields if is_reserved_name(str(f.get("name") or ""))]
+
+
+def test_ensure_preserves_user_custom_fields():
+    """ensure 只校正受管字段，不能清掉用户为该自动化配置的自定义变量。"""
+    from src.domains.mgmt import org_analysis
+
+    org = _seed_org()
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    user_fields = [{"name": "TEAM_FLAG", "value": "1", "is_secret": False, "scope": ["all"]}]
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE autopilot_tasks SET custom_fields=? WHERE id=?",
+            (json.dumps(user_fields, ensure_ascii=False), task_id),
+        )
+        db.commit()
+
+    assert org_analysis.ensure_analysis_task(org["id"], actor_id=UID) == task_id
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT custom_fields FROM autopilot_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    assert json.loads(row[0]) == user_fields
+
+
+def test_migration_strips_reserved_org_analysis_custom_fields():
+    """存量任务里的 GRAPE_MANAGED_BY/GRAPE_ORG_ID/GRAPE_ANALYSIS_MODE 应被清理。"""
+    from src.api.db_setup import _fn_strip_org_analysis_reserved_fields
+    from src.domains.mgmt import org_analysis
+
+    org = _seed_org()
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    stale = [
+        {"name": "GRAPE_MANAGED_BY", "value": "org-analysis"},
+        {"name": "GRAPE_ORG_ID", "value": org["id"]},
+        {"name": "GRAPE_ANALYSIS_MODE", "value": "all"},
+        {"name": "TEAM_FLAG", "value": "keep-me"},
+    ]
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE autopilot_tasks SET custom_fields=? WHERE id=?",
+            (json.dumps(stale, ensure_ascii=False), task_id),
+        )
+        db.commit()
+
+    _fn_strip_org_analysis_reserved_fields()
+
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT custom_fields FROM autopilot_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    assert json.loads(row[0]) == [{"name": "TEAM_FLAG", "value": "keep-me"}]
+
+
+def test_ensure_task_uses_scene_work_branch():
+    """每日分析任务的 work_branch 必须跟随组织场景（新组织=grape-org）。"""
+    from src.domains.mgmt import org_analysis
+    from src.kernel.session_manager import db, db_lock
+
+    org = _seed_org()
+    scene_id = "custom-org-branch-test"
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO devops_pipeline_scene "
+            "(scene_id, name, repo_key, nodes_json, advanced_options, is_active) "
+            "VALUES (?,?,?,'[]','{\"work_branch\":\"grape-org\"}',1)",
+            (scene_id, scene_id, ORG_REPO_KEY),
+        )
+        c.execute("UPDATE organization SET org_scene_id=? WHERE id=?", (scene_id, org["id"]))
+        db.commit()
+
+    task_id = org_analysis.ensure_analysis_task(org["id"], actor_id=UID)
+    assert task_id
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT work_branch FROM autopilot_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+    assert row and row[0] == "grape-org"

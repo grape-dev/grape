@@ -243,7 +243,8 @@ def _get_task_repo_token(repo_key: str) -> str:
     if not repo_key:
         return ""
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         provider = create_provider_from_repo_key(repo_key)
         result = TokenResolver(provider).resolve(repo_key)
         # level == "user" → 路径 D 用户 token，不写入 task 行
@@ -344,7 +345,8 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
         return False
     # 条件 1: 路径 B 仓库（level == "user"）
     try:
-        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver
+        from src.domains.mgmt.public import create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         _config_result = TokenResolver(_provider).resolve_config_level(repo_key)
         if _config_result.level != "user":
@@ -2101,7 +2103,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
             return result
         try:
-            from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+            from src.kernel.token_resolver import TokenResolver, create_action_handler
+            from src.domains.mgmt.public import create_provider_from_repo_key
             _provider = create_provider_from_repo_key(repo_key)
             _resolver = TokenResolver(_provider)
             _config_result = _resolver.resolve_config_level(repo_key)
@@ -5566,7 +5569,9 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         if _card is not None and _card.api_auth == "query_token":
             _path = f"/repos/{_c.owner}/{_c.repo}/pulls/{pr_number}/comments"
         elif _card is not None and _card.dialect == "gitlab":
-            _path = f"/projects/{_c.owner}%2F{_c.repo}/merge_requests/{pr_number}/notes"
+            # 子组仓库（grp/sub/proj）必须整体编码：半编码会拼出
+            # /projects/grp%2Fsub/proj → 404（回帖被吞成 warning）。复用客户端同一实现。
+            _path = (f"/projects/{_c._project_path}/merge_requests/{pr_number}/notes")
         else:
             _path = f"/repos/{_c.owner}/{_c.repo}/issues/{pr_number}/comments"
         _resp = _c._request("POST", _path, {"body": _comment})
@@ -7212,6 +7217,40 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.info(f"Exec agent: last-node finalize result={_fin} issue={issue_id}")
         except Exception as _e:
             log.warning(f"Exec agent: last-node finalize to pending_review failed: {_e}")
+
+    # Issue #2118/#2270：本地 direct 收尾也按场景 next/handoff 自动推进。
+    # 此前只有远程 worker 的 complete_task() 调用该钩子；本地执行路径在技能未显式
+    # `grape a2a handoff` 时会停在中间节点（coding 完成后不再进 qa）。
+    # 放在末节点 finalize 之后：末节点已置 pending_review 时由 stage 守卫幂等跳过。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.domains.runtime.engine.service import run_auto_advance_hook
+            _adv = run_auto_advance_hook(task_id or "", repo_key, issue_id,
+                                         agent_type, seq, result_text or "")
+            if _adv.get("action") in ("a2a", "recheck", "pending_review"):
+                log.info(f"Exec agent: auto-advance issue={issue_id} agent={agent_type} "
+                         f"action={_adv.get('action')} next={_adv.get('next_role')} "
+                         f"round={_adv.get('round')} seq={_adv.get('seq')}")
+                # 与 pipeline_reconcile 同口径：只有真正新建了事件（seq>0）才算推进；
+                # append_event 撞幂等键返回负 seq、recheck 无 seq 都不落审计。
+                _adv_seq = int(_adv.get("seq") or 0)
+                if _adv.get("action") in ("a2a", "recheck") and _adv_seq > 0:
+                    try:
+                        from src.domains.mgmt import public as mgmt_public
+                        mgmt_public.log_audit(
+                            "issue_pipeline_advanced",
+                            user_id="0", operator_id="0",
+                            detail={"source": "exec", "task_id": task_id or "",
+                                    "repo_key": repo_key, "issue_id": issue_id,
+                                    "from": agent_type,
+                                    "to": _adv.get("next_role") or "",
+                                    "action": _adv.get("action") or "",
+                                    "seq": _adv_seq},
+                        )
+                    except Exception as _ae:
+                        log.warning(f"Exec agent: auto-advance audit failed issue={issue_id}: {_ae}")
+        except Exception as _e:
+            log.warning(f"Exec agent: auto-advance failed issue={issue_id}: {_e}")
 
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:

@@ -1022,7 +1022,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "health",
            # 组织下派快照读取口（A10 整改：runtime 引擎经 public 读取）
            "load_org_snapshot_files", "get_org_dispatch_snapshot",
-           "org_dispatch_terminal_statuses"]
+           "org_dispatch_terminal_statuses", "pipeline_transition", "node_role"]
 
 
 # ---------- 命名查询白名单（P4 读路径：runtime 域代码读 mgmt 表） ----------
@@ -1850,7 +1850,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
     "repo_platform_cards_all": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
@@ -1859,7 +1859,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms ORDER BY provider"),
     "repo_platform_bot_status_set": (
         "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "
@@ -2603,7 +2603,7 @@ _PLATFORM_CARD_COLUMNS = (
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 
 
@@ -6619,10 +6619,25 @@ def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
     return _impl(scene_id, repo_key=repo_key) or {}
 
 
+def pipeline_transition(scene_id: str, agent_role: str, repo_key: str = "") -> dict:
+    """按角色解析节点推进信息（跨域契约口：runtime 聚合/推进节点解析）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_transition as _impl
+
+    return _impl(scene_id, agent_role, repo_key=repo_key) or {}
+
+
+def node_role(node: dict) -> str:
+    """节点对外角色名（tag 优先、id 兜底；跨域契约口）。"""
+    from src.domains.mgmt.pipeline_config import node_role as _impl
+
+    return _impl(node) or ""
+
+
 # 原名别名：调用点只换模块路径。
 get_pipeline_config = pipeline_config
 get_scenes = scene_list
 _query_scene_by_id = scene_by_id
+get_pipeline_transition = pipeline_transition
 
 
 # ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----
@@ -6734,3 +6749,24 @@ def org_dispatch_terminal_statuses() -> tuple[str, ...]:
     from src.domains.mgmt.org_dispatch import DISPATCH_TERMINAL as _impl
 
     return tuple(_impl)
+
+def create_provider(provider: str) -> Any:
+    """VCS 平台适配器工厂（跨域入口）。实现归 src.domains.mgmt.vcs。"""
+    from src.domains.mgmt.vcs import create_provider as _impl
+
+    return _impl(provider)
+
+
+def create_provider_from_repo_key(repo_key: str) -> Any:
+    """按 repo_key 前缀取 provider（跨域入口）。"""
+    from src.domains.mgmt.vcs import create_provider_from_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def create_repo_kwargs(provider: str, auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """建仓可选参数（卡能力位驱动；跨域入口）。"""
+    from src.domains.mgmt.vcs import create_repo_kwargs as _impl
+
+    return _impl(provider, auto_init=auto_init, default_branch=default_branch)

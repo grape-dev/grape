@@ -38,7 +38,7 @@ class TestVerifyBotToken:
     def test_gitcode_healthy(self):
         _prov = _mock_provider(verify_ok=True)
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gc_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is True
@@ -47,7 +47,7 @@ class TestVerifyBotToken:
     def test_github_healthy(self):
         _prov = _mock_provider(verify_ok=True)
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gh_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is True
@@ -56,7 +56,7 @@ class TestVerifyBotToken:
     def test_gitcode_401(self):
         _prov = _mock_provider(verify_ok=False, err=RuntimeError("failed (401): Unauthorized"))
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="bad_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
@@ -65,7 +65,7 @@ class TestVerifyBotToken:
     def test_github_401(self):
         _prov = _mock_provider(verify_ok=False, err=RuntimeError("failed (401): Bad credentials"))
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="bad_gh_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
@@ -74,7 +74,7 @@ class TestVerifyBotToken:
     def test_gitcode_network_error(self):
         _prov = _mock_provider(verify_ok=False, err=RuntimeError("Cannot reach GitCode API: timeout"))
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
@@ -83,7 +83,7 @@ class TestVerifyBotToken:
     def test_github_network_error(self):
         _prov = _mock_provider(verify_ok=False, err=RuntimeError("Cannot reach GitHub API: timeout"))
         with patch("src.domains.mgmt.user.db.get_global_bot_token_for", return_value="valid_gh_token"), \
-             patch("src.kernel.token_resolver.create_provider", return_value=_prov):
+             patch("src.domains.mgmt.vcs.create_provider", return_value=_prov):
             from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False

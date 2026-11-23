@@ -102,6 +102,6 @@ def test_uc44_pat_supply_chain_reads_credential_domain():
     u = 9104
     _mk_account(u, "uc44b")
     _seed_pat(u, "gitcode", "uc44-user")
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     tok = create_provider("gitcode").fetch_user_token("uc44-user", u)
     assert tok == "pat-tok", "供给链未优先命中凭据域 PAT（① 通道失效）"

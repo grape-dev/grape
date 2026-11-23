@@ -172,7 +172,7 @@ def test_s52_platform_tokens_gitee_pat_entry(gitee_card):
     user = _fake_user()
     try:
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
-        with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()):
             update_credentials(body, user=user)
         from src.domains.mgmt.user.db import get_credential
         cred = get_credential(user["id"], "gitee_pat")
@@ -200,7 +200,7 @@ def test_s52_platform_tokens_no_identity_conflict(gitee_card):
         create_external_identity(grape_user_id=other["id"], provider="gitee",
                                   external_id="70001", external_login="gitee-bob")
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
-        with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()):
             update_credentials(body, user=user)
         from src.domains.mgmt.user.db import get_credential
         cred = get_credential(user["id"], "gitee_pat")

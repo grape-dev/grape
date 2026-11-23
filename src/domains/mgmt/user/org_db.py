@@ -559,12 +559,14 @@ def has_running_org_dispatch(org_id: str, repo_key: str,
 
 
 def list_org_repos(org_id: str) -> list[dict]:
-    """列出组织关联的托管仓库。"""
+    """列出组织关联的托管仓库（附带目录渲染所需的 dev_scene/推荐配置）。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
-            "org_id, is_org_repo, linked_by, linked_at, created_at "
+            "org_id, is_org_repo, linked_by, linked_at, created_at, "
+            "COALESCE(dev_scene,'') AS dev_scene, "
+            "COALESCE(scene_recommend_config,'') AS scene_recommend_config "
             "FROM managed_repos WHERE org_id=? ORDER BY full_name",
             (org_id,),
         )

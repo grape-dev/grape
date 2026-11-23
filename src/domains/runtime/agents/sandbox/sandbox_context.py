@@ -87,7 +87,12 @@ def build_context(task: dict) -> SandboxContext:
         bot_token = (_bot_from_env(_env_extra, repo_full_name)
                      or task.get("repo_gitcode_token") or "")
     except Exception:
-        bot_token = _env_extra.get("BOT_GITCODE_TOKEN") or task.get("repo_gitcode_token") or ""
+        # 兜底同样按平台卡派生（此前写死 BOT_GITCODE_TOKEN：gitee/gitlab 恒空）
+        try:
+            from src.domains.runtime.vcs.clone_endpoint import bot_token_from_env as _bfe
+            bot_token = _bfe(_env_extra, repo_full_name) or task.get("repo_gitcode_token") or ""
+        except Exception:
+            bot_token = task.get("repo_gitcode_token") or ""
     work_branch = _env_extra.get("GRAPE_WORK_BRANCH", "")
     # clone 地址单点派生（平台卡 host）。过去这里写死 gitcode.com，gitee/github/gitlab
     # 仓会被当成 gitcode 仓去 clone；派生失败留空，由调用方按"无仓库"处理。

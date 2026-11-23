@@ -526,7 +526,8 @@ class TestResolveEventTypes:
         from src.domains.mgmt.auth.audit import _resolve_event_types
         assert _resolve_event_types("org_dispatch_") == {
             "dispatch_created", "target_created", "dispatch_completed",
-            "dispatch_partial_failed", "dispatch_cancelled", "target_retried"}
+            "dispatch_partial_failed", "dispatch_cancelled", "target_retried",
+            "dispatch_needs_review"}
 
     def test_user_input_never_becomes_event_name(self):
         """非白名单输入不得拼进查询集合（防注入）。"""

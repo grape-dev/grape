@@ -147,7 +147,7 @@ def test_t2_pat_save_does_not_touch_identity_rows(gitee_card):
     try:
         _bind_then_unbind(a["id"])
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
-        with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()):
             update_credentials(body, user={"id": b["id"]})
 
         # 凭据落 B 名下（PAT 的语义就是这个）
@@ -295,7 +295,7 @@ def test_t5_credential_write_failure_is_loud_and_compensated(gitee_card):
     b = _mk_user("patb_t5")
     try:
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
-        with patch("src.kernel.token_resolver.create_provider", return_value=_P()), \
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()), \
                 patch("src.domains.mgmt.user.db.set_credential", return_value=False):
             with pytest.raises(HTTPException) as ei:
                 update_credentials(body, user={"id": b["id"]})
@@ -334,7 +334,7 @@ def test_t7_platform_tokens_change_invalidates_repo_cache(gitee_card):
         assert user_db.get_user_repos(a["id"]), "前置：缓存应已写入"
 
         body = UpdateCredentials(platform_tokens={"gitee": "gitee-pat-1"})
-        with patch("src.kernel.token_resolver.create_provider", return_value=_P()):
+        with patch("src.domains.mgmt.vcs.create_provider", return_value=_P()):
             update_credentials(body, user={"id": a["id"]})
 
         assert not user_db.get_user_repos(a["id"]), \

@@ -23,7 +23,7 @@ os.environ.setdefault("GRAPE_CREDENTIAL_KEYS", "dev:test")
 from src.kernel.session_manager import db, db_lock
 from src.domains.mgmt.user import db as udb
 
-from src.kernel.token_resolver import GenericVcsProvider
+from src.domains.mgmt.vcs import GenericVcsProvider
 from src.domains.runtime.vcs.platform_card import get_platform_card
 
 

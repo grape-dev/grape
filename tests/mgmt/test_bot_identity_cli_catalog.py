@@ -38,7 +38,7 @@ def gitee_card():
 def test_s1_login_platform_independent(gitee_card):
     """gitcode OAuth 登录用户 + gitee 手配 PAT → gitee 仓库凭据可用，登录身份不参与。"""
     from src.domains.mgmt.auth.grape_account_db import create_grape_account, create_external_identity
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     acc = create_grape_account(username=f"s1_{uuid.uuid4().hex[:8]}", email="", password="pw")
     assert acc
     # 登录身份：gitcode OAuth（与 gitee 无关）

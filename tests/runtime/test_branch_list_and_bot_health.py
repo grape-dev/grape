@@ -80,7 +80,7 @@ def test_s29_bot_health_platforms_auto_extended(gitee_card):
         db.commit()
     try:
         # 单平台验证走统一 token 来源链（mock verify_token 避免真实网络）
-        with patch("src.kernel.token_resolver.create_provider") as mp:
+        with patch("src.domains.mgmt.vcs.create_provider") as mp:
             class _FakeVCS:
                 def verify_token(self, token):
                     assert token == "gbt_gitee"

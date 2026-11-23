@@ -461,6 +461,17 @@ async def start_event_tasks(app, include_sweep_events: bool = True) -> dict:
         except Exception as e:
             log.warning(f"Event sweeper loop start failed: {e}")
 
+    # Issue #3580/P3：webhook 事件持久收件箱消费 worker（先入队、再消费、可重放）
+    try:
+        from src.domains.runtime.webhook_inbox import webhook_inbox_loop, ensure_webhook_inbox_table
+        # 表归 Event 进程（runtime 库）独占：共享台账是 mgmt 的跨库视图，迁移不会在
+        # 本域执行 → 起 worker 前先 IF NOT EXISTS 自建（幂等，缺失时否则入队 1146 → 全量 500）
+        ensure_webhook_inbox_table()
+        h["webhook_inbox_task"] = asyncio.create_task(webhook_inbox_loop())
+        log.info("Webhook inbox worker started (1s poll)")
+    except Exception as e:
+        log.warning(f"Webhook inbox worker start failed: {e}")
+
     # Issue #345: 全局 bot token 健康探活——每 5 分钟探活，集群下分布式锁保证单实例执行
     try:
         from src.domains.runtime.engine.bot_token_health import start_bot_token_health
@@ -479,6 +490,14 @@ async def stop_event_tasks(app, h: dict) -> None:
             await asyncio.wait_for(_t, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    _wi = h.get("webhook_inbox_task")
+    if _wi:
+        _wi.cancel()
+        try:
+            await asyncio.wait_for(_wi, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError) as _e:
+            # Issue #3580 复审：取消/超时不静默（静默 except ratchet）
+            log.debug(f"webhook inbox worker shutdown: {type(_e).__name__}")
 
 
 # ===========================================================================
@@ -550,6 +569,41 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
     except Exception as e:
         log.warning(f"Local probe loop start failed: {e}")
 
+    # 流水线推进确定性兜底（runtime 域职责，5min）：任务 completed 但
+    # issue.stage 未前进 → 按场景 next/handoff 幂等推进。Worker 进程 = runtime 域，
+    # 直接读本域库；Mgmt 只保留手动契约口（POST /api/patrol/pipeline-advance），
+    # 不在 Mgmt 的 patrol 循环里执行 runtime 逻辑（四进程职责严格归位）。
+    try:
+        async def _pipeline_advance_loop():
+            from src.domains.runtime.public import (
+                reconcile_pipeline_progress,
+            )
+            await asyncio.sleep(30)
+            while True:
+                try:
+                    stats = await asyncio.to_thread(reconcile_pipeline_progress)
+                    try:
+                        from src.domains.insight.public import obs_loop_beat
+                        obs_loop_beat("pipeline_advance")
+                    except Exception as _loop_e:
+                        log.debug(f"pipeline_advance loop beat failed: {_loop_e}")
+                    if stats.get("advanced"):
+                        log.info(f"Pipeline advance loop: advanced={stats['advanced']} "
+                                 f"scanned={stats.get('scanned', 0)}")
+                except Exception as e:
+                    try:
+                        from src.domains.insight.public import obs_loop_fail
+                        obs_loop_fail("pipeline_advance", e)
+                    except Exception as _loop_e:
+                        log.debug(f"pipeline_advance loop fail record failed: {_loop_e}")
+                    log.warning(f"Pipeline advance loop failed: {e}")
+                await asyncio.sleep(300)
+
+        h["pipeline_advance_task"] = asyncio.create_task(_pipeline_advance_loop())
+        log.info("Pipeline advance loop started (5min)")
+    except Exception as e:
+        log.warning(f"Pipeline advance loop start failed: {e}")
+
     # 远端 runtime 僵尸清理（每 60 秒）：AI DevSpace 被删后 runtime 行残留 status=online
     try:
         def _reap_stale_runtimes_sync():
@@ -594,7 +648,8 @@ async def start_worker_tasks(app, include_sweep_tasks: bool = True,
 
 async def stop_worker_tasks(app, h: dict) -> None:
     """Worker 进程关闭。"""
-    for _k in ("probe_task", "reap_task", "sweep_tasks_task", "table_maintenance_task"):
+    for _k in ("probe_task", "pipeline_advance_task", "reap_task",
+               "sweep_tasks_task", "table_maintenance_task"):
         _t = h.get(_k)
         if _t:
             _t.cancel()

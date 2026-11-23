@@ -33,5 +33,6 @@
   "brand_color": "#C71D23",
   "token_storage_field": "",
   "webhook_token_field": "",
-  "bot_username": ""
+  "bot_username": "",
+  "create_repo_options": true
 }
