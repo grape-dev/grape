@@ -1418,6 +1418,40 @@ def is_task_claimable(status) -> bool:
     return (status or "") in TASK_CLAIMABLE_STATUSES
 
 
+# ── Issue #3963：同仓 enqueue 撞 repo-dispatch 租约 → 排队等待（不再 0.95s 即判死）──
+#
+# 缺陷：抢锁原语默认 `attempts=20 / interval=0.05`（≈0.95s），而 enqueue 抢的是
+# `ttl=30` 的 repo 租约、临界区在 db_lock 长持有（#3927）下常 > 1s → 撞锁必然，
+# 且抛出的是一句无条件失败的 RuntimeError，调度侧只能按永久失败落 failed。
+# 修复：把「抢锁窗口」与「租约 TTL」对齐（预算 = TTL + 余量，AC 要求有效等待 ≥ TTL），
+# 抢不到才抛结构化分类，由调度侧按瞬态重试/requeue。
+REPO_DISPATCH_BUSY = "REPO_DISPATCH_BUSY"
+_REPO_DISPATCH_LEASE_TTL = 30          # 与设计租约 TTL 一致（续期/短 TTL 不在本单范围）
+# 余量：抖动/时钟粒度下仍保证「有效等待 ≥ TTL」；TTL 是持锁者崩溃后锁最晚过期时间，
+# 等到 TTL 才可能接管残留租约。
+_REPO_DISPATCH_LEASE_WAIT_SECONDS = _REPO_DISPATCH_LEASE_TTL + 5
+_REPO_DISPATCH_LEASE_JITTER_RATIO = 0.2  # 抖动防多实例同刻齐抢（仅作用 sleep 间隔）
+# 重试间隔：预算路径用它代替原语默认 0.05s——35s 预算下 0.05s 会打出约 700 次抢锁
+# （每轮都是一次 INSERT+提交），对 DB 是纯噪声；0.25s 约 4 次/秒/等待者，抖动后错峰。
+_REPO_DISPATCH_LEASE_RETRY_INTERVAL = 0.25
+
+
+class RepoDispatchBusyError(RuntimeError):
+    """同仓 enqueue 等待 repo-dispatch 租约预算耗尽（瞬态可重试，非永久失败）。
+
+    - `error_code`：稳定的 `REPO_DISPATCH_BUSY`，调度侧据此走瞬态通道（不消耗 attempt）；
+    - 文案保留 `task enqueue busy for repo {repo_key}`：既有 Loki 查询/看板/告警按该
+      字面子串聚合，改名会让他们失明。
+    """
+
+    error_code = REPO_DISPATCH_BUSY
+
+    def __init__(self, repo_key: str, waited_seconds: float = 0.0):
+        self.repo_key = repo_key or ""
+        self.waited_seconds = float(waited_seconds or 0.0)
+        super().__init__(f"task enqueue busy for repo {repo_key}")
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", user_gitcode_token="", env_extra=None,
@@ -1672,9 +1706,28 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _snap = (None, "", "")
     # 组织派发租约（a85f72d33）：同仓库 enqueue 串行化，避免 dispatch 双写竞争
+    # Issue #3963：等待预算与租约 TTL 对齐（不再固定 0.95s 即判 busy）——同仓并发
+    # enqueue 排队等待；预算耗尽才抛结构化 REPO_DISPATCH_BUSY（瞬态，调度侧重试/requeue）。
     dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
-    if dispatch_lease_key and not acquire_lock_with_retry(dispatch_lease_key, ttl=30):
-        raise RuntimeError(f"task enqueue busy for repo {repo_key}")
+    if dispatch_lease_key:
+        _lease_t0 = time.monotonic()
+        _lease_ok = acquire_lock_with_retry(
+            dispatch_lease_key, ttl=_REPO_DISPATCH_LEASE_TTL,
+            interval=_REPO_DISPATCH_LEASE_RETRY_INTERVAL,
+            wait_seconds=_REPO_DISPATCH_LEASE_WAIT_SECONDS,
+            jitter_ratio=_REPO_DISPATCH_LEASE_JITTER_RATIO)
+        _lease_waited = time.monotonic() - _lease_t0
+        try:
+            from src.domains.insight.public import (
+                record_repo_dispatch_busy, record_repo_dispatch_lease_wait)
+            record_repo_dispatch_lease_wait(repo_key, _lease_waited)
+            if not _lease_ok:
+                record_repo_dispatch_busy(repo_key)
+        except Exception as _obs_e:
+            # 埋点绝不拖垮入队主链路（可观测性铁律）；显式 debug 记录而非静默吞
+            log.debug(f"repo dispatch lease metrics skipped: {_obs_e}")
+        if not _lease_ok:
+            raise RepoDispatchBusyError(repo_key, waited_seconds=_lease_waited)
     try:
         with db_lock:
             c = _rt_db.cursor()

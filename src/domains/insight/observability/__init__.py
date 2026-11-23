@@ -327,6 +327,27 @@ TASK_QUEUE_WAIT = Histogram(
     registry=registry,
 )
 
+# Issue #3963：repo-dispatch 租约争用（入队侧的排队等待与 busy）。
+# 语义：`lease_wait_seconds` 观测每次 enqueue 抢租约的实际耗时（含排队）；`busy_total`
+# 只在「预算耗尽仍未抢到」时自增——看板据此区分「排队冲突」与「执行失败」。
+# 标签只有 repo 一维（与既有 per-repo 口径一致，不引入高基数）。
+_REPO_LEASE_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 45, 60)
+
+REPO_DISPATCH_LEASE_WAIT = Histogram(
+    "grape_repo_dispatch_lease_wait_seconds",
+    "Seconds spent waiting for the repo-dispatch lease before enqueue succeeded or gave up.",
+    ["repo"],
+    buckets=_REPO_LEASE_BUCKETS,
+    registry=registry,
+)
+
+REPO_DISPATCH_BUSY = Counter(
+    "grape_repo_dispatch_busy_total",
+    "Repo-dispatch lease waits that exhausted their budget (task enqueue busy).",
+    ["repo"],
+    registry=registry,
+)
+
 TASK_RUN_SECONDS = Histogram(
     "grape_agent_task_run_seconds",
     "Time agent tasks spent running before a terminal state.",
@@ -428,6 +449,30 @@ def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reaso
     s = _normalize_source(source)
     m = _normalize_mode(_runtime_mode(runtime_id))
     TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
+
+
+def record_repo_dispatch_lease_wait(repo_key: str, seconds: float):
+    """Issue #3963：观测一次 repo-dispatch 租约等待的耗时（含排队）。
+
+    repo_key 为空或耗时非法时直接返回；任何异常都在本函数内吞掉——埋点绝不拖垮入队主链路。
+    """
+    try:
+        _repo = (repo_key or "").strip() or "unknown"
+        _secs = float(seconds)
+        if _secs < 0:
+            return
+        REPO_DISPATCH_LEASE_WAIT.labels(repo=_repo).observe(_secs)
+    except Exception:
+        return
+
+
+def record_repo_dispatch_busy(repo_key: str):
+    """Issue #3963：repo-dispatch 租约等待预算耗尽（`task enqueue busy`）计数。"""
+    try:
+        _repo = (repo_key or "").strip() or "unknown"
+        REPO_DISPATCH_BUSY.labels(repo=_repo).inc()
+    except Exception:
+        return
 
 
 # ===== LLM token 用量指标（参考 multica metrics/business.go llmTokens）=====
