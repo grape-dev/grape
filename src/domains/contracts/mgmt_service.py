@@ -57,3 +57,14 @@ class MgmtService(ABC):
     @abstractmethod
     def get_user_mapping_batch(self, keys: list) -> list:
         """N10 批量外部身份 → user_id（platform+external_id，批量 ≤ 200）。"""
+
+    # ---- Issue #3632：平台卡跨域只读（仓库平台描述的权威源在 mgmt 域） ----
+
+    @abstractmethod
+    def get_repo_platform_cards(self, enabled_only: bool = True) -> list:
+        """平台卡行（`grape_t_repo_platforms`）：provider/name/dialect/host/… 白名单列。
+
+        为什么进契约而不是让 runtime 直读表：3 库 4 进程下该表归 mgmt 域，
+        其它进程没有它的库（拆库拓扑）或只有陈旧副本（单库回落到别的库）。
+        凭据列（bot_token_enc / client_*_enc）**不出域**，由 mgmt 侧原语保证。
+        """

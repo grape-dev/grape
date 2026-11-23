@@ -4110,6 +4110,28 @@ class ContractGuardSignalBody(BaseModel):
     ts: float = 0
 
 
+@router.get("/platform-cards", operation_id="runtime_platform_cards")
+def runtime_platform_cards(credential_id: int = Depends(_require_credential)):
+    """Issue #3632：平台卡契约端点（worker/engine 进程取卡的唯一通道）。
+
+    为什么需要这条端点：`grape_t_repo_platforms` 归 mgmt 域，而 worker 引擎进程
+    的启动环境只有 `RUNTIME_TOKEN`（没有任何 `GRAPE_DSN_*`）。平台卡在它那里
+    原先三条来源全断（本进程表被就绪门挡、configs/platforms 不随包发布、代码
+    默认没有 gitee）→ worktree 解析不出 clone 地址 → 静默降级只读 → 任务
+    "completed"却没有仓库。
+
+    职责划分（都不在本路由里）：
+      * 跨域取数 = `mgmt.get_repo_platform_cards` 契约（单点宿存，凭据列不出域）；
+      * 响应整形 / 失败降级 = `card_contract.PlatformCardContractServer`；
+      * worker 侧消费 / 回落策略 = `card_contract.PlatformCardContractClient`
+        + `card_sources.ServerContractCardSource`。
+    路由只做鉴权 + 委派。
+    """
+    from src.domains.runtime.vcs.card_contract import PlatformCardContractServer
+
+    return PlatformCardContractServer().snapshot()
+
+
 @router.post("/contract-guard/signal", operation_id="runtime_contract_guard_signal")
 def runtime_contract_guard_signal(body: ContractGuardSignalBody,
                                   credential_id: int = Depends(_require_credential)):

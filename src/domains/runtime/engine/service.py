@@ -3812,6 +3812,23 @@ def _run_aggregate_recheck(task: dict, transition: dict, scene_id: str,
                     f"round={round_no}: {e}")
 
 
+def _node_declares_auto_advance(node: dict) -> bool:
+    """场景节点是否显式开启「完成即自动推进下一棒」（Issue #3688）。
+
+    仅为 ``auto_advance`` 为真值的节点启用 #2118 的兜底派发；缺省即关闭，
+    回到「技能自行 grape a2a handoff」的旧语义。接受布尔与字符串写法，
+    便于场景编辑页/接口以 ``true`` / ``"true"`` / ``1`` 任一形态配置。
+    """
+    if not isinstance(node, dict):
+        return False
+    raw = node.get("auto_advance")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _auto_advance_after_complete(task: dict, output: dict | None = None,
                                  result_text: str = "") -> dict:
     """Issue #2118：按场景 next/handoff 自动推进已完成节点。
@@ -3888,6 +3905,17 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
                 or _next_skill == "org-aggregate-cli"):
             return {"action": "wait_for_dispatch", "node": _cur_id or "org_dispatch",
                     "scene_id": _scene_id}
+        # Issue #3688：自动推进兜底必须由场景节点显式声明 auto_advance=true 才启用。
+        # #2118 引入的兜底原本用于组织链条（技能未显式 handoff 时防卡死），但它对所有
+        # 场景节点无差别生效：交付类节点（如 sre）会在 PR 尚未合入时被提前派发，
+        # 表现为「qa 一完成 sre 就开跑」，且派发侧拿不到 PR 号无法自行判断合并状态。
+        # 未声明的节点回到旧语义——仍由技能自行 `grape a2a handoff` 推进。
+        if not _node_declares_auto_advance(_transition.get("node") or {}):
+            log.info(f"auto-advance: skip issue={issue_id} agent={agent_type} "
+                     f"(node does not declare auto_advance)")
+            return {"action": "none", "reason": "auto_advance_not_declared",
+                    "scene_id": _scene_id,
+                    "node": str((_transition.get("node") or {}).get("id") or "")}
         if _transition.get("handoff") != "a2a":
             return {"action": "none", "reason": "handoff_not_a2a",
                     "handoff": _transition.get("handoff") or ""}
@@ -4977,6 +5005,16 @@ def fail_task(task_id, error, exit_code=-1):
                     _issue_id = task.get("issue_id") or ""
                     _comment_token = ""
 
+                    def _global_comment() -> str:
+                        """全局 bot 令牌（D37/S57 统一入口，按 provider 派生；失败降级空串）。"""
+                        try:
+                            from src.domains.mgmt.public import get_global_bot_token_for
+
+                            return get_global_bot_token_for(_expired_provider) or ""
+                        except Exception as _gce:  # noqa: BLE001 - 回帖失败不阻断收尾
+                            log.warning(f"fail_task: global comment token unavailable: {_gce}")
+                            return ""
+
                     # R18.6.9: 评论 token 通过 handler.get_comment_token() 获取
                     # handler 内部按级别差异化选择评论 token（含 fallback）
                     try:
@@ -4988,22 +5026,12 @@ def fail_task(task_id, error, exit_code=-1):
                         if _handler:
                             _comment_token = _handler.get_comment_token(_resolve_result) or ""
                         else:
-                            # 无 handler → fallback 到全局 bot token
-                            if _rk.startswith("github:"):
-                                from src.domains.mgmt.public import get_global_github_bot_token
-                                _comment_token = get_global_github_bot_token() or ""
-                            else:
-                                from src.domains.mgmt.public import _get_global_bot_token
-                                _comment_token = _get_global_bot_token() or ""
+                            # 无 handler → 全局 bot token（统一入口，按 provider 派生）
+                            _comment_token = _global_comment()
                     except Exception as _cte:
                         log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
-                        # fallback 到原有逻辑
-                        if _rk.startswith("github:"):
-                            from src.domains.mgmt.public import get_global_github_bot_token
-                            _comment_token = get_global_github_bot_token() or ""
-                        else:
-                            from src.domains.mgmt.public import _get_global_bot_token
-                            _comment_token = _get_global_bot_token() or ""
+                        # fallback：全局 bot 令牌；仍为空再用任务令牌
+                        _comment_token = _global_comment()
                         if not _comment_token:
                             _comment_token = _get_task_token(task) or ""
 
@@ -5843,12 +5871,25 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                     user_id = int(row[2] or 0)
                 except (TypeError, ValueError):
                     user_id = 0
+                # #3649：env_extra 落库已是 enc:v1 信封（#2423 M1 加密），必须走
+                # decrypt_env_extra。历史实现直接 json.loads → 解信封必抛 JSONDecodeError
+                # → env 被当成空字典 → 回写只剩 GRAPE_SESSION_TOKEN，把场景/仓库/凭据变量
+                # 整片抹平（现场表现：任务执行时 shell 里缺少场景自定义变量与 PR 上下文）。
+                _raw_env = row[3]
                 try:
-                    env = json.loads(row[3] or "{}")
-                except Exception:
+                    from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
+                    env = decrypt_env_extra(_raw_env) if _raw_env else {}
+                except Exception as _env_e:
+                    log.error(f"sync_task_session_token: env_extra 解析失败 task={task_id}: {_env_e}")
                     env = {}
                 if not isinstance(env, dict):
                     env = {}
+                if _raw_env and not env:
+                    # fail-closed：快照读不出来时绝不回写，否则一次解密失败就永久抹平任务环境
+                    log.error("sync_task_session_token: env_extra 不可读（信封解密为空），"
+                              f"task={task_id} 拒绝回写以免抹平任务环境快照")
+                    _rt_db.commit()
+                    return ""
                 if not repo_key or not agent_type:
                     _rt_db.commit()
                     return ""
@@ -5872,6 +5913,9 @@ def sync_task_session_token(task_id: str, force: bool = False) -> str:
                     session_key=task_id, repo_key=repo_key,
                     agent_type=agent_type, user_id=user_id, commit=False)
                 env["GRAPE_SESSION_TOKEN"] = new_token
+                # 注意：这里沿用明文回写（启动迁移 _fn_migrate_env_extra_encryption 会
+                # 重新加密）。改信封属于 #2423 的独立收口，不在本次数据丢失修复范围内——
+                # 但绝不因为格式问题丢掉任何变量。
                 c.execute(
                     "UPDATE agent_tasks SET env_extra=? WHERE id=?",
                     (json.dumps(env, ensure_ascii=False), task_id),
@@ -5917,6 +5961,67 @@ def session_token_for_execution(task_id: str, *, session_key_fallback: str,
     return issue_session_token(
         session_key=session_key, repo_key=repo_key,
         agent_type=agent_type, user_id=user_id)
+
+
+def reuse_or_issue_session_token(env, *, session_key, repo_key, agent_type,
+                                 user_id=0, task_id="", scope="dispatch",
+                                 context_log_level="warning"):
+    """派发/执行前的 token 注入：#990 口径 —— 复用任务快照，不新签未落库 token。
+
+    ``issue_and_inject_session_token`` 是「每次新签一枚」的上游口径（建任务时用）；
+    派发链必须走这里：``session_token_for_execution`` 先读 ``agent_tasks.env_extra``
+    快照，有效即复用、失效才在同一事务内轮换**并回写快照**。
+
+    为什么不能继续用 issue_session_token：每次派发都把入队那枚覆盖成新 token，
+    快照里留下 stale 值，靠后续 ``sync_task_session_token`` 轮换回写才能收敛，
+    中间存在 401 窗口 —— 正是 #990 记录的症状（"绝不制造未落库 token"）。
+
+    返回 None（成功注入）或诊断条目（上下文缺失 / 快照同步失败 / 签发失败）。
+    """
+    if not (repo_key and agent_type):
+        _reason = (f"session token not issued: missing dispatch context "
+                   f"(repo_key={'set' if repo_key else 'empty'}, "
+                   f"agent_type={'set' if agent_type else 'empty'})")
+        _entry = _token_diag_entry(SESSION_TOKEN_CONTEXT_MISSING, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        _log = log.error if context_log_level == "error" else log.warning
+        _log(f"{scope}: {_reason} (task={task_id or '-'}); continuing without "
+             "GRAPE_SESSION_TOKEN, CLI falls back to GRAPE_AUTH_FILE/config")
+        return _entry
+    try:
+        _uid = int(user_id or 0)
+    except (TypeError, ValueError):
+        _uid = 0
+    try:
+        _token = session_token_for_execution(
+            task_id, session_key_fallback=session_key, repo_key=repo_key,
+            agent_type=agent_type, user_id=_uid)
+    except Exception as e:
+        _reason = f"session token snapshot sync failed: {type(e).__name__}: {e}"
+        _entry = _token_diag_entry(SESSION_TOKEN_ISSUE_FAILED, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        log.error(f"{scope}: {_reason} (task={task_id or '-'} repo={repo_key} "
+                  f"agent={agent_type}); continuing without GRAPE_SESSION_TOKEN")
+        return _entry
+    if not _token:
+        _reason = ("session token snapshot sync returned empty "
+                   f"(task={task_id or '-'} repo={repo_key} agent={agent_type})")
+        _entry = _token_diag_entry(SESSION_TOKEN_ISSUE_FAILED, _reason)
+        _persist_task_diagnostic(task_id, _entry)
+        log.error(f"{scope}: {_reason}; continuing without GRAPE_SESSION_TOKEN")
+        return _entry
+    env["GRAPE_SESSION_TOKEN"] = _token
+    env["GRAPE_CLI_MODE"] = "WORKER"
+    return None
+
+
+def reuse_or_issue_session_token_safe(env, *, log_scope, **kwargs):
+    """派发链兜底封装：诊断钩子自身异常不得阻断派发（#2790 同口径）。"""
+    try:
+        return reuse_or_issue_session_token(env, **kwargs)
+    except Exception as e:
+        log.error(f"{log_scope}: session token reuse hook failed: {e}")
+        return None
 
 
 def _release_task_token_lock(dconn, lock_name: str):

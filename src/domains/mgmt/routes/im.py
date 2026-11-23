@@ -98,6 +98,30 @@ def _connected_ids() -> set:
         return set()
 
 
+def _instance_id() -> str:
+    """本进程 IM 引擎实例 id（与 /api/im/status 的 instance_id 同源）。"""
+    eng = _engine()
+    return str(getattr(eng, "instance_id", "") or "") if eng else ""
+
+
+def _lease_connected_owners() -> dict:
+    """全集群口径：租约活着 = 某台主控正在维护这条渠道。
+
+    四台主控按 `grape_t_channel_lease` 分片，每条安装只在一台上连；只按
+    本进程 `supervisor._channels` 判 connected，会让连在另外三台的渠道在
+    本机页面上显示成「已配置 · 未连接」（Issue：IM 页误报）。租约表是跨
+    进程唯一真源：`live_channel_lease_owners()` 已按「owner 非空 + 未过期」
+    过滤，两种到期文本口径（空格 / ISO 8601）的判定收口在那里。
+    """
+    try:
+        from src.domains.mgmt.public import live_channel_lease_owners
+        owners = live_channel_lease_owners()
+    except Exception as e:
+        log.warning(f"IM lease snapshot read failed: {e}")
+        return {}
+    return {str(i): str(o) for i, o in (owners or {}).items()}
+
+
 @router.get("/status")
 def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
     """IM 引擎状态汇总——前端用来显示总开关与真连上的渠道数。
@@ -214,7 +238,9 @@ def im_installations(
     finally:
         conn.close()
 
-    connected = _connected_ids()
+    local_connected = _connected_ids()
+    lease_owners = _lease_connected_owners()
+    connected = set(local_connected) | set(lease_owners)
     out = []
     for r in rows or []:
         inst_id, ctype, scope, owner, repo_key, config, status, updated = r
@@ -240,6 +266,8 @@ def im_installations(
             "config": _masked_config(config),
             "status": str(status or ""),
             "connected": inst_id in connected,
+            "connected_on": str(_instance_id() if inst_id in local_connected
+                                else lease_owners.get(str(inst_id), "")),
             "updated_at": str(updated or ""),
         })
     return {"installations": out, "total": len(out)}

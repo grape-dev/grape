@@ -124,6 +124,8 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
   "handoff": "a2a",
   "skip": [],
   "enabled": true,          // false = 灰色/不需要（仅非 vod/issue 可设 false）
+  "auto_advance": false,    // true = 本节点完成且技能未自行交办时，平台兜底派下一棒；
+                            // 缺省 false = 回到「技能自行 a2a handoff」语义（Issue #3688）
   "engine_runtime_ids": []  // 空 = 广播竞争；非空 = 限定这些引擎
 }
 ```

@@ -660,7 +660,8 @@ def guarded_push(repo_key: str, head_branch: str, wt_dir: str, token: str = "",
     if run_git is None:
         from src.domains.runtime.engine.repogit import _run_git as run_git
     r = run_git(["-C", wt_dir, "push", "--no-verify", "origin",
-                 f"HEAD:refs/heads/{head_branch}"], token=token, timeout=120)
+                 f"HEAD:refs/heads/{head_branch}"], token=token, timeout=120,
+              repo_key=repo_key)
     if r is None or r.returncode != 0:
         err = (r.stderr[:300] if r is not None and r.stderr else "git exec failed")
         return {"ok": False, "stage": "push", "reason": "push_failed",

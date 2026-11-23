@@ -2617,7 +2617,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             from src.domains.runtime.engine.repogit import _run_git
             _r_push = _run_git(
                 ["-C", _wt_dir, "push", "origin", f"HEAD:refs/heads/{_wt_branch}"],
-                token=_token, timeout=120)
+                token=_token, timeout=120, repo_key=_rk)
             if _r_push is None or _r_push.returncode != 0:
                 _err = (_r_push.stderr[:300] if _r_push else "git exec failed") if _r_push else "git exec failed"
                 log.warning(f"linked PR: push failed {_rk}: {_err}")
@@ -3161,6 +3161,46 @@ async def _execute_task(client, task, engine_name: str = ""):
             return await _execute_task_impl(client, task, engine_name)
 
 
+def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
+    """Issue #3632：平台未注册时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：这段行为是本次修复最关键的一条（"平台未注册"曾经只
+    WARNING 一条就放行 agent，agent 拿不到 clone 地址后自述"git 只读降级交付"，
+    任务 completed/exit 0、工作区空）。把"判定 → 结构化错误 + 明确日志"从
+    执行流程里抽出来，才能被用例直接锁住，而不是靠读代码确认。
+
+    Returns:
+        `{"_error": "<code>: <message>", "_started": False}` —— 由 `_wrap` 上报
+        failed，任务**不进入** Agent 执行（与 WorkspaceBaselineError 同一条阻断语义）。
+    """
+    code = getattr(exc, "code", "platform_not_registered")
+    log.error(f"task {tid} blocked by platform card: code={code} "
+              f"repo_key={repo_key or ''} err={exc}")
+    return {"_error": f"{code}: {exc}", "_started": False}
+
+
+def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+    """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
+
+    为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
+    继续跑 agent」，agent 拿不到工作区后自述「git 元数据只读」并交零交付结论，
+    任务仍 completed。真因是凭据（rc 行为空/解不开/过期）时，必须把分类带进
+    task errors，而不是渲染成 git 只读（与 #3632 平台未注册同一条阻断语义）。
+
+    Returns:
+        归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
+        （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
+        凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+    """
+    from src.domains.runtime.engine import repogit
+
+    reason = repogit.worktree_credential_error(repo_key)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
 async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -3319,20 +3359,36 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # Issue #2514：基线分叉/不可达 → WorkspaceBaselineError 在此显式阻断（不静默复用错基线），
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
+    from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
-            repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=_get_task_token(task),
-                                          work_branch=_wb, task_id=tid,
-                                          strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            _wt = repogit.ensure_issue_worktree(
+                task.get("repo_key") or "", task.get("agent_type") or "",
+                _num, token=_get_task_token(task),
+                work_branch=_wb, task_id=tid,
+                strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+            # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
+            # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
+            if not _wt:
+                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
+                if _cred_blocked:
+                    _res.dispose()
+                    return _cred_blocked
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
         _res.dispose()
         return {"_error": str(_wb_err), "_started": False}
+    except _PlatformCardMissing as _pc_err:
+        # Issue #3632：平台未注册（三条卡来源全断）≠ 工作区 git 不可写。
+        # 原先这里只 WARNING 一条就放行 agent，agent 拿不到 clone 地址 → 自述
+        # "git 只读降级交付" → 任务 completed/exit 0，工作区空、无 PR、无 QA 交办。
+        # 现在显式阻断并把 code 带进任务错误（构造逻辑见 platform_card_block_result）。
+        _res.dispose()
+        return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）

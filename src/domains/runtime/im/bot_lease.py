@@ -16,6 +16,12 @@ from src.kernel.config import (log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL,
 # 渠道租约/安装表归 mgmt 域：语句在该域 public（三库独立后进程库 ≠ mgmt 库）
 from src.domains.mgmt import public as _mgmt_lease
 
+from src.kernel.owner_db import db_pair
+
+# global_im_bot_config / grape_im_instance 是 runtime 基表：本模块由 mgmt 进程里的
+# IM 引擎调用，必须走 runtime owner 连接（单库拓扑自动回落 session_manager.db）。
+db, db_lock = db_pair("runtime")
+
 def generate_instance_id() -> str:
     hostname = socket.gethostname() or "unknown"
     return f"{hostname}-{secrets.token_hex(4)}"
@@ -179,7 +185,6 @@ class BotLeaseStore:
             return []
         inactive = []
         try:
-            from src.kernel.session_manager import db, db_lock
             app_ids = list(held_bots.keys())
             ph = ",".join(["?"] * len(app_ids))
             with db_lock:
@@ -197,7 +202,6 @@ class BotLeaseStore:
         if not app_ids:
             return {}
         try:
-            from src.kernel.session_manager import db, db_lock
             ph = ",".join(["?"] * len(app_ids))
             with db_lock:
                 c = db.cursor()
@@ -233,7 +237,6 @@ class BotLeaseStore:
         try:
             from datetime import datetime, timezone
 
-            from src.kernel.session_manager import db, db_lock
             _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
             with db_lock:
                 c = db.cursor()
@@ -285,7 +288,6 @@ class BotLeaseStore:
         上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。
         """
         try:
-            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
@@ -322,7 +324,6 @@ class BotLeaseStore:
         if not owner:
             return False
         try:
-            from src.kernel.session_manager import db, db_lock
             _low, _high = self._heartbeat_window(timeout)
             with db_lock:
                 c = db.cursor()
@@ -348,7 +349,6 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
               - timedelta(hours=older_than_hours)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM grape_im_instance WHERE last_heartbeat < ?", (cutoff,))

@@ -20,7 +20,7 @@ from src.domains.runtime.im.channel.card import Card
 
 from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
 
-from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
+from src.kernel.session_manager import get_or_create_session, update_session, update_conversation
 
 from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
 
@@ -33,6 +33,16 @@ from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 from src.api.chat_session_env import chat_session_env_extra
 
 from src.kernel.token_service import is_auth_401_error
+from src.kernel.owner_db import db_pair
+
+# 三库独立（weekly-11 拆库）后，本文件属 runtime 域，但 IM 引擎由 **mgmt 进程**启动并执行
+# （grape_server.py → engine_wiring.start_im_engine）。chat_conversations / issue /
+# chat_agent_session / repo_im_group_binding 都是 runtime 基表，用进程本域连接会得到
+# `1146 Table 'grape_mgmt.chat_conversations' doesn't exist`——飞书 /repo 选仓库、
+# 自然语言绑仓库、/task 进任务会话全断。故 db/db_lock 一律绑 runtime owner 代理
+# （与 insight 可观测性模块同口径，见 src/kernel/owner_db.py）：单库/无 DSN 拓扑
+# 自动回落 session_manager.db，零回归。
+db, db_lock = db_pair("runtime")
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
@@ -397,9 +407,9 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     if not uid or not repo_key:
         return False
     try:
-        from src.domains.mgmt.public import get_managed_repos
-        repos = get_managed_repos(uid) or []
-        return any(r.get("repo_key") == repo_key for r in repos)
+        # 可见性判定归 mgmt 域（宿主能力），此处只消费契约
+        from src.domains.mgmt.public import user_can_access_repo
+        return user_can_access_repo(uid, repo_key)
     except Exception as e:
         log.warning(f"[finding-card] access check failed uid={uid}: {e}")
         return False
@@ -800,7 +810,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
                 "❌ 未关联用户", "**❌ 未找到关联平台用户**\n请在 Chat Agent 页配置飞书。",
                 Tone.DANGER))
             return ""
-        from src.kernel.session_manager import join_feishu_chat, create_conversation, get_conversation, db_lock
+        from src.kernel.session_manager import join_feishu_chat, create_conversation, get_conversation
         cid = value.get("conv_id") or ""
         _title = f"Issue #{_iss}"
         if not cid:
@@ -1053,7 +1063,7 @@ async def _send_bind_success_card(ctx, egress, msg_id, repo_key):
 
 async def _bind_repo(ctx, egress, chat_id, msg_id, repo_key, uid_str):
     """绑定仓库到当前聊天"""
-    from src.kernel.session_manager import db_lock, upsert_repo_im_binding
+    from src.kernel.session_manager import upsert_repo_im_binding
     uid = get_user_id_by_app_id(ctx.app_id) or 0
     with db_lock:
         upsert_repo_im_binding(chat_id, repo_key, _im_binding_provider(repo_key), str(uid or ""), ctx.app_id)  # S77：provider 卡派生
@@ -1140,7 +1150,7 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
                     "无需重复选择。发送 `/chat` 选择会话，或直接提问。",
                     Tone.NEUTRAL))
                 return
-            from src.kernel.session_manager import db_lock, upsert_repo_im_binding
+            from src.kernel.session_manager import upsert_repo_im_binding
             with db_lock:
                 upsert_repo_im_binding(chat_id, repo_key, _im_binding_provider(repo_key), str(uid or ""), ctx.app_id)  # S77：provider 卡派生
                 c = db.cursor()
@@ -1172,7 +1182,6 @@ async def _handle_selection(ctx: "BotContext", egress: "HandlerEgress", chat_id:
             if row and row[0]:
                 cid = row[0]
             if not cid:
-                from src.kernel.session_manager import db_lock
                 with db_lock:
                     cc = db.cursor()
                     r2 = cc.execute("SELECT id FROM chat_conversations WHERE user_id=? AND repo_key=? AND conv_type='task' AND issue_number=? LIMIT 1",
@@ -1742,10 +1751,9 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                         log.info(f"[Chat:{ctx.name}] engine fallback: {_orig_rid}->{_rid} (original offline/local-direct)")
                     else:
                         # 按名找的引擎仍为本机直连 → 扫描在线远端 worker 引擎兜底
-                        from src.kernel.session_manager import db as _sdb, db_lock as _slock
                         _found = 0
-                        with _slock:
-                            _c = _sdb.cursor()
+                        with db_lock:
+                            _c = db.cursor()
                             _c.execute(
                                 "SELECT id FROM agent_runtimes "
                                 "WHERE credential_id > 0 AND status = 'online' AND name = ? "

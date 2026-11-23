@@ -102,3 +102,34 @@ def query_state(state: str) -> str:
 
 # PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
 PR_WEB_PATH = "merge_requests"
+
+
+# ── 通道能力位（Issue #3632 后继：checks/status 通道不再按平台名分派）──
+# GitLab v4 无 check-runs / combined status 通道 → 显式 404，不打别的平台。
+CHECK_RUNS_NATIVE = False
+STATUS_NATIVE = False
+PR_ISSUE_LINK_NATIVE = False
+# PR 评论 id 的路径不是扁平 /pulls/comments/{id}：GitLab 需要 MR 号
+# （/merge_requests/{iid}/notes/{id}），故关闭扁平形态。
+PR_COMMENT_FLAT_PATH = False
+
+
+# ── 子路径重写（PATH_MAP 只映首段：/pulls→/merge_requests；尾段方言差异在此收口）──
+# GitLab 的评论是 notes、MR 变更是 changes；不映会 404（A 链 VcsApiClient 已按 dialect
+# 派生，透传面此前没有，导致"同一平台一处通一处不通"）。
+import re as _re2
+
+_PATH_REWRITES = (
+    (_re2.compile(r"^/issues/([^/]+)/comments$"), r"/issues/\1/notes"),
+    (_re2.compile(r"^/merge_requests/([^/]+)/comments$"), r"/merge_requests/\1/notes"),
+    (_re2.compile(r"^/merge_requests/([^/]+)/comments/([^/]+)$"), r"/merge_requests/\1/notes/\2"),
+    (_re2.compile(r"^/merge_requests/([^/]+)/files$"), r"/merge_requests/\1/changes"),
+)
+
+
+def rewrite_path(subpath: str) -> str:
+    """把 github 方言子路径改写成 GitLab 资源路径（未命中则原样返回）。"""
+    for rx, repl in _PATH_REWRITES:
+        if rx.match(subpath or ""):
+            return rx.sub(repl, subpath)
+    return subpath

@@ -368,16 +368,34 @@ def fetch_repos_with_role(api_token: str) -> list[dict]:
     log.info(f"fetch_repos total: {len(repos)} repos (current_user={current_user})")
     return repos
 
-def get_user_gitcode_login(api_token: str) -> str:
-    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。"""
+def get_user_gitcode_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变。
+
+    status 口径：0=成功；>=400=上游 HTTP 状态码（401/403/5xx）；
+    -1=网络/未知失败。成功/失败各有独立日志行（provider、status、结果）。
+    """
     if not api_token:
-        return ""
+        return "", -1
     try:
         data = _req("GET", f"{API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_gitcode_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_gitcode_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_gitcode_login failed: {e}")
-        return ""
+        return "", -1
+
+def get_user_gitcode_login(api_token: str) -> str:
+    """获取当前 token 的 GitCode 登录用户名（GET /api/v5/user）。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变（20+ 调用点零改动）；
+    需要上游状态码的调用方改用 get_user_gitcode_login_status。
+    """
+    login, _status = get_user_gitcode_login_status(api_token)
+    return login
 
 def fetch_user_orgs(api_token: str, *, admin_only: bool = False) -> list[dict]:
     """获取当前 token 用户的 GitCode 组织列表。
@@ -621,12 +639,19 @@ def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
     try:
+        import os as _os
+        _env = dict(_os.environ)
+        # 一律非交互：没有 TTY/credential helper 时让 git 立刻失败并给出明确
+        # 错误，而不是尝试读密码（线上曾出现 "No such device or address"）
+        _env["GIT_TERMINAL_PROMPT"] = "0"
+        _env["GIT_ASKPASS"] = ""
         p = subprocess.run(
-            ["git"] + args,
+            ["git", "-c", "credential.helper="] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_env,
         )
     except FileNotFoundError:
         raise RuntimeError("服务器未安装 git CLI")
@@ -667,11 +692,21 @@ def _download_and_extract_tarball(url, workdir, tmp, headers=None, token=None):
     _run_git(["init"], workdir)
 
 def _download_gitcode_tarball(source_repo, workdir, tmp, token):
-    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。"""
+    """GitCode 不支持 tarball API，回退到 shallow clone + 删除 .git（避免 shallow push 问题）。
+
+    2026-11-22：地址与鉴权方式都改走 runtime 契约——旧实现把
+    `https://oauth2:{token}@gitcode.com/...` 写死平台，且把 token 拼进 URL
+    （进程列表/日志/错误信息泄漏面）。现在：地址=clone_params(clone_url)，
+    凭据=clone_auth_header → `git -c http.extraheader=` 注入。
+    """
     if not token:
         raise RuntimeError("GitCode 模板需要 Bot token 拉取")
-    url = f"https://oauth2:{token}@gitcode.com/{source_repo}.git"
-    _run_git(["clone", "--quiet", "--depth", "1", url, workdir], tmp)
+    from src.domains.runtime import public as _runtime_public
+
+    url = _runtime_public.clone_url(source_repo)
+    header = _runtime_public.clone_auth_header(source_repo, token)
+    _run_git(["-c", f"http.extraheader=Authorization: {header}",
+              "clone", "--quiet", "--depth", "1", url, workdir], tmp)
     shutil.rmtree(os.path.join(workdir, ".git"), ignore_errors=True)
     _run_git(["init"], workdir)
 
@@ -761,21 +796,22 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             _pc_wf = _gpc(provider)
             _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
         _wf_denied = not _wf
+        # push 目标 URL：任何分支都必须携带真实 token。
+        # 历史 bug：受限分支（_wf_denied）曾拼 `https://***@host/...` —— 字面量
+        # "***" 当用户名、没有密码，子进程里没有 credential helper/TTY，
+        # git 直接报 `could not read Password for 'https://***@host':
+        # No such device or address`，模板代码 100% 写不进去（线上 502：
+        # 「仓库已创建但模板代码写入失败」）。
+        # 删 .github/workflows 的目的正是「用受限 token 也能推上去」，所以
+        # token 必须照常携带。
+        target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
-            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被
-            # 拒绝——怪癖以卡 workflows_write=False 声明（github 内置卡）。
-            # push URL 沿用存量 "***" 置换形态（不携带真实 token，鉴权走 git
-            # credential helper），host 已从 github 卡派生。
-            target_url = f"https://***@{_tgt_host}/{owner_login}/{target_repo}.git"
+            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+            # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
                 log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
-        else:
-            # gitcode 家族存量 clone 鉴权形态（oauth2 前缀）保持逐字节不变；
-            # host 已卡派生（修复真二分缺陷：gitee 等目标此前被硬编码推到
-            # gitcode.com）
-            target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
@@ -1214,16 +1250,30 @@ def probe_github_repo_create(api_token: str, owner: str = "", private: bool = Tr
     return None, "GitHub 权限探测未得到预期拒绝（不阻断创建）"
 
 
-def get_user_github_login(api_token: str) -> str:
-    """获取当前 token 的 GitHub 登录用户名。"""
+def get_user_github_login_status(api_token: str) -> tuple[str, int]:
+    """Issue #3563: (login, status) 变体——透出上游状态码，不抛契约不变（同 GitCode 版）。"""
     if not api_token:
-        return ""
+        return "", -1
     try:
         data = _github_req("GET", f"{_GITHUB_API_BASE}/user", api_token)
-        return data.get("login", "") or ""
+        login = data.get("login", "") or ""
+        log.info(f"get_user_github_login: ok (login={login})")
+        return login, 0
+    except UpstreamAPIError as e:
+        log.warning(f"get_user_github_login failed (status={e.status_code}): {e.message[:120]}")
+        return "", e.status_code
     except RuntimeError as e:
         log.warning(f"get_user_github_login failed: {e}")
-        return ""
+        return "", -1
+
+def get_user_github_login(api_token: str) -> str:
+    """获取当前 token 的 GitHub 登录用户名。
+
+    Issue #3563：变薄包装——失败返回空串的既有契约不变；需要上游状态码的
+    调用方改用 get_user_github_login_status。
+    """
+    login, _status = get_user_github_login_status(api_token)
+    return login
 
 def get_github_repo_permissions(api_token: str, owner: str, repo: str) -> dict | None:
     """获取 token 持有者对指定仓库的权限（GET /repos/{owner}/{repo}）。

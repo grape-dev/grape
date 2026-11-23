@@ -15,6 +15,7 @@ OBS 改造（feat/knowledge-obs）：
 """
 
 import hashlib
+import time
 
 import json
 
@@ -653,6 +654,19 @@ def _get_worker_pool():
         _worker_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kwq-worker")
     return _worker_pool
 
+def _claim_pending_writes(now: str):
+    """同步：捞一批待写知识任务（在 worker 线程里执行）。"""
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        return db.cursor().execute(
+            "SELECT id, repo_key, scope, agent_type, issue_num, content, status, "
+            "source_seq, created_by, source, description, name, retry_count "
+            "FROM knowledge_write_queue "
+            "WHERE queue_status='pending' AND next_retry_at <= ? "
+            "ORDER BY created_at LIMIT 50", (now,)
+        ).fetchall()
+
+
 async def knowledge_write_worker():
     """后台 worker：每 3 秒轮询 pending 任务，线程池并行消费。
 
@@ -662,15 +676,8 @@ async def knowledge_write_worker():
     while True:
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # 1. 捞 pending 任务
-            with db_lock:
-                rows = db.cursor().execute(
-                    "SELECT id, repo_key, scope, agent_type, issue_num, content, status, "
-                    "source_seq, created_by, source, description, name, retry_count "
-                    "FROM knowledge_write_queue "
-                    "WHERE queue_status='pending' AND next_retry_at <= ? "
-                    "ORDER BY created_at LIMIT 50", (now,)
-                ).fetchall()
+            # 1. 捞 pending 任务（同步 DB 放到线程池，别占事件循环）
+            rows = await asyncio.to_thread(_claim_pending_writes, now)
             if not rows:
                 await asyncio.sleep(3)
                 continue
@@ -937,6 +944,130 @@ def agent_files(repo_key: str, agent_type: str = "") -> dict:
     """[Issue #95 废弃] 用户上传知识统一由 member_files_pi 走 ref 表注入，此函数保留向后兼容但不再被调用。"""
     return {}
 
+def _knowledge_sync_pass(storage):
+    """一次知识同步（同步实现，必须在工作线程执行，禁止在事件循环里跑）。
+
+    py-spy 实测：本函数原来整段跑在事件循环线程上——遍历 managed_repos、
+    每个 repo 抢一次分布式锁（同步 DB 事务）、读文件、上传 OBS、INSERT/UPDATE，
+    一跑就是 60~90 秒，期间同进程所有请求（含 /api/ping）一起排队。
+    """
+    from src.kernel.repo_key import parse_repo_key, workspace_repo_dir
+    from src.kernel.session_manager import db, db_lock
+
+    _t0 = time.time()
+    _scanned = _synced = _failed = 0
+    cursor = 0
+    while True:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT id, file_path, scope, repo_key, agent_type, issue_num "
+                "FROM agent_shared_knowledge WHERE (obs_key='' OR obs_key IS NULL) AND id>? ORDER BY id LIMIT 500",
+                (cursor,)
+            ).fetchall()
+            _scanned += len(rows)
+        if not rows:
+            break
+        for row in rows:
+            rid, file_path, scope, repo_key, agent_type, issue_num = row
+            if rid in _sync_not_found:
+                continue
+            try:
+                # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（含 provider 前缀），
+                # member 文档：用 file_path 生成
+                from src.kernel.repo_key import workspace_repo_dir
+                _ws_repo = workspace_repo_dir(repo_key)
+                _ws_repo_rel = os.path.relpath(_ws_repo, WORKSPACE_DIR)
+                if file_path.startswith(_ws_repo_rel + "/"):
+                    full_path = os.path.join(WORKSPACE_DIR, file_path)
+                else:
+                    full_path = os.path.join(_ws_repo, file_path)
+                if not os.path.isfile(full_path):
+                    _sync_not_found.add(rid)
+                    log.error(f"[knowledge] sync skip id={rid}: file not found {full_path} (repo may be deleted)")
+                    continue
+                content = ""
+                with open(full_path, encoding="utf-8") as f:
+                    content = f.read()
+                if content:
+                    # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
+                    _obs_prefix = knowledge_obs_prefix(repo_key)
+                    _sync_name = ""
+                    _sync_desc = ""
+                    if scope == "member":
+                        # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
+                        # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
+                        for marker in ("member/", "agent/"):
+                            idx = file_path.find(marker)
+                            if idx >= 0:
+                                _rel = file_path[idx:]
+                                break
+                        else:
+                            _rel = os.path.basename(file_path)
+                        storage_key = f"{_obs_prefix}/{_rel}"
+                    elif scope == "baseline":
+                        _fname = os.path.basename(file_path)
+                        storage_key = f"{_obs_prefix}/project-info/{_fname}"
+                        _sync_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
+                        _sync_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
+                    else:
+                        # 共享知识：project/issue/issue_agent
+                        storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
+                    storage.save_bytes(storage_key, content.encode("utf-8"))
+                    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
+                    with db_lock:
+                        c2 = db.cursor()
+                        # UPDATE 补 source/name/description（COALESCE 空值不覆盖）
+                        c2.execute(
+                            "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
+                            "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
+                            "WHEN scope='member' THEN 'manual' ELSE 'agent' END), "
+                            "name=COALESCE(NULLIF(name, ''), ?), "
+                            "description=COALESCE(NULLIF(description, ''), ?) "
+                            "WHERE id=?",
+                            (storage_key, content_hash,
+                             _sync_name,
+                             _sync_desc,
+                             rid)
+                        )
+                        db.commit()
+                    # 只在真正落 OBS + 写库之后计数（架构守护 N3）：空文件
+                    # 跳过了上传与 UPDATE，原先也被计成 synced，日志会高估同步量。
+                    _synced += 1
+            except Exception as e:
+                _failed += 1
+                log.warning(f"[knowledge] sync failed id={rid}: {e}")
+            cursor = rid
+        if len(rows) < 500:
+            break
+    with db_lock:
+        c3 = db.cursor()
+        remaining = c3.execute(
+            "SELECT COUNT(*) FROM agent_shared_knowledge WHERE obs_key='' OR obs_key IS NULL"
+        ).fetchone()[0]
+    if remaining == 0:
+        log.info("[knowledge] sync complete, all data migrated to OBS")
+        # 不 return——继续每小时检查新增的 obs_key 为空的记录
+    # 补扫本地 project-info 基线文件（OBS 代码之前 onboard 的 repo 没有 DB baseline 记录）
+    try:
+        _sync_baseline_files()
+    except Exception as e:
+        log.error(f"[knowledge] sync baseline files error: {e}")
+    log.info(f"[knowledge] sync pass done in {time.time() - _t0:.1f}s "
+             f"scanned={_scanned} synced={_synced} failed={_failed} remaining={remaining}")
+    # Issue #103：清理 7 天前的 failed 队列记录
+    try:
+        _cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        with db_lock:
+            db.cursor().execute(
+                "DELETE FROM knowledge_write_queue "
+                "WHERE queue_status='failed' AND created_at < ?",
+                (_cutoff,))
+            db.commit()
+    except Exception:
+        pass
+
+
 async def knowledge_sync_loop():
     """后台定时同步老数据到 OBS——每小时一次，分批 500 条。
 
@@ -957,7 +1088,9 @@ async def knowledge_sync_loop():
 
     while True:
         # 并发保护：检查是否有其他实例正在执行
-        running = get_meta_value(SYNC_LOCK_KEY)
+        # 架构守护 N2：锁检查/抢锁/释放也是同步 DB，别压在事件循环上（每小时数次，
+        # 但与后台 pass 的 db_lock 争用时会造成秒级阻塞）。
+        running = await asyncio.to_thread(get_meta_value, SYNC_LOCK_KEY)
         if running:
             try:
                 running_ts = float(running)
@@ -969,118 +1102,15 @@ async def knowledge_sync_loop():
                 pass  # 值不是时间戳 → 视为过期 → 继续执行
 
         # 抢锁
-        set_meta_value(SYNC_LOCK_KEY, str(time.time()))
+        await asyncio.to_thread(set_meta_value, SYNC_LOCK_KEY, str(time.time()))
 
         try:
-            cursor = 0
-            while True:
-                with db_lock:
-                    c = db.cursor()
-                    rows = c.execute(
-                        "SELECT id, file_path, scope, repo_key, agent_type, issue_num "
-                        "FROM agent_shared_knowledge WHERE (obs_key='' OR obs_key IS NULL) AND id>? ORDER BY id LIMIT 500",
-                        (cursor,)
-                    ).fetchall()
-                if not rows:
-                    break
-                for row in rows:
-                    rid, file_path, scope, repo_key, agent_type, issue_num = row
-                    if rid in _sync_not_found:
-                        continue
-                    try:
-                        # 兼容 file_path 格式：write_knowledge/builder 用 WORKSPACE_DIR 相对（含 provider 前缀），
-                        # member 文档：用 file_path 生成
-                        from src.kernel.repo_key import workspace_repo_dir
-                        _ws_repo = workspace_repo_dir(repo_key)
-                        _ws_repo_rel = os.path.relpath(_ws_repo, WORKSPACE_DIR)
-                        if file_path.startswith(_ws_repo_rel + "/"):
-                            full_path = os.path.join(WORKSPACE_DIR, file_path)
-                        else:
-                            full_path = os.path.join(_ws_repo, file_path)
-                        if not os.path.isfile(full_path):
-                            _sync_not_found.add(rid)
-                            log.error(f"[knowledge] sync skip id={rid}: file not found {full_path} (repo may be deleted)")
-                            continue
-                        content = ""
-                        with open(full_path, encoding="utf-8") as f:
-                            content = f.read()
-                        if content:
-                            # Issue #190：按 scope 生成 storage_key（含 provider 前缀）
-                            _obs_prefix = knowledge_obs_prefix(repo_key)
-                            _sync_name = ""
-                            _sync_desc = ""
-                            if scope == "member":
-                                # Issue #190：从 file_path 提取 member/ 或 agent/ 后的相对路径
-                                # 不用 replace（file_path 含 owner/repo 时会导致路径重复）
-                                for marker in ("member/", "agent/"):
-                                    idx = file_path.find(marker)
-                                    if idx >= 0:
-                                        _rel = file_path[idx:]
-                                        break
-                                else:
-                                    _rel = os.path.basename(file_path)
-                                storage_key = f"{_obs_prefix}/{_rel}"
-                            elif scope == "baseline":
-                                _fname = os.path.basename(file_path)
-                                storage_key = f"{_obs_prefix}/project-info/{_fname}"
-                                _sync_name = BASELINE_NAME_MAP.get(_fname, BASELINE_NAME_FALLBACK)
-                                _sync_desc = BASELINE_DESC_MAP.get(_fname, BASELINE_DESC_FALLBACK)
-                            else:
-                                # 共享知识：project/issue/issue_agent
-                                storage_key = knowledge_storage_key(repo_key, scope, agent_type or "", issue_num or 0)
-                            storage.save_bytes(storage_key, content.encode("utf-8"))
-                            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
-                            with db_lock:
-                                c2 = db.cursor()
-                                # UPDATE 补 source/name/description（COALESCE 空值不覆盖）
-                                c2.execute(
-                                    "UPDATE agent_shared_knowledge SET obs_key=?, content_hash=?, "
-                                    "source=COALESCE(NULLIF(source, ''), CASE WHEN scope='baseline' THEN 'system' "
-                                    "WHEN scope='member' THEN 'manual' ELSE 'agent' END), "
-                                    "name=COALESCE(NULLIF(name, ''), ?), "
-                                    "description=COALESCE(NULLIF(description, ''), ?) "
-                                    "WHERE id=?",
-                                    (storage_key, content_hash,
-                                     _sync_name,
-                                     _sync_desc,
-                                     rid)
-                                )
-                                db.commit()
-                    except Exception as e:
-                        
-                        log.warning(f"[knowledge] sync failed id={rid}: {e}")
-                    cursor = rid
-                if len(rows) < 500:
-                    break
-            with db_lock:
-                c3 = db.cursor()
-                remaining = c3.execute(
-                    "SELECT COUNT(*) FROM agent_shared_knowledge WHERE obs_key='' OR obs_key IS NULL"
-                ).fetchone()[0]
-            if remaining == 0:
-                log.info("[knowledge] sync complete, all data migrated to OBS")
-                # 不 return——继续每小时检查新增的 obs_key 为空的记录
-            # 补扫本地 project-info 基线文件（OBS 代码之前 onboard 的 repo 没有 DB baseline 记录）
-            try:
-                _sync_baseline_files()
-            except Exception as e:
-                log.error(f"[knowledge] sync baseline files error: {e}")
-            # Issue #103：清理 7 天前的 failed 队列记录
-            try:
-                _cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                with db_lock:
-                    db.cursor().execute(
-                        "DELETE FROM knowledge_write_queue "
-                        "WHERE queue_status='failed' AND created_at < ?",
-                        (_cutoff,))
-                    db.commit()
-            except Exception:
-                pass
+            await asyncio.to_thread(_knowledge_sync_pass, storage)
         except Exception as e:
             log.error(f"[knowledge] sync error: {e}")
         finally:
             # 释放锁
-            set_meta_value(SYNC_LOCK_KEY, "")
+            await asyncio.to_thread(set_meta_value, SYNC_LOCK_KEY, "")
         await asyncio.sleep(3600)
 
 def _sync_baseline_files():

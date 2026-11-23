@@ -587,16 +587,14 @@ def _render_files(org_id: str) -> dict[str, str]:
     return files
 
 def _clone_url(repo_key: str) -> str:
-    from src.kernel.repo_key import parse_repo_key
+    """clone 地址只走 runtime 契约（clone_endpoint 单点派生）。
 
-    provider, owner, name = parse_repo_key(repo_key)
-    hosts = {
-        "gitcode": "https://gitcode.com",
-        "github": "https://github.com",
-        "gitee": "https://gitee.com",
-        "gitlab": "https://gitlab.com",
-    }
-    return f"{hosts.get(provider, hosts['gitcode'])}/{owner}/{name}.git"
+    旧实现内置 hosts 字典：与平台卡双真源，自建域名/新平台必错；错误时退回
+    卡外默认（gitcode）又会把 gitee/github 仓 clone 到错平台。
+    """
+    from src.domains.runtime import public as _runtime_public
+
+    return _runtime_public.clone_url(repo_key)
 
 
 _ANALYSIS_SYNC_TIMERS: dict[str, threading.Timer] = {}

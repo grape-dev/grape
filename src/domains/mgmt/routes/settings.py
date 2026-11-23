@@ -846,43 +846,64 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
             "code": 403, "error_code": "PERMISSION_DENIED",
             "message": "无权限操作，请联系托管人或管理员"
         })
+    def _assert_bot_username_free(name: str) -> None:
+        """FR-12.3：bot 用户名与真人账号冲突检查（**写之前**做）。
+
+        旧实现先 update_managed_repo_bot_token 再校验，冲突时返回 400，
+        但令牌已经落库 —— 半写状态（2026-11-22 评审补强①）。
+        """
+        if not name:
+            return
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+        try:
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                _c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) "
+                           "AND status=1 LIMIT 1", (name,))
+                if _c.fetchone():
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "BOT_USERNAME_CONFLICT",
+                        "message": f"Bot 用户名 '{name}' 与真人账号冲突，该用户的操作将被自循环过滤静默忽略"
+                    })
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 查询失败不阻断
+
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
         from src.kernel.token_resolver import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
+        _verified_login = ""
         try:
-            _vcs_provider.verify_token(token)
+            _info = _vcs_provider.verify_token(token) or {}
+            _verified_login = str((_info or {}).get("login") or "").strip()
         except Exception:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": "Bot Token 无效，请检查后重试"
             })
+        # 先校验最终会写下去的用户名（显式值优先，其次令牌所属账号），再写令牌
+        _assert_bot_username_free((body.bot_username or _verified_login or "").strip())
         _result = update_managed_repo_bot_token(repo_key, token)
         if not _result.get("ok"):
             raise HTTPException(status_code=404, detail={
                 "code": 404, "error_code": "REPO_NOT_FOUND",
                 "message": "仓库不存在或写入失败"
             })
+        # 存令牌顺手回填账号名：basic_password 平台（gitee）的 clone 用户名必须是
+        # 令牌所属账号 login，让平台自己回答「我是谁」，不再要求用户手填。
+        if _verified_login and not body.bot_username:
+            body.bot_username = _verified_login
+            _log.info(f"settings: bot username auto-filled from token owner: {_verified_login}")
         _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
     else:
         _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
-        # FR-12.3: bot 用户名与真人账号冲突检查
-        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
-        try:
-            with _sm_dl:
-                _c = _sm_db.cursor()
-                _c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (body.bot_username,))
-                if _c.fetchone():
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400, "error_code": "BOT_USERNAME_CONFLICT",
-                        "message": f"Bot 用户名 '{body.bot_username}' 与真人账号冲突，该用户的操作将被自循环过滤静默忽略"
-                    })
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # 查询失败不阻断
+        # 冲突校验已在上面的写令牌之前完成（无令牌、只改用户名时在此校验）
+        if not (body.bot_token and not _is_placeholder(body.bot_token)):
+            _assert_bot_username_free(body.bot_username.strip())
         update_managed_repo_bot_username(repo_key, body.bot_username)
     # FR-20.11: 返回 warning + related_repos
     _response = {"message": "GitCode Repo 配置已更新"}

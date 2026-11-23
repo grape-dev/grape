@@ -446,9 +446,11 @@ esac
 log "Install dir: $INSTALL_DIR | Device: $DEVICE | Controller: $SERVER | Arch: $TARGET_ARCH | Mode: $([ "$ROOT_MODE" = 1 ] && echo root/systemd || echo user/nohup)"
 
 # ===== 1. 准备 Python >= 3.10 =====
-# 优先级：系统 python3.12/3.11/3.10/python3 → 包内自带解释器（python-<arch>/ 分目录，
-# standalone 免编译；arch 由第 3.5 步按 TARGET_ARCH 选取；旧包 python/ 单目录仅为读取兜底）
-# 注意：包内解释器要等第 3 步解压后才可用，故此处只探测系统 python，第 3 步后再补探测包内。
+# 优先级（bundled-first-2026-11-20）：包内自带解释器（python-<arch>/ 分目录，standalone
+# 免编译）→ 系统 python3.12/3.11/3.10/python3 兜底。
+# 理由：包内 wheels 是按捆绑解释器版本打的（当前 cp312），优先用系统 Python 时
+# ABI 对不上（3.11 装 cp312 轮子、3.14 装 cp312 轮子都失败），离线安装必回退在线。
+# 包内解释器要等第 3 步解压后才可用，故此处只做系统探测留作兜底。
 pick_python() {
   for py in python3.12 python3.11 python3.10 python3; do
     if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
@@ -457,9 +459,10 @@ pick_python() {
   done
   return 1
 }
-PY="$(pick_python || true)"
-if [ -z "$PY" ]; then
-  log "No system Python>=3.10 found, will try the bundled interpreter (auto-detected after extraction)"
+PY=""   # 留空：第 3.5 步先试包内捆绑解释器，失败才回落到系统 Python
+_PY_SYSTEM="$(pick_python || true)"
+if [ -z "$_PY_SYSTEM" ]; then
+  log "No system Python>=3.10 found; bundled interpreter will be used (auto-detected after extraction)"
 fi
 
 # ===== 2. 下载运行包（公开端点，无需鉴权）=====
@@ -733,6 +736,11 @@ if [ -z "$PY" ]; then
     log "Hint: install a system Python>=3.10 first (apt/yum install python3.12 python3.12-venv), then retry"
   fi
 fi
+if [ -z "$PY" ] && [ -n "$_PY_SYSTEM" ]; then
+  PY="$_PY_SYSTEM"
+  log "Warning: bundled Python unusable on this machine; falling back to system Python ($PY)." \
+      "Offline wheels are built for the bundled interpreter version -- if dependency install fails, retry online or use a package matching this Python version"
+fi
 if [ -z "$PY" ]; then
   fail "Python>=3.10 not found; install a system Python>=3.10 first (apt/yum install python3.12 python3.12-venv) and retry, or re-download the install package from an upgraded controller (should contain python-$TARGET_ARCH/)"
 fi
@@ -840,8 +848,10 @@ _install_grape_online() {
     && log "grape CLI installed (online): $VENV/bin/grape" \
     || log "Warning: grape-cli online install failed, no `grape` inside agent yet; worker runs fine without it"; return 0
 }
-if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
-  if "$PIP_CMD" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
+# grape-cli-offline-fix-2026-11-20: 轮子名是 grape_cli-*.whl（下划线），发行名是 grape_cli；
+# 原写法 glob `grape-*.whl` + `pip install grape` 都匹配不上，离线分支形同虚设，永远走在线。
+if ls "$INSTALL_DIR/wheels"/grape*.whl >/dev/null 2>&1; then
+  if "$PIP_CMD" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape_cli 2>/dev/null; then
     chmod +x "$VENV/bin/grape" 2>/dev/null || true
     log "grape CLI installed (offline wheel, bundled): $VENV/bin/grape"
   else
@@ -1097,6 +1107,55 @@ else
   log "Warning: codegraph check FAILED ('codegraph --version' not available); worker runs fine, knowledge baseline will be degraded"
 fi
 
+
+# ===== 后台启动：真脱离父会话（容器 `curl | bash` 场景必修，2026-11-20）=====
+# 容器/无 systemd 时旧实现 `setsid nohup "$START_SCRIPT" ... &`(a) 依赖脚本可执行位与 shebang，
+# 失败时因为 `&` 不会中止脚本、日志看起来仍正常；(b) 与验证可用的手动命令
+# `setsid bash /opt/grape/start-worker.sh &` 不等价。父 shell 退出后进程被一起回收。
+# 这里改为显式 bash + setsid --fork，并校验新进程 SID ≠ 安装脚本 SID（同 SID 就是没脱离），
+# 失败时打印手动命令而不是假装成功。
+# 用法：start_background_detached "<脚本>" "<日志>" → 成功 echo PID，返回 0；未脱离返回 2；失败 1
+start_background_detached() {
+  local _script="${1:?}" _log="${2:?}"
+  local _pidfile="$INSTALL_DIR/data/worker.pid"
+  local _self_sid _pid _sid _i
+  _self_sid="$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  rm -f "$_pidfile" 2>/dev/null || true      # 旧 pidfile 会掩盖新进程
+  local _setsid_fork=""
+  if command -v setsid >/dev/null 2>&1; then
+    # --fork 是 util-linux 2.24+ 才有的；先探测，不支持就退到普通 setsid（它会按需 fork）
+    if setsid --fork true >/dev/null 2>&1; then _setsid_fork=1; fi
+  fi
+  # 双 fork：放进短命子 shell 里启动，父 shell 立刻退出 → 进程被 init/pid1 收养，
+  # 与安装脚本既不同会话、也无父子关系（容器里 `curl | bash` 结束时最彻底的一种脱离）。
+  if [ -n "$_setsid_fork" ]; then
+    ( setsid --fork bash "$_script" >> "$_log" 2>&1 < /dev/null & )
+  elif command -v setsid >/dev/null 2>&1; then
+    ( setsid bash "$_script" >> "$_log" 2>&1 < /dev/null & )
+  else
+    log "Warning: setsid not found; falling back to nohup (process may not survive shell exit in containers)"
+    ( nohup bash "$_script" >> "$_log" 2>&1 < /dev/null & )
+  fi
+  disown 2>/dev/null || true
+  for _i in $(seq 1 20); do
+    [ -s "$_pidfile" ] && break
+    sleep 0.5
+  done
+  _pid="$(tr -d '[:space:]' < "$_pidfile" 2>/dev/null || true)"
+  if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
+    return 1
+  fi
+  _sid="$(ps -o sid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+  if [ -n "$_self_sid" ] && [ "$_sid" = "$_self_sid" ]; then
+    log "Warning: worker pid $_pid is still in the installer session (sid=$_sid); it may die when this shell exits"
+    log "         Manual fix: setsid bash $START_SCRIPT > $INSTALL_DIR/data/daemon.log 2>&1 &"
+    printf '%s\n' "$_pid"
+    return 2
+  fi
+  printf '%s\n' "$_pid"
+  return 0
+}
+
 # ===== 6. 生成启动脚本并启动（Issue #3418：只作用于本实例）=====
 # _has_systemd 已在第 0 节定义（容器环境 PID 1 非 systemd → root 也回退 nohup）。
 # 跨实例互斥：同机其他安装目录已登记同一 unit → fail-fast，不动它的进程/unit。
@@ -1346,13 +1405,26 @@ unset _hermes_home
   #   * PID 快照：判活只认启动后新增的 PID，否则旧实例忽略 SIGTERM 慢退出时会被判成功；
   #   * 日志水位：注册判据只认水位之后的行。若在启动后（哪怕判活窗口之后）采样，新 worker
   #     在窗口内写下的注册行会被当成历史行，永远读不到 → 健康新版被误判未注册并回滚。
-  _pids_before=" $(pgrep -f "${_pat}.*-m ${WORKER_MODULE_PAT}" 2>/dev/null | tr '\n' ' ')"
+  # set -euo pipefail 下 pgrep 无匹配返回 1 → 管道失败 → 赋值失败 → 整个脚本在"启动前一行"
+  # 静默中止（2026-11-21 容器实例实测：日志停在 hermes 模型校验之后，什么都不打印，
+  # worker 未启动，用户只能手动 setsid 起）。必须 || true 吃掉无匹配的退出码。
+  _pids_before="$(pgrep -f "${_pat}.*-m ${WORKER_MODULE_PAT}" 2>/dev/null | tr '\n' ' ' || true)"
+  _pids_before=" $_pids_before"
   _log_start="$(log_line_watermark "$INSTALL_DIR/data/worker.log")"
   # 限域停止本实例（Issue #3418）：不再用裸模块名 pkill，避免误杀异构 worker
   stop_own_worker
-  # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
-  setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
-  disown 2>/dev/null || true
+  # 脱离终端启动：显式 bash + setsid --fork，并校验新进程已脱离本安装脚本的会话
+  # （容器 `curl | bash` 场景下这是"日志正常但进程已死"的唯一防线，见函数注释）
+  _detach_rc=0
+  _detach_pid="$(start_background_detached "$START_SCRIPT" "$INSTALL_DIR/data/worker.log")" || _detach_rc=$?
+  if [ "$_detach_rc" = "1" ]; then
+    log "Warning: background start could not confirm a live daemon (see $INSTALL_DIR/data/worker.log)"
+    log "         Manual fix: setsid bash $START_SCRIPT > $INSTALL_DIR/data/daemon.log 2>&1 &"
+  elif [ "$_detach_rc" = "2" ]; then
+    log "Warning: daemon $_detach_pid did not detach from this shell session (container?)"
+  else
+    log "Worker daemon started detached (pid ${_detach_pid:-unknown})"
+  fi
   # 启动验证 + 失败回滚（2026-10-08）：原逻辑只打一行"启动失败"就继续走完脚本退出，
   # 旧 agent 已被杀、新 agent 没起来 → worker 永久失联无人拉回（k8gtld1 实锤）。
   # 现在验证两件事：进程活着 + 30s 内注册成功（日志出现 registered）。
@@ -1372,6 +1444,13 @@ unset _hermes_home
   if wait_runtime_registered "$INSTALL_DIR/data/worker.log" "$((_log_start + 1))" "$REGISTER_LOG" "$_reg_timeout_loops"; then
     registry_register "$_alive"
     log "Started in background and registered (pid $_alive, unit $SERVICE_NAME), log: $INSTALL_DIR/data/worker.log"
+    _dp="$(tr -d '[:space:]' < "$INSTALL_DIR/data/worker.pid" 2>/dev/null || true)"
+    if [ -n "$_dp" ] && ! kill -0 "$_dp" 2>/dev/null; then
+      log "Warning: daemon $_dp is gone right after registration (container killed it?)"
+      log "         Last lines of $INSTALL_DIR/data/worker.log:"
+      tail -n 5 "$INSTALL_DIR/data/worker.log" 2>/dev/null | sed 's/^/           /' || true
+      log "         Manual fix: setsid bash $START_SCRIPT > $INSTALL_DIR/data/daemon.log 2>&1 &"
+    fi
   elif restore_upgrade_backup nohup; then
     log "New agent process alive but not registered within $((_reg_timeout_loops * 3))s -- rolled back (new version may not reach the master, e.g. a 502 window upgrade)"
   else

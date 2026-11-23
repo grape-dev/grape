@@ -44,17 +44,17 @@ ORG_NODES = [
     {
         "id": "org_intake", "tag": "issue", "skill": "org-intake-cli",
         "mode": "emit", "next": "org_dispatch", "handoff": "a2a",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
     {
         "id": "org_dispatch", "tag": "coding", "skill": "org-dispatch-cli",
         "mode": "emit", "next": "org_aggregate", "handoff": "a2a",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
     {
         "id": "org_aggregate", "tag": "qa", "skill": "org-aggregate-cli",
         "mode": "emit", "next": "done", "handoff": "complete",
-        "skip": [], "enabled": True, "engine_runtime_ids": [],
+        "skip": [], "enabled": True, "auto_advance": True, "engine_runtime_ids": [],
     },
 ]
 

@@ -1029,24 +1029,36 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
 
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
+    # Issue #3563：身份获取改经 with_oauth_token 包装——过期 token（上游 401）走
+    # 刷新重试，仍失败统一 401 reauth_required（detail 带 provider，Spec v2），
+    # 替代零信息量 502；其余上游异常剥离内部 URL 后短消息化（原文仅落日志）。
     from src.kernel.token_resolver import create_provider
+    from src.api.oauth_token import sanitize_upstream_error
     from src.domains.runtime.public import VcsApiClient
     try:
-        _uinfo = create_provider(provider).verify_token(api_token)
+        # 捕获 with_oauth_token 实际使用的 token（刷新成功后重取 repo 信息用旧 token 会再 401）
+        _used_token = {"v": api_token}
+        def _verify_identity(t, _p=provider):
+            _used_token["v"] = t
+            return create_provider(_p).verify_token(t)
+        _uinfo = with_oauth_token(user, provider, _verify_identity)
         login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
         if not login:
+            # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
-        _repo_info = VcsApiClient(provider, api_token, login, name).get_repo_info()
+        _repo_info = VcsApiClient(provider, _used_token["v"], login, name).get_repo_info()
         if isinstance(_repo_info, dict) and str(_repo_info.get("error", "")).strip() == "HTTP 404":
             return {"exists": False}
         if isinstance(_repo_info, dict) and _repo_info.get("error"):
+            _short = sanitize_upstream_error(_repo_info.get("error"))
             raise HTTPException(status_code=502, detail={
-                "code": 502, "message": f"检查失败: {_repo_info['error']}"})
+                "code": 502, "message": f"检查失败: {_short}"})
         return {"exists": True, "full_name": f"{login}/{name}"}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+        log.warning(f"check_repo_name failed (provider={provider}, user={user.get('id', '')}): {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {sanitize_upstream_error(e)}"})
 
 
 @router.post("/create", operation_id="repos_create", summary="Create repository (optionally auto-host)", description="Creates a repository via the VCS API; optionally auto-hosts it afterwards.")
@@ -2853,13 +2865,18 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     from src.kernel.repo_key import split_owner_repo, to_repo_key
     from src.domains.runtime.public import load_project_info
     # 前缀必须解析真实平台：裸 to_repo_key 默认 gitcode:，gitee/github 托管仓会读错 key
-    # （2026-11-14 实锤：gitee:yang-aiwu-new/... 的 project-info 返回 gitcode: 前缀 + 空基线）
+    # （2026-11-14 实锤：gitee:<ACCOUNT>/... 的 project-info 返回 gitcode: 前缀 + 空基线）
     from src.domains.mgmt.user.db import resolve_managed_repo_key
     repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     if user.get("auth_type") == "session_token":
-        _bound_owner, _bound_repo = split_owner_repo(user.get("repo_key") or "")
-        if _bound_owner and (_bound_owner != owner or _bound_repo != repo):
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权读取该项目知识（仓库作用域不匹配）"})
+        # 场景化作用域（src/kernel/scene_policy.py）：PROJECT_INFO = repo_bound
+        from src.kernel.scene_policy import Scene as _Scene, decide as _decide_scene
+
+        _d = _decide_scene(_Scene.PROJECT_INFO, user.get("repo_key") or "", repo_key)
+        if not _d.ok:
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "error_code": _d.code,
+                "message": f"无权读取该项目知识（{_d.message}）"})
     files, meta = load_project_info(repo_key)
     return {"repo_key": repo_key, "files": files, "meta": meta}
 
@@ -3032,6 +3049,19 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     """
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    # 作用域判定统一收敛到场景策略（src/kernel/scene_policy.py，2026-11-22）：
+    # 场景 = GIT_CREDENTIAL（repo_bound + 同平台；`chat:<uid>`/空作用域直接拒绝并给
+    # SESSION_NOT_REPO_BOUND，提示调用方先绑仓）。策略表是唯一真源，调用点只声明场景。
+    from src.kernel.repo_key import to_repo_key as _trk
+    from src.kernel.scene_policy import Scene as _Scene, decide as _decide_scene
+
+    _target_rk = _trk(f"{provider}:{_strip_provider_prefix(owner)}/{repo}")
+    _scope = _decide_scene(_Scene.GIT_CREDENTIAL, user.get("repo_key") or "", _target_rk,
+                           target_provider=provider)
+    if not _scope.ok:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": _scope.code,
+            "message": f"无权使用该仓库的 git 凭据（{_scope.message}）"})
     from src.kernel.repo_key import to_repo_key
 
     # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
@@ -3064,30 +3094,84 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
 
-        def _user():
+        def _user(**_kw):
+            """存量平台的用户档：**devops 先归属者，再会话用户**。
+
+            2026-11-21 P0 修复：此前这里只看会话身份，而 devops 任务的会话是仓库
+            身份（`agent_tasks.user_id=0`）→ `_getter("", user_id=0)` 恒空，于是
+            gitcode/github 的 path-B 仓（bot 档被 db 层守卫按设计挡掉）整条链断，
+            表现为 git-credential 502/424。owner 回落是 path-B 的原始语义（R2.1），
+            gitee/gitlab 的 generic 分支早就这么做，这里补齐。
+            chat 分支不走 owner（否则非 owner 会话会拿 owner 的 PAT → 权限放大）。
+            """
             try:
                 import importlib
                 _mod, _fn = _getters["user"]
                 _getter = getattr(importlib.import_module(_mod), _fn)
+                if user.get("agent_type") != "chat":
+                    from src.domains.mgmt.user.db import get_host_user_id, get_host_vcs_username
+                    try:
+                        _huid = str(get_host_user_id(_rk) or "")
+                    except Exception:
+                        _huid = ""
+                    if _huid and _huid != "0":
+                        _huser = get_host_vcs_username(_rk) or ""
+                        if not _huser:
+                            # OAuth 档按 username 匹配；空 username 取不到，回落 owner 段
+                            _huser = (_rk.split(":", 1)[-1].split("/") or [""])[0]
+                        _t = _getter(_huser, user_id=_huid) or ""
+                        if _t:
+                            return _t, "owner_user", None
                 uid = user.get("id") or 0
                 username = user.get("username") or ""
                 if not username and has_user_id(uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
-                return _getter(username, user_id=uid) or "", "", None
+                _t = _getter(username, user_id=uid) or ""
+                return _t, ("session_user" if _t else ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
     else:
-        # 其余在册平台（gitee/gitlab…）：仓库级 bot token 走端口（token_storage_field），
-        # 用户 token 走 provider 无关解析（PAT→OAuth），零平台分支。
+        # 其余在册平台（gitee/gitlab…）：仓库级 bot token 与用户 token 都由
+        # **同一个执行凭据选择器**回答（`TokenResolver.resolve_exec_token`），零平台分支。
+        #
+        # ── Issue #3713：这里曾自己直读 rc 行并做三段判定（empty/undecryptable/expired），
+        # 与策略链是两套实现 → 同一份 rc 行两条链给出两种答案：
+        #   换券链看得见 rc 行（守卫之外直读），建树链的 RepoBotToken._fetch 在 rc 读取
+        #   之前就按 path-B 返回空 → 私有 path-B 仓换券 200 / 建树 token 空 / refs=0。
+        # 现在三段判定只存在于选择器里（链首 `ExplicitRepoBotToken`），本路由只做渲染：
+        #   stage == "" → 用返回的 token；stage ∈ CREDENTIAL_STAGES → 424 + code + stage。
+        # bypass_path_b 仍然一行都不许出现：它会同时解锁 RepoBot 与 GlobalBot 两级，
+        # 把「仓库无 bot、平台有全局 bot」的 path-B 私仓推到全局 bot 身份上（403 且难查）。
         def _bot():
             try:
                 from src.kernel.token_resolver import TokenResolver, create_provider
-                return TokenResolver(create_provider(provider)).read_stored_token(rk) or "", "", None
+                _sel = TokenResolver(create_provider(provider)).resolve_exec_token(rk)
+                return _sel.token, (_sel.stage or ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
 
-        def _user():
+        def _owner_user():
+            """仓库归属者（host_user_id）的凭据。"""
+            try:
+                from src.api.deps import get_user_token_for
+                from src.domains.mgmt.user.db import get_host_user_id, get_host_vcs_username
+                _huid = str(get_host_user_id(rk) or "").strip()
+                if not _huid or _huid in ("0", "None"):
+                    return "", "", None
+                _huser = get_host_vcs_username(rk) or ""
+                if not _huser:
+                    # host_vcs_username 可能为空（本环境实测为空）：PAT 档按 user_id 命中，
+                    # 但 OAuth 档按 username 匹配 —— 回落仓库 owner 段，避免 OAuth-only 取不到。
+                    from src.kernel.repo_key import parse_repo_key
+                    _huser = (parse_repo_key(rk)[1:2] or [""])[0] or ""
+                _t = get_user_token_for(_huser, user_id=_huid, provider=provider) or ""
+                return _t, ("owner_user" if _t else ""), None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
+
+        def _session_user():
+            """当前会话用户的凭据。"""
             try:
                 from src.api.deps import get_user_token_for
                 username = user.get("username") or ""
@@ -3095,12 +3179,46 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 if not username and has_user_id(uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(uid) or {}).get("username", "")
-                return get_user_token_for(username, user_id=str(uid), provider=provider) or "", "", None
+                _t = get_user_token_for(username, user_id=str(uid), provider=provider) or ""
+                return _t, ("session_user" if _t else ""), None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
 
+        def _user(chat_first: bool = False):
+            """用户档组合。
+
+            chat_first=True（chat / Web 会话）：**只取会话用户** —— 聊天里操作仓库的
+              身份必须是发起人。此前第二档回落到归属者（`_owner_user`），非 owner 的
+              chat 会话在自己没有凭据时就会拿到 owner 的 PAT，等于代签 + 权限放大
+              （QA A9，2026-11-21）。现在取不到就走外层：bot → 424 可判定码。
+            chat_first=False（devops 事件）：归属者优先 —— 路径 B 的原始语义。
+            """
+            if chat_first:
+                return _session_user()
+            tok, st, ex = _owner_user()
+            if tok:
+                return tok, st, ex
+            tok2, st2, ex2 = _session_user()
+            return tok2, st2, (ex2 or ex)
+
+    def _raise_explicit_bot_unusable(stage: str):
+        """渲染选择器给的分类（Issue #3713：分类统一、措辞在本面）。
+
+        只在 `exc is None` 时调用——选择器**分类**（empty/undecryptable/expired）是
+        「显式配的凭据不能用」，必须显式失败；而 `_bot()` 抛异常（读库/造 provider 失败）
+        是另一回事，保持原语义：交给后面的 502 分支带 stage 上报（#1063）。
+        """
+        _why = ("密文无法解密（密钥不匹配或行被破坏）" if stage == "undecryptable"
+                else "已标记过期" if stage == "expired"
+                else "值为空或被撤销")
+        raise HTTPException(status_code=424, detail={
+            "code": "BOT_CREDENTIAL_INVALID",
+            "stage": stage,
+            "message": f"{_provider_display(provider)} 该仓库 bot 凭据不可用（{_why}），请轮换",
+        })
+
     if user.get("agent_type") == "chat":
-        tok, stage, exc = _user()
+        tok, stage, exc = _user(chat_first=True)
         if not tok:
             alt, alt_stage, alt_exc = _bot()
             tok = alt
@@ -3108,11 +3226,19 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 stage, exc = alt_stage, alt_exc
     else:
         tok, stage, exc = _bot()
+        if not tok and stage and exc is None:
+            # 选择器判定「显式 rc 行存在但不可用」→ 显式失败，不降级到用户身份
+            # （机器身份与用户身份混一根链，审计与提交署名都会失真）。
+            _raise_explicit_bot_unusable(stage)
         if not tok:
             alt, alt_stage, alt_exc = _user()
             tok = alt
             if not tok and not stage:
                 stage, exc = alt_stage, alt_exc
+    if not tok and stage and exc is None:
+        # chat 面优先会话用户（QA A9：聊天里必须是发起人身份），但会话用户也没有时，
+        # 「显式配的 rc 行不可用」比「未配置任何凭据」更准确——分类由选择器给。
+        _raise_explicit_bot_unusable(stage)
     if tok:
         log.debug("git_credential_ok", extra={
             "event": "git_credential_ok",
@@ -3120,10 +3246,22 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
             "repo_key": rk,
             "auth_type": user.get("auth_type", ""),
             "agent_type": user.get("agent_type", ""),
+            "token_stage": stage or "",
             "duration_ms": round((time.monotonic() - _start) * 1000),
         })
         return tok
-    raise HTTPException(status_code=502, detail={"code": 502, "message": f"{_provider_display(provider)} 仓库 token 解析失败"})
+    # 不再用 502 表达配置问题（2026-11-21）：全空且无异常 = 该仓没配任何凭据，
+    # 这是可判定、可自助修复的状态；只有 stage/exc 记录了具体异常才是上游故障。
+    if exc:
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "stage": stage or "",
+            "message": f"{_provider_display(provider)} 仓库 token 解析失败（{type(exc).__name__}）",
+        })
+    raise HTTPException(status_code=424, detail={
+        "code": "CREDENTIAL_NOT_CONFIGURED",
+        "message": f"{_provider_display(provider)} 该仓库未配置任何可用凭据（无 bot，也无归属者/会话用户凭据）",
+    })
 
 
 @router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
@@ -3142,13 +3280,42 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     token/凭据 URL 落日志；现场由 request_id 关联全局 handler 的 500 记录。
     """
     token = _repo_platform_token(owner, repo, user, p)
-    _gh = _clone_host(p)
     _o = _strip_provider_prefix(owner)
+    # 用户名按平台卡 clone_auth 派生、地址同源——过去 username 恒 "x-access-token"，
+    # 与 gitee 卡的 clone_auth=basic_password（真实账号 + 令牌当密码）不符，clone 必被拒。
+    from src.kernel.repo_key import to_repo_key as _to_repo_key
+    from src.domains.runtime import public as _runtime_public
+
+    CloneEndpointError = _runtime_public.CloneEndpointError
+    clone_params = _runtime_public.clone_params
+
+    _repo_key_obj = _to_repo_key(f"{p}:{_o}/{repo}")
+    try:
+        _cp = clone_params(_repo_key_obj)
+    except CloneEndpointError as e:
+        raise HTTPException(status_code=503, detail={
+            "code": "clone_endpoint_unavailable",
+            "message": f"{_provider_display(p)} clone 端点不可派生（平台卡缺 host）: {e}",
+        })
+    # basic_password 平台：用户名由**令牌本身**解析（令牌所属账号 login），
+    # 不再依赖人在卡上填的 bot_username（实测填组织名/grape 账号名 → 上游 403）。
+    # 解析失败回落卡/owner 派生，并用 username_source 把档位报给调用方。
+    _username = _cp["username"]
+    _username_src = ""
+    try:
+        from src.domains.runtime import public as _runtime_public
+
+        _user_for_token = _runtime_public.username_for_token
+
+        _username, _username_src = _user_for_token(p, token, _repo_key_obj)
+    except Exception as e:  # noqa: BLE001 - 派生失败不阻断换券，回落卡值
+        log.debug(f"git-credential dynamic username failed: {e}")
     return {
         "provider": p,
-        "username": "x-access-token",
+        "username": _username,
+        "username_source": _username_src,
         "password": token,
-        "clone_url": f"https://{_gh}/{_o}/{repo}.git",
+        "clone_url": _cp["clone_url"],
         "expires_in": _CREDENTIAL_TTL,
     }
 

@@ -152,3 +152,12 @@ def repo_segment(owner: str, repo: str) -> str:
     import urllib.parse
     return (f"repos/{urllib.parse.quote(owner, safe='')}/"
             f"{urllib.parse.quote(repo, safe='')}")
+
+
+# ── 通道能力位（Issue #3632 后继：checks/status 通道不再按平台名分派）──
+# 原生 check-runs 端点（GET /commits/{ref}/check-runs，GitHub 原生形态）。
+CHECK_RUNS_NATIVE = True
+# 原生 combined status 端点（GET /commits/{ref}/status，ref 可直接是分支名）。
+STATUS_NATIVE = True
+# PR↔Issue 原生关联存储（GitHub 无：关联只是 body 文本，解除为幂等 no-op）。
+PR_ISSUE_LINK_NATIVE = False

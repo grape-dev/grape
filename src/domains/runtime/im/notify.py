@@ -34,6 +34,11 @@ from typing import Any, Iterable, Optional
 
 # Issue #3055：issue 编号判定/强转内核唯一入口
 from src.kernel.issue_ident import native_issue_number, is_actionable_issue_number
+from src.kernel.owner_db import db_pair
+
+# 本文件属 runtime 域，IM 引擎却在 mgmt 进程里执行：issue / repo_im_group_binding
+# 都是 runtime 基表，进程本域连接会 1146（通知因此静默不发）。绑 runtime owner 代理。
+db, db_lock = db_pair("runtime")
 
 log = logging.getLogger(__name__)
 
@@ -299,7 +304,6 @@ def _engine():
 def _issue_owner(repo_key: str, issue_number: "int | str") -> tuple[int, str, str]:
     """(user_id, conv_id, title) —— 通知目标缺失时为空值。"""
     try:
-        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             row = c.execute(
@@ -719,7 +723,6 @@ def notify_repo_group(repo_key: str, kind: str, text: str, *, issue_number: int 
         res["reason"] = "no_repo"
         return res
     try:
-        from src.kernel.session_manager import db, db_lock
         rows = []
         with db_lock:
             c = db.cursor()

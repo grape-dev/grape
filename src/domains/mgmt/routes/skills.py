@@ -495,6 +495,33 @@ def _version_from_content(content: str) -> str:
     return "—"
 
 
+def _validate_repo_param(repo: str) -> None:
+    """校验 repo 查询参数：空 / owner/repo / <provider>:owner/repo 合规，其余 400。
+
+    Issue #1790：不合规（裸仓库名、残留冒号、缺失 owner、多余路径段）必须显式报错，
+    不能静默回退到官方列表——否则前端把错参数当成功，看到的列表是错的。
+    平台前缀不硬编码：新平台接入后 <provider> 仍能通过，只校验结构。
+    """
+    if not repo:
+        return
+
+    def _bad(reason: str):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"repo 参数不合规（{reason}）: {repo!r}"})
+
+    _rest = repo
+    if ":" in repo:
+        _prefix, _rest = repo.split(":", 1)
+        if not _prefix or not _prefix.strip() or _prefix != _prefix.strip():
+            _bad("平台前缀为空或不合法")
+    if not _rest or _rest != _rest.strip():
+        _bad("owner/repo 为空或含首尾空格")
+    _segs = _rest.split("/")
+    if len(_segs) != 2 or not _segs[0] or not _segs[1]:
+        _bad("需为 owner/repo 两段且都非空")
+    if any(c.isspace() for c in _rest):
+        _bad("含空白字符")
+
+
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",                agent_type: str = "", category_id: int = 0,
                 cat_l1_id: int = 0, cat_l2_id: int = 0,
@@ -529,17 +556,22 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
 
     skills = []
     skill_ids: list[int] = []
-    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突
+    # 批量查分类名称（避免 N+1）— 在 db_lock 外查，避免 SQLite cursor 复用冲突。
+    # QA（#3648）：schema 缺列/缺表时分类名与分类树降级为空可接受，但禁止
+    # 裸 except 静默吞掉（Issue 事故形态之一就是「列表为空且无报错」），
+    # 必须 log.exception 留痕（堆栈进日志，可定位到具体缺失列/表）。
+    from src.kernel.config import log as _cat_log
     cat_map = {}
     try:
         for cat in list_skill_categories():
             cat_map[cat["id"]] = cat["name"]
     except Exception:
-        pass
+        _cat_log.exception("list_skills: list_skill_categories failed (分类名降级为空)")
     try:
         _cat_dict_map = {c["id"]: c for c in list_category_dict("skill")}
     except Exception:
         _cat_dict_map = {}
+        _cat_log.exception("list_skills: list_category_dict failed (分类路径降级为空)")
     total = 0
     try:
         total, _skill_rows = _rt_skills.skill_search(
@@ -572,8 +604,16 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                 "tags": parse_tags(raw_tags, limit=SKILL_MAX_TAGS),
             })
             skill_ids.append(r[0])
-    except Exception:
-        pass
+    except Exception as _search_exc:
+        # Issue #3648：schema 故障（如 skill 缺 cat_l1_id）不得伪装成 200 空列表。
+        # 记录完整堆栈并显式 5xx；前端/运维能据此定位，而不是被误导成「没有技能」。
+        from src.kernel.config import log
+        log.exception("list_skills: skill_search failed (schema/query error): %s",
+                      _search_exc)
+        raise HTTPException(status_code=503, detail={
+            "code": 503,
+            "message": "技能列表查询失败（数据库 schema 或查询异常），请查看服务端日志",
+        }) from _search_exc
 
     # 批量查 liked_by_me
     liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids) if skill_ids else {}

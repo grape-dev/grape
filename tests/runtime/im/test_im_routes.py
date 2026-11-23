@@ -156,3 +156,122 @@ def test_onboard_scan_binding_also_writes_installation(ui_db, monkeypatch):
                        "WHERE legacy_app_id='cli_onboard_proof'").fetchone()
     assert row == ("user", "1", "active"), row
     conn.close()
+
+
+# ---------- 全集群租约 → connected 口径（跨主控误报的回归） ----------
+
+def _seed_lease(db_path, installation_id, owner, expires_at):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS grape_t_channel_lease ("
+        " lease_key TEXT PRIMARY KEY, channel_type TEXT, installation_id TEXT,"
+        " lease_token TEXT, lease_owner TEXT, lease_expires_at TEXT,"
+        " lease_acquired_at TEXT, updated_at TEXT)")
+    conn.execute(
+        "INSERT OR REPLACE INTO grape_t_channel_lease"
+        " (lease_key, channel_type, installation_id, lease_token, lease_owner,"
+        "  lease_expires_at, lease_acquired_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        ("feishu:" + installation_id, "feishu", installation_id, "tok", owner,
+         expires_at, "2026-01-01 00:00:00", "2026-01-01 00:00:00"))
+    conn.commit()
+    conn.close()
+
+
+def _inst_id_of(db_path, app_id):
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id FROM grape_t_channel_installation WHERE legacy_app_id=?",
+                       (app_id,)).fetchone()
+    conn.close()
+    return row[0]
+
+
+def test_installations_connected_via_cluster_lease(ui_db):
+    """本机没连、但别的主控持有未过期租约 → connected=True 且 connected_on 指向持有者。"""
+    from src.domains.runtime.routes.im import im_installations
+
+    engine_wiring.sync_installation("user", owner_user_id="1234",
+                                    app_id="app_lease_live", app_secret="s")
+    inst_id = _inst_id_of(ui_db, "app_lease_live")
+    _seed_lease(ui_db, inst_id, "ecs-grape-master-004-abcd1234",
+                "2099-01-01 00:00:00")          # 空格口径、远期有效
+
+    row = im_installations(repo="", user=_user())["installations"][0]
+    assert row["connected"] is True
+    assert row["connected_on"] == "ecs-grape-master-004-abcd1234"
+
+
+def test_installations_expired_lease_is_not_connected(ui_db):
+    """租约已过期（空格口径）→ connected=False。"""
+    from src.domains.runtime.routes.im import im_installations
+
+    engine_wiring.sync_installation("user", owner_user_id="1234",
+                                    app_id="app_lease_dead", app_secret="s")
+    inst_id = _inst_id_of(ui_db, "app_lease_dead")
+    _seed_lease(ui_db, inst_id, "ecs-grape-master-001-abcd1234",
+                "2000-01-01 00:00:00")
+
+    row = im_installations(repo="", user=_user())["installations"][0]
+    assert row["connected"] is False
+    assert row["connected_on"] == ""
+
+
+def test_installations_iso_expiry_is_compared_as_time_not_string(ui_db):
+    """ISO 8601 到期串（acquire_channel_lease 口径）已过期 → 不得判成「未过期」。
+
+    字符串比较会因第 11 位 'T'(84) > ' '(32) 把同 UTC 日的 ISO 值恒判为未来，
+    这里钉住「解析成时间再比」的语义。
+    """
+    from src.domains.runtime.routes.im import im_installations
+
+    engine_wiring.sync_installation("user", owner_user_id="1234",
+                                    app_id="app_lease_iso", app_secret="s")
+    inst_id = _inst_id_of(ui_db, "app_lease_iso")
+    _seed_lease(ui_db, inst_id, "ecs-grape-master-002-abcd1234",
+                "2000-01-01T00:00:00.000000+00:00")
+
+    row = im_installations(repo="", user=_user())["installations"][0]
+    assert row["connected"] is False, "ISO 过期串被当成了未过期（字符串比较回归）"
+
+
+def test_lease_expiry_alive_accepts_both_formats(ui_db):
+    from datetime import datetime, timezone
+    from src.domains.mgmt.public import _lease_expiry_alive
+
+    now = datetime(2026, 11, 20, 20, 0, 0, tzinfo=timezone.utc)
+    assert _lease_expiry_alive("2026-11-20 20:03:00", now) is True
+    assert _lease_expiry_alive("2026-11-20T20:03:00.000000+00:00", now) is True
+    assert _lease_expiry_alive("2026-11-20 19:00:00", now) is False
+    assert _lease_expiry_alive("2026-11-20T10:00:00.000000+00:00", now) is False
+    assert _lease_expiry_alive("", now) is False          # 空到期按已失效
+    assert _lease_expiry_alive("garbage", now) is False   # 脏值按已失效
+
+
+# ---------- 生效路由（mgmt/routes/im.py，前端实际挂的那条） ----------
+
+def test_mgmt_route_connected_via_cluster_lease(ui_db):
+    """/api/im 实际挂的是 mgmt 路由：本机没连、租约活着 → connected=True。"""
+    from src.domains.mgmt.routes.im import im_installations as mgmt_installations
+
+    engine_wiring.sync_installation("user", owner_user_id="1234",
+                                    app_id="app_mgmt_live", app_secret="s")
+    inst_id = _inst_id_of(ui_db, "app_mgmt_live")
+    _seed_lease(ui_db, inst_id, "ecs-grape-master-003-abcd1234", "2099-01-01 00:00:00")
+
+    row = mgmt_installations(repo="", user=_user())["installations"][0]
+    assert row["connected"] is True
+    assert row["connected_on"] == "ecs-grape-master-003-abcd1234"
+
+
+def test_mgmt_route_expired_iso_lease_not_connected(ui_db):
+    """mgmt 路由同样不能把 ISO 过期串判成「未过期」。"""
+    from src.domains.mgmt.routes.im import im_installations as mgmt_installations
+
+    engine_wiring.sync_installation("user", owner_user_id="1234",
+                                    app_id="app_mgmt_iso", app_secret="s")
+    inst_id = _inst_id_of(ui_db, "app_mgmt_iso")
+    _seed_lease(ui_db, inst_id, "ecs-grape-master-002-abcd1234",
+                "2000-01-01T00:00:00.000000+00:00")
+
+    row = mgmt_installations(repo="", user=_user())["installations"][0]
+    assert row["connected"] is False

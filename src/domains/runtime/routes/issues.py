@@ -696,7 +696,7 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
             "segments": segments}
 
 @router.post("/{issue_id}/start", operation_id="issues_start", summary="Open issue session", description="Opens the Issue conversation entry: validates ownership and returns the current status without flipping it. User-only (front-end navigation preflight).")
-async def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+def start_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """打开 Issue 会话（"去对话"）——仅校验归属并返回当前状态，不翻转状态。
 
     user_only：纯前端导航预检（确认可访问 + 取当前状态），Agent 执行期（tk_ 会话）无此场景；
@@ -1019,7 +1019,7 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         return ""
 
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
-async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
+def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage
     from src.kernel.session_manager import db, db_lock
@@ -1096,7 +1096,7 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
                          "(owner/admin via VCS permission API, cf. #377), then status -> completed, stage -> done, "
                          "syncs related pipeline tasks to terminal state, writes an audit log, and closes the VCS "
                          "issue (degraded, non-blocking). Idempotent in terminal state; non-admin -> 403.")
-async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_no_session_token)):
+def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_no_session_token)):
     """Issue #393: 仓库 admin 成员确认需求完成（人工终审）。
 
     与开发者 confirm-done 的区别：
@@ -1267,7 +1267,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
 @router.post("/{issue_id}/reopen", operation_id="issues_reopen", summary="Reopen completed issue", description="Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.")
-async def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """把误标完成的需求退回「处理中」（2026-11-20 主人口径 B）。
 
     与 `resume`（cancelled→processing，自动续派）的区别：
@@ -1333,7 +1333,7 @@ async def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_to
     return {"ok": True, "issue_id": issue_id, "status": "processing", "stage": ""}
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config
@@ -1698,7 +1698,7 @@ async def issue_terminal_disposition(issue_id: int, body: IssueTerminalDispositi
 
 
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
-async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
     from src.api.issues_center import _get_task_issue_info, _find_agent_task_ids
     from src.kernel.session_manager import db, db_lock
@@ -2230,7 +2230,7 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
     raise HTTPException(status_code=404, detail={"code": 404, "message": "附件不存在"})
 
 @router.get("/mine", operation_id="issues_mine", summary="My issues (personal dimension)", description="My issues (issue-center personal dimension), enriched with scene/stage/is_running/agent_statuses. Issue #2082 paging (semantics unified with issues_list/gitrepo_milestones): page is 1-based; per_page defaults to 20 when omitted (env ISSUES_DEFAULT_PER_PAGE, set 0 to restore the legacy full-list default), is clamped to a max of 100 and 0 means explicit full list. With per_page>0 the response carries total/page/per_page/has_more (total counts the filtered set).")
-async def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
+def my_issues(status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)?$"),
                     repo_key: str = Query("", description="按仓库过滤"),
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
@@ -2898,7 +2898,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
             description="Lists production release tasks for the issue with status, result branch "
                         "(deployed_success/deploy_failed/not_executed), failure reason and binding "
                         "elements (candidate SHA / target env / evidence / approval source).")
-async def list_production_releases(issue_id: int, user: dict = Depends(require_no_session_token)):
+def list_production_releases(issue_id: int, user: dict = Depends(require_no_session_token)):
     """Issue #627: 查询发布子单列表（状态/结果三分支/失败原因/绑定要素随行返回）。"""
     from src.api.session_store import list_release_subissues
     from src.kernel.session_manager import db, db_lock
@@ -2915,7 +2915,7 @@ async def list_production_releases(issue_id: int, user: dict = Depends(require_n
             "releases": releases, "total": len(releases)}
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
+def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config

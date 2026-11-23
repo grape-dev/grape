@@ -3035,6 +3035,14 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
         "pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')"),
     # meta 写
+    # 单语句 upsert（2026-11-21）：存在性由主键回答，不靠 UPDATE 的 rowcount。
+    # MySQL 的 UPDATE 返回「实际改变的行数」，同值重写 = 0 → 旧的两段式会误判
+    # 「这行不存在」再去 INSERT → 1062 meta.PRIMARY（实测：每次启动刷一条）。
+    # ON CONFLICT(key) 由方言层翻译成 ON DUPLICATE KEY UPDATE（mysql_compat）。
+    # `key` 是 MySQL 保留字，列名必须加反引号（否则 1064 near '`key` UPDATE …'）；
+    # 反引号在 SQLite 侧同样合法，一套 SQL 两边都能跑。
+    "meta_upsert": "INSERT INTO meta (`key`, value) VALUES (?, ?) "
+                   "ON CONFLICT(`key`) DO UPDATE SET value=excluded.value",
     "meta_upsert_update": "UPDATE meta SET value=? WHERE key=?",
     "meta_upsert_insert": "INSERT INTO meta (key, value) VALUES (?, ?)",
     "meta_insert_absent": "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
@@ -4008,11 +4016,14 @@ def get_meta_value_any(key: str) -> str:
 
 
 def set_meta_value_any(key: str, value: str) -> None:
-    """写 meta 配置值（任意拓扑）：UPDATE→INSERT 两段式幂等 upsert。"""
+    """写 meta 配置值（任意拓扑）：**单语句**幂等 upsert。
+
+    存在性只由主键回答，不看 UPDATE 的 rowcount（MySQL 计「实际改变的行」，
+    同值重写返回 0；SQLite 计「匹配行」——同一份两段式实现在 SQLite 上全绿、
+    在 MySQL 上必炸，2026-11-21 每次启动一条 1062 实测为证）。
+    """
     with _any_cursor(write=True) as c:
-        cur = c.execute(_any_sql("meta_upsert_update"), (value, key))
-        if not getattr(cur, "rowcount", 0):
-            c.execute(_any_sql("meta_upsert_insert"), (key, value))
+        c.execute(_any_sql("meta_upsert"), (key, value))
 
 
 def set_meta_if_absent(key: str, value: str) -> bool:
@@ -5110,6 +5121,62 @@ def ensure_repo_im_binding_schema(conn: Any) -> None:
 
 #: 跟随 repo_key 的 runtime 表（固定白名单：不接受调用方传表名）
 _ORG_BACKFILL_TABLES = ("events", "agent_tasks", "devops_agent_session", "issue")
+
+
+# ---------- clone 端点契约（clone_endpoint 单点派生的对外出口）----------
+# mgmt 等其它域要拼 clone 地址/用户名时只能走这里，禁止 import runtime.vcs.* 内部模块。
+try:  # 异常类一并导出，调用方按它做错误分类
+    from src.domains.runtime.vcs.clone_endpoint import CloneEndpointError  # noqa: F401
+except Exception:  # pragma: no cover - 极端导入失败时给出可捕获的替身
+    class CloneEndpointError(RuntimeError):  # type: ignore[no-redef]
+        pass
+
+
+def clone_params(repo_key: str) -> dict:
+    """按平台卡派生 clone 参数（provider/owner/repo/clone_url/clone_auth/username）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _impl
+
+    return _impl(repo_key)
+
+
+def clone_url(repo_key: str) -> str:
+    """仓库 clone 地址（平台卡派生的唯一实现）。"""
+    from src.domains.runtime.vcs.clone_endpoint import clone_url as _impl
+
+    return _impl(repo_key)
+
+
+def username_for_token(provider: str, token: str, repo_key: str = "") -> tuple:
+    """令牌所属账号名（basic_password 平台用；返回 (username, source)）。"""
+    from src.domains.runtime.vcs.clone_identity import username_for_token as _impl
+
+    return _impl(provider, token, repo_key)
+
+
+def invalidate_clone_identity(provider: str, token: str = "") -> None:
+    """清掉令牌→login 解析缓存（令牌轮换后调用；契约出口，别域不得直连内部模块）。"""
+    from src.domains.runtime.vcs.clone_identity import invalidate as _impl
+
+    _impl(provider, token)
+
+
+def clone_auth_header(repo_key: str, token: str) -> str:
+    """git 传输用的 Authorization 头值（Basic base64(user:token)，按卡的 clone_auth 取用户名）。
+
+    为什么提供在契约里：mgmt 拼克隆命令时不能自己再实现一套 scheme/用户名派生
+    （那就是第二个真源），也不能把 token 拼进 URL（进程列表/日志泄漏面）。
+    """
+    from src.domains.runtime.vcs.clone_endpoint import clone_params as _cp
+
+    p = _cp(repo_key)
+    scheme = str(p.get("clone_auth") or "x_access_token")
+    user = str(p.get("username") or "")
+    if not user:
+        user = "x-access-token" if scheme == "x_access_token" else (
+            "oauth2" if scheme == "oauth2" else str(p.get("owner") or ""))
+    import base64 as _b64
+
+    return "Basic " + _b64.b64encode(f"{user}:{token}".encode()).decode()
 
 
 def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:

@@ -40,6 +40,10 @@ _REPO_CRED_QUERIES: dict[str, str] = {
     "repo_cred_clear": (
         "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
         "WHERE repo_key=? AND cred_type=?"),
+    # 空值语义 = 没有这行（不是「有一行但是空的」）：凭据解析按档位下降，
+    # 空行会被「显式 bot 闸」判成「配了但不可用」→ 424，比缺行更难查。
+    "repo_cred_delete": (
+        "DELETE FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
     "repo_cred_nonempty_keys": (
         "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
         "AND value IS NOT NULL AND value!=''"),
@@ -121,40 +125,20 @@ __all__ = ["available", "record_api_latency", "record_merge_gate_log", "health"]
 
 @contextmanager
 def _any_cursor(write: bool = False):
-    """insight 表游标：自有 DSN 优先（autocommit），否则回落进程主库（持有 db_lock）。"""
-    if db_registry.uses_own_dsn("insight"):
-        with db_registry.cursor("insight") as c:
-            yield c
-        return
-    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+    """insight 表游标：连接归属由 kernel.route_of 决定（本域/单库→主库，跨域→域连接）。
 
-    with _plock:
-        c = _pdb.cursor()
+    缺 GRAPE_DSN_INSIGHT 时抛 DomainUnavailable —— 绝不回落进程主库，
+    否则 rc 行会被读/写到非 owner 库（用错的密钥加密，生成解不开的毒行）。
+    """
+    with db_registry.cursor_for("insight", write=write) as c:
         yield c
-        if write:
-            _pdb.commit()
 
 
 @contextmanager
 def _any_tx():
-    """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
-    if db_registry.uses_own_dsn("insight"):
-        with db_registry.transaction("insight") as c:
-            yield c
-        return
-    from src.kernel.session_manager import db as _pdb, db_lock as _plock
-
-    with _plock:
-        c = _pdb.cursor()
-        try:
-            yield c
-            _pdb.commit()
-        except Exception:
-            try:
-                _pdb.rollback()
-            except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
-                log.debug(f"insight public rollback skipped: {exc}")
-            raise
+    """多语句组合写：连接归属同上（域连接 → 真事务；主库 → 进程锁 + 提交）。"""
+    with db_registry.transaction_for("insight") as c:
+        yield c
 
 
 def _any_sql(name: str) -> str:
@@ -197,6 +181,16 @@ def repo_credential_meta(repo_key: str, cred_type: str) -> tuple | None:
     return read_one_any("repo_cred_value_id", (repo_key, cred_type))
 
 
+def set_repo_credential_derived_from(cred_id: str, derived_from: str) -> int:
+    """标记 rc 行的来源身份（derived_from）。owner 域写口，供平台迁移经契约调用。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_repo_credentials SET derived_from=? WHERE id=?",
+            (derived_from, cred_id),
+        )
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
 def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
                                  updated_at: str) -> dict:
     """幂等 upsert：UPDATE → rowcount==0 → INSERT → 并发冲突再 UPDATE（同一事务）。
@@ -219,6 +213,18 @@ def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
             # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
             c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
             return {"action": "updated_after_conflict", "id": 0}
+
+
+def delete_repo_credential_value(repo_key: str, cred_type: str) -> int:
+    """删除该仓库该类型的凭据行（返回删除行数）。
+
+    为什么需要：读写两侧对「空」必须同一语义。空值应该等于「没有这行」，
+    这样解析链会继续往下一档（平台 bot / 归属者），而不是被
+    「行存在但值为空」判成 `BOT_CREDENTIAL_INVALID stage=empty` 卡住。
+    """
+    with _any_tx() as c:
+        cur = c.execute(_any_sql("repo_cred_delete"), (repo_key, cred_type))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
 
 def upsert_repo_credentials(repo_key: str, items: list[tuple[str, str]],

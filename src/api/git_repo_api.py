@@ -532,6 +532,14 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
         _mapped = _path_map.get("/" + _head)
         if _mapped:
             _sub = str(_mapped) + (("/" + _rest) if _rest else "")
+    # 模块级子路径重写钩子（可选）：PATH_MAP 只映首段，尾段方言差异（gitlab 的
+    # /comments→/notes、/files→/changes）由 provider 模块自己收口，代理层零平台分支。
+    _rewrite = getattr(mod, "rewrite_path", None)
+    if callable(_rewrite):
+        try:
+            _sub = _rewrite(_sub) or _sub
+        except Exception as e:  # noqa: BLE001 - 钩子异常不阻断 URL 构造
+            log.warning(f"vcs_url rewrite_path failed ({provider}, {_sub}): {e}")
     # Issue #714：subpath 以 / 为分隔逐段 percent-encode（+→%2B、中文→UTF-8、空格→%20），
     # / 保留路径分隔语义；纯 ASCII 段（/branches、issue 编号等）编码后不变，存量行为零变更。
     url = base + "/".join(urllib.parse.quote(seg, safe="") for seg in _sub.split("/"))
@@ -1588,10 +1596,12 @@ def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
                       user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #728：关联解除端点（幂等、双参数显式校验——PR 号 + Issue 号均为路径参数）。
     _token = _repo_token(owner, repo, user, p)
-    if p != "gitcode":
-        # GitHub 等无原生 PR↔Issue 关联存储（其关联仅为 body 文本引用），幂等 no-op。
+    if not _pflag(p, "PR_ISSUE_LINK_NATIVE"):
+        # 无原生 PR↔Issue 关联存储的平台（GitHub / GitLab / Gitee）幂等 no-op。
+        # 判定走能力位，不再比较平台名（过去 gitcode 以外的平台一律落这里）。
         return {"unlinked": False, "pr_number": number, "issue_number": issue_number,
-                "reason": f"provider {p} has no native PR-Issue association"}
+                "reason": f"provider {p} has no native PR-Issue association "
+                          f"(PR_ISSUE_LINK_NATIVE=false)"}
     # 1. GET PR 详情，校验关联存在（不存在 → 幂等成功，不发 PATCH）
     pr = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token)
     _issues = pr.get("issues") if isinstance(pr, dict) else None
@@ -2025,7 +2035,11 @@ def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, bod
     # Issue #623：comment_id 兼容十六进制 id——解析为数字 note_id 后走既有更新逻辑
     note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
                                             _repo_token(owner, repo, user, p))
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
+    # 评论 id 路径形态：扁平 /pulls/comments/{id}（gitcode/gitee/github）
+    # vs 带 MR 号 /pulls/{number}/comments/{id}（gitlab → 模块 rewrite 成 notes/{id}）。
+    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
+             else f"/pulls/{number}/comments/{note_id}")
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, _csub, None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
@@ -2037,7 +2051,9 @@ def delete_pull_comment(owner: str, repo: str, number: int, comment_id: str,
     # （hex 直传 400 Orchestration error）。数字 id 直传，零额外请求（向后兼容）。
     note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
                                             _repo_token(owner, repo, user, p))
-    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
+    _csub = (f"/pulls/comments/{note_id}" if _pflag(p, "PR_COMMENT_FLAT_PATH", True)
+             else f"/pulls/{number}/comments/{note_id}")
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, _csub, None, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -2359,7 +2375,7 @@ def _ref_to_commit_sha(p: str, owner: str, repo: str, ref: str, token: str) -> s
     return None
 
 
-def _gitcode_commit_sha_or_404(owner: str, repo: str, ref: str, token: str) -> str:
+def _commit_sha_or_404(provider: str, owner: str, repo: str, ref: str, token: str) -> str:
     """checks/statuses 组共用前置（Issue #2035 QA 复审④去重）：ref → commit sha。
 
     `_ref_to_commit_sha`（全部 ref 含完整 sha 过存在性探测）失败路径统一归一
@@ -2368,7 +2384,7 @@ def _gitcode_commit_sha_or_404(owner: str, repo: str, ref: str, token: str) -> s
     """
     ref = (ref or "").strip()
     try:
-        sha = _ref_to_commit_sha("gitcode", owner, repo, ref, token)
+        sha = _ref_to_commit_sha(provider, owner, repo, ref, token)
     except HTTPException as e:
         if getattr(e, "status_code", None) == 404:
             _checks_404("ref_not_found", f"ref not found: {ref}", owner, repo, ref)
@@ -2419,7 +2435,7 @@ def _actions_check_entry(run: dict, job: dict | None) -> dict:
 def _gitcode_checks_for_sha(owner: str, repo: str, ref: str, token: str) -> dict:
     """GitCode check-runs 适配（Issue #2035）：Actions v8 runs 按 head_sha 过滤 + per-run jobs。
 
-    - ref 经 `_gitcode_commit_sha_or_404` 存在性探测并解析为 commit sha
+    - ref 经 `_commit_sha_or_404(provider, ...)` 存在性探测并解析为 commit sha
       （分支名/斜杠 ref/完整 sha 统一口径，伪 sha → 404 ref_not_found）。
     - runs 逐页扫描（per_page=100，短页终止，封顶 _ACTIONS_RUNS_SCAN_MAX_PAGES 页——
       封顶命中显式回传 scan_truncated=true，不冒充全量）。
@@ -2428,7 +2444,7 @@ def _gitcode_checks_for_sha(owner: str, repo: str, ref: str, token: str) -> dict
       区分「无 checks」与「通道不可用」不靠静默空列表）。
     """
     ref = (ref or "").strip()
-    target_sha = _gitcode_commit_sha_or_404(owner, repo, ref, token)
+    target_sha = _commit_sha_or_404("gitcode", owner, repo, ref, token)
 
     runs: list = []
     scan_truncated = False
@@ -2508,9 +2524,19 @@ def list_check_runs(owner: str, repo: str, ref: str,
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     """QA 守卫复核归因通道（Issue #2035）：mergeable_state=unstable 可归因到具体 check 名。"""
     token = _repo_token(owner, repo, user, p)
-    if p == "github":
-        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{ref}/check-runs", None, p), token)
-    return _gitcode_checks_for_sha(owner, repo, ref, token)
+    # 通道能力位分派（Issues #3632 后继）：原生 check-runs / Actions 适配器 / 无通道。
+    # 不许 "else 默认走 gitcode"——那会把 gitee/gitlab 仓的 checks 打到 gitcode 上，
+    # 读到的可能是同名仓的数据，也可能只拿到 404（都不可诊断）。
+    if _pflag(p, "CHECK_RUNS_NATIVE"):
+        _cref = ref
+        if _pflag(p, "CHECK_RUNS_RESOLVE_SHA"):
+            _cref = _commit_sha_or_404(p, owner, repo, ref, token)
+        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{_cref}/check-runs", None, p), token)
+    if _pflag(p, "CHECK_RUNS_VIA_ACTIONS"):
+        return _gitcode_checks_for_sha(owner, repo, ref, token)
+    _checks_404("checks_unavailable",
+                f"{p} 未声明 check-runs 通道（CHECK_RUNS_NATIVE / CHECK_RUNS_VIA_ACTIONS 均为假）",
+                owner, repo, ref)
 
 
 @router.get("/{owner}/{repo}/commits/{ref:path}/status", operation_id="gitrepo_statuses_list",
@@ -2530,22 +2556,26 @@ def list_check_runs(owner: str, repo: str, ref: str,
                         "permission). Never silently returns an empty list to mask upstream errors.")
 def list_commit_statuses(owner: str, repo: str, ref: str,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    """commit status 只读通道（Issue #2035）：与 checks 通道互补，双 provider 语义对齐。"""
+    """commit status 只读通道（Issue #2035）：与 checks 互补；通道由平台卡能力位决定。"""
     token = _repo_token(owner, repo, user, p)
-    if p == "github":
-        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{ref}/status", None, p), token)
-    ref = (ref or "").strip()
-    sha = _gitcode_commit_sha_or_404(owner, repo, ref, token)
+    if not _pflag(p, "STATUS_NATIVE"):
+        # 无 combined status 通道的平台（gitee / gitlab）显式 404：语义可判定，
+        # 且不再回落到 gitcode（回落会读到别的平台的仓）。
+        _checks_404("statuses_unavailable",
+                    f"{p} 无 commit status 通道（能力位 STATUS_NATIVE=false）", owner, repo, ref)
+    _ref = (ref or "").strip()
+    if _pflag(p, "STATUS_RESOLVE_SHA"):
+        # v5 系 status 端点要 commit sha（分支名直连会 404），先做存在性解析。
+        _ref = _commit_sha_or_404(p, owner, repo, _ref, token)
     try:
-        return _vcs_req("gitcode", "GET", _vcs_url(owner, repo, f"/commits/{sha}/status", None, "gitcode"), token)
+        return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/commits/{_ref}/status", None, p), token)
     except HTTPException as e:
         if getattr(e, "status_code", None) != 404:
             raise
         _d = getattr(e, "detail", None)
         _up_msg = str(_d.get("message", "")) if isinstance(_d, dict) else str(_d or "")
-        log.warning(f"gitrepo_statuses_list: upstream 404 for {owner}/{repo} ref={ref} "
-                    f"(sha resolved: {sha[:12]}): {_up_msg}")
+        log.warning(f"gitrepo_statuses_list: upstream 404 for {owner}/{repo} ref={_ref} "
+                    f"({p}): {_up_msg}")
         _checks_404("statuses_unavailable",
-                    f"GitCode commit status 通道不可用或该提交无 status 记录: {ref}"
-                    f"（upstream: {_up_msg[:120] or 'Not Found'}）",
+                    f"{p} commit status 通道不可用或该提交无 status 记录: {_ref}",
                     owner, repo, ref)

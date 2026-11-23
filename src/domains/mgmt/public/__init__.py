@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
@@ -918,7 +919,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # W2 渠道写原语
            "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
            # 渠道租约只读（runtime/im/outbox 归属过滤；任意拓扑）
-           "lease_owner_by_key", "lease_owned_installations_by_owner",
+           "lease_owner_by_key", "lease_owned_installations_by_owner", "live_channel_lease_owners",
            "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
            "upsert_chat_session_binding", "upsert_sender_identity",
            "add_event_action_filter", "update_event_action_filter",
@@ -1023,7 +1024,6 @@ _READ_QUERIES: dict[str, str] = {
     "grape_accounts_e047af": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s) LIMIT 1",
     # （`autopilot_tasks_e3fa0b` / `autopilot_subscriptions_13648d` 已下线：调度器改走
     #   `_ANY_QUERIES` 的 `autopilot_task_full_row` / `autopilot_subscribers_by_task`）
-    "user_accounts_e2eb04": "SELECT username FROM user_accounts WHERE id=%s",
     "scene_market_c969bb": "SELECT id, name FROM scene_market WHERE source='official'",
     "scene_market_0d2dd0": "SELECT id FROM scene_market WHERE name=%s AND source='official' LIMIT 1",
     # 用户映射（runtime / insight 代码读）
@@ -2255,7 +2255,8 @@ _ANY_QUERIES: dict[str, str] = {
     # 语句逐字照抄原兜底句（无 LIMIT、无 is_disabled/is_active 过滤：任务创建者即便是
     # 已停用账号也要回原名，由调用方的形态校验决定是否采用）。
     # 不可复用 `account_username_by_id`：那张表是登录账号，同 id 空间不同表。
-    "user_account_username_by_id": "SELECT username FROM user_accounts WHERE id=?",
+    # 历史 user_accounts 现网 0 行，读它只会返回空；统一读权威账号表
+    "user_account_username_by_id": "SELECT username FROM grape_accounts WHERE id=?",
     # ── 引擎 scope / claim 过滤取账号 id（runtime/engine/service.py 两处「lib 优先 + 本地兜底」）──
     # 原实现是双分支：lib 侧走 `grape_accounts_0b3fdc`（严格大小写）/ `grape_accounts_d0ac07`
     # （LOWER 双侧），兜底侧是调用方进程主库上的同一段 SQL —— 三库拓扑下进程库没有
@@ -2434,6 +2435,14 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT installation_id, channel_type FROM grape_t_channel_lease "
         "WHERE lease_owner=? AND installation_id<>'' "
         "ORDER BY updated_at DESC LIMIT 200"),
+    # 全集群租约快照（IM 渠道页 connected 口径）：一条查询取回安装 → 持有者/到期。
+    # 谓词与 COALESCE 与调用方原语句逐字一致；「是否过期」不在 SQL 判（写侧存在
+    # 空格与 ISO 8601 两种口径，字符串比大小会把 ISO 行判成永远未过期），交调用方
+    # 解析时间后判定。
+    "live_channel_lease_owners": (
+        "SELECT installation_id, COALESCE(lease_owner,''), COALESCE(lease_expires_at,'') "
+        "FROM grape_t_channel_lease "
+        "WHERE installation_id<>'' AND COALESCE(lease_owner,'')<>''"),
     # ── 互动卡片台账（grape_t_channel_outbound_card 归 mgmt；runtime/im/engine/
     # outbound_cards 的钉钉 outTrackId → 会话映射）──────────────────────────────
     # 与上方 W3 `upsert_outbound_card`（outbox 投递状态机）**分开登记**：那条是
@@ -3006,10 +3015,10 @@ def account_username_by_id_any(account_id: Any) -> str:
 
 
 def user_account_username_by_id_any(user_id: Any) -> str:
-    """按 id 取**个人账号** `user_accounts.username`（任意拓扑）；无行 / id 非法 → 空串。
+    """按 id 取账号用户名（任意拓扑，读 grape_accounts）；无行 / id 非法 → 空串。
 
-    与 `account_username_by_id_any` 的区别：那是登录账号 `grape_accounts`，这是个人账号
-    `user_accounts`，同 id 空间但两张表，不能互相顶替。
+    历史实现读的是已清退的 `user_accounts`（现网 0 行），永远返回空；
+    2026-11-22 起统一读权威账号表 grape_accounts；函数名保留以免改调用点。
 
     `id` 非法（0 / 非数字）→ 空串且**不查库**：原调用点（runtime/pipeline/account_env
     的 autopilot 任务创建者解析）在 `created_by=0` 的历史任务上正是这么短路的 —— 一次
@@ -4446,6 +4455,42 @@ def managed_repo_host_user(repo_key: str) -> str:
     return str(row[0]) if row and row[0] else ""
 
 
+def get_github_token(repo_key: str) -> str:
+    """按仓库取 GitHub 平台 token（空=无；契约出口，runtime 不得直连 mgmt.user.db）。"""
+    from src.domains.mgmt.user.db import get_github_token as _impl
+
+    return _impl(repo_key)
+
+
+def get_repo_bot_token(repo_key: str) -> str:
+    """按仓库取 bot token（契约出口）。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
+
+    return _impl(repo_key)
+
+
+def user_can_manage_repo(user_id: Any, repo_key: str) -> bool:
+    """该用户是否是仓库的**管理方**（托管人 host_user_id 或 user_repos.is_admin=1）。
+
+    与 `user_can_access_repo` 的区别：能看见仓库（含外部 issue 提报者）不等于能读
+    任务日志/代码 diff。runtime 读任务日志用它做 fail-closed 判据。
+    """
+    uid = str(user_id or "").strip()
+    if not uid or not repo_key:
+        return False
+    try:
+        host = managed_repo_host_user(repo_key)
+        if host and host == uid:
+            return True
+        with _any_cursor() as c:
+            c.execute("SELECT 1 FROM user_repos WHERE repo_key=? AND user_id=? "
+                      "AND is_admin=1 LIMIT 1", (repo_key, uid))
+            return bool(c.fetchone())
+    except Exception as e:  # noqa: BLE001 - 判定不出按无权（fail-closed）
+        log.warning(f"user_can_manage_repo failed user={uid} repo={repo_key}: {e}")
+        return False
+
+
 def repo_admin_user_id(repo_key: str):
     """仓库的首个管理员 user_id（按 created_at 最早）；无则返回 0。"""
     with _any_cursor() as c:
@@ -4641,23 +4686,63 @@ def pipeline_scene_advanced_options(scene_id, repo_keys) -> str:
 # 为什么在 mgmt：两张表在三库拓扑里落在 mgmt 库，而签发/校验逻辑是 kernel 的共享能力，
 # 由 api / mgmt / runtime 三个进程共同调用 —— 跨域时连接必须走本域（自有 DSN 或单库回落）。
 
+def _is_unique_conflict(exc: BaseException) -> bool:
+    """跨方言识别唯一键冲突：SQLite `UNIQUE constraint failed` / MySQL `1062 Duplicate entry`。
+
+    只在 `session_token_insert` / `session_token_rotate` 的降级路径上用：本仓库**不主张**
+    `session_key` 唯一（原设计允许多枚并存），但部署侧可能存在手工建的 `uniq_session_key`
+    （实测 <db_alt> 有、<db_mgmt> 没有），此时裸 INSERT 会撞键。
+    撞了就就地覆盖那一行；没撞就保留多行 —— 不把某一部署的物理约束写成代码语义。
+    """
+    if type(exc).__name__ != "IntegrityError":
+        return False
+    text = str(exc).lower()
+    return "unique" in text or "duplicate entry" in text or "1062" in text
+
+
 def session_token_insert(session_key: str, repo_key: str, agent_type: str, user_id,
                          token_sha256: str, expires_at: int, kind: str | None = None) -> int:
-    """插入一条会话 token（kind=None 为 worker/tk_，'takeover' 为接管）；返回自增 id。"""
+    """写入一条会话 token；返回该行 id。
+
+    kind=None 为 worker/tk_，'takeover' 为接管。
+
+    语义：**同一 session_key 允许多枚并存**（原设计 —— 建表只有 id 主键，历史原语
+    `session_token_set_expiry` / `session_token_shrink_active` / `session_token_delete_by_session`
+    全是按 key 批量操作；索引 `ix_sat_kind_key(kind, session_key)` 也是非唯一的）。
+    所以这里先裸 INSERT：无唯一索引的库（如 <db_mgmt>）会得到多行，各枚各自有效。
+
+    唯一例外：部署侧可能手工建了 `uniq_session_key`（实测 <db_mgmt> / <db_alt>
+    有），此时 INSERT 会抛唯一键冲突 —— 就地 UPDATE 该行并返回它的 id，调用方语义不变。
+    这是**兼容既有可能存在的物理约束**，不是把单行当成契约。
+
+    历史坑（别退回 UPDATE-then-INSERT 那种判存在性写法）：MySQL 的 affected-rows 计的是
+    「实际改变的行数」，同值重写为 0 → 被判成「未命中」再 INSERT → 1062 复现；
+    SQLite 计「匹配行数」，单测永远绿。要么裸 INSERT，要么按主键/唯一键判。
+    """
+    _cols = "session_key, repo_key, agent_type, user_id, token_sha256, expires_at"
+    _vals = "?,?,?,?,?,?"
+    _params = [session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)]
+    _sets = "repo_key=?, agent_type=?, user_id=?, token_sha256=?, expires_at=?"
+    _set_params = [repo_key, agent_type, user_id, token_sha256, int(expires_at)]
+    if kind:
+        _cols += ", kind"
+        _vals += ",?"
+        _params.append(kind)
+        _sets += ", kind=?"
+        _set_params.append(kind)
     with _any_cursor(write=True) as c:
-        if kind:
-            cur = c.execute(
-                "INSERT INTO session_api_tokens "
-                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at, kind) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at), kind))
-        else:
-            cur = c.execute(
-                "INSERT INTO session_api_tokens "
-                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
-        return int(getattr(cur, "lastrowid", 0) or 0)
+        try:
+            c.execute(f"INSERT INTO session_api_tokens ({_cols}) VALUES ({_vals})", tuple(_params))
+        except Exception as exc:  # noqa: BLE001 —— 只处理唯一键冲突，其余原样抛
+            if not _is_unique_conflict(exc):
+                raise
+            c.execute(f"UPDATE session_api_tokens SET {_sets} WHERE session_key=?",
+                      tuple(_set_params + [session_key]))
+        row = c.execute(
+            "SELECT id FROM session_api_tokens WHERE session_key=? AND token_sha256=? "
+            "ORDER BY id DESC", (session_key, token_sha256)).fetchone()
+        return int((row[0] if row else 0) or 0)
+
 
 
 def session_token_by_sha(token_sha256: str, kind: str | None = None) -> tuple | None:
@@ -4728,18 +4813,34 @@ def session_token_rotate(session_key: str, repo_key: str, agent_type: str, user_
                          token_sha256: str, expires_at: int, now: int) -> None:
     """轮换：作废仍有效的旧 token + 插入新 token（**同一事务**）。
 
+    原语义（本函数自古如此，2026-11-21 曾被我误改成无条件 upsert，已还原）：
+    · 按 session_key 批量把「仍有效」的旧行 expires_at 改写成 now —— 多枚并存时全部作废；
+    · 然后裸 INSERT 新行 —— 无唯一索引的库上就是新增一枚（原设计）。
+    唯一例外仍是部署侧手工的 `uniq_session_key`：INSERT 撞键时降级为就地覆盖该行。
+
     注意跨域边界：调用方若还要回写别的域（如 agent_tasks.env_extra）的快照，
     那一步已不在本事务内 —— 顺序上必须先完成本原语（新 token 已落库）再回写快照，
     并由调用方自己的实例锁串行化，失败重试即可收敛。
     """
+    _sets = ("repo_key=?, agent_type=?, user_id=?, token_sha256=?, expires_at=?")
+    _set_params = [repo_key, agent_type, user_id, token_sha256, int(expires_at)]
     with _any_tx() as c:
-        c.execute("UPDATE session_api_tokens SET expires_at=? "
-                  "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
-                  (int(now), session_key, int(now)))
-        c.execute("INSERT INTO session_api_tokens "
-                  "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
-                  "VALUES (?,?,?,?,?,?)",
-                  (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+        c.execute(
+            "UPDATE session_api_tokens SET expires_at=? "
+            "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+            (int(now), session_key, int(now)))
+        try:
+            c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+        except Exception as exc:  # noqa: BLE001 —— 只处理唯一键冲突
+            if not _is_unique_conflict(exc):
+                raise
+            c.execute(f"UPDATE session_api_tokens SET {_sets} WHERE session_key=?",
+                      tuple(_set_params + [session_key]))
+
 
 
 def api_token_insert(user_id, token_sha256: str, name: str, created_at: str) -> int:
@@ -5053,6 +5154,62 @@ def lease_owned_installations_by_owner(owner: str, cursor: Any = None) -> list[t
     with _owner_cursor(cursor) as c:
         c.execute(_any_sql("lease_owned_installations_by_owner"), (str(owner or ""),))
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+_LEASE_EXPIRY_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f")
+
+
+def _lease_expiry_alive(expires_at: Any, now: Any = None) -> bool:
+    """租约是否仍在有效期内（空值/脏值一律按「已失效」）。
+
+    到期列是文本，写侧有两条口径、都是 UTC：
+      - 主续约路径 `bot_lease._future` → `"YYYY-MM-DD HH:MM:SS"`；
+      - `acquire_channel_lease`（lib 抢租约）→ `datetime.isoformat()`，
+        形如 `"YYYY-MM-DDTHH:MM:SS+00:00"`。
+    逐字比大小会把 ISO 行判成「永远未过期」——同一 UTC 日第 11 个字符
+    `T`(84) > 空格(32)。两种口径的判定只在这一点收口，调用方（两条 IM 路由）
+    不再各写一份比较。
+    """
+    raw = str(expires_at or "").strip()
+    if not raw:
+        return False
+    dt = None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in _LEASE_EXPIRY_FORMATS:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return False
+    if dt.tzinfo is None:          # 两种写法都是 UTC 口径，补上时区再比
+        dt = dt.replace(tzinfo=timezone.utc)
+    ref = now if now is not None else datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return dt > ref
+
+
+def live_channel_lease_owners(cursor: Any = None) -> dict:
+    """全集群「谁正在维护哪条渠道」的快照（installation_id → lease_owner）。
+
+    用途：IM 渠道页的「已连接」口径。四台主控按租约分片各连一部分，
+    单台进程的 supervisor 只知道自己那几条，直接拿它当 connected 会让
+    其余三台连着的渠道显示成「已配置 · 未连接」。租约表是跨进程唯一真源：
+    **owner 非空且未过期**才计入（到期判定走 `_lease_expiry_alive`，
+    同时吃空格与 ISO 两种写入口径）。
+    `cursor` 语义同 `lease_owner_by_key`；SQL 登记在 `_ANY_QUERIES`（跨域读白名单口径），
+    走 `_any_sql` 以便两种方言都能翻译。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("live_channel_lease_owners"))
+        rows = c.fetchall() or []
+    now = datetime.now(timezone.utc)
+    return {str(r[0]): str(r[1] or "") for r in rows
+            if _lease_expiry_alive(r[2], now)}
 
 
 def installation_status(installation_id: str):
@@ -5918,6 +6075,52 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
     from src.domains.mgmt.user.db import get_managed_repos as _impl
 
     return _impl(user_id, org_id, personal_org)
+
+
+def dispatch_user_id_mode() -> str:
+    """派发身份开关（off/shadow/on，默认 on）——Issue #21 第 2 步。"""
+    from src.domains.mgmt.auth.dispatch_identity import current_mode
+
+    return current_mode().value
+
+
+def dispatch_identity(*, task_user_id="", account_name="", actor_name=""):
+    """派发侧认人（跨域消费者用）：返回 `DispatchIdentity` 值对象。
+
+    只有 `identity.applies` 为真（mode=on 且 id 非空）才写库/取令牌；
+    shadow（显式）只记观测日志，off 静默。
+    """
+    from src.domains.mgmt.auth.dispatch_identity import dispatch_identity as _impl
+
+    return _impl(task_user_id=task_user_id, account_name=account_name,
+                 actor_name=actor_name)
+
+
+def resolve_actor_user_id(*, task_user_id="", account_name="", actor_name=""):
+    """「这次该用谁的身份」纯解析（mode 只进结果，不决定是否生效）。"""
+    from src.domains.mgmt.auth.dispatch_identity import resolve_identity as _impl
+
+    return _impl(task_user_id=task_user_id, account_name=account_name,
+                 actor_name=actor_name)
+
+
+def user_can_access_repo(user_id, repo_key: str) -> bool:
+    """宿主域能力：某用户是否可见（有权限的）某仓库。
+
+    「用户 → 仓库可见性」的判定归 mgmt 域所有，其它域（runtime / insight）一律通过本契约
+    取值，不自己 JOIN managed_repos / user_repos（3库4进程：跨域只走 public）。
+    口径 = get_managed_repos(user_id) 含目标 repo_key（JOIN user_repos，成员也算可见）；
+    user_id 缺失、查询异常一律 False（宁拒勿放）。
+    """
+    uid = str(user_id or "").strip()
+    rk = str(repo_key or "").strip()
+    if not uid or not rk:
+        return False
+    try:
+        return any((r.get("repo_key") or "") == rk
+                   for r in (get_managed_repos(uid) or []))
+    except Exception:  # noqa: BLE001 - 判定不出可见性按无权处理
+        return False
 
 
 def get_host_user_id(repo_key: str):

@@ -156,10 +156,10 @@ class TestCredentialCellUnit:
         names = [n for n, _ in db_setup._NEW_TABLES]
         assert "grape_t_ov_credential_cells" in names
         migs = {m.version: m for m in db_setup._MIGRATIONS}
-        # 撞号让位：原 202611180002 改号 202611200004（runtime 域 ensure-runtime-type-info-columns 占用 002）
-        assert "202611200004" in migs
-        assert migs["202611200004"].kind == "safe"
-        assert migs["202611200004"].name == "issue2423-create-ov-credential-cells"
+        # 撞号让位：原 202611180002 改号 202611220004（runtime 域 ensure-runtime-type-info-columns 占用 002）
+        assert "202611220004" in migs
+        assert migs["202611220004"].kind == "safe"
+        assert migs["202611220004"].name == "issue2423-create-ov-credential-cells"
         assert "create table if not exists" in dict(db_setup._NEW_TABLES)["grape_t_ov_credential_cells"].lower()
 
 

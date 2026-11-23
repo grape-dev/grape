@@ -134,6 +134,27 @@ class PlatformCardError(ValueError):
     """平台卡构建失败（校验 invariant 不满足）。"""
 
 
+class PlatformCardMissingError(ValueError):
+    """provider 未注册（三条来源全断：表/契约、文件卡、代码默认都没有）。
+
+    Issue #3632：未知 provider 原先抛裸 ValueError，被上层与"工作区 git 目录
+    不可写"混为一谈，任务以 completed/exit 0 收尾却没有任何仓库。带上稳定的
+    `code` 让上游按"平台未注册"分桶上报，不再伪装成权限问题。
+    """
+
+    code = "platform_not_registered"
+
+    def __init__(self, provider: str, detail: str = "", code: str | None = None):
+        # code 可覆盖类属性：取卡通道不可用时传 platform_card_contract_unavailable，
+        # 让上游按「修链路」而不是「配卡」分流（2026-11-21）。
+        if code:
+            self.code = code
+        self.provider = provider
+        base = (f"{provider!r} 未注册为仓库平台（no platform card）："
+                f"表/契约、configs/platforms 文件、代码内置默认三处都没有该平台")
+        super().__init__(f"{base}{('；' + detail) if detail else ''}")
+
+
 def _build_brand_color(provider: str, raw: dict) -> str:
     """台阶2：brand_color 校验（#RRGGBB 十六进制；空串=未配置合法）。"""
     c = str(raw.get("brand_color") or "").strip()
@@ -515,6 +536,10 @@ _CACHE: dict[str, PlatformCard] = {}
 _cache_lock = threading.Lock()
 _cache_ts: float = 0.0
 _CACHE_TTL = 300.0
+#: 最近一次装配是否降级（"" = 正常）。取值见 card_sources 的 degraded：
+#: "contract_unavailable" / "contract_error" / "contract_empty"。
+#: 与卡缓存同生命周期（_load_cards 每次重建都会覆盖），读它的人就是读卡的人。
+_degraded_reason: str = ""
 _loaded = False
 
 
@@ -569,7 +594,10 @@ def _builtin_raws_from_dir(dir_path: str) -> "dict[str, dict]":
 
 
 _TABLE_SKIP = {"id", "provider", "source", "config_hash", "created_at", "updated_at", "enabled"}
-# 跨域读原语返回的列（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）
+# 契约列**镜像**（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）。
+# Issue #3632 起运行时不再用本清单做投影——列白名单只由 mgmt 契约/owner 原语
+# 提供（避免第二份投影漂移）；此常量只作为静态锚点，供
+# tests/runtime/test_platform_config_keys_accepted.py 校验两侧清单不漂移。
 _PLATFORM_CARD_COLUMNS = (
     "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
     "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
@@ -583,34 +611,42 @@ _PLATFORM_CARD_COLUMNS = (
 # 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
 
 
+def _table_source() -> "object":
+    """表来源（owner 域 `grape_t_repo_platforms`）——列投影口径由本模块持有。
+
+    来源本身的"判据收口/留痕/失败回落"在 `card_sources.OwnerTableCardSource`；
+    这里只负责把"非卡字段"清单（`_TABLE_SKIP`）喂给它；列白名单由
+    mgmt 契约（`get_repo_platform_cards`）/ owner 原语单一提供，不再复制一份。
+    """
+    from src.domains.runtime.vcs.card_sources import OwnerTableCardSource
+
+    return OwnerTableCardSource(skip_columns=_TABLE_SKIP)
+
+
+def _server_source() -> "object":
+    """契约来源（worker 引擎进程→主控 `/api/runtime/platform-cards`）。"""
+    from src.domains.runtime.vcs.card_sources import ServerContractCardSource
+
+    return ServerContractCardSource()
+
+
 def _raws_from_table() -> dict:
-    """D109：表就绪后从 grape_t_repo_platforms（+caps）构造平台卡 raw。
+    """D109 表卡 raw（委托 `OwnerTableCardSource`，保留模块级薄壳以兼容既有调用/测试）。
 
     未就绪 / 读失败 → 空 dict，调用方保持「meta > 文件 > 代码兜底」原路径。
+
+    Issue #3632（第 1/2 层）：原实现第一句是 `if not is_table_backed(): return {}`
+    —— 静默返回空字典，调用方看到的是"这个平台没有卡"，不是"读卡失败"；而
+    `is_table_backed()` 的判据是**本进程的库**，在无 mgmt DSN 的 worker/engine
+    进程里恒假，于是表卡路径对该进程永久关闭。现在判据收口到 owner 域并由
+    来源对象留痕（debug 带 owner_dsn 状态），不可用即让位给契约来源。
     """
-    try:
-        from src.domains.platform.public import is_table_backed
+    return _table_source().raws()
 
-        if not is_table_backed():
-            return {}
-        # 平台对象表归 mgmt 域：拆库拓扑下必须走 mgmt public 原语（lib 命名查询），
-        # 不能在本进程库里 ORM 直读——那是另一份空/陈旧副本（三库四进程守护）。
-        from src.domains.mgmt import public as _mgmt_public
 
-        out: dict[str, dict] = {}
-        # 这里**保留** enabled_only：disabled 平台不用表行覆盖卡，卡仍从
-        # configs/platforms/*.json 解析 → "用户面不提供"不等于"内网不可用"
-        # （方言/host/托管链路还要能工作）。与用户面目录的判据是两件事。
-        for row in _mgmt_public.repo_platform_cards(enabled_only=True):
-            out[str(row.get("provider") or "")] = {
-                col: row.get(col) or ""
-                for col in _PLATFORM_CARD_COLUMNS
-                if col not in _TABLE_SKIP
-            }
-        return {k: v for k, v in out.items() if k}
-    except Exception as e:
-        log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
-        return {}
+def _raws_from_server() -> dict:
+    """契约卡 raw（委托 `ServerContractCardSource`；无 RUNTIME_TOKEN 时为空且不吵）。"""
+    return _server_source().raws()
 
 
 def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
@@ -621,7 +657,11 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
 
 
 def _build_cards() -> "dict[str, PlatformCard]":
-    """无锁构建平台卡（meta > 文件 > 代码兜底 > DB 表）。
+    """无锁构建平台卡（meta > 文件 > 代码兜底 > 表/契约）。
+
+    Issue #3632：装配逻辑收进 `card_sources.PlatformCardAssembler`——本函数只做
+    "把本模块的原料与几个来源接上"，优先级链与回落语义都在装配器里各由一类
+    对象承担（策略模式），加新来源不再改这里的分支。
 
     2026-11-19：**调用本函数时不得持有 `_cache_lock`**。函数内部经
     `get_meta_value()` / `_raws_from_table()` 会走到 `runtime.public._any_cursor`，
@@ -631,54 +671,24 @@ def _build_cards() -> "dict[str, PlatformCard]":
     全站卡死的 ABBA 死锁（thread dump 实证：一边卡 platform_card.py:620，
     另一边卡 runtime/public._any_cursor）。
     """
-    cards: dict[str, PlatformCard] = {}
-    raw_cfg = ""
-    try:
-        from src.domains.mgmt import public as user_db
-        raw_cfg = user_db.get_meta_value("vcs_providers_config") or ""
-    except Exception as e:  # DB 未就绪（测试/启动早期）→ 走默认
-        log.debug(f"platform_card: read meta failed ({e}), using defaults")
-    # S83/D59 优先级链：meta（admin 运行时覆盖）> configs/platforms/ 文件
-    # （内置默认载体，每平台一个文件）> _DEFAULT_CARDS_RAW（代码兜底，
-    # 目录缺失时才用）。
-    # D105-19：meta 对文件卡是【逐键覆盖】——meta 只覆盖它声明的键，缺席键
-    # 落到文件卡值。存量 meta 常是整卡全量 dump（admin UI 保存形态），若做
-    # 整卡替换，代码/文件新增的卡字段（如 webhook_dialect）会被 stale dump
-    # 静默抹掉，导致托管消费侧 fail-closed。显式置空语义不变（键存在即尊重）。
-    if os.path.isdir(_CONFIGS_DIR):
-        _base_raws = _builtin_raws_from_dir(_CONFIGS_DIR)
-    else:
-        log.warning(f"platform_card: 配置目录缺失 {_CONFIGS_DIR}，回退代码内置默认")
-        _base_raws = {p: dict(raw) for p, raw in _DEFAULT_CARDS_RAW.items()}
-    if raw_cfg:
-        try:
-            data = json.loads(raw_cfg)
-            for provider, raw in (data or {}).items():
-                _merged = dict(_base_raws.get(provider) or {})
-                _merged.update(raw or {})
-                _base_raws[provider] = _merged
-        except Exception as e:
-            log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
-    # D109：表就绪后 DB 表为运行时真源——表内 provider 覆盖 meta/文件合并结果；
-    # 文件独有平台仍保留（防表缺行致平台消失）。
-    _tbl_raws = _raws_from_table()
-    if _tbl_raws:
-        for _p, _raw in _tbl_raws.items():
-            _base_raws[_p] = dict(_raw)
-        log.info(f"platform cards from table: {sorted(_tbl_raws)}")
-    cards = {}
-    for provider, raw in _base_raws.items():
-        try:
-            cards[provider] = build_platform_card(provider, raw)
-        except PlatformCardError as e:
-            # meta 合并产物非法：退回纯文件卡（meta 覆盖被拒），不静默丢平台
-            _fb = (_builtin_raws_from_dir(_CONFIGS_DIR).get(provider)
-                   if os.path.isdir(_CONFIGS_DIR) else None)
-            if _fb is not None:
-                log.warning(f"platform_card: {provider} meta 合并卡非法（{e}），回退文件卡")
-                cards[provider] = build_platform_card(provider, _fb)
-            else:
-                log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
+    from src.domains.runtime.vcs.card_sources import (
+        ServerContractCardSource,
+        default_assembler,
+    )
+
+    assembler = default_assembler(
+        _CONFIGS_DIR,
+        _builtin_raws_from_dir,
+        _DEFAULT_CARDS_RAW,
+        table_source=_table_source(),
+        server_source=ServerContractCardSource(),
+    )
+    global _degraded_reason
+    cards = assembler.build(builder=build_platform_card, error_type=PlatformCardError)
+    _degraded_reason = assembler.last_degraded
+    if _degraded_reason:
+        log.warning(f"platform_card: 装配降级 reason={_degraded_reason}"
+                    "（取卡通道异常时不会退化成「平台未注册」）")
     return cards
 
 
@@ -703,6 +713,16 @@ def invalidate_platform_card_cache() -> None:
     with _cache_lock:
         _loaded = False
     log.info("platform card cache invalidated")
+
+
+def platform_card_degraded_reason() -> str:
+    """最近一次装配的降级原因（"" = 正常）。
+
+    clone 端在 `get_platform_card()` 返回 None 时用它区分两类故障：
+      · 非空（contract_unavailable / contract_error）→ 取卡通道坏了，修链路；
+      · 空 → 真的没有这张卡，去配卡。
+    """
+    return _degraded_reason
 
 
 def get_platform_card(provider: str) -> "PlatformCard | None":

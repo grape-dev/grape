@@ -202,16 +202,27 @@ async def create_from_template(body: CreateTemplateRequest,
 
     # 1. 创建空仓库（用户个人名下）。同名已存在时不视为致命错误：
     #    继续走 push + 托管流程（空仓库可复用；非空仓库 push 冲突时再报错）
+    from src.api.oauth_token import with_oauth_token, sanitize_upstream_error
     repo_created = False
     try:
         # D44/S66：建仓+取 login 统一走适配器端口（存量平台子类委托原实现，
         # config-only 平台卡驱动自动正确，无平台名分支）
+        # Issue #3563：身份获取改经 with_oauth_token——过期 token（上游 401）刷新重试，
+        # 仍失败统一 401 reauth_required（detail 带 provider，Spec v2）；get_user_login
+        # 实现吞 401 返空（→502 无信息文案），故用 verify_token 让 401 穿透到刷新链。
+        # 捕获实际使用的 token：刷新成功后外层 api_token 已过期，建仓必须用新 token。
         from src.kernel.token_resolver import create_provider
         _prov_adapter = create_provider(provider)
-        owner_login = _prov_adapter.get_user_login(api_token)
+        _used_token = {"v": api_token}
+        def _verify_login(t, _adapter=_prov_adapter):
+            _used_token["v"] = t
+            info = _adapter.verify_token(t)
+            return str((info or {}).get("login", "") or "") if isinstance(info, dict) else ""
+        owner_login = with_oauth_token(user, provider, _verify_login)
         if not owner_login:
+            # verify_token 已成功但响应无 login：确实取不到身份（保留原文案）
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"无法获取当前 {provider} 用户身份"})
-        _prov_adapter.create_repo(api_token, repo_name, description=tpl.get("description", ""))
+        _prov_adapter.create_repo(_used_token["v"], repo_name, description=tpl.get("description", ""))
         repo_created = True
     except HTTPException:
         raise
@@ -221,7 +232,9 @@ async def create_from_template(body: CreateTemplateRequest,
         if any(k in msg for k in ("409", "422", "already exists", "same name", "已存在", "已经存在")):
             repo_created = False  # 仓库已存在，尝试复用
         else:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {msg}"})
+            # Issue #3563：上游异常短消息化——剥离内部 API URL（原文仅落日志）
+            log.warning(f"create_from_template: create repo failed (provider={provider}, user={user.get('id', '')}): {e}")
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {sanitize_upstream_error(e)}"})
 
     full_name = f"{owner_login}/{repo_name}"
 
@@ -235,19 +248,21 @@ async def create_from_template(body: CreateTemplateRequest,
         log.warning(f"create_from_template: invalidate user_repos failed: {_inv_e}")
 
     # 2. 写入模板代码（放到 executor 避免阻塞 event loop）
+    # Issue #3563：用 with_oauth_token 实际生效的 token（刷新成功后外层 api_token 已过期）
     try:
         bot_token, _ = _load_global_bot_config(provider=provider)
         import asyncio, functools
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None,
             functools.partial(push_template_to_repo, tpl, owner_login, repo_name,
-                              api_token, bot_token=bot_token, provider=provider,
+                              _used_token["v"], bot_token=bot_token, provider=provider,
                               user_id=user.get("id", "") or ""))
     except Exception as e:
         log.warning(f"template push failed: {e}")
         if not repo_created:
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"同名仓库 {owner_login}/{repo_name} 已存在且模板代码写入失败（可能是该仓库已有内容）。请更换仓库名，或在仓库管理页对该仓库手动操作。"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {e}"})
+        # Issue #3563：上游/git 异常短消息化——剥离内部 URL（原文仅落日志）
+        raise HTTPException(status_code=502, detail={"code": 502, "message": f"仓库已创建但模板代码写入失败: {sanitize_upstream_error(e)}"})
 
     # 3. 自动加入托管（复用 /api/repos/host 全链路）
     #    host_repo 是同步函数（含 GitCode HTTP 调用），用 to_thread 避免阻塞 event loop

@@ -1708,7 +1708,11 @@ class ImEngine:
             text = str(cmd.get("text", ""))
             fn = engine._process_command or engine._legacy_process_command()
             try:
-                from src.kernel.session_manager import db as legacy_db
+                # 本文件属 runtime 域、由 mgmt 进程执行：命令处理用到的
+                # repo_im_group_binding / issue / chat_agent_session 都是 runtime 基表，
+                # 必须传 runtime owner 连接（单库拓扑自动回落 session_manager.db）。
+                from src.kernel.owner_db import db_pair
+                legacy_db, _ = db_pair("runtime")
             except Exception:
                 legacy_db = None
             result = await fn(

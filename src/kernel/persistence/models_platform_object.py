@@ -82,8 +82,6 @@ class RepoPlatformModel(Base):
     pr_comment_endpoint = Column("pr_comment_endpoint", Text, default="")
     pr_labels_via_issues = Column("pr_labels_via_issues", Integer, default=0)
     workflows_write = Column("workflows_write", Integer, default=0)
-    # 建仓可选参数（auto_init/default_branch）能力位；卡驱动的建仓参数分叉。
-    create_repo_options = Column("create_repo_options", Integer, default=0)
     legacy_token_symbol = Column("legacy_token_symbol", Text, default="")
     # 原 grape_t_repo_credential_caps 的存活字段（2026-11-14 合表：drivers/oauth_requires_scope/
     # supports_bot_token/supports_webhook_secret 已删除语义，不再存储）
