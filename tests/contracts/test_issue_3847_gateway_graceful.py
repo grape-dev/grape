@@ -41,9 +41,13 @@ RETRY_INC = "deploy/nginx-grape-upstream.inc"
 KEEPALIVE_INC = "deploy/nginx-grape-upstream-keepalive.inc"
 SHUTDOWN_INC = "deploy/nginx-worker-shutdown.inc"
 DRAIN_SCRIPT = "scripts/deploy-drain.sh"
+INSTALL_SCRIPT = "deploy/install-nginx-grape-gateway.sh"
 COMPOSE = "deploy/docker-compose.yml"
 ALERTS = "deploy/alerts.yml"
 LOKI_RULES = "deploy/loki-rules.yml"
+ALERTS_PY = "src/domains/insight/observability/alerts.py"
+GRAFANA_README = "deploy/grafana/README.md"
+GRAFANA_SRE_JSON = "deploy/grafana/alerts/alerts-grape-sre.json"
 SYSTEMD_UNITS = [
     "deploy/systemd/grape-server.service",
     "deploy/systemd/grape-event-server.service",
@@ -127,6 +131,17 @@ def test_upstream_keepalive_inc_and_window_ordering():
     assert upstream_timeout > client_timeout, (
         "upstream keepalive_timeout 必须大于客户端侧，避免复用对端已关闭连接"
     )
+
+
+def test_keepalive_inc_does_not_overstate_idle_connection_capacity():
+    """nginx keepalive 池按对端 sockaddr 复用，同址双 peer 共用同一池。
+
+    片段旧注释称 2 peer → 64 条空闲连接，与实际容量（仍为 keepalive 32）不符，
+    会让「连接数是否足够」的判断偏一倍（审查 Nit）。
+    """
+    keep = _read(KEEPALIVE_INC)
+    assert "64 条空闲连接" not in keep, "keepalive 片段仍声称同址双 peer 提供 64 条空闲连接"
+    assert re.search(r"同一?池|共用", keep), "缺少「同址双 peer 共用同一 keepalive 池」的说明"
 
 
 def test_worker_shutdown_inc_documents_main_context():
@@ -319,12 +334,15 @@ def test_drain_script_is_bash_syntax_valid():
 
 _FAKE_CURL = r"""#!/usr/bin/env bash
 # 假 curl：模拟 `curl -s -o /dev/null -m 5 -w '%{http_code}' <url>`
+[ -n "${FAKE_LOG:-}" ] && date +%s%N >> "$FAKE_LOG"
 case "${FAKE_MODE:-ok}" in
   ok)    printf '200'; exit 0 ;;
   down)  exit 7 ;;                 # 连接失败（真 curl 此时也非 0 退出）
   000)   printf '000'; exit 7 ;;   # 连接失败 + 000 双写
   502)   printf '502'; exit 0 ;;
   503)   printf '503'; exit 0 ;;
+  504)   printf '504'; exit 0 ;;
+  slow)  sleep 1; printf '200'; exit 0 ;;   # 慢响应：验证窗口按墙钟而非迭代次数计时
   one502)
     n=$(cat "${FAKE_COUNTER}" 2>/dev/null || echo 0)
     n=$((n+1)); echo "$n" > "${FAKE_COUNTER}"
@@ -410,6 +428,46 @@ def test_gate_rolls_back_on_502_storm(tmp_path):
     assert rollback_marker.exists()
 
 
+@pytest.mark.parametrize("code", ["503", "504"])
+def test_gate_rolls_back_on_non_502_5xx_storm(tmp_path, code):
+    """验收目标是「窗口内 5xx ≤0.5%」，503/504 与 502 同为 5xx。
+
+    修复前失败率只累加 n502+nconn，全返 503 时 `502=0` → 放行 exit 0，
+    应用侧 503/504 风暴（上游过载、超时）会被门禁当成健康。
+    """
+    proc, _, rollback_marker = _run_drain(tmp_path, mode=code, samples=4)
+    assert proc.returncode != 0, f"全部 {code} 仍放行：\n{proc.stdout}\n{proc.stderr}"
+    assert "触发自动回滚" in proc.stderr
+    assert rollback_marker.exists()
+
+
+def test_gate_failure_rate_counts_all_5xx_samples(tmp_path):
+    """失败率口径 = 5xx（含 502）+ 连接失败，而非仅 502+连接失败。"""
+    proc, _, _ = _run_drain(tmp_path, mode="503", samples=4)
+    m = re.search(r"失败率 ([0-9.]+) > 阈值", proc.stderr)
+    assert m, f"未见失败率判定输出：\n{proc.stdout}\n{proc.stderr}"
+    assert float(m.group(1)) > 0.5, f"503 未计入失败率：{m.group(1)}"
+
+
+def test_gate_all_5xx_below_min_samples_still_rolls_back(tmp_path):
+    """全样本失败（此处全 503）即网关判死，不能被「最小样本不足」放行。
+
+    小窗口/少路径（或缩窗排障）下 total < GATEWAY_MIN_SAMPLES 时，旧实现先判
+    样本不足再判失败率 → 全失败也 exit 0（fail-open）。
+    """
+    env = {"GATEWAY_MIN_SAMPLES": "30"}
+    proc, _, rollback_marker = _run_drain(tmp_path, mode="503", samples=3, extra_env=env)
+    assert proc.returncode != 0, f"全样本 5xx 且样本不足仍放行：\n{proc.stdout}\n{proc.stderr}"
+    assert rollback_marker.exists()
+
+
+def test_gate_all_connections_failed_below_min_samples_rolls_back(tmp_path):
+    env = {"GATEWAY_MIN_SAMPLES": "30"}
+    proc, _, rollback_marker = _run_drain(tmp_path, mode="down", samples=3, extra_env=env)
+    assert proc.returncode != 0, f"网关全不可用仍以样本不足放行：\n{proc.stdout}\n{proc.stderr}"
+    assert rollback_marker.exists()
+
+
 def test_gate_ignores_single_isolated_502(tmp_path):
     """180 样本粒度下 1 次 502 = 0.56% > 阈值；基线 0.077% 时这会误回滚发布，
     故要求失败样本数 ≥ GATEWAY_MIN_FAILURES（默认 3）。"""
@@ -423,6 +481,50 @@ def test_gate_passes_on_healthy_gateway(tmp_path):
     assert proc.returncode == 0
     assert "[OK]" in proc.stdout
     assert not rollback_marker.exists()
+
+
+def test_gate_window_is_wall_clock_not_loop_iterations(tmp_path):
+    """采样窗口必须按墙钟计时，而不是「迭代次数 × 间隔」。
+
+    修复前每轮只把 elapsed 加一个 GATEWAY_SAMPLE_INTERVAL，与 curl 实际耗时无关：
+    每样本 1s × 3 路径、配置窗口 2s 时，实际要跑 2 轮 ×(3+1)s = 8s；默认 60s 窗口
+    若 curl 全部超时（-m 5）则约 60×(15+1)=960s 才判定，回滚被延迟到 16 分钟。
+    """
+    env = {"GATEWAY_HEALTH_PATHS": "/a /b /c"}
+    started = time.time()
+    proc, _, _ = _run_drain(tmp_path, mode="slow", samples=2, extra_env=env)
+    elapsed = time.time() - started
+    assert proc.returncode == 0, proc.stderr
+    assert elapsed < 6, f"窗口 2s 实际耗时 {elapsed:.1f}s（按迭代次数计时的旧行为）"
+
+
+def test_gate_short_circuits_early_on_failure(tmp_path):
+    """失败率与最小失败数已达标时应提前判定，不必跑满窗口（否则回滚延迟一整个窗口）。"""
+    env = {"GATEWAY_MIN_SAMPLES": "3", "GATEWAY_MIN_FAILURES": "3"}
+    started = time.time()
+    proc, _, rollback_marker = _run_drain(tmp_path, mode="503", samples=60, extra_env=env)
+    elapsed = time.time() - started
+    assert proc.returncode != 0
+    assert rollback_marker.exists()
+    assert elapsed < 10, f"已确认失败仍跑满 60s 窗口（{elapsed:.1f}s）"
+
+
+def test_sampling_starts_before_restart_covers_cutover_window(tmp_path):
+    """门禁采样必须覆盖重启/切流瞬间（在 stop_unit 之前开始），否则切流 502 采不到。"""
+    sample_log = tmp_path / "samples.log"
+    stop_stamp = tmp_path / "stop.stamp"
+    env = {
+        "FAKE_LOG": str(sample_log),
+        "GATEWAY_STOP_CMD": f"date +%s%N > {stop_stamp}; sleep 2",
+        "GATEWAY_GATE_WINDOW_SECONDS": "4",
+        "GATEWAY_MIN_SAMPLES": "2",
+    }
+    proc, _, _ = _run_drain(tmp_path, samples=4, extra_env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert sample_log.exists() and stop_stamp.exists()
+    first_sample = int(sample_log.read_text().split()[0])
+    stop_at = int(stop_stamp.read_text().split()[0])
+    assert first_sample < stop_at, "首个采样晚于重启——切流瞬间的失败没有被覆盖"
 
 
 def test_drain_dry_run_executes_nothing(tmp_path):
@@ -477,6 +579,151 @@ def test_alerts_and_loki_rules_yml_are_valid_yaml():
     names = [r["alert"] for g in loki["groups"] for r in g["rules"]]
     for name in ("GrapeGateway502RateWarning", "GrapeGateway502RateCritical"):
         assert name in names
+
+
+def _seed_rules():
+    """用 ast 解析 SEED_RULES（不 import 告警模块，避免拉 DB/runtime 依赖）。"""
+    import ast
+    tree = ast.parse(_read(ALERTS_PY))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == "SEED_RULES":
+                    return ast.literal_eval(node.value)
+    raise AssertionError(f"{ALERTS_PY}: 未见 SEED_RULES 定义")
+
+
+def test_insight_seed_http_5xx_rules_match_alerts_yml_tiers():
+    """Insight 种子规则必须与 deploy/alerts.yml 同为 5xx 分级 0.5%/2%。
+
+    修复前种子是单条 threshold=0.1、seed_source=GrapeHTTPErrorRateHigh；Insight 重启
+    后仍按 10% 求值，1.63% 的事故时段两侧都不触发（审查 Required R3）。
+    """
+    rules = [r for r in _seed_rules() if r.get("metric") == "http_5xx_rate"]
+    assert len(rules) == 2, f"5xx 种子规则应拆为 warning/critical 两条，实际 {len(rules)}"
+    assert {float(r["threshold"]) for r in rules} == {float(THRESHOLD), float(CRITICAL)}, (
+        f"种子阈值 {[r['threshold'] for r in rules]} 与 alerts.yml 的 0.5%/2% 不一致"
+    )
+    assert {r["severity"] for r in rules} == {"warning", "critical"}
+    assert {r["seed_source"] for r in rules} == {
+        "GrapeHTTPErrorRateWarning", "GrapeHTTPErrorRateCritical",
+    }
+    assert not [r for r in _seed_rules() if r.get("seed_source") == "GrapeHTTPErrorRateHigh"], (
+        "alerts.yml 已删除 GrapeHTTPErrorRateHigh，种子规则不得再引用该名字"
+    )
+
+
+def test_grafana_5xx_rule_aligned_with_tiered_thresholds():
+    """Grafana SRE 规则（排除 /faro/collect）不得再停在 10% 旧口径。"""
+    readme = _read(GRAFANA_README)
+    sre = _read(GRAFANA_SRE_JSON)
+    assert "GrapeHTTPErrorRateHigh" not in readme, "README 仍引用已删除的 GrapeHTTPErrorRateHigh"
+    assert '"$A > 10"' not in sre, "Grafana 数学表达式仍是 $A > 10（10% 旧阈值）"
+    assert '"$A > 0.5"' in sre, "Grafana 规则应改用 0.5%（与 alerts.yml Warning 对齐）"
+    assert "GrapeHTTPErrorRateHigh" not in sre, "Grafana summary 仍引用已删除的规则名"
+    assert "0.5%" in readme and "10%" not in readme.split("## 数据源 uid")[0].split("## 告警规则")[1], (
+        "Grafana README 告警表仍在描述 10% 阈值"
+    )
+
+
+def test_no_dangling_grape_http_error_rate_high_anywhere():
+    """全仓不得再出现已删除规则名的悬空引用（含 Insight 种子与 Grafana 侧）。"""
+    for rel in (ALERTS_PY, GRAFANA_README, GRAFANA_SRE_JSON, ALERTS, LOKI_RULES):
+        assert "GrapeHTTPErrorRateHigh" not in _read(rel), f"{rel} 仍引用已删除的 GrapeHTTPErrorRateHigh"
+
+
+# ---------------------------------------------------------------------------
+# 原生下发脚本：幂等 + nginx -t 失败回滚
+# ---------------------------------------------------------------------------
+
+def _install_prefix(tmp_path, backend_port=None, listen_port=None):
+    prefix = tmp_path / "nginx"
+    confd = prefix / "conf.d"
+    confd.mkdir(parents=True)
+    (prefix / "logs").mkdir()
+    backend_port = backend_port or _free_port()
+    listen_port = listen_port or _free_port()
+    conf = _rewrite_for_test(_read("deploy/nginx-grape-compose.conf"), backend_port, listen_port)
+    confd.joinpath("grape.conf").write_text(conf, encoding="utf-8")
+    (prefix / "nginx.conf").write_text(
+        "worker_processes 1;\n"
+        f"pid {prefix}/nginx.pid;\n"
+        f"error_log {prefix}/error.log warn;\n"
+        "events { worker_connections 64; }\n"
+        "http {\n"
+        "    access_log off;\n"
+        "    include conf.d/*.conf;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return prefix
+
+
+def _run_install(prefix, extra_env=None, args=()):
+    env = dict(os.environ)
+    env.update({
+        "NGINX_CONF_DIR": str(prefix / "conf.d"),
+        "NGINX_MAIN_CONF": str(prefix / "nginx.conf"),
+        "NGINX_TEST_ARGS": f"-p {prefix} -c nginx.conf",
+        "NGINX_SKIP_RELOAD": "1",
+    })
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["bash", os.path.join(_REPO_ROOT, INSTALL_SCRIPT), *args],
+        cwd=_REPO_ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+
+
+def test_install_script_syntax_and_dry_run(tmp_path):
+    path = os.path.join(_REPO_ROOT, INSTALL_SCRIPT)
+    assert os.path.isfile(path), f"{INSTALL_SCRIPT}: 缺少原生下发脚本（审查 Optional O3）"
+    assert subprocess.run(["bash", "-n", path], capture_output=True).returncode == 0
+    prefix = _install_prefix(tmp_path)
+    proc = _run_install(prefix, args=("--dry-run",))
+    assert proc.returncode == 0, proc.stderr
+    assert "[dry-run]" in proc.stdout
+    assert not (prefix / "conf.d" / "nginx-grape-upstream.inc").exists(), "dry-run 不应真的落盘"
+
+
+def test_install_script_copies_includes_and_wires_shutdown(tmp_path):
+    prefix = _install_prefix(tmp_path)
+    proc = _run_install(prefix)
+    assert proc.returncode == 0, proc.stderr
+    confd = prefix / "conf.d"
+    for inc in (RETRY_INC, KEEPALIVE_INC):
+        dst = confd / os.path.basename(inc)
+        assert dst.is_file() and dst.read_text() == _read(inc)
+    shutdown = prefix / os.path.basename(SHUTDOWN_INC)
+    assert shutdown.is_file() and shutdown.read_text() == _read(SHUTDOWN_INC)
+    main_conf = (prefix / "nginx.conf").read_text()
+    assert "include nginx-worker-shutdown.inc;" in main_conf
+    assert main_conf.index("include nginx-worker-shutdown.inc;") < main_conf.index("events {"), (
+        "worker_shutdown_timeout 必须在 main 上下文（events 之前）"
+    )
+
+
+def test_install_script_is_idempotent(tmp_path):
+    prefix = _install_prefix(tmp_path)
+    first = _run_install(prefix)
+    assert first.returncode == 0, first.stderr
+    before = {p.name: p.read_text() for p in prefix.rglob("*") if p.is_file()}
+    second = _run_install(prefix)
+    assert second.returncode == 0, second.stderr
+    after = {p.name: p.read_text() for p in prefix.rglob("*") if p.is_file()}
+    assert before == after, "重复下发改变了文件内容（非幂等）"
+
+
+def test_install_script_rolls_back_when_nginx_test_fails(tmp_path):
+    prefix = _install_prefix(tmp_path)
+    (prefix / "conf.d" / "broken.conf").write_text("definitely not nginx syntax;\n", encoding="utf-8")
+    main_before = (prefix / "nginx.conf").read_text()
+    proc = _run_install(prefix)
+    assert proc.returncode != 0, f"nginx -t 失败仍以 0 退出：\n{proc.stdout}\n{proc.stderr}"
+    assert not (prefix / "conf.d" / "nginx-grape-upstream.inc").exists(), "失败后未清理新下发的片段"
+    assert "include nginx-worker-shutdown.inc;" not in (prefix / "nginx.conf").read_text(), (
+        "失败后未回滚主 nginx.conf"
+    )
+    assert (prefix / "nginx.conf").read_text() == main_before
 
 
 # ---------------------------------------------------------------------------
