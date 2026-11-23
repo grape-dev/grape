@@ -36,6 +36,9 @@ _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
 
 _MAX_RETRY_DELAY = 300    # 秒：退避上限
 
+# Issue #3897：失败 exec 的 cause 里 agent 输出尾行截断长度（单行日志可读、可 grep）
+_AUTOPILOT_CAUSE_TAIL_MAX = 300
+
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
 # ── Issue #3800：环境性失败（绑定引擎离线/悬空）分类 + 退避 + 熔断 ────────────
@@ -894,6 +897,41 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
         _update_execution_result(exec_id, _status, error=f"入队异常: {e}", error_code=_code)
 
+def _autopilot_failure_cause(exit_code: int, final_text: str) -> str:
+    """失败 exec 的结构化 cause（恒非空）：`exit_code=<n>; output=<agent 输出尾行>`。
+
+    Issue #3897（生产 Loki：`Autopilot: task 83 exec <id> failed after 0 retries`）：
+    此前 `_finalize_autopilot_task` 失败时只写 status、`error` 留空，调度收口日志回落到
+    字面量 `failed after N retries` —— 既没有失败原因，也不解释为什么 max_retry=0
+    一次都不重试。本函数保证「失败必有 cause」：输出为空时也给出可辨识的空输出标记，
+    让日志能直接区分「agent 报错」与「agent 什么都没产出」。
+    """
+    _lines = [ln.strip() for ln in str(final_text or "").splitlines() if ln.strip()]
+    tail = _lines[-1] if _lines else ""
+    if not tail:
+        tail = "<no output: agent produced no stdout/stderr>"
+    if len(tail) > _AUTOPILOT_CAUSE_TAIL_MAX:
+        tail = tail[:_AUTOPILOT_CAUSE_TAIL_MAX] + "…"
+    return f"exit_code={int(exit_code)}; output={tail}"
+
+
+def _retry_skip_reason(max_retry: int, attempt: int, error_code: str) -> str:
+    """解释「为什么 0 重试」（Issue #3897）：环境性失败 / 任务配置 / 已达上限。
+
+    收口日志用该字段替代原来的裸 `failed after {max_retry} retries` —— 后者在
+    max_retry=0 时是一句同义反复，读日志的人无法判断「配置就是 0」还是「代码没重试」。
+    """
+    if error_code in _ENV_FAILURE_CODES:
+        return (f"environmental failure error_code={error_code}: retry is pointless "
+                f"(handed to backoff/circuit)")
+    _max = int(max_retry or 0)
+    if _max <= 0:
+        return "max_retry=0 (task config): no retry scheduled"
+    if int(attempt) >= _max:
+        return f"reached max_retry={_max} after {int(attempt) + 1} attempt(s)"
+    return f"retries available ({int(attempt)}/{_max} used)"
+
+
 def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
     """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
     # 更新 agent_tasks 状态（用 task_id 精确更新）
@@ -925,7 +963,9 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
 
     # 更新 autopilot_executions
     status = "success" if exit_code == 0 else "failed"
-    _ev_error = ""
+    # Issue #3897：失败必须落 cause（exit_code + agent 输出尾行）。此前失败行 error 恒为空，
+    # 调度收口只能打 `failed after N retries`，生产 task 83 每分钟一条、无法自诊断。
+    _ev_error = "" if status == "success" else _autopilot_failure_cause(exit_code, final_text)
     if status == "success":
         # Issue #537 P1-1：部署类任务收口前做落地证据校验（版本指纹/健康检查）。
         # 校验失败 → 收口 failed 带 evidence 详情（纵深防御，防 false-success 也防 false-failed）。
@@ -940,7 +980,9 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
             _evd = {"checked": False}
         if _evd.get("checked") and not _evd.get("passed"):
             status = "failed"
-            _ev_error = _evd.get("reason", "部署证据校验未通过")
+            # Issue #3897：证据失败也是失败，cause 同时带证据原因与 agent 输出尾行。
+            _ev_error = (f"deploy_evidence: {_evd.get('reason', '部署证据校验未通过')}; "
+                         f"{_autopilot_failure_cause(exit_code, final_text)}")
             log.info(f"Autopilot exec {exec_id}: deploy evidence failed -> {status} ({_evd.get('reason')})")
     _update_execution_result(exec_id, status,
                              result=_result_summary,
@@ -1956,7 +1998,9 @@ async def _execute_task(task: dict):
                 # 直接跳出重试循环进入退避/熔断裁决。
                 log.warning(
                     f"Autopilot: task {task_id} exec {exec_id} environmental failure "
-                    f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error}")
+                    f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error} "
+                    f"retries_attempted={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\"")
                 _env_failure = (exec_id, exec_error_code, exec_error)
                 break
             if attempt < max_retry:
@@ -1967,11 +2011,16 @@ async def _execute_task(task: dict):
                 await asyncio.sleep(delay)
                 attempt += 1
             else:
+                # Issue #3897：此前是 `error=failed after {max_retry} retries`——max_retry=0 时
+                # 既无原因也不解释为何不重试。现在恒带 cause + retries_attempted + retry_skip
+                # （环境性失败/任务配置 max_retry=0/已达上限三种可读原因）。
                 log.error(
                     f"Autopilot task={task_id} exec={exec_id} status={exec_status} "
                     f"error_code={exec_error_code or ''} engine_ids={_task_binding_label(task)} "
                     f"consecutive_failures={int(task.get('consecutive_failures') or 0)} "
-                    f"error={exec_error or f'failed after {max_retry} retries'}")
+                    f"retries_attempted={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\" "
+                    f"error={exec_error or '<no cause recorded by executor>'}")
                 break
 
         if _env_failure is not None:
