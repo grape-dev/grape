@@ -1,0 +1,28 @@
+name: lock-regression
+
+# Issue #3927 门禁：任务级锁/事件终态保护锁/终态拆写/慢锁观测的并发回归用例。
+# 背景：锁改造属高危并发变更，PR 审查（工作流-受控执行 Required）指出回归只靠
+# 人工执行、后续改动可绕过门禁直接回归线上——本 job 把并发回归用例拉进 CI，
+# 任何 PR 都必须通过后才能合入。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lock-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GITCODE_API_TOKEN: test_token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Lock & concurrency regression (issue #3927)
+        run: python -m pytest tests/runtime/test_3927_lock_scope.py tests/kernel/test_owner_db.py -v
