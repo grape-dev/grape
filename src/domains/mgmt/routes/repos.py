@@ -1738,7 +1738,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         })
     # B 批（2026-11-13）：回调路径按平台卡派生（D12/W3 同一来源链）。
     # 2026-11-22 修：旧写法「基址里没有 /webhook/ 段就整段跳过」，裸基址（如隧道
-    # 基址 https://<id>.hwtunnel.com）会建出缺平台路径的 hook → 平台回调 404
+    # 基址 https://<id>.tunnel.example.com）会建出缺平台路径的 hook → 平台回调 404
     # （实锤 gitcode:org-a/repo-a）。改为按平台卡重建，缺段自动补。
     from src.domains.mgmt.user.db import _rebuild_webhook_url_for_provider as _rebuild_wh_url
     webhook_url = _rebuild_wh_url(webhook_url, provider)
