@@ -11,7 +11,10 @@
    `attempts=<attempt+1>/<max_retry+1> max_retry=<n> retry_skip=<原因>`
    （`attempts` 含首次执行，不是「重试次数」；口径已在字段名里写明）；
    原因取值：环境性失败码（不重试）/ `max_retry=0`（任务配置不重试）/
-   `reached_max_retry`。日志同时带 `exit=<code>`（从 error 前缀解析或单独列）。
+   `reached_max_retry`。收口日志不设独立 `exit=` 字段：退出码由 `error=` 内嵌的
+   cause 前缀携带（`exit_code=<n>; output=…`，None/非法统一归一为 -1 并带注记，
+   与落库的 `autopilot_executions.error` 同文）；另有独立的 `error_code=`（业务
+   失败码，非退出码）。
 4. 不改重试策略本身：本次只补可观测性，避免改动 #3800 退避/熔断语义。
 
 ## B 组 — external_identities（uow / db_setup / schema_probe / 迁移）
