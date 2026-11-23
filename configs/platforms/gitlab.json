@@ -30,6 +30,5 @@
   "token_storage_field": "",
   "webhook_token_field": "",
   "bot_username": "",
-  "branch_create_form": "form",
   "issue_write_form": "repo_path"
 }

@@ -42,6 +42,5 @@
   "download_base": "https://raw.gitcode.com",
   "brand_color": "#DA203E",
   "legacy_token_symbol": "get_user_token_with_refresh",
-  "branch_create_form": "form",
   "issue_write_form": "repo_path"
 }
