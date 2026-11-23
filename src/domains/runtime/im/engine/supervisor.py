@@ -40,6 +40,15 @@ REGISTER_CONFLICT_ALERT_AFTER = 5
 # 一次连接健康存活 ≥ 该时长 → 视为已恢复，重置并发注册冲突的连续计数。
 REGISTER_CONFLICT_STABLE_SECS = 60.0
 
+# Issue #3897：传输层断连异常族——「链路抖动」，不是适配器 bug。
+# 生产现场 `channel crashed (unexpected)` 的异常栈即 asyncio selector_events 写 socket 时
+# 抛的 BrokenPipeError（1h 11 条）。这类异常必须按传输抖动 WARNING 归因 + 既有指数退避，
+# 不能落通用 except 打成全栈 ERROR（既污染 error 计数，也让 `channel crashed` 验收无法归零）。
+_TRANSPORT_ERRORS = (
+    BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError,
+    asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -451,6 +460,22 @@ class Supervisor:
                         self._record_reconnect(
                             "ilink_longpoll" if channel_type == Type.WECHAT.value
                             else "ws_transport")
+                        await _backoff_sleep(backoff)
+                        backoff = next_backoff(backoff)
+                    except _TRANSPORT_ERRORS as e:
+                        # Issue #3897：传输层断连（BrokenPipe/ConnectionReset/超时…）就是
+                        # 「链路抖动」——WARNING 单行归因（inst/type/cause/errno），走既有
+                        # 指数退避重连；不进通用 except，避免 `channel crashed (unexpected)`
+                        # 全栈 ERROR 刷屏（生产 1h 11 条）与 error 计数污染。
+                        last_session_secs = time.monotonic() - started
+                        _cause = ("ilink_longpoll" if channel_type == Type.WECHAT.value
+                                  else "ws_transport")
+                        log.warning(
+                            "[im-engine] channel transport error: inst=%s type=%s "
+                            "cause=%s errtype=%s errno=%s retry_in=%.0fs: %s",
+                            inst_id, channel_type, _cause, type(e).__name__,
+                            getattr(e, "errno", None), backoff, e)
+                        self._record_reconnect(_cause)
                         await _backoff_sleep(backoff)
                         backoff = next_backoff(backoff)
                     except Exception:
