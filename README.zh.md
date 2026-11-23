@@ -25,6 +25,10 @@
   </p>
 
   <p>
+    <a href="https://railway.com/deploy/TEMPLATE_SLUG"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+  </p>
+
+  <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="加入社区群"><img src="assets/community/feishu.svg" width="18" height="18" alt="飞书">&nbsp;飞书</a> ·
     <a href="https://www.grapedev.cn/community.html?cat=join" title="加入社区群"><img src="assets/community/wechat.svg" width="18" height="18" alt="微信">&nbsp;微信</a>
   </p>
@@ -100,28 +104,7 @@ Agent 任务的 59% 集中于流水线两端：VOD 将模糊需求收敛为可�
 
 ## 五、快速开始
 
-三种装法，任选其一 —— 一键托管部署（Railway）、交给 Agent，或者自己动手。
-
-### 一键托管部署（Railway）
-
-<!-- TODO(publish): 模板发布后把 TEMPLATE_SLUG 换成 Railway 给的 slug（railway.com/deploy/<slug>），
-     其余内容无需改动。 -->
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/TEMPLATE_SLUG)
-
-Railway 会从这个仓库构建镜像、挂载数据卷并生成公网域名。你只需要填**一个**字段：`LLM_API_KEY`（模型服务的 key）。
-其余变量已预置或自动生成 —— `JWT_SECRET` 由 `${{secret(64)}}` 生成，`LLM_PROVIDER` 默认 `openrouter`，
-`LLM_BASE_URL` / `LLM_MODEL` 留空即走 provider 预设。
-
-首次启动后自检：
-
-| 检查项 | 期望结果 |
-| --- | --- |
-| `GET /api/health` | 返回 `200`，且 `server_base_url_configured: true` 指向生成的域名（不是 `localhost`）|
-| 登录页 | 正常渲染，底部第三方登录区在 |
-| `Settings → Volumes` | 已挂载 `/app/data`，重新部署后数据不丢 |
-
-第三方登录要等你配好自己的 OAuth 应用凭据（管理后台 → `配置中心 → 登录渠道`）才会启用；
-需要登记的回调地址是 `https://<你的域名>/api/auth/callback/<provider>`。
+两种装法，任选其一 —— 交给 Agent，还是自己动手。
 
 ### ① 让 Agent 装（推荐）
 
@@ -177,6 +160,14 @@ git clone https://gitcode.com/grape-dev/grape.git ; python grape/quickstart.py
 | --- | --- | --- |
 | **配置 OAuth 应用凭据** | GitCode / GitHub 登录返回 400（`not_configured`），登录按钮灰 | `configs/oauth-providers.json` 填两个 provider 的 `client_id` / `client_secret`，回调须为 `https://<域名>/api/auth/callback/{gitcode,github}` |
 | **配置对外可访问基址** | 回退 `localhost:3000`，OAuth 回调无法回访，登录与托管不可用 | `configs/server-config.json` 的 `server_base_url` 与 `webhook_url` 改成对外地址 |
+
+## 生产部署
+
+不想自己跑服务器？用本页顶部的 **Deploy on Railway** 按钮即可从本仓库一键起一套托管实例 —— 它会构建镜像、
+挂载数据卷、生成公网域名，你只需要填一个字段（`LLM_API_KEY`）。之后第三方登录还需要你自己的 OAuth 应用凭据
+（管理后台 → `配置中心 → 登录渠道`）。
+
+自己部署同样支持：见 **[SETUP.HUMAN.md](SETUP.HUMAN.md)** 与 [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md)。
 
 ## 社区与贡献
 
