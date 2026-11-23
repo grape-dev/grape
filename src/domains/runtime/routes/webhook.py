@@ -121,7 +121,8 @@ from src.api.a2a_skip_nodes import (
 
 
 def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
-                          scene_id: str | None = None, context_key: str = "") -> int:
+                          scene_id: str | None = None, context_key: str = "",
+                          degraded: dict | None = None) -> int:
     """Issue #587：A2A 去重判定键 = 「事件活跃(running/dispatched)」。
 
     仅同 issue + 同 agent_type 且事件仍处于活跃态才视为重复（返回该事件 seq）；
@@ -132,11 +133,14 @@ def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
     - 未提供 context_key（旧调用方）→ 保持 #587 原语义，任何活跃事件都算重复；
     - 提供 context_key → 仅活跃事件上下文键相同（或历史行无上下文键）才判重复，
       不同上下文（不同 idempotency_key/context）放行，不再静默丢弃。
+
+    Issue #3865：`events` 属 runtime 域，改走 `cursor_for("runtime")`。查询失败仍
+    fail-open（返回 0，不因 DB 抖动全量阻断 A2A），但降级写入 `degraded` 供响应
+    detail 透出——「查询失败」不再等价于「无重复」。
     """
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             if scene_id:
                 c.execute(
                     "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
@@ -161,25 +165,29 @@ def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
                 return _seq
         return 0
     except Exception as _de:
-        log.warning(f"A2A: active-event dedup check failed: {_de}")
+        _a2a_gate_degraded("dedup_unavailable", repo_key=repo_key, issue_id=issue_id,
+                           agent=agent_type, exc=_de, sink=degraded)
         return 0
 
 
 def _active_a2a_event_seqs(repo_key: str, issue_id: str, agent_type: str,
-                           scene_id: str | None = None) -> list:
+                           scene_id: str | None = None,
+                           degraded: dict | None = None) -> list:
     """同 Issue 同目标 agent 的全部活跃事件 seq（含 queued），可按场景收窄。
 
     Issue #1973 复审残留 2：入队阻塞集合此前只取最新一条活跃目标事件且未按场景
     收窄——多活跃会漏判（旧事件仍 running 时补派出第二份同 agent 任务），异场景
     活跃会过度阻塞本单排队。此处与 drain 的活跃语义（running/dispatched/queued）
     对齐，返回全部 seq；scene_id 提供时仅取本场景及历史无场景行，避免跨场景误拦。
+
+    Issue #3865：同域读 + 降级标记——异常返回空列表时必须同时打 `dedup_unavailable`，
+    否则「空集合 = 无阻塞」会被当成事实（静默 fail-open）。
     """
     _statuses = ("running", "dispatched", "queued")
     _scene = str(scene_id or "").strip()
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             _sql = (
                 "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
                 "AND event_type='a2a_event' AND agent_type=? "
@@ -193,19 +201,21 @@ def _active_a2a_event_seqs(repo_key: str, issue_id: str, agent_type: str,
             rows = c.fetchall() or []
         return sorted({int(r[0]) for r in rows if r and r[0]})
     except Exception as _ae:
-        log.warning(f"A2A: active target event seq lookup failed: {_ae}")
+        _a2a_gate_degraded("dedup_unavailable", repo_key=repo_key, issue_id=issue_id,
+                           agent=agent_type, exc=_ae, sink=degraded)
         return []
 
 
-def _queued_a2a_events(repo_key: str, issue_id: str, agent_type: str) -> list:
+def _queued_a2a_events(repo_key: str, issue_id: str, agent_type: str,
+                       degraded: dict | None = None) -> list:
     """Issue #1667：列出同 issue+agent 的排队 A2A 事件（status='queued'）。
 
     返回 [{"seq", "payload", "queue": {...}}]，供 queue 幂等复用与 force 取代使用。
+    Issue #3865：`events` 属 runtime 域，改域读；失败与去重门禁同源标记。
     """
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             c.execute(
                 "SELECT seq, payload FROM events WHERE repo_key=? AND issue_id=? "
                 "AND agent_type=? AND event_type='a2a_event' AND status='queued' "
@@ -213,7 +223,8 @@ def _queued_a2a_events(repo_key: str, issue_id: str, agent_type: str) -> list:
                 (repo_key, issue_id, agent_type))
             rows = c.fetchall() or []
     except Exception as _qe:
-        log.warning(f"A2A: queued event lookup failed: {_qe}")
+        _a2a_gate_degraded("dedup_unavailable", repo_key=repo_key, issue_id=issue_id,
+                           agent=agent_type, exc=_qe, sink=degraded)
         return []
     out = []
     for _seq, _raw in rows:
@@ -229,12 +240,13 @@ def _queued_a2a_events(repo_key: str, issue_id: str, agent_type: str) -> list:
 
 
 def _cancel_superseded_queued_a2a(repo_key: str, issue_id: str, agent_type: str,
-                                  context_key: str, reason: str) -> list:
+                                  context_key: str, reason: str,
+                                  degraded: dict | None = None) -> list:
     """Issue #1667：force 下发后取消同上下文的旧排队记录，避免终态后重复派发。"""
     cancelled = []
     if not context_key:
         return cancelled
-    for _item in _queued_a2a_events(repo_key, issue_id, agent_type):
+    for _item in _queued_a2a_events(repo_key, issue_id, agent_type, degraded=degraded):
         _p = _item["payload"]
         _row_key = _a2a_context_key(
             str(_p.get("idempotency_key") or ""), str(_p.get("context") or ""))
@@ -520,6 +532,77 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
         content.update(
             {k: v for k, v in extra.items() if k not in _A2A_SKIP_RESERVED_KEYS})
     return JSONResponse(status_code=status_code, content=content)
+
+
+def _host_label() -> str:
+    """Issue #3865：降级告警的主机名（取不到留空，不影响主流程）。"""
+    try:
+        return os.uname().nodename
+    except Exception:  # noqa: BLE001 - 仅日志字段
+        return ""
+
+
+def _a2a_gate_degraded(flag: str, *, repo_key: str = "", issue_id: str = "",
+                       agent: str = "", exc: BaseException | None = None,
+                       sink: dict | None = None) -> dict:
+    """Issue #3865：A2A 前置门禁读取失败 → 结构化告警 + 显式降级标记。
+
+    旧行为是 `log.warning(...)` 后 `return 0` / `return []` / 继续派发——三库拓扑下
+    `events` / `issue` 读不到时，调用方与运维都无法区分「确实没有活跃事件」与
+    「查询失败」，重复派发因此不被拦截（静默 fail-open）。
+
+    这里保留 fail-open 的派发语义（DB 抖动不阻断 A2A），但：
+    ① WARNING 带 repo/issue/agent/路由/目标库/pid/host，运维可直接定位；
+    ② 标记返回给调用方并入响应 detail（`dedup_unavailable` / `cancel_check_unavailable`）。
+    """
+    from src.kernel import db_registry as _dbreg
+
+    try:
+        _route = _dbreg.route_of("runtime")
+    except Exception as _re:  # noqa: BLE001 - 路由标签本身失败也要给出原因
+        _route = f"unavailable:{type(_re).__name__}"
+    marks = {flag: True, "runtime_domain_route": _route}
+    log.warning(
+        f"A2A: {flag} gate degraded — runtime domain read failed: "
+        f"repo={repo_key} issue={issue_id} agent={agent} route={_route} "
+        f"target_db=runtime pid={os.getpid()} host={_host_label()}: {exc}")
+    if sink is not None:
+        sink.update(marks)
+    return marks
+
+
+def _a2a_stamp_degraded(resp, degraded: dict | None):
+    """Issue #3865：把门禁降级标记并入响应 `detail`（dict / JSONResponse 两态）。
+
+    无降级时原样返回（不复制、不改写），保证既有响应对象语义零变化。
+    """
+    if not degraded:
+        return resp
+    if isinstance(resp, JSONResponse):
+        try:
+            _raw = resp.body
+            if isinstance(_raw, (bytes, bytearray, memoryview)):
+                _raw = bytes(_raw).decode("utf-8")
+            content = json.loads(_raw)
+        except Exception as _e:  # noqa: BLE001 - 打标失败不得影响已生成响应
+            log.debug(f"A2A: cannot stamp degraded detail: {_e}")
+            return resp
+        if not isinstance(content, dict):
+            return resp
+        detail = content.get("detail")
+        if not isinstance(detail, dict):
+            detail = {}
+            content["detail"] = detail
+        detail.update(degraded)
+        return JSONResponse(status_code=resp.status_code, content=content,
+                            headers=dict(resp.headers))
+    if isinstance(resp, dict):
+        detail = resp.get("detail")
+        if not isinstance(detail, dict):
+            detail = {}
+            resp["detail"] = detail
+        detail.update(degraded)
+    return resp
 
 
 def _issue_repo_mismatch(repo_key: str, issue_number) -> str:
@@ -1328,7 +1411,7 @@ def _cross_pipeline_handoff(
     repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
     carried_context: dict, target_assignee: str, engine_config, context: str,
     repository: str, account: str, source_seq: int = 0,
-    guard_state: dict | None = None,
+    guard_state: dict | None = None, degraded: dict | None = None,
 ) -> dict:
     """Issue #329: Cross-pipeline handoff — redirect A2A to target scene's vod node.
 
@@ -1426,7 +1509,8 @@ def _cross_pipeline_handoff(
 
     # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
     #    Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
-    _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
+    _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "",
+                                         scene_id=target_scene_id, degraded=degraded)
     if _existing_seq:
         log.info(f"A2A #329: duplicate handoff skip — issue=#{issue_number} already has running event in scene={target_scene_id} seq={_existing_seq}")
         # Issue #729：拦截时携带原事件的任务产物引用（task_ref/result_ref），
@@ -1848,20 +1932,55 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
     return "unreachable"
 
 
+def _a2a_issue_cancelled(repo_key: str, issue_number, degraded: dict | None = None) -> bool:
+    """Issue #51：cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）。
+
+    Issue #3865：`issue` 表属 runtime 域，改走 `cursor_for("runtime")`（三库下
+    mgmt 主库必 1146）。查询失败**不阻断派发**（保留原 fail-open 语义，避免 DB
+    抖动全量阻断 A2A），但必须打 `cancel_check_unavailable` 标记 + 结构化告警，
+    否则「检查失败」与「未取消」在响应里不可区分。
+    """
+    if not is_native_issue_ident(issue_number):
+        return False
+    try:
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=? "
+                "AND status='cancelled' LIMIT 1",
+                (repo_key, native_issue_number(issue_number)))
+            return bool(c.fetchone())
+    except Exception as _ck_e:
+        _a2a_gate_degraded("cancel_check_unavailable", repo_key=repo_key,
+                           issue_id=f"#{issue_number}", exc=_ck_e, sink=degraded)
+        return False
+
+
 def _issue_exists_in_db(repo_key: str, issue_number) -> bool:
-    """Issue #755：目标仓 issue 表存在性快查（平台已知 Issue 直接放行，避免每条 A2A 外呼 VCS）。"""
+    """Issue #755：目标仓 issue 表存在性快查（平台已知 Issue 直接放行，避免每条 A2A 外呼 VCS）。
+
+    Issue #3865：`issue` 属 runtime 域，改域读；失败仍返回 False（沿用「未命中 →
+    VCS 外呼兜底」的原语义），但日志补齐路由/目标库/进程定位字段。
+    """
     if not is_native_issue_ident(issue_number):
         return False
     _num = native_issue_number(issue_number)
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             c.execute("SELECT 1 FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
                       (repo_key, _num))
             return bool(c.fetchone())
     except Exception as _e:
-        log.warning(f"A2A #755: issue existence db check failed for {repo_key}: {_e}")
+        try:
+            from src.kernel import db_registry as _dbreg
+            _route = _dbreg.route_of("runtime")
+        except Exception as _re:  # noqa: BLE001 - 仅日志字段
+            _route = f"unavailable:{type(_re).__name__}"
+        log.warning(
+            f"A2A #755: issue existence check degraded — runtime domain read failed: "
+            f"repo={repo_key} route={_route} target_db=runtime "
+            f"pid={os.getpid()} host={_host_label()}: {_e}")
         return False
 
 
@@ -1889,14 +2008,15 @@ def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_contex
     if is_native_issue_ident(_tgt) and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
         return _tgt, "target_field"
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             c.execute("SELECT issue_number, carried_context FROM issue WHERE repo_key=?",
                       (repo_key,))
             rows = c.fetchall() or []
     except Exception as _e:
-        log.warning(f"A2A #755: source mapping db scan failed for {repo_key}: {_e}")
+        log.warning(f"A2A #755: source mapping scan degraded — runtime domain read failed: "
+                    f"repo={repo_key} target_db=runtime pid={os.getpid()} "
+                    f"host={_host_label()}: {_e}")
         rows = []
     _hits = []
     for _n, _raw in rows:
@@ -2142,6 +2262,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     import hashlib as _hashlib
     _fingerprint = _hashlib.sha256(
         f"{repo_key}|{issue_number_early}|{agent_name}".encode()).hexdigest()[:16]
+    # Issue #3865：A2A 门禁（去重/取消）的降级标记袋。门禁读取失败不再等价于
+    # 「无重复 / 未取消」，标记统一并入响应 detail，调用方与运维都能看到。
+    _a2a_degraded: dict = {}
     try:
         # Issue #329: cross-pipeline handoff — extract carried context fields.
         # When target_scene_id is specified, redirect the A2A to the target scene's
@@ -2219,12 +2342,13 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 repo_key, issue_number, target_scene_id, target_node or "vod",
                 carried_context, target_assignee, engine_config, context, repository, account,
                 source_seq=_source_seq, guard_state=_cross_guard,
+                degraded=_a2a_degraded,
             )
             if _redirect.get("ok"):
                 # Issue #2327 评审 O7：ok=True 只表示「redirect 分支已处理」，不代表派发成功——
                 # 成功与否看 response.status / handoff_result（失败时仍是 ok=True + 真实 seq 回显）。
                 log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
-                return _redirect["response"]
+                return _a2a_stamp_degraded(_redirect["response"], _a2a_degraded)
             if _redirect.get("error"):
                 _skip_code = _redirect["error"]
                 log.info(
@@ -2238,11 +2362,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 _skip_detail = {}
                 if _skip_code in ("target_scene_not_found", "target_scene_missing_node"):
                     _skip_detail = {"target_node": target_node or "vod"}
-                return _a2a_skip_response(
+                return _a2a_stamp_degraded(_a2a_skip_response(
                     _skip_code, agent=target_node or "vod", source_seq=_source_seq,
                     detail=_skip_detail,
                     original_event=_redirect.get("original_event"),
-                )
+                ), _a2a_degraded)
 
         # Issue #2555：仓库归属校验（正向证据判定，置于取消判定之前）。
         _issue_vcs_verdict_cache = ""
@@ -2283,31 +2407,25 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 log.warning(f"A2A #2555: repo mismatch check failed: {_rm_e}")
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
+        # Issue #3865：issue 属 runtime 域，检查下沉到 _a2a_issue_cancelled（域读 +
+        # 失败打 cancel_check_unavailable，不再静默 fail-open）。
         if issue_number and repo_key:
-            try:
-                from src.kernel.session_manager import db as _ck_db, db_lock as _ck_lock
-                with _ck_lock:
-                    _ck_c = _ck_db.cursor()
-                    _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
-                                  (repo_key, native_issue_number(issue_number)))
-                    if _ck_c.fetchone():
-                        _cancel_reason = _a2a_skip_reason(
-                            "task_cancelled", issue_number=issue_number)
-                        log.info(
-                            f"A2A: rejected — task cancelled, code=task_cancelled "
-                            f"issue=#{issue_number} repository={repository} "
-                            f"agent={agent_name} status=cancelled "
-                            f"reason={_cancel_reason}")
-                        return _a2a_skip_response(
-                            "task_cancelled", agent=agent_name, source_seq=_source_seq,
-                            reason=_cancel_reason,
-                            detail={
-                                "issue_number": native_issue_number(issue_number),
-                                "repository": repository,
-                                "status": "cancelled",
-                            })
-            except Exception as _ck_e:
-                log.warning(f"A2A: cancelled check failed: {_ck_e}")
+            if _a2a_issue_cancelled(repo_key, issue_number, degraded=_a2a_degraded):
+                _cancel_reason = _a2a_skip_reason(
+                    "task_cancelled", issue_number=issue_number)
+                log.info(
+                    f"A2A: rejected — task cancelled, code=task_cancelled "
+                    f"issue=#{issue_number} repository={repository} "
+                    f"agent={agent_name} status=cancelled "
+                    f"reason={_cancel_reason}")
+                return _a2a_stamp_degraded(_a2a_skip_response(
+                    "task_cancelled", agent=agent_name, source_seq=_source_seq,
+                    reason=_cancel_reason,
+                    detail={
+                        "issue_number": native_issue_number(issue_number),
+                        "repository": repository,
+                        "status": "cancelled",
+                    }), _a2a_degraded)
         seq = 0
 
         # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
@@ -2728,7 +2846,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _target_active_scene = target_scene_id or _guard_scene
                     for _target_active_seq in _active_a2a_event_seqs(
                             repo_key, f"#{issue_number}", agent_name,
-                            scene_id=_target_active_scene):
+                            scene_id=_target_active_scene, degraded=_a2a_degraded):
                         if _target_active_seq not in _dq_blocking:
                             _dq_blocking.append(_target_active_seq)
                     _dq_blocking.sort()
@@ -2754,13 +2872,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         # 排队成功即把 Issue 归属推进到目标 agent（补派后不残留阻塞下游）。
                         _advance_a2a_issue_stage(repo_key, issue_number, agent_name,
                                                  context=(context or "") if 'context' in dir() else "")
-                        return _queued_a2a_response(
+                        return _a2a_stamp_degraded(_queued_a2a_response(
                             agent_name, issue_number,
                             reason="downstream_running", scene_id=_guard_scene,
                             existing_seq=_down["seq"], blocking_seqs=_reuse_blocking,
                             queue_seq=_reused_seq, downstream_event=_down,
                             idempotent=True, source_seq=_source_seq,
-                            message="same context already queued; existing queued event returned")
+                            message="same context already queued; existing queued event returned"),
+                            _a2a_degraded)
                     if not _dq_qseq:
                         log.error(f"A2A: downstream queue event store failed agent={agent_name} issue=#{issue_number}")
                         return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
@@ -2775,7 +2894,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                              f"(issue=#{issue_number} agent={agent_name} "
                              f"queue_seq={_dq_qseq} downstream_seq={_down['seq']} "
                              f"blocking={_dq_blocking})")
-                    return _queued_a2a_response(
+                    return _a2a_stamp_degraded(_queued_a2a_response(
                         agent_name, issue_number,
                         reason="downstream_running", scene_id=_guard_scene,
                         existing_seq=_down["seq"], blocking_seqs=_dq_blocking,
@@ -2783,10 +2902,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         source_seq=_source_seq,
                         message="a downstream event is still running; this handoff is "
                                 "queued and will be dispatched automatically after that "
-                                "event reaches a terminal state")
-                return _a2a_guard_skip_response(
+                                "event reaches a terminal state"), _a2a_degraded)
+                return _a2a_stamp_degraded(_a2a_guard_skip_response(
                     repo_key, issue_number, agent_name, _guard_scene,
-                    "downstream_running", _down)
+                    "downstream_running", _down), _a2a_degraded)
             # Issue #1962：手动补发（a2a-redo）显式排除源事件自身，避免同 Issue
             # 同 agent 的 completed 源事件在 120s 窗内把补发再次拦成 duplicate_key。
             # 仅作用于时间窗/活跃去重，find_running_downstream 下游保护不受影响。
@@ -2798,9 +2917,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 repo_key, issue_number, agent_name, _guard_scene,
                 exclude_seq=_exclude_seq)
             if _dup:
-                return _a2a_guard_skip_response(
+                return _a2a_stamp_degraded(_a2a_guard_skip_response(
                     repo_key, issue_number, agent_name, _guard_scene,
-                    "duplicate_key", _dup)
+                    "duplicate_key", _dup), _a2a_degraded)
             # Issue #1770（审查 P3）：同 issue+scene+agent 短窗活跃事件即使 context
             # 不同也拦截，避免 coding 已 running 时再次派发空跑（force 仍可越过；
             # queue=true 走 #1667 排队语义，不在此拦截）。
@@ -2809,9 +2928,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     repo_key, issue_number, agent_name, _guard_scene,
                     _a2a_ctx_key, exclude_seq=_exclude_seq)
                 if _active:
-                    return _a2a_guard_skip_response(
+                    return _a2a_stamp_degraded(_a2a_guard_skip_response(
                         repo_key, issue_number, agent_name, _guard_scene,
-                        "active_dispatch", _active)
+                        "active_dispatch", _active), _a2a_degraded)
 
         if issue_number and not _event_scene:
             _event_scene = _a2a_issue_scene or ""
@@ -2859,12 +2978,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # _force / _queue / _a2a_ctx_key 已在 #1770 派发门禁前解析。
         if issue_number:
             _existing_seq = _has_active_a2a_event(
-                repo_key, f"#{issue_number}", agent_name, context_key=_a2a_ctx_key)
+                repo_key, f"#{issue_number}", agent_name, context_key=_a2a_ctx_key,
+                degraded=_a2a_degraded)
             if _existing_seq and _force:
                 log.info(f"A2A: force=true — bypass active-event dedup (issue=#{issue_number} "
                          f"agent={agent_name} existing_seq={_existing_seq})")
                 _cancel_superseded_queued_a2a(
-                    repo_key, f"#{issue_number}", agent_name, _a2a_ctx_key, "force=true")
+                    repo_key, f"#{issue_number}", agent_name, _a2a_ctx_key, "force=true",
+                    degraded=_a2a_degraded)
             elif _existing_seq and _queue:
                 # 审查修复②：排队落库改为「查重 + 插入」同一 db_lock/事务内原子完成，
                 # 无 idempotency_key 的并发同上下文请求不会再产生多条排队行。
@@ -2887,11 +3008,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 if _qseq < 0:
                     _reused_seq = -_qseq
                     log.info(f"A2A: queue idempotent hit — reuse queued seq={_reused_seq}")
-                    return _queued_a2a_response(
+                    return _a2a_stamp_degraded(_queued_a2a_response(
                         agent_name, issue_number, reason="active_a2a_event",
                         existing_seq=_existing_seq, queue_seq=_reused_seq,
                         idempotent=True, source_seq=_source_seq,
-                        message="same context already queued; existing queued event returned")
+                        message="same context already queued; existing queued event returned"),
+                        _a2a_degraded)
                 if not _qseq:
                     log.error(f"A2A: queue event store failed for agent={agent_name}, issue=#{issue_number}")
                     return JSONResponse(status_code=500, content={"code": 500, "message": "event store failed, retry A2A", "handoff_result": HANDOFF_RESULT_FAILED, "source_seq": _source_seq})
@@ -2904,19 +3026,20 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     log.warning(f"A2A: queue reconcile after enqueue failed: {_re}")
                 log.info(f"A2A: queued (issue=#{issue_number} agent={agent_name} "
                          f"queue_seq={_qseq} existing_seq={_existing_seq})")
-                return _queued_a2a_response(
+                return _a2a_stamp_degraded(_queued_a2a_response(
                     agent_name, issue_number, reason="active_a2a_event",
                     existing_seq=_existing_seq, queue_seq=_qseq,
                     source_seq=_source_seq,
                     message="same issue+agent already has an active a2a event (existing_seq); "
                             "this handoff is queued and will be dispatched automatically "
-                            "after that event reaches a terminal state")
+                            "after that event reaches a terminal state"), _a2a_degraded)
             elif _existing_seq:
                 log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
                 # Issue #729：拦截响应携带原任务产物引用（task_ref/result_ref），
                 # 下游凭引用可续接原任务产物，无需重新定位
-                return _duplicate_a2a_skip_response(agent_name, repo_key, _existing_seq,
-                                                source_seq=_source_seq)
+                return _a2a_stamp_degraded(_duplicate_a2a_skip_response(
+                    agent_name, repo_key, _existing_seq, source_seq=_source_seq),
+                    _a2a_degraded)
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
@@ -2964,9 +3087,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 context_key=_a2a_ctx_key, idempotency_key=_idem_key,
                 exclude_seq=_exclude_seq)
             if _guard_kind in ("duplicate_key", "active_dispatch"):
-                return _a2a_guard_skip_response(
+                return _a2a_stamp_degraded(_a2a_guard_skip_response(
                     repo_key, issue_number, agent_name, _event_scene,
-                    _guard_kind, _guard_result)
+                    _guard_kind, _guard_result), _a2a_degraded)
             seq = _guard_result
         else:
             seq = append_event(
@@ -3025,9 +3148,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             force=bool(_force),
             guard_state=(_terminal if (issue_number and not _force) else None),
         )
-        return _augment_a2a_dispatch_response(
+        return _a2a_stamp_degraded(_augment_a2a_dispatch_response(
             _dispatch_result, agent_name, issue_number, source_seq=_source_seq,
-            skipped_nodes=_skipped_nodes)
+            skipped_nodes=_skipped_nodes), _a2a_degraded)
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
@@ -3040,9 +3163,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 pass
         seq = 0
 
-    return {"status": "ok", "seq": seq, "agent": agent_name,
-            "source_seq": _source_seq,
-            "handoff_result": _handoff_result_of("ok", seq)}
+    return _a2a_stamp_degraded({"status": "ok", "seq": seq, "agent": agent_name,
+                                "source_seq": _source_seq,
+                                "handoff_result": _handoff_result_of("ok", seq)},
+                               _a2a_degraded)
 
 
 # ── 跨流水线移交开放接口（开放契约 / CLI `grape pipeline handoff`）──

@@ -96,6 +96,35 @@ class _DomainDbProxy:
 _rt_db = _DomainDbProxy()
 
 
+def _cursor_for(domain: str, write: bool = False):
+    """Issue #3865：按域取游标（读路径统一原语，延迟导入便于测试替换 db_registry）。
+
+    为什么不用 `_rt_db` 读：`_DomainDbProxy.cursor()` 在单库/本域回落分支不持
+    `db_lock`，而 `collect_knowledge_files` 会被线程池（`warm_knowledge_cache`）并发调用；
+    `cursor_for` 的两条路由都安全——local 分支持进程锁，domain 分支独立连接由上下文
+    管理器在退出时关闭（不泄漏）。
+    """
+    from src.kernel import db_registry as _dbreg
+
+    return _dbreg.cursor_for(domain, write=write)
+
+
+def _domain_route_label(domain: str) -> str:
+    """Issue #3865：降级日志用的路由标签（标签本身失败绝不能影响主流程）。"""
+    from src.kernel import db_registry as _dbreg
+
+    try:
+        return _dbreg.route_of(domain)
+    except Exception as _e:  # noqa: BLE001 - 仅日志字段，吞掉并显式给出原因
+        return f"unavailable:{type(_e).__name__}"
+
+
+def _host_label() -> str:
+    """降级日志的主机名（容器内 uname 偶发不可用，取不到留空）。"""
+    try:
+        return os.uname().nodename
+    except Exception:  # noqa: BLE001 - 仅日志字段
+        return ""
 
 
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
@@ -1261,10 +1290,15 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
         pass
 
     # 4. 组织下派快照：issue.org_context_snapshot_id -> .org-context/（仅组织子任务）
+    # Issue #3865：issue 表属 runtime 域。三库拓扑下 session_manager.db（进程主库=mgmt）
+    # 必 1146，快照静默不进知识。改走 cursor_for("runtime")：域连接 / 单库与本域回落主库 /
+    # 三库缺 GRAPE_DSN_RUNTIME 显式抛 DomainUnavailable；上下文管理器保证游标关闭
+    # （单库回落分支仍持 db_lock——本函数会被线程池并发调用，不能裸用共享连接）。
+    # 失败时除结构化告警外，在 meta 打 context_degraded，使「.org-context/ 缺失」对上层可见。
     if issue_id and _inum:
         try:
-            with db_lock:
-                _row = db.cursor().execute(
+            with _cursor_for("runtime") as _oc_c:
+                _row = _oc_c.execute(
                     "SELECT org_context_snapshot_id FROM issue "
                     "WHERE repo_key=? AND issue_number=?",
                     (repo_key, _inum)).fetchone()
@@ -1275,7 +1309,13 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
                 for rel, content in (_mgmt_snap.load_org_snapshot_files(_snap_id) or {}).items():
                     _know[rel] = {"content": content, "obs_key": ""}
         except Exception as _e:
-            log.warning(f"collect org-context snapshot failed repo={repo_key} issue={issue_id}: {_e}")
+            if isinstance(_pim, dict):
+                _pim["context_degraded"] = "org_snapshot"
+            log.warning(
+                f"org-context snapshot read degraded (issue 属 runtime 域，域读失败，"
+                f".org-context/ 未注入) repo={repo_key} issue={issue_id} "
+                f"route={_domain_route_label('runtime')} target_db=runtime "
+                f"pid={os.getpid()} host={_host_label()}: {_e}")
 
     return {"project_info": _pif, "meta": _pim, "knowledge": _know}
 
