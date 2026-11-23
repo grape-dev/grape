@@ -4284,8 +4284,9 @@ class ContractGuardSignalBody(BaseModel):
 class RuntimeTagsProbeSignalBody(BaseModel):
     """Issue #4082：worker 标签探活失败信号（按 host/reason 计数）。
 
-    reason 取值见 `RUNTIME_TAGS_PROBE_REASONS`（id_missing/unauthorized/not_found/no_tags）；
-    host/pid/ts 仅供服务端日志甄别（worker sink 就地补充）；runtime_id/detail 只进日志。
+    reason 取值见 `RUNTIME_TAGS_PROBE_REASONS`（id_missing/unauthorized/not_found/no_tags/other，
+    other = worker 归并的契约外失败如 HTTP 403/422）；契约外 reason 服务端按 unknown 兜底计数
+    （不丢数、不告警）；host/pid/ts 仅供服务端日志甄别（worker sink 就地补充）；runtime_id/detail 只进日志。
     """
     host: str = ""
     reason: str
