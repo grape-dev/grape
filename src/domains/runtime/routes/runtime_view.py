@@ -112,7 +112,9 @@ def _register_runtime_views() -> None:
             summary="Set role tags",
             description=(
                 "Sets an engine's role tags (mutual-exclusion applied). "
-                "engine_capabilities is the single source; agent_tags is the derived cache."))),
+                "engine_capabilities is the single source; agent_tags is the derived cache. "
+                "Write is restricted to the credential owner (user/org owner+admin) "
+                "or platform admin (Issue #3396)."))),
         ("put", "/runtimes/{runtime_id}/max-concurrent", "set_runtime_max_concurrent", dict(
             operation_id="runtime_max_concurrent_set",
             summary="Set max concurrent",

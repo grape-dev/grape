@@ -799,9 +799,15 @@ class TestChat:
             row = c.execute("SELECT id FROM agent_runtimes WHERE credential_id=0 AND lower(name)='opencode'").fetchone()
             if row:
                 c.execute("UPDATE agent_runtimes SET installed=1, healthy=1, status='online' WHERE id=?", (row[0],))
+                rid = row[0]
             else:
                 c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
                           "VALUES ('opencode','opencode',0,1,1,'online','global','')")
+                rid = c.lastrowid
+            # Issue #3396 / A8：角色守卫单一事实源改为 engine_capabilities，空标签 fail-closed，
+            # chat 兜底按 chat/all 过滤；注册默认自动补 'all'，此处对齐该口径，避免该兜底引擎被排除
+            c.execute("INSERT OR IGNORE INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (rid,))
+            c.execute("UPDATE engine_capabilities SET enabled=1 WHERE runtime_id=? AND tag='all'", (rid,))
             db.commit()
         # D105: 走 create_grape_account（UUIDv7 id 应用层生成）
         _chat_uname = "chat_def_" + _uuid.uuid4().hex[:6]

@@ -226,7 +226,7 @@
   "tag": {
     "all": "全能",
     "all_desc": "可作为所有角色",
-    "single_desc": "仅 {{label}} 角色"
+    "single_desc": "{{label}} 角色"
   },
   "refresh": "刷新",
   "devspace": {

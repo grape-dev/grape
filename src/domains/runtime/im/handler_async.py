@@ -1688,7 +1688,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         # codearts 忽略 session_id；opencode/hermes/aishell-dsh 真正使用 session 续接
         # （aishell-dsh 二期起支持 session/resume——uuid 形态 sessionId 跨进程续接）。
         from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
-        _rid = chat_runtime_id or (resolve_local_engine(_uid or 0) or 0)
+        # Issue #3396：chat 兜底候选必须过 chat 角色过滤（engine_capabilities 勾了 chat/all）
+        _rid = chat_runtime_id or (resolve_local_engine(_uid or 0, agent_type="chat") or 0)
         _engine_name = engine_name(_rid) if _rid else ""
         _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
         has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes", "aishell-dsh")

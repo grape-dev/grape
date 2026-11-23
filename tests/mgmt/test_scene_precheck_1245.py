@@ -143,11 +143,12 @@ def test_uid_dangling_engine_reported_as_missing(monkeypatch):
     assert {p["reason_code"] for p in out["problems"]} == {"engine_missing"}
 
 
-def test_uid_empty_sre_still_blocked(monkeypatch):
-    """两轨全空的 SRE 仍按原约束报「未绑定机器」（SRE 不支持广播）。"""
+def test_uid_empty_sre_not_blocked_after_3396(monkeypatch):
+    """Issue #3396：两轨全空的 SRE 不再报「未绑定机器」（空绑定 = 广播模式，
+    与其它角色同口径；越权机器由 engine_capabilities 角色守卫在派发/认领侧拦截）。"""
     out = _run(monkeypatch, [_node_uid("sre", uids=[])])
-    assert out["ok"] is False
-    assert {p["reason_code"] for p in out["problems"]} == {"engine_missing"}
+    assert out["ok"] is True
+    assert out["problems"] == []
 
 
 def test_engine_missing(monkeypatch):
@@ -297,24 +298,25 @@ def test_exempt_empty_skill(monkeypatch):
         _cleanup([rid])
 
 
-def test_sre_empty_binding_rejected(monkeypatch):
+def test_sre_empty_binding_allowed(monkeypatch):
+    """Issue #3396：SRE 空绑定 = 广播模式（禁广播预检特例已删），不再报 engine_missing。"""
     out = _run(monkeypatch, [_node("sre", eids=[])])
-    assert out["ok"] is False
-    assert any(p["reason_code"] == "engine_missing" for p in out["problems"])
+    assert out["ok"] is True
+    assert not any(p["reason_code"] == "engine_missing" for p in out["problems"])
 
 
-def test_sre_empty_binding_downgraded_for_non_explicit_scene(monkeypatch):
-    """非用户显式选择的场景（dev_scene/default 回落）只告警不拦单。
+def test_sre_empty_binding_not_flagged_after_3396(monkeypatch):
+    """Issue #3396：SRE 空绑定 = 广播模式，显式/非显式场景都不再是问题项。
 
-    beta 实测故障：删场景后 60s 内建单落到另一台，请求命中旧缓存里的场景，
-    该场景带未绑机的 sre 节点 → 智能推荐路径被 400 拦死，而用户无从修复。
+    旧口径下 SRE 空绑定会报 engine_missing（显式场景 400 / 非显式降级告警）；
+    拆除禁广播特例后两种场景都返回 ok，且不再产生 SRE 相关告警。
     """
     _patch_scene(monkeypatch, [_node("sre", eids=[])])
     out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,
                                         {"username": "me", "id": ""}, explicit=False)
     assert out["ok"] is True
     assert out["problems"] == []
-    assert any("SRE" in w for w in out["warnings"])
+    assert not any("SRE" in w for w in out["warnings"])
 
 
 def test_precheck_bypasses_scene_cache(monkeypatch):

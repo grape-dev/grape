@@ -55,13 +55,16 @@ def _client():
 
 
 def _mk_local_engine(name="opencode") -> int:
-    """本机直连引擎（credential_id=0，健康）——保证 backend 字符串可解析落库。"""
+    """本机直连引擎（credential_id=0，健康）——保证 backend 字符串可解析落库。
+
+    Issue #3396：注册默认自动补 'all'（engine_capabilities，chat 兜底角色过滤依赖）。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope) "
             "VALUES (?, 'issue508_local', 0, 1, 1, 'online', 'global')", (name,))
         rid = c.lastrowid or 0
+        c.execute("INSERT OR IGNORE INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (rid,))
         db.commit()
         return rid
 

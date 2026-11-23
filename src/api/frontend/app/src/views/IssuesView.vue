@@ -238,7 +238,6 @@
           <template v-if="sel">
             <div v-html="detailCardHtml"></div>
             <div v-html="reviewBannerHtml"></div>
-            <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
               <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -619,7 +618,6 @@
           </div>
         </div>
         <div v-html="reviewBannerHtml"></div>
-        <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
           <div class="isk-attach-list">
@@ -1780,53 +1778,6 @@ const detailCardHtml = computed(() => {
     </div>`
 })
 
-// ═══════════ Agent 节点状态卡（Issue #126 等价） ═══════════
-const agentStatusCardHtml = computed(() => {
-  const tk = detailTarget.value
-  if (!tk || !(tk.agent_statuses || []).length) return ''
-  const sm = {
-    pending: {
-      color: 'var(--t3)',
-      bg: 'var(--chip-bg)',
-      icon: '○',
-      label: t('agent_status.pending'),
-    },
-    running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
-    completed: { color: 'var(--g)', bg: 'var(--g)', icon: '✓', label: t('agent_status.completed') },
-    failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
-    cancelled: {
-      color: 'var(--t3)',
-      bg: 'var(--chip-bg)',
-      icon: '⊘',
-      label: t('agent_status.cancelled'),
-    },
-  }
-  const statuses = tk.agent_statuses
-  let html =
-    '<div class="isk-card"><div class="isk-card-tt">' + esc(t('agent_status.title')) + '</div>'
-  html += '<div class="isk-nodebar">'
-  statuses.forEach(function (s, i) {
-    const si = sm[s.status] || sm.pending
-    const isRunningS = s.status === 'running'
-    const isCompletedS = s.status === 'completed'
-    const isFailedS = s.status === 'failed'
-    const pulseStyle = isRunningS ? ';animation:iskPulse 1.2s ease-in-out infinite' : ''
-    const seq = s.latest_seq
-    const clickable = (isRunningS || isCompletedS || isFailedS) && seq
-    const clickAttr = clickable ? ` data-isk-jump="${seq}" style="cursor:pointer"` : ''
-    html += `<div class="isk-node"${clickAttr}>`
-    html += `<div class="isk-node-dot" style="background:${si.bg}${pulseStyle}">${si.icon}</div>`
-    html += `<span class="isk-node-lbl" style="color:${si.color}">${esc(s.label || s.agent || '')}</span>`
-    html += '</div>'
-    if (i < statuses.length - 1) {
-      const lineCol = isCompletedS ? 'var(--g)' : isFailedS ? '#ef4444' : 'rgba(0,0,0,.1)'
-      html += `<div class="isk-node-line" style="background:${lineCol}"></div>`
-    }
-  })
-  html += '</div></div>'
-  return html
-})
-
 // ═══════════ Issue #539：需求级业务状态 + SRE 验收结论 ═══════════
 // 数据来自 GET /issues/{id}/pipeline（review_status / sre_result）。
 // 目的：把「节点/事件执行结束」和「需求待人工确认 / 生产发布完成」分开说清，
@@ -2847,13 +2798,14 @@ function updateSceneWarn() {
   const s = modal.scenes.find((x) => x.id === modal.sceneId)
   if (!s || !s.all_offline) return
   const nodes = (s.offline_nodes || []).join('、')
+  // Issue #3396：SRE 未选机器特例已删除（SRE 空绑定 = 广播模式，不再是告警条件；
+  // sre_unbound 字段保留恒 False，仅作 API 兼容）。
   modal.sceneWarn = {
     sceneId: s.id,
-    reason: s.sre_unbound
-      ? 'SRE 节点未选择机器（SRE 不支持广播模式），部署任务无法执行。请为 SRE 节点绑定个人或仓库级机器。'
-      : '该场景绑定的引擎当前全部离线' +
-        (nodes ? '（离线节点：' + nodes + '）' : '') +
-        '，创建后任务将无法派发。',
+    reason:
+      '该场景绑定的引擎当前全部离线' +
+      (nodes ? '（离线节点：' + nodes + '）' : '') +
+      '，创建后任务将无法派发。',
   }
 }
 function goSceneRebind() {
