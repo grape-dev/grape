@@ -360,3 +360,12 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_4065_result_comment_ident.py \
             tests/api/test_issue_4065_issue_card_ident.py -v
+      - name: Runtime id guard probe isolation regression tests (issue #4082)
+        # Issue #4082 QA 复审修复（Required）：新增用例 test_issue_4082_runtime_id_guard.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#3490/#3699/#3758/#3771/#3848）。
+        # 用例锁 worker runtime_id=0 探活恒 401 的三条路径（客户端守卫/服务端非法 id 400/
+        # 探活失败指标告警）与多引擎探活上报器按 rid 隔离；回退会让探活失败告警对多引擎
+        # 主机静默失效、注册回填再次以 0 兜底，只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v

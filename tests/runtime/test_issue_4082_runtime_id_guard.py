@@ -15,6 +15,8 @@ import hashlib
 import json
 import os
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from src.domains.runtime.engine import runtime_id_guard as guard
@@ -525,3 +527,87 @@ def test_reregister_cycle_schedules_retry_on_partial_ids():
     assert 0 < agent_mod._PARTIAL_ID_REREGISTER_BACKOFF < 300
     # 下次重注册 = now + backoff（而非等满 300s 周期）
     assert state["last_reregister"] == 1600.0 - 300 + agent_mod._PARTIAL_ID_REREGISTER_BACKOFF
+
+# ---------------------------------------------------------------- 切片⑨：_run_loop 实际接线（PR #2066 复审 Optional ②）
+
+def test_run_loop_wires_per_rid_tags_probe_reporters(monkeypatch):
+    """`_run_loop` 每 rid 取专属 reporter，且共用同一份 reporters 字典。
+
+    仅测 helper（上文切片⑥）无法发现 loop 内改回共享实例；本用例驱动真实
+    `_run_loop`，断言它按 rid 调用 `tags_probe_reporter_for` 而非复用单例。
+    """
+    from src.domains.runtime.engine import agent as agent_mod
+
+    calls = []
+    dict_ids = []
+
+    def _spy(reporters, rid, *, scene="", make=None):
+        calls.append(rid)
+        dict_ids.append(id(reporters))
+        rep = reporters.get(rid)
+        if rep is None:
+            # 阈值拉高：本用例只验证接线，不触发真实信号上报
+            rep = guard.ProbeFailureReporter(threshold=10 ** 6, sink=lambda p: True,
+                                             host="h-loop")
+            reporters[rid] = rep
+        return rep
+
+    monkeypatch.setattr(agent_mod, "tags_probe_reporter_for", _spy)
+    monkeypatch.setattr(agent_mod, "_start_worker_probe", lambda: None)
+
+    async def _probe(rid):
+        # rid=11 无标签、rid=22 正常——旧共享实现下 22 的成功会清零 11 的连败
+        return ([], "no_tags") if rid == 11 else (["tag-a"], "")
+
+    client = AsyncMock()
+    client.probe_tags.side_effect = _probe
+    client.claim_by_tag.return_value = None
+    client.claim.return_value = None
+    client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
+
+    async def _drive():
+        t = asyncio.ensure_future(agent_mod._run_loop(
+            client, [11, 22], poll_interval=0.01, heartbeat_interval=0.05,
+            max_concurrent=4, engine_by_rid={11: "coding-dev", 22: "qa-dev"}))
+        await asyncio.sleep(0.2)
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(_drive())
+    assert 11 in calls and 22 in calls, "loop 必须对每个 rid 分别取专属 reporter"
+    assert len(set(dict_ids)) == 1, "同一 loop 内应共用一份 reporters 字典（按 rid 隔离）"
+
+
+# ---------------------------------------------------------------- 切片⑩：启动路径 rid 配对（PR #2066 复审 Optional ①）
+
+def test_startup_engine_by_rid_pairs_by_name_when_ids_shorter():
+    """启动路径：register 回包部分非法（ids 比 installed 短）时按 name 配对，不得 zip 错位。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    class _C:
+        # 回包：id=7 是 qa，id=0 非法，id=8 是 coding；installed 顺序 [coding, qa]
+        last_register_detail = [{"id": 7, "name": "qa"}, {"id": 0, "name": "bad"},
+                                {"id": 8, "name": "coding"}]
+
+    installed = [{"name": "coding", "installed": True},
+                 {"name": "qa", "installed": True}]
+    engine_by_rid = agent_mod._engine_by_rid_from_register(_C(), [7, 8], installed, "dev")
+    # zip(ids, installed) 会得到 7→coding / 8→qa（错位）；按 name 应 7→qa / 8→coding
+    assert "qa" in engine_by_rid[7]
+    assert "coding" in engine_by_rid[8]
+
+
+def test_startup_engine_by_rid_falls_back_to_position_without_detail():
+    """无注册明细时保持旧行为：按位置对齐（向后兼容）。"""
+    from src.domains.runtime.engine import agent as agent_mod
+
+    class _C:
+        last_register_detail = None
+
+    installed = [{"name": "coding"}, {"name": "qa"}]
+    engine_by_rid = agent_mod._engine_by_rid_from_register(_C(), [7, 8], installed, "dev")
+    assert "coding" in engine_by_rid[7]
+    assert "qa" in engine_by_rid[8]

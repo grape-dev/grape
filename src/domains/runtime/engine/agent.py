@@ -4014,23 +4014,9 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
-            from src.domains.runtime.engine.instances import instance_name
             # S2：按 name 配对（服务端返回顺序/跳过与本地发现列表可能不一致，
             # zip 位置对齐在个别引擎被跳过时会错位）
-            _name_by_rid = {}
-            for _rt in (_probe_runtimes_detail(client) or []):
-                if isinstance(_rt, dict) and _rt.get("id") is not None:
-                    _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
-            _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in installed}
-            engine_by_rid = {}
-            for rid in ids:
-                _nm = _name_by_rid.get(rid, "")
-                _r = _local_by_name.get(_nm) if _nm else None
-                if _r is None:
-                    # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
-                    _idx = ids.index(rid)
-                    _r = installed[_idx] if _idx < len(installed) else {}
-                engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
+            engine_by_rid = _engine_by_rid_from_register(client, ids, installed, device_name)
             log.info(f"re-registered successfully, new runtime ids: {ids}")
             return ids, engine_by_rid, installed
         if not installed:
@@ -4054,6 +4040,33 @@ def _probe_runtimes_detail(client):
     测试 Fake 可自行提供该属性。
     """
     return getattr(client, "last_register_detail", None)
+
+
+def _engine_by_rid_from_register(client, ids, installed, device_name=""):
+    """按最近一次 register 回包的 name 配对 rid→引擎实例名（S2 / PR #2066 审查 Optional ①）。
+
+    `client.register` 已改为逐条过滤非法 id，返回的 `ids` 可能比 `installed`
+    短；此时 `zip(ids, installed)` 位置对齐会把 rid 配给错位的引擎。这里复用
+    `_reregister` 的配对逻辑（按 name），明细缺失/name 未知时回退位置对齐。
+
+    启动路径与 `_reregister` 共用本函数，避免两处实现漂移（本轮启动路径正是漏改点）。
+    """
+    from src.domains.runtime.engine.instances import instance_name
+    _installed = installed or []
+    _name_by_rid = {}
+    for _rt in (_probe_runtimes_detail(client) or []):
+        if isinstance(_rt, dict) and _rt.get("id") is not None:
+            _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
+    _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in _installed}
+    engine_by_rid = {}
+    for _idx, rid in enumerate(ids):
+        _nm = _name_by_rid.get(rid, "")
+        _r = _local_by_name.get(_nm) if _nm else None
+        if _r is None:
+            # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
+            _r = _installed[_idx] if _idx < len(_installed) else {}
+        engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
+    return engine_by_rid
 
 
 _report_queue_obj = None
@@ -5316,10 +5329,10 @@ def main():
             except Exception as e:
                 log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
         log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")
-        # rid → 引擎实例名（`{type}-{device}`，register 返回顺序与 installed 一致）
-        from src.domains.runtime.engine.instances import instance_name
-        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
-                         for rid, r in zip(ids, installed)}
+        # rid → 引擎实例名（`{type}-{device}`）。PR #2066 审查 Optional ①：register
+        # 逐条过滤后 `ids` 可能比 `installed` 短，不能再用 zip 位置对齐；按回包 name
+        # 配对（与 _reregister 同一实现），明细缺失时回退位置对齐。
+        engine_by_rid = _engine_by_rid_from_register(client, ids, installed, device)
         log.info(f"RuntimeAgent registered: {ids} -> {server}, engines={list(engine_by_rid.values())}, "
                  f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         for rid in ids:
