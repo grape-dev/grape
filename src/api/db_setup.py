@@ -4776,6 +4776,13 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 verify_category_collapse(conn=conn)
             except Exception as e:  # noqa: BLE001
                 failures.append(f"mgmt 分类字典后置校验失败: {e}")
+            try:
+                from src.domains.mgmt.migrations.org_repo_create_options import (
+                    verify_org_repo_create_columns,
+                )
+                verify_org_repo_create_columns(conn=conn)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"mgmt organization 仓库创建选项列后置校验失败: {e}")
         if dom in ("", "runtime"):
             try:
                 from src.domains.runtime.migrations.skill_detail_tables import (
@@ -4790,7 +4797,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
         if raise_on_fail:
             raise RuntimeError(msg)
     else:
-        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列）")
+        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列）")
     return failures
 
 
@@ -11038,6 +11045,26 @@ register_migration(
     name="add-org-repo-create-options",
     kind="safe",
     fn=_fn_add_org_repo_create_options,
+)
+
+
+# ===== 组织仓库创建选项：假盖章修复（2026-11-23）=====
+# 202611183011 在部分库已盖章但 organization 仍缺 5 列（实测 POST /api/orgs 1054）。
+# 老迁移的 strict/raise_on_guard 补不上——版本号已判「已执行」，改它只改 checksum。
+# 用新号幂等重跑：strict + raise_on_guard + post_check，列不全不盖章，下次启动重试。
+# SQL 住属主域 migrations 下（organization owner=mgmt）。
+from src.domains.mgmt.migrations.org_repo_create_options import (
+    ensure_org_repo_create_columns as _ensure_org_repo_create_columns,
+    verify_org_repo_create_columns as _verify_org_repo_create_columns,
+)
+
+register_migration(
+    version="202611230003",
+    name="repair-org-repo-create-options",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_ensure_org_repo_create_columns,
+    post_check=_verify_org_repo_create_columns,
 )
 
 # ===== 组织仓库地图（MD-first） =====
