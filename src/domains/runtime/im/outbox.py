@@ -44,6 +44,7 @@ POLL_INTERVAL = 1.0          # 消费者轮询周期（秒）—— ≤30s 送�
 BATCH_LIMIT = 50             # 单批最多处理行数
 MAX_ATTEMPTS = 5             # 超过即 failed（1 首发 + 4 退避重试）
 RETRY_BACKOFF = (1, 2, 4, 8)      # 秒；第 n 次失败后取 RETRY_BACKOFF[n-1]（截断）
+CONSUMER_BACKOFF_STEPS = (1, 2, 4)  # 消费者连续失败退避倍数（封顶 4x，Issue #3588）
 TTL_SECONDS = 600            # 入队 +10min 过期（expires_at）
 
 # 保留期（20261113 性能整改）：sent/failed/expired 超过 N 天物理删除，防止表无限增长。
@@ -633,6 +634,12 @@ def list_rows(status: str = "", limit: int = 50) -> list[dict]:
 
 # ---------------------------------------------------------------- 消费者
 
+def consumer_backoff_seconds(poll_interval: float, fail_streak: int) -> float:
+    """消费者连续失败退避：1x/2x/4x 封顶（Issue #3588），成功由 run() 复位。"""
+    idx = min(max(int(fail_streak), 1) - 1, len(CONSUMER_BACKOFF_STEPS) - 1)
+    return poll_interval * CONSUMER_BACKOFF_STEPS[idx]
+
+
 class OutboxConsumer:
     """A 进程 / 单进程入口的 outbox 消费协程。
 
@@ -650,6 +657,7 @@ class OutboxConsumer:
         self._engine = engine
         self.instance_id = instance_id or getattr(engine, "instance_id", "") or ""
         self._poll_interval = poll_interval
+        self._fail_streak = 0     # 连续失败计数（退避倍数与复位依据，Issue #3588）
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
 
@@ -660,20 +668,30 @@ class OutboxConsumer:
 
     async def run(self) -> None:
         log.info("[outbox] consumer started (instance=%s)", self.instance_id)
+        # Issue #3588：连续失败退避（1x/2x/4x poll_interval，成功即复位）。
+        # WAL/SHM 失效场景下 DB 操作经 stale-aware 连接自动重连；若重建后仍失败
+        # （库本体暂不可用），退避避免空转打日志。认领态（pending→sending）持久
+        # 化在库中，重连恢复后从上次位点继续，不会重复投递。
         while not self._stopped.is_set():
+            wait = self._poll_interval
             try:
                 await self.run_once()
+                self._fail_streak = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # Issue #3251：DB 打开失败已在 _connect 层按路径一次性 ERROR，
+                # 消费轮不再逐轮 WARNING 刷屏（曾 2.5h 刷 5005 条拖死事件循环）。
                 if getattr(e, "_db_open_logged", False):
-                    # Issue #3251：DB 打开失败已在 _connect 层按路径一次性 ERROR，
-                    # 消费轮不再逐轮 WARNING 刷屏（曾 2.5h 刷 5005 条拖死事件循环）。
                     log.debug("[outbox] consumer round skipped (db open failure already reported): %s", e)
                 else:
                     log.warning("[outbox] consumer round failed: %s", e)
+                # Issue #3588：连续失败退避（1x/2x/4x 封顶），成功时在 run() 头部复位。
+                self._fail_streak += 1
+                wait = consumer_backoff_seconds(self._poll_interval,
+                                                 self._fail_streak)
             try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
+                await asyncio.wait_for(self._stopped.wait(), timeout=wait)
             except Exception as _e:
                 log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         log.info("[outbox] consumer stopped")

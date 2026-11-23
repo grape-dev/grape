@@ -29,6 +29,9 @@ configs/**
 !configs/credential-filter.json
 !configs/onboarding-templates.json
 !configs/scene-precheck.json
+# oauth 登录渠道卡（端点/scope/品牌色等定义，凭据不进文件——见 providers.py 的剥离守卫）。
+# 不带进镜像 → 登录页「或使用第三方登录」区永远空白。
+!configs/oauth-providers.json
 !configs/platforms/gitcode.json
 !configs/platforms/gitee.json
 !configs/platforms/github.json

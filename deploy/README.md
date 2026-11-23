@@ -129,3 +129,14 @@ GRAPE_BASE_URL=http://<host>:38081         # mgmt 进程：业务 API（issue / 
 > 已知缺口：网页手工建单落下来的 `agent_tasks.user_id` 目前是 `'0'`（未归属），
 > 因此 `scope=user` 的引擎**永远领不到**这类任务，表现为任务一直 `queued`。机器级 worker
 > 请用 `scope=global`；归属修复另行跟进（需先定建单侧 creator 写入口径）。
+
+## 容器 overlayfs 与 SQLite（Issue #3588）
+
+overlayfs copy-up 可能以「删旧建新」替换 `data/sessions.db-wal` / `-shm`，进程持有的
+连接随即失效（`disk I/O error`、接口持续 500）。运行期自愈已内置（失效检测 + 连接重建，
+日志 `event=db_stale_detected` / `event=db_reconnect_ok`，`/healthz` 报 `db_status` /
+`wal_valid`）。部署建议：
+
+1. 数据目录落持久卷（compose 已挂 `grape-data:/app/data`；裸容器用 `DEVOPS_DB_PATH`
+   指到卷内路径），不要让 WAL/SHM 落在容器可写层；
+2. 反复触发时可用 `DEVOPS_DB_JOURNAL_MODE=truncate|delete` 规避（默认 `wal` 不变）。
