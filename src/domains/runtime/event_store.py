@@ -497,6 +497,7 @@ def _delete_guard_batch(cutoff: str, seqs: list) -> int:
     with db_lock:
         c = db.cursor()
         try:
+            deleted = 0
             with _bounded_lock_wait(c, _PURGE_LOCK_WAIT_SECONDS):
                 c.execute(
                     "DELETE FROM event_active_guard WHERE created_at < ? "
@@ -507,8 +508,14 @@ def _delete_guard_batch(cutoff: str, seqs: list) -> int:
                     "  AND t.event_seq = event_active_guard.seq"
                     ")",
                     (cutoff, *seqs))
+                # rowcount 必须在退出 _bounded_lock_wait 之前取：退出时 finally 会再执行一条
+                # `SET SESSION innodb_lock_wait_timeout=…` 还原语句，MySQLCompatCursor 的
+                # rowcount 会跟着那条 SET 变成 0。真库实测（MySQL 8.0.43）：DELETE 删 3 行
+                # 立刻读 rowcount=3，再跑一条 SET 后读为 0 —— 在 with 外读会让批次返回值恒为 0，
+                # ok 指标与 purged 日志永不出现（QA 原子回归 D1）。sqlite 分支无 SET，测不出来。
+                deleted = int(c.rowcount or 0)
             db.commit()
-            return c.rowcount
+            return deleted
         except Exception:
             # 失败语句所在事务及其已持行锁必须立刻释放：退避后在同一事务里重试会再撞锁，
             # 并且延长对 claim/heartbeat 的持锁时间（与本次优化目标相反）。

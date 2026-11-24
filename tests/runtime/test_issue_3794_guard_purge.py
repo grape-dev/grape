@@ -398,3 +398,79 @@ def test_bounded_lock_wait_retries_restore_then_warns(monkeypatch, caplog):
             pass
     assert cur.restore_attempts == 2, cur.restore_attempts
     assert any("keeps the bounded wait until reconnect" in r.message for r in caplog.records)
+
+
+# ── QA 原子回归 D1：MySQL 上批次删除返回值恒为 0 ──
+#
+# MySQLCompatCursor 每条语句都重置 rowcount；`_bounded_lock_wait` 退出时会再执行一条
+# `SET SESSION innodb_lock_wait_timeout=…` 还原语句，于是「在 with 之外读 c.rowcount」
+# 恒为 0（真库实测：删 3 行→立即读 3→跑一条 SET→读 0）。旧用例的假游标只在 DELETE 时
+# 置 rowcount、SET 不碰它，属测试盲区。下面这个游标按真 MySQL 语义重置 rowcount。
+
+
+class _MySQLRowcountCursor:
+    def __init__(self, deleted=3, candidates=None):
+        self.deleted = deleted
+        self.candidates = candidates
+        self.rowcount = -1
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        s = " ".join(str(sql).split())
+        self.statements.append(s)
+        self.rowcount = 0  # 每条语句都重置——真 MySQLCompatCursor 的行为
+        if s.startswith("SELECT @@SESSION"):
+            self._row = (50,)
+        elif s.startswith("DELETE"):
+            self.rowcount = self.deleted
+        elif s.startswith("SELECT seq FROM event_active_guard"):
+            self._rows = self.candidates or []
+        return self
+
+    def fetchone(self):
+        return getattr(self, "_row", None)
+
+    def fetchall(self):
+        return getattr(self, "_rows", [])
+
+
+def _patch_mysql_backend(monkeypatch, cur, metric_calls=None):
+    class _DB:
+        def cursor(self_inner):
+            return cur
+
+        def commit(self_inner):
+            pass
+
+        def rollback(self_inner):
+            pass
+
+    monkeypatch.setattr("src.kernel.session_manager._is_mysql_backend", lambda: True)
+    monkeypatch.setattr(es, "db", _DB())
+    monkeypatch.setattr(es, "db_lock", __import__("threading").RLock())
+    if metric_calls is not None:
+        monkeypatch.setattr(es, "_purge_metric_inc",
+                            lambda res, n=1: metric_calls.append((res, n)))
+
+
+def test_delete_batch_returns_rows_under_mysql_rowcount_semantics(monkeypatch):
+    """D1 回归：SET 还原语句吃掉 rowcount 后，批次仍要返回真实删除行数。"""
+    cur = _MySQLRowcountCursor(deleted=3)
+    _patch_mysql_backend(monkeypatch, cur)
+    assert es._delete_guard_batch("2026-01-01 00:00:00", [1, 2, 3]) == 3, \
+        "在 _bounded_lock_wait 之外读 rowcount 会拿到 SET 的 0（QA D1）"
+    assert any(s.startswith("SET SESSION innodb_lock_wait_timeout=50")
+               for s in cur.statements), "还原语句仍必须执行"
+
+
+def test_purge_metrics_and_log_work_under_mysql_rowcount_semantics(monkeypatch, caplog):
+    """后果链回归：deleted>0 → ok 指标计数 + purged 日志打印（MySQL 后端）。"""
+    cur = _MySQLRowcountCursor(deleted=3, candidates=[(1,), (2,), (3,)])
+    calls = []
+    _patch_mysql_backend(monkeypatch, cur, calls)
+    import logging
+    with caplog.at_level(logging.INFO):
+        total = es.purge_stale_event_guards()
+    assert total == 3
+    assert ("ok", 3) in calls, f"ok 指标必须计入真实删除数，实际 {calls}"
+    assert any("purged=3" in r.message for r in caplog.records)
