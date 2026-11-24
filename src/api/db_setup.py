@@ -12245,15 +12245,16 @@ def stamp_repo_bot_credential_backfill() -> dict:
 # agent_runtimes 增 6 列：backend_status/backend_reason/backend_checked_at +
 # circuit_open_until/circuit_fail_count/circuit_half_open。新装库由
 # runtime schema_ddl 直接带列，本迁移只服务存量库；列在位才盖章。
-# 版本号避让：基线上 202611240001（#4066）与 202611240002（#3789）已占用，
-# 本迁移取 202611240003（register_migration 撞号守卫）。
+# 版本号避让：基线上 202611240001（#4066）、202611240002（#3789）与
+# 202611240003（#3763 autopilot_executions 补建）已占用，本迁移顺延取
+# 202611240004（register_migration 撞号守卫：同号会被判「已执行」永久跳过）。
 
 from src.domains.runtime.migrations.backend_health_columns import (
     add_backend_health_columns as _fn_backend_health_columns,
     verify_backend_health_columns as _post_backend_health_columns,
 )
 register_migration(
-    version="202611240003",
+    version="202611240004",
     name="backend-capability-circuit-breaker-columns",
     kind="safe",
     fn=_fn_backend_health_columns,

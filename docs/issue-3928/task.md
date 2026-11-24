@@ -1,7 +1,7 @@
 # Issue #3928 Task Breakdown
 
 - [x] T1 后端能力探针（backend_capability）：映射 + which + TTL 缓存 + probe→状态映射。
-- [x] T2 存储：agent_runtimes 熔断/能力列（DDL + 迁移 202611240003）。
+- [x] T2 存储：agent_runtimes 熔断/能力列（DDL + 迁移 202611240004）。
 - [x] T3 worker 注册/心跳上报能力；服务端注册/心跳落库、缺 CLI 立即摘除并告警。
 - [x] T4 认领闸门收紧：fail/failed/spawn_failed/degraded/unavailable/healthy=0 拒绝；
       正常/unknown 实例零回归；池可达性统一。
