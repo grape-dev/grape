@@ -397,6 +397,8 @@
     "open_new_tab": "在新标签页打开"
   },
   "feedback": {
+    "choose_file": "选择附件",
+    "cancel": "取消",
     "title": "问题反馈",
     "link_text": "反馈",
     "category_bug": "Bug 缺陷",
@@ -465,6 +467,8 @@
     "status_skipped": "已跳过"
   },
   "account": {
+    "hide_plaintext": "隐藏明文",
+    "llm_tab": "LLM 凭据",
     "account_security": "账号安全",
     "basic_info": "基本信息",
     "username": "用户名",

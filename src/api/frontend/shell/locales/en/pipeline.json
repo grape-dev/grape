@@ -48,5 +48,13 @@
   "cross_scene_handoff": "Cross-Scene Handoff",
   "no_issues": "No issues",
   "loading_more": "Loading…",
-  "stalled_badge": "⏳ stalled {{minutes}}m"
+  "stalled_badge": "⏳ stalled {{minutes}}m",
+  "load_failed": "Load failed",
+  "scene_default": "Default",
+  "scene_cloud_native": "Cloud Native",
+  "scene_iac": "IaC",
+  "scene_agent_dev": "Agent Dev",
+  "scene_skill_dev": "Skill Dev",
+  "scene_api_skill_dev": "API Skill Dev",
+  "scene_blog_publish": "Blog Publish"
 }

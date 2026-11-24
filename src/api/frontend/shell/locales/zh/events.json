@@ -137,5 +137,6 @@
   "fail_legacy_hint": "该事件为历史事件，未记录结构化失败原因；可查看下方处理记录与日志排查。",
   "fail_actions": "建议操作",
   "btn_fail_retry": "重试",
-  "btn_contact_human": "联系人工"
+  "btn_contact_human": "联系人工",
+  "back_to_requirement": "返回需求详情"
 }

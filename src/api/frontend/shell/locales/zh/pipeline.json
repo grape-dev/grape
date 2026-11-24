@@ -48,5 +48,13 @@
   "cross_scene_handoff": "跨场景移交",
   "no_issues": "暂无 Issue",
   "loading_more": "加载中…",
-  "stalled_badge": "⏳ 停滞 {{minutes}}m"
+  "stalled_badge": "⏳ 停滞 {{minutes}}m",
+  "load_failed": "加载失败",
+  "scene_default": "默认",
+  "scene_cloud_native": "云原生",
+  "scene_iac": "IaC",
+  "scene_agent_dev": "Agent 开发",
+  "scene_skill_dev": "技能开发",
+  "scene_api_skill_dev": "API 技能开发",
+  "scene_blog_publish": "博客发布"
 }

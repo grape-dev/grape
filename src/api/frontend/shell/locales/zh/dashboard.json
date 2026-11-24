@@ -1,4 +1,13 @@
 {
+  "execution_flow": "执行流程",
+  "skill_kicker": "技能绑定",
+  "skill_unit": "项",
+  "scene_search_no_match": "没有匹配的场景",
+  "discard_and_leave": "放弃并离开",
+  "stay_editing": "继续编辑",
+  "leave_unsaved_title": "有未保存的改动",
+  "leave_unsaved_hint": "这个场景的编辑还没保存，离开后刚才对技能、引擎和节点启用状态的修改会被丢弃，并退出编辑模式。",
+  "skill_unbind": "不绑定技能",
   "dev_scene": "开发场景:",
   "apply": "应用",
   "no_engine": "无 engine，不可用",

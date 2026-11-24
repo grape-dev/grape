@@ -1,4 +1,10 @@
 {
+  "attachments": "Attachments",
+  "no_attachments": "No attachments",
+  "upload_attach": "Upload attachment",
+  "attach_load_failed": "Failed to load attachments",
+  "deploy_hint": "Deploy URL (optional)",
+  "deploy_placeholder": "https://...",
   "detail_title": "Requirement Detail",
   "detail": {
     "issue_id": "Issue ID",

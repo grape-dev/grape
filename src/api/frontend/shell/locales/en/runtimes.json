@@ -203,6 +203,7 @@
     "platform_detail_btn_tip": "Open platform detail (info/templates/sandboxes)"
   },
   "toast": {
+    "load_failed": "Load failed",
     "load_tasks_failed": "Failed to load tasks: {{msg}}",
     "refreshing": "Refreshing...",
     "refresh_success": "Refreshed successfully",

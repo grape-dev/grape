@@ -1,4 +1,10 @@
 {
+  "attachments": "附件",
+  "no_attachments": "暂无附件",
+  "upload_attach": "上传附件",
+  "attach_load_failed": "附件加载失败",
+  "deploy_hint": "部署地址（可选）",
+  "deploy_placeholder": "https://...",
   "detail_title": "需求详情",
   "detail": {
     "issue_id": "需求编号",

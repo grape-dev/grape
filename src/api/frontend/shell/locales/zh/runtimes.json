@@ -203,6 +203,7 @@
     "platform_detail_btn_tip": "打开平台详情（信息/模板/沙箱）"
   },
   "toast": {
+    "load_failed": "加载失败",
     "load_tasks_failed": "加载任务失败: {{msg}}",
     "refreshing": "刷新中...",
     "refresh_success": "刷新成功",

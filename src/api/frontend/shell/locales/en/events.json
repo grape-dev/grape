@@ -137,5 +137,6 @@
   "fail_legacy_hint": "This is a legacy event without structured failure attribution; check the processing record and logs below.",
   "fail_actions": "Suggested actions",
   "btn_fail_retry": "Retry",
-  "btn_contact_human": "Contact support"
+  "btn_contact_human": "Contact support",
+  "back_to_requirement": "Back to Requirement"
 }

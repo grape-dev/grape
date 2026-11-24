@@ -334,13 +334,13 @@
             <!-- 操作按钮行 -->
             <div class="isk-actions">
               <button class="tsk-btn tsk-btn-ghost" @click="openIssueLink(sel)">
-                ↗ {{ td('view_issue') }}
+                ↗ {{ td('detail.view_issue') }}
               </button>
               <button class="tsk-btn tsk-btn-ghost" @click="openTaskConversation(sel)">
-                {{ td('go_conversation') }}
+                {{ td('detail.go_conversation') }}
               </button>
               <button class="tsk-btn tsk-btn-ghost" @click="openCopyModal(sel)">
-                ⎘ {{ td('copy_task') }}
+                ⎘ {{ td('detail.copy_task') }}
               </button>
               <template v-if="!sel.is_pr_event">
                 <button
@@ -567,13 +567,13 @@
         </div>
         <div class="isk-dp-actions">
           <button class="tsk-btn tsk-btn-ghost" @click="openIssueLink(detailView)">
-            ↗ {{ td('view_issue') }}
+            ↗ {{ td('detail.view_issue') }}
           </button>
           <button class="tsk-btn tsk-btn-ghost" @click="openTaskConversation(detailView)">
-            {{ td('go_conversation') }}
+            {{ td('detail.go_conversation') }}
           </button>
           <button class="tsk-btn tsk-btn-ghost" @click="openCopyModal(detailView)">
-            ⎘ {{ td('copy_task') }}
+            ⎘ {{ td('detail.copy_task') }}
           </button>
           <template v-if="detailView.status !== 'completed' && detailView.status !== 'cancelled'">
             <button class="tsk-btn tsk-btn-primary" @click="confirmTaskDone(detailView, $event)">
@@ -1055,13 +1055,18 @@ function td(key, params) {
   const full = 'issues.' + key
   const v = G.I18N.t(full, params)
   if (v && v !== full) return v
-  // 模板里有 td('view_issue') 与 td('detail.view_issue') 两种写法，默认表两种都要能命中，
+  // 默认表按 detail.* 命名；兼容未带 detail. 前缀的历史写法，两种都要能命中，
   // 否则按钮会直接显示 view_issue 这种标识符（2026-11-12 主人报的「按钮显示函数名」）
   const alt = key.indexOf('.') === -1 ? 'detail.' + key : key.replace(/^detail\./, '')
   return ISSUE_DEFAULTS[key] || ISSUE_DEFAULTS[alt] || key
 }
 function t2(key, params) {
   return td(key, params)
+}
+function tp(key, params) {
+  const full = 'pipeline.' + key
+  const v = G.I18N.t(full, params)
+  return v && v !== full ? v : key
 }
 function tc(key) {
   const map = {
@@ -1993,7 +1998,7 @@ const pipelineCardHtml = computed(() => {
     html +=
       '<div style="font-size:11px;color:var(--r);background:rgba(255,59,48,.08);' +
       'border-radius:8px;padding:6px 10px;margin-bottom:10px"><b>' +
-      esc(t('pipeline.status_failed')) +
+      esc(tp('status_failed')) +
       '</b> · ' +
       esc(String(data.failed_node_name)) +
       '</div>'
@@ -3195,7 +3200,7 @@ function saveDeployUrl() {
   if (!repo) return
   const url = deployDraft.value.trim()
   if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
-    app().showToast(t('save_failed', { msg: 'URL 必须以 http:// 或 https:// 开头' }))
+    app().showToast(td('save_failed', { msg: 'URL 必须以 http:// 或 https:// 开头' }))
     return
   }
   API()
@@ -3203,10 +3208,10 @@ function saveDeployUrl() {
     .then(function () {
       deployUrl.value = url
       deployEditing.value = false
-      app().showToast(t('deploy_url_saved'))
+      app().showToast(td('deploy_url_saved'))
     })
     .catch(function (e) {
-      app().showToast(t('save_failed', { msg: (e.detail && e.detail.message) || e.message }))
+      app().showToast(td('save_failed', { msg: (e.detail && e.detail.message) || e.message }))
     })
 }
 function deployLongPressStart() {

@@ -397,6 +397,8 @@
     "open_new_tab": "Open in new tab"
   },
   "feedback": {
+    "choose_file": "Choose attachment",
+    "cancel": "Cancel",
     "title": "Feedback",
     "link_text": "Feedback",
     "category_bug": "Bug",
@@ -465,6 +467,8 @@
     "status_skipped": "Skipped"
   },
   "account": {
+    "hide_plaintext": "Hide plaintext",
+    "llm_tab": "LLM Credentials",
     "account_security": "Account",
     "basic_info": "Basic Info",
     "username": "Username",
