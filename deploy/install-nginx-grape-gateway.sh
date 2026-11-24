@@ -47,11 +47,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grape-nginx-install.XXXXXX")"
+# 测试/校验的 stderr 落点必须每次唯一：固定路径（如 /tmp/grape-nginx-gateway-test.err）
+# 在同机多用户/并发下发时会被他人占位，表现为 "Permission denied" 或读到别人的旧错误。
+TEST_ERR="$(mktemp "${TMPDIR:-/tmp}/grape-nginx-gateway-test.XXXXXX.err")"
 CREATED=()
 BACKED_UP=()
 
 cleanup() {
   rm -rf "$BACKUP_DIR"
+  rm -f "$TEST_ERR"
 }
 trap cleanup EXIT
 
@@ -145,9 +149,9 @@ ensure_main_include
 
 # ---- nginx -t 守卫：失败回滚 ----
 read -r -a TEST_ARGV <<< "$TEST_ARGS"
-if ! "$NGINX_CMD" -t "${TEST_ARGV[@]}" 2>/tmp/grape-nginx-gateway-test.err; then
+if ! "$NGINX_CMD" -t "${TEST_ARGV[@]}" 2>"$TEST_ERR"; then
   echo "[gateway] nginx -t 失败，回滚本次下发：" >&2
-  cat /tmp/grape-nginx-gateway-test.err >&2
+  cat "$TEST_ERR" >&2
   rollback_all
   exit 1
 fi

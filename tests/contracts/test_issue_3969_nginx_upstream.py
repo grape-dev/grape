@@ -56,7 +56,9 @@ class TestWorkerUpstream:
 
     def test_keepalive_enabled(self, path, upstream, peers):
         block = _block(_conf(path), f"upstream {upstream}")
-        assert "keepalive 32;" in block
+        # keepalive 参数可由公共片段提供（Issue #3847 的 nginx-grape-upstream-keepalive.inc），
+        # 也可以是内联 `keepalive 32;`——两者都必须真在 upstream 块内出现。
+        assert "keepalive 32;" in block or "nginx-grape-upstream-keepalive.inc" in block
 
     def test_local_server_has_failure_marking(self, path, upstream, peers):
         block = _block(_conf(path), f"upstream {upstream}")
@@ -100,6 +102,15 @@ def _nginx_test(conf_text: str) -> subprocess.CompletedProcess:
         pytest.skip("nginx not installed")
     tmp = tempfile.mkdtemp(prefix="grape-nginx-3969-")
     conf_path = os.path.join(tmp, "nginx.conf")
+    # 模板用 `include conf.d/<fragment>` 引用 #3847 的公共片段：组装最小配置时把片段
+    # 落到本临时 prefix 下，否则 nginx -t 会因 open() failed 直接判失败（与语法无关）。
+    inc_dir = os.path.join(tmp, "conf.d")
+    os.makedirs(inc_dir, exist_ok=True)
+    for name in ("nginx-grape-upstream.inc", "nginx-grape-upstream-keepalive.inc"):
+        src = os.path.join(_REPO_ROOT, "deploy", name)
+        if os.path.isfile(src):
+            shutil.copy(src, os.path.join(inc_dir, name))
+    conf_text = conf_text.replace("include conf.d/", f"include {inc_dir}/")
     wrapper = f"""
 worker_processes 1;
 pid {tmp}/nginx.pid;
@@ -156,7 +167,8 @@ def test_every_conf_with_worker_upstream_has_failover(path):
         pytest.skip(f"{os.path.basename(path)} has no worker upstream")
     assert "proxy_next_upstream error timeout http_502" in conf, \
         f"{os.path.basename(path)} missing proxy_next_upstream http_502"
-    assert "keepalive 32;" in conf, f"{os.path.basename(path)} missing keepalive"
+    assert "keepalive 32;" in conf or "nginx-grape-upstream-keepalive.inc" in conf, \
+        f"{os.path.basename(path)} missing keepalive"
     assert "worker-peers.conf*" in conf, \
         f"{os.path.basename(path)} missing peer include"
     assert "max_fails=2" in conf and "fail_timeout=10s" in conf

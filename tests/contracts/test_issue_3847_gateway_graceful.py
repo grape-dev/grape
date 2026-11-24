@@ -184,7 +184,7 @@ def test_every_upstream_has_at_least_two_peers(tpl):
     ups = _upstreams(conf)
     assert ups, f"{tpl}: 未见 upstream 块"
     for header, body in ups:
-        peers = re.findall(r"^\s*server\s+\S+;", body, re.M)
+        peers = re.findall(r"^\s*server\s+\S+", body, re.M)
         assert len(peers) >= 2, f"{tpl}: {header} 只有 {len(peers)} 个 peer，proxy_next_upstream 不会生效"
 
 
@@ -769,7 +769,7 @@ def _free_port():
 def _rewrite_for_test(conf, backend_port, listen_port):
     """把模板改写成可在测试环境启动的等价配置（仅地址/端口/TLS 差异）。"""
     conf = re.sub(r"^(\s*)listen\s+\d+(\s+ssl)?;", rf"\1listen {listen_port};", conf, flags=re.M)
-    conf = re.sub(r"^(\s*server\s+)\S+;", rf"\g<1>127.0.0.1:{backend_port};", conf, flags=re.M)
+    conf = re.sub(r"^([ \t]*server[ \t]+)\S+([ \t]+[^;\n]*)?;", rf"\g<1>127.0.0.1:{backend_port}\g<2>;", conf, flags=re.M)
     return conf
 
 
