@@ -420,10 +420,17 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                 continue
             refs.append({"skill_id": int(resolved), "skill_name": skill_name})
     if not refs:
-        # 一个都没解析出来：不要 DELETE 掉既有绑定（那会让场景彻底失去引用），
-        # 保留原状等下一轮（技能同步就绪后自愈）。
-        logger.warning(f"Scene sync: {scene_name} no skill refs resolved, existing bindings left untouched")
-        return
+        # 两种「空集」必须分开：
+        #   ① 模板本来就没有技能节点 → 清空引用是正确语义（继续往下走 replace）；
+        #   ② 声明了技能但一个都没解析出来 → 清空会让场景彻底失去引用，保留原状等下一轮自愈。
+        _declared = [str(n.get("skill") or "").strip() for n in (nodes or [])]
+        _declared = [s for s in _declared if s]
+        if _declared:
+            logger.warning(
+                f"Scene sync: {scene_name} none of {len(_declared)} declared skill(s) resolved, "
+                f"existing bindings left untouched")
+            return
+        logger.info(f"Scene sync: {scene_name} declares no skill nodes, clearing scene_skill_ref")
     if _mg_ssr is not None:
         # 三库拓扑：一条幂等意图进 outbox（远端失败可重放），本进程不直写外域表
         _write_scene_skill_ref_via_lib(_mg_ssr, market_id, refs, scene_name)
@@ -477,14 +484,17 @@ def _repair_scene_skill_ref_if_unresolved(scene_name: str, market_id: int, nodes
     """
     if not market_id:
         return
-    db, db_lock = _db_pair("runtime")
+    # scene_skill_ref 归属 mgmt 域（configs/table_ownership.json），runtime **不得直读**：
+    # 三库拓扑走 mgmt lib，单库/测试拓扑经 mgmt public 原语（此时本进程即 mgmt 持有者，
+    # 不是跨域读）。直读会触发跨域读棘轮门禁，且三库实例无跨域视图时 SELECT 会 1146 被吞。
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_rep
+    from src.domains.mgmt import public as _mgmt_public_rep
+    _mg_rep = _mgmt_lib_rep(foreign_only=True)
     try:
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT COUNT(*) FROM scene_skill_ref "
-                "WHERE scene_id=? AND (skill_id IS NULL OR skill_id<=0)",
-                (int(market_id),)).fetchone()
-        unresolved = int(row[0]) if row else 0
+        if _mg_rep is not None:
+            unresolved = int(_mg_rep.count_unresolved_scene_skill_ref(int(market_id)) or 0)
+        else:
+            unresolved = int(_mgmt_public_rep.count_unresolved_scene_skill_ref(int(market_id)) or 0)
     except Exception as exc:  # noqa: BLE001 - 检查失败不影响同步主流程
         logger.warning(f"Scene sync: {scene_name} skill ref check failed: {exc}")
         return
