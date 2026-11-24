@@ -23,8 +23,6 @@ import pytest
 
 import src.kernel.repo_bot_observability as obs
 import src.kernel.token_resolver as tr
-from src.kernel.ports import repos as _repos
-from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_provider as _vcs_provider
 
 _NS = "x3740"
@@ -41,26 +39,46 @@ def _strategy(rk):
 
 @pytest.fixture
 def fake_ports(monkeypatch):
-    """端口隔离：rc 缺失/命中与 legacy 列值由 state 控制，全用例零 DB 依赖。"""
+    """端口隔离：rc 缺失/命中与 legacy 列值由 state 控制，全用例零 DB 依赖。
+
+    ⚠️ 打桩目标是 `token_resolver` 模块里的 `_tokens` / `_repos` **引用**，不是
+    `src.kernel.ports.*` 代理模块本身：代理是 PEP 562 转发模块，`setattr` 到它上面
+    会写进模块 `__dict__`，monkeypatch 复位时把「转发来的实现」还原成真实属性，
+    于是绑定被永久遮蔽 —— 后续用例（如 `test_issue_3713_action_handler_level`）
+    读到的是本用例的假件，表现为跨文件假红。
+    """
     state = {"rc": "", "legacy": "", "rc_reads": 0, "legacy_reads": 0, "audit": []}
 
-    def _get_repo_credential_meta(repo_key, cred_type):
-        state["rc_reads"] += 1
-        if cred_type != "bot" or not state["rc"]:
-            return None
-        return {"value": state["rc"], "id": "rc-id-1"}
+    class _FakeTokens:
+        def get_repo_credential_meta(self, repo_key, cred_type):
+            state["rc_reads"] += 1
+            if cred_type != "bot" or not state["rc"]:
+                return None
+            return {"value": state["rc"], "id": "rc-id-1"}
 
-    def _legacy_read(repo_key, column):
-        state["legacy_reads"] += 1
-        return state["legacy"]
+        def get_host_user_id(self, repo_key):
+            return ""
+
+        def repo_secret_decrypt(self, raw):
+            return raw
+
+    class _FakeRepos:
+        def repo_bot_token_from_legacy_column_any(self, repo_key, column):
+            state["legacy_reads"] += 1
+            return state["legacy"]
+
+        def repo_bot_token_status_any(self, repo_key):
+            return ""
+
+        def set_repo_bot_token_status_any(self, repo_key, status):
+            return True
 
     import src.kernel.persistence.credential_usage_log as cul
 
-    monkeypatch.setattr(_tokens, "get_repo_credential_meta", _get_repo_credential_meta)
-    monkeypatch.setattr(_tokens, "get_host_user_id", lambda repo_key: "")
-    monkeypatch.setattr(_repos, "repo_bot_token_from_legacy_column_any", _legacy_read)
-    monkeypatch.setattr(_repos, "repo_bot_token_status_any", lambda repo_key: "")
-    monkeypatch.setattr(_repos, "set_repo_bot_token_status_any", lambda repo_key, status: True)
+    fake_tokens = _FakeTokens()
+    monkeypatch.setattr(tr, "_tokens", fake_tokens)
+    monkeypatch.setattr(tr, "_repos", _FakeRepos())
+    state["tokens"] = fake_tokens
 
     def _log_usage(credential_id="", user_id=0, **kwargs):
         state["audit"].append(kwargs.get("operation", ""))
@@ -271,7 +289,7 @@ def test_rc_read_failure_does_not_cache_legacy(fake_ports, long_cache, monkeypat
         calls["rc"] += 1
         raise RuntimeError("rc down")
 
-    monkeypatch.setattr(_tokens, "get_repo_credential_meta", _rc_boom)
+    monkeypatch.setattr(fake_ports["tokens"], "get_repo_credential_meta", _rc_boom)
     strategy = _strategy(rk)
 
     assert strategy.get_token(rk) == "tok-legacy"
@@ -292,7 +310,7 @@ def test_rc_recovery_after_error_is_immediately_visible(fake_ports, long_cache, 
             raise RuntimeError("rc transient")
         return {"value": "tok-rc-new", "id": "rc-id-2"}
 
-    monkeypatch.setattr(_tokens, "get_repo_credential_meta", _flaky_rc)
+    monkeypatch.setattr(fake_ports["tokens"], "get_repo_credential_meta", _flaky_rc)
     strategy = _strategy(rk)
     assert strategy.get_token(rk) == "tok-legacy"
     assert strategy.get_token(rk) == "tok-rc-new"
