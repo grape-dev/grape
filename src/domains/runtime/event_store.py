@@ -1,6 +1,6 @@
 """Event Store — 事件记录与查询（shared events table）"""
-import json, re, threading, asyncio
-from contextlib import nullcontext as _nullcontext
+import json, re, threading, asyncio, random, time
+from contextlib import nullcontext as _nullcontext, contextmanager as _contextmanager
 from datetime import datetime
 from src.kernel.owner_db import db_pair
 
@@ -372,6 +372,107 @@ def release_event_guard(repo_key: str, issue_id: str, agent_type: str, seq: int)
         log.warning(f"release_event_guard failed seq={seq}: {e}")
 
 
+# ===== Issue #3794: TTL 清理分批契约 =====
+# 旧实现单大事务 DELETE + 相关子查询（agent_tasks 缺 (event_seq,status) 组合索引），
+# 与 claim/heartbeat/状态回写互相等锁 → InnoDB 1205 锁等待超时，主控 100% 失败。
+_PURGE_BATCH = 200            # 单批最大行数（两段短事务，避免长持锁）
+_PURGE_MAX_ROUNDS = 50        # 单次调用最多轮数（10000 行/次上限，防无界循环/空转）
+_LOCK_RETRY_BACKOFF_SECONDS = 0.2  # 1205 短退避基线（加随机抖动，避免多主控同步重试）
+# 可重试的 InnoDB 锁冲突：1205 锁等待超时 / 1213 死锁（后者由引擎自动回滚事务，
+# 语义同样是「稍后重试即可」）。失败一次就放弃会让 TTL 自愈继续卡住（Issue #3794）。
+_RETRYABLE_LOCK_ERROR_CODES = (1205, 1213)
+# 单批 DELETE 的行锁等待上限（秒）：MySQL 默认 50s，在进程级 db_lock 内等满会冻全站
+_PURGE_LOCK_WAIT_SECONDS = 3
+
+# rowcount 指标（挂 observability 独立 registry；prometheus 不可用时静默跳过）
+_PURGE_METRIC = None
+
+
+def _is_retryable_lock_error(e: BaseException) -> bool:
+    """判定可重试的 InnoDB 锁冲突（pymysql: e.args[0] 为错误码；兜底匹配 message）。"""
+    args = getattr(e, "args", None)
+    if args and isinstance(args[0], int) and args[0] in _RETRYABLE_LOCK_ERROR_CODES:
+        return True
+    text = str(e).lower()
+    return "lock wait timeout" in text or "deadlock" in text
+
+
+def _purge_metric_inc(result: str, amount: int = 1) -> None:
+    """grape_event_guard_purged_total{result=ok|failed}：ok 按删除行数计，failed 计 1。"""
+    global _PURGE_METRIC
+    try:
+        if _PURGE_METRIC is None:
+            from prometheus_client import Counter
+            from src.domains.insight.observability import registry
+            _PURGE_METRIC = Counter(
+                "grape_event_guard_purged_total",
+                "event_active_guard TTL purge rows (Issue #3794)",
+                ["result"], registry=registry)
+        _PURGE_METRIC.labels(result=result).inc(amount)
+    except Exception as e:  # noqa: BLE001 - prometheus 不可用不影响清理本身
+        log.debug(f"event guard purge metric skipped: {e}")
+
+
+@_contextmanager
+def _bounded_lock_wait(c, seconds: int = _PURGE_LOCK_WAIT_SECONDS):
+    """把本连接的 InnoDB 行锁等待上限临时压到 `seconds`，退出时还原。
+
+    为什么必须做：`db_lock` 是进程级大锁，DELETE 在锁内等行锁时整个进程（含
+    /api/ping 与静态文件）都会排队；MySQL 默认 innodb_lock_wait_timeout=50，
+    实测单次冻结 50s 以上（Issue #3794 线上事故）。压到 3s 后，最坏是「这批放弃、
+    下一轮再来」，不会再把全站拖住。SET SESSION 是会话级设置，必须在 db_lock 内
+    设置与还原，避免把 3s 漏给同一连接上的 claim/heartbeat 等语句。
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+
+    if not _is_mysql_backend():
+        yield
+        return
+    prev = None
+    try:
+        prev = c.execute("SELECT @@SESSION.innodb_lock_wait_timeout").fetchone()
+        prev = int(prev[0]) if prev and prev[0] is not None else None
+    except Exception as e:  # noqa: BLE001 - 读不到旧值也要继续压时限
+        log.debug(f"read innodb_lock_wait_timeout failed: {e}")
+    c.execute("SET SESSION innodb_lock_wait_timeout=%d" % int(seconds))
+    try:
+        yield
+    finally:
+        try:
+            c.execute("SET SESSION innodb_lock_wait_timeout=%d" % int(prev if prev else 50))
+        except Exception as e:  # noqa: BLE001 - 还原失败只影响本连接的等待上限
+            log.debug(f"restore innodb_lock_wait_timeout failed: {e}")
+
+
+def _delete_guard_batch(cutoff: str, seqs: list) -> int:
+    """短事务删除一批守卫行；DELETE 内重新 NOT EXISTS 复核（防 TOCTOU，§33 不回归）。
+
+    select 与 delete 之间 task 可能转 running——只有 DELETE 内复核才不误删长任务守卫。
+    独立 db_lock + commit，批间释放锁给 claim/heartbeat，避免 1205。
+    """
+    placeholders = ",".join("?" * len(seqs))
+    with db_lock:
+        c = db.cursor()
+        try:
+            with _bounded_lock_wait(c, _PURGE_LOCK_WAIT_SECONDS):
+                c.execute(
+                    "DELETE FROM event_active_guard WHERE created_at < ? "
+                    "AND seq IN (" + placeholders + ") "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM agent_tasks t "
+                    "  WHERE t.status IN ('dispatched','running') "
+                    "  AND t.event_seq = event_active_guard.seq"
+                    ")",
+                    (cutoff, *seqs))
+            db.commit()
+            return c.rowcount
+        except Exception:
+            # 失败语句所在事务及其已持行锁必须立刻释放：退避后在同一事务里重试会再撞锁，
+            # 并且延长对 claim/heartbeat 的持锁时间（与本次优化目标相反）。
+            db.rollback()
+            raise
+
+
 def purge_stale_event_guards(max_age_seconds: int = 1800) -> int:
     """TTL 兜底清理守卫行（进程崩溃来不及终态释放时的自愈；默认 30min）。
 
@@ -379,26 +480,59 @@ def purge_stale_event_guards(max_age_seconds: int = 1800) -> int:
     Issue #372 §12.7: 从 6h 缩短到 30min——活跃 guard 不应存活这么久，
     异常退出后 30min 内自动恢复，不影响用户重试。
     Issue #372 §33: 跳过有运行中 task 的 guard——长任务不应被 TTL 误清理导致重复派发。
+    Issue #3794: 重写为两段短事务按 seq 分批（BATCH=200 × 最多 50 轮）：
+    先只读 SELECT 候选 seq（不含相关子查询），再逐批短事务 DELETE（内含复核），
+    1205/1213 短退避重试一次；失败 WARNING 带 seq 集合、返回累计已删数，不中断后台循环。
+    QA #1981 R2：候选窗口按 seq keyset 严格后移 —— 旧实现候选批全被 running/dispatched
+    保护时 `deleted == 0 → break` 会整轮结束，剩余可删过期守卫永远清不掉（头阻塞，
+    与「守卫自愈失效」同一症状）。现在无论本批删掉多少，窗口都推进到 max(seq) 之后，
+    空转只受 _PURGE_MAX_ROUNDS 上限约束。
     """
-    try:
-        _cutoff = _utc_now_str(-max_age_seconds)
-        with db_lock:
-            c = db.cursor()
-            # §33: 只清理没有运行中 task 的 guard（防长任务被误清理后重复派发）
-            c.execute(
-                "DELETE FROM event_active_guard WHERE created_at < ? "
-                "AND NOT EXISTS ("
-                "  SELECT 1 FROM agent_tasks t "
-                "  WHERE t.status IN ('dispatched','running') "
-                "  AND t.event_seq = event_active_guard.seq"
-                ")",
-                (_cutoff,)
-            )
-            db.commit()
-            return c.rowcount
-    except Exception as e:
-        log.warning(f"purge_stale_event_guards failed: {e}")
-        return 0
+    total = 0
+    cutoff = _utc_now_str(-max_age_seconds)
+    last_seq = -1  # keyset 游标：event_active_guard.seq 为 INTEGER NOT NULL DEFAULT 0
+    for round_no in range(1, _PURGE_MAX_ROUNDS + 1):
+        # 第一段：短只读事务选候选（无相关子查询，不与 agent_tasks 热表互锁）
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT seq FROM event_active_guard WHERE created_at < ? AND seq > ? "
+                    f"ORDER BY seq LIMIT {_PURGE_BATCH}",
+                    (cutoff, last_seq))
+                rows = c.fetchall()
+        except Exception as e:
+            log.warning(f"purge_stale_event_guards select failed (round {round_no}): {e}")
+            _purge_metric_inc("failed")
+            return total
+        if not rows:
+            break
+        seqs = [r[0] for r in rows]
+        last_seq = max(seqs)  # 窗口严格后移：受保护批也不会再被下一轮选中
+        # 第二段：短删除事务；1205/1213 短退避重试一次
+        deleted = None
+        for attempt in (1, 2):
+            try:
+                deleted = _delete_guard_batch(cutoff, seqs)
+                break
+            except Exception as e:
+                if attempt == 1 and _is_retryable_lock_error(e):
+                    time.sleep(_LOCK_RETRY_BACKOFF_SECONDS + random.uniform(0, 0.1))
+                    continue
+                log.warning(
+                    f"purge_stale_event_guards failed (round {round_no}, "
+                    f"seqs_n={len(seqs)} seqs_range={min(seqs) if seqs else -1}..{max(seqs) if seqs else -1}): {e}")
+                _purge_metric_inc("failed")
+                return total
+        total += deleted or 0
+        if deleted:
+            # 逐批计入 ok：后续轮次失败提前返回时，前面已删行数也不会从指标里丢失。
+            _purge_metric_inc("ok", deleted)
+        if len(seqs) < _PURGE_BATCH:
+            break  # 不足一批 = 已到尾部
+    if total:
+        log.info(f"purge_stale_event_guards purged={total}")
+    return total
 
 
 def _utc_now_str(offset_seconds: int = 0) -> str:
