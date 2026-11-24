@@ -69,6 +69,7 @@ def test_run_domain_migrations_filters_by_domain_and_never_runs_legacy(monkeypat
     monkeypatch.setattr(db_setup, "_ensure_migrations_ledger", lambda conn: None)
     monkeypatch.setattr(db_setup, "_ensure_migration_session_lock_timeout", lambda: None)
     try:
+        monkeypatch.setenv("GRAPE_DOMAIN_LIB", "1")
         monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "runtime")
         db_setup.run_domain_migrations()
         # 只跑 runtime 域登记的条目（真实仓库里是 #646/#868/#1011 那 7 条 + 本测试的 1 条）
@@ -132,6 +133,11 @@ def test_current_domain_requires_three_db_flag(monkeypatch):
     monkeypatch.setenv("GRAPE_DOMAIN_LIB", "1")
     assert db_setup.current_migration_domain() == "runtime"
 
+    # 只认四个合法域：非法 owner 不再直接判空，而走库名/角色推断兜底，
+    # 因此这里必须清掉推断输入（套件内其他用例会残留 DEVOPS_DB_NAME/角色），
+    # 才能验证「无任何可推断信息 → 空」这条口径。
+    for _k in ("DEVOPS_DB_NAME", "GRAPE_PROCESS_ROLE", "GRAPE_SERVICE_NAME"):
+        monkeypatch.delenv(_k, raising=False)
     monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "worker")
     assert db_setup.current_migration_domain() == ""  # 只认四个合法域
 
@@ -248,6 +254,7 @@ def test_domain_migrations_run_under_the_migrate_lock(monkeypatch):
     monkeypatch.setattr(db_setup, "_run_with_migrate_lock", _fake_lock)
     monkeypatch.setattr(db_setup, "_ensure_migrations_ledger", lambda *a, **k: None)
     monkeypatch.setattr(db_setup, "_run_migrations_with_conn", lambda *a, **k: None)
+    monkeypatch.setenv("GRAPE_DOMAIN_LIB", "1")
     monkeypatch.setenv("GRAPE_MIGRATION_OWNER", "runtime")
     db_setup.run_domain_migrations()
     assert locked.get("ran") is True

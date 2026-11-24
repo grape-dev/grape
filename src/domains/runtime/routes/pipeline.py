@@ -5,6 +5,7 @@ from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number, is_native_issue_ident  # Issue #3055
+from src.domains.runtime.pipeline.owner_display import resolve_human_owner  # Issue #3646
 
 
 class _OwnedCursor:
@@ -358,8 +359,10 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
 
     involved_agents = [_nodes[i].get("name") or _nodes[i].get("id", "") for i, s in enumerate(stage_statuses) if s > 0]
 
-    # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
-    # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
+    # 责任人（Issue #3646）：**只展示人类**。优先级 ① issue_state.assignee（GitCode 真实指派）
+    # → ② 事件 payload 的 assignee → ③ 最近一次人类事件操作者；bot / Agent runtime 身份 /
+    # `gcw_*` 自动登录名一律过滤（#3644 曾因此把内部账号 gcw_0000 当成人展示），
+    # 全为内部账号时回退当前阶段 Agent 显示名，绝不输出原始内部账号。
     current_owner = ""
     # _st 已在上方从 stage_map 获取
     def _resolve_feishu_name_cached(name):
@@ -372,29 +375,49 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             feishu_name_cache[name] = result
         return result
 
+    # 内部账号名单：调用方批量查询结果优先；为空时懒加载一次全局名单（不做 N+1）
+    _owner_bots = bot_usernames
+    if not _owner_bots:
+        try:
+            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
+            _owner_bots = set(get_all_bot_usernames() or ())
+        except Exception as _be:
+            # 不静默：名单缺失会让过滤退化为「仅按名字形态」，留可观测信号
+            log.warning(f"[pipeline] bot username batch fallback failed: {_be}")
+            _owner_bots = set()
+
+    # ① ② 指派候选：issue_state.assignee → 事件 payload 最新 assignee
+    _assignee_candidates = []
     if _st and _st.get("assignee"):
-        current_owner = _resolve_feishu_name_cached(_st["assignee"])
-    else:
-        assignee = _get_latest_assignee(issue_events)
-        if assignee:
-            current_owner = _resolve_feishu_name_cached(assignee)
-        else:
-            for i in range(len(stage_statuses) - 1, -1, -1):
-                if stage_statuses[i] > 0:
-                    agent = _nodes[i].get("id", "") if i < len(_nodes) else ""
-                    latest = stages[i].get("latest_event") or {}
-                    actor = latest.get("actor", "")
-                    if actor:
-                        _bots = bot_usernames if bot_usernames is not None else set()
-                        if not _bots:
-                            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
-                            _bots = get_all_bot_usernames()
-                        if actor in _bots:
-                            from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name
-                            current_owner = get_agent_display_name(agent)
-                        else:
-                            current_owner = actor
-                    break
+        _assignee_candidates.append(_st["assignee"])
+    _payload_assignee = _get_latest_assignee(issue_events)
+    if _payload_assignee:
+        _assignee_candidates.append(_payload_assignee)
+
+    # ③ 操作者候选：阶段倒序（不因最近 actor 是内部账号提前结束）→ 末位补最早一条事件的操作者
+    _actor_candidates = []
+    _owner_agent = ""
+    for i in range(len(stage_statuses) - 1, -1, -1):
+        if stage_statuses[i] <= 0:
+            continue
+        if not _owner_agent:
+            # 当前阶段 agent（全内部账号时用它的显示名兜底，与旧口径一致）
+            _owner_agent = _nodes[i].get("id", "") if i < len(_nodes) else ""
+        _actor = str(((stages[i].get("latest_event") or {}).get("actor") or "")).strip()
+        if _actor:
+            _actor_candidates.append(_actor)
+    for _e in issue_events:  # issue_events 按 seq 升序（最早在前）
+        _opener = str(_e.get("actor") or "").strip()
+        if _opener:
+            _actor_candidates.append(_opener)
+            break
+
+    _human_owner = resolve_human_owner(_assignee_candidates, _actor_candidates, _owner_bots)
+    if _human_owner:
+        current_owner = _resolve_feishu_name_cached(_human_owner)
+    elif _owner_agent:
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name
+        current_owner = get_agent_display_name(_owner_agent)
 
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
@@ -600,34 +623,58 @@ def get_pipeline(owner: str, repo: str,
     # （每次还做一次后端探测）单独就占 0.8s。
     _scene_filter = str(scene_id or "").strip()
     _need = 1 + max(int(history_offset or 0), 0) + int(history_limit)
-    try:
-        _win_ids, _issues_total, _failed_ids = _pipeline_window(_repo_keys, _scene_filter, _need)
-        _pushdown_ok = True
-    except Exception as _e:
-        log.warning(f"pipeline window pushdown failed, fallback to full load: {_e}")
-        _win_ids, _issues_total, _failed_ids, _pushdown_ok = [], None, None, False
-
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.otel import feature_span
+    with feature_span("pipeline.window_pushdown",
+                      {"repo_keys": len(_repo_keys), "need": _need,
+                       "scene_filter": 1 if _scene_filter else 0}) as _sp_win:
         try:
-            _where = ("repo_key IN ({}) AND issue_id NOT IN ('', '#0') "
-                      "AND event_type <> 'admin_action'").format(",".join("?" * len(_repo_keys)))
-            _params = list(_repo_keys)
-            if _pushdown_ok and _win_ids:
-                _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
-                _params += list(_win_ids)
-            from src.domains.runtime.schema_probe import column_exists as _col_exists
-            _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
-                           else "'' AS failed_node")
-            c.execute(
-                "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
-                f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
-            rows = c.fetchall()
-        except Exception as e:
-            # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
-            log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
-            rows = []
+            _win_ids, _issues_total, _failed_ids = _pipeline_window(_repo_keys, _scene_filter, _need)
+            _pushdown_ok = True
+        except Exception as _e:
+            log.warning(f"pipeline window pushdown failed, fallback to full load: {_e}")
+            _win_ids, _issues_total, _failed_ids, _pushdown_ok = [], None, None, False
+        if _sp_win is not None:
+            try:
+                _sp_win.set_attribute("pipeline.pushdown_ok", bool(_pushdown_ok))
+                _sp_win.set_attribute("pipeline.issues_total", int(_issues_total or 0))
+                _sp_win.set_attribute("pipeline.window_ids", len(_win_ids or []))
+            except Exception as _se:
+                log.debug(f"[pipeline] span attribute failed (window): {_se}")
+
+    with feature_span("pipeline.events_query",
+                      {"repo_keys": len(_repo_keys),
+                       "pushdown": 1 if _pushdown_ok else 0}) as _sp_ev:
+        with db_lock:
+            c = db.cursor()
+            try:
+                _where = ("repo_key IN ({}) AND issue_id NOT IN ('', '#0') "
+                          "AND event_type <> 'admin_action'").format(",".join("?" * len(_repo_keys)))
+                _params = list(_repo_keys)
+                if _pushdown_ok and _win_ids:
+                    _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
+                    _params += list(_win_ids)
+                from src.domains.runtime.schema_probe import column_exists as _col_exists
+                _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
+                               else "'' AS failed_node")
+                c.execute(
+                    "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
+                    "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
+                    f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
+                rows = c.fetchall()
+            except Exception as e:
+                # 不得静默清空：缺列/下推失败会让整个流水线页空白，必须留可观测信号。
+                log.warning(f"[pipeline] events query failed (pushdown={_pushdown_ok}): {e}")
+                try:
+                    if _sp_ev is not None:
+                        _sp_ev.set_attribute("pipeline.error", str(e)[:200])
+                except Exception as _se:
+                    log.debug(f"[pipeline] span attribute failed (error marker): {_se}")
+                rows = []
+        if _sp_ev is not None:
+            try:
+                _sp_ev.set_attribute("pipeline.event_rows", len(rows))
+            except Exception as _se:
+                log.debug(f"[pipeline] span attribute failed (rows): {_se}")
 
     events = [
         {"seq": r[0], "issue_id": r[1], "event_type": r[2], "agent_type": r[3] or "", "title": r[4],
@@ -652,30 +699,37 @@ def get_pipeline(owner: str, repo: str,
             if is_native_issue_ident(iid):
                 _iss_nums.append(native_issue_number(iid))
         if _iss_nums:
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    # 一次查询同时获取 title + stage + scene_id + assignee 等
-                    c.execute(
-                        "SELECT issue_number, title, stage, owner_agent, assignee, "
-                        "scene_id, parent_issue_id, is_subtask_mode, status "
-                        "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
-                            ",".join("?" * len(_repo_keys)),
-                            ",".join("?" * len(_iss_nums))
-                        ),
-                        (*_repo_keys, *_iss_nums)
-                    )
-                    for r in c.fetchall():
-                        _iid = f"#{r[0]}"
-                        _title_map[_iid] = r[1] or ""
-                        _stage_map[_iid] = {
-                            "stage": r[2] or "", "owner_agent": r[3] or "",
-                            "assignee": r[4] or "", "scene_id": r[5] or "",
-                            "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
-                            "status": r[8] if len(r) > 8 else "",
-                        }
-            except Exception:
-                pass
+            with feature_span("pipeline.issue_batch",
+                              {"issue_nums": len(_iss_nums), "repo_keys": len(_repo_keys)}) as _sp_is:
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        # 一次查询同时获取 title + stage + scene_id + assignee 等
+                        c.execute(
+                            "SELECT issue_number, title, stage, owner_agent, assignee, "
+                            "scene_id, parent_issue_id, is_subtask_mode, status "
+                            "FROM issue WHERE repo_key IN ({}) AND issue_number IN ({})".format(
+                                ",".join("?" * len(_repo_keys)),
+                                ",".join("?" * len(_iss_nums))
+                            ),
+                            (*_repo_keys, *_iss_nums)
+                        )
+                        for r in c.fetchall():
+                            _iid = f"#{r[0]}"
+                            _title_map[_iid] = r[1] or ""
+                            _stage_map[_iid] = {
+                                "stage": r[2] or "", "owner_agent": r[3] or "",
+                                "assignee": r[4] or "", "scene_id": r[5] or "",
+                                "parent_issue_id": r[6] or "", "is_subtask_mode": r[7] or 0,
+                                "status": r[8] if len(r) > 8 else "",
+                            }
+                except Exception:
+                    pass
+                if _sp_is is not None:
+                    try:
+                        _sp_is.set_attribute("pipeline.issue_rows", len(_stage_map))
+                    except Exception as _se:
+                        log.debug(f"[pipeline] span attribute failed (issue rows): {_se}")
 
     # 场景配置缓存（同仓库内 scene_id 去重，消除 get_pipeline_config N+1）
     _pipe_cfg_cache = {}
@@ -689,7 +743,10 @@ def get_pipeline(owner: str, repo: str,
     _bot_usernames = set()
     try:
         from src.domains.mgmt import public as _mgmt_public_bots
+        # Issue #3646：repo 级 bot 之外并上全局 bot 名单（责任人过滤需要完整名单），
+        # 一次查询覆盖整页，避免 _get_issue_pipeline 内部按 issue 懒加载造成 N+1。
         _bot_usernames = set(_mgmt_public_bots.repo_bot_usernames_any(_repo_keys))
+        _bot_usernames |= set(_mgmt_public_bots.get_all_bot_usernames() or ())
     except Exception as _e:
         # 不静默：空集会让下方责任人推断退化为「直接显示 actor」（不区分 bot/用户），
         # 必须留可观测信号，否则展示口径错误无从发现。

@@ -25,10 +25,11 @@ def test_create_execution_uses_domain_cursor():
 
 def test_execute_task_result_read_uses_domain_cursor():
     from src.domains.runtime.engine import scheduler as sch
-    body = inspect.getsource(sch._execute_task)
-    assert 'SELECT status, error FROM autopilot_executions' in body
+    # 上游把内联查询抽成 _read_exec_state（#3800 error_code）——守卫改锁 helper 本体
+    body = inspect.getsource(sch._read_exec_state)
+    assert 'FROM autopilot_executions' in body
     assert '_rt_cursor_for("runtime")' in body, (
-        "执行结果查询必须走 runtime 域游标（mgmt 进程 1146）")
+        "执行结果查询(_read_exec_state)必须走 runtime 域游标（mgmt 进程 1146）")
 
 
 def test_poll_dispatched_completion_uses_domain_cursor():

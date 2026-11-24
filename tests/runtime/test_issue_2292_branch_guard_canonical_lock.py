@@ -93,13 +93,15 @@ def test_lease_functions_run_without_import_error():
 # ===================== 2. 钩子可加载 + 模板版本（AC2/AC5） =====================
 
 def test_installed_hook_pins_canonical_module_and_version_line(tmp_path):
-    """生成的 pre-push 固化新布局模块路径，且版本指纹可被存量钩子识别升级。"""
+    """生成的 pre-push 固化仓库相对模块路径，且版本指纹可被存量钩子识别升级。"""
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
     assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
     hook = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
-    assert f"# hook-module-path: {bg._hook_module_path()}" in hook
+    # Issue #3579：只写仓库相对路径，不写安装时 worktree 绝对路径。
+    assert f"# hook-module-rel: {bg._hook_module_relpath()}" in hook
+    assert bg._hook_module_path() not in hook
     assert bg.HOOK_VERSION_LINE in hook
     assert "src/runtime/branch_guard.py" not in hook, "旧硬编码布局路径绝迹"
     # 以钩子内联代码真实执行一次：模块加载成功 + 空 stdin 快路径 rc=0，无告警

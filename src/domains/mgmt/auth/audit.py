@@ -82,6 +82,16 @@ EVENT_TYPES = frozenset({
     "dispatch_cancelled",           # 下派被取消
     "target_retried",               # 单目标重试（复用既有子 Issue）
     "dispatch_needs_review",        # 下派批次等待人工复核
+    # 插件市场写操作（QA #1847 C3：未登记会被静默丢弃，等于没有审计）
+    "plugin_upload",                # 插件上传（detail: plugin/version/scope）
+    "plugin_delete",                # 插件市场条目软删（detail: plugin/version/plugin_id）
+    "plugin_certify",               # 官方认证位标记/撤销（detail: plugin_id/certified）
+    "plugin_rollback",              # 生效版本回滚（detail: plugin/plugin_id/target_version）
+    "plugin_like",                  # 点赞开关（detail: plugin_id/liked）
+    "plugin_install",               # 运行时安装（detail: plugin）
+    "plugin_uninstall",             # 运行时卸载（detail: plugin）
+    "plugin_credentials_saved",     # 插件凭据保存（detail 只记 key 名，不落值）
+    "plugin_config_saved",          # 插件参数默认值保存（detail 只记 key 名）
     # Issue #2150：组织上下文与组织知识库（未登记会被静默丢弃）
     "org_context_create",           # 组织上下文创建（draft）
     "org_context_update",           # 组织上下文更新

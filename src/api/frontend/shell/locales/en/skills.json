@@ -67,6 +67,7 @@
   },
   "confirm": {
     "delete_skill": "Are you sure you want to delete skill {{name}}?",
+    "delete_skill_fallback": "this skill",
     "convert_skill": "Copy personal skill \"{{name}}\" to repo {{repo}}?\n\nThe original personal skill is preserved. After copying, it can be configured in the DevOps/Chat Agent of that repo."
   },
   "upload": {

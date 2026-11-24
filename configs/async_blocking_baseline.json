@@ -45,7 +45,7 @@
     "src/domains/mgmt/admin/db.py:274:A7 db_lock around bulk scan",
     "src/domains/mgmt/admin/db.py:348:A7 db_lock around bulk scan",
     "src/domains/mgmt/auth/audit.py:423:A7 db_lock around bulk scan",
-    "src/domains/mgmt/auth/credential_cell.py:194:A7 db_lock around bulk scan",
+    "src/domains/mgmt/auth/credential_cell.py:195:A7 db_lock around bulk scan",
     "src/domains/mgmt/auth/signup_policy.py:18:A7 db_lock around bulk scan",
     "src/domains/mgmt/auth/signup_policy.py:30:A7 db_lock around bulk scan",
     "src/domains/mgmt/knowledge.py:1033:A6 db_lock in async",

@@ -67,6 +67,7 @@
   },
   "confirm": {
     "delete_skill": "确定删除技能 {{name}} 吗？",
+    "delete_skill_fallback": "该技能",
     "convert_skill": "将个人技能「{{name}}」复制到仓库 {{repo}}？\n\n原个人技能保留，复制后可在该仓库的 DevOps/Chat Agent 中配置。"
   },
   "upload": {

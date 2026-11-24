@@ -53,13 +53,18 @@ _TRANSIENT_RE = re.compile("|".join(TRANSIENT_PATTERNS), re.I)
 TRANSIENT = "upstream_transient"   # 上游瞬时抖动 → 可重试
 EMPTY_OUTPUT = "empty_output"      # exit 0 空输出（假完成降级）→ 可重试
 AUTH_CONFIG = "auth_config"        # VCS token/权限配置错误 → 不重试
+CONFIG_ERROR = "config_error"      # 模型名不在网关可用列表（404 Model not found）→ 不重试
 TASK_FAILURE = "task_failure"      # 其余（默认业务失败）→ 不重试
 
 _RETRYABLE = (TRANSIENT, EMPTY_OUTPUT)
 
 
 def classify_stream_failure(exit_code, error_text: str, has_output: bool) -> dict:
-    """R50：失败分类。返回 {error_class, transient, reason}。"""
+    """R50：失败分类。返回 {error_class, transient, reason}。
+
+    Issue #3820：404 `Model not found`（配置模型名不在网关 key 可用列表）是配置类错误，
+    优先于瞬时特征判定——即便错误文案同时带 retry/retryable 字样也不得进入重试链路。
+    """
     _txt = (error_text or "").strip()
     # 配置类错误优先（401/token 过期）——即便文本同时带 retry 字样也不盲目重试
     try:
@@ -68,6 +73,14 @@ def classify_stream_failure(exit_code, error_text: str, has_output: bool) -> dic
             return {"error_class": AUTH_CONFIG, "transient": False, "reason": _txt[:300]}
     except Exception:
         pass
+    # Issue #3820：模型名不存在（404 + Model not found）→ config_error，不可重试
+    if _txt:
+        try:
+            from src.domains.runtime.engine.engine_model import is_model_not_found_error
+            if is_model_not_found_error(_txt):
+                return {"error_class": CONFIG_ERROR, "transient": False, "reason": _txt[:300]}
+        except Exception as e:
+            log.warning(f"transient_retry: model-not-found detection failed: {e}")
     if _txt and _TRANSIENT_RE.search(_txt):
         return {"error_class": TRANSIENT, "transient": True, "reason": _txt[:300]}
     # exit 0 但无可信产出（假完成硬门槛降级路径）→ 模型流静默中断
@@ -221,6 +234,7 @@ _CLASS_LABELS = {
     TRANSIENT: "上游瞬时抖动",
     EMPTY_OUTPUT: "exit 0 空输出（模型流静默中断）",
     AUTH_CONFIG: "配置类错误（鉴权/凭据）",
+    CONFIG_ERROR: "模型配置错误（不可重试）",
     TASK_FAILURE: "任务执行失败",
 }
 
@@ -235,7 +249,7 @@ def format_stream_failure_result(error_class: str, attempts: int, max_retries: i
     """
     parts = []
     _label = _CLASS_LABELS.get(error_class, "模型流异常")
-    if error_class == AUTH_CONFIG:
+    if error_class in (AUTH_CONFIG, CONFIG_ERROR):
         parts.append(f"{_label}，未自动重试")
     elif attempts:
         parts.append(f"上游瞬时抖动（{_label}），自动重试 {attempts}/{max_retries} 次后仍失败")
@@ -460,16 +474,19 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
         # 非瞬时失败（auth_config/task_failure）：不重试，但把分类结果记进
         # errors——fail_task 终态摘要按 TRANSIENT_RETRY* 记录触发，配置类错误
         # 直接判死路径无记录会导致摘要回落原文（部署实测 D2 抓到）。
-        # 仅 auth_config 记录（task_failure 是默认分类，记了是噪音）。
-        if _cls["error_class"] == AUTH_CONFIG:
+        # 仅 auth_config / config_error 记录（task_failure 是默认分类，记了是噪音）。
+        # Issue #3820：config_error 用独立 error_code（不写 TRANSIENT_RETRY），
+        # 失败摘要按该键取分类，记录中不出现 upstream_transient。
+        if _cls["error_class"] in (AUTH_CONFIG, CONFIG_ERROR):
+            _record_code = "CONFIG_ERROR" if _cls["error_class"] == CONFIG_ERROR else "TRANSIENT_RETRY"
             try:
                 _append_task_error(task_id, {
-                    "error_code": "TRANSIENT_RETRY",
-                    "error_class": AUTH_CONFIG,
+                    "error_code": _record_code,
+                    "error_class": _cls["error_class"],
                     "reason": _cls["reason"][:200],
-                    "note": "classified non-transient; not retried"})
-            except Exception:
-                pass
+                    "note": "classified non-transient (config error); not retried"})
+            except Exception as e:
+                log.warning(f"transient_retry: record config error failed for {task_id}: {e}")
         return False
     # R52 副作用闸门：调用方未传 tool_uses 且有 event_seq 时，回查 agent_logs
     # 补全写操作证据（worker 上报路径：tool_use 已由 report_messages 落库）

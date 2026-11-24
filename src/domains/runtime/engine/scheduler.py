@@ -48,6 +48,55 @@ _MAX_RETRY_DELAY = 300    # 秒：退避上限
 
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
+# ── Issue #3800：环境性失败（绑定引擎离线/悬空）分类 + 退避 + 熔断 ────────────
+#
+# 缺陷：任务绑定的引擎全部离线时，健康过滤为空的路径直接写 failed 返回，而
+# `_execute_task` 之后无条件推进 next_run_at —— 60s cron 下形成
+# 「建 exec → 秒失败 → 再建一条」的空转（生产实测 1 小时 60 条 failed exec +
+# 60+ 条 ERROR/WARNING，且没有任何告警）。
+# 修复：环境性失败单独归类，走「指数退避 → 连续同因熔断 → 一次性告警 → 恢复自愈」。
+ERROR_ENGINE_OFFLINE = "ENGINE_OFFLINE"   # 绑定引擎全部离线（环境性，重试无意义）
+ERROR_BINDING_STALE = "BINDING_STALE"     # 绑定 uid/id 在 agent_runtimes 中查无此行（需重绑）
+_ENV_FAILURE_CODES = (ERROR_ENGINE_OFFLINE, ERROR_BINDING_STALE)
+
+# ── Issue #3963：repo-dispatch 租约争用（同仓 enqueue busy）归类为「瞬态」──────────
+#
+# 语义与 `_ENV_FAILURE_CODES` 严格分开：环境性失败要 60s 起指数退避 + 连续 3 次熔断
+# （任务停用），而 busy 是**秒级**争用，等/重试几秒即可。若复用环境通道，会把一次
+# 排队冲突升级成任务被暂停，恰是本单要消灭的「定时任务丢失」。
+# 瞬态通道：独立预算（不消耗 max_retry 的 attempt）、短退避 1/2/4s、预算耗尽 requeue
+# 下一 tick（execution 记 skipped + error_code，不置 failed、不推进失败计数）。
+# 复审（#3963 Optional 落地）：错误码与文案指纹改为从 service 共享（同源防漂移）——
+# service 抛出方（RepoDispatchBusyError）与本模块判定方各自维护字面量时，文案
+# 漂移会让「存量库缺 error_code 列」的指纹回推静默失效。本地名保持不变，引用零改动。
+from src.domains.runtime.engine.service import (
+    REPO_DISPATCH_BUSY as ERROR_REPO_DISPATCH_BUSY,
+    REPO_DISPATCH_BUSY_LOG_FINGERPRINT as _BUSY_LOG_FINGERPRINT)
+_BUSY_RETRY_BUDGET = 3                                 # 同 tick 内的瞬态重试次数
+_BUSY_RETRY_DELAYS = (1, 2, 4)                         # 秒：短退避基数
+_BUSY_RETRY_JITTER_RATIO = 0.2                         # 抖动：避免多实例同刻齐抢
+_BACKOFF_CAP_SECONDS = 1800               # 退避封顶 30min
+_BACKOFF_MIN_BASE_SECONDS = 60            # 退避基数下限（cron 周期更短时按 60s 起算）
+_CIRCUIT_THRESHOLD = 3                    # 连续同因失败 → 熔断
+_CIRCUIT_MIN_OFFLINE_SECONDS = 300        # 熔断附加门槛：离线持续 ≥5min（防健康抖动误停）
+# 既有 Loki 查询按该指纹聚合（生产 Grafana：`|= "all offline (Issue #259)"`），
+# ERROR 行内必须保留这段字面子串——改名会让历史看板/告警规则失明。
+_OFFLINE_LOG_FINGERPRINT = "all offline (Issue #259)"
+# Issue #3827：`autopilot_executions.error_code` 落库失败（存量库缺列 1054）时的
+# 分类兜底。本条与 `_binding_failure_code` 的 BINDING_STALE 文案同源（本模块常量），
+# 仅在「列读不到 -> error_code 为空」时按稳定指纹回推分类，不让缺列把退避链路整条断掉。
+_STALE_LOG_FINGERPRINT = "not found in agent_runtimes"
+
+
+def _scheduler_now() -> datetime:
+    """调度侧「当前时间」唯一 seam（aware local datetime）。
+
+    cron 计算、退避/熔断判定、运行时间回写全部走这里——假时钟测试只 patch 这一个
+    函数，就能把 1 小时的空转窗口压成毫秒级回归（Issue #3800）。
+    """
+    return datetime.now().astimezone()
+
+
 # Issue #537：pending_self_report 超时（worker 未自报）→ timeout_failed 兜底阈值；
 # zombie 判死离线宽限（停双主/重启 master 的短暂离线不误判 failed）。
 # Issue #1071：默认 1800→5400——部署类任务（打包+生产部署全流程约 40-50 分钟）按设计
@@ -422,6 +471,13 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         except Exception as _se:
             log.warning(f"Autopilot exec {exec_id}: task engine pick failed: {_se}")
     if engine_id is None:
+        # Issue #3800：任务级绑定全灭 / 绑定悬空属于环境性失败——写 error_code 交给收口段
+        # 走退避/熔断通道，而不是记一条「无可用引擎」后每 tick 重来一次。
+        _probe = _probe_task_binding(task, repo_key)
+        _code, _msg = _binding_failure_code(_probe)
+        if _code:
+            _update_execution_result(exec_id, "failed", error=_msg, error_code=_code)
+            return
         log.warning(f"Autopilot exec {exec_id}: no engine for {agent_type}")
         _update_execution_result(exec_id, "failed", error="无可用引擎")
         return
@@ -510,19 +566,31 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         **resolve_task_server_env(engine_id),
     }
     # 注入 custom_fields（自定义环境变量）和 work_branch
+    # Issue #4066：不再逐条 WARNING（一条执行会把整批 custom_fields 刷成多行噪声），
+    # 改为一次执行一条 info 汇总（injected/skipped + 变量名）。非法/保留项写侧已 400
+    # 拒绝，这里只兜底存量数据；平台已注入的键（如 GRAPE_ORG_ID）不由任务覆盖。
     _task_custom_fields = task.get("custom_fields") or ""
     if _task_custom_fields:
+        _cf_injected: list = []
+        _cf_skipped: list = []
         try:
             _cf_list = json.loads(_task_custom_fields) if isinstance(_task_custom_fields, str) else _task_custom_fields
             from src.kernel.scene_custom_env import is_upper_name, is_reserved_name
-            for _f in _cf_list:
-                _fname = (_f.get("name") or "").strip()
-                if not _fname or not is_upper_name(_fname) or is_reserved_name(_fname):
-                    log.warning(f"Autopilot exec {exec_id}: custom env '{_fname}' rejected")
+            for _f in (_cf_list or []):
+                _fname = (_f.get("name") or "").strip() if isinstance(_f, dict) else ""
+                if (not _fname or not is_upper_name(_fname)
+                        or is_reserved_name(_fname) or _fname in env_extra):
+                    _cf_skipped.append(_fname)
                     continue
                 env_extra[_fname] = str(_f.get("value", ""))
+                _cf_injected.append(_fname)
         except Exception as _e:
             log.warning(f"Autopilot exec {exec_id}: inject custom_fields failed: {_e}")
+        if _cf_injected or _cf_skipped:
+            log.info(
+                f"Autopilot exec {exec_id}: custom env injected={len(_cf_injected)} "
+                f"skipped={len(_cf_skipped)} names={','.join(_cf_injected)} "
+                f"skipped_names={','.join(n for n in _cf_skipped if n)}")
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
@@ -570,11 +638,26 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     # 创建 agent_tasks 记录（用 autopilot 专属 seq 命名空间，skip_event_config=True 不写 events 表）
     # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
     # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
-    task_id = _create_direct_task(
-        repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
-        "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
-        issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
-    )
+    # Issue #3963（复审 Required）：direct 派发撞 repo-dispatch 租约时
+    # _create_direct_task 抛 RepoDispatchBusyError（瞬态）——与 REMOTE 入队同口径
+    # 落 skipped + error_code，交给 _execute_task 瞬态通道（不消耗 attempt /
+    # 超预算 requeue 下一 tick），不再「创建任务记录失败」记 failed（撞锁即判死）。
+    try:
+        task_id = _create_direct_task(
+            repo_key, _autopilot_event_seq(exec_id), agent_type, backend, skill_name,
+            "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
+            issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
+        )
+    except Exception as _dt_e:
+        _dt_code = _enqueue_failure_code(_dt_e)
+        _dt_status = "skipped" if _dt_code == ERROR_REPO_DISPATCH_BUSY else "failed"
+        if _dt_code == ERROR_REPO_DISPATCH_BUSY:
+            log.warning(f"Autopilot exec {exec_id}: direct dispatch busy (transient, retryable): {_dt_e}")
+        else:
+            log.error(f"Autopilot exec {exec_id}: _create_direct_task failed: {_dt_e}")
+        _update_execution_result(exec_id, _dt_status, error=f"直发建任务异常: {_dt_e}",
+                                 error_code=_dt_code)
+        return
     if not task_id:
         log.warning(f"Autopilot exec {exec_id}: _create_direct_task failed")
         _update_execution_result(exec_id, "failed", error="创建任务记录失败")
@@ -707,48 +790,31 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 任务级引擎限定：uid 模式（engine_runtime_uids 非空）优先 → uid 池路径；
     # legacy id 路径（engine_runtime_ids）行为不变——三分支判据不混装（Issue #1011）
     # Issue #259：写入前按健康过滤（复用 engine_select 的 _engines_by_ids + _health_ok）
+    # Issue #3800：两条路径共用 `_probe_task_binding` 一次探测，健康过滤为空统一落
+    # error_code（ENGINE_OFFLINE / BINDING_STALE），由 `_execute_task` 收口改走退避/熔断，
+    # 不再在此处直接写一句中文 failed 让下一 tick 重来。
     _pool_engine_ids = ""
     if engine_id == 0:
-        _task_engine_uids = task.get("engine_runtime_uids") or ""
-        if _task_engine_uids:
-            try:
-                _raw_uids = json.loads(_task_engine_uids) if isinstance(_task_engine_uids, str) else _task_engine_uids
-                if isinstance(_raw_uids, list) and _raw_uids:
-                    from src.domains.runtime.engine.engine_select import _engines_by_uids, _health_ok, _norm_repo
-                    _members = _engines_by_uids([str(u).strip() for u in _raw_uids if str(u).strip()],
-                                                _norm_repo(repo_key))
-                    _healthy = [m for m in _members if _health_ok(m)]
-                    if _healthy:
-                        _pool_engine_ids = json.dumps([m["runtime_id"] for m in _healthy])
-                        log.info(f"Autopilot exec {exec_id}: task 级限定（uid 模式）engines={_pool_engine_ids}")
-                    else:
-                        log.warning(f"Autopilot exec {exec_id}: task engines(uid) {_raw_uids} all offline (Issue #1011)")
-                        _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
-                        return
-            except Exception as _pe:
-                log.warning(f"Autopilot exec {exec_id}: parse engine uids failed: {_pe}")
-                _pool_engine_ids = ""
-        else:
-            _task_engine_ids = task.get("engine_runtime_ids") or ""
-            if _task_engine_ids:
-                try:
-                    _raw_ids = json.loads(_task_engine_ids) if isinstance(_task_engine_ids, str) else _task_engine_ids
-                    if isinstance(_raw_ids, list) and _raw_ids:
-                        from src.domains.runtime.engine.engine_select import _engines_by_ids, _health_ok, load_engine_selection, _norm_repo
-                        _members = _engines_by_ids([int(x) for x in _raw_ids if str(x).strip().isdigit()],
-                                                   _norm_repo(repo_key), load_engine_selection())
-                        _healthy_ids = [m["runtime_id"] for m in _members if _health_ok(m)]
-                        if _healthy_ids:
-                            _pool_engine_ids = json.dumps(_healthy_ids)
-                            log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
-                        else:
-                            # 方案A：任务级引擎全灭 → 明确报错，不广播
-                            log.warning(f"Autopilot exec {exec_id}: task engines {_raw_ids} all offline (Issue #259)")
-                            _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
-                            return
-                except Exception as _pe:
-                    log.warning(f"Autopilot exec {exec_id}: parse engine ids failed: {_pe}")
-                    _pool_engine_ids = ""
+        _probe = _probe_task_binding(task, repo_key)
+        if _probe.get("mode") and _probe.get("error"):
+            # 探测本身失败（DB 抖动）：不分类（避免把瞬时抖动记成「绑定悬空」触发重绑
+            # 告警），也绝不回落到广播池——任务级绑定必须被尊重，宁可按普通失败留痕。
+            log.warning(f"Autopilot exec {exec_id}: probe task engines failed: {_probe['error']}")
+            _update_execution_result(
+                exec_id, "failed",
+                error=f"任务级引擎探测失败，未派发（{_probe['error']}）")
+            return
+        if _probe.get("mode"):
+            if _probe.get("healthy"):
+                _pool_engine_ids = json.dumps([m["runtime_id"] for m in _probe["healthy"]])
+                log.info(f"Autopilot exec {exec_id}: task 级限定（{_probe['mode']} 模式）"
+                         f"engines={_pool_engine_ids}")
+            else:
+                _code, _msg = _binding_failure_code(_probe)
+                # 单条结构化行由 `_handle_environmental_failure` 在收口段输出（含指纹），
+                # 此处不再另发 WARNING/ERROR，避免「ERROR 无因 + WARNING 有因」割裂。
+                _update_execution_result(exec_id, "failed", error=_msg, error_code=_code)
+                return
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 
@@ -824,8 +890,17 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
                                  result=f"已入队 task_id={task_id}，等待 worker 执行")
 
     except Exception as e:
-        log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
-        _update_execution_result(exec_id, "failed", error=f"入队异常: {e}")
+        # Issue #3963：入队异常按分类落库。租约争用（busy）是瞬态，记 `skipped` +
+        # error_code（非 failed：管理台/统计按 error_code 区分「排队冲突 / 执行失败」），
+        # 由 `_execute_task` 的瞬态通道决定「同 tick 重试」还是「requeue 下一 tick」。
+        _code = _enqueue_failure_code(e)
+        _status = "skipped" if _code == ERROR_REPO_DISPATCH_BUSY else "failed"
+        if _code == ERROR_REPO_DISPATCH_BUSY:
+            # 瞬态争用不是执行失败：WARNING 级留痕（ERROR 面会被失败率类告警误计）
+            log.warning(f"Autopilot exec {exec_id}: enqueue busy (transient, retryable): {e}")
+        else:
+            log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
+        _update_execution_result(exec_id, _status, error=f"入队异常: {e}", error_code=_code)
 
 def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
     """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
@@ -1077,24 +1152,34 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} notify failed: {e}")
 
 def _update_execution_result(exec_id: int, status: str, result: str = "",
-                             error: str = "", findings_json: str = ""):
-    """更新 autopilot_executions 执行结果。"""
-    fields = ["status=?"]
-    vals = [status]
-    if result:
-        fields.append("result=?")
-        vals.append(result)
-    if error:
-        fields.append("error=?")
-        vals.append(error)
-    if findings_json:
-        fields.append("findings_json=?")
-        vals.append(findings_json)
-    if status in ("success", "failed", "cancelled"):
-        fields.append("completed_at=?")
-        vals.append(datetime.now(timezone.utc).isoformat())
-    vals.append(exec_id)
-    try:
+                             error: str = "", findings_json: str = "", error_code: str = ""):
+    """更新 autopilot_executions 执行结果。
+
+    Issue #3800：`error_code` 记录失败分类（`ENGINE_OFFLINE` / `BINDING_STALE` / 空=普通失败），
+    调度收口据此改走退避/熔断通道。列缺失（迁移未跑的极端场景）时降级为不写该列，
+    保证结果回写本身不因新列而失败。
+    （PR #2075：连接走 cursor_for("runtime", write=True)——mgmt 进程手动触发路径
+    下进程库里没有 autopilot_executions；本地路由由 write=True 自动提交。）
+    """
+    def _write(with_code: bool) -> None:
+        fields = ["status=?"]
+        vals = [status]
+        if result:
+            fields.append("result=?")
+            vals.append(result)
+        if error:
+            fields.append("error=?")
+            vals.append(error)
+        if findings_json:
+            fields.append("findings_json=?")
+            vals.append(findings_json)
+        if with_code and error_code:
+            fields.append("error_code=?")
+            vals.append(error_code)
+        if status in ("success", "failed", "cancelled"):
+            fields.append("completed_at=?")
+            vals.append(datetime.now(timezone.utc).isoformat())
+        vals.append(exec_id)
         with _rt_cursor_for("runtime", write=True) as c:
             # 终态幂等：已 success/failed/cancelled 的执行不再覆盖——
             # 用户杀死(cancelled)后，轮询/迟到的完成回写不得把状态洗掉
@@ -1105,8 +1190,82 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
                 f"UPDATE autopilot_executions SET {', '.join(fields)} WHERE id=?",
                 vals
             )
+    try:
+        _write(with_code=bool(error_code))
     except Exception as e:
+        if error_code:
+            try:
+                _write(with_code=False)
+                log.warning(f"Autopilot: exec {exec_id} error_code column unavailable (1054?), "
+                            f"result written without it: {e}")
+                return
+            except Exception as e2:
+                log.warning(f"Autopilot: update execution {exec_id} failed: {e2}")
+                return
         log.warning(f"Autopilot: update execution {exec_id} failed: {e}")
+
+
+def _enqueue_failure_code(exc: BaseException) -> str:
+    """入队异常 → 失败分类（Issue #3963）。
+
+    - 结构化异常（`RepoDispatchBusyError.error_code`）优先：显式分类永远可信；
+    - 旧写入方/跨进程序列化丢了属性时，按 service 侧稳定文案指纹回推 busy；
+    - 其它异常返回空串（普通失败，保持原语义）。
+    """
+    _code = getattr(exc, "error_code", "") or ""
+    if _code:
+        return str(_code)
+    if _BUSY_LOG_FINGERPRINT in str(exc or ""):
+        return ERROR_REPO_DISPATCH_BUSY
+    return ""
+
+
+def _classify_env_error(error_code: str, error: str) -> str:
+    """Issue #3827：`error_code` 为空时按稳定指纹回推环境性失败分类。
+
+    仅用于「列缺失/旧写入方没写 error_code」的存量库兜底：显式分类永远优先，
+    普通失败（文案不含环境性指纹）保持原样。指纹是本模块 `_binding_failure_code`
+    自己产出的字面子串（Loki 看板同源），不是随手解析的第三方文案。
+    """
+    if error_code:
+        return error_code
+    _err = error or ""
+    if _OFFLINE_LOG_FINGERPRINT in _err:
+        return ERROR_ENGINE_OFFLINE
+    if _STALE_LOG_FINGERPRINT in _err:
+        return ERROR_BINDING_STALE
+    # Issue #3963：存量库缺 `error_code` 列时，busy 同样要靠文案指纹回推——否则瞬态
+    # 通道会在老库上整条断掉，又退回「0 重试即 failed」。
+    if _BUSY_LOG_FINGERPRINT in _err:
+        return ERROR_REPO_DISPATCH_BUSY
+    return ""
+
+
+def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
+    """读执行记录终态三元组 (status, error, error_code)；老库缺 error_code 列时回落。
+
+    缺列回落路径不再把分类丢弃（Issue #3827）：`error_code` 缺失时按稳定指纹从
+    `error` 回推 ENGINE_OFFLINE / BINDING_STALE，保证退避/熔断链路不被缺列整条断掉。
+    """
+    try:
+        with _rt_cursor_for("runtime") as c:
+            try:
+                row = c.execute(
+                    "SELECT status, error, error_code FROM autopilot_executions WHERE id=?",
+                    (exec_id,)).fetchone()
+            except Exception:
+                row = c.execute(
+                    "SELECT status, error FROM autopilot_executions WHERE id=?",
+                    (exec_id,)).fetchone()
+                _err = (row[1] if row else "") or ""
+                return ((row[0] if row else "unknown"), _err,
+                        _classify_env_error("", _err))
+        _err = (row[1] if row else "") or ""
+        _code = (row[2] if len(row) > 2 else "") or ""
+        return ((row[0] if row else "unknown"), _err, _classify_env_error(_code, _err))
+    except Exception as e:
+        log.warning(f"Autopilot: read execution {exec_id} state failed: {e}")
+        return ("unknown", "", "")
 
 def _get_enabled_tasks() -> list[dict]:
     """获取所有启用的 autopilot 任务。"""
@@ -1131,6 +1290,12 @@ def _get_enabled_tasks() -> list[dict]:
             "work_branch": r[11] if len(r) > 11 else "",
             # Issue #1011 姊妹字段：uid 绑定（非空优先，ids legacy 只读回落）
             "engine_runtime_uids": r[12] if len(r) > 12 else "",
+            # Issue #3800：退避/熔断状态（列序见 mgmt `autopilot_tasks_enabled_full`）
+            "consecutive_failures": int(r[13] or 0) if len(r) > 13 else 0,
+            "last_error_code": (r[14] or "") if len(r) > 14 else "",
+            "offline_since": (r[15] or "") if len(r) > 15 else "",
+            "backoff_until": (r[16] or "") if len(r) > 16 else "",
+            "circuit_paused": 1 if (len(r) > 17 and r[17]) else 0,
         })
     if skipped:
         log.warning(
@@ -1142,7 +1307,7 @@ def _is_cron_due(cron_expr: str, last_run: str) -> bool:
     """判断 cron 表达式是否在当前时间窗口（最近 60s）内到期。"""
     try:
         from croniter import croniter
-        now = datetime.now().astimezone()
+        now = _scheduler_now()
         if last_run:
             try:
                 last_dt = datetime.fromisoformat(last_run.replace(" ", "T"))
@@ -1170,7 +1335,7 @@ def _compute_next_run(cron_expr: str) -> str:
     """计算 cron 表达式的下次触发时间（本地时区，ISO 格式）。"""
     try:
         from croniter import croniter
-        now_local = datetime.now().astimezone()
+        now_local = _scheduler_now()
         cron = croniter(cron_expr, now_local)
         nxt = cron.get_next(datetime)
         if nxt.tzinfo is None:
@@ -1178,6 +1343,136 @@ def _compute_next_run(cron_expr: str) -> str:
         return nxt.isoformat()
     except Exception:
         return ""
+
+
+def _cron_period_seconds(cron_expr: str) -> int:
+    """cron 周期秒数（相邻两次触发差）；解析失败按调度扫描周期兜底。"""
+    try:
+        from croniter import croniter
+        cron = croniter(cron_expr or "", _scheduler_now())
+        first = cron.get_next(datetime)
+        second = cron.get_next(datetime)
+        period = int(round((second - first).total_seconds()))
+        if period > 0:
+            return max(period, _BACKOFF_MIN_BASE_SECONDS)
+    except Exception as e:
+        log.warning(f"Autopilot: cron period parse failed '{cron_expr}': {e}")
+    return _SCHEDULER_INTERVAL
+
+
+def _compute_backoff_next_run(cron_expr: str, consecutive_failures, now=None) -> str:
+    """环境性失败的指数退避：`now + min(base·2^(n-1), 1800s)`。
+
+    base = max(cron 周期, 60s)：60s cron 下退避序列为 60/120/240/480/960 → 封顶 1800s，
+    1 小时内环境性失败最多产生 4 条 exec（Issue #3800 验收），而不是 60 条。
+    """
+    _now = now if now is not None else _scheduler_now()
+    n = max(int(consecutive_failures or 1), 1)
+    base = _cron_period_seconds(cron_expr)
+    delay = min(base * (2 ** (n - 1)), _BACKOFF_CAP_SECONDS)
+    return (_now + timedelta(seconds=delay)).isoformat()
+
+
+def _json_list(raw) -> list:
+    """宽松解析 JSON 数组列（已是 list 则原样返回；非法/空 → 空列表）。"""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    return list(data) if isinstance(data, list) else []
+
+
+def _probe_task_binding(task: dict, repo_key: str | None = None) -> dict:
+    """任务级引擎绑定探测（Issue #3800 唯一 seam，派发侧与自愈侧共用）。
+
+    返回：
+      - `mode`：`"uid"`（`engine_runtime_uids` 非空，生态优先）/ `"ids"`（legacy）/ `""`（无任务级绑定）
+      - `uids` / `ids`：原绑定值
+      - `members`：`agent_runtimes` 中命中的行（**不看健康**——查无此行才是「悬空绑定」）
+      - `healthy`：`members` 中健康可达者（复用 engine_select._health_ok 单一真尺子）
+      - `engine_ids`：命中的 runtime_id 列表（日志/告警里的 `engine_ids`）
+
+    分叉判据沿用 #1011：uids 非空优先，ids 仅在 uids 为空时回落。
+    """
+    out = {"mode": "", "uids": [], "ids": [], "members": [], "healthy": [],
+           "engine_ids": [], "error": ""}
+    if not task:
+        return out
+    raw_uids = _json_list(task.get("engine_runtime_uids"))
+    raw_ids = _json_list(task.get("engine_runtime_ids"))
+    uids = [str(u).strip() for u in raw_uids if str(u or "").strip()]
+    ids = [int(str(x).strip()) for x in raw_ids if str(x).strip().isdigit()]
+    if not uids and not ids:
+        return out
+    repo = repo_key if repo_key is not None else (task.get("repo_key") or "")
+    try:
+        from src.domains.runtime.engine.engine_select import (
+            _engines_by_ids, _engines_by_uids, _health_ok, _norm_repo, load_engine_selection,
+        )
+        _repo = _norm_repo(repo)
+        if uids:
+            out["mode"] = "uid"
+            out["uids"] = uids
+            out["members"] = _engines_by_uids(uids, _repo) or []
+        else:
+            out["mode"] = "ids"
+            out["ids"] = ids
+            out["members"] = _engines_by_ids(ids, _repo, load_engine_selection()) or []
+        out["healthy"] = [m for m in out["members"] if _health_ok(m)]
+        out["engine_ids"] = [m.get("runtime_id") for m in out["members"]]
+    except Exception as e:  # 探测失败不判死：交回原有「无可用引擎」路径
+        out["error"] = str(e)
+        log.warning(f"Autopilot: probe task binding failed: {e}")
+    return out
+
+
+def _binding_failure_code(probe: dict) -> tuple[str, str]:
+    """绑定探测结果 → 环境性失败分类 `(error_code, error_msg)`；可派发时返回 `("", "")`。
+
+    - 绑定存在且至少一个健康引擎 → 可派发；
+    - 绑定存在但全不健康 → `ENGINE_OFFLINE`（环境性，重试无意义）；
+    - 绑定 uid/id 在 `agent_runtimes` 中查无此行 → `BINDING_STALE`（需重绑，不是等引擎上线）；
+    - 探测本身失败（DB 异常，`probe["error"]` 非空）→ 返回 `("", "")` 不分类：
+      一次瞬时抖动不该被记成「绑定悬空」并触发重绑告警，交回原有「无可用引擎」路径。
+    """
+    if not probe or probe.get("error") or not probe.get("mode") or probe.get("healthy"):
+        return ("", "")
+    if probe.get("members"):
+        _is_uid = probe.get("mode") == "uid"
+        # 报文里报「用户绑的是什么」（uids/ids 原值），不是命中的 runtime_id——
+        # 排查者对着任务配置能立刻对上号。
+        label = probe.get("uids") if _is_uid else probe.get("ids")
+        kind = "uid" if _is_uid else ""
+        return (ERROR_ENGINE_OFFLINE,
+                f"task engines{'(' + kind + ')' if kind else ''} {label} {_OFFLINE_LOG_FINGERPRINT}")
+    if probe.get("mode") == "uid":
+        return (ERROR_BINDING_STALE,
+                f"bound engine uids {probe.get('uids')} not found in agent_runtimes; "
+                f"please rebind task engines")
+    return (ERROR_BINDING_STALE,
+            f"bound engine ids {probe.get('ids')} not found in agent_runtimes; "
+            f"please rebind task engines")
+
+
+def _task_binding_label(task: dict) -> str:
+    """任务绑定标签（日志用，零 DB 开销）：uid 优先，回落 legacy ids。"""
+    uids = _json_list(task.get("engine_runtime_uids")) if task else []
+    if uids:
+        return json.dumps([str(u) for u in uids if str(u or "").strip()])
+    ids = _json_list(task.get("engine_runtime_ids")) if task else []
+    return json.dumps(ids) if ids else "[]"
+
+
+def _backoff_active(task: dict, now=None) -> bool:
+    """退避窗口是否仍然有效（`backoff_until` 未到 → 本 tick 不派发）。"""
+    until = _parse_iso_aware(task.get("backoff_until") or "")
+    if until is None:
+        return False
+    return (now if now is not None else _scheduler_now()) < until
 
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
     """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
@@ -1198,7 +1493,7 @@ def _update_execution(exec_id: int, status: str, result: str = "", error: str = 
 
 def _update_task_run_info(task_id: int, next_run: str):
     """更新任务最近运行时间和下次预计运行时间。"""
-    now_str = datetime.now().astimezone().isoformat()
+    now_str = _scheduler_now().isoformat()
     # P3-5d：autopilot_tasks 是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ri
     _mg_ri = _mgmt_lib_ri(foreign_only=True)
@@ -1230,6 +1525,193 @@ def _parse_iso_aware(value):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _write_failure_state(task_id: int, consecutive_failures, last_error_code: str,
+                         offline_since: str, backoff_until: str, circuit_paused,
+                         updated_at: str) -> None:
+    """写回「运行时间 + 退避/熔断状态」（Issue #3800，跨域写 mgmt 基表）。
+
+    一次 UPDATE 同时落 `last_run_at/next_run_at` 与失败状态，避免两次跨域写出现
+    「状态写了、下次运行时间没写」的半写；通道与 `_update_task_run_info` 一致
+    （mgmt lib 意图优先，归属域任意拓扑原语兜底）。
+    """
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_fs
+    _mg_fs = _mgmt_lib_fs(foreign_only=True)
+    if _mg_fs is not None and hasattr(_mg_fs, "set_autopilot_failure_state"):
+        try:
+            from src.kernel import cross_write as _xw_fs
+            _res_fs = _xw_fs.submit(
+                "mgmt", "autopilot_failure_state_set",
+                _xw_fs.unique_key(f"autopilot-fail:{task_id}:{updated_at}"),
+                {"task_id": int(task_id), "consecutive_failures": int(consecutive_failures or 0),
+                 "last_error_code": last_error_code or "", "offline_since": offline_since or "",
+                 "backoff_until": backoff_until or "",
+                 "circuit_paused": 1 if circuit_paused else 0, "updated_at": updated_at},
+                lambda: _mg_fs.set_autopilot_failure_state(
+                    int(task_id), int(consecutive_failures or 0), last_error_code or "",
+                    offline_since or "", backoff_until or "",
+                    1 if circuit_paused else 0, updated_at))
+            if _res_fs.get("status") == "failed":
+                log.warning(f"autopilot failure state queued for retry: {_res_fs.get('error')}")
+            return
+        except Exception as _e_fs:
+            log.warning(f"_write_failure_state lib path failed, fallback to local SQL: {_e_fs}")
+    from src.domains.mgmt import public as _mgmt_public_fs
+    _mgmt_public_fs.set_autopilot_failure_state_any(
+        task_id, consecutive_failures, last_error_code, offline_since, backoff_until,
+        circuit_paused, updated_at)
+
+
+def _clear_failure_state(task_id: int, next_run: str) -> None:
+    """清空退避/熔断状态并推进正常 `next_run_at`（环境性失败已恢复）。"""
+    now_str = _scheduler_now().isoformat()
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_cs
+    _mg_cs = _mgmt_lib_cs(foreign_only=True)
+    if _mg_cs is not None and hasattr(_mg_cs, "clear_autopilot_failure_state"):
+        try:
+            from src.kernel import cross_write as _xw_cs
+            _res_cs = _xw_cs.submit(
+                "mgmt", "autopilot_failure_state_clear",
+                _xw_cs.unique_key(f"autopilot-clear:{task_id}:{now_str}"),
+                {"task_id": int(task_id), "next_run_at": next_run, "updated_at": now_str},
+                lambda: _mg_cs.clear_autopilot_failure_state(int(task_id), next_run, now_str))
+            if _res_cs.get("status") == "failed":
+                log.warning(f"autopilot failure state clear queued for retry: {_res_cs.get('error')}")
+            return
+        except Exception as _e_cs:
+            log.warning(f"_clear_failure_state lib path failed, fallback to local SQL: {_e_cs}")
+    from src.domains.mgmt import public as _mgmt_public_cs
+    _mgmt_public_cs.clear_autopilot_failure_state_any(task_id, next_run, now_str)
+
+
+def _alert_task_failure(task: dict, exec_id: int, error_code: str, error: str,
+                        consecutive_failures: int, circuit_paused: bool) -> None:
+    """一次性结构化告警（Issue #3800）：ERROR 结构化行 + 订阅者通知。
+
+    只在「跨越门槛的那一刻」被调用（`BINDING_STALE` 首派 / `ENGINE_OFFLINE` 熔断），
+    因此同一 episode 只发一次；卡片侧幂等仍由 `_notify_subscribers` 的
+    `notified=0` 抢占保证（同一 exec 不会重复发送）。
+    """
+    task_id = task.get("id") or 0
+    # 报文里的 engine_ids 一律是「用户绑定了什么」（uid 优先、回落 legacy ids），
+    # 与 `_task_binding_label` 同一口径：收到告警的人对着任务配置就能对上号，
+    # 而 runtime_id 是命中行才有的内部编号（悬空绑定时根本没有）。
+    engine_ids = _json_list(task.get("engine_runtime_uids")) or _json_list(
+        task.get("engine_runtime_ids"))
+    if error_code == ERROR_BINDING_STALE:
+        guidance = ("绑定引擎在引擎列表中已不存在（常见于引擎重注册换了 uid）："
+                    "请在自动化任务配置中重新绑定引擎")
+    else:
+        guidance = ("请恢复绑定引擎（启动 worker / 修复引擎健康）后任务会自动解除暂停并续跑")
+    _state = "已自动暂停（熔断）" if circuit_paused else "已进入退避"
+    log.error(
+        f"[autopilot-alert] task={task_id} error_code={error_code} engine_ids={engine_ids} "
+        f"consecutive_failures={consecutive_failures} circuit_paused={int(bool(circuit_paused))} "
+        f"error={error or '(no detail)'}")
+    summary = (f"错误码 {error_code}；连续失败 {consecutive_failures} 次；绑定引擎 {engine_ids}；"
+               f"{_state}。原因：{error or '无'}。{guidance}")
+    try:
+        _notify_subscribers(task_id, exec_id, "failed", summary, {})
+    except Exception as e:  # 通知失败不影响状态已落库
+        log.warning(f"[autopilot-alert] task={task_id} exec={exec_id} notify failed: {e}")
+
+
+def _handle_environmental_failure(task: dict, exec_id: int, error_code: str, error: str) -> dict:
+    """环境性失败收口（Issue #3800）：计数 → 退避 → 熔断 → 一次性告警，返回状态快照。
+
+    离线时长取 `offline_since`（落库，进程重启后仍生效）而非引擎 `last_seen_at`：
+    熔断判据是「本任务持续撞同一面墙」而不是「某引擎心跳断了多久」。
+    """
+    task_id = task.get("id") or 0
+    now = _scheduler_now()
+    prev_code = task.get("last_error_code") or ""
+    prev_n = int(task.get("consecutive_failures") or 0)
+    same_cause = (prev_code == error_code)
+    consecutive = (prev_n + 1) if same_cause else 1
+    offline_since = (task.get("offline_since") or "") if same_cause else ""
+    offline_since = offline_since or now.isoformat()
+    _since = _parse_iso_aware(offline_since)
+    offline_seconds = max((now - _since).total_seconds(), 0.0) if _since else 0.0
+    was_paused = bool(task.get("circuit_paused"))
+    circuit_paused = was_paused or (
+        consecutive >= _CIRCUIT_THRESHOLD
+        and (error_code == ERROR_BINDING_STALE
+             or offline_seconds >= _CIRCUIT_MIN_OFFLINE_SECONDS))
+    next_run = _compute_backoff_next_run(task.get("cron") or "", consecutive, now)
+    state = {
+        "consecutive_failures": consecutive,
+        "last_error_code": error_code,
+        "offline_since": offline_since,
+        "backoff_until": next_run,
+        "circuit_paused": 1 if circuit_paused else 0,
+    }
+    _write_failure_state(task_id, consecutive, error_code, offline_since, next_run,
+                         circuit_paused, now.isoformat())
+    task.update(state)
+
+    # 告警恰好一次：悬空绑定首派即告警（等下 3 次太晚，用户需要重绑指引）；
+    # 全离线则等到「跨越熔断门槛」那一刻，避免抖动刷屏。
+    should_alert = ((error_code == ERROR_BINDING_STALE and consecutive == 1)
+                    or (error_code == ERROR_ENGINE_OFFLINE
+                        and circuit_paused and not was_paused))
+    _error_line = error or ""
+    if error_code == ERROR_ENGINE_OFFLINE and _OFFLINE_LOG_FINGERPRINT not in _error_line:
+        _error_line = f"{_error_line} {_OFFLINE_LOG_FINGERPRINT}".strip()
+    log.error(
+        f"Autopilot task={task_id} exec={exec_id} status=failed error_code={error_code} "
+        f"engine_ids={_task_binding_label(task)} n={consecutive} "
+        f"consecutive_failures={consecutive} "
+        f"offline_seconds={int(offline_seconds)} circuit_paused={int(bool(circuit_paused))} "
+        f"backoff_until={next_run} error={_error_line or '(no detail)'}")
+    if should_alert:
+        _alert_task_failure(task, exec_id, error_code, _error_line, consecutive, circuit_paused)
+    return state
+
+
+def _try_resume_task(task: dict) -> bool:
+    """熔断自愈（Issue #3800）：绑定引擎恢复健康 / 悬空绑定重新存在 → 解除暂停。
+
+    无任务级绑定的任务（广播池）不参与熔断，直接放行（健康由派发侧判定）。
+    """
+    probe = _probe_task_binding(task)
+    if probe.get("mode") and not probe.get("healthy"):
+        return False
+    task_id = task.get("id") or 0
+    _prev_code = task.get("last_error_code") or ""
+    next_run = _compute_next_run(task.get("cron") or "")
+    try:
+        _clear_failure_state(task_id, next_run)
+    except Exception as e:
+        log.warning(f"Autopilot: task {task_id} clear failure state failed: {e}")
+        return False
+    task.update({"consecutive_failures": 0, "last_error_code": "", "offline_since": "",
+                 "backoff_until": "", "circuit_paused": 0})
+    log.info(
+        f"Autopilot: task {task_id} engine binding recovered (was error_code={_prev_code}, "
+        f"engines={probe.get('engine_ids')}) -> circuit closed, resume on next due tick")
+    return True
+
+
+def _scan_task_once(task: dict, last_run: str) -> str:
+    """单任务单轮派发裁决（scheduler_loop 与假时钟测试共用的同一条判定路径）。
+
+    返回：`dispatch` / `paused`（熔断未解除）/ `backoff`（退避窗口内）/ `not-due`。
+    """
+    task_id = task.get("id") or 0
+    if task.get("circuit_paused"):
+        if not _try_resume_task(task):
+            return "paused"
+    if not _is_cron_due(task.get("cron") or "", last_run):
+        return "not-due"
+    if _backoff_active(task):
+        log.info(
+            f"Autopilot: task {task_id} in engine-offline backoff until "
+            f"{task.get('backoff_until')} (error_code={task.get('last_error_code')}, "
+            f"consecutive_failures={task.get('consecutive_failures')}), skip this tick")
+        return "backoff"
+    log.info(f"Autopilot: cron due for task {task_id} ('{task.get('name')}')")
+    return "dispatch"
 
 _AGENT_TASK_SELECT = "id, status, result_text, exit_code, skill, env_extra, runtime_id"
 
@@ -1417,7 +1899,15 @@ async def _execute_task(task: dict):
 
         _run_params = task.get("_run_params") or {}
         _params_json = json.dumps(_run_params, ensure_ascii=False) if _run_params else ""
-        for attempt in range(max_retry + 1):
+        # Issue #3800：环境性失败（绑定引擎离线/悬空）单独收口——不消耗重试、不推进 cron，
+        # 交给退避/熔断状态机。`_env_failure` 为本次派发的分类结果（空=普通失败路径）。
+        _env_failure = None
+        # Issue #3963：repo-dispatch 租约争用走独立瞬态通道——`busy_deferred` 非空表示
+        # 同 tick 内的瞬态预算已耗尽，本次不判 failed，requeue 到下一 tick 重投。
+        _busy_retries = 0
+        _busy_deferred = None
+        attempt = 0
+        while attempt <= max_retry:
             exec_id = _create_execution(task_id, agent_type, _params_json)
             log.info(f"Autopilot: executing task {task_id} ('{task['name']}'), exec_id={exec_id}, attempt={attempt}")
 
@@ -1425,18 +1915,36 @@ async def _execute_task(task: dict):
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _execute_autopilot_agent, task["repo_key"], task, exec_id)
 
-            # 检查执行结果
-            with _rt_cursor_for("runtime") as c:
-                row = c.execute("SELECT status, error FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
-            exec_status = row[0] if row else "unknown"
+            # 检查执行结果（status/error/error_code 一并取出：error_code 是 #3800 的分类依据）
+            exec_status, exec_error, exec_error_code = _read_exec_state(exec_id)
 
             # REMOTE 模式下状态为 "dispatched"，需要轮询等待 worker 完成
             if exec_status == "dispatched":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} dispatched, polling worker completion...")
                 exec_status = await _poll_dispatched_completion(exec_id, timeout=3600)
+                # 轮询收口后重读原因/错误码（轮询侧的失败写可能带 error_code）
+                _, exec_error, exec_error_code = _read_exec_state(exec_id)
 
             if exec_status == "success":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} success (attempt {attempt})")
+                break
+            if exec_error_code == ERROR_REPO_DISPATCH_BUSY:
+                # Issue #3963：同仓 enqueue 撞租约——瞬态争用，不消耗 attempt。
+                # 预算内按 1/2/4s（+抖动）在同 tick 重试；耗尽则 requeue 下一 tick。
+                # 判定顺序在 skipped/cancelled 之前：busy 的 execution 行本身就是 skipped。
+                if _busy_retries < _BUSY_RETRY_BUDGET:
+                    _delay = _BUSY_RETRY_DELAYS[min(_busy_retries, len(_BUSY_RETRY_DELAYS) - 1)]
+                    if _BUSY_RETRY_JITTER_RATIO > 0:
+                        import random as _random
+                        _delay *= 1.0 + _random.uniform(-_BUSY_RETRY_JITTER_RATIO, _BUSY_RETRY_JITTER_RATIO)
+                    _busy_retries += 1
+                    log.warning(
+                        f"Autopilot: task {task_id} exec {exec_id} {_BUSY_LOG_FINGERPRINT} "
+                        f"(transient, attempt={attempt} untouched, retry {_busy_retries}/"
+                        f"{_BUSY_RETRY_BUDGET} in {_delay:.1f}s)")
+                    await asyncio.sleep(max(0.0, _delay))
+                    continue
+                _busy_deferred = (exec_id, exec_error)
                 break
             if exec_status == "skipped":
                 # Issue #3201：接管守门拦截 → 非失败，立即终止，不重试、不消耗执行次数
@@ -1446,17 +1954,52 @@ async def _execute_task(task: dict):
                 # 用户杀死：立即停止，不再重试
                 log.info(f"Autopilot: task {task_id} exec {exec_id} cancelled by user, stop")
                 break
+            if exec_error_code in _ENV_FAILURE_CODES:
+                # 环境性失败（D4）：重试无意义（任务 83 即 max_retry=0 仍每 tick 建 exec），
+                # 直接跳出重试循环进入退避/熔断裁决。
+                log.warning(
+                    f"Autopilot: task {task_id} exec {exec_id} environmental failure "
+                    f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error}")
+                _env_failure = (exec_id, exec_error_code, exec_error)
+                break
             if attempt < max_retry:
-                error_msg = row[1] if row else "unknown"
+                error_msg = exec_error or "unknown"
                 delay = min(_BASE_RETRY_DELAY * (2 ** attempt), _MAX_RETRY_DELAY)
                 log.warning(f"Autopilot: task {task_id} exec {exec_id} attempt {attempt} failed ({exec_status}), "
                             f"retrying in {delay}s: {error_msg}")
                 await asyncio.sleep(delay)
+                attempt += 1
             else:
-                log.error(f"Autopilot: task {task_id} exec {exec_id} failed after {max_retry} retries ({exec_status})")
+                log.error(
+                    f"Autopilot task={task_id} exec={exec_id} status={exec_status} "
+                    f"error_code={exec_error_code or ''} engine_ids={_task_binding_label(task)} "
+                    f"consecutive_failures={int(task.get('consecutive_failures') or 0)} "
+                    f"error={exec_error or f'failed after {max_retry} retries'}")
+                break
 
-        next_run = _compute_next_run(task["cron"])
-        _update_task_run_info(task_id, next_run)
+        if _env_failure is not None:
+            _env_exec_id, _env_code, _env_error = _env_failure
+            _handle_environmental_failure(task, _env_exec_id, _env_code, _env_error)
+        else:
+            if _busy_deferred is not None:
+                # Issue #3963：瞬态预算耗尽 → requeue 下一 tick。execution 行已是
+                # skipped（非终态，可二次写入），补一句「已重投」说明供管理台/排查；
+                # 不置 failed、不推进 consecutive_failures/backoff/熔断，定时任务不丢。
+                _b_exec_id, _b_error = _busy_deferred
+                _b_msg = (f"{_BUSY_LOG_FINGERPRINT} {task['repo_key']}（排队冲突，瞬态预算已耗尽，"
+                          f"已 requeue 下一 tick 重投）")
+                log.warning(
+                    f"Autopilot: task {task_id} exec {_b_exec_id} repo dispatch busy after "
+                    f"{_BUSY_RETRY_BUDGET} transient retries, requeue next tick: {_b_error}")
+                _update_execution_result(_b_exec_id, "skipped", error=_b_msg,
+                                         error_code=ERROR_REPO_DISPATCH_BUSY)
+            next_run = _compute_next_run(task["cron"])
+            # 环境性失败已恢复（本轮成功/跳过/普通失败/busy requeue）→ 清空退避与熔断状态。
+            if task.get("circuit_paused") or int(task.get("consecutive_failures") or 0):
+                _clear_failure_state(task_id, next_run)
+                task.update({"consecutive_failures": 0, "last_error_code": "",
+                             "offline_since": "", "backoff_until": "", "circuit_paused": 0})
+            _update_task_run_info(task_id, next_run)
     except Exception as e:
         log.error(f"Autopilot: task {task_id} execution exception: {e}")
     finally:
@@ -1993,8 +2536,14 @@ async def scheduler_loop():
                     row = await asyncio.to_thread(
                         _mgmt_public.autopilot_task_last_run_any, task_id)
                     last_run = row[0] if row else ""
-                    if _is_cron_due(task["cron"], last_run):
-                        log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
+                    # Issue #3800：派发裁决（熔断自愈 / cron 到期 / 退避闸门）抽成
+                    # `_scan_task_once`，生产循环与假时钟回归走同一条判定路径。
+                    try:
+                        decision = await asyncio.to_thread(_scan_task_once, task, last_run)
+                    except Exception as _de:
+                        log.warning(f"Autopilot: task {task_id} dispatch decision failed: {_de}")
+                        continue
+                    if decision == "dispatch":
                         asyncio.ensure_future(_execute_task(task))
         except Exception as e:
             log.warning(f"Autopilot scheduler loop error: {e}")
@@ -2060,6 +2609,12 @@ async def trigger_task_now(task_id: int, params: dict | None = None) -> dict:
         "work_branch": row[11] if len(row) > 11 else "",
         # Issue #1011 姊妹字段：uid 绑定（非空优先）
         "engine_runtime_uids": row[12] if len(row) > 12 else "",
+        # Issue #3800：退避/熔断状态（列序见 mgmt `autopilot_task_full_row`）
+        "consecutive_failures": int(row[13] or 0) if len(row) > 13 else 0,
+        "last_error_code": (row[14] or "") if len(row) > 14 else "",
+        "offline_since": (row[15] or "") if len(row) > 15 else "",
+        "backoff_until": (row[16] or "") if len(row) > 16 else "",
+        "circuit_paused": 1 if (len(row) > 17 and row[17]) else 0,
     }
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}

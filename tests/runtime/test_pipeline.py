@@ -126,7 +126,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload={"object_attributes": {"assignee": "younger_eric"}})]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u, *a: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "younger_eric"
 
@@ -135,7 +135,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload={"issue": {"assignee": {"username": "alice"}}})]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u, *a: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "alice"
 
@@ -148,7 +148,7 @@ class TestPipeline:
                 payload={"object_attributes": {"assignee": "new_owner"}}),
         ]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u, *a: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "new_owner"
 
@@ -158,7 +158,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload=_json.dumps({"object_attributes": {"assignee": "bob"}}))]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u, *a: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "bob"
 

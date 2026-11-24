@@ -31,6 +31,11 @@ __all__ = [
     "parse_hermes_config",
     "check_models_against_gateway",
     "minimal_model_call",
+    "read_opencode_model_config",
+    "validate_engine_model",
+    "probe_engine_model_call",
+    "is_model_not_found_error",
+    "MODEL_CHECK_DISABLED_ENV",
     "main",
 ]
 
@@ -488,6 +493,320 @@ def minimal_model_call(config: dict, timeout: float = GATEWAY_TIMEOUT, post=None
     if status == 404 or "model not found" in low or "model_not_found" in low:
         return False, {"model_call": "model_not_found: %s" % model}
     return True, {"model_call": "http_%s (not model-not-found, ignored)" % status}
+
+
+# ===== Issue #3820：opencode 模型名对齐校验（启动/注册 + 探活共用）=====
+
+MODEL_CHECK_DISABLED_ENV = "GRAPE_MODEL_CHECK_DISABLED"
+#: opencode provider 的 apiKey 插值语法 `{env:VAR}`（与 `${VAR}` 两种形态都解析）
+_OPENCODE_ENV_REF = re.compile(r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
+_TRUTHY = ("1", "true", "yes", "on")
+#: 模型名不存在短语（`Model not found` / `model_not_found` / `model-not-found`）
+_MODEL_MISSING_RE = re.compile(r"model[\s_-]*(?:is\s+)?not[\s_-]*found", re.I)
+#: 错误码形态（带下划线/连字符）本身就是 API 契约，足以判定模型不存在
+_MODEL_CODE_RE = re.compile(r"model[_\-]not[_\-]?found|model[_\-]?not[_\-]found", re.I)
+#: 404 状态上下文：裸 `404` / `Not Found:` 状态标签 / `NotFoundError`
+_MODEL_404_CONTEXT_RE = re.compile(r"\b404\b|\bnot\s*found\s*:|\bnotfound(?:error)?\b", re.I)
+
+
+def is_model_not_found_error(text: str) -> bool:
+    """404 + `Model not found` 双条件判定（Issue #3820，分类/探活共用）。
+
+    双条件防文本匹配过宽：业务文案里的 `model ... not found`（如 "model file not found in
+    expected list"）没有 404 状态上下文，不得误判为配置错误。错误码形态
+    `model_not_found` / `model-not-found` 本身即 API 契约，直接判定。
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if _MODEL_CODE_RE.search(raw):
+        return True
+    return bool(_MODEL_MISSING_RE.search(raw) and _MODEL_404_CONTEXT_RE.search(raw))
+
+
+def _is_truthy(value) -> bool:
+    return str(value or "").strip().lower() in _TRUTHY
+
+
+def _model_check_disabled(env=None) -> bool:
+    """进程级运维开关：显式 env 或 os.environ 任一为真即关闭校验。"""
+    if _is_truthy(os.environ.get(MODEL_CHECK_DISABLED_ENV)):
+        return True
+    if env is None or env is os.environ:
+        return False
+    return _is_truthy(env.get(MODEL_CHECK_DISABLED_ENV))
+
+
+def opencode_config_path(config_path: str | None = None) -> str:
+    """opencode 配置路径：显式入参 > ~/.config/opencode/opencode.json > opencode.jsonc。"""
+    if config_path:
+        return config_path
+    base = os.path.expanduser("~/.config/opencode")
+    for name in ("opencode.json", "opencode.jsonc"):
+        candidate = os.path.join(base, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.join(base, "opencode.json")
+
+
+def _strip_jsonc(text: str) -> str:
+    """去掉 JSONC 的 `//` 行注释与尾逗号（字符串内的 `//` 不处理）。"""
+    lines = []
+    for line in text.splitlines():
+        in_single = in_double = False
+        cut = len(line)
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "'" and not in_double:
+                in_single = not in_single
+            elif not in_single and not in_double and ch == "/" and i + 1 < len(line) \
+                    and line[i + 1] == "/":
+                cut = i
+                break
+            i += 1
+        lines.append(line[:cut])
+    return re.sub(r",(\s*[}\]])", r"\1", "\n".join(lines))
+
+
+def _resolve_opencode_key(raw, env) -> str:
+    """opencode apiKey：`{env:VAR}` / `${VAR}` → 环境变量值；字面量原样。"""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    for pattern in (_OPENCODE_ENV_REF, ENV_PATTERN):
+        m = pattern.match(s)
+        if m:
+            return env.get(m.group(1), "")
+    return s
+
+
+def _opencode_models(provider: dict) -> list[str]:
+    models = provider.get("models")
+    out: list[str] = []
+    if isinstance(models, dict):
+        out = [str(k) for k in models if str(k)]
+    elif isinstance(models, list):
+        for item in models:
+            if isinstance(item, dict) and item.get("id"):
+                out.append(str(item["id"]))
+            elif isinstance(item, str) and item:
+                out.append(item)
+    return out
+
+
+def read_opencode_model_config(config_path: str | None = None,
+                               env: dict | None = None) -> dict | None:
+    """读取 opencode 模型配置，返回与 hermes 同构的校验视角（Issue #3820）。
+
+    返回 None = 配置文件不存在（调用方跳过校验）。返回结构：
+      {
+        "config_path": str,
+        "default_model": str,   # 顶层 model 的 provider 前缀已剥离（网关只认裸 model-id）
+        "targets": [{"base_url": str, "api_key": str, "models": [str, ...]}],
+        "warnings": [str, ...],
+      }
+    网关与密钥来自 `provider.<id>.options.baseURL` / `options.apiKey`（支持 `{env:VAR}`）；
+    已配置模型全集 = `provider.<id>.models` 键集 + default 模型。
+    """
+    env = dict(os.environ) if env is None else env
+    path = opencode_config_path(config_path)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        try:
+            cfg = json.loads(raw)
+        except ValueError:
+            cfg = json.loads(_strip_jsonc(raw))
+    except Exception as e:
+        return {"config_path": path, "default_model": "", "targets": [],
+                "warnings": ["cannot parse opencode config (%s); validation skipped" % e]}
+    if not isinstance(cfg, dict):
+        return {"config_path": path, "default_model": "", "targets": [],
+                "warnings": ["opencode config root is not an object; validation skipped"]}
+
+    raw_model = str(cfg.get("model") or "").strip()
+    provider_id, sep, model_id = raw_model.partition("/")
+    if not sep:
+        provider_id, model_id = "", raw_model
+    default_model = model_id.strip()
+
+    providers_cfg = cfg.get("provider")
+    providers: dict = providers_cfg if isinstance(providers_cfg, dict) else {}
+    targets: list[dict] = []
+    warnings: list[str] = []
+
+    def _target(base_url: str, api_key: str) -> dict | None:
+        if not base_url:
+            return None
+        for t in targets:
+            if t["base_url"] == base_url and t["api_key"] == api_key:
+                return t
+        if not api_key:
+            warnings.append("gateway %s has no resolvable api_key; its models are not validated"
+                            % base_url)
+            return None
+        t = {"base_url": base_url, "api_key": api_key, "models": []}
+        targets.append(t)
+        return t
+
+    for pid, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        opts_cfg = provider.get("options")
+        options: dict = opts_cfg if isinstance(opts_cfg, dict) else {}
+        base_url = str(options.get("baseURL") or options.get("base_url") or "").strip().rstrip("/")
+        api_key = _resolve_opencode_key(options.get("apiKey") or options.get("api_key"), env)
+        models = _opencode_models(provider)
+        if pid == provider_id and default_model and default_model not in models:
+            models.insert(0, default_model)
+        target = _target(base_url, api_key)
+        if target:
+            for model in models:
+                if model not in target["models"]:
+                    target["models"].append(model)
+
+    if not default_model:
+        warnings.append("opencode config model is empty; default model is not validated")
+    elif provider_id and provider_id not in providers:
+        warnings.append("opencode provider '%s' not found; default model is not validated"
+                        % provider_id)
+    else:
+        # 探活最小调用固定打 targets[0]——default 模型所在网关必须排首位
+        for idx, t in enumerate(targets):
+            if default_model in t["models"]:
+                if idx:
+                    targets.insert(0, targets.pop(idx))
+                break
+    return {"config_path": path, "default_model": default_model,
+            "targets": targets, "warnings": warnings}
+
+
+def _engine_model_config(engine_name: str, config_path: str | None = None,
+                         env: dict | None = None) -> dict | None:
+    """按引擎名读取模型配置（hermes / opencode 共用校验视角）。"""
+    name = str(engine_name or "").strip().lower()
+    if name.startswith("opencode"):
+        return read_opencode_model_config(config_path, env=env)
+    if name.startswith("hermes"):
+        return read_hermes_model_config(config_path, env=env)
+    return None
+
+
+def _check_status(check: dict) -> str:
+    """把 `check_models_against_gateway` 结果收敛为注册/启动判定口径。
+
+    http_error / invalid_response 同 `unreachable`：无法校验时放行（不误拒），
+    仅 misaligned（确认缺失）才拒绝。
+    """
+    if check.get("status") == "misaligned":
+        return "misaligned"
+    detail = check.get("detail") or []
+    if any(d.get("status") in ("unreachable", "http_error", "invalid_response") for d in detail):
+        return "unreachable"
+    if not any(d.get("status") == "ok" for d in detail):
+        return "no_validatable_target"
+    return "ok"
+
+
+def _misaligned_message(engine_name: str, detail: list) -> str:
+    parts = []
+    for d in detail:
+        if d.get("status") != "misaligned":
+            continue
+        parts.append(
+            "%s 配置模型名不在网关可用列表：配置=%s；缺失=%s；%s 可用=%s" % (
+                engine_name, ", ".join(d.get("configured") or []),
+                ", ".join(d.get("missing") or []),
+                gateway_models_url(d.get("base_url") or ""),
+                ", ".join(d.get("available") or [])))
+    return "；".join(parts)
+
+
+def validate_engine_model(engine_name: str, config_path: str | None = None,
+                          env: dict | None = None, fetch=None,
+                          timeout: float = GATEWAY_TIMEOUT) -> dict:
+    """启动/注册阶段模型可用性校验（Issue #3820）。
+
+    返回 {"engine", "status", "default_model", "message", "detail"}：
+      ok / no_config / no_validatable_target / disabled → 放行；
+      misaligned → 调用方拒绝健康注册（message 即「配置模型名 vs /v1/models 可用列表」差异）；
+      unreachable → 网关不可达/响应不可用，放行并告警（风险缓解：不误拒）。
+    """
+    name = str(engine_name or "").strip().lower()
+    out = {"engine": name, "status": "not_applicable", "default_model": "",
+           "message": "", "detail": []}
+    if _model_check_disabled(env):
+        out.update(status="disabled",
+                   message="model check disabled by %s" % MODEL_CHECK_DISABLED_ENV)
+        return out
+    if not (name.startswith("opencode") or name.startswith("hermes")):
+        out["message"] = "%s has no model-alignment validation; skipped" % name
+        return out
+    cfg = _engine_model_config(name, config_path=config_path, env=env)
+    if cfg is None:
+        out.update(status="no_config",
+                   message="%s 未找到模型配置文件，跳过模型校验" % name)
+        return out
+    out["default_model"] = cfg.get("default_model") or ""
+    check = check_models_against_gateway(cfg, fetch=fetch, timeout=timeout)
+    out["detail"] = check.get("detail") or []
+    status = _check_status(check)
+    out["status"] = status
+    warnings = [w for w in (cfg.get("warnings") or []) if w]
+    if status == "misaligned":
+        out["message"] = _misaligned_message(name, out["detail"])
+        if warnings:
+            out["message"] += "；" + "；".join(warnings)
+    elif status == "unreachable":
+        errors = [str(d.get("error") or "") for d in out["detail"] if d.get("status") != "ok"]
+        out["message"] = ("%s 模型可用性校验 SKIPPED（网关不可达/响应不可用：%s），不阻断注册"
+                          % (name, "; ".join(errors)[:300]))
+    elif status == "ok":
+        models = sorted({m for d in out["detail"] if d.get("status") == "ok"
+                         for m in (d.get("configured") or [])})
+        out["message"] = "%s 模型 %s 均在网关 /v1/models 可用列表中" % (
+            name, ", ".join(models))
+        if warnings:
+            out["message"] += "；" + "；".join(warnings)
+    else:
+        out["message"] = "%s 无可校验的网关目标（配置/密钥缺失），跳过模型校验" % name
+        if warnings:
+            out["message"] += "；" + "；".join(warnings)
+    return out
+
+
+def probe_engine_model_call(engine_name: str, config_path: str | None = None,
+                            env: dict | None = None, timeout: float = GATEWAY_TIMEOUT,
+                            post=None, fetch=None) -> tuple[bool, dict, str]:
+    """探活期最小模型调用（max_tokens=1，Issue #3820，opencode/hermes 共用）。
+
+    返回 (ok, detail, error_message)：
+      200 / 网络不可达 / 无配置 → (True, detail, "")            不误判；
+      404 模型不存在            → (False, detail, 差异文案)      探针置 unhealthy + 运行时页展示。
+    """
+    name = str(engine_name or "").strip().lower()
+    if _model_check_disabled(env):
+        return True, {"model_call": "skipped: model check disabled"}, ""
+    cfg = _engine_model_config(name, config_path=config_path, env=env)
+    if cfg is None:
+        return True, {"model_call": "skipped: no model config"}, ""
+    ok, detail = minimal_model_call(cfg, timeout=timeout, post=post)
+    if ok:
+        return True, detail, ""
+    message = "%s 模型配置错误（不可重试）：%s" % (name, detail.get("model_call", ""))
+    try:
+        check = check_models_against_gateway(cfg, fetch=fetch, timeout=timeout)
+        diff = _misaligned_message(name, check.get("detail") or [])
+        if diff:
+            message += "；" + diff
+    except Exception as e:
+        message += "；(/v1/models 对照不可用: %s)" % e
+    return False, detail, message
 
 
 # ===== CLI（安装脚本/人工自检统一入口）=====

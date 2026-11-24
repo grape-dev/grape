@@ -81,6 +81,8 @@ from src.domains.runtime.schema_ddl import (
     _CHAT_MESSAGES_DDL,
     _GLOBAL_IM_BOT_CONFIG_DDL,
     _IM_INSTANCE_DDL,
+    # Issue #3799：渠道健康状态表（runtime 域，ret=-14 暂停可观测）
+    _CHANNEL_HEALTH_DDL,
     _VOD_CONVERSATIONS_DDL,
     _ISSUE_DDL,
     _AGENT_TASKS_DDL,
@@ -409,6 +411,9 @@ _NEW_TABLES = [
     ("grape_t_skill_file", _SKILL_FILE_DDL),
     ("grape_t_skill_comment", _SKILL_COMMENT_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
+    # Issue #3799：渠道健康状态（ret=-14 风控暂停）——runtime 域状态表，
+    # 管理台/告警与渠道写侧共用同一真源（进程重启后仍可见）。
+    ("grape_t_channel_health", _CHANNEL_HEALTH_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
@@ -11646,3 +11651,59 @@ from src.domains.runtime.migrations.skill_category_cutover import (
     MIGRATION as _M_SKILL_CUTOVER_MAP,
 )
 register_migration(**_M_SKILL_CUTOVER_MAP)
+
+
+# ===== Autopilot 环境性失败退避/熔断（Issue #3800）=====
+# 材质回写与列名同源于属主域（跨域守卫 P0-2），这里只做登记：
+#   mgmt 侧 202611230003：autopilot_tasks 增 5 列（连续失败/错误码/离线起算/退避截止/熔断位）；
+#   runtime 侧 202611230004：autopilot_executions 增 error_code（失败分类落库）。
+# 两条均 kind=safe + post_check（列存在性可判定才盖章）。version/name/kind 用字面量
+# 登记（不用 `**_MIGRATION`），否则 tests/api/test_migration_track_guard.py 的
+# 版本号唯一性与格式守卫解析不出该条，会漏看。
+
+from src.domains.mgmt.migrations.autopilot_failure_state import (
+    add_failure_state_columns as _fn_autopilot_failure_state_columns,
+    verify_failure_state_columns as _post_autopilot_failure_state_columns,
+)
+register_migration(
+    version="202611230003",
+    name="autopilot-task-failure-state-columns",
+    kind="safe",
+    fn=_fn_autopilot_failure_state_columns,
+    domains=("mgmt",),
+    post_check=_post_autopilot_failure_state_columns,
+)
+
+from src.domains.runtime.migrations.autopilot_execution_error_code import (
+    add_error_code_column as _fn_autopilot_exec_error_code,
+    verify_error_code_column as _post_autopilot_exec_error_code,
+)
+register_migration(
+    version="202611230004",
+    name="autopilot-execution-error-code",
+    kind="safe",
+    fn=_fn_autopilot_exec_error_code,
+    domains=("runtime",),
+    post_check=_post_autopilot_exec_error_code,
+)
+
+
+# ===== 存量 custom_fields 保留前缀清理（Issue #4066）=====
+# 写侧此前不校验 autopilot custom_fields，非法/保留条目长期留库、每次执行刷
+# `custom env ... rejected` WARNING。SQL 住属主域 migrations 下（跨域守卫 P0-2）：
+#   mgmt 侧 202611240001：清理 autopilot_tasks.custom_fields 与
+#   devops_pipeline_scene.advanced_options.custom_fields 的非法条目（幂等 + post_check）。
+# 字面量登记 version/name/kind，供 tests/api/test_migration_track_guard.py 解析。
+
+from src.domains.mgmt.migrations.autopilot_custom_fields_cleanup import (
+    cleanup_invalid_custom_fields as _fn_autopilot_cf_cleanup,
+    verify_custom_fields_clean as _post_autopilot_cf_cleanup,
+)
+register_migration(
+    version="202611240001",
+    name="autopilot-custom-fields-cleanup",
+    kind="cleanup",
+    fn=_fn_autopilot_cf_cleanup,
+    domains=("mgmt",),
+    post_check=_post_autopilot_cf_cleanup,
+)

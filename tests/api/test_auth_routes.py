@@ -23,6 +23,9 @@ client = TestClient(app)
 
 class _FakeReqResp:
     """模拟 requests.get/post 的返回值。"""
+
+    status_code = 200
+
     def __init__(self, payload: dict):
         self._payload = payload
 
@@ -101,6 +104,9 @@ class TestOAuthLogin:
 
     def test_redirect_uri_fallback_from_host(self, monkeypatch):
         monkeypatch.delenv("OAUTH_REDIRECT_URI", raising=False)
+        # 本机 configs/server-config.json 配了对外基址（OAuth/安装命令要用），
+        # 会让「按 Host 兜底」这条路失效；测兜底逻辑必须屏蔽机器级配置。
+        monkeypatch.setattr("src.kernel.config.read_server_config", lambda: {})
         # 只返回 client_id（其余 meta 为空 → 走 host 构造 redirect_uri）
         def fake(key):
             if key == "oauth_gitcode_client_id":

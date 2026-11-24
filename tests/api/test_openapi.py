@@ -38,6 +38,8 @@ EXPECTED_PUBLIC = {
     # 此处一并补齐锁死）；其余为多平台解耦 r3/r4 新增对外端点。
     "im_engine_status_api_im_status_get": ("get", "/api/im/status"),
     "im_installations_api_im_installations_get": ("get", "/api/im/installations"),
+    "im_channel_health_api_im_channels_health_get": ("get", "/api/im/channels/health"),
+    "im_installation_recover_api_im_installations__installation_id__recover_post": ("post", "/api/im/installations/{installation_id}/recover"),
     "im_notify_test_api_im_notify_test_post": ("post", "/api/im/notify-test"),
     "im_set_installation_status_api_im_installations__installation_id__put": ("put", "/api/im/installations/{installation_id}"),
     "im_dingtalk_card_setup_api_im_dingtalk_card_setup_get": ("get", "/api/im/dingtalk/card-setup"),
@@ -195,7 +197,9 @@ EXPECTED_PUBLIC = {
     "gitrepo_contents_root": ("get", "/api/git-repo/{owner}/{repo}/contents"),
     "gitrepo_issues_close": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/close"),
     "gitrepo_issues_comments_create": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
+    "gitrepo_issues_comments_delete": ("delete", "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}"),
     "gitrepo_issues_comments_list": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
+    "gitrepo_issues_comments_update": ("patch", "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}"),
     "gitrepo_issues_create": ("post", "/api/git-repo/{owner}/{repo}/issues"),
     "gitrepo_issues_get": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}"),
     "gitrepo_issues_list": ("get", "/api/git-repo/{owner}/{repo}/issues"),

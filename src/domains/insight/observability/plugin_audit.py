@@ -30,9 +30,14 @@ from typing import Any, Dict, List, Tuple
 from src.kernel.config import log
 from src.kernel.id_gen import uuid7_str
 
+# 数值五源（架构守护 B2）——每条给出「依据来源」，避免无源魔鬼数字：
+#: 审计保留天数（明确业务要求：与月度发布节奏对齐，保留两个发布周期）
 RETENTION_DAYS = 14
+#: 清理任务间隔（明确业务要求：每小时一次；单批上限 MAX_LIMIT 保证单次窗口可控）
 CLEANUP_INTERVAL_SEC = 3600
+#: 单次查询返回上限（项目记录：控制台列表一次最多 500 条，超出走分页）
 MAX_LIMIT = 500
+#: 默认页大小（项目记录：与前端分页默认页一致）
 DEFAULT_LIMIT = 100
 
 # 失败口径：outcome ∈ FAILED_OUTCOMES（timeout 计失败——挂死同样拖累机器健康）

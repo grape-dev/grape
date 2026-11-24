@@ -74,6 +74,15 @@ _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 # Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 ≈ 24 行/秒）
 _LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
 
+# Issue #3699：trace 中继禁用态（主控未配 OTLP_RELAY_TARGET）是配置态 feature-off，
+# 不是事故。中继侧用该响应头标记；访问日志据此把 503 降为 debug。与 server_common.py
+# 的同名判据保持一致（单进程/四进程共用一套分级口径）。
+_RELAY_DISABLED_HEADER = "x-grape-trace-relay"
+
+
+def _is_relay_disabled_503(status: int, headers) -> bool:
+    return status == 503 and (headers.get(_RELAY_DISABLED_HEADER) or "") == "disabled"
+
 
 def _redact_path(path: str) -> str:
     """webhook 路径中的 token 段替换为 [redacted]。"""
@@ -179,9 +188,12 @@ def install_request_middleware(app: FastAPI) -> None:
         skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
         start = time.time()
         status = 500
+        relay_disabled = False
         try:
             response = await call_next(request)
             status = response.status_code
+            # 需在 return 前取：finally 里 response 未绑定（call_next 抛异常分支）
+            relay_disabled = _is_relay_disabled_503(status, response.headers)
             response.headers["X-Request-ID"] = rid
             return response
         except Exception:
@@ -202,7 +214,12 @@ def install_request_middleware(app: FastAPI) -> None:
                 if redacted_path == "/faro/collect" and status == 503:
                     _log.debug(msg, extra=extra)
                 elif status >= 500:
-                    _log.error(msg, extra=extra)
+                    # Issue #3699：中继禁用（配置缺失）是 feature-off，非事故 → debug；
+                    # 其他 5xx（含上游 LGTM 故障透传）保持 ERROR，不被误抑制。
+                    if relay_disabled:
+                        _log.debug(msg, extra=extra)
+                    else:
+                        _log.error(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)

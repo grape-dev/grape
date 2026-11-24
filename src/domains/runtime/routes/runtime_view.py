@@ -37,9 +37,14 @@ import importlib
 
 from fastapi import APIRouter
 
+from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
+
 # 视图 router：A 进程加载（main.py 单进程模式同样加载本 router，
 # runtime.py 的 router 在拆分后仅由 worker 入口与单进程模式加载）。
-view_router = APIRouter(prefix="/api/runtime", tags=["runtime"])
+view_router = APIRouter(prefix="/api/runtime", tags=["runtime"],
+                        # Issue #4082：与 runtime.py 同一路由类——A 进程视图端点
+                        # （role-tags/scene-tags/tasks…）对非法 runtime_id 同样 400
+                        route_class=RuntimeIdGuardRoute)
 
 
 def _register_runtime_views() -> None:

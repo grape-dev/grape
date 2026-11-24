@@ -43,16 +43,21 @@ class TestEnqueue:
     def test_enqueue_uses_repo_dispatch_lease(self, monkeypatch):
         from src.kernel.lock import repo_dispatch_lease_key
 
-        seen_keys = []
+        seen = []
 
-        def _busy(key, ttl=30):
-            seen_keys.append(key)
+        # Issue #3963：调用点改为「预算对齐 TTL」的排队语义（wait_seconds/jitter），
+        # 仍以 False 模拟预算耗尽 → 结构化 busy 异常（RuntimeError 子类，旧捕获兼容）。
+        def _busy(key, ttl=30, attempts=20, interval=0.05, wait_seconds=None, jitter_ratio=0.0):
+            seen.append((key, ttl, wait_seconds, jitter_ratio))
             return False
 
         monkeypatch.setattr(service, "acquire_lock_with_retry", _busy)
-        with pytest.raises(RuntimeError, match="task enqueue busy"):
+        with pytest.raises(service.RepoDispatchBusyError, match="task enqueue busy") as ei:
             _enqueue(seq=8)
-        assert seen_keys == [repo_dispatch_lease_key("gitcode:test/repo")]
+        assert ei.value.error_code == service.REPO_DISPATCH_BUSY
+        assert [s[0] for s in seen] == [repo_dispatch_lease_key("gitcode:test/repo")]
+        assert seen[0][1] == service._REPO_DISPATCH_LEASE_TTL
+        assert seen[0][2] >= service._REPO_DISPATCH_LEASE_TTL, seen
 
     def test_packs_skill_files(self):
         import os

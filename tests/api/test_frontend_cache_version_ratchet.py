@@ -18,10 +18,71 @@ APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend"
 
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
-    'index.html': {'tokens.css': '2', 'app.css': '10', 'all-views.css': '73', 'auth.css': '1', '.min.css': '1', 'vue.global.prod.min.js': '1', 'jquery.min.js': '1', 'marked.min.js': '1', 'qrcode.min.js': '1', '.min.js': '1', 'echarts.min.js': '1', 'faro-web-sdk.iife.js': '1', 'faro-web-tracing.iife.js': '1', 'faro.js': '7', 'api.js': '36', 'pwd-blocklist.js': '3', 'worker-name.js': '2', 'dashboard-view.js': '91', 'pipeline.js': '58', 'agent-view.js': '51', 'event-view.js': '63', 'chat-view.js': '63', 'im-channel.js': '56', 'repos-view.js': '67', 'issues-view.js': '71', 'account-view.js': '63', 'scene-market.js': '61', 'skills-view.js': '62', 'plugins.js': '56', 'knowledge-view.js': '49', 'runtimes-view.js': '91', 'observability-view.js': '59', 'organizations.js': '82', 'feedback-dialog.js': '50', 'my-feedback.js': '50', 'my-feedback-detail.js': '50', 'autopilot-view.js': '70', 'sandbox-view.js': '13', 'deeplink.js': '1', 'platform-icons.js': '2', 'app.js': '309', 'login-view.js': '2', 'onboarding-view.js': '9', 'auto-recovery.js': '2', 'oauth-buttons.js': '2', 'host-status.js': '1'},
-    'admin.html': {'admin-view.css': '2', 'tokens.css': '2', 'pwd-blocklist.js': '3', 'admin-view.js': '51'},
-    'register.html': {'app.css': '10', 'auth.css': '1', 'api.js': '36', 'pwd-blocklist.js': '3', 'auth.js': '8', 'register-view.js': '1'},
-    'forgot.html': {'app.css': '10', 'auth.css': '1', 'api.js': '36', 'pwd-blocklist.js': '3', 'auth.js': '8', 'forgot-view.js': '3'},
+    'index.html': {
+        'account-view.js': '63',
+        'agent-view.js': '51',
+        'all-views.css': '73',
+        'api.js': '37',
+        'app.css': '10',
+        'app.js': '310',
+        'auth.css': '1',
+        'auto-recovery.js': '2',
+        'autopilot-view.js': '71',
+        'chat-view.js': '63',
+        'dashboard-view.js': '92',
+        'deeplink.js': '1',
+        'event-view.js': '65',
+        'faro.js': '8',
+        'feedback-dialog.js': '50',
+        'host-status.js': '1',
+        'im-channel.js': '57',
+        'issues-view.js': '72',
+        'knowledge-view.js': '49',
+        'login-view.js': '2',
+        'my-feedback-detail.js': '50',
+        'my-feedback.js': '50',
+        'oauth-buttons.js': '2',
+        'observability-view.js': '59',
+        'onboarding-view.js': '9',
+        'organizations.js': '83',
+        'pipeline.js': '58',
+        'platform-icons.js': '2',
+        'plugins.js': '57',
+        'pwd-blocklist.js': '3',
+        'repos-view.js': '67',
+        'runtimes-view.js': '92',
+        'sandbox-view.js': '15',
+        'scene-market.js': '62',
+        'skills-view.js': '64',
+        'tokens.css': '2',
+        'worker-name.js': '2',
+    },
+    'admin.html': {
+        'admin-view.css': '2',
+        'admin-view.js': '51',
+        'pwd-blocklist.js': '3',
+        'tokens.css': '2',
+    },
+    'register.html': {
+        'api.js': '37',
+        'app.css': '10',
+        'auth.css': '1',
+        'auth.js': '8',
+        'pwd-blocklist.js': '3',
+        'register-view.js': '1',
+    },
+    'forgot.html': {
+        'api.js': '37',
+        'app.css': '10',
+        'auth.css': '1',
+        'auth.js': '8',
+        'forgot-view.js': '3',
+        'pwd-blocklist.js': '3',
+    },
+}
+# 日期型版本模块：交给 i18n_locale_cache_ratchet 的「下界 + 指纹」守护
+DATE_VERSIONED = {
+    "i18n.js",
 }
 
 # 第三方库：版本号随 vendor 打包固定，不参与冻结校验
@@ -104,7 +165,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ("73", "a96afb49d5c49a0c")
+ALL_VIEWS = ('73', '57a23b9b2e4dde03')
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）

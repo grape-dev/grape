@@ -2004,7 +2004,7 @@
           "repos"
         ],
         "summary": "One-shot git platform credential (CLI internal, TTL)",
-        "description": "One-shot short-lived platform credential for local git via CLI (in-process, never persisted). gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only.",
+        "description": "One-shot short-lived platform credential for local git via CLI (in-process, never persisted). gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Repo-session-only (tk_ worker / tko_ takeover).",
         "operationId": "repos_git_credential",
         "parameters": [
           {
@@ -3916,6 +3916,188 @@
         "x-token-scope": "session_only"
       }
     },
+    "/api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}": {
+      "patch": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "Updates an issue comment",
+        "description": "Updates an issue comment body by comment id (body required). Issue #3821: mirrors the pulls comment update self-correction capability. comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list response (compat form, resolved to note_id server-side); other forms return a readable 422.",
+        "operationId": "gitrepo_issues_comments_update",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Number"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Comment Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      },
+      "delete": {
+        "tags": [
+          "git-repo"
+        ],
+        "summary": "Delete issue comment",
+        "description": "Deletes an issue comment by comment id. Issue #3821: mirrors the pulls comment delete self-correction capability. comment_id accepts the numeric note_id or the hex id returned by the create/list response; other forms return a readable 422.",
+        "operationId": "gitrepo_issues_comments_delete",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Owner"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Number"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Comment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "session_only"
+      }
+    },
     "/api/git-repo/{owner}/{repo}/pulls": {
       "get": {
         "tags": [
@@ -4654,7 +4836,7 @@
           "git-repo"
         ],
         "summary": "Update PR comment",
-        "description": "Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment response (compat form, auto-mapped to note_id server-side); other forms return 422.",
+        "description": "Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment response (compat form, auto-mapped to note_id server-side); other forms return 422. Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).",
         "operationId": "gitrepo_pulls_comments_update",
         "parameters": [
           {
@@ -4742,7 +4924,7 @@
           "git-repo"
         ],
         "summary": "Delete PR comment",
-        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams).",
+        "description": "Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments. comment_id accepts the numeric note_id or the hex id returned by the create/list response (gitcode/gitee: resolved to note_id server-side before DELETE; hex is rejected by those upstreams). Issue #3821: routes to the same note channel used at create time (/pulls note vs /issues note for merged-PR fallback).",
         "operationId": "gitrepo_pulls_comments_delete",
         "parameters": [
           {
@@ -12713,7 +12895,7 @@
           "skills"
         ],
         "summary": "List skills",
-        "description": "Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.",
+        "description": "Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging. Issue #1790: repo param format = owner/repo (optional gitcode:/github: provider prefix); bare repo names and other malformed values return 400 with a format hint instead of silently falling back to the official list.",
         "operationId": "skills_list",
         "parameters": [
           {
@@ -12722,9 +12904,11 @@
             "required": false,
             "schema": {
               "type": "string",
+              "description": "仓库过滤，格式 owner/repo（可带 gitcode:/github: 前缀）；裸仓库名等不合规值返回 400（Issue #1790）",
               "default": "",
               "title": "Repo"
-            }
+            },
+            "description": "仓库过滤，格式 owner/repo（可带 gitcode:/github: 前缀）；裸仓库名等不合规值返回 400（Issue #1790）"
           },
           {
             "name": "scope",
@@ -14641,7 +14825,7 @@
           "scenes"
         ],
         "summary": "List scenes with pipeline",
-        "description": "Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.",
+        "description": "Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; always returns total; carries card fields (icon/scope/created_by/pin) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.",
         "operationId": "scenes_with_pipeline",
         "parameters": [
           {
@@ -14652,6 +14836,57 @@
               "type": "string",
               "default": "",
               "title": "Repo"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(id|latest)$",
+              "default": "id",
+              "title": "Sort"
             }
           }
         ],
@@ -17692,6 +17927,59 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/pipeline/trigger": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Trigger pending issue pipeline",
+        "description": "Issue #3621: triggers the pipeline for an issue created with `trigger_pipeline=false` (stage=created), reusing the issue_opened sync trigger path. Idempotent: 409 when stage is not created or the issue already has pipeline events. User-only. Issue #3913 (QA C3): a successful trigger writes an audit log entry (`issue_pipeline_triggered_from_created`, detail carries repo_key/issue_id/issue_number/from_stage=created/to_stage=vod/actor/seq; audit failure only warns and never blocks the trigger).",
+        "operationId": "issues_trigger_pending_pipeline",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/pipeline": {
       "get": {
         "tags": [
@@ -18872,7 +19160,7 @@
           "issues"
         ],
         "summary": "Create issue (unified entry)",
-        "description": "Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode.",
+        "description": "Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?, trigger_pipeline? (default true; false = create without triggering pipeline, stage=created).",
         "operationId": "issues_create",
         "parameters": [
           {
@@ -29173,7 +29461,7 @@
           "im"
         ],
         "summary": "Im Installations",
-        "description": "安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。",
+        "description": "安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。\n\nIssue #3799：每条安装带渠道健康字段（`paused / last_pause_at / next_retry_at /\nconsecutive_pauses / alert_state`），前端渠道卡片直接消费，无需二次请求。",
         "operationId": "im_installations_api_im_installations_get",
         "parameters": [
           {
@@ -29187,6 +29475,101 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/channels/health": {
+      "get": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Channel Health",
+        "description": "渠道健康面板（Issue #3799）：paused / last_pause_at / next_retry_at / 告警态。\n\n告警可检索入口之一：`alert_state=firing` + `alert_reason`（另见 ERROR 日志\n`[im-channel-health] alert=wechat_channel_unavailable`）。\n\n行级裁剪（PR #1983 审查 Critical）：只返回当前用户可见安装的行——\nuser 轨 owner 过滤、repo 轨仓库访问过滤，与 `/installations` 同口径。",
+        "operationId": "im_channel_health_api_im_channels_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/im/installations/{installation_id}/recover": {
+      "post": {
+        "tags": [
+          "im"
+        ],
+        "summary": "Im Installation Recover",
+        "description": "人工恢复入口（Issue #3799）：`relogin / clear_pause / retry_now`。\n\n- `retry_now`：唤醒渠道暂停等待，立即重新 getupdates（成功即 paused 清除）；\n- `relogin`：同 retry_now + 打断扫描窗口（重连重新执行 notifystart）；\n- `clear_pause`：只清暂停态/看板，不动连接。\n无引擎进程（B/C/D）返回 409 `engine_unavailable`——不改状态、不假装成功。",
+        "operationId": "im_installation_recover_api_im_installations__installation_id__recover_post",
+        "parameters": [
+          {
+            "name": "installation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Installation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -33100,6 +33483,18 @@
         "title": "PutOVCredentialBody",
         "description": "Issue #2423 M2b：管理端 OV 凭据格子配置体（明文仅入 vault，永不回显）。"
       },
+      "RecoverBody": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action",
+            "default": "retry_now"
+          }
+        },
+        "type": "object",
+        "title": "RecoverBody",
+        "description": "人工恢复动作（Issue #3799）。"
+      },
       "RecoverOrphansBody": {
         "properties": {
           "active_task_ids": {
@@ -35449,8 +35844,7 @@
   "x-changelog": {
     "version": "2.3.0a1",
     "added": [
-      "/api/repos/create-targets",
-      "/api/repos/{provider}/connection"
+      "/api/issues/{issue_id}/pipeline/trigger"
     ],
     "removed": [],
     "deprecated": [
@@ -35458,7 +35852,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 396,
+  "x-endpoint-count": 400,
   "x-groups": [
     "a2a",
     "agents",
@@ -35493,8 +35887,8 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "084561b20",
-  "x-generated-at": "2026-11-23T02:07:42.001490+00:00",
-  "change_reason": "merge arch-weekly-11 80b1b8e92: keep yaw create-targets/connection endpoints together with org scene-catalog/repo-map/patrol endpoints",
-  "updated_at": "2026-11-23T02:07:42.003027+00:00"
+  "x-source-commit": "d6308c884",
+  "x-generated-at": "2026-11-23T12:57:36.512624+00:00",
+  "change_reason": "merge: sync arch-weekly-11 (63f1317be) into arch-weekly-11-ljt — union of both branches' endpoint additions",
+  "updated_at": "2026-11-23T12:57:36.514685+00:00"
 }

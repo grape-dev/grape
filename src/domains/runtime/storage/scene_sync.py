@@ -350,6 +350,15 @@ async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
     return repo_root
 
 
+def _declares_skill_nodes(nodes: list) -> bool:
+    """模板是否声明了技能节点（用于区分「解析失败」与「本来就没有技能」两种空集）。
+
+    `refs` 为空时语义分两种：模板从未声明技能 → 清空引用正确；声明了但解析不出来
+    （技能同步未就绪）→ 必须保留既有绑定，等下一轮自愈。
+    """
+    return any(str(n.get("skill") or "").strip() for n in (nodes or []))
+
+
 def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                              repo_key: str = ""):
     """重建 scene_skill_ref（DELETE + INSERT）。
@@ -413,8 +422,22 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                         "AND scope='user' LIMIT 1", (skill_name,)).fetchone()
                     resolved = row[0] if row else 0
             if resolved == 0:
-                logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
+                # 不写 0：读取侧会把 skill_id=0 当成「技能已删除」，且这条绑定永远不会回填。
+                # 宁可本轮少一条引用（下一轮同步会补齐），也不要落一条无效绑定。
+                logger.warning(
+                    f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, ref skipped")
+                continue
             refs.append({"skill_id": int(resolved), "skill_name": skill_name})
+    if not refs:
+        # 两种「空集」必须分开：
+        #   ① 模板本来就没有技能节点 → 清空引用是正确语义（继续往下走 replace）；
+        #   ② 声明了技能但一个都没解析出来 → 清空会让场景彻底失去引用，保留原状等下一轮自愈。
+        if _declares_skill_nodes(nodes):
+            logger.warning(
+                f"Scene sync: {scene_name} none of the declared skill(s) resolved, "
+                f"existing bindings left untouched")
+            return
+        logger.info(f"Scene sync: {scene_name} declares no skill nodes, clearing scene_skill_ref")
     if _mg_ssr is not None:
         # 三库拓扑：一条幂等意图进 outbox（远端失败可重放），本进程不直写外域表
         _write_scene_skill_ref_via_lib(_mg_ssr, market_id, refs, scene_name)
@@ -456,6 +479,35 @@ def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str
     _scene_id = _mgmt_public.official_scene_id_any(scene_name)
     if _scene_id:
         _rebuild_scene_skill_ref(int(_scene_id), nodes, scene_name, repo_key)
+
+
+def _repair_scene_skill_ref_if_unresolved(scene_name: str, market_id: int, nodes: list,
+                                          repo_key: str = "") -> None:
+    """仅当 scene_skill_ref 里存在未解析引用（skill_id <= 0）时重建绑定。
+
+    场景定义没变时同步会 skipped 并跳过重建，于是**首次同步写入的 skill_id=0 会永久留存**
+    （典型成因：容器首次启动时技能库还没就绪，或跨境拉取技能源失败）。
+    这里每轮做一次零成本检查，让存量坏数据在下一轮同步自愈；没有坏数据时不写库。
+    """
+    if not market_id:
+        return
+    # scene_skill_ref 归属 mgmt 域（configs/table_ownership.json），runtime **不得直读**：
+    # 三库拓扑走 mgmt lib，单库/测试拓扑经 mgmt public 原语（此时本进程即 mgmt 持有者，
+    # 不是跨域读）。直读会触发跨域读棘轮门禁，且三库实例无跨域视图时 SELECT 会 1146 被吞。
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_rep
+    from src.domains.mgmt import public as _mgmt_public_rep
+    _mg_rep = _mgmt_lib_rep(foreign_only=True)
+    try:
+        if _mg_rep is not None:
+            unresolved = int(_mg_rep.count_unresolved_scene_skill_ref(int(market_id)) or 0)
+        else:
+            unresolved = int(_mgmt_public_rep.count_unresolved_scene_skill_ref(int(market_id)) or 0)
+    except Exception as exc:  # noqa: BLE001 - 检查失败不影响同步主流程
+        logger.warning(f"Scene sync: {scene_name} skill ref check failed: {exc}")
+        return
+    if unresolved:
+        logger.info(f"Scene sync: {scene_name} has {unresolved} unresolved skill ref(s), rebuilding bindings")
+        _rebuild_scene_skill_ref(int(market_id), nodes, scene_name, repo_key)
 
 
 def _init_featured_scenes_if_empty():
@@ -688,6 +740,8 @@ async def sync_official_scenes(repo_root: str | None = None):
                     _content_fields["cat_l2_id"] = cat_l2_id
                 market_id, action = _persist_scene_row(name, _content_fields, stats)
                 if action == "skipped":
+                    # 内容没变不重建，但绑定可能是坏的（历史 skill_id=0）→ 检查并自愈
+                    _repair_scene_skill_ref_if_unresolved(name, market_id, nodes)
                     continue
                 _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)
 

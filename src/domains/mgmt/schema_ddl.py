@@ -345,7 +345,15 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now')),
-    created_by      INTEGER DEFAULT 0                    -- 创建者 user_id
+    created_by      INTEGER DEFAULT 0,                   -- 创建者 user_id
+    -- Issue #3800：环境性失败（绑定引擎离线/悬空）退避与熔断状态。
+    -- 落库而非内存态：进程重启后退避仍生效；`circuit_paused` 与 `enabled` 分离，
+    -- 保证「系统自动暂停」可自动解除，而不会抹掉用户主动停用的意图。
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,     -- 连续同因失败次数
+    last_error_code  TEXT DEFAULT '',                    -- 最近一次失败错误码（同因判据）
+    offline_since    TEXT DEFAULT '',                    -- 本次离线/悬空起始时间
+    backoff_until    TEXT DEFAULT '',                    -- 退避截止时间（调度闸门）
+    circuit_paused   INTEGER NOT NULL DEFAULT 0          -- 1=熔断自动暂停（引擎恢复后自愈）
 )
 """
 

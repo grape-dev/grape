@@ -28,7 +28,16 @@ def test_singletons():
     from src.kernel.owner_db import owner_db, owner_lock
     assert owner_db("insight") is owner_db("insight")
     assert owner_lock("runtime") is owner_lock("runtime")
-    assert isinstance(owner_lock("mgmt"), type(threading.RLock()))
+    # Issue #3927：owner_lock 改为可观测包装（InstrumentedLock），仍保持 RLock
+    # 的可重入协议；这里钉住「进程级单例 + with/acquire/release + 可重入」。
+    lock = owner_lock("mgmt")
+    assert hasattr(lock, "acquire") and hasattr(lock, "release")
+    assert lock.acquire(timeout=0.1)
+    assert lock.acquire(timeout=0.1)
+    lock.release()
+    lock.release()
+    with lock:
+        pass
 
 
 def test_fallback_to_process_db_without_dsn(monkeypatch):

@@ -1,5 +1,12 @@
 <template>
   <div class="tsk-page isk">
+    <!-- Issue #3734：会话失效软横幅（保留页面，给明确重新登录入口） -->
+    <div v-if="sessionExpired" class="isk-session-banner">
+      <span>⚠ {{ t('board.session_expired') }}</span>
+      <button class="tsk-btn tsk-btn-primary" @click="relogin">
+        {{ t('board.relogin') }}
+      </button>
+    </div>
     <!-- ═══ 加载/错误态 ═══ -->
     <div v-if="loadError" class="error">{{ loadError }}</div>
     <div v-else-if="!loaded" class="loading">{{ t('loading') }}</div>
@@ -787,6 +794,8 @@ import {
   aggregateBoardTasks,
   decideBoardRound,
 } from '../lib/boardRound.js'
+// Issue #3734：轮询决策纯函数（401 立即停机 / 连续失败降频 / 成功复位）
+import { nextPollAction, pollIntervalFor, POLL_INTERVAL_MS } from '../lib/pollGuard.js'
 
 const G = globalThis
 
@@ -827,6 +836,10 @@ const viewPopover = ref(false)
 const statusExpanded = ref(false)
 const creatorExpanded = ref(false)
 const loadError = ref('')
+// Issue #3734：会话失效态（横幅 + 停轮询）；连续失败计数与当前轮询节奏
+const sessionExpired = ref(false)
+let pollFailures = 0
+let pollIntervalMs = POLL_INTERVAL_MS
 const attachments = reactive({ state: 'idle', list: [] })
 const pipeline = reactive({ loading: false, data: null })
 const deployUrl = ref('')
@@ -856,6 +869,8 @@ const TASK_DEFAULTS = {
   page_title: '需求中心',
   'board.refresh_failed_keep': '看板刷新失败，已保留上次数据',
   'board.retry': '重试',
+  'board.session_expired': '登录已失效，请重新登录',
+  'board.relogin': '重新登录',
   view_mine: '我的需求',
   view_repo_all: '仓库全部',
   view_list: '列表',
@@ -1440,6 +1455,11 @@ function boardFetch(key, opts) {
   if (!repo || !cur) return Promise.resolve()
   const merge = !!(opts && opts.merge)
   const round = (opts && opts.round) || null
+  // Issue #3734：会话已失效时整轮短路（把每轮 5 条 401 压到 1 条），回合照常收敛。
+  if (sessionExpired.value) {
+    if (round) abandonBoardRound(round)
+    return Promise.resolve()
+  }
   const epoch = boardEpoch.value // Issue #2649：捕获回合序号，reset 后过期响应整体丢弃
   if (cur.loading) {
     // Issue #2649（QA 第 2 轮）：列在途时本次取数跳过，但回合必须收敛——否则
@@ -1482,6 +1502,7 @@ function boardFetch(key, opts) {
       if (epoch !== boardEpoch.value) return // Issue #2649：过期回合（then 侧丢弃）
       if (seq !== cur.seq) return // 已被本列更新的请求取代
       cur.loading = false
+      notePollSuccess() // Issue #3734：任一列成功即复位失败计数与 30s 节奏
       const items = d.issues || d.tasks || []
       // 游标推进：整刷（含渐进）与滚动追加都要推进——否则滚到底永远重拉 page=1
       if (!merge || round) cur.page = page + 1
@@ -1512,10 +1533,19 @@ function boardFetch(key, opts) {
         if (round) abandonBoardRound(round)
         return
       }
+      // Issue #3734：401/会话失效 → 收敛回合并立即停轮询（不再等下一个 30s 周期）。
+      // 放在 left-view 守卫之前：api.js 先 showLogin 再广播，_currentView 已清空，
+      // 若被守卫拦掉就看板不会进入失效态（横幅丢失）。
+      if (isAuthError(e) || sessionExpired.value) {
+        if (round) abandonBoardRound(round)
+        markSessionExpired()
+        return
+      }
       if (G.window._currentView !== 'tasks') {
         if (round) abandonBoardRound(round)
         return
       }
+      notePollFailure(e) // Issue #3734：非 401 连续失败达 3 次 → 降频 60s
       if (round) {
         round.failed = true
         round.error = e
@@ -3096,6 +3126,7 @@ function loadTasks(opts) {
         tasksAppendLoading.value = false
         return // stale guard
       }
+      notePollSuccess() // Issue #3734：成功即复位失败计数与 30s 节奏
       tasksAppendLoading.value = false
       tasksLoading.value = false
       const items = d.issues || d.tasks || []
@@ -3218,9 +3249,18 @@ function loadTasks(opts) {
         loaded.value = true
         return
       }
+      // Issue #3734：401/会话失效 → 停轮询 + 会话失效横幅（不再裸发下个周期）。
+      // 置于 left-view 守卫之前：api.js 先 showLogin 再广播，_currentView 已清空。
+      if (isAuthError(e) || sessionExpired.value) {
+        G.window._pendingTaskDetailId = null
+        G.window._deeplinkIssueNumber = null
+        markSessionExpired()
+        return
+      }
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
       G.window._deeplinkIssueNumber = null
+      notePollFailure(e) // Issue #3734：非 401 连续失败达 3 次 → 降频 60s
       loadError.value = t('load_failed', { msg: e.message })
       loaded.value = true
     })
@@ -3334,25 +3374,80 @@ function armLoadWatchdog() {
 function disarmLoadWatchdog() {
   if (_loadWatchdog) { clearTimeout(_loadWatchdog); _loadWatchdog = null }
 }
-function startPoll() {
+// Issue #3734：401 判定（API 层把 401 挂在 e.status 上）
+function isAuthError(e) {
+  return !!e && (e.status === 401 || e.status === '401')
+}
+// Issue #3734：会话失效收敛——停机 + 收敛在途回合 + 展示重新登录横幅（幂等）
+function markSessionExpired() {
+  stopPoll()
+  if (sessionExpired.value) return
+  sessionExpired.value = true
+  loadError.value = ''
+  loaded.value = true
+  if (boardRound.value) abandonBoardRound(boardRound.value)
+}
+// Issue #3734：成功即复位失败计数；若已降频，恢复 30s 节奏（清旧 timer 防双跑）
+function notePollSuccess() {
+  pollFailures = 0
+  if (pollIntervalMs !== POLL_INTERVAL_MS) {
+    pollIntervalMs = POLL_INTERVAL_MS
+    if (pollTimer) armPollTimer()
+  }
+}
+// Issue #3734：失败计数 → 401 停机 / 连续 3 次降频 60s
+function notePollFailure(e) {
+  if (isAuthError(e) || sessionExpired.value) {
+    markSessionExpired()
+    return
+  }
+  pollFailures += 1
+  const action = nextPollAction({
+    status: e && e.status,
+    failures: pollFailures,
+    sessionExpired: sessionExpired.value,
+  })
+  if (action === 'stop') {
+    markSessionExpired()
+    return
+  }
+  if (action === 'degrade') {
+    pollIntervalMs = pollIntervalFor(action)
+    if (pollTimer) armPollTimer()
+  }
+}
+// Issue #3734：按当前节奏挂表（先清旧 timer，确保任何路径都不会双定时器）
+function armPollTimer() {
   if (pollTimer) clearInterval(pollTimer)
-  pollTimer = setInterval(function () {
-    const needRefresh = tasks.value.some(function (tk) {
-      return (
-        ((tk.status === 'active' || tk.status === 'processing') && tk.scene_source !== 'vod') ||
-        tk.status === 'processing'
-      )
-    })
-    if (needRefresh) {
-      // Issue #926：分屏视图只刷新第 1 屏做增量对账，不重置已滚动加载的分屏
-      if (boardPagedView.value) loadBoardAll({ merge: true })
-      else if (serverPagedView.value) loadTasks({ merge: true })
-      else loadTasks()
-    } else {
-      clearInterval(pollTimer)
-      pollTimer = null
-    }
-  }, 30000)
+  pollTimer = null
+  if (!sessionExpired.value) pollTimer = setInterval(pollTick, pollIntervalMs)
+}
+function pollTick() {
+  if (sessionExpired.value) {
+    stopPoll()
+    return
+  }
+  const needRefresh = tasks.value.some(function (tk) {
+    return (
+      ((tk.status === 'active' || tk.status === 'processing') && tk.scene_source !== 'vod') ||
+      tk.status === 'processing'
+    )
+  })
+  if (needRefresh) {
+    // Issue #926：分屏视图只刷新第 1 屏做增量对账，不重置已滚动加载的分屏
+    if (boardPagedView.value) loadBoardAll({ merge: true })
+    else if (serverPagedView.value) loadTasks({ merge: true })
+    else loadTasks()
+  } else {
+    stopPoll()
+  }
+}
+function startPoll() {
+  // Issue #3734：开场复位（重新登录后重启轮询不该继承旧的失效态/失败计数）
+  pollFailures = 0
+  pollIntervalMs = POLL_INTERVAL_MS
+  sessionExpired.value = false
+  armPollTimer()
 }
 function stopPoll() {
   if (pollTimer) {
@@ -3362,6 +3457,8 @@ function stopPoll() {
 }
 // app.js 离开 tasks 时调用（typeof 判空安全，保持函数名契约）
 G.window._stopScenePoll = stopPoll
+// Issue #3734：与 _stopScenePoll 对称——重新登录后 app.js 无需重挂 Vue 组件即可回启轮询
+G.window._startScenePoll = startPoll
 
 // ═══════════ 跨模块桥接（window 契约） ═══════════
 // 批8 EventView「返回需求详情」按钮引用（legacy 从未定义——本批补齐）
@@ -3389,8 +3486,18 @@ watch(serverPagedView, function () {
   })
 })
 
+// Issue #3734：api.js 401 清 token 后广播；看板收到即停机并给出重新登录入口
+function onSessionExpired() {
+  // 不按 _currentView 过滤：api.js 先 showLogin（会清空 _currentView）再广播，
+  // 过滤会导致看板永远进不了失效态、横幅丢失；停机本身幂等且组件重挂会复位。
+  markSessionExpired()
+}
+function relogin() {
+  if (app() && app().showLogin) app().showLogin()
+}
 onMounted(function () {
   G.window._currentView = 'tasks' // renderTasks 入口契约（app.js 已设，防御性再设）
+  G.window.addEventListener('grape:session-expired', onSessionExpired)
   // Issue #341: 纯数字 param 视为深链 issue_number
   if (
     props.initialParam !== undefined &&
@@ -3410,6 +3517,7 @@ onMounted(function () {
   armLoadWatchdog()
 })
 onBeforeUnmount(function () {
+  G.window.removeEventListener('grape:session-expired', onSessionExpired)
   disarmLoadWatchdog()
   stopPoll()
   teardownListObserver()
@@ -4157,6 +4265,23 @@ onBeforeUnmount(function () {
   padding-bottom: 4px;
   flex-shrink: 0;
   min-height: 0;
+}
+/* Issue #3734：会话失效横幅（顶部居中的可点击重新登录入口） */
+.isk-session-banner {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--c-issue) 14%, transparent);
+  color: var(--c-issue);
+  font-size: 12px;
+}
+.isk-session-banner .tsk-btn {
+  padding: 1px 10px;
+  font-size: 12px;
 }
 /* Issue #2649：整刷失败的软横幅（绝对定位于看板顶部，不挤占列宽） */
 .isk-board-banner {

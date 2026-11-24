@@ -13,7 +13,7 @@ from .message import (
 from .capability import Capability
 from .channel import (
     CancelContext, Channel, ChannelConfig, ChannelError, ChannelFactory,
-    InboundHandler, PermanentChannelError,
+    ChannelRegistrationConflict, InboundHandler, PermanentChannelError,
 )
 from .registry import ChannelRegistry, default_registry
 
@@ -22,6 +22,6 @@ __all__ = [
     "InboundMessage", "MediaRef", "OutboundMessage", "ReplyCtx", "SendResult", "Source",
     "Capability",
     "CancelContext", "Channel", "ChannelConfig", "ChannelError", "ChannelFactory",
-    "InboundHandler", "PermanentChannelError",
+    "ChannelRegistrationConflict", "InboundHandler", "PermanentChannelError",
     "ChannelRegistry", "default_registry",
 ]

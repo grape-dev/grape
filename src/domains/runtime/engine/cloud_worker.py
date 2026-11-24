@@ -1094,9 +1094,34 @@ async def _refresh_templates(client, config):
             # register 返回 ids 与 _changed 顺序一致；只回填「新增」条目
             # （老条目 rid 已在心跳列表，重复 append 会致心跳重复）
             _added_names = {r["name"] for r in _changed} - _old_names
-            for r, rid in zip(_changed, _ids or []):
-                if r["name"] in _added_names:
-                    _new_rid_by_name[r["name"]] = rid
+            # Issue #4082（PR #2066 审查 Optional ①）：回包里若有非法 id，client 已逐条过滤，
+            # `_ids` 不再与 `_changed` 位置一一对应——此时改按回包明细的 name 配对，避免 zip 错位
+            # 把 rid 配给别的引擎（老行为是整包失败，不会错配；新行为必须保证不错配）。
+            from src.domains.runtime.engine.agent import _register_partial_ids
+            from src.domains.runtime.engine.runtime_id_guard import parse_runtime_id
+            _partial = _register_partial_ids(client)
+            if _partial:
+                _detail = getattr(client, "last_register_detail", None)
+                _rid_by_name = {}
+                for _d in (_detail if isinstance(_detail, (list, tuple)) else []):
+                    if not isinstance(_d, dict):
+                        continue
+                    _rid = parse_runtime_id(_d.get("id"))
+                    _nm = str(_d.get("name") or "").strip().lower()
+                    if _nm and _rid is not None:
+                        _rid_by_name[_nm] = _rid
+                _added_lc = {str(n).strip().lower() for n in _added_names}
+                for r in _changed:
+                    _nm = str(r["name"]).strip().lower()
+                    if _nm in _added_lc and _nm in _rid_by_name:
+                        _new_rid_by_name[r["name"]] = _rid_by_name[_nm]
+                log.warning(f"template refresh: register reply carried invalid runtime id(s) "
+                            f"{_partial}; mapped new rids by name and will re-register to "
+                            f"backfill the rest")
+            else:
+                for r, rid in zip(_changed, _ids or []):
+                    if r["name"] in _added_names:
+                        _new_rid_by_name[r["name"]] = rid
 
         if _deleted:
             _offline_runtimes = [{"name": n, "version": "", "healthy": False,
@@ -1308,6 +1333,27 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
             await _refresh_task
         except asyncio.CancelledError:
             pass
+
+
+def _startup_engine_by_rid(client, ids, runtimes, device_name):
+    """启动注册后 rid → 引擎实例名：复用 agent 的按 name 配对，并对部分非法 id 落 partial 日志。
+
+    PR #2066 复审 Required：`client.register` 已改为逐条过滤非法 id，回包含非法 id 时
+    `ids` 可能比 `runtimes` 短，旧的 `zip(ids, runtimes)` 会错位把 rid 配给别的引擎
+    （`_backend_for_engine` 据此选后端，错位会把任务派给错误引擎）。`_refresh_templates`
+    与 agent 启动路径已统一为按回包明细 name 配对，此处第三处一并收敛。
+    """
+    from src.domains.runtime.engine.agent import (
+        _engine_by_rid_from_register, _register_partial_ids,
+    )
+    engine_by_rid = _engine_by_rid_from_register(client, ids, runtimes, device_name)
+    partial_ids = _register_partial_ids(client)
+    if partial_ids:
+        log.warning(
+            f"cloud_worker register reply carried invalid runtime id(s) {partial_ids}; "
+            f"mapped rids to engines by name, missing engine(s) will be backfilled "
+            f"by the periodic re-register")
+    return engine_by_rid
 
 
 def main():
@@ -1622,10 +1668,9 @@ def main():
             json.dumps(sorted(runtimes, key=lambda r: r.get("name", "")), sort_keys=True).encode()
         ).hexdigest()
 
-        # rid → 引擎实例名
-        from src.domains.runtime.engine.instances import instance_name
-        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
-                         for rid, r in zip(ids, runtimes)}
+        # rid → 引擎实例名（PR #2066 复审 Required：按回包 name 配对，避免部分非法 id 时
+        # ids 比 runtimes 短导致 zip 错位；与 _refresh_templates / agent 启动路径同口径）
+        engine_by_rid = _startup_engine_by_rid(client, ids, runtimes, device)
         log.info(f"cloud_worker registered: {ids} -> {config['server_url']}, "
                  f"engines={list(engine_by_rid.values())}, "
                  f"provider={config['provider']}, "

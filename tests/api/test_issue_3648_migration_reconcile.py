@@ -272,7 +272,7 @@ def test_list_skills_propagates_schema_error(monkeypatch, caplog):
     monkeypatch.setattr(skills_route._rt_skills, "skill_search", _boom)
     user = {"id": "3648", "username": "t3648", "org_id": "", "auth_type": "jwt"}
     with caplog.at_level("ERROR"), pytest.raises(HTTPException) as exc:
-        skills_route.list_skills(user=user)
+        skills_route.list_skills(user=user, repo="")
     assert exc.value.status_code == 503
     assert any(r.levelname == "ERROR" and "skill_search" in r.getMessage()
                for r in caplog.records), "list_skills 未落 ERROR 日志"
