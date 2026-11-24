@@ -24,6 +24,7 @@ import src.kernel.repo_bot_observability as obs
 import src.kernel.token_resolver as tr
 from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
+from src.kernel.ports import vcs_provider as _vcs_provider
 
 _NS = "x3740"
 
@@ -34,7 +35,7 @@ def _rk(tag=""):
 
 
 def _strategy(rk):
-    return tr.RepoBotToken(tr.create_provider_from_repo_key(rk))
+    return tr.RepoBotToken(_vcs_provider.create_provider_from_repo_key(rk))
 
 
 @pytest.fixture

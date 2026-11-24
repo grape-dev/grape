@@ -196,11 +196,12 @@ def test_stamp_backfill_writes_migration_ledger():
 def test_rc_upsert_invalidates_fetch_cache():
     """rc 写路径（upsert）后，解析缓存立即失效——轮换不必等 TTL。"""
     from src.domains.insight.public import upsert_repo_credential_value
-    from src.kernel.token_resolver import RepoBotToken, create_provider_from_repo_key
+    from src.kernel.token_resolver import RepoBotToken
+    from src.kernel.ports import vcs_provider as _vcs_provider
 
     rk = _rk("rotate")
     _insert_legacy(rk, bot_gitcode_token="tok-legacy-era")
-    strategy = RepoBotToken(create_provider_from_repo_key(rk))
+    strategy = RepoBotToken(_vcs_provider.create_provider_from_repo_key(rk))
     assert strategy.get_token(rk) == "tok-legacy-era"
 
     upsert_repo_credential_value(rk, "bot", "tok-rc-new", "2026-11-22 10:00:00")
