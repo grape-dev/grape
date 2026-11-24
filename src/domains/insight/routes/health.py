@@ -85,7 +85,9 @@ def health():
     engine = {
         "engine_configured": None,
         "engine_provider": "",
-        "engine_base_url": "",
+        # 免鉴权端点不回完整网关地址（可能含私有路径/租户前缀），只回主机名
+        "engine_base_host": "",
+        "engine_probe_ok": None,
         "engine_models": 0,
         "engine_default_model": "",
         "engine_error": "",
@@ -97,8 +99,6 @@ def health():
         _cands = [
             _os.environ.get("ENGINE_STATUS_FILE") or "",
             _os.path.join(_os.environ.get("DEVOPS_DATA_DIR") or "/app/data", "engine-status.json"),
-            _os.path.join(_os.environ.get("GRAPE_ENGINE_HOME") or "/app/data/engine-home",
-                          ".config", "opencode", "engine-status.json"),
         ]
         for _p in _cands:
             if _p and _os.path.exists(_p):
@@ -106,7 +106,13 @@ def health():
                     _d = _json.load(_f) or {}
                 engine["engine_configured"] = bool(_d.get("configured"))
                 engine["engine_provider"] = str(_d.get("provider") or "")
-                engine["engine_base_url"] = str(_d.get("base_url") or "")
+                _raw_base = str(_d.get("base_url") or "")
+                try:
+                    from urllib.parse import urlsplit as _urlsplit
+                    engine["engine_base_host"] = str(_urlsplit(_raw_base).hostname or "")
+                except Exception:  # noqa: BLE001
+                    engine["engine_base_host"] = ""
+                engine["engine_probe_ok"] = _d.get("probe_ok")
                 engine["engine_models"] = int(_d.get("models") or 0)
                 engine["engine_default_model"] = str(_d.get("default_model") or "")
                 engine["engine_error"] = str(_d.get("error") or "")
