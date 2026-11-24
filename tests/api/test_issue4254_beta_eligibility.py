@@ -1,7 +1,7 @@
 """Issue #4254: 内测资格判定（自注册用户 OAuth/PAT 场景内测提示）。
 
 覆盖 `check_beta_eligibility` 的判定分支与 `/api/auth/beta-eligibility` 路由：
-- OAuth 注册用户恒不提示；
+- 判据只看白名单是否命中，与建号来源无关（OAuth 建号但未命中白名单同样提示）；
 - login_whitelist 启用时按绑定身份命中；
 - login_whitelist 关闭时按 signup_whitelist 邮箱/域名命中；
 - 白名单为空 = 无管控（不提示）；
@@ -31,9 +31,19 @@ def _eligibility(monkeypatch, account, identities=None,
     return signup_policy.check_beta_eligibility(account, identities)
 
 
-def test_oauth_registered_user_never_prompted(monkeypatch):
+def test_oauth_registered_user_not_whitelisted_prompts(monkeypatch):
+    """OAuth 建号但没命中白名单，同样要提示去申请内测（与建号来源无关）。"""
     r = _eligibility(monkeypatch, {"created_by_oauth": 1, "email": "a@b.com"},
+                     identities=[{"provider": "gitcode", "external_login": "bob"}],
                      login_enabled=True, login_allowed=False)
+    assert r["is_self_registered"] is False
+    assert r["whitelisted"] is False
+
+
+def test_oauth_registered_user_whitelisted_no_prompt(monkeypatch):
+    r = _eligibility(monkeypatch, {"created_by_oauth": 1, "email": "a@b.com"},
+                     identities=[{"provider": "gitcode", "external_login": "alice"}],
+                     login_enabled=True, login_allowed=True)
     assert r["is_self_registered"] is False
     assert r["whitelisted"] is True
 
@@ -142,15 +152,16 @@ def test_api_route_self_registered_prompts(monkeypatch):
         soft_delete_account(u["id"])
 
 
-def test_api_route_oauth_user_no_prompt(monkeypatch):
-    monkeypatch.setattr(signup_policy, "_is_login_whitelist_enabled", lambda: False)
+def test_api_route_oauth_user_without_whitelist_prompts(monkeypatch):
+    """线上实测口径：created_by_oauth=1 但未命中白名单的账号同样要提示。"""
+    monkeypatch.setattr(signup_policy, "_is_login_whitelist_enabled", lambda: True)
     u, h = _auth_headers(created_by_oauth=1)
     try:
         r = client.get("/api/auth/beta-eligibility", headers=h)
         assert r.status_code == 200
         data = r.json()
         assert data["is_self_registered"] is False
-        assert data["whitelisted"] is True
+        assert data["whitelisted"] is False
     finally:
         from src.domains.mgmt.auth.grape_account_db import soft_delete_account
         soft_delete_account(u["id"])
@@ -210,3 +221,82 @@ def test_profile_returns_created_by_oauth():
     finally:
         from src.domains.mgmt.auth.grape_account_db import soft_delete_account
         soft_delete_account(u["id"])
+
+def test_api_credentials_blocked_for_non_whitelisted(monkeypatch):
+    """未命中白名单用户不得保存凭据（Issue #4254 第二阶段：硬阻断）。"""
+    monkeypatch.setattr(signup_policy, "_is_login_whitelist_enabled", lambda: True)
+    u, h = _auth_headers(created_by_oauth=0)
+    try:
+        r = client.put("/api/settings/credentials", headers=h, json={})
+        assert r.status_code == 403
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "BETA_WHITELIST_REQUIRED"
+        assert detail["apply_url"] == "/beta-apply"
+    finally:
+        from src.domains.mgmt.auth.grape_account_db import soft_delete_account
+        soft_delete_account(u["id"])
+
+
+def test_api_credentials_allowed_for_whitelisted(monkeypatch):
+    """命中白名单用户不受门禁影响（门禁只挡未授权）。"""
+    monkeypatch.setattr(signup_policy, "is_beta_whitelisted_user", lambda user: True)
+    u, h = _auth_headers(created_by_oauth=1)
+    try:
+        r = client.put("/api/settings/credentials", headers=h, json={})
+        assert r.status_code == 200
+    finally:
+        from src.domains.mgmt.auth.grape_account_db import soft_delete_account
+        soft_delete_account(u["id"])
+
+
+def _fake_request(path="/api/auth/callback/gitcode"):
+    from starlette.requests import Request
+    return Request({
+        "type": "http", "method": "GET", "path": path, "raw_path": path.encode(),
+        "headers": [(b"host", b"testserver")], "query_string": b"",
+        "server": ("testserver", 80), "scheme": "http", "client": ("127.0.0.1", 1234),
+        "root_path": "",
+    })
+
+
+def test_oauth_bind_refused_before_any_db_write(monkeypatch):
+    """未命中白名单的第三方身份不得建立绑定：闸必须在任何 DB 读/写之前。"""
+    from src.domains.mgmt.routes import grape_auth
+    from src.domains.mgmt.auth import grape_account_db
+
+    monkeypatch.setattr(grape_auth, "_check_whitelist", lambda p, l: False)
+
+    def _must_not_touch_db(*a, **kw):
+        raise AssertionError("白名单闸之前就访问了 DB")
+
+    monkeypatch.setattr(grape_account_db, "get_external_identity", _must_not_touch_db)
+    resp = grape_auth._handle_oauth_bind(
+        _fake_request(), "gitcode", "ext-4254-1",
+        {"external_login": "bob", "external_name": "Bob"}, "tok", "", "user-uuid", popup=False,
+    )
+    assert resp.status_code == 302
+    assert "oauth_error=WHITELIST" in resp.headers["location"]
+    assert "gitcode" in resp.headers["location"]
+
+
+def test_oauth_bind_allowed_passes_the_gate(monkeypatch):
+    """命中白名单的身份通过闸（后续 DB 行为由绑定流程自己负责）。"""
+    from src.domains.mgmt.routes import grape_auth
+    from src.domains.mgmt.auth import grape_account_db
+
+    monkeypatch.setattr(grape_auth, "_check_whitelist", lambda p, l: True)
+    reached = {}
+
+    def _fake_get_external_identity(*a, **kw):
+        reached["db"] = True
+        return None
+
+    monkeypatch.setattr(grape_account_db, "get_external_identity", _fake_get_external_identity)
+    try:
+        grape_auth._handle_oauth_bind(
+            _fake_request(), "gitcode", "ext-4254-2",
+            {"external_login": "alice", "external_name": "Alice"}, "tok", "", "user-uuid", popup=False,
+        )
+    except Exception:
+        pass  # 后续写入用假 user id 必然失败，只要证明闸已放行到 DB 层即可
+    assert reached.get("db") is True

@@ -141,11 +141,16 @@ def _signup_whitelist_match(email: str) -> "bool | None":
 def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None) -> dict:
     """当前用户的内测资格判定（Issue #4254）。
 
-    - 仅 `created_by_oauth=0`（平台注册入口自注册）的用户才可能被提示；
+    - 判据只看「是否命中内测白名单」，与建号来源无关：平台注册入口自注册
+      （`created_by_oauth=0`）与 OAuth 建号（`created_by_oauth=1`）一视同仁——
+      两者都可能不在白名单里（早期白名单未启用时建的号、换绑过多身份等），
+      漏提示会让这些用户以为能力坏了；
     - login_whitelist 启用时按已绑定第三方身份匹配，否则按邮箱/域名匹配 signup_whitelist；
     - 两个白名单均未启用且为空 → 视为无白名单管控，不提示；
     - 查询异常 → 视为已具备资格（不误提示），并记日志；
     - identities=None 表示身份读取异常（未知态），同样视为已具备资格。
+
+    `is_self_registered` 仅作为展示/统计标记随响应返回，不再参与是否提示的判定。
 
     返回 {"is_self_registered", "whitelisted", "apply_url"}。
     """
@@ -156,10 +161,6 @@ def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None
         "whitelisted": False,
         "apply_url": BETA_APPLY_URL,
     }
-    if not is_self_registered:
-        # OAuth 注册用户不受内测白名单引导影响
-        result["whitelisted"] = True
-        return result
     try:
         if _is_login_whitelist_enabled():
             # 身份读取异常（None）= 未知态，不能当作"无绑定"误判未命中
@@ -186,3 +187,25 @@ def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None
         log.warning(f"check_beta_eligibility failed: {e}")
         result["whitelisted"] = True
         return result
+
+
+def is_beta_whitelisted_user(user: dict) -> bool:
+    """接口层判据（Issue #4254 第二阶段：未命中白名单不予配置凭据）。
+
+    与 `GET /api/auth/beta-eligibility` 同源：读账号 + 活跃身份后委派
+    `check_beta_eligibility`。任何读取异常都返回 True（fail-open）——门禁只做
+    "挡未授权"，不能因 DB 抖动把已授权用户锁在门外。
+    """
+    try:
+        from src.domains.mgmt.auth.grape_account_db import (
+            get_grape_account_by_username, get_user_identities,
+        )
+        acc = get_grape_account_by_username(user.get("username", ""), strict=True)
+        if acc is None:
+            log.warning("is_beta_whitelisted_user: account not found — fail-open")
+            return True
+        identities = get_user_identities(user["id"], strict=True)
+    except Exception as e:
+        log.warning(f"is_beta_whitelisted_user read failed ({type(e).__name__}) — fail-open")
+        return True
+    return bool(check_beta_eligibility(acc, identities).get("whitelisted"))

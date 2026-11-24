@@ -9,7 +9,7 @@
   - 新增 `GET /beta-eligibility`（`operation_id=auth_beta_eligibility`），读取账号 + 活跃身份后委派判定。
 
 ## 前端
-- `AccountView.vue`：`onMounted` 拉取 `/auth/beta-eligibility`，`showBetaHint` 计算属性控制 OAuth 区/PAT 区提示条；入口调用壳内 `G.app.openBetaApply()`（降级跳转 `/static-vue/beta-apply`）。
+- `AccountView.vue`：`onMounted` 拉取 `/auth/beta-eligibility`，`showBetaHint` 计算属性（判据 `whitelisted === false`，不看建号来源）控制 OAuth 区/PAT 区提示条；入口调用壳内 `G.app.openBetaApply()`（降级跳转 `/static-vue/beta-apply`）。
 - `PatDialog.vue` / `BindDialog.vue`：新增 `betaHint` prop（默认 false，其他宿主不受影响），弹窗顶部同步提示条。
 - i18n：`app.account.beta_hint_text` / `app.account.beta_hint_apply`（zh/en）。
 

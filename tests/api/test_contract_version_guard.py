@@ -36,8 +36,26 @@ def test_contract_root_version_is_single_source(contract):
     assert contract["info"]["version"] == cv.CONTRACT_VERSION
 
 
+def _released_snapshots() -> list[dict]:
+    return [
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in (REPO_ROOT / "contracts" / "released").glob("*.json")
+    ]
+
+
+def _latest_released_snapshot() -> dict:
+    snapshots = _released_snapshots()
+    assert snapshots, "contracts/released/ 至少要有一次发布冻结快照（现网版本来源）"
+    return max(snapshots, key=lambda s: s["release_index"])
+
+
 def test_contract_version_is_legal_prerelease_of_production_snapshot(contract):
-    production = json.loads(BASELINE.read_text(encoding="utf-8"))["info"]["version"]
+    # Issue #4254：现网版本的单一来源是发布冻结快照（contracts/released/，按 release_index
+    # 取最新），不是 help/api/openapi-baseline.json —— 后者由 `--update-baseline` 从当前契约
+    # 写盘，必然带着测试线的预发布版本；把它当"现网"会让本用例恒红（2026-11-20~24 在
+    # arch-weekly-11 上红了 4 天，期间 #4254 直接合入）。删侧观察期门禁早已改用发布快照
+    # （src/domains/contracts/deprecation.py），这里与之对齐，保证"现网是什么"只有一个答案。
+    production = _latest_released_snapshot()["version"]
     errors = cv.check_successor(production, contract["info"]["version"])
     assert errors == [], "测试线契约版本必须是从现网版本合法递进的预发布版：" + "; ".join(errors)
     assert cv.is_prerelease(contract["info"]["version"]), (
@@ -97,3 +115,27 @@ def test_version_policy_design_note_exists():
     text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     assert "### 9.1 契约版本号策略" in text, "版本策略正文必须落在 CONTRIBUTING.md §9.1"
     assert "CONTRACT_VERSION" in text, "策略正文必须指向单一事实源实现"
+
+
+# --------------------------------------------------------------------------
+# 现网版本来源护栏（Issue #4254 合并后补）。
+# 回归背景：护栏原先从 help/api/openapi-baseline.json 读"现网版本"，而该文件由
+# `scripts/regenerate_openapi.py --update-baseline` 从当前契约写盘——测试线每重定基
+# 一次就把预发布版本写进去，于是「候选 2.3.0a1 与现网 2.3.0a1 相同 → 未递进」，
+# 版本护栏从 2026-11-20 起恒红 4 天，期间 #4254 直接合入。现改用发布冻结快照作唯一
+# 来源，并在这里钉死快照本身的两条性质，避免"现网版本"再次漂移。
+
+def test_released_snapshots_are_formal_versions_and_monotone():
+    """发布冻结快照只装正式版，release_index 唯一且单调（现网版本的判定基准）。"""
+    snapshots = _released_snapshots()
+    assert snapshots, "contracts/released/ 至少要有一次发布冻结快照（现网版本来源）"
+    for s in snapshots:
+        assert not cv.is_prerelease(s["version"]), (
+            f"发布冻结快照 {s.get('version')} 带预发布后缀——现网只装正式版，"
+            f"预发布请走 CONTRACT_VERSION（测试线），冻结只在转正后做"
+        )
+        assert s.get("paths"), f"发布冻结快照 {s.get('version')} 缺 paths"
+    indexes = [s["release_index"] for s in sorted(snapshots, key=lambda s: s["release_index"])]
+    assert indexes == sorted(set(indexes)), (
+        f"release_index 必须唯一且单调递增，实际={indexes}"
+    )

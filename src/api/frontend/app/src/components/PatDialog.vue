@@ -28,7 +28,7 @@
           <summary>{{ t('how_to_get_token') }}</summary>
           <div>{{ helpSteps }}</div>
         </details>
-        <button class="bt bt-p pd__wide" :disabled="busy" @click="save()">
+        <button class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
           {{ busy ? t('verifying') : t('save') }}
         </button>
       </div>

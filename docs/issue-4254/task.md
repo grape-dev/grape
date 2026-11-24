@@ -6,5 +6,6 @@
 - [x] AccountView OAuth/PAT 区提示与申请入口
 - [x] PatDialog / BindDialog 顶部提示
 - [x] i18n zh/en 文案
+- [x] 凭据保存门禁（未命中白名单 403 + 前端保存置灰）
 - [x] 单元/路由测试
 - [x] OpenAPI 契约/基线重生成、缓存版本棘轮同步

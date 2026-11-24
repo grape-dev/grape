@@ -260,7 +260,7 @@
               </div>
             </div>
             <p class="tx t2 mt8">{{ t('huawei_cloud_desc') }}</p>
-            <button class="bt bt-p mt8" @click="saveCloudCreds">{{ t('save') }}</button>
+            <button class="bt bt-p mt8" :disabled="showBetaHint" @click="saveCloudCreds">{{ t('save') }}</button>
           </div>
         </template>
 
@@ -1926,12 +1926,12 @@ function onModalMask() {
 }
 
 // ── 内测白名单资格（Issue #4254）──
-// 仅自注册（created_by_oauth=0）且未命中白名单的用户展示非阻断提示；
-// 接口异常 / 未返回数据时不提示（不误打扰已授权用户）。
+// 判据只有一条：未命中内测白名单就提示（与建号来源无关——OAuth 建号但不在
+// 白名单的用户同样需要去申请）；接口异常 / 未返回数据时不提示（不误打扰）。
 const betaEligibility = ref({})
 const showBetaHint = computed(function () {
   const b = betaEligibility.value || {}
-  return b.is_self_registered === true && b.whitelisted === false
+  return b.whitelisted === false
 })
 function loadBetaEligibility() {
   G.API.get('/auth/beta-eligibility')
