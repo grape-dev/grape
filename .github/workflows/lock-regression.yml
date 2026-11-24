@@ -24,9 +24,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[all,dev]"
-      - name: Lock & concurrency regression (issue #3927, #3963)
+      - name: Lock & concurrency regression (issue #3927, #3963, #4023)
         # Issue #3963（复审 Required）：本单新增的租约排队/瞬态分类并发用例
         # （test_issue_3963_repo_dispatch_lease.py，含同仓 5 并发 0 busy、busy
         # 不消耗 attempt、direct 派发共用租约预算等 AC）此前未接任何 CI job——
         # 锁原语回归只跑 #3927 两文件，而本单改的正是锁原语与同仓并发，必须进同一门禁。
-        run: python -m pytest tests/runtime/test_3927_lock_scope.py tests/kernel/test_owner_db.py tests/runtime/test_issue_3963_repo_dispatch_lease.py -v
+        # Issue #4023（复审 Required）：基线失败可见性用例
+        # （test_issue_4023_baseline_failure_visibility.py，含 Task failed 日志
+        # 七要素、截断标记、结构化落库、3 次触发/2 次不触发打点、key 归一）
+        # 同口径接入本 job，避免失败可见性回归静默复发。
+        run: python -m pytest tests/runtime/test_3927_lock_scope.py tests/kernel/test_owner_db.py tests/runtime/test_issue_3963_repo_dispatch_lease.py tests/runtime/test_issue_4023_baseline_failure_visibility.py -v
