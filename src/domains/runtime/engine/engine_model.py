@@ -35,6 +35,7 @@ __all__ = [
     "validate_engine_model",
     "probe_engine_model_call",
     "is_model_not_found_error",
+    "split_model_prefix",
     "MODEL_CHECK_DISABLED_ENV",
     "main",
 ]
@@ -150,9 +151,10 @@ def _parse_scalar_or_flow(s: str, warnings: list | None = None):
 def _fallback_parse(text: str, warnings: list | None = None) -> dict:
     """降级 YAML 解析器：覆盖 hermes config.yaml 实际子集。
 
-    支持：缩进嵌套映射 / 标量 / 内联 {k: v} 流映射 / 注释；不支持列表、锚点等
-    ——遇到列表改为记录 warning 并跳过该块（Issue #3874：无法校验 ≠ 配置错误，
-    不再抛异常阻断 worker 安装），由上层输出非阻断提示。
+    支持：缩进嵌套映射 / 标量 / 内联 {k: v} 流映射 / 注释 / **块序列**（`- ` 项，映射或
+    标量）——`fallback_providers` 是列表（Issue #3822：此前整份配置被判「无法解析」→ 跳过
+    校验，2 个 404 id 正是从该缺口漏过）；不支持锚点/多行标量等，遇到即抛 ValueError，
+    由上层按「无法校验」告警（worker 安装不受阻，Issue #3874：无法校验 ≠ 配置错误）。
 
     warnings 为 None 时内部自建列表并把降级提示写 stderr（Issue #3874 审查建议：
     调用方漏传列表时不得整块静默丢弃、无任何信号）。
@@ -170,7 +172,62 @@ def _fallback_parse(text: str, warnings: list | None = None) -> dict:
             raise ValueError("fallback parser does not support tab indentation")
         lines.append((indent, content.strip()))
 
+    def _is_item(content: str) -> bool:
+        return content == "-" or content.startswith("- ")
+
+    def parse_seq(i: int, indent: int):
+        """块序列：`- scalars` / `- {k: v}` / `- k: v` + 同项续行（更深缩进映射）。"""
+        # Issue #3874 非阻断信号兼容：块序列在降级模式下解析成功也保留 warning 提示，
+        # 校验覆盖可能不完整（含 "sequences" 关键字，供既有守门用例断言）。
+        warnings.append(
+            "fallback parser parsed YAML block sequences (line: %r) in degraded mode; "
+            "model validation may be incomplete" % lines[i][1])
+        items = []
+        while i < len(lines):
+            cur_indent, content = lines[i]
+            if cur_indent < indent:
+                break
+            if cur_indent > indent:
+                raise ValueError(f"unexpected indent at line: {content!r}")
+            if not _is_item(content):
+                break
+            rest = content[1:].strip()
+            if not rest:
+                # `-` 后空：子块（映射或下一层序列）
+                if i + 1 < len(lines) and lines[i + 1][0] > indent:
+                    child, i = parse_block(i + 1, lines[i + 1][0])
+                    items.append(child)
+                else:
+                    items.append("")
+                    i += 1
+                continue
+            if rest[0] in "{[":
+                items.append(_parse_scalar_or_flow(rest))
+                i += 1
+                continue
+            k, v = _split_key_value(rest)
+            if not k:
+                items.append(_unquote(rest))       # `- scalar`
+                i += 1
+                continue
+            item = {}
+            if v:
+                item[_unquote(k)] = _parse_scalar_or_flow(v)
+                i += 1
+            else:
+                item[_unquote(k)] = {}
+                i += 1
+            # 同一项的其余键（`- provider: p1` 之后的 `  model: m1` 等）
+            if i < len(lines) and lines[i][0] > indent and not _is_item(lines[i][1]):
+                more, i = parse_block(i, lines[i][0])
+                if isinstance(more, dict):
+                    item.update(more)
+            items.append(item)
+        return items, i
+
     def parse_block(i: int, indent: int):
+        if i < len(lines) and lines[i][0] == indent and _is_item(lines[i][1]):
+            return parse_seq(i, indent)
         result = {}
         while i < len(lines):
             cur_indent, content = lines[i]
@@ -178,14 +235,8 @@ def _fallback_parse(text: str, warnings: list | None = None) -> dict:
                 break
             if cur_indent > indent:
                 raise ValueError(f"unexpected indent at line: {content!r}")
-            if content.startswith("- "):
-                warnings.append(
-                    "fallback parser cannot parse YAML sequences (line: %r); "
-                    "that block is skipped and model validation may be incomplete" % content)
-                i += 1
-                while i < len(lines) and lines[i][0] > cur_indent:
-                    i += 1
-                continue
+            if _is_item(content):
+                raise ValueError("fallback parser: sequence item inside mapping block")
             k, v = _split_key_value(content)
             if not k:
                 raise ValueError(f"cannot parse line: {content!r}")
@@ -258,6 +309,84 @@ def _resolve_gateway(model_cfg: dict, cfg: dict, env) -> tuple[str, str]:
                 api_key = _resolve_entry_key(p, env, key_env_first=True)
                 base_url = base_url or str(p.get("api") or "").strip().rstrip("/")
     return base_url, api_key
+
+
+def _resolve_provider_gateway(provider_name: str, cfg: dict, env) -> tuple[str, str]:
+    """`providers.<name>` 条目的网关（`api` + `key_env`/`api_key`），缺失返回空串。"""
+    providers = cfg.get("providers") or {}
+    if not isinstance(providers, dict) or not provider_name:
+        return "", ""
+    p = providers.get(provider_name)
+    if not isinstance(p, dict):
+        return "", ""
+    url = str(p.get("api") or p.get("base_url") or "").strip().rstrip("/")
+    return url, _resolve_entry_key(p, env, key_env_first=True)
+
+
+def _fallback_entries(cfg: dict, warnings: list) -> list[dict]:
+    """`fallback_providers`（主）+ 旧键 `fallback_model`（兜底）的有效条目。
+
+    与 hermes `get_fallback_chain` 同口径：两者都是列表或单对象；按
+    `(provider, model, base_url)` 去重，`fallback_providers` 顺序优先。
+    Issue #3822：此前 fallback 链完全不参与校验，本机 2 个 404 id 正是从该缺口漏过。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for key in ("fallback_providers", "fallback_model"):
+        raw = cfg.get(key)
+        if isinstance(raw, str) and raw.strip():
+            # 旧键 `fallback_model` 的历史写法是裸模型名标量；同样纳入校验（网关回落主网关）
+            candidates = [{"model": raw.strip()}]
+        elif isinstance(raw, dict):
+            candidates = [raw]
+        elif isinstance(raw, list):
+            candidates = raw
+        else:
+            if raw not in (None, "", [], {}):
+                warnings.append("%s 不是列表/映射，已跳过（格式无法识别）" % key)
+            continue
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                warnings.append("%s 含非映射条目，已跳过" % key)
+                continue
+            provider = str(entry.get("provider") or "").strip()
+            model = str(entry.get("model") or "").strip()
+            if not model:
+                continue
+            base_url = str(entry.get("base_url") or "").strip().rstrip("/")
+            ident = (provider.lower(), model.lower(), base_url.lower())
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append({"provider": provider, "model": model,
+                        "base_url": base_url, "raw": entry})
+    return out
+
+
+def _resolve_fallback_gateway(entry: dict, cfg: dict, env, default_url: str,
+                              default_key: str) -> tuple[str, str]:
+    """fallback 条目的网关：条目自带 base_url → 只用条目自己的 key（不借主网关 key）。
+
+    独立网关没有可解析 key 时返回空 key，由 `_target` 告警并跳过该网关——绝不把主网关的
+    key 发到第三方 base_url（凭证串用）。仅当条目没有独立网关（回落主网关/providers 段）时
+    才允许借用默认 key。
+    """
+    raw = entry.get("raw") or {}
+    base_url = entry.get("base_url") or ""
+    api_key = _resolve_entry_key(raw, env, key_env_first=False)
+    if not api_key:
+        api_key_env = str(raw.get("api_key_env") or "").strip()
+        if api_key_env:
+            api_key = env.get(api_key_env, "")
+    if base_url:
+        # 同一网关（base_url 与主网关一致）可沿用主 key；第三方网关绝不借 key（凭证串用）
+        if not api_key and default_url and base_url.rstrip("/") == default_url.rstrip("/"):
+            api_key = default_key
+        return base_url, api_key
+    p_url, p_key = _resolve_provider_gateway(entry.get("provider") or "", cfg, env)
+    if p_url:
+        return p_url, (api_key or p_key)
+    return default_url, (api_key or default_key)
 
 
 def read_hermes_model_config(hermes_home: str | None = None, env: dict | None = None) -> dict | None:
@@ -344,6 +473,14 @@ def read_hermes_model_config(hermes_home: str | None = None, env: dict | None = 
         t = _target(c_url, c_key)
         if t and c_model not in t["models"]:
             t["models"].append(c_model)
+
+    # Issue #3822：fallback 链（fallback_providers + 旧 fallback_model）纳入校验——
+    # 主模型对齐不代表 fallback 对齐，错位的 fallback 一旦被选中即 100% Model not found。
+    for entry in _fallback_entries(cfg, warnings):
+        f_url, f_key = _resolve_fallback_gateway(entry, cfg, env, base_url, api_key)
+        t = _target(f_url, f_key)
+        if t and entry["model"] not in t["models"]:
+            t["models"].append(entry["model"])
 
     return {"config_path": config_path, "default_model": default_model,
             "targets": targets, "warnings": warnings}
@@ -597,6 +734,72 @@ def _opencode_models(provider: dict) -> list[str]:
     return out
 
 
+def split_model_prefix(model: str, provider_ids=None) -> tuple[str, str]:
+    """`provider/model-id` → `(provider, bare)`；无前缀（或前缀不是已知 provider）→ `("", model)`。
+
+    Issue #3822：网关 `/v1/models` 只认**裸 id**（`glm-5.3`），带 provider 前缀的写法
+    （`opengw/glm-5.3`）会 HTTP 404 `Model not found`；而 opencode 本地按裸 id 查 provider 的
+    `models` 映射，键写成 `opengw/glm-5.3` 时本地先报 `Model not found: opengw/glm-5.3`。
+    两个比对口径都必须以裸 id 为准，否则会出现「网关清单里有、却报 Model not found」。
+
+    `provider_ids` 为空表示「不做白名单校验」（首段即前缀）；非空时仅当首段在集合内才拆，
+    避免把自带 `/` 的模型名（`org/model-x`）误归一。
+    """
+    raw = str(model or "").strip()
+    head, sep, rest = raw.partition("/")
+    if not sep or not head or not rest:
+        return "", raw
+    if provider_ids is None:
+        return head, rest
+    try:
+        known = {str(p).strip().lower() for p in provider_ids if str(p).strip()}
+    except TypeError:
+        known = set()
+    if not known or head.lower() in known:
+        return head, rest
+    return "", raw
+
+
+def _opencode_candidate_paths() -> list[str]:
+    base = os.path.expanduser("~/.config/opencode")
+    return [os.path.join(base, n) for n in ("opencode.json", "opencode.jsonc")]
+
+
+def _peek_opencode_model(path: str) -> str:
+    """尽力读取某份 opencode 配置的顶层 `model`（失败/无值返回空串，不抛）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        try:
+            cfg = json.loads(raw)
+        except ValueError:
+            cfg = json.loads(_strip_jsonc(raw))
+        return str((cfg or {}).get("model") or "").strip() if isinstance(cfg, dict) else ""
+    except Exception:
+        return ""
+
+
+def _pick_opencode_config(path: str, explicit: str | None) -> tuple[str, str]:
+    """两份配置（`opencode.json` / `opencode.jsonc`）并存时的取用口径。
+
+    Issue #3822 实测：同一台机器上 `opencode.json` 有完整 provider/model，`opencode.jsonc`
+    只有 `$schema` 空壳；反之也有仅维护 jsonc 的主机（SRE 轨 A 整改的正是 jsonc）。
+    `opencode_config_path` 的固定顺序（json 优先）会在「生效配置其实是 jsonc」的主机上
+    读到空壳 → 校验结论与实际运行期不符（可能误拒/漏报）。故：显式路径不动；非显式时
+    **优先取有顶层 model 的那份**，两份都有 model 则维持既有顺序（json 优先）。
+
+    返回 `(chosen, other)`：`other` 为另一份存在的文件路径（无则空串）。
+    """
+    if explicit:
+        return path, ""
+    candidates = _opencode_candidate_paths()
+    others = [p for p in candidates if os.path.isfile(p) and p != path]
+    other = others[0] if others else ""
+    if other and not _peek_opencode_model(path) and _peek_opencode_model(other):
+        return other, path
+    return path, other
+
+
 def read_opencode_model_config(config_path: str | None = None,
                                env: dict | None = None) -> dict | None:
     """读取 opencode 模型配置，返回与 hermes 同构的校验视角（Issue #3820）。
@@ -615,6 +818,8 @@ def read_opencode_model_config(config_path: str | None = None,
     path = opencode_config_path(config_path)
     if not os.path.isfile(path):
         return None
+    chosen, alt = _pick_opencode_config(path, config_path)
+    path = chosen
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
@@ -623,22 +828,45 @@ def read_opencode_model_config(config_path: str | None = None,
         except ValueError:
             cfg = json.loads(_strip_jsonc(raw))
     except Exception as e:
-        return {"config_path": path, "default_model": "", "targets": [],
+        return {"config_path": path, "default_model": "", "targets": [], "local_issues": [],
                 "warnings": ["cannot parse opencode config (%s); validation skipped" % e]}
     if not isinstance(cfg, dict):
-        return {"config_path": path, "default_model": "", "targets": [],
+        return {"config_path": path, "default_model": "", "targets": [], "local_issues": [],
                 "warnings": ["opencode config root is not an object; validation skipped"]}
-
-    raw_model = str(cfg.get("model") or "").strip()
-    provider_id, sep, model_id = raw_model.partition("/")
-    if not sep:
-        provider_id, model_id = "", raw_model
-    default_model = model_id.strip()
 
     providers_cfg = cfg.get("provider")
     providers: dict = providers_cfg if isinstance(providers_cfg, dict) else {}
+    provider_ids = {str(k) for k in providers}
+
+    raw_model = str(cfg.get("model") or "").strip()
+    provider_id, default_model = split_model_prefix(raw_model, provider_ids)
+    if not provider_id:
+        # Issue #3822 审查 Required：顶层 `model` 恒为 opencode 的 `provider/model-id` 写法，
+        # provider 段未在 `provider` 块声明（内置 provider 形态，如 `deepseek/<id>`）时
+        # split 会原样保留整串 → 探活/比对把带前缀名发给网关 → 404 Model not found 误判
+        # unhealthy。此处仍剥前缀取裸 id，provider_id 留空（跳过「provider not found」误告警）。
+        head, sep, rest = raw_model.partition("/")
+        if sep and head and rest:
+            default_model = rest
+    default_model = default_model.strip()
+
     targets: list[dict] = []
     warnings: list[str] = []
+    if alt:
+        warnings.append("检测到两份 opencode 配置（%s / %s），本次按生效的一份（%s）校验；"
+                        "两份不一致时请人工确认实际生效配置" % (path, alt, path))
+    #: Issue #3822 本地查表类诊断（网关清单对齐 ≠ 运行期可用）：
+    #:   prefixed_key       —— `models` 键重复 provider 前缀（opencode 本地按裸 id 查表）
+    #:   undeclared_default —— default 裸 id 未在该 provider 的 `models` 声明
+    local_issues: list[dict] = []
+
+    #: default 无 provider 前缀且配置里只有一个 provider（opencode 允许省略前缀）时，
+    #: 本地查表仍落在这个唯一 provider 的 `models` 映射上——按它做 undeclared_default 判定。
+    declared_provider = provider_id
+    if not declared_provider and default_model:
+        _dict_providers = [str(k) for k, v in providers.items() if isinstance(v, dict)]
+        if len(_dict_providers) == 1:
+            declared_provider = _dict_providers[0]
 
     def _target(base_url: str, api_key: str) -> dict | None:
         if not base_url:
@@ -661,9 +889,25 @@ def read_opencode_model_config(config_path: str | None = None,
         options: dict = opts_cfg if isinstance(opts_cfg, dict) else {}
         base_url = str(options.get("baseURL") or options.get("base_url") or "").strip().rstrip("/")
         api_key = _resolve_opencode_key(options.get("apiKey") or options.get("api_key"), env)
-        models = _opencode_models(provider)
-        if pid == provider_id and default_model and default_model not in models:
-            models.insert(0, default_model)
+        raw_models = _opencode_models(provider)
+        models: list[str] = []
+        for raw_id in raw_models:
+            # Issue #3822 前缀归一：`opengw/<id>` 与 `<id>` 是同一模型（比对口径取裸 id）；
+            # 但键本身带重复 provider 前缀时 opencode 本地查表会失败 → 记录可执行诊断。
+            prefix, bare = split_model_prefix(raw_id, {pid})
+            if prefix and bare:
+                local_issues.append({"code": "prefixed_key", "provider": pid,
+                                     "configured": raw_id, "expected": bare})
+                models.append(bare)
+            else:
+                models.append(raw_id)
+        declared = {m for m in models if m}
+        if str(pid).lower() == str(declared_provider).lower() and default_model:
+            if declared and default_model not in declared:
+                local_issues.append({"code": "undeclared_default", "provider": pid,
+                                     "model": default_model, "declared": sorted(declared)})
+            if default_model not in models:
+                models.insert(0, default_model)
         target = _target(base_url, api_key)
         if target:
             for model in models:
@@ -672,7 +916,7 @@ def read_opencode_model_config(config_path: str | None = None,
 
     if not default_model:
         warnings.append("opencode config model is empty; default model is not validated")
-    elif provider_id and provider_id not in providers:
+    elif provider_id and not any(str(p).lower() == str(provider_id).lower() for p in providers):
         warnings.append("opencode provider '%s' not found; default model is not validated"
                         % provider_id)
     else:
@@ -683,7 +927,7 @@ def read_opencode_model_config(config_path: str | None = None,
                     targets.insert(0, targets.pop(idx))
                 break
     return {"config_path": path, "default_model": default_model,
-            "targets": targets, "warnings": warnings}
+            "targets": targets, "warnings": warnings, "local_issues": local_issues}
 
 
 def _engine_model_config(engine_name: str, config_path: str | None = None,
@@ -727,6 +971,40 @@ def _misaligned_message(engine_name: str, detail: list) -> str:
     return "；".join(parts)
 
 
+def _local_issues_message(engine_name: str, cfg: dict, detail: list | None = None) -> str:
+    """本地查表类诊断的差异文案（Issue #3822）：配置原值 + 建议值 + 网关可用列表。
+
+    这类问题网关 `/v1/models` 看起来「有模型」，但 opencode 运行期本地按裸 id 查 provider 的
+    `models` 映射会直接 `Model not found: <provider>/<id>`——必须在注册期判死并给出可执行改写。
+    """
+    issues = [i for i in (cfg.get("local_issues") or []) if isinstance(i, dict)]
+    if not issues:
+        return ""
+    parts = []
+    for it in issues:
+        if it.get("code") == "prefixed_key":
+            parts.append(
+                "provider '%s' 的 models 键 '%s' 重复 provider 前缀（本地只认裸 id，"
+                "运行期会报 Model not found: %s），应改为 '%s'"
+                % (it.get("provider", ""), it.get("configured", ""),
+                   it.get("configured", ""), it.get("expected", "")))
+        elif it.get("code") == "undeclared_default":
+            parts.append(
+                "default 模型 '%s' 未在 provider '%s' 的 models 中声明"
+                "（本地查表会报 Model not found: %s/%s），请把该 id 加入 models 或在已声明模型中改选"
+                % (it.get("model", ""), it.get("provider", ""),
+                   it.get("provider", ""), it.get("model", "")))
+    available: list[str] = []
+    for d in detail or []:
+        if d.get("status") in ("ok", "misaligned"):
+            available.extend(d.get("available") or [])
+    msg = "%s 本地模型查表配置错误（运行期必报 Model not found，非上游抖动）：%s" % (
+        engine_name, "；".join(parts))
+    if available:
+        msg += "；网关可用=%s" % ", ".join(sorted({m for m in available if m}))
+    return msg
+
+
 def validate_engine_model(engine_name: str, config_path: str | None = None,
                           env: dict | None = None, fetch=None,
                           timeout: float = GATEWAY_TIMEOUT) -> dict:
@@ -758,8 +1036,18 @@ def validate_engine_model(engine_name: str, config_path: str | None = None,
     status = _check_status(check)
     out["status"] = status
     warnings = [w for w in (cfg.get("warnings") or []) if w]
+    # Issue #3822：本地查表类诊断（前缀重复 / default 未声明）——网关清单可能对齐，
+    # 但运行期依然 100% Model not found，故同样判 misaligned（真错位才拒，不误拒）。
+    local_msg = _local_issues_message(name, cfg, out["detail"])
     if status == "misaligned":
         out["message"] = _misaligned_message(name, out["detail"])
+        if local_msg:
+            out["message"] = (out["message"] + "；" + local_msg) if out["message"] else local_msg
+        if warnings:
+            out["message"] += "；" + "；".join(warnings)
+    elif local_msg:
+        out["status"] = "misaligned"
+        out["message"] = local_msg
         if warnings:
             out["message"] += "；" + "；".join(warnings)
     elif status == "unreachable":
@@ -804,6 +1092,9 @@ def probe_engine_model_call(engine_name: str, config_path: str | None = None,
         diff = _misaligned_message(name, check.get("detail") or [])
         if diff:
             message += "；" + diff
+        loc = _local_issues_message(name, cfg, check.get("detail") or [])
+        if loc:
+            message += "；" + loc
     except Exception as e:
         message += "；(/v1/models 对照不可用: %s)" % e
     return False, detail, message
