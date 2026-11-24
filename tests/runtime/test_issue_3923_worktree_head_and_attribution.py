@@ -424,3 +424,93 @@ class TestFailureSceneLifecycle:
         }
         assert repogit.worktree_last_failure(RK, issue_num="3923",
                                              agent_type="coding") == {}
+
+    def test_fetch_failure_text_survives_later_worktree_add_failure(
+            self, _unavailable_attribution, monkeypatch):
+        """fetch 失败现场不得被随后的 worktree add 覆盖，也不得被空仓断言抹掉。
+
+        Issue #3923 复审 Required：`ensure_repo_base` 记 repo_base 后回落到既有
+        裸仓，`worktree add` 再失败时旧实现覆盖同一键 → 401/网络原文丢失；错误面
+        又先做「本地 0 refs → empty_repo」短路，把真因替换成「仓库没有提交」。
+        """
+        # 本地 refs 为 0（fetch 失败的真实后果），空仓断言此时不成立
+        monkeypatch.setattr(repogit, "repo_base_has_refs", lambda rk: False)
+        repogit._record_worktree_failure(
+            RK, repogit.WORKTREE_STAGE_BASE,
+            "fatal: unable to access 'https://gitcode.com/owner/repo.git/': "
+            "The requested URL returned error: 401",
+            issue_num="3923", agent_type="coding")
+        # 随后 worktree add 也失败（同一任务键）：低优先级阶段不得顶掉真因
+        repogit._record_worktree_failure(
+            RK, repogit.WORKTREE_STAGE_ADD,
+            "fatal: 'origin/main' is not a commit and a branch could not be created",
+            issue_num="3923", agent_type="coding")
+
+        scene = repogit.worktree_last_failure(RK, issue_num="3923", agent_type="coding")
+        assert scene["stage"] == repogit.WORKTREE_STAGE_BASE, scene
+        assert "error: 401" in scene["stderr"], "fetch 原文必须保留"
+
+        err = repogit.worktree_failure_error(RK, issue_num="3923", agent_type="coding")
+        assert "基线 fetch/clone 失败" in err, err
+        assert "error: 401" in err, err
+        assert "git worktree add 失败" not in err, err
+        assert "empty_repo" not in err, (
+            "有 repo_base 现场时空仓断言不得成立（会抹掉 401 原文）: %s" % err)
+        blk = agent_mod.worktree_block_result("t_3923", RK, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk
+        assert "empty_repo" not in blk["_error"], blk
+
+    def test_real_empty_repo_still_reports_empty_repo(self, _unavailable_attribution,
+                                                      monkeypatch):
+        """真实空仓（无 repo_base 现场）仍返回 empty_repo——修复不得把这条吞掉。"""
+        monkeypatch.setattr(repogit, "repo_base_has_refs", lambda rk: False)
+        assert repogit.worktree_last_failure(RK, issue_num="3923",
+                                             agent_type="coding") == {}
+        err = repogit.worktree_failure_error(RK, issue_num="3923", agent_type="coding")
+        assert err.startswith("empty_repo"), err
+        blk = agent_mod.worktree_block_result("t_3923", RK, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk
+        assert blk["_error"].startswith("empty_repo"), blk
+
+    def test_build_exception_records_scene_and_blocks(
+            self, _unavailable_attribution, tmp_path, monkeypatch):
+        """issue_dir 父路径不可建（普通文件）→ 记录 worktree_build_exception 并阻断。
+
+        Issue #3923 复审 Required：`os.makedirs` 旧在 try 之外，异常直接冒到
+        agent 的宽 except，只 WARNING 一条 → 任务无工作区继续执行。
+        """
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a dir", encoding="utf-8")
+        monkeypatch.setattr(repogit, "issue_dir_for",
+                            lambda rk, agent, num: str(blocker / "deep" / f"issue-{num}"))
+
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3923") is None
+        scene = repogit.worktree_last_failure(RK, issue_num="3923", agent_type="coding")
+        assert scene, "目录不可建必须记录失败现场"
+        assert scene["stage"] == repogit.WORKTREE_STAGE_BUILD_EXCEPTION, scene
+        assert "dir create failed" in scene["stderr"], scene
+        err = repogit.worktree_failure_error(RK, issue_num="3923", agent_type="coding")
+        assert err and "建树过程异常" in err, err
+        blk = agent_mod.worktree_block_result("t_3923", RK, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk
+
+    def test_ensure_issue_worktree_exception_records_scene_and_blocks(
+            self, _unavailable_attribution, monkeypatch):
+        """建树函数内部异常（except 兜底）同样必须写现场并阻断。"""
+        def _boom(*_a, **_kw):
+            raise RuntimeError("askpass write exploded")
+
+        monkeypatch.setattr(repogit, "_write_askpass", _boom)
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3926") is None
+        scene = repogit.worktree_last_failure(RK, issue_num="3926", agent_type="coding")
+        assert scene, "建树异常必须记录失败现场"
+        assert scene["stage"] == repogit.WORKTREE_STAGE_BUILD_EXCEPTION, scene
+        assert "ensure_issue_worktree exception" in scene["stderr"], scene
+        err = repogit.worktree_failure_error(RK, issue_num="3926", agent_type="coding")
+        assert err and "askpass write exploded" in err, err
+        blk = agent_mod.worktree_block_result("t_3926", RK, issue_num="3926",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk

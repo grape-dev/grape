@@ -2020,6 +2020,34 @@ def ensure_bare_head(base: str, preferred_branch: str = "", token: str = "",
     return out
 
 
+# 建树失败阶段（写进错误面的「已执行到哪一步」，只陈述事实）
+WORKTREE_STAGE_ADD = "worktree_add"
+WORKTREE_STAGE_HEAD_REPAIR = "worktree_add_head_repair"
+WORKTREE_STAGE_BASE = "repo_base"
+# 建树函数自身抛异常/目录建不出来（os.makedirs、_write_askpass 等）的出口：
+# 这类失败没有 git stderr 可透传，但同样**必须**留下现场，否则任务不阻断。
+WORKTREE_STAGE_BUILD_EXCEPTION = "worktree_build_exception"
+
+# 阶段 → 事实措辞（Issue #3923 审查 Required）：阶段名不能一律渲染成
+# 「git worktree add 失败」，否则 repo_base（clone/fetch 失败）会被误述。
+_WORKTREE_STAGE_FAILURE_TEXT = {
+    WORKTREE_STAGE_BASE: "基线 fetch/clone 失败",
+    WORKTREE_STAGE_ADD: "git worktree add 失败",
+    WORKTREE_STAGE_HEAD_REPAIR: "HEAD 自愈后重试仍失败",
+    WORKTREE_STAGE_BUILD_EXCEPTION: "建树过程异常（目录/文件系统）",
+}
+
+# 阶段优先级（Issue #3923 复审 Required）：同一任务键**不全量覆盖**。
+# base（init/fetch）失败先于 worktree add，后者覆盖会把 401/网络原文抹掉；
+# 优先级低的新现场不得顶掉已记录的更高优先级现场（同等优先级允许后写覆盖，
+# 例如同一次调用内 add → head_repair 的推进）。数值越大越接近根因。
+WORKTREE_STAGE_PRIORITY = {
+    WORKTREE_STAGE_BASE: 3,
+    WORKTREE_STAGE_HEAD_REPAIR: 2,
+    WORKTREE_STAGE_ADD: 1,
+    WORKTREE_STAGE_BUILD_EXCEPTION: 1,
+}
+
 # 最近一次建树失败的现场（供失败后的错误面透传 git 原文与失败阶段）
 # key = `<repo_key>|<issue>|<agent>`（无 issue/agent 时用 repo_key）；只保留最近一次，
 # 避免无限增长。**不存 token/凭据**。
@@ -2035,7 +2063,20 @@ _LAST_WORKTREE_FAILURE_REPO_TTL = 900
 def _record_worktree_failure(repo_key: str, stage: str, stderr: str,
                              head_repair: dict = None, issue_num=None,
                              agent_type: str = "") -> None:
-    _LAST_WORKTREE_FAILURE[_failure_key(repo_key, issue_num, agent_type)] = {
+    key = _failure_key(repo_key, issue_num, agent_type)
+    prev = _LAST_WORKTREE_FAILURE.get(key) or {}
+    prev_stage = prev.get("stage") or ""
+    # Issue #3923 复审 Required：同一键按阶段优先级保留现场。一次建树里
+    # `ensure_repo_base` 失败（401/网络原文）先写入，随后回落到既有裸仓再
+    # `worktree add` 又失败——旧实现直接覆盖，把真正的 git 原文抹掉。
+    if prev_stage and (WORKTREE_STAGE_PRIORITY.get(stage, 0)
+                       < WORKTREE_STAGE_PRIORITY.get(prev_stage, 0)):
+        log.info(f"repogit keep earlier failure scene repo={repo_key or '-'} "
+                 f"issue={issue_num or '-'} agent={agent_type or '-'} "
+                 f"kept_stage={prev_stage} dropped_stage={stage} "
+                 f"dropped_stderr={(stderr or '')[:160]}")
+        return
+    _LAST_WORKTREE_FAILURE[key] = {
         "stage": stage,
         "stderr": (stderr or "").strip()[:600],
         "head_repair": dict(head_repair or {}),
@@ -2128,7 +2169,8 @@ def repo_base_has_refs(repo_key: str) -> "bool | None":
     return bool((r.stdout or "").strip())
 
 
-def worktree_credential_error(repo_key: str, token_result=None) -> str:
+def worktree_credential_error(repo_key: str, token_result=None,
+                              failure_scene=None) -> str:
     """建树失败后的凭据归因（Issue #3713）：返回 `<code>: <message>`，否则空串。
 
     为什么需要：token 取空 → mirror refs=0 → `git worktree add` 失败 → 平台只看得到
@@ -2149,11 +2191,18 @@ def worktree_credential_error(repo_key: str, token_result=None) -> str:
 
     `token_result`：调用方已跑过一次 `resolve_exec_token` 时传入，避免单次阻断
     把同一条凭据链重复解析（Issue #3923 审查 Optional）。
+
+    `failure_scene`：本任务已记录的失败现场（`worktree_last_failure` 的结果）。
+    空仓断言只在「**没有** repo_base 阶段现场」时成立——fetch/init 失败本身就会
+    让本地 `refs/remotes/origin` 为 0，此时空仓是失败的**结果**而非原因，再报
+    `empty_repo` 会把 401/网络原文抹掉（Issue #3923 复审 Required）。
     """
     if not repo_key:
         return ""
-    # 空仓优先：远端 0 分支时凭据再好也建不出树 —— 先把事实说清，不归因到凭据
-    if repo_base_has_refs(repo_key) is False:
+    scene_stage = (failure_scene or {}).get("stage") or ""
+    # 空仓优先：远端 0 分支时凭据再好也建不出树 —— 先把事实说清，不归因到凭据。
+    # 但已有 repo_base 阶段现场时不得短路：那是 git 侧失败的后果，原文才是真因。
+    if scene_stage != WORKTREE_STAGE_BASE and repo_base_has_refs(repo_key) is False:
         return ("empty_repo: 仓库还没有任何提交（远端 0 条分支）；"
                 "请先在仓库放置一个初始提交后再派任务（这不是凭据问题）")
     try:
@@ -2180,22 +2229,8 @@ def worktree_credential_error(repo_key: str, token_result=None) -> str:
     return (f"credential_{stage}: {hint}；建树取 token 为空，本轮无法 clone/fetch")
 
 
-# 建树失败阶段（写进错误面的「已执行到哪一步」，只陈述事实）
-WORKTREE_STAGE_ADD = "worktree_add"
-WORKTREE_STAGE_HEAD_REPAIR = "worktree_add_head_repair"
-WORKTREE_STAGE_BASE = "repo_base"
-
-# 阶段 → 事实措辞（Issue #3923 审查 Required）：阶段名不能一律渲染成
-# 「git worktree add 失败」，否则 repo_base（clone/fetch 失败）会被误述。
-_WORKTREE_STAGE_FAILURE_TEXT = {
-    WORKTREE_STAGE_BASE: "基线 fetch/clone 失败",
-    WORKTREE_STAGE_ADD: "git worktree add 失败",
-    WORKTREE_STAGE_HEAD_REPAIR: "HEAD 自愈后重试仍失败",
-}
-
-
 def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
-                           token_result=None) -> str:
+                           token_result=None, failure_scene=None) -> str:
     """建树失败的错误面（Issue #3923）：凭据归因成立才报凭据，否则透传 git 原文。
 
     worker 侧不做 repo token 归因（无装配层），因此这里的主路径是「如实上报」：
@@ -2207,11 +2242,19 @@ def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
 
     `token_result`：调用方已解析过凭据链时传入，凭据归因与归因备注复用同一结果，
     单次阻断只解析一次（Issue #3923 审查 Optional）。
+
+    `failure_scene`：调用方已读过的失败现场，传入即不再重复读（也便于先读现场
+    再问凭据的次序在单一入口处可见，Issue #3923 复审 Required）。
     """
-    cred = worktree_credential_error(repo_key, token_result=token_result)
+    # 先读现场、再问凭据：空仓断言与凭据归因都要能看见「git 侧已经失败在哪一步」，
+    # 否则 fetch 失败导致的本地 0 refs 会被渲染成 empty_repo / 凭据问题。
+    fail = (failure_scene if failure_scene is not None
+            else worktree_last_failure(repo_key, issue_num=issue_num,
+                                       agent_type=agent_type))
+    cred = worktree_credential_error(repo_key, token_result=token_result,
+                                     failure_scene=fail)
     if cred:
         return cred
-    fail = worktree_last_failure(repo_key, issue_num=issue_num, agent_type=agent_type)
     if not fail:
         return ""
     stage = fail.get("stage") or WORKTREE_STAGE_ADD
@@ -2286,7 +2329,18 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     if not base:
         return None
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
-    os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
+    # Issue #3923 复审 Required：目录建不出来（父路径是普通文件/磁盘满/权限）
+    # 必须在**本函数内**写失败现场。旧实现把 makedirs 放在 try 之外，异常一路
+    # 冒到 agent 的宽 except 只 WARNING 一条 → 无现场 → 任务在无工作区状态下继续跑。
+    try:
+        os.makedirs(os.path.dirname(issue_dir), exist_ok=True)
+    except Exception as e:  # noqa: BLE001 - 失败已记录，按不可建树处理
+        log.warning(f"repogit worktree dir create failed {repo_key}: {e}")
+        _record_worktree_failure(
+            repo_key, WORKTREE_STAGE_BUILD_EXCEPTION,
+            f"ensure_issue_worktree dir create failed: {e}",
+            issue_num=issue_num, agent_type=agent_type)
+        return None
     branch = f"feat/issue-{issue_num}"
     # #2514：基线只解析一次并贯穿全函数（标记 baseline / 新建起点 / 闸门同一口径）
     base_branch, requested_branch, _fb_reason = _resolve_base_branch(
@@ -2496,6 +2550,13 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             raise
         except Exception as e:
             log.warning(f"repogit worktree failed {repo_key}: {e}")
+            # Issue #3923 复审 Required：建树自身的异常出口必须写现场——
+            # 旧实现只 warn 后 return None，agent 侧宽 except 再吞一条 → 无现场 →
+            # worktree_block_result 返回 None → 任务无工作区继续执行。
+            _record_worktree_failure(
+                repo_key, WORKTREE_STAGE_BUILD_EXCEPTION,
+                f"ensure_issue_worktree exception: {e}",
+                issue_num=issue_num, agent_type=agent_type)
             return None
 
 

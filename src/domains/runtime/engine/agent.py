@@ -3423,7 +3423,8 @@ def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
     return {"_error": f"{code}: {exc}", "_started": False}
 
 
-def credential_block_result(tid: str, repo_key: str, token_result=None) -> "dict | None":
+def credential_block_result(tid: str, repo_key: str, token_result=None,
+                            failure_scene=None) -> "dict | None":
     """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
 
     为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
@@ -3437,10 +3438,13 @@ def credential_block_result(tid: str, repo_key: str, token_result=None) -> "dict
         凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
 
     `token_result`：调用方已解析过凭据链时传入，避免同一阻断重复解析。
+    `failure_scene`：已记录的建树失败现场——有 repo_base 阶段现场时空仓断言不成立
+    （fetch 失败的后果），必须优先透传 git 原文（Issue #3923 复审 Required）。
     """
     from src.domains.runtime.engine import repogit
 
-    reason = repogit.worktree_credential_error(repo_key, token_result=token_result)
+    reason = repogit.worktree_credential_error(repo_key, token_result=token_result,
+                                               failure_scene=failure_scene)
     if not reason:
         return None
     log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
@@ -3465,13 +3469,20 @@ def worktree_block_result(tid: str, repo_key: str, issue_num=None,
     # Issue #3923 审查 Optional：一次阻断只解析一次凭据链，结果下传给
     # 凭据归因与错误面（原实现会重复解析 3 次，失败路径成本被放大）。
     token_result = resolve_exec_token(repo_key)
+    # Issue #3923 复审 Required：**先读现场、再问凭据**。空仓断言只在没有
+    # repo_base 阶段现场时成立（fetch/init 失败会让本地 0 refs，此时空仓是
+    # 失败的后果，不是原因）；否则 401/网络原文会被 empty_repo 抹掉。
+    scene = repogit.worktree_last_failure(repo_key, issue_num=issue_num,
+                                          agent_type=agent_type)
     # 凭据归因成立（确实无凭据/空仓）→ 沿用既有阻断语义与文案
-    cred = credential_block_result(tid, repo_key, token_result=token_result)
+    cred = credential_block_result(tid, repo_key, token_result=token_result,
+                                   failure_scene=scene)
     if cred:
         return cred
     reason = repogit.worktree_failure_error(repo_key, issue_num=issue_num,
                                             agent_type=agent_type,
-                                            token_result=token_result)
+                                            token_result=token_result,
+                                            failure_scene=scene)
     if not reason:
         return None
     log.error(f"task {tid} blocked by worktree failure: {reason} repo_key={repo_key or ''}")
@@ -3641,8 +3652,11 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     from src.domains.runtime.vcs.platform_card import PlatformCardMissingError as _PlatformCardMissing
+    from src.domains.runtime.engine import repogit
+    _wt_repo_key = task.get("repo_key") or ""
+    _wt_agent = task.get("agent_type") or ""
+    _num = None
     try:
-        from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
@@ -3675,7 +3689,18 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         _res.dispose()
         return platform_card_block_result(tid, task.get("repo_key") or "", _pc_err)
     except Exception as e:
-        log.warning(f"git worktree ensure failed: {e}")
+        # Issue #3923 复审 Required：建树异常不得只 WARNING 一条就放行——旧行为让
+        # agent 在无工作区状态下继续执行、自述降级交付，正是本 Issue 要消灭的形态。
+        log.error(f"git worktree ensure failed: {e}")
+        if repogit.is_git_agent(_wt_agent) and task.get("issue_session_id"):
+            _blocked = worktree_block_result(tid, _wt_repo_key, issue_num=_num,
+                                             agent_type=_wt_agent)
+            if not _blocked:
+                # 异常发生在失败现场落盘之前（如 repo_base_dir 自身抛错）：
+                # 仍按不可建树阻断，错误面如实带异常原文。
+                _blocked = {"_error": f"worktree_failed: {e}", "_started": False}
+            _res.dispose()
+            return _blocked
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
     # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
     # token 解析 env 优先 → 本地 Repo.bot_token 回退
