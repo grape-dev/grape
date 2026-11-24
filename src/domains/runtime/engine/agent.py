@@ -3332,6 +3332,30 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
     return None
 
 
+# Issue #4203：每个 tid 的网络错误连续 flush 窗口计数（达到阈值即把批次落盘，
+# 防止内存 batch 在 OOM SIGKILL 下丢失；成功送达即清零）
+_msg_flush_retry_streak: dict[str, int] = {}
+
+
+def _persist_failed_batch(tid: str, batch: list) -> None:
+    """把未能送达的消息批次逐条截断后落本地持久化补报队列（Issue #4203）。
+
+    复用 Issue #975 的 kind=messages 条目格式（task_id 带 #msg- 后缀、截断防 413），
+    由 _report_replay_loop 周期重放；任何异常吞掉——落盘失败时调用方仍保留 batch。
+    """
+    import time as _time
+    try:
+        from src.domains.runtime.engine.message_report import truncate_message, build_msg_entry_id
+        q = _report_queue()
+        _ts = _time.time()
+        for i, m in enumerate(batch):
+            q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                   "task": tid, "message": truncate_message(m)})
+        log.info(f"task {tid} report batch persisted for replay: {len(batch)} message(s)")
+    except Exception as e:
+        log.warning(f"task {tid} report batch persist failed: {e}")
+
+
 async def _flush_report_batch(client, tid: str, batch: list) -> str:
     """批量上报一批消息（Issue #975 三态处理）。
 
@@ -3339,9 +3363,15 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     - "ok"      批次已送达（或已走降级：拆批重发/占位/补报队列），可清空 batch
     - "retry"   网络错误（可重试）——保留 batch，下个 flush 窗口重试，不清空不丢
     - "terminal" 任务已被服务端标终态（410），调用方应中断执行
+
+    Issue #4203：网络错误连续 N 个 flush 窗口（GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER，
+    默认 3）仍失败时，批次逐条截断后落本地持久化补报队列并返回 "ok"——内存 batch
+    在进程被 SIGKILL（OOM kill）时必然丢失（004 事故 28 条消息回执的成因），
+    落盘后由 _report_replay_loop 退避续投。
     """
     from src.domains.runtime.engine.client import ReportBatchError
     from src.domains.runtime.engine.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    global _msg_flush_retry_streak
     try:
         _resp = await client.report_messages(tid, batch)
     except ReportBatchError as e:
@@ -3368,10 +3398,12 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
             except Exception as _qe:
                 log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
                 return "retry"
+        _msg_flush_retry_streak.pop(tid, None)
         return "ok"
     except CredentialRevokedError:
         raise
     if _resp is None:
+        _msg_flush_retry_streak.pop(tid, None)
         return "terminal"
     if isinstance(_resp, dict) and _resp.get("status") == "ok":
         # 服务端回执带 seq 范围（seq_start/seq_end）——记录累计已确认 seq 供对账
@@ -3379,8 +3411,20 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
         if _seq_end is not None:
             log.info(f"task {tid} messages acknowledged: count={len(batch)} "
                      f"seq_range={_resp.get('seq_start')}..{_seq_end}")
+        _msg_flush_retry_streak.pop(tid, None)
         return "ok"
-    # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
+    # 网络错误（{}）：连续 N 个窗口仍失败 → 落盘后清空（Issue #4203：内存 batch
+    # 在 SIGKILL 下必丢，持久化后交由补报重放循环续投）；未达阈值保留 batch 下个
+    # 窗口重试（不清空，防止静默丢失）。
+    _streak = _msg_flush_retry_streak.get(tid, 0) + 1
+    _persist_after = int(os.environ.get("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "3"))
+    if _streak >= max(1, _persist_after):
+        _persist_failed_batch(tid, batch)
+        _msg_flush_retry_streak.pop(tid, None)
+        return "ok"
+    _msg_flush_retry_streak[tid] = _streak
+    log.warning(f"task {tid} report batch network error (streak={_streak}/"
+                f"{max(1, _persist_after)}), keeping batch for retry")
     return "retry"
 
 
