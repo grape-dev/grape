@@ -255,6 +255,43 @@ def test_gateway_file_without_runtime_location_warns_not_silent_pass():
     assert "grape.conf" in c.detail
 
 
+def test_runtime_location_without_proxy_pass_warns_not_silent_pass():
+    """runtime location 没有 proxy_pass 时无法断言，必须 warn 而非静默 PASS。"""
+    conf = """
+    upstream grape_worker { server 127.0.0.1:38083; }
+    server { location /api/runtime/ { return 404; } }
+    """
+    c = dp.check_upstream_role(conf, source="conf:/etc/nginx/conf.d/grape.conf")
+    assert c.ok
+    assert "WARN" in c.detail
+    assert "无 proxy_pass" in c.detail
+    assert "grape.conf" in c.detail
+
+
+def test_runtime_upstream_unix_socket_warns_not_silent_pass():
+    """upstream 只含 unix socket（无 host:port）时给 warn，不静默 PASS。"""
+    conf = """
+    upstream grape_worker { server unix:/run/grape-worker.sock; }
+    server { location /api/runtime/ { proxy_pass http://grape_worker; } }
+    """
+    c = dp.check_upstream_role(conf)
+    assert c.ok
+    assert "WARN" in c.detail
+    assert "无可解析 server" in c.detail
+
+
+def test_runtime_upstream_server_without_port_warns_not_silent_pass():
+    """upstream server 缺端口（无法归属到 worker 端口）时给 warn，不静默 PASS。"""
+    conf = """
+    upstream grape_worker { server 127.0.0.1 max_fails=3; }
+    server { location /api/runtime/ { proxy_pass http://grape_worker; } }
+    """
+    c = dp.check_upstream_role(conf)
+    assert c.ok
+    assert "WARN" in c.detail
+    assert "无可解析 server" in c.detail
+
+
 def test_parse_ports_rejects_invalid_values():
     """--ports 非法值（非整数/未知角色/越界端口）必须 ValueError，CLI 退出码 2。"""
     for spec in ("worker=abc", "bogus=1", "worker=70000"):

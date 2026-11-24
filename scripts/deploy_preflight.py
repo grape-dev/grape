@@ -456,7 +456,14 @@ def check_upstream_role_sources(sources: list[NginxSource],
             file_results.append(f"{src.label}: WARN(无 /api/runtime*)")
             continue
         before = len(problems)
+        before_warn = len(warnings)
+        role_checked: list[str] = []
+        port_checked = False
         for loc in runtime_locs:
+            if not loc.proxies:
+                warnings.append(
+                    f"{src.label}: {loc.pattern} (L{loc.line}) 无 proxy_pass，无法断言上游归属")
+                continue
             for raw, line in loc.proxies:
                 servers, name = _resolve_proxy(raw, upstreams)
                 if servers is None:
@@ -464,21 +471,40 @@ def check_upstream_role_sources(sources: list[NginxSource],
                         f"{src.label}: {loc.pattern} (L{loc.line}) proxy_pass {raw} (L{line}) "
                         "无法解析上游（upstream 未定义或地址缺少端口）")
                     continue
+                if not servers:
+                    warnings.append(
+                        f"{src.label}: {loc.pattern} (L{loc.line}) upstream={name} "
+                        "无可解析 server（unix socket 或无端口），无法断言上游归属")
+                    continue
                 for srv in servers:
                     if _is_container_host(srv.host):
+                        role_checked.append(f"{name}:{srv.host}")
                         if not _targets_role(name, srv.host, "worker"):
                             problems.append(
                                 f"{src.label}: {loc.pattern} (L{loc.line}) upstream={name} "
                                 f"server {srv.host}:{srv.port} 容器拓扑未指向 worker 角色"
                                 "（upstream/主机名需含 worker）")
-                    elif srv.port != expected:
-                        where = f"server L{srv.line}" if srv.line else f"L{line}"
-                        problems.append(
-                            f"{src.label}: {loc.pattern} (L{loc.line}) upstream={name} "
-                            f"server {srv.host}:{srv.port} ({where}) 期望 worker:{expected}")
-        if len(problems) == before:
-            file_results.append(
-                f"{src.label}: PASS({len(runtime_locs)} 个 /api/runtime* → worker:{expected})")
+                    else:
+                        port_checked = True
+                        if srv.port != expected:
+                            where = f"server L{srv.line}" if srv.line else f"L{line}"
+                            problems.append(
+                                f"{src.label}: {loc.pattern} (L{loc.line}) upstream={name} "
+                                f"server {srv.host}:{srv.port} ({where}) 期望 worker:{expected}")
+        if len(problems) == before and len(warnings) == before_warn:
+            if role_checked and not port_checked:
+                file_results.append(
+                    f"{src.label}: PASS({len(runtime_locs)} 个 /api/runtime* → worker 角色"
+                    f"，容器拓扑按服务名校验: {', '.join(sorted(set(role_checked)))})")
+            elif role_checked:
+                file_results.append(
+                    f"{src.label}: PASS({len(runtime_locs)} 个 /api/runtime* → worker"
+                    f"（容器按服务名、回环按 {expected} 端口校验）)")
+            else:
+                file_results.append(
+                    f"{src.label}: PASS({len(runtime_locs)} 个 /api/runtime* → worker:{expected})")
+        elif len(problems) == before:
+            file_results.append(f"{src.label}: WARN(无法断言上游归属)")
         else:
             file_results.append(f"{src.label}: FAIL")
 

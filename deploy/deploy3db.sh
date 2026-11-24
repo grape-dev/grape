@@ -141,7 +141,7 @@ start_one() {
 # 会让 claim/install 405/502 且 error 日志刷屏；非 0 一律中止部署。
 if ! "$PY" scripts/verify_nginx_upstream.py; then
   echo "[3db] FAIL: 网关 /api/runtime* 上游归属校验未通过（见上），已中止部署。" >&2
-  echo "[3db]       跳过校验可用 GRAPE_NGINX_CONF 指向正确配置；过渡端口用 GRAPE_PROCESS_PORTS。" >&2
+  echo "[3db]       可用 GRAPE_NGINX_CONF 指定待检的网关配置；过渡端口用 GRAPE_PROCESS_PORTS。" >&2
   exit 1
 fi
 
