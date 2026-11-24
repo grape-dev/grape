@@ -9,6 +9,7 @@ from src.kernel.ports import engines as _engines
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 from src.kernel.ports import plugins as _plugins
+from src.kernel.ports import repos as _repos
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -1019,6 +1020,53 @@ def _build_plugin_capability_section(repo_key: str, agent_type: str = "",
     )
     return "\n".join(lines)
 
+
+# Issue #4301（Spec AC5）：任务文本里出现 .github/workflows 即视为「涉及工作流」。
+# 少数派路径写法（Windows 分隔符）一并收纳；非工作流任务零注入。
+_WORKFLOWS_TASK_RE = re.compile(r"\.github\s*[/\\]\s*workflows", re.IGNORECASE)
+# 产出 Spec/方案 的 agent 才需要在「动手前」拿到阻断提示（AC5 的 spec 阶段）。
+_SPEC_STAGE_AGENT_TYPES = ("issue", "coding")
+
+
+def _build_workflows_blocker_section(repo_key: str, agent_type: str = "",
+                                     task_text: str = "") -> str:
+    """Issue #4301 Spec AC5：spec/方案组装阶段注入 workflows 权限阻断提示。
+
+    消费 ``repo_manager.workflows_capability_blocker``（经 ``repos`` 端口，
+    kernel 不直接 import domains）：仅当
+      ① 产出 Spec/方案 的 agent（issue / coding）；
+      ② 任务文本涉及 ``.github/workflows``；
+      ③ 仓库绑定用户的凭据域**明确**无 workflow 写权限（三态 False）
+    时返回阻断段；其余（有权限 / 未知 / 无绑定 / 读失败）返回空串，不阻断。
+    """
+    if agent_type not in _SPEC_STAGE_AGENT_TYPES:
+        return ""
+    if not repo_key or ":" not in str(repo_key) or not task_text:
+        return ""
+    if not _WORKFLOWS_TASK_RE.search(task_text):
+        return ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider = parse_repo_key(repo_key)[0]
+        user_id = str(_tokens.get_host_user_id(repo_key) or "")
+        # 0/'' = 该仓库未绑定托管用户 → 无凭据域可查（不阻断）
+        if user_id in ("", "0"):
+            return ""
+        blocker = _repos.workflows_capability_blocker(user_id, provider, True)
+    except Exception as _e:
+        _log_safe("debug", f"prompt_builder: workflows blocker probe failed: {_e}")
+        return ""
+    if not blocker:
+        return ""
+    return (
+        "\n## Spec Stage Capability Blocker (workflows)\n"
+        "本任务涉及 `.github/workflows`，平台已预检该仓库绑定凭据的 workflow 写能力：\n"
+        f"{blocker}\n"
+        "MUST: 在需求/Spec 与方案阶段就写明该前置条件与阻断风险（不要等到编码完成后的 "
+        "`git push` 才暴露失败），并在交办编码前告知用户需要补齐凭据权限。\n"
+    )
+
+
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
                  agent_type=""):
     number = extract_event_number(evt['payload'])
@@ -1036,10 +1084,14 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                       ensure_ascii=False)
     parts = []
     evt_type = evt.get("type", "event")
+    # Issue #4301（Spec AC5）：任务文本原文（未截断的 body 也参与 workflows 判定）
+    _wf_text_parts = [str(issue_data.get("title", "") or ""),
+                       str(issue_data.get("body", issue_data.get("description", "")) or "")]
 
     # A2A context injection —— Issue 编号放在最主要位置
     a2a_ctx = evt.get("_a2a_context", "")
     if a2a_ctx:
+        _wf_text_parts.append(str(a2a_ctx))
         issue_num = evt.get("issue_id", "") or ""
         if issue_num:
             parts.append(f"## Task Issue: {issue_num}\n")
@@ -1070,6 +1122,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         note = ""
         if isinstance(payload.get("object_attributes"), dict):
             note = payload["object_attributes"].get("note", "")
+        if note:
+            _wf_text_parts.append(str(note))
         prefix = f"User commented on issue #{number} of {repo}" if number is not None else f"User commented on {repo}"
         parts.append(prefix)
         if note:
@@ -1223,6 +1277,13 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                 _log.warning(f"plugin capability section injection failed: {_e}")
             except Exception:
                 pass
+
+    # Issue #4301（Spec AC5）：spec/方案组装阶段注入 workflows 能力阻断提示。
+    # 只看 evt 自带 repo_key（A2A 事件 source='a2a' 时拼接键会指向错误仓库）。
+    _wf_section = _build_workflows_blocker_section(
+        _rk, agent_type=agent_type, task_text=" ".join(_wf_text_parts))
+    if _wf_section:
+        parts.append(_wf_section)
 
     parts.append("\n## Role Definition\n" + build_role_definition(skills, agent_type=agent_type, repo_key=_rk))
 

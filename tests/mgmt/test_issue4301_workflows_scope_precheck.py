@@ -212,3 +212,156 @@ def test_blocker_blocks_only_when_explicitly_forbidden():
 
     set_credential(f"{NS}unk", "github_pat", {"token": "t", "login": "l"})
     assert not rm.workflows_capability_blocker(f"{NS}unk", "github", True)
+
+
+# ---------- Spec AC5：阻断提示接入 spec/方案汇编（PR#2135 复审 Required） ----------
+
+def _spec_evt(body: str) -> dict:
+    return {
+        "type": "issue_opened",
+        "repository": "owner/repo",
+        "source": "github",
+        "repo_key": "github:owner/repo",
+        "issue_id": "4301",
+        "payload": {"issue": {"number": 4301,
+                              "title": "Bug: create GitHub Actions pipeline",
+                              "body": body}},
+    }
+
+
+def _bind_repo_user(monkeypatch, user_id=f"{NS}repo"):
+    """把 repo_key 的绑定用户指到测试凭据域（真实链路 = managed_repos.host_user_id）。"""
+    monkeypatch.setattr("src.kernel.ports.tokens.get_host_user_id",
+                        lambda rk: user_id)
+    return user_id
+
+
+def test_spec_prompt_injects_blocker_for_workflow_task(monkeypatch):
+    """凭据明确无 workflow 权限 + 任务涉及 .github/workflows → spec 阶段提示进 prompt。"""
+    from src.kernel import prompt_builder as pb
+    uid = _bind_repo_user(monkeypatch)
+    set_credential(uid, "github_pat", {"token": "t", "login": "l",
+                                       "workflows_write": False})
+
+    prompt = pb.build_devops_agent_prompt(
+        _spec_evt("需要新增 .github/workflows/deploy.yml"), [], "", ["issue"],
+        agent_type="issue")
+
+    assert "## Spec Stage Capability Blocker (workflows)" in prompt
+    assert "缺少 workflow 权限" in prompt
+    # 提示须落在 Role Definition 之前（spec/方案阶段的早期诊断，不混进角色段）
+    assert prompt.index("Spec Stage Capability Blocker") < prompt.index("## Role Definition")
+
+
+def test_spec_prompt_no_blocker_when_credential_has_permission(monkeypatch):
+    from src.kernel import prompt_builder as pb
+    uid = _bind_repo_user(monkeypatch)
+    set_credential(uid, "github_pat", {"token": "t", "login": "l",
+                                       "workflows_write": True})
+    prompt = pb.build_devops_agent_prompt(
+        _spec_evt("需要新增 .github/workflows/deploy.yml"), [], "", ["issue"],
+        agent_type="issue")
+    assert "Spec Stage Capability Blocker" not in prompt
+
+
+def test_spec_prompt_no_blocker_when_task_unrelated(monkeypatch):
+    from src.kernel import prompt_builder as pb
+    uid = _bind_repo_user(monkeypatch)
+    set_credential(uid, "github_pat", {"token": "t", "login": "l",
+                                       "workflows_write": False})
+    prompt = pb.build_devops_agent_prompt(
+        _spec_evt("修复 README 排版"), [], "", ["issue"], agent_type="issue")
+    assert "Spec Stage Capability Blocker" not in prompt
+
+
+def test_spec_prompt_no_blocker_for_unknown_or_unbound(monkeypatch):
+    """未知态（细粒度 PAT 不落键）/ 仓库未绑定用户 → 不阻断。"""
+    from src.kernel import prompt_builder as pb
+    uid = _bind_repo_user(monkeypatch)
+    set_credential(uid, "github_pat", {"token": "t", "login": "l"})
+    assert not pb._build_workflows_blocker_section(
+        "github:owner/repo", "issue", ".github/workflows/x.yml")
+    # 未绑定（0 哨兵）
+    monkeypatch.setattr("src.kernel.ports.tokens.get_host_user_id", lambda rk: 0)
+    set_credential(f"{NS}repo2", "github_pat", {"token": "t", "login": "l",
+                                                "workflows_write": False})
+    assert not pb._build_workflows_blocker_section(
+        "github:owner/repo", "issue", ".github/workflows/x.yml")
+
+
+def test_blocker_section_scoped_to_spec_stage_agents(monkeypatch):
+    """只有产出 Spec/方案 的 agent 注入；无前缀 repo_key 不猜平台。"""
+    from src.kernel import prompt_builder as pb
+    uid = _bind_repo_user(monkeypatch)
+    set_credential(uid, "github_pat", {"token": "t", "login": "l",
+                                       "workflows_write": False})
+    assert not pb._build_workflows_blocker_section(
+        "github:owner/repo", "qa", ".github/workflows/x.yml")
+    assert not pb._build_workflows_blocker_section(
+        "owner/repo", "issue", ".github/workflows/x.yml")
+    assert not pb._build_workflows_blocker_section(
+        "github:owner/repo", "issue", "")
+    assert pb._build_workflows_blocker_section(
+        "github:owner/repo", "issue", "path: .github\\workflows\\ci.yml")
+
+
+# ---------- 真实 provider 响应头捕获链路（复审 Optional：FakeProvider 未覆盖） ----------
+
+class _HeaderCaptureCard:
+    provider = "github"
+    api_base = "https://api.github.invalid"
+    api_auth = "bearer"
+    dialect = "github"
+    name = "GitHub"
+    ca_bundle = ""
+
+
+class _FakeUpstreamResp:
+    def __init__(self, headers, payload):
+        import json as _json
+        self.headers = headers
+        self.status = 200
+        self._raw = _json.dumps(payload).encode()
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_generic_provider_captures_scopes_header(monkeypatch):
+    """GenericVcsProvider._http → last_response_headers → verify_token_scopes 单次往返。"""
+    import src.kernel.upstream_http as uh
+    from src.domains.mgmt.vcs.base import GenericVcsProvider
+
+    seen = {"calls": 0}
+
+    def _fake_open(req, **kwargs):
+        seen["calls"] += 1
+        return _FakeUpstreamResp({"x-oauth-scopes": "repo, admin:repo_hook, workflow"},
+                                 {"id": 1, "login": "lg1"})
+
+    monkeypatch.setattr(uh, "open_with_policy", _fake_open)
+    provider = GenericVcsProvider(_HeaderCaptureCard())
+    assert provider.last_response_headers is None
+    info, scopes = provider.verify_token_scopes("ghp_tok")
+    assert info.get("login") == "lg1"
+    assert scopes == "repo, admin:repo_hook, workflow"
+    assert seen["calls"] == 1, "verify_token_scopes 必须复用 /user 的同一次往返"
+
+
+def test_generic_provider_without_scopes_header_yields_none(monkeypatch):
+    """细粒度 PAT：响应头无 x-oauth-scopes → None（未知态，不阻断绑定）。"""
+    import src.kernel.upstream_http as uh
+    from src.domains.mgmt.vcs.base import GenericVcsProvider
+
+    monkeypatch.setattr(uh, "open_with_policy",
+                        lambda req, **kw: _FakeUpstreamResp({}, {"id": 2, "login": "lg2"}))
+    provider = GenericVcsProvider(_HeaderCaptureCard())
+    info, scopes = provider.verify_token_scopes("github_pat_x")
+    assert info.get("login") == "lg2"
+    assert scopes is None
