@@ -781,11 +781,16 @@ def _run_git_retry(args: list, token: str = "", timeout: int = 900,
             delay *= 2
     return last
 
-def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
+def ensure_repo_base(repo_key: str, token: str = "", issue_num=None,
+                     agent_type: str = "") -> str | None:
     """确保本机 bare 基线存在并刷新（每机懒建立）。
 
     用 `git init --bare` + refspec 拉取到 `refs/remotes/origin/*`，而非 `--mirror`：
     mirror 会把 per-Issue 本地分支 refs/heads/feat/issue-* 误当远程跟踪引用，被 `fetch --prune` 误删。
+
+    Issue #3923：``issue_num``/``agent_type`` 下传后，init/remote add/fetch/异常各失败
+    路径直接把现场写到 (repo, issue, agent) 三元组键——并发任务各自持有自己的 git
+    原文，互不覆盖；不传时回落仓级键（历史行为）。
     """
     base = repo_base_dir(repo_key)
     url = clone_url_for(repo_key)
@@ -823,10 +828,21 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
                 r = _run_git_retry(["init", "--bare", base], token=token, scheme=_scheme,
                               provider=_provider, username=_clone_user)
                 if r is None or r.returncode != 0:
-                    log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
+                    _stderr = (r.stderr if r is not None else "git exec failed") or ""
+                    log.warning(f"repogit init failed {repo_key}: {_stderr[:300]}")
+                    # Issue #3923：init 失败同样写失败现场——不写会导致
+                    # worktree_failure_error 为空、任务不阻断而在无工作区状态继续执行
+                    _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                             issue_num=issue_num, agent_type=agent_type)
                     return None
-                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme,
+                r = _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token, scheme=_scheme,
                                 provider=_provider, username=_clone_user)
+                if r is None or r.returncode != 0:
+                    _stderr = (r.stderr if r is not None else "git exec failed") or ""
+                    log.warning(f"repogit remote add failed {repo_key}: {_stderr[:300]}")
+                    _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                             issue_num=issue_num, agent_type=agent_type)
+                    return None
             r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*",
                                 "+refs/tags/*:refs/tags/*"], token=token, scheme=_scheme,
                                provider=_provider, username=_clone_user)
@@ -834,7 +850,8 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
                 _stderr = (r.stderr if r is not None else "git exec failed") or ""
                 log.warning(f"repogit fetch failed {repo_key}: {_stderr[:300]}")
                 # Issue #3923：建树失败要能透传 git 原文与失败阶段（不落 not_configured）
-                _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr)
+                _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, _stderr,
+                                         issue_num=issue_num, agent_type=agent_type)
                 return None
             # Issue #3923：裸仓 HEAD 必须在 refs/heads/* 下。历史现场里 HEAD 被写成
             # `ref: refs/remotes/origin/<baseline>`（远程跟踪引用），此后每次
@@ -848,6 +865,9 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
             return base
         except Exception as e:
             log.warning(f"repogit ensure_repo_base failed {repo_key}: {e}")
+            # Issue #3923：异常兜底同样写失败现场，不得静默返回 None
+            _record_worktree_failure(repo_key, WORKTREE_STAGE_BASE, f"ensure_repo_base exception: {e}",
+                                     issue_num=issue_num, agent_type=agent_type)
             return None
 
 def ensure_repo_base_multi(linked_repos: list, token: str = "", env: dict = None) -> dict:
@@ -2005,9 +2025,10 @@ def ensure_bare_head(base: str, preferred_branch: str = "", token: str = "",
 # 避免无限增长。**不存 token/凭据**。
 _LAST_WORKTREE_FAILURE: dict = {}
 _LAST_WORKTREE_FAILURE_MAX = 200
-# 仓级兜底记录（无 issue/agent 三元组时）的保留时长：只用于「本次任务入口后
-# 写入的现场」，过期记录不再当作当前失败原因（并发任务各自的 at >= _t0 判定见
-# ensure_issue_worktree）。三元组记录不设 TTL，由建树成功/入口清理。
+# 仓级兜底记录（无 issue/agent 三元组时）的保留时长：过期记录不再当作当前失败
+# 原因（见 worktree_last_failure 的 TTL 判定）。三元组记录不设 TTL，由建树成功/
+# 入口清理；Issue #3923 复审后失败现场在 ensure_repo_base 内直接写三元组键，
+# 不再经过「仓级 → 三元组」复制。
 _LAST_WORKTREE_FAILURE_REPO_TTL = 900
 
 
@@ -2253,27 +2274,16 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     # 精确清理，并发任务互不覆盖。
     clear_worktree_failure(repo_key, issue_num=issue_num, agent_type=agent_type)
     _base_dir = repo_base_dir(repo_key)
-    _t0 = time.time()
     if _is_git_dir(_base_dir) and not probe_path_writable(_base_dir)[0]:
         base = _base_dir
         log.warning(f"repogit: shared base is read-only, reuse as-is: {_base_dir}")
     else:
-        base = ensure_repo_base(repo_key, token) or (_base_dir if _is_git_dir(_base_dir) else None)
+        # Issue #3923：issue/agent 下传 ensure_repo_base，init/remote add/fetch/异常
+        # 失败直接写 (repo, issue, agent) 三元组键——并发任务各自持有自己的 git 原文，
+        # 不再经过「仓级 → 三元组」复制（后写覆盖先写的竞态随之消失）。
+        base = ensure_repo_base(repo_key, token, issue_num=issue_num,
+                                agent_type=agent_type) or (_base_dir if _is_git_dir(_base_dir) else None)
     if not base:
-        # 基线建不起来（fetch/init 失败）→ 把失败现场绑到本任务上下文，
-        # 供错误面透传 git 原文；否则并发任务只能读到仓库级兜底记录。
-        # 只消费**本次调用期间**写入的记录（at >= _t0），避免把上一轮过期的
-        # git 原文当成当前失败原因。**不 pop**：同仓并发任务可能先后 base 失败，
-        # 先到者取走会让后到者拿不到现场而漏阻断（Issue #3923 审查 Required）；
-        # 仓级记录改由 _LAST_WORKTREE_FAILURE_MAX + TTL 收敛。
-        _base_fail = _LAST_WORKTREE_FAILURE.get(repo_key, {}) or {}
-        if _base_fail and float(_base_fail.get("at") or 0) >= _t0:
-            _record_worktree_failure(
-                repo_key, _base_fail.get("stage") or WORKTREE_STAGE_BASE,
-                _base_fail.get("stderr", ""), issue_num=issue_num,
-                agent_type=agent_type)
-        elif _base_fail:
-            log.warning(f"repogit: ignoring stale worktree failure record for {repo_key}")
         return None
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
     os.makedirs(os.path.dirname(issue_dir), exist_ok=True)

@@ -15,3 +15,7 @@
 | 11 | 审查 R1：仓级失败现场 `pop` → `get` + TTL，并发任务均阻断 | ✅ | `repogit.ensure_issue_worktree` / `worktree_last_failure` |
 | 12 | 审查 R2：失败阶段按事实映射措辞（repo_base ≠ worktree add） | ✅ | `_WORKTREE_STAGE_FAILURE_TEXT` |
 | 13 | 审查 Optional/Nit：单次阻断只解析一次凭据链；用例名与断言对齐 | ✅ | `agent.worktree_block_result` / 测试改名与补断言 |
+| 14 | 复审 Required：`ensure_repo_base` 的 init/remote add/except 失败路径同样写失败现场并阻断 | ✅ | `repogit.ensure_repo_base` + `test_base_init_failure_records_scene_and_blocks` / `test_base_exception_failure_records_scene_and_blocks` |
+| 15 | 复审 Optional：issue/agent 下传 `ensure_repo_base`，失败直接写三元组键，去掉「仓级 → 三元组」复制 | ✅ | `repogit.ensure_issue_worktree` + 并发用例改为各自读自己的 git 原文 |
+| 16 | 复审 Nit：`test_non_head_failure_is_not_recorded_as_head_repair` 构造真实非 HEAD 失败，断言 `stage=worktree_add` 且无 head_repair | ✅ | `tests/runtime/test_issue_3923_worktree_head_and_attribution.py` |
+| 17 | 复审合并阻塞：分支落后基线（lint.yml 缺失、non_ff）→ 变基到 `arch-weekly-11-zj` 并复跑回归 | ✅ | 变基后 124 passed + `make lint` 通过 |

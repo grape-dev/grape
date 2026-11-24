@@ -152,7 +152,8 @@ class TestWorktreeAddRetriesAfterHeadRepair:
         base = repogit.ensure_repo_base(REPO)
         _break_head_to_remote(base)
         monkeypatch.setattr(repogit, "ensure_repo_base",
-                            lambda repo_key, token="": base)
+                            lambda repo_key, token="", issue_num=None,
+                            agent_type="": base)
         assert repogit.ensure_bare_head  # 自愈入口存在
         wt = repogit.ensure_issue_worktree(REPO, "coding", "3924")
         assert wt, "worktree add 失败后应先自愈 HEAD 再重试一次"
@@ -161,15 +162,32 @@ class TestWorktreeAddRetriesAfterHeadRepair:
         assert head.stdout.strip() == "feat/issue-3924"
 
     def test_non_head_failure_is_not_recorded_as_head_repair(self):
-        """非 HEAD 类失败不做自愈（避免误改正常仓库）。"""
+        """非 HEAD 类失败不做自愈（避免误改正常仓库），现场记为 worktree_add。"""
         base = repogit.ensure_repo_base(REPO)
         good = repogit.bare_head_ref(base)
-        # 分支已存在但被另一个 worktree 占用 → worktree add --force 仍会失败
+        # 先构造一次真实的非 HEAD 失败：目标目录被外来文件占据 →
+        # worktree add 必然 "already exists"，HEAD 本身完好 → 不触发自愈
+        blocked = repogit.issue_dir_for(REPO, "coding", "3925")
+        os.makedirs(blocked, exist_ok=True)
+        with open(os.path.join(blocked, "stray.txt"), "w", encoding="utf-8") as fh:
+            fh.write("foreign file")
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3925") is None
+        scene = repogit.worktree_last_failure(REPO, issue_num="3925",
+                                             agent_type="coding")
+        assert scene, "非 HEAD 失败必须记失败现场"
+        assert scene["stage"] == repogit.WORKTREE_STAGE_ADD, scene
+        assert not scene["head_repair"].get("repaired"), (
+            "非 HEAD 失败不得记成 head_repair 现场")
+        assert repogit.bare_head_ref(base) == good, "正常 HEAD 不得被改动"
+        err = repogit.worktree_failure_error(REPO, issue_num="3925",
+                                             agent_type="coding")
+        assert scene["stderr"] and "already exists" in scene["stderr"], (
+            "git 原文必须透传")
+        # 成功路径的复用不产生失败现场
         wt = repogit.ensure_issue_worktree(REPO, "coding", "3923")
         assert wt
         other = repogit.ensure_issue_worktree(REPO, "coding", "3923")
         assert other == wt, "同一 Issue 复用工作区"
-        assert repogit.bare_head_ref(base) == good, "正常 HEAD 不得被改动"
         assert repogit.worktree_last_failure(REPO, issue_num="3923",
                                              agent_type="coding") == {}, (
             "非 HEAD 类失败不得被记成 head_repair 现场")
@@ -298,18 +316,16 @@ class TestFailureSceneLifecycle:
 
     def test_repo_base_failure_is_visible_to_every_concurrent_task(
             self, _unavailable_attribution, monkeypatch):
-        """同仓两个任务先后 base 失败：先到者不得取走现场，后到者仍必须阻断。"""
-        calls = {"n": 0}
+        """同仓两个任务先后 base 失败：各自现场按三元组键写入，互不覆盖。
 
-        def _fail_base(repo_key, token=""):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                # 真实失败只在首次 fetch 时写入仓级现场；第二次调用模拟
-                # 「先到者已 pop 走现场」的旧形态：不再写入。
-                repogit._record_worktree_failure(
-                    repo_key, repogit.WORKTREE_STAGE_BASE,
-                    "fatal: unable to access 'https://example.com/repo.git': "
-                    "Could not resolve host")
+        Issue #3923 复审 Optional：issue/agent 下传 ensure_repo_base 后，失败
+        直接写 (repo, issue, agent) 键——每个任务读到的是自己的 git 原文。
+        """
+        def _fail_base(repo_key, token="", issue_num=None, agent_type=""):
+            repogit._record_worktree_failure(
+                repo_key, repogit.WORKTREE_STAGE_BASE,
+                f"fatal: task {issue_num} fetch failed: Could not resolve host",
+                issue_num=issue_num, agent_type=agent_type)
             return None
 
         monkeypatch.setattr(repogit, "ensure_repo_base", _fail_base)
@@ -321,12 +337,63 @@ class TestFailureSceneLifecycle:
             err = repogit.worktree_failure_error(REPO, issue_num=issue,
                                                  agent_type="coding")
             assert err, f"任务 {issue} 必须读到 base 失败现场"
+            assert f"task {issue} fetch failed" in err, (
+                f"任务 {issue} 读到的必须是自己的 git 原文: {err}")
             assert "基线 fetch/clone 失败" in err, err
             assert "git worktree add 失败" not in err, err
             blk = agent_mod.worktree_block_result(f"t_{issue}", REPO,
                                                   issue_num=issue,
                                                   agent_type="coding")
             assert blk and blk["_started"] is False, (issue, blk)
+
+    def test_base_init_failure_records_scene_and_blocks(
+            self, _unavailable_attribution, tmp_path, monkeypatch):
+        """git init --bare 失败也必须写失败现场并阻断（复审 Required）。
+
+        现场形态：base 路径被普通文件占据 → init returncode != 0。
+        旧码此路径直接 return None 不记录 → worktree_failure_error 为空 →
+        任务在无工作区状态下继续执行。
+        """
+        base_as_file = tmp_path / "blocked.git"
+        base_as_file.write_text("not a dir", encoding="utf-8")
+        monkeypatch.setattr(repogit, "repo_base_dir", lambda rk: str(base_as_file))
+
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3923") is None
+        fail = repogit.worktree_last_failure(REPO, issue_num="3923",
+                                             agent_type="coding")
+        assert fail, "init 失败必须记录失败现场"
+        assert fail["stage"] == repogit.WORKTREE_STAGE_BASE, fail
+        assert fail["stderr"], "init 的 git 原文必须保留"
+        err = repogit.worktree_failure_error(REPO, issue_num="3923",
+                                             agent_type="coding")
+        assert err and "基线 fetch/clone 失败" in err, err
+        blk = agent_mod.worktree_block_result("t_3923", REPO, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk
+
+    def test_base_exception_failure_records_scene_and_blocks(
+            self, _unavailable_attribution, tmp_path, monkeypatch):
+        """ensure_repo_base 异常兜底路径同样必须写失败现场并阻断（复审 Required）。
+
+        现场形态：base 的父路径是普通文件 → makedirs 抛异常 → except 兜底。
+        """
+        parent_as_file = tmp_path / "parent-is-file"
+        parent_as_file.write_text("not a dir", encoding="utf-8")
+        monkeypatch.setattr(repogit, "repo_base_dir",
+                            lambda rk: str(parent_as_file / "x.git"))
+
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3923") is None
+        fail = repogit.worktree_last_failure(REPO, issue_num="3923",
+                                             agent_type="coding")
+        assert fail, "异常兜底必须记录失败现场"
+        assert fail["stage"] == repogit.WORKTREE_STAGE_BASE, fail
+        assert "ensure_repo_base exception" in fail["stderr"], fail
+        err = repogit.worktree_failure_error(REPO, issue_num="3923",
+                                             agent_type="coding")
+        assert err, "worktree_failure_error 不得为空"
+        blk = agent_mod.worktree_block_result("t_3923", REPO, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False, blk
 
     def test_failure_scene_has_stage_specific_wording(self, _unavailable_attribution):
         """阶段必须按事实映射措辞，不能把 repo_base 也写成 worktree add 失败。"""
