@@ -41,6 +41,29 @@ _REPO_PARAM_RE = re.compile(r"^(?:([a-z][a-z0-9_-]{0,20}):)?[A-Za-z0-9_.-]+/[A-Z
 _REPO_PARAM_FORMAT_MESSAGE = "repo 参数格式应为 owner/repo"
 
 
+def _validate_repo_param(repo: str) -> None:
+    """repo 查询参数三态校验：未传 / 合规 owner/repo / 不合规。
+
+    不合规（裸仓库名、未知 provider 前缀、残留冒号、http/git@ 地址、多级路径）
+    直接 400。此前这类参数会被静默忽略、回退成官方列表——前端看起来是「这个仓
+    没有技能」，实际是参数写错了，故障被藏起来（#1790：「不再静默回退官方列表」）。
+    """
+    if repo is None:
+        return
+    raw = str(repo).strip()
+    if not raw:
+        return
+    from src.kernel.repo_key import provider_prefixes
+
+    m = _REPO_PARAM_RE.match(raw)
+    if m and (not m.group(1) or m.group(1) in provider_prefixes()):
+        return
+    raise HTTPException(status_code=400, detail={
+        "code": 400,
+        "message": _REPO_PARAM_FORMAT_MESSAGE,
+    })
+
+
 def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。
 
