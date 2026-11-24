@@ -701,7 +701,8 @@ def role_caps_inventory(runtime_ids: list | None = None) -> dict:
     for r in rows or []:
         try:
             out[int(r[0])] = {"total": int(r[1] or 0), "enabled": int(r[2] or 0)}
-        except Exception:  # noqa: BLE001 - 脏行不影响整表
+        except Exception as e:  # noqa: BLE001 - 脏行不影响整表，但必须留痕
+            log.warning(f"role_caps_inventory: skipping malformed row (runtime_id={r[0]!r}): {e}")
             continue
     return out
 
