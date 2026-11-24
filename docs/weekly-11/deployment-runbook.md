@@ -107,6 +107,20 @@ tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value grape@worker)/environ \
 - 只跑 `systemctl show grape-worker-server` 不够：该静态单元可能根本没在运行。
 - `MemoryMax` 是 16G 主机的保守默认；SRE 拿到 004 的 `dmesg` victim 行（total-vm/rss）
   后按宿主机覆盖 drop-in 或单元，并把实测值回写本节。
+- 两条路径的 ExecStart 都是「脚本路径」启动 `scripts/start-worker.py`（非 `python -m`），
+  此时 `-m` 把 cwd 加进 sys.path 的隐式行为不存在——app（`src.api.*`）可导入靠
+  launcher 顶层的仓库根 sys.path 自举（Issue #4203 SRE 复核 Critical：缺自举时
+  uvicorn config.load 阶段 ModuleNotFoundError，worker 反复 status=1/FAILURE）。
+  因此 **worker 启动不依赖 PYTHONPATH**：现场若有以 `Environment=PYTHONPATH=`
+  临时救急的 drop-in（如 `/etc/systemd/system/grape@worker.service.d/40-pythonpath.conf`），
+  在含 sys.path 自举的版本部署后**必须删除并 `systemctl daemon-reload`**——留着它会把
+  「自举被改坏」的回归掩盖成生产能跑、CI/新机器必炸。核查命令：
+
+  ```bash
+  systemctl cat grape@worker | grep -i PYTHONPATH   # 期望：无输出（SRE drop-in 已移除）
+  systemctl restart grape@worker && sleep 3 \
+    && curl -sf http://127.0.0.1:38083/api/ping     # 期望 {"ok":true,...}（无 PYTHONPATH 也能起）
+  ```
 
 ## 4. 部署后自检
 
