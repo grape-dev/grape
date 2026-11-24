@@ -376,6 +376,19 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py \
             tests/runtime/test_issue_3826_count_no_fallback.py -v
+      - name: Model config alert + prefix/fallback validation tests (issue #3822)
+        # Issue #3822 轨 C：新增 4 个用例文件此前未接入 linux-backend 门禁（先例
+        # #1613/#2133/#3758/#3771）。锁定：①首次 Model not found(count=1) 不计入配置故障
+        # 告警、仅 escalated 计；②未声明 provider 前缀时 default/probe 用裸 id；
+        # ③hermes fallback（含旧键标量）纳入校验；④24h 告警指标与种子规则。回退会让
+        # 单次抖动再次触发 critical、带前缀模型名探活 404 误判 unhealthy。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_3822_engine_model_prefix.py \
+            tests/test_issue_3822_hermes_fallback.py \
+            tests/runtime/test_issue_3822_model_config_alert.py \
+            tests/insight/test_issue_3822_obs_model_config_alert.py -v
       - name: Deploy gateway upstream guard (issue #3764)
         # Issue #3764 QA 复审（Required）：网关 /api/runtime* 上游端口守卫此前只存在于
         # scripts/，未接任何自动路径；现网残留 8181 只能靠人工发现。本步骤把四套

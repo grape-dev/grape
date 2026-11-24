@@ -58,6 +58,18 @@ SEED_RULES: List[Dict[str, Any]] = [
         "severity": "warning", "seed_source": "GrapeTaskTimeout",
         "description": "近 10 分钟有任务因超时被强制失败（timed out after），建议预拆分长任务或上调该 skill/仓库超时配置",
     },
+    # Issue #3822 轨 C：模型配置故障告警——同一 task 24h 内 `Model not found` ≥2 次即升级，
+    # 不再按瞬时抖动沉默。与 #1985 引擎永久离线熔断（runtimes_online）区分：本条是
+    # 「引擎配置模型名与网关 /v1/models 不一致」反复命中，修法是改模型清单/默认模型，
+    # 而不是排查引擎进程。数据源：transient_retry.record_model_config_error 写入的 errors 签名。
+    {
+        "name": "task_model_config_alert", "kind": "metric", "level": "user",
+        "metric": "task_model_config_alert",
+        "comparator": "gt", "threshold": 0, "window_sec": 86400, "for_sec": 0,
+        "severity": "critical", "seed_source": "GrapeModelConfigFault",
+        "description": "近 24h 有任务因「同一 task 内 Model not found ≥2 次」升级为配置故障"
+                       "（网关模型清单 vs 引擎配置模型名错位），需运维核对 /v1/models 与引擎默认模型",
+    },
     {
         "name": "task_queue_backlog", "kind": "metric", "level": "user", "metric": "task_queued",
         "comparator": "gt", "threshold": 10, "window_sec": 600, "for_sec": 600,
@@ -162,6 +174,9 @@ FAILURE_WINDOW_SEC = 300
 MUTATION_WINDOW_SEC = 1800
 #: 突变检测最小样本：两个窗口各自至少这么多终态任务才出指标（防小样本误报）
 MUTATION_MIN_SAMPLES = 3
+#: Issue #3822：模型配置故障告警窗口——与 `transient_retry.MODEL_CONFIG_ALERT_WINDOW_SEC`
+#: （24h 累计窗口）保持一致；改一处必须同步另一处。
+MODEL_CONFIG_ALERT_WINDOW_SEC = 24 * 3600
 
 
 def _event_source(rule: Dict[str, Any]) -> str:
@@ -377,6 +392,8 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
     fail_cutoff = _iso(now - timedelta(seconds=FAILURE_WINDOW_SEC))
     mut0_cutoff = _iso(now - timedelta(seconds=MUTATION_WINDOW_SEC))
     mut1_cutoff = _iso(now - timedelta(seconds=2 * MUTATION_WINDOW_SEC))
+    #: Issue #3822：模型配置故障告警窗口（与 transient_retry 的 24h 累计窗口对齐）
+    model_config_cutoff = _iso(now - timedelta(seconds=MODEL_CONFIG_ALERT_WINDOW_SEC))
 
     def _row(m: Dict[str, float]) -> Dict[str, float]:
         return m
@@ -413,6 +430,15 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
                                               "_mut1_tot": 0.0, "_mut1_bad": 0.0})
                 m["task_timeout"] = m.get("task_timeout", 0.0) + float(n or 0)
+            # ②c Issue #3822 轨 C：模型配置故障（同一 task 24h 内 Model not found ≥2 次已升级）
+            # 按仓库聚合。窗口独立于 5 分钟失败率窗口（24h），与 task_timeout 同口径查询
+            # （status='failed' + completed_at 下界 + 签名 LIKE），不新增扫描形态。
+            for repo_key, n in _rt_alerts.alerts_task_model_config_alert(model_config_cutoff):
+                m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
+                                              "_done": 0.0, "_bad": 0.0,
+                                              "_mut0_tot": 0.0, "_mut0_bad": 0.0,
+                                              "_mut1_tot": 0.0, "_mut1_bad": 0.0})
+                m["task_model_config_alert"] = m.get("task_model_config_alert", 0.0) + float(n or 0)
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
             for repo_key, status, n0, n1 in _rt_alerts.alerts_task_mutation(mut0_cutoff, mut1_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,

@@ -6029,6 +6029,42 @@ def alerts_task_timeout(fail_cutoff: str, signature: str) -> list[tuple]:
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+#: 配置故障升级标记（Issue #3822）：与 `runtime.engine.transient_retry.MODEL_CONFIG_ALERT`
+#: 同一字面量；跨域不 import 对方内部模块，常量在本域单独声明，改动需两侧同步。
+MODEL_CONFIG_ALERT_SIGNATURE = "MODEL_CONFIG_ALERT"
+
+
+def alerts_task_model_config_alert(
+        cutoff: str,
+        signature: str = MODEL_CONFIG_ALERT_SIGNATURE) -> list[tuple]:
+    """窗口内「模型配置故障」失败任务按仓库计数 [(repo_key, count)]。
+
+    口径与 `alerts_task_timeout` 一致（`status='failed'` + `completed_at` 时间下界 + 签名 LIKE），
+    **不新增扫描形态**。签名由 `transient_retry.record_model_config_error` 写入：同一 task 在
+    24h 内 `Model not found` ≥2 次时，errors 里留下 escalated 的 `MODEL_CONFIG_ALERT` 条目，
+    与 #1985 引擎永久离线熔断（runtime 在线数）区分——本条是配置错位反复命中。
+
+    **必须同时命中 escalated 标记**（Issue #3822 审查 Required）：`record_model_config_error`
+    首次命中（count=1）就已写入 `MODEL_CONFIG_ALERT` 条目，仅凭签名会把单次 `Model not found`
+    也算成配置故障（severity=critical）。只有 `escalated: true`（24h 内 ≥2 次）才计入。
+    """
+    like = f"%{signature}%"
+    #: JSON 序列化（errors 列）与 Python repr（result_text 里拼入的调试串）两种形态
+    escalated = ('%"escalated": true%', "%'escalated': True%")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, COUNT(*) FROM agent_tasks"
+            " WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status='failed'"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            "   AND ((errors LIKE ? AND (errors LIKE ? OR errors LIKE ?))"
+            "        OR (result_text LIKE ? AND (result_text LIKE ? OR result_text LIKE ?)))"
+            " GROUP BY repo_key",
+            (cutoff, like, escalated[0], escalated[1],
+             like, escalated[0], escalated[1]))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
 def alerts_task_mutation(mut0_cutoff: str, mut1_cutoff: str) -> list[tuple]:
     """突变检测两窗口 [(repo_key, status, 本窗口数, 上一窗口数)]。"""
     with _any_cursor() as c:
