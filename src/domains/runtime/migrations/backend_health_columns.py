@@ -1,4 +1,4 @@
-"""agent_runtimes 后端能力 + 熔断列（迁移 202611240004）。
+"""agent_runtimes 后端能力 + 熔断列（迁移 202611240008）。
 
 Issue #3928：缺 CLI 的 codearts runtime 仍参与认领 → 认领后 3s 内 exit=-1 丢任务。
 本迁移给存量库补：
@@ -48,12 +48,12 @@ def verify_backend_health_columns(conn=None) -> None:
     missing = [col for col, _ddl in COLUMNS if col not in cols]
     if missing:
         raise RuntimeError(
-            f"202611240004 post_check 未收敛：{TABLE} 缺列 {missing}（不盖章，下次启动重试）")
-    log.info(f"202611240004 post_check 通过：{TABLE} 后端能力/熔断列在位")
+            f"202611240008 post_check 未收敛：{TABLE} 缺列 {missing}（不盖章，下次启动重试）")
+    log.info(f"202611240008 post_check 通过：{TABLE} 后端能力/熔断列在位")
 
 
 MIGRATION = {
-    "version": "202611240004",
+    "version": "202611240008",
     "name": "backend-capability-circuit-breaker-columns",
     "kind": "safe",
     "fn": add_backend_health_columns,

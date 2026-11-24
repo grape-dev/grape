@@ -1,4 +1,4 @@
-"""Issue #3733：autopilot_tasks「不可派发」状态列 + 存量一次性幂等自检（迁移 202611240004）。
+"""Issue #3733：autopilot_tasks「不可派发」状态列 + 存量一次性幂等自检（迁移 202611240007）。
 
 锁四条契约（Spec 见 Issue #3733 评论 202816767，方案见 docs/issue-3733/plan.md）：
 1. 三个状态列补齐（dispatch_state / dispatch_state_reason / dispatch_state_at）——
@@ -146,7 +146,7 @@ def test_migration_registered_for_mgmt_domain():
     否则拆库拓扑下只有 runtime 进程跑它，列永远不在 mgmt 库落。"""
     from src.api import db_setup
 
-    mers = [m for m in db_setup._MIGRATIONS if m.version == "202611240004"]
+    mers = [m for m in db_setup._MIGRATIONS if m.version == "202611240007"]
     assert len(mers) == 1, [m.version for m in db_setup._MIGRATIONS if "2026112200" in m.version]
     assert mers[0].name == "autopilot-task-dispatch-state"
     assert tuple(mers[0].domains) == ("mgmt",)

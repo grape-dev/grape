@@ -12,7 +12,7 @@
 - worker ``/api/runtime/heartbeat`` 的 UPDATE 把这 4 列写在 SET 列表里 → 每条心跳
   1054 ``Unknown column 'acp_state_db_bytes'``，心跳与 ACP 指标全断（异常被吞）。
 
-修复：4 列改走注册式迁移 ``202611240005``（kind=safe + post_check）。本文件把
+修复：4 列改走注册式迁移 ``202611240006``（kind=safe + post_check）。本文件把
 「已盖章存量库补列」钉住。
 
 覆盖（生产同款执行器 `_run_migrations_with_conn`，sqlite 内存库即可）：
@@ -29,7 +29,7 @@ import pytest
 
 from src.api import db_setup as ds
 
-MIG_VERSION = "202611240005"
+MIG_VERSION = "202611240006"
 MIG_NAME = "issue3773-acp-state-db-metrics-columns"
 TABLE = "runtime_credentials"
 COLUMNS = (

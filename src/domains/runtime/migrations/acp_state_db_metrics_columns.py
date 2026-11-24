@@ -1,4 +1,4 @@
-"""runtime_credentials 的 ACP state.db 治理指标列（迁移 202611240005）。
+"""runtime_credentials 的 ACP state.db 治理指标列（迁移 202611240006）。
 
 Issue #3773 让 worker 在 ``/api/runtime/heartbeat`` 上报 hermes ACP state.db 的
 体积/清理/跳过指标，落 ``runtime_credentials`` 四列。心跳写侧这四列都在 UPDATE
@@ -83,13 +83,13 @@ def verify_acp_state_db_metrics_columns(conn=None) -> None:
     missing = [col for col, _ in COLUMNS if col not in present]
     if missing:
         raise RuntimeError(
-            f"202611240005 post_check 未收敛：{TABLE} 缺列 {missing}"
+            f"202611240006 post_check 未收敛：{TABLE} 缺列 {missing}"
             f"（不盖章，下次启动重试）")
-    log.info(f"202611240005 post_check 通过：{TABLE} ACP 指标列齐全（{len(COLUMNS)} 列）")
+    log.info(f"202611240006 post_check 通过：{TABLE} ACP 指标列齐全（{len(COLUMNS)} 列）")
 
 
 MIGRATION = {
-    "version": "202611240005",
+    "version": "202611240006",
     "name": "issue3773-acp-state-db-metrics-columns",
     "kind": "safe",
     "fn": add_acp_state_db_metrics_columns,

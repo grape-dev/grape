@@ -7105,7 +7105,7 @@ def _migrate_tables():
                 # ⚠️ Issue #3773 的 4 个 acp_state_db_* / acp_resume_skipped_total 列**不在本段**：
                 # 本段属冻结老轨（存量库已盖 legacy-stamp，启动不执行），新增列写在这里
                 # 存量库永远没有该列 → 心跳 UPDATE 报 1054 Unknown column。这 4 列改走
-                # 注册式迁移 202611240005（domains/runtime/migrations/acp_state_db_metrics_columns.py）。
+                # 注册式迁移 202611240006（domains/runtime/migrations/acp_state_db_metrics_columns.py）。
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute(runtime_mig.DELETE_RUNTIME_CREDENTIALS)
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")
@@ -9751,7 +9751,7 @@ register_migration(
 # ======================================================================
 # ===== Issue #3733：autopilot_tasks「不可派发」状态三列 + 存量一次性自检 =====
 # ======================================================================
-def _migration_202611240004_autopilot_dispatch_state() -> None:
+def _migration_202611240007_autopilot_dispatch_state() -> None:
     """注册式入口：autopilot_tasks 状态三列 + 存量空指令行一次性幂等标记。
 
     Issue #3733：拦截语义保留，但「拦截」不能再只靠每 tick 一条日志表达——
@@ -9768,12 +9768,14 @@ def _migration_202611240004_autopilot_dispatch_state() -> None:
     run()
 
 
+# 版本号避让：202611240004 已被 #3846 沙箱表迁移占用，本迁移顺延取
+# 202611240007（register_migration 撞号守卫：同号会被判「已执行」永久跳过）。
 register_migration(
-    version="202611240004",
+    version="202611240007",
     name="autopilot-task-dispatch-state",
     kind="safe",
     domains=("mgmt",),   # autopilot_tasks 归 mgmt 域（configs/table_ownership.json）
-    fn=_migration_202611240004_autopilot_dispatch_state,
+    fn=_migration_202611240007_autopilot_dispatch_state,
 )
 
 
@@ -12000,7 +12002,7 @@ from src.domains.mgmt.migrations.feedback_convert_fail_count import (
     verify_convert_fail_count_column as _post_feedback_convert_fail_count,
 )
 register_migration(
-    version="202611240004",
+    version="202611240005",
     name="issue3731-user-feedback-convert-fail-count",
     kind="safe",
     fn=_fn_feedback_convert_fail_count,
@@ -12013,7 +12015,7 @@ from src.domains.runtime.migrations.acp_state_db_metrics_columns import (
     verify_acp_state_db_metrics_columns as _post_acp_state_db_metrics_columns,
 )
 register_migration(
-    version="202611240005",
+    version="202611240006",
     name="issue3773-acp-state-db-metrics-columns",
     kind="safe",
     fn=_fn_acp_state_db_metrics_columns,
@@ -12314,16 +12316,18 @@ def stamp_repo_bot_credential_backfill() -> dict:
 # agent_runtimes 增 6 列：backend_status/backend_reason/backend_checked_at +
 # circuit_open_until/circuit_fail_count/circuit_half_open。新装库由
 # runtime schema_ddl 直接带列，本迁移只服务存量库；列在位才盖章。
-# 版本号避让：基线上 202611240001（#4066）、202611240002（#3789）与
-# 202611240003（#3763 autopilot_executions 补建）已占用，本迁移顺延取
-# 202611240004（register_migration 撞号守卫：同号会被判「已执行」永久跳过）。
+# 版本号避让：基线上 202611240001（#4066）、202611240002（#3789）、
+# 202611240003（#3763 autopilot_executions 补建）、202611240004（#3846 沙箱表）、
+# 202611240005（#3731 convert_fail_count）与 202611240006（#3773 ACP 指标列）
+# 已占用，本迁移顺延取 202611240008（register_migration 撞号守卫：同号会被判
+# 「已执行」永久跳过）。
 
 from src.domains.runtime.migrations.backend_health_columns import (
     add_backend_health_columns as _fn_backend_health_columns,
     verify_backend_health_columns as _post_backend_health_columns,
 )
 register_migration(
-    version="202611240004",
+    version="202611240008",
     name="backend-capability-circuit-breaker-columns",
     kind="safe",
     fn=_fn_backend_health_columns,

@@ -26,7 +26,7 @@
   `UPDATE autopilot_tasks SET dispatch_state=:blocked, dispatch_state_reason=:reason, dispatch_state_at=:now
    WHERE enabled=1 AND TRIM(instruction)='' AND dispatch_state<>:blocked`
   —— `dispatch_state<>` 谓词使重复启动零改动（幂等），且**只标记不改 `enabled`**。
-- 迁移版本号 `202611240004`（原拟 `202611220001`，基线占用让位；二次取 `202611240002` 后基线合入 #3789 同号；再取 `202611240003` 后基线 #3763 的 create-autopilot-executions-table 已占用同号，顺延让位到 `202611240004`；已过 `test_migration_track_guard` 的撞号/格式守卫）。
+- 迁移版本号 `202611240007`（原拟 `202611220001`，基线占用让位；二次取 `202611240002` 后基线合入 #3789 同号；再取 `202611240003` 后基线 #3763 的 create-autopilot-executions-table 已占用同号；`202611240004` 又先后被 #3846 沙箱表 / #3928 后端能力列占用，最终顺延到 `202611240007`；已过 `test_migration_track_guard` 的撞号/格式守卫）。
 
 ### 2. 跨进程权威 + 进程内节流（日志与 tick / 副本解耦）
 

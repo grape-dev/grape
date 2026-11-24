@@ -30,7 +30,7 @@
      degraded 经冷却闸门放行后可进入一次半开试探（`cooldown_gate_passed`）。
    - `fail_task` 先走后端 failover，再走原有瞬时重试；`complete_task` 成功释放熔断。
 5. 存储
-   - 新列同时进 `schema_ddl`（新库）与注册式幂等迁移 202611240004（存量）。
+   - 新列同时进 `schema_ddl`（新库）与注册式幂等迁移 202611240008（存量）。
 
 ## 测试 seam
 - 探针：纯函数 `probe_engine_capability`（注入 which/clock）。

@@ -1,4 +1,4 @@
-"""user_feedback.convert_fail_count 列（迁移 202611240004）：反馈→Issue 连续失败轮次。
+"""user_feedback.convert_fail_count 列（迁移 202611240005）：反馈→Issue 连续失败轮次。
 
 Issue #3731 的转换失败计数只落在日志里（7 天 20.7 万条 WARNING），故障不可感知；
 修复把连续失败轮次落库（跨 worker 共享库可见、admin 可查、达阈值升级 ERROR、
@@ -72,13 +72,13 @@ def verify_convert_fail_count_column(conn=None) -> None:
         conn = db
     if COLUMN not in _columns_of(conn.cursor(), TABLE):
         raise RuntimeError(
-            f"202611240004 post_check 未收敛：{TABLE} 缺列 {COLUMN}"
+            f"202611240005 post_check 未收敛：{TABLE} 缺列 {COLUMN}"
             f"（不盖章，下次启动重试）")
-    log.info(f"202611240004 post_check 通过：{TABLE}.{COLUMN} 在位")
+    log.info(f"202611240005 post_check 通过：{TABLE}.{COLUMN} 在位")
 
 
 MIGRATION = {
-    "version": "202611240004",
+    "version": "202611240005",
     "name": "issue3731-user-feedback-convert-fail-count",
     "kind": "safe",
     "fn": add_convert_fail_count_column,

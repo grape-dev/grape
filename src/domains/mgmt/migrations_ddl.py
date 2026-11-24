@@ -268,7 +268,7 @@ ALTERS_USER_FEEDBACK_COLUMNS = (
     # ⚠️ Issue #3731 的 `convert_fail_count` **不在这里**：本常量只被**冻结老轨**
     # `db_setup._migrate_tables()` 消费，存量库（已盖 legacy-stamp 202610300001）整段
     # 不执行 → 新增列写在这里线上表现为「读侧 Unknown column 1054」（部署验证实测：
-    # 转换读侧首轮即崩）。该列改走注册式迁移 202611240004
+    # 转换读侧首轮即崩）。该列改走注册式迁移 202611240005
     # （src/domains/mgmt/migrations/feedback_convert_fail_count.py）。
     # 新增列一律用 register_migration()，不要续写本常量。
 )

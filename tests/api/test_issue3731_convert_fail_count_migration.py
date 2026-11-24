@@ -10,7 +10,7 @@
 - 而 `mgmt.public` 的 ``feedback_pending_rows`` 已经把 ``convert_fail_count`` 写进
   SELECT → 转换读侧首轮即 1054 Unknown column，反馈→Issue 转换继续全停。
 
-修复：列改走注册式迁移 ``202611240004``（kind=safe + post_check），本文件把
+修复：列改走注册式迁移 ``202611240005``（kind=safe + post_check），本文件把
 「已盖章存量库升列」这件事钉住，避免同类缺口再次静默上线。
 
 覆盖（全部走生产同款执行器 `_run_migrations_with_conn`，sqlite 内存库即可）：
@@ -26,7 +26,7 @@ import pytest
 
 from src.api import db_setup as ds
 
-MIG_VERSION = "202611240004"
+MIG_VERSION = "202611240005"
 MIG_NAME = "issue3731-user-feedback-convert-fail-count"
 TABLE = "user_feedback"
 COLUMN = "convert_fail_count"
