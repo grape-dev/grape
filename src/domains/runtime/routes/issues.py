@@ -416,25 +416,50 @@ def _review_point_readonly(repo_keys: list[str], number: str) -> dict:
     }
 
 
-def _issue_stage_status_by_id(issue_id) -> tuple[str, str]:
+def _issue_stage_status_by_id(issue_id) -> tuple[str, str] | None:
     """Issue #4024：按内部主键（issue.id）读权威行 `(stage, status)`。
 
     多平台别名（gitcode/github/…）在同仓可能各有一行，按 repo_key+number 聚合时
-    取值顺序不保证一致；status get / detail / pipeline 统一以内部主键行为单一事实源，
-    保证审核点态读回同口径。无行/异常 → ("","")。
+    取值顺序不保证一致；status get / pending-review / detail / pipeline 统一以内部
+    主键行为单一事实源，保证审核点态读回同口径。无行/异常 → None（命中行即使
+    stage/status 为空也返回空串二元组，由调用方成对覆盖，避免混合口径）。
     """
     if not issue_id:
-        return ("", "")
-    from src.kernel.session_manager import db, db_lock
+        return None
+    from src.kernel.session_manager import db_lock
     try:
         with db_lock:
             c = _rt_db.cursor()
             c.execute("SELECT stage, status FROM issue WHERE id=?", (issue_id,))
             row = c.fetchone()
-        return ((row[0] or "", row[1] or "") if row else ("", ""))
+        return ((row[0] or "", row[1] or "") if row else None)
     except Exception as e:
         log.warning(f"issues: load issue stage/status by id={issue_id} failed: {e}")
-        return ("", "")
+        return None
+
+
+def _issue_internal_id_by_number(repo_keys: list[str], number) -> int | None:
+    """Issue #4024：按 issue number 在跨平台候选键内解析规范内部主键（issue.id）。
+
+    同仓多平台别名行共存时以最小 `issue.id` 为确定性规范行，detail / pipeline
+    复用同一解析结果再按 id 读取审核点态，避免聚合顺序漂移。无行/异常 → None。
+    """
+    if not repo_keys or number in (None, ""):
+        return None
+    placeholders = ",".join("?" * len(repo_keys))
+    from src.kernel.session_manager import db_lock
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute(
+                f"SELECT id FROM issue WHERE repo_key IN ({placeholders}) "
+                f"AND issue_number=? ORDER BY id ASC LIMIT 1",
+                (*repo_keys, str(number)))
+            row = c.fetchone()
+        return (row[0] if row else None)
+    except Exception as e:
+        log.warning(f"issues: resolve internal id for #{number} failed: {e}")
+        return None
 
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
@@ -1545,6 +1570,11 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
         _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
                        "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
 
+    # Issue #4024：审核点态与 `issues status get` 同源——按 issue.id 成对读取 stage/status，
+    # 避免 issue_state.stage 与 issue.status 混合派生导致 review_status 与读回分歧。
+    _id_pair = _issue_stage_status_by_id(issue_id)
+    _biz_stage, _biz_status = _id_pair if _id_pair is not None else (_current_stage, _issue_task_status)
+
     from src.api.pipeline_status import attach_stall_state, extract_failed_node
     # Issue #2432：失败节点（详细路线图展示失败状态 + 失败节点名，不输出失败原因）
     _failed_node, _failed_node_name = extract_failed_node(nodes)
@@ -1561,12 +1591,12 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
         "source_issue_number": _source_issue_number,
         "has_cross_scene_handoff": _has_cross_scene,
         # Issue #539: 需求级业务状态（待人工确认等）+ SRE 验收结果引用
-        "issue_stage": _current_stage,
-        "issue_task_status": _issue_task_status,
-        "review_status": derive_review_status(_current_stage, _issue_task_status),
+        "issue_stage": _biz_stage,
+        "issue_task_status": _biz_status,
+        "review_status": derive_review_status(_biz_stage, _biz_status),
         "sre_result": _sre_result,
     }
-    attach_stall_state(_out, events, _current_stage, _issue_task_status)
+    attach_stall_state(_out, events, _biz_stage, _biz_status)
     return _out
 
 class IssueHandoffBody(BaseModel):
@@ -2129,11 +2159,17 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                 body.references or "", it["repo_key"], it["issue_number"], _cfg))
         except Exception as e:
             log.warning(f"Issue pending-review: notify schedule failed: {e}")
-    # Issue #4024：新增 review_status，与 status get / pipeline.review_status 同源
+    # Issue #4024：置位响应按内部主键（issue.id）回读落库真值，与 status get /
+    # pipeline.review_status 共用同一行（`issue.status` + `issue.stage`，
+    # derive_review_status），避免 repo_key+number 多别名行读到另一行导致分歧。
     from src.api.pipeline_status import derive_review_status
+    _persisted_pair = _issue_stage_status_by_id(it["id"])
+    _persisted_status = (_persisted_pair[1] if _persisted_pair is not None
+                         else (status_after or prior_status))
+    _persisted_stage = _persisted_pair[0] if _persisted_pair is not None else it.get("stage", "")
     return {"ok": True, "issue_id": it["id"], "prior_status": prior_status,
-            "status": status_after,
-            "review_status": derive_review_status(it.get("stage", ""), status_after or prior_status),
+            "status": _persisted_status,
+            "review_status": derive_review_status(_persisted_stage, _persisted_status),
             "changed": _changed, "idempotent": not _changed}
 
 class _ReviewPassBody(BaseModel):
@@ -3026,12 +3062,15 @@ def get_issue_detail(owner: str, repo: str, number: str,
     # Issue #4024：已知内部主键时以该行（与 status get 同一行）为审核点态单一事实源，
     # 消除多平台别名行按 repo_key+number 聚合顺序不一致导致的 task_status /
     # pipeline.review_status 打架（置位后即读回 pending_review，不滞留 in_progress）。
-    _id_stage, _id_status = _issue_stage_status_by_id(base.get("issue_id"))
-    if _id_status:
+    _canonical_id = _issue_internal_id_by_number(repo_keys, num)
+    _id_pair = _issue_stage_status_by_id(_canonical_id)
+    if _id_pair is not None:
+        # 命中规范内部主键行 → stage/status 成对覆盖（不残留聚合行 stage）
+        _id_stage, _id_status = _id_pair
         _biz_stage, _biz_status = _id_stage, _id_status
+        base["issue_id"] = _canonical_id
         base["task_status"] = _id_status
-        if _id_stage:
-            base["stage"] = _id_stage
+        base["stage"] = _id_stage
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
@@ -3094,6 +3133,12 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
     _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
+    # Issue #4024：与 detail 一致，按 number 解析规范内部主键后复用 id 行读审核点态，
+    # 消除多平台别名行下 owner/repo/number pipeline 滞留 in_progress 的分歧。
+    _canonical_id = _issue_internal_id_by_number(repo_keys, num)
+    _id_pair = _issue_stage_status_by_id(_canonical_id)
+    if _id_pair is not None:
+        _biz_stage, _biz_status = _id_pair
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
