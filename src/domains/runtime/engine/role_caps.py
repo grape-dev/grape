@@ -16,7 +16,10 @@
 """
 from datetime import datetime, timezone
 
-from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES, _PRIO_GLOBAL
+
+# 与 public.upsert_engine_capability() 的默认值同源（优先级取 engine_select._PRIO_GLOBAL）
+_DEFAULT_MAX_CONCURRENT = 1
 
 
 def role_rows(c, runtime_id):
@@ -83,8 +86,8 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
     for _t in _write:
         c.execute(
             "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-            "VALUES (?,?,1,50,1,?,?)",
-            (rid, _t, _now, _now))
+            "VALUES (?,?,?,?,1,?,?)",
+            (rid, _t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now))
     return _write
 
 

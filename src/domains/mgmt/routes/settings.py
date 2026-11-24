@@ -2719,9 +2719,9 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Re
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = tag.strip().lower()
-    if not int(body.enabled or 0):
-        _guard_last_role_or_400(rid, tag)
     with db_lock:
+        if not int(body.enabled or 0):
+            _guard_last_role_or_400(rid, tag)
         c = db.cursor()
         try:
             from src.kernel.domain_read import runtime_lib as _rt_upd
@@ -2761,9 +2761,15 @@ def _guard_last_role_or_400(rid: int, tag: str) -> None:
     try:
         from src.domains.runtime.public import removing_leaves_no_role as _no_role
         _empty = _no_role(rid, tag)
-    except Exception as _ge:  # noqa: BLE001 - 判定自身故障不阻断正常删除
+    except Exception as _ge:  # noqa: BLE001
+        # QA 架构守护 I3：守卫自身故障必须 fail-closed——放行等于让「禁止清空」失效，
+        # 与守卫目标相反。这里拒绝本次操作（503，可重试），而不是静默删除。
         log.warning(f"engine tag last-role guard failed (rid={rid} tag={tag}): {_ge}")
-        return
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "error_code": "ROLE_GUARD_UNAVAILABLE",
+            "code_note": "last-role guard unavailable, refusing to change tags",
+            "message": "暂时无法校验角色数量，已拒绝本次修改，请稍后重试",
+        }) from _ge
     if _empty:
         raise HTTPException(status_code=400, detail={
             "code": 400,
@@ -2778,8 +2784,9 @@ def delete_engine_tag(rid: int, tag: str, request: Request,
     """删除引擎标签（不允许删掉最后一个角色行，见 2026-11-23 裁定）"""
     from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
-    _guard_last_role_or_400(rid, tag)
+    # QA I3：判定与删除放在同一把锁内，避免 check-then-act 竞态（并发两次删除各看到 2 行）
     with db_lock:
+        _guard_last_role_or_400(rid, tag)
         c = db.cursor()
         try:
             from src.kernel.domain_read import runtime_lib as _rt_del

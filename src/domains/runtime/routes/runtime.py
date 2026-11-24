@@ -3104,7 +3104,19 @@ def set_runtime_tags(runtime_id: int, body: dict, request: Request,
     """
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags
-    tags = _apply_tag_rules(body.get("tags") or [])
+    _raw_tags = [str(t).strip().lower() for t in (body.get("tags") or []) if str(t).strip()]
+    # QA 架构守护 A1（Critical）：开放接口必须校验角色值域。此前值域外标签会通过
+    # 「非空」守卫，先删光真实角色行、再插入 bogus 并置 tags_user_set=1 —— 引擎从此
+    # 对任何任务都不可选。值域外一律 400，且不写任何行、不改 flags。
+    _allowed = {"all"} | set(AGENT_TAGS)
+    _bad = sorted({t for t in _raw_tags if t not in _allowed})
+    if _bad:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "INVALID_ROLE_TAGS",
+            "message": f"无效的角色标签：{', '.join(_bad)}；允许的值为 all 或 {', '.join(sorted(AGENT_TAGS))}",
+        })
+    tags = _apply_tag_rules(_raw_tags)
     if not tags:
         # 2026-11-23 用户裁定：不允许把所有角色都取消——空角色行在 A7 下是 fail-closed，
         # 引擎会变成任何角色都不可调度。保存直接失败并给出用户可读提示。

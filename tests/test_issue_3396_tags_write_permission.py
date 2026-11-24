@@ -401,3 +401,39 @@ class TestDisabledRoleVisibility:
         rows = {int(x["id"]): x for x in r.json().get("runtimes", [])}
         assert rows[rid].get("roles_disabled") is False, rows[rid]
 
+
+class TestRoleTagValueDomain:
+    """QA 架构守护 A1（Critical）：开放接口必须校验角色值域。
+
+    回归背景：`{"tags":["bogus"]}` 非空 → 通过「至少一个角色」守卫 → 删光真实角色行
+    → 插入 bogus → 置 tags_user_set=1，引擎从此对任何任务都不可选。
+    """
+
+    def test_put_unknown_tag_rejected_without_writing(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # all:1
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("bogus",))
+        assert r.status_code == 400, r.text
+        detail = (r.json() or {}).get("detail") or {}
+        assert detail.get("error_code") == "INVALID_ROLE_TAGS", detail
+        assert "bogus" in (detail.get("message") or "")
+        assert ("all", 1) in _engine_tags(rid)          # 真实角色行没被删
+        with db_lock:
+            us = db.cursor().execute(
+                "SELECT ifnull(tags_user_set,0) FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
+        assert int(us or 0) == 0                        # 也没被置成「用户设过」
+
+    def test_put_mixed_valid_and_unknown_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("chat", "bogus"))
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "INVALID_ROLE_TAGS"
+        assert ("chat", 1) not in _engine_tags(rid)
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_put_valid_tags_still_ok(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("chat", "coding"))
+        assert r.status_code == 200, r.text
+        tags = [t for t, _ in _engine_tags(rid)]
+        assert "chat" in tags and "coding" in tags and "all" not in tags
+
