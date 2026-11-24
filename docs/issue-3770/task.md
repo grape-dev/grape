@@ -8,7 +8,7 @@
 - [x] T4 `service.py·_fn_migrate_env_extra_encryption`：口径改「非空且非 `enc:v1:`」；keyset 分页；失败行保留原值（不置 NULL）+ 计数 + 告警
 - [x] T5 `service.py·get_task`：读 env 传 `task_id` 走自愈
 - [x] T6 `db_setup.py`：核对 `202611220003` 注册（本轮不改代码，用例锁定）
-- [x] T7 用例：`tests/test_issue_3770_env_extra_plaintext.py`（15 例：回写加密/加密失败不回落/自愈幂等/`{}` 空对象/节流/坏值/backfill 脏值与失败保留/指标注册）
+- [x] T7 用例：`tests/test_issue_3770_env_extra_plaintext.py`（22 例：回写加密/加密失败不回落/自愈幂等/CAS 并发新值/`{}` 空对象/节流/坏值/backfill 脏值与失败保留/指标注册/锁序不嵌套/嵌套持锁降级 report_only）
 - [x] T8 回归：`tests/test_issue2423_env_extra_crypto.py`(6 passed)、`tests/test_issue2423_server_env_credentials.py`、
       `tests/runtime/test_issue_990_*`、`tests/arch/test_domain_boundaries.py`、`tests/mgmt/test_account_contract_routing.py`、
       `tests/test_issue_2085_contract_guard_alert.py`、`tests/insight/test_pr1077_observability_endpoints.py`、`scripts/check-arch.py`、`scripts/check-secrets.py`
