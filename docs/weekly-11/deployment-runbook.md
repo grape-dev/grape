@@ -97,6 +97,11 @@ systemctl show grape@worker -p MemoryAccounting,MemoryHigh,MemoryMax,RestartUSec
 journalctl -u grape@worker -n 50 | grep '\[memory-limit\]'   # 启动自检打印的生效限额
 # 期望 MemoryMax=8589934592（8G）+ "[memory-limit] process=worker cgroup limit=..."
 # 出现 "cgroup limit=unbounded" = drop-in 没装上，或限额挂在 v1 控制器
+# process 标签与端口必须等于部署角色事实源（脚本按角色导出 GRAPE_PROCESS_ROLE /
+# GRAPE_WORKER_PORT；出现在 .env 里的旧端口会让脚本 exit 6，而不是监听 A 注册 B）
+tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value grape@worker)/environ \
+  | grep -E '^GRAPE_PROCESS_ROLE=|^GRAPE_WORKER_PORT=|^GRAPE_UVICORN_WORKERS='
+# 期望 worker / 38083 / 1
 ```
 
 - 只跑 `systemctl show grape-worker-server` 不够：该静态单元可能根本没在运行。
