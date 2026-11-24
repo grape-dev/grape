@@ -10,7 +10,10 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # 仅供静态检查解析 `check_state_db_size()` 的字符串返回注解（运行期不导入）
+    from src.domains.runtime.engine.state_db_maintenance import StateDbCheckResult
 
 log = logging.getLogger("devops-bot")
 
