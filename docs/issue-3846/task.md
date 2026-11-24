@@ -3,7 +3,7 @@
 | # | 任务 | 产出 | 状态 |
 |---|------|------|------|
 | 1 | 失败测试先行 | `tests/api/test_issue_3846_cloud_sandboxes_migration.py`（红：旧号仍注册、无 post_check） | commit 1 |
-| 2 | renumber 202611180001 → 202611240002 | `ensure_cloud_sandboxes_table.py`（docstring/日志/`_INDEXES` 相关注释） | commit 2 |
+| 2 | renumber 202611180001 → 202611240003 | `ensure_cloud_sandboxes_table.py`（docstring/日志/`_INDEXES` 相关注释） | commit 2 |
 | 3 | 新增 `_postcheck_cloud_sandboxes` 并以 `post_check=` 注册 | 同上文件（表 + 三索引校验） | commit 2 |
 | 4 | db_setup 三处现状注释同步新号 | `src/api/db_setup.py`（纯注释） | commit 2 |
 | 5 | CI 门禁接入 | `.github/workflows/windows-smoke.yml` linux-backend 新增 pytest 步 | commit 3 |
