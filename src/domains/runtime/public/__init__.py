@@ -2436,6 +2436,11 @@ _ANY_QUERIES: dict[str, str] = {
     'conversations_by_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE user_id=? "
         "ORDER BY updated_at DESC LIMIT ?"),
+    # Issue #4183：任务会话按业务键精确检索（不依赖「最近 N 条」窗口，走
+    # idx_chat_conv_repo_issue 的部分唯一索引列序），供存在性判断与 1062 兜底共用。
+    'conversation_by_repo_issue_type': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations "
+        "WHERE user_id=? AND repo_key=? AND issue_number=? AND conv_type=? LIMIT 1"),
     'conversation_by_id': f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE id=?",
     'conversation_by_im_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE im_channel_id=? AND user_id=? "

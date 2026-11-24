@@ -102,6 +102,9 @@ from src.kernel.startup_metrics import install as _install_startup_metrics
 # 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
 # （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
 from src.kernel.comment_metrics import install as _install_comment_metrics
+# Issue #4183：任务会话 get-or-create 失败指标（grape_task_conversation_ensure_failed_total{reason}）。
+# 旧 Issue 重派撞唯一索引后的「1062 兜底仍查不到」由 WARNING 升级为可巡检指标。
+from src.kernel.task_conversation_metrics import install as _install_task_conversation_metrics
 # db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
 # 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
 from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
@@ -113,6 +116,7 @@ _install_db_lock_metrics(registry)
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
 _install_comment_metrics(registry)
+_install_task_conversation_metrics(registry)
 # Issue #3740：RepoBotToken 历史列回落 counter。降噪后日志不再承担全量计数，
 # 回落规模与仓库分布由 grape_repo_bot_legacy_fallback_total{provider,repo} 兜底。
 from src.kernel.repo_bot_observability import install as _install_repo_bot_observability
