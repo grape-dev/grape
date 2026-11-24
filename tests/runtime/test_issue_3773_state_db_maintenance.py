@@ -40,10 +40,12 @@ def _make_db(path, sessions, payload: int = 10_000):
         );
         """
     )
-    for sid, last_ts in sessions:
+    for item in sessions:
+        sid, last_ts = item[0], item[1]
+        ended_ts = item[2] if len(item) > 2 else None
         conn.execute(
             "INSERT INTO sessions (id, started_at, ended_at, message_count) VALUES (?,?,?,?)",
-            (sid, last_ts, None, 3),
+            (sid, last_ts, ended_ts, 3),
         )
         for i in range(3):
             conn.execute(
@@ -209,7 +211,9 @@ class TestCheckStateDbSize:
             retention_days=0, min_sessions=1, min_interval_s=3600,
             backup_dir=str(tmp_path / "b"), now=NOW, force=True,
         )
-        assert first.skip_resume in (False, True)
+        assert first.cleanup.result == m._RESULT_OK
+        assert first.skip_resume is True
+        assert first.reason == "archive_failed"
         second = check_state_db_size(
             str(tmp_path), threshold_mb=0.000001, low_water_mb=0,
             retention_days=0, min_sessions=1, min_interval_s=3600,
@@ -275,7 +279,16 @@ class TestOpsScript:
     def test_dry_run_then_cleanup_then_idempotent(self, tmp_path):
         mod = self._load()
         db = tmp_path / "state.db"
-        _make_db(db, _six_sessions(), payload=40_000)
+        real_now = time.time()
+        sessions = [
+            ("s_old40", real_now - 40 * DAY, real_now - 40 * DAY),
+            ("s_old30", real_now - 30 * DAY, real_now - 30 * DAY),
+            ("s_old20", real_now - 20 * DAY, real_now - 20 * DAY),
+            ("s_rec3", real_now - 3 * DAY, real_now - 3 * DAY),
+            ("s_rec1", real_now - 1 * DAY, real_now - 1 * DAY),
+            ("s_new", real_now - 3600, None),
+        ]
+        _make_db(db, sessions, payload=40_000)
         before = m.db_size_bytes(str(db))
         backups = tmp_path / "b"
         rc = mod.main([
@@ -301,3 +314,136 @@ class TestOpsScript:
             "--backup-dir", str(backups), "--no-archive",
         ])
         assert rc == 0
+
+class TestSizeAndLock:
+    def test_db_size_includes_wal_and_shm(self, tmp_path):
+        db = tmp_path / "state.db"
+        db.write_bytes(b"x" * 100)
+        (tmp_path / "state.db-wal").write_bytes(b"w" * 200)
+        (tmp_path / "state.db-shm").write_bytes(b"s" * 50)
+        assert m.db_size_bytes(str(db)) == 350
+
+    def test_thread_lock_fallback_releases_each_time(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "fcntl", None)
+        db = tmp_path / "state.db"
+        db.write_bytes(b"x")
+        first = m._DbLock(str(db))
+        assert first.__enter__() is True
+        assert m._thread_lock.locked() is True
+        first.__exit__(None, None, None)
+        assert m._thread_lock.locked() is False, "无 fcntl 回退路径泄漏 _thread_lock"
+        second = m._DbLock(str(db))
+        assert second.__enter__() is True
+        second.__exit__(None, None, None)
+        assert m._thread_lock.locked() is False
+
+
+class TestProtectAndForcedRound:
+    def test_protect_session_ids_keeps_resume_target(self, tmp_path):
+        db = tmp_path / "state.db"
+        _make_db(db, _six_sessions())
+        res = m.prune_and_vacuum(
+            str(db), retention_days=0, min_sessions=0,
+            target_bytes=100 * 1024 * 1024, now=NOW,
+            backup_dir=str(tmp_path / "backups"),
+            protect_session_ids=["s_rec3"], force_min_idle_days=0,
+        )
+        assert res.result == m._RESULT_OK
+        assert "s_rec3" in _sessions(str(db)), "即将 resume 的 session 被清理"
+        assert _sessions(str(db)) == {"s_rec3"}
+
+    def test_forced_round_only_prunes_closed_idle_sessions(self, tmp_path):
+        m.reset_metrics()
+        db = tmp_path / "state.db"
+        sessions = [
+            ("closed_old", NOW - 40 * DAY, NOW - 40 * DAY),
+            ("closed_recent", NOW - 3600, NOW - 3600),
+            ("active_old", NOW - 60 * DAY, None),
+        ]
+        _make_db(db, sessions)
+        res = m.prune_and_vacuum(
+            str(db), retention_days=365, min_sessions=0, target_bytes=1,
+            now=NOW, backup_dir=str(tmp_path / "backups"),
+            force_min_idle_days=1,
+        )
+        assert res.result == m._RESULT_OK
+        assert res.forced_pruned_sessions == 1
+        assert _sessions(str(db)) == {"closed_recent", "active_old"}, \
+            "forced 轮不得删除未结束会话或刚结束的会话"
+        assert m._cleanup_counts.get(m._RESULT_FORCED, 0) == 1
+        m.reset_metrics()
+
+
+class TestBackupFailure:
+    def test_backup_failure_returns_failed_without_raising(self, tmp_path, monkeypatch):
+        db = tmp_path / "state.db"
+        _make_db(db, _six_sessions())
+        before_sessions = _sessions(str(db))
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(m, "_backup_db", _boom)
+        res = m.prune_and_vacuum(
+            str(db), retention_days=0, min_sessions=0, target_bytes=1,
+            now=NOW, backup_dir=str(tmp_path / "backups"),
+        )
+        assert res.result == m._RESULT_FAILED
+        assert res.reason == "backup_failed"
+        assert res.backup_path == ""
+        assert _sessions(str(db)) == before_sessions
+
+        health = check_state_db_size(
+            str(tmp_path), threshold_mb=0.0001, low_water_mb=0,
+            retention_days=0, min_sessions=0, backup_dir=str(tmp_path / "backups"),
+            now=NOW, force=True,
+        )
+        assert health.exceeded is True
+        assert health.skip_resume is True
+        assert health.cleanup.reason == "backup_failed"
+
+
+class TestAcpResumeDecision:
+    def test_check_passes_resume_session_as_protected(self, monkeypatch, tmp_path):
+        from src.domains.runtime.agents import hermes_acp as ha
+
+        captured = {}
+
+        class _Health:
+            skip_resume = False
+            reason = ""
+            db_path = str(tmp_path / "state.db")
+            after_bytes = 1
+
+        def fake_check(home, **kwargs):
+            captured["home"] = home
+            captured.update(kwargs)
+            return _Health()
+
+        monkeypatch.setattr(
+            "src.domains.runtime.engine.context_compaction.check_state_db_size",
+            fake_check)
+        _health, skip = ha._check_state_db_before_resume(
+            str(tmp_path), "sess-resume", label="t ")
+        assert captured["protect_session_ids"] == ["sess-resume"]
+        assert skip is False
+
+    def test_check_records_resume_skipped(self, monkeypatch):
+        from src.domains.runtime.agents import hermes_acp as ha
+
+        recorded = []
+
+        class _Health:
+            skip_resume = True
+            reason = "archived"
+            db_path = "/tmp/state.db"
+            after_bytes = 10
+
+        monkeypatch.setattr(
+            "src.domains.runtime.engine.context_compaction.check_state_db_size",
+            lambda home, **kwargs: _Health())
+        monkeypatch.setattr(m, "record_resume_skipped",
+                            lambda reason: recorded.append(reason))
+        _health, skip = ha._check_state_db_before_resume("/tmp", "sess")
+        assert skip is True
+        assert recorded == ["archived"]

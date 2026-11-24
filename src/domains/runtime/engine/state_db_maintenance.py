@@ -9,6 +9,7 @@ VACUUM → 再次校验。清理后仍超阈值时归档重建空库，保留可
     ACP_STATE_DB_RETENTION_DAYS=7
     ACP_STATE_DB_MIN_SESSIONS=10
     ACP_STATE_DB_CLEANUP_MIN_INTERVAL_S=3600
+    ACP_STATE_DB_FORCE_MIN_IDLE_DAYS=1
     ACP_STATE_DB_BACKUP_DIR=~/.cache/hermes-acp-backups
     ACP_STATE_DB_BACKUP_RETENTION_H=24
 
@@ -36,6 +37,7 @@ MIN_SESSIONS_ENV = "ACP_STATE_DB_MIN_SESSIONS"
 MIN_INTERVAL_ENV = "ACP_STATE_DB_CLEANUP_MIN_INTERVAL_S"
 BACKUP_DIR_ENV = "ACP_STATE_DB_BACKUP_DIR"
 BACKUP_RETENTION_ENV = "ACP_STATE_DB_BACKUP_RETENTION_H"
+FORCE_MIN_IDLE_DAYS_ENV = "ACP_STATE_DB_FORCE_MIN_IDLE_DAYS"
 
 DEFAULT_MAX_MB = 50.0
 DEFAULT_LOW_WATER_MB = 40.0
@@ -43,12 +45,14 @@ DEFAULT_RETENTION_DAYS = 7.0
 DEFAULT_MIN_SESSIONS = 10
 DEFAULT_MIN_INTERVAL_S = 3600.0
 DEFAULT_BACKUP_RETENTION_H = 24.0
+DEFAULT_FORCE_MIN_IDLE_DAYS = 1.0
 
 _RESULT_OK = "ok"
 _RESULT_SKIPPED = "skipped"
 _RESULT_FAILED = "failed"
 _RESULT_DRY_RUN = "dry_run"
 _RESULT_ARCHIVED = "archived"
+_RESULT_FORCED = "forced"
 
 _session_tables = ("messages", "session_model_usage", "compression_locks")
 _delegation_tables = {
@@ -103,6 +107,10 @@ def min_interval_default() -> float:
     return _env_float(MIN_INTERVAL_ENV, DEFAULT_MIN_INTERVAL_S)
 
 
+def force_min_idle_days_default() -> float:
+    return _env_float(FORCE_MIN_IDLE_DAYS_ENV, DEFAULT_FORCE_MIN_IDLE_DAYS)
+
+
 def backup_dir_default() -> str:
     configured = (os.environ.get(BACKUP_DIR_ENV) or "").strip()
     if configured:
@@ -122,6 +130,7 @@ class MaintenanceResult:
     freed_bytes: int = 0
     pruned_sessions: int = 0
     pruned_messages: int = 0
+    forced_pruned_sessions: int = 0
     result: str = _RESULT_SKIPPED
     reason: str = ""
     backup_path: str = ""
@@ -138,6 +147,7 @@ class MaintenanceResult:
             "freed_bytes": self.freed_bytes,
             "pruned_sessions": self.pruned_sessions,
             "pruned_messages": self.pruned_messages,
+            "forced_pruned_sessions": self.forced_pruned_sessions,
             "result": self.result,
             "reason": self.reason,
             "backup_path": self.backup_path,
@@ -182,19 +192,22 @@ class _DbLock:
         self.path = db_path + ".cleanup.lock"
         self.timeout = max(0.0, float(timeout))
         self._fh = None
-        self._local = False
+        self._mode = ""
         self._locked = False
 
     def __enter__(self) -> bool:
+        self._mode = ""
+        self._locked = False
         try:
             self._fh = open(self.path, "a+")
         except OSError:
-            self._local = True
+            self._mode = "thread"
             self._locked = _thread_lock.acquire(blocking=False)
             return self._locked
         try:
             import fcntl
 
+            self._mode = "flock"
             deadline = time.time() + self.timeout
             while True:
                 try:
@@ -206,37 +219,48 @@ class _DbLock:
                         break
                     time.sleep(0.05)
         except Exception:
-            self._local = True
+            self._mode = "thread"
             self._locked = _thread_lock.acquire(blocking=False)
         return self._locked
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._fh is not None:
-            try:
-                if self._locked:
+        try:
+            if self._mode == "flock" and self._fh is not None and self._locked:
+                try:
                     import fcntl
 
                     fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-            self._fh = None
-        elif self._local and self._locked:
-            try:
-                _thread_lock.release()
-            except Exception:
-                pass
-        self._locked = False
+                except Exception:
+                    pass
+            elif self._mode == "thread" and self._locked:
+                try:
+                    _thread_lock.release()
+                except Exception:
+                    pass
+        finally:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+            self._mode = ""
+            self._locked = False
 
 
 def db_size_bytes(db_path: str) -> int:
-    try:
-        return int(os.path.getsize(db_path))
-    except OSError:
-        return 0
+    """state.db 实际占用：主文件 + WAL/SHM 边车文件。
+
+    只算主文件会低估 20%~30%（实测 756MB 主库 + 233MB WAL），导致阈值、
+    低水位、归档判定与上报指标同口径偏低。
+    """
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += int(os.path.getsize(db_path + suffix))
+        except OSError:
+            pass
+    return total
 
 
 def discover_state_dbs(root: str, include_children: bool = True) -> list[str]:
@@ -300,6 +324,13 @@ def _write_stamp(db_path: str, now: Optional[float] = None) -> None:
         pass
 
 
+def _clear_stamp(db_path: str) -> None:
+    try:
+        os.remove(_stamp_path(db_path))
+    except OSError:
+        pass
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
@@ -331,7 +362,8 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
         return False
 
 
-def _session_activity(conn: sqlite3.Connection) -> Optional[list[tuple[str, float]]]:
+def _session_activity(conn: sqlite3.Connection) -> Optional[list[tuple[str, float, float]]]:
+    """返回 (session_id, last_activity_ts, ended_ts)；ended_ts=0 表示会话未结束。"""
     if not _has_table(conn, "sessions"):
         return None
     cols = set(_table_columns(conn, "sessions"))
@@ -345,24 +377,45 @@ def _session_activity(conn: sqlite3.Connection) -> Optional[list[tuple[str, floa
     select.append(f"COALESCE({start_col},0)" if start_col else "0")
     select.append(f"COALESCE({end_col},0)" if end_col else "0")
     rows = conn.execute(f"SELECT {', '.join(select)} FROM sessions").fetchall()
-    activity: list[tuple[str, float]] = []
+    activity: list[tuple[str, float, float]] = []
     for sid, started, ended in rows:
         sid = str(sid or "")
         if not sid:
             continue
-        activity.append((sid, max(float(started or 0), float(ended or 0))))
+        try:
+            started_ts = float(started or 0)
+        except (TypeError, ValueError):
+            started_ts = 0.0
+        try:
+            ended_ts = float(ended or 0)
+        except (TypeError, ValueError):
+            ended_ts = 0.0
+        activity.append((sid, max(started_ts, ended_ts), ended_ts))
     return activity
 
 
-def _eligible_sessions(activity: list[tuple[str, float]], min_sessions: int,
-                       cutoff_ts: Optional[float]) -> list[tuple[str, float]]:
+def _eligible_sessions(activity: list[tuple[str, float, float]], min_sessions: int,
+                       cutoff_ts: Optional[float],
+                       protect_session_ids: Optional[set[str]] = None
+                       ) -> list[tuple[str, float, float]]:
     ordered = sorted(activity, key=lambda item: item[1], reverse=True)
-    protected = {sid for sid, _ in ordered[:max(0, int(min_sessions))]}
-    eligible = [(sid, last) for sid, last in ordered if sid not in protected]
+    protected = {sid for sid, _, _ in ordered[:max(0, int(min_sessions))]}
+    protected.update(protect_session_ids or set())
+    eligible = [item for item in ordered if item[0] not in protected]
     if cutoff_ts is not None:
-        eligible = [(sid, last) for sid, last in eligible if last < cutoff_ts]
+        eligible = [item for item in eligible if item[1] < cutoff_ts]
     eligible.sort(key=lambda item: item[1])
     return eligible
+
+
+def _forced_eligible(item: tuple[str, float, float], idle_cutoff_ts: float) -> bool:
+    """round2（forced）只清理已结束且空闲超过门槛的会话。
+
+    未置位 ``ended_at`` 的会话可能是活跃会话/即将 resume 的会话，绝不由强制轮删除；
+    这类情况交给“仍超阈值 → 归档重建”兜底，避免一次清掉数千个仍可复用的 context。
+    """
+    _sid, last_ts, ended_ts = item
+    return bool(ended_ts and ended_ts > 0 and last_ts < idle_cutoff_ts)
 
 
 def _count_messages(conn: sqlite3.Connection, session_ids: list[str]) -> int:
@@ -440,7 +493,7 @@ def _prune_old_backups(backup_dir: str, retention_hours: Optional[float] = None)
 
 
 def _backup_db(db_path: str, backup_dir: str) -> str:
-    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(backup_dir, mode=0o700, exist_ok=True)
     try:
         free = shutil.disk_usage(backup_dir).free
     except OSError:
@@ -460,6 +513,10 @@ def _backup_db(db_path: str, backup_dir: str) -> str:
             dst.close()
     finally:
         src.close()
+    try:
+        os.chmod(dest, 0o600)
+    except OSError:
+        pass
     _prune_old_backups(backup_dir)
     return dest
 
@@ -561,8 +618,16 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
                      target_bytes: Optional[int] = None,
                      dry_run: bool = False,
                      now: Optional[float] = None,
-                     lock_timeout: float = 0.0) -> MaintenanceResult:
-    """就地清理单个 state.db：校验 → 备份 → 裁剪 → VACUUM → 校验。"""
+                     lock_timeout: float = 0.0,
+                     protect_session_ids: Optional[list[str]] = None,
+                     force_min_idle_days: Optional[float] = None) -> MaintenanceResult:
+    """就地清理单个 state.db：校验 → 备份 → 裁剪 → VACUUM → 校验。
+
+    裁剪分两轮：
+    - retention：删除活跃时间早于保留窗口的会话；
+    - forced：若仍高于低水位，仅删除「已结束且空闲超过 force_min_idle_days」的会话，
+      未结束会话绝不在此轮删除（避免误删仍可 resume 的 context），并单独打点 ``forced``。
+    """
     result = MaintenanceResult(db_path=db_path)
     if not os.path.isfile(db_path):
         result.reason = "not_found"
@@ -572,6 +637,9 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
     retention = retention_days_default() if retention_days is None else float(retention_days)
     keep_sessions = min_sessions_default() if min_sessions is None else max(0, int(min_sessions))
     target = low_water_bytes_default() if target_bytes is None else max(0, int(target_bytes))
+    force_idle_days = (force_min_idle_days_default() if force_min_idle_days is None
+                       else float(force_min_idle_days))
+    protect_ids = {str(s).strip() for s in (protect_session_ids or []) if str(s).strip()}
     current = time.time() if now is None else float(now)
     result.before_bytes = db_size_bytes(db_path)
 
@@ -606,31 +674,44 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
                 return result
 
             cutoff = current - retention * 86400.0
-            older = _eligible_sessions(activity, keep_sessions, cutoff)
-            remaining = _eligible_sessions(activity, keep_sessions, None)
-            plan: list[list[tuple[str, float]]] = []
+            older = _eligible_sessions(activity, keep_sessions, cutoff, protect_ids)
+            remaining = _eligible_sessions(activity, keep_sessions, None, protect_ids)
+            plan: list[tuple[str, list[tuple[str, float, float]]]] = []
             if older:
-                plan.append(older)
-            older_ids = {sid for sid, _ in older}
-            extra = [(sid, last) for sid, last in remaining if sid not in older_ids]
+                plan.append(("retention", older))
+            older_ids = {sid for sid, _, _ in older}
+            force_idle_cutoff = current - max(0.0, force_idle_days) * 86400.0
+            extra = [item for item in remaining
+                     if item[0] not in older_ids and _forced_eligible(item, force_idle_cutoff)]
             if extra:
-                plan.append(extra)
+                plan.append(("forced", extra))
 
             if dry_run:
-                candidate_round1 = [sid for sid, _ in older]
-                result.pruned_sessions = len(candidate_round1) + len(extra)
-                result.pruned_messages = _count_messages(conn, candidate_round1)
+                candidate_round1 = [sid for sid, _, _ in older]
+                candidate_forced = [sid for sid, _, _ in extra]
+                result.pruned_sessions = len(candidate_round1) + len(candidate_forced)
+                result.forced_pruned_sessions = len(candidate_forced)
+                result.pruned_messages = _count_messages(
+                    conn, candidate_round1 + candidate_forced)
                 result.after_bytes = result.before_bytes
                 result.result = _RESULT_DRY_RUN
-                result.reason = f"eligible={len(candidate_round1)} extra={len(extra)}"
+                result.reason = (f"eligible={len(candidate_round1)} "
+                                 f"forced={len(candidate_forced)}")
                 _record_cleanup(_RESULT_DRY_RUN)
                 return result
 
-            result.backup_path = _backup_db(db_path, backup_dir or backup_dir_default())
+            try:
+                result.backup_path = _backup_db(db_path, backup_dir or backup_dir_default())
+            except Exception as exc:
+                result.result = _RESULT_FAILED
+                result.reason = "backup_failed"
+                result.error = str(exc)[:300]
+                _record_cleanup(_RESULT_FAILED)
+                return result
 
             try:
-                for batch in plan:
-                    ids = [sid for sid, _ in batch]
+                for round_name, batch in plan:
+                    ids = [sid for sid, _, _ in batch]
                     conn.execute("BEGIN IMMEDIATE")
                     try:
                         deleted = _delete_from_session_tables(conn, ids)
@@ -640,6 +721,13 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
                         raise
                     result.pruned_sessions += len(ids)
                     result.pruned_messages += deleted
+                    if round_name == "forced":
+                        result.forced_pruned_sessions += len(ids)
+                        _record_cleanup(_RESULT_FORCED)
+                        log.info(
+                            "ACP state.db forced prune round: db=%s pruned_sessions=%s "
+                            "idle_days=%s",
+                            db_path, len(ids), force_idle_days)
                     _vacuum(conn)
                     if db_size_bytes(db_path) <= target:
                         break
@@ -724,11 +812,15 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
                         backup_dir: Optional[str] = None,
                         force: bool = False,
                         db_path: Optional[str] = None,
-                        now: Optional[float] = None) -> StateDbCheckResult:
+                        now: Optional[float] = None,
+                        protect_session_ids: Optional[list[str]] = None,
+                        force_min_idle_days: Optional[float] = None) -> StateDbCheckResult:
     """检测 state.db 体积并执行清理；返回是否跳过 resume 的结构化结果。
 
     清理成功且回落到阈值内 → skip_resume=False（继续 resume）。
     节流中/清理失败/清理后仍超阈值（已归档重建）→ skip_resume=True（session/new）。
+    ``protect_session_ids`` 用于把本次即将 resume 的会话并入保护集，避免被裁剪后
+    resume 失败回落 session/new 且不计 ACP_RESUME_SKIPPED。
     """
     max_mb = _env_float(MAX_MB_ENV, DEFAULT_MAX_MB) if threshold_mb is None else float(threshold_mb)
     low_mb = _env_float(LOW_WATER_MB_ENV, DEFAULT_LOW_WATER_MB) if low_water_mb is None else float(low_water_mb)
@@ -753,8 +845,6 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
         out.reason = "throttled"
         return out
 
-    _write_stamp(target, current)
-
     cleanup = prune_and_vacuum(
         target,
         retention_days=retention_days,
@@ -762,7 +852,15 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
         backup_dir=backup_dir,
         target_bytes=low_size,
         now=current,
+        protect_session_ids=protect_session_ids,
+        force_min_idle_days=force_min_idle_days,
     )
+    # 节流 stamp 只在真正执行过清理（ok/archived/dry-run）后写入；失败/锁跳过时清除，
+    # 避免失败后 1 小时内全部 throttle → 新任务直接 skip_resume，扩大上下文丢失窗口。
+    if cleanup.result in (_RESULT_FAILED, _RESULT_SKIPPED):
+        _clear_stamp(target)
+    else:
+        _write_stamp(target, current)
     out.cleanup = cleanup
     out.after_bytes = db_size_bytes(target)
 
@@ -771,9 +869,10 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
         out.reason = "cleaned"
         log.info(
             "ACP state.db cleanup ok: db=%s before=%s after=%s pruned_sessions=%s "
-            "pruned_messages=%s backup=%s",
+            "pruned_messages=%s forced_sessions=%s backup=%s",
             target, cleanup.before_bytes, cleanup.after_bytes,
-            cleanup.pruned_sessions, cleanup.pruned_messages, cleanup.backup_path,
+            cleanup.pruned_sessions, cleanup.pruned_messages,
+            cleanup.forced_pruned_sessions, cleanup.backup_path,
         )
         return out
 

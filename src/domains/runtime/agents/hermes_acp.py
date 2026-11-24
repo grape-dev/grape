@@ -283,19 +283,9 @@ class HermesACPBackend:
         _skip_resume = False
         _state_db_health = None
         if session_id:
-            from src.domains.runtime.engine.context_compaction import check_state_db_size
-            from src.domains.runtime.engine.state_db_maintenance import record_resume_skipped
-            _state_db_health = check_state_db_size(iso_home)
-            _skip_resume = bool(_state_db_health.skip_resume)
+            _state_db_health, _skip_resume = _check_state_db_before_resume(
+                iso_home, session_id, label=label, shared_home_mode=_shared_home_mode)
             if _skip_resume:
-                _db_bytes = _state_db_health.after_bytes
-                log.warning(
-                    f"{label}ACP_RESUME_SKIPPED reason={_state_db_health.reason or 'unknown'} "
-                    f"db={_state_db_health.db_path} bytes={_db_bytes} "
-                    f"mode={'shared' if _shared_home_mode else 'isolated'} "
-                    f"hermes ACP state.db too large, skipping resume to avoid context overflow"
-                )
-                record_resume_skipped(_state_db_health.reason or "unknown")
                 session_id = ""
 
         proc_env = dict(env) if env else os.environ.copy()
@@ -1555,6 +1545,30 @@ def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
         "exit_code": exit_code, "text": text,
         "oc_session_id": session_id, "errors": errors, "stderr": stderr,
     }
+
+
+def _check_state_db_before_resume(iso_home: str, session_id: str, label: str = "",
+                                  shared_home_mode: bool = False):
+    """Issue #3773：拉起 hermes 前治理 state.db，返回 (health, skip_resume)。
+
+    把本次即将 resume 的 ``session_id`` 并入保护集，避免它不在“最近 N 个”时被
+    清理掉后 resume 失败回落 session/new 且不计 ACP_RESUME_SKIPPED。
+    """
+    from src.domains.runtime.engine.context_compaction import check_state_db_size
+    from src.domains.runtime.engine.state_db_maintenance import record_resume_skipped
+
+    protect = [session_id] if session_id else None
+    health = check_state_db_size(iso_home, protect_session_ids=protect)
+    if health.skip_resume:
+        log.warning(
+            f"{label}ACP_RESUME_SKIPPED reason={health.reason or 'unknown'} "
+            f"db={health.db_path} bytes={health.after_bytes} "
+            f"mode={'shared' if shared_home_mode else 'isolated'} "
+            f"hermes ACP state.db too large, skipping resume to avoid context overflow"
+        )
+        record_resume_skipped(health.reason or "unknown")
+        return health, True
+    return health, False
 
 # ── issue #439：overlay home 条目分类（替代全量 symlink）──
 # 可写状态目录白名单：per-task 真实目录。Windows 提权引擎下 symlink 是 reparse
