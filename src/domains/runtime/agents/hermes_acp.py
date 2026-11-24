@@ -277,6 +277,27 @@ class HermesACPBackend:
             _SHARED_HOME_LOCK.acquire()
             _locked = True
 
+        # Issue #3773：在拉起 hermes 子进程之前治理 state.db，避免 VACUUM 与
+        # 运行中的引擎抢写锁。清理成功则保留 session_id 走 resume；仅清理失败 /
+        # 清理后仍超阈值（已归档重建）才放弃 resume。
+        _skip_resume = False
+        _state_db_health = None
+        if session_id:
+            from src.domains.runtime.engine.context_compaction import check_state_db_size
+            from src.domains.runtime.engine.state_db_maintenance import record_resume_skipped
+            _state_db_health = check_state_db_size(iso_home)
+            _skip_resume = bool(_state_db_health.skip_resume)
+            if _skip_resume:
+                _db_bytes = _state_db_health.after_bytes
+                log.warning(
+                    f"{label}ACP_RESUME_SKIPPED reason={_state_db_health.reason or 'unknown'} "
+                    f"db={_state_db_health.db_path} bytes={_db_bytes} "
+                    f"mode={'shared' if _shared_home_mode else 'isolated'} "
+                    f"hermes ACP state.db too large, skipping resume to avoid context overflow"
+                )
+                record_resume_skipped(_state_db_health.reason or "unknown")
+                session_id = ""
+
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
         proc_env["HERMES_YOLO_MODE"] = "1"
@@ -564,11 +585,7 @@ class HermesACPBackend:
             yield ("step_start", "Step 1 started (session: ACP)")
             cwd_arg = cwd if cwd else "."
             if session_id:
-                from src.domains.runtime.engine.context_compaction import check_state_db_size
-                _skip_resume = check_state_db_size(iso_home, threshold_mb=50.0)
                 if _skip_resume:
-                    log.warning(f"{label}hermes ACP state.db too large, skipping resume to avoid context overflow")
-                    session_id = ""
                     result, err = client.request("session/new", {
                         "cwd": cwd_arg, "mcpServers": [],
                     }, timeout=100)
@@ -587,7 +604,8 @@ class HermesACPBackend:
                         return
                     new_session_id = _extract_session_id(result) or ""
                 else:
-                    new_session_id = _extract_session_id(result) or session_id
+                    new_session_id = _extract_session_id(result) or (
+                        "" if _skip_resume else session_id)
             else:
                 result, err = client.request("session/new", {
                     "cwd": cwd_arg, "mcpServers": [],
