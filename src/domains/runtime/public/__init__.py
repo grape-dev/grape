@@ -6230,6 +6230,32 @@ def skills_by_ids(skill_ids) -> list[tuple]:
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+def skills_by_names(skill_names) -> list[tuple]:
+    """按名字批量取技能（id, skill_name, display_name, agent_type, description, scope），只取启用行。
+
+    与 skills_by_ids 同构：给「绑定丢了 id、只剩名字」的历史数据（scene_skill_ref 里
+    skill_id=0 的行）一个可解析的入口，避免整条链路被判成「技能已删除」。
+    """
+    names = [str(n).strip() for n in (skill_names or []) if str(n).strip()]
+    if not names:
+        return []
+    ph = ",".join(["?"] * len(names))
+    with _any_cursor() as c:
+        c.execute(f"SELECT id, skill_name, display_name, agent_type, description, scope "
+                  f"FROM skill WHERE skill_name IN ({ph}) AND is_active=1", names)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def skill_names_active(skill_names) -> set:
+    """批量按名字校验技能仍启用；返回命中的 skill_name 集合（口径与 skill_ids_active 一致）。"""
+    return {str(r[1]) for r in skills_by_names(skill_names)}
+
+
+def skill_ids_by_names(skill_names) -> dict:
+    """名字 → id 映射（只含启用行）；用于把 skill_id=0 的老绑定补齐成真实 id。"""
+    return {str(r[1]): int(r[0]) for r in skills_by_names(skill_names)}
+
+
 def skill_ids_active(skill_ids) -> list[int]:
     """批量校验技能 id 仍启用；返回命中的 id 列表。"""
     ids = [int(i) for i in (skill_ids or []) if str(i).strip()]
