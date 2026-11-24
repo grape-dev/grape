@@ -212,6 +212,11 @@ ALTERS_ENGINE_CREDENTIAL_COLUMNS = (
     # ===== Issue #180: 带宽占用率指标 =====
     "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
     "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
+    # ===== Issue #3773: hermes ACP state.db 体积治理指标（worker 心跳上报）=====
+    "ALTER TABLE runtime_credentials ADD COLUMN acp_state_db_bytes DOUBLE DEFAULT 0",
+    "ALTER TABLE runtime_credentials ADD COLUMN acp_state_db_cleanup_counts TEXT DEFAULT ''",
+    "ALTER TABLE runtime_credentials ADD COLUMN acp_state_db_bytes_freed_total DOUBLE DEFAULT 0",
+    "ALTER TABLE runtime_credentials ADD COLUMN acp_resume_skipped_total INT DEFAULT 0",
     "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
 )
 ALTERS_SKILL_ENGINE_COLUMNS = (

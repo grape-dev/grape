@@ -252,3 +252,30 @@ groups:
         annotations:
           summary: "Trace relay cannot reach LGTM"
           description: "The master failed to POST to <OTLP_RELAY_TARGET>/v1/traces for 5 minutes (502 lgtm unreachable). Check LGTM :4318 reachability from the master (security group / process health)."
+
+      # Issue #3773：hermes ACP state.db 体积治理（worker 心跳上报，按 host 聚合）
+      # state.db 超阈值会触发就地清理；清理失败或仍超阈值时归档重建并跳过 resume。
+      - alert: GrapeAcpStateDbTooLarge
+        expr: grape_acp_state_db_bytes > 52428800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hermes ACP state.db exceeds 50MB"
+          description: "host={{ $labels.host }} state.db={{ $value }} bytes (>50MB for 10m). Cleanup should prune old sessions and VACUUM; check cleanup_total{result=\"failed\"} and worker logs for ACP_RESUME_SKIPPED."
+      - alert: GrapeAcpStateDbCritical
+        expr: grape_acp_state_db_bytes > 104857600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hermes ACP state.db exceeds 100MB"
+          description: "host={{ $labels.host }} state.db={{ $value }} bytes (>100MB for 5m). Immediate risk of skipped resume / disk pressure; run scripts/ops/hermes_acp_state_db_cleanup.py --dry-run then cleanup."
+      - alert: GrapeAcpResumeSkipped
+        expr: increase(grape_acp_resume_skipped_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hermes ACP resume is being skipped"
+          description: "host={{ $labels.host }} skipped resume {{ $value }} times in 15m because state.db stayed too large; session context is being lost. Check cleanup_total{result} and state.db bytes."

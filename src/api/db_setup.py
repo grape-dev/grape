@@ -7102,6 +7102,11 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
+                # Issue #3773：ACP state.db 体积治理指标（worker 心跳上报）
+                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "acp_state_db_cleanup_counts", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes_freed_total", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "acp_resume_skipped_total", "INTEGER DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute(runtime_mig.DELETE_RUNTIME_CREDENTIALS)
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")

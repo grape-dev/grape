@@ -391,6 +391,71 @@ TASK_IN_PROGRESS = Gauge(
 )
 
 
+# ===== ACP state.db 体积治理指标（Issue #3773）=====
+# worker 心跳把本机 state.db 体积与清理计数写入 runtime_credentials，这里在
+# /metrics scrape 时按 host 采样。名字与 Spec 一致（_total 系列用 Gauge 承载
+# worker 累计值，rate() 仍可直接用于告警）。
+ACP_STATE_DB_BYTES = Gauge(
+    "grape_acp_state_db_bytes",
+    "Largest hermes ACP state.db observed on a worker host.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_STATE_DB_CLEANUP_TOTAL = Gauge(
+    "grape_acp_state_db_cleanup_total",
+    "Cumulative ACP state.db cleanup attempts by result.",
+    ["host", "result"],
+    registry=registry,
+)
+
+ACP_STATE_DB_BYTES_FREED_TOTAL = Gauge(
+    "grape_acp_state_db_bytes_freed_total",
+    "Cumulative bytes freed by ACP state.db cleanup.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_RESUME_SKIPPED_TOTAL = Gauge(
+    "grape_acp_resume_skipped_total",
+    "Cumulative ACP resume attempts skipped because state.db stayed too large.",
+    ["host"],
+    registry=registry,
+)
+
+_acp_cleanup_results: dict[str, set] = {}
+
+
+def collect_acp_state_db_metrics():
+    """scrape 时把 worker 上报的 state.db 指标刷到 Prometheus。"""
+    try:
+        import json as _json
+
+        from src.domains.runtime import public as _rt_public
+        rows = _rt_public.read_all_any("runtime_credentials_acp_state_rows")
+    except Exception:
+        return
+    for row in rows or []:
+        values = list(row) + [None] * 6
+        device_name, name, db_bytes, cleanup_counts, freed, skipped = values[:6]
+        host = str(device_name or name or "unknown")
+        ACP_STATE_DB_BYTES.labels(host=host).set(float(db_bytes or 0))
+        ACP_STATE_DB_BYTES_FREED_TOTAL.labels(host=host).set(float(freed or 0))
+        ACP_RESUME_SKIPPED_TOTAL.labels(host=host).set(float(skipped or 0))
+        counts = {}
+        try:
+            parsed = _json.loads(cleanup_counts or "{}")
+            if isinstance(parsed, dict):
+                counts = {str(k): int(v or 0) for k, v in parsed.items()}
+        except (TypeError, ValueError):
+            counts = {}
+        known = _acp_cleanup_results.setdefault(host, set())
+        known.update(counts)
+        for result in known:
+            ACP_STATE_DB_CLEANUP_TOTAL.labels(host=host, result=result).set(
+                float(counts.get(result, 0)))
+
+
 # ===== 标签规范化（参考 multica metrics/labels.go）=====
 
 _VALID_SOURCES = frozenset({"chat", "issue", "webhook", "manual", "api", "vod", "autopilot", "other"})
@@ -854,3 +919,4 @@ def on_metrics_scrape():
     """
     collect_mysql_metrics()
     collect_business_sampler()
+    collect_acp_state_db_metrics()

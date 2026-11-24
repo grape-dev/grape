@@ -3225,6 +3225,13 @@ _ANY_QUERIES: dict[str, str] = {
     "runtime_credentials_silent_rows": (
         "SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at,"
         " status, repo_key FROM runtime_credentials WHERE status != 'revoked'"),
+    # ── ACP state.db 体积治理指标（insight/observability 采样；Issue #3773）──
+    # worker 心跳把本机 state.db 体积/清理计数写入 runtime_credentials，/metrics
+    # 采样时按 host 暴露 grape_acp_state_db_bytes 等指标。
+    "runtime_credentials_acp_state_rows": (
+        "SELECT device_name, name, acp_state_db_bytes, acp_state_db_cleanup_counts,"
+        " acp_state_db_bytes_freed_total, acp_resume_skipped_total"
+        " FROM runtime_credentials WHERE status != 'revoked'"),
     "agent_task_activity_rows": (
         "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
         " WHERE repo_key IS NOT NULL AND repo_key != ''"),
