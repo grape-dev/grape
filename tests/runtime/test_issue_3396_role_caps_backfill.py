@@ -79,6 +79,16 @@ class TestEnsureRoleCaps:
         assert "all" not in _caps(rid)
         assert "sre" in _caps(rid)
 
+    def test_multi_role_declaration_backfills_all_roles(self):
+        """QA C-1：一次声明多个角色必须整组落库，不能只写第一个。"""
+        rid = _mk_engine("b3396bf-m", role_tags='["sre","qa"]')
+        written = ensure_role_caps(db.cursor(), rid)
+        db.commit()
+        assert sorted(written) == ["qa", "sre"], written
+        caps = _caps(rid)
+        assert "sre" in caps and "qa" in caps, caps
+        assert "all" not in caps
+
     def test_illegal_declaration_falls_back_to_all(self):
         rid = _mk_engine("b3396bf-c", role_tags='["not-a-role"]')
         written = ensure_role_caps(db.cursor(), rid)

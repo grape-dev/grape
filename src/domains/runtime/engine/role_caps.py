@@ -92,20 +92,29 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None, 
     _domain = ("all",) + tuple(KNOWN_AGENT_ROLES)
     _in = ",".join("?" * len(_domain))
     _written = []
-    for _t in _write:
-        # 原子：库里已出现任意角色行（含并发写入的）就跳过，不再依赖进程内的预检
-        _cur = c.execute(
-            "INSERT INTO engine_capabilities "
-            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-            "SELECT ?,?,?,?,1,?,? WHERE NOT EXISTS ("
-            "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN (" + _in + "))",
-            (rid, _t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now, rid, *_domain))
-        try:
-            _n = getattr(_cur, "rowcount", 0)
-        except Exception:  # noqa: BLE001
-            _n = 0
-        if _n:
-            _written.append(_t)
+    if not _write:
+        return _written
+    # 整组一次性写入（QA C-1）：旧循环形态的 NOT EXISTS 谓词是「任意角色行」，
+    # 首条插入成功后循环内后续声明角色会被自我抑制——一次声明多角色时只落
+    # 第一个。改为单条多行 INSERT ... SELECT，外层 NOT EXISTS 只判一次：
+    # 零角色行时整组落库，已有任意角色行（含并发写入的）整组跳过，语义不变。
+    _rows_sql = " UNION ALL ".join(
+        "SELECT ? AS runtime_id, ? AS tag, %d AS max_concurrent, %d AS priority,"
+        " 1 AS enabled, ? AS created_at, ? AS updated_at"
+        % (_DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL) for _t in _write)
+    _cur = c.execute(
+        "INSERT INTO engine_capabilities "
+        "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+        "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at FROM ("
+        + _rows_sql + ") WHERE NOT EXISTS ("
+        "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN (" + _in + "))",
+        tuple(v for _t in _write for v in (rid, _t, _now, _now)) + (rid, *_domain))
+    try:
+        _n = getattr(_cur, "rowcount", 0)
+    except Exception:  # noqa: BLE001
+        _n = 0
+    if _n:
+        _written = list(_write)
     if _written:
         # QA 复审 Medium：自愈写入直接改变派发可用性（补 all = 全角色可调度），
         # 成功路径必须留痕，不能只在异常时 warning。
