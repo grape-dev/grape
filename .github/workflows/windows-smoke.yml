@@ -369,3 +369,14 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v
+      - name: VcsApiClient log redaction regression tests (issue #3737)
+        # Issue #3737 QA 审查修复（Required）：新增用例 test_vcs_api_client_log_redaction.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771/#3848/#4065）。
+        # 用例锁 query_token 鉴权的 6 处失败日志出口（400/401/超时/URLError/下载失败）
+        # 只写脱敏后的 method+path+状态码与截断后的 body，token 全文及任意 ≥8 位片段零出现；
+        # 同时守 `%26access_token%3D…` 编码形态、`access_key/api_key/password` 覆盖面与
+        # #558 返回语义不变。回退会让 bot 凭据重新以 WARNING 落 Loki（事故实测 923 条/日），
+        # 只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_vcs_api_client_log_redaction.py -v
