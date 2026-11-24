@@ -1038,7 +1038,10 @@ provision_codearts_trust() {
     "$VENV/bin/python" -c "
 import sys
 sys.path.insert(0, '$INSTALL_DIR')
-from src.domains.runtime.agents.codearts import write_trust_settings
+try:
+    from src.domains.runtime.engine.codearts import write_trust_settings
+except ImportError:  # M0 之前的包，函数仍在 agents 命名空间
+    from src.domains.runtime.agents.codearts import write_trust_settings
 write_trust_settings('$_oc_data', ['$INSTALL_DIR', '$_oc_tasks'])
 " && log "codearts folder trust configured (write_trust_settings: trustedFolders += $INSTALL_DIR)" && return 0
   fi
