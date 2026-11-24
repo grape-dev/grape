@@ -257,3 +257,46 @@
 
 | 出参 | `{"ok": true, ...}` |
 | 返回 | 200；400 |
+
+---
+
+## POST /api/skills/by-id/{skill_id}/convert — 技能原地互转 scope（Issue #3976）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：未开放（内部 Web 端点，operation_id=`skills_convert_scope`）。
+
+请求头：`Content-Type: application/json`
+
+请求体（ConvertScopeRequest）：`{"target": "user" | "repo", "repo": "owner/repo"}`（target=repo 时必填 repo）
+
+| 出参 | `{"message", "skill_id", "scope", "owner_id"}` |
+| 返回 | 200；400/403/404/409 |
+
+原地转换：技能 ID、历史版本与场景引用保持不变，仅切换归属。
+
+---
+
+## PUT /api/skills/by-id/{skill_id}/content — 保存 SKILL.md（版本号不变，Issue #3976）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：未开放（内部 Web 端点，operation_id=`skills_save_content`）。
+
+请求头：`Content-Type: application/json`
+
+请求体（SkillContentRequest）：`{"content": "<SKILL.md 全文>"}`（≤1MB，仅个人技能）
+
+| 出参 | `{"message", "skill_id", "content_hash", "version"}` |
+| 返回 | 200；400/403/404 |
+
+不写入版本表：保存后版本号不变；官方/仓库技能 403。
+
+---
+
+## POST /api/skills/by-id/{skill_id}/ai-fill — AI 填写技能元信息（Issue #3976）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：未开放（内部 Web 端点，operation_id=`skills_ai_fill`）。
+
+读取 SKILL.md（截断至 `GRAPE_AI_FILL_CONTENT_MAX_CHARS`，默认 20000 字符）交平台 LLM 生成建议。
+
+| 出参 | `{"summary", "description", "intro": {scope,steps,products,constraints,review}, "tags": [...]}` |
+| 返回 | 200；400/403/404/502/503 |
+
+仅返回建议、不落库；时延由上游 LLM 决定，受 `GRAPE_AI_FILL_TIMEOUT_SECONDS`（默认 60s）约束。

@@ -631,7 +631,9 @@ def write_openapi_contract(schema: dict, help_path: Path | None = None,
                     p, len(missing), ", ".join(missing[:3]))
                 continue
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(_json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+        # QA Informational 1：固定 LF 写盘，避免 Windows 渲染器把入仓契约副本写成 CRLF
+        p.write_text(_json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
+                     encoding="utf-8", newline="\n")
         written_any = True
 
     return len(new_paths) if written_any else 0
