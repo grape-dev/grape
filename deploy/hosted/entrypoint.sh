@@ -220,7 +220,6 @@ if [ -n "${LLM_API_KEY:-}" ]; then
     groq)       DEF_BASE="https://api.groq.com/openai/v1" ;;
     anthropic)  DEF_BASE="https://api.anthropic.com/v1"; NO_MODEL_LIST=1 ;;
     deepseek)   DEF_BASE="https://api.deepseek.com/v1" ;;
-    opengw)     DEF_BASE="https://opengw.clouddeveloper.club/v1" ;;
     *)          DEF_BASE="" ;;
   esac
   BASE="${LLM_BASE_URL:-$DEF_BASE}"
