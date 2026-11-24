@@ -6245,13 +6245,19 @@ def skills_by_names_scoped(skill_names, scopes=("official", "repo")) -> list[tup
         return []
     ph = ",".join(["?"] * len(names))
     sph = ",".join(["?"] * len(scopes))
-    order = " ".join(f"WHEN '{s}' THEN {k}" for k, s in enumerate(scopes))
+    # 作用域优先级用**参数化** CASE 表达，不拼字面量；非白名单作用域直接拒绝，
+    # 避免调用方透传外部值时成为注入面（与 configs/table_ownership 的域边界一致）。
+    _SCOPE_ALLOW = ("official", "repo")
+    _bad = [s for s in scopes if s not in _SCOPE_ALLOW]
+    if _bad:
+        raise ValueError(f"unsupported skill scope(s): {_bad}; allowed: {_SCOPE_ALLOW}")
+    order = " ".join([f"WHEN ? THEN {k}" for k in range(len(scopes))])
     with _any_cursor() as c:
         c.execute(
             f"SELECT id, skill_name, display_name, agent_type, description, scope "
             f"FROM skill WHERE skill_name IN ({ph}) AND is_active=1 AND scope IN ({sph}) "
             f"ORDER BY CASE scope {order} ELSE {len(scopes)} END, id ASC",
-            list(names) + list(scopes))
+            list(names) + list(scopes) + list(scopes))
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
