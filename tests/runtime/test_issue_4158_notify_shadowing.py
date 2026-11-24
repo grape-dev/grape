@@ -5,9 +5,11 @@
 通知静默退回旧链路。
 
 本用例锁定三件事：
-1. 5 个文件顶层同名 def/class 计数为 0；
+1. 6 个文件顶层同名 def/class 计数为 0（含 Spec 清单外的 `mgmt/routes/skills.py`）；
 2. `ctx=None` 且仅非飞书渠道可达时，三族通知真的走 `notify_user` 扇出（sent_ok，绝不 skipped_no_ctx）；
-3. UUID 账号 id（D105）不被 `int()` 短路，`_resolve_issue_notify_targets` 照常解析通知目标。
+3. UUID 账号 id（D105）不被 `int()` 短路，`_resolve_issue_notify_targets` 照常解析通知目标，
+   且三族在「真无渠道 / 渠道发送失败」两种 else 形态下的计数口径完全一致
+   （真无渠道 = sent_failed + skipped_no_ctx；有渠道但失败 = 只计 sent_failed）。
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ _DEDUP_TARGET_FILES = [
     ROOT / "src/domains/runtime/public/__init__.py",
     ROOT / "src/domains/runtime/routes/issues.py",
     ROOT / "src/domains/mgmt/public/__init__.py",
+    ROOT / "src/domains/mgmt/routes/skills.py",
     ROOT / "src/api/db_setup.py",
 ]
 
@@ -127,7 +130,7 @@ def test_task_notify_fans_out_without_ctx(fresh_counters, monkeypatch):
 
 
 def test_pending_review_reports_skip_when_no_channel(fresh_counters, monkeypatch):
-    """对照：真无渠道（sent/failed/skipped 全空）仍计 skipped_no_ctx，语义未被改坏。"""
+    """兼容保留：pending_review 族真无渠道仍计 skipped_no_ctx（三族统一在下方参数化用例）。"""
     ic = fresh_counters
     _install_notify_user(monkeypatch, {"sent": [], "failed": [], "skipped": {}})
 
@@ -137,6 +140,46 @@ def test_pending_review_reports_skip_when_no_channel(fresh_counters, monkeypatch
 
     counters = ic.get_im_notify_counters()
     assert counters.get("skipped_no_ctx") == 1
+
+
+# 三族通知的统一调用入口：用于「else 分支计数口径」对照用例（PR #2077 复审 Required）。
+# 事故形态修复后三族的 else 口径必须一致，任何一族单独漂移都要在这里变红。
+_FAMILY_CALLS = {
+    "task": lambda ic, n: ic._run_notify(
+        None, None, UUID_UID, "", "", "任务描述", "gitcode:org/test", n, {}),
+    "awaiting": lambda ic, n: ic._run_awaiting_notify(
+        None, None, UUID_UID, "", "", "补充信息", "gitcode:org/test", n, {}),
+    "pending_review": lambda ic, n: ic._run_pending_review_notify(
+        None, None, UUID_UID, "", "", "请审核", "PR#1", "gitcode:org/test", n, {}),
+}
+
+
+@pytest.mark.parametrize("family", sorted(_FAMILY_CALLS))
+def test_no_channel_counts_skipped_no_ctx_for_all_families(family, fresh_counters, monkeypatch):
+    """三族同口径：notify_user 返回全空（无任何可用渠道）→ sent_failed + skipped_no_ctx。"""
+    ic = fresh_counters
+    _install_notify_user(monkeypatch, {"sent": [], "failed": [], "skipped": {}})
+
+    _run(_FAMILY_CALLS[family](ic, 105))
+
+    counters = ic.get_im_notify_counters()
+    assert counters.get("sent_failed") == 1, counters
+    assert counters.get("skipped_no_ctx") == 1, counters
+    assert "sent_ok" not in counters, counters
+
+
+@pytest.mark.parametrize("family", sorted(_FAMILY_CALLS))
+def test_channel_failure_is_not_counted_as_no_channel(family, fresh_counters, monkeypatch):
+    """有渠道但发送失败 → 只计 sent_failed；skipped_no_ctx 只代表「无渠道」，不得被吞并。"""
+    ic = fresh_counters
+    _install_notify_user(monkeypatch, {"sent": [], "failed": ["wecom"], "skipped": {}})
+
+    _run(_FAMILY_CALLS[family](ic, 106))
+
+    counters = ic.get_im_notify_counters()
+    assert counters.get("sent_failed") == 1, counters
+    assert "skipped_no_ctx" not in counters, counters
+    assert not any(k.startswith("skipped_") for k in counters), counters
 
 
 def test_resolve_issue_notify_targets_keeps_uuid(fresh_counters, monkeypatch):
