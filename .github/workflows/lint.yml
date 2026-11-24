@@ -35,3 +35,9 @@ jobs:
                             tests/runtime/im/test_im_notify_fanout.py \
                             tests/runtime/test_issue_3510_im_uuid_notify.py \
                             tests/api/test_runtime_public_lib.py
+      - name: Worktree build failure regression (issue #3923)
+        # Issue #3923 复审：建树失败必须阻断（凭据归因不可用时透传 git 原文），
+        # 这条不变量此前只在本机跑，CI 里无覆盖。纳入本 job 后 PR 上可直接复算。
+        run: |
+          python -m pytest -q tests/runtime/test_issue_3923_worktree_head_and_attribution.py \
+                            tests/runtime/test_repogit.py
