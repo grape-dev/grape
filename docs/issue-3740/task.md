@@ -2,7 +2,7 @@
 
 | # | 切片 | 红（测试） | 绿（实现） | 状态 |
 |---|------|-----------|-----------|------|
-| 1 | legacy 回落日志首打 + 1‰ 采样 | `tests/kernel/test_issue3740_repo_bot_denoise.py::test_legacy_fallback_log_first_hit_and_sample` | `repo_bot_observability.should_warn_legacy_fallback` + `_fetch` 调用点 | ✅ |
+| 1 | legacy 回落日志限频（沿用基线 #3897 口径） | `test_issue3740_repo_bot_denoise.py::test_legacy_fallback_log_rate_limited_unless_counter` | `_fetch` 调用 `token_resolver._legacy_fallback_log` + `repo_bot_observability.observe_legacy_fallback` | ✅ |
 | 2 | counter `grape_repo_bot_legacy_fallback_total{provider,repo}` | `::test_legacy_fallback_counter_counts_every_storage_read` | `repo_bot_observability.install/observe` + insight registry 安装 | ✅ |
 | 3 | `(repo_key, field)` 短 TTL 缓存（含 miss） | `::test_fetch_cache_collapses_repeated_resolution` | `token_resolver` 缓存原语 + `_fetch` 改造 | ✅ |
 | 4 | 缓存失效（TTL）与主动失效 / 轮换 | `::test_fetch_cache_ttl_expiry`、`::test_fetch_cache_invalidation_on_rotation` | TTL 判据、`invalidate_repo_bot_token_cache`、`mark_expired` 失效 | ✅ |
@@ -13,7 +13,7 @@
 | 9 | 回填验证报告 | `::test_verify_backfill_reports_gaps_then_zero` | `verify_repo_bot_credential_backfill()` | ✅ |
 | 10 | 盖章 | `::test_stamp_backfill_writes_migration_ledger` | `stamp_repo_bot_credential_backfill()` | ✅ |
 | 11 | CLI 可执行（dry-run 默认零写） | `::test_cli_dry_run_by_default` | `scripts/backfill_repo_bot_credentials.py` | ✅ |
-| 12 | 测试隔离 | 现有用例回归（尤其 `tests/mgmt/test_s82_dualwrite_removal.py`） | `tests/conftest.py` 逐用例清缓存/采样状态 | ✅ |
+| 12 | 测试隔离 | 现有用例回归（尤其 `tests/mgmt/test_s82_dualwrite_removal.py`） | `tests/conftest.py` 逐用例清缓存 + `_fallback_warn_at` 限频状态 | ✅ |
 
 验收对账：
 - 降噪：切片 1/2；缓存：3/4/5/6；回填：7/8/9/10/11；回归：全部现有测试。
@@ -22,7 +22,8 @@
 ## 落地结果（实现侧）
 
 - 新用例：`tests/kernel/test_issue3740_repo_bot_denoise.py` 13 条 + `tests/mgmt/test_issue3740_bot_cred_backfill.py` 12 条，全绿；两文件已接入 `.github/workflows/windows-smoke.yml` linux-backend 门禁。
-- 复审整改（PR #1963 Required）：①探列失败新增 `probe_ok/error`，verify/stamp/apply 失败退出（不再空缺口伪装通过）；②下线判据改为 counter 窗口增量 + legacy 审计零命中（日志 1/1000 采样不足以作为判据）；③rc 读失败回落的 legacy 值不入缓存（`legacy_rc_error`），下次重试权威源；④新增用例接入 CI。
+- 复审整改（PR #1963 Required）：①探列失败新增 `probe_ok/error`，verify/stamp/apply 失败退出（不再空缺口伪装通过）；②下线判据改为 counter 窗口增量 + legacy 审计零命中（日志已限频，不足以作为判据）；③rc 读失败回落的 legacy 值不入缓存（`legacy_rc_error`），下次重试权威源；④新增用例接入 CI。
 - 回归：`test_s82_dualwrite_removal` / `test_s80_repo_credentials` / `test_uc41_rc_schema` / `test_s128_*` 由 7 ERROR（缺 `backfill_repo_credentials_from_columns`）转为通过；`tests/api/test_migration_track_guard.py` 通过；`scripts/check-arch.py` PASS；新增读点 0（rc 读改走 insight public）。
 - 未注册自动迁移（生产回填由 sre 用脚本 + `--verify` + `--stamp` 执行）；盖章号 `202611220001`。
+- rebase 合流（基线 `arch-weekly-11-ljt` 的 #3897 已落地日志限频）：本单移除自研采样判定，改为「基线限频日志 + 本单全量 counter」；`tests/kernel/test_issue_3897_repobot_fallback_log.py` 补 `GRAPE_REPO_BOT_TOKEN_CACHE_TTL=0` 以在关缓存下观察限频语义。两文件 26 条 + #3897 限频用例 2 条全绿。
 - 已知既有失败（基线同源、非本单引入）：`tests/kernel` 52 条与基线逐条一致；`test_s118_*` / `issue_372_*` 等按 `_SRC = tests/src` 取源码路径，整套测试目录重组后未同步；`check-all` 的读点清单门禁基线过期（涉 5 条本次未改文件）。

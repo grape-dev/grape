@@ -76,12 +76,6 @@ _REPO_BOT_CACHE_DEFAULT_TTL = 60.0
 _REPO_BOT_CACHE_MAX_ENTRIES = 2048
 _repo_bot_cache: dict = {}
 
-# legacy 回落日志文本：保持不变（便于按原字符串 grep 定位）；降噪只改「打不打」，
-# 不改「打什么」。⚠️ 1/1000 采样后日志不再是下线判据——判据 = counter 窗口增量 == 0
-# 且 legacy 审计零命中（见下方回落分支 checklist）。
-_LEGACY_FALLBACK_LOG = ("RepoBotToken: historical column fallback hit "
-                        "(rc miss) repo={repo_key} field={field}")
-
 
 def repo_bot_token_cache_ttl() -> float:
     """解析缓存 TTL（秒）：``GRAPE_REPO_BOT_TOKEN_CACHE_TTL`` 可覆盖，钳制到 [0, 60]。"""

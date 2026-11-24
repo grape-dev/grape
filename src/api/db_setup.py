@@ -12111,7 +12111,7 @@ def verify_repo_bot_credential_backfill() -> dict:
 
     验收口径：回填后 ``missing`` 为空、``coverage == 1.0``；生产下线判据再叠加
     ``grape_repo_bot_legacy_fallback_total`` 窗口增量 == 0 且
-    ``repo_bot_hit_legacy_column`` 审计零命中（降噪后日志 1/1000 采样，不再作为判据）。
+    ``repo_bot_hit_legacy_column`` 审计零命中（日志已限频，不再作为判据）。
     """
     report: dict = {"legacy_repos": 0, "rc_bot_rows": 0, "missing": [],
                     "coverage": 1.0, "per_column": {}, "probe_ok": True, "error": ""}

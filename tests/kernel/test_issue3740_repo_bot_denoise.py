@@ -2,11 +2,12 @@
 
 合同（本文件即契约，实现前应全红）：
 
-1. 日志降噪：每个 ``(repo_key, field)`` 首次 legacy 列回落必打 WARNING，其后按
-   1/1000 采样打 WARNING，未命中采样降 DEBUG；日志文本保持
-   ``… historical column fallback hit (rc miss) …`` 不变（回落分支下线判据的 grep 锚点）。
+1. 日志降噪：沿用基线 Issue #3897 口径——同一 ``(repo_key, field)`` 每小时最多 1 条
+   WARNING，其余降 DEBUG；日志文本保持
+   ``… historical column fallback hit (rc miss) …`` 不变（grep 定位锚点）。
+   降频后日志不再是下线判据，判据 = counter 窗口增量 == 0 且 legacy 审计零命中。
 2. 指标：``grape_repo_bot_legacy_fallback_total{provider,repo}`` 按**实际 legacy 列存储读**
-   全量计数，与采样解耦（日志少不等于数据丢）；缓存命中不计数（没读存储就不算回落）。
+   全量计数，与日志限频解耦（日志少不等于数据丢）；缓存命中不计数（没读存储就不算回落）。
 3. 缓存：``(repo_key, field)`` 进程内短 TTL 缓存（≤60s，``GRAPE_REPO_BOT_TOKEN_CACHE_TTL``
    可覆盖，0=关闭），缓存最终解析结果（rc 命中 / legacy 命中 / 全空），同请求不重复解析。
 4. 审计口径：``credential_usage_log`` 随缓存降频——一次实际存储读一行审计，缓存命中不写
@@ -30,7 +31,7 @@ _NS = "x3740"
 
 
 def _rk(tag=""):
-    """每次取新的 repo_key：进程级缓存/采样状态按 key 隔离，避免用例互染。"""
+    """每次取新的 repo_key：进程级缓存/日志限频状态按 key 隔离，避免用例互染。"""
     return f"gitcode:{_NS}{tag}{uuid.uuid4().hex[:8]}/repo"
 
 
@@ -66,10 +67,10 @@ def fake_ports(monkeypatch):
 
     monkeypatch.setattr(cul, "log_usage", _log_usage)
     tr.invalidate_repo_bot_token_cache()
-    obs.reset_log_state()
+    tr._fallback_warn_at.clear()
     yield state
     tr.invalidate_repo_bot_token_cache()
-    obs.reset_log_state()
+    tr._fallback_warn_at.clear()
 
 
 @pytest.fixture
@@ -88,27 +89,36 @@ def _fallback_warnings(caplog):
             if r.levelno == logging.WARNING and "historical column fallback hit" in r.getMessage()]
 
 
-# ────────────────────────────────────────── 1. 日志首打 + 1/1000 采样
+# ────────────────────────────────────────── 1. 日志降噪与计数解耦
+# （日志口径取自基线 Issue #3897：DEBUG 常态 + 每 (repo, field) 每小时 1 条 WARNING）
 
-def test_legacy_fallback_log_first_hit_and_sample(caplog, fake_ports, no_cache):
-    """首打必报；其后 1/1000 采样；未采样降 DEBUG（不再淹告警面）。"""
+def test_legacy_fallback_log_rate_limited_unless_counter(caplog, fake_ports, no_cache):
+    """日志限频到「每小时 1 条 WARNING」，counter 仍逐次全量计数（日志少 ≠ 数据丢）。"""
+    from prometheus_client import CollectorRegistry, generate_latest
+
     rk = _rk("log")
     fake_ports["legacy"] = "tok-legacy"
     strategy = _strategy(rk)
     caplog.set_level(logging.DEBUG, logger="devops-bot")
+    registry = CollectorRegistry()
+    obs.install(registry)
 
     for _ in range(999):
         assert strategy.get_token(rk) == "tok-legacy"
-    first_batch = _fallback_warnings(caplog)
-    assert len(first_batch) == 1, f"首打之外不应再打 WARNING：{len(first_batch)} 条"
+    assert len(_fallback_warnings(caplog)) == 1, "同一 (repo, field) 一小时内只留 1 条 WARNING"
 
-    assert strategy.get_token(rk) == "tok-legacy"     # 第 1000 次命中采样点
-    assert len(_fallback_warnings(caplog)) == 2, "第 1000 次应命中 1/1000 采样"
+    assert strategy.get_token(rk) == "tok-legacy"     # 第 1000 次仍在同一限频窗口
+    assert len(_fallback_warnings(caplog)) == 1, "限频窗口内不得再打 WARNING"
 
     assert all("rc miss" in r.getMessage() for r in _fallback_warnings(caplog))
     debug_lines = [r for r in caplog.records
                    if r.levelno == logging.DEBUG and "historical column fallback hit" in r.getMessage()]
-    assert len(debug_lines) == 998, f"未采样记录应降 DEBUG（保留定位能力）: {len(debug_lines)}"
+    assert len(debug_lines) == 999, f"未限频的记录降 DEBUG（保留定位能力）: {len(debug_lines)}"
+
+    _owner = rk.split(":", 1)[1]
+    body = generate_latest(registry).decode()
+    assert (f'grape_repo_bot_legacy_fallback_total{{provider="gitcode",repo="{_owner}"}} '
+            '1000.0') in body, "计数不随日志限频丢失"
 
 
 def test_legacy_fallback_log_state_is_per_repo_field(caplog, fake_ports, no_cache):

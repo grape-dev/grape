@@ -369,30 +369,27 @@ def plugin_market_stubs(request, cli_manifest_factory, probe_ok, probe_auth_requ
 
 @pytest.fixture(autouse=True)
 def _reset_repo_bot_token_cache():
-    """RepoBotToken 的进程级解析缓存/采样状态在用例之间必须清空。
+    """RepoBotToken 的进程级解析缓存/日志限频状态在用例之间必须清空。
 
     Issue #3740：`token_resolver` 为消除同一请求内的重复解析引入了
-    `(repo_key, field)` 短 TTL 缓存（默认 60s），并把 legacy 回落日志的首打/采样
-    计数放在进程级字典里。测试用例大量使用固定 repo_key + 逐用例清库的写法，
-    缓存不让位就会读到「上一个用例已删除的行」——表现为假绿/假红随机漂移。
+    `(repo_key, field)` 短 TTL 缓存（默认 60s）；legacy 回落日志的
+    「每 `(repo, field)` 每小时 1 条 WARNING」限频状态（Issue #3897）同为进程级。
+    测试用例大量使用固定 repo_key + 逐用例清库的写法，缓存/限频不让位就会读到
+    「上一个用例已删除的行」或吞掉本用例的 WARNING——表现为假绿/假红随机漂移。
     与 `_reset_gsb_lb_state` 同口径：进程级 memo 由用例边界统一复位。
     """
     try:
-        from src.kernel.token_resolver import invalidate_repo_bot_token_cache
+        from src.kernel.token_resolver import _fallback_warn_at, invalidate_repo_bot_token_cache
 
         invalidate_repo_bot_token_cache()
+        _fallback_warn_at.clear()
     except Exception:  # noqa: BLE001 - 实现未就位/指标未初始化时不阻塞用例
-        pass
-    try:
-        from src.kernel.repo_bot_observability import reset_log_state
-
-        reset_log_state()
-    except Exception:  # noqa: BLE001 - 同上
         pass
     yield
     try:
-        from src.kernel.token_resolver import invalidate_repo_bot_token_cache
+        from src.kernel.token_resolver import _fallback_warn_at, invalidate_repo_bot_token_cache
 
         invalidate_repo_bot_token_cache()
+        _fallback_warn_at.clear()
     except Exception:  # noqa: BLE001
         pass

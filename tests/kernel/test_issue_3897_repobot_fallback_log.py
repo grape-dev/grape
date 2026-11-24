@@ -38,13 +38,20 @@ class _FakeProvider:
 
 @pytest.fixture
 def strategy(monkeypatch):
-    """把 port 层打桩：rc 恒 miss、历史列恒命中、解密恒等。"""
+    """把 port 层打桩：rc 恒 miss、历史列恒命中、解密恒等。
+
+    Issue #3740 起 ``RepoBotToken._fetch`` 带 ``(repo_key, field)`` 短 TTL 缓存：
+    本用例锁的是「每次真实存储读 ⇒ 每小时 1 条 WARNING」，故关掉缓存（TTL=0），
+    否则 N 次 fetch 只会产生 1 次存储读、1 条日志，限频语义无从观察。
+    """
+    monkeypatch.setenv("GRAPE_REPO_BOT_TOKEN_CACHE_TTL", "0")
     monkeypatch.setattr(TR._tokens, "get_repo_credential_meta", lambda rk, kind: None)
     monkeypatch.setattr(TR._tokens, "get_host_user_id", lambda rk: "")
     monkeypatch.setattr(TR._tokens, "repo_secret_decrypt", lambda raw: raw)
     monkeypatch.setattr(TR._repos, "repo_bot_token_from_legacy_column_any",
                         lambda rk, col: _TOKEN if col == _COL else "")
     TR._fallback_warn_at.clear()
+    TR.invalidate_repo_bot_token_cache()
 
     s = TR.RepoBotToken.__new__(TR.RepoBotToken)
     s.provider = _FakeProvider()
