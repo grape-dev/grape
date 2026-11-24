@@ -133,3 +133,47 @@ server {{
     proc = _nginx_test(snippet)
     assert proc.returncode == 0, proc.stderr
     assert "successful" in proc.stderr
+
+import glob
+import re
+
+
+def _all_gateway_confs():
+    return sorted(glob.glob(os.path.join(_REPO_ROOT, "deploy", "*.conf")))
+
+
+def _has_worker_upstream(conf: str) -> bool:
+    if re.search(r"upstream\s+\S*worker\S*\s*\{", conf, re.IGNORECASE):
+        return True
+    return "38082" in conf or "grape-worker-server" in conf
+
+
+@pytest.mark.parametrize("path", _all_gateway_confs())
+def test_every_conf_with_worker_upstream_has_failover(path):
+    """复审 R5：遍历 deploy/*.conf——凡承载 worker 流量的拓扑都必须多上游 + 切换。"""
+    conf = _conf(path)
+    if not _has_worker_upstream(conf):
+        pytest.skip(f"{os.path.basename(path)} has no worker upstream")
+    assert "proxy_next_upstream error timeout http_502" in conf, \
+        f"{os.path.basename(path)} missing proxy_next_upstream http_502"
+    assert "keepalive 32;" in conf, f"{os.path.basename(path)} missing keepalive"
+    assert "worker-peers.conf*" in conf, \
+        f"{os.path.basename(path)} missing peer include"
+    assert "max_fails=2" in conf and "fail_timeout=10s" in conf
+    # 不允许仍有绕过命名 upstream 的直连 worker 端口
+    assert "proxy_pass http://127.0.0.1:38082;" not in conf
+
+
+def test_compose_worker_runtime_has_next_upstream():
+    conf = _conf(os.path.join(_REPO_ROOT, "deploy/nginx-grape-compose.conf"))
+    block = _block(conf, "location /api/runtime/")
+    assert _NEXT_UPSTREAM in block
+    assert "proxy_http_version 1.1;" in block
+    assert 'proxy_set_header Connection "";' in block
+
+
+def test_legacy_worker_runtime_has_next_upstream():
+    conf = _conf(os.path.join(_REPO_ROOT, "deploy/nginx-grape.conf"))
+    assert "upstream grape_worker_server" in conf
+    assert "proxy_pass http://grape_worker_server;" in conf
+    assert "proxy_next_upstream error timeout http_502" in conf

@@ -179,3 +179,36 @@ overlayfs copy-up 可能以「删旧建新」替换 `data/sessions.db-wal` / `-s
 
 注：滚动重启只用 `systemctl restart`，不要用 `scripts/restart-four-process.sh`
 强杀（会绕过摘流，见脚本自身提示）。
+
+### 拓扑与 worker 端口对应关系
+
+| 网关配置 | 拓扑 | worker 上游 | 说明 |
+|---|---|---|---|
+| `nginx-grape.conf` | 三进程（A/B/C 同机） | `grape_worker_server` → `127.0.0.1:38082` + peers | 旧三进程反代，已同步多上游/切换 |
+| `nginx-grape-four-process.conf` | 四进程（同机 systemd） | `grape_worker_server` → `127.0.0.1:38082` + peers | 生产四进程主配置 |
+| `nginx-grape-cluster.conf` | 四进程（集群端口 38081–38084） | `grape_worker` → `127.0.0.1:38083` + cluster peers | 集群端口整体上移一位 |
+| `nginx-grape-compose.conf` | Docker Compose | `grape_worker_server` → `grape-worker-server:38082` + peers | 服务名寻址，容器网络 |
+
+事故现场 `127.0.0.1:8083` 是 master-002 上旧版单进程 worker 端口，与仓库四份配置的
+38080/38082/38083 均不匹配；上线前必须确认该机实际加载的 `conf.d/*.conf` 与 worker
+监听端口一致（`ss -ltnp | grep -E '38082|8083'` + `nginx -T | grep proxy_pass`）。
+四份配置现均含 `include /etc/nginx/conf.d/grape-worker-peers.conf*`（缺省仅本机）。
+
+### 502 告警验证（可执行步骤）
+
+```bash
+# 1) 语法与抓取自检
+nginx -t
+curl -s http://127.0.0.1:12345/metrics | grep -E 'nginx_upstream_(502|requests)_total'
+# 无输出时：确认 alloy-config.alloy 已加载 prometheus.scrape "alloy_self"
+
+# 2) 故障注入：临时把对端 worker 端口改为拒绝连接，压 /api/runtime/heartbeat
+#    （会在 nginx access.log 产生 502 行）
+for i in $(seq 1 20); do curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST http://127.0.0.1/api/runtime/heartbeat -H 'Content-Type: application/json' -d '{}'; done
+
+# 3) 规则验证
+promtool check rules deploy/alerts.yml
+# Prometheus 侧确认指标出现，且 2m 内 502 增量 >50 时 GrapeRuntime502Burst 触发；
+# 5m 率 >1% 时 GrapeRuntime502RateHigh 触发。
+```
