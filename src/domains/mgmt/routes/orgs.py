@@ -15,10 +15,9 @@ from pydantic import BaseModel, Field  # Field：#2423 M2b 移植
 
 from src.api.deps import get_user_token_for, require_no_session_token, require_org_admin
 from src.domains.mgmt.user.org_db import (
-    create_org, get_org, list_user_orgs, update_org, delete_org,
+    create_org, get_org, get_org_by_slug, list_user_orgs, update_org, delete_org,
     get_org_members, add_org_member, update_member_role, remove_org_member,
     claim_org_provision_retry, get_member_role, is_org_member,
-    update_org_provision_fields,
 )
 from src.domains.mgmt.org_provision import (
     manual_bind_org_repo as manual_bind_org_repo_service,
@@ -149,18 +148,17 @@ def _normalize_repo_create_options(body: CreateOrgBody, user: dict) -> dict:
                 400, "VCS_TOKEN_MISSING",
                 f"当前账号未绑定 {provider} 平台凭据，无法在该平台创建组织仓库",
             )
-        if provider == "github":
-            # 建组织前先探测建仓权限：没权限直接报错，不创建组织再异步失败
-            # （2026-11-19 现场：细粒度 PAT 无建仓权限，组织建出来了但仓库没了）。
-            from src.domains.mgmt.user.repo_manager import probe_github_repo_create
+        # 建组织前先探测建仓权限：没权限直接报错，不创建组织再异步失败
+        # （2026-11-19 现场：细粒度 PAT 无建仓权限，组织建出来了但仓库没了）。
+        from src.domains.mgmt.user.repo_manager import probe_repo_create
 
-            can_create, reason = probe_github_repo_create(
-                token, owner=owner, private=bool(body.repo_private))
-            if can_create is False:
-                raise _error(
-                    400, "VCS_REPO_CREATE_FORBIDDEN",
-                    f"无法在 GitHub 创建组织仓库：{reason}",
-                )
+        can_create, reason = probe_repo_create(
+            provider, token, owner=owner, private=bool(body.repo_private))
+        if can_create is False:
+            raise _error(
+                400, "VCS_REPO_CREATE_FORBIDDEN",
+                f"无法在 {provider} 创建组织仓库：{reason}",
+            )
 
     return {
         "org_repo_provider": provider,
@@ -235,15 +233,14 @@ def _ns_cache_put(key: tuple[str, str, str], entry: dict) -> None:
 
 def _namespace_provider_entry(user: dict, provider: str) -> dict:
     """单个 provider 的账号/空间视图（并行外部调用 + 60s 缓存）。"""
-    from src.domains.mgmt.user.repo_manager import fetch_org_namespaces
 
     token = get_user_token_for(
         user.get("username", ""), user_id=str(user.get("id") or ""), provider=provider)
     name = provider
     try:
-        from src.domains.runtime import public as runtime_public
+        from src.domains.runtime.public import get_platform_card
 
-        card = runtime_public.get_platform_card(provider)
+        card = get_platform_card(provider)
         if card is not None and getattr(card, "name", ""):
             name = card.name
     except Exception:
@@ -266,12 +263,17 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
         return cached
 
     def _verify() -> dict:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
 
         return create_provider(provider).verify_token(token) or {}
 
     def _orgs() -> list:
-        return fetch_org_namespaces(provider, token) or []
+        # 组织清单归命名空间领域（gitlab 走 provider.list_create_spaces 端口，
+        # gitee 走 /user/orgs，gitcode/github 复用各自 /orgs 适配器）——不再查
+        # 只登记了两家的旧 fetcher 表。
+        from src.domains.mgmt.user.namespaces import list_org_namespaces
+
+        return [ref.as_payload() for ref in list_org_namespaces(provider, token)]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_info = pool.submit(_verify)
@@ -290,28 +292,18 @@ def _namespace_provider_entry(user: dict, provider: str) -> dict:
             entry["org_error"] = str(org_exc)[:300]
 
     try:
+        from src.domains.mgmt.user.namespaces import compose_namespaces
+
         login = str(info.get("login") or info.get("username") or "")
         if not login:
             raise RuntimeError("平台未返回登录名")
         display = str(info.get("name") or info.get("nickname") or login)
         avatar = str(info.get("avatar_url") or info.get("avatar") or "")
         entry["account"] = {"login": login, "name": display, "avatar_url": avatar}
-        entry["namespaces"].append({
-            "login": login,
-            "name": display,
-            "avatar_url": avatar,
-            "type": "user",
-        })
-        for org in orgs:
-            org_login = str((org or {}).get("login") or "").strip()
-            if not org_login or org_login == login:
-                continue
-            entry["namespaces"].append({
-                "login": org_login,
-                "name": str((org or {}).get("name") or org_login),
-                "avatar_url": str((org or {}).get("avatar_url") or ""),
-                "type": "org",
-            })
+        # 归一 kind（personal/org/unknown，白名单）由命名空间值对象负责；未知类型
+        # 不会落进「个人」桶——个人桶是最宽的权限面，未知输入不能默认进去。
+        refs = compose_namespaces(provider, entry["account"], orgs)
+        entry["namespaces"] = [ref.as_payload() for ref in refs]
     except Exception as exc:
         entry["connected"] = False
         entry["error"] = str(exc)[:300]
@@ -329,9 +321,9 @@ def list_org_repo_namespaces(user: dict = Depends(require_no_session_token)):
     每个 provider 返回 connected（是否已绑定 token）和 account/namespaces；
     token 失效仅影响该 provider（connected=false + error），不阻断另一平台。
     """
-    from src.domains.mgmt.user.repo_manager import org_namespace_providers
+    from src.domains.mgmt.user.namespaces import listable_providers
 
-    providers = org_namespace_providers()
+    providers = listable_providers()
     if not providers:
         return {"providers": []}
     with ThreadPoolExecutor(max_workers=min(4, len(providers))) as pool:
@@ -343,12 +335,31 @@ def list_org_repo_namespaces(user: dict = Depends(require_no_session_token)):
 def create_organization(body: CreateOrgBody, user: dict = Depends(require_no_session_token)):
     repo_options = _normalize_repo_create_options(body, user)
     slug = _ensure_slug(body.slug, body.name, user["id"])
-    org = create_org(name=body.name, slug=slug, owner_id=user["id"],
-                     description=body.description)
+    # provisioning 初始状态与仓库选项必须和组织行同一条 INSERT 写入：
+    # 分两步（先建组织、再 UPDATE 选项）时，选项列缺失/写入失败会留下
+    # 「组织已提交、provision_status=NULL」的半成品，接口却是 500
+    # （2026-11-23 org_repo_provider 1054 事故）。
+    org = create_org(
+        name=body.name, slug=slug, owner_id=user["id"],
+        description=body.description,
+        extra_fields={
+            "provision_status": "pending",
+            "provision_error": "",
+            **repo_options,
+        },
+    )
     if not org:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": "Slug already exists or creation failed"})
-    update_org_provision_fields(
-        org["id"], provision_status="pending", provision_error="", **repo_options)
+        if get_org_by_slug(slug):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 409, "error_code": "ORG_SLUG_EXISTS",
+                        "message": "Slug already exists"},
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={"code": 500, "error_code": "ORG_CREATE_FAILED",
+                    "message": "Organization creation failed"},
+        )
     start_provision(org["id"])
     org = get_org(org["id"]) or org
     return {

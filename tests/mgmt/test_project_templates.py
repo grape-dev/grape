@@ -237,6 +237,40 @@ class TestCreate:
             assert not data["host_warning"]  # 托管成功时不应有提醒
             assert "托管成功" in data["message"]  # 成功消息应包含"托管成功"
 
+    def test_owner_space_creates_under_namespace(self):
+        """一键创建支持「所属空间」：owner 透传 create_repo，full_name 用空间路径。"""
+        with patch.object(templates_mod, "_find_template",
+                          return_value={"template": {"id": "hello-skill", "source": "local",
+                                                     "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
+                                        "scene_id": "skill-dev"}), \
+             patch.object(GitCodeProvider, "get_user_login", return_value="test_tmpl"), \
+             patch.object(GitCodeProvider, "create_repo",
+                          return_value={"full_name": "grp/sub/hello-skill"}) as cr, \
+             patch.object(templates_mod, "push_template_to_repo", return_value=True), \
+             patch("src.domains.mgmt.routes.repos._assert_owner_visible", new=lambda *a, **k: None), \
+             patch("src.domains.mgmt.routes.repos.host_repo", new=_fake_host), \
+             patch("src.domains.mgmt.routes.scenes.apply_scene", new=_fake_apply_scene):
+            r = client.post("/api/project-templates/create",
+                            json={"template_id": "hello-skill", "repo_name": "", "owner": "grp/sub"},
+                            headers=_headers)
+            assert r.status_code == 200, r.text
+            assert r.json()["full_name"] == "grp/sub/hello-skill"
+            assert cr.call_args.kwargs.get("owner") == "grp/sub", "owner 必须透传到 create_repo"
+
+    def test_invalid_owner_space_rejected_before_upstream(self):
+        """非法空间路径 → 400，且不触达上游建仓（校验前置）。"""
+        with patch.object(templates_mod, "_find_template",
+                          return_value={"template": {"id": "hello-skill", "source": "local",
+                                                     "default_repo_name": "hello-skill", "scene_id": "skill-dev"},
+                                        "scene_id": "skill-dev"}), \
+             patch.object(GitCodeProvider, "create_repo") as cr:
+            for bad in ("../etc", "/lead", "trail/", "a//b"):
+                r = client.post("/api/project-templates/create",
+                                json={"template_id": "hello-skill", "repo_name": "", "owner": bad},
+                                headers=_headers)
+                assert r.status_code == 400, f"{bad} 应被拒绝，实际 {r.status_code}"
+            assert not cr.called, "非法空间必须在建仓前拦截"
+
     def test_host_failure(self):
         """仓库已创建但托管失败 → 200 + host_warning 提醒（非致命）"""
         with patch.object(templates_mod, "_find_template",
@@ -301,10 +335,12 @@ class TestRepoManager:
              patch("src.domains.mgmt.user.repo_manager._git_has_changes", return_value=True):
             mock_git.side_effect = [""] * 20  # init/add/branch/commit/push 等
             ok = push_template_to_repo(tpl, "me", "hello-skill", "user_tok", bot_token="")
-            assert ok is True
+            assert isinstance(ok, dict) and ok.get("ok") is True  # 返回落点分支
             cmds = [c[0][0] if c and c[0] else [] for c in mock_git.call_args_list]
             assert ["init"] in cmds
-            assert ["push", "--force", "-u", "origin", "HEAD:main"] in cmds
+            # 2026-11-22 B+A 双层：空仓库先走普通 push 落 main，不再一上来就 --force
+            assert ["push", "-u", "origin", "HEAD:main"] in cmds
+            assert ["push", "--force", "-u", "origin", "HEAD:main"] not in cmds
 
     def test_push_git_template_falls_back_to_user_token(self):
         """git 模板：无 bot token 时回退用户 token，push URL 含 user token，不应抛错。"""
@@ -316,7 +352,7 @@ class TestRepoManager:
              patch("src.domains.mgmt.user.repo_manager._download_gitcode_tarball"):
             mock_git.side_effect = [""] * 20
             ok = push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
-            assert ok is True
+            assert isinstance(ok, dict) and ok.get("ok") is True  # 返回落点分支
             # D43: git 模板不再用 clone，改为 tarball 下载；验证 remote add 含 user token
             remote_calls = [c for c in mock_git.call_args_list if c[0][0] and c[0][0][0] == "remote" and c[0][0][1] == "add"]
             assert len(remote_calls) > 0, f"expected remote add, got: {mock_git.call_args_list}"
@@ -325,4 +361,4 @@ class TestRepoManager:
 
 from src.domains.mgmt.routes import templates as templates_mod
 
-from src.kernel.token_resolver import GitCodeProvider
+from src.domains.mgmt.vcs import GitCodeProvider

@@ -249,7 +249,7 @@ def test_s59_auto_upgrade_gitee_provider_ports(gitee_card):
     mock_prov = MagicMock()
     mock_prov.add_collaborator.return_value = True
     mock_prov.accept_collaborator_invite.return_value = True
-    with patch("src.kernel.token_resolver.create_provider", return_value=mock_prov), \
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=mock_prov), \
             patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[_mk_repo_row("gitee:acme/web")]), \
             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id",
                   return_value={"id": 123, "username": "host_user"}), \

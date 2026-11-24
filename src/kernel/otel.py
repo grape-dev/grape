@@ -333,6 +333,11 @@ class _RelayBackoffPolicy:
     - 收到 2xx 即 ``note_success()`` 复位，恢复上报与再次告警能力。
     """
 
+    # 数值五源（架构守护 B2；依据见 Issue #3699 明确业务要求 + 运维口径）：
+    #   base_delay=30.0s  —— 禁用态首个静默窗口：故障中继每分钟最多被试探 1 次
+    #   factor=2.0        —— 标准指数退避倍数（每次失败窗口翻倍）
+    #   max_delay=900.0s  —— 静默上限 15 分钟：再长会导致恢复探测滞后到需人工介入
+    #   <undecided: 中继端 P99 导出时延实测> —— 上线后按 Loki/Tempo 数据回填
     def __init__(self, base_delay: float = 30.0, factor: float = 2.0,
                  max_delay: float = 900.0):
         self._base = float(base_delay)
@@ -394,6 +399,11 @@ class _RelaySpanExporter:
     未装 opentelemetry），``BatchSpanProcessor`` 仅按 export/shutdown 协议鸭子调用。
     """
 
+    # 数值五源（架构守护 B2；明确业务要求——单批上报不得拖慢 flush、不得放大故障）：
+    #   timeout=5.0s     —— 单次导出上限：超过即丢弃本批，交给退避窗口重试
+    #   max_retries=3    —— 单批最多 3 次，之后按窗口丢弃（避免重试风暴）
+    #   backoff_base=0.5s —— 重试间隔起点（0.5s → 1s → 2s）
+    #   <undecided: 中继端 P99 导出时延实测> —— 上线后按实测数据校准 timeout
     def __init__(self, endpoint: str, headers: dict | None = None, timeout: float = 5.0,
                  policy: _RelayBackoffPolicy | None = None, post=None, sleep=None,
                  max_retries: int = 3, backoff_base: float = 0.5):

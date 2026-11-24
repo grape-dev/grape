@@ -161,6 +161,9 @@ def _patch_successful_vcs(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create_new_repo)
     monkeypatch.setattr(provision, "host_repo", _fake_host_repo)
+    # 分支同步涉及真实 git/网络；单元用例只验证 provisioning 编排。
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     return calls
 
 
@@ -196,7 +199,9 @@ def test_provision_reaches_ready_and_is_idempotent(monkeypatch):
     nodes = json.loads(scene[0])
     assert [n["id"] for n in nodes] == ["org_intake", "org_dispatch", "org_aggregate"]
     assert [n["skill"] for n in nodes] == ["org-intake-cli", "org-dispatch-cli", "org-aggregate-cli"]
-    assert json.loads(scene[1])["work_branch"] == "main"
+    from src.domains.mgmt.org_context_repo import ORG_REPO_DEFAULT_BRANCH
+
+    assert json.loads(scene[1])["work_branch"] == ORG_REPO_DEFAULT_BRANCH
     assert scene[2] == org_id
 
     second = provision_org(org_id)
@@ -220,6 +225,30 @@ def test_provision_failure_is_retryable(monkeypatch):
     assert get_org(org_id)["provision_status"] == "failed"
 
     _patch_successful_vcs(monkeypatch)
+    retried = provision.provision_org(org_id)
+    assert retried["provision_status"] == "ready"
+
+
+def test_branch_failure_goes_pending_then_retries(monkeypatch):
+    """分支/token 瞬时失败降级 branches_pending，重试成功后可收敛到 ready。"""
+    import src.domains.mgmt.org_provision as provision
+    from src.domains.mgmt.user.org_db import get_org
+
+    _patch_successful_vcs(monkeypatch)
+
+    def _fail_branches(org, repo_key, **kwargs):
+        raise RuntimeError("VCS token missing after hosting")
+
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches", _fail_branches)
+    org_id = _seed_team_org()
+
+    pending = provision.provision_org(org_id)
+    assert pending["provision_status"] == "branches_pending"
+    assert "VCS token missing" in pending["provision_error"]
+    assert get_org(org_id)["provision_status"] == "branches_pending"
+
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     retried = provision.provision_org(org_id)
     assert retried["provision_status"] == "ready"
 
@@ -294,6 +323,8 @@ def _patch_claim_host(monkeypatch, calls: dict):
         return {"message": "hosted", "webhook_id": 4242}
 
     monkeypatch.setattr(provision, "host_repo", _host)
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
 
 
 def test_retry_claims_repo_created_before_crash(monkeypatch):
@@ -427,6 +458,8 @@ def test_host_failure_retry_does_not_recreate_repo(monkeypatch):
         return {"message": "hosted", "webhook_id": 4242}
 
     monkeypatch.setattr(provision, "host_repo", _host)
+    monkeypatch.setattr(provision, "_ensure_org_repo_branches",
+                        lambda org, repo_key, **kwargs: None)
     second = provision.provision_org(org_id)
 
     assert second["provision_status"] == "ready"
@@ -537,9 +570,10 @@ def test_retry_ready_does_not_reset_status(monkeypatch):
     from src.api.deps import get_current_user_or_api_key
     from src.api.main import app
     from src.domains.mgmt.routes import orgs as orgs_route
+    from src.domains.mgmt.user.org_db import update_org_provision_fields
 
     org_id = _seed_team_org()
-    orgs_route.update_org_provision_fields(org_id, provision_status="ready")
+    update_org_provision_fields(org_id, provision_status="ready")
     scheduled = []
     monkeypatch.setattr(orgs_route, "start_provision", lambda oid: scheduled.append(oid))
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
@@ -563,3 +597,27 @@ def test_default_org_repo_name_has_no_prefix():
     assert _repo_name({"slug": "123", "id": "uuid-1"}) == "123"
     assert _repo_name({"slug": "Test Team", "id": "uuid-2"}) == "test-team"
     assert _repo_name({"slug": "", "id": "42"}) == "repo-42"
+
+
+def test_provision_creates_branches_before_ready(monkeypatch):
+    """provisioning 必须先创建默认分支 + 分析分支，再置 ready。"""
+    import src.domains.mgmt.org_provision as provision
+    from src.domains.mgmt.org_provision import provision_org
+    from src.domains.mgmt.org_context_repo import (
+        ORG_REPO_COMBINED_BRANCH,
+        ORG_REPO_DEFAULT_BRANCH,
+    )
+
+    calls = []
+    _patch_successful_vcs(monkeypatch)
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: calls.append(
+            (str(org["id"]), repo_key, kwargs.get("enforce_default"))))
+    org_id = _seed_team_org()
+
+    result = provision_org(org_id)
+    assert result["provision_status"] == "ready"
+    assert calls == [(str(org_id), REPO_KEY, True)]
+    assert ORG_REPO_DEFAULT_BRANCH == "main"
+    assert ORG_REPO_COMBINED_BRANCH == "grape-org"

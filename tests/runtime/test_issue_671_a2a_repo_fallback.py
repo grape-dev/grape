@@ -233,7 +233,7 @@ class TestCreateRepoFallbackRegistration:
             def create_repo(self, api_token="", name="", description="", private=False, **kw):
                 return {"full_name": "owner/newrepo671", "owner": "owner", "name": name}
 
-        monkeypatch.setattr("src.kernel.token_resolver.create_provider",
+        monkeypatch.setattr("src.domains.mgmt.vcs.create_provider",
                             lambda provider="": _StubProv())
         monkeypatch.setattr("src.domains.mgmt.user.db.get_webhook_url", lambda: "")
         monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache", lambda *a, **kw: [])

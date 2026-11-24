@@ -1,0 +1,47 @@
+name: inbox-mysql
+
+# Issue #3580/P3 专用门禁：webhook 收件箱的 MySQL-only 契约只能连真 MySQL 才测得出。
+# 背景：`tests/runtime/test_issue_3580_gitlab_multi_instance.py` 的收件箱用例跑在
+# conftest 强制的 SQLite 上，而 `last_error` 的 TEXT 列语义 / 严格模式 1364 /
+# REPEATABLE READ 快照可见性全是 MySQL 独有——历史上这套用例全绿、上线 500。
+# 本 job 提供一个隔离 MySQL service，把 opt-in 用例（GRAPE_TEST_MYSQL_DSN 门控）
+# 真正跑起来；本地/普通 pytest 跑因缺 DSN 自动 skip，不污染既有套件。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  inbox-mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: grape_test_inbox
+          MYSQL_USER: grape_test
+          MYSQL_PASSWORD: grape_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      # 专用测试库，用例只 DROP/CREATE 自己的表并清行，不碰任何应用库
+      GRAPE_TEST_MYSQL_DSN: mysql://grape_test:grape_test@127.0.0.1:3306/grape_test_inbox
+      GITCODE_API_TOKEN: test_token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Webhook inbox contracts on isolated MySQL (issue #3580)
+        run: python -m pytest tests/runtime/test_issue_3580_inbox_mysql.py -v

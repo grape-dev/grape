@@ -30,8 +30,8 @@ from src.api.frontend_flags import apply_feature_flags
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
 from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
-from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
-                               trace_id_var, user_var)
+from src.kernel.config import (issue_var, path_var, request_id_var, repo_var, seq_var,
+                               span_id_var, trace_id_var, user_var)
 
 __all__ = [
     "ensure_python_version",
@@ -113,6 +113,16 @@ def build_app(
         start_metrics_server()
 
     _attach_request_log(app)
+
+    # 连接池僵死防护（2026-11-23 mgmt 全站僵死事故）：线程上限收敛到 ≤ 池上限、
+    # 请求收尾归还被粘住的连接、池饱和时打 ERROR + dump 线程栈。
+    try:
+        from src.kernel.config import log as _guard_log
+        from src.kernel.db_pool_guard import install_guard
+        _guard_log.info(f"db-pool-guard: {install_guard(app)}")
+    except Exception as _ge:  # noqa: BLE001 - 防护层失败不得挡住启动
+        from src.kernel.config import log as _guard_log
+        _guard_log.warning(f"db-pool-guard 装载失败: {_ge}")
 
     # 可选 tracing，两条路径互斥、新路径优先：
     #  - 新路径 OTEL_EXPORTER_OTLP_ENDPOINT → src/kernel/otel.py：FastAPI + requests
@@ -257,6 +267,7 @@ def _attach_request_log(app: FastAPI) -> None:
 
         # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
         path = request.url.path
+        token_path = path_var.set(path)
         _repo = ""
         _path_parts = path.strip("/").split("/")
         if len(_path_parts) >= 4 and _path_parts[0] == "api":
@@ -389,6 +400,7 @@ def _attach_request_log(app: FastAPI) -> None:
                     except Exception as _exc:
                         log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
+            path_var.reset(token_path)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
             issue_var.reset(token_issue)
@@ -408,6 +420,19 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # 启动自检（#3580 复盘）：多库拓扑下"跨域依赖缺失"必须当场拒绝启动，不能
+        # 靠调用方各自降级——缺 GRAPE_DSN_<DOMAIN> 时跨域读会回落进程库，读到的是
+        # 同名 VIEW（列快照），基表加列即 1054 的 500（/api/dashboard/* 实锤）。
+        from src.kernel.domain_topology import assert_cross_domain_wiring as _assert_wiring
+        _assert_wiring()
+        # 视图新鲜度：只修本库视图，修不掉（列仍缺/权限不足）→ 严格模式 exit 7。
+        try:
+            from src.kernel.domain_views import reconcile_on_startup as _reconcile_views
+            _reconcile_views()
+        except SystemExit:
+            raise
+        except Exception as _view_err:  # noqa: BLE001
+            _log.error(f"three-database mode: view freshness check failed: {_view_err}")
         # kernel 端口绑定与建表/迁移无关，三库模式同样必须执行：insight 角色
         # （dashboard 等按 repo_key 取权限的入口）若拿不到 vcs_cards 端口，
         # repo_key 的平台前缀候选集会退化成空，非默认前缀仓库一律 403。
@@ -458,6 +483,11 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             _db = describe_connection()
         except Exception as _e:  # noqa: BLE001
             _db = {"error": str(_e)}
+        try:
+            from src.kernel.mysql_compat import pool_stats_all
+            _pools = pool_stats_all()
+        except Exception as _e:  # noqa: BLE001
+            _pools = [{"error": str(_e)}]
         return {
             "status": "ok",
             "service": service_name,
@@ -465,6 +495,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,
+            "db_pool": _pools,
         }
 
     if not readiness:
@@ -812,7 +843,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     }).then(function(d){
       try {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem('repo_member_cache');
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');

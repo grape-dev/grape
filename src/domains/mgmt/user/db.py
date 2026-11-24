@@ -58,6 +58,9 @@ class _MgmtDbProxy:
         if db_registry.route_of("mgmt") == "domain":
             _conn = db_registry.new_connection("mgmt")
             return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        # 跨域读却拿不到 mgmt DSN → 会在进程库里读同名 VIEW（列快照过期即 1054）。
+        # 单库/共库拓扑下库名相同，不会告警。
+        db_registry.warn_if_cross_domain_fallback("mgmt")
         from src.kernel.session_manager import db as _main
         return _main.cursor(*a, **kw)
 
@@ -784,13 +787,21 @@ def _migrate_repo_key_tables():
             log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
 
 def _cleanup_usage_log_retention() -> None:
-    """N4-p2：usage_log 保留期清理（启动链 force=True 重启即对齐；运行期
-    由 log_usage 惰性触发 + 30 天节流承接）。异常全吞（清理失败不阻断启动）。"""
+    """N4-p2：usage_log 保留期清理的**启动布防点**（Issue #3848 启动次序）。
+
+    本函数原先直接 ``cleanup_expired_retention(force=True)``，但 init_db 是模块导入期
+    执行的——那时装配层（src/api/contracts_wiring.py）还没 bind tokens 端口，清理每次
+    启动必然空跑，并刷一条 ``retention cleanup failed: kernel port 'tokens' is not
+    bound`` WARNING（30 天节流的「重启即对齐」承诺因此长期失效）。
+
+    现在只「布防」：端口已绑则立即跑一次，未绑则由 kernel 端口的 ``on_bind`` 钩子在
+    ``bind("tokens")`` 之后补跑——本调用点一处覆盖 init/worker/event/insight 四条启动
+    路径。清理失败仍不阻断启动。
+    """
     try:
-        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
-        _rc_n = cleanup_expired_retention(force=True)
-        if _rc_n:
-            log.info(f"usage_log retention cleanup: {_rc_n} rows")
+        from src.kernel.persistence.credential_usage_log import (
+            defer_startup_retention_cleanup)
+        defer_startup_retention_cleanup()
     except Exception:
         pass
 
@@ -1288,7 +1299,8 @@ def get_skill_current_version(skill_id) -> int:
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
-                     category_id: int = 0, content_hash: str = "") -> int | None:
+                     category_id: int = 0, content_hash: str = "",
+                     display_name: str | None = None) -> int | None:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
     scope: user/repo；owner: user_id 或 repo_key。
@@ -1296,6 +1308,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
     Issue #444: 新增 content_hash 参数（UPDATE/INSERT 补写 content_hash 列，
     读时校验据此感知跨进程覆盖更新）；返回值改为 int | None（技能主键 id，
     失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
+    Issue #3855: 新增 display_name 参数。显式非空值直接写入（新增/编辑录入的名称）；
+    None（既有调用方/重新上传）表示「保留行内已有非空 display_name，为空才回填源名称」，
+    避免重新上传把用户录入的名称冲回 SKILL.md 源名称。
     """
     try:
         from src.domains.runtime import public as _rt  # noqa: PLC0415
@@ -1304,6 +1319,16 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 "skill_id_by_owner_scope",
                 (skill_name, "repo" if scope == "repo" else "user", owner))
             if row:
+                # Issue #3855：显式传入的名称优先；缺省时保留行内已有非空名称，
+                # 为空则回填源名称（= skill_name），杜绝重新上传覆盖用户命名。
+                _incoming_name = (display_name or "").strip() if display_name is not None else ""
+                if _incoming_name:
+                    _target_name = _incoming_name
+                else:
+                    # Issue #3855：存量非空名称原样保留（不清洗），历史 " Name " 不得被
+                    # strip 静默改写；仅 None/""/纯空白视为空值回填源名称。
+                    _current_name = "" if (len(row) <= 1 or row[1] is None) else str(row[1])
+                    _target_name = _current_name if _current_name.strip() else skill_name
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
                 from src.kernel import cross_write as _xw_uso
@@ -1315,17 +1340,17 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                         _rt_uso_ok, "runtime", "skill_obs_update",
                         f"skill-obs:{row[0]}:{(content_hash or '')[:12]}",
                         {"skill_id": int(row[0]), "object_key": object_key,
-                         "display_name": skill_name, "agent_type": agent_type or "",
+                         "display_name": _target_name, "agent_type": agent_type or "",
                          "description": description or "", "category_id": category_id,
                          "updated_by": created_by or "", "content_hash": content_hash or ""},
                         lambda: _rt_uso_ok.update_skill_obs(
-                            int(row[0]), object_key, skill_name, agent_type or "",
+                            int(row[0]), object_key, _target_name, agent_type or "",
                             description or "", category_id, created_by or "",
                             content_hash or ""), log)
                 if not _uso_done:
                     _rt.exec_any(
                         "skill_obs_update",
-                        (object_key, skill_name, agent_type or "", description or "",
+                        (object_key, _target_name, agent_type or "", description or "",
                          category_id, created_by or "", content_hash or "", row[0]))
                 _mg_db.commit()
                 return int(row[0])
@@ -1340,7 +1365,8 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
 
                 def _apply_usi() -> None:
                     _usi_out["id"] = _rt_usi_ok.insert_skill(
-                        skill_name, skill_name, description or "", agent_type or "",
+                        skill_name, (display_name or "").strip() or skill_name,
+                        description or "", agent_type or "",
                         object_key, scope, owner, created_by or "", created_by or "",
                         category_id, content_hash or "")
 
@@ -1357,9 +1383,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 return int(_usi_out.get("id") or 0)
             _rt.exec_any(
                 "skill_obs_insert",
-                (skill_name, skill_name, description or "", agent_type or "",
-                 object_key, scope, owner, created_by or "", created_by or "", category_id,
-                 content_hash or ""))
+                (skill_name, (display_name or "").strip() or skill_name, description or "",
+                 agent_type or "", object_key, scope, owner, created_by or "",
+                 created_by or "", category_id, content_hash or ""))
             _mg_db.commit()
             _new = _rt.read_one_any(
                 "skill_id_by_owner_scope",
@@ -1806,6 +1832,32 @@ def set_host_status(repo_key: str, status: str = "", step: str = "", error: str 
 
 
 
+def get_managed_repo_owner_row(repo_key: str) -> "dict | None":
+    """读单行托管归属（repo_key/org_id/host_user_id/host_status/webhook_id）。
+
+    托管前置校验用（Issue #3580 G2）：判断该仓库是否已被他人/他组织托管。
+    不存在返回 None；读取异常按"无归属信息"返回 None（不阻断托管主流程）。
+    """
+    from src.kernel.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = _mg_db.cursor()
+            c.execute(
+                "SELECT repo_key, repo_owner, repo_name, webhook_id, org_id, "
+                "host_user_id, host_status FROM managed_repos WHERE repo_key=? LIMIT 1",
+                (repo_key,))
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"Get managed repo owner row failed: {e}")
+        return None
+    if not row:
+        return None
+    return {"repo_key": row[0], "repo_owner": row[1], "repo_name": row[2],
+            "webhook_id": row[3], "org_id": row[4] or "", "host_user_id": row[5] or "",
+            "host_status": row[6] or ""}
+
+
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
     from src.kernel.repo_key import to_repo_key
@@ -1928,7 +1980,7 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
         log.warning(f"_rebuild_webhook_with_bot_token: cannot split repo_key {repo_key}")
         return ""
     # S58/D36：删旧/建新一律走适配器端口（create_provider），无平台分支
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     _old_hook_id = _get_managed_webhook_id(repo_key)
     if _old_hook_id:
         try:
@@ -1981,7 +2033,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     _related_repos = []
     try:
         # D38/S58：列名走适配器卡派生（内置卡=存量列名，config-only 平台=bot_<p>_token）
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _bot_token_col = create_provider(provider).token_storage_field()
         import re as _re
         # F4/D106：卡列空平台（gitee/gitlab 终态）无列可查——改查 grape_t_repo_credentials
@@ -2082,7 +2134,7 @@ def _repo_bot_token_value(repo_key: str) -> str:
     provider = parse_repo_key(repo_key or "")[0] or "gitcode"
     _col = ""
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _col = create_provider(provider).token_storage_field()
     except Exception:
         _col = ""
@@ -2157,11 +2209,8 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     （rc_bot 与 repo_bot——后者 `_fetch` 也优先读同一行）一并摘掉，回到「无行」语义，
     由后续级别（归属者用户凭据）兜底；绝不把旧值发出去。
     """
-    from src.kernel.token_resolver import (
-        ExplicitRepoBotToken,
-        TokenResolver,
-        create_provider_from_repo_key,
-    )
+    from src.kernel.token_resolver import ExplicitRepoBotToken, TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R25.1: 跳过第 3 级 GlobalBotToken（保持"no_global"语义）
@@ -2427,7 +2476,8 @@ def get_repo_bot_token(repo_key: str = "") -> str:
     """
     if not repo_key:
         return ""
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R18：跳过第 1 级 session token（DevopsAgentSessionToken）——D101 方案三该级
@@ -2457,8 +2507,8 @@ def get_task_token(task: dict) -> str:
     #    真因由建树面的 resolve_exec_token 归因，避免抢走失败分类）。
     if repo_key:
         try:
-            from src.kernel.token_resolver import (
-                ExplicitRepoBotToken, create_provider_from_repo_key)
+            from src.kernel.token_resolver import ExplicitRepoBotToken
+            from src.domains.mgmt.vcs import create_provider_from_repo_key
 
             _head = ExplicitRepoBotToken(create_provider_from_repo_key(repo_key))
             _explicit_token, _explicit_stage = _head.resolve(repo_key)
@@ -2652,7 +2702,8 @@ def get_repo_token_with_refresh(repo_key: str) -> str:
 
     R16.4: 过期短路——标记过期的 token 短路返回空串（用户 token status=4 除外，best-effort）。
     """
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     return TokenResolver(provider).get_token(repo_key)
 
@@ -2666,7 +2717,7 @@ def get_repo_token_for(repo_key: str) -> str:
     消费方（qa_gate/issues 路由/issue_vcs_index/event_pipeline）不再按
     平台名分叉选 getter——本函数自身也零平台分支。
     """
-    from src.kernel.token_resolver import create_provider_from_repo_key
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     _prov = create_provider_from_repo_key(repo_key)
     try:
         return _prov.resolve_repo_token(repo_key) or ""
@@ -2791,7 +2842,8 @@ def get_github_token(repo_key: str = "") -> str:
     - repo_key 非空 → bot token：managed_repos.bot_github_token → 全局 → 用户 token 降级
     - 无 repo_key → 空（用户级 token 走 get_user_github_token）
     """
-    from src.kernel.token_resolver import TokenResolver, create_provider
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider
     token = TokenResolver(create_provider("github")).get_token(repo_key)
     if token:
         return token
@@ -2827,7 +2879,7 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
             c = _mg_db.cursor()
             # D43/S63：列名与前缀子句卡/目录派生——token 列走适配器；
             # 默认平台（内置卡序首）含裸键（无前缀存量数据），其余平台按前缀
-            from src.kernel.token_resolver import create_provider as _cp_pb
+            from src.domains.mgmt.vcs import create_provider as _cp_pb
             _tok_col = _cp_pb(provider).token_storage_field()
             _prefix_clause = _path_b_prefix_clause(provider)
             # F4/D106: card column empty (gitee/gitlab final state) — path B determination changed to
@@ -2882,7 +2934,7 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
         except (ValueError, TypeError):
             _wh_id = 0
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _prov = create_provider(provider)
         _tok_col = _prov.token_storage_field()
         _wt_col = _prov.webhook_token_field()
@@ -2988,7 +3040,7 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
             # GitHub push 邀请制、generic 直加平台无确认步骤；调用方零平台分支）
             owner = repo["repo_owner"]
             repo_name = repo["repo_name"]
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.vcs import create_provider
             _prov = create_provider(provider)
             if not _prov.add_collaborator(host_token, owner, repo_name, bot_username):
                 skipped += 1
@@ -5632,7 +5684,7 @@ def clear_repo_bot_token(repo_key: str) -> bool:
     repo_key = to_repo_key(repo_key)
     provider = parse_repo_key(repo_key)[0]
     try:
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         _col = create_provider(provider).token_storage_field()
     except Exception:
         _col = ""

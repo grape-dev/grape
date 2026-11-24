@@ -885,7 +885,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.domains.runtime.engine.transient_retry import format_stream_failure_result
             _retries = [e for e in _task_errors_json(task_id)
                         if isinstance(e, dict) and e.get("error_code") in
-                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY", "CONFIG_ERROR")]
             if _retries:
                 _ex = next((e for e in _retries
                             if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
@@ -939,7 +939,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             result_text=result_text, errors=_fail_errors_json)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                          agent_logs=agent_logs, completed_at=completed_at, result=result_text)
+                          agent_logs=agent_logs, completed_at=completed_at, result=result_text,
+                          task_id=task_id or "")
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
 
     # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（direct 模式）
@@ -1030,6 +1031,49 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.info(f"SRE completed → pending_review (awaiting user review) issue={issue_id}")
         except Exception as _e:
             log.warning(f"SRE → pending_review failed: {_e}")
+
+    # 末节点完成后 → 推进到「待人工确认」（与 event_pipeline 同一钩子清单）。
+    # 技能未显式置 pending-review 时由服务端兜底；函数自带 stage/末节点守卫，非末节点 noop。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.api.issues_center import finalize_issue_to_pending_review
+            _fin = finalize_issue_to_pending_review(repo_key, issue_id, agent_type, source="exec")
+            if _fin not in ("noop:not_last_node", "noop:not_issue", "noop:terminal"):
+                log.info(f"Exec agent: last-node finalize result={_fin} issue={issue_id}")
+        except Exception as _e:
+            log.warning(f"Exec agent: last-node finalize to pending_review failed: {_e}")
+
+    # Issue #2118/#2270：本地 direct 收尾也按场景 next/handoff 自动推进，与远程
+    # worker 的 complete_task() 保持同一钩子清单（避免 coding 完成后停在中间节点）。
+    if new_status == "completed" and issue_id and agent_type:
+        try:
+            from src.domains.runtime.engine.service import run_auto_advance_hook
+            _adv = run_auto_advance_hook(task_id or "", repo_key, issue_id,
+                                         agent_type, seq, result_text or "")
+            if _adv.get("action") in ("a2a", "recheck", "pending_review"):
+                log.info(f"Exec agent: auto-advance issue={issue_id} agent={agent_type} "
+                         f"action={_adv.get('action')} next={_adv.get('next_role')} "
+                         f"round={_adv.get('round')} seq={_adv.get('seq')}")
+                # 与 pipeline_reconcile 同口径：只有真正新建了事件（seq>0）才算推进；
+                # append_event 撞幂等键返回负 seq、recheck 无 seq 都不落审计。
+                _adv_seq = int(_adv.get("seq") or 0)
+                if _adv.get("action") in ("a2a", "recheck") and _adv_seq > 0:
+                    try:
+                        from src.domains.mgmt import public as mgmt_public
+                        mgmt_public.log_audit(
+                            "issue_pipeline_advanced",
+                            user_id="0", operator_id="0",
+                            detail={"source": "exec", "task_id": task_id or "",
+                                    "repo_key": repo_key, "issue_id": issue_id,
+                                    "from": agent_type,
+                                    "to": _adv.get("next_role") or "",
+                                    "action": _adv.get("action") or "",
+                                    "seq": _adv_seq},
+                        )
+                    except Exception as _ae:
+                        log.warning(f"Exec agent: auto-advance audit failed issue={issue_id}: {_ae}")
+        except Exception as _e:
+            log.warning(f"Exec agent: auto-advance failed issue={issue_id}: {_e}")
 
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:

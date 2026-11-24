@@ -145,7 +145,7 @@ EXEMPT_FILES: dict = {
     # 其中 3 处为 D105-14/D105k 原手工上调基线项（迁移守卫探测/幂等跳过），
     # 重锚 weekly-10 后由基线下调转为显式登记；旧场景表 user_repos
     # 反查吞错已改 log.warning（本提交）。
-    ('domains/mgmt/user/legacy_column_migrations.py', 'except Exception:'): 5,
+    ('domains/mgmt/user/legacy_column_migrations.py', 'except Exception:'): 2,
     # 幂等补列/回填，失败=目标形态已达成（两条 ALTER 合并进一个循环后只剩 1 处）
     ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 1,
     # duplicate column 幂等语义（行内注释已声明）；+1 = PR#1318 白名单改名联动
@@ -304,8 +304,6 @@ EXEMPT_FILES: dict = {
     # ── domains/runtime/agents/sandbox/repository.py（模板查询兜底回 ("", "")（查不到走默认，探测语义本体））──
     ('domains/runtime/agents/sandbox/repository.py', 'except Exception:'): 1,
 
-    # ── domains/runtime/agents/sandbox/sandbox_context.py（env_extra JSON 解析防御（坏串按未配置处理））──
-    ('domains/runtime/agents/sandbox/sandbox_context.py', 'except Exception:'): 1,
 
     # ── domains/runtime/agents/sandbox/stage2.py（stage2 UDS 代理进程（沙箱内常驻子进程）：信号注册/ready 文件/socket shutdown/close 幂等收尾——代理断连 fail-closed（主循环退出）且收尾绝不阻断 accept 泵）──
     ('domains/runtime/agents/sandbox/stage2.py', 'except (OSError, ValueError):'): 1,

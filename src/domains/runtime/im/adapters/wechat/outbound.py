@@ -21,6 +21,7 @@ from typing import Any
 
 from ...channel.capability import Capability
 from ...channel.message import OutboundMessage, SendResult
+from ...channel_health import HourlyLogAggregator, log_summary
 from .media import WechatMediaUploader, media_type_for_name
 from .protocol import (
     ITEM_FILE,
@@ -106,7 +107,8 @@ class WechatSender:
                  typing: WechatTypingCache | None = None,
                  uploader: WechatMediaUploader | None = None,
                  metrics: Any = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 log_agg: HourlyLogAggregator | None = None) -> None:
         self._client = client
         self._routes = routes if routes is not None else WechatRouteRegistry()
         self._users = users if users is not None else WechatUserResolver()
@@ -114,6 +116,8 @@ class WechatSender:
         self._uploader = uploader or WechatMediaUploader(client)
         self._metrics = metrics
         self._sleep = sleep
+        # Issue #3799：notifystart/notifystop 失败按 (instance, reason, 小时窗口) 聚合
+        self._log_agg = log_agg if log_agg is not None else HourlyLogAggregator()
         self.calls: list[dict] = []
         self.media_upload_failed = 0
 
@@ -155,13 +159,37 @@ class WechatSender:
         try:
             await self._client.notify_start()
         except Exception as e:
-            log.warning("[wechat] notifystart failed (ignored): %r", e)
+            self._notify_failure("notifystart", e)
 
     async def notify_stop(self) -> None:
         try:
             await self._client.notify_stop()
         except Exception as e:
-            log.warning("[wechat] notifystop failed (ignored): %r", e)
+            self._notify_failure("notifystop", e)
+
+    def _notify_failure(self, reason: str, exc: Exception) -> None:
+        """失败日志按 (sender, reason, 小时窗口) 聚合：窗口内只 1 条汇总（Issue #3799）。"""
+        try:
+            summary = self._log_agg.note("wechat-sender", reason, detail=repr(exc))
+        except Exception as agg_error:
+            log.warning("[wechat] notify failure aggregation failed: %s", agg_error)
+            return
+        if summary is not None:
+            log_summary("[wechat] notifystart/notifystop", summary)
+
+    def flush_log_agg(self) -> None:
+        """断开/停机收尾（PR #1983 审查 Required）：把未滚动窗口的失败汇总落日志。
+
+        sender 侧聚合器与 channel 侧是两个实例（channel.flush 只清自己的），
+        没有 flush 调用点时最后一个窗口的汇总永远不输出。
+        """
+        try:
+            summaries = self._log_agg.flush()
+        except Exception as e:
+            log.warning("[wechat] notify failure flush failed: %s", e)
+            return
+        for summary in summaries:
+            log_summary("[wechat] notifystart/notifystop", summary)
 
     # ---------------- 发送
 

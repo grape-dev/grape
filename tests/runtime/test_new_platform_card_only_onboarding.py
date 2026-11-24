@@ -3,7 +3,8 @@
 这是「多平台可扩展」的判据：
   · clone 三要素（host / clone_auth / username）全部来自卡，代码里不需要任何平台分支；
   · token env 名由卡的 token_env 派生（缺省 BOT_<P>_TOKEN）；
-  · 没有 provider 模块的新平台，clone 链路照样成立（模块只影响 /api/git-repo 的字段翻译面）。
+  · 没有 provider 模块的新平台，clone 链路照样成立；API 翻译面落「方言族代理」
+    （FamilyProviderModule：属性委托同族模块，API_BASE 取卡上 host）。
 
 本用例不写任何 Python 平台分支，只用临时目录里的一张卡（示例平台 gitea）。
 """
@@ -83,11 +84,21 @@ def test_token_env_name_comes_from_the_card(new_platform):
 
 
 def test_clone_params_chain_needs_no_python_module(new_platform):
-    """没有任何 providers/gitea.py 也能跑通 clone 三要素（模块只服务 API 翻译面）。"""
+    """纯配卡平台不写任何 Python 模块也能拿到消费面：方言族代理，API_BASE 取卡。
+
+    Issue #3580 复审后口径变了（自建实例仓不再 502）：无代码模块、无 resources
+    段的卡不再落 None，而是按 `card.dialect` 套同族代码模块的 FamilyProviderModule
+    代理。本用例守的是「零新增平台字面量」——代理的 API_BASE 必须来自卡上的 host，
+    不能回落内置默认域名（否则凭据会打到 gitlab.com 一类公网实例）。
+    """
     ce, _cards = new_platform
     from src.domains.runtime.vcs.providers import module_for
+    from src.domains.runtime.vcs.providers.family_module import FamilyProviderModule
 
-    assert module_for("gitea") is None, "本用例前提：无代码模块"
+    mod = module_for("gitea")
+    assert mod is not None, "纯配卡平台必须落方言族代理，不能返回 None（否则实例仓全量 502）"
+    assert isinstance(mod, FamilyProviderModule)
+    assert mod.API_BASE == "https://gitea.example.com/api/v1", "API_BASE 必须取卡，不得回落内置域名"
     params = ce.clone_params("gitea:acme/widget")
     assert params["provider"] == "gitea"
     assert params["clone_url"] == "https://gitea.example.com/acme/widget.git"

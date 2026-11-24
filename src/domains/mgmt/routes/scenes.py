@@ -138,7 +138,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     经 with_oauth_token 包一层：401/403(token) 预刷新+重试语义与存量一致
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
@@ -294,17 +294,43 @@ def list_scenes(user: dict = Depends(require_no_session_token), repo: str = "",
     return {"scenes": scenes, "total": total}
 
 
-@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
-def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; always returns total; carries card fields (icon/scope/created_by/pin) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.")
+def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = "",
+                              page: Optional[int] = Query(default=None, ge=1),
+                              page_size: int = Query(default=20, ge=1, le=100),
+                              q: str = Query(default="", max_length=100),
+                              sort: str = Query(default="id", pattern="^(id|latest)$")):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
-    
+
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
+
+    分页（与 /scenes 同参数同语义，前端项目场景页的翻页依赖这里）：
+    - 不带 page：全量返回（老调用方零改动，向后兼容）
+    - page>=1：SQL LIMIT/OFFSET + ORDER BY（含置顶序），total 走 COUNT
+    - 技能显示名解析（enrich）只跑当前页，不再为看不到的页付解析成本
+    - q/sort 与 /scenes 完全同参同语义（name/display_name/description LIKE + 置顶序）
     """
     from src.api.pipeline_config import get_scenes, get_pipeline_config, _count_scenes_from_db
     from src.kernel.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
-    scene_list = get_scenes(repo_key=repo_key)
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 int/None——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    # total 恒返回（COUNT 不拉 nodes_json）；不带 page 时与数组长度一致
+    _total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scene_list = get_scenes(repo_key=repo_key, limit=page_size, offset=_start,
+                                q=q, sort=sort)
+    else:
+        scene_list = get_scenes(repo_key=repo_key, q=q, sort=sort)
 
     # Issue #980：显示名解析统一走共用 skill_display 层（skill_id 优先 →
     # (scope, skill_name) → user/repo 上下文 → official 兜底），三档同名技能
@@ -345,7 +371,10 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "is_pinned": int(s.get("is_pinned") or 0),
                        "pinned_at": s.get("pinned_at") or "",
                        "pipeline": cfg})
-    _total = len(result)
+    # total 用 COUNT 的结果（不带 page 时与数组长度一致；带 page 时是全量总数，
+    # 不能再取 len(result) —— 那是当前页条数，会让前端分页条永远只显示 1 页）
+    if not _total:
+        _total = len(result)
     return {"scenes": result, "total": _total}
 
 
@@ -406,8 +435,9 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
     语义与原 with-pipeline 内联版完全一致：
     - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
       返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
-    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
-      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
+    - Issue #3396：SRE 空绑定特例（sre_unbound）已删除——SRE 未绑定 = 广播模式
+      （池内勾了 sre/all 的引擎可认领），不再是"无引擎"告警条件；字段保留恒 False
+      以维持 API 兼容。
     - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
 
     Issue #1208（L2 可见性徽标，复用入队校验查询同一把尺子）：
@@ -416,7 +446,7 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
     - all_offline 聚合含两类 selector 异常（既有消费方警告条不回归）
     """
     offline_nodes: list[str] = []
-    sre_unbound: bool = False
+    sre_unbound: bool = False  # Issue #3396：保留字段恒 False（API 兼容，禁广播特例已删）
     selector_dead_nodes: list[str] = []
     selector_offline_nodes: list[str] = []
     try:
@@ -449,9 +479,7 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
                     pass
                 continue
             if not _eids and not _uids:
-                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
-                if _tag and str(_tag).lower() == "sre":
-                    sre_unbound = True
+                # Issue #3396：空绑定=广播模式（SRE 禁广播特例已删），不再置 sre_unbound
                 continue
             try:
                 if _gspei(scene_id, _tag, repo_key=repo_key) is None:
@@ -2275,17 +2303,15 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
        Issue #955 follow-up：恢复 'all' 通配——存量引擎仅登记 'all' 一行，严格匹配
        会误杀其场景引擎配置（实证：用户场景保存 sre 节点全量被拒）；#955 的节点
        id 角色枚举校验保留，仅推翻"堵通配"这一点）
-    4. SRE 节点：引擎必须为个人级或仓库级（scope=user 且 owner_id==当前用户，或
-       scope=repo 且归属当前仓库——repo 归属由下方通用校验覆盖）
-       （sre-repo-worker-relax §1.2，取代 sre-personal-machine §3.7 Q2/Q3）
-    5. SRE 节点 enabled 且三模式绑定全空 → 400（SRE 空 ≠ 广播，= 无引擎无法派发）
-    6. Issue #1208 D7：三模式同 node 互斥——ids/uids 双非空 400；
+    4. Issue #1208 D7：三模式同 node 互斥——ids/uids 双非空 400；
        selector 与 ids/uids 任一非空双非空 400（保存端双非空拒绝）
-    7. Issue #1208 D13 L1：selector 标签语法/值域硬阻断 400（未知前缀文案指引 label:；
+    5. Issue #1208 D13 L1：selector 标签语法/值域硬阻断 400（未知前缀文案指引 label:；
        engine/scope 固定值域；scene 动态查 scene_market 活跃行）
-    8. SRE 节点 selector 模式：tags 必须含 scope:user 或 scope:repo → 否则 400
-       （claim 侧没有 SRE 专属 scope 层，边界只由 selector 的 scope 标签承担；与前端
-       SRE 弹窗只给「个人/仓库」两档对齐）
+
+    Issue #3396：删除 SRE 禁广播写侧特例（原 sre-repo-worker-relax §1.2——
+    SRE 空列表拒绝保存 + 仅个人/仓库级引擎）——SRE 与其他角色同口径：空
+    engine_runtime_ids = 广播模式，global 引擎可绑定；越权机器由
+    engine_capabilities 角色守卫在派发/认领两侧拦截。
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
@@ -2349,22 +2375,6 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             _err = validate_selector_tags(_sel_tags, scene_values=_selector_scene_values())
             if _err:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
-        # SRE 空 = 无引擎：启用状态下不允许保存（Q2/Q5 裁定；selector 非空视为已绑定）
-        if tag == "sre" and node.get("enabled") is not False and not eids and not uids and not _sel_tags:
-            raise HTTPException(status_code=400, detail={
-                "code": 400,
-                "message": "SRE Agent 不支持广播模式，请选择个人或仓库级机器（引擎列表不能为空）"})
-        # SRE 的 user/repo 边界在 claim 侧没有独立一层（_DEFAULT_ENGINE_ROLE_TAGS 空表、
-        # claim_by_tag 无 sre/scope 层、_selector_guard_blocks 只做标签 AND 匹配），实际边界
-        # 完全落在 selector 的 scope 标签上：不带 scope 的 selector 会被 global 档引擎认领。
-        # 保存端在此收紧，与前端 SRE 弹窗只给「个人/仓库」两档对齐（早于派发/认领，成本最低）。
-        if tag == "sre" and node.get("enabled") is not False and _sel_tags:
-            _sre_sel_scopes = {str(t or "").strip().lower() for t in _sel_tags}
-            if not (_sre_sel_scopes & {"scope:user", "scope:repo"}):
-                raise HTTPException(status_code=400, detail={
-                    "code": 400,
-                    "message": "SRE Agent 的引擎筛选必须包含 scope:user 或 scope:repo"
-                               "（SRE 禁止使用全局引擎，缺少 scope 标签的筛选会被全局引擎认领）"})
         if not eids and not uids:
             continue
         # Issue #646：绑定入口支持 uid（字符串）——先解析为 id（服务端校验），
@@ -2383,7 +2393,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             else:
                 _resolved_eids.append(eid)
         # Issue #1208：显式 uids 逐个校验存在性（fail-fast 同 ids 口径），
-        # 解析出的 runtime_id 并入 ids 同款校验循环（scope/SRE/能力校验不因 uid 形态绕过）
+        # 解析出的 runtime_id 并入 ids 同款校验循环（scope/能力校验不因 uid 形态绕过，Issue #3396 去 SRE 特例）
         for u in uids:
             if is_uid_str(u):
                 from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
@@ -2411,17 +2421,6 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
                 continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
-            # SRE 专属（sre-repo-worker-relax §1.2）：引擎必须为 user 档（且属于当前用户）
-            # 或 repo 档（归属校验由下方通用 repo 检查覆盖）；global/local 不放行
-            if tag == "sre":
-                if _scope not in ("user", "repo"):
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400,
-                        "message": f"SRE Agent 只能使用个人或仓库级机器，引擎 {_eid} 不是个人/仓库级（scope={_scope}）"})
-                if _scope == "user" and _owner_id and username and _owner_id != username:
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400,
-                        "message": f"SRE Agent 只能使用当前用户自己的个人机器，引擎 {_eid} 属于 {_owner_id}"})
             # scope=repo 时校验仓库归属
             if _scope == "repo" and _cred_id > 0:
                 _owner_norm = (from_repo_key(_owner_id) or "").strip()
@@ -2570,8 +2569,8 @@ def _scene_copy_source_meta(scene_id: str, repo_key: str):
 def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: str = ""):
     """返回「当前用户在该仓库可选引擎 id（按角色）」查询闭包。
 
-    口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
-    global+user+repo+local 四档；非个人组织按 org_id 隔离。
+    口径对齐 dashboard agent_engines：全角色 global+user+repo+local 四档
+    （Issue #3396：SRE 禁广播特例已删，SRE 与其它角色同口径）；非个人组织按 org_id 隔离。
     """
     from src.domains.runtime.public import query_engines
     _filter_org = 0
@@ -2590,14 +2589,11 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: str = ""):
             _cache[role] = []
             return _cache[role]
         try:
-            if role == "sre":
-                engines = (query_engines(repo_key, "user", agent_type="sre", username=username)
-                           + query_engines(repo_key, "repo", agent_type="sre"))
-            else:
-                engines = (query_engines(repo_key, "global", agent_type=role)
-                           + query_engines(repo_key, "user", agent_type=role, username=username)
-                           + query_engines(repo_key, "repo", agent_type=role)
-                           + query_engines(repo_key, "local", agent_type=role, username=username))
+            # Issue #3396：SRE 与其他角色同走四档（global 池可绑定，越权由角色守卫拦截）
+            engines = (query_engines(repo_key, "global", agent_type=role)
+                       + query_engines(repo_key, "user", agent_type=role, username=username)
+                       + query_engines(repo_key, "repo", agent_type=role)
+                       + query_engines(repo_key, "local", agent_type=role, username=username))
         except Exception as e:
             log.warning(f"scene copy: query engines failed for role {role}: {e}")
             engines = []
@@ -2709,9 +2705,8 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
             else:
                 dropped_engines.append({"node_id": role, "engine_runtime_id": _eid})
         node["engine_runtime_ids"] = _kept
-        # SRE 启用但清洗后无引擎 → 停用（与前端既有规则一致，避免创建被拒绝）
-        if role == "sre" and node.get("enabled") is not False and not _kept:
-            node["enabled"] = False
+        # Issue #3396：SRE 启用但清洗后无引擎不再自动停用——空绑定 = 广播模式，
+        # 与其它角色同口径（池内勾了 sre/all 的引擎可认领）。
 
     # 技能：复用 arch 侧既有 scope 判官（_collect_scene_skill_scope_violations，repo 场景口径），
     # 冲突节点保留原名到 skill_pending，复制不中断（不再自建第二份判定）

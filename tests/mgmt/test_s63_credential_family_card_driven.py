@@ -111,7 +111,7 @@ def test_s63_swap_columns_card_driven(gitee_card):
     #  因 3 元组解包失败而红——修 mock 形状，断言口径不变。）
     _cursor.fetchall.return_value = [("gitee:acme/web", "ENCOLD")]
     _cursor.execute.return_value.rowcount = 1
-    with patch("src.kernel.token_resolver.create_provider", return_value=_prov) as m_cp, \
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=_prov) as m_cp, \
             patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://wh/webhook/gitee"), \
             patch("src.domains.mgmt.user.db._get_managed_webhook_id", return_value=0), \
             patch("src.domains.mgmt.user.db._rebuild_webhook_url_for_provider",
@@ -151,7 +151,7 @@ def test_s63_query_path_b_repos_gitee(gitee_card):
     物理列（旧口径断言已随实现退役）。
     """
     from src.domains.mgmt.user import db as udb
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.vcs import create_provider
     create_provider("gitee").token_storage_field()  # 预热卡缓存（防 db mock 干扰目录读）
     _cursor = MagicMock()
     _cursor.fetchall.return_value = []
@@ -188,7 +188,7 @@ def test_s63_bot_token_health_columns(gitee_card):
     _cursor = MagicMock()
     _cursor.fetchone.return_value = ["tok-rc"]
     _cursor.rowcount = 0
-    with patch("src.kernel.token_resolver.create_provider", return_value=_prov), \
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=_prov), \
             patch("src.domains.mgmt.user.db.get_repo_credential_value", return_value="tok-rc"), \
             patch("src.kernel.session_manager.db") as _mdb, patch("src.kernel.session_manager.db_lock"):
         _mdb.cursor.return_value = _cursor
@@ -200,7 +200,7 @@ def test_s63_bot_token_health_columns(gitee_card):
     _cursor2 = MagicMock()
     _cursor2.fetchone.return_value = ["tok"]
     _cursor2.rowcount = 0
-    with patch("src.kernel.token_resolver.create_provider", return_value=_prov), \
+    with patch("src.domains.mgmt.vcs.create_provider", return_value=_prov), \
             patch("src.domains.mgmt.user.db.get_repo_credential_value", return_value=""), \
             patch("src.kernel.session_manager.db") as _mdb, patch("src.kernel.session_manager.db_lock"):
         _mdb.cursor.return_value = _cursor2

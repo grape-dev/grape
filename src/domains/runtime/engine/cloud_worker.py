@@ -492,6 +492,13 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
             _bot_key = bot_token_env_name(task.get("repo_key") or "")
         except Exception as _be:
             log.warning(f"bot token env name derive failed: {_be}")
+        if not _bot_tok:
+            # P2：无凭据运行必须可见（此前静默空值 → 沙箱 askpass 回声为空 →
+            # 推送 401 被误判成"token 失效/权限不足"，实测排查两轮）
+            log.warning(
+                f"cloud_worker: 任务 {task.get('id') or task.get('tid') or '-'} 无可用的"
+                f"仓库 bot 凭据（repo_key={task.get('repo_key') or '-'}，键={_bot_key}）"
+                f"——沙箱内 git push/PR 将不可用，请检查派发侧凭据注入")
         env[_bot_key] = _bot_tok
         if _bot_key != "BOT_GITCODE_TOKEN":
             # 升级期兜底：旧引擎 / bwrap 白名单仍按 gitcode 键名读
@@ -525,11 +532,15 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
     # （127.0.0.1:8081/8083）——对云沙箱无意义（沙箱内的 127.0.0.1 是沙箱自身，
     # 引擎调平台 API 全部 Connection refused，实测 round8 vod 结果）。云沙箱场景
     # 用 worker 自身的主控地址（CLOUD_WORKER_SERVER_URL，nginx 单入口）覆盖。
-    _cw_server = os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+    # 2026-11-22：worker 自身配置优先——它才是"我确实能连到主控"的实证。
+    # 任务行的 server_url 是建单进程视角算出来的（可能是公网/回环），远端 worker
+    # 未必可达（实测 .213 到公网 IP 000 不可达 → grape CLI 全 301）。
+    _cw_server = (os.environ.get("CLOUD_WORKER_SERVER_URL", "")
+                  or os.environ.get("RUNTIME_SERVER_URL", ""))
     _task_server = task.get("server_url") or ""
-    _effective = _task_server
-    if _task_server and "127.0.0.1" in _task_server and _cw_server:
-        _effective = _cw_server
+    _effective = _cw_server or _task_server
+    if _effective and _task_server and _effective != _task_server:
+        log.info(f"cloud_worker: 回连基址以 worker 配置为准 {_task_server} -> {_effective}")
     if _effective:
         env["GRAPE_SERVER_URL"] = _effective
 
@@ -1033,6 +1044,13 @@ async def _refresh_templates(client, config):
     try:
         templates = await client.get_templates()
         if not templates:
+            # [云 worker 领取修复] 空结果必须区分两种语义，调用方据此决定要不要覆盖
+            # 已注册清单（此前一律返回 []，一次 499/超时就把 _installed_live 清空 →
+            # 下一轮 register([]) → runtime_ids 归零 → 永不 claim）：
+            #   []        = 平台确实没有模板（真空）→ 返回空清单，允许同步清空
+            #   None/其他 = 拉取失败/未知        → 返回 None 哨兵，沿用上一份快照
+            if templates is None:
+                return None, set(), None
             return {}, set(), []
 
         new_runtimes = _expand_templates(templates)
@@ -1076,9 +1094,34 @@ async def _refresh_templates(client, config):
             # register 返回 ids 与 _changed 顺序一致；只回填「新增」条目
             # （老条目 rid 已在心跳列表，重复 append 会致心跳重复）
             _added_names = {r["name"] for r in _changed} - _old_names
-            for r, rid in zip(_changed, _ids or []):
-                if r["name"] in _added_names:
-                    _new_rid_by_name[r["name"]] = rid
+            # Issue #4082（PR #2066 审查 Optional ①）：回包里若有非法 id，client 已逐条过滤，
+            # `_ids` 不再与 `_changed` 位置一一对应——此时改按回包明细的 name 配对，避免 zip 错位
+            # 把 rid 配给别的引擎（老行为是整包失败，不会错配；新行为必须保证不错配）。
+            from src.domains.runtime.engine.agent import _register_partial_ids
+            from src.domains.runtime.engine.runtime_id_guard import parse_runtime_id
+            _partial = _register_partial_ids(client)
+            if _partial:
+                _detail = getattr(client, "last_register_detail", None)
+                _rid_by_name = {}
+                for _d in (_detail if isinstance(_detail, (list, tuple)) else []):
+                    if not isinstance(_d, dict):
+                        continue
+                    _rid = parse_runtime_id(_d.get("id"))
+                    _nm = str(_d.get("name") or "").strip().lower()
+                    if _nm and _rid is not None:
+                        _rid_by_name[_nm] = _rid
+                _added_lc = {str(n).strip().lower() for n in _added_names}
+                for r in _changed:
+                    _nm = str(r["name"]).strip().lower()
+                    if _nm in _added_lc and _nm in _rid_by_name:
+                        _new_rid_by_name[r["name"]] = _rid_by_name[_nm]
+                log.warning(f"template refresh: register reply carried invalid runtime id(s) "
+                            f"{_partial}; mapped new rids by name and will re-register to "
+                            f"backfill the rest")
+            else:
+                for r, rid in zip(_changed, _ids or []):
+                    if r["name"] in _added_names:
+                        _new_rid_by_name[r["name"]] = rid
 
         if _deleted:
             _offline_runtimes = [{"name": n, "version": "", "healthy": False,
@@ -1099,7 +1142,7 @@ async def _refresh_templates(client, config):
         raise  # [401 自杀修复] 凭据吊销向上传播——refresh loop 的 except 也要放行
     except Exception as e:
         log.warning(f"_refresh_templates failed: {e}")
-        return {}, set(), []
+        return None, set(), None
 
 
 async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed, device_name):
@@ -1233,7 +1276,11 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
                 # [身份锚定] 无条件同步 re-register 动态视图——改名时 rid 不变（锚命中 UPDATE），
                 # added 循环不触发（rid 已在心跳列表），旧版仅在 added 时同步会让 5min re-register
                 # 用旧名快照把引擎名写回（s14 被 re-register 覆盖回 s13 实测根因）
-                _installed_live[:] = _all_runtimes or []
+                # [云 worker 领取修复] 只有本次刷新拿到了真实的模板结果才覆盖已注册清单；
+                # None = 拉取失败/未知（含 499、超时、平台不可达），沿用上一份快照，
+                # 否则一次失败就会把清单清空 → register([]) → runtime_ids 归零 → 永不 claim。
+                if _all_runtimes is not None:
+                    _installed_live[:] = _all_runtimes
                 for _n, _rid in (_new_rid_by_name or {}).items():
                     if _rid and _rid not in runtime_ids:
                         runtime_ids.append(_rid)
@@ -1286,6 +1333,27 @@ async def _cloud_run_loop(client, runtime_ids, config, engine_by_rid, installed,
             await _refresh_task
         except asyncio.CancelledError:
             pass
+
+
+def _startup_engine_by_rid(client, ids, runtimes, device_name):
+    """启动注册后 rid → 引擎实例名：复用 agent 的按 name 配对，并对部分非法 id 落 partial 日志。
+
+    PR #2066 复审 Required：`client.register` 已改为逐条过滤非法 id，回包含非法 id 时
+    `ids` 可能比 `runtimes` 短，旧的 `zip(ids, runtimes)` 会错位把 rid 配给别的引擎
+    （`_backend_for_engine` 据此选后端，错位会把任务派给错误引擎）。`_refresh_templates`
+    与 agent 启动路径已统一为按回包明细 name 配对，此处第三处一并收敛。
+    """
+    from src.domains.runtime.engine.agent import (
+        _engine_by_rid_from_register, _register_partial_ids,
+    )
+    engine_by_rid = _engine_by_rid_from_register(client, ids, runtimes, device_name)
+    partial_ids = _register_partial_ids(client)
+    if partial_ids:
+        log.warning(
+            f"cloud_worker register reply carried invalid runtime id(s) {partial_ids}; "
+            f"mapped rids to engines by name, missing engine(s) will be backfilled "
+            f"by the periodic re-register")
+    return engine_by_rid
 
 
 def main():
@@ -1600,10 +1668,9 @@ def main():
             json.dumps(sorted(runtimes, key=lambda r: r.get("name", "")), sort_keys=True).encode()
         ).hexdigest()
 
-        # rid → 引擎实例名
-        from src.domains.runtime.engine.instances import instance_name
-        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
-                         for rid, r in zip(ids, runtimes)}
+        # rid → 引擎实例名（PR #2066 复审 Required：按回包 name 配对，避免部分非法 id 时
+        # ids 比 runtimes 短导致 zip 错位；与 _refresh_templates / agent 启动路径同口径）
+        engine_by_rid = _startup_engine_by_rid(client, ids, runtimes, device)
         log.info(f"cloud_worker registered: {ids} -> {config['server_url']}, "
                  f"engines={list(engine_by_rid.values())}, "
                  f"provider={config['provider']}, "

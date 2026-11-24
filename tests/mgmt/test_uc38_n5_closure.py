@@ -95,7 +95,7 @@ def test_uc38_2_platform_tokens_write_path_credential_only():
 
     body = UpdateCredentials(platform_tokens={"gitee": "tok_uc38_valid"})
     try:
-        with patch("src.kernel.token_resolver.create_provider") as _cp:
+        with patch("src.domains.mgmt.vcs.create_provider") as _cp:
             _cp.return_value = SimpleNamespace(verify_token=_fake_verify)
             update_credentials(body, user={"id": uid})
 
@@ -109,7 +109,7 @@ def test_uc38_2_platform_tokens_write_path_credential_only():
         uid2 = _mk_user("uc38b")["id"]
         body2 = UpdateCredentials(platform_tokens={"gitee": "tok_uc38_valid"})
         try:
-            with patch("src.kernel.token_resolver.create_provider") as _cp2:
+            with patch("src.domains.mgmt.vcs.create_provider") as _cp2:
                 _cp2.return_value = SimpleNamespace(verify_token=_fake_verify)
                 update_credentials(body2, user={"id": uid2})
             assert (user_db.get_credential(uid2, "gitee_pat") or {}).get("token") == "tok_uc38_valid"

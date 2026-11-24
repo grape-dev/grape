@@ -995,8 +995,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     rid = cfg.get("runtime_id") or 0
     if not rid:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine
-            rid = resolve_local_engine(user.get("id") or 0) or 0
+            from src.domains.runtime.engine.engine_select import resolve_chat_engine
+            rid = resolve_chat_engine(user.get("id") or 0, user.get("username") or "",
+                                       repo_key, "chat") or 0
         except Exception:
             rid = 0
     kind = runtime_execution_kind(rid)
@@ -1313,8 +1314,9 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
             pass
     if not runtime_id:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine
-            runtime_id = resolve_local_engine(user.get("id") or 0) or 0
+            from src.domains.runtime.engine.engine_select import resolve_chat_engine
+            runtime_id = resolve_chat_engine(user.get("id") or 0, user.get("username") or "",
+                                              repo_key, "chat") or 0
         except Exception:
             runtime_id = 0
     if not runtime_id:
@@ -1516,55 +1518,70 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # agent_runtimes / runtime_credentials 归 runtime：必须走归属域具名查询。
     # 原先用进程库游标直查，在 mgmt 进程里 1146 并被 except 吞掉 —— 表现就是
     # 「点引擎配置/技能配置没反应」（浮层里一直「执行引擎加载中...」）。
-    # 本机直连引擎（credential_id=0，已知类型且已装且健康——与 resolve_local_engine 口径一致）
+    # Issue #3396（2026-11-20 用户裁定）：Chat 引擎可选面与其它角色**同口径**——
+    # 直接复用 query_engines 四档（local/user/repo/global）+ agent_type 角色过滤，
+    # 不再自己拼 SQL（原先那套归属规则手写在这里，跨库改一次要改两处，容易漂）。
+    # 健康策略（用户裁定）：健康过低仍返回但标记 status 并置 disabled，前端灰显不可选。
+    import time as _time_chat
+    from src.domains.runtime.public import (derive_runtime_health, derive_local_runtime_health,
+                                            query_engines)
+    _now_chat = _time_chat.time()
+    _uname = user.get("username") or ""
     try:
-        for r in _rt.read_all_any("chat_local_engines"):
-            _rid, ename, ver, _hn = r
-            if not is_known_engine_name(ename or ""):
-                continue
-            _label = f"{ename} v{ver or ''}"
-            if _hn:
-                # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
-                _short = _hn.replace("ecs-grape-", "")
-                _label += f"（{_short} 直连）"
+        _cands = []
+        for _scope in ("local", "user", "repo", "global"):
+            if _scope == "user":
+                _cands += (query_engines(repo, "user", agent_type="chat", username=_uname,
+                                         user_id=(user.get("id") or 0)) or [])
+            elif _scope == "repo":
+                # 仓库档：repo_key 精确过滤；空 repo 时按"用户已加入的仓库"收紧（别人仓库不可用）
+                _cands += (query_engines(repo, "repo", agent_type="chat", username=_uname) or [])
             else:
-                _label += "（本机直连）"
-            backends.append({"name": ename, "display_name": _label, "scope": "local",
-                             "owner": _hn, "runtime_id": _rid, "engine_uid": _ar_engine_uid(_rid)})
+                _cands += (query_engines(repo, _scope, agent_type="chat") or [])
+        _seen_rid = set()
+        for e in _cands:
+            _rid = int(e.get("runtime_id") or 0)
+            if not _rid or _rid in _seen_rid:
+                continue
+            _seen_rid.add(_rid)
+            _cid = int(e.get("credential_id") or 0)
+            _sc = "local" if _cid == 0 else (e.get("scope") or "global")
+            if _sc not in ("local", "user", "repo", "global"):
+                _sc = "global"
+            _status = (derive_local_runtime_health(bool(e.get("installed")), bool(e.get("healthy")))
+                       if _cid == 0
+                       else derive_runtime_health(e.get("status"), e.get("last_seen_at") or "", _now_chat))
+            _dev = e.get("device_name") or (e.get("host_name") or "" if _cid == 0 else "")
+            ins = instance_name(e.get("name") or "", _dev, _cid)
+            if _sc == "local":
+                _label = (e.get("name") or "")
+                _label += (f"（{(e.get('host_name') or '').replace('ecs-grape-', '')} 直连）"
+                           if (e.get("host_name") or "") else "（本机直连）")
+                _bname = e.get("name") or ""
+            else:
+                _label = f"{ins} · {e.get('name') or ''}"
+                _bname = ins
+            backends.append({"name": _bname, "display_name": _label, "scope": _sc,
+                             "owner": _dev or (e.get("owner_name") or ""),
+                             "runtime_id": _rid, "engine_uid": e.get("engine_uid") or "",
+                             "status": _status, "healthy": bool(e.get("healthy")),
+                             "disabled": str(_status) not in ("online",),
+                             "credential_id": _cid})
     except Exception as _e:  # noqa: BLE001 - 取数失败不阻断配置接口，但必须留痕
-        log.warning(f"chat config: local engines unavailable: {_e}")
-        # 旧库（engine_uid 列未迁移）降级：忽略 uid 列照常返回引擎列表
+        log.warning(f"chat config: role engines unavailable: {_e}")
+        # 旧库降级（缺 scope/engine_uid 列）：只回本机直连，行为与本改动前一致
         try:
-            # 旧库降级查询走 runtime/public 登记层（chat 域读守卫口径）
             for _rid, ename, ver, _hn in _rt.read_all_any("chat_local_engines_legacy"):
                 if not is_known_engine_name(ename or ""):
                     continue
                 _label = f"{ename} v{ver or ''}"
                 _label += f"（{_hn.replace('ecs-grape-', '')} 直连）" if _hn else "（本机直连）"
                 backends.append({"name": ename, "display_name": _label, "scope": "local",
-                                     "owner": _hn, "runtime_id": _rid, "engine_uid": ""})
+                                 "owner": _hn, "runtime_id": _rid, "engine_uid": "",
+                                 "status": "online", "healthy": True, "disabled": False,
+                                 "credential_id": 0})
         except Exception as _e2:  # noqa: BLE001
             log.warning(f"chat config: legacy local engines unavailable: {_e2}")
-    # 个人引擎（scope=user，仅当前用户 + active）
-    try:
-        for r in _rt.read_all_any("chat_user_engines", (user["username"],)):
-            _rid, ename, ver, dev, owner, cid = r
-            ins = instance_name(ename, dev or "", cid or 0)
-            backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
-                             "scope": "user", "owner": owner or "", "runtime_id": _rid,
-                             "engine_uid": _ar_engine_uid(_rid)})
-    except Exception as _e:  # noqa: BLE001
-        log.warning(f"chat config: user engines unavailable: {_e}")
-        try:
-            # 旧库降级查询走 runtime/public 登记层（chat 域读守卫口径）
-            for _rid, ename, ver, dev, owner, cid in _rt.read_all_any(
-                    "chat_user_engines_legacy", (user["username"],)):
-                ins = instance_name(ename, dev or "", cid or 0)
-                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
-                                     "scope": "user", "owner": owner or "", "runtime_id": _rid,
-                                     "engine_uid": ""})
-        except Exception as _e2:  # noqa: BLE001
-            log.warning(f"chat config: legacy user engines unavailable: {_e2}")
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     from src.kernel.repo_key import to_repo_key
@@ -1865,6 +1882,23 @@ async def update_chat_config(body: dict, request: Request,
                 _uid_applied = True
     if not _uid_applied and body.get("runtime_id") is not None:
         kwargs["runtime_id"] = body["runtime_id"]
+    # Issue #3396（2026-11-20 用户裁定）：保存引擎指针必须过 chat 角色校验，堵住
+    # 「可选面已按角色过滤，但直传 runtime_id 仍能绑定无权引擎」的绕过口。只校验显式
+    # 指定引擎的保存（只改 IM/技能的普通保存不带 runtime_id，不受影响）。
+    _rid_sel = kwargs.get("runtime_id")
+    if _rid_sel is not None:
+        try:
+            from src.domains.runtime.engine.engine_select import engine_allows_role
+            if int(_rid_sel or 0) and not engine_allows_role(int(_rid_sel), "chat"):
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "error_code": "ENGINE_ROLE_MISMATCH",
+                    "message": "该引擎未开启 Chat 角色（engine_capabilities 无 chat/all），不能作为 Chat 执行引擎",
+                })
+        except HTTPException:
+            raise
+        except Exception as _e:  # noqa: BLE001 - 校验自身故障不阻断保存（可用性优先）
+            log.warning(f"chat config: chat-role check skipped: {_e}")
     if body.get("skill_id") is not None:
         # 新方式：前端直传 skill_id
         skill_id = body["skill_id"]
@@ -2121,8 +2155,9 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     rid = cfg.get("runtime_id") or 0
     if not rid:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine
-            rid = resolve_local_engine(user.get("id") or 0) or 0
+            from src.domains.runtime.engine.engine_select import resolve_chat_engine
+            rid = resolve_chat_engine(user.get("id") or 0, user.get("username") or "",
+                                       repo_key, "chat") or 0
         except Exception:
             rid = 0
     kind = runtime_execution_kind(rid)
@@ -2553,8 +2588,9 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     rid = cfg.get("runtime_id") or 0
     if not rid:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine
-            rid = resolve_local_engine(user.get("id") or 0) or 0
+            from src.domains.runtime.engine.engine_select import resolve_chat_engine
+            rid = resolve_chat_engine(user.get("id") or 0, user.get("username") or "",
+                                       repo_key, "chat") or 0
         except Exception:
             rid = 0
 

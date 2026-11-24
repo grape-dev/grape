@@ -108,7 +108,7 @@
             <button
               v-if="tab === 'repo' || tab === 'user'"
               class="bt bt-p bt-s sk__upload-btn"
-              @click="showUpload = true"
+              @click="openUpload"
             >
               {{ tt2('action.add_skill') }}
             </button>
@@ -360,7 +360,7 @@
               {{ tt('download_skill') }}
             </button>
             <button
-              v-if="detail.scope !== 'official'"
+              v-if="detail.scope !== 'official' || detail.can_edit_display_name"
               class="skd-btn"
               @click="askEditMeta(detail)"
             >
@@ -596,6 +596,17 @@
           ><span>{{ currentRepo }}</span>
         </div>
         <div class="srow sk__srow">
+          <label>{{ tt('upload_display_name') }}</label>
+          <div class="sk__f1 sk__summary-fld">
+            <input
+              v-model="uploadForm.displayName"
+              class="sk__f1"
+              :placeholder="tt('upload_display_name_ph')"
+            />
+            <span class="sk__counter">{{ displayNameLen(uploadForm.displayName) }}/{{ SKILL_DISPLAY_NAME_MAX }}</span>
+          </div>
+        </div>
+        <div class="srow sk__srow">
           <label>{{ tt2('upload.agent_type') }}</label>
           <AGSelect
             v-model="uploadForm.agentType"
@@ -744,6 +755,16 @@
       <div class="sk__form sk__meta-form">
         <div class="sk__grp">
           <div class="sk__grp-title">{{ tt('edit_grp_base') }}</div>
+          <div class="sk__fld">
+            <label>{{ tt('upload_display_name') }}</label>
+            <div class="sk__summary-fld">
+              <input
+                v-model="metaCtx.displayName"
+                :placeholder="tt('upload_display_name_ph')"
+              />
+              <span class="sk__counter">{{ displayNameLen(metaCtx.displayName) }}/{{ SKILL_DISPLAY_NAME_MAX }}</span>
+            </div>
+          </div>
           <div class="sk__fld">
             <label>{{ tt2('upload.agent_type') }}</label>
             <AGSelect v-model="metaCtx.agentType" :options="agentOpts" />
@@ -940,6 +961,10 @@ const KEY_DEFAULTS = {
   upload_tags_ph: '输入后回车或逗号确认',
   upload_summary: '摘要（必填，≤50 字）',
   upload_summary_ph: '一句话说明用途，不要使用 → 或 -> 流程链',
+  upload_display_name: '名称（必填，≤20 字）',
+  upload_display_name_ph: '技能名称，可直接用于卡片与详情展示',
+  display_name_required: '名称不能为空',
+  display_name_too_long: '名称不能超过 20 个字符',
   edit_meta: '编辑信息',
   edit_grp_base: '基本信息',
   edit_grp_class: '分类与标签',
@@ -1087,6 +1112,7 @@ const FEAT_GRADIENT = {
 }
 const agentList = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'auto']
 //: 技能标签上限（Issue #3202；场景市场仍为 3）
+const SKILL_DISPLAY_NAME_MAX = 20
 const SKILL_MAX_TAGS = 5
 const SKILL_MAX_TAG_LEN = 12
 const SKILL_SUMMARY_MAX = 120
@@ -2267,6 +2293,7 @@ const uploadDone = ref(false)
 const uploadPct = ref(0)
 const uploadForm = reactive({
   agentType: '',
+  displayName: '',
   categoryId: '0',
   catL1: '0',
   catL2: '0',
@@ -2296,6 +2323,26 @@ function downloadTemplate() {
   var token = encodeURIComponent(G.window.localStorage.getItem('token') || '')
   G.window.open('/api/skills/template?token=' + token, '_blank')
 }
+// Issue #3855：显示名称统一口径——去首尾空格、按 Unicode 码点计数（emoji 计 1）。
+function displayNameLen(v) {
+  return Array.from(String(v || '').trim()).length
+}
+function validateDisplayName(v) {
+  var t = String(v || '').trim()
+  if (!t) {
+    G.app.showToast(tt('display_name_required'))
+    return ''
+  }
+  if (displayNameLen(t) > SKILL_DISPLAY_NAME_MAX) {
+    G.app.showToast(tt('display_name_too_long'))
+    return ''
+  }
+  return t
+}
+function openUpload() {
+  uploadForm.displayName = ''
+  showUpload.value = true
+}
 function doUpload() {
   if (!uploadForm.file) {
     G.app.showToast(
@@ -2305,6 +2352,8 @@ function doUpload() {
     )
     return
   }
+  var displayName = validateDisplayName(uploadForm.displayName)
+  if (!displayName) return
   if (!uploadForm.agentType) {
     G.app.showToast('请选择 Agent 类型')
     return
@@ -2316,6 +2365,7 @@ function doUpload() {
   commitTag(uploadForm)
   var fd = new FormData()
   fd.append('file', uploadForm.file)
+  fd.append('display_name', displayName)
   fd.append('scope', tab.value)
   fd.append('agent_type', uploadForm.agentType)
   fd.append('category_id', String(parseInt(uploadForm.categoryId, 10)))
@@ -2421,6 +2471,7 @@ const metaCtx = reactive({
   id: 0,
   name: '',
   scope: 'user',
+  displayName: '',
   agentType: '',
   catL1: '0',
   catL2: '0',
@@ -2458,6 +2509,7 @@ function askEditMeta(s) {
   metaCtx.id = s && s.id
   metaCtx.name = (s && (s.display_name || s.name)) || ''
   metaCtx.scope = (s && s.scope) || 'user'
+  metaCtx.displayName = (s && (s.display_name || s.name)) || ''
   metaCtx.agentType = (s && s.agent_type) || ''
   metaCtx.catL1 = String((s && s.cat_l1_id) || 0)
   metaCtx.catL2 = String((s && s.cat_l2_id) || 0)
@@ -2476,6 +2528,27 @@ function askEditMeta(s) {
   metaCtx.busy = false
 }
 function doEditMeta() {
+  var displayName = validateDisplayName(metaCtx.displayName)
+  if (!displayName) return
+  if (metaCtx.scope === 'official') {
+    // 官方技能仅放开显示名称编辑（其余元信息后端维持 403）。
+    metaCtx.busy = true
+    G.API.patch('/skills/' + encodeURIComponent(metaCtx.id), { display_name: displayName })
+      .then(function (r) {
+        metaCtx.busy = false
+        metaCtx.open = false
+        G.app.showToast((r && r.message) || tt('save'))
+        loadAll()
+        if (detail.value && String(detail.value.id) === String(metaCtx.id)) {
+          openDetail(metaCtx.id, 'overview')
+        }
+      })
+      .catch(function (e) {
+        metaCtx.busy = false
+        G.app.showToast((e && e.message) || '保存失败')
+      })
+    return
+  }
   if (!String(metaCtx.summary || '').trim()) {
     tagToast('summary_required')
     return
@@ -2484,6 +2557,7 @@ function doEditMeta() {
   var l1 = parseInt(metaCtx.catL1, 10) || 0
   var l2 = parseInt(metaCtx.catL2, 10) || 0
   var payload = {
+    display_name: displayName,
     agent_type: metaCtx.agentType,
     tags: (metaCtx.tagsArr || []).map(function (t) {
       return { name: t.name, source: 'manual' }

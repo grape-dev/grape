@@ -666,6 +666,44 @@ def test_consumer_run_once_non_owner_no_deliver(outbox_db, clean_notify):
     assert OB.get_row(tid)["status"] == "pending"
 
 
+def test_consumer_run_once_recovers_after_wal_replacement(outbox_db, clean_notify):
+    """Issue #3588 验收：WAL/SHM 被替换（overlayfs copy-up）后，消费者 run_once
+    仍能恢复消费——既有行不丢、不重复投递，新行继续送达。"""
+    from src.domains.runtime.im import outbox as OB
+    _mk_lease(outbox_db, "feishu:inst-1", "owner-A")
+    tid = OB.out_track_id(1, "awaiting", "gitcode:o/r", 7, "feishu", "inst-1")
+    OB.enqueue(out_track_id=tid, installation_id="inst-1", channel_type="feishu",
+               channel_chat_id="oc_1", payload={"kind": "awaiting", "text": "x",
+                                                "repo_key": "gitcode:o/r", "issue_number": 7,
+                                                "user_id": 1},
+               expires_at=OB.new_expiry())
+    ch = FakeChannel(Capability.TEXT)
+    eng = FakeEngine({"inst-1": ch})
+    consumer = OB.OutboxConsumer(eng, instance_id="owner-A")
+    assert asyncio.run(consumer.run_once()) == 1
+    assert OB.get_row(tid)["status"] == "sent"
+
+    # 模拟 overlayfs copy-up：删旧 WAL/SHM、新建同名空文件（新 inode）
+    for suffix in ("-wal", "-shm"):
+        p = outbox_db + suffix
+        if os.path.exists(p):
+            os.remove(p)
+        with open(p, "wb") as f:
+            f.write(b"")
+
+    tid2 = OB.out_track_id(1, "awaiting", "gitcode:o/r", 9, "feishu", "inst-1")
+    OB.enqueue(out_track_id=tid2, installation_id="inst-1", channel_type="feishu",
+               channel_chat_id="oc_1", payload={"kind": "awaiting", "text": "y",
+                                                "repo_key": "gitcode:o/r", "issue_number": 9,
+                                                "user_id": 1},
+               expires_at=OB.new_expiry())
+    assert asyncio.run(consumer.run_once()) == 1
+    assert ch.calls == 2  # 首行未重复投递，失效后新行正常送达
+    assert OB.get_row(tid)["status"] == "sent"
+    assert OB.get_row(tid2)["status"] == "sent"
+    assert OB.get_row(tid2)["attempt_count"] == 0
+
+
 def test_consumer_set_engine_after_mode_flip(outbox_db, clean_notify):
     """QA #1314 M2：模式翻转重建引擎 → set_engine 换新句柄后消费者能继续认领。"""
     from src.domains.runtime.im import outbox as OB
@@ -745,9 +783,20 @@ def _user(uid=1234):
 
 
 def test_outbound_list_and_retry(outbox_db, clean_notify):
-    """/api/im/outbound 查询 + /api/im/outbound/{id}/retry 重发。"""
+    """/api/im/outbound 查询 + /api/im/outbound/{id}/retry 重发。
+
+    Issue #3799 审查（PR #1983）：outbound 明细按可见安装裁剪——
+    本测试的安装必须真实存在且属当前用户，行才可见。
+    """
     from src.domains.mgmt.routes import im as IM
     from src.domains.runtime.im import outbox as OB
+    import sqlite3 as _s3
+    conn = _s3.connect(outbox_db)
+    conn.execute(
+        "INSERT OR REPLACE INTO grape_t_channel_installation "
+        "(id, channel_type, scope, owner_user_id, status) VALUES ('inst-1','feishu','user','1234','active')")
+    conn.commit()
+    conn.close()
     tid = OB.out_track_id(8, "pending_review", "gitcode:o/r", 21, "feishu", "inst-1")
     OB.enqueue(out_track_id=tid, installation_id="inst-1", channel_type="feishu",
                channel_chat_id="oc_1",

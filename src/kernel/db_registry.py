@@ -124,18 +124,27 @@ ROLE_DOMAIN = {
 }
 
 
-def expected_db_name(role: str) -> str:
-    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
-    domain = ROLE_DOMAIN.get((role or "").strip().lower())
-    if not domain:
-        return ""
-    dsn = dsn_of(domain)
+def database_of(domain: str) -> str:
+    """该域 DSN path 里的库名（脱敏：不含账号/口令/主机）；缺 DSN 或解析失败返回空串。
+
+    日志与启动自检用（`route=domain` 时"实际打到哪个库"）。`expected_db_name` 复用本函数，
+    不再各写一份 `parse_dsn` 解析。
+    """
+    dsn = dsn_of((domain or "").lower())
     if not dsn:
         return ""
     try:
         return (parse_dsn(dsn).get("database") or "").strip()
     except Exception:
         return ""
+
+
+def expected_db_name(role: str) -> str:
+    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
+    domain = ROLE_DOMAIN.get((role or "").strip().lower())
+    if not domain:
+        return ""
+    return database_of(domain)
 
 
 def describe_connection() -> dict:
@@ -188,6 +197,35 @@ def assert_role_database(role: str) -> None:
         if os.environ.get("GRAPE_3DB_STRICT_DSN", "").strip().lower() in ("1", "true", "yes", "on"):
             log.error(f"[db-guard] role={role} 拒绝启动：GRAPE_3DB_STRICT_DSN=1 且 DSNS 不全")
             raise SystemExit(6)
+
+
+def warn_if_cross_domain_fallback(domain: str) -> None:
+    """跨域读拿不到该域 DSN 时告警一次（禁止静默串到进程库）。
+
+    为什么必须响：三库拓扑下缺 GRAPE_DSN_<DOMAIN> 时，`domain_db()` 返回 None，
+    调用方"降级"到进程主库——同名表往往是**跨库视图**，视图是建视图时的列快照，
+    基表加列后非 owner 侧读该列就 1054、读新表就 1146，表现为 500
+    （2026-11-20 实锤：/api/dashboard/{owner}/{repo} 在 insight 进程读
+    insight.managed_repos 视图，缺 is_org_repo → 1054 → 500）。单库/共库拓扑下
+    `GRAPE_<DOMAIN>_DB_NAME == DEVOPS_DB_NAME`，不会触发本告警。
+    """
+    domain = (domain or "").lower()
+    if domain not in _VALID or domain == current_domain():
+        return
+    if dsn_of(domain):
+        return
+    expected = os.environ.get(f"GRAPE_{domain.upper()}_DB_NAME", "").strip()
+    actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
+    if not (expected and actual and expected != actual):
+        return
+    flag = f"_warned_cross_{domain}"
+    if getattr(_local, flag, False):
+        return
+    setattr(_local, flag, True)
+    log.error(
+        f"[db-guard] 跨域读 {domain} 缺 GRAPE_DSN_{domain.upper()}，回落到进程库 "
+        f"{actual}（owner 库应为 {expected}）：同名 VIEW 列漂移会变成 1054/1146 的 500"
+    )
 
 
 def dsn_of(domain: str) -> str:
@@ -331,8 +369,8 @@ def _bounded_ping(conn, timeout: float) -> None:
         if sock is not None and prev is not None:
             try:
                 sock.settimeout(prev)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 恢复超时失败不影响探活结论
+                log.debug(f"db_registry: restore socket timeout failed: {e}")
 
 
 def _needs_liveness_check(domain: str) -> bool:
@@ -362,6 +400,7 @@ def domain_db(domain: str):
     domain = (domain or "").lower()
     if domain not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
+    warn_if_cross_domain_fallback(domain)
     if domain in _forbidden:          # 配置/鉴权类错误：重试也不会好，永久停用
         return None
     if _retry_after.get(domain, 0.0) > time.monotonic():   # 临时失败按退避重试
@@ -454,6 +493,17 @@ def route_of(domain: str) -> str:
     if dsn_of(d):                    # 跨域且有 DSN：用该域连接
         return "domain"
     raise DomainUnavailable(d, f"GRAPE_DSN_{d.upper()} missing in a three-database topology")
+
+
+def host_label() -> str:
+    """降级告警用的主机名（PR #2002 R2 Nit：原 service/webhook 各定义一份）。
+
+    取不到留空——纯日志字段，绝不能影响主流程。
+    """
+    try:
+        return os.uname().nodename
+    except Exception:  # noqa: BLE001 - 仅日志字段
+        return ""
 
 
 @contextmanager

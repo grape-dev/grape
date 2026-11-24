@@ -164,3 +164,45 @@ async def scan_run(user: dict = Depends(require_no_session_token)):
 
 
 _scan_in_flight = False
+
+
+class PipelineAdvanceBody(BaseModel):
+    limit: int = 200
+    lookback_hours: float | None = None
+
+
+@router.post("/pipeline-advance", operation_id="patrol_pipeline_advance_run",
+             summary="Run one deterministic pipeline advance round",
+             description="Manually run the DB-driven convergence pass: completed tasks whose Issue stage is still the completed agent are advanced by scene next/handoff (idempotent, independent of skills or in-process completion hooks). Does not require an explicit agent handoff; safe to call repeatedly.")
+async def pipeline_advance_run(body: PipelineAdvanceBody = None,
+                               user: dict = Depends(require_no_session_token)):
+    """手动触发「任务已完成 → 下一节点」确定性推进（运营/排障入口）。
+
+    真源是数据库：``agent_tasks.status=completed`` + ``issue.stage`` 仍停在该
+    agent + 无在途下游 → 按场景 next/handoff 幂等推进。技能是否显式
+    ``grape a2a handoff``、收尾钩子是否执行，都不影响本口径。
+    """
+    from src.domains.mgmt.auth.audit import log_audit
+    from src.domains.runtime import public as _rt_public
+    from src.domains.insight import public as _insight_public
+
+    b = body or PipelineAdvanceBody()
+    limit = max(1, min(int(b.limit or 200), 1000))
+    try:
+        stats = await asyncio.to_thread(
+            _rt_public.reconcile_pipeline_progress, limit, b.lookback_hours)
+        _insight_public.obs_loop_beat("pipeline_advance")
+    except Exception as e:
+        _insight_public.obs_loop_fail("pipeline_advance", e)
+        raise
+    uid = str(user.get("id") or 0)
+    log_audit(
+        "issue_pipeline_advanced",
+        user_id=uid, operator_id=uid,
+        detail={"source": "manual", "limit": limit,
+                "advanced": int(stats.get("advanced") or 0),
+                "scanned": int(stats.get("scanned") or 0),
+                "skipped": int(stats.get("skipped") or 0),
+                "actions": (stats.get("actions") or [])[:50]},
+    )
+    return {"status": "ok", "advance": stats}

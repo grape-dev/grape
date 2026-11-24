@@ -79,9 +79,14 @@
                 >({{ repoMapSummary.ready || 0 }}/{{ repoMapSummary.total || 0 }})</span
               >
             </h3>
-            <AGButton size="sm" variant="plain" :disabled="mapBusy" @click="analyzeAllMap">
-              {{ mapBusy ? t('detail.repo_map_analyzing') : t('detail.repo_map_generate') }}
-            </AGButton>
+            <div class="org__mhead-actions">
+              <AGButton size="sm" variant="plain" @click="openRepoMapSummary">
+                {{ t('detail.repo_map_summary_view') }}
+              </AGButton>
+              <AGButton size="sm" variant="plain" :disabled="mapBusy" @click="analyzeAllMap">
+                {{ mapBusy ? t('detail.repo_map_analyzing') : t('detail.repo_map_generate') }}
+              </AGButton>
+            </div>
           </div>
           <p class="org-repo-map__hint">{{ t('detail.repo_map_subtitle') }}</p>
           <div v-if="!repos.length" class="org__hint">{{ t('detail.repos_empty') }}</div>
@@ -382,7 +387,10 @@
                   accountInitial(currentOwner)
                 }}</span>
                 <select v-model="createForm.repo_owner" class="repo-path__owner">
-                  <optgroup :label="t('create.repo_owner_personal')">
+                  <optgroup
+                    v-if="personalNamespaces.length"
+                    :label="t('create.repo_owner_personal')"
+                  >
                     <option
                       v-for="ns in personalNamespaces"
                       :key="'u-' + ns.login"
@@ -399,7 +407,29 @@
                       {{ ns.name || ns.login }}（{{ ns.login }}）
                     </option>
                   </optgroup>
+                  <optgroup
+                    v-if="unknownNamespaces.length"
+                    :label="t('create.repo_owner_unknown')"
+                  >
+                    <option
+                      v-for="ns in unknownNamespaces"
+                      :key="'x-' + ns.login"
+                      :value="ns.login"
+                      disabled
+                    >
+                      {{ ns.name || ns.login }}（{{ t('create.repo_owner_unknown_tag') }}）
+                    </option>
+                  </optgroup>
+                  <option v-if="!providerNamespaces.length" value="" disabled>
+                    {{ t('create.repo_owner_none') }}
+                  </option>
                 </select>
+                <p
+                  v-if="providerNamespaces.length && !personalNamespaces.length && orgNamespaces.length"
+                  class="repo-path__hint"
+                >
+                  {{ t('create.repo_owner_no_personal') }}
+                </p>
                 <span class="repo-path__sep">/</span>
                 <input
                   v-if="createForm.repo_provider === 'gitcode'"
@@ -699,6 +729,83 @@
           {{ ct('organizations.workbench.map_summary.empty') }}
         </div>
       </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="showMapSummary = false">
+          {{ ct('common.close') }}
+        </AGButton>
+        <a
+          v-if="mapSummaryUrl"
+          class="org-repo__link org-repo__link--btn"
+          :href="mapSummaryUrl"
+          target="_blank"
+          rel="noopener"
+        >
+          {{ t('detail.repo_map_open_file') }} ↗
+        </a>
+      </template>
+    </AGModal>
+
+    <AGModal
+      :open="showRepoMapSummary"
+      :title="t('detail.repo_map_summary_title')"
+      @close="showRepoMapSummary = false"
+    >
+      <div class="org-cap">
+        <div class="org-cap__intro">
+          <div class="org-cap__purpose">{{ t('detail.repo_map_summary_intro') }}</div>
+          <div class="org-cap__meta">
+            <span>{{ t('detail.repo_map_summary_coverage', {
+              ready: repoMapSummaryData.summary?.ready || 0,
+              total: repoMapSummaryData.summary?.total || 0,
+            }) }}</span>
+            <span v-if="repoMapSummaryData.branch">
+              {{ t('detail.repo_map_summary_branch', { branch: repoMapSummaryData.branch }) }}
+            </span>
+          </div>
+        </div>
+        <div class="org-summary__repos">
+          <div
+            v-for="item in repoMapSummaryData.repos || []"
+            :key="'summary-' + item.repo_key"
+            class="org-summary__repo"
+          >
+            <div class="org-summary__repo-head">
+              <span class="org-summary__repo-name">{{
+                item.full_name || item.repo_key
+              }}</span>
+              <span
+                class="org-repo-map__status"
+                :class="'org-repo-map__status--' + summaryRepoStatus(item)"
+                >{{ mapStatusLabel(summaryRepoStatus(item)) }}</span
+              >
+            </div>
+            <div class="org-summary__repo-purpose">
+              {{ item.purpose || t('detail.repo_map_no_purpose') }}
+            </div>
+            <div v-if="(item.domains || []).length" class="org-cap__chips">
+              <span
+                v-for="d in (item.domains || []).slice(0, 8)"
+                :key="'summary-tag-' + item.repo_key + '-' + d"
+                >{{ d }}</span
+              >
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="showRepoMapSummary = false">
+          {{ ct('common.close') }}
+        </AGButton>
+        <a
+          v-if="repoMapSummaryData.url"
+          class="org-repo__link org-repo__link--btn"
+          :href="repoMapSummaryData.url"
+          target="_blank"
+          rel="noopener"
+        >
+          {{ t('detail.repo_map_summary_open') }} ↗
+        </a>
+      </template>
     </AGModal>
   </div>
 </template>
@@ -768,6 +875,9 @@ const bindRepoSubmitting = ref(false)
 const showMapSummary = ref(false)
 const mapSummaryTitle = ref('')
 const mapSummary = ref({})
+const mapSummaryUrl = ref('')
+const showRepoMapSummary = ref(false)
+const repoMapSummaryData = ref({})
 const detailLoading = ref(false)
 const detailError = ref('')
 const showCreate = ref(false)
@@ -951,7 +1061,8 @@ function openRepoWorkspace(repo) {
 function autoNameFromSlug() {
   const raw = String(createForm.slug || createForm.name || '').trim().toLowerCase()
   const slug = raw.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
-  return slug ? 'org-' + slug.slice(0, 60).replace(/-+$/g, '') : ''
+  // 新组织仓库名默认使用组织 slug，不再自动加 org- 前缀（显式输入仍优先）。
+  return slug ? slug.slice(0, 60).replace(/-+$/g, '') : ''
 }
 const autoRepoName = computed(() => autoNameFromSlug())
 const currentNamespaceProvider = computed(() => {
@@ -961,14 +1072,21 @@ const currentNamespaceProvider = computed(() => {
     ) || null
   )
 })
-const personalNamespaces = computed(() => {
-  const p = currentNamespaceProvider.value
-  return ((p && p.namespaces) || []).filter((ns) => ns.type !== 'org')
-})
-const orgNamespaces = computed(() => {
-  const p = currentNamespaceProvider.value
-  return ((p && p.namespaces) || []).filter((ns) => ns.type === 'org')
-})
+// 命名空间分类用**白名单**：个人是最宽的权限面，未知类型绝不能默认落进个人桶
+// （fail-safe defaults）。后端下发归一 kind（personal/org/unknown），这里同时认
+// 历史字面量 user（个人）/ group（GitLab 组织）。
+const PERSONAL_KINDS = ['personal', 'user']
+const ORG_KINDS = ['org', 'group']
+function nsKind(ns) {
+  const kind = String((ns && ns.type) || '').toLowerCase()
+  if (PERSONAL_KINDS.indexOf(kind) >= 0) return 'personal'
+  if (ORG_KINDS.indexOf(kind) >= 0) return 'org'
+  return 'unknown'
+}
+const providerNamespaces = computed(() => (currentNamespaceProvider.value && currentNamespaceProvider.value.namespaces) || [])
+const personalNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'personal'))
+const orgNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'org'))
+const unknownNamespaces = computed(() => providerNamespaces.value.filter((ns) => nsKind(ns) === 'unknown'))
 const currentOwner = computed(() => {
   const p = currentNamespaceProvider.value
   const list = (p && p.namespaces) || []
@@ -997,8 +1115,9 @@ function selectProvider(p) {
   }
   createForm.repo_provider = p.provider
   const namespaces = p.namespaces || []
-  const personal = namespaces.find((ns) => ns.type !== 'org')
-  createForm.repo_owner = (personal && personal.login) || (namespaces[0] && namespaces[0].login) || ''
+  const personal = namespaces.find((ns) => nsKind(ns) === 'personal')
+  const firstOrg = namespaces.find((ns) => nsKind(ns) === 'org')
+  createForm.repo_owner = (personal && personal.login) || (firstOrg && firstOrg.login) || ''
   if (!repoNameTouched.value) {
     createForm.repo_name = autoRepoName.value
     repoPathTouched.value = false
@@ -1215,6 +1334,16 @@ function mapStatusLabel(status) {
   var key = 'detail.repo_map_status_' + (status || 'none')
   var label = t(key)
   return label === 'organizations.' + key ? status || 'none' : label
+}
+function summaryRepoStatus(item) {
+  var raw = String((item && item.ai_status) || '')
+  var mapped = {
+    queued: 'queued',
+    running: 'analyzing',
+    succeeded: 'ready',
+    failed: 'failed',
+  }
+  return mapped[raw] || String((item && item.status) || 'none')
 }
 let _mapPollTimer = null
 function _stopMapPoll() {
@@ -1454,11 +1583,38 @@ function analyzeOneMap(item) {
 }
 function openMapSummary(item) {
   if (!detailId.value || !item) return
-  G.API.get('/orgs/' + detailId.value + '/repo-map/' + encodeURIComponent(item.repo_key))
+  mapSummaryUrl.value = String(item.summary_url || '')
+  ensureRepoMapSynced()
+    .then(function () {
+      return G.API.get('/orgs/' + detailId.value + '/repo-map/' + encodeURIComponent(item.repo_key))
+    })
     .then(function (d) {
       mapSummaryTitle.value = (d && (d.full_name || d.repo_key)) || item.full_name || ''
       mapSummary.value = d || {}
       showMapSummary.value = true
+    })
+    .catch(function (e) {
+      G.app.showToast(t('detail.repo_map_failed', { msg: (e && e.message) || e }))
+    })
+}
+
+function ensureRepoMapSynced() {
+  if (!detailId.value) return Promise.resolve()
+  return G.API.post('/orgs/' + detailId.value + '/repo-map/sync', {}, 60000)
+    .catch(function () {
+      return null
+    })
+}
+
+function openRepoMapSummary() {
+  if (!detailId.value) return
+  ensureRepoMapSynced()
+    .then(function () {
+      return G.API.get('/orgs/' + detailId.value + '/repo-map/summary')
+    })
+    .then(function (d) {
+      repoMapSummaryData.value = d || {}
+      showRepoMapSummary.value = true
     })
     .catch(function (e) {
       G.app.showToast(t('detail.repo_map_failed', { msg: (e && e.message) || e }))
@@ -1826,6 +1982,12 @@ if (props.initialCreate && !props.initialDetailId) {
 .org__mhead h3 {
   margin: 0;
   font-size: var(--f-body);
+}
+.org__mhead-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .org__mrow {
   display: flex;
@@ -2518,6 +2680,40 @@ if (props.initialCreate && !props.initialDetailId) {
   color: var(--c-text-3);
   font-size: 12px;
   text-align: center;
+}
+.org-repo__link--btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+.org-summary__repos {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.org-summary__repo {
+  padding: 12px 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-control);
+  background: var(--c-bg-elevated);
+}
+.org-summary__repo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.org-summary__repo-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-text);
+  word-break: break-all;
+}
+.org-summary__repo-purpose {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-text-2);
 }
 
 /* ── 关联仓库选择弹窗 ── */

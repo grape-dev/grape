@@ -1,6 +1,7 @@
 """S14/D13：VCS API 命令层配置驱动——gitee 走 VcsApiClient 零代码命令面。"""
 import io
 import json
+import urllib.error
 from unittest.mock import patch
 
 import pytest
@@ -159,3 +160,122 @@ def test_s14_unsupported_provider_rejected(monkeypatch):
     c = VcsApiClient("nonexist", "TK", "o", "r")
     resp = c.get_issue(1)
     assert "error" in resp and "unsupported" in resp["error"]
+
+
+GITLAB_CARD = {
+    "name": "GitLab", "dialect": "gitlab", "host": "gitlab.com",
+    "webhook_path": "/webhook/gitlab", "event_header": "X-Gitlab-Event",
+    "api_base": "https://gitlab.com/api/v4", "api_auth": "private_token",
+    "webhook_verify": "token_compare", "clone_auth": "basic_password",
+}
+
+
+@pytest.fixture()
+def gitlab_card():
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
+            (json.dumps({"gitlab": GITLAB_CARD}),))
+        db.commit()
+    invalidate_platform_card_cache()
+    yield GITLAB_CARD
+    with db_lock:
+        db.cursor().execute("DELETE FROM meta WHERE key='vcs_providers_config'")
+        db.commit()
+    invalidate_platform_card_cache()
+
+
+def test_gitlab_repo_info_uses_projects_endpoint(gitlab_card, monkeypatch):
+    """GitLab 仓库根必须走 /projects/{全路径编码}。
+
+    回归（2026-11-20 线上）：`_generic_path(..., "")` 把空串当"未给"，于是
+    get_repo_info 对 GitLab 请求了不存在的 `/repos/{o}/{r}` → 恒 404 →
+    查重永远得到「不存在」（真实存在的 account-a/hello-fastapi-2 也被判为空）。
+    """
+    client = VcsApiClient("gitlab", "tok", "account-a", "hello-fastapi-2")
+    seen = {}
+
+    def _fake_request(method, path, data=None, form=False, timeout=30):
+        seen["path"] = path
+        return {"id": 1}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.get_repo_info()
+    assert seen["path"] == "/projects/account-a%2Fhello-fastapi-2"
+
+
+def test_non_gitlab_dialect_keeps_github_style_repo_path(monkeypatch):
+    """非 gitlab 方言不受影响：仍用 /repos/{o}/{r}（存量四平台逐字节不变）。"""
+    client = VcsApiClient("gitcode", "tok", "owner", "repo")
+    seen = {}
+    monkeypatch.setattr(client, "_request",
+                        lambda m, path, data=None, form=False, timeout=30: seen.update(path=path) or {})
+    client.get_repo_info()
+    assert seen["path"] == "/repos/owner/repo"
+
+
+def test_gitlab_dialect_refuses_github_style_path(gitlab_card):
+    """gitlab 卡下漏传 gitlab_style 必须报错，不能静默拼出 /repos/（否则 404 当「不存在」）。"""
+    from src.domains.runtime.vcs.api_client import VcsPathContractError
+
+    client = VcsApiClient("gitlab", "tok", "account-a", "demo")
+    with pytest.raises(VcsPathContractError):
+        client._generic_path("/repos/account-a/demo/issues")
+
+
+def test_query_token_auth_failure_log_redacted(gitee_card, monkeypatch, caplog):
+    """query 形态（Issue #4064）：请求 URL 仍带 token，日志只留 `access_token=***`。"""
+    import src.kernel.upstream_http as _uh
+    seen = {}
+
+    def boom(req, **kw):
+        seen["url"] = req.full_url
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                     io.BytesIO(b'{"error":"bad token"}'))
+
+    monkeypatch.setattr(_uh, "open_with_policy", boom)
+    with caplog.at_level("WARNING"):
+        VcsApiClient("gitee", "TK_SECRET_QUERY", "oschina", "grape").get_issue(5)
+    assert seen["url"].endswith("?access_token=TK_SECRET_QUERY")   # 鉴权形态不变
+    assert "access_token=TK_SECRET_QUERY" not in caplog.text
+    assert "access_token=***" in caplog.text
+
+
+@pytest.mark.parametrize("provider,token,header", [
+    ("github", "TK_SECRET_HEADER", "Authorization"),
+    ("gitlab", "TK_SECRET_PRIVATE", "PRIVATE-TOKEN"),
+])
+def test_header_token_auth_failure_log_redacted(provider, token, header, monkeypatch, caplog):
+    """header 形态（Issue #4064）：URL 不含 token，异常串回显 header 也须打码。"""
+    import src.kernel.upstream_http as _uh
+    seen = {}
+
+    def boom(req, **kw):
+        seen["headers"] = dict(req.headers or {})
+        seen["url"] = req.full_url
+        dumped = "; ".join(f"{k}: {v}" for k, v in seen["headers"].items())
+        raise ConnectionError(f"upstream refused {req.full_url} ({dumped})")
+
+    monkeypatch.setattr(_uh, "open_with_policy", boom)
+    with caplog.at_level("WARNING"):
+        VcsApiClient(provider, token, "own", "repo").get_issue(1)
+    assert token in "".join(seen["headers"].values())            # 请求本身仍带凭据
+    assert token not in caplog.text
+    assert "VcsApiClient: GET" in caplog.text
+
+
+def test_every_generic_path_call_site_declares_gitlab_form():
+    """静态守卫：新增端点若忘记给 gitlab_style，这里直接红（防止再漏一个 /repos/）。"""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("src/domains/runtime/vcs/api_client.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    offenders = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_generic_path"):
+            has_kw = any(k.arg == "gitlab_style" for k in node.keywords)
+            if len(node.args) < 2 and not has_kw:
+                offenders.append(node.lineno)
+    assert not offenders, f"_generic_path 调用点未声明 GitLab 形态（行号）: {offenders}"

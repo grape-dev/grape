@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT '',
-    failed_node TEXT DEFAULT ''
+    failed_node TEXT DEFAULT '',
+    cascade_reason TEXT DEFAULT '',
+    report_missing INTEGER DEFAULT 0,
+    triggered_by TEXT DEFAULT '',
+    cascade_task_status TEXT DEFAULT '',
+    cascade_prev_event_status TEXT DEFAULT ''
 )
 """
 
@@ -536,7 +541,10 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
     agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
     -- Feishu subscription notification: terminal-state notify idempotency guard
-    notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    notified        INTEGER NOT NULL DEFAULT 0,          -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    -- Issue #3800：失败分类（ENGINE_OFFLINE / BINDING_STALE / 空=普通失败）。调度收口据此
+    -- 决定走退避/熔断通道还是普通重试路径；落列而非解析 error 文案，避免文案改动断链。
+    error_code      TEXT DEFAULT ''
 )
 """
 
@@ -564,6 +572,31 @@ CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (scope_type, scope_id, cred_type)
+)
+"""
+
+_CHANNEL_HEALTH_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_health (
+    installation_id     VARCHAR(191) PRIMARY KEY,
+    channel_type        VARCHAR(32) NOT NULL DEFAULT '',
+    instance_id         VARCHAR(128) NOT NULL DEFAULT '',
+    paused              INTEGER NOT NULL DEFAULT 0,
+    last_pause_at       DOUBLE NOT NULL DEFAULT 0,
+    next_retry_at       DOUBLE NOT NULL DEFAULT 0,
+    pause_count         INTEGER NOT NULL DEFAULT 0,
+    consecutive_pauses  INTEGER NOT NULL DEFAULT 0,
+    last_pause_reason   VARCHAR(200) NOT NULL DEFAULT '',
+    last_resume_at      DOUBLE NOT NULL DEFAULT 0,
+    alert_state         VARCHAR(16) NOT NULL DEFAULT '',
+    alerted_at          DOUBLE NOT NULL DEFAULT 0,
+    alert_reason        VARCHAR(200) NOT NULL DEFAULT '',
+    degraded_count      INTEGER NOT NULL DEFAULT 0,
+    last_degraded_at    DOUBLE NOT NULL DEFAULT 0,
+    last_degraded_to    VARCHAR(32) NOT NULL DEFAULT '',
+    last_degraded_ok    INTEGER NOT NULL DEFAULT 0,
+    last_recover_action VARCHAR(32) NOT NULL DEFAULT '',
+    last_recover_at     DOUBLE NOT NULL DEFAULT 0,
+    updated_at          DOUBLE NOT NULL DEFAULT 0
 )
 """
 
@@ -599,3 +632,77 @@ CREATE TABLE IF NOT EXISTS takeover_sessions (
     finished_at       TEXT DEFAULT ''
 )
 """
+
+# Issue #3580/P3：webhook 事件持久收件箱（入队与消费同在 Event 进程）。
+# 幂等键 = (repo_key, delivery_id)；delivery_id 取平台投递 ID 头，缺失则用 body sha256。
+# claim_owner + lease_expires_at 提供租约（进程崩溃后过期可被重放消费）。
+# Issue #3580 复审：last_error 曾写成 `TEXT NOT NULL DEFAULT ''` —— MySQL 下 TEXT 列
+# 带不了字面默认值（兼容层会剥掉），严格模式里任何不写该列的 INSERT 直接 1364。
+# 改可空 MEDIUMTEXT，入队显式写 ''；存量库由迁移 202611200004 收敛。
+# A12（Gate 7）：`id` 是投递句柄（claim/renew/finish 全按 id 定位，也对外返回），
+# **不得**用自增整数——主备重建/跨库搬迁/回绕后 inbox_id 不再全局唯一，日志与重试
+# 台账会指向另一条投递。改为客户端生成的 UUID（32 位 hex），入队即写入。
+_WEBHOOK_INBOX_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox (
+    id VARCHAR(64) PRIMARY KEY,
+    repo_key VARCHAR(255) NOT NULL,
+    provider VARCHAR(64) NOT NULL DEFAULT '',
+    delivery_id VARCHAR(128) NOT NULL,
+    event_header VARCHAR(128) NOT NULL DEFAULT '',
+    payload MEDIUMTEXT NOT NULL,
+    headers TEXT NOT NULL DEFAULT '{}',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    claim_owner VARCHAR(128) NOT NULL DEFAULT '',
+    claimed_at VARCHAR(32) NOT NULL DEFAULT '',
+    lease_expires_at VARCHAR(32) NOT NULL DEFAULT '',
+    next_attempt_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_error MEDIUMTEXT DEFAULT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    finished_at VARCHAR(32) NOT NULL DEFAULT '',
+    UNIQUE(repo_key, delivery_id)
+)
+"""
+
+# Issue #3580 复审 A7：收件箱是纯追加的高写入表，dead/长期 pending 若只删不归档，
+# 故障排查就失去原始投递；若只留不删，单表无界增长。归档表与主表同构、无唯一键
+# （同一 delivery 允许在主/归档各留一份），由 purge 每小时搬一次。
+_WEBHOOK_INBOX_ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_webhook_inbox_archive (
+    repo_key VARCHAR(255) NOT NULL,
+    provider VARCHAR(64) NOT NULL DEFAULT '',
+    delivery_id VARCHAR(128) NOT NULL,
+    event_header VARCHAR(128) NOT NULL DEFAULT '',
+    payload MEDIUMTEXT NOT NULL,
+    headers TEXT NOT NULL DEFAULT '{}',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    claim_owner VARCHAR(128) NOT NULL DEFAULT '',
+    claimed_at VARCHAR(32) NOT NULL DEFAULT '',
+    lease_expires_at VARCHAR(32) NOT NULL DEFAULT '',
+    next_attempt_at VARCHAR(32) NOT NULL DEFAULT '',
+    last_error MEDIUMTEXT DEFAULT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    finished_at VARCHAR(32) NOT NULL DEFAULT '',
+    archived_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(repo_key, delivery_id, archived_at)
+)
+"""
+
+# A7 残留：清扫/排障都按 status、时间过滤，补索引（主表与归档表各自）。
+# 两个后端的建索引语法不同，索引声明因此带两套列定义，由 ensure 侧按后端择一：
+#   MySQL  —— 不支持 `CREATE INDEX IF NOT EXISTS`，且 created_at 是 TEXT，前缀长度必填
+#             （否则 1170 "BLOB/TEXT column used in key specification without a key length"）；
+#   SQLite —— 支持 `IF NOT EXISTS`，但**不支持**前缀长度（created_at(20) 会被当作函数调用
+#             报 "no such function"）。只写 MySQL 一套会让 SQLite 下索引永不创建。
+# 形如 (表, 索引名, MySQL 列定义, SQLite 列定义)。
+_WEBHOOK_INBOX_INDEXES = (
+    ("grape_t_webhook_inbox", "idx_webhook_inbox_status_created",
+     "(status, created_at(20))", "(status, created_at)"),
+    ("grape_t_webhook_inbox_archive", "idx_webhook_inbox_archived",
+     "(archived_at)", "(archived_at)"),
+)

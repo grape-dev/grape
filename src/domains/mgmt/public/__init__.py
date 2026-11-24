@@ -517,6 +517,35 @@ def set_autopilot_engine_ids(task_id: int, engine_runtime_ids_json: str) -> int:
         return int(c.rowcount or 0)
 
 
+def set_autopilot_failure_state(task_id: int, consecutive_failures: int, last_error_code: str,
+                                offline_since: str, backoff_until: str, circuit_paused: int,
+                                updated_at: str) -> int:
+    """Issue #3800：写入环境性失败的退避/熔断状态（同一条 UPDATE 推进运行时间）。
+
+    `autopilot_tasks` 归 mgmt；runtime 调度器经 `cross_write` 意图通道调用本原语。
+    幂等语义：整行状态覆盖（同值重复执行 0 行变更），调用方可安全重试。
+    `backoff_until` 同时作为 `next_run_at`（对外展示「下次预计运行时间」即退避截止）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET last_run_at=%s, next_run_at=%s, "
+                  "consecutive_failures=%s, last_error_code=%s, offline_since=%s, "
+                  "backoff_until=%s, circuit_paused=%s, updated_at=%s WHERE id=%s",
+                  (updated_at, backoff_until or "", int(consecutive_failures or 0),
+                   last_error_code or "", offline_since or "", backoff_until or "",
+                   1 if circuit_paused else 0, updated_at, int(task_id)))
+        return int(c.rowcount or 0)
+
+
+def clear_autopilot_failure_state(task_id: int, next_run_at: str, updated_at: str) -> int:
+    """Issue #3800：清空退避/熔断状态（引擎恢复后自愈续跑），只推进 `next_run_at`。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE autopilot_tasks SET next_run_at=%s, consecutive_failures=0, "
+                  "last_error_code='', offline_since='', backoff_until='', circuit_paused=0, "
+                  "updated_at=%s WHERE id=%s",
+                  (next_run_at or "", updated_at, int(task_id)))
+        return int(c.rowcount or 0)
+
+
 # ---------- 知识库写原语（P3-5b：agent_shared_knowledge / scene_knowledge_ref / scene_skill_ref） ----------
 
 def upsert_baseline_knowledge(repo_key: str, display_name: str, description: str,
@@ -993,7 +1022,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "health",
            # 组织下派快照读取口（A10 整改：runtime 引擎经 public 读取）
            "load_org_snapshot_files", "get_org_dispatch_snapshot",
-           "org_dispatch_terminal_statuses"]
+           "org_dispatch_terminal_statuses", "pipeline_transition", "node_role"]
 
 
 # ---------- 命名查询白名单（P4 读路径：runtime 域代码读 mgmt 表） ----------
@@ -1821,7 +1850,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
     "repo_platform_cards_all": (
         "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
@@ -1830,7 +1859,7 @@ _ANY_QUERIES: dict[str, str] = {
         "pr_comment_endpoint, "
         "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
         "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
-        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color, ca_bundle "
         "FROM grape_t_repo_platforms ORDER BY provider"),
     "repo_platform_bot_status_set": (
         "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "
@@ -2203,15 +2232,27 @@ _ANY_QUERIES: dict[str, str] = {
         "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?"),
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
         "FROM autopilot_tasks WHERE id=?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (
         "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?"),
+    # Issue #3800：环境性失败的退避/熔断状态。运行时间与失败状态同一条 UPDATE 落库——
+    # 拆两次跨域写会出现「状态写了、下次运行时间没写」的半写窗口。占位符顺序即调用方
+    # 参数顺序（set/clear 各自成条，语义自解释）。
+    "autopilot_failure_state_set": (
+        "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, consecutive_failures=?, "
+        "last_error_code=?, offline_since=?, backoff_until=?, circuit_paused=?, updated_at=? "
+        "WHERE id=?"),
+    "autopilot_failure_state_clear": (
+        "UPDATE autopilot_tasks SET next_run_at=?, consecutive_failures=0, last_error_code='', "
+        "offline_since='', backoff_until='', circuit_paused=0, updated_at=? WHERE id=?"),
     # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
     # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
     "knowledge_obs_keys_scoped": (
@@ -2562,7 +2603,7 @@ _PLATFORM_CARD_COLUMNS = (
     "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
     "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
     "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
-    "user_images_base", "brand_color",
+    "user_images_base", "brand_color", "ca_bundle",
 )
 
 
@@ -2862,6 +2903,22 @@ def set_autopilot_run_info_any(task_id, last_run_at: str, next_run_at: str) -> i
     """回写 last_run_at / next_run_at / updated_at（updated_at 与原实现一致 = last_run_at）。"""
     return exec_any("autopilot_run_info_set",
                     (last_run_at, next_run_at, last_run_at, int(task_id)))
+
+
+def set_autopilot_failure_state_any(task_id, consecutive_failures, last_error_code,
+                                    offline_since, backoff_until, circuit_paused,
+                                    updated_at) -> int:
+    """Issue #3800：任意拓扑写退避/熔断状态（与 lib 原语同语义、同一条 UPDATE）。"""
+    return exec_any("autopilot_failure_state_set",
+                    (updated_at, backoff_until or "", int(consecutive_failures or 0),
+                     last_error_code or "", offline_since or "", backoff_until or "",
+                     1 if circuit_paused else 0, updated_at, int(task_id)))
+
+
+def clear_autopilot_failure_state_any(task_id, next_run_at, updated_at) -> int:
+    """Issue #3800：任意拓扑清空退避/熔断状态（引擎恢复自愈）。"""
+    return exec_any("autopilot_failure_state_clear",
+                    (next_run_at or "", updated_at, int(task_id)))
 
 
 # ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------
@@ -6562,10 +6619,25 @@ def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
     return _impl(scene_id, repo_key=repo_key) or {}
 
 
+def pipeline_transition(scene_id: str, agent_role: str, repo_key: str = "") -> dict:
+    """按角色解析节点推进信息（跨域契约口：runtime 聚合/推进节点解析）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_transition as _impl
+
+    return _impl(scene_id, agent_role, repo_key=repo_key) or {}
+
+
+def node_role(node: dict) -> str:
+    """节点对外角色名（tag 优先、id 兜底；跨域契约口）。"""
+    from src.domains.mgmt.pipeline_config import node_role as _impl
+
+    return _impl(node) or ""
+
+
 # 原名别名：调用点只换模块路径。
 get_pipeline_config = pipeline_config
 get_scenes = scene_list
 _query_scene_by_id = scene_by_id
+get_pipeline_transition = pipeline_transition
 
 
 # ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----
@@ -6677,3 +6749,24 @@ def org_dispatch_terminal_statuses() -> tuple[str, ...]:
     from src.domains.mgmt.org_dispatch import DISPATCH_TERMINAL as _impl
 
     return tuple(_impl)
+
+def create_provider(provider: str) -> Any:
+    """VCS 平台适配器工厂（跨域入口）。实现归 src.domains.mgmt.vcs。"""
+    from src.domains.mgmt.vcs import create_provider as _impl
+
+    return _impl(provider)
+
+
+def create_provider_from_repo_key(repo_key: str) -> Any:
+    """按 repo_key 前缀取 provider（跨域入口）。"""
+    from src.domains.mgmt.vcs import create_provider_from_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def create_repo_kwargs(provider: str, auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """建仓可选参数（卡能力位驱动；跨域入口）。"""
+    from src.domains.mgmt.vcs import create_repo_kwargs as _impl
+
+    return _impl(provider, auto_init=auto_init, default_branch=default_branch)

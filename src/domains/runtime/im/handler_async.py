@@ -38,7 +38,7 @@ from src.kernel.owner_db import db_pair
 # 三库独立（weekly-11 拆库）后，本文件属 runtime 域，但 IM 引擎由 **mgmt 进程**启动并执行
 # （grape_server.py → engine_wiring.start_im_engine）。chat_conversations / issue /
 # chat_agent_session / repo_im_group_binding 都是 runtime 基表，用进程本域连接会得到
-# `1146 Table 'grape_mgmt.chat_conversations' doesn't exist`——飞书 /repo 选仓库、
+# `1146 Table '<mgmt 库>.chat_conversations' doesn't exist`——飞书 /repo 选仓库、
 # 自然语言绑仓库、/task 进任务会话全断。故 db/db_lock 一律绑 runtime owner 代理
 # （与 insight 可观测性模块同口径，见 src/kernel/owner_db.py）：单库/无 DSN 拓扑
 # 自动回落 session_manager.db，零回归。
@@ -1688,7 +1688,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         # codearts 忽略 session_id；opencode/hermes/aishell-dsh 真正使用 session 续接
         # （aishell-dsh 二期起支持 session/resume——uuid 形态 sessionId 跨进程续接）。
         from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
-        _rid = chat_runtime_id or (resolve_local_engine(_uid or 0) or 0)
+        # Issue #3396：chat 兜底候选必须过 chat 角色过滤（engine_capabilities 勾了 chat/all）
+        _rid = chat_runtime_id or (resolve_local_engine(_uid or 0, agent_type="chat") or 0)
         _engine_name = engine_name(_rid) if _rid else ""
         _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
         has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes", "aishell-dsh")

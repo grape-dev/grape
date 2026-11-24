@@ -56,6 +56,7 @@ mysql -h<host> -u<user> -p -e "CREATE DATABASE IF NOT EXISTS grape_db CHARACTER 
 - 管理台的精选排序另读一个 admin 库（默认 `grape_admin_db`，`ADMIN_DB_*` 可覆盖）：连不上会静默降级，不影响主流程。
 - `deploy/docker-compose.yml` 只起应用、**不含 MySQL 服务**；Docker + MySQL 要把配置指向外部实例（`./configs` 已挂载进容器，改完重启容器生效）。
 - 切换后端不会自动搬数据：SQLite 上的历史数据要自行迁移（仓库只带 `scripts/export_mysql_to_sqlite.py` 这条 MySQL → SQLite 的反向导出）。
+- **容器 overlayfs 兼容（Issue #3588）**：部分容器存储驱动（overlayfs copy-up）会以「删除旧文件 + 新建同名文件」替换 SQLite 的 WAL/SHM 文件（`sessions.db-wal` / `sessions.db-shm`），进程持有的连接随即失效并持续报 `disk I/O error`、接口 500。grape 已内置运行期自愈：检测失效后自动重建连接并重放 PRAGMA（日志关键词 `event=db_stale_detected` / `event=db_reconnect_ok`，`/healthz` 有 `db_status` / `wal_valid` 信号）。部署侧建议：① 数据目录务必落在**持久卷**（容器内如 `grape-data` 卷，或用 `DEVOPS_DB_PATH` 显式指向卷内路径），避免 WAL/SHM 落进容器可写层；② 若失效仍反复出现，可用 `DEVOPS_DB_JOURNAL_MODE` 改 journal 模式（如 `truncate` / `delete`，默认 `wal` 不变——改动会影响写并发，谨慎评估）。
 - 故障对照：`ModuleNotFoundError: pymysql` → 驱动没装；`Access denied` → 账号、授权或库名不对；中文乱码 → 库不是 `utf8mb4`；重启后数据"消失" → 仍在 SQLite 且 `grape-data` 卷被 `down -v` 删了。
 
 </details>

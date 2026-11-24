@@ -1,7 +1,7 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 390,
-  "min_endpoint_count": 351,
+  "endpoint_count": 400,
+  "min_endpoint_count": 360,
   "groups": [
     "a2a",
     "agents",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "PR #1847: plugin system + arch line reaches production; re-baseline groups/endpoint count (390 paths, +categories/org/sandbox groups) after intentional additions",
-  "source_commit": "c77202850"
+  "change_reason": "merge: sync arch-weekly-11 (63f1317be) into arch-weekly-11-ljt — union of both branches' endpoint additions",
+  "source_commit": "d6308c884"
 }

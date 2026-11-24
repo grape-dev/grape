@@ -119,7 +119,7 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
         def _check(token, _owner=owner, _repo=repo, _u=username, _p=provider):
             # D44/S66：统一走适配器端口（形态归一，无平台名分支）；
             # generic 平台返回 None → fail-closed 非 admin
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.vcs import create_provider
             perm = create_provider(_p).get_collaborator_permission(
                 token, _owner, _repo, _u)
             return _is_admin_permission(perm)

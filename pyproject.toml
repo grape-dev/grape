@@ -83,6 +83,9 @@ worker = [
     "cubesandbox>=0.7",
     "requests>=2.31",
     "cryptography>=42",
+    # Issue #3874：worker 侧 engine_model 优先用 pyyaml 解析 hermes config.yaml，
+    # 缺包会走降级解析器（不支持 sequences）。与 requirements-worker.txt 同源。
+    "pyyaml>=6.0",
 ]
 # Development / testing
 dev = [

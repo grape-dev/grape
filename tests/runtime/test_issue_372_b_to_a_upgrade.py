@@ -80,7 +80,7 @@ class TestBToACompatGetGithubToken:
         """
         from src.domains.mgmt.user.db import get_github_token
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="GH_USER_TOKEN"), \
-             patch("src.kernel.token_resolver.create_provider_from_repo_key", return_value=MagicMock(provider_name="github")):
+             patch("src.domains.mgmt.vcs.create_provider_from_repo_key", return_value=MagicMock(provider_name="github")):
             result = get_github_token("github:owner/repo")
             assert result == "GH_USER_TOKEN"
             assert result != "GH_GLOBAL_BOT"

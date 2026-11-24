@@ -90,7 +90,7 @@ class TestAdapterPortShapes:
     """D44/S66 行为级锁：适配器端口三形态与判定链端到端接通（mock 端口返回值）。"""
 
     def test_gitcode_port_dict_shape(self):
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         from src.domains.mgmt.auth.repo_roles import _is_admin_permission
         with patch("src.domains.mgmt.user.repo_manager.get_member_permission",
                    return_value=_perm(access_level=40, permission="write",
@@ -104,7 +104,7 @@ class TestAdapterPortShapes:
             assert _is_admin_permission(perm) is True
 
     def test_github_port_str_shape(self):
-        from src.kernel.token_resolver import create_provider
+        from src.domains.mgmt.vcs import create_provider
         from src.domains.mgmt.auth.repo_roles import _is_admin_permission
         with patch("src.domains.mgmt.user.repo_manager.get_github_collaborator_permission",
                    return_value="admin"):

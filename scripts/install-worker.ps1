@@ -20,7 +20,9 @@ param(
     [string]$Server = "",
     [string]$Device = "",
     [string]$Dir = "",
-    [switch]$Force
+    [switch]$Force,
+    # Issue #3874: skip the hermes model-config alignment check and only register opencode.
+    [switch]$SkipEngineCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -503,7 +505,9 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
 # requests/cryptography（沙箱平台 SDK / 网络代理 / 凭据加密），与 install-worker.sh 对齐。
 # 2026-11-20：补 fastapi——pyproject [worker] 与 WORKER_DEPS 已声明，脚本硬列表漏了，
 # Windows 装机后任务链路 `stream failed: No module named 'fastapi'`（实测 11-19 21:36/21:38）。
-$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography", "fastapi")
+# Issue #3874: add pyyaml — worker-side engine_model prefers it for hermes config.yaml;
+# without it the bundled offline install misses a declared worker dependency.
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography", "fastapi", "pyyaml")
 $pyprojectFile = Join-Path $Dir "pyproject.toml"
 if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL
@@ -667,15 +671,30 @@ if (-not (Test-Path $canonicalAgent)) {
 
 
 # ===== Issue #2545: hermes model config alignment gate (before restart) =====
+# Issue #3874: model config validation is non-blocking. "Cannot validate" (missing
+# pyyaml / unsupported config structure / gateway unreachable) must not abort the
+# install. --SkipEngineCheck skips the check entirely and only registers opencode.
 $_hermes_home = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$HOME\.hermes" }
-if (Test-Path "$_hermes_home\config.yaml") {
+if ($SkipEngineCheck) {
+    Log "Skipping hermes model config validation (-SkipEngineCheck); only registering opencode"
+} elseif (Test-Path "$_hermes_home\config.yaml") {
     Log "Validating hermes model config against gateway /v1/models ($_hermes_home\config.yaml, Issue #2545)..."
     # Issue #429/#2545：Stop 模式下原生命令 stderr 会终止脚本——调用前临时切 EAP=Continue
+    # cwd 必须是安装目录，否则 `-m src.domains...` 找不到模块（Linux 侧等价写法是 cd $INSTALL_DIR）
     $_prev_eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & "$VenvPython" -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
-    $ErrorActionPreference = $_prev_eap
-    if ($LASTEXITCODE -ne 0) { Fail "hermes model config validation FAILED: model name(s) not in gateway /v1/models (fix config.yaml or switch key; see docs/deployment/model-gateway-alignment.md)" }
-    Log "hermes model config validation passed"
+    Push-Location $Dir
+    try {
+        & $VenvPy -m src.domains.runtime.engine.engine_model --check --hermes-home "$_hermes_home"
+        $_gate_exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $_prev_eap
+        Pop-Location
+    }
+    if ($_gate_exit -ne 0) {
+        Log "Warning: hermes model config validation FAILED: model name(s) not in gateway /v1/models (non-blocking, install continues; fix config.yaml or switch key, or re-run with -SkipEngineCheck; see docs/deployment/model-gateway-alignment.md)"
+    } else {
+        Log "hermes model config validation passed"
+    }
 } else {
     Log "No hermes config found, skipping model validation"
 }

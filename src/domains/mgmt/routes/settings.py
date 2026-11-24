@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
 
-from src.api.deps import require_no_session_token, require_org_member
+from src.api.deps import (require_no_session_token, require_org_member,
+                           require_settings_runtime_owner_or_admin)
 
 from src.kernel.config import log
 
@@ -105,6 +106,13 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         }
         if isinstance(_cfg, dict) and "workflows_write" in _cfg:
             out["workflows_write"] = _cfg["workflows_write"]
+        if _pat_tok:
+            # Issue #3580/PR#1854：到期判定统一走域值对象 CredentialExpiry
+            # （绑定落库 expires_at；这里只投影状态，前端不再自己算天数）。
+            from src.domains.mgmt.user.credential_expiry import CredentialExpiry
+            _exp = str(_cfg.get("expires_at") or "")
+            if _exp:
+                out.update(CredentialExpiry.parse(_exp).as_payload())
         if _diag.get("credential_error"):
             # PAT 行在但读不出来（密钥变更/记录损坏）：不能报"没配置"，否则用户
             # 会去重新配一遍而不知道旧记录坏了（也会让"清不掉"更难解释）。
@@ -159,16 +167,7 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
         # exists=False 但 broken≠空 = "配过、坏了"，前端要提示重配而不是当成没配。
         **{
-            f"{_p}_pat": (
-                {
-                    "exists": st["exists"],
-                    "login": st["login"],
-                    **({"workflows_write": st["workflows_write"]} if "workflows_write" in st else {}),
-                    **({"broken": st["broken"]} if st.get("broken") else {}),
-                }
-                if (st["exists"] or st.get("broken") or st.get("oauth_bound"))
-                else {}
-            )
+            f"{_p}_pat": _pat_public_payload(st)
             for _p, st in _pat_states.items()
         },
         # 新增（2026-11-18）：令牌来源单列一眼可见——PAT 与"登录授权"是两种形态，
@@ -196,6 +195,29 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
 # GET /credentials 已收敛为「凭据只回存在性」；需要查看/复制明文时走本接口：
 #   二次确认（重新输入 Grape 密码）+ 审计日志 + 明文仅当次返回（Cache-Control: no-store）
 #   + 高频取回告警（窗口内计数超阈值 → 429）。
+def _pat_public_payload(st: dict) -> dict:
+    """`<provider>_pat` 对外投影：存在性 + 登录名 + 到期三键（白名单唯一维护点）。
+
+    到期键（expires_at / expires_state / expires_in_days）由 _pat_state 经
+    CredentialExpiry 产出；若重建白名单时漏掉，前端读到的就是空对象，
+    "PAT 快过期"提醒永远不会出现（功能等于没上线）。
+    """
+    if not (st.get("exists") or st.get("broken") or st.get("oauth_bound")):
+        return {}
+    out = {"exists": st["exists"], "login": st["login"]}
+    if "workflows_write" in st:
+        out["workflows_write"] = st["workflows_write"]
+    if st.get("broken"):
+        out["broken"] = st["broken"]
+    if st.get("expires_at"):
+        out["expires_at"] = st["expires_at"]
+    if st.get("expires_state"):
+        out["expires_state"] = st["expires_state"]
+    if st.get("expires_in_days") is not None:
+        out["expires_in_days"] = st["expires_in_days"]
+    return out
+
+
 _REVEAL_WINDOW_SECONDS = 600      # 高频窗口：10 分钟
 
 _REVEAL_MAX_PER_WINDOW = 10       # 窗口内最大取回次数（第 11 次起告警并拒绝）
@@ -508,25 +530,36 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     "code": 400, "message": f"未注册的平台: {_p}（先在管理面配置平台卡）"})
             if _tok and not _is_placeholder(_tok):
                 try:
-                    from src.kernel.token_resolver import create_provider
-                    _info = create_provider(_p).verify_token(_tok)
+                    from src.domains.mgmt.vcs import create_provider
+                    _provider = create_provider(_p)
+                    _info = _provider.verify_token(_tok)
                 except HTTPException:
                     raise
                 except Exception as _ve:
                     raise HTTPException(status_code=502, detail={
                         "code": 502, "message": f"{_p} token 验证失败: {_ve}"})
-                if not isinstance(_info, dict) or not _info.get("login") or not _info.get("id"):
+                _info_login = str((_info or {}).get("login") or (_info or {}).get("username") or "") if isinstance(_info, dict) else ""
+                _info_id = str((_info or {}).get("id") or "") if isinstance(_info, dict) else ""
+                if not _info_login or not _info_id:
                     raise HTTPException(status_code=400, detail={
                         "code": 400, "error_code": "TOKEN_INVALID",
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
-                _ext_id = str(_info.get("id"))
-                _ext_login = str(_info.get("login", ""))
+                _ext_id = _info_id
+                _ext_login = _info_login
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
                 # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
                 # 凭据写进 B 账号」的半转移态，也就不再需要 409 与转移票据。
                 # 平台登录名来源 = 凭据域 config.login（list_platform_links 并集读）。
                 _pat_cfg = {"token": _tok, "login": _ext_login}
+                try:
+                    _exp_meta = _provider.token_expiry(_tok) or {}
+                except Exception:  # noqa: BLE001 - 取不到到期信息不影响绑定
+                    _exp_meta = {}
+                if _exp_meta.get("expires_at"):
+                    # Issue #3580/PR#1854：PAT 到期时间落库（config_json，不加列）。
+                    # 没有它只能等 401 才发现过期——那时智能体任务已经失败。
+                    _pat_cfg["expires_at"] = str(_exp_meta["expires_at"])
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
                 # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
@@ -750,7 +783,8 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
-    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver
+    from src.domains.mgmt.vcs import create_provider_from_repo_key
     from src.kernel.repo_key import to_repo_key
     _rk = to_repo_key(f"{owner}/{repo}")
     _provider = create_provider_from_repo_key(_rk)
@@ -775,7 +809,7 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
         from src.kernel.session_manager import db, db_lock
         # FR-21.4: 按 repo_key 前缀选列（D43/S63：列名卡派生）
         from src.kernel.repo_key import parse_repo_key
-        from src.kernel.token_resolver import create_provider as _cp_cfg
+        from src.domains.mgmt.vcs import create_provider as _cp_cfg
         _provider_name, _, _ = parse_repo_key(_rk)
         _token_col = _cp_cfg(_provider_name).token_storage_field()
         if _token_col:
@@ -873,7 +907,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
-        from src.kernel.token_resolver import create_provider_from_repo_key
+        from src.domains.mgmt.vcs import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         _verified_login = ""
         try:
@@ -2559,6 +2593,25 @@ def _sync_agent_tags(rid: int, cursor):
             return
     _rt.set_agent_tags(int(rid), list(tags))
 
+def _audit_engine_tag_change(action: str, rid: int, tag: str, user: dict,
+                             request: Request | None = None, **extra) -> None:
+    """标签写入审计（Issue #3396 F2 / C3）。
+
+    audit_logs 归 mgmt，本文件即 mgmt 域，直接经 auth.audit 写；detail 只记标识与
+    变更值，不含任何凭据原文。审计失败只告警，不回滚已提交的标签写入。
+    """
+    try:
+        from src.domains.mgmt.auth import audit as _auth_audit
+        _auth_audit.log_audit(
+            "engine_tag_change",
+            operator_id=user.get("id") or 0,
+            ip=(request.client.host if request is not None and request.client else ""),
+            detail={"runtime_id": rid, "tag": tag, "action": action,
+                    "operator": user.get("username") or "", **extra})
+    except Exception as _ae:
+        log.warning(f"engine tag audit failed: action={action} rid={rid} tag={tag}: {_ae}")
+
+
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     """获取引擎的标签列表"""
@@ -2588,7 +2641,8 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     ]}
 
 @router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag", description="Adds an engine tag (idempotent: updates if present).")
-def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
+def add_engine_tag(rid: int, body: EngineTagBody, request: Request,
+                   user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """为引擎添加标签（幂等：已有则更新）"""
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -2625,11 +2679,12 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
+    _audit_engine_tag_change("add", rid, tag, user, request, priority=body.priority)
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
 @router.put("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_update", summary="Update engine tag", description="Updates an engine tag configuration.")
-def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
-                            user: dict = Depends(require_no_session_token)):
+def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Request,
+                            user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """修改引擎标签配置"""
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -2663,10 +2718,13 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    _audit_engine_tag_change("update", rid, tag, user, request,
+                              priority=body.priority, enabled=body.enabled)
     return {"message": f"标签 {tag} 已更新"}
 
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
-def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
+def delete_engine_tag(rid: int, tag: str, request: Request,
+                      user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """删除引擎标签"""
     from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
@@ -2698,6 +2756,7 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
+    _audit_engine_tag_change("delete", rid, tag, user, request)
     return {"message": f"标签 {tag} 已删除"}
 
 class EventActionFilterBody(BaseModel):

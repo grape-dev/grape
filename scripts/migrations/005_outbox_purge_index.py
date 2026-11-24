@@ -38,7 +38,8 @@ def ensure_purge_index(conn) -> bool:
     （MySQL 不支持 IF NOT EXISTS——与 004 的 _ensure_status_index 同款处理）。
     失败只 warning 不阻断启动（索引缺失只影响性能，不影响功能）。
     """
-    if isinstance(conn, sqlite3.Connection):
+    from src.kernel.db_health import is_sqlite_conn  # 自愈代理接入后 SQLite 判别统一走它
+    if is_sqlite_conn(conn):
         try:
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS {_IDX} ON {_TABLE} (status, updated_at)")

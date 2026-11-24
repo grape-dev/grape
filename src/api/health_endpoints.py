@@ -120,6 +120,17 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
                     status = "degraded"
         except Exception as _ske:
             checks["skill_consistency"] = f"error: {_ske}"
+        # Issue #3588：数据库文件失效/恢复信号（db_status / wal_valid）。
+        # 非阻断信号项——失效判定已由上面的 DB 探活决定，这里只暴露自愈代理
+        # 的观测信号（ok / stale / recovered），不改 readiness 终态。
+        try:
+            from src.kernel.db_health import db_health as _db_health_sig
+            _dh = _db_health_sig()
+            checks["db_status"] = _dh.get("db_status", "unknown")
+            checks["wal_valid"] = bool(_dh.get("wal_valid", True))
+        except Exception as _dhe:  # noqa: BLE001  # 信号缺失不影响 readiness
+            checks["db_status"] = "unknown"
+            checks["wal_valid"] = True
         resp = JSONResponse(
             status_code=http_status,
             content={"status": status, "checks": checks, "service": service_name},

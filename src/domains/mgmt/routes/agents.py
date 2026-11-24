@@ -269,7 +269,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             if _repo_keys:
                 _provider, _, _ = parse_repo_key(_repo_keys[0])
             # 会话 token 列按 provider 从端口派生（模块/卡 session_token_field 能力位）
-            from src.kernel.token_resolver import create_provider
+            from src.domains.mgmt.vcs import create_provider
             _token_col = create_provider(_provider).session_token_field()
             # 走 provider（GSB，mgmt → runtime）；失败回落 owner 域原语
             try:

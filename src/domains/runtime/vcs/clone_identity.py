@@ -79,7 +79,7 @@ def _lock_for(key: str) -> threading.Lock:
 def _fetch_login(provider: str, token: str) -> str:
     """真出网一次：卡驱动的 `create_provider(provider).verify_token(token)` → login。"""
     global _calls
-    from src.kernel.token_resolver import create_provider
+    from src.domains.mgmt.public import create_provider
 
     _calls += 1
     try:

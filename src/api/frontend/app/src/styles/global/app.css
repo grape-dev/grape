@@ -255,8 +255,8 @@
 .create-repo-form{padding:18px 24px 24px;display:flex;flex-direction:column;gap:16px}
 .create-repo-field label{display:block;font-size:12px;font-weight:600;color:var(--t);margin-bottom:7px}
 .cr-req{color:var(--r)}
-.create-repo-field input[type=text],.create-repo-field textarea{width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:10px;font-size:13px;color:var(--t);background:var(--c);outline:none;transition:all .18s;box-sizing:border-box;font-family:inherit}
-.create-repo-field input[type=text]:focus,.create-repo-field textarea:focus{border-color:var(--a);background:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--a) 14%,transparent)}
+.create-repo-field input[type=text],.create-repo-field textarea,.create-repo-field select{width:100%;padding:9px 12px;border:1px solid var(--b);border-radius:10px;font-size:13px;color:var(--t);background:var(--c);outline:none;transition:all .18s;box-sizing:border-box;font-family:inherit}
+.create-repo-field input[type=text]:focus,.create-repo-field textarea:focus,.create-repo-field select:focus{border-color:var(--a);background:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--a) 14%,transparent)}
 .create-repo-field textarea{resize:vertical;min-height:64px}
 .cr-hint{font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5}
 .create-repo-vis{display:flex;gap:10px}
@@ -1060,14 +1060,16 @@
 }
 :root ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
 
-/* 日志框（黑底）滚动条：使用亮色，避免黑底黑滚动条不可见 */
-:root #tlBody::-webkit-scrollbar { width: 6px; }
-:root #tlBody::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
-:root #tlBody::-webkit-scrollbar-thumb {
+/* Dark log panel scrollbar: keep the thumb light; a dark thumb on a #000 background is invisible.
+   Since the Vue port this container is class="ev__tl-body" (task log modal in EventView,
+   log pane in AutopilotView) instead of id="tlBody", so the selector has to follow the class. */
+:root .ev__tl-body::-webkit-scrollbar { width: 6px; }
+:root .ev__tl-body::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+:root .ev__tl-body::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,0.25);
   border-radius: 3px;
 }
-:root #tlBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
+:root .ev__tl-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
 
 /* ── 3. Login Screen ── */
 /* P2-10: auth-page 自包含块 — 深色认证页面 */

@@ -141,7 +141,7 @@ def install_plugin(manifest: dict, source: str = "market",
                     "scope, owner_id, is_active, like_count) VALUES (?,?,?,?,?,?,1,0)",
                     (sn, bs["display_name"],
                      bs["description"] or f"插件 {normalized['display_name']} 捆绑技能",
-                     bs["agent_type"] or "auto", "official", 0))
+                     bs["agent_type"] or "auto", "official", ""))
                 created = 1
             c.execute(
                 "INSERT OR IGNORE INTO grape_t_plugin_skill (plugin_id, skill_name, created_by_plugin) "

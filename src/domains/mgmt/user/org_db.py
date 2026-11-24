@@ -121,19 +121,34 @@ db = _mg_db
 
 
 def create_org(name: str, slug: str, owner_id: str, description: str = "",
-               is_personal: int = 0) -> dict | None:
+               is_personal: int = 0, extra_fields: dict | None = None) -> dict | None:
     """创建组织并添加创建者为 owner。D105 第三批：org.id 用 uuid7_str 显式生成
-    （TEXT 主键，退役 lastrowid）；owner_id 入库前 str() 归一。"""
+    （TEXT 主键，退役 lastrowid）；owner_id 入库前 str() 归一。
+
+    extra_fields：额外列（仅 _PROVISION_FIELDS 白名单），与组织行**同一条 INSERT**
+    原子写入。2026-11-23 事故：建组织先提交组织行，再单独 UPDATE provisioning
+    选项；目标库缺列时 UPDATE 1054 → 接口 500，留下 provision_status=NULL 的
+    半成品组织。调用方应把 provisioning 初始状态与仓库选项一起从这里写入。
+    """
+    extra = dict(extra_fields or {})
+    invalid = set(extra) - _PROVISION_FIELDS
+    if invalid:
+        raise ValueError(f"invalid organization create fields: {sorted(invalid)}")
     try:
         from src.kernel.id_gen import uuid7_str
         with db_lock:
             c = db.cursor()
             owner_id = str(owner_id)
             org_id = uuid7_str()
+            cols = ["id", "name", "slug", "description", "owner_id", "is_personal"]
+            values = [org_id, name, slug, description, owner_id, is_personal]
+            for key, value in extra.items():
+                cols.append(key)
+                values.append(value)
             c.execute(
-                "INSERT INTO organization (id, name, slug, description, owner_id, is_personal) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (org_id, name, slug, description, owner_id, is_personal)
+                f"INSERT INTO organization ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)})",
+                values,
             )
             c.execute(
                 "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
@@ -447,12 +462,18 @@ def fail_org_provision_attempt(org_id: str, attempt: str, error: str) -> bool:
 
 
 def claim_org_provision_retry(org_id: str) -> bool:
-    """CAS retryable provision states to pending; ready/active states are untouched."""
+    """CAS retryable provision states to pending; ready/active states are untouched.
+
+    NULL 也认：读侧一直把 NULL 归一成 "none"（provision_status 列可空），
+    但旧 SQL 的 IN ('none','failed') 匹配不到 NULL。缺列事故（2026-11-23）留下的
+    「组织已建、状态 NULL」半成品会因此 CAS 失败。
+    """
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE organization SET provision_status='pending', provision_error='' "
-            "WHERE id=? AND provision_status IN ('none', 'failed')",
+            "WHERE id=? AND (provision_status IN ('none', 'failed') "
+            "OR provision_status IS NULL)",
             (org_id,),
         )
         db.commit()
@@ -559,12 +580,14 @@ def has_running_org_dispatch(org_id: str, repo_key: str,
 
 
 def list_org_repos(org_id: str) -> list[dict]:
-    """列出组织关联的托管仓库。"""
+    """列出组织关联的托管仓库（附带目录渲染所需的 dev_scene/推荐配置）。"""
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, "
-            "org_id, is_org_repo, linked_by, linked_at, created_at "
+            "org_id, is_org_repo, linked_by, linked_at, created_at, "
+            "COALESCE(dev_scene,'') AS dev_scene, "
+            "COALESCE(scene_recommend_config,'') AS scene_recommend_config "
             "FROM managed_repos WHERE org_id=? ORDER BY full_name",
             (org_id,),
         )
