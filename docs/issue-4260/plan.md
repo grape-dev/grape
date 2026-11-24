@@ -35,3 +35,24 @@
 - 前端：`tests/js/test_issue_4260_skill_missing_param.js`（守卫顺序 / hash 改写 /
   400 分流 / i18n / 缓存版本）。
 - 既有：`tests/runtime/test_issue_630_skill_gate.py` 名称深链语义、`tests/api/test_openapi.py`。
+
+## 追加：缓存版本棘轮同步（PR #2113 合入后收口）
+
+合入提交只改了 `app.js` / `i18n.js` / `locales/*/common.json` 与四页的
+`__I18N_CACHE_VER__`、`app.js?v=`，未同步两道缓存版本守卫与本页脚本键：
+
+| 项 | 位置 | 处理 |
+|----|------|------|
+| `app.js` 冻结版本 | `tests/api/test_frontend_cache_version_ratchet.py` `FROZEN['index.html']` | `310` → `311`（页面实际值） |
+| locales 内容指纹 | `tests/api/test_i18n_locale_cache_ratchet.py` `LOCALE_FINGERPRINT` | `8d7fa3e9b28fb255` → `15e33e00d25e8feb`（`common.invalid_param` 新增） |
+| index.html 语言包 cacheVer | 同上 `CACHE_VER['index.html']` | `('90','53')` → `('91','53')` |
+| `i18n.js` 脚本缓存键 | 四页 `i18n.js?v=` + 同上 `I18N_JS_VER` | `20261120-3` → `20261120-4` |
+
+`i18n.js` 内联兜底包新增了 `common.invalid_param`（中英各一条），脚本内容已变；
+不 bump `?v=` 会让持旧缓存的客户端继续用旧的 inline 包，400 文案仍渲染成裸 key，
+故四页（index/admin/register/forgot）统一升到 `20261120-4`，守卫登记值同一次提交同步。
+
+## 验证
+
+- `pytest tests/api/test_frontend_cache_version_ratchet.py tests/api/test_i18n_locale_cache_ratchet.py -q` → 7 passed（修复前 3 failed）。
+- `pytest tests/arch tests/api -q` 与基线 `d30a7a83b` 同为 `142 failed, 1421 passed, 6 skipped`，失败集合逐条比对无新增。

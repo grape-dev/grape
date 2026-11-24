@@ -19,11 +19,11 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = '8d7fa3e9b28fb255'
+LOCALE_FINGERPRINT = '15e33e00d25e8feb'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    'index.html': ('90', '53'),
+    'index.html': ('91', '53'),
     'admin.html': ('20261122-7', '20261114-23'),
     'register.html': ('69', '45'),
     'forgot.html': ('69', '45'),
@@ -93,7 +93,7 @@ def test_page_cache_ver_is_current_and_monotonic():
 
 # shell/js/i18n.js 自身的脚本缓存键：日期型版本，同样「只升不降」
 # （复审 R-1：棘轮只认纯数字，这类版本此前没有任何下界检查）
-I18N_JS_VER = ('20261120-3', '20261114-23')  # (当前, base 下界)
+I18N_JS_VER = ('20261120-4', '20261114-23')  # (当前, base 下界)
 
 
 def test_i18n_js_script_version_monotonic():

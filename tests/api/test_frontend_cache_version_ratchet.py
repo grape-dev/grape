@@ -24,7 +24,7 @@ FROZEN = {
         'all-views.css': '75',
         'api.js': '38',
         'app.css': '11',
-        'app.js': '310',
+        'app.js': '311',
         'auth.css': '1',
         'auto-recovery.js': '2',
         'autopilot-view.js': '71',
