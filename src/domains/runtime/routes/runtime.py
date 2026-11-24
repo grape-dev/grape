@@ -304,14 +304,22 @@ class LogLineBody(BaseModel):
 
 
 class HeartbeatBody(BaseModel):
+    """心跳 body。
+
+    Issue（心跳双写覆盖指标）：worker 有两个心跳循环——完整心跳带 metrics，
+    `_presence_heartbeat_loop` 的最小在线态心跳**不带**。旧模型把缺省值定为 0.0 并
+    无条件 UPDATE，于是最小心跳每 15~20s 就把真实 cpu/mem/disk 刷成 0，看板来回跳
+    「有数据 → 全 0」。现在缺省为 None，服务端只更新**真的上报了**的列。
+    """
+
     runtime_ids: list[int] = []
-    cpu_percent: float = 0.0
-    memory_percent: float = 0.0
-    disk_percent: float = 0.0
-    tmp_percent: float = 0.0
-    bandwidth_percent: float = 0.0
-    bandwidth_mbps: float = 0.0
-    load_avg: str = ""
+    cpu_percent: float | None = None
+    memory_percent: float | None = None
+    disk_percent: float | None = None
+    tmp_percent: float | None = None
+    bandwidth_percent: float | None = None
+    bandwidth_mbps: float | None = None
+    load_avg: str | None = None
     spec: str = ""
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
@@ -814,13 +822,27 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     client_ip = _client_ip(request)
     cancelled_tasks = []
     with _runtime_cursor() as c:
+        # 只更新本次真的上报了的指标列：worker 的「最小在线态心跳」只保 last_seen，
+        # 不带 metrics；旧实现无条件写 0.0，会把它之前完整心跳采到的真实值抹成 0
+        # （看板几秒内「有数据 → 全 0 → 有数据」来回跳的根因）。
+        _set = ["last_seen_at=?", "last_ip=?"]
+        _vals: list = [now, client_ip]
+        for _col, _val in (("cpu_percent", body.cpu_percent),
+                           ("memory_percent", body.memory_percent),
+                           ("disk_percent", body.disk_percent),
+                           ("tmp_percent", body.tmp_percent),
+                           ("bandwidth_percent", body.bandwidth_percent),
+                           ("bandwidth_mbps", body.bandwidth_mbps),
+                           ("load_avg", body.load_avg)):
+            if _val is not None:
+                _set.append(f"{_col}=?")
+                _vals.append(_val)
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
-        else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
+            _set.append("spec=?")
+            _vals.append(body.spec)
+        c.execute(f"UPDATE runtime_credentials SET {', '.join(_set)} WHERE id=?",
+                  _vals + [credential_id])
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
