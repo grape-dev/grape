@@ -435,11 +435,23 @@ def collect_acp_state_db_metrics():
         rows = _rt_public.read_all_any("runtime_credentials_acp_state_rows")
     except Exception:
         return
+    # 同一 host 可能存在多行凭据（worker 上报真实值 + insight/API 进程的 0 值行）。
+    # 无 ORDER BY 的逐个 set 会被后一行覆盖，故先按 host 取 db_bytes 最大的一行；
+    # 避免 0 值行把 worker 真实指标刷掉。
+    best: dict[str, tuple] = {}
     for row in rows or []:
         values = list(row) + [None] * 6
         device_name, name, db_bytes, cleanup_counts, freed, skipped = values[:6]
         host = str(device_name or name or "unknown")
-        ACP_STATE_DB_BYTES.labels(host=host).set(float(db_bytes or 0))
+        try:
+            rank = float(db_bytes or 0)
+        except (TypeError, ValueError):
+            rank = 0.0
+        current = best.get(host)
+        if current is None or rank > current[0]:
+            best[host] = (rank, cleanup_counts, freed, skipped)
+    for host, (_db_bytes, cleanup_counts, freed, skipped) in best.items():
+        ACP_STATE_DB_BYTES.labels(host=host).set(float(_db_bytes or 0))
         ACP_STATE_DB_BYTES_FREED_TOTAL.labels(host=host).set(float(freed or 0))
         ACP_RESUME_SKIPPED_TOTAL.labels(host=host).set(float(skipped or 0))
         counts = {}

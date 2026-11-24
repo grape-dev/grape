@@ -1818,18 +1818,10 @@ async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
     for rid in (body.runtime_ids or []):
         if rid not in merged:
             merged.append(rid)
-    v1_body = HeartbeatBody(
-        runtime_ids=merged,
-        cpu_percent=body.cpu_percent,
-        memory_percent=body.memory_percent,
-        disk_percent=body.disk_percent,
-        tmp_percent=body.tmp_percent,
-        bandwidth_percent=body.bandwidth_percent,
-        bandwidth_mbps=body.bandwidth_mbps,
-        load_avg=body.load_avg,
-        spec=body.spec,
-        log_lines=body.log_lines,
-        probe_results=body.probe_results)
+    # 透传 v1 全部字段（含 #3773 的 acp_state_db_bytes / cleanup_counts /
+    # bytes_freed_total / resume_skipped_total）；逐字段重建会静默丢弃这些指标，
+    # 而 worker 默认 v2-first 且 200 即 return，v1 落库分支永远走不到 → /metrics 恒 0。
+    v1_body = HeartbeatBody(**{**body.model_dump(), "runtime_ids": merged})
     resp = await runtime_heartbeat(v1_body, request, credential_id)
     resp["engine_uids_resolved"] = len(resolved_ids)
     resp["engine_uids_stale"] = len(stale_uids)
