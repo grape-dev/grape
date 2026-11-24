@@ -3445,6 +3445,32 @@ def credential_block_result(tid: str, repo_key: str) -> "dict | None":
     return {"_error": reason, "_started": False}
 
 
+def worktree_block_result(tid: str, repo_key: str, issue_num=None,
+                          agent_type: str = "") -> "dict | None":
+    """Issue #3923：建树失败的阻断结果 —— 凭据归因成立则报凭据，否则透传 git 原文。
+
+    为什么需要：worker 进程没有装配层（`vcs_provider`/`vcs_cards` 端口未绑），
+    凭据归因在 worker 上永远不成立；此前归因为空即落默认 `not_configured`，
+    把任何 git 失败（HEAD 断裂、ref 冲突）都写成「仓库没配凭据」。
+
+    Returns:
+        有失败现场 → `{"_error": ..., "_started": False}`；
+        无失败现场（建树失败另有原因/未记录）→ None（保持既有告警路径）。
+    """
+    from src.domains.runtime.engine import repogit
+
+    # 凭据归因成立（确实无凭据/空仓）→ 沿用既有阻断语义与文案
+    cred = credential_block_result(tid, repo_key)
+    if cred:
+        return cred
+    reason = repogit.worktree_failure_error(repo_key, issue_num=issue_num,
+                                            agent_type=agent_type)
+    if not reason:
+        return None
+    log.error(f"task {tid} blocked by worktree failure: {reason} repo_key={repo_key or ''}")
+    return {"_error": reason, "_started": False}
+
+
 async def _execute_task_impl(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -3621,10 +3647,14 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
             # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
             if not _wt:
-                _cred_blocked = credential_block_result(tid, task.get("repo_key") or "")
-                if _cred_blocked:
+                # Issue #3923：凭据归因**成立**才报凭据；worker 上归因不可用（端口未绑）
+                # 时透传 git 原文与失败阶段，不再默认落 credential_not_configured。
+                _blocked = worktree_block_result(
+                    tid, task.get("repo_key") or "", issue_num=_num,
+                    agent_type=task.get("agent_type") or "")
+                if _blocked:
                     _res.dispose()
-                    return _cred_blocked
+                    return _blocked
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
