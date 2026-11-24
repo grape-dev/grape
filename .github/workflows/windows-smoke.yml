@@ -577,4 +577,5 @@ jobs:
           python -m pytest tests/kernel/test_issue_3796_category_aliases.py \
             tests/runtime/test_issue_3796_scene_sync_category.py \
             tests/scripts/test_check_category_slugs.py \
-            tests/api/test_issue_3796_category_slug_startup.py -v
+            tests/api/test_issue_3796_category_slug_startup.py \
+            tests/mgmt/test_issue_3796_scene_category_backfill.py -v
