@@ -2,23 +2,25 @@
 
 不真启动 uvicorn（服务类命令禁前台长驻），只验证 seam：
 - listen_socket：bind + listen + SO_REUSEADDR（端口 0 免冲突）；
-- main-guard：spawn 子进程重跑本文件不触发 bind（EADDRINUSE 崩溃循环的实测教训）；
-- 环境变量缺省对齐单元（38082 / 0.0.0.0 / 2 workers）。
+- main-guard：spawn 子进程重跑本文件（__name__ 不是 __main__）不触发 bind
+  （EADDRINUSE 崩溃循环的实测教训，用真子进程断言，不再 `or True` 恒真）；
+- 环境变量缺省对齐端口事实源（38083 / 0.0.0.0 / 2 workers）。
 """
-import asyncio
+import importlib.util as _ilu
 import os
 import socket
+import subprocess
 import sys
+import textwrap
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
 import pytest  # noqa: E402
 
-import importlib.util as _ilu
+_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "start-worker.py")
 
-_spec = _ilu.spec_from_file_location("start_worker", os.path.join(
-    os.path.dirname(__file__), "..", "..", "scripts", "start-worker.py"))
+_spec = _ilu.spec_from_file_location("start_worker", _SCRIPT)
 sw = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(sw)
 
@@ -43,14 +45,61 @@ class TestListenSocket:
             s.close()
 
 
-class TestMainGuard:
-    def test_no_top_level_side_effects_on_import(self):
-        """spawn 子进程重跑本文件时（__name__ != __main__）不 bind。"""
-        assert sw.__name__ != "__main__" or True
-        # import 该模块本身（上面 exec_module 已执行顶层）——无异常、无端口副作用
-        assert callable(sw.listen_socket)
+class TestSpawnReentry:
+    """multiprocessing spawn 会用 __mp_main__ 重跑本文件：顶层绝不能 bind。"""
+
+    def test_spawn_reentry_does_not_bind(self, tmp_path):
+        code = textwrap.dedent(f"""
+            import importlib.util as u, socket, sys
+
+            class _GuardSocket(socket.socket):
+                def bind(self, *a, **k):
+                    # 顶层 bind = 每个 worker 抢同一端口 → EADDRINUSE 崩溃循环
+                    sys.exit(97)
+
+            socket.socket = _GuardSocket
+            spec = u.spec_from_file_location("__mp_main__", {_SCRIPT!r})
+            mod = u.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            print(mod.__name__)
+            print(mod._APP_IMPORT)
+        """)
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                              text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        assert "__mp_main__" in proc.stdout
+        assert sw._APP_IMPORT in proc.stdout
+
+    def test_main_guard_present(self):
+        """真 spawn 的入口只由 __main__ 分支驱动（AST 级核对，防守卫被删）。"""
+        import ast
+        tree = ast.parse(open(_SCRIPT, encoding="utf-8").read())
+        guards = [n for n in tree.body if isinstance(n, ast.If)
+                  and "__main__" in ast.dump(n.test)]
+        assert guards, "缺少 __main__ 守卫：spawn 子进程会重复 bind"
 
 
 class TestDefaults:
     def test_app_import_string_matches_unit_app(self):
         assert sw._APP_IMPORT == "src.api.grape_worker_server:app"
+
+    def test_default_port_matches_port_fact_source(self):
+        # #3764 端口事实源：mgmt/event/worker/insight = 38081/38082/38083/38084
+        assert sw._DEFAULT_PORT == 38083
+
+    def test_defaults_host_and_workers(self):
+        assert sw._DEFAULT_HOST == "0.0.0.0"
+        assert sw._DEFAULT_WORKERS == 2
+
+    def test_env_overrides_are_read(self, monkeypatch):
+        """GRAPE_WORKER_PORT 优先于 GRAPE_PORT（与单元的 Environment= 对齐）。"""
+        for var in ("GRAPE_WORKER_PORT", "GRAPE_PORT", "GRAPE_HOST", "GRAPE_UVICORN_WORKERS"):
+            monkeypatch.delenv(var, raising=False)
+        assert sw.resolve_params() == ("0.0.0.0", 38083, 2)
+        monkeypatch.setenv("GRAPE_PORT", "39001")
+        assert sw.resolve_params()[1] == 39001
+        monkeypatch.setenv("GRAPE_WORKER_PORT", "39002")
+        assert sw.resolve_params()[1] == 39002          # 专用变量优先
+        monkeypatch.setenv("GRAPE_HOST", "127.0.0.1")
+        monkeypatch.setenv("GRAPE_UVICORN_WORKERS", "1")   # grape@ 路径的单进程语义
+        assert sw.resolve_params() == ("127.0.0.1", 39002, 1)

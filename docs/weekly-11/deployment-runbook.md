@@ -79,11 +79,37 @@ drop-in 见 `deploy/systemd/grape-service-3db-env.conf`。
 + drop-in Environment=GRAPE_3DB_ENV=<tenant-env-file>
 ```
 
+### 3.1 worker 托管路径（内存上限与预 bind，Issue #4203）
+
+生产 worker 的启动链路有 **两条**，两条都必须带同一套内存/重启参数，否则同一单在不同
+机器上表现不同（有/无 MemoryMax、有/无预 bind）：
+
+| 路径 | ExecStart | 内存/重启参数来源 |
+|------|-----------|------------------|
+| `grape@worker.service`（`scripts/install-grape-systemd.sh` 托管） | `grape-systemd-run.sh worker` → `scripts/start-worker.py`（预 bind） | drop-in `/etc/systemd/system/grape@worker.service.d/30-worker-oom.conf`（仓库源文件 `deploy/systemd/grape-worker-oom.conf`，安装脚本自动装） |
+| `grape-worker-server.service`（静态单元） | `scripts/start-worker.py`（预 bind） | 单元内联 `MemoryAccounting/MemoryHigh=6G/MemoryMax=8G`、`RestartSec=1/RestartSteps=5/RestartMaxDelaySec=30` |
+
+确认本机走哪条、参数是否生效：
+
+```bash
+systemctl cat grape@worker.service | head -20   # ExecStart 是否 grape-systemd-run.sh
+systemctl show grape@worker -p MemoryAccounting,MemoryHigh,MemoryMax,RestartUSec,RestartSteps,RestartMaxDelaySec
+journalctl -u grape@worker -n 50 | grep '\[memory-limit\]'   # 启动自检打印的生效限额
+# 期望 MemoryMax=8589934592（8G）+ "[memory-limit] process=worker cgroup limit=..."
+# 出现 "cgroup limit=unbounded" = drop-in 没装上，或限额挂在 v1 控制器
+```
+
+- 只跑 `systemctl show grape-worker-server` 不够：该静态单元可能根本没在运行。
+- `MemoryMax` 是 16G 主机的保守默认；SRE 拿到 004 的 `dmesg` victim 行（total-vm/rss）
+  后按宿主机覆盖 drop-in 或单元，并把实测值回写本节。
+
 ## 4. 部署后自检
 
 ```bash
-# 1) worker 连的是不是 stage 三库
-PID=$(pgrep -f "uvicorn src.api.grape_worker_server" | head -1)
+# 1) worker 连的是不是 stage 三库（#4203 起 worker 由 start-worker.py 预 bind 启动，
+#    uvicorn 不再是命令行可见的进程名——先取 systemd MainPID，再兜底 pgrep）
+PID=$(systemctl show -p MainPID --value grape@worker 2>/dev/null)
+[ -n "$PID" ] && [ "$PID" != "0" ] || PID=$(pgrep -f "start-worker.py|uvicorn src.api.grape_worker_server" | head -1)
 tr '\0' '\n' < /proc/$PID/environ | grep -E "^DEVOPS_DB_HOST=|^DEVOPS_DB_PORT=|^DEVOPS_DB_NAME=|^GRAPE_DOMAIN_LIB="
 # 期望：<lan-ip-b> / 3307 / <runtime-db> / 1
 

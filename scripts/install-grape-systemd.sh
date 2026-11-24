@@ -8,6 +8,8 @@
 # 本脚本做的事（幂等，可重复执行）：
 #   1. 落一份三库 DSN 环境文件到 /etc/grape/grape-3db.env（root:grape 0640，不写进 .env）；
 #   2. 给四个角色写 drop-in：GRAPE_3DB_ENV（三库模式）+ 按角色的 GRAPE_GSB_BASE_URL；
+#      worker 额外装内存/重启 drop-in（deploy/systemd/grape-worker-oom.conf →
+#      grape@worker.service.d/30-worker-oom.conf，Issue #4203）；
 #   3. 停掉 nohup 遗留进程（pid 文件 + 端口兜底），避免和 Restart=always 抢端口；
 #   4. systemctl daemon-reload + enable --now grape@{mgmt,event,worker,insight}；
 #   5. 等 4/4 健康，打印 PID / MainPID 对照表（MainPID == /health 的 pid 才算真托管）。
@@ -111,6 +113,17 @@ for role in $ROLES; do
         printf "%b" "$body" > "$dropin"
         say "drop-in → $dropin"
     fi
+    # Issue #4203：worker 角色的内存上限 + 秒级重启参数（grape@worker.service 路径）。
+    # 生产 worker 走 grape@*.service → grape-systemd-run.sh，静态单元
+    # grape-worker-server.service 的 Memory*/Restart* 到不了这条路径，故用 drop-in 落值。
+    if [ "$role" = "worker" ]; then
+        if [ -f "$REPO/deploy/systemd/grape-worker-oom.conf" ]; then
+            run "install -m 644 '$REPO/deploy/systemd/grape-worker-oom.conf' '$dropin_dir/30-worker-oom.conf'"
+            say "drop-in → $dropin_dir/30-worker-oom.conf (MemoryHigh/MemoryMax + RestartSec=1)"
+        else
+            echo "WARN: 缺少 $REPO/deploy/systemd/grape-worker-oom.conf，worker 内存上限不会生效" >&2
+        fi
+    fi
 done
 
 # ── 3. 停掉 nohup 遗留进程（否则会和 Restart=always 抢同一端口）──────────────
@@ -197,7 +210,8 @@ cat <<'NEXT'
   重启全部角色   systemctl restart grape@mgmt grape@event grape@worker grape@insight
   单角色重启     systemctl restart grape@worker
   查状态         systemctl status grape@mgmt --no-pager -n 0
-  验证自愈       kill -9 $(systemctl show -p MainPID --value grape@worker)；约 5s 后自动拉起
+  查内存限额     systemctl show grape@worker -p MemoryAccounting,MemoryHigh,MemoryMax
+  验证自愈       kill -9 $(systemctl show -p MainPID --value grape@worker)；约 1s 后自动拉起
   回滚到 nohup   systemctl disable --now grape@{mgmt,event,worker,insight} && bash deploy/deploy3db.sh
 
 注意：启用托管后 deploy/deploy3db.sh 会拒绝执行（会与 Restart=always 抢端口）。

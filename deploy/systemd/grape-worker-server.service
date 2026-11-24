@@ -23,6 +23,11 @@ Environment=GRAPE_WORKER_PORT=38083
 EnvironmentFile=/etc/grape/grape.env
 # Issue #4203：内存边界显式化——OOM 变成可预测的 cgroup 失败而非整机风险。
 # MemoryHigh=6G 软限（回收压力起峰），MemoryMax=8G 硬限（16G 主机保守默认）。
+# ⚠️ 若本机 worker 实际由模板单元 grape@worker.service 托管（ExecStart →
+#    scripts/grape-systemd-run.sh → scripts/start-worker.py），本文件的
+#    Memory*/Restart* 不生效：同参数在 deploy/systemd/grape-worker-oom.conf
+#    （drop-in → /etc/systemd/system/grape@worker.service.d/30-worker-oom.conf）。
+#    两条路径的字面值由 tests/deploy/test_issue_4203_deploy_config.py 断言相等。
 # ⚠️ 取值待 SRE 按 004 dmesg victim 行（total-vm/rss）与实测 RSS 峰值校准：
 #    systemctl cat grape@worker.service + journalctl -u ... 校对后在宿主机覆盖。
 MemoryAccounting=yes

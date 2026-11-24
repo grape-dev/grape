@@ -18,16 +18,22 @@ listen，uvicorn 直接在既有 socket 上 accept，lifespan 再慢端口也不
   崩溃循环，实测教训）。
 - bind 失败显式退出非 0，交给 systemd Restart 拉起，绝不静默换端口。
 
-环境变量（与 deploy/systemd/grape-worker-server.service 对齐，均有缺省）：
+环境变量（与 deploy/systemd/grape-worker-server.service / scripts/grape-systemd-run.sh
+对齐，均有缺省）：
 - GRAPE_WORKER_PORT / GRAPE_PORT   监听端口（缺省 38083，对齐 #3764 端口事实源）
 - GRAPE_HOST                        监听地址（缺省 0.0.0.0）
-- GRAPE_UVICORN_WORKERS             worker 数（缺省 2）
+- GRAPE_UVICORN_WORKERS             worker 数（缺省 2；grape@ 启动路径显式传 1 保持
+                                    单进程生产语义）
+- GRAPE_WORKER_APP                  ASGI 应用导入串（缺省 worker app）
 """
 import os
 import socket
 
 _BACKLOG = 2048
 _APP_IMPORT = "src.api.grape_worker_server:app"
+_DEFAULT_PORT = 38083
+_DEFAULT_HOST = "0.0.0.0"
+_DEFAULT_WORKERS = 2
 
 
 def listen_socket(host: str, port: int) -> socket.socket:
@@ -42,7 +48,8 @@ def listen_socket(host: str, port: int) -> socket.socket:
 def _run(sock: socket.socket, workers: int) -> None:
     """对齐 uvicorn.main.run 的 worker 分支，只是 socket 换成预 bind 的那只。"""
     import uvicorn
-    config = uvicorn.Config(_APP_IMPORT, workers=workers)
+    config = uvicorn.Config(os.environ.get("GRAPE_WORKER_APP") or _APP_IMPORT,
+                            workers=workers)
     if workers > 1:
         from uvicorn.supervisors import Multiprocess
         Multiprocess(config, sockets=[sock]).run()
@@ -51,10 +58,17 @@ def _run(sock: socket.socket, workers: int) -> None:
         server.run(sockets=[sock])
 
 
+def resolve_params() -> tuple:
+    """(host, port, workers)：环境变量优先，缺省对齐单元/端口事实源（可单测）。"""
+    port = int(os.environ.get("GRAPE_WORKER_PORT") or os.environ.get("GRAPE_PORT")
+               or _DEFAULT_PORT)
+    host = os.environ.get("GRAPE_HOST") or _DEFAULT_HOST
+    workers = int(os.environ.get("GRAPE_UVICORN_WORKERS") or str(_DEFAULT_WORKERS))
+    return host, port, workers
+
+
 def main() -> int:
-    port = int(os.environ.get("GRAPE_WORKER_PORT") or os.environ.get("GRAPE_PORT") or 38083)
-    host = os.environ.get("GRAPE_HOST") or "0.0.0.0"
-    workers = int(os.environ.get("GRAPE_UVICORN_WORKERS") or "2")
+    host, port, workers = resolve_params()
     try:
         sock = listen_socket(host, port)
     except OSError as e:
