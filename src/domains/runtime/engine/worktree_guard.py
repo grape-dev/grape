@@ -1050,12 +1050,19 @@ def _parse_issue_segment(parts: list) -> tuple:
     """按尾部布局锚定解析 `issues/<segment>`（Issue #3441）。
 
     返回 (issue_segment, identity_parts, legacy)：
+    - 同 Issue 多 PR `{...}/issues/{segment}/pr-<p>/{agent}`：
+      `parts[-4] == "issues"` 且 `parts[-2].startswith("pr-")`（Issue #3375）；
     - 新 `{...}/issues/{segment}/{agent}`：`parts[-3] == "issues"`；
     - 过渡期 `{...}/issues/{segment}`：`parts[-2] == "issues"`。
 
     仅从路径尾部锚定，避免路径中更早出现的名为 `issues` 的目录/仓库段被误取；
-    不匹配 → (None, [], False)。`identity_parts` 为 `issues` 之前的部分。
+    `pr-<p>` 分支须先于通用 `issues/{segment}/{agent}` 判定，否则会把 PR 维度
+    目录名误当作 Issue 标识。不匹配 → (None, [], False)。`identity_parts` 为
+    `issues` 之前的部分。
     """
+    if (len(parts) >= 4 and parts[-4] == "issues"
+            and parts[-2].startswith("pr-")):
+        return parts[-3], parts[:-4], False
     if len(parts) >= 3 and parts[-3] == "issues":
         return parts[-2], parts[:-3], False
     if len(parts) >= 3 and parts[-2] == "issues":
@@ -1071,9 +1078,11 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
     - 同 Issue 多 PR `{provider}/{owner}/{repo}/issues/{n}/pr-<p>/{agent}`（Issue #3375）；
     - issue-less PR `{provider}/{owner}/{repo}/prs/<p>/{agent}`（Issue #3375）；
     - 旧 `{owner}/{repo}/issues/{n}/{agent}`（provider 回退 gitcode）；
-    - 过渡期旧 `{repo}/{agent}/issues/{n}`（cleanup._zombie_issue_dirs 仍扫描该布局，
+- 过渡期旧 `{repo}/{agent}/issues/{n}`（cleanup._zombie_issue_dirs 仍扫描该布局，
       不解析会绕开保全闸直接 rmtree）。
-    非该形态 / 非 git agent / 非数字 issue 号 → ("", "", "")。
+    非该形态 / 非 git agent / 过渡期旧布局与同 Issue 多 PR 布局的非数字 issue 号
+    → ("", "", "")；新 `issues/{segment}/{agent}` 布局允许字符串标识（PR 订阅伪
+    id、Gitee 字符串 Issue 标识），与 `extract_workdir_issue_num` 同口径。
     """
     from src.domains.runtime.engine.repogit import is_git_agent
     try:
@@ -1122,9 +1131,12 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
 def extract_workdir_issue_num(path: str) -> str:
     """从 workdir 路径提取 `issues/<segment>` 段中的 Issue 标识（Issue #3441）。
 
-    兼容新布局 {provider}/{owner}/{repo}/issues/{segment}/{agent} 与过渡期
-    {repo}/{agent}/issues/{segment}，与 parse_issue_workdir 复用同一
+    兼容新布局 {provider}/{owner}/{repo}/issues/{segment}/{agent}、同 Issue 多 PR
+    布局 {provider}/{owner}/{repo}/issues/{segment}/pr-<p>/{agent}（Issue #3375）
+    与过渡期 {repo}/{agent}/issues/{segment}，与 parse_issue_workdir 复用同一
     `_parse_issue_segment`（尾部锚定，避免更早出现的 issues 段被误取）。
+    issue-less PR 布局 {provider}/{owner}/{repo}/prs/<p>/{agent} 不含 Issue 标识
+    → 返回 ''（该类任务无关联 Issue，不会进入本校验）。
     segment 取目录名原样字符串（非纯数字，与 get_agent_workdir 派生口径一致：
     PR 订阅伪 id `pr_257_default`、Gitee 字符串 Issue 标识等均可解析）。
     无法解析出标识 → 返回 ''。

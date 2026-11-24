@@ -89,6 +89,28 @@ class TestExtractWorkdirIssueNum:
         assert extract_workdir_issue_num(
             "/ws/issues/repo/test/coding/issues/3383") == "3383"
 
+    def test_pr_dimension_layout(self):
+        # 同 Issue 多 PR 隔离布局（Issue #3375）：issues/<n>/pr-<p>/<agent>
+        assert extract_workdir_issue_num(
+            "/ws/gitcode/org/test/issues/3383/pr-257/coding") == "3383"
+        assert extract_workdir_issue_num(
+            "/ws/gitcode/org/test/issues/pr_257_default/pr-99/qa") == "pr_257_default"
+
+    def test_pr_dimension_consistent_with_parse_issue_workdir(self):
+        from src.domains.runtime.engine.worktree_guard import parse_issue_workdir
+        path = "/ws/gitcode/org/test/issues/3383/pr-257/coding"
+        assert extract_workdir_issue_num(path) == "3383"
+        assert parse_issue_workdir(
+            path, "/ws") == ("gitcode:org/test", "3383", "coding")
+
+    def test_issue_less_pr_layout_has_no_issue(self):
+        # issue-less PR 布局 prs/<p>/<agent> 不含 Issue 标识
+        from src.domains.runtime.engine.worktree_guard import parse_issue_workdir
+        path = "/ws/gitcode/org/test/prs/452/coding"
+        assert extract_workdir_issue_num(path) == ""
+        assert parse_issue_workdir(
+            path, "/ws") == ("gitcode:org/test", "452", "coding")
+
     def test_trailing_separator_tolerated(self):
         assert extract_workdir_issue_num(
             "/ws/gitcode/org/test/issues/3383/coding/") == "3383"
@@ -111,6 +133,18 @@ class TestValidateWorkdirIssueConsistency:
     def test_mismatch_aborts_with_both_numbers(self):
         ok, msg = validate_workdir_issue_consistency(
             "/ws/gitcode/org/test/issues/1588/coding", "#3383", "coding")
+        assert ok is False
+        assert "#1588" in msg and "#3383" in msg
+
+    def test_pr_dimension_match_passes(self):
+        # 回归 #3375：同 Issue 多 PR 工位不得被误判 mismatch
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues/3383/pr-257/coding", "#3383", "coding")
+        assert ok is True and msg == ""
+
+    def test_pr_dimension_mismatch_aborts(self):
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues/1588/pr-257/coding", "#3383", "coding")
         assert ok is False
         assert "#1588" in msg and "#3383" in msg
 
@@ -194,6 +228,14 @@ class TestDependencyCheckGate:
     def test_non_git_agent_not_gated(self, monkeypatch):
         task = _base_task(agent_type="chat",
                           cwd="/ws/gitcode/org/test/issues/1588/coding")
+        validate_task_dependencies(task, "opencode-test")
+
+    def test_pr_dimension_worker_task_passes(self, monkeypatch):
+        """同 Issue 多 PR 工位（issues/<n>/pr-<p>/<agent>）不被启动门禁误拦。"""
+        monkeypatch.setattr(
+            "src.kernel.token_service.resolve_repo_config_level",
+            lambda rk: type("L", (), {"level": "repo"})())
+        task = _base_task(cwd="/ws/gitcode/org/test/issues/3383/pr-257/coding")
         validate_task_dependencies(task, "opencode-test")
 
     def test_pr_subscription_worker_task_passes(self, monkeypatch):

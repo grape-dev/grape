@@ -52,14 +52,20 @@ git bundle create /tmp/issue-3383-polluted-head.bundle HEAD@{1}   # 在覆盖前
 
 ## 四、后续防线（本次已落地的机制）
 
-1. **按 Issue 隔离分配 worktree**：任务派发时 workdir 一律为
-   `grape-workspaces/{provider}/{owner}/{repo}/issues/<N>/<agent>`
-   （`get_agent_workdir`，同 Issue 复用、跨 Issue 硬隔离）；
+1. **按 Issue（及 PR）隔离分配 worktree**：任务派发时 workdir 由
+   `get_agent_workdir` 派生（同 Issue 复用、跨 Issue 硬隔离）：
+   - 有关联 Issue、无 PR：`grape-workspaces/{provider}/{owner}/{repo}/issues/<N>/<agent>`；
+   - 有关联 Issue、有 PR（同 Issue 多 PR 隔离，Issue #3375）：
+     `grape-workspaces/{provider}/{owner}/{repo}/issues/<N>/pr-<P>/<agent>`；
+   - 无关联 Issue 的 PR 事件：`grape-workspaces/{provider}/{owner}/{repo}/prs/<P>/<agent>`
+     （该布局不含 Issue 标识，不进入下述启动一致性校验）；
 2. **启动一致性校验（fail-fast）**：worker 任务启动入口
    `dependency_check.validate_task_dependencies`（第 6 项）调用
    `worktree_guard.validate_workdir_issue_consistency`，校验 workdir 中的
    `issues/<N>` 标识与任务 Issue 标识一致，不一致立即中止并输出含双方标识的
-   显式错误，不静默继续。
+   显式错误，不静默继续。`issues/<N>/<agent>` 与 `issues/<N>/pr-<P>/<agent>`
+   两种含 Issue 标识的布局均受支持（`extract_workdir_issue_num` 与
+   `parse_issue_workdir` 复用同一尾部锚定解析）。
    direct 路径（`direct_executor._execute_agent_inner`）不做该校验：其
    workdir 由本任务 `issue_id` 经 `get_agent_workdir` 同源派生，不存在外部
    错配入口；错配风险统一由 worker 派发入口拦截；
