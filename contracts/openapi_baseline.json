@@ -1,6 +1,6 @@
 {
   "contract_version": "2.3.0a1",
-  "endpoint_count": 400,
+  "endpoint_count": 401,
   "min_endpoint_count": 360,
   "groups": [
     "a2a",
@@ -36,6 +36,6 @@
     "task",
     "tasks"
   ],
-  "change_reason": "merge: sync arch-weekly-11 (63f1317be) into arch-weekly-11-ljt — union of both branches' endpoint additions",
-  "source_commit": "d6308c884"
+  "change_reason": "feat(auth): #4254 add GET /api/auth/beta-eligibility for beta whitelist hint",
+  "source_commit": "8b1599e96"
 }

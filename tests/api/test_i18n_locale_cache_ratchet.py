@@ -19,11 +19,11 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = '8d7fa3e9b28fb255'
+LOCALE_FINGERPRINT = 'b624d6230f02e874'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    'index.html': ('90', '53'),
+    'index.html': ('91', '53'),
     'admin.html': ('20261122-7', '20261114-23'),
     'register.html': ('69', '45'),
     'forgot.html': ('69', '45'),

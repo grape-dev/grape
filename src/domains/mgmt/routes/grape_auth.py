@@ -1535,11 +1535,24 @@ def _handle_oauth_delete(request, provider, external_id, user_info, delete_accou
     return RedirectResponse(url=url, status_code=302)
 
 def _handle_oauth_bind(request, provider, external_id, user_info, access_token, refresh_token, binding_user_id, popup=False, expires_in=0):
-    """绑定流程——检查重复绑定 → 写入 external_identities → 重定向回用户中心。
+    """绑定流程——白名单闸 → 检查重复绑定 → 写入 external_identities → 重定向回用户中心。
 
     需求 6：占位账号合并与新绑定创建在同一个 with db_lock 事务内执行。
     执行顺序：unbind 旧绑定 → create 新绑定 → mark 占位账号 status=4。
+
+    Issue #4254（负责人拍板）：绑定与登录同源白名单闸。未命中 login_whitelist 的
+    第三方身份不建立绑定——否则会出现「绑得上却登不进、资格也不增加」的尴尬态。
+    拦截形态与登录侧完全一致（oauth_error=WHITELIST:<provider>:<ticket>），前端复用
+    同一套「申请内测」引导与预填票据。
     """
+    _external_login = (user_info or {}).get("external_login", "")
+    if not _check_whitelist(provider, _external_login):
+        _wl_code = "WHITELIST:" + provider if _WL_PROVIDER_KEY_RE.match(provider or "") else "WHITELIST"
+        if _WL_PROVIDER_KEY_RE.match(provider or ""):
+            _wl_code += ":" + _issue_beta_prefill_ticket(provider, _external_login)
+        log.info(f"OAuth bind refused by login whitelist: provider={provider}")
+        return _oauth_error_redirect(request, _wl_code, popup=popup)
+
     from src.domains.mgmt.auth.grape_account_db import (
         get_external_identity, get_external_identity_any_status, save_binding_ticket,
         is_placeholder_account_mergeable,

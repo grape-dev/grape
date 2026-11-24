@@ -305,8 +305,12 @@ def get_grape_account_by_id(user_id: str) -> "dict | None":
         return None
     return _row_to_account(row)
 
-def get_grape_account_by_username(username: str) -> "dict | None":
-    """按用户名查询 Grape 账号。"""
+def get_grape_account_by_username(username: str, strict: bool = False) -> "dict | None":
+    """按用户名查询 Grape 账号。
+
+    strict（2026-11-24，Issue #4254）：默认 False 保持"读失败 → None"的宽容语义；
+    需要区分"确实不存在"与"读不出来"的调用方传 True，读失败时抛出原异常。
+    """
     try:
         with db_lock:
             c = _mg_db.cursor()
@@ -320,6 +324,8 @@ def get_grape_account_by_username(username: str) -> "dict | None":
             row = c.fetchone()
     except Exception as e:
         log.warning(f"Get grape account by username failed: {e}")
+        if strict:
+            raise
         return None
     if not row:
         return None

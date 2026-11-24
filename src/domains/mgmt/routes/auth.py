@@ -328,7 +328,37 @@ def get_profile(user: dict = Depends(require_no_session_token)):
         "email_verified": acc.get("email_verified", 0),
         # Issue #3469 N4：壳前端走本接口，判据与 /auth/me 同源，避免两套逻辑漂移
         "email_deliverable": _email_deliverable(acc.get("email")),
+        # Issue #4254：平台注册入口自注册标记（0=自注册，1=OAuth 建号）
+        "created_by_oauth": int(acc.get("created_by_oauth") or 0),
     }
+
+
+@router.get("/beta-eligibility", operation_id="auth_beta_eligibility",
+            summary="Get beta whitelist eligibility for current user",
+            description="Returns whether the current user is self-registered and whether they already hit the beta whitelist (login_whitelist / signup_whitelist).")
+def get_beta_eligibility(user: dict = Depends(require_no_session_token)):
+    """内测资格判定（Issue #4254）——自注册且未命中白名单的用户需提示申请内测。
+
+    查询异常一律视为"已具备资格"（不误提示），并记日志。账号/身份读取失败必须与
+    "确实不存在/确实无绑定"可分辨：读失败直接返回 whitelisted=true。
+    """
+    from src.domains.mgmt.auth.signup_policy import BETA_APPLY_URL, check_beta_eligibility
+    try:
+        acc = get_grape_account_by_username(user["username"], strict=True)
+    except Exception as e:
+        log.warning(f"get_beta_eligibility account read failed: {type(e).__name__}")
+        return {"is_self_registered": False, "whitelisted": True, "apply_url": BETA_APPLY_URL}
+    if acc is None:
+        # 已认证用户却查不到账号 = 异常态，按未知处理，不误提示
+        log.warning("get_beta_eligibility account not found for authenticated user")
+        return {"is_self_registered": False, "whitelisted": True, "apply_url": BETA_APPLY_URL}
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        identities = get_user_identities(user["id"], strict=True)
+    except Exception as e:
+        log.warning(f"get_beta_eligibility identities read failed: {type(e).__name__}")
+        identities = None  # 未知态，判定函数按"已具备资格"处理
+    return check_beta_eligibility(acc, identities)
 
 
 @router.post("/logout", operation_id="auth_logout", summary="Logout (revoke all tokens)", description="Logs out: increments token_version to revoke all tokens and clears the refresh cookie.")
