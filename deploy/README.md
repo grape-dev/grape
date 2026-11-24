@@ -5,9 +5,10 @@
 四进程端口只有一个事实源：`scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT`
 （mgmt/event/worker/insight = 38081/38082/38083/38084），与
 `deploy/nginx-grape-cluster.conf`、`scripts/restart-four-process.sh`、
-`scripts/install-grape-systemd.sh` 完全一致。nginx 配置只允许引用这套端口，
-不得另起一套（历史上 `nginx-grape-four-process.conf` 曾是 38080–38083，
-`/api/runtime` 打到 38082 event，已在 Issue #3764 对齐）。
+`scripts/install-grape-systemd.sh`、`deploy/systemd/grape-*.service` 静态单元
+完全一致。nginx 配置只允许引用这套端口，
+不得另起一套（历史上 `nginx-grape-four-process.conf` 与 `deploy/systemd/` 静态单元曾是
+38080–38083，`/api/runtime` 打到 38082 event，已在 Issue #3764 对齐）。
 
 | 配置 | 适用场景 | 入口 |
 |---|---|---|
@@ -53,6 +54,12 @@ nginx；`deploy/deploy3db.sh` 与 `scripts/restart-four-process.sh` 在重启前
 `scripts/verify_nginx_upstream.py`，非 0 立即中止部署。过渡端口请写入 `.env` 的
 `GRAPE_PROCESS_PORTS=...`（两脚本都会 source `.env`），或临时用
 `GRAPE_NGINX_CONF=...` 指定待检配置。
+
+> **断言边界（peers include）**：以上校验只解析配置文件内的字面 upstream `server`
+> 行；`include /etc/nginx/conf.d/grape-worker-peers.conf*` 注入的对等 worker 端点
+> 为人工维护文件，**不在断言覆盖内**（写错端口不会触发 FAIL）。部署时请对
+> peers 文件单独核对（`nginx -T` 转储会展开 include，可喂给
+> `verify_nginx_upstream.py --nginx-dump` 人工复核其中的 worker 端点端口）。
 
 > `deploy/nginx-grape.conf` 是单入口历史上的 38080–38082 布局，不在上述四进程口径内，
 > 新部署请勿使用。
@@ -242,13 +249,14 @@ overlayfs copy-up 可能以「删旧建新」替换 `data/sessions.db-wal` / `-s
 | 网关配置 | 拓扑 | worker 上游 | 说明 |
 |---|---|---|---|
 | `nginx-grape.conf` | 三进程（A/B/C 同机） | `grape_worker_server` → `127.0.0.1:38082` + peers | 旧三进程反代，已同步多上游/切换 |
-| `nginx-grape-four-process.conf` | 四进程（同机 systemd） | `grape_worker_server` → `127.0.0.1:38082` + peers | 生产四进程主配置 |
+| `nginx-grape-four-process.conf` | 四进程（同机 systemd） | `grape_worker_server` → `127.0.0.1:38083` + peers | 生产四进程主配置（worker 已对齐事实源 38083，#3764） |
 | `nginx-grape-cluster.conf` | 四进程（集群端口 38081–38084） | `grape_worker` → `127.0.0.1:38083` + cluster peers | 集群端口整体上移一位 |
-| `nginx-grape-compose.conf` | Docker Compose | `grape_worker_server` → `grape-worker-server:38082` + peers | 服务名寻址，容器网络 |
+| `nginx-grape-compose.conf` | Docker Compose | `grape_worker_server` → `grape-worker-server:38082` + peers | 服务名寻址，容器网络；容器端口自洽，不随主机 38081–38084 口径 |
 
 事故现场 `127.0.0.1:8083` 是 master-002 上旧版单进程 worker 端口，与仓库四份配置的
-38080/38082/38083 均不匹配；上线前必须确认该机实际加载的 `conf.d/*.conf` 与 worker
-监听端口一致（`ss -ltnp | grep -E '38082|8083'` + `nginx -T | grep proxy_pass`）。
+worker 上游端口（38082/38083，four-process 与 cluster 已是 38083）均不匹配；上线前必须
+确认该机实际加载的 `conf.d/*.conf` 与 worker 监听端口一致
+（`ss -ltnp | grep -E '38083|8083'` + `nginx -T | grep proxy_pass`）。
 四份配置现均含 `include /etc/nginx/conf.d/grape-worker-peers.conf*`（缺省仅本机）。
 
 ### 502 告警验证（可执行步骤）
