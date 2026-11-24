@@ -93,6 +93,17 @@ groups:
           summary: "nginx /api/runtime/ 502 rate > 1%"
           description: "{{ $value | humanizePercentage }} of /api/runtime/* requests returned 502 in the last 5 minutes — worker upstream restart/unreachable or gateway failover failure. Check nginx-gateway error log and worker /readyz."
 
+      # Issue #3969 复审 R9：短窗绝对量突发告警。上面的 5m 比率在 91s 级事故里要等
+      # 窗口铺满才触发，且低流量端点会被 clamp_min(分母,1) 稀释；这里用 2m 绝对增量兜底。
+      - alert: GrapeRuntime502Burst
+        expr: sum(increase(nginx_upstream_502_total{path=~"/api/runtime/.*"}[2m])) > 50
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nginx /api/runtime/ 502 burst (>50 in 2m)"
+          description: "{{ $value }} /api/runtime/* requests returned 502 in the last 2 minutes — worker restart/unreachable. Check nginx-gateway error log, worker /readyz and upstream peers."
+
       # 队列积压
       - alert: GrapeTaskQueueBacklog
         expr: grape_task_queued > 10

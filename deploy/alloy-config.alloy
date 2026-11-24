@@ -39,6 +39,14 @@ loki.process "nginx_502" {
     stage.regex {
       expression = "^(?P<remote_addr>\\S+) \\S+ \\S+ \\[(?P<time>[^\\]]+)\\] \\\"(?P<method>\\S+) (?P<path>\\S+)[^\\\"]*\\\" (?P<status>\\d{3}) (?P<bytes>\\S+)"
     }
+    // Issue #3969 复审 R8：path 含 runtime_id/task_id 会让 Loki 流与 Prometheus label
+    // 基数随业务量增长；入 label 前把 ids 归一为 <id>（如 runtimes/123/tags →
+    // runtimes/<id>/tags），告警仍用 `/api/runtime/` 前缀匹配。
+    stage.replace {
+      source     = "path"
+      expression = "(runtimes|tasks)/[^/]+"
+      replace    = "${1}/<id>"
+    }
     stage.labels {
       values = { status = "", path = "" }
     }
@@ -56,8 +64,11 @@ loki.process "nginx_502" {
     }
   }
 
+  // Issue #3969 复审 R3：必须按已提取的 status label 过滤 502。用行过滤 `|~ " 502 "`
+  // 会把 combined 格式里 bytes=502 或 UA 含 " 502 " 的 2xx/其它请求也算成 502，
+  // 指标假阳性抬高 → SLO 与告警同时失真。
   stage.match {
-    selector = "{job=\"nginx-access\"} |~ \" 502 \""
+    selector = "{job=\"nginx-access\", status=\"502\"}"
     stage.metrics {
       metric.counter {
         name        = "nginx_upstream_502_total"
@@ -93,6 +104,19 @@ prometheus.scrape "grape" {
     {"__address__" = "127.0.0.1:39082", "instance" = sys.env("HOST_IP"), "process" = "event"},
     {"__address__" = "127.0.0.1:39083", "instance" = sys.env("HOST_IP"), "process" = "worker"},
     {"__address__" = "127.0.0.1:39084", "instance" = sys.env("HOST_IP"), "process" = "insight"},
+  ]
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+  metrics_path = "/metrics"
+}
+
+// Issue #3969 复审 R4：nginx_upstream_502_total 是 Alloy 自身从日志派生的指标，
+// 只暴露在 Alloy 的 /metrics（默认 127.0.0.1:12345），必须自抓取后才能被 Prometheus
+// 写入并让 GrapeRuntime502RateHigh 有数据。若改为外部 Prometheus 抓取，请同步删除本段
+// 并在部署文档标注外部抓取地址。
+prometheus.scrape "alloy_self" {
+  targets = [
+    {"__address__" = "127.0.0.1:12345", "instance" = sys.env("HOST_IP"), "process" = "alloy"},
   ]
   forward_to = [prometheus.remote_write.default.receiver]
   scrape_interval = "15s"

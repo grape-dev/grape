@@ -52,3 +52,39 @@ class TestSloBaseline:
             assert token in doc, token
         assert "/api/runtime/" in doc
         assert "502" in doc
+
+class TestAlloy502Filter:
+    """复审 R3：502 计数按 status label 过滤，不能用行过滤（bytes/UA 假阳性）。"""
+
+    def test_uses_status_label_not_line_filter(self):
+        conf = _read("deploy/alloy-config.alloy")
+        assert 'selector = "{job=\\"nginx-access\\", status=\\"502\\"}"' in conf
+        assert '|~ \\" 502 \\"' not in conf
+
+    def test_path_label_ids_are_normalized(self):
+        # 复审 R8：runtimes/tasks 的 id 归一，避免 label/流基数随业务增长
+        conf = _read("deploy/alloy-config.alloy")
+        assert "stage.replace" in conf
+        assert "(runtimes|tasks)/[^/]+" in conf
+
+
+class TestAlloySelfScrape:
+    """复审 R4：Alloy 自身 /metrics 必须被抓取，否则派生指标永远没有数据。"""
+
+    def test_alloy_self_scrape_configured(self):
+        conf = _read("deploy/alloy-config.alloy")
+        block = conf.split('prometheus.scrape "alloy_self"', 1)[1].split("prometheus.scrape", 1)[0]
+        assert "127.0.0.1:12345" in block
+        assert 'metrics_path = "/metrics"' in block
+        assert "prometheus.remote_write.default.receiver" in block
+
+
+class TestRuntime502BurstAlert:
+    def test_short_window_absolute_alert(self):
+        # 复审 R9：低流量端点 clamp_min 稀释 + 5m 窗口滞后，补短窗绝对量告警
+        conf = _read("deploy/alerts.yml")
+        assert "GrapeRuntime502Burst" in conf
+        rule = conf.split("alert: GrapeRuntime502Burst", 1)[1].split("- alert:", 1)[0]
+        assert "increase(nginx_upstream_502_total" in rule
+        assert "[2m]" in rule
+        assert "> 50" in rule
