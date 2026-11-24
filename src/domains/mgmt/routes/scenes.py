@@ -17,6 +17,9 @@ from src.kernel.tags import MAX_TAGS, encode_tags, prepare_tags, suggest_tags
 # 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
 from src.domains.runtime import public as _rt_scenes
 
+# Issue #4169：上游错误统一分流（404/401/403/502 语义对齐 repos.py，兜底 502 不回吐上游原文）
+from src.domains.mgmt.routes import _vcs_error_map
+
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
 # Issue #862：体验模板创建总闸（#357 P1-C 引入，原 30s）。实测 domain-swarm
@@ -1542,12 +1545,17 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     _client = VcsApiClient(provider, token, owner, repo)
     _path = _client._generic_path(f"/repos/{owner}/{repo}/branches", "/repository/branches")
     branches = []
+    _err = None
+    _log_prefix = f"List branches failed for {_pname} {owner}/{repo}"
     try:
         page = 1
         while page <= 5:
             data = _client._card_or_legacy_get(f"{_path}?per_page=100&page={page}")
             if isinstance(data, dict) and data.get("error"):
-                raise RuntimeError(f"{data.get('error')} {data.get('detail', '')}".strip())
+                # Issue #4169：上游错误 dict（{"error":"HTTP 404","status_code":404,...}）
+                # 直接入统一分流，不再拼 RuntimeError 中转（原文不进响应体）
+                _err = data
+                break
             if not isinstance(data, list) or not data:
                 break
             for b in data:
@@ -1558,9 +1566,15 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
             if len(data) < 100:
                 break
             page += 1
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning(f"List branches failed for {_pname} {owner}/{repo}: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+        _err = e
+    if _err is not None:
+        raise _vcs_error_map.map_vcs_error(
+            _err, stage="scenes_branches", message="查询分支失败，请稍后重试",
+            log_prefix=_log_prefix,
+            retry_hint="可稍后重试；若持续失败请确认仓库地址与 Token 权限")
 
     payload = {"branches": branches}
     _branches_cache_put(_cache_key, payload)
@@ -1612,18 +1626,23 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     # 卡驱动（VcsApiClient.create_branch）：gitlab /projects 形态、refs_sha 形态、
     # form 形态全部由卡能力位（dialect / branch_create_form）决定。
     _client = VcsApiClient(provider, token, owner, repo)
+    # Issue #4169：上游错误统一分流——404/401/403 不再折叠成 502，409/422 仍 409
+    _log_prefix = f"Create branch failed for {_pname} {owner}/{repo}"
+    _map_kwargs = dict(conflict_on=(409, 422),
+                       conflict_markers=("already exists", "已存在"),
+                       stage="scenes_branch_create",
+                       message="创建分支失败，请稍后重试",
+                       permission_message="Token 权限不足或已过期：创建分支需要维护者权限，请更新后重试或改用 OAuth",
+                       retry_hint="可稍后重试；若持续失败请确认仓库地址与 Token 权限",
+                       log_prefix=_log_prefix)
     try:
         result = _client.create_branch(body.branch_name.strip(), body.refs or "main")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+        raise _vcs_error_map.map_vcs_error(e, **_map_kwargs)
     if isinstance(result, dict) and result.get("error"):
-        _code = result.get("status_code") or 0
-        _detail = str(result.get("detail") or result.get("error") or "")
-        if _code in (409, 422) or "already exists" in _detail or "已存在" in _detail:
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
-        if _code == 403:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {result.get('error')}"})
+        raise _vcs_error_map.map_vcs_error(result, **_map_kwargs)
 
     log.info(f"Branch created: {body.branch_name} in {_pname} {owner}/{repo}")
     # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）

@@ -16,6 +16,7 @@ from src.api.org_context import resolve_org_context
 from src.domains.mgmt.auth.audit import log_audit
 from src.domains.mgmt.user.org_db import transfer_managed_repo_to_org
 from src.domains.mgmt.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, repo_has_bot_credential, resolve_managed_repo_key
+from src.domains.mgmt.routes import _vcs_error_map
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -1363,46 +1364,13 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
         return {"bot_collaborator_needed": True, "bot_username": bot_username, "bot_status": "error"}
 
 
-_UPSTREAM_CODE_RE = re.compile(r"failed \((\d{3})\)")
+# Issue #4169：上游错误分流抽到共享模块（scenes 分支端点复用同一口径），
+# 私有名保留模块级别名以兼容既有内部引用，行为零变更。
+_UPSTREAM_CODE_RE = _vcs_error_map._UPSTREAM_FAILED_CODE_RE
 
+_upstream_status_code = _vcs_error_map.upstream_status_code
 
-def _upstream_status_code(err: Exception) -> int:
-    """从 _req/_github_req RuntimeError 报文中提取上游状态码（无则 0）。
-
-    报文格式固定：GitCode API {method} {url} failed ({code}) / GitHub API ... failed ({code})。
-    """
-    try:
-        m = _UPSTREAM_CODE_RE.search(str(err))
-        if m:
-            return int(m.group(1))
-    except Exception:
-        pass
-    return 0
-
-
-def _host_502_detail(stage: str, err: Exception, message: str = "",
-                     host_status: str = "partial", missing: list | None = None,
-                     step: str = "") -> dict:
-    """构造带上下文的 502 detail（Issue #455：托管失败需可解释、可重试）。
-
-    - 不把上游内部 URL/报文透出给客户端（Issue #383/#395 防泄露约束），原文仅落日志；
-    - 401/403/404 为权限/资源类错误，不标记 retryable（盲重试无意义）；
-    - 网络类/5xx 标记 retryable，并给出自愈/重试路径提示。
-    - Issue #2126：统一携带 host_status / missing / step，前端可直接渲染缺失项。
-    """
-    code = _upstream_status_code(err)
-    retryable = code not in (401, 403, 404)
-    return {
-        "code": 502,
-        "error_code": f"UPSTREAM_{stage.upper()}" + (f"_{code}" if code else ""),
-        "message": message or "托管服务暂时不可用，请稍后重试",
-        "host_status": host_status,
-        "missing": list(missing or []),
-        "step": step or stage,
-        "upstream": {"stage": stage, "status": code or None, "retryable": retryable},
-        "retryable": retryable,
-        "retry_hint": "可稍后重试；若 webhook 已创建但托管未完成，可使用「修复托管」自愈（POST /repos/{owner}/{repo}/repair-host）",
-    }
+_host_502_detail = _vcs_error_map.host_502_detail
 
 
 def _host_status_marker(repo_key: str, scope: str = "host_repo"):
