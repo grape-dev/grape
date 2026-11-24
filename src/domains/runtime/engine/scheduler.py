@@ -53,6 +53,61 @@ _AUTOPILOT_EXIT_CODE_UNKNOWN = -1
 
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
+# Issue #3763：autopilot_executions 归 runtime 域；缺表必须显式失败/告警，不能静默吞掉。
+_AUTOPILOT_EXECUTIONS_TABLE = "autopilot_executions"
+_AUTOPILOT_EXECUTIONS_DOMAIN = "runtime"
+
+
+class AutopilotSchemaError(RuntimeError):
+    """autopilot_executions 缺表（拓扑/迁移缺陷）——必须 fail-fast，不得被普通 except 吞掉。"""
+
+
+def _autopilot_executions_table_present() -> bool:
+    """探测 autopilot_executions 是否存在于 runtime owner 库。
+
+    探针走 runtime 域游标（#2075）：三库拓扑下取 runtime 自有 DSN，mgmt 进程
+    手动触发时也能看到 owner 库里的真实表状态，不会把进程库缺表误判为迁移缺失。
+    探针自身异常按「存在」处理（fail-safe）：连接抖动不应被误判成缺表而停机；
+    真正缺表时 INSERT 仍会报 1146，由 _create_execution 兜底包装为 AutopilotSchemaError。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        with _rt_cursor_for("runtime") as c:
+            if _is_mysql_backend():
+                row = c.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=DATABASE() AND table_name=?",
+                    (_AUTOPILOT_EXECUTIONS_TABLE,)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (_AUTOPILOT_EXECUTIONS_TABLE,)).fetchone()
+        return bool(row)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Autopilot: autopilot_executions presence probe failed: {e}")
+        return True
+
+
+def _assert_autopilot_executions_table() -> None:
+    """缺表 → 抛 AutopilotSchemaError（含表名与期望域），供启动/每 tick 显式告警。"""
+    if _autopilot_executions_table_present():
+        return
+    raise AutopilotSchemaError(
+        f"{_AUTOPILOT_EXECUTIONS_TABLE} 表缺失（期望域={_AUTOPILOT_EXECUTIONS_DOMAIN}）："
+        "当前库不存在该表，autopilot 无法写入执行记录。请确认 worker/event 运行在 "
+        "runtime 库，并已完成 202611230006 create-autopilot-executions-table 迁移")
+
+
+def _is_missing_table_error(exc: BaseException) -> bool:
+    """识别本表的「表不存在」错误（MySQL 1146 / SQLite no such table），避免误包其它 DB 错误。"""
+    text = str(exc).lower()
+    if "no such table" in text:
+        return True
+    return (
+        _AUTOPILOT_EXECUTIONS_TABLE in text
+        and any(k in text for k in ("1146", "doesn't exist", "does not exist"))
+    )
+
 # ── Issue #3800：环境性失败（绑定引擎离线/悬空）分类 + 退避 + 熔断 ────────────
 #
 # 缺陷：任务绑定的引擎全部离线时，健康过滤为空的路径直接写 failed 返回，而
@@ -1557,16 +1612,31 @@ def _backoff_active(task: dict, now=None) -> bool:
     return (now if now is not None else _scheduler_now()) < until
 
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
-    """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
+    """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。
+
+    Issue #3763：缺表属拓扑/迁移缺陷，必须 fail-fast（AutopilotSchemaError，含表名与
+    期望域），并 `from` 保留原始异常；不得以普通运行期异常被 _execute_task 外层吞掉。
+    """
     now_str = datetime.now().astimezone().isoformat()
+    _assert_autopilot_executions_table()
+    # 写路径走 runtime 域游标（#2075）：三库拓扑取 runtime 自有 DSN（autocommit）；
+    # 本地路由由 write=True 自动提交，禁止再显式 db.commit()。
     with _rt_cursor_for("runtime", write=True) as c:
-        c.execute(
-            "INSERT INTO autopilot_executions "
-            "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
-            "VALUES (?, 'running', 0, ?, ?, ?, ?)",
-            (task_id, now_str, now_str, agent_type, params_json or "")
-        )
-        return c.lastrowid
+        try:
+            c.execute(
+                "INSERT INTO autopilot_executions "
+                "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
+                "VALUES (?, 'running', 0, ?, ?, ?, ?)",
+                (task_id, now_str, now_str, agent_type, params_json or "")
+            )
+            return c.lastrowid
+        except Exception as e:
+            if _is_missing_table_error(e):
+                raise AutopilotSchemaError(
+                    f"{_AUTOPILOT_EXECUTIONS_TABLE} 表缺失（期望域="
+                    f"{_AUTOPILOT_EXECUTIONS_DOMAIN}）：创建执行记录失败；原始异常: {e}"
+                ) from e
+            raise
 
 def _update_execution(exec_id: int, status: str, result: str = "", error: str = "",
                       retry_count: Optional[int] = None):
@@ -2089,6 +2159,8 @@ async def _execute_task(task: dict):
                 task.update({"consecutive_failures": 0, "last_error_code": "",
                              "offline_since": "", "backoff_until": "", "circuit_paused": 0})
             _update_task_run_info(task_id, next_run)
+    except AutopilotSchemaError as e:
+        log.error(f"Autopilot: task {task_id} FAIL-FAST（拓扑/迁移缺陷）: {e}")
     except Exception as e:
         log.error(f"Autopilot: task {task_id} execution exception: {e}")
     finally:
@@ -2609,6 +2681,14 @@ async def scheduler_loop():
     from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     log.info("Autopilot scheduler loop started (60s interval)")
     while True:
+        # Issue #3763：每 tick 先做表存在性自检；缺表 → 显式 ERROR（含表名/期望域）并跳过本轮，
+        # 不再进入派发后被 _create_execution 的 1146 吞成普通 ERROR。
+        try:
+            await asyncio.to_thread(_assert_autopilot_executions_table)
+        except AutopilotSchemaError as _se:
+            log.error(f"Autopilot tick aborted — 拓扑/迁移缺陷: {_se}")
+            await asyncio.sleep(_SCHEDULER_INTERVAL)
+            continue
         try:
             async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
                 # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
@@ -2665,6 +2745,12 @@ def start_scheduler():
     if _scheduler_task and not _scheduler_task.done():
         log.info("Autopilot scheduler already running")
         return
+    # Issue #3763：启动期显式自检；缺表只影响 autopilot 子系统，不阻断 worker 其它任务，
+    # 因此记录 ERROR 后仍启动 loop（迁移补齐后下一 tick 自愈）。
+    try:
+        _assert_autopilot_executions_table()
+    except AutopilotSchemaError as e:
+        log.error(f"Autopilot startup schema check failed: {e}")
     _scheduler_task = asyncio.ensure_future(scheduler_loop())
     log.info("Autopilot scheduler started")
 

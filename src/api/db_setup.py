@@ -3323,6 +3323,57 @@ register_migration(
 )
 
 
+def _fn_create_autopilot_executions_table() -> None:
+    """Issue #3763：存量库补建 runtime 域表 autopilot_executions。
+
+    `autopilot_executions` 原先只挂在老轨 `_NEW_TABLES`（legacy 全量首跑清单）里，
+    已盖 legacy-stamp 的存量库启动只跑 `_MIGRATIONS`，所以该表永远不会补建：
+    worker 建执行记录时 `(1146) Table ... doesn't exist`，被 `_execute_task` 外层
+    except 吞成一条无上下文 ERROR，autopilot 静默失效（生产 33 条/时）。
+
+    归属 runtime（configs/table_ownership.json），故只登记 runtime 域并在 owner
+    连接上执行；CREATE IF NOT EXISTS + 幂等补列/索引，存量库重跑零写入。
+    """
+    if _owned_skip("autopilot_executions", "create table"):
+        return
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "autopilot_executions"):
+            c.execute(_AUTOPILOT_EXECUTIONS_DDL)
+        for _col, _ddl in (
+            ("agent_type", "TEXT DEFAULT ''"),
+            ("findings_json", "MEDIUMTEXT DEFAULT ''"),
+            ("agent_task_id", "TEXT DEFAULT NULL"),
+            ("params_json", "MEDIUMTEXT DEFAULT ''"),
+            ("notified", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            _ensure_column(c, "autopilot_executions", _col, _ddl, strict=True)
+        for _idx in (
+            "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task "
+            "ON autopilot_executions(task_id)",
+            "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status "
+            "ON autopilot_executions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)",
+        ):
+            c.execute(_idx)
+        conn.commit()
+
+
+register_migration(
+    # 复审 R2 换号：202611220001 与 chat-conversations-status-index 撞号后曾用
+    # 202611230003，但基线 #3800（autopilot-task-failure-state-columns）已注册同一
+    # 版本号——撞号守卫只 log.error 不抛，runner 按 version 判已执行 → 本建表迁移被
+    # 永久跳过；202611230004/#3800 已用、202611230005 已被 #1981/#3794 预定 → 顺延 006。
+    version="202611230006",
+    name="create-autopilot-executions-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_autopilot_executions_table,
+)
+
+
 def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
     """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
     原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——

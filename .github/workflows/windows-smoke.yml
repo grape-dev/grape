@@ -390,6 +390,17 @@ jobs:
           python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape.conf \
             --ports mgmt=38080,event=38081,worker=38082,insight=38083
           python -m pytest tests/test_deploy_preflight_upstream.py tests/api/test_deploy_preflight.py -v
+      - name: Autopilot executions runtime-domain migration tests (issue #3763)
+        # Issue #3763 QA 审查修复（Required）：runtime 域 autopilot_executions 补建迁移
+        # 与缺表 fail-fast 用例此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/
+        # #3167/#3490/#3699/#3758/#3771），本 PR 修复的正是 MySQL 分库才复现的 1146，未门禁时
+        # 回归只能靠人工；同时接入迁移域归属守卫，防止登记域与 table_ownership 漂移。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3763_autopilot_exec_table.py \
+            tests/api/test_issue_3763_autopilot_exec_domain.py \
+            tests/api/test_migration_domains_match_ownership.py -v
       - name: Startup port-binding order regression tests (issue #3848)
         # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
