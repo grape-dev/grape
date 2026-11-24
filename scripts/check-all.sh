@@ -97,6 +97,9 @@ fi
 # Issue #4158：顶层同名定义门禁——同模块重复 def/class 会后者覆盖前者（通知链路
 # 静默退回旧实现、reason=no_ctx 丢消息）。基线 0，扫描根缺失/解析失败显式 FAIL。
 "$PY" scripts/check_duplicate_defs.py || exit 1
+# Issue #4158（PR #2077 复审 Optional）：F811 重定义棘轮——顶层同名门禁看不见 import
+# 别名/局部重定义，全仓 69 处存量此前无任何门禁调用。基线入库，新增即失败。
+"$PY" scripts/check_f811.py || exit 1
 if command -v node >/dev/null 2>&1; then
   _rc=0
   for _f in tests/js/test_*.js; do
