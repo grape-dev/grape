@@ -224,6 +224,12 @@
                 class="rtv-pdisabled"
                 :title="t('label.platform_disabled_tip')"
                 >⏸ {{ t('label.platform_disabled') }}</span
+              ><!-- 角色标签全部停用：与「未分配」区分，否则会被误读成从未配置 -->
+              <span
+                v-if="rt.roles_disabled"
+                class="rtv-rdisabled"
+                :title="t('label.roles_disabled_tip')"
+                >⏸ {{ t('label.roles_disabled') }}</span
               ><span
                 v-if="rt.spawn_fail_degraded"
                 class="rtv-degraded"
@@ -1250,6 +1256,7 @@ import {
   isChecked,
   toggle as toggleRoleTag,
   toPayload,
+  droppedByScene,
 } from './runtime-tag-link.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { pluginsEnabled } from '@/lib/features'
@@ -1656,6 +1663,8 @@ function cardLeftBorder(h, rt) {
   }
   // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
   if (rt && platformDisabled(rt)) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
+  // 角色标签全部停用 → 同样红框：这台引擎现在不会被任何任务选中
+  if (rt && rt.roles_disabled) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
   // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
   return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
 }
@@ -2225,19 +2234,35 @@ function saveSceneTags(rt) {
     .catch((e) => app().showToast(t('toast.save_failed', { msg: e.message })))
 }
 function saveEngineTags(rt) {
-  // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）
+  // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）；
+  // 否则只下发「当前场景可见」的已勾角色（2026-11-24 裁定：切场景后保存即按场景收窄）
   const _payload = toPayload(edAgentTags.value, edVisibleRoles.value)
+  // 2026-11-23 裁定：不允许把所有角色都取消（空角色 = 该引擎对任何任务都不可选）
+  const _dropped = droppedByScene(edAgentTags.value, edVisibleRoles.value)
+  const _droppedLabels = _dropped.map((r) => rtTagLabel(r) || r).join('、')
+  if (!_payload.length) {
+    // 空载荷分两种：当前场景下一个角色都勾不到（收窄后为空） vs 用户本来就全取消
+    app().showToast(_dropped.length
+      ? t('toast.tags_scene_none', { roles: _droppedLabels })
+      : t('toast.tags_need_one'))
+    return
+  }
+  if (_dropped.length && !window.confirm(t('toast.tags_scene_drop_confirm', { roles: _droppedLabels }))) return
   API()
     .put('/runtime/runtimes/' + rt.id + '/tags', { tags: _payload })
     .then(function (d) {
-      const target = runtimes.value.find((r) => r.id === rt.id)
-      if (target) target.agent_tags = d.tags
+      // I2：保存即写入 enabled=1 的角色行，服务端 roles_disabled 必然变 false；
+      // 这里同步清掉本地标记，否则「已停用」徽标与红框要等下次拉列表才消失。
+      function syncRow(r) {
+        if (!r) return
+        r.agent_tags = d.tags
+        r.roles_disabled = false
+      }
+      syncRow(runtimes.value.find((r) => r.id === rt.id))
       devices.value.forEach(function (dev) {
-        const r = (dev.runtimes || []).find((x) => x.id === rt.id)
-        if (r) r.agent_tags = d.tags
+        syncRow((dev.runtimes || []).find((x) => x.id === rt.id))
       })
-      if (engineDetail.value && engineDetail.value.id === rt.id)
-        engineDetail.value.agent_tags = d.tags
+      if (engineDetail.value && engineDetail.value.id === rt.id) syncRow(engineDetail.value)
       app().showToast(t('toast.tags_saved'))
     })
     .catch((e) => app().showToast(t('toast.save_failed', { msg: e.message })))
@@ -3259,6 +3284,17 @@ onBeforeUnmount(function () {
 }
 /* B5：沙箱平台禁用徽标 */
 .rtv-pdisabled {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  --tag: var(--rtv-bad);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
+  border: 1px solid color-mix(in srgb, var(--tag) 32%, transparent);
+  font-weight: 700;
+}
+/* 角色标签全部停用（enabled=0）——与沙箱平台禁用同色系，但语义是「角色被关掉」 */
+.rtv-rdisabled {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 999px;

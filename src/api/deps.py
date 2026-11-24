@@ -429,40 +429,37 @@ def _resolve_user_or_platform_admin(request: Request, authorization: str = Heade
 
 
 def _check_runtime_owner_or_admin(runtime_id: int, user: dict) -> dict:
-    """权限矩阵本体（两个路由命名空间的依赖共用同一判定）。
+    """角色标签写权限（两个路由命名空间的依赖共用同一判定）。
 
-    可改面 = 引擎凭据所有者（user 本人 / org owner+admin）+ 平台管理员：
-    - 平台管理员 ✅（全放行，含本机直连 credential_id=0）
-    - 凭据所有者本人（runtime_credentials.owner_name 匹配）✅
-    - 凭据归属组织的 owner/admin ✅
-    - 仓库管理员 ❌（仓库与机器无责任关系，用户裁定禁改）
-    - 其他登录用户 ❌；本机直连（credential_id=0）仅平台管理员 ✅
-    - session_token ❌（账户/平台管理语义，沿用 require_no_session_token 口径）
-    读接口（GET role-tags）保持全员可读，不受本依赖影响。
+    **2026-11-24 用户裁定（修正 11-23 的整体放开）**：
+    - 本机直连引擎（`credential_id=0`，主控机资产，与个人凭据无归属关系）→ **任意登录用户可改**；
+    - 由他人凭据注册的引擎 → 仍然只允许 **平台管理员 / 凭据 owner 本人 / 凭据所属 org 的
+      owner+admin**；仓库管理员与其他登录用户 403。
+
+    始终生效的两条：`session_token`（`tk_`）→ 403；目标 runtime 不存在 → 404。
+    写接口自身的值域校验（`INVALID_ROLE_TAGS`）、非空校验（`EMPTY_ROLE_TAGS`）与
+    `engine_tag_change` 审计不受本依赖影响。
     """
     if user.get("auth_type") == "session_token":
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "Session token not allowed on this endpoint (account/platform management)"})
-    if user.get("is_platform_admin"):
-        return user
-    # F3（A11）：归属表读走运行域 public 具名查询（api 层不再直连 runtime 表，
-    # 棘轮守卫 foreign_table_refs.py --check 保持基线；三库拓扑下由 owner DSN 承接）。
+    # 存在性校验：读到行即放行，读不到按 404（跨域读走运行域具名查询，保持棘轮基线）
     from src.domains.runtime.public import read_one_any as _runtime_read_one
     row = _runtime_read_one("runtime_credential_ref_any", (runtime_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
     credential_id = row[0] or 0
     if credential_id == 0:
-        # 本机直连是主控机资产，与个人凭据无归属关系 → 仅平台管理员可改
-        raise HTTPException(status_code=403, detail={"code": 403,
-                                                     "message": "本机直连引擎的角色标签仅平台管理员可修改"})
+        # 本机直连：放开给任意登录用户（11-24 裁定）
+        return user
+    if user.get("is_platform_admin"):
+        return user
     cred = _runtime_read_one("runtime_credential_owner_org_any", (credential_id,))
     if not cred:
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "引擎凭据不存在或已注销，禁止修改角色标签"})
     owner_name = (cred[0] or "").strip()
-    # D105 第三批：org_id 为 str（uuid，''=未归属哨兵），不再按 int 比较
-    org_id = str(cred[1] or "").strip()
+    org_id = str(cred[1] or "").strip()      # uuid；'' = 未归属哨兵
     uid = user.get("id") or 0
     username = (user.get("username") or "").strip()
     if owner_name and username and owner_name.lower() == username.lower():

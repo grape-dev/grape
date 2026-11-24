@@ -659,6 +659,88 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def role_tag_domain() -> tuple:
+    """角色值域单一来源：`('all', <短角色名...>)`（不含 engine:/scene:/scope: 派生行）。
+
+    管理台、settings 单标签接口与角色行统计共用，避免各处硬编码字面量后再分叉
+    （架构守护 M3）。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+    # sorted：KNOWN_AGENT_ROLES 是 set，直接元组化会随进程哈希种子变序，
+    # 400 文案「可选: …」与前端展示顺序不稳定（QA 复审 Info）。
+    return ("all",) + tuple(sorted(KNOWN_AGENT_ROLES))
+
+
+def role_caps_inventory(runtime_ids: list | None = None) -> dict:
+    """每台引擎的角色行统计 {rid: {"total": n, "enabled": m}}。
+
+    - **只数角色值域行**（`all` 与短角色名，来源 `role_tag_domain()`）。冒号派生行不计；
+      值域外的平铺行同样不计 —— 否则会出现「卡片显示已停用、实际仍可派发」的假阳性
+      （架构守护 M4：判定口径必须与派发守卫一致）。
+    - `runtime_ids` 给定时只统计这些引擎（列表接口按当前页 id 传参，避免无 WHERE 全表
+      聚合，架构守护 M2）。
+    供管理台区分「从未配置角色」(total=0) 与「角色全部停用」(total>0 且 enabled=0)。
+    """
+    domain = list(role_tag_domain())
+    in_tags = ",".join("?" * len(domain))
+    sql = ("SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
+           f"FROM engine_capabilities WHERE tag IN ({in_tags})")
+    params: list = list(domain)
+    if runtime_ids is not None:
+        ids = [int(i) for i in runtime_ids if i]
+        if not ids:
+            return {}
+        sql += f" AND runtime_id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    sql += " GROUP BY runtime_id"
+    from src.kernel.otel import feature_span
+    _n_ids = 0 if runtime_ids is None else len(runtime_ids)
+    with feature_span("runtime.role_caps_inventory", {"runtimes": _n_ids}), _any_cursor() as c:
+        rows = c.execute(sql, tuple(params)).fetchall()
+    out: dict = {}
+    for r in rows or []:
+        try:
+            out[int(r[0])] = {"total": int(r[1] or 0), "enabled": int(r[2] or 0)}
+        except Exception as e:  # noqa: BLE001 - 脏行不影响整表，但必须留痕
+            log.warning(f"role_caps_inventory: skipping malformed row (runtime_id={r[0]!r}): {e}")
+            continue
+    return out
+
+
+def engine_cap_tag_exists(runtime_id, tag: str) -> bool:
+    """该引擎是否存在指定标签行（含 enabled=0）。mgmt 的守卫用它把 404 判定提前。"""
+    with _any_cursor() as c:
+        row = c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag=? LIMIT 1",
+                        (int(runtime_id or 0), str(tag))).fetchone()
+    return bool(row)
+
+
+def removing_leaves_no_role(runtime_id: int, tag: str) -> bool:
+    """删除/禁用该 tag 后，该引擎是否一个角色行都不剩（`all` 与已知角色都算角色行）。
+
+    供写接口在保存前做「至少保留一个角色」判定：空角色行在 Issue #3396 之后是
+    fail-closed（A7），引擎会变成任何角色都不可调度，必须阻止用户手工造成这种状态。
+    派生行（engine:/scene:/scope:）不计。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+
+    _tag = (tag or "").strip().lower()
+    with _any_cursor() as c:
+        rows = c.execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1",
+            (int(runtime_id),)).fetchall()
+    remaining = []
+    for (t,) in rows:
+        _t = str(t or "").strip().lower()
+        if not _t:
+            continue
+        if _t == _tag:
+            continue  # 即将删除 / 停用的那一行
+        if _t == "all" or _t in KNOWN_AGENT_ROLES:
+            remaining.append(_t)
+    return not remaining
+
+
 def _mgmt_channel_lib():
     """W2 渠道表（mgmt 归属）的 lib 句柄：可用则写 owner 库，否则返回 None 走原 SQL。
 
@@ -1404,6 +1486,13 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     # Issue #646：uid 派生轨道写回（UPDATE 路径）
                     c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
                               (_engine_uid, rid))
+                # Issue #3396 后续：本机发现的 UPDATE 分支原先不补角色行 —— 引擎一旦
+                # 只剩派生行就再也回不来（A7 fail-closed）。这里按「角色行为空才补」补齐。
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_u
+                    _ensure_rc_u(c, rid, now_iso=now_iso)
+                except Exception as _ercu:
+                    log.warning(f"upsert_local_runtimes role caps ensure (update) failed (runtime={rid}): {_ercu}")
                 # Issue #1208：本机直连引擎补三维度派生标签（否则 selector 圈池恒不命中）
                 _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
                 out["upserted"] += 1
@@ -1451,12 +1540,14 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                 _seed_roles_l = [t for t in dict.fromkeys(_seed_roles_l) if t in _KAR_L]
             except Exception:
                 _seed_roles_l = []
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-            if not c.fetchone():
-                for _t in (_seed_roles_l or ["all"]):
-                    c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                              "enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                              (rid, _t, now_iso, now_iso))
+            # Issue #3396 后续：只按「角色行是否为空」判定（派生行 engine:/scene:/scope: 不算），
+            # 空则按声明/all 补齐 —— 见 engine/role_caps.py（原判定用 LIMIT 1 任意行，
+            # 派生行在表里就再也不会补 all，导致空角色引擎 fail-closed 且永不恢复）。
+            try:
+                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                _ensure_rc(c, rid, declared=_seed_roles_l, user_set=0, now_iso=now_iso)
+            except Exception as _erc:
+                log.warning(f"upsert_local_runtimes role caps ensure failed (runtime={rid}): {_erc}")
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]
@@ -1927,7 +2018,7 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "role_caps_inventory", "role_tag_domain", "engine_cap_tag_exists", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
            "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
@@ -2906,6 +2997,7 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
     "engine_cap_tags_sorted": (
         "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
+    # 角色行统计（含 enabled=0）：管理台区分「从未配置」与「配过但全停用」
     "engine_caps_by_runtime": (
         "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities "
         "WHERE runtime_id=? ORDER BY tag"),

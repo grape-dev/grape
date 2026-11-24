@@ -1897,8 +1897,11 @@ async def update_chat_config(body: dict, request: Request,
                 })
         except HTTPException:
             raise
-        except Exception as _e:  # noqa: BLE001 - 校验自身故障不阻断保存（可用性优先）
-            log.warning(f"chat config: chat-role check skipped: {_e}")
+        except Exception as _e:  # noqa: BLE001 - 校验自身异常放行（可用性优先）
+            # 注意：此处只兜「校验代码本身」的异常。engine_allows_role 内部把角色查询失败
+            # 吞成空标签（A7 fail-closed），那种情况会命中上面的 400，不会走到这里——
+            # 所以「DB 瞬时读失败」表现为明确拒绝，而不是注释早期的“放行”。
+            log.warning(f"chat config: chat-role check itself errored, save allowed: {_e}")
     if body.get("skill_id") is not None:
         # 新方式：前端直传 skill_id
         skill_id = body["skill_id"]

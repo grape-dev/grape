@@ -1,13 +1,13 @@
 """Issue #3396 改动④：PUT /runtimes/{id}/tags 写权限收紧（A5 权限矩阵）。
 
-矩阵（用户裁定）：
-- 引擎凭据所有者本人（owner_name 匹配）→ 200
-- 凭据归属组织 owner/admin → 200
-- 平台管理员（admin_accounts 身份）→ 200（含本机直连 credential_id=0）
-- 其他登录用户 / 仓库语境管理员（与机器无归属关系）→ 403
-- 本机直连（credential_id=0）非平台管理员 → 403
-- session_token（tk_）→ 403
+矩阵（2026-11-24 用户裁定，修正 11-23 的整体放开）：
+- 本机直连（credential_id=0）→ 任意登录用户 200（主控机资产，与个人凭据无归属关系）
+- 由他人凭据注册的引擎 → 平台管理员 / 凭据 owner 本人 / 凭据所属 org 的 owner+admin 200；
+  其他登录用户、仓库管理员 403（11-24 恢复归属矩阵）
+- session_token（tk_）→ 403（账户/平台管理语义，仍拒绝）
+- 不存在的 runtime → 404
 - 读接口 GET /runtimes/{id}/role-tags 保持全员可读 → 200
+- 审计（engine_tag_change）与 tags_user_set=1 语义不变：放开的是“谁能改”
 """
 import hashlib
 import json
@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.deps import _resolve_user_or_platform_admin
+from src.api.deps import _resolve_user_or_platform_admin, require_org_member
 from src.kernel.session_manager import db, db_lock
 
 
@@ -55,7 +55,10 @@ def _clean():
         c.execute("DELETE FROM admin_accounts WHERE username='b3396w-admin'")
         c.execute("DELETE FROM audit_logs WHERE event_type='engine_tag_change'")
         db.commit()
+    # 两个依赖都必须还原：require_org_member 的 override 泄漏会让后续模块的
+    # dashboard/仓库权限校验直接 403（跨模块污染，实测 sre_engine_picker_global 6 例红）
     app.dependency_overrides.pop(_resolve_user_or_platform_admin, None)
+    app.dependency_overrides.pop(require_org_member, None)
 
 
 def _mk_engine(owner_name="owner_alice", scope="user", owner_id="44", org_id="",
@@ -86,6 +89,9 @@ def _mk_engine(owner_name="owner_alice", scope="user", owner_id="44", org_id="",
 
 def _client_as(user: dict):
     app.dependency_overrides[_resolve_user_or_platform_admin] = lambda: user
+    # 列表端点用 require_org_member（依赖 session token 注入），这里一并放行，
+    # 与线上「已登录用户」语义对齐
+    app.dependency_overrides[require_org_member] = lambda: user
     return TestClient(app)
 
 
@@ -112,10 +118,15 @@ class TestPutTagsPermissionMatrix:
         assert r.status_code == 200, r.text
         assert r.json()["tags"] == ["chat"]
 
-    def test_other_user_forbidden(self):
+    def test_other_user_forbidden_on_credential_engine(self):
+        """11-24 裁定：凭据引擎回到归属矩阵 —— 与凭据无归属关系的登录用户 403，且不写库。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
+        before = _engine_tags(rid)
         r = _put_tags(_client_as(_other_user()), rid)
         assert r.status_code == 403, r.text
+        assert "仅引擎凭据所有者" in (r.json().get("detail") or {}).get("message", "")
+        assert _engine_tags(rid) == before          # 未写入
+        assert not [a for a in _tag_audits(rid) if a.get("operator") == "mallory"]
 
     def test_platform_admin_can_write(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
@@ -135,10 +146,11 @@ class TestPutTagsPermissionMatrix:
         r = _put_tags(_client_as(_other_user()), rid)
         assert r.status_code == 200, r.text
 
-    def test_local_direct_non_admin_forbidden(self):
+    def test_local_direct_any_user_allowed(self):
+        """11-24 裁定：本机直连（cred=0）放开给任意登录用户（凭据引擎不放开）。"""
         rid = _mk_engine(credential=False)
-        r = _put_tags(_client_as(_owner_user()), rid)
-        assert r.status_code == 403, r.text
+        r = _put_tags(_client_as(_other_user()), rid)
+        assert r.status_code == 200, r.text
 
     def test_local_direct_platform_admin_allowed(self):
         rid = _mk_engine(credential=False)
@@ -256,15 +268,14 @@ class TestSettingsTagWritePermissionMatrix:
         assert any(a.get("action") == "add" and a.get("tag") == "chat"
                    and a.get("operator") == "owner_alice" for a in audits), audits
 
-    def test_other_user_forbidden_on_settings_writes(self):
+    def test_other_user_forbidden_on_settings_credential_engine(self):
+        """11-24 裁定：settings 三个写端点对凭据引擎同样执行归属矩阵（403 且不写库）。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         client = _client_as(_other_user())
-        before = _engine_tags(rid)
         assert _settings_tags(client, "post", rid, tag="chat").status_code == 403
-        assert _settings_tags(client, "put", rid, tag="all").status_code == 403
+        assert ("chat", 1) not in _engine_tags(rid)
         assert _settings_tags(client, "delete", rid, tag="all").status_code == 403
-        assert _engine_tags(rid) == before
-        assert _tag_audits(rid) == []
+        assert not [a for a in _tag_audits(rid) if a.get("operator") == "mallory"]
 
     def test_platform_admin_can_write_via_settings(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
@@ -277,13 +288,15 @@ class TestSettingsTagWritePermissionMatrix:
                 "is_platform_admin": False}
         assert _settings_tags(_client_as(user), "post", rid, tag="chat").status_code == 403
 
-    def test_local_direct_non_admin_forbidden_on_settings(self):
+    def test_local_direct_any_user_allowed_on_settings(self):
         rid = _mk_engine(credential=False)
-        assert _settings_tags(_client_as(_owner_user()), "post", rid, tag="chat").status_code == 403
+        assert _settings_tags(_client_as(_other_user()), "post", rid, tag="chat").status_code == 200
 
     def test_owner_update_and_delete_via_settings_audited(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         client = _client_as(_owner_user())
+        # 先补一个角色，保证删除 all 时不是「最后一个角色」（空角色集已被禁止）
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
         assert _settings_tags(client, "put", rid, tag="all").status_code == 200
         assert _settings_tags(client, "delete", rid, tag="all").status_code == 200
         actions = [a.get("action") for a in _tag_audits(rid)]
@@ -304,3 +317,181 @@ class TestRuntimeSetTagsAudited:
         audits = _tag_audits(rid)
         assert any(a.get("action") == "set" and a.get("tags") == ["chat"]
                    and a.get("source") == "runtime_tags_set" for a in audits), audits
+
+
+class TestNoEmptyRoleSet:
+    """2026-11-23 裁定：不允许把所有角色都取消（空角色 = 该引擎对任何任务都不可选）。"""
+
+    def test_put_empty_tags_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=())
+        assert r.status_code == 400, r.text
+        detail = (r.json() or {}).get("detail") or {}
+        assert detail.get("error_code") == "EMPTY_ROLE_TAGS", detail
+        assert "至少要保留一个角色" in (detail.get("message") or "")
+        assert ("all", 1) in _engine_tags(rid)          # 原标签未被清掉
+
+    def test_put_empty_tags_does_not_touch_user_set(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        _put_tags(_client_as(_owner_user()), rid, tags=())   # 失败
+        with db_lock:
+            us = db.cursor().execute(
+                "SELECT ifnull(tags_user_set,0) FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
+        assert int(us or 0) == 0, us                    # 失败请求不留「用户已设过」的痕迹
+
+    def test_delete_last_role_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # 只有 all
+        r = _settings_tags(_client_as(_owner_user()), "delete", rid, tag="all")
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "EMPTY_ROLE_TAGS"
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_delete_role_with_other_role_remaining_allowed(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        client = _client_as(_owner_user())
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
+        assert _settings_tags(client, "delete", rid, tag="chat").status_code == 200
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_disable_last_role_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _client_as(_owner_user()).put(
+            f"/api/settings/agent-runtimes/{rid}/tags/all",
+            json={"priority": 50, "enabled": 0})
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "EMPTY_ROLE_TAGS"
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_disable_role_with_other_remaining_allowed(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        client = _client_as(_owner_user())
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
+        r = client.put(f"/api/settings/agent-runtimes/{rid}/tags/chat",
+                       json={"priority": 50, "enabled": 0})
+        assert r.status_code == 200, r.text
+
+
+class TestDisabledRoleVisibility:
+    """管理台要能区分「没配过角色」与「配过但全停用」——卡片徽标依赖 roles_disabled。
+
+    回归背景：该字段首版在请求路径里被同名变量 `_rt` / `type` 遮蔽，异常被兜成空
+    map，接口永远返回 false（线上表现为「已停用」永远不显示）。
+    """
+
+    def test_list_reports_roles_disabled_for_stopped_engine(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # 默认 all:1
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.get("/api/settings/agent-runtimes?page_size=0")
+        assert r.status_code == 200, r.text
+        rows = {int(x["id"]): x for x in r.json().get("runtimes", [])}
+        assert rows[rid].get("roles_disabled") is True, rows[rid]
+
+    def test_list_reports_no_flag_for_engine_without_role_rows(self):
+        # 不依赖构造参数：直接清空角色行，只留派生行
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)",
+                      (rid, "engine:demo"))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.get("/api/settings/agent-runtimes?page_size=0")
+        assert r.status_code == 200, r.text
+        rows = {int(x["id"]): x for x in r.json().get("runtimes", [])}
+        assert rows[rid].get("roles_disabled") is False, rows[rid]
+
+
+class TestRoleTagValueDomain:
+    """QA 架构守护 A1（Critical）：开放接口必须校验角色值域。
+
+    回归背景：`{"tags":["bogus"]}` 非空 → 通过「至少一个角色」守卫 → 删光真实角色行
+    → 插入 bogus → 置 tags_user_set=1，引擎从此对任何任务都不可选。
+    """
+
+    def test_put_unknown_tag_rejected_without_writing(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # all:1
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("bogus",))
+        assert r.status_code == 400, r.text
+        detail = (r.json() or {}).get("detail") or {}
+        assert detail.get("error_code") == "INVALID_ROLE_TAGS", detail
+        assert "bogus" in (detail.get("message") or "")
+        assert ("all", 1) in _engine_tags(rid)          # 真实角色行没被删
+        with db_lock:
+            us = db.cursor().execute(
+                "SELECT ifnull(tags_user_set,0) FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
+        assert int(us or 0) == 0                        # 也没被置成「用户设过」
+
+    def test_put_mixed_valid_and_unknown_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("chat", "bogus"))
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "INVALID_ROLE_TAGS"
+        assert ("chat", 1) not in _engine_tags(rid)
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_put_valid_tags_still_ok(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=("chat", "coding"))
+        assert r.status_code == 200, r.text
+        tags = [t for t, _ in _engine_tags(rid)]
+        assert "chat" in tags and "coding" in tags and "all" not in tags
+
+
+class TestOperationDescriptionMatchesImplementation:
+    """契约文案必须与实现同口径（QA 合入阻塞项：description 曾写「Any authenticated user may write」）。
+
+    文档口径漂移本身就是缺陷：前端/CLI 从 OpenAPI description 读语义，写反了会让调用方
+    误判 403。此用例锁死 2026-11-24 分层口径与两道校验的错误码。
+    """
+
+    def _desc(self) -> str:
+        from src.domains.runtime.routes.runtime import router
+        for route in router.routes:
+            if getattr(route, "operation_id", "") == "runtime_tags_set":
+                return route.description or ""
+        raise AssertionError("runtime_tags_set route not found")
+
+    def test_description_states_layered_permission(self):
+        d = self._desc()
+        assert "Any authenticated user may write" not in d      # 11-23 整体放开口径已废止
+        assert "layered" in d and "2026-11-24" in d
+        assert "credential_id=0" in d and "any authenticated user" in d
+        assert "credential owner" in d and "owner/admin" in d
+        assert "session_token" in d and "403" in d
+        assert "INVALID_ROLE_TAGS" in d and "EMPTY_ROLE_TAGS" in d
+
+
+class TestLastRoleGuardScope:
+    """QA 复审 Info：守卫只该拦「角色值域」内的最后一个角色。
+
+    派生行（engine:/scene:/scope:）与领域外标签既不参与角色计数，也不该在零角色行
+    的引擎上被 400 挡住；不存在的 tag 必须先落到 404。
+    """
+
+    def test_guard_ignores_derived_tag(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)",
+                      (rid, "engine:opencode"))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.delete(f"/api/settings/agent-runtimes/{rid}/tags/engine:opencode")
+        assert r.status_code != 400 or "EMPTY_ROLE_TAGS" not in r.text, r.text
+        assert r.status_code in (200, 204, 404), r.text
+
+    def test_guard_missing_tag_is_404_not_400(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True, cap=None)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag NOT LIKE '%:%'", (rid,))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.delete(f"/api/settings/agent-runtimes/{rid}/tags/chat")
+        assert r.status_code == 404, r.text

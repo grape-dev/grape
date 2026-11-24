@@ -1315,6 +1315,21 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     # Issue #472 全局口径：筛选标签（类型/场景/标签）从全量可见集派生（分页/筛选后不消失）
     _avail_types = list(set(_engine_type_of(rt) for rt in visible_runtimes if _engine_type_of(rt)))
     _avail_scenes = sorted({s for rt in visible_runtimes for s in (rt.get("scene_tags") or []) if s})
+    # 角色停用 vs 未配置（2026-11-24 用户裁定「把已停用展示出来」）：
+    # 两种状态在派发上都是不可选，但「配过又全关掉」必须区别于「从没配过」。
+    _rc_inv: dict = {}
+    try:
+        # 独立别名：本函数内 `_rt` 已被 `for _rt in cached:` 的循环变量遮蔽成 dict
+        from src.domains.runtime import public as _rt_role_counts
+        # 只统计当前可见引擎（避免无 WHERE 全表聚合，架构守护 M2）
+        _rc_inv = _rt_role_counts.role_caps_inventory(
+            [int(rt.get("id") or 0) for rt in visible_runtimes]) or {}
+    except Exception as _rc_e:  # noqa: BLE001
+        log.warning(f"settings: role_caps_inventory failed: {_rc_e.__class__.__name__}: {_rc_e}")
+    for rt in visible_runtimes:
+        _st = _rc_inv.get(int(rt.get("id") or 0)) or {}
+        rt["roles_disabled"] = bool(_st.get("total")) and not bool(_st.get("enabled"))
+
     _avail_tags = sorted({t for rt in visible_runtimes for t in (rt.get("agent_tags") or []) if t})
 
     # Issue #472 全局口径：q/type/scene/tag 在分页切片前对全量可见集过滤
@@ -2662,8 +2677,12 @@ def add_engine_tag(rid: int, body: EngineTagBody, request: Request,
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = (body.tag or "").strip().lower()
-    if tag not in ("vod", "issue", "coding", "qa", "sre", "chat"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: vod/issue/coding/qa/sre/chat"})
+    # 值域单一来源（架构守护 M3）：与 PUT tags / 派发守卫共用 role_tag_domain()，
+    # 新增角色时不会只有一侧更新。单标签接口不接受 'all'（全能由 PUT tags 折叠产生）。
+    from src.domains.runtime.public import role_tag_domain as _role_domain
+    _roles = [r for r in _role_domain() if r != "all"]
+    if tag not in _roles:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: {'/'.join(_roles)}"})
     with db_lock:
         c = db.cursor()
         try:
@@ -2705,6 +2724,8 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Re
     now = datetime.now(timezone.utc).isoformat()
     tag = tag.strip().lower()
     with db_lock:
+        if not int(body.enabled or 0):
+            _guard_last_role_or_400(rid, tag)
         c = db.cursor()
         try:
             from src.kernel.domain_read import runtime_lib as _rt_upd
@@ -2736,13 +2757,55 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Re
                               priority=body.priority, enabled=body.enabled)
     return {"message": f"标签 {tag} 已更新"}
 
+def _guard_last_role_or_400(rid: int, tag: str) -> None:
+    """不允许把最后一个角色行删掉/停用（空角色行在 Issue #3396 后是 fail-closed）。
+
+    判定走运行域 public 具名原语 `removing_leaves_no_role`（mgmt 不直连 runtime 表）。
+    """
+    # QA 复审 Info：派生行（engine:/scene:/scope:）与领域外标签不参与「最后一个角色」判定，
+    # 也不该被它挡住 —— 零角色行的引擎删派生行必须照常成功。存在性先判，交给上层 404。
+    try:
+        from src.domains.runtime.public import role_tag_domain as _role_domain
+        if tag not in _role_domain():
+            return
+        from src.domains.runtime.public import engine_cap_tag_exists as _tag_exists
+        if not _tag_exists(rid, tag):
+            return
+    except Exception as _de:  # noqa: BLE001
+        log.warning(f"engine tag guard pre-check failed (rid={rid} tag={tag}): {_de}")
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "error_code": "ROLE_GUARD_UNAVAILABLE",
+            "message": "暂时无法校验标签状态，已拒绝本次修改，请稍后重试",
+        })
+    try:
+        from src.domains.runtime.public import removing_leaves_no_role as _no_role
+        _empty = _no_role(rid, tag)
+    except Exception as _ge:  # noqa: BLE001
+        # QA 架构守护 I3：守卫自身故障必须 fail-closed——放行等于让「禁止清空」失效，
+        # 与守卫目标相反。这里拒绝本次操作（503，可重试），而不是静默删除。
+        log.warning(f"engine tag last-role guard failed (rid={rid} tag={tag}): {_ge}")
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "error_code": "ROLE_GUARD_UNAVAILABLE",
+            "code_note": "last-role guard unavailable, refusing to change tags",
+            "message": "暂时无法校验角色数量，已拒绝本次修改，请稍后重试",
+        }) from _ge
+    if _empty:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "EMPTY_ROLE_TAGS",
+            "message": "至少要保留一个角色（「全能」或任一角色），不能全部取消——空角色会让该引擎对任何任务都不再可选",
+        })
+
+
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
 def delete_engine_tag(rid: int, tag: str, request: Request,
                       user: dict = Depends(require_settings_runtime_owner_or_admin)):
-    """删除引擎标签"""
+    """删除引擎标签（不允许删掉最后一个角色行，见 2026-11-23 裁定）"""
     from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
+    # QA I3：判定与删除放在同一把锁内，避免 check-then-act 竞态（并发两次删除各看到 2 行）
     with db_lock:
+        _guard_last_role_or_400(rid, tag)
         c = db.cursor()
         try:
             from src.kernel.domain_read import runtime_lib as _rt_del
