@@ -60,7 +60,11 @@ def columns_exist(cursor, table: str, cols: tuple) -> bool:
     if key in _COLS_CACHE:
         return _COLS_CACHE[key]
     try:
-        present = {r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+        # 探列单一入口（kernel.ddl_safety）：PRAGMA（compat 翻译）+ 裸 MySQL
+        # information_schema 回退；PR #2009 I2 收敛。
+        from src.kernel.ddl_safety import table_columns
+
+        present = set(table_columns(cursor, table))
         ok = all(col in present for col in cols)
     except Exception:  # noqa: BLE001  # 探列失败=降级单轨，调用方记结构化 warn
         ok = False

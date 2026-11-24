@@ -9,6 +9,7 @@
 """
 from datetime import datetime, timezone
 import json
+import logging
 import os
 import re
 
@@ -22,6 +23,8 @@ from fastapi.routing import APIRoute
 from src.api.contract_versioning import build_changelog, load_contract_baseline
 
 _METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+log = logging.getLogger(__name__)
 
 # FastAPI 路由模板 `/contents/{path:path}` → OpenAPI 路径 `/contents/{path}`
 _PATH_PARAM_CONV = re.compile(r"\{(\w+):\w+\}")
@@ -74,7 +77,12 @@ def _iter_routes(route):
 # 视为「对外安全路由」的认证依赖名（契约收录范围）
 _PUBLIC_AUTH_DEPS = frozenset({
     "get_current_user_or_api_key",
+    # Issue #3855：官方技能改名/详情同时服务普通用户与管理台 JWT（admin_accounts）。
+    "get_current_user_or_api_key_or_admin",
     "get_user_or_none",  # a2a 软认证（JWT/session/api key 任一；None 交给内部 bot 鉴权）
+    # Issue #3396：角色标签写权限收紧依赖（平台管理员 JWT / 用户认证二选一，
+    # session_token 体内拒绝）——挂载端点对外（PUT /runtimes/{id}/tags）
+    "_resolve_user_or_platform_admin",
 })
 
 # session 强制但依赖链不可见（体内 `_repo_token`/`_repo_platform_token` 判 auth_type）的 operation_id。
@@ -113,10 +121,13 @@ def route_is_public(route) -> bool:
 def token_scope(route) -> str | None:
     """推导对外路由的 token 作用域（`x-token-scope`）：
 
-    - 依赖链命中 `require_no_session_token`                → user_only（156 处 D 类管理端点）
+    - 依赖链命中 `require_no_session_token_or_admin` → user_or_admin
+      （D 类管理端点 + 管理台 JWT；session token 仍拒绝，Issue #3855）
+    - 依赖链命中 `require_no_session_token` → user_only
     - operation_id 在 `_SESSION_ONLY_OPERATIONS` 或路径前缀命中
       `_SESSION_ONLY_PATH_PREFIXES`                          → session_only（git-repo 传输/凭据）
-    - 依赖链命中 `get_current_user_or_api_key` / `get_user_or_none` → dual
+    - 依赖链命中 `get_current_user_or_api_key` / `get_current_user_or_api_key_or_admin`
+      / `get_user_or_none`                                   → dual
     - 其余（依赖链无对外认证）                               → None（不进契约或未知）
     """
     if not isinstance(route, APIRoute):
@@ -126,7 +137,12 @@ def token_scope(route) -> str | None:
     path = getattr(route, "path", "") or ""
     if op_id in _SESSION_ONLY_OPERATIONS or path.startswith(_SESSION_ONLY_PATH_PREFIXES):
         return "session_only"
+    if "require_no_session_token_or_admin" in names:
+        return "user_or_admin"
     if "require_no_session_token" in names:
+        return "user_only"
+    # Issue #3396：写权限收紧依赖同样体内拒绝 session_token（账户/平台管理语义）→ user_only
+    if "_resolve_user_or_platform_admin" in names:
         return "user_only"
     if names & _PUBLIC_AUTH_DEPS:
         return "dual"
@@ -643,8 +659,20 @@ def custom_openapi(app, check_baseline: bool = True):
     # Issue #2837（等价 #2783）：挂牌登记表 → deprecated / x-deprecated-since /
     # x-deprecated-replacement（挂牌态随契约发布，可从冻结发布快照机器读取；
     # 登记漂移在契约域 fail-fast）。空登记表时本调用是 no-op。
-    from src.domains.contracts.deprecation import apply_deprecation_markup
-    apply_deprecation_markup(schema)
+    # Issue #3756：登记表**缺失/不可读**时，读接口不应整体 500——本步单独降级，
+    # 根级打 x-degraded 并 WARNING。只捕获 RegistryUnavailable：登记表损坏、
+    # 条目非法、挂牌位置漂移仍是数据面错误，继续 fail-fast（#2837 挂牌承诺）。
+    # import 也放在 try 之外：半套代码（模块缺失）不得被误吞成 200。
+    from src.domains.contracts.deprecation import (
+        RegistryUnavailable,
+        apply_deprecation_markup,
+    )
+    try:
+        apply_deprecation_markup(schema)
+    except RegistryUnavailable as _de:
+        schema.setdefault("x-degraded", "deprecation-registry-missing")
+        log.warning(
+            "openapi deprecation markup degraded (registry missing/unreadable): %s", _de)
     attach_contract_meta(schema)  # Issue #1863 ③：元信息透出（x-endpoint-count/x-groups/x-source-commit/x-generated-at）
     # Issue #1863/#2080/#2081：契约完整性 fail-fast——必需操作缺失/端点数偏离基线即拒出契约。
     # check_baseline=False 供测试/局部渲染上下文跳过（weekly 口径）；生产默认 True。

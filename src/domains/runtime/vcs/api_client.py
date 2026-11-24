@@ -13,6 +13,8 @@ import time
 import urllib.request
 import urllib.error
 from src.kernel.config import log
+# Issue #4064：日志统一脱敏入口（只作用于日志，请求与返回值不变）
+from src.domains.runtime.vcs.redact import redact_text, redact_url
 
 
 # ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
@@ -201,17 +203,17 @@ def _download_authed(url: str, token: str, *, allowed_prefix: str, ctype_prefixe
             content = b"".join(chunks)
             return {"content": content, "content_type": ctype, "size": total}
     except urllib.error.HTTPError as e:
-        log.warning(f"{label} download failed: {url} -> HTTP {e.code}")
+        log.warning(f"{label} download failed: {redact_url(url)} -> HTTP {e.code}")
         return {"error": f"HTTP {e.code}"}
     except urllib.error.URLError as e:
         _reason = getattr(e, "reason", e)
         if "timed out" in str(_reason).lower() or "timeout" in str(_reason).lower():
-            log.warning(f"{label} download failed: {url} -> timeout ({timeout}s)")
+            log.warning(f"{label} download failed: {redact_url(url)} -> timeout ({timeout}s)")
             return {"error": "timeout"}
-        log.warning(f"{label} download failed: {url} -> {_reason}")
+        log.warning(f"{label} download failed: {redact_url(url)} -> {redact_text(_reason)}")
         return {"error": str(_reason)}
     except Exception as e:
-        log.warning(f"{label} download failed: {url} -> {e}")
+        log.warning(f"{label} download failed: {redact_url(url)} -> {redact_text(e)}")
         return {"error": str(e)}
 
 
@@ -1090,13 +1092,13 @@ class VcsApiClient:
                     err_body = e.read().decode()
                 except Exception:
                     pass
-                log.warning(f"VcsApiClient: {method} {url} → HTTP {e.code}: {err_body}")
+                log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: {redact_text(err_body)}")
                 if _span is not None:
                     _span.set_attribute("http.status_code", e.code)
                     _span.set_attribute("vcs.result", "http_error")
                 return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
             except Exception as e:
-                log.warning(f"VcsApiClient: {method} {url} → {e}")
+                log.warning(f"VcsApiClient: {method} {redact_url(url)} → {redact_text(e)}")
                 if _span is not None:
                     _span.set_attribute("vcs.result", "exception")
                 return {"error": str(e)}

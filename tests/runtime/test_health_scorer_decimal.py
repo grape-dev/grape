@@ -57,19 +57,24 @@ class TestDecimalCrashFix:
         assert _consecutive_failure_penalty(None) == 0
         assert _consecutive_failure_penalty(Decimal("0")) == 0
 
-    def test_T7_fetch_task_stats_normalizes_decimal(self):
+    def test_T7_fetch_task_stats_counts_are_int(self):
+        """Issue #3927：聚合改为锁外 Python 计数后，结果仍是 int（不再有 Decimal）。
+
+        旧实现靠 SQL COUNT/SUM（MySQL 返回 Decimal）；现在快照读原始行、Python
+        计数，天然是 int。这里钉住返回类型契约，防止回退到 Decimal 混算。
+        """
+        from datetime import datetime, timezone
+        _now = datetime.now(timezone.utc).isoformat()
+
         class _FakeCursor:
             def execute(self, *a, **kw):
                 pass
 
             def fetchone(self):
-                if not getattr(self, "_first", False):
-                    self._first = True
-                    return (Decimal("20"), Decimal("6"), Decimal("3"))
-                return None
+                return ("completed",)
 
             def fetchall(self):
-                return []
+                return [("failed", _now), ("failed", _now), ("completed", _now)]
 
         class _FakeDb:
             def cursor(self):
@@ -78,6 +83,20 @@ class TestDecimalCrashFix:
         with patch("src.domains.runtime.engine.health_scorer._db", return_value=_FakeDb()), \
              patch("src.domains.runtime.engine.health_scorer._effective_window_start", return_value="2026-10-16T00:00:00"):
             stats = _fetch_task_stats(1)
-        assert stats["total"] == 20 and isinstance(stats["total"], int)
-        assert stats["failed"] == 6 and isinstance(stats["failed"], int)
-        assert stats["completed"] == 3 and isinstance(stats["completed"], int)
+        assert stats["total"] == 3 and isinstance(stats["total"], int)
+        assert stats["failed"] == 2 and isinstance(stats["failed"], int)
+        assert stats["completed"] == 1 and isinstance(stats["completed"], int)
+        assert stats["consecutive_failures"] == 2
+        assert stats["last_status"] == "completed"
+
+    def test_T8_compute_health_score_normalizes_decimal_to_int(self):
+        """Issue #3927 审查 Nit：聚合已迁至 Python 计数（见 T7 注释）。
+
+        保留 `_compute_health_score`/`_consecutive_failure_penalty` 的 Decimal 入参
+        护栏：若未来恢复 SQL 聚合（MySQL SUM/COUNT 返回 Decimal），
+        int 归一契约仍须成立，防 2026-10-23 的 Decimal×float TypeError 崩溃复发。
+        """
+        score = _compute_health_score(Decimal("20"), Decimal("6"), Decimal("3"))
+        assert score == 40 and isinstance(score, int)
+        penalty = _consecutive_failure_penalty(Decimal("3"))
+        assert penalty == 45 and isinstance(penalty, int)

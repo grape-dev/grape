@@ -42,3 +42,8 @@ opentelemetry-exporter-otlp-proto-http>=1.27,<2
 # 两者都必须声明，否则按文档装 worker 会 ModuleNotFoundError（服务端 requirements.txt 早已声明）。
 pymysql>=1.1
 DBUtils>=3.0
+
+# Issue #3874: engine_model.py prefers pyyaml for hermes config.yaml; without it the
+# worker falls back to a parser that cannot handle sequences. Declare pyyaml so the
+# bundled wheels (incl. win_amd64) cover it and Windows worker onboard works offline.
+pyyaml>=6.0

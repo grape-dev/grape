@@ -406,6 +406,171 @@ def downstream_event_exists(repo_key: str, issue_id: str, agent_type: str, since
         return None
 
 
+#: 接管 finish 回填真实结论时的补偿归因触发路径（cascade.py 展示层按此区分来源）
+TRIGGER_TAKEOVER_FINISH = "takeover_finish"
+
+
+def _event_columns(c) -> set:
+    """events 表列清单（统一走 event_store 的跨库探测，避免各处重复实现）。"""
+    from src.domains.runtime.event_store import _events_columns
+    return _events_columns(c)
+
+
+def _mark_issue_done(repo_key: str, issue_number: str, reason: str = "takeover_done") -> None:
+    """把 Issue 收敛到完成态（stage=done / status=completed），供场景链末节点复用。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE issue SET status='completed', stage='done', completed_at=?, "
+                      "completed_reason=? WHERE repo_key=? AND issue_number=?",
+                      (_now_iso(), reason, repo_key, native_issue_number(issue_number)))
+            db.commit()
+    except Exception as e:
+        log.warning(f"takeover: mark issue done failed: {e}")
+
+
+def event_conclusion_snapshot(event_seq: int) -> dict:
+    """读事件在接管 finish 写入前的结论状态（用于判定是否属于级联补偿事件）。
+
+    返回 ``{status, result, cascade_reason}``；缺列 / 查询失败降级为空值。
+    """
+    _out = {"status": "", "result": "", "cascade_reason": ""}
+    if not event_seq:
+        return _out
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = _event_columns(c)
+            _has_reason = "cascade_reason" in cols
+            _sel = "status, result" + (", cascade_reason" if _has_reason else "")
+            row = c.execute(f"SELECT {_sel} FROM events WHERE seq=?", (int(event_seq),)).fetchone()
+        if row:
+            _out["status"] = str(row[0] or "")
+            _out["result"] = str(row[1] or "")
+            _out["cascade_reason"] = str(row[2] or "") if _has_reason and len(row) > 2 else ""
+    except Exception as e:
+        log.warning(f"takeover: conclusion snapshot failed seq={event_seq}: {e}")
+    return _out
+
+
+def mark_backfilled_conclusion(event_seq: int, *, prev: dict,
+                               prev_task_status: str = "cancelled") -> bool:
+    """接管 finish 交回真实结论后，把级联补偿归因改判为「已回填真实结论」。
+
+    Issue #3834：让渡时 cancel_task 会把事件收敛成 REASON_SYNTHESIZED（合成补偿，
+    is_agent_conclusion=false）。接管 finish 写入的是用户/本地 agent 的真实结论，
+    等价于「原始回报丢失但结论已回填」→ 归因改为 REASON_BACKFILLED，事件重新具备
+    真实 Agent 结论资格（展示层 :func:`cascade.display_meta` 据此计入 A2A 链）。
+    非补偿事件（普通接管）不做任何改写。
+    """
+    from src.domains.runtime.engine import cascade as _cascade
+    _prev_status = str((prev or {}).get("status") or "")
+    _prev_result = str((prev or {}).get("result") or "")
+    _prev_reason = str((prev or {}).get("cascade_reason") or "")
+    _is_cascade = _cascade.is_compensation_state(event_status=_prev_status,
+                                                 result_text=_prev_result,
+                                                 cascade_reason=_prev_reason)
+    if not (event_seq and _is_cascade):
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = _event_columns(c)
+            # #3834 复审④：cascade_task_status / cascade_prev_event_status 属于
+            # cancel 收敛时记录的「原始现场」，改判只补空缺、不覆盖既有值——
+            # 避免把 cancel 时记录的 running/dispatched 冲成快照期的 takeover/cancelled。
+            _values = (
+                ("cascade_reason", _cascade.REASON_BACKFILLED),
+                ("report_missing", 1),
+                ("triggered_by", TRIGGER_TAKEOVER_FINISH),
+                ("cascade_task_status", (prev_task_status or "")[:32]),
+                ("cascade_prev_event_status", (_prev_status or "")[:32]),
+            )
+            _present = {}
+            if "cascade_task_status" in cols and "cascade_prev_event_status" in cols:
+                _prow = c.execute(
+                    "SELECT cascade_task_status, cascade_prev_event_status FROM events WHERE seq=?",
+                    (int(event_seq),)).fetchone()
+                if _prow:
+                    _present = {"cascade_task_status": str(_prow[0] or ""),
+                                "cascade_prev_event_status": str(_prow[1] or "")}
+            _sets, _params = [], []
+            for k, v in _values:
+                if k not in cols:
+                    continue
+                if k in _present and _present[k]:
+                    continue
+                _sets.append(f"{k}=?")
+                _params.append(v)
+            if not _sets:
+                # 归因列一个都不缺时也视为成功（幂等）
+                return True
+            c.execute(f"UPDATE events SET {', '.join(_sets)} WHERE seq=?",
+                      _params + [int(event_seq)])
+            db.commit()
+        log.info(f"takeover: event {event_seq} conclusion backfilled "
+                 f"(prev={_prev_status or '-'}, trigger={TRIGGER_TAKEOVER_FINISH})")
+        return True
+    except Exception as e:
+        log.warning(f"takeover: backfill conclusion attr failed seq={event_seq}: {e}")
+        return False
+
+
+def _next_agent_from_scene(repo_key: str, issue_number: str,
+                           current_agent: str) -> tuple[str, bool]:
+    """按场景节点链再解析一次下一节点（id 优先、tag 兜底两口径，覆盖非标准节点写法）。
+
+    返回 ``(next_agent, is_done)``：末节点（``next=done``）会把 Issue 收敛为完成态并返回
+    ``("done", True)``，避免「stage 推进成功却无下一节点」的静默断链。
+    """
+    try:
+        from src.api.pipeline_config import get_next_node
+        from src.api.session_store import get_issue_scene
+        from src.api.pipeline_constants import DISPATCHABLE_AGENTS
+        from src.domains.runtime.engine.engine_select import node_matches_agent_role
+        scene_id = ""
+        try:
+            sc = get_issue_scene(repo_key, f"#{issue_number}")
+            scene_id = (sc[0] if sc and sc[0] else "") or ""
+        except Exception:
+            scene_id = ""
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(scene_id or "default", repo_key=repo_key) or {}
+        for n in cfg.get("nodes") or []:
+            if not node_matches_agent_role(n, current_agent):
+                continue
+            _next = (n.get("next") or "").strip()
+            if not _next:
+                return "", False
+            if _next == "done":
+                _mark_issue_done(repo_key, issue_number)
+                return "done", True
+            nxt = get_next_node(scene_id or "default", n.get("id") or current_agent)
+            _target = (_next if not nxt else (nxt.get("id") or _next))
+            # #3834 复审⑤：next 字符串必须落在可派发集合（标准 agent 角色 or 本场景节点 id/tag）
+            # 内才返回，否则按未解析处理——不把不存在的 agent 派出去制造静默黑洞。
+            _valid = set(DISPATCHABLE_AGENTS) | {
+                (x.get("id") or "").strip() for x in cfg.get("nodes") or []
+            } | {(x.get("tag") or "").strip() for x in cfg.get("nodes") or []}
+            if (_target or "") not in _valid:
+                log.warning(f"takeover: scene next '{_target}' is not dispatchable, "
+                             f"treated as unresolved")
+                return "", False
+            return _target, False
+    except Exception as e:
+        log.warning(f"takeover: scene next-agent fallback failed: {e}")
+    return "", False
+
+
+def assert_no_active_takeover(repo_key: str, issue_id: str, agent_type: str = "") -> None:
+    """防重做守卫：接管中的节点禁止任何派发（A2A / a2a-redo / issues-resume 调用）。"""
+    sess = active_takeover_for(repo_key, issue_id, agent_type)
+    if sess:
+        raise TakeoverError(409, "already_taken_over",
+                            f"Issue {issue_id} 正被 {sess.get('username') or '用户'} 接管中（"
+                            f"takeover={sess.get('id')}），禁止再次派发")
+
+
 # ----------------------------------------------------------------------------- bundle
 
 def _issue_row(repo_key: str, issue_number: str) -> dict:
@@ -1545,15 +1710,7 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
     if not next_agent:
         return "", False          # 场景里找不到该节点：不动 stage，交给人
     if next_agent == "done":
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE issue SET status='completed', stage='done', completed_at=?, "
-                          "completed_reason='takeover_done' WHERE repo_key=? AND issue_number=?",
-                          (_now_iso(), repo_key, native_issue_number(issue_number)))
-                db.commit()
-        except Exception as e:
-            log.warning(f"takeover: mark issue done failed: {e}")
+        _mark_issue_done(repo_key, issue_number)
         return "done", True
     try:
         # owner_agent 记录"现在轮到谁"，写 takeover 会让需求中心显示成不存在的 agent
@@ -1563,18 +1720,53 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
     return next_agent, False
 
 
-_INTERNAL_BASE_CACHE = ""
+# 业务/general 内部基址（health-only；bundle env 的 GRAPE_SERVER_URL 回退用）。
+_BUSINESS_BASE_CACHE = ""
+# A2A 派发基址：只缓存「/api/health 可达 + POST /api/a2a 路由可用」双重校验通过的基址。
+_A2A_DISPATCH_BASE_CACHE = ""
+
+
+def _dedupe_bases(values: list[str]) -> list[str]:
+    """候选基址去重（保序）；只保留 http:// / https:// 绝对地址。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in values:
+        b = (v or "").strip().rstrip("/")
+        if b.startswith(("http://", "https://")) and b not in seen:
+            seen.add(b)
+            out.append(b)
+    return out
+
+
+def _base_is_loopback(base: str) -> bool:
+    """基址是否指向本机回环（localhost / 127.0.0.0/8 / ::1）。
+
+    本机 worker 同样 ``runtime_id>0``，其回连基址是 ``127.0.0.1:<本进程端口>``；
+    这类基址旁通常还有同机其它进程（如 event 38082）可派发，必须按本机候选重选，
+    不能当作远程 worker 只做 best-effort。
+    """
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit((base or "").strip()).hostname or "").strip().lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in ("localhost", "::1"):
+        return True
+    return host.startswith("127.")
 
 
 def _internal_base_url(runtime_id: int = 0) -> str:
-    """内部自调用的基址。
+    """内部业务自调用的基址（health-only）。
 
     本机任务优先 127.0.0.1；端口不能信任 config（本地实测 GRAPE_PORT 未设时 config 给 3000，
     但 uvicorn 实际跑在 8000）——所以按候选端口探活 /api/health，取第一个通的并缓存。
+    A2A 派发不走这里（见 ``_a2a_dispatch_base``）：业务 API 与 A2A 可能不在同一进程。
     """
-    global _INTERNAL_BASE_CACHE
-    if _INTERNAL_BASE_CACHE:
-        return _INTERNAL_BASE_CACHE
+    global _BUSINESS_BASE_CACHE
+    if _BUSINESS_BASE_CACHE:
+        return _BUSINESS_BASE_CACHE
     if int(runtime_id or 0) <= 0:
         import httpx
         cands: list[str] = []
@@ -1587,18 +1779,13 @@ def _internal_base_url(runtime_id: int = 0) -> str:
         except Exception as _e:
             log.debug(f"takeover.py best-effort skipped: {_e}")
         cands += ["http://127.0.0.1:8000", "http://127.0.0.1:3000"]
-        seen: set[str] = set()
-        for base in cands:
-            base = base.rstrip("/")
-            if base in seen:
-                continue
-            seen.add(base)
+        for base in _dedupe_bases(cands):
             try:
                 # 2.5s：finish 时同进程可能正持着 db_lock（health 若查库会排队），
                 # 0.8s 会把「自己在忙」误判成「端口不通」
                 r = httpx.get(f"{base}/api/health", timeout=2.5)
                 if r.status_code < 500:
-                    _INTERNAL_BASE_CACHE = base
+                    _BUSINESS_BASE_CACHE = base
                     log.info(f"takeover: internal base = {base}")
                     return base
             except Exception as _e:
@@ -1607,17 +1794,214 @@ def _internal_base_url(runtime_id: int = 0) -> str:
         # 本机任务：探活全失败也只用本机地址，绝不回退公网/配置域名
         # （实测 config 的 worker_connect_url = http://localhost:3000，本机没人监听）
         # 兜底端口取本部署的既定端口 8000（systemd uvicorn --port 8000）。
-        _INTERNAL_BASE_CACHE = "http://127.0.0.1:8000"
-        log.warning(f"takeover: health probe all failed, fallback {_INTERNAL_BASE_CACHE}")
-        return _INTERNAL_BASE_CACHE
+        _BUSINESS_BASE_CACHE = "http://127.0.0.1:8000"
+        log.warning(f"takeover: health probe all failed, fallback {_BUSINESS_BASE_CACHE}")
+        return _BUSINESS_BASE_CACHE
     try:
         from src.kernel.prompt_builder import _resolve_server_url
         base = (_resolve_server_url(int(runtime_id or 0)) or "").rstrip("/")
     except Exception:
         base = ""
     if base:
-        _INTERNAL_BASE_CACHE = base
+        _BUSINESS_BASE_CACHE = base
     return base or f"http://127.0.0.1:{_local_port()}"
+
+
+def _dispatch_base_candidates() -> list[str]:
+    """A2A 派发基址候选（显式内部地址 > 服务端口映射 > 注册表 > 本进程端口 > 兜底）。
+
+    服务端口映射/环境变量名与 ``src.kernel.gsb.client`` 同源（直接导入
+    ``_FALLBACK_PORT`` / ``_ENV_URL_MAP``，不另存一份表），避免两处漂移；注册表来源
+    复用 ``list_instances()``。本函数只补充 A2A 派发特有的环境变量优先级与角色遍历
+    顺序。角色顺序优先取 A2A 实际挂载角色（event），避免本进程（如 mgmt）的 health-only
+    候选抢在正确端口之前命中，导致 POST /api/a2a 拿 405。
+    """
+    cands: list[str] = []
+    for v in (os.environ.get("GRAPE_INTERNAL_URL"),
+              os.environ.get("GRAPE_A2A_PORT"), os.environ.get("GRAPE_EVENT_PORT"),
+              os.environ.get("EVENT_PORT")):
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
+    try:
+        from src.kernel.gsb.client import _ENV_URL_MAP as _role_env_urls
+        from src.kernel.gsb.client import _FALLBACK_PORT as _role_ports
+    except Exception:
+        _role_env_urls, _role_ports = {}, {}
+    roles = ("event", "runtime", "worker", "mgmt", "insight")
+    for role in roles:
+        env_key = _role_env_urls.get(role)
+        v = os.environ.get(env_key) if env_key else None
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
+        port = _role_ports.get(role)
+        if port:
+            cands.append(f"http://127.0.0.1:{port}")
+    for role in roles:
+        try:
+            from src.kernel.gsb.registry import list_instances
+            for row in list_instances(role):
+                base = (row.get("base_url") or "").rstrip("/")
+                if base:
+                    cands.append(base)
+        except Exception as _e:
+            log.debug(f"takeover.py best-effort skipped: {_e}")
+            break
+    for v in (os.environ.get("PORT"), os.environ.get("GRAPE_PORT")):
+        if v:
+            cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
+    try:
+        cands.append(f"http://127.0.0.1:{_local_port()}")
+    except Exception as _e:
+        log.debug(f"takeover.py best-effort skipped: {_e}")
+    cands += ["http://127.0.0.1:8000", "http://127.0.0.1:3000"]
+    return _dedupe_bases(cands)
+
+
+def _probe_dispatchable(base: str, timeout: float = 2.5) -> tuple[bool, str]:
+    """双重校验候选基址：``/api/health`` 可达 且 ``POST /api/a2a`` 路由存在。
+
+    只有 POST 能区分「无路由 404/405」与「端点存在但缺参 400」。辅助进程的
+    health 可能 200 但没有 a2a 路由（如 mgmt / insight），这类候选必须排除。
+    返回 ``(是否可派发, 诊断串)``，诊断串含端口/状态码，供 warning 观测。
+    """
+    import httpx
+    base = (base or "").rstrip("/")
+    if not base:
+        return False, "empty base"
+    try:
+        h = httpx.get(f"{base}/api/health", timeout=timeout)
+        h_code = int(h.status_code)
+    except Exception as e:
+        return False, f"health unreachable: {e}"
+    if h_code >= 500:
+        return False, f"health HTTP {h_code}"
+    try:
+        # 空 payload：真实端点返回 400（端点存在、不落账），无路由返回 404/405。
+        p = httpx.post(f"{base}/api/a2a", json={}, timeout=min(timeout, 1.5))
+        p_code = int(p.status_code)
+    except Exception as e:
+        return False, f"health HTTP {h_code}; a2a unreachable: {e}"
+    if p_code in (404, 405):
+        return False, f"health HTTP {h_code} but a2a route missing HTTP {p_code}"
+    if 300 <= p_code < 400:
+        return False, f"health HTTP {h_code} but a2a redirected HTTP {p_code}"
+    if p_code >= 500:
+        return False, f"health HTTP {h_code} but a2a route error HTTP {p_code}"
+    return True, f"health HTTP {h_code}, a2a HTTP {p_code}"
+
+
+def _select_local_a2a_base(preferred: list[str] | None,
+                           excluded: set[str]) -> str:
+    """本机扫描 A2A 候选并重选（只缓存双重校验通过的基址）。
+
+    命中进程级缓存/``preferred``（本机 worker 的回连基址）优先，其次扫描
+    ``_dispatch_base_candidates()``；405/404 候选排除并输出 warning；全部不可派发时
+    不缓存错误基址，仅本次回退本机既定端口，由调用方按失败语义上报。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
+    if cached and cached not in excluded:
+        return cached
+    for base in _dedupe_bases(list(preferred or []) + _dispatch_base_candidates()):
+        if base in excluded:
+            continue
+        ok, detail = _probe_dispatchable(base)
+        if ok:
+            _A2A_DISPATCH_BASE_CACHE = base
+            log.info(f"takeover: a2a dispatch base = {base} ({detail})")
+            return base
+        log.warning(f"takeover: skip a2a dispatch candidate {base} ({detail})")
+    fallback = f"http://127.0.0.1:{_local_port()}"
+    if fallback.rstrip("/") in excluded:
+        fallback = "http://127.0.0.1:8000"
+    log.warning(f"takeover: no dispatchable a2a candidate; fallback {fallback} (not cached)")
+    return fallback
+
+
+def _a2a_internal_base(runtime_id: int = 0, exclude: set[str] | None = None) -> str:
+    """内部派发基址（只缓存双重校验通过的基址）。
+
+    ``runtime_id > 0`` 既可能是远程 worker，也可能是本机 worker（``last_ip=127.0.0.1``
+    或 ``credential_id=0``）。判据组合 ``_runtime_is_local()`` 与回连基址是否回环：
+    - 本机 worker：与 ``runtime_id=0`` 一致，把回连基址并进本机候选做 health + POST
+      双重校验并重选（405 后排除坏基址也能换到同机 event 端口）；
+    - 真远程 worker：本机 127.0.0.1 候选不可达，只校验回连基址，通过则缓存，
+      不可派发则 warning 并最佳努力返回该基址（不缓存），由外层按失败上报。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
+    if int(runtime_id or 0) > 0:
+        try:
+            from src.kernel.prompt_builder import (_resolve_server_url,
+                                                   _runtime_is_local)
+            base = (_resolve_server_url(int(runtime_id)) or "").rstrip("/")
+            local = _runtime_is_local(int(runtime_id))
+        except Exception:
+            base, local = "", None
+        # locality 未知（None）时以回环地址为判据，避免把本机 worker 误当远程。
+        is_local_worker = bool(local) or _base_is_loopback(base)
+        if not is_local_worker:
+            if base:
+                if base in excluded:
+                    # 405 重选时被排除：远程没有其它 A2A 进程可换，返回原基址让调用方上报
+                    log.warning(f"takeover: no alternative remote a2a base; keep {base}")
+                    return base
+                ok, detail = _probe_dispatchable(base)
+                if ok:
+                    _A2A_DISPATCH_BASE_CACHE = base
+                    log.info(f"takeover: a2a dispatch base = {base} ({detail})")
+                    return base
+                log.warning(f"takeover: skip a2a dispatch candidate {base} ({detail})")
+                # 远程 worker：本机 127.0.0.1 候选不可达，仍按回连基址最佳努力派发（不缓存）
+                log.warning(f"takeover: a2a dispatch base {base} unverified; "
+                            "best-effort use remote server_url (not cached)")
+                return base
+            return f"http://127.0.0.1:{_local_port()}"
+        # 本机 worker 回环：回连基址并入候选，扫描重选而不是 best-effort 打坏地址
+        return _select_local_a2a_base([base] if base else [], excluded)
+    return _select_local_a2a_base([], excluded)
+
+
+def _a2a_dispatch_base(runtime_id: int = 0, exclude: set[str] | None = None) -> str:
+    """A2A 派发基址：显式配置可信，``server_url`` 回退必须双重校验。
+
+    与开放 PR !2020 协同：保留其「task_a2a_api_url > 网关 /a2a 前缀 >
+    server_base_url」显式优先顺序。差异（Issue #3910）：
+    - ``explicit_a2a_api_url`` / ``gateway_prefix_a2a`` 可信任，直接返回；
+    - ``runtime_server_url_fallback`` 不可信任（四进程下常是本进程 mgmt 端口），
+      本机需做 health + POST /api/a2a 双重校验，不可派发则 warning 并排除后扫描候选；
+      ``runtime_id>0`` 同样交由 ``_a2a_internal_base`` 区分本机 worker（回环基址，
+      扫描重选）与真远程 worker（仅校验回连基址、best-effort）。
+    ``exclude`` 用于 405 后排除坏基址重选。
+    """
+    global _A2A_DISPATCH_BASE_CACHE
+    excluded = {(b or "").rstrip("/") for b in (exclude or set())}
+    try:
+        from src.kernel.prompt_builder import (A2A_TRUSTED_BASE_SOURCES,
+                                               resolve_a2a_base_with_source)
+        base, source = resolve_a2a_base_with_source(int(runtime_id or 0))
+        base = (base or "").strip().rstrip("/")
+        if base and base not in excluded and source in A2A_TRUSTED_BASE_SOURCES:
+            return base
+        if int(runtime_id or 0) > 0:
+            # 远程 worker：server_url 回连基址在 _a2a_internal_base 内校验
+            return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
+        cached = (_A2A_DISPATCH_BASE_CACHE or "").rstrip("/")
+        if cached and cached not in excluded:
+            # 已双重校验过的基址优先于不可信任的回退，避免每次 finish 重复探活+405 warning
+            return cached
+        if base and base not in excluded:
+            ok, detail = _probe_dispatchable(base)
+            if ok:
+                _A2A_DISPATCH_BASE_CACHE = base
+                log.info(f"takeover: a2a dispatch base = {base} ({source}; {detail})")
+                return base
+            log.warning(f"takeover: skip a2a dispatch candidate {base} "
+                        f"(source={source}; {detail})")
+            excluded.add(base)
+    except Exception as _e:  # noqa: BLE001 — 解析失败必须回退，不能阻断派发
+        log.debug(f"takeover: resolve_a2a_base_with_source skipped: {_e}")
+    return _a2a_internal_base(int(runtime_id or 0), exclude=excluded)
 
 
 def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context: str,
@@ -1625,12 +2009,15 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
                    base_url: str = "") -> dict:
     """派发下一节点（内部 HTTP 调 /api/a2a，与 resume 同路径；失败可重试）。
 
-    目标地址一律取 ``_internal_base_url()``（本机探活得出的内部基址）。
+    目标地址取 ``_a2a_dispatch_base()``：显式 A2A 配置优先，回退路径做
+    health + POST /api/a2a 双重校验（避免命中无 a2a 路由的辅助服务端口）。
+    405 命中时清缓存、在候选集内排除坏基址重选并重试一次。
     调用方传入的 base_url 来自 ``request.base_url``，可被 Host 头伪造，
     用作 SSRF 跳板会把调用方凭据发给攻击者控制的主机，因此这里显式忽略。
     """
+    global _A2A_DISPATCH_BASE_CACHE
     import httpx
-    base = _internal_base_url(int(runtime_id or 0)).rstrip("/")
+    base = _a2a_dispatch_base(int(runtime_id or 0)).rstrip("/")
     url = f"{base.rstrip('/')}/api/a2a"
     body = {"agent": next_agent,
             "payload": {"repository": repo_key.split(":", 1)[-1],
@@ -1652,6 +2039,18 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
                     seq = 0
                 return {"ok": True, "seq": seq, "status": r.status_code}
             last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            if int(r.status_code) == 405 and attempt == 1:
+                # 缓存/竞态导致仍命中无 a2a 路由的基址：清缓存，排除坏基址后重选重试一次
+                _A2A_DISPATCH_BASE_CACHE = ""
+                new_base = _a2a_dispatch_base(int(runtime_id or 0),
+                                              exclude={base}).rstrip("/")
+                if new_base and new_base != base:
+                    log.warning(f"takeover: a2a dispatch 405 at {base}; "
+                                f"retry with reselected base {new_base}")
+                    base = new_base
+                    url = f"{base}/api/a2a"
+                    continue
+                log.warning(f"takeover: a2a dispatch 405 at {base}; no alternative candidate")
         except Exception as e:
             last_err = str(e)
         if attempt == 1:
@@ -1769,18 +2168,21 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             _sess_view = dict(sess)
             _sess_view["skipped_dispatches"] = _skipped_count
             return {"ok": True, "changed": False, "status": sess.get("status"),
-                    "session": _sess_view,
-                    "skipped_dispatches": _skipped_count,
-                    "skipped_message": _skipped_message}
-        _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
-                       auth_headers=auth_headers, base_url=base_url)
+                    "session": sess}
+        retry_ok = _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
+                                  auth_headers=auth_headers, base_url=base_url)
         _sess_view = get_session(session_id) or sess
         _sess_view = dict(_sess_view)
         _sess_view["skipped_dispatches"] = _skipped_count
-        return {"ok": True, "changed": False, "status": sess.get("status"),
-                "session": _sess_view,
-                "skipped_dispatches": _skipped_count,
-                "skipped_message": _skipped_message}
+        out = {"ok": bool(retry_ok), "changed": False, "status": sess.get("status"),
+               "session": _sess_view,
+               "skipped_dispatches": _skipped_count,
+               "skipped_message": _skipped_message}
+        if not retry_ok:
+            # 补派发失败：不得呈现为干净成功（Spec 验收：handoff.ok=false 时不伪装 ok:true）
+            out["partial"] = True
+            out["warnings"] = ["handoff_retry_failed"]
+        return out
 
     outcome = (outcome or "completed").lower()
     if outcome not in ("completed", "failed"):
@@ -1803,7 +2205,10 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     }
 
     # ① 事件终态
+    # 先快照让渡阶段的补偿状态：finish 写入真实结论后据此把归因改判为「已回填」
+    _pre_conclusion = event_conclusion_snapshot(event_seq) if event_seq else {}
     event_status = ""
+    _backfilled = False
     if event_seq:
         try:
             update_event_complete(event_seq, outcome, result=(summary or "")[:4000],
@@ -1812,11 +2217,34 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             event_status = outcome
         except Exception as e:
             raise TakeoverError(500, "event_finalize_failed", f"事件终态写入失败：{e}")
+        if outcome == "completed":
+            # Issue #3834：让渡补偿事件不再以「系统合成补偿（is_agent_conclusion=false）」身份
+            # 留在链上——真实结论由接管 finish 回填，归因改判 REASON_BACKFILLED。
+            # 复审⑥：结果可观测——非补偿事件为 False（无需改判）；补偿事件改判失败也如实
+            # 返回 False，调用方/审计可据此发现「completed 但归因仍 synthesized」的半状态。
+            _backfilled = bool(mark_backfilled_conclusion(
+                event_seq, prev=_pre_conclusion, prev_task_status="cancelled"))
 
-    # ② stage 推进 / Issue 完成
+    # ② stage 推进 / Issue 完成（stage 写入与派发目标必须同源）
     next_agent_resolved, is_done = "", False
     if outcome == "completed":
         next_agent_resolved, is_done = _advance_stage(repo_key, issue_number, agent_type)
+        # 场景节点写法非标准（id/tag 对不上）时补一次节点链解析，避免 stage 推进成功
+        # 却因为没有下一节点而静默断链（Issue #3834 断链点）；末节点会在此收敛为完成。
+        if not next_agent_resolved and not is_done:
+            next_agent_resolved, is_done = _next_agent_from_scene(repo_key, issue_number, agent_type)
+        # 场景链与请求都无目标时才回落到请求 next_agent；一旦回落，stage 与派发目标同步落库。
+        if not next_agent_resolved and not is_done:
+            _req_target = (next_agent or "").strip()
+            if _req_target and _req_target != "done":
+                next_agent_resolved = _req_target
+        if next_agent_resolved and not is_done:
+            try:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", next_agent_resolved,
+                                next_agent_resolved)
+            except Exception as e:
+                log.warning(f"takeover: set_issue_stage({next_agent_resolved}) failed: {e}")
     # next_step 只有推进后才知道 → 补一次 events.structured_output（update_event_complete
     # 对终态事件是幂等跳过，不能二次覆盖，所以这里直接改结构化列）
     if event_seq and next_agent_resolved and _structured.get("next_step") != next_agent_resolved:
@@ -1848,18 +2276,26 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
 
     # ④ 可选派发下一节点
     handoff_result: dict = {"ok": False, "skipped": True}
+    handoff_attempted = False
+    handoff_target = ""
     if outcome == "completed" and not is_done and handoff == "a2a":
-        target = (next_agent or next_agent_resolved or "").strip()
+        target = (next_agent_resolved or "").strip()
+        handoff_target = target
+        if not target:
+            handoff_result = {"ok": False, "skipped": True, "reason": "next_agent_unresolved"}
+            log.warning(f"takeover: finish {session_id} advanced but no next agent resolved "
+                        f"(agent={agent_type or '-'})")
         existing = downstream_event_exists(repo_key, issue_number, target, int(sess.get("event_seq") or 0)) if target else None
         if existing:
             log.info(f"takeover: skip handoff to {target} — already dispatched seq={existing['seq']} "
                      f"status={existing['status']}")
             handoff_result = {"ok": True, "skipped": True, "reason": "already_dispatched",
                               "seq": existing["seq"]}
-        if not handoff_result.get("seq"):
+        if not handoff_result.get("seq") and target:
             ctx = (f"由用户 {user.get('username') or ''} 在本机接管完成节点 {agent_type}；"
                    f"summary: {summary or ''}；evidence: {evidence or ''}；"
                    f"files: {', '.join(files_written or [])}")
+            handoff_attempted = True
             handoff_result = _dispatch_next(repo_key=repo_key, issue_number=issue_number,
                                             next_agent=target, context=ctx,
                                             runtime_id=int(sess.get("runtime_id") or 0),
@@ -1877,39 +2313,63 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
             except Exception as _e:
                 log.debug(f"takeover.py best-effort skipped: {_e}")
 
+    # ⑤ 外层失败语义：真实派发失败时不得返回干净成功（降级 partial + 强 warnings）
+    out_warnings: list[str] = []
+    out_ok = True
+    if handoff_attempted and not handoff_result.get("ok"):
+        out_ok = False
+        err = str(handoff_result.get("error") or "unknown")[:300]
+        out_warnings.append(f"handoff_failed:target={handoff_target or '-'};error={err}")
+        log.warning(f"takeover: finished PARTIAL {session_id} — handoff to "
+                    f"{handoff_target or '-'} failed: {err}")
+
     log.info(f"takeover: finished {session_id} event={outcome} next={next_agent_resolved or '-'} "
              f"handoff_ok={handoff_result.get('ok')} done={is_done} skipped={_skipped_count}")
     _sess_view = get_session(session_id) or sess
     _sess_view = dict(_sess_view)
     _sess_view["skipped_dispatches"] = _skipped_count
-    return {"ok": True, "changed": True, "status": ST_FINISHED,
-            "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
-            "next_agent": next_agent_resolved or next_agent,
-            "handoff": handoff_result, "session": _sess_view,
-            "skipped_dispatches": _skipped_count,
-            "skipped_message": _skipped_message}
+    out = {"ok": out_ok, "changed": True, "status": ST_FINISHED,
+           "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
+           "next_agent": next_agent_resolved or next_agent,
+           "backfilled": _backfilled,
+           "handoff": handoff_result, "session": _sess_view,
+           "skipped_dispatches": _skipped_count,
+           "skipped_message": _skipped_message}
+    if out_warnings:
+        out["partial"] = True
+        out["warnings"] = out_warnings
+    return out
 
 
 def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str = "",
-                   auth_headers: dict | None = None, base_url: str = "") -> None:
-    """finish 之后补派发（幂等键 = session_id + next_agent）。"""
+                   auth_headers: dict | None = None, base_url: str = "") -> bool:
+    """finish 之后补派发（幂等键 = session_id + next_agent）。返回是否派发成功。"""
     target = (sess.get("next_agent") if sess.get("next_agent") else "") or next_agent
     if not target:
-        # 从场景重新推一次
         target, _ = _advance_stage(sess.get("repo_key") or "", _issue_num(sess.get("issue_id") or ""),
                                    sess.get("agent_type") or "")
+    if not target:
+        target, _ = _next_agent_from_scene(sess.get("repo_key") or "",
+                                           _issue_num(sess.get("issue_id") or ""),
+                                           sess.get("agent_type") or "")
     if not target or target == "done":
-        return
+        return True
     ctx = f"由用户 {user.get('username') or ''} 接管完成节点 {sess.get('agent_type')}；summary: {summary}"
     res = _dispatch_next(repo_key=sess.get("repo_key") or "", issue_number=_issue_num(sess.get("issue_id") or ""),
                          next_agent=target, context=ctx,
                          runtime_id=int(sess.get("runtime_id") or 0), auth_headers=auth_headers,
                          base_url=base_url)
     if res.get("ok"):
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE takeover_sessions SET handoff_seq=? WHERE id=?", (int(res.get("seq") or 0), sess["id"]))
-            db.commit()
+        seq = int(res.get("seq") or 0)
+        if seq > 0:
+            # 只有真实 seq 才算派发进展：seq=0 无进展，若落库会让幂等键误以为已交接。
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE takeover_sessions SET handoff_seq=? WHERE id=?", (seq, sess["id"]))
+                db.commit()
+        return True
+    log.warning(f"takeover: retry handoff to {target} failed: {res.get('error')}")
+    return False
 
 
 def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch: bool = True) -> dict:

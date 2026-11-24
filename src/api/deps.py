@@ -318,6 +318,31 @@ def require_admin(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
 
+
+def get_current_user_or_api_key_or_admin(request: Request) -> dict:
+    """业务 API 认证入口 + 管理台 JWT 兜底（Issue #3855）。
+
+    普通用户 JWT / API Key / 会话 token 按 `get_current_user_or_api_key` 原样解析；
+    Bearer 若是合法管理台 JWT（role=admin + admin_accounts token_version 校验），
+    则以 `token_type='admin'` 返回管理台身份（不进入 grape_accounts 查询）。
+
+    为什么单独开一个入口：admin JWT 的 sub 是 admin_accounts id，与 grape_accounts
+    完全独立，走 get_current_user 必然 401；但不能把 admin 身份塞进通用
+    `get_current_user_or_api_key`，否则管理台 token 会顺带获得普通用户能力位。
+    只有同时服务普通用户与管理员的端点（官方技能改名/详情）才使用本依赖。
+    """
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        # 管理台 JWT 先走 require_admin（role=admin + admin_accounts token_version），
+        # 避免把 admin id 误送 grape_accounts 查询；非 admin / 非法 token 回落常规链路。
+        if token and not token.startswith(("tk_", "grape_", "tko_")):
+            from src.kernel.auth_sdk.jwt_utils import verify_access_token
+            _payload = verify_access_token(token)
+            if _payload and _payload.get("role") == TOKEN_TYPE_ADMIN:
+                return require_admin(authorization=auth)
+    return get_current_user_or_api_key(request)
+
 def require_user_or_takeover(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """允许"用户身份"或"接管 token"（tko_）。
 
@@ -350,6 +375,22 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     return user
 
 
+def require_no_session_token_or_admin(
+        user: dict = Depends(get_current_user_or_api_key_or_admin)) -> dict:
+    """`require_no_session_token` + 管理台 JWT（Issue #3855）。
+
+    常规用户/API Key 维持 user_scope 能力校验；管理台 JWT（token_type='admin'）
+    直接放行，供官方技能改名这类「管理员专属」端点复用同一路由。
+    """
+    if str(user.get("token_type") or "") == TOKEN_TYPE_ADMIN:
+        return user
+    from src.api.auth_caps import USER_SCOPE, has_capability
+    if not has_capability(user, USER_SCOPE):
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "Session token not allowed on this endpoint (account/platform management)"})
+    return user
+
+
 def require_org_api_user(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """组织运行态 API 鉴权：允许 JWT / API Key / 任务会话 token（dual）。
 
@@ -357,6 +398,101 @@ def require_org_api_user(user: dict = Depends(get_current_user_or_api_key)) -> d
     放行三类凭据；具体路由仍必须执行组织成员/管理员校验以及仓库或目标范围校验。
     """
     return user
+def _resolve_user_or_platform_admin(request: Request, authorization: str = Header(None)) -> dict:
+    """解析「平台管理员 或 登录用户」身份（Issue #3396）。
+
+    平台管理员（admin_accounts 独立身份体系，与 grape_accounts 解耦）：role=admin
+    的 JWT 且 token_version 与 admin_accounts 一致 → 直接返回并标记
+    is_platform_admin=True；否则回落通用用户认证（JWT 用户 / 用户级 API Key），
+    is_platform_admin=False。session_token 语义由调用方按需拒绝。
+    """
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "").strip()
+        try:
+            from src.api.jwt_utils import verify_access_token
+            payload = verify_access_token(token)
+        except Exception:
+            payload = None
+        if payload and payload.get("role") == TOKEN_TYPE_ADMIN:
+            uid = int(payload.get("sub", 0) or 0)
+            try:
+                from src.domains.mgmt.admin.db import get_admin_token_version
+                db_ver = get_admin_token_version(uid)
+            except Exception:
+                db_ver = -1
+            if uid and db_ver >= 0 and int(payload.get("ver", 0) or 0) == db_ver:
+                return {"id": uid, "username": payload.get("username", ""), "token": token,
+                        "token_type": TOKEN_TYPE_ADMIN, "auth_type": "jwt",
+                        "is_platform_admin": True}
+    user = get_current_user_or_api_key(request)
+    return {**user, "is_platform_admin": False}
+
+
+def _check_runtime_owner_or_admin(runtime_id: int, user: dict) -> dict:
+    """权限矩阵本体（两个路由命名空间的依赖共用同一判定）。
+
+    可改面 = 引擎凭据所有者（user 本人 / org owner+admin）+ 平台管理员：
+    - 平台管理员 ✅（全放行，含本机直连 credential_id=0）
+    - 凭据所有者本人（runtime_credentials.owner_name 匹配）✅
+    - 凭据归属组织的 owner/admin ✅
+    - 仓库管理员 ❌（仓库与机器无责任关系，用户裁定禁改）
+    - 其他登录用户 ❌；本机直连（credential_id=0）仅平台管理员 ✅
+    - session_token ❌（账户/平台管理语义，沿用 require_no_session_token 口径）
+    读接口（GET role-tags）保持全员可读，不受本依赖影响。
+    """
+    if user.get("auth_type") == "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "Session token not allowed on this endpoint (account/platform management)"})
+    if user.get("is_platform_admin"):
+        return user
+    # F3（A11）：归属表读走运行域 public 具名查询（api 层不再直连 runtime 表，
+    # 棘轮守卫 foreign_table_refs.py --check 保持基线；三库拓扑下由 owner DSN 承接）。
+    from src.domains.runtime.public import read_one_any as _runtime_read_one
+    row = _runtime_read_one("runtime_credential_ref_any", (runtime_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    credential_id = row[0] or 0
+    if credential_id == 0:
+        # 本机直连是主控机资产，与个人凭据无归属关系 → 仅平台管理员可改
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "本机直连引擎的角色标签仅平台管理员可修改"})
+    cred = _runtime_read_one("runtime_credential_owner_org_any", (credential_id,))
+    if not cred:
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "引擎凭据不存在或已注销，禁止修改角色标签"})
+    owner_name = (cred[0] or "").strip()
+    # D105 第三批：org_id 为 str（uuid，''=未归属哨兵），不再按 int 比较
+    org_id = str(cred[1] or "").strip()
+    uid = user.get("id") or 0
+    username = (user.get("username") or "").strip()
+    if owner_name and username and owner_name.lower() == username.lower():
+        return user
+    if org_id:
+        try:
+            from src.domains.mgmt.user.org_db import get_member_role
+            if get_member_role(str(uid), org_id) in ("owner", "admin"):
+                return user
+        except Exception as e:
+            log.warning(f"require_runtime_owner_or_admin: org role check failed: {e}")
+    raise HTTPException(status_code=403, detail={"code": 403,
+                                                  "message": "仅引擎凭据所有者（本人/组织管理员）或平台管理员可修改角色标签"})
+
+
+def require_runtime_owner_or_admin(runtime_id: int,
+                                   user: dict = Depends(_resolve_user_or_platform_admin)) -> dict:
+    """运行域 `PUT /runtimes/{runtime_id}/tags` 的写权限依赖（Issue #3396 / A5）。"""
+    return _check_runtime_owner_or_admin(runtime_id, user)
+
+
+def require_settings_runtime_owner_or_admin(rid: int,
+                                            user: dict = Depends(_resolve_user_or_platform_admin)) -> dict:
+    """settings 面 `.../agent-runtimes/{rid}/tags` 的写权限依赖（Issue #3396 F1 / A9）。
+
+    路径参数名是 `rid`（沿用既有 settings 契约，不改 OpenAPI）；判定与运行域
+    `require_runtime_owner_or_admin` 共用 `_check_runtime_owner_or_admin`，避免
+    同一张 engine_capabilities 出现第二套权限口径。
+    """
+    return _check_runtime_owner_or_admin(rid, user)
 
 
 def require_jwt_only(user: dict = Depends(get_current_user_or_api_key)) -> dict:

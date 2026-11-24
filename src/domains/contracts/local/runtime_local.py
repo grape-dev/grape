@@ -169,7 +169,7 @@ class RuntimeServiceLocal(RuntimeService):
         from src.domains.runtime.public import inflight_task_count_any
         return int(inflight_task_count_any(repo_keys))
 
-    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+    def get_issue_card(self, repo_key: str, issue_number: "int | str") -> dict:
         """A Issue 卡片状态——复用 runtime public 的 issue_card_row 具名查询。
 
         不自己拼 SQL：字段顺序与过滤条件都在 owner 域里定义，这里只做形状归一，

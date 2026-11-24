@@ -37,6 +37,9 @@ import contextvars
 request_id_var: contextvars.ContextVar = contextvars.ContextVar("request_id", default="-")
 repo_var: contextvars.ContextVar = contextvars.ContextVar("repo_key", default="")
 user_var: contextvars.ContextVar = contextvars.ContextVar("user_id", default="")
+# 请求路径（原始 URL path）：db_lock 排障用——慢等待/慢持有时日志能指到「哪条请求」，
+# 指标侧再把数字/uuid 段归一成 {id} 控制标签基数（见 src/kernel/db_lock_metrics.py）。
+path_var: contextvars.ContextVar = contextvars.ContextVar("path", default="")
 # 本次处理对应的 Issue（issue 号或 issue_id）与事件序号（events.seq）。
 # agent 任务执行期间由 _execute_task 绑定，便于在 Loki 里按 repo/issue/seq 过滤。
 issue_var: contextvars.ContextVar = contextvars.ContextVar("issue_id", default="")

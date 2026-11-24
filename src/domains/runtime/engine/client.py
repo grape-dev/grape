@@ -6,6 +6,13 @@ runtime_gone（404）→ 清理本地 → 幂等重注册。
 """
 import asyncio, json, logging, os, time
 
+from src.domains.runtime.engine.runtime_id_guard import (
+    RUNTIME_ID_MISSING,
+    RuntimeIdMissingError,
+    missing_runtime_id_error,
+    parse_runtime_id,
+)
+
 log = logging.getLogger("devops-bot")
 
 
@@ -64,6 +71,9 @@ class RuntimeClient:
         self._uid_by_rid = {}    # runtime_id -> engine_uid（register 响应 / 本地持久化）
         self._v2_enabled = True  # 空白 404/405 判定对端为旧服务端后置 False（记忆，不再每轮撞 v2）
         self.last_register_detail = []
+        # Issue #4082：最近一次注册回包里被判定非法的 runtime id 原始值（逐条过滤后仍保留
+        # 合法 id；调用方据此把下次重注册提前，补齐错 id 的引擎）
+        self.last_register_invalid_ids: list[str] = []
         self._load_engine_uids()
 
     # ------------------------------------------------------------------
@@ -115,19 +125,25 @@ class RuntimeClient:
     # Issue #1011：v2 调用原语（404 语义二分）
     # ------------------------------------------------------------------
 
-    async def _request_raw(self, method: str, path: str, body=None, retries: int = 1):
+    async def _request_raw(self, method: str, path: str, body=None, retries: int = 1, session=None):
         """一次性探测请求：返回 (status, json_or_None, text)。
 
         与 _request 的区别：不吞 404，供 v2-first 回退判定按「空白 404/405 =
         旧服务端」vs「body 带 UNKNOWN_ENGINE_UID = uid 失效」二分。
+        session：可选专用会话（标签探活走短超时 _poll_session，Issue #4082——
+        探活失败必须快速失败，不能用 30s 主会话把 claim 循环拖住）。
         """
         delay = 2
         attempt = 0
         while True:
-            await self._ensure_session()
+            if session is not None:
+                _sess = session
+            else:
+                await self._ensure_session()
+                _sess = self._session
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                async with self._session.request(method, self.base + path, json=body, headers=headers) as resp:
+                async with _sess.request(method, self.base + path, json=body, headers=headers) as resp:
                     text = ""
                     try:
                         text = await resp.text()
@@ -344,11 +360,31 @@ class RuntimeClient:
         # Issue #471 S2：暴露最近一次注册明细（{id, name}），供 _reregister 按 name
         # 配对 rid→引擎（个别引擎被跳过时位置对齐会错位）。测试 Fake 亦可提供该属性。
         self.last_register_detail = _detail
-        ids = [r["id"] for r in _detail]
+        # Issue #4082：注册回包必须回填**真实 id**——非法 id（0/None/"abc"）不再作为
+        # runtime_ids 兜底。0 是非法 id，放行就会让后续探活/心跳拼出 /runtimes/0/*
+        # 恒 401（生产 15 台 worker 正是这条路径静默失败）。
+        # PR #2066 审查 Optional ①：**逐条过滤**，不因一个异常 id 把整响应判死——同响应里的
+        # 合法 id 照常回填（否则单个引擎错 id 会让全部引擎离线到下次注册成功）；非法项
+        # 仍作为「注册未完成」信号挂在 `last_register_invalid_ids`，由调用方缩短重注册间隔补齐。
+        ids: list[int] = []
+        invalid_ids: list[str] = []
+        for r in _detail:
+            rid = parse_runtime_id(r.get("id"))
+            if rid is None:
+                invalid_ids.append(str(r.get("id")))
+            else:
+                ids.append(rid)
+        self.last_register_invalid_ids = invalid_ids
+        if invalid_ids:
+            err = missing_runtime_id_error(",".join(invalid_ids), context="register_reply")
+            log.error(f"{RUNTIME_ID_MISSING} {err.message} — register reply carried "
+                      f"{len(invalid_ids)} invalid runtime id(s); kept {len(ids)} valid id(s) "
+                      f"and scheduling re-register for the rest: {invalid_ids}")
         # Issue #1011：register 响应双带 {id, engine_uid} → uid 映射 + 本地持久化
         # （重启后 claim 不依赖服务端 id 记忆；旧服务端无 engine_uid 字段静默忽略）
         try:
-            self._remember_register_detail(_detail)
+            self._remember_register_detail(
+                [r for r in _detail if parse_runtime_id(r.get("id")) is not None])
         except Exception as _e:
             log.warning(f"register uid map persist failed: {_e}")
         return ids, (data.get("probe_url") or "")
@@ -559,6 +595,21 @@ class RuntimeClient:
         metrics: worker 系统资源指标 {cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, spec}
         probe_results: worker 引擎探测结果 {engine_name: {status, latency, last_probe, error}}
         """
+        # Issue #4082：心跳只上报**合法正整数** id。0/None/"abc" 进 payload 只会被服务端
+        # 静默忽略（甚至造出 0 号探活），既掩盖注册态缺失又把日志刷满 401 噪声。
+        _raw_ids = list(runtime_ids or [])
+        _valid_ids = [rid for rid in (parse_runtime_id(x) for x in _raw_ids) if rid is not None]
+        if len(_valid_ids) != len(_raw_ids):
+            _bad = [str(x) for x in _raw_ids if parse_runtime_id(x) is None]
+            log.error(f"{RUNTIME_ID_MISSING} heartbeat dropped {len(_bad)} invalid runtime "
+                      f"id(s) (host probe cannot address them): {_bad}")
+        if not _valid_ids and _raw_ids:
+            # 有 id 但全部非法：不发心跳（发了也刷不到任何行），返回 None 让主循环
+            # 计入心跳连败 → 达阈值后强制重注册（退避重试，自愈取回真实 id）。
+            log.error(f"{RUNTIME_ID_MISSING} heartbeat skipped: no valid runtime id "
+                      f"(raw={_raw_ids}); re-register will be retried with backoff")
+            return None
+        runtime_ids = _valid_ids
         payload = {"runtime_ids": runtime_ids}
         if log_lines:
             payload["log_lines"] = log_lines
@@ -595,6 +646,7 @@ class RuntimeClient:
         Issue #1011：claim v2-first（uid 寻址；uid 失效回退 v1 id；空白 404 记忆切 v1）。
         """
         _payload = {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback}
+        runtime_id = self._guard_runtime_id(runtime_id, "claim")
         _uid = self.uid_for(runtime_id)
         if _uid and self._v2_enabled:
             _payload["runtime_id"] = runtime_id   # uid 失效时的兜底锚
@@ -622,6 +674,8 @@ class RuntimeClient:
         调用方通过 .get("task") 取任务、.get("scan_request") 取扫描指令。
         """
         _payload = {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback}
+        # Issue #4082：claim-by-tag 同样在拼 URL 前守卫非法 id（0 会拼出 /runtimes/0/*）
+        runtime_id = self._guard_runtime_id(runtime_id, "claim_by_tag")
         # Issue #1011：claim-by-tag v2-first（同主 claim）
         _uid = self.uid_for(runtime_id)
         if _uid and self._v2_enabled:
@@ -649,13 +703,60 @@ class RuntimeClient:
 
         Called periodically by the claim loop to get the current tag list.
         Enables real-time tag updates via console without worker restart.
+
+        Issue #4082：探活主路径改为 ``probe_tags``（带失败归因），本方法保留为薄包装
+        兼容既有调用方/测试 Fake；id 合法性与失败语义全部在 ``probe_tags`` 里。
         """
-        _poll = await self._poll_session()
-        data = await self._request("GET", f"/api/runtime/runtimes/{runtime_id}/tags",
-                                   retries=1, session=_poll)
-        if not data:
-            return []
-        return data.get("tags") or []
+        tags, _reason = await self.probe_tags(runtime_id)
+        return tags
+
+    def _guard_runtime_id(self, runtime_id, context: str) -> int:
+        """拼 URL 前校验 runtime id 为正整数（Issue #4082）。
+
+        非法 id 会拼出 ``/runtimes//tags``（服务端归一为 0）→ 恒 401 的静默失败，
+        因此这里**直接抛结构化 ``RUNTIME_ID_MISSING``，不发任何 HTTP**。
+        """
+        rid = parse_runtime_id(runtime_id)
+        if rid is None:
+            err = missing_runtime_id_error(runtime_id, context=context)
+            log.error(f"{RUNTIME_ID_MISSING} {err.message}")
+            raise err
+        return rid
+
+    async def probe_tags(self, runtime_id) -> tuple[list[str], str]:
+        """标签探活（Issue #4082）：返回 ``(tags, reason)``，不抛凭据异常。
+
+        reason 口径（与服务端指标/告警标签一致）：
+
+        - ``id_missing``：id 缺失/非法 → **不发请求**（401 噪声的源头，此路径已断）；
+        - ``no_tags``：已注册但无标签（稳态，需可观测而不是静默为空）；
+        - ``unauthorized``：401（配置/归属不对，**不再当凭据吊销**——否则会误杀 worker）；
+        - ``not_found``：404（runtime 行已被删/重建窗口）；
+        - ``""``：成功且拿到标签；``network``/``http_<code>``：其它失败（不计连续失败）。
+        """
+        rid = parse_runtime_id(runtime_id)
+        if rid is None:
+            err = missing_runtime_id_error(runtime_id, context="tags_probe")
+            log.error(f"{RUNTIME_ID_MISSING} {err.message}")
+            return [], "id_missing"
+        status, data, _text = await self._request_raw(
+            "GET", f"/api/runtime/runtimes/{rid}/tags", retries=1,
+            session=await self._poll_session())
+        if status == 200:
+            raw = data.get("tags") if isinstance(data, dict) else None
+            tags = [t for t in (raw or []) if isinstance(t, str) and t]
+            return tags, ("" if tags else "no_tags")
+        if status == 401:
+            return [], "unauthorized"
+        if status == 404:
+            return [], "not_found"
+        if status == 400:
+            # 服务端判定 id 非法（含被改写的 0）——语义等同于本地守卫命中
+            log.error(f"{RUNTIME_ID_MISSING} server rejected runtime_id={rid} as invalid (400)")
+            return [], "id_missing"
+        if status == 0:
+            return [], "network"
+        return [], f"http_{status}"
 
     async def get_task_env(self, task_id: str) -> dict:
         """Fetch latest env (AK/SK + credentials) for a task from server DB.
@@ -811,12 +912,14 @@ class RuntimeClient:
         便于 worker 观测白名单是否生效；请求失败返回空 dict。
         """
         body = {} if active_task_ids is None else {"active_task_ids": list(active_task_ids)}
+        runtime_id = self._guard_runtime_id(runtime_id, "recover_orphans")
         resp = await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/recover-orphans",
                                    body, retries=2)
         return resp if isinstance(resp, dict) else {}
 
     async def report_skills(self, runtime_id: int, skills: list[dict]):
         """回报 skill 扫描结果给服务端（scan_request 指令的响应）。"""
+        runtime_id = self._guard_runtime_id(runtime_id, "report_skills")
         await self._request("POST", f"/api/runtime/runtimes/{runtime_id}/skills-report",
                             {"skills": skills}, retries=2)
 

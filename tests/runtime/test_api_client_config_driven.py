@@ -1,6 +1,7 @@
 """S14/D13：VCS API 命令层配置驱动——gitee 走 VcsApiClient 零代码命令面。"""
 import io
 import json
+import urllib.error
 from unittest.mock import patch
 
 import pytest
@@ -220,6 +221,47 @@ def test_gitlab_dialect_refuses_github_style_path(gitlab_card):
     client = VcsApiClient("gitlab", "tok", "account-a", "demo")
     with pytest.raises(VcsPathContractError):
         client._generic_path("/repos/account-a/demo/issues")
+
+
+def test_query_token_auth_failure_log_redacted(gitee_card, monkeypatch, caplog):
+    """query 形态（Issue #4064）：请求 URL 仍带 token，日志只留 `access_token=***`。"""
+    import src.kernel.upstream_http as _uh
+    seen = {}
+
+    def boom(req, **kw):
+        seen["url"] = req.full_url
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                     io.BytesIO(b'{"error":"bad token"}'))
+
+    monkeypatch.setattr(_uh, "open_with_policy", boom)
+    with caplog.at_level("WARNING"):
+        VcsApiClient("gitee", "TK_SECRET_QUERY", "oschina", "grape").get_issue(5)
+    assert seen["url"].endswith("?access_token=TK_SECRET_QUERY")   # 鉴权形态不变
+    assert "access_token=TK_SECRET_QUERY" not in caplog.text
+    assert "access_token=***" in caplog.text
+
+
+@pytest.mark.parametrize("provider,token,header", [
+    ("github", "TK_SECRET_HEADER", "Authorization"),
+    ("gitlab", "TK_SECRET_PRIVATE", "PRIVATE-TOKEN"),
+])
+def test_header_token_auth_failure_log_redacted(provider, token, header, monkeypatch, caplog):
+    """header 形态（Issue #4064）：URL 不含 token，异常串回显 header 也须打码。"""
+    import src.kernel.upstream_http as _uh
+    seen = {}
+
+    def boom(req, **kw):
+        seen["headers"] = dict(req.headers or {})
+        seen["url"] = req.full_url
+        dumped = "; ".join(f"{k}: {v}" for k, v in seen["headers"].items())
+        raise ConnectionError(f"upstream refused {req.full_url} ({dumped})")
+
+    monkeypatch.setattr(_uh, "open_with_policy", boom)
+    with caplog.at_level("WARNING"):
+        VcsApiClient(provider, token, "own", "repo").get_issue(1)
+    assert token in "".join(seen["headers"].values())            # 请求本身仍带凭据
+    assert token not in caplog.text
+    assert "VcsApiClient: GET" in caplog.text
 
 
 def test_every_generic_path_call_site_declares_gitlab_form():

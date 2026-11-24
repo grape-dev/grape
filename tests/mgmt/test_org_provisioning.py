@@ -570,9 +570,10 @@ def test_retry_ready_does_not_reset_status(monkeypatch):
     from src.api.deps import get_current_user_or_api_key
     from src.api.main import app
     from src.domains.mgmt.routes import orgs as orgs_route
+    from src.domains.mgmt.user.org_db import update_org_provision_fields
 
     org_id = _seed_team_org()
-    orgs_route.update_org_provision_fields(org_id, provision_status="ready")
+    update_org_provision_fields(org_id, provision_status="ready")
     scheduled = []
     monkeypatch.setattr(orgs_route, "start_provision", lambda oid: scheduled.append(oid))
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {

@@ -53,6 +53,7 @@ git-repo/git-credential/workspace 会被标成 `dual`，**永远推导不出 `se
 ```python
 # 1) session_only：依赖链命中白名单守卫（未来若守卫化）或路径/operation_id 命中覆盖表 → session_only
 # 2) user_only  ：依赖链命中 require_no_session_token         → user_only  （156 端点）
+# 2b) user_or_admin：依赖链命中 require_no_session_token_or_admin → user_or_admin（管理台 JWT，Issue #3855）
 # 3) dual       ：依赖链命中 get_current_user_or_api_key /
 #                 get_user_or_none（a2a 软认证，三通道或 None）→ dual
 # 4) 其余不标   ：无对外认证依赖（不应进契约，已由 route_is_public 排除）
@@ -110,7 +111,7 @@ def token_scope(route) -> str | None:
 operation_id 与契约测试。
 
 **L2 scope 必填存在性（新增）**：`test_public_ops_have_x_token_scope` 断言每个公开 op 的
-`x-token-scope ∈ {user_only, session_only, dual}`，绝不遗漏标注。
+`x-token-scope ∈ {user_only, user_or_admin, session_only, dual}`，绝不遗漏标注。
 
 **L3 双向一致性守卫（新增）**：`test_x_token_scope_consistency`：
 - 覆盖表/前缀规则命中的 operation 必须在契约中且被标 `session_only`（防删/改残留）；

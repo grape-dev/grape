@@ -26,6 +26,9 @@ from src.domains.mgmt import public as _mgmt_public
 
 from src.kernel.config import log
 
+# Issue #4064：去重探测日志的脱敏出口（与 VcsApiClient 共用同一 helper）
+from src.domains.runtime.vcs.redact import redact_text
+
 # 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
 # 与 src/domains/runtime/storage/scene_sync.py 同源：grape-dev/grape-skills）
 _OFFICIAL_SKILLS_REPO = "grape-dev/grape-skills"
@@ -182,7 +185,9 @@ def _find_existing_open_issue(provider, owner, repo, token, title):
         try:
             items = mod.request("GET", url, "")
         except Exception as e:
-            log.warning(f"feedback→issue: title probe failed {provider}:{owner}/{repo}: {e}")
+            # Issue #4064：异常串常回带含 access_token 的 URL，日志出口统一脱敏
+            log.warning(f"feedback→issue: title probe failed {provider}:{owner}/{repo}: "
+                        f"{redact_text(e)}")
             return None
         if not isinstance(items, list):
             return None

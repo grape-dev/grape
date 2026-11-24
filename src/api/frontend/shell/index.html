@@ -8,9 +8,9 @@
 <link rel="icon" type="image/png" sizes="48x48" href="/static/favicon-48.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon-180.png">
 <link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
-<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=10">
+<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=11">
 <!-- view 级样式合并产物：阻塞加载，避免首帧无样式（见 vite closeBundle）-->
-<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=72">
+<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=73">
 <link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
 <link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
 <script>
@@ -22,7 +22,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='87';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='88';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -127,35 +127,45 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <script>
 // i18n.js is loaded with defer in <head> — it auto-inits.
 // Here we only update language switch labels after DOMContentLoaded.
-// ===== 启动看门狗（本地加固，内联执行：即使 app.js 加载/执行失败也能兜底）=====
-// 现象：个别浏览器状态会让 #pageContent 永远停在「加载中...」且不发任何 API 请求。
-// 15s 未渲染任何视图 → 首次清站点缓存重载一次；仍失败 → 明确报错 + 一键清登录态。
+/* 启动看门狗：30 秒仍未渲染出视图 → 只提示 + 给「重试」按钮，不自动重载。
+   原逻辑在 15 秒时自动 location.reload()，服务端偶发卡顿（事件循环被同步 IO
+   阻塞）时会把"慢一次"放大成"反复重载"，十来个并发请求再来一轮，雪崩。
+   现在把决定权交给用户，且等待窗口放宽到 30 秒。 */
 (function () {
+  /* 看门狗等待窗口（架构守护 F5：不写散落字面量，取值有据）：
+     - 修复前 15s，RUM 24h 内 [boot-watchdog] 触发 18 次（误杀）；
+     - 事故期实测 lcp=15152ms、element_render_delay=15081ms、ttfb=70.5ms，
+       即「服务端慢」时首屏要 15s+；
+     - 取 2× 观测值 = 30s 作为兜底上限，后续有 P95/P99 直接替换此常量。 */
+  var BOOT_WATCHDOG_MS = 30000;
+  var _t = function (k, fb, vars) {
+    try { return (window.I18N && I18N.t) ? I18N.t(k, vars || null, fb) : fb; } catch (e) { return fb; }
+  };
   setTimeout(function () {
     try {
+      // 只在应用内页（/app/...）启用；登录/注册页没有 #pageContent.loading，误报会挡住表单
+      if (location.pathname.indexOf('/app') !== 0) return;
       if (window._currentView) return;
       var pc = document.getElementById('pageContent');
       if (!pc || !pc.querySelector('.loading')) return;
-      var last = 0;
-      try { last = parseInt(sessionStorage.getItem('boot_retry_at') || '0', 10) || 0; } catch (e) {}
-      if (Date.now() - last > 60000) {
-        try {
-          sessionStorage.setItem('boot_retry_at', String(Date.now()));
-          localStorage.removeItem('app_cache_ver');
-          sessionStorage.removeItem('currentRepo');
-        } catch (e) {}
-        console.warn('[boot-watchdog] 页面初始化超时，清理站点缓存后重载');
-        window.location.reload();
-        return;
-      }
+      var _secs = Math.round(BOOT_WATCHDOG_MS / 1000);
+      console.warn('[boot-watchdog] 页面初始化超过 ' + _secs + ' 秒，显示重试入口（不自动重载）');
       pc.innerHTML = '<div style="padding:32px;max-width:520px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif;text-align:center">' +
-        '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">页面初始化超时</div>' +
-        '<div style="font-size:13px;color:#6e6e73;line-height:1.6;margin-bottom:16px">前端脚本未能完成启动（已自动重试过一次）。请点下方按钮清除本地登录态后重新登录。</div>' +
-        '<button onclick="try{localStorage.clear()}catch(e){};try{sessionStorage.clear()}catch(e){};location.reload()" ' +
-        'style="padding:10px 18px;border:none;border-radius:10px;background:#0071e3;color:#fff;font-size:13px;font-weight:600;cursor:pointer">清除登录态并重新加载</button>' +
+        '<div style="font-size:15px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:8px">' + _t('app.boot.watchdog_title', '页面还在加载') + '</div>' +
+        '<div style="font-size:13px;color:var(--t3,#6e6e73);line-height:1.6;margin-bottom:16px">' + _t('app.boot.watchdog_body', '服务端响应较慢，已等待 ' + _secs + ' 秒。可以再等一下，或点下方按钮重试。', { secs: _secs }) + '</div>' +
+        '<button id="bwRetry" style="padding:10px 18px;border:none;border-radius:10px;background:var(--a,#0071e3);color:#fff;font-size:13px;font-weight:600;cursor:pointer;margin-right:8px">' + _t('app.boot.watchdog_retry', '重试') + '</button>' +
+        '<button id="bwClear" style="padding:10px 18px;border:1px solid var(--bd,#d2d2d7);border-radius:10px;background:var(--bg,#fff);color:var(--t1,#1d1d1f);font-size:13px;font-weight:600;cursor:pointer">' + _t('app.boot.watchdog_clear', '清除缓存并重载') + '</button>' +
         '</div>';
+      var r = document.getElementById('bwRetry');
+      if (r) r.onclick = function () { window.location.reload(); };
+      var c = document.getElementById('bwClear');
+      if (c) c.onclick = function () {
+        try { localStorage.clear(); } catch (e) {}
+        try { sessionStorage.clear(); } catch (e) {}
+        window.location.reload();
+      };
     } catch (e) { /* 看门狗不得影响页面 */ }
-  }, 15000);
+  }, BOOT_WATCHDOG_MS);
 })();
 document.addEventListener('DOMContentLoaded', function(){
   _updateLoginLangLabel();
@@ -265,25 +275,25 @@ function _toggleAppLang(){
 <script src="/static/js/api.js?v=37" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
-<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=91"></script>
-<script type="module" src="/static-vue/viewjs/pipeline.js?v=57"></script>
+<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=92"></script>
+<script type="module" src="/static-vue/viewjs/pipeline.js?v=58"></script>
 <script type="module" src="/static-vue/viewjs/agent-view.js?v=51"></script>
 <script type="module" src="/static-vue/viewjs/event-view.js?v=65"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=63"></script>
 <script type="module" src="/static-vue/viewjs/im-channel.js?v=57"></script>
 <script type="module" src="/static-vue/viewjs/repos-view.js?v=67"></script>
-<script type="module" src="/static-vue/viewjs/issues-view.js?v=70"></script>
+<script type="module" src="/static-vue/viewjs/issues-view.js?v=72"></script>
 <script type="module" src="/static-vue/viewjs/account-view.js?v=63"></script>
 <script type="module" src="/static-vue/viewjs/scene-market.js?v=62"></script>
-<script type="module" src="/static-vue/viewjs/skills-view.js?v=63"></script>
+<script type="module" src="/static-vue/viewjs/skills-view.js?v=64"></script>
 <script type="module" src="/static-vue/viewjs/plugins.js?v=57"></script>
 <script type="module" src="/static-vue/viewjs/knowledge-view.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=91"></script>
+<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=92"></script>
 <script type="module" src="/static-vue/viewjs/observability-view.js?v=59"></script>
 <script type="module" src="/static-vue/viewjs/organizations.js?v=83"></script>
 <script type="module" src="/static-vue/viewjs/feedback-dialog.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback-detail.js?v=50"></script>
-<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=69"></script>
+<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=71"></script>
 <script type="module" src="/static-vue/viewjs/sandbox-view.js?v=15"></script>
 <script src="/static/js/deeplink.js?v=1" defer></script><!-- 深链解析 /app/<owner>/<repo>/#tasks/N -->
 <script src="/static/js/platform-icons.js?v=2" defer></script><!-- 平台图标卡派生（D109 解耦：不写死 gitcode/github） -->

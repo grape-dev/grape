@@ -91,7 +91,10 @@ from src.domains.runtime.vcs.api_client import _native_issue_number
 from src.kernel.issue_ident import (
     is_native_issue_ident, is_actionable_issue_number, native_issue_number,
     normalize_issue_ident,
+    deliverable_comment_ident,  # Issue #4065：可回帖口径（数字平台只认数字）
 )
+# Issue #4065：结果评论投递指标（reason 限枚举 + 连续失败告警），kernel 可安装收集器
+from src.kernel import comment_metrics as _comment_metrics
 
 from src.domains.runtime.engine.direct_executor import (  # noqa: F401 — Phase 3 (#699) 迁往 direct_executor
     _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK,
@@ -709,12 +712,14 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     dispatch_lease_key = ""
     dispatch_lease = False
     if repo_key:
-        from src.kernel.lock import acquire_lock_with_retry, repo_dispatch_lease_key
-        dispatch_lease_key = repo_dispatch_lease_key(repo_key)
-        dispatch_lease = acquire_lock_with_retry(dispatch_lease_key, ttl=30)
-        if not dispatch_lease:
-            log.error(f"create_direct_task: dispatch lease busy for repo={repo_key}")
-            return ""
+        # Issue #3963（复审 Required）：direct 派发与 enqueue_task 共用同一把
+        # repo-dispatch 租约的获取入口 acquire_repo_dispatch_lease（预算 = TTL+5s，
+        # 不再默认 0.95s 撞锁即判死）；预算耗尽抛 RepoDispatchBusyError（瞬态分类），
+        # 由调用方走 #3963 瞬态通道：autopilot 记 skipped + error_code，
+        # SRE 重试按 busy 指纹收口 failed 留待下一轮 claim 复试。
+        from src.domains.runtime.engine.service import acquire_repo_dispatch_lease
+        dispatch_lease_key, _ = acquire_repo_dispatch_lease(repo_key)
+        dispatch_lease = True
 
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名；未迁移旧库/引擎已删不阻断）
     try:
@@ -4590,6 +4595,10 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
             scope = normalize_scope(f.get("scope"))
             if agent_type and "all" not in scope and agent_type not in scope:
                 continue
+            # Issue #4066：平台已注入的键（如按事件/组织注入的 GRAPE_ORG_ID）优先，
+            # 场景 custom_fields 不得覆盖平台上下文（白名单变量放开后的安全边界）。
+            if name in env_extra:
+                continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
         # 注意：本函数内不得再写 `from src.kernel.config import log`——局部 import
@@ -5351,6 +5360,37 @@ def _parse_task_errors(raw):
     return [parsed]
 
 
+def _locate_task_errors_row(c, task_id, seq, repo_key, issue_ident):
+    """定位要追加留痕的 agent_tasks 行 → (where_col, where_val, existing_records)。
+
+    无行时返回 ("", None, None)。优先级：task_id → event_seq → repo_key+issue 兜底。
+    Issue #4065：从 `_record_post_suppressed` 提取，供跳过/卡片兜底留痕共用同一套定位。
+    """
+    if task_id:
+        c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if row:
+            return ("id", task_id, _parse_task_errors(row[0]))
+    elif seq is not None:
+        c.execute(
+            "SELECT errors FROM agent_tasks WHERE event_seq=? "
+            "ORDER BY created_at DESC LIMIT 1", (seq,))
+        row = c.fetchone()
+        if row:
+            return ("event_seq", seq, _parse_task_errors(row[0]))
+    else:
+        _issue_num = str(issue_ident or "").lstrip("#")
+        c.execute(
+            "SELECT id, errors FROM agent_tasks WHERE repo_key=? AND "
+            "(issue_id=? OR issue_id=? OR issue_id LIKE ?) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (repo_key or "", str(issue_ident or ""), _issue_num, f"%{_issue_num}%"))
+        row = c.fetchone()
+        if row:
+            return ("id", row[0], _parse_task_errors(row[1]))
+    return ("", None, None)
+
+
 def _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type, reason, raw_text):
     """Issue #1545 C1/C2：把一次结果回帖抑制留痕写入 agent_tasks.errors。
 
@@ -5373,29 +5413,8 @@ def _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type, re
         _existing = None
         with db_lock:
             c = _rt_db.cursor()
-            if task_id:
-                c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
-                row = c.fetchone()
-                if row:
-                    _where_col, _where_val, _existing = "id", task_id, _parse_task_errors(row[0])
-            elif seq is not None:
-                c.execute(
-                    "SELECT errors FROM agent_tasks WHERE event_seq=? "
-                    "ORDER BY created_at DESC LIMIT 1", (seq,))
-                row = c.fetchone()
-                if row:
-                    _where_col, _where_val, _existing = "event_seq", seq, _parse_task_errors(row[0])
-            else:
-                # 无任务上下文（系统通知等）→ 按 repo_key + issue 兜底定位最近任务
-                _issue_num = str(issue_number or "").lstrip("#")
-                c.execute(
-                    "SELECT id, errors FROM agent_tasks WHERE repo_key=? AND "
-                    "(issue_id=? OR issue_id=? OR issue_id LIKE ?) "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (repo_key or "", str(issue_number or ""), _issue_num, f"%{_issue_num}%"))
-                row = c.fetchone()
-                if row:
-                    _where_col, _where_val, _existing = "id", row[0], _parse_task_errors(row[1])
+            _where_col, _where_val, _existing = _locate_task_errors_row(
+                c, task_id, seq, repo_key, issue_number)
             if _where_col and _existing is not None:
                 for e in _existing:
                     if (isinstance(e, dict) and e.get("error_code") == "RESULT_POST_SUPPRESSED"
@@ -5413,6 +5432,133 @@ def _record_post_suppressed(task_id, seq, repo_key, issue_number, agent_type, re
         log.warning(f"record_post_suppressed: no task row for {repo_key}#{issue_number}")
     except Exception as e:
         log.warning(f"record_post_suppressed failed: {e}")
+
+
+def _append_task_error_record(record, task_id, seq, repo_key, issue_ident, idem_key) -> bool:
+    """幂等追加一条结构化留痕到 agent_tasks.errors（Issue #4065 通用通路）。
+
+    幂等键 = (error_code, idem_key)；5 条上限 + 首条保护式（同 UC7-3 家族）。
+    DB 异常只告警，不影响任务终态与主流程。返回是否成功写入。
+    """
+    if not task_id and seq is None:
+        # 无任务上下文（系统通知/子任务汇总等）：没有可挂靠的任务行，不追加留痕也不查库
+        return False
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            _col, _val, _existing = _locate_task_errors_row(c, task_id, seq, repo_key, issue_ident)
+            if not _col or _existing is None:
+                log.warning(f"task_error_record: no task row for {repo_key}#{issue_ident} "
+                            f"({record.get('error_code')})")
+                return False
+            for e in _existing:
+                if (isinstance(e, dict) and e.get("error_code") == record["error_code"]
+                        and str(e.get("idem_key") or "") == str(idem_key or "")):
+                    return False
+            _rec = dict(record)
+            _rec["idem_key"] = str(idem_key or "")
+            _existing = [e for e in _existing if str(e).strip()]
+            _existing.append(_rec)
+            if len(_existing) > 5:
+                _existing = _existing[:1] + _existing[1:][-4:]
+            c.execute(f"UPDATE agent_tasks SET errors=? WHERE {_col}=?",
+                      (json.dumps(_existing, ensure_ascii=False), _val))
+            _rt_db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"task_error_record failed ({record.get('error_code')}): {e}")
+        return False
+
+
+def _record_result_comment_skipped(reason, repo_key, issue_ident, agent_type, task_id, seq):
+    """Issue #4065：非数字 ident 跳过结果回帖 → 结构化记录 + 指标，零远程请求。
+
+    行格式对齐生产检索口径：`RESULT_COMMENT_SKIPPED reason=<enum> ident=<ident> repo=<rk> task_id=<id>`。
+    """
+    _rk = repo_key or ""
+    _ident = str(issue_ident or "")
+    _reason = _comment_metrics.observe_skipped(reason, _rk)
+    log.warning(f"RESULT_COMMENT_SKIPPED reason={_reason} ident={_ident} repo={_rk} "
+                f"task_id={task_id or '-'} seq={seq if seq is not None else '-'} "
+                f"agent={agent_type or '-'}")
+    _append_task_error_record(
+        {"error_code": "RESULT_COMMENT_SKIPPED", "reason": _reason,
+         "issue_ident": _ident, "repo_key": _rk, "agent_type": agent_type or "",
+         "at": datetime.now(timezone.utc).isoformat()},
+        task_id, seq, _rk, _ident, idem_key=f"skip:{_reason}:{_ident}")
+
+
+def _record_result_card_fallback(conclusion, repo_key, issue_ident, agent_type, task_id, seq):
+    """Issue #4065：无有效 issue_number 的结果落卡片/事件流（不发评论，留痕可读）。
+
+    结果正文本身已由 `update_event_complete(result=...)` 写入 events.result；
+    这里补一条任务级留痕（结论截断 500 字），任务中心/事件流可直接看到「结果去哪了」。
+    """
+    _rk = repo_key or ""
+    _ident = str(issue_ident or "")
+    log.warning(f"RESULT_CARD_FALLBACK ident={_ident} repo={_rk} task_id={task_id or '-'} "
+                f"reason=no_deliverable_issue_number agent={agent_type or '-'}")
+    _append_task_error_record(
+        {"error_code": "RESULT_CARD_FALLBACK", "reason": "no_deliverable_issue_number",
+         "issue_ident": _ident, "repo_key": _rk, "agent_type": agent_type or "",
+         "conclusion": (conclusion or "")[:500],
+         "at": datetime.now(timezone.utc).isoformat()},
+        task_id, seq, _rk, _ident, idem_key=f"fallback:{_ident}")
+
+
+def _task_real_issue_number(task_id, seq, repo_key) -> str:
+    """Issue #4065 双保险：从任务/事件记录解析**可回帖的真实** issue_number。
+
+    合成键任务（`autopilot-<字母>`）本身不是 issue 号；但同一条记录的事件 payload
+    往往带着真实号（`issue_number` / `issue.number` / `number`）。取第一个可投递候选，
+    使「有真实号就凭真实号回帖」不依赖调用方有没有改签名。
+    解析失败/无候选一律返回 ""（交由上层走卡片/事件流兜底）。
+    """
+    _evt_seq = 0
+    _row = None
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            if task_id:
+                c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+                _trow = c.fetchone()
+                if _trow and _trow[0]:
+                    _evt_seq = int(_trow[0])
+            elif seq is not None:
+                c.execute("SELECT event_seq FROM agent_tasks WHERE event_seq=? "
+                          "ORDER BY created_at DESC LIMIT 1", (seq,))
+                _trow = c.fetchone()
+                if _trow and _trow[0]:
+                    _evt_seq = int(_trow[0])
+            if not _evt_seq and seq is not None:
+                _evt_seq = int(seq)
+            if not _evt_seq:
+                return ""
+            c = db.cursor()
+            c.execute("SELECT issue_id, payload FROM events WHERE seq=?", (_evt_seq,))
+            _row = c.fetchone()
+    except Exception as e:
+        log.warning(f"resolve real issue number failed (task={task_id} seq={seq}): {e}")
+        return ""
+    if not _row:
+        return ""
+    _cands = [_row[0]]
+    try:
+        _pl = json.loads(_row[1] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        _pl = {}
+    if isinstance(_pl, dict):
+        _cands.append(_pl.get("issue_number"))
+        _issue = _pl.get("issue")
+        if isinstance(_issue, dict):
+            _cands.append(_issue.get("number"))
+        _cands.append(_pl.get("number"))
+    _provider = _provider_of_repo_key(repo_key)
+    for _cand in _cands:
+        _ident = deliverable_comment_ident(_cand, _provider)
+        if _ident:
+            return _ident
+    return ""
 
 
 def _apply_agent_result_policy(result_text: str, structured_conclusion: str, plain_text: str,
@@ -5490,31 +5636,62 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
                                         "no_conclusion", result_text)
             log.info(f"Exec agent: skip system comment, no conclusion or valid text to post to {repository}/issues/{issue_number}")
             return
+    # Issue #4065：投递前 ident 归一一律按 provider 判定，非数字 ident（autopilot-*/pr_*/IK* 于
+    # 数字平台）绝不落远程 400；有真实号（任务记录/事件 payload）则凭真实号回帖（双保险）。
+    _rk = repo_key or repository
+    _deliver_ident = deliverable_comment_ident(issue_number, _provider_of_repo_key(_rk))
+    if not _deliver_ident:
+        _real_num = _task_real_issue_number(task_id, seq, _rk)
+        if _real_num:
+            log.info(f"Exec agent: resolved real issue number {_real_num} for ident "
+                     f"'{issue_number}' ({_rk}); posting to the real issue")
+            _deliver_ident = _real_num
+    if not _deliver_ident:
+        # 无有效号 → 结果不落评论，落卡片/事件流（结构化留痕，看板/任务中心可读）
+        _record_result_comment_skipped("non_numeric_ident", _rk, issue_number, agent_type,
+                                       task_id, seq)
+        _record_result_card_fallback(_conclusion, _rk, issue_number, agent_type, task_id, seq)
+        return False
     if agent_result:
         _conclusion = _apply_agent_result_policy(
             result_text, _structured_conclusion, _plain_text,
             task_id, seq, repo_key, issue_number, agent_type)
         if not _conclusion:
-            return
+            return False
 
     # D29/S49：评论投递统一走卡驱动（gitcode/github/gitee/gitlab 同路径）
     try:
         # 先查 Issue 已有评论，若已有 agent 评论则跳过（方案 B）
-        _existing = _list_issue_comments_card(repo_key, repository, str(issue_number), bot_token)
+        _existing = _list_issue_comments_card(repo_key, repository, _deliver_ident, bot_token)
         _agent_tag_lower = agent_type.lower()
         for _c in _existing:
             _body = (_c.get("body") or "").lower()
             if _agent_tag_lower in _body and "agent]" in _body:
-                log.info(f"Exec agent: skip system comment, agent already posted to {repository}/issues/{issue_number}")
-                return
+                log.info(f"Exec agent: skip system comment, agent already posted to {repository}/issues/{_deliver_ident}")
+                _comment_metrics.observe_delivered(_rk)
+                return True
         # agent 没发评论，系统补发（只发 conclusion，不发原始 result_text）
         _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
         _comment += "\n<!-- grape-auto-comment -->"
-        _post_issue_comment_ledgered(repository, issue_number, _comment, bot_token,
-                                      repo_key=repo_key)
-        log.info(f"Exec agent: posted system comment (agent did not post) to {repository}/issues/{issue_number}")
+        _posted = _post_issue_comment_ledgered(repository, _deliver_ident, _comment, bot_token,
+                                              repo_key=repo_key)
+        if not _posted:
+            # 底层再次归一失败（纵深防御）→ 同样落卡片/事件流，不留半截
+            _record_result_card_fallback(_conclusion, _rk, issue_number, agent_type, task_id, seq)
+            return False
+        _comment_metrics.observe_delivered(_rk)
+        log.info(f"Exec agent: posted system comment (agent did not post) to {repository}/issues/{_deliver_ident}")
+        return True
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
+        # Issue #4065：失败不再只有一条 WARNING——reason 枚举指标 + 连续失败达阈值告警
+        _fail = _comment_metrics.observe_failure(
+            _comment_metrics.classify_failure(e), _rk)
+        if _fail["alert"]:
+            log.error(f"RESULT_COMMENT_ALERT consecutive={_fail['consecutive']} "
+                      f"threshold={_fail['threshold']} reason={_fail['reason']} repo={_rk} "
+                      f"ident={issue_number} task_id={task_id or '-'} detail={e}")
+        return False
 
 
 def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, parent_issue_num: str,
@@ -5553,6 +5730,52 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
+
+
+def _post_result_to_issue_from_exec_done(repository, issue_id, result_text, repo_gitcode_token,
+                                         agent_type, repo_key, task_id, seq, evt):
+    """执行完成 → 自动回帖 Issue（从 _execute_agent_inner 收尾段抽出，Issue #4065 QA R1）。
+
+    Issue #4065 双保险接线：调用 _post_result_to_issue 必须带 task_id/seq——
+    合成键任务（issue_id=autopilot-*）本身不是 issue 号，但任务/事件记录
+    （events.payload）往往带真实 issue_number；不传则 _task_real_issue_number
+    直接返回 ""，生产上永远解析不到真实号，结果只能落卡片/事件流兜底。
+    PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖。
+    """
+    _issue_num = _issue_num_from(issue_id)
+    if not (_issue_num and repo_gitcode_token):
+        return
+    try:
+        # 直连执行路径无结构化 agent_result：#1545 策略按无结论处理
+        _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
+                              agent_result=False, task_id=task_id, seq=seq)
+    except Exception as _pe:
+        # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
+        log.warning(f"Exec agent: post result to issue failed: {_pe}")
+        if task_id:
+            try:
+                with db_lock:
+                    c = _rt_db.cursor()
+                    c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                    _row = c.fetchone()
+                    _errs = []
+                    if _row and _row[0]:
+                        try:
+                            _errs = json.loads(_row[0])
+                            if not isinstance(_errs, list):
+                                _errs = [str(_row[0])]
+                        except (json.JSONDecodeError, TypeError):
+                            _errs = [str(_row[0])]
+                    _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
+                    if not _has_rpf:
+                        _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
+                        # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                        _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
+                        c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
+                        _rt_db.commit()
+            except Exception:
+                pass
+        # R20.3.3: 回帖失败不影响 task 状态（task 仍标记 completed）
 
 
 def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_token: str,
@@ -6436,7 +6659,7 @@ def _provider_of_repo_key(repo_key: str) -> str:
     return parse_repo_key(repo_key or "")[0]
 
 def _post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_token: str,
-                                  repo_key: str = "", origin_task: str = "") -> None:
+                                  repo_key: str = "", origin_task: str = "") -> bool:
     """卡驱动发 Issue 评论 + 记账（D29/S49：消灭评论投递族的平台二分）。
 
     供 _post_result_to_issue / _post_subtask_completion_to_parent /
@@ -6444,11 +6667,20 @@ def _post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_t
     存量 gitcode/github/gitee/gitlab 同一条代码路径）；成功后走既有
     _ledger_record_comment 入账（provider 标签由 repo_key 前缀派生）。
     失败抛异常（调用方原有 try/except 兜底）。
+
+    Issue #4065：入口先按 provider 归一 ident——非数字 ident（autopilot-*/
+    pr_*/数字平台上的 IK*）**不发起任何远程请求**，直接落
+    `RESULT_COMMENT_SKIPPED` 结构化记录并返回 False。此前直接字符串插值进
+    `/issues/{ident}/comments`，生产上恒 400「参数类型错误」并被上层吞成 WARNING。
     """
     from src.domains.runtime.vcs.api_client import create_client
     # 回帖身份：一律优先 bot（仓库 bot → 全局 bot）。调用方传进来的可能是用户 token
     # （执行链在路径 B 仓库会解析到用户 token），直接用会导致 agent 评论挂在用户名下。
     _rk = repo_key or repository
+    _ident = deliverable_comment_ident(issue_num, _provider_of_repo_key(_rk))
+    if not _ident:
+        _record_result_comment_skipped("non_numeric_ident", _rk, issue_num, "", "", None)
+        return False
     try:
         from src.kernel.token_service import get_bot_identity_token
         _bot_tok = get_bot_identity_token(_rk) or ""
@@ -6464,21 +6696,34 @@ def _post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_t
             f"global_bot_<provider>_token")
     _c = create_client(_rk, bot_token or "")
     _resp = _c._request("POST", _c._generic_path(
-        f"/repos/{_c.owner}/{_c.repo}/issues/{issue_num}/comments",
-        f"/issues/{issue_num}/notes"), {"body": comment})
+        f"/repos/{_c.owner}/{_c.repo}/issues/{_ident}/comments",
+        f"/issues/{_ident}/notes"), {"body": comment})
     if not isinstance(_resp, dict) or "error" in _resp:
         raise RuntimeError(f"post issue comment failed: {_resp}")
     _ledger_record_comment(_provider_of_repo_key(repo_key or repository),
-                           _rk, repository, issue_num, comment, _resp,
+                           _rk, repository, _ident, comment, _resp,
                            origin_task=origin_task)
+    return True
 
 def _list_issue_comments_card(repo_key: str, repository: str, issue_num, bot_token: str) -> list:
-    """卡驱动拉取 Issue 评论列表（D29/S49）。失败抛异常，返回 list。"""
+    """卡驱动拉取 Issue 评论列表（D29/S49）。失败抛异常，返回 list。
+
+    Issue #4065：入口同样先归一；不可回帖的 ident 直接返回 []（= 无既有评论），
+    不再发起必 400 的预检请求——此前预检先炸、异常上抛，`_post_result_to_issue`
+    连补发都不会执行（结果彻底丢失）。
+    """
     from src.domains.runtime.vcs.api_client import create_client
-    _c = create_client(repo_key or repository, bot_token or "")
+    _rk = repo_key or repository
+    _ident = deliverable_comment_ident(issue_num, _provider_of_repo_key(_rk))
+    if not _ident:
+        _comment_metrics.observe_skipped("non_numeric_ident", _rk)
+        log.warning(f"RESULT_COMMENT_SKIPPED reason=non_numeric_ident ident={issue_num} "
+                    f"repo={_rk} stage=precheck")
+        return []
+    _c = create_client(_rk, bot_token or "")
     _resp = _c._request("GET", _c._generic_path(
-        f"/repos/{_c.owner}/{_c.repo}/issues/{issue_num}/comments?per_page=100",
-        f"/issues/{issue_num}/notes?per_page=100&sort=created&direction=asc"))
+        f"/repos/{_c.owner}/{_c.repo}/issues/{_ident}/comments?per_page=100",
+        f"/issues/{_ident}/notes?per_page=100&sort=created&direction=asc"))
     return _resp if isinstance(_resp, list) else []
 
 def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) -> "tuple[str, dict]":
@@ -7176,7 +7421,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             result_text=result_text, errors=_fail_errors_json)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                          agent_logs=agent_logs, completed_at=completed_at, result=result_text)
+                          agent_logs=agent_logs, completed_at=completed_at, result=result_text,
+                          task_id=task_id or "")
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
 
     # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（direct 模式）
@@ -7201,38 +7447,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # 执行完成 → 自动回帖到 Issue（仅 sre 等有实质产出的 Agent，且有关联 Issue）
     # PR 订阅的伪 issue_id（#pr_123_scene_id）不是真实 Issue，跳过 Issue 回帖
     if new_status == "completed" and result_text and issue_id and not evt.get("_pr_sub_pr_number"):
-        _issue_num = _issue_num_from(issue_id)
-        if _issue_num and repo_gitcode_token:
-            try:
-                _post_result_to_issue(repository, _issue_num, result_text, repo_gitcode_token, agent_type, repo_key,
-                                  agent_result=False)  # 直连执行路径无结构化 agent_result：#1545 策略按无结论处理
-            except Exception as _pe:
-                # R20.3.2: _post_result_to_issue 失败时 append RESULT_POST_FAILED
-                log.warning(f"Exec agent: post result to issue failed: {_pe}")
-                if task_id:
-                    try:
-                        with db_lock:
-                            c = _rt_db.cursor()
-                            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
-                            _row = c.fetchone()
-                            _errs = []
-                            if _row and _row[0]:
-                                try:
-                                    _errs = json.loads(_row[0])
-                                    if not isinstance(_errs, list):
-                                        _errs = [str(_errs)]
-                                except (json.JSONDecodeError, TypeError):
-                                    _errs = [str(_row[0])]
-                            _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
-                            if not _has_rpf:
-                                _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
-                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
-                                _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
-                                c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
-                                _rt_db.commit()
-                    except Exception:
-                        pass
-                # R20.3.3: 回帖失败不影响 task 状态（task 仍标记 completed）
+        _post_result_to_issue_from_exec_done(repository, issue_id, result_text, repo_gitcode_token,
+                                             agent_type, repo_key, task_id, seq, evt)
     # PR 订阅场景 → 回帖到 PR 评论
     if new_status == "completed" and result_text and evt.get("_pr_sub_pr_number"):
         _pr_num = str(evt["_pr_sub_pr_number"])

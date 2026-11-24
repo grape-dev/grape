@@ -11,7 +11,7 @@
 
 ## 现象与根因
 
-- 证据（Issue 正文日志，2026-11-21 12:34 UTC，`ecs-grape-master-002/004`）：
+- 证据（Issue 正文日志，2026-11-21 12:34 UTC，`<node-a>`/`<node-b>`）：
   `level=ERROR component=devops-bot role=worker service_name=grape-worker
   message="POST /api/runtime/traces status=503 duration=1~38ms"`，`user_id/repo_key/issue_id/seq`
   均为空——OTLP 批量导出特征，非业务请求；1~5ms 瞬时返回说明是本地立即拒绝。

@@ -97,12 +97,22 @@ HTTP_REQUEST_DURATION = Histogram(
 from src.kernel.gsb.metrics import install as _install_gsb_metrics
 from src.kernel.org_metrics import install as _install_org_metrics
 from src.kernel.startup_metrics import install as _install_startup_metrics
+# Issue #4065：结果评论投递指标（grape_comment_post_failed_total{reason} /
+# grape_comment_post_skipped_total{reason} / grape_comment_post_consecutive_failures）。
+# 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
+# （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
+from src.kernel.comment_metrics import install as _install_comment_metrics
+# db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
+# 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
+from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
 
 _install_gsb_metrics(registry)
 _install_org_metrics(registry)
+_install_db_lock_metrics(registry)
 # Issue #3848：启动期降级（component/reason 两维度）——把「本来只能 grep 日志」的
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
+_install_comment_metrics(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
@@ -327,6 +337,27 @@ TASK_QUEUE_WAIT = Histogram(
     registry=registry,
 )
 
+# Issue #3963：repo-dispatch 租约争用（入队侧的排队等待与 busy）。
+# 语义：`lease_wait_seconds` 观测每次 enqueue 抢租约的实际耗时（含排队）；`busy_total`
+# 只在「预算耗尽仍未抢到」时自增——看板据此区分「排队冲突」与「执行失败」。
+# 标签只有 repo 一维（与既有 per-repo 口径一致，不引入高基数）。
+_REPO_LEASE_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 45, 60)
+
+REPO_DISPATCH_LEASE_WAIT = Histogram(
+    "grape_repo_dispatch_lease_wait_seconds",
+    "Seconds spent waiting for the repo-dispatch lease before enqueue succeeded or gave up.",
+    ["repo"],
+    buckets=_REPO_LEASE_BUCKETS,
+    registry=registry,
+)
+
+REPO_DISPATCH_BUSY = Counter(
+    "grape_repo_dispatch_busy_total",
+    "Repo-dispatch lease waits that exhausted their budget (task enqueue busy).",
+    ["repo"],
+    registry=registry,
+)
+
 TASK_RUN_SECONDS = Histogram(
     "grape_agent_task_run_seconds",
     "Time agent tasks spent running before a terminal state.",
@@ -430,6 +461,30 @@ def record_task_failed(task_id: str, source: str, runtime_id: int, failure_reaso
     TASK_FAILED.labels(source=s, runtime_mode=m, failure_reason=failure_reason or "unknown").inc()
 
 
+def record_repo_dispatch_lease_wait(repo_key: str, seconds: float):
+    """Issue #3963：观测一次 repo-dispatch 租约等待的耗时（含排队）。
+
+    repo_key 为空或耗时非法时直接返回；任何异常都在本函数内吞掉——埋点绝不拖垮入队主链路。
+    """
+    try:
+        _repo = (repo_key or "").strip() or "unknown"
+        _secs = float(seconds)
+        if _secs < 0:
+            return
+        REPO_DISPATCH_LEASE_WAIT.labels(repo=_repo).observe(_secs)
+    except Exception:
+        return
+
+
+def record_repo_dispatch_busy(repo_key: str):
+    """Issue #3963：repo-dispatch 租约等待预算耗尽（`task enqueue busy`）计数。"""
+    try:
+        _repo = (repo_key or "").strip() or "unknown"
+        REPO_DISPATCH_BUSY.labels(repo=_repo).inc()
+    except Exception:
+        return
+
+
 # ===== LLM token 用量指标（参考 multica metrics/business.go llmTokens）=====
 
 LLM_TOKENS = Counter(
@@ -492,6 +547,47 @@ def record_contract_guard_failure(outcome: str, detail: str = ""):
     if o not in CONTRACT_GUARD_OUTCOMES:
         o = "unknown"
     CONTRACT_GUARD_FAILURES.labels(outcome=o).inc()
+
+
+# Issue #4082：worker 标签探活失败信号（`/api/runtime/runtime-tags-probe/signal` 承接）。
+# 口径：
+# - id_missing：worker 拿不到真实 runtime id（注册回包未回填/配置缺失）——本条缺陷的主犯；
+# - unauthorized：401（凭据/归属不对，**不是**凭据吊销）；
+# - not_found：404（runtime 行已被删或重建窗口）；
+# - no_tags：已注册但一个标签都没有（引擎派发依据为空，需运维补标签）。
+# - other：契约外失败（`http_403`/`http_422` 等），worker 侧归并、原始 reason 随信号
+#   `raw_reason`/detail 与日志带出——既不让非预期失败静默，也不给指标加高基数标签。
+# - unknown：连 worker 都没能归类的 reason（服务端兜底，不丢数，但不参与告警以避噪声）。
+# 与 worker `src/domains/runtime/engine/runtime_id_guard.PROBE_REASONS` 为自包含双实现
+# （worker 包闭包内没有 insight 域），口径由 Issue #4082 测试锁定。
+RUNTIME_TAGS_PROBE_FAILURES_METRIC = "grape_runtime_tags_probe_failure_total"
+
+RUNTIME_TAGS_PROBE_REASONS = ("id_missing", "unauthorized", "not_found", "no_tags", "other")
+
+RUNTIME_TAGS_PROBE_FAILURES = Counter(
+    RUNTIME_TAGS_PROBE_FAILURES_METRIC,
+    "Runtime tags probe failure signals reported by workers, by host and reason: "
+    "id_missing = worker has no valid runtime id (registration not backfilled), "
+    "unauthorized = 401 on probe (config/ownership, not revocation), "
+    "not_found = runtime row deleted or in re-derive window, "
+    "no_tags = registered engine without any claimable tags, "
+    "other = non-contract failure (e.g. HTTP 403/422) bucketed by the worker.",
+    ["host", "reason"],
+    registry=registry,
+)
+
+
+def record_runtime_tags_probe_failure(host: str, reason: str, detail: str = ""):
+    """标签探活失败计数（`/api/runtime/runtime-tags-probe/signal` 的承接落点）。
+
+    reason 取值见 RUNTIME_TAGS_PROBE_REASONS；未知取值按 unknown 计数（不丢数）。
+    host 用于按主机定位（15 台 worker 逐台补 id 的依据），detail 不进标签（防高基数）。
+    """
+    h = (host or "").strip()[:120] or "unknown"
+    r = (reason or "").strip().lower()
+    if r not in RUNTIME_TAGS_PROBE_REASONS:
+        r = "unknown"
+    RUNTIME_TAGS_PROBE_FAILURES.labels(host=h, reason=r).inc()
 
 
 # ===== MySQL 连接池指标（参考 multica metrics/db.go，适配 grape MySQL）=====

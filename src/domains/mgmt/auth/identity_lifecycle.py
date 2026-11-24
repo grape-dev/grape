@@ -65,7 +65,10 @@ def _default_repository():
 
 def _default_uow():
     from src.kernel.persistence.uow import uow
-    return uow
+    # Issue #3897：身份域读写固定绑 mgmt 域连接——三库拓扑下 worker/event 进程主库是
+    # runtime 库，绑主库会让 external_identities 落到跨域视图（缺失即 1146）。
+    # 单库 / mgmt 进程由 route_of("mgmt") 回落主库，行为零变化。
+    return lambda: uow("mgmt")
 
 
 def _default_cipher():

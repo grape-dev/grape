@@ -25,6 +25,10 @@
   </p>
 
   <p>
+    <a href="https://railway.com/deploy/grape-ai-native-devops"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="30"></a>
+  </p>
+
+  <p>
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/feishu.svg" width="18" height="18" alt="Feishu">&nbsp;Feishu</a> ·
     <a href="https://www.grapedev.cn/community.html?cat=join" title="Join the community"><img src="assets/community/wechat.svg" width="18" height="18" alt="WeChat">&nbsp;WeChat</a>
   </p>

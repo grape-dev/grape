@@ -587,12 +587,12 @@
           <div class="rtv-ed-tags">
             <label v-for="tg in edTagOptions" :key="tg" class="rtv-ed-taglbl">
               <input
-                v-model="edAgentTags"
                 type="checkbox"
                 :value="tg"
+                :checked="edTagChecked(tg)"
                 :disabled="edTagDisabled(tg)"
                 :style="{ accentColor: RT_TAG_COLORS[tg] }"
-                @change="onEdTagChange(tg)"
+                @change="onEdTagChange(tg, $event)"
               />
               <span class="rtv-tagpill" :style="{ '--tag': RT_TAG_COLORS[tg] }">{{
                 rtTagLabel(tg)
@@ -1244,6 +1244,13 @@
 </template>
 
 <script setup>
+import {
+  initialRoles,
+  visibleRoles,
+  isChecked,
+  toggle as toggleRoleTag,
+  toPayload,
+} from './runtime-tag-link.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { pluginsEnabled } from '@/lib/features'
 
@@ -1296,6 +1303,7 @@ const SCENE_TAG_COLORS = {
   'api-skill-dev': 'var(--rtv-scn-api-skill-dev)',
   'blog-publish': 'var(--rtv-scn-blog-publish)',
 }
+// Issue #3396：chat 进角色标签值域（与后端 AGENT_TAGS 对账锁定，6 角色）
 const RT_TAG_COLORS = {
   all: 'var(--rtv-tg-all)',
   vod: 'var(--rtv-tg-vod)',
@@ -1303,8 +1311,13 @@ const RT_TAG_COLORS = {
   coding: 'var(--rtv-tg-coding)',
   qa: 'var(--rtv-tg-qa)',
   sre: 'var(--rtv-tg-sre)',
+  chat: 'var(--rtv-tg-chat)',
 }
-const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
+const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre', 'chat']
+// 不参与「场景可用角色」过滤的角色档（Issue #3396 复审 b 方案）：
+// all = 互斥哨兵；chat = 对话助手能力位，不属于任何流水线场景（场景节点的 tag 只有
+// vod/issue/coding/qa/sre），若让它参与场景过滤，绑了场景的引擎永远勾不上 Chat。
+const SCENE_FILTER_EXEMPT_TAGS = ['all', 'chat']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
   'cde.0000': '#64748b',
@@ -1512,7 +1525,7 @@ function scopeBadgeLabel(rt) {
 function rtTagLabel(tg) {
   return tg === 'all'
     ? t('tag.all')
-    : { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE' }[tg] || tg
+    : { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', chat: 'Chat' }[tg] || tg
 }
 function sceneDisplayName(name) {
   if (!sceneTagsCache.value) return name
@@ -2054,7 +2067,8 @@ function upgradeEngineDetail(runtimeId) {
 function renderEngineDetail(rt) {
   engineDetail.value = rt
   edSceneTags.value = (rt.scene_tags || []).slice()
-  edAgentTags.value = (rt.agent_tags || []).slice()
+  // 'all' 展开成完整角色集合（UI 上全勾 + 全能勾）
+  edAgentTags.value = initialRoles(rt.agent_tags || [])
   edMaxConcurrent.value = rt.max_concurrent || 20
   edSkillQuery.value = ''
   ensureSceneTags()
@@ -2134,8 +2148,9 @@ function copyEngineName(rt) {
 }
 // 场景可用角色
 function sceneAvailableRoles(sceneTags) {
+  // 默认表含 chat（Issue #3396，与 RT_TAG_OPTIONS 同源）
   if (!sceneTagsCache.value || !sceneTags || sceneTags.length === 0)
-    return ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
+    return ['all', 'vod', 'issue', 'coding', 'qa', 'sre', 'chat']
   const roles = []
   sceneTags.forEach(function (sn) {
     const s = sceneTagsCache.value.find(function (x) {
@@ -2164,32 +2179,30 @@ const edSceneTagsDesc = computed(() => {
 const edTagOptions = computed(() => {
   const allowed = sceneAvailableRoles(edSceneTags.value)
   return edSceneTags.value.length > 0
-    ? RT_TAG_OPTIONS.filter((x) => x === 'all' || allowed.indexOf(x) >= 0)
+    ? RT_TAG_OPTIONS.filter((x) => SCENE_FILTER_EXEMPT_TAGS.indexOf(x) >= 0 || allowed.indexOf(x) >= 0)
     : RT_TAG_OPTIONS
 })
 function edTagDisabled(tg) {
   const allowed = sceneAvailableRoles(edSceneTags.value)
-  return edSceneTags.value.length > 0 && tg !== 'all' && allowed.indexOf(tg) < 0
+  return (
+    edSceneTags.value.length > 0 &&
+    SCENE_FILTER_EXEMPT_TAGS.indexOf(tg) < 0 &&
+    allowed.indexOf(tg) < 0
+  )
 }
 function onEdSceneTagChange() {
   // 角色标签选项随场景变化（v-model 已更新，选项 computed 自动联动）
 }
-function onEdTagChange(tag) {
-  // all 与具体角色互斥（与老 onEngineTagChange 等价）
-  if (tag === 'all') {
-    if (edAgentTags.value.includes('all')) {
-      edAgentTags.value = ['all']
-    }
-  } else {
-    const i = edAgentTags.value.indexOf('all')
-    if (i >= 0) edAgentTags.value.splice(i, 1)
-    const agents = ['vod', 'issue', 'coding', 'qa', 'sre'].filter((x) =>
-      edAgentTags.value.includes(x)
-    )
-    if (agents.length === 5) {
-      edAgentTags.value = ['all']
-    }
-  }
+// 角色联动规则集中在 views/runtime-tag-link.js（纯函数，有 node 行为回归看护）。
+// 判定基准是「当前可勾的角色集合」：场景过滤掉某角色时，全能 = 可见角色全勾，
+// 不会因为固定六档而永远点不亮（用户 2026-11-20 追问补充）。
+const edVisibleRoles = computed(() => visibleRoles(edTagOptions.value))
+function edTagChecked(tg) {
+  return isChecked(edAgentTags.value, tg, edVisibleRoles.value)
+}
+function onEdTagChange(tag, ev) {
+  const checked = !!(ev && ev.target && ev.target.checked)
+  edAgentTags.value = toggleRoleTag(edAgentTags.value, tag, checked, edVisibleRoles.value)
 }
 function saveSceneTags(rt) {
   if (!edSceneTags.value.length) {
@@ -2212,8 +2225,10 @@ function saveSceneTags(rt) {
     .catch((e) => app().showToast(t('toast.save_failed', { msg: e.message })))
 }
 function saveEngineTags(rt) {
+  // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）
+  const _payload = toPayload(edAgentTags.value, edVisibleRoles.value)
   API()
-    .put('/runtime/runtimes/' + rt.id + '/tags', { tags: edAgentTags.value })
+    .put('/runtime/runtimes/' + rt.id + '/tags', { tags: _payload })
     .then(function (d) {
       const target = runtimes.value.find((r) => r.id === rt.id)
       if (target) target.agent_tags = d.tags
@@ -2926,6 +2941,7 @@ onBeforeUnmount(function () {
   /* 异常描边语义：浅色档与旧口径等价（整卡 1px 红环 + 3px 纯红条） */
   --ring: 0 0 0 1px var(--r);
   --bar-bad: var(--r);
+  --rtv-tg-chat: #0c92d4;
   min-height: 100%;
 }
 /* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
@@ -2975,6 +2991,7 @@ onBeforeUnmount(function () {
   /* 2026-11-20：深底上 #ff453a 全不透明 1px 环=霓虹，环降到 40%，左条 55%↔卡片 */
   --ring: 0 0 0 1px color-mix(in srgb, var(--r) 40%, transparent);
   --bar-bad: color-mix(in srgb, var(--r) 55%, var(--c));
+  --rtv-tg-chat: #38bdf8;
 }
 
 /* 暗色档：危险按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」。

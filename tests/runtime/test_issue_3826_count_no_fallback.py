@@ -29,8 +29,8 @@ import pytest
 from src.domains.runtime.routes import issues as rt
 from src.kernel import db_registry
 
-_RUNTIME_DSN = "mysql://rt_user:dummyDsnPass@10.0.0.9:3306/grape_prod_runtime?charset=utf8mb4"
-_PROCESS_DB = "grape_prod_mgmt"
+_RUNTIME_DSN = "mysql://user:<password>@127.0.0.1:3306/test_runtime?charset=utf8mb4"
+_PROCESS_DB = "test_mgmt"
 
 
 class _FallbackBomb:
@@ -185,7 +185,8 @@ def test_count_failure_log_carries_route_target_pid_host(monkeypatch, caplog):
     text = caplog.text
     assert "issues mine: count failed" in text
     assert "route=domain" in text, f"域路由未标注: {text}"
-    assert f"target_db=grape_prod_runtime" in text, f"目标库名缺失: {text}"
+    _expect_db = db_registry.database_of("runtime") or "-"
+    assert f"target_db={_expect_db}" in text, f"目标库名缺失: {text}"
     assert f"pid={os.getpid()}" in text, f"pid 缺失: {text}"
     assert f"host={socket.gethostname()}" in text, f"host 缺失: {text}"
     # 脱敏硬约束：日志会被集中采集/转贴，不得出现账号口令或完整 DSN

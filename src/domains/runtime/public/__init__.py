@@ -1449,11 +1449,26 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                  int(a.get("probe_latency") or 0), now_iso,
                  1 if a.get("healthy") else 0))
             rid = int(c.lastrowid or 0)
+            # Issue #3396 A8 兼容：本机发现若带角色声明（role_tags），按声明播种；
+            # 无声明维持存量口径补 'all'（任意角色可认领）。
+            _seed_roles_l: list = []
+            try:
+                _dr = a.get("role_tags")
+                if isinstance(_dr, list):
+                    _seed_roles_l = [str(t).strip().lower() for t in _dr if str(t).strip()]
+            except Exception:
+                _seed_roles_l = []
+            try:
+                from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as _KAR_L
+                _seed_roles_l = [t for t in dict.fromkeys(_seed_roles_l) if t in _KAR_L]
+            except Exception:
+                _seed_roles_l = []
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
             if not c.fetchone():
-                c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                          "enabled, created_at, updated_at) VALUES (?,'all',1,50,1,?,?)",
-                          (rid, now_iso, now_iso))
+                for _t in (_seed_roles_l or ["all"]):
+                    c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
+                              "enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                              (rid, _t, now_iso, now_iso))
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]
@@ -2648,6 +2663,11 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, "
         "skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?"),
     "runtime_exists_any": "SELECT 1 FROM agent_runtimes WHERE id=?",
+    # Issue #3396 F3：api 层鉴权（require_runtime_owner_or_admin）读运行域归属的具名查询，
+    # 收敛 `agent_runtimes←api` / `runtime_credentials←api` 的裸 SQL 跨域引用。
+    "runtime_credential_ref_any": "SELECT credential_id FROM agent_runtimes WHERE id=?",
+    "runtime_credential_owner_org_any": (
+        "SELECT COALESCE(owner_name,''), COALESCE(org_id,'') FROM runtime_credentials WHERE id=?"),
     # 引擎实例解析（engine/instances.py：三库独立后同域代码也必须走 owner 连接）
     "runtimes_for_instance_scan": (
         "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status "
@@ -2915,7 +2935,15 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_id_official": (
         "SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1"),
     "skill_id_by_owner_scope": (
-        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+        "SELECT id, display_name FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+    # Issue #3855：同 scope 重名校验取该 scope 下全部 active 行，比较留 Python 侧
+    # （去首尾空格 + casefold），避免依赖 MySQL/SQLite 各异的 LOWER/TRIM 语义。
+    "skill_display_names_by_scope": (
+        "SELECT id, display_name FROM skill WHERE scope=? AND owner_id=? AND is_active=1"),
+    # 官方技能 owner_id 历史存在 '' 与 0 两种写法（plugins/registry.py 曾用 0），
+    # 重名校验必须只按 scope 取数，不能把 owner_id 当作官方档的过滤条件。
+    "skill_display_names_by_official_scope": (
+        "SELECT id, display_name FROM skill WHERE scope='official' AND is_active=1"),
     "skill_scope_repo_owner": (
         "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
         "AND is_active=1 LIMIT 1"),
@@ -2959,8 +2987,8 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
     "skill_meta_patch_update": (
         "UPDATE skill SET description=?, agent_type=?, category_id=?, cat_l1_id=?, "
-        "cat_l2_id=?, tags=?, summary=?, updated_by=?, updated_at=datetime('now') "
-        "WHERE id=?"),
+        "cat_l2_id=?, tags=?, summary=?, display_name=?, updated_by=?, "
+        "updated_at=datetime('now') WHERE id=?"),
     "skill_download_inc": (
         "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
     "skill_intro_override_update": (
@@ -7205,11 +7233,15 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 
 def query_engines(repo_key: str, scope: str, agent_type: str = "",
-                  username: str = "") -> list[dict]:
-    """某仓库在某档位的候选引擎（repo/global/local）。"""
+                  username: str = "", user_id: int | str = 0) -> list[dict]:
+    """某仓库在某档位的候选引擎（repo/global/local/user）。
+
+    user scope：user_id 非空时按 owner_id 精确过滤（2026-11-20），
+    owner_id 为空的存量行用 username 兜底。
+    """
     from src.domains.runtime.engine.engine_select import query_engines as _impl
 
-    return _impl(repo_key, scope, agent_type, username)
+    return _impl(repo_key, scope, agent_type, username, user_id)
 
 
 def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:

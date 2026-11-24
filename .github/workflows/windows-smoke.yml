@@ -7,6 +7,8 @@ name: windows-smoke
 # Issue #536 QA-Impt 修复：linux-backend 增加 DDL 安全带卡点——显式目标分支
 # 运行 scripts/check-destructive-ddl.py + Issue #536 新增 pytest 用例，
 # 危险 DDL 回归不再依赖人工本地执行。
+# Issue #3874 PR #2003 审查修复（Required）：Windows worker onboard 三段修复的
+# 新增用例接入 windows-smoke 门禁（依赖清单/wheels 平台覆盖 × 降级解析器 × ps1 软门）。
 on:
   push:
     branches: ["**"]
@@ -29,6 +31,14 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py tests/runtime/test_windows_euid_guard.py tests/runtime/test_worker_windows_deps.py -v
+      - name: "Worker onboard dependency + model gate tests (issue #3874)"
+        # Issue #3874 PR #2003 审查修复（Required）：三段修复的新增用例此前未接入
+        # 任何 CI job，回归只能靠人工 pytest（先例 #1613/#1982/#2133/#2245/#3490）。
+        # 覆盖依赖清单同源 + bundled wheels 平台标签（含 win_amd64）、YAML sequences
+        # 降级为非阻断 warning、install-worker.ps1 校验软门与 -SkipEngineCheck。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3874_worker_onboard.py tests/test_engine_model_2545.py tests/test_worker_install_model_gate_2545.py -v
 
   linux-backend:
     runs-on: ubuntu-latest
@@ -337,3 +347,25 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3848_startup_order.py -v
+      - name: Result comment ident routing tests (issue #4065)
+        # Issue #4065 QA 审查修复（Required）：新增用例 test_issue_4065_result_comment_ident.py
+        # 与 test_issue_4065_issue_card_ident.py 此前未接入 linux-backend 门禁（先例
+        # #1613/#2133/#2245/#3167/#3490/#3699/#3758/#3771/#3848 均由 QA 要求补齐）。
+        # 用例锁结果回帖 ident 归一（autopilot-*/IK*/pr_* 零远程 400）、真实号双保险
+        # （执行完成调用路径传 task_id/seq、payload 带真实号凭真实号回帖）、
+        # 失败/跳过指标与卡片端点 int→str 契约；回退会让合成键任务结果评论恒 400，
+        # 只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_4065_result_comment_ident.py \
+            tests/api/test_issue_4065_issue_card_ident.py -v
+      - name: Runtime id guard probe isolation regression tests (issue #4082)
+        # Issue #4082 QA 复审修复（Required）：新增用例 test_issue_4082_runtime_id_guard.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#3490/#3699/#3758/#3771/#3848）。
+        # 用例锁 worker runtime_id=0 探活恒 401 的三条路径（客户端守卫/服务端非法 id 400/
+        # 探活失败指标告警）与多引擎探活上报器按 rid 隔离；回退会让探活失败告警对多引擎
+        # 主机静默失效、注册回填再次以 0 兜底，只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v

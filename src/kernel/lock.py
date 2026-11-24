@@ -17,6 +17,7 @@ PRIMARY KEY 保证互斥。
 mgmt 两域的基础设施原语，锁协议属同类基础设施）。符号名与签名不变，解析在调用点发生，
 未绑定时由 PortNotBound 在调用处 fail-fast，kernel 侧不出现任何 domains import。
 """
+import random
 import socket
 import secrets
 import time
@@ -66,15 +67,42 @@ def repo_dispatch_lease_key(repo_key: str) -> str:
 
 
 def acquire_lock_with_retry(lock_key: str, ttl: int = 60, attempts: int = 20,
-                            interval: float = 0.05) -> bool:
-    """短等待抢锁；调用方负责在 finally 中 release。"""
+                            interval: float = 0.05,
+                            wait_seconds: float | None = None,
+                            jitter_ratio: float = 0.0) -> bool:
+    """短等待抢锁；调用方负责在 finally 中 release。
+
+    wait_seconds: 总等待预算（秒）。缺省 None → 保持旧行为（attempts×interval）；
+        该原语被 runtime/engine 多处复用，默认路径语义不得变化（Issue #3963）。
+        给定预算时按 deadline 收敛每次 sleep（不超过剩余预算），预算耗尽前末尾再补
+        一次尝试；返回 False 表示预算内未抢到（调用方据此判 busy/排队失败）。
+    jitter_ratio: 抖动比例（0=无抖动），仅预算路径生效——避免多实例在同一时刻齐抢。
+    """
     attempts = max(1, int(attempts))
-    for attempt in range(attempts):
+    if wait_seconds is None:
+        for attempt in range(attempts):
+            if acquire_lock(lock_key, ttl=ttl):
+                return True
+            if attempt < attempts - 1:
+                time.sleep(max(0.0, float(interval)))
+        return False
+
+    budget = max(0.0, float(wait_seconds))
+    base_interval = max(0.0, float(interval))
+    deadline = time.monotonic() + budget
+    while True:
         if acquire_lock(lock_key, ttl=ttl):
             return True
-        if attempt < attempts - 1:
-            time.sleep(max(0.0, float(interval)))
-    return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # 睡眠不超过剩余预算：预算尾段不做无意义的长等待，交给末尾补做的尝试
+        pause = remaining if base_interval <= 0 else min(base_interval, remaining)
+        if jitter_ratio > 0:
+            pause *= 1.0 + random.uniform(-abs(float(jitter_ratio)), abs(float(jitter_ratio)))
+        time.sleep(min(max(pause, 0.001), remaining))
+    # 末尾补一次尝试：预算耗尽的边界（避免"最后一次睡眠跨过 deadline"吞掉一次机会）
+    return acquire_lock(lock_key, ttl=ttl)
 
 
 def cleanup_expired_locks():

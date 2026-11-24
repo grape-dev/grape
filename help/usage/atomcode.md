@@ -1,4 +1,4 @@
-# AtomCode 安装与使用
+# 14. AtomCode 安装与使用
 
 AtomCode 是**基于 Rust** 的 Agent CLI。npm 是它的分发安装渠道。
 

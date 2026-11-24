@@ -73,6 +73,7 @@ EVENT_TYPES = frozenset({
     "org_provision_completed",      # 组织供给完成
     "org_provision_failed",         # 组织供给失败（含租约丢失）
     "issue_pipeline_advanced",      # 流水线确定性推进（manual/patrol；detail 含任务/from/to/seq，不落正文）
+    "issue_pipeline_triggered_from_created",  # 挂单首次触发入链（Issue #3621 / #3913 C3：created→vod 留痕；detail 含 repo_key/issue_id/issue_number/from_stage/to_stage/actor/seq）
     # Issue #2112：组织需求跨仓下派（6 类事件，未登记会走 Unknown 分支丢弃）
     "dispatch_created",             # 下派批次创建
     "target_created",               # 单目标子 Issue 创建成功
@@ -115,6 +116,7 @@ EVENT_TYPES = frozenset({
     "skill_comment_posted",          # 技能详情页发表评论（Issue #3168 D11：detail 含 skill_id/comment_id/字数，不落评论原文）
     "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
     "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
+    "engine_tag_change",            # 引擎角色标签写入（Issue #3396 F2：add/update/delete/set，detail 含 runtime_id/tag(s)/enabled/priority，不含凭据）
 })
 
 

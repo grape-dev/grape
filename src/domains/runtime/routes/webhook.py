@@ -1,4 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
+import hashlib
 import json, os, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -100,6 +101,20 @@ def persist_webhook_event(repo_key: str, provider: str, event_header: str,
 
     return enqueue_webhook(repo_key=repo_key, provider=provider,
                            event_header=event_header, body=body, headers=headers)
+
+
+def _token_fingerprint(value: str) -> str:
+    """验签日志用 token 指纹：sha256 前 12 位（不可逆），空值 → ``absent``。
+
+    Issue #3897：`Webhook rejected: token mismatch for repo=...` 只有 repo，运维无法判断
+    是「平台端 Secret 与 Grape 端配置不同」还是「请求根本没带 token」。两端各打指纹后，
+    看一眼日志即可区分（相同 = 配置一致但比对失败的另一类问题；不同 = Secret 不一致；
+    absent = 平台没带）。绝不打印明文（验收 C-3）。
+    """
+    _v = str(value or "")
+    if not _v:
+        return "absent"
+    return "sha256:" + hashlib.sha256(_v.encode("utf-8")).hexdigest()[:12]
 
 
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
@@ -1077,7 +1092,11 @@ async def gitcode_webhook(request: Request):
     # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
     import hmac
     if not hmac.compare_digest(str(token), str(expected)):
-        log.warning(f"Webhook rejected: token mismatch for repo={repo}")
+        # Issue #3897：带两端指纹与来源 IP（不含明文），运维可直接定位 Secret 不一致。
+        log.warning(f"Webhook rejected: token mismatch for repo={repo} "
+                    f"expected={_token_fingerprint(expected)} "
+                    f"actual={_token_fingerprint(token)} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
@@ -1158,7 +1177,9 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
         if not hmac.compare_digest(str(token_header), str(expected)):
-            log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
+            log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo} "
+                        f"expected={_token_fingerprint(expected)} "
+                        f"actual={_token_fingerprint(token_header)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
     log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")

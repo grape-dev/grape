@@ -282,6 +282,10 @@ def takeover_finish(session_id: str, body: FinishBody, request: Request,
             auth_headers=_auth_headers(request),
             base_url=str(request.base_url),
         )
+        # 返回契约（Issue #3910）：res 内的 ok/partial/warnings 覆盖默认 ok=True。
+        # 真实派发失败 → ok=False + partial=True + warnings（事件终态仍按 outcome 落地）；
+        # 外部调用方（如 dsh-web）应据 partial/warnings 告警，不应因 ok=False 重复 finish
+        # （重复 finish 是幂等补偿路径，仅在 handoff_seq 为空时补派发）。
         return {"ok": True, **res}
     except svc.TakeoverError as e:
         return _err(e)

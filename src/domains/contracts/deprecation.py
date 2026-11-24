@@ -62,6 +62,15 @@ def fmt_operation(oid: str, path: str, method: str) -> str:
     return f"{oid} ({str(method).upper()} {path})"
 
 
+class RegistryUnavailable(RuntimeError):
+    """契约登记表不可用（文件缺失 / 不可读）——仅表达环境缺件。
+
+    渲染层据此降级为「无挂牌条目」并打 `x-degraded`；而登记表**损坏**
+    （非法 JSON / 条目非法）与挂牌**位置漂移**属数据面内容错误，继续以
+    RuntimeError fail-fast（Issue #2837 挂牌纪律，Issue #3756 审查 R2）。
+    """
+
+
 def load_deprecated_endpoints(path: str | None = None) -> dict[str, dict]:
     """加载挂牌登记表，返回 {operation_id: entry}。
 
@@ -75,10 +84,13 @@ def load_deprecated_endpoints(path: str | None = None) -> dict[str, dict]:
         with open(target, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        raise RuntimeError(
+        raise RegistryUnavailable(
             f"deprecated endpoints registry missing: {target} — restore the "
             "versioned deprecation registry (Issue #2837)")
-    except (json.JSONDecodeError, OSError) as e:
+    except OSError as e:
+        raise RegistryUnavailable(
+            f"deprecated endpoints registry unreadable: {target}: {e}")
+    except json.JSONDecodeError as e:
         raise RuntimeError(f"deprecated endpoints registry corrupt: {target}: {e}")
     entries_raw = data.get("entries")
     if not isinstance(entries_raw, list):
