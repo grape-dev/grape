@@ -1322,7 +1322,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         for _r in _rt.read_all_any("engine_cap_role_counts", ()) or []:
             _rc_inv[int(_r[0])] = {"total": int(_r[1] or 0), "enabled": int(_r[2] or 0)}
     except Exception as _rc_e:  # noqa: BLE001
-        log.warning(f"settings: engine_cap_role_counts failed: {type(_rc_e).__name__}: {_rc_e}")
+        log.warning(f"settings: engine_cap_role_counts failed: {_rc_e.__class__.__name__}: {_rc_e}")
     for rt in visible_runtimes:
         _st = _rc_inv.get(int(rt.get("id") or 0)) or {}
         rt["roles_disabled"] = bool(_st.get("total")) and not bool(_st.get("enabled"))
