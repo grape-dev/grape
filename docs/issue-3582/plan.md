@@ -20,8 +20,9 @@
   pipelines.json → default，进程级缓存 + 写路径失效链路）；
 - 过滤口径统一：`enabled`（节点未启用不在有效清单）+ `resolvable`
   （`scene_skill_scope.evaluate` 单一判定器）；
-- 产出 `nodes`（附加 resolvable/scope_check，展示用）、`valid_targets`
-  （有效目标清单）、`node_status`（conflict_reason 归因）。
+- 产出 `nodes`（场景定义全量，展示/诊断用）、`available_nodes`（可用节点，
+  enabled+resolvable）、`valid_targets`（有效目标清单）、`target_reasons`
+  （conflict_reason 归因）。
 
 ### 两处调用收敛
 
@@ -49,9 +50,10 @@
 2. [x] `scenes detail` 收敛调用 + 响应新增 `valid_targets`
 3. [x] `webhook._scene_node_check` 收敛调用 + 409 结构化
 4. [x] 删除 `scenes.py` 私有辅助函数（已无调用，避免兼容委托造成的口径漂移回潮）
-5. [x] 新增测试 `tests/mgmt/test_issue_3582_scene_targets.py`（T1-T6，
-   覆盖同源一致 / 合法节点全放行 / 409 reason+targets / 禁用同步拦截 /
-   不可解析同步拦截 / 场景变更两处同步）
+5. [x] 新增测试 `tests/mgmt/test_issue_3582_scene_targets.py`（T1-T13b，
+   共 16 用例，覆盖同源一致 / 合法节点全放行 / 409 reason+targets / 禁用
+   同步拦截 / 不可解析同步拦截 / 场景变更两处同步 / 路由级 detail+409
+   契约 / 组织场景 #955/#2118 回归 / 写路径缓存失效 / id≠tag 双白名单）
 6. [x] 回归既有测试（#568 / #1721 / #1758 / a2a_scene_check 等全通过）
 
 ## 验收对照

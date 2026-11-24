@@ -38,7 +38,7 @@ REASON_NODE_DISABLED = "node_disabled"
 REASON_SKILL_UNRESOLVABLE = "skill_unresolvable"
 
 
-def attach_node_scope_checks(nodes: list, repo_key: str,
+def _attach_node_scope_checks(nodes: list, repo_key: str,
                              scene_id: str = "") -> list:
     """为场景节点附加 resolvable/scope_check（Issue #1721，纯增量）。
 
@@ -52,12 +52,12 @@ def attach_node_scope_checks(nodes: list, repo_key: str,
             result.append(node)
             continue
         item = dict(node)
-        item.update(node_scope_check(node, repo_key, scene_id, cache=_cache))
+        item.update(_node_scope_check(node, repo_key, scene_id, cache=_cache))
         result.append(item)
     return result
 
 
-def node_scope_check(node: dict, repo_key: str, scene_id: str = "",
+def _node_scope_check(node: dict, repo_key: str, scene_id: str = "",
                      cache: dict | None = None) -> dict:
     """单节点技能可解析性前置判定（Issue #1721 / #1758）。
 
@@ -107,6 +107,22 @@ def dispatchable_roles(node) -> list:
     return roles
 
 
+def node_dispatch_names(node) -> list:
+    """handoff 可按哪些名字命中该节点（单一谓词，供 webhook 投影）。
+
+    Issue #3582 复审：webhook 侧 ``id == target or target in dispatchable_roles``
+    的重复判定收敛到本模块——白名单角色（id 或 tag 命中）之外，节点自身的
+    id 也算命中（#2118 组织/存量场景的 ``org_*`` id 直达别名），命中语义
+    与 POST /api/a2a 的白名单 400 前置校验叠加后即实际接受集合。
+    """
+    names = dispatchable_roles(node)
+    if isinstance(node, dict):
+        nid = str(node.get("id") or "").strip()
+        if nid and nid not in names:
+            names.append(nid)
+    return names
+
+
 def empty_scene_targets(scene_id: str) -> dict:
     """场景解析失败/解析异常时的空结果（与正常结果键结构同构，单一来源）。
 
@@ -149,7 +165,7 @@ def resolve_scene_targets(scene_id: str, repo_key: str = "",
     if not cfg:
         return empty_scene_targets(scene_id)
     resolved_id = cfg.get("scene_id") or scene_id
-    nodes = attach_node_scope_checks(cfg.get("nodes") or [], repo_key,
+    nodes = _attach_node_scope_checks(cfg.get("nodes") or [], repo_key,
                                      scene_id=resolved_id)
     available_nodes: list = []
     valid_targets: list = []

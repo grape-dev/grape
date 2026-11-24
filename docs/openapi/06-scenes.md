@@ -202,7 +202,7 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
 | Path | `{scene_id}` |
-| 出参 | `{scene_id, name, nodes, available_nodes, valid_targets, onboarding, ...}`（`nodes`=场景定义全量，含 disabled/unresolvable 节点；派发目标以 `available_nodes`/`valid_targets` 为准，与 POST /api/a2a 接受集合一致，Issue #3582） |
+| 出参 | `{scene_id, name, nodes, available_nodes, valid_targets, onboarding, ...}`（`nodes`=场景定义全量，含 disabled/unresolvable 节点；可投递目标一律取 `valid_targets`（与 POST /api/a2a 接受集合一致），`available_nodes` 仅展示可用性，Issue #3582） |
 | 返回 | 200；404 |
 
 ---

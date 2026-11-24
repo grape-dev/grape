@@ -5,7 +5,7 @@
 > `GET /api/scenes/{scene_id}`（场景详情）为 **dual**（会话 token `tk_` 可读，供 agent 按
 > `GRAPE_SCENE_ID` 按需取当前场景流水线/节点）。场景清单 `GET /api/scenes`（list）为 user_only，
 > agent 不需要清单（当前场景经 env `GRAPE_SCENE_ID` 注入）。
-> A2A 交办：服务端校验目标 agent 是否在当前 Issue 场景的 `available_nodes`/`valid_targets` 内，不在则返回 `skipped: not_in_scene` 且不派发（`conflict_reason` 细分 `not_in_scene`/`node_disabled`/`skill_unresolvable`）。`nodes`=场景定义全量（含 disabled/unresolvable 节点，仅供展示/诊断），**派发一律以 `available_nodes`/`valid_targets` 为准**（Issue #3582）。
+> A2A 交办：服务端校验目标 agent 是否在当前 Issue 场景的 `available_nodes`/`valid_targets` 内，不在则返回 `skipped: not_in_scene` 且不派发（`conflict_reason` 细分 `not_in_scene`/`node_disabled`/`skill_unresolvable`）。`nodes`=场景定义全量（含 disabled/unresolvable 节点，仅供展示/诊断），**可投递目标一律取 `valid_targets`**（`available_nodes` 仅展示可用性，Issue #3582）。
 
 ## GET /api/scenes — 场景列表
 
@@ -273,7 +273,7 @@
 ```
 
 > `nodes[]` 是场景定义全量（含 disabled/unresolvable 节点），每条含 Agent 阶段（`id`）、对应技能（`skill`）、下游（`next`，`done`=结束）、交办方式（`handoff`）；**它不是派发依据**。
-> 交办/派发请使用 `available_nodes`（可用节点）与 `valid_targets`（实际可派发目标名），二者与 `POST /api/a2a` 的接受集合同源一致（Issue #3582）。
+> 可投递目标名**一律取 `valid_targets`**（与 `POST /api/a2a` 的接受集合同源一致，Issue #3582）；`available_nodes` 仅用于展示可用性（enabled 且 resolvable 的节点及其 id/技能），**不要直接把 `available_nodes[].id` 当派发目标**（组织/存量场景的 `org_*` id 会被 POST 白名单 400 拒绝）。
 > 按 `nodes` 向 disabled（`conflict_reason=node_disabled`）或技能不可解析（`skill_unresolvable`）的节点交办会被 409 拦截；场景外目标为 `not_in_scene`。
 > 删除某节点（如 `qa`）后：详情不再显示、也不会执行；**须同步把上游 `next` 改到下一个存活节点**，
 > 否则该步派发时「node not found」而 `failed`（pipeline_executor）。

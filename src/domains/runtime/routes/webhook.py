@@ -1484,8 +1484,8 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     "conflict_reason"}。
     """
     from src.api.scene_targets import (
-        dispatchable_roles,
         empty_scene_targets,
+        node_dispatch_names,
         resolve_scene_targets,
     )
     from src.api.session_store import get_issue_scene
@@ -1504,11 +1504,11 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     valid_targets = list(_res.get("valid_targets") or [])
     available_nodes = _res.get("available_nodes") or []
     target = str(agent_name or "")
-    # 基线兼容（#2118）：目标命中可用节点的 id（org_* 直达别名）也算在场景内。
+    # 基线兼容（#2118）：目标命中可用节点的 id（org_* 直达别名）也算在场景内；
+    # 命中谓词收敛到 scene_targets.node_dispatch_names（单一来源）。
     matched = next(
         (n for n in available_nodes
-         if isinstance(n, dict) and (n.get("id") == target or target in
-                                     dispatchable_roles(n))),
+         if isinstance(n, dict) and target in node_dispatch_names(n)),
         None,
     )
     in_scene = target in valid_targets or matched is not None

@@ -716,8 +716,8 @@ def set_scene_nodes(nodes_json: str, scene_id: str | None = None, row_id: int | 
         try:
             from src.domains.mgmt.pipeline_config import invalidate_scene_cache
             invalidate_scene_cache(scene_id or "", repo_key or "")
-        except Exception:
-            pass
+        except Exception as exc:  # Issue #3582: explicit trace, no silent swallow (ratchet)
+            log.warning("scene_nodes_write invalidate_scene_cache failed: %s", exc)
         return {"action": "updated", "changed": int(c.rowcount or 0), "hash": new_hash}
 
 
@@ -4144,8 +4144,8 @@ def scene_nodes_write_by_id(nodes_json: str, now_iso: str, row_id: int,
             try:
                 from src.domains.mgmt.pipeline_config import invalidate_scene_cache
                 invalidate_scene_cache()
-            except Exception:
-                pass
+            except Exception as exc:  # Issue #3582: explicit trace, no silent swallow (ratchet)
+                log.warning("scene_nodes_write_by_id invalidate_scene_cache failed: %s", exc)
         return changed
 
 
