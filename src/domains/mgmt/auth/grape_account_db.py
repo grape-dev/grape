@@ -19,7 +19,7 @@ from src.kernel.config import log
 _IDENTITY_DOMAIN = "mgmt"
 _IDENTITY_RELATION_REMEDIATION = (
     "python3 scripts/domain_view_freshness.py --repair（owner=mgmt 补建跨域视图；"
-    "存量 mgmt 库缺基表时跑迁移 202611230005）")
+    "存量 mgmt 库缺基表时跑迁移 202611230013）")
 _degraded_identity_ops: dict[str, int] = {}
 _degraded_identity_warned: set[str] = set()
 _degraded_identity_lock = threading.Lock()

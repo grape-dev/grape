@@ -1,4 +1,4 @@
-"""external_identities 身份基表迁移（202611230005）。
+"""external_identities 身份基表迁移（202611230013）。
 
 Issue #3897 B 组：生产 `grape_prod_runtime.external_identities` 不存在（MySQL 1146），
 带 token 的身份解析整体失败。两层原因：
@@ -75,19 +75,19 @@ def verify_identity_relation(conn=None) -> None:
     kind = relation_kind(c, TABLE)
     if kind is None:
         raise RuntimeError(
-            f"202611230005 post_check 未收敛：{TABLE} 在当前库不存在"
+            f"202611230013 post_check 未收敛：{TABLE} 在当前库不存在"
             f"（owner 库补表失败；非 owner 库需 scripts/domain_view_freshness.py --repair）")
     if kind != "view":
         missing = [col for col, _ in COLUMNS if not column_exists(c, TABLE, col)]
         if missing:
             raise RuntimeError(
-                f"202611230005 post_check 未收敛：{TABLE} 缺列 {missing}"
+                f"202611230013 post_check 未收敛：{TABLE} 缺列 {missing}"
                 f"（补列失败未盖章，下次启动重试；MySQL 侧查 _DDL_MANUAL_REVIEW 清单）")
-    log.info(f"202611230005 post_check 通过：{TABLE} 形态={kind}")
+    log.info(f"202611230013 post_check 通过：{TABLE} 形态={kind}")
 
 
 MIGRATION = {
-    "version": "202611230005",
+    "version": "202611230013",
     "name": "external-identities-relation",
     "kind": "safe",
     "fn": ensure_identity_relation,

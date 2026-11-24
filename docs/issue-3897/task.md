@@ -14,7 +14,7 @@
       `schema_probe.relation_kind` 双后端、`_check_identity_relations` 缺失时 ERROR 且不抛。
       提交 `1e5c8fcb0`。
 - [x] T4（绿）B 组：`uow(domain)`、`grape_account_db`/`identity_lifecycle` 改 mgmt 域、
-      `schema_probe.relation_kind`、`db_setup._check_identity_relations`、迁移 `202611230005`、
+      `schema_probe.relation_kind`、`db_setup._check_identity_relations`、迁移 `202611230013`、
       视图补建白名单。提交 `6921c26b5`。
 - [x] T5（红）C 组：`tests/runtime/im/test_issue_3897_transport_reconnect.py` +
       `tests/runtime/test_issue_3897_webhook_fingerprint.py` ——

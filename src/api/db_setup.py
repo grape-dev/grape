@@ -5495,7 +5495,7 @@ def init_database():
 _IDENTITY_RELATIONS = ("external_identities", "grape_accounts")
 _IDENTITY_RELATION_REMEDIATION = (
     "python3 scripts/domain_view_freshness.py --repair "
-    "（owner=mgmt 补建跨域视图；存量 mgmt 库缺基表时由迁移 202611230005 补建）")
+    "（owner=mgmt 补建跨域视图；存量 mgmt 库缺基表时由迁移 202611230013 补建）")
 #: identity 读写的 owner 域（`grape_account_db` / `identity_lifecycle` 固定 `uow("mgmt")`）。
 _IDENTITY_DOMAIN = "mgmt"
 _IDENTITY_DOMAIN_REMEDIATION = (
@@ -11181,6 +11181,37 @@ def _fn_normalize_org_domain_text() -> None:
     log.info(f"org domain text normalize 完成（本域改动: {n}）")
 
 
+def _fn_normalize_org_domain_text_sqlite() -> None:
+    """D105 第三批：存量 SQLite 库 org 域 id TEXT 化（幂等）。
+
+    背景：organization.id 的 TEXT 主键 DDL 只在全新库生效。存量库建表时仍是
+    ``INTEGER PRIMARY KEY AUTOINCREMENT``，而 create_org 已改为写入 uuid7 字符串
+    （TEXT 主键）——旧库创建组织会直接 ``datatype mismatch``，组织 provisioning
+    全链路不可用。MySQL 环境的 org 域 TEXT 化已由历史迁移盖章，
+    这里只处理 SQLite 旧 DDL（PRAGMA 重建，见 _normalize_org_domain_text）。
+
+    为什么单独保留：迁移 202611183007 已在各环境盖章，删号会让它永久跳过
+    （迁移台账按版本号判「已执行」）。后续的跨域 TEXT 化收敛到
+    202611190100（d105-org-domain-text-normalize），两者并存不重复执行：
+    本迁移在 MySQL 上直接返回，收敛版在 SQLite 上同样幂等。
+    """
+    from src.kernel.session_manager import _is_mysql_backend, db as _db, db_lock as _db_lock
+    if _is_mysql_backend():
+        # MySQL：历史迁移已把 org 域改为 VARCHAR/TEXT，无需重复处理。
+        return
+    with _db_lock:
+        _normalize_org_domain_text(_db)
+        _db.commit()
+
+
+register_migration(
+    version="202611183007",
+    name="normalize-org-domain-text",
+    kind="safe",
+    fn=_fn_normalize_org_domain_text_sqlite,
+)
+
+
 register_migration(
     version=_ORG_TEXT_MIGRATION_VERSION,
     name="d105-org-domain-text-normalize",
@@ -11840,7 +11871,7 @@ from src.domains.mgmt.migrations.external_identities_relation import (
     verify_identity_relation as _post_external_identities_relation,
 )
 register_migration(
-    version="202611230005",
+    version="202611230013",
     name="external-identities-relation",
     kind="safe",
     fn=_fn_external_identities_relation,
@@ -11959,7 +11990,7 @@ def backfill_repo_credentials_from_columns() -> int:
             n += k
         db.commit()
     if n:
-        log.info(f"grape_t_repo_credentials backfill from managed_repos columns: "
+        log.info(f"grape_t_repo_credentials backfill of repo-registry columns: "
                  f"{per_col} (rows filled={n})")
     return n
 

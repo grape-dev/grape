@@ -227,7 +227,7 @@ def test_identity_uow_sites_use_mgmt_domain():
     assert "with _uow() as session" not in src
 
 
-# ---------------------------------------------------------------- 5. 迁移 202611230005
+# ---------------------------------------------------------------- 5. 迁移 202611230013
 
 def test_identity_relation_migration_creates_missing_table(tmp_path):
     """存量库缺基表 → 迁移幂等补建（含 status/unbound_at/token_expires_at 缺列）。"""
@@ -236,7 +236,7 @@ def test_identity_relation_migration_creates_missing_table(tmp_path):
     from src.api import db_setup
     from src.domains.mgmt.migrations import external_identities_relation as M
 
-    assert any(m.version == "202611230005" for m in db_setup._MIGRATIONS)
+    assert any(m.version == "202611230013" for m in db_setup._MIGRATIONS)
 
     conn = sqlite3.connect(tmp_path / "id.db")
     M.ensure_identity_relation(conn)

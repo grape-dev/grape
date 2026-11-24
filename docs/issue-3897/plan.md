@@ -38,7 +38,7 @@
    前置条件：worker/event 进程必须可见 `GRAPE_DSN_MGMT`（或共享 `GRAPE_3DB_ENV`），
    否则 `route_of("mgmt")` 抛 `DomainUnavailable` → 身份解析降级为 `[]`；
    `db_setup._check_identity_domain()` 在启动自检里把该前置变成一条 ERROR（含 remediation）。
-6. 迁移 `202611230005`（mgmt 域）：存量库幂等补建 `external_identities` 基表 +
+6. 迁移 `202611230013`（mgmt 域）：存量库幂等补建 `external_identities` 基表 +
    缺列（status/unbound_at/token_expires_at），post_check 断言表存在——
    覆盖「代码已上线、老库 `_create_tables` 老轨已冻结、表未建」的漂移。
    （跨域视图不在此迁移里建：视图唯一构造实现是 `scripts/view_ddl_builder.py`，
