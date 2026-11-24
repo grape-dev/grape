@@ -66,6 +66,10 @@ git bundle create /tmp/issue-3383-polluted-head.bundle HEAD@{1}   # 在覆盖前
    显式错误，不静默继续。`issues/<N>/<agent>` 与 `issues/<N>/pr-<P>/<agent>`
    两种含 Issue 标识的布局均受支持（`extract_workdir_issue_num` 与
    `parse_issue_workdir` 复用同一尾部锚定解析）。
+   作用范围（#3441 复审收敛）：仅校验**含 `issues/` 段的布局**。既有非 Issue
+   目录（autopilot 远端派发的仓库级 `issue-agent`、VOD 的
+   `vod/<provider>/<repo_>`）以及合成 Issue 键 `autopilot-*` 一律跳过，
+   避免把既有派发链路拦成启动即失败；范围外的错配仍由派发入口的其它校验兜底。
    direct 路径（`direct_executor._execute_agent_inner`）不做该校验：其
    workdir 由本任务 `issue_id` 经 `get_agent_workdir` 同源派生，不存在外部
    错配入口；错配风险统一由 worker 派发入口拦截；

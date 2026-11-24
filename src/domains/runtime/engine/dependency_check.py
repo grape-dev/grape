@@ -28,6 +28,8 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
     3. cwd exists or can be created
     4. Repo token is present for git agents
     5. Issue session is valid for git worktree agents
+    6. workdir 的 issues/<segment> 与任务 Issue 一致（仅 issues 布局；合成键
+       autopilot-* 与既有非 issues 目录不校验，见 #3441）
 
     Raises DependencyError with a list of missing items if any check fails.
     """

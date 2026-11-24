@@ -148,9 +148,32 @@ class TestValidateWorkdirIssueConsistency:
         assert ok is False
         assert "#1588" in msg and "#3383" in msg
 
-    def test_unparsable_workdir_treated_as_mismatch(self):
+    def test_non_issues_layout_skipped(self):
+        """既有非 issues 布局（agent 级目录）不属本闸范围 → 放行（#3441 复审）。
+
+        回归：门禁曾覆盖全部 git agent，autopilot 远端派发的仓库级
+        `issue-agent` cwd + 合成 issue 键会在启动即失败。范围收敛为「issues 布局」。
+        """
         ok, msg = validate_workdir_issue_consistency(
             "/ws/gitcode/org/test/coding-agent", "#3383", "coding")
+        assert ok is True and msg == ""
+
+    def test_autopilot_synthetic_issue_key_skipped(self):
+        """autopilot 合成 Issue 键 + 仓库级 issue-agent cwd → 放行。"""
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issue-agent", "autopilot-ab", "issue")
+        assert ok is True and msg == ""
+
+    def test_vod_custom_layout_skipped(self):
+        """VOD 自定义 cwd（vod/<provider>/<repo_>）带 issue 标识时也不拦。"""
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/vod/gitcode/org_test", "#5", "vod")
+        assert ok is True and msg == ""
+
+    def test_issues_layout_without_segment_still_fails(self):
+        """issues 布局解析不出段 → 仍 fail-fast（收敛后保留的唯一拦截面）。"""
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues", "#3383", "coding")
         assert ok is False
         assert "#3383" in msg
 

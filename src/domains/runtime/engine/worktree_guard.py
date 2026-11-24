@@ -1128,6 +1128,10 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
         return "", "", ""
 
 
+# Issue #3441：合成 Issue 标识前缀（autopilot 远端派发用仓库级 cwd，无 issues 段）
+_SYNTHETIC_ISSUE_PREFIXES = ("autopilot-",)
+
+
 def extract_workdir_issue_num(path: str) -> str:
     """从 workdir 路径提取 `issues/<segment>` 段中的 Issue 标识（Issue #3441）。
 
@@ -1168,13 +1172,26 @@ def validate_workdir_issue_consistency(cwd: str, issue_id: str,
 
     返回 (ok: bool, message: str)：
     - 任务无 Issue 标识（push/#0 等非 Issue 任务）→ (True, "") 不校验；
-    - workdir 解析不出 issues/<segment> 标识 → 按不一致处理（fail-fast，不静默放行）；
-    - 标识不一致 → (False, <含双方标识的显式错误>)。
+    - 任务标识为合成键（`autopilot-<letters>`，autopilot 远端派发用仓库级 cwd）→
+      (True, "") 不校验（该链路 cwd 从来不含 issues/<segment>）；
+    - workdir 根本不是 issues 布局（VOD `vod/<provider>/<repo>`、autopilot
+      `issue-agent` 等既有非 Issue 目录）→ (True, "") 不校验（本闸只负责
+      「同为 issues 布局但标识不同」的错配）；
+    - issues 布局下解析不出 <segment> 或标识不一致 → (False, <显式错误>)。
     """
     # 与 event_pipeline._issue_num_from 同口径：仅去前导 #，按字符串比较；
     # #0/0/空 视为无关联 Issue 任务，不校验
     task_issue = str(issue_id or "").strip().lstrip("#").strip()
     if not task_issue or task_issue == "0":
+        return True, ""
+    # Issue #3441 复审：合成 Issue 键（autopilot 远端/广播派发）不走 issues 布局，
+    # 直接跳过，避免对既有链路 fail-fast
+    if task_issue.startswith(_SYNTHETIC_ISSUE_PREFIXES):
+        return True, ""
+    # 只校验「issues 布局」的 workdir：VOD `vod/<provider>/<repo_>`、autopilot
+    # `issue-agent` 等既有非 Issue 目录不属于本闸范围（否则会误伤既有派发）
+    _parts = [p for p in str(cwd or "").replace("\\", "/").split("/") if p]
+    if "issues" not in _parts:
         return True, ""
     workdir_issue = extract_workdir_issue_num(cwd)
     if not workdir_issue:
