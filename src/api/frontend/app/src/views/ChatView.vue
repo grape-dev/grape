@@ -239,8 +239,8 @@
             <div v-if="!backends.length" class="cv__pop-hint">{{ tc('loading') }}</div>
             <div
               v-for="b in backends"
-              :key="(b.runtime_id || '') + b.name"
-              :class="['chat-picker-item', { active: isBackendActive(b) }]"
+              :key="(b.engine_uid || b.runtime_id || '') + (b.name || '')"
+              :class="['chat-picker-item', { active: isBackendActive(b), 'chat-picker-item--disabled': b.disabled }]"
               @click="saveModelConfig(b)"
             >
               <span class="cv__pop-ic">
@@ -273,6 +273,8 @@
                 </svg>
               </span>
               <span class="cv__pop-name">{{ b.display_name || b.name }}</span>
+              <!-- I4（#3396 收尾）：离线/失联引擎灰显 + 状态徽标，当前选中项也如实展示（不静默） -->
+              <span v-if="b.disabled" class="cv__pop-offline">{{ engineStatusText(b) }}</span>
               <span v-if="isBackendActive(b)" class="cv__pop-cur">
                 {{ t('current_engine') }}
                 <svg
@@ -521,6 +523,11 @@ const DEFAULTS = {
   'plugin.source_market': '市场',
   'plugin.degraded_hint': '清单可能含未安装插件',
   current_engine: '当前',
+  // I4（#3396 收尾）：离线引擎状态文案兜底（与 locales/{zh,en}/chat.json 平齐）
+  'engine.unavailable': '该引擎当前不可用，请选择在线引擎',
+  'engine.status_offline': '已离线',
+  'engine.status_recently_lost': '已失联',
+  'engine.status_about_to_gc': '已失联（即将回收）',
   'skill.default_official': '默认（官方技能）',
   'skill.no_repo_skill': '此仓库暂无 Chat 技能',
   'skill.no_personal_skill': '暂无个人 Chat 技能',
@@ -1444,13 +1451,23 @@ function closePicker() {
   pickerOpen.value = null
 }
 function isBackendActive(b) {
+  // I1（#3396 收尾，方案 A）：uid 是唯一稳定选中键（D11 口径，后端 #868 T10 双读），
+  // runtime_id 仅为旧数据兜底；名字兜底分支删除——同实例多引擎会并列高亮并静默串台。
   const d = configData.value || {}
-  const backend = d.backend || {}
-  const curType = (backend.type || '').toLowerCase()
   const sel = d.selectedEngine || {}
+  const selUid = String(sel.engine_uid || '').toLowerCase()
+  const uid = String(b.engine_uid || '').toLowerCase()
+  if (selUid) return !!uid && uid === selUid
   const selRid = parseInt(sel.runtime_id || 0, 10)
   const rid = parseInt(b.runtime_id || 0, 10)
-  return (selRid > 0 && rid === selRid) || (selRid <= 0 && b.name.toLowerCase() === curType)
+  return selRid > 0 && rid === selRid
+}
+function engineStatusText(b) {
+  // I4：状态文案走 i18n；未映射的状态原样透出（t() 缺 key 时返回 key 本身，此处退回原始状态码）
+  const s = String(b.status || 'offline').toLowerCase()
+  const k = 'engine.status_' + s
+  const v = t(k)
+  return v === k ? s : v
 }
 function loadConfigData() {
   const repo = currentRepo()
@@ -1551,9 +1568,16 @@ function togglePlugin(name) {
   else selectedPlugins.value.push(name)
 }
 function saveModelConfig(b) {
+  // I4（#3396 收尾）：离线/失联引擎不可选——前端短路，不再把失败延后到发消息
+  if (b.disabled) {
+    G.app.showToast(t('engine.unavailable'))
+    return
+  }
   const repo = currentRepo()
   const qs = repo ? '?repo=' + encodeURIComponent(repo.fullName) : ''
+  // I1（方案 A，对齐后端 #868 T10 uid 优先口径）：engine_uid 优先提交，runtime_id 兜底旧数据
   const body = { backend: b.name }
+  if (b.engine_uid) body.engine_uid = b.engine_uid
   if (b.runtime_id) body.runtime_id = parseInt(b.runtime_id, 10)
   G.API.put('/chat/config' + qs, body)
     .then(function () {
@@ -2041,6 +2065,23 @@ onMounted(function () {
   font-size: 10.5px;
   color: var(--a);
   background: color-mix(in srgb, var(--a) 12%, transparent);
+}
+/* I4（#3396 收尾）：离线/失联引擎灰显不可选 + 右侧状态徽标 */
+.chat-picker-item--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.chat-picker-item--disabled:hover {
+  background: transparent;
+}
+.cv__pop-offline {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
 }
 .cv__scope-tabs {
   display: flex;

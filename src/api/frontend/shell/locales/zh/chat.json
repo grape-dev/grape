@@ -226,5 +226,11 @@
     "source_installed": "已安装",
     "source_market": "市场",
     "degraded_hint": "清单可能含未安装插件"
+  },
+  "engine": {
+    "unavailable": "该引擎当前不可用，请选择在线引擎",
+    "status_offline": "已离线",
+    "status_recently_lost": "已失联",
+    "status_about_to_gc": "已失联（即将回收）"
   }
 }
