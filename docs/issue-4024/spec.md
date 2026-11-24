@@ -38,10 +38,10 @@
 
 ## Acceptance Criteria
 
-- [ ] pending-review 置位后立即 `issues status get`，`status` 与 `review_status`
+- [x] pending-review 置位后立即 `issues status get`，`status` 与 `review_status`
       均与置位响应一致（不再恒为 active / in_progress）。
-- [ ] `issues detail.pipeline.review_status` 置位后为 `pending_review`，不滞留
+- [x] `issues detail.pipeline.review_status` 置位后为 `pending_review`，不滞留
       `in_progress`。
-- [ ] 双 runtime 对账（status get ↔ detail/pipeline）两侧 `review_status` 一致。
-- [ ] 契约/文档注明聚合口径来源。
-- [ ] 新增回归用例全部通过，既有 `#539` / `#2695` 等测试通过。
+- [x] 双 runtime 对账（status get ↔ detail/pipeline）两侧 `review_status` 一致。
+- [x] 契约/文档注明聚合口径来源。
+- [x] 新增回归用例全部通过，既有 `#539` / `#2695` / `#2111` 等测试通过。

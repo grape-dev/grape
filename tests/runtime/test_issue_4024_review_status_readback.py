@@ -71,11 +71,11 @@ def _persisted(issue_id):
             "SELECT status, stage FROM issue WHERE id=?", (issue_id,)).fetchone()
 
 
-def _post_pending_review(issue_id, issue_number):
+def _post_pending_review(issue_id, issue_number, headers=None):
     with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
         return client.post(
             f"/api/issues/{issue_id}/pending-review",
-            headers=_session_headers(issue_number),
+            headers=headers or _session_headers(issue_number),
             json={"review_points": "请审核确认交付结果", "references": "PR#1"})
 
 
@@ -143,6 +143,39 @@ class TestPendingReviewReadbackUnified:
             _alias_status = db.cursor().execute(
                 "SELECT status FROM issue WHERE id=?", (alias,)).fetchone()[0]
         assert _alias_status == "completed"
+
+    def test_multi_platform_alias_smaller_id_reverse_consistent(self):
+        """⑤-reverse 别名在途行 id 更小（规范行非最小 id 方向）时四处读数仍单源一致。"""
+        alias_key = "github:org/test4024"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM issue WHERE repo_key=? AND issue_number=?", (alias_key, 4106))
+            db.commit()
+        # 别名（在途）先入库 → id 更小；主平台（终态）后入库 → id 更大。
+        alias = _seed(issue_number=4106, status="processing", stage="qa", repo_key=alias_key)
+        primary = _seed(issue_number=4106, status="completed", stage="done")
+        assert alias < primary
+        h = _session_headers(4106, repo_key=alias_key)
+
+        detail_before = client.get("/api/issues/org/test4024/4106", headers=h).json()
+        assert detail_before["issue_id"] == alias
+
+        set_data = _post_pending_review(alias, 4106, headers=h).json()
+        get_data = client.get(f"/api/issues/{alias}/status", headers=h).json()
+        detail = client.get("/api/issues/org/test4024/4106", headers=h).json()
+        pipeline = client.get("/api/issues/org/test4024/4106/pipeline", headers=h).json()
+
+        assert set_data["changed"] is True
+        assert set_data["status"] == get_data["status"] == "pending_review"
+        assert detail["task_status"] == pipeline["issue_task_status"] == "pending_review"
+        assert (set_data["review_status"] == get_data["review_status"]
+                == detail["pipeline"]["review_status"] == pipeline["review_status"]
+                == REVIEW_STATUS_PENDING_REVIEW)
+        assert get_data["stage"] == detail["stage"] == "qa"
+        with db_lock:
+            _primary_status = db.cursor().execute(
+                "SELECT status FROM issue WHERE id=?", (primary,)).fetchone()[0]
+        assert _primary_status == "completed"
 
     def test_dual_runtime_reconciliation_two_sides_agree(self):
         """③ 双 runtime 对账：status get 与 detail/pipeline 两侧 review_status 读数一致。"""

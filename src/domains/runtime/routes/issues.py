@@ -1591,6 +1591,9 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
         "source_issue_number": _source_issue_number,
         "has_cross_scene_handoff": _has_cross_scene,
         # Issue #539: 需求级业务状态（待人工确认等）+ SRE 验收结果引用
+        # ⚠️ `issue_stage` 是需求级业务态（issue 行原始 stage，空值保留空串供
+        # derive_review_status 判 unknown），与 `current_stage`（流水线推进态，
+        # 来自 issue_state/scene 配置）口径不同，二者不可互相归一/替代。
         "issue_stage": _biz_stage,
         "issue_task_status": _biz_status,
         "review_status": derive_review_status(_biz_stage, _biz_status),
@@ -3070,7 +3073,10 @@ def get_issue_detail(owner: str, repo: str, number: str,
         _biz_stage, _biz_status = _id_stage, _id_status
         base["issue_id"] = _canonical_id
         base["task_status"] = _id_status
-        base["stage"] = _id_stage
+        # Issue #2111/#4024：detail 出口 stage 保持 `or "vod"` 归一（与 _assemble_issue /
+        # /mine 同口径），id 行 stage 为空时不得把已归一值覆盖回空串；仅非空时生效。
+        # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
+        base["stage"] = _id_stage or "vod"
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
