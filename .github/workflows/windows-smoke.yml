@@ -546,3 +546,11 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/api/test_issue_3846_cloud_sandboxes_migration.py -v
+      - name: Domain-aware mgmt ORM session routing tests (issue #3732)
+        # Issue #3732 QA 审查修复（Required）：新增用例 test_issue_3732_domain_session.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#1982/#2133/#2245/#3167/#3490 均由 QA
+        # 要求补齐）。域感知 engine/session 工厂、strict 失败通道、启动域表归属自检都是
+        # 结构性改动，实现漂移时无门禁会静默通过——此前只能靠人工 pytest。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/kernel/test_issue_3732_domain_session.py -v
