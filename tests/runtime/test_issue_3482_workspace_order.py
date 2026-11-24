@@ -234,9 +234,10 @@ class TestFailClosedBehavior:
         monkeypatch.setattr(dependency_check, "validate_task_dependencies", lambda *a, **k: None)
         monkeypatch.setattr(session_tmpdir, "ensure_session_tmpdir", lambda *a, **k: None)
         monkeypatch.setattr(agent, "_worker_server_url_reachable", lambda *a, **k: False)
-        # rebase note: base-side #3713 credential attribution takes precedence over the
-        # #3482 fallback; credentials unblocked here so this case pins the fail-closed path.
-        monkeypatch.setattr(agent, "credential_block_result", lambda *a, **k: None)
+        # rebase note: base-side #3923/#3713 attribution (worktree_block_result) takes
+        # precedence over the #3482 fallback; attribution neutralized here so this
+        # case pins the fail-closed path deterministically.
+        monkeypatch.setattr(agent, "worktree_block_result", lambda *a, **k: None)
 
         class _StubClient:
             async def get_task_env(self, tid):
