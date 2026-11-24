@@ -974,6 +974,7 @@ def test_nginx_config_syntax(tmp_path, tpl):
         "error_log stderr;\n"
         "events { worker_connections 64; }\n"
         "http {\n"
+        "    access_log off;\n"
         "    include conf.d/grape.conf;\n"
         "}\n",
         encoding="utf-8",
