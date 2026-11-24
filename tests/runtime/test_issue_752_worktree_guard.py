@@ -192,3 +192,58 @@ def test_ensure_issue_worktree_reuse_resets_baseline():
     wt2 = repogit.ensure_issue_worktree("gitcode:owner/repo", "qa", "5")
     assert wt2 == wt
     assert wg.verify_fidelity(wt)["modified"] == []
+
+# ===== 2026-11-24 事故回归：未跟踪快照不得吞 .venv / node_modules，且快照要有保留策略 =====
+
+@pytest.mark.parametrize("path,expected", [
+    (".venv/bin/python", True),
+    (".venv/lib/python3.12/site-packages/x.py", True),
+    ("node_modules/react/index.js", True),
+    ("app/__pycache__/m.cpython-312.pyc", True),
+    ("dist/app.js", True),
+    ("src/app.py", False),
+    ("new_notes.txt", False),
+])
+def test_snapshot_excludes_rebuildable_dirs(path, expected):
+    """可重建大目录不进快照（19G 事故的根因）；源码与新增文档仍要保全。"""
+    assert wg._is_snapshot_excluded(path) is expected
+
+
+def test_snapshot_untracked_skips_venv_without_marking_incomplete(tmp_path):
+    """.venv 被跳过要记在 excluded，而非 skipped —— 否则归档被判不完整而拒绝清理。"""
+    wt = tmp_path / "wt"
+    os.makedirs(wt / ".venv" / "bin")
+    (wt / ".venv" / "bin" / "python").write_text("bin\n", encoding="utf-8")
+    (wt / "notes.txt").write_text("hello\n", encoding="utf-8")
+    arc = tmp_path / "archive" / "20261124T000000Z-abcdef01"
+
+    copied, skipped, excluded = wg._snapshot_untracked(
+        str(wt), str(arc), [".venv/bin/python", "notes.txt"])
+
+    assert copied == ["notes.txt"]
+    assert skipped == []                      # 不阻断归档
+    assert excluded == [".venv/bin/python"]
+    assert (arc / "untracked" / "notes.txt").is_file()
+    assert not (arc / "untracked" / ".venv").exists()
+    rec = wg._build_reset_record(
+        {"lost_commits": 0, "unpushed_count": 0, "dirty": [], "untracked": ["notes.txt"],
+         "branch": "main", "head": "abc", "compare_ref": "origin/main"},
+        "gitcode:o/r", 1, "coding", "", "", copied, skipped, "2026-11-24T00:00:00Z",
+        "reset", "t_x", snap_excluded=excluded)
+    assert rec["untracked_excluded"] == [".venv/bin/python"]
+    assert rec["archive_complete"] is True
+
+
+def test_prune_archive_snapshots_keeps_newest(tmp_path, monkeypatch):
+    """每个 issue 只保留最新 N 份快照，旧的按时间序删除。"""
+    parent = tmp_path / "issues" / "93"
+    parent.mkdir(parents=True)
+    for name in ("20261119T000000Z-aaaaaaa1", "20261120T000000Z-bbbbbbb2",
+                 "20261121T000000Z-ccccccc3"):
+        (parent / name).mkdir()
+    (parent / "worktree.bundle").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("GRAPE_WORKTREE_ARCHIVE_KEEP", "2")
+
+    assert wg._prune_archive_snapshots(str(parent)) == 1
+    assert sorted(p.name for p in parent.iterdir()) == [
+        "20261120T000000Z-bbbbbbb2", "20261121T000000Z-ccccccc3", "worktree.bundle"]
