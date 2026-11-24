@@ -8,7 +8,7 @@
 本文件锁四条口径（engine/role_caps.ensure_role_caps）：
 1. 只剩派生行 + 无声明 → 补 `all`
 2. 只剩派生行 + 有声明 → 按声明补（声明即收窄，不补 all）
-3. tags_user_set=1（UI 手工清空）→ 不补（尊重用户意图）
+3. tags_user_set=1（旧版允许清空，现已双层禁止）→ 也补（历史遗留自愈）
 4. 已有角色行 → 不补（不覆盖）
 外加一条端到端：本机发现的 UPDATE 分支现在也会补齐。
 """
@@ -84,12 +84,14 @@ class TestEnsureRoleCaps:
         db.commit()
         assert written == ["all"]
 
-    def test_user_set_empty_roles_is_left_alone(self):
+    def test_user_set_empty_roles_is_backfilled_as_legacy(self):
+        """旧版允许「清空全部角色」会置 tags_user_set=1；清空已被禁止后这类行属历史遗留，
+        必须自愈补 all，否则引擎永久不可派发、UI 只显示「未分配」。"""
         rid = _mk_engine("b3396bf-d", user_set=1)
         written = ensure_role_caps(db.cursor(), rid)
         db.commit()
-        assert written == []
-        assert all(":" in t for t in _caps(rid))   # 仍然只有派生行
+        assert written == ["all"]
+        assert ("all" in [t for t in _caps(rid) if ":" not in t])
 
     def test_existing_role_rows_not_overwritten(self):
         rid = _mk_engine("b3396bf-e", roles=("chat",))

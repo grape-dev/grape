@@ -8,7 +8,9 @@
 本原语把口径集中在一处，只数**角色行**（`all` 或 KNOWN_AGENT_ROLES）：
 
 - 已有角色行 → 不动（UI/接口写入优先）；
-- `tags_user_set=1` 且角色行为空 → **不动**（用户显式清空＝故意让该引擎停派）；
+- `tags_user_set=1` 且角色行为空 → **照补**（2026-11-24 裁定：清空已被前端+接口双层
+  禁止，`EMPTY_ROLE_TAGS` 使「用户主动清空」这条路径不存在了；这种状态只剩历史遗留，
+  留着会让引擎永久 fail-closed、UI 只显示「未分配」且无法自愈）；
 - 有合法声明 → 按声明补齐（声明即收窄，A8b）；
 - 无声明 / 声明非法 → 补 `all`（与基线默认一致）。
 """
@@ -70,8 +72,10 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
             declared = _parse_declared(row[0])
         if user_set is None:
             user_set = row[1] or 0
-    if user_set:
-        return []  # UI 手工清空 → 尊重用户意图，不自动补
+    # tags_user_set=1 不再阻断补齐（2026-11-24 裁定）：旧版允许「清空全部角色」，那一刻会
+    # 置 flags=1；现在清空路径已被双层拦截（PUT 空集 400 EMPTY_ROLE_TAGS、删/停用最后一个
+    # 角色 400），新操作不可能再产生「user_set=1 且零角色行」，这类行只剩历史遗留，
+    # 留着会让引擎永久 fail-closed、UI 只显示「未分配」且无法自愈。声明优先，无声明补 all。
     _valid = [str(t).strip().lower() for t in (declared or []) if str(t).strip()]
     _valid = [t for t in dict.fromkeys(_valid) if t in KNOWN_AGENT_ROLES]
     _write = _valid or ["all"]
