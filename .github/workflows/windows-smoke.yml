@@ -601,3 +601,12 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/test_issue_3770_env_extra_plaintext.py -v
+
+      - name: "Sweeper own-DSN dialect layer + restart grace window regressions (issue #4303)"
+        # Issue #4303：三库拓扑下 per-seq 回收的游标方言层回归（裸 pymysql 游标绕过
+        # ?→%s 翻译 → TypeError → 整段回落 bulk 一刀切判 failed）+ 重启恢复窗口护栏 +
+        # per-seq 逐条降级。本 job 逐文件列举、无全量 pytest 兜底（先例 #2133/#2245/
+        # #3490/#3699/#3758/#3794 均由 QA 要求补齐），未接线的用例 CI 永不执行。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_4303_sweep_own_dsn.py -v
