@@ -25,7 +25,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from src.kernel.config import log
-from src.kernel.issue_ident import is_native_issue_ident, native_issue_number
+from src.kernel.issue_ident import is_native_issue_ident, normalize_issue_ident
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
     TERMINAL_ISSUE_STAGES,
@@ -62,19 +62,17 @@ def _marker_hit(value) -> bool:
 
 
 def _labels_external_block(labels) -> str:
-    """标签里是否带 external-block；返回命中的原始标签（未命中返回空串）。"""
+    """标签里是否带 external-block；返回命中的归一标签（未命中返回空串）。
+
+    复用 ``a2a_terminal_guard.normalize_labels``，避免与 #2816 终态门禁的标签
+    归一逻辑各写一套（QA 复审 Standards：重复代码）。
+    """
     if not labels:
         return ""
-    items = labels
-    if isinstance(labels, str):
-        items = labels.split(",")
-    elif isinstance(labels, dict):
-        items = [labels]
-    for item in items:
-        if isinstance(item, dict):
-            item = item.get("name") or item.get("title") or ""
+    from src.api.a2a_terminal_guard import normalize_labels
+    for item in normalize_labels(labels):
         if _marker_hit(item):
-            return str(item).strip()
+            return item
     return ""
 
 
@@ -120,43 +118,79 @@ def is_redispatch_payload(payload) -> bool:
 
 
 def _parse_ts(value):
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            return value.astimezone(timezone.utc)
-        raw = value.isoformat()
-    else:
-        raw = str(value or "").strip()
-    if not raw:
-        return None
-    from src.api.time_utils import normalize_event_time
-    try:
-        dt = datetime.fromisoformat(str(normalize_event_time(raw)).replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    """复用 a2a_dispatch_guard._parse_ts（存储层时间口径唯一实现）。"""
+    from src.api.a2a_dispatch_guard import _parse_ts as _shared_parse_ts
+    return _shared_parse_ts(value)
 
 
 def _event_issue_ref(issue_number) -> str:
-    return f"#{str(issue_number).lstrip('#')}" if issue_number else ""
+    """归一为 ``#N`` 事件 issue_id（与 qa_gate / a2a 历史落库形态对齐）。"""
+    num = normalize_issue_ident(issue_number)
+    return f"#{num}" if num else ""
 
 
-def _query_segment_rows(repo_key: str, issue_number) -> list[tuple]:
-    """同 Issue 的 a2a_event 段（seq, agent_type, status, created_at），按 seq 升序。"""
-    if not repo_key or not is_native_issue_ident(issue_number):
+def _resolve_scene_key(repo_key: str, issue_number):
+    """Issue 当前流水线场景键；解析异常返回 None（调用方按放行处理）。
+
+    复用 ``qa_gate._issue_scene_key``，与 ``latest_qa_event`` 的场景口径保持一致。
+    """
+    num = normalize_issue_ident(issue_number)
+    if not repo_key or not num:
+        return None
+    try:
+        from src.api.qa_gate import _issue_scene_key
+        return _issue_scene_key(repo_key, num)
+    except Exception as exc:
+        log.debug(f"[watchdog-redispatch] scene resolve failed "
+                  f"repo={repo_key} issue=#{num}: {exc}")
+        return None
+
+
+def _query_segment_rows(repo_key: str, issue_number, scene_id=None,
+                        default_scene: bool = False) -> list[tuple]:
+    """同 Issue 同一流水线（scene_id）的 a2a_event 段，按 seq 升序。
+
+    列：``seq, agent_type, status, result, structured_output, created_at``。
+    ``scene_id`` 为空/``default`` 时并入历史空场景事件（与
+    ``qa_gate.latest_qa_event`` 的 default_scene 口径一致），避免跨流水线旧段
+    被当成本次终态（QA 复审 Spec：终态查询须按 pipeline/scene 收敛）。
+    """
+    num = normalize_issue_ident(issue_number)
+    if not repo_key or not num:
         return []
+    where = "repo_key=? AND issue_id IN (?, ?) AND event_type=?"
+    params: list = [repo_key, f"#{num}", num, "a2a_event"]
+    if scene_id is not None:
+        if default_scene:
+            where += " AND (scene_id=? OR scene_id='' OR scene_id IS NULL)"
+        else:
+            where += " AND scene_id=?"
+        params.append(scene_id)
+    _select = "seq, agent_type, status, result, structured_output, created_at"
     try:
         from src.domains.runtime import public as _runtime_public
-        return _runtime_public.query_events(
-            "seq, agent_type, status, created_at",
-            where="repo_key=? AND issue_id=? AND event_type=?",
-            params=(repo_key, _event_issue_ref(issue_number), "a2a_event"),
-            order_by="seq ASC")
+        try:
+            return _runtime_public.query_events_any(
+                _select, where=where, params=tuple(params), order_by="seq ASC")
+        except Exception:
+            # 旧库无 structured_output 列：退回纯文本列，结论仍按文本判定。
+            return _runtime_public.query_events_any(
+                "seq, agent_type, status, result, created_at",
+                where=where, params=tuple(params), order_by="seq ASC")
     except Exception as exc:
         log.warning(f"[watchdog-redispatch] segment query failed "
-                    f"repo={repo_key} issue={issue_number}: {exc}")
+                    f"repo={repo_key} issue=#{num} scene={scene_id}: {exc}")
         return []
+
+
+def _parse_structured(raw) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "")
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
 
 
 def load_issue_terminal_inputs(repo_key: str, issue_number) -> dict:
@@ -180,9 +214,12 @@ def evaluate_pipeline_terminal(status: str = "", stage: str = "",
                                segments=None, external_block: dict | None = None) -> dict:
     """纯判定：目标 Issue 是否已完成（流水线终态 / qa 通过 / 外部阻塞）。
 
-    ``segments`` 为按 seq 升序的 ``(seq, agent_type, status, created_at)`` 段列表。
-    ``qa-passed`` 判据：最新流水线段由 qa 产出且状态 completed（对应 #3888 的
-    qa 双轮通过后不应再回派 coding）。``status``/``stage`` 覆盖用户已收敛的单据。
+    ``segments`` 为按 seq 升序的
+    ``(seq, agent_type, status, result, structured_output, created_at)`` 段列表。
+    ``qa-passed`` 判据：最新流水线段由 qa 产出，且复用
+    ``qa_gate.classify_qa_conclusion`` 判定为 pass。仅 status=completed 不足以
+    判通过——QA 打回（文本「不通过」或 ``next_step=a2a_coding``）同样是
+    completed，必须继续允许 coding 返工重派（QA 复审 Spec 高优）。
     """
     block = external_block if isinstance(external_block, dict) else {}
     if block.get("hit"):
@@ -206,12 +243,23 @@ def evaluate_pipeline_terminal(status: str = "", stage: str = "",
     if rows:
         last = rows[-1]
         last_agent = str(last[1] or "").strip().lower()
-        last_status = str(last[2] or "").strip().lower()
-        if last_agent == "qa" and last_status == "completed":
-            return {"terminal": True, "reason": "qa_passed",
-                    "criteria_source": f"pipeline.segment.seq={last[0]}",
-                    "external_block": False, "qa_passed": True,
-                    "matched_marker": f"qa:{last_status}"}
+        last_status = str(last[2] or "").strip()
+        if last_agent == "qa":
+            last_result = last[3] if len(last) > 3 else ""
+            last_structured = _parse_structured(last[4]) if len(last) > 4 else None
+            verdict = "unknown"
+            try:
+                from src.api.qa_gate import classify_qa_conclusion
+                verdict = classify_qa_conclusion(
+                    last_status, last_result or "", structured=last_structured)
+            except Exception as exc:
+                log.warning(f"[watchdog-redispatch] qa conclusion classify failed "
+                            f"seq={last[0]}: {exc}")
+            if verdict == "pass":
+                return {"terminal": True, "reason": "qa_passed",
+                        "criteria_source": f"pipeline.segment.seq={last[0]}",
+                        "external_block": False, "qa_passed": True,
+                        "matched_marker": f"qa:{last_status}"}
     return {"terminal": False, "reason": "", "criteria_source": "",
             "external_block": False, "qa_passed": False, "matched_marker": ""}
 
@@ -222,10 +270,42 @@ def resolve_pipeline_terminal_state(repo_key: str, issue_number, payload=None,
     inputs = load_issue_terminal_inputs(repo_key, issue_number)
     carried = payload.get("carried_context") if isinstance(payload, dict) else None
     block = detect_external_block(payload=payload, carried_context=carried, labels=labels)
-    segments = _query_segment_rows(repo_key, issue_number)
+    scene_key = _resolve_scene_key(repo_key, issue_number)
+    if scene_key is None:
+        segments: list = []
+    else:
+        segments = _query_segment_rows(
+            repo_key, issue_number, scene_key,
+            default_scene=(scene_key in ("", "default")))
     return evaluate_pipeline_terminal(
         status=inputs.get("status"), stage=inputs.get("stage"),
         segments=segments, external_block=block)
+
+
+def load_issue_labels(repo_key: str, issue_number) -> list[str]:
+    """best-effort 读取 Issue 标签（供巡检路径校验 external-block）。
+
+    VCS 不可用/无 token/查询异常一律返回空列表（按未命中放行）。
+    """
+    num = normalize_issue_ident(issue_number)
+    if not repo_key or not num:
+        return []
+    try:
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.runtime.vcs.api_client import create_client, _native_issue_number
+        from src.api.a2a_terminal_guard import normalize_labels
+        token = get_repo_token_with_refresh(repo_key) or ""
+        if not token:
+            return []
+        client = create_client(repo_key, token)
+        issue = client.get_issue(_native_issue_number(num), timeout=10.0)
+        if not isinstance(issue, dict) or issue.get("error"):
+            return []
+        return normalize_labels(issue.get("labels"))
+    except Exception as exc:
+        log.debug(f"[watchdog-redispatch] issue labels read failed "
+                  f"repo={repo_key} issue=#{num}: {exc}")
+        return []
 
 
 def _query_recent_dispatch_payloads(repo_key: str, issue_number,
@@ -234,7 +314,7 @@ def _query_recent_dispatch_payloads(repo_key: str, issue_number,
         return []
     try:
         from src.domains.runtime import public as _runtime_public
-        return _runtime_public.query_events(
+        return _runtime_public.query_events_any(
             "seq, created_at, payload",
             where="repo_key=? AND issue_id=? AND event_type=? AND agent_type=?",
             params=(repo_key, _event_issue_ref(issue_number), "a2a_event",
@@ -322,13 +402,18 @@ def resolve_original_context(repo_key: str, issue_number, target_agent: str,
 
 def record_redispatch_skip(repo_key: str, issue_number, target_agent: str,
                            reason: str, detail: str = "") -> str:
-    """结构化留痕（event_skipped + 日志），返回 detail 供调用方回显。"""
+    """结构化留痕（event_skipped + 日志），返回 detail 供调用方回显。
+
+    ``issue_number`` 先归一为不带 ``#`` 的编号再交给 ``record_skip``——后者会
+    自行补 ``#``，原样传 ``#4334`` 会落成 ``##4334``（QA 复审 Standards）。
+    """
+    num = normalize_issue_ident(issue_number)
     try:
         from src.api.a2a_dispatch_guard import record_skip
-        record_skip(repo_key, issue_number, target_agent, reason, detail=detail)
+        record_skip(repo_key, num, target_agent, reason, detail=detail)
     except Exception as exc:
         log.warning(f"[watchdog-redispatch] record skip failed: {exc}")
-    log.info(f"[watchdog-redispatch] skip repo={repo_key} issue=#{issue_number} "
+    log.info(f"[watchdog-redispatch] skip repo={repo_key} issue=#{num} "
              f"target={target_agent} reason={reason} {detail}")
     return detail
 
@@ -338,13 +423,17 @@ def guard_watchdog_redispatch(repo_key: str, issue_number, target_agent: str,
     """重派前综合守卫：终态预检 → 频次上限 → context 非空保护。
 
     返回 ``{}`` 表示放行；否则返回含 ``reason``/``detail``/``terminal`` 的判定
-    结果，调用方据此短路本次派发。仅作用于 coding 目标（Spec 范围）。
+    结果，调用方据此短路本次派发。仅作用于 coding 目标、且仅为该派发声明为
+    watchdog/自动重派的 payload（Spec 范围；普通 coding 派发不进入终态判定，
+    避免误拦正常/人工派发——QA 复审 Spec）。
     """
     if not repo_key or not issue_number:
         return {}
     if str(target_agent or "").strip().lower() != "coding":
         return {}
     payload = payload if isinstance(payload, dict) else {}
+    if not is_redispatch_payload(payload):
+        return {}
 
     terminal = resolve_pipeline_terminal_state(repo_key, issue_number, payload, labels)
     if terminal.get("terminal"):
@@ -357,28 +446,27 @@ def guard_watchdog_redispatch(repo_key: str, issue_number, target_agent: str,
         out.update({"reason": PIPELINE_TERMINAL_REASON, "detail": detail})
         return out
 
-    if is_redispatch_payload(payload):
-        if not str(payload.get("context") or "").strip():
-            original = resolve_original_context(repo_key, issue_number, target_agent, payload)
-            if original:
-                payload["context"] = original
-                log.info(f"[watchdog-redispatch] backfilled original context "
-                         f"repo={repo_key} issue=#{issue_number} len={len(original)}")
-            else:
-                detail = "target=coding criteria=payload.context empty and no original context"
-                record_redispatch_skip(repo_key, issue_number, target_agent,
-                                       CONTEXT_EMPTY_REASON, detail)
-                return {"terminal": False, "reason": CONTEXT_EMPTY_REASON,
-                        "detail": detail, "criteria_source": "payload.context",
-                        "external_block": False, "qa_passed": False}
-        limit = redispatch_limit_state(repo_key, issue_number, target_agent)
-        if limit.get("hit"):
-            detail = (f"target=coding count={limit['count']} limit={limit['limit']} "
-                      f"window={limit['window']}s")
+    if not str(payload.get("context") or "").strip():
+        original = resolve_original_context(repo_key, issue_number, target_agent, payload)
+        if original:
+            payload["context"] = original
+            log.info(f"[watchdog-redispatch] backfilled original context "
+                     f"repo={repo_key} issue=#{issue_number} len={len(original)}")
+        else:
+            detail = "target=coding criteria=payload.context empty and no original context"
             record_redispatch_skip(repo_key, issue_number, target_agent,
-                                   REDISPATCH_LIMIT_REASON, detail)
-            return {"terminal": False, "reason": REDISPATCH_LIMIT_REASON,
-                    "detail": detail, "criteria_source": "redispatch.count",
-                    "external_block": False, "qa_passed": False,
-                    "count": limit["count"], "limit": limit["limit"]}
+                                   CONTEXT_EMPTY_REASON, detail)
+            return {"terminal": False, "reason": CONTEXT_EMPTY_REASON,
+                    "detail": detail, "criteria_source": "payload.context",
+                    "external_block": False, "qa_passed": False}
+    limit = redispatch_limit_state(repo_key, issue_number, target_agent)
+    if limit.get("hit"):
+        detail = (f"target=coding count={limit['count']} limit={limit['limit']} "
+                  f"window={limit['window']}s")
+        record_redispatch_skip(repo_key, issue_number, target_agent,
+                               REDISPATCH_LIMIT_REASON, detail)
+        return {"terminal": False, "reason": REDISPATCH_LIMIT_REASON,
+                "detail": detail, "criteria_source": "redispatch.count",
+                "external_block": False, "qa_passed": False,
+                "count": limit["count"], "limit": limit["limit"]}
     return {}

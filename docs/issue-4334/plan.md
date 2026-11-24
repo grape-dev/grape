@@ -27,7 +27,8 @@
 |------|----------|------|
 | external-block | issue.label / payload / carried_context | skip + 留痕 |
 | status/stage 终态 | issue.status / issue.stage | skip + 留痕 |
-| 最新段 qa completed | pipeline.segment.seq=N | skip + 留痕 |
+| 最新段 qa 通过（classify_qa_conclusion=pass） | pipeline.segment.seq=N（按 scene 收敛） | skip + 留痕 |
+| 最新段 qa 打回/不可判定 | pipeline.segment.seq=N | 放行 coding 返工 |
 | 同 Issue 重派次数 ≥ 上限 | events.payload context 标记计数 | 拦截 + 留痕 |
 | 重派 context 为空 | payload.context | 回填空则拦截 |
 

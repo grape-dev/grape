@@ -3050,9 +3050,13 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 guard_terminal_dispatch, repo_key, issue_number, agent_name,
                 (payload if isinstance(payload, dict) else {}))
             # Issue #4334：重派守卫可能把原事件 context 回填进 payload，同步到
-            # 后续事件 payload 组装，避免空 context 覆盖既有产物。
+            # 已组装的 evt payload，避免空 context 覆盖既有产物。
             if isinstance(payload, dict):
-                context = payload.get("context") or context
+                _backfilled_ctx = str(payload.get("context") or "").strip()
+                if _backfilled_ctx and _backfilled_ctx != context:
+                    context = _backfilled_ctx
+                    _payload["context"] = _backfilled_ctx
+                    evt["_a2a_context"] = _backfilled_ctx
             if _terminal:
                 from src.api.terminal_disposition import available_actions
                 _terminal_reason = _terminal.get("reason") or "needs_human_terminal"

@@ -607,6 +607,57 @@ def test_recheck_handler_evidence_and_guards():
     assert ctx.verdict == "target_unresolvable" and rec[0][0] == "needs_human"  # S29
 
 
+def test_recheck_pipeline_terminal_labels_and_coding_scope():
+    # Issue #4334：巡检预检须传 Issue 标签校验 external-block，且仅对 target=coding 生效。
+    import src.api.watchdog_redispatch_guard as wdg
+
+    task_row = (_old(60), "qa", json.dumps({"next_step": "a2a-coding"}))
+
+    def _run(target):
+        ctx = pc.CompensateContext(finding_id="f4334", task_id="t4334",
+                                   repo_key=SENTINEL_REPO, issue_id="#4334",
+                                   status="claiming")
+        rec, captured = [], {}
+
+        def _fake_terminal(repo, num, payload=None, labels=()):
+            captured.update(repo=repo, num=num, labels=list(labels))
+            return {"terminal": True, "reason": "external_block",
+                    "criteria_source": "issue.label",
+                    "matched_marker": "external-block"}
+
+        def _fake_skip(*a, **k):
+            captured.setdefault("skips", []).append((a, k))
+
+        fake = FakeDb([("FROM agent_tasks WHERE id=?", [task_row])])
+        with patch.object(_sm, "db", fake), \
+             patch.object(_sm, "db_lock", __import__("threading").Lock()), \
+             patch.object(pc, "_set_finding",
+                          lambda fid, status, meta: rec.append((status, meta))), \
+             patch.object(patrol_mod, "issue_terminal", lambda *a: ""), \
+             patch.object(patrol_mod, "structured_handoff_exists",
+                          lambda *a, **k: False), \
+             patch.object(patrol_mod, "resolve_handoff_target",
+                          lambda *a, **k: (target, pc.TARGET_SOURCE_TEXT)), \
+             patch.object(patrol_mod, "l1_event_exists", lambda *a, **k: False), \
+             patch.object(patrol_mod, "l2_downstream_exists", lambda *a, **k: False), \
+             patch.object(patrol_mod, "_subtask_parent", lambda *a: ""), \
+             patch.object(wdg, "load_issue_labels", lambda *a, **k: ["external-block"]), \
+             patch.object(wdg, "resolve_pipeline_terminal_state", _fake_terminal), \
+             patch.object(wdg, "record_redispatch_skip", _fake_skip):
+            ok = pc.RecheckHandler().handle(ctx)
+        return ok, ctx, rec, captured
+
+    ok, ctx, rec, cap = _run("coding")
+    assert ok is False and ctx.verdict == "false_positive"
+    assert cap["labels"] == ["external-block"] and cap["num"] == "#4334"
+    assert cap.get("skips"), "命中终态必须留痕"
+    assert rec and rec[0][0] == "false_positive"
+
+    ok2, ctx2, _rec2, cap2 = _run("qa")
+    assert ok2 is True, "非 coding 目标不得进入 pipeline 终态预检"
+    assert "labels" not in cap2
+
+
 def test_identity_handler_strategy_chain():
     # 策略族编排（策略本身的数据访问用注入替身——代码原生支持 strategies 注入）
     class _S:

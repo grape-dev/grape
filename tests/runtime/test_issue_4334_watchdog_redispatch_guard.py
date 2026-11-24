@@ -11,16 +11,18 @@ from datetime import datetime, timezone
 from src.api import watchdog_redispatch_guard as guard
 
 
-class TestEvaluatelPipelineTerminal:
+class TestEvaluatePipelineTerminal:
     def test_qa_passed_latest_segment_is_terminal(self):
-        segments = [(10, "coding", "completed", ""), (11, "qa", "completed", "")]
+        segments = [(10, "coding", "completed", "", None, ""),
+                    (11, "qa", "completed", "结论：通过", None, "")]
         state = guard.evaluate_pipeline_terminal(segments=segments)
         assert state["terminal"] is True
         assert state["reason"] == "qa_passed"
         assert "pipeline.segment.seq=11" in state["criteria_source"]
 
     def test_running_after_qa_is_not_terminal(self):
-        segments = [(11, "qa", "completed", ""), (12, "coding", "running", "")]
+        segments = [(11, "qa", "completed", "结论：通过", None, ""),
+                    (12, "coding", "running", "", None, "")]
         state = guard.evaluate_pipeline_terminal(segments=segments)
         assert state["terminal"] is False
 
@@ -42,10 +44,71 @@ class TestEvaluatelPipelineTerminal:
         assert state["criteria_source"] == "issue.label"
 
     def test_in_flight_issue_passes(self):
-        segments = [(10, "coding", "completed", "")]
+        segments = [(10, "coding", "completed", "", None, "")]
         state = guard.evaluate_pipeline_terminal(status="processing", stage="qa",
                                                  segments=segments)
         assert state["terminal"] is False
+
+    def test_qa_rejection_text_is_not_terminal(self):
+        # QA 打回同样是 completed，但结论「不通过」必须允许 coding 返工重派。
+        segments = [(10, "coding", "completed", "", None, ""),
+                    (11, "qa", "completed", "审查不通过，需返工", None, "")]
+        state = guard.evaluate_pipeline_terminal(segments=segments)
+        assert state["terminal"] is False
+        assert state["reason"] == ""
+
+    def test_qa_rejection_structured_next_step_coding_is_not_terminal(self):
+        segments = [(11, "qa", "completed", "", {"next_step": "a2a_coding"}, "")]
+        state = guard.evaluate_pipeline_terminal(segments=segments)
+        assert state["terminal"] is False
+
+    def test_qa_unknown_conclusion_is_not_terminal(self):
+        segments = [(11, "qa", "completed", "", None, "")]
+        state = guard.evaluate_pipeline_terminal(segments=segments)
+        assert state["terminal"] is False
+
+
+class TestSceneConvergence:
+    def _patch_inputs(self, monkeypatch, scene):
+        monkeypatch.setattr(
+            guard, "load_issue_terminal_inputs",
+            lambda *a, **k: {"status": "", "stage": ""})
+        monkeypatch.setattr(guard, "_resolve_scene_key", lambda *a, **k: scene)
+
+    def test_segment_query_scoped_to_scene(self, monkeypatch):
+        self._patch_inputs(monkeypatch, "scene-b")
+        captured = {}
+
+        def _fake_segments(repo, num, scene_id=None, default_scene=False):
+            captured.update(scene_id=scene_id, default=default_scene)
+            return [(11, "qa", "completed", "结论：通过", None, "")]
+
+        monkeypatch.setattr(guard, "_query_segment_rows", _fake_segments)
+        out = guard.resolve_pipeline_terminal_state("gitcode:owner/repo", "5")
+        assert captured == {"scene_id": "scene-b", "default": False}
+        assert out["terminal"] is True
+
+    def test_default_scene_includes_legacy_empty_scene(self, monkeypatch):
+        self._patch_inputs(monkeypatch, "default")
+        captured = {}
+
+        def _fake_segments(repo, num, scene_id=None, default_scene=False):
+            captured.update(scene_id=scene_id, default=default_scene)
+            return []
+
+        monkeypatch.setattr(guard, "_query_segment_rows", _fake_segments)
+        out = guard.resolve_pipeline_terminal_state("gitcode:owner/repo", "5")
+        assert captured == {"scene_id": "default", "default": True}
+        assert out["terminal"] is False
+
+    def test_unresolved_scene_fails_open_without_query(self, monkeypatch):
+        self._patch_inputs(monkeypatch, None)
+        called = []
+        monkeypatch.setattr(guard, "_query_segment_rows",
+                            lambda *a, **k: called.append(1) or [])
+        out = guard.resolve_pipeline_terminal_state("gitcode:owner/repo", "5")
+        assert called == []
+        assert out["terminal"] is False
 
 
 class TestExternalBlockDetection:
@@ -107,7 +170,8 @@ class TestGuardWatchdogRedispatch:
             "criteria_source": "pipeline.segment.seq=11",
             "external_block": False, "qa_passed": True, "matched_marker": "qa:completed"})
         out = guard.guard_watchdog_redispatch(
-            "gitcode:owner/repo", "5", "coding", {"context": "x"})
+            "gitcode:owner/repo", "5", "coding",
+            {"redispatch_mode": "watchdog", "context": "x"})
         assert out["reason"] == guard.PIPELINE_TERMINAL_REASON
         assert "criteria=pipeline.segment.seq=11" in out["detail"]
         assert recorded and recorded[0][0] == guard.PIPELINE_TERMINAL_REASON
@@ -141,13 +205,55 @@ class TestGuardWatchdogRedispatch:
     def test_non_coding_target_not_guarded(self, monkeypatch):
         self._patch(monkeypatch, terminal={"terminal": True, "reason": "qa_passed"})
         assert guard.guard_watchdog_redispatch(
-            "gitcode:owner/repo", "5", "qa", {"context": "x"}) == {}
+            "gitcode:owner/repo", "5", "qa",
+            {"redispatch_mode": "watchdog", "context": "x"}) == {}
 
     def test_clean_coding_redispatch_passes(self, monkeypatch):
         self._patch(monkeypatch)
         assert guard.guard_watchdog_redispatch(
             "gitcode:owner/repo", "5", "coding",
             {"compensated_by": "patrol:t:1", "context": "ctx"}) == {}
+
+    def test_normal_coding_dispatch_not_terminal_guarded(self, monkeypatch):
+        # Spec 范围：终态判定只作用于 watchdog 自动重派，普通 coding 派发放行。
+        recorded = self._patch(monkeypatch, terminal={
+            "terminal": True, "reason": "qa_passed",
+            "criteria_source": "pipeline.segment.seq=11"})
+        out = guard.guard_watchdog_redispatch(
+            "gitcode:owner/repo", "5", "coding",
+            {"context": "Issue #5 开发完成，请审查 PR #6"})
+        assert out == {}
+        assert recorded == []
+
+
+class TestRecordSkipPersistence:
+    def test_skip_writes_single_hash_issue_id_and_detail(self):
+        """留痕真实写入 event_skipped：issue_id 不得出现双井号 ##。"""
+        from src.kernel.session_manager import db, db_lock
+        rk = "gitcode:test/issue4334"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM event_skipped WHERE repo_key=?", (rk,))
+            db.commit()
+        try:
+            guard.record_redispatch_skip(
+                rk, "#4334", "coding", guard.PIPELINE_TERMINAL_REASON,
+                "target=coding criteria=pipeline.segment.seq=11")
+            with db_lock:
+                c = db.cursor()
+                row = c.execute(
+                    "SELECT issue_id, event_type, reason, detail FROM event_skipped "
+                    "WHERE repo_key=? ORDER BY id DESC LIMIT 1", (rk,)).fetchone()
+            assert row is not None
+            assert row[0] == "#4334", row
+            assert row[1] == "a2a_event"
+            assert row[2] == guard.PIPELINE_TERMINAL_REASON
+            assert "criteria=pipeline.segment.seq=11" in row[3]
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM event_skipped WHERE repo_key=?", (rk,))
+                db.commit()
 
 
 class TestCountRecentRedispatches:
@@ -184,7 +290,8 @@ class TestTerminalGuardIntegration:
                              "external_block": False, "qa_passed": True,
                              "matched_marker": "qa:completed"})
         out = terminal_guard.guard_terminal_dispatch(
-            "gitcode:owner/repo", "5", "coding", {"context": "x"})
+            "gitcode:owner/repo", "5", "coding",
+            {"redispatch_mode": "watchdog", "context": "x"})
         assert out["reason"] == guard.PIPELINE_TERMINAL_REASON
         assert out["triggers"]
         assert out["terminal"] is True
