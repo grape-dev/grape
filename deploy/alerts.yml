@@ -297,3 +297,45 @@ groups:
         annotations:
           summary: "No-progress task scan is failing repeatedly"
           description: "The no_progress sweep has failed at least 5 times in 5 minutes, so stuck running tasks may never be auto-requeued. Check master scheduler logs for 'no_progress: scan running tasks failed', then verify the DB backend cursor iteration/context protocol and SQL dialect."
+      # Issue #4203：内核 OOM killer 选中本机任一进程即 P1（critical，值班立即响应）。
+      # 语义：master-004 曾 24h 内 4 次 OOM kill，前 3 次选中引擎子进程（无外显），
+      # 第 4 次选中 worker 主进程才 339 次 502 + 终态/消息回执丢失。任何增量都说明
+      # 进程内存失控或 cgroup 限额(MemoryMax)生效，必须当场取证。
+      # 排查：dmesg -T | grep -i -E "oom|killed process" 取 victim 名称与 total-vm/rss；
+      # systemctl show grape-worker-server -p MemoryMax,MemoryHigh,MemoryAccounting；
+      # /metrics 的 grape_process_memory_rss_bytes / grape_engine_child_rss_bytes 定位
+      # 是主进程还是引擎子进程在长。
+      - alert: GrapeWorkerOOMKilled
+        expr: increase(node_vmstat_oom_kill[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "OOM killer killed a process on {{ $labels.instance }}"
+          description: "node_vmstat_oom_kill increased on {{ $labels.instance }}: the kernel OOM killer fired within the last hour. Grab `dmesg -T | grep -i -E 'oom|killed process'` for the victim (total-vm/rss), check worker cgroup limits via `systemctl show grape-worker-server -p MemoryMax,MemoryHigh,MemoryAccounting`, and watch grape_process_memory_rss_bytes / grape_engine_child_rss_bytes to locate the growth source. See Issue #4203."
+
+      # Issue #4203：worker 进程 RSS 距 cgroup 上限 < 20%（ratio > 0.8）持续 10 分钟。
+      # 分母是 grape_process_memory_limit_bytes（cgroup memory.max）；未设限额时该序列
+      # 恒为 0、ratio 恒为 0，本规则不触发（由启动日志 WARNING 与 unbounded=1 序列兜底）。
+      - alert: GrapeProcessMemoryNearLimit
+        expr: grape_process_memory_ratio > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker process RSS near cgroup memory limit ({{ $labels.process }})"
+          description: "RSS of process {{ $labels.process }} has been above 80% of its cgroup memory limit for 10 minutes — approaching MemoryMax, an OOM kill is imminent. Check grape_process_memory_rss_bytes vs grape_process_memory_limit_bytes and long-running tasks' engine children (grape_engine_child_rss_bytes). See Issue #4203."
+
+      # Issue #4203：worker RSS 30 分钟持续增长（斜率为正且增量超 512MiB）。
+      # 语义：接近上限的比值是「快撞了」，本条抓「还在一直涨」——泄漏类增长在撞限前
+      # 就该被看到（004 事故 RSS 爬升数小时无人感知）。deriv>0 连续 30m + 增量阈值
+      # 双条件去抖，避免正常业务波动误报。
+      - alert: GrapeWorkerRSSGrowth
+        expr: |
+          deriv(grape_process_memory_rss_bytes[30m]) > 0
+          and increase(grape_process_memory_rss_bytes[30m]) > (512 * 1024 * 1024)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker process RSS keeps growing ({{ $labels.process }})"
+          description: "RSS of process {{ $labels.process }} grew by more than 512MiB over the last 30 minutes with a consistently positive slope — memory leak or runaway task suspected. Correlate with grape_engine_child_rss_bytes per engine and long-running agent tasks. See Issue #4203."
