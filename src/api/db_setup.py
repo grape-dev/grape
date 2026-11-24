@@ -3323,6 +3323,74 @@ register_migration(
 )
 
 
+def _fn_create_autopilot_executions_table() -> None:
+    """Issue #3763：存量库补建 runtime 域表 autopilot_executions。
+
+    `autopilot_executions` 原先只挂在老轨 `_NEW_TABLES`（legacy 全量首跑清单）里，
+    已盖 legacy-stamp 的存量库启动只跑 `_MIGRATIONS`，所以该表永远不会补建：
+    worker 建执行记录时 `(1146) Table ... doesn't exist`，被 `_execute_task` 外层
+    except 吞成一条无上下文 ERROR，autopilot 静默失效（生产 33 条/时）。
+
+    归属 runtime（configs/table_ownership.json），故只登记 runtime 域并在 owner
+    连接上执行；CREATE IF NOT EXISTS + 幂等补列/索引，存量库重跑零写入。
+    """
+    if _owned_skip("autopilot_executions", "create table"):
+        return
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
+        if not _table_present(c, "autopilot_executions"):
+            c.execute(_AUTOPILOT_EXECUTIONS_DDL)
+        for _col, _ddl in (
+            ("agent_type", "TEXT DEFAULT ''"),
+            ("findings_json", "MEDIUMTEXT DEFAULT ''"),
+            ("agent_task_id", "TEXT DEFAULT NULL"),
+            ("params_json", "MEDIUMTEXT DEFAULT ''"),
+            ("notified", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            _ensure_column(c, "autopilot_executions", _col, _ddl, strict=True)
+        for _idx in (
+            "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task "
+            "ON autopilot_executions(task_id)",
+            "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status "
+            "ON autopilot_executions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_ap_exec_agent_task "
+            "ON autopilot_executions(agent_task_id)",
+        ):
+            c.execute(_idx)
+        conn.commit()
+
+
+def _postcheck_autopilot_executions_table() -> None:
+    """Issue #3763 复审加固：autopilot_executions 真在 runtime owner 库才盖章。
+
+    执行器对「fn 正常返回」即盖章。但本迁移在非 runtime owner 进程会被
+    `_owned_skip` 直接 return（或三库 DSN 缺失时 `_migration_conn` 回落进程库），
+    两种情况下表都没建，台账却被写入 → runtime 进程因「已盖章」不再执行，
+    表永久缺失。此处断言基表存在，缺表 raise 不盖章，交 owner 进程下次启动补齐。
+    """
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
+        if not _base_table_present(c, "autopilot_executions"):
+            raise RuntimeError(
+                "202611240003 post_check 未收敛：runtime owner 库缺 autopilot_executions "
+                "基表（_owned_skip 跳过 / 回落进程库未命中），不盖章，待 owner 进程重试")
+
+
+register_migration(
+    # R3 换号：基线已发布最大号为 202611230012（tests/arch/test_migration_version_integrity.py
+    # 强制新增迁移必须大于该值），早前顺延到的 202611230006 落在历史区间内会被门禁拦下；
+    # 202611240001/002 已用，顺延到未占用的 202611240003（名字/语义不变，仍只登记 runtime 域）。
+    version="202611240003",
+    name="create-autopilot-executions-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_autopilot_executions_table,
+    post_check=_postcheck_autopilot_executions_table,
+)
+
+
 def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
     """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
     原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——
@@ -7034,6 +7102,11 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
+                # Issue #3773：ACP state.db 体积治理指标（worker 心跳上报）
+                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "acp_state_db_cleanup_counts", "TEXT DEFAULT ''")
+                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes_freed_total", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "acp_resume_skipped_total", "INTEGER DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute(runtime_mig.DELETE_RUNTIME_CREDENTIALS)
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")

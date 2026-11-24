@@ -289,6 +289,10 @@ class HeartbeatBody(BaseModel):
     bandwidth_mbps: float = 0.0
     load_avg: str = ""
     spec: str = ""
+    acp_state_db_bytes: float = 0.0
+    acp_state_db_cleanup_counts: str = ""
+    acp_state_db_bytes_freed_total: float = 0.0
+    acp_resume_skipped_total: int = 0
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
@@ -827,11 +831,11 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     with _runtime_cursor() as c:
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=?, acp_state_db_bytes=?, acp_state_db_cleanup_counts=?, acp_state_db_bytes_freed_total=?, acp_resume_skipped_total=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, body.acp_state_db_bytes, body.acp_state_db_cleanup_counts, body.acp_state_db_bytes_freed_total, body.acp_resume_skipped_total, credential_id))
         else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, acp_state_db_bytes=?, acp_state_db_cleanup_counts=?, acp_state_db_bytes_freed_total=?, acp_resume_skipped_total=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.acp_state_db_bytes, body.acp_state_db_cleanup_counts, body.acp_state_db_bytes_freed_total, body.acp_resume_skipped_total, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -1864,18 +1868,10 @@ async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
     for rid in (body.runtime_ids or []):
         if rid not in merged:
             merged.append(rid)
-    v1_body = HeartbeatBody(
-        runtime_ids=merged,
-        cpu_percent=body.cpu_percent,
-        memory_percent=body.memory_percent,
-        disk_percent=body.disk_percent,
-        tmp_percent=body.tmp_percent,
-        bandwidth_percent=body.bandwidth_percent,
-        bandwidth_mbps=body.bandwidth_mbps,
-        load_avg=body.load_avg,
-        spec=body.spec,
-        log_lines=body.log_lines,
-        probe_results=body.probe_results)
+    # 透传 v1 全部字段（含 #3773 的 acp_state_db_bytes / cleanup_counts /
+    # bytes_freed_total / resume_skipped_total）；逐字段重建会静默丢弃这些指标，
+    # 而 worker 默认 v2-first 且 200 即 return，v1 落库分支永远走不到 → /metrics 恒 0。
+    v1_body = HeartbeatBody(**{**body.model_dump(), "runtime_ids": merged})
     resp = await runtime_heartbeat(v1_body, request, credential_id)
     resp["engine_uids_resolved"] = len(resolved_ids)
     resp["engine_uids_stale"] = len(stale_uids)

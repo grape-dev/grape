@@ -89,26 +89,26 @@ def compact_messages(messages: list[dict]) -> list[dict]:
     return [summary_msg] + recent_messages
 
 
-def check_state_db_size(hermes_home: str, threshold_mb: float = 50.0) -> bool:
-    """Check if hermes state.db is too large (context bloat indicator).
+def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
+                        **kwargs) -> "StateDbCheckResult":
+    """检测 hermes state.db 体积并在超阈值时执行就地清理（Issue #3773）。
 
-    Args:
-        hermes_home: HERMES_HOME directory path
-        threshold_mb: Size threshold in MB
-
-    Returns:
-        True if state.db exceeds threshold (should compact or reset session)
+    返回值是 ``state_db_maintenance.StateDbCheckResult``：``bool(result)`` 为 True
+    表示需要放弃 resume（``skip_resume``），保留与历史调用方的布尔语义兼容。
     """
-    state_db = os.path.join(hermes_home, "state.db")
-    try:
-        if os.path.exists(state_db):
-            size_mb = os.path.getsize(state_db) / (1024 * 1024)
-            if size_mb > threshold_mb:
-                log.warning(
-                    f"state.db size {size_mb:.1f}MB exceeds threshold {threshold_mb}MB, "
-                    f"considering session reset to prevent context overflow"
-                )
-                return True
-    except Exception:
-        pass
-    return False
+    from src.domains.runtime.engine.state_db_maintenance import (
+        check_state_db_size as _check,
+        max_bytes_default,
+    )
+
+    result = _check(hermes_home, threshold_mb=threshold_mb, **kwargs)
+    if result.exceeded:
+        size_mb = result.before_bytes / (1024 * 1024)
+        limit_mb = (threshold_mb if threshold_mb is not None
+                    else max_bytes_default() / (1024 * 1024))
+        log.warning(
+            f"state.db size {size_mb:.1f}MB exceeds threshold {limit_mb}MB, "
+            f"cleanup={result.cleanup.result if result.cleanup else 'not_run'} "
+            f"reason={result.reason or 'n/a'} skip_resume={result.skip_resume}"
+        )
+    return result

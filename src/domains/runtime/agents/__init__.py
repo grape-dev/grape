@@ -4,6 +4,18 @@
 """
 from .base import AgentBackend
 from .opencode import OpencodeBackend
-from .codearts import CodeArtsBackend
+from .codearts import CodeArtsBackend, probe_env, write_trust_settings
 from .atomcode import AtomCodeBackend
 from .executor import stream_agent, get_backend, stream_opencode
+
+__all__ = [
+    "AgentBackend",
+    "OpencodeBackend",
+    "CodeArtsBackend",
+    "write_trust_settings",
+    "probe_env",
+    "AtomCodeBackend",
+    "stream_agent",
+    "get_backend",
+    "stream_opencode",
+]

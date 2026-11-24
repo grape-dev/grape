@@ -376,6 +376,19 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py \
             tests/runtime/test_issue_3826_count_no_fallback.py -v
+      - name: Model config alert + prefix/fallback validation tests (issue #3822)
+        # Issue #3822 轨 C：新增 4 个用例文件此前未接入 linux-backend 门禁（先例
+        # #1613/#2133/#3758/#3771）。锁定：①首次 Model not found(count=1) 不计入配置故障
+        # 告警、仅 escalated 计；②未声明 provider 前缀时 default/probe 用裸 id；
+        # ③hermes fallback（含旧键标量）纳入校验；④24h 告警指标与种子规则。回退会让
+        # 单次抖动再次触发 critical、带前缀模型名探活 404 误判 unhealthy。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/test_issue_3822_engine_model_prefix.py \
+            tests/test_issue_3822_hermes_fallback.py \
+            tests/runtime/test_issue_3822_model_config_alert.py \
+            tests/insight/test_issue_3822_obs_model_config_alert.py -v
       - name: Deploy gateway upstream guard (issue #3764)
         # Issue #3764 QA 复审（Required）：网关 /api/runtime* 上游端口守卫此前只存在于
         # scripts/，未接任何自动路径；现网残留 8181 只能靠人工发现。本步骤把四套
@@ -390,6 +403,17 @@ jobs:
           python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape.conf \
             --ports mgmt=38080,event=38081,worker=38082,insight=38083
           python -m pytest tests/test_deploy_preflight_upstream.py tests/api/test_deploy_preflight.py -v
+      - name: Autopilot executions runtime-domain migration tests (issue #3763)
+        # Issue #3763 QA 审查修复（Required）：runtime 域 autopilot_executions 补建迁移
+        # 与缺表 fail-fast 用例此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/
+        # #3167/#3490/#3699/#3758/#3771），本 PR 修复的正是 MySQL 分库才复现的 1146，未门禁时
+        # 回归只能靠人工；同时接入迁移域归属守卫，防止登记域与 table_ownership 漂移。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3763_autopilot_exec_table.py \
+            tests/api/test_issue_3763_autopilot_exec_domain.py \
+            tests/api/test_migration_domains_match_ownership.py -v
       - name: Startup port-binding order regression tests (issue #3848)
         # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
@@ -495,7 +519,6 @@ jobs:
             tests/runtime/test_issue_993_branch_guard.py -v \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard
-
       - name: Engine backend capability + claim gate + failover regression tests (issue #3928)
         # Issue #3928 QA 复审修复（Required R5）：新增 5 个 test_issue_3928_*.py 与改写后的
         # test_claim_executor_guard.py 此前未接入 linux-backend 门禁（先例 #2133/#2245/
@@ -504,3 +527,13 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3928_*.py tests/runtime/test_claim_executor_guard.py -v
+      - name: "Skill sync distributed-lock contract tests (issue #3742)"
+        # Issue #3742 QA 审查修复（Required）：新增用例 test_issue_3742_lock_contract.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2133/#2245/#3167/#3490/#3699 均由
+        # QA 要求补齐）。契约用例覆盖 acquired 消费 / strict 模式 / TTL 单点派生 /
+        # 续期失败中止 OBS，并回归受影响的 skill sync 调度幂等用例。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3742_lock_contract.py -v
+          python -m pytest tests/runtime/test_skill_sync_scheduler_idempotent.py -v

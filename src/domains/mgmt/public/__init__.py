@@ -998,7 +998,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑）
            "feedback_pending_conversions", "feedback_mark_converted",
            "feedback_claim_row", "feedback_release_claim", "feedback_list_claims",
-           "feedback_mark_converted_from_claim",
+           "feedback_mark_converted_from_claim", "feedback_bump_convert_fail",
            # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
            "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
@@ -2348,19 +2348,22 @@ _ANY_QUERIES: dict[str, str] = {
     # ── 反馈 → Issue 转换（api/feedback_issue_converter.py；user_feedback 归 mgmt）──
     # 原实现在 api 进程主库直发（`_fetch_pending` 读 + 组内逐行回写）：三库拓扑下
     # api 进程库没有 user_feedback（视图 0 → 1146），待转换队列恒空、转换器整体停摆。
-    # 列序（15 列）/ 谓词 / ORDER BY / LIMIT 逐字照抄；只用 `?` 占位符。
+    # 列序（16 列，末列为 Issue #3731 的连续失败轮次）/ 谓词 / ORDER BY / LIMIT
+    # 逐字照抄；只用 `?` 占位符。
     # 入选口径照抄：未转换（issue_url='')、未软删，且 source='agent' 或
     # source='user' 且带仓库上下文（repo_key 非空，Issue #673）—— 不额外加过滤。
     "feedback_pending_rows": (
         "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
         "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind, "
-        "source, username "
+        "source, username, convert_fail_count "
         "FROM user_feedback WHERE issue_url='' AND is_deleted=0 "
         "AND (source='agent' OR (source='user' AND COALESCE(repo_key,'')!='')) "
         "ORDER BY id LIMIT ?"),
     # 回写守卫 `issue_url=''` 逐字保留：已转换行不被二次覆盖（重放 / 并发安全）。
+    # Issue #3731：建单成功即清零连败计数（同一条语句，避免多一次往返）。
     "feedback_mark_converted": (
-        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=?, "
+        "convert_fail_count=0 "
         "WHERE id=? AND issue_url=''"),
     # 占位（claim）：把空 issue_url 改成本次 worker 的占位值，单条条件 UPDATE 即领走该行。
     # 多进程 / 多机（共享同一库）下只有一个能 rowcount=1，这就是跨进程去重的那道闸。
@@ -2374,9 +2377,18 @@ _ANY_QUERIES: dict[str, str] = {
     "feedback_list_claims": (
         "SELECT id, issue_url FROM user_feedback WHERE issue_url LIKE ?"),
     # 回写时同时接受「空」与「本次占位」：占位挡着自己回写会让建出来的单永远记不上。
+    # Issue #3731：与 feedback_mark_converted 同步清零连败计数。
     "feedback_mark_converted_from_claim": (
-        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=?, "
+        "convert_fail_count=0 "
         "WHERE id=? AND (issue_url='' OR issue_url LIKE ?)"),
+    # Issue #3731：累计一次转换失败轮次（路由解析 / 无 token / 建单失败统一口径），
+    # 达阈值由调用方升级 ERROR；成功后由上面两条回写语句清零。
+    "feedback_bump_convert_fail": (
+        "UPDATE user_feedback SET convert_fail_count=COALESCE(convert_fail_count,0)+1 "
+        "WHERE id=?"),
+    "feedback_convert_fail_count": (
+        "SELECT convert_fail_count FROM user_feedback WHERE id=?"),
     # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
     # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
     # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
@@ -5805,6 +5817,22 @@ def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
                       (url, number, converted_at, fid, f"{prefix}%"))
             done += int(getattr(c, "rowcount", 0) or 0)
     return done
+
+
+def feedback_bump_convert_fail(fid) -> int:
+    """累计一次「反馈 → Issue」转换失败轮次，返回累计值（Issue #3731）。
+
+    失败原因（路由解析崩溃 / 无 bot token / 建单 400）都不该只留一条每 tick 的
+    WARNING：计数落 `user_feedback.convert_fail_count`（跨 worker 共享库可见，
+    admin 可查），调用方按阈值把日志升级为 ERROR。成功后由
+    `feedback_mark_converted[_from_claim]` 在同一条 UPDATE 里清零。
+    同事务「先自增再读回」，多 worker 并发时各自拿到自增后的值，不会互相覆盖。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_bump_convert_fail"), (fid,))
+        c.execute(_any_sql("feedback_convert_fail_count"), (fid,))
+        row = c.fetchone()
+    return int(row[0] or 0) if row else 0
 
 # ── 跨域异常类再导出（2026-11-18）──────────────────────────────────────────
 # runtime 的 VCS providers（gitcode/gitee/gitlab/card_module）在调用上游 API 失败时

@@ -7,6 +7,7 @@ NoCacheStaticMiddleware、i18n boost 注入、auth 页面、SPA catch-all、
 仅 A 进程（grape_server.py）与单进程模式（main.py）调用——B/C 进程
 不提供前端页面。
 """
+import asyncio
 import json as _json_mod
 import logging
 import os
@@ -15,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
 
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
 from src.api.frontend_flags import apply_feature_flags
@@ -325,7 +327,16 @@ document.documentElement.classList.remove('i18n-loading');})();
             return Response(content='{"error":"payload too large"}', status_code=413,
                             media_type="application/json")
         import httpx
-        body = await request.body()
+        # Issue #4248：读取请求体也可能因客户端在途断开而抛异常（页面卸载/切换），
+        # 必须在本 handler 内兜住，避免直落全局兜底被记成服务端 500。
+        try:
+            body = await request.body()
+        except (ClientDisconnect, asyncio.CancelledError):
+            # 客户端主动中止（nginx 记 499）：不是服务端故障。返回 499 让访问日志
+            # 与指标按状态码与 5xx 分离（499 不计入错误率）；仅 debug 留痕，避免刷屏。
+            log.debug("faro collect: client disconnected while reading request body")
+            return Response(content='{"error":"client disconnected"}', status_code=499,
+                            media_type="application/json")
         if len(body) > _FARO_MAX_BODY:
             return Response(content='{"error":"payload too large"}', status_code=413,
                             media_type="application/json")
@@ -339,7 +350,7 @@ document.documentElement.classList.remove('i18n-loading');})();
             return Response(content=upstream.content, status_code=upstream.status_code,
                             media_type="application/json")
         except Exception as e:
-            log.warning(f"faro collect proxy error: {e}")
+            log.warning(f"faro collect proxy error: {type(e).__name__}: {e}")
             return Response(content='{"error":"faro upstream unavailable"}', status_code=502,
                             media_type="application/json")
 

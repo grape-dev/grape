@@ -56,6 +56,16 @@ AUTH_CONFIG = "auth_config"        # VCS token/权限配置错误 → 不重试
 CONFIG_ERROR = "config_error"      # 模型名不在网关可用列表（404 Model not found）→ 不重试
 TASK_FAILURE = "task_failure"      # 其余（默认业务失败）→ 不重试
 
+# ── Issue #3822 轨 C-1：同一 task 24h 内 Model not found ≥2 次 → 配置故障告警 ──
+#: 累计计数载体（agent_tasks.errors 的结构化条目，同一 task 只保留一条）
+MODEL_CONFIG_ALERT = "MODEL_CONFIG_ALERT"
+#: 累计窗口（秒）：24h 内反复命中同一配置错位才算「配置故障」，跨窗重置
+MODEL_CONFIG_ALERT_WINDOW_SEC = 24 * 3600
+#: 升级阈值：第 2 次命中即升级（首次失败已由 #1986 判死，不再静默重试）
+MODEL_CONFIG_ALERT_ESCALATE_AT = 2
+#: 日志签名（Loki/值班可 `|= "[MODEL_CONFIG_ALERT]"` 检索，与 #1985 引擎离线熔断区分）
+MODEL_CONFIG_ALERT_LOG_TAG = "[MODEL_CONFIG_ALERT]"
+
 _RETRYABLE = (TRANSIENT, EMPTY_OUTPUT)
 
 
@@ -314,6 +324,98 @@ def _append_task_error(task_id, entry: dict):
         db.commit()
 
 
+def _is_model_config_alert(entry) -> bool:
+    return isinstance(entry, dict) and entry.get("error_code") == MODEL_CONFIG_ALERT
+
+
+def record_model_config_error(task_id, reason: str = "", error_class: str = CONFIG_ERROR) -> dict:
+    """累计同一 task 24h 内「模型配置错误」命中次数，≥2 次升级为「配置故障」告警。
+
+    背景（Issue #3822）：生产 24h 内 125 次真实 `Model not found`、39 个任务、35 个 issue，
+    同一任务被反复重试放大 3 倍，错误以 `upstream_transient` 呈现，值班按「上游抖动」放行。
+    #1986 只做到「首次失败即判死」，**没有累积语义**——同一配置错位在不同轮次/重派里反复命中时
+    依然只剩一条孤立的失败记录，监控面看不到「这是配置故障，不是抖动」。
+
+    计数载体是 `agent_tasks.errors` 里的**唯一条** `MODEL_CONFIG_ALERT` 条目：
+      {error_code, error_class, count, first_seen_at, last_seen_at, escalated, escalated_at,
+       window_sec, reason}
+    跨窗口（>24h）重置为 1；`_do_requeue` 复位 errors 时显式保留该条目（跨轮次累计不丢）。
+
+    升级动作：
+      - 首次跨过阈值写 `escalated=true` 并 `log.error` 固定签名 `[MODEL_CONFIG_ALERT]`
+        （Loki 可直接检索；与 #1985 引擎永久离线熔断区分——本条是配置错位反复命中）；
+      - 后续命中只更新 count/last_seen_at（不重复刷 error 日志）。
+
+    返回 ``{"count": int, "escalated": bool}``；任务不存在/DB 故障时返回 `count=0` 且不抛错
+    （累计失败不得阻断主失败路径）。
+    """
+    out = {"count": 0, "escalated": False}
+    if not task_id:
+        return out
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return out
+            entries = parse_task_errors(row[0])
+            prior, kept = None, []
+            for entry in entries:
+                if _is_model_config_alert(entry):
+                    prior = entry          # 只保留最后一条，历史重复条目丢弃
+                else:
+                    kept.append(entry)
+            count, first_seen = 1, now_iso
+            escalated, escalated_at = False, ""
+            if prior:
+                fs = None
+                try:
+                    fs = datetime.fromisoformat(str(prior.get("first_seen_at") or ""))
+                    if fs.tzinfo is None:
+                        fs = fs.replace(tzinfo=timezone.utc)
+                except Exception:
+                    fs = None
+                if fs and (now - fs).total_seconds() <= MODEL_CONFIG_ALERT_WINDOW_SEC:
+                    count = int(prior.get("count") or 1) + 1
+                    first_seen = prior.get("first_seen_at") or now_iso
+                    escalated = bool(prior.get("escalated"))
+                    escalated_at = str(prior.get("escalated_at") or "")
+            newly_escalated = count >= MODEL_CONFIG_ALERT_ESCALATE_AT and not escalated
+            if count >= MODEL_CONFIG_ALERT_ESCALATE_AT:
+                escalated = True
+                escalated_at = escalated_at or now_iso
+            kept.append({
+                "error_code": MODEL_CONFIG_ALERT,
+                "error_class": error_class,
+                "count": count,
+                "first_seen_at": first_seen,
+                "last_seen_at": now_iso,
+                "escalated": escalated,
+                "escalated_at": escalated_at,
+                "window_sec": MODEL_CONFIG_ALERT_WINDOW_SEC,
+                "reason": (reason or "")[:200],
+            })
+            c.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
+                      (json.dumps(kept[-TASK_ERROR_SLOTS:]), task_id))
+            db.commit()
+    except Exception as e:
+        log.warning(f"transient_retry: record model config error failed for {task_id}: {e}")
+        return out
+
+    out = {"count": count, "escalated": escalated}
+    if newly_escalated:
+        log.error(
+            f"{MODEL_CONFIG_ALERT_LOG_TAG} task {task_id} 24h 内第 {count} 次 Model not found"
+            f" — 模型配置故障（非上游瞬时抖动，不重试）：引擎配置模型名与网关 /v1/models 不一致，"
+            f"需运维核对模型清单/引擎默认模型；原因: {(reason or '')[:150]}")
+    else:
+        log.info(f"transient_retry: task {task_id} model config error #{count}"
+                 f" (escalated={escalated})")
+    return out
+
+
 def _do_requeue(task_id):
     """R51：重置回 queued（含信号/产出字段复位，防 cleanup 双信号判死误收）。
 
@@ -337,11 +439,14 @@ def _do_requeue(task_id):
             # 归档旧 errors 到事件侧 agent_logs（第 9 轮外审：note 声称 archived 但无实现）——
             # 旧诊断（NO_TOKEN/COMMENT_POST_FAILED 等）不随 5 槽清空丢失，任务详情外仍可查
             _archived = []
+            _carried = []          # Issue #3822：累计计数条目跨轮次保留（不归档、不清空）
             try:
                 _pe = json.loads(_prior_errors) if _prior_errors else []
                 if isinstance(_pe, list):
+                    _carried = [e for e in _pe if _is_model_config_alert(e)][-1:]
                     _archived = [e for e in _pe if not (
-                        isinstance(e, dict) and str(e.get("error_code", "")).startswith("TRANSIENT_RETRY"))]
+                        isinstance(e, dict) and str(e.get("error_code", "")).startswith("TRANSIENT_RETRY"))
+                        and not _is_model_config_alert(e)]
             except Exception:
                 pass
             # 归零 runtime_id 时回填 pool_tag/pool_agent_type（claim 兜底回收同款，
@@ -357,12 +462,13 @@ def _do_requeue(task_id):
                 "WHERE id=? AND status='running'",
                 (_tag, _pool_agent_type,
                  datetime.now(timezone.utc).isoformat(),
-                 json.dumps([{"error_code": "TRANSIENT_RETRY",
+                 json.dumps(_carried + [{"error_code": "TRANSIENT_RETRY",
                               "attempt": (attempts_hint or 0) + 1,
                               "note": "prior-round errors archived to event agent_logs; "
                                       "cleared to keep the 5-slot list from filling with "
                                       "retry records and feeding stale transient keywords "
-                                      "back into classification"}]),
+                                      "back into classification; "
+                                      "MODEL_CONFIG_ALERT(counter) is carried over (#3822)"}]),
                  task_id))
             ret = c.rowcount > 0
             if ret:
@@ -487,6 +593,9 @@ def retry_transient_task(task_id, exit_code, error_text: str, has_output: bool =
                     "note": "classified non-transient (config error); not retried"})
             except Exception as e:
                 log.warning(f"transient_retry: record config error failed for {task_id}: {e}")
+            # Issue #3822：24h 内累积次数，≥2 次升级「配置故障」告警（日志签名 + 结构化计数）
+            if _cls["error_class"] == CONFIG_ERROR:
+                record_model_config_error(task_id, _cls["reason"])
         return False
     # R52 副作用闸门：调用方未传 tool_uses 且有 event_seq 时，回查 agent_logs
     # 补全写操作证据（worker 上报路径：tool_use 已由 report_messages 落库）

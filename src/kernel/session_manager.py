@@ -606,6 +606,52 @@ def _is_constraint_error(exc: Exception) -> bool:
 
 # ====== chat_conversations CRUD ======
 
+class ConversationDuplicateUnresolved(RuntimeError):
+    """Issue #4183：写会话撞唯一键（1062）后按业务键仍查不到既有行。
+
+    属不可静默的数据不一致（部分唯一索引与业务键查询结果互斥），调用方据此升级为
+    可观测事件并保留旁路；不再复用「最近 N 条」窗口做二次查找。
+    """
+
+    def __init__(self, message: str = "", *, user_id: int = 0, repo_key: str = "",
+                 issue_number=0, conv_type: str = ""):
+        super().__init__(message or "conversation duplicate unresolved")
+        self.user_id = user_id
+        self.repo_key = repo_key
+        self.issue_number = issue_number
+        self.conv_type = conv_type
+
+
+def _conv_row_to_dict(r) -> dict:
+    return {
+        "id": r[0], "user_id": r[1],
+        "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "",
+        "user_gitcode_token": r[4] or "", "repo_key": r[5] or "",
+        "im_channel_id": r[6], "title": r[7], "status": r[8],
+        "created_at": normalize_event_time(r[9]),
+        "updated_at": normalize_event_time(r[10]),
+        "conv_type": r[11] or "general", "issue_number": r[12] or 0,
+    }
+
+
+def get_conversation_by_repo_issue_type(user_id: int, repo_key: str = "",
+                                        issue_number=0, conv_type: str = "task") -> dict | None:
+    """按 (user_id, repo_key, issue_number, conv_type) 精确取任务会话（Issue #4183）。
+
+    存在性判断不能用「最近 N 条」窗口：老 Issue 重派时会话早已滑出窗口，
+    导致误判为不存在并撞部分唯一索引。业务键与 `idx_chat_conv_repo_issue`
+    列序一致，issue_number 统一 native 归一（#3055：不 int() 强转 ident）。
+    """
+    from src.kernel.repo_key import to_repo_key
+    rk = to_repo_key(repo_key) if repo_key else ""
+    if not rk:
+        return None
+    row = _im.read_one_any(
+        "conversation_by_repo_issue_type",
+        (user_id, rk, native_issue_number(issue_number or 0), conv_type or "task"))
+    return _conv_row_to_dict(row) if row else None
+
+
 def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "", title: str = "",
                         user_gitcode_token: str = "", agent_session_id: str = "",
                         conv_type: str = "general", issue_number: int = 0) -> str:
@@ -626,15 +672,20 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
         msg = str(exc)
         if not ("1062" in msg or "Duplicate" in msg or "UNIQUE" in msg):
             raise
-        # 复用既有读路径（不新增跨域 SQL）：命中同键会话即返回其 id
+        # Issue #4183：1062 兜底复用同一具名查询（业务键精确检索），不得再走
+        # get_user_conversations(limit=50) 窗口——旧 Issue 的会话已滑出窗口，
+        # 复用窗口重查必然再次查不到，会把原本可恢复的 get-or-create 变成失败。
         _want = native_issue_number(_issue_no)
-        for conv in get_user_conversations(user_id, repo_key, limit=50):
-            # Issue #3055：两侧统一原生形态比较（数字 int / 平台 ident str），
-            # 不得再 int() 强转（ident 会抛 ValueError 打断 get-or-create）。
-            if native_issue_number(conv.get("issue_number") or 0) == _want \
-                    and (conv.get("conv_type") or "general") == _conv_type:
-                return str(conv["id"])
-        raise
+        row = _im.read_one_any(
+            "conversation_by_repo_issue_type", (user_id, repo_key, _want, _conv_type))
+        if row:
+            return str(row[0])
+        raise ConversationDuplicateUnresolved(
+            f"duplicate conversation not found by key "
+            f"(user_id={user_id}, repo_key={repo_key}, "
+            f"issue_number={_want}, conv_type={_conv_type})",
+            user_id=user_id, repo_key=repo_key,
+            issue_number=_want, conv_type=_conv_type)
 
 
 def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
@@ -646,7 +697,7 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
         rows = _im.read_all_any("conversations_by_user_repo", (user_id, repo_key, limit))
     else:
         rows = _im.read_all_any("conversations_by_user", (user_id, limit))
-    return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5] or "", "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in rows]
+    return [_conv_row_to_dict(r) for r in rows]
 
 
 def get_conversation(conv_id: str) -> dict | None:

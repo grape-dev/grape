@@ -412,9 +412,12 @@ async def lifespan(app: FastAPI):
             await _aio.sleep(600)  # 10 min after startup (avoid migration race)
             while True:
                 try:
-                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
-                        from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
-                        cleanup_old_task_messages()
+                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600) as acquired:
+                        if acquired:
+                            from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
+                            cleanup_old_task_messages()
+                        else:
+                            log.debug("table maintenance (messages): lock held by another worker, skipping")
                 except asyncio.CancelledError:
                     raise
                 except Exception:

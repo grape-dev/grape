@@ -102,6 +102,9 @@ from src.kernel.startup_metrics import install as _install_startup_metrics
 # 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
 # （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
 from src.kernel.comment_metrics import install as _install_comment_metrics
+# Issue #4183：任务会话 get-or-create 失败指标（grape_task_conversation_ensure_failed_total{reason}）。
+# 旧 Issue 重派撞唯一索引后的「1062 兜底仍查不到」由 WARNING 升级为可巡检指标。
+from src.kernel.task_conversation_metrics import install as _install_task_conversation_metrics
 # db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
 # 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
 from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
@@ -113,6 +116,7 @@ _install_db_lock_metrics(registry)
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
 _install_comment_metrics(registry)
+_install_task_conversation_metrics(registry)
 # Issue #3740：RepoBotToken 历史列回落 counter。降噪后日志不再承担全量计数，
 # 回落规模与仓库分布由 grape_repo_bot_legacy_fallback_total{provider,repo} 兜底。
 from src.kernel.repo_bot_observability import install as _install_repo_bot_observability
@@ -385,6 +389,85 @@ TASK_IN_PROGRESS = Gauge(
     ["source", "runtime_mode"],
     registry=registry,
 )
+
+
+# ===== ACP state.db 体积治理指标（Issue #3773）=====
+# worker 心跳把本机 state.db 体积与清理计数写入 runtime_credentials，这里在
+# /metrics scrape 时按 host 采样。名字与 Spec 一致（_total 系列用 Gauge 承载
+# worker 进程内的单调累计值）。语义约定：同一 host 相邻两次 scrape 的值单调不减，
+# worker 重启时归零 —— Prometheus 的 increase() 把这种下降当作 counter reset 处理，
+# 因此 Gauge 承载累计量仍可用于 increase()/rate() 告警（deploy/alerts.yml）。
+ACP_STATE_DB_BYTES = Gauge(
+    "grape_acp_state_db_bytes",
+    "Largest hermes ACP state.db observed on a worker host.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_STATE_DB_CLEANUP_TOTAL = Gauge(
+    "grape_acp_state_db_cleanup_total",
+    "Cumulative ACP state.db cleanup attempts by result.",
+    ["host", "result"],
+    registry=registry,
+)
+
+ACP_STATE_DB_BYTES_FREED_TOTAL = Gauge(
+    "grape_acp_state_db_bytes_freed_total",
+    "Cumulative bytes freed by ACP state.db cleanup.",
+    ["host"],
+    registry=registry,
+)
+
+ACP_RESUME_SKIPPED_TOTAL = Gauge(
+    "grape_acp_resume_skipped_total",
+    "Cumulative ACP resume attempts skipped because state.db stayed too large.",
+    ["host"],
+    registry=registry,
+)
+
+_acp_cleanup_results: dict[str, set] = {}
+
+
+def collect_acp_state_db_metrics():
+    """scrape 时把 worker 上报的 state.db 指标刷到 Prometheus。"""
+    try:
+        import json as _json
+
+        from src.domains.runtime import public as _rt_public
+        rows = _rt_public.read_all_any("runtime_credentials_acp_state_rows")
+    except Exception:
+        return
+    # 同一 host 可能存在多行凭据（worker 上报真实值 + insight/API 进程的 0 值行）。
+    # 无 ORDER BY 的逐个 set 会被后一行覆盖，故先按 host 取 db_bytes 最大的一行；
+    # 避免 0 值行把 worker 真实指标刷掉。
+    best: dict[str, tuple] = {}
+    for row in rows or []:
+        values = list(row) + [None] * 6
+        device_name, name, db_bytes, cleanup_counts, freed, skipped = values[:6]
+        host = str(device_name or name or "unknown")
+        try:
+            rank = float(db_bytes or 0)
+        except (TypeError, ValueError):
+            rank = 0.0
+        current = best.get(host)
+        if current is None or rank > current[0]:
+            best[host] = (rank, cleanup_counts, freed, skipped)
+    for host, (_db_bytes, cleanup_counts, freed, skipped) in best.items():
+        ACP_STATE_DB_BYTES.labels(host=host).set(float(_db_bytes or 0))
+        ACP_STATE_DB_BYTES_FREED_TOTAL.labels(host=host).set(float(freed or 0))
+        ACP_RESUME_SKIPPED_TOTAL.labels(host=host).set(float(skipped or 0))
+        counts = {}
+        try:
+            parsed = _json.loads(cleanup_counts or "{}")
+            if isinstance(parsed, dict):
+                counts = {str(k): int(v or 0) for k, v in parsed.items()}
+        except (TypeError, ValueError):
+            counts = {}
+        known = _acp_cleanup_results.setdefault(host, set())
+        known.update(counts)
+        for result in known:
+            ACP_STATE_DB_CLEANUP_TOTAL.labels(host=host, result=result).set(
+                float(counts.get(result, 0)))
 
 
 # ===== 标签规范化（参考 multica metrics/labels.go）=====
@@ -850,3 +933,4 @@ def on_metrics_scrape():
     """
     collect_mysql_metrics()
     collect_business_sampler()
+    collect_acp_state_db_metrics()

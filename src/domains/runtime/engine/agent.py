@@ -1664,6 +1664,11 @@ def _collect_worker_metrics() -> dict:
 
         # load_avg: Windows 无等价指标，保持空
         # bandwidth: Windows 无 /proc/net/dev 等价，保持 0.0
+        try:
+            from src.domains.runtime.engine.state_db_maintenance import worker_metrics_snapshot
+            metrics.update(worker_metrics_snapshot())
+        except Exception:
+            pass
         return metrics
 
     # ===== Unix: /proc 采集（保持原有行为不变）=====
@@ -1776,6 +1781,12 @@ def _collect_worker_metrics() -> dict:
                 if _thr > 0:
                     metrics["bandwidth_percent"] = round(min(_mbps / _thr * 100, 100.0), 1)
         _collect_worker_metrics._bw_prev = (_now_bw, _rx + _tx)
+    except Exception:
+        pass
+
+    try:
+        from src.domains.runtime.engine.state_db_maintenance import worker_metrics_snapshot
+        metrics.update(worker_metrics_snapshot())
     except Exception:
         pass
 

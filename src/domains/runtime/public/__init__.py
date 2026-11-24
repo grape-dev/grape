@@ -2436,6 +2436,11 @@ _ANY_QUERIES: dict[str, str] = {
     'conversations_by_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE user_id=? "
         "ORDER BY updated_at DESC LIMIT ?"),
+    # Issue #4183：任务会话按业务键精确检索（不依赖「最近 N 条」窗口，走
+    # idx_chat_conv_repo_issue 的部分唯一索引列序），供存在性判断与 1062 兜底共用。
+    'conversation_by_repo_issue_type': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations "
+        "WHERE user_id=? AND repo_key=? AND issue_number=? AND conv_type=? LIMIT 1"),
     'conversation_by_id': f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE id=?",
     'conversation_by_im_user': (
         f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE im_channel_id=? AND user_id=? "
@@ -3220,6 +3225,13 @@ _ANY_QUERIES: dict[str, str] = {
     "runtime_credentials_silent_rows": (
         "SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at,"
         " status, repo_key FROM runtime_credentials WHERE status != 'revoked'"),
+    # ── ACP state.db 体积治理指标（insight/observability 采样；Issue #3773）──
+    # worker 心跳把本机 state.db 体积/清理计数写入 runtime_credentials，/metrics
+    # 采样时按 host 暴露 grape_acp_state_db_bytes 等指标。
+    "runtime_credentials_acp_state_rows": (
+        "SELECT device_name, name, acp_state_db_bytes, acp_state_db_cleanup_counts,"
+        " acp_state_db_bytes_freed_total, acp_resume_skipped_total"
+        " FROM runtime_credentials WHERE status != 'revoked'"),
     "agent_task_activity_rows": (
         "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
         " WHERE repo_key IS NOT NULL AND repo_key != ''"),
@@ -6014,6 +6026,42 @@ def alerts_task_timeout(fail_cutoff: str, signature: str) -> list[tuple]:
             "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
             "   AND (result_text LIKE ? OR errors LIKE ?)"
             " GROUP BY repo_key", (fail_cutoff, like, like))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+#: 配置故障升级标记（Issue #3822）：与 `runtime.engine.transient_retry.MODEL_CONFIG_ALERT`
+#: 同一字面量；跨域不 import 对方内部模块，常量在本域单独声明，改动需两侧同步。
+MODEL_CONFIG_ALERT_SIGNATURE = "MODEL_CONFIG_ALERT"
+
+
+def alerts_task_model_config_alert(
+        cutoff: str,
+        signature: str = MODEL_CONFIG_ALERT_SIGNATURE) -> list[tuple]:
+    """窗口内「模型配置故障」失败任务按仓库计数 [(repo_key, count)]。
+
+    口径与 `alerts_task_timeout` 一致（`status='failed'` + `completed_at` 时间下界 + 签名 LIKE），
+    **不新增扫描形态**。签名由 `transient_retry.record_model_config_error` 写入：同一 task 在
+    24h 内 `Model not found` ≥2 次时，errors 里留下 escalated 的 `MODEL_CONFIG_ALERT` 条目，
+    与 #1985 引擎永久离线熔断（runtime 在线数）区分——本条是配置错位反复命中。
+
+    **必须同时命中 escalated 标记**（Issue #3822 审查 Required）：`record_model_config_error`
+    首次命中（count=1）就已写入 `MODEL_CONFIG_ALERT` 条目，仅凭签名会把单次 `Model not found`
+    也算成配置故障（severity=critical）。只有 `escalated: true`（24h 内 ≥2 次）才计入。
+    """
+    like = f"%{signature}%"
+    #: JSON 序列化（errors 列）与 Python repr（result_text 里拼入的调试串）两种形态
+    escalated = ('%"escalated": true%', "%'escalated': True%")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, COUNT(*) FROM agent_tasks"
+            " WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status='failed'"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            "   AND ((errors LIKE ? AND (errors LIKE ? OR errors LIKE ?))"
+            "        OR (result_text LIKE ? AND (result_text LIKE ? OR result_text LIKE ?)))"
+            " GROUP BY repo_key",
+            (cutoff, like, escalated[0], escalated[1],
+             like, escalated[0], escalated[1]))
         return [tuple(r) for r in (c.fetchall() or [])]
 
 

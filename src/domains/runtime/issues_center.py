@@ -28,6 +28,8 @@ from src.kernel.issue_ident import is_actionable_issue_number, native_issue_numb
 
 from src.kernel.config import log, WORKSPACE_DIR
 
+from src.kernel import task_conversation_metrics
+
 
 class _OwnedCursor:
     """自带连接的游标：close 时把连接一并关掉（每次查询独立建连的收尾）。"""
@@ -353,28 +355,27 @@ def _ensure_task_conversation(user_id: str, repo_key: str, issue_number: int,
                               write_context_on_reuse: bool = False) -> str:
     """为任务查找/复用「Issue #N · {title}」对话（任务中心「去对话」入口）。
 
-    - 复用：同用户已有该 Issue 对话（按 conv_type='task' + issue_number 列匹配，
-      旧格式 `Issue #N` 字符串作回退）→ 补 conv_type/issue_number 标记；
+    - 复用：按业务键 (user_id, repo_key, issue_number, conv_type='task') 精确检索
+      （不依赖「最近 N 条」窗口，Issue #4183）；仅旧格式 `Issue #N` 字符串回退
+      仍走窗口扫描，保持存量升级的对外行为不变。
       write_context_on_reuse=True 时再次写入上下文消息（notify 语义：每次分配都刷上下文）
     - 存量升级：复用命中旧标题 `Issue #N` 的会话时刷新为新格式（不覆盖用户自定义标题）
     - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
-    - 失败返回空串（不抛异常，旁路不影响任务建档）。
+    - 失败返回空串（不抛异常，旁路不影响任务建档）；1062 后仍查不到升级为可观测事件。
     """
-    from src.kernel.session_manager import get_user_conversations, update_conversation, add_message
+    from src.kernel.session_manager import (
+        get_user_conversations, get_conversation_by_repo_issue_type,
+        update_conversation, ConversationDuplicateUnresolved,
+    )
     conv_id = ""
     new_title = _build_task_conversation_title(issue_number, title)
     old_title = f"Issue #{issue_number}"
     try:
-        convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
-        matched = None
-        for conv in convs:
-            _ct = conv.get("conv_type") or ""
-            _in = conv.get("issue_number") or 0
-            if _ct == "task" and _in == issue_number:
-                matched = conv
-                break
+        matched = get_conversation_by_repo_issue_type(
+            user_id, repo_key, issue_number, conv_type="task")
         if matched is None:
-            for conv in convs:
+            # 旧格式 `Issue #N` 回退：仅此路径保留窗口扫描（存量标题升级语义不变）。
+            for conv in get_user_conversations(user_id, repo_key=repo_key, limit=50):
                 if conv.get("title") == old_title:
                     matched = conv
                     break
@@ -394,6 +395,14 @@ def _ensure_task_conversation(user_id: str, repo_key: str, issue_number: int,
                 add_message(conv_id, "agent", ctx_msg)
             except Exception as e:
                 log.warning(f"Task conversation write context message failed: {e}")
+    except ConversationDuplicateUnresolved as e:
+        # Issue #4183：撞唯一键后按业务键仍查不到 = 数据不一致，必须可观测（计数 + error），
+        # 不再静默成 WARNING；保留旁路语义（返回空串不阻断任务建档）。
+        reason = task_conversation_metrics.observe_unresolved("duplicate_unresolved")
+        log.error(f"Task conversation ensure unresolved after duplicate "
+                  f"(reason={reason}, repo_key={repo_key}, issue_number={issue_number}, "
+                  f"conv_type='task'): {e}")
+        return ""
     except Exception as e:
         log.warning(f"Task conversation ensure failed: {e}")
         return ""

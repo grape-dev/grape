@@ -553,16 +553,24 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(600)  # 10 min after startup (avoid migration race)
             while True:
                 try:
-                    async with run_with_distributed_lock("table_maintenance", ttl=3600):
-                        from src.domains.runtime.engine.table_maintenance import (
-                            cleanup_old_agent_tasks_fields,
-                            delete_old_agent_tasks,
-                        )
-                        cleanup_old_agent_tasks_fields()
-                        delete_old_agent_tasks()
-                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
-                        from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
-                        cleanup_old_task_messages()
+                    async with run_with_distributed_lock("table_maintenance", ttl=3600) as acquired:
+                        if acquired:
+                            from src.domains.runtime.engine.table_maintenance import (
+                                cleanup_old_agent_tasks_fields,
+                                delete_old_agent_tasks,
+                            )
+                            cleanup_old_agent_tasks_fields()
+                            delete_old_agent_tasks()
+                        else:
+                            log.debug("table maintenance: lock held by another worker, "
+                                      "skipping agent_tasks cleanup")
+                    async with run_with_distributed_lock("table_maintenance_messages", ttl=3600) as acquired:
+                        if acquired:
+                            from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
+                            cleanup_old_task_messages()
+                        else:
+                            log.debug("table maintenance: lock held by another worker, "
+                                      "skipping task_messages cleanup")
                 except asyncio.CancelledError:
                     raise
                 except Exception:

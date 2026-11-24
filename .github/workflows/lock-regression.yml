@@ -33,4 +33,6 @@ jobs:
         # （test_issue_4023_baseline_failure_visibility.py，含 Task failed 日志
         # 七要素、截断标记、结构化落库、3 次触发/2 次不触发打点、key 归一）
         # 同口径接入本 job，避免失败可见性回归静默复发。
-        run: python -m pytest tests/runtime/test_3927_lock_scope.py tests/kernel/test_owner_db.py tests/runtime/test_issue_3963_repo_dispatch_lease.py tests/runtime/test_issue_4023_baseline_failure_visibility.py -v
+        # Issue #3773（复审 Required）：state.db 清理锁回退/保护集/forced 轮、v2 心跳
+        # 落库与 /metrics 采样链路此前只靠人工执行，现纳入同一运行时可靠性门禁。
+        run: python -m pytest tests/runtime/test_3927_lock_scope.py tests/kernel/test_owner_db.py tests/runtime/test_issue_3963_repo_dispatch_lease.py tests/runtime/test_issue_4023_baseline_failure_visibility.py tests/runtime/test_issue_3773_state_db_maintenance.py tests/runtime/test_issue_3773_acp_metrics.py -v
