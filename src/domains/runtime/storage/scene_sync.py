@@ -350,6 +350,15 @@ async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
     return repo_root
 
 
+def _declares_skill_nodes(nodes: list) -> bool:
+    """模板是否声明了技能节点（用于区分「解析失败」与「本来就没有技能」两种空集）。
+
+    `refs` 为空时语义分两种：模板从未声明技能 → 清空引用正确；声明了但解析不出来
+    （技能同步未就绪）→ 必须保留既有绑定，等下一轮自愈。
+    """
+    return any(str(n.get("skill") or "").strip() for n in (nodes or []))
+
+
 def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                              repo_key: str = ""):
     """重建 scene_skill_ref（DELETE + INSERT）。
@@ -423,11 +432,9 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
         # 两种「空集」必须分开：
         #   ① 模板本来就没有技能节点 → 清空引用是正确语义（继续往下走 replace）；
         #   ② 声明了技能但一个都没解析出来 → 清空会让场景彻底失去引用，保留原状等下一轮自愈。
-        _declared = [str(n.get("skill") or "").strip() for n in (nodes or [])]
-        _declared = [s for s in _declared if s]
-        if _declared:
+        if _declares_skill_nodes(nodes):
             logger.warning(
-                f"Scene sync: {scene_name} none of {len(_declared)} declared skill(s) resolved, "
+                f"Scene sync: {scene_name} none of the declared skill(s) resolved, "
                 f"existing bindings left untouched")
             return
         logger.info(f"Scene sync: {scene_name} declares no skill nodes, clearing scene_skill_ref")
