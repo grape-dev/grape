@@ -200,3 +200,55 @@ def test_reregister_still_reports_single_engine_cli_removed(monkeypatch):
     assert out == ([], {}, [])
     assert client.payload and client.payload[0]["installed"] is False
     assert client.payload[0]["backend_capability"]["status"] == "unavailable"
+
+
+def test_reregister_keeps_snapshot_when_rescan_returns_nothing(monkeypatch):
+    """Issue #471 S3 回归：重扫整体为空（扫描异常）时沿用快照，单引擎主机也不例外。
+
+    Issue #3928 把注册载荷改成「discovered 全量（含 installed=false）」，判空随之收敛为
+    「按已安装数」；若把「distinguish 扫描为空」与「扫描到了但 installed=false」混同，
+    单引擎主机一次扫描抖动就会被注册成空列表、清空在线态（17641 的撤销方向）。
+    """
+    from src.domains.runtime.engine import agent as ra
+
+    class _FakeClient:
+        payload = None
+
+        async def reset_session(self):
+            return None
+
+        async def register(self, runtimes, **_kw):
+            self.payload = runtimes
+            return [], ""
+
+    client = _FakeClient()
+    monkeypatch.delenv("CLOUD_WORKER_PROVIDER", raising=False)
+    monkeypatch.setattr(ra, "_discover_local_runtimes", lambda: [])
+    out = asyncio.run(ra._reregister(
+        client, prev_installed=[{"name": "opencode", "installed": True}],
+        device_name="d-3928"))
+    assert out is None, "重扫为空沿用快照（返回 None），不清空在线态"
+    assert client.payload is None, "沿用快照时不应发起注册"
+
+
+def test_reregister_registers_empty_scan_when_snapshot_was_also_empty(monkeypatch):
+    """Issue #471 C1 回归：启动起就无引擎（快照也为空）→ 仍正常注册空列表。"""
+    from src.domains.runtime.engine import agent as ra
+
+    class _FakeClient:
+        payload = None
+
+        async def reset_session(self):
+            return None
+
+        async def register(self, runtimes, **_kw):
+            self.payload = runtimes
+            return [], ""
+
+    client = _FakeClient()
+    monkeypatch.delenv("CLOUD_WORKER_PROVIDER", raising=False)
+    monkeypatch.setattr(ra, "_discover_local_runtimes", lambda: [])
+    out = asyncio.run(ra._reregister(
+        client, prev_installed=[], device_name="d-3928"))
+    assert out == ([], {}, []), "无引擎为正常状态（C1），不判失败"
+    assert client.payload == []

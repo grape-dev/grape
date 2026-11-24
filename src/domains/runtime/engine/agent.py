@@ -4024,6 +4024,7 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         # ② 本机引擎被误注到沙箱凭据下（cred15 污染行 20/21/29，与 cred14 正身行并存）；
         # ③ 模板 hash 未变 → _refresh_templates 不再重注册 → 非重启 worker 不可恢复。
         # 云条目按 name 锚定注册（UPDATE 分支）拿回原 rid，心跳即刻恢复。
+        _discovered = None
         _cloud_prev = [r for r in (prev_installed or [])
                        if (r.get("runtime_type") or "") == "cloud"]
         _register_payload = None
@@ -4058,6 +4059,16 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         # 存量行永远 healthy=1 继续认领）。
         _installed_now = [r for r in (installed or []) if r.get("installed")]
         _prev_installed_count = sum(1 for r in (prev_installed or []) if r.get("installed"))
+        # S3（Issue #471）：重扫整体为空 = 扫描本身失败/瞬时异常，与「扫描到了、但
+        # installed=false」是两回事——后者才是 17641 的「CLI 已被移除」形态（条目齐全
+        # 只差 installed 位）。因此「发现列表为空且快照曾有已安装引擎」一律沿用快照，
+        # 不再受快照台数限制：单引擎主机一次扫描异常不得被注册成空列表清空在线态
+        # （test_issue_471_reregister_robustness::test_rescan_transient_empty_skips_register_call）。
+        if _discovered is not None and not _discovered and _prev_installed_count >= 1:
+            log.warning("re-scan returned nothing while snapshot had "
+                        f"{_prev_installed_count} installed engine(s); keeping snapshot "
+                        "(transient scan?)")
+            return None
         if not _installed_now and _prev_installed_count >= 2:
             log.warning("re-scan found no installed engines while snapshot had "
                         f"{_prev_installed_count}; keeping snapshot (transient scan?)")
