@@ -51,9 +51,12 @@ def __getattr__(name: str):
 # 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
 # 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
 _db_path = default_db_path()
-# Issue #3927：慢锁可观测（持锁栈 + owner 维度指标）。语义仍是可重入锁。
-from src.kernel.lock_instrument import InstrumentedLock as _InstrumentedLock
-db_lock = _InstrumentedLock("db_lock")
+# 进程级 DB 互斥锁：改用 TrackedRLock（接口与 threading.RLock 一致），
+# 记录等锁/持锁时长与当前持有者；慢等待/慢持有会打进日志，
+# 「一条重查询拿住锁、后续请求全部排队」这类现场靠这两类信号定位。
+from src.kernel.db_lock_metrics import TrackedRLock  # noqa: E402
+
+db_lock = TrackedRLock()
 
 
 def _is_mysql_backend() -> bool:

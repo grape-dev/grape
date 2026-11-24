@@ -102,9 +102,13 @@ from src.kernel.startup_metrics import install as _install_startup_metrics
 # 此前 autopilot 结果回帖失败只有一条 WARNING，值守无从感知；收集器定义在 kernel
 # （kernel 不依赖 domains），在这里注册进本模块 registry，/metrics 才能带出来。
 from src.kernel.comment_metrics import install as _install_comment_metrics
+# db_lock 的等待/持锁直方图与持有者 gauge（owner = 归一化请求路径）。
+# 与 lock_instrument 的慢锁计数器互补：这里看「等了多久、谁在持」，那里看「临界区在哪」。
+from src.kernel.db_lock_metrics import install as _install_db_lock_metrics
 
 _install_gsb_metrics(registry)
 _install_org_metrics(registry)
+_install_db_lock_metrics(registry)
 # Issue #3848：启动期降级（component/reason 两维度）——把「本来只能 grep 日志」的
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
