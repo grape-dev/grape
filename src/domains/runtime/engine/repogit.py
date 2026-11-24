@@ -2052,11 +2052,19 @@ WORKTREE_STAGE_PRIORITY = {
 # key = `<repo_key>|<issue>|<agent>`（无 issue/agent 时用 repo_key）；只保留最近一次，
 # 避免无限增长。**不存 token/凭据**。
 _LAST_WORKTREE_FAILURE: dict = {}
+# 现场条数上限。来源（业务要求，Issue #3923）：单 worker 并发建树的 (repo, issue,
+# agent) 三元组规模实测远小于该值，200 是「同机全仓失败现场各留一份」的安全上界，
+# 只防内存无限增长，不参与任何判定语义；超限丢最旧（按写入时间）。
 _LAST_WORKTREE_FAILURE_MAX = 200
 # 仓级兜底记录（无 issue/agent 三元组时）的保留时长：过期记录不再当作当前失败
 # 原因（见 worktree_last_failure 的 TTL 判定）。三元组记录不设 TTL，由建树成功/
 # 入口清理；Issue #3923 复审后失败现场在 ensure_repo_base 内直接写三元组键，
 # 不再经过「仓级 → 三元组」复制。
+# 数值来源（业务要求，Issue #3923）：仓级键只在「建树入口未带 issue/agent」的
+# 调用路径产生，读取方是紧接着同一仓的下一批任务；15 分钟覆盖「同仓连续派单的
+# 常规间隔」的观察窗口，目标是避免上上轮的仓级失败被后来的任务误读为当前原因
+# ——窗口应大于派单重试间隔、小于一次值班排查的会话时长。若需精确值，
+# 需实测「仓级失败 → 下一任务读现场」的实际间隔分布再定（待决策项已登记）。
 _LAST_WORKTREE_FAILURE_REPO_TTL = 900
 
 
