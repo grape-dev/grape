@@ -23,3 +23,15 @@
   nginx 侧本就记 499，口径一致。
 - 捕获 `CancelledError` 会吞掉取消信号：仅在 handler 内、读取请求体阶段、客户端已断开时发生；
   返回前无后续 await，不影响其它协程。
+
+## 复审修正（PR #2106 第 2 轮）
+
+- **全局兜底 handler 单一来源**：`@app.exception_handler(Exception)` 只能有一份实现，位于
+  `src/api/exception_handlers.py::install_exception_handlers`。`build_app` 只做装配；
+  `main.py` / `grape_server.py` 在 `build_app` 之后的再次调用是幂等 no-op（`app.state`
+  标记位），不再出现「后注册覆盖前者、修复落在不生效的那份」。
+- **测试对齐真实装配链**：用例按 `build_app(...)` + `install_exception_handlers(app)` 建 app，
+  并断言生效 handler 的 `__qualname__` 来自单一来源、二次装配返回同一函数对象。
+- **冗余分支删除**：`middleware.py` / `server_common.py` 的 `elif status == 499` 与
+  `elif status >= 400`（warning）行为等价，删除并留注释，避免状态码链继续复制膨胀。
+- **CI 门禁**：`.github/workflows/lint.yml` 增加 Issue #4248 回归套件步骤，PR 描述中的用例计数可复算。
