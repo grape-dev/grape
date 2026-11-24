@@ -5454,7 +5454,7 @@ def dashboard_today_status_counts(day_prefix: str, repo_keys=None, org_id=None) 
 
 _DASH_WORKER_COLS = (
     "SELECT id, name, device_name, status, last_seen_at, last_ip, cpu_percent, memory_percent, "
-    "disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
+    "disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name, spec "
     "FROM runtime_credentials WHERE status != 'revoked' "
     "AND last_seen_at IS NOT NULL AND last_seen_at >= ?")
 

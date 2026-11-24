@@ -2582,6 +2582,14 @@ function refreshObs(isAuto) {
       // realOps 退回 fallbackOps，而 fallback 的数值是硬编码 0 —— 表现为
       // worker 卡片「一会儿全 0、一会儿正常」。现在保留旧值并标记失败时间。
       if (ops && !ops.error) {
+        // workers 段降级时不要把整块清空：保留上一份有效列表并沿用 stale 标记，
+        // 否则页面会在「有卡片」和「空列表」之间来回跳（用户报的「有时候是空的」）。
+        const _deg = Array.isArray(ops.degraded) ? ops.degraded : []
+        const _prev = opsData.value && !opsData.value.error ? opsData.value : null
+        if (_prev && _deg.indexOf('workers') >= 0 &&
+            ((_prev.workers || {}).list || []).length) {
+          ops = Object.assign({}, ops, { workers: _prev.workers })
+        }
         opsData.value = ops
         opsFailedAt.value = ''
       } else {
@@ -2654,16 +2662,47 @@ const pageWorkers = computed(() =>
 function wkKey(wk) {
   return wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_')
 }
+// 指标格式化：没有采样（null/空/NaN）一律显 '—'，不画成长度为 NaN 的空条。
+function numOrNull(v) {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(v)
+  return isFinite(n) ? n : null
+}
+function pctText(v) {
+  const n = numOrNull(v)
+  return n === null ? '—' : n.toFixed(1) + '%'
+}
+function sizeText(mb) {
+  const n = numOrNull(mb)
+  if (n === null || n <= 0) return ''
+  return n >= 1024 ? (n / 1024).toFixed(1) + 'G' : Math.round(n) + 'M'
+}
+// 内存显示「已用 / 总量」（心跳只上报百分比，分母来自机型 spec；解析不出就退回百分比）
+function memText(wk) {
+  const used = numOrNull(wk.memory_used_mb)
+  const total = numOrNull(wk.memory_total_mb)
+  if (used !== null && total) {
+    const u = sizeText(used)
+    const tot = sizeText(total)
+    if (u && tot) return u + ' / ' + tot
+  }
+  return pctText(wk.memory_percent)
+}
 function workerBars(wk) {
+  const cpu = numOrNull(wk.cpu_percent)
+  const mem = numOrNull(wk.memory_percent)
+  const tmp = numOrNull(wk.tmp_percent)
+  const disk = numOrNull(wk.disk_percent)
+  const bw = numOrNull(wk.bandwidth_percent)
   return [
-    { label: t('cpu'), pct: wk.cpu_percent },
-    { label: t('mem'), pct: wk.memory_percent },
-    { label: t('tmp'), pct: wk.tmp_percent },
-    { label: t('disk'), pct: wk.disk_percent },
+    { label: t('cpu'), pct: cpu === null ? 0 : cpu, text: pctText(wk.cpu_percent) },
+    { label: t('mem'), pct: mem === null ? 0 : mem, text: memText(wk) },
+    { label: t('tmp'), pct: tmp === null ? 0 : tmp, text: pctText(wk.tmp_percent) },
+    { label: t('disk'), pct: disk === null ? 0 : disk, text: pctText(wk.disk_percent) },
     {
       label: t('bandwidth'),
-      pct: wk.bandwidth_percent,
-      text: (wk.bandwidth_mbps || 0).toFixed(1) + ' Mbps',
+      pct: bw === null ? 0 : bw,
+      text: (numOrNull(wk.bandwidth_mbps) || 0).toFixed(1) + ' Mbps',
     },
   ]
 }
