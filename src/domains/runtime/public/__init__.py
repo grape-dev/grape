@@ -26,7 +26,6 @@ except ImportError:  # pragma: no cover - worker 无 web 框架
     Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
-from src.kernel.issue_ident import native_issue_number
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -141,17 +140,6 @@ def list_runtime_id_uid_rows() -> list[tuple]:
     with db_registry.cursor("runtime") as c:
         c.execute("SELECT id, engine_uid FROM agent_runtimes ORDER BY id")
         return [tuple(r) for r in c.fetchall()]
-
-
-def runtime_ids_by_engine_uids(engine_uids) -> list[int]:
-    """按 engine_uid（大小写不敏感）反查运行时 id 列表。"""
-    keys = [str(u).lower() for u in (engine_uids or []) if u]
-    if not keys:
-        return []
-    ph = ",".join(["%s"] * len(keys))
-    with db_registry.cursor("runtime") as c:
-        c.execute(f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({ph})", tuple(keys))
-        return [int(r[0]) for r in c.fetchall()]
 
 
 def runtime_cred_rows_by_engine_uids(engine_uids) -> list[tuple]:
@@ -669,6 +657,88 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         else:
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (int(runtime_id),))
         return int(c.rowcount or 0)
+
+
+def role_tag_domain() -> tuple:
+    """角色值域单一来源：`('all', <短角色名...>)`（不含 engine:/scene:/scope: 派生行）。
+
+    管理台、settings 单标签接口与角色行统计共用，避免各处硬编码字面量后再分叉
+    （架构守护 M3）。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+    # sorted：KNOWN_AGENT_ROLES 是 set，直接元组化会随进程哈希种子变序，
+    # 400 文案「可选: …」与前端展示顺序不稳定（QA 复审 Info）。
+    return ("all",) + tuple(sorted(KNOWN_AGENT_ROLES))
+
+
+def role_caps_inventory(runtime_ids: list | None = None) -> dict:
+    """每台引擎的角色行统计 {rid: {"total": n, "enabled": m}}。
+
+    - **只数角色值域行**（`all` 与短角色名，来源 `role_tag_domain()`）。冒号派生行不计；
+      值域外的平铺行同样不计 —— 否则会出现「卡片显示已停用、实际仍可派发」的假阳性
+      （架构守护 M4：判定口径必须与派发守卫一致）。
+    - `runtime_ids` 给定时只统计这些引擎（列表接口按当前页 id 传参，避免无 WHERE 全表
+      聚合，架构守护 M2）。
+    供管理台区分「从未配置角色」(total=0) 与「角色全部停用」(total>0 且 enabled=0)。
+    """
+    domain = list(role_tag_domain())
+    in_tags = ",".join("?" * len(domain))
+    sql = ("SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
+           f"FROM engine_capabilities WHERE tag IN ({in_tags})")
+    params: list = list(domain)
+    if runtime_ids is not None:
+        ids = [int(i) for i in runtime_ids if i]
+        if not ids:
+            return {}
+        sql += f" AND runtime_id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    sql += " GROUP BY runtime_id"
+    from src.kernel.otel import feature_span
+    _n_ids = 0 if runtime_ids is None else len(runtime_ids)
+    with feature_span("runtime.role_caps_inventory", {"runtimes": _n_ids}), _any_cursor() as c:
+        rows = c.execute(sql, tuple(params)).fetchall()
+    out: dict = {}
+    for r in rows or []:
+        try:
+            out[int(r[0])] = {"total": int(r[1] or 0), "enabled": int(r[2] or 0)}
+        except Exception as e:  # noqa: BLE001 - 脏行不影响整表，但必须留痕
+            log.warning(f"role_caps_inventory: skipping malformed row (runtime_id={r[0]!r}): {e}")
+            continue
+    return out
+
+
+def engine_cap_tag_exists(runtime_id, tag: str) -> bool:
+    """该引擎是否存在指定标签行（含 enabled=0）。mgmt 的守卫用它把 404 判定提前。"""
+    with _any_cursor() as c:
+        row = c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag=? LIMIT 1",
+                        (int(runtime_id or 0), str(tag))).fetchone()
+    return bool(row)
+
+
+def removing_leaves_no_role(runtime_id: int, tag: str) -> bool:
+    """删除/禁用该 tag 后，该引擎是否一个角色行都不剩（`all` 与已知角色都算角色行）。
+
+    供写接口在保存前做「至少保留一个角色」判定：空角色行在 Issue #3396 之后是
+    fail-closed（A7），引擎会变成任何角色都不可调度，必须阻止用户手工造成这种状态。
+    派生行（engine:/scene:/scope:）不计。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+
+    _tag = (tag or "").strip().lower()
+    with _any_cursor() as c:
+        rows = c.execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1",
+            (int(runtime_id),)).fetchall()
+    remaining = []
+    for (t,) in rows:
+        _t = str(t or "").strip().lower()
+        if not _t:
+            continue
+        if _t == _tag:
+            continue  # 即将删除 / 停用的那一行
+        if _t == "all" or _t in KNOWN_AGENT_ROLES:
+            remaining.append(_t)
+    return not remaining
 
 
 def _mgmt_channel_lib():
@@ -1416,6 +1486,13 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     # Issue #646：uid 派生轨道写回（UPDATE 路径）
                     c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
                               (_engine_uid, rid))
+                # Issue #3396 后续：本机发现的 UPDATE 分支原先不补角色行 —— 引擎一旦
+                # 只剩派生行就再也回不来（A7 fail-closed）。这里按「角色行为空才补」补齐。
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_u
+                    _ensure_rc_u(c, rid, now_iso=now_iso)
+                except Exception as _ercu:
+                    log.warning(f"upsert_local_runtimes role caps ensure (update) failed (runtime={rid}): {_ercu}")
                 # Issue #1208：本机直连引擎补三维度派生标签（否则 selector 圈池恒不命中）
                 _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
                 out["upserted"] += 1
@@ -1463,12 +1540,14 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                 _seed_roles_l = [t for t in dict.fromkeys(_seed_roles_l) if t in _KAR_L]
             except Exception:
                 _seed_roles_l = []
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-            if not c.fetchone():
-                for _t in (_seed_roles_l or ["all"]):
-                    c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                              "enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
-                              (rid, _t, now_iso, now_iso))
+            # Issue #3396 后续：只按「角色行是否为空」判定（派生行 engine:/scene:/scope: 不算），
+            # 空则按声明/all 补齐 —— 见 engine/role_caps.py（原判定用 LIMIT 1 任意行，
+            # 派生行在表里就再也不会补 all，导致空角色引擎 fail-closed 且永不恢复）。
+            try:
+                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                _ensure_rc(c, rid, declared=_seed_roles_l, user_set=0, now_iso=now_iso)
+            except Exception as _erc:
+                log.warning(f"upsert_local_runtimes role caps ensure failed (runtime={rid}): {_erc}")
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]
@@ -1939,7 +2018,7 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "role_caps_inventory", "role_tag_domain", "engine_cap_tag_exists", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
            "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
@@ -2372,6 +2451,16 @@ def set_meta_value(key: str, value: str) -> None:
 # 会话/消息列清单（具名查询共用；列序即调用方取值的下标，改动必须同步所有消费者）
 _CONV_COLS_SQL = ", ".join(_CONV_COLS)
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
+
+# Issue #3813：failed-dispatch LIKE 谓词单源（候选查询与探针共用；漂移=短路漏扫）
+_A2A_FAILED_DISPATCH_LIKE_PRED = (
+    "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_dispatch_exception]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
+    "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
+    "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
+    "OR result LIKE '%unclaimed%'")
 
 _ANY_QUERIES: dict[str, str] = {
     # ── 免鉴权健康端点的运行时就绪快照（insight/routes/health.py）──
@@ -2827,18 +2916,38 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY e.seq DESC"),
     # 形态二/三：failed 且失败语义=派发失败/排队超时（结果文本已含
     # _fail_event 写入的 [code]；LIKE 预筛只用于减少跨库取数，最终归类仍在 patrol）。
+    # Issue #3813：LIKE 谓词提取为模块常量 _A2A_FAILED_DISPATCH_LIKE_PRED——
+    # 候选查询与 events_probe_failed_dispatch 探针共用同一谓词（防双源漂移：
+    # 探针谓词一旦与候选查询漂移，短路会把真候选判空=静默漏扫）。
     "patrol_a2a_failed_dispatch_rows": (
         "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result, "
         "payload, created_at, started_at, completed_at FROM events "
         "WHERE event_type='a2a_event' AND status='failed' AND ("
-        "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_dispatch_exception]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
-        "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
-        "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
-        "OR result LIKE '%unclaimed%') "
+        + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
         "ORDER BY seq DESC"),
+    # ===== Issue #3813：巡检候选存在性探针（S53 短路判定唯一事实源）=====
+    # 五路 LIMIT 1 有界索引查询（零候选轮次查询数=常量级，AC③）。形状与候选
+    # 查询逐谓词一致（仅收列到主键 + LIMIT 1）；全部命中
+    # idx_events_type_status_seq / idx_tasks_status_completed_id（EXPLAIN 可证）。
+    "events_probe_unclaimed": (
+        "SELECT e.seq FROM events e LEFT JOIN agent_tasks t ON t.event_seq = e.seq "
+        "WHERE e.event_type='a2a_event' AND e.status='running' "
+        "AND (e.runtime IS NULL OR e.runtime='') AND t.id IS NULL "
+        "ORDER BY e.seq DESC LIMIT 1"),
+    "events_probe_failed_dispatch": (
+        "SELECT seq FROM events WHERE event_type='a2a_event' AND status='failed' "
+        "AND (" + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
+        "ORDER BY seq DESC LIMIT 1"),
+    "tasks_probe_completed_cutoff": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND completed_at > ? "
+        "AND id > ? ORDER BY id LIMIT 1"),
+    "tasks_probe_completed_all": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND id > ? "
+        "ORDER BY id LIMIT 1"),
+    # running/queued 探针与候选查询同款内嵌字面量口径（tasks_running_rows 先例；
+    # sqlite mysql_compat 对 TEXT 等值的计划折叠一致，EXPLAIN 形状与候选查询可比）
+    "tasks_probe_running": "SELECT id FROM agent_tasks WHERE status='running' LIMIT 1",
+    "tasks_probe_queued": "SELECT id FROM agent_tasks WHERE status='queued' LIMIT 1",
     # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
     "task_recheck_row": (
         "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
@@ -2888,6 +2997,7 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
     "engine_cap_tags_sorted": (
         "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
+    # 角色行统计（含 enabled=0）：管理台区分「从未配置」与「配过但全停用」
     "engine_caps_by_runtime": (
         "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities "
         "WHERE runtime_id=? ORDER BY tag"),
@@ -3324,6 +3434,29 @@ def read_all_any(name: str, params: tuple = ()) -> list[Any]:
     with _any_cursor() as c:
         c.execute(_any_sql(name), params)
         return list(c.fetchall() or [])
+
+def named_query_sql(name: str) -> str:
+    """具名查询的原始 SQL 文本（Issue #3813 采样日志用：打印脱敏形状的事实源）。
+
+    只读、不执行；与 explain_named_query 共用 _any_sql 的 KeyError 口径。
+    """
+    return _any_sql(name)
+
+
+def explain_named_query(name: str, params: tuple = ()) -> list[tuple]:
+    """具名查询的执行计划（Issue #3813 slow scan 采样专用，只读不写）。
+
+    方言：SQLite 走 ``EXPLAIN QUERY PLAN``（列形状 id/parent/notused/detail），
+    MySQL 走 ``EXPLAIN``（多列，含 type/key/rows/Extra）——统一整行 tuple 返回，
+    由调用方做摘要与限长（本原语不裁剪、不解释，保持 DB 事实原样）。
+    未登记的具名查询抛 KeyError（与 read_*_any 同口径，不静默兜底）。
+    """
+    sql = _any_sql(name)
+    from src.kernel.session_manager import _is_mysql_backend
+    verb = "EXPLAIN" if _is_mysql_backend() else "EXPLAIN QUERY PLAN"
+    with _any_cursor() as c:
+        c.execute(f"{verb} {sql}", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
 
 
 def patrol_dispatch_stall_threshold_seconds() -> int:
@@ -4245,15 +4378,6 @@ def event_dashboard_metrics(repo_keys, week_cutoff: str = "") -> dict[str, Any]:
     return out
 
 
-def dashboard_task_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """任务队列状态分布：[(status, count)]（GROUP BY status，口径同 ops overview）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1" + where +
-                  " GROUP BY status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
 def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
     """issue 级状态分布：每个 issue 取 MAX(id) 那条 task 的状态再计数。"""
     where, args = _rk_scope(repo_keys, org_id)
@@ -4265,81 +4389,6 @@ def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
             " GROUP BY issue_id) latest JOIN agent_tasks t ON t.id = latest.max_id"
             " GROUP BY t.status", tuple(args))
         return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_stuck_tasks(cutoff: str, repo_keys=(), org_id: int = 0,
-                          limit: int = 100) -> list[tuple]:
-    """stuck 任务（running 且 started_at < cutoff），按 started_at 升序。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
-            "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL "
-            "AND started_at < ?" + where + " ORDER BY started_at ASC LIMIT " + str(int(limit)),
-            (cutoff,) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_failed_tasks(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """最近 failed 任务（按 completed_at 降序；调用方自行截断，保持原无 LIMIT 口径）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, "
-            "event_seq, result_text, exit_code, errors FROM agent_tasks WHERE status='failed'"
-            + where + " ORDER BY completed_at DESC", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_task_by_source(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """按 agent_type × status 的排队/运行数（只含 queued/dispatched/running）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-            "WHERE status IN ('queued','dispatched','running')" + where +
-            " GROUP BY agent_type, status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_today_status_counts(day_prefix: str, repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """今日任务状态分布（UTC 日期前缀匹配 created_at）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE created_at LIKE ?" + where +
-                  " GROUP BY status", (f"{day_prefix}%",) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_running_counts(org_id: int = 0) -> dict[int, int]:
-    """每个引擎当前 running 任务数（实时负载）：{runtime_id: n}。"""
-    where, args = _rk_scope((), org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running'" + where +
-                  " GROUP BY runtime_id", tuple(args))
-        return {r[0]: int(r[1] or 0) for r in (c.fetchall() or [])}
-
-
-def dashboard_avg_durations(org_id: int = 0) -> dict[int, float]:
-    """每个引擎已完成任务的平均耗时（秒）：{runtime_id: seconds}，双方言兜底。"""
-    where, args = _rk_scope((), org_id)
-    try:
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(CASE WHEN completed_at IS NOT NULL "
-                "AND started_at IS NOT NULL THEN (strftime('%s', completed_at) - "
-                "strftime('%s', started_at)) ELSE NULL END) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0"
-                + where + " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
-    except Exception:  # noqa: BLE001 - sqlite strftime 在 MySQL 上是 1064，走下面的口径
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
-                "AND started_at IS NOT NULL AND completed_at IS NOT NULL" + where +
-                " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
 
 
 _WORKER_COLS = ("id, name, device_name, status, last_seen_at, last_ip, "
@@ -4369,20 +4418,6 @@ def dashboard_workers(stale_cutoff: str, org_id: int = 0, uname: str = "",
     else:
         sql = base + " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id"
         args = (stale_cutoff, uname)
-    with _any_cursor() as c:
-        c.execute(sql, args)
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_local_runtimes(org_id: int = 0) -> list[tuple]:
-    """本机直连引擎（credential_id=0）：7 列，供看板补一条本地 worker。"""
-    sql = ("SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
-           "ar.healthy, ar.busy_slots, ar.max_concurrent FROM agent_runtimes ar "
-           "WHERE ar.credential_id = 0")
-    args: tuple = ()
-    if org_id:
-        sql += " AND ar.org_id=?"
-        args = (int(org_id),)
     with _any_cursor() as c:
         c.execute(sql, args)
         return [tuple(r) for r in (c.fetchall() or [])]

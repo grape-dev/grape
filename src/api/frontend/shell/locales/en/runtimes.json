@@ -126,7 +126,9 @@
     "sandbox_template": "Template",
     "platform_disabled": "Disabled",
     "platform_disabled_tip": "Associated sandbox platform is disabled: no new sandboxes; enable it on the platform detail page",
-    "cred_id_tip": "Credential ID — on multi-instance hosts the service name is sandbox-worker-<instanceID>-<credID> (systemctl)"
+    "cred_id_tip": "Credential ID — on multi-instance hosts the service name is sandbox-worker-<instanceID>-<credID> (systemctl)",
+    "roles_disabled": "Disabled",
+    "roles_disabled_tip": "All role tags on this engine are turned off (enabled=0), so no task will pick it. Open Role tags, tick a role and save to enable it again"
   },
   "empty": {
     "no_engines": "No engines",
@@ -213,7 +215,10 @@
     "max_concurrent_saved": "Max concurrent saved",
     "max_concurrent_invalid": "Please enter an integer between 1-100",
     "save_failed": "Save failed: {{msg}}",
-    "scanning": "Scanning..."
+    "scanning": "Scanning...",
+    "tags_need_one": "Keep at least one role (All or any role); clearing them all is not allowed",
+    "tags_scene_drop_confirm": "The current scene does not support these roles: {{roles}}. Saving will remove them. Continue?",
+    "tags_scene_none": "No role can be saved in the current scene ({{roles}} is not part of it); switch the scene or tick a role"
   },
   "skill": {
     "no_desc": "No description",

@@ -22,6 +22,10 @@ from src.domains.runtime.routes.runtime_id_validation import RuntimeIdGuardRoute
 from src.api.time_utils import normalize_event_time
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+# Issue #3396：角色标签值域唯一来源 = engine_select.KNOWN_AGENT_ROLES（Issue #955 角色全集）。
+# 本模块不再维护第二份字面量：两份不同步会让新角色被静默过滤/误折叠。
+from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as AGENT_TAGS, _PRIO_GLOBAL
+from src.domains.runtime.engine.role_caps import _DEFAULT_MAX_CONCURRENT
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
 # Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
@@ -104,7 +108,8 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
         return 1 if reported else 0
 
 
-_ROLE_SEED_KNOWN = frozenset({"coding", "issue", "qa", "vod", "chat", "sre"})
+# 角色值域唯一来源：文件头部的 AGENT_TAGS（= engine_select.KNOWN_AGENT_ROLES 别名）。
+# 播种在调用期取值，本模块不再维护第二份字面量——两份不同步会让新角色被静默过滤。
 
 
 def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> list:
@@ -138,23 +143,42 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         if user_set:
             return []
         tags = [str(t).strip().lower() for t in (declared or []) if str(t).strip()]
-        tags = [t for t in dict.fromkeys(tags) if t in _ROLE_SEED_KNOWN]
+        tags = [t for t in dict.fromkeys(tags) if t in AGENT_TAGS]
         if not tags:
             return []
+        # QA 第 6 轮 Required：存在性判定不得只看 enabled=1——「只剩显式停用的角色行」
+        # 会被当成「没配过」而复活（违反 spec A8c/PR §4「停用行一律不覆盖、不重开」）。
+        # 唯一允许改写的状态 = 仅有一条 enabled=1 的自动 'all'（声明即收窄，原语义）；
+        # 其余任何角色行状态（含停用行、含非 all 行）一律返回 [] 交 ensure_role_caps 判定。
         rows = c.execute(
-            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
-        cur = [r[0] for r in rows]
-        cur_roles = [t for t in cur if t == "all" or t in _ROLE_SEED_KNOWN]
-        if cur_roles and set(cur_roles) - {"all"}:
-            return []  # 已有非 all 角色行 → 不覆盖
-        if cur_roles:
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+        cur_roles = []
+        for _t, _e in rows:
+            _t = str(_t or "").strip().lower()
+            if _t == "all" or _t in AGENT_TAGS:
+                cur_roles.append((_t, int(_e or 0)))
+        if not cur_roles:
+            pass  # 零角色行 → 直接按声明播种（声明即收窄，不走 ensure 的值域回落 all）
+        elif cur_roles != [("all", 1)]:
+            return []  # 已有角色行（含 enabled=0 停用、含非 all）→ 不覆盖、不重开
+        else:
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag='all'", (rid,))
         _now = datetime.now(timezone.utc).isoformat()
-        for t in tags:
-            c.execute(
-                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?, ?, 1, 50, 1, ?, ?)",
-                (rid, t, _now, _now))
+        # 单条多行原子写入（QA 第 6 轮 Required）：逐条 INSERT 撞唯一键会把异常整体吞成
+        # log.warning，留下「半组启用行」却返回 []；同一语句一次落整组或整组失败。
+        _rows_sql = " UNION ALL ".join(
+            "SELECT ? AS runtime_id, ? AS tag, %d AS max_concurrent, %d AS priority,"
+            " 1 AS enabled, ? AS created_at, ? AS updated_at"
+            % (_DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL) for _t in tags)
+        c.execute(
+            "INSERT INTO engine_capabilities "
+            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+            "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at"
+            " FROM (" + _rows_sql + ") AS _seed_rows WHERE NOT EXISTS ("
+            "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN ("
+            + ",".join("?" * (len(AGENT_TAGS) + 1)) + "))",
+            tuple(v for _t in tags for v in (rid, _t, _now, _now))
+            + (rid, "all", *sorted(AGENT_TAGS)))
         log.info(f"role caps seeded: rid={rid} tags={tags} (declared role_tags)")
         return tags
     except Exception as _se:
@@ -685,15 +709,14 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             except Exception:
                 _declared = []
             _seeded = seed_role_caps_from_declared(c, rid, _declared, _user_set)
-            if not _seeded and not _user_set:
-                c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-                if not c.fetchone():
-                    _now_ec = datetime.now(timezone.utc).isoformat()
-                    c.execute(
-                        "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                        "VALUES (?, 'all', 1, 50, 1, ?, ?)",
-                        (rid, _now_ec, _now_ec))
-                    log.info(f"runtime_register: default 'all' capability seeded rid={rid}")
+            # Issue #3396 后续：补齐判定只看角色行（旧口径用「任意一行」→ 派生行会
+            # 永久挡住补 all）。声明非法/为空 → 补 all；UI 手工清空（user_set）→ 不动。
+            if not _seeded:
+                try:
+                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
+                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set, source="register")
+                except Exception as _erc:
+                    log.warning(f"runtime_register: role caps ensure failed rid={rid}: {_erc}")
             # Issue #646：标签行同步 engine_uid（引用切换，孤儿防护）
             try:
                 c.execute(
@@ -958,18 +981,35 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             _et_hb = (json.loads(_hb_row[4] or "{}").get("engine_type") or "")
                         except Exception:
                             _et_hb = ""
+                        # Issue #3396 后续：心跳兜底改成「角色行为空就补」——
+                        # 有声明按声明（A8b 声明即收窄），无声明补 all。
+                        # 2026-11-24：不再用 tags_user_set 做闸门——清空已被前端+接口双层
+                        # 禁止（EMPTY_ROLE_TAGS），`user_set=1 且零角色行`只剩历史遗留，
+                        # 闸门会让它永久 fail-closed；是否覆盖由两步原语内部判定
+                        # （seed 见 user_set 即返回空，ensure 只在 has_role_rows 为假时补）。
+                        # 顺序：先补角色行，再刷新派生标签快照，否则快照不含新行，
+                        # `GET /runtimes/{id}/tags` 会滞后到下一跳（QA 复审 Info）。
+                        _user_set_hb = _hb_row[6] or 0
+                        try:
+                            _p_decl = json.loads(_hb_row[5] or "[]")
+                            if not isinstance(_p_decl, list):
+                                _p_decl = []
+                        except Exception:
+                            _p_decl = []
+                        try:
+                            # 两步：①声明即收窄（只有自动 all 时改写为声明集合）；
+                            # ②角色行为空才补（有声明按声明，无声明补 all）。
+                            _seeded = (seed_role_caps_from_declared(c, _rid, _p_decl, _user_set_hb)
+                                       if _p_decl else [])
+                            if not _seeded:
+                                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
+                                _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=_user_set_hb,
+                                              source="heartbeat")
+                        except Exception as _sde:
+                            log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
                         # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
                         _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
                                  engine_type=_et_hb)
-                        # Issue #3396 A8b：心跳链兜底——存量行 role_tags 有声明但能力行仍是
-                        # 自动补的 'all' 时改写为声明集合（user_set/非 all 角色行不覆盖）
-                        if not (_hb_row[6] or 0) and (_hb_row[5] or "").strip():
-                            try:
-                                _p_decl = json.loads(_hb_row[5])
-                                if isinstance(_p_decl, list):
-                                    seed_role_caps_from_declared(c, _rid, _p_decl, 0)
-                            except Exception as _sde:
-                                log.warning(f"heartbeat role caps seed failed (runtime={_rid}): {_sde}")
             except Exception as _at_e:
                 log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:
@@ -2808,6 +2848,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - local_engines：discover_backends() 本机扫描（沙箱内通常全空）
     - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
+    - degraded / engines_unavailable_reason：runtime 域读失败时置 true 并给出原因码
+      （`query_failed` / `runtime_domain_unavailable`）；此时 needs_worker 语义不变，
+      由前端依据 degraded 区分「确实无引擎」与「查询失败」，不做误引导。
     """
     from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
     from src.domains.runtime.engine.executor import discover_backends
@@ -2823,9 +2866,17 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     # repo 匹配值：单一真源等值匹配（engine_onboarding_repo_key）——带前缀原样、
     # 裸形态查 managed_repos 定唯一前缀。不做多形态撒网 IN（跨平台同名仓库泄漏）。
     _rk = engine_onboarding_repo_key(repo or "")
+    # Issue #3857：agent_runtimes / runtime_credentials 属 runtime 域，此前用进程主库
+    # （持进程锁的 session_manager 连接）读取——三库拓扑下 mgmt 进程主库没有这两张表，必 1146；
+    # 异常被下面 except 吞成 WARNING，remote 恒空、needs_worker 恒 true（4 台主控约
+    # 216 条/小时）。改走内核唯一路由 `cursor_for("runtime")`：domain → 域连接；
+    # local → 进程主库（单库拓扑/本域进程零回归）；三库缺 DSN → DomainUnavailable
+    # （绝不静默回落 mgmt）。只读查询，无需事务提交。
+    degraded = False
+    degraded_reason = ""
     try:
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             # 判定语义：本端点回答"该用户是否还有可用的执行引擎"——
             # global（本组织内免提示）+ 本人 user-scope + 本人名下所有 repo-scope
             # （不限当前 repo）。repo_key 用于 remote_engines 的上下文过滤（展示）。
@@ -2860,7 +2911,22 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
             else:
                 remote = [e for e in _all if e.get("scope") != "repo"]
     except Exception as e:
-        log.warning(f"engine-onboarding: query agent_runtimes failed: {e}")
+        degraded = True
+        degraded_reason = "query_failed"
+        # 路由定位字段（同 #3826/#3865 口径）：单行日志即可回答「本进程连的是哪个库」，
+        # 避免「旧进程未重启」与「仍在打 mgmt 库」两种根因在日志上同形。
+        _route = "unknown"
+        try:
+            _route = _dbreg.route_of("runtime")
+        except _dbreg.DomainUnavailable:
+            _route = "unavailable"
+            degraded_reason = "runtime_domain_unavailable"
+        except Exception as _re:  # noqa: BLE001 - 仅日志字段
+            _route = f"unknown:{type(_re).__name__}"
+        log.warning(
+            f"engine-onboarding: agent_runtimes read degraded ({degraded_reason}) — "
+            f"route={_route} target_db=runtime pid={os.getpid()} "
+            f"host={_dbreg.host_label()}: {e}")
 
     local_usable = [e["name"] for e in local if e.get("installed")]
     needs_worker = not local_usable and not _user_visible
@@ -2872,6 +2938,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
         "local_engines": local,
         "remote_engines": remote,
         "needs_worker": needs_worker,
+        # Issue #3857：查询失败不再与「确实无引擎」同形——前端据此抑制误引导
+        "degraded": degraded,
+        "engines_unavailable_reason": degraded_reason,
     }
 
 
@@ -3015,16 +3084,16 @@ def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depe
 
 # ===== Engine 角色标签 =====
 
-# Issue #3396：角色标签值域单点常量（与前端 RuntimesView.vue 的 RT_TAG_OPTIONS
-# / 场景可用角色默认表对账锁定）。chat 补进值域（6 角色），'all' 为折叠态不在此列。
-AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat"}
+# Issue #3396：AGENT_TAGS 在文件头部由 engine_select.KNOWN_AGENT_ROLES 别名而来
+# （值域单点常量；'all' 为折叠态不在此列，前端 RT_TAG_OPTIONS 由测试对账锁定）。
 
 
 def _apply_tag_rules(tags: list[str]) -> list[str]:
     """应用标签互斥规则。
     - 全能与其他互斥：有其他标签时去掉全能。
     - 6 个角色全选时自动替换为全能（Issue #3396：chat 进值域，5→6）。
-    - 允许空标签（不自动回全能；空标签 fail-closed，见 engine_select #3396）。
+    - 空标签集合被端点层拒绝（400 EMPTY_ROLE_TAGS：至少保留一个角色；A7 下空集
+      等同 fail-closed，因此不允许用户把自己锁死）。
     """
     tag_set = set(tags)
     has_all = "all" in tag_set
@@ -3050,19 +3119,45 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_to
     return {"tags": json.loads(row[0]) if row[0] else []}
 
 
-@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).")
+@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write permission is layered (Issue #3396, 2026-11-24): locally-attached engines (credential_id=0) accept any authenticated user; credential-backed engines accept only a platform admin, the credential owner, or an owner/admin of the credential's org; session_token is always 403. Tag values are domain-validated (400 INVALID_ROLE_TAGS) and empty tag sets are rejected (400 EMPTY_ROLE_TAGS, at least one role must remain).")
 def set_runtime_tags(runtime_id: int, body: dict, request: Request,
                      user: dict = Depends(require_runtime_owner_or_admin)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
     写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
-    写权限（Issue #3396 A5）：仅引擎凭据所有者（user 本人 / org owner+admin）
-    与平台管理员可改，仓库管理员禁改；本机直连（credential_id=0）仅平台管理员。
+    写权限（Issue #3396 A5，2026-11-24 分层裁定）：
+    - 本机直连（credential_id=0，主控机资产、与个人凭据无归属关系）→ 任意登录用户可改；
+    - 凭据引擎（credential_id≠0）→ 仅平台管理员 / 凭据 owner 本人 /
+      凭据所属 org 的 owner+admin 可改，仓库管理员与其他登录用户 403；
+    - session_token（tk_）→ 403；目标 runtime 不存在 → 404。
+    值域校验：值域外标签一律 400 INVALID_ROLE_TAGS，不写行、不改 flags
+    （此前值域外标签会先删光真实角色行再插入 bogus，引擎从此不可调度）。
+    非空校验：空标签集合一律 400 EMPTY_ROLE_TAGS，至少保留一个角色（空集在 A7 下 fail-closed）。
     """
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags
-    tags = _apply_tag_rules(body.get("tags") or [])
+    _raw_tags = [str(t).strip().lower() for t in (body.get("tags") or []) if str(t).strip()]
+    # QA 架构守护 A1（Critical）：开放接口必须校验角色值域。此前值域外标签会通过
+    # 「非空」守卫，先删光真实角色行、再插入 bogus 并置 tags_user_set=1 —— 引擎从此
+    # 对任何任务都不可选。值域外一律 400，且不写任何行、不改 flags。
+    _allowed = {"all"} | set(AGENT_TAGS)
+    _bad = sorted({t for t in _raw_tags if t not in _allowed})
+    if _bad:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "INVALID_ROLE_TAGS",
+            "message": f"无效的角色标签：{', '.join(_bad)}；允许的值为 all 或 {', '.join(sorted(AGENT_TAGS))}",
+        })
+    tags = _apply_tag_rules(_raw_tags)
+    if not tags:
+        # 2026-11-23 用户裁定：不允许把所有角色都取消——空角色行在 A7 下是 fail-closed，
+        # 引擎会变成任何角色都不可调度。保存直接失败并给出用户可读提示。
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "EMPTY_ROLE_TAGS",
+            "message": "至少要保留一个角色（勾选「全能」或任一角色），不能全部取消——空角色会让该引擎对任何任务都不再可选",
+        })
     now = datetime.now(timezone.utc).isoformat()
     # Issue #3350：engine_capabilities / agent_runtimes 归 runtime 域，按域取连接
     with _runtime_cursor() as c:
@@ -3257,6 +3352,9 @@ def _relay_target() -> str:
 
 
 _relay_warn_ts = 0.0
+# Issue #3749：启动自检只跑一次（进程内）；与请求期提示共用 _warn_relay_disabled
+# 的 10 分钟窗口，避免启动就 WARN 一次、首个请求又 WARN 一次。
+_relay_selfcheck_done = False
 
 
 def _warn_relay_disabled() -> None:
@@ -3267,7 +3365,9 @@ def _warn_relay_disabled() -> None:
         return
     _relay_warn_ts = now
     log.warning("trace relay disabled: OTLP_RELAY_TARGET 未配置，worker trace 出口返回 "
-                "503（仅影响 trace 上报，不影响业务）")
+                "503（仅影响 trace 上报，不影响业务）。该变量应为 LGTM 的 OTLP/HTTP "
+                "基址且不含 /v1/traces（如 http://<lgtm-host>:4318），在进程环境变量 "
+                "（.env / systemd EnvironmentFile）中配置后中继即启用。")
 
 
 # Issue #3699：禁用态是**配置态确定性分支**（不是事故）——给响应加确定性标记头，
@@ -3294,6 +3394,57 @@ except Exception as _relay_metric_e:  # noqa: BLE001
                 f"{type(_relay_metric_e).__name__}: {_relay_metric_e}")
 
 
+def _relay_count(status: str) -> None:
+    """中继结果打点（未注册/异常时静默，不影响请求路径）。
+
+    Issue #3749：禁用态（未配 OTLP_RELAY_TARGET）同样按 status="503" 计数——
+    配置缺失必须能被指标与告警捕获，而不是只靠人工翻日志。
+    """
+    if _relay_total is None:
+        return
+    try:
+        _relay_total.labels(status=status).inc()
+    except Exception:
+        pass
+
+
+def trace_relay_selfcheck() -> dict:
+    """启动期一次中继自检（Issue #3749）：把「部署漏配」在启动阶段就说清楚。
+
+    - `OTLP_RELAY_TARGET` 为空 → WARNING 一次（复用 `_warn_relay_disabled` 的限频文案，
+      含变量名、503 语义与配置方式），并占用该 10 分钟窗口，请求期不再立刻重复刷；
+    - 非空 → INFO 打印生效端点 `<target>/v1/traces`（与请求路径同口径）；若变量误带了
+      `/v1/traces` 后缀 → 额外 WARNING：拼出的 `/v1/traces/v1/traces` 会被上游 404，
+      `status="404"` 不命中 503 告警，等于静默失效。
+
+    幂等：同一进程只输出一次；返回
+    `{enabled, upstream, endpoint, misconfigured}` 便于启动日志/测试断言。
+    """
+    global _relay_selfcheck_done
+    target = _relay_target()
+    endpoint = (target.rstrip("/") + "/v1/traces") if target else ""
+    misconfigured = bool(target) and target.rstrip("/").endswith("/v1/traces")
+    info = {"enabled": bool(target),
+            "upstream": target,
+            "endpoint": endpoint,
+            "misconfigured": misconfigured}
+    if _relay_selfcheck_done:
+        return info
+    _relay_selfcheck_done = True
+    if not target:
+        _warn_relay_disabled()
+    else:
+        if misconfigured:
+            log.warning(
+                "[trace-relay] selfcheck: OTLP_RELAY_TARGET must be the OTLP/HTTP "
+                "base endpoint without the /v1/traces suffix; got "
+                f"{target!r}. Forwarded URL would be {endpoint}, which the upstream "
+                "rejects (404) — status=\"404\" does not match the 503 alert, so "
+                "the relay fails silently.")
+        log.info(f"[trace-relay] selfcheck: enabled — forwarding to {endpoint}")
+    return info
+
+
 @router.post("/traces", operation_id="runtime_traces_relay",
              summary="Relay worker OTLP traces to LGTM",
              description="Transparently forwards worker OTLP/HTTP trace exports to the LGTM "
@@ -3308,6 +3459,8 @@ async def runtime_traces_relay(request: Request,
         # Issue #3699：配置缺失是确定性禁用（重试无意义）。body/状态码契约不变，
         # 只加标记头供访问日志精确降噪；补配置提示按 10 分钟限频（见 _warn_relay_disabled）。
         _warn_relay_disabled()
+        # Issue #3749：禁用态也要计入 status="503"——否则「没配」永远进不了指标/告警。
+        _relay_count("503")
         return _RelayResponse(status_code=503,
                               content='{"detail":"trace relay disabled"}',
                               media_type="application/json",
@@ -3334,19 +3487,11 @@ async def runtime_traces_relay(request: Request,
         async with httpx.AsyncClient(timeout=10) as hc:
             r = await hc.post(target.rstrip("/") + "/v1/traces",
                               content=body, headers=fwd_headers)
-        if _relay_total is not None:
-            try:
-                _relay_total.labels(status=str(r.status_code)).inc()
-            except Exception:
-                pass
+        _relay_count(str(r.status_code))
         return _RelayResponse(status_code=r.status_code, content=r.content,
                               media_type=r.headers.get("content-type", "application/x-protobuf"))
     except Exception as e:
-        if _relay_total is not None:
-            try:
-                _relay_total.labels(status="relay_unreachable").inc()
-            except Exception:
-                pass
+        _relay_count("relay_unreachable")
         log.warning(f"trace relay unreachable: {type(e).__name__}")
         return _RelayResponse(status_code=502,
                               content='{"detail":"lgtm unreachable"}',
