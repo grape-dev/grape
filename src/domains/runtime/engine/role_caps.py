@@ -106,7 +106,7 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None, 
         "INSERT INTO engine_capabilities "
         "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
         "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at FROM ("
-        + _rows_sql + ") WHERE NOT EXISTS ("
+        + _rows_sql + ") AS _rows WHERE NOT EXISTS ("
         "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN (" + _in + "))",
         tuple(v for _t in _write for v in (rid, _t, _now, _now)) + (rid, *_domain))
     try:
