@@ -7,9 +7,11 @@ yielded 值，导致 4 实例部署下每周期各自跑一遍同步/清理；`s
 这里锁住契约：
 - 未抢到锁：非严格模式 yield False 不抛；strict=True 抛 LockNotAcquired。
 - 两个 worker 并发进入 `_skill_sync_worker`，`sync_official_skills` 只执行 1 次。
-- 5 处调用点均显式 `as acquired` 且未持锁跳过主体。
+- 全仓 `src/` 下每一处 `async with run_with_distributed_lock(...)` 都消费 yielded flag
+  并以该 flag 守卫 with 主体（静态 AST 枚举，不限定文件清单）。
 - `SKILL_SYNC_LOCK_TTL` 单点派生（worker CM / `_ensure_outer_lock` / 超时阈值）。
 """
+import ast
 import asyncio
 import inspect
 import re
@@ -136,21 +138,174 @@ def test_two_workers_concurrently_call_sync_once(monkeypatch):
     assert len(calls) == 1, f"sync must run once, got {len(calls)}"
 
 
+_LOCK_CM = "run_with_distributed_lock"
+
+
+def _iter_lock_call_sites():
+    """全仓枚举（AST）`async with run_with_distributed_lock(...)` 调用点。
+
+    Issue #3742 复审要求：静态断言不能只扫固定文件清单，否则新增/遗漏的调用点
+    不会被发现。这里按语法树遍历 `src/` 下所有 .py（注释、docstring 里的示例不算），
+    返回 [(相对路径, 行号, 锁 key, 绑定的 flag 名, with 节点)]。
+    """
+    sites = []
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncWith):
+                continue
+            for item in node.items:
+                call = item.context_expr
+                if not (isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id == _LOCK_CM):
+                    continue
+                key = (call.args[0].value
+                       if call.args and isinstance(call.args[0], ast.Constant)
+                       else "<dynamic>")
+                flag = (item.optional_vars.id
+                        if isinstance(item.optional_vars, ast.Name) else None)
+                sites.append((rel, node.lineno, key, flag, node))
+    return sites
+
+
+def _is_guarded_body(node, flag):
+    """with 主体的首条语句必须是以 flag 为条件的 if —— 即「消费 acquired」的守卫。"""
+    if not node.body or not isinstance(node.body[0], ast.If):
+        return False
+    return any(isinstance(n, ast.Name) and n.id == flag for n in ast.walk(node.body[0].test))
+
+
 def test_all_call_sites_consume_acquired():
-    files = [
-        "src/domains/runtime/storage/skill_sync.py",
-        "src/api/main.py",
-        "src/api/grape_server.py",
-        "src/domains/runtime/storage/upload_cleanup.py",
-    ]
-    pattern = "run_with_distributed_lock("
-    total = 0
-    for rel in files:
-        content = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        for line in content.splitlines():
-            if pattern in line and not line.lstrip().startswith("#"):
-                total += int("as acquired" in line)
-    assert total == 5, f"expected 5 call sites consuming acquired, got {total}"
+    sites = _iter_lock_call_sites()
+    expected = {
+        ("src/domains/runtime/storage/skill_sync.py", "skill_sync"),
+        ("src/domains/runtime/storage/plugin_sync.py", "plugin_sync"),
+        ("src/domains/runtime/storage/upload_cleanup.py", "upload_cleanup"),
+        ("src/domains/runtime/engine/scheduler.py", "autopilot_scheduler"),
+        ("src/domains/runtime/engine/table_maintenance.py", "table_maintenance_tasks"),
+        ("src/domains/runtime/engine/table_maintenance.py", "table_maintenance_messages"),
+        ("src/api/main.py", "table_maintenance"),
+        ("src/api/main.py", "table_maintenance_messages"),
+        ("src/api/grape_server.py", "table_maintenance_messages"),
+        ("src/api/feedback_issue_converter.py", "feedback_reconcile"),
+        ("src/api/feedback_issue_converter.py", "feedback_status_sync"),
+    }
+    found = {(rel, key) for rel, _lineno, key, _flag, _node in sites}
+    missing = expected - found
+    assert not missing, f"lock call sites disappeared (contract regression): {sorted(missing)}"
+
+    unguarded = [f"{rel}:{lineno} key={key}"
+                 for rel, lineno, key, flag, node in sites
+                 if flag is None or not _is_guarded_body(node, flag)]
+    assert not unguarded, (
+        "every run_with_distributed_lock call site must consume the yielded flag and "
+        f"guard its body (CM does not skip the body): {unguarded}")
+
+
+def _run_loop_briefly(monkeypatch, looper, holder, run_for=0.15):
+    """在给定 holder 状态下跑一小段 loop，然后取消（loop 内含 interval 睡眠）。"""
+    fake = _FakeDistributedLock(holder=holder)
+    _install_lock_stub(monkeypatch, fake)
+
+    async def _run():
+        task = asyncio.create_task(looper())
+        await asyncio.sleep(run_for)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
+def test_table_maintenance_tasks_skipped_when_lock_held(monkeypatch):
+    """table_maintenance_tasks 锁被其它实例持有时不执行清理（正/反双向）。"""
+    from src.domains.runtime.engine import table_maintenance as tm
+
+    calls = []
+    monkeypatch.setattr(tm, "_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(tm, "_TABLE_MAINTENANCE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(tm, "cleanup_old_agent_tasks_fields", lambda: calls.append("fields"))
+    monkeypatch.setattr(tm, "delete_old_agent_tasks", lambda: calls.append("delete"))
+
+    _run_loop_briefly(monkeypatch, tm.table_maintenance_tasks_loop,
+                      holder="table_maintenance_tasks")
+    assert calls == [], f"agent_tasks cleanup must be skipped while lock is held: {calls}"
+
+    _run_loop_briefly(monkeypatch, tm.table_maintenance_tasks_loop, holder=None)
+    assert "fields" in calls and "delete" in calls, "cleanup must run when the lock is free"
+
+
+def test_table_maintenance_messages_skipped_when_lock_held(monkeypatch):
+    """table_maintenance_messages 锁被其它实例持有时不执行清理（正/反双向）。"""
+    from src.domains.runtime.engine import table_maintenance as tm
+
+    calls = []
+    monkeypatch.setattr(tm, "_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(tm, "_TABLE_MAINTENANCE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(tm, "cleanup_old_task_messages", lambda: calls.append("messages"))
+
+    _run_loop_briefly(monkeypatch, tm.table_maintenance_messages_loop,
+                      holder="table_maintenance_messages")
+    assert calls == [], f"task_messages cleanup must be skipped while lock is held: {calls}"
+
+    _run_loop_briefly(monkeypatch, tm.table_maintenance_messages_loop, holder=None)
+    assert calls, "cleanup must run when the lock is free"
+
+
+def test_plugin_sync_skipped_when_lock_held(monkeypatch):
+    """plugin_sync worker 未持锁时不同步（否则每实例各拉一遍外部插件）。"""
+    from src.domains.runtime.storage import plugin_sync as ps
+
+    calls = []
+
+    async def _fake_sync():
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(ps, "sync_official_plugins", _fake_sync)
+
+    _run_loop_briefly(monkeypatch, lambda: ps._plugin_sync_worker(interval=0.01),
+                      holder="plugin_sync")
+    assert calls == [], "plugin sync must be skipped while the lock is held"
+
+    _run_loop_briefly(monkeypatch, lambda: ps._plugin_sync_worker(interval=0.01), holder=None)
+    assert calls, "plugin sync must run when the lock is free"
+
+
+def test_feedback_reconcile_skipped_when_lock_held(monkeypatch):
+    """feedback reconcile / status sync 未持锁时不得转换、不得拉外部状态。"""
+    from src.api import feedback_issue_converter as fc
+
+    calls = []
+    monkeypatch.setattr(fc, "convert_pending_feedback",
+                        lambda *a, **k: calls.append("convert"))
+    monkeypatch.setattr(fc, "_sync_statuses", lambda *a, **k: calls.append("statuses"))
+
+    _run_loop_briefly(monkeypatch, lambda: fc.feedback_reconcile_loop(interval=0.01),
+                      holder="feedback_reconcile")
+    assert calls == [], f"reconcile/status sync must be skipped while the lock is held: {calls}"
+
+    _run_loop_briefly(monkeypatch, lambda: fc.feedback_reconcile_loop(interval=0.01), holder=None)
+    assert "convert" in calls and "statuses" in calls, "both steps must run when locks are free"
+
+
+def test_autopilot_scheduler_skipped_when_lock_held(monkeypatch):
+    """autopilot 调度循环未持锁时不扫描任务、不派发（防重复派发）。"""
+    from src.domains.runtime.engine import scheduler as sc
+
+    calls = []
+    monkeypatch.setattr(sc, "_SCHEDULER_INTERVAL", 0.01)
+    monkeypatch.setattr(sc, "_get_enabled_tasks", lambda: calls.append("scan") or [])
+    monkeypatch.setattr(sc, "_reap_zombie_executions", lambda: None)
+    monkeypatch.setattr(sc, "_sweep_pending_self_report_timeouts", lambda: None)
+    monkeypatch.setattr(sc, "_sweep_no_progress_tasks", lambda: None)
+
+    _run_loop_briefly(monkeypatch, sc.scheduler_loop, holder="autopilot_scheduler")
+    assert calls == [], "autopilot scan/dispatch must be skipped while the lock is held"
+
+    _run_loop_briefly(monkeypatch, sc.scheduler_loop, holder=None)
+    assert calls, "autopilot scan must run when the lock is free"
 
 
 def test_skill_sync_ttl_single_source():
