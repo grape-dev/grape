@@ -17,6 +17,12 @@
 - [x] T5 验证：新增 7 例 + `TestIssuePipeline` 2 例 + `test_issue_667_detail_fallback` 10 例全绿；
       基线既有失败集（`TestListIssues*`／`TestIssueEvents::test_events_empty`／arch 棘轮 4 项／
       contracts 5 项）逐项与 HEAD 基线比对一致，零新增失败
+- [x] T10 基线冲突修复（rebase）：rebase 到 `origin/arch-weekly-11-ljt`（头 `819f68ec2`），冲突 0；
+      旧 merge-sync 提交被 git 判定「已应用」跳过，本 PR 5 个提交原样重放（`issues.py` 补丁体与改前逐字一致）。
+      `contracts/openapi_baseline.json`／`src/api/db_setup.py` 等冲突文件属基线侧已合入内容，本 PR 不再携带，
+      未新增迁移号。复验：19 例目标用例全绿；基线失败集 29 项在基线侧逐项复现
+      （`test_api_routes.py::TestChat::test_chat_im_app_id_global_unique` 为全量跑顺序依赖，
+      单独在当前分支与基线均绿），零新增失败
 - [ ] T6 自审查（5 轴 + 开源前置增量检查：无关内容黑名单 / 敏感信息 pass=0 fail=0）
 - [ ] T7 提交 + push + 建 PR（base=`arch-weekly-11-ljt`）+ Issue 评论
 - [ ] T8 A2A 通知 QA（场景含 qa 节点才发起）
