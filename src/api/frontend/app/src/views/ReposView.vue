@@ -228,9 +228,9 @@
                   </div>
                 </div>
                 <div v-if="filteredRepos.length === 0" class="lobby-empty rv-empty">
-                  <div class="lobby-empty-ic">{{ onlyHosted ? '📦' : '🔭' }}</div>
-                  <h3>{{ onlyHosted ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
-                  <p>{{ onlyHosted ? t('repos.lobby.empty_hosted_desc') : t('repos.lobby.empty_desc') }}</p>
+                  <div class="lobby-empty-ic">{{ showHostedEmpty ? '📦' : '🔭' }}</div>
+                  <h3>{{ showHostedEmpty ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
+                  <p>{{ showHostedEmpty ? t('repos.lobby.empty_hosted_desc') : t('repos.lobby.empty_desc') }}</p>
                 </div>
                 <div v-if="pages > 1" class="project-pager">
                   <button :disabled="repoPage === 0" @click="goPage(-1)">‹</button>
@@ -541,6 +541,12 @@ const platforms = computed(() => {
     .map((k) => ({ key: k, name: (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k) }))
 })
 const hostedCount = computed(() => repos.value.filter((r) => r.is_hosted).length)
+const hasUnhostedRepos = computed(() => repos.value.some((r) => !r.is_hosted))
+// 三态空态：仅当「只看已托管」选中、确实没有已托管仓库、且存在未托管候选时，
+// 才引导用户取消勾选浏览全部；搜索/平台筛选命中 0 条时仍走通用「未找到匹配」空态。
+const showHostedEmpty = computed(
+  () => onlyHosted.value && hostedCount.value === 0 && hasUnhostedRepos.value
+)
 
 // ── list / search / pager (identical sort+filter logic) ──
 const allRepos = computed(() => {

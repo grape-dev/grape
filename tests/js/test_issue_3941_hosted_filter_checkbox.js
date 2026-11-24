@@ -71,6 +71,17 @@ check('搜索与勾选共用 resetPage 重置分页', function () {
   assert.ok(!/function onHostedFilterChange\(/.test(VIEW), '重复的 onHostedFilterChange 应已合并移除');
 });
 
+check('空态三态判定保留：搜索/平台零结果不误报「还没有已托管仓库」', function () {
+  assert.ok(
+    /const showHostedEmpty = computed\([\s\S]{0,160}hostedCount\.value === 0[\s\S]{0,120}hasUnhostedRepos\.value/.test(VIEW),
+    '仅在无已托管且有未托管候选时展示引导空态'
+  );
+  assert.ok(
+    /\{\{\s*showHostedEmpty\s*\?\s*t\('repos\.lobby\.empty_hosted_title'\)\s*:\s*t\('repos\.lobby\.empty_title'\)\s*\}\}/.test(VIEW),
+    '空态标题应按三态判定切换'
+  );
+});
+
 check('zh lobby 只保留一套 scope_hosted*，无重复键/无点击切换措辞', function () {
   assert.strictEqual(countKey(ZH, 'scope_hosted'), 1, 'zh 应只有一个 scope_hosted 键');
   assert.strictEqual(countKey(ZH, 'scope_hosted_title'), 1, 'zh 应只有一个 scope_hosted_title 键');
@@ -105,4 +116,4 @@ check('zh/en lobby 键集合一致', function () {
     'zh/en lobby 键应一一对应');
 });
 
-console.log('\nIssue #3941 hosted filter 源码断言全部通过 (' + passed + '/8)');
+console.log('\nIssue #3941 hosted filter 源码断言全部通过 (' + passed + '/9)');

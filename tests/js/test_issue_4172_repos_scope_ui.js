@@ -8,7 +8,7 @@
  *   2. 勾选框以 v-model 绑定 onlyHosted，且点击即时生效（无切换按钮残留）
  *   3. 勾选/搜索共用 resetPage 重置分页
  *   4. 无托管仓库空态引导「取消勾选」而非已删除的「全部仓库」按钮
- *   5. 全部仓库为 0 条时仍展示通用空态
+ *   5. 空态三态判定：仅无已托管且有未托管候选时引导，搜索/平台零结果走通用空态
  *   6. zh/en locale 文案同步（勾选语义 tooltip + 单段空态文案）
  */
 const assert = require('assert');
@@ -65,15 +65,25 @@ check('勾选/搜索共用 resetPage 重置分页', function () {
 check('无托管仓库空态引导取消勾选（不再有「全部仓库」按钮）', function () {
   assert.ok(!/lobby-empty-link/.test(VIEW), '空态不应再有可点击「全部仓库」按钮');
   assert.ok(
-    /\{\{\s*onlyHosted\s*\?\s*t\('repos\.lobby\.empty_hosted_desc'\)\s*:\s*t\('repos\.lobby\.empty_desc'\)\s*\}\}/.test(VIEW),
-    '空态文案应随 onlyHosted 切换为单段 desc'
+    /\{\{\s*showHostedEmpty\s*\?\s*t\('repos\.lobby\.empty_hosted_desc'\)\s*:\s*t\('repos\.lobby\.empty_desc'\)\s*\}\}/.test(VIEW),
+    '空态文案应随三态判定切换为单段 desc'
   );
 });
 
-check('全部仓库为 0 条时仍显示通用空态', function () {
+check('空态三态判定：仅无已托管且有未托管候选时引导空态', function () {
   assert.ok(
-    /\{\{\s*onlyHosted\s*\?\s*t\('repos\.lobby\.empty_hosted_title'\)\s*:\s*t\('repos\.lobby\.empty_title'\)\s*\}\}/.test(VIEW),
-    '空态标题应随 onlyHosted 变化'
+    /const showHostedEmpty = computed\([\s\S]{0,160}hostedCount\.value === 0[\s\S]{0,120}hasUnhostedRepos\.value/.test(
+      VIEW
+    ),
+    '仅在无已托管且有未托管候选时展示引导空态'
+  );
+  assert.ok(
+    /const hasUnhostedRepos = computed\(\(\) => repos\.value\.some\(\(r\) => !r\.is_hosted\)\)/.test(VIEW),
+    '应存在 hasUnhostedRepos 判定'
+  );
+  assert.ok(
+    /\{\{\s*showHostedEmpty\s*\?\s*t\('repos\.lobby\.empty_hosted_title'\)\s*:\s*t\('repos\.lobby\.empty_title'\)\s*\}\}/.test(VIEW),
+    '空态标题应随三态判定变化，搜索/平台零结果不误报'
   );
 });
 
