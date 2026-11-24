@@ -55,7 +55,10 @@ def _clean():
         c.execute("DELETE FROM admin_accounts WHERE username='b3396w-admin'")
         c.execute("DELETE FROM audit_logs WHERE event_type='engine_tag_change'")
         db.commit()
+    # 两个依赖都必须还原：require_org_member 的 override 泄漏会让后续模块的
+    # dashboard/仓库权限校验直接 403（跨模块污染，实测 sre_engine_picker_global 6 例红）
     app.dependency_overrides.pop(_resolve_user_or_platform_admin, None)
+    app.dependency_overrides.pop(require_org_member, None)
 
 
 def _mk_engine(owner_name="owner_alice", scope="user", owner_id="44", org_id="",
