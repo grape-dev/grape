@@ -66,7 +66,7 @@ Out of scope：
 |------|------|
 | `_find_open_issue_by_title`（含 401 刷新后重试） | `await asyncio.to_thread(...)` |
 | `_gitcode_assignee_member_check` | `await asyncio.to_thread(...)` |
-| `_post_gitcode_issue` / `_post_github_issue`（含 401 重试） | `await asyncio.to_thread(..., timeout=CREATE_HTTP_TIMEOUT)`，外层 `asyncio.wait_for(..., CREATE_UPSTREAM_TIMEOUT)` |
+| `_create_issue_unified`（统一建单入口，含 401 重试） | `asyncio.to_thread(..., timeout=CREATE_HTTP_TIMEOUT)` 经 `VcsApiClient.create_issue` 透传 socket 超时，外层 `asyncio.wait_for(..., CREATE_UPSTREAM_TIMEOUT)` |
 | `_patch_issue_body` / `_patch_github_issue_body` | `await asyncio.to_thread(...)` |
 
 其余 async 调用点同样 `asyncio.to_thread`：`_submit_linked_repo_prs`（agent 执行线程）、

@@ -100,6 +100,10 @@ _USER_ATTACHMENT_URL_RE = re.compile(r"https://gitcode\.com/user-attachments/[^\
 _USER_ATTACHMENT_URL_PREFIX = "https://gitcode.com/user-attachments/"
 USER_ATTACHMENT_MAX_SIZE = 50 * 1024 * 1024    # 与视频理解 50MB 阈值一致，避免整段下载后才判超限
 USER_ATTACHMENT_TIMEOUT = 60                   # 下载 60s 超时（视频较大）
+# Issue #3349（架构守护条件 3 整改）：建单 POST 默认 socket 超时。issues_center
+# 建单链经 `_create_issue_unified` 显式传入 `CREATE_HTTP_TIMEOUT`（15s）；
+# 此默认值 30s 仅为其它直接调用方保持既有行为（继承自统一请求入口的既有默认）。
+CREATE_ISSUE_HTTP_TIMEOUT = 30
 # 单次评论最多采集的媒体附件数。取值依据（Issue #1748 复审，MR !1145 Critical-3）：
 # 与同族 USER_IMAGE_MAX_COUNT（编辑器上传图片）对齐为 8，避免「同一评论里图片比编辑器
 # 图片少采 2 个」的口径分裂；8 也是单条评论里人工可一次性上传/贴链的实际上限，
@@ -463,8 +467,15 @@ class VcsApiClient:
     # === Issue 查询 ===
 
 
-    def create_issue(self, title: str, body: str = "", assignee: str = "") -> dict:
-        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。"""
+    def create_issue(self, title: str, body: str = "", assignee: str = "",
+                     timeout: int = CREATE_ISSUE_HTTP_TIMEOUT) -> dict:
+        """创建 Issue（D20/S31，命令面补齐：卡驱动路径+鉴权，方言 assignee 语义）。
+
+        ``timeout``：建单 POST 的 socket 超时。Issue #3349 接线：issues_center
+        的 ``CREATE_HTTP_TIMEOUT``（15s）经 ``_create_issue_unified`` 透传至此
+        （架构守护条件 3：常量定义后必须被生产路径消费）；默认 30s 仅供其它
+        直接调用方保持既有行为。
+        """
         # D22：全平台统一走卡路径（gitcode/gitee form 语义、github JSON+token 头，
         # gitlab 走 projects/issues——后者为此前 unsupported 的新增能力）
         card = self._platform_card()
@@ -487,9 +498,11 @@ class VcsApiClient:
         if card.issue_write_form == "owner_param":
             data = dict(data)
             data["repo"] = self.repo
-            return self._request("POST", f"/repos/{self.owner}/issues", data, form=_form)
+            return self._request("POST", f"/repos/{self.owner}/issues", data,
+                                 form=_form, timeout=timeout)
         return self._request("POST", self._generic_path(
-            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
+            f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data,
+            form=_form, timeout=timeout)
 
     def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
         """获取 Issue 详情。"""

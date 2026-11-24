@@ -3067,12 +3067,24 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
 #   ① 查重改查平台库（本地 `issue` 台账，索引定位，成本与 open issue 数无关）；
 #   ② 台账不可判定时才降级 VCS 探针，且**固定页数上限 + 显式单页超时**；
 #   ③ 所有 VCS 出站一律 `asyncio.to_thread`，不允许在 async 路由内同步阻塞。
-DEDUP_UPSTREAM_TIMEOUT = 8          # 查重探针单页超时（秒）
-DEDUP_FALLBACK_MAX_PAGES = 3        # 台账不可用时的降级扫描页数上限（成本有界）
-DEDUP_FALLBACK_PAGE_SIZE = 50       # 与存量 GitCode 查重页大小一致
-CREATE_HTTP_TIMEOUT = 15            # 建单 POST socket 超时（秒）
-CREATE_UPSTREAM_TIMEOUT = 25        # 建单请求级放弃阈值（秒，须显著小于网关 upstream timeout）
-CREATE_RECONCILE_TIMEOUT = 5        # 建单超时后的对账探针超时（秒）
+# Issue #3349 数值来源（B2 五源闸门，2026-11-24 架构守护条件 1 整改）：
+# 本组常量的**可判定约束**（本项目已有记录）：
+#   - CREATE_UPSTREAM_TIMEOUT 必须显著小于网关 upstream timeout：nginx
+#     `proxy_read_timeout 300s`（deploy/nginx-grape.conf:156/176/211），25s 留 12 倍余量；
+#   - 层级序 DEDUP(8) < HTTP(15) < UPSTREAM(25)：探针/单请求超时逐级放大，
+#     保证查重探针先于建单 socket 超时、socket 超时先于请求级放弃，超时分层可判别；
+#   - RECONCILE(5) + grace(5) < HTTP(15)：对账探针整体必须在建单 socket 超时内完成。
+# 具体取值（8/15/25/5）的**上游延迟实测（建单/查重 P95/P99）尚未进行**，
+# 已按「不成立则登记待决策」口径登记：docs/issue-3349/task.md「待决策数值」节，
+# 实测后以 P99×3 为初值复核本组取值。
+DEDUP_UPSTREAM_TIMEOUT = 8          # 查重探针单页超时（秒）；来源：层级序推导，待上游 P99 实测复核
+DEDUP_FALLBACK_MAX_PAGES = 3       # 台账不可用时的降级扫描页数上限（成本有界：3×50=150 条）
+DEDUP_FALLBACK_PAGE_SIZE = 50      # 与存量 GitCode 查重页大小一致（既有行为，spec §3）
+CREATE_HTTP_TIMEOUT = 15           # 建单 POST socket 超时（秒）；来源：层级序推导，待上游 P99 实测复核
+CREATE_UPSTREAM_TIMEOUT = 25       # 建单请求级放弃阈值（秒）；上界约束=网关 300s（nginx conf）
+CREATE_RECONCILE_TIMEOUT = 5       # 建单超时后的对账探针超时（秒）；来源：层级序推导
+RECONCILE_ABANDON_GRACE = 5         # 对账探针请求级放弃的额外宽限（秒）：wait_for 上限 = 探针超时 + 本宽限，
+#                                   # 使 socket 超时先于放弃阈值触发、超时分支按探针失败而非放弃判别
 
 
 def _dedup_repo_key(owner: str, repo: str, provider: str = "gitcode") -> str:
@@ -3649,7 +3661,7 @@ async def _reconcile_created_issue(api_token: str, owner: str, repo: str, title:
         return await _run_upstream(
             _find_open_issue_by_title_vcs, api_token, owner, repo, title,
             provider=provider, max_pages=1, timeout=CREATE_RECONCILE_TIMEOUT,
-            abandon_after=CREATE_RECONCILE_TIMEOUT + 5)
+            abandon_after=CREATE_RECONCILE_TIMEOUT + RECONCILE_ABANDON_GRACE)
     except Exception as e:
         log.warning(f"create reconcile probe failed (report upstream_timeout): {e}")
         return None
@@ -5012,16 +5024,23 @@ def cancel_issue_rows(c, repo_key: str, issue_number: int) -> int:
     return c.rowcount
 
 def _create_issue_unified(api_token: str, provider: str, owner: str, repo: str,
-                          title: str, body_text: str = "", assignee: str = "") -> dict:
+                          title: str, body_text: str = "", assignee: str = "",
+                          timeout: int = CREATE_HTTP_TIMEOUT) -> dict:
     """D35/S55：建单统一入口——VcsApiClient.create_issue（卡驱动路径 + 方言
     assignee 语义，gitee 自动正确）；存量平台行为由内置卡对齐（github token 头
     + JSON、gitcode form）。供手工建单链与 onboarding 共用，_post_github_issue /
     _post_gitcode_issue 的分派收敛至此。失败抛 RuntimeError（调用方 403/422
-    友好化与 401 刷新重试逻辑语义保持）。"""
+    友好化与 401 刷新重试逻辑语义保持）。
+
+    Issue #3349（架构守护条件 3 整改）：``timeout`` 接线建单 POST 的 socket
+    超时（默认 ``CREATE_HTTP_TIMEOUT``，spec §4.2），经 VcsApiClient.create_issue
+    透传到统一请求入口——此前该常量仅测试引用，生产路径实际走 urllib 默认 30s，
+    与 spec 声明的 15s 不符。
+    """
     from src.domains.runtime.vcs.api_client import VcsApiClient
     try:
         resp = VcsApiClient(provider, api_token, owner, repo).create_issue(
-            title, body_text, assignee=assignee)
+            title, body_text, assignee=assignee, timeout=timeout)
     except Exception as e:
         raise RuntimeError(f"create issue failed: {e}")
     if not isinstance(resp, dict) or "error" in resp:

@@ -333,3 +333,27 @@ def test_create_route_delegates_to_async_flow():
     assert "await create_task_via_issue(" in src
     assert "urlopen" not in src
     assert "_req(" not in src, "async 路由不得内联同步 VCS 调用"
+def test_create_http_timeout_is_wired_into_vcs_client(monkeypatch):
+    """架构守护 PR #2131 条件 3：CREATE_HTTP_TIMEOUT 必须被生产路径消费。
+
+    _create_issue_unified 的默认 timeout 即 CREATE_HTTP_TIMEOUT，且透传到
+    VcsApiClient.create_issue（真实建单链的 socket 超时），而非仅测试引用。
+    """
+    captured = {}
+
+    class _FakeClient:
+        def __init__(self, provider, token, owner, repo):
+            pass
+
+        def create_issue(self, title, body="", assignee="", timeout=None):
+            captured["timeout"] = timeout
+            return {"number": 999}
+
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient", _FakeClient)
+    resp = ics._create_issue_unified("tok", "gitcode", "owner", "repo", "t", "b")
+    assert resp == {"number": 999}
+    assert captured["timeout"] == ics.CREATE_HTTP_TIMEOUT, (
+        "建单 POST 的 socket 超时必须取 CREATE_HTTP_TIMEOUT，而非 urllib 默认 30s")
+    # 显式覆盖也须透传（异常路径/特殊调用方仍可控）
+    ics._create_issue_unified("tok", "gitcode", "owner", "repo", "t", "b", timeout=3)
+    assert captured["timeout"] == 3

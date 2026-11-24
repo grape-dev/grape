@@ -22,3 +22,9 @@
 | 18 | 三轮 Required：错误面先读现场再问凭据；空仓断言仅在无 `repo_base` 现场时成立；失败现场按阶段优先级保留 | ✅ | `repogit.worktree_credential_error` / `worktree_failure_error` / `_record_worktree_failure`（`WORKTREE_STAGE_PRIORITY`） |
 | 19 | 三轮 Required：建树自身异常出口写现场并阻断（`os.makedirs` + `ensure_issue_worktree` except + `agent` 宽 except） | ✅ | `WORKTREE_STAGE_BUILD_EXCEPTION` / `agent._execute_task_impl` |
 | 20 | 三轮 CI 覆盖：lint.yml pytest 步骤纳入本 Issue 用例与 `test_repogit.py` | ✅ | `.github/workflows/lint.yml` |
+
+## 待决策数值（架构守护 B2 五源闸门，PR #2131 条件 1 登记）
+
+`_LAST_WORKTREE_FAILURE_REPO_TTL = 900`（repogit.py 仓级失败现场保留时长）：
+- 已确立约束（代码注释同步登记）：窗口应大于派单重试间隔、小于一次值班排查会话时长；
+- 待实测项：「仓级失败 → 同仓下一任务读现场」的实际间隔分布，实测后按分布 P95 复核 900s。
