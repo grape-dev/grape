@@ -10812,35 +10812,6 @@ register_migration(
 )
 
 
-def _fn_normalize_org_domain_text() -> None:
-    """D105 第三批：存量 SQLite 库 org 域 id TEXT 化（幂等）。
-
-    背景：organization.id 的 TEXT 主键 DDL 只在全新库生效。存量库建表时仍是
-    ``INTEGER PRIMARY KEY AUTOINCREMENT``，而 create_org 已改为写入 uuid7 字符串
-    （TEXT 主键）——旧库创建组织会直接 ``datatype mismatch``，组织 provisioning
-    全链路不可用。MySQL 环境的 org 域 TEXT 化已由历史迁移盖章，
-    这里只处理 SQLite 旧 DDL（PRAGMA 重建，见 _normalize_org_domain_text）。
-
-    SQLite：organization 整表重建 + 各 org_id 引用列 TEXT 亲和 + 哨兵 0 → ''；
-    若列已 TEXT 且无混型行则零改动（幂等）。
-    """
-    from src.kernel.session_manager import _is_mysql_backend, db as _db, db_lock as _db_lock
-    if _is_mysql_backend():
-        # MySQL：历史迁移已把 org 域改为 VARCHAR/TEXT，无需重复处理。
-        return
-    with _db_lock:
-        _normalize_org_domain_text(_db)
-        _db.commit()
-
-
-register_migration(
-    version="202611183007",
-    name="normalize-org-domain-text",
-    kind="safe",
-    fn=_fn_normalize_org_domain_text,
-)
-
-
 # ===== D105 第四批：组织域用户引用列 TEXT 化（Issue #2150/#2269）=====
 # grape_t_org_context.owner_id/created_by/updated_by、grape_t_org_dispatch.created_by、
 # agent_shared_knowledge.owner_id、managed_repos.linked_by 均存 user id。D105 后

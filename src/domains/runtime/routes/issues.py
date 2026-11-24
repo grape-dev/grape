@@ -1425,7 +1425,7 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
     nodes = (pipe_cfg or {}).get("nodes", [])
     events = []
     if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30)
+        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
     nodes, _ = compute_node_statuses(
@@ -1948,7 +1948,6 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    from src.kernel.repo_key import to_repo_key
     if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
@@ -3070,48 +3069,9 @@ def list_production_releases(issue_id: int, user: dict = Depends(require_no_sess
     return {"issue_id": issue_id, "issue_number": _issue_num, "repo_key": _repo_key,
             "releases": releases, "total": len(releases)}
 
-@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """获取需求关联的流水线信息和事件历史（详情页展示）。"""
-    from src.api.event_store import get_events
-    from src.api.pipeline_config import get_pipeline_config
-    from src.api.session_store import get_issue_stage, get_issue_scene
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = _rt_db.cursor()
-        # 仓库全部视图下，用户可以看到其他人的 Issue
-        # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
-        c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?",
-                  (issue_id,))
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        repo_key, issue_number, _issue_task_status = row[0], row[1], (row[2] or "")
-    # 校验仓库访问权限（与"仓库全部"列表接口一致）
-    from src.api.deps import check_repo_access
-    check_repo_access(user, repo_key)
-    issue_key = f"#{issue_number}" if issue_number else ""
-    _scene_tuple = get_issue_scene(repo_key, issue_key)
-    _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
-    _stage_info = get_issue_stage(repo_key, issue_key) if issue_key else None
-    _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
-    pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
-    nodes = (pipe_cfg or {}).get("nodes", [])
-    events = []
-    if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
-    # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
-    from src.api.pipeline_status import compute_node_statuses
-    nodes, _ = compute_node_statuses(
-        nodes, events, _current_stage, repo_key=repo_key, issue_id=issue_key)
-    # Issue #329: extract carried_context for cross-pipeline continuation source annotation
-    from src.api.session_store import get_carried_context
-
 from pydantic import BaseModel, Field
 
-from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
-                                   _review_pass, _review_reject, _set_issue_pending_review,
-                                   _read_issue_status, cancel_issue_rows)
+from src.api.issues_center import cancel_issue_rows
 
 def _detail_404(reason: str, number) -> HTTPException:
     """Issue #667：detail 404 语义区分——「Issue 不存在（VCS 侧亦无）」vs「需求不存在（内部缺行）」。

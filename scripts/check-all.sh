@@ -94,6 +94,9 @@ fi
 # 曾以 +28 新增形态绕过所有「守卫全绿」自述。请求路径新增读一律走
 # src/kernel/bulk_read.reader()（免进程锁读通道）。
 "$PY" scripts/check_async_blocking.py || exit 1
+# Issue #4158：顶层同名定义门禁——同模块重复 def/class 会后者覆盖前者（通知链路
+# 静默退回旧实现、reason=no_ctx 丢消息）。基线 0，扫描根缺失/解析失败显式 FAIL。
+"$PY" scripts/check_duplicate_defs.py || exit 1
 if command -v node >/dev/null 2>&1; then
   _rc=0
   for _f in tests/js/test_*.js; do

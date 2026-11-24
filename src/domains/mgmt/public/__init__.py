@@ -1109,70 +1109,6 @@ def read_all(query: str, params: tuple = ()) -> list[Any]:
 # 统一约束：函数内 SQL 固定、参数化、幂等（UPDATE→INSERT 或 INSERT IGNORE）、
 # 目标表均为 mgmt 归属，调用方（runtime/insight）经 lib 或 N13 端点写入。
 
-def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
-                          ttl_seconds: int = 60) -> bool:
-    """抢占渠道租约（W2）：条件 UPDATE（空/过期/同 token 重入），无行则 INSERT。
-
-    幂等：同 token 重入返回 True；并发插入撞主键 → False（未抢到）。
-    """
-    from datetime import datetime, timedelta, timezone
-
-    now = datetime.now(timezone.utc)
-    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
-    stamp = now.isoformat()
-    channel_type = lease_key.split(":", 1)[0] if ":" in lease_key else ""
-    with db_registry.cursor("mgmt") as c:
-        c.execute(
-            "UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-            "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
-            "updated_at=%s WHERE lease_key=%s AND (lease_token IS NULL OR "
-            "lease_token=%s OR lease_expires_at IS NULL OR lease_expires_at < %s)",
-            (token, owner, expires, stamp, stamp, lease_key, token, stamp))
-        if int(c.rowcount or 0) > 0:
-            return True
-        try:
-            c.execute(
-                "INSERT INTO grape_t_channel_lease (lease_key, channel_type, lease_token, "
-                "lease_owner, lease_expires_at, lease_acquired_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (lease_key, channel_type, token, owner, expires, stamp, stamp))
-            return True
-        except Exception as exc:  # noqa: BLE001 - 并发抢占时主键冲突即为失败
-            log.info(f"channel lease not acquired ({lease_key}): {exc}")
-            return False
-
-
-def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds: int = 60,
-                        expected_token: str | None = None) -> bool:
-    """租约续约（W2）：仅当 token 为空或等于 expected_token 时写入。"""
-    from datetime import datetime, timedelta, timezone
-
-    now = datetime.now(timezone.utc)
-    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
-    stamp = now.isoformat()
-    if expected_token:
-        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
-               "updated_at=%s WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s)")
-        args = (token, owner, expires, stamp, stamp, lease_key, expected_token)
-    else:
-        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
-               "updated_at=%s WHERE lease_key=%s AND lease_token IS NULL")
-        args = (token, owner, expires, stamp, stamp, lease_key)
-    with db_registry.cursor("mgmt") as c:
-        c.execute(sql, args)
-        return int(c.rowcount or 0) > 0
-
-
-def release_channel_lease(lease_key: str, token: str) -> bool:
-    """释放租约（W2）：仅当 token 匹配时清空；已释放返回 False（幂等）。"""
-    with db_registry.cursor("mgmt") as c:
-        c.execute("UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
-                  "lease_expires_at=NULL, updated_at=NOW() "
-                  "WHERE lease_key=%s AND lease_token=%s", (lease_key, token))
-        return int(c.rowcount or 0) > 0
-
 
 def release_all_leases(pairs: list[tuple[str, str]]) -> int:
     """批量释放 [(lease_key, token)]，返回实际释放条数（W2）。"""
@@ -4510,20 +4446,6 @@ def managed_repo_host_user(repo_key: str) -> str:
         c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
         row = c.fetchone()
     return str(row[0]) if row and row[0] else ""
-
-
-def get_github_token(repo_key: str) -> str:
-    """按仓库取 GitHub 平台 token（空=无；契约出口，runtime 不得直连 mgmt.user.db）。"""
-    from src.domains.mgmt.user.db import get_github_token as _impl
-
-    return _impl(repo_key)
-
-
-def get_repo_bot_token(repo_key: str) -> str:
-    """按仓库取 bot token（契约出口）。"""
-    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
-
-    return _impl(repo_key)
 
 
 def user_can_manage_repo(user_id: Any, repo_key: str) -> bool:

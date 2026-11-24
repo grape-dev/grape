@@ -26,7 +26,6 @@ except ImportError:  # pragma: no cover - worker 无 web 框架
     Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
-from src.kernel.issue_ident import native_issue_number
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -141,17 +140,6 @@ def list_runtime_id_uid_rows() -> list[tuple]:
     with db_registry.cursor("runtime") as c:
         c.execute("SELECT id, engine_uid FROM agent_runtimes ORDER BY id")
         return [tuple(r) for r in c.fetchall()]
-
-
-def runtime_ids_by_engine_uids(engine_uids) -> list[int]:
-    """按 engine_uid（大小写不敏感）反查运行时 id 列表。"""
-    keys = [str(u).lower() for u in (engine_uids or []) if u]
-    if not keys:
-        return []
-    ph = ",".join(["%s"] * len(keys))
-    with db_registry.cursor("runtime") as c:
-        c.execute(f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({ph})", tuple(keys))
-        return [int(r[0]) for r in c.fetchall()]
 
 
 def runtime_cred_rows_by_engine_uids(engine_uids) -> list[tuple]:
@@ -4298,15 +4286,6 @@ def event_dashboard_metrics(repo_keys, week_cutoff: str = "") -> dict[str, Any]:
     return out
 
 
-def dashboard_task_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """任务队列状态分布：[(status, count)]（GROUP BY status，口径同 ops overview）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1" + where +
-                  " GROUP BY status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
 def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
     """issue 级状态分布：每个 issue 取 MAX(id) 那条 task 的状态再计数。"""
     where, args = _rk_scope(repo_keys, org_id)
@@ -4318,81 +4297,6 @@ def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
             " GROUP BY issue_id) latest JOIN agent_tasks t ON t.id = latest.max_id"
             " GROUP BY t.status", tuple(args))
         return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_stuck_tasks(cutoff: str, repo_keys=(), org_id: int = 0,
-                          limit: int = 100) -> list[tuple]:
-    """stuck 任务（running 且 started_at < cutoff），按 started_at 升序。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
-            "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL "
-            "AND started_at < ?" + where + " ORDER BY started_at ASC LIMIT " + str(int(limit)),
-            (cutoff,) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_failed_tasks(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """最近 failed 任务（按 completed_at 降序；调用方自行截断，保持原无 LIMIT 口径）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, "
-            "event_seq, result_text, exit_code, errors FROM agent_tasks WHERE status='failed'"
-            + where + " ORDER BY completed_at DESC", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_task_by_source(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """按 agent_type × status 的排队/运行数（只含 queued/dispatched/running）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-            "WHERE status IN ('queued','dispatched','running')" + where +
-            " GROUP BY agent_type, status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_today_status_counts(day_prefix: str, repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """今日任务状态分布（UTC 日期前缀匹配 created_at）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE created_at LIKE ?" + where +
-                  " GROUP BY status", (f"{day_prefix}%",) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_running_counts(org_id: int = 0) -> dict[int, int]:
-    """每个引擎当前 running 任务数（实时负载）：{runtime_id: n}。"""
-    where, args = _rk_scope((), org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running'" + where +
-                  " GROUP BY runtime_id", tuple(args))
-        return {r[0]: int(r[1] or 0) for r in (c.fetchall() or [])}
-
-
-def dashboard_avg_durations(org_id: int = 0) -> dict[int, float]:
-    """每个引擎已完成任务的平均耗时（秒）：{runtime_id: seconds}，双方言兜底。"""
-    where, args = _rk_scope((), org_id)
-    try:
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(CASE WHEN completed_at IS NOT NULL "
-                "AND started_at IS NOT NULL THEN (strftime('%s', completed_at) - "
-                "strftime('%s', started_at)) ELSE NULL END) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0"
-                + where + " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
-    except Exception:  # noqa: BLE001 - sqlite strftime 在 MySQL 上是 1064，走下面的口径
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
-                "AND started_at IS NOT NULL AND completed_at IS NOT NULL" + where +
-                " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
 
 
 _WORKER_COLS = ("id, name, device_name, status, last_seen_at, last_ip, "
@@ -4422,20 +4326,6 @@ def dashboard_workers(stale_cutoff: str, org_id: int = 0, uname: str = "",
     else:
         sql = base + " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id"
         args = (stale_cutoff, uname)
-    with _any_cursor() as c:
-        c.execute(sql, args)
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_local_runtimes(org_id: int = 0) -> list[tuple]:
-    """本机直连引擎（credential_id=0）：7 列，供看板补一条本地 worker。"""
-    sql = ("SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
-           "ar.healthy, ar.busy_slots, ar.max_concurrent FROM agent_runtimes ar "
-           "WHERE ar.credential_id = 0")
-    args: tuple = ()
-    if org_id:
-        sql += " AND ar.org_id=?"
-        args = (int(org_id),)
     with _any_cursor() as c:
         c.execute(sql, args)
         return [tuple(r) for r in (c.fetchall() or [])]
