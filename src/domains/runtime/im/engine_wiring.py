@@ -746,6 +746,19 @@ def _lookup_user_sync(db_path: str, installation_id: str, open_id: str,
 
 _BIND_WORDS = ("/绑定", "/bind me", "/bindme", "绑定我", "绑定账号")
 
+# 未绑定身份时的帮助词：卡片底部「❓ 帮助」按钮回传的 value 就是 {"cmd": "/help"}。
+# 不认这一条时，未绑定用户点帮助会落进 unbound 分支被吞掉、换回一张一模一样的绑定卡，
+# 观感就是"帮助按钮没生效"。帮助词必须先于绑定词判断。
+_HELP_WORDS = ("/help", "/帮助", "/?", "help", "帮助")
+
+_UNBOUND_HELP_TEXT = (
+    "❓ 帮助\n"
+    "你的飞书账号还没绑定 grape 账号，所以现在只认绑定指令。\n"
+    "· 回复 /绑定 —— 绑定到本机器人所属的账号\n"
+    "· 绑定成功后会回一条确认，再发一条消息就能开始用\n"
+    "· 绑定之后回复 /help 可以看全部命令\n"
+)
+
 
 def _bind_identity_sync(db_path: str, installation_id: str, scope: str,
                         owner_user_id: str, platform_user_id: str,
@@ -1555,6 +1568,11 @@ class ImEngine:
         # ---- ⑤' 身份逃生口：未绑定时先认绑定指令，写 grape_t_channel_sender_identity
         async def identity_bind(inst_view: Installation, msg: InboundMessage) -> bool:
             text = (msg.command_text or msg.text or "").strip().lower()
+            # 帮助词先于绑定词：未绑定用户点卡片底部「❓ 帮助」（cmd=/help）时，
+            # 必须回一段可读说明，否则只会再收到那张绑定引导卡。
+            if text in _HELP_WORDS:
+                await _reply_text(msg.source.chat_id, _UNBOUND_HELP_TEXT)
+                return True
             if text not in _BIND_WORDS:
                 return False
             user_id = await asyncio.to_thread(
