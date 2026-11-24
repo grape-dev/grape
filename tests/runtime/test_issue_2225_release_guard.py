@@ -16,7 +16,12 @@ def _user(**kw):
 
 
 def test_first_issue_anchor_only_subject_not_later_refs():
+    # Issue #4335：主语收窄为「开头行/标题行」——正文段落内的 Issue 引用是样例引用，
+    # 不再作主语（`## 概述` 标题无锚点 → 整篇无主语锚点）。
     body = "## 概述\n\n实现 Issue #2225：隔离暂存目录。\n\n参考 Issue #2080 与 #2085 的实测。"
+    assert release_guard.first_issue_anchor(body) is None
+    # 开头行主语仍命中，其后段落内引用不作主语。
+    body = "Issue #2225：隔离暂存目录。\n\n参考 Issue #2080 与 #2085 的实测。"
     assert release_guard.first_issue_anchor(body) == 2225
     assert release_guard.first_issue_ref("feat: #2225 修复") == 2225
 

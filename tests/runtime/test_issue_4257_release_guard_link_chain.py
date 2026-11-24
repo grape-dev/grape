@@ -45,7 +45,11 @@ def test_anchor_ignores_link_chain_only_body():
 
 
 def test_anchor_accepts_explicit_subject_after_chain():
+    # Issue #4335：主语收窄为「开头行/标题行」——链路行是开头行但无锚点，
+    # 其后正文段落里的锚点是样例引用；显式主语须落在标题行才命中。
     body = CHAIN + "\n\n实现 Issue #25107：链路梳理"
+    assert release_guard.first_issue_anchor(body) is None
+    body = CHAIN + "\n\n# 实现 Issue #25107：链路梳理"
     assert release_guard.first_issue_anchor(body) == 25107
 
 

@@ -4,8 +4,12 @@
 写进线上 Issue/PR」的真实路径。本模块在写操作落上游前做一次一致性校验：
 
 - 仅对 `tk_` 会话 token（agent 会话）生效；用户 JWT / `grape_` API Key 放行。
-- 只锚定正文的「主语」Issue 号（首个显式 `Issue #N`）与 PR 标题首个 `#N`，
-  正文里后续的跨 Issue 引用/关联不受影响（避免误伤正常评论文本）。
+- 只锚定正文的「主语」Issue 号：Issue #4335 将主语位置收窄为「开头行（首个非空、
+  非引用行）」与「markdown 标题行」，正文段落内出现的 `Issue #N` 样例引用一律视为
+  样例引用（白名单），不计入主语判定——用户反馈类正文合法引用其他 Issue 编号不再被
+  409 误伤；真实主语不一致（开头行/标题行指向其他 Issue）仍拦截，409 保留不降级。
+- update 侧（issues create/update）与评论侧（comments create/update）共用
+  `first_issue_anchor` 同一「主语提取器 + 样例白名单」实现，不复制两份逻辑。
 - 校验不一致时由调用方抛 409（CLI 非零退出），不产生任何线上写入。
 - `allow_cross_issue=True` 为显式覆盖语义，供确实需要跨 Issue 写入的场景使用。
 """
@@ -23,10 +27,22 @@ from src.kernel.config import log
 # Issue #4257：`Issue` 与编号之间必须至少有一个空白——`issue#25107` 这类紧邻形态
 # 是 A2A 链路顺序的「段名#序号」引用（如 `vod#25105 → issue#25107 → coding#25108`），
 # 不是正文主语；此前 `\s*#?` 允许零空白，把它当主语而误判为其它 Issue 并 409。
-_ANCHOR_RE = re.compile(r"(?i)(?<![a-z])issues?\s+(?:#\s*)?(\d+)")
+# Issue #4329（对齐在途 PR #2150，两侧共用同一正则，不复制两份边界逻辑）：
+# 主语锚点加「词元/路径边界」双重约束，样例标识符与测试文件名不再误判：
+# - 前置断言用显式 ASCII 字符集 `(?<![A-Za-z0-9_/.])`（不用 `\w`，`\w` 含中文会漏判
+#   「实现Issue #2225」类中文紧邻合法主语），排除 `test_issue456`、`x/issue456` 等
+#   标识符/路径前缀形态；
+# - 编号后负向前瞻 `(?![A-Za-z0-9_])` 排除续写——`Issue 456_*`、`Issue 456abc`
+#   是样例前缀/文件名片段，不是完整词元，不作主语。
+# 裸 `#N`（如 `PR #83`、`commit #123`）不命中本锚点，不提升为正文主语。
+_ANCHOR_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_/.])issues?\s+(?:#\s*)?(\d+)(?![A-Za-z0-9_])"
+)
 # 「段名#序号」链路引用（vod#25105 / issue#25107 / coding#25108 等）：搜索主语锚点前
 # 先剔除，避免链路里的编号被当成正文主语（Issue #4257）。
 _CHAIN_REF_RE = re.compile(r"\w+#\d+")
+# markdown 标题行（`#` 开头）：Issue #4335 主语位置之一（「引用作为标题行主要陈述对象」）。
+_HEADING_RE = re.compile(r"^\s*#+(?:\s|$)")
 # 标题/正文通用引用：#N
 _REF_RE = re.compile(r"#(\d+)")
 
@@ -62,21 +78,41 @@ def _strip_chain_refs(text: str) -> str:
 
 
 def first_issue_anchor(text: str) -> int | None:
-    """正文首个显式 `Issue #N` / `Issue N` 主语锚点（跳过引用行与链路引用）。
+    """正文主语锚点（Issue #4335 收窄）：仅「开头行 / markdown 标题行」内的 Issue 引用。
 
-    引用行（`>` / `>>` 开头的行，含嵌套）是他号正文的原文摘录，不是本正文的
-    主语——QA 报告等以 `> Issue #N` 引用开头是合法形态，锚点必须落在首个
-    非引用段落里，否则误杀合法正文（F4）。
-    链路顺序引用（`vod#25105 → issue#25107 → coding#25108`）是 A2A 事件序号，
-    不是正文主语，先剔除再找锚点（Issue #4257）。
+    主语位置规则（收窄后）：
+    - 开头行：首个非空、非引用行（正文的主题句/标题）——行内首个锚点即主语；
+    - 标题行：markdown 标题行（`#` 开头，含后文各节标题）——「引用作为标题行主要
+      陈述对象」。
+    正文段落内出现的 `Issue #N` 引用一律视为**样例引用**（白名单，不计入主语判定）
+    ——用户反馈类正文合法引用其他 Issue 编号（含「」内错误消息引用）不再被 409 误伤。
+    残余风险（Spec 已按 Med 接受）：真实他号正文仅当主语落在开头行/标题行才被拦截，
+    409 拦截能力保留、不降级放行。
+
+    既有防线保留：
+    - 引用行（`>` / `>>` 开头的行，含嵌套）是他号正文的原文摘录，不是本正文的
+      主语——QA 报告等以 `> Issue #N` 引用开头是合法形态（F4）。
+    - 链路顺序引用（`vod#25105 → issue#25107 → coding#25108`）是 A2A 事件序号，
+      先剔除再找锚点（Issue #4257）。
+    - 锚点正则带词元/路径边界（Issue #4329，与评论侧 PR #2150 共用），样例前缀
+      `issueNNN_*`、测试文件名 `test_issueN_*.py` 不作主语。
     """
     body = text or ""
-    non_quote = "\n".join(
-        line for line in body.splitlines()
-        if not line.lstrip().startswith(">")
-    )
-    m = _ANCHOR_RE.search(_strip_chain_refs(non_quote))
-    return int(m.group(1)) if m else None
+    opening_seen = False
+    for line in body.splitlines():
+        if line.lstrip().startswith(">"):
+            continue
+        if not line.strip():
+            continue
+        is_opening = not opening_seen
+        opening_seen = True
+        if not (is_opening or _HEADING_RE.match(line)):
+            # 正文段落行：样例引用白名单，不参与主语判定（Issue #4335）。
+            continue
+        m = _ANCHOR_RE.search(_strip_chain_refs(line))
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def first_issue_ref(text: str) -> int | None:
