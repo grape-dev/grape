@@ -144,7 +144,8 @@ def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None
     - 仅 `created_by_oauth=0`（平台注册入口自注册）的用户才可能被提示；
     - login_whitelist 启用时按已绑定第三方身份匹配，否则按邮箱/域名匹配 signup_whitelist；
     - 两个白名单均未启用且为空 → 视为无白名单管控，不提示；
-    - 查询异常 → 视为已具备资格（不误提示），并记日志。
+    - 查询异常 → 视为已具备资格（不误提示），并记日志；
+    - identities=None 表示身份读取异常（未知态），同样视为已具备资格。
 
     返回 {"is_self_registered", "whitelisted", "apply_url"}。
     """
@@ -161,8 +162,15 @@ def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None
         return result
     try:
         if _is_login_whitelist_enabled():
+            # 身份读取异常（None）= 未知态，不能当作"无绑定"误判未命中
+            if identities is None:
+                log.warning(
+                    "check_beta_eligibility identities unavailable — treat as whitelisted"
+                )
+                result["whitelisted"] = True
+                return result
             matched = False
-            for ident in identities or []:
+            for ident in identities:
                 provider = (ident or {}).get("provider", "")
                 login = (ident or {}).get("external_login", "")
                 if provider and login and is_user_allowed(provider, login):

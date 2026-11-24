@@ -156,6 +156,47 @@ def test_api_route_oauth_user_no_prompt(monkeypatch):
         soft_delete_account(u["id"])
 
 
+def test_api_route_identity_read_error_no_prompt(monkeypatch):
+    """身份读异常 → 未知态，不得当成"无绑定未命中"误提示。"""
+    monkeypatch.setattr(signup_policy, "_is_login_whitelist_enabled", lambda: True)
+
+    import src.domains.mgmt.auth.grape_account_db as gadb
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("identity db down")
+
+    monkeypatch.setattr(gadb, "get_user_identities", _boom)
+    u, h = _auth_headers(created_by_oauth=0)
+    try:
+        r = client.get("/api/auth/beta-eligibility", headers=h)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["is_self_registered"] is True
+        assert data["whitelisted"] is True
+    finally:
+        from src.domains.mgmt.auth.grape_account_db import soft_delete_account
+        soft_delete_account(u["id"])
+
+
+def test_api_route_account_read_error_no_prompt(monkeypatch):
+    """账号读异常（读失败 ≠ 不存在）→ 直接按已具备资格处理，不误提示。"""
+    import src.domains.mgmt.routes.auth as auth_routes
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("account db down")
+
+    monkeypatch.setattr(auth_routes, "get_grape_account_by_username", _boom)
+    u, h = _auth_headers(created_by_oauth=0)
+    try:
+        r = client.get("/api/auth/beta-eligibility", headers=h)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["whitelisted"] is True
+    finally:
+        from src.domains.mgmt.auth.grape_account_db import soft_delete_account
+        soft_delete_account(u["id"])
+
+
 def test_api_route_requires_auth():
     assert client.get("/api/auth/beta-eligibility").status_code == 401
 

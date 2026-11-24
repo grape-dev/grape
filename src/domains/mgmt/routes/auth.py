@@ -337,15 +337,27 @@ def get_profile(user: dict = Depends(require_no_session_token)):
             summary="Get beta whitelist eligibility for current user",
             description="Returns whether the current user is self-registered and whether they already hit the beta whitelist (login_whitelist / signup_whitelist).")
 def get_beta_eligibility(user: dict = Depends(require_no_session_token)):
-    """内测资格判定（Issue #4254）——自注册且未命中白名单的用户需提示申请内测。"""
-    from src.domains.mgmt.auth.signup_policy import check_beta_eligibility
-    acc = get_grape_account_by_username(user["username"]) or {}
+    """内测资格判定（Issue #4254）——自注册且未命中白名单的用户需提示申请内测。
+
+    查询异常一律视为"已具备资格"（不误提示），并记日志。账号/身份读取失败必须与
+    "确实不存在/确实无绑定"可分辨：读失败直接返回 whitelisted=true。
+    """
+    from src.domains.mgmt.auth.signup_policy import BETA_APPLY_URL, check_beta_eligibility
+    try:
+        acc = get_grape_account_by_username(user["username"], strict=True)
+    except Exception as e:
+        log.warning(f"get_beta_eligibility account read failed: {type(e).__name__}")
+        return {"is_self_registered": False, "whitelisted": True, "apply_url": BETA_APPLY_URL}
+    if acc is None:
+        # 已认证用户却查不到账号 = 异常态，按未知处理，不误提示
+        log.warning("get_beta_eligibility account not found for authenticated user")
+        return {"is_self_registered": False, "whitelisted": True, "apply_url": BETA_APPLY_URL}
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities
-        identities = get_user_identities(user["id"])
+        identities = get_user_identities(user["id"], strict=True)
     except Exception as e:
-        log.warning(f"get_beta_eligibility identities read failed: {e}")
-        identities = []
+        log.warning(f"get_beta_eligibility identities read failed: {type(e).__name__}")
+        identities = None  # 未知态，判定函数按"已具备资格"处理
     return check_beta_eligibility(acc, identities)
 
 
