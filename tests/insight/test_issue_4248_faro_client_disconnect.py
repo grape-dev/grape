@@ -43,6 +43,25 @@ def test_faro_client_disconnect_returns_499_without_error(monkeypatch, caplog):
     assert not bad, [(rec.levelname, rec.getMessage()) for rec in bad]
 
 
+def test_faro_cancelled_error_returns_499(monkeypatch, caplog):
+    """进程关停/超时取消（CancelledError）同样按 499 收敛，不落全局兜底 500。"""
+    import asyncio
+
+    async def _raise_cancel(self):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(Request, "body", _raise_cancel, raising=True)
+    client = TestClient(_faro_app(monkeypatch), raise_server_exceptions=False)
+
+    with caplog.at_level(logging.DEBUG, logger="src.api.spa"):
+        r = client.post("/faro/collect", content=b"{}",
+                        headers={"content-type": "application/json"})
+
+    assert r.status_code == 499
+    assert "client disconnected" in r.text
+    assert not any("status=500" in rec.getMessage() for rec in caplog.records)
+
+
 def test_faro_upstream_unreachable_still_502_and_warns(monkeypatch, caplog):
     """上游不可达是真故障：仍返回 502 并记 warning（含异常类名）。"""
     client = TestClient(_faro_app(monkeypatch))
