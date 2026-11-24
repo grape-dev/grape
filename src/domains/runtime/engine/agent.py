@@ -3337,23 +3337,44 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
 _msg_flush_retry_streak: dict[str, int] = {}
 
 
-def _persist_failed_batch(tid: str, batch: list) -> None:
-    """把未能送达的消息批次逐条截断后落本地持久化补报队列（Issue #4203）。
+def _msg_flush_persist_after() -> int:
+    """落盘阈值（连续网络错误窗口数）；非法/空值回落到默认 3。
+
+    Issue #4203 复审：`int(os.environ.get(...))` 未捕获 ValueError，环境变量写成
+    空串/非法值会从 flush 里抛出，直接中断当次任务上报（异常落在执行主循环）。
+    """
+    try:
+        return max(1, int(os.environ.get("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _persist_failed_batch(tid: str, batch: list) -> int:
+    """把未能送达的消息批次逐条截断后落本地持久化补报队列，返回已持久化条数。
 
     复用 Issue #975 的 kind=messages 条目格式（task_id 带 #msg- 后缀、截断防 413），
-    由 _report_replay_loop 周期重放；任何异常吞掉——落盘失败时调用方仍保留 batch。
+    由 _report_replay_loop 周期重放。批量入队（WorkerReportQueue.add_many 只重写
+    一次 jsonl）；落盘失败返回 0，调用方据此 `return "retry"` 保留内存 batch——
+    docstring 与行为一致：只有全部落盘才允许丢弃内存批次。
     """
     import time as _time
+    entries = []
     try:
         from src.domains.runtime.engine.message_report import truncate_message, build_msg_entry_id
-        q = _report_queue()
         _ts = _time.time()
         for i, m in enumerate(batch):
-            q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
-                   "task": tid, "message": truncate_message(m)})
-        log.info(f"task {tid} report batch persisted for replay: {len(batch)} message(s)")
+            entries.append({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                            "task": tid, "message": truncate_message(m)})
+        persisted = _report_queue().add_many(entries)
     except Exception as e:
         log.warning(f"task {tid} report batch persist failed: {e}")
+        return 0
+    if persisted >= len(batch):
+        log.info(f"task {tid} report batch persisted for replay: {persisted} message(s)")
+        return persisted
+    log.warning(f"task {tid} report batch persist incomplete: {persisted}/{len(batch)} "
+                f"message(s) durable, keeping batch in memory")
+    return persisted
 
 
 async def _flush_report_batch(client, tid: str, batch: list) -> str:
@@ -3365,12 +3386,13 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     - "terminal" 任务已被服务端标终态（410），调用方应中断执行
 
     Issue #4203：网络错误连续 N 个 flush 窗口（GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER，
-    默认 3）仍失败时，批次逐条截断后落本地持久化补报队列并返回 "ok"——内存 batch
+    默认 3）仍失败时，批次截断后批量落本地持久化补报队列并返回 "ok"——内存 batch
     在进程被 SIGKILL（OOM kill）时必然丢失（004 事故 28 条消息回执的成因），
-    落盘后由 _report_replay_loop 退避续投。
+    落盘后由 _report_replay_loop 退避续投。落盘未全部成功则返回 "retry" 保留 batch
+    （绝不把「只在内存」当成「已持久化」清空）。
     """
     from src.domains.runtime.engine.client import ReportBatchError
-    from src.domains.runtime.engine.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
+    from src.domains.runtime.engine.message_report import degrade_failed_batch
     global _msg_flush_retry_streak
     try:
         _resp = await client.report_messages(tid, batch)
@@ -3382,25 +3404,19 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
                 enqueue=_report_queue().add)
         except Exception as _de:
             # QA 复审修复（Spec #3）：降级链路自身抛错时绝不能仍返回 "ok"
-            # 静默清空 batch（原缺陷换入口复现）。兜底：逐条落本地持久化补报队列
-            # （截断防 413），由 _report_replay_loop 后续重放；队列也不可用才返回
+            # 静默清空 batch（原缺陷换入口复现）。兜底：批量落本地持久化补报队列
+            # （截断防 413），由 _report_replay_loop 后续重放；落盘不全才返回
             # "retry" 保留 batch 下个窗口重试——两条路径都不丢消息。
             log.warning(f"task {tid} report degrade failed: {_de}")
-            try:
-                import time as _time
-                _q = _report_queue()
-                _ts = _time.time()
-                for i, m in enumerate(batch):
-                    _q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
-                            "task": tid, "message": truncate_message(m)})
-                log.info(f"task {tid} report degrade fallback: {len(batch)} message(s) queued for replay")
+            if await asyncio.to_thread(_persist_failed_batch, tid, batch) >= len(batch):
                 return "ok"
-            except Exception as _qe:
-                log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
-                return "retry"
+            _msg_flush_retry_streak[tid] = _msg_flush_retry_streak.get(tid, 0) + 1
+            return "retry"
         _msg_flush_retry_streak.pop(tid, None)
         return "ok"
     except CredentialRevokedError:
+        # 异常退出路径也清计数（否则 tid 不复用时 dict 缓慢增长）
+        _msg_flush_retry_streak.pop(tid, None)
         raise
     if _resp is None:
         _msg_flush_retry_streak.pop(tid, None)
@@ -3417,14 +3433,19 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     # 在 SIGKILL 下必丢，持久化后交由补报重放循环续投）；未达阈值保留 batch 下个
     # 窗口重试（不清空，防止静默丢失）。
     _streak = _msg_flush_retry_streak.get(tid, 0) + 1
-    _persist_after = int(os.environ.get("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "3"))
-    if _streak >= max(1, _persist_after):
-        _persist_failed_batch(tid, batch)
-        _msg_flush_retry_streak.pop(tid, None)
-        return "ok"
+    _persist_after = _msg_flush_persist_after()
+    if _streak >= _persist_after:
+        # 批量落盘放线程池：add_many 只重写一次 jsonl，但仍不能占用事件循环
+        # （心跳/摘流恰好在这个网络故障窗口里最需要响应）。
+        if await asyncio.to_thread(_persist_failed_batch, tid, batch) >= len(batch):
+            _msg_flush_retry_streak.pop(tid, None)
+            return "ok"
+        # 落盘未成功：保留 batch 下个窗口继续重试，不清空、不谎报 ok
+        _msg_flush_retry_streak[tid] = _streak
+        return "retry"
     _msg_flush_retry_streak[tid] = _streak
     log.warning(f"task {tid} report batch network error (streak={_streak}/"
-                f"{max(1, _persist_after)}), keeping batch for retry")
+                f"{_persist_after}), keeping batch for retry")
     return "retry"
 
 

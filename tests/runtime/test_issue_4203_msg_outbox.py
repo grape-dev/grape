@@ -3,10 +3,11 @@
 seam（src/domains/runtime/engine/agent.py）：
 - `_flush_report_batch(client, tid, batch)`：网络错误（client.report_messages 返回 {}）
   连续 GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER（默认 3）个窗口后：
-  1) 批次逐条落 WorkerReportQueue（kind=messages，#msg- 后缀 + 截断）；
-  2) 返回 "ok"（调用方清空内存 batch）。
+  1) 批次截断后**批量**落 WorkerReportQueue（kind=messages，#msg- 后缀）；
+  2) 全部落盘才返回 "ok"（调用方清空内存 batch）；落盘未成功返回 "retry" 保留 batch。
 - 未达阈值：返回 "retry" 保留 batch（原语义不变）。
-- 成功送达：streak 清零。
+- 成功送达/终态/凭据吊销：streak 清零。
+- 阈值环境变量非法值回落 3（不抛 ValueError 打断上报）。
 """
 import asyncio
 import os
@@ -57,8 +58,7 @@ def _batch(n=2):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) \
-        if False else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 class TestFlushPersistAfterStreak:
@@ -113,3 +113,79 @@ class TestFlushPersistAfterStreak:
         assert q2.size() == 2
         real = q2.pending()[0]
         assert real["task"] == "t-5"
+
+
+class TestPersistFailureKeepsBatch:
+    """QA 复审 Required：落盘失败绝不能清空内存 batch（docstring 与行为必须一致）。"""
+
+    def test_persist_failure_returns_retry_not_ok(self, outbox, monkeypatch):
+        monkeypatch.setenv("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "1")
+        # 模拟磁盘写失败：add_many 返回 0（已回滚，条目不在内存队列里）
+        monkeypatch.setattr(outbox, "add_many", lambda entries: 0)
+        tid = "t-fail"
+        assert _run(agent._flush_report_batch(_NetErrorClient(), tid, _batch())) == "retry"
+        assert outbox.size() == 0
+        # 批次保留语义：streak 继续累加，下个窗口仍会重试（不清零、不谎报 ok）
+        assert agent._msg_flush_retry_streak.get(tid) == 1
+
+    def test_persist_exception_also_retry(self, outbox, monkeypatch):
+        monkeypatch.setenv("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "1")
+
+        def _boom(entries):
+            raise OSError("disk full")
+        monkeypatch.setattr(outbox, "add_many", _boom)
+        assert _run(agent._flush_report_batch(_NetErrorClient(), "t-boom", _batch())) == "retry"
+
+    def test_add_many_rolls_back_on_flush_failure(self, tmp_path, monkeypatch):
+        q = WorkerReportQueue(path=str(tmp_path / "q.jsonl"))
+        monkeypatch.setattr(q, "_flush", lambda: False)
+        n = q.add_many([{"kind": "messages", "task_id": f"x-{i}", "task": "x",
+                         "message": {}} for i in range(3)])
+        assert n == 0
+        assert q.size() == 0           # 未持久化的条目不留内存幽灵
+
+    def test_add_many_single_flush(self, tmp_path):
+        q = WorkerReportQueue(path=str(tmp_path / "q.jsonl"))
+        calls = []
+        real_flush = q._flush
+
+        def _spy():
+            calls.append(1)
+            return real_flush()
+        q._flush = _spy
+        n = q.add_many([{"kind": "messages", "task_id": f"y-{i}", "task": "y",
+                         "message": {"i": i}} for i in range(50)])
+        assert n == 50 and len(calls) == 1     # 50 条只重写一次 jsonl
+        assert WorkerReportQueue(path=str(tmp_path / "q.jsonl")).size() == 50
+
+
+class TestEnvParsing:
+    def test_invalid_persist_after_falls_back_to_3(self, monkeypatch):
+        for bad in ("", "abc", "  "):
+            monkeypatch.setenv("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", bad)
+            assert agent._msg_flush_persist_after() == 3
+
+    def test_invalid_env_does_not_break_flush(self, outbox, monkeypatch):
+        monkeypatch.setenv("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "not-a-number")
+        # 未达默认阈值 3 → retry；不抛 ValueError
+        assert _run(agent._flush_report_batch(_NetErrorClient(), "t-bad", _batch())) == "retry"
+
+    def test_zero_or_negative_clamped_to_1(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_WORKER_MSG_FLUSH_PERSIST_AFTER", "0")
+        assert agent._msg_flush_persist_after() == 1
+
+
+class TestCredentialRevokedClearsStreak:
+    def test_revoked_pops_streak(self, outbox, monkeypatch):
+        from src.domains.runtime.engine.client import CredentialRevokedError
+
+        class _RevokedClient:
+            async def report_messages(self, task_id, messages):
+                raise CredentialRevokedError("revoked")
+
+        tid = "t-rev"
+        assert _run(agent._flush_report_batch(_NetErrorClient(), tid, _batch())) == "retry"
+        assert agent._msg_flush_retry_streak.get(tid) == 1
+        with pytest.raises(CredentialRevokedError):
+            _run(agent._flush_report_batch(_RevokedClient(), tid, _batch()))
+        assert agent._msg_flush_retry_streak.get(tid) is None
