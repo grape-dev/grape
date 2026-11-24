@@ -56,6 +56,11 @@ def collect_drift() -> list[str]:
     all_engines = set(reg.all().keys())
 
     # 1. executor known 表
+    # [F3 口径声明·PR #2047 复审] 本面为**结构自检**而非漂移拦截：discover 的
+    # cli/pip 本身由 reg.discover_map() 派生（executor.py discover），对账恒真——
+    # 保留意义是锁「discover 结果的形状」（引擎名全集/键结构）随 descriptor 集
+    # 变化；真正拦 discover 覆盖面的是面 2（prefix 冻结基线）与面 3（db._KNOWN
+    # 字面量 fallback）。六个面的分级：2/3/4/5 = 拦截面，1/6 = 结构自检面。
     import src.domains.runtime.engine.registry  # noqa: F401 先触发（绕开循环导入）
     from src.domains.runtime.agents import executor
     known = {r["name"]: {"cli": r.get("cli", ""), "pip": r.get("pip_package", "")}
@@ -117,6 +122,8 @@ def collect_drift() -> list[str]:
                         f"descriptor.sandbox_installable={sorted(installable)}")
 
     # 6. usage retry 集
+    # [F3 口径声明] 同面 1：USAGE_RETRY_ENGINES 由 descriptor usage_retry 派生
+    # （instances.py），本面为结构自检；usage 消费面的真拦截在消费点单测。
     want_retry = {c for c, d in reg.all().items() if d.get("usage_retry")}
     if instances.USAGE_RETRY_ENGINES != want_retry:
         problems.append(f"USAGE_RETRY_ENGINES 漂移: instances={instances.USAGE_RETRY_ENGINES} "

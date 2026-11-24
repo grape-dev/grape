@@ -22,7 +22,8 @@
     "light_args": [
       "acp",
       "--check"
-    ]
+    ],
+    "local_acp_deep_check": true
   },
   "model_config_path": "~/.hermes/config.yaml",
   "usage_retry": true,

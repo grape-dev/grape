@@ -116,8 +116,8 @@ class MockACPBackend:
             # 只对 _pending 中的 id 触发 on_prompt_done）
             client.set_prompt_req_id(client.next_id())
             prompt_evt = threading.Event()
-            with client._lock:
-                client._pending[client._prompt_req_id] = prompt_evt
+            # [F5] 走公开 API 注册 pending（不触 client._lock/_pending 私有成员）
+            client.register_prompt_pending(client._prompt_req_id, prompt_evt)
             client.write_line((json.dumps({
                 "jsonrpc": "2.0", "id": client._prompt_req_id,
                 "method": "session/prompt",

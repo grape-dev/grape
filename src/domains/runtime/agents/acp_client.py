@@ -238,6 +238,16 @@ class _ACPSimpleClient:
         """设置 session/prompt 的 req_id（只有它才触发 prompt_done）。"""
         self._prompt_req_id = req_id
 
+    def register_prompt_pending(self, req_id: int, event: "threading.Event") -> None:
+        """[F5] 注册 prompt 响应的 pending 等待（公开 API，支撑件勿触私有成员）。
+
+        与「先 request() 后手工挂 pending」的既有调用方（hermes/hwcloud/mock）
+        语义一致：把 req_id 映射到 Event，response 到达时 _handle_response
+        触发 on_prompt_done 并 set 该 Event。
+        """
+        with self._lock:
+            self._pending[req_id] = event
+
     def close(self):
         """transport 模式：关闭 transport（PTY/fifo 清理由 transport.close() 负责）。"""
         try:

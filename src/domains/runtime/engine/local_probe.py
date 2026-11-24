@@ -116,12 +116,24 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
     engines 缺省 = `discover_backends()`（含 cli_path/installed）。
     浅探参数由 _probe_one 按 descriptor light_probe_args 取（hermes 自动
     [acp, --check]：ACP 依赖缺失 → healthy=False，与 worker 注册口径一致，
-    见 hermes-acp-auto-bootstrap-design.md）。
+    见 hermes-acp-auto-bootstrap-design.md）。probe.local_acp_deep_check=true
+    的引擎浅探通过后追加深检（真实 ACP 握手 + 模型调用探针，见 _probe_one）。
     线程池并发 + 单引擎 5s 超时 + 总时长 ≤ LOCAL_PROBE_MAX_TOTAL（超时未完成引擎置 healthy=False）。
     """
     if engines is None:
         from src.domains.runtime.engine.executor import discover_backends
         engines = discover_backends()
+    # [F1 恢复·PR #2047 复审] 本机探活深检位注入：probe.local_acp_deep_check=true 的引擎
+    # （hermes——浅探 [acp, --check] 只验 ACP 依赖存在，深检才做真实握手 + 模型调用
+    # 探针，Issue #1982 R1 / #2545：否则「healthy 但任务 404 Model not found」回归）。
+    # 判定 = descriptor 位，不做引擎名分支（与 B5 收编口径一致）。
+    from src.domains.runtime.engine.descriptor import get_registry as _reg
+    engines = [
+        {**e, "acp_probe": True}
+        if e.get("installed") and _reg().probe_local_acp_deep_check(e.get("name"))
+        else e
+        for e in engines
+    ]
     if not engines:
         return []
     results: list[dict] = []

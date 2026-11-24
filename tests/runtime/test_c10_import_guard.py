@@ -40,10 +40,10 @@ _SDK_IMPORT_RE = re.compile(
 # 基线豁免清单（非本批引入，历史行为冻结；新违规不在此列 → 必红）:
 # - cloud_worker.py 批末清扫的 cubesandbox lazy import: 基线既有（725d14c44），
 #   属批0「SDK 圈死 backends/」工作流收编范围，待批0 落地后删除本条豁免。
-#   行号随基线演进漂移：1352（arch11 一代）→ 1397（11-19 基线）→ 1519
+#   行号随基线演进漂移：1352（arch11 一代）→ 1397（11-19 基线）→ 1519（11-23）→ 1565（179-commit rebase 后实测）
 #   （11-23 基线前移 433 commit 后实测，rebase 2026-11-23 同步）。
 _BASELINE_ALLOWLIST = {
-    "src/domains/runtime/engine/cloud_worker.py:1519",
+    "src/domains/runtime/engine/cloud_worker.py:1565",
 }
 
 

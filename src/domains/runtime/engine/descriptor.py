@@ -176,6 +176,19 @@ class EngineDescriptorRegistry:
             return ["--version"]
         return list(d.get("probe", {}).get("light_args") or ["--version"])
 
+    def probe_local_acp_deep_check(self, name: str | None) -> bool:
+        """本机探活深检位（F1 恢复，PR #2047 复审）：probe.local_acp_deep_check。
+
+        true = 浅探（light_probe_args）通过后追加深检——真实 ACP 握手
+        （_acp_check）+ 模型调用探针（Issue #1982 R1 / #2545）。
+        与 sandbox.acp_deep_check（建箱层深检位）正交：一个管本机探活，
+        一个管云沙箱建箱。hermes 是当前唯一 true 引擎。
+        """
+        d = self.get(name)
+        if d is None:
+            return False
+        return bool(d.get("probe", {}).get("local_acp_deep_check"))
+
     def usage_mode(self, name: str | None) -> str:
         """账本分派模式（B5 收敛）：descriptor usage.mode，alias 归一后取值
         （aishell → hwcloud 同走 hwcloud_offset，原换名分支语义保留）。

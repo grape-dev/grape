@@ -52,6 +52,12 @@ _ARGS_HOOKS: dict[str, tuple[str, str]] = {
 }
 
 
+# help 能力探测超时（秒）：与 _PROBE_TIMEOUT 同源口径——CLI 冷启动含 node/python
+# 解释器初始化实测可达 5-10s（atomcode 5.x 实测 ~6s），15s = 2 倍实测上界 headroom；
+# 超时按「无能力信息」处理（保持基础参数），不阻断探活主链路。
+_HELP_PROBE_TIMEOUT = 15
+
+
 def _append_optional_flags_by_help(cmd: list[str], optional_flags: list[str]) -> list[str]:
     """按 CLI help 文本决定是否追加可选开关（help 探测不到 = 保持基础参数）。
 
@@ -62,7 +68,7 @@ def _append_optional_flags_by_help(cmd: list[str], optional_flags: list[str]) ->
     import subprocess as _sp
     try:
         proc = _sp.run([cmd[0], "--help"], capture_output=True, text=True,
-                       timeout=15, stdin=_sp.DEVNULL)
+                       timeout=_HELP_PROBE_TIMEOUT, stdin=_sp.DEVNULL)
         help_text = ((proc.stdout or "") + (proc.stderr or "")) if proc.returncode == 0 else ""
     except Exception:  # noqa: BLE001 - 探测失败只是没有能力信息
         return cmd
@@ -120,6 +126,10 @@ def probe_deep(engine_name: str, cli_path: str = "") -> dict:
     # runtimes page probe_error surfaces it before a real task hits 404.
     # (Ported from the former agent.py:_probe_engine_worker precheck when the
     # B5 dispatch merge moved deep-probe knowledge into this module.)
+    # [F4 例外声明] 本判定按引擎名前缀（基线 agent.py:1008-1011 同构迁入、行为不变）——
+    # 模型预检是 opencode CLI 形态的探活前验，语义属「该引擎探活的组成步骤」而非
+    # 协议分派；descriptor 化（probe.model_precheck 位）列为后续项，与模块 docstring
+    # 的「分派无名字分支」声明不冲突：该分支不改变 cli_run/acp_handshake 的分派走向。
     if engine_name.startswith("opencode"):
         model_err = _opencode_model_probe_error()
         if model_err:
