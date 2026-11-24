@@ -82,7 +82,7 @@ FROZEN = {
     "runtimes-view.js": ("92", '71', "4c099bbf432dd903", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/features.js", "styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js", "views/runtime-tag-link.js"]),
     "sandbox-view.js": ("15", '7', "343c48358f06de8d", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGDrawer.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
     "scene-market.js": ("62", None, "11171f8b11e8f82c", ["components/ui/AGButton.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
-    "skills-view.js": ("65", None, "e68e0ac3d6fa8214", ["components/ui/AGButton.vue", "components/ui/AGDrawer.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SkillsView.vue", "views/entries/skills-view.js"]),
+    "skills-view.js": ("66", None, "900db4c10f5d8a35", ["components/ui/AGButton.vue", "components/ui/AGDrawer.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "lib/features.js", "views/SkillsView.vue", "views/entries/skills-view.js"]),
 }
 
 
@@ -114,7 +114,7 @@ SHIPPED = {
     "runtimes-view.js": ("92", '71', "4c099bbf432dd903", '33baa6fcc12d15de'),
     "sandbox-view.js": ("15", '7', "343c48358f06de8d", 'c8d6d76758384d5d'),
     "scene-market.js": ("62", None, "11171f8b11e8f82c", None),
-    "skills-view.js": ("65", None, "e68e0ac3d6fa8214", None),
+    "skills-view.js": ("66", None, "900db4c10f5d8a35", None),
 }
 
 

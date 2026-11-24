@@ -17,6 +17,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
@@ -110,10 +112,10 @@ def test_locale_change_bumps_index_cachever():
     try:
         prev = _git("rev-parse", "HEAD~1").decode().strip()
         head = _git("rev-parse", "HEAD").decode().strip()
-    except Exception:
-        return  # 浅克隆 / 无 git 环境跳过
+    except Exception as e:
+        pytest.skip(f"浅克隆 / 无 git 环境跳过: {e}")
     if not prev or prev == head:
-        return
+        pytest.skip("无前一提交可对比")
 
     def _fp_at(commit: str) -> str:
         h = hashlib.sha256()
@@ -126,7 +128,7 @@ def test_locale_change_bumps_index_cachever():
         return h.hexdigest()[:16]
 
     if _fp_at(prev) == _fp_at(head):
-        return  # 语言包没变，无需抬档
+        pytest.skip("语言包在本提交未变化，无需抬档")
 
     def _ver_at(commit: str) -> str:
         html = _git("show", f"{commit}:src/api/frontend/shell/index.html").decode("utf-8")

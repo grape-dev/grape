@@ -40,3 +40,21 @@
 5. **前端已有等待态**：按钮进入「AI 填写中...」busy 态，失败保留已填内容。
 
 后续路线：上线后按真实调用时延实测（p95/p99），若确需更快体验再评估「提任务 + 轮询」的异步化改造（本轮不做，见 QA 修复顺序建议第 2 步）。
+
+## 临时运行参数登记（QA B2 复评口径：五源占位 + env 可配）
+
+以下数值五源依据不足，以「暂用值 + 环境变量覆盖 + `<undecided>` 占位登记」形态运行，
+实测定值后回填本节与代码注释（与 `DEDUP_SUFFIX_MAX` 同一整改模式）：
+
+| 参数 | 暂用值 | env 覆盖 | 定值所需测量 |
+| --- | --- | --- | --- |
+| AI_FILL_MAX_TOKENS | 1200 | `GRAPE_AI_FILL_MAX_TOKENS` | 真实 SKILL.md 样本「摘要+描述+五槽」输出 token 分布与合法 JSON 率 |
+| AI_FILL_TEMPERATURE | 0.2 | `GRAPE_AI_FILL_TEMPERATURE` | 同输入多次输出的字段可用率 |
+| AI_FILL_TIMEOUT_SECONDS | 60 | `GRAPE_AI_FILL_TIMEOUT_SECONDS` | 上游 p95/p99 时延，并与前端/网关超时对齐 |
+| _AI_FILL_CONTENT_MAX_CHARS | 20000 | `GRAPE_AI_FILL_CONTENT_MAX_CHARS` | SKILL.md 正文字长分布 + 截断字段缺失率 |
+| _AI_FILL_DESCRIPTION_MAX | 2000 | `GRAPE_AI_FILL_DESCRIPTION_MAX` | DB 列宽 / 前端展示长度约束 |
+| DEDUP_SUFFIX_MAX | 999 | `GRAPE_DEDUP_SUFFIX_MAX` | 同 scope 同名变体规模测量 |
+
+A4 豁免确认状态：本节及上文豁免申请为开发侧自述，**待业务/产品方书面确认**；
+确认前不视为规则来源（QA 复评原文口径）。
+

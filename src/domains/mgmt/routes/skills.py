@@ -155,9 +155,13 @@ _COMMENT_PAGE_MAX = 50
 # 加 5px 余量；单项文本 400 字对齐 _clean_summary 的概述截断口径（QA B2：数值须具名）。
 _INTRO_KEY_MAX = 32
 _INTRO_TEXT_MAX = 400
-# AI 填写截断口径（Issue #3976 QA B2 登记：五源依据不足，暂按登记值运行，后续实测调整）：
-_AI_FILL_CONTENT_MAX_CHARS = 20000   # 送入 prompt 的 SKILL.md 正文截断上限
-_AI_FILL_DESCRIPTION_MAX = 2000      # description 字段硬截断（对齐既有展示/落库口径）
+# AI 填写截断口径（Issue #3976 QA B2 登记，五源占位 + env 可配，实测定值后回填）：
+# 五源登记：_AI_FILL_CONTENT_MAX_CHARS = <undecided: SKILL.md 正文字长分布 + 截断
+#           导致的字段缺失率实测>，暂用 20000；
+#           _AI_FILL_DESCRIPTION_MAX = <undecided: DB 列宽 / 前端展示长度约束核对>，
+#           暂用 2000。
+_AI_FILL_CONTENT_MAX_CHARS = int(os.environ.get("GRAPE_AI_FILL_CONTENT_MAX_CHARS", "20000"))
+_AI_FILL_DESCRIPTION_MAX = int(os.environ.get("GRAPE_AI_FILL_DESCRIPTION_MAX", "2000"))
 # 列宽切片上限（与 schema_ddl 的列定义逐字一致，防双后端 silent truncation 漂移）：
 _VERSION_MAX = 64            # grape_t_skill_version.version VARCHAR(64)
 _UPLOADER_MAX = 64           # grape_t_skill_version.uploaded_by VARCHAR(64)

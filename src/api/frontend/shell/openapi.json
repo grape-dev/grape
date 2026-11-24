@@ -14139,6 +14139,185 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/skills/by-id/{skill_id}/convert": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Convert skill scope in place (user ↔ repo)",
+        "description": "Issue #3976: moves a skill between personal(user) and repo scope in place, keeping the skill id, version history, scene references and likes. official skills are read-only.",
+        "operationId": "skills_convert_scope",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertScopeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/content": {
+      "put": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Save personal skill SKILL.md without bumping version",
+        "description": "Issue #3976: replaces the SKILL.md inside a personal skill package in place. Refreshes content_hash/updated_at but does NOT write a version row. official/repo skills are read-only.",
+        "operationId": "skills_save_content",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillContentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/ai-fill": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Suggest skill metadata from SKILL.md via platform LLM",
+        "description": "Issue #3976: reads the skill's SKILL.md and asks the platform LLM to suggest summary/description/five intro slots/tags. Returns suggestions only (nothing persisted). official skills are read-only.",
+        "operationId": "skills_ai_fill",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills/{skill_id}/sub": {
       "get": {
         "tags": [
@@ -31134,6 +31313,24 @@
         ],
         "title": "ConversationMessage"
       },
+      "ConvertScopeRequest": {
+        "properties": {
+          "target_scope": {
+            "type": "string",
+            "title": "Target Scope"
+          },
+          "repo": {
+            "type": "string",
+            "title": "Repo",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_scope"
+        ],
+        "title": "ConvertScopeRequest"
+      },
       "ConvertSkillRequest": {
         "properties": {
           "skill_name": {
@@ -34337,6 +34534,19 @@
         ],
         "title": "SetPasswordBody"
       },
+      "SkillContentRequest": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "SkillContentRequest"
+      },
       "SloCreateBody": {
         "properties": {
           "name": {
@@ -35944,14 +36154,18 @@
   },
   "x-changelog": {
     "version": "2.3.0a1",
-    "added": [],
+    "added": [
+      "/api/skills/by-id/{skill_id}/ai-fill",
+      "/api/skills/by-id/{skill_id}/content",
+      "/api/skills/by-id/{skill_id}/convert"
+    ],
     "removed": [],
     "deprecated": [
       "/api/dashboard/efficiency"
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 400,
+  "x-endpoint-count": 403,
   "x-groups": [
     "a2a",
     "agents",
@@ -35986,6 +36200,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "5d297ed28",
-  "x-generated-at": "2026-11-24T04:55:43.472002+00:00"
+  "x-source-commit": "ce4302279",
+  "x-generated-at": "2026-11-24T06:56:49.755363+00:00",
+  "tags": []
 }
