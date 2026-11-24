@@ -81,6 +81,34 @@ def test_fallback_to_process_db_warns_cross_domain(dual_sqlite_dbs, monkeypatch,
     assert "runtime" in guard_logs[0] and "GRAPE_DSN_RUNTIME" in guard_logs[0]
 
 
+def test_own_dsn_transient_unavailable_falls_back_and_warns(
+        dual_sqlite_dbs, monkeypatch, caplog):
+    """二次探测瞬时不可用：own=True 但 domain_db() 返回 None 时按回落处理并告警。
+
+    `uses_own_dsn()` 内部探活成功后连接可能立即失效（退避重试窗口），此时若继续用
+    裸表名 `agent_tasks` 打到进程库会恒 1146，且既无回落告警也无跨域告警。
+    """
+    mgmt_conn, _runtime_conn, _mgmt_path, _runtime_path = dual_sqlite_dbs
+    monkeypatch.setattr(sm, "db", mgmt_conn)
+    monkeypatch.setattr(sm, "db_lock", _NullLock())
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda d: True)
+    monkeypatch.setattr(db_registry, "domain_db", lambda d: None)
+    monkeypatch.setattr(db_registry, "_warned_cross_domains", set())
+
+    monkeypatch.setenv("DEVOPS_DB_NAME", "grape_prod_mgmt")
+    monkeypatch.setenv("GRAPE_RUNTIME_DB_NAME", "grape_prod_runtime")
+    monkeypatch.delenv("GRAPE_DSN_RUNTIME", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        assert release_guard._read_task_issue_id("t_3811") == "#2085"
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("domain_db() unavailable" in m and "t_3811" in m for m in msgs), \
+        "own=True 但二次探测失败必须显式告警"
+    assert any("[db-guard]" in m for m in msgs), \
+        "二次探测失败回落进程库也必须打跨域降级告警"
+
+
 def test_cross_domain_warning_once_per_process(monkeypatch, caplog):
     """回落告警去重应为每进程每域一次，跨请求线程不重复刷同一条。"""
     monkeypatch.setattr(db_registry, "_warned_cross_domains", set())

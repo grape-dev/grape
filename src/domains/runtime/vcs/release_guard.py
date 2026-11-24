@@ -115,12 +115,29 @@ def _read_task_issue_id(session_key: str) -> str | None:
         from src.kernel import db_registry
         from src.kernel.db import t_runtime
 
-        own = db_registry.uses_own_dsn("runtime")
-        db = db_registry.domain_db("runtime") or sm.db
-        if not own:
+        own_dsn = db_registry.uses_own_dsn("runtime")
+        # 二次探测与 own 联合判定：`uses_own_dsn()` 内部已探过一次 `domain_db()`，
+        # 此处再取连接可能命中瞬时不可用窗口（探活失败/退避重试）返回 None。
+        # 若此时仍按 own=True 走裸表名，会拿进程库 `sm.db` 读 runtime 表（1146），
+        # 且回落告警与跨域告警都不触发。二次探测失败即视为回落，显式告警并改用
+        # 进程库限定表名。
+        domain_conn = db_registry.domain_db("runtime")
+        own = own_dsn and domain_conn is not None
+        if own:
+            db = domain_conn
+            lock = db_registry.domain_lock("runtime")
+            table = "agent_tasks"
+        else:
+            if own_dsn:
+                log.warning(
+                    f"release guard: runtime domain dsn configured but "
+                    f"domain_db() unavailable, fall back to process db "
+                    f"(session_key={session_key})"
+                )
+            db = domain_conn or sm.db
             db_registry.warn_if_cross_domain_fallback("runtime")
-        lock = db_registry.domain_lock("runtime") if own else sm.db_lock
-        table = "agent_tasks" if own else t_runtime("agent_tasks")
+            lock = sm.db_lock
+            table = t_runtime("agent_tasks")
         with lock:
             row = db.cursor().execute(
                 f"SELECT issue_id FROM {table} WHERE id=?", (session_key,)
