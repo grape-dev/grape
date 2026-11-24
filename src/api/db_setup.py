@@ -7102,11 +7102,10 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
-                # Issue #3773：ACP state.db 体积治理指标（worker 心跳上报）
-                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes", "REAL DEFAULT 0")
-                _ensure_column(c, "runtime_credentials", "acp_state_db_cleanup_counts", "TEXT DEFAULT ''")
-                _ensure_column(c, "runtime_credentials", "acp_state_db_bytes_freed_total", "REAL DEFAULT 0")
-                _ensure_column(c, "runtime_credentials", "acp_resume_skipped_total", "INTEGER DEFAULT 0")
+                # ⚠️ Issue #3773 的 4 个 acp_state_db_* / acp_resume_skipped_total 列**不在本段**：
+                # 本段属冻结老轨（存量库已盖 legacy-stamp，启动不执行），新增列写在这里
+                # 存量库永远没有该列 → 心跳 UPDATE 报 1054 Unknown column。这 4 列改走
+                # 注册式迁移 202611240005（domains/runtime/migrations/acp_state_db_metrics_columns.py）。
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute(runtime_mig.DELETE_RUNTIME_CREDENTIALS)
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")
@@ -11982,6 +11981,44 @@ register_migration(
     fn=_fn_external_identities_relation,
     domains=("mgmt",),
     post_check=_post_external_identities_relation,
+)
+
+
+# ===== 部署验证缺口修复：新增列曾经只落在冻结老轨（Issue #3731 / #3773）=====
+# 背景：`convert_fail_count`（#3731 的转换连败计数）曾登记在
+# `mgmt/migrations_ddl.py::ALTERS_USER_FEEDBACK_COLUMNS`；`acp_state_db_*` 4 列
+# （#3773 的 ACP state.db 指标）曾登记在 `runtime/migrations_ddl.py::ALTERS_ENGINE_CREDENTIAL_COLUMNS`
+# + `_migrate_tables()` 的 `_ensure_column` 段。这两个消费点都在**冻结老轨**：
+# 存量库（已盖 legacy-stamp 202610300001）启动时整段不执行 → 列永远不建 →
+# 读/写侧 1054 Unknown column（转换读侧首轮即崩；worker 心跳 UPDATE 全断）。
+# 修法：两批列都改成注册式迁移（kind=safe + post_check，列存在性可判定才盖章）。
+# version/name/kind 用字面量登记（不用 `**_MIGRATION`），否则
+# tests/api/test_migration_track_guard.py 的版本号唯一性/格式守卫解析不出该条。
+
+from src.domains.mgmt.migrations.feedback_convert_fail_count import (
+    add_convert_fail_count_column as _fn_feedback_convert_fail_count,
+    verify_convert_fail_count_column as _post_feedback_convert_fail_count,
+)
+register_migration(
+    version="202611240004",
+    name="issue3731-user-feedback-convert-fail-count",
+    kind="safe",
+    fn=_fn_feedback_convert_fail_count,
+    domains=("mgmt",),
+    post_check=_post_feedback_convert_fail_count,
+)
+
+from src.domains.runtime.migrations.acp_state_db_metrics_columns import (
+    add_acp_state_db_metrics_columns as _fn_acp_state_db_metrics_columns,
+    verify_acp_state_db_metrics_columns as _post_acp_state_db_metrics_columns,
+)
+register_migration(
+    version="202611240005",
+    name="issue3773-acp-state-db-metrics-columns",
+    kind="safe",
+    fn=_fn_acp_state_db_metrics_columns,
+    domains=("runtime",),
+    post_check=_post_acp_state_db_metrics_columns,
 )
 
 # ============================================================================

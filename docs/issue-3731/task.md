@@ -10,6 +10,8 @@
 | 4 | 历史用例对齐 #673 语义 | `tests/runtime/test_feedback_issue_converter.py` | 基线已红（user+repo_key 现应转换） | 用例改为「带 repo_key 的 user 反馈转换、纯意见类不转换」 | ✅ 86376fd03 |
 | 5 | QA 审查修复（Critical+Required） | `tests/kernel/test_gsb_route.py` + 转换器新用例 | `test_public_primitives_registry_sync` head 红 | 原语登记 + ERROR 跨阈值节流 + 策略跳过/不可路由不计数 | ✅ 本轮 |
 | 6 | 文档 + PR | — | — | `docs/issue-3731/{spec,plan,task}.md`、自审查、建 PR、A2A QA | ✅ |
+| 7 | 部署缺口：新增列只登记在冻结老轨 | 已盖章存量库（legacy-stamp 202610300001）跑迁移 | 存量库 `PRAGMA table_info` 无列 / worker 心跳 1054 | `convert_fail_count` → 注册式迁移 202611240004；4 个 `acp_state_db_*` → 202611240005（均 `kind=safe` + `post_check`） | ✅ 本轮 |
+| 8 | lint 红：F821 `StateDbCheckResult` 未 import | `scripts/check_undefined_names.py` | 当前 1 / 基线 1（棘轮只许降） | `TYPE_CHECKING` 前向引用 + 基线收紧到 0 | ✅ 本轮 |
 
 ## 验证记录（本地实跑）
 
@@ -38,9 +40,21 @@
    遗留 `provider == "github"` 平台字面量，存量、非本次引入）。本轮已顺手用平台卡方言
    `translate_query_state(provider, "open")` 收口，该守卫转绿；其余 s87/d16 红仍在存量文件。
 
+## 验证记录（部署缺口修复轮，本地实跑）
+
+| 命令 | 结果 |
+|------|------|
+| `python3 -m pytest tests/api/test_issue3731_convert_fail_count_migration.py -q` | 5 passed |
+| `python3 -m pytest tests/api/test_issue3773_acp_metrics_columns_migration.py -q` | 5 passed |
+| `python3 -m pytest tests/api/test_migration_track_guard.py tests/api/test_migration_domain_inference.py tests/api/test_migration_domain_ownership.py tests/api/test_issue995_vcs_migration.py tests/api/test_issue_3648_migration_reconcile.py -q` | 45 passed |
+| `python3 -m pytest tests/runtime/test_feedback_issue_converter.py tests/runtime/test_issue_3773_acp_metrics.py tests/api/test_issue_536_migrations.py -q` | 65 passed |
+| `python3 scripts/check_undefined_names.py` | 当前 0 / 基线 0（收敛 1 处，`--update` 收紧） |
+| `python3 scripts/check_duplicate_defs.py` / `check_f811.py` / `check_async_blocking.py` | 0 / 0、0 / 72、251 / 273，均未新增 |
+| `python3 -m compileall`（6 个改动文件） | 0 错 |
+
 ## 附：部署时序提示
 
-`convert_fail_count` 为新增列（`db_setup` 启动时按 `ALTERS_USER_FEEDBACK_COLUMNS` 幂等补列）。
+`convert_fail_count` 为新增列，走**注册式迁移 202611240004**（`_ensure_column` 幂等补列）。
 若 api 进程先于 mgmt（owner）进程升级，**先失败的是读侧**：`feedback_pending_conversions`
 的 SELECT 已含第 16 列 `convert_fail_count`，api 进程首轮 reconcile 在 `_fetch_pending`
 就抛「no such column」，整轮转换中断（每 300s 一条 traceback），直到 mgmt 进程补列完成；

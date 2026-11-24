@@ -45,7 +45,14 @@ def _clip_title(title) -> str:
 ALTER TABLE user_feedback ADD COLUMN convert_fail_count INTEGER NOT NULL DEFAULT 0
 ```
 
-登记到 `mgmt/migrations_ddl.py::ALTERS_USER_FEEDBACK_COLUMNS`（`db_setup` 启动时逐条幂等执行，SQLite / MySQL 同一句）。
+登记为**注册式迁移** `202611240004`（`src/domains/mgmt/migrations/feedback_convert_fail_count.py`，
+`register_migration(kind="safe", domains=("mgmt",), post_check=查列在位)`，`_ensure_column` 幂等）。
+
+> ⚠️ 部署验证修正（2026-11-24）：首版把这行 DDL 登记在
+> `mgmt/migrations_ddl.py::ALTERS_USER_FEEDBACK_COLUMNS`——该常量只被**冻结老轨**
+> `db_setup._migrate_tables()` 消费，存量库（已盖 legacy-stamp 202610300001）启动
+> 整段不执行，列永远不建，而读侧 SELECT 已含该列 → 转换读侧首轮 1054。详见文末
+> 「部署缺口修复」。
 
 数据原语（`src/domains/mgmt/public/__init__.py`，具名 SQL + `_any_tx`，任意拓扑）：
 
@@ -90,13 +97,26 @@ def _note_failure(fid, reason, provider="", owner="", repo="", prev_count=0) -> 
 |------|------|
 | `src/api/feedback_issue_converter.py` | 解包、截断、查重键、失败计数与升级 |
 | `src/domains/mgmt/public/__init__.py` | 3 条 SQL 增补/新增 + 2 个公开原语 + 导出登记 |
-| `src/domains/mgmt/migrations_ddl.py` | user_feedback 新增计数列 |
+| `src/domains/mgmt/migrations/feedback_convert_fail_count.py` | user_feedback 计数列注册式迁移（202611240004，原误登记在冻结老轨，见文末） |
+| `tests/api/test_issue3731_convert_fail_count_migration.py` | 已盖章存量库升列 / post_check 拦截 / 非 owner 跳过 5 条用例 |
 | `tests/runtime/test_feedback_issue_converter.py` | 新增 4 组用例；修正 1 条与 #673 语义冲突的历史用例 |
 
 ## 风险与缓解
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| 依赖新列（未迁移库） | 中 | ALTER 在 `init_database()` 幂等执行；`_note_failure` 全程 try/except，计数失败只丢可观测性、不影响建单主链路 |
+| 依赖新列（未迁移库） | 中 | 列走注册式迁移 `202611240004`（`kind=safe` + `post_check` 查列在位才盖章），已盖章存量库启动即补列；`_note_failure` 全程 try/except，计数失败只丢可观测性、不影响建单主链路 |
 | 截断后同前缀长标题碰撞 | 中 | 查重与建单共用同一函数，碰撞即复用（幂等，符合目标） |
 | 全解包改变 owner/repo 解析路径 | 中 | 单测覆盖空键 / 裸键 / 带 provider 前缀键三态，与旧返回值逐项比对 |
+
+## 部署缺口修复（部署验证实测，2026-11-24）
+
+`arch-weekly-11-ljt` 上部署验证（四进程 200 / compileall 0 / check-arch PASS）发现本批
+合入代码有两处「代码已合、线上不生效」的落地缺口，本次一并补齐：
+
+| # | 缺口 | 症状（实测） | 修法 |
+|---|------|--------------|------|
+| 1 | `convert_fail_count` 只登记在 `mgmt/migrations_ddl.py::ALTERS_USER_FEEDBACK_COLUMNS`（冻结老轨 `_migrate_tables()` 消费） | 存量库永远无此列，而 `feedback_pending_rows` 的 SELECT 已含它 → 转换读侧首轮 1054，转换链路继续全停 | 改注册式迁移 `202611240004`（`domains=("mgmt",)`，`_ensure_column` + `post_check` 查列在位）；该行从 `ALTERS_USER_FEEDBACK_COLUMNS` 撤出并留注释 |
+| 2 | #3773 的 4 个 `acp_state_db_*` / `acp_resume_skipped_total` 列只登记在 `runtime/migrations_ddl.py::ALTERS_ENGINE_CREDENTIAL_COLUMNS` + `_migrate_tables()` 的 `_ensure_column` 段 | 存量库（213）worker 心跳 `/api/runtime/heartbeat` 持续 `1054 Unknown column 'acp_state_db_bytes'`，心跳与 ACP 指标全断 | 改注册式迁移 `202611240005`（`domains=("runtime",)`，4 列 `post_check` 齐全才盖章）；两处老轨登记撤出并留注释 |
+| 3 | `tests/api/test_migration_track_guard.py` 只比对 `_run_all_migrations()` 调用清单，不校验 `ALTERS_*` 常量内容 | 这类「新增列只登记在冻结老轨」门禁抓不到 | 两条迁移各补 5 条回归用例：①已注册且**不再**出现在 `ALTERS_*` 常量；②已盖章存量库跑一遍即补列并盖章；③重跑幂等；④列未补齐时 `post_check` 拦住不盖章；⑤非 owner 域跳过不盖章 |
+| 4 | `make lint` 红：`src/domains/runtime/engine/context_compaction.py:93` 字符串前向引用 `"StateDbCheckResult"` 未 import（F821 undefined-name 棘轮） | 运行期无影响，但门禁只允许下降 | 加 `TYPE_CHECKING` 前向引用 import，并 `--update` 把棘轮基线从 1 收紧到 0 |
