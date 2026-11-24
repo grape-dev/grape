@@ -7,7 +7,9 @@
   `_create_direct_task` / `_create_failed_task` 全走 enc:v1（direct/failed 触发后
   验收口径 SQL = 0）；
 - 读侧自愈：明文行经 `get_task` 读出后列原文变信封；重复读不重复计数（幂等）；自愈失败才告警；
-  自愈写通道在单库拓扑下同持 `session_manager.db_lock`（审查 R1 锁错配）；
+  自愈写通道按拓扑二选一持锁、不嵌套（单库只持 session_manager.db_lock、三库只持
+  owner_lock("runtime")，审查 Critical 锁序反转）；在 claim 的 db_lock 段内嵌套调用时降级
+  report_only（审查 Required，不提前提交外层事务）；
   CAS 防旧快照覆盖并发新值；rowcount=0 计 heal_skipped 不计 healed（审查 Optional 口径）；
 - 节流：同一 (host, 行类型) 每进程每小时 ≤1 条 WARNING，文案指向 202611220003 且只含键名/行 id；
   report 策略 / 无行 id 读点计 report_only，不与真失败（heal_failed）混计；
@@ -276,14 +278,18 @@ def test_heal_cas_does_not_overwrite_concurrent_new_plaintext():
 
 
 def test_heal_holds_session_db_lock_in_single_db_topology(monkeypatch):
-    """QA #3770 审查 R1（锁错配）：单库/同域拓扑下 heal 的写通道连接就是
-    session_manager.db（autocommit=False 共享连接），必须同持 session_manager.db_lock
-    ——否则 heal 的 commit 可能提交其它线程未完成的事务。"""
+    """QA #3770 Critical（锁序反转）：单库/同域拓扑下 heal 的连接就是
+    session_manager.db（autocommit=False 共享连接），必须持 session_manager.db_lock，
+    但**不得叠加** owner_lock("runtime")——否则与 claim 的
+    `db_lock → owner_lock("runtime")`（claim 事务内经 health_scorer 现算健康分）
+    构成锁序反转，可互等挂死派发链路。"""
     from src.kernel import db_registry
     assert not db_registry.uses_own_dsn("runtime"), "本用例前提：单库拓扑（无 runtime 自有 DSN）"
 
     import src.kernel.session_manager as sm
+    from src.kernel.owner_db import owner_lock
     inner = sm.db_lock
+    rt_lock = owner_lock("runtime")
 
     class _RecordingLock:
         def __init__(self):
@@ -300,12 +306,53 @@ def test_heal_holds_session_db_lock_in_single_db_topology(monkeypatch):
     monkeypatch.setattr(sm, "db_lock", rec)
 
     tid = _insert_plaintext_row(json.dumps({"A": "1"}))
+    with sec.runtime_agent_tasks_write():
+        assert rec.enters == 1, "单库写通道必须进入 session_manager.db_lock"
+        assert not rt_lock._is_owned(), "单库写通道不得同时持有 owner_lock（锁序反转）"
     changed = heal_env_extra_plaintext_row(tid, encrypt_env_extra({"A": "1"}))
 
     assert changed is True
-    assert rec.enters == 1, "heal 写通道必须进入 session_manager.db_lock（锁与连接同源）"
+    assert rec.enters == 2, "heal 写通道必须进入 session_manager.db_lock（锁与连接同源）"
     raw = _raw_env_extra(tid)
     assert raw and raw.startswith(ENVELOPE_PREFIX)
+
+
+def test_write_channel_holds_only_owner_lock_in_three_db_topology(monkeypatch):
+    """QA #3770 Critical：三库拓扑（runtime 自有 DSN）连接是独立 owner 连接，
+    写通道只持 owner_lock("runtime")，不叠加进程 db_lock。"""
+    from src.kernel import db_registry
+    from src.kernel.owner_db import owner_lock
+    import src.kernel.session_manager as sm
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn",
+                        lambda domain: (domain or "").lower() == "runtime")
+    rt_lock = owner_lock("runtime")
+    assert not rt_lock._is_owned()
+
+    with sec.runtime_agent_tasks_write():
+        assert rt_lock._is_owned() is True, "三库写通道必须持 owner_lock('runtime')"
+        assert not sm.db_lock._is_owned(), "三库写通道不得叠加进程 db_lock"
+
+
+def test_heal_degrades_to_report_only_when_nested_in_outer_db_lock(outcomes):
+    """QA #3770 Required（提前提交外层事务）：get_task 在 claim 的 db_lock 段内被调用时，
+    heal 的 commit 会把外层未提交事务一并提交——此时必须降级为 report_only（不自愈）。"""
+    plain = json.dumps({"A": "1"})
+    tid = _insert_plaintext_row(plain)
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_tasks SET prompt='uncommitted-3770' WHERE id=?", (tid,))
+        env = decrypt_env_extra(plain, task_id=tid)
+        db.rollback()
+
+    assert env == {"A": "1"}, "不自愈不影响本次读出"
+    assert outcomes == ["report_only"], "嵌套持锁降级为 report_only（只计数不自愈）"
+    assert _raw_env_extra(tid) == plain, "嵌套持锁时不得自愈"
+    with db_lock:
+        row = db.cursor().execute(
+            "SELECT prompt FROM agent_tasks WHERE id=?", (tid,)).fetchone()
+    assert row[0] == "p", "自愈不得提交外层未完成事务（rollback 必须能回退）"
 
 
 def test_heal_skipped_when_row_already_converged(monkeypatch, outcomes):

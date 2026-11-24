@@ -1005,9 +1005,9 @@ def _fn_migrate_env_extra_encryption() -> None:
     failed_ids: list[str] = []
     last_id = ""
     while True:
-        # #3770 审查 R1：写通道走 runtime_agent_tasks_write——连接回落进程库（单库/同域
-        # 拓扑）时同持 session_manager.db_lock，与本仓 agent_tasks 写路径同一把锁；三库
-        # 拓扑继续 db_pair（owner DSN 连接 + owner_lock）。
+        # #3770 审查 R1/R2：写通道走 runtime_agent_tasks_write——单库/同域拓扑只持
+        # session_manager.db_lock（与本仓 agent_tasks 写路径同一把锁，不叠加 owner_lock）；
+        # 三库拓扑只持 owner_lock("runtime")（owner DSN 独立连接）。
         with runtime_agent_tasks_write() as db:
             c = db.cursor()
             c.execute(
@@ -2438,7 +2438,9 @@ def get_task(task_id) -> dict | None:
     # Issue #2423 M1-b（#2423 移植）：get_task 出口解密 env_extra（enc:v1 信封 → dict；
     # 兼容存量明文 JSON 由 decrypt_env_extra 降级处理并告警）。
     # Issue #3770：带上 task_id → 明文行在这里**就地自愈**（加密回写，幂等），
-    # 自愈失败才节流告警 + 计数。解密在 db_lock 之外执行，不会与写事务嵌套。
+    # 自愈失败才节流告警 + 计数。本函数单独调用时解密在 db_lock 之外执行；claim 会在
+    # 其 db_lock 段内调用本函数，此时 heal 检测到嵌套持锁会降级为 report_only（不自愈），
+    # 避免自愈 commit 提前提交 claim 未完成的事务。
     try:
         from src.domains.runtime.engine.env_extra_security import decrypt_env_extra
         if isinstance(_t.get("env_extra"), str) and _t["env_extra"]:

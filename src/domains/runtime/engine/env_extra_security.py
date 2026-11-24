@@ -29,7 +29,7 @@ import json
 import os
 import threading
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 
 from src.kernel.config import log
 from src.kernel.scene_custom_env import is_secret_name
@@ -167,29 +167,53 @@ def record_env_extra_plaintext(outcome: str) -> None:
 
 @contextmanager
 def runtime_agent_tasks_write():
-    """agent_tasks 写通道（#3770 heal / backfill 迁移共用；QA 审查 R1 锁错配修复）。
+    """agent_tasks 写通道（#3770 heal / backfill 迁移共用；QA 审查 R1/R2 锁序修复）。
 
-    连接仍取 owner 域代理（`db_pair("runtime")`）：四进程拆分下 agent_tasks 归 runtime 域，
-    单库拓扑自动回落进程库。锁错配修复：回落进程库（`not db_registry.uses_own_dsn("runtime")`）
-    时，该连接就是 `session_manager.db`（autocommit=False 的共享连接）——全仓 agent_tasks
-    写路径（claim / sync_task_session_token 等）都以 `session_manager.db_lock` 串行
-    「多语句 + commit」，只持 owner_lock 的话，这里的 commit 可能把其它线程未完成的事务
-    一并提交。因此该拓扑下**同持** `session_manager.db_lock`（与 `_DomainDbProxy` 同款
-    口径，owner_lock → db_lock 单向获取，无反向持锁点故无死锁环）；三库拓扑
-    （uses_own_dsn）继续 db_pair 语义（owner DSN 连接 + owner_lock）。
+    连接取 owner 域代理（`db_pair("runtime")`）：四进程拆分下 agent_tasks 归 runtime 域，
+    单库拓扑自动回落进程库。锁按拓扑**二选一，不嵌套**（QA #3770 Critical）：
+
+    - 单库/同域拓扑（`not uses_own_dsn("runtime")`）：连接就是 `session_manager.db`
+      （autocommit=False 共享连接）——全仓 agent_tasks 写路径（claim / sync_task_session_token
+      等）都以 `session_manager.db_lock` 串行，这里**只持** `session_manager.db_lock`。
+      此前「同持 owner_lock("runtime") + db_lock」与 claim 路径的
+      `db_lock → owner_lock("runtime")`（claim 事务内经 health_scorer 现算健康分）构成
+      锁序反转，可互等挂死派发链路。
+    - 三库拓扑（`uses_own_dsn("runtime")`）：连接是 owner DSN 独立连接，**只持**
+      `owner_lock("runtime")`（与 health_scorer 同锁、不叠加进程 db_lock）。
     """
     from src.kernel.owner_db import db_pair
-    db, db_lock = db_pair("runtime")
-    with ExitStack() as st:
-        st.enter_context(db_lock)
-        try:
-            from src.kernel import db_registry
-            if not db_registry.uses_own_dsn("runtime"):
-                from src.kernel.session_manager import db_lock as _process_db_lock
-                st.enter_context(_process_db_lock)
-        except Exception as _dom_e:  # noqa: BLE001 - 域判定失败按原 db_pair 语义执行（不阻断自愈）
-            log.debug(f"runtime_agent_tasks_write: domain 路由判定失败，按 owner_lock 执行: {_dom_e}")
+    db, domain_lock = db_pair("runtime")
+    try:
+        from src.kernel import db_registry
+        own_dsn = bool(db_registry.uses_own_dsn("runtime"))
+    except Exception as _dom_e:  # noqa: BLE001 - 域判定失败按单库（连接回落进程库）执行
+        own_dsn = False
+        log.debug(f"runtime_agent_tasks_write: domain 路由判定失败，按单库 db_lock 执行: {_dom_e}")
+    if own_dsn:
+        with domain_lock:
+            yield db
+        return
+    from src.kernel.session_manager import db_lock as _process_db_lock
+    with _process_db_lock:
         yield db
+
+
+def _nested_under_process_db_lock() -> bool:
+    """单库/同域拓扑下当前线程是否已持有 `session_manager.db_lock`（读路径嵌套）。
+
+    QA #3770 Required：`get_task` 会在 claim 的 `db_lock` 段内被调用，此时自愈的 commit
+    会把外层未完成事务一并提交。三库拓扑 heal 走独立 owner 连接（不持进程 db_lock），
+    不存在该风险，返回 False。
+    """
+    try:
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            return False
+        from src.kernel.session_manager import db_lock as _process_db_lock
+        is_owned = getattr(_process_db_lock, "_is_owned", None)
+        return bool(is_owned and is_owned())
+    except Exception:
+        return False
 
 
 def heal_env_extra_plaintext_row(row_id: str, sealed: str, *,
@@ -203,8 +227,9 @@ def heal_env_extra_plaintext_row(row_id: str, sealed: str, *,
     新值，交由下一次读重新自愈。返回是否真正改写了该行。异常由调用方捕获（自愈失败
     只影响观测，不影响读 env）。
 
-    连接/锁走 ``runtime_agent_tasks_write()``（owner 域连接；回落进程库时同持
-    ``session_manager.db_lock``，见其 docstring）。
+    连接/锁走 ``runtime_agent_tasks_write()``（单库/同域拓扑只持
+    ``session_manager.db_lock``，三库拓扑只持 ``owner_lock("runtime")``，不嵌套，
+    见其 docstring）。
     """
     kind = (row_kind or "agent_tasks").strip() or "agent_tasks"
     if not row_id or not sealed or kind not in PLAINTEXT_ROW_KINDS:
@@ -266,6 +291,11 @@ def _handle_plaintext_row(raw: str, *, task_id: str, row_kind: str,
         return {}
     env = parsed
     if policy == "heal" and task_id:
+        # QA #3770 Required：嵌套在 claim 的 db_lock 段内（单库/同域拓扑）时不自愈
+        # ——heal 的 commit 会把外层未提交事务一并提交；降级为 report_only（只计数）。
+        if _nested_under_process_db_lock():
+            _plaintext_report("report_only", task_id=task_id, kind=kind, env=env)
+            return env
         err = ""
         sealed = ""
         try:
