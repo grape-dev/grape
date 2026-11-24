@@ -819,13 +819,27 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         for row in _rt_scenes.skills_by_ids(ref_skill_ids):
             skill_by_id[row[0]] = row
 
-    # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
+    # 名字兜底（2026-11-23）：历史数据/首次同步竞态会让 scene_skill_ref 里留下 skill_id=0，
+    # 若只按 id 查就整排判「已删除」，而技能其实还在。这里把「id 解析不到」的名字按名字再查一次。
+    skill_by_name = {}
+    try:
+        _need_names = [n.get("skill", "") for n in nodes
+                       if n.get("skill") and not _pick_node_skill_id(n, ref_map)]
+        if _need_names:
+            for row in _rt_scenes.skills_by_names(_need_names):
+                skill_by_name[str(row[1])] = row
+    except Exception as _e:  # 名字兜底失败只降级为旧行为
+        log.warning(f"scenes_market_detail: skill name fallback failed: {_e}")
+
+    # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询，失败按名字兜底）
     for node in nodes:
         skill_name = node.get("skill", "")
         if not skill_name:
             continue
         skill_id = _pick_node_skill_id(node, ref_map)
         row = skill_by_id.get(skill_id) if skill_id else None
+        if not row:
+            row = skill_by_name.get(skill_name)
         skills_detail.append({
             "skill_id": (row[0] if row else skill_id),
             "name": skill_name,
@@ -981,7 +995,12 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
             ref_map = {r[0]: r[1] for r in ref_rows}
             ref_skill_ids = [sid for sid in ref_map.values() if sid]
             existing_ids = set(_rt_scenes.skill_ids_active(ref_skill_ids))
-            missing = [name for name, sid in ref_map.items() if sid not in existing_ids]
+            missing = [name for name, sid in ref_map.items() if sid and sid not in existing_ids]
+            # 绑定为 0（首次同步竞态 / 历史数据）时按名字兜底，否则整个场景永远无法应用
+            _unresolved = [name for name, sid in ref_map.items() if not sid]
+            if _unresolved:
+                _live_names = _rt_scenes.skill_names_active(_unresolved)
+                missing += [n for n in _unresolved if n not in _live_names]
             if missing:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
 
@@ -1023,6 +1042,24 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     # 新建（scope='repo'）。
     # weekly-09：scene_id 不再用模板 name（扁平命名空间会互相覆盖/409 挡路），
     # 每次应用生成独立 custom-{uuid}，多个用户应用同一模板互不影响。
+    # 绑定兜底：市场模板的 nodes 里 skill_id 可能为 0，写入前按名字补全，
+    # 否则派单/运行期按 id 解析会落空（表现为场景跑不起来）。
+    try:
+        _need = [n.get("skill", "") for n in (nodes or [])
+                 if n.get("skill") and not int(n.get("skill_id") or 0)]
+        if _need:
+            _name_to_id = _rt_scenes.skill_ids_by_names(_need)
+            _filled = 0
+            for _n in (nodes or []):
+                if _n.get("skill") and not int(_n.get("skill_id") or 0):
+                    _sid = _name_to_id.get(_n.get("skill"))
+                    if _sid:
+                        _n["skill_id"] = _sid
+                        _filled += 1
+            log.info(f"apply_market_scene: filled {_filled}/{len(_need)} skill_id by name (market_id={market_id})")
+    except Exception as _e:
+        log.warning(f"apply_market_scene: fill skill_id by name failed: {_e}")
+
     new_scene_id = f"custom-{uuid.uuid4().hex[:8]}"
     db_id = create_custom_scene(
         scene_id=new_scene_id, name=display_name or new_scene_id,
