@@ -34,11 +34,12 @@
     "ws_go_host": "Host my repo",
     "stat_visible": "Visible",
     "scope_hosted": "Hosted only",
-    "scope_hosted_title": "Showing hosted repositories only; click to switch to all repositories",
+    "scope_hosted_title": "Click to show hosted repositories only",
     "scope_all": "All repositories",
-    "scope_all_title": "Showing every repository visible in VCS (including unhosted); click to show hosted only",
+    "scope_all_title": "Click to view all repositories (including unhosted)",
     "empty_hosted_title": "No hosted repository yet",
-    "empty_hosted_desc": "Use \"All repositories\" (top right) to browse and host one."
+    "empty_hosted_desc_prefix": "Use \"",
+    "empty_hosted_desc_suffix": "\" (top right) to browse and host one."
   },
   "template": {
     "hello_world": "Hello World Starter",
