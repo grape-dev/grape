@@ -146,20 +146,39 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         tags = [t for t in dict.fromkeys(tags) if t in AGENT_TAGS]
         if not tags:
             return []
+        # QA 第 6 轮 Required：存在性判定不得只看 enabled=1——「只剩显式停用的角色行」
+        # 会被当成「没配过」而复活（违反 spec A8c/PR §4「停用行一律不覆盖、不重开」）。
+        # 唯一允许改写的状态 = 仅有一条 enabled=1 的自动 'all'（声明即收窄，原语义）；
+        # 其余任何角色行状态（含停用行、含非 all 行）一律返回 [] 交 ensure_role_caps 判定。
         rows = c.execute(
-            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,)).fetchall()
-        cur = [r[0] for r in rows]
-        cur_roles = [t for t in cur if t == "all" or t in AGENT_TAGS]
-        if cur_roles and set(cur_roles) - {"all"}:
-            return []  # 已有非 all 角色行 → 不覆盖
-        if cur_roles:
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+        cur_roles = []
+        for _t, _e in rows:
+            _t = str(_t or "").strip().lower()
+            if _t == "all" or _t in AGENT_TAGS:
+                cur_roles.append((_t, int(_e or 0)))
+        if not cur_roles:
+            pass  # 零角色行 → 直接按声明播种（声明即收窄，不走 ensure 的值域回落 all）
+        elif cur_roles != [("all", 1)]:
+            return []  # 已有角色行（含 enabled=0 停用、含非 all）→ 不覆盖、不重开
+        else:
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag='all'", (rid,))
         _now = datetime.now(timezone.utc).isoformat()
-        for t in tags:
-            c.execute(
-                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 1, ?, ?)",
-                (rid, t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now))
+        # 单条多行原子写入（QA 第 6 轮 Required）：逐条 INSERT 撞唯一键会把异常整体吞成
+        # log.warning，留下「半组启用行」却返回 []；同一语句一次落整组或整组失败。
+        _rows_sql = " UNION ALL ".join(
+            "SELECT ? AS runtime_id, ? AS tag, %d AS max_concurrent, %d AS priority,"
+            " 1 AS enabled, ? AS created_at, ? AS updated_at"
+            % (_DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL) for _t in tags)
+        c.execute(
+            "INSERT INTO engine_capabilities "
+            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+            "SELECT runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at"
+            " FROM (" + _rows_sql + ") AS _seed_rows WHERE NOT EXISTS ("
+            "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN ("
+            + ",".join("?" * (len(AGENT_TAGS) + 1)) + "))",
+            tuple(v for _t in tags for v in (rid, _t, _now, _now))
+            + (rid, "all", *sorted(AGENT_TAGS)))
         log.info(f"role caps seeded: rid={rid} tags={tags} (declared role_tags)")
         return tags
     except Exception as _se:

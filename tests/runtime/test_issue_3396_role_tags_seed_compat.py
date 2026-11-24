@@ -151,6 +151,51 @@ def test_heartbeat_reseeds_legacy_declared_row():
     assert es.engine_allows_role(rid, "coding") is False
 
 
+def test_heartbeat_does_not_resurrect_declared_disabled_roles():
+    """QA 第 6 轮 Required：声明非空 + 仅停用行 + tags_user_set=0，心跳也不得复活。
+
+    与 test_heartbeat_does_not_resurrect_disabled_roles 互补：那条是声明为空、
+    停用的恰是 all；本条复现 QA 端点探针的精确场景——声明的 sre 被显式停用后，
+    seed 旧口径（只看 enabled=1）会把它当「没配过」重新插入 enabled=1。
+    """
+    client = _client()
+    token = _make_token("b3396r-13")
+    rid = _register(client, token, "b3396r-dev13", {"name": "hermes", "role_tags": ["sre"]})
+    assert _role_caps(rid) == ["sre"]
+    with db_lock:
+        db.cursor().execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+        db.cursor().execute("UPDATE agent_runtimes SET tags_user_set=0 WHERE id=?", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    r = client.post("/api/runtime/heartbeat", headers={"Authorization": f"Bearer {token}"},
+                    json={"runtime_ids": [rid]})
+    assert r.status_code == 200, r.text
+    assert _role_caps(rid) == [], "声明角色停用后被心跳复活"
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
+def test_re_register_does_not_resurrect_declared_disabled_roles():
+    """注册链同场景：重复注册（如 worker 重启自注册）不得复活显式停用的声明角色。"""
+    client = _client()
+    token = _make_token("b3396r-14")
+    payload = {"name": "hermes", "role_tags": ["sre"]}
+    rid = _register(client, token, "b3396r-dev14", payload)
+    with db_lock:
+        db.cursor().execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+        db.cursor().execute("UPDATE agent_runtimes SET tags_user_set=0 WHERE id=?", (rid,))
+        db.commit()
+    r = client.post("/api/runtime/register", headers={"Authorization": f"Bearer {token}"},
+                    json={"device_name": "b3396r-dev14", "runtimes": [payload]})
+    assert r.status_code == 200, r.text
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
 def test_user_set_tags_are_not_overwritten():
     """tags_user_set=1（UI 改过）→ 声明的 role_tags 不覆盖用户配置。"""
     client = _client()
