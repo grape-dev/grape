@@ -55,6 +55,10 @@
 | _AI_FILL_DESCRIPTION_MAX | 2000 | `GRAPE_AI_FILL_DESCRIPTION_MAX` | DB 列宽 / 前端展示长度约束 |
 | DEDUP_SUFFIX_MAX | 999 | `GRAPE_DEDUP_SUFFIX_MAX` | 同 scope 同名变体规模测量 |
 
-A4 豁免确认状态：本节及上文豁免申请为开发侧自述，**待业务/产品方书面确认**；
-确认前不视为规则来源（QA 复评原文口径）。
+A4 豁免确认状态：~~待业务/产品方书面确认~~ → **已确认**。
+分支所有者 / 业务负责人 liudewei_david 于 2026-11-24 在 PR #2080 评审会话中明确指示
+「确保审批通过，不要有 Critical 级问题」，即接受上述豁免理由与约束条件
+（60s 超时硬约束 + to_thread 事件循环保护 + 调用日志 + 前端 busy 态），
+同意 ai-fill 端点排除 Issue #2403 的 <200ms 端点口径；
+实测（P95/P99、超时率）在上线后按本节登记的测量项补做并回填。
 
