@@ -12,6 +12,8 @@ import os
 
 import sys
 
+import pytest
+
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "test_sessions.db"))
 
@@ -767,3 +769,91 @@ def test_org_ops_have_english_summary_and_scope():
                 bad.append((method, path, op.get("x-token-scope")))
     assert org_ops >= 37
     assert not bad, bad[:10]
+
+
+# ===================== Issue #3756：登记表缺失时契约降级 =====================
+def test_custom_openapi_degrades_when_deprecation_registry_missing(tmp_path, monkeypatch):
+    """登记表缺失：custom_openapi 返回 schema（不抛），paths 非空且根级 x-degraded。"""
+    from src.domains.contracts import deprecation as dep
+
+    monkeypatch.setattr(dep, "DEPRECATED_ENDPOINTS_PATH",
+                        str(tmp_path / "missing_deprecated_endpoints.json"))
+    cached = app.openapi_schema
+    app.openapi_schema = None
+    try:
+        schema = openapi.custom_openapi(app, check_baseline=False)
+    finally:
+        app.openapi_schema = cached
+
+    assert schema.get("paths"), "降级契约不应为空"
+    assert schema.get("x-degraded") == "deprecation-registry-missing"
+
+
+def test_custom_openapi_keeps_deprecated_markup_when_registry_present(tmp_path, monkeypatch):
+    """登记表正常：deprecated 标注输出不变（回归红线，与 #2837 行为一致）。"""
+    import json
+    from src.domains.contracts import deprecation as dep
+
+    registry = {
+        "entries": [{
+            "operation_id": "a2a_status",
+            "method": "get",
+            "path": "/api/a2a/status",
+            "deprecated_since_release": 1,
+            "deprecated_since_date": "2026-11-22",
+            "replacement": "/api/a2a",
+        }]
+    }
+    reg = tmp_path / "deprecated_endpoints.json"
+    reg.write_text(json.dumps(registry), encoding="utf-8")
+    monkeypatch.setattr(dep, "DEPRECATED_ENDPOINTS_PATH", str(reg))
+    cached = app.openapi_schema
+    app.openapi_schema = None
+    try:
+        schema = openapi.custom_openapi(app, check_baseline=False)
+    finally:
+        app.openapi_schema = cached
+
+    op = schema["paths"]["/api/a2a/status"]["get"]
+    assert op.get("deprecated") is True
+    assert op.get("x-deprecated-since") == 1
+    assert op.get("x-deprecated-replacement") == "/api/a2a"
+    assert schema.get("x-degraded") is None
+
+
+def _render_with_registry(monkeypatch, registry_path):
+    """把登记表路径指向 registry_path 后渲染契约（渲染后恢复 schema 缓存）。"""
+    from src.domains.contracts import deprecation as dep
+
+    monkeypatch.setattr(dep, "DEPRECATED_ENDPOINTS_PATH", str(registry_path))
+    cached = app.openapi_schema
+    app.openapi_schema = None
+    try:
+        return openapi.custom_openapi(app, check_baseline=False)
+    finally:
+        app.openapi_schema = cached
+
+
+def test_custom_openapi_fails_fast_when_deprecation_registry_drifted(tmp_path, monkeypatch):
+    """位置漂移是挂牌承诺错位（#2837），不得降级成「登记表缺失」的 200。"""
+    import json
+
+    reg = tmp_path / "deprecated_endpoints.json"
+    reg.write_text(json.dumps({"entries": [{
+        "operation_id": "a2a_status",
+        "method": "get",
+        "path": "/api/definitely-not-where-it-renders",
+        "deprecated_since_release": 1,
+        "deprecated_since_date": "2026-11-22",
+        "replacement": "/api/a2a",
+    }]}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="drifted"):
+        _render_with_registry(monkeypatch, reg)
+
+
+def test_custom_openapi_fails_fast_when_deprecation_registry_corrupt(tmp_path, monkeypatch):
+    """登记表损坏（非法 JSON）是数据面错误，不得误报为文件缺失而降级。"""
+    reg = tmp_path / "deprecated_endpoints.json"
+    reg.write_text("{ not valid json", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="corrupt"):
+        _render_with_registry(monkeypatch, reg)

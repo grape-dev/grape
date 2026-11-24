@@ -7,3 +7,8 @@ agent_tasks
 grape_t_credential_usage_log
 grape_t_system_credentials
 grape_t_repo_credentials
+# Issue #3897：身份域（owner=mgmt）被 worker/event/insight 进程跨域读。
+# 生产 `grape_prod_runtime.external_identities` 缺失（1146）即因未登记 → --repair 不补建；
+# 带 token 的身份解析、群成员映射、派发身份判定全部依赖这两张表的跨域视图。
+external_identities
+grape_accounts

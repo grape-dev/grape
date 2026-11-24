@@ -17,6 +17,9 @@ from src.kernel.tags import MAX_TAGS, encode_tags, prepare_tags, suggest_tags
 # 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
 from src.domains.runtime import public as _rt_scenes
 
+# Issue #4169：上游错误统一分流（404/401/403/502 语义对齐 repos.py，兜底 502 不回吐上游原文）
+from src.domains.mgmt.routes import _vcs_error_map
+
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
 # Issue #862：体验模板创建总闸（#357 P1-C 引入，原 30s）。实测 domain-swarm
@@ -847,6 +850,18 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         for row in _rt_scenes.skills_by_ids(ref_skill_ids):
             skill_by_id[row[0]] = row
 
+    # 名字兜底：历史数据/首次同步竞态会让 scene_skill_ref 留下 skill_id=0，
+    # 只按 id 查就整排判「已删除」，而技能其实还在。按名字（限定 official/repo 作用域）再查一次。
+    skill_by_name = {}
+    try:
+        _need_names = [n.get("skill", "") for n in nodes
+                       if n.get("skill") and not _pick_node_skill_id(n, ref_map)]
+        if _need_names:
+            for _n, _row in _rt_scenes.resolve_skills_by_names(_need_names).items():
+                skill_by_name[_n] = _row
+    except Exception as _e:  # 兜底失败只降级为旧行为
+        log.warning(f"scenes_market_detail: skill name fallback failed: {_e}")
+
     # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
     for node in nodes:
         skill_name = node.get("skill", "")
@@ -854,6 +869,8 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
             continue
         skill_id = _pick_node_skill_id(node, ref_map)
         row = skill_by_id.get(skill_id) if skill_id else None
+        if not row:
+            row = skill_by_name.get(skill_name)
         skills_detail.append({
             "skill_id": (row[0] if row else skill_id),
             "name": skill_name,
@@ -995,6 +1012,10 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     except Exception:
         nodes = []
 
+    # Issue #3789：模板里的显式 skill_id 可能属模板属仓（跨仓不可移植）或已失效，
+    # 先清掉再校验，否则跨仓应用会按 id 判 owner 不一致直接 400。
+    _rebase_scene_skill_ids(nodes, repo_key, f"market:{market_id}")
+
     # Issue #1758：应用市场模板前复核技能 scope——repo 级场景引用 user 技能
     # 一律拒绝（含创建者本人）。
     _validate_scene_skill_scope(nodes, repo_key)
@@ -1009,7 +1030,13 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
             ref_map = {r[0]: r[1] for r in ref_rows}
             ref_skill_ids = [sid for sid in ref_map.values() if sid]
             existing_ids = set(_rt_scenes.skill_ids_active(ref_skill_ids))
-            missing = [name for name, sid in ref_map.items() if sid not in existing_ids]
+            missing = [name for name, sid in ref_map.items() if sid and sid not in existing_ids]
+            # 绑定为 0（首次同步竞态 / 历史数据）时按名字兜底，否则整个场景永远无法应用；
+            # 只认 official/repo，避免同名个人技能把「真实删除」洗白。
+            _unresolved = [name for name, sid in ref_map.items() if not sid]
+            if _unresolved:
+                _live_names = _rt_scenes.skill_names_active_scoped(_unresolved)
+                missing += [n for n in _unresolved if n not in _live_names]
             if missing:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
 
@@ -1051,7 +1078,35 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     # 新建（scope='repo'）。
     # weekly-09：scene_id 不再用模板 name（扁平命名空间会互相覆盖/409 挡路），
     # 每次应用生成独立 custom-{uuid}，多个用户应用同一模板互不影响。
+    # 绑定兜底：市场模板 nodes 里 skill_id 可能为 0，写入前按名字补全（作用域限定），
+    # 否则派单/运行期按 id 解析会落空。
+    try:
+        def _node_skill_id(_n) -> int:
+            """模板里的 skill_id 可能是非数字（脏数据），与 _pick_node_skill_id 同口径防护。"""
+            try:
+                return int(_n.get("skill_id") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        _need = [n.get("skill", "") for n in (nodes or [])
+                 if n.get("skill") and not _node_skill_id(n)]
+        if _need:
+            _name_to_id = _rt_scenes.skill_ids_by_names(_need)
+            _filled = 0
+            for _n in (nodes or []):
+                if _n.get("skill") and not _node_skill_id(_n):
+                    _sid = _name_to_id.get(_n.get("skill"))
+                    if _sid:
+                        _n["skill_id"] = _sid
+                        _filled += 1
+            log.info(f"apply_market_scene: filled {_filled}/{len(_need)} skill_id by name (market_id={market_id})")
+    except Exception as _e:
+        log.warning(f"apply_market_scene: fill skill_id by name failed: {_e}")
+
     new_scene_id = f"custom-{uuid.uuid4().hex[:8]}"
+    # Issue #3789：按目标 repo_key 解析并固化节点 skill_id（模板可能无 id / 带模板属仓 id），
+    # 落库后派发以 id 为权威，不再回退名字降级。
+    _persist_scene_skill_ids(nodes, repo_key, new_scene_id)
     db_id = create_custom_scene(
         scene_id=new_scene_id, name=display_name or new_scene_id,
         description=scene["description"] or "",
@@ -1331,6 +1386,9 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
         nodes = json.loads(scene["nodes_json"]) if scene["nodes_json"] else []
     except Exception:
         nodes = []
+    # Issue #3789：模板带的显式 skill_id 可能属模板属仓/已失效，先清掉再由下方按目标
+    # repo_key 重新解析固化，避免跨仓体验时按 id 判 owner 不一致 400。
+    _rebase_scene_skill_ids(nodes, experience_repo_key, f"market:{market_id}")
     nodes_json_str = json.dumps(nodes, ensure_ascii=False)
 
     # display_name 查重：仓库内不能有同名场景（排除自己）
@@ -1356,6 +1414,8 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     if existing_scene_id:
         # 已有 repo 场景 → 更新
         scene_id = existing_scene_id
+        # Issue #3789：按目标 repo_key 解析并固化节点 skill_id（派发以 id 为权威）
+        _persist_scene_skill_ids(nodes, experience_repo_key, scene_id)
         from src.api.pipeline_config import update_custom_scene
         update_custom_scene(
             scene_id=scene_id, repo_key=experience_repo_key, nodes=nodes,
@@ -1364,6 +1424,9 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     else:
         # 不存在 → 新建
         scene_id = str(uuid.uuid4())
+        # Issue #3789：新建场景同样先固化 skill_id（模板无 id 时不再 name_degraded）
+        _persist_scene_skill_ids(nodes, experience_repo_key, scene_id)
+        nodes_json_str = json.dumps(nodes, ensure_ascii=False)
         with db_lock:
             c = db.cursor()
             from datetime import datetime, timezone
@@ -1527,12 +1590,17 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     _client = VcsApiClient(provider, token, owner, repo)
     _path = _client._generic_path(f"/repos/{owner}/{repo}/branches", "/repository/branches")
     branches = []
+    _err = None
+    _log_prefix = f"List branches failed for {_pname} {owner}/{repo}"
     try:
         page = 1
         while page <= 5:
             data = _client._card_or_legacy_get(f"{_path}?per_page=100&page={page}")
             if isinstance(data, dict) and data.get("error"):
-                raise RuntimeError(f"{data.get('error')} {data.get('detail', '')}".strip())
+                # Issue #4169：上游错误 dict（{"error":"HTTP 404","status_code":404,...}）
+                # 直接入统一分流，不再拼 RuntimeError 中转（原文不进响应体）
+                _err = data
+                break
             if not isinstance(data, list) or not data:
                 break
             for b in data:
@@ -1543,9 +1611,15 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
             if len(data) < 100:
                 break
             page += 1
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning(f"List branches failed for {_pname} {owner}/{repo}: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+        _err = e
+    if _err is not None:
+        raise _vcs_error_map.map_vcs_error(
+            _err, stage="scenes_branches", message="查询分支失败，请稍后重试",
+            log_prefix=_log_prefix,
+            retry_hint="可稍后重试；若持续失败请确认仓库地址与 Token 权限")
 
     payload = {"branches": branches}
     _branches_cache_put(_cache_key, payload)
@@ -1597,18 +1671,23 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     # 卡驱动（VcsApiClient.create_branch）：gitlab /projects 形态、refs_sha 形态、
     # form 形态全部由卡能力位（dialect / branch_create_form）决定。
     _client = VcsApiClient(provider, token, owner, repo)
+    # Issue #4169：上游错误统一分流——404/401/403 不再折叠成 502，409/422 仍 409
+    _log_prefix = f"Create branch failed for {_pname} {owner}/{repo}"
+    _map_kwargs = dict(conflict_on=(409, 422),
+                       conflict_markers=("already exists", "已存在"),
+                       stage="scenes_branch_create",
+                       message="创建分支失败，请稍后重试",
+                       permission_message="Token 权限不足或已过期：创建分支需要维护者权限，请更新后重试或改用 OAuth",
+                       retry_hint="可稍后重试；若持续失败请确认仓库地址与 Token 权限",
+                       log_prefix=_log_prefix)
     try:
         result = _client.create_branch(body.branch_name.strip(), body.refs or "main")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
+        raise _vcs_error_map.map_vcs_error(e, **_map_kwargs)
     if isinstance(result, dict) and result.get("error"):
-        _code = result.get("status_code") or 0
-        _detail = str(result.get("detail") or result.get("error") or "")
-        if _code in (409, 422) or "already exists" in _detail or "已存在" in _detail:
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
-        if _code == 403:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {result.get('error')}"})
+        raise _vcs_error_map.map_vcs_error(result, **_map_kwargs)
 
     log.info(f"Branch created: {body.branch_name} in {_pname} {owner}/{repo}")
     # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
@@ -1677,11 +1756,15 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
 
     # Issue #1564 R1：市场模板为全仓共享配置，保存即强制拒绝 user scope（含创建者本人）
     _validate_scene_skill_scope(body.nodes, repo_key)
+    # Issue #3789：保存时解析并固化节点 skill_id（此时市场行尚未插入，场景标识留空）
+    _persist_scene_skill_ids(body.nodes, repo_key, "")
 
     # Issue #2761：一/二级分类必须存在且层级匹配（二级归属一级）
     cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
 
-    nodes_json = json.dumps(body.nodes, ensure_ascii=False)
+    # Issue #3914 E：存名必存 id（市场模板 scope 强制 repo → user_id=0）
+    from src.api.pipeline_config import fill_scene_nodes_skill_id as _fill_scene_skill_ids_c
+    nodes_json = json.dumps(_fill_scene_skill_ids_c(body.nodes, repo_key), ensure_ascii=False)
     tag_items, overflow = prepare_tags(body.tags)
     if overflow:
         raise HTTPException(status_code=400, detail={
@@ -1766,8 +1849,15 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     # update 无 repo 入参，repo_key 取市场行自身归属。
     if body.nodes:
         _validate_scene_skill_scope(body.nodes, scene.get("repo_key", ""))
+        # Issue #3789：保存时解析并固化节点 skill_id（场景标识用 market:{id}，便于排障定位）
+        _persist_scene_skill_ids(body.nodes, scene.get("repo_key", ""),
+                                 f"market:{market_id}")
 
-    nodes_json = json.dumps(body.nodes, ensure_ascii=False) if body.nodes else ""
+    # Issue #3914 E：存名必存 id（沿用市场行自身 repo_key / scope；update 无 repo 入参）
+    from src.api.pipeline_config import fill_scene_nodes_skill_id as _fill_scene_skill_ids_u
+    nodes_json = (json.dumps(
+        _fill_scene_skill_ids_u(body.nodes, scene.get("repo_key", "") or ""),
+        ensure_ascii=False) if body.nodes else "")
 
     # 图标文件落定
     if body.file_id:
@@ -2506,14 +2596,16 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # Issue #1758: 保存即拦截——repo 级场景引用 user 技能一律拒绝（含创建者本人）→ 400
     _validate_scene_skill_scope(nodes_json, repo_key)
 
+    scene_id = body.scene_id or str(uuid.uuid4())
+    # Issue #3789：解析并固化节点 skill_id（派发以 id 为权威，消除名字降级告警）
+    _persist_scene_skill_ids(nodes_json, repo_key, scene_id)
+
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     if body.pr_subscription_enabled:
         qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
         if not qa_node or not qa_node.enabled or not qa_node.skill:
             raise HTTPException(status_code=400, detail={
                 "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
-
-    scene_id = body.scene_id or str(uuid.uuid4())
 
     try:
         db_id = create_custom_scene(
@@ -2798,6 +2890,10 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
         _existing_names)
 
     new_scene_id = str(uuid.uuid4())
+    # Issue #3789：源场景可能来自其它仓库/官方模板，先清掉不可移植/失效 skill_id，
+    # 再按目标 repo_key 重新解析固化（副本派发以 id 为权威，不再 name_degraded）。
+    _rebase_scene_skill_ids(nodes, repo_key, new_scene_id)
+    _persist_scene_skill_ids(nodes, repo_key, new_scene_id)
     try:
         db_id = create_custom_scene(
             scene_id=new_scene_id, name=final_name,
@@ -2896,6 +2992,8 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     # Issue #1758: 保存即拦截——repo 级场景引用 user 技能一律拒绝（含创建者本人）→ 400
     if repo_key and body.nodes:
         _validate_scene_skill_scope(_update_nodes, repo_key)
+        # Issue #3789：保存时解析并固化 skill_id（派发以 id 为权威）
+        _persist_scene_skill_ids(_update_nodes, repo_key, scene_id)
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
@@ -2975,6 +3073,92 @@ def _project_scene_scope_violation(v: dict) -> dict:
     """对外 violations[] 的唯一裁剪点（Issue #1564）：去掉内部 owner_id 等字段。"""
     return {k: v[k] for k in _SCENE_SCOPE_VIOLATION_FIELDS}
 
+def _rebase_scene_skill_ids(nodes: list, repo_key: str, scene_id: str = "") -> int:
+    """Issue #3789：应用/复制场景模板前，清掉「当前仓库不可用」的显式 skill_id。
+
+    市场模板是跨仓共享配置：迁移/保存按模板属仓写入的 repo 档 ``skill_id`` 若直接
+    按 id 校验，跨仓应用会被判 owner 不一致而 400（scene_skill_scope.evaluate）。
+    这里只清掉不可移植（他仓 repo 档）与已失效（技能已删/停用）的 id，保留技能名，
+    随后由 ``_persist_scene_skill_ids`` 按目标 repo_key 重新解析固化。
+    返回清掉的节点数。
+    """
+    if not nodes:
+        return 0
+    from src.domains.mgmt.user.db import get_skill_by_id
+    cleared = 0
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        try:
+            _sid = int(node.get("skill_id") or 0)
+        except (TypeError, ValueError):
+            _sid = 0
+        if not _sid:
+            # 非数字脏值同样清掉，避免派发按 id 命中失败
+            if "skill_id" in node:
+                node.pop("skill_id", None)
+            continue
+        try:
+            row = get_skill_by_id(_sid)
+        except Exception as e:  # noqa: BLE001 - 读失败不阻断应用，交由后续按名解析
+            log.warning(f"_rebase_scene_skill_ids: read skill failed (id={_sid}): {e}")
+            continue
+        _scope = str((row or {}).get("scope") or "")
+        _owner = str((row or {}).get("owner_id") or "")
+        if not row or (_scope == "repo" and repo_key and _owner != repo_key):
+            node.pop("skill_id", None)
+            cleared += 1
+            log.info(f"_rebase_scene_skill_ids: dropped non-portable skill_id={_sid} "
+                     f"(scope={_scope or '-'} owner={_owner or '-'} target={repo_key} "
+                     f"scene={scene_id or '-'} node={node.get('id') or node.get('tag') or '-'})")
+    return cleared
+
+
+def _persist_scene_skill_ids(nodes: list, repo_key: str, scene_id: str = "") -> int:
+    """Issue #3789：保存/应用前把节点技能名解析为 skill_id 并就地固化。
+
+    统一走单一 scope 判官 ``scene_skill_scope.evaluate``（repo 场景口径）：
+    - 解析命中 repo/official 档 → 写回 ``skill_id`` 与规范 ``skill`` 名；
+    - 内置包形态（不在 skill 表）→ 保持原样，派发时按名字降级；
+    - scope 冲突已在保存校验阶段拦截（不会到这里）；
+    返回发生变更的节点数（供应用链路判断是否回写场景）。
+    幂等：skill_id 已一致时不再变更。
+    """
+    if not repo_key or not nodes:
+        return 0
+    from src.api.scene_skill_scope import evaluate
+    _cache: dict = {}
+    changed = 0
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("enabled") is False:
+            continue
+        _name = str(node.get("skill") or "").strip()
+        if not _name:
+            continue
+        try:
+            result = evaluate(node, repo_key, "repo", scene_id=scene_id, cache=_cache)
+        except Exception as e:
+            log.warning(f"_persist_scene_skill_ids: evaluate failed "
+                        f"(scene={scene_id or '-'} node={node.get('id') or node.get('tag') or '-'}): {e}")
+            continue
+        if not result.get("ok"):
+            continue
+        _sid = int(result.get("skill_id") or 0)
+        if not _sid:
+            # 悬空/失效 id（技能已删/停用、名字也不在 skill 表）→ 清掉，避免派发继续
+            # 打 skill_id invalid/inactive 降级告警（与迁移同口径，Issue #3789 Low）
+            if int(node.get("skill_id") or 0):
+                node.pop("skill_id", None)
+                changed += 1
+            continue
+        _canonical = result.get("skill") or _name
+        if int(node.get("skill_id") or 0) != _sid or node.get("skill") != _canonical:
+            node["skill_id"] = _sid
+            node["skill"] = _canonical
+            changed += 1
+    return changed
+
+
 def _validate_scene_skill_scope(nodes: list, repo_key: str, expected_scope: str = "repo"):
     """场景节点技能 scope 校验（Issue #657 / #1564 / #1758）：冲突时抛 HTTPException(400)。
 
@@ -3036,13 +3220,20 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{body.scene_id}' 不存在"})
 
-    nodes = cfg.get("nodes", [])
+    nodes = [dict(n) for n in (cfg.get("nodes") or []) if isinstance(n, dict)]
     if not nodes:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "场景无 Agent 节点配置"})
 
     # Issue #657: 节点技能 scope 校验（repo 级场景不可引用 user 级技能），
     # Pass 1 只读阶段拦截，落库前直接拒绝
     _validate_scene_skill_scope(nodes, repo_key)
+    # Issue #3789：应用时同样解析并固化 skill_id；有变更则回写场景配置
+    if _persist_scene_skill_ids(nodes, repo_key, body.scene_id):
+        try:
+            from src.api.pipeline_config import update_custom_scene
+            update_custom_scene(body.scene_id, repo_key, nodes=nodes)
+        except Exception as _pe:
+            log.warning(f"apply_scene: persist skill_id failed (scene={body.scene_id}): {_pe}")
 
     # R25.9 回声治理：应用场景不触碰 token（原 get_repo_token_with_refresh 把 bot/用户级
     # token 回填 session，第 1 级命中 bot token → 自循环检测放行 bot 评论 → 回声）。
@@ -3053,7 +3244,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     with db_lock:
         c = db.cursor()
         # Issue #524: Pass 1——先逐节点解析引擎选择（只读，不落库），产出结构化回执
-        _pending = []  # (node_receipt, agent_type, skill, runtime_id)
+        _pending = []  # (node_receipt, agent_type, skill, runtime_id, node_skill_id)
         for node in nodes:
             # Issue #955：节点 id 即角色名（id 优先、tag 兜底）——tag 为中文阶段名
             # 的节点在 apply 路径也按 id 角色解析引擎绑定，不再取展示 tag
@@ -3123,7 +3314,8 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     "reason": (f"engine {runtime_id} applied" if runtime_id
                                else "applied (broadcast/default engine)"),
                 })
-                _pending.append((receipt, agent_type, skill, runtime_id))
+                _pending.append((receipt, agent_type, skill, runtime_id,
+                                int(node.get("skill_id") or 0)))
             except Exception as e:
                 log.warning(f"Scene apply: resolve failed for {agent_type}: {e}")
                 receipt.update({"status": "failed", "reason": str(e)})
@@ -3141,13 +3333,20 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
             })
 
         # Pass 2——对 applied 节点落库（strict 已在落库前拒绝）
-        from src.domains.mgmt.user.db import resolve_skill_id
-        for receipt, agent_type, skill, runtime_id in _pending:
+        # Issue #3789：节点 skill_id 权威（repo/official 档），无 id 时按
+        # repo→official 名字降级；不再用 user 档名字解析，避免同名误绑。
+        from src.domains.mgmt.user.db import resolve_skill_dispatch
+        for receipt, agent_type, skill, runtime_id, node_skill_id in _pending:
             try:
-                skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
+                _res = resolve_skill_dispatch(
+                    skill, node_skill_id, repo_key=repo_key,
+                    scene_id=body.scene_id, node_tag=agent_type,
+                    agent_type=agent_type)
+                skill_id = int(_res.get("skill_id") or 0)
+                _skill_name = _res.get("skill_name") or skill
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=agent_type,
-                    runtime_id=runtime_id, skill=skill, skill_id=skill_id,
+                    runtime_id=runtime_id, skill=_skill_name, skill_id=skill_id,
                     status="idle",
                     enable=None, subscribe_events=None,
                 )

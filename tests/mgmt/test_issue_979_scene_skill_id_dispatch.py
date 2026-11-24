@@ -87,7 +87,7 @@ class TestTripleScopeIdLock:
             _cleanup_user(ua["username"])
 
     def test_invalid_id_degrades_by_name_with_warning(self, caplog):
-        """skill_id 失效 → 名字降级（user→repo→official）+ warning。"""
+        """skill_id 失效 → 名字降级（repo→official，Issue #3789 不含 user）+ warning。"""
         ua = _mk_user()
         sname = f"clash979_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:org/test979"
@@ -97,28 +97,30 @@ class TestTripleScopeIdLock:
             with caplog.at_level("WARNING"):
                 res = udb.resolve_skill_dispatch(sname, 987654321, repo_key=rk,
                                                  user_id=ua["id"], scene_id="s979", node_tag="issue")
-            # 降级走名字规则：user 优先（user_id 传入）→ 命中 user 档
-            assert res["skill_id"] == sid_u
+            # Issue #3789：降级走 repo→official，同名 user 档不得被误绑
+            assert res["skill_id"] == sid_o
             assert res["degraded"] is True
+            assert res["skill_source"] == "name_degraded"
             assert any("degrade to name resolution" in r.message for r in caplog.records)
-            assert res["skill_id"] != sid_o
+            assert res["skill_id"] != sid_u
         finally:
             _delete_skills(sname)
             _cleanup_user(ua["username"])
 
 class TestPrSubscriptionUserId:
-    def test_user_id_resolves_user_scope(self):
-        """PR 订阅口径：同名 official+user，传 user_id → user scope；不传 → official。"""
+    def test_user_scope_not_bound_on_degrade(self):
+        """PR 订阅降级口径（Issue #3789）：同名 official+user 一律命中 official，
+        不再因 user_id 回退 user 档（repo 级场景禁止 user 档技能）。"""
         ua = _mk_user()
         sname = f"prsub979_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:org/test979"
         try:
             sid_o = _insert_scope_skill(sname, "official", "")
             sid_u = _insert_scope_skill(sname, "user", str(ua["id"]))
-            # 补 user_id（Issue #979 修复前 PR 订阅只传 repo_key → 恒落 official）
             with_uid = udb.resolve_skill_dispatch(sname, 0, repo_key=rk, user_id=ua["id"])
-            assert with_uid["skill_id"] == sid_u
-            assert with_uid["skill"] and with_uid["skill"]["scope"] == "user"
+            assert with_uid["skill_id"] == sid_o
+            assert with_uid["skill_source"] == "name_degraded"
+            assert with_uid["skill_id"] != sid_u
             without_uid = udb.resolve_skill_dispatch(sname, 0, repo_key=rk)
             assert without_uid["skill_id"] == sid_o
         finally:
@@ -156,7 +158,11 @@ class TestPrSubscriptionUserId:
 
 class TestLegacySceneCompat:
     def test_name_only_node_degrades_same_as_before(self, caplog):
-        """老场景（仅 skill_name）：结果与 resolve_skill_id 名字解析一致 + warning。"""
+        """老场景（存量行只存 skill_name）：结果与 resolve_skill_id 名字解析一致 + warning。
+
+        Issue #3914 E 之后保存链路「存名必存 id」（create_custom_scene 会回填 skill_id），
+        故老场景行必须直接写库模拟——经保存链路写入的节点已带 id，不再代表存量形态。
+        """
         ua = _mk_user()
         sname = f"legacy979_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:org/test979"
@@ -165,9 +171,14 @@ class TestLegacySceneCompat:
             sid_r = _insert_scope_skill(sname, "repo", rk)
             sid_o = _insert_scope_skill(sname, "official", "")
             nodes = [{"id": "n1", "tag": "issue", "skill": sname, "enabled": True}]
-            db_id = create_custom_scene(scene_id=scene_id, name=scene_id, description="",
-                                        repo_key=rk, nodes=nodes)
-            assert db_id
+            # 直接写库：模拟 Issue #3914 E 之前落库的「只存名字」存量场景
+            with db_lock:
+                db.cursor().execute(
+                    "INSERT INTO devops_pipeline_scene "
+                    "(scene_id, name, description, repo_key, nodes_json, is_active, created_by, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,1,?,?,?)",
+                    (scene_id, scene_id, "", rk, json.dumps(nodes), "", "now", "now"))
+                db.commit()
             # 节点无 skill_id → 0（老场景）
             assert event_pipeline.resolve_scene_node_skill_id(rk, "issue", scene_id=scene_id) == 0
             with caplog.at_level("WARNING"):

@@ -215,8 +215,20 @@ class TestIssuePipeline:
         assert p["segments"][0]["seq"] >= 1
 
     def test_pipeline_not_found(self):
-        resp = client.get(f"/api/issues/{OWNER}/{REPO}/99997/pipeline", headers=_headers)
+        """Issue #3891：内部未登记 + VCS 侧明确无此 issue → 仍 404，且 reason/error_code 可判别。
+
+        VCS 两个外呼 seam 均 patch（单测不得真实请求平台）。
+        """
+        from unittest.mock import patch
+        from src.domains.runtime.routes import issues as issues_mod
+        with patch.object(issues_mod, "_vcs_issue_lookup", return_value=None), \
+             patch("src.domains.runtime.pipeline.event_pipeline.fetch_issue_via_vcs",
+                   return_value=("missing", {})):
+            resp = client.get(f"/api/issues/{OWNER}/{REPO}/99997/pipeline", headers=_headers)
         assert resp.status_code == 404
+        detail = resp.json()["detail"]
+        assert detail["reason"] == "issue_not_found"
+        assert detail["error_code"] == "issue_not_found"
 
 class TestCreateIssue:
     def test_create_missing_fields(self):

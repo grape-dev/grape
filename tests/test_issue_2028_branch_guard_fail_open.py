@@ -249,29 +249,29 @@ def _write_stale_hook(tmp_path, stale):
     return repo, hooks
 
 
-def test_install_rewrites_hook_when_interpreter_missing(tmp_path):
+def test_install_template_does_not_pin_interpreter_absolute_path(tmp_path):
+    """Issue #3579：模板不再固化 sys.executable（worktree 回收后会 exit 127）。"""
+    repo = _init_repo(tmp_path / "repo")
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
+    content = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+    assert "# hook-interpreter:" not in content
+    assert sys.executable not in content
+    assert "command -v python3" in content
+
+
+def test_install_rewrites_hook_when_module_relpath_mismatch(tmp_path):
+    """Issue #3579：相对模块路径失配 → 视为不可用并重写升级。"""
     stale = _current_version_hook_with([
-        (sys.executable, "/nonexistent/venv/bin/python3.0"),
+        (f"# hook-module-rel: {bg._hook_module_relpath()}",
+         "# hook-module-rel: src/runtime/branch_guard.py"),
     ], tmp_path)
     repo, hooks = _write_stale_hook(tmp_path, stale)
 
     assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
     content = (hooks / "pre-push").read_text(encoding="utf-8")
-    assert "/nonexistent/venv/bin/python3.0" not in content
-    assert sys.executable in content
-
-
-def test_install_rewrites_hook_when_module_path_missing(tmp_path):
-    missing_module = "/nonexistent/src/domains/runtime/engine/branch_guard.py"
-    stale = _current_version_hook_with([
-        (bg._hook_module_path(), missing_module),
-    ], tmp_path)
-    repo, hooks = _write_stale_hook(tmp_path, stale)
-
-    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is True
-    content = (hooks / "pre-push").read_text(encoding="utf-8")
-    assert missing_module not in content
-    assert bg._hook_module_path() in content
+    assert "src/runtime/branch_guard.py" not in content
+    assert f"# hook-module-rel: {bg._hook_module_relpath()}" in content
+    assert bg._hook_module_path() not in content
 
 
 def test_install_rewrites_hook_when_repo_key_changed(tmp_path):
@@ -299,6 +299,6 @@ def test_existing_hook_usable_accepts_freshly_installed_hook(tmp_path):
     assert bg._existing_hook_usable(hook, REPO_KEY) is True
     # repo_key 不一致 → False（触发重写自愈）
     assert bg._existing_hook_usable(hook, "gitcode:other/repo") is False
-    # marker 缺失（如 2028-02 旧模板无 marker）→ False → 重写升级
+    # marker 缺失（旧模板无相对模块 marker）→ False → 重写升级
     assert bg._existing_hook_usable(
-        hook.replace("# hook-interpreter: ", "# removed: "), REPO_KEY) is False
+        hook.replace("# hook-module-rel: ", "# removed: "), REPO_KEY) is False

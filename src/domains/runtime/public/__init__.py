@@ -26,7 +26,6 @@ except ImportError:  # pragma: no cover - worker 无 web 框架
     Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
-from src.kernel.issue_ident import native_issue_number
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -141,17 +140,6 @@ def list_runtime_id_uid_rows() -> list[tuple]:
     with db_registry.cursor("runtime") as c:
         c.execute("SELECT id, engine_uid FROM agent_runtimes ORDER BY id")
         return [tuple(r) for r in c.fetchall()]
-
-
-def runtime_ids_by_engine_uids(engine_uids) -> list[int]:
-    """按 engine_uid（大小写不敏感）反查运行时 id 列表。"""
-    keys = [str(u).lower() for u in (engine_uids or []) if u]
-    if not keys:
-        return []
-    ph = ",".join(["%s"] * len(keys))
-    with db_registry.cursor("runtime") as c:
-        c.execute(f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({ph})", tuple(keys))
-        return [int(r[0]) for r in c.fetchall()]
 
 
 def runtime_cred_rows_by_engine_uids(engine_uids) -> list[tuple]:
@@ -2373,6 +2361,16 @@ def set_meta_value(key: str, value: str) -> None:
 _CONV_COLS_SQL = ", ".join(_CONV_COLS)
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
 
+# Issue #3813：failed-dispatch LIKE 谓词单源（候选查询与探针共用；漂移=短路漏扫）
+_A2A_FAILED_DISPATCH_LIKE_PRED = (
+    "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_dispatch_exception]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
+    "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
+    "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
+    "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
+    "OR result LIKE '%unclaimed%'")
+
 _ANY_QUERIES: dict[str, str] = {
     # ── 免鉴权健康端点的运行时就绪快照（insight/routes/health.py）──
     # `_READ_QUERIES` 里同名键是 %s 方言的 lib 专用版（单库拓扑经 db_registry.cursor
@@ -2827,18 +2825,38 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY e.seq DESC"),
     # 形态二/三：failed 且失败语义=派发失败/排队超时（结果文本已含
     # _fail_event 写入的 [code]；LIKE 预筛只用于减少跨库取数，最终归类仍在 patrol）。
+    # Issue #3813：LIKE 谓词提取为模块常量 _A2A_FAILED_DISPATCH_LIKE_PRED——
+    # 候选查询与 events_probe_failed_dispatch 探针共用同一谓词（防双源漂移：
+    # 探针谓词一旦与候选查询漂移，短路会把真候选判空=静默漏扫）。
     "patrol_a2a_failed_dispatch_rows": (
         "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result, "
         "payload, created_at, started_at, completed_at FROM events "
         "WHERE event_type='a2a_event' AND status='failed' AND ("
-        "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_dispatch_exception]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
-        "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
-        "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
-        "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
-        "OR result LIKE '%unclaimed%') "
+        + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
         "ORDER BY seq DESC"),
+    # ===== Issue #3813：巡检候选存在性探针（S53 短路判定唯一事实源）=====
+    # 五路 LIMIT 1 有界索引查询（零候选轮次查询数=常量级，AC③）。形状与候选
+    # 查询逐谓词一致（仅收列到主键 + LIMIT 1）；全部命中
+    # idx_events_type_status_seq / idx_tasks_status_completed_id（EXPLAIN 可证）。
+    "events_probe_unclaimed": (
+        "SELECT e.seq FROM events e LEFT JOIN agent_tasks t ON t.event_seq = e.seq "
+        "WHERE e.event_type='a2a_event' AND e.status='running' "
+        "AND (e.runtime IS NULL OR e.runtime='') AND t.id IS NULL "
+        "ORDER BY e.seq DESC LIMIT 1"),
+    "events_probe_failed_dispatch": (
+        "SELECT seq FROM events WHERE event_type='a2a_event' AND status='failed' "
+        "AND (" + _A2A_FAILED_DISPATCH_LIKE_PRED + ") "
+        "ORDER BY seq DESC LIMIT 1"),
+    "tasks_probe_completed_cutoff": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND completed_at > ? "
+        "AND id > ? ORDER BY id LIMIT 1"),
+    "tasks_probe_completed_all": (
+        "SELECT id FROM agent_tasks WHERE status='completed' AND id > ? "
+        "ORDER BY id LIMIT 1"),
+    # running/queued 探针与候选查询同款内嵌字面量口径（tasks_running_rows 先例；
+    # sqlite mysql_compat 对 TEXT 等值的计划折叠一致，EXPLAIN 形状与候选查询可比）
+    "tasks_probe_running": "SELECT id FROM agent_tasks WHERE status='running' LIMIT 1",
+    "tasks_probe_queued": "SELECT id FROM agent_tasks WHERE status='queued' LIMIT 1",
     # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
     "task_recheck_row": (
         "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
@@ -3331,6 +3349,29 @@ def read_all_any(name: str, params: tuple = ()) -> list[Any]:
     with _any_cursor() as c:
         c.execute(_any_sql(name), params)
         return list(c.fetchall() or [])
+
+def named_query_sql(name: str) -> str:
+    """具名查询的原始 SQL 文本（Issue #3813 采样日志用：打印脱敏形状的事实源）。
+
+    只读、不执行；与 explain_named_query 共用 _any_sql 的 KeyError 口径。
+    """
+    return _any_sql(name)
+
+
+def explain_named_query(name: str, params: tuple = ()) -> list[tuple]:
+    """具名查询的执行计划（Issue #3813 slow scan 采样专用，只读不写）。
+
+    方言：SQLite 走 ``EXPLAIN QUERY PLAN``（列形状 id/parent/notused/detail），
+    MySQL 走 ``EXPLAIN``（多列，含 type/key/rows/Extra）——统一整行 tuple 返回，
+    由调用方做摘要与限长（本原语不裁剪、不解释，保持 DB 事实原样）。
+    未登记的具名查询抛 KeyError（与 read_*_any 同口径，不静默兜底）。
+    """
+    sql = _any_sql(name)
+    from src.kernel.session_manager import _is_mysql_backend
+    verb = "EXPLAIN" if _is_mysql_backend() else "EXPLAIN QUERY PLAN"
+    with _any_cursor() as c:
+        c.execute(f"{verb} {sql}", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
 
 
 def patrol_dispatch_stall_threshold_seconds() -> int:
@@ -4252,15 +4293,6 @@ def event_dashboard_metrics(repo_keys, week_cutoff: str = "") -> dict[str, Any]:
     return out
 
 
-def dashboard_task_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """任务队列状态分布：[(status, count)]（GROUP BY status，口径同 ops overview）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1" + where +
-                  " GROUP BY status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
 def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
     """issue 级状态分布：每个 issue 取 MAX(id) 那条 task 的状态再计数。"""
     where, args = _rk_scope(repo_keys, org_id)
@@ -4272,81 +4304,6 @@ def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
             " GROUP BY issue_id) latest JOIN agent_tasks t ON t.id = latest.max_id"
             " GROUP BY t.status", tuple(args))
         return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_stuck_tasks(cutoff: str, repo_keys=(), org_id: int = 0,
-                          limit: int = 100) -> list[tuple]:
-    """stuck 任务（running 且 started_at < cutoff），按 started_at 升序。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
-            "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL "
-            "AND started_at < ?" + where + " ORDER BY started_at ASC LIMIT " + str(int(limit)),
-            (cutoff,) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_failed_tasks(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """最近 failed 任务（按 completed_at 降序；调用方自行截断，保持原无 LIMIT 口径）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, "
-            "event_seq, result_text, exit_code, errors FROM agent_tasks WHERE status='failed'"
-            + where + " ORDER BY completed_at DESC", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_task_by_source(repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """按 agent_type × status 的排队/运行数（只含 queued/dispatched/running）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute(
-            "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-            "WHERE status IN ('queued','dispatched','running')" + where +
-            " GROUP BY agent_type, status", tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_today_status_counts(day_prefix: str, repo_keys=(), org_id: int = 0) -> list[tuple]:
-    """今日任务状态分布（UTC 日期前缀匹配 created_at）。"""
-    where, args = _rk_scope(repo_keys, org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE created_at LIKE ?" + where +
-                  " GROUP BY status", (f"{day_prefix}%",) + tuple(args))
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_running_counts(org_id: int = 0) -> dict[int, int]:
-    """每个引擎当前 running 任务数（实时负载）：{runtime_id: n}。"""
-    where, args = _rk_scope((), org_id)
-    with _any_cursor() as c:
-        c.execute("SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running'" + where +
-                  " GROUP BY runtime_id", tuple(args))
-        return {r[0]: int(r[1] or 0) for r in (c.fetchall() or [])}
-
-
-def dashboard_avg_durations(org_id: int = 0) -> dict[int, float]:
-    """每个引擎已完成任务的平均耗时（秒）：{runtime_id: seconds}，双方言兜底。"""
-    where, args = _rk_scope((), org_id)
-    try:
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(CASE WHEN completed_at IS NOT NULL "
-                "AND started_at IS NOT NULL THEN (strftime('%s', completed_at) - "
-                "strftime('%s', started_at)) ELSE NULL END) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0"
-                + where + " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
-    except Exception:  # noqa: BLE001 - sqlite strftime 在 MySQL 上是 1064，走下面的口径
-        with _any_cursor() as c:
-            c.execute(
-                "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
-                "AND started_at IS NOT NULL AND completed_at IS NOT NULL" + where +
-                " GROUP BY runtime_id", tuple(args))
-            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
 
 
 _WORKER_COLS = ("id, name, device_name, status, last_seen_at, last_ip, "
@@ -4376,20 +4333,6 @@ def dashboard_workers(stale_cutoff: str, org_id: int = 0, uname: str = "",
     else:
         sql = base + " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id"
         args = (stale_cutoff, uname)
-    with _any_cursor() as c:
-        c.execute(sql, args)
-        return [tuple(r) for r in (c.fetchall() or [])]
-
-
-def dashboard_local_runtimes(org_id: int = 0) -> list[tuple]:
-    """本机直连引擎（credential_id=0）：7 列，供看板补一条本地 worker。"""
-    sql = ("SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
-           "ar.healthy, ar.busy_slots, ar.max_concurrent FROM agent_runtimes ar "
-           "WHERE ar.credential_id = 0")
-    args: tuple = ()
-    if org_id:
-        sql += " AND ar.org_id=?"
-        args = (int(org_id),)
     with _any_cursor() as c:
         c.execute(sql, args)
         return [tuple(r) for r in (c.fetchall() or [])]
@@ -6266,6 +6209,58 @@ def skills_by_ids(skill_ids) -> list[tuple]:
         c.execute(f"SELECT id, skill_name, display_name, agent_type, description, scope "
                   f"FROM skill WHERE id IN ({ph}) AND is_active=1", ids)
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def skills_by_names_scoped(skill_names, scopes=("official", "repo")) -> list[tuple]:
+    """按名字批量取技能，**限定作用域**并给出确定性顺序。
+
+    `skill` 表的唯一性是 `UNIQUE (skill_name, scope, owner_id)`，同名技能可在不同 scope
+    下各有一条。因此按名字解析必须限定作用域并固定顺序（scope 优先级 → id 升序），
+    否则会出现「显示/绑定到了另一条同名技能」。
+
+    返回行：(id, skill_name, display_name, agent_type, description, scope)
+    """
+    names = [str(n).strip() for n in (skill_names or []) if str(n).strip()]
+    scopes = tuple(str(s) for s in (scopes or ()) if str(s))
+    if not names or not scopes:
+        return []
+    ph = ",".join(["?"] * len(names))
+    sph = ",".join(["?"] * len(scopes))
+    # 作用域优先级用**参数化** CASE 表达，不拼字面量；非白名单作用域直接拒绝，
+    # 避免调用方透传外部值时成为注入面（与 configs/table_ownership 的域边界一致）。
+    _SCOPE_ALLOW = ("official", "repo")
+    _bad = [s for s in scopes if s not in _SCOPE_ALLOW]
+    if _bad:
+        raise ValueError(f"unsupported skill scope(s): {_bad}; allowed: {_SCOPE_ALLOW}")
+    order = " ".join([f"WHEN ? THEN {k}" for k in range(len(scopes))])
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT id, skill_name, display_name, agent_type, description, scope "
+            f"FROM skill WHERE skill_name IN ({ph}) AND is_active=1 AND scope IN ({sph}) "
+            f"ORDER BY CASE scope {order} ELSE {len(scopes)} END, id ASC",
+            list(names) + list(scopes) + list(scopes))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def resolve_skills_by_names(skill_names, scopes=("official", "repo")) -> dict:
+    """名字 → 行（确定性）。同名多命中时取作用域优先级最高、id 最小的一条。"""
+    out = {}
+    for row in skills_by_names_scoped(skill_names, scopes):
+        out.setdefault(str(row[1]), row)
+    return out
+
+
+def skill_names_active_scoped(skill_names, scopes=("official", "repo")) -> set:
+    """名字 → 是否仍有启用且属于给定作用域的技能（「已删除」判定的收窄口径）。
+
+    与 scene_sync._query_active_skill_names 的 `is_active=1 AND scope IN ('official','repo')` 一致。
+    """
+    return set(resolve_skills_by_names(skill_names, scopes).keys())
+
+
+def skill_ids_by_names(skill_names, scopes=("official", "repo")) -> dict:
+    """名字 → id（确定性、限定作用域）；用于把 skill_id=0 的老绑定补齐。"""
+    return {n: int(r[0]) for n, r in resolve_skills_by_names(skill_names, scopes).items()}
 
 
 def skill_ids_active(skill_ids) -> list[int]:

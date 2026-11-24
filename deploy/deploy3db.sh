@@ -137,6 +137,14 @@ start_one() {
   echo $! > "/home/grape/$role.pid"
 }
 
+# Issue #3764：重启前先校验网关 /api/runtime* 上游归属，错配（如 127.0.0.1:8181）
+# 会让 claim/install 405/502 且 error 日志刷屏；非 0 一律中止部署。
+if ! "$PY" scripts/verify_nginx_upstream.py; then
+  echo "[3db] FAIL: 网关 /api/runtime* 上游归属校验未通过（见上），已中止部署。" >&2
+  echo "[3db]       可用 GRAPE_NGINX_CONF 指定待检的网关配置；过渡端口用 GRAPE_PROCESS_PORTS。" >&2
+  exit 1
+fi
+
 if [ "$_SYSTEMD_MODE" = "1" ]; then
   # 单元自己负责拉起进程（Restart=always / 启动顺序），这里只触发重启并等健康。
   # 三库 DSN 已在文件头 source 过（.grape-rds-stage.env），unit 侧另有 GRAPE_3DB_ENV drop-in。

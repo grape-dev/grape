@@ -1,4 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
+import hashlib
 import json, os, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -100,6 +101,20 @@ def persist_webhook_event(repo_key: str, provider: str, event_header: str,
 
     return enqueue_webhook(repo_key=repo_key, provider=provider,
                            event_header=event_header, body=body, headers=headers)
+
+
+def _token_fingerprint(value: str) -> str:
+    """验签日志用 token 指纹：sha256 前 12 位（不可逆），空值 → ``absent``。
+
+    Issue #3897：`Webhook rejected: token mismatch for repo=...` 只有 repo，运维无法判断
+    是「平台端 Secret 与 Grape 端配置不同」还是「请求根本没带 token」。两端各打指纹后，
+    看一眼日志即可区分（相同 = 配置一致但比对失败的另一类问题；不同 = Secret 不一致；
+    absent = 平台没带）。绝不打印明文（验收 C-3）。
+    """
+    _v = str(value or "")
+    if not _v:
+        return "absent"
+    return "sha256:" + hashlib.sha256(_v.encode("utf-8")).hexdigest()[:12]
 
 
 def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
@@ -1077,7 +1092,11 @@ async def gitcode_webhook(request: Request):
     # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
     import hmac
     if not hmac.compare_digest(str(token), str(expected)):
-        log.warning(f"Webhook rejected: token mismatch for repo={repo}")
+        # Issue #3897：带两端指纹与来源 IP（不含明文），运维可直接定位 Secret 不一致。
+        log.warning(f"Webhook rejected: token mismatch for repo={repo} "
+                    f"expected={_token_fingerprint(expected)} "
+                    f"actual={_token_fingerprint(token)} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
@@ -1158,7 +1177,9 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
         if not hmac.compare_digest(str(token_header), str(expected)):
-            log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
+            log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo} "
+                        f"expected={_token_fingerprint(expected)} "
+                        f"actual={_token_fingerprint(token_header)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
     log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")
@@ -2717,6 +2738,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         skill_name = ""
         skill_id = 0
         skill_path = ""
+        _skill_source = ""
         repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
             with db_lock:
@@ -2816,6 +2838,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         skill_id = _res["skill_id"]
                         skill_name = _res.get("skill_name") or _pipe_skill
                         skill_path = _res.get("skill_path") or _pipe_skill
+                        # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                        _skill_source = _res.get("skill_source") or ""
                         log.info(f"A2A: issue scene skill override: {agent_name}={skill_name} sid={skill_id} (scene={_a2a_issue_scene})")
             except Exception as _oe:
                 log.warning(f"A2A: issue scene skill override failed: {_oe}")
@@ -2854,6 +2878,22 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 except Exception as e:
                     log.warning(f"A2A: fallback skill lookup failed: {e}")
 
+        _payload = {
+            "repository": repository,
+            "account": account,
+            "issue_number": issue_number,
+            "pr_number": pr_number,
+            "context": context,
+            "source_seq": _source_seq,
+            # Issue #329: pass through cross-pipeline fields for downstream agents
+            "carried_context": carried_context if (target_scene_id or carried_context) else {},
+            "engine_config": engine_config if (target_scene_id or engine_config) else None,
+            # Issue #627: production release binding context pass-through
+        }
+        # Issue #3789：仅在确有降级/权威来源结论时写入，避免无条件空串（与 event_pipeline 同写法）
+        if _skill_source:
+            _payload["skill_source"] = _skill_source
+
         evt = {
             "type": "a2a_event",
             "repository": repository,
@@ -2863,18 +2903,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "issue_id": str(issue_number) if issue_number else "",
             "_a2a_context": context,
             "_skill_path": skill_path,
-            "payload": {
-                "repository": repository,
-                "account": account,
-                "issue_number": issue_number,
-                "pr_number": pr_number,
-                "context": context,
-                "source_seq": _source_seq,
-                # Issue #329: pass through cross-pipeline fields for downstream agents
-                "carried_context": carried_context if (target_scene_id or carried_context) else {},
-                "engine_config": engine_config if (target_scene_id or engine_config) else None,
-                # Issue #627: production release binding context pass-through
-            },
+            "payload": _payload,
         }
 
         # _force / _queue / _a2a_ctx_key 已在 Issue #2248 幂等命中判定前解析并复用：

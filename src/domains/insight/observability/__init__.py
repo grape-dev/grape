@@ -113,6 +113,11 @@ _install_db_lock_metrics(registry)
 # 启动降级变成可巡检指标；未安装前 record 是 no-op。
 _install_startup_metrics(registry)
 _install_comment_metrics(registry)
+# Issue #3740：RepoBotToken 历史列回落 counter。降噪后日志不再承担全量计数，
+# 回落规模与仓库分布由 grape_repo_bot_legacy_fallback_total{provider,repo} 兜底。
+from src.kernel.repo_bot_observability import install as _install_repo_bot_observability
+
+_install_repo_bot_observability(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",

@@ -84,7 +84,10 @@ def origin_of(expr, env: dict[str, str]) -> str:
             return "owner"
         if name in ("_any_cursor", "_owner_cursor", "read_one_any", "read_all_any"):
             return "owner"
-        if name in ("cursor", "_domain_cursor"):
+        # `cursor_for` / `transaction_for` 是内核唯一路由原语（route_of 判定；三库缺 DSN
+        # 即 DomainUnavailable，绝不回落进程库）——Issue #3857：此前未登记，靠
+        # “未知来源”恰好不被计数，语义上应收口为域来源。
+        if name in ("cursor", "_domain_cursor", "cursor_for", "transaction_for"):
             return "domain"
     return "unknown"
 

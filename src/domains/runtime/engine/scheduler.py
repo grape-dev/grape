@@ -30,11 +30,26 @@ from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
 
+# autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
+# 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
+# 表不在 → 1146「Table doesn't exist」，execution 永远建不出来（定时触发在 worker
+# 进程不受影响）。凡操作 autopilot_executions 一律走 db_registry.cursor_for("runtime")：
+# 域路由（own DSN）→ runtime 域连接（autocommit，写后无需 commit）；
+# 本地路由（本域进程/单库）→ 进程库 + write=True 自动 commit。
+# 写路径禁止再显式 db.commit()——那会提交进程（mgmt）连接上其它线程
+# 的未完成事务（架构守护 3.0 B1：撕裂事务 / sqlite 下写丢）。
+from src.kernel.db_registry import cursor_for as _rt_cursor_for
+
 _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
 
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
 
 _MAX_RETRY_DELAY = 300    # 秒：退避上限
+
+# Issue #3897：失败 exec 的 cause 里 agent 输出尾行截断长度（单行日志可读、可 grep）
+_AUTOPILOT_CAUSE_TAIL_MAX = 300
+# Issue #3897 QA R1：exit_code 缺失/不可解析时的占位码（cause 里另带注记，与真实 -1 可区分）
+_AUTOPILOT_EXIT_CODE_UNKNOWN = -1
 
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
 
@@ -145,7 +160,7 @@ def _autopilot_issue_ref(task_id) -> str:
     while n > 0:
         n, r = divmod(n - 1, 26)
         s = chr(ord("a") + r) + s
-    return f"autopilot-{s}"
+    return f"{_AUTOPILOT_ISSUE_ID_PREFIX}{s}"
 
 
 def _skip_autopilot_for_takeover(repo_key, task, exec_id) -> bool:
@@ -408,6 +423,10 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     if not _is_org_analysis:
         parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
     return "\n".join(parts)
+
+# Autopilot 任务来源标记（Issue #3744）：agent_tasks.issue_id 合成键前缀。
+# 与下方 event_seq 高位命名空间同为「任务来源」单一判定依据，供场景校正入口短路。
+_AUTOPILOT_ISSUE_ID_PREFIX = "autopilot-"
 
 # Autopilot 不使用 events 表，但 agent_tasks.event_seq 需要非 0 且不能与真实事件
 # 序号碰撞（历史实现直接传 exec_id，重放/已有 events 的库会命中旧事件状态，
@@ -758,7 +777,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 不同 autopilot 任务各持独立会话，互不排队。每次触发前清空续接指针 → 全新上下文开始。
     # 注意：清空必须走直接 UPDATE（update_issue_session 的空指针不覆盖），且只影响合成会话行，
     # 不触碰真实 issue 的会话（主流程不受影响）。
-    _synthetic_issue = f"autopilot-{task.get('id') or ''}"
+    _synthetic_issue = f"{_AUTOPILOT_ISSUE_ID_PREFIX}{task.get('id') or ''}"
     _isess = get_or_create_issue_session(repo_key, agent_type, _synthetic_issue)
     _autopilot_issue_session_id = _isess.get("id") or ""
     if _autopilot_issue_session_id:
@@ -864,12 +883,10 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
         # Issue #1546：执行记录直接持有 agent_tasks.id，反查不再依赖 event_seq 撞号。
         # 回写失败只告警，不影响派发主流程（历史空值行走受约束兜底）。
         try:
-            with db_lock:
-                _c = db.cursor()
+            with _rt_cursor_for("runtime", write=True) as _c:
                 _c.execute(
                     "UPDATE autopilot_executions SET agent_task_id=? WHERE id=?",
                     (str(task_id), exec_id))
-                db.commit()
         except Exception as _at_e:
             log.warning(f"Autopilot exec {exec_id}: persist agent_task_id failed: {_at_e}")
 
@@ -894,8 +911,76 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             log.error(f"Autopilot exec {exec_id}: enqueue failed: {e}")
         _update_execution_result(exec_id, _status, error=f"入队异常: {e}", error_code=_code)
 
-def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
-    """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
+def _coerce_exit_code(exit_code) -> tuple[int, str]:
+    """归一化 exec 的 exit_code：None/非法值 → ``(-1, 注记)``。
+
+    Issue #3897 QA R1：上游 done 事件的 exit_code 可能为 None（`CommandResult.exit_code`
+    初值，见 src/domains/runtime/agents/executor.py:2632），也可能被序列化成字符串。
+    原先 `int(exit_code)` 直接抛 TypeError，从 `_finalize_autopilot_task` 无 try 包裹的
+    收尾路径逃逸 → exec 行停留 running，结果/订阅/用量收尾全被跳过。
+    返回 ``(code, note)``：note 非空表示「退出码未上报/不可解析」，让 cause 可区分
+    「agent 明确返回 -1」与「根本没拿到退出码」。
+    """
+    if exit_code is None:
+        return _AUTOPILOT_EXIT_CODE_UNKNOWN, "exit_code unavailable: executor reported None"
+    try:
+        return int(exit_code), ""
+    except (TypeError, ValueError):
+        return (_AUTOPILOT_EXIT_CODE_UNKNOWN,
+                f"exit_code unavailable: non-numeric {str(exit_code)[:40]!r}")
+
+
+def _autopilot_failure_cause(exit_code, final_text: str, note: str = "") -> str:
+    """失败 exec 的结构化 cause（恒非空）：`exit_code=<n>; output=<agent 输出尾行>`。
+
+    Issue #3897（生产 Loki：`Autopilot: task 83 exec <id> failed after 0 retries`）：
+    此前 `_finalize_autopilot_task` 失败时只写 status、`error` 留空，调度收口日志回落到
+    字面量 `failed after N retries` —— 既没有失败原因，也不解释为什么 max_retry=0
+    一次都不重试。本函数保证「失败必有 cause」：输出为空时也给出可辨识的空输出标记，
+    让日志能直接区分「agent 报错」与「agent 什么都没产出」。
+
+    ``note`` 由调用方传入已归一化的注记（如 None → -1）；直接传入原始值也可——
+    内部同样走 `_coerce_exit_code`，绝不因 None/非数字退出码抛异常。
+    """
+    _lines = [ln.strip() for ln in str(final_text or "").splitlines() if ln.strip()]
+    tail = _lines[-1] if _lines else ""
+    if not tail:
+        tail = "<no output: agent produced no stdout/stderr>"
+    if len(tail) > _AUTOPILOT_CAUSE_TAIL_MAX:
+        tail = tail[:_AUTOPILOT_CAUSE_TAIL_MAX] + "…"
+    _code, _note = _coerce_exit_code(exit_code)
+    _note = note or _note
+    _head = f"exit_code={_code}"
+    if _note:
+        _head += f" ({_note})"
+    return f"{_head}; output={tail}"
+
+
+def _retry_skip_reason(max_retry: int, attempt: int, error_code: str) -> str:
+    """解释「为什么 0 重试」（Issue #3897）：环境性失败 / 任务配置 / 已达上限。
+
+    收口日志用该字段替代原来的裸 `failed after {max_retry} retries` —— 后者在
+    max_retry=0 时是一句同义反复，读日志的人无法判断「配置就是 0」还是「代码没重试」。
+    """
+    if error_code in _ENV_FAILURE_CODES:
+        return (f"environmental failure error_code={error_code}: retry is pointless "
+                f"(handed to backoff/circuit)")
+    _max = int(max_retry or 0)
+    if _max <= 0:
+        return "max_retry=0 (task config): no retry scheduled"
+    if int(attempt) >= _max:
+        return f"reached max_retry={_max} after {int(attempt) + 1} attempt(s)"
+    return f"retries available ({int(attempt)}/{_max} used)"
+
+
+def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code, final_text: str):
+    """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。
+
+    Issue #3897 QA R1：入参 exit_code 允许为 None（done 事件 exit_code 可为 None）。
+    本函数是先落终态再发通知的收尾路径，中途异常会让 exec 永远停留 running，
+    故先归一化（None/非法 → -1 + 注记），再走原有逻辑。
+    """
+    exit_code, _code_note = _coerce_exit_code(exit_code)
     # 更新 agent_tasks 状态（用 task_id 精确更新）
     # L1（2026-10-17）：改为统一终态入口 update_task_status，其内部完成
     #   release_busy_slot（防 busy_slots 泄漏 → 本机引擎误判满载）＋ events 状态同步。
@@ -925,7 +1010,10 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
 
     # 更新 autopilot_executions
     status = "success" if exit_code == 0 else "failed"
-    _ev_error = ""
+    # Issue #3897：失败必须落 cause（exit_code + agent 输出尾行）。此前失败行 error 恒为空，
+    # 调度收口只能打 `failed after N retries`，生产 task 83 每分钟一条、无法自诊断。
+    _ev_error = ("" if status == "success"
+                 else _autopilot_failure_cause(exit_code, final_text, _code_note))
     if status == "success":
         # Issue #537 P1-1：部署类任务收口前做落地证据校验（版本指纹/健康检查）。
         # 校验失败 → 收口 failed 带 evidence 详情（纵深防御，防 false-success 也防 false-failed）。
@@ -940,7 +1028,9 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
             _evd = {"checked": False}
         if _evd.get("checked") and not _evd.get("passed"):
             status = "failed"
-            _ev_error = _evd.get("reason", "部署证据校验未通过")
+            # Issue #3897：证据失败也是失败，cause 同时带证据原因与 agent 输出尾行。
+            _ev_error = (f"deploy_evidence: {_evd.get('reason', '部署证据校验未通过')}; "
+                         f"{_autopilot_failure_cause(exit_code, final_text, _code_note)}")
             log.info(f"Autopilot exec {exec_id}: deploy evidence failed -> {status} ({_evd.get('reason')})")
     _update_execution_result(exec_id, status,
                              result=_result_summary,
@@ -1073,8 +1163,7 @@ async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
 def _exec_task_id(exec_id: int) -> int:
     """exec_id → task_id 反查（通知挂载点用）；查不到返回 0（_notify_subscribers 内 JOIN 不到行 → noop）。"""
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             row = c.execute("SELECT task_id FROM autopilot_executions WHERE id=?",
                             (exec_id,)).fetchone()
         return row[0] if row else 0
@@ -1093,11 +1182,9 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
     """
     try:
         # 抢占通知权（幂等）：失败=已通知或表缺列
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime", write=True) as c:
             cur = c.execute("UPDATE autopilot_executions SET notified=1 WHERE id=? AND notified=0",
                             (exec_id,)).rowcount
-            db.commit()
         if not cur:
             return
         # 查订阅者 + 任务信息（JOIN 取 name/repo_key；订阅表缺失时抛错被外层捕获）
@@ -1153,6 +1240,8 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
     Issue #3800：`error_code` 记录失败分类（`ENGINE_OFFLINE` / `BINDING_STALE` / 空=普通失败），
     调度收口据此改走退避/熔断通道。列缺失（迁移未跑的极端场景）时降级为不写该列，
     保证结果回写本身不因新列而失败。
+    （PR #2075：连接走 cursor_for("runtime", write=True)——mgmt 进程手动触发路径
+    下进程库里没有 autopilot_executions；本地路由由 write=True 自动提交。）
     """
     def _write(with_code: bool) -> None:
         fields = ["status=?"]
@@ -1173,8 +1262,7 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
             fields.append("completed_at=?")
             vals.append(datetime.now(timezone.utc).isoformat())
         vals.append(exec_id)
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime", write=True) as c:
             # 终态幂等：已 success/failed/cancelled 的执行不再覆盖——
             # 用户杀死(cancelled)后，轮询/迟到的完成回写不得把状态洗掉
             _cur = c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
@@ -1184,8 +1272,6 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
                 f"UPDATE autopilot_executions SET {', '.join(fields)} WHERE id=?",
                 vals
             )
-            db.commit()
-
     try:
         _write(with_code=bool(error_code))
     except Exception as e:
@@ -1244,8 +1330,7 @@ def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
     `error` 回推 ENGINE_OFFLINE / BINDING_STALE，保证退避/熔断链路不被缺列整条断掉。
     """
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             try:
                 row = c.execute(
                     "SELECT status, error, error_code FROM autopilot_executions WHERE id=?",
@@ -1474,15 +1559,13 @@ def _backoff_active(task: dict, now=None) -> bool:
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
     """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
     now_str = datetime.now().astimezone().isoformat()
-    with db_lock:
-        c = db.cursor()
+    with _rt_cursor_for("runtime", write=True) as c:
         c.execute(
             "INSERT INTO autopilot_executions "
             "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
             "VALUES (?, 'running', 0, ?, ?, ?, ?)",
             (task_id, now_str, now_str, agent_type, params_json or "")
         )
-        db.commit()
         return c.lastrowid
 
 def _update_execution(exec_id: int, status: str, result: str = "", error: str = "",
@@ -1787,8 +1870,10 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
     while _time.time() - _start < timeout:
         await asyncio.sleep(poll_interval)
         try:
-            with db_lock:
-                c = db.cursor()
+            # agent_tasks 同归 runtime：域游标下 exec 行与 agent_tasks 反查同库，
+            # _get_exec_agent_task 复用同一游标（mgmt 进程手动触发时两表都只在
+            # runtime 库——旧代码这里在 mgmt 进程下同样会 1146）。
+            with _rt_cursor_for("runtime") as c:
                 _erow = c.execute(
                     "SELECT agent_task_id, started_at, created_at "
                     "FROM autopilot_executions WHERE id=?",
@@ -1956,7 +2041,9 @@ async def _execute_task(task: dict):
                 # 直接跳出重试循环进入退避/熔断裁决。
                 log.warning(
                     f"Autopilot: task {task_id} exec {exec_id} environmental failure "
-                    f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error}")
+                    f"error_code={exec_error_code}, hand over to backoff/circuit: {exec_error} "
+                    f"attempts={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\"")
                 _env_failure = (exec_id, exec_error_code, exec_error)
                 break
             if attempt < max_retry:
@@ -1967,11 +2054,16 @@ async def _execute_task(task: dict):
                 await asyncio.sleep(delay)
                 attempt += 1
             else:
+                # Issue #3897：此前是 `error=failed after {max_retry} retries`——max_retry=0 时
+                # 既无原因也不解释为何不重试。现在恒带 cause + attempts（含首次执行）+ retry_skip
+                # （环境性失败/任务配置 max_retry=0/已达上限三种可读原因）。
                 log.error(
                     f"Autopilot task={task_id} exec={exec_id} status={exec_status} "
                     f"error_code={exec_error_code or ''} engine_ids={_task_binding_label(task)} "
                     f"consecutive_failures={int(task.get('consecutive_failures') or 0)} "
-                    f"error={exec_error or f'failed after {max_retry} retries'}")
+                    f"attempts={attempt + 1}/{max_retry + 1} max_retry={max_retry} "
+                    f"retry_skip=\"{_retry_skip_reason(max_retry, attempt, exec_error_code)}\" "
+                    f"error={exec_error or '<no cause recorded by executor>'}")
                 break
 
         if _env_failure is not None:
@@ -2392,8 +2484,7 @@ def _reap_zombie_executions() -> None:
     - 收口 success 前对部署类任务做 evidence 校验（版本指纹/健康检查，见 deploy_evidence.py）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             c.execute(
                 "SELECT id, agent_task_id, started_at, created_at "
                 "FROM autopilot_executions "

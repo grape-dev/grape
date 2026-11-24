@@ -16,6 +16,12 @@ from src.kernel.config import log
 # Issue #4064：日志统一脱敏入口（只作用于日志，请求与返回值不变）
 from src.domains.runtime.vcs.redact import redact_text, redact_url
 
+# Issue #3737：日志是凭据唯一泄露通道，URL 与上游 error body 写日志前一律先过
+# redact_url / redact_text（单一出口收口在 vcs.redact，Issue #4064），随后再按
+# _LOG_BODY_MAX 截断：既保留可排障的上游摘要，又避免整段 body 把日志撑爆。
+# 先脱敏后截断：截断只会切到已掩码的 ***，不会把凭据切成半截片段。
+_LOG_BODY_MAX = 500
+
 
 # ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
 # 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
@@ -1092,7 +1098,8 @@ class VcsApiClient:
                     err_body = e.read().decode()
                 except Exception:
                     pass
-                log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: {redact_text(err_body)}")
+                log.warning(f"VcsApiClient: {method} {redact_url(url)} → HTTP {e.code}: "
+                            f"{redact_text(err_body)[:_LOG_BODY_MAX]}")
                 if _span is not None:
                     _span.set_attribute("http.status_code", e.code)
                     _span.set_attribute("vcs.result", "http_error")

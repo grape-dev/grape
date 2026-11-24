@@ -1,4 +1,7 @@
-# Grape Server（Mgmt 进程 :38080）— Issue #699 Phase 4 四进程拆分
+# Grape Server（Mgmt 进程 :38081）— Issue #699 Phase 4 四进程拆分
+# [端口已对齐事实源 Issue #3764] 本单元端口与 scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT
+# 一致（mgmt/event/worker/insight = 38081/38082/38083/38084）；新部署推荐
+# scripts/install-grape-systemd.sh 的 grape@.service 模板路径。
 [Unit]
 Description=Grape Server (Mgmt - Workbench API)
 After=network.target
@@ -8,7 +11,7 @@ User=grape
 WorkingDirectory=/opt/grape
 Environment=PYTHONUNBUFFERED=1
 Environment=GRAPE_PROCESS_ROLE=server
-Environment=GRAPE_PORT=38080
+Environment=GRAPE_PORT=38081
 EnvironmentFile=/etc/grape/grape.env
 # 跨库视图体检（只检查）：迁移发生在进程 import 期，启动前无法修复本次发布的漂移。
 # 修复请用 scripts/deploy-after-migrate.sh（迁移 → 修复 → 复核 → 重启）；
@@ -19,9 +22,14 @@ ExecStartPre=-/opt/grape/.venv/bin/python scripts/domain_view_freshness.py \
     --create-missing-tables scripts/view_create_missing_allowlist.txt \
     --narrowed-tables scripts/view_narrowed_allowlist.txt
 ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_server:app \
-    --host 0.0.0.0 --port 38080 --workers 2
+    --host 0.0.0.0 --port 38081 --workers 2
 Restart=always
 RestartSec=5
+# Issue #3847：优雅退出——SIGTERM 先让 uvicorn 排空在途请求，45s 后仍未退出才强杀。
+# 与 nginx 的 worker_shutdown_timeout 30s 对齐（systemd 多留 15s 余量）。
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target

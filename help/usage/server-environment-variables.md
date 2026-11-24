@@ -135,6 +135,14 @@
 | `ADMIN_DB_HOST` / `PORT` / `USER` / `PASSWORD` / `NAME` | 管理台独立库（admin-db-split） | 空 | `featured_order.py` |
 | `GIT_COMMIT` | 构建时注入的提交号（监控展示） | 空 | `observability/__init__.py` |
 | `METRICS_ADDR` | 监控指标暴露地址 | 代码默认 | `observability/__init__.py` |
+| `GRAPE_DRAIN_FILE` | worker 停机摘流标记路径（存在即 `/readyz` 503） | `/tmp/grape-worker-draining` | `api/drain_state.py` |
+| `GRAPE_MAIN_DRAIN_FILE` | main+webhook 停机摘流标记路径（与 worker 隔离） | `/tmp/grape-main-webhook-draining` | `api/drain_state.py` |
+| `GRAPE_DRAIN_SECONDS` | 摘流后等待排空秒数（负数归零） | `5` | `api/drain_state.py` |
+| `GRAPE_WORKER_PORT` | worker 端口（systemd 摘流/readiness 脚本使用） | `38082` | `deploy/systemd/grape-worker-*.sh` |
+| `GRAPE_READY_TIMEOUT` | 启动 readiness 轮询超时秒数 | `60` | `deploy/systemd/grape-worker-ready.sh` |
+| `GRAPE_CLIENT_RETRY_JITTER` | 客户端指数退避抖动比例（0~0.5） | `0.2` | `domains/runtime/engine/client.py` |
+| `GRAPE_CLIENT_RETRY_BUDGET_SECONDS` | 单次请求重试总时长上限（0=不限） | `90` | `domains/runtime/engine/client.py` |
+| `HEALTH_HEARTBEAT_MISSES_THRESHOLD` | 连续错过 N 个心跳间隔判离线（与静态阈值取大） | `3` | `domains/runtime/engine/health_scorer.py` |
 
 ## 十一、联网 / 代理
 

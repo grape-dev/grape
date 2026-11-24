@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 
 from src.kernel.config import log
 
@@ -22,6 +23,24 @@ from src.kernel.config import log
 _ANCHOR_RE = re.compile(r"(?i)(?<![a-z])issues?\s*#?\s*(\d+)")
 # 标题/正文通用引用：#N
 _REF_RE = re.compile(r"#(\d+)")
+
+# fail-open 计数：守卫因查询失败而静默放行时累加，便于从业务侧/日志观测失效。
+# 写路径运行在多线程（请求工作线程）下，`+=` 非原子，必须加锁避免并发少记。
+_FAIL_OPEN_STATS = {"count": 0}
+_FAIL_OPEN_LOCK = threading.Lock()
+
+
+def _record_fail_open(session_key: str, exc: Exception, mysql_backend: bool) -> None:
+    """记录一次 fail-open（守卫未生效），保留 fail-open 语义不阻断写操作。"""
+    with _FAIL_OPEN_LOCK:
+        _FAIL_OPEN_STATS["count"] += 1
+        count = _FAIL_OPEN_STATS["count"]
+    backend = "mysql" if mysql_backend else "sqlite"
+    log.warning(
+        f"release guard: task issue lookup fail-open (guard disabled) "
+        f"count={count} backend={backend} "
+        f"session_key={session_key}: {exc}"
+    )
 
 
 def _as_int(value):
@@ -64,7 +83,10 @@ def _read_task_issue_id(session_key: str) -> str | None:
     连接 + `db_lock` 兜底。
     QA round-2 F5：只读快路径仅限 SQLite 后端——MySQL 后端下真实数据在 MySQL，
     `_db_path` 仍会拼出 sqlite 文件路径，若机器上残留旧 sessions.db 会读到陈旧库
-    （误拦或守卫形同虚设）。MySQL 后端直接走 `sm.db` 共享连接兜底。
+    （误拦或守卫形同虚设）。
+    Issue #3811：`agent_tasks` 属 runtime 域表，三库拓扑下进程主库是 mgmt，裸 SQL 恒
+    1146。MySQL 分支改为按域路由（`domain_db/domain_lock/t_runtime`），无自有 DSN 回落
+    进程库时告警；查询失败记录 fail-open 计数/告警，仍放行不阻断。
     """
     try:
         from src.kernel import session_manager as sm
@@ -90,12 +112,38 @@ def _read_task_issue_id(session_key: str) -> str | None:
         except Exception as e:
             log.warning(f"release guard: read-only issue lookup failed ({session_key}): {e}")
     try:
-        with sm.db_lock:
-            row = sm.db.cursor().execute(
-                "SELECT issue_id FROM agent_tasks WHERE id=?", (session_key,)
+        from src.kernel import db_registry
+        from src.kernel.db import t_runtime
+
+        own_dsn = db_registry.uses_own_dsn("runtime")
+        # 二次探测与 own 联合判定：`uses_own_dsn()` 内部已探过一次 `domain_db()`，
+        # 此处再取连接可能命中瞬时不可用窗口（探活失败/退避重试）返回 None。
+        # 若此时仍按 own=True 走裸表名，会拿进程库 `sm.db` 读 runtime 表（1146），
+        # 且回落告警与跨域告警都不触发。二次探测失败即视为回落，显式告警并改用
+        # 进程库限定表名。
+        domain_conn = db_registry.domain_db("runtime")
+        own = own_dsn and domain_conn is not None
+        if own:
+            db = domain_conn
+            lock = db_registry.domain_lock("runtime")
+            table = "agent_tasks"
+        else:
+            if own_dsn:
+                log.warning(
+                    f"release guard: runtime domain dsn configured but "
+                    f"domain_db() unavailable, fall back to process db "
+                    f"(session_key={session_key})"
+                )
+            db = domain_conn or sm.db
+            db_registry.warn_if_cross_domain_fallback("runtime")
+            lock = sm.db_lock
+            table = t_runtime("agent_tasks")
+        with lock:
+            row = db.cursor().execute(
+                f"SELECT issue_id FROM {table} WHERE id=?", (session_key,)
             ).fetchone()
     except Exception as e:
-        log.warning(f"release guard: resolve task issue failed ({session_key}): {e}")
+        _record_fail_open(session_key, e, mysql_backend)
         return None
     return None if not row else str(row[0] or "")
 

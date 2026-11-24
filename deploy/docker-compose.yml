@@ -38,6 +38,8 @@ services:
       - ../.grape/skills:/app/.grape/skills
       - ../examples:/app/examples
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: &default-logging
       driver: json-file
       options:
@@ -74,6 +76,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -96,6 +100,9 @@ services:
       - GRAPE_MODE=${GRAPE_MODE:-single}
       - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
       - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
+      # Issue #3749：worker trace 中继上游（LGTM OTLP/HTTP 基址，不含 /v1/traces）。
+      # 仅本容器承接 POST /api/runtime/traces；留空 = 中继禁用（恒 503）。
+      - OTLP_RELAY_TARGET=${OTLP_RELAY_TARGET:-}
     env_file:
       - path: ../.env
         required: false
@@ -104,6 +111,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -134,6 +143,8 @@ services:
       - ../configs:/app/configs
       - ../.grape/skills:/app/.grape/skills
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
@@ -152,7 +163,15 @@ services:
     volumes:
       # 四进程分流配置（upstream 指向 compose 服务名）
       - ./nginx-grape-compose.conf:/etc/nginx/conf.d/grape.conf:ro
+      # Issue #3847：grape.conf 内 include 的公共片段必须一并挂进容器，否则 nginx
+      # 启动即 [emerg] open() failed（include 路径相对 prefix /etc/nginx 解析）。
+      # 只能逐个挂载 .inc：整目录挂载会把 nginx-grape*.conf 一并纳入 conf.d/*.conf
+      # 的自动 include，产生重复 upstream / 重复 listen 冲突。
+      - ./nginx-grape-upstream.inc:/etc/nginx/conf.d/nginx-grape-upstream.inc:ro
+      - ./nginx-grape-upstream-keepalive.inc:/etc/nginx/conf.d/nginx-grape-upstream-keepalive.inc:ro
     restart: unless-stopped
+    # Issue #3847：给 SIGTERM 排空留出窗口（与 systemd TimeoutStopSec=45 对齐）
+    stop_grace_period: 45s
     logging: *default-logging
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health"]

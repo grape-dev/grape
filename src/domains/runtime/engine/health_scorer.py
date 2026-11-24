@@ -48,6 +48,33 @@ _MAX_CONSECUTIVE_FAILURES = int(os.environ.get("HEALTH_MAX_CONSECUTIVE_FAILURES"
 # 心跳超时阈值（秒）：last_seen_at 超过此值或为 NULL → 引擎失联，健康分强制 0。
 # 与 engine_select._RUNTIME_STALE_SECONDS / health.py 5min 判定保持一致。
 _HEARTBEAT_STALE_SECONDS = int(os.environ.get("HEALTH_HEARTBEAT_STALE_SECONDS", "100"))
+# Issue #3969：显式「连续 ≥N 个心跳间隔才判离线」口径。worker 心跳默认 15s（env
+# RUNTIME_HEARTBEAT_INTERVAL）；单次 502 会被客户端退避重试覆盖，不应判离线，只有
+# 连续错过 N 个间隔才算失联。实际阈值 = max(静态阈值, interval × N)，默认
+# max(100, 15×3)=100 保持现网行为不变。
+_HEARTBEAT_INTERVAL_SECONDS = float(os.environ.get("RUNTIME_HEARTBEAT_INTERVAL", "15"))
+_HEARTBEAT_MISSES_THRESHOLD = int(os.environ.get("HEALTH_HEARTBEAT_MISSES_THRESHOLD", "3"))
+
+
+def _heartbeat_stale_threshold() -> int:
+    """心跳失联阈值（秒）：`max(HEALTH_HEARTBEAT_STALE_SECONDS, interval × misses)`。
+
+    每次调用读取 env，便于测试与按部署调参；默认 100s 与 engine_select / health.py
+    的 `RUNTIME_STALE_SECONDS=100` 对齐。
+    """
+    try:
+        stale = int(os.environ.get("HEALTH_HEARTBEAT_STALE_SECONDS", str(_HEARTBEAT_STALE_SECONDS)))
+    except (TypeError, ValueError):
+        stale = _HEARTBEAT_STALE_SECONDS
+    try:
+        interval = float(os.environ.get("RUNTIME_HEARTBEAT_INTERVAL", str(_HEARTBEAT_INTERVAL_SECONDS)))
+    except (TypeError, ValueError):
+        interval = _HEARTBEAT_INTERVAL_SECONDS
+    try:
+        misses = int(os.environ.get("HEALTH_HEARTBEAT_MISSES_THRESHOLD", str(_HEARTBEAT_MISSES_THRESHOLD)))
+    except (TypeError, ValueError):
+        misses = _HEARTBEAT_MISSES_THRESHOLD
+    return int(max(stale, interval * max(1, misses)))
 # 小样本保护阈值（issue #439）：窗口内任务总数 < N 时豁免连败惩罚、失败率按
 # failed/N 稀释——低样本引擎单次失败不再打入拒派区（旧逻辑 total=1/failed=1
 # → 0 分 → claim_by_tag 拒派死锁）。
@@ -402,7 +429,7 @@ def _fetch_heartbeat(runtime_id: int) -> bool:
         ts = parse_dt(last_seen_at)
         if ts is None:
             return False  # 解析失败 → 保守判为失联
-        return (time.time() - ts) <= _HEARTBEAT_STALE_SECONDS
+        return (time.time() - ts) <= _heartbeat_stale_threshold()
     except Exception as e:
         log.warning(f"health_scorer: fetch_heartbeat failed for runtime={runtime_id}: {e}")
         return False

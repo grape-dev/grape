@@ -196,6 +196,7 @@ _DISPATCH_STALL_MIN_SECONDS = 2 * _ENGINE_HEARTBEAT_SECONDS
 
 # 引擎心跳新鲜度不设 patrol 副本：_engine_unreachable 内单源引用
 # src.domains.runtime.engine.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
+
 _LEADER_TTL_MULTIPLIER = 2  # 心跳窗 = 2×周期（集群时钟漂移余量，设计 §八）
 
 # 巡检读的表分散在三域：SQL 归 owner 域 public，本模块只调用（三库独立后不能用进程库直查）
@@ -764,6 +765,17 @@ def _iter_completed_tasks(cutoff: str, chunk: int = 500):
     连接上并发执行语句的迭代语义风险），峰值内存 O(500 行)。
     分页期间并发插入的新任务由 INSERT OR IGNORE 幂等兜底（同发现不重插）。
     id 为 TEXT 主键（自动索引），id > '' 匹配全部非空 id。
+
+    不漏不重（Issue #3813 AC⑥）：游标取上一页尾 id 单调推进——同轮内每行
+    恰好访问一次；分页窗口内新插入行（UUID 字典序可小于游标）本轮错过、
+    下轮覆盖，finding 幂等保证不丢（S49 原语义保持）。
+
+    批间让步（S54/Issue #3813「单轮不长时间独占」三层模型的最后一层）：
+      1. 事件循环：run_patrol_once 整体经 to_thread 卸载（D23，不动）；
+      2. DB 车道：每页独立 _any_cursor，锁天然只持「取页」瞬间（S49，不动）；
+      3. 批间让步：每拉到一页后调 _scan_batch_yield（默认 time.sleep(0) 让出
+         GIL——单库拓扑下同进程等待 db_lock 的 API 线程获得插入机会；长轮次
+         可经 meta patrol:scan_yield_ms 调大让步窗口，默认 0 行为不变）。
     """
     last_id = ""
     while True:
@@ -771,6 +783,7 @@ def _iter_completed_tasks(cutoff: str, chunk: int = 500):
         rows = _rt_patrol.tasks_completed_page(cutoff, last_id, chunk)
         if not rows:
             return
+        _scan_batch_yield()   # S54：批间让步（页已到手、锁已释放，处理前让出）
         for row in rows:
             yield row
         last_id = rows[-1][0]
@@ -1155,6 +1168,114 @@ _TERMINAL_RETENTION_STATUSES = ("dismissed", "false_positive", "compensated",
 # 与 _LOOKBACK_RUNTIME_DAYS 同款纪律）；命中=告警不熔断。
 _SLOW_SCAN_WARN_MS = 30000
 
+# ===== Issue #3813 / S54：巡检扫描批间让步（AC⑥「单轮不长时间独占」的第三层）=====
+# meta 键 patrol:scan_yield_ms：completed 候选键集分页的批间让步毫秒数。
+# 默认 0（time.sleep(0)，行为不变）；大库长轮次灰度时可调大（如 5-20ms）给同进程
+# DB 竞争者更多喘息。0 也是合法值（minimum=0），与 confirm/interval 的正数口径不同。
+# （三层让出模型：①事件循环=to_thread 卸载，D23 已建；②DB 车道=每页独立
+#  _any_cursor，S49 已建；③本层=批间让步，3813 新增。）
+_SCAN_YIELD_META = "patrol:scan_yield_ms"
+
+def scan_yield_seconds() -> float:
+    """批间让步秒数（meta 真源，每批一次读取；坏值回落 0 并告警）。"""
+    return _meta_int(_SCAN_YIELD_META, 0, minimum=0) / 1000.0
+
+def _scan_batch_yield():
+    """键集分批批间让步（独立函数而非内联 time.sleep：单点可测——测试 patch
+    计数断言批间调用次数；meta 读频可控——每批一次，500 行/批成本可忽略）。"""
+    _seconds = scan_yield_seconds()
+    time.sleep(_seconds if _seconds > 0 else 0)
+
+# ===== Issue #3813 / S53：候选为空前置短路（AC③）=====
+# 探针顺序 cheap-first：一旦任一路命中立即返回 True（后续路不再探）。
+# 五路全部为 LIMIT 1 有界索引查询（新复合索引支撑，EXPLAIN type != ALL）——
+# 零候选轮次的查询数=5（常量级），known-set 全表拉取 / 逐行判定 / 落库 /
+# TTL 清理全部短路跳过（见 _run_patrol_once_inner）。
+def _scan_probe_has_candidates(cutoff: str) -> bool:
+    """候选存在性探针：completed 窗内首页 / running / queued / 两形态 a2a 事件。
+
+    fail-open 铁律（S53）：任一路探针异常 → 返回 True（判定失败=有候选），
+    短路静默漏扫是被禁止的失败形态（与 dispatch 检测的容错口径一致）。
+    单路异常不中止其余路（每路独立 try，全部失败仍返回 True）。
+    """
+    try:
+        if cutoff:
+            if _rt_patrol.read_one_any("tasks_probe_completed_cutoff",
+                                        (cutoff, "")) is not None:
+                return True
+        else:   # audit 档：全历史无窗（不得把 runtime 窗下推进探针=漏候选）
+            if _rt_patrol.read_one_any("tasks_probe_completed_all",
+                                        ("",)) is not None:
+                return True
+        if _rt_patrol.read_one_any("tasks_probe_running") is not None:
+            return True
+        if _rt_patrol.read_one_any("tasks_probe_queued") is not None:
+            return True
+        if _rt_patrol.read_one_any("events_probe_unclaimed") is not None:
+            return True
+        if _rt_patrol.read_one_any("events_probe_failed_dispatch") is not None:
+            return True
+    except Exception as e:
+        # 探针面整体异常（缺表/拓扑断连）→ fail-open 全量路径，日志留痕
+        log.warning(f"[patrol] scan probe failed (fail-open to full scan): {e}")
+        return True
+    return False
+
+# ===== Issue #3813 / S55：慢扫描采样日志（AC⑤ 脱敏 + 限频）=====
+# 采样对象=五路候选查询（36-42s 固定成本主源）；known-set 有 S53 短路 + covering
+# 索引后不再采样。限频窗：同窗内第二次采样直接返回空（防告警风暴 16 次/小时×
+# 每轮 5 条 EXPLAIN 的日志放大——Spec「限频采样」决策）。
+_EXPLAIN_SAMPLE_WINDOW_SECONDS = 600
+_EXPLAIN_SAMPLE_LINE_MAX = 240
+_EXPLAIN_SAMPLE_STATE: dict = {"ts": 0.0}
+
+# 采样参数用占位常量（cutoff 空串/空游标/LIMIT 1）：EXPLAIN 只取执行计划、
+# 不回数据行，计划形状不受参数值影响——参数无需携带真实数据，零字面量泄漏面。
+_PROBE_SAMPLE_CALLS = (
+    ("tasks_completed_page_cutoff", ("", "", 1)),
+    ("tasks_running_rows", ()),
+    ("tasks_queued_rows", ()),
+    ("patrol_a2a_unclaimed_rows", ()),
+    ("patrol_a2a_failed_dispatch_rows", ()),
+)
+
+def _sanitize_sql_literals(sql: str) -> str:
+    """采样 SQL 脱敏（AC⑤）：字面量→?，保留 SQL 形状。
+
+    单引号字符串（含转义折叠）与裸数字统一替换为 ``?``——日志里只留查询
+    形状，不落任何参数值（repo_key/issue_id/时间戳等数据字段零泄漏）。
+    """
+    out = re.sub(r"'(?:[^']|'')*'", "?", sql or "")
+    out = re.sub(r"\b\d+\b", "?", out)
+    return out
+
+def _slow_scan_explain_samples() -> list:
+    """慢扫描采样行（脱敏 SQL + 执行计划摘要）；限频窗内返回 []。
+
+    单条采集失败吞掉继续（S5 口径）；全部失败返回空列表（采样是观测面，
+    绝不反压扫描主路径）。EXPLAIN 结果整行 str() 后限长——MySQL 多列与
+    SQLite detail 列统一处理，不在 DB 层解释计划（保持事实原样给人工判读）。
+    """
+    now = time.time()
+    if now - _EXPLAIN_SAMPLE_STATE["ts"] < _EXPLAIN_SAMPLE_WINDOW_SECONDS:
+        return []
+    _EXPLAIN_SAMPLE_STATE["ts"] = now
+    lines = []
+    for name, params in _PROBE_SAMPLE_CALLS:
+        try:
+            # 采样参数是计划形状常数（窗起点/空游标/单行），无数据泄漏面；
+            # EXPLAIN 不回数据行，但计划 detail 可能内嵌 WHERE 常量——计划同样脱敏。
+            shape = _sanitize_sql_literals(_rt_patrol.named_query_sql(name))
+            plan_rows = _rt_patrol.explain_named_query(name, params)
+            plan = _sanitize_sql_literals(
+                " | ".join(str(col) for row in plan_rows for col in row))
+            lines.append(
+                f"query={name} shape={shape[:120]} "
+                f"plan={plan[:_EXPLAIN_SAMPLE_LINE_MAX]}".rstrip())
+        except Exception as e:
+            lines.append(f"query={name} explain failed: {str(e)[:80]}")
+    return lines
+
 def cleanup_terminal_findings(retention_days: int = -1) -> int:
     """删除超过保留期的终态 findings 行（R11/D21）。
 
@@ -1211,6 +1332,28 @@ def _run_patrol_once_inner(mode: str) -> dict:
         days = _LOOKBACK_RUNTIME_DAYS
         cutoff = datetime.fromtimestamp(
             time.time() - days * 86400, tz=timezone.utc).isoformat()
+    # S53/Issue #3813（AC③）：候选为空前置短路——五路 LIMIT 1 有界探针全空时，
+    # 本轮不做任何行级查询：known-set 全表拉取（O(findings)）、断链/僵尸/派发
+    # 三检测的逐行判定与反查、finding 落库、TTL 清理全部跳过。零候选轮次的
+    # 查询数=探针 5 条（常量级，EXPLAIN type != ALL 可证）。
+    # TTL 清理被跳过的安全性：findings 只由候选产生，零候选轮 findings 集恒定
+    # 不膨胀；过期终态行的清理延迟到下一个有候选轮（DELETE 按 cutoff 一次清
+    # 齐，天级粒度无感）——漏清理不丢数据、延迟可接受。
+    # 探针 fail-open（_scan_probe_has_candidates 内铁律）：探针异常走全量路径。
+    if not _scan_probe_has_candidates(cutoff):
+        duration_ms = int((time.time() - t0) * 1000)
+        log.info(f"[patrol] scan short-circuited: zero candidates "
+                 f"(probes=5 constant, 0 row-level queries); "
+                 f"duration={duration_ms}ms")
+        # S40 告警在短路轮同样成立：常量级探针若仍超阈值，说明探针本身退化为
+        # 大范围扫描（索引失效/优化器计划漂移）——那正是要暴露的异常，禁止静默。
+        if duration_ms > _SLOW_SCAN_WARN_MS:
+            log.warning(f"[patrol] slow scan: duration={duration_ms}ms > "
+                        f"{_SLOW_SCAN_WARN_MS}ms threshold (candidates=0, "
+                        f"short-circuited); check patrol probe indexes "
+                        f"(idx_events_type_status_seq / idx_tasks_status_completed_id)")
+        return {"broken": 0, "zombie": 0, "stalled": 0, "inserted": 0,
+                "purged": 0, "duration_ms": duration_ms}
     known = _known_task_ids()   # S51/R22：轮内一次拉取，双检测共享引用（原两检测各自全表拉同一集合）
     broken = detect_broken_chains(cutoff, known)
     zombies = detect_zombies(known)
@@ -1226,9 +1369,14 @@ def _run_patrol_once_inner(mode: str) -> dict:
     # 即告警不熔断（阈值拍太紧=告警噪音，太松=无感；30s=约 60× 当前实测上界，
     # 命中即说明量级变化需复核索引/短路健康度）。
     if duration_ms > _SLOW_SCAN_WARN_MS:
+        # S40 告警行逐字保留（Loki 查询口径 `{service_name="grape-mgmt"} |= "slow scan"` 兼容）
         log.warning(f"[patrol] slow scan: duration={duration_ms}ms > "
                     f"{_SLOW_SCAN_WARN_MS}ms threshold (candidates={len(broken) + len(zombies)}); "
                     f"check S31 known-set short-circuit and event/task indexes")
+        # S55/Issue #3813（AC⑤）：慢扫描采样——脱敏 SQL 形状 + EXPLAIN 计划摘要，
+        # 限频（默认 600s 窗，见 _slow_scan_explain_samples）防告警风暴下的日志放大。
+        for _sample in _slow_scan_explain_samples():
+            log.warning(f"[patrol] slow scan sample: {_sample}")
     return {"broken": len(broken), "zombie": len(zombies), "stalled": len(stalled),
             "inserted": inserted, "purged": purged, "duration_ms": duration_ms}
 

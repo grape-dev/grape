@@ -23,7 +23,7 @@ URL_PLACEHOLDER = "<url-redacted>"
 #: 非 str / 替换失败时的文本占位
 TEXT_PLACEHOLDER = "<text-redacted>"
 
-#: 敏感 query 参数名（大小写不敏感）：token 家族 + 预签名家族（OBS/S3）
+#: 敏感 query 参数名（大小写不敏感）：token 家族 + 预签名家族（OBS/S3）+ 密钥/口令家族
 SENSITIVE_PARAMS = (
     "access_token",
     "token",
@@ -35,6 +35,11 @@ SENSITIVE_PARAMS = (
     "x-amz-signature",
     "x-amz-credential",
     "x-amz-security-token",
+    # Issue #3737：GitLab `access_key` / 通用 `api_key` / `password` 与 token 同风险，
+    # 旧 VcsApiClient 私有实现已覆盖，收敛到本模块时不得收窄覆盖面。
+    "access_key",
+    "api_key",
+    "password",
 )
 
 # 长名优先，避免 `token` 抢先匹配 `access_token` 的前半段；
@@ -66,6 +71,14 @@ _TEXT_BEARER_RE = re.compile(
 
 # 裸 token 前缀（异常串里可能只有一个凭据、没有参数名）
 _TEXT_PREFIX_RE = re.compile(r"\b(grape_|gcw_|rta_|tk_|ghp_|glpat_)[A-Za-z0-9_\-]{6,}")
+
+# URL 编码赋值形态（嵌套 URL / 上游错误回显）：`access_token%3D<凭据>`、`%26access_token%3D…`。
+# 这里不能用 `\b` 定位参数名：编码形态前面是 `%26`，末位 `6` 是 word 字符，`\b` 不成立
+# （Issue #3737 复审 Required 项即此边界缺陷 → `%26` 形态整体漏匹配、凭据照旧落日志）。
+# 改为显式吞掉可选编码分隔符后再重建，分隔符原样保留，只掩码值。
+_TEXT_ENCODED_KV_RE = re.compile(
+    r"(?i)(?P<lead>%26|%3F|%23|%3B)?(?P<name>" + _PARAM_ALT + r")(?P<sep>%3[dD])"
+    r"(?P<value>[^\s&\"'<>]+)")
 
 
 def redact_url(url) -> str:
@@ -104,7 +117,7 @@ def redact_headers(headers) -> dict:
 
 
 def redact_text(text) -> str:
-    """对任意串做 `key=value` / `Bearer|token <凭据>` / 裸 token 前缀打码。
+    """对任意串做 `key=value` / 编码形态 `key%3Dvalue` / `Bearer|token <凭据>` / 裸前缀打码。
 
     None → ""；非 str 先 `str()` 兜底；任何失败返回 `TEXT_PLACEHOLDER`，不抛异常。
     """
@@ -116,7 +129,10 @@ def redact_text(text) -> str:
         except Exception:
             return TEXT_PLACEHOLDER
     try:
-        out = _TEXT_KEY_RE.sub(lambda m: m.group("prefix") + MASK, text)
+        out = _TEXT_ENCODED_KV_RE.sub(
+            lambda m: f"{m.group('lead') or ''}{m.group('name')}{m.group('sep')}{MASK}",
+            text)
+        out = _TEXT_KEY_RE.sub(lambda m: m.group("prefix") + MASK, out)
         out = _TEXT_BEARER_RE.sub(lambda m: f"{m.group(1)} {MASK}", out)
         out = _TEXT_PREFIX_RE.sub(lambda m: m.group(1) + MASK, out)
         return out

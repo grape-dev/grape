@@ -195,6 +195,21 @@ def exec_any(name: str, params: tuple = ()) -> int:
 
 # ---------- 仓库凭据（grape_t_repo_credentials 归 insight：唯一权威读写口）----------
 
+def _invalidate_token_resolve_cache(repo_key: str) -> None:
+    """Issue #3740：rc 写路径失效 kernel 的 RepoBotToken 解析缓存。
+
+    `token_resolver` 为消除同请求重复解析引入了 `(repo_key, field)` 短 TTL 缓存
+    （≤60s）。没有这一步，轮换/回填写入后同进程解析仍要等一个 TTL 窗口才可见；
+    失效范围仅本进程（跨进程受 TTL 约束，spec 已接受）。缓存失效失败绝不影响写入。
+    """
+    try:
+        from src.kernel.token_resolver import invalidate_repo_bot_token_cache
+
+        invalidate_repo_bot_token_cache(repo_key)
+    except Exception:  # noqa: BLE001 - kernel 未就位/缓存空时不阻断写路径
+        pass
+
+
 def repo_credential_value(repo_key: str, cred_type: str) -> str:
     """读单条凭据值（未解密，调用方自行 decrypt）；无行返回空串。"""
     row = read_one_any("repo_cred_value", (repo_key, cred_type))
@@ -228,16 +243,21 @@ def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
     with _any_tx() as c:
         cur = c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
         if int(getattr(cur, "rowcount", 0) or 0) > 0:
-            return {"action": "updated", "id": 0}
-        try:
-            new_id = uuid7_str()
-            c.execute(_any_sql("repo_cred_insert"),
-                      (new_id, repo_key, cred_type, value, updated_at))
-            return {"action": "inserted", "id": new_id}
-        except Exception:
-            # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
-            c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
-            return {"action": "updated_after_conflict", "id": 0}
+            result = {"action": "updated", "id": 0}
+        else:
+            try:
+                new_id = uuid7_str()
+                c.execute(_any_sql("repo_cred_insert"),
+                          (new_id, repo_key, cred_type, value, updated_at))
+                result = {"action": "inserted", "id": new_id}
+            except Exception:
+                # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
+                c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+                result = {"action": "updated_after_conflict", "id": 0}
+    # Issue #3740：写入生效后失效解析缓存（轮换/回填同进程即时可见）。
+    # 放在事务提交之后，避免回滚时把缓存清成已回滚值。
+    _invalidate_token_resolve_cache(repo_key)
+    return result
 
 
 def delete_repo_credential_value(repo_key: str, cred_type: str) -> int:
@@ -280,6 +300,8 @@ def upsert_repo_credentials(repo_key: str, items: list[tuple[str, str]],
                 c.execute(_any_sql("repo_cred_update"),
                           (value, updated_at, repo_key, cred_type))
                 out.append({"action": "updated_after_conflict", "id": 0})
+    # Issue #3740：多行写入生效后失效解析缓存（bot + webhook 同事务换发一次清）。
+    _invalidate_token_resolve_cache(repo_key)
     return out
 
 
@@ -292,7 +314,10 @@ def list_repo_credential_rows(repo_key: str = "") -> list[tuple]:
 
 def clear_repo_credential_value(repo_key: str, updated_at: str, cred_type: str = "bot") -> int:
     """把指定类型凭据置空（默认 bot；返回影响行数）。"""
-    return exec_any("repo_cred_clear", (updated_at, repo_key, cred_type))
+    affected = exec_any("repo_cred_clear", (updated_at, repo_key, cred_type))
+    # Issue #3740：清空即「无凭据」，解析缓存必须跟着失效（否则仍返回已被清除的值）。
+    _invalidate_token_resolve_cache(repo_key)
+    return affected
 
 
 def any_repo_credential(repo_keys: list[str]) -> bool:

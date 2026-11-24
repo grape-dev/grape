@@ -2808,6 +2808,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - local_engines：discover_backends() 本机扫描（沙箱内通常全空）
     - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
+    - degraded / engines_unavailable_reason：runtime 域读失败时置 true 并给出原因码
+      （`query_failed` / `runtime_domain_unavailable`）；此时 needs_worker 语义不变，
+      由前端依据 degraded 区分「确实无引擎」与「查询失败」，不做误引导。
     """
     from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
     from src.domains.runtime.engine.executor import discover_backends
@@ -2823,9 +2826,17 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     # repo 匹配值：单一真源等值匹配（engine_onboarding_repo_key）——带前缀原样、
     # 裸形态查 managed_repos 定唯一前缀。不做多形态撒网 IN（跨平台同名仓库泄漏）。
     _rk = engine_onboarding_repo_key(repo or "")
+    # Issue #3857：agent_runtimes / runtime_credentials 属 runtime 域，此前用进程主库
+    # （持进程锁的 session_manager 连接）读取——三库拓扑下 mgmt 进程主库没有这两张表，必 1146；
+    # 异常被下面 except 吞成 WARNING，remote 恒空、needs_worker 恒 true（4 台主控约
+    # 216 条/小时）。改走内核唯一路由 `cursor_for("runtime")`：domain → 域连接；
+    # local → 进程主库（单库拓扑/本域进程零回归）；三库缺 DSN → DomainUnavailable
+    # （绝不静默回落 mgmt）。只读查询，无需事务提交。
+    degraded = False
+    degraded_reason = ""
     try:
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.db_registry import cursor_for
+        with cursor_for("runtime") as c:
             # 判定语义：本端点回答"该用户是否还有可用的执行引擎"——
             # global（本组织内免提示）+ 本人 user-scope + 本人名下所有 repo-scope
             # （不限当前 repo）。repo_key 用于 remote_engines 的上下文过滤（展示）。
@@ -2860,7 +2871,22 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
             else:
                 remote = [e for e in _all if e.get("scope") != "repo"]
     except Exception as e:
-        log.warning(f"engine-onboarding: query agent_runtimes failed: {e}")
+        degraded = True
+        degraded_reason = "query_failed"
+        # 路由定位字段（同 #3826/#3865 口径）：单行日志即可回答「本进程连的是哪个库」，
+        # 避免「旧进程未重启」与「仍在打 mgmt 库」两种根因在日志上同形。
+        _route = "unknown"
+        try:
+            _route = _dbreg.route_of("runtime")
+        except _dbreg.DomainUnavailable:
+            _route = "unavailable"
+            degraded_reason = "runtime_domain_unavailable"
+        except Exception as _re:  # noqa: BLE001 - 仅日志字段
+            _route = f"unknown:{type(_re).__name__}"
+        log.warning(
+            f"engine-onboarding: agent_runtimes read degraded ({degraded_reason}) — "
+            f"route={_route} target_db=runtime pid={os.getpid()} "
+            f"host={_dbreg.host_label()}: {e}")
 
     local_usable = [e["name"] for e in local if e.get("installed")]
     needs_worker = not local_usable and not _user_visible
@@ -2872,6 +2898,9 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
         "local_engines": local,
         "remote_engines": remote,
         "needs_worker": needs_worker,
+        # Issue #3857：查询失败不再与「确实无引擎」同形——前端据此抑制误引导
+        "degraded": degraded,
+        "engines_unavailable_reason": degraded_reason,
     }
 
 
@@ -3257,6 +3286,9 @@ def _relay_target() -> str:
 
 
 _relay_warn_ts = 0.0
+# Issue #3749：启动自检只跑一次（进程内）；与请求期提示共用 _warn_relay_disabled
+# 的 10 分钟窗口，避免启动就 WARN 一次、首个请求又 WARN 一次。
+_relay_selfcheck_done = False
 
 
 def _warn_relay_disabled() -> None:
@@ -3267,7 +3299,9 @@ def _warn_relay_disabled() -> None:
         return
     _relay_warn_ts = now
     log.warning("trace relay disabled: OTLP_RELAY_TARGET 未配置，worker trace 出口返回 "
-                "503（仅影响 trace 上报，不影响业务）")
+                "503（仅影响 trace 上报，不影响业务）。该变量应为 LGTM 的 OTLP/HTTP "
+                "基址且不含 /v1/traces（如 http://<lgtm-host>:4318），在进程环境变量 "
+                "（.env / systemd EnvironmentFile）中配置后中继即启用。")
 
 
 # Issue #3699：禁用态是**配置态确定性分支**（不是事故）——给响应加确定性标记头，
@@ -3294,6 +3328,57 @@ except Exception as _relay_metric_e:  # noqa: BLE001
                 f"{type(_relay_metric_e).__name__}: {_relay_metric_e}")
 
 
+def _relay_count(status: str) -> None:
+    """中继结果打点（未注册/异常时静默，不影响请求路径）。
+
+    Issue #3749：禁用态（未配 OTLP_RELAY_TARGET）同样按 status="503" 计数——
+    配置缺失必须能被指标与告警捕获，而不是只靠人工翻日志。
+    """
+    if _relay_total is None:
+        return
+    try:
+        _relay_total.labels(status=status).inc()
+    except Exception:
+        pass
+
+
+def trace_relay_selfcheck() -> dict:
+    """启动期一次中继自检（Issue #3749）：把「部署漏配」在启动阶段就说清楚。
+
+    - `OTLP_RELAY_TARGET` 为空 → WARNING 一次（复用 `_warn_relay_disabled` 的限频文案，
+      含变量名、503 语义与配置方式），并占用该 10 分钟窗口，请求期不再立刻重复刷；
+    - 非空 → INFO 打印生效端点 `<target>/v1/traces`（与请求路径同口径）；若变量误带了
+      `/v1/traces` 后缀 → 额外 WARNING：拼出的 `/v1/traces/v1/traces` 会被上游 404，
+      `status="404"` 不命中 503 告警，等于静默失效。
+
+    幂等：同一进程只输出一次；返回
+    `{enabled, upstream, endpoint, misconfigured}` 便于启动日志/测试断言。
+    """
+    global _relay_selfcheck_done
+    target = _relay_target()
+    endpoint = (target.rstrip("/") + "/v1/traces") if target else ""
+    misconfigured = bool(target) and target.rstrip("/").endswith("/v1/traces")
+    info = {"enabled": bool(target),
+            "upstream": target,
+            "endpoint": endpoint,
+            "misconfigured": misconfigured}
+    if _relay_selfcheck_done:
+        return info
+    _relay_selfcheck_done = True
+    if not target:
+        _warn_relay_disabled()
+    else:
+        if misconfigured:
+            log.warning(
+                "[trace-relay] selfcheck: OTLP_RELAY_TARGET must be the OTLP/HTTP "
+                "base endpoint without the /v1/traces suffix; got "
+                f"{target!r}. Forwarded URL would be {endpoint}, which the upstream "
+                "rejects (404) — status=\"404\" does not match the 503 alert, so "
+                "the relay fails silently.")
+        log.info(f"[trace-relay] selfcheck: enabled — forwarding to {endpoint}")
+    return info
+
+
 @router.post("/traces", operation_id="runtime_traces_relay",
              summary="Relay worker OTLP traces to LGTM",
              description="Transparently forwards worker OTLP/HTTP trace exports to the LGTM "
@@ -3308,6 +3393,8 @@ async def runtime_traces_relay(request: Request,
         # Issue #3699：配置缺失是确定性禁用（重试无意义）。body/状态码契约不变，
         # 只加标记头供访问日志精确降噪；补配置提示按 10 分钟限频（见 _warn_relay_disabled）。
         _warn_relay_disabled()
+        # Issue #3749：禁用态也要计入 status="503"——否则「没配」永远进不了指标/告警。
+        _relay_count("503")
         return _RelayResponse(status_code=503,
                               content='{"detail":"trace relay disabled"}',
                               media_type="application/json",
@@ -3334,19 +3421,11 @@ async def runtime_traces_relay(request: Request,
         async with httpx.AsyncClient(timeout=10) as hc:
             r = await hc.post(target.rstrip("/") + "/v1/traces",
                               content=body, headers=fwd_headers)
-        if _relay_total is not None:
-            try:
-                _relay_total.labels(status=str(r.status_code)).inc()
-            except Exception:
-                pass
+        _relay_count(str(r.status_code))
         return _RelayResponse(status_code=r.status_code, content=r.content,
                               media_type=r.headers.get("content-type", "application/x-protobuf"))
     except Exception as e:
-        if _relay_total is not None:
-            try:
-                _relay_total.labels(status="relay_unreachable").inc()
-            except Exception:
-                pass
+        _relay_count("relay_unreachable")
         log.warning(f"trace relay unreachable: {type(e).__name__}")
         return _RelayResponse(status_code=502,
                               content='{"detail":"lgtm unreachable"}',

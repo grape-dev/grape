@@ -100,6 +100,21 @@ EndpointFetcher = Callable[[str, str], Awaitable[tuple]]
 LeaseChecker = Callable[[], bool]
 
 
+async def _default_endpoint_fetcher(app_id: str, app_secret: str) -> tuple:
+    """取飞书 WS 动态端点（短生命周期 API 客户端，**用完即关**）。
+
+    Issue #3897 D：原实现在 `connect()` 里现场 `FeishuAsync()`（自建 aiohttp session）
+    并挂在闭包里永不 close → `Unclosed client session`（生产 mgmt 1 小时 12 条）。
+    endpoint 只在每次建连时取一次，不需要常驻连接池；`finally` 保证异常路径也关闭。
+    """
+    from ...feishu_async import BotContext, FeishuAsync
+    api = FeishuAsync()
+    try:
+        return await api.get_ws_endpoint(BotContext(app_id=app_id, app_secret=app_secret))
+    finally:
+        await api.close()
+
+
 class FeishuChannel(Channel):
     """飞书 WS 长连接渠道。connect() = run_bot 生命周期迁移（A6）。"""
 
@@ -150,15 +165,10 @@ class FeishuChannel(Channel):
         app_id = str(self._cfg.raw.get("app_id", ""))
         app_secret = str(self._cfg.raw.get("app_secret", ""))
         if self._endpoint is None:
-            # 默认端点：legacy FeishuAsync API 客户端（get_ws_endpoint(ctx) 签名适配）
-            from ...feishu_async import BotContext, FeishuAsync
-            api = FeishuAsync()
-            bot_ctx = BotContext(app_id=app_id, app_secret=app_secret)
-
-            async def _fetch(aid: str, secret: str):
-                return await api.get_ws_endpoint(bot_ctx)
-
-            self._endpoint = _fetch
+            # 默认端点：短生命周期 FeishuAsync 客户端（get_ws_endpoint 签名适配）。
+            # Issue #3897 D：客户端在 `_default_endpoint_fetcher` 内用完即 close，
+            # 不再把自带 aiohttp session 的实例挂在闭包里泄漏。
+            self._endpoint = _default_endpoint_fetcher
 
         if not ctx.cancelled and self._lease_checker is not None:
             # 问题 A：连接前复查 lease 是否还在自己手里（token 失配 → 让渡）
