@@ -38,7 +38,8 @@
 `socket.bind() + listen()` 后 `os.execv` uvicorn 并传 `--fd`：
 - 先 bind 再 exec，uvicorn 直接在既有 fd 上 accept —— 单/多 worker 行为一致；
 - 端口/host/workers 从 `GRAPE_WORKER_PORT`/`GRAPE_HOST`/`GRAPE_UVICORN_WORKERS` 读取，
-  缺省对齐单元（0.0.0.0:38082, workers=2）；
+  缺省对齐单元（0.0.0.0:38083，#3764 端口事实源；mgmt/event/worker/insight =
+  38081/38082/38083/38084，本单元 worker=38083；workers=2）；
 - bind 失败显式退出非 0（systemd Restart 拉起），不静默换端口。
 
 ## 5. 告警（deploy/alerts.yml）

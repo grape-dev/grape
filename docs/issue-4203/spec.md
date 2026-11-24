@@ -36,6 +36,7 @@ systemd 重启 + uvicorn 启动共 12.1s，窗口内网关 502 共 339 次，其
 
 ## 5. Open Question（不阻塞）
 
-004 实跑单元端口 8083/9083 与仓库 38082/39083 不符；MemoryMax 取值与 RSS 增长源
+004 实跑单元端口 8083/9083 与仓库端口事实源（#3764：mgmt/event/worker/insight =
+38081/38082/38083/38084）不符；MemoryMax 取值与 RSS 增长源
 需 SRE 的 `systemctl cat` / `dmesg` victim 行。开发阶段按 MemoryHigh + 采集先落地，
 MemoryMax 写入保守默认值并在注释中标注待 SRE 实测校准。
