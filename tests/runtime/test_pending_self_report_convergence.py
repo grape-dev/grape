@@ -40,7 +40,6 @@ BASE_SEQ = 10900
 SELF_REPORT_TIMEOUT = 5400
 NO_TRACE_TIMEOUT = 600
 STREAM_ACTIVE_WINDOW = 600
-FINALIZE_GRACE = 120
 
 
 def _utcnow():
@@ -234,12 +233,16 @@ class TestExecutionTraceCriterion:
 
 class TestSelfReportOnlyConvergence:
 
-    def test_self_reported_converges_completed_after_grace(self):
-        """self_reported=1、流已静默、宽限已过 → completed，且保留 agent 写的 result_text。"""
+    def test_self_reported_converges_completed_after_stream_silence(self):
+        """self_reported=1、执行流静默超活跃窗、stream_end 未到 → completed 且保留 result_text。
+
+        与审查 C2 对应：判据是「执行流静默超过活跃窗」这个真实信号，不看 pending_since——
+        pending 已 3600s 也不影响结论。
+        """
         from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_event(BASE_SEQ + 7)
         payload = '{"actions": ["x"], "conclusion": "ready", "next_step": "a2a_coding"}'
-        _seed_task("t_psc_sr1", BASE_SEQ + 7, pending_ago_seconds=300,
+        _seed_task("t_psc_sr1", BASE_SEQ + 7, pending_ago_seconds=3600,
                    self_reported=1, result_text=payload)
         _seed_message("t_psc_sr1", age_seconds=700)
         assert _sweep_pending_self_report_timeouts() >= 1
@@ -247,18 +250,19 @@ class TestSelfReportOnlyConvergence:
         assert t["status"] == "completed"
         assert t["exit_code"] == 0
         assert t["result_text"] == payload, "agent 自报的结构化结论必须原样保留"
-        assert "SELF_REPORTED_ONLY" in t["errors"]
+        assert "SELF_REPORTED_STREAM_LOST" in t["errors"]
         assert _event_status(BASE_SEQ + 7) == "completed", "任务收敛后事件应级联 completed"
 
-    def test_self_reported_within_grace_left_alone(self):
-        """自报刚落（宽限内）→ 不动，等 stream_end 正常收尾。"""
+    def test_self_reported_but_young_pending_still_waits_window(self):
+        """自报已在、但执行流静默还没满活跃窗 → 不动（等 stream_end 正常收尾）。"""
         from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_event(BASE_SEQ + 8)
-        _seed_task("t_psc_sr2", BASE_SEQ + 8, pending_ago_seconds=60,
+        _seed_task("t_psc_sr2", BASE_SEQ + 8, pending_ago_seconds=3600,
                    self_reported=1, result_text='{"conclusion": "ready"}')
-        _seed_message("t_psc_sr2", age_seconds=700)
+        _seed_message("t_psc_sr2", age_seconds=300)
         _sweep_pending_self_report_timeouts()
-        assert _task("t_psc_sr2")["status"] == "pending_self_report"
+        assert _task("t_psc_sr2")["status"] == "pending_self_report", \
+            "静默未满活跃窗就不得定案（C2：自报后仍在执行的任务不能被提前判定完成）"
 
     def test_self_reported_with_active_stream_not_converged(self):
         """自报已在但执行流仍在写（<600s）→ 不收敛，继续豁免。"""
@@ -295,8 +299,58 @@ class TestRegressions:
         sweep_stuck_events_once(no_start_minutes=10, stale_minutes=30)
         assert _event_status(BASE_SEQ + 11) == "running"
 
-    def test_constants(self):
+    def test_active_window_single_source(self):
+        """活跃窗只有一个来源：任务侧与事件侧读到同一个值（审查 M1）。"""
         import src.domains.runtime.engine.scheduler as sched
-        assert sched.PENDING_SELF_REPORT_FINALIZE_GRACE_SECONDS == FINALIZE_GRACE
-        from src.domains.runtime.engine import cleanup as cl
-        assert cl._PENDING_STREAM_ACTIVE_WINDOW_SECONDS == STREAM_ACTIVE_WINDOW
+        from src.domains.runtime.engine import cleanup as cl, liveness
+        assert liveness.PENDING_STREAM_ACTIVE_WINDOW_SECONDS == STREAM_ACTIVE_WINDOW
+        assert cl._PENDING_STREAM_ACTIVE_WINDOW_SECONDS is liveness.PENDING_STREAM_ACTIVE_WINDOW_SECONDS
+        assert sched._PENDING_STREAM_ACTIVE_WINDOW_SECONDS is liveness.PENDING_STREAM_ACTIVE_WINDOW_SECONDS
+
+    def test_liveness_env_invalid_falls_back(self, monkeypatch):
+        """env 非法整数不得打挂 import（审查 I3）。"""
+        import importlib
+        import src.domains.runtime.engine.liveness as lv
+        monkeypatch.setenv("PENDING_STREAM_ACTIVE_WINDOW_SECONDS", "abc")
+        try:
+            importlib.reload(lv)
+            assert lv.PENDING_STREAM_ACTIVE_WINDOW_SECONDS == STREAM_ACTIVE_WINDOW
+        finally:
+            monkeypatch.delenv("PENDING_STREAM_ACTIVE_WINDOW_SECONDS", raising=False)
+            importlib.reload(lv)
+
+
+class TestEventProbeSharding:
+    """审查 M2：探针按批查询，大批量不撞参数上限且不整批放弃。"""
+
+    def test_large_batch_still_detects_active_event(self):
+        from src.domains.runtime.engine.cleanup import _pending_self_report_live_seqs
+        from src.kernel.session_manager import db, db_lock
+        # 造 5 个事件/任务，活跃那个排最后（分片后会落在第二批）
+        for i in range(5):
+            seq = BASE_SEQ + 20 + i
+            _seed_event(seq)
+            _seed_task(f"t_psc_sh{i}", seq, pending_ago_seconds=600)
+            _seed_message(f"t_psc_sh{i}", age_seconds=60 if i == 4 else 900)
+        with db_lock:
+            c = db.cursor()
+            live = _pending_self_report_live_seqs(c, [BASE_SEQ + 20 + i for i in range(5)], batch=2)
+        assert live == {BASE_SEQ + 24}, f"分片后仍应只命中活跃那条，实际 {live}"
+
+    def test_probe_exception_is_isolated_and_logged(self, caplog):
+        from src.domains.runtime.engine.cleanup import _pending_self_report_live_seqs
+        import logging
+
+        class _Boom:
+            def execute(self, *a, **k):
+                raise RuntimeError("bind limit")
+
+            def fetchall(self):
+                return []
+
+        _seed_event(BASE_SEQ + 30)
+        _seed_task("t_psc_boom", BASE_SEQ + 30, pending_ago_seconds=600)
+        with caplog.at_level(logging.ERROR, logger="devops-bot"):
+            assert _pending_self_report_live_seqs(_Boom(), [BASE_SEQ + 30]) == set()
+        assert any("pending task probe failed" in r.message for r in caplog.records), \
+            "探测失败要留 error 级日志（可观测）"
