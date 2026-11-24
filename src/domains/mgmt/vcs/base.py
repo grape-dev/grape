@@ -308,12 +308,15 @@ class GenericVcsProvider(VCSProvider):
         try:
             acc = _accounts.get_grape_account_by_username(owner)
             if acc:
-                for ident in _accounts.get_user_identities_with_tokens(acc["id"]):
+                # strict=True（Issue #3732）：mgmt 域读失败必须显式进入本分支并
+                # 标注原因——token 解析失败不得无声回落仓库 bot token。
+                for ident in _accounts.get_user_identities_with_tokens(acc["id"], strict=True):
                     if ident.get("provider") == self.provider_name and ident.get("access_token"):
                         return ident["access_token"]
         except Exception as e:
-            log.warning(f"fetch_owner_identity_token failed (provider={self.provider_name}, "
-                        f"owner={owner}): {e}")
+            log.warning(f"fetch_owner_identity_token failed "
+                        f"(credential_unavailable: mgmt_read_failed, "
+                        f"provider={self.provider_name}, owner={owner}): {e}")
         return ""
 
     def get_user_login(self, token: str) -> str:

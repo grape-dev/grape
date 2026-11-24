@@ -36,22 +36,26 @@ def _get_gitcode_login(user: dict) -> str:
     """取用户绑定的 GitCode 用户名（external_identities.external_login，status=1）。"""
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
-        for ident in get_user_identities_with_tokens(user.get("id", 0) or 0):
+        # strict=True（Issue #3732）：mgmt 域读失败必须显式进入本分支并标注原因，
+        # 禁止空列表把「读不出来」冒充「未绑定」。
+        for ident in get_user_identities_with_tokens(user.get("id", 0) or 0, strict=True):
             if ident.get("provider") == "gitcode":
                 return ident.get("external_login", "") or ""
     except Exception as e:
-        log.warning(f"repo_roles: get gitcode login failed (user={user.get('id')}): {e}")
+        log.warning(f"repo_roles: get gitcode login failed "
+                    f"(credential_unavailable: mgmt_read_failed, user={user.get('id')}): {e}")
     return ""
 
 def _get_github_login(user: dict) -> str:
     """取用户绑定的 GitHub 用户名。"""
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
-        for ident in get_user_identities_with_tokens(user.get("id", 0) or 0):
+        for ident in get_user_identities_with_tokens(user.get("id", 0) or 0, strict=True):
             if ident.get("provider") == "github":
                 return ident.get("external_login", "") or ""
     except Exception as e:
-        log.warning(f"repo_roles: get github login failed (user={user.get('id')}): {e}")
+        log.warning(f"repo_roles: get github login failed "
+                    f"(credential_unavailable: mgmt_read_failed, user={user.get('id')}): {e}")
     return ""
 
 def _check_gitcode_admin(token: str, owner: str, repo: str, username: str) -> bool:
@@ -142,11 +146,13 @@ def _get_platform_login(user: dict, provider: str) -> str:
     """
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities_with_tokens
-        for ident in get_user_identities_with_tokens(user.get("id", "") or ""):
+        # strict=True（Issue #3732）：读失败显式进本分支标注原因，fail-closed 不变。
+        for ident in get_user_identities_with_tokens(user.get("id", "") or "", strict=True):
             if ident.get("provider") == provider:
                 return ident.get("external_login", "") or ""
     except Exception as e:
-        log.warning(f"repo_roles: get {provider} login failed (user={user.get('id')}): {e}")
+        log.warning(f"repo_roles: get {provider} login failed "
+                    f"(credential_unavailable: mgmt_read_failed, user={user.get('id')}): {e}")
     return ""
 
 def _is_admin_permission(perm) -> bool:

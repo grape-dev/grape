@@ -4,6 +4,7 @@ Grape 账号表（grape_accounts）只存账号自身字段，不含任何第三
 第三方绑定关系存储在 external_identities 表。
 """
 
+import os
 import threading
 import time
 
@@ -709,6 +710,8 @@ def get_user_identities(grape_user_id: str, strict: bool = False) -> list[dict]:
     参与推断，把"读失败"当成"来源全无"，进而撤销用户真实的平台关系。
     """
     try:
+        # Issue #3732 / #3897：external_identities 归 mgmt 域——按域取 session，
+        # 禁止复用进程全局 engine（三库下 worker/event 会打到 runtime 库）。
         with _uow(_IDENTITY_DOMAIN) as session:
             ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
         return [{"provider": d.provider, "external_login": d.external_login,
@@ -722,7 +725,10 @@ def get_user_identities(grape_user_id: str, strict: bool = False) -> list[dict]:
         if _is_missing_identity_relation(e):
             _degrade_identity_read("get_user_identities", e)
         else:
-            log.warning(f"Get user identities failed: {e}")
+            from src.kernel.db_errors import missing_schema
+            log.warning(f"Get user identities failed: domain={_IDENTITY_DOMAIN} "
+                        f"db={_mgmt_target_db_name()} missing_schema={missing_schema(e)} "
+                        f"user={grape_user_id}: {e}")
         if strict:
             raise
         return []
@@ -757,7 +763,12 @@ def list_platform_links(grape_user_id: str, strict: bool = False) -> list[dict]:
     _tokens: dict = {}
     _token_errors: dict = {}
     try:
-        for _t in get_user_identities_with_tokens(grape_user_id, errors=_token_errors):
+        # strict 透传（Issue #3732 复审）：token 扫描同样要能报"读失败"——否则
+        # 域库读不出来时 _tokens 为空集，身份行会被判定 token_usable=False（把
+        # "读不出来"渲染成"授权失效"），而下面 token_scan 的 degraded 分支永远
+        # 不可达（get_user_identities_with_tokens 内部吞异常不抛）。
+        for _t in get_user_identities_with_tokens(grape_user_id, errors=_token_errors,
+                                                 strict=strict):
             _tokens[str(_t.get("provider") or "")] = _t
     except Exception as e:
         log.warning(f"list_platform_links: token scan failed: {e}")
@@ -849,7 +860,8 @@ def list_platform_links(grape_user_id: str, strict: bool = False) -> list[dict]:
     return out
 
 
-def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = None) -> list[dict]:
+def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = None,
+                                    strict: bool = False) -> list[dict]:
     """获取用户的所有第三方活跃绑定（含 access_token/refresh_token）。
 
     仅供后端内部使用（get_credentials 等），不暴露到前端。
@@ -862,8 +874,16 @@ def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = 
     errors（2026-11-18）：传入 dict 时按 provider 写入解密失败原因
     （credential_error=decrypt_failed）——OAuth 密文用旧 kid 写入后同样解不开，
     上层要能和"令牌过期/为空"区分开，否则用户只看到"登录授权已失效"。
+
+    strict（Issue #3732）：默认 False 保持"读失败 → 空列表"的宽容语义；
+    需要区分"确实没有绑定"与"读不出来"的调用方（repo_roles / vcs 提供方的
+    owner identity token 解析 / user token 解析）必须传 True——否则 1146 这类
+    读失败会以空集身份参与推断，把"mgmt 库读不出来"当成"用户无任何第三方绑定"
+    （生产 7 天 6218 条 1146 WARNING 的直接后果）。对齐 get_user_identities(strict=)。
     """
     try:
+        # Issue #3732 / #3897：external_identities 归 mgmt 域——按域取 session
+        # （禁止复用进程全局 engine；单库/本域进程回落主库，零回归）。
         with _uow(_IDENTITY_DOMAIN) as session:
             ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
         out = []
@@ -888,7 +908,12 @@ def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = 
         if _is_missing_identity_relation(e):
             _degrade_identity_read("get_user_identities_with_tokens", e)
         else:
-            log.warning(f"Get user identities with tokens failed: {e}")
+            from src.kernel.db_errors import missing_schema
+            log.warning(f"Get user identities with tokens failed: domain={_IDENTITY_DOMAIN} "
+                        f"db={_mgmt_target_db_name()} missing_schema={missing_schema(e)} "
+                        f"user={grape_user_id}: {e}")
+        if strict:
+            raise
         return []
 
 def _has_refresh_token(user_id: str, provider: str) -> bool:
@@ -1752,7 +1777,25 @@ from src.kernel.id_gen import uuid7_str
 from src.kernel.persistence.repositories import identity_admin_repository as _iar
 from src.domains.mgmt.auth.identity_lifecycle import identity_lifecycle as _identity_lifecycle
 
+# 连接归属统一入口（Issue #3732 + #3897 收敛）：`uow(domain)` 按域取 engine。
+# 本模块 ORM 事务的表全部归 mgmt 域（external_identities / user_credentials /
+# grape_accounts，见 configs/table_ownership.json），四个调用点一律传
+# `_uow(_IDENTITY_DOMAIN)`——三库拓扑下 worker/event 进程全局 engine 指向 runtime
+# 库，复用它会把 mgmt 表打到 runtime 库（1146）。
 from src.kernel.persistence.uow import uow as _uow
+
+
+def _mgmt_target_db_name() -> str:
+    """读失败告警用：本模块 ORM 事务实际打的库名（域 DSN 库名，回落进程库名）。"""
+    from src.kernel import db_registry
+    dsn = db_registry.dsn_of("mgmt")
+    if dsn:
+        try:
+            return str(db_registry.parse_dsn(dsn).get("database") or "")
+        except Exception:
+            pass
+    return os.environ.get("DEVOPS_DB_NAME", "")
+
 
 def revoke_provider_credentials(grape_user_id: str, provider: str) -> dict:
     """D40/S60 凭据撤销域服务：撤销该 provider 名下用户级凭据形态全集。
@@ -1823,6 +1866,10 @@ def mark_identity_pat(grape_user_id: str, provider: str, pat_login: str = "") ->
     from sqlalchemy import select as _sel
     from src.kernel.persistence.models import ExternalIdentityModel as _M
     try:
+        # Issue #3732 域限定结论：external_identities 归 mgmt 域，本函数是
+        # 「同一 session 读+写」的完整 ORM 事务（UoW 出口统一 commit），
+        # 整体改走 mgmt 域 session（#3897 统一入口 _uow(domain)）——三库下
+        # worker/event 打 mgmt 库不再 1146，事务边界/提交语义不变。
         with _uow(_IDENTITY_DOMAIN) as session:
             rows = session.execute(_sel(_M).where(
                 _M.grape_user_id == str(grape_user_id), _M.provider == provider,
@@ -1858,6 +1905,11 @@ def backfill_pat_identity_tokens() -> int:
     moved = 0
     moved_out = 0
     try:
+        # Issue #3732 域限定结论：ei / user_credentials 均归 mgmt 域——ORM 侧
+        # （候选行扫描 + 第一段 ei 清 token 打标）改走 mgmt 域 session（#3897
+        # 统一入口 _uow(domain)）；第二段「搬家」落写维持 _mg_db 裸 SQL 不动
+        # （本就按域代理），两路径在 mgmt 进程同库、worker/event 同指向 mgmt 库，
+        # 读写一致性由各连接即时提交保证。
         with _uow(_IDENTITY_DOMAIN) as session:
             # D105k：LIKE '\%_pat' 在 SQLite（无默认转义）匹配不中——改宽匹配+Python 精确过滤
             pats = [c for c in session.execute(_sel(_C)).scalars().all()
