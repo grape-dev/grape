@@ -1319,7 +1319,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     # 两种状态在派发上都是不可选，但「配过又全关掉」必须区别于「从没配过」。
     _rc_inv: dict = {}
     try:
-        for _r in _rt.read_all_any("engine_cap_role_counts", ()) or []:
+        # 注意：本函数内 `_rt` 已被 `for _rt in cached:` 的循环变量遮蔽成 dict，
+        # 这里必须用独立别名取运行域模块，否则 read_all_any 会 AttributeError。
+        from src.domains.runtime import public as _rt_role_counts
+        for _r in _rt_role_counts.read_all_any("engine_cap_role_counts", ()) or []:
             _rc_inv[int(_r[0])] = {"total": int(_r[1] or 0), "enabled": int(_r[2] or 0)}
     except Exception as _rc_e:  # noqa: BLE001
         log.warning(f"settings: engine_cap_role_counts failed: {_rc_e.__class__.__name__}: {_rc_e}")

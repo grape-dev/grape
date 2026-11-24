@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.deps import _resolve_user_or_platform_admin
+from src.api.deps import _resolve_user_or_platform_admin, require_org_member
 from src.kernel.session_manager import db, db_lock
 
 
@@ -85,6 +85,9 @@ def _mk_engine(owner_name="owner_alice", scope="user", owner_id="44", org_id="",
 
 def _client_as(user: dict):
     app.dependency_overrides[_resolve_user_or_platform_admin] = lambda: user
+    # 列表端点用 require_org_member（依赖 session token 注入），这里一并放行，
+    # 与线上「已登录用户」语义对齐
+    app.dependency_overrides[require_org_member] = lambda: user
     return TestClient(app)
 
 
@@ -361,4 +364,40 @@ class TestNoEmptyRoleSet:
         r = client.put(f"/api/settings/agent-runtimes/{rid}/tags/chat",
                        json={"priority": 50, "enabled": 0})
         assert r.status_code == 200, r.text
+
+
+class TestDisabledRoleVisibility:
+    """管理台要能区分「没配过角色」与「配过但全停用」——卡片徽标依赖 roles_disabled。
+
+    回归背景：该字段首版在请求路径里被同名变量 `_rt` / `type` 遮蔽，异常被兜成空
+    map，接口永远返回 false（线上表现为「已停用」永远不显示）。
+    """
+
+    def test_list_reports_roles_disabled_for_stopped_engine(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # 默认 all:1
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=?", (rid,))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.get("/api/settings/agent-runtimes?page_size=0")
+        assert r.status_code == 200, r.text
+        rows = {int(x["id"]): x for x in r.json().get("runtimes", [])}
+        assert rows[rid].get("roles_disabled") is True, rows[rid]
+
+    def test_list_reports_no_flag_for_engine_without_role_rows(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True, derived_only=True)             if "derived_only" in _mk_engine.__code__.co_varnames else None
+        # 不依赖构造参数：直接清空角色行，只留派生行
+        rid = rid or _mk_engine(owner_name="owner_alice", credential=True)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)",
+                      (rid, "engine:demo"))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.get("/api/settings/agent-runtimes?page_size=0")
+        assert r.status_code == 200, r.text
+        rows = {int(x["id"]): x for x in r.json().get("runtimes", [])}
+        assert rows[rid].get("roles_disabled") is False, rows[rid]
 
