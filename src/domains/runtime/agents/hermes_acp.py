@@ -575,14 +575,11 @@ class HermesACPBackend:
             yield ("step_start", "Step 1 started (session: ACP)")
             cwd_arg = cwd if cwd else "."
             if session_id:
-                if _skip_resume:
-                    result, err = client.request("session/new", {
-                        "cwd": cwd_arg, "mcpServers": [],
-                    }, timeout=100)
-                else:
-                    result, err = client.request("session/resume", {
-                        "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
-                    }, timeout=100)
+                # _skip_resume=True 时上游已把 session_id 置空，这里只可能是 resume；
+                # resume 失败才回落 session/new（死分支 _skip_resume 已删除）。
+                result, err = client.request("session/resume", {
+                    "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
+                }, timeout=100)
                 if err:
                     log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
                     result, err = client.request("session/new", {
@@ -594,8 +591,7 @@ class HermesACPBackend:
                         return
                     new_session_id = _extract_session_id(result) or ""
                 else:
-                    new_session_id = _extract_session_id(result) or (
-                        "" if _skip_resume else session_id)
+                    new_session_id = _extract_session_id(result) or session_id
             else:
                 result, err = client.request("session/new", {
                     "cwd": cwd_arg, "mcpServers": [],

@@ -394,7 +394,9 @@ TASK_IN_PROGRESS = Gauge(
 # ===== ACP state.db 体积治理指标（Issue #3773）=====
 # worker 心跳把本机 state.db 体积与清理计数写入 runtime_credentials，这里在
 # /metrics scrape 时按 host 采样。名字与 Spec 一致（_total 系列用 Gauge 承载
-# worker 累计值，rate() 仍可直接用于告警）。
+# worker 进程内的单调累计值）。语义约定：同一 host 相邻两次 scrape 的值单调不减，
+# worker 重启时归零 —— Prometheus 的 increase() 把这种下降当作 counter reset 处理，
+# 因此 Gauge 承载累计量仍可用于 increase()/rate() 告警（deploy/alerts.yml）。
 ACP_STATE_DB_BYTES = Gauge(
     "grape_acp_state_db_bytes",
     "Largest hermes ACP state.db observed on a worker host.",

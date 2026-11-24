@@ -96,12 +96,16 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
     返回值是 ``state_db_maintenance.StateDbCheckResult``：``bool(result)`` 为 True
     表示需要放弃 resume（``skip_resume``），保留与历史调用方的布尔语义兼容。
     """
-    from src.domains.runtime.engine.state_db_maintenance import check_state_db_size as _check
+    from src.domains.runtime.engine.state_db_maintenance import (
+        check_state_db_size as _check,
+        max_bytes_default,
+    )
 
     result = _check(hermes_home, threshold_mb=threshold_mb, **kwargs)
     if result.exceeded:
         size_mb = result.before_bytes / (1024 * 1024)
-        limit_mb = threshold_mb if threshold_mb is not None else 50.0
+        limit_mb = (threshold_mb if threshold_mb is not None
+                    else max_bytes_default() / (1024 * 1024))
         log.warning(
             f"state.db size {size_mb:.1f}MB exceeds threshold {limit_mb}MB, "
             f"cleanup={result.cleanup.result if result.cleanup else 'not_run'} "

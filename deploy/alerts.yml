@@ -255,6 +255,9 @@ groups:
 
       # Issue #3773：hermes ACP state.db 体积治理（worker 心跳上报，按 host 聚合）
       # state.db 超阈值会触发就地清理；清理失败或仍超阈值时归档重建并跳过 resume。
+      # 阈值与代码默认口径对齐：50MB = ACP_STATE_DB_MAX_MB，100MB = 2x 阈值；
+      # 若在 worker 上覆盖 ACP_STATE_DB_MAX_MB，请同步调整这两条 expr（Alertmanager
+      # 无法读取 worker 环境变量，只能在此声明式对齐）。
       - alert: GrapeAcpStateDbTooLarge
         expr: grape_acp_state_db_bytes > 52428800
         for: 10m
