@@ -967,23 +967,27 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                         # Issue #3396 后续：心跳兜底改成「角色行为空就补」——
                         # 有声明按声明（A8b 声明即收窄），无声明补 all。
                         # 旧条件要求 role_tags 非空，未声明的引擎被清空后永远补不回来。
-                        if not (_hb_row[6] or 0):
-                            try:
-                                _p_decl = json.loads(_hb_row[5] or "[]")
-                                if not isinstance(_p_decl, list):
-                                    _p_decl = []
-                            except Exception:
+                        # 2026-11-24：不再用 tags_user_set 做闸门——清空已被前端+接口双层
+                        # 禁止（EMPTY_ROLE_TAGS），`user_set=1 且零角色行`只剩历史遗留，
+                        # 闸门会让它永久 fail-closed；是否覆盖由两步原语内部判定
+                        # （seed 见 user_set 即返回空，ensure 只在 has_role_rows 为假时补）。
+                        _user_set_hb = _hb_row[6] or 0
+                        try:
+                            _p_decl = json.loads(_hb_row[5] or "[]")
+                            if not isinstance(_p_decl, list):
                                 _p_decl = []
-                            try:
-                                # 两步：①声明即收窄（只有自动 all 时改写为声明集合）；
-                                # ②角色行为空才补（有声明按声明，无声明补 all）。
-                                _seeded = (seed_role_caps_from_declared(c, _rid, _p_decl, 0)
-                                           if _p_decl else [])
-                                if not _seeded:
-                                    from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
-                                    _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=0)
-                            except Exception as _sde:
-                                log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
+                        except Exception:
+                            _p_decl = []
+                        try:
+                            # 两步：①声明即收窄（只有自动 all 时改写为声明集合）；
+                            # ②角色行为空才补（有声明按声明，无声明补 all）。
+                            _seeded = (seed_role_caps_from_declared(c, _rid, _p_decl, _user_set_hb)
+                                       if _p_decl else [])
+                            if not _seeded:
+                                from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
+                                _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=_user_set_hb)
+                        except Exception as _sde:
+                            log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
             except Exception as _at_e:
                 log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:
@@ -3092,15 +3096,21 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_to
     return {"tags": json.loads(row[0]) if row[0] else []}
 
 
-@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Any authenticated user may write; empty tag sets are rejected (at least one role must remain).")
+@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write permission is layered (Issue #3396, 2026-11-24): locally-attached engines (credential_id=0) accept any authenticated user; credential-backed engines accept only a platform admin, the credential owner, or an owner/admin of the credential's org; session_token is always 403. Tag values are domain-validated (400 INVALID_ROLE_TAGS) and empty tag sets are rejected (400 EMPTY_ROLE_TAGS, at least one role must remain).")
 def set_runtime_tags(runtime_id: int, body: dict, request: Request,
                      user: dict = Depends(require_runtime_owner_or_admin)):
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
     写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
-    写权限（Issue #3396 A5）：仅引擎凭据所有者（user 本人 / org owner+admin）
-    与平台管理员可改，仓库管理员禁改；本机直连（credential_id=0）仅平台管理员。
+    写权限（Issue #3396 A5，2026-11-24 分层裁定）：
+    - 本机直连（credential_id=0，主控机资产、与个人凭据无归属关系）→ 任意登录用户可改；
+    - 凭据引擎（credential_id≠0）→ 仅平台管理员 / 凭据 owner 本人 /
+      凭据所属 org 的 owner+admin 可改，仓库管理员与其他登录用户 403；
+    - session_token（tk_）→ 403；目标 runtime 不存在 → 404。
+    值域校验：值域外标签一律 400 INVALID_ROLE_TAGS，不写行、不改 flags
+    （此前值域外标签会先删光真实角色行再插入 bogus，引擎从此不可调度）。
+    非空校验：空标签集合一律 400 EMPTY_ROLE_TAGS，至少保留一个角色（空集在 A7 下 fail-closed）。
     """
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags

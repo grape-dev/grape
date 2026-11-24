@@ -442,3 +442,27 @@ class TestRoleTagValueDomain:
         tags = [t for t, _ in _engine_tags(rid)]
         assert "chat" in tags and "coding" in tags and "all" not in tags
 
+
+class TestOperationDescriptionMatchesImplementation:
+    """契约文案必须与实现同口径（QA 合入阻塞项：description 曾写「Any authenticated user may write」）。
+
+    文档口径漂移本身就是缺陷：前端/CLI 从 OpenAPI description 读语义，写反了会让调用方
+    误判 403。此用例锁死 2026-11-24 分层口径与两道校验的错误码。
+    """
+
+    def _desc(self) -> str:
+        from src.domains.runtime.routes.runtime import router
+        for route in router.routes:
+            if getattr(route, "operation_id", "") == "runtime_tags_set":
+                return route.description or ""
+        raise AssertionError("runtime_tags_set route not found")
+
+    def test_description_states_layered_permission(self):
+        d = self._desc()
+        assert "Any authenticated user may write" not in d      # 11-23 整体放开口径已废止
+        assert "layered" in d and "2026-11-24" in d
+        assert "credential_id=0" in d and "any authenticated user" in d
+        assert "credential owner" in d and "owner/admin" in d
+        assert "session_token" in d and "403" in d
+        assert "INVALID_ROLE_TAGS" in d and "EMPTY_ROLE_TAGS" in d
+

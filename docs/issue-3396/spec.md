@@ -9,7 +9,7 @@
 1. **删 SRE 禁广播**：删除 `_sre_no_broadcast`（engine_select.py）及 pick_engine / get_scene_pool_engine_ids 中的全部调用分支，SRE 任务进入通用引擎选择链（global 池广播放开）。
 2. **chat 补进标签值域四处联动**：后端互斥规则 `AGENT_TAGS`（src/domains/runtime/routes/runtime.py `_apply_tag_rules`）；前端 `_RT_TAG_OPTIONS` / `_RT_TAG_COLORS` / `_rtTagLabel`、`onEdTagChange` 5→6（src/api/frontend/app/src/views/RuntimesView.vue）、`sceneAvailableRoles` 默认表；配套对账扫描测试锁定前后端值域一致。
 3. **认领侧 #658 守卫口径统一到 `engine_capabilities`**：`_filter_by_role` / `_member_role_tags` / `_role_no_candidates_detail` / `_candidate_reject_reasons` / `service.claim_by_tag` 全部改读 engine_capabilities；`engine_role_tags` 降级为注册透传解析（守卫不再消费）；空标签 fail-closed。
-4. **角色标签写权限收紧**：新增 `require_runtime_owner_or_admin`（src/api/deps.py）；`PUT /runtimes/{id}/tags` 仅引擎凭据所有者（user 本人 / org owner+admin）与平台管理员可改，仓库管理员禁改；本机直连（credential_id=0）仅平台管理员可改；读接口保持全员可读。
+4. **角色标签写权限分层**（2026-11-24 裁定，修正 11-23 的整体放开）：新增 `require_runtime_owner_or_admin`（src/api/deps.py），settings 面 `require_settings_runtime_owner_or_admin` 共用同一判定；`PUT /runtimes/{id}/tags` 本机直连（`credential_id=0`）任意登录用户可改；由他人凭据注册的引擎（`credential_id≠0`）仅**平台管理员 / 凭据 owner 本人 / 凭据所属 org 的 owner+admin** 可改，仓库管理员与其他登录用户 403；`session_token` 始终 403，不存在的 runtime 404；读接口保持全员可读。
 5. **Chat 兜底角色过滤**：两条兜底路径（`resolve_local_engine` global 回退、`_resolve_chat_runtime_id` 末级兜底）保留，但候选必须过 chat 角色过滤（勾了 chat 或 all），无合规候选给出明确提示，不静默调度。
 
 ## 关键设计决策（4 个裁决点已裁定）
