@@ -1,11 +1,19 @@
 """M3 sweeper 清理测试（见 multi-issue-isolation-design.md §7.4）"""
 import os
+import time
 import pytest
 
 from datetime import datetime, timezone, timedelta
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import cleanup
+
+
+@pytest.fixture(autouse=True)
+def _past_restart_window(monkeypatch):
+    """Issue #4303：sweep_stuck_events_once 有以进程启动时刻为参照的重启恢复
+    窗口护栏；本文件测回收/清理逻辑本身，把窗口钉到已过期。"""
+    monkeypatch.setattr(cleanup, "_PROCESS_STARTED_AT", time.time() - 3600)
 
 
 def test_sweep_once_purges_stale_im_instances():

@@ -82,6 +82,15 @@ _IDLE_RUNNING_TXT = ("中断：running 任务长时间无执行消息（complete
 
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
+# Issue #4303：sweeper 事件回收的两类兜底文案（原为 sweep_stuck_events_once
+# 内局部变量，提升为模块常量以便降级路径与测试引用；文案逐字不变——
+# agent-tasks-direct-create-binding-fix-design.md §5.4 的结果契约）。
+# - 该事件在 agent_tasks 连一条记录都没有 → 极可能是 _create_direct_task/pre
+#   入队失败（INSERT 绑定数错误等），结果写明真实根因，避免一律误标「running 超时」。
+# - 有任务记录但非活跃（终态/缺失）→ 才是真正的 running 超时/执行中断。
+_NO_TASK_TXT = "中断：running 超时无任务执行记录，且 agent_tasks 无任何关联行——疑似创建任务失败（create_direct_task/enqueue 未落行，请查服务端日志）"
+_TIMEOUT_TXT = "中断：running 超时无活跃任务执行记录（sweeper 兜底回收）"
+
 # pending_self_report 任务的执行流活跃窗：主控重启会把「worker 还在跑」的 REMOTE 任务转成
 # pending_self_report（等 worker 自报），此后任务不再属于 queued/dispatched/running。
 # 事件层回收若只认这三个状态（见 sweep_stuck_events_once），就会把仍在产执行流的事件判
@@ -95,6 +104,28 @@ from src.domains.runtime.engine.liveness import (  # noqa: E402
 # 探针分片大小：单条 SQL 的 IN 绑定参数随僵尸事件规模线性增长，整批一次绑定会撞驱动上限
 # （MySQL 65535 / SQLite 999），分成 ≤200 一批并在异常时只影响该批。
 _PROBE_BATCH = 200
+
+# Issue #4303：sweeper 进程启动时刻（cleanup 在进程启动即被 import，各进程独立
+# 取值，≈ 进程启动时刻）。重启会把「执行到一半被切断」的在途事件留在 running——
+# 它们的 created_at 早于重启，恰是最不该在首轮巡检被一刀切回收的一批。
+_PROCESS_STARTED_AT = time.time()
+
+
+def _restart_grace_minutes() -> float:
+    """重启恢复窗口（分钟）：进程启动后该窗口内不回收在途事件（Issue #4303）。
+
+    默认 10 分钟——重启后首轮巡检天然落在窗口内；SWEEPER_RESTART_GRACE_MINUTES
+    可调（0 = 关闭护栏）。仅靠 created_at 距今阈值不够：被重启打断的事件
+    created_at 早于重启，护栏必须扣住「进程刚启动过」这个信号。
+    """
+    _env = (os.environ.get("SWEEPER_RESTART_GRACE_MINUTES") or "").strip()
+    if _env:
+        try:
+            return float(_env)
+        except ValueError as _e:  # noqa: BLE001 - 配置坏值回落默认，不阻断回收
+            log.debug(f"sweeper: invalid SWEEPER_RESTART_GRACE_MINUTES={_env!r}, "
+                      f"fallback to default 10min: {_e}")
+    return 10.0
 
 # 同一判定的「成功」方向：agent 已经自报 exit_code=0，只是主控没来得及写终态
 # （tasks/complete 504、主控重启等）。这不是中断，必须收敛成 completed。
@@ -138,11 +169,17 @@ def _log_round(scope: str, cleaned: int, elapsed: float) -> None:
 
 
 def _commit() -> None:
-    """legacy 模式下显式提交；own 模式 autocommit 已在语句结束提交（避免误提交主连接）。"""
+    """legacy 模式下显式提交；own 模式 autocommit 已在语句结束提交（避免误提交主连接）。
+
+    Issue #4303：此前 legacy 分支误写为 `_commit()` 自调用——无限递归被 except
+    吞成 log.debug，单库拓扑下 sweeper 实际从未显式提交。改为与全仓一致的
+    `with db_lock: db.commit()`（db_lock 为 RLock，_sweep_cursor 临界区内重入安全）。
+    """
     if _use_own_sweeper_conn():
         return
     try:
-        _commit()
+        with db_lock:
+            db.commit()
     except Exception as e:  # noqa: BLE001
         log.debug(f"sweeper commit failed: {e}")
 
@@ -270,6 +307,26 @@ def _sweep_cursor():
         return
     with db_lock:
         yield db.cursor()
+
+def _second_sweep_cursor(c):
+    """同一连接上的第二个游标——方言翻译层必须与第一游标一致（Issue #4303）。
+
+    - own 模式（三库，uses_own_dsn("runtime")）：第一游标是
+      `db_registry._CompatCursor`，`c.connection` 经其 `__getattr__` 透传到
+      **裸 pymysql 连接**，再 `.cursor()` 得到的是不带 `?→%s` 翻译的裸游标——
+      首条含 `?` 的 UPDATE 与 `_cascade_event_terminal` 内的 SELECT 都抛
+      `TypeError: not all arguments converted during string formatting`，
+      per-seq 精收整段失效并回落 bulk 一刀切判 failed（#4303 生产实例：
+      worker 重启后 9 个在途事件同秒被写 failed）。必须重新包一层
+      `_CompatCursor` 恢复方言层。
+    - legacy 模式：主库游标由 `db.cursor()` 统一提供正确方言（sqlite 原生
+      `?` / MySQLCompatCursor 自带翻译；后者无 connection 属性，沿旧写法
+      `c.connection.cursor()` 在 legacy MySQL 下会 AttributeError）。**不能**
+      在此分支包 `_CompatCursor`——sqlite 上 `?` 会被译成 `%s`，绑定直接报错。
+    """
+    if isinstance(c, db_registry._CompatCursor):
+        return db_registry._CompatCursor(c.connection.cursor())
+    return db.cursor()
 
 def _done_issues() -> list[tuple[str, str]]:
     """返回到达终态（stage='done'）的 (repo_key, issue_id) 列表。Phase C3：读 issue 单表。"""
@@ -582,6 +639,138 @@ def _pending_self_report_live_seqs(cursor, seqs, batch: int | None = None) -> se
     return out
 
 
+_ACTIVE_EVENT_STATUSES = ("pending", "running", "dispatched")
+
+
+def _event_active(cursor, seq) -> bool:
+    """事件是否仍处于活跃态。
+
+    级联返回 False 时区分「事件已终态、本就无需处理」与「写路径失败、
+    需降级重试」（Issue #4303）；读不出来按仍活跃处理（保守降级）。
+    """
+    try:
+        cursor.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        row = cursor.fetchone()
+        return bool(row) and (row[0] or "") in _ACTIVE_EVENT_STATUSES
+    except Exception:  # noqa: BLE001 - 读不出按仍活跃处理（宁可降级重试）
+        return True
+
+
+def _recover_stuck_events(dead: list, terminal_by_seq: dict, now_iso: str) -> int:
+    """按 seq 逐条精收僵尸事件终态，返回本轮收敛条数（Issue #4303 重构）。
+
+    主路径（#587/#1938 精收语义）：
+    - 任务已终态 → `_cascade_event_terminal` 级联（回填真实 result_text）；
+    - agent_tasks 无关联行 → `_NO_TASK_TXT`（创建任务失败）；
+    - 有任务行但非活跃 → `_TIMEOUT_TXT`（running 超时）。
+
+    失败降级（不再整段回落 bulk 一刀切——此前 per-seq 任一异常会把该轮全部
+    dead seq 统一写 failed+超时文案，8 条生产事件停留 failed 即此根因）：
+    1. 单个 seq 的异常只影响该 seq：按 seq 记 warning（失败原因不静默），
+       其余 seq 照常收敛；
+    2. 失败 seq 换新游标重读该 seq 的 agent_tasks 终态再试一轮——能级联则
+       级联（回填真实 result_text），确实无法级联才写对应兜底文案；
+    3. 降级也失败的 seq 才走最后手段 bulk UPDATE（**占位符绑定文案**，
+       不再 f-string 直拼），并 log.error 显式告警；任务已终态的事件即使
+       级联写失败也绝不进 bulk——宁可保留 running 下一轮重试，也不把
+       completed/cancelled 任务的事件误标成 failed。
+    """
+    # Nit 修复（保留）：import 移出 db_lock 临界区（首次导入不应持锁执行）
+    from src.domains.runtime.engine.service import _cascade_event_terminal
+    fixed = 0
+    failed_seqs: list = []
+    with _sweep_cursor() as _c:
+        _with_task_rows = set()
+        try:
+            _ph = ",".join("?" * len(dead))
+            _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({_ph})", dead)
+            _with_task_rows = {r[0] for r in _c.fetchall()}
+        except Exception as _we:
+            log.warning(f"sweeper: with-task lookup failed: {_we}")
+        # 第二游标必须与第一游标同一方言层（Issue #4303 根因：
+        # 裸 pymysql 游标绕过 ?→%s 翻译 → 首条 UPDATE 必抛 TypeError）
+        _c2 = _second_sweep_cursor(_c)
+        for s in dead:
+            try:
+                if s in terminal_by_seq:
+                    # 任务已终态 → 级联到任务终态（探活收敛，幂等）
+                    _st, _ec, _tid = terminal_by_seq[s]
+                    if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
+                        fixed += 1
+                        continue
+                    # 级联未收敛：事件已终态则本就无需处理；仍活跃说明写路径
+                    # 出了问题（级联内部异常被吞），归入降级重试，不静默。
+                    if _event_active(_c2, s):
+                        log.warning(
+                            f"sweeper: per-seq cascade did not converge for seq={s}, "
+                            f"degrading to per-seq retry")
+                        failed_seqs.append(s)
+                    continue
+                _txt = _TIMEOUT_TXT if s in _with_task_rows else _NO_TASK_TXT
+                _c2.execute(
+                    "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
+                    "WHERE seq=? AND status IN ('pending','running')",
+                    (now_iso, _txt, s))
+                fixed += _c2.rowcount
+            except Exception as _se:
+                log.warning(f"sweeper: per-seq recovery failed for seq={s}: {_se}")
+                failed_seqs.append(s)
+        _commit()
+    if not failed_seqs:
+        return fixed
+    # ② 逐条降级：换新游标重读该 seq 的 agent_tasks 终态，能级联则级联，
+    #    确实无法级联才写 _NO_TASK_TXT/_TIMEOUT_TXT。
+    _bulk_seqs: list = []
+    for s in failed_seqs:
+        try:
+            with _sweep_cursor() as _fc:
+                _fc.execute(
+                    "SELECT status, exit_code FROM agent_tasks WHERE event_seq=? "
+                    "AND status IN ('completed','failed','cancelled') "
+                    "ORDER BY created_at ASC", (s,))
+                _rows = _fc.fetchall()
+                if _rows:
+                    # 任务已终态：只级联；级联再失败保留 running 下一轮重试，
+                    # 绝不写兜底文案（completed/cancelled 被标 failed 即 #4303
+                    # 一刀切事故的复现）。
+                    if _cascade_event_terminal(_fc, s, _rows[-1][0],
+                                               exit_code=_rows[-1][1]):
+                        fixed += 1
+                    else:
+                        log.error(f"sweeper: cascade retry failed for terminal "
+                                  f"task of seq={s}, leave running for next round")
+                    continue
+                _fc.execute("SELECT 1 FROM agent_tasks WHERE event_seq=? LIMIT 1", (s,))
+                _txt = _TIMEOUT_TXT if _fc.fetchone() else _NO_TASK_TXT
+                _fc.execute(
+                    "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
+                    "WHERE seq=? AND status IN ('pending','running')",
+                    (now_iso, _txt, s))
+                fixed += _fc.rowcount
+        except Exception as _de:
+            log.error(f"sweeper: degraded per-seq recovery failed for seq={s}: {_de}")
+            _bulk_seqs.append(s)
+    # ③ 最后手段 bulk：降级也失败的 seq 才整批 UPDATE（占位符绑定文案，
+    #    不再 f-string 直拼 `result='{...}'`——文案含 ' 即崩），并显式告警；
+    #    bulk 也失败则保留事件原状（下一轮巡检重试），不吞异常误标。
+    if _bulk_seqs:
+        _ph3 = ",".join("?" * len(_bulk_seqs))
+        try:
+            with _sweep_cursor() as _bc:
+                _bc.execute(
+                    f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
+                    f"result=? WHERE seq IN ({_ph3}) AND status IN ('pending','running')",
+                    (now_iso, _TIMEOUT_TXT, *_bulk_seqs))
+                fixed += _bc.rowcount
+                _commit()
+            log.error(f"sweeper: last-resort bulk recovery hit {len(_bulk_seqs)} "
+                      f"seq(s) after per-seq degradation failed (check DB health): "
+                      f"{_bulk_seqs}")
+        except Exception as _be:
+            log.error(f"sweeper: last-resort bulk recovery failed for seq(s) "
+                      f"{_bulk_seqs}: {_be}")
+    return fixed
+
 def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30) -> int:
     """兜底回收：running 事件超时且无 agent_tasks 活跃任务支撑 → 置 failed（防卡 running 僵尸）。
 
@@ -591,10 +780,21 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
     - started_at 非空但超过 stale_minutes 且无活跃任务 → 执行中断（任务记录已消失）
     有 queued/dispatched/running 任务支撑的 running 事件一律跳过（真在执行）。
     created_at 为 DB 本地时间（MySQL），started_at 为 UTC ISO 字符串，分开比较。
+
+    Issue #4303 重启恢复窗口护栏：进程启动后 _restart_grace_minutes() 分钟内
+    直接整轮跳过——重启把「执行到一半被切断」的在途事件留在 running，它们正是
+    最不该在首轮巡检被一刀切回收的一批；窗口外僵尸照常回收（不引入漏收）。
     """
     from datetime import datetime, timezone, timedelta
     fixed = 0
     try:
+        _grace_min = _restart_grace_minutes()
+        if _grace_min > 0 and (time.time() - _PROCESS_STARTED_AT) < _grace_min * 60:
+            log.info(
+                f"sweeper: restart grace window active "
+                f"({time.time() - _PROCESS_STARTED_AT:.0f}s since process start "
+                f"< {_grace_min:.0f}min) — skip stuck-event recovery this round")
+            return 0
         now_local = datetime.now()
         no_start_cut = (now_local - timedelta(minutes=no_start_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         now_utc = datetime.now(timezone.utc)
@@ -629,13 +829,8 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         if dead:
             ph2 = ",".join("?" * len(dead))
             now_iso = now_utc.isoformat()
-            # 区分「创建任务失败」与「running 超时」：
-            # - 该事件在 agent_tasks 连一条记录都没有 → 极可能是 _create_direct_task/pre 入队失败（INSERT 绑定数错误等），
-            #   结果写明真实根因，避免一律误标"running 超时"（见 agent-tasks-direct-create-binding-fix-design.md §5.4）。
-            # - 有任务记录但非活跃（终态/缺失）→ 才是真正的 running 超时/执行中断。
-            _no_task_txt = "中断：running 超时无任务执行记录，且 agent_tasks 无任何关联行——疑似创建任务失败（create_direct_task/enqueue 未落行，请查服务端日志）"
-            _timeout_txt = "中断：running 超时无活跃任务执行记录（sweeper 兜底回收）"
-            _with_task_rows = set()
+            # 文案区分「创建任务失败」（_NO_TASK_TXT）与「running 超时」（_TIMEOUT_TXT）
+            # 见模块常量注释 / agent-tasks-direct-create-binding-fix-design.md §5.4。
             # Issue #587：超时探活收敛——最近任务已终态时按任务终态映射收敛
             # （cancelled 任务 → 事件 cancelled，不再是 failed；保留业务结论语义），
             # 而非一律标 failed。
@@ -651,38 +846,8 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                         _terminal_by_seq[_s] = (_st, _ec, _tid)
             except Exception as _te:
                 log.warning(f"sweeper: terminal task lookup failed: {_te}")
-            try:
-                # Nit 修复：import 移出 db_lock 临界区（首次导入不应持锁执行）
-                from src.domains.runtime.engine.service import _cascade_event_terminal
-                with _sweep_cursor() as _c:
-                    _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
-                    _with_task_rows = {r[0] for r in _c.fetchall()}
-                    # 同一连接上的第二个游标（own 模式不能再用进程主连接 db.cursor()）
-                    _c2 = _c.connection.cursor()
-                    for s in dead:
-                        if s in _terminal_by_seq:
-                            # 任务已终态 → 级联到任务终态（探活收敛，幂等）
-                            _st, _ec, _tid = _terminal_by_seq[s]
-                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
-                                fixed += 1
-                            continue
-                        _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
-                        _c2.execute(
-                            "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
-                            "WHERE seq=? AND status IN ('pending','running')",
-                            (now_iso, _txt, s))
-                        fixed += _c2.rowcount
-                    _commit()
-            except Exception as e:
-                log.warning(f"sweeper: per-seq recovery failed, fallback bulk: {e}")
-                with _sweep_cursor() as _c:
-                    _c.execute(
-                        f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
-                        f"result='{_timeout_txt}' WHERE seq IN ({ph2}) "
-                        f"AND status IN ('pending','running')",
-                        (now_iso, *dead))
-                    fixed = _c.rowcount
-                    _commit()
+            # Issue #4303：按 seq 逐条精收 + 逐条降级，失败不再整段回落 bulk。
+            fixed += _recover_stuck_events(dead, _terminal_by_seq, now_iso)
             if fixed:
                 log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
             # 取消对应的线程池排队任务（防止 event 已 failed 但子进程还在跑）

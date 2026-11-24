@@ -21,6 +21,7 @@
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -30,6 +31,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 
 from src.kernel.session_manager import db, db_lock
+from src.domains.runtime.engine import cleanup
 
 RT = 9331
 CRED = 9431
@@ -40,6 +42,13 @@ BASE_SEQ = 10900
 SELF_REPORT_TIMEOUT = 5400
 NO_TRACE_TIMEOUT = 600
 STREAM_ACTIVE_WINDOW = 600
+
+
+@pytest.fixture(autouse=True)
+def _past_restart_window(monkeypatch):
+    """Issue #4303：sweep_stuck_events_once 有以进程启动时刻为参照的重启恢复
+    窗口护栏；本文件测回收判据本身，把窗口钉到已过期。"""
+    monkeypatch.setattr(cleanup, "_PROCESS_STARTED_AT", time.time() - 3600)
 
 
 def _utcnow():

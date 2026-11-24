@@ -9,12 +9,21 @@
 - sweeper 超时探活：终态任务 → 事件映射收敛（cancelled 不再误标 failed）
 """
 import json
+import time
 from datetime import datetime, timezone, timedelta
 
 import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
+
+
+@pytest.fixture(autouse=True)
+def _past_restart_window(monkeypatch):
+    """Issue #4303：sweep_stuck_events_once 有以进程启动时刻为参照的重启恢复
+    窗口护栏；本文件测级联收敛逻辑本身，把窗口钉到已过期。"""
+    from src.domains.runtime.engine import cleanup
+    monkeypatch.setattr(cleanup, "_PROCESS_STARTED_AT", time.time() - 3600)
 
 
 @pytest.fixture(autouse=True)
