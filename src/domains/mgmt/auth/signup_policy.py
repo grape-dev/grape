@@ -9,7 +9,10 @@
 注册白名单与现有 login_whitelist（OAuth 白名单）独立运作。
 """
 from src.kernel.config import log
+from src.kernel.config import _is_login_whitelist_enabled, is_user_allowed
 from src.kernel.session_manager import db, db_lock
+
+BETA_APPLY_URL = "/beta-apply"
 
 
 def _get_whitelist_emails() -> "set[str] | None":
@@ -112,3 +115,66 @@ def check_signup_allowed(email: str) -> bool:
 
     # 4. 白名单非空但未命中 → 拒绝（白名单优先于开关）
     return False
+
+
+def _signup_whitelist_match(email: str) -> "bool | None":
+    """注册白名单命中判定（Issue #4254 内测资格复用）。
+
+    返回 True=命中/无白名单管控；False=白名单非空但未命中；None=查询异常（未知）。
+    """
+    e = (email or "").strip().lower()
+    email_whitelist = _get_whitelist_emails()
+    domain_whitelist = _get_whitelist_domains()
+    if email_whitelist is None or domain_whitelist is None:
+        return None
+    if e and "@" in e:
+        if e in email_whitelist:
+            return True
+        if e.split("@", 1)[1] in domain_whitelist:
+            return True
+    # 两个白名单均为空 = 无白名单管控，不构成内测限制
+    if not email_whitelist and not domain_whitelist:
+        return True
+    return False
+
+
+def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None) -> dict:
+    """当前用户的内测资格判定（Issue #4254）。
+
+    - 仅 `created_by_oauth=0`（平台注册入口自注册）的用户才可能被提示；
+    - login_whitelist 启用时按已绑定第三方身份匹配，否则按邮箱/域名匹配 signup_whitelist；
+    - 两个白名单均未启用且为空 → 视为无白名单管控，不提示；
+    - 查询异常 → 视为已具备资格（不误提示），并记日志。
+
+    返回 {"is_self_registered", "whitelisted", "apply_url"}。
+    """
+    created_by_oauth = int((account or {}).get("created_by_oauth") or 0)
+    is_self_registered = created_by_oauth == 0
+    result = {
+        "is_self_registered": is_self_registered,
+        "whitelisted": False,
+        "apply_url": BETA_APPLY_URL,
+    }
+    if not is_self_registered:
+        # OAuth 注册用户不受内测白名单引导影响
+        result["whitelisted"] = True
+        return result
+    try:
+        if _is_login_whitelist_enabled():
+            matched = False
+            for ident in identities or []:
+                provider = (ident or {}).get("provider", "")
+                login = (ident or {}).get("external_login", "")
+                if provider and login and is_user_allowed(provider, login):
+                    matched = True
+                    break
+            result["whitelisted"] = matched
+            return result
+        matched = _signup_whitelist_match((account or {}).get("email", ""))
+        # None（查询异常）按"已具备资格"处理，避免对用户误提示
+        result["whitelisted"] = True if matched is None else matched
+        return result
+    except Exception as e:
+        log.warning(f"check_beta_eligibility failed: {e}")
+        result["whitelisted"] = True
+        return result

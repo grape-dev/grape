@@ -81,6 +81,12 @@
             <div class="cd-h">
               <h2>{{ t('third_party_accounts') }}</h2>
             </div>
+            <div v-if="showBetaHint" class="ac__betahint">
+              <span class="ac__betatext">{{ t('beta_hint_text') }}</span>
+              <button class="bt bt-s bt-o ac__betabtn" @click="openBetaApply">
+                {{ t('beta_hint_apply') }}
+              </button>
+            </div>
             <div v-if="!providers.length" class="tx t2 ac__prow">
               {{ t('no_third_party_platforms') }}
             </div>
@@ -184,6 +190,12 @@
           <div class="cd">
             <div class="cd-h">
               <h2>{{ t('third_party_repo_credentials') }}</h2>
+            </div>
+            <div v-if="showBetaHint" class="ac__betahint">
+              <span class="ac__betatext">{{ t('beta_hint_text') }}</span>
+              <button class="bt bt-s bt-o ac__betabtn" @click="openBetaApply">
+                {{ t('beta_hint_apply') }}
+              </button>
             </div>
             <p v-if="!repoPlatforms.length" class="tx t2 ac__mb">{{ t('loading') }}</p>
             <CredRepoRow
@@ -382,6 +394,7 @@
       :allow-pat="false"
       :already-bound="bindBound"
       :providers="providers"
+      :beta-hint="showBetaHint"
       @close="bindOpen = false"
       @bound="onBindOk"
     />
@@ -391,6 +404,7 @@
       :name="pName(patTarget)"
       :pat-url="patDialogUrl()"
       :oauth-configured="patDialogConfigured()"
+      :beta-hint="showBetaHint"
       @close="patOpen = false"
       @saved="onPatSaved"
     />
@@ -457,7 +471,7 @@ function fmtKeyTime(v) {
   }
 }
 
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import BindDialog from '../components/BindDialog.vue'
 import PatDialog from '../components/PatDialog.vue'
 import CredRepoRow from '../components/CredRepoRow.vue'
@@ -552,6 +566,9 @@ const DEFAULTS = {
   reveal_not_configured: '该凭据未配置',
   enter_password: '输入密码',
   cancel: '取消',
+  // Issue #4254：自注册非白名单用户的内测提示（非阻断）
+  beta_hint_text: '该能力处于内测阶段，需申请内测白名单后使用。',
+  beta_hint_apply: '申请内测白名单',
 }
 function modeLabel(m) {
   return t(m === 'light' ? 'light_mode' : m === 'dark' ? 'dark_mode' : 'auto_mode')
@@ -1908,6 +1925,32 @@ function onModalMask() {
   if (!modal.locked) closeModal()
 }
 
+// ── 内测白名单资格（Issue #4254）──
+// 仅自注册（created_by_oauth=0）且未命中白名单的用户展示非阻断提示；
+// 接口异常 / 未返回数据时不提示（不误打扰已授权用户）。
+const betaEligibility = ref({})
+const showBetaHint = computed(function () {
+  const b = betaEligibility.value || {}
+  return b.is_self_registered === true && b.whitelisted === false
+})
+function loadBetaEligibility() {
+  G.API.get('/auth/beta-eligibility')
+    .then(function (d) {
+      betaEligibility.value = d || {}
+    })
+    .catch(function () {
+      betaEligibility.value = {}
+    })
+}
+function openBetaApply() {
+  if (G.app && typeof G.app.openBetaApply === 'function') {
+    G.app.openBetaApply()
+    return
+  }
+  const url = betaEligibility.value.apply_url || '/static-vue/beta-apply'
+  G.window.location.href = url
+}
+
 // ── tab 加载 ──
 function loadTab() {
   tabError.value = ''
@@ -2036,6 +2079,7 @@ G.window._accountFetchTransferContext = fetchTransferContext
 
 onMounted(function () {
   tab.value = resolveInitialTab()
+  loadBetaEligibility()
   loadTab()
 })
 </script>
@@ -2051,6 +2095,27 @@ onMounted(function () {
 }
 .ac__mb {
   margin-bottom: 12px;
+}
+/* Issue #4254：内测提示条（非阻断） */
+.ac__betahint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255, 159, 10, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.28);
+}
+.ac__betatext {
+  font-size: 12px;
+  color: var(--t2);
+  line-height: 1.6;
+}
+.ac__betabtn {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .ac__prowwrap {
   margin-bottom: 0;

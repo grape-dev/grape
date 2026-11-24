@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
 <link rel="stylesheet" href="/static-vue/assets/css/app.css?v=11">
 <!-- view 级样式合并产物：阻塞加载，避免首帧无样式（见 vite closeBundle）-->
-<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=75">
+<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=76">
 <link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
 <link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
 <script>
@@ -22,7 +22,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='90';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='91';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -282,7 +282,7 @@ function _toggleAppLang(){
 <script type="module" src="/static-vue/viewjs/im-channel.js?v=57"></script>
 <script type="module" src="/static-vue/viewjs/repos-view.js?v=68"></script>
 <script type="module" src="/static-vue/viewjs/issues-view.js?v=72"></script>
-<script type="module" src="/static-vue/viewjs/account-view.js?v=63"></script>
+<script type="module" src="/static-vue/viewjs/account-view.js?v=64"></script>
 <script type="module" src="/static-vue/viewjs/scene-market.js?v=62"></script>
 <script type="module" src="/static-vue/viewjs/skills-view.js?v=64"></script>
 <script type="module" src="/static-vue/viewjs/plugins.js?v=57"></script>
