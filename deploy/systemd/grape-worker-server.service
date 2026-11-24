@@ -1,7 +1,7 @@
-# Grape Worker Server（Worker 进程 :38082）— Issue #699 Phase 4 四进程拆分
-# [DEPRECATED 端口布局] 本单元为 38080-38083 历史四进程口径（Issue #3764）；
-# 现行单一端口事实源 = scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT
-# （mgmt/event/worker/insight = 38081/38082/38083/38084，见 scripts/install-grape-systemd.sh）。
+# Grape Worker Server（Worker 进程 :38083）— Issue #699 Phase 4 四进程拆分
+# [端口已对齐事实源 Issue #3764] 本单元端口与 scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT
+# 一致（mgmt/event/worker/insight = 38081/38082/38083/38084）；新部署推荐
+# scripts/install-grape-systemd.sh 的 grape@.service 模板路径。
 [Unit]
 Description=Grape Worker Server (Task Execution)
 After=network.target grape-server.service
@@ -11,18 +11,18 @@ User=grape
 WorkingDirectory=/opt/grape
 Environment=PYTHONUNBUFFERED=1
 Environment=GRAPE_PROCESS_ROLE=worker
-Environment=GRAPE_PORT=38082
+Environment=GRAPE_PORT=38083
 Environment=GRAPE_LOCAL_CLAIMER=1
 Environment=RUNTIME_MAX_CONCURRENT_TASKS=20
 # Issue #3969：停机先摘流排空、启动 readiness 门禁（见同目录 grape-worker-*.sh）
 Environment=GRAPE_DRAIN_FILE=/tmp/grape-worker-draining
 Environment=GRAPE_DRAIN_SECONDS=5
-Environment=GRAPE_WORKER_PORT=38082
+Environment=GRAPE_WORKER_PORT=38083
 # worker trace 中继上游（Issue #3749）：OTLP_RELAY_TARGET=http://<lgtm-host>:4318（不含 /v1/traces），
 # 经 /etc/grape/grape.env 注入；未配置 = 中继禁用（POST /api/runtime/traces 恒 503，worker span 丢失）。
 EnvironmentFile=/etc/grape/grape.env
 ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_worker_server:app \
-    --host 0.0.0.0 --port 38082 --workers 2
+    --host 0.0.0.0 --port 38083 --workers 2
 # 停机：先标记 draining + 等待排空（≥5s），systemd 随后才 SIGTERM uvicorn。
 ExecStop=/opt/grape/deploy/systemd/grape-worker-drain.sh
 # 启动：轮询 /readyz；`-` 前缀允许超时仅告警，避免 Restart=always 重启风暴。
