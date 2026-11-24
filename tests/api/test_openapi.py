@@ -129,6 +129,7 @@ EXPECTED_PUBLIC = {
     "agents_clean": ("post", "/api/agents/{name}/{owner}/{repo}/clean"),
     "agents_detail": ("get", "/api/agents/{name}/{owner}/{repo}"),
     "agents_update": ("put", "/api/agents/{name}/{owner}/{repo}"),
+    "auth_beta_eligibility": ("get", "/api/auth/beta-eligibility"),
     "auth_logout": ("post", "/api/auth/logout"),
     "auth_profile": ("get", "/api/auth/profile"),
     "bind_provider_api_auth_bind__provider__get": ("get", "/api/auth/bind/{provider}"),

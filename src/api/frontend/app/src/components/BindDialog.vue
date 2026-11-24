@@ -12,6 +12,14 @@
           <span>{{ titleText }}</span>
         </h3>
 
+        <!-- Issue #4254：自注册非白名单用户内测提示（非阻断） -->
+        <div v-if="betaHint" class="bd__beta">
+          <span class="bd__betatext">{{ t('beta_hint_text') }}</span>
+          <button type="button" class="bt bt-s bt-o bd__betabtn" @click="openBetaApply">
+            {{ t('beta_hint_apply') }}
+          </button>
+        </div>
+
         <!-- 非引导页上下文 + 未开通 OAuth → 指路凭据管理（不在账号绑定域给 PAT 表单） -->
         <template v-if="!oauthConfigured && !allowPat">
           <p class="bd__hint">{{ t('bind_unavailable_hint') }}</p>
@@ -93,6 +101,7 @@ const props = defineProps({
   // chrome：历史上下文标记（引导页传 'shell'）；外框两种上下文同为 440px 玻璃卡片，
   // 且样式由本组件自带，不依赖宿主页面 scoped CSS。
   chrome: { type: String, default: 'account' },
+  betaHint: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close', 'bound'])
 
@@ -137,6 +146,15 @@ const patError = ref('')
 const busy = ref(false)
 const transferTicket = ref('')
 const transferError = ref('')
+
+// Issue #4254：内测申请入口（优先复用壳内既有申请弹窗，降级跳转申请页）
+function openBetaApply() {
+  if (G.app && typeof G.app.openBetaApply === 'function') {
+    G.app.openBetaApply()
+    return
+  }
+  G.window.location.href = '/static-vue/beta-apply'
+}
 
 // 官方实测过的预选参数链接优先；其余平台取平台卡 pat_create_url；都没有就不渲染按钮
 const PAT_CREATE_URLS = {
@@ -408,6 +426,25 @@ function confirmTransfer() {
 }
 .bd__tabs {
   margin-bottom: 16px;
+}
+/* Issue #4254：自注册非白名单用户内测提示（非阻断） */
+.bd__beta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 159, 10, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.28);
+}
+.bd__betatext {
+  font-size: 12px;
+  color: var(--t2);
+  line-height: 1.6;
+}
+.bd__betabtn {
+  align-self: flex-start;
 }
 .bd__hint {
   margin-bottom: 16px;

@@ -804,6 +804,38 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/auth/beta-eligibility": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Get beta whitelist eligibility for current user",
+        "description": "Returns whether the current user is self-registered and whether they already hit the beta whitelist (login_whitelist / signup_whitelist).",
+        "operationId": "auth_beta_eligibility",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/auth/logout": {
       "post": {
         "tags": [
@@ -9827,6 +9859,15 @@
               "type": "integer",
               "title": "Rid"
             }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
+            }
           }
         ],
         "requestBody": {
@@ -9899,6 +9940,15 @@
               "type": "string",
               "title": "Tag"
             }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
+            }
           }
         ],
         "requestBody": {
@@ -9968,6 +10018,15 @@
             "schema": {
               "type": "string",
               "title": "Tag"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
             }
           }
         ],
@@ -14001,7 +14060,7 @@
           "skills"
         ],
         "summary": "Skill metadata edit without re-uploading the package",
-        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
+        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. Issue #3855: official skills allow display_name edits by platform admins only (other fields and non-admin callers 403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
         "operationId": "skills_patch_meta",
         "parameters": [
           {
@@ -14057,7 +14116,7 @@
             "accessToken": []
           }
         ],
-        "x-token-scope": "user_only"
+        "x-token-scope": "user_or_admin"
       }
     },
     "/api/skills/convert": {
@@ -19375,7 +19434,7 @@
           "issues"
         ],
         "summary": "Issue pipeline roadmap",
-        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).",
+        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials). Issue #3891: shares the main resource's resolution chain — an issue that exists on the VCS side but is not registered internally (issue_id=null) returns 200 with an empty pipeline plus `diagnostics{exists:true, has_pipeline_data:false, reason:\"issue_unregistered\", source:\"vcs\"}`; only a confirmed-missing issue returns 404, where `detail.error_code`/`detail.reason` (`issue_not_found` vs `internal_sync_missing`) distinguishes 'does not exist' from 'exists but unverifiable/no pipeline data'.",
         "operationId": "issues_pipeline",
         "parameters": [
           {
@@ -19709,7 +19768,7 @@
           "runtime"
         ],
         "summary": "Set role tags",
-        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache.",
+        "description": "Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).",
         "operationId": "runtime_tags_set",
         "parameters": [
           {
@@ -19719,6 +19778,15 @@
             "schema": {
               "type": "integer",
               "title": "Runtime Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "title": "Authorization"
             }
           }
         ],
@@ -30637,6 +30705,17 @@
             "type": "boolean",
             "title": "Clear Category",
             "default": false
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
           }
         },
         "type": "object",
@@ -33899,6 +33978,60 @@
         "type": "object",
         "title": "RuntimeRegBody"
       },
+      "RuntimeTagsProbeSignalBody": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "title": "Host",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "runtime_id": {
+            "type": "string",
+            "title": "Runtime Id",
+            "default": ""
+          },
+          "consecutive": {
+            "type": "integer",
+            "title": "Consecutive",
+            "default": 0
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "default": ""
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          },
+          "scene": {
+            "type": "string",
+            "title": "Scene",
+            "default": ""
+          },
+          "pid": {
+            "type": "integer",
+            "title": "Pid",
+            "default": 0
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "RuntimeTagsProbeSignalBody",
+        "description": "Issue #4082：worker 标签探活失败信号（按 host/reason 计数）。\n\nreason 取值见 `RUNTIME_TAGS_PROBE_REASONS`（id_missing/unauthorized/not_found/no_tags/other，\nother = worker 归并的契约外失败如 HTTP 403/422）；契约外 reason 服务端按 unknown 兜底计数\n（不丢数、不告警）；host/pid/ts 仅供服务端日志甄别（worker sink 就地补充）；runtime_id/detail 只进日志。"
+      },
       "SandboxProviderReportBody": {
         "properties": {
           "platform": {
@@ -35844,7 +35977,7 @@
   "x-changelog": {
     "version": "2.3.0a1",
     "added": [
-      "/api/issues/{issue_id}/pipeline/trigger"
+      "/api/auth/beta-eligibility"
     ],
     "removed": [],
     "deprecated": [
@@ -35852,7 +35985,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 400,
+  "x-endpoint-count": 401,
   "x-groups": [
     "a2a",
     "agents",
@@ -35887,8 +36020,8 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "d6308c884",
-  "x-generated-at": "2026-11-23T12:57:36.512624+00:00",
-  "change_reason": "merge: sync arch-weekly-11 (63f1317be) into arch-weekly-11-ljt — union of both branches' endpoint additions",
-  "updated_at": "2026-11-23T12:57:36.514685+00:00"
+  "x-source-commit": "8b1599e96",
+  "x-generated-at": "2026-11-24T08:51:05.544509+00:00",
+  "change_reason": "feat(auth): #4254 add GET /api/auth/beta-eligibility for beta whitelist hint",
+  "updated_at": "2026-11-24T08:51:05.547679+00:00"
 }

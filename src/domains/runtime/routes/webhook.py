@@ -24,6 +24,20 @@ from src.domains.runtime.engine.repogit import resolve_work_branch
 router = APIRouter(tags=["webhook"])
 
 
+def _runtime_db():
+    """runtime 域连接句柄（issue/events/agent_tasks 都在这套库里）。
+
+    分域库部署下 `session_manager.db` 是**进程本域**库：event 进程恰好就是 runtime
+    （历史写法闭眼能用），但本文件的跨流水线交办实现会被 **mgmt 进程**的
+    `POST /api/issues/{id}/handoff` 服务内直调（`_dispatch_a2a` 同进程），那里主库
+    是 mgmt 库、没有 issue 表 → 1146 被 except 吞成 WARNING，场景/stage/assignee
+    全不落库。统一走 runtime 句柄，两条入口同行为。只用于读；写路径走
+    `session_store` 的 runtime public 原语。
+    """
+    from src.domains.runtime.issues_center import _rt_db as _proxy
+    return _proxy
+
+
 # Issue #340：仓库删除 webhook 事件名（GitCode/GitHub，大小写不敏感匹配）
 _REPO_DELETE_EVENT_HEADERS = {
     "repo.destroyed", "repository.destroyed", "repo.deleted", "repository.deleted",
@@ -853,9 +867,9 @@ def _a2a_source_event_seq(session_info) -> int:
     """
     try:
         if session_info and session_info.get("session_key"):
-            from src.kernel.session_manager import db, db_lock
+            from src.kernel.session_manager import db_lock
             with db_lock:
-                c = db.cursor()
+                c = _runtime_db().cursor()
                 c.execute("SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
                           (session_info["session_key"],))
                 row = c.fetchone()
@@ -1647,20 +1661,20 @@ def _cross_pipeline_handoff(
     #    Also capture old_assignee BEFORE the UPDATE so the audit trail in step 5
     #    records the original owner rather than an empty string.
     _old_assignee = ""
+    # Audit read only — must never take the state writes below down with it.
+    # `session_manager.db` is the process-own domain DB: in the mgmt process
+    # (in-process handoff) this table does not exist, so read through the
+    # runtime primitive / handle instead of raising 1146.
+    try:
+        from src.api.session_store import get_issue_assignee
+        _old_assignee = get_issue_assignee(repo_key, f"#{issue_number}") or ""
+    except Exception as _oe:  # noqa: BLE001
+        log.debug(f"A2A #329: read old assignee failed (audit only): {_oe}")
+
     try:
         from src.api.session_store import set_issue_scene, set_issue_stage
-        from src.kernel.session_manager import db, db_lock
         _issue_key = f"#{issue_number}"
         _issue_num = native_issue_number(issue_number)
-        # Read current assignee BEFORE writing (audit trail needs the old value)
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT assignee FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, _issue_num))
-            _row = c.fetchone()
-        if _row:
-            _old_assignee = _row[0] or ""
         # Issue #568: 刷新 issue 绑定场景为目标场景有效 ID（校验 DB 行存在 + scene_id 归一），
         # 后续注入 GRAPE_SCENE_ID 即有效且可通过 scenes detail 查询；DB 行缺失时回落原值
         _effective_sid = _refresh_issue_scene_after_handoff(repo_key, issue_number, target_scene_id)
@@ -1686,17 +1700,12 @@ def _cross_pipeline_handoff(
         pass
     if _cc:
         try:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
-            _cc_json = json.dumps(_cc)
-            with _sdl:
-                _sc = _sdb.cursor()
-                _sc.execute(
-                    "UPDATE issue SET carried_context=? WHERE repo_key=? AND issue_number=?",
-                    (_cc_json, repo_key, native_issue_number(issue_number)))
-                _sdb.commit()
-        except Exception:
-            # carried_context column may not exist yet — store in issue_state metadata
-            log.info("A2A #329: carried_context column not available, skipping persist")
+            from src.api.session_store import _sync_issue_fields
+            _sync_issue_fields(
+                repo_key, f"#{issue_number}",
+                {"carried_context": json.dumps(_cc)}, touch_updated_at=False)
+        except Exception as _ce:  # noqa: BLE001
+            log.warning(f"A2A #329: carried_context persist failed: {_ce}")
 
     # 5. Assignee change audit event (assignee already written by set_issue_stage in step 3;
     #    only record the assignee_changed event with old_assignee captured in step 3)
@@ -1942,11 +1951,11 @@ def a2a_status_endpoint(request: Request,
 
     import hashlib as _hashlib
     import json as _json
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
     events: list = []
     try:
         with db_lock:
-            c = db.cursor()
+            c = _runtime_db().cursor()
             if idempotency_key:
                 c.execute(
                     "SELECT seq, issue_id, agent_type, status, title, created_at, payload"
@@ -2625,10 +2634,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         #   session token 通道（agent CLI 调用）可反查；bot token 通道（服务端 resume/redispatch）无身份，放行
         if _a2a_session_info and _a2a_session_info.get("session_key"):
             try:
-                from src.kernel.session_manager import db as _prsub_db, db_lock as _prsub_lock
+                from src.kernel.session_manager import db_lock as _prsub_lock
                 _caller_task_id = _a2a_session_info["session_key"]
                 with _prsub_lock:
-                    _prsub_c = _prsub_db.cursor()
+                    _prsub_c = _runtime_db().cursor()
                     _prsub_c.execute("SELECT issue_id FROM agent_tasks WHERE id=?", (_caller_task_id,))
                     _prsub_row = _prsub_c.fetchone()
                 if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
@@ -2731,7 +2740,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         }), _a2a_degraded)
     try:
         from src.domains.runtime.pipeline.event_pipeline import _execute_agent
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.session_manager import db_lock
         backend = ""
         # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
         runtime_id = int(payload.get("runtime_id", 0) or 0)
@@ -2742,7 +2751,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
             with db_lock:
-                c = db.cursor()
+                c = _runtime_db().cursor()
                 # payload 未指定 runtime_id 时，从 session 表查绑定的引擎
                 if not runtime_id:
                     c.execute("SELECT runtime_id, skill, skill_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_name))
@@ -3087,7 +3096,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if agent_name == "sre" and issue_number and pr_number:
             try:
                 with db_lock:
-                    c = db.cursor()
+                    c = _runtime_db().cursor()
                     c.execute(
                         "SELECT subscribe_events FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'",
                         (repo_key,))
