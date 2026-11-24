@@ -1315,6 +1315,17 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     # Issue #472 全局口径：筛选标签（类型/场景/标签）从全量可见集派生（分页/筛选后不消失）
     _avail_types = list(set(_engine_type_of(rt) for rt in visible_runtimes if _engine_type_of(rt)))
     _avail_scenes = sorted({s for rt in visible_runtimes for s in (rt.get("scene_tags") or []) if s})
+    # 角色停用 vs 未配置（2026-11-24 用户裁定「把已停用展示出来」）：
+    # 两种状态在派发上都是不可选，但「配过又全关掉」必须区别于「从没配过」。
+    try:
+        _rc_inv = _rt.role_caps_inventory()
+    except Exception as _rc_e:  # noqa: BLE001
+        log.debug(f"settings: role_caps_inventory failed: {_rc_e}")
+        _rc_inv = {}
+    for rt in visible_runtimes:
+        _st = _rc_inv.get(int(rt.get("id") or 0)) or {}
+        rt["roles_disabled"] = bool(_st.get("total")) and not bool(_st.get("enabled"))
+
     _avail_tags = sorted({t for rt in visible_runtimes for t in (rt.get("agent_tags") or []) if t})
 
     # Issue #472 全局口径：q/type/scene/tag 在分页切片前对全量可见集过滤

@@ -224,6 +224,12 @@
                 class="rtv-pdisabled"
                 :title="t('label.platform_disabled_tip')"
                 >⏸ {{ t('label.platform_disabled') }}</span
+              ><!-- 角色标签全部停用：与「未分配」区分，否则会被误读成从未配置 -->
+              <span
+                v-if="rt.roles_disabled"
+                class="rtv-rdisabled"
+                :title="t('label.roles_disabled_tip')"
+                >⏸ {{ t('label.roles_disabled') }}</span
               ><span
                 v-if="rt.spawn_fail_degraded"
                 class="rtv-degraded"
@@ -1656,6 +1662,8 @@ function cardLeftBorder(h, rt) {
   }
   // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
   if (rt && platformDisabled(rt)) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
+  // 角色标签全部停用 → 同样红框：这台引擎现在不会被任何任务选中
+  if (rt && rt.roles_disabled) return { borderLeft: '3px solid var(--bar-bad)', boxShadow: ABNORMAL_RING }
   // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
   return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
 }
@@ -3264,6 +3272,17 @@ onBeforeUnmount(function () {
 }
 /* B5：沙箱平台禁用徽标 */
 .rtv-pdisabled {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  --tag: var(--rtv-bad);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
+  border: 1px solid color-mix(in srgb, var(--tag) 32%, transparent);
+  font-weight: 700;
+}
+/* 角色标签全部停用（enabled=0）——与沙箱平台禁用同色系，但语义是「角色被关掉」 */
+.rtv-rdisabled {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 999px;

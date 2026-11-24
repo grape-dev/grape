@@ -126,7 +126,9 @@
     "sandbox_template": "模板",
     "platform_disabled": "已禁用",
     "platform_disabled_tip": "关联的沙箱平台已禁用：不再新建沙箱，启用请在平台详情操作",
-    "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理"
+    "cred_id_tip": "凭据 ID——同机多实例时机器侧服务名为 sandbox-worker-<实例ID>-<凭据ID>，可用 systemctl 管理",
+    "roles_disabled": "已停用",
+    "roles_disabled_tip": "该引擎的角色标签已全部停用（enabled=0），当前不会被任何任务选中；打开「角色标签」勾选并保存即可重新启用"
   },
   "empty": {
     "no_engines": "暂无引擎",

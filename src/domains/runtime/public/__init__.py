@@ -659,6 +659,26 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def role_caps_inventory() -> dict:
+    """每台引擎的角色行统计 {rid: {"total": n, "enabled": m}}。
+
+    只数平铺角色行（'all' 或短角色名），冒号派生行（engine:/scene:/scope:）不计。
+    供管理台区分「从未配置角色」(total=0) 与「角色全部停用」(total>0 且 enabled=0)——
+    两者在派发上都是不可选，但语义完全不同。
+    """
+    with _any_cursor() as c:
+        rows = c.execute(
+            "SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
+            "FROM engine_capabilities WHERE tag NOT LIKE '%:%' GROUP BY runtime_id").fetchall()
+    out: dict = {}
+    for r in rows or []:
+        try:
+            out[int(r[0])] = {"total": int(r[1] or 0), "enabled": int(r[2] or 0)}
+        except Exception:  # noqa: BLE001 - 脏行不影响整表
+            continue
+    return out
+
+
 def removing_leaves_no_role(runtime_id: int, tag: str) -> bool:
     """删除/禁用该 tag 后，该引擎是否一个角色行都不剩（`all` 与已知角色都算角色行）。
 
@@ -1962,7 +1982,7 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "role_caps_inventory", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
            "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",

@@ -154,3 +154,19 @@ def test_ensure_is_idempotent_when_disabled_row_exists():
         assert ensure_role_caps(db.cursor(), rid) == []
         db.commit()
 
+
+def test_role_caps_inventory_counts_disabled_rows():
+    """管理台要能区分「没配过」与「配过但全停用」——统计必须含 enabled=0 的行。"""
+    from src.domains.runtime.public import role_caps_inventory
+
+    rid_off = _mk_engine("b3396inv-off")
+    rid_on = _mk_engine("b3396inv-on")
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,0)", (rid_off, "all"))
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)", (rid_on, "all"))
+        db.commit()
+    inv = role_caps_inventory()
+    assert inv.get(rid_off) == {"total": 1, "enabled": 0}, inv.get(rid_off)
+    assert inv.get(rid_on) == {"total": 1, "enabled": 1}, inv.get(rid_on)
+
