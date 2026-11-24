@@ -365,8 +365,7 @@ def _ensure_task_conversation(user_id: str, repo_key: str, issue_number: int,
     """
     from src.kernel.session_manager import (
         get_user_conversations, get_conversation_by_repo_issue_type,
-        create_conversation, update_conversation, add_message,
-        ConversationDuplicateUnresolved,
+        update_conversation, ConversationDuplicateUnresolved,
     )
     conv_id = ""
     new_title = _build_task_conversation_title(issue_number, title)
