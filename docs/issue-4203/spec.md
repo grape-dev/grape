@@ -30,9 +30,9 @@ systemd 重启 + uvicorn 启动共 12.1s，窗口内网关 502 共 339 次，其
 | 终态回执 outbox | `worker_report_queue.py` 已有：先 `q.add` 落盘再 `client.complete/fail`，ack 后出队，10s 重放循环 + run_token 幂等守卫 | 已落地，无缺口 |
 | 消息回执 | 4xx 降级路径已落 outbox（#975）；网络错误只保留内存 batch 重试 | **SIGKILL 时内存 batch 丢失**（11:39 事故 28 条的成因）|
 | 进程内存指标 | 无 | 全部新增 |
-| systemd 单元 | 无 MemoryAccounting/High/Max，RestartSec=5 | 全部新增 |
+| systemd 单元 | 无 MemoryAccounting/High/Max，RestartSec=5；生产 worker 走 `grape@worker.service → scripts/grape-systemd-run.sh`，静态单元不一定是实际入口 | 两条路径都要落：静态单元内联参数 + `grape@worker.service` drop-in（`deploy/systemd/grape-worker-oom.conf`）|
 | 告警 | 无 OOM/内存类规则 | 全部新增 |
-| 端口先绑 | `--workers 2` 下 uvicorn supervisor 在 spawn 前 bind（多 worker 已满足） | 单 worker 路径无预 bind；统一由 launcher 预 bind fd 收口 |
+| 端口先绑 | `--workers 2` 下 uvicorn supervisor 在 spawn 前 bind（多 worker 已满足） | 单 worker 路径无预 bind；统一由 launcher 预 bind socket 对象收口（worker 两条启动路径都改走 launcher）|
 
 ## 5. Open Question（不阻塞）
 
@@ -40,3 +40,8 @@ systemd 重启 + uvicorn 启动共 12.1s，窗口内网关 502 共 339 次，其
 38081/38082/38083/38084）不符；MemoryMax 取值与 RSS 增长源
 需 SRE 的 `systemctl cat` / `dmesg` victim 行。开发阶段按 MemoryHigh + 采集先落地，
 MemoryMax 写入保守默认值并在注释中标注待 SRE 实测校准。
+
+004 实际托管 unit 尚未取得证据 → 本单**不赌单一入口**：静态单元
+`grape-worker-server.service` 与模板单元 `grape@worker.service`（含 drop-in）两条
+路径都落同一套 Memory*/Restart*/预 bind，取证后只需按宿主机校准取值
+（见 docs/weekly-11/deployment-runbook.md §3.1）。
