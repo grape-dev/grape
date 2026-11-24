@@ -413,8 +413,17 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
                         "AND scope='user' LIMIT 1", (skill_name,)).fetchone()
                     resolved = row[0] if row else 0
             if resolved == 0:
-                logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
+                # 不写 0：读取侧会把 skill_id=0 当成「技能已删除」，且这条绑定永远不会回填。
+                # 宁可本轮少一条引用（下一轮同步会补齐），也不要落一条无效绑定。
+                logger.warning(
+                    f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, ref skipped")
+                continue
             refs.append({"skill_id": int(resolved), "skill_name": skill_name})
+    if not refs:
+        # 一个都没解析出来：不要 DELETE 掉既有绑定（那会让场景彻底失去引用），
+        # 保留原状等下一轮（技能同步就绪后自愈）。
+        logger.warning(f"Scene sync: {scene_name} no skill refs resolved, existing bindings left untouched")
+        return
     if _mg_ssr is not None:
         # 三库拓扑：一条幂等意图进 outbox（远端失败可重放），本进程不直写外域表
         _write_scene_skill_ref_via_lib(_mg_ssr, market_id, refs, scene_name)
@@ -456,6 +465,32 @@ def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str
     _scene_id = _mgmt_public.official_scene_id_any(scene_name)
     if _scene_id:
         _rebuild_scene_skill_ref(int(_scene_id), nodes, scene_name, repo_key)
+
+
+def _repair_scene_skill_ref_if_unresolved(scene_name: str, market_id: int, nodes: list,
+                                          repo_key: str = "") -> None:
+    """仅当 scene_skill_ref 里存在未解析引用（skill_id <= 0）时重建绑定。
+
+    场景定义没变时同步会 skipped 并跳过重建，于是**首次同步写入的 skill_id=0 会永久留存**
+    （典型成因：容器首次启动时技能库还没就绪，或跨境拉取技能源失败）。
+    这里每轮做一次零成本检查，让存量坏数据在下一轮同步自愈；没有坏数据时不写库。
+    """
+    if not market_id:
+        return
+    db, db_lock = _db_pair("runtime")
+    try:
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT COUNT(*) FROM scene_skill_ref "
+                "WHERE scene_id=? AND (skill_id IS NULL OR skill_id<=0)",
+                (int(market_id),)).fetchone()
+        unresolved = int(row[0]) if row else 0
+    except Exception as exc:  # noqa: BLE001 - 检查失败不影响同步主流程
+        logger.warning(f"Scene sync: {scene_name} skill ref check failed: {exc}")
+        return
+    if unresolved:
+        logger.info(f"Scene sync: {scene_name} has {unresolved} unresolved skill ref(s), rebuilding bindings")
+        _rebuild_scene_skill_ref(int(market_id), nodes, scene_name, repo_key)
 
 
 def _init_featured_scenes_if_empty():
@@ -688,6 +723,8 @@ async def sync_official_scenes(repo_root: str | None = None):
                     _content_fields["cat_l2_id"] = cat_l2_id
                 market_id, action = _persist_scene_row(name, _content_fields, stats)
                 if action == "skipped":
+                    # 内容没变不重建，但绑定可能是坏的（历史 skill_id=0）→ 检查并自愈
+                    _repair_scene_skill_ref_if_unresolved(name, market_id, nodes)
                     continue
                 _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)
 
