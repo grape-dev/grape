@@ -272,8 +272,8 @@ groups:
           summary: "hermes ACP state.db exceeds 100MB"
           description: "host={{ $labels.host }} state.db={{ $value }} bytes (>100MB for 5m). Immediate risk of skipped resume / disk pressure; run scripts/ops/hermes_acp_state_db_cleanup.py --dry-run then cleanup."
       - alert: GrapeAcpResumeSkipped
+        # increase 窗口已覆盖 15m 判定，不再叠加 for:15m（否则最长 30m 才触发）。
         expr: increase(grape_acp_resume_skipped_total[15m]) > 0
-        for: 15m
         labels:
           severity: warning
         annotations:

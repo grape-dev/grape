@@ -9,6 +9,8 @@
     python3 scripts/ops/hermes_acp_state_db_cleanup.py --dry-run
     python3 scripts/ops/hermes_acp_state_db_cleanup.py --db-path ~/.hermes/state.db
     python3 scripts/ops/hermes_acp_state_db_cleanup.py --all --retention-days 7
+    # 归档重建会删线上 state.db：须先停 worker 并显式确认
+    python3 scripts/ops/hermes_acp_state_db_cleanup.py --yes-worker-stopped
 """
 from __future__ import annotations
 
@@ -70,10 +72,16 @@ def _process_one(path: str, args) -> dict:
     if args.dry_run or cleanup.result != "ok":
         return payload
     if m.db_size_bytes(path) > max_bytes and args.archive:
-        archive = m.archive_and_recreate(
-            path, backup_dir=args.backup_dir, lock_timeout=args.lock_timeout)
-        payload["archive"] = archive.to_dict()
-        payload["after_bytes"] = archive.after_bytes
+        # 归档会删除线上正在使用的 state.db；未显式确认 worker 已停止时拒绝。
+        if not getattr(args, "yes_worker_stopped", False):
+            payload["archive"] = {
+                "result": "skipped", "reason": "worker_running_unconfirmed",
+                "hint": "stop the worker first, then pass --yes-worker-stopped",
+            }
+        else:
+            archive = m.archive_and_recreate(
+                path, backup_dir=args.backup_dir, lock_timeout=args.lock_timeout)
+            payload["archive"] = archive.to_dict()
     payload["after_bytes"] = m.db_size_bytes(path)
     return payload
 
@@ -95,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="即使未超阈值也执行清理")
     p.add_argument("--no-archive", dest="archive", action="store_false", default=True,
                    help="清理后仍超阈值时不做归档重建")
+    p.add_argument("--yes-worker-stopped", action="store_true",
+                   help="确认 worker 已停止；否则拒绝归档重建（避免删除线上在用的 state.db）")
     p.add_argument("--lock-timeout", type=float, default=0.0)
     return p
 
