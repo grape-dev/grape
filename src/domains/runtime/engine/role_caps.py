@@ -14,9 +14,12 @@
 - 有合法声明 → 按声明补齐（声明即收窄，A8b）；
 - 无声明 / 声明非法 → 补 `all`（与基线默认一致）。
 """
+import logging
 from datetime import datetime, timezone
 
 from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES, _PRIO_GLOBAL
+
+log = logging.getLogger(__name__)
 
 # 与 public.upsert_engine_capability() 的默认值同源（优先级取 engine_select._PRIO_GLOBAL）
 _DEFAULT_MAX_CONCURRENT = 1
@@ -48,11 +51,17 @@ def has_role_rows(c, runtime_id) -> bool:
     return False
 
 
-def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
+def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None, source="unknown"):
     """角色行为空时补齐（声明优先，否则 `all`）。
 
     declared/user_set 为 None 时从 agent_runtimes 行内读取（存量行迁移面）。
     返回实际写入的标签列表；无需动作返回 []。
+
+    并发：判定与插入在同一条 `INSERT ... WHERE NOT EXISTS` 里完成（QA 复审 Medium）。
+    早先的 `has_role_rows` 预检只是快路径——本机发现链走自有 DSN 的 autocommit 连接，
+    与 `PUT /runtimes/{id}/tags` 的另一条连接可交错：预检「无角色行」后用户先保存
+    `["chat"]`，再把 `all` 插进来，引擎就从收窄被静默放大成全能。原子语句让后到者
+    在库侧看到已有角色行后自行跳过。
     """
     try:
         rid = int(runtime_id or 0)
@@ -62,9 +71,6 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
         return []
     if has_role_rows(c, rid):
         return []  # 已有角色行（含 enabled=0 的显式停用）→ 不补、不重开
-    _tags, _roles = role_rows(c, rid)
-    if _roles:  # 双保险（正常不会走到）
-        return []
     if declared is None or user_set is None:
         row = c.execute(
             "SELECT ifnull(role_tags,''), ifnull(tags_user_set,0) FROM agent_runtimes WHERE id=?",
@@ -83,12 +89,29 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
     _valid = [t for t in dict.fromkeys(_valid) if t in KNOWN_AGENT_ROLES]
     _write = _valid or ["all"]
     _now = now_iso or datetime.now(timezone.utc).isoformat()
+    _domain = ("all",) + tuple(KNOWN_AGENT_ROLES)
+    _in = ",".join("?" * len(_domain))
+    _written = []
     for _t in _write:
-        c.execute(
-            "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-            "VALUES (?,?,?,?,1,?,?)",
-            (rid, _t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now))
-    return _write
+        # 原子：库里已出现任意角色行（含并发写入的）就跳过，不再依赖进程内的预检
+        _cur = c.execute(
+            "INSERT INTO engine_capabilities "
+            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+            "SELECT ?,?,?,?,1,?,? WHERE NOT EXISTS ("
+            "  SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag IN (" + _in + "))",
+            (rid, _t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now, rid, *_domain))
+        try:
+            _n = getattr(_cur, "rowcount", 0)
+        except Exception:  # noqa: BLE001
+            _n = 0
+        if _n:
+            _written.append(_t)
+    if _written:
+        # QA 复审 Medium：自愈写入直接改变派发可用性（补 all = 全角色可调度），
+        # 成功路径必须留痕，不能只在异常时 warning。
+        log.info("role caps backfilled by ensure: rid=%s tags=%s declared=%s user_set=%s source=%s",
+                 rid, _written, declared or [], int(user_set or 0), source)
+    return _written
 
 
 def _parse_declared(raw) -> list:

@@ -666,7 +666,9 @@ def role_tag_domain() -> tuple:
     （架构守护 M3）。
     """
     from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
-    return ("all",) + tuple(KNOWN_AGENT_ROLES)
+    # sorted：KNOWN_AGENT_ROLES 是 set，直接元组化会随进程哈希种子变序，
+    # 400 文案「可选: …」与前端展示顺序不稳定（QA 复审 Info）。
+    return ("all",) + tuple(sorted(KNOWN_AGENT_ROLES))
 
 
 def role_caps_inventory(runtime_ids: list | None = None) -> dict:
@@ -702,6 +704,14 @@ def role_caps_inventory(runtime_ids: list | None = None) -> dict:
         except Exception:  # noqa: BLE001 - 脏行不影响整表
             continue
     return out
+
+
+def engine_cap_tag_exists(runtime_id, tag: str) -> bool:
+    """该引擎是否存在指定标签行（含 enabled=0）。mgmt 的守卫用它把 404 判定提前。"""
+    with _any_cursor() as c:
+        row = c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND tag=? LIMIT 1",
+                        (int(runtime_id or 0), str(tag))).fetchone()
+    return bool(row)
 
 
 def removing_leaves_no_role(runtime_id: int, tag: str) -> bool:
@@ -2007,7 +2017,7 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "role_caps_inventory", "role_tag_domain", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "role_caps_inventory", "role_tag_domain", "engine_cap_tag_exists", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
            "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",

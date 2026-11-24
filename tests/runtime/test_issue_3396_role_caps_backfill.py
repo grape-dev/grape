@@ -198,3 +198,51 @@ def test_role_caps_inventory_scopes_to_given_ids():
     assert rid_b not in inv, inv
     assert role_caps_inventory([]) == {}
 
+
+
+def test_role_tag_domain_order_is_stable():
+    """QA 复审 Info：值域顺序必须稳定（set 元组化会随哈希种子变序，400 文案会抖）。"""
+    from src.domains.runtime.public import role_tag_domain
+    d = role_tag_domain()
+    assert d[0] == "all"
+    assert list(d[1:]) == sorted(d[1:]), d
+    assert role_tag_domain() == d
+
+
+def test_ensure_role_caps_logs_backfill(caplog):
+    """QA 复审 Medium：自愈写入改变派发可用性，成功路径必须留痕。"""
+    import logging
+    rid = _mk_engine("b3396bf-log")
+    with db_lock:
+        db.cursor().execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+        db.commit()
+    with caplog.at_level(logging.INFO):
+        written = ensure_role_caps(db.cursor(), rid, declared=[], user_set=0, source="probe")
+    assert written == ["all"], written
+    assert any("role caps backfilled" in r.getMessage() and str(rid) in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_ensure_skips_when_role_row_appears_concurrently():
+    """QA 复审 Medium：原子性 —— 预检之后才出现的角色行必须让插入自行放弃。
+
+    直接构造「预检已过、写前库里已有 chat 行」的时序：先让 has_role_rows 返回假，
+    再由另一条路径写入 chat，然后调用 ensure；单条 INSERT ... WHERE NOT EXISTS
+    应在库侧看到 chat 后跳过，不会叠出 all。
+    """
+    rid = _mk_engine("b3396bf-race")
+    with db_lock:
+        db.cursor().execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+        db.commit()
+
+    with db_lock:
+        c = db.cursor()
+        # 模拟并发写者先落 chat（预检与插入之间的窗口）
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)", (rid, "chat"))
+        db.commit()
+        written = ensure_role_caps(c, rid, declared=[], user_set=0, source="probe")
+        db.commit()
+    assert written == [], written
+    tags = sorted(t for (t,) in db.cursor().execute(
+        "SELECT tag FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall())
+    assert tags == ["chat"], tags

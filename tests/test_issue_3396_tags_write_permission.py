@@ -391,9 +391,8 @@ class TestDisabledRoleVisibility:
         assert rows[rid].get("roles_disabled") is True, rows[rid]
 
     def test_list_reports_no_flag_for_engine_without_role_rows(self):
-        rid = _mk_engine(owner_name="owner_alice", credential=True, derived_only=True)             if "derived_only" in _mk_engine.__code__.co_varnames else None
         # 不依赖构造参数：直接清空角色行，只留派生行
-        rid = rid or _mk_engine(owner_name="owner_alice", credential=True)
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
@@ -466,3 +465,33 @@ class TestOperationDescriptionMatchesImplementation:
         assert "session_token" in d and "403" in d
         assert "INVALID_ROLE_TAGS" in d and "EMPTY_ROLE_TAGS" in d
 
+
+class TestLastRoleGuardScope:
+    """QA 复审 Info：守卫只该拦「角色值域」内的最后一个角色。
+
+    派生行（engine:/scene:/scope:）与领域外标签既不参与角色计数，也不该在零角色行
+    的引擎上被 400 挡住；不存在的 tag 必须先落到 404。
+    """
+
+    def test_guard_ignores_derived_tag(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,1)",
+                      (rid, "engine:opencode"))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.delete(f"/api/settings/agent-runtimes/{rid}/tags/engine:opencode")
+        assert r.status_code != 400 or "EMPTY_ROLE_TAGS" not in r.text, r.text
+        assert r.status_code in (200, 204, 404), r.text
+
+    def test_guard_missing_tag_is_404_not_400(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True, cap=None)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag NOT LIKE '%:%'", (rid,))
+            db.commit()
+        client = _client_as(_owner_user())
+        r = client.delete(f"/api/settings/agent-runtimes/{rid}/tags/chat")
+        assert r.status_code == 404, r.text

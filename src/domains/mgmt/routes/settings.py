@@ -2762,6 +2762,21 @@ def _guard_last_role_or_400(rid: int, tag: str) -> None:
 
     判定走运行域 public 具名原语 `removing_leaves_no_role`（mgmt 不直连 runtime 表）。
     """
+    # QA 复审 Info：派生行（engine:/scene:/scope:）与领域外标签不参与「最后一个角色」判定，
+    # 也不该被它挡住 —— 零角色行的引擎删派生行必须照常成功。存在性先判，交给上层 404。
+    try:
+        from src.domains.runtime.public import role_tag_domain as _role_domain
+        if tag not in _role_domain():
+            return
+        from src.domains.runtime.public import engine_cap_tag_exists as _tag_exists
+        if not _tag_exists(rid, tag):
+            return
+    except Exception as _de:  # noqa: BLE001
+        log.warning(f"engine tag guard pre-check failed (rid={rid} tag={tag}): {_de}")
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "error_code": "ROLE_GUARD_UNAVAILABLE",
+            "message": "暂时无法校验标签状态，已拒绝本次修改，请稍后重试",
+        })
     try:
         from src.domains.runtime.public import removing_leaves_no_role as _no_role
         _empty = _no_role(rid, tag)

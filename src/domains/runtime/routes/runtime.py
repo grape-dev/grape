@@ -24,7 +24,8 @@ from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine import service
 # Issue #3396：角色标签值域唯一来源 = engine_select.KNOWN_AGENT_ROLES（Issue #955 角色全集）。
 # 本模块不再维护第二份字面量：两份不同步会让新角色被静默过滤/误折叠。
-from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as AGENT_TAGS
+from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as AGENT_TAGS, _PRIO_GLOBAL
+from src.domains.runtime.engine.role_caps import _DEFAULT_MAX_CONCURRENT
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
 # Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
@@ -157,8 +158,8 @@ def seed_role_caps_from_declared(c, rid: int, declared=None, user_set=None) -> l
         for t in tags:
             c.execute(
                 "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?, ?, 1, 50, 1, ?, ?)",
-                (rid, t, _now, _now))
+                "VALUES (?, ?, ?, ?, 1, ?, ?)",
+                (rid, t, _DEFAULT_MAX_CONCURRENT, _PRIO_GLOBAL, _now, _now))
         log.info(f"role caps seeded: rid={rid} tags={tags} (declared role_tags)")
         return tags
     except Exception as _se:
@@ -694,7 +695,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             if not _seeded:
                 try:
                     from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
-                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set)
+                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set, source="probe")
                 except Exception as _erc:
                     log.warning(f"runtime_register: role caps ensure failed rid={rid}: {_erc}")
             # Issue #646：标签行同步 engine_uid（引用切换，孤儿防护）
@@ -961,16 +962,14 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                             _et_hb = (json.loads(_hb_row[4] or "{}").get("engine_type") or "")
                         except Exception:
                             _et_hb = ""
-                        # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
-                        _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
-                                 engine_type=_et_hb)
                         # Issue #3396 后续：心跳兜底改成「角色行为空就补」——
                         # 有声明按声明（A8b 声明即收窄），无声明补 all。
-                        # 旧条件要求 role_tags 非空，未声明的引擎被清空后永远补不回来。
                         # 2026-11-24：不再用 tags_user_set 做闸门——清空已被前端+接口双层
                         # 禁止（EMPTY_ROLE_TAGS），`user_set=1 且零角色行`只剩历史遗留，
                         # 闸门会让它永久 fail-closed；是否覆盖由两步原语内部判定
                         # （seed 见 user_set 即返回空，ensure 只在 has_role_rows 为假时补）。
+                        # 顺序：先补角色行，再刷新派生标签快照，否则快照不含新行，
+                        # `GET /runtimes/{id}/tags` 会滞后到下一跳（QA 复审 Info）。
                         _user_set_hb = _hb_row[6] or 0
                         try:
                             _p_decl = json.loads(_hb_row[5] or "[]")
@@ -985,9 +984,13 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                                        if _p_decl else [])
                             if not _seeded:
                                 from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc_hb
-                                _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=_user_set_hb)
+                                _ensure_rc_hb(c, _rid, declared=_p_decl, user_set=_user_set_hb,
+                                              source="heartbeat")
                         except Exception as _sde:
                             log.warning(f"heartbeat role caps ensure failed (runtime={_rid}): {_sde}")
+                        # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
+                        _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
+                                 engine_type=_et_hb)
             except Exception as _at_e:
                 log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:
@@ -3070,7 +3073,8 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
     """应用标签互斥规则。
     - 全能与其他互斥：有其他标签时去掉全能。
     - 6 个角色全选时自动替换为全能（Issue #3396：chat 进值域，5→6）。
-    - 允许空标签（不自动回全能；空标签 fail-closed，见 engine_select #3396）。
+    - 空标签集合被端点层拒绝（400 EMPTY_ROLE_TAGS：至少保留一个角色；A7 下空集
+      等同 fail-closed，因此不允许用户把自己锁死）。
     """
     tag_set = set(tags)
     has_all = "all" in tag_set

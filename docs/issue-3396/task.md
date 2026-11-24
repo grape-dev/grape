@@ -8,7 +8,7 @@
 - [x] T6 改动④：require_runtime_owner_or_admin 写权限收紧（所有者/org owner+admin/平台管理员可改，仓库管理员禁改，本机直连仅平台管理员）+ OpenAPI 契约登记（test_issue_3396_tags_write_permission.py 11 例）——**2026-11-24 分层修正**：本机直连（credential_id=0）改为任意登录用户可改，凭据引擎保留归属矩阵，见 spec.md 决策表 / A5
 - [x] T7 测试与验收：A1-A8 用例覆盖 + 受影响套件与基线逐文件对账（无新增失败，基线既有失败清单见 PR 描述）+ 5 commit 独立可 revert + 无 weekly-11 专属假设残留（改动内无分支/行号假设，符号名定位）
 - [x] T8 文档：docs/issue-3396/{spec,plan,task}.md
-- [x] T9（M1 整改）A8b 声明兼容：注册/本机发现带 role_tags → 按声明播种角色能力行（无声明仍补 all；tags_user_set=1 与非 all 既有角色行不覆盖；存量行「role_tags 非空 + 仅自动 all」再注册改写）；test_issue_3396_role_tags_seed_compat.py 7 例
+- [x] T9（M1 整改）A8b 声明兼容：注册/本机发现带 role_tags → 按声明播种角色能力行（无声明仍补 all；**已有角色行含 enabled=0 一律不覆盖**；`tags_user_set=1` 且零角色行的历史遗留行按 11-24 裁定照补；存量行「role_tags 非空 + 仅自动 all」再注册改写）；test_issue_3396_role_tags_seed_compat.py 7 例
 - [x] T9 架构守护复审整改（新基线 77d77b202 后重跑）：
   - F1/A9：settings 三个同源写端点（`POST/PUT/DELETE /api/settings/agent-runtimes/{rid}/tags`）统一挂
     `require_settings_runtime_owner_or_admin`，与运行域 `require_runtime_owner_or_admin` 共用 `_check_runtime_owner_or_admin` 判定。
