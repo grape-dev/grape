@@ -804,6 +804,38 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/auth/beta-eligibility": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Get beta whitelist eligibility for current user",
+        "description": "Returns whether the current user is self-registered and whether they already hit the beta whitelist (login_whitelist / signup_whitelist).",
+        "operationId": "auth_beta_eligibility",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/auth/logout": {
       "post": {
         "tags": [
@@ -35951,7 +35983,7 @@
     ],
     "baseline_available": true
   },
-  "x-endpoint-count": 400,
+  "x-endpoint-count": 401,
   "x-groups": [
     "a2a",
     "agents",
@@ -35986,6 +36018,7 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "5d297ed28",
-  "x-generated-at": "2026-11-24T04:55:43.472002+00:00"
+  "x-source-commit": "8b1599e96",
+  "x-generated-at": "2026-11-24T08:52:05.641856+00:00",
+  "tags": []
 }

@@ -9,7 +9,10 @@
 注册白名单与现有 login_whitelist（OAuth 白名单）独立运作。
 """
 from src.kernel.config import log
+from src.kernel.config import _is_login_whitelist_enabled, is_user_allowed
 from src.kernel.session_manager import db, db_lock
+
+BETA_APPLY_URL = "/beta-apply"
 
 
 def _get_whitelist_emails() -> "set[str] | None":
@@ -112,3 +115,97 @@ def check_signup_allowed(email: str) -> bool:
 
     # 4. 白名单非空但未命中 → 拒绝（白名单优先于开关）
     return False
+
+
+def _signup_whitelist_match(email: str) -> "bool | None":
+    """注册白名单命中判定（Issue #4254 内测资格复用）。
+
+    返回 True=命中/无白名单管控；False=白名单非空但未命中；None=查询异常（未知）。
+    """
+    e = (email or "").strip().lower()
+    email_whitelist = _get_whitelist_emails()
+    domain_whitelist = _get_whitelist_domains()
+    if email_whitelist is None or domain_whitelist is None:
+        return None
+    if e and "@" in e:
+        if e in email_whitelist:
+            return True
+        if e.split("@", 1)[1] in domain_whitelist:
+            return True
+    # 两个白名单均为空 = 无白名单管控，不构成内测限制
+    if not email_whitelist and not domain_whitelist:
+        return True
+    return False
+
+
+def check_beta_eligibility(account: dict, identities: "list[dict] | None" = None) -> dict:
+    """当前用户的内测资格判定（Issue #4254）。
+
+    - 判据只看「是否命中内测白名单」，与建号来源无关：平台注册入口自注册
+      （`created_by_oauth=0`）与 OAuth 建号（`created_by_oauth=1`）一视同仁——
+      两者都可能不在白名单里（早期白名单未启用时建的号、换绑过多身份等），
+      漏提示会让这些用户以为能力坏了；
+    - login_whitelist 启用时按已绑定第三方身份匹配，否则按邮箱/域名匹配 signup_whitelist；
+    - 两个白名单均未启用且为空 → 视为无白名单管控，不提示；
+    - 查询异常 → 视为已具备资格（不误提示），并记日志；
+    - identities=None 表示身份读取异常（未知态），同样视为已具备资格。
+
+    `is_self_registered` 仅作为展示/统计标记随响应返回，不再参与是否提示的判定。
+
+    返回 {"is_self_registered", "whitelisted", "apply_url"}。
+    """
+    created_by_oauth = int((account or {}).get("created_by_oauth") or 0)
+    is_self_registered = created_by_oauth == 0
+    result = {
+        "is_self_registered": is_self_registered,
+        "whitelisted": False,
+        "apply_url": BETA_APPLY_URL,
+    }
+    try:
+        if _is_login_whitelist_enabled():
+            # 身份读取异常（None）= 未知态，不能当作"无绑定"误判未命中
+            if identities is None:
+                log.warning(
+                    "check_beta_eligibility identities unavailable — treat as whitelisted"
+                )
+                result["whitelisted"] = True
+                return result
+            matched = False
+            for ident in identities:
+                provider = (ident or {}).get("provider", "")
+                login = (ident or {}).get("external_login", "")
+                if provider and login and is_user_allowed(provider, login):
+                    matched = True
+                    break
+            result["whitelisted"] = matched
+            return result
+        matched = _signup_whitelist_match((account or {}).get("email", ""))
+        # None（查询异常）按"已具备资格"处理，避免对用户误提示
+        result["whitelisted"] = True if matched is None else matched
+        return result
+    except Exception as e:
+        log.warning(f"check_beta_eligibility failed: {e}")
+        result["whitelisted"] = True
+        return result
+
+
+def is_beta_whitelisted_user(user: dict) -> bool:
+    """接口层判据（Issue #4254 第二阶段：未命中白名单不予配置凭据）。
+
+    与 `GET /api/auth/beta-eligibility` 同源：读账号 + 活跃身份后委派
+    `check_beta_eligibility`。任何读取异常都返回 True（fail-open）——门禁只做
+    "挡未授权"，不能因 DB 抖动把已授权用户锁在门外。
+    """
+    try:
+        from src.domains.mgmt.auth.grape_account_db import (
+            get_grape_account_by_username, get_user_identities,
+        )
+        acc = get_grape_account_by_username(user.get("username", ""), strict=True)
+        if acc is None:
+            log.warning("is_beta_whitelisted_user: account not found — fail-open")
+            return True
+        identities = get_user_identities(user["id"], strict=True)
+    except Exception as e:
+        log.warning(f"is_beta_whitelisted_user read failed ({type(e).__name__}) — fail-open")
+        return True
+    return bool(check_beta_eligibility(acc, identities).get("whitelisted"))

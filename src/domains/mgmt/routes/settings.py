@@ -353,6 +353,20 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
     # D32: 写入 user_credentials 表，不写 user_accounts
     explicit = body.model_dump(exclude_unset=True)
 
+    # Issue #4254（第二阶段，负责人拍板 2026-11-24）：凭据配置只对内测白名单用户开放。
+    # 判据与 /api/auth/beta-eligibility 同源（login_whitelist 命中即放行，无绑定 =
+    # 未命中 = 拒绝），读取异常 fail-open，避免 DB 抖动锁死已授权用户。
+    from src.domains.mgmt.auth.signup_policy import (
+        BETA_APPLY_URL, is_beta_whitelisted_user,
+    )
+    if not is_beta_whitelisted_user(user):
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "error_code": "BETA_WHITELIST_REQUIRED",
+            "message": "该能力处于内测阶段，需申请内测白名单后使用。",
+            "apply_url": BETA_APPLY_URL,
+        })
+
     def _apply_ak_sk(provider: str, ak_field: str, sk_field: str):
         """统一 AK/SK 写入逻辑（user_credentials 表）"""
         if ak_field not in explicit and sk_field not in explicit:

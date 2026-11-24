@@ -231,3 +231,246 @@ def test_batch_constant_within_contract():
     """分批契约：BATCH=200、最多 50 轮（防无界循环）。"""
     assert es._PURGE_BATCH == 200
     assert es._PURGE_MAX_ROUNDS == 50
+
+
+# ── 附加守卫（本轮上收新增）：db_lock 内的行锁等待必须有上限且被还原 ────────────
+class _RecordingCursor:
+    """只记录语句的假游标：验证 SET SESSION innodb_lock_wait_timeout 的设置与还原。"""
+
+    def __init__(self, log, prev="50", fail_delete=False):
+        self.log = log
+        self.prev = prev
+        self.fail_delete = fail_delete
+        self.rowcount = 0
+
+    def execute(self, sql, params=None):
+        s = " ".join(str(sql).split())
+        self.log.append(s)
+        if s.startswith("SELECT @@SESSION.innodb_lock_wait_timeout"):
+            self._row = (self.prev,)
+        elif s.startswith("DELETE"):
+            if self.fail_delete:
+                raise RuntimeError(1205, "Lock wait timeout exceeded")
+            self.rowcount = 1
+        return self
+
+    def fetchone(self):
+        return getattr(self, "_row", None)
+
+
+def _run_batch_with_fake(monkeypatch, fail_delete=False):
+    log = []
+    cur = _RecordingCursor(log, prev="50", fail_delete=fail_delete)
+
+    class _DB:
+        def cursor(self_inner):
+            return cur
+
+        def commit(self_inner):
+            log.append("COMMIT")
+
+        def rollback(self_inner):
+            log.append("ROLLBACK")
+
+    monkeypatch.setattr("src.kernel.session_manager._is_mysql_backend", lambda: True)
+    monkeypatch.setattr(es, "db", _DB())
+    monkeypatch.setattr(es, "db_lock", __import__("threading").RLock())
+    try:
+        es._delete_guard_batch("2026-01-01 00:00:00", [1, 2, 3])
+    except Exception:
+        pass
+    return log
+
+
+def test_lock_wait_bounded_then_restored(monkeypatch):
+    log = _run_batch_with_fake(monkeypatch)
+    set_stmt = [s for s in log if s.startswith("SET SESSION innodb_lock_wait_timeout")]
+    assert set_stmt == ["SET SESSION innodb_lock_wait_timeout=3",
+                        "SET SESSION innodb_lock_wait_timeout=50"], set_stmt
+    # 设置必须包住 DELETE，且还原在其后
+    assert log.index("SET SESSION innodb_lock_wait_timeout=3") < [
+        i for i, s in enumerate(log) if s.startswith("DELETE")][0]
+    assert log.index("SET SESSION innodb_lock_wait_timeout=3") < log.index(
+        "SET SESSION innodb_lock_wait_timeout=50")
+
+
+def test_lock_wait_restored_even_when_delete_fails(monkeypatch):
+    log = _run_batch_with_fake(monkeypatch, fail_delete=True)
+    assert "SET SESSION innodb_lock_wait_timeout=50" in log, log
+    assert "ROLLBACK" in log, log
+
+
+def test_failed_batch_log_is_not_flooded_with_seqs(monkeypatch, caplog):
+    """撞锁告警只打数量与区间，不把 200 个 seq 原样写进日志（线上日志膨胀）。"""
+    calls = {"n": 0}
+
+    def boom(*a, **kw):
+        calls["n"] += 1
+        raise RuntimeError(1205, "Lock wait timeout exceeded")
+
+    monkeypatch.setattr(es, "_delete_guard_batch", boom)
+    monkeypatch.setattr(es, "_purge_metric_inc", lambda *a, **kw: None)
+    monkeypatch.setattr(es, "db_lock", __import__("threading").RLock())
+    monkeypatch.setattr(es, "time", __import__("types").SimpleNamespace(
+        sleep=lambda s: None))
+    monkeypatch.setattr(es, "random", __import__("types").SimpleNamespace(
+        uniform=lambda a, b: 0.0))
+
+    seqs = [(i,) for i in range(1, 201)]
+
+    class _Cursor:
+        def execute(self, sql, params=None):
+            self._r = seqs
+            return self
+
+        def fetchall(self):
+            return self._r
+
+    class _DB:
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr(es, "db", _DB())
+    with caplog.at_level("WARNING"):
+        es.purge_stale_event_guards()
+    msg = " ".join(r.message for r in caplog.records if "purge_stale_event_guards failed" in r.message)
+    assert msg, "expected a warning log"
+    assert "seqs_n=200" in msg, msg
+
+    assert len(msg) < 400, f"warning log too long ({len(msg)} chars)"
+
+
+# ── 审查 O2/O3：SET SESSION 的降级与还原失败不能中断清理 ──
+
+
+class _SetCursor:
+    """记录 SET/SELECT 的假游标；fail_set / fail_restore 控制哪一步失败。"""
+
+    def __init__(self, fail_set=0, fail_restore=0):
+        self.statements = []
+        self.fail_set = fail_set
+        self.fail_restore = fail_restore
+        self.restore_attempts = 0
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        if sql.startswith("SELECT @@SESSION"):
+            self._row = (50,)
+        elif sql.startswith("SET SESSION"):
+            if "=3" in sql and self.fail_set > 0:
+                self.fail_set -= 1
+                raise RuntimeError("SET SESSION not allowed (fake)")
+            if "=50" in sql:
+                self.restore_attempts += 1
+                if self.fail_restore > 0:
+                    self.fail_restore -= 1
+                    raise RuntimeError("restore failed (fake)")
+        return self
+
+    def fetchone(self):
+        return getattr(self, "_row", None)
+
+
+def test_bounded_lock_wait_degrades_when_set_is_rejected(monkeypatch, caplog):
+    """SET 被拒（权限/方言）→ 只告警、仍执行清理主体，不抛异常（O3）。"""
+    import src.kernel.session_manager as sm
+
+    monkeypatch.setattr(sm, "_is_mysql_backend", lambda: True)
+    cur = _SetCursor(fail_set=1)
+    ran = []
+    with caplog.at_level("WARNING"):
+        with es._bounded_lock_wait(cur, 3):
+            ran.append(1)
+    assert ran == [1], "body must still run when the bound cannot be applied"
+    assert not any("=50" in s for s in cur.statements), "must not restore what was never set"
+    assert any("degrade to unbounded" in r.message for r in caplog.records)
+
+
+def test_bounded_lock_wait_retries_restore_then_warns(monkeypatch, caplog):
+    """还原失败 → 重试一次后仍失败只告警，绝不把异常抛给清理循环（O2）。"""
+    import src.kernel.session_manager as sm
+
+    monkeypatch.setattr(sm, "_is_mysql_backend", lambda: True)
+    cur = _SetCursor(fail_restore=2)
+    monkeypatch.setattr(es, "db", type("D", (), {"rollback": staticmethod(lambda: None)})())
+    with caplog.at_level("WARNING"):
+        with es._bounded_lock_wait(cur, 3):
+            pass
+    assert cur.restore_attempts == 2, cur.restore_attempts
+    assert any("keeps the bounded wait until reconnect" in r.message for r in caplog.records)
+
+
+# ── QA 原子回归 D1：MySQL 上批次删除返回值恒为 0 ──
+#
+# MySQLCompatCursor 每条语句都重置 rowcount；`_bounded_lock_wait` 退出时会再执行一条
+# `SET SESSION innodb_lock_wait_timeout=…` 还原语句，于是「在 with 之外读 c.rowcount」
+# 恒为 0（真库实测：删 3 行→立即读 3→跑一条 SET→读 0）。旧用例的假游标只在 DELETE 时
+# 置 rowcount、SET 不碰它，属测试盲区。下面这个游标按真 MySQL 语义重置 rowcount。
+
+
+class _MySQLRowcountCursor:
+    def __init__(self, deleted=3, candidates=None):
+        self.deleted = deleted
+        self.candidates = candidates
+        self.rowcount = -1
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        s = " ".join(str(sql).split())
+        self.statements.append(s)
+        self.rowcount = 0  # 每条语句都重置——真 MySQLCompatCursor 的行为
+        if s.startswith("SELECT @@SESSION"):
+            self._row = (50,)
+        elif s.startswith("DELETE"):
+            self.rowcount = self.deleted
+        elif s.startswith("SELECT seq FROM event_active_guard"):
+            self._rows = self.candidates or []
+        return self
+
+    def fetchone(self):
+        return getattr(self, "_row", None)
+
+    def fetchall(self):
+        return getattr(self, "_rows", [])
+
+
+def _patch_mysql_backend(monkeypatch, cur, metric_calls=None):
+    class _DB:
+        def cursor(self_inner):
+            return cur
+
+        def commit(self_inner):
+            pass
+
+        def rollback(self_inner):
+            pass
+
+    monkeypatch.setattr("src.kernel.session_manager._is_mysql_backend", lambda: True)
+    monkeypatch.setattr(es, "db", _DB())
+    monkeypatch.setattr(es, "db_lock", __import__("threading").RLock())
+    if metric_calls is not None:
+        monkeypatch.setattr(es, "_purge_metric_inc",
+                            lambda res, n=1: metric_calls.append((res, n)))
+
+
+def test_delete_batch_returns_rows_under_mysql_rowcount_semantics(monkeypatch):
+    """D1 回归：SET 还原语句吃掉 rowcount 后，批次仍要返回真实删除行数。"""
+    cur = _MySQLRowcountCursor(deleted=3)
+    _patch_mysql_backend(monkeypatch, cur)
+    assert es._delete_guard_batch("2026-01-01 00:00:00", [1, 2, 3]) == 3, \
+        "在 _bounded_lock_wait 之外读 rowcount 会拿到 SET 的 0（QA D1）"
+    assert any(s.startswith("SET SESSION innodb_lock_wait_timeout=50")
+               for s in cur.statements), "还原语句仍必须执行"
+
+
+def test_purge_metrics_and_log_work_under_mysql_rowcount_semantics(monkeypatch, caplog):
+    """后果链回归：deleted>0 → ok 指标计数 + purged 日志打印（MySQL 后端）。"""
+    cur = _MySQLRowcountCursor(deleted=3, candidates=[(1,), (2,), (3,)])
+    calls = []
+    _patch_mysql_backend(monkeypatch, cur, calls)
+    import logging
+    with caplog.at_level(logging.INFO):
+        total = es.purge_stale_event_guards()
+    assert total == 3
+    assert ("ok", 3) in calls, f"ok 指标必须计入真实删除数，实际 {calls}"
+    assert any("purged=3" in r.message for r in caplog.records)

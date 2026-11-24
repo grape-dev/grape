@@ -9,6 +9,12 @@
           <span v-html="icon"></span>
           <span>{{ t('pat_btn_configure') + ' · ' + name }}</span>
         </h3>
+        <div v-if="betaHint" class="pd__beta">
+          <span class="pd__betatext">{{ t('beta_hint_text') }}</span>
+          <button type="button" class="bt bt-s bt-o pd__betabtn" @click="openBetaApply">
+            {{ t('beta_hint_apply') }}
+          </button>
+        </div>
         <div v-if="!oauthConfigured" class="pd__note">{{ t('pat_no_refresh_hint') }}</div>
         <a v-if="effectivePatUrl" class="bt pd__link" :href="effectivePatUrl" target="_blank" rel="noopener noreferrer">
           {{ t('open_token_page') + (patHost ? ' ' + patHost : '') }}
@@ -22,7 +28,7 @@
           <summary>{{ t('how_to_get_token') }}</summary>
           <div>{{ helpSteps }}</div>
         </details>
-        <button class="bt bt-p pd__wide" :disabled="busy" @click="save()">
+        <button class="bt bt-p pd__wide" :disabled="busy || betaHint" @click="save()">
           {{ busy ? t('verifying') : t('save') }}
         </button>
       </div>
@@ -41,6 +47,7 @@ const props = defineProps({
   name: { type: String, default: '' },
   patUrl: { type: String, default: '' },
   oauthConfigured: { type: Boolean, default: false },
+  betaHint: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close', 'saved'])
 
@@ -77,6 +84,14 @@ const helpSteps = computed(function () {
 const token = ref('')
 const error = ref('')
 const busy = ref(false)
+
+function openBetaApply() {
+  if (G.app && typeof G.app.openBetaApply === 'function') {
+    G.app.openBetaApply()
+    return
+  }
+  G.window.location.href = '/static-vue/beta-apply'
+}
 
 watch(
   function () {
@@ -156,6 +171,25 @@ function save() {
   color: var(--t2);
   font-size: 12px;
   line-height: 1.6;
+}
+/* Issue #4254：自注册非白名单用户内测提示（非阻断） */
+.pd__beta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 159, 10, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.28);
+}
+.pd__betatext {
+  font-size: 12px;
+  color: var(--t2);
+  line-height: 1.6;
+}
+.pd__betabtn {
+  align-self: flex-start;
 }
 .pd__link {
   display: block;

@@ -753,7 +753,9 @@
     "transfer_need_reauth": "绑定已转移，请再授权一次以启用仓库列表",
     "pat_expires_ok": "PAT 到期日 {date}",
     "pat_expires_soon": "PAT 将在 {days} 天后过期（{date}），请尽快重新配置",
-    "pat_expires_expired": "PAT 已于 {date} 过期，仓库同步与智能体任务会全部失败，请重新配置"
+    "pat_expires_expired": "PAT 已于 {date} 过期，仓库同步与智能体任务会全部失败，请重新配置",
+    "beta_hint_text": "该能力处于内测阶段，需申请内测白名单后使用。",
+    "beta_hint_apply": "申请内测白名单"
   },
   "error": {
     "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",
