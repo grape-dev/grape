@@ -144,6 +144,14 @@
               <div v-if="!sortedWorkers.length" class="ts t2" style="padding: 12px">
                 {{ opsWorkers.total === null ? t('obs_no_data') : t('no_remote_worker') }}
               </div>
+              <div
+                v-else-if="!pageWorkers.length"
+                class="ts t2"
+                style="padding: 12px"
+                @click="workerPage = 0"
+              >
+                {{ t('page_empty_hint') }}
+              </div>
               <div v-for="wk in pageWorkers" :key="wkKey(wk)" class="obv-wkcard">
                 <div class="obv-wk-head">
                   <span class="obv-wk-dot">{{ healthDot(wk.health) }}</span>
@@ -2566,9 +2574,16 @@ G.window.__obvOpenAlerts = function () {
 }
 
 // ═══ 设备分区数据 ═══
+let lastOpsRepoKey = null
 function refreshObs(isAuto) {
   const repo = currentRepo()
   const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : ''
+  // 换仓库=换 worker 可见集，页码必须归零，否则沿用上个仓库的页码会切到空页
+  const _repoKey = (repo && repo.fullName) || ''
+  if (_repoKey !== lastOpsRepoKey) {
+    lastOpsRepoKey = _repoKey
+    workerPage.value = 0
+  }''
   if (!isAuto) {
     API()
       .get('/dashboard/ops/probe-now')
@@ -2653,12 +2668,17 @@ const sortedWorkers = computed(() =>
 const workerTotalPages = computed(() =>
   Math.max(1, Math.ceil(sortedWorkers.value.length / workerPageSize.value))
 )
-const pageWorkers = computed(() =>
-  sortedWorkers.value.slice(
-    workerPage.value * workerPageSize.value,
-    (workerPage.value + 1) * workerPageSize.value
-  )
-)
+// 页码夹取：worker 数会随心跳/过期变化，停在第 2 页而列表变短时旧实现会切出空数组，
+// 于是整块卡片区域空白（既没有卡片也没有"无远端 Worker"提示）。这里按当前总页数夹取，
+// 并在总页数缩小时把页码拉回最后一页。
+const pageWorkers = computed(() => {
+  const total = workerTotalPages.value
+  const p = Math.min(Math.max(0, workerPage.value), total - 1)
+  return sortedWorkers.value.slice(p * workerPageSize.value, (p + 1) * workerPageSize.value)
+})
+watch(workerTotalPages, function (n) {
+  if (workerPage.value > n - 1) workerPage.value = Math.max(0, n - 1)
+})
 function wkKey(wk) {
   return wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_')
 }

@@ -540,5 +540,6 @@
   },
   "obs_no_data": "暂时拿不到 worker 数据（不是 0 台）",
   "obs_stale_since": "数据更新失败，显示的是 {{time}} 的快照",
-  "obs_partial": "部分数据不可用（后端降级）"
+  "obs_partial": "部分数据不可用（后端降级）",
+  "page_empty_hint": "本页没有 Worker（列表刚变短），点这里回到第一页"
 }
