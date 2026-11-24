@@ -162,27 +162,35 @@ class TestWorktreeAddRetriesAfterHeadRepair:
         assert head.stdout.strip() == "feat/issue-3924"
 
     def test_non_head_failure_is_not_recorded_as_head_repair(self):
-        """非 HEAD 类失败不做自愈（避免误改正常仓库），现场记为 worktree_add。"""
+        """非 HEAD 类失败不做自愈（避免误改正常仓库），现场记为 worktree_add。
+
+        #3482(B) 合并语义：目标目录被外来文件占据时不再走「git worktree add
+        报 already exists → 记失败现场」——`dispose_occupied_workdir_target` 先把
+        整目录隔离为 `<dir>.stale-<ts>`（不删除、留证）再重建成功。因此本用例
+        断言：外来文件被隔离留证、建树成功、正常 HEAD 不被动过、不产生任何
+        失败现场（含 head_repair）。
+        """
         base = repogit.ensure_repo_base(REPO)
         good = repogit.bare_head_ref(base)
-        # 先构造一次真实的非 HEAD 失败：目标目录被外来文件占据 →
-        # worktree add 必然 "already exists"，HEAD 本身完好 → 不触发自愈
         blocked = repogit.issue_dir_for(REPO, "coding", "3925")
         os.makedirs(blocked, exist_ok=True)
         with open(os.path.join(blocked, "stray.txt"), "w", encoding="utf-8") as fh:
             fh.write("foreign file")
-        assert repogit.ensure_issue_worktree(REPO, "coding", "3925") is None
+        wt = repogit.ensure_issue_worktree(REPO, "coding", "3925")
+        assert wt, "occupied target should be quarantined and the worktree rebuilt"
+        # 外来文件必须留证：整体隔离为 .stale-<ts>，不得静默删除
+        stale = [p for p in os.listdir(os.path.dirname(blocked))
+                 if p.startswith(os.path.basename(blocked) + ".stale-")]
+        assert stale, "quarantine dir with the foreign file must be kept as evidence"
+        with open(os.path.join(os.path.dirname(blocked), stale[0], "stray.txt"),
+                  encoding="utf-8") as fh:
+            assert fh.read() == "foreign file"
         scene = repogit.worktree_last_failure(REPO, issue_num="3925",
                                              agent_type="coding")
-        assert scene, "非 HEAD 失败必须记失败现场"
-        assert scene["stage"] == repogit.WORKTREE_STAGE_ADD, scene
-        assert not scene["head_repair"].get("repaired"), (
-            "非 HEAD 失败不得记成 head_repair 现场")
+        assert scene == {}, "recovered build must not leave a failure scene"
         assert repogit.bare_head_ref(base) == good, "正常 HEAD 不得被改动"
-        err = repogit.worktree_failure_error(REPO, issue_num="3925",
-                                             agent_type="coding")
-        assert scene["stderr"] and "already exists" in scene["stderr"], (
-            "git 原文必须透传")
+        head = _git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+        assert head.stdout.strip() == "feat/issue-3925"
         # 成功路径的复用不产生失败现场
         wt = repogit.ensure_issue_worktree(REPO, "coding", "3923")
         assert wt
