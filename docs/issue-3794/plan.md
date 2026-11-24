@@ -32,7 +32,7 @@
 - 锁冲突容错：`_is_retryable_lock_error(e)`（`e.args[0] ∈ {1205,1213}` 优先，message 含
   `Lock wait timeout` / `deadlock` 兜底）→ 退避 0.2s + 随机抖动重试一次；**重试前
   `db.rollback()`**（失败语句的事务与行锁未释放时同事务重试会再撞锁，且延长对
-  claim/heartbeat 的持锁时间）；仍失败 WARNING 带批序号与 seq 集合，返回累计已删数。
+  claim/heartbeat 的持锁时间）；仍失败 WARNING 只带批序号与 `seqs_n` / `seqs_range`（不打印整批 seq，避免撞锁频繁时日志爆炸），返回累计已删数。
 - 结束条件：空集 / 本批行数 < BATCH / 达到 50 轮上限。
 
 ### 切片 3：指标

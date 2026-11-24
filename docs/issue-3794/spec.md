@@ -8,7 +8,9 @@
 ## 范围
 - `src/domains/runtime/event_store.py::purge_stale_event_guards`：重写为两段短事务按 `seq` 分批清理（BATCH=200，最多 50 轮），候选窗口按 `seq` keyset 严格后移（受保护批不得终止整轮），DELETE 内重新 `NOT EXISTS` 复核防 TOCTOU。
 - `src/api/db_setup.py`：**注册式迁移** `202611240003 add-agent-tasks-event-seq-status-index`（`kind=safe`，`domains=("runtime",)`）补 `idx_agent_tasks_event_seq_status(event_seq, status)`，同一迁移回收左前缀冗余索引 `idx_agent_tasks_event`（SQLite 通用语法，MySQL 前缀由 mysql_compat 自动补 191）。
-- 1205/1213 短退避（0.2s + 抖动）重试一次（重试前 `db.rollback()` 开新事务）；失败日志带 seq 集合；rowcount 指标 `grape_event_guard_purged_total{result}`。
+- 1205/1213 短退避（0.2s + 抖动）重试一次（重试前 `db.rollback()` 开新事务）；失败日志带 `seqs_n` 与 `seqs_range`（整批 seq 不再打印）；rowcount 指标 `grape_event_guard_purged_total{result}`。
+- DELETE 前把本连接 `innodb_lock_wait_timeout` 临时压到 3s（`_bounded_lock_wait`），退出时还原；SET 被拒则降级为「无上限但分批」，还原失败重试一次后告警。
+- 候选 SELECT 读完立刻提交，丢掉只读快照：单库 MySQL 的 REPEATABLE READ 下否则会让 DELETE 里的 `NOT EXISTS` 看到旧版本（§33 保护变弱）。
 
 ## 关键校准
 - `event_active_guard` 无 `id` 列（PK=repo_key,issue_id,agent_type），批处理键用 `seq`。

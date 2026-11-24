@@ -336,4 +336,65 @@ def test_failed_batch_log_is_not_flooded_with_seqs(monkeypatch, caplog):
     msg = " ".join(r.message for r in caplog.records if "purge_stale_event_guards failed" in r.message)
     assert msg, "expected a warning log"
     assert "seqs_n=200" in msg, msg
+
     assert len(msg) < 400, f"warning log too long ({len(msg)} chars)"
+
+
+# ── 审查 O2/O3：SET SESSION 的降级与还原失败不能中断清理 ──
+
+
+class _SetCursor:
+    """记录 SET/SELECT 的假游标；fail_set / fail_restore 控制哪一步失败。"""
+
+    def __init__(self, fail_set=0, fail_restore=0):
+        self.statements = []
+        self.fail_set = fail_set
+        self.fail_restore = fail_restore
+        self.restore_attempts = 0
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        if sql.startswith("SELECT @@SESSION"):
+            self._row = (50,)
+        elif sql.startswith("SET SESSION"):
+            if "=3" in sql and self.fail_set > 0:
+                self.fail_set -= 1
+                raise RuntimeError("SET SESSION not allowed (fake)")
+            if "=50" in sql:
+                self.restore_attempts += 1
+                if self.fail_restore > 0:
+                    self.fail_restore -= 1
+                    raise RuntimeError("restore failed (fake)")
+        return self
+
+    def fetchone(self):
+        return getattr(self, "_row", None)
+
+
+def test_bounded_lock_wait_degrades_when_set_is_rejected(monkeypatch, caplog):
+    """SET 被拒（权限/方言）→ 只告警、仍执行清理主体，不抛异常（O3）。"""
+    import src.kernel.session_manager as sm
+
+    monkeypatch.setattr(sm, "_is_mysql_backend", lambda: True)
+    cur = _SetCursor(fail_set=1)
+    ran = []
+    with caplog.at_level("WARNING"):
+        with es._bounded_lock_wait(cur, 3):
+            ran.append(1)
+    assert ran == [1], "body must still run when the bound cannot be applied"
+    assert not any("=50" in s for s in cur.statements), "must not restore what was never set"
+    assert any("degrade to unbounded" in r.message for r in caplog.records)
+
+
+def test_bounded_lock_wait_retries_restore_then_warns(monkeypatch, caplog):
+    """还原失败 → 重试一次后仍失败只告警，绝不把异常抛给清理循环（O2）。"""
+    import src.kernel.session_manager as sm
+
+    monkeypatch.setattr(sm, "_is_mysql_backend", lambda: True)
+    cur = _SetCursor(fail_restore=2)
+    monkeypatch.setattr(es, "db", type("D", (), {"rollback": staticmethod(lambda: None)})())
+    with caplog.at_level("WARNING"):
+        with es._bounded_lock_wait(cur, 3):
+            pass
+    assert cur.restore_attempts == 2, cur.restore_attempts
+    assert any("keeps the bounded wait until reconnect" in r.message for r in caplog.records)
