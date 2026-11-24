@@ -18,12 +18,29 @@ from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
 
 
 def role_rows(c, runtime_id):
-    """返回 (全部 enabled 标签, 其中属于角色值域的标签)。"""
+    """返回 (全部 enabled 标签, 其中属于角色值域的标签)。用于派发/生效判定。"""
     rows = c.execute(
         "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1",
         (int(runtime_id),)).fetchall()
     tags = [str(r[0] or "").strip().lower() for r in rows if str(r[0] or "").strip()]
     return tags, [t for t in tags if t == "all" or t in KNOWN_AGENT_ROLES]
+
+
+def has_role_rows(c, runtime_id) -> bool:
+    """是否**已存在**任何角色行（不论 enabled）。
+
+    补齐判定必须用它而不是 `role_rows`：`enabled=0` 的角色行是「用户/流程显式停用」，
+    代表已配置且被关掉——若按「没有启用行」去补，会撞 (runtime_id, tag) 唯一键
+    （实测 1062 Duplicate entry '<rid>-all'），且语义上等于擅自把停用重新打开。
+    """
+    rows = c.execute(
+        "SELECT tag FROM engine_capabilities WHERE runtime_id=?",
+        (int(runtime_id),)).fetchall()
+    for (t,) in rows:
+        _t = str(t or "").strip().lower()
+        if _t == "all" or _t in KNOWN_AGENT_ROLES:
+            return True
+    return False
 
 
 def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
@@ -38,8 +55,10 @@ def ensure_role_caps(c, runtime_id, declared=None, user_set=None, now_iso=None):
         return []
     if not rid:
         return []
+    if has_role_rows(c, rid):
+        return []  # 已有角色行（含 enabled=0 的显式停用）→ 不补、不重开
     _tags, _roles = role_rows(c, rid)
-    if _roles:
+    if _roles:  # 双保险（正常不会走到）
         return []
     if declared is None or user_set is None:
         row = c.execute(

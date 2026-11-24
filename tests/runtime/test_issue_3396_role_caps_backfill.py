@@ -124,3 +124,33 @@ class TestLocalDiscoveryBackfill:
               "cli_path": "/bin/true", "version": "0", "pip_package": ""}],
             "user", "44", "b3396bf-host", "2026-11-23T00:00:00+00:00")
         assert "sre" in _caps(rid) and "all" not in _caps(rid), _caps(rid)
+
+
+def test_disabled_role_row_is_not_reopened():
+    """enabled=0 的角色行 = 显式停用：补齐必须视作「已配置」，不补、不重开、不撞唯一键。"""
+    rid = _mk_engine("b3396bf-f")
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,0)", (rid, "all"))
+        db.commit()
+    _tags, roles = role_rows(db.cursor(), rid)
+    assert roles == []                       # 生效面看：没有启用的角色行
+    assert ensure_role_caps(db.cursor(), rid) == []   # 但补齐判定：已配置 → 不动
+    db.commit()
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=? AND tag='all'", (rid,)).fetchall()
+    assert rows == [("all", 0)], rows        # 仍是停用态，且没有第二行（无 1062）
+
+
+def test_ensure_is_idempotent_when_disabled_row_exists():
+    """重复调用不会再尝试插入（线上 probe/心跳每轮都会调）。"""
+    rid = _mk_engine("b3396bf-g")
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,0)", (rid, "all"))
+        db.commit()
+    for _ in range(3):
+        assert ensure_role_caps(db.cursor(), rid) == []
+        db.commit()
+
