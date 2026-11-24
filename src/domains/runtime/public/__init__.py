@@ -2961,6 +2961,10 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
     "engine_cap_tags_sorted": (
         "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
+    # 角色行统计（含 enabled=0）：管理台区分「从未配置」与「配过但全停用」
+    "engine_cap_role_counts": (
+        "SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
+        "FROM engine_capabilities WHERE tag NOT LIKE '%:%' GROUP BY runtime_id"),
     "engine_caps_by_runtime": (
         "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities "
         "WHERE runtime_id=? ORDER BY tag"),
