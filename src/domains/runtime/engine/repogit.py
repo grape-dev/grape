@@ -2005,6 +2005,10 @@ def ensure_bare_head(base: str, preferred_branch: str = "", token: str = "",
 # 避免无限增长。**不存 token/凭据**。
 _LAST_WORKTREE_FAILURE: dict = {}
 _LAST_WORKTREE_FAILURE_MAX = 200
+# 仓级兜底记录（无 issue/agent 三元组时）的保留时长：只用于「本次任务入口后
+# 写入的现场」，过期记录不再当作当前失败原因（并发任务各自的 at >= _t0 判定见
+# ensure_issue_worktree）。三元组记录不设 TTL，由建树成功/入口清理。
+_LAST_WORKTREE_FAILURE_REPO_TTL = 900
 
 
 def _record_worktree_failure(repo_key: str, stage: str, stderr: str,
@@ -2034,7 +2038,11 @@ def _failure_key(repo_key: str, issue_num=None, agent_type: str = "") -> str:
 
 
 def worktree_last_failure(repo_key: str, issue_num=None, agent_type: str = "") -> dict:
-    """取最近一次建树失败现场（按 (repo, issue, agent) 优先，回落 repo；无记录空 dict）。"""
+    """取最近一次建树失败现场（按 (repo, issue, agent) 优先，回落 repo；无记录空 dict）。
+
+    Issue #3923 审查：仓级兜底记录不 pop，同仓并发任务都要能读到同一份现场；
+    这里用 TTL 收敛，避免很久以前的仓级失败被后来的任务当成当前原因。
+    """
     rk = repo_key or ""
     if not rk:
         return {}
@@ -2042,7 +2050,12 @@ def worktree_last_failure(repo_key: str, issue_num=None, agent_type: str = "") -
         hit = _LAST_WORKTREE_FAILURE.get(_failure_key(rk, issue_num, agent_type))
         if hit:
             return dict(hit)
-    return dict(_LAST_WORKTREE_FAILURE.get(rk, {}) or {})
+    repo_hit = _LAST_WORKTREE_FAILURE.get(rk, {}) or {}
+    if not repo_hit:
+        return {}
+    if time.time() - float(repo_hit.get("at") or 0) > _LAST_WORKTREE_FAILURE_REPO_TTL:
+        return {}
+    return dict(repo_hit)
 
 
 def clear_worktree_failure(repo_key: str = "", issue_num=None,
@@ -2094,7 +2107,7 @@ def repo_base_has_refs(repo_key: str) -> "bool | None":
     return bool((r.stdout or "").strip())
 
 
-def worktree_credential_error(repo_key: str) -> str:
+def worktree_credential_error(repo_key: str, token_result=None) -> str:
     """建树失败后的凭据归因（Issue #3713）：返回 `<code>: <message>`，否则空串。
 
     为什么需要：token 取空 → mirror refs=0 → `git worktree add` 失败 → 平台只看得到
@@ -2112,6 +2125,9 @@ def worktree_credential_error(repo_key: str) -> str:
     端口未绑），归因本身不成立（unavailable/unattributed）→ 返回空串，由
     `worktree_failure_error()` 如实透传 git 原文与失败阶段。这样「归因不可用」与
     「确实无凭据」在任务错误与日志中可区分。
+
+    `token_result`：调用方已跑过一次 `resolve_exec_token` 时传入，避免单次阻断
+    把同一条凭据链重复解析（Issue #3923 审查 Optional）。
     """
     if not repo_key:
         return ""
@@ -2124,7 +2140,7 @@ def worktree_credential_error(repo_key: str) -> str:
             CREDENTIAL_ATTRIBUTION_UNAVAILABLE, CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
             resolve_exec_token,
         )
-        sel = resolve_exec_token(repo_key)
+        sel = token_result if token_result is not None else resolve_exec_token(repo_key)
     except Exception as e:  # noqa: BLE001 - 归因失败不得反过来打断任务
         log.warning(f"repogit: credential attribution failed {repo_key}: {e}")
         return ""
@@ -2148,18 +2164,30 @@ WORKTREE_STAGE_ADD = "worktree_add"
 WORKTREE_STAGE_HEAD_REPAIR = "worktree_add_head_repair"
 WORKTREE_STAGE_BASE = "repo_base"
 
+# 阶段 → 事实措辞（Issue #3923 审查 Required）：阶段名不能一律渲染成
+# 「git worktree add 失败」，否则 repo_base（clone/fetch 失败）会被误述。
+_WORKTREE_STAGE_FAILURE_TEXT = {
+    WORKTREE_STAGE_BASE: "基线 fetch/clone 失败",
+    WORKTREE_STAGE_ADD: "git worktree add 失败",
+    WORKTREE_STAGE_HEAD_REPAIR: "HEAD 自愈后重试仍失败",
+}
 
-def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "") -> str:
+
+def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "",
+                           token_result=None) -> str:
     """建树失败的错误面（Issue #3923）：凭据归因成立才报凭据，否则透传 git 原文。
 
     worker 侧不做 repo token 归因（无装配层），因此这里的主路径是「如实上报」：
 
-      `<stage>: git worktree add failed: <git stderr 原文>`（含 HEAD 修复结果）
+      `<stage>: <阶段事实措辞>: <git stderr 原文>`（含 HEAD 修复结果）
 
     只有 `worktree_credential_error()` 明确归因为凭据问题（或空仓）时才返回
     `credential_<stage>` / `empty_repo`。无失败现场返回空串（保持既有告警路径）。
+
+    `token_result`：调用方已解析过凭据链时传入，凭据归因与归因备注复用同一结果，
+    单次阻断只解析一次（Issue #3923 审查 Optional）。
     """
-    cred = worktree_credential_error(repo_key)
+    cred = worktree_credential_error(repo_key, token_result=token_result)
     if cred:
         return cred
     fail = worktree_last_failure(repo_key, issue_num=issue_num, agent_type=agent_type)
@@ -2168,7 +2196,8 @@ def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "") 
     stage = fail.get("stage") or WORKTREE_STAGE_ADD
     stderr = (fail.get("stderr") or "").strip()
     repair = fail.get("head_repair") or {}
-    parts = [f"{stage}: git worktree add 失败"]
+    failure_text = _WORKTREE_STAGE_FAILURE_TEXT.get(stage, "git worktree add 失败")
+    parts = [f"{stage}: {failure_text}"]
     if repair:
         prev = repair.get("previous") or "unreadable"
         cur = repair.get("current") or "-"
@@ -2184,7 +2213,7 @@ def worktree_failure_error(repo_key: str, issue_num=None, agent_type: str = "") 
             CREDENTIAL_ATTRIBUTION_UNAVAILABLE, CREDENTIAL_ATTRIBUTION_UNATTRIBUTED,
             resolve_exec_token,
         )
-        _sel = resolve_exec_token(repo_key)
+        _sel = token_result if token_result is not None else resolve_exec_token(repo_key)
         if (getattr(_sel, "attribution", "") in (CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
                                                  CREDENTIAL_ATTRIBUTION_UNATTRIBUTED)
                 and not getattr(_sel, "token", "")):
@@ -2234,8 +2263,10 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
         # 基线建不起来（fetch/init 失败）→ 把失败现场绑到本任务上下文，
         # 供错误面透传 git 原文；否则并发任务只能读到仓库级兜底记录。
         # 只消费**本次调用期间**写入的记录（at >= _t0），避免把上一轮过期的
-        # git 原文当成当前失败原因；取走即消费。
-        _base_fail = _LAST_WORKTREE_FAILURE.pop(repo_key, {}) or {}
+        # git 原文当成当前失败原因。**不 pop**：同仓并发任务可能先后 base 失败，
+        # 先到者取走会让后到者拿不到现场而漏阻断（Issue #3923 审查 Required）；
+        # 仓级记录改由 _LAST_WORKTREE_FAILURE_MAX + TTL 收敛。
+        _base_fail = _LAST_WORKTREE_FAILURE.get(repo_key, {}) or {}
         if _base_fail and float(_base_fail.get("at") or 0) >= _t0:
             _record_worktree_failure(
                 repo_key, _base_fail.get("stage") or WORKTREE_STAGE_BASE,

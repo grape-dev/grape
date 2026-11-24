@@ -66,6 +66,23 @@ def _break_head_to_remote(base: str, branch: str = "main"):
     _git(["symbolic-ref", "HEAD", f"refs/remotes/origin/{branch}"], base)
 
 
+@pytest.fixture
+def _unavailable_attribution(monkeypatch):
+    """把凭据链钉成 worker 的「归因不可用」，避免用例触碰端口/DB。"""
+    from src.kernel import token_resolver
+    from src.kernel.token_resolver import (
+        CREDENTIAL_ATTRIBUTION_UNAVAILABLE, TokenResult,
+    )
+
+    def _fake(repo_key):
+        return TokenResult(token="", repo_key=repo_key,
+                           attribution=CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
+                           attribution_detail="test: 端口未绑定")
+
+    monkeypatch.setattr(token_resolver, "resolve_exec_token", _fake)
+    monkeypatch.setattr(repogit, "repo_base_has_refs", lambda rk: True)
+
+
 class TestBareHeadRepair:
     def test_valid_head_is_left_alone(self):
         base = repogit.ensure_repo_base(REPO)
@@ -153,6 +170,9 @@ class TestWorktreeAddRetriesAfterHeadRepair:
         other = repogit.ensure_issue_worktree(REPO, "coding", "3923")
         assert other == wt, "同一 Issue 复用工作区"
         assert repogit.bare_head_ref(base) == good, "正常 HEAD 不得被改动"
+        assert repogit.worktree_last_failure(REPO, issue_num="3923",
+                                             agent_type="coding") == {}, (
+            "非 HEAD 类失败不得被记成 head_repair 现场")
 
 
 class TestAttributionTriState:
@@ -226,8 +246,32 @@ class TestAttributionTriState:
         src2 = inspect.getsource(repogit.worktree_failure_error)
         assert "真因在凭据" not in src2
 
+    def test_block_resolves_exec_token_once(self, _unavailable_attribution, monkeypatch):
+        """单次阻断只解析一次凭据链（审查 Optional 的验收：计数为 1）。"""
+        from src.kernel import token_resolver
+        from src.kernel.token_resolver import (
+            CREDENTIAL_ATTRIBUTION_UNAVAILABLE, TokenResult,
+        )
 
-class TestDeprecatedHint:
+        calls = {"n": 0}
+
+        def _counted(repo_key):
+            calls["n"] += 1
+            return TokenResult(token="", repo_key=repo_key,
+                               attribution=CREDENTIAL_ATTRIBUTION_UNAVAILABLE,
+                               attribution_detail="test: 端口未绑定")
+
+        monkeypatch.setattr(token_resolver, "resolve_exec_token", _counted)
+        repogit._record_worktree_failure(
+            RK, repogit.WORKTREE_STAGE_ADD, "fatal: ref conflict",
+            issue_num="3923", agent_type="coding")
+        blk = agent_mod.worktree_block_result("t_3923", RK, issue_num="3923",
+                                              agent_type="coding")
+        assert blk and blk["_started"] is False
+        assert calls["n"] == 1, calls
+
+
+class TestFailureSceneLifecycle:
     def test_ensure_bare_head_clears_stale_failure_after_success(self):
         base = repogit.ensure_repo_base(REPO)
         # 只清本 (repo, issue, agent) 的现场（并发任务互不干扰）
@@ -251,3 +295,65 @@ class TestDeprecatedHint:
         assert repogit.worktree_last_failure(RK, issue_num="9000", agent_type="qa"), (
             "别的任务的失败现场必须保留，供其错误面透传")
         assert repogit.bare_head_ref(base) == "refs/heads/main"
+
+    def test_repo_base_failure_is_visible_to_every_concurrent_task(
+            self, _unavailable_attribution, monkeypatch):
+        """同仓两个任务先后 base 失败：先到者不得取走现场，后到者仍必须阻断。"""
+        calls = {"n": 0}
+
+        def _fail_base(repo_key, token=""):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 真实失败只在首次 fetch 时写入仓级现场；第二次调用模拟
+                # 「先到者已 pop 走现场」的旧形态：不再写入。
+                repogit._record_worktree_failure(
+                    repo_key, repogit.WORKTREE_STAGE_BASE,
+                    "fatal: unable to access 'https://example.com/repo.git': "
+                    "Could not resolve host")
+            return None
+
+        monkeypatch.setattr(repogit, "ensure_repo_base", _fail_base)
+
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3923") is None
+        assert repogit.ensure_issue_worktree(REPO, "coding", "3924") is None
+
+        for issue in ("3923", "3924"):
+            err = repogit.worktree_failure_error(REPO, issue_num=issue,
+                                                 agent_type="coding")
+            assert err, f"任务 {issue} 必须读到 base 失败现场"
+            assert "基线 fetch/clone 失败" in err, err
+            assert "git worktree add 失败" not in err, err
+            blk = agent_mod.worktree_block_result(f"t_{issue}", REPO,
+                                                  issue_num=issue,
+                                                  agent_type="coding")
+            assert blk and blk["_started"] is False, (issue, blk)
+
+    def test_failure_scene_has_stage_specific_wording(self, _unavailable_attribution):
+        """阶段必须按事实映射措辞，不能把 repo_base 也写成 worktree add 失败。"""
+        cases = [
+            (repogit.WORKTREE_STAGE_BASE, "基线 fetch/clone 失败",
+             "git worktree add 失败"),
+            (repogit.WORKTREE_STAGE_ADD, "git worktree add 失败", None),
+            (repogit.WORKTREE_STAGE_HEAD_REPAIR, "HEAD 自愈后重试仍失败",
+             "git worktree add 失败"),
+        ]
+        for stage, expected, unexpected in cases:
+            repogit.clear_worktree_failure()
+            repogit._record_worktree_failure(
+                RK, stage, "fatal: demo error", issue_num="3923",
+                agent_type="coding")
+            err = repogit.worktree_failure_error(RK, issue_num="3923",
+                                                 agent_type="coding")
+            assert expected in err, (stage, err)
+            if unexpected:
+                assert unexpected not in err, (stage, err)
+
+    def test_stale_repo_level_failure_expires(self, _unavailable_attribution):
+        """仓级兜底现场按 TTL 收敛，旧记录不得被当成当前失败原因。"""
+        repogit._LAST_WORKTREE_FAILURE[RK] = {
+            "stage": repogit.WORKTREE_STAGE_BASE,
+            "stderr": "fatal: stale",
+            "at": time.time() - repogit._LAST_WORKTREE_FAILURE_REPO_TTL - 1,
+        }
+        assert repogit.worktree_last_failure(RK, issue_num="3923",
+                                             agent_type="coding") == {}

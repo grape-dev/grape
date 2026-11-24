@@ -3423,7 +3423,7 @@ def platform_card_block_result(tid: str, repo_key: str, exc) -> dict:
     return {"_error": f"{code}: {exc}", "_started": False}
 
 
-def credential_block_result(tid: str, repo_key: str) -> "dict | None":
+def credential_block_result(tid: str, repo_key: str, token_result=None) -> "dict | None":
     """Issue #3713：建树取不到 token 时的任务阻断结果（纯构造，便于单测）。
 
     为什么单独成函数：原行为是「ensure_issue_worktree 返回空 → 只 WARNING 一条 →
@@ -3435,10 +3435,12 @@ def credential_block_result(tid: str, repo_key: str) -> "dict | None":
         归因成立 → `{"_error": "credential_<stage>: ...", "_started": False}`
         （由 `_wrap` 上报 failed，任务不进入 Agent 执行）；
         凭据可用或无法归因 → None（保持既有告警路径，语义不变）。
+
+    `token_result`：调用方已解析过凭据链时传入，避免同一阻断重复解析。
     """
     from src.domains.runtime.engine import repogit
 
-    reason = repogit.worktree_credential_error(repo_key)
+    reason = repogit.worktree_credential_error(repo_key, token_result=token_result)
     if not reason:
         return None
     log.error(f"task {tid} blocked by credential: {reason} repo_key={repo_key or ''}")
@@ -3458,13 +3460,18 @@ def worktree_block_result(tid: str, repo_key: str, issue_num=None,
         无失败现场（建树失败另有原因/未记录）→ None（保持既有告警路径）。
     """
     from src.domains.runtime.engine import repogit
+    from src.kernel.token_resolver import resolve_exec_token
 
+    # Issue #3923 审查 Optional：一次阻断只解析一次凭据链，结果下传给
+    # 凭据归因与错误面（原实现会重复解析 3 次，失败路径成本被放大）。
+    token_result = resolve_exec_token(repo_key)
     # 凭据归因成立（确实无凭据/空仓）→ 沿用既有阻断语义与文案
-    cred = credential_block_result(tid, repo_key)
+    cred = credential_block_result(tid, repo_key, token_result=token_result)
     if cred:
         return cred
     reason = repogit.worktree_failure_error(repo_key, issue_num=issue_num,
-                                            agent_type=agent_type)
+                                            agent_type=agent_type,
+                                            token_result=token_result)
     if not reason:
         return None
     log.error(f"task {tid} blocked by worktree failure: {reason} repo_key={repo_key or ''}")

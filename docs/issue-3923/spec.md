@@ -45,6 +45,9 @@ worker 进程内 `git worktree add` 失败时如实上报 git 原文与失败阶
       `credential_not_configured`。
 - [x] 反向回归：确实无凭据的仓库仍报 `credential_not_configured`。
 - [x] 「归因不可用」与「无凭据」在事件错误与日志中可区分。
+- [x] 同仓两个任务并发 base 失败时，二者 `worktree_failure_error()` 均非空、
+      `worktree_block_result()` 均阻断。
+- [x] 失败阶段按事实映射措辞：`repo_base` 不渲染成 `git worktree add 失败`。
 - [x] 新增测试覆盖 HEAD 自愈与三态归因；相关既有测试全绿。
 
 ## 风险与对策

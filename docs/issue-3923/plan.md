@@ -7,7 +7,7 @@
 | `src/kernel/token_resolver.py` | `TokenResult` 增 `attribution`/`attribution_detail`；`resolve_exec_token` 区分来源异常 | `PortNotBound` → `unavailable`；其它异常 → `unattributed`；链跑完仍空 → `no_credential` |
 | `src/domains/runtime/engine/repogit.py` | 新增 `bare_head_ref` / `ensure_bare_head` 等；`ensure_repo_base` 建树前校验；`worktree add` 失败自愈重试一次；失败现场 + `worktree_failure_error` | HEAD 自愈、git 原文透传、删除猜测性文案 |
 | `src/domains/runtime/engine/agent.py` | 新增 `worktree_block_result`；`_execute_task_impl` 改用它 | 凭据归因成立才报凭据，否则透传 git 原文 |
-| `tests/runtime/test_issue_3923_worktree_head_and_attribution.py` | 新增 15 条用例 | HEAD 自愈 / 重试 / 三态归因 / 反向回归 |
+| `tests/runtime/test_issue_3923_worktree_head_and_attribution.py` | 新增 19 条用例 | HEAD 自愈 / 重试 / 三态归因 / 反向回归 / 并发失败现场 / 阶段措辞 / 单次解析 |
 
 ## 二、关键设计决策
 
@@ -30,10 +30,15 @@
 
 1. `worktree_credential_error`：只有归因**跑完**且结论为空才返回 `credential_<stage>`；
    `unavailable`/`unattributed` 不再落 `not_configured`。
-2. `worktree_failure_error`：凭据归因成立 → 报凭据/空仓；否则给
-   `<stage>: git worktree add 失败；git 原文：<stderr>`（含 HEAD 自愈结果）+
-   「凭据归因不可用（未据此判定为凭据问题）」。
+2. `worktree_failure_error`：凭据归因成立 → 报凭据/空仓；否则按阶段映射事实措辞
+   （`repo_base` → 基线 fetch/clone 失败、`worktree_add` → git worktree add 失败、
+   `worktree_add_head_repair` → HEAD 自愈后重试仍失败），并附 `<stderr>` 原文
+   （含 HEAD 自愈结果）+「凭据归因不可用（未据此判定为凭据问题）」。
 3. `agent.worktree_block_result`：先问凭据归因，再透传失败现场。
+
+> 审查修复（PR #2099）：仓级失败现场由 `pop` 改为 `get`（同仓并发任务都能读到，
+> 由上限 200 + 仓级 TTL 收敛）；阶段措辞按上表映射；单次阻断只解析一次
+> `resolve_exec_token` 并下传。
 
 ## 五、验证
 
@@ -42,5 +47,5 @@ python3 -m pytest tests/runtime/test_issue_3923_worktree_head_and_attribution.py
   tests/runtime/test_repogit.py tests/runtime/test_issue_3713_task_credential_stage.py \
   tests/api/test_issue_3713_dual_entry_credential.py tests/api/test_git_credential_token_plane.py \
   tests/runtime/test_issue_2245_git_writable.py tests/runtime/test_issue_2514_workspace_binding.py -q
-# → 118 passed
+# → 122 passed
 ```
