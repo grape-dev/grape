@@ -377,13 +377,20 @@ def _sync_statuses():
         log.exception("feedback status sync in reconcile failed")
 
 async def feedback_reconcile_loop(interval: float = 300.0):
-    """周期性扫描转换（与 skill-sync serial worker 同套路：分布式锁 + 崩溃安全）。"""
+    """周期性扫描转换（与 skill-sync serial worker 同套路：分布式锁 + 崩溃安全）。
+
+    Issue #3742：锁 CM 不跳过 body，两段都必须消费 `acquired` 跳过本轮，
+    否则多实例部署下每个实例各转换一遍、各拉一遍外部 Issue 状态。
+    """
     from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     _fail = 0
     while True:
         try:
-            async with run_with_distributed_lock("feedback_reconcile", ttl=300):
-                await asyncio.to_thread(convert_pending_feedback, 50)
+            async with run_with_distributed_lock("feedback_reconcile", ttl=300) as acquired:
+                if acquired:
+                    await asyncio.to_thread(convert_pending_feedback, 50)
+                else:
+                    log.debug("feedback reconcile: skipped, another instance holds the lock")
             _fail = 0
         except asyncio.CancelledError:
             raise
@@ -398,8 +405,11 @@ async def feedback_reconcile_loop(interval: float = 300.0):
         # （单请求 timeout=30s），放在 reconcile 的 300s 锁内会把锁撑过期，
         # 导致其它进程重入并重复发起外部请求（架构审查 M-4）。
         try:
-            async with run_with_distributed_lock("feedback_status_sync", ttl=900):
-                await asyncio.to_thread(_sync_statuses)
+            async with run_with_distributed_lock("feedback_status_sync", ttl=900) as acquired:
+                if acquired:
+                    await asyncio.to_thread(_sync_statuses)
+                else:
+                    log.debug("feedback status sync: skipped, another instance holds the lock")
         except asyncio.CancelledError:
             raise
         except Exception:

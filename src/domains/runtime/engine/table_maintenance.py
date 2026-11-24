@@ -203,6 +203,8 @@ async def table_maintenance_tasks_loop() -> None:
     """Worker 进程：agent_tasks 大字段置空（7 天）+ 终态整行删除（90 天）。
 
     与 Insight 进程的 task_messages 清理使用不同分布式锁 key，互不阻塞。
+    Issue #3742：锁未拿到时必须消费 `acquired` 跳过本轮（CM 不跳过 body），
+    否则多进程部署下每个进程各清理一遍。
     """
     import asyncio
     from src.kernel.config import log as _log
@@ -211,9 +213,13 @@ async def table_maintenance_tasks_loop() -> None:
     await asyncio.sleep(_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS)
     while True:
         try:
-            async with run_with_distributed_lock("table_maintenance_tasks", ttl=3600):
-                cleanup_old_agent_tasks_fields()
-                delete_old_agent_tasks()
+            async with run_with_distributed_lock("table_maintenance_tasks", ttl=3600) as acquired:
+                if acquired:
+                    cleanup_old_agent_tasks_fields()
+                    delete_old_agent_tasks()
+                else:
+                    _log.debug("table maintenance: skipped agent_tasks cleanup, "
+                               "another instance holds the lock")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -225,6 +231,7 @@ async def table_maintenance_messages_loop() -> None:
     """Insight 进程：task_messages 清理（90 天）。
 
     与 Worker 进程的 agent_tasks 维护使用不同分布式锁 key，互不阻塞。
+    Issue #3742：锁未拿到时必须消费 `acquired` 跳过本轮（CM 不跳过 body）。
     """
     import asyncio
     from src.kernel.config import log as _log
@@ -233,8 +240,12 @@ async def table_maintenance_messages_loop() -> None:
     await asyncio.sleep(_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS)
     while True:
         try:
-            async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
-                cleanup_old_task_messages()
+            async with run_with_distributed_lock("table_maintenance_messages", ttl=3600) as acquired:
+                if acquired:
+                    cleanup_old_task_messages()
+                else:
+                    _log.debug("table maintenance: skipped task_messages cleanup, "
+                               "another instance holds the lock")
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -2677,6 +2677,8 @@ async def scheduler_loop():
 
     P1-D (Issue #357): Distributed lock ensures only one worker runs the
     scheduler loop when uvicorn uses --workers N (prevents duplicate task dispatch).
+    Issue #3742: 锁 CM 不跳过 body，未拿到锁必须在此消费 `acquired` 跳过本轮扫描，
+    否则每个 worker 都会对同一批到期任务各派发一次。
     """
     from src.domains.runtime.engine.task_lock import run_with_distributed_lock
     log.info("Autopilot scheduler loop started (60s interval)")
@@ -2690,30 +2692,33 @@ async def scheduler_loop():
             await asyncio.sleep(_SCHEDULER_INTERVAL)
             continue
         try:
-            async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
-                # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
-                # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
-                # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
-                # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
-                tasks = await asyncio.to_thread(_get_enabled_tasks)
-                for task in tasks:
-                    task_id = task["id"]
-                    if task_id in _RUNNING_TASKS:
-                        continue
-                    # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
-                    from src.domains.mgmt import public as _mgmt_public
-                    row = await asyncio.to_thread(
-                        _mgmt_public.autopilot_task_last_run_any, task_id)
-                    last_run = row[0] if row else ""
-                    # Issue #3800：派发裁决（熔断自愈 / cron 到期 / 退避闸门）抽成
-                    # `_scan_task_once`，生产循环与假时钟回归走同一条判定路径。
-                    try:
-                        decision = await asyncio.to_thread(_scan_task_once, task, last_run)
-                    except Exception as _de:
-                        log.warning(f"Autopilot: task {task_id} dispatch decision failed: {_de}")
-                        continue
-                    if decision == "dispatch":
-                        asyncio.ensure_future(_execute_task(task))
+            async with run_with_distributed_lock("autopilot_scheduler", ttl=120) as acquired:
+                if acquired:
+                    # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
+                    # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
+                    # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
+                    # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
+                    tasks = await asyncio.to_thread(_get_enabled_tasks)
+                    for task in tasks:
+                        task_id = task["id"]
+                        if task_id in _RUNNING_TASKS:
+                            continue
+                        # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
+                        from src.domains.mgmt import public as _mgmt_public
+                        row = await asyncio.to_thread(
+                            _mgmt_public.autopilot_task_last_run_any, task_id)
+                        last_run = row[0] if row else ""
+                        # Issue #3800：派发裁决（熔断自愈 / cron 到期 / 退避闸门）抽成
+                        # `_scan_task_once`，生产循环与假时钟回归走同一条判定路径。
+                        try:
+                            decision = await asyncio.to_thread(_scan_task_once, task, last_run)
+                        except Exception as _de:
+                            log.warning(f"Autopilot: task {task_id} dispatch decision failed: {_de}")
+                            continue
+                        if decision == "dispatch":
+                            asyncio.ensure_future(_execute_task(task))
+                else:
+                    log.debug("Autopilot scheduler: skipped scan, another worker holds the lock")
         except Exception as e:
             log.warning(f"Autopilot scheduler loop error: {e}")
 
