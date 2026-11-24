@@ -350,8 +350,12 @@ const REAUTH_401 = {
   ok(API_JS.indexOf("location.href = _langLoginUrl()") < 0, 'T10 失败分支不再整页跳登录页');
 
   // ---------------------------------------------------------------- T11（后端 + i18n）
-  const providerFields = (OAUTH_PY.match(/"provider": provider,/g) || []).length;
-  ok(providerFields === 3, 'T11 oauth_token.py 三处 401 detail 均补 provider（实际 ' + providerFields + '）');
+  // base 分支已用 raise_reauth_required(provider) 统一三处 401 出口（Issue #3563），
+  // provider 字段落在 reauth_required_detail() 里；这里校验统一出口与字段口径，而非散落三份 detail。
+  ok(/def reauth_required_detail[\s\S]{0,900}?"provider":\s*_provider/.test(OAUTH_PY),
+    'T11 reauth_required_detail 统一 401 detail 含 provider');
+  const reauthExits = (OAUTH_PY.match(/raise_reauth_required\(provider\)/g) || []).length;
+  ok(reauthExits === 3, 'T11 with_oauth_token 三条 401 出口均经 raise_reauth_required(provider)（实际 ' + reauthExits + '）');
   const zh = JSON.parse(fs.readFileSync(path.join(SHELL, 'locales/zh/app.json'), 'utf8')).error;
   const en = JSON.parse(fs.readFileSync(path.join(SHELL, 'locales/en/app.json'), 'utf8')).error;
   const keys = ['reauth_expired', 'reauth_retry_later', 'reauth_not_configured', 'reauth_redirect_failed', 'reauth_go_settings'];

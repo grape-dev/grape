@@ -497,7 +497,7 @@ const API = (() => {
         });
       }
       if (r.status === 401) {
-// 没有 retryFn——检查是否 reauth_required（按 provider 跳对应平台），否则直接跳登录
+        // 没有 retryFn——检查是否 reauth_required（按 provider 跳对应平台），否则直接跳登录
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
             // Issue #3569: 按 provider 跳对应平台授权（缺失/未知回退 GitCode）
