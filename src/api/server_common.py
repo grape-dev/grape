@@ -23,9 +23,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRoute
-from starlette.requests import ClientDisconnect
 
 from src.api.version_check import ensure_python_version
+# Issue #4248：全局异常处理器的唯一实现（本模块 build_app 只装配、不再内联一份）
+from src.api.exception_handlers import install_exception_handlers
 # Issue #3395：前端功能开关单一下发源（shell HTML 注入 window.__FEATURES__）
 from src.api.frontend_flags import apply_feature_flags
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
@@ -160,20 +161,10 @@ def build_app(
         """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。"""
         return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
 
-    @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
-        # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端——原文仅落服务端日志，
-        # 响应体返回通用文案 + request_id（便于关联排障）
-        rid = request.scope.get("request_id", "-")
-        # Issue #4248：空异常串（如 ClientDisconnect）会让排障盲区，日志至少带异常类名。
-        exc_name = type(exc).__name__
-        if isinstance(exc, ClientDisconnect):
-            # 客户端主动中止（页面卸载/切换，nginx 记 499）不是服务端故障：
-            # 降级 info 并返回 499，不污染 5xx 错误率与 ERROR 日志。
-            log.info(f"API client disconnected ({request.url.path}): {exc_name}")
-            return JSONResponse(status_code=499, content={"code": 499, "message": "客户端已断开", "request_id": rid})
-        log.warning(f"API error ({request.url.path}): {exc_name}: {exc}")
-        return JSONResponse(status_code=500, content={"code": 500, "message": "服务器内部错误，请稍后重试", "request_id": rid})
+    # Issue #4248：全局兜底处理器只有一份实现（exception_handlers.py），此处只做装配。
+    # 各入口在 build_app 之后再次调用 install_exception_handlers 是幂等的 no-op，
+    # 不再出现「后注册覆盖前者、改动落在不生效的那份」。
+    install_exception_handlers(app)
 
     return app
 
@@ -398,10 +389,8 @@ def _attach_request_log(app: FastAPI) -> None:
                         _log.debug(msg, extra=extra)
                     else:
                         _log.error(msg, extra=extra)
-                elif status == 499:
-                    # Issue #4248：客户端主动中止（页面卸载/切换）与 nginx 499 对齐，
-                    # 记 warning 而不进 5xx ERROR / 错误率，便于与真故障区分。
-                    _log.warning(msg, extra=extra)
+                # 499（客户端中止）无需单列：它已由下方 `status >= 400` 记 warning，
+                # 本就不进 5xx ERROR / 错误率（Issue #4248）。
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)
