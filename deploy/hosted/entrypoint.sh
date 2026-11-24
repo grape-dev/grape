@@ -262,12 +262,13 @@ def _write_status(payload):
 # LLM_MODEL 可能是 `<provider-id>/<model-id>` 或裸 `<model-id>`：只有前缀**恰好等于 provider id**
 # 时才剥离。模型 id 自身可能带斜杠（OpenRouter 的 `anthropic/claude-sonnet-4.5`），
 # 无条件 split 会把第一段吃掉，得到非法 id —— 实测表现为启动成功、任务阶段才 404。
+# 只剥「恰好等于 provider id」的前缀。不再维护「已知厂商名」白名单去剥首段：
+# 那张名单会让 `anthropic/claude-sonnet-4.5` 在 LLM_PROVIDER_ID 缺省（custom）时照样被
+# 切成 `claude-sonnet-4.5`，而 `google/gemini-2.5-pro` 却保留首段 —— 同为厂商前缀口径
+# 不一致，正是本改动要消除的「启动成功、任务阶段 404」。需要旧写法的部署者把
+# LLM_PROVIDER_ID 设为对应 provider 名即可（此时上面 startswith 分支命中）。
 if mid.startswith(pid + "/"):
     mid = mid[len(pid) + 1:]
-elif "/" in mid and mid.split("/", 1)[0] in ("custom", "openai", "openrouter", "anthropic",
-                                            "gemini", "groq", "deepseek", "opengw"):
-    # 老写法兼容：`<已知 provider>/<model>` 但 pid != 该 provider（例如 pid 默认 custom）
-    mid = mid.split("/", 1)[1]
 
 models = {}
 def add(m):
@@ -280,7 +281,6 @@ add(mid)
 # 端点若暴露 /models，把返回的模型全部登记，部署者可在 Agent 设置里切换，而不是被钉死一个。
 no_list = os.environ.get("LLM_NO_MODEL_LIST") == "1"
 disc_err = ""
-status_path = os.environ.get("ENGINE_STATUS_FILE") or ""
 if base and not no_list:
     try:
         req = urllib.request.Request(
@@ -327,7 +327,8 @@ if not models:
     )
     _write_status({
         "configured": False, "provider": pid, "base_url": base,
-        "models": 0, "default_model": "", "error": disc_err or "no model available",
+        "models": 0, "default_model": "", "probe_ok": False,
+        "error": disc_err or "no model available",
     })
     sys.exit(0)
 
@@ -367,7 +368,11 @@ with open(cfg_path, "w", encoding="utf-8") as f:
 
 _write_status({
     "configured": True, "provider": pid, "base_url": base,
-    "models": len(models), "default_model": default_model, "error": "",
+    "models": len(models), "default_model": default_model,
+    # 显式给了 LLM_MODEL 时 models 非空，探测失败不会走到上面的 configured:false 分支；
+    # 把探测结论一并写入，避免「key/URL 填错但 /api/health 报已配置、无错误」的失真。
+    "probe_ok": not disc_err,
+    "error": disc_err,
 })
 print(
     f"[entrypoint] engine config -> {cfg_path} "
