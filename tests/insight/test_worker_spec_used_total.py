@@ -112,3 +112,53 @@ class TestWorkerRowsCarryTotals:
         assert w["memory_percent"] == 22.0
         assert w["memory_total_mb"] is None
         assert w["spec"] == ""
+
+class TestMetricsStaleness:
+    """心跳断了以后卡片上的 cpu/mem 是最后一次采样值（多数是 0）——必须标成「无采样」。"""
+
+    def test_stale_worker_is_flagged(self):
+        from src.domains.insight.routes.dashboard import get_ops_overview
+        from datetime import timedelta
+        _seed_worker("4C7G", cpu=0.0, mem=0.0)
+        with db_lock:
+            db.cursor().execute(
+                "UPDATE runtime_credentials SET last_seen_at=? WHERE id=?",
+                ((datetime.now(timezone.utc) - timedelta(minutes=12)).isoformat(), CRED_ID))
+            db.commit()
+        w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
+             if x.get("id") == CRED_ID][0]
+        assert w["metrics_stale"] is True
+        assert w["metrics_age_seconds"] and w["metrics_age_seconds"] > 300
+
+    def test_fresh_worker_is_not_flagged(self):
+        from src.domains.insight.routes.dashboard import get_ops_overview
+        _seed_worker("4C7G", cpu=12.5, mem=41.2)
+        w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
+             if x.get("id") == CRED_ID][0]
+        assert w["metrics_stale"] is False
+        assert w["metrics_age_seconds"] is not None and w["metrics_age_seconds"] < 300
+
+
+class TestAllZeroMetrics:
+    """心跳正常但四项全 0 = worker 没上报指标（老版本 worker / wmic 被移除）。"""
+
+    def test_all_zero_metrics_marked_unreported(self):
+        from src.domains.insight.routes.dashboard import get_ops_overview
+        _seed_worker("4C7G", cpu=0.0, mem=0.0)
+        with db_lock:
+            db.cursor().execute(
+                "UPDATE runtime_credentials SET cpu_percent=0, memory_percent=0, "
+                "disk_percent=0, tmp_percent=0 WHERE id=?", (CRED_ID,))
+            db.commit()
+        w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
+             if x.get("id") == CRED_ID][0]
+        assert w["metrics_all_zero"] is True
+        assert w["metrics_stale"] is True, "全 0 即使心跳新鲜也要标成无采样"
+
+    def test_partial_metrics_not_marked_unreported(self):
+        from src.domains.insight.routes.dashboard import get_ops_overview
+        _seed_worker("4C7G", cpu=0.0, mem=41.2)
+        w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
+             if x.get("id") == CRED_ID][0]
+        assert w["metrics_all_zero"] is False
+        assert w["metrics_stale"] is False

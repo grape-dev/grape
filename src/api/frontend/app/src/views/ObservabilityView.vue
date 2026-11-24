@@ -166,6 +166,13 @@
                     {{ t('heartbeat') }}: {{ fmtLocal(wk.last_seen_at || '').substring(11, 19) }}
                   </div>
                 </div>
+                <div
+                  v-if="wk.metrics_stale"
+                  class="ts t3"
+                  style="margin: 2px 0 4px; color: var(--y)"
+                >
+                  {{ staleHint(wk) }}
+                </div>
                 <div v-for="b in workerBars(wk)" :key="b.label" class="obv-bar-row">
                   <span class="obv-bar-lbl">{{ b.label }}</span>
                   <div class="obv-bar-track">
@@ -2708,23 +2715,49 @@ function memText(wk) {
   }
   return pctText(wk.memory_percent)
 }
+// 心跳断了（或从来没采到过）的 worker，库里存的是最后一次采样值，很多是 0.0。
+// 这种卡片的 0% 是假数据，统一显示 —，避免把「没数据」看成「机器很闲/空载」。
 function workerBars(wk) {
+  const stale = !!wk.metrics_stale
   const cpu = numOrNull(wk.cpu_percent)
   const mem = numOrNull(wk.memory_percent)
   const tmp = numOrNull(wk.tmp_percent)
   const disk = numOrNull(wk.disk_percent)
   const bw = numOrNull(wk.bandwidth_percent)
   return [
-    { label: t('cpu'), pct: cpu === null ? 0 : cpu, text: pctText(wk.cpu_percent) },
-    { label: t('mem'), pct: mem === null ? 0 : mem, text: memText(wk) },
-    { label: t('tmp'), pct: tmp === null ? 0 : tmp, text: pctText(wk.tmp_percent) },
-    { label: t('disk'), pct: disk === null ? 0 : disk, text: pctText(wk.disk_percent) },
+    {
+      label: t('cpu'),
+      pct: stale || cpu === null ? 0 : cpu,
+      text: stale ? '—' : pctText(wk.cpu_percent),
+    },
+    {
+      label: t('mem'),
+      pct: stale || mem === null ? 0 : mem,
+      text: stale ? '—' : memText(wk),
+    },
+    {
+      label: t('tmp'),
+      pct: stale || tmp === null ? 0 : tmp,
+      text: stale ? '—' : pctText(wk.tmp_percent),
+    },
+    {
+      label: t('disk'),
+      pct: stale || disk === null ? 0 : disk,
+      text: stale ? '—' : pctText(wk.disk_percent),
+    },
     {
       label: t('bandwidth'),
-      pct: bw === null ? 0 : bw,
-      text: (numOrNull(wk.bandwidth_mbps) || 0).toFixed(1) + ' Mbps',
+      pct: stale || bw === null ? 0 : bw,
+      text: stale ? '—' : (numOrNull(wk.bandwidth_mbps) || 0).toFixed(1) + ' Mbps',
     },
   ]
+}
+// 指标过期提示（分钟数；未知则不显示数字）
+function staleHint(wk) {
+  if (wk.metrics_all_zero) return t('metrics_unreported')
+  const age = numOrNull(wk.metrics_age_seconds)
+  const mins = age === null ? null : Math.floor(age / 60)
+  return mins === null ? t('metrics_stale') : t('metrics_stale_min', { n: mins })
 }
 const sortedRuntimes = computed(() =>
   (opsRuntimes.value.list || [] || [])

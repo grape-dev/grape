@@ -529,6 +529,26 @@ def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
         return {"repo": repo_key_out, "items": [], "total": 0, "empty": True,
                 "error": "aggregation_failed"}
 
+# worker 指标过期阈值：心跳默认 15s 一次；超过该时长没有心跳，卡片上的 cpu/mem 等
+# 就是历史快照（甚至是从未采到过的 0），必须显示成「无采样」而不是 0.0%。
+_WORKER_METRICS_STALE_SECONDS = 300
+
+
+def _metrics_age_seconds(last_seen_at) -> int | None:
+    """last_seen_at → 距现在的秒数；解析不出返回 None（调用方按「未知」处理）。"""
+    raw = str(last_seen_at or "").strip()
+    if not raw:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        d = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_tz.utc)
+        return max(0, int((_dt.now(_tz.utc) - d).total_seconds()))
+    except Exception:
+        return None
+
+
 _SPEC_RE = None
 
 
@@ -779,9 +799,19 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 _mem_used_mb = None
                 if _mem_total_mb and wmem:
                     _mem_used_mb = int(round(_mem_total_mb * float(wmem) / 100.0))
+                _m_age = _metrics_age_seconds(wlast_seen)
+                # 四项全 0 而心跳是新的 = worker 压根没上报指标（老版本 worker / Windows 上
+                # wmic 被移除后采集静默失败）。内存与磁盘使用率不可能真的是 0，所以这个判据
+                # 不会把「真空闲」误标成「无数据」。
+                _all_zero = not any(float(x or 0) > 0 for x in (wcpu, wmem, wdisk, wtmp))
                 worker_list.append({
                     "id": wid, "name": wname or "", "device_name": wdevice or "",
                     "status": wstatus or "offline", "health": w_health,
+                    # 心跳断了以后 cpu/mem 等是最后一次采样值（很多是 0）——前端据此显示「无采样」
+                    "metrics_age_seconds": _m_age,
+                    "metrics_all_zero": bool(_all_zero),
+                    "metrics_stale": bool(_all_zero or _m_age is None
+                                           or _m_age > _WORKER_METRICS_STALE_SECONDS),
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
@@ -819,6 +849,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "id": 0, "name": _local_hostname or "本机直连",
                         "device_name": _local_hostname or "本机直连",
                         "status": "online", "health": "online",
+                        "metrics_age_seconds": 0, "metrics_stale": False,
+                        "metrics_all_zero": False,
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
@@ -850,6 +882,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                             w["tmp_percent"] = _local_tmp
                             w["bandwidth_percent"] = _local_bw_pct
                             w["bandwidth_mbps"] = _local_bw_mbps
+                            w["metrics_age_seconds"] = 0
+                            w["metrics_stale"] = False
+                            w["metrics_all_zero"] = False
                             # 本机是当前进程自己的机器：核数/内存总量直接用 psutil，
                             # 不依赖凭据行上的 spec（root 安装形态常上报空 spec）。
                             if _g_cores:
