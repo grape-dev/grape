@@ -1319,13 +1319,13 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     # 两种状态在派发上都是不可选，但「配过又全关掉」必须区别于「从没配过」。
     _rc_inv: dict = {}
     try:
-        # 注意：本函数内 `_rt` 已被 `for _rt in cached:` 的循环变量遮蔽成 dict，
-        # 这里必须用独立别名取运行域模块，否则 read_all_any 会 AttributeError。
+        # 独立别名：本函数内 `_rt` 已被 `for _rt in cached:` 的循环变量遮蔽成 dict
         from src.domains.runtime import public as _rt_role_counts
-        for _r in _rt_role_counts.read_all_any("engine_cap_role_counts", ()) or []:
-            _rc_inv[int(_r[0])] = {"total": int(_r[1] or 0), "enabled": int(_r[2] or 0)}
+        # 只统计当前可见引擎（避免无 WHERE 全表聚合，架构守护 M2）
+        _rc_inv = _rt_role_counts.role_caps_inventory(
+            [int(rt.get("id") or 0) for rt in visible_runtimes]) or {}
     except Exception as _rc_e:  # noqa: BLE001
-        log.warning(f"settings: engine_cap_role_counts failed: {_rc_e.__class__.__name__}: {_rc_e}")
+        log.warning(f"settings: role_caps_inventory failed: {_rc_e.__class__.__name__}: {_rc_e}")
     for rt in visible_runtimes:
         _st = _rc_inv.get(int(rt.get("id") or 0)) or {}
         rt["roles_disabled"] = bool(_st.get("total")) and not bool(_st.get("enabled"))
@@ -2677,8 +2677,12 @@ def add_engine_tag(rid: int, body: EngineTagBody, request: Request,
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = (body.tag or "").strip().lower()
-    if tag not in ("vod", "issue", "coding", "qa", "sre", "chat"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: vod/issue/coding/qa/sre/chat"})
+    # 值域单一来源（架构守护 M3）：与 PUT tags / 派发守卫共用 role_tag_domain()，
+    # 新增角色时不会只有一侧更新。单标签接口不接受 'all'（全能由 PUT tags 折叠产生）。
+    from src.domains.runtime.public import role_tag_domain as _role_domain
+    _roles = [r for r in _role_domain() if r != "all"]
+    if tag not in _roles:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效标签: {tag}，可选: {'/'.join(_roles)}"})
     with db_lock:
         c = db.cursor()
         try:

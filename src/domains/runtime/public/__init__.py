@@ -659,17 +659,40 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
-def role_caps_inventory() -> dict:
+def role_tag_domain() -> tuple:
+    """角色值域单一来源：`('all', <短角色名...>)`（不含 engine:/scene:/scope: 派生行）。
+
+    管理台、settings 单标签接口与角色行统计共用，避免各处硬编码字面量后再分叉
+    （架构守护 M3）。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+    return ("all",) + tuple(KNOWN_AGENT_ROLES)
+
+
+def role_caps_inventory(runtime_ids: list | None = None) -> dict:
     """每台引擎的角色行统计 {rid: {"total": n, "enabled": m}}。
 
-    只数平铺角色行（'all' 或短角色名），冒号派生行（engine:/scene:/scope:）不计。
-    供管理台区分「从未配置角色」(total=0) 与「角色全部停用」(total>0 且 enabled=0)——
-    两者在派发上都是不可选，但语义完全不同。
+    - **只数角色值域行**（`all` 与短角色名，来源 `role_tag_domain()`）。冒号派生行不计；
+      值域外的平铺行同样不计 —— 否则会出现「卡片显示已停用、实际仍可派发」的假阳性
+      （架构守护 M4：判定口径必须与派发守卫一致）。
+    - `runtime_ids` 给定时只统计这些引擎（列表接口按当前页 id 传参，避免无 WHERE 全表
+      聚合，架构守护 M2）。
+    供管理台区分「从未配置角色」(total=0) 与「角色全部停用」(total>0 且 enabled=0)。
     """
+    domain = list(role_tag_domain())
+    in_tags = ",".join("?" * len(domain))
+    sql = ("SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
+           f"FROM engine_capabilities WHERE tag IN ({in_tags})")
+    params: list = list(domain)
+    if runtime_ids is not None:
+        ids = [int(i) for i in runtime_ids if i]
+        if not ids:
+            return {}
+        sql += f" AND runtime_id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    sql += " GROUP BY runtime_id"
     with _any_cursor() as c:
-        rows = c.execute(
-            "SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
-            "FROM engine_capabilities WHERE tag NOT LIKE '%:%' GROUP BY runtime_id").fetchall()
+        rows = c.execute(sql, tuple(params)).fetchall()
     out: dict = {}
     for r in rows or []:
         try:
@@ -1982,7 +2005,7 @@ __all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
            "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
-           "role_caps_inventory", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "role_caps_inventory", "role_tag_domain", "removing_leaves_no_role", "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
            "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
@@ -2962,9 +2985,6 @@ _ANY_QUERIES: dict[str, str] = {
     "engine_cap_tags_sorted": (
         "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
     # 角色行统计（含 enabled=0）：管理台区分「从未配置」与「配过但全停用」
-    "engine_cap_role_counts": (
-        "SELECT runtime_id, COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) "
-        "FROM engine_capabilities WHERE tag NOT LIKE '%:%' GROUP BY runtime_id"),
     "engine_caps_by_runtime": (
         "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities "
         "WHERE runtime_id=? ORDER BY tag"),

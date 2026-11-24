@@ -18,6 +18,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.role_caps import ensure_role_caps, role_rows
+from src.domains.runtime.public import role_caps_inventory
 
 
 @pytest.fixture(autouse=True)
@@ -171,4 +172,29 @@ def test_role_caps_inventory_counts_disabled_rows():
     inv = role_caps_inventory()
     assert inv.get(rid_off) == {"total": 1, "enabled": 0}, inv.get(rid_off)
     assert inv.get(rid_on) == {"total": 1, "enabled": 1}, inv.get(rid_on)
+
+
+def test_role_caps_inventory_ignores_non_domain_tags():
+    """架构守护 M4：统计口径必须与派发守卫一致 —— 值域外的平铺行不算角色。
+
+    旧实现用 `tag NOT LIKE '%:%'`，一条手工插入的 `bogus` 停用行会让卡片显示
+    「已停用」，而派发守卫只认 all/短角色名 → 该引擎其实照样可派发（假阳性）。
+    """
+    rid = _mk_engine("b3396bf-m4")
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?,?,0)", (rid, "bogus"))
+        db.commit()
+    inv = role_caps_inventory([rid])
+    assert rid not in inv or inv[rid]["total"] == 0, inv
+
+
+def test_role_caps_inventory_scopes_to_given_ids():
+    """架构守护 M2：按页内 id 统计，不做无 WHERE 全表聚合。"""
+    rid_a = _mk_engine("b3396bf-m2a", roles=["all"])
+    rid_b = _mk_engine("b3396bf-m2b", roles=["all"])
+    inv = role_caps_inventory([rid_a])
+    assert inv.get(rid_a) == {"total": 1, "enabled": 1}, inv
+    assert rid_b not in inv, inv
+    assert role_caps_inventory([]) == {}
 
