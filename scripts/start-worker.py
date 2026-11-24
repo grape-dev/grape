@@ -16,6 +16,9 @@ listen，uvicorn 直接在既有 socket 上 accept，lifespan 再慢端口也不
 - 多 worker 子进程经 multiprocessing spawn 重跑本文件：所有顶层代码必须 import-safe，
   bind 只在 ``__main__`` 分支执行（缺守卫会让每个 worker 再 bind 一次 → EADDRINUSE
   崩溃循环，实测教训）。
+- 多 worker 构造按 uvicorn 版本自适应（依赖是 ``uvicorn>=0.23`` 未锁版本）：
+  ``Multiprocess(config, sockets=[...])`` 只适用于 ≥0.51；0.23–0.50 仍需
+  ``target``（``Server(config).run``）。见 ``build_multiprocess``。
 - bind 失败显式退出非 0，交给 systemd Restart 拉起，绝不静默换端口。
 
 环境变量（与 deploy/systemd/grape-worker-server.service / scripts/grape-systemd-run.sh
@@ -45,14 +48,47 @@ def listen_socket(host: str, port: int) -> socket.socket:
     return s
 
 
+def _requires_target(multiprocess_cls) -> bool:
+    """判断 ``Multiprocess`` 是否需要 ``target`` 位置参数。
+
+    uvicorn 0.23–0.50 的签名是 ``Multiprocess(config, target, sockets)``（target 必填），
+    0.51 起移除 target 改为 ``Multiprocess(config, sockets)``。依赖声明是 ``uvicorn>=0.23``
+    未锁版本，必须两种签名都构造得出来。
+    """
+    import inspect
+    try:
+        params = inspect.signature(multiprocess_cls).parameters
+    except (TypeError, ValueError):
+        return False
+    target = params.get("target")
+    return target is not None and target.default is inspect.Parameter.empty
+
+
+def build_multiprocess(config, sock, multiprocess_cls=None, server_cls=None):
+    """按 uvicorn 版本构造 ``Multiprocess``（旧签名补 target，新签名直传 sockets）。"""
+    if multiprocess_cls is None:
+        from uvicorn.supervisors import Multiprocess as multiprocess_cls
+    if server_cls is None:
+        from uvicorn import Server as server_cls
+    if _requires_target(multiprocess_cls):
+        # 等价于 uvicorn.main.run 的多 worker 分支：target=Server(config).run
+        return multiprocess_cls(config, target=server_cls(config).run, sockets=[sock])
+    try:
+        return multiprocess_cls(config, sockets=[sock])
+    except TypeError as e:
+        # 私有签名读不出来时的兜底：仍是「缺 target」就按旧签名再构造一次
+        if "target" not in str(e):
+            raise
+        return multiprocess_cls(config, target=server_cls(config).run, sockets=[sock])
+
+
 def _run(sock: socket.socket, workers: int) -> None:
     """对齐 uvicorn.main.run 的 worker 分支，只是 socket 换成预 bind 的那只。"""
     import uvicorn
     config = uvicorn.Config(os.environ.get("GRAPE_WORKER_APP") or _APP_IMPORT,
                             workers=workers)
     if workers > 1:
-        from uvicorn.supervisors import Multiprocess
-        Multiprocess(config, sockets=[sock]).run()
+        build_multiprocess(config, sock).run()
     else:
         server = uvicorn.Server(config=config)
         server.run(sockets=[sock])

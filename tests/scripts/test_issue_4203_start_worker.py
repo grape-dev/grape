@@ -79,6 +79,106 @@ class TestSpawnReentry:
         assert guards, "缺少 __main__ 守卫：spawn 子进程会重复 bind"
 
 
+class TestMultiprocessCompat:
+    """多 worker 构造要同时适配 uvicorn ≥0.51 与 0.23–0.50（依赖只写了 >=0.23）。"""
+
+    class _Server:
+        def __init__(self, config):
+            self.config = config
+            self.run_called = False
+
+        def run(self):
+            self.run_called = True
+
+    class _NewMP:
+        """uvicorn ≥0.51：``Multiprocess(config, sockets)``。"""
+
+        def __init__(self, config, sockets):
+            self.config = config
+            self.sockets = sockets
+            self.target = None
+            self.ran = False
+
+        def run(self):
+            self.ran = True
+
+    class _OldMP:
+        """uvicorn 0.23–0.50：``Multiprocess(config, target, sockets)``，target 必填。"""
+
+        def __init__(self, config, target, sockets):
+            self.config = config
+            self.target = target
+            self.sockets = sockets
+
+        def run(self):
+            pass
+
+    def test_new_signature_gets_sockets(self):
+        sock = socket.socket()
+        try:
+            mp = sw.build_multiprocess(object(), sock, multiprocess_cls=self._NewMP,
+                                       server_cls=self._Server)
+        finally:
+            sock.close()
+        assert isinstance(mp, self._NewMP)
+        assert mp.sockets == [sock]
+        assert mp.target is None
+
+    def test_old_signature_gets_target(self):
+        sock = socket.socket()
+        try:
+            mp = sw.build_multiprocess(object(), sock, multiprocess_cls=self._OldMP,
+                                       server_cls=self._Server)
+        finally:
+            sock.close()
+        assert isinstance(mp, self._OldMP)
+        assert mp.sockets == [sock]
+        assert callable(mp.target)
+
+    def test_unnamed_signature_falls_back_on_type_error(self):
+        """签名读不出来时（C 扩展/装饰器），构造 TypeError 应回退旧签名而非崩溃。"""
+        sock = socket.socket()
+        calls = []
+
+        class _Opaque:
+            def __init__(self, config, *args, **kwargs):
+                calls.append(kwargs)
+                if "target" not in kwargs:
+                    raise TypeError("__init__() missing 1 required positional argument: 'target'")
+                self.target, self.sockets = kwargs["target"], kwargs["sockets"]
+
+        try:
+            mp = sw.build_multiprocess(object(), sock, multiprocess_cls=_Opaque,
+                                       server_cls=self._Server)
+        finally:
+            sock.close()
+        assert mp.sockets == [sock] and callable(mp.target)
+        assert len(calls) == 2, "应先按新签名构造、TypeError 后再按旧签名重试"
+
+    def test_run_dispatches_workers_to_build_multiprocess(self, monkeypatch):
+        """workers>1 走 build_multiprocess（而不是裸构造），单进程仍走 Server.run。"""
+        seen = {}
+
+        class _MP:
+            def __init__(self, config, sock):
+                seen["sock"] = sock
+
+            def run(self):
+                seen["ran"] = True
+
+        called = {}
+        monkeypatch.setattr(sw, "build_multiprocess",
+                            lambda config, sock: (called.setdefault("argv", (config, sock)),
+                                                  _MP(config, sock))[1])
+        s = sw.listen_socket("127.0.0.1", 0)
+        try:
+            sw._run(s, 2)
+        finally:
+            s.close()
+        assert called["argv"][1] is s
+        assert seen.get("ran") is True
+
+
 class TestDefaults:
     def test_app_import_string_matches_unit_app(self):
         assert sw._APP_IMPORT == "src.api.grape_worker_server:app"
