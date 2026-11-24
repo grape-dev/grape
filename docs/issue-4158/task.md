@@ -22,7 +22,7 @@ PR #2077 复审的两项 Required 以「切片 8/9」续做。
 ```bash
 # 1) 静态门禁
 python3 scripts/check_duplicate_defs.py src      # 顶层重名 0 / 基线 0
-python3 scripts/check_f811.py                    # F811 69 / 基线 69
+python3 scripts/check_f811.py                    # F811 72 / 基线 72
 make lint                                        # 含上述两道门禁 + F821 + 异步阻塞棘轮
 
 # 2) 本单回归（仓库实际存在的套件；路径含子目录 im/ 与 api/）
@@ -35,6 +35,6 @@ python3 -m pytest -q \
 
 ## 不做
 
-- 全仓 `ruff F811` 69 处存量清理（import/局部别名重定义，Spec 划为存量分批）；
+- 全仓 `ruff F811` 72 处存量清理（import/局部别名重定义，Spec 划为存量分批）；
 - `tests/test_issue_2419_review_point_notify.py` 的 3 个基线既有失败（基线 worktree 可复现，与本单无关）；
 - `tests/runtime/test_issue_pending_review.py` 的 `datatype mismatch`（基线迁移/环境问题）。

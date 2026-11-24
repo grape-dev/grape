@@ -3,7 +3,7 @@
 
 背景：`scripts/check_duplicate_defs.py` 只看**顶层同名 def/class**，看不见 import 别名 /
 局部重定义这类 F811 形态。Issue #4158 的事故是顶层同名副本覆盖，但同一类「后定义顶掉前定义」
-在 ruff 里还有 69 处存量（`runtime/routes/chat.py` 9、`mgmt/routes/grape_auth.py` 8、
+在 ruff 里还有 72 处存量（`runtime/routes/chat.py` 9、`mgmt/routes/grape_auth.py` 8、
 `mgmt/user/db.py` 5 等），此前**没有任何门禁调用** `ruff check --select F811`——
 `pyproject.toml` 里的 dev 依赖只是「装了才用」，静默失效（PR #2077 复审 Optional）。
 

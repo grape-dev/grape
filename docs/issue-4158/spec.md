@@ -26,7 +26,7 @@
 ## 3. 非目标
 
 - 不改通知正文/卡片样式，不改 `notify_user` 扇出与 outbox 语义；
-- 不清零全仓 `ruff F811` 的 69 处存量（import/局部别名重定义），只把它纳入棘轮（新增即失败）；
+- 不清零全仓 `ruff F811` 的 72 处存量（import/局部别名重定义），只把它纳入棘轮（新增即失败）；
 - 不处理 `tests/runtime/test_issue_pending_review.py` 在基线上的 `datatype mismatch`（既有环境/迁移问题）。
 
 ## 4. 验收

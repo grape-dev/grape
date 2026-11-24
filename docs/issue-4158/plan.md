@@ -39,7 +39,7 @@
 - `scripts/check_duplicate_defs.py`：AST 扫顶层同名 `def/class`，基线固定 0；
   扫描根缺失/解析失败**显式 FAIL**（不静默跳过）；接入 `make lint` + `scripts/check-all.sh`。
 - `scripts/check_f811.py`：`ruff check --select F811` 棘轮，基线
-  `configs/f811_baseline.json`（69 处存量：`runtime/routes/chat.py` 9、`mgmt/routes/grape_auth.py` 8、
+  `configs/f811_baseline.json`（72 处存量：`runtime/routes/chat.py` 9、`mgmt/routes/grape_auth.py` 8、
   `mgmt/user/db.py` 5 等），新增即失败；ruff 缺失显式失败。
 - `.github/workflows/lint.yml`：跑 `make lint`（含上述两道门禁）+ 本单回归套件，
   使「门禁接入 CI」可验证（此前仅本地 `make lint`，现有 workflow 都不跑 lint）。
@@ -63,4 +63,11 @@
 - `tests/test_issue_2419_review_point_notify.py` 在基线 `arch-weekly-11-ljt` 上即有 3 个失败
   （`close_issue_tasks` 把 `stage=done` 落成 `pending_review` 等），与本单无关，已用基线
   worktree 复现取证，不纳入「本单回归」计数。
-- 全仓 `ruff F811` 69 处存量按 Spec「存量分批」不纳入本 PR，已加棘轮防止继续增长。
+- 全仓 `ruff F811` 72 处存量按 Spec「存量分批」不纳入本 PR，已加棘轮防止继续增长。
+- 变基到 `arch-weekly-11-ljt` 最新 tip 后重放 6 个业务提交（`git rebase --onto` 只取本单
+  自己的提交，旧的基线侧历史不再随分支带回）：`skills.py` 的 `_validate_repo_param`
+  两侧各删一份副本（基线删底部 `REPO_PARAM_PROVIDER_PREFIXES` 版、本单删顶部 regex 版），
+  直接重放会互相抵消成 0 定义、调用点仍在（F821 棘轮基线 1 会掩盖它）。已按基线侧收敛：
+  只保留顶部 regex 版单份（`_REPO_PARAM_RE` + `provider_prefixes()`），`REPO_PARAM_PROVIDER_PREFIXES`
+  在本文件 0 引用。`configs/f811_baseline.json` 随基线前进重取为 72（当前 72 / 基线 72；
+  基线自身 101 处，本单净降 29）。
