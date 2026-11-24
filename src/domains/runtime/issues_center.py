@@ -1768,6 +1768,12 @@ async def _run_notify(ctx, api, user_id: str, conv_id: str, open_id: str,
             _im_notify_counter("sent_ok")
         else:
             _im_notify_counter("sent_failed")
+            # Issue #2419 移植可观测口径：无任何渠道配置（no_ctx 等价形态）单独计数。
+            # 任务分配族与 awaiting / pending_review 两族必须同口径：修复前三族都由
+            # `_im_notify_skip` 计 skipped_no_ctx，只有这里并进 sent_failed 会让
+            # 「用户没配渠道」在任务族指标里彻底消失（PR #2077 复审 Required）。
+            if not (_res.get("failed") or _res.get("skipped")):
+                _im_notify_counter("skipped_no_ctx")
             log.warning(f"Task notify: no channel delivered (sent={_res.get('sent')} "
                         f"failed={_res.get('failed')} skipped={_res.get('skipped')})")
     except Exception as e:
