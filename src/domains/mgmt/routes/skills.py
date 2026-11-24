@@ -172,7 +172,8 @@ SKILL_DISPLAY_NAME_MAX = 20
 # Issue #3855：复用/转换写路径 ~N 后缀去重枚举上界。
 # 五源登记：DEDUP_SUFFIX_MAX = <undecided: 需要同 scope 同名变体规模测量>。
 # 现为防死循环的工程护栏（无业务口径），耗尽即 409，绝不静默返回重名值。
-DEDUP_SUFFIX_MAX = 999
+# QA B2 同批整改：env 可配 + 占位登记，实测定值后回填五源。
+DEDUP_SUFFIX_MAX = int(os.environ.get("GRAPE_DEDUP_SUFFIX_MAX", "999"))
 
 
 def _normalize_skill_display_name(raw) -> str:

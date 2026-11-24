@@ -1111,6 +1111,8 @@ const KEY2_DEFAULTS = {
   // Issue #3976：scope 互转 / SKILL.md 在线编辑 / AI 填写
   'action.convert_to_user': '转为个人技能',
   'action.convert_to_repo': '转为仓库技能',
+  'action.convert_to_user_desc': '原地转为个人技能：技能 ID、历史版本与场景引用保持不变',
+  'action.convert_to_repo_desc': '原地转为仓库技能：技能 ID、历史版本与场景引用保持不变',
   'action.edit_skill_md': '编辑 SKILL.md',
   'action.ai_fill': 'AI 填写',
   'action.ai_filling': 'AI 填写中...',
@@ -2745,9 +2747,9 @@ const convertCtx = reactive({ open: false, skill: null, targetScope: 'user', bus
 const convertDesc = computed(function () {
   if (!convertCtx.skill) return ''
   if (convertCtx.targetScope === 'user') {
-    return '原地转为个人技能：技能 ID、历史版本与场景引用保持不变'
+    return tt2('action.convert_to_user_desc')
   }
-  return '原地转为仓库技能：技能 ID、历史版本与场景引用保持不变'
+  return tt2('action.convert_to_repo_desc')
 })
 function askScopeConvert(s) {
   if (!s || s.scope === 'official') return

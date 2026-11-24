@@ -23,12 +23,13 @@ import urllib.request
 
 DEFAULT_MODEL = "deepseek-v4.1-flash-1017"
 
-# AI 填写默认调用参数（Issue #3976 QA B2 登记：五源依据不足，暂按登记值运行，
-# 后续按线上时延 / 输出完整性实测调整。此处为单一来源，调用方不得再各自硬编码。
-# 与 autopilot 润色的 1000/0.3/30 是两套独立口径，互不混用。）
-AI_FILL_MAX_TOKENS = 1200
-AI_FILL_TEMPERATURE = 0.2
-AI_FILL_TIMEOUT_SECONDS = 60
+# AI 填写默认调用参数（Issue #3976 QA B2 登记：五源依据不足，暂按登记默认值运行，
+# 可用环境变量覆盖；后续按线上时延 / 输出完整性实测调整后回填五源。
+# 此处为单一来源，调用方不得再各自硬编码。与 autopilot 润色的 1000/0.3/30
+# 是两套独立口径，互不混用。）
+AI_FILL_MAX_TOKENS = int(os.environ.get("GRAPE_AI_FILL_MAX_TOKENS", "1200"))
+AI_FILL_TEMPERATURE = float(os.environ.get("GRAPE_AI_FILL_TEMPERATURE", "0.2"))
+AI_FILL_TIMEOUT_SECONDS = int(os.environ.get("GRAPE_AI_FILL_TIMEOUT_SECONDS", "60"))
 
 _log = logging.getLogger("grape.llm")
 

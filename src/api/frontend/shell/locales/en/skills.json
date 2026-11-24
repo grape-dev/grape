@@ -27,7 +27,9 @@
     "back_to_huawei": "Back to Huawei Cloud Skills",
     "download_skill_title": "Download skill package zip",
     "update_skill": "Upload Update",
-    "confirm_update": "Confirm Overwrite Update"
+    "confirm_update": "Confirm Overwrite Update",
+    "convert_to_user_desc": "Convert in place to personal skill: skill ID, version history and scene references stay unchanged",
+    "convert_to_repo_desc": "Convert in place to repo skill: skill ID, version history and scene references stay unchanged"
   },
   "update": {
     "title": "Upload Skill Update",

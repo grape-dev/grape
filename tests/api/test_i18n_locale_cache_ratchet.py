@@ -15,15 +15,16 @@
 import hashlib
 import pathlib
 import re
+import subprocess
 
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = "61ee7f489b0e5ccf"
+LOCALE_FINGERPRINT = "4c386d778e9df5de"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    "index.html": ("90", "53"),
+    "index.html": ("91", "53"),
     "admin.html": ("20261123-1", "20261114-23"),
     "register.html": ("69", "45"),
     "forgot.html": ("69", "45"),
@@ -90,6 +91,52 @@ def test_pages_keep_i18n_early_start_logic():
         assert "classList.add('i18n-loading')" in html, (
             f"{page} 丢失 i18n 早启隐藏逻辑（i18n-loading 注入点），"
             "请还原 lang 探测 IIFE——只留 cacheVer 赋值会让非 zh 用户首帧闪原文")
+
+
+def test_locale_change_bumps_index_cachever():
+    """D1 防回归补强（QA 复评：棘轮守卫盲区）：语言包内容变更必须同提交抬 cacheVer。
+
+    既有守卫只比对「登记值 == 实际值」——指纹变了而渲染页 cacheVer 不动也能全绿，
+    浏览器会继续吃旧语言包缓存，新增 key 取不到。本断言对比 HEAD~1：语言包指纹
+    变了而 index.html 的 cacheVer 没变 → 红。浅克隆/单提交环境跳过。
+    """
+    def _git(*args) -> bytes:
+        r = subprocess.run(["git", "-C", str(SHELL.parent.parent.parent), *args],
+                           capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.decode("utf-8", "ignore")[:200])
+        return r.stdout
+
+    try:
+        prev = _git("rev-parse", "HEAD~1").decode().strip()
+        head = _git("rev-parse", "HEAD").decode().strip()
+    except Exception:
+        return  # 浅克隆 / 无 git 环境跳过
+    if not prev or prev == head:
+        return
+
+    def _fp_at(commit: str) -> str:
+        h = hashlib.sha256()
+        for lang in ("zh", "en"):
+            listed = _git("ls-tree", "-r", "--name-only", commit,
+                          f"src/api/frontend/shell/locales/{lang}").decode().splitlines()
+            for name in sorted(n for n in listed if n.endswith(".json")):
+                h.update(f"{lang}/{name.rsplit('/', 1)[-1]}:".encode())
+                h.update(_git("show", f"{commit}:{name}"))
+        return h.hexdigest()[:16]
+
+    if _fp_at(prev) == _fp_at(head):
+        return  # 语言包没变，无需抬档
+
+    def _ver_at(commit: str) -> str:
+        html = _git("show", f"{commit}:src/api/frontend/shell/index.html").decode("utf-8")
+        m = re.search(r"__I18N_CACHE_VER__\s*=\s*['\"]([^'\"]+)['\"]", html)
+        return m.group(1) if m else ""
+
+    v_prev, v_head = _ver_at(prev), _ver_at(head)
+    assert v_head != v_prev and version_rank(v_head) > version_rank(v_prev), (
+        f"语言包内容在本提交发生变化但 index.html 的 i18n cacheVer 未抬升"
+        f"（{v_prev} -> {v_head}）——浏览器会继续吃旧缓存，新增 key 取不到（QA D1 盲区）")
 
 
 def test_page_cache_ver_is_current_and_monotonic():

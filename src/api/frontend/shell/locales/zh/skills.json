@@ -27,7 +27,9 @@
     "back_to_huawei": "返回华为云技能包",
     "download_skill_title": "下载技能包 zip",
     "update_skill": "上传更新",
-    "confirm_update": "确认覆盖更新"
+    "confirm_update": "确认覆盖更新",
+    "convert_to_user_desc": "原地转为个人技能：技能 ID、历史版本与场景引用保持不变",
+    "convert_to_repo_desc": "原地转为仓库技能：技能 ID、历史版本与场景引用保持不变"
   },
   "update": {
     "title": "上传更新技能",
