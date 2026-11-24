@@ -34,11 +34,20 @@
    （`repo_base` → 基线 fetch/clone 失败、`worktree_add` → git worktree add 失败、
    `worktree_add_head_repair` → HEAD 自愈后重试仍失败），并附 `<stderr>` 原文
    （含 HEAD 自愈结果）+「凭据归因不可用（未据此判定为凭据问题）」。
-3. `agent.worktree_block_result`：先问凭据归因，再透传失败现场。
+3. `agent.worktree_block_result`：先读失败现场，再问凭据归因；归因不成立则透传现场。
 
 > 审查修复（PR #2099）：仓级失败现场由 `pop` 改为 `get`（同仓并发任务都能读到，
 > 由上限 200 + 仓级 TTL 收敛）；阶段措辞按上表映射；单次阻断只解析一次
 > `resolve_exec_token` 并下传。
+>
+> 复审修复（PR #2099 第三轮）：①错误面**先读现场再问凭据**——空仓断言只在没有
+> `repo_base` 阶段现场时成立（fetch/init 失败会让本地 refs=0，空仓是后果不是原因），
+> 否则 `empty_repo` 会抹掉 401/网络原文；②失败现场按阶段优先级保留
+> （`repo_base` 3 > `worktree_add_head_repair` 2 > `worktree_add` 1 ≥
+> `worktree_build_exception` 1），低优先级新现场不顶掉已记录的更高优先级现场；
+> ③建树自身的异常出口补现场：`os.makedirs` 与 `ensure_issue_worktree` 的 `except`
+> 都写 `worktree_build_exception`，`agent._execute_task_impl` 的宽 `except` 改为
+> 走 `worktree_block_result` 阻断（无现场时用 `worktree_failed: <异常原文>` 兜底）。
 
 ## 五、验证
 
@@ -49,3 +58,8 @@ python3 -m pytest tests/runtime/test_issue_3923_worktree_head_and_attribution.py
   tests/runtime/test_issue_2245_git_writable.py tests/runtime/test_issue_2514_workspace_binding.py -q
 # → 122 passed
 ```
+
+> 第三轮复审后复跑同一组命令 → **128 passed**（新增 4 条：fetch 原文不被 add 覆盖 /
+> 真实空仓仍报 `empty_repo` / 目录不可建写现场并阻断 / 建树异常写现场并阻断）；
+> `make lint` 通过（undefined-name 0、duplicate-defs 0、F811 72/72、async 251/273）。
+> CI：`.github/workflows/lint.yml` 新增 job step 跑本 Issue 用例 + `tests/runtime/test_repogit.py`。

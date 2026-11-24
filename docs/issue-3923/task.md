@@ -19,3 +19,6 @@
 | 15 | 复审 Optional：issue/agent 下传 `ensure_repo_base`，失败直接写三元组键，去掉「仓级 → 三元组」复制 | ✅ | `repogit.ensure_issue_worktree` + 并发用例改为各自读自己的 git 原文 |
 | 16 | 复审 Nit：`test_non_head_failure_is_not_recorded_as_head_repair` 构造真实非 HEAD 失败，断言 `stage=worktree_add` 且无 head_repair | ✅ | `tests/runtime/test_issue_3923_worktree_head_and_attribution.py` |
 | 17 | 复审合并阻塞：分支落后基线（lint.yml 缺失、non_ff）→ 变基到 `arch-weekly-11-zj` 并复跑回归 | ✅ | 变基后 124 passed + `make lint` 通过 |
+| 18 | 三轮 Required：错误面先读现场再问凭据；空仓断言仅在无 `repo_base` 现场时成立；失败现场按阶段优先级保留 | ✅ | `repogit.worktree_credential_error` / `worktree_failure_error` / `_record_worktree_failure`（`WORKTREE_STAGE_PRIORITY`） |
+| 19 | 三轮 Required：建树自身异常出口写现场并阻断（`os.makedirs` + `ensure_issue_worktree` except + `agent` 宽 except） | ✅ | `WORKTREE_STAGE_BUILD_EXCEPTION` / `agent._execute_task_impl` |
+| 20 | 三轮 CI 覆盖：lint.yml pytest 步骤纳入本 Issue 用例与 `test_repogit.py` | ✅ | `.github/workflows/lint.yml` |
