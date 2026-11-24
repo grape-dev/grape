@@ -529,11 +529,6 @@ def get_efficiency_issues(repo: str = "", kind: str = "aging", bucket: str = "",
         return {"repo": repo_key_out, "items": [], "total": 0, "empty": True,
                 "error": "aggregation_failed"}
 
-# worker 指标过期阈值：心跳默认 15s 一次；超过该时长没有心跳，卡片上的 cpu/mem 等
-# 就是历史快照（甚至是从未采到过的 0），必须显示成「无采样」而不是 0.0%。
-_WORKER_METRICS_STALE_SECONDS = 300
-
-
 def _metrics_age_seconds(last_seen_at) -> int | None:
     """last_seen_at → 距现在的秒数；解析不出返回 None（调用方按「未知」处理）。"""
     raw = str(last_seen_at or "").strip()
@@ -805,8 +800,10 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     "status": wstatus or "offline", "health": w_health,
                     # 心跳断了以后 cpu/mem 等是最后一次采样值（很多是 0）——前端据此显示「无采样」
                     "metrics_age_seconds": _m_age,
-                    "metrics_stale": bool(_m_age is None
-                                           or _m_age > _WORKER_METRICS_STALE_SECONDS),
+                    # 过期判据复用健康态派生（derive_runtime_health，阈值 RUNTIME_STALE_SECONDS
+                    # 默认 100s，env 可调）：卡片圆点显示「失联」时指标就不再按实时渲染，
+                    # 不再自造第二个新鲜度阈值（架构守护 B2）。
+                    "metrics_stale": w_health != "online",
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,

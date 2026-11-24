@@ -128,7 +128,8 @@ class TestMetricsStaleness:
         w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
              if x.get("id") == CRED_ID][0]
         assert w["metrics_stale"] is True
-        assert w["metrics_age_seconds"] and w["metrics_age_seconds"] > 300
+        # 阈值与健康态派生同源（RUNTIME_STALE_SECONDS 默认 100s）
+        assert w["metrics_age_seconds"] and w["metrics_age_seconds"] > 100
 
     def test_fresh_worker_is_not_flagged(self):
         from src.domains.insight.routes.dashboard import get_ops_overview
@@ -136,7 +137,7 @@ class TestMetricsStaleness:
         w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
              if x.get("id") == CRED_ID][0]
         assert w["metrics_stale"] is False
-        assert w["metrics_age_seconds"] is not None and w["metrics_age_seconds"] < 300
+        assert w["metrics_age_seconds"] is not None and w["metrics_age_seconds"] < 100
 
 
 class TestAllZeroMetrics:
