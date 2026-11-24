@@ -39,6 +39,15 @@ async def lifespan(app: FastAPI):
     from src.kernel.db_registry import assert_role_database
     assert_role_database("worker")
 
+    # Issue #3749：worker trace 中继启动自检（本进程挂载 runtime 全量路由，含 POST /api/runtime/traces）。OTLP_RELAY_TARGET 为空时
+    # 启动期 WARN 一次并说明 503 语义，配置存在则打印生效端点；自检失败不阻断启动。
+    try:
+        from src.domains.runtime.routes.runtime import trace_relay_selfcheck
+        trace_relay_selfcheck()
+    except Exception as _relay_selfcheck_err:
+        log.warning(f"[trace-relay] startup selfcheck skipped: {_relay_selfcheck_err}")
+
+
     # kernel 端口绑定：GSB 注册/心跳经 pipeline 端口调契约域原语，未绑定会抛
     # PortNotBound（现象：GSB register failed: service=xxx err=PortNotBound）。
     # mgmt 在 db_setup.init_database() 里绑；本 server 不走那条路径，必须自己绑，

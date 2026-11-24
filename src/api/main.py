@@ -384,6 +384,15 @@ async def lifespan(app: FastAPI):
     except SystemExit as e:
         raise
 
+    # Issue #3749：worker trace 中继启动自检（单进程模式由本进程承接 POST /api/runtime/traces）。OTLP_RELAY_TARGET 为空时
+    # 启动期 WARN 一次并说明 503 语义，配置存在则打印生效端点；自检失败不阻断启动。
+    try:
+        from src.domains.runtime.routes.runtime import trace_relay_selfcheck
+        trace_relay_selfcheck()
+    except Exception as _relay_selfcheck_err:
+        log.warning(f"[trace-relay] startup selfcheck skipped: {_relay_selfcheck_err}")
+
+
     # 四组进程任务启动器（设计 §5.1~5.4）。单进程并集模式：
     # - 僵尸事件回收/悬空任务回收/表维护由下方合并 sweep_loop + 组合表维护负责
     #   （与拆分 loop 同一事实源，行为等价）
