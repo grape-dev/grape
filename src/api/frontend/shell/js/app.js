@@ -377,7 +377,7 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
     var label = I18N.t('app.repo.org_project') || '组织项目';
     if (!id) return '<span style="color:var(--t2);font-weight:500">' + label + '</span>';
     var safe = id.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    var title = I18N.t('organizations.demands.title') || '组织需求';
+    var title = I18N.t('organizations.workbench.demands.title') || '组织需求';
     return '<a href="javascript:void(0)" onclick="app._openOrgDemandCenter(\'' + safe + '\')" style="color:var(--a);font-weight:600;text-decoration:none" title="' + title + '">' + label + ' ↗</a>';
   }
 
