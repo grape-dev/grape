@@ -228,16 +228,9 @@
                   </div>
                 </div>
                 <div v-if="filteredRepos.length === 0" class="lobby-empty rv-empty">
-                  <div class="lobby-empty-ic">{{ showHostedEmpty ? '📦' : '🔭' }}</div>
-                  <h3>{{ showHostedEmpty ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
-                  <p v-if="showHostedEmpty">
-                    <span>{{ t('repos.lobby.empty_hosted_desc_prefix') }}</span>
-                    <button type="button" class="lobby-empty-link" @click="showAllRepos">{{
-                      t('repos.lobby.scope_all')
-                    }}</button>
-                    <span>{{ t('repos.lobby.empty_hosted_desc_suffix') }}</span>
-                  </p>
-                  <p v-else>{{ t('repos.lobby.empty_desc') }}</p>
+                  <div class="lobby-empty-ic">{{ onlyHosted ? '📦' : '🔭' }}</div>
+                  <h3>{{ onlyHosted ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
+                  <p>{{ onlyHosted ? t('repos.lobby.empty_hosted_desc') : t('repos.lobby.empty_desc') }}</p>
                 </div>
                 <div v-if="pages > 1" class="project-pager">
                   <button :disabled="repoPage === 0" @click="goPage(-1)">‹</button>
@@ -548,12 +541,6 @@ const platforms = computed(() => {
     .map((k) => ({ key: k, name: (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k) }))
 })
 const hostedCount = computed(() => repos.value.filter((r) => r.is_hosted).length)
-const hasUnhostedRepos = computed(() => repos.value.some((r) => !r.is_hosted))
-// 仅当「只看已托管」下确实没有任何已托管仓库、且存在可切换的未托管仓库时，
-// 才展示带「全部仓库」可点击引导的空态；全部仓库为 0 条时仍用通用空态。
-const showHostedEmpty = computed(
-  () => onlyHosted.value && hostedCount.value === 0 && hasUnhostedRepos.value
-)
 
 // ── list / search / pager (identical sort+filter logic) ──
 const allRepos = computed(() => {
@@ -681,15 +668,6 @@ function platCls(key) {
 }
 function switchPlatform(key) {
   platformFilter.value = key
-  repoPage.value = 0
-}
-// 范围切换按钮文案 = 点击后要切到的目标视图（与当前状态相反）
-function toggleScope() {
-  onlyHosted.value = !onlyHosted.value
-  repoPage.value = 0
-}
-function showAllRepos() {
-  onlyHosted.value = false
   repoPage.value = 0
 }
 function initials(r) {
@@ -1270,19 +1248,6 @@ defineExpose({
   margin: 0;
   border: none;
   background: none;
-}
-.lobby-empty-link {
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--a);
-  font: inherit;
-  cursor: pointer;
-  text-decoration: underline;
-}
-.lobby-empty-link:hover {
-  color: var(--a);
-  opacity: 0.85;
 }
 /* 凭据异常提示条：解释"为什么列表是空的/是旧的"，并提供一键去修复 */
 .rv-cred-hint {
