@@ -36,12 +36,13 @@ def main() -> int:
         print(f"verify_nginx_upstream: {exc}", file=sys.stderr)
         return 2
     try:
-        text, source = dp.load_nginx_text(args.nginx_conf or None, args.nginx_dump or None)
+        sources = dp.load_nginx_sources(args.nginx_conf or None, args.nginx_dump or None)
     except OSError as exc:
         print(f"verify_nginx_upstream: 读取 nginx 配置失败: {exc}", file=sys.stderr)
         return 2
 
-    check = dp.check_upstream_role(text, ports=ports, source=source)
+    check = dp.check_upstream_role_sources(sources, ports=ports)
+    source = ", ".join(s.label for s in sources)
     if args.json:
         print(json.dumps({"source": source, "pass": check.ok, **check.as_dict()},
                          ensure_ascii=False, indent=2))

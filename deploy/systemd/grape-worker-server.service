@@ -1,4 +1,7 @@
 # Grape Worker Server（Worker 进程 :38082）— Issue #699 Phase 4 四进程拆分
+# [DEPRECATED 端口布局] 本单元为 38080-38083 历史四进程口径（Issue #3764）；
+# 现行单一端口事实源 = scripts/deploy_preflight.py::UPSTREAM_ROLE_PORT
+# （mgmt/event/worker/insight = 38081/38082/38083/38084，见 scripts/install-grape-systemd.sh）。
 [Unit]
 Description=Grape Worker Server (Task Execution)
 After=network.target grape-server.service

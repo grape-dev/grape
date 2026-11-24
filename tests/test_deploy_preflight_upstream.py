@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "deploy_preflight.py"
 
@@ -172,12 +174,97 @@ def test_nginx_conf_and_nginx_dump_are_equivalent(tmp_path):
     r_dump = _run_cli(db, "--nginx-dump", dump)
     assert r_conf.returncode == 0, r_conf.stdout + r_conf.stderr
     assert r_dump.returncode == 0, r_dump.stdout + r_dump.stderr
-    assert _upstream_check(r_conf.stdout) == _upstream_check(r_dump.stdout)
+    c_conf = _upstream_check(r_conf.stdout)
+    c_dump = _upstream_check(r_dump.stdout)
+    assert c_conf["ok"] is True and c_dump["ok"] is True
+    assert (c_conf["detail"].replace(f"conf:{conf}", "<src>")
+            == c_dump["detail"].replace(f"dump:{dump}", "<src>"))
 
 
 def test_repo_gateway_configs_are_aligned_with_fact_source():
-    """仓库内 cluster / four-process 两套网关配置都必须与端口事实源一致。"""
-    for name in ("nginx-grape-cluster.conf", "nginx-grape-four-process.conf"):
+    """仓库内 cluster / four-process / compose 三套网关配置都必须通过上游归属校验。
+
+    cluster 与 four-process 为 127.0.0.1 四进程拓扑，按绝对端口事实源校验；
+    compose 为容器服务名拓扑（worker=38082），只校验指向 worker 角色。
+    """
+    for name in (
+        "nginx-grape-cluster.conf",
+        "nginx-grape-four-process.conf",
+        "nginx-grape-compose.conf",
+    ):
         text = (ROOT / "deploy" / name).read_text(encoding="utf-8")
         c = dp.check_upstream_role(text)
         assert c.ok, f"{name}: {c.detail}"
+
+    compose = (ROOT / "deploy" / "nginx-grape-compose.conf").read_text(encoding="utf-8")
+    c = dp.check_upstream_role(compose)
+    assert "worker" in c.detail
+    assert dp.check_upstream_role(compose, ports={"worker": 9999}).ok
+
+
+def test_deprecated_three_process_conf_passes_only_with_legacy_ports():
+    """废弃三进程布局（38080-38082）按自身端口口径可校验，防止 runtime 漂到 8181。
+
+    默认四进程口径下它必然失败（worker=38082 ≠ 38083），因此 CI 用 --ports 显式声明。
+    """
+    text = (ROOT / "deploy" / "nginx-grape.conf").read_text(encoding="utf-8")
+    assert not dp.check_upstream_role(text).ok
+    c = dp.check_upstream_role(
+        text, ports=dp.parse_ports("mgmt=38080,event=38081,worker=38082,insight=38083"))
+    assert c.ok, c.detail
+
+
+def test_auto_detection_scans_all_conf_d_files(monkeypatch, tmp_path):
+    """conf.d 同时存在 grape-gzip.conf 与 grape.conf 时必须检到后者（Issue #3764 R1）。
+
+    旧实现只取 sorted(glob()) 第一个命中，grape-gzip.conf ASCII 序在前，
+    含 /api/runtime* 的网关文件从未被读取 → check 静默 skip。
+    """
+    gzip_conf = tmp_path / "grape-gzip.conf"
+    gzip_conf.write_text("gzip_vary on;\ngzip_types application/json;\n", encoding="utf-8")
+    gateway = tmp_path / "grape.conf"
+    gateway.write_text(
+        "upstream grape_worker { server 127.0.0.1:8181; }\n"
+        "server { location /api/runtime/ { proxy_pass http://grape_worker; } }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dp.glob, "glob", lambda pattern: [str(gzip_conf), str(gateway)])
+
+    sources = dp.load_nginx_sources()
+    assert [s.label for s in sources] == [f"conf:{gzip_conf}", f"conf:{gateway}"]
+    assert [s.gateway for s in sources] == [False, True]
+
+    text, label = dp.load_nginx_text()
+    assert "8181" in (text or "")
+    assert "grape-gzip.conf" in label and "grape.conf" in label
+
+    c = dp.check_upstream_role_sources(sources)
+    assert not c.ok
+    assert str(gateway) in c.detail
+    assert "8181" in c.detail and "38083" in c.detail
+    assert "grape-gzip.conf" in c.detail  # 非网关文件被记录而非丢弃
+
+
+def test_gateway_file_without_runtime_location_warns_not_silent_pass():
+    """网关文件没有 /api/runtime* 时必须 warn 点名文件，不允许静默 PASS。"""
+    conf = "server { location / { proxy_pass http://127.0.0.1:38080; } }"
+    c = dp.check_upstream_role(conf, source="conf:/etc/nginx/conf.d/grape.conf")
+    assert c.ok
+    assert "未发现 /api/runtime*" in c.detail
+    assert "grape.conf" in c.detail
+
+
+def test_parse_ports_rejects_invalid_values():
+    """--ports 非法值（非整数/未知角色/越界端口）必须 ValueError，CLI 退出码 2。"""
+    for spec in ("worker=abc", "bogus=1", "worker=70000"):
+        with pytest.raises(ValueError):
+            dp.parse_ports(spec)
+
+
+def test_cli_invalid_ports_exits_2():
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "--ports", "worker=abc"],
+        capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "端口非整数" in r.stderr or "端口非整数" in r.stdout

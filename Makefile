@@ -5,6 +5,7 @@
 #   make install - install package in editable mode (core deps)
 #   make install-dev - install with dev dependencies
 #   make test    - run pytest test suite
+#   make deploy-preflight - verify gateway /api/runtime upstream ownership (Issue #3764)
 #   make run     - start the API server (dev mode, port 3000)
 #   make sync-skills - sync official skills from grape-skills repo
 #   make lint    - run basic import/syntax checks
@@ -19,7 +20,7 @@ TEST_PYTHON ?= $(firstword $(wildcard venv/bin/python .venv/bin/python) $(PYTHON
 # 逐域测试的领域顺序（可覆盖：make test-domains DOMAINS="kernel api"）
 DOMAINS ?= arch contracts kernel insight api mgmt runtime
 
-.PHONY: help install install-dev install-all test test-fast run sync-skills lint clean docker
+.PHONY: help install install-dev install-all test test-fast run sync-skills lint clean docker deploy-preflight
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -39,6 +40,17 @@ install-worker: ## Install worker-only dependencies
 
 test: ## Run pytest test suite
 	$(PYTHON) -m pytest tests/ -v
+
+deploy-preflight: ## Verify gateway /api/runtime* upstream ownership (Issue #3764)
+	@for f in deploy/nginx-grape-cluster.conf deploy/nginx-grape-four-process.conf deploy/nginx-grape-compose.conf; do \
+		echo "== $$f"; \
+		$(PYTHON) scripts/verify_nginx_upstream.py --nginx-conf "$$f" || exit 1; \
+	done
+	@echo "== deploy/nginx-grape.conf (deprecated 3-process layout)"
+	@$(PYTHON) scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape.conf \
+		--ports mgmt=38080,event=38081,worker=38082,insight=38083
+	@$(PYTHON) scripts/verify_nginx_upstream.py \
+		$(if $(NGINX_CONF),--nginx-conf "$(NGINX_CONF)",)
 
 test-domains: ## Run tests per domain in isolated processes (stable order; see tests/README.md)
 	@rc=0; for d in $(DOMAINS); do \

@@ -15,6 +15,16 @@
 | `nginx-grape-four-process.conf` | 需要 443/SSL、按路径分流的四进程部署 | `:443`（80→443 跳转） |
 | `nginx-grape-compose.conf` | 容器编排内网反代（端口自洽） | compose 内网 |
 
+**compose 变体口径**：`nginx-grape-compose.conf` 的 upstream 指向 compose 服务名
+（`grape-worker-server` 等），端口随 `docker-compose.yml` 自洽
+（mgmt/event/worker/insight = 38080/38081/38082/38083），**不适用**主机四进程的
+38081–38084 基线，因此校验只认「`/api/runtime*` 指向 worker 角色」
+（upstream/主机名含 `worker`），不比较绝对端口，**也不需要** `--ports`。
+`--ports` 仅用于主机上 `127.0.0.1` 拓扑的过渡口径（如 001 的 8081–8084）。
+`deploy/nginx-grape.conf` 是已废弃的三进程 38080–38082 布局，门禁按其自身端口口径
+（`--ports mgmt=38080,event=38081,worker=38082`）校验，只防 `/api/runtime*` 漂移；
+新部署请勿使用。
+
 **关键约束**：`/api/runtime*`（含 `/api/runtime/install`、
 `/api/runtime/tasks/.../status`）的 `proxy_pass` 上游必须是 **worker** 进程端口
 （基线 38083）。指到业务 API 端口 8181 或其他进程端口会在 claim/install 上表现为
@@ -37,6 +47,12 @@ python3 scripts/verify_nginx_upstream.py --nginx-conf /etc/nginx/conf.d/grape.co
 # 过渡口径（如 001 仍为 8081–8084 / 8083）用 --ports 或 GRAPE_PROCESS_PORTS 覆盖
 python3 scripts/verify_nginx_upstream.py --ports mgmt=8081,event=8082,worker=8083,insight=8084
 ```
+
+**自动路径（Issue #3764）**：`make deploy-preflight` 校验仓库三套在用配置并探测本机
+nginx；`deploy/deploy3db.sh` 与 `scripts/restart-four-process.sh` 在重启前调用
+`scripts/verify_nginx_upstream.py`，非 0 立即中止部署。过渡端口请写入 `.env` 的
+`GRAPE_PROCESS_PORTS=...`（两脚本都会 source `.env`），或临时用
+`GRAPE_NGINX_CONF=...` 指定待检配置。
 
 > `deploy/nginx-grape.conf` 是单入口历史上的 38080–38082 布局，不在上述四进程口径内，
 > 新部署请勿使用。

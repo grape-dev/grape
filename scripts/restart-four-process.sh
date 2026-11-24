@@ -63,6 +63,12 @@ start_one() {
     echo $! > "/tmp/grape-four-${role}.pid"
 }
 
+if ! "$PY" scripts/verify_nginx_upstream.py; then
+    echo "[restart] ERROR: 网关 /api/runtime* 上游归属校验未通过（见上），已中止重启。" >&2
+    echo "[restart]        跳过校验可用 GRAPE_NGINX_CONF 指向正确配置；过渡端口用 GRAPE_PROCESS_PORTS。" >&2
+    exit 1
+fi
+
 stop_old
 
 start_one mgmt    src.api.grape_server 38081 39081 mgmt
