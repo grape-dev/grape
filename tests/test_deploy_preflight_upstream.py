@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -305,3 +306,41 @@ def test_cli_invalid_ports_exits_2():
         capture_output=True, text=True, timeout=60)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "端口非整数" in r.stderr or "端口非整数" in r.stdout
+
+
+def test_static_systemd_units_align_with_port_fact_source():
+    """deploy/systemd 四个静态单元端口必须与 UPSTREAM_ROLE_PORT 事实源一致（#3764）。
+
+    历史上静态单元为 38080-38083（worker 38082 = event 端口），按旧习惯安装会把
+    网关 worker 上游 38083 打到 insight；本用例锁死静态单元不得再漂移。
+    """
+    expected = {
+        "grape-server.service": "mgmt",
+        "grape-event-server.service": "event",
+        "grape-worker-server.service": "worker",
+        "grape-insight-server.service": "insight",
+    }
+    for name, role in expected.items():
+        text = (ROOT / "deploy" / "systemd" / name).read_text(encoding="utf-8")
+        fact = str(dp.UPSTREAM_ROLE_PORT[role])
+        for line in text.splitlines():
+            if "GRAPE_PORT=" in line or "GRAPE_WORKER_PORT=" in line or "--port " in line:
+                used = set(re.findall(r"380\d{2}", line))
+                assert used == {fact}, f"{name}: {line!r} 端口 {used} != 事实源 {fact}"
+
+
+def test_readme_worker_port_table_matches_fact_source():
+    """README #3969 拓扑表的 four-process worker 上游口径必须与事实源一致（#3764）。
+
+    第 6 轮复审发现该表仍写 38082（event 端口），sre 照表核对会核错端口；本用例
+    锁死 README 口径：four-process 行与 ss 核查行都必须是 worker 事实源端口 38083。
+    """
+    worker_port = str(dp.UPSTREAM_ROLE_PORT["worker"])
+    text = (ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+    table = text[text.index("### 拓扑与 worker 端口对应关系"):]
+    four_proc_row = next(line for line in table.splitlines()
+                         if "nginx-grape-four-process.conf" in line and "|" in line)
+    assert worker_port in four_proc_row, four_proc_row
+    assert "38082" not in four_proc_row, four_proc_row
+    ss_line = next(line for line in table.splitlines() if "ss -ltnp" in line)
+    assert worker_port in ss_line, ss_line

@@ -8,6 +8,10 @@
     nginx -T > /tmp/nginx-T.txt && python3 scripts/verify_nginx_upstream.py --nginx-dump /tmp/nginx-T.txt
 
 退出码：0 = 通过（或未探测到配置而 skip）；1 = 上游错配/无法解析；2 = 参数/读取错误。
+
+断言边界：只解析配置文件内的字面 upstream ``server`` 行；``include`` 注入的
+peers 文件（如 ``/etc/nginx/conf.d/grape-worker-peers.conf*``）为人工维护，
+不在断言覆盖内——可用 ``nginx -T`` 转储（会展开 include）人工复核其中端点。
 """
 from __future__ import annotations
 

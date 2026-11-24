@@ -595,6 +595,11 @@ def run(db_path: str, role: str, contracts_dir: str | None = None, *,
         nginx_text: str | None = None,
         ports: dict[str, int] | None = None, nginx_source: str = "",
         nginx_sources: list[NginxSource] | None = None) -> list[Check]:
+    """运行全部预检；nginx 入口优先级：nginx_sources > (nginx_text, nginx_source)。
+
+    main() 恒传 nginx_sources（多文件逐条断言），nginx_text/nginx_source 仅保留
+    兼容旧的单段文本调用（tests / 外部脚本直接喂字符串时使用）。
+    """
     checks: list[Check] = [
         check_role(role),
         check_contracts_registry(contracts_dir or str(REPO / "contracts")),
@@ -648,15 +653,10 @@ def main() -> int:
     except OSError as exc:
         print(f"preflight: 读取 nginx 配置失败: {exc}", file=sys.stderr)
         return 2
-    nginx_text = None
     nginx_source = ", ".join(s.label for s in nginx_sources)
-    if nginx_sources:
-        gateways = [s for s in nginx_sources if s.gateway]
-        if gateways:
-            nginx_text = "\n".join(s.text for s in gateways)
     db_path = args.db_path or str(REPO / "data" / "sessions.db")
-    checks = run(db_path, args.role, args.contracts_dir, nginx_text=nginx_text,
-                 ports=ports, nginx_source=nginx_source, nginx_sources=nginx_sources)
+    checks = run(db_path, args.role, args.contracts_dir,
+                 ports=ports, nginx_sources=nginx_sources)
     failed = [c for c in checks if not c.ok]
 
     if args.json:
