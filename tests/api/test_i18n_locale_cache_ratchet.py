@@ -79,6 +79,19 @@ def test_locale_fingerprint_matches_recorded():
     )
 
 
+def test_pages_keep_i18n_early_start_logic():
+    """D1 防回归（QA Informational 2）：三页必须保留 i18n 早启隐藏赋值点。
+
+    base 合并时曾把整段早启 IIFE 丢成裸 cacheVer 赋值（QA 架构守护 D1 BLOCKED），
+    本断言确保 lang 探测 + i18n-loading 类注入不再被合并悄悄丢掉。
+    """
+    for page in ("index.html", "register.html", "forgot.html"):
+        html = (SHELL / page).read_text(encoding="utf-8")
+        assert "classList.add('i18n-loading')" in html, (
+            f"{page} 丢失 i18n 早启隐藏逻辑（i18n-loading 注入点），"
+            "请还原 lang 探测 IIFE——只留 cacheVer 赋值会让非 zh 用户首帧闪原文")
+
+
 def test_page_cache_ver_is_current_and_monotonic():
     """四页 cacheVer 必须等于登记值，且不低于基线分支的历史下界。"""
     bad = []

@@ -14,10 +14,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import socket
+import time
+import urllib.error
 import urllib.request
 
 DEFAULT_MODEL = "deepseek-v4.1-flash-1017"
+
+# AI 填写默认调用参数（Issue #3976 QA B2 登记：五源依据不足，暂按登记值运行，
+# 后续按线上时延 / 输出完整性实测调整。此处为单一来源，调用方不得再各自硬编码。
+# 与 autopilot 润色的 1000/0.3/30 是两套独立口径，互不混用。）
+AI_FILL_MAX_TOKENS = 1200
+AI_FILL_TEMPERATURE = 0.2
+AI_FILL_TIMEOUT_SECONDS = 60
+
+_log = logging.getLogger("grape.llm")
 
 
 class LLMConfigError(RuntimeError):
@@ -81,11 +94,15 @@ def resolve_llm_endpoint(hermes_cfg: dict, *, force_model: str = "") -> tuple[st
     return base_url, model_name, api_key
 
 
-def chat_completion(prompt: str, *, max_tokens: int = 1200, temperature: float = 0.2,
-                    timeout: int = 60, force_model: str = "") -> str:
+def chat_completion(prompt: str, *, max_tokens: int = AI_FILL_MAX_TOKENS,
+                    temperature: float = AI_FILL_TEMPERATURE,
+                    timeout: int = AI_FILL_TIMEOUT_SECONDS,
+                    force_model: str = "", caller: str = "") -> str:
     """调用 OpenAI 兼容的 chat/completions，返回文本内容（已 strip）。
 
     配置类失败抛 LLMConfigError；上游调用失败抛 LLMRequestError。
+    `caller`：调用方标识（如 "skills.ai_fill"），仅用于接口日志归因，
+    不参与请求。日志不含 api_key 与 prompt/正文内容（QA C2）。
     """
     hermes_cfg = load_hermes_config()
     base_url, model_name, api_key = resolve_llm_endpoint(hermes_cfg, force_model=force_model)
@@ -100,15 +117,41 @@ def chat_completion(prompt: str, *, max_tokens: int = 1200, temperature: float =
     req = urllib.request.Request(f"{base_url}/chat/completions", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {api_key}")
+    _t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
             data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+    except urllib.error.HTTPError as e:
+        _log.warning(f"llm call failed caller={caller or '-'} model={model_name} "
+                     f"duration_ms={int((time.monotonic() - _t0) * 1000)} "
+                     f"class=http_status status={e.code}")
+        raise LLMRequestError(f"HTTP {e.code}: {e.reason}") from e
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", e)
+        is_timeout = isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(reason).lower()
+        _log.warning(f"llm call failed caller={caller or '-'} model={model_name} "
+                     f"duration_ms={int((time.monotonic() - _t0) * 1000)} "
+                     f"class={'timeout' if is_timeout else 'network'} detail={type(reason).__name__}")
         raise LLMRequestError(str(e)) from e
-    return ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
+    except LLMRequestError:
+        raise
+    except Exception as e:  # 响应非 JSON 等解析类失败
+        _log.warning(f"llm call failed caller={caller or '-'} model={model_name} "
+                     f"duration_ms={int((time.monotonic() - _t0) * 1000)} "
+                     f"class=parse detail={type(e).__name__}")
+        raise LLMRequestError(str(e)) from e
+    out = ((data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
+    _log.info(f"llm call caller={caller or '-'} model={model_name} "
+              f"duration_ms={int((time.monotonic() - _t0) * 1000)} "
+              f"status={status} out_chars={len(out)}")
+    return out
 
 
 __all__ = [
+    "AI_FILL_MAX_TOKENS",
+    "AI_FILL_TEMPERATURE",
+    "AI_FILL_TIMEOUT_SECONDS",
     "DEFAULT_MODEL",
     "LLMConfigError",
     "LLMRequestError",

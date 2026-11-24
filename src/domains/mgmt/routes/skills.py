@@ -155,6 +155,9 @@ _COMMENT_PAGE_MAX = 50
 # 加 5px 余量；单项文本 400 字对齐 _clean_summary 的概述截断口径（QA B2：数值须具名）。
 _INTRO_KEY_MAX = 32
 _INTRO_TEXT_MAX = 400
+# AI 填写截断口径（Issue #3976 QA B2 登记：五源依据不足，暂按登记值运行，后续实测调整）：
+_AI_FILL_CONTENT_MAX_CHARS = 20000   # 送入 prompt 的 SKILL.md 正文截断上限
+_AI_FILL_DESCRIPTION_MAX = 2000      # description 字段硬截断（对齐既有展示/落库口径）
 # 列宽切片上限（与 schema_ddl 的列定义逐字一致，防双后端 silent truncation 漂移）：
 _VERSION_MAX = 64            # grape_t_skill_version.version VARCHAR(64)
 _UPLOADER_MAX = 64           # grape_t_skill_version.uploaded_by VARCHAR(64)
@@ -2156,7 +2159,7 @@ def _normalize_ai_meta(raw_text: str) -> dict:
     if not data:
         return {}
     summary = _clean_summary(str(data.get("summary") or ""), limit=_SUMMARY_MAX)
-    description = str(data.get("description") or "").strip()[:2000]
+    description = str(data.get("description") or "").strip()[:_AI_FILL_DESCRIPTION_MAX]
     intro_in = data.get("intro") if isinstance(data.get("intro"), dict) else {}
     intro: dict[str, str] = {}
     for key in _AI_INTRO_KEYS:
@@ -2175,13 +2178,17 @@ def _normalize_ai_meta(raw_text: str) -> dict:
     }
 
 
-def _platform_llm_chat(prompt: str, max_tokens: int = 1200) -> str:
-    """调用平台既有 LLM（公共封装 `src/kernel/llm.py`），返回文本内容。"""
+def _platform_llm_chat(prompt: str, *, max_tokens: int) -> str:
+    """调用平台既有 LLM（公共封装 `src/kernel/llm.py`），返回文本内容。
+
+    max_tokens 无默认值：数值单一来源在 kernel 侧 AI_FILL_*（QA B2，消除双处维护）。
+    """
     from src.kernel.config import log as _log
-    from src.kernel.llm import LLMConfigError, LLMRequestError, chat_completion
+    from src.kernel.llm import (AI_FILL_MAX_TOKENS, LLMConfigError,
+                                LLMRequestError, chat_completion)
 
     try:
-        return chat_completion(prompt, max_tokens=max_tokens)
+        return chat_completion(prompt, max_tokens=max_tokens, caller="skills.ai_fill")
     except LLMConfigError as e:  # 配置缺失/不完整 → 503
         raise HTTPException(status_code=503, detail={"code": 503, "message": str(e)})
     except LLMRequestError as e:  # 网络/上游失败 → 502 由前端提示
@@ -2363,25 +2370,28 @@ def save_skill_content(skill_id: int, body: SkillContentRequest,
              description="Issue #3976: reads the skill's SKILL.md and asks the platform LLM to suggest summary/description/five intro slots/tags. Returns suggestions only (nothing persisted). official skills are read-only.")
 async def ai_fill_skill_meta(skill_id: int, user: dict = Depends(require_no_session_token)):
     """AI 填写：读 SKILL.md → 平台 LLM → 返回结构化建议（不落库）。"""
-    row = _rt_skills.read_one_any("skill_meta_row", (int(skill_id),))
+    import asyncio
+    from src.kernel.llm import AI_FILL_MAX_TOKENS
+    # QA A4：async handler 内不做同步 DB / OBS 读——全部卸载到线程，避免阻塞事件循环。
+    row = await asyncio.to_thread(_rt_skills.read_one_any, "skill_meta_row", (int(skill_id),))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
     skill_name, _scope, _owner_id, _user_id = _require_skill_write_access(row, user)
-    _object_key, content, _storage = _load_skill_md_for_action(int(skill_id), skill_name)
+    _object_key, content, _storage = await asyncio.to_thread(
+        _load_skill_md_for_action, int(skill_id), skill_name)
     if not content.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "SKILL.md 为空，无法 AI 填写"})
 
     prompt = (
         "你是技能元信息助手。请阅读下面的 SKILL.md，只输出一个 JSON 对象，不要代码块、不要解释。\n"
         "字段要求：\n"
-        "- summary: 不超过50字的中文摘要（单句，不要出现「→」或「->」）\n"
+        f"- summary: 不超过{_SUMMARY_MAX}字的中文摘要（单句，不要出现「→」或「->」）\n"
         "- description: 120-300字的中文描述\n"
-        "- intro: 对象，键为 scope/steps/products/constraints/review，每项不超过400字，无信息用空字符串\n"
-        "- tags: 3-5个中文标签数组，每个不超过12字，不要使用 vod/issue/coding/qa/sre/chat/auto 或分类名\n"
-        "SKILL.md 内容：\n" + content[:20000]
+        f"- intro: 对象，键为 scope/steps/products/constraints/review，每项不超过{_INTRO_TEXT_MAX}字，无信息用空字符串\n"
+        f"- tags: 3-{SKILL_MAX_TAGS}个中文标签数组，每个不超过{MAX_TAG_LEN}字，不要使用 vod/issue/coding/qa/sre/chat/auto 或分类名\n"
+        f"SKILL.md 内容：\n{content[:_AI_FILL_CONTENT_MAX_CHARS]}"
     )
-    import asyncio
-    raw = await asyncio.to_thread(_platform_llm_chat, prompt)
+    raw = await asyncio.to_thread(_platform_llm_chat, prompt, max_tokens=AI_FILL_MAX_TOKENS)
     meta = _normalize_ai_meta(raw)
     if not meta:
         raise HTTPException(status_code=502, detail={
