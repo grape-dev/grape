@@ -19402,7 +19402,7 @@
           "issues"
         ],
         "summary": "Issue pipeline roadmap",
-        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).",
+        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials). Issue #3891: shares the main resource's resolution chain — an issue that exists on the VCS side but is not registered internally (issue_id=null) returns 200 with an empty pipeline plus `diagnostics{exists:true, has_pipeline_data:false, reason:\"issue_unregistered\", source:\"vcs\"}`; only a confirmed-missing issue returns 404, where `detail.error_code`/`detail.reason` (`issue_not_found` vs `internal_sync_missing`) distinguishes 'does not exist' from 'exists but unverifiable/no pipeline data'.",
         "operationId": "issues_pipeline",
         "parameters": [
           {
@@ -35986,6 +35986,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "188e88d2f",
-  "x-generated-at": "2026-11-24T02:00:06.444154+00:00"
+  "x-source-commit": "5d297ed28",
+  "x-generated-at": "2026-11-24T04:55:43.472002+00:00"
 }
