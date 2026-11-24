@@ -357,8 +357,14 @@ function savePat() {
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
   G.API.put('/settings/credentials', body, 15000)
-    .then(function () {
+    .then(function (r) {
       busy.value = false
+      // Issue #4301：绑定期 workflow 权限预检结果经 scope_warnings 返回，逐条提示。
+      if (r && r.scope_warnings && r.scope_warnings.length) {
+        r.scope_warnings.forEach(function (w) {
+          if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+        })
+      }
       return refreshRelations()
     })
     .then(function () {

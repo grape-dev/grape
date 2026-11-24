@@ -61,7 +61,9 @@ const icon = computed(function () {
 })
 // 官方实测过的预选参数链接优先（与 BindDialog 同源），其余取平台卡 pat_create_url
 const PAT_CREATE_URLS = {
-  github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+  // Issue #4301：经典 PAT 必勾 repo / admin:repo_hook / workflow（缺 workflow 会被拒绝推送 .github/workflows）
+  github:
+    'https://github.com/settings/tokens/new?scopes=repo%2Cadmin%3Arepo_hook%2Cworkflow&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
 }
 const effectivePatUrl = computed(function () {
@@ -117,8 +119,15 @@ function save() {
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
   G.API.put('/settings/credentials', body, 15000)
-    .then(function () {
+    .then(function (r) {
       busy.value = false
+      // Issue #4301：后端绑定期做 workflow 权限预检，缺权限/细粒度未知时回传
+      // scope_warnings；这里逐条提示，避免用户直到 push 被拒才发现。
+      if (r && r.scope_warnings && r.scope_warnings.length) {
+        r.scope_warnings.forEach(function (w) {
+          if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+        })
+      }
       emit('saved', props.provider)
     })
     .catch(function (e) {

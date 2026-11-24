@@ -338,6 +338,15 @@ _PLACEHOLDER_VALUES = {
     "AK-demo-access-key-xxxx", "SK-demo-secret-key-xxxx", "ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx",
 }
 
+# Issue #4301：PAT 绑定期 workflow 权限提示（不阻断保存，仅前端可见告警）。
+_WF_MISSING_WARNING = (
+    "GitHub Token 缺少 workflow 权限：涉及 .github/workflows 的自动化任务将被推送拒绝，"
+    "请重新生成令牌并在 PAT 中勾选 workflow 后重新绑定。")
+_WF_FINEGRAINED_WARNING = (
+    "GitHub Token 未返回 scope 响应头（通常为细粒度 PAT），无法自动校验 workflow 权限；"
+    "请确认 Contents / Pull requests / Issues / Workflows 均为 Read and write，"
+    "否则涉及 .github/workflows 的推送会被拒绝。")
+
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
     if not v:
@@ -352,6 +361,9 @@ def _is_placeholder(value: str) -> bool:
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     # D32: 写入 user_credentials 表，不写 user_accounts
     explicit = body.model_dump(exclude_unset=True)
+
+    # Issue #4301：绑定期 workflow 权限预检告警（统一在末尾并入 scope_warnings）。
+    _wf_warnings: list[str] = []
 
     # Issue #4254（第二阶段，负责人拍板 2026-11-24）：凭据配置只对内测白名单用户开放。
     # 判据与 /api/auth/beta-eligibility 同源（login_whitelist 命中即放行，无绑定 =
@@ -404,8 +416,17 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     # 身份行（external_identities）只由 OAuth 首登或设置页 OAuth
                     # 绑定产生，因此这里不再有 409 / 转移票据分支。
                     from src.domains.mgmt.user.db import set_credential as _sc
+                    # Issue #4301：经典 PAT 的 scope 响应头随 /user 请求一并拿到，直接解析
+                    # workflow 能力并落 workflows_write（细粒度 PAT 无该头 = 未知不落键）。
+                    _gh_cfg = {"token": _gh_tok, "login": gh_login}
+                    _gh_scopes = _resp.headers.get("X-OAuth-Scopes")
+                    if _gh_scopes is not None:
+                        _gh_wf = "workflow" in {x.strip() for x in _gh_scopes.split(",") if x.strip()}
+                        _gh_cfg["workflows_write"] = _gh_wf
+                        if not _gh_wf:
+                            _wf_warnings.append(_WF_MISSING_WARNING)
                     # 写失败必须 loud：静默 False 会留下「前端看到成功、凭据没落库」
-                    if not _sc(user["id"], "github", {"token": _gh_tok, "login": gh_login}, kind="pat"):
+                    if not _sc(user["id"], "github", _gh_cfg, kind="pat"):
                         raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
                     # Issue #372 §12.8: 同步写入 unified_user_mapping.github_login
@@ -560,6 +581,10 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
                 _ext_id = _info_id
                 _ext_login = _info_login
+                from src.domains.mgmt.user.repo_manager import (
+                    probe_workflows_write,
+                    workflows_probe_supported,
+                )
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
                 # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
@@ -576,6 +601,19 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     _pat_cfg["expires_at"] = str(_exp_meta["expires_at"])
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
+                    if (not _wf_write) and workflows_probe_supported(_p):
+                        _wf_warnings.append(_WF_MISSING_WARNING)
+                else:
+                    # Issue #4301：绑定期预检 X-OAuth-Scopes，把 workflow 能力落到
+                    # workflows_write（经典 PAT 三态；细粒度 PAT 无响应头 = 未知不落键）。
+                    if workflows_probe_supported(_p):
+                        _wf_probe = probe_workflows_write(_p, _tok)
+                        if _wf_probe is not None:
+                            _pat_cfg["workflows_write"] = _wf_probe
+                        if _wf_probe is False:
+                            _wf_warnings.append(_WF_MISSING_WARNING)
+                        elif _wf_probe is None:
+                            _wf_warnings.append(_WF_FINEGRAINED_WARNING)
                 # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
                 # 也照样打 "PAT bound" 成功日志。PAT 不碰身份行后无需补偿身份。
                 if not set_credential(user["id"], _p, _pat_cfg, kind="pat"):
@@ -671,6 +709,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 触发依赖），不同步则"清 PAT 后空项目页而非引导页"
     from src.domains.mgmt.auth.grape_account_db import get_user_identities
     remaining = [i["provider"] for i in get_user_identities(user["id"])]
+    _scope_warnings.extend(_wf_warnings)
     if _scope_warnings:
         return {"message": "凭据已更新", "scope_warnings": _scope_warnings,
                 "bindings": remaining}

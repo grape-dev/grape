@@ -1334,6 +1334,71 @@ def _github_token_scopes(api_token: str) -> str | None:
         return None
 
 
+def _scopes_has(scopes: "str | None", name: str) -> "bool | None":
+    """scope 响应头是否包含指定权限；无响应头返回 None（未知）。
+
+    经典 PAT 的 x-oauth-scopes 是逗号分隔列表（如 ``repo, workflow``）。响应头存在
+    但为空串表示「确认无任何 scope」，返回 False 而非 None。
+    """
+    if scopes is None:
+        return None
+    parts = {s.strip() for s in str(scopes).split(",") if s.strip()}
+    return name in parts
+
+
+def probe_github_workflows_write(api_token: str) -> "bool | None":
+    """Issue #4301：探测 GitHub token 是否具备 workflow 写权限（三态）。
+
+    - 经典 PAT：读 x-oauth-scopes → 含 ``workflow`` = True，不含 = False；
+    - 细粒度 PAT / 读取失败：GitHub 不返回该响应头 → None（未知，不阻断绑定，
+      交由 PAT 权限勾选清单提示）。
+    """
+    if not api_token:
+        return None
+    return _scopes_has(_github_token_scopes(api_token), "workflow")
+
+
+# workflow 写能力探测能力注册表（实现绑定集中一处，调用方零平台分支）。
+_WORKFLOWS_PROBES = {"github": "probe_github_workflows_write"}
+
+
+def workflows_probe_supported(provider: str) -> bool:
+    """该平台是否登记了 workflow 写能力探测（仅 github 目前返回该响应头）。"""
+    return str(provider or "").strip().lower() in _WORKFLOWS_PROBES
+
+
+def probe_workflows_write(provider: str, api_token: str) -> "bool | None":
+    """按 provider 探测 token 的 workflow 写权限；未登记平台 / 探测失败返回 None。"""
+    if not api_token:
+        return None
+    name = _WORKFLOWS_PROBES.get(str(provider or "").strip().lower())
+    fn = globals().get(name) if name else None
+    if fn is None:
+        return None
+    try:
+        return fn(api_token)
+    except Exception:  # noqa: BLE001 - 探测失败按未知态处理，不阻断绑定
+        return None
+
+
+def workflows_capability_blocker(user_id, provider: str,
+                                 task_requires_workflows: bool = False) -> str:
+    """Issue #4301：Agent spec 阶段诊断。
+
+    任务涉及 ``.github/workflows`` 且凭据**明确**无 workflow 写权限（三态 False）
+    时返回阻断级提示；未涉及 / 有权限 / 未知（细粒度 PAT）返回空串（不阻断）。
+    """
+    if not task_requires_workflows:
+        return ""
+    if credential_workflows_write(user_id, provider) is False:
+        return (
+            "当前凭据缺少 workflow 权限：涉及 .github/workflows 的推送会被 GitHub "
+            "拒绝。请重新绑定含 workflow 权限的 GitHub PAT（经典 PAT 勾选 workflow；"
+            "细粒度 PAT 勾选 Workflows: Read and write）后再执行该任务。"
+        )
+    return ""
+
+
 def probe_github_repo_create(api_token: str, owner: str = "", private: bool = True
                              ) -> "tuple[bool | None, str]":
     """无副作用探测 GitHub token 是否有建仓权限。

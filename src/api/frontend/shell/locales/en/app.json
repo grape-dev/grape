@@ -602,7 +602,7 @@
     "go_credentials_btn": "Open credentials",
     "re_authorize": "Re-authorize",
     "authorize": "Authorize",
-    "github_token_help": "1. Go to github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. Generate new token (repo scope)",
+    "github_token_help": "1. Go to github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. Classic PAT: select repo, admin:repo_hook, workflow; Fine-grained PAT: set Contents / Pull requests / Issues / Workflows to Read and write<br>4. Tasks touching GitHub Actions workflows (.github/workflows) require the workflow permission",
     "gitee_token_help": "1. Go to gitee.com → Settings<br>2. Personal Access Tokens → Generate new token<br>3. Select projects scope",
     "gitcode_token_help": "1. Go to gitcode.com → Settings<br>2. Personal Access Tokens → New<br>3. Select project read/write scope",
     "pat_token_help_generic": "1. Go to {{host}} → Settings<br>2. Personal Access Tokens → New token<br>3. Select project read/write scope",
