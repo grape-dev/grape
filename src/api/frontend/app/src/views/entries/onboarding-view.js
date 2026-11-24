@@ -5,7 +5,7 @@
   ;['bridge.css', 'viewcss/onboarding-view.css', 'viewcss/bind-dialog.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=8'
+    link.href = '/static-vue/assets/' + f + '?v=9'
     document.head.appendChild(link)
   })
 })()

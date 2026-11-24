@@ -356,13 +356,18 @@ function savePat() {
   patError.value = ''
   const body = { platform_tokens: {} }
   body.platform_tokens[props.provider] = val
-  G.API.put('/settings/credentials', body, 15000)
+  // Issue #4301（PR#2135 复审 R-2）：后端 verify_token 网络预算 30s（预检已
+  // 复用同一次 /user 响应、无第二次请求），前端预算必须覆盖它——15000 会在
+  // 慢网下误判失败而服务端已落库。
+  G.API.put('/settings/credentials', body, 35000)
     .then(function (r) {
       busy.value = false
       // Issue #4301：绑定期 workflow 权限预检结果经 scope_warnings 返回，逐条提示。
+      // showToast 第二参是副标题而非类型（PR#2135 复审 O-4）：传 '' 不出
+      // 多余副标题，第三参给足阅读时长。
       if (r && r.scope_warnings && r.scope_warnings.length) {
         r.scope_warnings.forEach(function (w) {
-          if (G.app && G.app.showToast) G.app.showToast(w, 'warning')
+          if (G.app && G.app.showToast) G.app.showToast(w, '', 8000)
         })
       }
       return refreshRelations()

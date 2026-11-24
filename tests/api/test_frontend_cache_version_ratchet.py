@@ -19,9 +19,9 @@ APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend"
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     'index.html': {
-        'account-view.js': '68',
+        'account-view.js': '69',
         'agent-view.js': '51',
-        'all-views.css': '81',
+        'all-views.css': '82',
         'api.js': '38',
         'app.css': '11',
         'app.js': '310',
@@ -43,8 +43,8 @@ FROZEN = {
         'my-feedback.js': '50',
         'oauth-buttons.js': '2',
         'observability-view.js': '60',
-        'onboarding-view.js': '11',
-        'organizations.js': '85',
+        'onboarding-view.js': '12',
+        'organizations.js': '86',
         'pipeline.js': '58',
         'platform-icons.js': '2',
         'plugins.js': '57',
@@ -165,7 +165,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ('81', '167a99a50bf67f1e')
+ALL_VIEWS = ('82', '6b46f1f9a94f9131')
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）
