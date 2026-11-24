@@ -15,8 +15,11 @@ NOW = 1_800_000_000.0
 DAY = 86400.0
 
 
-def _make_db(path, sessions, payload: int = 10_000):
+def _make_db(path, sessions, payload: int = 10_000, wal: bool = False):
     conn = sqlite3.connect(str(path))
+    if wal:
+        # 生产 hermes state.db 为 WAL 模式：VACUUM 的新镜像先落 WAL，主文件仍是旧尺寸
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(
         """
         CREATE TABLE sessions (
@@ -337,6 +340,22 @@ class TestSizeAndLock:
         second.__exit__(None, None, None)
         assert m._thread_lock.locked() is False
 
+    def test_backup_dir_permissions_tightened_when_existing(self, tmp_path):
+        import stat as _stat
+
+        backups = tmp_path / "backups"
+        backups.mkdir()
+        os.chmod(backups, 0o755)  # 已存在的宽松目录
+        db = tmp_path / "state.db"
+        _make_db(db, [("s", NOW)])
+        res = m.prune_and_vacuum(
+            str(db), retention_days=7, min_sessions=1, target_bytes=100 * 1024 * 1024,
+            now=NOW, backup_dir=str(backups),
+        )
+        assert res.result == m._RESULT_OK
+        assert _stat.S_IMODE(os.stat(backups).st_mode) == 0o700
+        assert _stat.S_IMODE(os.stat(res.backup_path).st_mode) == 0o600
+
 
 class TestProtectAndForcedRound:
     def test_protect_session_ids_keeps_resume_target(self, tmp_path):
@@ -371,6 +390,60 @@ class TestProtectAndForcedRound:
         assert _sessions(str(db)) == {"closed_recent", "active_old"}, \
             "forced 轮不得删除未结束会话或刚结束的会话"
         assert m._cleanup_counts.get(m._RESULT_FORCED, 0) == 1
+        m.reset_metrics()
+
+
+class TestVacuumCheckpointInWalMode:
+    """VACUUM 在 WAL 模式下把新镜像写进 WAL：不 checkpoint 则测量虚高。
+
+    后果一：``after_bytes``/``freed_bytes`` 失真，指标恒 0；
+    后果二：低水位停轮条件恒不成立，forced 轮必执行并多删已结束但仍在保留窗口内的
+    会话（实测 19 个「已结束 2 天」会话被删）。
+    """
+
+    def test_retention_round_reports_real_disk_size(self, tmp_path):
+        db = tmp_path / "state.db"
+        # 40 个超保留窗口、每个 ~250KB 的会话：单跑 retention 轮就足以压到目标以下
+        sessions = [(f"old{i}", NOW - 30 * DAY, NOW - 30 * DAY) for i in range(40)]
+        sessions += [(f"recent{i}", NOW - 3600 * i, None) for i in range(10)]
+        _make_db(db, sessions, payload=50_000, wal=True)
+        before = m.db_size_bytes(str(db))
+
+        res = m.prune_and_vacuum(
+            str(db), retention_days=7, min_sessions=10, target_bytes=0,
+            now=NOW, backup_dir=str(tmp_path / "backups"), force_min_idle_days=1,
+        )
+
+        assert res.result == m._RESULT_OK
+        assert res.pruned_sessions == 40
+        # freed_bytes 必须反映真实释放量，而不是「旧主库 + WAL 新镜像」的虚高值
+        assert res.freed_bytes > 0
+        assert res.after_bytes < before
+        # 测量口径 = 磁盘真实占用（会话关闭后 SHM 会被清理，故留 64KB 容差）
+        assert abs(res.after_bytes - m.db_size_bytes(str(db))) <= 64 * 1024
+        assert res.after_bytes <= 6 * 1024 * 1024
+
+    def test_round1_hitting_target_skips_forced_round(self, tmp_path):
+        m.reset_metrics()
+        db = tmp_path / "state.db"
+        sessions = [(f"old{i}", NOW - 30 * DAY, NOW - 30 * DAY) for i in range(40)]
+        # 已结束 2 天：在 7 天保留窗口内，仅 forced 轮会删；轮次判定正确时不该被删
+        sessions += [(f"closed2d{i}", NOW - 2 * DAY, NOW - 2 * DAY) for i in range(19)]
+        sessions += [(f"recent{i}", NOW - 3600 * i, None) for i in range(10)]
+        _make_db(db, sessions, payload=50_000, wal=True)
+
+        res = m.prune_and_vacuum(
+            str(db), retention_days=7, min_sessions=10, target_bytes=5 * 1024 * 1024,
+            now=NOW, backup_dir=str(tmp_path / "backups"), force_min_idle_days=1,
+        )
+
+        assert res.result == m._RESULT_OK
+        assert res.pruned_sessions == 40
+        assert res.forced_pruned_sessions == 0, "retention 轮已达标，forced 轮不得再删会话"
+        assert res.freed_bytes > 0
+        kept = _sessions(str(db))
+        assert {f"closed2d{i}" for i in range(19)} <= kept
+        assert m._cleanup_counts.get(m._RESULT_FORCED, 0) == 0
         m.reset_metrics()
 
 

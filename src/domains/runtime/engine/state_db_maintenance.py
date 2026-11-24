@@ -25,7 +25,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 log = logging.getLogger("devops-bot")
@@ -464,12 +464,40 @@ def _batches(items: list[str], size: int):
         yield items[i:i + size]
 
 
+def _checkpoint(conn: sqlite3.Connection, attempts: int = 3) -> bool:
+    """把 WAL 回写主库并截断，返回是否真正完成（busy=0）。
+
+    ``PRAGMA wal_checkpoint(TRUNCATE)`` 在还有其它读连接时返回 busy=1 且不回写，
+    因此重试数次；调用方据此决定是否接受测量结果。
+    """
+    total = max(1, int(attempts))
+    for attempt in range(total):
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except Exception:
+            return False
+        busy = int(row[0] or 0) if row else 0
+        if not busy:
+            return True
+        if attempt < total - 1:
+            time.sleep(0.05)
+    return False
+
+
 def _vacuum(conn: sqlite3.Connection) -> None:
+    try:
+        conn.commit()
+    except Exception:
+        pass
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except Exception:
         pass
     conn.execute("VACUUM")
+    # WAL 模式下 VACUUM 把新镜像写进 WAL，主文件仍是旧尺寸。不在这里 checkpoint，
+    # 则 db_size_bytes()（主文件 + WAL）会「旧主库 + 新镜像」重复计数：after_bytes
+    # 虚高、freed_bytes 恒 0，且低水位停轮条件恒不成立 → forced 轮必然多删会话。
+    _checkpoint(conn)
 
 
 def _prune_old_backups(backup_dir: str, retention_hours: Optional[float] = None) -> None:
@@ -494,6 +522,11 @@ def _prune_old_backups(backup_dir: str, retention_hours: Optional[float] = None)
 
 def _backup_db(db_path: str, backup_dir: str) -> str:
     os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+    # makedirs 不会收紧已存在目录的权限（备份含全量会话内容，可能含凭据/对话全文）。
+    try:
+        os.chmod(backup_dir, 0o700)
+    except OSError:
+        pass
     try:
         free = shutil.disk_usage(backup_dir).free
     except OSError:
@@ -729,9 +762,12 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
                             "idle_days=%s",
                             db_path, len(ids), force_idle_days)
                     _vacuum(conn)
+                    # _vacuum 已在 VACUUM 后 checkpoint(TRUNCATE)，这里的测量是磁盘
+                    # 真实占用（主库 + 残余 WAL），低水位达标即停轮，不会误跑 forced。
                     if db_size_bytes(db_path) <= target:
                         break
                 result.integrity_after = _integrity_check(conn)
+                _checkpoint(conn)
                 result.after_bytes = db_size_bytes(db_path)
                 result.freed_bytes = max(0, result.before_bytes - result.after_bytes)
                 if result.integrity_after != "ok":
@@ -759,7 +795,6 @@ def prune_and_vacuum(db_path: str, retention_days: Optional[float] = None,
 
 
 def archive_and_recreate(db_path: str, backup_dir: Optional[str] = None,
-                         now: Optional[float] = None,
                          lock_timeout: float = 0.0) -> MaintenanceResult:
     """归档 state.db 到带时间戳备份并新建空库（清理后仍超阈值时兜底）。"""
     result = MaintenanceResult(db_path=db_path, archived=True)
@@ -886,7 +921,7 @@ def check_state_db_size(hermes_home: str, threshold_mb: Optional[float] = None,
         return out
 
     if out.after_bytes > max_size:
-        archive = archive_and_recreate(target, backup_dir=backup_dir, now=current)
+        archive = archive_and_recreate(target, backup_dir=backup_dir)
         out.archive = archive
         out.after_bytes = db_size_bytes(target)
         out.skip_resume = True
