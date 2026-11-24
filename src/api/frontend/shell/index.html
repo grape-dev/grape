@@ -8,9 +8,9 @@
 <link rel="icon" type="image/png" sizes="48x48" href="/static/favicon-48.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon-180.png">
 <link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
-<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=10">
+<link rel="stylesheet" href="/static-vue/assets/css/app.css?v=11">
 <!-- view 级样式合并产物：阻塞加载，避免首帧无样式（见 vite closeBundle）-->
-<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=71">
+<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=73">
 <link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
 <link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
 <script>
@@ -22,7 +22,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='87';})();
+window.__I18N_CACHE_VER__='88';
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -125,6 +125,8 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 </div>
 </div>
 <script>
+// i18n.js is loaded with defer in <head> — it auto-inits.
+// Here we only update language switch labels after DOMContentLoaded.
 /* 启动看门狗：30 秒仍未渲染出视图 → 只提示 + 给「重试」按钮，不自动重载。
    原逻辑在 15 秒时自动 location.reload()，服务端偶发卡顿（事件循环被同步 IO
    阻塞）时会把"慢一次"放大成"反复重载"，十来个并发请求再来一轮，雪崩。
@@ -269,33 +271,33 @@ function _toggleAppLang(){
 <script src="/static-vue/vendor/echarts.min.js?v=1" defer></script><!-- 可观测性图表（vendored，不走 CDN） -->
 <script src="/static/js/vendor/faro-web-sdk.iife.js?v=1" defer></script><!-- Faro RUM（vendored，上报走 /api/faro/collect 反代；未配 GRAPE_FARO_UPSTREAM 时整块移除） -->
 <script src="/static/js/vendor/faro-web-tracing.iife.js?v=1" defer></script><!-- Faro 追踪（fetch 注入 traceparent，前后端 trace 关联） -->
-<script src="/static/js/faro.js?v=7" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
-<script src="/static/js/api.js?v=36" defer></script>
+<script src="/static/js/faro.js?v=8" defer></script><!-- Faro 初始化（在 app.js 之前，尽早捕获异常/日志） -->
+<script src="/static/js/api.js?v=37" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
 <script src="/static/js/worker-name.js?v=2" defer></script><!-- worker 显示名统一取值（Issue #701：rc.name 唯一来源 + 空名占位） -->
-<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=89"></script>
-<script type="module" src="/static-vue/viewjs/pipeline.js?v=57"></script>
+<script type="module" src="/static-vue/viewjs/dashboard-view.js?v=92"></script>
+<script type="module" src="/static-vue/viewjs/pipeline.js?v=58"></script>
 <script type="module" src="/static-vue/viewjs/agent-view.js?v=51"></script>
-<script type="module" src="/static-vue/viewjs/event-view.js?v=63"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=63"></script>
-<script type="module" src="/static-vue/viewjs/im-channel.js?v=56"></script>
+<script type="module" src="/static-vue/viewjs/event-view.js?v=65"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=63"></script>
+<script type="module" src="/static-vue/viewjs/im-channel.js?v=57"></script>
 <script type="module" src="/static-vue/viewjs/repos-view.js?v=67"></script>
-<script type="module" src="/static-vue/viewjs/issues-view.js?v=69"></script>
+<script type="module" src="/static-vue/viewjs/issues-view.js?v=72"></script>
 <script type="module" src="/static-vue/viewjs/account-view.js?v=63"></script>
-<script type="module" src="/static-vue/viewjs/scene-market.js?v=61"></script>
-<script type="module" src="/static-vue/viewjs/skills-view.js?v=62"></script>
-<script type="module" src="/static-vue/viewjs/plugins.js?v=56"></script>
+<script type="module" src="/static-vue/viewjs/scene-market.js?v=62"></script>
+<script type="module" src="/static-vue/viewjs/skills-view.js?v=65"></script>
+<script type="module" src="/static-vue/viewjs/plugins.js?v=57"></script>
 <script type="module" src="/static-vue/viewjs/knowledge-view.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=89"></script>
+<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=92"></script>
 <script type="module" src="/static-vue/viewjs/observability-view.js?v=59"></script>
-<script type="module" src="/static-vue/viewjs/organizations.js?v=82"></script>
+<script type="module" src="/static-vue/viewjs/organizations.js?v=83"></script>
 <script type="module" src="/static-vue/viewjs/feedback-dialog.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback-detail.js?v=50"></script>
-<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=68"></script>
-<script type="module" src="/static-vue/viewjs/sandbox-view.js?v=13"></script>
+<script type="module" src="/static-vue/viewjs/autopilot-view.js?v=71"></script>
+<script type="module" src="/static-vue/viewjs/sandbox-view.js?v=15"></script>
 <script src="/static/js/deeplink.js?v=1" defer></script><!-- 深链解析 /app/<owner>/<repo>/#tasks/N -->
 <script src="/static/js/platform-icons.js?v=2" defer></script><!-- 平台图标卡派生（D109 解耦：不写死 gitcode/github） -->
-<script src="/static/js/app.js?v=309" defer></script>
+<script src="/static/js/app.js?v=310" defer></script>
 <script type="module" src="/static-vue/viewjs/login-view.js?v=2"></script>
 <script type="module" src="/static-vue/viewjs/onboarding-view.js?v=9"></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>

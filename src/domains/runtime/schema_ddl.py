@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT '',
-    failed_node TEXT DEFAULT ''
+    failed_node TEXT DEFAULT '',
+    cascade_reason TEXT DEFAULT '',
+    report_missing INTEGER DEFAULT 0,
+    triggered_by TEXT DEFAULT '',
+    cascade_task_status TEXT DEFAULT '',
+    cascade_prev_event_status TEXT DEFAULT ''
 )
 """
 
@@ -536,7 +541,10 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
     agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
     -- Feishu subscription notification: terminal-state notify idempotency guard
-    notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    notified        INTEGER NOT NULL DEFAULT 0,          -- 0=pending 1=notified (prevents double-send from two terminal hooks)
+    -- Issue #3800：失败分类（ENGINE_OFFLINE / BINDING_STALE / 空=普通失败）。调度收口据此
+    -- 决定走退避/熔断通道还是普通重试路径；落列而非解析 error 文案，避免文案改动断链。
+    error_code      TEXT DEFAULT ''
 )
 """
 
@@ -564,6 +572,31 @@ CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (scope_type, scope_id, cred_type)
+)
+"""
+
+_CHANNEL_HEALTH_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_health (
+    installation_id     VARCHAR(191) PRIMARY KEY,
+    channel_type        VARCHAR(32) NOT NULL DEFAULT '',
+    instance_id         VARCHAR(128) NOT NULL DEFAULT '',
+    paused              INTEGER NOT NULL DEFAULT 0,
+    last_pause_at       DOUBLE NOT NULL DEFAULT 0,
+    next_retry_at       DOUBLE NOT NULL DEFAULT 0,
+    pause_count         INTEGER NOT NULL DEFAULT 0,
+    consecutive_pauses  INTEGER NOT NULL DEFAULT 0,
+    last_pause_reason   VARCHAR(200) NOT NULL DEFAULT '',
+    last_resume_at      DOUBLE NOT NULL DEFAULT 0,
+    alert_state         VARCHAR(16) NOT NULL DEFAULT '',
+    alerted_at          DOUBLE NOT NULL DEFAULT 0,
+    alert_reason        VARCHAR(200) NOT NULL DEFAULT '',
+    degraded_count      INTEGER NOT NULL DEFAULT 0,
+    last_degraded_at    DOUBLE NOT NULL DEFAULT 0,
+    last_degraded_to    VARCHAR(32) NOT NULL DEFAULT '',
+    last_degraded_ok    INTEGER NOT NULL DEFAULT 0,
+    last_recover_action VARCHAR(32) NOT NULL DEFAULT '',
+    last_recover_at     DOUBLE NOT NULL DEFAULT 0,
+    updated_at          DOUBLE NOT NULL DEFAULT 0
 )
 """
 

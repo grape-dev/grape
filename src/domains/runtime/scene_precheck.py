@@ -6,8 +6,8 @@
 3) 引擎归属合法（user 档属创建者本人，repo 档属当前仓库）；
 4) 节点技能对创建者可解析（skill_id 有效或 resolve_skill_id 命中）。
 
-另有结构校验（next 悬空 / 节点 id 重复）与三类豁免（非 SRE 空绑定、
-enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
+另有结构校验（next 悬空 / 节点 id 重复）与三类豁免（空绑定=广播模式
+（Issue #3396：SRE 特例已删）、enabled=false、skill 为空）。配置缺失/解析失败回落默认全开（不因缺配置跳过
 校验），查询/探测异常逐一 fail-open，避免误拦正常建单。
 """
 
@@ -314,15 +314,12 @@ def _check_structure(nodes: list, cfg: dict, problems: list) -> None:
                 message=f"节点 {key} 的 next 指向不存在节点：{nxt}",
                 suggestion="修正节点流向或删除悬空引用后再建单")
 
-def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str,
+def _check_engine_binding(tag: str, eids: list[int], scene_id: str,
                           repo_key: str, names: set[str], uids: set[str],
                           cfg: dict, problems: list) -> None:
+    # Issue #3396：删除 SRE「未绑定机器」预检特例——SRE 空绑定 = 广播模式
+    # （与其他角色同口径，池内勾了 sre/all 的引擎可认领），不再是建单阻断项。
     if not eids:
-        if is_sre:
-            _append_problem(
-                problems, cfg, "engine_missing", tag, [],
-                message=f"SRE 节点 {tag} 未绑定机器（SRE 不支持广播）",
-                suggestion="为 SRE 节点选择个人或仓库级机器后重试")
         return
 
     rows_map = _lookup_engine_rows(eids)
@@ -396,9 +393,8 @@ def _resolve_engine_refs(n: dict) -> list[int]:
       「绑定的引擎不存在」，不静默放行）；
     - uids 为空 → 回落 engine_runtime_ids（legacy 轨，行为不变）。
 
-    注意 selector 模式节点两轨均空是**合法**（按标签圈池），调用方对 SRE 的
-    「未绑定机器」判定也因本函数的存在而只会在两轨都空时触发——SRE 走
-    selector 同样非法（SRE 无 label: 维度实践），维持原约束。
+    注意 selector 模式节点两轨均空是**合法**（按标签圈池）；Issue #3396 起
+    SRE 空绑定同款按广播模式放行（禁广播特例已删）。
     """
     _uids = [u for u in (n.get("engine_runtime_uids") or []) if str(u or "").strip()]
     if _uids:
@@ -421,10 +417,9 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
         if n.get("enabled") is False:
             continue
         tag = _node_key(n)
-        is_sre = str(n.get("id") or n.get("tag") or "").strip().lower() == "sre"
         # [uid 优先回落 2026-11-13] 引擎引用 uid 轨优先（#646/#868 口径），空再回落 id 轨
         eids = _resolve_engine_refs(n)
-        _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
+        _check_engine_binding(tag, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
         _check_skill(n, tag, repo_key, cfg, problems, user_id)
 

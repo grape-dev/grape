@@ -1097,11 +1097,7 @@
             v-if="!engModalFiltered.length"
             style="padding: 20px 0; text-align: center; color: var(--t3); font-size: 13px"
           >
-            {{
-              engineModal.agentType === 'sre'
-                ? t('sre_engine_empty_hint')
-                : t('no_engine_broadcast')
-            }}
+            {{ t('no_engine_broadcast') }}
           </div>
           <template v-for="s in SCOPE_ORDER2" :key="'eg' + s">
             <template v-if="engModalByScope[s]">
@@ -1676,7 +1672,7 @@ function missReasonDetail(p) {
 // e.scope='local' 的权威行是 scope:global，按字段筛会漏；场景组按市场注册序，未登记排末尾）
 const SEL_SCOPE_LABELS = { global: t('dv2.sel_scope_global'), user: t('dv2.sel_scope_user'), repo: t('dv2.sel_scope_repo') }
 const selGroups = computed(function () {
-  const vis = engModalVisible.value
+  const vis = engModalAll.value
   const types = []
   vis.forEach(function (e) {
     const ty = engEngineTypeOf(e)
@@ -1771,7 +1767,7 @@ function requestServerPreview() {
     })
 }
 function selectorPreviewData() {
-  const vis = engModalVisible.value
+  const vis = engModalAll.value
   const selTags = engineModal.selTags
   if (selTags.length && engineModal.serverPreview) {
     return vis.map(function (e) {
@@ -1956,7 +1952,6 @@ function t(key, vars) {
     recommend_condition_value: '推荐条件',
     recommend_fallback_required: '兜底场景不能为空',
     recommend_rule_dup: '同一场景不能有多条规则',
-    sre_engine_empty_hint: '暂无可用引擎',
     no_engine_broadcast: '暂无可用引擎，将使用广播模式',
     engines_available: '已注册引擎: {count}',
     engine_personal_scope_hint: '个人级引擎仅创建者可用',
@@ -2178,8 +2173,7 @@ function engineBadgeState(engineIds, agentType) {
   if (!ids.length) return { total: 0, offline: 0 }
   const ae = agentEngines.value || {}
   if (!ae[agentType] || !ae[agentType].length) {
-    // SRE 专属：引擎行不存在（凭据吊销后被清理）= 绑定失效，全部计入 offline
-    if (agentType === 'sre') return { total: ids.length, offline: ids.length }
+    // Issue #3396：SRE 特例已删——引擎行缺失与其它角色同口径（不额外判全离线）
     return { total: ids.length, offline: 0 }
   }
   const availMap = {}
@@ -2254,9 +2248,7 @@ function engineBadgeHtml(node) {
   const ids = uids.length ? uids : node.engine_runtime_ids || []
   const st = engineBadgeState(ids, tag)
   if (!st.total) {
-    if (tag === 'sre') {
-      return `<span class="dbv-engbadge gray">${esc(t('sre_engine_required'))}</span>`
-    }
+    // Issue #3396：SRE 空绑定与其它角色同口径（广播模式），灰色"不支持广播"徽章已删
     return `<span class="dbv-engbadge green">${esc(t('dv2.broadcast_fb'))}</span>`
   }
   if (st.offline > 0) {
@@ -2621,19 +2613,6 @@ function saveCreateScene() {
   if (emptyAgents.length) {
     const names = emptyAgents.map((n) => agentLabel(n.id)).join('、')
     app().showToast(t('skill_empty_warning', { agents: names }))
-    return
-  }
-  // SRE 必选引擎前端拦截
-  const sreNoEngine = editNodes.value.find(
-    (n) =>
-      n.id === 'sre' &&
-      n.enabled &&
-      !(n.engine_runtime_ids || []).length &&
-      !(n.engine_runtime_uids || []).length &&
-      !((n.engine_selector || {}).tags || []).length
-  )
-  if (sreNoEngine) {
-    app().showToast(t('sre_engine_personal_only'))
     return
   }
   const nodesPayload = buildNodesPayload(editNodes.value)
@@ -3098,9 +3077,8 @@ function openEngineModal(agentType) {
   const boundUids = (node && node.engine_runtime_uids) || []
   engineModal.mode = Array.isArray(selTagsRaw) ? 'tag' : 'engine'
   engineModal.selTags = selTags.slice()
-  const all = (agentEngines.value[agentType] || []).slice()
-  // SRE 专属：只显示个人+仓库
-  const visible = agentType === 'sre' ? all.filter((e) => e.scope === 'user' || e.scope === 'repo') : all
+  // Issue #3396：SRE 不再只显示个人/仓库档（空绑定=广播，global 引擎可绑定）
+  const visible = (agentEngines.value[agentType] || []).slice()
   const visibleIds = new Set(visible.map((e) => e.id))
   // 打开即剔除不可见引擎勾选
   engCurIds.value = ((node && node.engine_runtime_ids) || []).filter((id) => visibleIds.has(id))
@@ -3143,15 +3121,9 @@ function openEngineModal(agentType) {
   ensureSceneTags()
 }
 const engModalAll = computed(() => (agentEngines.value[engineModal.agentType] || []).slice())
-const engModalVisible = computed(() => {
-  const all = engModalAll.value
-  return engineModal.agentType === 'sre'
-    ? all.filter((e) => e.scope === 'user' || e.scope === 'repo')
-    : all
-})
 const engModalAvailTypes = computed(() => {
   const types = []
-  engModalVisible.value.forEach(function (e) {
+  engModalAll.value.forEach(function (e) {
     const tn = engFilterTypeOf(e)
     if (tn && !types.includes(tn)) types.push(tn)
   })
@@ -3167,7 +3139,7 @@ function engFilterTypeOf(e) {
   return ty
 }
 const engModalAvailScenes = computed(() => [
-  ...new Set(engModalVisible.value.flatMap((e) => e.scene_tags || [])),
+  ...new Set(engModalAll.value.flatMap((e) => e.scene_tags || [])),
 ].filter(Boolean))
 function toggleEngFilterScene(sn) {
   const i = engineModal.filterScene.indexOf(sn)
@@ -3175,11 +3147,11 @@ function toggleEngFilterScene(sn) {
   else engineModal.filterScene.push(sn)
 }
 const engModalAvailScopes = computed(() => [
-  ...new Set(engModalVisible.value.map((e) => e.scope || 'global')),
+  ...new Set(engModalAll.value.map((e) => e.scope || 'global')),
 ])
 const engModalFiltered = computed(() => {
   const q = engineModal.q.toLowerCase().trim()
-  return engModalVisible.value.filter(function (e) {
+  return engModalAll.value.filter(function (e) {
     if (q) {
       // Issue #1310：搜索引擎名/凭据名/设备名，与列表显示口径一致
       const hay = [
@@ -3245,7 +3217,7 @@ function confirmEnginePick() {
       node.engine_runtime_uids = []
     } else {
       node.engine_selector = {}
-      const visible = engModalVisible.value
+      const visible = engModalAll.value
       const selEngines = visible.filter((e) => engCurIds.value.indexOf(e.id) >= 0)
       const selUids = selEngines.map((e) => String(e.engine_uid || ''))
       if (selEngines.length && selUids.every((u) => u)) {
@@ -3576,19 +3548,6 @@ function saveSceneEdit() {
     app().showToast(t('skill_empty_warning', { agents: names }))
     return
   }
-  const sreNoEngine = editNodes.value.find(function (n) {
-    return (
-      n.id === 'sre' &&
-      n.enabled &&
-      !(n.engine_runtime_ids || []).length &&
-      !(n.engine_runtime_uids || []).length &&
-      !((n.engine_selector || {}).tags || []).length
-    )
-  })
-  if (sreNoEngine) {
-    app().showToast(t('sre_engine_personal_only'))
-    return
-  }
   API()
     .put(
       '/scenes/' +
@@ -3688,7 +3647,6 @@ function doCopyScene() {
     })
     if (eids.length !== (n.engine_runtime_ids || []).length) dropped = true
     n.engine_runtime_ids = eids
-    if (tag === 'sre' && n.enabled !== false && !eids.length) n.enabled = false
   })
   // 名称冲突处理
   const existing = {}

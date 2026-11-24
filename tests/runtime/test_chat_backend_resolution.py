@@ -33,6 +33,10 @@ def _seed_runtimes():
             c.execute(
                 "INSERT OR REPLACE INTO agent_runtimes (id, credential_id, name, installed, healthy, status, scope, owner_id, last_seen_at) VALUES (?,?,?,1,1,?,?,?,datetime('now'))",
                 (rid, cid, "opencode", status, scope, "44" if scope == "user" else ""))
+            # Issue #3396：注册默认自动补 'all'（engine_capabilities 单一事实源，
+            # chat 兜底角色过滤依赖；A8 存量口径）
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+            c.execute("INSERT INTO engine_capabilities (runtime_id, tag, enabled) VALUES (?, 'all', 1)", (rid,))
         # 隔离：清理其他测试残留的 opencode 全局行（非种子 id），避免 get_runtime_id_by_name 选错
         c.execute("DELETE FROM agent_runtimes WHERE lower(name)='opencode' AND scope='global' AND id NOT IN (?,?)",
                   (R_WORKER_GLOBAL, R_LOCAL_DIRECT))
@@ -44,6 +48,7 @@ def _clean():
         c = db.cursor()
         for rid in (R_WORKER_GLOBAL, R_LOCAL_DIRECT, R_USER_WORKER):
             c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
         for cid in (C_WORKER_GLOBAL, C_USER_WORKER):
             c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'sess-cfg-%'")

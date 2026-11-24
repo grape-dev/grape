@@ -37,6 +37,22 @@ def _hermes_model_call_probe(timeout: float = MODEL_CALL_TIMEOUT) -> tuple[bool,
         return True, {"model_call": "skipped: probe error (%s)" % e}
 
 
+def _opencode_model_call_probe(timeout: float = MODEL_CALL_TIMEOUT) -> tuple[bool, dict, str]:
+    """opencode 最小模型调用探针（Issue #3820）。
+
+    opencode 的 `--version` 能证明 CLI 可起，但暴露不了「配置模型名不在该 key 所属
+    网关可用列表」——该类错配此前要等任务真实调用才报 `Not Found: Model not found`。
+    此处补一次 1-token 补全（engine_model.probe_engine_model_call，与启动/注册校验
+    共用同一函数）：404 模型不存在 → (False, detail, 差异文案) → 探针置 unhealthy
+    并在运行时页 probe_error 展示；其余（200/网络不可达/无配置）→ 不误判。
+    """
+    from src.domains.runtime.engine import engine_model
+    try:
+        return engine_model.probe_engine_model_call("opencode", timeout=timeout)
+    except Exception as e:
+        return True, {"model_call": "skipped: probe error (%s)" % e}, ""
+
+
 def _probe_one(eng: dict) -> dict:
     """探测单个引擎：跑 [cli, --version]（非 hermes 可用 probe_args 覆盖），healthy=returncode==0。
 
@@ -52,6 +68,7 @@ def _probe_one(eng: dict) -> dict:
     try:
         _t0 = time.monotonic()
         _probe_detail = {}   # Issue #2545：模型调用探针详情（ACP 分支填充，全路径可见）
+        _probe_error = ""    # Issue #3820：模型配置错误原因（运行时页 probe_error 展示）
         # hermes 固定 --version（健康由 acp_probe 握手判定）；其余引擎保留 probe_args 覆盖
         if (eng.get("name") or "").lower() == "hermes":
             _args = ["--version"]
@@ -74,6 +91,11 @@ def _probe_one(eng: dict) -> dict:
             # 语义保持（ok/failed 随最终 healthy 落库）。
             if healthy:
                 healthy, _probe_detail = _hermes_model_call_probe()
+        # Issue #3820：opencode `--version` 通过后补一次最小模型调用——配置模型名不在
+        # 网关可用列表 → healthy=False + probe_error（运行时页提前暴露，不必等任务 404）
+        if healthy and (eng.get("name") or "").lower().startswith("opencode"):
+            healthy, _oc_detail, _probe_error = _opencode_model_call_probe()
+            _probe_detail.update(_oc_detail)
         # probe_status 必须随结果一起返回：upsert 侧只认这几个字段，
         # 缺了它 agent_runtimes.probe_status 就永远停在 pending，
         # 健康判定把"从未探测"当成"低分/连败"，claim 直接被拒（2026-11-15 实证）。
@@ -82,6 +104,8 @@ def _probe_one(eng: dict) -> dict:
                "probe_latency": latency_ms}
         if _probe_detail:
             out["probe_detail"] = _probe_detail
+        if _probe_error:
+            out["probe_error"] = _probe_error
         out.pop("probe_args", None)
         return out
     except Exception:

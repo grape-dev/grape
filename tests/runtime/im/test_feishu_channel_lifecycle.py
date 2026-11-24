@@ -17,12 +17,17 @@ import json
 import pytest
 from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from src.domains.runtime.im.channel.channel import (
-    CancelContext, ChannelConfig, ChannelError, PermanentChannelError,
+    CancelContext, ChannelConfig, ChannelError, ChannelRegistrationConflict,
+    PermanentChannelError,
 )
 from src.domains.runtime.im.channel.types import Scope, Type
-from src.domains.runtime.im.adapters.feishu.channel import PERMANENT_WS_ERROR_CODES, FeishuChannel
+from src.domains.runtime.im.adapters.feishu.channel import (
+    PERMANENT_WS_ERROR_CODES, FeishuChannel, _ws_close_code, _ws_failure,
+)
 from src.domains.runtime.im.adapters.feishu.outbound import FeishuSender
 
 
@@ -97,6 +102,17 @@ class FakeWS:
         self.closed = True
 
 
+class FailingWS(FakeWS):
+    """接收循环抛指定异常的替身（模拟 websockets 断连 / 管道断开）。"""
+
+    def __init__(self, exc: BaseException):
+        super().__init__([])
+        self._exc = exc
+
+    async def __anext__(self):
+        raise self._exc
+
+
 class FakeConnect:
     def __init__(self, ws: FakeWS):
         self.ws = ws
@@ -107,8 +123,14 @@ class FakeConnect:
         return self.ws
 
 
-def _channel(frames, handler=None, lease_checker=None, seen=None,
-             endpoint=None, **kw):
+def _closed_error(code: int, reason: str = "registered too many connections") -> ConnectionClosedError:
+    """构造 websockets 关闭异常（飞书 3001 现场即为 received+sent 双向关闭帧）。"""
+    frame = Close(code, reason)
+    return ConnectionClosedError(frame, frame, rcvd_then_sent=True)
+
+
+def _channel(frames=(), handler=None, lease_checker=None, seen=None,
+             endpoint=None, ws=None, **kw):
     seen_store = set() if seen is None else seen
     cfg = ChannelConfig(
         type=Type.FEISHU,
@@ -118,7 +140,7 @@ def _channel(frames, handler=None, lease_checker=None, seen=None,
         inbound_handler=handler,
     )
     sender = FeishuSender(reply_text=None, reply_card=None)
-    ws = FakeWS(frames)
+    ws = ws if ws is not None else FakeWS(frames)
     conn = FakeConnect(ws)
     persisted = []
 
@@ -287,6 +309,57 @@ async def _test_cancelled_ctx_returns_cleanly_impl():
     assert conn.calls  # 已建立连接但随即退出
 
 
+async def _test_ws_close_3001_normalized_to_register_conflict_impl():
+    """Issue #3698：接收循环收到飞书 3001（too many connections）→ 归一为
+    ChannelRegistrationConflict（ChannelError 子类），原生 websockets 异常不再穿透 connect()。"""
+    ch, ws, conn, _ = _channel(ws=FailingWS(_closed_error(3001)))
+    with pytest.raises(ChannelRegistrationConflict) as ei:
+        await ch.connect(CancelContext())
+    assert type(ei.value) is ChannelRegistrationConflict   # 精确类型：不降级成通用 ChannelError
+    assert isinstance(ei.value, ChannelError)
+    assert isinstance(ei.value.__cause__, ConnectionClosedError)   # 原始原因保留在 cause 链
+    assert "3001" in str(ei.value)
+
+
+async def _test_ws_close_generic_normalized_to_channel_error_impl():
+    """普通断连关闭码（非并发注册上限）→ 仍是 ChannelError，不误判为注册冲突。"""
+    ch, ws, conn, _ = _channel(ws=FailingWS(_closed_error(1006, "connection closed abnormally")))
+    with pytest.raises(ChannelError) as ei:
+        await ch.connect(CancelContext())
+    assert not isinstance(ei.value, ChannelRegistrationConflict)
+    assert isinstance(ei.value.__cause__, ConnectionClosedError)
+
+
+async def _test_ws_broken_pipe_normalized_to_channel_error_impl():
+    """Issue #3698 现场之一：BrokenPipeError 也不能穿透接收循环（否则被打成全栈 ERROR）。"""
+    ch, ws, conn, _ = _channel(ws=FailingWS(BrokenPipeError(32, "Broken pipe")))
+    with pytest.raises(ChannelError) as ei:
+        await ch.connect(CancelContext())
+    assert not isinstance(ei.value, ChannelRegistrationConflict)
+    assert isinstance(ei.value.__cause__, BrokenPipeError)
+
+
+async def _test_ws_handshake_3001_normalized_impl():
+    """握手阶段就被飞书以 3001 拒登（注册发生在建连时）同样要归一。"""
+    class _RejectingWS:
+        async def __aenter__(self):
+            raise _closed_error(3001)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    ch, ws, conn, _ = _channel(ws=_RejectingWS())
+    with pytest.raises(ChannelRegistrationConflict):
+        await ch.connect(CancelContext())
+
+
+async def _test_cancelled_error_passes_through_impl():
+    """asyncio.CancelledError 必须原样放行（停机/让渡取消不得被包成 ChannelError）。"""
+    ch, ws, conn, _ = _channel(ws=FailingWS(asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        await ch.connect(CancelContext())
+
+
 async def _test_permanent_codes_match_legacy_impl():
     """永久错误码集合与 legacy 常量一致（A5 继承）。"""
     from src.domains.runtime.im.feishu_async import FeishuAsync
@@ -335,5 +408,48 @@ def test_ws_close_raises_for_reconnect():
 def test_cancelled_ctx_returns_cleanly():
     asyncio.run(_test_cancelled_ctx_returns_cleanly_impl())
 
+def test_ws_close_3001_normalized_to_register_conflict():
+    asyncio.run(_test_ws_close_3001_normalized_to_register_conflict_impl())
+
+
+def test_ws_close_generic_normalized_to_channel_error():
+    asyncio.run(_test_ws_close_generic_normalized_to_channel_error_impl())
+
+
+def test_ws_broken_pipe_normalized_to_channel_error():
+    asyncio.run(_test_ws_broken_pipe_normalized_to_channel_error_impl())
+
+
+def test_ws_handshake_3001_normalized():
+    asyncio.run(_test_ws_handshake_3001_normalized_impl())
+
+
+def test_cancelled_error_passes_through():
+    asyncio.run(_test_cancelled_error_passes_through_impl())
+
+
 def test_permanent_codes_match_legacy():
     asyncio.run(_test_permanent_codes_match_legacy_impl())
+
+
+def test_ws_close_code_ignores_non_websockets_code_attribute():
+    """PR #1947 审查返修：`_ws_close_code` 只认 websockets 的关闭对象。
+
+    非 WS 异常自带的同名 `.code`（HTTP 状态码 / 业务错误码）不得被误判为关闭码，
+    因此也不会把普通链路失败错归成并发注册冲突；真实 3001（含 cause 链包装）仍命中。
+    """
+    class HttpLike(Exception):
+        code = 3001
+
+    assert _ws_close_code(HttpLike("boom")) is None
+    assert _ws_close_code(_closed_error(3001)) == 3001
+
+    wrapped = RuntimeError("outer")
+    wrapped.__cause__ = _closed_error(3001)
+    assert _ws_close_code(wrapped) == 3001
+
+    conflict = _ws_failure("cli_test", HttpLike("boom"))
+    assert isinstance(conflict, ChannelError)
+    assert not isinstance(conflict, ChannelRegistrationConflict)
+    assert isinstance(_ws_failure("cli_test", _closed_error(3001)),
+                      ChannelRegistrationConflict)

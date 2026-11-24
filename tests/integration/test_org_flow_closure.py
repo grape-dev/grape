@@ -348,7 +348,8 @@ def test_aggregate_comment_retry_after_vcs_failure(org_e2e, monkeypatch):
     def _flaky_post(self, issue_number, body_text):
         attempts.append((int(issue_number), body_text or ""))
         if len(attempts) == 1:
-            raise RuntimeError("vcs 502")
+            # 真实 VcsApiClient 的网络/上游失败返回 error dict（不抛异常）。
+            return {"error": "vcs 502"}
         return {"ok": True}
 
     monkeypatch.setattr(VcsApiClient, "post_issue_comment", _flaky_post)

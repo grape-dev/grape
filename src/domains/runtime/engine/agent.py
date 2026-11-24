@@ -39,6 +39,8 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE, log_context
 from src.domains.runtime.engine.client import CredentialRevokedError
+# Issue #4082：runtime_id 守卫的结构化错误（id 缺失/非法时不发请求）
+from src.domains.runtime.engine.runtime_id_guard import RuntimeIdMissingError, RUNTIME_ID_MISSING
 from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
@@ -293,6 +295,12 @@ _PROBE_FIRST_WINDOW = float(os.environ.get("RUNTIME_PROBE_FIRST_WINDOW", "60"))
 _FAST_DISCOVER_INTERVAL = float(os.environ.get("RUNTIME_FAST_DISCOVER_INTERVAL", "15"))
 # 定期重注册间隔（防服务端重启后 runtime id 静默失效）
 _REREGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
+
+# Issue #4082（PR #2066 审查 Optional ①）：注册回包部分 id 非法时不把整响应判死——
+# 合法 id 已上线，但**缩短下次重注册**（不等满周期）以尽快补齐错 id 的引擎；
+# 60s 远大于主循环周期又不至于变成注册风暴。
+_PARTIAL_ID_REREGISTER_BACKOFF = float(
+    os.environ.get("RUNTIME_PARTIAL_ID_REREGISTER_BACKOFF", "60"))
 
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
 # 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
@@ -964,6 +972,22 @@ def _probe_aishell_dsh_acp(cli_path: str) -> dict:
             _close_proc_pipes(proc)
 
 
+def _opencode_model_probe_error() -> str:
+    """opencode 探活前置：最小模型调用（Issue #3820）。
+
+    返回非空 = 配置模型名不在网关可用列表（含差异文案）；空 = 通过/不可校验（不误判）。
+    """
+    try:
+        from src.domains.runtime.engine import engine_model
+        ok, detail, error = engine_model.probe_engine_model_call("opencode")
+        if ok:
+            return ""
+        return error or str(detail.get("model_call") or "model config error")
+    except Exception as e:  # noqa: BLE001 - 探活失败不得拖垮其它引擎
+        log.warning(f"opencode model probe failed: {e}")
+        return ""
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -979,6 +1003,12 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     # aishell-dsh 使用 ACP 模式探活（与实际任务执行路径一致：aishell acp，四步全真）
     if engine_name == "aishell-dsh":
         return _probe_aishell_dsh_acp(cli_path)
+    # Issue #3820：opencode 先做最小模型调用（max_tokens=1）——配置模型名不在网关
+    # 可用列表时直接 fail + 差异，运行时页 probe_error 提前暴露，不再等任务 404。
+    if engine_name.startswith("opencode"):
+        _model_err = _opencode_model_probe_error()
+        if _model_err:
+            return {"status": "fail", "latency": 0, "error": _model_err}
 
 
     cmd = _PROBE_COMMANDS.get(engine_name)
@@ -1243,6 +1273,16 @@ def _fast_install_triggered(installed, scan_fn=None) -> list:
     return _new_engines(installed, _scan)
 
 
+def _register_partial_ids(client) -> list:
+    """读取最近一次 register 回包里被逐条过滤掉的非法 id（Issue #4082 / PR #2066 审查 Optional ①）。
+
+    测试 Fake / 旧客户端没有该属性（MagicMock 取到的是别的对象）→ 返回空表，
+    调用方按「整包注册成功」的旧语义处理。
+    """
+    raw = getattr(client, "last_register_invalid_ids", None)
+    return [str(x) for x in raw] if isinstance(raw, (list, tuple, set)) else []
+
+
 async def _reregister_cycle(client, installed, device_name, *, now, last_reregister,
                             last_fast_scan, cli_version: str = "", force: bool = False,
                             fast_interval: float | None = None,
@@ -1263,6 +1303,7 @@ async def _reregister_cycle(client, installed, device_name, *, now, last_reregis
     _rr_iv = _REREGISTER_INTERVAL if reregister_interval is None else reregister_interval
     _state = {"did": False, "triggered_by": "", "ok": True,
               "runtime_ids": None, "engine_by_rid": None, "installed": installed,
+              "partial_invalid_ids": [],
               "last_reregister": last_reregister, "last_fast_scan": last_fast_scan}
 
     _periodic = (now - last_reregister) >= _rr_iv
@@ -1284,13 +1325,113 @@ async def _reregister_cycle(client, installed, device_name, *, now, last_reregis
         runtime_ids, engine_by_rid, _installed = _rr
         _state.update({"runtime_ids": runtime_ids, "engine_by_rid": engine_by_rid,
                        "installed": _installed})
+        # Issue #4082（PR #2066 审查 Optional ①）：回包里部分 id 非法 → 合法 id 已照常
+        # 上线，但把下次重注册提前到 backoff 后（不停等满周期），尽快补齐缺 id 的引擎。
+        _partial = _register_partial_ids(client)
+        _state["partial_invalid_ids"] = _partial
+        if _partial:
+            log.warning(f"register reply carried {len(_partial)} invalid runtime id(s) {_partial}; "
+                        f"kept valid ids {runtime_ids}, re-registering in "
+                        f"{min(_rr_iv, _PARTIAL_ID_REREGISTER_BACKOFF):.0f}s to backfill them")
         _probe = probe_fn or _probe_after_reregister
         _probe(installed, _installed)
     else:
         _state["ok"] = False
     _state["last_reregister"] = now
     _state["last_fast_scan"] = now
+    if _state.get("partial_invalid_ids"):
+        # 部分回填：把「下次周期重注册到期时刻」提前到 backoff 之后（见常量注释）
+        _state["last_reregister"] = now - _rr_iv + min(_rr_iv, _PARTIAL_ID_REREGISTER_BACKOFF)
     return _state
+
+
+def tags_probe_reporter_for(reporters: dict, rid, *, scene: str = "", make=None):
+    """取（或创建）**该 rid 专属**的标签探活连败上报器（Issue #4082 / PR #2066 审查）。
+
+    为什么必须按 rid 隔离：`_run_loop` 一轮里对所有引擎各探一次标签，`ProbeFailureReporter`
+    的连败计数是「连续失败才告警」的唯一依据。共享一个实例时，同一轮里**任一引擎成功**
+    的 `observe("")` 会把其它引擎的连败清零——多引擎主机上「1 个引擎失败 + 1 个引擎成功」
+    交替出现，失败引擎的计数永远回到 0，达不到阈值，`GrapeRuntimeTagsProbeFailing`
+    告警对多引擎主机完全失效。
+
+    `reporters` 由调用方按 rid 持有；`make` 仅用于测试注入（返回已配置好的 reporter）。
+    """
+    rep = reporters.get(rid)
+    if rep is None:
+        if make is not None:
+            rep = make()
+        else:
+            from src.domains.runtime.engine.runtime_id_guard import ProbeFailureReporter
+            rep = ProbeFailureReporter(scene=scene)
+        if getattr(rep, "rid", None) is None:
+            rep.rid = rid       # 信号里带 rid，多引擎主机可定位到具体引擎
+        reporters[rid] = rep
+    return rep
+
+
+def prune_tags_probe_reporters(reporters: dict, live_ids) -> list:
+    """回收已消失 rid 的上报器（重注册换 id 后调用），返回被回收的 rid 列表。
+
+    - 防字典无界增长（云 worker 模板反复刷新 id）；
+    - 旧 rid 的连败计数随实例一起丢弃，不给已下线的引擎补发告警；
+    - **存活 rid 的计数保留**——别的 rid 重注册/成功不得清零它（这正是共享单例的缺陷）。
+    """
+    live = {str(x) for x in (live_ids or [])}
+    dropped = [rid for rid in list(reporters) if str(rid) not in live]
+    for rid in dropped:
+        reporters.pop(rid, None)
+    return dropped
+
+
+def _handle_tags_probe_result(reporter, rid, reason: str, engine_name: str = "") -> bool:
+    """Issue #4082：标签探活结果归因（返回 True 表示需要强制重注册）。
+
+    - 成功 → 清零连续失败计数；
+    - no_tags / unauthorized / not_found → WARNING/ERROR 日志（打掉「静默为空」），
+      连续失败达阈值（默认 3）时按 host/reason 上报主控指标并告警（节流防刷）；
+    - 契约外 reason（`http_403`/`http_422` 等）→ 归 reporter 的 `other` 桶计入连败并告警，
+      这里补一条带原始 reason 的日志；
+    - id_missing → ERROR + 结构化 `RUNTIME_ID_MISSING`，返回 True 让调用方退避重试注册。
+
+    为什么归因而不是简单 `except: tags=[]`：无标签是**稳态**（已注册但未配置），
+    401 是配置/归属问题，两者都需要显式可观测，而不是被吞成空列表后表现为
+    「runtime 在线但永远不派单」。
+
+    ⚠️ `reporter` 必须是**该 rid 专属**实例（见 `tags_probe_reporter_for`）：共享实例会让
+    同轮其它引擎的成功把本引擎的连败清零，多引擎主机上告警就永远不触发。
+    """
+    if not reason:
+        reporter.observe("")
+        return False
+    # 先计数，再决定是否打详细日志：claim 循环每轮每引擎都探一次，逐次打日志同样是
+    # 噪声（原文「401 日志噪声」的另一种形态）。只在首次失败与达到告警阈值时出声。
+    due = reporter.observe(reason)
+    if reporter.consecutive == 1 or due:
+        if reason == "id_missing":
+            log.error(f"{RUNTIME_ID_MISSING} rid={rid} engine={engine_name or '-'}: no valid "
+                      f"runtime id — tag probe/claim skipped (no HTTP), forcing re-register")
+        elif reason == "no_tags":
+            log.warning(f"runtime tags probe: rid={rid} engine={engine_name or '-'} registered "
+                        f"but has no tags (empty role_tags/scene_tags → dispatch has no basis)")
+        elif reason == "unauthorized":
+            log.error(f"runtime tags probe unauthorized: rid={rid} engine={engine_name or '-'} "
+                      f"(401 on probe = config/ownership mismatch, not credential revocation)")
+        elif reason == "not_found":
+            log.warning(f"runtime tags probe not_found: rid={rid} (runtime row deleted or in "
+                        f"re-derive window)")
+        else:
+            # PR #2066 审查 Optional ②：契约外失败不静默——归 other 桶计数，达阈值时带原始
+            # reason 出声（首次失败已由 reporter 的 _log_reason_once 记过，不重复刷）
+            if due:
+                log.warning(f"runtime tags probe rid={rid} engine={engine_name or '-'} kept "
+                            f"failing with non-contract reason={reason} "
+                            f"(counted as '{reporter.last_reason}', "
+                            f"{reporter.consecutive} in a row)")
+    if due:
+        log.error(f"runtime tags probe failed {reporter.consecutive} times in a row "
+                  f"(rid={rid} engine={engine_name or '-'} reason={reason} host={reporter.host}) "
+                  f"— failure signal reported to master")
+    return reason == "id_missing"
 
 
 def _worker_probe_once():
@@ -1721,6 +1862,31 @@ def _env_int(name, default):
         return int(default)
 
 
+def _validate_opencode_registration() -> str:
+    """注册阶段模型校验（Issue #3820）。
+
+    misaligned（配置模型名不在 `/v1/models` 可用列表）→ 返回差异文案并大声告警，
+    调用方据此把 healthy 置 False（= 拒绝健康注册，服务端不再派单）；
+    网关不可达/无配置/已关闭 → 返回空串放行（风险缓解：不误拒）。
+    """
+    try:
+        from src.domains.runtime.engine.registry import validate_registration_model
+        res = validate_registration_model("opencode")
+    except Exception as e:  # noqa: BLE001 - 校验自身故障不得阻断注册
+        log.warning(f"opencode model registration check failed: {e}")
+        return ""
+    status = res.get("status")
+    message = str(res.get("message") or "")
+    if status == "misaligned":
+        log.error(f"[model-check] opencode 拒绝健康注册：{message}")
+        return message or "opencode 配置模型名不在网关可用列表"
+    if status == "unreachable":
+        log.warning(f"[model-check] {message}")
+    elif status == "ok":
+        log.info(f"[model-check] {message}")
+    return ""
+
+
 def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
@@ -1750,6 +1916,11 @@ def _discover_local_runtimes() -> list[dict]:
         # hermes：ACP 握手通过才算真健康（失败只诊断，不自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
+        # Issue #3820：opencode 模型名 vs /v1/models 校验——misaligned → healthy=False
+        # （服务端 engine_select 只挑 healthy，等价拒绝健康注册）并输出差异。
+        if healthy and (r["name"] or "").lower().startswith("opencode"):
+            if _validate_opencode_registration():
+                healthy = False
         # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）
         from src.domains.runtime.engine.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
@@ -2051,6 +2222,8 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
         # 探测路径与 CLI 心跳同款路由前缀（/api/runtime/runtimes/0/tags）：不带凭据返回
         # 401/404 都证明"路由可达"（HTTP 层有响应）；curl 000（超时/拒连/DNS 失败）= 不可达。
         # 实测：正确地址 401，坏地址 :3000 与不存在域名 000。
+        # Issue #4082：服务端对非法 id（0）改为 400 invalid runtime_id——仍是 HTTP 响应，
+        # 语义不变（能拿到状态码即路由可达）；这里的 0 是「永不存在的 id」，不是真实探活对象。
         probe_url = rts.rstrip("/") + "/api/runtime/runtimes/0/tags"
         r = _subprocess.run(
             ["curl", "-sS", "--connect-timeout", "1", "--max-time", "2",
@@ -3841,23 +4014,9 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
-            from src.domains.runtime.engine.instances import instance_name
             # S2：按 name 配对（服务端返回顺序/跳过与本地发现列表可能不一致，
             # zip 位置对齐在个别引擎被跳过时会错位）
-            _name_by_rid = {}
-            for _rt in (_probe_runtimes_detail(client) or []):
-                if isinstance(_rt, dict) and _rt.get("id") is not None:
-                    _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
-            _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in installed}
-            engine_by_rid = {}
-            for rid in ids:
-                _nm = _name_by_rid.get(rid, "")
-                _r = _local_by_name.get(_nm) if _nm else None
-                if _r is None:
-                    # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
-                    _idx = ids.index(rid)
-                    _r = installed[_idx] if _idx < len(installed) else {}
-                engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
+            engine_by_rid = _engine_by_rid_from_register(client, ids, installed, device_name)
             log.info(f"re-registered successfully, new runtime ids: {ids}")
             return ids, engine_by_rid, installed
         if not installed:
@@ -3881,6 +4040,33 @@ def _probe_runtimes_detail(client):
     测试 Fake 可自行提供该属性。
     """
     return getattr(client, "last_register_detail", None)
+
+
+def _engine_by_rid_from_register(client, ids, installed, device_name=""):
+    """按最近一次 register 回包的 name 配对 rid→引擎实例名（S2 / PR #2066 审查 Optional ①）。
+
+    `client.register` 已改为逐条过滤非法 id，返回的 `ids` 可能比 `installed`
+    短；此时 `zip(ids, installed)` 位置对齐会把 rid 配给错位的引擎。这里复用
+    `_reregister` 的配对逻辑（按 name），明细缺失/name 未知时回退位置对齐。
+
+    启动路径与 `_reregister` 共用本函数，避免两处实现漂移（本轮启动路径正是漏改点）。
+    """
+    from src.domains.runtime.engine.instances import instance_name
+    _installed = installed or []
+    _name_by_rid = {}
+    for _rt in (_probe_runtimes_detail(client) or []):
+        if isinstance(_rt, dict) and _rt.get("id") is not None:
+            _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
+    _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in _installed}
+    engine_by_rid = {}
+    for _idx, rid in enumerate(ids):
+        _nm = _name_by_rid.get(rid, "")
+        _r = _local_by_name.get(_nm) if _nm else None
+        if _r is None:
+            # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
+            _r = _installed[_idx] if _idx < len(_installed) else {}
+        engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
+    return engine_by_rid
 
 
 _report_queue_obj = None
@@ -4008,6 +4194,16 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     last_reregister = asyncio.get_running_loop().time()
     last_fast_discover = last_reregister
     engine_by_rid = engine_by_rid or {}
+    # Issue #4082：标签探活连续失败上报器——**每个 rid 一个**（阈值内不出声防刷）。
+    # 无标签是稳态、401 是配置问题、id_missing 是注册态缺失——三者都要显式可观测。
+    # ⚠️ 不能用一个共享实例：同轮任一引擎成功探活会把其它引擎的连败清零，多引擎主机上
+    # 告警永远不触发（PR #2066 审查 Required）。创建/回收见 tags_probe_reporter_for /
+    # prune_tags_probe_reporters。
+    _tags_probe_scene = (os.environ.get("GRAPE_SCENE_ID") or "").strip()
+    _tags_probe_reporters: dict = {}
+
+    def _tags_probe_reporter(rid):
+        return tags_probe_reporter_for(_tags_probe_reporters, rid, scene=_tags_probe_scene)
 
     # 自动升级状态
     pending_upgrade = False
@@ -4052,6 +4248,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 engine_by_rid = _rrc["engine_by_rid"]
             installed = _rrc["installed"]
             heartbeat_fail_streak = 0
+            # 重注册换过 id：回收消失 rid 的探活上报器（存活 rid 的连败计数保留）
+            prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
 
         # 同 worker 多引擎：随机打乱 rid 顺序，避免固定轮询导致排前面的引擎吃满、后面的引擎闲置
         _shuffled_rids = list(runtime_ids)
@@ -4062,16 +4260,34 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             log.warning("cloud worker: runtime_ids is empty — no engine to claim; "
                         "waiting for template refresh to register cloud engines")
         random.shuffle(_shuffled_rids)
+        # Issue #4082：本轮任一次 id_missing → 本轮结束后强制重注册（退避，见下方）
+        _reregister_due = False
         for rid in _shuffled_rids:
             try:
                 # Tags from server DB (single source of truth, managed via console)
                 # claim_by_tag 和 claim 都返回完整 dict {task, scan_request}
                 _claim_resp = None
                 _db_tags = []
+                _probe_reason = ""
                 try:
-                    _db_tags = await client.get_tags(rid)
-                except Exception:
-                    _db_tags = []
+                    # Issue #4082：探活带失败归因（id_missing 不发请求 / no_tags /
+                    # unauthorized / not_found），不再 `except: tags=[]` 吞掉一切。
+                    # 测试 Fake / 旧客户端无 probe_tags 时回落 get_tags（无归因）。
+                    _probe = getattr(client, "probe_tags", None)
+                    if _probe is not None:
+                        _db_tags, _probe_reason = await _probe(rid)
+                    else:
+                        _db_tags = await client.get_tags(rid)
+                except Exception as _pe:
+                    _db_tags, _probe_reason = [], "network"
+                    log.warning(f"runtime tags probe rid={rid} error: {_pe}")
+                if _handle_tags_probe_result(_tags_probe_reporter(rid), rid, _probe_reason,
+                                             engine_by_rid.get(rid, "")):
+                    _reregister_due = True
+                if _probe_reason == "id_missing":
+                    # id 非法时 claim/claim_by_tag 同样会被守卫拦下（零 HTTP），
+                    # 本轮直接换下一个 rid，重注册由本轮末尾统一触发（退避）
+                    continue
                 if _db_tags:
                     for _tag in _db_tags:
                         _resp = await client.claim_by_tag(rid, _tag,
@@ -4092,6 +4308,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     elif _legacy_resp and _legacy_resp.get("scan_request") and not _claim_resp:
                         _claim_resp = _legacy_resp
             except Exception as e:
+                if isinstance(e, RuntimeIdMissingError):
+                    # Issue #4082：claim/claim_by_tag 守卫命中（非法 id 零 HTTP）——
+                    # 归因为 id_missing 并标记本轮结束后强制重注册（退避）
+                    _handle_tags_probe_result(_tags_probe_reporter(rid), rid, "id_missing",
+                                              engine_by_rid.get(rid, ""))
+                    _reregister_due = True
+                    continue
                 log.warning(f"claim rid={rid} failed: {e}")
                 heartbeat_fail_streak += 1
                 continue
@@ -4388,6 +4611,35 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             asyncio.create_task(_wrap())
 
+        # ---- Issue #4082：本轮命中 RUNTIME_ID_MISSING → 强制重注册（退避重试）----
+        # 为什么放在本轮末尾而不是循环里：重注册会改写 runtime_ids（原地更新），
+        # 在遍历 `_shuffled_rids` 中途换列表会让本轮后续 rid 指向已失效的集合；
+        # 一并只做一次注册，避免多个非法 rid 触发多轮注册风暴。
+        if _reregister_due:
+            log.warning("runtime tags probe/claim hit RUNTIME_ID_MISSING this round — "
+                        "forcing re-register to backfill the real runtime id")
+            _imrc = await _reregister_cycle(
+                client, installed, device_name, now=asyncio.get_running_loop().time(),
+                last_reregister=last_reregister, last_fast_scan=last_fast_discover,
+                cli_version=_read_local_worker_version(), force=True)
+            if _imrc["did"] and _imrc["ok"]:
+                _new_ids = _imrc["runtime_ids"]
+                if _new_ids is not None:
+                    runtime_ids[:] = _new_ids
+                if _imrc["engine_by_rid"]:
+                    engine_by_rid = _imrc["engine_by_rid"]
+                installed = _imrc["installed"]
+                last_reregister = _imrc["last_reregister"]
+                last_fast_discover = _imrc["last_fast_scan"]
+                # 取回 id：回收已消失 rid 的上报器（旧连败随实例丢弃；**存活 rid 的计数保留**，
+                # 别的引擎重注册不得清零本引擎的连败——共享单例正是这个缺陷）。
+                prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
+            else:
+                _id_backoff = min(30 * (2 ** max(0, heartbeat_fail_streak)), 300)
+                log.warning(f"re-register for missing runtime id failed, "
+                            f"backing off {_id_backoff:.0f}s")
+                await asyncio.sleep(_id_backoff)
+
         # ---- 凭据吊销信号（_wrap 是独立 task，异常不穿透主循环——用 Event 传递）----
         if _credential_revoked.is_set():
             log.error("credential revoked by server (worker tasks aborted), exiting worker process")
@@ -4451,6 +4703,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     heartbeat_fail_streak = 0
                     last_reregister = _hbrc["last_reregister"]
                     last_fast_discover = _hbrc["last_fast_scan"]
+                    prune_tags_probe_reporters(_tags_probe_reporters, runtime_ids)
                 else:
                     backoff = min(30 * (2 ** (heartbeat_fail_streak - HEARTBEAT_FAIL_THRESHOLD)), 300)
                     log.warning(f"re-register failed, backing off {backoff:.0f}s")
@@ -4869,6 +5122,34 @@ def _check_opencode_api_keys():
 
 
 
+def _check_opencode_model_alignment():
+    """启动早期模型名对齐校验（Issue #3820）。
+
+    配置模型名不在网关 key 的 `/v1/models` 可用列表 → 启动日志即输出「配置模型名 vs
+    可用列表」差异（后续 `_discover_local_runtimes` 会把该引擎以 healthy=False 注册，
+    等价拒绝健康注册）。网关不可达/无配置只告警，不阻断 worker 启动——同机其它引擎
+    与运维离线场景不受影响。
+    """
+    try:
+        from src.domains.runtime.engine.registry import validate_registration_model
+        res = validate_registration_model("opencode")
+    except Exception as e:  # noqa: BLE001 - 启动检查失败不得阻断 worker
+        log.warning(f"[model-check] opencode 模型校验执行失败（跳过）：{e}")
+        return
+    status = res.get("status")
+    message = str(res.get("message") or "")
+    if status == "misaligned":
+        log.error(f"[model-check] 配置模型名不在网关可用列表，opencode 将拒绝健康注册：{message}")
+        log.error("[model-check] 修复：把 ~/.config/opencode/opencode.json 的 model/provider "
+                  "改为可用列表中的模型，或换用覆盖该模型的 key")
+    elif status == "unreachable":
+        log.warning(f"[model-check] {message}")
+    elif status == "ok":
+        log.info(f"[model-check] {message}")
+    else:
+        log.info(f"[model-check] opencode 模型校验跳过：{message}")
+
+
 def _start_cli_version_check(log_sink=None):
     """Issue #2695（#2695 移植）：后台线程核对 grape CLI 版本，返回该线程（不阻塞 worker 启动）。
 
@@ -4930,6 +5211,8 @@ def main():
 
     # 启动早期检测 opencode API key 环境变量缺失（2026-08-28 事故预防）
     _check_opencode_api_keys()
+    # Issue #3820：模型名 vs /v1/models 对齐校验（启动即暴露配置错误）
+    _check_opencode_model_alignment()
     # Issue #2423 M0（#2423 移植）：机器级静态 OV conf 检测（C2 混账号风险可见性；
     # 任务凭据已收敛服务端链路——env 无 OV 凭据 + tk_ 兑换，静态 conf 仅告警提示迁移）。
     try:
@@ -5046,10 +5329,10 @@ def main():
             except Exception as e:
                 log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
         log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")
-        # rid → 引擎实例名（`{type}-{device}`，register 返回顺序与 installed 一致）
-        from src.domains.runtime.engine.instances import instance_name
-        engine_by_rid = {rid: instance_name(r.get("name", ""), device, 0)
-                         for rid, r in zip(ids, installed)}
+        # rid → 引擎实例名（`{type}-{device}`）。PR #2066 审查 Optional ①：register
+        # 逐条过滤后 `ids` 可能比 `installed` 短，不能再用 zip 位置对齐；按回包 name
+        # 配对（与 _reregister 同一实现），明细缺失时回退位置对齐。
+        engine_by_rid = _engine_by_rid_from_register(client, ids, installed, device)
         log.info(f"RuntimeAgent registered: {ids} -> {server}, engines={list(engine_by_rid.values())}, "
                  f"poll={poll}s heartbeat={heartbeat}s max_concurrent={max_concurrent}")
         for rid in ids:

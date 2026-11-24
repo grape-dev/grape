@@ -64,7 +64,7 @@ class RuntimeService(ABC):
         """这批仓库上的在制任务数（queued/dispatched/running 三态之和）。"""
 
     @abstractmethod
-    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+    def get_issue_card(self, repo_key: str, issue_number: "int | str") -> dict:
         """A Issue 卡片状态（issue 单表优先，字段已归一）。
 
         与 get_issue_state 的区别：后者只读 issue_state 过渡表；本方法读**权威** issue 单表，

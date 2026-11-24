@@ -574,6 +574,18 @@ def record_task_failed(task_id: str, source: str, runtime_id: int,
     return _impl(task_id, source, runtime_id, failure_reason)
 
 
+def record_repo_dispatch_lease_wait(repo_key: str, seconds: float) -> None:
+    """Issue #3963：repo-dispatch 租约等待耗时直方图埋点（repo 维度）。"""
+    from src.domains.insight.observability import record_repo_dispatch_lease_wait as _impl
+    return _impl(repo_key, seconds)
+
+
+def record_repo_dispatch_busy(repo_key: str) -> None:
+    """Issue #3963：repo-dispatch 租约等待预算耗尽（busy）计数埋点。"""
+    from src.domains.insight.observability import record_repo_dispatch_busy as _impl
+    return _impl(repo_key)
+
+
 def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens: int,
                      cache_tokens: int = 0) -> None:
     """Prometheus 侧 LLM token 埋点（与用量台账同源）。"""
@@ -623,6 +635,7 @@ def new_run_id(prefix: str) -> str:
 __all__ += ["redact_issue_text", "normalize_tokens", "pipeline_trace_id",
             "record_task_enqueued", "record_task_dispatched", "record_task_terminal",
             "record_task_failed", "record_llm_usage", "record_usage",
+            "record_repo_dispatch_lease_wait", "record_repo_dispatch_busy",
             "task_model_summary", "master_usage_for_task", "master_run", "new_run_id"]
 
 

@@ -325,6 +325,14 @@ git log origin/<branch> --oneline -30
 > `Issue #N` 主语锚点必须与当前任务一致；不一致返回 **409**（`ISSUE_ASSERT_MISMATCH`）
 > 且不产生线上写入。讨论区 chat 会话代发与用户 JWT / API Key 不受影响。该断言无放行参数；确需在其他 Issue 评论区发言时，请在目标 Issue 自己的会话（或用户 JWT / API Key 身份）下发起。
 
+### PATCH/DELETE /api/git-repo/{owner}/{repo}/issues/{number}/comments/{comment_id}
+> scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
+> CLI：`grape git-repo issues comments update --owner {owner} --repo {repo} --number {number} --comment_id {id} --json '{"body":"修正后的内容"}'` / `grape git-repo issues comments delete --owner {owner} --repo {repo} --number {number} --comment_id {id}`（operation_id=`gitrepo_issues_comments_update` / `gitrepo_issues_comments_delete`）。
+
+- **PATCH**：Body `{body}`（必填）→ 透传 `PATCH /issues/comments/{id}` 改写 Issue 评论正文 → 返回更新后的评论对象。
+- **DELETE**：透传 `DELETE /issues/comments/{id}` 删除 Issue 评论（误发评论自纠）。
+- **Issue #3821 契约说明**：`--comment_id` 支持**数字 note_id（推荐，list 响应中的 `id`）**与 **create 响应返回的十六进制 `id`（兼容形态，服务端自动解析为 note_id）**；非法/不可解析 id 返回可读 422（含原因）。十六进制识别规则同 pulls comments：全 hex 字符且含 a-f 字母。
+
 ---
 
 ## 8. Pull Requests
@@ -503,6 +511,8 @@ approval_reviewers_required_passed`；仅当
 | POST/issues/{number}/close | `grape git-repo issues close --owner Jason7602 --repo hello --number 5` |
 | GET/issues comments | `grape git-repo issues comments list --owner Jason7602 --repo hello --number 5` |
 | POST/issues comments | `grape git-repo issues comments create --owner Jason7602 --repo hello --number 5 --json '{"body":"已定位原因"}'` |
+| PATCH/issues comments | `grape git-repo issues comments update --owner Jason7602 --repo hello --number 5 --comment_id 202860901 --json '{"body":"更正后的内容"}'` |
+| DELETE/issues comments | `grape git-repo issues comments delete --owner Jason7602 --repo hello --number 5 --comment_id 202860901` |
 | GET/pulls | `grape git-repo pulls --owner Jason7602 --repo hello` |
 | POST/pulls | `grape git-repo pulls create --owner Jason7602 --repo hello --json '{"title":"feat: #7","head":"feat/7","base":"main","related_issue_nums":[7],"auto_close_issues":true}' --json-out` |
 | GET/pulls/{number} | `grape git-repo pulls get --owner Jason7602 --repo hello --number 7` |

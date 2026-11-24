@@ -226,7 +226,7 @@
   "tag": {
     "all": "All",
     "all_desc": "Can serve all roles",
-    "single_desc": "{{label}} role only"
+    "single_desc": "{{label}} role"
   },
   "refresh": "Refresh",
   "devspace": {

@@ -124,18 +124,27 @@ ROLE_DOMAIN = {
 }
 
 
-def expected_db_name(role: str) -> str:
-    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
-    domain = ROLE_DOMAIN.get((role or "").strip().lower())
-    if not domain:
-        return ""
-    dsn = dsn_of(domain)
+def database_of(domain: str) -> str:
+    """该域 DSN path 里的库名（脱敏：不含账号/口令/主机）；缺 DSN 或解析失败返回空串。
+
+    日志与启动自检用（`route=domain` 时"实际打到哪个库"）。`expected_db_name` 复用本函数，
+    不再各写一份 `parse_dsn` 解析。
+    """
+    dsn = dsn_of((domain or "").lower())
     if not dsn:
         return ""
     try:
         return (parse_dsn(dsn).get("database") or "").strip()
     except Exception:
         return ""
+
+
+def expected_db_name(role: str) -> str:
+    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
+    domain = ROLE_DOMAIN.get((role or "").strip().lower())
+    if not domain:
+        return ""
+    return database_of(domain)
 
 
 def describe_connection() -> dict:
@@ -360,8 +369,8 @@ def _bounded_ping(conn, timeout: float) -> None:
         if sock is not None and prev is not None:
             try:
                 sock.settimeout(prev)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 恢复超时失败不影响探活结论
+                log.debug(f"db_registry: restore socket timeout failed: {e}")
 
 
 def _needs_liveness_check(domain: str) -> bool:
@@ -484,6 +493,17 @@ def route_of(domain: str) -> str:
     if dsn_of(d):                    # 跨域且有 DSN：用该域连接
         return "domain"
     raise DomainUnavailable(d, f"GRAPE_DSN_{d.upper()} missing in a three-database topology")
+
+
+def host_label() -> str:
+    """降级告警用的主机名（PR #2002 R2 Nit：原 service/webhook 各定义一份）。
+
+    取不到留空——纯日志字段，绝不能影响主流程。
+    """
+    try:
+        return os.uname().nodename
+    except Exception:  # noqa: BLE001 - 仅日志字段
+        return ""
 
 
 @contextmanager

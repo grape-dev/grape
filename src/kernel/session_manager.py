@@ -51,7 +51,12 @@ def __getattr__(name: str):
 # 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
 # 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
 _db_path = default_db_path()
-db_lock = threading.RLock()
+# 进程级 DB 互斥锁：改用 TrackedRLock（接口与 threading.RLock 一致），
+# 记录等锁/持锁时长与当前持有者；慢等待/慢持有会打进日志，
+# 「一条重查询拿住锁、后续请求全部排队」这类现场靠这两类信号定位。
+from src.kernel.db_lock_metrics import TrackedRLock  # noqa: E402
+
+db_lock = TrackedRLock()
 
 
 def _is_mysql_backend() -> bool:
@@ -130,6 +135,49 @@ def prune_db_backups(path: str, keep: int | None = None) -> int:
         return 0
 
 
+def _sqlite_journal_mode() -> str:
+    """SQLite journal 模式（Issue #3588 overlayfs 兼容选项）。
+
+    环境变量 DEVOPS_DB_JOURNAL_MODE 可选 wal|truncate|delete|memory 等
+    sqlite 合法值，默认 wal（与历史行为一致，不改默认）。overlayfs 容器
+    若 WAL/SHM copy-up 失效反复触发，可显式改为 truncate/delete 规避。
+    """
+    mode = (os.environ.get("DEVOPS_DB_JOURNAL_MODE") or "").strip().lower()
+    if mode:
+        log.info("SQLite journal_mode override via DEVOPS_DB_JOURNAL_MODE=%s", mode)
+        return mode
+    return "wal"
+
+
+def _build_sqlite_db(path: str):
+    """构建一条完整初始化的 SQLite 主连接（connect + PRAGMA 重放 + schema 包装）。
+
+    接受路径参数：惰性代理在建连时解析 DEVOPS_DB_PATH 后传入。
+
+    db_health 自愈代理在 WAL/SHM 失效（overlayfs 删旧建新替换）后用本工厂
+    重建连接：PRAGMA 与 SchemaSQLiteDB 包装必须随连接重放，否则重建后的
+    连接行为与启动时不一致（Issue #3588）。
+    """
+    conn = sqlite3.connect(path, check_same_thread=False)
+    # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
+    try:
+        conn.execute(f"PRAGMA journal_mode={_sqlite_journal_mode()}")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=FULL")  # FULL: commit 时 fsync WAL 到磁盘
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception as e:
+        log.warning(f"SQLite pragma setup failed: {e}")
+    # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_ 前缀，
+    # 业务代码经 kernel/db.qualify_sql 运行时改写，零改动无感。
+    try:
+        from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
+        if schema_mode_enabled():
+            conn = SchemaSQLiteDB(conn)
+    except Exception as e:
+        log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+    return conn
+
+
 # ── 惰性连接（PEP 562 风格的代理）───────────────────────────────────────────────
 #
 # 历史实现在这里**模块级**建连：`import src.kernel.session_manager` 的瞬间就打开
@@ -189,26 +237,13 @@ class _LazyDB:
                 os.makedirs(parent, exist_ok=True)
             except Exception:
                 pass
-        # timeout 保持 sqlite3 默认 5s（PRAGMA busy_timeout=5000 也是 5s）。
-        # 曾试过 30s，整域跑时每个拿不到锁的用例要多等 25s，累积到十几分钟看着像死锁。
-        real = sqlite3.connect(path, check_same_thread=False)
-        # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
-        try:
-            real.execute("PRAGMA journal_mode=WAL")
-            real.execute("PRAGMA busy_timeout=5000")
-            real.execute("PRAGMA synchronous=FULL")
-            real.execute("PRAGMA foreign_keys=ON")
-        except Exception as e:
-            log.warning(f"SQLite pragma setup failed: {e}")
-        # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_
-        try:
-            from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
-            if schema_mode_enabled():
-                real = SchemaSQLiteDB(real)
-                log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
-        except Exception as e:
-            log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
-        return real
+        # Issue #3588：主连接包自愈代理——WAL/SHM 被 overlayfs 删旧建新替换后，
+        # 持久 fd 指向已删除 inode → disk I/O error 持续 500；代理检测（异常 +
+        # inode 周期校验双条件）后自动重建连接，factory=完整初始化（PRAGMA 与
+        # Schema 包装随连接重放）。446 处调用点均为 `from session_manager import
+        # db` 的对象引用传递，代理一经建立即全局生效。
+        from src.kernel.db_health import wrap_with_health_tracking
+        return wrap_with_health_tracking(lambda: _build_sqlite_db(path), path)
 
     def get(self):
         """返回真实连接（必要时建立）。"""
@@ -895,7 +930,9 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     """
     if not backend and not runtime_id:
         try:
-            _rid = _engines.resolve_local_engine(user_id) or 0
+            # Issue #3396：chat 兜底候选必须过 chat 角色过滤（engine_capabilities
+            # 勾了 chat/all；无合规候选返回 0 = 前端"无 engine，不可用"，明确不静默）
+            _rid = _engines.resolve_local_engine(user_id, agent_type="chat") or 0
             if _rid:
                 backend = _engines.engine_name(_rid) or ""
                 runtime_id = _rid
@@ -912,18 +949,34 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     兜底按名/默认。修复：裸名 'opencode' 被解析成同名的共享全局 worker。
     queue_remote 强制模式下本机直连行（credential_id=0）无 claim 方=黑洞
     （chat-task-blackhole-local-direct-2026-08.md），跳过本机解析直接按名找远端 worker。
+
+    Issue #3396：各级解析结果必须过 chat 角色过滤（engine_capabilities 勾了
+    chat 或 all，空标签 fail-closed），不合规落下一级；全不合规返回 0——
+    调用方给出明确提示，绝不静默调度到越出可选面的引擎。
     """
     if not backend:
         return 0
     _rid = _engines.resolve_instance_id(backend, scope="user")
-    if _rid is not None and _engines.scope_of_runtime(_rid) == "user":
+    if _rid is not None and _engines.scope_of_runtime(_rid) == "user" \
+            and _engines.engine_allows_role(_rid, "chat"):
         return _rid
     if "-" not in backend:
         if _engines.get_execution_mode() != _engines.EXEC_MODE_REMOTE:
             _local = _engines.get_local_direct_runtime_id(backend)
-            if _local:
+            if _local and _engines.engine_allows_role(_local, "chat"):
                 return _local
-    return _engines.get_runtime_id_by_name(backend) or _engines.ensure_default_backend(backend) or 0
+    _by_name = _engines.get_runtime_id_by_name(backend) or 0
+    if _by_name and _engines.engine_allows_role(_by_name, "chat"):
+        return _by_name
+    _default = _engines.ensure_default_backend(backend) or 0
+    if _default and _engines.engine_allows_role(_default, "chat"):
+        return _default
+    if _by_name or _default:
+        # 末级兜底命中但未勾 chat/all → 明确拒绝（A6），留痕不静默
+        log.warning(f"_resolve_chat_runtime_id: backend '{backend}' resolved to engine(s) without "
+                    f"chat capability (by_name={_by_name}, default={_default}), "
+                    f"chat fallback rejected (Issue #3396)")
+    return 0
 
 
 def _chat_config_engine_uid_rt(runtime_id: int) -> str:

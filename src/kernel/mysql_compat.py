@@ -1000,8 +1000,8 @@ class MySQLCompatDB:
             if sock is not None and prev is not None:
                 try:
                     sock.settimeout(prev)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - 恢复超时失败不影响判死结果
+                    log.debug(f"mysql_compat: restore socket timeout failed: {e}")
 
     def _drop_local_conn(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -1010,8 +1010,8 @@ class MySQLCompatDB:
         if conn is not None:
             try:
                 conn.close()  # 池化包装 close() = 归还；死连接由池在借出时剔除
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 丢弃的已是死连接，关闭失败无需上抛
+                log.debug(f"mysql_compat: close dead pooled conn failed: {e}")
 
     def _borrow_pooled_conn(self):
         """从池借一条连接：短轮询 + 超时快速失败（替代 dbutils 的无限阻塞）。

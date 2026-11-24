@@ -106,6 +106,20 @@ def is_cascade_result_text(text: str) -> bool:
     return False
 
 
+def is_compensation_state(*, event_status: str = "", result_text: str = "",
+                          cascade_reason: str = "") -> bool:
+    """事件是否处于「系统补偿」状态（多信号归一判定）。
+
+    供接管 finish 等消费方判断「该事件是否需要改判为已回填真实结论」，避免各处自行
+    复制 ``status == cancelled`` / 补偿文案 / ``REASON_SYNTHESIZED`` 的组合逻辑。
+    """
+    if (event_status or "").strip() == "cancelled":
+        return True
+    if (cascade_reason or "").strip() == REASON_SYNTHESIZED:
+        return True
+    return is_cascade_result_text(result_text)
+
+
 def is_structured_agent_output(text: str) -> bool:
     """文本是否为结构化 Agent 产出（与 routes/tasks.py 的组装口径一致）。"""
     _t = (text or "").strip()

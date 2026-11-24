@@ -71,15 +71,22 @@ BOT_GITCODE_TOKEN USER_ID CONVERSATION_ID
 | 层 | 行为 |
 |----|------|
 | `scenes.py` 保存/读取 | `custom_env_error(name)` 校验；非法名报错，不落库 |
-| `event_pipeline._inject_scene_env` | 注入 agent env 时兜底校验（`is_upper_name` / `is_reserved_name`）；非法项跳过注入 |
+| `routes/autopilot.py` 保存（Issue #4066） | 定时任务 create/update 走 `custom_env_error(name)`；冲突/非法名一次性 400 汇总回显（`invalid_names`），不落库 |
+| `event_pipeline._inject_scene_env` | 注入 agent env 时兜底校验（`is_upper_name` / `is_reserved_name`）；非法项跳过注入；平台已注入的键优先，不被 custom_fields 覆盖 |
+| `scheduler._execute_autopilot_agent` | 定时任务注入同一套校验；一次执行输出**单条** info 汇总（`injected/skipped/names`），不再逐条 WARNING |
 | 技能侧 | 直接 `os.environ.get('MY_API_KEY')` 读取（变量名原样注入） |
+
+> `GRAPE_` 前缀默认保留，但 `src/kernel/scene_custom_env.py::_PLATFORM_MANAGED_ENV` 白名单里的
+> **三精确名**（`GRAPE_ANALYSIS_MODE` / `GRAPE_ORG_ID` / `GRAPE_MANAGED_BY`）允许自定义注入
+> （Issue #4066 收窄保留语义）；其余 `GRAPE_*`（`GRAPE_SESSION_TOKEN` / `GRAPE_API_TOKEN` /
+> `GRAPE_WORK_BRANCH` / `GRAPE_SERVER_URL` / `GRAPE_SCENE_ID` 等）仍不可用。
 
 ---
 
 ## 7. 常见问题
 
 1. **为什么必须全大写**：确保与系统（`GRAPE_*` 及 POSIX 常规）语义边界清晰、跨 shell 无歧义。
-2. **想要 `GRAPE_*` 名字怎么办**：不可；`GRAPE_` 为平台保留命名空间。请用业务名（如 `CLOUD_AK`）。
+2. **想要 `GRAPE_*` 名字怎么办**：默认不可（`GRAPE_` 为平台保留命名空间），仅白名单三精确名例外，请优先用业务名（如 `CLOUD_AK`）。
 3. **口令变量命名**：建议带 `_TOKEN/_KEY/_PASSWORD` 后缀即可自动掩码；或显式 `is_secret=true`。
 4. **只想注入给某 agent**：scope 选该 agent（如 `qa`）；缺省=全部。
 5. **改已有字段语义**：改名/改组以 `normalize_custom_field` 为准（读取容错 `key`→`name`，写入以 `name`）。

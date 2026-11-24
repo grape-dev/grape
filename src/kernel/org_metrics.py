@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 _DISPATCH_TOTAL: Any = None
+_DB_RECONNECTS: Any = None
+_DB_WAL_VALID: Any = None
 _DISPATCH_DURATION: Any = None
 _PROVISION_TOTAL: Any = None
 _PROVISION_DURATION: Any = None
@@ -24,6 +26,7 @@ def install(registry: Any) -> None:
     """把组织下派/供给指标注册到 prometheus_client CollectorRegistry（幂等）。"""
     global _DISPATCH_TOTAL, _DISPATCH_DURATION, _PROVISION_TOTAL
     global _PROVISION_DURATION, _INFLIGHT, _PIPELINE_ITEMS, _PIPELINE_RUNS
+    global _DB_RECONNECTS, _DB_WAL_VALID
     if _DISPATCH_TOTAL is not None:
         return
     from prometheus_client import Counter, Gauge, Histogram
@@ -70,6 +73,22 @@ def install(registry: Any) -> None:
             "grape_pipeline_advance_runs_total",
             "Pipeline advance rounds by outcome.",
             ["result"],
+            registry=registry,
+        )
+    except ValueError:  # pragma: no cover - 同一 registry 重复注册
+        pass
+    try:
+        # Issue #3588：SQLite 自愈连接指标（失效检测/恢复可告警，A13 接入）
+        _DB_RECONNECTS = Counter(
+            "grape_db_reconnects_total",
+            "SQLite self-healing connection rebuilds.",
+            ["db"],
+            registry=registry,
+        )
+        _DB_WAL_VALID = Gauge(
+            "grape_db_wal_valid",
+            "WAL/SHM validity per self-healed connection (1 valid, 0 stale).",
+            ["db"],
             registry=registry,
         )
     except ValueError:  # pragma: no cover - 同一 registry 重复注册
@@ -122,3 +141,17 @@ def observe_pipeline_advance(stats: dict | None = None) -> None:
     else:
         result = "empty"
     _PIPELINE_RUNS.labels(result=result).inc()
+
+
+def observe_db_reconnect(db_label: str) -> None:
+    """记录一次自愈重建（Issue #3588，A13）。"""
+    if _DB_RECONNECTS is None:
+        return
+    _DB_RECONNECTS.labels(db=str(db_label or "unknown")).inc()
+
+
+def set_db_wal_valid(db_label: str, valid: bool) -> None:
+    """刷新 WAL/SHM 有效性（Issue #3588，A13；stale=0，valid=1）。"""
+    if _DB_WAL_VALID is None:
+        return
+    _DB_WAL_VALID.labels(db=str(db_label or "unknown")).set(1 if valid else 0)

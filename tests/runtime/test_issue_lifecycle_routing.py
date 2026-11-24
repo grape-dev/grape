@@ -162,7 +162,8 @@ class TestIssueAssigneeAndStage:
         p = _get_issue_pipeline(RK, "#5", events)
         assert p is not None
         assert p["stage"] == "qa"
-        assert p["current_owner"] == "grape_bot"  # 优先 issue_state.assignee
+        # Issue #3646：assignee=grape_bot 是内部账号，不进展示位 → 回退最近人类操作者 alice
+        assert p["current_owner"] == "alice"
 
     def test_pipeline_stage_default_vod(self):
         """无 issue_state 记录时 stage 默认 vod。"""

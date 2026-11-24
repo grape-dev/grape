@@ -44,6 +44,13 @@ RUN ( npm install -g --prefix /opt/codegraph @colbymchenry/codegraph@${CODEGRAPH
 # 代码
 COPY . .
 
+# 前端构建产物：vite build → src/api/frontend/static-dist（vite base=/static-vue/）
+# 仓库不提交产物（.gitignore 已忽略 static-dist），必须在构建期生成；否则 /static-vue/*
+# 会被 SPA 兜底返回 index.html，表现为页面停在「加载中…」且无任何样式。node 22 已在上方安装。
+RUN cd src/api/frontend/app \
+    && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) \
+    && npm run build
+
 # 官方项目模板：configs/project-templates.json 与 examples/<模板>/ 都不入库，
 # 必须构建期铺入，否则 UI 模板页为空。必须放在 COPY . . 之后：脚本在 scripts/ 下，
 # 且不能被随后的一次 COPY 覆盖。可用 --build-arg TEMPLATES_REF=<tag> 固定模板版本。

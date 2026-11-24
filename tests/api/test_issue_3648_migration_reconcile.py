@@ -272,7 +272,7 @@ def test_list_skills_propagates_schema_error(monkeypatch, caplog):
     monkeypatch.setattr(skills_route._rt_skills, "skill_search", _boom)
     user = {"id": "3648", "username": "t3648", "org_id": "", "auth_type": "jwt"}
     with caplog.at_level("ERROR"), pytest.raises(HTTPException) as exc:
-        skills_route.list_skills(user=user)
+        skills_route.list_skills(user=user, repo="")
     assert exc.value.status_code == 503
     assert any(r.levelname == "ERROR" and "skill_search" in r.getMessage()
                for r in caplog.records), "list_skills 未落 ERROR 日志"
@@ -321,11 +321,12 @@ def test_verify_migration_targets_flags_missing_target_tables(tmp_path):
     conn.commit()
     failures = D.verify_migration_targets(conn=conn, domain="mgmt")
     assert any("表/列缺失" in f for f in failures), failures
+    assert any("organization" in f for f in failures), failures
     failures = D.verify_migration_targets(conn=conn, domain="runtime")
     assert any("skill 表不存在" in f for f in failures), failures
     with pytest.raises(RuntimeError):
         D.verify_migration_targets(conn=conn, domain="runtime", raise_on_fail=True)
-    # 两表都到位且达标 → 通过
+    # 三处目标都到位且达标 → 通过（organization 是 202611230012 的补列目标）
     conn.execute(
         "CREATE TABLE grape_t_category_dict (id INTEGER PRIMARY KEY, level INTEGER, "
         "is_active INTEGER)")
@@ -335,6 +336,10 @@ def test_verify_migration_targets_flags_missing_target_tables(tmp_path):
     conn.execute(
         "CREATE TABLE skill (id INTEGER PRIMARY KEY, cat_l1_id INTEGER DEFAULT 0, "
         "cat_l2_id INTEGER DEFAULT 0)")
+    conn.execute(
+        "CREATE TABLE organization (id TEXT PRIMARY KEY, org_repo_provider TEXT, "
+        "org_repo_owner TEXT, org_repo_name TEXT, org_repo_path TEXT, "
+        "org_repo_private INTEGER DEFAULT 1)")
     conn.commit()
     assert D.verify_migration_targets(conn=conn) == []
     conn.close()

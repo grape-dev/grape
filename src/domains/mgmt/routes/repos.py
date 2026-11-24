@@ -3368,14 +3368,75 @@ _GIT_CREDENTIAL_STAGE_USER = "user_token_lookup"
 _GIT_CREDENTIAL_STAGE_UNEXPECTED = "credential_resolve"
 
 
-def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
-    """平台 token 解析（仅会话级临时 token tk_；用户 API Key / Web JWT 不适用）。
+def _takeover_session_status(task_id: str) -> str | None:
+    """接管会话的最近状态（走 runtime owner 原语，任意拓扑；Issue #3620）。
 
+    与 `src/api/git_repo_api._tk_session_status` 同一事实源：表 `takeover_sessions`
+    归运行域，mgmt 侧不持该表 SQL，只保留「active 才放行」的状态机判定。
+    """
+    from src.domains.runtime import public as _rt_public
+    return _rt_public.takeover_session_status_any(task_id)
+
+
+def _ensure_takeover_repo_scope(user: dict, repo_key: str) -> None:
+    """tko_ 仓级严格校验（Issue #3620）。
+
+    - repo_key 必须存在且与本次请求目标仓严格相等（跨仓 / 未绑定仓库一律 403）；
+    - 接管会话必须仍 active：finish/abort 会吊销 token，这里按 DB 二次校验。
+    口径与 `git_repo_api._repo_token` 的 takeover 分支一致，避免两处端点判定脱节。
+    """
+    from src.kernel.repo_key import to_repo_key
+    # tko_ 签发侧统一带 provider 前缀；此处再做一次幂等归一，避免兼容期无前缀
+    # 存量 token 被误判跨仓（to_repo_key 已带前缀则原值返回）。
+    tk_repo = to_repo_key(str(user.get("repo_key") or ""))
+    if not tk_repo:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "该接管 token 未绑定仓库，不能获取仓库凭据"})
+    if tk_repo != repo_key:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": f"该接管 token 仅限其任务仓库（{tk_repo}），不能操作 {repo_key}",
+        })
+    try:
+        task_id = str(user.get("session_key") or "").replace("takeover:", "")
+        if _takeover_session_status(task_id) != "active":
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "接管会话已结束，仓库操作被拒绝"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "message": f"接管会话校验失败：{e}"})
+
+
+def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
+    """平台 token 解析（repo 域会话凭据 tk_/tko_；用户 API Key / Web JWT 不适用）。
+
+    身份判定由能力位 `repo_session` 驱动（`src/api/auth_caps.CAPABILITIES`）：
+    worker 会话（tk_）与接管会话（tko_）均为 True，API Key / JWT / internal 为 False。
+    Issue #3620：tko_ 额外做 repo_key 仓级严格校验 + 接管会话 active 校验。
     chat agent → 用户 token；devops 事件 agent → 仓库 bot token；一种缺失交叉回退；均缺失 502。
     Issue #1063：分别记录 bot 读取异常 / user 刷新异常 / 两者均空，失败响应带 stage 与错误码。
     """
-    if user.get("auth_type") != "session_token":
+    from src.api.auth_caps import REPO_SESSION, has_capability
+    if not has_capability(user, REPO_SESSION):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
+    from src.kernel.repo_key import to_repo_key
+
+    # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
+    # 禁止再手工拼前缀，否则会得到双前缀导致 managed_repos 精确匹配不到 → 502。
+    from src.domains.mgmt.user.repo_manager import repo_token_getters
+    # QA C2（2026-11-13）：has_user_id 在 base 就只有使用没有 import（既有缺陷），
+    # 本批把 outlet 从 else 分支扩散到 _getters 主路径 → NameError 被 except 吞成
+    # 空 token（用户凭据解析全线失效）。这里显式绑定。
+    from src.kernel.user_ids import has_user_id
+    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
+    if str(user.get("auth_type") or "") == "takeover":
+        # Issue #3620 复审（2026-11-23）：tko_ 仓级严格校验必须先于场景策略判定——
+        # 同是拒绝也由更具体的仓级口径出「仅限其任务仓库」消息，此前被前置场景
+        # 策略遮蔽（交叉仓/换平台返回通用「仓库作用域不匹配/平台不匹配」），2 条
+        # #3620 用例红。语义不变：校验内容与顺序仅在 takeover 分支内前移。
+        _ensure_takeover_repo_scope(user, rk)
     # 作用域判定统一收敛到场景策略（src/kernel/scene_policy.py，2026-11-22）：
     # 场景 = GIT_CREDENTIAL（repo_bound + 同平台；`chat:<uid>`/空作用域直接拒绝并给
     # SESSION_NOT_REPO_BOUND，提示调用方先绑仓）。策略表是唯一真源，调用点只声明场景。
@@ -3389,16 +3450,6 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         raise HTTPException(status_code=403, detail={
             "code": 403, "error_code": _scope.code,
             "message": f"无权使用该仓库的 git 凭据（{_scope.message}）"})
-    from src.kernel.repo_key import to_repo_key
-
-    # Issue #466: owner 段可带 provider 前缀（跨平台关联仓换券）；to_repo_key 幂等，
-    # 禁止再手工拼前缀，否则会得到双前缀导致 managed_repos 精确匹配不到 → 502。
-    from src.domains.mgmt.user.repo_manager import repo_token_getters
-    # QA C2（2026-11-13）：has_user_id 在 base 就只有使用没有 import（既有缺陷），
-    # 本批把 outlet 从 else 分支扩散到 _getters 主路径 → NameError 被 except 吞成
-    # 空 token（用户凭据解析全线失效）。这里显式绑定。
-    from src.kernel.user_ids import has_user_id
-    rk = to_repo_key(f"{owner}/{repo}", provider=provider)
     _start = time.monotonic()
 
     def _fail(stage: str, exc: Exception):
@@ -3595,7 +3646,8 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
 @router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
             summary="One-shot git platform credential (CLI internal, TTL)",
             description="One-shot short-lived platform credential for local git via CLI (in-process, never persisted). "
-                        "gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only.")
+                        "gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. "
+                        "Repo-session-only (tk_ worker / tko_ takeover).")
 def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                             p: str = Depends(_repo_provider)):
     """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。

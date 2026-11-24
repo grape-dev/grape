@@ -885,7 +885,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.domains.runtime.engine.transient_retry import format_stream_failure_result
             _retries = [e for e in _task_errors_json(task_id)
                         if isinstance(e, dict) and e.get("error_code") in
-                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY", "CONFIG_ERROR")]
             if _retries:
                 _ex = next((e for e in _retries
                             if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
@@ -939,7 +939,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             result_text=result_text, errors=_fail_errors_json)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
-                          agent_logs=agent_logs, completed_at=completed_at, result=result_text)
+                          agent_logs=agent_logs, completed_at=completed_at, result=result_text,
+                          task_id=task_id or "")
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
 
     # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（direct 模式）
