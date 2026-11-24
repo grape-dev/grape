@@ -34,6 +34,14 @@ async def lifespan(app: FastAPI):
     # Issue #3969：清理上次停机残留的排空标记，避免重启后 /readyz 永久 not_ready。
     drain_state.clear_drain()
 
+    # Issue #4203：启动自检——打印自身 cgroup 生效内存限额（无限额打 WARNING）。
+    # 004 上 OOM 后只能靠 dmesg 反查受害者归属；生效值进日志，值班一眼可查。
+    try:
+        from src.domains.insight.observability import log_effective_memory_limit
+        log_effective_memory_limit()
+    except Exception as _mem_selfcheck_err:
+        log.warning(f"[memory-limit] selfcheck skipped: {_mem_selfcheck_err}")
+
     # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
     from src.kernel.db_registry import assert_role_database, warn_domain_table_residency

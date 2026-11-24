@@ -782,6 +782,13 @@ async def start_insight_tasks(app, include_table_maintenance: bool = True) -> di
                         _bw_pct, _bw_mbps, _load)
                 except Exception as e:
                     log.warning(f"Server metrics: upload failed: {e}")
+                # Issue #4203：进程内存 gauge 15s 刷新（无 scrape 时也保持采样节奏，
+                # 与 on_metrics_scrape 拉取时采样互补）
+                try:
+                    from src.domains.insight.observability import collect_process_memory
+                    await asyncio.to_thread(collect_process_memory)
+                except Exception as e:
+                    log.debug(f"process memory sample failed: {e}")
                 await asyncio.sleep(15)
         h["server_metrics_task"] = asyncio.create_task(_server_metrics_loop())
         log.info("Server metrics loop started (15s)")

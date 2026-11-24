@@ -123,6 +123,17 @@ from src.kernel.repo_bot_observability import install as _install_repo_bot_obser
 
 _install_repo_bot_observability(registry)
 
+# Issue #4203：进程级内存指标（worker 主进程 + 引擎子进程 RSS + cgroup 限额）。
+# gauge 定义在 process_memory（install 模式，与 kernel metrics 一致），这里注册进
+# 本模块 registry；采样在 on_metrics_scrape 拉取时执行。
+from src.domains.insight.observability.process_memory import (
+    install as _install_process_memory,
+    collect_process_memory,
+    log_effective_memory_limit,
+)
+
+_install_process_memory(registry)
+
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
     "Current number of in-flight HTTP requests served by the API server.",
@@ -951,3 +962,5 @@ def on_metrics_scrape():
     collect_mysql_metrics()
     collect_business_sampler()
     collect_acp_state_db_metrics()
+    # Issue #4203：进程/引擎子进程 RSS 与 cgroup 限额（拉取时采样，无新链路）
+    collect_process_memory()
