@@ -667,8 +667,11 @@ RUNTIME_TAGS_PROBE_FAILURES = Counter(
 # Issue #3772：no_progress 无进展检测扫描失败计数。
 # 扫描入口异常此前仅一条 WARNING 后 return 0（本轮不检测），生产上看不出检测停摆。
 # 由 runtime scheduler 记录，deploy/alerts.yml GrapeNoProgressScanFailing 规则消费。
+# 指标名单一来源（QA R1）：告警表达式漂移由 test_issue_3772_no_progress_scan 断言看护。
+NO_PROGRESS_SCAN_FAILURES_METRIC = "grape_no_progress_scan_failures_total"
+
 NO_PROGRESS_SCAN_FAILURES = Counter(
-    "grape_no_progress_scan_failures_total",
+    NO_PROGRESS_SCAN_FAILURES_METRIC,
     "No-progress detection scan failures reported by the runtime scheduler.",
     registry=registry,
 )

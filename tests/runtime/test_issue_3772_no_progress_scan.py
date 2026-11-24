@@ -107,3 +107,37 @@ class TestNoProgressScanFailureObservability:
         _patch_db(monkeypatch, _NonIterableCursor(_young_row()))
         scheduler._sweep_no_progress_tasks(now_epoch=time.time())
         assert scheduler._NO_PROGRESS_SCAN_FAILURE_STREAK == 0
+
+
+class TestNoProgressScanAlertRuleDriftGuard:
+    """QA R1 看护：告警规则消费的指标名必须与指标出口实际暴露的一致。"""
+
+    def test_alert_rule_consumes_exposed_metric_name(self):
+        import yaml
+        from src.domains.insight.observability import NO_PROGRESS_SCAN_FAILURES_METRIC
+
+        alerts_path = os.path.join(ROOT, "deploy", "alerts.yml")
+        with open(alerts_path, encoding="utf-8") as f:
+            rules = yaml.safe_load(f)
+
+        rule = None
+        for group in rules.get("groups", []):
+            for candidate in group.get("rules", []):
+                if candidate.get("alert") == "GrapeNoProgressScanFailing":
+                    rule = candidate
+        assert rule is not None, "deploy/alerts.yml 缺少 GrapeNoProgressScanFailing 规则"
+        assert NO_PROGRESS_SCAN_FAILURES_METRIC in rule["expr"], (
+            f"告警 expr 未消费指标 {NO_PROGRESS_SCAN_FAILURES_METRIC}: {rule['expr']}"
+        )
+        assert rule["labels"]["severity"] == "warning"
+        assert rule["for"] == "1m"
+
+    def test_counter_registers_metric_name_constant(self):
+        from src.domains.insight.observability import (
+            NO_PROGRESS_SCAN_FAILURES,
+            NO_PROGRESS_SCAN_FAILURES_METRIC,
+        )
+        # prometheus_client Counter 的 `_name` 会剥掉 `_total` 后缀，以样本名为准。
+        samples = [s.name for m in NO_PROGRESS_SCAN_FAILURES.collect()
+                   for s in m.samples]
+        assert NO_PROGRESS_SCAN_FAILURES_METRIC in samples
