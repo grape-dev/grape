@@ -42,7 +42,7 @@ opencode 引擎在「配置模型名不在网关 key 可用列表」时报 `Not 
 | 验收标准 | 实现 / 测试 |
 |---|---|
 | 首次失败即 `config_error`、重试 0 次、记录无 `upstream_transient` | `transient_retry.classify_stream_failure` 在瞬时规则前判定；`tests/runtime/test_issue_3820_config_error_classification.py` |
-| 启动/注册阶段失败并输出模型名 vs `/v1/models` 可用列表差异 | `engine_model.validate_engine_model` + `agent._discover_local_runtimes`；`tests/test_issue_3820_engine_model_opencode.py`、`tests/test_issue_3820_registration_probe.py` |
+| 启动/注册阶段失败并输出模型名 vs `/v1/models` 可用列表差异 | `engine_model.validate_engine_model` + `agent._discover_local_runtimes`；`tests/runtime/test_issue_3820_engine_model_opencode.py`、`tests/runtime/test_issue_3820_registration_probe.py` |
 | 探活检出并在运行时页展示 | `engine_model.probe_engine_model_call` → `local_probe`/`_probe_engine_worker` 的 `probe_error`；同上测试文件 |
 | 不再产生透传式 404 运行时记录 | 注册阶段拒绝 misaligned 引擎 + 分类短路，任务不再进入重试循环 |
 | 既有 transient 重试测试与新增测试通过 | `tests/runtime/test_transient_retry.py` 回归 + 新增 3 个测试文件 |
