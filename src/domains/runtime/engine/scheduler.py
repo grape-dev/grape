@@ -116,6 +116,15 @@ PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TI
 PENDING_NO_SESSION_TIMEOUT_SECONDS = int(
     os.environ.get("PENDING_NO_SESSION_TIMEOUT_SECONDS", "600"))
 
+# 自报已到、引擎流结束信号丢失时的收敛：没有额外宽限数值，判据就是「执行流已静默超过活跃窗」。
+# 设计上任务终态由 stream_end 定案、self_report 只记结论（tasks.py /tasks/complete 返回
+# pending_finalize=true）。worker 的 stream_end 一丢（ACP 桥断开、网关 5xx、进程被杀），
+# 任务就只剩「自报在、流没结束」这一种状态，没人再写终态，只能等超时判死 —— 实测
+# 2026-11-24 issue #5：self_reported=1、42 条消息、结论齐全，仍被 PENDING_NO_SESSION_TIMEOUT
+# 判 timeout_failed。收敛条件只复用既有信号：self_reported=1 且最后一条执行消息已经超过
+# _PENDING_STREAM_ACTIVE_WINDOW_SECONDS（与豁免同一窗口）。这同时保证「自报后仍在产出」
+# 的任务不会被提前定案：任何新消息都会把静默计时清零。
+
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
@@ -2117,13 +2126,16 @@ def _offline_duration_seconds(last_seen_at: str):
     except Exception:
         return None
 
-# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 600s 视为
-# 「执行中」（worker 还在产出执行流），跳过本轮判死。600s 与调度扫描周期（60s）量级
-# 匹配，避免无限豁免；真沉默任务最多延迟一轮（60s 扫描 + 600s 静默窗）被回收。
-_PENDING_STREAM_ACTIVE_WINDOW_SECONDS = 600
+# Issue #1071：活跃流豁免窗口——pending 任务 task_messages 最新写入距 now < 窗口视为
+# 「执行中」（worker 还在产出执行流），跳过本轮判死。窗口与事件侧 sweeper 共用同一份定义
+# （`liveness.PENDING_STREAM_ACTIVE_WINDOW_SECONDS`，默认 600s，env 可覆盖）——两处各写一份
+# 会在运维调 env 后分叉成「任务判死、事件还 running」。
+from src.domains.runtime.engine.liveness import (  # noqa: E402
+    PENDING_STREAM_ACTIVE_WINDOW_SECONDS as _PENDING_STREAM_ACTIVE_WINDOW_SECONDS,
+)
 
 def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
-    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 600s → True。
+    """活跃流豁免判据（Issue #1071）：task_messages 最新一条写入距 now < 活跃窗 → True。
 
     返回 False（回退原判死逻辑，Spec：数据缺失不豁免，宁可误回收不留死任务）：
     - 该任务在 task_messages 无任何记录（执行流从未产出，无法证明在跑）；
@@ -2146,6 +2158,42 @@ def _pending_self_report_stream_active(cursor, task_id: str) -> bool:
     except Exception as _e:
         log.warning(f"pending stream activity check failed for task {task_id}: {_e}")
         return False
+
+def _task_has_execution_trace(cursor, task_id: str, runtime_session_id: str,
+                              issue_session_id: str = "") -> bool:
+    """任务是否真的建立过引擎会话（判「从未执行」的唯一判据）。
+
+    历史实现只看 `agent_tasks.runtime_session_id`，但这一列在 pipeline/ACP 链路上**不写**：
+    实测全库 21375 条任务只有 4575 条非空，issue 类 3325 条只有 228 条非空 —— 于是
+    「有 42 条执行消息、结论齐全」的任务照样被当成「从未建立会话」，走 600s 短窗判死
+    （2026-11-24 issue #5）。判据改为三选一，任一成立即算有执行痕迹：
+
+    1. agent_tasks.runtime_session_id 非空（非 ACP 引擎的常规写法）；
+    2. task_messages 有该任务的任何一条记录（执行流本身，最可靠）；
+    3. issue_agent_session.runtime_session_id 非空（会话指针落在 issue 会话上）。
+    """
+    if str(runtime_session_id or "").strip():
+        return True
+    try:
+        cursor.execute(
+            "SELECT 1 FROM task_messages WHERE task_id=? LIMIT 1", (task_id,))
+        if cursor.fetchone():
+            return True
+    except Exception as _e:
+        log.warning(f"session trace: task_messages probe failed for {task_id}: {_e}")
+    _isid = str(issue_session_id or "").strip()
+    if _isid:
+        try:
+            cursor.execute(
+                "SELECT runtime_session_id FROM issue_agent_session WHERE id=?",
+                (_isid,))
+            row = cursor.fetchone()
+            if row and str(row[0] or "").strip():
+                return True
+        except Exception as _e2:
+            log.warning(f"session trace: issue session probe failed for {task_id}: {_e2}")
+    return False
+
 
 def _parse_pending_since(value: str) -> float | None:
     """pending_since → epoch 秒。
@@ -2199,17 +2247,24 @@ def _sweep_pending_self_report_timeouts() -> int:
     _reason = (f"[PENDING_SELF_REPORT_TIMEOUT] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
                f"且执行流静默超 {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s"
                f"（pending_self_report 超时），判 timeout_failed")
-    _reason_no_session = (f"[PENDING_NO_SESSION_TIMEOUT] 任务认领后从未建立引擎会话"
-                          f"（runtime_session_id 为空、无任务消息），{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内"
-                          f"无任何执行痕迹，判 timeout_failed —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
+    _reason_no_session = (f"[PENDING_NO_SESSION_TIMEOUT] 任务认领后没有留下任何执行痕迹"
+                          f"（runtime_session_id/issue 会话指针为空、task_messages 无记录），"
+                          f"{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内无任何进展，判 timeout_failed"
+                          f" —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
+    _reason_self_reported = (f"[SELF_REPORTED_STREAM_LOST] agent 已自报结构化结论，但引擎流结束"
+                             f"信号（stream_end）未送达且执行流已静默超 "
+                             f"{_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s，按自报结论收敛为 completed"
+                             f"（保留 agent 原始 result_text）")
     marked = 0
     _ended = []
+    _self_reported_only = []
     try:
         _pending_rows = []
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, event_seq, runtime_id, pending_since, runtime_session_id FROM agent_tasks "
+                "SELECT id, event_seq, runtime_id, pending_since, runtime_session_id, "
+                "self_reported, issue_session_id FROM agent_tasks "
                 "WHERE status='pending_self_report' AND pending_since IS NOT NULL "
                 "AND pending_since != ''"
             )
@@ -2224,10 +2279,8 @@ def _sweep_pending_self_report_timeouts() -> int:
                     _ts = None
                 if not _ts:
                     continue
-                _has_session = bool(str(_r[4] or "").strip())
-                _limit = _cutoff_ts if _has_session else max(_cutoff_ts, _cutoff_short)
-                if float(_ts) > _limit:
-                    continue
+                # 「是否真的跑过」看执行痕迹（消息/会话指针），不看单列 runtime_session_id
+                _has_session = _task_has_execution_trace(c, _r[0], _r[4], _r[6])
                 # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
                 # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
                 if _pending_self_report_stream_active(c, _r[0]):
@@ -2243,6 +2296,16 @@ def _sweep_pending_self_report_timeouts() -> int:
                 if _ended_ok:
                     _ended.append(_r[0])
                     continue
+                # 自报已在、只是 stream_end 丢了 → 按自报结论收敛（worker 的 ACP 桥断开时
+                # self_report 能过、stream_end 过不来，任务只能干等判死；实测 2026-11-24
+                # issue #5）。走到这里已满足「执行流静默超活跃窗」，不再引入额外宽限数值；
+                # 自报后又产出新消息会回到上面的活跃流豁免，不会被提前定案。
+                if (_r[5] or 0) == 1:
+                    _self_reported_only.append(_r[0])
+                    continue
+                _limit = _cutoff_ts if _has_session else max(_cutoff_ts, _cutoff_short)
+                if float(_ts) > _limit:
+                    continue
                 # 下游按 4 元组解包；把「无会话」标记塞进第 4 位之外的 map
                 _pending_rows.append((_r[0], _r[1], _r[2], _r[3], _has_session))
             rows = _pending_rows
@@ -2256,7 +2319,19 @@ def _sweep_pending_self_report_timeouts() -> int:
                 log.info(f"sweeper: task {_etid} stream ended normally -> completed (self-report was lost)")
             except Exception as _ee:
                 log.warning(f"sweeper: converge ended task {_etid} failed: {_ee}")
-        rows = [r for r in rows if r[0] not in set(_ended)]
+        # 自报已在、stream_end 丢失、执行流已静默超活跃窗 → 按自报结论收敛（不动 result_text）
+        for _rtid in _self_reported_only:
+            try:
+                update_task_status(_rtid, "completed", exit_code=0,
+                                   errors=json.dumps([_reason_self_reported], ensure_ascii=False),
+                                   completed_at=_now, cascade_trigger="sweeper")
+                marked += 1
+                log.info(f"sweeper: task {_rtid} self-reported, stream_end missing "
+                         f"-> completed (stream silent > {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s)")
+            except Exception as _re:
+                log.warning(f"sweeper: converge self-reported task {_rtid} failed: {_re}")
+        rows = [r for r in rows
+                if r[0] not in set(_ended) and r[0] not in set(_self_reported_only)]
         _reasons = {_r[0]: (_reason if _r[4] else _reason_no_session) for _r in rows}
         for tid, evt_seq, _rt_id, _ps, _hs in rows:
             _why = _reasons.get(tid, _reason)
