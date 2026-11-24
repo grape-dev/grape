@@ -28,6 +28,7 @@ tests/api/test_issue_536_migrations.py:
 import ast
 import collections
 import pathlib
+import re
 
 DB_SETUP = pathlib.Path(__file__).resolve().parents[2] / "src" / "api" / "db_setup.py"
 LEGACY_CALL_PREFIXES = ("_migrate_", "_mig_", "_ensure_")
@@ -117,6 +118,104 @@ def test_legacy_track_is_frozen():
     assert not removed, (
         f"老轨 _run_all_migrations() 少了迁移调用: {sorted(removed)}。\n"
         "若确为有意删除（迁移已改注册式），请同步更新 LEGACY_TRACK_FROZEN 常量。"
+    )
+
+
+# 老轨 `_create_indexes()` 冻结时的索引名快照（Issue #3794 QA #1981 经验沉淀）。
+# 为什么单列一份：`test_legacy_track_is_frozen` 只比对「迁移调用名」，拦不住有人把
+# 新的补索引直接写进 _create_indexes() 的 DDL 列表 —— 那种改动在存量库永不执行
+# （legacy-stamp 202610300001 之后老轨整段不跑），却能让新库/CI 变绿。
+LEGACY_INDEX_DDL_FROZEN = frozenset({
+    "idx_agent_runtimes_engine_uid",
+    "idx_agent_sessions_repo",
+    "idx_agent_tasks_engine_uid",
+    "idx_agent_tasks_event",
+    "idx_agent_tasks_issue_session",
+    "idx_agent_tasks_repo_status",
+    "idx_agent_tasks_runtime",
+    "idx_agent_tasks_runtime_status",
+    "idx_agent_tasks_session",
+    "idx_agent_tasks_status",
+    "idx_agent_type_runtime_pool_engine_uid",
+    "idx_autopilot_exec_status",
+    "idx_autopilot_exec_task",
+    "idx_autopilot_tasks_enabled",
+    "idx_autopilot_tasks_repo",
+    "idx_bot_seen_messages_app_id",
+    "idx_bot_seen_messages_seen_at",
+    "idx_chat_conv_repo_issue",
+    "idx_chat_conv_status",
+    "idx_engine_capabilities_engine_uid",
+    "idx_event_route_config_repo",
+    "idx_events_issue_id",
+    "idx_events_repo_issue",
+    "idx_events_repo_key",
+    "idx_events_status",
+    "idx_issue_agent_session_repo",
+    "idx_kwq_dim_created",
+    "idx_kwq_source_seq",
+    "idx_kwq_status_retry",
+    "idx_latency_log_created",
+    "idx_latency_log_duration",
+    "idx_latency_log_path",
+    "idx_latency_log_source",
+    "idx_market_scene_id",
+    "idx_runtime_credentials_credential_uid",
+    "idx_scene_market_category_id",
+    "idx_scene_market_is_featured",
+    "idx_scene_market_repo_key",
+    "idx_scene_market_scope",
+    "idx_scene_market_source",
+    "idx_scene_skill_ref_skill_name",
+    "idx_skill_category_id",
+    "idx_skill_is_featured",
+    "idx_task_messages_engine_uid",
+    "idx_task_messages_task",
+    "idx_tasks_repo_issue",
+    "idx_tasks_user_status",
+    "idx_uploaded_files_ref",
+    "idx_uploaded_files_scope",
+})
+
+_INDEX_DDL_RE = re.compile(
+    r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_]\w*)", re.I)
+
+
+def _legacy_index_names() -> set:
+    """提取 `_create_indexes()` 函数体内所有索引名（跨行字符串只取含名字的首段）。"""
+    fn = next(n for n in _tree().body
+              if isinstance(n, ast.FunctionDef) and n.name == "_create_indexes")
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            m = _INDEX_DDL_RE.match(node.value)
+            if m:
+                names.add(m.group(1))
+    return names
+
+
+def test_legacy_index_ddl_is_frozen():
+    """老轨索引 DDL 也冻结：新增补索引写在 _create_indexes() 里会让本测试失败。
+
+    Issue #3794 事故样本：`idx_agent_tasks_event_seq_status` 起初写进老轨，
+    存量库（已盖 legacy-stamp）启动时根本不执行 → 1205 根因未消除，
+    但新库与 CI 全绿。正确做法同补列/补表：register_migration(version, name,
+    kind="safe", domains=(属主域,), fn=...)（参考 202611230003）。
+    仅当确认索引必须留在老轨（全新库建表顺序依赖）时同步改常量并写明理由。
+    """
+    actual = _legacy_index_names()
+    frozen = set(LEGACY_INDEX_DDL_FROZEN)
+    added = actual - frozen
+    removed = frozen - actual
+    assert not added, (
+        f"老轨 _create_indexes() 新增了索引: {sorted(added)}。\n"
+        "存量库启动只跑注册式迁移，写在这里的补索引永远不会执行（查询仍全表扫）。"
+        "请改成 register_migration(...)，不要把名字加进 LEGACY_INDEX_DDL_FROZEN。"
+    )
+    assert not removed, (
+        f"老轨 _create_indexes() 少了索引: {sorted(removed)}。\n"
+        "若确为有意删除（索引改注册式/被组合索引取代），请同步更新 "
+        "LEGACY_INDEX_DDL_FROZEN 常量。"
     )
 
 

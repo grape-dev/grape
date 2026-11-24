@@ -495,3 +495,14 @@ jobs:
             tests/runtime/test_issue_993_branch_guard.py -v \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
             --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard
+
+      - name: "Event guard TTL purge + event_seq/status index regressions (issue #3794)"
+        # Issue #3794: batched purge (200/round, 1205/1213 retry, keyset window) and the
+        # registered (event_seq,status) index migration were not wired into this gate.
+        # migration_track_guard runs too: this change adds a legacy-DDL freeze guard.
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3794_guard_purge.py \
+            tests/api/test_issue_3794_event_seq_status_index.py \
+            tests/api/test_migration_track_guard.py -v
