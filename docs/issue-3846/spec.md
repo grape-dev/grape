@@ -22,10 +22,10 @@
 
 ## 期望行为（In Scope）
 
-1. `MIGRATION["version"]` 由 `202611180001` 改为未占用号 `202611240003`
+1. `MIGRATION["version"]` 由 `202611180001` 改为未占用号 `202611240004`
    （须大于已发布基线 `max_version=202611230012`；`202611240001/002` 已被
    autopilot-custom-fields-cleanup 与 scene-nodes-skill-id-repo-scope（#3789）占用，
-   `202611240003` 全仓未占用）；文件头 docstring、
+   `202611240004` 全仓未占用）；文件头 docstring、
    `[DDL_SKIP]`/索引跳过/就位日志里的旧号一并替换。
 2. 新增 `_postcheck_cloud_sandboxes()`：校验 `grape_t_cloud_sandboxes` 表与
    `idx_cloud_sandboxes_repo/state/task` 三索引存在，以 `post_check=` 注册，使同号
@@ -48,7 +48,7 @@
 ## 验收标准
 
 - [ ] 存量库启动后 `grape_t_cloud_sandboxes` 与三索引存在
-- [ ] 台账新增行 `name=ensure-cloud-sandboxes-in-runtime`（`202611240003`），旧行保留
+- [ ] 台账新增行 `name=ensure-cloud-sandboxes-in-runtime`（`202611240004`），旧行保留
 - [ ] 启动日志「迁移版本号撞号」不再出现该迁移
 - [ ] 单测：带 post_check 进 reconcile、无 post_check 仅 ERROR 不进
 - [ ] CI：同 version 重复登记即失败
