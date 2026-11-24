@@ -386,23 +386,30 @@ def _task_status_map(repo_keys: list[str]) -> dict:
             log.warning(f"issues: load tasks status failed: {e}")
     return out
 
-def _review_point_readonly(repo_keys: list[str], number: str) -> dict:
+def _review_point_readonly(repo_keys: list[str], number: str, issue_id=None) -> dict:
     """Issue #4063：审核点只读投影（review_point.status / review_point.references）。
 
     权威源 = `issue.status`（与 detail.task_status、status get.status 同一行）：
     - 在位（status=pending_review）→ status="pending_review"，references 取在位快照；
     - 非在位 → status=""、references=""（不把已流转审核点的历史参考当在位态暴露）。
     仅读，不写、不触发状态迁移；下游技能据 status 即可幂等判断是否已在位。
+
+    Issue #4024：调用方已知内部主键（issue.id）时传入 `issue_id`，改按该行读取，
+    与 detail.task_status / pipeline.review_status 的单一事实源保持一致——多平台别名行下
+    按 repo_key+number 聚合会取到顺序不定的行，导致同源投影契约破裂。
     """
     from src.kernel.session_manager import db_lock
     placeholders = ",".join("?" * len(repo_keys))
     try:
         with db_lock:
             c = _rt_db.cursor()
-            c.execute(
-                f"SELECT status, review_refs FROM issue "
-                f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
-                repo_keys + [number])
+            if issue_id not in (None, "", 0):
+                c.execute("SELECT status, review_refs FROM issue WHERE id=?", (issue_id,))
+            else:
+                c.execute(
+                    f"SELECT status, review_refs FROM issue "
+                    f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
+                    repo_keys + [number])
             row = c.fetchone()
     except Exception as e:
         log.warning(f"issues: load review_point failed: {e}")
@@ -850,7 +857,7 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
     with db_lock:
         c = _rt_db.cursor()
         c.execute(
-"SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at, "
+            "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at, "
             "review_refs, stage FROM issue WHERE id=?",
             (issue_id,),
         )
@@ -872,7 +879,7 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
         "id": row[0], "status": row[1], "repo_key": row[2],
         "issue_number": _native_issue_number(row[3]),
         "title": row[4], "completed_reason": row[5] or "", "completed_at": row[6],
-"review_point": {
+        "review_point": {
             "status": "pending_review" if _in_place else "",
             "references": ((row[7] or "") if _in_place else ""),
         },
@@ -3073,6 +3080,9 @@ def get_issue_detail(owner: str, repo: str, number: str,
         _biz_stage, _biz_status = _id_stage, _id_status
         base["issue_id"] = _canonical_id
         base["task_status"] = _id_status
+        # Issue #4024：review_point 与同一次读回一同单源化（同一 issue.id 行），
+        # 避免多别名仓 task_status 与 review_point.status 各自命中不同行。
+        base["review_point"] = _review_point_readonly(repo_keys, num, _canonical_id)
         # Issue #2111/#4024：detail 出口 stage 保持 `or "vod"` 归一（与 _assemble_issue /
         # /mine 同口径），id 行 stage 为空时不得把已归一值覆盖回空串；仅非空时生效。
         # 注意 `_biz_stage` 仍保留 id 行原始空串语义（review_status 派生 unknown），不受出口归一影响。
