@@ -6204,6 +6204,58 @@ def skills_by_ids(skill_ids) -> list[tuple]:
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+def skills_by_names_scoped(skill_names, scopes=("official", "repo")) -> list[tuple]:
+    """按名字批量取技能，**限定作用域**并给出确定性顺序。
+
+    `skill` 表的唯一性是 `UNIQUE (skill_name, scope, owner_id)`，同名技能可在不同 scope
+    下各有一条。因此按名字解析必须限定作用域并固定顺序（scope 优先级 → id 升序），
+    否则会出现「显示/绑定到了另一条同名技能」。
+
+    返回行：(id, skill_name, display_name, agent_type, description, scope)
+    """
+    names = [str(n).strip() for n in (skill_names or []) if str(n).strip()]
+    scopes = tuple(str(s) for s in (scopes or ()) if str(s))
+    if not names or not scopes:
+        return []
+    ph = ",".join(["?"] * len(names))
+    sph = ",".join(["?"] * len(scopes))
+    # 作用域优先级用**参数化** CASE 表达，不拼字面量；非白名单作用域直接拒绝，
+    # 避免调用方透传外部值时成为注入面（与 configs/table_ownership 的域边界一致）。
+    _SCOPE_ALLOW = ("official", "repo")
+    _bad = [s for s in scopes if s not in _SCOPE_ALLOW]
+    if _bad:
+        raise ValueError(f"unsupported skill scope(s): {_bad}; allowed: {_SCOPE_ALLOW}")
+    order = " ".join([f"WHEN ? THEN {k}" for k in range(len(scopes))])
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT id, skill_name, display_name, agent_type, description, scope "
+            f"FROM skill WHERE skill_name IN ({ph}) AND is_active=1 AND scope IN ({sph}) "
+            f"ORDER BY CASE scope {order} ELSE {len(scopes)} END, id ASC",
+            list(names) + list(scopes) + list(scopes))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def resolve_skills_by_names(skill_names, scopes=("official", "repo")) -> dict:
+    """名字 → 行（确定性）。同名多命中时取作用域优先级最高、id 最小的一条。"""
+    out = {}
+    for row in skills_by_names_scoped(skill_names, scopes):
+        out.setdefault(str(row[1]), row)
+    return out
+
+
+def skill_names_active_scoped(skill_names, scopes=("official", "repo")) -> set:
+    """名字 → 是否仍有启用且属于给定作用域的技能（「已删除」判定的收窄口径）。
+
+    与 scene_sync._query_active_skill_names 的 `is_active=1 AND scope IN ('official','repo')` 一致。
+    """
+    return set(resolve_skills_by_names(skill_names, scopes).keys())
+
+
+def skill_ids_by_names(skill_names, scopes=("official", "repo")) -> dict:
+    """名字 → id（确定性、限定作用域）；用于把 skill_id=0 的老绑定补齐。"""
+    return {n: int(r[0]) for n, r in resolve_skills_by_names(skill_names, scopes).items()}
+
+
 def skill_ids_active(skill_ids) -> list[int]:
     """批量校验技能 id 仍启用；返回命中的 id 列表。"""
     ids = [int(i) for i in (skill_ids or []) if str(i).strip()]

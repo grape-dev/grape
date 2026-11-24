@@ -79,6 +79,48 @@ def health():
     except Exception:
         skill_consistency["detail"] = "skill consistency aggregate check failed"
 
+    # 托管镜像的引擎配置自证（2026-11-23）：entrypoint 把结果写成 <data dir>/engine-status.json，
+    # 这里只读文件、不探测模型端点（免鉴权的 /api/health 不能因为探测而变慢或外呼）。
+    # 目的是让部署者一条 curl 就能分辨「配好了没 / 错在 URL 还是 key」，而不是等到任务失败。
+    engine = {
+        "engine_configured": None,
+        "engine_provider": "",
+        # 免鉴权端点不回完整网关地址（可能含私有路径/租户前缀），只回主机名
+        "engine_base_host": "",
+        "engine_probe_ok": None,
+        "engine_models": 0,
+        "engine_default_model": "",
+        "engine_error": "",
+        "engine_checked_at": "",
+    }
+    try:
+        import json as _json
+        import os as _os
+        _cands = [
+            _os.environ.get("ENGINE_STATUS_FILE") or "",
+            _os.path.join(_os.environ.get("DEVOPS_DATA_DIR") or "/app/data", "engine-status.json"),
+        ]
+        for _p in _cands:
+            if _p and _os.path.exists(_p):
+                with open(_p, encoding="utf-8") as _f:
+                    _d = _json.load(_f) or {}
+                engine["engine_configured"] = bool(_d.get("configured"))
+                engine["engine_provider"] = str(_d.get("provider") or "")
+                _raw_base = str(_d.get("base_url") or "")
+                try:
+                    from urllib.parse import urlsplit as _urlsplit
+                    engine["engine_base_host"] = str(_urlsplit(_raw_base).hostname or "")
+                except Exception:  # noqa: BLE001
+                    engine["engine_base_host"] = ""
+                engine["engine_probe_ok"] = _d.get("probe_ok")
+                engine["engine_models"] = int(_d.get("models") or 0)
+                engine["engine_default_model"] = str(_d.get("default_model") or "")
+                engine["engine_error"] = str(_d.get("error") or "")
+                engine["engine_checked_at"] = str(_d.get("checked_at") or "")
+                break
+    except Exception as _e:  # noqa: BLE001 —— 状态缺失不应影响健康检查本身
+        log.debug(f"engine status read failed: {_e}")
+
     # Issue #455：base_configured/base_warning 供 OSS 用户自检——未配置对外基址时明确告警
     # （OAuth 回调指向 localhost 第三方平台无法回访）。字段新增向后兼容。
     return {
@@ -93,4 +135,6 @@ def health():
         "url_split_warning": split_warning,
         "agent_runtime": agent_runtime_status,
         "skill_consistency": skill_consistency,
+        # 托管镜像的引擎状态（非托管/未写过状态文件时为 None/空，向后兼容）
+        **engine,
     }

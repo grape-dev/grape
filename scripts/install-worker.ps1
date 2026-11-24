@@ -216,6 +216,9 @@ if (Test-Path $srcDir) {
 # restore_upgrade_backup: 恢复备份的旧代码并重启 agent（回滚函数，与 Linux 对齐）
 function restore_upgrade_backup {
     Log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting old agent !!!"
+    # Issue #3892：回滚结果（恢复到的旧版本标识）留给结尾提示复用——回滚后不得再打印
+    # 成功完成提示，必须如实告知「回滚到了哪个版本、备份在哪、下一步怎么重试」。
+    $script:rolledBackVersion = "unknown"
     $backupSrc = Join-Path $upgradeBackupDir "src"
     if (-not (Test-Path $backupSrc)) {
         Log "Rollback failed: no backup ($upgradeBackupDir missing, maybe fresh install) - worker stays offline, manual intervention needed"
@@ -228,6 +231,7 @@ function restore_upgrade_backup {
         Copy-Item -Path $backupVer -Destination $versionFilePath -Force -ErrorAction SilentlyContinue
     }
     $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "unknown" }
+    $script:rolledBackVersion = "$restoredVer"
     Log "Restored old code ($restoredVer)"
     # 重启旧 agent
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
@@ -758,11 +762,28 @@ Start-Sleep -Seconds 1
 $workerLogDir = Join-Path $Dir "data\\logs"
 $workerLog = Join-Path $workerLogDir "devops-bot.log"
 
+# 本轮新 agent 的启动时刻（UTC）：既是注册窗口的计时基准，也是回滚前主控心跳交叉验证的
+# 「本轮窗口」起点（老 agent 在启动前已被停掉，此后新增的心跳只可能来自新 agent）。
+$agentStartUtc = [datetime]::UtcNow
+# 结尾提示分支依据（Issue #3892）：installed / rolled_back / rollback_failed
+$installOutcome = "installed"
+# Issue #3892（QA 审查 Required）：devops-bot.log 是 append-only——安装器既不截断也不轮转，上一轮
+# 运行残留的 Traceback / Register failed / worker exiting 会一直留在文件里。若等待期间只读
+# `-Tail 40`，新 agent 在第一秒就会读到上轮的失败行、被立即判死回滚，重试升级会长期循环回滚。
+# 因此启动新 agent 前先采样日志字节长度作为水位，此后只扫描水位之后新增的内容
+# （与 install-worker.sh 的 _LOG_OFFSET + `tail -c +offset` 口径一致）。
+# 取不到长度（文件不存在/无权限）时水位为 0，等价于从文件头读——与旧行为一致，不会更差。
+$agentLogOffset = 0L
+if (Test-Path $workerLog) {
+    $existingLog = Get-Item $workerLog -ErrorAction SilentlyContinue
+    if ($existingLog) { $agentLogOffset = [long]$existingLog.Length }
+}
+
 Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
 
 # 启动验证 + 失败回滚（与 Linux install-worker.sh 对齐）：
-# 1. 进程存活检查（3s 后）
-# 2. 注册成功检查（最多等 30s，日志出现 "registered"）
+# 1. 进程存活检查（最多 30s × 1s，保持不变 = 快速失败路径）
+# 2. 注册成功检查（Issue #3892：30s 软到期 + 60s 硬上限，见下方注册等待段）
 # 3. 任一失败 → restore_upgrade_backup 恢复旧代码重启
 # 进程存活检查：轮询最多 30s（不是固定 3s 只看一眼）。
 # Windows 上 python 冷启动 + 74MB 新文件被 Defender 实时扫描，首个进程常要 8~15s
@@ -792,27 +813,224 @@ if (-not $workerProc) {
 
 Log "New agent started (pid $($workerProc.ProcessId)), waiting for registration..."
 
-# 等待注册成功（最多 30s）
+# Issue #3892：注册等待窗口 30s → 60s 封顶 + 30s 软到期评估。
+# 实测（Windows 冷盘 + Defender 实时扫描 + anaconda 冷启动）：新 agent 07:03:25.452 才注册成功，
+# 旧实现固定的 30s 窗口在 07:03:15 就到期 → restore_upgrade_backup 把健康的新版本杀回旧代码，
+# 机器此后长期停留在旧版本。放宽后仍保持「快速失败」：日志出现硬失败迹象立即停等，进程与 daemon
+# 双双消失也立即停等，绝不无限等待。
+$regSoftDeadlineSec = 30          # 首轮软到期（= 原固定窗口长度）
+$regWindowSec = 60                # 硬上限（20 × 3s）
+$regIntervalSec = 3
+
+# Issue #3892 QA（数值证据 B2）：以下三个运行参数全部具名登记，来源=五源登记（undecided 形态，
+# 与 base tip 对 DEDUP_SUFFIX_MAX 的登记先例同款：按 undecided: 登记需要何种测量）。
+# 修改任一值前先更新对应登记，禁止回落为内联裸字面量。
+$agentLogMaxLines = 400            # 来源=五源登记：<undecided: 需要 3s 轮询窗口内 agent 日志单轮新增行数分布的测量>。
+                                  # 现仅为防一次读进整份日志的内存兜底工程护栏（无业务口径）；截断只影响
+                                  # 最旧的线索行，线索不足时由「进程/daemon 存活判定」降级路径兜底。
+$whoamiTimeoutSec = 5              # 来源=五源登记：<undecided: 需要主控 /api/runtime/whoami 的 P95/P99 响应延迟测量>。
+                                  # 现仅为异常网络下的超时护栏；超时即静默降级为纯日志判定，
+                                  # 不阻断回滚主流程（catch 分支）。
+$heartbeatToleranceSec = 10        # 来源=五源登记：<undecided: 需要安装机与主控 NTP 时钟偏移分布的测量>。
+                                  # 现仅为覆盖心跳落库秒级取整误差的护栏；交叉验证当前恒走跳过分支
+                                  # （/whoami 尚未返回 last_seen_at），故该容差不影响生产行为。
+
+# 注册在途迹象：注册 RPC 已发出 / 注册前启动进度 / 心跳相关（agent 启动序列的正常进度行）。
+# 只用 ASCII 关键字：Windows PowerShell 5.1 的 Get-Content 对无 BOM 的 UTF-8 日志按 ANSI 解码，
+# 中文关键字会乱码匹配不到（日志里的英文标记不受影响）。
+$regInFlightPattern = 'registering with|register(ing)? (runtime|engine)|/register|heartbeat|contract guard|codearts tasks dir|Killed existing worker|engine discovery|engine probe'
+# 硬失败迹象：只保留「注册被明确拒绝 / 凭据被吊销」这类真正致命、且 agent 自己会退出进程的标记。
+# 不再收 Traceback / SystemExit / worker exiting 这类泛化关键字（QA 审查 Required）：
+# 单个引擎探针、skills 扫描或 sandbox 失败也会打 Traceback，但主进程随后仍可能正常注册；
+# 用泛化关键字会把「本可注册成功」的启动短路成回滚。进程/daemon 真退出由下方的存活采样兜底。
+$regFailedPattern = 'Register failed|RUNTIME_TOKEN rejected|register 401|credential revoked'
+
+# 只读「本轮新增」的日志行（Issue #3892 QA 审查 Required）：以启动前采样的字节长度
+# （$agentLogOffset）为水位，从水位往后读，上一轮残留的行一律不计入判定。
+# - 文件被轮转/截断（当前长度 < 水位）→ 退化为从 0 读，避免把整份新文件当空；
+# - 以 FileShare.ReadWrite 打开：agent 正在追加写，不能独占；
+# - 读不到（文件不存在/共享冲突）→ 返回空数组，调用方按「本轮暂无线索」回落进程存活判定；
+# - 只保留末尾 MaxLines 行：轮询粒度 3s，正常新增行远低于上限，但防止一次读进整份日志。
+function Get-NewAgentLogLines {
+    param($LogPath, [long]$Offset = 0, [int]$MaxLines = $agentLogMaxLines)
+    if (-not (Test-Path $LogPath)) { return @() }
+    $text = ""
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($fs.Length -lt $Offset) { $Offset = 0 }
+        [void]$fs.Seek($Offset, [System.IO.SeekOrigin]::Begin)
+        # 日志是 UTF-8；判定只用 ASCII 关键字，起始处可能被切在半个多字节字符上也无关紧要。
+        $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8, $false)
+        $text = $reader.ReadToEnd()
+    } catch {
+        return @()
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    if (-not $text) { return @() }
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne "" })
+    if ($lines.Count -gt $MaxLines) { $lines = @($lines[($lines.Count - $MaxLines)..($lines.Count - 1)]) }
+    return $lines
+}
+
+# 采样：新 agent 进程 / 本安装目录的 daemon 是否还活着。daemon 会在 worker 崩溃后重启进程，
+# 所以「进程暂时消失但 daemon 还在」仍算在途，不能据此判死。
+# 按安装目录过滤（QA 审查 Optional）：同机可能存在多个 grape 安装（不同 -Dir），
+# 只按 src.domains.runtime.engine.agent 命令行匹配会把别的安装的 agent 当成本轮新进程。
+function Test-NewAgentProcessAlive {
+    $proc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        (Test-GrapeAgentProcess $_) -and $_.CommandLine -like "*$Dir*"
+    } | Select-Object -First 1
+    return [bool]$proc
+}
+
+function Test-WorkerDaemonAlive {
+    $daemon = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -like "*$startScript*"
+    } | Select-Object -First 1
+    return [bool]$daemon
+}
+
+# 30s 软到期时的「注册在途」判定（Issue #3892）：决定续等至 60s，还是立即进入回滚判定。
+# 只看本轮新增日志（$NewLog 由 Get-NewAgentLogLines 按水位读出），优先级：
+#   1. 本轮新增日志出现硬失败迹象 → 不在途（不空等）；
+#   2. 本轮新增日志出现注册在途迹象 → 在途；
+#   3. 本轮暂无判定线索（冷盘+Defender 首扫时 30s 内可能一行都还没落盘）→ 以「进程或 daemon 仍存活」为准；
+#   4. 无迹象且进程与 daemon 都已消失 → 不在途。
+function Test-RegistrationInFlight {
+    param([string[]]$NewLog = @(), [bool]$AgentProcessAlive = $false, [bool]$DaemonAlive = $false)
+    $newText = @($NewLog) -join "`n"
+    if ($newText) {
+        if ($newText -match $regFailedPattern) { return $false }
+        if ($newText -match $regInFlightPattern) { return $true }
+    }
+    return ($AgentProcessAlive -or $DaemonAlive)
+}
+
+# 回滚前交叉验证（可选加固，Issue #3892）：用安装器已持有的 rta_ 凭据向主控查本 runtime 最近的
+# 心跳时间（last_seen_at）。窗口内刚更新 → 新 agent 已经连上主控，只是注册日志还没落到我们读的
+# 尾部，此时回滚等于杀掉健康版本。
+# 端点不存在 / 403 / 超时 / 响应无该字段 → 一律静默降级为纯日志判定，不阻断主流程（验收不依赖
+# 该项）。/whoami 是凭据下的既有只读端点：主控在该响应里补上 last_seen_at 后本函数自动生效。
+function Test-MasterRuntimeRecentlySeen {
+    param([datetime]$SinceUtc = [datetime]::UtcNow)
+    try {
+        $who = Invoke-RestMethod -Uri "$Server/api/runtime/whoami" -TimeoutSec $whoamiTimeoutSec -UseBasicParsing `
+            -Headers @{ Authorization = "Bearer $Token" } -ErrorAction Stop
+    } catch {
+        Log "Master heartbeat cross-check skipped (whoami unavailable: $($_.Exception.Message)) - using log-only judgement"
+        return $false
+    }
+    $raw = $null
+    try { $raw = $who.last_seen_at } catch { $raw = $null }
+    if (-not $raw) {
+        Log "Master heartbeat cross-check skipped (whoami exposes no last_seen_at) - using log-only judgement"
+        return $false
+    }
+    $seenUtc = $null
+    try {
+        if ($raw -is [int] -or $raw -is [long] -or $raw -is [double]) {
+            $seenUtc = [datetime]::new(1970, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc).AddSeconds([double]$raw)
+        } else {
+            $seenUtc = ([datetime]$raw).ToUniversalTime()
+        }
+    } catch {
+        Log "Master heartbeat cross-check skipped (unparsable last_seen_at '$raw') - using log-only judgement"
+        return $false
+    }
+    # 容差 $heartbeatToleranceSec：安装器与主控时钟不可能完全同步；老 agent 在本轮启动前已被停掉，因此窗口内新增的
+    # 心跳只可能来自新 agent（含 daemon 重启后的重试实例）。
+    if ($seenUtc -ge $SinceUtc.AddSeconds(-$heartbeatToleranceSec)) {
+        Log "Master reports a heartbeat within this upgrade window ($($seenUtc.ToString('u'))) - the new agent is reaching the controller"
+        return $true
+    }
+    Log "Master last heartbeat $($seenUtc.ToString('u')) predates this upgrade window - registration not confirmed"
+    return $false
+}
+
+# 本轮新增日志的注册状态判定（Issue #3892 复审 Required）：等待循环与窗口末尾补检必须复用
+# 同一段判定，避免末尾补检只认 registered、漏掉 58-60s 才落盘的硬失败行。
+# registered 优先于 hard_failed：同一批新增行里注册成功与失败关键字并存（例如失败后重试成功）时，
+# 以成功为准；仅当无注册成功行且命中硬失败关键字时才判硬失败。
+function Get-RegistrationStateFromLog {
+    param([string[]]$NewLog = @())
+    $newText = @($NewLog) -join "`n"
+    if ($newText -match "RuntimeAgent registered") { return "registered" }
+    if ($newText -match $regFailedPattern) { return "hard_failed" }
+    return "none"
+}
+
 $regOk = $false
-for ($i = 1; $i -le 10; $i++) {
-    if (Test-Path $workerLog) {
-        $logContent = Get-Content $workerLog -Tail 40 -ErrorAction SilentlyContinue
-        if ($logContent -match "RuntimeAgent registered") {
-            $regOk = $true
+$regElapsed = 0
+$regSoftChecked = $false
+# 本轮是否已观测到硬失败（Issue #3892 QA 审查 Required）：硬失败必须跳过主控心跳交叉验证。
+$regHardFailed = $false
+while ($regElapsed -lt $regWindowSec) {
+    # 只读水位之后的新增行：上一轮残留的 registered / Register failed 不得参与本轮判定。
+    $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
+    $regState = Get-RegistrationStateFromLog -NewLog $logContent
+    if ($regState -eq "registered") {
+        $regOk = $true
+        break
+    }
+    if ($regState -eq "hard_failed") {
+        $regHardFailed = $true
+        Log "Registration failure detected in log at ${regElapsed}s - stopping the wait early"
+        break
+    }
+    if ($regElapsed -ge $regSoftDeadlineSec -and -not $regSoftChecked) {
+        # 首轮 30s 到期：先看本轮新增日志判定注册是否在途，有迹象续等至 60s，无迹象立即进入回滚判定。
+        $regSoftChecked = $true
+        $regProcAlive = Test-NewAgentProcessAlive
+        $regDaemonAlive = Test-WorkerDaemonAlive
+        if (Test-RegistrationInFlight -NewLog $logContent -AgentProcessAlive $regProcAlive -DaemonAlive $regDaemonAlive) {
+            Log "Not registered at ${regElapsed}s yet, but the new agent is still starting (in flight) - extending the wait to ${regWindowSec}s"
+        } else {
+            Log "Not registered at ${regElapsed}s and no registration progress in flight - stopping the wait early"
             break
         }
     }
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds $regIntervalSec
+    $regElapsed += $regIntervalSec
+}
+
+if (-not $regOk) {
+    # 窗口末尾补检一次：最后一轮日志采样落在 57s，59-60s 才落盘的行不能被漏判
+    # （否则在窗口边界上仍会误杀健康新版本/漏掉硬失败）。同样只看本轮新增行，
+    # 并复用循环同一段判定（Issue #3892 复审 Required）：58-60s 才落盘的硬失败行
+    # 必须同样置 $regHardFailed，绝不能留给主控心跳交叉验证翻案。
+    $logContent = @(Get-NewAgentLogLines -LogPath $workerLog -Offset $agentLogOffset)
+    $regState = Get-RegistrationStateFromLog -NewLog $logContent
+    if ($regState -eq "registered") {
+        $regOk = $true
+    } elseif ($regState -eq "hard_failed") {
+        $regHardFailed = $true
+        Log "Registration failure detected in log at ${regWindowSec}s window end - stopping before cross-check"
+    }
+    # 交叉验证：主控若能看到本 runtime 在窗口内的心跳，说明新 agent 已连上主控（日志尾部滞后），
+    # 不回滚；查询不可用时函数内部静默降级为纯日志判定。
+    # 但硬失败必须跳过交叉验证（QA 审查 Required）：硬失败常在 10s 内发生，而老 agent 在停进程前
+    # 的最后一次心跳仍落在 10s 容差窗内，会被误读成「新 agent 已连上主控」→ 取消回滚并打出
+    # 安装完成提示，把失败掩盖成成功。此时必须按日志结论回滚。
+    if (-not $regOk -and -not $regHardFailed -and (Test-MasterRuntimeRecentlySeen -SinceUtc $agentStartUtc)) {
+        Log "Master heartbeat cross-check passed - treating the new agent as registered despite the missing log line"
+        $regOk = $true
+    } elseif (-not $regOk -and $regHardFailed) {
+        Log "Master heartbeat cross-check skipped (hard registration failure in this round) - rolling back"
+    }
 }
 
 if ($regOk) {
     Log "Started in background and registered (pid $($workerProc.ProcessId)), log: $workerLog"
 } else {
-    Log "Agent alive but not registered after 30s, rolling back..."
+    Log "Agent alive but not registered after ${regElapsed}s, rolling back..."
     $rollbackOk = restore_upgrade_backup
     if ($rollbackOk) {
+        $installOutcome = "rolled_back"
         Log "Rolled back to old version (new version may not reach master)"
     } else {
+        $installOutcome = "rollback_failed"
         Log "Rollback failed, worker state abnormal, check log: $workerLog"
     }
 }
@@ -823,8 +1041,26 @@ Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windo
 # Issue #499: 执行引擎安装引导段已删除——worker 启动自动发现并注册本机已装引擎，
 # 无需在安装期引导用户安装 opencode/hermes/codearts/codex。
 
-Log "Install complete! Verify registration:"
-Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"
-Log "  Controller WebUI Workers page should show device $Device"
+# ===== 7. 结束提示（按真实结果分支，Issue #3892）=====
+# 旧实现无论成功还是回滚都会打印完成提示（回滚分支之后统一打印），回滚事实被掩盖，
+# 用户以为升级成功、机器实际停在旧代码。现在：成功路径保留原提示；回滚成功路径显式说明
+# 「已回滚到的旧版本标识 + 备份位置 + 建议重试」；回滚失败路径维持异常提示并要求人工介入。
+$rolledBackVer = if ($script:rolledBackVersion) { $script:rolledBackVersion } else { "unknown" }
+if ($installOutcome -eq "installed") {
+    Log "Install complete! Verify registration:"
+    Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"
+    Log "  Controller WebUI Workers page should show device $Device"
+} elseif ($installOutcome -eq "rolled_back") {
+    Log "Install ROLLED BACK - the new version did NOT take effect!"
+    Log "  Rolled back to pre-upgrade version: $rolledBackVer (backup: $upgradeBackupDir)"
+    Log "  The old agent was restarted and should reconnect; verify on the WebUI Workers page (device $Device)"
+    Log "  Suggested next step: wait until the machine is idle, then re-run the installer (or let auto-upgrade retry)"
+    Log "  If this repeats, check $workerLog for the new version's startup/registration errors"
+} else {
+    Log "Install FAILED and rollback did NOT restore a running agent - worker is OFFLINE!"
+    Log "  Rolled-back version: $rolledBackVer (backup: $upgradeBackupDir)"
+    Log "  Manual intervention needed: inspect $workerLog, then start the daemon manually: powershell -NoProfile -ExecutionPolicy Bypass -File $startScript"
+    Log "  Suggested next step: fix the cause above, then re-run the installer"
+}
 
 

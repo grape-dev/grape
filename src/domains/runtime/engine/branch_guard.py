@@ -24,7 +24,9 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -92,8 +94,27 @@ LEASE_LOCK_MODULE = "src.kernel.lock"
 # 告警单行含 --no-verify 指引（Issue #2933）。
 # 2028-06：并入 #2292 修复指引（HOOK_REPAIR_HINT：重装/升级 worker 包），
 # 模板文案变化必须递增版本号，否则存量 worktree 永不升级。
-HOOK_TEMPLATE_VERSION = "2028-06"
+# 2028-07（Issue #3579）：去掉安装时固化的解释器/模块绝对路径，改运行时解析；
+# 存量钩子在 ensure_issue_worktree 时按本版本重写升级。
+# 2028-08（Issue #3579 QA 复审 Required/Optional）：加载优先级反转为
+# 「部署态守卫模块优先，worktree 兜底」——安装时记录守卫模块稳定来源根
+# （# hook-module-root:，issue 工作树内安装不记录），运行时按
+# <module_root>/<rel> → <push_root>/<rel> → 部署态包导入（导入前移除
+# sys.path 的 ''/cwd，避免 -c 模式下又解析回 worktree 同一棵树）；
+# 解释器解析与 worker 同源（GRAPE_PYTHON → VIRTUAL_ENV → push 树 .venv → PATH）。
+HOOK_TEMPLATE_VERSION = "2028-08"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
+
+# Issue #3579：钩子只记录仓库相对模块路径，运行时由当前 worktree 顶层解析。
+# 安装发生在 in-flight issue worktree 时，任何绝对路径都会随 worktree 回收而失效
+# （解释器 → exit 127；模块 → 导入失败），且 shell 层 127 早于内联 Python 的
+# try/except，fail-open 无法执行。
+HOOK_MODULE_REL_PATH = "src/domains/runtime/engine/branch_guard.py"
+# Issue #3579 QA 复审：安装进程自身可能跑在会随任务回收的 issue 工作树内
+# （{WORKSPACE}/{provider}/{owner}/{repo}/issues/{n}/{agent_type}，即
+# repogit.issue_dir_for 的布局）。该树不得作为守卫模块稳定来源根写入 marker——
+# 回收后失效正是本 Issue 要根治的形态；仅匹配路径尾部三段，不误伤同名子目录。
+_ISSUE_WORKTREE_PATH_RE = re.compile(r"(?:^|/)issues/\d+/[^/]+$")
 # 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
 # Issue #2292（同 #2147）：lock 随 #2010 布局收敛到 ``src.kernel.lock``，部署树不再保证
 # 顶层 ``src/lock.py``（现存别名仅由 ``src/__init__.py`` 一跳解析）。自检必须直接校验
@@ -801,6 +822,11 @@ def _hook_module_path() -> str:
     return os.path.abspath(__file__)
 
 
+def _hook_module_relpath() -> str:
+    """仓库相对守卫模块路径（写入钩子，运行时按当前 worktree 顶层解析）。"""
+    return HOOK_MODULE_REL_PATH
+
+
 def _hook_root() -> str:
     """仓库/安装根目录：``<root>/src/domains/runtime/engine/branch_guard.py`` 上溯 5 层。"""
     root = _hook_module_path()
@@ -809,31 +835,88 @@ def _hook_root() -> str:
     return root
 
 
+def _resolve_hook_interpreter() -> str:
+    """钩子运行时解释器：与 shell 模板同一解析顺序（Issue #3579 QA 复审 Optional）。
+
+    ``$GRAPE_PYTHON``（worker 启动解释器，scripts/start-worker.sh 同名变量）→
+    ``$VIRTUAL_ENV/bin/python3``（激活中的 venv）→ ``<根>/.venv/bin/python3``
+    （校验侧以安装进程根近似运行时的 push worktree 根）→ PATH 上的 python3。
+    全部为运行时解析、缺失自动降级，不固化绝对路径；最终权威口径以 shell 模板为准。
+    """
+    cand = os.environ.get("GRAPE_PYTHON", "").strip()
+    if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if venv:
+        cand = os.path.join(venv, "bin", "python3")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    cand = os.path.join(_hook_root(), ".venv", "bin", "python3")
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    return shutil.which("python3") or ""
+
+
+def _stable_module_root(wt_dir: str) -> str:
+    """安装进程守卫模块根：issue 工作树（随任务回收）不记录，返回空串。
+
+    Issue #3579 QA 复审 Required：运行时优先加载部署态守卫模块，部署态来源 =
+    安装进程自身加载本模块的树（``_hook_root()``，worker 从部署安装根运行时即
+    部署根）。但该根若本身就是 issue 工作树（开发期 dogfood：安装进程跑在
+    ``issues/<n>/<agent_type>`` 检出内，或恰好就是本次 push 的 worktree），
+    随任务回收后必失效，记录它等于复发 #3579 原始缺陷——返回空串，
+    运行时自动降级为 worktree/部署态包导入兜底链。
+    """
+    try:
+        root = os.path.realpath(_hook_root())
+    except Exception:
+        return ""
+    try:
+        wt = os.path.realpath(wt_dir or "")
+    except Exception:
+        wt = ""
+    if wt and (root == wt or root.startswith(wt + os.sep) or wt.startswith(root + os.sep)):
+        return ""
+    if _ISSUE_WORKTREE_PATH_RE.search(root):
+        return ""
+    return root
+
+
 def _existing_hook_usable(existing: str, repo_key: str) -> bool:
-    """版本指纹命中后仍校验钩子内固化的运行时路径是否可用（Issue #2028）。
+    """版本指纹命中后校验钩子运行时依赖是否可用（Issue #2028 / #3579）。
 
-    钩子通过单行 marker 注释（``# hook-interpreter:/hook-module-path:/hook-repo-key:``）
-    固化解释器绝对路径、守卫模块路径与 repo_key；解释器升级/目录搬迁后旧路径失效
-    会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open 无从执行。
-    任一项缺失或失效即返回 False，触发重写自愈。
+    2028-08 模板固化：仓库相对模块路径（``# hook-module-rel:``）、守卫模块稳定
+    来源根（``# hook-module-root:``，issue 工作树安装时为空）与 repo_key；解释器
+    运行时按 ``_resolve_hook_interpreter`` 顺序解析。可用性校验与运行时加载链路
+    一致（不再用安装进程的树校验另一棵树的文件）：
+    - repo_key 一致；
+    - 相对模块路径与当前 canonical 布局一致；
+    - 记录了稳定来源根：``<根>/<rel>`` 真实存在（运行时优先加载它）；未记录
+      （issue 工作树安装，运行时走 worktree 兜底）时退回校验安装树自身
+      （``_hook_root()``），与运行时兜底候选同构；
+    - 当前环境仍能解析到 python3 解释器。
 
-    注意不要回退到解析内联 Python 代码（2028-02 的做法）：代码经 shlex.quote 后
-    跨物理行，``splitlines()`` 首行引号未闭合，``shlex.split`` 抛 ValueError 被吞，
-    校验恒 False，「版本命中→校验→幂等跳过」分支退化为死代码（QA 第 2 轮 M-2 复现）。
+    任一项缺失或失效即返回 False，触发重写自愈（存量旧模板的绝对
+    ``# hook-interpreter:`` / ``# hook-module-path:`` marker 同样视为不可用）。
     """
     markers = {}
     for line in existing.splitlines():
-        for key in ("hook-interpreter", "hook-module-path", "hook-repo-key"):
+        for key in ("hook-module-rel", "hook-module-root", "hook-repo-key"):
             prefix = f"# {key}: "
             if line.startswith(prefix):
                 markers[key] = line[len(prefix):].strip()
     if len(markers) != 3:
         return False
-    if not markers["hook-interpreter"] or not os.path.isfile(markers["hook-interpreter"]):
+    if markers["hook-repo-key"] != repo_key:
         return False
-    if not markers["hook-module-path"] or not os.path.isfile(markers["hook-module-path"]):
+    if markers["hook-module-rel"] != _hook_module_relpath():
         return False
-    return markers["hook-repo-key"] == repo_key
+    if not _resolve_hook_interpreter():
+        return False
+    root = markers["hook-module-root"]
+    if root:
+        return os.path.isfile(os.path.join(root, markers["hook-module-rel"]))
+    return os.path.isfile(os.path.join(_hook_root(), markers["hook-module-rel"]))
 
 
 def _hook_entry_code(root: str, module_path: str) -> str:
@@ -842,6 +925,9 @@ def _hook_entry_code(root: str, module_path: str) -> str:
     Issue #2028：模块加载与 ``hook_main()`` 调用一并纳入 try/except，
     守卫自身异常一律 fail-open（stderr 明确告警 + exit 0），真实违规仍由
     ``hook_main`` 显式 return 1 阻断。
+
+    说明：``module_path`` 为显式文件路径，仅供单元测试/诊断内联生成复用；
+    生产钩子使用 ``_hook_runtime_entry_code`` 在运行时解析仓库相对路径。
     """
     return (
         "import sys, importlib.util; "
@@ -860,6 +946,65 @@ def _hook_entry_code(root: str, module_path: str) -> str:
         f"% (_e, {json.dumps(module_path)}))\n"
         # Issue #2292：同一条 WARNING 通道给出可执行修复动作，避免只留裸异常 repr。
         f"    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
+        f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
+        "    _rc = 0\n"
+        "sys.exit(_rc)"
+    )
+
+
+def _hook_runtime_entry_code() -> str:
+    """生成生产钩子内联代码：运行时解析守卫模块并执行 hook_main（#3579）。
+
+    钩子 shell 层把当前 push worktree 顶层（argv[2]）与安装时记录的守卫模块
+    稳定来源根（argv[3]，issue 工作树安装时为空串）传入。加载优先级
+    （Issue #3579 QA 复审 Required：部署态优先，worktree 降为兜底）：
+    1. ``<guard_root>/<rel>``：部署态守卫——语义由部署版本决定，不受 worktree
+       检出的旧基线（缺 #2314/#2890 等修复）或工作树内篡改影响；
+    2. ``<push_root>/<rel>``、``<cwd>/<rel>``：worktree 兜底（未记录稳定根，
+       与 2028-07 行为一致）；
+    3. 部署态包导入 ``src.domains.runtime.engine.branch_guard``：导入前移除
+       ``sys.path`` 中的 ``''``/cwd——``-c`` 模式下它们指向 worktree，会再次
+       解析回同一棵树，部署安装根反而永远不可达。
+    按文件路径加载时把所属树插回 ``sys.path`` 首位，保证模块自身的
+    ``src.*`` 依赖与模块来自同一棵树。解析/导入/执行任一失败都 fail-open
+    （stderr 单行告警 + exit 0），真实违规仍由 ``hook_main`` 显式返回 1 阻断。
+    """
+    rel = _hook_module_relpath()
+    return (
+        "import sys, os, importlib, importlib.util\n"
+        "_root = sys.argv[2] if len(sys.argv) > 2 else ''\n"
+        "_guard_root = sys.argv[3] if len(sys.argv) > 3 else ''\n"
+        f"_rel = {json.dumps(rel)}\n"
+        "_candidates = []\n"
+        "if _guard_root:\n"
+        "    _candidates.append((_guard_root, os.path.join(_guard_root, _rel)))\n"
+        "if _root:\n"
+        "    _candidates.append((_root, os.path.join(_root, _rel)))\n"
+        "_candidates.append((os.getcwd(), os.path.join(os.getcwd(), _rel)))\n"
+        "_hit = next(((r, p) for r, p in _candidates if os.path.isfile(p)), None)\n"
+        "_module_root = _hit[0] if _hit else ''\n"
+        "_module_path = _hit[1] if _hit else ''\n"
+        "try:\n"
+        "    if _module_path:\n"
+        "        if _module_root and _module_root not in sys.path:\n"
+        "            sys.path.insert(0, _module_root)\n"
+        "        _spec = importlib.util.spec_from_file_location('grape_branch_guard', _module_path)\n"
+        "        if _spec is None or _spec.loader is None:\n"
+        "            raise ImportError('cannot load guard module: %s' % _module_path)\n"
+        "        _m = importlib.util.module_from_spec(_spec)\n"
+        "        _spec.loader.exec_module(_m)\n"
+        "    else:\n"
+        "        _path = [p for p in sys.path if p not in ('', os.getcwd())]\n"
+        "        if _guard_root and _guard_root not in _path:\n"
+        "            _path.insert(0, _guard_root)\n"
+        "        sys.path[:] = _path\n"
+        "        _m = importlib.import_module('src.domains.runtime.engine.branch_guard')\n"
+        "    _rc = _m.hook_main()\n"
+        "except Exception as _e:\n"
+        "    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
+        "(fail-open): %r [module=%s]；如需跳过本钩子可加 --no-verify\\n' "
+        "% (_e, _module_path or _rel))\n"
+        "    sys.stderr.write('[branch-guard] WARNING 修复指引: %s\\n' "
         f"% {json.dumps(HOOK_REPAIR_HINT)})\n"
         "    _rc = 0\n"
         "sys.exit(_rc)"
@@ -958,21 +1103,21 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                         return True
             except Exception:
                 pass
-        root = _hook_root()
+        # Issue #3579：模板不再固化解释器/模块绝对路径（worktree 回收后 127/导入失败）。
+        # Issue #3579 QA 复审：运行时加载优先级反转为「部署态守卫优先，worktree 兜底」。
+        # 解释器按 worker 同源顺序运行时解析；模块来源只记录稳定安装根（部署态优先），
+        # issue 工作树内安装不记录（_stable_module_root），避免回收后路径失效复发。
         # Issue #993 R8：钩子按文件路径直接加载本模块，绕过运行时包 __init__ 的重型依赖链。
-        # Issue #2028：模板必须按当前 canonical 布局（src/domains/runtime/engine/）定位，
-        # 不能沿用 #699 迁移前的 src/runtime/ 路径，否则守卫模块加载必失败、静默 no-op。
-        module_path = _hook_module_path()
-        code = _hook_entry_code(root, module_path)
-        interpreter = sys.executable or "python3"
+        code = _hook_runtime_entry_code()
+        module_root = _stable_module_root(wt_dir)
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
             HOOK_VERSION_LINE,
-            # Issue #2028：固化元数据单行 marker，供 _existing_hook_usable 解析
+            # Issue #2028/#3579：固化元数据单行 marker，供 _existing_hook_usable 解析
             # （2028-02 解析多行内联代码恒 False 的教训，勿再回退）。
-            f"# hook-interpreter: {interpreter}",
-            f"# hook-module-path: {module_path}",
+            f"# hook-module-rel: {_hook_module_relpath()}",
+            f"# hook-module-root: {module_root}",
             f"# hook-repo-key: {repo_key}",
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
@@ -987,7 +1132,30 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             "fi",
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
             'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" < "$STDIN_TMP" || exit $?; fi',
-            f'{shlex.quote(interpreter)} -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
+            # Issue #3579：模块来源运行时按「部署态稳定根 → 当前 worktree 顶层」
+            # 解析，不引用安装时 in-flight issue worktree 的绝对路径。
+            'ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"',
+            # Issue #3579 QA 复审 Optional：解释器与 worker 实际解释器同源
+            # （scripts/start-worker.sh 的 GRAPE_PYTHON / .venv 前置）——
+            # GRAPE_PYTHON → 激活 venv → push worktree .venv → PATH python3；
+            # 全部运行时解析，缺失自动降级，不再因固化失效路径 exit 127。
+            'PY=""',
+            'if [ -n "$GRAPE_PYTHON" ] && [ -x "$GRAPE_PYTHON" ]; then PY="$GRAPE_PYTHON"; fi',
+            'if [ -z "$PY" ] && [ -n "$VIRTUAL_ENV" ] && [ -x "$VIRTUAL_ENV/bin/python3" ]; then '
+            'PY="$VIRTUAL_ENV/bin/python3"; fi',
+            'if [ -z "$PY" ] && [ -n "$ROOT" ] && [ -x "$ROOT/.venv/bin/python3" ]; then '
+            'PY="$ROOT/.venv/bin/python3"; fi',
+            'if [ -z "$PY" ]; then PY="$(command -v python3 2>/dev/null || true)"; fi',
+            'if [ -z "$PY" ]; then',
+            ('    echo "[branch-guard] WARNING 未找到可用的 python3 解释器'
+             '（GRAPE_PYTHON/VIRTUAL_ENV/.venv/PATH 均未解析到）；守卫已放行本次 push（fail-open）。'
+             '如需跳过本钩子可加 --no-verify" >&2'),
+            "    exit 0",
+            "fi",
+            # Issue #3579 QA 复审 Required：部署态守卫模块优先（module_root 稳定时），
+            # push worktree 顶层降为兜底；module_root 为空串即未记录稳定根。
+            f'"$PY" -c {shlex.quote(code)} {shlex.quote(repo_key)} "$ROOT" '
+            f'{shlex.quote(module_root)} < "$STDIN_TMP"',
             "",
         ]
         with open(hook_path, "w", encoding="utf-8") as f:

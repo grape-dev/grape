@@ -3945,6 +3945,21 @@ def mark_default_featured_any(names: list[str]) -> int:
         return int(getattr(c, "rowcount", 0) or 0)
 
 
+def count_unresolved_scene_skill_ref(scene_id: int) -> int:
+    """scene_skill_ref 中 skill_id<=0 的引用行数（mgmt 归属表的读原语，任意拓扑）。
+
+    为什么需要它：`scene_skill_ref` 归属 mgmt（configs/table_ownership.json），
+    runtime 进程直读会触发跨域读棘轮门禁（架构守护 A11）。runtime 侧的「绑定自愈」
+    判定一律走本原语：三库拓扑经 mgmt lib，单库/测试拓扑回落进程主库。
+    """
+    with _any_cursor() as c:
+        row = c.execute(
+            "SELECT COUNT(*) FROM scene_skill_ref "
+            "WHERE scene_id=? AND (skill_id IS NULL OR skill_id<=0)",
+            (int(scene_id),)).fetchone()
+    return int(row[0]) if row else 0
+
+
 def replace_scene_skill_ref_any(scene_id: int, refs: list[dict[str, Any]]) -> dict[str, int]:
     """重建某场景的技能引用：同一事务里先删后插（`INSERT OR IGNORE` 幂等）。
 

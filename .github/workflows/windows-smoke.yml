@@ -39,6 +39,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3874_worker_onboard.py tests/test_engine_model_2545.py tests/test_worker_install_model_gate_2545.py -v
+      - name: Worker install register-window tests (issue #3892)
+        # Issue #3892 QA 审查修复（Required#3）：新增用例
+        # tests/runtime/test_issue_3892_install_worker_register_window.py 此前未接入 CI，
+        # 其中 15 条 pwsh 行为用例在没有 PowerShell 的环境恒 skip，回归等于无门禁。
+        # windows-latest 自带 pwsh，静态守卫 + 行为用例全部生效（历史日志水位、
+        # 硬失败跳过主控交叉验证、回滚提示分支都在此被拦截）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3892_install_worker_register_window.py -v
+
 
   linux-backend:
     runs-on: ubuntu-latest
@@ -465,3 +475,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends nginx
           nginx -v
           python -m pytest tests/contracts/test_issue_3847_gateway_graceful.py -v
+      - name: Branch guard runtime resolution tests (issue #3579)
+        # Issue #3579 QA 复审（工作流审查·变更验证 Required）：pre-push 守卫钩子的
+        # 运行时解释器/模块解析用例此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245
+        # 均由 QA 要求补齐），模板改动红/绿只能靠提交者自证。接入 branch_guard 全量
+        # 回归（fail-open/fail-closed 边界、部署态优先加载、存量模板升级）。
+        # 注：test_issue_993 的两个 linked-push 用例在基线上即失败（与 #3579 无关，
+        # 历史问题另行跟踪），显式 deselect 保持门禁可绿，其余用例全部进门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3579_branch_guard_runtime_path.py \
+            tests/test_issue_2028_branch_guard_fail_open.py \
+            tests/runtime/test_issue_2292_branch_guard_canonical_lock.py \
+            tests/runtime/test_issue_2314_branch_guard_fast_forward.py \
+            tests/runtime/test_issue_2514_workspace_binding.py \
+            tests/runtime/test_issue_2706_branch_guard_lease_fallback.py \
+            tests/runtime/test_issue_2933_readonly_log_failopen.py \
+            tests/runtime/test_issue_993_branch_guard.py -v \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard

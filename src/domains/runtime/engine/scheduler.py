@@ -30,6 +30,16 @@ from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
 
+# autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
+# 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
+# 表不在 → 1146「Table doesn't exist」，execution 永远建不出来（定时触发在 worker
+# 进程不受影响）。凡操作 autopilot_executions 一律走 db_registry.cursor_for("runtime")：
+# 域路由（own DSN）→ runtime 域连接（autocommit，写后无需 commit）；
+# 本地路由（本域进程/单库）→ 进程库 + write=True 自动 commit。
+# 写路径禁止再显式 db.commit()——那会提交进程（mgmt）连接上其它线程
+# 的未完成事务（架构守护 3.0 B1：撕裂事务 / sqlite 下写丢）。
+from src.kernel.db_registry import cursor_for as _rt_cursor_for
+
 _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
 
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
@@ -873,12 +883,10 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
         # Issue #1546：执行记录直接持有 agent_tasks.id，反查不再依赖 event_seq 撞号。
         # 回写失败只告警，不影响派发主流程（历史空值行走受约束兜底）。
         try:
-            with db_lock:
-                _c = db.cursor()
+            with _rt_cursor_for("runtime", write=True) as _c:
                 _c.execute(
                     "UPDATE autopilot_executions SET agent_task_id=? WHERE id=?",
                     (str(task_id), exec_id))
-                db.commit()
         except Exception as _at_e:
             log.warning(f"Autopilot exec {exec_id}: persist agent_task_id failed: {_at_e}")
 
@@ -1155,8 +1163,7 @@ async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
 def _exec_task_id(exec_id: int) -> int:
     """exec_id → task_id 反查（通知挂载点用）；查不到返回 0（_notify_subscribers 内 JOIN 不到行 → noop）。"""
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             row = c.execute("SELECT task_id FROM autopilot_executions WHERE id=?",
                             (exec_id,)).fetchone()
         return row[0] if row else 0
@@ -1175,11 +1182,9 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
     """
     try:
         # 抢占通知权（幂等）：失败=已通知或表缺列
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime", write=True) as c:
             cur = c.execute("UPDATE autopilot_executions SET notified=1 WHERE id=? AND notified=0",
                             (exec_id,)).rowcount
-            db.commit()
         if not cur:
             return
         # 查订阅者 + 任务信息（JOIN 取 name/repo_key；订阅表缺失时抛错被外层捕获）
@@ -1235,6 +1240,8 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
     Issue #3800：`error_code` 记录失败分类（`ENGINE_OFFLINE` / `BINDING_STALE` / 空=普通失败），
     调度收口据此改走退避/熔断通道。列缺失（迁移未跑的极端场景）时降级为不写该列，
     保证结果回写本身不因新列而失败。
+    （PR #2075：连接走 cursor_for("runtime", write=True)——mgmt 进程手动触发路径
+    下进程库里没有 autopilot_executions；本地路由由 write=True 自动提交。）
     """
     def _write(with_code: bool) -> None:
         fields = ["status=?"]
@@ -1255,8 +1262,7 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
             fields.append("completed_at=?")
             vals.append(datetime.now(timezone.utc).isoformat())
         vals.append(exec_id)
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime", write=True) as c:
             # 终态幂等：已 success/failed/cancelled 的执行不再覆盖——
             # 用户杀死(cancelled)后，轮询/迟到的完成回写不得把状态洗掉
             _cur = c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
@@ -1266,8 +1272,6 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
                 f"UPDATE autopilot_executions SET {', '.join(fields)} WHERE id=?",
                 vals
             )
-            db.commit()
-
     try:
         _write(with_code=bool(error_code))
     except Exception as e:
@@ -1326,8 +1330,7 @@ def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
     `error` 回推 ENGINE_OFFLINE / BINDING_STALE，保证退避/熔断链路不被缺列整条断掉。
     """
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             try:
                 row = c.execute(
                     "SELECT status, error, error_code FROM autopilot_executions WHERE id=?",
@@ -1556,15 +1559,13 @@ def _backoff_active(task: dict, now=None) -> bool:
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
     """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
     now_str = datetime.now().astimezone().isoformat()
-    with db_lock:
-        c = db.cursor()
+    with _rt_cursor_for("runtime", write=True) as c:
         c.execute(
             "INSERT INTO autopilot_executions "
             "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
             "VALUES (?, 'running', 0, ?, ?, ?, ?)",
             (task_id, now_str, now_str, agent_type, params_json or "")
         )
-        db.commit()
         return c.lastrowid
 
 def _update_execution(exec_id: int, status: str, result: str = "", error: str = "",
@@ -1869,8 +1870,10 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
     while _time.time() - _start < timeout:
         await asyncio.sleep(poll_interval)
         try:
-            with db_lock:
-                c = db.cursor()
+            # agent_tasks 同归 runtime：域游标下 exec 行与 agent_tasks 反查同库，
+            # _get_exec_agent_task 复用同一游标（mgmt 进程手动触发时两表都只在
+            # runtime 库——旧代码这里在 mgmt 进程下同样会 1146）。
+            with _rt_cursor_for("runtime") as c:
                 _erow = c.execute(
                     "SELECT agent_task_id, started_at, created_at "
                     "FROM autopilot_executions WHERE id=?",
@@ -2481,8 +2484,7 @@ def _reap_zombie_executions() -> None:
     - 收口 success 前对部署类任务做 evidence 校验（版本指纹/健康检查，见 deploy_evidence.py）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_cursor_for("runtime") as c:
             c.execute(
                 "SELECT id, agent_task_id, started_at, created_at "
                 "FROM autopilot_executions "
