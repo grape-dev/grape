@@ -82,6 +82,14 @@ _IDLE_RUNNING_TXT = ("中断：running 任务长时间无执行消息（complete
 
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
+# pending_self_report 任务的执行流活跃窗：主控重启会把「worker 还在跑」的 REMOTE 任务转成
+# pending_self_report（等 worker 自报），此后任务不再属于 queued/dispatched/running。
+# 事件层回收若只认这三个状态（见 sweep_stuck_events_once），就会把仍在产执行流的事件判
+# failed —— 实测 2026-11-24：coding 事件 18:12 被判失败，同一任务 18:15 仍在写消息。
+# 这里按 task_messages 活跃度补判（口径与任务侧活跃流豁免一致，默认 600s）。
+_PENDING_STREAM_ACTIVE_WINDOW_SECONDS = int(
+    os.environ.get("PENDING_STREAM_ACTIVE_WINDOW_SECONDS", "600"))
+
 # 同一判定的「成功」方向：agent 已经自报 exit_code=0，只是主控没来得及写终态
 # （tasks/complete 504、主控重启等）。这不是中断，必须收敛成 completed。
 _DUAL_SIGNAL_OK_TXT = "已完成：agent 自报成功（stream_ended+self_reported，sweeper 补偿收敛）"
@@ -502,6 +510,55 @@ def _stale_session_dirs(ttl: float) -> list[str]:
 
     return out
 
+def _pending_self_report_live_seqs(cursor, seqs) -> set:
+    """pending_self_report 事件里「worker 仍在产执行流」的 seq 集合（活跃窗内）。
+
+    判据与任务侧活跃流豁免同源：task_messages 最新一条 created_at 距 now <
+    _PENDING_STREAM_ACTIVE_WINDOW_SECONDS。数据缺失（无消息/解析失败/查询异常）一律
+    不豁免：宁可照旧回收，也不留一个永远判不死的僵尸事件。
+    """
+    if not seqs:
+        return set()
+    try:
+        ph = ",".join("?" * len(seqs))
+        cursor.execute(
+            f"SELECT event_seq, id FROM agent_tasks WHERE event_seq IN ({ph}) "
+            "AND status='pending_self_report'", seqs)
+        pend = [(r[0], r[1]) for r in cursor.fetchall() if r[0] is not None]
+        if not pend:
+            return set()
+        ids = list(dict.fromkeys(r[1] for r in pend))
+        ph_ids = ",".join("?" * len(ids))
+        cursor.execute(
+            f"SELECT task_id, created_at FROM task_messages WHERE task_id IN ({ph_ids}) "
+            "ORDER BY id DESC", ids)
+        from datetime import datetime, timezone
+        from src.domains.runtime.engine.health import parse_dt
+        now_ts = datetime.now(timezone.utc).timestamp()
+        latest = {}
+        for tid, created_at in cursor.fetchall():
+            if tid in latest:
+                continue  # 已取到该任务最新一条（ORDER BY id DESC）
+            latest[tid] = created_at
+        out = set()
+        for seq, tid in pend:
+            raw = (latest.get(tid) or "").strip()
+            if not raw:
+                continue
+            try:
+                ts = parse_dt(raw)
+            except Exception:
+                ts = None
+            if ts is None:
+                continue
+            if now_ts - float(ts) < _PENDING_STREAM_ACTIVE_WINDOW_SECONDS:
+                out.add(seq)
+        return out
+    except Exception as e:
+        log.warning(f"sweeper: pending stream activity probe failed: {e}")
+        return set()
+
+
 def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30) -> int:
     """兜底回收：running 事件超时且无 agent_tasks 活跃任务支撑 → 置 failed（防卡 running 僵尸）。
 
@@ -541,6 +598,10 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                 "AND status IN ('queued','dispatched','running')",
                 seqs)
             live = {r[0] for r in c.fetchall()}
+            # pending_self_report 不是活跃状态，但 worker 可能在继续跑（主控重启把执行中的
+            # REMOTE 任务转成 pending_self_report，等 worker 自报）。用 task_messages 最新
+            # 写入距 now < 活跃窗补判，避免「任务在写消息、事件先被判 failed」的次序颠倒。
+            live |= _pending_self_report_live_seqs(c, seqs)
         dead = [s for s in seqs if s not in live]
         if dead:
             ph2 = ",".join("?" * len(dead))
