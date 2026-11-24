@@ -12167,3 +12167,70 @@ def stamp_repo_bot_credential_backfill() -> dict:
         db.commit()
     return {"version": REPO_BOT_BACKFILL_VERSION, "name": REPO_BOT_BACKFILL_NAME,
             "stamped_at": stamped_at, "already": already}
+
+
+# ===== Issue #3794: agent_tasks(event_seq, status) 组合索引 =====
+# QA #1981 C1：该索引原先写进老轨 `_create_indexes()`，而老轨只在「版本表为空首跑」或
+# 「执行器异常兜底」时执行；存量库已盖 legacy-stamp，启动时完全不跑，所以 1205 根因之一
+# （NOT EXISTS 复核逐行扫 agent_tasks 热表）在生产实际未消除；三库模式下 runtime 域进程
+# 只跑登记迁移（allow_legacy=False），更是永远到不了那段。改注册式迁移后，存量库下次启动
+# 即补齐并盖章（幂等：IF NOT EXISTS）。
+def _index_present(c, table: str, index_name: str) -> bool:
+    """索引是否已存在（MySQL 查 information_schema，SQLite 查 PRAGMA）。"""
+    try:
+        if _mysql_backend():
+            row = c.execute(
+                "SELECT 1 FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? LIMIT 1",
+                (table, index_name)).fetchone()
+            return bool(row)
+        return any(r[1] == index_name
+                   for r in c.execute(f"PRAGMA index_list('{table}')").fetchall())
+    except Exception as e:  # noqa: BLE001 - 判不出存在性按「不存在」处理，DROP 仍会被幂等兜住
+        log.debug(f"_index_present({table}.{index_name}) probe failed: {e}")
+        return False
+
+
+def _fn_add_agent_tasks_event_seq_status_index() -> None:
+    """Issue #3794：补 (event_seq, status) 组合索引，并回收左前缀冗余索引。
+
+    只写 SQLite 通用语法：MySQL TEXT 前缀由 mysql_compat 在 CREATE INDEX 特判自动补 (191)；
+    event_seq 为 INTEGER 不受前缀限制。索引建不出来必须 raise（不盖章，下次启动重试）——
+    吞掉异常会「版本号盖死、热表仍逐行扫」，正是本次要修的 1205 根因。
+    """
+    from src.kernel.session_manager import db as _db, db_lock
+    # agent_tasks 属 runtime 域：三库模式下必须在该域连接上执行（mgmt 连接里没有该表）。
+    conn = _migration_conn("runtime", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        try:
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event_seq_status "
+                "ON agent_tasks(event_seq, status)")
+        except Exception:
+            conn.rollback()
+            raise
+        # 左前缀冗余索引回收（QA #1981 M3）：组合索引已覆盖 event_seq 单列查询，保留旧索引
+        # 只会让热表每次状态回写多维护一棵树。不走 _destructive_ddl 的 min_code_version
+        # 门槛：旧版本代码只按 event_seq 查询，新组合索引是它的超集，删除不改任何查询语义，
+        # 不存在蓝绿共存风险。
+        if _index_present(c, "agent_tasks", "idx_agent_tasks_event"):
+            try:
+                if _mysql_backend():
+                    # MySQL 的 DROP INDEX 必须带 ON 子句，SQLite 不允许带。
+                    c.execute("DROP INDEX idx_agent_tasks_event ON agent_tasks")
+                else:
+                    c.execute("DROP INDEX idx_agent_tasks_event")
+                log.info("dropped redundant idx_agent_tasks_event (composite index covers prefix)")
+            except Exception as e:  # noqa: BLE001 - 冗余索引删不掉不该阻断索引补齐
+                log.warning(f"drop redundant idx_agent_tasks_event failed: {e}")
+        conn.commit()
+
+
+register_migration(
+    version="202611240003",
+    name="add-agent-tasks-event-seq-status-index",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_add_agent_tasks_event_seq_status_index,
+)
