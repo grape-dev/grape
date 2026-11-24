@@ -579,3 +579,17 @@ jobs:
             tests/scripts/test_check_category_slugs.py \
             tests/api/test_issue_3796_category_slug_startup.py \
             tests/mgmt/test_issue_3796_scene_category_backfill.py -v
+
+      - name: "Event guard TTL purge + event_seq/status index regressions (issue #3794)"
+        # Issue #3794 QA 审查修复（Required）：新增用例 test_issue_3794_guard_purge.py
+        # （分批清理 / §33 复核 / 1205+1213 重试 / keyset 头阻塞）与组合索引注册式迁移
+        # 用例 test_issue_3794_event_seq_status_index.py 此前未接入 linux-backend 门禁
+        # （先例 #2133/#2245/#3167/#3490/#3699/#3758 均由 QA 要求补齐）；本 job 逐文件
+        # 列举、无全量 pytest 兜底，守卫自愈与索引落点回退只能靠人工发现。
+        # migration_track_guard 一并跑：本次新增「老轨索引 DDL 冻结」守卫。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3794_guard_purge.py \
+            tests/api/test_issue_3794_event_seq_status_index.py \
+            tests/api/test_migration_track_guard.py -v
