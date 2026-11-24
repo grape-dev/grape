@@ -95,7 +95,7 @@ def _assert_autopilot_executions_table() -> None:
     raise AutopilotSchemaError(
         f"{_AUTOPILOT_EXECUTIONS_TABLE} 表缺失（期望域={_AUTOPILOT_EXECUTIONS_DOMAIN}）："
         "当前库不存在该表，autopilot 无法写入执行记录。请确认 worker/event 运行在 "
-        "runtime 库，并已完成 202611230006 create-autopilot-executions-table 迁移")
+        "runtime 库，并已完成 202611240003 create-autopilot-executions-table 迁移")
 
 
 def _is_missing_table_error(exc: BaseException) -> bool:

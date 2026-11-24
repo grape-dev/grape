@@ -12,13 +12,14 @@ import re
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
-# 复审 R1：版本号按目标分支顺延（202611220001 已被 chat-conversations-status-index 占用）；
-# 复审 R2：202611230003 又与基线 #3800（autopilot-task-failure-state-columns）撞号，
-# 顺延至 202611230006（202611230004 已用、202611230005 被 #1981/#3794 预定）。
+# R3：基线已发布最大号 202611230012，arch 门禁要求新增迁移必须更大；
+# 选用未占用的 202611240003（202611240001/002 已用）。
 # 用例一律按 name 定位迁移，版本号变更只改这一处常量。
 MIGRATION_NAME = "create-autopilot-executions-table"
-MIGRATION_VERSION = "202611230006"
+MIGRATION_VERSION = "202611240003"
 
 
 def _migration():
@@ -73,6 +74,33 @@ def test_migration_is_idempotent_on_sqlite(monkeypatch):
         idx = {r[1] for r in c.execute("PRAGMA index_list(autopilot_executions)").fetchall()}
         assert {"idx_autopilot_exec_task", "idx_autopilot_exec_status",
                 "idx_ap_exec_agent_task"} <= idx
+    finally:
+        conn.close()
+
+
+def test_migration_post_check_blocks_stamp_when_table_missing(monkeypatch):
+    """复审加固：fn 被 _owned_skip 跳过（正常返回）时，缺表必须 post_check 失败不盖章。"""
+    from src.api import db_setup
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        monkeypatch.setattr(db_setup, "_migration_conn",
+                            lambda domain, default=None: conn)
+        monkeypatch.setattr(db_setup, "db", conn)
+        monkeypatch.setattr(db_setup, "_owned_skip",
+                            lambda table, what="": True)
+
+        mig = _migration()
+        assert getattr(mig, "post_check", None) is not None
+
+        mig.fn()  # 模拟 skip：正常返回但未建表
+        with pytest.raises(RuntimeError):
+            mig.post_check()
+
+        monkeypatch.setattr(db_setup, "_owned_skip",
+                            lambda table, what="": False)
+        mig.fn()
+        mig.post_check()  # 表建成后通过，才会盖章
     finally:
         conn.close()
 

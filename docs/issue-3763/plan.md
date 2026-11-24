@@ -32,10 +32,8 @@ mgmt 进程
    `_AUTOPILOT_EXECUTIONS_DDL`（`CREATE TABLE IF NOT EXISTS`）；建表后用
    `_ensure_column` 幂等补齐 `agent_type`/`findings_json`/`agent_task_id`/
    `params_json`/`notified`；`CREATE INDEX IF NOT EXISTS` 补齐 task_id/status/
-   agent_task_id 索引；`domains=("runtime",)`，版本号取目标分支未占用的 `202611230006`
-   （R2 换号：`202611230003` 已被基线 #3800 `autopilot-task-failure-state-columns` 占用，
-   撞号守卫只 log.error 不抛、runner 按 version 判已执行会永久跳过本建表迁移；
-   `202611230004` 已用、`202611230005` 已被 #1981/#3794 预定）。
+   agent_task_id 索引；`domains=("runtime",)`，版本号取 `202611240003`（R3：基线已发布最大号
+   `202611230012`，arch 门禁要求新增迁移必须大于它；`202611240001/002` 已用）。
 2. **自检**：`scheduler.py` 新增 `AutopilotSchemaError`、`_autopilot_executions_table_present`
    （SQLite `sqlite_master` / MySQL `information_schema`）与
    `_assert_autopilot_executions_table`（缺失抛含表名 `autopilot_executions` 与

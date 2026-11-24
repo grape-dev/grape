@@ -3361,16 +3361,33 @@ def _fn_create_autopilot_executions_table() -> None:
         conn.commit()
 
 
+def _postcheck_autopilot_executions_table() -> None:
+    """Issue #3763 复审加固：autopilot_executions 真在 runtime owner 库才盖章。
+
+    执行器对「fn 正常返回」即盖章。但本迁移在非 runtime owner 进程会被
+    `_owned_skip` 直接 return（或三库 DSN 缺失时 `_migration_conn` 回落进程库），
+    两种情况下表都没建，台账却被写入 → runtime 进程因「已盖章」不再执行，
+    表永久缺失。此处断言基表存在，缺表 raise 不盖章，交 owner 进程下次启动补齐。
+    """
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
+        if not _base_table_present(c, "autopilot_executions"):
+            raise RuntimeError(
+                "202611240003 post_check 未收敛：runtime owner 库缺 autopilot_executions "
+                "基表（_owned_skip 跳过 / 回落进程库未命中），不盖章，待 owner 进程重试")
+
+
 register_migration(
-    # 复审 R2 换号：202611220001 与 chat-conversations-status-index 撞号后曾用
-    # 202611230003，但基线 #3800（autopilot-task-failure-state-columns）已注册同一
-    # 版本号——撞号守卫只 log.error 不抛，runner 按 version 判已执行 → 本建表迁移被
-    # 永久跳过；202611230004/#3800 已用、202611230005 已被 #1981/#3794 预定 → 顺延 006。
-    version="202611230006",
+    # R3 换号：基线已发布最大号为 202611230012（tests/arch/test_migration_version_integrity.py
+    # 强制新增迁移必须大于该值），早前顺延到的 202611230006 落在历史区间内会被门禁拦下；
+    # 202611240001/002 已用，顺延到未占用的 202611240003（名字/语义不变，仍只登记 runtime 域）。
+    version="202611240003",
     name="create-autopilot-executions-table",
     kind="safe",
     domains=("runtime",),
     fn=_fn_create_autopilot_executions_table,
+    post_check=_postcheck_autopilot_executions_table,
 )
 
 
