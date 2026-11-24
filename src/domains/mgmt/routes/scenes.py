@@ -1047,13 +1047,20 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     # 绑定兜底：市场模板的 nodes 里 skill_id 可能为 0，写入前按名字补全，
     # 否则派单/运行期按 id 解析会落空（表现为场景跑不起来）。
     try:
+        def _node_skill_id(_n) -> int:
+            """模板里的 skill_id 可能是非数字（脏数据），与 _pick_node_skill_id 同口径防护。"""
+            try:
+                return int(_n.get("skill_id") or 0)
+            except (TypeError, ValueError):
+                return 0
+
         _need = [n.get("skill", "") for n in (nodes or [])
-                 if n.get("skill") and not int(n.get("skill_id") or 0)]
+                 if n.get("skill") and not _node_skill_id(n)]
         if _need:
             _name_to_id = _rt_scenes.skill_ids_by_names(_need)   # 已限定 official/repo
             _filled = 0
             for _n in (nodes or []):
-                if _n.get("skill") and not int(_n.get("skill_id") or 0):
+                if _n.get("skill") and not _node_skill_id(_n):
                     _sid = _name_to_id.get(_n.get("skill"))
                     if _sid:
                         _n["skill_id"] = _sid
