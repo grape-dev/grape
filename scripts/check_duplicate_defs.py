@@ -7,6 +7,9 @@
 规则：单个模块顶层（module body）同名 FunctionDef/AsyncFunctionDef/ClassDef 计数 > 1 即 FAIL。
 基线固定为 0——重名没有合法场景（`@overload` 桩本仓未使用；条件定义属于设计缺陷）。
 
+判定与取舍依据见 `docs/issue-4158/plan.md`（逐符号「择一保留」表 + no_ctx 指标口径）；
+import 别名/局部重定义的姊妹门禁是 `scripts/check_f811.py`。
+
 用法：
     python3 scripts/check_duplicate_defs.py          # 校验（CI/make lint）
     python3 scripts/check_duplicate_defs.py src      # 指定扫描根（默认 src）
