@@ -30,6 +30,13 @@ from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
 
+# autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
+# 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
+# 表不在 → 1146「Table doesn't exist」，execution 永远建不出来（定时触发在 worker
+# 进程不受影响）。凡操作 autopilot_executions 一律走 runtime 域游标：own DSN 时
+# 指向 runtime 库，单库形态回落进程库（行为不变，worker 进程也照旧）。
+from src.kernel.domain_db import cursor as _rt_domain_cursor
+
 _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
 
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
@@ -798,12 +805,10 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
         # Issue #1546：执行记录直接持有 agent_tasks.id，反查不再依赖 event_seq 撞号。
         # 回写失败只告警，不影响派发主流程（历史空值行走受约束兜底）。
         try:
-            with db_lock:
-                _c = db.cursor()
+            with _rt_domain_cursor("runtime") as _c:
                 _c.execute(
                     "UPDATE autopilot_executions SET agent_task_id=? WHERE id=?",
                     (str(task_id), exec_id))
-                db.commit()
         except Exception as _at_e:
             log.warning(f"Autopilot exec {exec_id}: persist agent_task_id failed: {_at_e}")
 
@@ -998,8 +1003,7 @@ async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
 def _exec_task_id(exec_id: int) -> int:
     """exec_id → task_id 反查（通知挂载点用）；查不到返回 0（_notify_subscribers 内 JOIN 不到行 → noop）。"""
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_domain_cursor("runtime") as c:
             row = c.execute("SELECT task_id FROM autopilot_executions WHERE id=?",
                             (exec_id,)).fetchone()
         return row[0] if row else 0
@@ -1018,8 +1022,7 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
     """
     try:
         # 抢占通知权（幂等）：失败=已通知或表缺列
-        with db_lock:
-            c = db.cursor()
+        with _rt_domain_cursor("runtime") as c:
             cur = c.execute("UPDATE autopilot_executions SET notified=1 WHERE id=? AND notified=0",
                             (exec_id,)).rowcount
             db.commit()
@@ -1090,8 +1093,7 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
         vals.append(datetime.now(timezone.utc).isoformat())
     vals.append(exec_id)
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_domain_cursor("runtime") as c:
             # 终态幂等：已 success/failed/cancelled 的执行不再覆盖——
             # 用户杀死(cancelled)后，轮询/迟到的完成回写不得把状态洗掉
             _cur = c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
@@ -1179,8 +1181,7 @@ def _compute_next_run(cron_expr: str) -> str:
 def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
     """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
     now_str = datetime.now().astimezone().isoformat()
-    with db_lock:
-        c = db.cursor()
+    with _rt_domain_cursor("runtime") as c:
         c.execute(
             "INSERT INTO autopilot_executions "
             "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
@@ -1305,8 +1306,10 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
     while _time.time() - _start < timeout:
         await asyncio.sleep(poll_interval)
         try:
-            with db_lock:
-                c = db.cursor()
+            # agent_tasks 同归 runtime：域游标下 exec 行与 agent_tasks 反查同库，
+            # _get_exec_agent_task 复用同一游标（mgmt 进程手动触发时两表都只在
+            # runtime 库——旧代码这里在 mgmt 进程下同样会 1146）。
+            with _rt_domain_cursor("runtime") as c:
                 _erow = c.execute(
                     "SELECT agent_task_id, started_at, created_at "
                     "FROM autopilot_executions WHERE id=?",
@@ -1423,8 +1426,7 @@ async def _execute_task(task: dict):
             await loop.run_in_executor(None, _execute_autopilot_agent, task["repo_key"], task, exec_id)
 
             # 检查执行结果
-            with db_lock:
-                c = db.cursor()
+            with _rt_domain_cursor("runtime") as c:
                 row = c.execute("SELECT status, error FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
             exec_status = row[0] if row else "unknown"
 
@@ -1850,8 +1852,7 @@ def _reap_zombie_executions() -> None:
     - 收口 success 前对部署类任务做 evidence 校验（版本指纹/健康检查，见 deploy_evidence.py）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
+        with _rt_domain_cursor("runtime") as c:
             c.execute(
                 "SELECT id, agent_task_id, started_at, created_at "
                 "FROM autopilot_executions "
