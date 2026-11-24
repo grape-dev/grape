@@ -1,6 +1,7 @@
 {
   "loading": "加载中...",
   "load_failed": "加载失败",
+  "invalid_param": "缺少或无效的技能 ID",
   "save": "保存",
   "cancel": "取消",
   "confirm": "确认",

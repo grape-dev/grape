@@ -48,6 +48,7 @@ var I18N = (function () {
       common: {
         loading: '加载中...',
         load_failed: '加载失败',
+        invalid_param: '缺少或无效的技能 ID',
         save: '保存',
         cancel: '取消',
         confirm: '确认',
@@ -350,6 +351,7 @@ var I18N = (function () {
       common: {
         loading: 'Loading...',
         load_failed: 'Failed to load',
+        invalid_param: 'Missing or invalid skill ID',
         save: 'Save',
         cancel: 'Cancel',
         confirm: 'Confirm',

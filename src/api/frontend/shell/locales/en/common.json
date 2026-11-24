@@ -1,6 +1,7 @@
 {
   "loading": "Loading...",
   "load_failed": "Load failed",
+  "invalid_param": "Missing or invalid skill ID",
   "save": "Save",
   "cancel": "Cancel",
   "confirm": "Confirm",

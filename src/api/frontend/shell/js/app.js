@@ -221,8 +221,21 @@ const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene
     return state;
   }
 
+  // Issue #4260：技能详情必需 param。空值/undefined/null 三个哨兵字面量视为缺参，
+  // 用于 nav 守卫与 _pushHistory 半截 hash 收口；其余（含名称深链）原样透传。
+  function _isMissingSkillParam(param) {
+    return param === undefined || param === null || param === '' ||
+      param === 'undefined' || param === 'null';
+  }
+
   function _pushHistory(view, param) {
     if (_replaying) return;
+    // Issue #4260：skill 视图缺参不生成半截 #skill（刷新/复制链接会复现 undefined 请求），
+    // 从生成侧改写为 #skills。
+    if (view === 'skill' && _isMissingSkillParam(param)) {
+      view = 'skills';
+      param = null;
+    }
     const hash = '#' + view + (param !== undefined && param !== null ? '/' + encodeURIComponent(param) : '');
     if (window.location.hash === hash) return; // 同一视图不重复入栈
     try {
@@ -2501,6 +2514,15 @@ function loadAgentTypes() {
       _stopEventPoll();
     }
 
+    // Issue #4260：技能详情缺 id（空/undefined/null）时回退技能列表，绝不以字面量
+    // undefined 请求 /api/skills/by-id/undefined。守卫必须在任何取数之前 return；
+    // popstate 重放复用本分支，天然覆盖刷新/前进后退。
+    if (view === 'skill' && _isMissingSkillParam(param)) {
+      showToast(I18N.t('common.invalid_param') || '缺少或无效的技能 ID，已返回技能列表');
+      nav('skills');
+      return;
+    }
+
     // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
     if (view === 'skill') {
       const _prev = window.history.state;
@@ -2829,7 +2851,18 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs)
+        .then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); })
+        .catch(e => {
+          if (e.name === 'AbortError' && e.silent) return;
+          if (window._currentView !== 'skill') return;
+          // Issue #4260：400=参数错误（缺少/无效的技能 ID），必须与 404「技能不存在」文案分离。
+          if (e.status === 400) {
+            pc.innerHTML = '<div class="error">' + (I18N.t('common.invalid_param') || '缺少或无效的技能 ID') + '</div>';
+            return;
+          }
+          pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
+        });
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = I18N.t('app.current_project');
