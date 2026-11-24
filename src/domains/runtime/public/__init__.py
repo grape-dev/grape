@@ -7097,17 +7097,17 @@ def exec_agent_task(exec_id, agent_task_id: str = "", started_at: str = "",
     agent_task_id 非空按主键直查，为空走受约束兜底。
     """
     from src.domains.runtime.engine.scheduler import _get_exec_agent_task as _impl
-    # 与内部实现同源：_get_exec_agent_task 原本就吃调用方游标，历史上调用方一直用
-    # 进程库（session_manager.db）。这里同样用进程库，保证 agent_tasks 在同一库内解析
-    # （曾经先试 db_registry.connection_for("runtime")，在单库测试环境会连到另一个库、
-    # 查不到数据而返回 None —— 契约测试随即红）。
-    from src.kernel.session_manager import db as _conn
+    # agent_tasks 归 runtime 域：调用方可能是 mgmt 进程（手动触发/管理台），
+    # 进程库是 mgmt 库、没有该表 → 每次解析都刷 1146（实测启动扫描一批 68 条）。
+    # 统一走 db_registry 的域游标：域路由 → runtime 连接；单库/本域 → 进程主库
+    # （与历史行为一致，测试环境仍解析同一库）。
+    from src.kernel.db_registry import cursor_for as _cursor_for
 
-    cur = _conn.cursor()
-    row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
-    if not row:
-        return None
-    cols = [d[0] for d in (cur.description or [])]
+    with _cursor_for("runtime") as cur:
+        row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
+        if not row:
+            return None
+        cols = [d[0] for d in (cur.description or [])]
     return dict(zip(cols, row)) if cols else None
 
 # ── DevStage 云开发环境客户端（2026-11-18）──────────────────────────────────
