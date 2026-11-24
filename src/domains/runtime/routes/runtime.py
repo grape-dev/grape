@@ -714,7 +714,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             if not _seeded:
                 try:
                     from src.domains.runtime.engine.role_caps import ensure_role_caps as _ensure_rc
-                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set, source="probe")
+                    _ensure_rc(c, rid, declared=_declared, user_set=_user_set, source="register")
                 except Exception as _erc:
                     log.warning(f"runtime_register: role caps ensure failed rid={rid}: {_erc}")
             # Issue #646：标签行同步 engine_uid（引用切换，孤儿防护）

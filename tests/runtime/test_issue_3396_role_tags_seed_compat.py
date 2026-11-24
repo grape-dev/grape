@@ -196,6 +196,31 @@ def test_re_register_does_not_resurrect_declared_disabled_roles():
     assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
 
 
+def test_register_seed_skips_whole_group_when_sibling_role_disabled():
+    """QA 第 6 轮 Required ②：声明 ['chat','sre'] 且已存在停用 sre 行 → 整组跳过。
+
+    旧 seed 逐条 INSERT：chat 先落 enabled=1，sre 撞 (runtime_id, tag) 唯一键
+    1062 被整体吞成 log.warning → 半组启用、调用方却以为没播种。修复后只要
+    存在任何角色行（含 enabled=0）就整组不动，由 ensure_role_caps 收口。
+    """
+    client = _client()
+    token = _make_token("b3396r-16")
+    rid = _register(client, token, "b3396r-dev16", {"name": "codearts", "role_tags": ["sre"]})
+    assert _role_caps(rid) == ["sre"]
+    with db_lock:
+        db.cursor().execute(
+            "UPDATE engine_capabilities SET enabled=0 WHERE runtime_id=? AND tag='sre'", (rid,))
+        db.commit()
+    assert _role_caps(rid) == []
+    _register(client, token, "b3396r-dev16",
+              {"name": "codearts", "role_tags": ["chat", "sre"]})
+    assert _role_caps(rid) == [], "声明组被部分启用（chat 落了 enabled=1）"
+    with db_lock:
+        rows = db.cursor().execute(
+            "SELECT tag, enabled FROM engine_capabilities WHERE runtime_id=?", (rid,)).fetchall()
+    assert [tuple(x) for x in rows if ":" not in x[0]] == [("sre", 0)], rows
+
+
 def test_user_set_tags_are_not_overwritten():
     """tags_user_set=1（UI 改过）→ 声明的 role_tags 不覆盖用户配置。"""
     client = _client()
