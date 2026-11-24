@@ -6,7 +6,7 @@ issue2761-skill-classification-columns 盖章，而该迁移无 post_check —�
 `grape_t_cloud_sandboxes` 只能靠 mgmt 域误建的空表顶替（#3527 空表遮蔽）。
 
 本文件钉住四层：
-1. renumber：旧号 202611180001 不再注册；新号 202611230010 以
+1. renumber：旧号 202611180001 不再注册；新号 202611240002 以
    name=ensure-cloud-sandboxes-in-runtime、domains=("runtime",)、post_check 注册；
 2. post_check 三态：缺表 / 缺索引 → raise（不盖章）；表 + 三索引在位 → 通过；
 3. 撞号对照（对照 db_setup 守卫语义）：带 post_check 的同号不同名迁移进
@@ -25,7 +25,7 @@ from src.api import db_setup as D
 from src.domains.runtime.migrations import ensure_cloud_sandboxes_table as mig
 
 OLD_VERSION = "202611180001"
-NEW_VERSION = "202611230010"
+NEW_VERSION = "202611240002"
 MIG_NAME = "ensure-cloud-sandboxes-in-runtime"
 STAMPED_OTHER_NAME = "issue2761-skill-classification-columns"
 
@@ -174,7 +174,7 @@ def test_registry_versions_unique():
 
 def test_existing_ledger_old_row_preserved_new_row_stamped(tmp_path, monkeypatch):
     """存量库（202611180001=issue2761 旧行在）启动：新号 pending 执行、旧行保留、
-    台账新增 202611230010=ensure-cloud-sandboxes-in-runtime，表与三索引真实在位。"""
+    台账新增 202611240002=ensure-cloud-sandboxes-in-runtime，表与三索引真实在位。"""
     conn = sqlite3.connect(str(tmp_path / "mig.db"))
     try:
         conn.execute(D._SCHEMA_MIGRATIONS_DDL)

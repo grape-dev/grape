@@ -22,9 +22,9 @@
 
 ## 期望行为（In Scope）
 
-1. `MIGRATION["version"]` 由 `202611180001` 改为未占用号 `202611230010`
-   （已核 `202611230001/002` 被技能分类切换占用、`003/004` 被 autopilot 失败状态列
-   占用，`202611230010` 全仓未占用且与同段留间隔）；文件头 docstring、
+1. `MIGRATION["version"]` 由 `202611180001` 改为未占用号 `202611240002`
+   （须大于已发布基线 `max_version=202611230012`；`202611240001` 已被
+   autopilot-custom-fields-cleanup 占用，`202611240002` 全仓未占用）；文件头 docstring、
    `[DDL_SKIP]`/索引跳过/就位日志里的旧号一并替换。
 2. 新增 `_postcheck_cloud_sandboxes()`：校验 `grape_t_cloud_sandboxes` 表与
    `idx_cloud_sandboxes_repo/state/task` 三索引存在，以 `post_check=` 注册，使同号
@@ -38,13 +38,16 @@
 - 不改 db_setup 撞号守卫的 fail-safe 语义（无 `post_check` 仍只报错不修）。
 - 不删除存量库历史盖章行 `202611180001=issue2761-skill-classification-columns`。
 - 不处理 #3527 的 mgmt 空表遮蔽。
-- 不刷新 `tests/arch/migration_versions_baseline.json`（按其 note 需发布评审单独提交；
-  该基线测试在改动前已因 #3648 renumber 处于红态，PR 中如实说明）。
+- 不做全量刷新 `tests/arch/migration_versions_baseline.json`（完整刷新需发布评审执行
+  `scripts/gen-migration-baseline.py --write` 并单独提交）。仅按 QA 要求做**最小处置**：
+  从基线快照删除被 renumber 的 `202611180001=ensure-cloud-sandboxes-in-runtime` 条目
+  （该号在存量库实际盖的是 issue2761 的名字，此迁移从未真正按该名发布），避免 PR
+  新引入 vanished 红态；基线既有的 `202611230005 <= max_version` 红态保持不动、不静默吞掉。
 
 ## 验收标准
 
 - [ ] 存量库启动后 `grape_t_cloud_sandboxes` 与三索引存在
-- [ ] 台账新增行 `name=ensure-cloud-sandboxes-in-runtime`（`202611230010`），旧行保留
+- [ ] 台账新增行 `name=ensure-cloud-sandboxes-in-runtime`（`202611240002`），旧行保留
 - [ ] 启动日志「迁移版本号撞号」不再出现该迁移
 - [ ] 单测：带 post_check 进 reconcile、无 post_check 仅 ERROR 不进
 - [ ] CI：同 version 重复登记即失败

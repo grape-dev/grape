@@ -9758,7 +9758,7 @@ register_migration(
 _SANDBOX_CONTROL_TABLES: list[tuple[str, str]] = [
     # Issue #3527（2026-11-20）：grape_t_cloud_sandboxes 已从本组摘除。
     # 该表归 runtime（configs/table_ownership.json: tables.grape_t_cloud_sandboxes=runtime），
-    # runtime 侧已有双实现：202611230010 ensure_cloud_sandboxes_table()（带所有权守卫；
+    # runtime 侧已有双实现：202611240002 ensure_cloud_sandboxes_table()（带所有权守卫；
     # 原号 202611180001 撞号 renumber，Issue #3846）
     # 与 src/domains/runtime/agents/sandbox/schema.py::ensure_sandbox_tables()。
     # 保留在这里会让 mgmt 进程额外建出第三份同名空表，把沙箱列表读成 0 行。
@@ -9944,7 +9944,7 @@ def _migration_sandbox_control_plane_schema() -> None:
 
     Issue #3527：本组表全部归 mgmt；函数体逐表过归属守卫，使「已配 DSN 但未注入
     迁移属主（不筛域）」形态下 runtime/insight 进程也不会越权建出 mgmt 同名空表。
-    grape_t_cloud_sandboxes 已摘出本组，由 runtime 域 202611230010 建表（原号
+    grape_t_cloud_sandboxes 已摘出本组，由 runtime 域 202611240002 建表（原号
     202611180001 撞号 renumber，Issue #3846）。
     """
     with db_lock:
@@ -10012,7 +10012,7 @@ def _migration_sandbox_control_plane_schema() -> None:
 # 迁移时已顺延到 003）撞号——同号迁移被判「已执行」永久跳过。顺延到 202611110007
 # （004-006 已被 #1208 selector 占用，007 空闲）。迁移为幂等 DDL，重跑无损。
 # [Issue #3527] 本迁移只剩 mgmt 归属表（grape_t_cloud_sandboxes 已摘出并由 runtime
-# 域的 202611230010 负责——原号 202611180001 撞号 renumber，Issue #3846），显式声明
+# 域的 202611240002 负责——原号 202611180001 撞号 renumber，Issue #3846），显式声明
 # domains 避免缺省域语义随摘表漂移；函数体内的
 # runtime 列补齐段（runtime_credentials / agent_runtimes）由 _ensure_column 守卫跳过，
 # 真正落地在 runtime 域 202611170045 / 202611180002。
