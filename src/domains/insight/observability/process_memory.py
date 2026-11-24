@@ -87,9 +87,15 @@ def read_vm_rss_bytes(status_path: str) -> int:
                     if len(parts) >= 2:
                         return int(parts[1]) * 1024
                     return 0
-    except Exception:
-        pass
+    except (OSError, ValueError):
+        return 0
     return 0
+
+
+def _split_cgroup_entry(entry: str):
+    """解析 /proc/self/cgroup 一行 → (hierarchy, controllers, path)；坏行返回 None。"""
+    parts = entry.split(":", 2)
+    return tuple(parts) if len(parts) == 3 else None
 
 
 def read_cgroup_memory_limit(proc_root: str = "/proc",
@@ -100,40 +106,41 @@ def read_cgroup_memory_limit(proc_root: str = "/proc",
     （根路径直接 /sys/fs/cgroup/memory.max）；`max` 占位 = 无限额。
     cgroup v1：`<n>:memory:<path>` → /sys/fs/cgroup/memory/<path>/memory.limit_in_bytes；
     v1 占位上限（≥ 2^40）视为无限额。
+
+    Issue #4203 复审：混合层级下 `0::` 条目存在但 v2 的 memory.max 缺失/为 `max`
+    （限额实际挂在 v1 控制器上）时，v2 解析为 0 **不等于**无限额——必须继续回退
+    v1 再判定 unbounded，否则启动自检误报 unbounded、ratio 告警永不触发。
     """
     try:
         with open(os.path.join(proc_root, "self", "cgroup"), "r",
                   encoding="utf-8", errors="replace") as f:
             entries = [ln.strip() for ln in f if ln.strip()]
-    except Exception:
+    except OSError:
         return 0
     for entry in entries:
-        try:
-            parts = entry.split(":", 2)
-            if len(parts) != 3:
-                continue
-            hier, _, path = parts
-            if hier == "0":  # v2 unified
-                limit_path = os.path.join(sys_fs, path.strip("/"), "memory.max") \
-                    if path.strip("/") else os.path.join(sys_fs, "memory.max")
-                return _parse_limit_file(limit_path)
-        except Exception:
+        parts = _split_cgroup_entry(entry)
+        if parts is None or parts[0] != "0":
             continue
+        path = parts[2].strip("/")
+        limit_path = os.path.join(sys_fs, path, "memory.max") if path \
+            else os.path.join(sys_fs, "memory.max")
+        value = _parse_limit_file(limit_path)
+        if value > 0:
+            return value
+        # v2 未给出限额（文件缺失 / `max` 占位）→ 继续回退 v1 控制器
+        break
     # v1 回退（memory 子系统）
     for entry in entries:
-        try:
-            parts = entry.split(":", 2)
-            if len(parts) == 3 and "memory" in parts[1].split(","):
-                path = parts[2].strip("/")
-                limit_path = os.path.join(sys_fs, "memory", path,
-                                         "memory.limit_in_bytes") if path \
-                    else os.path.join(sys_fs, "memory", "memory.limit_in_bytes")
-                value = _parse_limit_file(limit_path)
-                if 0 < value < _V1_PLACEHOLDER_LIMIT:
-                    return value
-                return 0
-        except Exception:
+        parts = _split_cgroup_entry(entry)
+        if parts is None or "memory" not in parts[1].split(","):
             continue
+        path = parts[2].strip("/")
+        limit_path = os.path.join(sys_fs, "memory", path, "memory.limit_in_bytes") \
+            if path else os.path.join(sys_fs, "memory", "memory.limit_in_bytes")
+        value = _parse_limit_file(limit_path)
+        if 0 < value < _V1_PLACEHOLDER_LIMIT:
+            return value
+        return 0
     return 0
 
 
@@ -158,17 +165,15 @@ def _sample_engine_children(pid_status_dir: str = "/proc") -> dict[str, int]:
     with _active_procs_lock:
         procs = list(_active_procs)
     for proc in procs:
-        try:
-            pid = proc.pid
-            if not pid:
-                continue
-            rss = read_vm_rss_bytes(os.path.join(pid_status_dir, str(pid), "status"))
-            if rss <= 0:
-                continue
-            backend = (getattr(proc, "_grape_backend", "") or "unknown").strip().lower() or "unknown"
-            per_engine[backend] = per_engine.get(backend, 0) + rss
-        except Exception:
+        # 注册表里是 Popen 对象；用 getattr 取值（不 try/except），坏条目直接跳过
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
             continue
+        rss = read_vm_rss_bytes(os.path.join(pid_status_dir, str(pid), "status"))
+        if rss <= 0:
+            continue
+        backend = (getattr(proc, "_grape_backend", "") or "unknown").strip().lower() or "unknown"
+        per_engine[backend] = per_engine.get(backend, 0) + rss
     return per_engine
 
 

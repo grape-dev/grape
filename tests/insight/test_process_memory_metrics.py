@@ -119,6 +119,45 @@ class TestCgroupLimitV1:
         assert pm.read_cgroup_memory_limit(proc_root=proc_root, sys_fs=sys_fs) == 0
 
 
+class TestCgroupMixedHybrid:
+    """混合层级：`0::` 存在但 v2 未给限额时，必须回退 v1 控制器再判定 unbounded。
+
+    QA 复审复现：v2 条目存在、根 memory.max 缺失、v1 memory.limit_in_bytes=4GiB
+    → 旧实现直接 return 0（期望 4294967296），启动自检误报 unbounded、ratio 告警不触发。
+    """
+
+    def test_v2_file_missing_falls_back_to_v1(self, fake_fs):
+        proc_root, sys_fs = fake_fs
+        _write(os.path.join(proc_root, "self", "cgroup"),
+               "0::/system.slice/grape-worker-server.service\n11:memory:/grape-worker\n")
+        # v2 memory.max 不写（缺失）→ 限额实际挂在 v1
+        _write(os.path.join(sys_fs, "memory", "grape-worker",
+                            "memory.limit_in_bytes"), "4294967296\n")
+        assert pm.read_cgroup_memory_limit(proc_root=proc_root, sys_fs=sys_fs) == 4294967296
+
+    def test_v2_max_placeholder_falls_back_to_v1(self, fake_fs):
+        proc_root, sys_fs = fake_fs
+        _write(os.path.join(proc_root, "self", "cgroup"),
+               "0::/\n11:memory:/grape-worker\n")
+        _write(os.path.join(sys_fs, "memory.max"), "max\n")
+        _write(os.path.join(sys_fs, "memory", "grape-worker",
+                            "memory.limit_in_bytes"), "4294967296\n")
+        assert pm.read_cgroup_memory_limit(proc_root=proc_root, sys_fs=sys_fs) == 4294967296
+
+    def test_v2_limit_wins_when_both_present(self, fake_fs):
+        proc_root, sys_fs = fake_fs
+        _write(os.path.join(proc_root, "self", "cgroup"), "0::/\n11:memory:/grape\n")
+        _write(os.path.join(sys_fs, "memory.max"), "1073741824\n")
+        _write(os.path.join(sys_fs, "memory", "grape", "memory.limit_in_bytes"),
+               "4294967296\n")
+        assert pm.read_cgroup_memory_limit(proc_root=proc_root, sys_fs=sys_fs) == 1073741824
+
+    def test_hybrid_without_any_limit_is_unbounded(self, fake_fs):
+        proc_root, sys_fs = fake_fs
+        _write(os.path.join(proc_root, "self", "cgroup"), "0::/\n11:memory:/grape\n")
+        assert pm.read_cgroup_memory_limit(proc_root=proc_root, sys_fs=sys_fs) == 0
+
+
 class TestCollectProcessMemory:
     def test_bounded_cgroup_branch(self, fake_fs, gauge, monkeypatch):
         proc_root, sys_fs = fake_fs
