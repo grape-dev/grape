@@ -220,6 +220,10 @@ def install_request_middleware(app: FastAPI) -> None:
                         _log.debug(msg, extra=extra)
                     else:
                         _log.error(msg, extra=extra)
+                elif status == 499:
+                    # Issue #4248：客户端主动中止（页面卸载/切换）与 nginx 499 对齐，
+                    # 记 warning 而不进 5xx ERROR / 错误率，便于与真故障区分。
+                    _log.warning(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)
