@@ -155,6 +155,22 @@ def _num_from_issue_id(issue_id: str) -> str:
     # Issue #3055：ident 判据转发内核唯一实现（禁止在此复制正则）
     return normalize_issue_ident(_raw)
 
+def _normalize_issue_number(number) -> str:
+    """路径参数 `{number}` 归一：去 `#` 前缀、纯数字去前导零、字符串 ident 原样。
+
+    Issue #3891：主资源与 `/pipeline` 共用同一归一口径（此前两处各写一遍
+    `number[1:] if number[:1]=="#"` + `isdigit→int`），避免同一编号在两端落成
+    不同键（「主资源 200 / 子资源 404」的成因之一）。判据转发内核
+    `normalize_issue_ident()`（#3055 单一入口），非法形态原样透传交由下游兜底。
+    """
+    num = str(number or "").strip()
+    if num[:1] == "#":
+        num = num[1:]
+    norm = normalize_issue_ident(num)
+    if norm:
+        num = norm
+    return str(int(num)) if num.isdigit() else num
+
 def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
     """tk_ 会话 token 限定其绑定仓库：请求 repo_keys 含该 repo 才放行（防 agent 跨仓库读事件）。"""
     if user.get("auth_type") == "session_token":
@@ -1409,7 +1425,7 @@ def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_sess
     nodes = (pipe_cfg or {}).get("nodes", [])
     events = []
     if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30)
+        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
     nodes, _ = compute_node_statuses(
@@ -1932,7 +1948,6 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    from src.kernel.repo_key import to_repo_key
     if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
@@ -2830,58 +2845,61 @@ def get_issue_detail(owner: str, repo: str, number: str,
     _enforce_session_repo_scope(user, repo_keys)
     # D105 字符串 ident（gitee IK*）：路径参数改 str——纯数字归一去前导零语义不变，
     # 非数字（IK*/#IK*）原样透传给 ledger 查找（number: int 会 422 拒掉 gitee ident）。
-    num = number[1:] if number[:1] == "#" else number
-    if num.isdigit():
-        num = str(int(num))
+    num = _normalize_issue_number(number)
     stage_map = _issue_stage_map(repo_keys)
     status_map = _task_status_map(repo_keys)
     group_map = _group_events_by_issue(repo_keys)
     title_map = _issue_title_map(repo_keys)
-    if num not in stage_map and num not in status_map and num not in group_map:
+    # Issue #3891：存在性解析抽成共用助手——`/pipeline` 与本端点对同一编号同口径裁决，
+    # 消除「主资源 200 / 子资源 404」的自相矛盾（外部托管仓 issue_id=null 场景）。
+    _resolved = _resolve_issue_presence(
+        owner, repo, repo_keys, number, user,
+        stage_map=stage_map, status_map=status_map, group_map=group_map, backfill=True)
+    if _resolved["vcs"] is not None:
         # Issue #672：本地聚合 miss 时按 number+owner/repo 走 git-repo 通道兜底，
         # 消除 issues detail 与 git-repo issues get 同编号 404/正常分裂（eduSwarm 实测）。
-        _vcs = _vcs_issue_lookup(owner, repo, number, user)
-        if _vcs:
-            _vi = _vcs.get("issue") or {}
-            _asg = _vi.get("assignee") or ""
-            if isinstance(_asg, dict):
-                _asg = _asg.get("login") or _asg.get("username") or ""
-            # Issue #805: VCS 兜底详情透出创建人（GitCode issue 作者 login）
-            _vcs_user = _vi.get("user") or {}
-            _vcs_creator = (_vcs_user.get("login") or _vcs_user.get("username") or "") if isinstance(_vcs_user, dict) else ""
-            from src.domains.runtime.vcs.api_client import _native_issue_number
-            return {
-                "number": _native_issue_number(number),
-                "issue_id": None,
-                "title": (_vi.get("title") or f"Issue #{number}"),
-                "stage": "vod",
-                "task_status": "",
-                "owner_agent": "vod",
-                "scene_id": "",
-                "assignee": _asg,
-                "creator": _vcs_creator,
-                "is_subtask_mode": 0,
-                "parent_issue_id": "",
-                "events_count": 0,
-                "latest_event": None,
-                "events": [],
-                "pipeline": {"issue": {"number": _native_issue_number(number)}, "summary": "", "status": "unknown", "segments": []},
-                "source": "vcs",
-                "vcs_provider": _vcs.get("provider", ""),
-                "vcs_id": _vi.get("id"),
-                "state": _vi.get("state", ""),
-            }
+        _vi = _resolved["vcs"]
+        _asg = _vi.get("assignee") or ""
+        if isinstance(_asg, dict):
+            _asg = _asg.get("login") or _asg.get("username") or ""
+        # Issue #805: VCS 兜底详情透出创建人（GitCode issue 作者 login）
+        _vcs_user = _vi.get("user") or {}
+        _vcs_creator = (_vcs_user.get("login") or _vcs_user.get("username") or "") if isinstance(_vcs_user, dict) else ""
+        return {
+            "number": native_issue_number(number),
+            "issue_id": None,
+            "title": (_vi.get("title") or f"Issue #{number}"),
+            "stage": "vod",
+            "task_status": "",
+            "owner_agent": "vod",
+            "scene_id": "",
+            "assignee": _asg,
+            "creator": _vcs_creator,
+            "is_subtask_mode": 0,
+            "parent_issue_id": "",
+            "events_count": 0,
+            "latest_event": None,
+            "events": [],
+            "pipeline": {"issue": {"number": native_issue_number(number)}, "summary": "", "status": "unknown", "segments": []},
+            "source": "vcs",
+            "vcs_provider": _resolved["vcs_provider"],
+            "vcs_id": _vi.get("id"),
+            "state": _vi.get("state", ""),
+        }
+    if _resolved["state"] != "exists":
         # Issue #667：三表未命中 → VCS 兜底核实并自动补建内部行（存在）/
         # 语义区分 404（不存在 vs 内部缺行且无法核实）
-        _state = _sync_missing_issue_row(repo_keys, number)
-        if _state != "exists":
-            raise _detail_404("issue_not_found" if _state == "missing" else "internal_sync_missing", number)
+        raise _detail_404("issue_not_found" if _resolved["state"] == "missing" else "internal_sync_missing", number)
+    if _resolved["synced"]:
         stage_map = _issue_stage_map(repo_keys)
         status_map = _task_status_map(repo_keys)
         group_map = _group_events_by_issue(repo_keys)
         title_map = _issue_title_map(repo_keys)
-        _fallback_synced = True
     base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
+    if _resolved["synced"]:
+        # Issue #667 契约（test_issue_667_detail_fallback 断言）：仅「本次经 VCS 核实并补建」的
+        # 响应带该存在性标志；后续命中内部行不再出现（区分「已登记」与「刚补建」）。
+        base["synced_by_fallback"] = True
     events = group_map.get(num) or []
     pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
     # Issue #539：详情内嵌 pipeline 同步叠加需求级业务状态与任务/结果引用
@@ -2909,15 +2927,12 @@ def get_issue_events(owner: str, repo: str, number: str,
     events = group_map[num]
     return {"events": events, "segments": events, "total": len(events)}
 
-@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).")
+@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials). Issue #3891: shares the main resource's resolution chain — an issue that exists on the VCS side but is not registered internally (issue_id=null) returns 200 with an empty pipeline plus `diagnostics{exists:true, has_pipeline_data:false, reason:\"issue_unregistered\", source:\"vcs\"}`; only a confirmed-missing issue returns 404, where `detail.error_code`/`detail.reason` (`issue_not_found` vs `internal_sync_missing`) distinguishes 'does not exist' from 'exists but unverifiable/no pipeline data'.")
 def get_issue_pipeline(owner: str, repo: str, number: str,
                        user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
     # D105 字符串 ident（gitee IK*）：与 issues_detail 同口径（number: int 对 IK* 422）。
-    num = number[1:] if number[:1] == "#" else number
-    if num.isdigit():
-        num = str(int(num))
-        number = num
+    num = _normalize_issue_number(number)
     group_map = _group_events_by_issue(repo_keys)
     events = group_map.get(num) or []
     # weekly-05：优先 events 表（含结构化 output）；无事件时回退 event.json 档案
@@ -2926,8 +2941,29 @@ def get_issue_pipeline(owner: str, repo: str, number: str,
     else:
         pipeline = _pipeline_from_archive(repo_keys, num) or {
             "issue": {"number": number}, "summary": "", "status": "unknown", "segments": []}
-    if not pipeline.get("segments") and num not in _issue_stage_map(repo_keys):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
+    if not pipeline.get("segments"):
+        # Issue #3891：与主资源共用解析助手（本端点只读，backfill=False）——
+        # 外部托管仓既有 issue（内部未登记、issue_id=null）不再 404，
+        # 返回 200 + 空 pipeline，并用 `diagnostics` 让「存在但无 pipeline 数据」可判别。
+        stage_map = _issue_stage_map(repo_keys)
+        if not num or num not in stage_map:
+            _resolved = _resolve_issue_presence(
+                owner, repo, repo_keys, number, user,
+                stage_map=stage_map, group_map=group_map, backfill=False)
+            if _resolved["state"] != "exists":
+                raise _detail_404("issue_not_found" if _resolved["state"] == "missing"
+                                  else "internal_sync_missing", number)
+            if _resolved["source"] == "vcs":
+                # 仅外部托管仓既有 issue（内部未登记）才追加增量字段；
+                # ledger 命中（如仅有任务行的存量卡片）保持原有空 pipeline 结构不变。
+                pipeline["issue"] = {**(pipeline.get("issue") or {}),
+                                     "number": native_issue_number(number)}
+                pipeline["diagnostics"] = {
+                    "exists": True,
+                    "has_pipeline_data": False,
+                    "reason": "issue_unregistered",
+                    "source": "vcs",
+                }
     # Issue #539：叠加需求级业务状态 + 各段任务/结果引用（旧字段语义不变，新增字段可选）
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
@@ -3033,68 +3069,37 @@ def list_production_releases(issue_id: int, user: dict = Depends(require_no_sess
     return {"issue_id": issue_id, "issue_number": _issue_num, "repo_key": _repo_key,
             "releases": releases, "total": len(releases)}
 
-@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
-def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
-    """获取需求关联的流水线信息和事件历史（详情页展示）。"""
-    from src.api.event_store import get_events
-    from src.api.pipeline_config import get_pipeline_config
-    from src.api.session_store import get_issue_stage, get_issue_scene
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = _rt_db.cursor()
-        # 仓库全部视图下，用户可以看到其他人的 Issue
-        # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
-        c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?",
-                  (issue_id,))
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        repo_key, issue_number, _issue_task_status = row[0], row[1], (row[2] or "")
-    # 校验仓库访问权限（与"仓库全部"列表接口一致）
-    from src.api.deps import check_repo_access
-    check_repo_access(user, repo_key)
-    issue_key = f"#{issue_number}" if issue_number else ""
-    _scene_tuple = get_issue_scene(repo_key, issue_key)
-    _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
-    _stage_info = get_issue_stage(repo_key, issue_key) if issue_key else None
-    _current_stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
-    pipe_cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
-    nodes = (pipe_cfg or {}).get("nodes", [])
-    events = []
-    if issue_key:
-        events = get_events(repo_key, issue_id=issue_key, limit=30, include_payload=True)
-    # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
-    from src.api.pipeline_status import compute_node_statuses
-    nodes, _ = compute_node_statuses(
-        nodes, events, _current_stage, repo_key=repo_key, issue_id=issue_key)
-    # Issue #329: extract carried_context for cross-pipeline continuation source annotation
-    from src.api.session_store import get_carried_context
-
 from pydantic import BaseModel, Field
 
-from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
-                                   _review_pass, _review_reject, _set_issue_pending_review,
-                                   _read_issue_status, cancel_issue_rows)
+from src.api.issues_center import cancel_issue_rows
 
 def _detail_404(reason: str, number) -> HTTPException:
-    """Issue #667：detail 404 语义区分——「Issue 不存在（VCS 侧亦无）」vs「需求不存在（内部缺行）」。"""
+    """Issue #667：detail 404 语义区分——「Issue 不存在（VCS 侧亦无）」vs「需求不存在（内部缺行）」。
+
+    Issue #3891：两处增量补 `error_code`（= reason），供客户端编程判别
+    「真不存在」与「存在但无 pipeline 数据」；`code`/`message` 保持原样兼容。
+    """
     if reason == "issue_not_found":
         return HTTPException(status_code=404, detail={
-            "code": 404, "reason": "issue_not_found",
+            "code": 404, "reason": "issue_not_found", "error_code": "issue_not_found",
             "message": f"Issue #{number} 不存在（GitCode 侧无此 Issue，可能已删除或编号有误）",
             "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
     return HTTPException(status_code=404, detail={
-        "code": 404, "reason": "internal_sync_missing",
+        "code": 404, "reason": "internal_sync_missing", "error_code": "internal_sync_missing",
         "message": f"需求不存在：VCS 侧 Issue #{number} 存在性无法核实且内部需求库缺行（同步未落或时序未到）",
         "suggestion": "稍后重试（webhook 同步到位后自动恢复）；持续失败请检查仓库 token 与 webhook 同步链路"})
 
-def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
+def _sync_missing_issue_row(repo_keys: list[str], number, backfill: bool = True) -> str:
     """Issue #667 兜底解析：内部三表未命中时按 VCS 核实并自动补建 issue 行。
 
     返回：
     - "exists"：已补建（或已存在）内部行，调用方重读聚合后正常返回
     - "missing"：VCS 侧明确 404（Issue 不存在）
     - "unknown"：VCS 无法核实（token 缺失/网络异常），调用方按降级语义 404
+
+    Issue #3891：`backfill=False` 只做存在性核实、**不补建内部行**——供 `/pipeline`
+    这类被客户端高频轮询的只读端点复用解析语义，避免轮询触发写入放大
+    （回填/入库仍只在主资源 detail 路径发生）。
     """
     num = str(number)
     from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
@@ -3104,6 +3109,8 @@ def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
         except Exception:
             state, data = "unknown", {}
         if state == "exists":
+            if not backfill:
+                return "exists"
             try:
                 from src.api.issues_center import ensure_issue_task
                 # Issue #805: VCS 兜底补建行时带上创建人（GitCode issue 作者）
@@ -3121,6 +3128,47 @@ def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
         if state == "missing":
             return "missing"
     return "unknown"
+
+def _resolve_issue_presence(owner: str, repo: str, repo_keys: list[str], number, user: dict,
+                            *, stage_map: dict | None = None, status_map: dict | None = None,
+                            group_map: dict | None = None, backfill: bool = True) -> dict:
+    """Issue #3891：issue 存在性/来源的统一解析助手（主资源与 `/pipeline` 共用）。
+
+    解析顺序（与改动前 detail 分支顺序一致，仅抽出复用）：
+      1. 平台内部登记（`issue`/`tasks`/`events` 任一命中）→ `exists/ledger`；
+      2. 未登记 → `_vcs_issue_lookup()`（#672 owner/repo/number 回落）→ `exists/vcs` + VCS 原文；
+      3. 仍未命中 → `_sync_missing_issue_row(..., backfill=)` 核实三态
+         （`missing`=VCS 明确 404；`unknown`=无 token/异常无法核实）。
+
+    返回 dict：
+      num          归一后的编号（`_normalize_issue_number`）
+      state        "exists" | "missing" | "unknown"
+      source       "ledger" | "vcs" | ""（未命中）
+      vcs          VCS 原文 dict（仅第 2 步命中时有；第 3 步命中为 None）
+      vcs_provider VCS 平台（`gitcode`/`github`/...）
+      synced       是否已补建内部行（`backfill=True` 且第 3 步核实存在）
+
+    调用方按 `state` 统一裁决：仅 `missing` 才可判「Issue 不存在」；
+    `unknown` 一律走降级语义（与主资源同文案），不得伪装成 200。
+    """
+    num = _normalize_issue_number(number)
+    _stage = stage_map if stage_map is not None else _issue_stage_map(repo_keys)
+    _status = status_map if status_map is not None else _task_status_map(repo_keys)
+    _group = group_map if group_map is not None else _group_events_by_issue(repo_keys)
+    if num and (num in _stage or num in _status or num in _group):
+        return {"num": num, "state": "exists", "source": "ledger",
+                "vcs": None, "vcs_provider": "", "synced": False}
+    if num:
+        _vcs = _vcs_issue_lookup(owner, repo, num, user)
+        if _vcs:
+            return {"num": num, "state": "exists", "source": "vcs",
+                    "vcs": _vcs.get("issue") or {}, "vcs_provider": _vcs.get("provider") or "",
+                    "synced": False}
+    _state = _sync_missing_issue_row(repo_keys, num, backfill=backfill) if num else "unknown"
+    return {"num": num, "state": _state,
+            "source": "vcs" if _state == "exists" else "",
+            "vcs": None, "vcs_provider": "",
+            "synced": bool(backfill and _state == "exists")}
 
 def _attach_event_payloads(group_map: dict) -> None:
     """按需补 structured_output / agent_logs（Issue #859 性能修复，2026-11-03）。

@@ -387,6 +387,7 @@ def test_run_patrol_once_delivers_stall_finding():
     captured = []
     with patch.object(patrol_mod, "patrol_runtime_config",
                       lambda: {"lookback_mode": "runtime", "confirm_minutes": 10}), \
+         patch.object(patrol_mod, "_scan_probe_has_candidates", lambda c: True), \
          patch.object(patrol_mod, "_known_task_ids", lambda: set()), \
          patch.object(patrol_mod, "detect_broken_chains", lambda *a, **k: [finding]), \
          patch.object(patrol_mod, "detect_zombies", lambda *a, **k: []), \

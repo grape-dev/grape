@@ -108,7 +108,7 @@
         <!-- 设备与引擎 -->
         <template v-else-if="section === 'devices'">
 <template v-if="tab === 'overview'">
-          <div v-if="!opsData && !rtData" class="loading">{{ t('loading') }}</div>
+          <div v-if="!obsLoaded" class="loading">{{ t('loading') }}</div>
           <template v-else>
             <div class="obv-sec">
               <h2>{{ t('worker_monitor') }}</h2>
@@ -397,16 +397,16 @@
             <div class="obv-kpirow">
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('task_total') }}</div>
-                <div class="obv-kpiv" style="color: var(--a)">{{ taskStats.total || 0 }}</div>
+                <div class="obv-kpiv" style="color: var(--a)">{{ kpiVal(taskStats.total) }}</div>
               </div>
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('completed') }}</div>
-                <div class="obv-kpiv" style="color: var(--g)">{{ taskStats.completed || 0 }}</div>
+                <div class="obv-kpiv" style="color: var(--g)">{{ kpiVal(taskStats.completed) }}</div>
               </div>
               <div class="obv-kpicell">
                 <div class="obv-kpil">{{ t('in_progress') }}</div>
                 <div class="obv-kpiv" style="color: var(--pu)">
-                  {{ taskStats.in_progress || 0 }}
+                  {{ kpiVal(taskStats.in_progress) }}
                 </div>
               </div>
               <div class="obv-kpicell">
@@ -415,7 +415,7 @@
                   class="obv-kpiv"
                   :style="{ color: (taskStats.failed || 0) > 0 ? 'var(--r)' : 'var(--t3)' }"
                 >
-                  {{ taskStats.failed || 0 }}
+                  {{ kpiVal(taskStats.failed) }}
                 </div>
               </div>
             </div>
@@ -1917,7 +1917,7 @@ const ovData = ref(null)
 let chartRefs = {}
 // 设备
 const opsData = ref(null)
-const rtData = ref(null)
+const obsLoaded = ref(false)
 const workerPage = ref(0)
 const workerPageSize = ref(10)
 const runtimePage = ref(0)
@@ -2574,59 +2574,38 @@ function refreshObs(isAuto) {
       .get('/dashboard/ops/probe-now')
       .catch(() => null)
   }
-  Promise.all([
-    API()
-      .get('/dashboard/ops/overview' + repoParam)
-      .catch(() => null),
-    G.fetch('/health/realtime', {
-      signal: G.AbortSignal ? G.AbortSignal.timeout(10000) : undefined,
+  API()
+    .get('/dashboard/ops/overview' + repoParam)
+    .catch(() => null)
+    .then(function (ops) {
+      // 失败不要覆盖上一份有效快照：旧实现在这里直接赋值 null/error，于是
+      // realOps 退回 fallbackOps，而 fallback 的数值是硬编码 0 —— 表现为
+      // worker 卡片「一会儿全 0、一会儿正常」。现在保留旧值并标记失败时间。
+      if (ops && !ops.error) {
+        opsData.value = ops
+        opsFailedAt.value = ''
+      } else {
+        opsFailedAt.value = new Date().toLocaleTimeString('zh-CN')
+      }
+      obsLoaded.value = true
+      lastUpdate.value = new Date().toLocaleTimeString('zh-CN')
+      if (section.value === 'devices' || tab.value === 'tasks') loadTokCols()
+      if (isAuto && section.value === 'inspect' && tab.value === 'events') eventSoftRefresh()
+      if (isAuto && section.value === 'inspect' && tab.value === 'efficiency') loadEff(true)
     })
-      .then((r) => r.json())
-      .catch(() => null),
-  ]).then(function (results) {
-    const [ops, realtime] = results
-    // 失败不要覆盖上一份有效快照：旧实现在这里直接赋值 null/error，于是
-    // realOps 退回 fallbackOps，而 fallback 的 workers 是硬编码 0 —— 表现为
-    // worker 卡片「一会儿全 0、一会儿正常」。现在保留旧值并标记失败时间。
-    if (ops && !ops.error) {
-      opsData.value = ops
-      opsFailedAt.value = ''
-    } else if (opsData.value) {
-      opsFailedAt.value = new Date().toLocaleTimeString('zh-CN')
-    }
-    if (realtime && !realtime.error) rtData.value = realtime
-    lastUpdate.value = new Date().toLocaleTimeString('zh-CN')
-    if (section.value === 'devices' || tab.value === 'tasks') loadTokCols()
-    if (isAuto && section.value === 'inspect' && tab.value === 'events') eventSoftRefresh()
-    if (isAuto && section.value === 'inspect' && tab.value === 'efficiency') loadEff(true)
-  })
 }
 const realOps = computed(() => {
   const ops = opsData.value
   if (ops && !ops.error) return ops
-  return fallbackOps(rtData.value)
+  return fallbackOps()
 })
-function fallbackOps(realtime) {
-  const rt = realtime || {}
-  const tasks = rt.tasks || {}
+function fallbackOps() {
+  // 未知（不是「0」）：拿不到 overview 时卡片显示 —，不再画成 0。
   return {
-    tasks: {
-      status_counts: tasks,
-      in_progress: rt.in_progress || 0,
-      stuck_count: 0,
-      stuck_tasks: [],
-      by_source: {},
-      today: {},
-    },
-    runtimes: {
-      total: rt.runtimes ? rt.runtimes.total : 0,
-      online: rt.runtimes ? rt.runtimes.online : 0,
-      offline: rt.runtimes ? rt.runtimes.total - rt.runtimes.online : 0,
-      by_mode: {},
-      list: [],
-    },
-    // 未知（不是「0 台」）：拿不到 overview 时卡片显示 —，不再画成 0。
+    tasks: null,
+    runtimes: null,
     workers: null,
+    degraded: [],
   }
 }
 const opsDegraded = computed(() => {

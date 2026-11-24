@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 
 from src.kernel.config import log
@@ -402,6 +403,42 @@ _MAX_LOST_COMMITS = 200          # manifest 记录的未推送提交上限
 _MAX_DIRTY_LIST = 200            # manifest 记录的脏文件清单上限
 _MAX_UNTRACKED_FILES = 2000      # untracked 快照文件数上限（超出 → 归档不完整 → 拒绝删除）
 _MAX_UNTRACKED_FILE_BYTES = 10 * 1024 * 1024  # 单文件快照上限（超大 → 归档不完整 → 拒绝删除）
+
+# 2026-11 事故复盘：未跟踪快照把 .venv 一起拷走（单份约 57MB），单个 issue 的
+# 归档目录累积数百份快照把工作区盘打满 → 任务技能物化失败（ENOSPC），流水线 fail-fast。
+# 可重建的大目录永不进快照（它们不是「待保全改动」，删了能重装）。
+_SNAPSHOT_EXCLUDE_DIRS = frozenset({
+    ".venv", "venv", "env", ".env", "node_modules", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "site-packages", ".tox", ".git", ".gradle",
+    "target", "dist", "build",
+})
+_SNAPSHOT_EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".so", ".o", ".class")
+# 每个 issue 归档目录保留的快照份数（时间戳目录，按名字/时间淘汰旧档）。
+# 五源 = 项目实测（2026-11-24 事故复盘）：排除可重建目录前单份归档 57MB，
+# 排除后单份实测 ~1MB；即便回落到 57MB 量级，10 份 ≈ 0.6GB，相对工作区
+# 可用空间（事故处置后 23GB）留足两个数量级余量；同时覆盖「最近 10 次
+# 重置」的回滚排查窗口。调整请走 GRAPE_WORKTREE_ARCHIVE_KEEP（env 覆盖优先）。
+_ARCHIVE_KEEP_DEFAULT = 10
+_SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]+$")
+
+
+def _is_snapshot_excluded(rel: str) -> bool:
+    """未跟踪路径是否属于「可重建的大目录」（不进快照，也不计为 skipped）。"""
+    parts = [p for p in re.split(r"[\\/]+", str(rel or "")) if p and p not in (".", "..")]
+    if not parts:
+        return True
+    if any(seg in _SNAPSHOT_EXCLUDE_DIRS for seg in parts[:-1]):
+        return True
+    return parts[-1].lower().endswith(_SNAPSHOT_EXCLUDE_SUFFIXES)
+
+
+def _archive_keep_limit() -> int:
+    raw = (os.environ.get("GRAPE_WORKTREE_ARCHIVE_KEEP") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else _ARCHIVE_KEEP_DEFAULT
+    except ValueError:
+        return _ARCHIVE_KEEP_DEFAULT
+
 _REMOTE_PROBE_TIMEOUT = 60       # `ls-remote` 远端事实探测上限（网络抖动不影响保守判定）
 
 
@@ -572,7 +609,8 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "",
     out = {"risk": False, "dirty": [], "untracked": [], "unpushed_count": 0,
            "lost_commits": [], "compare_ref": "", "branch": "", "head": "",
            "head_missing": False, "remote_head": "", "dirty_count": 0,
-           "untracked_count": 0, "untracked_overflow": 0, "scan_failed": False}
+           "untracked_count": 0, "untracked_overflow": 0, "scan_failed": False,
+           "untracked_excluded_count": 0}
     from src.domains.runtime.engine.repogit import _run_git
     try:
         head = _run_git(["-C", wt_dir, "rev-parse", "HEAD"], token=token)
@@ -601,10 +639,19 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "",
             out["scan_failed"] = True
             return out
         dirty, untracked = [], []
+        excluded_untracked = 0
         for xy, path in entries:
             if _is_reset_ignored_path(path):
                 continue
+            if xy == "??" and _is_snapshot_excluded(path):
+                # QA F1：可重建目录（.venv/node_modules/__pycache__ 等）必须在
+                # 计数与 _MAX_UNTRACKED_FILES 截断**之前**剔除，否则它们既占 2000
+                # 配额、又推高 untracked_overflow → 归档被判不完整 → 仍然拒绝重置
+                # （2026-11-24 事故在 node_modules 仓库上会原样复发）。
+                excluded_untracked += 1
+                continue
             (untracked if xy == "??" else dirty).append(path)
+        out["untracked_excluded_count"] = excluded_untracked
         out["dirty_count"] = len(dirty)
         out["untracked_count"] = len(untracked)
         out["dirty"] = dirty[:_MAX_DIRTY_LIST]
@@ -681,6 +728,34 @@ def _atomic_json_write(path: str, data: dict) -> bool:
         return False
 
 
+def _prune_archive_snapshots(issue_archive_dir: str) -> int:
+    """按时间戳目录名保留最新 N 份快照，返回删除份数（best-effort，不影响归档结论）。
+
+    快照目录名形如 ``20261124T045905Z-1b625ca2``，字典序即时间序；只处理本 issue
+    归档目录下一层，不动 bundle/patch/manifest 文件。
+    """
+    try:
+        names = sorted(
+            d for d in os.listdir(issue_archive_dir)
+            if _SNAPSHOT_NAME_RE.match(d)
+            and os.path.isdir(os.path.join(issue_archive_dir, d))
+        )
+    except Exception:
+        return 0
+    keep = _archive_keep_limit()
+    removed = 0
+    for name in names[:-keep]:
+        try:
+            shutil.rmtree(os.path.join(issue_archive_dir, name), ignore_errors=True)
+            removed += 1
+        except Exception as e:  # noqa: BLE001 - 清理失败不影响归档主流程
+            log.warning(f"worktree reset guard: prune snapshot failed {name}: {e}")
+    if removed:
+        log.info(f"worktree reset guard: pruned {removed} old snapshot(s) under "
+                 f"{issue_archive_dir} (keep={keep})")
+    return removed
+
+
 def _snapshot_untracked(wt_dir: str, archive_dir: str, untracked: list,
                         overflow: int = 0) -> tuple:
     """未跟踪文件内容快照（bundle 只含已提交对象，新增文件必须逐个拷贝）。
@@ -692,13 +767,20 @@ def _snapshot_untracked(wt_dir: str, archive_dir: str, untracked: list,
 
     返回 (copied, skipped)；skipped 元素形如
     {"path": "<rel>", "reason": "too_large|not_regular_file|copy_error|file_count_cap"}。
+
+    第三返回值 excluded = 命中可重建大目录（.venv/node_modules/__pycache__ 等）被
+    有意跳过的路径，仅作记录，**不**影响 archive_complete（见 _SNAPSHOT_EXCLUDE_DIRS）。
     """
-    copied, skipped = [], []
+    copied, skipped, excluded = [], [], []
     dst_root = os.path.join(archive_dir, UNTRACKED_SNAPSHOT_DIR)
     if overflow > 0:
         skipped.append({"path": "", "reason": "file_count_cap",
                         "skipped_count": int(overflow)})
     for rel in untracked[:_MAX_UNTRACKED_FILES]:
+        if _is_snapshot_excluded(rel):
+            # 可重建目录/产物：不进快照也不计入「不完整」，避免把 venv 拷进归档
+            excluded.append(rel)
+            continue
         src = os.path.join(wt_dir, rel)
         if not os.path.isfile(src):
             skipped.append({"path": rel, "reason": "not_regular_file"})
@@ -720,13 +802,14 @@ def _snapshot_untracked(wt_dir: str, archive_dir: str, untracked: list,
         except Exception as e:
             log.warning(f"worktree reset guard: untracked snapshot failed {rel}: {e}")
             skipped.append({"path": rel, "reason": "copy_error", "error": str(e)[:200]})
-    return copied, skipped
+    return copied, skipped, excluded
 
 
 def _build_reset_record(risk: dict, repo_key: str, issue_num, agent_type: str,
                         bundle_path: str, dirty_patch: str,
                         snap_files: list, snap_skipped: list, archived_at: str,
-                        reason: str, task_id: str) -> dict:
+                        reason: str, task_id: str,
+                        snap_excluded: "list | None" = None) -> dict:
     """归档 manifest / 机器可读记录（同一份内容，落两处）。"""
     try:
         bundle_size = os.path.getsize(bundle_path) if bundle_path else 0
@@ -741,6 +824,7 @@ def _build_reset_record(risk: dict, repo_key: str, issue_num, agent_type: str,
         "untracked": risk["untracked"],
         "untracked_snapshot": snap_files,
         "untracked_skipped": snap_skipped,
+        "untracked_excluded": list(snap_excluded or []),
         "untracked_overflow": risk.get("untracked_overflow", 0),
         "bundle_path": bundle_path,
         "bundle_size": bundle_size,
@@ -761,7 +845,7 @@ def _build_reset_record(risk: dict, repo_key: str, issue_num, agent_type: str,
     }
 
 
-def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
+def _archive_worktree_before_reset_impl(wt_dir: str, repo_key: str, issue_num,
                                   agent_type: str, token: str = "",
                                   base_branch: str = "", reason: str = "",
                                   task_id: str = "") -> dict:
@@ -853,12 +937,13 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
             res["error"] = f"dirty patch write failed: {e}"
             return res
 
-    snap_files, snap_skipped = _snapshot_untracked(
+    snap_files, snap_skipped, snap_excluded = _snapshot_untracked(
         wt_dir, archive_dir, risk["untracked"],
         overflow=risk.get("untracked_overflow") or 0)
     record = _build_reset_record(risk, repo_key, issue_num, agent_type,
                                  bundle_path, dirty_patch, snap_files, snap_skipped,
-                                 archived_at, reason, task_id)
+                                 archived_at, reason, task_id,
+                                 snap_excluded=snap_excluded)
     manifest_path = os.path.join(archive_dir, MANIFEST_NAME)
     if not _atomic_json_write(manifest_path, record):
         res["ok"] = False
@@ -892,6 +977,37 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
         f"agent={agent_type} unpushed={risk['unpushed_count']} "
         f"dirty={len(risk['dirty'])} untracked={len(risk['untracked'])} "
         f"reason={record['reset_reason']} -> {bundle_path}")
+    return res
+
+
+def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
+                                  agent_type: str, token: str = "",
+                                  base_branch: str = "", reason: str = "",
+                                  task_id: str = "") -> dict:
+    """重置前归档（公开入口）：在 impl 之上统一做「失败不留残档 + 保留裁剪」。
+
+    QA #2098 F2：裁剪原先只在归档成功路径执行，快照不完整（超大文件/拷贝失败）时
+    直接 return，反复重试会每轮新建一份永不裁剪的归档目录 —— 正是 2026-11-24
+    事故的形态。这里改为所有出口统一收口：
+
+    - 失败（ok=False）：删除本次新建的 archive_dir（残档无保全价值，manifest 已
+      记录失败原因），再执行该 issue 的保留裁剪；
+    - 成功：保留最新 N 份（GRAPE_WORKTREE_ARCHIVE_KEEP 可调）；
+    - 裁剪异常只告警，不影响归档结论（保全语义优先）。
+    """
+    res = _archive_worktree_before_reset_impl(
+        wt_dir, repo_key, issue_num, agent_type, token=token,
+        base_branch=base_branch, reason=reason, task_id=task_id)
+    _archive_dir = str(res.get("archive_dir") or "")
+    if _archive_dir:
+        try:
+            if not res.get("ok"):
+                shutil.rmtree(_archive_dir, ignore_errors=True)
+                res["discarded_archive_dir"] = _archive_dir
+                res["archive_dir"] = ""
+            res["pruned"] = _prune_archive_snapshots(os.path.dirname(_archive_dir))
+        except Exception as e:  # noqa: BLE001 - 清理失败不影响归档结论
+            log.warning(f"worktree reset guard: archive cleanup failed {_archive_dir}: {e}")
     return res
 
 

@@ -112,6 +112,79 @@ class WorkspaceBaselineError(Exception):
             "reason": self.reason,
         }
 
+    def to_log_fields(self) -> dict:
+        """Issue #4023：日志单行字段（与 to_dict() 同源，ahead/behind 归一 unknown）。
+
+        日志与结构化落库共用同一份字段值，避免两处格式漂移；None 的分叉计数在
+        日志侧显示 unknown（与错误文本历史口径一致）。
+        """
+        d = self.to_dict()
+        d["ahead"] = "unknown" if d.get("ahead") is None else d["ahead"]
+        d["behind"] = "unknown" if d.get("behind") is None else d["behind"]
+        return d
+
+    def format_one_line(self) -> str:
+        """Issue #4023：失败日志专用单行（固定顺序七要素，**不做截断**）。
+
+        字段顺序与 to_dict() 同源：issue / path / expected_baseline / actual_head /
+        ahead / behind / reason；requested_baseline 与 expected_baseline 不同
+        （发生过基线回退）时追加，保证 #2514「错误文本六要素可照抄定位」在唯一的
+        运行失败日志出口不被 `[:120]` 切掉。
+        """
+        d = self.to_log_fields()
+        issue = str(d.get("issue") or "")
+        if not issue.startswith("#"):
+            issue = f"#{issue}"
+        line = (f"workspace baseline mismatch: issue={issue} path={d.get('path')} "
+                f"expected_baseline={d.get('expected_baseline')} "
+                f"actual_head={d.get('actual_head')} ahead={d.get('ahead')} "
+                f"behind={d.get('behind')} reason={d.get('reason')}")
+        rb = d.get("requested_baseline") or ""
+        if rb and rb != (d.get("expected_baseline") or ""):
+            line += f" requested_baseline={rb}"
+        return line
+
+
+# Issue #4023：worker 只把 str(error) 回传服务端（client.fail body.error），fail_task
+# 收到的基线错误是字符串而非对象；按固定 `key=value` 词法还原结构化字段，使日志
+# 单行与 JSON 落库在「对象来源 / 字符串来源」两条路径上同构。
+_BASELINE_ERROR_FIELDS = ("issue", "path", "expected_baseline", "actual_head",
+                          "ahead", "behind", "reason", "requested_baseline")
+
+
+def parse_baseline_error_text(text) -> dict:
+    """从失败上报文本还原 WorkspaceBaselineError 结构化字段；非基线文本 → {}。
+
+    仅含 `workspace baseline mismatch:` 前缀但解析不出 issue 与 reason 的文本
+    （半截截断 / 仿写）不视为基线错误，返回 {}，避免落入
+    WORKSPACE_BASELINE_MISMATCH 且打点 key 归 '-'。
+    """
+    s = str(text or "")
+    if "workspace baseline mismatch:" not in s:
+        return {}
+    fields = {}
+    for key in _BASELINE_ERROR_FIELDS:
+        m = re.search(rf"(?:^|\s){re.escape(key)}=(\S+)", s)
+        if m:
+            fields[key] = m.group(1)
+    if not (fields.get("issue") and fields.get("reason")):
+        return {}
+    if fields.get("issue"):
+        fields["issue"] = fields["issue"].lstrip("#")
+    # requested_baseline 仅在发生基线回退时才出现在文本里；与 to_dict() 恒含该 key
+    # 对齐，避免 errors JSON 在 requested == expected 时缺字段。
+    fields.setdefault("requested_baseline", "")
+    for key in ("ahead", "behind"):
+        val = fields.get(key)
+        if val == "unknown":
+            fields[key] = None
+        elif val is not None:
+            try:
+                fields[key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    return fields
+
 
 def _is_ignored_dirt(rel_path: str) -> bool:
     """路径是否命中脏检测白名单（平台轻文件 / askpass / 归属标记）。"""

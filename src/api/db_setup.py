@@ -5485,7 +5485,90 @@ def init_database():
     # 幂等 DDL（列已存在跳过）与盖章迁移语义解耦，每次启动执行。
     # （D44/S64 函数体在合并 squash 时一度丢失，2026-11-13 按 b439764fd 原形恢复。）
     _ensure_platform_storage_columns()
-    # MySQL with session_manager
+    # Issue #3897：启动期 schema 自检——跨域身份关系（external_identities 基表/视图）
+    # 缺失时立刻可诊断（生产曾出现「代码已上线、runtime 库视图未建」→ 每次身份解析 1146）。
+    # 失败不阻断启动（自检只负责可见性，修复交给迁移/部署脚本）。
+    _check_identity_relations()
+
+
+#: 启动自检覆盖的跨域身份关系（owner=mgmt；非 owner 库形态为跨域视图）。
+_IDENTITY_RELATIONS = ("external_identities", "grape_accounts")
+_IDENTITY_RELATION_REMEDIATION = (
+    "python3 scripts/domain_view_freshness.py --repair "
+    "（owner=mgmt 补建跨域视图；存量 mgmt 库缺基表时由迁移 202611230013 补建）")
+#: identity 读写的 owner 域（`grape_account_db` / `identity_lifecycle` 固定 `uow("mgmt")`）。
+_IDENTITY_DOMAIN = "mgmt"
+_IDENTITY_DOMAIN_REMEDIATION = (
+    "worker/event 进程需可见 GRAPE_DSN_MGMT（三库拓扑下不共享该 DSN 时请用 "
+    "GRAPE_3DB_ENV drop-in 统一下发）；缺 DSN 时 mgmt 域不可用，身份解析会降级为 []"
+    "（等同「无身份」，用户绑定/PAT 回填全部失效）")
+
+
+def _check_identity_domain() -> str:
+    """启动期自检：identity owner 域（mgmt）是否可路由。
+
+    Issue #3897 QA R1：identity 读写已固定 `uow("mgmt")`，三库拓扑下
+    `route_of("mgmt")` 在缺 `GRAPE_DSN_MGMT` 时抛 `DomainUnavailable`，被降级成
+    返回 `[]` —— 表现为「用户突然没有身份」，且只在业务日志里零星可见。
+    该检查把部署前置（DSN 可见性）变成启动那一刻的一条 ERROR（含 remediation），
+    不阻断启动：返回路由结果（"local"/"domain"），不可用时返回空串。
+    """
+    try:
+        from src.kernel.db_registry import route_of
+        return route_of(_IDENTITY_DOMAIN)
+    except Exception as _e:
+        log.error(
+            "schema self-check: identity domain '%s' unavailable (%s): starts degraded, "
+            "identity lookups return []; remediation: %s",
+            _IDENTITY_DOMAIN, _e, _IDENTITY_DOMAIN_REMEDIATION)
+        return ""
+
+
+def _check_identity_relations(relation_kind=None) -> list[str]:
+    """启动期自检：当前库是否具备身份域关系（基表或跨域视图）。
+
+    Issue #3897：`external_identities` 在生产 `grape_prod_runtime` 缺失（1146），
+    属于「代码已上线、跨域视图未补建」的 schema 漂移。迁移只会补 owner 基表，
+    非 owner 库的视图由部署脚本 `scripts/domain_view_freshness.py --repair` 建
+    （补建清单在 `scripts/view_create_missing_allowlist.txt`）。
+    本自检把这种漂移在**启动那一刻**变成一条可 grep 的 ERROR（含库名与修复命令），
+    不再等业务请求逐条刷 WARNING。
+
+    返回缺失关系名列表（便于测试/运维断言）；探测异常只 WARN，绝不抛。
+    """
+    from src.domains.runtime.schema_probe import relation_kind as _default_probe
+
+    probe = relation_kind or _default_probe
+    missing: list[str] = []
+    # Issue #3897 QA R1：先确认 owner 域可路由（缺 DSN → ERROR + remediation），
+    # 再探测关系是否存在；两者都不阻断启动。
+    _domain_route = _check_identity_domain()
+    try:
+        from src.kernel.db_registry import current_domain, database_of
+        _db_label = database_of(current_domain() or "") or os.environ.get("DEVOPS_DB_NAME", "")
+    except Exception:
+        _db_label = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            for _table in _IDENTITY_RELATIONS:
+                if probe(c, _table) is None:
+                    missing.append(_table)
+    except Exception as _e:
+        log.warning(f"schema self-check (identity relations) skipped: {_e}")
+        return []
+    if missing:
+        log.error(
+            "schema self-check: identity relation(s) missing in db=%s (domain=%s route=%s): %s "
+            "(身份解析将 1146/降级); remediation: %s",
+            _db_label or "current", _IDENTITY_DOMAIN, _domain_route or "unavailable",
+            ",".join(missing), _IDENTITY_RELATION_REMEDIATION)
+    else:
+        log.info("schema self-check: identity relations present in db=%s (domain=%s route=%s) (%s)",
+                 _db_label or "current", _IDENTITY_DOMAIN, _domain_route or "unavailable",
+                 ",".join(_IDENTITY_RELATIONS))
+    return missing
+
 
 def _migrate_event_status_pending():
     """事件状态语义迁移（docs/weekly-07/seq-2310-health-gate-stuck-design.md §6.5.4）。
@@ -10729,35 +10812,6 @@ register_migration(
 )
 
 
-def _fn_normalize_org_domain_text() -> None:
-    """D105 第三批：存量 SQLite 库 org 域 id TEXT 化（幂等）。
-
-    背景：organization.id 的 TEXT 主键 DDL 只在全新库生效。存量库建表时仍是
-    ``INTEGER PRIMARY KEY AUTOINCREMENT``，而 create_org 已改为写入 uuid7 字符串
-    （TEXT 主键）——旧库创建组织会直接 ``datatype mismatch``，组织 provisioning
-    全链路不可用。MySQL 环境的 org 域 TEXT 化已由历史迁移盖章，
-    这里只处理 SQLite 旧 DDL（PRAGMA 重建，见 _normalize_org_domain_text）。
-
-    SQLite：organization 整表重建 + 各 org_id 引用列 TEXT 亲和 + 哨兵 0 → ''；
-    若列已 TEXT 且无混型行则零改动（幂等）。
-    """
-    from src.kernel.session_manager import _is_mysql_backend, db as _db, db_lock as _db_lock
-    if _is_mysql_backend():
-        # MySQL：历史迁移已把 org 域改为 VARCHAR/TEXT，无需重复处理。
-        return
-    with _db_lock:
-        _normalize_org_domain_text(_db)
-        _db.commit()
-
-
-register_migration(
-    version="202611183007",
-    name="normalize-org-domain-text",
-    kind="safe",
-    fn=_fn_normalize_org_domain_text,
-)
-
-
 # ===== D105 第四批：组织域用户引用列 TEXT 化（Issue #2150/#2269）=====
 # grape_t_org_context.owner_id/created_by/updated_by、grape_t_org_dispatch.created_by、
 # agent_shared_knowledge.owner_id、managed_repos.linked_by 均存 user id。D105 后
@@ -11125,6 +11179,37 @@ def _fn_normalize_org_domain_text() -> None:
             f"org domain text normalize 未完成：{len(bad)} 列仍非字符串族 {bad}；"
             "本次不盖章，下次启动重试（大表 MODIFY 是 COPY 锁写，需安排低峰/维护窗口）")
     log.info(f"org domain text normalize 完成（本域改动: {n}）")
+
+
+def _fn_normalize_org_domain_text_sqlite() -> None:
+    """D105 第三批：存量 SQLite 库 org 域 id TEXT 化（幂等）。
+
+    背景：organization.id 的 TEXT 主键 DDL 只在全新库生效。存量库建表时仍是
+    ``INTEGER PRIMARY KEY AUTOINCREMENT``，而 create_org 已改为写入 uuid7 字符串
+    （TEXT 主键）——旧库创建组织会直接 ``datatype mismatch``，组织 provisioning
+    全链路不可用。MySQL 环境的 org 域 TEXT 化已由历史迁移盖章，
+    这里只处理 SQLite 旧 DDL（PRAGMA 重建，见 _normalize_org_domain_text）。
+
+    为什么单独保留：迁移 202611183007 已在各环境盖章，删号会让它永久跳过
+    （迁移台账按版本号判「已执行」）。后续的跨域 TEXT 化收敛到
+    202611190100（d105-org-domain-text-normalize），两者并存不重复执行：
+    本迁移在 MySQL 上直接返回，收敛版在 SQLite 上同样幂等。
+    """
+    from src.kernel.session_manager import _is_mysql_backend, db as _db, db_lock as _db_lock
+    if _is_mysql_backend():
+        # MySQL：历史迁移已把 org 域改为 VARCHAR/TEXT，无需重复处理。
+        return
+    with _db_lock:
+        _normalize_org_domain_text(_db)
+        _db.commit()
+
+
+register_migration(
+    version="202611183007",
+    name="normalize-org-domain-text",
+    kind="safe",
+    fn=_fn_normalize_org_domain_text_sqlite,
+)
 
 
 register_migration(
@@ -11527,6 +11612,66 @@ register_migration(
 )
 
 
+def _patrol_scan_indexes_post_check() -> None:
+    """Issue #3813 post_check：runtime 两条巡检索引在位（缺=不盖章）。"""
+    from src.domains.runtime.migrations.patrol_scan_indexes import (
+        verify_patrol_scan_indexes as _impl,
+    )
+    _impl()
+
+
+def _patrol_findings_indexes_post_check() -> None:
+    """Issue #3813 post_check：mgmt 两条 findings 索引在位（缺=不盖章）。"""
+    from src.domains.mgmt.migrations.patrol_findings_indexes import (
+        verify_patrol_findings_indexes as _impl,
+    )
+    _impl()
+
+
+def _fn_patrol_scan_indexes() -> None:
+    """Issue #3813：巡检候选扫描复合索引（events/agent_tasks，runtime 域）。
+
+    列序依据与 EXPLAIN 基线见
+    src/domains/runtime/migrations/patrol_scan_indexes.py 模块 docstring。
+    """
+    from src.domains.runtime.migrations.patrol_scan_indexes import (
+        ensure_patrol_scan_indexes as _impl,
+    )
+    _impl()
+
+
+def _fn_patrol_findings_indexes() -> None:
+    """Issue #3813：findings known-set / TTL 清理索引（grape_t_patrol_findings，mgmt 域）。"""
+    from src.domains.mgmt.migrations.patrol_findings_indexes import (
+        ensure_patrol_findings_indexes as _impl,
+    )
+    _impl()
+
+
+register_migration(
+    # Issue #3813 S52：巡检候选扫描的 events/agent_tasks 复合索引。列序依据
+    # （实测 EXPLAIN：等值列在前、范围列居中、排序/键集游标列在尾）标注在
+    # 迁移模块 docstring；post_check 保证「索引没建成但盖章」不可发生。
+    version="202611231001",
+    name="patrol-scan-composite-indexes",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_patrol_scan_indexes,
+    post_check=_patrol_scan_indexes_post_check,
+)
+
+
+register_migration(
+    # Issue #3813 S52：findings known-set covering 索引 + TTL 清理定位索引。
+    version="202611231002",
+    name="patrol-findings-scan-indexes",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_patrol_findings_indexes,
+    post_check=_patrol_findings_indexes_post_check,
+)
+
+
 register_migration(
     version="202611220005",
     name="session-token-key-column-width",
@@ -11707,3 +11852,318 @@ register_migration(
     domains=("mgmt",),
     post_check=_post_autopilot_cf_cleanup,
 )
+
+
+# ===== Issue #3789：场景节点 skill_id 存量收敛（repo→official 优先）=====
+# 只读/回写 devops_pipeline_scene + scene_market（mgmt 域），技能档位查询走
+# mgmt.public（skill 在 runtime 域，跨域守卫 P0-2）。幂等；post_check 判定
+# 「repo 级场景节点不得引用 user 档技能」收敛后才盖章。
+# 版本号取 202611240002（原 202611230003 与 Issue #3800 的 autopilot 失败状态列
+# 迁移撞号，合入基线时改号；迁移函数本身幂等，改号后重跑无副作用）。
+
+from src.domains.mgmt.migrations.scene_nodes_skill_id_repo_scope import (
+    MIGRATION as _M_SCENE_NODES_SKILL_ID_REPO_SCOPE,
+)
+register_migration(**_M_SCENE_NODES_SKILL_ID_REPO_SCOPE)
+# ===== external_identities 关系补齐（Issue #3897 B 组）=====
+from src.domains.mgmt.migrations.external_identities_relation import (
+    ensure_identity_relation as _fn_external_identities_relation,
+    verify_identity_relation as _post_external_identities_relation,
+)
+register_migration(
+    version="202611230013",
+    name="external-identities-relation",
+    kind="safe",
+    fn=_fn_external_identities_relation,
+    domains=("mgmt",),
+    post_check=_post_external_identities_relation,
+)
+
+# ============================================================================
+# Issue #3740：bot 凭据回填（managed_repos 历史列 → grape_t_repo_credentials）
+#
+# 根因背景：rc（cred_type='bot'）在生产的 gitcode/github 侧**从未被回填**——此前
+# 只注册了 gitee/gitlab 四列的回填迁移（202611150004），而 gitcode/github 的
+# bot_*_token 列没有回填入口，于是 RepoBotToken 的 rc 查询恒 miss、100% 走 legacy
+# 列回落（8,872 条 WARNING/h）。
+#
+# 执行权责：生产执行由 sre 环节承接（脚本 + 盖章 + 验证），本模块提供三个幂等原语，
+# 不注册自动迁移——回填写生产数据属高风险动作（写错可致全站 token 解析失败），
+# 必须走「先 dry-run → 备份 → apply → verify → stamp」的受控流程。
+# ============================================================================
+
+#: 回填盖章版本号（未在源码注册 register_migration：由脚本显式盖章，幂等；
+#: 与 `grape_t_schema_migrations` 中现有号无冲突，取当日最大号 + 1）
+REPO_BOT_BACKFILL_VERSION = "202611220001"
+REPO_BOT_BACKFILL_NAME = "backfill-repo-bot-token-columns-to-rc"
+
+#: bot 凭据列（cred_type='bot'）：四个平台一一对应
+_REPO_BOT_TOKEN_COLS = ("bot_gitcode_token", "bot_github_token",
+                        "bot_gitee_token", "bot_gitlab_token")
+
+#: 全部平台凭据列（bot + webhook，供 `backfill_repo_credentials_from_columns` 用）
+_REPO_CRED_COLS = ("bot_gitcode_token", "gitcode_webhook_token",
+                   "bot_github_token", "github_webhook_token",
+                   "bot_gitee_token", "gitee_webhook_token",
+                   "bot_gitlab_token", "gitlab_webhook_token")
+
+
+def _managed_repos_columns_probe(c) -> "tuple[set[str], str]":
+    """managed_repos 列集合探测（sqlite PRAGMA / MySQL information_schema 双方言）。
+
+    返回 ``(columns, error)``：``error == ""`` 表示探测成功（``columns`` 可为空，
+    即库确实没有该表/列）；``error != ""`` 表示探测本身失败（驱动/权限/方言异常）。
+    二者必须区分——探列失败若被当成「无列」，回填/验证会静默零写入却报
+    ``coverage == 1.0``（Issue #2432 同族坑 + #3740 复审 Required）。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+
+        is_mysql = bool(_is_mysql_backend())
+    except Exception:  # noqa: BLE001 - 探不到后端就按 sqlite 口径试 PRAGMA
+        is_mysql = False
+    if is_mysql:
+        try:
+            rows = c.execute(
+                "SELECT COLUMN_NAME FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='managed_repos'").fetchall()
+            return {r[0] for r in rows}, ""
+        except Exception as e:  # noqa: BLE001 - 探列失败显式上报，由调用方拒绝验证/盖章
+            msg = f"managed_repos column probe failed: {e}"
+            log.warning(msg)
+            return set(), msg
+    try:
+        return {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}, ""
+    except Exception as e:  # noqa: BLE001
+        msg = f"managed_repos column probe failed: {e}"
+        log.warning(msg)
+        return set(), msg
+
+
+def _managed_repos_columns(c) -> "set[str]":
+    """managed_repos 列集合探测（仅返回列名，探列失败按「无列」处理）。
+
+    供既有只读调用方使用；需要区分「探列失败 / 真的无列」的验证与盖章路径
+    必须改用 ``_managed_repos_columns_probe``（Issue #3740 复审 Required）。
+    """
+    cols, _error = _managed_repos_columns_probe(c)
+    return cols
+
+
+def backfill_repo_credentials_from_columns() -> int:
+    """managed_repos 平台凭据列 → grape_t_repo_credentials 行（幂等：只填空）。
+
+    D99 归一映射：``bot_*_token`` → ``cred_type='bot'``、``*_webhook_token`` →
+    ``'webhook'``；行 id = UUID 主键首写。值按**原样拷贝**（列值与 rc 值同属 N3
+    通道加密形态，读侧解密口径一致；历史明文由读侧「明文兼容」覆盖）。
+
+    幂等：``INSERT OR IGNORE``（UNIQUE(repo_key, cred_type) 冲突即忽略），重复执行
+    零写入。列存在性守卫（双方言探测）：冷启动库无 gitee/gitlab 列时跳过零写入。
+
+    （Issue #3740：本函数在历史上的 squash 合并中丢失，而 `tests/mgmt/
+    test_s80_repo_credentials.py`、`test_s82_dualwrite_removal.py`、
+    `test_uc41_rc_schema.py` 一直 import 它——缺失即三处 ERROR。按 b439764fd
+    原形恢复，并把列探测改为双方言，避免 MySQL 拓扑静默零写入。）
+    """
+    from src.kernel.id_gen import uuid7_str
+
+    n = 0
+    per_col: dict = {}
+    with db_lock:
+        c = db.cursor()
+        cols = _managed_repos_columns(c)
+        if not cols:
+            return 0
+        for col in _REPO_CRED_COLS:
+            if col not in cols:
+                per_col[col] = 0      # 冷启动库无此列（F4 后新库只留 gitcode/github）
+                continue
+            cred_type = "bot" if col.startswith("bot_") else "webhook"
+            rows = c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall()
+            k = 0
+            for repo_key, val in rows:
+                cur = c.execute(
+                    insight_mig.INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS,
+                    (uuid7_str(), repo_key, cred_type, val or ""))
+                k += int(getattr(cur, "rowcount", 0) or 0)
+            per_col[col] = k
+            n += k
+        db.commit()
+    if n:
+        log.info(f"grape_t_repo_credentials backfill of repo-registry columns: "
+                 f"{per_col} (rows filled={n})")
+    return n
+
+
+def _rc_bot_repo_keys() -> "set[str]":
+    """rc 中已有非空 bot 行的仓库集合。
+
+    走 insight 域公开读写口（凭据表归 insight），不在 api 层裸读外域表——跨域读
+    清单门禁（scripts/p4/scan_cross_domain_reads.py）按裸 SQL 记账，本函数因此
+    无新增读点；三库拓扑下由 insight public 的任意拓扑游标决定落哪台库。
+    """
+    try:
+        from src.domains.insight import public as _insight_public
+
+        rows = _insight_public.list_repo_credential_rows()
+    except Exception as e:  # noqa: BLE001 - 读失败按「无 rc 行」处理（回填只填空，最坏多插幂等行）
+        log.warning(f"rc bot rows read failed: {e}")
+        return set()
+    return {r[1] for r in rows if len(r) > 4 and r[2] == "bot" and (r[3] or "")}
+
+
+def backfill_repo_bot_token_columns_to_rc(dry_run: bool = False) -> dict:
+    """bot 列专用回填：managed_repos 的 ``bot_*_token`` 四列 → rc ``cred_type='bot'``。
+
+    与 gitee/gitlab 回填同款语义，但覆盖**全部平台**的 bot 列（gitcode/github 正是
+    本次生产 100% legacy 回落的来源），并补上：
+
+    - 值归一：列值可能为 N3 密文或历史明文 → ``_decrypt``（明文直通）→ ``_encrypt``
+      统一回填为密文（与写路径同构，读侧零特判）；单行解密失败 raw-copy 不阻断整档。
+    - 只填空：``INSERT OR IGNORE``，已有 rc 行（可能已轮换）绝不被列值覆盖。
+    - dry-run：默认只算计划（``filled`` 恒 0），供 sre 先看影响面再 apply。
+
+    返回 ``{dry_run, scanned, would_fill, filled, per_column, missing, probe_ok, error}``；
+    ``missing`` = 持有 legacy bot 值但没有 rc bot 行的仓库（回填后应为空）；
+    ``probe_ok=False`` = managed_repos 探列失败（``error`` 带原因），此档不可当作
+    「无缺口」消费——脚本必须失败退出（Issue #3740 复审 Required）。
+    """
+    from src.kernel.id_gen import uuid7_str
+
+    report: dict = {
+        "dry_run": bool(dry_run),
+        "scanned": 0,          # legacy 非空 (repo, col) 条目数
+        "would_fill": 0,       # 计划写入的 rc 行数（按仓库去重）
+        "filled": 0,           # 实际写入行数（dry-run 恒 0）
+        "per_column": {},
+        "missing": [],
+        "probe_ok": True,
+        "error": "",
+    }
+    try:
+        from src.domains.mgmt.user.db import _decrypt_repo_secret, _encrypt_repo_secret
+    except Exception as e:  # noqa: BLE001 - 加解密不可用则不做归一，宁可不动生产数据
+        log.warning(f"bot backfill: crypto import failed, skip: {e}")
+        return report
+
+    missing: "list[str]" = []
+    seen_missing: set = set()
+    rc_bot = _rc_bot_repo_keys()
+    with db_lock:
+        c = db.cursor()
+        cols, probe_error = _managed_repos_columns_probe(c)
+        if probe_error:
+            report["probe_ok"] = False
+            report["error"] = probe_error
+            return report
+        if not cols:
+            return report
+        for col in _REPO_BOT_TOKEN_COLS:
+            filled_col = 0
+            report["per_column"][col] = 0
+            if col not in cols:
+                continue      # 冷启动库无该平台的物理列（F4 终态）
+            for repo_key, val in c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall():
+                report["scanned"] += 1
+                if repo_key in rc_bot:
+                    continue  # 已有 rc bot 行 = 权威，回填不覆盖
+                first_seen = repo_key not in seen_missing
+                if first_seen:
+                    seen_missing.add(repo_key)
+                    missing.append(repo_key)
+                    # (repo_key, 'bot') 一行唯一：计划行数 = 缺口仓库数
+                    report["would_fill"] += 1
+                if dry_run or not first_seen:
+                    # dry-run 只算计划；同仓库第二个 bot 列无新行可写
+                    continue
+                try:
+                    _norm = _encrypt_repo_secret(_decrypt_repo_secret(val or ""))
+                except Exception as _de:  # noqa: BLE001
+                    # 单行解密失败不阻断整档：保留列值原样回填（读侧明文兼容可读）
+                    log.warning(f"bot backfill: decrypt failed for {repo_key}.{col}, "
+                                f"raw copy: {_de}")
+                    _norm = val or ""
+                cur = c.execute(insight_mig.INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS,
+                                (uuid7_str(), repo_key, "bot", _norm))
+                wrote = int(getattr(cur, "rowcount", 0) or 0)
+                filled_col += wrote
+                report["filled"] += wrote
+            report["per_column"][col] = filled_col
+        if not dry_run:
+            db.commit()
+        else:
+            db.rollback()     # 只读扫描：不留下任何隐性写
+    report["missing"] = missing
+    if report["filled"]:
+        log.info(f"bot credential backfill -> grape_t_repo_credentials: "
+                 f"{report['per_column']} (rows filled={report['filled']})")
+    return report
+
+
+def verify_repo_bot_credential_backfill() -> dict:
+    """回填验证报告：legacy bot 列与 rc bot 行的覆盖差（回落分支下线前置）。
+
+    返回 ``{legacy_repos, rc_bot_rows, missing, coverage, per_column, probe_ok, error}``：
+    - ``legacy_repos``：持有非空 legacy bot 列的仓库数（回填源规模）
+    - ``rc_bot_rows``：rc 中非空 bot 行数（回填目标现状）
+    - ``missing``：持有 legacy 值但 rc 无 bot 行的仓库（回填缺口）
+    - ``coverage``：``1 - len(missing)/legacy_repos``（无 legacy 值时记 1.0）
+    - ``probe_ok``：``False`` = managed_repos 探列失败，``coverage`` 强制 0.0——
+      **探列失败绝不能伪装成「无缺口、覆盖 1.0」**（Issue #3740 复审 Required）。
+
+    验收口径：回填后 ``missing`` 为空、``coverage == 1.0``；生产下线判据再叠加
+    ``grape_repo_bot_legacy_fallback_total`` 窗口增量 == 0 且
+    ``repo_bot_hit_legacy_column`` 审计零命中（日志已限频，不再作为判据）。
+    """
+    report: dict = {"legacy_repos": 0, "rc_bot_rows": 0, "missing": [],
+                    "coverage": 1.0, "per_column": {}, "probe_ok": True, "error": ""}
+    rc_bot = _rc_bot_repo_keys()
+    with db_lock:
+        c = db.cursor()
+        cols, probe_error = _managed_repos_columns_probe(c)
+        if probe_error:
+            report["probe_ok"] = False
+            report["error"] = probe_error
+            report["coverage"] = 0.0
+            return report
+        if not cols:
+            return report
+        report["rc_bot_rows"] = len(rc_bot)
+        legacy: set = set()
+        for col in _REPO_BOT_TOKEN_COLS:
+            if col not in cols:
+                report["per_column"][col] = 0
+                continue
+            keys = {r[0] for r in c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall()}
+            report["per_column"][col] = len(keys)
+            legacy |= keys
+        report["legacy_repos"] = len(legacy)
+        report["missing"] = sorted(legacy - rc_bot)
+    if report["legacy_repos"]:
+        report["coverage"] = round(
+            1.0 - len(report["missing"]) / float(report["legacy_repos"]), 4)
+    return report
+
+
+def stamp_repo_bot_credential_backfill() -> dict:
+    """回填盖章：把 ``REPO_BOT_BACKFILL_VERSION`` 写进 ``grape_t_schema_migrations``。
+
+    回落分支下线 checklist ①「回填迁移全量盖章」的凭证——没有台账行，后续没人能
+    证明「存量值确实进过 rc」，删分支就是拿全站 token 解析冒险。幂等：已存在同号
+    台账行时不重写（``already=True``），避免覆盖首次执行时间。
+    """
+    stamped_at = _now_iso()
+    with db_lock:
+        c = db.cursor()
+        existing = c.execute(
+            mgmt_mig.SELECT_GRAPE_T_SCHEMA_MIGRATIONS + " WHERE version=?",
+            (REPO_BOT_BACKFILL_VERSION,)).fetchone()
+        already = existing is not None
+        if not already:
+            c.execute(
+                mgmt_mig.UPSERT_GRAPE_T_SCHEMA_MIGRATIONS,
+                (REPO_BOT_BACKFILL_VERSION, REPO_BOT_BACKFILL_NAME, "backfill",
+                 stamped_at, 0, _fn_checksum(backfill_repo_bot_token_columns_to_rc)))
+        db.commit()
+    return {"version": REPO_BOT_BACKFILL_VERSION, "name": REPO_BOT_BACKFILL_NAME,
+            "stamped_at": stamped_at, "already": already}

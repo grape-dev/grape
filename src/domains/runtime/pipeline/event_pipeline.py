@@ -1624,8 +1624,20 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
             return
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
+        # Issue #3914 A：传场景节点权威 skill_id（此前硬编码 0 → 仓级/用户级自定义 QA
+        # 技能在 direct 链路丢失绑定 → #617 官方检查器兜底 → #887 门禁误拒）。
+        _qa_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=scene_id,
+                                              user_id=_sub_uid)
+        _qa_skill_path = ""
+        if _qa_sid:
+            try:
+                from src.domains.mgmt.public import get_skill_path as _gsp_sub
+                _qa_skill_path = _gsp_sub(_qa_sid) or ""
+            except Exception as _ape:
+                log.warning(f"Pipeline: PR subscription extra skill path resolve "
+                            f"failed for sid={_qa_sid}: {_ape}")
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                               0, qa_skill, _engine_id, _pseudo_id,
+                               _qa_sid, _qa_skill_path, _engine_id, _pseudo_id,
                                pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
                                pool_selector=_pool_sel)
     except Exception as e:
@@ -1710,8 +1722,19 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
             return
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
+        # Issue #3914 A：重派同样传场景节点权威 skill_id（与补派路径同源）
+        _qa_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=scene_id,
+                                              user_id=_sub_uid)
+        _qa_skill_path = ""
+        if _qa_sid:
+            try:
+                from src.domains.mgmt.public import get_skill_path as _gsp_rsp
+                _qa_skill_path = _gsp_rsp(_qa_sid) or ""
+            except Exception as _ape:
+                log.warning(f"Pipeline: PR subscription redispatch skill path resolve "
+                            f"failed for sid={_qa_sid}: {_ape}")
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                               0, qa_skill, _engine_id, _pseudo_id,
+                               _qa_sid, _qa_skill_path, _engine_id, _pseudo_id,
                                pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
                                pool_selector=_pool_sel)
 
@@ -2737,6 +2760,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = _res["skill_name"]
             if _res.get("skill_path"):
                 skill_path = _res["skill_path"]
+            if isinstance(evt.get("payload"), dict):
+                # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                evt["payload"]["skill_source"] = _res.get("skill_source") or ""
         except Exception as _se979:
             log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
@@ -2756,7 +2782,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             skill_name = _pipe_skill
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
             # Issue #979: 节点 skill_id 权威优先（三档同名锁定用户选择的档位），
-            # 无 id/失效 → 名字降级（user→repo→official）+ warning
+            # 无 id/失效 → 名字降级（repo→official，Issue #3789）+ warning
             from src.domains.mgmt.public import resolve_skill_dispatch
             _node_sid = resolve_scene_node_skill_id(repo_key, agent_type, scene_id=_issue_scene,
                                                     user_id=_issue_scene_uid)
@@ -2764,6 +2790,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag=agent_type,
                                           agent_type=agent_type)
+            if isinstance(evt.get("payload"), dict):
+                # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                evt["payload"]["skill_source"] = _res.get("skill_source") or ""
             if _res["skill_id"]:
                 skill_id = _res["skill_id"]
                 skill_path = _res.get("skill_path") or _pipe_skill
@@ -4822,6 +4851,19 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                     if _full and os.path.exists(_full):
                         _skill_local = os.path.dirname(_full)
             else:
+                # Issue #3914 C：direct evt 只带任务行的 __obs_key__（存量行 skill_id=0）
+                # 时复用既有 OBS 取包通道（get_skill_zip_bytes，与 worker 同源），
+                # 不新增通道；无键 → 保持「按名找官方目录」既有降级。
+                _okey_bridge = evt.get("_skill_obs_key") or ""
+                if _okey_bridge:
+                    from src.domains.runtime.storage import get_skill_zip_bytes
+                    _zip = get_skill_zip_bytes(_okey_bridge)
+                    if _zip:
+                        return ("zip", _zip)
+                    # 行为变化（review 确认项）：任务行已写明 OBS 键但拉取失败 → 直接
+                    # ("none", ...) 交给物化回退链（degraded/FALLBACK.md 指引），**不再**
+                    # 退化为「按名找官方目录」——按名找回的是另一份内容，属静默换源。
+                    return ("none", f"skill zip unavailable: {_okey_bridge}")
                 from src.kernel.config import resolve_official_skill_path as _resolve_skill_path
                 _real_skill_md = _resolve_skill_path(skill_name or "")
                 if _real_skill_md:
@@ -4904,8 +4946,22 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
         try:
             from src.domains.runtime.engine.skill_materialize import (
                 verify_skill_execution_consistency, SKILL_CONSISTENCY_KEY)
+            # Issue #3914 D：与 worker 侧同口径——本次物化走了明示回退（#617 官方检查器）
+            # 时把替身技能名传给门禁（declared_fallback），否则门禁会按「本地缓存残留」拒绝，
+            # 而 worker 侧同样场景是靠 task["skill_fallback"] 放行的（口径不一致 → QA 断链）。
+            # degraded（真缺失）不传 → 既有 fail-fast（[skill_mismatch]）保持不变。
+            # ⚠️ 物化结果一律从 evt 取（已在上方写入）：skill_name 为空时本次不物化，
+            # 此时不能引用 `if skill_name:` 块内的局部变量（否则 NameError 被下方 except
+            # 吞掉 → 一致性结论不落 evt → 门禁退化为 verdict missing）。
+            _mat = evt.get("_skill_materialize") or {}
+            _mat_fb = None
+            if (isinstance(_mat, dict) and _mat.get("status") == "fallback"
+                    and _mat.get("skill_name")):
+                _mat_fb = {"skill_name": _mat["skill_name"],
+                           "skill_id": _mat.get("skill_id") or 0}
             evt[SKILL_CONSISTENCY_KEY] = verify_skill_execution_consistency(
-                skill_name or "", skill_dir, extra_scan_dirs=_extra_dirs)
+                skill_name or "", skill_dir, skill_fallback=_mat_fb,
+                extra_scan_dirs=_extra_dirs)
         except Exception as _sc_e:
             log.warning(f"direct skill consistency verify failed: {_sc_e}")
     except Exception as e:
@@ -6417,9 +6473,39 @@ _PR_SUB_ISSUE_ID_RE = re.compile(r"^#?pr_\d+_")
 
 _PR_SUB_PROMPT_MARKERS = ("本任务来自 PR 订阅场景", "## PR 审查任务")
 
+def _is_autopilot_task(issue_id: str = "", event_seq: int = 0) -> bool:
+    """判定任务是否来自 autopilot 调度（Issue #3744）。
+
+    autopilot 任务使用合成 issue_id（`autopilot-<字母>`）与高位合成 event_seq
+    （`_AUTOPILOT_EVENT_SEQ_BASE + exec_id`），设计上不写 events 表
+    （`skip_event_config=True`）。因此场景校正必须在入口按来源短路，不得查询 events
+    （否则每次必然查空并产生 WARNING）。
+
+    识别口径（常量单一来源 = scheduler，禁止硬编码观测值）：
+    - 主判据：`agent_tasks.issue_id` 前缀 `autopilot-`（任务级权威标记）；
+    - 辅助判据：`event_seq >= _AUTOPILOT_EVENT_SEQ_BASE`（高位命名空间兜底，
+      兼容历史/无 issue_id 的 autopilot 任务）。
+    """
+    _issue = str(issue_id or "")
+    try:
+        from src.domains.runtime.engine.scheduler import (
+            _AUTOPILOT_EVENT_SEQ_BASE, _AUTOPILOT_ISSUE_ID_PREFIX)
+    except Exception as e:
+        # 常量不可用时不误杀真实任务，保守按非 autopilot 处理
+        log.debug(f"[scene-env] autopilot source constants unavailable: {e}")
+        return False
+    if (_issue.startswith(_AUTOPILOT_ISSUE_ID_PREFIX)
+            and len(_issue) > len(_AUTOPILOT_ISSUE_ID_PREFIX)):
+        return True
+    try:
+        return bool(event_seq) and int(event_seq) >= int(_AUTOPILOT_EVENT_SEQ_BASE)
+    except (TypeError, ValueError):
+        return False
+
 def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                            event_type: str = "", title: str = "",
-                           prompt: str = ""):
+                           prompt: str = "", task_id: str = "",
+                           repo_key: str = ""):
     """判定任务是否属于 PR 订阅场景，返回三态（Issue #1745 复审修复）。
 
     - `True`：确认是 PR 订阅任务；
@@ -6432,6 +6518,8 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
     3. 事件标题为「PR 订阅」派发（真实关联 Issue 号 + a2a_event 的既有形态）；
     4. 关联 events 行的 event_type / title 命中 2/3；
     5. 事件行不可用（event_seq=0/缺失）时，回退任务 prompt 快照中的订阅标记。
+
+    `task_id` / `repo_key` 仅用于缺行告警的可定位字段（Issue #3744），不参与判定。
     """
     if _PR_SUB_ISSUE_ID_RE.match(str(issue_id or "")):
         return True
@@ -6453,11 +6541,15 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
                     "SELECT event_type, title FROM events WHERE seq=?",
                     (event_seq,)).fetchone()
         except Exception:
-            log.warning(f"[scene-env] events lookup failed for seq={event_seq}, "
+            log.warning(f"[scene-env] events lookup failed for seq={event_seq} "
+                        f"task_id={task_id or '-'} event_seq={event_seq} "
+                        f"repo_key={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if not _row:
-            log.warning(f"[scene-env] events row missing for seq={event_seq}, "
+            log.warning(f"[scene-env] events row missing for seq={event_seq} "
+                        f"task_id={task_id or '-'} event_seq={event_seq} "
+                        f"repo_key={repo_key or '-'}, "
                         f"skip scene reconcile conservatively")
             return None
         if (_row[0] or "") in PR_EVENT_TYPES:
@@ -6469,14 +6561,16 @@ def _pr_subscription_state(issue_id: str = "", event_seq: int = 0,
 
 def _is_pr_subscription_task(issue_id: str = "", event_seq: int = 0,
                              event_type: str = "", title: str = "",
-                             prompt: str = "") -> bool:
+                             prompt: str = "", task_id: str = "",
+                             repo_key: str = "") -> bool:
     """判断任务是否属于 PR 订阅场景（Issue #427 语义，Issue #1745 唯一判定入口）。
 
     保守口径：未判定（`None`）也视为 PR 订阅/需保留订阅场景，避免 PR 订阅任务被
     误校正为 Issue 场景而重现 #427。详见 `_pr_subscription_state` 三态说明。
     """
     return _pr_subscription_state(
-        issue_id, event_seq, event_type, title, prompt) is not False
+        issue_id, event_seq, event_type, title, prompt,
+        task_id, repo_key) is not False
 
 def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     """执行前用 Issue 归属场景校正任务快照中的 GRAPE_SCENE_ID（Issue #1745）。
@@ -6487,6 +6581,8 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     `agent_tasks → issue 当前归属场景`（`get_issue_bound_scene`，与
     `issues detail.scene_id` 同源且不回退 dev_scene）重算并覆盖陈旧快照；
     PR 订阅任务保持订阅场景语义不校正；Issue 未绑定场景时按「未选定=空串」口径处理；
+    autopilot 任务（合成 issue_id / 高位合成 seq，设计上不写 events 表）在入口按来源
+    短路并保留快照（Issue #3744）；
     PR 订阅判定未定（events 查询异常/事件行缺失）或 Issue 归属查询异常时一律跳过，
     不覆盖快照，避免误清空正确的 GRAPE_SCENE_ID。
 
@@ -6511,10 +6607,18 @@ def reconcile_task_scene_env(task_id: str, env: dict) -> str:
     _event_seq = _row[2] or 0
     _event_type = _row[3] or ""
     _prompt = _row[4] or ""
+    if _is_autopilot_task(_issue_id, _event_seq):
+        # autopilot 不写 events 表：入口短路，避免必然查空的 events 查询与 WARNING
+        log.debug(f"[scene-env] skip scene reconcile: autopilot task={task_id} "
+                  f"issue={_issue_id or '-'} event_seq={_event_seq} "
+                  f"scene_reconciled=false reason=autopilot_source "
+                  f"snapshot_scene={_snapshot or '-'}")
+        return _snapshot
     if not _repo_key or not _issue_id:
         return _snapshot
     if _pr_subscription_state(_issue_id, _event_seq, _event_type,
-                              prompt=_prompt) is not False:
+                              prompt=_prompt, task_id=task_id,
+                              repo_key=_repo_key) is not False:
         return _snapshot
     _authoritative = _issue_authoritative_scene(_repo_key, _issue_id)
     if _authoritative is None:

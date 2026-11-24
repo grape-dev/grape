@@ -205,6 +205,28 @@ def _engine_busy(runtime_id: int) -> bool:
     except Exception:
         return True  # 查询失败保守视为忙（不抢）
 
+def _obs_key_from_skill_files(skill_files, skill: str) -> str:
+    """Issue #3914：从任务行 skill_files 提取 OBS 对象键（存量行 skill_id=0 的取包桥）。
+
+    enqueue 侧单写形态为 ``{<skill>: {"__obs_key__": <对象键>}}``；全量内联文本、
+    非法 JSON、无该键 → 返回空串（保持既有「按名 + 官方目录」降级语义）。
+    """
+    if not skill_files:
+        return ""
+    try:
+        data = json.loads(skill_files) if isinstance(skill_files, str) else skill_files
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    entry = data.get(skill) if skill else None
+    if entry is None and not skill and len(data) == 1:
+        entry = next(iter(data.values()))
+    if isinstance(entry, dict):
+        return str(entry.get("__obs_key__") or "")
+    return ""
+
+
 def _rebuild_evt_from_task(task: dict) -> dict:
     """按任务行 + events 表重建 _execute_agent 所需的 evt。
 
@@ -221,6 +243,27 @@ def _rebuild_evt_from_task(task: dict) -> dict:
         "account": task.get("account") or "",
         "repository": (task.get("repo_key") or "").split(":", 1)[-1],
     }
+    # Issue #3914 B：技能标识桥接。direct 用的 evt 由本函数重建（入队那份 dict 不入库），
+    # 不桥接 _skill_id → _materialize_direct_workdir 退化为「按名找官方目录」→ #617
+    # 官方检查器兜底 → #887 门禁按「本地缓存残留」误拒（[skill_mismatch]，QA 随机断链）。
+    # 桥接必须落在这里（入队处补 evt 无效）：skill_id>0 → 权威 id + 解析路径；
+    # 存量行 id=0 → 名字降级 + 任务行 __obs_key__ 取包桥（见 _obs_key_from_skill_files）。
+    _skill = task.get("skill") or ""
+    _sid = int(task.get("skill_id") or 0)
+    if _sid:
+        evt["_skill_id"] = _sid
+        try:
+            from src.domains.mgmt.public import get_skill_path
+            _sp = get_skill_path(_sid) or ""
+        except Exception as _spe:
+            _sp = ""
+            log.warning(f"local_claimer: skill path resolve failed for sid={_sid}: {_spe}")
+        evt["_skill_path"] = _sp or _skill
+    elif _skill:
+        evt["_skill_path"] = _skill
+    _okey = _obs_key_from_skill_files(task.get("skill_files"), _skill)
+    if _okey:
+        evt["_skill_obs_key"] = _okey
     seq = task.get("event_seq") or 0
     if not seq:
         return evt

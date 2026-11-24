@@ -30,6 +30,9 @@ _local = threading.local()
 _conns: dict[str, Any] = {}          # 仅放域级锁（domain_lock），连接改线程本地
 _forbidden: set[str] = set()         # 永久禁用（配置/鉴权类错误：重试也不会好）
 _retry_after: dict[str, float] = {}  # 临时失败的退避时间点（monotonic 秒）
+#: 跨域回落告警去重：进程级 set + 锁（每进程每域一次），不用 threading.local
+#: ——后者实为「每线程每域一次」，请求工作线程多时会重复刷同一条告警。
+_warned_cross_domains: set[str] = set()
 _RETRY_BACKOFF_S = 5.0
 #: 缓存连接的存活校验节流：空闲超过该秒数才 ping，避免每次取连接都多一次往返。
 _PING_IDLE_SECONDS = float(os.environ.get("DB_PING_IDLE_SECONDS", "30"))
@@ -218,10 +221,10 @@ def warn_if_cross_domain_fallback(domain: str) -> None:
     actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
     if not (expected and actual and expected != actual):
         return
-    flag = f"_warned_cross_{domain}"
-    if getattr(_local, flag, False):
-        return
-    setattr(_local, flag, True)
+    with _lock:
+        if domain in _warned_cross_domains:
+            return
+        _warned_cross_domains.add(domain)
     log.error(
         f"[db-guard] 跨域读 {domain} 缺 GRAPE_DSN_{domain.upper()}，回落到进程库 "
         f"{actual}（owner 库应为 {expected}）：同名 VIEW 列漂移会变成 1054/1146 的 500"

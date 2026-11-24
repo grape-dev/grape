@@ -39,6 +39,11 @@ echo "=== Running all contract checks ==="
 # 须 `--update-baseline` 并在 PR 中说明理由（维护流程见
 # docs/lib-3db/read-inventory-diff.md）。
 "$PY" scripts/p4/scan_cross_domain_reads.py --check || exit 1
+# Issue #3857：进程库连接棘轮（PG1）——runtime/insight 域代码用进程主库连接查本域表，
+# 在 mgmt 进程里会撞 1146（engine-onboarding 读 agent_runtimes 即此族），静态跨域扫描按
+# 「文件域 × 表归属」判不出来（两者同为 runtime）。此前只接在 rds_gate.sh（三库收口门禁），
+# CI 的 check-all 完全不跑 → 新调用点可静默合入。基线按「文件 → 处数」允许下降、禁止上升。
+"$PY" scripts/scan_pgconn.py --check || exit 1
 # Issue #897：契约端点完整性卡点——核心工作流端点（/api/a2a、/api/tasks/* 等）
 # 不得从 OpenAPI 契约丢失（v2.2.0 曾被子集落盘覆盖，CLI 命令组不渲染）。
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，
@@ -89,6 +94,12 @@ fi
 # 曾以 +28 新增形态绕过所有「守卫全绿」自述。请求路径新增读一律走
 # src/kernel/bulk_read.reader()（免进程锁读通道）。
 "$PY" scripts/check_async_blocking.py || exit 1
+# Issue #4158：顶层同名定义门禁——同模块重复 def/class 会后者覆盖前者（通知链路
+# 静默退回旧实现、reason=no_ctx 丢消息）。基线 0，扫描根缺失/解析失败显式 FAIL。
+"$PY" scripts/check_duplicate_defs.py || exit 1
+# Issue #4158（PR #2077 复审 Optional）：F811 重定义棘轮——顶层同名门禁看不见 import
+# 别名/局部重定义，全仓 72 处存量此前无任何门禁调用。基线入库，新增即失败。
+"$PY" scripts/check_f811.py || exit 1
 if command -v node >/dev/null 2>&1; then
   _rc=0
   for _f in tests/js/test_*.js; do

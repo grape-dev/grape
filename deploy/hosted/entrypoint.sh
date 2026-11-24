@@ -41,6 +41,32 @@ fi
 DATA="${DEVOPS_DATA_DIR:-/app/data}"
 mkdir -p "$DATA" /app/configs "$HOME/.config/opencode"
 
+# ---------- 0) 引擎/设备身份：跨重部署必须稳定 ----------
+# 容器/Pod 每次重建 hostname 都会变，而 host_name 是本机引擎自然键的一部分
+# （UNIQUE (credential_id, name, scope, owner_id, host_name)，见 src/kernel/host_identity.py）。
+# 不固定它：每次重部署就多一条永远离线的引擎行 + 一条离线设备记录，场景节点的引擎绑定
+# 也会停在旧行上。身份落在持久卷 → 同一部署的历次重建共用同一个值；未挂卷时行为不变。
+if [ -z "${GRAPE_HOSTNAME:-}" ]; then
+  _idf="$DATA/instance-id"
+  if [ ! -s "$_idf" ]; then
+    _gen=""
+    if [ -r /dev/urandom ]; then
+      _gen="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' || true)"
+    fi
+    [ -n "$_gen" ] || _gen="$(date +%s)"
+    printf 'inst-%s\n' "$_gen" >"$_idf" 2>/dev/null || rm -f "$_idf" 2>/dev/null || true
+  fi
+  if [ -s "$_idf" ]; then
+    GRAPE_HOSTNAME="$(cat "$_idf")"
+    export GRAPE_HOSTNAME
+    echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (persisted in $_idf)"
+  else
+    echo "[entrypoint] WARN: cannot persist instance id under $DATA; engine identity will follow the container hostname and redeploys will add offline rows" >&2
+  fi
+else
+  echo "[entrypoint] engine identity -> GRAPE_HOSTNAME=$GRAPE_HOSTNAME (from env)"
+fi
+
 # ---------- 1) JWT_SECRET ----------
 if [ -z "${JWT_SECRET:-}" ]; then
   if [ -f "$DATA/.jwt_secret" ]; then
@@ -220,7 +246,6 @@ if [ -n "${LLM_API_KEY:-}" ]; then
     groq)       DEF_BASE="https://api.groq.com/openai/v1" ;;
     anthropic)  DEF_BASE="https://api.anthropic.com/v1"; NO_MODEL_LIST=1 ;;
     deepseek)   DEF_BASE="https://api.deepseek.com/v1" ;;
-    opengw)     DEF_BASE="https://opengw.clouddeveloper.club/v1" ;;
     *)          DEF_BASE="" ;;
   esac
   BASE="${LLM_BASE_URL:-$DEF_BASE}"
@@ -241,8 +266,34 @@ pid = (os.environ.get("LLM_PROVIDER_ID") or "custom").strip() or "custom"
 cfg_path = os.environ["OPENCODE_CFG"]
 api_key = os.environ.get("LLM_API_KEY") or ""
 
-# LLM_MODEL 可能是 `custom/<model-id>` 或裸 `<model-id>`；取斜杠后半段
-mid = mid.split("/", 1)[1] if "/" in mid else mid
+
+def _write_status(payload):
+    """把引擎配置结果写到固定路径，供 /api/health 读取（免鉴权自证）。
+
+    路径与数据卷一致（默认 /app/data），HOME 指向引擎目录时两者可能不同，故显式取数据目录。
+    """
+    import datetime as _dt
+    path = os.environ.get("ENGINE_STATUS_FILE") or os.path.join(
+        os.environ.get("DEVOPS_DATA_DIR") or "/app/data", "engine-status.json")
+    payload = dict(payload)
+    payload["checked_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as _f:
+            json.dump(payload, _f, ensure_ascii=False, indent=2)
+    except Exception as _e:  # 状态文件写不出不应影响启动
+        print(f"[entrypoint] WARN: cannot write engine status file {path}: {_e}", file=sys.stderr)
+
+# LLM_MODEL 可能是 `<provider-id>/<model-id>` 或裸 `<model-id>`：只有前缀**恰好等于 provider id**
+# 时才剥离。模型 id 自身可能带斜杠（OpenRouter 的 `anthropic/claude-sonnet-4.5`），
+# 无条件 split 会把第一段吃掉，得到非法 id —— 实测表现为启动成功、任务阶段才 404。
+# 只剥「恰好等于 provider id」的前缀。不再维护「已知厂商名」白名单去剥首段：
+# 那张名单会让 `anthropic/claude-sonnet-4.5` 在 LLM_PROVIDER_ID 缺省（custom）时照样被
+# 切成 `claude-sonnet-4.5`，而 `google/gemini-2.5-pro` 却保留首段 —— 同为厂商前缀口径
+# 不一致，正是本改动要消除的「启动成功、任务阶段 404」。需要旧写法的部署者把
+# LLM_PROVIDER_ID 设为对应 provider 名即可（此时上面 startswith 分支命中）。
+if mid.startswith(pid + "/"):
+    mid = mid[len(pid) + 1:]
 
 models = {}
 def add(m):
@@ -254,6 +305,7 @@ add(mid)
 
 # 端点若暴露 /models，把返回的模型全部登记，部署者可在 Agent 设置里切换，而不是被钉死一个。
 no_list = os.environ.get("LLM_NO_MODEL_LIST") == "1"
+disc_err = ""
 if base and not no_list:
     try:
         req = urllib.request.Request(
@@ -265,14 +317,44 @@ if base and not no_list:
         for item in (data.get("data") or []):
             add(item.get("id"))
     except Exception as e:
-        print(f"[entrypoint] model discovery skipped: {type(e).__name__}: {e}", file=sys.stderr)
+        # 分类报错：把「填错哪一半」直接说出来，而不是只打异常名。
+        kind = type(e).__name__
+        detail = str(e)
+        code = getattr(e, "code", None)
+        if code in (401, 403):
+            disc_err = (f"key_rejected ({code}) - the API key was not accepted by {base}; "
+                        f"LLM_API_KEY and LLM_BASE_URL are a matched pair")
+        elif code == 404:
+            disc_err = (f"endpoint_not_found (404) - {base.rstrip('/')}/models returned 404; "
+                        f"check LLM_BASE_URL (it must include the /v1 suffix if the API uses one)")
+        elif code is not None:
+            disc_err = f"http_{code} - {base.rstrip('/')}/models returned HTTP {code}"
+        elif kind in ("URLError", "HTTPError", "timeout", "TimeoutError", "socket.timeout"):  # noqa: E501
+            disc_err = f"unreachable - cannot reach {base} ({detail}); check the URL and outbound network"
+        else:
+            disc_err = f"discovery_failed - {kind}: {detail}"
+        print(f"[entrypoint] WARN: model discovery skipped: {disc_err}", file=sys.stderr)
 
 if not models:
     print(
-        "[entrypoint] ERROR: no model available - the endpoint returned no model list, or the discovery call failed, and LLM_MODEL is empty.\n"
-        "[entrypoint]        set LLM_MODEL explicitly, e.g. claude-sonnet-4-5 for the anthropic preset.",
+        "[entrypoint] ============================================================\n"
+        "[entrypoint] ERROR: engine NOT configured - every agent task will fail with\n"
+        "[entrypoint]        \"no available engine\" until this is fixed.\n"
+        f"[entrypoint]   provider : {pid}\n"
+        f"[entrypoint]   endpoint : {base or '<unset>'}\n"
+        f"[entrypoint]   reason   : {disc_err or 'endpoint returned an empty model list'}\n"
+        "[entrypoint]   fix      : make LLM_API_KEY and LLM_BASE_URL a matched pair\n"
+        "[entrypoint]              (the key must be issued by that endpoint), and/or set\n"
+        "[entrypoint]              LLM_MODEL explicitly. The container keeps running so\n"
+        "[entrypoint]              /api/health stays reachable for diagnosis.\n"
+        "[entrypoint] ============================================================",
         file=sys.stderr,
     )
+    _write_status({
+        "configured": False, "provider": pid, "base_url": base,
+        "models": 0, "default_model": "", "probe_ok": False,
+        "error": disc_err or "no model available",
+    })
     sys.exit(0)
 
 # 没给模型时优先选主流通用模型，而不是字母序第一个（聚合端点动辄几百个模型，顺序无意义）
@@ -308,6 +390,15 @@ cfg = {
 }
 with open(cfg_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+_write_status({
+    "configured": True, "provider": pid, "base_url": base,
+    "models": len(models), "default_model": default_model,
+    # 显式给了 LLM_MODEL 时 models 非空，探测失败不会走到上面的 configured:false 分支；
+    # 把探测结论一并写入，避免「key/URL 填错但 /api/health 报已配置、无错误」的失真。
+    "probe_ok": not disc_err,
+    "error": disc_err,
+})
 print(
     f"[entrypoint] engine config -> {cfg_path} "
     f"(provider={pid} default={default_model} models={len(models)} baseURL={base or '<unset>'})"

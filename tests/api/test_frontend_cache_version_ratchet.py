@@ -21,9 +21,9 @@ FROZEN = {
     'index.html': {
         'account-view.js': '63',
         'agent-view.js': '51',
-        'all-views.css': '73',
-        'api.js': '37',
-        'app.css': '10',
+        'all-views.css': '75',
+        'api.js': '38',
+        'app.css': '11',
         'app.js': '310',
         'auth.css': '1',
         'auto-recovery.js': '2',
@@ -42,14 +42,14 @@ FROZEN = {
         'my-feedback-detail.js': '50',
         'my-feedback.js': '50',
         'oauth-buttons.js': '2',
-        'observability-view.js': '59',
+        'observability-view.js': '60',
         'onboarding-view.js': '9',
         'organizations.js': '83',
         'pipeline.js': '58',
         'platform-icons.js': '2',
         'plugins.js': '57',
         'pwd-blocklist.js': '3',
-        'repos-view.js': '67',
+        'repos-view.js': '68',
         'runtimes-view.js': '92',
         'sandbox-view.js': '15',
         'scene-market.js': '62',
@@ -64,7 +64,7 @@ FROZEN = {
         'tokens.css': '2',
     },
     'register.html': {
-        'api.js': '37',
+        'api.js': '38',
         'app.css': '10',
         'auth.css': '1',
         'auth.js': '8',
@@ -72,7 +72,7 @@ FROZEN = {
         'register-view.js': '1',
     },
     'forgot.html': {
-        'api.js': '37',
+        'api.js': '38',
         'app.css': '10',
         'auth.css': '1',
         'auth.js': '8',
@@ -165,7 +165,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ('73', '57a23b9b2e4dde03')
+ALL_VIEWS = ('75', '1ab263e04f0e0021')
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）

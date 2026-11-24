@@ -340,7 +340,7 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
                                      agent_type: str = "",
                                      agent_type_fallback=None,
                                      scope: str = "", skill_type: str = "",
-                                     skill_id: int = 0, baseline_dir=None) -> tuple:
+                                     skill_id: int = 0, baseline_dir=None) -> dict:
     """主渠道物化 + 官方技能包回退 + 降级状态。
 
     primary: 闭包，返回 (kind, payload)：
@@ -354,7 +354,8 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
         ``scope``/``skill_id`` 也可传无参 callable，在 ``primary()`` 执行后再取值，
         供来源 meta 由 primary 惰性写入的调用点使用（避免参数先于函数体求值恒为空）。
     返回 dict {"status": ok|fallback|degraded, "detail": str, "skill_dir": str,
-               "skill_id": int, "drift": dict, "source": dict}。
+                  "skill_id": int, "drift": dict, "source": dict,
+                  "skill_name": str（仅 fallback：实际物化的替身技能名，Issue #3914 D）}。
     """
     result = {"status": "degraded", "detail": "", "skill_dir": ""}
     try:
@@ -425,6 +426,9 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
             result["detail"] = f"primary skill source failed ({_fb_reason}); " \
                                f"materialized official skill package instead"
             result["skill_dir"] = os.path.join(skills_root, _fb_official_name)
+            # Issue #3914 D：回退结果带替身技能名（declared_fallback 判定的单点来源，
+            # 调用点无需用 basename(skill_dir) 反推）
+            result["skill_name"] = _fb_official_name
             # 官方回退内容与来源口径一致：scope=official，skill_id 未知记 0（不使用主
             # 渠道 skill_id，避免「主来源 id + 官方 digest」溯源错配，review）。
             result.update(build_skill_drift_and_source(
@@ -451,6 +455,8 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
                 result["status"] = "fallback"
                 result["skill_dir"] = os.path.join(skills_root, _fb_name)
                 result["skill_id"] = _fb_id
+                # Issue #3914 D：同上，替身技能名随结果返回（门禁按它判 declared_fallback）
+                result["skill_name"] = _fb_name
                 result["detail"] = (
                     f"skill '{skill_name}' not found ({_fb_reason}); materialized official "
                     f"checker '{_fb_name}' for agent_type '{agent_type}' instead "

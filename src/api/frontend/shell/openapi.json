@@ -19402,7 +19402,7 @@
           "issues"
         ],
         "summary": "Issue pipeline roadmap",
-        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).",
+        "description": "Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials). Issue #3891: shares the main resource's resolution chain — an issue that exists on the VCS side but is not registered internally (issue_id=null) returns 200 with an empty pipeline plus `diagnostics{exists:true, has_pipeline_data:false, reason:\"issue_unregistered\", source:\"vcs\"}`; only a confirmed-missing issue returns 404, where `detail.error_code`/`detail.reason` (`issue_not_found` vs `internal_sync_missing`) distinguishes 'does not exist' from 'exists but unverifiable/no pipeline data'.",
         "operationId": "issues_pipeline",
         "parameters": [
           {
@@ -33946,6 +33946,60 @@
         "type": "object",
         "title": "RuntimeRegBody"
       },
+      "RuntimeTagsProbeSignalBody": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "title": "Host",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "runtime_id": {
+            "type": "string",
+            "title": "Runtime Id",
+            "default": ""
+          },
+          "consecutive": {
+            "type": "integer",
+            "title": "Consecutive",
+            "default": 0
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "default": ""
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          },
+          "scene": {
+            "type": "string",
+            "title": "Scene",
+            "default": ""
+          },
+          "pid": {
+            "type": "integer",
+            "title": "Pid",
+            "default": 0
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "RuntimeTagsProbeSignalBody",
+        "description": "Issue #4082：worker 标签探活失败信号（按 host/reason 计数）。\n\nreason 取值见 `RUNTIME_TAGS_PROBE_REASONS`（id_missing/unauthorized/not_found/no_tags/other，\nother = worker 归并的契约外失败如 HTTP 403/422）；契约外 reason 服务端按 unknown 兜底计数\n（不丢数、不告警）；host/pid/ts 仅供服务端日志甄别（worker sink 就地补充）；runtime_id/detail 只进日志。"
+      },
       "SandboxProviderReportBody": {
         "properties": {
           "platform": {
@@ -35932,7 +35986,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "ccadfb425",
-  "x-generated-at": "2026-11-23T15:01:13.272165+00:00",
-  "tags": []
+  "x-source-commit": "5d297ed28",
+  "x-generated-at": "2026-11-24T04:55:43.472002+00:00"
 }

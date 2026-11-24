@@ -898,6 +898,49 @@ ORG_SCENE_NODES = [
 ]
 
 
+def fill_scene_nodes_skill_id(nodes: list, repo_key: str = "", user_id: int = 0,
+                              resolver=None) -> list:
+    """Issue #3914 E：场景节点「存名必存 id」——返回补齐 skill_id 后的节点列表。
+
+    背景：节点只落 ``skill`` 名时，派发侧只能按名解析（user→repo→official 三档同名
+    无法锁定用户选择档位）；落 id 后走 #979 的权威 id 直查。
+
+    语义：
+    - 节点已有**非 0** skill_id → 保留（不覆盖前端显式选择）；``skill_id=0`` 或缺省
+      → 视为「未存 id」按名解析回填（存量/老前端只落 0 的节点正需回填）；
+    - 无技能名 / 非 dict 节点 → 原样返回；
+    - 有技能名无 id → 按 name 解析回填；解析不到保持原样（派发时按名降级 + warning，
+      与 #979 存量回填同口径）。
+    ``resolver`` 仅供测试注入（默认 mgmt.user.db.resolve_skill_id）。
+    纯内存变换：不就地改入参、异常不外抛（保存链不得因解析失败被阻断）。
+    """
+    _resolve = resolver
+    if _resolve is None:
+        from src.domains.mgmt.user.db import resolve_skill_id as _resolve
+    out: list = []
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            out.append(n)
+            continue
+        _name = str(n.get("skill") or "").strip()
+        # 只认 truthy 的既有 skill_id 为「已存」：0/缺省 → 按名回填（0 不是有效选择，
+        # 与 docstring 语义一致）；非数值的脏值保持原样不覆盖（不猜前端意图）。
+        if not _name or n.get("skill_id"):
+            out.append(n)
+            continue
+        try:
+            _sid = int(_resolve(_name, repo_key=repo_key or "",
+                                user_id=user_id or 0) or 0)
+        except Exception as e:
+            log.warning(f"scene node skill resolve failed (skill={_name}): {e}")
+            _sid = 0
+        if _sid:
+            n = dict(n)
+            n["skill_id"] = _sid
+        out.append(n)
+    return out
+
+
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
                         display_name: str = "", created_by: str = "", icon: str = "",
@@ -905,7 +948,8 @@ def create_custom_scene(scene_id: str, name: str, description: str,
                         linked_repos: list = None) -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
-    nodes_json = json.dumps(nodes, ensure_ascii=False)
+    # Issue #3914 E：存名必存 id（仓库级场景只允许 repo/official 档 → user_id=0）
+    nodes_json = json.dumps(fill_scene_nodes_skill_id(nodes, repo_key), ensure_ascii=False)
     linked_repos_json = json.dumps(linked_repos or [], ensure_ascii=False)
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
@@ -1096,7 +1140,8 @@ def update_custom_scene(scene_id: str, repo_key: str,
                         linked_repos: list | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
-    nodes_json = json.dumps(nodes, ensure_ascii=False)
+    # Issue #3914 E：存名必存 id（保存链路单点收口，复制/组织场景同样受益）
+    nodes_json = json.dumps(fill_scene_nodes_skill_id(nodes, repo_key), ensure_ascii=False)
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     with lock:

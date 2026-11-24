@@ -98,6 +98,12 @@ dev = [
     "pytest-xdist>=3.5",
     "pytest-rerunfailures>=13.0",
     "playwright>=1.40",
+    # Issue #4158：F811 重定义门禁（scripts/check_f811.py 的静态姊妹检查）
+    # 此前无依赖，ruff 仅「装了才用」；显式固定下限，避免门禁因缺工具静默降级。
+    # 上限固定到 0.18：F811 命中数受 ruff 规则版本影响，scripts/check_f811.py 的
+    # 基线（configs/f811_baseline.json = 72）与 ruff 版本绑定；升级 ruff 必须
+    # 同时跑 `python3 scripts/check_f811.py --update-baseline` 收紧/校准基线。
+    "ruff>=0.6,<0.18",
 ]
 # All optional features (equivalent to old requirements.txt)
 all = [

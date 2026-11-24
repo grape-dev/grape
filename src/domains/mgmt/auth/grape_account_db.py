@@ -4,10 +4,55 @@ Grape 账号表（grape_accounts）只存账号自身字段，不含任何第三
 第三方绑定关系存储在 external_identities 表。
 """
 
+import threading
 import time
 
 from src.domains.mgmt.auth.business_data import BusinessDataProbe, legacy_table_tuples
 from src.kernel.config import log
+
+# ── Issue #3897：identity 关系缺失（1146 / 域不可用）的一次性降级 ─────────────
+# 生产现场（worker/event 进程）：identity ORM 原走进程主库（runtime 库），而
+# external_identities 的 owner 是 mgmt——runtime 侧只是跨域视图，视图未补建时
+# 每次身份解析一条 WARNING（30 分钟抽样命中 113 条），把真正的异常噪音化。
+# 口径：缺表/域不可用属 schema 漂移，按 op 只 WARN 一次并给出修复命令；其余异常
+# （解密失败/业务错）保持既有 WARNING，不被降级吞掉。返回值仍是 []（非致命）。
+_IDENTITY_DOMAIN = "mgmt"
+_IDENTITY_RELATION_REMEDIATION = (
+    "python3 scripts/domain_view_freshness.py --repair（owner=mgmt 补建跨域视图；"
+    "存量 mgmt 库缺基表时跑迁移 202611230013）")
+_degraded_identity_ops: dict[str, int] = {}
+_degraded_identity_warned: set[str] = set()
+_degraded_identity_lock = threading.Lock()
+
+
+def _is_missing_identity_relation(exc: BaseException) -> bool:
+    """是否「identity 关系缺失 / 域不可用」（1146、Unknown table、DomainUnavailable）。
+
+    只认关系级信号（1146 / 域不可用 / 明确指向 external_identities 的缺表文案），
+    避免把「user does not exist」这类业务文案误降级成 schema 漂移。
+    """
+    msg = str(exc).lower()
+    if "1146" in msg or "domain 'mgmt' unavailable" in msg:
+        return True
+    return ("external_identities" in msg
+            and ("doesn't exist" in msg or "does not exist" in msg
+                 or "unknown table" in msg))
+
+
+def _degrade_identity_read(op: str, exc: BaseException) -> None:
+    """缺表降级：同一 op 只 WARN 一次（含累计计数与修复命令），其余 DEBUG。"""
+    with _degraded_identity_lock:
+        count = _degraded_identity_ops.get(op, 0) + 1
+        _degraded_identity_ops[op] = count
+        first = op not in _degraded_identity_warned
+        if first:
+            _degraded_identity_warned.add(op)
+    if first:
+        log.warning(
+            f"identity read degraded ({op}): external_identities relation unavailable "
+            f"(count={count}): {exc}; remediation: {_IDENTITY_RELATION_REMEDIATION}")
+    else:
+        log.debug(f"identity read degraded ({op}): still unavailable (count={count}): {exc}")
 
 
 class _OwnedCursor:
@@ -664,7 +709,7 @@ def get_user_identities(grape_user_id: str, strict: bool = False) -> list[dict]:
     参与推断，把"读失败"当成"来源全无"，进而撤销用户真实的平台关系。
     """
     try:
-        with _uow() as session:
+        with _uow(_IDENTITY_DOMAIN) as session:
             ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
         return [{"provider": d.provider, "external_login": d.external_login,
                  "external_name": d.external_name, "external_avatar": d.external_avatar,
@@ -674,7 +719,10 @@ def get_user_identities(grape_user_id: str, strict: bool = False) -> list[dict]:
                  # <p>_pat，专用字段路径已改写不再触碰 ei。非空即 OAuth。
                  "has_oauth_token": bool(getattr(d, "access_token", ""))} for d in ds]
     except Exception as e:
-        log.warning(f"Get user identities failed: {e}")
+        if _is_missing_identity_relation(e):
+            _degrade_identity_read("get_user_identities", e)
+        else:
+            log.warning(f"Get user identities failed: {e}")
         if strict:
             raise
         return []
@@ -816,7 +864,7 @@ def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = 
     上层要能和"令牌过期/为空"区分开，否则用户只看到"登录授权已失效"。
     """
     try:
-        with _uow() as session:
+        with _uow(_IDENTITY_DOMAIN) as session:
             ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
         out = []
         for d in ds:
@@ -837,7 +885,10 @@ def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = 
             out.append(item)
         return out
     except Exception as e:
-        log.warning(f"Get user identities with tokens failed: {e}")
+        if _is_missing_identity_relation(e):
+            _degrade_identity_read("get_user_identities_with_tokens", e)
+        else:
+            log.warning(f"Get user identities with tokens failed: {e}")
         return []
 
 def _has_refresh_token(user_id: str, provider: str) -> bool:
@@ -1772,7 +1823,7 @@ def mark_identity_pat(grape_user_id: str, provider: str, pat_login: str = "") ->
     from sqlalchemy import select as _sel
     from src.kernel.persistence.models import ExternalIdentityModel as _M
     try:
-        with _uow() as session:
+        with _uow(_IDENTITY_DOMAIN) as session:
             rows = session.execute(_sel(_M).where(
                 _M.grape_user_id == str(grape_user_id), _M.provider == provider,
                 _M.status.in_((1, 4)))).scalars().all()
@@ -1807,7 +1858,7 @@ def backfill_pat_identity_tokens() -> int:
     moved = 0
     moved_out = 0
     try:
-        with _uow() as session:
+        with _uow(_IDENTITY_DOMAIN) as session:
             # D105k：LIKE '\%_pat' 在 SQLite（无默认转义）匹配不中——改宽匹配+Python 精确过滤
             pats = [c for c in session.execute(_sel(_C)).scalars().all()
                     if c.provider.endswith("_pat")]

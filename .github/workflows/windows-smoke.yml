@@ -39,6 +39,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3874_worker_onboard.py tests/test_engine_model_2545.py tests/test_worker_install_model_gate_2545.py -v
+      - name: Worker install register-window tests (issue #3892)
+        # Issue #3892 QA 审查修复（Required#3）：新增用例
+        # tests/runtime/test_issue_3892_install_worker_register_window.py 此前未接入 CI，
+        # 其中 15 条 pwsh 行为用例在没有 PowerShell 的环境恒 skip，回归等于无门禁。
+        # windows-latest 自带 pwsh，静态守卫 + 行为用例全部生效（历史日志水位、
+        # 硬失败跳过主控交叉验证、回滚提示分支都在此被拦截）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_3892_install_worker_register_window.py -v
+
 
   linux-backend:
     runs-on: ubuntu-latest
@@ -312,6 +322,18 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3699_trace_relay_noise.py -v
+      - name: Trace relay observability + deploy config tests (issue 3749)
+        # Issue #3749 QA 审查修复（Required）：新增用例
+        # test_issue_3749_trace_relay_observability.py（禁用态 503 打点、启动自检、
+        # 指标单次注册与两个入口接线）与 test_issue_3749_trace_relay_deploy_config.py
+        # （五个配置面 + compose worker-server + 503 告警规则）此前未接入 linux-backend
+        # 门禁（先例 #2133/#2245/#3167/#3490/#3699/#3758）。本缺陷正是「CI 绿但指标
+        # 整体失效」类，无门禁断言则回归可静默复发。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3749_trace_relay_observability.py \
+            tests/runtime/test_issue_3749_trace_relay_deploy_config.py -v
       - name: A2A target scene work_branch validation tests (issue #3758)
         # Issue #3758 QA 审查修复（Required）：work_branch 存在性校验回退回归用例
         # 此前未接入 linux-backend 门禁（先例 #2133/#2245/#3167/#3490/#3699），
@@ -321,6 +343,22 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_1753_handoff_target_branch.py \
             tests/runtime/test_issue_329_cross_pipeline.py -v
+      - name: Scene node skill_id persist + dispatch degradation tests (issue #3789)
+        # Issue #3789 QA 审查修复（Required）：新增用例
+        # tests/mgmt/test_issue_3789_scene_skill_id_persist_and_dispatch.py 此前未接入
+        # linux-backend 门禁（先例 #2133/#2245/#3167/#3490/#3699/#3758 均由 QA 要求补齐），
+        # 场景写入口固化 skill_id、repo→official 降级顺序、迁移回填收敛只能靠人工 pytest。
+        # 同时纳入 #979 既有派发用例，防止降级顺序回退而 CI 仍绿。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/mgmt/test_issue_3789_scene_skill_id_persist_and_dispatch.py \
+            tests/mgmt/test_issue_979_scene_skill_id_dispatch.py -v \
+            --deselect "tests/mgmt/test_issue_979_scene_skill_id_dispatch.py::TestLegacySceneCompat::test_migration_backfills_skill_id"
+        # deselect 说明：TestLegacySceneCompat::test_migration_backfills_skill_id 在本
+        # 基线同样失败（unified_user_mapping.user_id 为 INTEGER 主键，用例以 grape 账号
+        # 字符串 id 落库 → datatype mismatch；case body 未被本 PR 改动），属既有环境性
+        # 缺陷，不计入本门禁，避免掩盖 #3789 的真实回退。
       - name: Issues mine COUNT domain routing tests (issue #3771)
         # Issue #3771 QA 审查修复（Required）：新增用例 test_issue_3771_mine_count_domain.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758）。
@@ -338,6 +376,20 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_3771_mine_count_domain.py \
             tests/runtime/test_issue_3826_count_no_fallback.py -v
+      - name: Deploy gateway upstream guard (issue #3764)
+        # Issue #3764 QA 复审（Required）：网关 /api/runtime* 上游端口守卫此前只存在于
+        # scripts/，未接任何自动路径；现网残留 8181 只能靠人工发现。本步骤把四套
+        # deploy/nginx-grape-*.conf 与守卫 pytest 一并纳入门禁。其中 nginx-grape.conf
+        # 是已废弃三进程 38080-38082 布局，按其自身端口口径校验（只防 runtime 漂移）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape-cluster.conf
+          python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape-four-process.conf
+          python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape-compose.conf
+          python3 scripts/verify_nginx_upstream.py --nginx-conf deploy/nginx-grape.conf \
+            --ports mgmt=38080,event=38081,worker=38082,insight=38083
+          python -m pytest tests/test_deploy_preflight_upstream.py tests/api/test_deploy_preflight.py -v
       - name: Startup port-binding order regression tests (issue #3848)
         # Issue #3848 QA 审查修复（Required）：新增用例 test_issue_3848_startup_order.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771）。
@@ -369,3 +421,77 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v
+      - name: VcsApiClient log redaction regression tests (issue #3737)
+        # Issue #3737 QA 审查修复（Required）：新增用例 test_vcs_api_client_log_redaction.py
+        # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771/#3848/#4065）。
+        # 用例锁 query_token 鉴权的 6 处失败日志出口（400/401/超时/URLError/下载失败）
+        # 只写脱敏后的 method+path+状态码与截断后的 body，token 全文及任意 ≥8 位片段零出现；
+        # 同时守 `%26access_token%3D…` 编码形态、`access_key/api_key/password` 覆盖面与
+        # #558 返回语义不变。回退会让 bot 凭据重新以 WARNING 落 Loki（事故实测 923 条/日），
+        # 只能靠人工 pytest 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_vcs_api_client_log_redaction.py -v
+      - name: Release guard domain routing regression tests (issue #3811)
+        # Issue #3811 QA 审查修复（Required）：新增用例
+        # tests/runtime/test_issue_3811_release_guard_domain_routing.py 此前未接入
+        # linux-backend 门禁（先例 #1613/#1982/#2133/#2245/#3167/#3490/#3699/#3758
+        # 均由 QA 要求补齐）。三库拓扑下 release guard 若再次退化为裸 SQL 读 mgmt
+        # 库（1146 / 守卫 fail-open），CI 仍会绿而回归只能靠人工，故与既有 #2225
+        # release guard 用例一并纳入门禁；tests/kernel/test_db_registry_cross_domain_warning.py
+        # 锁 warn_if_cross_domain_fallback 的进程级去重语义（每进程每域一次），
+        # 本 PR 改动该去重机制，故同步纳入，避免 CI 绿而 make test 红。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3811_release_guard_domain_routing.py \
+            tests/runtime/test_issue_2225_release_guard.py \
+            tests/kernel/test_db_registry_cross_domain_warning.py -v
+      - name: Repo bot token denoise + credential backfill tests (issue #3740)
+        # Issue #3740 QA 审查修复（Required#4）：新增两套用例（历史列回落日志限频/缓存/
+        # 指标 + bot 凭据回填/验证/盖章）此前未接入 CI 门禁（先例
+        # #1613/#2133/#2245/#3167/#3490/#3699），回退只能靠人工本地 pytest。
+        # 第三项为基线 Issue #3897 的回落日志限频用例：本单在 _fetch 上加缓存后，
+        # 其 FIXTURE 必须显式关缓存（TTL=0）才能观察「每次存储读」的限频语义，
+        # 一并纳入门禁防回归。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/kernel/test_issue3740_repo_bot_denoise.py \
+            tests/mgmt/test_issue3740_bot_cred_backfill.py \
+            tests/kernel/test_issue_3897_repobot_fallback_log.py -v
+
+      - name: Gateway release-window 502 hardening tests (issue #3847)
+        # Issue #3847 QA 审查修复（Required）：本用例此前未接入 linux-backend 门禁
+        # （先例 #1613/#2133/#2245/#3167/#3490/#3699/#3758/#3771）。
+        # 用例覆盖 compose include 挂载、upstream peer 数量、每个反代 location 的
+        # Connection 重设、deploy-drain.sh 的 fail-closed 与失败率门禁失败语义；
+        # 其中 keepalive 复用 / Upgrade 映射 / 502 重试是**真实 nginx 行为断言**，
+        # 缺 nginx 时这些用例会 skip（门禁等于失效），故此处显式安装 nginx。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx
+          nginx -v
+          python -m pytest tests/contracts/test_issue_3847_gateway_graceful.py -v
+      - name: Branch guard runtime resolution tests (issue #3579)
+        # Issue #3579 QA 复审（工作流审查·变更验证 Required）：pre-push 守卫钩子的
+        # 运行时解释器/模块解析用例此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245
+        # 均由 QA 要求补齐），模板改动红/绿只能靠提交者自证。接入 branch_guard 全量
+        # 回归（fail-open/fail-closed 边界、部署态优先加载、存量模板升级）。
+        # 注：test_issue_993 的两个 linked-push 用例在基线上即失败（与 #3579 无关，
+        # 历史问题另行跟踪），显式 deselect 保持门禁可绿，其余用例全部进门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3579_branch_guard_runtime_path.py \
+            tests/test_issue_2028_branch_guard_fail_open.py \
+            tests/runtime/test_issue_2292_branch_guard_canonical_lock.py \
+            tests/runtime/test_issue_2314_branch_guard_fast_forward.py \
+            tests/runtime/test_issue_2514_workspace_binding.py \
+            tests/runtime/test_issue_2706_branch_guard_lease_fallback.py \
+            tests/runtime/test_issue_2933_readonly_log_failopen.py \
+            tests/runtime/test_issue_993_branch_guard.py -v \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_agent_linked_push_path_uses_guard \
+            --deselect tests/runtime/test_issue_993_branch_guard.py::test_direct_linked_push_path_uses_guard

@@ -162,3 +162,46 @@ def test_check_fail_closed_when_baseline_missing(tmp_path, monkeypatch):
     _make_repo(tmp_path, CASE_PG_ONE, {"src/domains/runtime/case.py": 1})
     os.remove(os.path.join(str(tmp_path), "scripts", "pgconn_baseline.json"))
     assert _run_check(tmp_path, monkeypatch) == 2
+
+
+# ---- Issue #3857：门禁接线 + 真实读点回归锁 ----
+
+CASE_CURSOR_FOR = '''
+from src.kernel.db_registry import cursor_for
+
+def f(x):
+    with cursor_for("runtime") as c:
+        c.execute("SELECT status FROM agent_runtimes WHERE id=%s", (x,))
+'''
+
+
+def test_cursor_for_is_recognized_as_domain_source(tmp_path):
+    """`cursor_for("<域>")` 是内核唯一路由原语（三库缺 DSN 即 DomainUnavailable），
+    属域连接来源，不得被当作进程库读。"""
+    assert _scan(tmp_path, CASE_CURSOR_FOR) == []
+
+
+def test_check_all_wires_pgconn_ratchet():
+    """门禁必须真正接入 check-all。
+
+    Issue #3857 复盘点：脚本与 `--check` 都对，但只在 `rds_gate.sh`（三库收口门禁）里
+    接线，CI 的 check-all 完全不跑——engine-onboarding 这类新读点因此可静默合入。
+    """
+    path = os.path.join(ROOT, "scripts", "check-all.sh")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "scan_pgconn.py --check" in text, "check-all 未接入进程库连接棘轮"
+
+
+def test_engine_onboarding_not_flagged():
+    """Issue #3857 回归锁：engine-onboarding 读 agent_runtimes 不得再被判为进程库读。
+
+    该端点三库下曾用 mgmt 主库游标查 runtime 域表（1146 → remote_engines 恒空、
+    needs_worker 恒 true）。单测 `--check` 只能拦「相对基线上升」，这里锁死具体读点。
+    """
+    mod = _load_scanner()
+    owned = mod.load_owned()["runtime"]
+    path = os.path.join(ROOT, "src", "domains", "runtime", "routes", "runtime.py")
+    hits = mod.scan_file(path, "src/domains/runtime/routes/runtime.py", "runtime", owned)
+    flagged = [h for h in hits if h["func"] == "runtime_engine_onboarding"]
+    assert flagged == [], f"engine-onboarding 仍用进程库连接读 runtime 域表: {flagged}"

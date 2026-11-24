@@ -27,12 +27,18 @@ factory.py + 各平台 <dialect>.py）；
   resolve_exec_token()  — 唯一执行凭据选择器（换券面 + 建树面共用，带 stage 分类）
 """
 
+import threading
+import time
+
 from abc import ABC, abstractmethod
 
 from dataclasses import dataclass, field
 
+import os
+
 from typing import Optional
 
+from src.kernel import repo_bot_observability as _repo_bot_obs
 from src.kernel.config import log
 from src.kernel.ports import accounts as _accounts
 from src.kernel.ports import pipeline as _pipeline
@@ -53,6 +59,83 @@ CREDENTIAL_STAGE_UNDECRYPTABLE = "undecryptable"
 CREDENTIAL_STAGE_EXPIRED = "expired"
 CREDENTIAL_STAGES = (CREDENTIAL_STAGE_EMPTY, CREDENTIAL_STAGE_UNDECRYPTABLE,
                      CREDENTIAL_STAGE_EXPIRED)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Issue #3740：RepoBotToken 解析结果进程内短 TTL 缓存
+#
+# 动因：token 解析是热路径（每次 VCS 调用前都走），一次 issue 收尾会对同一
+# (repo_key, field) 连解析 3-4 次——每次一次 rc 查询 + 一次 managed_repos 列读 +
+# 解密。缓存把「同请求重复解析」折叠成一次，同时把 legacy 回落日志/审计写入
+# 从 O(解析次数) 降到 O(存储读次数)。
+#
+# 口径（spec 已接受）：TTL ≤60s，凭据轮换最多延迟一个 TTL 窗口；同进程内写路径
+# （rc upsert/clear）与过期标记路径会主动失效，轮换即时可见。TTL=0 关闭缓存。
+# ────────────────────────────────────────────────────────────────────────────
+_REPO_BOT_CACHE_DEFAULT_TTL = 60.0
+_REPO_BOT_CACHE_MAX_ENTRIES = 2048
+_repo_bot_cache: dict = {}
+
+
+def repo_bot_token_cache_ttl() -> float:
+    """解析缓存 TTL（秒）：``GRAPE_REPO_BOT_TOKEN_CACHE_TTL`` 可覆盖，钳制到 [0, 60]。"""
+    raw = os.environ.get("GRAPE_REPO_BOT_TOKEN_CACHE_TTL", "")
+    try:
+        ttl = float(raw) if str(raw).strip() != "" else _REPO_BOT_CACHE_DEFAULT_TTL
+    except (TypeError, ValueError):
+        ttl = _REPO_BOT_CACHE_DEFAULT_TTL
+    if ttl <= 0:
+        return 0.0
+    return min(float(ttl), _REPO_BOT_CACHE_DEFAULT_TTL)
+
+
+def _repo_bot_cache_get(key: tuple):
+    """取未过期缓存项 (expires_at, source, value, cred_id)；无/过期返回 None。"""
+    entry = _repo_bot_cache.get(key)
+    if not entry:
+        return None
+    if entry[0] <= time.monotonic():
+        _repo_bot_cache.pop(key, None)
+        return None
+    return entry
+
+
+#: 不入缓存的解析来源：存储读失败（``error``）以及「rc 读失败后 legacy 回落」
+#: （``legacy_rc_error``）。两者都是瞬时故障态，缓存会把错误冻结一个 TTL 窗口。
+_UNCACHEABLE_SOURCES = frozenset({"error", "legacy_rc_error"})
+
+
+def _repo_bot_cache_put(key: tuple, source: str, value: str, cred_id: str = "") -> None:
+    """写缓存。存储读失败 / rc 读失败后的 legacy 回落不入缓存——瞬时故障不该被冻结一个 TTL。"""
+    ttl = repo_bot_token_cache_ttl()
+    if ttl <= 0 or source in _UNCACHEABLE_SOURCES:
+        return
+    if len(_repo_bot_cache) >= _REPO_BOT_CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        for stale in [k for k, v in _repo_bot_cache.items() if v[0] <= now]:
+            _repo_bot_cache.pop(stale, None)
+        if len(_repo_bot_cache) >= _REPO_BOT_CACHE_MAX_ENTRIES:
+            _repo_bot_cache.clear()
+    _repo_bot_cache[key] = (time.monotonic() + ttl, source, value or "", cred_id or "")
+
+
+def invalidate_repo_bot_token_cache(repo_key: str = "", field: str = "") -> int:
+    """失效解析缓存：给定 repo_key（可选 field）清对应项，空参清全表。
+
+    返回清理条数。rc 写路径（upsert/clear）、过期标记路径与运维手工刷新调用；
+    失效范围 = 进程内，跨进程仍受 ≤60s TTL 约束。
+    """
+    if not repo_key:
+        n = len(_repo_bot_cache)
+        _repo_bot_cache.clear()
+        return n
+    if field:
+        return 1 if _repo_bot_cache.pop((str(repo_key), str(field)), None) is not None else 0
+    stale_keys = [k for k in _repo_bot_cache if k[0] == str(repo_key)]
+    for key in stale_keys:
+        _repo_bot_cache.pop(key, None)
+    return len(stale_keys)
+
 
 # 链首显式仓库 bot 行的级别标识（换券面 / 任务面 / 审计共用同一个词）
 EXPLICIT_REPO_BOT_LEVEL = "rc_bot"
@@ -321,6 +404,35 @@ class ExplicitRepoBotToken(TokenStrategy):
             log.warning(f"ExplicitRepoBotToken.clear_expired: {e}")
 
 
+# ── Issue #3897 D：RepoBotToken 历史列回退日志降噪 ─────────────────────────────
+# 生产 3.9 万条/小时 `historical column fallback hit (rc miss)`：token 解析是高频路径，
+# 每条历史数据命中都打 WARNING 会把真正的告警淹掉。降噪口径（验收：0 条/h 或 debug）：
+#   · 默认 DEBUG（仍可 `log.debug` 取证 / 灰度期临时调级别）；
+#   · 同一 `(repo_key, field)` 保留 1 条 WARNING / 小时——下线判据 grep 仍能拿到
+#     「还有哪些仓库在吃历史列」，不至于降噪后彻底失明；
+#   · 按 repo 限频（不是全局一次），避免一条日志掩盖受影响面。
+_FALLBACK_WARN_INTERVAL_SECONDS = 3600.0
+_fallback_warn_at: dict = {}
+_fallback_warn_lock = threading.Lock()
+
+
+def _legacy_fallback_log(repo_key: str, field: str) -> None:
+    """历史列命中日志：DEBUG 常态 + 每 (repo, field) 每小时最多 1 条 WARNING。"""
+    _key = (repo_key, field)
+    _now = time.monotonic()
+    with _fallback_warn_lock:
+        _last = _fallback_warn_at.get(_key, 0.0)
+        _should_warn = (_now - _last) >= _FALLBACK_WARN_INTERVAL_SECONDS
+        if _should_warn:
+            _fallback_warn_at[_key] = _now
+    _msg = (f"RepoBotToken: historical column fallback hit (rc miss) "
+            f"repo={repo_key} field={field}")
+    if _should_warn:
+        log.warning(_msg)
+    else:
+        log.debug(_msg)
+
+
 class RepoBotToken(TokenStrategy):
     """第 2 级：managed_repos.{token_storage_field}
 
@@ -339,6 +451,11 @@ class RepoBotToken(TokenStrategy):
         return "repo_bot"
 
     def _fetch(self, repo_key: str) -> str:
+        """读仓库 bot token：先看进程内短 TTL 缓存，未命中才真正解析。
+
+        缓存的 key 是 ``(repo_key, field)``——field 参与 key，是因为同一仓库的
+        gitcode/github 两套存量列在平台切换前后可能各命中一次，混用会串值。
+        """
         repo_key = self._normalize_repo_key(repo_key)
         if not repo_key:
             return ""
@@ -347,6 +464,25 @@ class RepoBotToken(TokenStrategy):
         if self._is_path_b(repo_key) and not self.bypass_path_b:
             return ""
         field = self.provider.token_storage_field()  # bot_gitcode_token / bot_github_token
+        cache_key = (repo_key, field or "")
+        cached = _repo_bot_cache_get(cache_key)
+        if cached is not None:
+            return cached[2]
+        token, source, cred_id = self._resolve_bot_token(repo_key, field)
+        _repo_bot_cache_put(cache_key, source, token, cred_id)
+        return token
+
+    def _resolve_bot_token(self, repo_key: str, field: str) -> "tuple[str, str, str]":
+        """真正解析 bot token，返回 ``(token, source, cred_id)``。
+
+        source ∈ {``rc``, ``legacy``, ``legacy_rc_error``, ``none``, ``error``}：
+        ``error`` = 存储读失败、``legacy_rc_error`` = rc 读失败后回落的 legacy 值——
+        二者均不写缓存（瞬时故障不该被冻结一个 TTL）；``none`` = rc miss 且 legacy
+        列空（含 rc miss 标记，正是要缓存的那类重复解析）。
+        审计口径 =「一次实际存储读一行」：缓存命中不经过本函数，故写入随缓存降频
+        （Issue #3740 明列的写放大待消除项）。
+        """
+        _rc_error = False
         # S82：grape_t_repo_credentials 唯一权威（rc 优先无条件；列=历史回落）
         # D99：cred_type 归一='bot'（值域 {'bot','webhook'}，平台由 repo_key 承载）
         try:
@@ -361,13 +497,14 @@ class RepoBotToken(TokenStrategy):
                               operation="repo_bot_hit", repo_key=repo_key)
                 except Exception:
                     pass  # 审计失败不阻断
-                return _rc["value"]
+                return _rc["value"], "rc", str(_rc.get("id") or "")
         except Exception as _rc_err:
+            _rc_error = True
             log.warning(f"RepoBotToken: grape_t_repo_credentials read failed: {_rc_err}")
         # F4/D106（终态第一批）：卡列空平台（gitee/gitlab）无物理列——
         # legacy 列回落分支对其不存在，直接返回空（不触发下方 SQL 报错噪音）。
         if not field:
-            return ""
+            return "", ("error" if _rc_error else "none"), ""
         # ------------------------------------------------------------------
         # LEGACY 列回落分支（F4/D106 显式标记）：
         # 仅为 gitcode/github 存量行服务；gitee/gitlab 侧由 D106 回填迁移
@@ -376,18 +513,24 @@ class RepoBotToken(TokenStrategy):
         # 独立消费审计（operation=repo_bot_hit_legacy_column，与 rc 命中的
         # repo_bot_hit 区分）：回填窗口内旧列消费不留审计盲区。
         # 退出 checklist（满足后本分支可删）：
-        # ①回填迁移全量盖章 → ②写路径轮换置空存量列 → ③生产日志连续
-        #   观察期零 "historical column fallback hit"（下线判据）→
+        # ①回填迁移全量盖章 → ②写路径轮换置空存量列 → ③生产观察期
+        #   grape_repo_bot_legacy_fallback_total 窗口增量 == 0 **且** 审计
+        #   operation=repo_bot_hit_legacy_column 零命中（下线判据）→
         # ④删除本分支 + 评估 DROP COLUMN。
+        #
+        # Issue #3740：counter 全量计数（日志可降噪，计数不可）。日志降噪沿用
+        # 基线 Issue #3897 口径（DEBUG 常态 + 每 (repo, field) 每小时 1 条
+        # WARNING）；日志文本保持原样，仅用于 grep 定位——**日志不再是下线
+        # 判据**，判据只认 counter 窗口增量与审计零命中。
         # ------------------------------------------------------------------
         try:
             # managed_repos 归 mgmt：列名与语句都由归属域持有（本文件不再拼 SQL）。
             # 任意拓扑原语：自有 DSN → mgmt 连接；单库回落进程库（同一份语句）。
             raw = _repos.repo_bot_token_from_legacy_column_any(repo_key, field)
             if raw:
-                # 挂账 #12 观测：log.warning 即采集（下线判据 = grep 此日志零命中）
-                log.warning(f"RepoBotToken: historical column fallback hit "
-                            f"(rc miss) repo={repo_key} field={field}")
+                provider, repo = _repo_bot_obs.repo_labels(repo_key)
+                _repo_bot_obs.observe_legacy_fallback(provider, repo)
+                _legacy_fallback_log(repo_key, field)
                 # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
                 # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
                 # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
@@ -399,10 +542,16 @@ class RepoBotToken(TokenStrategy):
                               repo_key=repo_key)
                 except Exception:
                     pass
-                return _tokens.repo_secret_decrypt(raw)
+                # rc 读失败时仍回落 legacy 值（可用性优先），但**不缓存**：
+                # 瞬时 rc 故障不该把 legacy 结果冻结一个 TTL；下一次解析必须
+                # 重新尝试 rc，避免过期 legacy token 被缓存拖过一个窗口
+                # （复审 Required#3）。source 用独立标记，缓存层据此跳过。
+                return (_tokens.repo_secret_decrypt(raw),
+                        ("legacy_rc_error" if _rc_error else "legacy"), "")
+            return "", ("error" if _rc_error else "none"), ""
         except Exception as e:
             log.warning(f"RepoBotToken._fetch: {e}")
-        return ""
+            return "", "error", ""
 
     def _is_expired(self, repo_key: str) -> bool:
         repo_key = self._normalize_repo_key(repo_key)
@@ -422,6 +571,9 @@ class RepoBotToken(TokenStrategy):
             _repos.set_repo_bot_token_status_any(repo_key, "expired")
         except Exception as e:
             log.warning(f"RepoBotToken.mark_expired: {e}")
+        # Issue #3740：过期标记使缓存值失效——回帖链在 401 后必须读到轮换后的新值，
+        # 不能继续吃 TTL 窗口内的旧 token。
+        invalidate_repo_bot_token_cache(repo_key)
 
     def clear_expired(self, repo_key: str):
         repo_key = self._normalize_repo_key(repo_key)
@@ -431,6 +583,7 @@ class RepoBotToken(TokenStrategy):
             _repos.set_repo_bot_token_status_any(repo_key, "")
         except Exception as e:
             log.warning(f"RepoBotToken.clear_expired: {e}")
+        invalidate_repo_bot_token_cache(repo_key)
 
 class GlobalBotToken(TokenStrategy):
     """第 3 级：全局 bot token（meta 表 {global_bot_meta_key}）

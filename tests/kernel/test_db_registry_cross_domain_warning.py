@@ -19,9 +19,9 @@ def _clean(monkeypatch):
     for key in ("DEVOPS_DB_NAME", "GRAPE_MGMT_DB_NAME", "GRAPE_RUNTIME_DB_NAME",
                 "GRAPE_INSIGHT_DB_NAME", "GRAPE_DSN_MGMT", "GRAPE_PROCESS_ROLE"):
         monkeypatch.delenv(key, raising=False)
-    # 告警节流标记在线程本地，逐用例重置
-    for dom in ("mgmt", "runtime", "insight"):
-        monkeypatch.setattr(db_registry._local, f"_warned_cross_{dom}", False, raising=False)
+    # 告警节流标记是进程级 set（每进程每域一次），逐用例替换为空 set；
+    # 不重置会让上一用例写入的域跨用例残留，后续断言「静默通过」而掩盖漏告警。
+    monkeypatch.setattr(db_registry, "_warned_cross_domains", set())
     yield
 
 

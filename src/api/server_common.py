@@ -40,6 +40,7 @@ __all__ = [
     "attach_frontend",
     "init_process_db",
     "is_loopback",
+    "is_direct_loopback",
     "include_selected",
     "check_and_sync_templates",
     "attach_internal_routes",
@@ -61,6 +62,17 @@ def is_loopback(request: Request) -> bool:
     if xri in ("127.0.0.1", "::1"):
         return True
     return False
+
+
+def is_direct_loopback(request: Request) -> bool:
+    """判断直连来源是否为本机（**不信任** X-Forwarded-For / X-Real-IP）。
+
+    Issue #3969 复审 R7：worker uvicorn 绑 0.0.0.0，直连端口即可伪造 XFF 为 127.0.0.1；
+    `/internal/*` 等危险端点必须只看 TCP 对端（`request.client.host`），否则绕过网关
+    deny 就能触发摘流。普通只读健康探针可保留 `is_loopback()`（兼容反代）。
+    """
+    client = request.client
+    return bool(client and client.host in ("127.0.0.1", "::1", "localhost"))
 
 
 def build_app(
@@ -461,11 +473,14 @@ def init_process_db() -> None:
     _load_accounts()
 
 
-def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = False) -> None:
+def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = False,
+                  drain_file: "str | None" = None) -> None:
     """Liveness / readiness health endpoints.
 
     - /health: liveness（loopback 内网专用，外网 403）；返回 service 名便于四进程区分
     - /healthz + /readyz + /health/realtime + /metrics: Mgmt 进程独占（readiness=True）
+    - drain_file（Issue #3969）：停机摘流标记存在时 /readyz 立即 503 not_ready，
+      供 systemd ExecStartPost/ExecStop 与发布编排判定；未传则不做摘流判定。
     """
     _PROCESS_STARTED_AT = _dt.now(_tz.utc).isoformat()
 
@@ -517,8 +532,20 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         if cached and now < _readiness_cache["expires_at"]:
             return cached
 
+        # Issue #3969：排空期优先判 not_ready，且短路 DB 探测（停机中不再服务新流量）。
+        if drain_file and os.path.exists(drain_file):
+            resp = JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "checks": {"draining": "draining"}},
+            )
+            _readiness_cache["result"] = resp
+            _readiness_cache["expires_at"] = now + _READINESS_CACHE_TTL
+            return resp
+
         from src.kernel.session_manager import db, db_lock
         checks = {"db": "ok", "tables": "ok"}
+        if drain_file:
+            checks["draining"] = "false"
         status = "ok"
         http_status = 200
         try:

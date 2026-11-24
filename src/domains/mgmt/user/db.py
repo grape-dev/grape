@@ -1145,24 +1145,30 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
                            repo_key: str = "", user_id: str | int = "",
                            scene_id: str = "", node_tag: str = "",
                            agent_type: str = "") -> dict:
-    """派发技能解析（Issue #979）：skill_id 权威直查 → 名字降级 + warning。
+    """派发技能解析（Issue #979 / #3789）：skill_id 权威直查 → 名字降级 + warning。
 
     - skill_id 非零且 skill 表命中（is_active=1）→ 直接返回该档（显式绑定，
-      三档同名下锁定用户选择的档位）；
-    - skill_id 缺失（老场景仅名字）或失效（技能被删/停用）→ 按
-      resolve_skill_id 现有规则（user→repo→official）降级解析，并打
-      warning（含场景/节点/降级原因），行为与既有名字派发一致；
-    - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底）。
+      三档同名下锁定用户选择的档位，``skill_source="skill_id"``）；
+    - skill_id 缺失（老场景仅名字）或失效（技能被删/停用）→ 降级按
+      **repo → official** 名字解析（Issue #3789：场景派发不再回退 user 档，
+      避免同名 user 技能被误绑到 repo 级场景），并打 warning（含场景/节点/
+      降级原因），结果标 ``skill_source="name_degraded"``；
+    - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底），
+      ``skill_source="unresolved"``。
+
+    ``user_id`` 参数仅为兼容既有调用方保留，不参与降级顺序（scene scope 一律
+    禁止 user 档技能）。
 
     agent_type 非空时做职责校验：解析到的技能 agent_type 与该节点角色不一致时，
     记 warning 并标 ``role_mismatch=True``——存量错绑（过滤上线前绑的）只告警不阻断，
     避免老场景突然停摆；新绑定由场景页下拉的职责过滤挡住。
 
-    返回 {skill_id, skill_name, skill_path, degraded, skill, role_mismatch}。
+    返回 {skill_id, skill_name, skill_path, degraded, skill, role_mismatch,
+    skill_source}。
     """
     out = {"skill_id": 0, "skill_name": skill_name or "",
            "skill_path": skill_name or "", "degraded": False, "skill": None,
-           "role_mismatch": False}
+           "role_mismatch": False, "skill_source": ""}
     if not skill_name and not skill_id:
         return out
     if skill_id:
@@ -1170,7 +1176,8 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
         if row:
             _name = row.get("skill_name") or skill_name or ""
             out.update(skill_id=int(skill_id), skill_name=_name,
-                       skill_path=row.get("skill_path") or _name, skill=row)
+                       skill_path=row.get("skill_path") or _name, skill=row,
+                       skill_source="skill_id")
             _role = (row.get("agent_type") or "").strip().lower()
             if agent_type and _role and _role != agent_type.strip().lower():
                 out["role_mismatch"] = True
@@ -1187,11 +1194,14 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
             f"resolve_skill_dispatch: node without skill_id "
             f"(scene={scene_id or '-'} node={node_tag or '-'} "
             f"skill_name='{skill_name}'), degrade to name resolution "
-            f"(user→repo→official)")
-    sid = resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id)
+            f"(repo→official, skill_source=name_degraded)")
+    # Issue #3789：场景派发降级只允许 repo → official（不允许 user 档，
+    # 同名 user 技能不得被误绑到 repo 级场景）。user_id 不参与降级顺序。
+    sid = resolve_skill_id(skill_name, repo_key=repo_key)
     if sid:
         out["skill_id"] = int(sid)
         out["degraded"] = True
+        out["skill_source"] = "name_degraded"
         row = get_skill_by_id(sid)
         out["skill"] = row
         if row:
@@ -1205,6 +1215,7 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
                             f"(scene={scene_id or '-'} node={node_tag or '-'}, warn only)")
     else:
         out["degraded"] = True
+        out["skill_source"] = "unresolved"
     return out
 
 def get_skill_scope_info(skill_name: str, repo_key: str = "",
