@@ -312,6 +312,18 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_3699_trace_relay_noise.py -v
+      - name: Trace relay observability + deploy config tests (issue 3749)
+        # Issue #3749 QA 审查修复（Required）：新增用例
+        # test_issue_3749_trace_relay_observability.py（禁用态 503 打点、启动自检、
+        # 指标单次注册与两个入口接线）与 test_issue_3749_trace_relay_deploy_config.py
+        # （五个配置面 + compose worker-server + 503 告警规则）此前未接入 linux-backend
+        # 门禁（先例 #2133/#2245/#3167/#3490/#3699/#3758）。本缺陷正是「CI 绿但指标
+        # 整体失效」类，无门禁断言则回归可静默复发。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_issue_3749_trace_relay_observability.py \
+            tests/runtime/test_issue_3749_trace_relay_deploy_config.py -v
       - name: A2A target scene work_branch validation tests (issue #3758)
         # Issue #3758 QA 审查修复（Required）：work_branch 存在性校验回退回归用例
         # 此前未接入 linux-backend 门禁（先例 #2133/#2245/#3167/#3490/#3699），
