@@ -21,18 +21,19 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_SRC = REPO / 'src/api/frontend/app/src'
+# 扫描范围 = 整个前端（app/src Vue 组件 + shell/js 壳页面脚本）。
+# 只扫 app/src 会漏掉 shell/js 里直接调用 `I18N.t('<ns>.<key>')` 的词条缺口。
+DEFAULT_SRC = REPO / 'src/api/frontend'
 DEFAULT_LOCALES = REPO / 'src/api/frontend/shell/locales'
-
-# 与 shell/js/i18n.js 的 MODULES 对齐；目录派生保证新增模块自动纳入。
-MODULE_FILES = ('common', 'app', 'settings', 'knowledge', 'skills', 'chat',
-                'events', 'agents', 'pipeline', 'runtimes', 'tasks', 'issues',
-                'repos', 'dashboard', 'observability', 'templates',
-                'organizations', 'autopilot', 'admin', 'plugins', 'sandbox')
 
 # 组件内 t() 包装函数的命名（按长度从长到短，避免 t 抢先匹配 t2/td/tf/tc/tp）。
 FUNC_NAMES = ('tOr', 't2', 'td', 'tf', 'tc', 'tp', 't')
 FUNC_RE = re.compile(r'function\s+(' + '|'.join(FUNC_NAMES) + r')\s*\(')
+# 箭头函数包装：`const t = (key) => G.I18N.t('sandbox.llm.' + key)`、
+# `const t = key => ...`。漏掉这类写法会静默跳过整个文件的 t() 前缀映射。
+ARROW_RE = re.compile(
+    r'(?:const|let|var)\s+(' + '|'.join(FUNC_NAMES) + r')\s*=\s*'
+    r'(?:\(\s*[^)]*\)|[A-Za-z_$][\w$]*)\s*=>')
 PREFIX_RE = re.compile(r"""['"]([A-Za-z_][\w.-]*)\.\s*['"]\s*\+\s*key""")
 RAW_RE = re.compile(r"""I18N\s*\.\s*t\(\s*key\b""")
 ALIAS_RE = re.compile(r'\b(' + '|'.join(FUNC_NAMES) + r')\s*\(')
@@ -55,17 +56,18 @@ def flat_keys(obj, prefix=''):
 
 
 def load_pack_keys(locales_dir):
-    """返回 {lang: set(full_key)}，full_key 形如 pipeline.status_failed。"""
+    """返回 {lang: set(full_key)}，full_key 形如 pipeline.status_failed。
+
+    模块清单从语言包目录派生（`locales/<lang>/*.json`），不写死列表：
+    新增模块（如 beta_apply.json）自动纳入，避免"注释说目录派生、实为硬编码"。
+    """
     packs = {}
     lang_dirs = [p for p in Path(locales_dir).iterdir() if p.is_dir()]
     for lang_dir in lang_dirs:
         merged = set()
-        for mod in MODULE_FILES:
-            path = lang_dir / f'{mod}.json'
-            if not path.exists():
-                continue
+        for path in sorted(lang_dir.glob('*.json')):
             with open(path, encoding='utf-8') as f:
-                merged |= flat_keys(json.load(f), mod)
+                merged |= flat_keys(json.load(f), path.stem)
         packs[lang_dir.name] = merged
     return packs
 
@@ -190,6 +192,33 @@ def _function_body(txt, start):
     return txt[brace:]
 
 
+def _arrow_body(txt, start):
+    """箭头函数体：`=> { ... }` 走 `_function_body`，`=> expr` 读到顶层 `;`/换行。"""
+    i = _skip_ws_comments(txt, start)
+    n = len(txt)
+    if i < n and txt[i] == '{':
+        return _function_body(txt, i)
+    depth = 0
+    out_start = i
+    while i < n:
+        c = txt[i]
+        if c in '\'"`':
+            _, i = _read_js_string(txt, i)
+            continue
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == ';' and depth == 0:
+            break
+        elif c == '\n' and depth == 0:
+            break
+        i += 1
+    return txt[out_start:i]
+
+
 def scan_file(path, merged_keys):
     """返回 [(kind, key)]；kind 为 leak（无 DEFAULTS 兜底）或 fallback（DEFAULTS 兜底）。"""
     txt = Path(path).read_text(encoding='utf-8')
@@ -202,6 +231,16 @@ def scan_file(path, merged_keys):
     for m in FUNC_RE.finditer(txt):
         name = m.group(1)
         body = _function_body(txt, m.end())
+        if 'I18N' in body:
+            func_prefixes[name] = set(PREFIX_RE.findall(body))
+            func_raw[name] = bool(RAW_RE.search(body))
+        else:
+            alias = [a for a in FUNC_NAMES if re.search(r'\b' + a + r'\s*\(', body)]
+            if alias:
+                func_alias[name] = alias[0]
+    for m in ARROW_RE.finditer(txt):
+        name = m.group(1)
+        body = _arrow_body(txt, m.end())
         if 'I18N' in body:
             func_prefixes[name] = set(PREFIX_RE.findall(body))
             func_raw[name] = bool(RAW_RE.search(body))

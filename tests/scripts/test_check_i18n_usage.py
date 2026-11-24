@@ -113,3 +113,58 @@ def test_main_exit_code_reflects_findings(tmp_path):
 def test_repository_is_clean():
     findings = gate.scan_tree(gate.DEFAULT_SRC, gate.DEFAULT_LOCALES)
     assert findings == []
+
+
+_ARROW_BLOCK = '''
+<script>
+const t = (key, vars) => {
+  const full = 'sandbox.llm.' + key
+  const v = G.I18N.t(full, vars)
+  return v && v !== full ? v : key
+}
+const a = t('missing_key')
+</script>
+'''
+
+_ARROW_EXPR = '''
+<script>
+const t = key => G.I18N.t('sandbox.llm.' + key)
+const a = t('missing_key')
+</script>
+'''
+
+
+def test_arrow_wrapper_block_body_flagged(tmp_path):
+    """箭头函数包装（块体）也必须解析出前缀，否则整文件静默跳过。"""
+    src = tmp_path / "src"
+    locales = tmp_path / "locales"
+    _write_src(src, _ARROW_BLOCK)
+    _write_locales(locales)
+
+    found = {(kind, key) for _path, kind, key in gate.scan_tree(src, locales)}
+    assert ("leak", "missing_key") in found
+
+
+def test_arrow_wrapper_expression_body_flagged(tmp_path):
+    """`const t = key => G.I18N.t('ns.' + key)` 这种单表达式体同样要被识别。"""
+    src = tmp_path / "src"
+    locales = tmp_path / "locales"
+    _write_src(src, _ARROW_EXPR)
+    _write_locales(locales)
+
+    found = {(kind, key) for _path, kind, key in gate.scan_tree(src, locales)}
+    assert ("leak", "missing_key") in found
+
+
+def test_module_list_derived_from_locale_dir(tmp_path):
+    """模块清单必须从 locales/<lang>/*.json 派生：旧硬编码表漏掉的 beta_apply 也要纳入。"""
+    src = tmp_path / "src"
+    locales = tmp_path / "locales"
+    for lang in ("zh", "en"):
+        d = locales / lang
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "beta_apply.json").write_text(
+            json.dumps({"form": {"title": "x"}}, ensure_ascii=False), encoding="utf-8")
+    _write_src(src, "const a = I18N.t('beta_apply.form.title')\n")
+
+    assert gate.scan_tree(src, locales) == []
