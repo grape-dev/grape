@@ -18,7 +18,7 @@
 |---|---|---|
 | 标签事实源 | `engine_capabilities` | UI 勾选即生效，无需重启/重注册（A4） |
 | 空标签语义 | fail-closed | 手动清空标签的引擎两侧均不可调度（A7） |
-| 角色标签写权限 | **任意登录用户可改**（2026-11-23 裁定放开；原 A5 矩阵为凭据所有者 + 平台管理员） | 权限体系未完善期以可用性优先；`session_token` 仍 403，审计与 `tags_user_set=1` 语义不变 |
+| 角色标签写权限 | **分层**（2026-11-24 裁定，修正 11-23 的整体放开）：本机直连（`credential_id=0`）任意登录用户可改；由他人凭据注册的引擎仅 **平台管理员 / 凭据 owner 本人 / 凭据所属 org 的 owner+admin** 可改 | 本机直连是主控机资产、与个人凭据无归属关系，锁死会导致大量机器"看得到改不了"；凭据引擎仍归属明确，保留矩阵可防越权改配置；`session_token` 始终 403 |
 | 官方机器初始态 | 无声明补 all；有声明按 role_tags 播种 | 存量回归不被误伤（A8），`tags_user_set=1` 防心跳覆盖；显式声明 role_tags 的机器（特殊场景，如 only-sre）升级后保持收窄，不被补成 all（架构守护 M1 整改） |
 
 ## Acceptance Criteria
@@ -27,7 +27,7 @@
 - [ ] A2 未勾 sre 也未勾 all 的引擎，派发+认领两侧都不可调度（决策日志 `role_no_candidates` 留痕）
 - [ ] A3 UI 可勾/不勾 chat；6 角色全选自动折叠为全能；保存后心跳不覆盖（`tags_user_set=1`）
 - [ ] A4 认领侧以 engine_capabilities 为准，UI 改标签无需重启/重注册即时生效，role_tags 列改值不再影响认领
-- [ ] A5 写权限（2026-11-23 放开）：任意登录用户（含与凭据无归属关系者、本机直连）PUT tags → 200；`session_token` → 403；不存在的 runtime → 404；写后审计 `engine_tag_change` 记录 operator
+- [ ] A5 写权限（2026-11-24 分层裁定）：本机直连（cred=0）任意登录用户 PUT tags → 200；凭据引擎（cred≠0）仅凭据 owner 本人 / org owner+admin / 平台管理员 → 200，其余登录用户与仓库管理员 → 403 且不写库；`session_token` → 403；不存在的 runtime → 404；写后审计 `engine_tag_change` 记录 operator
 - [ ] A6 Chat 兜底只落勾了 chat/all 的引擎，全不勾时明确提示不静默
 - [ ] A7 手动清空标签的引擎任何角色两侧均不可调度（fail-closed）
 - [ ] A8 存量回归：未手工设标签的引擎（注册自动补 all）行为与基线一致不被误伤
@@ -43,4 +43,4 @@
 | 拆禁广播后官方机器被越权认领 | High | 守卫先行（改动③先于改动①提交）；`role_no_candidates` 留痕 |
 | 口径切换导致认领面变化 | Med | A8 存量回归 + 对账扫描 |
 | 前后端标签值域不同步 | Med | 四处联动清单固定 + 对账扫描测试兜底 |
-| 权限放开导致越权改标签 | Med | 审计 `engine_tag_change` 可追责；如需回收，恢复 `_check_runtime_owner_or_admin` 内的归属判定即可（调用方不变） |
+| 权限放开导致越权改标签 | Med | 已按 11-24 裁定收口：仅本机直连放开，凭据引擎保留归属矩阵；审计 `engine_tag_change` 可追责；如再需收紧，恢复 `_check_runtime_owner_or_admin` 内 `credential_id==0` 分支即可（调用方不变） |

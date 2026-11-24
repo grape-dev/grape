@@ -1,8 +1,9 @@
 """Issue #3396 改动④：PUT /runtimes/{id}/tags 写权限收紧（A5 权限矩阵）。
 
-矩阵（2026-11-23 用户裁定：放开为「任何已登录用户可改」）：
-- 任意登录用户（JWT / API key）→ 200，不限归属（原先仅 owner/org admin/平台管理员）
-- 本机直连（credential_id=0）→ 任意登录用户 200（原先仅平台管理员）
+矩阵（2026-11-24 用户裁定，修正 11-23 的整体放开）：
+- 本机直连（credential_id=0）→ 任意登录用户 200（主控机资产，与个人凭据无归属关系）
+- 由他人凭据注册的引擎 → 平台管理员 / 凭据 owner 本人 / 凭据所属 org 的 owner+admin 200；
+  其他登录用户、仓库管理员 403（11-24 恢复归属矩阵）
 - session_token（tk_）→ 403（账户/平台管理语义，仍拒绝）
 - 不存在的 runtime → 404
 - 读接口 GET /runtimes/{id}/role-tags 保持全员可读 → 200
@@ -114,13 +115,15 @@ class TestPutTagsPermissionMatrix:
         assert r.status_code == 200, r.text
         assert r.json()["tags"] == ["chat"]
 
-    def test_other_user_can_write(self):
-        """放开后：与凭据无归属关系的登录用户同样可改（可用性优先，审计照记）。"""
+    def test_other_user_forbidden_on_credential_engine(self):
+        """11-24 裁定：凭据引擎回到归属矩阵 —— 与凭据无归属关系的登录用户 403，且不写库。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
+        before = _engine_tags(rid)
         r = _put_tags(_client_as(_other_user()), rid)
-        assert r.status_code == 200, r.text
-        assert r.json()["tags"] == ["chat"]
-        assert any(a.get("operator") == "mallory" for a in _tag_audits(rid)), _tag_audits(rid)
+        assert r.status_code == 403, r.text
+        assert "仅引擎凭据所有者" in (r.json().get("detail") or {}).get("message", "")
+        assert _engine_tags(rid) == before          # 未写入
+        assert not [a for a in _tag_audits(rid) if a.get("operator") == "mallory"]
 
     def test_platform_admin_can_write(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
@@ -141,7 +144,7 @@ class TestPutTagsPermissionMatrix:
         assert r.status_code == 200, r.text
 
     def test_local_direct_any_user_allowed(self):
-        """放开后：本机直连引擎也不再限定平台管理员。"""
+        """11-24 裁定：本机直连（cred=0）放开给任意登录用户（凭据引擎不放开）。"""
         rid = _mk_engine(credential=False)
         r = _put_tags(_client_as(_other_user()), rid)
         assert r.status_code == 200, r.text
@@ -262,15 +265,14 @@ class TestSettingsTagWritePermissionMatrix:
         assert any(a.get("action") == "add" and a.get("tag") == "chat"
                    and a.get("operator") == "owner_alice" for a in audits), audits
 
-    def test_other_user_can_write_on_settings(self):
-        """放开后：settings 三个写端点同样对任意登录用户开放，且审计照记。"""
+    def test_other_user_forbidden_on_settings_credential_engine(self):
+        """11-24 裁定：settings 三个写端点对凭据引擎同样执行归属矩阵（403 且不写库）。"""
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         client = _client_as(_other_user())
-        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
-        assert ("chat", 1) in _engine_tags(rid)
-        assert _settings_tags(client, "delete", rid, tag="chat").status_code == 200
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 403
         assert ("chat", 1) not in _engine_tags(rid)
-        assert any(a.get("operator") == "mallory" for a in _tag_audits(rid)), _tag_audits(rid)
+        assert _settings_tags(client, "delete", rid, tag="all").status_code == 403
+        assert not [a for a in _tag_audits(rid) if a.get("operator") == "mallory"]
 
     def test_platform_admin_can_write_via_settings(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)

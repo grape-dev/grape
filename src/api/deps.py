@@ -431,20 +431,14 @@ def _resolve_user_or_platform_admin(request: Request, authorization: str = Heade
 def _check_runtime_owner_or_admin(runtime_id: int, user: dict) -> dict:
     """角色标签写权限（两个路由命名空间的依赖共用同一判定）。
 
-    **2026-11-23 用户裁定：放开为「任何已登录用户可改」**——现网权限体系尚不完善，
-    前端按归属判权导致大量机器「看得到、改不了」，可用性优先。因此本依赖现在只做
-    两件事：
+    **2026-11-24 用户裁定（修正 11-23 的整体放开）**：
+    - 本机直连引擎（`credential_id=0`，主控机资产，与个人凭据无归属关系）→ **任意登录用户可改**；
+    - 由他人凭据注册的引擎 → 仍然只允许 **平台管理员 / 凭据 owner 本人 / 凭据所属 org 的
+      owner+admin**；仓库管理员与其他登录用户 403。
 
-    - `session_token`（`tk_`）→ 403：账户/平台管理语义，仍不接受临时会话令牌；
-    - 目标 runtime 不存在 → 404（避免对幽灵 id 写脏数据）。
-
-    平台管理员 / 凭据所有者 / 其他登录用户一律放行。写接口自身的审计
-    （`engine_tag_change`，经 `mgmt.public.log_audit`）与
-    「UI 写入置 `tags_user_set=1`」的语义保持不变——放开的是**谁**能改，不是**改了什么**。
-
-    留痕：原先的归属矩阵（凭据所有者 / org owner+admin / 平台管理员，仓库管理员禁改，
-    本机直连仅平台管理员）在 Issue #3396 A5 落地过一版，本次按用户裁定整体放开；
-    如需回收，恢复本函数中的归属判定即可（调用方无需改动）。
+    始终生效的两条：`session_token`（`tk_`）→ 403；目标 runtime 不存在 → 404。
+    写接口自身的值域校验（`INVALID_ROLE_TAGS`）、非空校验（`EMPTY_ROLE_TAGS`）与
+    `engine_tag_change` 审计不受本依赖影响。
     """
     if user.get("auth_type") == "session_token":
         raise HTTPException(status_code=403, detail={"code": 403,
@@ -454,7 +448,31 @@ def _check_runtime_owner_or_admin(runtime_id: int, user: dict) -> dict:
     row = _runtime_read_one("runtime_credential_ref_any", (runtime_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
-    return user
+    credential_id = row[0] or 0
+    if credential_id == 0:
+        # 本机直连：放开给任意登录用户（11-24 裁定）
+        return user
+    if user.get("is_platform_admin"):
+        return user
+    cred = _runtime_read_one("runtime_credential_owner_org_any", (credential_id,))
+    if not cred:
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "引擎凭据不存在或已注销，禁止修改角色标签"})
+    owner_name = (cred[0] or "").strip()
+    org_id = str(cred[1] or "").strip()      # uuid；'' = 未归属哨兵
+    uid = user.get("id") or 0
+    username = (user.get("username") or "").strip()
+    if owner_name and username and owner_name.lower() == username.lower():
+        return user
+    if org_id:
+        try:
+            from src.domains.mgmt.user.org_db import get_member_role
+            if get_member_role(str(uid), org_id) in ("owner", "admin"):
+                return user
+        except Exception as e:
+            log.warning(f"require_runtime_owner_or_admin: org role check failed: {e}")
+    raise HTTPException(status_code=403, detail={"code": 403,
+                                                  "message": "仅引擎凭据所有者（本人/组织管理员）或平台管理员可修改角色标签"})
 
 
 def require_runtime_owner_or_admin(runtime_id: int,
