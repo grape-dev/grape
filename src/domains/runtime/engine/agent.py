@@ -4677,15 +4677,24 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             active_task_objs.pop(_tid, None)
             else:
                 heartbeat_fail_streak += 1
-                if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
-                    log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
+                # Issue #3969：以 RuntimeClient 的连续心跳失败口径为准（单次 502 已被其
+                # 退避重试覆盖，只有整轮耗尽才 +1；`consecutive_failures` 为请求级连败）。
+                # 这样「单次 502 不判离线、连续 ≥3 轮才判离线」在真实心跳循环里生效，
+                # 不再只是仅测试引用的孤立 API。
+                if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD or \
+                        client.heartbeat_offline(HEARTBEAT_FAIL_THRESHOLD):
+                    log.warning(
+                        f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}, "
+                        f"client_streak={client.heartbeat_fail_streak}, "
+                        f"consecutive_failures={client.consecutive_failures}), resetting session")
                     await client.reset_session()
                     _hb_session_just_reset = True  # B3: trigger independent version check
                 else:
                     log.debug(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), will retry")
             last_heartbeat = now
 
-            if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
+            if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD or \
+                    client.heartbeat_offline(HEARTBEAT_FAIL_THRESHOLD):
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
                 # Issue #2791：与周期档共用同一实现（force 档）；新装引擎同样立即进首探窗口
                 _hbrc = await _reregister_cycle(
