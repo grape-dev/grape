@@ -74,6 +74,7 @@ def test_dispatch_contract_covers_api_and_errors():
 
     for endpoint in (
         "POST /api/orgs/{id}/dispatches",
+        "GET /api/orgs/{id}/dispatch/scene-catalog",
         "GET /api/orgs/{id}/dispatches/{did}",
         "POST /api/orgs/{id}/dispatches/{did}/cancel",
         "POST /api/orgs/{id}/dispatches/{did}/targets/{repo_key}/retry",
@@ -82,10 +83,14 @@ def test_dispatch_contract_covers_api_and_errors():
     for error_code in ("INVALID_TARGET", "NO_TARGET_SCENE", "PERMISSION_DENIED"):
         assert error_code in combined
     assert "dispatch_id" in combined
+    assert "target_scenes" in combined
+    assert "scene-catalog" in combined
+    assert "scene catalog" in combined
     assert "idempot" in combined.lower() or "幂等" in combined
     assert "not print" in combined.lower() or "不得打印" in combined
     for command in (
         "grape org dispatches create",
+        "grape org dispatches scene catalog",
         "grape org dispatches list",
         "grape org dispatches detail",
         "grape org dispatches cancel",

@@ -348,3 +348,54 @@ class TestCliMain:
         empty.mkdir()
         assert engine_model.main(["--check", "--hermes-home", str(empty)]) == 0
         assert "No hermes config" in capsys.readouterr().out
+
+
+# ===== Issue #3874：降级解析器遇 sequences 不再异常（非阻断 warning）=====
+
+SEQ_FIXTURE = textwrap.dedent("""\
+    model:
+      default: deepseek-v4-flash-0731
+      provider: custom
+      base_url: https://gw.example.com/v1
+      api_key: ${HERMES_TEST_KEY}
+    custom_providers:
+      - model: glm-5.3
+        base_url: https://gw.example.com/v1
+        api_key: sk-list-key
+""")
+
+
+class TestFallbackParserSequencesNonBlocking:
+    def test_fallback_parser_does_not_raise_on_sequences(self):
+        """Issue #3874：降级解析器遇 `- ` 列表行不再抛异常，返回已解析映射 + warning。"""
+        warnings: list[str] = []
+        cfg = engine_model._fallback_parse(SEQ_FIXTURE, warnings)
+        assert cfg["model"]["default"] == "deepseek-v4-flash-0731"
+        assert any("sequences" in w for w in warnings)
+
+    def test_read_config_keeps_default_model_with_sequences(self, tmp_path, monkeypatch):
+        """缺 pyyaml + config 含列表：读取不中断，默认模型 target 仍可解析，附非阻断 warning。"""
+        monkeypatch.setenv("HERMES_TEST_KEY", "sk-test-env-key")
+        home = tmp_path / "hermes-seq"
+        home.mkdir()
+        (home / "config.yaml").write_text(SEQ_FIXTURE, encoding="utf-8")
+        monkeypatch.setattr(engine_model, "_yaml", None)
+        cfg = engine_model.read_hermes_model_config(str(home))
+        assert cfg is not None
+        assert cfg["default_model"] == "deepseek-v4-flash-0731"
+        assert cfg["targets"], "默认模型仍应产生可校验 target"
+        assert any("sequences" in w for w in cfg["warnings"])
+
+    def test_flow_sequence_is_non_blocking_warning(self):
+        """Issue #3874：内联 `[a, b]` 流式列表同样降级为 warning，不抛异常。"""
+        warnings: list[str] = []
+        cfg = engine_model._fallback_parse("key: [a, b]\nother: ok\n", warnings)
+        assert cfg["other"] == "ok"
+        assert any("flow sequences" in w for w in warnings)
+
+    def test_fallback_parser_without_warnings_list_signals_stderr(self, capsys, monkeypatch):
+        """Issue #3874 审查建议：未传 warnings 列表时序列块不得静默丢弃，须留 stderr 信号。"""
+        monkeypatch.setattr(engine_model, "_yaml", None)
+        cfg = engine_model.parse_hermes_config(SEQ_FIXTURE)
+        assert cfg["model"]["default"] == "deepseek-v4-flash-0731"
+        assert "sequences" in capsys.readouterr().err, "缺 warnings 列表时降级提示必须写 stderr"
