@@ -22,7 +22,7 @@ class _FakeResp:
         self._body = body
         self._text = text
 
-    async def json(self):
+    async def json(self, *args, **kwargs):
         return self._body
 
     async def text(self):
@@ -169,3 +169,37 @@ class TestHeartbeatBehavior:
             assert c.heartbeat_fail_streak == 1
             assert _run(c.heartbeat([1])) == {"status": "ok"}
         assert c.heartbeat_fail_streak == 0
+
+class TestRawRequestBackoff:
+    """复审 R1：heartbeat-v2 使用的 `_request_raw` 必须有抖动与总时长预算。"""
+
+    def test_raw_retry_delays_have_jitter(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_CLIENT_RETRY_JITTER", "0.2")
+        monkeypatch.setenv("GRAPE_CLIENT_RETRY_BUDGET_SECONDS", "0")
+        c = _client([_Ctx(_FakeResp(502)), _Ctx(_FakeResp(502)),
+                     _Ctx(_FakeResp(200, {"status": "ok"}))])
+        slept = []
+
+        async def _sleep(sec):
+            slept.append(sec)
+
+        with patch.object(asyncio, "sleep", new=_sleep):
+            status, data, _text = _run(
+                c._request_raw("POST", "/api/runtime/heartbeat-v2", retries=2,
+                               session=c._session))
+        assert status == 200 and data == {"status": "ok"}
+        assert len(slept) == 2
+        # 固定退避为 2s→4s；加 ±20% 抖动后必须落在区间内（不是精确固定值）
+        assert 1.6 <= slept[0] <= 2.4
+        assert 3.2 <= slept[1] <= 4.8
+
+    def test_raw_retry_stops_when_budget_exceeded(self, monkeypatch):
+        monkeypatch.setenv("GRAPE_CLIENT_RETRY_BUDGET_SECONDS", "1")
+        c = _client([_Ctx(_FakeResp(503))] * 6)
+        sleeps = AsyncMock()
+        with patch.object(asyncio, "sleep", new=sleeps), \
+             patch.object(client_mod, "_monotonic",
+                          side_effect=[0.0] + [10.0] * 10):
+            assert _run(c._request_raw("POST", "/api/runtime/heartbeat-v2",
+                                       retries=5, session=c._session)) == (0, None, "")
+        assert sleeps.await_count == 0

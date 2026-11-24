@@ -174,9 +174,15 @@ class RuntimeClient:
         旧服务端」vs「body 带 UNKNOWN_ENGINE_UID = uid 失效」二分。
         session：可选专用会话（标签探活走短超时 _poll_session，Issue #4082——
         探活失败必须快速失败，不能用 30s 主会话把 claim 循环拖住）。
+
+        Issue #3969：与 _request 共用抖动（±20%）与总时长预算（默认 90s）——heartbeat-v2
+        也走本函数，若只有固定 2s→4s→…→32s 退避，30 个 worker 仍会在同一时点重试
+        （惊群未消除）。
         """
         delay = 2
         attempt = 0
+        _started = _monotonic()
+        _budget = _client_retry_budget()
         while True:
             if session is not None:
                 _sess = session
@@ -200,18 +206,18 @@ class RuntimeClient:
                         raise RetryableError(f"http {resp.status}")
                     return resp.status, data, text
             except RetryableError:
-                if attempt >= retries:
+                if attempt >= retries or (_budget > 0 and _monotonic() - _started >= _budget):
                     return 0, None, ""
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_next_backoff(delay, 32))
                 delay = min(delay * 2, 32)
                 attempt += 1
             except (asyncio.CancelledError, KeyboardInterrupt):
                 raise
             except Exception as e:
                 log.warning(f"RuntimeClient raw {method} {path} error: {e}")
-                if attempt >= retries:
+                if attempt >= retries or (_budget > 0 and _monotonic() - _started >= _budget):
                     return 0, None, ""
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_next_backoff(delay, 32))
                 delay = min(delay * 2, 32)
                 attempt += 1
 
