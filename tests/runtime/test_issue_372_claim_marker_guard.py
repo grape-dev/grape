@@ -142,9 +142,12 @@ def test_purge_skips_running_task_guards():
     修复后：SQL 加 NOT EXISTS 子查询保护运行中 task 的 guard。
     """
     import inspect
-    from src.api.event_store import purge_stale_event_guards
+    from src.api.event_store import purge_stale_event_guards, _delete_guard_batch
 
-    src = inspect.getsource(purge_stale_event_guards)
+    # Issue #3794 起 §33 复核随「两段短事务」下沉到 _delete_guard_batch（DELETE 内
+    # NOT EXISTS 复核，防 SELECT→DELETE 间 task 转 running 的 TOCTOU），
+    # 故文本守卫需同时覆盖入口函数与其删除语句实现。
+    src = inspect.getsource(purge_stale_event_guards) + inspect.getsource(_delete_guard_batch)
     assert "NOT EXISTS" in src, (
         "purge_stale_event_guards 必须包含 NOT EXISTS 子查询保护运行中 task"
     )
