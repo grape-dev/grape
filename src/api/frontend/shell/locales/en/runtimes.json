@@ -213,7 +213,8 @@
     "max_concurrent_saved": "Max concurrent saved",
     "max_concurrent_invalid": "Please enter an integer between 1-100",
     "save_failed": "Save failed: {{msg}}",
-    "scanning": "Scanning..."
+    "scanning": "Scanning...",
+    "tags_need_one": "Keep at least one role (All or any role); clearing them all is not allowed"
   },
   "skill": {
     "no_desc": "No description",

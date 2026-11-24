@@ -287,6 +287,8 @@ class TestSettingsTagWritePermissionMatrix:
     def test_owner_update_and_delete_via_settings_audited(self):
         rid = _mk_engine(owner_name="owner_alice", credential=True)
         client = _client_as(_owner_user())
+        # 先补一个角色，保证删除 all 时不是「最后一个角色」（空角色集已被禁止）
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
         assert _settings_tags(client, "put", rid, tag="all").status_code == 200
         assert _settings_tags(client, "delete", rid, tag="all").status_code == 200
         actions = [a.get("action") for a in _tag_audits(rid)]
@@ -307,3 +309,56 @@ class TestRuntimeSetTagsAudited:
         audits = _tag_audits(rid)
         assert any(a.get("action") == "set" and a.get("tags") == ["chat"]
                    and a.get("source") == "runtime_tags_set" for a in audits), audits
+
+
+class TestNoEmptyRoleSet:
+    """2026-11-23 裁定：不允许把所有角色都取消（空角色 = 该引擎对任何任务都不可选）。"""
+
+    def test_put_empty_tags_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _put_tags(_client_as(_owner_user()), rid, tags=())
+        assert r.status_code == 400, r.text
+        detail = (r.json() or {}).get("detail") or {}
+        assert detail.get("error_code") == "EMPTY_ROLE_TAGS", detail
+        assert "至少要保留一个角色" in (detail.get("message") or "")
+        assert ("all", 1) in _engine_tags(rid)          # 原标签未被清掉
+
+    def test_put_empty_tags_does_not_touch_user_set(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        _put_tags(_client_as(_owner_user()), rid, tags=())   # 失败
+        with db_lock:
+            us = db.cursor().execute(
+                "SELECT ifnull(tags_user_set,0) FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
+        assert int(us or 0) == 0, us                    # 失败请求不留「用户已设过」的痕迹
+
+    def test_delete_last_role_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)   # 只有 all
+        r = _settings_tags(_client_as(_owner_user()), "delete", rid, tag="all")
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "EMPTY_ROLE_TAGS"
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_delete_role_with_other_role_remaining_allowed(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        client = _client_as(_owner_user())
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
+        assert _settings_tags(client, "delete", rid, tag="chat").status_code == 200
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_disable_last_role_rejected(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        r = _client_as(_owner_user()).put(
+            f"/api/settings/agent-runtimes/{rid}/tags/all",
+            json={"priority": 50, "enabled": 0})
+        assert r.status_code == 400, r.text
+        assert ((r.json() or {}).get("detail") or {}).get("error_code") == "EMPTY_ROLE_TAGS"
+        assert ("all", 1) in _engine_tags(rid)
+
+    def test_disable_role_with_other_remaining_allowed(self):
+        rid = _mk_engine(owner_name="owner_alice", credential=True)
+        client = _client_as(_owner_user())
+        assert _settings_tags(client, "post", rid, tag="chat").status_code == 200
+        r = client.put(f"/api/settings/agent-runtimes/{rid}/tags/chat",
+                       json={"priority": 50, "enabled": 0})
+        assert r.status_code == 200, r.text
+

@@ -2704,6 +2704,8 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Re
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = tag.strip().lower()
+    if not int(body.enabled or 0):
+        _guard_last_role_or_400(rid, tag)
     with db_lock:
         c = db.cursor()
         try:
@@ -2736,12 +2738,32 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Re
                               priority=body.priority, enabled=body.enabled)
     return {"message": f"标签 {tag} 已更新"}
 
+def _guard_last_role_or_400(rid: int, tag: str) -> None:
+    """不允许把最后一个角色行删掉/停用（空角色行在 Issue #3396 后是 fail-closed）。
+
+    判定走运行域 public 具名原语 `removing_leaves_no_role`（mgmt 不直连 runtime 表）。
+    """
+    try:
+        from src.domains.runtime.public import removing_leaves_no_role as _no_role
+        _empty = _no_role(rid, tag)
+    except Exception as _ge:  # noqa: BLE001 - 判定自身故障不阻断正常删除
+        log.warning(f"engine tag last-role guard failed (rid={rid} tag={tag}): {_ge}")
+        return
+    if _empty:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "EMPTY_ROLE_TAGS",
+            "message": "至少要保留一个角色（「全能」或任一角色），不能全部取消——空角色会让该引擎对任何任务都不再可选",
+        })
+
+
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
 def delete_engine_tag(rid: int, tag: str, request: Request,
                       user: dict = Depends(require_settings_runtime_owner_or_admin)):
-    """删除引擎标签"""
+    """删除引擎标签（不允许删掉最后一个角色行，见 2026-11-23 裁定）"""
     from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
+    _guard_last_role_or_400(rid, tag)
     with db_lock:
         c = db.cursor()
         try:

@@ -213,7 +213,8 @@
     "max_concurrent_saved": "并发数已保存",
     "max_concurrent_invalid": "请输入 1-100 之间的整数",
     "save_failed": "保存失败: {{msg}}",
-    "scanning": "扫描中..."
+    "scanning": "扫描中...",
+    "tags_need_one": "至少要保留一个角色（全能或任一角色），不能全部取消"
   },
   "skill": {
     "no_desc": "无描述",

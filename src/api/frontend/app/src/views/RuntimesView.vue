@@ -2227,6 +2227,11 @@ function saveSceneTags(rt) {
 function saveEngineTags(rt) {
   // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）
   const _payload = toPayload(edAgentTags.value, edVisibleRoles.value)
+  // 2026-11-23 裁定：不允许把所有角色都取消（空角色 = 该引擎对任何任务都不可选）
+  if (!_payload.length) {
+    app().showToast(t('toast.tags_need_one'))
+    return
+  }
   API()
     .put('/runtime/runtimes/' + rt.id + '/tags', { tags: _payload })
     .then(function (d) {

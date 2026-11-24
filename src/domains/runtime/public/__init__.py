@@ -659,6 +659,32 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def removing_leaves_no_role(runtime_id: int, tag: str) -> bool:
+    """删除/禁用该 tag 后，该引擎是否一个角色行都不剩（`all` 与已知角色都算角色行）。
+
+    供写接口在保存前做「至少保留一个角色」判定：空角色行在 Issue #3396 之后是
+    fail-closed（A7），引擎会变成任何角色都不可调度，必须阻止用户手工造成这种状态。
+    派生行（engine:/scene:/scope:）不计。
+    """
+    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
+
+    _tag = (tag or "").strip().lower()
+    with _any_cursor() as c:
+        rows = c.execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1",
+            (int(runtime_id),)).fetchall()
+    remaining = []
+    for (t,) in rows:
+        _t = str(t or "").strip().lower()
+        if not _t:
+            continue
+        if _t == _tag:
+            continue  # 即将删除 / 停用的那一行
+        if _t == "all" or _t in KNOWN_AGENT_ROLES:
+            remaining.append(_t)
+    return not remaining
+
+
 def _mgmt_channel_lib():
     """W2 渠道表（mgmt 归属）的 lib 句柄：可用则写 owner 库，否则返回 None 走原 SQL。
 

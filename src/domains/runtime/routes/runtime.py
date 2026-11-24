@@ -3092,7 +3092,7 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_to
     return {"tags": json.loads(row[0]) if row[0] else []}
 
 
-@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Write is restricted to the credential owner (user/org owner+admin) or platform admin (Issue #3396).")
+@router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache. Any authenticated user may write; empty tag sets are rejected (at least one role must remain).")
 def set_runtime_tags(runtime_id: int, body: dict, request: Request,
                      user: dict = Depends(require_runtime_owner_or_admin)):
     """设置 engine 的角色标签。应用互斥规则后写入。
@@ -3105,6 +3105,14 @@ def set_runtime_tags(runtime_id: int, body: dict, request: Request,
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
+    if not tags:
+        # 2026-11-23 用户裁定：不允许把所有角色都取消——空角色行在 A7 下是 fail-closed，
+        # 引擎会变成任何角色都不可调度。保存直接失败并给出用户可读提示。
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "EMPTY_ROLE_TAGS",
+            "message": "至少要保留一个角色（勾选「全能」或任一角色），不能全部取消——空角色会让该引擎对任何任务都不再可选",
+        })
     now = datetime.now(timezone.utc).isoformat()
     # Issue #3350：engine_capabilities / agent_runtimes 归 runtime 域，按域取连接
     with _runtime_cursor() as c:
