@@ -238,6 +238,12 @@ class _ACPSimpleClient:
         """设置 session/prompt 的 req_id（只有它才触发 prompt_done）。"""
         self._prompt_req_id = req_id
 
+    @property
+    def prompt_req_id(self) -> int:
+        """[O1] Read accessor for the prompt req_id (public API, supports test
+        fixtures without touching private attributes)."""
+        return self._prompt_req_id
+
     def register_prompt_pending(self, req_id: int, event: "threading.Event") -> None:
         """[F5] 注册 prompt 响应的 pending 等待（公开 API，支撑件勿触私有成员）。
 

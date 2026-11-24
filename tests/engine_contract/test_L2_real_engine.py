@@ -98,7 +98,7 @@ class TestL2RealEngine:
             _details = str((_err.get("data") or {}).get("details", "")) or _err.get("message", "")
             if _err and "gateway" in _details.lower():
                 pytest.skip("host hermes gateway singleton conflict — "
-                            "run L2 full-lifecycle on dedicated verification instance (8091-8094)")
+                            "run L2 full-lifecycle on a dedicated verification instance")
             assert "result" in new, f"session/new 失败: {new}"
             # turn：真实流式 prompt（探活级短 prompt，假完成守卫由段⑤ L1 覆盖断言逻辑）
             prompt = _jsonrpc(proc, "session/prompt", {

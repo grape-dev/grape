@@ -30,7 +30,7 @@ class TestPageTypeOfInstance:
         ("aishell-dsh-worker-1", "aishell-dsh"),
         ("aishell-worker-1", "aishell"),
         ("codearts", "codearts"),
-        ("zj-codex-atomcode-1", "codex"),  # 顺序敏感：codex 先于 atomcode
+        ("codex-atomcode-1", "codex"),  # 顺序敏感：codex 先于 atomcode
         ("atomcode-x", "atomcode"),
         # [行为冻结] 下列两条为基线既有行为（wt-p0-baseline 实测一致），非本轮改动引入：
         # cursor=ghost 引擎不在 prefix_map → canonical_engine 兜底 opencode → 链无 hit → ""
@@ -52,7 +52,7 @@ class TestPageTypeOfInstance:
         """settings._engine_type_of 保留（既有测试/调用面不破坏）但改为委托单源函数。"""
         from src.domains.mgmt.routes.settings import _engine_type_of
         from src.domains.runtime.engine.instances import page_type_of_instance
-        for n in ("hermes-worker-1", "aishell-dsh-node2", "hwcloud-1", "zj-codex-atomcode-1", ""):
+        for n in ("hermes-worker-1", "aishell-dsh-node2", "hwcloud-1", "codex-atomcode-1", ""):
             rt = {"name": n}
             assert _engine_type_of(rt) == page_type_of_instance(n)
 
