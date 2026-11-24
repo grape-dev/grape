@@ -185,3 +185,32 @@ class TestSingleDescWording:
         val = zh["tag"]["single_desc"]
         assert val == "{{label}} 角色", val
         assert "仅" not in val
+
+    def test_domain_single_source_both_writers(self):
+        """M3：两处写链路必须同源 —— settings 单标签端点接受集合 == 角色值域 - all。"""
+        from src.domains.runtime.public import role_tag_domain
+        import inspect
+        from src.domains.mgmt.routes import settings as S
+        src = inspect.getsource(S.add_engine_tag)
+        assert "role_tag_domain" in src, "settings 添加标签必须复用 role_tag_domain()"
+        assert '"vod"' not in src, "不应再出现硬编码值域字面量"
+        domain = [r for r in role_tag_domain() if r != "all"]
+        assert set(domain) == {"chat", "coding", "issue", "qa", "sre", "vod"}, domain
+
+
+class TestDisabledPredicateConsistency:
+    """M4：统计口径与守卫口径必须是同一个「角色值域」谓词。"""
+
+    def test_inventory_and_guard_share_domain(self):
+        from src.domains.runtime.public import role_caps_inventory, removing_leaves_no_role, role_tag_domain
+        import inspect
+        from src.domains.runtime import public as P
+        dom = set(role_tag_domain())
+        assert dom == {"all", "chat", "coding", "issue", "qa", "sre", "vod"}, dom
+        # 两者都用域内判定：库存统计 SQL 含域内 tag 集合，守卫函数按同一常量判定
+        inv_src = inspect.getsource(P.role_caps_inventory)
+        assert "role_tag_domain()" in inv_src, "统计必须走角色值域"
+        assert "NOT LIKE" not in inv_src, "不应再用 NOT LIKE 前缀通配（索引失效且口径不一致）"
+        assert "role_tag_domain()" in inspect.getsource(removing_leaves_no_role) or \
+               "KNOWN_AGENT_ROLES" in inspect.getsource(removing_leaves_no_role)
+

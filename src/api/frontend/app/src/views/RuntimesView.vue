@@ -2251,14 +2251,18 @@ function saveEngineTags(rt) {
   API()
     .put('/runtime/runtimes/' + rt.id + '/tags', { tags: _payload })
     .then(function (d) {
-      const target = runtimes.value.find((r) => r.id === rt.id)
-      if (target) target.agent_tags = d.tags
+      // I2：保存即写入 enabled=1 的角色行，服务端 roles_disabled 必然变 false；
+      // 这里同步清掉本地标记，否则「已停用」徽标与红框要等下次拉列表才消失。
+      function syncRow(r) {
+        if (!r) return
+        r.agent_tags = d.tags
+        r.roles_disabled = false
+      }
+      syncRow(runtimes.value.find((r) => r.id === rt.id))
       devices.value.forEach(function (dev) {
-        const r = (dev.runtimes || []).find((x) => x.id === rt.id)
-        if (r) r.agent_tags = d.tags
+        syncRow((dev.runtimes || []).find((x) => x.id === rt.id))
       })
-      if (engineDetail.value && engineDetail.value.id === rt.id)
-        engineDetail.value.agent_tags = d.tags
+      if (engineDetail.value && engineDetail.value.id === rt.id) syncRow(engineDetail.value)
       app().showToast(t('toast.tags_saved'))
     })
     .catch((e) => app().showToast(t('toast.save_failed', { msg: e.message })))

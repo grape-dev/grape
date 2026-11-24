@@ -691,7 +691,9 @@ def role_caps_inventory(runtime_ids: list | None = None) -> dict:
         sql += f" AND runtime_id IN ({','.join('?' * len(ids))})"
         params.extend(ids)
     sql += " GROUP BY runtime_id"
-    with _any_cursor() as c:
+    from src.kernel.otel import feature_span
+    _n_ids = 0 if runtime_ids is None else len(runtime_ids)
+    with feature_span("runtime.role_caps_inventory", {"runtimes": _n_ids}), _any_cursor() as c:
         rows = c.execute(sql, tuple(params)).fetchall()
     out: dict = {}
     for r in rows or []:
