@@ -268,6 +268,18 @@ class TestCountRecentRedispatches:
                             lambda *a, **k: rows)
         assert guard.count_recent_redispatches("gitcode:owner/repo", "5", "coding") == 2
 
+    def test_count_excludes_current_seq(self, monkeypatch):
+        seen = {}
+
+        def _fake(repo, issue, agent, exclude_seq=0):
+            seen["exclude"] = exclude_seq
+            return []
+
+        monkeypatch.setattr(guard, "_query_recent_dispatch_payloads", _fake)
+        assert guard.count_recent_redispatches(
+            "gitcode:owner/repo", "5", "coding", exclude_seq=42) == 0
+        assert seen["exclude"] == 42
+
     def test_limit_state(self, monkeypatch):
         monkeypatch.setattr(guard, "count_recent_redispatches", lambda *a, **k: 3)
         state = guard.redispatch_limit_state("gitcode:owner/repo", "5", "coding", limit=3)
@@ -295,3 +307,35 @@ class TestTerminalGuardIntegration:
         assert out["reason"] == guard.PIPELINE_TERMINAL_REASON
         assert out["triggers"]
         assert out["terminal"] is True
+
+
+class TestWatchdogSourceScope:
+    def test_manual_redispatch_of_is_not_watchdog(self):
+        """人工重派（events.py mark_event_redispatch_of）只写 redispatch_of，不算 watchdog。"""
+        assert guard.is_redispatch_payload({"redispatch_of": 12}) is True
+        assert guard.is_watchdog_redispatch_payload({"redispatch_of": 12}) is False
+        assert guard.is_watchdog_redispatch_payload(
+            {"redispatch_mode": "watchdog", "redispatch_of": 12}) is True
+
+    def test_count_excludes_manual_redispatch_of(self, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (3, now, json.dumps({"redispatch_of": 2, "context": "manual redo"})),
+            (2, now, json.dumps({"redispatch_mode": "watchdog", "context": "watchdog"})),
+        ]
+        monkeypatch.setattr(guard, "_query_recent_dispatch_payloads",
+                            lambda *a, **k: rows)
+        assert guard.count_recent_redispatches(
+            "gitcode:owner/repo", "5", "coding") == 1
+
+    def test_manual_redispatch_not_guarded(self, monkeypatch):
+        recorded = []
+        monkeypatch.setattr(guard, "resolve_pipeline_terminal_state",
+                            lambda *a, **k: {"terminal": True, "reason": "qa_passed"})
+        monkeypatch.setattr(guard, "record_redispatch_skip",
+                            lambda *a, **k: recorded.append(a))
+        out = guard.guard_watchdog_redispatch(
+            "gitcode:owner/repo", "5", "coding",
+            {"redispatch_of": 12, "context": "manual redo"})
+        assert out == {}
+        assert recorded == []

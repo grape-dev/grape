@@ -32,6 +32,8 @@ from src.kernel.issue_ident import (
     native_issue_number, is_native_issue_ident,
 )  # Issue #3055
 
+from src.api.watchdog_redispatch_guard import CONTEXT_EMPTY_REASON
+
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
     TARGET_SOURCE_LEGACY_TEXT,
@@ -449,8 +451,8 @@ class DispatchHandler(Handler):
                                       f" 原任务结论：{_fallback_ctx[:600]}")
             else:
                 _set_finding(ctx.finding_id, "needs_human",
-                             "redispatch_context_empty：重派 context 为空且无可回填结论")
-                ctx.verdict, ctx.action_meta = "redispatch_context_empty", "空 context 禁止重派"
+                             f"{CONTEXT_EMPTY_REASON}：重派 context 为空且无可回填结论")
+                ctx.verdict, ctx.action_meta = CONTEXT_EMPTY_REASON, "空 context 禁止重派"
                 return False
         try:
             res = await a2a_endpoint(

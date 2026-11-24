@@ -279,6 +279,40 @@ def _effective_carrier_pr(repo_key: str, issue_number, explicit_pr: int = 0) -> 
     return 0
 
 
+def _open_issue(repo_key: str, issue_number, timeout: float):
+    """token→create_client→get_issue 单一实现（终态门禁 / watchdog 标签读取共用）。
+
+    跨域取 token 统一走 ``src.domains.mgmt.public``。返回 ``(client, issue, num)``；
+    token 缺失或读取失败返回 ``(None, None, 0)``。
+    """
+    try:
+        from src.domains.mgmt.public import get_repo_token_with_refresh
+        token = get_repo_token_with_refresh(repo_key) or ""
+    except Exception as e:
+        log.debug(f"A2A terminal guard: repo token resolve failed ({e})")
+        return None, None, 0
+    if not token:
+        return None, None, 0
+    try:
+        from src.domains.runtime.vcs.api_client import create_client, _native_issue_number
+        client = create_client(repo_key, token)
+        num = _native_issue_number(str(issue_number).lstrip("#"))
+        issue = client.get_issue(num, timeout=timeout)
+    except Exception as e:
+        log.warning(f"A2A terminal guard: VCS read failed repo={repo_key} "
+                    f"issue={issue_number}: {e}")
+        return None, None, 0
+    if not isinstance(issue, dict) or issue.get("error"):
+        return None, None, 0
+    return client, issue, num
+
+
+def fetch_issue_for_guard(repo_key: str, issue_number, timeout: float = 10.0) -> dict | None:
+    """best-effort 读取 Issue 原生对象（供 watchdog 标签校验复用，避免重复实现）。"""
+    _client, issue, _num = _open_issue(repo_key, issue_number, timeout)
+    return issue
+
+
 def _fetch_vcs_state(repo_key: str, issue_number, explicit_pr: int = 0) -> dict:
     """读取 Issue 标签 / 载体 PR 评论（best-effort；失败返回 available=False）。
 
@@ -286,24 +320,10 @@ def _fetch_vcs_state(repo_key: str, issue_number, explicit_pr: int = 0) -> dict:
     入参 explicit，meta 载体评论被读取却不参与判定（复审硬违规：假阴性）。
     标签读取与评论读取解耦：评论读取失败不得丢弃已命中的权威 ``needs-human`` 标签。
     """
-    try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        token = get_repo_token_with_refresh(repo_key) or ""
-    except Exception as e:
-        log.debug(f"A2A terminal guard: repo token resolve failed ({e})")
-        token = ""
-    if not token:
-        return {"available": False}
     deadline = time.monotonic() + _FETCH_BUDGET_SECONDS
-    try:
-        from src.domains.runtime.vcs.api_client import create_client, _native_issue_number
-        client = create_client(repo_key, token)
-        num = _native_issue_number(str(issue_number).lstrip("#"))
-        issue = client.get_issue(num, timeout=_remaining_timeout(deadline))
-    except Exception as e:
-        log.warning(f"A2A terminal guard: VCS read failed repo={repo_key} issue={issue_number}: {e}")
-        return {"available": False}
-    if not isinstance(issue, dict) or issue.get("error"):
+    client, issue, num = _open_issue(
+        repo_key, issue_number, _remaining_timeout(deadline))
+    if issue is None:
         return {"available": False}
     labels = issue.get("labels")
     texts = [issue.get("title") or "", issue.get("body") or ""]
@@ -407,7 +427,8 @@ def _record_skip(repo_key: str, issue_number, target_agent: str, state: dict) ->
 
 
 def guard_terminal_dispatch(repo_key: str, issue_number, target_agent: str,
-                            evt_payload: dict | None = None) -> dict:
+                            evt_payload: dict | None = None,
+                            exclude_seq: int = 0) -> dict:
     """派发 coding 前的终态短路。
 
     返回 ``{}`` = 放行；否则返回终态判定结果（含 ``reason``/``detail``），调用方
@@ -433,7 +454,7 @@ def guard_terminal_dispatch(repo_key: str, issue_number, target_agent: str,
             from src.api.watchdog_redispatch_guard import guard_watchdog_redispatch
             redo = guard_watchdog_redispatch(
                 repo_key, issue_number, target_agent, payload,
-                labels=(state or {}).get("labels") or ())
+                labels=(state or {}).get("labels") or (), exclude_seq=exclude_seq)
         except Exception as exc:
             log.warning(f"A2A #4334: watchdog redispatch guard failed: {exc}")
             redo = {}

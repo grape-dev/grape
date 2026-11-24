@@ -60,3 +60,39 @@ class TestWebhookRedispatchGuard(A2AGuardTestBase):
         data = resp.json()
         assert data.get("skipped") != guard.PIPELINE_TERMINAL_REASON, data
         assert data["seq"] > 0
+
+    def test_redispatch_mode_only_limit_blocks_nth_and_audits(self):
+        """webhook 落库保留 redispatch_mode 标记：连续重派第 N+1 次被上限拦截留痕。"""
+        from src.api.event_store import update_event_status
+        client = self._setup()
+        limit = guard.DEFAULT_REDISPATCH_LIMIT
+        assert limit >= 1
+        for i in range(limit):
+            resp = client.post("/api/a2a", json=self._body(
+                context=f"watchdog 重派第 {i + 1} 轮：原任务结论 A",
+                redispatch_mode="watchdog", redispatch_of=f"task-{i}"))
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            assert data.get("skipped") != guard.REDISPATCH_LIMIT_REASON, data
+            assert int(data.get("seq") or 0) > 0, data
+            update_event_status(int(data["seq"]), "failed", result="test wheel failed")
+
+        resp = client.post("/api/a2a", json=self._body(
+            context=f"watchdog 重派第 {limit + 1} 轮：原任务结论 A",
+            redispatch_mode="watchdog", redispatch_of=f"task-{limit}"))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data.get("skipped") == guard.REDISPATCH_LIMIT_REASON, data
+        assert int(data.get("seq") or 0) == 0, data
+        assert "count=" in str(data.get("reason") or "") or "count=" in resp.text
+
+        skips = self._skips_for("#5")
+        assert any(r[0] == guard.REDISPATCH_LIMIT_REASON for r in skips), skips
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT reason, detail FROM event_skipped WHERE repo_key=? "
+                "AND issue_id='#5' ORDER BY id DESC LIMIT 1", (REPO_KEY,)).fetchone()
+        assert row is not None
+        assert row[0] == guard.REDISPATCH_LIMIT_REASON, row
+        assert f"count={limit} limit={limit}" in row[1], row

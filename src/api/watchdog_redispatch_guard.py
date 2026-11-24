@@ -44,6 +44,12 @@ REDISPATCH_MARKERS = ("redispatch", "redispatch_of", "redispatch_mode", "_reissu
                       "watchdog_redispatch")
 REDISPATCH_CONTEXT_MARKERS = ("compensated_by=patrol", "watchdog_redispatch")
 
+# watchdog 专属来源标记：人工重派（events.py ``mark_event_redispatch_of``）只写
+# ``redispatch_of``（整数源 seq），不得计入 watchdog 频次上限，也不得触发
+# watchdog 终态/context 守卫。来源区分见 ``is_watchdog_redispatch_payload``。
+WATCHDOG_REDISPATCH_MODES = ("watchdog", "auto_redispatch", "patrol")
+WATCHDOG_MARKER_KEYS = ("watchdog_redispatch", "_reissue")
+
 DEFAULT_REDISPATCH_LIMIT = int(os.environ.get("WATCHDOG_REDISPATCH_LIMIT", "3"))
 DEFAULT_REDISPATCH_WINDOW_SECONDS = int(
     os.environ.get("WATCHDOG_REDISPATCH_WINDOW_SECONDS", "1800"))
@@ -103,13 +109,34 @@ def detect_external_block(payload=None, carried_context=None, labels=()) -> dict
 
 
 def is_redispatch_payload(payload) -> bool:
-    """payload/context 是否声明为 watchdog/自动重派。"""
+    """payload/context 是否声明为重派（宽口径，含人工重派标记）。"""
     if not isinstance(payload, dict):
         return False
     for key in REDISPATCH_MARKERS:
         if payload.get(key):
             return True
     # patrol 补偿器以 compensated_by 标记重派（值形如 ``patrol:<task>:<ts>``）。
+    compensated_by = str(payload.get("compensated_by") or "").lower()
+    if "patrol" in compensated_by or "watchdog" in compensated_by:
+        return True
+    context = str(payload.get("context") or "").lower()
+    return any(marker in context for marker in REDISPATCH_CONTEXT_MARKERS)
+
+
+def is_watchdog_redispatch_payload(payload) -> bool:
+    """payload/context 是否来自 watchdog/巡检自动重派（严格口径）。
+
+    ``events.py`` 的人工重派（``mark_event_redispatch_of``）只写 ``redispatch_of``，
+    因此这里不把单独的 ``redispatch_of`` 视为 watchdog 来源——否则人工重派会被
+    计入 watchdog 频次上限并触发重派守卫（QA 复审 Spec 口径偏差）。
+    """
+    if not isinstance(payload, dict):
+        return False
+    mode = _norm_marker(payload.get("redispatch_mode"))
+    if mode:
+        return mode in {_norm_marker(m) for m in WATCHDOG_REDISPATCH_MODES}
+    if any(payload.get(key) for key in WATCHDOG_MARKER_KEYS):
+        return True
     compensated_by = str(payload.get("compensated_by") or "").lower()
     if "patrol" in compensated_by or "watchdog" in compensated_by:
         return True
@@ -183,16 +210,6 @@ def _query_segment_rows(repo_key: str, issue_number, scene_id=None,
         return []
 
 
-def _parse_structured(raw) -> dict | None:
-    if isinstance(raw, dict):
-        return raw
-    try:
-        parsed = json.loads(raw or "")
-        return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        return None
-
-
 def load_issue_terminal_inputs(repo_key: str, issue_number) -> dict:
     """读取 Issue status/stage（best-effort，查询失败按空串）。"""
     status = stage = ""
@@ -246,7 +263,7 @@ def evaluate_pipeline_terminal(status: str = "", stage: str = "",
         last_status = str(last[2] or "").strip()
         if last_agent == "qa":
             last_result = last[3] if len(last) > 3 else ""
-            last_structured = _parse_structured(last[4]) if len(last) > 4 else None
+            last_structured = _payload_dict(last[4]) if len(last) > 4 else None
             verdict = "unknown"
             try:
                 from src.api.qa_gate import classify_qa_conclusion
@@ -291,15 +308,9 @@ def load_issue_labels(repo_key: str, issue_number) -> list[str]:
     if not repo_key or not num:
         return []
     try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
-        from src.domains.runtime.vcs.api_client import create_client, _native_issue_number
-        from src.api.a2a_terminal_guard import normalize_labels
-        token = get_repo_token_with_refresh(repo_key) or ""
-        if not token:
-            return []
-        client = create_client(repo_key, token)
-        issue = client.get_issue(_native_issue_number(num), timeout=10.0)
-        if not isinstance(issue, dict) or issue.get("error"):
+        from src.api.a2a_terminal_guard import fetch_issue_for_guard, normalize_labels
+        issue = fetch_issue_for_guard(repo_key, num, timeout=10.0)
+        if not issue:
             return []
         return normalize_labels(issue.get("labels"))
     except Exception as exc:
@@ -309,16 +320,21 @@ def load_issue_labels(repo_key: str, issue_number) -> list[str]:
 
 
 def _query_recent_dispatch_payloads(repo_key: str, issue_number,
-                                    target_agent: str) -> list[tuple]:
+                                    target_agent: str,
+                                    exclude_seq: int = 0) -> list[tuple]:
     if not repo_key or not is_native_issue_ident(issue_number):
         return []
+    where = "repo_key=? AND issue_id=? AND event_type=? AND agent_type=?"
+    params: list = [repo_key, _event_issue_ref(issue_number), "a2a_event",
+                    str(target_agent or "").strip()]
+    if int(exclude_seq or 0) > 0:
+        # 排队事件在 drain 阶段复查守卫时排除自身，避免把本次派发计入上限而自锁。
+        where += " AND seq<>?"
+        params.append(int(exclude_seq))
     try:
         from src.domains.runtime import public as _runtime_public
         return _runtime_public.query_events_any(
-            "seq, created_at, payload",
-            where="repo_key=? AND issue_id=? AND event_type=? AND agent_type=?",
-            params=(repo_key, _event_issue_ref(issue_number), "a2a_event",
-                    str(target_agent or "").strip()),
+            "seq, created_at, payload", where=where, params=tuple(params),
             order_by="seq DESC", limit=50)
     except Exception as exc:
         log.warning(f"[watchdog-redispatch] dispatch payload query failed "
@@ -337,8 +353,13 @@ def _payload_dict(raw) -> dict:
 
 
 def count_recent_redispatches(repo_key: str, issue_number, target_agent: str,
-                              window_seconds: int | None = None) -> int:
-    """时间窗内同 Issue + 同目标 agent 的 watchdog 自动重派次数。"""
+                              window_seconds: int | None = None,
+                              exclude_seq: int = 0) -> int:
+    """时间窗内同 Issue + 同目标 agent 的 watchdog 自动重派次数。
+
+    ``exclude_seq`` 用于排队事件 drain 阶段复查时排除自身（否则本次事件已落库，
+    带上重派标记会被计入上限而自我拦截）。
+    """
     window = (DEFAULT_REDISPATCH_WINDOW_SECONDS if window_seconds is None
               else int(window_seconds))
     if window <= 0:
@@ -346,8 +367,8 @@ def count_recent_redispatches(repo_key: str, issue_number, target_agent: str,
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window)
     count = 0
     for _seq, created_at, payload_raw in _query_recent_dispatch_payloads(
-            repo_key, issue_number, target_agent):
-        if not is_redispatch_payload(_payload_dict(payload_raw)):
+            repo_key, issue_number, target_agent, exclude_seq=exclude_seq):
+        if not is_watchdog_redispatch_payload(_payload_dict(payload_raw)):
             continue
         dt = _parse_ts(created_at)
         if dt is None or dt < cutoff:
@@ -358,14 +379,16 @@ def count_recent_redispatches(repo_key: str, issue_number, target_agent: str,
 
 def redispatch_limit_state(repo_key: str, issue_number, target_agent: str,
                            limit: int | None = None,
-                           window_seconds: int | None = None) -> dict:
+                           window_seconds: int | None = None,
+                           exclude_seq: int = 0) -> dict:
     """同 Issue 重派上限判定。超限返回 ``{"hit": True, ...}``，否则 ``{"hit": False}``。"""
     cap = DEFAULT_REDISPATCH_LIMIT if limit is None else int(limit)
     if cap <= 0:
         return {"hit": False, "count": 0, "limit": cap, "window": 0}
     window = (DEFAULT_REDISPATCH_WINDOW_SECONDS if window_seconds is None
               else int(window_seconds))
-    count = count_recent_redispatches(repo_key, issue_number, target_agent, window)
+    count = count_recent_redispatches(
+        repo_key, issue_number, target_agent, window, exclude_seq=exclude_seq)
     return {"hit": count >= cap, "count": count, "limit": cap, "window": window}
 
 
@@ -419,7 +442,7 @@ def record_redispatch_skip(repo_key: str, issue_number, target_agent: str,
 
 
 def guard_watchdog_redispatch(repo_key: str, issue_number, target_agent: str,
-                              payload=None, labels=()) -> dict:
+                              payload=None, labels=(), exclude_seq: int = 0) -> dict:
     """重派前综合守卫：终态预检 → 频次上限 → context 非空保护。
 
     返回 ``{}`` 表示放行；否则返回含 ``reason``/``detail``/``terminal`` 的判定
@@ -432,7 +455,7 @@ def guard_watchdog_redispatch(repo_key: str, issue_number, target_agent: str,
     if str(target_agent or "").strip().lower() != "coding":
         return {}
     payload = payload if isinstance(payload, dict) else {}
-    if not is_redispatch_payload(payload):
+    if not is_watchdog_redispatch_payload(payload):
         return {}
 
     terminal = resolve_pipeline_terminal_state(repo_key, issue_number, payload, labels)
@@ -459,7 +482,8 @@ def guard_watchdog_redispatch(repo_key: str, issue_number, target_agent: str,
             return {"terminal": False, "reason": CONTEXT_EMPTY_REASON,
                     "detail": detail, "criteria_source": "payload.context",
                     "external_block": False, "qa_passed": False}
-    limit = redispatch_limit_state(repo_key, issue_number, target_agent)
+    limit = redispatch_limit_state(
+        repo_key, issue_number, target_agent, exclude_seq=exclude_seq)
     if limit.get("hit"):
         detail = (f"target=coding count={limit['count']} limit={limit['limit']} "
                   f"window={limit['window']}s")

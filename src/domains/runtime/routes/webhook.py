@@ -2351,6 +2351,23 @@ def _a2a_register_repo(repo_key: str) -> bool:
         return False
 
 
+# Issue #4334：A2A 落库 payload 只组装固定字段，重派标记必须透传落库，
+# 否则 watchdog 频次上限（读取已落库 payload 的 redispatch 标记）永远计数为 0。
+_REDISPATCH_PAYLOAD_KEYS = ("redispatch_mode", "redispatch_of", "compensated_by",
+                            "watchdog_redispatch", "_reissue")
+
+
+def _copy_redispatch_markers(dst: dict, payload: dict) -> dict:
+    """把重派来源标记从入参 payload 透传进落库 payload（有值才写，避免空键污染）。"""
+    if not isinstance(payload, dict):
+        return dst
+    for key in _REDISPATCH_PAYLOAD_KEYS:
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            dst[key] = value
+    return dst
+
+
 def _a2a_pr_number(payload: dict) -> str:
     """A2A 交办 PR 号透传：只取显式 payload.pr_number，绝不回落 issue_number。
 
@@ -2994,7 +3011,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 except Exception as e:
                     log.warning(f"A2A: fallback skill lookup failed: {e}")
 
-        _payload = {
+        _payload = _copy_redispatch_markers({
             "repository": repository,
             "account": account,
             "issue_number": issue_number,
@@ -3005,7 +3022,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "carried_context": carried_context if (target_scene_id or carried_context) else {},
             "engine_config": engine_config if (target_scene_id or engine_config) else None,
             # Issue #627: production release binding context pass-through
-        }
+        }, payload)
         # Issue #3789：仅在确有降级/权威来源结论时写入，避免无条件空串（与 event_pipeline 同写法）
         if _skill_source:
             _payload["skill_source"] = _skill_source
@@ -3338,7 +3355,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _a2a_title = f"A2A: {agent_name}"
         # Issue #476：源事件 seq（触发本次交办的调用方事件；无 session 时为 0）。
 # Issue #1948 / #1973：已在派发门禁前解析，复用同一值，保证门禁排除与落库引用一致。
-        _a2a_payload = _attach_skipped_nodes({"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "source_seq": _source_seq, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}, _skipped_nodes)
+        _a2a_payload = _attach_skipped_nodes(_copy_redispatch_markers({"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "source_seq": _source_seq, "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq, "idempotency_key": _idem_key, "fingerprint": _fingerprint}, payload), _skipped_nodes)
         if issue_number and not _force:
             # Issue #1770（审查 P4）：门禁复查 + 事件落库在同一 db_lock 内原子完成，
             # 消除并发同键「查询都未命中 → 双落库」的 TOCTOU。
