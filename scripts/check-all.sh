@@ -17,6 +17,10 @@ fi
 echo "=== Running all contract checks ==="
 ./scripts/check-shared-versions.sh || exit 1
 "$PY" scripts/check-i18n-keys.py || exit 1
+# Issue #4239：调用方差集卡点——静态 t('<ns>.<key>') 必须在语言包有词条，
+# 否则页面会渲染 key 原文（或回退到组件 DEFAULTS 中文）。check-i18n-keys 只比对
+# zh/en 是否对称，检不出"调用处有、词条无"的缺口。
+"$PY" scripts/check-i18n-usage.py || exit 1
 "$PY" scripts/check-css-vars.py || exit 1
 "$PY" scripts/check-health-contract.py || exit 1
 "$PY" scripts/check-secrets.py || exit 1

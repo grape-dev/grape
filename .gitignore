@@ -118,6 +118,7 @@ scripts/verify_*.py
 !scripts/verify_nginx_upstream.py
 scripts/check-*-*.py
 !scripts/check-i18n-keys.py
+!scripts/check-i18n-usage.py
 !scripts/check-css-vars.py
 !scripts/check-health-contract.py
 !scripts/check-destructive-ddl.py
