@@ -42,7 +42,8 @@
     "menu_edit": "✎ 编辑",
     "menu_delete": "🗑 删除",
     "confirm_delete_selected": "确定删除选中的 {{count}} 个任务吗？",
-    "confirm_delete_one": "确定删除此任务吗？"
+    "confirm_delete_one": "确定删除此任务吗？",
+    "not_dispatchable": "不可派发（指令为空）"
   },
   "form": {
     "edit_title": "编辑自动化",
@@ -191,7 +192,10 @@
     "subscribe": "订阅飞书通知",
     "subscribed": "已订阅",
     "subscribe_on": "已开启订阅",
-    "subscribe_off": "已取消订阅"
+    "subscribe_off": "已取消订阅",
+    "not_dispatchable_title": "已启用但不可派发",
+    "not_dispatchable_desc": "任务指令为空，补齐巡检指令后将自动恢复按 cron 派发",
+    "not_dispatchable_fix": "补齐指令"
   },
   "advanced": {
     "save": "保存",

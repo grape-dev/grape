@@ -17,6 +17,15 @@ from datetime import datetime, timezone
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
+# Issue #3733：autopilot 任务派发状态口径（常量/原因文案单一事实源，runtime 调度器由此取）
+from src.domains.mgmt.autopilot_state import (  # noqa: F401
+    AUTOPILOT_EMPTY_INSTRUCTION_REASON,
+    AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+    AUTOPILOT_STATE_OK,
+    dispatch_reason,
+    reason_for_state,
+)
+
 from typing import Any
 
 from src.kernel import db_registry
@@ -86,6 +95,8 @@ _TABLES: dict[str, set[str]] = {
         "issue_number", "max_retry", "enabled", "last_run_at", "next_run_at", "created_at",
         "updated_at", "created_by", "agent_type", "instruction", "skill_name",
         "engine_runtime_ids", "custom_fields", "work_branch",
+        # Issue #3733：不可派发状态三列（状态/原因/时间，库内为跨进程权威）
+        "dispatch_state", "dispatch_state_reason", "dispatch_state_at",
     },
     "grape_accounts": {
         "id", "username", "email", "email_source", "password_hash", "nickname",
@@ -991,7 +1002,10 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 巡检任务调度（runtime/engine/scheduler.py；任意拓扑）
            "autopilot_subscribers_any", "list_enabled_autopilot_tasks_any",
            "autopilot_task_row_any", "autopilot_task_last_run_any",
-           "set_autopilot_run_info_any",
+           "set_autopilot_run_info_any", "set_autopilot_dispatch_state_any",
+           # Issue #3733：不可派发状态口径（常量 / 原因文案，runtime 调度器与 mgmt 路由共用）
+           "AUTOPILOT_STATE_OK", "AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION",
+           "AUTOPILOT_EMPTY_INSTRUCTION_REASON", "reason_for_state", "dispatch_reason",
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",
            "feedback_internal_sync_page", "feedback_apply_statuses",
@@ -2169,13 +2183,22 @@ _ANY_QUERIES: dict[str, str] = {
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
         "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
-        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused, "
+        # Issue #3733：状态三列**追加在末尾**——原有 r[0..12] 下标解包保持不变
+        "dispatch_state, dispatch_state_reason, dispatch_state_at "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
         "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, "
-        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused "
+        "consecutive_failures, last_error_code, offline_since, backoff_until, circuit_paused, "
+        "dispatch_state, dispatch_state_reason, dispatch_state_at "
         "FROM autopilot_tasks WHERE id=?"),
+    # Issue #3733：状态写入（幂等）。`AND dispatch_state<>?` 让「状态未变更」返回 0 行——
+    # 并发多副本同时发现同一空指令任务时，只有一处 UPDATE 命中，日志只在那一处留痕；
+    # 重启/重复写入也不会刷新 dispatch_state_at（该列是状态进入时刻）。
+    "autopilot_dispatch_state_set": (
+        "UPDATE autopilot_tasks SET dispatch_state=?, dispatch_state_reason=?, "
+        "dispatch_state_at=?, updated_at=? WHERE id=? AND dispatch_state<>?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (
         "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?"),
@@ -2851,6 +2874,23 @@ def set_autopilot_run_info_any(task_id, last_run_at: str, next_run_at: str) -> i
     """回写 last_run_at / next_run_at / updated_at（updated_at 与原实现一致 = last_run_at）。"""
     return exec_any("autopilot_run_info_set",
                     (last_run_at, next_run_at, last_run_at, int(task_id)))
+
+
+def set_autopilot_dispatch_state_any(task_id, state: str, reason: str = "") -> int:
+    """写任务的不可派发状态（状态 + 原因 + 进入时间），返回变更行数。
+
+    Issue #3733：**返回值就是「状态是否真的变更」**——语句带 `AND dispatch_state<>?`
+    谓词，库内已是目标状态时返回 0 行：
+
+    - 并发多副本同时扫描到同一空指令任务时，只有一处 UPDATE 命中 → 只有那一处留痕，
+      日志量不随副本数、tick 频率增长；
+    - 调用方据此决定是否打 WARNING，跨重启也以库内状态为权威（进程内记忆只做节流）。
+
+    `state` 取 `autopilot_state` 中的常量（`''` = 恢复正常可派发）。
+    """
+    _now = datetime.now(timezone.utc).isoformat()
+    return exec_any("autopilot_dispatch_state_set",
+                    (state or "", reason or "", _now, _now, int(task_id), state or ""))
 
 
 def set_autopilot_failure_state_any(task_id, consecutive_failures, last_error_code,

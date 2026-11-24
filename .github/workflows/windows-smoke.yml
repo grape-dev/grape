@@ -445,6 +445,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_4082_runtime_id_guard.py -v
+      - name: Autopilot not-dispatchable state regression tests (issue #3733)
+        # Issue #3733 QA 复审（Optional）：空指令状态化的三组 pytest 与任务页 node 用例
+        # 此前未接入 linux-backend 门禁（该 workflow 只跑显式列举的用例集；先例
+        # #1613/#1982/#2133/#2245/#3167/#3490 均由 QA 要求补齐）。补列静默盖章、
+        # 读侧状态归一化、迁移幂等与任务页模板分叉的回退只能靠人工 pytest/node。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_autopilot_empty_instruction_guard.py tests/kernel/test_issue3733_autopilot_dispatch_state_migration.py tests/mgmt/test_issue3733_autopilot_dispatch_state_route.py -v
+          node tests/js/test_issue_3733_autopilot_not_dispatchable.js
       - name: VcsApiClient log redaction regression tests (issue #3737)
         # Issue #3737 QA 审查修复（Required）：新增用例 test_vcs_api_client_log_redaction.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758/#3771/#3848/#4065）。

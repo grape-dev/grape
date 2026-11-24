@@ -30,6 +30,14 @@ from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
 
+# Issue #3733：空指令 → 显式不可派发状态。状态值与原因文案的单一事实源在 mgmt 域
+# （`src/domains/mgmt/autopilot_state.py`，纯常量模块、零依赖，不会引入环）；
+# 本模块禁止另写一份字符串，否则界面原因与调度器状态会漂移。
+from src.domains.mgmt.autopilot_state import (  # noqa: E402
+    AUTOPILOT_EMPTY_INSTRUCTION_REASON as _MGMT_EMPTY_INSTRUCTION_REASON,
+    AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION as _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+)
+
 # autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
 # 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
 # 表不在 → 1146「Table doesn't exist」，execution 永远建不出来（定时触发在 worker
@@ -107,6 +115,11 @@ def _is_missing_table_error(exc: BaseException) -> bool:
         _AUTOPILOT_EXECUTIONS_TABLE in text
         and any(k in text for k in ("1146", "doesn't exist", "does not exist"))
     )
+
+
+# 进程内「已经知道这个任务处于该不可派发状态」的记忆：只用于省掉重复 DB 往返 /
+# 重复留痕，**不是判重权威**（权威是库内 `dispatch_state`，跨进程/跨重启可见）。
+_NOT_DISPATCHABLE_SEEN: dict[int, str] = {}
 
 # ── Issue #3800：环境性失败（绑定引擎离线/悬空）分类 + 退避 + 熔断 ────────────
 #
@@ -1348,6 +1361,44 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
         log.warning(f"Autopilot: update execution {exec_id} failed: {e}")
 
 
+def _mark_not_dispatchable(task_id: int, state: str, reason: str,
+                           db_state: str = "") -> bool:
+    """把任务标记为「不可派发」（库内状态为跨进程权威），返回**状态是否真的变更**。
+
+    Issue #3733：拦截语义不变，但「拦截」不能再只靠每 tick 一条 WARNING 表达——
+    线上 1 小时 240 条 ≈ 每 15s 一条，而扫描间隔常量是 60s，说明有多个持调度器副本，
+    仅进程内去重会按副本数残留噪音。因此：
+
+    - `db_state` = 本 tick 刚读到的库内状态。已是目标状态 → **不写库**、**不打 WARNING**
+      （只在本进程首次观察到时记一条 INFO，便于排查「谁标的」）；
+    - 否则调 `set_autopilot_dispatch_state_any`，其返回值本身就是「变更行数」：
+      `>0` = 真的从别的状态转进来 → 返回 True，调用方留痕一次；`0` = 并发副本抢先写过；
+    - 进程内 `_NOT_DISPATCHABLE_SEEN` 只在「库内已一致」时省掉 DB 往返，
+      **不阻断**「用户补齐指令后又清空」的重新标记（那条路径 db_state 会变回空串）。
+
+    指令补齐后（库内不再是空指令）本函数不再被调用，状态由 mgmt 路由清空，cron 派发恢复。
+    """
+    tid = int(task_id)
+    if db_state == state:
+        if _NOT_DISPATCHABLE_SEEN.get(tid) != state:
+            _NOT_DISPATCHABLE_SEEN[tid] = state
+            log.info(f"Autopilot: task {tid} is not dispatchable ({state}): {reason}")
+        return False
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        changed = int(_mgmt_public.set_autopilot_dispatch_state_any(
+            tid, state, reason) or 0) > 0
+    except Exception as _e:  # noqa: BLE001 状态写失败不得阻断调度
+        # 写失败仍要「每 tick 重试」（下面不短路写路径），但**只留痕一次**——
+        # 否则库不可写时又会退回每 tick 一条 WARNING 的老毛病。
+        if _NOT_DISPATCHABLE_SEEN.get(tid) != state:
+            _NOT_DISPATCHABLE_SEEN[tid] = state
+            log.warning(f"Autopilot: task {tid} dispatch state write failed: {_e}")
+        return False
+    _NOT_DISPATCHABLE_SEEN[tid] = state
+    return changed
+
+
 def _enqueue_failure_code(exc: BaseException) -> str:
     """入队异常 → 失败分类（Issue #3963）。
 
@@ -1410,19 +1461,28 @@ def _read_exec_state(exec_id: int) -> tuple[str, str, str]:
         log.warning(f"Autopilot: read execution {exec_id} state failed: {e}")
         return ("unknown", "", "")
 
+
 def _get_enabled_tasks() -> list[dict]:
-    """获取所有启用的 autopilot 任务。"""
-    # autopilot_tasks 归 mgmt：走归属域任意拓扑原语（列序与原查询逐字一致）
+    """获取所有启用的 autopilot 任务（空指令任务被跳过并标记为「不可派发」）。"""
+    # autopilot_tasks 归 mgmt：走归属域任意拓扑原语（列序与原查询逐字一致，
+    # Issue #3733 的状态三列追加在末尾；Issue #3800 的五列在其前面：r[13..17]，
+    # 故状态三列按 r[18..20] 定位）
     from src.domains.mgmt import public as _mgmt_public
     rows = _mgmt_public.list_enabled_autopilot_tasks_any()
     tasks = []
-    skipped: list[str] = []
     for r in rows:
         # 指令为空的任务不能派发：创建端已经拒收空指令（mgmt 路由 instruction_not_empty），
         # 但存量行（历史数据/直接改库）仍然 enabled，调度器不拦的话会按 cron 反复生成
         # 空壳 execution 与空壳 agent_task（实测每 30 分钟一次，且执行必然空转失败）。
+        # Issue #3733：跳过时把「不可派发」写成库内状态，只在状态变更那一刻留痕一次。
         if not (r[4] or "").strip():
-            skipped.append(f"{r[0]}({r[1]})")
+            if _mark_not_dispatchable(
+                    r[0], _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                    _MGMT_EMPTY_INSTRUCTION_REASON,
+                    r[18] if len(r) > 18 else ""):
+                log.warning(
+                    f"Autopilot: task {r[0]}({r[1]}) enabled but has empty instruction, "
+                    f"marked as not dispatchable（补齐指令即恢复 cron 派发）")
             continue
         tasks.append({
             "id": r[0], "name": r[1], "repo_key": r[2],
@@ -1439,11 +1499,9 @@ def _get_enabled_tasks() -> list[dict]:
             "offline_since": (r[15] or "") if len(r) > 15 else "",
             "backoff_until": (r[16] or "") if len(r) > 16 else "",
             "circuit_paused": 1 if (len(r) > 17 and r[17]) else 0,
+            # Issue #3733：不可派发状态（库内权威，用于判重与出参原因）
+            "dispatch_state": r[18] if len(r) > 18 else "",
         })
-    if skipped:
-        log.warning(
-            f"Autopilot: skipped {len(skipped)} enabled task(s) with empty instruction: "
-            f"{', '.join(skipped)}（补齐指令或停用后再派发）")
     return tasks
 
 def _is_cron_due(cron_expr: str, last_run: str) -> bool:
@@ -2034,9 +2092,18 @@ async def _execute_task(task: dict):
     """执行单个 autopilot 任务（含重试逻辑）。"""
     task_id = task["id"]
     if not (task.get("instruction") or "").strip():
-        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并留痕，
+        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并落库状态，
         # 不要建 execution/agent_task 再在 agent 侧空转（见 _get_enabled_tasks 同名守卫）。
-        log.warning(f"Autopilot: task {task_id} has empty instruction, refuse to dispatch")
+        # Issue #3733：拒绝不再只靠 WARNING 表达——写状态（幂等）+ 只在状态变更时留痕一次，
+        # 且**不写 last_run_at、不建 execution**（本函数在守卫之前没有副作用）。
+        if _mark_not_dispatchable(
+                task_id, _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                _MGMT_EMPTY_INSTRUCTION_REASON, task.get("dispatch_state") or ""):
+            log.warning(
+                f"Autopilot: task {task_id} has empty instruction, refuse to dispatch"
+                f"（已标记为不可派发，补齐指令即恢复）")
+        else:
+            log.debug(f"Autopilot: task {task_id} still not dispatchable (empty instruction)")
         return
     if task_id in _RUNNING_TASKS:
         log.info(f"Autopilot: task {task_id} already running, skip")
@@ -2828,7 +2895,20 @@ async def trigger_task_now(task_id: int, params: dict | None = None) -> dict:
         "offline_since": (row[15] or "") if len(row) > 15 else "",
         "backoff_until": (row[16] or "") if len(row) > 16 else "",
         "circuit_paused": 1 if (len(row) > 17 and row[17]) else 0,
+        # Issue #3733：不可派发状态（库内权威，用于判重与出参原因）
+        "dispatch_state": row[18] if len(row) > 18 else "",
     }
+    if not (task["instruction"] or "").strip():
+        # Issue #3733：手动触发拒绝必须「有状态、有原因」，而不是每次调用一条 WARNING。
+        # 在建协程之前返回 → 不建 execution、不写 last_run_at（两者都在 _execute_task 里）。
+        # 路由按 result["ok"]=False 转 409，界面直接展示 message。
+        if _mark_not_dispatchable(
+                task["id"], _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+                _MGMT_EMPTY_INSTRUCTION_REASON, task.get("dispatch_state") or ""):
+            log.warning(
+                f"Autopilot: task {task['id']} has empty instruction, refuse manual trigger"
+                f"（已标记为不可派发，补齐指令即恢复）")
+        return {"ok": False, "message": _MGMT_EMPTY_INSTRUCTION_REASON}
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}
     task["_run_params"] = dict(params or {})

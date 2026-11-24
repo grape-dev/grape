@@ -105,6 +105,14 @@
               <span class="apv-time">{{ formatTime(t.next_run_at) }}</span>
             </div>
             <div class="apv-c-st">
+              <!-- Issue #3733：已启用但指令为空 → 显式不可派发（不再只靠后端日志）。
+                   只在启用状态下提示：暂停的任务本来就不派发，不该常年挂告警。 -->
+              <span
+                v-if="t.enabled && t.dispatchable === false"
+                class="apv-warn"
+                :title="t.dispatch_state_reason || tt('list.not_dispatchable')"
+                >⚠</span
+              >
               <span v-if="t.enabled" class="apv-on">●</span>
               <span v-else class="apv-off">○</span>
             </div>
@@ -155,6 +163,19 @@
           <button class="bt bt-p" @click="trigger(detail.id)">{{ tt('detail.trigger') }}</button>
           <button :class="['bt', subscribed ? 'bt-p' : 'bt-o']" @click="toggleSubscribe(detail.id)">
             {{ subscribed ? tt('detail.subscribed') : tt('detail.subscribe') }}
+          </button>
+        </div>
+        <!-- Issue #3733：已启用但不可派发（指令为空）——原因可见 + 补齐入口。
+             后端只在状态变更时留痕一次，任务页必须把这件事说清楚，否则运营只看到「不跑」。
+             条件带 enabled：暂停态不算异常，只有在跑却永远不派发才提示。 -->
+        <div v-if="detail.enabled && detail.dispatchable === false" class="apv-blocked">
+          <span class="apv-blocked-ic">⚠</span>
+          <div class="apv-blocked-txt">
+            <b>{{ tt('detail.not_dispatchable_title') }}</b>
+            <span>{{ detail.dispatch_state_reason || tt('detail.not_dispatchable_desc') }}</span>
+          </div>
+          <button class="bt bt-p bt-s" @click="editTask(detail.id)">
+            {{ tt('detail.not_dispatchable_fix') }}
           </button>
         </div>
         <!-- 任务信息卡 -->
@@ -2763,6 +2784,43 @@ onBeforeUnmount(function () {
 .apv-off {
   color: var(--t3);
   font-size: 11px;
+}
+/* Issue #3733：不可派发徽标（列表状态列） */
+.apv-warn {
+  color: #e8a000;
+  font-size: 11px;
+  margin-right: 2px;
+  cursor: help;
+}
+/* Issue #3733：详情页不可派发提示条（原因 + 补齐入口） */
+.apv-blocked {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  border: 1px solid #e8a000;
+  border-radius: 8px;
+  background: rgba(232, 160, 0, 0.08);
+}
+.apv-blocked-ic {
+  font-size: 14px;
+  line-height: 1.4;
+  color: #e8a000;
+  flex-shrink: 0;
+}
+.apv-blocked-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--t2);
+}
+.apv-blocked-txt b {
+  color: var(--a-text);
+  font-weight: 600;
 }
 .apv-c-act {
   padding: 0 4px;

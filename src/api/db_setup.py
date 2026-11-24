@@ -9750,6 +9750,35 @@ register_migration(
 
 
 # ======================================================================
+# ===== Issue #3733：autopilot_tasks「不可派发」状态三列 + 存量一次性自检 =====
+# ======================================================================
+def _migration_202611240004_autopilot_dispatch_state() -> None:
+    """注册式入口：autopilot_tasks 状态三列 + 存量空指令行一次性幂等标记。
+
+    Issue #3733：拦截语义保留，但「拦截」不能再只靠每 tick 一条日志表达——
+    `autopilot_tasks` 此前没有任何「不可派发原因/健康状态」列，运营侧只能翻 Loki。
+
+    实现不在本文件（本模块是启动期装配，9000+ 行只留接线）：见
+    `src/domains/mgmt/migrations/autopilot_dispatch_state.py`。放本域的理由：
+    autopilot_tasks 归 mgmt（configs/table_ownership.json），补列必须由 owner 域执行；
+    含表名的 UPDATE 若留在 api 层会被 tests/arch/test_foreign_table_refs 判成
+    新增跨域引用（autopilot_tasks←api）。
+    """
+    from src.domains.mgmt.migrations.autopilot_dispatch_state import run
+
+    run()
+
+
+register_migration(
+    version="202611240004",
+    name="autopilot-task-dispatch-state",
+    kind="safe",
+    domains=("mgmt",),   # autopilot_tasks 归 mgmt 域（configs/table_ownership.json）
+    fn=_migration_202611240004_autopilot_dispatch_state,
+)
+
+
+# ======================================================================
 # ===== 沙箱控制面 schema（feat/devbox-sandbox-integration7 移植，2026-11-10）=====
 # ===== i7 侧原注册于 202611040005-009（毒号段），此处以新号 202611100001 重注册，
 # ===== DDL 与列集取自 i7 现值（IF NOT EXISTS/_ensure_column 幂等）。
