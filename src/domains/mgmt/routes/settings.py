@@ -416,15 +416,24 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     # 身份行（external_identities）只由 OAuth 首登或设置页 OAuth
                     # 绑定产生，因此这里不再有 409 / 转移票据分支。
                     from src.domains.mgmt.user.db import set_credential as _sc
-                    # Issue #4301：经典 PAT 的 scope 响应头随 /user 请求一并拿到，直接解析
-                    # workflow 能力并落 workflows_write（细粒度 PAT 无该头 = 未知不落键）。
+
+                    # Issue #4301（PR#2135 复审 R-1，D102-P 两路语义等价）：经典
+                    # PAT 的 scope 响应头随 /user 请求一并拿到，经与泛型入口共用
+                    # 的同一解析器落 workflows_write；细粒度 PAT 无该头 = 未知不落
+                    # 键，并同样回传细粒度 PAT 权限清单提示——不再与 platform_tokens
+                    # 泛型入口分叉（无内联第二份 scope 解析实现）。
+                    from src.domains.mgmt.user.repo_manager import (
+                        workflows_write_from_scopes,
+                    )
                     _gh_cfg = {"token": _gh_tok, "login": gh_login}
                     _gh_scopes = _resp.headers.get("X-OAuth-Scopes")
                     if _gh_scopes is not None:
-                        _gh_wf = "workflow" in {x.strip() for x in _gh_scopes.split(",") if x.strip()}
+                        _gh_wf = workflows_write_from_scopes(_gh_scopes)
                         _gh_cfg["workflows_write"] = _gh_wf
                         if not _gh_wf:
                             _wf_warnings.append(_WF_MISSING_WARNING)
+                    else:
+                        _wf_warnings.append(_WF_FINEGRAINED_WARNING)
                     # 写失败必须 loud：静默 False 会留下「前端看到成功、凭据没落库」
                     if not _sc(user["id"], "github", _gh_cfg, kind="pat"):
                         raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
@@ -567,7 +576,18 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 try:
                     from src.domains.mgmt.vcs import create_provider
                     _provider = create_provider(_p)
-                    _info = _provider.verify_token(_tok)
+                    # Issue #4301（PR#2135 复审 R-2）：verify_token 与 workflow 预检
+                    # 共用同一次 /user 网络往返（verify_token_scopes 顺带取
+                    # x-oauth-scopes 响应头），不再串行第二次 GET /user——
+                    # 30s + 15s 叠加会超出前端 PUT 绑定预算。非该接口形态的
+                    # provider（无 verify_token_scopes）回退纯 verify_token，
+                    # scope 头取不到 = 未知态。
+                    _verify_scopes = getattr(_provider, "verify_token_scopes", None)
+                    if callable(_verify_scopes):
+                        _info, _wf_scopes = _verify_scopes(_tok)
+                    else:
+                        _info = _provider.verify_token(_tok)
+                        _wf_scopes = None
                 except HTTPException:
                     raise
                 except Exception as _ve:
@@ -582,8 +602,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 _ext_id = _info_id
                 _ext_login = _info_login
                 from src.domains.mgmt.user.repo_manager import (
-                    probe_workflows_write,
                     workflows_probe_supported,
+                    workflows_write_from_scopes,
                 )
                 # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
                 # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
@@ -604,10 +624,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     if (not _wf_write) and workflows_probe_supported(_p):
                         _wf_warnings.append(_WF_MISSING_WARNING)
                 else:
-                    # Issue #4301：绑定期预检 X-OAuth-Scopes，把 workflow 能力落到
-                    # workflows_write（经典 PAT 三态；细粒度 PAT 无响应头 = 未知不落键）。
+                    # Issue #4301（PR#2135 复审 R-1/R-2）：绑定期预检 x-oauth-scopes，
+                    # 把 workflow 能力落到 workflows_write。scope 头来自上面
+                    # verify_token 的同一次 /user 响应（无第二次网络请求）；经与
+                    # 专用 github_token 入口共用的同一解析器（workflows_write_from_scopes）
+                    # 解析三态：True/False 落键，缺失头（细粒度 PAT）= 未知不落键。
                     if workflows_probe_supported(_p):
-                        _wf_probe = probe_workflows_write(_p, _tok)
+                        _wf_probe = workflows_write_from_scopes(_wf_scopes)
                         if _wf_probe is not None:
                             _pat_cfg["workflows_write"] = _wf_probe
                         if _wf_probe is False:

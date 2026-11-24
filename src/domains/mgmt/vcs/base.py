@@ -59,6 +59,20 @@ class TokenCapability(ABC):
         """
         return {}
 
+    def verify_token_scopes(self, token: str) -> "tuple[dict, 'str | None']":
+        """Issue #4301：verify_token + 同一次请求响应里的 x-oauth-scopes 头。
+
+        绑定期 workflow 权限预检用（PR#2135 复审 R-2）：单次网络往返，不再
+        串行第二次 GET /user（30s + 15s 叠加会超出前端 PUT 绑定预算，慢网下
+        出现「前端判失败、服务端已落库」）。返回 (用户信息, scopes 头值)：
+        平台不返回该头（如 GitHub 细粒度 PAT）→ None（未知态，不阻断绑定）；
+        verify_token 覆写未走 _http 捕获 → 同样 None。
+        """
+        info = self.verify_token(token)
+        headers = getattr(self, "last_response_headers", None)
+        scopes = headers.get("x-oauth-scopes") if headers is not None else None
+        return info, scopes
+
     @abstractmethod
     def token_storage_field(self) -> str:
         """仓库级 bot token 存储列名。"""
@@ -202,6 +216,8 @@ class GenericVcsProvider(VCSProvider):
 
     def __init__(self, card):
         self._card = card
+        # Issue #4301：最近一次 _http 响应头（供 verify_token_scopes 复用）。
+        self.last_response_headers = None
 
     @property
     def provider_name(self) -> str:
@@ -243,6 +259,10 @@ class GenericVcsProvider(VCSProvider):
                     ca_bundle=str(getattr(self._card, "ca_bundle", "") or ""),
                     allow_redirects=self._card.dialect != "gitlab",
             ) as resp:
+                # Issue #4301（PR#2135 复审 R-2）：捕获本次响应头——verify_token
+                # 的 /user 响应头里有 x-oauth-scopes，绑定期 workflow 预检直接
+                # 复用（单次网络往返），不再串行第二次 GET /user 叠加超时。
+                self.last_response_headers = getattr(resp, "headers", None)
                 _payload = _json.loads(resp.read().decode("utf-8"))
                 log.info(f"vcs upstream {self._card.provider} {method} "
                          f"{self._card.api_base}{_log_path} -> {getattr(resp, 'status', 200)} "

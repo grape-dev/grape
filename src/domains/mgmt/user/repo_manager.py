@@ -1318,6 +1318,9 @@ def _github_token_scopes(api_token: str) -> str | None:
     """经典 PAT 的 x-oauth-scopes；细粒度 PAT / 读取失败返回 None。
 
     细粒度 PAT 不返回该响应头（权限由细粒度权限集控制，无法从这里自查）。
+    注意 None 的两种来源在这里不可区分（复审 O-1）；绑定期预检不走本函数——
+    它复用 verify_token 已成功的 /user 响应头（settings.py 绑定路径），因此
+    「请求成功但头缺失」可确定是细粒度 PAT（未知态），不存在网络失败误判。
     """
     req = urllib.request.Request(
         f"{_GITHUB_API_BASE}/user",
@@ -1346,39 +1349,28 @@ def _scopes_has(scopes: "str | None", name: str) -> "bool | None":
     return name in parts
 
 
-def probe_github_workflows_write(api_token: str) -> "bool | None":
-    """Issue #4301：探测 GitHub token 是否具备 workflow 写权限（三态）。
+def workflows_write_from_scopes(scopes: "str | None") -> "bool | None":
+    """Issue #4301：从 x-oauth-scopes 响应头值解析 workflow 写能力（三态）。
 
-    - 经典 PAT：读 x-oauth-scopes → 含 ``workflow`` = True，不含 = False；
-    - 细粒度 PAT / 读取失败：GitHub 不返回该响应头 → None（未知，不阻断绑定，
-      交由 PAT 权限勾选清单提示）。
+    **两路共用唯一实现**（D102-P 语义等价，2026-11-24 PR#2135 复审 R-1）：
+    专用 ``github_token`` 入口与 ``platform_tokens`` 泛型入口都必须经此函数
+    解析，不得各自内联。头值存在 → True/False；头缺失（细粒度 PAT 不返回
+    该头，见 ``_github_token_scopes`` 文档）→ None（未知态，不落键、不阻断，
+    由绑定响应回传 PAT 权限勾选清单提示）。
     """
-    if not api_token:
-        return None
-    return _scopes_has(_github_token_scopes(api_token), "workflow")
+    return _scopes_has(scopes, "workflow")
 
 
-# workflow 写能力探测能力注册表（实现绑定集中一处，调用方零平台分支）。
-_WORKFLOWS_PROBES = {"github": "probe_github_workflows_write"}
+# 支持「经 x-oauth-scopes 响应头探测 workflow 写能力」的平台集合。
+# 复审后无独立网络探测入口（绑定预检复用 verify_token 的 /user 响应头，
+# 不再串行第二次 GET /user，见 settings.py 绑定路径），这里只回答「平台
+# 是否具备该头语义」——供绑定入口判定是否消费 scope 头。
+_WORKFLOWS_SCOPE_PLATFORMS = frozenset({"github"})
 
 
 def workflows_probe_supported(provider: str) -> bool:
-    """该平台是否登记了 workflow 写能力探测（仅 github 目前返回该响应头）。"""
-    return str(provider or "").strip().lower() in _WORKFLOWS_PROBES
-
-
-def probe_workflows_write(provider: str, api_token: str) -> "bool | None":
-    """按 provider 探测 token 的 workflow 写权限；未登记平台 / 探测失败返回 None。"""
-    if not api_token:
-        return None
-    name = _WORKFLOWS_PROBES.get(str(provider or "").strip().lower())
-    fn = globals().get(name) if name else None
-    if fn is None:
-        return None
-    try:
-        return fn(api_token)
-    except Exception:  # noqa: BLE001 - 探测失败按未知态处理，不阻断绑定
-        return None
+    """该平台是否支持经 x-oauth-scopes 响应头探测 workflow 写能力（仅 github）。"""
+    return str(provider or "").strip().lower() in _WORKFLOWS_SCOPE_PLATFORMS
 
 
 def workflows_capability_blocker(user_id, provider: str,
