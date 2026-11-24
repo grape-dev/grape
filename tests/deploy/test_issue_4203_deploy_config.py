@@ -85,6 +85,19 @@ class TestGraptAtWorkerPath:
         # 生产既有语义是单进程：显式 1，避免换成多 worker 改变信号/生命周期行为
         assert "GRAPE_UVICORN_WORKERS" in branch_body and ':-1' in branch_body
 
+    def test_worker_port_fact_source_is_role_mapping(self):
+        """QA 复审 Optional：端口以角色映射为唯一事实源，外部旧值 fail-fast 不静默生效。"""
+        branch_body = self._runner().split('if [ "$role" = "worker" ]', 1)[1].split("\nfi", 1)[0]
+        assert 'export GRAPE_WORKER_PORT="$port"' in branch_body
+        assert "exit 6" in branch_body, "外部端口与事实源不一致时应 fail-fast"
+
+    def test_runner_exports_process_role_for_all_roles(self):
+        """QA 复审 Optional：process 标签必须绑定部署角色（否则 grape@ 路径是 runtime）。"""
+        script = self._runner()
+        assert 'export GRAPE_PROCESS_ROLE="$role"' in script
+        # 必须在 exec 之前导出（Python 只在进程启动时读一次）
+        assert script.index('export GRAPE_PROCESS_ROLE="$role"') < script.index("exec \"$PY\"")
+
     def test_dropin_params_match_static_unit(self):
         """两条路径 Memory*/Restart* 字面值必须相等（否则同一单在不同机器行为不同）。"""
         unit_dirs = _directives(_read(UNIT))
@@ -127,6 +140,7 @@ class TestAlerts:
         rule = rules["GrapeProcessMemoryNearLimit"]
         assert rule["labels"]["severity"] == "warning"
         assert "grape_process_memory_ratio" in rule["expr"]
+        assert 'process="worker"' in rule["expr"]
         assert rule["for"] == "10m"
 
     def test_rss_growth_alert(self):
@@ -134,6 +148,7 @@ class TestAlerts:
         rule = rules["GrapeWorkerRSSGrowth"]
         assert "grape_process_memory_rss_bytes" in rule["expr"]
         assert "deriv(" in rule["expr"] and "increase(" in rule["expr"]
+        assert rule["expr"].count('process="worker"') == 2, "两个子查询都要按 worker 过滤"
 
     def test_alert_metric_names_match_module(self):
         """规则里的指标名与 process_memory.py 定义的 gauge 一致（防漂移）。"""

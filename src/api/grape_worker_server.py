@@ -1,4 +1,4 @@
-"""Worker 进程（grape_worker_server :38082）——Worker 执行态。
+"""Worker 进程（grape_worker_server :38083）——Worker 执行态。
 
 Issue #699 Phase 4 四进程拆分：注册 Worker API 路由（runtime 全量 POST/GET 协议端点、
 tasks 通知/完成/当前任务自省、chat 执行端点），启动 Worker 进程定时任务

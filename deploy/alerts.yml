@@ -317,7 +317,7 @@ groups:
       # 分母是 grape_process_memory_limit_bytes（cgroup memory.max）；未设限额时该序列
       # 恒为 0、ratio 恒为 0，本规则不触发（由启动日志 WARNING 与 unbounded=1 序列兜底）。
       - alert: GrapeProcessMemoryNearLimit
-        expr: grape_process_memory_ratio > 0.8
+        expr: grape_process_memory_ratio{process="worker"} > 0.8
         for: 10m
         labels:
           severity: warning
@@ -331,8 +331,8 @@ groups:
       # 双条件去抖，避免正常业务波动误报。
       - alert: GrapeWorkerRSSGrowth
         expr: |
-          deriv(grape_process_memory_rss_bytes[30m]) > 0
-          and increase(grape_process_memory_rss_bytes[30m]) > (512 * 1024 * 1024)
+          deriv(grape_process_memory_rss_bytes{process="worker"}[30m]) > 0
+          and increase(grape_process_memory_rss_bytes{process="worker"}[30m]) > (512 * 1024 * 1024)
         for: 10m
         labels:
           severity: warning
