@@ -800,17 +800,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 if _mem_total_mb and wmem:
                     _mem_used_mb = int(round(_mem_total_mb * float(wmem) / 100.0))
                 _m_age = _metrics_age_seconds(wlast_seen)
-                # 四项全 0 而心跳是新的 = worker 压根没上报指标（老版本 worker / Windows 上
-                # wmic 被移除后采集静默失败）。内存与磁盘使用率不可能真的是 0，所以这个判据
-                # 不会把「真空闲」误标成「无数据」。
-                _all_zero = not any(float(x or 0) > 0 for x in (wcpu, wmem, wdisk, wtmp))
                 worker_list.append({
                     "id": wid, "name": wname or "", "device_name": wdevice or "",
                     "status": wstatus or "offline", "health": w_health,
                     # 心跳断了以后 cpu/mem 等是最后一次采样值（很多是 0）——前端据此显示「无采样」
                     "metrics_age_seconds": _m_age,
-                    "metrics_all_zero": bool(_all_zero),
-                    "metrics_stale": bool(_all_zero or _m_age is None
+                    "metrics_stale": bool(_m_age is None
                                            or _m_age > _WORKER_METRICS_STALE_SECONDS),
                     "last_seen_at": normalize_event_time(wlast_seen), "last_ip": wip or "",
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
@@ -850,7 +845,6 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "device_name": _local_hostname or "本机直连",
                         "status": "online", "health": "online",
                         "metrics_age_seconds": 0, "metrics_stale": False,
-                        "metrics_all_zero": False,
                         "last_seen_at": "", "last_ip": "127.0.0.1",
                         "cpu_percent": _local_cpu, "memory_percent": _local_mem,
                         "disk_percent": _local_disk, "tmp_percent": _local_tmp,
@@ -884,7 +878,6 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                             w["bandwidth_mbps"] = _local_bw_mbps
                             w["metrics_age_seconds"] = 0
                             w["metrics_stale"] = False
-                            w["metrics_all_zero"] = False
                             # 本机是当前进程自己的机器：核数/内存总量直接用 psutil，
                             # 不依赖凭据行上的 spec（root 安装形态常上报空 spec）。
                             if _g_cores:

@@ -543,6 +543,5 @@
   "obs_partial": "Partially degraded (backend section failed)",
   "page_empty_hint": "No workers on this page (the list just shrank) - click to go back to page one",
   "metrics_stale": "No live sample (heartbeat lost, values are historical)",
-  "metrics_stale_min": "No live sample · last heartbeat {{n}} min ago",
-  "metrics_unreported": "Heartbeat is live but this worker reports no resource metrics (old worker build or collection failure)"
+  "metrics_stale_min": "No live sample · last heartbeat {{n}} min ago"
 }

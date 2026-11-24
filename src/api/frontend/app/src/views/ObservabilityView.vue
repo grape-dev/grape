@@ -2754,7 +2754,6 @@ function workerBars(wk) {
 }
 // 指标过期提示（分钟数；未知则不显示数字）
 function staleHint(wk) {
-  if (wk.metrics_all_zero) return t('metrics_unreported')
   const age = numOrNull(wk.metrics_age_seconds)
   const mins = age === null ? null : Math.floor(age / 60)
   return mins === null ? t('metrics_stale') : t('metrics_stale_min', { n: mins })

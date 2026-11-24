@@ -140,9 +140,9 @@ class TestMetricsStaleness:
 
 
 class TestAllZeroMetrics:
-    """心跳正常但四项全 0 = worker 没上报指标（老版本 worker / wmic 被移除）。"""
+    """四项全 0 但心跳新鲜 → 按真实采样展示（不再改判成「无采样」）。"""
 
-    def test_all_zero_metrics_marked_unreported(self):
+    def test_all_zero_metrics_kept_as_sample(self):
         from src.domains.insight.routes.dashboard import get_ops_overview
         _seed_worker("4C7G", cpu=0.0, mem=0.0)
         with db_lock:
@@ -152,13 +152,12 @@ class TestAllZeroMetrics:
             db.commit()
         w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
              if x.get("id") == CRED_ID][0]
-        assert w["metrics_all_zero"] is True
-        assert w["metrics_stale"] is True, "全 0 即使心跳新鲜也要标成无采样"
+        assert w["metrics_stale"] is False, "心跳新鲜就该按采样展示，不能因为全 0 改判"
+        assert w["cpu_percent"] == 0 and w["memory_percent"] == 0
 
-    def test_partial_metrics_not_marked_unreported(self):
+    def test_partial_metrics_not_stale(self):
         from src.domains.insight.routes.dashboard import get_ops_overview
         _seed_worker("4C7G", cpu=0.0, mem=41.2)
         w = [x for x in get_ops_overview(repo="", user=_user())["workers"]["list"]
              if x.get("id") == CRED_ID][0]
-        assert w["metrics_all_zero"] is False
         assert w["metrics_stale"] is False
