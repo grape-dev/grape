@@ -404,8 +404,8 @@ _MAX_DIRTY_LIST = 200            # manifest 记录的脏文件清单上限
 _MAX_UNTRACKED_FILES = 2000      # untracked 快照文件数上限（超出 → 归档不完整 → 拒绝删除）
 _MAX_UNTRACKED_FILE_BYTES = 10 * 1024 * 1024  # 单文件快照上限（超大 → 归档不完整 → 拒绝删除）
 
-# 2026-11-24 事故：未跟踪快照把 .venv 一起拷走（单份 ~57MB），issue 93 累积 342 份
-# = 19G，工作区盘 100% → 任务技能物化 [Errno 28]，整条流水线 fail-fast。
+# 2026-11 事故复盘：未跟踪快照把 .venv 一起拷走（单份约 57MB），单个 issue 的
+# 归档目录累积数百份快照把工作区盘打满 → 任务技能物化失败（ENOSPC），流水线 fail-fast。
 # 可重建的大目录永不进快照（它们不是「待保全改动」，删了能重装）。
 _SNAPSHOT_EXCLUDE_DIRS = frozenset({
     ".venv", "venv", "env", ".env", "node_modules", "__pycache__", ".pytest_cache",
@@ -413,7 +413,11 @@ _SNAPSHOT_EXCLUDE_DIRS = frozenset({
     "target", "dist", "build",
 })
 _SNAPSHOT_EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".so", ".o", ".class")
-# 每个 issue 归档目录保留的快照份数（时间戳目录，默认 10；LRU 按名字/时间淘汰）
+# 每个 issue 归档目录保留的快照份数（时间戳目录，按名字/时间淘汰旧档）。
+# 五源 = 项目实测（2026-11-24 事故复盘）：排除可重建目录前单份归档 57MB，
+# 排除后单份实测 ~1MB；即便回落到 57MB 量级，10 份 ≈ 0.6GB，相对工作区
+# 可用空间（事故处置后 23GB）留足两个数量级余量；同时覆盖「最近 10 次
+# 重置」的回滚排查窗口。调整请走 GRAPE_WORKTREE_ARCHIVE_KEEP（env 覆盖优先）。
 _ARCHIVE_KEEP_DEFAULT = 10
 _SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]+$")
 
@@ -605,7 +609,8 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "",
     out = {"risk": False, "dirty": [], "untracked": [], "unpushed_count": 0,
            "lost_commits": [], "compare_ref": "", "branch": "", "head": "",
            "head_missing": False, "remote_head": "", "dirty_count": 0,
-           "untracked_count": 0, "untracked_overflow": 0, "scan_failed": False}
+           "untracked_count": 0, "untracked_overflow": 0, "scan_failed": False,
+           "untracked_excluded_count": 0}
     from src.domains.runtime.engine.repogit import _run_git
     try:
         head = _run_git(["-C", wt_dir, "rev-parse", "HEAD"], token=token)
@@ -634,10 +639,19 @@ def collect_reset_risk(wt_dir: str, token: str = "", base_branch: str = "",
             out["scan_failed"] = True
             return out
         dirty, untracked = [], []
+        excluded_untracked = 0
         for xy, path in entries:
             if _is_reset_ignored_path(path):
                 continue
+            if xy == "??" and _is_snapshot_excluded(path):
+                # QA F1：可重建目录（.venv/node_modules/__pycache__ 等）必须在
+                # 计数与 _MAX_UNTRACKED_FILES 截断**之前**剔除，否则它们既占 2000
+                # 配额、又推高 untracked_overflow → 归档被判不完整 → 仍然拒绝重置
+                # （2026-11-24 事故在 node_modules 仓库上会原样复发）。
+                excluded_untracked += 1
+                continue
             (untracked if xy == "??" else dirty).append(path)
+        out["untracked_excluded_count"] = excluded_untracked
         out["dirty_count"] = len(dirty)
         out["untracked_count"] = len(untracked)
         out["dirty"] = dirty[:_MAX_DIRTY_LIST]
@@ -831,7 +845,7 @@ def _build_reset_record(risk: dict, repo_key: str, issue_num, agent_type: str,
     }
 
 
-def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
+def _archive_worktree_before_reset_impl(wt_dir: str, repo_key: str, issue_num,
                                   agent_type: str, token: str = "",
                                   base_branch: str = "", reason: str = "",
                                   task_id: str = "") -> dict:
@@ -955,9 +969,6 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
         res["error"] = "reset record write failed"
         return res
 
-    # 保留策略：每个 issue 只留最新 N 份快照（默认 10，GRAPE_WORKTREE_ARCHIVE_KEEP 可调）。
-    # 无保留策略时 342 份快照堆到 19G，把工作区盘打满（2026-11-24 事故）。
-    res["pruned"] = _prune_archive_snapshots(os.path.dirname(archive_dir))
     res.update({"archived": True, "archive_dir": archive_dir,
                 "bundle_path": bundle_path, "record_path": record_path,
                 "record": record})
@@ -966,6 +977,37 @@ def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
         f"agent={agent_type} unpushed={risk['unpushed_count']} "
         f"dirty={len(risk['dirty'])} untracked={len(risk['untracked'])} "
         f"reason={record['reset_reason']} -> {bundle_path}")
+    return res
+
+
+def archive_worktree_before_reset(wt_dir: str, repo_key: str, issue_num,
+                                  agent_type: str, token: str = "",
+                                  base_branch: str = "", reason: str = "",
+                                  task_id: str = "") -> dict:
+    """重置前归档（公开入口）：在 impl 之上统一做「失败不留残档 + 保留裁剪」。
+
+    QA #2098 F2：裁剪原先只在归档成功路径执行，快照不完整（超大文件/拷贝失败）时
+    直接 return，反复重试会每轮新建一份永不裁剪的归档目录 —— 正是 2026-11-24
+    事故的形态。这里改为所有出口统一收口：
+
+    - 失败（ok=False）：删除本次新建的 archive_dir（残档无保全价值，manifest 已
+      记录失败原因），再执行该 issue 的保留裁剪；
+    - 成功：保留最新 N 份（GRAPE_WORKTREE_ARCHIVE_KEEP 可调）；
+    - 裁剪异常只告警，不影响归档结论（保全语义优先）。
+    """
+    res = _archive_worktree_before_reset_impl(
+        wt_dir, repo_key, issue_num, agent_type, token=token,
+        base_branch=base_branch, reason=reason, task_id=task_id)
+    _archive_dir = str(res.get("archive_dir") or "")
+    if _archive_dir:
+        try:
+            if not res.get("ok"):
+                shutil.rmtree(_archive_dir, ignore_errors=True)
+                res["discarded_archive_dir"] = _archive_dir
+                res["archive_dir"] = ""
+            res["pruned"] = _prune_archive_snapshots(os.path.dirname(_archive_dir))
+        except Exception as e:  # noqa: BLE001 - 清理失败不影响归档结论
+            log.warning(f"worktree reset guard: archive cleanup failed {_archive_dir}: {e}")
     return res
 
 
