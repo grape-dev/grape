@@ -170,6 +170,34 @@ class RecheckHandler(Handler):
             _set_finding(ctx.finding_id, "false_positive", f"issue 已终态（{_term}），用户已收敛，不补")
             ctx.verdict, ctx.action_meta = "false_positive", f"终检 issue 终态命中（{_term}）"
             return False
+        # Issue #4334：watchdog 重派前强制校验最新 pipeline 终态与外部阻塞标记。
+        # issue_terminal 只看 issue.status/stage；qa 双轮通过但 stage 未落终态的单
+        # （#3888 场景）必须由 pipeline 段判定补齐，命中即跳过并记录判据来源。
+        try:
+            from src.api.watchdog_redispatch_guard import (
+                resolve_pipeline_terminal_state, record_redispatch_skip,
+                PIPELINE_TERMINAL_REASON,
+            )
+            _pipeline_term = resolve_pipeline_terminal_state(
+                ctx.repo_key, ctx.issue_id or "", {"target_agent": ctx.target_agent})
+        except Exception as _pge:
+            log.warning(f"[patrol-comp] pipeline terminal precheck failed: {_pge}")
+            _pipeline_term = {}
+        if _pipeline_term.get("terminal"):
+            _detail = (f"target={ctx.target_agent} "
+                       f"criteria={_pipeline_term.get('criteria_source')} "
+                       f"reason={_pipeline_term.get('reason')}")
+            record_redispatch_skip(ctx.repo_key, ctx.issue_id or "",
+                                   ctx.target_agent or "coding",
+                                   PIPELINE_TERMINAL_REASON, _detail)
+            _set_finding(ctx.finding_id, "false_positive",
+                         f"pipeline 已终态（{_pipeline_term.get('reason')}"
+                         f" @ {_pipeline_term.get('criteria_source')}），不补")
+            ctx.verdict = "false_positive"
+            ctx.action_meta = (f"终检 pipeline 终态命中"
+                               f"（{_pipeline_term.get('reason')}，"
+                               f"来源 {_pipeline_term.get('criteria_source')}）")
+            return False
         # 终检：任一证据出现 → 误报，放弃补偿
         if _p.l1_event_exists(ctx.repo_key, ctx.issue_id, ctx.completed_at, ctx.target_agent):
             _set_finding(ctx.finding_id, "false_positive", "终检 L1 命中（交棒已发生，入库慢）")
@@ -400,8 +428,24 @@ class DispatchHandler(Handler):
                         f"{_concl_part} finding={ctx.finding_id}"),
             "compensated_by": marker,                 # 载荷层冗余标记（调用方可读）
             "idempotency_key": _idem_key,             # 决策 A：规范交棒键（同任务同目标恰好一次）
+            # Issue #4334：显式声明 watchdog 自动重派，供频次上限与审计识别。
+            "redispatch_mode": "watchdog",
+            "redispatch_of": ctx.task_id,
         }
         payload.update(ctx.mode_payload)
+        # Issue #4334：重派必须携带原 context（非空），禁止空 context 覆盖既有产物。
+        # 正常路径 marker/结论本就非空；此处只在异常裁剪后仍为空时兜底回填原任务结论。
+        if not str(payload.get("context") or "").strip():
+            _fallback_ctx = _conclusion_snippet(ctx.result_text)
+            if _fallback_ctx:
+                payload["context"] = (f"巡检器补偿交棒[compensated_by={marker}]：原任务 "
+                                      f"{ctx.task_id} 已完成但未交下游，按其自报 next_step 补发。"
+                                      f" 原任务结论：{_fallback_ctx[:600]}")
+            else:
+                _set_finding(ctx.finding_id, "needs_human",
+                             "redispatch_context_empty：重派 context 为空且无可回填结论")
+                ctx.verdict, ctx.action_meta = "redispatch_context_empty", "空 context 禁止重派"
+                return False
         try:
             res = await a2a_endpoint(
                 None, A2AHandoffBody(agent=ctx.target_agent, payload=payload,

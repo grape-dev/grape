@@ -426,6 +426,28 @@ def guard_terminal_dispatch(repo_key: str, issue_number, target_agent: str,
             break
     state = resolve_terminal_state(repo_key, issue_number, explicit_pr)
     if not state or not state.get("terminal"):
+        # Issue #4334：needs-human 之外，再回读目标 Issue 的流水线终态
+        # （completed / qa-passed）与 external-block 标记；并对 watchdog
+        # 自动重派做频次上限与 context 非空保护。判定异常一律放行。
+        try:
+            from src.api.watchdog_redispatch_guard import guard_watchdog_redispatch
+            redo = guard_watchdog_redispatch(
+                repo_key, issue_number, target_agent, payload,
+                labels=(state or {}).get("labels") or ())
+        except Exception as exc:
+            log.warning(f"A2A #4334: watchdog redispatch guard failed: {exc}")
+            redo = {}
+        if redo:
+            out = dict(state or {})
+            out.update(redo)
+            out.setdefault("triggers", [redo.get("reason") or ""])
+            out.setdefault("carrier_pr", 0)
+            out.setdefault("folded", False)
+            out.setdefault("conflict_scope", "")
+            out.setdefault("manual_status", "")
+            out.setdefault("manual_applied", False)
+            out.setdefault("manual_required", False)
+            return out
         return {}
     reason = TERMINAL_SKIP_REASON
     if state.get("intersect"):
