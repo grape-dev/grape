@@ -321,6 +321,22 @@ jobs:
         run: |
           python -m pytest tests/runtime/test_issue_1753_handoff_target_branch.py \
             tests/runtime/test_issue_329_cross_pipeline.py -v
+      - name: Scene node skill_id persist + dispatch degradation tests (issue #3789)
+        # Issue #3789 QA 审查修复（Required）：新增用例
+        # tests/mgmt/test_issue_3789_scene_skill_id_persist_and_dispatch.py 此前未接入
+        # linux-backend 门禁（先例 #2133/#2245/#3167/#3490/#3699/#3758 均由 QA 要求补齐），
+        # 场景写入口固化 skill_id、repo→official 降级顺序、迁移回填收敛只能靠人工 pytest。
+        # 同时纳入 #979 既有派发用例，防止降级顺序回退而 CI 仍绿。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/mgmt/test_issue_3789_scene_skill_id_persist_and_dispatch.py \
+            tests/mgmt/test_issue_979_scene_skill_id_dispatch.py -v \
+            --deselect "tests/mgmt/test_issue_979_scene_skill_id_dispatch.py::TestLegacySceneCompat::test_migration_backfills_skill_id"
+        # deselect 说明：TestLegacySceneCompat::test_migration_backfills_skill_id 在本
+        # 基线同样失败（unified_user_mapping.user_id 为 INTEGER 主键，用例以 grape 账号
+        # 字符串 id 落库 → datatype mismatch；case body 未被本 PR 改动），属既有环境性
+        # 缺陷，不计入本门禁，避免掩盖 #3789 的真实回退。
       - name: Issues mine COUNT domain routing tests (issue #3771)
         # Issue #3771 QA 审查修复（Required）：新增用例 test_issue_3771_mine_count_domain.py
         # 此前未接入 linux-backend 门禁（先例 #1613/#2112/#2260/#3490/#3699/#3758）。

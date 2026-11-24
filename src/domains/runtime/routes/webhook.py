@@ -2738,6 +2738,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         skill_name = ""
         skill_id = 0
         skill_path = ""
+        _skill_source = ""
         repo_name = repository.split("/", 1)[-1] if "/" in repository else repository
         try:
             with db_lock:
@@ -2837,6 +2838,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         skill_id = _res["skill_id"]
                         skill_name = _res.get("skill_name") or _pipe_skill
                         skill_path = _res.get("skill_path") or _pipe_skill
+                        # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                        _skill_source = _res.get("skill_source") or ""
                         log.info(f"A2A: issue scene skill override: {agent_name}={skill_name} sid={skill_id} (scene={_a2a_issue_scene})")
             except Exception as _oe:
                 log.warning(f"A2A: issue scene skill override failed: {_oe}")
@@ -2875,6 +2878,22 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 except Exception as e:
                     log.warning(f"A2A: fallback skill lookup failed: {e}")
 
+        _payload = {
+            "repository": repository,
+            "account": account,
+            "issue_number": issue_number,
+            "pr_number": pr_number,
+            "context": context,
+            "source_seq": _source_seq,
+            # Issue #329: pass through cross-pipeline fields for downstream agents
+            "carried_context": carried_context if (target_scene_id or carried_context) else {},
+            "engine_config": engine_config if (target_scene_id or engine_config) else None,
+            # Issue #627: production release binding context pass-through
+        }
+        # Issue #3789：仅在确有降级/权威来源结论时写入，避免无条件空串（与 event_pipeline 同写法）
+        if _skill_source:
+            _payload["skill_source"] = _skill_source
+
         evt = {
             "type": "a2a_event",
             "repository": repository,
@@ -2884,18 +2903,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "issue_id": str(issue_number) if issue_number else "",
             "_a2a_context": context,
             "_skill_path": skill_path,
-            "payload": {
-                "repository": repository,
-                "account": account,
-                "issue_number": issue_number,
-                "pr_number": pr_number,
-                "context": context,
-                "source_seq": _source_seq,
-                # Issue #329: pass through cross-pipeline fields for downstream agents
-                "carried_context": carried_context if (target_scene_id or carried_context) else {},
-                "engine_config": engine_config if (target_scene_id or engine_config) else None,
-                # Issue #627: production release binding context pass-through
-            },
+            "payload": _payload,
         }
 
         # _force / _queue / _a2a_ctx_key 已在 Issue #2248 幂等命中判定前解析并复用：

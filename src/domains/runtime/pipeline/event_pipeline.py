@@ -2760,6 +2760,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = _res["skill_name"]
             if _res.get("skill_path"):
                 skill_path = _res["skill_path"]
+            if isinstance(evt.get("payload"), dict):
+                # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                evt["payload"]["skill_source"] = _res.get("skill_source") or ""
         except Exception as _se979:
             log.warning(f"Pipeline (PR-sub): skill dispatch resolve failed: {_se979}")
         backend = ""  # PR 订阅不走 agent_session，backend 置空让 pick_engine 自动选
@@ -2779,7 +2782,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             skill_name = _pipe_skill
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
             # Issue #979: 节点 skill_id 权威优先（三档同名锁定用户选择的档位），
-            # 无 id/失效 → 名字降级（user→repo→official）+ warning
+            # 无 id/失效 → 名字降级（repo→official，Issue #3789）+ warning
             from src.domains.mgmt.public import resolve_skill_dispatch
             _node_sid = resolve_scene_node_skill_id(repo_key, agent_type, scene_id=_issue_scene,
                                                     user_id=_issue_scene_uid)
@@ -2787,6 +2790,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag=agent_type,
                                           agent_type=agent_type)
+            if isinstance(evt.get("payload"), dict):
+                # Issue #3789：降级来源可观测（skill_id 权威 / name_degraded）
+                evt["payload"]["skill_source"] = _res.get("skill_source") or ""
             if _res["skill_id"]:
                 skill_id = _res["skill_id"]
                 skill_path = _res.get("skill_path") or _pipe_skill

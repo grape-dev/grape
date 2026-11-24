@@ -6190,7 +6190,7 @@ def get_host_user_id(repo_key: str):
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",
                            user_id: "str | int" = "", scene_id: str = "",
                            node_tag: str = "", agent_type: str = "") -> dict:
-    """派发技能解析：skill_id 权威直查 → 名字降级（user→repo→official）。"""
+    """派发技能解析：skill_id 权威直查 → 名字降级（repo→official，Issue #3789）。"""
     from src.domains.mgmt.user.db import resolve_skill_dispatch as _impl
 
     return _impl(skill_name, skill_id, repo_key, user_id, scene_id, node_tag, agent_type)

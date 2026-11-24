@@ -11791,6 +11791,18 @@ register_migration(
     post_check=_post_autopilot_cf_cleanup,
 )
 
+
+# ===== Issue #3789：场景节点 skill_id 存量收敛（repo→official 优先）=====
+# 只读/回写 devops_pipeline_scene + scene_market（mgmt 域），技能档位查询走
+# mgmt.public（skill 在 runtime 域，跨域守卫 P0-2）。幂等；post_check 判定
+# 「repo 级场景节点不得引用 user 档技能」收敛后才盖章。
+# 版本号取 202611240002（原 202611230003 与 Issue #3800 的 autopilot 失败状态列
+# 迁移撞号，合入基线时改号；迁移函数本身幂等，改号后重跑无副作用）。
+
+from src.domains.mgmt.migrations.scene_nodes_skill_id_repo_scope import (
+    MIGRATION as _M_SCENE_NODES_SKILL_ID_REPO_SCOPE,
+)
+register_migration(**_M_SCENE_NODES_SKILL_ID_REPO_SCOPE)
 # ===== external_identities 关系补齐（Issue #3897 B 组）=====
 from src.domains.mgmt.migrations.external_identities_relation import (
     ensure_identity_relation as _fn_external_identities_relation,
