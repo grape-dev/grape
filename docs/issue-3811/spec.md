@@ -34,7 +34,7 @@ Issue 一致」守卫的拦截能力，并让守卫失效（fail-open）可观�
 - 回归：任务 Issue ≠ 目标 Issue 时仍返回 409，不退化为恒 fail-open。
 - 现有 release guard 相关测试全绿。
 - Loki 验收（sre）：修复发布后 1 小时
-  `{service_name="grape-mgmt"} |~ "release guard: resolve task issue failed"` 计数为 0。
+  `{service_name="grape-mgmt"} |~ "release guard: task issue lookup fail-open"` 计数为 0。
 
 ## 范围外
 
