@@ -135,10 +135,13 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
     # Phase C3：写 issue 单表（无卡片行则建档最小行）
-    _sync_issue_fields(repo_key, issue_id, {
-        "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
-        "a2a_seq": a2a_seq,
-    }, ensure_row=True, assignee=assignee)
+    # Issue #3646：assignee 只在**显式传入**时写——A2A 推进路径（`set_issue_stage(rk, iid, next, next)`）
+    # 只带角色不带责任人，原实现 `assignee or ""` 会把真实责任人一次推进就抹成空串，
+    # 流水线「当前责任人」随之退化为内部账号推断。
+    _fields = {"stage": stage, "owner_agent": owner_agent, "a2a_seq": a2a_seq}
+    if assignee:
+        _fields["assignee"] = assignee
+    _sync_issue_fields(repo_key, issue_id, _fields, ensure_row=True, assignee=assignee)
     from src.kernel.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
@@ -173,6 +176,35 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
     """返回 Issue 责任人（GitCode assignee 用户名；无记录空）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st["assignee"] if st else "") or ""
+
+
+def sync_issue_assignee(repo_key: str, issue_id: str, assignee: str) -> bool:
+    """指派/更新事件把 VCS 当前 assignee 回填 Issue 卡片（Issue #3646）。
+
+    历史实现只在 `issue_opened` 初始化 assignee，而 A2A 推进路径又不携带责任人，
+    卡片 assignee 因此长期为空，流水线「当前责任人」只能靠 event actor 推断——
+    内部 Agent 账号（`gcw_*`）就是这样被展示出来的。
+
+    口径：
+    - 只写 `assignee` 单字段（不动 stage / owner_agent / updated_at，也不动 user_id 归属）；
+    - **仅空值回填**：已有非空责任人（人类或机器人接管值）一律不覆盖，人类责任人优先；
+    - 空 assignee / 非法 issue 标识 → 不写，返回 False。
+    """
+    _asg = str(assignee or "").strip()
+    _num = _issue_num_or_ident(issue_id)
+    if not _asg or not _num:
+        return False
+    try:
+        _st = get_issue_stage(repo_key, issue_id) or {}
+        if (_st.get("assignee") or "").strip():
+            return False
+        # 返回值取真实写入行数：无卡片行时不假装回填成功（对账口径）。
+        return bool(rt.update_issue_card_fields(repo_key, _num, {"assignee": _asg},
+                                                touch_updated_at=False))
+    except Exception as e:  # noqa: BLE001 - 回填是旁路，失败不阻断事件主流程
+        from src.kernel.config import log as _log
+        _log.warning(f"sync_issue_assignee failed for {repo_key} #{_num}: {e}")
+        return False
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
@@ -737,13 +769,14 @@ def _issue_num_or_ident(issue_id) -> "int | str | None":
     原样 str 返回；空/None 返回 None。此前 set_issue_stage/_sync_issue_fields
     等保存路径一律 int() 强转，字符串 ident 必炸被 except 吞掉 → stage/scene/
     status 静默不落库（gitee confirm-done 后 stage 恒 'vod' 的写入点）。
+
+    Issue #4065：卡片主键口径收敛到 `card_ident_number`——`autopilot-*` 合成键
+    （issue 表真实主键）照常可查/可写；`pr_*` 订阅伪 id / 空 / 含分隔文本一律
+    None（此前原样透传，使 get_issue_stage 拿伪 id 打卡片端点 → 244 条/小时 422）。
     """
-    _raw = str(issue_id or "").lstrip("#")
-    if not _raw:
-        return None
     # Issue #3055：判定/强转统一走内核唯一入口（数字→int，ident→str）
-    from src.kernel.issue_ident import native_issue_number
-    return native_issue_number(_raw)
+    from src.kernel.issue_ident import card_ident_number
+    return card_ident_number(issue_id)
 
 
 def _scene_binding_active(repo_key: str, scene_id: str) -> bool:

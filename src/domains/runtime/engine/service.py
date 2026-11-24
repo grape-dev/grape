@@ -96,6 +96,30 @@ class _DomainDbProxy:
 _rt_db = _DomainDbProxy()
 
 
+def _cursor_for(domain: str, write: bool = False):
+    """Issue #3865：按域取游标（读路径统一原语，延迟导入便于测试替换 db_registry）。
+
+    为什么不用 `_rt_db` 读：`_DomainDbProxy.cursor()` 在单库/本域回落分支不持
+    `db_lock`，而 `collect_knowledge_files` 会被线程池（`warm_knowledge_cache`）并发调用；
+    `cursor_for` 的两条路由都安全——local 分支持进程锁，domain 分支独立连接由上下文
+    管理器在退出时关闭（不泄漏）。
+    """
+    from src.kernel import db_registry as _dbreg
+
+    return _dbreg.cursor_for(domain, write=write)
+
+
+def _domain_route_label(domain: str) -> str:
+    """Issue #3865：降级日志用的路由标签（标签本身失败绝不能影响主流程）。"""
+    from src.kernel import db_registry as _dbreg
+
+    try:
+        return _dbreg.route_of(domain)
+    except Exception as _e:  # noqa: BLE001 - 仅日志字段，吞掉并显式给出原因
+        return f"unavailable:{type(_e).__name__}"
+
+
+from src.kernel.db_registry import host_label as _host_label  # PR #2002 R2 Nit：收敛 kernel 单点
 
 
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
@@ -1261,10 +1285,15 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
         pass
 
     # 4. 组织下派快照：issue.org_context_snapshot_id -> .org-context/（仅组织子任务）
+    # Issue #3865：issue 表属 runtime 域。三库拓扑下 session_manager.db（进程主库=mgmt）
+    # 必 1146，快照静默不进知识。改走 cursor_for("runtime")：域连接 / 单库与本域回落主库 /
+    # 三库缺 GRAPE_DSN_RUNTIME 显式抛 DomainUnavailable；上下文管理器保证游标关闭
+    # （单库回落分支仍持 db_lock——本函数会被线程池并发调用，不能裸用共享连接）。
+    # 失败时除结构化告警外，在 meta 打 context_degraded，使「.org-context/ 缺失」对上层可见。
     if issue_id and _inum:
         try:
-            with db_lock:
-                _row = db.cursor().execute(
+            with _cursor_for("runtime") as _oc_c:
+                _row = _oc_c.execute(
                     "SELECT org_context_snapshot_id FROM issue "
                     "WHERE repo_key=? AND issue_number=?",
                     (repo_key, _inum)).fetchone()
@@ -1275,7 +1304,13 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
                 for rel, content in (_mgmt_snap.load_org_snapshot_files(_snap_id) or {}).items():
                     _know[rel] = {"content": content, "obs_key": ""}
         except Exception as _e:
-            log.warning(f"collect org-context snapshot failed repo={repo_key} issue={issue_id}: {_e}")
+            if isinstance(_pim, dict):
+                _pim["context_degraded"] = "org_snapshot"
+            log.warning(
+                f"org-context snapshot read degraded (issue 属 runtime 域，域读失败，"
+                f".org-context/ 未注入) repo={repo_key} issue={issue_id} "
+                f"route={_domain_route_label('runtime')} target_db=runtime "
+                f"pid={os.getpid()} host={_host_label()}: {_e}")
 
     return {"project_info": _pif, "meta": _pim, "knowledge": _know}
 
@@ -1381,6 +1416,81 @@ def is_task_claimable(status) -> bool:
     其中之一，否则视为「入队未生效」（宁失败不跑飞）。
     """
     return (status or "") in TASK_CLAIMABLE_STATUSES
+
+
+# ── Issue #3963：同仓 enqueue 撞 repo-dispatch 租约 → 排队等待（不再 0.95s 即判死）──
+#
+# 缺陷：抢锁原语默认 `attempts=20 / interval=0.05`（≈0.95s），而 enqueue 抢的是
+# `ttl=30` 的 repo 租约、临界区在 db_lock 长持有（#3927）下常 > 1s → 撞锁必然，
+# 且抛出的是一句无条件失败的 RuntimeError，调度侧只能按永久失败落 failed。
+# 修复：把「抢锁窗口」与「租约 TTL」对齐（预算 = TTL + 余量，AC 要求有效等待 ≥ TTL），
+# 抢不到才抛结构化分类，由调度侧按瞬态重试/requeue。
+REPO_DISPATCH_BUSY = "REPO_DISPATCH_BUSY"
+_REPO_DISPATCH_LEASE_TTL = 30          # 与设计租约 TTL 一致（续期/短 TTL 不在本单范围）
+# 余量：抖动/时钟粒度下仍保证「有效等待 ≥ TTL」；TTL 是持锁者崩溃后锁最晚过期时间，
+# 等到 TTL 才可能接管残留租约。
+_REPO_DISPATCH_LEASE_WAIT_SECONDS = _REPO_DISPATCH_LEASE_TTL + 5
+_REPO_DISPATCH_LEASE_JITTER_RATIO = 0.2  # 抖动防多实例同刻齐抢（仅作用 sleep 间隔）
+# 重试间隔：预算路径用它代替原语默认 0.05s——35s 预算下 0.05s 会打出约 700 次抢锁
+# （每轮都是一次 INSERT+提交），对 DB 是纯噪声；0.25s 约 4 次/秒/等待者，抖动后错峰。
+_REPO_DISPATCH_LEASE_RETRY_INTERVAL = 0.25
+
+
+# Issue #3963（复审）：busy 文案指纹提为共享常量——scheduler 侧回推分类
+# （_enqueue_failure_code/_classify_env_error）依赖该字面子串；两侧各自维护时
+# 文案漂移会让「存量库缺 error_code 列」的回推静默失效（busy 又退回 0 重试即
+# failed）。改名等于让既有 Loki 查询失明，必须与异常文案同源。
+REPO_DISPATCH_BUSY_LOG_FINGERPRINT = "task enqueue busy for repo"
+
+
+class RepoDispatchBusyError(RuntimeError):
+    """同仓 enqueue 等待 repo-dispatch 租约预算耗尽（瞬态可重试，非永久失败）。
+
+    - `error_code`：稳定的 `REPO_DISPATCH_BUSY`，调度侧据此走瞬态通道（不消耗 attempt）；
+    - 文案保留 `task enqueue busy for repo {repo_key}`：既有 Loki 查询/看板/告警按该
+      字面子串聚合，改名会让他们失明。
+    """
+
+    error_code = REPO_DISPATCH_BUSY
+
+    def __init__(self, repo_key: str, waited_seconds: float = 0.0):
+        self.repo_key = repo_key or ""
+        self.waited_seconds = float(waited_seconds or 0.0)
+        super().__init__(f"{REPO_DISPATCH_BUSY_LOG_FINGERPRINT} {repo_key}")
+
+
+def acquire_repo_dispatch_lease(repo_key: str) -> tuple[str, float]:
+    "同仓派发租约获取：enqueue_task 与 direct 派发（_create_direct_task）的共用入口。"
+    # Issue #3963（复审 Required）：LOCAL 引擎派发 / 事件直发 / SRE 重试此前各持一份
+    # 「默认 0.95s 抢锁、抢不到即判死」的内联调用。本入口统一等待预算 = TTL + 余量
+    # （AC：有效等待 >= 租约 TTL，持锁者崩溃后最晚 TTL 过期可接管残留租约），
+    # 间隔 _REPO_DISPATCH_LEASE_RETRY_INTERVAL + 抖动，全部调用点同口径排队等待。
+    # 返回 (lease_key, waited_seconds)：lease_key 供调用方 finally 中 release
+    # （空 repo_key 返回 ("", 0.0)，调用方按空键跳过释放）；预算耗尽抛
+    # RepoDispatchBusyError（瞬态分类，调用方走 #3963 瞬态通道，不判永久失败）。
+    # 埋点（wait 直方图 / busy 计数）在本入口完成，全部调用点同口径上报。
+    dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
+    if not dispatch_lease_key:
+        return "", 0.0
+    _lease_t0 = time.monotonic()
+    _lease_ok = acquire_lock_with_retry(
+        dispatch_lease_key, ttl=_REPO_DISPATCH_LEASE_TTL,
+        interval=_REPO_DISPATCH_LEASE_RETRY_INTERVAL,
+        wait_seconds=_REPO_DISPATCH_LEASE_WAIT_SECONDS,
+        jitter_ratio=_REPO_DISPATCH_LEASE_JITTER_RATIO)
+    _lease_waited = time.monotonic() - _lease_t0
+    try:
+        from src.domains.insight.public import (
+            record_repo_dispatch_busy, record_repo_dispatch_lease_wait)
+        record_repo_dispatch_lease_wait(repo_key, _lease_waited)
+        if not _lease_ok:
+            record_repo_dispatch_busy(repo_key)
+    except Exception as _obs_e:
+        # 埋点绝不拖垮入队主链路（可观测性铁律）；显式 debug 记录而非静默吞
+        log.debug(f"repo dispatch lease metrics skipped: {_obs_e}")
+    if not _lease_ok:
+        raise RepoDispatchBusyError(repo_key, waited_seconds=_lease_waited)
+    return dispatch_lease_key, _lease_waited
 
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
@@ -1637,9 +1747,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _snap = (None, "", "")
     # 组织派发租约（a85f72d33）：同仓库 enqueue 串行化，避免 dispatch 双写竞争
-    dispatch_lease_key = repo_dispatch_lease_key(repo_key) if repo_key else ""
-    if dispatch_lease_key and not acquire_lock_with_retry(dispatch_lease_key, ttl=30):
-        raise RuntimeError(f"task enqueue busy for repo {repo_key}")
+    # Issue #3963：等待预算与租约 TTL 对齐（不再固定 0.95s 即判 busy）——同仓并发
+    # enqueue 排队等待；预算耗尽抛结构化 REPO_DISPATCH_BUSY（瞬态，调度侧重试/requeue）。
+    # 复审 Required：租约获取/埋点/异常分类收口在 acquire_repo_dispatch_lease，
+    # 与 direct 派发（event_pipeline._create_direct_task）共用同一口径。
+    dispatch_lease_key, _ = acquire_repo_dispatch_lease(repo_key)
     try:
         with db_lock:
             c = _rt_db.cursor()
@@ -1803,8 +1915,13 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
         deterministic_only=True（Issue #699 Phase 3，local_claimer 确定性认领用）：
     只认领 runtime_id 绑定到本引擎的定向 queued 任务，跳过 legacy 池兜底；
     默认 False，行为与历史完全一致。
+
+    Issue #3927（审查 R5）：claim 的锁口径归因——`lock_owner("claim")` 使
+    db_lock 的慢等待/持有指标可按 claim 与 complete/update_task_status 区分，
+    灰度前据此确认 17–50s 排队命中的是哪把锁/哪个 owner。
     """
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    with lock_owner("claim"), db_lock:
         c = _rt_db.cursor()
         try:
             # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
@@ -2290,9 +2407,12 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
 
     scope=global → 可认领所有仓库的 queued 任务
     scope=repo   → 只认领 owner_id 对应仓库的 queued 任务
-    scope=user   → 只认领该用户创建的 queued 任务
+    scope=user   → 只认领该用户创建的任务
+
+    Issue #3927（审查 R5）：同 claim，lock_owner 归因 db_lock 慢等待的持有方。
     """
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    with lock_owner("claim_by_tag"), db_lock:
         c = _rt_db.cursor()
         try:
             # 1. 校验标签能力 + 获取引擎 scope
@@ -2437,34 +2557,39 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
             # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
             # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
             # 这里用 Python 循环 LIMIT N 逐个检查。
-            # Issue #658：认领侧角色守卫——引擎有效角色集（显式 role_tags > 引擎类型默认映射）
-            # 非空时，任务 pool_tag（已知节点角色）必须 ∈ 角色集才可认领（堵全量广播漏洞：
-            # #90 vod 任务被 codearts 引擎按 tag='all' 认领 → rc=1）。角色集为 None
-            # （未知类型且未显式声明）不限制；pool_tag 非已知角色（自定义路由 tag）不受约束。
-            _engine_roles = None
+            # Issue #658/#3396：认领侧角色守卫——角色集统一读 engine_capabilities
+            # （单一事实源，UI 勾选即生效；空标签 fail-closed）。任务 pool_tag 为
+            # 已知节点角色时必须 ∈ 引擎标签集（或引擎勾了 all）才可认领；pool_tag
+            # 非已知角色（自定义路由 tag）不受约束。step 1 的标签能力匹配
+            # （ec.tag=? OR 'all'）与本守卫同源，此处为纵深防御（防止上游口径松动）。
             try:
-                from src.domains.runtime.engine.engine_select import engine_role_tags as _ert, is_agent_role as _is_role
-                _er_row = c.execute(
-                    "SELECT name, COALESCE(role_tags,'') FROM agent_runtimes WHERE id=?",
-                    (runtime_id,)).fetchone()
-                if _er_row:
-                    _engine_roles = _ert(_er_row[0] or "", _er_row[1] or "")
+                from src.domains.runtime.engine.engine_select import (
+                    engine_capability_tags as _ect, is_agent_role as _is_role)
+            except Exception as _gie:
+                # 复审 Informational 3：守卫依赖导入失败时显式 fail-closed（不认领），
+                # 不再让 ImportError 直接中断认领路径且无留痕。
+                log.warning(f"claim_by_tag: role guard import failed, fail-closed: {_gie}")
+                return None
+            _engine_roles: list = []
+            try:
+                _engine_roles = _ect(runtime_id) or []
             except Exception as _ere:
-                log.warning(f"claim_by_tag: role tags lookup failed for engine {runtime_id}: {_ere}")
-                _engine_roles = None
+                log.warning(f"claim_by_tag: capability tags lookup failed for engine {runtime_id}: {_ere}")
+                _engine_roles = []  # 查询异常按空标签处理（fail-closed）
             _tried_ids = [task_id]
             _max_tries = 20  # 防止全表扫描
             while True:
                 if expected_task_id is not None:
                     # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），
-                    # 此处补角色硬校验：不匹配 → fail-closed（不尝试其他任务）
-                    if _engine_roles is not None:
-                        _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-                        _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
-                        if _is_role(_bt_tag) and _bt_tag not in _engine_roles:
-                            log.warning(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} "
-                                        f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658), reject bound claim")
-                            return None
+                    # 此处补角色硬校验（engine_capabilities 口径）：不匹配 → fail-closed
+                    # （不尝试其他任务）
+                    _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
+                    if (_is_role(_bt_tag) and _bt_tag not in _engine_roles
+                            and "all" not in _engine_roles):
+                        log.warning(f"claim_by_tag: engine {runtime_id} caps={_engine_roles} "
+                                    f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658/#3396), reject bound claim")
+                        return None
                     # Issue #1208 ③：selector 守卫（bound fail-closed，不尝试其他任务；
                     # 层级在角色②之后、名单④之前——顺序即语义）
                     if _selector_guard_blocks(c, task_id, runtime_id):
@@ -2476,12 +2601,13 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
                 if _pe_row:
                     _task_pool_tag = (_pe_row[1] or "").strip().lower()
                 _skip = False
-                if (_engine_roles is not None and _is_role(_task_pool_tag)
-                        and _task_pool_tag not in _engine_roles):
-                    # Issue #658：角色不匹配 → 跳过该任务继续尝试下一个（与 pool 名单
-                    # 守卫同款跳过语义，不阻塞队列，也绝不认领不匹配角色任务）
-                    log.info(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} mismatch "
-                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658), skip")
+                if (_is_role(_task_pool_tag) and _task_pool_tag not in _engine_roles
+                        and "all" not in _engine_roles):
+                    # Issue #658/#3396：角色不匹配（engine_capabilities 口径）→ 跳过该任务
+                    # 继续尝试下一个（与 pool 名单守卫同款跳过语义，不阻塞队列，
+                    # 也绝不认领不匹配角色任务）
+                    log.info(f"claim_by_tag: engine {runtime_id} caps={_engine_roles} mismatch "
+                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658/#3396), skip")
                     _skip = True
                 # Issue #1208 ③：selector 守卫（层级在角色②之后、名单④之前——顺序即语义）——
                 # 不匹配跳过该任务继续尝试下一个（与 #658 同款跳过语义，不阻塞队列）
@@ -2879,6 +3005,24 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
                             triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
                             task_status: str = "", task_result_text: str = None,
                             task_id: str = ""):
+    """Issue #3927 审查 R1 复审：级联终态写纳入 event_lock(seq)。
+
+    与 `update_event_complete`/`update_event_status` 共用同一把事件维度锁，
+    `SELECT status → UPDATE` 对同 seq 的 complete 写者原子；锁序仍
+    db_lock（调用方持有）→ event_lock，无交叉死锁面。
+    """
+    from src.kernel.lock_instrument import event_lock
+    with event_lock(event_seq):
+        return _cascade_event_terminal_impl(
+            cursor, event_seq, status, exit_code=exit_code,
+            triggered_by=triggered_by, task_status=task_status,
+            task_result_text=task_result_text, task_id=task_id)
+
+
+def _cascade_event_terminal_impl(cursor, event_seq: int, status: str, exit_code: int = None,
+                                 triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
+                                 task_status: str = "", task_result_text: str = None,
+                                 task_id: str = ""):
     """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
@@ -2966,7 +3110,9 @@ def mark_task_takeover(task_id: str) -> dict:
     seq = task.get("event_seq") or 0
     if not seq:
         return {"status": "no_event", "task_id": task_id}
-    with db_lock:
+    # Issue #3927 审查 R1 复审：接管写与 complete 共用 event_lock(seq)，锁序 db_lock → event_lock。
+    from src.kernel.lock_instrument import event_lock
+    with db_lock, event_lock(seq):
         c = _rt_db.cursor()
         c.execute("SELECT status FROM events WHERE seq=?", (seq,))
         row = c.fetchone()
@@ -3040,14 +3186,122 @@ def converge_event_to_task(task_id: str) -> dict:
             "cascade_prev_event_status": (_after_row[5] if _after_row else "") or ""}
 
 
+_TASK_STATUS_SMALL_COLS = ("exit_code",)
+# 大字段列：可达数十 MB（complete 全量 result_text / usage_json / errors / stderr）。
+# Issue #3927 审查 R5：移出 db_lock 短临界区，但必须**先于终态提交**写入
+# （order：大字段 → 终态小字段），消除「终态已提交、大字段写崩溃/失败即永久丢失」窗口。
+_TASK_STATUS_BIG_COLS = ("result_text", "usage_json", "errors", "stderr")
+
+# Issue #3927 审查 R5 复审：大字段写失败登记 pending（重复调用/巡检带 payload 时补写）。
+_task_big_pending_guard = threading.Lock()
+_task_big_pending: set[str] = set()
+
+
+def _task_big_mark_pending(task_id: str) -> None:
+    with _task_big_pending_guard:
+        _task_big_pending.add(str(task_id))
+
+
+def _task_big_is_pending(task_id: str) -> bool:
+    with _task_big_pending_guard:
+        return str(task_id) in _task_big_pending
+
+
+def _task_big_clear_pending(task_id: str) -> None:
+    with _task_big_pending_guard:
+        _task_big_pending.discard(str(task_id))
+
+
+def pending_task_big_count() -> int:
+    """待补写 agent_tasks 大字段的任务数（观测/测试/巡检用）。"""
+    with _task_big_pending_guard:
+        return len(_task_big_pending)
+
+
+def _task_write_lockfree() -> bool:
+    """大字段短写是否免进程锁：MySQL/池化连接每语句独立事务；SQLite 保守持锁。"""
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        return _is_mysql_backend()
+    except Exception:
+        return False
+
+
+def _write_task_big_fields(task_id: str, cols: dict, only_nonterminal: bool = True) -> bool:
+    """Issue #3927 审查 R5：agent_tasks 大字段短写（db_lock 释放后执行）。
+
+    **先写大字段、后写终态**：调用方在终态提交前调用本函数，保证
+    「terminal ⇒ 大字段已写」不变式；`only_nonterminal=True` 时 UPDATE 带
+    `status NOT IN (终态)` 条件，避免并发终态赢家被后到大字段覆盖。
+
+    MySQL 拓扑不持进程锁；SQLite/单库共享连接保留 db_lock 短临界区
+    （commit 为连接级语义，防跨线程事务交错）。返回是否写成功；失败由调用方
+    登记 pending（重复调用带 payload 时补写）。
+    """
+    try:
+        sets = ", ".join(f"{col}=?" for col in cols)
+        params = [cols[col] for col in cols] + [task_id]
+        sql = f"UPDATE agent_tasks SET {sets} WHERE id=?"
+        if only_nonterminal:
+            marks = ",".join("?" for _ in TASK_TERMINAL_STATUSES)
+            sql += f" AND status NOT IN ({marks})"
+            params += list(TASK_TERMINAL_STATUSES)
+        if _task_write_lockfree():
+            c = _rt_db.cursor()
+            c.execute(sql, params)
+            _rt_db.commit()
+        else:
+            with db_lock:
+                c = _rt_db.cursor()
+                c.execute(sql, params)
+                _rt_db.commit()
+        return True
+    except Exception as _e:
+        log.warning(f"update_task_status: write big fields failed for {task_id}: {_e}")
+        return False
+
+
 def update_task_status(task_id, status, **kw):
     """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2).
 
     Issue #1938：可选关键字 ``cascade_trigger``（``update_task_status`` / ``sweeper``）
     用于给事件级联收敛补偿归因，不落 agent_tasks 列（不在 SQL 列清单内，安全忽略）。
+
+    Issue #3927（审查 R5，复审修订）：claim 排队 17–50s 的锁口径是本 db_lock——
+    complete 路径原本在锁内写全量 result_text/usage_json（可达数十 MB）+ 级联。现拆为：
+    - db_lock 短临界区：终态判定 + status/completed_at/exit_code 小写 + 级联收敛；
+    - 大字段（result_text/usage_json/errors/stderr）：在终态提交**之前**锁外短写
+      （MySQL 免锁、SQLite/单库保留短临界区），失败登记 pending 并在重复调用
+      携带 payload 时补写——保证「terminal ⇒ 大字段已写」不再有永久丢失窗口。
+    `lock_owner("update_task_status:<id>")` 提供灰度归因（指标 owner 粗化，日志全量）。
     """
     _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
-    with db_lock:
+    from src.kernel.lock_instrument import lock_owner
+    _big_cols = {col: kw[col] for col in _TASK_STATUS_BIG_COLS if col in kw}
+    # ① 终态判定（短临界区）：已终态 → 仅在 pending 且本次带 payload 时补写大字段。
+    with lock_owner(f"update_task_status:{task_id}"), db_lock:
+        c = _rt_db.cursor()
+        c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+        if not row:
+            return
+        if row[0] in TASK_TERMINAL_STATUSES:
+            if _big_cols and _task_big_is_pending(task_id):
+                if _write_task_big_fields(task_id, _big_cols, only_nonterminal=False):
+                    _task_big_clear_pending(task_id)
+                    log.info(f"update_task_status: backfilled pending big fields "
+                             f"for terminal task {task_id}")
+            return
+    # ② 大字段先写（终态提交之前，锁外；失败登记 pending，终态仍可落库并由下次补写）。
+    _big_ok = True
+    if _big_cols:
+        _big_ok = _write_task_big_fields(task_id, _big_cols, only_nonterminal=True)
+        if not _big_ok:
+            _task_big_mark_pending(task_id)
+            log.warning(f"update_task_status: big fields write failed, terminal still "
+                        f"committed; pending backfill for task {task_id}")
+    # ③ 终态/小字段 + 级联（短临界区；重新判定，并发终态赢家先行则短路）。
+    with lock_owner(f"update_task_status:{task_id}"), db_lock:
         c = _rt_db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
@@ -3063,7 +3317,7 @@ def update_task_status(task_id, status, **kw):
             # running 任务写成 completed_at=启动时刻，干扰终态判断/展示）。
             sets.append("completed_at=?")
             params.append(kw.get("completed_at") or datetime.now(timezone.utc).isoformat())
-        for col in ("exit_code", "result_text", "errors", "stderr", "usage_json"):
+        for col in _TASK_STATUS_SMALL_COLS:
             if col in kw:
                 sets.append(f"{col}=?")
                 params.append(kw[col])
@@ -3109,6 +3363,8 @@ def update_task_status(task_id, status, **kw):
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         _rt_db.commit()
+    if _big_cols and _big_ok:
+        _task_big_clear_pending(task_id)
     # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
     # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
     if _cascaded_seq:
@@ -3676,7 +3932,7 @@ def _aggregate_round(task: dict) -> int:
         return 0
     try:
         with db_lock:
-            row = db.cursor().execute(
+            row = _rt_db.cursor().execute(
                 "SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
         if not row:
             return 0
@@ -3693,7 +3949,7 @@ def _aggregate_dispatch_ref(task: dict) -> int:
         return 0
     try:
         with db_lock:
-            row = db.cursor().execute(
+            row = _rt_db.cursor().execute(
                 "SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
         if not row:
             return 0
@@ -3893,8 +4149,18 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
         # 子任务还在关联仓库里跑，聚合节点必须等 dispatch 进入终态后由
         # _maybe_trigger_terminal_aggregate 触发，不能任务一完成就自动 A2A，
         # 否则 org_aggregate 会在子任务未完成时提前跑完，流水线看似走完。
-        if str((_transition.get("node") or {}).get("id") or "") == "org_dispatch":
-            return {"action": "wait_for_dispatch", "node": "org_dispatch",
+        # 节点身份按语义判定（id / skill / 下一节点 skill），不假设自定义组织场景
+        # 的下派节点 id 一定叫 org_dispatch：只要「当前节点是组织下派」或
+        # 「下一节点是组织聚合」，就必须等批次终态，不能任务一完成就提前聚合。
+        _cur_node = _transition.get("node") or {}
+        _next_node = _transition.get("next_node") or {}
+        _cur_id = str(_cur_node.get("id") or "")
+        _cur_skill = str(_cur_node.get("skill") or "")
+        _next_skill = str(_next_node.get("skill") or "")
+        if (_cur_id == "org_dispatch"
+                or _cur_skill == "org-dispatch-cli"
+                or _next_skill == "org-aggregate-cli"):
+            return {"action": "wait_for_dispatch", "node": _cur_id or "org_dispatch",
                     "scene_id": _scene_id}
         # Issue #3688：自动推进兜底必须由场景节点显式声明 auto_advance=true 才启用。
         # #2118 引入的兜底原本用于组织链条（技能未显式 handoff 时防卡死），但它对所有
@@ -3922,6 +4188,25 @@ def _auto_advance_after_complete(task: dict, output: dict | None = None,
     except Exception as e:
         log.warning(f"auto-advance failed issue={issue_id} agent={agent_type}: {e}")
         return {"action": "none", "reason": f"error: {e}"}
+
+
+def run_auto_advance_hook(task_id: str, repo_key: str, issue_id: str,
+                          agent_type: str, event_seq: int,
+                          result_text: str = "") -> dict:
+    """本地 direct 收尾的统一 auto-advance 入口（与远程 complete_task 同一判定）。
+
+    Issue #2118/#2270：此前只有远程 worker 的 complete_task() 调用
+    ``_auto_advance_after_complete``，本地执行路径（event_pipeline /
+    direct_executor）在技能未显式 ``grape a2a handoff`` 时会停在中间节点。
+    这里只做参数装配，判定/派发仍由 ``_auto_advance_after_complete`` 负责。
+    """
+    from src.api.event_store import parse_agent_output_json
+
+    task = {"id": task_id or "", "repo_key": repo_key, "issue_id": issue_id,
+            "agent_type": agent_type, "event_seq": event_seq or 0}
+    return _auto_advance_after_complete(
+        task, output=parse_agent_output_json(result_text or ""),
+        result_text=result_text or "")
 
 
 def _create_auto_advance_a2a(task: dict, next_role: str, scene_id: str,
@@ -4070,6 +4355,46 @@ def _create_auto_advance_a2a(task: dict, next_role: str, scene_id: str,
     return _seq
 
 
+def _auto_advance_async_enabled() -> bool:
+    """Issue #3927：complete 的 A2A 自动推进是否卸载到后台线程（M3 灰度开关）。
+
+    默认关闭以保持既有同步语义（技能/测试按 stage 同步回写断言）；生产灰度阶段
+    设 `COMPLETE_A2A_ASYNC=1` 后，A2A 派发不再占用 complete 请求线程。
+    """
+    return os.environ.get("COMPLETE_A2A_ASYNC", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _run_auto_advance_after_complete(task: dict, output: dict | None,
+                                     result_text: str) -> dict:
+    try:
+        _adv = _auto_advance_after_complete(task, output=output,
+                                            result_text=result_text or "")
+        if _adv.get("action") in ("a2a", "recheck"):
+            log.info(f"complete_task: auto-advanced issue={task.get('issue_id')} "
+                     f"agent={task.get('agent_type')} action={_adv.get('action')} "
+                     f"next={_adv.get('next_role')} round={_adv.get('round')} "
+                     f"seq={_adv.get('seq')}")
+        return _adv
+    except Exception as _e:  # noqa: BLE001 - 自动推进失败不阻断终态
+        log.warning(f"complete_task: auto-advance failed: {_e}")
+        return {"action": "none", "reason": f"error: {_e}"}
+
+
+def _schedule_auto_advance_after_complete(task: dict, output: dict | None,
+                                          result_text: str):
+    """Issue #3927：锁外/请求线程外执行 auto-advance（A2A 外呼不占 complete 线程）。"""
+    if _auto_advance_async_enabled():
+        threading.Thread(
+            target=_run_auto_advance_after_complete,
+            args=(task, output, result_text or ""),
+            name=f"auto-advance:{task.get('id') or task.get('event_seq') or '?'}",
+            daemon=True,
+        ).start()
+        return None
+    return _run_auto_advance_after_complete(task, output, result_text or "")
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None,
                   revive_from_timeout_failed: bool = False):
     """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。
@@ -4171,23 +4496,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                                   result=_result_show,
                                   structured_output=output or None,
                                   revive_from_timeout_failed=(
-                                      revive_from_timeout_failed and status == "completed"))
+                                      revive_from_timeout_failed and status == "completed"),
+                                  task_id=task_id)
             # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
             # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
             # failed 阻断回退 pending_review 保留人工 confirm done 路径）
             # Issue #2118：按 next/handoff 统一推进（组织节点 id != tag 时也能命中），
             # 未显式 A2A 交办时自动派发下一节点，避免流水线停在当前节点。
             if status == "completed" and task.get("issue_id"):
-                try:
-                    _adv = _auto_advance_after_complete(task, output=output,
-                                                        result_text=result_text or "")
-                    if _adv.get("action") in ("a2a", "recheck"):
-                        log.info(f"complete_task: auto-advanced issue={task.get('issue_id')} "
-                                 f"agent={task.get('agent_type')} action={_adv.get('action')} "
-                                 f"next={_adv.get('next_role')} round={_adv.get('round')} "
-                                 f"seq={_adv.get('seq')}")
-                except Exception as _e:
-                    log.warning(f"complete_task: auto-advance failed: {_e}")
+                # Issue #3927：A2A 派发已移出 db_lock；灰度开关下发到后台线程，
+                # 避免网络外呼长尾继续占用 complete 请求线程。
+                _schedule_auto_advance_after_complete(task, output, result_text or "")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     # 疑似提前结束：标记落到 agent_tasks.errors（任务详情可见）；状态仍是 completed。
@@ -4552,13 +4871,16 @@ def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
 def _set_task_late_result(task_id: str, task: dict, result_text: str, status: str):
     """补挂/提升：更新 agent_tasks 与关联 event 的结果存储（无副作用重放）。"""
     _now_iso = datetime.now(timezone.utc).isoformat()
-    with db_lock:
+    _event_seq = task.get("event_seq") or 0
+    # Issue #3927 审查 R1 复审：late-result 终态写与 complete 共用 event_lock(seq)，
+    # 锁序固定 db_lock → event_lock（无事件时锁 event:0，仅同进程无事件任务附加串行）。
+    from src.kernel.lock_instrument import event_lock
+    with db_lock, event_lock(_event_seq):
         c = _rt_db.cursor()
         c.execute(
             "UPDATE agent_tasks SET status=?, result_text=?, exit_code=CASE WHEN ?='completed' THEN 0 ELSE exit_code END, "
             "completed_at=? WHERE id=? AND status IN ('completed','failed')",
             (status, result_text, status, _now_iso, task_id))
-        _event_seq = task.get("event_seq")
         if _event_seq:
             c.execute(
                 "UPDATE events SET status=?, structured_output=?, result=?, completed_at=? WHERE seq=?",
@@ -4873,7 +5195,7 @@ def fail_task(task_id, error, exit_code=-1):
                 from src.domains.runtime.engine.transient_retry import format_stream_failure_result
                 _retries = [e for e in _task_errors_json(task_id)
                             if isinstance(e, dict) and e.get("error_code") in
-                            ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+                            ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY", "CONFIG_ERROR")]
                 if _retries:
                     _ex = next((e for e in _retries
                                 if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
@@ -4889,7 +5211,8 @@ def fail_task(task_id, error, exit_code=-1):
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=(_result_show or (error or ""))[:200])
+                                  result=(_result_show or (error or ""))[:200],
+                                  task_id=task_id)
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")
     # Issue #403：耗尽判死时 errors 合并而非覆盖——上方 retry 检查已把

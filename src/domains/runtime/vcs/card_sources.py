@@ -34,6 +34,10 @@ from abc import ABC, abstractmethod
 from typing import Callable, Iterable
 
 from src.kernel.config import log
+# Issue #3848：端口未就绪（启动窗口，预期时序）与真读失败必须分流——前者只 debug +
+# startup_degraded 打点，后者保留 WARNING（fail-open 但响亮）。
+from src.kernel.ports._base import PortNotBound
+from src.kernel.startup_metrics import record_startup_degraded
 from src.domains.runtime.vcs.card_contract import (
     PlatformCardContractClient,
     PlatformCardContractError,
@@ -195,7 +199,18 @@ class OwnerTableCardSource(PlatformCardSource):
                           "契约接口/文件卡/代码默认仍生效")
                 return {}
             rows = self._rows(enabled_only=True) or []
+        except PortNotBound as e:
+            # Issue #3848（启动次序）：跨域取卡经 GSB 的 `_ensure_registered()` →
+            # pipeline 端口，装配层 bind() 之前必然 PortNotBound。这是**预期时序**
+            # （端口在服务首个请求前就绑好了），不是"表读不了"——原先被下面的
+            # `except Exception` 记成 "repo_platforms table read failed" WARNING，
+            # 每次启动刷一条，还把巡检方向带歪。这里降为 debug + 打点。
+            record_startup_degraded("card_source", "port_not_bound")
+            log.debug("platform_card: kernel port 未就绪（启动窗口内属预期时序），"
+                      f"本次表读卡让位给契约/文件卡/代码默认: {e}")
+            return {}
         except Exception as e:  # noqa: BLE001
+            record_startup_degraded("card_source", "read_failed")
             log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
             return {}
         out: dict[str, dict] = {}

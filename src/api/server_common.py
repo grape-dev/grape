@@ -30,8 +30,8 @@ from src.api.frontend_flags import apply_feature_flags
 # Issue #2784：契约版本号单一来源（健康探针与 /openapi.json 必须是同一个号）
 from src.api.contract_versioning import CONTRACT_VERSION
 from src.kernel.config import log
-from src.kernel.config import (issue_var, request_id_var, repo_var, seq_var, span_id_var,
-                               trace_id_var, user_var)
+from src.kernel.config import (issue_var, path_var, request_id_var, repo_var, seq_var,
+                               span_id_var, trace_id_var, user_var)
 
 __all__ = [
     "ensure_python_version",
@@ -114,6 +114,16 @@ def build_app(
 
     _attach_request_log(app)
 
+    # 连接池僵死防护（2026-11-23 mgmt 全站僵死事故）：线程上限收敛到 ≤ 池上限、
+    # 请求收尾归还被粘住的连接、池饱和时打 ERROR + dump 线程栈。
+    try:
+        from src.kernel.config import log as _guard_log
+        from src.kernel.db_pool_guard import install_guard
+        _guard_log.info(f"db-pool-guard: {install_guard(app)}")
+    except Exception as _ge:  # noqa: BLE001 - 防护层失败不得挡住启动
+        from src.kernel.config import log as _guard_log
+        _guard_log.warning(f"db-pool-guard 装载失败: {_ge}")
+
     # 可选 tracing，两条路径互斥、新路径优先：
     #  - 新路径 OTEL_EXPORTER_OTLP_ENDPOINT → src/kernel/otel.py：FastAPI + requests
     #    + db.query + task.* 全套 span（service.name 认 GRAPE_TRACE_SERVICE）；
@@ -166,6 +176,15 @@ def _redact_path(path: str) -> str:
 _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 # Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
 _LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
+
+# Issue #3699：trace 中继禁用态（主控未配 OTLP_RELAY_TARGET）是配置态 feature-off，
+# 不是事故。中继侧用该响应头标记；访问日志据此把 503 降为 debug，避免每批 worker
+# 上报都刷 ERROR。上游 LGTM 故障透传的 5xx 不带该头 → 仍按 ERROR 记录。
+_RELAY_DISABLED_HEADER = "x-grape-trace-relay"
+
+
+def _is_relay_disabled_503(status: int, headers) -> bool:
+    return status == 503 and (headers.get(_RELAY_DISABLED_HEADER) or "") == "disabled"
 
 
 _ISSUE_PATH_RE = _re.compile(r"^/api/issues/([^/]+)")
@@ -248,6 +267,7 @@ def _attach_request_log(app: FastAPI) -> None:
 
         # 从请求路径提取 repo_key（如 /api/dashboard/requiredsa/hello-flask → requiredsa/hello-flask）
         path = request.url.path
+        token_path = path_var.set(path)
         _repo = ""
         _path_parts = path.strip("/").split("/")
         if len(_path_parts) >= 4 and _path_parts[0] == "api":
@@ -327,9 +347,12 @@ def _attach_request_log(app: FastAPI) -> None:
         skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
         start = _time.time()
         status = 500
+        relay_disabled = False
         try:
             response = await call_next(request)
             status = response.status_code
+            # 需在 return 前取：finally 里 response 未绑定（call_next 抛异常分支）
+            relay_disabled = _is_relay_disabled_503(status, response.headers)
             response.headers["X-Request-ID"] = rid
             return response
         except Exception:
@@ -349,7 +372,12 @@ def _attach_request_log(app: FastAPI) -> None:
                 if redacted_path == "/faro/collect" and status == 503:
                     _log.debug(msg, extra=extra)
                 elif status >= 500:
-                    _log.error(msg, extra=extra)
+                    # Issue #3699：中继禁用（配置缺失）是 feature-off，非事故 → debug；
+                    # 其他 5xx（含上游 LGTM 故障透传）保持 ERROR，不被误抑制。
+                    if relay_disabled:
+                        _log.debug(msg, extra=extra)
+                    else:
+                        _log.error(msg, extra=extra)
                 elif status == 401:
                     if path.startswith("/api/runtime/"):
                         _log.warning(msg, extra=extra)
@@ -372,6 +400,7 @@ def _attach_request_log(app: FastAPI) -> None:
                     except Exception as _exc:
                         log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
+            path_var.reset(token_path)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
             issue_var.reset(token_issue)
@@ -454,6 +483,11 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             _db = describe_connection()
         except Exception as _e:  # noqa: BLE001
             _db = {"error": str(_e)}
+        try:
+            from src.kernel.mysql_compat import pool_stats_all
+            _pools = pool_stats_all()
+        except Exception as _e:  # noqa: BLE001
+            _pools = [{"error": str(_e)}]
         return {
             "status": "ok",
             "service": service_name,
@@ -461,6 +495,7 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
             "database": _db,
+            "db_pool": _pools,
         }
 
     if not readiness:

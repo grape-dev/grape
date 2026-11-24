@@ -14,7 +14,7 @@ import pytest
 from src.domains.runtime.im.channel.channel import CancelContext, ChannelError
 from src.domains.runtime.im.channel.message import OutboundMessage
 from src.domains.runtime.im.channel.registry import ChannelRegistry
-from src.domains.runtime.im.engine.metrics import CountingSender, EngineMetrics
+from src.domains.runtime.im.engine.metrics import CountingSender, EngineMetrics, FLAP_CAUSES
 from src.domains.runtime.im.engine_wiring import ImEngine
 
 from test_engine_wiring import (
@@ -103,7 +103,9 @@ def test_engine_metric_field_set_is_canonical():
     """
     snap = EngineMetrics().snapshot()
     required = LEGACY_METRIC_KEYS | {"total_messages_degraded", "degraded_by_reason",
-                                     "reconnects"}
+                                     "reconnects",
+                                     # Issue #3799：渠道风控暂停（ret=-14）实例维度 + 告警计数
+                                     "channel_paused_by_instance", "channel_paused_alerts"}
     assert required <= set(snap)
     assert set(snap) == required
 
@@ -111,7 +113,7 @@ def test_engine_metric_field_set_is_canonical():
 # ---------------------------------------------------------------- 缺失给 0
 
 async def test_health_metrics_default_zero(db_path):
-    """无任何流量时指标为 0，flap_by_cause 三分类齐全（缺失 ≠ 缺键）。"""
+    """无任何流量时指标为 0，flap_by_cause 各归因桶齐全（缺失 ≠ 缺键）。"""
     rec = Recorder()
     engine = _build_engine(db_path, FakeApi(), rec)
     await engine.start()
@@ -123,8 +125,7 @@ async def test_health_metrics_default_zero(db_path):
         assert health["reconnects"] == 0
         assert health["total_reconnects"] == 0
         flap = health["flap_by_cause"]
-        assert flap == {"lease": 0, "ws_transport": 0, "shutdown": 0,
-                        "ilink_longpoll": 0}
+        assert flap == {cause: 0 for cause in FLAP_CAUSES}
     finally:
         await engine.stop()
 

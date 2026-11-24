@@ -313,6 +313,10 @@ def test_provision_uses_selected_provider_namespace_and_path(monkeypatch):
 
     monkeypatch.setattr(provision, "create_new_repo", _fake_create)
     monkeypatch.setattr(provision, "host_repo", _fake_host)
+    # 本用例只验证建仓选项透传；分支同步需要真实 VCS token/网络，单测统一桩掉。
+    monkeypatch.setattr(
+        provision, "_ensure_org_repo_branches",
+        lambda org, repo_key, **kwargs: None)
 
     result = provision.provision_org(org["id"])
 
@@ -393,3 +397,145 @@ def test_create_org_rejects_github_without_create_permission(monkeypatch):
         orgs_route._normalize_repo_create_options(body, {"id": UID, "username": USERNAME})
     assert ei.value.status_code == 400
     assert ei.value.detail.get("error_code") == "VCS_REPO_CREATE_FORBIDDEN"
+
+
+def test_github_create_repo_applies_custom_default_branch(monkeypatch):
+    """GitHub 建仓不支持 default_branch：必须先 auto_init 再改名并 PATCH 默认分支。"""
+    from src.domains.mgmt.user import repo_manager
+
+    calls = []
+
+    def _fake_req(method, url, token="", body=None):
+        calls.append({"method": method, "url": url, "body": body})
+        if method == "GET" and url.endswith("/user"):
+            return {"login": "Misheng-chenyan"}
+        if method == "POST" and url.endswith("/orgs/acme/repos"):
+            return {"full_name": "acme/team-workspace", "default_branch": "main"}
+        return {}
+
+    monkeypatch.setattr(repo_manager, "_github_req", _fake_req)
+
+    result = repo_manager.create_github_repo(
+        "tk", "team-workspace", "desc", private=True, owner="acme",
+        default_branch="grape-repo-knowledge")
+
+    assert result["default_branch"] == "grape-repo-knowledge"
+    create = next(c for c in calls if c["url"].endswith("/orgs/acme/repos"))
+    assert create["body"]["auto_init"] is True
+    rename = next(c for c in calls if c["url"].endswith("/branches/main/rename"))
+    assert rename["body"] == {"new_name": "grape-repo-knowledge"}
+    patch = next(c for c in calls if c["method"] == "PATCH"
+                 and c["url"].endswith("/repos/acme/team-workspace"))
+    assert patch["body"] == {"default_branch": "grape-repo-knowledge"}
+
+
+def test_create_org_writes_provision_fields_in_single_insert():
+    """回归 2026-11-23：选项列缺失时，旧实现「先建组织再 UPDATE」会留下半成品。
+
+    现在 provisioning 初始状态与仓库选项必须和 organization 行同一条 INSERT
+    写入；只要 create_org 成功，读回来的行就应带齐这些字段。
+    """
+    from src.domains.mgmt.user.org_db import create_org, get_org
+
+    org = create_org(
+        name="Atomic Options Team",
+        slug=SLUG + "-atomic",
+        owner_id=UID,
+        extra_fields={
+            "provision_status": "pending",
+            "provision_error": "",
+            "org_repo_provider": "github",
+            "org_repo_owner": "acme",
+            "org_repo_name": "team-workspace",
+            "org_repo_path": "team-path",
+            "org_repo_private": 1,
+        },
+    )
+    assert org
+    assert org["provision_status"] == "pending"
+    assert org["org_repo_provider"] == "github"
+
+    row = get_org(org["id"])
+    assert row["provision_status"] == "pending"
+    assert row["org_repo_owner"] == "acme"
+    assert row["org_repo_name"] == "team-workspace"
+    assert row["org_repo_path"] == "team-path"
+    assert int(row["org_repo_private"]) == 1
+
+
+def test_create_org_rejects_non_provision_extra_fields():
+    """extra_fields 只收 _PROVISION_FIELDS 白名单，防止调用方拼任意列名。"""
+    from src.domains.mgmt.user.org_db import create_org
+
+    with pytest.raises(ValueError, match="invalid organization create fields"):
+        create_org(
+            name="Bad Extra", slug=SLUG + "-bad-extra", owner_id=UID,
+            extra_fields={"owner_id": "someone-else"},
+        )
+
+
+def test_create_org_route_no_longer_needs_followup_update(monkeypatch):
+    """回归：POST /api/orgs 不得再依赖建组织后的 update_org_provision_fields。
+
+    旧链路在该调用上遇到 1054 就 500，且组织已经提交。把该函数打成会炸的哨兵，
+    接口仍应 200，并带上 provisioning 初始状态。
+    """
+    from src.domains.mgmt.routes import orgs as orgs_route
+
+    monkeypatch.setattr(orgs_route, "start_provision", lambda org_id: None)
+    monkeypatch.setattr(
+        orgs_route, "update_org_provision_fields",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unexpected follow-up update")),
+        raising=False,
+    )
+
+    client, app = _api()
+    try:
+        response = client.post("/api/orgs", json={
+            "name": "No Followup Update",
+            "slug": SLUG + "-no-followup",
+        })
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["provision_status"] == "pending"
+    assert body["provision_error"] == ""
+
+
+def test_org_repo_repair_migration_registered_with_post_check():
+    """防再犯的修复迁移必须存在，且带 post_check、注册在属主域 mgmt。"""
+    from src.api import db_setup
+
+    mig = next(m for m in db_setup._MIGRATIONS if m.version == "202611230012")
+    assert mig.name == "repair-org-repo-create-options"
+    assert "mgmt" in mig.domains
+    assert callable(mig.fn)
+    assert mig.post_check is not None
+
+
+def test_org_repo_repair_is_idempotent_and_post_check_passes():
+    from src.domains.mgmt.migrations.org_repo_create_options import (
+        ensure_org_repo_create_columns,
+        verify_org_repo_create_columns,
+    )
+
+    ensure_org_repo_create_columns()
+    ensure_org_repo_create_columns()
+    assert verify_org_repo_create_columns() == []
+
+
+def test_claim_retry_accepts_null_provision_status():
+    """半成品（provision_status NULL）也要能被 retry 的 CAS 认领。"""
+    from src.domains.mgmt.user.org_db import create_org, claim_org_provision_retry, get_org
+
+    org = create_org(name="Null Status Team", slug=SLUG + "-null-status", owner_id=UID)
+    assert org
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE organization SET provision_status=NULL WHERE id=?", (org["id"],))
+        db.commit()
+
+    assert claim_org_provision_retry(org["id"]) is True
+    assert get_org(org["id"])["provision_status"] == "pending"

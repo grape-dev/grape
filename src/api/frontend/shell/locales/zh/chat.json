@@ -195,7 +195,19 @@
     "hint_dingtalk_app_id": "AppKey",
     "hint_dingtalk_secret": "AppSecret",
     "wechat_pin_label": "验证码（手机显示的数字）",
-    "wechat_qr_close": "关闭"
+    "wechat_qr_close": "关闭",
+    "badge_paused": "风控暂停",
+    "badge_stale": "暂停状态过期",
+    "paused_title": "渠道被风控暂停（微信 ret=-14）",
+    "paused_last": "暂停时间",
+    "paused_next": "预计重试",
+    "paused_alerting": "已触发告警：连续暂停，需要人工重登恢复",
+    "recover_retry_now": "立即重试",
+    "recover_relogin": "重新登录",
+    "recover_clear_pause": "清除暂停",
+    "recover_ok": "恢复指令已下发",
+    "recover_failed": "恢复失败，请稍后重试",
+    "recover_no_installation": "未找到该渠道的安装记录，无法下发恢复指令"
   },
   "current_engine": "当前使用",
   "recall": {

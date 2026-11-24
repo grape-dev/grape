@@ -128,7 +128,8 @@ BASELINE_RAW = {
     ('repo_key.py', '_UM_PROVIDER_COLUMNS = {"gitcode": "gitcode_user", "github": "github_login"}'): 1,
     ('repo_key.py', '_DIALECT_FALLBACK = {"github": "github", "gitlab": "gitlab"}'): 1,
     # ── docstring/注释提及两平台（非判定）──
-    ('token_resolver.py', '"""provider 标识: "gitcode" / "github"。"""'): 1,
+    # 2026-11-23 摘除：token_resolver 的 "provider 标识: gitcode/github" docstring 已随
+    # 平台卡文档化改写（不再出现二元字面量），基线点同步收紧。
     ('domains/mgmt/user/db.py', 'provider: "gitcode" 查 GitCode 路径 B 仓库，"github" 查 GitHub 路径 B 仓库。'): 1,
     ('domains/mgmt/user/db.py', 'provider: "gitcode" 或 "github"'): 1,
     ('api/oauth_token.py', 'provider: "gitcode" 或 "github"'): 1,

@@ -27,9 +27,11 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from src.kernel.db_lock_metrics import TrackedRLock
+
 _VALID = ("mgmt", "runtime", "insight")
 
-_locks: dict[str, threading.RLock] = {}
+_locks: dict[str, "TrackedRLock"] = {}
 _locks_guard = threading.Lock()
 
 
@@ -159,18 +161,18 @@ def owner_db(domain: str) -> _OwnerDB:
     return _proxies[dom]
 
 
-def owner_lock(domain: str) -> threading.RLock:
-    """该域配套的进程级可重入锁。"""
+def owner_lock(domain: str) -> "TrackedRLock":
+    """该域配套的进程级可重入锁（TrackedRLock：与 RLock 接口一致，额外记录等待/持有）。"""
     dom = (domain or "").strip().lower()
     if dom not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
     with _locks_guard:
         if dom not in _locks:
-            _locks[dom] = threading.RLock()
+            _locks[dom] = TrackedRLock()
         return _locks[dom]
 
 
-def db_pair(domain: str) -> tuple[_OwnerDB, threading.RLock]:
+def db_pair(domain: str) -> tuple[_OwnerDB, "TrackedRLock"]:
     """便捷组合：`db, db_lock = db_pair("insight")`。"""
     return owner_db(domain), owner_lock(domain)
 

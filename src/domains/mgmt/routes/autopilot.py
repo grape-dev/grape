@@ -203,6 +203,35 @@ def _autopilot_exec_cols() -> list:
         c.execute("PRAGMA table_info(autopilot_executions)")
         return [r[1] for r in c.fetchall()]
 
+def _validate_custom_fields(fields) -> None:
+    """写侧校验 autopilot 任务 custom_fields（Issue #4066）。
+
+    历史实现把 `body.custom_fields` 直接 json.dumps 落库，非法/保留变量只能等
+    执行侧 `custom env rejected` 静默丢弃（配置意图 ≠ 运行实际，每 tick 刷日志）。
+    这里在落库前复用场景共享校验 `custom_env_error()`，一次性汇总全部冲突/非法
+    变量名返回 400（与 scenes.py 同口径），并附 `invalid_names` 供前端标红。
+    """
+    from src.kernel.scene_custom_env import custom_env_error
+
+    errors: list[tuple[str, str]] = []
+    for f in (fields or []):
+        if not isinstance(f, dict):
+            continue
+        _name = str(f.get("name") or "").strip()
+        _err = custom_env_error(_name)
+        if _err:
+            errors.append((_name or "<空>", _err))
+    if errors:
+        _names = [n for n, _ in errors if n != "<空>"]
+        _shown = ", ".join(n for n, _ in errors)
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"custom_fields 校验失败，冲突/非法变量名: {_shown}；"
+                       + "；".join(e for _, e in errors),
+            "invalid_names": _names,
+        })
+
+
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
     import json as _json
@@ -218,6 +247,20 @@ def _row_to_task(row) -> dict:
             custom_fields = _json.loads(row[15])
         except Exception:
             custom_fields = []
+    # 防御历史数据：GRAPE_* 是系统保留环境变量（Issue #4066 白名单
+    # GRAPE_ANALYSIS_MODE/GRAPE_ORG_ID/GRAPE_MANAGED_BY 除外），执行侧拒绝注入、
+    # 前端保存也拒绝。这类字段在配置页只会标红挡住整次保存，不应展示给用户；
+    # 读侧直接过滤，用户重新保存后即从 DB 中清掉（存量清理另见注册式迁移）。
+    try:
+        from src.kernel.scene_custom_env import is_reserved_name
+
+        custom_fields = [
+            f for f in custom_fields
+            if not (isinstance(f, dict)
+                    and is_reserved_name(str(f.get("name") or "").strip()))
+        ]
+    except Exception as _cf_err:  # noqa: BLE001 - 读侧过滤失败不阻断任务详情
+        log.debug(f"autopilot: reserved custom_fields filter skipped: {_cf_err}")
     work_branch = row[16] if len(row) > 16 else ""
     engine_uids = []
     if len(row) > 17 and row[17]:
@@ -463,6 +506,8 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     _validate_engine_runtime_ids(user, body.repo_key or "", body.engine_runtime_ids or [])
     # Issue #1011：uid 模式归属校验（uid-first，口径同 #486）
     _validate_engine_runtime_uids(user, body.repo_key or "", body.engine_runtime_uids or [])
+    # Issue #4066：custom_fields 写侧校验（保留前缀/非法名 400，禁止落库）
+    _validate_custom_fields(body.custom_fields)
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
     engine_ids_json = ""
@@ -510,6 +555,9 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
             body.engine_runtime_ids = []
     fields = []
     params = []
+    # Issue #4066：提交了 custom_fields 才校验（部分更新语义），保留前缀/非法名 400
+    if body.custom_fields is not None:
+        _validate_custom_fields(body.custom_fields)
     updates = body.model_dump(exclude_none=True)
     for key, val in updates.items():
         if key == "enabled":

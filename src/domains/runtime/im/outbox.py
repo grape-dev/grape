@@ -44,6 +44,7 @@ POLL_INTERVAL = 1.0          # 消费者轮询周期（秒）—— ≤30s 送�
 BATCH_LIMIT = 50             # 单批最多处理行数
 MAX_ATTEMPTS = 5             # 超过即 failed（1 首发 + 4 退避重试）
 RETRY_BACKOFF = (1, 2, 4, 8)      # 秒；第 n 次失败后取 RETRY_BACKOFF[n-1]（截断）
+CONSUMER_BACKOFF_STEPS = (1, 2, 4)  # 消费者连续失败退避倍数（封顶 4x，Issue #3588）
 TTL_SECONDS = 600            # 入队 +10min 过期（expires_at）
 
 # 保留期（20261113 性能整改）：sent/failed/expired 超过 N 天物理删除，防止表无限增长。
@@ -51,6 +52,12 @@ TTL_SECONDS = 600            # 入队 +10min 过期（expires_at）
 RETENTION_DAYS = int(os.environ.get("GRAPE_IM_OUTBOX_RETENTION_DAYS", "7") or 7)
 PURGE_LIMIT = 500
 PURGE_EVERY_ROUNDS = 60      # 每 60 轮（≈1 分钟）清一次，不给 1s 轮询加固定开销
+
+# 渠道暂停（Issue #3799）行回 pending 的最小退避：暂停期不投递，但行必须离开
+# 「每秒可认领」状态，否则 1s 轮询每轮认领+释放同一行（PR #1983 R2 复审 Required）。
+PAUSED_RETRY_SECONDS = 60.0
+# 暂停期「N delivery(ies) deferred」INFO 的最小输出间隔（按窗口/状态变化打一次）。
+PAUSED_LOG_INTERVAL = 60.0
 
 _TRACK_ID_LEN = 40           # out_track_id 截断长度（sha1 前 40 位）
 _ERROR_LEN = 500             # last_error 落库截断长度
@@ -503,19 +510,53 @@ def get_row(out_track_id: str) -> Optional[dict]:
     return _get(out_track_id)
 
 
-def release_sending(out_track_id: str) -> bool:
+def release_sending(out_track_id: str, retry_after: float = 0.0) -> bool:
     """sending → pending（内联投递 offline 中止时把行还给租约持有实例）。
 
     幂等：行不在 sending（已终态/未被认领）时不写。
+
+    `retry_after>0`：同时把 `next_retry_at` 前移到 now+retry_after（PR #1983 R2
+    复审 Required）。渠道暂停（`channel_paused`）会把行回 pending，而认领条件是
+    `next_retry_at='' OR next_retry_at<=now`、消费者 1s 轮询——不前移就等于每秒
+    「认领+释放」同一行（每行每轮 2 次 commit + 一条 INFO，1h 暂停即数千次）。
     """
     conn = _conn()
     try:
-        cur = conn.execute(
-            f"UPDATE {_TABLE} SET status='pending', updated_at=? "
-            f"WHERE out_track_id=? AND status='sending'",
-            (_now_str(), out_track_id))
+        now = _now_str()
+        if float(retry_after or 0.0) > 0:
+            cur = conn.execute(
+                f"UPDATE {_TABLE} SET status='pending', next_retry_at=?, updated_at=? "
+                f"WHERE out_track_id=? AND status='sending'",
+                (_future_str(float(retry_after)), now, out_track_id))
+        else:
+            cur = conn.execute(
+                f"UPDATE {_TABLE} SET status='pending', updated_at=? "
+                f"WHERE out_track_id=? AND status='sending'",
+                (now, out_track_id))
         conn.commit()
         return (getattr(cur, "rowcount", 0) or 0) > 0
+    finally:
+        conn.close()
+
+
+def wake_pending_rows(installation_id: str) -> int:
+    """清掉某安装 pending 行的 `next_retry_at`（暂停恢复后立即补投）。
+
+    `release_sending(retry_after=...)` 把暂停行推迟到渠道 `next_retry_at`（最长 1h）；
+    人工 `retry_now / relogin / clear_pause` 提前恢复时必须把行拉回「立刻可认领」，
+    否则「恢复后补投」会一直等到原暂停窗口结束。返回唤醒行数。
+    """
+    inst = str(installation_id or "")
+    if not inst:
+        return 0
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            f"UPDATE {_TABLE} SET next_retry_at='', updated_at=? "
+            f"WHERE installation_id=? AND status='pending' AND next_retry_at!=''",
+            (_now_str(), inst))
+        conn.commit()
+        return int(getattr(cur, "rowcount", 0) or 0)
     finally:
         conn.close()
 
@@ -633,6 +674,42 @@ def list_rows(status: str = "", limit: int = 50) -> list[dict]:
 
 # ---------------------------------------------------------------- 消费者
 
+def paused_retry_after(engine, rows: list[dict]) -> float:
+    """渠道暂停行回 pending 的重试间隔（秒）：`max(PAUSED_RETRY_SECONDS, 渠道 next_retry_at)`。
+
+    PR #1983 R2 复审 Required：暂停行不前移 `next_retry_at` 时，1s 轮询会每秒
+    「认领 + 释放」同一行（每行每轮 2 次 commit）并每轮刷一条 INFO。取渠道
+    `next_retry_at` 与 60s 的较大者——暂停窗口内不再认领，窗口到点自然补投。
+    读健康态失败 → 退化为 60s（宁可稍晚一轮，也不回落到每秒热循环）。
+    """
+    delay = PAUSED_RETRY_SECONDS
+    tracker = getattr(engine, "health_tracker", None)
+    state_fn = getattr(tracker, "state", None)
+    if state_fn is None:
+        return delay
+    now = time.time()
+    for row in rows:
+        try:
+            snap = state_fn(str(row.get("installation_id") or ""),
+                            str(row.get("channel_type") or ""))
+        except Exception as e:      # 健康态读失败不影响释放（行照样回 pending）
+            log.debug("[outbox] paused next_retry_at lookup skipped: %s", e)
+            continue
+        try:
+            ts = float((snap or {}).get("next_retry_at_ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ts > now:
+            delay = max(delay, ts - now)
+    return delay
+
+
+def consumer_backoff_seconds(poll_interval: float, fail_streak: int) -> float:
+    """消费者连续失败退避：1x/2x/4x 封顶（Issue #3588），成功由 run() 复位。"""
+    idx = min(max(int(fail_streak), 1) - 1, len(CONSUMER_BACKOFF_STEPS) - 1)
+    return poll_interval * CONSUMER_BACKOFF_STEPS[idx]
+
+
 class OutboxConsumer:
     """A 进程 / 单进程入口的 outbox 消费协程。
 
@@ -650,30 +727,59 @@ class OutboxConsumer:
         self._engine = engine
         self.instance_id = instance_id or getattr(engine, "instance_id", "") or ""
         self._poll_interval = poll_interval
+        self._fail_streak = 0     # 连续失败计数（退避倍数与复位依据，Issue #3588）
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
+        # 暂停期 deferral INFO 的窗口状态（积压行数变化或窗口滚动才再打一条）
+        self._paused_logged_count = 0
+        self._paused_logged_at = 0.0
 
     def set_engine(self, engine) -> None:
         """引擎句柄可替换（mode 切换重建引擎时消费者复用，instance_id 跟随新引擎）。"""
         self._engine = engine
         self.instance_id = getattr(engine, "instance_id", "") or self.instance_id
 
+    def _log_paused(self, count: int, retry_after: float) -> None:
+        """暂停期 deferral 日志：积压行数变化或 `PAUSED_LOG_INTERVAL` 窗口滚动才打一条。
+
+        PR #1983 R2 复审 Required：原先每轮一条 INFO，1h 暂停 × 1s 轮询 = 数千条，
+        与本次「失败日志收敛」目标相反。
+        """
+        now = time.time()
+        if (count == self._paused_logged_count
+                and now - self._paused_logged_at < PAUSED_LOG_INTERVAL):
+            return
+        self._paused_logged_count = count
+        self._paused_logged_at = now
+        log.info("[outbox] channel paused, %d delivery(ies) deferred, retry in %.0fs",
+                 count, retry_after)
+
     async def run(self) -> None:
         log.info("[outbox] consumer started (instance=%s)", self.instance_id)
+        # Issue #3588：连续失败退避（1x/2x/4x poll_interval，成功即复位）。
+        # WAL/SHM 失效场景下 DB 操作经 stale-aware 连接自动重连；若重建后仍失败
+        # （库本体暂不可用），退避避免空转打日志。认领态（pending→sending）持久
+        # 化在库中，重连恢复后从上次位点继续，不会重复投递。
         while not self._stopped.is_set():
+            wait = self._poll_interval
             try:
                 await self.run_once()
+                self._fail_streak = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # Issue #3251：DB 打开失败已在 _connect 层按路径一次性 ERROR，
+                # 消费轮不再逐轮 WARNING 刷屏（曾 2.5h 刷 5005 条拖死事件循环）。
                 if getattr(e, "_db_open_logged", False):
-                    # Issue #3251：DB 打开失败已在 _connect 层按路径一次性 ERROR，
-                    # 消费轮不再逐轮 WARNING 刷屏（曾 2.5h 刷 5005 条拖死事件循环）。
                     log.debug("[outbox] consumer round skipped (db open failure already reported): %s", e)
                 else:
                     log.warning("[outbox] consumer round failed: %s", e)
+                # Issue #3588：连续失败退避（1x/2x/4x 封顶），成功时在 run() 头部复位。
+                self._fail_streak += 1
+                wait = consumer_backoff_seconds(self._poll_interval,
+                                                 self._fail_streak)
             try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
+                await asyncio.wait_for(self._stopped.wait(), timeout=wait)
             except Exception as _e:
                 log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         log.info("[outbox] consumer stopped")
@@ -713,6 +819,7 @@ class OutboxConsumer:
         from src.domains.runtime.im.notify import _deliver, build_cards_from_payload
         sent: list[str] = []
         failed: list[tuple[str, str]] = []
+        paused_skips: list[dict] = []
         degraded_marks: list[dict] = []
         # 多渠并发投递（2026-11-18）：逐行顺序 await 会让先排到的渠道先到、另一个晚 1~2s，
         # 用户侧体感「不是同时收到」。这里按行并发，但同一 (installation, chat) 内用锁串行保序。
@@ -741,12 +848,27 @@ class OutboxConsumer:
                                            "conv": payload.get("conv_id") or "",
                                            "repo_key": payload.get("repo_key", ""),
                                            "issue_number": native_issue_number(payload.get("issue_number") or 0)})
+            elif reason == "channel_paused":
+                # Issue #3799：渠道被风控暂停 → 不算发送失败（不递增 attempt/退避），
+                # 行回 pending；恢复后下一轮自然补投，内容不丢。
+                paused_skips.append(row)
             else:
                 failed.append((row["out_track_id"], reason or "send_failed"))
 
         # ---- 批量收尾（本批一次 commit，不再逐行）
         if sent:
             await asyncio.to_thread(mark_sent_many, sent)
+        if paused_skips:
+            # 回 pending 的同时前移 next_retry_at（PR #1983 R2 复审 Required）：
+            # 否则 1s 轮询每秒认领+释放同一行，暂停 1h 即数千次无效写与日志。
+            delay = await asyncio.to_thread(paused_retry_after, engine, paused_skips)
+            for row in paused_skips:
+                track = row["out_track_id"]
+                try:
+                    await asyncio.to_thread(release_sending, track, retry_after=delay)
+                except Exception as e:
+                    log.warning("[outbox] release paused row failed track=%s: %s", track, e)
+            self._log_paused(len(paused_skips), delay)
         if failed:
             statuses = await asyncio.to_thread(mark_failed_many, failed)
             for track, reason in failed:

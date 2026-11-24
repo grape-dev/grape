@@ -37,6 +37,10 @@ from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
 # 能力端口：kernel 不 import src.domains；凭据审计原语的实现在装配层
 # src/api/contracts_wiring.py 绑定到 tokens 端口，这里只在调用点解析。
 from src.kernel.ports import tokens as _tokens
+# Issue #3848：启动链（模块导入期）跑在 bind() 之前，未绑可预期——需要把这种情况
+# 与"真清理失败"分开，并用绑定后钩子补跑一次（不再每次启动空跑）。
+from src.kernel.ports._base import PortNotBound as _PortNotBound
+from src.kernel.ports._base import on_bind as _register_post_bind_hook
 
 
 _DDL = """
@@ -157,6 +161,12 @@ def cleanup_expired_retention(force: bool = False) -> int:
     的实例可能延迟清理——延迟清理 ≠ 不清理，下次写入会补上；启动链兜底
     一次（重启即对齐）。
 
+    Issue #3848（启动次序）：启动链的这一次「兜底」原先在装配层 bind() 之前
+    执行，tokens 端口未绑 → 每次启动必然空跑。现在分两类处理：未绑 = 预期
+    时序（debug + ``startup_degraded{component=credential_usage_log}`` 打点且
+    return 0，不推进 30 天节流），真异常 = 保持 WARNING；补跑由 ``on_bind``
+    钩子在 ``bind("tokens")`` 之后驱动（见本文末「启动期补跑」）。
+
     DELETE 分批：两步查删（SELECT id LIMIT → DELETE IN 具体列表）——
     MySQL 禁 IN 子查询带 LIMIT（错误 1235），翻译层不重写该形态（复审
     2026-11-07 实测）。节流状态不持久化（meta 落库暂不上——复杂度换不来
@@ -181,6 +191,16 @@ def cleanup_expired_retention(force: bool = False) -> int:
         with _cleanup_lock:
             _cleanup_last_mono = time.monotonic()
         return total
+    except _PortNotBound as e:
+        # 端口未绑 = 启动期时序（bind() 还没跑），不是清理故障：不进 WARNING 巡检面，
+        # 也不推进 30 天节流（否则绑定后的补跑会被自己刚写的节流状态挡掉）。
+        from src.kernel.config import log
+        from src.kernel.startup_metrics import record_startup_degraded
+        # 预期时序同样必须可巡检：只留 debug 日志等于「只能 grep 日志发现」，而运维要区分
+        # 「这次启动降级了」正需要这条计数——与 card_source 同口径，WARNING 面只留给真故障。
+        record_startup_degraded("credential_usage_log", "port_not_bound")
+        log.debug(f"usage_log retention cleanup deferred (kernel port not bound yet): {e}")
+        return total
     except Exception as e:
         from src.kernel.config import log
         log.warning(f"usage_log retention cleanup failed: {e}")
@@ -193,6 +213,82 @@ def maybe_cleanup_expired_retention() -> int:
         return cleanup_expired_retention()
     except Exception:
         return 0
+
+
+# ====== Issue #3848 启动期补跑（挂 kernel 端口绑定，而非启动调用点的先后）======
+#
+# 缺陷：启动链调用点（src/domains/mgmt/user/db.py::_cleanup_usage_log_retention，由
+# init_db 在模块导入期执行）跑在装配层 contracts_wiring.bind_all() 之前，tokens 端口
+# 未绑 → 上面那条「启动链兜底一次」每次必然空跑。四条启动路径（init / worker /
+# event / insight）各自挪调用点既重复又容易漏，因此改为复用 kernel 端口的
+# on_bind 钩子：绑定即补跑，调一次也覆盖未来新增的启动路径。
+#
+# 时序覆盖两条路径（与本仓 session_manager._bootstrap_domain_schema 同款）：
+#   · 本模块早于装配层导入 → 绑定时钩子补跑；
+#   · 本模块晚于装配层导入（测试 / 重复启动路径）→ 布防时立即试跑一次。
+
+_startup_prune_done = False
+_startup_prune_lock = threading.Lock()
+_startup_hook_registered = False
+
+
+def reset_startup_prune_state() -> None:
+    """测试复位入口：清掉「已补跑」闸与节流状态（端口重新绑定后需要能再跑一次）。
+
+    生产路径不需要调用：进程内启动链只跑一次，``replace=True`` 重绑的重复清理
+    由 once 闸挡住（DELETE 条件幂等，重复执行也只会删 0 行）。
+    """
+    global _startup_prune_done, _cleanup_last_mono
+    with _startup_prune_lock:
+        _startup_prune_done = False
+    with _cleanup_lock:
+        _cleanup_last_mono = 0.0
+
+
+def _run_startup_prune_once() -> int:
+    """启动期补跑（恰好一次）：端口已绑才执行，返回删除行数。"""
+    global _startup_prune_done
+    with _startup_prune_lock:
+        if _startup_prune_done:
+            return 0
+        if not _tokens.is_bound():
+            return 0
+        _startup_prune_done = True
+    from src.kernel.config import log
+    total = cleanup_expired_retention(force=True)
+    if total:
+        log.info(f"usage_log retention cleanup: {total} rows")
+    return total
+
+
+def _on_port_bound(name: str) -> None:
+    """on_bind 钩子：装配层每绑一个端口都会回调（锁外），只对 tokens 动作。"""
+    if name != "tokens":
+        return
+    _run_startup_prune_once()
+
+
+def _ensure_startup_hook_registered() -> None:
+    """注册钩子一次（幂等：重复调用/重复启动路径不叠加回调）。"""
+    global _startup_hook_registered
+    with _startup_prune_lock:
+        if _startup_hook_registered:
+            return
+        _startup_hook_registered = True
+    _register_post_bind_hook(_on_port_bound)
+
+
+def defer_startup_retention_cleanup() -> None:
+    """启动链调用点：把保留期清理安排到 kernel 端口绑定之后（幂等）。
+
+    端口已绑（重复启动路径 / 测试）→ 立即跑一次；未绑 → 什么都不做，由
+    ``on_bind`` 钩子在 ``bind("tokens")`` 时补跑。异常不抛出（清理失败不阻断启动）。
+    """
+    _ensure_startup_hook_registered()
+    _run_startup_prune_once()
+
+
+_ensure_startup_hook_registered()
 
 
 # ====== N4-p3 异步写入（主流程零阻塞）======

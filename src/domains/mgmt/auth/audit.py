@@ -9,7 +9,11 @@ import json
 import re
 
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
+# 审计表归 mgmt 域：worker/event 进程调用时必须走 owner 连接，否则会写进
+# 进程本库（runtime）——三库下要么 1146 被吞，要么拆断审计哈希链。
+from src.kernel.owner_db import db_pair
+
+db, db_lock = db_pair("mgmt")
 
 
 # 事件类型
@@ -58,6 +62,7 @@ EVENT_TYPES = frozenset({
     "org_repo_bind",                # 组织关联托管仓库
     "org_repo_map_analyze",         # 组织仓库地图：单仓分析
     "org_repo_map_analyze_all",     # 组织仓库地图：全量分析
+    "org_repo_map_sync",            # 组织仓库地图：显式同步汇总文档到 grape-org
     "org_repo_ai_result",           # 组织仓库 AI 分析结果回写（worker / 手动）
     "org_repo_analysis_run",        # 组织 AI 分析手动触发（单仓/全量）
     "org_repo_analysis_automation_ensure",  # 组织 AI 分析每日自动任务开启
@@ -67,6 +72,8 @@ EVENT_TYPES = frozenset({
     "org_provision_started",        # 组织供给开始（建仓/建场景/绑定）
     "org_provision_completed",      # 组织供给完成
     "org_provision_failed",         # 组织供给失败（含租约丢失）
+    "issue_pipeline_advanced",      # 流水线确定性推进（manual/patrol；detail 含任务/from/to/seq，不落正文）
+    "issue_pipeline_triggered_from_created",  # 挂单首次触发入链（Issue #3621 / #3913 C3：created→vod 留痕；detail 含 repo_key/issue_id/issue_number/from_stage/to_stage/actor/seq）
     # Issue #2112：组织需求跨仓下派（6 类事件，未登记会走 Unknown 分支丢弃）
     "dispatch_created",             # 下派批次创建
     "target_created",               # 单目标子 Issue 创建成功
@@ -74,6 +81,17 @@ EVENT_TYPES = frozenset({
     "dispatch_partial_failed",      # 下派存在失败目标（含全部失败）
     "dispatch_cancelled",           # 下派被取消
     "target_retried",               # 单目标重试（复用既有子 Issue）
+    "dispatch_needs_review",        # 下派批次等待人工复核
+    # 插件市场写操作（QA #1847 C3：未登记会被静默丢弃，等于没有审计）
+    "plugin_upload",                # 插件上传（detail: plugin/version/scope）
+    "plugin_delete",                # 插件市场条目软删（detail: plugin/version/plugin_id）
+    "plugin_certify",               # 官方认证位标记/撤销（detail: plugin_id/certified）
+    "plugin_rollback",              # 生效版本回滚（detail: plugin/plugin_id/target_version）
+    "plugin_like",                  # 点赞开关（detail: plugin_id/liked）
+    "plugin_install",               # 运行时安装（detail: plugin）
+    "plugin_uninstall",             # 运行时卸载（detail: plugin）
+    "plugin_credentials_saved",     # 插件凭据保存（detail 只记 key 名，不落值）
+    "plugin_config_saved",          # 插件参数默认值保存（detail 只记 key 名）
     # Issue #2150：组织上下文与组织知识库（未登记会被静默丢弃）
     "org_context_create",           # 组织上下文创建（draft）
     "org_context_update",           # 组织上下文更新
@@ -98,6 +116,7 @@ EVENT_TYPES = frozenset({
     "skill_comment_posted",          # 技能详情页发表评论（Issue #3168 D11：detail 含 skill_id/comment_id/字数，不落评论原文）
     "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
     "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
+    "engine_tag_change",            # 引擎角色标签写入（Issue #3396 F2：add/update/delete/set，detail 含 runtime_id/tag(s)/enabled/priority，不含凭据）
 })
 
 
@@ -234,6 +253,7 @@ _DISPATCH_EVENT_TYPES = frozenset({
     "dispatch_partial_failed",
     "dispatch_cancelled",
     "target_retried",
+    "dispatch_needs_review",
 })
 
 # 组织审计事件全集（唯一来源：EVENT_TYPES 白名单 + 下派事件），查询只允许命中此集合

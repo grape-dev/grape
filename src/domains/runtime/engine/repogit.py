@@ -891,6 +891,303 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
     return get_scene_work_branch(repo_key, issue_id=issue_id)
 
 
+# ---------------------------------------------------------------------------
+# Issue #3758：#1841 的 work_branch 存在性校验在仓库重构为 src/domains/** 后丢失
+# 公开符号 resolve_work_branch，webhook 调用点被 except Exception 吞成静默 WARNING，
+# 未校验分支被标 target_branch_source=target_scene_work_branch 交给下游 coding。
+# 这里恢复公开入口：基于 VCS 分支列表显式比对（交办时点无 worktree，不能照搬依赖
+# base 目录 + token 的 _default_base_branch），显式确认不存在才回退默认分支并留痕，
+# 分支列表不可核实（无 token/网络失败/分页截断）时保持原配置。
+# ---------------------------------------------------------------------------
+_BRANCH_LIST_TTL = 90.0
+_BRANCH_LIST_FAIL_TTL = 30.0
+_BRANCH_MIRROR_TTL = 120.0
+_BRANCH_MIRROR_FETCH_TIMEOUT = 30
+_MAX_BRANCH_PAGES = 50
+_branch_list_cache = {}          # repo_key -> (ts, branches: set|None, default_branch)
+_branch_list_force_remote = set()
+_branch_mirror_fresh_at = {}     # repo_key -> 最近一次成功的 mirror 刷新时间
+_branch_list_lock = threading.Lock()
+
+
+def _mark_mirror_fresh(repo_key: str) -> None:
+    with _branch_list_lock:
+        _branch_mirror_fresh_at[repo_key] = time.time()
+
+
+def _mirror_is_stale(repo_key: str) -> bool:
+    """本地 mirror 是否超过刷新 TTL（未知按 stale 处理，避免长期信任陈旧 refs）。"""
+    with _branch_list_lock:
+        ts = _branch_mirror_fresh_at.get(repo_key)
+    if ts is None:
+        base = repo_base_dir(repo_key)
+        try:
+            ts = os.path.getmtime(base) if base and os.path.isdir(base) else 0.0
+        except OSError:
+            ts = 0.0
+    return (time.time() - ts) > _BRANCH_MIRROR_TTL
+
+
+def _refresh_local_mirror(repo_key: str, token: str = "",
+                          timeout: int = _BRANCH_MIRROR_FETCH_TIMEOUT) -> bool:
+    """`fetch --prune` 刷新本地 bare mirror（含平台外新建/删除的分支）。
+
+    timeout 默认短超时（20-30s）：本函数会被 A2A 交办链路调用，长超时 + 多次重试会
+    长时间占用线程（#3758 R2），不再沿用 git 写操作默认的 900s。
+    """
+    base = repo_base_dir(repo_key)
+    if not base or not os.path.isdir(base):
+        return False
+    with _repo_lock(base):
+        r = _run_git_retry(
+            ["-C", base, "fetch", "--prune", "origin",
+             "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"],
+            token=token, timeout=timeout)
+        if r is None or r.returncode != 0:
+            log.warning(f"work_branch: refresh mirror failed repo={repo_key}: "
+                        f"{(r.stderr if r else 'git exec failed')[:200]}")
+            return False
+        _run_git(["-C", base, "remote", "set-head", "origin", "--auto"],
+                 token=token, timeout=60)
+    _mark_mirror_fresh(repo_key)
+    return True
+
+
+def _branch_list_cache_get(repo_key: str = "", refresh: bool = False):
+    """读分支列表缓存；失败结果短 TTL，避免交办链路反复穿透外部 API。"""
+    now = time.time()
+    with _branch_list_lock:
+        if refresh:
+            return None
+        entry = _branch_list_cache.get(repo_key)
+        if not entry:
+            return None
+        ttl = _BRANCH_LIST_TTL if entry[1] is not None else _BRANCH_LIST_FAIL_TTL
+        if now - entry[0] < ttl:
+            return entry[1], entry[2]
+    return None
+
+
+def _branch_list_cache_put(repo_key: str, branches, default_branch: str = "") -> None:
+    with _branch_list_lock:
+        _branch_list_cache[repo_key] = (time.time(), branches, default_branch or "")
+
+
+def _consume_force_remote(repo_key: str) -> bool:
+    """取出并清除「下次必须走远端」标记（建分支后 mirror 可能尚未刷新）。"""
+    with _branch_list_lock:
+        if repo_key not in _branch_list_force_remote:
+            return False
+        _branch_list_force_remote.discard(repo_key)
+        return True
+
+
+def invalidate_branch_list_cache(repo_key: str = "", force_remote: bool = True) -> None:
+    """失效分支列表缓存（建分支等写操作后调用；空 repo_key = 全清）。"""
+    with _branch_list_lock:
+        if repo_key:
+            _branch_list_cache.pop(repo_key, None)
+            if force_remote:
+                _branch_list_force_remote.add(repo_key)
+            else:
+                _branch_list_force_remote.discard(repo_key)
+        else:
+            _branch_list_cache.clear()
+            _branch_list_force_remote.clear()
+
+
+def _local_repo_branch_names(repo_key: str):
+    """本地 bare mirror 的 remote-tracking 分支列表（不依赖外部 API；不存在返回 None）。"""
+    base = repo_base_dir(repo_key)
+    if not base or not os.path.isdir(base):
+        return None, ""
+    r = _run_git(["-C", base, "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"])
+    if r is None or r.returncode != 0:
+        return None, ""
+    branches = set()
+    for line in (r.stdout or "").splitlines():
+        name = line.strip()
+        if name.startswith("origin/"):
+            name = name[len("origin/"):]
+        if name and name != "HEAD":
+            branches.add(name)
+    default = ""
+    rh = _run_git(["-C", base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if rh is not None and rh.returncode == 0:
+        default = (rh.stdout or "").strip()
+        if default.startswith("origin/"):
+            default = default[len("origin/"):]
+    return (branches or None), default
+
+
+def _branch_lookup_token(repo_key: str) -> str:
+    """分支查询 token：统一 TokenResolver → 本地 Repo.bot_token 兜底。"""
+    try:
+        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+        tok = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
+    except Exception:
+        tok = ""
+    if tok:
+        return tok
+    try:
+        from src.kernel.repo import Repo
+        return Repo(repo_key).bot_token or ""
+    except Exception:
+        return ""
+
+
+def fetch_repo_branch_records(repo_key: str, token: str = "",
+                              max_pages: int = _MAX_BRANCH_PAGES):
+    """经 VCS 公开分支列表 API 拉取分支记录。
+
+    返回 (records: list[dict]|None, truncated: bool)。None 表示请求失败/无 token。
+    只消费 ``VcsApiClient.list_branches`` 公开方法，私有路径/分页实现漂移由 API
+    客户端自身兜底，不在此复制（#3758 R1）；异常收窄为预期运行期失败。
+    """
+    from src.kernel.repo_key import parse_repo_key
+    provider, owner, name = parse_repo_key(repo_key)
+    tok = token or _branch_lookup_token(repo_key)
+    if not owner or not name or not tok:
+        return None, False
+    try:
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        client = VcsApiClient(provider, tok, owner, name)
+        records, truncated = client.list_branches(
+            max_pages=max_pages, per_page=100, with_truncation=True)
+        return records, truncated
+    except (OSError, RuntimeError, TimeoutError) as e:
+        log.warning(f"work_branch: list branches failed repo={repo_key}: {e}")
+        return None, False
+
+
+def _fetch_remote_default_branch(repo_key: str, token: str = "") -> str:
+    """经 VCS 方言正确的公开默认分支方法读取；失败返回空串。"""
+    from src.kernel.repo_key import parse_repo_key
+    provider, owner, name = parse_repo_key(repo_key)
+    tok = token or _branch_lookup_token(repo_key)
+    if not owner or not name or not tok:
+        return ""
+    try:
+        from src.domains.runtime.vcs.api_client import VcsApiClient
+        return VcsApiClient(provider, tok, owner, name).get_default_branch()
+    except (OSError, RuntimeError, TimeoutError) as e:
+        log.warning(f"work_branch: read default branch failed repo={repo_key}: {e}")
+    return ""
+
+
+def _fetch_remote_branch_names(repo_key: str, token: str = ""):
+    """经 VCS 分支列表 API 拉取真实分支集合 + 默认分支；失败返回 (None, "")。
+
+    分页上限 50 页（5000 分支）。超过上限仍满页时视为不可核实，避免把
+    「列表被截断」误判为「分支确实不存在」。
+    """
+    records, truncated = fetch_repo_branch_records(repo_key, token=token)
+    if records is None:
+        return None, ""
+    if truncated:
+        log.warning(f"work_branch: branch list truncated at {_MAX_BRANCH_PAGES} pages "
+                    f"for repo={repo_key}; treat as unverifiable")
+        return None, ""
+    branches = {r["name"] for r in records if r.get("name")}
+    default = _fetch_remote_default_branch(repo_key, token=token)
+    return (branches or None), default
+
+
+def list_repo_branches(repo_key: str, token: str = "", refresh: bool = False,
+                       remote_only: bool = False):
+    """返回 (branches: set|None, default_branch)。
+
+    - 先读本地 bare mirror（无网络开销）；mirror 超 TTL 时先 `fetch --prune`
+      刷新，确保平台外新建/删除的分支可见，避免陈旧 refs 双向误判。
+    - 无镜像或 remote_only=True 时穿透 VCS 分支列表 API。
+    - 结果按 repo 缓存（成功 90s / 失败 30s）。branches=None 表示无法核实。
+    """
+    forced = remote_only or _consume_force_remote(repo_key)
+    cached = _branch_list_cache_get(repo_key, refresh=refresh or forced)
+    if cached is not None:
+        return cached
+    branches, default = (None, "")
+    if not forced:
+        branches, default = _local_repo_branch_names(repo_key)
+        if branches is not None and _mirror_is_stale(repo_key):
+            if _refresh_local_mirror(repo_key, token=token):
+                branches, default = _local_repo_branch_names(repo_key)
+    if branches is None:
+        branches, default = _fetch_remote_branch_names(repo_key, token=token)
+    elif not default:
+        default = _fetch_remote_default_branch(repo_key, token=token)
+    _branch_list_cache_put(repo_key, branches, default)
+    return branches, default
+
+
+def pick_default_branch(branches: set, default_branch: str = "") -> str:
+    """选仓库默认分支：优先 API/mirror 报告的默认分支，其次 main/master。
+
+    取不到可信默认分支时返回空串——**不回退到 `sorted(branches)[0]` 任意分支**
+    （#3758 R3：gitlab 方言默认分支读取曾为空，任意分支会被当作权威基线）。
+    """
+    if default_branch and (not branches or default_branch in branches):
+        return default_branch
+    for cand in ("main", "master"):
+        if branches and cand in branches:
+            return cand
+    return ""
+
+
+def _classify_work_branch(repo_key: str, branch: str, token: str = "",
+                          authoritative: bool = False):
+    """统一分支判定：返回 (exists: bool|None, default_branch, branches)。
+
+    - authoritative=True（保存校验）：直接以 VCS 远端分支列表为准。
+    - authoritative=False（注入/交办）：mirror 未命中目标分支时强制远端复核，
+      避免平台外新建分支（如 weekly 发布流水线）被误判失效。
+    exists=None 表示分支列表不可核实（无 token/网络失败/分页截断）。
+    """
+    branches, default = list_repo_branches(repo_key, token=token,
+                                           remote_only=authoritative)
+    if branches is not None and branch not in branches and not authoritative:
+        remote_branches, remote_default = list_repo_branches(
+            repo_key, token=token, refresh=True, remote_only=True)
+        if remote_branches is None:
+            # 远端不可核实 → 不把 mirror 未命中当作确定失效，保持原配置
+            return None, default or remote_default, None
+        branches, default = remote_branches, remote_default or default
+    if branches is None:
+        return None, default, None
+    return (branch in branches), default, branches
+
+
+def resolve_work_branch(repo_key: str, configured: str, token: str = "") -> tuple:
+    """交办/注入前校验 work_branch 是否存在，失效则回退仓库默认分支并留痕。
+
+    Returns (effective_branch, fallback_note)。fallback_note 为空表示未回退。
+    - 仅用「分支列表显式比对」，不依赖 GitCode ref/tree 查询（ref 不存在会静默回退）。
+    - 无法拉取分支列表（无 token/网络失败/分页截断）时保持原配置，不误判回退。
+    """
+    cfg = (configured or "").strip()
+    if not cfg:
+        return "", ""
+    exists, default, branches = _classify_work_branch(repo_key, cfg, token=token)
+    if exists is None:
+        log.warning(f"work_branch: cannot verify '{cfg}' for repo={repo_key} "
+                    f"(branch list unavailable); keep configured value")
+        return cfg, ""
+    if exists:
+        return cfg, ""
+    fallback = pick_default_branch(branches, default)
+    if not fallback:
+        # 分支明确不存在，但无法确定可信默认分支：不选任意分支当权威基线，
+        # 保持原配置并标注未确认（#3758 R3）。
+        note = (f"configured work_branch '{cfg}' does not exist in repo {repo_key}; "
+                f"default branch unknown, keep configured value (unconfirmed)")
+        log.warning(note)
+        return cfg, note
+    note = (f"configured work_branch '{cfg}' does not exist in repo {repo_key}; "
+            f"fallback to default branch '{fallback}'")
+    log.warning(note)
+    return fallback, note
+
+
 def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_work_branch: str = "") -> str:
     """推断默认分支：优先 env work_branch → 场景 DB work_branch → main/master 兜底。
 

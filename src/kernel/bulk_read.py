@@ -57,10 +57,28 @@ def reader(domain: str = "") -> Iterator:
             except Exception:  # noqa: BLE001  # best-effort，勿掩蔽调用方异常
                 pass
         return
-    # SQLite：短连接读（WAL 读者与写者并发；不与 session 共享连接故无需 db_lock）
+    # SQLite：短连接读（WAL 读者与写者并发；不与 session 共享连接故无需 db_lock）。
+    # Issue #3588：连接期先探测（SELECT 1 触发开库与 WAL 打开，stale 状态在此暴露），
+    # 命中失效（disk I/O error / unable to open 等）则换一条全新短连接重试一次——
+    # 短连接独立完成、不受主连接 stale WAL 状态干扰。
     import sqlite3
     from src.kernel import session_manager as _sm
-    conn = sqlite3.connect(_sm._db_path, timeout=5)
+    from src.kernel.db_health import is_stale_error
+    conn = None
+    for _attempt in (1, 2):
+        try:
+            conn = sqlite3.connect(_sm._db_path, timeout=5)
+            conn.execute("SELECT 1").fetchone()
+            break
+        except sqlite3.Error as _e:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001  # best-effort，勿掩蔽失效异常
+                    pass
+            conn = None
+            if _attempt == 2 or not is_stale_error(_e):
+                raise
     try:
         c = conn.cursor()
         try:
@@ -77,13 +95,34 @@ def reader(domain: str = "") -> Iterator:
             pass
 
 
+def _read_with_retry(sql: str, params, fetch, domain: str = ""):
+    """read_all/read_one 共享重试结构：stale 失效 → 换新短连接重放同一语句。"""
+    import sqlite3
+    from src.kernel.db_health import is_stale_error
+
+    def _once():
+        with reader(domain) as c:
+            return fetch(c.execute(sql, params or ()))
+
+    try:
+        return _once()
+    except sqlite3.Error as e:
+        if not is_stale_error(e):
+            raise
+    return _once()
+
+
 def read_all(sql: str, params=(), domain: str = "") -> list:
-    """批量读一行集（免锁通道的便捷封装）。"""
-    with reader(domain) as c:
-        return c.execute(sql, params or ()).fetchall()
+    """批量读一行集（免锁通道的便捷封装）。
+
+    Issue #3588：读语句命中 SQLite 存储层失效时换新短连接重试一次。
+    """
+    return _read_with_retry(sql, params, lambda cur: cur.fetchall(), domain)
 
 
 def read_one(sql: str, params=(), domain: str = "") -> tuple | None:
-    """读单行（免锁通道的便捷封装）。"""
-    with reader(domain) as c:
-        return c.execute(sql, params or ()).fetchone()
+    """读单行（免锁通道的便捷封装）。
+
+    Issue #3588：读语句命中 SQLite 存储层失效时换新短连接重试一次。
+    """
+    return _read_with_retry(sql, params, lambda cur: cur.fetchone(), domain)

@@ -35,12 +35,12 @@
   "webhook_dialect": "gitee_v5",
   "pr_head_filter": "bare_ref",
   "clone_auth": "x_access_token",
+  "branch_create_form": "form",
   "create_repo_options": true,
   "bot_username": "my_grape_bot",
   "user_images_base": "https://raw.gitcode.com/user-images",
   "download_base": "https://raw.gitcode.com",
   "brand_color": "#DA203E",
   "legacy_token_symbol": "get_user_token_with_refresh",
-  "branch_create_form": "form",
   "issue_write_form": "repo_path"
 }

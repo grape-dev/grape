@@ -326,3 +326,17 @@ def test_admin_page_shows_confirm_dialog_before_retrying(monkeypatch):
     assert "Teleport" in text and "ap-confirm-mask" in text, "确认层不是页面内 Vue 弹层"
     assert "position: fixed" in text and "inset: 0" in text, "弹层遮罩没有自带定位样式"
     assert "window.confirm(" not in text, "仍在用原生 window.confirm（用户已明确不要）"
+
+
+def test_platform_cards_accept_create_repo_options():
+    """卡能力位 create_repo_options 必须同时存在于卡文件与 Builder（防配置/模型漂移）。"""
+    from pathlib import Path
+
+    from src.domains.runtime.vcs.platform_card import builtin_cards_from_dir
+
+    cards = builtin_cards_from_dir(
+        str(Path(__file__).resolve().parents[2] / "configs" / "platforms"))
+    assert cards["gitcode"].create_repo_options is True
+    assert cards["gitcode"].branch_create_form == "form"
+    assert cards["github"].create_repo_options is True
+    assert cards["github"].branch_create_form == "refs_sha"

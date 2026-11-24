@@ -1,9 +1,11 @@
 """Event Store — 事件记录与查询（shared events table）"""
 import json, re, threading, asyncio
+from contextlib import nullcontext as _nullcontext
 from datetime import datetime
 from src.kernel.owner_db import db_pair
 
 db, db_lock = db_pair("runtime")
+from src.kernel.lock_instrument import task_lock, lock_owner, event_lock
 from src.kernel.config import log
 from src.kernel.issue_ident import is_actionable_issue_number, normalize_issue_ident  # Issue #3055
 from src.kernel.time_utils import normalize_event_time
@@ -24,21 +26,11 @@ def _events_columns(c) -> set:
     global _EVENTS_COLUMNS_CACHE
     if _EVENTS_COLUMNS_CACHE is not None:
         return _EVENTS_COLUMNS_CACHE
-    cols: set = set()
-    for sql in (
-        "SELECT COLUMN_NAME FROM information_schema.columns "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='events'",
-        "PRAGMA table_info(events)",
-    ):
-        try:
-            rows = c.execute(sql).fetchall() or []
-            if rows:
-                # information_schema: COLUMN_NAME 在 0；PRAGMA: 列名在 1
-                cols = {(r[0] if isinstance(r[0], str) else r[1]) for r in rows}
-                break
-        except Exception as e:  # noqa: BLE001 - 后端不支持该方言时换下一种
-            log.debug(f"_events_columns: {sql.split()[0]} 不可用: {e}")
-            continue
+    # 探列单一入口（kernel.ddl_safety）：PRAGMA（compat 翻译）+ 裸 MySQL
+    # information_schema 回退。原实现自己拼两种方言，PR #2009 I2 收敛。
+    from src.kernel.ddl_safety import table_columns
+
+    cols = set(table_columns(c, "events"))
     _EVENTS_COLUMNS_CACHE = cols
     return cols
 
@@ -1026,7 +1018,9 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     _FALLBACK_REASON = "[E-FAIL-NODIAG] 事件置 failed 但未携带诊断信息（update_event_status 裸调用，见 #476）"
     from datetime import datetime, timezone as _tz
     _notify_repo = _notify_issue = _notify_agent = ""
-    with db_lock:
+    # Issue #3927 审查 R1 复审：终态保护与 update_event_complete 共用 event_lock(seq)，
+    # 锁序固定 db_lock → event_lock（与 complete 的 _write_guard → event_lock 一致）。
+    with db_lock, event_lock(seq):
         try:
             c = db.cursor()
             if status in _TERMINAL:
@@ -1148,17 +1142,21 @@ def reset_event_terminal(seq: int):
     语义：事件被人工重派/重试 → 视为重新处理中，允许重跑成功后 complete_task 写入
     structured_output/result（避免「事件首次 failed 后 redispatch 成功却无法覆盖」）。
     仅 redispatch 调用；普通 complete 仍走 update_event_complete 终态保护。
+    Issue #3927 审查 R1：终态解除同样纳入事件维度锁 t_ev:<seq>（db_lock →
+    event_lock 锁序与 update_event_complete 的 _write_guard → event_lock 一致），
+    防止「重置 running」与「迟到终态写」互不可见地交错。
     """
     with db_lock:
-        try:
-            c = db.cursor()
-            c.execute(
-                "UPDATE events SET status='running', exit_code=NULL, completed_at='', "
-                "structured_output=NULL, result='' WHERE seq=?",
-                (seq,))
-            db.commit()
-        except Exception as e:
-            log.warning(f"reset_event_terminal failed seq={seq}: {e}")
+        with event_lock(seq):
+            try:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE events SET status='running', exit_code=NULL, completed_at='', "
+                    "structured_output=NULL, result='' WHERE seq=?",
+                    (seq,))
+                db.commit()
+            except Exception as e:
+                log.warning(f"reset_event_terminal failed seq={seq}: {e}")
     # redispatch：重新抢占守卫（终态时已释放；此处幂等重抢，防重跑期间并发事件滑入）
     try:
         with db_lock:
@@ -1195,13 +1193,112 @@ def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
             log.warning(f"Failed to update event config {seq}: {e}")
 
 
+def _mysql_backend() -> bool:
+    """是否 MySQL（云 RDS）后端：池化/每线程连接，单语句事务不共享连接。
+
+    探测失败按 SQLite/单库保守处理（保留进程级短临界区）。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        return _is_mysql_backend()
+    except Exception:
+        return False
+
+
+def _write_guard():
+    """Issue #3927 审查 R4：终态/payload 短写的按后端锁选择。
+
+    - MySQL：`nullcontext()`——每线程/池化连接，commit 只作用于本线程语句，无锁写安全；
+    - SQLite/单库：返回进程级 `db_lock` 短临界区——单条共享连接的 `commit()` 是
+      **连接级**语义，会把其他线程未提交的语句一并提交（跨线程事务交错），
+      终态与 payload 写必须与其他 event_store 写者互斥（与基线行为一致）。
+    """
+    if _mysql_backend():
+        from contextlib import nullcontext
+        return nullcontext()
+    return db_lock
+
+
+# Issue #3927 审查 R2：payload 写失败的可重试标记（同 seq 后续终态短路时自愈补写）。
+_pending_payload_guard = threading.Lock()
+_pending_payload: set[int] = set()
+
+
+def _payload_mark_pending(seq: int) -> None:
+    with _pending_payload_guard:
+        _pending_payload.add(int(seq))
+
+
+def _payload_is_pending(seq: int) -> bool:
+    with _pending_payload_guard:
+        return int(seq) in _pending_payload
+
+
+def _payload_clear_pending(seq: int) -> None:
+    with _pending_payload_guard:
+        _pending_payload.discard(int(seq))
+
+
+def pending_payload_count() -> int:
+    """待补写 payload 的事件数（观测/测试/巡检用）。"""
+    with _pending_payload_guard:
+        return len(_pending_payload)
+
+
+def _write_event_payload_fields(seq: int, agent_logs, structured_output) -> bool:
+    """Issue #3927：agent_logs / structured_output 大字段独立短写。
+
+    与终态字段拆事务（终态先行、大字段补齐，读侧已兼容）。序列化（可能是几十 MB
+    的 dumps）与 UPDATE 都在 event_lock 内完成（审查 R2：大字段写不再游离在保护
+    锁外），但仍**不持进程级全局锁**——MySQL 下无锁并行，SQLite 由外层
+    `_write_guard` 短临界区覆盖（审查 R4）。
+
+    返回是否写成功；失败由调用方登记 pending 标记（重复 complete 短路时自愈补写），
+    不回滚已落库的终态字段。
+    """
+    try:
+        _logs_json = json.dumps(agent_logs or [])
+    except Exception as e:  # noqa: BLE001 - 大字段脏数据不阻断终态
+        log.warning(f"Event {seq}: serialize agent_logs failed: {e}")
+        return False
+    _structured_json = None
+    if structured_output is not None:
+        try:
+            _structured_json = json.dumps(structured_output, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Event {seq}: serialize structured_output failed: {e}")
+            return False
+    try:
+        c = db.cursor()
+        cols = _events_columns(c)
+        if "structured_output" in cols and _structured_json is not None:
+            c.execute("UPDATE events SET agent_logs=?, structured_output=? WHERE seq=?",
+                      (_logs_json, _structured_json, seq))
+        else:
+            c.execute("UPDATE events SET agent_logs=? WHERE seq=?", (_logs_json, seq))
+        db.commit()
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Event {seq}: write payload fields failed: {e}")
+        return False
+
+
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
                           completed_at: str = "", result: str = "",
                           structured_output: dict = None,
                           revive_from_timeout_failed: bool = False,
-                          allow_from_takeover: bool = False):
+                          allow_from_takeover: bool = False,
+                          task_id: str = ""):
     """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result, structured_output）
+
+    Issue #3927（审查修订）：终态保护锁按**事件维度统一**为 `t_ev:<seq>`（R1）——
+    传/不传 task_id 的全部终态写者共用一把锁，`SELECT status → UPDATE` 恢复原子；
+    `task_id` 仅作日志/指标归因与同任务附加串行（嵌套在内，锁序无交叉）。
+    终态字段 UPDATE 与 agent_logs/structured_output 大字段仍拆两个事务/两次短写，
+    但都在 event_lock 内完成（R2：大字段写不再游离在保护锁外；失败登记 pending
+    标记，重复 complete 短路时自愈补写）。全程不持 session 全局锁；SQLite/单库
+    拓扑由 `_write_guard` 保留进程级短临界区（R4：commit 是连接级语义）。
 
     幂等保护：终态事件不允许被其他终态覆盖。
     - 已 completed 的事件不允许被 failed 覆盖（防止 complete→fail 竞态）。
@@ -1225,63 +1322,99 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
     _is_terminal = status in ("completed", "failed", "cancelled")
     _agent_type = _repo_key = _issue_id = ""
     _terminal_written = False
-    with db_lock:
-        try:
-            c = db.cursor()
-            # 检查当前状态：已终态的事件不允许被其他终态覆盖
-            c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
-            row = c.fetchone()
-            # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
-            # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
-            # （finish/abort，allow_from_takeover=True）能落终态。
-            if row and row[0] == "takeover" and status in ("completed", "failed", "cancelled"):
-                if not allow_from_takeover:
-                    log.info(f"Event {seq} is taken over by a human, skip {status} overwrite")
-                    return
-                log.info(f"Event {seq}: takeover -> {status} (by takeover service)")
-            if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
-                _revive_ok = (revive_from_timeout_failed
-                              and row[0] == "failed" and status == "completed")
-                if not _revive_ok:
-                    log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
-                    return
-                log.info(f"Event {seq}: failed -> completed via timeout revive "
-                         f"(Issue #1071 narrow gate)")
-            # Issue #1503：终态写入 result 兜底（与 completed_at 兜底同层）。
-            # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
-            if _is_terminal and not (result or "").strip():
-                _ec = exit_code if exit_code is not None else "?"
-                result = f"{status} (exit_code={_ec})"
-                log.info(f"Event {seq}: terminal write with empty result, "
-                         f"backfilled default summary (#1503)")
-            _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
-            cols = _events_columns(c)
-            # Issue #2432: the node that failed is the event's own agent_type,
-            # read from the row selected above (arch layout keeps it in `row`).
-            if row:
-                _agent_type = str(row[1] or "")
-                _repo_key = str(row[2] or "")
-                _issue_id = str(row[3] or "")
-            # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
-            _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
-            _failed_sql = "" if not _set_failed_node else ", failed_node=?"
-            _failed_param = () if not _set_failed_node else (_agent_type,)
-            if "structured_output" in cols and _structured is not None:
-                c.execute(
-                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
-                    "result=?, structured_output=?" + _failed_sql + " WHERE seq=?",
-                    (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result, _structured) + _failed_param + (seq,))
-            else:
-                c.execute(
-                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
-                    "result=?" + _failed_sql + " WHERE seq=?",
-                    (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result) + _failed_param + (seq,))
-            db.commit()
-            _terminal_written = True
-        except Exception as e:
-            log.warning(f"Failed to update event complete {seq}: {e}")
+    # Issue #3927 审查修订：
+    # - R1：终态保护统一按事件维度 t_ev:<seq>（所有终态写者共用一把锁）；
+    # - R2：payload 写入锁内（不持全局锁）；
+    # - R4：SQLite/单库由 _write_guard 保留短临界区（锁序固定：db_lock → event_lock
+    #   → task_lock，与 reset_event_terminal 一致，无交叉死锁面）。
+    _owner_label = f"complete:{task_id or seq}"
+    with lock_owner(_owner_label):
+        with _write_guard():
+            with event_lock(seq):
+                with (task_lock(task_id) if task_id else _nullcontext()):
+                    try:
+                        c = db.cursor()
+                        # 检查当前状态：已终态的事件不允许被其他终态覆盖
+                        c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
+                        row = c.fetchone()
+                        # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
+                        # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
+                        # （finish/abort，allow_from_takeover=True）能落终态。
+                        if row and row[0] == "takeover" and status in ("completed", "failed", "cancelled"):
+                            if not allow_from_takeover:
+                                log.info(f"Event {seq} is taken over by a human, skip {status} overwrite")
+                                return
+                            log.info(f"Event {seq}: takeover -> {status} (by takeover service)")
+                        if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
+                            _revive_ok = (revive_from_timeout_failed
+                                          and row[0] == "failed" and status == "completed")
+                            # Issue #3834：接管 finish 是用户授权的终态写入。若让渡时 cancel_task
+                            # 已把事件级联收敛成 cancelled（cascade 合成补偿），而 mark_task_takeover
+                            # 未把状态拉回 takeover（老实例/写入竞态），旧实现会在这里静默跳过 →
+                            # 事件仍是补偿文案、无 structured_output，下一节点永远不派发。
+                            # 窄口子：仅接管服务（allow_from_takeover=True）且 cancelled→completed/failed 放行。
+                            # #3834 复审③：failed 也对称放行——接管失败时事件同样停在让渡期 cancelled，
+                            # 不放行会留下「接口返回 failed、库里却还是 cancelled+合成补偿文案」的口径分裂。
+                            _takeover_ok = (allow_from_takeover
+                                            and row[0] == "cancelled" and status in ("completed", "failed"))
+                            if not (_revive_ok or _takeover_ok):
+                                log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
+                                # R2 自愈：首写 payload 失败登记过 pending → 重复 complete
+                                # 终态短路时补写大字段（清标记；仍不覆盖终态字段）。
+                                if _payload_is_pending(seq) and (agent_logs or structured_output is not None):
+                                    if _write_event_payload_fields(seq, agent_logs, structured_output):
+                                        _payload_clear_pending(seq)
+                                        log.info(f"Event {seq}: backfilled pending payload on duplicate complete")
+                                return
+                            if _takeover_ok:
+                                log.info(f"Event {seq}: cancelled -> {status} via takeover finish "
+                                         f"(Issue #3834 authorized revive)")
+                            else:
+                                log.info(f"Event {seq}: failed -> completed via timeout revive "
+                                         f"(Issue #1071 narrow gate)")
+                        # 放在终态保护之后：被 skip 的覆盖写入不产生兜底。
+                        if _is_terminal and not (result or "").strip():
+                            _ec = exit_code if exit_code is not None else "?"
+                            result = f"{status} (exit_code={_ec})"
+                            log.info(f"Event {seq}: terminal write with empty result, "
+                                     f"backfilled default summary (#1503)")
+                        cols = _events_columns(c)
+                        # Issue #2432: the node that failed is the event's own agent_type,
+                        # read from the row selected above (arch layout keeps it in `row`).
+                        if row:
+                            _agent_type = str(row[1] or "")
+                            _repo_key = str(row[2] or "")
+                            _issue_id = str(row[3] or "")
+                        # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
+                        _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
+                        _failed_sql = "" if not _set_failed_node else ", failed_node=?"
+                        _failed_param = () if not _set_failed_node else (_agent_type,)
+                        # 终态 UPDATE：锁内短写
+                        c.execute(
+                            "UPDATE events SET status=?, exit_code=?, duration=?, completed_at=?, "
+                            "result=?" + _failed_sql + " WHERE seq=?",
+                            (status, exit_code, duration, completed_at, result)
+                            + _failed_param + (seq,))
+                        db.commit()
+                        _terminal_written = True
+                        # Issue #3927 审查 R2：agent_logs/structured_output 在 event_lock
+                        # 内补写（终态先行、大字段补齐拆事务；MySQL 不持全局锁，
+                        # SQLite 由外层 _write_guard 覆盖）。失败登记 pending，
+                        # 重复 complete 短路时自愈补写，不再有「completed 而
+                        # structured_output 永久为空」的不可自愈路径。
+                        _write_payload = "structured_output" in cols
+                        try:
+                            _payload_ok = _write_event_payload_fields(
+                                seq, agent_logs, structured_output if _write_payload else None)
+                        except Exception as _pe:  # noqa: BLE001 - payload 失败不回滚终态
+                            _payload_ok = False
+                            log.warning(f"Event {seq}: write payload fields raised: {_pe}")
+                        if _payload_ok:
+                            _payload_clear_pending(seq)
+                        elif agent_logs or structured_output is not None:
+                            _payload_mark_pending(seq)
+                    except Exception as e:
+                        log.warning(f"Failed to update event complete {seq}: {e}")
     # Issue #2432：失败终态（执行失败/超时/重试耗尽）→ 异步通知飞书群，异常不阻断
     if _terminal_written and status == "failed" and _repo_key:
         _notify_pipeline_failure(_repo_key, _issue_id, _agent_type, seq)

@@ -195,7 +195,19 @@
     "hint_dingtalk_app_id": "AppKey",
     "hint_dingtalk_secret": "AppSecret",
     "wechat_pin_label": "Verification code shown on your phone",
-    "wechat_qr_close": "Close"
+    "wechat_qr_close": "Close",
+    "badge_paused": "Risk paused",
+    "badge_stale": "Pause expired",
+    "paused_title": "Channel paused by risk control (WeChat ret=-14)",
+    "paused_last": "Paused at",
+    "paused_next": "Next retry",
+    "paused_alerting": "Alert firing: repeated pauses, manual relogin required",
+    "recover_retry_now": "Retry now",
+    "recover_relogin": "Re-login",
+    "recover_clear_pause": "Clear pause",
+    "recover_ok": "Recovery request sent",
+    "recover_failed": "Recovery failed, please retry later",
+    "recover_no_installation": "Installation record not found for this channel"
   },
   "current_engine": "Current",
   "recall": {

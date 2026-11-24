@@ -203,6 +203,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { stripRepoPrefix } from '../lib/repo-key.js'
 
 const G = globalThis
 
@@ -452,7 +453,7 @@ function applySearch() {
 // ── Issue #542：history 增量分页 ──
 function ownerRepo() {
   let rk = (pipeData.value && pipeData.value.repo_key) || (props.data && props.data.repo_key) || ''
-  rk = String(rk).replace(/^(github|gitcode):/, '')
+  rk = stripRepoPrefix(rk)
   const i = rk.indexOf('/')
   if (i < 0) return ['', '']
   return [rk.slice(0, i), rk.slice(i + 1)]

@@ -103,6 +103,18 @@ function renderMarkdown(text) {
 const API = (() => {
   const BASE = '/api';
   let _refreshPromise = null;  // 并发 refresh 时所有请求等待同一个 Promise
+  // Issue #3734: 会话失效广播去重——5 列看板并发 401 只广播一次，避免重复停机/重复提示。
+  // 任一成功响应即复位（重新登录后再次失效仍能通知）。
+  let _sessionExpiredNotified = false;
+  function _notifySessionExpired() {
+    if (_sessionExpiredNotified) return;
+    _sessionExpiredNotified = true;
+    try {
+      if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('grape:session-expired'));
+      }
+    } catch (e) {}
+  }
 
   // 多 Tab 同步——监听 localStorage token 变化，其他 Tab 刷新 token 后自动同步
   // 体验优化，不是安全屏障——同步失败有 401 + Promise 队列兜底
@@ -182,6 +194,7 @@ const API = (() => {
       // (整页刷新). This also resolves R7's language prefix issue — showLogin doesn't
       // involve URL navigation.
       if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      _notifySessionExpired();
       throw e;
     }).finally(() => {
       clearTimeout(timer);
@@ -330,6 +343,8 @@ const API = (() => {
           localStorage.removeItem('token');
           localStorage.removeItem('user');
           if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+          // Issue #3734: 会话失效广播——tasks 看板收到即停轮询并给出重新登录入口
+          _notifySessionExpired();
           throw new Error(err?.detail?.message || I18N.t('common.session_expired'));
         });
       }
@@ -345,6 +360,8 @@ const API = (() => {
         throw e;
       });
     }
+    // Issue #3734: 会话恢复（任一成功响应）→ 复位失效广播去重标记
+    _sessionExpiredNotified = false;
     // Issue #63: 响应是 HTML（如 nginx 502 页面或登录页重定向）时，不报 "Unexpected token"
     var ct = r.headers.get('content-type') || '';
     if (ct.indexOf('text/html') !== -1) {

@@ -24,6 +24,7 @@ _LAZY = {
     "register_runtime": (".registry", "register_runtime"),
     "get_runtime": (".registry", "get_runtime"),
     "discover_runtimes": (".registry", "discover_runtimes"),
+    "validate_registration_model": (".registry", "validate_registration_model"),
     # 流式执行
     "stream_runtime": (".executor", "stream_runtime"),
     "stream_agent": (".executor", "stream_agent"),

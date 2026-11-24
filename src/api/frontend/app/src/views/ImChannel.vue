@@ -125,6 +125,40 @@
               </div>
             </div>
 
+            <!-- Issue #3799：渠道风控暂停卡片 + 三个恢复入口（PR #1983 审查 Required） -->
+            <div v-if="pausedLive" class="imc__paused">
+              <div class="imc__paused-title">{{ imt('paused_title') }}</div>
+              <div class="imc__paused-meta">
+                <span>{{ imt('paused_last') }}: {{ pausedLive.last_pause_at || '-' }}</span>
+                <span>{{ imt('paused_next') }}: {{ pausedLive.next_retry_at || '-' }}</span>
+              </div>
+              <div v-if="pausedLive.alert_state === 'firing'" class="imc__paused-alert">
+                {{ imt('paused_alerting') }}
+              </div>
+              <div class="imc__paused-actions">
+                <AGButton size="sm" :disabled="recoverBusy" @click="recover('retry_now')">
+                  {{ imt('recover_retry_now') }}
+                </AGButton>
+                <AGButton
+                  size="sm"
+                  variant="plain"
+                  :disabled="recoverBusy"
+                  @click="recover('relogin')"
+                >
+                  {{ imt('recover_relogin') }}
+                </AGButton>
+                <AGButton
+                  size="sm"
+                  variant="plain"
+                  :disabled="recoverBusy"
+                  @click="recover('clear_pause')"
+                >
+                  {{ imt('recover_clear_pause') }}
+                </AGButton>
+              </div>
+              <div v-if="recoverHint" class="imc__paused-hint">{{ recoverHint }}</div>
+            </div>
+
             <div class="imc__cfg-row">
               <div
                 v-for="f in curFields"
@@ -408,6 +442,10 @@ function platformConfig(key) {
 function badgeOf(key) {
   const inst = live.value[key]
   const cfg = platformConfig(key)
+  if (inst && inst.paused) return { tone: 'no', text: imt('badge_paused') }
+  // 过期暂停（进程崩溃遗留行）：后端已按 is_paused() 口径报 paused=False，
+  // 这里单独标「暂停状态过期」，避免看板把遗留行显示成健康或长期显示暂停。
+  if (inst && inst.stale) return { tone: 'no', text: imt('badge_stale') }
   if (inst && inst.connected) return { tone: 'ok', text: imt('badge_connected') }
   if (cfg && cfg.app_id) return { tone: 'no', text: inst ? imt('badge_configured_offline') : imt('badge_configured') }
   return { tone: 'no', text: imt('badge_none') }
@@ -448,18 +486,65 @@ function load() {
 }
 
 function loadLive() {
-  // 只取连接状态给徽标用（正式界面不展示运维面板）
+  // 连接状态 + 渠道健康（Issue #3799：paused / last_pause_at / next_retry_at）
   G.API.get('/im/installations' + qs())
     .then(function (list) {
       const map = {}
       ;(list && list.installations ? list.installations : []).forEach(function (it) {
         if (!it || it.status === 'revoked' || !it.channel_type) return
-        map[it.channel_type] = { connected: !!it.connected, status: it.status }
+        const h = it.health || {}
+        const entry = {
+          connected: !!it.connected,
+          status: it.status,
+          installation_id: it.installation_id || '',
+          paused: !!it.paused,
+          stale: !!h.stale,
+          last_pause_at: h.last_pause_at || it.last_pause_at || '',
+          next_retry_at: h.next_retry_at || it.next_retry_at || '',
+          alert_state: h.alert_state || '',
+        }
+        // 同类型多安装：优先保留 paused 的那条（渠道卡片按「最坏状态」展示）
+        const prev = map[it.channel_type]
+        if (prev && prev.paused && !entry.paused) return
+        map[it.channel_type] = entry
       })
       live.value = map
     })
     .catch(function () {
       live.value = {}
+    })
+}
+
+const pausedLive = computed(function () {
+  const st = live.value[current.value]
+  return st && st.paused ? st : null
+})
+const recoverBusy = ref(false)
+const recoverHint = ref('')
+
+// Issue #3799：人工恢复入口——retry_now（立即重试）/ relogin（重登）/ clear_pause（清除暂停）
+function recover(action) {
+  const st = live.value[current.value]
+  if (!st || !st.installation_id) {
+    recoverHint.value = imt('recover_no_installation')
+    return
+  }
+  recoverBusy.value = true
+  recoverHint.value = ''
+  G.API.post('/im/installations/' + encodeURIComponent(st.installation_id) + '/recover', {
+    action: action,
+  })
+    .then(function () {
+      G.app.showToast(imt('recover_ok'))
+      loadLive()
+    })
+    .catch(function (e) {
+      // 409 channel_not_running：租约在其它主控/无引擎进程——后端 message 直接透出
+      recoverHint.value = e && e.message ? e.message : imt('recover_failed')
+      G.app.showToast(imt('recover_failed'))
+    })
+    .finally(function () {
+      recoverBusy.value = false
     })
 }
 
@@ -817,6 +902,45 @@ load()
   text-align: center;
   color: var(--c-text-3);
   padding: 80px 0;
+}
+/* Issue #3799：渠道风控暂停卡片（paused / last_pause_at / next_retry_at + 恢复入口） */
+.imc__paused {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--c-danger, #dc2828) 32%, transparent);
+  background: color-mix(in srgb, var(--c-danger, #dc2828) 7%, transparent);
+  border-radius: 12px;
+}
+.imc__paused-title {
+  font-weight: 600;
+  color: var(--c-danger, #dc2828);
+  margin-bottom: 6px;
+}
+.imc__paused-meta {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--c-text-3);
+  margin-bottom: 4px;
+}
+.imc__paused-alert {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-danger, #dc2828);
+  margin-top: 4px;
+}
+.imc__paused-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.imc__paused-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--c-danger, #dc2828);
+  word-break: break-all;
 }
 .imc__hint--err {
   color: var(--c-danger);

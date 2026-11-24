@@ -787,13 +787,21 @@ def _migrate_repo_key_tables():
             log.warning(f"Add managed_repos.scene_recommend_config failed: {e}")
 
 def _cleanup_usage_log_retention() -> None:
-    """N4-p2：usage_log 保留期清理（启动链 force=True 重启即对齐；运行期
-    由 log_usage 惰性触发 + 30 天节流承接）。异常全吞（清理失败不阻断启动）。"""
+    """N4-p2：usage_log 保留期清理的**启动布防点**（Issue #3848 启动次序）。
+
+    本函数原先直接 ``cleanup_expired_retention(force=True)``，但 init_db 是模块导入期
+    执行的——那时装配层（src/api/contracts_wiring.py）还没 bind tokens 端口，清理每次
+    启动必然空跑，并刷一条 ``retention cleanup failed: kernel port 'tokens' is not
+    bound`` WARNING（30 天节流的「重启即对齐」承诺因此长期失效）。
+
+    现在只「布防」：端口已绑则立即跑一次，未绑则由 kernel 端口的 ``on_bind`` 钩子在
+    ``bind("tokens")`` 之后补跑——本调用点一处覆盖 init/worker/event/insight 四条启动
+    路径。清理失败仍不阻断启动。
+    """
     try:
-        from src.kernel.persistence.credential_usage_log import cleanup_expired_retention
-        _rc_n = cleanup_expired_retention(force=True)
-        if _rc_n:
-            log.info(f"usage_log retention cleanup: {_rc_n} rows")
+        from src.kernel.persistence.credential_usage_log import (
+            defer_startup_retention_cleanup)
+        defer_startup_retention_cleanup()
     except Exception:
         pass
 
@@ -1291,7 +1299,8 @@ def get_skill_current_version(skill_id) -> int:
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
-                     category_id: int = 0, content_hash: str = "") -> int | None:
+                     category_id: int = 0, content_hash: str = "",
+                     display_name: str | None = None) -> int | None:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
     scope: user/repo；owner: user_id 或 repo_key。
@@ -1299,6 +1308,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
     Issue #444: 新增 content_hash 参数（UPDATE/INSERT 补写 content_hash 列，
     读时校验据此感知跨进程覆盖更新）；返回值改为 int | None（技能主键 id，
     失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
+    Issue #3855: 新增 display_name 参数。显式非空值直接写入（新增/编辑录入的名称）；
+    None（既有调用方/重新上传）表示「保留行内已有非空 display_name，为空才回填源名称」，
+    避免重新上传把用户录入的名称冲回 SKILL.md 源名称。
     """
     try:
         from src.domains.runtime import public as _rt  # noqa: PLC0415
@@ -1307,6 +1319,16 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 "skill_id_by_owner_scope",
                 (skill_name, "repo" if scope == "repo" else "user", owner))
             if row:
+                # Issue #3855：显式传入的名称优先；缺省时保留行内已有非空名称，
+                # 为空则回填源名称（= skill_name），杜绝重新上传覆盖用户命名。
+                _incoming_name = (display_name or "").strip() if display_name is not None else ""
+                if _incoming_name:
+                    _target_name = _incoming_name
+                else:
+                    # Issue #3855：存量非空名称原样保留（不清洗），历史 " Name " 不得被
+                    # strip 静默改写；仅 None/""/纯空白视为空值回填源名称。
+                    _current_name = "" if (len(row) <= 1 or row[1] is None) else str(row[1])
+                    _target_name = _current_name if _current_name.strip() else skill_name
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
                 from src.kernel import cross_write as _xw_uso
@@ -1318,17 +1340,17 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                         _rt_uso_ok, "runtime", "skill_obs_update",
                         f"skill-obs:{row[0]}:{(content_hash or '')[:12]}",
                         {"skill_id": int(row[0]), "object_key": object_key,
-                         "display_name": skill_name, "agent_type": agent_type or "",
+                         "display_name": _target_name, "agent_type": agent_type or "",
                          "description": description or "", "category_id": category_id,
                          "updated_by": created_by or "", "content_hash": content_hash or ""},
                         lambda: _rt_uso_ok.update_skill_obs(
-                            int(row[0]), object_key, skill_name, agent_type or "",
+                            int(row[0]), object_key, _target_name, agent_type or "",
                             description or "", category_id, created_by or "",
                             content_hash or ""), log)
                 if not _uso_done:
                     _rt.exec_any(
                         "skill_obs_update",
-                        (object_key, skill_name, agent_type or "", description or "",
+                        (object_key, _target_name, agent_type or "", description or "",
                          category_id, created_by or "", content_hash or "", row[0]))
                 _mg_db.commit()
                 return int(row[0])
@@ -1343,7 +1365,8 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
 
                 def _apply_usi() -> None:
                     _usi_out["id"] = _rt_usi_ok.insert_skill(
-                        skill_name, skill_name, description or "", agent_type or "",
+                        skill_name, (display_name or "").strip() or skill_name,
+                        description or "", agent_type or "",
                         object_key, scope, owner, created_by or "", created_by or "",
                         category_id, content_hash or "")
 
@@ -1360,9 +1383,9 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 return int(_usi_out.get("id") or 0)
             _rt.exec_any(
                 "skill_obs_insert",
-                (skill_name, skill_name, description or "", agent_type or "",
-                 object_key, scope, owner, created_by or "", created_by or "", category_id,
-                 content_hash or ""))
+                (skill_name, (display_name or "").strip() or skill_name, description or "",
+                 agent_type or "", object_key, scope, owner, created_by or "",
+                 created_by or "", category_id, content_hash or ""))
             _mg_db.commit()
             _new = _rt.read_one_any(
                 "skill_id_by_owner_scope",

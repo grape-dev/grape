@@ -27,6 +27,16 @@ class PermanentChannelError(ChannelError):
     """永久失败（凭证无效/app 不存在等）→ Supervisor 置 revoked 不再重试（继承 A5）。"""
 
 
+class ChannelRegistrationConflict(ChannelError):
+    """并发注册冲突：服务端对同一 app 的并发长连接数已达上限，拒绝本次注册。
+
+    例：飞书 WS 关闭码 ``3001 (registered) too many connections``。
+    仍属**可重试**的链路失败（继承 ChannelError），但同一时刻重连只会继续撞上限，
+    因此 Supervisor 需按独立归因（`ws_register_conflict`）走更长退避并在连续多次
+    失败后升级告警，而不是当作普通链路抖动每 15s 重试一次。
+    """
+
+
 class CancelContext:
     """连接生命周期取消信号；必须容忍在新 ctx 上被重复调用（继承 run_bot 语义）。"""
 
@@ -90,5 +100,6 @@ ChannelFactory = Callable[[ChannelConfig], Channel]
 
 __all__ = [
     "Channel", "ChannelConfig", "ChannelFactory", "ChannelError",
-    "PermanentChannelError", "CancelContext", "InboundHandler",
+    "ChannelRegistrationConflict", "PermanentChannelError", "CancelContext",
+    "InboundHandler",
 ]

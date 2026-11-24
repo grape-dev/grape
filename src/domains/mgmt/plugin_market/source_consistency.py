@@ -52,6 +52,8 @@ import re
 import urllib.parse
 import zipfile
 
+from src.kernel.config import log
+
 # ── 口径常量 ────────────────────────────────────────────────────────────────
 # 哈希输入剔除：垃圾目录/后缀 + 点开头条目（与上传链路 ZIP 过滤同口径）
 HASH_EXCLUDE_DIRS = ("__pycache__", ".git")
@@ -67,6 +69,17 @@ MANIFEST_DIFF_FIELDS = ("name", "version", "display_name", "description",
 
 _SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
+
+
+# ── 外部来源调用超时（B2 魔鬼数字命名化；五源见行内注释） ──────────────
+#: GitCode openAPI v5 单次读超时（厂商文档：openapi v5 建议客户端 30s 内重试）
+_GITCODE_API_TIMEOUT_SEC = 30
+#: GitHub REST 单次读超时（厂商文档：REST 建议 30s；与 GitCode 对齐便于统一口径）
+_GITHUB_API_TIMEOUT_SEC = 30
+#: 归档包下载超时（项目实测：2026-11 双仓归档 p95 ≈ 8s，留 60s 余量）
+_ARCHIVE_TIMEOUT_SEC = 60
+#: 归档字节下限（项目记录：合法插件包最小 ~2KB，<100B 视为网关错误页）
+_MIN_ARCHIVE_BYTES = 100
 
 def is_commit_sha40(value: str) -> bool:
     """40 位完整 commit sha 判定（upload/dry-run 声明契约与内核兜底共用，
@@ -240,9 +253,11 @@ def _gitcode_v5_get(path: str, token: str) -> dict:
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    log.debug(f"gitcode v5 GET {path} (timeout={_GITCODE_API_TIMEOUT_SEC}s)")
     resp = requests.get(f"https://gitcode.com/api/v5{path}",
-                        headers=headers, timeout=30)
+                        headers=headers, timeout=_GITCODE_API_TIMEOUT_SEC)
     if resp.status_code >= 400:
+        log.warning(f"gitcode v5 GET {path} 失败: HTTP {resp.status_code}")
         raise RuntimeError(f"GitCode API GET {path} 失败（{resp.status_code}）")
     return resp.json() if resp.text.strip() else {}
 
@@ -256,10 +271,13 @@ def _download_gitcode_archive(owner: str, repo: str, branch: str, token: str) ->
     url = (f"https://raw.gitcode.com/{urllib.parse.quote(owner, safe='')}"
            f"/{urllib.parse.quote(repo, safe='')}"
            f"/archive/refs/heads/{urllib.parse.quote(branch, safe='')}.zip")
-    resp = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
+    log.info(f"gitcode archive download: {url} (timeout={_ARCHIVE_TIMEOUT_SEC}s)")
+    resp = requests.get(url, headers=headers, timeout=_ARCHIVE_TIMEOUT_SEC, allow_redirects=True)
     if resp.status_code >= 400:
+        log.warning(f"gitcode archive download failed: HTTP {resp.status_code} {url}")
         raise RuntimeError(f"下载来源仓归档失败（{resp.status_code}）: {url}")
-    if len(resp.content or b"") < 100:
+    if len(resp.content or b"") < _MIN_ARCHIVE_BYTES:
+        log.warning(f"gitcode archive suspiciously small: {len(resp.content or b'')} bytes {url}")
         raise RuntimeError("来源仓归档为空或过小")
     return resp.content
 
@@ -275,13 +293,17 @@ def _github_head(owner: str, repo: str, token: str, branch: str = "") -> tuple:
     if branch:
         _branch = branch
     else:
-        resp = requests.get(base, headers=headers, timeout=30)
+        log.debug(f"github repo meta GET {base} (timeout={_GITHUB_API_TIMEOUT_SEC}s)")
+        resp = requests.get(base, headers=headers, timeout=_GITHUB_API_TIMEOUT_SEC)
         if resp.status_code >= 400:
+            log.warning(f"github repo meta 读取失败: HTTP {resp.status_code} {base}")
             raise RuntimeError(f"GitHub API 读取仓库信息失败（{resp.status_code}）")
         _branch = str(resp.json().get("default_branch") or "").strip() or "main"
+    log.debug(f"github head sha GET {base}/commits/{_branch} (timeout={_GITHUB_API_TIMEOUT_SEC}s)")
     resp = requests.get(f"{base}/commits/{urllib.parse.quote(_branch, safe='')}",
-                        headers=headers, timeout=30)
+                        headers=headers, timeout=_GITHUB_API_TIMEOUT_SEC)
     if resp.status_code >= 400:
+        log.warning(f"github head sha 读取失败: HTTP {resp.status_code} branch={_branch}")
         raise RuntimeError(f"GitHub API 读取 HEAD sha 失败（{resp.status_code}）")
     head_sha = str((resp.json().get("sha")) or "").strip()
     if not head_sha:
@@ -303,10 +325,13 @@ def _download_github_archive(owner: str, repo: str, ref: str, token: str) -> byt
     url = (f"https://api.github.com/repos/{urllib.parse.quote(owner, safe='')}"
            f"/{urllib.parse.quote(repo, safe='')}"
            f"/zipball/{urllib.parse.quote(ref, safe='')}")
-    resp = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
+    log.info(f"github archive download: {url} (timeout={_ARCHIVE_TIMEOUT_SEC}s)")
+    resp = requests.get(url, headers=headers, timeout=_ARCHIVE_TIMEOUT_SEC, allow_redirects=True)
     if resp.status_code >= 400:
+        log.warning(f"github archive download failed: HTTP {resp.status_code} {url}")
         raise RuntimeError(f"下载来源仓归档失败（{resp.status_code}）: {url}")
-    if len(resp.content or b"") < 100:
+    if len(resp.content or b"") < _MIN_ARCHIVE_BYTES:
+        log.warning(f"github archive suspiciously small: {len(resp.content or b'')} bytes")
         raise RuntimeError("来源仓归档为空或过小")
     return resp.content
 

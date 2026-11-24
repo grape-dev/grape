@@ -26,6 +26,7 @@ import re
 import socket
 import threading
 import time
+import weakref
 
 import pymysql
 
@@ -44,6 +45,69 @@ _DB_PING_TIMEOUT_SECONDS = float(os.environ.get("DB_PING_TIMEOUT_SECONDS", "3"))
 _DB_READ_TIMEOUT = int(os.environ.get("DB_READ_TIMEOUT", "120"))
 _DB_WRITE_TIMEOUT = int(os.environ.get("DB_WRITE_TIMEOUT", "120"))
 _DB_TCP_KEEPALIVE = os.environ.get("DB_TCP_KEEPALIVE", "1").lower() in ("1", "true", "yes")
+
+# ── 连接池僵死防护（2026-11-23 mgmt 进程全站僵死事故）────────────────────────
+# 事故形状：连接池上限 16（DB_POOL_MAX_CONNECTIONS）< anyio 工作线程上限 40。
+# 慢语句把 16 条连接占满后，dbutils 的 blocking=True 会让**所有**后续借连接
+# 的线程（含跑事件循环的主线程）无限期阻塞在 PooledDB._wait_lock 上 ——
+# 主线程一卡，uvicorn 连静态文件都不再响应，进程活着但整站静默。
+# 修法：① 借连接改成短轮询 + 超时快速失败（带池水位日志，不再永久挂死）；
+#      ② 全部实例登记到弱引用表，供请求收尾兜底归还 / 池水位巡检 / 健康检查。
+_DB_POOL_WAIT_TIMEOUT = float(os.environ.get("DB_POOL_WAIT_TIMEOUT", "15"))
+_DB_POOL_WARN_WAIT = float(os.environ.get("DB_POOL_WARN_WAIT", "3"))
+_DB_INSTANCES: "weakref.WeakSet" = weakref.WeakSet()
+
+# 只读语句首关键字：认 CTE(WITH)/EXPLAIN/DESCRIBE，且允许 SQL 以注释开头。
+# 原实现只按 lstrip 前缀判 SELECT/SHOW/PRAGMA —— 带注释或 WITH 开头的只读语句
+# 不会被 commit，池化连接就一直粘在该线程的 thread-local 上不归还。
+_READ_ONLY_LEADING = ("SELECT", "SHOW", "PRAGMA", "DESCRIBE", "DESC", "EXPLAIN", "WITH")
+
+
+def _strip_sql_leading_noise(sql: str) -> str:
+    """剥掉 SQL 开头的空白与注释（-- # /* */），用于判断语句类型。"""
+    s = (sql or "").lstrip()
+    while True:
+        if s.startswith("--") or s.startswith("#"):
+            nl = s.find("\n")
+            s = "" if nl < 0 else s[nl + 1:].lstrip()
+            continue
+        if s.startswith("/*"):
+            end = s.find("*/")
+            s = "" if end < 0 else s[end + 2:].lstrip()
+            continue
+        return s
+
+
+def _is_read_only_statement(sql: str) -> bool:
+    """只读语句判定（决定执行后是否自动 commit 归还连接）。"""
+    head = _strip_sql_leading_noise(sql)
+    if not head:
+        return False
+    tok = re.split(r"[\s(]", head, 1)[0].upper()
+    return tok in _READ_ONLY_LEADING
+
+
+def release_all_thread_connections() -> int:
+    """把**当前线程**在每个库实例上借的池连接都还回池，返回归还条数。"""
+    n = 0
+    for inst in list(_DB_INSTANCES):
+        try:
+            if inst.release_thread_connection():
+                n += 1
+        except Exception:  # noqa: BLE001 - 兜底清理不得抛
+            pass
+    return n
+
+
+def pool_stats_all() -> list:
+    """所有已建池实例的水位快照（进程内视角）。"""
+    out = []
+    for inst in list(_DB_INSTANCES):
+        try:
+            out.append(inst.pool_stats())
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _enable_tcp_keepalive(conn) -> None:
@@ -782,8 +846,9 @@ class MySQLCompatCursor:
         # autocommit=False：SELECT 也会隐式开启事务，同线程连接复用时
         # 后续 SELECT 看到旧 MVCC 快照（/repo 返回老列表根因）。
         # 只读语句执行后自动 commit 释放事务，保持读一致性。
-        _is_read_only = t.lstrip().upper().startswith(("SELECT", "SHOW", "PRAGMA"))
-        if _is_read_only:
+        # 判定收口到 _is_read_only_statement：兼容注释开头 / WITH(CTE) / EXPLAIN，
+        # 否则这类只读语句不 commit，池化连接会一直粘在该线程上不归还。
+        if _is_read_only_statement(t):
             self._conn.commit()
         self._pycur = cur
         self.rowcount = cur.rowcount
@@ -859,6 +924,7 @@ class MySQLCompatDB:
         self._lock = threading.RLock()  # 兼容层内部兜底锁
         self._pool = None  # PooledDB instance (lazy init)
         self._pool_disabled = os.environ.get("DB_POOL_DISABLED", "").lower() in ("1", "true", "yes")
+        _DB_INSTANCES.add(self)
 
     def _ensure_pool(self):
         """Lazy-init the connection pool (called once on first use)."""
@@ -876,7 +942,10 @@ class MySQLCompatDB:
                 mincached=int(os.environ.get("DB_POOL_MIN", "2")),
                 maxcached=int(os.environ.get("DB_POOL_MAX_CACHED", "16")),
                 maxconnections=int(os.environ.get("DB_POOL_MAX_CONNECTIONS", "32")),
-                blocking=True,
+                # blocking=False：池满立刻抛 TooManyConnectionsError，由
+                # _borrow_pooled_conn 短轮询 + 超时快速失败。原来的 blocking=True
+                # 会让线程（包括事件循环主线程）无限期挂在池锁上，全站静默。
+                blocking=False,
                 host=self._cfg.get("host", "127.0.0.1"),
                 port=self._cfg.get("port", 3306),
                 user=self._cfg.get("user", ""),
@@ -931,8 +1000,8 @@ class MySQLCompatDB:
             if sock is not None and prev is not None:
                 try:
                     sock.settimeout(prev)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - 恢复超时失败不影响判死结果
+                    log.debug(f"mysql_compat: restore socket timeout failed: {e}")
 
     def _drop_local_conn(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -941,8 +1010,71 @@ class MySQLCompatDB:
         if conn is not None:
             try:
                 conn.close()  # 池化包装 close() = 归还；死连接由池在借出时剔除
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - 丢弃的已是死连接，关闭失败无需上抛
+                log.debug(f"mysql_compat: close dead pooled conn failed: {e}")
+
+    def _borrow_pooled_conn(self):
+        """从池借一条连接：短轮询 + 超时快速失败（替代 dbutils 的无限阻塞）。
+
+        池满（并发语句 > maxconnections）时不再让线程永久挂死：
+        - 等待超过 DB_POOL_WARN_WAIT（默认 3s）先打一条 WARNING + 池水位；
+        - 超过 DB_POOL_WAIT_TIMEOUT（默认 15s）抛 TimeoutError，让请求快速 500，
+          而不是把事件循环和整站一起拖死。
+        """
+        deadline = time.monotonic() + _DB_POOL_WAIT_TIMEOUT
+        started = time.monotonic()
+        warned = False
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("connection pool not initialized")
+        while True:
+            try:
+                return pool.connection()
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ not in ("TooManyConnectionsError", "TooManyConnections"):
+                    raise
+                waited = time.monotonic() - started
+                if waited >= _DB_POOL_WAIT_TIMEOUT:
+                    st = self.pool_stats()
+                    log.error(
+                        f"MySQLCompatDB[{self._cfg.get('database', '')}]: 借连接超时 "
+                        f"{_DB_POOL_WAIT_TIMEOUT:.0f}s（池已满 in_use={st.get('in_use')}/"
+                        f"{st.get('max')}），本次请求快速失败以免拖死整个进程")
+                    raise TimeoutError(
+                        f"db pool exhausted ({st.get('in_use')}/{st.get('max')}) "
+                        f"after {_DB_POOL_WAIT_TIMEOUT:.0f}s")
+                if not warned and waited >= _DB_POOL_WARN_WAIT:
+                    warned = True
+                    st = self.pool_stats()
+                    log.warning(
+                        f"MySQLCompatDB[{self._cfg.get('database', '')}]: 等待池连接 "
+                        f"{waited:.1f}s（in_use={st.get('in_use')}/{st.get('max')}）")
+                time.sleep(0.05)
+
+    def pool_stats(self) -> dict:
+        """连接池水位（进程内视角）：in_use / idle / max。"""
+        p = self._pool
+        base = {"database": self._cfg.get("database", ""), "enabled": p is not None}
+        if p is None:
+            base.update({"max": 0, "in_use": 0, "idle": 0})
+            return base
+        try:
+            idle = len(getattr(p, "_idle_cache", []) or [])
+            total = int(getattr(p, "_connections", 0) or 0)
+            mx = int(getattr(p, "_maxconnections", 0) or 0)
+            base.update({"max": mx, "in_use": max(total - idle, 0), "idle": idle})
+        except Exception:  # noqa: BLE001
+            base.update({"max": 0, "in_use": 0, "idle": 0})
+        return base
+
+    def release_thread_connection(self) -> bool:
+        """把本线程借的池连接还回池（幂等）。请求收尾兜底用。"""
+        if self._pool is None:
+            return False
+        if getattr(self._local, "conn", None) is None:
+            return False
+        self._drop_local_conn()
+        return True
 
     def _raw_cursor(self):
         """Get a raw pymysql cursor.
@@ -969,7 +1101,7 @@ class MySQLCompatDB:
                 self._drop_local_conn()
                 conn = None
             if conn is None:
-                conn = self._pool.connection()
+                conn = self._borrow_pooled_conn()
                 self._local.conn = conn
                 self._local.conn_alive_at = time.time()
             return conn.cursor()

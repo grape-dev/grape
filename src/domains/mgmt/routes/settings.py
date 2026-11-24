@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
 
-from src.api.deps import require_no_session_token, require_org_member
+from src.api.deps import (require_no_session_token, require_org_member,
+                           require_settings_runtime_owner_or_admin)
 
 from src.kernel.config import log
 
@@ -2592,6 +2593,25 @@ def _sync_agent_tags(rid: int, cursor):
             return
     _rt.set_agent_tags(int(rid), list(tags))
 
+def _audit_engine_tag_change(action: str, rid: int, tag: str, user: dict,
+                             request: Request | None = None, **extra) -> None:
+    """标签写入审计（Issue #3396 F2 / C3）。
+
+    audit_logs 归 mgmt，本文件即 mgmt 域，直接经 auth.audit 写；detail 只记标识与
+    变更值，不含任何凭据原文。审计失败只告警，不回滚已提交的标签写入。
+    """
+    try:
+        from src.domains.mgmt.auth import audit as _auth_audit
+        _auth_audit.log_audit(
+            "engine_tag_change",
+            operator_id=user.get("id") or 0,
+            ip=(request.client.host if request is not None and request.client else ""),
+            detail={"runtime_id": rid, "tag": tag, "action": action,
+                    "operator": user.get("username") or "", **extra})
+    except Exception as _ae:
+        log.warning(f"engine tag audit failed: action={action} rid={rid} tag={tag}: {_ae}")
+
+
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     """获取引擎的标签列表"""
@@ -2621,7 +2641,8 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     ]}
 
 @router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag", description="Adds an engine tag (idempotent: updates if present).")
-def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
+def add_engine_tag(rid: int, body: EngineTagBody, request: Request,
+                   user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """为引擎添加标签（幂等：已有则更新）"""
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -2658,11 +2679,12 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
+    _audit_engine_tag_change("add", rid, tag, user, request, priority=body.priority)
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
 @router.put("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_update", summary="Update engine tag", description="Updates an engine tag configuration.")
-def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
-                            user: dict = Depends(require_no_session_token)):
+def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody, request: Request,
+                            user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """修改引擎标签配置"""
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -2696,10 +2718,13 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    _audit_engine_tag_change("update", rid, tag, user, request,
+                              priority=body.priority, enabled=body.enabled)
     return {"message": f"标签 {tag} 已更新"}
 
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
-def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
+def delete_engine_tag(rid: int, tag: str, request: Request,
+                      user: dict = Depends(require_settings_runtime_owner_or_admin)):
     """删除引擎标签"""
     from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
@@ -2731,6 +2756,7 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
             db.rollback()
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag deleted: runtime={rid} tag={tag}")
+    _audit_engine_tag_change("delete", rid, tag, user, request)
     return {"message": f"标签 {tag} 已删除"}
 
 class EventActionFilterBody(BaseModel):

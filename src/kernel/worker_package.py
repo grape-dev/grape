@@ -607,7 +607,10 @@ WHEEL_PLATFORMS = [
 # pyproject [worker] extra 保持一致（parity 由测试守护）。
 WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24",
                "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42",
-               "fastapi>=0.110"]
+               "fastapi>=0.110",
+               # Issue #3874：worker 侧 engine_model 优先解析 pyyaml；声明后随
+               # 平台矩阵（含 win_amd64）下载 wheels，Windows onboard 不缺依赖。
+               "pyyaml>=6.0"]
 
 
 def _dep_base_name(dep: str) -> str:
@@ -634,6 +637,53 @@ def _missing_dep_wheels(whl_dir: str) -> list[str]:
         if not any(n.startswith(base + "-") for n in names):
             missing.append(dep)
     return missing
+
+
+def _wheel_supports_platform(whl_name: str, platform: str) -> bool:
+    """wheel 文件名是否兼容指定平台标签（纯 Python wheel 视作全平台覆盖）。
+
+    wheel 文件名形如 `{dist}-{ver}-{py}-{abi}-{plat}.whl`；plat 可能是多点压缩
+    标签（`manylinux_2_17_x86_64.manylinux2014_x86_64`），逐段比对平台标签。
+    """
+    parts = whl_name[:-4].split("-")
+    if len(parts) < 5:
+        return False
+    tags = parts[-1].split(".")
+    return "any" in tags or platform in tags
+
+
+def _missing_platform_wheels(whl_dir: str) -> list[str]:
+    """按 WHEEL_PLATFORMS 矩阵校验每个依赖是否有该平台可用的 wheel，返回缺口清单。
+
+    基名存在 ≠ 平台可用：pyyaml 这类带 C 扩展的包，若目标 Python 版本没有
+    win_amd64 wheel，`_missing_dep_wheels` 的基名校验会通过，Windows 离线装机却在
+    `pip install --no-index` 时找不到可用 wheel（Issue #3874 审查建议）。
+    纯 Python wheel（`*-none-any.whl`）视为覆盖全部平台。
+    """
+    labels = {plat: label for plat, label in WHEEL_PLATFORMS}
+    try:
+        wheels = [f.lower() for f in os.listdir(whl_dir) if f.endswith(".whl")]
+    except Exception:
+        return [f"{_dep_base_name(dep)}[{label}]"
+                for dep in WORKER_DEPS for label in labels.values()]
+    missing = []
+    for dep in WORKER_DEPS:
+        base = _dep_base_name(dep)
+        dep_wheels = [w for w in wheels if w.startswith(base + "-")]
+        for plat, label in labels.items():
+            if not any(_wheel_supports_platform(w, plat) for w in dep_wheels):
+                missing.append(f"{base}[{label}]")
+    return missing
+
+
+def _log_platform_wheel_gaps() -> None:
+    """告警形式记录平台 wheel 缺口（缺失平台离线安装会回退在线）。"""
+    gaps = _missing_platform_wheels(WHEELS_DIR)
+    if gaps:
+        log.warning(
+            f"worker_package: bundled wheels lack platform coverage for {gaps}; "
+            f"offline installs on those platforms will fall back online "
+            f"(check PIP_INDEX={PIP_INDEX} has a compatible wheel for this Python version)")
 
 
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
@@ -698,6 +748,9 @@ def _ensure_wheels(py_version: str = "") -> str:
         # 下载静默失败）→ 缓存视为失效，走下方重下路径自愈
         _missing = _missing_dep_wheels(WHEELS_DIR)
         if not _missing:
+            # 平台覆盖第三道防线：基名齐全但目标平台无可用 wheel（如 pyyaml 缺
+            # win_amd64）只告警不重下——重下拿不到同样结果，会每次全量重试。
+            _log_platform_wheel_gaps()
             return WHEELS_DIR
         log.warning(
             f"worker_package: wheels cache hit but missing dep wheels "
@@ -728,6 +781,10 @@ def _ensure_wheels(py_version: str = "") -> str:
             f"worker_package: wheels incomplete after download, missing deps: "
             f"{_missing} (offline installs of these will fall back online; "
             f"check PIP_INDEX={PIP_INDEX} reachability)")
+    else:
+        # 基名齐全后补一层平台标签校验：pyyaml 等 C 扩展包缺 win_amd64 wheel 时
+        # 基名校验通过、Windows 离线装机才暴露（Issue #3874 审查建议）。
+        _log_platform_wheel_gaps()
     with open(marker, "w", encoding="utf-8") as f:
         # heal 路径 cur 被置空仅为绕过短路；写 marker 一律写当前完整键——
         # 自愈成功后的下一次调用应命中短路，不再多一次全量重下（架构守护观察1）

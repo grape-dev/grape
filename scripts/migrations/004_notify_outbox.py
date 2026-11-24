@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import sys
 
 _log = logging.getLogger(__name__)
@@ -62,8 +61,8 @@ def _ensure_status_index(conn) -> None:
     （MySQL 不支持 IF NOT EXISTS——与 001 的 _ensure_legacy_unique_index 同款处理）。
     建索引失败记 warning 不阻断启动（可重跑），不再静默吞错（QA #1314 S6）。
     """
-    import sqlite3 as _sqlite3
-    if isinstance(conn, _sqlite3.Connection):
+    from src.kernel.db_health import is_sqlite_conn  # 自愈代理接入后 SQLite 判别统一走它
+    if is_sqlite_conn(conn):
         try:
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS {_OUTBOX_STATUS_IDX} "

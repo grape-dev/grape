@@ -81,6 +81,8 @@ from src.domains.runtime.schema_ddl import (
     _CHAT_MESSAGES_DDL,
     _GLOBAL_IM_BOT_CONFIG_DDL,
     _IM_INSTANCE_DDL,
+    # Issue #3799：渠道健康状态表（runtime 域，ret=-14 暂停可观测）
+    _CHANNEL_HEALTH_DDL,
     _VOD_CONVERSATIONS_DDL,
     _ISSUE_DDL,
     _AGENT_TASKS_DDL,
@@ -108,6 +110,7 @@ from src.domains.runtime import migrations_ddl as runtime_mig
 from src.domains.insight import migrations_ddl as insight_mig
 from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
+from src.kernel import ddl_safety as _ddl_safety
 
 # ====== 新表 DDL ======
 
@@ -408,6 +411,9 @@ _NEW_TABLES = [
     ("grape_t_skill_file", _SKILL_FILE_DDL),
     ("grape_t_skill_comment", _SKILL_COMMENT_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
+    # Issue #3799：渠道健康状态（ret=-14 风控暂停）——runtime 域状态表，
+    # 管理台/告警与渠道写侧共用同一真源（进程重启后仍可见）。
+    ("grape_t_channel_health", _CHANNEL_HEALTH_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
@@ -876,35 +882,11 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
-def _strip_null_default(ddl: str) -> str:
-    """Issue #1546 修复：仅剥离尾部 `DEFAULT NULL`（与可空列的隐式默认完全等价）；
-    其它显式默认值（0/'' 等）原样保留——剥掉会改变历史行语义。"""
-    import re as _re
-    return _re.sub(r"\s+DEFAULT\s+NULL\s*$", "", (ddl or "").strip(), flags=_re.IGNORECASE)
-
-def _strip_text_default(ddl: str) -> str:
-    """剥离 TEXT 族的显式 DEFAULT（如 `TEXT DEFAULT ''`）。
-
-    2026-11-12 实测（MySQL 8.0.43）：带 DEFAULT 的 TEXT 列 INSTANT 与
-    INPLACE,LOCK=NONE 均不支持（1845），而 MySQL 接受语法后又**静默丢弃默认值**
-    （column_default 为 NULL）——语义上本就等价于无默认。剥离后即可用 INSTANT 补列，
-    避免「迁移盖章、列未建」的假绿（线上 202611120004 即此形态）。
-    """
-    import re as _re
-    d = (ddl or "").strip()
-    if not _re.search(r"\b(?:TINY|MEDIUM|LONG)?TEXT\b", d, _re.IGNORECASE):
-        return ddl
-    return _re.sub(r"\s+DEFAULT\s+.*$", "", d, flags=_re.IGNORECASE)
-
-
-
-class _NonOwnerObject(Exception):
-    """目标表在当前库中是视图（非 owner 域库）——跳过该条迁移且**不盖章**。
-
-    库按域拆分后，同一张表只有在 owner 库才是基表；其它域库拿到的是跨库只读视图。
-    视图既不能 ALTER、列又是快照，所以补列只能由 owner 库进程执行。抛这个异常
-    让执行器「跳过不盖章」，等 owner 库补齐后其它库自然收敛，而不是把版本号盖死。
-    """
+# DDL 安全带的纯函数/异常已下沉 kernel（PR #2009 I1）：db_setup 保留同名别名，
+# 既有调用点、测试与「执行器捕获本模块异常类」的约定都不变。
+_strip_null_default = _ddl_safety.strip_null_default
+_strip_text_default = _ddl_safety.strip_text_default
+_NonOwnerObject = _ddl_safety.NonOwnerObject
 
 
 def _base_table_present(c, tbl: str) -> bool:
@@ -1011,123 +993,30 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    raise_on_guard: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
+    实现已下沉 `src.kernel.ddl_safety.ensure_column`（PR #2009 I1：域模块不再
+    domains→api 反向依赖）；这里保留兼容包装，注入本模块的域守卫、人工处理清单、
+    MDL 等待异常，既有调用点与测试（monkeypatch `_owned_skip`）语义不变。
+
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
 
-    Issue #536 DDL 安全带（仅 MySQL 后端，SQLite 原样）：
-    1. 首选 ``ALGORITHM=INSTANT``（8.0 加可空列默认 INSTANT，不锁表）；
-    2. INSTANT 不支持 → 降级重试 ``ALGORITHM=INPLACE, LOCK=NONE``（显式声明，
-       做不到就报错而非默默锁全表）；
-    2.5 带 ``DEFAULT NULL`` 的 TEXT/MEDIUMTEXT 列上述两者都不支持（Issue #1546 实测）→
-       剥离该默认值后重试两者（与可空列隐式默认等价，不改历史行语义）；
-    3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
-       注意：此处不抛异常，调用方迁移仍会盖章 → 该列不会自动重试，只能另行补一条
-       幂等修复迁移（参考 202611090002）。
-
-    allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
-    补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
-    不加此开关时会被安全策略挡下导致列永远建不出来。
-
-    strict=True（注册式迁移专用）：所有降级分支都失败时 **raise** 而不是只记人工
-    清单后正常返回。理由：迁移执行器约定「fn 正常返回=盖章」，若这里静默返回，
-    列没建成也会盖死版本号，下次启动不再重试，线上表现为查询该列 1054 且接口
-    静默返回空 —— 与 2026-11-06 issue.vcs_exists 事故同态（QA 审查 M1）。
+    参数语义：
+    - allow_copy=True（小表迁移专用）：INSTANT/INPLACE 都不支持时允许默认算法 COPY；
+    - strict=True（注册式迁移专用）：所有降级分支失败时 raise，fn 抛错=不盖章；
+    - raise_on_guard=True：域归属守卫跳过时 raise（默认保持历史静默 False）。
     """
-    if not force and _owned_skip(tbl, "ensure column"):
-        # 2026-11-18 事故（category_dict 迁移 202611171846）：进程域判定不出/不是属主时
-        # 这里静默 return False，调用方 fn 正常返回 → 迁移照样盖章 → 列永不创建也不重试，
-        # 线上表现是 /api/runtime/scene-tags 500 `Unknown column 'cat_l1_id'`。
-        # ⚠️ 默认保持静默：存量 14 个 strict=True 调用点里有 7 条迁移的属主域与注册域不一致，
-        # 全局改成抛错会把它们一起引爆。需要「跳过即失败」的迁移显式传 raise_on_guard=True。
-        if raise_on_guard:
-            raise RuntimeError(
-                f"_ensure_column({tbl}.{col}) 被域归属守卫跳过（本进程非该表属主），"
-                f"raise_on_guard=True 拒绝静默盖章——迁移应在属主域执行或改用 force=True")
-        return False
-    cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
-    if col in cols:
-        return
-    if not _is_base_table(c, tbl):
-        # 非 owner 库的视图：ALTER 必然 1347，且视图列是建视图时快照 —— 必须由
-        # owner 库补列 + 重建视图。**跳过且不盖章**（抛给迁移执行器，下次启动重试），
-        # 否则版本被盖死、列永不创建，线上表现为查询该列 1054 静默失败。
-        raise _NonOwnerObject(
-            f"{tbl}.{col}: 当前库中是视图（非 owner），需 owner 库补列并重建视图后重试")
-    base_sql = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {ddl}"
-    if not _mysql_backend():
-        c.execute(base_sql)
-        return
-    # MySQL：INSTANT → INPLACE,LOCK=NONE → 人工清单（绝不静默 COPY）
-    try:
-        c.execute(f"{base_sql}, ALGORITHM=INSTANT")
-        return
-    except Exception as _instant_err:
-        if _is_mdl_timeout(_instant_err):
-            # QA Minor：INSTANT 失败若因 MDL 超时（1205）是「被阻塞」而非「不支持」，
-            # 不降级重试——直接转 _MdlWaitTimeout 由执行器跳过不盖章（legacy 路径
-            # 记入 _LEGACY_BLOCKED_DDL，阻止盖帽待下次重试）。
-            _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-            raise _MdlWaitTimeout(str(_instant_err))
-        log.warning(f"_ensure_column({tbl}.{col}) ALGORITHM=INSTANT failed: {_instant_err}，"
-                    f"降级重试 ALGORITHM=INPLACE, LOCK=NONE")
-    try:
-        c.execute(f"{base_sql}, ALGORITHM=INPLACE, LOCK=NONE")
-        return
-    except Exception as _inplace_err:
-        if _is_mdl_timeout(_inplace_err):
-            _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-            raise _MdlWaitTimeout(str(_inplace_err))
-        # Issue #1546 修复（2026-11-09）：带 DEFAULT NULL 的 TEXT/MEDIUMTEXT 列在 MySQL 上
-        # INSTANT 与 INPLACE,LOCK=NONE 均不支持；此前直接落人工清单后正常返回 → 迁移照样盖章、
-        # 列永不创建也不重试（SQLite 全绿，生产运行时才 1054）。DEFAULT NULL 与可空列隐式默认
-        # 等价，剥离后重试，既能把列补上、又不必退到 COPY 锁全表。
-        _ddl_nd = _strip_null_default(ddl)
-        if _ddl_nd != ddl:
-            _base_nd = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_nd}"
-            for _algo_nd in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
-                try:
-                    c.execute(f"{_base_nd}, {_algo_nd}")
-                    log.info(f"_ensure_column({tbl}.{col}) 剥离 DEFAULT NULL 后补列成功（{_algo_nd}）")
-                    return
-                except Exception as _nd_err:
-                    if _is_mdl_timeout(_nd_err):
-                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-                        raise _MdlWaitTimeout(str(_nd_err))
-                    _inplace_err = _nd_err
-        # TEXT 族的显式 DEFAULT（例如 202611100001 的 "TEXT DEFAULT ''"）在 MySQL 上
-        # INSTANT/INPLACE 均不支持，且 MySQL 会静默丢弃该默认值——剥离后重试即可补列。
-        _ddl_td = _strip_text_default(ddl)
-        if _ddl_td != ddl and _ddl_td != _ddl_nd:
-            _base_td = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {_ddl_td}"
-            for _algo_td in ("ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE"):
-                try:
-                    c.execute(f"{_base_td}, {_algo_td}")
-                    log.info(f"_ensure_column({tbl}.{col}) 剥离 TEXT 默认值后补列成功（{_algo_td}）")
-                    return
-                except Exception as _td_err:
-                    if _is_mdl_timeout(_td_err):
-                        _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
-                        raise _MdlWaitTimeout(str(_td_err))
-                    _inplace_err = _td_err
-        if allow_copy:
-            _copy_sql = base_sql.replace(ddl, _ddl_td) if _ddl_td != ddl else base_sql
-            try:
-                c.execute(_copy_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
-                log.info(f"_ensure_column({tbl}.{col}) INPLACE 不支持 → 已按默认算法(COPY)补列")
-                return
-            except Exception as _copy_err:
-                entry = (f"{tbl}.{col}: INSTANT/INPLACE/默认算法(COPY) 均失败 "
-                         f"({_copy_err})——需人工处理")
-                _DDL_MANUAL_REVIEW.append(entry)
-                log.error(f"_ensure_column MANUAL REVIEW: {entry}")
-                if strict:
-                    raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
-                return
-        entry = (f"{tbl}.{col}: INSTANT 与 INPLACE,LOCK=NONE 均失败 "
-                 f"(INPLACE err={_inplace_err})——需人工处理，未静默 COPY")
-        _DDL_MANUAL_REVIEW.append(entry)
-        log.error(f"_ensure_column MANUAL REVIEW: {entry}")
-        if strict:
-            raise RuntimeError(f"_ensure_column 补列失败（strict）: {entry}")
+    return _ddl_safety.ensure_column(
+        c, tbl, col, ddl,
+        allow_copy=allow_copy, strict=strict, force=force,
+        raise_on_guard=raise_on_guard,
+        guard=_owned_skip,
+        is_base_table=_is_base_table,
+        mysql_backend=_mysql_backend,
+        manual_review=_DDL_MANUAL_REVIEW,
+        blocked_ddl=_LEGACY_BLOCKED_DDL,
+        non_owner_exc=_NonOwnerObject,
+        mdl_exc=_MdlWaitTimeout,
+        is_mdl_timeout_fn=_is_mdl_timeout,
+    )
 
 
 def _rename_column_if_exists(c, tbl: str, old: str, new: str):
@@ -2505,7 +2394,7 @@ def _normalize_org_domain_text(conn) -> int:
     rebuilt = False
 
     # ① organization.id 主键（TEXT PK 重建，owner_id 随批）
-    _cols = c.execute("PRAGMA table_info(organization)").fetchall()
+    _cols = _ddl_safety.table_info_rows(c, "organization")
     if _cols:
         _decl = next((r[2] or "" for r in _cols if r[1] == "id"), None)
         if _decl is not None and _decl.strip().upper() != "TEXT":
@@ -2514,7 +2403,7 @@ def _normalize_org_domain_text(conn) -> int:
 
     # ② 引用列 TEXT 亲和归一（保值）
     for table, col in _ORG_DOMAIN_TEXT_COLS:
-        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        _cols = _ddl_safety.table_info_rows(c, table)
         if not _cols:
             continue
         _decl = next((r[2] or "" for r in _cols if r[1] == col), None)
@@ -2530,7 +2419,7 @@ def _normalize_org_domain_text(conn) -> int:
 
     # ③ 哨兵改写：0 → ''（''=全局/未归属；对齐 owner 列 ''=unowned 口径）
     for table, col in _ORG_SENTINEL_COLS:
-        _cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        _cols = _ddl_safety.table_info_rows(c, table)
         if not _cols or not any(r[1] == col for r in _cols):
             continue
         changed += c.execute(
@@ -4219,14 +4108,10 @@ def _fn_checksum(fn: Callable[[], None]) -> str:
         return ""
 
 
-class _MdlWaitTimeout(Exception):
-    """MySQL MDL 等待超时（错误码 1205 / Lock wait timeout）——跳过该条迁移不盖章。"""
-
-
-def _is_mdl_timeout(err: Exception) -> bool:
-    s = str(err).lower()
-    return ("lock wait timeout" in s or "1205" in s
-            or "metadata lock" in s or "metadata_locks" in s)
+# PR #2009 I1：MDL 异常与判定下沉 kernel，db_setup 只保留同名别名；
+# 域迁移（kernel.ensure_column 默认实现）与本模块抛/捕获的是同一组类。
+_MdlWaitTimeout = _ddl_safety.MdlWaitTimeout
+_is_mdl_timeout = _ddl_safety.is_mdl_timeout
 
 
 def _query_mdl_holders(err: Exception) -> str:
@@ -4776,6 +4661,13 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 verify_category_collapse(conn=conn)
             except Exception as e:  # noqa: BLE001
                 failures.append(f"mgmt 分类字典后置校验失败: {e}")
+            try:
+                from src.domains.mgmt.migrations.org_repo_create_options import (
+                    verify_org_repo_create_columns,
+                )
+                verify_org_repo_create_columns(conn=conn)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"mgmt organization 仓库创建选项列后置校验失败: {e}")
         if dom in ("", "runtime"):
             try:
                 from src.domains.runtime.migrations.skill_detail_tables import (
@@ -4790,7 +4682,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
         if raise_on_fail:
             raise RuntimeError(msg)
     else:
-        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列）")
+        log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列）")
     return failures
 
 
@@ -8307,6 +8199,71 @@ register_migration(
 )
 
 
+def _fn_strip_org_analysis_reserved_fields() -> None:
+    """清掉组织分析自动化里的系统保留 custom_fields（幂等）。
+
+    历史 ensure_analysis_task 会写入 GRAPE_MANAGED_BY / GRAPE_ORG_ID /
+    GRAPE_ANALYSIS_MODE。GRAPE_* 是保留环境变量：前端自定义配置页标红、保存被拒，
+    执行侧也拒绝注入（日志 `custom env ... rejected`）。现在 org_id/mode 由任务
+    指令和本次运行参数提供，受管身份走 skill_name；这些字段不再生成，存量行在此
+    一次性删除。
+    """
+    _names = {"GRAPE_MANAGED_BY", "GRAPE_ORG_ID", "GRAPE_ANALYSIS_MODE"}
+    from src.kernel.mysql_compat import get_db_backend
+
+    with db_lock:
+        c = db.cursor()
+        if get_db_backend() == "mysql":
+            _tbl = c.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=DATABASE() AND table_name='autopilot_tasks'"
+            ).fetchone()
+        else:
+            _tbl = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='autopilot_tasks'"
+            ).fetchone()
+        if not _tbl:
+            log.info("202611201700 autopilot_tasks 不存在，跳过")
+            return
+        rows = c.execute(
+            "SELECT id, custom_fields FROM autopilot_tasks "
+            "WHERE custom_fields LIKE '%GRAPE%'"
+        ).fetchall()
+        changed = 0
+        for _task_id, _raw in rows:
+            try:
+                fields = json.loads(_raw or "[]")
+            except Exception:
+                continue
+            if not isinstance(fields, list):
+                continue
+            cleaned = [
+                f for f in fields
+                if not (isinstance(f, dict)
+                        and str(f.get("name") or "").strip() in _names)
+            ]
+            if len(cleaned) == len(fields):
+                continue
+            c.execute(
+                "UPDATE autopilot_tasks SET custom_fields=? WHERE id=?",
+                (json.dumps(cleaned, ensure_ascii=False) if cleaned else "", _task_id),
+            )
+            changed += 1
+        db.commit()
+    if changed:
+        log.info(f"202611201700 已清理 {changed} 个自动化任务的保留 custom_fields")
+
+
+register_migration(
+    version="202611201700",
+    name="strip-org-analysis-reserved-custom-fields",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_strip_org_analysis_reserved_fields,
+)
+
+
 # 已盖章迁移的源码（含 docstring）是 checksum 冻结面：改动会让每次启动报"漂移"。
 # 因此下面的原 docstring 保持盖章时的原文；与事实不符之处在此更正：
 #   - meta 的 global_bot_*_token 是**历史明文**，本迁移会把它原样搬进 bot_token_enc
@@ -10975,6 +10932,26 @@ register_migration(
     fn=_fn_add_org_repo_create_options,
 )
 
+
+# ===== 组织仓库创建选项：假盖章修复（2026-11-23）=====
+# 202611183011 在部分库已盖章但 organization 仍缺 5 列（实测 POST /api/orgs 1054）。
+# 老迁移的 strict/raise_on_guard 补不上——版本号已判「已执行」，改它只改 checksum。
+# 用新号幂等重跑：strict + raise_on_guard + post_check，列不全不盖章，下次启动重试。
+# SQL 住属主域 migrations 下（organization owner=mgmt）。
+from src.domains.mgmt.migrations.org_repo_create_options import (
+    ensure_org_repo_create_columns as _ensure_org_repo_create_columns,
+    verify_org_repo_create_columns as _verify_org_repo_create_columns,
+)
+
+register_migration(
+    version="202611230012",
+    name="repair-org-repo-create-options",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_ensure_org_repo_create_columns,
+    post_check=_verify_org_repo_create_columns,
+)
+
 # ===== 组织仓库地图（MD-first） =====
 def _fn_create_org_repo_map_table() -> None:
     if _owned_skip("grape_t_org_repo_map", "create table"):
@@ -11674,3 +11651,59 @@ from src.domains.runtime.migrations.skill_category_cutover import (
     MIGRATION as _M_SKILL_CUTOVER_MAP,
 )
 register_migration(**_M_SKILL_CUTOVER_MAP)
+
+
+# ===== Autopilot 环境性失败退避/熔断（Issue #3800）=====
+# 材质回写与列名同源于属主域（跨域守卫 P0-2），这里只做登记：
+#   mgmt 侧 202611230003：autopilot_tasks 增 5 列（连续失败/错误码/离线起算/退避截止/熔断位）；
+#   runtime 侧 202611230004：autopilot_executions 增 error_code（失败分类落库）。
+# 两条均 kind=safe + post_check（列存在性可判定才盖章）。version/name/kind 用字面量
+# 登记（不用 `**_MIGRATION`），否则 tests/api/test_migration_track_guard.py 的
+# 版本号唯一性与格式守卫解析不出该条，会漏看。
+
+from src.domains.mgmt.migrations.autopilot_failure_state import (
+    add_failure_state_columns as _fn_autopilot_failure_state_columns,
+    verify_failure_state_columns as _post_autopilot_failure_state_columns,
+)
+register_migration(
+    version="202611230003",
+    name="autopilot-task-failure-state-columns",
+    kind="safe",
+    fn=_fn_autopilot_failure_state_columns,
+    domains=("mgmt",),
+    post_check=_post_autopilot_failure_state_columns,
+)
+
+from src.domains.runtime.migrations.autopilot_execution_error_code import (
+    add_error_code_column as _fn_autopilot_exec_error_code,
+    verify_error_code_column as _post_autopilot_exec_error_code,
+)
+register_migration(
+    version="202611230004",
+    name="autopilot-execution-error-code",
+    kind="safe",
+    fn=_fn_autopilot_exec_error_code,
+    domains=("runtime",),
+    post_check=_post_autopilot_exec_error_code,
+)
+
+
+# ===== 存量 custom_fields 保留前缀清理（Issue #4066）=====
+# 写侧此前不校验 autopilot custom_fields，非法/保留条目长期留库、每次执行刷
+# `custom env ... rejected` WARNING。SQL 住属主域 migrations 下（跨域守卫 P0-2）：
+#   mgmt 侧 202611240001：清理 autopilot_tasks.custom_fields 与
+#   devops_pipeline_scene.advanced_options.custom_fields 的非法条目（幂等 + post_check）。
+# 字面量登记 version/name/kind，供 tests/api/test_migration_track_guard.py 解析。
+
+from src.domains.mgmt.migrations.autopilot_custom_fields_cleanup import (
+    cleanup_invalid_custom_fields as _fn_autopilot_cf_cleanup,
+    verify_custom_fields_clean as _post_autopilot_cf_cleanup,
+)
+register_migration(
+    version="202611240001",
+    name="autopilot-custom-fields-cleanup",
+    kind="cleanup",
+    fn=_fn_autopilot_cf_cleanup,
+    domains=("mgmt",),
+    post_check=_post_autopilot_cf_cleanup,
+)

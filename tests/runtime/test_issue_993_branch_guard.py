@@ -390,8 +390,7 @@ def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
     fake_py = fake_bin / "python3"
     fake_py.write_text('#!/bin/sh\ncat > "$GUARD_SEEN"\n')
     fake_py.chmod(0o755)
-    # 钩子使用 sys.executable（不依赖 PATH 里的 python3），安装时注入假解释器。
-    monkeypatch.setattr(bg.sys, "executable", str(fake_py))
+    # Issue #3579：钩子运行时 command -v python3 解析解释器，测试通过 PATH 注入假解释器。
     assert bg.install_pre_push_hook(str(base), REPO_KEY) is True
     hooks = Path(bg._hooks_dir(str(base)))
 
@@ -402,6 +401,10 @@ def test_installed_hook_feeds_stdin_to_local_and_guard(tmp_path, monkeypatch):
 
     guard_seen = tmp_path / "guard-stdin.txt"
     env = os.environ.copy()
+    # Issue #3579（QA 复审）：钩子解释器按 GRAPE_PYTHON → VIRTUAL_ENV → .venv → PATH
+    # 解析；本用例注入 PATH 假解释器，需先清掉高优先级来源，保证确定性。
+    env.pop("GRAPE_PYTHON", None)
+    env.pop("VIRTUAL_ENV", None)
     env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
     env["LOCAL_SEEN"] = str(local_seen)
     env["GUARD_SEEN"] = str(guard_seen)

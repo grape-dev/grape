@@ -809,7 +809,7 @@ fi
 # 2026-11-20：补 fastapi——pyproject [worker] 与 WORKER_DEPS 早已声明，脚本硬列表
 # 没跟上，Windows 装机后任务链路 `stream failed: No module named 'fastapi'`
 # （`src.domains.mgmt.public` 的历史导入面）。三处清单必须同源。
-WORKER_DEPS="aiohttp bcrypt click httpx cubesandbox requests cryptography fastapi"
+WORKER_DEPS="aiohttp bcrypt click httpx cubesandbox requests cryptography fastapi pyyaml"
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"

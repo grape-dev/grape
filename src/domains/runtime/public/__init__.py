@@ -1449,11 +1449,26 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                  int(a.get("probe_latency") or 0), now_iso,
                  1 if a.get("healthy") else 0))
             rid = int(c.lastrowid or 0)
+            # Issue #3396 A8 兼容：本机发现若带角色声明（role_tags），按声明播种；
+            # 无声明维持存量口径补 'all'（任意角色可认领）。
+            _seed_roles_l: list = []
+            try:
+                _dr = a.get("role_tags")
+                if isinstance(_dr, list):
+                    _seed_roles_l = [str(t).strip().lower() for t in _dr if str(t).strip()]
+            except Exception:
+                _seed_roles_l = []
+            try:
+                from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES as _KAR_L
+                _seed_roles_l = [t for t in dict.fromkeys(_seed_roles_l) if t in _KAR_L]
+            except Exception:
+                _seed_roles_l = []
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
             if not c.fetchone():
-                c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                          "enabled, created_at, updated_at) VALUES (?,'all',1,50,1,?,?)",
-                          (rid, now_iso, now_iso))
+                for _t in (_seed_roles_l or ["all"]):
+                    c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
+                              "enabled, created_at, updated_at) VALUES (?,?,1,50,1,?,?)",
+                              (rid, _t, now_iso, now_iso))
             c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]
@@ -1914,7 +1929,10 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("runtime"))}
 
 
-__all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_session', 'update_agent_session_fields', 'delete_agent_sessions', 'update_issue_agent_session_fields', "available", "list_runtimes", "list_runtimes_rows", "get_runtime",
+__all__ = ['reconcile_pipeline_progress', 'create_task_via_issue',
+           'finalize_org_issue_aggregation', 'get_issue_task_digests',
+           'get_latest_task_digest', 'update_event_status', 'trigger_org_aggregate',
+           'ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_session', 'update_agent_session_fields', 'delete_agent_sessions', 'update_issue_agent_session_fields', "available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
@@ -2645,6 +2663,11 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, "
         "skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?"),
     "runtime_exists_any": "SELECT 1 FROM agent_runtimes WHERE id=?",
+    # Issue #3396 F3：api 层鉴权（require_runtime_owner_or_admin）读运行域归属的具名查询，
+    # 收敛 `agent_runtimes←api` / `runtime_credentials←api` 的裸 SQL 跨域引用。
+    "runtime_credential_ref_any": "SELECT credential_id FROM agent_runtimes WHERE id=?",
+    "runtime_credential_owner_org_any": (
+        "SELECT COALESCE(owner_name,''), COALESCE(org_id,'') FROM runtime_credentials WHERE id=?"),
     # 引擎实例解析（engine/instances.py：三库独立后同域代码也必须走 owner 连接）
     "runtimes_for_instance_scan": (
         "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status "
@@ -2912,7 +2935,15 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_id_official": (
         "SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1"),
     "skill_id_by_owner_scope": (
-        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+        "SELECT id, display_name FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+    # Issue #3855：同 scope 重名校验取该 scope 下全部 active 行，比较留 Python 侧
+    # （去首尾空格 + casefold），避免依赖 MySQL/SQLite 各异的 LOWER/TRIM 语义。
+    "skill_display_names_by_scope": (
+        "SELECT id, display_name FROM skill WHERE scope=? AND owner_id=? AND is_active=1"),
+    # 官方技能 owner_id 历史存在 '' 与 0 两种写法（plugins/registry.py 曾用 0），
+    # 重名校验必须只按 scope 取数，不能把 owner_id 当作官方档的过滤条件。
+    "skill_display_names_by_official_scope": (
+        "SELECT id, display_name FROM skill WHERE scope='official' AND is_active=1"),
     "skill_scope_repo_owner": (
         "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
         "AND is_active=1 LIMIT 1"),
@@ -2956,8 +2987,8 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
     "skill_meta_patch_update": (
         "UPDATE skill SET description=?, agent_type=?, category_id=?, cat_l1_id=?, "
-        "cat_l2_id=?, tags=?, summary=?, updated_by=?, updated_at=datetime('now') "
-        "WHERE id=?"),
+        "cat_l2_id=?, tags=?, summary=?, display_name=?, updated_by=?, "
+        "updated_at=datetime('now') WHERE id=?"),
     "skill_download_inc": (
         "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
     "skill_intro_override_update": (
@@ -6231,11 +6262,11 @@ def skills_by_ids(skill_ids) -> list[tuple]:
 
 
 def skills_by_names_scoped(skill_names, scopes=("official", "repo")) -> list[tuple]:
-    """按名字批量取技能，**限定作用域**，并给出确定性顺序。
+    """按名字批量取技能，**限定作用域**并给出确定性顺序。
 
-    `skill` 表的唯一性是 `UNIQUE (skill_name, scope, owner_id)`，也就是**同名技能可以
-    在不同 scope 下各有一条**。因此按名字解析必须限定作用域，且顺序确定（scope 优先级
-    列表顺序 → id 升序），否则会出现「显示/绑定到了另一条同名技能」。
+    `skill` 表的唯一性是 `UNIQUE (skill_name, scope, owner_id)`，同名技能可在不同 scope
+    下各有一条。因此按名字解析必须限定作用域并固定顺序（scope 优先级 → id 升序），
+    否则会出现「显示/绑定到了另一条同名技能」。
 
     返回行：(id, skill_name, display_name, agent_type, description, scope)
     """
@@ -6262,10 +6293,7 @@ def skills_by_names_scoped(skill_names, scopes=("official", "repo")) -> list[tup
 
 
 def resolve_skills_by_names(skill_names, scopes=("official", "repo")) -> dict:
-    """名字 → 行（确定性）。同名多命中时取作用域优先级最高、id 最小的一条。
-
-    用途仅限**读取/展示与绑定修复**：不要在没有作用域限定的情况下按名字猜 id。
-    """
+    """名字 → 行（确定性）。同名多命中时取作用域优先级最高、id 最小的一条。"""
     out = {}
     for row in skills_by_names_scoped(skill_names, scopes):
         out.setdefault(str(row[1]), row)
@@ -6273,10 +6301,9 @@ def resolve_skills_by_names(skill_names, scopes=("official", "repo")) -> dict:
 
 
 def skill_names_active_scoped(skill_names, scopes=("official", "repo")) -> set:
-    """名字 → 是否仍有**启用且属于给定作用域**的技能（判定「已删除」的收窄口径）。
+    """名字 → 是否仍有启用且属于给定作用域的技能（「已删除」判定的收窄口径）。
 
-    与 `scene_sync._query_active_skill_names` 的 `is_active=1 AND scope IN ('official','repo')`
-    保持一致：个人/repo 副本不得把官方的真实删除洗白。
+    与 scene_sync._query_active_skill_names 的 `is_active=1 AND scope IN ('official','repo')` 一致。
     """
     return set(resolve_skills_by_names(skill_names, scopes).keys())
 
@@ -7190,6 +7217,14 @@ def node_matches_agent_role(node, role) -> bool:
     return _impl(node, role)
 
 
+def precheck_scene(scene_id: str, repo_key: str = "", user: dict | None = None,
+                   explicit: bool = True) -> dict:
+    """场景可执行性预校验（只读；供 mgmt 下派场景目录复用同一把尺子）。"""
+    from src.domains.runtime.scene_precheck import precheck_scene as _impl
+
+    return _impl(scene_id, repo_key, user=user, explicit=explicit)
+
+
 def selector_candidate_engines(selector: dict, agent_type: str, repo_key: str = "",
                                user_id: int = 0) -> tuple:
     """selector 候选集 + 分层排除原因（入队即时校验）。"""
@@ -7250,11 +7285,15 @@ def resolve_default_engine(repo_key: str, agent_type: str = "") -> int | None:
 
 
 def query_engines(repo_key: str, scope: str, agent_type: str = "",
-                  username: str = "") -> list[dict]:
-    """某仓库在某档位的候选引擎（repo/global/local）。"""
+                  username: str = "", user_id: int | str = 0) -> list[dict]:
+    """某仓库在某档位的候选引擎（repo/global/local/user）。
+
+    user scope：user_id 非空时按 owner_id 精确过滤（2026-11-20），
+    owner_id 为空的存量行用 username 兜底。
+    """
     from src.domains.runtime.engine.engine_select import query_engines as _impl
 
-    return _impl(repo_key, scope, agent_type, username)
+    return _impl(repo_key, scope, agent_type, username, user_id)
 
 
 def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
@@ -7912,6 +7951,27 @@ def outbox_requeue_for_retry(out_track_id: str) -> bool:
     return _impl(out_track_id)
 
 
+def channel_health_rows() -> list:
+    """渠道健康快照（Issue #3799）：paused / last_pause_at / next_retry_at / 告警态。
+
+    管理台渠道卡片与告警面板的**唯一读口**（表 owner=runtime，跨域只能走本函数）。
+    """
+    from src.domains.runtime.im.channel_health import health_rows as _impl
+
+    return _impl()
+
+
+def channel_recover_channel(installation_id: str, action: str, engine=None) -> dict:
+    """人工恢复入口（Issue #3799）：`relogin / clear_pause / retry_now`。
+
+    返回 `{ok, action, installation_id, reason, health}`；无引擎的进程返回
+    `engine_unavailable`（不改状态，不假装成功）。
+    """
+    from src.domains.runtime.im.channel_health import recover_channel as _impl
+
+    return _impl(installation_id, action, engine=engine)
+
+
 def dingtalk_card_client(app_id: str, app_secret: str):
     """构造钉钉互动卡片实例客户端。"""
     from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient as _C
@@ -8127,3 +8187,75 @@ def storage_delete_object(obs_key: str) -> bool:
         return False
     storage.delete_object(obs_key)
     return True
+
+
+def reconcile_pipeline_progress(limit: int = 200,
+                                lookback_hours: float | None = None) -> dict:
+    """确定性流水线推进对账（跨域契约口）。
+
+    供 mgmt 侧 patrol / 手动接口调用：任务 completed 但 Issue.stage 未前进时，
+    按场景 next/handoff 幂等推进。实现见 runtime 域 ``pipeline_reconcile``；
+    本函数是对外契约面，调用方不得直接 import 域内部模块（H3）。
+    """
+    from src.domains.runtime.engine.pipeline_reconcile import (
+        reconcile_pipeline_progress as _impl,
+    )
+
+    # 契约口自带上限：手动入口可传大值，但单轮扫描不应无界占用 runtime 域。
+    bounded = max(1, min(int(limit or 200), 500))
+    return _impl(limit=bounded, lookback_hours=lookback_hours)
+
+
+async def create_task_via_issue(body: dict, user: dict | None = None) -> dict:
+    """统一建单契约口（mgmt 组织下派等跨域调用；内部走 runtime issues_center）。"""
+    from src.domains.runtime.issues_center import (
+        TaskCreateBody,
+        create_task_via_issue as _impl,
+    )
+
+    return await _impl(TaskCreateBody(**(body or {})), user=user or {})
+
+
+def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
+                                   terminal_status: str, **kwargs) -> dict:
+    """组织 Issue 聚合收口契约口（mgmt 下派 sweeper 跨域调用）。"""
+    from src.domains.runtime.issues_center import (
+        finalize_org_issue_aggregation as _impl,
+    )
+
+    return _impl(dispatch, targets, terminal_status, **kwargs)
+
+
+def get_issue_task_digests(repo_key: str, issue_id: str = "",
+                           agent_types: tuple = ("coding", "qa", "sre", "issue", "vod"),
+                           limit: int = 3) -> list[dict]:
+    """任务结构化产出摘要契约口（组织聚合回填）。"""
+    from src.domains.runtime.event_store import get_issue_task_digests as _impl
+
+    return _impl(repo_key, issue_id, agent_types=agent_types, limit=limit)
+
+
+def get_latest_task_digest(repo_key: str, issue_id: str = "",
+                           task_id: str = "") -> dict:
+    """单任务结构化产出摘要契约口（组织聚合回填）。"""
+    from src.domains.runtime.event_store import get_latest_task_digest as _impl
+
+    return _impl(repo_key, issue_id, task_id=task_id)
+
+
+def update_event_status(seq: int, status: str, result: str = "",
+                        exit_code: int | None = None):
+    """事件状态写契约口（mgmt 取消/重试目标时跨域写）。"""
+    from src.domains.runtime.event_store import update_event_status as _impl
+
+    return _impl(seq, status, result=result, exit_code=exit_code)
+
+
+def trigger_org_aggregate(dispatch: dict, targets: list[dict] | None,
+                          terminal_status: str) -> dict:
+    """组织批次终态 → 幂等持久化聚合重排事件（跨域契约口）。"""
+    from src.domains.runtime.a2a_aggregate import (
+        trigger_org_aggregate as _impl,
+    )
+
+    return _impl(dispatch, targets, terminal_status)

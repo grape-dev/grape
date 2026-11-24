@@ -35,6 +35,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 from src.kernel.config import log
+from src.kernel.lock_instrument import lock_owner
 
 # ===== 配置（可环境变量调优）=====
 
@@ -244,6 +245,103 @@ def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal 
     return max(0, min(100, score))
 
 
+def _snapshot_read_lock():
+    """快照读的锁选择：MySQL 每线程连接可无锁读；SQLite 单连接仍需串行。
+
+    Issue #3927：refactor 后聚合在锁外，快照 SELECT 在 MySQL 亦可脱离进程级锁，
+    从而把 refresh 的单引擎临界区压到健康分写回的一次短 UPDATE。
+    """
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        if _is_mysql_backend():
+            from contextlib import nullcontext
+            return nullcontext()
+    except Exception:  # noqa: BLE001 - 探测失败按 SQLite 保守处理
+        pass
+    return _lock()
+
+
+def _snapshot_task_rows(runtime_id: int, window: str) -> tuple[list, str]:
+    """Issue #3927：短锁快照读——只取行，不做聚合。
+
+    只发两条 SELECT 并 fetchall（取窗口内终态行 + 最近一条状态），聚合计算
+    在 `_aggregate_task_rows` 里锁外完成，避免 COUNT/SUM 大扫描 + 逐行判断占用
+    进程级 `_lock()`。MySQL 下快照读整体不持进程锁。异常时返回空快照。
+    """
+    rows: list = []
+    last_status = ""
+    try:
+        with lock_owner(f"health:stats:{runtime_id}"):
+            with _snapshot_read_lock():
+                c = _db().cursor()
+                c.execute(
+                    "SELECT status, completed_at FROM agent_tasks "
+                    "WHERE runtime_id=? AND created_at >= ? "
+                    "AND status IN ('completed','failed','cancelled') "
+                    "ORDER BY completed_at DESC",
+                    (runtime_id, window))
+                rows = list(c.fetchall() or [])
+                c.execute(
+                    "SELECT status FROM agent_tasks "
+                    "WHERE runtime_id=? ORDER BY completed_at DESC LIMIT 1",
+                    (runtime_id,))
+                last = c.fetchone()
+                if last:
+                    last_status = last[0] or ""
+    except Exception as e:
+        log.warning(f"health_scorer: snapshot_task_rows failed for runtime={runtime_id}: {e}")
+    return rows, last_status
+
+
+def _aggregate_task_rows(rows: list, decay: str, last_status: str = "") -> dict:
+    """Issue #3927：锁外聚合（纯函数，便于单测/无锁调用）。
+
+    口径与原 SQL 聚合一致：
+    - total/failed/completed 来自窗口内终态行；
+    - failed_effective 按 completed_at ≥ 衰减窗口起点（None 不计）；
+    - consecutive_failures 从最近一条终态倒序，遇到非 failed 即停；最近失败
+      已滚出衰减窗口 → 清零（Issue #498 自愈）。
+    """
+    total = len(rows)
+    failed = 0
+    completed = 0
+    failed_effective = 0
+    consec = 0
+    last_failure_at = ""
+    for st, comp_at in rows:
+        if st == "failed":
+            failed += 1
+            if comp_at and comp_at >= decay:
+                failed_effective += 1
+        elif st == "completed":
+            completed += 1
+    # rows 已按 completed_at DESC 排序：连续失败统计到第一个非失败为止
+    # （与原 SQL `ORDER BY completed_at DESC LIMIT 50` 口径一致，最多看 50 条）
+    for idx, (st, comp_at) in enumerate(rows):
+        if idx >= 50:
+            break
+        if st == "failed":
+            if not last_failure_at and comp_at:
+                last_failure_at = comp_at
+            consec += 1
+        else:
+            break
+    if last_failure_at:
+        from src.domains.runtime.engine.health import parse_dt
+        ts = parse_dt(last_failure_at)
+        if ts is not None and (time.time() - ts) > _FAILURE_DECAY_HOURS * 3600:
+            consec = 0
+    return {
+        "total": total,
+        "failed": failed,
+        "completed": completed,
+        "failed_effective": failed_effective,
+        "consecutive_failures": consec,
+        "last_failure_at": last_failure_at,
+        "last_status": last_status or "",
+    }
+
+
 def _fetch_task_stats(runtime_id: int) -> dict:
     """从 agent_tasks 表查询近 N 天的任务执行统计。
 
@@ -256,6 +354,9 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     `created_at >= ?` 字符串比较与 `ORDER BY completed_at DESC` 排序两侧口径一致
     （空格格式会在同日第 11 位 T(0x54) vs 空格(0x20) 上误判，赦免失效）。
 
+    Issue #3927：改为「短锁快照读 + 锁外聚合」，单引擎临界区只覆盖快照 SELECT，
+    聚合（COUNT/SUM 等价计算）移出进程级全局锁，避免与 complete 终态写互堵。
+
     Issue #498 失败衰减（自愈）：
     - failed_effective：completed_at ≥ 衰减窗口起点的失败数（老失败不计入健康分）
     - last_failure_at：最近一次失败时间（排障透出）
@@ -263,69 +364,8 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     """
     window = _to_sql_utc(_effective_window_start(runtime_id))
     decay = _decay_start()
-    result = {"total": 0, "failed": 0, "completed": 0,
-              "consecutive_failures": 0, "last_status": "",
-              "failed_effective": 0, "last_failure_at": ""}
-    try:
-        with _lock():
-            c = _db().cursor()
-            # 近 N 天总任务数 + 失败数 + 完成数 + 衰减窗口内失败数（Issue #498）
-            c.execute(
-                "SELECT COUNT(*), "
-                "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN status='failed' AND completed_at >= ? THEN 1 ELSE 0 END) "
-                "FROM agent_tasks "
-                "WHERE runtime_id=? AND created_at >= ? "
-                "AND status IN ('completed','failed','cancelled')",
-                (decay, runtime_id, window))
-            row = c.fetchone()
-            if row:
-                # 2026-10-23 Decimal 崩溃修复：MySQL 后端 SUM()/COUNT(*) 返回
-                # decimal.Decimal（SQLite 返回 int），从 DB 回来的第一时间归一成
-                # int。or 0 保留“SUM 无匹配行返回 None”的兜底语义。
-                result["total"] = int(row[0] or 0)
-                result["failed"] = int(row[1] or 0)
-                result["completed"] = int(row[2] or 0)
-                result["failed_effective"] = int(row[3] or 0)
-
-            # 连续失败次数：从最近一条终态任务倒序遍历，统计连续 failed
-            # （Issue #498：同时取 completed_at 记录最近失败时间，用于衰减判定）
-            c.execute(
-                "SELECT status, completed_at FROM agent_tasks "
-                "WHERE runtime_id=? AND created_at >= ? "
-                "AND status IN ('completed','failed','cancelled') "
-                "ORDER BY completed_at DESC LIMIT 50",
-                (runtime_id, window))
-            consec = 0
-            last_failure_at = ""
-            for (st, comp_at) in c.fetchall():
-                if st == "failed":
-                    if not last_failure_at and comp_at:
-                        last_failure_at = comp_at
-                    consec += 1
-                else:
-                    break  # 遇到非失败即停止
-            # Issue #498 衰减：最近失败滚出衰减窗口（无新失败）→ 连败清零
-            if last_failure_at:
-                from src.domains.runtime.engine.health import parse_dt
-                ts = parse_dt(last_failure_at)
-                if ts is not None and (time.time() - ts) > _FAILURE_DECAY_HOURS * 3600:
-                    consec = 0
-            result["consecutive_failures"] = consec
-            result["last_failure_at"] = last_failure_at
-
-            # 最近一条任务状态
-            c.execute(
-                "SELECT status FROM agent_tasks "
-                "WHERE runtime_id=? ORDER BY completed_at DESC LIMIT 1",
-                (runtime_id,))
-            last = c.fetchone()
-            if last:
-                result["last_status"] = last[0] or ""
-    except Exception as e:
-        log.warning(f"health_scorer: fetch_task_stats failed for runtime={runtime_id}: {e}")
-    return result
+    rows, last_status = _snapshot_task_rows(runtime_id, window)
+    return _aggregate_task_rows(rows, decay, last_status=last_status)
 
 
 def _fetch_heartbeat(runtime_id: int) -> bool:
@@ -480,33 +520,34 @@ def _persist_score(data: dict):
     （db_setup 幂等迁移补列；列缺失时降级为旧列集写入，不抛错）。
     """
     try:
-        with _lock():
-            c = _db().cursor()
-            try:
-                c.execute(
-                    "INSERT OR REPLACE INTO runtime_health_scores "
-                    "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
-                    "consecutive_failures, failure_rate, last_status, window_days, updated_at, "
-                    "failed_tasks_effective, last_failure_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (data["runtime_id"], data["health_score"], data["total_tasks"],
-                     data["failed_tasks"], data["completed_tasks"],
-                     data["consecutive_failures"], data["failure_rate"],
-                     data["last_status"], data["window_days"], data["updated_at"],
-                     data.get("failed_tasks_effective", 0),
-                     data.get("last_failure_at", "")))
-            except Exception:
-                # 旧库未迁移（新列缺失）→ 降级旧列集
-                c.execute(
-                    "INSERT OR REPLACE INTO runtime_health_scores "
-                    "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
-                    "consecutive_failures, failure_rate, last_status, window_days, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (data["runtime_id"], data["health_score"], data["total_tasks"],
-                     data["failed_tasks"], data["completed_tasks"],
-                     data["consecutive_failures"], data["failure_rate"],
-                     data["last_status"], data["window_days"], data["updated_at"]))
-            _db().commit()
+        with lock_owner(f"health:persist:{data['runtime_id']}"):
+            with _lock():
+                c = _db().cursor()
+                try:
+                    c.execute(
+                        "INSERT OR REPLACE INTO runtime_health_scores "
+                        "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
+                        "consecutive_failures, failure_rate, last_status, window_days, updated_at, "
+                        "failed_tasks_effective, last_failure_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (data["runtime_id"], data["health_score"], data["total_tasks"],
+                         data["failed_tasks"], data["completed_tasks"],
+                         data["consecutive_failures"], data["failure_rate"],
+                         data["last_status"], data["window_days"], data["updated_at"],
+                         data.get("failed_tasks_effective", 0),
+                         data.get("last_failure_at", "")))
+                except Exception:
+                    # 旧库未迁移（新列缺失）→ 降级旧列集
+                    c.execute(
+                        "INSERT OR REPLACE INTO runtime_health_scores "
+                        "(runtime_id, health_score, total_tasks, failed_tasks, completed_tasks, "
+                        "consecutive_failures, failure_rate, last_status, window_days, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (data["runtime_id"], data["health_score"], data["total_tasks"],
+                         data["failed_tasks"], data["completed_tasks"],
+                         data["consecutive_failures"], data["failure_rate"],
+                         data["last_status"], data["window_days"], data["updated_at"]))
+                _db().commit()
     except Exception as e:
         log.warning(f"health_scorer: persist_score failed for runtime={data['runtime_id']}: {e}")
 
@@ -757,14 +798,16 @@ def _refresh_all_loop():
         if _refresh_stop.wait(_REFRESH_INTERVAL):
             break  # stop 信号
         try:
-            with _lock():
-                c = _db().cursor()
-                c.execute("SELECT id FROM agent_runtimes ORDER BY id")
-                rids = [r[0] for r in c.fetchall()]
+            with lock_owner("health:refresh:ids"):
+                with _lock():
+                    c = _db().cursor()
+                    c.execute("SELECT id FROM agent_runtimes ORDER BY id")
+                    rids = [r[0] for r in c.fetchall()]
             stale = 0
             for rid in rids:
                 try:
-                    old = _cache.get(rid, {}).get("data", {}).get("health_score")
+                    with _cache_lock:
+                        old = _cache.get(rid, {}).get("data", {}).get("health_score")
                     data = _compute_and_persist(rid)
                     if old is not None and data["health_score"] != old:
                         log.info(f"health_scorer: refresh rid={rid} score {old} -> {data['health_score']}")

@@ -1645,16 +1645,15 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             _cred_name_cache[_cid] = _n
             return _n
         for atype in all_types:
-            # SRE 专属（sre-repo-worker-relax §1.3）：user + repo 两档
-            # （global 池不放行：SRE 执行部署/运维命令，广播责任边界不清）
-            if atype == "sre":
-                engines = (query_engines(repo_key, "user", agent_type="sre", username=_uname)
-                           + query_engines(repo_key, "repo", agent_type="sre"))
-            else:
-                engines = (query_engines(repo_key, "global", agent_type=atype)
-                           + query_engines(repo_key, "user", agent_type=atype, username=_uname)
-                           + query_engines(repo_key, "repo", agent_type=atype)
-                           + query_engines(repo_key, "local", agent_type=atype, username=_uname))
+            # Issue #3396：SRE 不再有「只查 user+repo」的特例。原
+            # sre-repo-worker-relax §1.3 把 global 池挡在候选之外（UID 时代 SRE 执行部署/
+            # 运维命令，广播责任边界不清）；#3396 已删除调度侧 `_sre_no_broadcast` 并放行
+            # global 池，若候选列表仍按旧口径过滤，会出现「调度允许但界面选不到引擎」——
+            # 用户实测「选择引擎-SRE 没有引擎列表」即此。现与其它角色同口径查四档。
+            engines = (query_engines(repo_key, "global", agent_type=atype)
+                       + query_engines(repo_key, "user", agent_type=atype, username=_uname)
+                       + query_engines(repo_key, "repo", agent_type=atype)
+                       + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
             from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
             import time as _time
