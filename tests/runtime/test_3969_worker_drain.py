@@ -114,9 +114,14 @@ class TestSystemdUnit:
 
 
 class TestRunShutdownOrder:
-    def test_drain_runs_before_terminate(self, drain_file):
+    def test_main_drain_uses_separate_marker(self, tmp_path, monkeypatch):
         from src.api import run
         import time as _time
+
+        main_marker = str(tmp_path / "main-webhook-draining")
+        worker_marker = str(tmp_path / "worker-draining")
+        monkeypatch.setenv("GRAPE_MAIN_DRAIN_FILE", main_marker)
+        monkeypatch.setenv("GRAPE_DRAIN_FILE", worker_marker)
 
         slept = []
         orig_sleep = _time.sleep
@@ -125,15 +130,85 @@ class TestRunShutdownOrder:
             run._drain_before_stop()
         finally:
             _time.sleep = orig_sleep
-        assert drain_state.is_draining() is True
+        # main+webhook 只写自己的标记，不得污染 worker readiness 标记（复审 R6）
+        assert drain_state.is_main_draining() is True
+        assert os.path.exists(main_marker)
+        assert not os.path.exists(worker_marker)
+        assert drain_state.is_draining() is False
         assert slept and slept[0] >= 5
 
     def test_no_drain_without_config(self, monkeypatch):
         from src.api import run
-        monkeypatch.delenv("GRAPE_DRAIN_FILE", raising=False)
+        monkeypatch.delenv("GRAPE_MAIN_DRAIN_FILE", raising=False)
         assert run._drain_before_stop() == 0
 
     def test_shutdown_calls_drain_before_terminate(self):
         from src.api import run
         src = inspect.getsource(run._shutdown)
         assert src.index("_drain_before_stop()") < src.index("p1.terminate()")
+
+
+class TestDrainRoleIsolation:
+    def test_main_drain_does_not_affect_worker(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GRAPE_MAIN_DRAIN_FILE", str(tmp_path / "main-draining"))
+        monkeypatch.setenv("GRAPE_DRAIN_FILE", str(tmp_path / "worker-draining"))
+        drain_state.begin_main_drain()
+        assert drain_state.is_main_draining() is True
+        assert drain_state.is_draining() is False
+        drain_state.clear_main_drain()
+        assert drain_state.is_main_draining() is False
+
+    def test_worker_drain_does_not_affect_main(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GRAPE_MAIN_DRAIN_FILE", str(tmp_path / "main-draining"))
+        monkeypatch.setenv("GRAPE_DRAIN_FILE", str(tmp_path / "worker-draining"))
+        drain_state.begin_drain()
+        assert drain_state.is_draining() is True
+        assert drain_state.is_main_draining() is False
+        drain_state.clear_drain()
+        assert drain_state.is_draining() is False
+
+    def test_clear_respects_configured(self, monkeypatch, tmp_path):
+        # 复审 R6：clear_drain 与 begin_drain 判定对齐，未配置时为无操作。
+        monkeypatch.delenv("GRAPE_DRAIN_FILE", raising=False)
+        stale = tmp_path / "stale-worker-draining"
+        stale.write_text("x")
+        drain_state.clear_drain(str(stale))
+        assert stale.exists()
+
+
+class TestInternalDrainAuth:
+    """复审 R7：/internal/drain 只认 TCP 对端，不信任 X-Forwarded-For。"""
+
+    class _Req:
+        def __init__(self, host, xff=""):
+            from types import SimpleNamespace
+            self.client = SimpleNamespace(host=host)
+            self.headers = {"x-forwarded-for": xff} if xff else {}
+
+    def _endpoint(self):
+        import asyncio
+        from src.api import grape_worker_server
+        route = next(r for r in grape_worker_server.app.routes
+                     if getattr(r, "path", "") == "/internal/drain")
+        return route.endpoint, asyncio.run
+
+    def test_spoofed_xff_from_non_loopback_is_forbidden(self, drain_file):
+        endpoint, run = self._endpoint()
+        resp = run(endpoint(self._Req("10.0.0.7", "127.0.0.1")))
+        assert getattr(resp, "status_code", 200) == 403
+        assert drain_state.is_draining() is False
+
+    def test_direct_loopback_is_allowed(self, drain_file):
+        endpoint, run = self._endpoint()
+        resp = run(endpoint(self._Req("127.0.0.1")))
+        assert isinstance(resp, dict)
+        assert resp["status"] == "draining"
+        assert drain_state.is_draining() is True
+
+def test_main_attach_health_wires_main_drain_file():
+    """复审 R6：main 的 /readyz 必须挂上角色隔离的 main 标记，否则摘流对本进程无效。"""
+    main_py = os.path.join(_REPO_ROOT, "src/api/main.py")
+    with open(main_py, encoding="utf-8") as f:
+        src = f.read()
+    assert "main_drain_file_path()" in src
+    assert "is_main_configured()" in src

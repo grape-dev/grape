@@ -33,15 +33,19 @@ _STOP_TIMEOUT = float(os.environ.get("GRAPE_STOP_TIMEOUT", "20"))
 def _drain_before_stop() -> float:
     """Issue #3969：SIGTERM 后先摘流并等待在飞请求排空，再 terminate 子进程。
 
-    仅当部署配置 `GRAPE_DRAIN_FILE` 时生效（未配置 = 保持原行为）。摘流标记让
-    /readyz 转 not_ready，等待窗口（`GRAPE_DRAIN_SECONDS`，默认 5s）内不再接新流量；
-    随后 uvicorn 子进程按既有 graceful shutdown 排空剩余连接。
+    仅当部署配置 `GRAPE_MAIN_DRAIN_FILE` 时生效（未配置 = 保持原行为）。摘流标记
+    让 main 的 /readyz 转 not_ready，等待窗口（`GRAPE_DRAIN_SECONDS`，默认 5s）内不再
+    接新流量；随后 uvicorn 子进程按既有 graceful shutdown 排空剩余连接。
+
+    Issue #3969 复审 R6：本进程起的是 main(3000)+webhook(8080)，**不是 worker**。
+    必须写独立的 `GRAPE_MAIN_DRAIN_FILE`，不得复用 worker 的 `GRAPE_DRAIN_FILE`——
+    否则共享 EnvironmentFile 时停 main 会把 worker 的 readiness 打成永续 not_ready。
     """
     from src.api import drain_state
 
-    if not drain_state.is_configured():
+    if not drain_state.is_main_configured():
         return 0
-    drain_state.begin_drain()
+    drain_state.begin_main_drain()
     _secs = drain_state.drain_seconds()
     if _secs > 0:
         import time

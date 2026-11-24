@@ -97,7 +97,9 @@ init_gsb(app, "worker")
 # 标记落盘后 /readyz 转 503，再等待排空窗口，最后才 SIGTERM。
 @app.post("/internal/drain")
 async def internal_drain(request: Request):
-    if not server_common.is_loopback(request):
+    # Issue #3969 复审 R7：只认 TCP 对端（request.client.host），不读 XFF/X-Real-IP。
+    # 否则直连 0.0.0.0:38082 伪造 `X-Forwarded-For: 127.0.0.1` 即可摘流并持久 503。
+    if not server_common.is_direct_loopback(request):
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     drain_state.begin_drain()
     return {"status": "draining", "drain_seconds": drain_state.drain_seconds()}

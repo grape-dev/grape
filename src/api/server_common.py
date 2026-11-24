@@ -40,6 +40,7 @@ __all__ = [
     "attach_frontend",
     "init_process_db",
     "is_loopback",
+    "is_direct_loopback",
     "include_selected",
     "check_and_sync_templates",
     "attach_internal_routes",
@@ -61,6 +62,17 @@ def is_loopback(request: Request) -> bool:
     if xri in ("127.0.0.1", "::1"):
         return True
     return False
+
+
+def is_direct_loopback(request: Request) -> bool:
+    """判断直连来源是否为本机（**不信任** X-Forwarded-For / X-Real-IP）。
+
+    Issue #3969 复审 R7：worker uvicorn 绑 0.0.0.0，直连端口即可伪造 XFF 为 127.0.0.1；
+    `/internal/*` 等危险端点必须只看 TCP 对端（`request.client.host`），否则绕过网关
+    deny 就能触发摘流。普通只读健康探针可保留 `is_loopback()`（兼容反代）。
+    """
+    client = request.client
+    return bool(client and client.host in ("127.0.0.1", "::1", "localhost"))
 
 
 def build_app(

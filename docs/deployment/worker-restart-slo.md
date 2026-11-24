@@ -28,7 +28,9 @@ register 66、state 42、messages 37、recover-orphans 18。
 1. 网关：worker upstream 多实例（本机 + 对等主控，共享 RDS 可互备）、
    `proxy_next_upstream error timeout http_502`、`max_fails=2 fail_timeout=10s`、keepalive。
 2. 停机：systemd `ExecStop` 先 `POST /internal/drain` 标记排空（`/readyz` 503），
-   等待 `GRAPE_DRAIN_SECONDS`（默认 5s）后再 SIGTERM。
+   等待 `GRAPE_DRAIN_SECONDS`（默认 5s）后再 SIGTERM。摘流标记按角色隔离：worker 用
+   `GRAPE_DRAIN_FILE`，main+webhook（`run.py`）用 `GRAPE_MAIN_DRAIN_FILE`，两者不共享，
+   避免停 main 把 worker 打成永续 not_ready。
 3. 启动：`ExecStartPost` 轮询 `/readyz`；超时仅告警（`-` 前缀），不放大成重启风暴。
 4. 客户端：心跳/注册/完成等幂等端点 ≥3 次指数退避（±20% 抖动、总时长上限 90s）；
    单次 502 不判离线，连续 ≥3 个心跳轮次失败才判离线。
@@ -38,4 +40,9 @@ register 66、state 42、messages 37、recover-orphans 18。
 - 故障注入：将一台上游改为拒绝连接，确认 `/api/runtime/*` GET 200（自动切换）。
 - 计划内重启：30 客户端持续压心跳，`systemctl restart grape-worker-server`，
   统计 91s 窗口 502 数并与 1,178 对比。
-- 告警验证：注入 502 日志，确认 `GrapeRuntime502RateHigh` 在 5min 内触发。
+- 指标自检：`curl -s http://127.0.0.1:12345/metrics | grep nginx_upstream_` 必须有
+  `nginx_upstream_502_total` / `nginx_upstream_requests_total`（Alloy 自抓取段
+  `prometheus.scrape "alloy_self"`（127.0.0.1:12345）已启用）。
+- 告警验证：按 `deploy/README.md`「502 告警验证」注入 502 日志，确认
+  `GrapeRuntime502Burst`（2m 内 >50 次）与 `GrapeRuntime502RateHigh`（5min 率 >1%）
+  在规定窗口内触发；`promtool check rules deploy/alerts.yml` 通过。

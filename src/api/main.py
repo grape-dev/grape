@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from src.api import server_common
+from src.api import drain_state, server_common
 from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit, org_analysis
 from src.domains.mgmt.routes import categories as categories_routes
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
@@ -711,7 +711,10 @@ app.openapi = lambda: custom_openapi(app)
 
 server_common.init_process_db()
 
-server_common.attach_health(app, service_name="server", readiness=True)
+server_common.attach_health(
+    app, service_name="server", readiness=True,
+    drain_file=drain_state.main_drain_file_path() if drain_state.is_main_configured() else None,
+)
 
 # Issue #825 修复（PR #1231 深度审查）：im 路由必须在 SPA catch-all（/{path:path} GET）
 # 之前注册，否则 GET /api/im/*（status/installations/dingtalk/card-setup）被
