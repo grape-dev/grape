@@ -375,6 +375,21 @@ def release_event_guard(repo_key: str, issue_id: str, agent_type: str, seq: int)
 # ===== Issue #3794: TTL 清理分批契约 =====
 # 旧实现单大事务 DELETE + 相关子查询（agent_tasks 缺 (event_seq,status) 组合索引），
 # 与 claim/heartbeat/状态回写互相等锁 → InnoDB 1205 锁等待超时，主控 100% 失败。
+# 取数依据（审查 C-1「魔法数五源」；实测脚本见 MR 评论，宿主机 MySQL 8.0 上
+# 用 12.1 万行 agent_tasks + 2000 行候选守卫跑出）：
+#   单批 DELETE(含 NOT EXISTS 复核、索引在位)：50 行 141ms / 100 行 138ms /
+#   200 行 138ms / 500 行 138ms —— 批大小在 50~500 之间对单批持锁时长不敏感
+#   （差 3ms，开销主要是语句与索引查找的固定成本），所以 200 取的是「够用且不浪费
+#   IN 列表」的中值，不是性能拐点。
+#   _PURGE_BATCH=200  ← 仓内既有先例：runtime/pipeline/title_backfill.py:88 的
+#                       _TITLE_MARKER_QUERY_CHUNK=200（同域、同「热表分批」形态）。
+#                       线上实测 event_active_guard 常态仅 7 行（2026-11-24，runtime 库），
+#                       一批即可清空；200 是上限而非期望值。
+#   _PURGE_MAX_ROUNDS=50 → 10000 行/次 ← 实测常态 7 行，上限留 3 个数量级余量；
+#                       有界是为了「清理永不空转」（后台 30s 循环里的同步调用，不能无界）。
+#   _LOCK_RETRY_BACKOFF=0.2 ← 仓内既有先例：runtime/im/notify.py:46 的
+#                       _RETRY_BACKOFF=0.4（单次亚秒级重试）。取一半，因为这里只重试一次；
+#                       +U(0,0.1) 抖动是为了四台主控不同步撞同一行锁。
 _PURGE_BATCH = 200            # 单批最大行数（两段短事务，避免长持锁）
 _PURGE_MAX_ROUNDS = 50        # 单次调用最多轮数（10000 行/次上限，防无界循环/空转）
 _LOCK_RETRY_BACKOFF_SECONDS = 0.2  # 1205 短退避基线（加随机抖动，避免多主控同步重试）
@@ -382,6 +397,14 @@ _LOCK_RETRY_BACKOFF_SECONDS = 0.2  # 1205 短退避基线（加随机抖动，�
 # 语义同样是「稍后重试即可」）。失败一次就放弃会让 TTL 自愈继续卡住（Issue #3794）。
 _RETRYABLE_LOCK_ERROR_CODES = (1205, 1213)
 # 单批 DELETE 的行锁等待上限（秒）：MySQL 默认 50s，在进程级 db_lock 内等满会冻全站
+# 语句级行锁上限：3s。实测依据（Issue #3794 事故，2026-11-24）——
+#   旧实现持全局 db_lock 等 InnoDB 行锁，四台主控 6h 内各冻 15~35 次、单次 49~92s；
+#   同期客户端 499 在 30.0s 就 abort（浏览器 "signal is aborted without reason"）。
+# 30s 是用户可感知的硬预算，取 10%（3s）为单批持锁上限：撞锁时最多放弃一批、下一轮
+# 5min 后自愈，不再把 /api/ping 与静态资源一起拖到 30s。
+# 实测（同上脚本）：另一会话持 guard 行锁 6s 时，默认 50s → DELETE 等 6149ms 才成功；
+# 上限 3s → 3001ms 抛 1205 并放弃本批 —— 这就是「6s 停顿」变「3s 放弃」的量化差别。仓内既有同类取值：
+# runtime/public/__init__.py:1341 的引擎 upsert 对同一张 agent_tasks 热表用 5。
 _PURGE_LOCK_WAIT_SECONDS = 3
 
 # rowcount 指标（挂 observability 独立 registry；prometheus 不可用时静默跳过）
@@ -419,9 +442,13 @@ def _bounded_lock_wait(c, seconds: int = _PURGE_LOCK_WAIT_SECONDS):
 
     为什么必须做：`db_lock` 是进程级大锁，DELETE 在锁内等行锁时整个进程（含
     /api/ping 与静态文件）都会排队；MySQL 默认 innodb_lock_wait_timeout=50，
-    实测单次冻结 50s 以上（Issue #3794 线上事故）。压到 3s 后，最坏是「这批放弃、
-    下一轮再来」，不会再把全站拖住。SET SESSION 是会话级设置，必须在 db_lock 内
-    设置与还原，避免把 3s 漏给同一连接上的 claim/heartbeat 等语句。
+    线上实测单次冻结 49~92s（Issue #3794 事故日志）。取值依据见
+    `_PURGE_LOCK_WAIT_SECONDS` 注释。
+
+    降级约定（审查 O3）：SET 被拒（权限/方言/连接异常）时**不抛、不吞掉整批清理**，
+    退化成「无上限但仍分批」的旧行为 —— 否则偶发 1205 会变成「每次清理都 0 删除」，
+    自愈路径反而彻底失效。还原失败（审查 O2）升为 WARNING 并回滚一次重试，因为这个
+    连接随后会被同一线程的 claim/heartbeat 复用，残留 3s 会让那些语句更早抛 1205。
     """
     from src.kernel.session_manager import _is_mysql_backend
 
@@ -432,16 +459,32 @@ def _bounded_lock_wait(c, seconds: int = _PURGE_LOCK_WAIT_SECONDS):
     try:
         prev = c.execute("SELECT @@SESSION.innodb_lock_wait_timeout").fetchone()
         prev = int(prev[0]) if prev and prev[0] is not None else None
-    except Exception as e:  # noqa: BLE001 - 读不到旧值也要继续压时限
+    except Exception as e:  # noqa: BLE001 - 读不到旧值按 MySQL 默认 50 还原
         log.debug(f"read innodb_lock_wait_timeout failed: {e}")
-    c.execute("SET SESSION innodb_lock_wait_timeout=%d" % int(seconds))
+    try:
+        c.execute("SET SESSION innodb_lock_wait_timeout=%d" % int(seconds))
+    except Exception as e:  # noqa: BLE001 - 设不上就退化为无上限，不能因此整批失败
+        log.warning(f"bound innodb_lock_wait_timeout skipped (degrade to unbounded): {e}")
+        yield
+        return
     try:
         yield
     finally:
-        try:
-            c.execute("SET SESSION innodb_lock_wait_timeout=%d" % int(prev if prev else 50))
-        except Exception as e:  # noqa: BLE001 - 还原失败只影响本连接的等待上限
-            log.debug(f"restore innodb_lock_wait_timeout failed: {e}")
+        restore_to = int(prev if prev else 50)
+        for attempt in (1, 2):
+            try:
+                c.execute("SET SESSION innodb_lock_wait_timeout=%d" % restore_to)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 1:
+                    try:
+                        db.rollback()  # 先把可能残留的事务清掉，再试一次还原
+                    except Exception as rb:  # noqa: BLE001 - 清理语句本身的错误更重要
+                        log.debug(f"rollback before restore retry failed: {rb}")
+                    continue
+                log.warning(
+                    f"restore innodb_lock_wait_timeout={restore_to} failed, this connection "
+                    f"keeps the bounded wait until reconnect: {e}")
 
 
 def _delete_guard_batch(cutoff: str, seqs: list) -> int:
@@ -501,6 +544,13 @@ def purge_stale_event_guards(max_age_seconds: int = 1800) -> int:
                     f"ORDER BY seq LIMIT {_PURGE_BATCH}",
                     (cutoff, last_seq))
                 rows = c.fetchall()
+                # 读完立刻结束只读事务（审查 O4）：单库 MySQL 的默认 REPEATABLE READ 会把
+                # 快照留到下一次提交，让后面的 DELETE 复查 NOT EXISTS 看到旧版本（§33 保护变弱）。
+                # 这里不持有任何写锁，提交空事务只是把快照丢掉；三库拓扑本来就是每语句 autocommit。
+                try:
+                    db.commit()
+                except Exception as e:  # noqa: BLE001 - 快照清理失败不影响本轮清理
+                    log.debug(f"purge candidate snapshot commit failed: {e}")
         except Exception as e:
             log.warning(f"purge_stale_event_guards select failed (round {round_no}): {e}")
             _purge_metric_inc("failed")
