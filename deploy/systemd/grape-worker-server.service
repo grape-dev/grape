@@ -15,6 +15,8 @@ Environment=RUNTIME_MAX_CONCURRENT_TASKS=20
 Environment=GRAPE_DRAIN_FILE=/tmp/grape-worker-draining
 Environment=GRAPE_DRAIN_SECONDS=5
 Environment=GRAPE_WORKER_PORT=38082
+# worker trace 中继上游（Issue #3749）：OTLP_RELAY_TARGET=http://<lgtm-host>:4318（不含 /v1/traces），
+# 经 /etc/grape/grape.env 注入；未配置 = 中继禁用（POST /api/runtime/traces 恒 503，worker span 丢失）。
 EnvironmentFile=/etc/grape/grape.env
 ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_worker_server:app \
     --host 0.0.0.0 --port 38082 --workers 2

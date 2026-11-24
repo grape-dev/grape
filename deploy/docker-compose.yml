@@ -96,6 +96,9 @@ services:
       - GRAPE_MODE=${GRAPE_MODE:-single}
       - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
       - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
+      # Issue #3749：worker trace 中继上游（LGTM OTLP/HTTP 基址，不含 /v1/traces）。
+      # 仅本容器承接 POST /api/runtime/traces；留空 = 中继禁用（恒 503）。
+      - OTLP_RELAY_TARGET=${OTLP_RELAY_TARGET:-}
     env_file:
       - path: ../.env
         required: false

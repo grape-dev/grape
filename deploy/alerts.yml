@@ -207,3 +207,27 @@ groups:
         annotations:
           summary: "Runtime tags probe failing repeatedly (host={{ $labels.host }}, reason={{ $labels.reason }})"
           description: "A worker reported >=3 consecutive runtime tags probe failures in 15m (reason={{ $labels.reason }}): id_missing = no valid runtime id (registration reply not backfilled, check GRAPE_RUNTIME_ID), unauthorized = 401 on probe (config/ownership, not credential revocation), not_found = runtime row deleted or in re-derive window, no_tags = registered engine without claimable tags (empty role_tags/scene_tags breaks dispatch), other = non-contract HTTP failure bucketed by the worker (raw reason in worker/server logs). Check worker logs for RUNTIME_ID_MISSING / 'runtime tags probe', ~/.grape/runtime-tags-probe-alerts.jsonl fallback, and console engine tags."
+
+      # Issue #3749：worker trace 中继 503 持续 5min
+      # 语义：主控 OTLP_RELAY_TARGET 未配置（禁用态，确定性分支）或上游 LGTM 不可达；
+      # worker 的 OTLP/HTTP span 全部被拒 → Tempo 缺根 span、跨进程调用链断裂。
+      # 排查：启动日志 "[trace-relay] selfcheck"，进程环境变量 / EnvironmentFile 的
+      # OTLP_RELAY_TARGET（LGTM OTLP/HTTP 基址，不含 /v1/traces），以及 LGTM :4318 可达性。
+      - alert: GrapeTraceRelayRejected
+        expr: sum(rate(grape_trace_relay_requests_total{status="503"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker trace relay rejected with 503 (OTLP_RELAY_TARGET unset or LGTM unreachable)"
+          description: "POST /api/runtime/traces has returned 503 for 5 minutes: OTLP_RELAY_TARGET is not configured (trace relay disabled) or the LGTM OTLP endpoint is failing. Worker spans are dropped, so Tempo traces for service.name=grape-worker lose their root span. Check the master startup log line '[trace-relay] selfcheck' and the OTLP_RELAY_TARGET entry in the process environment / systemd EnvironmentFile."
+
+      # Issue #3749：中继上游不可达（LGTM 网络/端口问题，与配置缺失区分开）
+      - alert: GrapeTraceRelayUnreachable
+        expr: sum(rate(grape_trace_relay_requests_total{status="relay_unreachable"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Trace relay cannot reach LGTM"
+          description: "The master failed to POST to <OTLP_RELAY_TARGET>/v1/traces for 5 minutes (502 lgtm unreachable). Check LGTM :4318 reachability from the master (security group / process health)."

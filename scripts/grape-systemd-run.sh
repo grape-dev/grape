@@ -148,6 +148,10 @@ export GRAPE_SERVICE_NAME="${role}"
 # （src/kernel/otel.py，认 OTEL_EXPORTER_OTLP_ENDPOINT）因此永远不生效，而本机
 # 通常没有 4317 监听，span 被静默发往死端口。保持 opt-in，不再补默认值。
 if [ -n "${GRAPE_OTLP_ENDPOINT:-}" ]; then export GRAPE_OTLP_ENDPOINT; fi
+# Issue #3749：worker trace 中继上游（LGTM OTLP/HTTP 基址，不含 /v1/traces）。
+# 同样只在 /etc/grape/grape.env 显式配置时透传——不补默认值：没配就是禁用（503），
+# 补一个本机不存在的默认端点只会把「没配」伪装成「配了」。
+if [ -n "${OTLP_RELAY_TARGET:-}" ]; then export OTLP_RELAY_TARGET; fi
 export GRAPE_TRACE_SERVICE="${GRAPE_TRACE_SERVICE:-grape-${role}}"
 export GRAPE_TRACE_RATIO="${GRAPE_TRACE_RATIO:-0.5}"
 export PYTHONUNBUFFERED=1

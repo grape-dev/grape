@@ -43,6 +43,10 @@ ENV_FILE="$HOME/.grape/runtime.env"
 if [ -f "$ENV_FILE" ]; then
   set -a; . "$ENV_FILE"; set +a
 fi
+# Issue #3749：worker trace 中继上游（LGTM OTLP/HTTP 基址，不含 /v1/traces）。
+# 远端纯 engine worker 不需要它（中继地址由 RUNTIME_SERVER_URL 推导）；仅本机同时
+# 承担主控（单机混合部署）时在 runtime.env 里配置并透传。未配置 = 中继禁用（保持原行为）。
+if [ -n "${OTLP_RELAY_TARGET:-}" ]; then export OTLP_RELAY_TARGET; fi
 # 引擎实现在 src/domains/runtime/engine/agent.py；src.runtime.agent 只是给历史安装
 # 保留的兼容 shim。这里直接走真实入口，新安装不再经过转发层。
 exec "$PYTHON" -m src.domains.runtime.engine.agent
