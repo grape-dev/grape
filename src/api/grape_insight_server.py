@@ -33,8 +33,10 @@ async def lifespan(app: FastAPI):
 
     # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
-    from src.kernel.db_registry import assert_role_database
+    from src.kernel.db_registry import assert_role_database, warn_domain_table_residency
     assert_role_database("insight")
+    # Issue #3732：域表 ↔ DSN 归属抽样自检（错配只告警不阻断，单库 no-op）
+    warn_domain_table_residency("insight")
 
     # kernel 端口绑定：GSB 注册/心跳经 pipeline 端口调契约域原语，未绑定会抛
     # PortNotBound（现象：GSB register failed: service=xxx err=PortNotBound）。

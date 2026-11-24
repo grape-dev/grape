@@ -36,8 +36,10 @@ async def lifespan(app: FastAPI):
 
     # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
-    from src.kernel.db_registry import assert_role_database
+    from src.kernel.db_registry import assert_role_database, warn_domain_table_residency
     assert_role_database("worker")
+    # Issue #3732：域表 ↔ DSN 归属抽样自检（错配只告警不阻断，单库 no-op）
+    warn_domain_table_residency("worker")
 
     # Issue #3749：worker trace 中继启动自检（本进程挂载 runtime 全量路由，含 POST /api/runtime/traces）。OTLP_RELAY_TARGET 为空时
     # 启动期 WARN 一次并说明 503 语义，配置存在则打印生效端点；自检失败不阻断启动。

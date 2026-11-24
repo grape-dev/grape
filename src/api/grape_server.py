@@ -130,7 +130,7 @@ async def lifespan(app: FastAPI):
 
     # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
     # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
-    from src.kernel.db_registry import assert_role_database
+    from src.kernel.db_registry import assert_role_database, warn_domain_table_residency
     assert_role_database("mgmt")
 
     # 库初始化/迁移必须在 lifespan（启动期）跑，不能留在模块级：
@@ -140,6 +140,12 @@ async def lifespan(app: FastAPI):
     # MainThread 停在 _migrate_tables ← init_database ← <module>，worker 心跳停发 →
     # 引擎被判定失联 → 健康分强制 0）。
     init_database()
+
+    # Issue #3732：域表 ↔ DSN 归属抽样自检（错配只告警不阻断，单库 no-op）。
+    # 必须排在 init_database() 之后（复审 Required）：全新库首启时迁移还没建表，
+    # 排在前面会把"表还没建"误报成"域表归属错配、必然 1146"，告警不再可信。
+    warn_domain_table_residency("mgmt")
+
     _load_accounts()
 
     # 沙箱配置面 6 表（white-list / paths / config / template / llm credential /
