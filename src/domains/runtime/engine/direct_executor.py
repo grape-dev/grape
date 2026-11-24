@@ -975,7 +975,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 if task_id:
                     try:
                         from src.kernel.session_manager import db, db_lock
-                        import json
                         with db_lock:
                             c = db.cursor()
                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
