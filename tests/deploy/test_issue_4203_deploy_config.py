@@ -4,6 +4,7 @@
 OOM/内存告警规则无声删掉，或只改其中一条启动路径（QA 复审 Critical：
 生产 worker 走 grape@worker.service → scripts/grape-systemd-run.sh，静态单元不一定生效）。
 """
+import ast
 import os
 import re
 import sys
@@ -17,6 +18,7 @@ UNIT = os.path.join(ROOT, "deploy", "systemd", "grape-worker-server.service")
 DROPIN = os.path.join(ROOT, "deploy", "systemd", "grape-worker-oom.conf")
 RUNNER = os.path.join(ROOT, "scripts", "grape-systemd-run.sh")
 INSTALLER = os.path.join(ROOT, "scripts", "install-grape-systemd.sh")
+LAUNCHER = os.path.join(ROOT, "scripts", "start-worker.py")
 ALERTS = os.path.join(ROOT, "deploy", "alerts.yml")
 
 
@@ -97,6 +99,71 @@ class TestGraptAtWorkerPath:
         assert 'export GRAPE_PROCESS_ROLE="$role"' in script
         # 必须在 exec 之前导出（Python 只在进程启动时读一次）
         assert script.index('export GRAPE_PROCESS_ROLE="$role"') < script.index("exec \"$PY\"")
+
+    def test_runner_worker_branch_execs_launcher_by_script_path(self):
+        """SRE 部署复核 Critical：grape@worker 分支以脚本路径 exec（与静态单元同形态）。"""
+        branch_body = self._runner().split('if [ "$role" = "worker" ]', 1)[1].split("\nfi", 1)[0]
+        assert 'exec "$PY" "$REPO_ROOT/scripts/start-worker.py"' in branch_body
+        assert "-m uvicorn" not in branch_body, "worker 分支回退 -m 形态会绕开预 bind launcher"
+
+
+class TestExecStartImportGuarantee:
+    """SRE 部署复核 Critical（PR #2092）：ExecStart 以「脚本路径」启动 launcher 时，
+    ``python -m`` 把 cwd 加进 sys.path 的隐式行为消失，``src.api.*`` 的导入必须有
+    独立保障，否则 uvicorn config.load 阶段 ModuleNotFoundError → exit 1 →
+    systemd 反复重启（生产 4 分钟 worker 不可用的根因）。断言该保障锚在 launcher
+    自身（sys.path 自举），且两条路径都不依赖外部 PYTHONPATH——SRE 现场曾以
+    drop-in ``40-pythonpath.conf`` 临时救急，env 侧兜底会把 launcher 缺自举的回归
+    掩盖成「生产能跑、CI/新机器必炸」，故仓库内保障必须落在脚本里。真启动级验证
+    见 tests/scripts/test_issue_4203_start_worker.py::TestRealStartupSeam。"""
+
+    def _launcher_tree(self):
+        return ast.parse(_read(LAUNCHER))
+
+    def test_static_unit_execstart_is_script_path_not_module_flag(self):
+        """静态单元 ExecStart 是脚本路径形态（非 ``-m``，cwd 不隐式进 sys.path）。"""
+        exec_start = [ln for ln in _read(UNIT).splitlines() if ln.startswith("ExecStart=")]
+        assert exec_start and "start-worker.py" in exec_start[0]
+        assert " -m " not in exec_start[0], (
+            "-m 形态依赖 cwd 进 sys.path 的隐式行为，脚本路径形态的 sys.path 保障成为死代码")
+
+    def test_launcher_bootstraps_repo_root_into_sys_path(self):
+        """launcher 顶层自带仓库根 sys.path 自举（修复本体，AST 级锚定）。"""
+        tree = self._launcher_tree()
+        src = _read(LAUNCHER)
+        inserts = []
+
+        def _scan(stmts):
+            for n in stmts:
+                if isinstance(n, ast.If):
+                    _scan(n.body)
+                elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call):
+                    func = n.value.func
+                    if (isinstance(func, ast.Attribute) and func.attr == "insert"
+                            and isinstance(func.value, ast.Attribute)
+                            and func.value.attr == "path"):
+                        inserts.append(n.value)
+
+        _scan(tree.body)
+        assert inserts, "start-worker.py 缺顶层 sys.path.insert：脚本路径启动时仓库根不可导入"
+        assert any(isinstance(c.args[0], ast.Constant) and c.args[0].value == 0
+                   for c in inserts), "必须 insert(0, ...)（优先于第三方同名 src 包）"
+        run_defs = [n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_run"]
+        assert run_defs, "start-worker.py 缺 _run（uvicorn 导入入口）"
+        assert max(c.lineno for c in inserts) < run_defs[0].lineno, (
+            "sys.path 自举必须在模块顶层、先于任何 uvicorn/app 导入路径执行")
+        # 仓库根推导锚定：本文件上级目录（跟随部署位置，不写死绝对路径）
+        assert "os.path.dirname(os.path.dirname(os.path.abspath(__file__)))" in src
+
+    def test_no_path_side_pythonpath_dependency(self):
+        """两条启动路径均不写 PYTHONPATH（env 侧兜底会掩盖 launcher 缺自举的回归）。"""
+        assert "PYTHONPATH" not in _read(UNIT), (
+            "静态单元不应靠 Environment=PYTHONPATH 保 app 导入——真启动回归会被 env 掩盖")
+        branch_body = (_read(RUNNER).split('if [ "$role" = "worker" ]', 1)[1]
+                       .split("\nfi", 1)[0])
+        assert "PYTHONPATH" not in branch_body, (
+            "grape@worker 分支不应 export PYTHONPATH——真启动回归会被 env 掩盖")
 
     def test_dropin_params_match_static_unit(self):
         """两条路径 Memory*/Restart* 字面值必须相等（否则同一单在不同机器行为不同）。"""

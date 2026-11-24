@@ -1,24 +1,35 @@
 """Issue #4203：launcher 预 bind（scripts/start-worker.py）。
 
-不真启动 uvicorn（服务类命令禁前台长驻），只验证 seam：
+seam 级验证（不真启动 uvicorn）：
 - listen_socket：bind + listen + SO_REUSEADDR（端口 0 免冲突）；
 - main-guard：spawn 子进程重跑本文件（__name__ 不是 __main__）不触发 bind
   （EADDRINUSE 崩溃循环的实测教训，用真子进程断言，不再 `or True` 恒真）；
 - 环境变量缺省对齐端口事实源（38083 / 0.0.0.0 / 2 workers）。
+
+真启动 seam（SRE 部署复核 Critical，PR #2092）：上述 seam 级用例全程 mock uvicorn，
+不覆盖 argv/sys.path 与真实 app 导入——「脚本路径启动时仓库根不在 sys.path →
+ModuleNotFoundError」这条链只有真启动才能拦截。TestRealStartupSeam 以子进程按
+生产单元一致的 argv+cwd+env（无 PYTHONPATH）拉起一次，断言 TCP 5s 内可连
+（预 bind 先于 app 导入）+ /api/ping 200 + 进程存活，finally 强制回收进程组，
+不留长驻服务（服务类命令禁前台长驻的约束不破）。
 """
 import importlib.util as _ilu
 import os
+import signal
 import socket
 import subprocess
 import sys
 import textwrap
+import time
+import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
 import pytest  # noqa: E402
 
-_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "start-worker.py")
+_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+_SCRIPT = os.path.join(_ROOT, "scripts", "start-worker.py")
 
 _spec = _ilu.spec_from_file_location("start_worker", _SCRIPT)
 sw = _ilu.module_from_spec(_spec)
@@ -203,3 +214,110 @@ class TestDefaults:
         monkeypatch.setenv("GRAPE_HOST", "127.0.0.1")
         monkeypatch.setenv("GRAPE_UVICORN_WORKERS", "1")   # grape@ 路径的单进程语义
         assert sw.resolve_params() == ("127.0.0.1", 39002, 1)
+
+
+class TestRealStartupSeam:
+    """SRE 部署复核 Critical（PR #2092）：生产 argv 真启动——真实 app 导入必须成功。
+
+    生产两条 ExecStart 路径都以「脚本路径」启动本 launcher（grape@worker →
+    grape-systemd-run.sh ``exec "$PY" .../scripts/start-worker.py``、静态单元直跑），
+    且不带 PYTHONPATH：Python 脚本模式 sys.path[0]=scripts/，仓库根不在 sys.path
+    （此前 ``python -m uvicorn`` 能导入 app 只因 ``-m`` 会把 cwd 加进 sys.path）。
+    缺 sys.path 自举时 uvicorn 在 config.load 阶段导入 ``src.api.grape_worker_server``
+    抛 ``ModuleNotFoundError: No module named 'src.api'``，exit 1 → systemd 反复
+    status=1/FAILURE，端口无监听（2026-11-24 生产 4 分钟不可用；seam 级用例全程
+    mock uvicorn，对这条真实导入路径零覆盖）。本用例不 mock：子进程真启动一次。
+
+    时限依据（本机实测）：TCP 可连 ~0.1s（bind 在 app 导入之前），/api/ping 首响应
+    ~8.3s（app import + lifespan 含 DB 初始化）——首响应预算取 30s（≈4x 余量），
+    5s 预算只给「端口先于 lifespan 可连」这条预 bind seam；收紧首响应到 5s 会在
+    CI 慢机上假红，反而让门禁不可信。
+    """
+
+    _TCP_DEADLINE_S = 5.0    # 预 bind seam：端口必须先于 app 导入可连
+    _PING_DEADLINE_S = 30.0   # /api/ping 200：含 app import + lifespan（实测 ~8.3s）
+
+    @staticmethod
+    def _free_port():
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def _spawn_unit_consistent(self, port):
+        """与生产 ExecStart 一致：脚本路径 argv、cwd=仓库根、无 PYTHONPATH。
+
+        DB/工作区隔离变量（DEVOPS_DB_BACKEND=sqlite 等）由 tests/conftest.py 在
+        收集期注入 os.environ，子进程整体继承——与 pytest 进程内用例同一套隔离语义。
+        """
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env.update({
+            "GRAPE_WORKER_PORT": str(port),
+            "GRAPE_HOST": "127.0.0.1",        # 测试监听回环即可，不对外暴露
+            "GRAPE_UVICORN_WORKERS": "1",     # 生产单进程语义（grape@worker 传 1）
+            "GRAPE_PROCESS_ROLE": "worker",   # 对齐静态单元 Environment=
+        })
+        return subprocess.Popen(
+            [sys.executable, _SCRIPT],
+            cwd=_ROOT, env=env, start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    @staticmethod
+    def _terminate_group(proc):
+        """收进程组（start_new_session 使 launcher 独立成组），不留长驻服务。"""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+        try:
+            return proc.communicate(timeout=15)[0]
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return proc.communicate()[0]
+
+    @staticmethod
+    def _tail(text, lines=20):
+        return "\n".join(text.splitlines()[-lines:])
+
+    def test_unit_consistent_startup_serves_ping(self):
+        port = self._free_port()
+        proc = self._spawn_unit_consistent(port)
+        tcp_ok = ping_ok = alive_at_ping = False
+        try:
+            tcp_deadline = time.monotonic() + self._TCP_DEADLINE_S
+            while time.monotonic() < tcp_deadline:
+                try:
+                    c = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                    c.close()
+                    tcp_ok = True
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            ping_deadline = time.monotonic() + self._PING_DEADLINE_S
+            while time.monotonic() < ping_deadline:
+                if proc.poll() is not None:
+                    break  # 进程先死：永远等不到 200（修复前的回归形态）
+                try:
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/ping", timeout=2) as r:
+                        if r.status == 200:
+                            ping_ok = True
+                            alive_at_ping = proc.poll() is None
+                            break
+                except Exception:
+                    time.sleep(0.2)
+        finally:
+            out = self._terminate_group(proc)
+
+        assert tcp_ok, (
+            f"{self._TCP_DEADLINE_S}s 内端口 {port} 不可连：预 bind seam 失效"
+            f"（「先监听再 lifespan」的窗口收敛前提不成立）\n{self._tail(out)}")
+        assert ping_ok and alive_at_ping, (
+            "单元一致启动（脚本路径 argv / 无 PYTHONPATH / cwd=仓库根）未达成 "
+            "/api/ping 200——回归形态：ModuleNotFoundError → exit 1 → systemd "
+            f"反复重启，端口无监听\n{self._tail(out)}")
+        assert "[start-worker] pre-bound" in out, (
+            f"日志缺 pre-bound（bind 与 lifespan 的顺序断言）\n{self._tail(out)}")
+        assert "ModuleNotFoundError" not in out and "No module named 'src" not in out, (
+            f"app 导入失败（仓库根未进 sys.path）\n{self._tail(out)}")

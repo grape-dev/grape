@@ -20,6 +20,12 @@ listen，uvicorn 直接在既有 socket 上 accept，lifespan 再慢端口也不
   ``Multiprocess(config, sockets=[...])`` 只适用于 ≥0.51；0.23–0.50 仍需
   ``target``（``Server(config).run``）。见 ``build_multiprocess``。
 - bind 失败显式退出非 0，交给 systemd Restart 拉起，绝不静默换端口。
+- sys.path 自举（SRE 部署复核 Critical）：两条生产路径都以「脚本路径」启动本文件
+  （grape@worker → grape-systemd-run.sh ``exec "$PY" .../scripts/start-worker.py``、
+  静态单元 ExecStart 同样直跑），脚本模式 sys.path[0]=scripts/，仓库根不在
+  sys.path——``python -m uvicorn`` 能导入 app 只因 ``-m`` 会把 cwd 加进 sys.path，
+  换成脚本路径后该隐式行为消失，uvicorn 导入 ``src.api.*`` 即 ModuleNotFoundError
+  （生产 worker 反复 status=1/FAILURE）。仓库根必须在这里显式插进 sys.path。
 
 环境变量（与 deploy/systemd/grape-worker-server.service / scripts/grape-systemd-run.sh
 对齐，均有缺省）：
@@ -31,6 +37,18 @@ listen，uvicorn 直接在既有 socket 上 accept，lifespan 再慢端口也不
 """
 import os
 import socket
+import sys
+
+# SRE 部署复核 Critical（PR #2092）：生产 ExecStart 以脚本路径启动本文件，脚本模式
+# 只把 scripts/ 放进 sys.path[0]，仓库根不在 sys.path（``python -m uvicorn`` 是靠
+# ``-m`` 把 cwd 加进 sys.path 才碰巧能跑）。缺这一行时 uvicorn 在 config.load 阶段
+# 导入 ``src.api.grape_worker_server:app`` 抛 ``ModuleNotFoundError: No module
+# named 'src.api'``，进程 exit 1 → systemd 反复重启，worker 端口无监听。把仓库根
+# （本文件上级目录）插到 sys.path[0]，使 app 导入与 cwd/PYTHONPATH 无关；
+# multiprocessing spawn 会重跑本文件，``not in`` 判重保证重复执行安全。
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 _BACKLOG = 2048
 _APP_IMPORT = "src.api.grape_worker_server:app"
@@ -110,7 +128,6 @@ def main() -> int:
     except OSError as e:
         # spawn 子进程重跑 main() 不应发生（有 __main__ 守卫）；真 bind 失败=端口被占，
         # 退出非 0 交给 systemd Restart，绝不静默换端口。
-        import sys
         print(f"[start-worker] bind {host}:{port} failed: {e}", file=sys.stderr, flush=True)
         return 1
     print(f"[start-worker] pre-bound {host}:{port} (backlog={_BACKLOG}, workers={workers})",
