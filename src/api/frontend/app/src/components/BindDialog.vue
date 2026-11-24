@@ -117,6 +117,17 @@ function t(key, vars) {
   }
   return key
 }
+// popup 回传的错误码一律走 i18n（键在 app.login.oauth_error_<code>）。此前直接
+// toast 原始码，用户看到的是 "bind_conflict" 这种英文枚举——2026-11-24 修。
+// WHITELIST:* 里夹带的是一次性票据，绝不能回显，单独归一到白名单文案。
+function bindErrorText(code) {
+  const raw = String(code || '')
+  if (!raw) return t('bind_failed_retry')
+  if (raw.indexOf('WHITELIST') === 0) return t('whitelist_title') || t('bind_failed_retry')
+  const key = 'oauth_error_' + raw
+  const got = t(key)
+  return got && got !== key ? got : raw // 未知码保留原值，便于排障
+}
 try {
   G.window.addEventListener('grape:langchange', () => { langVer.value += 1 })
 } catch (e) { /* 非浏览器环境忽略 */ }
@@ -298,7 +309,7 @@ function startOauth() {
             .catch(function () {
               finish(false, t('transfer_context_expired'))
             })
-        } else finish(false, d2.error)
+        } else finish(false, bindErrorText(d2.error))
       }
       G.window.addEventListener('message', onMsg)
       pollId = setInterval(function () {
