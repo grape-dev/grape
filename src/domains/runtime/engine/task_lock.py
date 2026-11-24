@@ -17,10 +17,9 @@ Usage in scheduler workers::
     async def _my_worker(interval=300):
         while True:
             async with run_with_distributed_lock("my_task", ttl=600) as acquired:
-                if not acquired:
-                    # another worker is already doing the work — skip this cycle
-                    continue
-                do_work()
+                # another worker may be doing the work — skip this cycle
+                if acquired:
+                    do_work()
             await asyncio.sleep(interval)
 
 Contract (Issue #3742): this context manager does **NOT** skip the body for

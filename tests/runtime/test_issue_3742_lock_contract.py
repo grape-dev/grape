@@ -323,7 +323,9 @@ def test_skill_sync_ttl_single_source():
     assert default_ttl == ss.SKILL_SYNC_LOCK_TTL
     cycle_src = inspect.getsource(ss.sync_official_skills)
     assert "SKILL_SYNC_LOCK_TTL" in cycle_src
-    assert "900" not in cycle_src, "cycle threshold must derive from TTL, not hardcode 900"
+    assert re.search(r"_threshold = SKILL_SYNC_LOCK_TTL / 2", cycle_src), (
+        "cycle threshold must derive from TTL (SKILL_SYNC_LOCK_TTL / 2), not hardcode 900"
+    )
 
 
 def _install_sync_stubs(monkeypatch, tmp_path):
