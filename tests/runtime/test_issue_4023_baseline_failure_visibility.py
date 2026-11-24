@@ -122,6 +122,18 @@ class TestBaselineErrorFormatting:
         assert parsed["requested_baseline"] == "", \
             "requested == expected 时 errors JSON 仍须含 requested_baseline 字段"
 
+    def test_parse_prefix_only_text_is_not_baseline_error(self):
+        # 仅有前缀、解析不出 issue+reason 的半截文本不得判定为基线错误，
+        # 否则 errors 落成 WORKSPACE_BASELINE_MISMATCH 且打点 key 归 '-'。
+        assert parse_baseline_error_text(
+            "workspace baseline mismatch: expected_baseline=arch") == {}
+        assert parse_baseline_error_text(
+            "workspace baseline mismatch: issue=#3564") == {}
+        text, struct = service._format_failure_error(
+            "workspace baseline mismatch: expected_baseline=arch")
+        assert struct is None
+        assert "workspace baseline mismatch:" in text
+
 
 class TestFailureErrorFormatting:
     def test_baseline_string_kept_full_and_structured(self):

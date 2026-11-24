@@ -5214,7 +5214,14 @@ def _record_baseline_failure(issue, reason) -> dict:
 
 
 def _reset_baseline_failure(issue) -> None:
-    """任务成功完成时清空该 issue 的连续失败链（key 归一与打点侧一致）。"""
+    """任务成功完成时清空该 issue 的连续失败链（key 归一与打点侧一致）。
+
+    口径（Issue #4023 复审 Optional 明确）：按 issue 全量清链、**不区分
+    agent_type**——连续失败链的语义是「同一 Issue 上的基线持续不一致」，
+    属 Issue 级而非 Agent 级。同一 Issue 上其他 Agent（如 qa）成功完成即
+    视为该 Issue 工作区已恢复可用，打断 coding 的连续失败链属预期行为
+    （打点最多被延迟，不会漏报持续不一致）。
+    """
     with _baseline_failure_lock:
         _baseline_failure_state.pop(_baseline_issue_key(issue), None)
 
@@ -5363,7 +5370,7 @@ def fail_task(task_id, error, exit_code=-1):
     # chat 远端轮询只读 result_text → 用户只见光秃秃「查询失败」。此处同步写入可读原因，
     # errors 仍保留原始排障详情（可能含结构化诊断 dict，如 TRANSIENT_RETRY_*）。
     _result_text_write = (_result_show if _result_show is not None else "") \
-        or str(error or "")[:500]
+        or _err_log
     update_task_status(task_id, "failed", exit_code=exit_code,
                        result_text=_result_text_write,
                        errors=_fail_errors)

@@ -153,7 +153,12 @@ _BASELINE_ERROR_FIELDS = ("issue", "path", "expected_baseline", "actual_head",
 
 
 def parse_baseline_error_text(text) -> dict:
-    """从失败上报文本还原 WorkspaceBaselineError 结构化字段；非基线文本 → {}。"""
+    """从失败上报文本还原 WorkspaceBaselineError 结构化字段；非基线文本 → {}。
+
+    仅含 `workspace baseline mismatch:` 前缀但解析不出 issue 与 reason 的文本
+    （半截截断 / 仿写）不视为基线错误，返回 {}，避免落入
+    WORKSPACE_BASELINE_MISMATCH 且打点 key 归 '-'。
+    """
     s = str(text or "")
     if "workspace baseline mismatch:" not in s:
         return {}
@@ -162,6 +167,8 @@ def parse_baseline_error_text(text) -> dict:
         m = re.search(rf"(?:^|\s){re.escape(key)}=(\S+)", s)
         if m:
             fields[key] = m.group(1)
+    if not (fields.get("issue") and fields.get("reason")):
+        return {}
     if fields.get("issue"):
         fields["issue"] = fields["issue"].lstrip("#")
     # requested_baseline 仅在发生基线回退时才出现在文本里；与 to_dict() 恒含该 key
