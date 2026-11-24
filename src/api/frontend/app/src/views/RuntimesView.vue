@@ -1256,6 +1256,7 @@ import {
   isChecked,
   toggle as toggleRoleTag,
   toPayload,
+  droppedByScene,
 } from './runtime-tag-link.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { pluginsEnabled } from '@/lib/features'
@@ -2233,13 +2234,20 @@ function saveSceneTags(rt) {
     .catch((e) => app().showToast(t('toast.save_failed', { msg: e.message })))
 }
 function saveEngineTags(rt) {
-  // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）
+  // 可见角色全勾 → 只下发全能（后端 _apply_tag_rules 亦会折叠，这里显式单一来源）；
+  // 否则只下发「当前场景可见」的已勾角色（2026-11-24 裁定：切场景后保存即按场景收窄）
   const _payload = toPayload(edAgentTags.value, edVisibleRoles.value)
   // 2026-11-23 裁定：不允许把所有角色都取消（空角色 = 该引擎对任何任务都不可选）
+  const _dropped = droppedByScene(edAgentTags.value, edVisibleRoles.value)
+  const _droppedLabels = _dropped.map((r) => rtTagLabel(r) || r).join('、')
   if (!_payload.length) {
-    app().showToast(t('toast.tags_need_one'))
+    // 空载荷分两种：当前场景下一个角色都勾不到（收窄后为空） vs 用户本来就全取消
+    app().showToast(_dropped.length
+      ? t('toast.tags_scene_none', { roles: _droppedLabels })
+      : t('toast.tags_need_one'))
     return
   }
+  if (_dropped.length && !window.confirm(t('toast.tags_scene_drop_confirm', { roles: _droppedLabels }))) return
   API()
     .put('/runtime/runtimes/' + rt.id + '/tags', { tags: _payload })
     .then(function (d) {

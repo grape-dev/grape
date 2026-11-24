@@ -216,7 +216,9 @@
     "max_concurrent_invalid": "请输入 1-100 之间的整数",
     "save_failed": "保存失败: {{msg}}",
     "scanning": "扫描中...",
-    "tags_need_one": "至少要保留一个角色（全能或任一角色），不能全部取消"
+    "tags_need_one": "至少要保留一个角色（全能或任一角色），不能全部取消",
+    "tags_scene_drop_confirm": "当前场景不支持这些角色：{{roles}}；保存将把它们移除，确定继续？",
+    "tags_scene_none": "当前场景下没有可保存的角色（{{roles}} 不在本场景），请切换场景或重新勾选"
   },
   "skill": {
     "no_desc": "无描述",

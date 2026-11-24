@@ -216,7 +216,9 @@
     "max_concurrent_invalid": "Please enter an integer between 1-100",
     "save_failed": "Save failed: {{msg}}",
     "scanning": "Scanning...",
-    "tags_need_one": "Keep at least one role (All or any role); clearing them all is not allowed"
+    "tags_need_one": "Keep at least one role (All or any role); clearing them all is not allowed",
+    "tags_scene_drop_confirm": "The current scene does not support these roles: {{roles}}. Saving will remove them. Continue?",
+    "tags_scene_none": "No role can be saved in the current scene ({{roles}} is not part of it); switch the scene or tick a role"
   },
   "skill": {
     "no_desc": "No description",

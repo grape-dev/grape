@@ -25,7 +25,7 @@ function loadLink() {
   const src = fs.readFileSync(MODULE, 'utf8').replace(/^export /gm, '');
   return new Function(
     src +
-      '\nreturn { ALL_ROLES, normalizeRoles, initialRoles, visibleRoles, isAllChecked, isChecked, toggle, toPayload };'
+      '\nreturn { ALL_ROLES, normalizeRoles, initialRoles, visibleRoles, isAllChecked, isChecked, toggle, toPayload, selectedVisible, droppedByScene };'
   )();
 }
 
@@ -166,3 +166,31 @@ check('看护 角色描述文案不含「仅」', function () {
 });
 
 console.log('\n' + passed + ' passed');
+
+// ── 2026-11-24 裁定：切场景后保存 = 按当前场景收窄（界面看不见的角色不进载荷）──────
+const OPTS_B = ['all', 'issue', 'chat']; // 博客开发场景：没有 qa
+
+check('收窄 场景外角色不再进载荷（原先会静默保留）', function () {
+  const vis = L.visibleRoles(OPTS_B);
+  assert.deepStrictEqual(L.toPayload(['qa'], vis), []);
+  assert.deepStrictEqual(L.droppedByScene(['qa'], vis), ['qa']);
+});
+
+check('收窄 场景内角色正常保留', function () {
+  const vis = L.visibleRoles(OPTS_B);
+  assert.deepStrictEqual(L.toPayload(['issue'], vis), ['issue']);
+  assert.deepStrictEqual(L.droppedByScene(['issue'], vis), []);
+});
+
+check('收窄 全勾可见角色=全能 → 不收窄（下发 all）', function () {
+  const vis = L.visibleRoles(OPTS_B);
+  assert.deepStrictEqual(L.toPayload(SIX, vis), ['all']);
+  assert.deepStrictEqual(L.droppedByScene(SIX, vis), []);
+});
+
+check('收窄 混合场景内外的已勾角色 → 只留场景内，并报出被移除项', function () {
+  const vis = L.visibleRoles(OPTS_B);
+  assert.deepStrictEqual(L.selectedVisible(['qa', 'issue'], vis), ['issue']);
+  assert.deepStrictEqual(L.droppedByScene(['qa', 'issue'], vis), ['qa']);
+});
+
