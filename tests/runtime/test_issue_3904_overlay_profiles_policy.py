@@ -190,6 +190,80 @@ def test_unmarked_cwd_does_not_read_shared_ledger(tmp_path, monkeypatch):
     assert col.finish() == []
 
 
+def test_baseline_snapshot_before_fallback_excludes_history(tmp_path, monkeypatch):
+    """Required #1：先 start 基线、后回退 —— 共享库历史累计不得计入本次。
+
+    start() 时回退标记尚未写入（由 stream_execute 在之后打标），基线必须无条件
+    快照共享候选；否则基线为空、finish 读共享全量，把别的任务历史当成本次用量。
+    """
+    shared = tmp_path / "shared-hermes"
+    shared.mkdir()
+    _mk_state_db(str(shared / "state.db"), [
+        ("s1", "claude-x", "", 100, 20, 5, 0, 3),
+        ("s2", "claude-y", "", 777, 0, 0, 0, 0),
+    ])
+    monkeypatch.setenv("HERMES_HOME", str(shared))
+    cwd = str(tmp_path / "workspace")
+    os.makedirs(cwd)
+
+    col = usage_collect.UsageCollector("hermes", cwd=cwd, session_id="s1")
+    col.start()                                     # 回退之前记基线
+    hermes_acp._mark_shared_home_fallback(cwd)      # 回退发生在 start 之后
+    assert col.finish() == [], "共享库历史累计不得计入本次任务"
+
+
+def test_baseline_before_fallback_counts_only_delta(tmp_path, monkeypatch):
+    """先 start、后回退：只结算本任务新增量（s1 100→160 → 60，s2 不计）。"""
+    shared = tmp_path / "shared-hermes"
+    shared.mkdir()
+    db = str(shared / "state.db")
+    _mk_state_db(db, [
+        ("s1", "claude-x", "", 100, 0, 0, 0, 0),
+        ("s2", "claude-y", "", 777, 0, 0, 0, 0),
+    ])
+    monkeypatch.setenv("HERMES_HOME", str(shared))
+    cwd = str(tmp_path / "workspace")
+    os.makedirs(cwd)
+
+    col = usage_collect.UsageCollector("hermes", cwd=cwd, session_id="s1")
+    col.start()
+    hermes_acp._mark_shared_home_fallback(cwd)
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE session_model_usage SET input_tokens=160 WHERE session_id='s1'")
+    conn.commit()
+    conn.close()
+
+    recs = col.finish()
+    assert len(recs) == 1, recs
+    assert recs[0]["model"] == "claude-x"
+    assert recs[0]["input"] == 60, recs
+
+
+def test_overlay_and_shared_baselines_are_separated(tmp_path, monkeypatch):
+    """overlay 与共享候选各自快照：finish 只用实际读取路径对应的基线。"""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    shared = tmp_path / "shared-hermes"
+    shared.mkdir()
+    _mk_state_db(str(shared / "state.db"), [("s1", "m", "", 100, 0, 0, 0, 0)])
+    monkeypatch.setenv("HERMES_HOME", str(shared))
+    cwd = str(tmp_path / "workspace")
+    os.makedirs(cwd)
+    iso = usage_collect._hermes_iso_home(cwd)
+    os.makedirs(iso)
+    overlay_db = os.path.join(iso, "state.db")
+    _mk_state_db(overlay_db, [("s1", "m", "", 40, 0, 0, 0, 0)])
+
+    col = usage_collect.UsageCollector("hermes", cwd=cwd, session_id="s1")
+    col.start()
+    conn = sqlite3.connect(overlay_db)
+    conn.execute("UPDATE session_model_usage SET input_tokens=70 WHERE session_id='s1'")
+    conn.commit()
+    conn.close()
+
+    recs = col.finish()
+    assert len(recs) == 1 and recs[0]["input"] == 30, recs
+
+
 def test_usage_collect_missing_ledger_is_silent(tmp_path, monkeypatch, caplog):
     """overlay 被回退删除、共享 home 也没账本 → 不得逐任务 WARNING（#3904 噪音源）。"""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty-home"))
