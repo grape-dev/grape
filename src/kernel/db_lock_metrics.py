@@ -31,6 +31,13 @@
    （默认 5s，0=关闭→回退无界等锁）作为等待预算；预算耗尽抛
    ``LockAcquireTimeout``，由 API 层映射成 **503 + Retry-After**（区别于「上游 VCS
    故障」的 502）。后台线程/批处理无请求上下文 → 保持无界，语义不变。
+
+   ⚠️ **派生任务的预算约定**（#2205 复审）：``asyncio.Task`` 创建时复制当前
+   ContextVars，请求线程里 ``create_task``/``run_coroutine_threadsafe`` 派生出去的后台
+   协程会继承 ``path_var`` 而拿到同一份预算——它们不会有 503 兜底（响应早已发出），
+   超预算就是**静默失败**。凡派生协程一律在任务内显式声明预算：
+   ``with foreground_lock_budget(0): await payload``（见
+   ``src/domains/runtime/issues_center.py::_notify_without_foreground_budget``）。
 """
 from __future__ import annotations
 
