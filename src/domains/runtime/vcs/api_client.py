@@ -131,6 +131,13 @@ def remember_ref_404(repo_key: str, ident, detail: str = "", *, warn: bool = Tru
         if len(_ref_404_cache) >= _REF_404_MAX_ENTRIES:
             for k in [k for k, v in _ref_404_cache.items() if v[0] <= now]:
                 _ref_404_cache.pop(k, None)
+            # QA Optional 收口：清理后仍超阈值（全为未过期键）时驱逐最早到期项，
+            # 保证物理条目不越过上限，而不是只靠 TTL 自愈短暂超限。
+            if len(_ref_404_cache) >= _REF_404_MAX_ENTRIES:
+                _overflow = len(_ref_404_cache) - _REF_404_MAX_ENTRIES + 1
+                for k, _entry in sorted(_ref_404_cache.items(),
+                                        key=lambda kv: kv[1][0])[:_overflow]:
+                    _ref_404_cache.pop(k, None)
         _ref_404_cache[_ref_404_key(repo_key, ident)] = (now + ttl, payload)
     if warn:
         log.warning(f"VcsApiClient: issue ref negative-cached repo_key={repo_key} "

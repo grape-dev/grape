@@ -256,10 +256,15 @@ def test_404_negcache_hit_no_upstream_on_second_poll():
                return_value="tok"), \
          patch.object(api_client_mod.VcsApiClient, "_request", stub):
         r1 = _pipeline_get(996, owner=f"gitcode:{OWNER}")
+        calls_after_first = stub.calls
         r2 = _pipeline_get(996, owner=f"gitcode:{OWNER}")
     assert r1.status_code == 404 and r2.status_code == 404
-    # 第一次请求：核实链打 1 次上游并写负缓存；第二次请求：负缓存命中，零上游调用
-    assert stub.calls == 1, f"负缓存 TTL 内上游调用应 = 1，实际 {stub.calls}"
+    # 第一次请求：核实链打上游 404 并写负缓存（Issue #3759 仓库级熔断在首次永久
+    # 失败时会另发 1 次 repo probe，不计入本用例的负缓存语义）；第二次请求：
+    # 负缓存命中，零**新增**上游调用（快速失败，不再 1.3s 空转）。
+    assert calls_after_first >= 1
+    assert stub.calls == calls_after_first, (
+        f"负缓存 TTL 内第二次请求应零新增上游调用，实际新增 {stub.calls - calls_after_first}")
 
 
 def test_repo_keys_of_prefix_direct_select():
@@ -298,3 +303,23 @@ def test_vcs_issue_lookup_prefixed_single_provider():
             f"gitcode:{OWNER}", REPO, "123", {"auth_type": "session_token"})
     assert out is None
     assert probed == ["gitcode"], f"前缀直选应只探测 gitcode，实际 {probed}"
+
+
+def test_negcache_bounded_evicts_earliest_when_all_unexpired():
+    """QA Optional 收口：缓存满且全未过期时驱逐最早到期项，物理条目不超上限。"""
+    _cleanup()
+    cache = api_client_mod._ref_404_cache
+    limit = api_client_mod._REF_404_MAX_ENTRIES
+    now = __import__("time").monotonic()
+    with api_client_mod._ref_404_lock:
+        cache.clear()
+        # 填充到上限：最早到期项排在最前（key 名带序号便于断言被驱逐）
+        for i in range(limit):
+            cache[f"gitcode:evict/repo#{i}"] = (now + 1000 + i, {"error": "HTTP 404"})
+    evicted_key = "gitcode:evict/repo#0"
+    assert evicted_key in cache
+    api_client_mod.remember_ref_404("gitcode:evict/repo", "new", warn=False)
+    assert len(cache) <= limit, f"缓存物理条目不超上限: {len(cache)} > {limit}"
+    assert evicted_key not in cache, "最早到期项应被驱逐"
+    assert "gitcode:evict/repo#new" in cache, "新写入项应保留"
+    _cleanup()
