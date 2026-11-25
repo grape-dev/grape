@@ -59,12 +59,16 @@
 
 ## 验收标准
 
-- [ ] 删除被 chat 绑定的 runtime 后，`chat_agent_session.runtime_id=0`、`engine_uid` 保留，
+- [x] 删除被 chat 绑定的 runtime 后，`chat_agent_session.runtime_id=0`、`engine_uid` 保留，
       同事务完成（失败整体回滚），`purge_runtime_credential` 报告含 chat 摘绑行数；
-- [ ] 悬空命中且 `engine_uid` 非空 → 重解析到可用引擎并回写 `runtime_id`（DB 可见），
+- [x] 悬空命中且 `engine_uid` 非空 → 重解析到可用引擎并回写 `runtime_id`（DB 可见），
       `get_chat_config` 返回 `bound=True`；
-- [ ] 悬空且 uid 不可解析 → `bound=False, reason=engine_missing`；真未配置 → `bound=False, reason=unbound`；
-- [ ] 同一 `runtime_id` 仅首次 WARNING，后续 debug；
-- [ ] 迁移 009 幂等（重复执行 0 变更），清扫后 audit 口径 0 悬空，`engine_uid` 未被清空；
-- [ ] 现有测试无新增失败（基线唯一红用例 `tests/api/test_credential_write_primitive.py::test_insert_runtime_credential_returns_id` 前后一致）；
+- [x] 悬空且 uid 不可解析 → `bound=False, reason=engine_missing`；真未配置 → `bound=False, reason=unbound`；
+- [x] 同一 `runtime_id` 仅首次 WARNING，后续 debug；
+- [x] 删除侧新形态（`runtime_id=0` + 悬空 `engine_uid`）的 uid 分支告警同样去重，且该行 `usable=False`（不遮蔽可用遗留行）；
+- [x] 引用对账（reconcile）只清扫 `runtime_id>0` 的孤儿 uid，不得抹掉 `runtime_id=0` 行保留的 `engine_uid`；
+- [x] 读路径回写 `runtime_id` 带旧值 CAS 守卫，不覆盖并发 `chat_config_upsert_uid` 新写入；
+- [x] 迁移 009 幂等（重复执行 0 变更），清扫后 audit 口径 0 悬空，`engine_uid` 未被清空；
+- [x] 现有测试无新增失败（基线唯一红用例 `tests/api/test_credential_write_primitive.py::test_insert_runtime_credential_returns_id` 前后一致）；
       `make lint`、`python3 scripts/check-arch.py` 通过。
+- [x] 迁移 009 对「表不存在 / 0 行」的疑似连错库显式非 0 退出，不输出假绿。

@@ -92,8 +92,9 @@ def scan(conn) -> dict:
 
 def backup(conn, plan: dict) -> str:
     """悬空行整批备份（表名带 UTC 时间戳），返回备份表名。"""
+    # 秒级时间戳 + 进程内纳秒后缀：同秒重复执行不会撞备份表名。
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    bak = f"{BACKUP_PREFIX}{ts}"
+    bak = f"{BACKUP_PREFIX}{ts}_{int(time.time_ns() % 1_000_000):06d}"
     conn.execute(
         f"CREATE TABLE {bak} (id VARCHAR(191) PRIMARY KEY, user_id VARCHAR(191), "
         f"repo_key VARCHAR(191), runtime_id INTEGER, engine_uid VARCHAR(36), "
@@ -101,11 +102,11 @@ def backup(conn, plan: dict) -> str:
     conn.commit()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     n = 0
-    for rid, uid_val, repo_key, runtime_id, engine_uid in plan["rows"]:
+    for rid, user_id_val, repo_key, runtime_id, engine_uid in plan["rows"]:
         conn.execute(
             f"INSERT INTO {bak} (id, user_id, repo_key, runtime_id, engine_uid, backed_up_at) "
             f"VALUES (?,?,?,?,?,?)",
-            (rid, str(uid_val or ""), str(repo_key or ""), int(runtime_id),
+            (rid, str(user_id_val or ""), str(repo_key or ""), int(runtime_id),
              engine_uid or None, now))
         n += 1
     conn.commit()
@@ -144,7 +145,17 @@ def main(argv=None) -> int:
              os.environ.get("DEVOPS_DB_PATH") or "<session default>"
     print(f"[009] 目标库: {target}")
 
-    plan = scan(conn)
+    try:
+        plan = scan(conn)
+    except Exception as e:  # noqa: BLE001 - 表不存在/连错库必须显式失败，不静默 0 行
+        print(f"[009] 无法读取 {TABLE}（疑似连错库或表不存在）：{e}", file=sys.stderr)
+        print("[009] 三库拓扑请用 DEVOPS_DB_* 指向 runtime 库（见文件头「三库拓扑」）。",
+              file=sys.stderr)
+        return 2
+    if plan["total"] == 0:
+        print(f"[009] {TABLE} 为 0 行：疑似连错库（三库拓扑需连 runtime 库 DEVOPS_DB_*）。",
+              file=sys.stderr)
+        return 2
     print(f"[009] chat_agent_session 共 {plan['total']} 行；悬空 runtime_id {plan['dangling']} 行"
           f"（其中带 engine_uid 可重绑定 {plan['with_uid']} 行）；engine_uid 列="
           f"{'有' if plan['has_uid'] else '无（旧库降级）'}")

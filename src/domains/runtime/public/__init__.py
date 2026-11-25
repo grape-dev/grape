@@ -1641,6 +1641,9 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
     Issue #4045：`chat_agent_session` 与 `devops_agent_session` 同批摘绑（`runtime_id=0`），
     **保留 `engine_uid`**——引擎行删除后 uid 虽不可解析，但保留「原绑的是哪台引擎」的可审计/
     可重绑定线索，读路径可据此重解析（`session_manager._chat_config_row_engine`）。
+
+    默认参数下走 `RuntimeRefReconciler`（reason="revoke"）统一对账：除两张会话表外，
+    还收敛池/能力/历史绑定/场景引用，避免其它删行路径留下同类悬空引用。
     """
     cid_s = str(cid)
     out: dict[str, Any] = {"rids": [], "sessions": 0, "chat_sessions": 0,
@@ -1651,18 +1654,42 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
         out["rids"] = rids
         if rids:
             ph = ",".join(["?"] * len(rids))
-            if detach_sessions:
-                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
-                          tuple(rids))
-                out["sessions"] = int(c.rowcount or 0)
-                # Issue #4045：chat 会话配置同事务摘绑（原缺口：只摘 devops 侧 → runtime_id 悬空
-                # 持续打 `get_chat_config: runtime_id=… 不存在` 并静默回落本机直连）
-                c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
-                          tuple(rids))
-                out["chat_sessions"] = int(c.rowcount or 0)
-            if drop_capabilities:
-                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
-                out["caps"] = int(c.rowcount or 0)
+            if detach_sessions and drop_capabilities:
+                # Issue #4045 / #3097：删引擎行前统一走引用对账（会话/池/能力/绑定/场景），
+                # 避免只覆盖 devops+chat 两张表而漏掉 agent_type_runtime_pool /
+                # devops_agent_runtime_binding / 场景 engine_runtime_ids 等引用。
+                try:
+                    _rep = reconcile_for_caller(c, rids, 0, reason="revoke")
+                except Exception as _re:  # noqa: BLE001 - 兜底不阻断吊销主流程
+                    log.warning(f"purge_runtime_credential reconcile skipped: {_re}")
+                    _rep = {}
+                out["sessions"] = int((_rep or {}).get("sessions_reset", 0) or 0)
+                out["chat_sessions"] = int((_rep or {}).get("chat_sessions_reset", 0) or 0)
+                out["caps"] = int((_rep or {}).get("capability_rows_deleted", 0) or 0)
+                if not _rep:
+                    # 对账通道不可用：至少保证 chat/devops 两条主引用摘绑（保留 engine_uid）
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["sessions"] = int(c.rowcount or 0)
+                    c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["chat_sessions"] = int(c.rowcount or 0)
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["caps"] = int(c.rowcount or 0)
+            else:
+                if detach_sessions:
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["sessions"] = int(c.rowcount or 0)
+                    # Issue #4045：chat 会话配置同事务摘绑（原缺口：只摘 devops 侧 → runtime_id 悬空
+                    # 持续打 `get_chat_config: runtime_id=… 不存在` 并静默回落本机直连）
+                    c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
+                              tuple(rids))
+                    out["chat_sessions"] = int(c.rowcount or 0)
+                if drop_capabilities:
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(rids))
+                    out["caps"] = int(c.rowcount or 0)
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(rids))
             out["engines"] = int(c.rowcount or 0)
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid_s,))
@@ -1714,6 +1741,17 @@ def change_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
                 rid_map[rid] = surviving
             replaced_ids.extend(replaced)
         if replaced_ids:
+            # Issue #4045：删合并行前先把引用改绑到各自的保留行（本仓既有 dedupe 路径口径），
+            # 否则 scope 切换会像 revoke 一样留下悬空 runtime_id。
+            # 按保留行分组：同一 lower(name) 组内的 replaced 只能改绑到该组 surviving。
+            _by_keep: dict[int, list[int]] = {}
+            for _rid, _keep in rid_map.items():
+                _by_keep.setdefault(int(_keep), []).append(int(_rid))
+            for _keep, _gone in _by_keep.items():
+                try:
+                    reconcile_for_caller(c, _gone, _keep, reason="credential-scope-merge")
+                except Exception as _re:  # noqa: BLE001 - 对账失败记 warn，不阻断 scope 切换
+                    log.warning(f"change_credential_scope reconcile skipped: {_re}")
             ph = ",".join(["?"] * len(replaced_ids))
             c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(replaced_ids))
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(replaced_ids))
@@ -2518,8 +2556,10 @@ _ANY_QUERIES: dict[str, str] = {
     'agent_runtime_name_by_uid': "SELECT name FROM agent_runtimes WHERE engine_uid=?",
     # Issue #4045：uid 重解析需要同时拿到 id（回写 runtime_id）与 name（backend 派生）
     'agent_runtime_row_by_uid': "SELECT id, name FROM agent_runtimes WHERE engine_uid=?",
-    # Issue #4045：读路径 uid 重解析命中后回写配置行的 runtime_id（按主键精确改一行）
-    'chat_config_runtime_id_backfill': "UPDATE chat_agent_session SET runtime_id=? WHERE id=?",
+    # Issue #4045：读路径 uid 重解析命中后回写配置行的 runtime_id。
+    # CAS：带观测到的旧 runtime_id 守卫，防覆盖用户并发 upsert 写入的新值（0 行即放弃）。
+    'chat_config_runtime_id_backfill': (
+        "UPDATE chat_agent_session SET runtime_id=? WHERE id=? AND runtime_id=?"),
     'chat_config_upsert_uid': (
         "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, engine_uid, skill, "
         "skill_id, created_at, last_active_at) "

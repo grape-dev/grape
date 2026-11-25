@@ -282,13 +282,18 @@ class RuntimeRefReconciler:
                 if columns_exist(c, _tbl, ("engine_uid",)):
                     _mirror = c.execute(session_uid_mirror_sql(_tbl)).rowcount
                     self.report[_prefix + "sessions_uid_rebound"] = _mirror
+                    # Issue #4045：只清扫仍有 runtime_id 的孤儿 uid；`runtime_id=0` 表示
+                    # 已摘绑，其 engine_uid 是删除侧刻意保留的可审计/可重绑定线索，
+                    # 不能被任何一次引用对账抹成 NULL（否则迁移 009 的保留决策失效）。
                     _nulled = c.execute(
                         f"SELECT COUNT(*) FROM {_tbl} WHERE engine_uid IS NOT NULL "
+                        f"AND runtime_id>0 "
                         f"AND runtime_id NOT IN (SELECT id FROM agent_runtimes)").fetchone()[0]
                     if _nulled:
                         c.execute(
                             f"UPDATE {_tbl} SET engine_uid=NULL "
-                            f"WHERE runtime_id NOT IN (SELECT id FROM agent_runtimes)")
+                            f"WHERE runtime_id>0 "
+                            f"AND runtime_id NOT IN (SELECT id FROM agent_runtimes)")
                     self.report[_prefix + "sessions_uid_nulled"] = _nulled
                 else:
                     # 历史库缺 engine_uid 列：uid 轨道跳过（记录，不静默）

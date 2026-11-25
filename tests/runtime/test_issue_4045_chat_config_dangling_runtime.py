@@ -246,3 +246,103 @@ def test_migration_009_idempotent(tmp_path):
 def _query_mig(conn, sql: str):
     row = conn.execute(sql).fetchone()
     return row[0] if row else None
+
+# ------------------------------------------------ 复审补充：uid 分支去重 / 对账保留 uid
+UID_ZERO_UID = 94049
+
+
+def test_zero_runtime_dangling_uid_usable_false(caplog):
+    """删除侧新形态（runtime_id=0 + 悬空 uid）→ usable=False/engine_missing，且告警同样去重。"""
+    from src.kernel import session_manager
+
+    session_manager._DANGLING_WARN_SEEN.clear()
+    with caplog.at_level(logging.DEBUG):
+        first = session_manager._chat_config_row_engine(0, "uid-4045-never-existed")
+        second = session_manager._chat_config_row_engine(0, "uid-4045-never-existed")
+    assert first == ("", False, "engine_missing", 0), f"置 0 + 悬空 uid 必须不可用，实际 {first}"
+    assert second == first
+    hits = [r for r in caplog.records if "engine_uid=uid-4045-never-existed" in r.getMessage()]
+    warn = [r for r in hits if r.levelno == logging.WARNING]
+    debug = [r for r in hits if r.levelno == logging.DEBUG]
+    assert len(warn) == 1, f"uid 分支同一 uid 只应首条 WARNING，实际 {[(r.levelname, r.getMessage()) for r in hits]}"
+    assert len(debug) == 1, f"其后应降级为 debug，实际 {[(r.levelname, r.getMessage()) for r in hits]}"
+
+
+def test_revoked_canonical_does_not_shadow_usable_legacy():
+    """canonical 行被 revoke（runtime_id=0 + 悬空 uid）时仍应下探到可用的遗留行（契约②）。"""
+    _clean(UID_ZERO_UID)
+    _clean_engines(R_LIVE)
+    _seed_engine(R_LIVE, "hermes")
+    _seed_row(f"sess-cfg-{UID_ZERO_UID}", UID_ZERO_UID, runtime_id=0,
+              engine_uid="uid-4045-swept-away")
+    _seed_row(f"sess-cfg-{UID_ZERO_UID}-legacy", UID_ZERO_UID, runtime_id=R_LIVE)
+    try:
+        cfg = get_chat_config(UID_ZERO_UID)
+        assert cfg["runtime_id"] == R_LIVE, f"应下探到可用遗留行，实际 {cfg}"
+        assert cfg.get("bound") is True, f"可用遗留行应 bound=True，实际 {cfg}"
+    finally:
+        _clean(UID_ZERO_UID)
+        _clean_engines(R_LIVE)
+        _reset_engine_cache()
+
+
+def test_reconcile_does_not_null_uid_on_detached_row():
+    """任何一次引用对账都不得把 runtime_id=0 行保留的 engine_uid 抹成 NULL。"""
+    from src.domains.runtime.engine.refs_reconcile import RuntimeRefReconciler
+
+    _clean(UID_ZERO_UID)
+    _clean_engines(9505)
+    _seed_engine(9505, "hermes")
+    _seed_row(f"sess-cfg-{UID_ZERO_UID}", UID_ZERO_UID, runtime_id=0,
+              engine_uid="uid-4045-audit-trail")
+    try:
+        with db_lock:
+            c = db.cursor()
+            RuntimeRefReconciler(c, reason="test").reconcile([9505], 0)
+            db.commit()
+        row = _query("SELECT runtime_id, engine_uid FROM chat_agent_session WHERE id=?",
+                     (f"sess-cfg-{UID_ZERO_UID}",))
+        assert row and row[0][0] == 0, f"已摘绑行 runtime_id 应保持 0，实际 {row}"
+        assert row[0][1] == "uid-4045-audit-trail", f"对账不得抹掉保留的 uid，实际 {row}"
+    finally:
+        _clean(UID_ZERO_UID)
+        _clean_engines(9505)
+        _reset_engine_cache()
+
+
+def test_backfill_runtime_id_is_cas_protected():
+    """回写带旧值守卫：并发 upsert 改了 runtime_id 后，旧观测值不得覆盖新值。"""
+    from src.kernel import session_manager
+
+    _clean(UID_ZERO_UID)
+    _seed_row(f"sess-cfg-{UID_ZERO_UID}", UID_ZERO_UID, runtime_id=12345)
+    try:
+        row_id = f"sess-cfg-{UID_ZERO_UID}"
+        session_manager._chat_config_backfill_runtime_id(row_id, R_LIVE2, R_GONE)
+        row = _query("SELECT runtime_id FROM chat_agent_session WHERE id=?", (row_id,))
+        assert row[0][0] == 12345, f"旧观测值不应覆盖并发写入，实际 {row}"
+        session_manager._chat_config_backfill_runtime_id(row_id, R_LIVE2, 12345)
+        row = _query("SELECT runtime_id FROM chat_agent_session WHERE id=?", (row_id,))
+        assert row[0][0] == R_LIVE2, f"观测值一致时应回写，实际 {row}"
+    finally:
+        _clean(UID_ZERO_UID)
+        _reset_engine_cache()
+
+
+def test_migration_009_refuses_wrong_or_empty_db(tmp_path, monkeypatch):
+    """连错库（表不存在）或 0 行时必须非 0 退出，不输出「0 行悬空」假绿。"""
+    import src.kernel.session_manager as _sm
+
+    mod = _load_migration()
+    conn = sqlite3.connect(str(tmp_path / "wrong009.db"))
+    monkeypatch.setattr(_sm, "db", conn)
+    try:
+        assert mod.main([]) == 2, "表不存在应拒绝"
+        conn.execute("CREATE TABLE agent_runtimes (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute("CREATE TABLE chat_agent_session (id TEXT PRIMARY KEY, user_id TEXT, "
+                     "repo_key TEXT, runtime_id INTEGER, engine_uid TEXT)")
+        conn.commit()
+        assert mod.main([]) == 2, "0 行应拒绝（疑似连错库）"
+    finally:
+        conn.close()
+

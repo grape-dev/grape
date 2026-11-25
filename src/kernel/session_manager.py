@@ -879,29 +879,38 @@ def _chat_config_query_rows(uid_name: str, legacy_name: str, params: tuple) -> l
         return [tuple(r) + ("",) for r in _im.read_all_any(legacy_name, params)]
 
 
-# Issue #4045：悬空 runtime_id 的 WARNING 按 id 去重（进程内，有界）。
+# Issue #4045：悬空 runtime_id / engine_uid 的 WARNING 按键去重（进程内，有界）。
 # 迁移 009 上线后存量归零，残留只有每实例首条；后续命中降级 debug，避免每请求刷屏
-# 掩盖真正的「未知引擎」告警。容量上限 256，超限整体清空以保持内存有界。
+# 掩盖真正的「未知引擎」告警。容量上限 256，超限按 FIFO 淘汰最旧键保持内存有界。
+# 键既可以是 runtime_id（int），也可以是 `uid:<engine_uid>`（删除侧新形态：
+# runtime_id=0 + 悬空 uid，逐请求打的是 uid 分支告警）。
 _DANGLING_WARN_SEEN: dict = {}
 _DANGLING_WARN_LIMIT = 256
 _DANGLING_WARN_LOCK = threading.Lock()
 
 
-def _mark_dangling_warned(runtime_id: int) -> bool:
+def _mark_dangling_warned(key) -> bool:
     """首次命中返回 True（打 WARNING），其后返回 False（打 debug）。"""
     with _DANGLING_WARN_LOCK:
-        if runtime_id in _DANGLING_WARN_SEEN:
+        if key in _DANGLING_WARN_SEEN:
             return False
         if len(_DANGLING_WARN_SEEN) >= _DANGLING_WARN_LIMIT:
-            _DANGLING_WARN_SEEN.clear()
-        _DANGLING_WARN_SEEN[runtime_id] = 1
+            _DANGLING_WARN_SEEN.pop(next(iter(_DANGLING_WARN_SEEN)))
+        _DANGLING_WARN_SEEN[key] = 1
         return True
 
 
-def _chat_config_backfill_runtime_id(row_id: str, runtime_id: int) -> None:
-    """Issue #4045：uid 重解析命中后把 runtime_id 回写配置行（一次写，之后行内已一致不再写）。"""
+def _chat_config_backfill_runtime_id(row_id: str, runtime_id: int,
+                                     expected_runtime_id: int = 0) -> None:
+    """Issue #4045：uid 重解析命中后把 runtime_id 回写配置行（CAS，防覆盖并发写入）。
+
+    带上「读到行时观测到的旧 runtime_id」做条件更新：若用户在这期间通过
+    `chat_config_upsert_uid` 改了配置（runtime_id/engine_uid 同时变化），本回写
+    命中 0 行即放弃，不覆盖用户新值。
+    """
     try:
-        _im.exec_any("chat_config_runtime_id_backfill", (int(runtime_id), row_id))
+        _im.exec_any("chat_config_runtime_id_backfill",
+                     (int(runtime_id), row_id, int(expected_runtime_id or 0)))
     except Exception as e:  # noqa: BLE001  # 回写失败不影响本次读路径结果（下次读会再试）
         log.warning(f"get_chat_config: backfill runtime_id failed (row={row_id}): {e}")
 
@@ -918,7 +927,9 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None, row_i
         （且调用方给了 `row_id`）**回写 runtime_id**——重注册/换行后引用自动收敛，不再悬空；
         第 4 位 engine_runtime_id 回传**重解析后的真实引擎 id**，避免调用方继续用旧 id；
       · 悬空且无可解析 uid → usable=False、reason="engine_missing"；
-      · `runtime_id=0` 且无 uid → usable=True（沿用「未配置」候选语义）、reason="unbound"。
+      · `runtime_id=0` 且无 uid → usable=True（沿用「未配置」候选语义）、reason="unbound"；
+      · `runtime_id=0` 且 uid 悬空（删除侧新形态）→ usable=False、reason="engine_missing"，
+        让候选继续下探到可用的遗留行，不把可用配置降级。
     """
     reason_unbound = "unbound"
     reason_missing = "engine_missing"
@@ -936,15 +947,22 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None, row_i
             if _engines.is_known_engine_name(_un):
                 _uid_rid = int(urow[0] or 0)
                 if row_id and _uid_rid and _uid_rid != int(runtime_id or 0):
-                    _chat_config_backfill_runtime_id(row_id, _uid_rid)
+                    _chat_config_backfill_runtime_id(row_id, _uid_rid, runtime_id)
                 return urow[1], True, "", _uid_rid
             log.warning(f"get_chat_config: engine_uid={engine_uid} 指向未知引擎 '{urow[1]}'，回退 runtime_id={runtime_id}")
         elif _uid_query_ok:
             _uid_dangling = True
-            log.warning(f"get_chat_config: engine_uid={engine_uid} 失效（引擎行已删除），回退 runtime_id={runtime_id}")
+            _msg = (f"get_chat_config: engine_uid={engine_uid} 失效（引擎行已删除），"
+                    f"回退 runtime_id={runtime_id}")
+            if _mark_dangling_warned(f"uid:{engine_uid}"):
+                log.warning(_msg)
+            else:
+                log.debug(_msg)
     if not runtime_id:
-        # 真未配置：既没有 uid 线索也没有 runtime_id；uid 悬空则归因 engine_missing
-        return "", True, (reason_missing if _uid_dangling else reason_unbound), 0
+        # 真未配置：既没有 uid 线索也没有 runtime_id；uid 悬空则归因 engine_missing。
+        # Issue #4045：删除侧新形态（runtime_id=0 + 悬空 uid）必须 usable=False，
+        # 否则会遮蔽后面可用的遗留候选行（违反 row-selection 契约②）。
+        return "", (not _uid_dangling), (reason_missing if _uid_dangling else reason_unbound), 0
     brow = _im.read_one_any("agent_runtime_name_by_id", (runtime_id,))
     if not brow or not brow[0]:
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底。
@@ -1023,8 +1041,10 @@ def get_chat_config(user_id: int) -> dict:
                 _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
             except Exception as e:
                 log.warning(f"get_chat_config materialize default failed: {e}")
-        cfg["bound"] = bool(cfg.get("runtime_id"))
-        cfg["reason"] = "" if cfg["bound"] else "unbound"
+        # 无配置行 = 用户未配置：与 `runtime_id=0` 配置行统一口径（bound=False/unbound）。
+        # 本机直连 runtime_id 只是兜底执行引擎，不代表「配置已绑定」。
+        cfg["bound"] = False
+        cfg["reason"] = "unbound"
         return cfg
     if picked_id != f"sess-cfg-{user_id}" and backend_name:
         # 命中历史遗留行（写路径碰不到它）——仍需迁移合并，见诊断报告第三步
