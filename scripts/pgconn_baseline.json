@@ -14,7 +14,7 @@
   "src/domains/runtime/engine/plugin_state.py": 3,
   "src/domains/runtime/engine/scheduler.py": 22,
   "src/domains/runtime/engine/service.py": 6,
-  "src/domains/runtime/engine/transient_retry.py": 12,
+  "src/domains/runtime/engine/transient_retry.py": 10,
   "src/domains/runtime/issues_center.py": 7,
   "src/domains/runtime/migrations/skill_category_collapse.py": 2,
   "src/domains/runtime/migrations/skill_detail_tables.py": 2,
