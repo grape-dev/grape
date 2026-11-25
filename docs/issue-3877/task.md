@@ -12,4 +12,4 @@
 8. [x] 门禁：`tests/api/test_migration_track_guard.py`、`tests/api/test_migration_domain_ownership.py`、
    `tests/runtime/test_repogit.py`、`tests/runtime/test_issue_3482_workspace_order.py`、
    `tests/runtime/test_issue_2245_git_writable.py`、`make lint`、`python3 scripts/check-arch.py` 全绿
-9. [ ] 自审查（5 轴 + 开源前置增量检查）→ 建 PR → Issue 评论 → A2A QA
+9. [x] 自审查（5 轴 + 开源前置增量检查）→ 建 PR #2171 → Issue 评论 → A2A QA（seq 108091）
