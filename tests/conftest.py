@@ -30,6 +30,11 @@ os.environ["DEVOPS_WORKSPACE_DIR"] = os.path.join(ROOT, "data", "test_workspaces
 # UAF → SIGSEGV。测试直接同步调 lg.ingest() 的用例（test_obs_logs 全部）不依赖
 # 该线程——OBS_LOG_DB=0 后 install_master_logging no-op，线程不启动，断言零影响。
 os.environ["OBS_LOG_DB"] = "0"
+# Issue #3750 同族：webhook 拒绝台账（obs_webhook_rejects）的后台 writer 线程与上面的
+# obs-log-writer 是同一失效形态——daemon 线程在测试进程里跨「换库 fixture close/重绑连接」
+# 落库会在 sqlite C 层撞 UAF。测试统一走 sync 模式（同一 `_write_rows` SQL 出口同步落库，
+# 断言零影响、行为等价），生产默认仍是有界队列 + 后台线程。
+os.environ["OBS_WEBHOOK_REJECTS"] = "sync"
 
 # S106（孤儿 inode 根因修复）：删除残留测试库必须发生在"任何模块建立 db 连接之前"。
 # 旧实现把删除放在 session fixture（_ensure_test_db）里——pytest 先收集/导入测试
