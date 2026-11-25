@@ -370,3 +370,55 @@ class TestAlertWindowEnvRobustness:
         finally:
             monkeypatch.delenv("SCENE_MISSING_ALERT_WINDOW", raising=False)
             importlib.reload(es)
+
+
+class TestFailedTaskRecordsSource:
+    """9. 失败快照落 pool_engine_source（审查 R1）：scene_missing 行可按来源筛选。"""
+
+    def _patch_failed_task_deps(self, monkeypatch, tmp_path):
+        import src.api.session_store as ss
+        import src.domains.runtime.engine.service as svc
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.kernel.prompt_builder as pb
+
+        monkeypatch.setattr(ss, "get_or_create_agent_session",
+                            lambda *a, **kw: {"id": "sess-3790-failed"})
+        monkeypatch.setattr(svc, "_encrypt_env_extra_for_write", lambda env: "enc:v1:test")
+        monkeypatch.setattr(pb, "build_devops_agent_prompt", lambda *a, **kw: "prompt-3790")
+        monkeypatch.setattr(ep, "get_agent_workdir", lambda *a, **kw: str(tmp_path))
+        monkeypatch.setattr(ep, "resolve_actor_account", lambda *a, **kw: "")
+
+    def test_failed_row_records_scene_missing(self, monkeypatch, tmp_path):
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        repo_key = _repo_key()
+        seq = _insert_event(repo_key)
+        try:
+            self._patch_failed_task_deps(monkeypatch, tmp_path)
+            ep._create_failed_task(repo_key, seq, "sre", "opencode", "sre",
+                                   "", 0, {"scene_id": "custom-ghost3790"},
+                                   "#3790", 0, pool_engine_source="scene_missing")
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT status, pool_engine_source FROM agent_tasks "
+                    "WHERE repo_key=? AND event_seq=?", (repo_key, seq)).fetchone()
+            assert row and row[0] == "failed"
+            assert row[1] == "scene_missing", f"失败快照来源丢失：{row!r}"
+        finally:
+            _cleanup(repo_key, [])
+
+    def test_failed_row_default_source_stays_empty(self, monkeypatch, tmp_path):
+        """未传来源时保持历史空串语义（不改既有失败快照口径）。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        repo_key = _repo_key()
+        seq = _insert_event(repo_key)
+        try:
+            self._patch_failed_task_deps(monkeypatch, tmp_path)
+            ep._create_failed_task(repo_key, seq, "sre", "opencode", "sre",
+                                   "", 0, {"scene_id": "s"}, "#3790", 0)
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT pool_engine_source FROM agent_tasks "
+                    "WHERE repo_key=? AND event_seq=?", (repo_key, seq)).fetchone()
+            assert row and row[0] == ""
+        finally:
+            _cleanup(repo_key, [])

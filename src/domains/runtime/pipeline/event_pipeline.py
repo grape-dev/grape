@@ -872,11 +872,15 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
 
 
 def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
-                        skill_path, skill_id, evt, issue_id="", runtime_id=0):
+                        skill_path, skill_id, evt, issue_id="", runtime_id=0,
+                        pool_engine_source=""):
     """引擎不可用时创建 failed 状态的 task 快照（供重派复用参数）。
 
     重派逻辑查 agent_tasks WHERE event_seq=?，无记录则报"无关联任务"。
     此函数确保引擎不可用时也有一条 failed task 记录，重派可走"终态→复用快照重建"路径。
+
+    Issue #3790：`pool_engine_source` 由调用方（run_pipeline 门禁来源）透传——本列原先
+    硬编码空串，scene_missing 的失败快照行无法按来源筛选（运营只能看到「引擎离线」）。
     """
     from src.domains.runtime.engine.service import _TASK_COLUMNS_LIST
     from src.api.session_store import get_or_create_agent_session
@@ -987,7 +991,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             pool_engine_uids="", engine_uid=None, engine_name_snapshot="",
             # Issue #1208：direct/failed 快照行无 selector 语义（列覆盖契约，值为空）
             pool_selector="",
-            pool_engine_source="",
+            # Issue #3790：来源随失败快照落库（scene_missing 可筛；未传保持历史空串语义）
+            pool_engine_source=pool_engine_source or "",
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
@@ -3263,7 +3268,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} selector zero-hit, "
                     f"skip enqueue (Issue #1208): {_gate_fail}")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
         _fail_event(seq, _gate_fail)
         return result
     else:
@@ -3286,7 +3292,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.info(f"Pipeline: no available engine for repo={repo_key} agent={agent_type}, seq={seq}, skip")
         # 创建 failed 状态的 task 快照（供重派复用参数，否则重派报"无关联任务"）
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
         # Issue #3790：场景未登记必须先报「仓内不存在（scene_missing）」，不能笼统报
         # 「无可用引擎」——否则运营只能看到「引擎离线」，丢失真实原因
         if _scene_missing:
@@ -3305,7 +3312,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 方案A：场景绑定的引擎全部离线/失联 → 不入队，事件置 failed 并明确提示
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                            pool_engine_source=_pool_source)
         _reason_offline = f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态"
         # Issue #3790：场景未登记时不得归档成「引擎全部离线」，先报仓内不存在（原因码 scene_missing）
         if _scene_missing:
@@ -3417,7 +3425,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.info(f"Pipeline: scene binding {list(set(_bind_names_253))} all offline for direct "
                          f"auto-select, seq={seq}, skip (Issue #253)")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                    pool_engine_source=_pool_source)
                 _fail_event(seq, f"场景绑定的引擎（{', '.join(sorted(set(_bind_names_253)))}）"
                                  f"全部不可用，direct 模式无法选机（Issue #253）")
                 return result
@@ -3455,13 +3464,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 else:
                     log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
                     _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                        skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                        skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                        pool_engine_source=_pool_source)
                     _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                     return result
             except Exception as _e:
                 log.warning(f"Pipeline: auto-select engine failed: {_e}")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0,
+                                    pool_engine_source=_pool_source)
                 _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                 return result
     try:
@@ -4392,7 +4403,7 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
 
 
 def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
-                     user_id: int = 0) -> tuple:
+                     user_id: int = 0, issue_creator: str = "") -> tuple:
     """Issue #1208：入队三分叉单点收口（selector / uid 池 / legacy id）。
 
     分叉判据（§2.1）：engine_selector 非空 → selector 路径（fail-closed 即时校验，
@@ -4428,8 +4439,10 @@ def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
                  "pool_engine_source": ""},
                 None)
     _src: dict = {}
+    # Issue #3790 审查 R1：`issue_creator` 与既有直调口径一致（user_id=0 时按创建人
+    # 反查场景 user scope），使门禁取代各入口的重复池解析后语义逐字不变。
     pool = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id,
-                                     source_out=_src)
+                                     issue_creator=issue_creator or "", source_out=_src)
     return "pool", {"pool_engine_ids": pool,
                     "pool_engine_source": _src.get("pool_engine_source", "")}, None
 
