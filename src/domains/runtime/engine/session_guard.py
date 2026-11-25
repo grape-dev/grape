@@ -653,13 +653,19 @@ def _append_error(task_id: str, entry: dict) -> None:
 
 
 def _merge_event_payload(event_seq, payload: dict) -> None:
-    """事件 payload 合并（独立命名空间 `_session_fail`，不改既有字段语义）。"""
+    """事件 payload 合并（独立命名空间 `_session_fail`，不改既有字段语义）。
+
+    QA 复审 Nit：`merge_event_payload` 返回 False（事件不存在 / 写入失败）时旧实现
+    静默丢弃观测 → 失败事件的引擎/队列/磁盘水位凭空消失且无痕。这里补一条 WARNING。
+    """
     try:
         seq = int(event_seq or 0)
         if not seq:
             return
         from src.domains.runtime.event_store import merge_event_payload
-        merge_event_payload(seq, {"_session_fail": payload})
+        if not merge_event_payload(seq, {"_session_fail": payload}):
+            log.warning(f"session_guard: _session_fail payload not merged (seq={seq}, "
+                        f"event missing or write failed); observation kept in task errors only")
     except Exception as e:
         log.debug(f"session_guard: merge event payload failed (seq={event_seq}): {e}")
 

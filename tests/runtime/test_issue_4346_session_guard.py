@@ -676,3 +676,25 @@ def test_acp_read_response_line_budget_not_regressed():
     assert agent._ACP_READ_MAX_LINES > 10, (
         "ACP 读取防御上限不得回退到 10 行（Issue #423 误报根因）")
     assert agent._ACP_READ_MAX_LINES >= 30
+
+
+# ── 8. 半开占位「有写必有一清」守门（复审 Experience 项）──
+
+def test_half_open_writer_has_release_paths():
+    """新增 session 半开写入点必须配套复位路径，否则引擎会被永久摘池（Critical 复发）。
+
+    守两条：
+    1. 模块内既有置位（``session_circuit_half_open=1``）就必有清零（``=0``）路径；
+    2. 终态收口必须挂在 ``update_task_status``（任务终态唯一必经点），不能只依赖
+       「completed 才复位」的单分支。
+    """
+    import inspect
+
+    from src.domains.runtime.engine import service as _svc
+
+    src = inspect.getsource(session_guard)
+    assert "session_circuit_half_open=1" in src, "半开置位点消失？本守门需同步更新"
+    assert "session_circuit_half_open=0" in src, "半开占位缺少清零路径（Critical 复发）"
+    assert "note_claim_outcome" in inspect.getsource(_svc.update_task_status), (
+        "终态必须收口 session 认领结果（note_claim_outcome），否则取消 / 非 session "
+        "失败会让占位永久残留")
