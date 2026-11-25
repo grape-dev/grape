@@ -1908,16 +1908,6 @@ def _engine_uid_by_rid(c, runtime_id) -> str:
         return ""
 
 
-def _runtime_conn_facts() -> str:
-    """解绑提示读失败日志附带的连接事实（`route`/`target_db`/`pid`/`host`，脱敏）。
-
-    Issue #3909：与 #2016/#3826/#3865 同口径——单行日志即可区分「旧进程未重启」与
-    「新代码仍打 mgmt 库」；实现收在 `db_registry.conn_facts`（只输出库名，不出 DSN）。
-    """
-    from src.kernel import db_registry
-    return db_registry.conn_facts("runtime")
-
-
 def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
                               repo_key: str = "") -> dict:
     """查询场景/引擎的被解绑提示信息（引擎绑定真实性同步 §4.3/§5.1b 前端数据源）。
@@ -1945,7 +1935,7 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
 
     def _degraded(reason: str, exc: Exception) -> dict:
         log.warning(
-            f"get_detached_engine_hints: degraded ({reason}) {_runtime_conn_facts()} "
+            f"get_detached_engine_hints: degraded ({reason}) {db_registry.conn_facts('runtime')} "
             f"scene_row_id={scene_row_id} runtime_ids={len(runtime_ids or [])} "
             f"repo_key={repo_key or '-'}: {exc}")
         return {"hints": out, "degraded": True, "reason": reason}
