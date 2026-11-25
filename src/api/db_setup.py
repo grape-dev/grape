@@ -476,6 +476,20 @@ CREATE TABLE IF NOT EXISTS event_active_guard (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (repo_key, issue_id, agent_type)
 )"""),
+    # ===== 评论派发幂等守卫（Issue #4088）=====
+    # 同一 (repo, agent, comment_id) 只派发一次：派发层先查后派，命中复用/短路
+    # 不新建任务段；event_seq 为首派事件 seq（幂等命中出参回显用），created_at
+    # 支撑重试窗口（GRAPE_COMMENT_DISPATCH_GUARD_WINDOW_SECONDS，TTL 兜底清理）。
+    ("grape_t_comment_dispatch_guard", """
+CREATE TABLE IF NOT EXISTS grape_t_comment_dispatch_guard (
+    repo_key    TEXT NOT NULL,
+    agent_type  TEXT NOT NULL,
+    comment_id  TEXT NOT NULL,
+    event_seq   INTEGER NOT NULL DEFAULT 0,
+    task_id     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, agent_type, comment_id)
+)"""),
     ("api_tokens", """
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4719,7 +4733,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
     - mgmt（单库/不筛域）：分类字典表必须存在，且一级活跃必须恰好 KEEP_L1_IDS；
     - mgmt（单库/不筛域）：autopilot_tasks 状态三列的 COLUMN_DEFAULT 必须是空串
       （`autopilot_dispatch_state.state_column_defaults_converged`）。加这一项的
-      原因：202611240011 的判据在 PR #2157 前几版里把 NULL 与 '' 折成同一态，
+      原因：autopilot 状态列默认值迁移（现 202611250007）的判据在 PR #2157 前几版里把 NULL 与 '' 折成同一态，
       迁移空转却盖章（假绿），那些「已盖章」的库启动时不会再跑 fn——只有把同一
       后置校验挂到台账之外的核对点，旧判据盖章的库才会在启动日志暴露漂移；
       SQLite 侧列定义本身带 DEFAULT ''，该函数直接通过（N/A）。
@@ -4761,7 +4775,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 failures.append(f"mgmt organization 仓库创建选项列后置校验失败: {e}")
             try:
                 # PR #2157 复审 Required：台账之外再核一次状态三列默认值。旧判据
-                # （把 COLUMN_DEFAULT NULL 当已收敛）盖章的库不会重跑 202611240011，
+                # （把 COLUMN_DEFAULT NULL 当已收敛）盖章的库不会重跑 202611250007，
                 # 只有这里能让「已盖章但目标未到位」在启动日志暴露。
                 from src.domains.mgmt.migrations.autopilot_dispatch_state import (
                     state_column_defaults_converged,
@@ -4777,6 +4791,16 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
                 verify_skill_classification_columns(conn=conn)
             except Exception as e:  # noqa: BLE001
                 failures.append(f"runtime skill 列后置校验失败: {e}")
+        if dom in ("", "insight"):
+            try:
+                # PR #2157 复审 R1：台账已盖章但目标缺失的存量库（表只在 _NEW_TABLES
+                # 登记过、建表迁移从未跑）不会重跑索引迁移，只有这里能让漂移进启动日志。
+                from src.domains.insight.observability.webhook_rejects import (
+                    verify_time_index as verify_webhook_rejects_index,
+                )
+                verify_webhook_rejects_index()
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"insight obs_webhook_rejects 表/时间窗索引后置校验失败: {e}")
     if failures:
         msg = "迁移目标后置校验失败（台账与目标不一致，需按域重跑）: " + "; ".join(failures)
         log.error(msg)
@@ -4784,7 +4808,7 @@ def verify_migration_targets(conn=None, domain: Optional[str] = None,
             raise RuntimeError(msg)
     else:
         log.info("迁移目标后置校验通过（分类一级集合 / skill 分类列 / organization 仓库列"
-                 " / autopilot 状态列默认值）")
+                 " / autopilot 状态列默认值 / obs_webhook_rejects 时间窗索引）")
     return failures
 
 
@@ -8181,6 +8205,97 @@ register_migration(
 )
 
 
+def _fn_add_events_failure_info() -> None:
+    """Issue #3433: add events.failure_info for structured failure attribution.
+
+    Stores {"error_type","phase","phase_label","message","runtime","agent","exit_code"}
+    as JSON so the event detail page can render reason + phase + retry guidance.
+
+    events 属 runtime 域：三库拓扑下必须在该域连接上执行（mgmt 连接里没有该表），
+    否则归属守卫会静默跳过 ALTER 却照常盖章，runtime 库永远缺列。
+    """
+    from src.kernel.session_manager import db as _db
+    conn = _migration_conn("runtime", default=_db)
+    c = conn.cursor()
+    _ensure_column(c, "events", "failure_info", "TEXT DEFAULT ''",
+                   allow_copy=True, strict=True, force=True)
+    conn.commit()
+    log.info("Added events.failure_info column (Issue #3433)")
+
+
+def _fn_rename_comment_dispatch_guard() -> None:
+    """Issue #4088 表名合规（架构闸 A6）：租户表必须用 grape_t_ 前缀。
+
+    comment_dispatch_guard 是 #4088 当晚新合入的租户表（按 repo_key/agent/comment 分域），
+    原名未带前缀。已建库的旧表就地 RENAME（保留数据 + 主键），全新库由 DDL 直接建新名；
+    两边都幂等：旧表不存在则跳过，新表已存在则不动。
+    """
+    from src.kernel.session_manager import db as _db
+    from src.kernel.ddl_safety import table_exists as _table_exists
+    conn = _migration_conn("runtime", default=_db)
+    c = conn.cursor()
+    old, new = "comment_dispatch_guard", "grape_t_comment_dispatch_guard"
+    if _table_exists(c, old) and not _table_exists(c, new):
+        c.execute(f"ALTER TABLE {old} RENAME TO {new}")
+        log.info(f"Renamed table {old} -> {new} (Issue #4088 / architecture rule A6)")
+    conn.commit()
+
+
+register_migration(
+    version="202611240013",
+    name="issue3433-events-failure-info-column",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_add_events_failure_info,
+)
+
+
+register_migration(
+    version="202611240014",
+    name="rename-comment-dispatch-guard-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_rename_comment_dispatch_guard,
+)
+
+
+def _fn_create_comment_dispatch_guard_table() -> None:
+    """Issue #4088 建表迁移（架构闸 A6 轮2）：租户表不能只挂在老轨 `_NEW_TABLES`。
+
+    `_NEW_TABLES` 只在「版本表为空首跑」或 legacy 兜底时执行；存量库已盖 legacy-stamp、
+    三库模式下 runtime 域进程又只跑登记迁移（allow_legacy=False），两条路都到不了这段 →
+    表永不创建，`claim_comment_dispatch_guard` 捕获异常后 fail-open 放行，派发幂等守卫
+    静默失效（#785/#995 同型事故）。本迁移补 kind=safe 建表，幂等：IF NOT EXISTS。
+
+    执行顺序：202611240014（RENAME 旧表）先跑，本迁移（202611240015）随后；
+    若全新库两表都无，014 空跑、本迁移建空表。
+    """
+    from src.kernel.session_manager import db as _db
+    conn = _migration_conn("runtime", default=_db)
+    c = conn.cursor()
+    c.execute("""
+CREATE TABLE IF NOT EXISTS grape_t_comment_dispatch_guard (
+    repo_key    TEXT NOT NULL,
+    agent_type  TEXT NOT NULL,
+    comment_id  TEXT NOT NULL,
+    event_seq   INTEGER NOT NULL DEFAULT 0,
+    task_id     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, agent_type, comment_id)
+)""")
+    conn.commit()
+    log.info("Ensured table grape_t_comment_dispatch_guard (Issue #4088)")
+
+
+register_migration(
+    version="202611240015",
+    name="create-comment-dispatch-guard-table",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_create_comment_dispatch_guard_table,
+)
+
+
 # ===== D109 平台对象模型六表（设计分片 d109 §4；DDL 单一来源 src/api/platform_object_ddl.py）=====
 
 def _fn_create_platform_object_tables() -> None:
@@ -9860,7 +9975,7 @@ register_migration(
 )
 
 
-def _migration_202611240011_autopilot_state_column_defaults() -> None:
+def _migration_202611250007_autopilot_state_column_defaults() -> None:
     """存量库修列：三列 TEXT NOT NULL 无默认 → VARCHAR(255) NOT NULL DEFAULT ''。
 
     2026-11-25 部署验证实测：`TEXT NOT NULL DEFAULT ''` 在 MySQL 8.0 落地为
@@ -9875,7 +9990,7 @@ def _migration_202611240011_autopilot_state_column_defaults() -> None:
     ensure_state_column_defaults()
 
 
-def _postcheck_202611240011_autopilot_state_column_defaults() -> None:
+def _postcheck_202611250007_autopilot_state_column_defaults() -> None:
     """盖章前校验三列默认值确已收敛为空串（Issue #3648 第 6 条约定）。"""
     from src.domains.mgmt.migrations.autopilot_dispatch_state import (
         state_column_defaults_converged,
@@ -9885,12 +10000,12 @@ def _postcheck_202611240011_autopilot_state_column_defaults() -> None:
 
 
 register_migration(
-    version="202611240011",
+    version="202611250007",
     name="autopilot-state-column-defaults",
     kind="cleanup",
     domains=("mgmt",),
-    fn=_migration_202611240011_autopilot_state_column_defaults,
-    post_check=_postcheck_202611240011_autopilot_state_column_defaults,
+    fn=_migration_202611250007_autopilot_state_column_defaults,
+    post_check=_postcheck_202611250007_autopilot_state_column_defaults,
 )
 
 
@@ -12068,16 +12183,17 @@ register_migration(
 # skill_category（is_active=1）；15 条种子里没有 content-generation，内容生成类
 # 技能每轮判未命中、category_id 恒 0（原实现还逐技能刷一条 WARNING）。
 # SQL 住属主域 migrations 下（跨域守卫 P0-2），这里只做注册引导。号段核对（提交前）：
-# 源码 register_migration 与各目标库 grape_t_schema_migrations 均未占用 202611240012
-# （当前最大 202611240011）。字面量登记 version/name/kind，供
-# tests/api/test_migration_track_guard.py 解析。
+# 基线 arch-weekly-11 已用 202611240011（#3564 引擎优先级）/202611240012（#4063
+# review 点快照列），本迁移与 autopilot 状态列默认值改取 202611250007/008——同号
+# 异名会让台账按 version 判「已执行」永久跳过（PR #2157 复审 C1）。字面量登记
+# version/name/kind，供 tests/api/test_migration_track_guard.py 解析。
 
 from src.domains.mgmt.migrations.skill_category_content_generation_seed import (
     seed_content_generation_category as _fn_seed_content_generation_category,
     verify_content_generation_category as _post_content_generation_category,
 )
 register_migration(
-    version="202611240012",
+    version="202611250008",
     name="skill-category-seed-content-generation",
     kind="backfill",
     fn=_fn_seed_content_generation_category,
@@ -12638,6 +12754,26 @@ def _fn_add_agent_tasks_event_seq_status_index() -> None:
             except Exception as e:  # noqa: BLE001 - 冗余索引删不掉不该阻断索引补齐
                 log.warning(f"drop redundant idx_agent_tasks_event failed: {e}")
         conn.commit()
+# ===== Issue #4063：审核点只读快照列（pending_review 内容幂等判据）=====
+# 语义：review_points / review_refs 记录**当前在位审核点**的内容与参考；
+# 是否在位由 issue.status 唯一决定（review_point.status 为派生投影），
+# 因此不需要额外的状态列，杜绝「内容列/状态列」双写漂移。
+def _fn_issue_review_point_columns() -> None:
+    """[202611240012 safe] Issue #4063：issue 增加 review_points / review_refs。
+
+    存量库补列；全新库由本迁移在 legacy 全量后执行同样补齐（注册式迁移，
+    不写老轨 _migrate_tables，避免已盖章库永不执行）。版本号取 202611240012：
+    基线上 202611240001（#4066）至 202611240010（#3763）已被占用，本 PR 的
+    #3564 引擎优先级迁移取 202611240011，本迁移顺延取 012；迁移函数幂等、
+    改号后重跑无副作用。
+    """
+    from src.kernel.session_manager import db as _db
+
+    conn = _migration_conn("runtime", default=_db)
+    c = conn.cursor()
+    _ensure_column(c, "issue", "review_points", "TEXT DEFAULT ''", force=True, strict=True)
+    _ensure_column(c, "issue", "review_refs", "TEXT DEFAULT ''", force=True, strict=True)
+    conn.commit()
 
 
 register_migration(
@@ -12697,57 +12833,37 @@ register_migration(
 )
 
 
-# ===== Issue #3750：obs_webhook_rejects(created_at, repo_key) 时间窗索引 =====
+# ===== Issue #3750：obs_webhook_rejects 建表 + (created_at, repo_key) 时间窗索引 =====
 # 该索引此前只写在**冻结老轨** `_create_indexes()` 里：存量库已盖 legacy-stamp
 # 202610300001，启动时不跑老轨，于是 #3750 的「按时间窗计数」（告警求值 + 14 天
 # 留存清理都是 `WHERE created_at >= ?`）在生产实际仍是全表扫 —— 正是
 # tests/api/test_migration_track_guard.py::test_legacy_index_ddl_is_frozen 恒红的
-# 原因（该守卫禁止往老轨新增索引）。改注册式迁移后，存量库下次启动即补齐并盖章
-# （先探测再建，幂等；三库模式下切到 insight 域连接）。
-# 版本号 202611250006：202611250001..005 已被本批迁移占用（见上面各条注释）。
-_OBS_WEBHOOK_REJECTS_TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+# 原因（该守卫禁止往老轨新增索引）。
+#
+# 两条注册式迁移（PR #2157 复审 C2，缺一不可）：
+#   · 202611240016 create-obs-webhook-rejects-table —— 建表。此前本表只登记在
+#     `_NEW_TABLES`（:643），而 `_create_tables()` 只在新装库首跑，存量库根本不跑，
+#     于是索引迁移每次 1146「no such table」、永远盖不上章，写侧只剩 WARNING 丢行
+#     （webhook_rejects._write_rows）。版本号取 202611240016（基线已占 001..015，
+#     且必须排在 202611250006 之前，否则首次启动建索引仍撞缺表）。
+#   · 202611250006 obs-webhook-rejects-time-repo-index —— 补索引。fn 自己再判一次表
+#     在位（台账已盖章/建表被跳过的库也能补齐），post_check 复核表 + 索引。
+# SQL 住属主域（insight）：`webhook_rejects.ensure_table / ensure_time_index / verify_*`。
+from src.domains.insight.observability.webhook_rejects import (  # noqa: E402
+    ensure_table as _fn_obs_webhook_rejects_table,
+    verify_table as _postcheck_obs_webhook_rejects_table,
+    ensure_time_index as _fn_obs_webhook_rejects_time_index,
+    verify_time_index as _postcheck_obs_webhook_rejects_time_index,
+)
 
-
-def _fn_obs_webhook_rejects_time_index() -> None:
-    """Issue #3750：补 webhook 验签拒绝台账的时间窗索引（幂等）。"""
-    from src.kernel.session_manager import db as _db, db_lock
-
-    conn = _migration_conn("insight", default=_db)
-    with (db_lock if conn is _db else nullcontext()):
-        c = conn.cursor()
-        if _index_present(c, "obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_TIME_INDEX):
-            return
-        if _mysql_backend():
-            # repo_key / created_at 是 TEXT，MySQL 建索引必须带前缀（1170）；迁移走
-            # db_registry._CompatCursor，mysql_compat「自动补 (191)」的特判不生效。
-            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
-                   "ON obs_webhook_rejects(created_at(191), repo_key(191))")
-        else:
-            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
-                   "ON obs_webhook_rejects(created_at, repo_key)")
-        try:
-            c.execute(ddl)
-        except Exception as e:  # noqa: BLE001
-            if "1061" in str(e) or "already exists" in str(e).lower():
-                log.info(f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 已存在（1061），视为建成")
-            else:
-                conn.rollback()
-                raise
-        conn.commit()
-
-
-def _postcheck_obs_webhook_rejects_time_index() -> None:
-    """post_check：索引在位才盖章（不在位 raise，不盖章、下次启动重试）。"""
-    from src.kernel.session_manager import db as _db, db_lock
-
-    conn = _migration_conn("insight", default=_db)
-    with (db_lock if conn is _db else nullcontext()):
-        c = conn.cursor()
-        if not _index_present(c, "obs_webhook_rejects",
-                              _OBS_WEBHOOK_REJECTS_TIME_INDEX):
-            raise RuntimeError(
-                f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 缺失（索引未建成，不盖章，下次启动重试）")
-
+register_migration(
+    version="202611240016",
+    name="create-obs-webhook-rejects-table",
+    kind="safe",
+    domains=("insight",),
+    fn=_fn_obs_webhook_rejects_table,
+    post_check=_postcheck_obs_webhook_rejects_table,
+)
 
 register_migration(
     version="202611250006",
@@ -12756,4 +12872,63 @@ register_migration(
     domains=("insight",),
     fn=_fn_obs_webhook_rejects_time_index,
     post_check=_postcheck_obs_webhook_rejects_time_index,
+)
+
+
+register_migration(
+    version="202611240012",
+    name="issue-review-point-snapshot-columns",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_issue_review_point_columns,
+)
+
+
+def _fn_add_agent_tasks_engine_priorities() -> None:
+    """Issue #3564：agent_tasks 补 `engine_priorities`（实例绑定优先级映射）。
+
+    场景 node 旁挂 engine_priorities 时，入队把 {engine_id: 1..9}（1 最高）写到本列；
+    空串 = 未配置 = 旧行为（claim_by_tag 优先级闸整体旁路）。存量库必须走
+    register_migration 才能补列（legacy 全量迁移段只在首跑执行）。
+
+    归属：`agent_tasks` owner=runtime（configs/table_ownership.json），故迁移必须
+    声明 `domains=("runtime",)`——否则三库模式下 mgmt 进程跑到跨库视图只会盖章
+    不建列、event(runtime) 进程又被域过滤永不执行，owner 库永远缺列（QA 2026-11-24）。
+    """
+    with db_lock:
+        c = db.cursor()
+        # 非 owner 库的 agent_tasks 是跨库视图：ALTER 必然 1346/1347，列只能加在
+        # owner 基表（grape_runtime_db）。视图场景跳过，等待 owner 库迁移。
+        if not _table_present(c, "agent_tasks") or not _is_base_table(c, "agent_tasks"):
+            log.info("agent_tasks 在本库非基表（视图/缺表），engine_priorities 归属 owner 基表，跳过 ALTER")
+            return
+        _ensure_column(c, "agent_tasks", "engine_priorities", "TEXT DEFAULT ''",
+                       allow_copy=True, strict=True)
+        db.commit()
+
+
+def _postcheck_agent_tasks_engine_priorities() -> None:
+    """后置校验：owner 基表含 `engine_priorities` 才盖章（Issue #3648 口径）。
+
+    非 owner 库/跨库视图没有该列属正常（列由 owner 基表保证），直接放行；只有
+    owner 基表缺列才抛错、不盖章，下次启动重试。
+    """
+    with db_lock:
+        c = db.cursor()
+        if not _table_present(c, "agent_tasks") or not _is_base_table(c, "agent_tasks"):
+            return
+        if not _uc_has_column(c, "agent_tasks", "engine_priorities"):
+            raise RuntimeError(
+                "202611240011 post_check 未收敛：agent_tasks 缺列 engine_priorities"
+                "（不盖章，下次启动重试）")
+    log.info("202611240011 post_check 通过：agent_tasks.engine_priorities 在位")
+
+
+register_migration(
+    version="202611240011",
+    name="issue3564-agent-tasks-engine-priorities",
+    kind="safe",
+    fn=_fn_add_agent_tasks_engine_priorities,
+    domains=("runtime",),
+    post_check=_postcheck_agent_tasks_engine_priorities,
 )

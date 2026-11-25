@@ -155,7 +155,8 @@
     "devops_pipeline_scene_uid_backup_1208": "mgmt",
     "grape_t_skill_version": "runtime",
     "grape_t_skill_file": "runtime",
-    "grape_t_skill_comment": "runtime"
+    "grape_t_skill_comment": "runtime",
+    "grape_t_comment_dispatch_guard": "runtime"
   },
   "views": {
     "admin_accounts": [

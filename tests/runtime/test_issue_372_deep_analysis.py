@@ -51,56 +51,28 @@ class TestA2ABotTokenPathB:
             assert result == ""
 
 class TestBotUsernamePathB:
-    """验收标准 12：路径 B 场景 git commit author 为 host 用户名（非 "grape_bot"）。"""
+    """验收标准 12（Issue #3348 修正）：host 登录名不再是 BOT_USERNAME 来源。"""
 
-    def test_bot_username_fallback_to_host_user_external_login(self):
-        """全局 bot username 为空 → fallback 到 host_user 的 external_login。"""
-        # 模拟 event_pipeline 中 BOT_USERNAME 注入逻辑
-        with patch("src.domains.mgmt.user.db.db") as mock_db, \
-             patch("src.domains.mgmt.user.db.db_lock"), \
-             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]), \
-             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value=""), \
-             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
-             patch("src.domains.mgmt.auth.grape_account_db.get_user_identities",
+    def test_bot_username_does_not_fallback_to_host_user_external_login(self):
+        """全局/仓库级 bot 均缺失 → 返回空来源 none，不回落 host_user external_login。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+
+        calls = {"host": 0}
+        with patch("src.domains.mgmt.user.db.get_global_bot_usernames_for", return_value=[]), \
+             patch("src.domains.mgmt.user.db.get_host_user_id",
+                   side_effect=lambda _rk: calls.__setitem__("host", calls["host"] + 1) or 42), \
+             patch("src.domains.mgmt.auth.grape_account_db.list_platform_links",
                    return_value=[{"provider": "gitcode", "external_login": "host_gc_user"}]):
-            cursor = MagicMock()
-            cursor.fetchone.return_value = None  # managed_repos.bot_username empty
-            mock_db.cursor.return_value = cursor
-
-            # 复现 event_pipeline 的注入逻辑
-            from src.kernel.repo_key import to_repo_key, parse_repo_key
-            _rk = to_repo_key("gitcode:owner/repo")
-            _prov, _o, _r = parse_repo_key(_rk)
-
-            with mock_db.cursor.return_value as cursor:
-                cursor.fetchone.return_value = None
-                _bot_name = ""
-
-            # 全局 bot username 为空
-            from src.domains.mgmt.user.db import get_global_bot_usernames
-            _us = get_global_bot_usernames()
-            _bot_name = _us[0] if _us else ""
-
-            # 路径 B fallback
-            if not _bot_name:
-                from src.domains.mgmt.user.db import get_host_user_id
-                _hid = get_host_user_id(_rk)
-                if _hid > 0:
-                    from src.domains.mgmt.auth.grape_account_db import get_user_identities
-                    for _ident in get_user_identities(_hid):
-                        if _ident.get("provider") == _prov:
-                            _bot_name = _ident.get("external_login") or ""
-                            break
-
-            assert _bot_name == "host_gc_user"
+            assert ep._resolve_bot_username_info("gitcode:owner/repo") == ("", "none")
+        assert calls["host"] == 0
 
     def test_bot_username_uses_global_when_available(self):
-        """有全局 bot username → 不 fallback 到 host_user。"""
-        with patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["global_bot"]):
-            from src.domains.mgmt.user.db import get_global_bot_usernames
-            _us = get_global_bot_usernames()
-            _bot_name = _us[0] if _us else ""
-            assert _bot_name == "global_bot"
+        """有全局 bot username → 返回 global 来源。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+
+        with patch("src.domains.mgmt.user.db.get_global_bot_usernames_for",
+                   return_value=["global_bot"]):
+            assert ep._resolve_bot_username_info("gitcode:owner/repo") == ("global_bot", "global")
 
 class TestStatus4TokenAccess:
     """验收标准 10：PAT 被撤销后 status=4，_get_oauth_token_from_identity 仍返回 token（R10 回帖需要）。"""

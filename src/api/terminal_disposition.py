@@ -84,8 +84,8 @@ def get_manual_override(repo_key: str, issue_number) -> dict:
         data = json.loads(raw) if raw else {}
         if isinstance(data, dict) and str(data.get("action") or "") in TERMINAL_ACTIONS:
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"terminal-disposition: read override failed {repo_key}/#{issue_number}: {e}")
     return {}
 
 

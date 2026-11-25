@@ -264,15 +264,22 @@ class TestLocaleI18nKeys:
         assert "re_bind" in acc, "en account.re_bind missing"
 
 class TestTokenNotBoundErrorCode:
-    """T2-15, T2-16: 无 token 时返回 error_code=TOKEN_NOT_BOUND。"""
+    """T2-15, T2-16: 无 token 时返回稳定 error_code。
+
+    Issue #3427 后 host_repo 的无凭据路径升级为分层错误码
+    （TOKEN_MISSING / TOKEN_DECRYPT_FAILED / TOKEN_REJECTED_UPSTREAM），
+    T2-15 断言同步迁移到新值域；T2-16（issues.py clarify）保持 TOKEN_NOT_BOUND。
+    """
 
     def test_t2_15_host_repo_no_token_has_error_code(self):
-        """T2-15: host_repo 无 api_token 时返回 400 + error_code=TOKEN_NOT_BOUND。"""
-        import inspect
-        from src.domains.mgmt.routes.repos import host_repo
-        source = inspect.getsource(host_repo)
-        # 验证 TOKEN_NOT_BOUND error_code 在 host_repo 源码中
-        assert "TOKEN_NOT_BOUND" in source, "host_repo should have TOKEN_NOT_BOUND error_code"
+        """T2-15: 无凭据解析 → TOKEN_MISSING，detail 携带 HTTP 400（#3427 分层码行为）。"""
+        from src.kernel.credential_errors import credential_error_detail
+        from src.domains.mgmt.auth.credential_resolver import resolve_credential_detailed
+        res = resolve_credential_detailed("github:t372/nonexistent")
+        assert res is not None and not res.ok
+        assert res.error_code == "TOKEN_MISSING"
+        detail = credential_error_detail(res.error_code)
+        assert detail["code"] == 400 and detail["error_code"] == "TOKEN_MISSING"
 
     def test_t2_16_issues_clarify_no_token_has_error_code(self):
         """T2-16: issues.py clarify 无 token 时返回 400 + error_code=TOKEN_NOT_BOUND。"""
@@ -283,34 +290,38 @@ class TestTokenNotBoundErrorCode:
         assert "TOKEN_NOT_BOUND" in source, "issues.py should have TOKEN_NOT_BOUND error_code"
 
 class TestBuildRetryEnvBotUsername:
-    """T2-17, T2-18: _build_retry_env 补齐 host_user external_login fallback。"""
+    """T2-17, T2-18: _build_retry_env 注入 bot username（Issue #3348 收敛为两级来源）。"""
 
-    def test_t2_17_retry_env_path_b_bot_username_from_host_user(self):
-        """T2-17: build_task_env 路径 B 时 BOT_USERNAME 注入 host_user 的 external_login。"""
+    def test_t2_17_retry_env_path_b_no_host_user_fallback(self):
+        """T2-17: build_task_env 经 _inject_bot_agent_env → _resolve_bot_username_info。
+
+        Issue #3348：host_user external_login 不再是 BOT_USERNAME 来源（旧断言会因
+        子串误命中而"假通过"），此处改为正向断言收敛入口且链内不含 external_login。
+        """
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env, _inject_bot_agent_env
+        from src.domains.runtime.pipeline.event_pipeline import (
+            build_task_env, _inject_bot_agent_env, _resolve_bot_username_info)
         source = inspect.getsource(build_task_env)
-        # 验证 build_task_env 中包含 host_user_id fallback 逻辑
-        # D90-N5 修正：host fallback 链已收敛——build_task_env → _inject_bot_agent_env
-        # → resolve_bot_username（含 get_host_user_id/get_user_identities external_login）
         assert "_inject_bot_agent_env" in source, "build_task_env should route through _inject_bot_agent_env"
-        import inspect as _inspect
-        _inj_src = _inspect.getsource(_inject_bot_agent_env)
-        assert "_resolve_bot_username" in _inj_src, \
-            "_inject_bot_agent_env should route through _resolve_bot_username"
-        # 完整链：_resolve_bot_username 内部含 get_host_user_id/get_user_identities（路径 B external_login）
+        _inj_src = inspect.getsource(_inject_bot_agent_env)
+        assert "_resolve_bot_username_info" in _inj_src, \
+            "_inject_bot_agent_env should route through _resolve_bot_username_info"
+        _resolve_src = inspect.getsource(_resolve_bot_username_info)
+        assert "get_host_user_id" not in _resolve_src, \
+            "host_user lookup must not be a BOT_USERNAME source"
+        assert "list_platform_links" not in _resolve_src, \
+            "host_user external_login must not be a BOT_USERNAME source"
 
     def test_t2_18_retry_env_path_a_uses_global_bot_username(self):
         """T2-18: build_task_env 路径 A 时 BOT_USERNAME 注入全局 bot username（回归保护）。"""
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import build_task_env, _inject_bot_agent_env
+        from src.domains.runtime.pipeline.event_pipeline import (
+            build_task_env, _inject_bot_agent_env)
         source = inspect.getsource(build_task_env)
-        # 验证全局 bot username 逻辑仍在
-        # D90-N5 修正：全局 bot username 在 _inject_bot_agent_env 链内（同上）
-        import inspect as _inspect
-        _inj_src2 = _inspect.getsource(_inject_bot_agent_env)
-        assert "_resolve_bot_username" in _inj_src2, \
-            "bot username injection should use _resolve_bot_username for path A"
+        assert "_inject_bot_agent_env" in source, "build_task_env should route through _inject_bot_agent_env"
+        _inj_src2 = inspect.getsource(_inject_bot_agent_env)
+        assert "_resolve_bot_username_info" in _inj_src2, \
+            "bot username injection should use _resolve_bot_username_info for path A"
 
 class TestR10IssueCommentBestEffort:
     """T2-19: R10 触发后 task errors 包含 error_code=TOKEN_EXPIRED，issue 回帖失败不影响主流程。"""

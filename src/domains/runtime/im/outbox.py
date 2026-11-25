@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 # 渠道租约表（grape_t_channel_lease）归 mgmt：归属判定的两条只读语句在该域 public，
 # 本模块只传「自己这条连接」当执行上下文（单库/测试拓扑复用，自有 DSN 由该域接管）。
 from src.domains.mgmt import public as _mgmt_public
+from src.kernel.user_ids import norm_uid
 
 _TABLE = "grape_t_channel_outbound_card"
 
@@ -87,21 +88,13 @@ def _parse_ts(value: str) -> float:
         return 0.0
 
 
-def norm_user_id(value):
-    """账号 id 归一：纯数字转 int（**对数字 id 的 sha1 输入完全不变**，跨进程幂等
-    单号不漂移），其余原样保留。
-
-    Issue #3510：D105 后 `grape_accounts.id` 是 UUIDv7 字符串，原实现裸
-    `int(user_id)` 直接 ValueError，被上游 except 吞掉 → 站内信静默丢失。
-    数字仍返回 int，是为了让 f-string 输出与历史一致（24 → "24"）。
-    """
-    s = str(value if value is not None else "").strip()
-    return int(s) if s.isdigit() else s
-
-
-def out_track_id(user_id, kind: str, repo_key: str, issue_number: int,
+def out_track_id(user_id: int | str, kind: str, repo_key: str, issue_number: int,
                  channel_type: str, installation_id: str, event_key: str = "") -> str:
     """跨进程幂等单号：sha1(uid|kind|repo|issue|channel|inst[|event])[:40]。
+
+    UID 归一走 ``norm_uid``：纯数字仍以 int 参与 sha1（既有单号不漂移），D105 后的
+    UUID 账号原样字符串参与（Issue #3510：旧实现对 UUID ``int()`` 抛 ValueError 导致
+    静默丢通知）。
 
     event_key 为空 = 旧口径（同一 (user,kind,repo,issue,channel,inst) 永远同一行，用于
     「同一事件多进程并发只发一次」）。当上一次触达已落终态（sent/failed/expired）时，
@@ -109,7 +102,8 @@ def out_track_id(user_id, kind: str, repo_key: str, issue_number: int,
     被历史行静默吞掉（架构守护 Critical-2）。
     """
     import hashlib
-    raw = f"{norm_user_id(user_id) or 0}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
+    uid = norm_uid(user_id or 0)
+    raw = f"{uid}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
           f"|{channel_type or ''}|{installation_id or ''}"
     if event_key:
         raw += f"|{event_key}"

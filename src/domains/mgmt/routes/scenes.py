@@ -432,6 +432,97 @@ def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
             "is_pinned": 1 if body.pinned else 0}
 
 
+def _engine_health_entry(runtime_id, node_tag: str) -> dict:
+    """单引擎结构化健康条目（Issue #3508）：{id, name, health_score, reachability, reason, node}。
+
+    双指标口径（与 Spec 对齐）：
+    - reachability（物理可达性）：复用唯一判定真源 engine_health_ok（health.py）；
+    - health_score（健康分）：读 health_scorer（表即缓存，runtime_health_scores）；
+    - reason：可读异常原因——物理不可达 / 健康分不足 / 查询降级，其余为空串。
+
+    单引擎查询异常只降级该条目（reason=健康数据暂不可用），不中断整体响应。
+    """
+    try:
+        rid = int(runtime_id)
+    except (TypeError, ValueError):
+        return {"id": runtime_id, "name": str(runtime_id), "health_score": None,
+                "reachability": "unknown", "reason": "引擎 ID 非法", "node": node_tag}
+    name = f"引擎#{rid}"
+    health_score = None
+    health_abnormal = False
+    reachability = "unknown"
+    reason = ""
+    row = None
+    query_failed = False
+    health_reason = ""
+    try:
+        # runtime_health_row 走运行域 public 的 any-cursor（三库独立拓扑下
+        # mgmt 进程不直连 runtime 库；get_runtime 的 db_registry 通道仅限
+        # runtime 进程域内调用，不能在 mgmt 路由里用）
+        row = _rt_scenes.runtime_health_row(rid)
+    except Exception as _ge:
+        # Issue #3508 复审：查询抛错 ≠ 引擎不存在——库抖动不能把全部节点
+        # 误报为物理不可达（reachability=unknown，且不计入 offline_nodes）。
+        log.warning(f"engine-status: runtime_health_row({rid}) failed: {_ge}")
+        query_failed = True
+    if row:
+        name = row[0] or row[1] or name
+        try:
+            from src.domains.runtime.public import engine_health_ok, derive_runtime_health
+            reachable = engine_health_ok(row[2], row[3], row[4], row[5], row[6])
+            reachability = "reachable" if reachable else "unreachable"
+            if not reachable:
+                _state = derive_runtime_health(row[3] or "", row[6])
+                reason = f"物理不可达（引擎状态：{_state}，心跳/探活失败）"
+                health_reason = "unreachable"
+        except Exception as _he:
+            log.warning(f"engine-status: reachability derive failed runtime={rid}: {_he}")
+            reason = "健康数据暂不可用（可达性判定失败）"
+            health_reason = "health_unavailable"
+    else:
+        if query_failed:
+            reason = "健康数据暂不可用（引擎查询失败）"
+            reachability = "unknown"
+            health_reason = "health_unavailable"
+        else:
+            reason = "引擎不存在或已删除"
+            reachability = "unreachable"
+            health_reason = "engine_missing"
+    # Issue #3508：仅对已存在的引擎读健康分——悬空 ID 不触发 get_health_score 的
+    # 现算落库副作用（GET 查询不写 runtime_health_scores 脏行）。复审追加：
+    # 查询路径改为只读（allow_compute=False），无健康档不现算落表。
+    if row:
+        try:
+            from src.domains.runtime.public import get_health_score
+            _data = get_health_score(rid, allow_compute=False) or {}
+            if _data:
+                health_score = int(_data.get("health_score") or 0)
+                health_abnormal = bool(_data.get("health_abnormal"))
+                if reachability == "reachable":
+                    # 原因文案来自结构化 health_reason（后端单一事实源），不再仅凭
+                    # is_healthy 猜测为「健康分不足」——连败/心跳判否不再误写文案。
+                    _hr = _data.get("health_reason") or ""
+                    health_reason = _hr
+                    if _hr == "low_score":
+                        reason = f"健康分不足（当前 {health_score} 分，低于派发阈值）"
+                    elif _hr == "consecutive_failures":
+                        _cf = int(_data.get("consecutive_failures") or 0)
+                        reason = f"连续失败过多（已连续失败 {_cf} 次，暂不派发）"
+                    elif _hr == "heartbeat_lost":
+                        reason = "心跳丢失（引擎失联）"
+                    elif health_abnormal:
+                        reason = f"引擎健康异常（原因：{_hr or '未知'}）"
+        except Exception as _se:
+            log.warning(f"engine-status: health_score read failed runtime={rid}: {_se}")
+            if not reason:
+                reason = "健康数据暂不可用（健康分查询失败）"
+                health_reason = "health_unavailable"
+    return {"id": rid, "name": name, "health_score": health_score,
+            "health_abnormal": health_abnormal, "query_failed": query_failed,
+            "reachability": reachability, "reason": reason,
+            "health_reason": health_reason, "node": node_tag}
+
+
 def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
                          user_id: int = 0) -> dict:
     """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
@@ -448,19 +539,47 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
     - selector 节点 0 命中（全库无引擎携带该标签，配置死）→ selector_dead_nodes（红点）
     - selector 节点命中引擎当前全离线（瞬时死）→ selector_offline_nodes（黄点）
     - all_offline 聚合含两类 selector 异常（既有消费方警告条不回归）
+
+    Issue #3508 双指标口径（保留旧字段兼容存量调用方）：
+    - engines：每个绑定引擎的结构化健康条目（health_score/reachability/reason）；
+    - offline_nodes：节点绑定引擎「全部物理不可达」；
+    - low_score_nodes：节点存在「可达但健康分不足/连败」的引擎（与 offline 分列，
+      覆盖「可达低分 + 物理不可达混合」「一低分多健康」等多引擎节点）；
+    - uid 轨（#1208 D11）节点的绑定值以 engine_runtime_uids 为权威，先解析为
+      runtime_id 再逐引擎取健康条目。
     """
     offline_nodes: list[str] = []
+    low_score_nodes: list[str] = []
+    engines: list[dict] = []
     sre_unbound: bool = False  # Issue #3396：保留字段恒 False（API 兼容，禁广播特例已删）
     selector_dead_nodes: list[str] = []
     selector_offline_nodes: list[str] = []
     try:
-        from src.domains.runtime.public import (get_scene_pool_engine_ids as _gspei,
-                                               get_scene_engine_selector,
-                                               selector_candidate_engines)
+        from src.domains.runtime.public import (get_scene_engine_selector,
+                                               selector_candidate_engines,
+                                               node_agent_role as _nar,
+                                               runtime_ids_by_engine_uids)
+
+        def _node_runtime_ids(_ids, _uids) -> list:
+            _out = []
+            if _ids:
+                for _x in _ids:
+                    _ci = _coerce_engine_id(_x)
+                    if _ci is not None:
+                        _out.append(_ci)
+                return _out
+            if _uids:
+                try:
+                    return [int(x) for x in (runtime_ids_by_engine_uids(list(_uids)) or [])]
+                except Exception as _ue:
+                    log.warning(f"engine-status: resolve uids failed {_uids}: {_ue}")
+            return _out
+
         for n in (cfg_nodes or []):
             if not isinstance(n, dict):
                 continue
-            _tag = n.get("tag") or n.get("id") or ""
+            # Issue #955/#3508：统一 id 优先、tag 兜底的角色口径（不再 tag 优先）
+            _tag = _nar(n)
             _eids = n.get("engine_runtime_ids") or []
             _uids = n.get("engine_runtime_uids") or []
             _sel = n.get("engine_selector") or {}
@@ -485,11 +604,35 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
             if not _eids and not _uids:
                 # Issue #3396：空绑定=广播模式（SRE 禁广播特例已删），不再置 sre_unbound
                 continue
-            try:
-                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
-                    offline_nodes.append(str(_tag))
-            except Exception:
-                pass
+            # Issue #3508：逐引擎结构化健康条目（单引擎异常隔离）
+            _node_entries = []
+            for _rid in _node_runtime_ids(_eids, _uids):
+                try:
+                    _entry = _engine_health_entry(_rid, str(_tag))
+                except Exception as _ee:
+                    log.warning(f"engine-status: entry build failed runtime={_rid}: {_ee}")
+                    continue
+                engines.append(_entry)
+                _node_entries.append(_entry)
+            if not _node_entries:
+                continue
+            # 双指标分列（覆盖多引擎混合场景）：
+            # - 全部引擎物理不可达 → offline_nodes
+            # - 有可达引擎但其中任一健康分不足/连败 → low_score_nodes
+            # Issue #3508 复审：查询失败（reachability=unknown）不误报物理不可达——
+            # 只要节点存在未知可达性的引擎，就不计入 offline_nodes（库抖动不波及全量）。
+            _reachable = [e for e in _node_entries if e["reachability"] == "reachable"]
+            _unknown = [e for e in _node_entries if e["reachability"] == "unknown"]
+            if not _reachable:
+                if _unknown:
+                    continue
+                offline_nodes.append(str(_tag))
+                continue
+            # 健康异常口径与 health_scorer._derive_health_flag 单一事实源一致
+            # （low_score / consecutive_failures / heartbeat_lost），避免二次现算落表。
+            _all_healthy = not any(e.get("health_abnormal") for e in _reachable)
+            if not _all_healthy:
+                low_score_nodes.append(str(_tag))
     except Exception:
         pass
     return {"offline_nodes": offline_nodes,
@@ -497,12 +640,14 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
             "selector_dead_nodes": selector_dead_nodes,
             "selector_offline_nodes": selector_offline_nodes,
             "all_offline": bool(offline_nodes) or sre_unbound
-                           or bool(selector_dead_nodes) or bool(selector_offline_nodes)}
+                           or bool(selector_dead_nodes) or bool(selector_offline_nodes),
+            "low_score_nodes": low_score_nodes,
+            "engines": engines}
 
 
 @router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
             summary="Scene engine online status",
-            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
+            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning. Issue #3508: adds per-engine structured health entries engines:[{id, name, health_score, reachability, reason, node}] plus low_score_nodes (engines reachable but below health threshold, distinct from physically unreachable offline_nodes); internal query errors degrade to 2xx {degraded, error} instead of a raw 500.")
 def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
 
@@ -513,20 +658,38 @@ def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_sessi
     from src.api.pipeline_config import get_pipeline_config
     from src.kernel.repo_key import to_repo_key
 
+    # Issue #3508：健康提示功能自身不允许裸 500——配置读取/状态计算任一异常
+    # 都降级为 2xx + {degraded, error}，前端据此展示可读错误 + 重试入口。
+    _degraded = {"scene_id": scene_id, "offline_nodes": [], "low_score_nodes": [],
+                 "engines": [], "sre_unbound": False, "all_offline": False,
+                 "degraded": True, "error": "引擎健康状态查询失败，请稍后重试"}
     # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
     # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
-    repo_key = _resolve_scene_repo_key(repo, user)
-    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
-    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+    try:
+        repo_key = _resolve_scene_repo_key(repo, user)
+    except Exception as _re:
+        log.warning(f"engine-status: resolve repo_key failed scene={scene_id}: {_re}")
+        return dict(_degraded)
+    try:
+        # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
+        cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+    except Exception as _ge:
+        log.warning(f"engine-status: get_pipeline_config failed scene={scene_id} repo={repo_key}: {_ge}")
+        return dict(_degraded)
     # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
     # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
     # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
     # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
     if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
-        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
+        return {"scene_id": scene_id, "offline_nodes": [], "low_score_nodes": [],
+                "engines": [], "sre_unbound": False, "all_offline": False}
     cfg_nodes = cfg.get("nodes") or []
-    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key,
-                                  user_id=(user or {}).get("id", 0) or 0)
+    try:
+        status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key,
+                                      user_id=(user or {}).get("id", 0) or 0)
+    except Exception as _se:
+        log.warning(f"engine-status: status compute failed scene={scene_id}: {_se}")
+        return dict(_degraded)
     status["scene_id"] = scene_id
     return status
 
@@ -2339,6 +2502,8 @@ class SceneNodeInput(BaseModel):
     # （三模式同 node 互斥，D7；保存端为权威校验点）
     engine_runtime_uids: list = []
     engine_selector: dict = {}
+    # Issue #3564：实例绑定优先级（{str(engine_id): 1..9}，1 最高；空=未配置旧行为）
+    engine_priorities: dict = {}
 
 class CreateSceneRequest(BaseModel):
     scene_id: str = ""
@@ -2401,6 +2566,39 @@ def _selector_scene_values() -> list:
         return ["default"]
 
 
+def _coerce_engine_id(value):
+    """Issue #3508：引擎 ID 归一化为 int；非法值返回 None（写侧/复制侧共用）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _filter_existing_engine_ids(eids) -> list:
+    """Issue #3508：过滤引擎 ID——剔除非法值与库中不存在的 runtime_id。
+
+    供保存前清洗与复制清洗共用（单一 int 化 + 存在性查询口径）。
+    查询异常时保留原 ID（宁可保留原配置也不误删）。
+    """
+    keep = []
+    for eid in eids or []:
+        _eid = _coerce_engine_id(eid)
+        if _eid is None:
+            log.warning(f"_filter_existing_engine_ids: 剔除非法引擎 ID {eid!r}")
+            continue
+        try:
+            _row = _rt_scenes.runtime_with_credential(_eid)
+        except Exception as _ge:
+            log.warning(f"_filter_existing_engine_ids: 引擎 {_eid} 存在性查询失败（保留）: {_ge}")
+            keep.append(_eid)
+            continue
+        if _row:
+            keep.append(_eid)
+        else:
+            log.warning(f"_filter_existing_engine_ids: 剔除不存在的引擎 ID {_eid}")
+    return keep
+
+
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """校验场景 nodes 的引擎绑定（Issue #1208 扩展：三模式互斥 + selector L1）：
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
@@ -2429,6 +2627,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
         # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
         tag = node_agent_role(node)
         eids = node.get("engine_runtime_ids") or []
+        _raw_eids = list(eids)
         uids = [str(u or "").strip() for u in (node.get("engine_runtime_uids") or [])
                 if str(u or "").strip()]
         selector = node.get("engine_selector") or {}
@@ -2481,6 +2680,24 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             _err = validate_selector_tags(_sel_tags, scene_values=_selector_scene_values())
             if _err:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+        # Issue #3564：engine_priorities 仅实例绑定模式有效，键必须属于绑定引擎集合，
+        # 值必须为 1..9（1 最高）；非法配置保存即拒绝，避免落库后静默失效。
+        # 校验逻辑唯一真源 = pipeline_config.normalize_engine_priorities(strict=True)。
+        _prio = node.get("engine_priorities")
+        if _prio not in (None, {}):
+            _allowed = set()
+            for _x in eids:
+                try:
+                    _allowed.add(str(int(_x)))
+                except (TypeError, ValueError):
+                    continue
+            try:
+                from src.domains.mgmt.pipeline_config import normalize_engine_priorities
+                normalize_engine_priorities(_prio, _allowed, strict=True)
+            except ValueError as _pve:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 的 {_pve}"})
         if not eids and not uids:
             continue
         # Issue #646：绑定入口支持 uid（字符串）——先解析为 id（服务端校验），
@@ -2514,17 +2731,22 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                     "code": 400,
                     "message": f"节点 {tag} 绑定的引擎 uid 无效: {u}（请从引擎详情面板复制有效 uid）"})
         eids = _resolved_eids
+        # Issue #3508 复审：把 uid→id 解析结果回写节点。清洗阶段（_sanitize_scene_engine_ids）
+        # 只认 int，若不回写，engine_runtime_ids 内的合法 36 位 UID 会被判非法丢弃并触发
+        # 「全部无效」400（回归 Issue #646 既有 UID 绑定能力）。uids 权威形态不回写 ids。
+        if _raw_eids and not uids:
+            node["engine_runtime_ids"] = list(_resolved_eids)
         for eid in eids:
-            try:
-                _eid = int(eid)
-            except (ValueError, TypeError):
+            _eid = _coerce_engine_id(eid)
+            if _eid is None:
                 continue
             with db_lock:
                 # 引擎行 + 凭据 scope/owner_id 在运行域一次取回（两表同属 runtime）
                 row = _rt_scenes.runtime_with_credential(_eid)
-            if not row:
-                # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
-                log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
+            if not row or len(row) < 3:
+                # Issue #250/#3508：失效 runtime_id / 行形状异常（连接层降级/旧档）
+                # 优雅降级——跳过而非 400/IndexError。
+                log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在或行数据异常（已跳过）")
                 continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
             # scope=repo 时校验仓库归属
@@ -2804,9 +3026,8 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
         _ok_ids = set(_allowed(role))
         _kept = []
         for eid in (node.get("engine_runtime_ids") or []):
-            try:
-                _eid = int(eid)
-            except (TypeError, ValueError):
+            _eid = _coerce_engine_id(eid)
+            if _eid is None:
                 _eid = eid
             if _eid in _ok_ids:
                 _kept.append(_eid)
@@ -2815,6 +3036,19 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
         node["engine_runtime_ids"] = _kept
         # Issue #3396：SRE 启用但清洗后无引擎不再自动停用——空绑定 = 广播模式，
         # 与其它角色同口径（池内勾了 sre/all 的引擎可认领）。
+        # Issue #3564：复制时清洗掉指向被剔除引擎的优先级键（避免孤儿优先级）；
+        # 清洗逻辑唯一真源 = pipeline_config.normalize_engine_priorities（非 strict，静默丢弃）。
+        _prio_src = node.get("engine_priorities")
+        if isinstance(_prio_src, dict):
+            try:
+                from src.domains.mgmt.pipeline_config import normalize_engine_priorities
+                _prio_kept = normalize_engine_priorities(_prio_src, [str(_x) for _x in _kept])
+            except Exception:
+                _prio_kept = {}
+            if _prio_kept:
+                node["engine_priorities"] = _prio_kept
+            else:
+                node.pop("engine_priorities", None)
 
     # 技能：复用 arch 侧既有 scope 判官（_collect_scene_skill_scope_violations，repo 场景口径），
     # 冲突节点保留原名到 skill_pending，复制不中断（不再自建第二份判定）
@@ -2956,6 +3190,45 @@ def copy_scene(scene_id: str, body: CopySceneRequest | None = None,
         "source_config_parse_error": source_parse_error,
     }
 
+def _scene_node_field(node, key: str, default=None):
+    """Issue #3508：场景节点字段安全访问——节点可能是 dict（DB nodes_json）、
+    pydantic 模型（请求体）或历史脏数据（字符串/None）。旧实现
+    `getattr(n, 'tag', n.get('tag'))` 对字符串/None 节点抛 AttributeError → 裸 500。
+    """
+    if isinstance(node, dict):
+        return node.get(key, default)
+    if node is None or isinstance(node, (str, int, float, bool, list)):
+        return default
+    return getattr(node, key, default)
+
+
+def _sanitize_scene_engine_ids(nodes: list) -> list:
+    """Issue #3508：绑定修改校验候选范围——落库前清洗 engine_runtime_ids。
+
+    校验阶段（_validate_scene_engine_ids）已对越权/缺能力 400；这里只做候选
+    范围清洗：非整数 ID、库里不存在的 runtime_id 一律不落库，保证保存后的
+    绑定配置全部真实生效（悬空 ID 不再静默保存 → 刷新后状态一致）。
+    DB 读失败时保持原样（宁可保留原配置也不误删）。
+    """
+    cleaned = []
+    try:
+        for n in nodes:
+            if not isinstance(n, dict):
+                cleaned.append(n)
+                continue
+            eids = n.get("engine_runtime_ids") or []
+            if not eids:
+                cleaned.append(n)
+                continue
+            n = dict(n)
+            n["engine_runtime_ids"] = _filter_existing_engine_ids(eids)
+            cleaned.append(n)
+        return cleaned
+    except Exception as _se:
+        log.warning(f"_sanitize_scene_engine_ids: 清洗失败（保持原样）: {_se}")
+        return nodes
+
+
 @router.put("/{scene_id}", operation_id="scenes_update", summary="Update scene", description="Updates a scene (repo/user scope directly; official immutable).")
 def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
@@ -2982,6 +3255,27 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     _validate_scene_node_roles(nodes_json)
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
+    # Issue #3508：候选范围清洗——非法/悬空引擎 ID 不落库，保存后配置真实生效
+    _orig_nodes_json = nodes_json
+    nodes_json = _sanitize_scene_engine_ids(nodes_json)
+    if repo_key and body.nodes:
+        # 清洗后绑定为空但提交时非空（原绑定全部悬空/非法）→ 显式 400 让用户重选。
+        # 空绑定语义 = 广播（get_scene_pool_engine_ids），静默落空会把任务派发到
+        # 用户未选择的引擎，与「保存配置真实生效」相反；对非 SRE 角色同样拦截。
+        from src.domains.runtime.public import node_agent_role as _nar
+        for _orig, _new in zip(_orig_nodes_json, nodes_json):
+            if not isinstance(_orig, dict) or not isinstance(_new, dict):
+                continue
+            if not (_orig.get("engine_runtime_ids") or []):
+                continue
+            if _new.get("engine_runtime_ids") or []:
+                continue
+            _role = _nar(_orig)
+            if _role == "sre":
+                _msg = "SRE Agent 所选引擎均已不存在，请重新选择个人或仓库级机器"
+            else:
+                _msg = f"节点 {_role} 所选引擎均已不存在或无效，请重新选择引擎（不支持静默清空为广播）"
+            raise HTTPException(status_code=400, detail={"code": 400, "message": _msg})
     # Issue #1208 D11：保存端透明升格（绑定值一律写 uids 清 ids，前端回读 uid 形态）
     _upgrade_scene_nodes_uid(nodes_json)
 
@@ -2991,11 +3285,13 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
         _pr_sub_on = bool(existing.get("pr_subscription_enabled", 0))
     if _pr_sub_on:
         # body.nodes 为空时从数据库已有场景查 QA 节点
-        _check_nodes = body.nodes if body.nodes else existing.get("nodes", [])
-        qa_node = next((n for n in _check_nodes if getattr(n, 'tag', n.get('tag') if isinstance(n, dict) else '') == "qa"), None)
+        _check_nodes = nodes_json if body.nodes else existing.get("nodes", [])
+        qa_node = next((n for n in _check_nodes
+                        if _scene_node_field(n, "tag", "") == "qa"
+                        or _scene_node_field(n, "id", "") == "qa"), None)
         if qa_node:
-            _qa_enabled = getattr(qa_node, 'enabled', True) if not isinstance(qa_node, dict) else qa_node.get("enabled", True)
-            _qa_skill = getattr(qa_node, 'skill', '') if not isinstance(qa_node, dict) else qa_node.get("skill", "")
+            _qa_enabled = _scene_node_field(qa_node, "enabled", True)
+            _qa_skill = _scene_node_field(qa_node, "skill", "")
         else:
             _qa_enabled = False
             _qa_skill = ""

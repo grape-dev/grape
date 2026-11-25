@@ -46,6 +46,8 @@ class TestResolveBusinessServerUrl:
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
+             patch("src.domains.mgmt.user.db.get_server_base_url",
+                   return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False):
             assert prompt_builder._resolve_business_server_url(7) == "https://api.grape.example.com"
 

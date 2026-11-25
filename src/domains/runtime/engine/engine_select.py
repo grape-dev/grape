@@ -11,7 +11,11 @@ import os
 
 import json
 
+import logging
+
 import random
+
+import threading
 
 import time as _time
 
@@ -919,6 +923,232 @@ def _filter_by_health(members: list[dict]) -> list[dict]:
         log.warning(f"_filter_by_health failed, skipping health filter: {e}")
         return members  # 模块异常时不过滤（不阻塞派发）
 
+# Issue #3584：同负载并列时的轮转序号（进程内单调递增；多主控下允许最终收敛而非强一致）。
+# 按候选集合（repo/角色/场景/同档候选 runtime_id 集合）分桶，避免不同场景共享同一全局
+# 计数——多场景交织下同一 2 引擎场景若恒定落在奇/偶 seq 会固定命中同一台（QA 复审意见）。
+# advance/peek 均加锁：peek 供取证路径只读预测下一次派发序号，不推进真实轮转。
+class _RotationSeq:
+    """进程内轮转序号。advance() 递增并返回当前值；peek() 只读下一次将用的值。"""
+
+    __slots__ = ("_lock", "_next")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next = 0
+
+    def advance(self) -> int:
+        with self._lock:
+            seq = self._next
+            self._next += 1
+            return seq
+
+    def peek(self) -> int:
+        with self._lock:
+            return self._next
+
+# 桶数量上限：避免长生命周期进程里 scene/候选集合不断变化导致桶字典无限增长。
+# 超出上限时按插入顺序淘汰最旧桶（FIFO），被淘汰桶下次命中时从 0 重新计数，
+# 仅影响该桶短窗口内的轮转公平性，不影响负载优先语义。
+_ROTATION_POOL_MAX_BUCKETS = 4096
+
+class _RotationPool:
+    """按桶键维护独立轮转序号；不同场景/角色/候选集合互不干扰（Issue #3584 QA 复审）。"""
+
+    __slots__ = ("_lock", "_seqs")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seqs: dict[tuple, _RotationSeq] = {}
+
+    def _get(self, key: tuple) -> _RotationSeq:
+        with self._lock:
+            seq = self._seqs.get(key)
+            if seq is None:
+                if len(self._seqs) >= _ROTATION_POOL_MAX_BUCKETS:
+                    # 有界内存：淘汰最早插入的桶（dict 保序），防止桶键只增不删
+                    oldest = next(iter(self._seqs))
+                    del self._seqs[oldest]
+                seq = _RotationSeq()
+                self._seqs[key] = seq
+            return seq
+
+    def advance(self, key: tuple) -> int:
+        return self._get(key).advance()
+
+    def peek(self, key: tuple) -> int:
+        return self._get(key).peek()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._seqs.clear()
+
+_PICK_ROTATION_POOL = _RotationPool()
+
+def _rotation_bucket(repo_key: str, agent_type: str, scene_id: str,
+                     runtime_ids) -> tuple:
+    """轮转分桶键：repo/角色/场景 + 同档候选 runtime_id 升序集合（稳定可复现）。"""
+    return (repo_key or "", agent_type or "", scene_id or "",
+            tuple(sorted(int(rid) for rid in runtime_ids if rid)))
+
+def _next_rotation_seq(key: tuple) -> int:
+    return _PICK_ROTATION_POOL.advance(key)
+
+def _peek_rotation_seq(key: tuple) -> int:
+    return _PICK_ROTATION_POOL.peek(key)
+
+def _engine_loads(engine_ids: list[int]) -> dict[int, int]:
+    """批量查询引擎实时负载：agent_tasks 中 running/dispatched/pending_self_report 计数。
+
+    口径与 service._real_active_count 一致（方案 D：真实在跑数为唯一事实源，
+    busy_slots 仅为展示快照）。单次 GROUP BY 查询，避免 N 次明细查询。
+    """
+    if not engine_ids:
+        return {}
+    db, lock = _db()
+    with lock:
+        try:
+            c = db.cursor()
+            placeholders = ",".join("?" * len(engine_ids))
+            c.execute(
+                "SELECT runtime_id, COUNT(*) FROM agent_tasks "
+                f"WHERE runtime_id IN ({placeholders}) "
+                "AND status IN ('running','dispatched','pending_self_report') "
+                "GROUP BY runtime_id",
+                tuple(engine_ids))
+            return {r[0]: int(r[1] or 0) for r in c.fetchall()}
+        except Exception as e:
+            log.warning(f"_engine_loads failed: {e}")
+            # fail-open 不可静默：负载读取失败时所有引擎按 load=0 参与轮转，
+            # 决策日志留痕（Issue #3584 QA 审查意见：取证侧需可见负载读取失败）。
+            _decision_log("engine_loads", result="fail_open", detail=str(e),
+                          engine_count=len(engine_ids))
+            return {}
+
+def _attach_loads(members: list[dict]) -> list[dict]:
+    """返回带 load 字段的候选副本（缺省 0），不就地改写调用方 dict。
+
+    load 键只进入本次选择/取证使用的副本，不外泄到其它 _engines_by_ids 消费者。
+    """
+    if not members:
+        return members
+    loads = _engine_loads([m.get("runtime_id") for m in members if m.get("runtime_id")])
+    return [dict(m, load=loads.get(m.get("runtime_id"), 0)) for m in members]
+
+def _engine_tags_by_ids(engine_ids: list[int]) -> dict[int, list[str]] | None:
+    """批量查询候选引擎的 enabled 标签（单次 IN 查询，避免逐候选 N+1）。
+
+    返回 None = 查询失败（调用方回退逐候选查询，fail-open 不改变原因口径）。
+    返回的映射只含至少一条 enabled 标签的引擎；缺失 rid 表示该引擎无 enabled 标签。
+    """
+    ids = [rid for rid in engine_ids if rid]
+    if not ids:
+        return {}
+    db, lock = _db()
+    with lock:
+        try:
+            c = db.cursor()
+            placeholders = ",".join("?" * len(ids))
+            c.execute(
+                "SELECT runtime_id, tag FROM engine_capabilities "
+                f"WHERE enabled=1 AND runtime_id IN ({placeholders})",
+                tuple(ids))
+            out: dict[int, list[str]] = {}
+            for rid, tag in c.fetchall():
+                out.setdefault(rid, []).append(tag)
+            return out
+        except Exception as e:
+            log.warning(f"_engine_tags_by_ids failed: {e}")
+            return None
+
+def _decision_candidates(cand: list[dict], cfg: dict, agent_type: str) -> list[dict]:
+    """决策日志候选全集（rid/priority/load/reasons）——random/order 两分支共用。
+
+    reasons 与实际过滤链同口径（_candidate_reject_reasons）；cfg 由调用方传入，
+    避免热路径每个候选重复读取 engine-selection.json。候选全集仅在 INFO 决策日志
+    开启时构造，tags 批量预取（单次 IN 查询），降低热路径 N+1 开销（QA 复审意见）。
+    """
+    if not cand:
+        return []
+    if not log.isEnabledFor(logging.INFO):
+        return []
+    rids = [m.get("runtime_id") for m in cand if m.get("runtime_id")]
+    tags_map = _engine_tags_by_ids(rids) if agent_type else None
+    out = []
+    for m in cand:
+        rid = m.get("runtime_id")
+        if tags_map is None:
+            _tags = None
+        else:
+            _tags = tags_map.get(rid, [])
+        out.append({"rid": rid, "priority": m.get("priority"),
+                    "load": m.get("load", 0),
+                    "reasons": _candidate_reject_reasons(
+                        m, cfg, agent_type, tags=_tags)})
+    return out
+
+def _pick_decision(cand: list[dict], *, repo_key: str = "", agent_type: str = "",
+                   scene_id: str = "", scope: str = "", rule: str = "order",
+                   cfg: dict | None = None, advance: bool = True,
+                   members: list[dict] | None = None) -> dict | None:
+    """Issue #3584：优先级档内选择决策——最小负载优先，负载并列按 seq 取模轮转。
+
+    替换旧的 min(priority, runtime_id) 钉死语义（多引擎绑定下恒选最小 id、其余空转）。
+    - rule=order：key = (priority, load)，最小负载集合内按轮转 seq 取模挑一台。
+    - rule=random：保持随机分支不变（广播语义不在此收口）。
+    - 其它未知值：显式告警并沿用旧语义回退 random（旧代码非 order 即 random），
+      避免配置拼写错误静默改变派发口径（QA 审查意见 #2）。
+    - advance=False：只读取证模式，peek 下一次轮转序号而不推进（explain_engine_selection
+      复用），取证调用不改变后续真实派发顺序。
+    - members：候选全集（含被过滤成员）。选择仍只在 cand 内进行；决策日志
+      （engine_select_decision）的 candidates 输出候选全集（rid/priority/load/reasons），
+      每候选过滤原因可还原（Issue #605：0 派发必须可解释），缺省回退 cand。
+    """
+    if not cand:
+        return None
+    if cfg is None:
+        cfg = load_engine_selection()
+    log_members = members if members is not None else cand
+    _rule = (rule or "").strip().lower()
+    if _rule not in ("order", "random"):
+        log.warning(f"_pick_decision: unknown rule '{rule}' in engine-selection config, "
+                    f"falling back to legacy random semantics")
+        _rule = "random"
+    if _rule == "random":
+        picked = random.choice(cand)
+        _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type,
+                      scene_id=scene_id, scope=scope, rule=_rule, result="selected",
+                      selected=picked["runtime_id"], reason=f"scope={scope} rule=random",
+                      candidates=_decision_candidates(log_members, cfg, agent_type))
+        return picked
+    prio_min = min(m.get("priority", 0) for m in cand)
+    tier = [m for m in cand if m.get("priority", 0) == prio_min]
+    load_min = min(m.get("load", 0) for m in tier)
+    least = sorted([m for m in tier if m.get("load", 0) == load_min],
+                   key=lambda m: m["runtime_id"])
+    # 仅并列（>1 台）时才推进轮转序号：单候选场景不消耗 seq，避免跨场景偏置
+    # （QA 复审意见：len(least)==1 仍自增会干扰其它场景的奇偶交织）。
+    if len(least) == 1:
+        picked = least[0]
+        rotation_seq = None
+        reason = (f"scope={scope} rule={_rule} priority={prio_min} "
+                  f"load={load_min} rotation=1")
+    else:
+        # 桶键用「同档候选全集」而非当次最小负载子集：负载随派发变化时轮转序号仍连续，
+        # 避免子集变化导致 seq 反复归零（公平性）；不同场景/角色/候选集合各自独立。
+        bucket = _rotation_bucket(repo_key, agent_type, scene_id,
+                                  [m["runtime_id"] for m in tier])
+        seq = _next_rotation_seq(bucket) if advance else _peek_rotation_seq(bucket)
+        picked = least[seq % len(least)]
+        rotation_seq = seq
+        reason = (f"scope={scope} rule={_rule} priority={prio_min} "
+                  f"load={load_min} rotation={seq % len(least)}/{len(least)}")
+    _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type,
+                  scene_id=scene_id, scope=scope, rule=_rule, result="selected",
+                  selected=picked["runtime_id"], reason=reason,
+                  rotation_seq=rotation_seq,
+                  candidates=_decision_candidates(log_members, cfg, agent_type))
+    return picked
+
 def _best_health_fallback(members: list[dict]) -> int | None:
     """全部不健康时的降级兜底：取健康分最高的引擎。"""
     try:
@@ -1137,6 +1367,61 @@ def resolve_directive_engine(engine_config, repo_key: str, agent_type: str = "")
     return _out
 
 
+def _select_rid_from_members(members: list[dict], cfg: dict, repo_key: str,
+                             agent_type: str, scene_id: str,
+                             *, advance: bool = True,
+                             log_members: list[dict] | None = None
+                             ) -> tuple[int | None, str]:
+    """Issue #3584：从已加载（含 load）的候选成员中选出 runtime_id——档位 → 健康过滤 →
+    档内最小负载 + seq 轮转（所有角色统一走通用选择链，Issue #3396 已删除 SRE 特例）。
+
+    pick_engine 与 explain_engine_selection 共用此入口，保证取证 selected 与
+    实际派发使用同一候选 load 快照、同一套选择逻辑（QA 审查意见 #3）。
+    返回 (runtime_id|None, scope)；scope 为空串 = 未选中。
+    - log_members：决策日志候选全集（含被标签过滤成员，Issue #605）；缺省回退 members。
+    - 零派发/健康兜底路径同步输出 engine_select_decision（Issue #605：0 派发必须可解释）：
+      全档位不健康兜底选中 → health_fallback；全档位不健康且无兜底 → all_scopes_unhealthy。
+    """
+    repo = _norm_repo(repo_key)
+    if log_members is None:
+        log_members = members
+
+    def _log_zero_dispatch(result: str, reason: str, selected=None) -> None:
+        _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type,
+                      scene_id=scene_id, result=result, selected=selected,
+                      reason=reason,
+                      candidates=_decision_candidates(log_members, cfg, agent_type))
+
+    for scope in cfg.get("scopes") or ["repo", "global", "local"]:
+        cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
+        if not cand:
+            continue
+        # Issue #134: 健康度过滤增强层——在候选机器筛选阶段过滤低健康分引擎
+        # 不改变广播协议/分发语义：仅在 pick_engine 选机阶段生效
+        cand = _filter_by_health(cand)
+        if not cand:
+            continue  # 该档位全不健康，尝试下一档位
+        # Issue #3584：档内最小负载优先、负载并列按 seq 取模轮转
+        # （替代旧 min(priority, runtime_id) 钉死最小 id，避免其余绑定引擎空转）
+        picked = _pick_decision(cand, repo_key=repo_key, agent_type=agent_type,
+                                scene_id=scene_id, scope=scope,
+                                rule=cfg.get("rule") or "order", cfg=cfg,
+                                advance=advance, members=log_members)
+        if picked is not None:
+            return picked["runtime_id"], scope
+    # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
+    all_cand = _apply_filters(members, cfg)
+    if all_cand:
+        _best = _best_health_fallback(all_cand)
+        if _best:
+            log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
+            # Issue #605：健康兜底选中同样留痕（result=selected / reason=health_fallback）
+            _log_zero_dispatch("selected", "health_fallback", selected=_best)
+            return _best, "fallback"
+    # Issue #605：全档位不健康且无兜底 = 零派发，必须留痕可解释
+    _log_zero_dispatch("engine_unavailable", "all_scopes_unhealthy")
+    return None, ""     # 集合存在但无健康成员 → engine_unavailable
+
 def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 scene_id: str = "", user_id: int = 0,
                 issue_creator: str = "") -> int | None:
@@ -1150,27 +1435,33 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     """
     cfg = load_engine_selection()
 
-    def _pick_decision(result: str, selected=None, reason: str = "", members=None) -> None:
-        """Issue #605：pick_engine 决策留痕（候选全集 + 每候选过滤原因 + 选中理由）。"""
+    def _log_pick_decision(result: str, selected=None, reason: str = "",
+                           members=None) -> None:
+        """Issue #605：pick_engine 决策留痕（候选全集 + 每候选过滤原因 + 选中理由）。
+
+        复用模块级 _decision_candidates，保证 candidates schema（rid/priority/load/reasons）
+        与主选择路径一致；disabled/plugin/fallback 事件同样可按 AC4 还原候选负载
+        （QA 复审意见：内嵌日志 schema 与 _decision_candidates 双轨需统一）。
+        - disabled / plugin_broadcast 在读取绑定引擎之前即返回，天然没有候选集合，
+          日志 candidates 为空是预期行为（非漏传），AC4 只要求可还原已加载候选。
+        - fallback（绑定引擎被标签全过滤）会带入已加载的 all_members（含 load），
+          使该事件也能还原候选与负载（QA 复审 AC4 意见）。
+        """
         _decision_log(
             "pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
             result=result, selected=selected, reason=reason,
-            candidates=[
-                {"rid": m.get("runtime_id"),
-                 "reasons": _candidate_reject_reasons(m, cfg, agent_type)}
-                for m in (members or [])
-            ],
+            candidates=_decision_candidates(list(members or []), cfg, agent_type),
         )
 
     if not cfg.get("enabled", True):
-        _pick_decision("disabled")
+        _log_pick_decision("disabled")
         return None
     # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
     # （Issue #3396：SRE 禁广播特例已删除，广播范围收口统一为角色/健康过滤）
     try:
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         if is_plugin_mode():
-            _pick_decision("plugin_broadcast")
+            _log_pick_decision("plugin_broadcast")
             return 0
     except Exception:
         pass
@@ -1189,42 +1480,25 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     # Issue #3396：删除 SRE 禁广播特例（_sre_no_broadcast）——SRE 与其他角色同走
     # 通用选择链（role → tag → scope → health），global 池广播放开；官方机器由
     # engine_capabilities 角色守卫（派发侧 _filter_by_role + 认领侧 #658 守卫）拦截。
+    # Issue #605：all_members = 标签过滤前候选全集（含 load），供决策日志输出
+    # 每候选过滤原因（被过滤成员也可见），选择集 members 仅在其内进行。
+    # engine_ids 为空时保持空列表，使 fallback 日志也能拿到已加载候选（AC4）。
+    all_members: list[dict] = []
     if engine_ids:
-        # 多引擎选择：查引擎详情，按优先级选健康引擎
-        members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
-        members = _filter_by_tags(members, agent_type)
+        # 多引擎选择：查引擎详情，按优先级 + 负载选健康引擎
+        all_members = _attach_loads(dedupe_engines(_engines_by_ids(engine_ids, repo, cfg)))
+        members = _filter_by_tags(all_members, agent_type)
         if members:
-            for scope in cfg.get("scopes") or ["repo", "global", "local"]:
-                cand = _apply_filters([m for m in members if _member_scope(m, repo) == scope], cfg)
-                if not cand:
-                    continue
-                # Issue #134: 健康度过滤增强层——在候选机器筛选阶段过滤低健康分引擎
-                # 不改变广播协议/分发语义：仅在 pick_engine 选机阶段生效
-                cand = _filter_by_health(cand)
-                if not cand:
-                    continue  # 该档位全不健康，尝试下一档位
-                if cfg.get("rule") == "order":
-                    _rid = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-                else:
-                    _rid = random.choice(cand)["runtime_id"]
-                _pick_decision("selected", selected=_rid,
-                               reason=f"scope={scope},rule={cfg.get('rule')}", members=members)
-                return _rid
-            # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
-            all_cand = _apply_filters(members, cfg)
-            if all_cand:
-                _best = _best_health_fallback(all_cand)
-                if _best:
-                    log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
-                    _pick_decision("selected", selected=_best,
-                                   reason="health_fallback", members=members)
-                    return _best
-            _pick_decision("engine_unavailable", reason="all_scopes_unhealthy", members=members)
+            rid, _scope = _select_rid_from_members(members, cfg, repo_key,
+                                                   agent_type, scene_id,
+                                                   log_members=all_members)
+            if rid is not None:
+                return rid
             return None     # 集合存在但无健康成员 → engine_unavailable
     # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
-        _pick_decision("fallback", selected=int(fallback_runtime_id),
-                       reason="fallback_runtime_id")
+        _log_pick_decision("fallback", selected=int(fallback_runtime_id),
+                           reason="fallback_runtime_id", members=all_members)
         return int(fallback_runtime_id)
     return None
 
@@ -1466,8 +1740,9 @@ def _pick_local_engine(user_id: int = 0, agent_type: str = "") -> int | None:
             _own = [m for m in cand if (m.get("host_name") or "") == _hn]
             if _own:
                 cand = _own
-        except Exception:
-            pass
+        except Exception as e:
+            # 本机名取数失败 → 保留候选不过滤（fail-open），但留痕便于定位主机名异常。
+            log.debug(f"engine-select: local host filter skipped (user_id={user_id}): {e}")
     if not cand:
         return None
     if user_id:
@@ -1516,6 +1791,32 @@ def resolve_chat_engine(user_id: int = 0, username: str = "", repo_key: str = ""
         if cand:
             return min(cand, key=lambda r: r["runtime_id"])["runtime_id"]
     return None
+
+
+def get_scene_engine_priorities(scene_id: str, agent_type: str, repo_key: str = "",
+                                user_id: int = 0) -> str:
+    """Issue #3564：场景节点实例绑定优先级映射（JSON 字符串，供 agent_tasks.engine_priorities）。
+
+    仅实例绑定模式（engine_runtime_ids 非空）且节点显式配置 engine_priorities 时返回
+    JSON（{"<engine_id>": 1..9}，1 最高）；其余情况返回 ""（未配置 = 旧行为）。
+
+    与 get_scene_pool_engine_ids 同源读取 get_scene_engine_binding，但**不做在线健康过滤**：
+    优先级闸在认领侧按「可达 + 健康分达标 + 未满载」复核，离线/不健康的高优引擎不会误挡低优引擎。
+    """
+    if not scene_id:
+        return ""
+    try:
+        from src.api.pipeline_config import get_scene_engine_binding
+        binding = get_scene_engine_binding(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+        if not isinstance(binding, dict) or binding.get("status") != "bound":
+            return ""
+        priorities = binding.get("engine_priorities") or {}
+        if not priorities:
+            return ""
+        return json.dumps(priorities, ensure_ascii=False, sort_keys=True)
+    except Exception as e:
+        log.warning(f"get_scene_engine_priorities: scene query failed: {e}")
+        return ""
 
 
 def resolve_local_engine(user_id: int = 0, agent_type: str = "") -> int | None:
@@ -2073,11 +2374,13 @@ def _detach_dead_engine_bindings() -> dict:
     return stats
 
 # ── Issue #605：候选过滤原因（由 weekly-10 迁入，只读解释，不改选择行为） ──
-def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
+def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "",
+                              *, tags: list[str] | None = None) -> list:
     """计算单个候选引擎会被过滤掉的原因列表（与实际过滤链同一口径，只读不改行为）。
 
     覆盖 _apply_filters（enabled/installed/healthy/_health_ok/本机已知引擎名）、
     _filter_by_tags（engine_capabilities 标签）、_filter_by_health（健康分）三层。
+    tags 可传入批量预取结果，避免召回路径逐候选查库；None = 按需单查。
     返回空列表 = 该候选可通过全部过滤。
     """
     reasons = []
@@ -2102,14 +2405,15 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
             pass
     rid = m.get("runtime_id") or 0
     if rid and agent_type:
-        try:
-            db, lock = _db()
-            with lock:
-                c = db.cursor()
-                c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
-                tags = [r[0] for r in c.fetchall()]
-        except Exception:
-            tags = []
+        if tags is None:
+            try:
+                db, lock = _db()
+                with lock:
+                    c = db.cursor()
+                    c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+                    tags = [r[0] for r in c.fetchall()]
+            except Exception:
+                tags = []
         if agent_type not in tags and "all" not in tags:
             # Issue #3396：角色硬过滤口径已与标签口径同源（engine_capabilities
             # 单一事实源，_filter_by_role/_filter_by_tags 同一把尺子），不再单列
@@ -2132,14 +2436,16 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
     返回：
     - mode：plugin（广播）/ legacy
     - bound_engine_ids：场景 node 绑定的 engine_runtime_ids
-    - candidates：候选全集（含 scope/priority/healthy/last_seen_at/tags），每个候选带
-      reasons（会被过滤的具体原因，空 = 可通过全部过滤）
+    - candidates：候选全集（含 scope/priority/healthy/last_seen_at/tags/load），每个候选带
+      reasons（会被过滤的具体原因，空 = 可通过全部过滤）；load 为派发前实时在跑数
+      （与决策日志 engine_select_decision 的候选 load 同口径）
     - pool_engine_ids：广播名单（get_scene_pool_engine_ids 实际结果，None = 全灭）
     - selected：legacy 模式实际会选中的 runtime_id（None = engine_unavailable）
+    - selected_scope：选中候选命中的档位（repo/global/local/fallback，空 = 未选中）
     """
     out = {"repo": _norm_repo(repo_key), "agent_type": agent_type, "scene_id": scene_id,
            "mode": "legacy", "bound_engine_ids": [], "candidates": [],
-           "pool_engine_ids": "", "selected": None}
+           "pool_engine_ids": "", "selected": None, "selected_scope": ""}
     try:
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         if is_plugin_mode():
@@ -2160,7 +2466,7 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
         engine_ids = []
     out["bound_engine_ids"] = list(engine_ids or [])
     if engine_ids:
-        members = dedupe_engines(_engines_by_ids(list(engine_ids), repo, cfg))
+        members = _attach_loads(dedupe_engines(_engines_by_ids(list(engine_ids), repo, cfg)))
         for m in members:
             out["candidates"].append({
                 "runtime_id": m.get("runtime_id"), "name": m.get("name") or "",
@@ -2169,14 +2475,22 @@ def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
                 "healthy": bool(m.get("healthy")), "installed": bool(m.get("installed")),
                 "last_seen_at": m.get("last_seen_at") or "",
                 "credential_id": m.get("credential_id") or 0,
+                "load": m.get("load", 0),
                 "reasons": _candidate_reject_reasons(m, cfg, agent_type),
             })
     if scene_id:
         out["pool_engine_ids"] = get_scene_pool_engine_ids(
             scene_id, agent_type, repo_key=repo_key, user_id=user_id, issue_creator=issue_creator)
     if out["mode"] == "legacy":
-        out["selected"] = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
-                                      scene_id=scene_id, user_id=user_id, issue_creator=issue_creator)
+        # QA 复审意见：取证 selected 必须与 candidates 同一 load 快照、同一选择逻辑，
+        # 且不得推进真实轮转序号——复用 _select_rid_from_members 并传 advance=False
+        # （peek 下一次序号，只读取证）。engine_ids 为空时 legacy 等价 fallback=0 → None。
+        if engine_ids:
+            sel_rid, sel_scope = _select_rid_from_members(
+                _filter_by_tags(members, agent_type), cfg, repo_key, agent_type, scene_id,
+                advance=False, log_members=members)
+            out["selected"] = sel_rid
+            out["selected_scope"] = sel_scope
     return out
 
 def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str = "",

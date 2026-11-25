@@ -334,6 +334,29 @@ def _done_issues() -> list[tuple[str, str]]:
         rows = c.execute("SELECT repo_key, issue_number FROM issue WHERE stage='done'").fetchall()
         return [(r[0], f"#{r[1]}") for r in rows]
 
+def _issue_pr_numbers(repo_key: str, issue_num) -> list[str]:
+    """已落盘的 Issue PR 子目录编号（`issues/<n>/pr-<p>`，Issue #3375）。
+
+    done-issue 清扫时除基础工位外，还需按 PR 维度逐个回收；PR 号从目录名反推，
+    数量通常极少（同 Issue 多 PR），无目录时返回空列表。
+    """
+    from src.domains.runtime.engine import repogit
+    from src.kernel.pr_scope import normalize_pr_number
+    issue_root = os.path.dirname(repogit.issue_dir_for(repo_key, "coding", issue_num))
+    try:
+        names = os.listdir(issue_root)
+    except Exception:
+        return []
+    out = []
+    for name in names:
+        if not name.startswith("pr-"):
+            continue
+        _pr = normalize_pr_number(name[3:])
+        if _pr:
+            out.append(_pr)
+    return out
+
+
 def _active_issue_sessions() -> set[tuple[str, str, str]]:
     """有 dispatched/running 任务的 (repo_key, agent_type, issue_num) 集合（不清理）。"""
     with _sweep_cursor() as c:
@@ -343,10 +366,13 @@ def _active_issue_sessions() -> set[tuple[str, str, str]]:
         return set()
     ph = ",".join("?" for _ in ids)
     active = set()
+    from src.api.session_store import split_issue_session_key
     with _sweep_cursor() as c:
         c.execute(f"SELECT repo_key, agent_type, issue_id FROM issue_agent_session WHERE id IN ({ph})", ids)
         for r in c.fetchall():
-            active.add((r[0], r[1], str(r[2]).lstrip("#")))
+            # Issue #3375：PR 维度会话键带 `::pr<n>` 后缀，还原真实 Issue 号再比对
+            _issue_id, _pr = split_issue_session_key(r[2])
+            active.add((r[0], r[1], str(_issue_id).lstrip("#")))
     return active
 
 
@@ -399,6 +425,24 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
                     continue
                 for agent in _GIT_AGENTS:
                     _check(os.path.join(issue_dir, agent))
+                # Issue #3375：同 Issue 多 PR 的 {repo}/issues/{n}/pr-<p>/{agent}
+                for sub in os.listdir(issue_dir):
+                    if not sub.startswith("pr-"):
+                        continue
+                    pr_dir = os.path.join(issue_dir, sub)
+                    if not os.path.isdir(pr_dir):
+                        continue
+                    for agent in _GIT_AGENTS:
+                        _check(os.path.join(pr_dir, agent))
+        # Issue #3375：issue-less PR 的 {repo}/prs/<pr>/{agent}
+        prs_root = os.path.join(repo_dir, "prs")
+        if os.path.isdir(prs_root):
+            for pr in os.listdir(prs_root):
+                pr_dir = os.path.join(prs_root, pr)
+                if not os.path.isdir(pr_dir):
+                    continue
+                for agent in _GIT_AGENTS:
+                    _check(os.path.join(pr_dir, agent))
         # 过渡期旧结构：{repo}/{agent}/issues/{n}/（仅兜底，新代码不写入）
         for agent in _GIT_AGENTS:
             issues = os.path.join(repo_dir, agent, "issues")
@@ -424,13 +468,16 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
                 d2 = os.path.join(d1, entry2)
                 if not os.path.isdir(d2):
                     continue
-                # 检查 d2 是否直接含 issues（旧结构：d2=repo_dir）
-                if os.path.isdir(os.path.join(d2, "issues")):
+                # 检查 d2 是否直接含 issues/prs（旧结构：d2=repo_dir）
+                if (os.path.isdir(os.path.join(d2, "issues"))
+                        or os.path.isdir(os.path.join(d2, "prs"))):
                     _scan_repo_dir(d2)
                 # 新结构：d2 是 owner 目录，下面还有 repo 层
                 for entry3 in os.listdir(d2):
                     d3 = os.path.join(d2, entry3)
-                    if os.path.isdir(d3) and os.path.isdir(os.path.join(d3, "issues")):
+                    if os.path.isdir(d3) and (
+                            os.path.isdir(os.path.join(d3, "issues"))
+                            or os.path.isdir(os.path.join(d3, "prs"))):
                         _scan_repo_dir(d3)
     except Exception as e:
         log.warning(f"sweeper zombie scan failed: {e}")
@@ -828,9 +875,13 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         dead = [s for s in seqs if s not in live]
         if dead:
             ph2 = ",".join("?" * len(dead))
-            now_iso = now_utc.isoformat()
-            # 文案区分「创建任务失败」（_NO_TASK_TXT）与「running 超时」（_TIMEOUT_TXT）
-            # 见模块常量注释 / agent-tasks-direct-create-binding-fix-design.md §5.4。
+            # 区分「创建任务失败」与「running 超时」：
+            # - 该事件在 agent_tasks 连一条记录都没有 → 极可能是 _create_direct_task/pre 入队失败（INSERT 绑定数错误等），
+            #   结果写明真实根因，避免一律误标"running 超时"（见 agent-tasks-direct-create-binding-fix-design.md §5.4）。
+            # - 有任务记录但非活跃（终态/缺失）→ 才是真正的 running 超时/执行中断。
+            _no_task_txt = "中断：running 超时无任务执行记录，且 agent_tasks 无任何关联行——疑似创建任务失败（create_direct_task/enqueue 未落行，请查服务端日志）"
+            _timeout_txt = "中断：running 超时无活跃任务执行记录（sweeper 兜底回收）"
+            _with_task_rows = set()
             # Issue #587：超时探活收敛——最近任务已终态时按任务终态映射收敛
             # （cancelled 任务 → 事件 cancelled，不再是 failed；保留业务结论语义），
             # 而非一律标 failed。
@@ -846,8 +897,38 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                         _terminal_by_seq[_s] = (_st, _ec, _tid)
             except Exception as _te:
                 log.warning(f"sweeper: terminal task lookup failed: {_te}")
-            # Issue #4303：按 seq 逐条精收 + 逐条降级，失败不再整段回落 bulk。
-            fixed += _recover_stuck_events(dead, _terminal_by_seq, now_iso)
+            try:
+                # Nit 修复：import 移出 db_lock 临界区（首次导入不应持锁执行）
+                from src.domains.runtime.engine.service import (
+                    _cascade_event_terminal, _recover_orphan_event_terminal)
+                with _sweep_cursor() as _c:
+                    _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
+                    _with_task_rows = {r[0] for r in _c.fetchall()}
+                    # 同一连接上的第二个游标（own 模式不能再用进程主连接 db.cursor()）
+                    _c2 = _c.connection.cursor()
+                    for s in dead:
+                        if s in _terminal_by_seq:
+                            # 任务已终态 → 级联到任务终态（探活收敛，幂等）
+                            _st, _ec, _tid = _terminal_by_seq[s]
+                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
+                                fixed += 1
+                            continue
+                        _has_task_row = s in _with_task_rows
+                        _txt = _timeout_txt if _has_task_row else _no_task_txt
+                        fixed += _recover_orphan_event_terminal(
+                            _c2, s, reason=_txt,
+                            phase="timeout" if _has_task_row else "recover")
+                    _commit()
+            except Exception as e:
+                log.warning(f"sweeper: per-seq recovery failed, fallback bulk: {e}")
+                with _sweep_cursor() as _c:
+                    for s in dead:
+                        try:
+                            fixed += _recover_orphan_event_terminal(
+                                _c, s, reason=_timeout_txt, phase="timeout")
+                        except Exception as _ie:
+                            log.warning(f"sweeper: fallback recovery failed for {s}: {_ie}")
+                    _commit()
             if fixed:
                 log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
             # 取消对应的线程池排队任务（防止 event 已 failed 但子进程还在跑）
@@ -1092,18 +1173,33 @@ def sweep_once() -> int:
                     if (repo_key, agent_type, num) in active:
                         continue
                     issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
-                    if not os.path.isdir(issue_dir):
-                        continue
-                    try:
-                        # Issue #2041：删除前过保全守卫（未推送/脏 → 先归档），
-                        # 守卫拒绝（归档失败）→ 返回 False，不计数（目录保留）。
-                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
-                                                          token=_tok(repo_key),
-                                                          base_branch=_sweep_base_branch(repo_key),
-                                                          reason="sweep_done_issue"):
-                            cleaned += 1
-                    except Exception as e:
-                        log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+                    if os.path.isdir(issue_dir):
+                        try:
+                            # Issue #2041：删除前过保全守卫（未推送/脏 → 先归档），
+                            # 守卫拒绝（归档失败）→ 返回 False，不计数（目录保留）。
+                            if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
+                                                              token=_tok(repo_key),
+                                                              base_branch=_sweep_base_branch(repo_key),
+                                                              reason="sweep_done_issue"):
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+                    # Issue #3375：同 Issue 多 PR 工位（issues/<n>/pr-<p>）逐个回收，
+                    # 不再只依赖 zombie TTL 兜底。
+                    for _pr in _issue_pr_numbers(repo_key, num):
+                        _pr_dir = repogit.issue_dir_for(repo_key, agent_type, num,
+                                                        pr_number=_pr)
+                        if not os.path.isdir(_pr_dir):
+                            continue
+                        try:
+                            if repogit.cleanup_issue_worktree(
+                                    repo_key, agent_type, num,
+                                    token=_tok(repo_key),
+                                    base_branch=_sweep_base_branch(repo_key),
+                                    reason="sweep_done_issue", pr_number=_pr):
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"sweeper cleanup failed {_pr_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):
@@ -1486,21 +1582,37 @@ async def sweep_events_loop() -> None:
                     if (repo_key, agent_type, num) in active:
                         continue
                     issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
-                    if not os.path.isdir(issue_dir):
-                        continue
-                    try:
-                        # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
-                        # cleanup_issue_worktree 内含 git 子进程与 ls-remote，必须入线程池。
-                        # Issue #2281：未推送判定以场景开发基线（GRAPE_WORK_BRANCH）为对比 ref。
-                        _gone = await _aio.to_thread(
-                            repogit.cleanup_issue_worktree, repo_key, agent_type, num,
-                            token=await _tok(repo_key),
-                            base_branch=_sweep_base_branch(repo_key),
-                            reason="event_sweep_done_issue")
-                        if _gone:
-                            cleaned += 1
-                    except Exception as e:
-                        log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
+                    if os.path.isdir(issue_dir):
+                        try:
+                            # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
+                            # cleanup_issue_worktree 内含 git 子进程与 ls-remote，必须入线程池。
+                            # Issue #2281：未推送判定以场景开发基线（GRAPE_WORK_BRANCH）为对比 ref。
+                            _gone = await _aio.to_thread(
+                                repogit.cleanup_issue_worktree, repo_key, agent_type, num,
+                                token=await _tok(repo_key),
+                                base_branch=_sweep_base_branch(repo_key),
+                                reason="event_sweep_done_issue")
+                            if _gone:
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
+                    # Issue #3375：同 Issue 多 PR 工位逐个回收（不再等 zombie TTL）。
+                    for _pr in await _aio.to_thread(_issue_pr_numbers, repo_key, num):
+                        _pr_dir = repogit.issue_dir_for(repo_key, agent_type, num,
+                                                        pr_number=_pr)
+                        if not os.path.isdir(_pr_dir):
+                            continue
+                        try:
+                            _gone = await _aio.to_thread(
+                                repogit.cleanup_issue_worktree,
+                                repo_key, agent_type, num,
+                                token=await _tok(repo_key),
+                                base_branch=_sweep_base_branch(repo_key),
+                                reason="event_sweep_done_issue", pr_number=_pr)
+                            if _gone:
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"Event sweeper cleanup failed {_pr_dir}: {e}")
             if cleaned:
                 log.info(f"Event sweeper: cleaned {cleaned} items")
             _log_round("events", cleaned, time.time() - _t0)
@@ -1741,17 +1853,31 @@ def sweep_events_once() -> int:
                     if (repo_key, agent_type, num) in active:
                         continue
                     issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
-                    if not os.path.isdir(issue_dir):
-                        continue
-                    try:
-                        if repogit.cleanup_issue_worktree(
-                                repo_key, agent_type, num,
-                                token=_tok(repo_key),
-                                base_branch=_sweep_base_branch(repo_key),
-                                reason="event_sweep_done_issue"):
-                            cleaned += 1
-                    except Exception as e:
-                        log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+                    if os.path.isdir(issue_dir):
+                        try:
+                            if repogit.cleanup_issue_worktree(
+                                    repo_key, agent_type, num,
+                                    token=_tok(repo_key),
+                                    base_branch=_sweep_base_branch(repo_key),
+                                    reason="event_sweep_done_issue"):
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+                    # Issue #3375：同 Issue 多 PR 工位逐个回收（不再等 zombie TTL）。
+                    for _pr in _issue_pr_numbers(repo_key, num):
+                        _pr_dir = repogit.issue_dir_for(repo_key, agent_type, num,
+                                                        pr_number=_pr)
+                        if not os.path.isdir(_pr_dir):
+                            continue
+                        try:
+                            if repogit.cleanup_issue_worktree(
+                                    repo_key, agent_type, num,
+                                    token=_tok(repo_key),
+                                    base_branch=_sweep_base_branch(repo_key),
+                                    reason="event_sweep_done_issue", pr_number=_pr):
+                                cleaned += 1
+                        except Exception as e:
+                            log.warning(f"sweeper cleanup failed {_pr_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):

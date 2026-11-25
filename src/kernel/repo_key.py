@@ -88,6 +88,112 @@ def _warn(msg: str) -> None:
     _log.warning(msg)
 
 
+def canonical_repo_key(repo_key: str) -> str:
+    """规范化 repo_key 的外形：provider 前缀小写，owner/repo 大小写原样保留。
+
+    Issue #3397：仓库路径大小写的权威口径是 VCS 实际路径（`full_name`），
+    provider 前缀只做小写归一。本函数**不做**大小写猜测（不查库、不改 owner/repo
+    写法），供纯函数路径使用；需要按已存数据回填权威写法时用
+    `canonicalize_repo_key` / `resolve_repo_key_ci`。
+    伪仓库（`chat:xxx`）与无前缀裸键幂等返回。
+    """
+    s = (repo_key or "").strip()
+    if not s:
+        return ""
+    provider, sep, rest = s.partition(":")
+    if not sep or "/" not in rest:
+        return f"{provider.lower()}:{rest}" if sep else s
+    owner, _, repo = rest.partition("/")
+    return f"{provider.lower()}:{owner}/{repo}"
+
+
+def repo_key_casefold(repo_key: str) -> str:
+    """repo_key 的大小写不敏感比较形态（canonical 外形 + casefold）。"""
+    return canonical_repo_key(repo_key).casefold()
+
+
+def same_repo_key(left: str, right: str) -> bool:
+    """两个 repo_key 是否指向同一仓库（大小写不敏感，provider 前缀小写归一）。"""
+    if not left or not right:
+        return False
+    return repo_key_casefold(left) == repo_key_casefold(right)
+
+
+def _managed_repo_keys_ci(key: str) -> "set[str]":
+    """managed_repos 中与 key 大小写不敏感相等的 repo_key 集合。
+
+    经 kernel.owner_db("mgmt") 直读 owner 库（三库拓扑连对 mgmt 库；单库/测试
+    形态回落进程主库），kernel 不 import domains（check-arch R1；对齐
+    kernel/gsb/route_config.py 的既有形态）。`?` 占位符由 db_registry 的
+    _CompatConn 按 owner 方言翻译。
+    """
+    from src.kernel.owner_db import owner_db, owner_lock
+    try:
+        with owner_lock("mgmt"):
+            c = owner_db("mgmt").cursor()
+            rows = c.execute(
+                "SELECT repo_key FROM managed_repos WHERE LOWER(repo_key)=LOWER(?)",
+                (key,)).fetchall()
+        return {str(r[0]) for r in rows if r and r[0]}
+    except Exception as e:
+        _log.warning(f"resolve_repo_key_ci DB lookup failed ({key!r}): {e}")
+        return set()
+
+
+def repo_keys_ci(repo_key: str) -> "set[str]":
+    """已存登记（managed_repos）中与 repo_key 大小写不敏感相等的候选键集合。
+
+    Issue #3397：`resolve_repo_key_ci` 与歧义诊断（404 文案）共用同一查询口径，
+    避免「反查一处、诊断另一处」的漂移。未登记 / 查询失败 → 空集。
+    """
+    key = canonical_repo_key(repo_key)
+    if not key or ":" not in key:
+        return set()
+    return _managed_repo_keys_ci(key)
+
+
+def resolve_repo_key_ci(repo_key: str) -> str:
+    """按大小写不敏感在已存仓库登记（managed_repos）中反查权威 repo_key。
+
+    Issue #3397 读取侧兜底：
+    - 精确命中优先（原样返回请求键对应的已存写法）；
+    - 精确未命中再按大小写不敏感查回**唯一**已存键；
+    - 模糊命中多条（同一 owner 下仅大小写不同的多个仓库）→ 视为歧义，
+      返回空串并告警，**禁止合并**；
+    - 未登记 / 查询失败 → 返回空串（调用方保留原键语义）。
+    """
+    key = canonical_repo_key(repo_key)
+    if not key or ":" not in key:
+        return ""
+    keys = repo_keys_ci(key)
+    if key in keys:
+        return key
+    if len(keys) == 1:
+        return next(iter(keys))
+    if len(keys) > 1:
+        _log.warning(f"resolve_repo_key_ci({key!r}) ambiguous: {sorted(keys)}")
+    return ""
+
+
+def canonicalize_repo_key(repo_key: str) -> str:
+    """把 repo_key 归一为已存登记的权威写法（无登记/歧义时保留 canonical 外形）。
+
+    写入侧（webhook / 注入）使用：让 `repo_key` 及其派生的 `REPO_*` 与 VCS 实际
+    路径逐字符一致，避免全小写路径被固化成唯一口径。
+    """
+    key = canonical_repo_key(repo_key)
+    if not key:
+        return ""
+    resolved = resolve_repo_key_ci(key)
+    return resolved or key
+
+
+def canonicalize_repo_full_name(owner_repo: str, provider: str = "gitcode") -> str:
+    """把 `owner/repo` 归一为已存登记的权威写法（无前缀全名，含真实大小写）。"""
+    key = canonicalize_repo_key(to_repo_key(owner_repo, provider))
+    return from_repo_key(key)
+
+
 def _catalog_providers() -> set[str]:
     """平台前缀名单：数据驱动单一入口，禁止平台字面量枚举。
 
@@ -210,6 +316,12 @@ def derive_repo_identity(repository: str = "", repo_key: str = "") -> tuple[str,
     if candidate and "/" in candidate:
         owner, _, name = candidate.partition("/")
         if owner and name:
+            # Issue #3397：REPO_FULL_NAME 与 repo_key 指向同一仓库但大小写不同 →
+            # 告警（调用方应在注入前用 canonicalize_repo_key 归一权威写法）。
+            _rk_full = from_repo_key((repo_key or "").strip())
+            if _rk_full and _rk_full != candidate and _rk_full.casefold() == candidate.casefold():
+                _warn(f"derive_repo_identity: repository/repo_key casing differ "
+                      f"(repository={repository!r}, repo_key={repo_key!r})")
             return f"{owner}/{name}", owner, name
 
     rk = (repo_key or "").strip()
@@ -321,6 +433,32 @@ def repo_key_candidates(base: str) -> "list[str]":
         _rk = f"{p}:{stripped}"
         if _rk not in cands:
             cands.append(_rk)
+    return cands
+
+
+def repo_key_candidates_ci(base: str) -> "list[str]":
+    """跨平台候选集 + 仓登记实际大小写候选（Issue #3397 读取侧统一入口）。
+
+    请求路径可能全小写，而 `events`/`issue` 行的 `repo_key` 与历史会话 token 可能
+    使用 VCS 实际大小写（`SongSpace/Flask-Blog`）。仅按请求原样派生候选会漏查存量
+    行、403 拒放行；故在 `repo_key_candidates` 之外补入按登记反查到的**唯一**实际
+    写法的候选。歧义（仅大小写不同的多仓）不合并——`resolve_repo_key_ci` 返回空串，
+    候选集保持请求形态，由调用方按其语义处理。
+    """
+    cands = repo_key_candidates(base)
+    if not cands:
+        return []
+    try:
+        provider, _, bare = base.partition(":")
+        if not bare:
+            provider, bare = "gitcode", base
+        resolved = resolve_repo_key_ci(to_repo_key(bare, provider))
+    except Exception:
+        resolved = ""
+    if resolved:
+        for _rk in repo_key_candidates(from_repo_key(resolved)):
+            if _rk not in cands:
+                cands.append(_rk)
     return cands
 
 

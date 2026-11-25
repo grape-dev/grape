@@ -250,7 +250,7 @@ def test_schema_ddl_state_columns_match_varchar_ddl():
 
     `_AUTOPILOT_TASKS_DDL` 走 `mysql_compat` 翻译建表：三列若仍写 TEXT，MySQL 不接受
     TEXT 的字面量 DEFAULT，翻译层会把 `DEFAULT ''` 包成表达式默认值 → 新装库的
-    `COLUMN_DEFAULT` 读不到 `''`，strict 下 1364 只等迁移 202611240011 补刀。
+    `COLUMN_DEFAULT` 读不到 `''`，strict 下 1364 只等迁移 202611250007 补刀。
     这里锁死两边一致，避免「迁移改了、建表没改」再让新装库回到假绿。
     """
     from src.domains.mgmt.migrations import autopilot_dispatch_state as mig

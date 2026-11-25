@@ -339,8 +339,11 @@ def test_missing_guard_module_fails_open(tmp_path, monkeypatch):
 
     assert r.returncode == 0, r.stderr
     assert "fail-open" in r.stderr
-    assert "branch_guard" in r.stderr
-    assert "ModuleNotFoundError" in r.stderr
+    # Issue #2923 去噪语义（rebase 到 2028-09 模板）：兜底 stderr 不再携带
+    # 模块名/原始异常文案；可读中文结论 + 修复指引仍在。
+    assert "branch_guard" not in r.stderr
+    assert "ModuleNotFoundError" not in r.stderr
+    assert "--no-verify" in r.stderr
 
 
 # ===================== fail-closed 正常路径 =====================

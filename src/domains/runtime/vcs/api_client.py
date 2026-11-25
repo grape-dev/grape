@@ -52,6 +52,11 @@ def _error_log_deduper():
     return _ERROR_LOG_DEDUPER
 
 
+# Issue #3348 复审：避免 404 魔法字面量散落（用户查询/存在性判定共用）。
+_HTTP_NOT_FOUND = 404
+_GITLAB_USERS_ENDPOINT = "/users?username={name}"
+
+
 # ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
 # 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
 # 积压越慢越贵（实测 grape-dev/grape 330 open = 7 页 4.5s；2000 open ≈ 30s+）。
@@ -413,7 +418,6 @@ class VcsApiClient:
                             issue_number=str(issue_number or ""),
                             content_hash=content_hash_md5(body) if body else "")
         except Exception as e:
-            from src.kernel.config import log
             log.warning(f"VcsApiClient ledger record failed (non-blocking): {e}")
 
     def post_issue_comment(self, issue_number: int, body: str) -> dict:
@@ -822,6 +826,22 @@ class VcsApiClient:
         card = self._platform_card()
         return bool(card is not None and card.dialect == "gitlab")
 
+    def _gitlab_users_by_username(self, username: str, timeout: "int | None" = None) -> "list | dict":
+        """GitLab `GET /users?username=<name>` 列表查询（Issue #3348 复审：去重）。
+
+        `_gitlab_assignee_ids` 与 `get_user` 共用。返回 list（成功）或错误 dict
+        （网络/HTTP 异常，`_request` 原样透出），调用方据此区分"空结果"与"查询失败"：
+        前者是真实不存在，后者必须 fail-open，不能当成 404（Issue #3348 二轮复审）。
+        """
+        from urllib.parse import quote as _quote
+        _name = str(username or "").strip()
+        if not _name:
+            return []
+        _path = _GITLAB_USERS_ENDPOINT.format(name=_quote(_name, safe=""))
+        if timeout is None:
+            return self._request("GET", _path)
+        return self._request("GET", _path, timeout=timeout)
+
     def _gitlab_assignee_ids(self, assignee: str) -> list:
         """GitLab 指派：用户名 → assignee_ids（Issue #3580 复审，对齐 PR #1854）。
 
@@ -835,13 +855,16 @@ class VcsApiClient:
             return []
         if _raw.isdigit():
             return [int(_raw)]
-        from urllib.parse import quote as _quote
         try:
-            users = self._request("GET", f"/users?username={_quote(_raw)}")
+            users = self._gitlab_users_by_username(_raw)
         except Exception as e:  # noqa: BLE001
             log.warning(f"gitlab assignee resolve failed ({_raw}): {e}")
             return []
-        for u in users if isinstance(users, list) else []:
+        if not isinstance(users, list):
+            # 网络/HTTP 错误 dict：指派是可选语义，解析不到只告警放弃。
+            log.warning(f"gitlab assignee resolve failed ({_raw}): {users}")
+            return []
+        for u in users:
             if not isinstance(u, dict):
                 continue
             if str(u.get("username", "")).lower() == _raw.lower() and u.get("id"):
@@ -977,6 +1000,38 @@ class VcsApiClient:
         """获取仓库信息。"""
         return self._request("GET", self._generic_path(
             f"/repos/{self.owner}/{self.repo}", ""), timeout=timeout)
+
+    def get_user(self, username: str, timeout: "int | None" = None) -> dict:
+        """查询平台用户信息（Issue #3348：BOT_USERNAME 注入前有效性校验）。
+
+        github/gitcode/gitee 走 `GET /users/{username}`；gitlab 走
+        `GET /users?username=...`（精确匹配 username，避免模糊命中他人后误判有效）。
+        不存在返回平台 404 error dict（含 status_code=404），调用方据此判定
+        user_not_found；网络/HTTP 异常原样返回错误 dict（无 404 语义），调用方按
+        fail-open 处理，不能伪造 404（Issue #3348 二轮复审）。
+        `timeout` 供派发热路径限时，避免平台变慢拖住任务派发。
+        """
+        from urllib.parse import quote as _quote
+        _name = str(username or "").strip()
+        if not _name:
+            return {"error": "empty username"}
+        if self._dialect_is_gitlab():
+            # 与 _gitlab_assignee_ids 共用列表查询（复审去重）；仅精确匹配才算存在。
+            _data = self._gitlab_users_by_username(_name, timeout=timeout)
+            if isinstance(_data, dict):
+                # 网络/HTTP 错误原样返回，交给调用方 fail-open（不得伪造成 404）。
+                return _data
+            if not isinstance(_data, list):
+                return {"error": "unexpected gitlab users response"}
+            for _user in _data:
+                if not isinstance(_user, dict):
+                    continue
+                if str(_user.get("username") or "").strip().lower() == _name.lower():
+                    return _user
+            return {"error": f"HTTP {_HTTP_NOT_FOUND}", "status_code": _HTTP_NOT_FOUND}
+        if timeout is None:
+            return self._request("GET", f"/users/{_quote(_name, safe='')}")
+        return self._request("GET", f"/users/{_quote(_name, safe='')}", timeout=timeout)
 
     def repo_exists(self, timeout: int = 30) -> bool:
         """探测仓库是否存在（Issue #340 代码仓删除感知）。

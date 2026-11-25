@@ -1,4 +1,4 @@
-"""技能分类补种「内容生成」（mgmt 侧）：Issue #3798（迁移 202611240012）。
+"""技能分类补种「内容生成」（mgmt 侧）：Issue #3798（迁移 202611250008）。
 
 背景（grapedev.cn 2026-11-22 线上实测）：官方技能同步（`runtime/storage/skill_sync`，
 worker 每 30 分钟一轮）按 `skill-description.json` 的 `sub_scene` 解析
@@ -54,7 +54,7 @@ def seed_content_generation_category(conn=None) -> None:
             "UPDATE skill_category SET is_active=1 WHERE slug=? AND is_active<>1",
             (SEED_SLUG,))
         conn.commit()
-        log.info(f"202611240012 skill_category 补种 {SEED_SLUG} 完成"
+        log.info(f"202611250008 skill_category 补种 {SEED_SLUG} 完成"
                  f"（本次启用 {getattr(cur, 'rowcount', 0)} 行）")
 
 
@@ -76,12 +76,12 @@ def verify_content_generation_category(conn=None) -> None:
                         "同步侧仍会判未命中")
     if problems:
         raise RuntimeError(
-            "202611240012 post_check 未收敛: " + "; ".join(problems))
-    log.info(f"202611240012 post_check 通过：{SEED_SLUG} 行在位且启用")
+            "202611250008 post_check 未收敛: " + "; ".join(problems))
+    log.info(f"202611250008 post_check 通过：{SEED_SLUG} 行在位且启用")
 
 
 MIGRATION = {
-    "version": "202611240012",
+    "version": "202611250008",
     "name": "skill-category-seed-content-generation",
     "kind": "backfill",
     "fn": seed_content_generation_category,

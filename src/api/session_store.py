@@ -647,14 +647,47 @@ def remove_agent_sessions(repo_key: str) -> int:
 # 与 devops_agent_session（repo+agent 配置）分离：issue_agent_session 只承载 Issue 级
 # 会话续接指针（runtime_session_id）+ 状态，作为 agent_tasks.issue_session_id 的串行粒度。
 
-def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict:
-    """获取或创建 Issue 级执行会话，per (repo_key, agent_type, issue_id) 独立。
+_ISSUE_SESSION_PR_SEP = "::pr"
+
+
+def issue_session_key(issue_id: str, pr_number="") -> str:
+    """Issue 级会话键（Issue #3375）：有 PR 时追加 `::pr<n>`，同 Issue 多 PR 各持会话。
+
+    无 PR 时与原键（issue_id）完全一致，历史 Issue 会话零改动。会话行的 issue_id
+    保持真实编号 + PR 后缀，读取侧用 split_issue_session_key 还原真实 Issue 号。
+    """
+    from src.kernel.pr_scope import normalize_pr_number
+    base = issue_id or ""
+    _pr = normalize_pr_number(pr_number)
+    if not _pr or base.endswith(f"{_ISSUE_SESSION_PR_SEP}{_pr}"):
+        return base
+    return f"{base}{_ISSUE_SESSION_PR_SEP}{_pr}"
+
+
+def split_issue_session_key(key: str) -> tuple[str, str]:
+    """拆分会话键 → (真实 issue_id, pr_number)；无 PR 后缀时 pr_number=''。"""
+    from src.kernel.pr_scope import normalize_pr_number
+    text = str(key or "")
+    idx = text.rfind(_ISSUE_SESSION_PR_SEP)
+    if idx < 0:
+        return text, ""
+    _pr = normalize_pr_number(text[idx + len(_ISSUE_SESSION_PR_SEP):])
+    if not _pr:
+        return text, ""
+    return text[:idx], _pr
+
+
+def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str,
+                                pr_number="") -> dict:
+    """获取或创建 Issue 级执行会话，per (repo_key, agent_type, issue_id[, pr]) 独立。
 
     每个 Issue 拥有完全独立的 opencode session：新 Issue 首次创建时 runtime_session_id 为空
     （不继承 repo 级 devops_agent_session 的指针，避免多 Issue 共用同一 session 导致 cwd/上下文错位，
     见 vod-agent-hang-rootcause-fix.md 方案 A）；第一次执行由 opencode 生成全新 session 后回写本行。
+
+    Issue #3375：pr_number 有值时按 PR 维度再隔离（同 Issue 多 PR 不共享 oc_session_id）。
     """
-    issue_id = issue_id or ""
+    issue_id = issue_session_key(issue_id, pr_number)
     row = None
     try:
         row = rt.read_one_any("issue_agent_session_row", (repo_key, agent_type, issue_id))
@@ -703,8 +736,10 @@ def update_issue_session(session_id: str, runtime_session_id: str = None, status
         log.warning(f"Failed to persist session {session_id}: {e}")
 
 
-def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | None:
-    """按 (repo, agent, issue) 查 Issue 级执行会话；无记录返回 None。"""
+def get_issue_session(repo_key: str, agent_type: str, issue_id: str,
+                      pr_number="") -> dict | None:
+    """按 (repo, agent, issue[, pr]) 查 Issue 级执行会话；无记录返回 None。"""
+    issue_id = issue_session_key(issue_id, pr_number)
     row = rt.read_one_any("issue_agent_session_row", (repo_key, agent_type, issue_id))
     if not row:
         return None
@@ -743,10 +778,15 @@ def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
             rows = rt.read_all_any("issue_agent_sessions_by_repo", (repo_key,))
     except Exception:
         return []
-    return [{"id": r[0], "repo_key": r[1], "agent_type": r[2], "issue_id": r[3],
-             "runtime_session_id": r[4] or "", "status": r[5],
-             "last_active_at": normalize_event_time(r[6]),
-             "created_at": normalize_event_time(r[7])} for r in rows]
+    out = []
+    for r in rows:
+        _issue_id, _pr = split_issue_session_key(r[3])
+        out.append({"id": r[0], "repo_key": r[1], "agent_type": r[2],
+                    "issue_id": _issue_id, "pr_number": _pr,
+                    "runtime_session_id": r[4] or "", "status": r[5],
+                    "last_active_at": normalize_event_time(r[6]),
+                    "created_at": normalize_event_time(r[7])})
+    return out
 
 
 def remove_issue_sessions(repo_key: str):

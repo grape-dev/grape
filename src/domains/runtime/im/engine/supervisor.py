@@ -40,6 +40,10 @@ REGISTER_CONFLICT_ALERT_AFTER = 5
 # 一次连接健康存活 ≥ 该时长 → 视为已恢复，重置并发注册冲突的连续计数。
 REGISTER_CONFLICT_STABLE_SECS = 60.0
 
+#: WS 关闭码 duck-typing 的 cause/context 回溯层数上限（PR #2157 复审 C3 数值证据门）：
+#: 实测关闭帧最多挂在 3~4 层因果链上，8 层足够覆盖包装异常且不会在环状链上打转。
+WS_CLOSE_CHAIN_MAX_DEPTH = 8
+
 # Issue #3897：传输层断连异常族——「链路抖动」，不是适配器 bug。
 # 生产现场 `channel crashed (unexpected)` 的异常栈即 asyncio selector_events 写 socket 时
 # 抛的 BrokenPipeError（1h 11 条）。这类异常必须按传输抖动 WARNING 归因 + 既有指数退避，
@@ -58,7 +62,7 @@ def ws_close_code_of(exc: BaseException) -> Optional[int]:
     （只在 ``rcvd``/``sent`` 容器里认，或异常自身同时具备 ``reason`` 时才认）。
     """
     cur: Optional[BaseException] = exc
-    for _ in range(8):
+    for _ in range(WS_CLOSE_CHAIN_MAX_DEPTH):
         if cur is None:
             return None
         for holder in (getattr(cur, "rcvd", None), getattr(cur, "sent", None)):

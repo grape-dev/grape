@@ -175,8 +175,8 @@ def tag_probe_signal_sink(base_url: str | None = None, token: str | None = None,
                 line["fallback"] = "alert-sink-unreachable"
                 with open(d / FALLBACK_FILE, "a", encoding="utf-8") as f:
                     f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug(f"runtime-id-guard: fallback alert write skipped: {e}")
         return ok
 
     return _sink

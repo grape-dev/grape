@@ -581,13 +581,16 @@ def _persist_score(data: dict):
 
 # ===== 公共接口 =====
 
-def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
+def get_health_score(runtime_id: int, force_refresh: bool = False,
+                     allow_compute: bool = True) -> dict | None:
     """获取单个引擎的健康度数据。
 
     Issue-P2: 读路径改为读 runtime_health_scores 表（表即缓存）——
     双主天然一致，写路径（任务终态触发 / 5min 定时扫描）负责现算落表。
     force_refresh=True 仍强制现算（管理端详情查询用）。
     表中无记录（全新引擎 / 服务刚迁移）→ 现算一条落表。
+    allow_compute=False：只读查询路径（如 GET engine-status）——无档时返回 None，
+    不触发 _compute_and_persist 的现算落表副作用（Issue #3508 复审）。
     返回 dict：{runtime_id, health_score, total_tasks, failed_tasks,
                completed_tasks, consecutive_failures, failure_rate,
                last_status, heartbeat_alive, window_days, updated_at}
@@ -628,6 +631,9 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
         except Exception as e:
             log.warning(f"health_scorer: read_score failed for runtime={runtime_id}: {e}")
         # 无记录/旧档列缺失 → 落到现算路径
+    if not allow_compute:
+        # Issue #3508 复审：GET 查询路径禁止现算落表（避免健康查询写入脏行）
+        return None
     return _compute_and_persist(runtime_id)
 
 

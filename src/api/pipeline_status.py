@@ -38,6 +38,10 @@ EVENT_STATUS_MAP = {
     "completed": STATUS_COMPLETED,
     "failed": STATUS_FAILED,
     "cancelled": STATUS_CANCELLED,
+    # Issue #3444：评论内容去重留痕事件（不派发任务）显式标为 skipped，
+    # 避免未知状态按 pending 渲染成「待执行」。
+    "skipped": STATUS_SKIPPED,
+    "deduped": STATUS_SKIPPED,
     # 接管中：原 worker 已被 cancel，Issue 由本地交互式会话来推进。
     # 展示上等同「进行中」，但服务端不写 running —— runner 已退出，
     # 声称 running 会误导 claim / 串行槽 / 超时判断。
@@ -46,6 +50,31 @@ EVENT_STATUS_MAP = {
 
 # 流水线终态阶段
 DONE_STAGES = ("done", "pending_review")
+
+# Issue #3444：评论内容去重留痕事件的状态集（与 event_store 的
+# find_recent_duplicate_comment「真实处理事件」口径一致）。events 表中
+# status='skipped'/'deduped' 的行均为去重/跳过留痕（不派发任务），
+# 携带真实 agent_type 仅供审计定位。
+DEDUP_LEFTOVER_STATUSES = ("skipped", "deduped")
+
+
+def is_dedup_leftover_event(e) -> bool:
+    """Issue #3444：判断事件是否为去重/跳过留痕（不参与节点状态聚合）。
+
+    events 表中 status='skipped'/'deduped' 的行均为去重留痕
+    （append_comment_dedup_event 写入，payload 带 `_dedup.deduped=True`），
+    不派发任务、不代表节点执行进度；聚合「最新事件」时必须排除，否则重复评论
+    到达后会把仍在 running / 已 completed 的真实节点状态覆盖成 skipped/pending。
+    口径与 event_store.find_recent_duplicate_comment 的
+    `status NOT IN ('skipped','deduped')`（真实处理事件）一致。
+
+    按 status 单条件判定即可：append_comment_dedup_event 是 events.status='skipped'
+    的唯一写入者（event_pipeline 提前 return 的 skipped 走 event_skipped 审计表，
+    不落 events 行）；`deduped` 为预留别名（当前无写入者），保留在状态集内与判重
+    查询口径对齐。SQL 侧（_issue_latest_event_status_by_agent）也按状态列过滤，
+    不解析 payload，保证两处判定一致。
+    """
+    return isinstance(e, dict) and str(e.get("status") or "") in DEDUP_LEFTOVER_STATUSES
 
 
 def extract_failed_node(nodes, statuses=None):
@@ -100,10 +129,14 @@ def compute_node_statuses(nodes, issue_events, current_stage,
 
     # 按 agent_type 分组，保留最新一条事件（后覆盖前；先按 seq 升序排序，不依赖调用方传入顺序）
     # Issue #3201：skipped_takeover 是「被守门忽略」的事件，不参与最后一条事件映射。
+    # Issue #3444：评论内容去重留痕（is_dedup_leftover_event）不参与——它是审计
+    # 留痕而非节点执行记录，若成为「最新事件」会把仍在 running / 已 completed 的
+    # 真实事件覆盖成 skipped/pending。
     events_by_agent = {}
     for e in sorted(issue_events, key=lambda x: x.get("seq") or 0):
         at = e.get("agent_type", "")
-        if at and str(e.get("status") or "") != "skipped_takeover":
+        if (at and str(e.get("status") or "") != "skipped_takeover"
+                and not is_dedup_leftover_event(e)):
             events_by_agent[at] = e
 
     statuses = []

@@ -61,7 +61,8 @@ _MGMT_TABLES = (
 _RUNTIME_TABLES = (
     # 4.2 1-25（devops_agent_session runtime 视图复用 mgmt 物理表，不重复注册；
     # v2.2：chat 三表归属运行域——Runtime 写、Mgmt 经 RuntimeService 读）
-    "events", "event_skipped", "event_active_guard", "event_thread",
+    "events", "event_skipped", "event_active_guard", "grape_t_comment_dispatch_guard",
+    "event_thread",
     "event_action_filter", "event_route_config", "agent_tasks", "task_messages", "issue",
     "issue_state", "issue_agent_session", "pipeline_instances", "agent_runtimes",
     "engine_capabilities", "agent_type_runtime_pool", "agent_shared_knowledge",
