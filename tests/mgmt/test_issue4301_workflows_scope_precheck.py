@@ -91,7 +91,7 @@ def _save_legacy(resp, user_id=f"{NS}u2", monkeypatch=None):
         return _FakeResp(payload=[{"id": 1}])  # FR-4 /user/repos 探活：非空列表
 
     monkeypatch.setattr("requests.get", _fake_get)
-    body = UpdateCredentials(github_token="ghp_legacy_tok")
+    body = UpdateCredentials(github_token="legacy-token-placeholder")
     return update_credentials(body, user={"id": user_id, "username": user_id})
 
 
@@ -190,9 +190,17 @@ def test_spec_prompt_no_blocker_when_task_unrelated(monkeypatch):
 
 
 def test_spec_prompt_no_blocker_for_unknown_or_unbound(monkeypatch):
-    """Unknown state (fine-grained PAT persists nothing) or unbound repo -> no blocking."""
+    """Unknown state (fine-grained PAT persists nothing) or unbound repo -> no blocking.
+
+    The channel scope is pinned to the pre-#4301 value on purpose: without that pin the
+    case only passes because today's channel card happens to request workflow, so it would
+    stay green even if the verdict fell back to the login channel (review round 2, Required).
+    """
+    import src.domains.mgmt.user.repo_manager as rm
+
     from src.kernel import prompt_builder as pb
     uid = _bind_repo_user(monkeypatch)
+    monkeypatch.setattr(rm, "_login_channel_scope", lambda p: "read:user user:email repo")
     set_credential(uid, "github_pat", {"token": "t", "login": "l"})
     assert not pb._build_workflows_blocker_section(
         "github:owner/repo", "issue", ".github/workflows/x.yml")
