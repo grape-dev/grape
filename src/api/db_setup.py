@@ -12008,6 +12008,29 @@ register_migration(
 )
 
 
+# ===== 技能分类字典补种 content-generation（Issue #3798）=====
+# 背景：官方技能同步按 sub_scene 解析 skill.category_id，映射源是 mgmt 域
+# skill_category（is_active=1）；15 条种子里没有 content-generation，内容生成类
+# 技能每轮判未命中、category_id 恒 0（原实现还逐技能刷一条 WARNING）。
+# SQL 住属主域 migrations 下（跨域守卫 P0-2），这里只做注册引导。号段核对（提交前）：
+# 源码 register_migration 与各目标库 grape_t_schema_migrations 均未占用 202611240012
+# （当前最大 202611240011）。字面量登记 version/name/kind，供
+# tests/api/test_migration_track_guard.py 解析。
+
+from src.domains.mgmt.migrations.skill_category_content_generation_seed import (
+    seed_content_generation_category as _fn_seed_content_generation_category,
+    verify_content_generation_category as _post_content_generation_category,
+)
+register_migration(
+    version="202611240012",
+    name="skill-category-seed-content-generation",
+    kind="backfill",
+    fn=_fn_seed_content_generation_category,
+    domains=("mgmt",),
+    post_check=_post_content_generation_category,
+)
+
+
 # ===== 存量 custom_fields 保留前缀清理（Issue #4066）=====
 # 写侧此前不校验 autopilot custom_fields，非法/保留条目长期留库、每次执行刷
 # `custom env ... rejected` WARNING。SQL 住属主域 migrations 下（跨域守卫 P0-2）：

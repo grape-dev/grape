@@ -20,9 +20,13 @@ import shutil
 import zipfile
 
 from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skill_path
+from src.kernel.startup_metrics import record_startup_degraded
 
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
+
+#: Issue #3798：轮级未命中聚合告警的样例技能上限（与 #3796 scene_sync 同口径）。
+_UNRESOLVED_SAMPLE_LIMIT = 3
 
 # Issue #3742：外层 `skill_sync` 锁 TTL 单点来源——worker 的 CM、续期默认值与
 # 周期超时阈值（ttl/2）全部由此派生，避免 1800/900 硬编码各自漂移。
@@ -126,6 +130,71 @@ def _resolve_skill_category(info: dict, dict_map: dict) -> tuple[int, int]:
     return resolve_category_slugs(info, dict_map, logger=logger, label="skill_sync")
 
 
+def _record_unresolved(sink: dict, slug: str, skill_name: str) -> None:
+    """按同步轮聚合未命中的 `sub_scene` slug（Issue #3798）。
+
+    循环内的未命中只降 debug 进 sink，轮末由 `_log_unresolved_misses` 发 **≤1 条**
+    聚合 WARNING，替代原来「每技能每轮一条」的刷屏（线上 576 条/小时）。
+    结构：`slug → {"count": 次数, "skills": 样例技能名（≤3，去重）}`，
+    与 #3796 在 `scene_sync` 落地的口径一致。
+    """
+    entry = sink.setdefault(slug, {"count": 0, "skills": []})
+    entry["count"] += 1
+    if skill_name and skill_name not in entry["skills"] \
+            and len(entry["skills"]) < _UNRESOLVED_SAMPLE_LIMIT:
+        entry["skills"].append(skill_name)
+
+
+def _log_unresolved_misses(miss_sink: dict) -> None:
+    """轮末输出 ≤1 条未命中聚合 WARNING（Issue #3798）；全部命中则一条都不发。
+
+    文案刻意**不含**旧字面量 `has no matching skill_category slug`：Loki 侧按该串
+    计数的告警规则必须归零（验收项），信号改由这条聚合行承载（slug + 命中次数 +
+    ≤3 个样例技能），逐技能的明细降为 DEBUG。
+    """
+    if not miss_sink:
+        return
+    parts = []
+    for slug in sorted(miss_sink):
+        entry = miss_sink[slug]
+        samples = ", ".join(entry["skills"])
+        parts.append(f"'{slug}'×{entry['count']} skills"
+                     + (f" (e.g. {samples})" if samples else ""))
+    logger.warning(
+        f"skill sync: {len(miss_sink)} sub_scene slug(s) unresolved in skill_category "
+        f"this round, category_id stays 0 (aggregated per round): " + "; ".join(parts))
+
+
+def _load_skill_category_map() -> dict[str, int]:
+    """读取「启用中」的技能分类字典（`skill_category` 归 mgmt，走 owner 域 public）。
+
+    Issue #3798：原实现把整段读取吞成 DEBUG——分库拓扑下字典不可用、或本表全部
+    停用时 `cat_map` 为空、`category_id` 恒 0，日志里没有任何可判定信号（线上表现
+    为 100% 未分类 + 无告警）。现在改为**每轮各 1 条** ERROR + 启动降级打点：
+
+    - 读失败（异常：缺表 / DSN 不对 / 跨域通道坏）→ `reason=read_failed`；
+    - 读到空字典（表在但无启用行，例如种子缺失或整表停用）→ `reason=empty`。
+
+    两类都只降级、不中断同步（`category_id=0` 语义保持不变），因此每轮最多 1 条
+    ERROR，不会回到「逐技能刷屏」。
+    """
+    try:
+        from src.domains.mgmt import public as _mgmt_public_cat  # noqa: PLC0415
+        cat_map = _mgmt_public_cat.skill_category_active_map() or {}
+    except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
+        logger.error("skill sync: skill_category dictionary read failed, category_id "
+                     f"falls back to 0 this round (reason: {exc})")
+        record_startup_degraded("skill_category", "read_failed")
+        return {}
+    if not cat_map:
+        logger.error("skill sync: skill_category dictionary is empty (no active row), "
+                     "category_id falls back to 0 this round — check the mgmt-domain "
+                     "skill_category seed / is_active state")
+        record_startup_degraded("skill_category", "empty")
+        return {}
+    return cat_map
+
+
 def _sync_skills_to_db(data: dict) -> int:
     """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
 
@@ -142,16 +211,14 @@ def _sync_skills_to_db(data: dict) -> int:
     _db, _db_lock = _db_pair("runtime")
 
     count = 0
+    # Issue #3798：未命中 slug 的轮级聚合 sink（循环内只进 sink + DEBUG，轮末 ≤1 条 WARNING）
+    miss_sink: dict = {}
     with _db_lock:
         c = _db.cursor()
         # 构建 slug → category_id 缓存（skill_category 归 mgmt：取映射走 owner 域 public，
-        # 本域只留 skill 表的 SQL。原语句 `WHERE is_active=1` 的口径由原语保留）
-        cat_map = {}
-        try:
-            from src.domains.mgmt import public as _mgmt_public_cat  # noqa: PLC0415
-            cat_map = _mgmt_public_cat.skill_category_active_map()
-        except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
-            logger.debug(f"skill_category map unavailable, category_id falls back to 0: {exc}")
+        # 本域只留 skill 表的 SQL。原语句 `WHERE is_active=1` 的口径由原语保留）。
+        # 字典不可用/为空 → 每轮 1 条 ERROR + 启动降级打点（Issue #3798，不再静默）
+        cat_map = _load_skill_category_map()
         dict_map = {}
         try:
             from src.domains.mgmt import public as _mgmt_public_dict  # noqa: PLC0415
@@ -169,7 +236,10 @@ def _sync_skills_to_db(data: dict) -> int:
                 sub_scene = info.get("sub_scene", "")
                 category_id = cat_map.get(sub_scene, 0)
                 if sub_scene and category_id == 0:
-                    logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                    # Issue #3798：逐技能明细降 DEBUG 并进轮级 sink（轮末 1 条聚合 WARNING）
+                    _record_unresolved(miss_sink, sub_scene, skill_name)
+                    logger.debug(f"skill sync: skill '{skill_name}' sub_scene='{sub_scene}' "
+                                 "unresolved in skill_category (aggregated per round)")
                 new_l1, new_l2 = _resolve_skill_category(info, dict_map)
                 raw_tags = info.get("tags")
                 if isinstance(raw_tags, str):
@@ -232,6 +302,8 @@ def _sync_skills_to_db(data: dict) -> int:
             except Exception:
                 logger.exception(f"sync skill '{skill_name}' to DB failed, skipping")
         _db.commit()
+    # Issue #3798：轮末一次性输出未命中聚合告警（≤1 条；全部命中则不输出）
+    _log_unresolved_misses(miss_sink)
     return count
 
 
