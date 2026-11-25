@@ -22,14 +22,14 @@ import pytest
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-LOCALE_FINGERPRINT = '79e5a09a09076e4f'
+LOCALE_FINGERPRINT = '2c48ba797ee0838d'
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    'index.html': ('95', '53'),
-    'admin.html': ('20261125-2', '20261114-23'),
-    'register.html': ('73', '45'),
-    'forgot.html': ('73', '45'),
+    'index.html': ('96', '53'),
+    'admin.html': ('20261125-3', '20261114-23'),
+    'register.html': ('74', '45'),
+    'forgot.html': ('74', '45'),
 }
 
 # 各页面 cacheVer 的取法（三份 auth 页是内联 IIFE，admin 走 I18N.init）

@@ -101,9 +101,14 @@ tools:
    grape org repo analysis docs --org_id "$ORG_ID" --json-out
    ```
 
-   返回 `repos[]`：`repo_key / full_name / purpose / domains / keywords /
+   返回 `repos[]`：`repo_key / full_name / purpose / core_functions /
+   core_responsibilities / other_capabilities / routing / domains / keywords /
    interfaces / depends_on / confidence / summary_md`，文档分支为
    `grape-org`。
+   - 选仓优先看 `purpose`、`core_functions[].task_examples / not_for /
+     owned_entities` 与 `core_responsibilities`；`routing` 是仓库级判别器；
+   - 每个选中目标必须写清「命中了哪个核心能力」以及「为什么不是其他仓」；
+   - `interfaces` / `keywords` 只作为命中和解释依据；
    - 用「组织需求 + 上述文档」做 AI 选仓，生成 `targets` 与每个目标的匹配理由；
    - `targets` 必须是组织关联仓库（组织自动仓库不参与下派）；
    - 低置信度（无明确匹配 / confidence 低）时回落到

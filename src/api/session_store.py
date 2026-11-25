@@ -223,6 +223,16 @@ def sync_issue_assignee(repo_key: str, issue_id: str, assignee: str) -> bool:
         return False
 
 
+def _scene_uid_or_zero(value):
+    """scene_user_id 归一：D105 哨兵 ''/'0'/'none'/'null' 一律视为 0。
+
+    MySQL 列是 varchar，历史行默认值是字符串 '0'——直接 `or 0` 会保留 truthy 的
+    '0'，让调用方误以为已有归属用户，跳过 Issue 创建人回退。
+    """
+    raw = str(value or "").strip()
+    return 0 if raw.lower() in ("", "0", "none", "null") else value
+
+
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     """读取 Issue 级开发场景。issue_state.scene_id 为空时回退到 issue 表。
 
@@ -242,14 +252,14 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
         return _m.group(1), 0
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
-        return st["scene_id"], st.get("scene_user_id", 0) or 0
+        return st["scene_id"], _scene_uid_or_zero(st.get("scene_user_id", 0))
     # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
     _num = _issue_num_or_ident(issue_id)
     if _num:
         try:
             r = rt.read_one_any("issue_card_row", (repo_key, _num))
             if r and r[5]:
-                return r[5], r[6] or 0
+                return r[5], _scene_uid_or_zero(r[6])
         except Exception:
             pass
     # Issue #415: Issue 级场景为空 → 回退仓库默认场景（managed_repos.dev_scene），
@@ -286,13 +296,13 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
         return _m.group(1), 0
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
-        return st["scene_id"], st.get("scene_user_id", 0) or 0
+        return st["scene_id"], _scene_uid_or_zero(st.get("scene_user_id", 0))
     _num = _issue_num_or_ident(issue_id)
     if _num:
         try:
             r = rt.read_one_any("issue_card_row", (repo_key, _num))
             if r and r[5]:
-                return r[5], r[6] or 0
+                return r[5], _scene_uid_or_zero(r[6])
         except Exception:
             pass
     return "", 0
