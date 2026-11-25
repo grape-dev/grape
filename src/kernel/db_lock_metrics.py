@@ -24,6 +24,8 @@
    某 owner 持有超过 ``DB_LOCK_WATCHDOG_HOLD_S``（默认 5s）时**当场**打 ERROR 并
    dump 持锁线程栈（同 owner 60s 内只打一次）。慢持有日志只在 release 后才出现，
    100s 级的持有过去只能事后回看；看门狗让最长持有者当场可定位。
+   看门狗随 ``session_manager`` 导入就位，并通过 ``os.register_at_fork`` 在每个
+   fork 子进程里复位状态并重启（gunicorn ``--preload`` 形态下 worker 也有看门狗）。
 5. **有界等锁**（Issue #4295）：``TrackedRLock.acquire()`` 在``前台请求``上下文
    （``path_var`` 非空，即正在服务一个 HTTP 请求）里改用 ``DB_LOCK_ACQUIRE_TIMEOUT_S``
    （默认 5s，0=关闭→回退无界等锁）作为等待预算；预算耗尽抛
@@ -65,6 +67,11 @@ _SLOW_HOLD_S = float(os.environ.get("DB_LOCK_SLOW_HOLD_S", "2.0") or 2.0)
 
 ACQUIRE_TIMEOUT_ENV = "DB_LOCK_ACQUIRE_TIMEOUT_S"
 _ACQUIRE_TIMEOUT_DEFAULT_S = 5.0
+# 超时 ERROR 日志按 owner 去重（默认 60s）：拥塞窗口里同一 owner 反复超时不再刷屏，
+# 指标（grape_db_lock_acquire_timeouts_total）仍逐次累加。
+TIMEOUT_LOG_DEDUP_ENV = "DB_LOCK_TIMEOUT_LOG_DEDUP_S"
+_TIMEOUT_REPORTED: dict[str, float] = {}
+_TIMEOUT_REPORTED_LOCK = threading.Lock()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -144,6 +151,28 @@ _STATE: dict[int, dict] = {}
 _STATE_GUARD = threading.Lock()
 # owner -> (holder_child, holds_child)：避免每次 acquire 都走 prometheus 的 label 查找
 _CHILD_CACHE: dict[str, tuple] = {}
+
+
+def reset_after_fork() -> None:
+    """fork 子进程复位（线程不跨 fork，父进程的线程对象/持锁状态在子进程里全是死对象）。
+
+    不清理会有两个后果：``snapshot()`` 报出没有对应线程的幽灵持有者；看门狗周期
+    线程对象仍指向父进程那个已消失的线程，``watchdog_running()``/``start_watchdog()``
+    的幂等判断失真，子进程静默无看门狗。守护锁也一并重建——fork 时若有线程正持有
+    这把内部小锁，子进程里将永远无法再获取。
+    """
+    global _STATE_GUARD, _CHILD_CACHE, _WATCHDOG_THREAD, _WATCHDOG_START_LOCK
+    global _WATCHDOG_REPORTED_LOCK, _TIMEOUT_REPORTED_LOCK
+    _STATE.clear()
+    _CHILD_CACHE = {}
+    _STATE_GUARD = threading.Lock()
+    _TIMEOUT_REPORTED.clear()
+    _TIMEOUT_REPORTED_LOCK = threading.Lock()
+    _WATCHDOG_REPORTED.clear()
+    _WATCHDOG_REPORTED_LOCK = threading.Lock()
+    _WATCHDOG_STOP.clear()
+    _WATCHDOG_THREAD = None
+    _WATCHDOG_START_LOCK = threading.Lock()
 
 
 def _children(owner: str):
@@ -455,6 +484,8 @@ _WATCHDOG_STOP = threading.Event()
 _WATCHDOG_START_LOCK = threading.Lock()
 # owner -> 上次上报的 perf_counter；同 owner 在去重窗口内不重复上报
 _WATCHDOG_REPORTED: dict[str, float] = {}
+# 去重映射的读写锁：看门狗线程与显式调用 watchdog_scan() 的线程可能并发
+_WATCHDOG_REPORTED_LOCK = threading.Lock()
 
 
 def watchdog_hold_s() -> float:
@@ -496,10 +527,11 @@ def watchdog_scan(now: float | None = None) -> list[dict]:
         if held < hold_s:
             continue
         owner = str(st.get("owner") or "-")
-        last = _WATCHDOG_REPORTED.get(owner)
-        if last is not None and (now - last) < dedup_s:
-            continue
-        _WATCHDOG_REPORTED[owner] = now
+        with _WATCHDOG_REPORTED_LOCK:
+            last = _WATCHDOG_REPORTED.get(owner)
+            if last is not None and (now - last) < dedup_s:
+                continue
+            _WATCHDOG_REPORTED[owner] = now
         stack = _holder_stack(st.get("tid"))
         hit = {"owner": owner, "rid": st.get("rid") or "-", "held_s": round(held, 3),
                "depth": st.get("depth", 1), "tid": st.get("tid"), "stack": stack}
@@ -518,9 +550,11 @@ def watchdog_scan(now: float | None = None) -> list[dict]:
             )
         except Exception as _le:  # pragma: no cover
             _dbg.debug("db_lock watchdog log failed: %s", _le)
-    if _WATCHDOG_REPORTED and dedup_s > 0:
-        for key in [k for k, ts in _WATCHDOG_REPORTED.items() if (now - ts) >= dedup_s]:
-            _WATCHDOG_REPORTED.pop(key, None)
+    if dedup_s > 0:
+        with _WATCHDOG_REPORTED_LOCK:
+            stale = [k for k, ts in _WATCHDOG_REPORTED.items() if (now - ts) >= dedup_s]
+            for key in stale:
+                _WATCHDOG_REPORTED.pop(key, None)
     return hits
 
 
@@ -566,3 +600,22 @@ def stop_watchdog(timeout: float = 2.0) -> None:
     with _WATCHDOG_START_LOCK:
         if _WATCHDOG_THREAD is t:
             _WATCHDOG_THREAD = None
+
+
+def _after_fork_in_child() -> None:
+    """fork 子进程：复位继承来的死状态并重新拉起看门狗（``--preload`` 形态）。
+
+    看门狗是线程、线程不跨 fork：只在 import 期启动时，gunicorn ``--preload`` 等
+    「先 import 后 fork」部署下 worker 既没有看门狗线程、``_STATE`` 也是空的，
+    看门狗会静默失效。``os.register_at_fork(after_in_child=...)`` 让每个 fork 出来的
+    子进程按幂等路径自己拉起一只。
+    """
+    try:
+        reset_after_fork()
+        start_watchdog()
+    except Exception:  # pragma: no cover - fork 钩子绝不阻断子进程启动
+        _dbg.debug("db_lock watchdog restart after fork failed", exc_info=True)
+
+
+if hasattr(os, "register_at_fork"):  # POSIX（Linux/macOS）
+    os.register_at_fork(after_in_child=_after_fork_in_child)

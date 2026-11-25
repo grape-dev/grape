@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import contextvars
+import os
+import select
 import threading
 import time
 
@@ -36,7 +38,8 @@ class _FakeLog:
 def _clean_state(monkeypatch):
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
-    dlm._WATCHDOG_REPORTED.clear()
+    with dlm._WATCHDOG_REPORTED_LOCK:
+        dlm._WATCHDOG_REPORTED.clear()
     path_var.set("")
     request_id_var.set("-")
     # 每个用例重置阈值/周期，避免互相污染
@@ -45,7 +48,8 @@ def _clean_state(monkeypatch):
     yield
     dlm._STATE.clear()
     dlm._CHILD_CACHE.clear()
-    dlm._WATCHDOG_REPORTED.clear()
+    with dlm._WATCHDOG_REPORTED_LOCK:
+        dlm._WATCHDOG_REPORTED.clear()
     path_var.set("")
     request_id_var.set("-")
 
@@ -199,3 +203,42 @@ def test_watchdog_thread_is_daemon(monkeypatch):
         dlm.stop_watchdog()
         monkeypatch.delenv(dlm.WATCHDOG_PERIOD_ENV, raising=False)
         dlm.start_watchdog()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="需要 POSIX fork")
+def test_watchdog_restarts_in_fork_child_after_preload():
+    """preload 形态（先 import 后 fork）：fork 子进程必须自己拉起看门狗并清空死状态。
+
+    gunicorn ``--preload`` / multiprocessing fork 下，父进程 import 时启动的看门狗线程
+    不跨 fork；若不在 ``os.register_at_fork(after_in_child=...)`` 里重启，worker 内
+    ``watchdog_running()`` 恒为 False、``snapshot()`` 为空 → 看门狗静默失效。
+    """
+    import src.kernel.session_manager  # noqa: F401 - 父进程先按生产路径就位
+
+    assert dlm.watchdog_running(), "父进程看门狗应在位（模拟 preload 主进程）"
+    ghost_tid = 987654321  # 父进程/任意线程的持锁残留，子进程必须丢弃
+    dlm._STATE[ghost_tid] = {"owner": "bg:ghost", "rid": "-", "tid": ghost_tid,
+                            "since": time.perf_counter(), "depth": 1}
+
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # 子进程：只看两个事实，然后立即 _exit（不回流 pytest）
+        try:
+            running = dlm.watchdog_running()
+            clean = dlm.snapshot() == []
+            os.write(w, (b"1" if running else b"0") + (b"1" if clean else b"0"))
+        finally:
+            os._exit(0)
+
+    os.close(w)
+    payload = b""
+    try:
+        readable, _, _ = select.select([r], [], [], 10)
+        payload = os.read(r, 2) if readable else b""
+    finally:
+        os.close(r)
+        os.waitpid(pid, 0)
+
+    assert payload == b"11", (
+        f"子进程应重启看门狗并清空父进程持锁状态（第1位=watchdog_running，第2位=snapshot 为空），"
+        f"实际 {payload!r}")
