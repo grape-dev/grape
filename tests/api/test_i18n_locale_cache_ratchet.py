@@ -102,8 +102,12 @@ def test_locale_change_bumps_index_cachever():
     浏览器会继续吃旧语言包缓存，新增 key 取不到。本断言对比 HEAD~1：语言包指纹
     变了而 index.html 的 cacheVer 没变 → 红。浅克隆/单提交环境跳过。
     """
+    # 仓库根：SHELL=repo/src/api/frontend/shell → 上溯 4 级；QA round-6 整改条件①
+    # （此前 -C src/api 使 ls-tree 的 pathspec 空转，_fp_at 恒为空串哈希，守卫形同虚设）
+    REPO_ROOT = SHELL.parent.parent.parent.parent
+
     def _git(*args) -> bytes:
-        r = subprocess.run(["git", "-C", str(SHELL.parent.parent.parent), *args],
+        r = subprocess.run(["git", "-C", str(REPO_ROOT), *args],
                            capture_output=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.decode("utf-8", "ignore")[:200])
@@ -135,8 +139,19 @@ def test_locale_change_bumps_index_cachever():
         return m.group(1) if m else ""
 
     v_head = _ver_at(head)
+    # QA round-6 整改条件②：自证断言——_fp_at(head) 必须非空（zh/en 至少各 1 个 json），
+    # 否则 fail 而非静默 continue，杜绝「空树哈希恒等」让守卫变成空转
+    head_files = []
+    for lang in ("zh", "en"):
+        listed = _git("ls-tree", "-r", "--name-only", head,
+                      f"src/api/frontend/shell/locales/{lang}").decode().splitlines()
+        head_files += [n for n in listed if n.endswith(".json")]
+    assert head_files, (
+        "守卫自证失败：_fp_at 的 ls-tree 未列出任何语言包 json（cwd 或 pathspec 错误）"
+        "——指纹恒等空转，本守卫不具备检出能力（QA round-6 条件②）")
+    fp_head = _fp_at(head)
     for parent in parents:
-        if _fp_at(parent) == _fp_at(head):
+        if _fp_at(parent) == fp_head:
             continue  # 该 parent 侧语言包没变，无需抬档
         v_parent = _ver_at(parent)
         assert version_rank(v_head) > version_rank(v_parent), (
