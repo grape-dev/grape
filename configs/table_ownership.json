@@ -99,6 +99,7 @@
     "obs_runtime_samples": "insight",
     "obs_slo": "insight",
     "obs_slo_snapshots": "insight",
+    "obs_webhook_rejects": "insight",
     "org_invitation": "mgmt",
     "org_member": "mgmt",
     "grape_t_org_context": "mgmt",

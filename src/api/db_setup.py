@@ -20,6 +20,7 @@ from src.domains.insight.schema_ddl import (
     _OBS_SLO_DDL,
     _OBS_SLO_SNAPSHOTS_DDL,
     _OBS_LOG_DDL,
+    _OBS_WEBHOOK_REJECTS_DDL,
 )
 from src.domains.mgmt.schema_ddl import (
     _EVENT_ROUTE_CONFIG_DDL,
@@ -633,6 +634,13 @@ _NEW_TABLES.extend([
     ("obs_log", _OBS_LOG_DDL),
 ])
 
+# ===== webhook 验签拒绝事实（Issue #3750）=====
+# 403 token mismatch 的每次拒绝落一行，供「同仓库 mismatch 速率」告警与
+# (ip, token_fp) 反查残留旧 secret；只存 sha256 短指纹，不存明文/前缀。
+_NEW_TABLES.extend([
+    ("obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_DDL),
+])
+
 # 需要 org_id 列的核心表
 _ORG_ID_TABLES = [
     "managed_repos",
@@ -1117,6 +1125,9 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
+        # Issue #3750: webhook 验签拒绝按仓库 + 时间窗口计数（告警求值/反查残留旧 secret）
+        "CREATE INDEX IF NOT EXISTS idx_obs_webhook_rejects_repo_time "
+        "ON obs_webhook_rejects(repo_key, created_at)",
         # ===== Issue #103: 知识写入队列索引 =====
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
