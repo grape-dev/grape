@@ -1,5 +1,5 @@
 """agent_runtimes session 通道熔断列 + LLM provider 状态列 + agent_tasks 重试计数列
-（迁移 202611250007）。
+（迁移 202611250009）。
 
 Issue #4346：`session/new` 100s 超时无分类、无换引擎重试、无 session 层熔断；
 引擎缺 LLM provider 时派发期才 500。本迁移给存量库补列：
@@ -19,7 +19,8 @@ SQL 住本域 migrations 下（跨域守卫 P0-2）；注册由 src/api/db_setup
 新装库由 schema_ddl._AGENT_RUNTIMES_DDL / _AGENT_TASKS_DDL 直接带列，本迁移只服务存量库。
 
 版本号说明：基线 202611250001/.../202611250006 已被并行线占用（#4262 renumber 后），
-本迁移取下一个空闲号 202611250007（同号会被判「已执行」而永久跳过）。
+本迁移取下一个空闲号 202611250009（202611250007/008 已被 #4262 的 autopilot 状态列默认值
+占用并盖章；同号会被判「已执行」而永久跳过）。
 """
 from __future__ import annotations
 
@@ -74,13 +75,13 @@ def verify_session_circuit_columns(conn=None) -> None:
         missing.extend(f"{table}.{col}" for col, _ddl in cols if col not in present)
     if missing:
         raise RuntimeError(
-            f"202611250007 post_check 未收敛：缺列 {missing}（不盖章，下次启动重试）")
-    log.info(f"202611250007 post_check 通过：{TABLE} session 熔断/provider 列 + "
+            f"202611250009 post_check 未收敛：缺列 {missing}（不盖章，下次启动重试）")
+    log.info(f"202611250009 post_check 通过：{TABLE} session 熔断/provider 列 + "
              f"{TASKS_TABLE} session_retry_count 在位")
 
 
 MIGRATION = {
-    "version": "202611250007",
+    "version": "202611250009",
     "name": "session-circuit-breaker-provider-columns",
     "kind": "safe",
     "fn": add_session_circuit_columns,

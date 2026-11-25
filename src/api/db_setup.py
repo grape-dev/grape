@@ -12680,13 +12680,14 @@ register_migration(
 # session_last_failure_at/session_last_success_at + llm_provider_ok/llm_provider_reason。
 # 新装库由 runtime schema_ddl 直接带列，本迁移只服务存量库；列在位才盖章。
 # 版本号：基线 202611250001..202611250006 已被并行线占用（#4262 renumber 后含同一号码
-# 重复注册的存量撞号），本迁移取下一个空闲号 202611250007（同号会被判「已执行」永久跳过）。
+# 重复注册的存量撞号）；202611250007/008 随后被 #4262 的 autopilot 状态列默认值与技能
+# 分类补种占用并盖章，本迁移顺延取 202611250009（同号会被判「已执行」永久跳过）。
 from src.domains.runtime.migrations.session_circuit_columns import (
     add_session_circuit_columns as _fn_session_circuit_columns,
     verify_session_circuit_columns as _post_session_circuit_columns,
 )
 register_migration(
-    version="202611250007",
+    version="202611250009",
     name="session-circuit-breaker-provider-columns",
     kind="safe",
     fn=_fn_session_circuit_columns,
