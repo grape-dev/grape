@@ -1483,7 +1483,9 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
 def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
 
-    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在（不远程比对 URL，杜绝 URL 漂移误报）。
+    - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在；Issue #4241 起
+      再按「落盘注册地址 vs 当前权威 webhook_url 前缀」判三态，地址漂移输出
+      webhook_stale（同样零远程比对 URL，只比本地落盘事实，杜绝 429）。
     - bot 检测：读本地已落库的 host_status；仅当原值为 bot_missing/partial 且 bot 实际应存在时
       维持原值（不额外远程查权限，避免限流）。
     - Issue #2126: partial 超过 30 分钟仍在复查时按诊断步骤重新判定——bot 相关步骤收敛为 bot_missing，
@@ -1503,6 +1505,17 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
                                 detail.get("error") or "webhook 未创建")
             return "webhook_missing"
         # webhook 存在：
+        # Issue #4241：地址漂移三态——落盘注册地址与当前权威 webhook_url 前缀不一致
+        # → webhook_stale（前端显示「需修复托管」，复用 repair-host 回写后自愈）。
+        # 仅在本状态无更具体的失败诊断（partial/bot_missing）时接管，避免覆盖 #2126 诊断。
+        if cur not in ("partial", "bot_missing"):
+            from src.domains.mgmt.public import webhook_state as _webhook_state
+            if _webhook_state(repo_key) == "stale":
+                if cur != "webhook_stale":
+                    _log.info(f"Dashboard: webhook address drifted for {repo_key}")
+                    set_host_status(repo_key, "webhook_stale", "configure_webhook_url",
+                                    "webhook 地址已漂移（与实际注册地址不一致），需修复托管")
+                return "webhook_stale"
         if cur == "partial":
             if _host_partial_stale(detail.get("updated_at", "")):
                 step = detail.get("step", "") or ""
@@ -1835,6 +1848,12 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
     host_status = _check_host_status(owner, repo, _actual_repo_key)
+    # Issue #4241：webhook 三态透出，供前端替换「Webhook 正常」静态标签（stale 时不能再显示正常）
+    try:
+        from src.domains.mgmt.public import webhook_state as _webhook_state_read
+        _webhook_state_value = _webhook_state_read(_actual_repo_key)
+    except Exception:
+        _webhook_state_value = ""
     # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
     try:
         from src.domains.mgmt.public import get_host_detail
@@ -1867,6 +1886,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
         "host_status": host_status,
+        # Issue #4241：ok / stale / absent / unknown（前端据此渲染「Webhook 正常/需修复」标签）
+        "webhook_state": _webhook_state_value,
         # Issue #3354: 透出失败步骤与可读原因，供前端「托管失败，点击重试」展示
         "host_step": _host_detail.get("step", ""),
         "host_error": _host_detail.get("error", ""),

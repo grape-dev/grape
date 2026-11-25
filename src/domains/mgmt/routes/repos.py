@@ -492,17 +492,21 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: str = "") -> list[dic
     managed_org = {}
     managed_org_name = {}
     managed_status = {}
+    managed_webhook_url = {}
     with _dbl:
         _c = _db.cursor()
         try:
             _c.execute(
-                "SELECT m.repo_key, m.webhook_id, m.org_id, m.host_status, COALESCE(o.name,'') "
+                "SELECT m.repo_key, m.webhook_id, m.org_id, m.host_status, COALESCE(o.name,''), "
+                # Issue #4241：实际注册 hook 地址（三态判定基线）
+                "COALESCE(m.webhook_url,'') "
                 "FROM managed_repos m LEFT JOIN organization o ON o.id=m.org_id")
             for _r in _c.fetchall():
                 managed[_r[0]] = _r[1]
                 managed_org[_r[0]] = _r[2] or ""
                 managed_status[_r[0]] = _r[3] or ""
                 managed_org_name[_r[0]] = _r[4] or ""
+                managed_webhook_url[_r[0]] = _r[5] or ""
         except Exception:
             # 降级：不带 org_id
             for r in user_db.get_all_managed_repos():
@@ -510,6 +514,9 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: str = "") -> list[dic
                 managed_org[r["repo_key"]] = ""
                 managed_org_name[r["repo_key"]] = ""
                 managed_status[r["repo_key"]] = r.get("host_status", "") or ""
+                managed_webhook_url[r["repo_key"]] = r.get("webhook_url", "") or ""
+    # Issue #4241：权威地址取一次，逐仓只做前缀比对（零远程调用）
+    _wh_authority = user_db.get_webhook_url()
     result = []
     for r in repos:
         full_name = r.get("full_name", "")
@@ -539,6 +546,11 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: str = "") -> list[dic
             "is_joined": in_managed,
             "is_hosted": hosted,
             "host_status": managed_status.get(repo_key, "") if in_managed else "",
+            # Issue #4241：托管仓库的 webhook 三态（ReposView 徽标/修复入口消费）
+            "webhook_state": (user_db.webhook_state_for_row(
+                managed.get(repo_key) or 0,
+                managed_webhook_url.get(repo_key, "") or "",
+                _wh_authority) if in_managed else ""),
             "created_at": r.get("created_at", "") or "",
             "org_id": (managed_org.get(repo_key, "") if in_managed else ""),
             "org_name": (managed_org_name.get(repo_key, "") if in_managed else ""),
@@ -1467,7 +1479,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
                     _db_wh_token = "" if _use_path_b else _wh_token
                     user_db.add_managed_repo(_repo_key, owner, repo_name, webhook_id=existing_id,
                         **{wh_col: _db_wh_token, _bot_token_col: (_create_global_bot_token if not _use_path_b else "")},
-                        host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
+                        host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret,
+                        # Issue #4241：落盘本次实际注册地址（漂移判定基线）
+                        webhook_url=webhook_url)
                     _hook_id = existing_id
                 else:
                     hook_id = _hcfg["setup_webhook"](
@@ -1477,7 +1491,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
                     _db_wh_token = "" if _use_path_b else _wh_token
                     user_db.add_managed_repo(_repo_key, owner, repo_name, webhook_id=hook_id,
                         **{wh_col: _db_wh_token, _bot_token_col: (_create_global_bot_token if not _use_path_b else "")},
-                        host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
+                        host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret,
+                        # Issue #4241：落盘本次实际注册地址（漂移判定基线）
+                        webhook_url=webhook_url)
                     _hook_id = hook_id
                 user_db.mark_user_repo_join(user["id"], _repo_key, is_join=True, is_admin=True)
                 break
@@ -2223,7 +2239,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                                              **{_hcfg["db_token_field"]: _gh_db_wh_token,
                                                 _hcfg["db_bot_token_field"]: ("" if _gh_use_path_b else _gh_bot_token)},
                                              bot_username=(_gh_bot_username if not _gh_use_path_b else ""), org_id=_org_id,
-                                             host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret)
+                                             host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret,
+                                             # Issue #4241：落盘本次实际注册地址
+                                             webhook_url=webhook_url)
                     _gh_mark("")
                     return _finalize_host_write(
                         repo_key, {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id, **_bot_result})
@@ -2251,7 +2269,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                                      **{_hcfg["db_token_field"]: _gh_db_wh_token,
                                         _hcfg["db_bot_token_field"]: ("" if _gh_use_path_b else _gh_bot_token)},
                                      bot_username=(_gh_bot_username if not _gh_use_path_b else ""), org_id=_org_id,
-                                     host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret)
+                                     host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret,
+                                     # Issue #4241：落盘本次实际注册地址
+                                     webhook_url=webhook_url)
             _gh_mark("")
             return _finalize_host_write(
                 repo_key, {"message": "仓库托管成功", "webhook_id": hook_id, **_bot_result})
@@ -2427,7 +2447,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                                         _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
                                      bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
                                      org_id=_org_id,
-                                     host_user_id=(user["id"] if (_use_path_b and _vcs_source != "rc") else 0), webhook_secret=_webhook_secret)
+                                     host_user_id=(user["id"] if (_use_path_b and _vcs_source != "rc") else 0), webhook_secret=_webhook_secret,
+                                     # Issue #4241：落盘本次实际注册地址
+                                     webhook_url=webhook_url)
             _mark("")
             return _finalize_host_write(
                 repo_key, {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id})
@@ -2458,7 +2480,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                                     _hcfg["db_bot_token_field"]: _bot_db_fields(_hcfg, usable=_bot_usable)[0]},
                                  bot_username=_bot_db_fields(_hcfg, usable=_bot_usable)[1],
                                  org_id=_org_id,
-                                 host_user_id=(user["id"] if (_use_path_b and _vcs_source != "rc") else 0), webhook_secret=_webhook_secret)
+                                 host_user_id=(user["id"] if (_use_path_b and _vcs_source != "rc") else 0), webhook_secret=_webhook_secret,
+                                 # Issue #4241：落盘本次实际注册地址
+                                 webhook_url=webhook_url)
         _mark("")
         return _finalize_host_write(
             repo_key, {"message": "仓库托管成功", "webhook_id": hook_id})
@@ -2703,6 +2727,8 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             "bot_username": (bot_username if not _use_path_b else ""),
             "host_user_id": (user["id"] if _use_path_b else 0),
             "webhook_secret": _webhook_secret,
+            # Issue #4241：落盘本次修复实际注册地址，修复后漂移状态即时恢复 ok
+            "webhook_url": webhook_url,
             _cfg["db_token_field"]: _db_wh_token,
             _cfg["db_bot_token_field"]: (bot_token if not _use_path_b else ""),
         }
@@ -2727,11 +2753,23 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
         except Exception:
             _personal_org = False
     repos = user_db.get_managed_repos(user["id"], org_id=org_id, personal_org=_personal_org)
+    # Issue #4241：webhook 三态（ok/stale/absent/unknown）。权威地址取一次，
+    # 逐行只做前缀比对（零远程调用，列表接口不做 VCS 查询）。
+    _wh_authority = user_db.get_webhook_url()
+    _wh_states = {
+        r["repo_key"]: user_db.webhook_state_for_row(
+            r.get("webhook_id") or 0, r.get("webhook_url") or "", _wh_authority)
+        for r in repos
+    }
     return {"repos": [{
         "repo_key": r["repo_key"],
         "full_name": r["full_name"],
         "role": "Admin" if r["is_admin"] else "Member",
-        "webhook_ok": bool(r["webhook_id"]),
+        # webhook_ok 保留 bool 兼容语义：仅「地址一致(ok)」与「无判据(unknown)」为 true，
+        # 地址漂移(stale) 与未建立(absent) 为 false；新增 stale/state 供前端三态渲染。
+        "webhook_ok": _wh_states[r["repo_key"]] in ("ok", "unknown"),
+        "webhook_stale": _wh_states[r["repo_key"]] == "stale",
+        "webhook_state": _wh_states[r["repo_key"]],
         "branch": "main",
         "status": "Active" if r["is_admin"] else "Joined",
         # P9：卡派生两路径判定（gitee 无列平台查 rc 单表；gitcode/github 查列），
