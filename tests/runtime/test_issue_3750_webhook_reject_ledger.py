@@ -134,8 +134,22 @@ def test_github_token_403_also_recorded(monkeypatch, caplog):
     assert "event=push" in caplog.text
     assert "reason=mismatch" in caplog.text
     assert "expected_fp=" in caplog.text and "token_fp=" in caplog.text
+    assert "ip=" in caplog.text and "xff=" in caplog.text, caplog.text
     wr.flush(timeout=3.0)
     rows = _rows(f"github:{REPO}")
     assert len(rows) == 1, rows
     assert rows[0]["provider"] == "github"
     assert rows[0]["event"] == "push"
+    assert rows[0]["ip"], "GitHub 入口同样必须落来源 IP（否则 ip 列恒空、无法反查残留 hook）"
+
+
+def test_github_404_unmanaged_logs_event_and_ip(monkeypatch, caplog):
+    monkeypatch.setattr(W, "_expected_webhook_token", lambda repo, provider: "")
+    caplog.set_level("WARNING")
+    body = json.dumps({"repository": {"full_name": REPO}}).encode()
+    r = TestClient(app).post("/webhook/github", content=body,
+                             headers={"X-GitHub-Event": "push"})
+    assert r.status_code == 404
+    assert "unmanaged" in caplog.text
+    assert "event=push" in caplog.text
+    assert "ip=" in caplog.text and "ip= " not in caplog.text, caplog.text

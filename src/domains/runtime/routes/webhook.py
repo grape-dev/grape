@@ -1,5 +1,6 @@
 """Webhook & A2A 端点 — 集成事件管道"""
 import json, os, time
+from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -1083,7 +1084,7 @@ async def gitcode_webhook(request: Request):
     gh_event = request.headers.get("X-GitHub-Event", "")
     if gh_event:
         log.info(f"GitCode webhook: GitHub event detected ({gh_event}), processing as GitHub webhook")
-        return await _process_github_webhook(body, request.headers)
+        return await _process_github_webhook(body, request.headers, request)
 
     token = request.headers.get("X-GitCode-Token", "")
     event_header = request.headers.get("X-Gitcode-Event", "unknown")
@@ -1175,14 +1176,23 @@ async def gitcode_webhook(request: Request):
 async def github_webhook(request: Request):
     """接收 GitHub Webhook 事件"""
     body = await request.body()
-    return await _process_github_webhook(body, request.headers)
+    return await _process_github_webhook(body, request.headers, request)
 
 
-async def _process_github_webhook(body: bytes, headers) -> dict:
-    """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。"""
+async def _process_github_webhook(body: bytes, headers, request: Optional[Request] = None) -> dict:
+    """GitHub Webhook 核心处理逻辑（body 已消费，直接传入）。
+
+    `request` 可选：路由入口传入后即可拿到 `client.host`，使 403/404 日志与
+    `obs_webhook_rejects.ip` 与 GitCode 入口同口径（否则该列恒空、无法按来源反查残留 hook）。
+    直接调用的测试/内部路径不传时退化为空 IP（行为与改造前一致）。
+    """
     event_header = headers.get("X-GitHub-Event", "unknown")
 
-    client_host = ""  # 转发场景下无 client 信息
+    client_host = ""
+    xff = ""
+    if request is not None:
+        client_host = request.client.host if request.client else "unknown"
+        xff = request.headers.get("X-Forwarded-For", "") or ""
     log.info(f"GitHub Webhook: event={event_header}, body_size={len(body)}")
 
     try:
@@ -1203,8 +1213,9 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     expected = _expected_webhook_token(repo, "github")
 
     if not expected:
-        # Issue #3750：404 与 403 同口径带 event（本入口拿不到 client_host，见上方注释）
-        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo} event={event_header}")
+        # Issue #3750：404 与 403 同口径带 event/ip（request 传入后本入口同样有来源 IP）
+        log.warning(f"GitHub Webhook rejected: unmanaged repo={repo} event={event_header} "
+                    f"ip={client_host} xff={xff or 'none'}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
     # GitHub webhook 验证（安全加固）：至少提供一种凭据且校验通过才放行。
@@ -1220,9 +1231,9 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     if signature:
         computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(f"sha256={computed}", signature):
-            # Issue #3750：签名类拒绝不是 token 比对，不落 token 指纹行，但同样要能定位事件
+            # Issue #3750：签名类拒绝不是 token 比对，不落 token 指纹行，但同样要能定位事件来源
             log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, "
-                        f"event={event_header}, body_size={len(body)}")
+                        f"event={event_header}, ip={client_host}, body_size={len(body)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
         if not hmac.compare_digest(str(token_header), str(expected)):
@@ -1232,7 +1243,8 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
                         f"event={event_header} "
                         f"token_fp={_token_fingerprint(token_header)} "
                         f"expected_fp={_token_fingerprint(expected)} "
-                        f"reason={_reason}")
+                        f"reason={_reason} "
+                        f"ip={client_host} xff={xff or 'none'}")
             _record_webhook_reject(repo, "github", event_header, client_host,
                                    token_header, expected)
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
