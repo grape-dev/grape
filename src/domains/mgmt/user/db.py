@@ -1706,13 +1706,26 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
         log.warning(f"Add managed repo failed: {e}")
         raise
 
-def set_repo_scene(repo_key: str, scene_id: str):
+def set_repo_scene(repo_key: str, scene_id: str) -> str:
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+
+    Issue #3790：写前校验 scene pool 登记（`scene_pool_binding_warning`）——仓内不存在
+    的 scene_id（典型为模板场景名）只告警并返回提示文案，**不阻断写入**（历史直写路径
+    仍需落库，派发侧按 scene_missing 降级并留痕）。返回空串 = 无需提示。
     """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    _warning = ""
+    if scene_id:
+        try:
+            from src.domains.mgmt.pipeline_config import scene_pool_binding_warning
+            _warning = scene_pool_binding_warning(scene_id, repo_key) or ""
+        except Exception as e:
+            log.warning(f"Set repo scene: scene pool validation failed: {e}")
+        if _warning:
+            log.warning(f"Set repo scene: {_warning} (repo={repo_key}, pool_engine_source=scene_missing)")
     try:
         with db_lock:
             c = _mg_db.cursor()
@@ -1720,6 +1733,7 @@ def set_repo_scene(repo_key: str, scene_id: str):
             _mg_db.commit()
     except Exception as e:
         log.warning(f"Set repo scene failed: {e}")
+    return _warning
 
 def get_repo_scene(repo_key: str) -> str:
     """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。

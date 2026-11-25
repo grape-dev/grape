@@ -421,7 +421,15 @@ async def create_from_template(body: CreateTemplateRequest,
         tpl_scene_id = tpl.get("scene_id") or ctx.get("scene_id") or ""
         if tpl_scene_id and tpl_scene_id != "default":
             try:
-                _apply_template_scene(repo_key, tpl_scene_id, str(user.get("id") or ""))
+                _tpl_real = _apply_template_scene(repo_key, tpl_scene_id, str(user.get("id") or ""))
+                # Issue #3790：应用后仍不在仓内 scene pool → 建仓回执明确提示（不阻断建仓）
+                if _tpl_real:
+                    from src.domains.mgmt.pipeline_config import scene_pool_binding_warning
+                    _pool_hint = scene_pool_binding_warning(_tpl_real, repo_key) or ""
+                    if _pool_hint:
+                        log.warning(f"template build: {_pool_hint}")
+                        host_warning = (f"{host_warning}；{_pool_hint}"
+                                        if host_warning else _pool_hint)
             except Exception as e:
                 log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
 

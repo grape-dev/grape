@@ -1304,6 +1304,26 @@ def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
         return False
 
 
+def scene_pool_binding_warning(scene_id: str, repo_key: str) -> str:
+    """Issue #3790：场景未在仓内 scene pool 登记时的保存/建仓提示（空串 = 已登记）。
+
+    与派发侧 `get_scene_pool_engine_ids` 的 scene_missing 判定同源（同一个
+    `scene_exists_in_repo`）：场景里绑的 scene_id 不是该仓库的副本（典型为误绑模板
+    场景名）时，派发会跳过全局模板回退并降级为 scene_missing，运营只能看到「引擎离线」。
+    写侧只提示不阻断——历史直写路径仍需落库（派发侧另有 fail-closed 防线）。
+    """
+    if not scene_id or not repo_key:
+        return ""
+    try:
+        if scene_exists_in_repo(scene_id, repo_key):
+            return ""
+    except Exception as e:
+        log.warning(f"scene_pool_binding_warning: check failed ({scene_id}/{repo_key}): {e}")
+        return ""
+    return (f"场景 {scene_id} 未在仓库 {repo_key} 的 scene pool 登记（scene_missing）："
+            f"派发将跳过全局模板回退并降级为无引擎派发，请先应用/创建仓内场景副本")
+
+
 def _query_official_scene_ids() -> set[str]:
     """Return set of official scene_ids available in scene_market(source='official')."""
     db, lock = _db()
