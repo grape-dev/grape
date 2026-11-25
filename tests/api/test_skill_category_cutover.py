@@ -50,16 +50,52 @@ def test_migration_sql_lives_in_owner_domain():
     assert "_OFFICIAL_SKILL_L2_MAP" not in db_setup
 
 
-# ── 契约二：映射表（74 条全量、唯一、slug 全可复算） ──
+# ── 契约二：映射表（唯一、slug 全可复算、与生产注册表集合对齐） ──
+
+#: 生产注册表（skill-description.json）实际发布的官方技能 74 条。
+#: 独立硬编码快照，与被测映射表不同源——映射表/注册表任一漂移都在单测阶段暴露。
+#: 映射表当前 76 条 = 本集合 74 条 + 2 条 dev-only 死条目（见 KNOWN_DEV_ONLY）。
+REGISTRY_OFFICIAL_SKILLS = frozenset({
+    "_template", "ai-blog-generation", "auto-review-pr", "blog-issue",
+    "blog-manager", "blog-publish", "blog-vod", "build-debug",
+    "changelog-gen", "chat", "chat-cli", "cloud-deploy",
+    "coding-cli", "coding-mattpocock", "common-skill-creator", "common-skill-tester",
+    "deploy-cli", "deploy-guard", "devbridge-deploy", "domain-coding",
+    "domain-deploy", "domain-issue", "domain-qa", "domain-vod",
+    "event-dialogue", "grape-skill-generator", "grape-skill-issue", "grape-skill-uploader",
+    "grape-skill-validator", "grape-vod-cli", "huawei-cloud", "huawei-cloud-devbridge-deploy",
+    "iac-coding", "iac-issue", "iac-qa", "iac-sre",
+    "iac-vod", "im-notify", "impact-analysis", "implementation",
+    "incident-triage", "issue", "issue-advance", "issue-cli",
+    "issue-mattpocock", "issue-multitask", "narrated-explainer-video", "nine-grid-storyboard",
+    "novel-to-manga", "org-repo-analyzer", "os-disk-list", "plugin-creator",
+    "plugin-publish", "plugin-tester", "pr", "qa",
+    "qa-cli", "qa-mattpocock", "qwen-image-generation", "repo-onboarding",
+    "rest-api-skill-creator", "rest-api-skill-tester", "runtime-install", "skill-creator",
+    "skill-issue", "skill-pr", "skill-publish", "skill-tester",
+    "vod", "vod-advance", "vod-cli", "vod-mattpocock",
+    "vod-strict", "wan-video-generation",
+})
+
+#: 映射表相对注册表多出的已知 dev-only 死条目（QA B2，PR #1955）：dev 在库、
+#: 生产注册表未发布。迁移对它们仅告警跳过；去留待产品决策，本单不删条目。
+KNOWN_DEV_ONLY = frozenset({"cce-terrapilot", "egress-test"})
+
 
 def test_map_entries_unique():
     names = [n for n, _ in OFFICIAL_SKILL_L2_MAP]
     assert len(names) == len(set(names)), "skill_name 重复：唯一性被破坏"
 
 
-def test_map_count_76():
-    # 74 + QA B2 补的 cce-terrapilot / egress-test（PR #1955 原子回归拦截点）
-    assert len(OFFICIAL_SKILL_L2_MAP) == 76
+def test_map_aligned_with_registry():
+    """集合对齐注册表：库内 official 必须全被覆盖，多出的只能是已知死条目。"""
+    names = {n for n, _ in OFFICIAL_SKILL_L2_MAP}
+    missing = REGISTRY_OFFICIAL_SKILLS - names
+    assert not missing, f"映射表漏配注册表内 official 技能: {sorted(missing)}"
+    extra = names - REGISTRY_OFFICIAL_SKILLS
+    assert extra == KNOWN_DEV_ONLY, (
+        f"映射表相对注册表的漂移超出已知死条目: {sorted(extra)}"
+        "（新增/删除条目须同步 REGISTRY_OFFICIAL_SKILLS 与 KNOWN_DEV_ONLY）")
 
 
 def test_all_l2_slugs_resolvable_in_seed():
@@ -94,33 +130,98 @@ def test_distribution_pinned():
     assert dict(c) == EXPECTED_DISTRIBUTION, f"归属分布漂移: {dict(c)}"
 
 
-# ── 契约四：失败语义（空表先探测后写；未命中 raise 不盖章） ──
+# ── 契约四：失败语义（空表先探测后写；双向差集：库多 raise / map 多告警盖章） ──
 
-def test_fn_raises_when_no_official_skills():
-    """空库时序防护：官方技能数为 0 时，任何写之前 raise（Spec#3 探测前置）。"""
+def _make_conn():
     import sqlite3
-
-    import src.domains.runtime.migrations.skill_category_cutover as mod
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
         "CREATE TABLE skill (skill_name TEXT, scope TEXT, cat_l1_id INTEGER DEFAULT 0,"
         " cat_l2_id INTEGER DEFAULT 0, category_id INTEGER DEFAULT 0)")
+    return conn
+
+
+def test_fn_raises_when_no_official_skills():
+    """空库时序防护：官方技能数为 0 时，任何写之前 raise（Spec#3 探测前置）。"""
+    import src.domains.runtime.migrations.skill_category_cutover as mod
+
+    conn = _make_conn()
     with pytest.raises(RuntimeError, match="官方技能尚未入库"):
         mod.cutover_official_skills(conn=conn)
 
 
-def test_fn_raises_on_partial_hit():
-    """名单漂移：未命中 skill_name 必须 raise（不允许部分挂靠却盖章，Spec#2）。"""
-    import sqlite3
-
+def test_fn_raises_when_db_has_unmapped_official():
+    """库内 official 多于映射表（真漏配）→ raise 且一字节不写、不盖章。"""
     import src.domains.runtime.migrations.skill_category_cutover as mod
 
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE skill (skill_name TEXT, scope TEXT, cat_l1_id INTEGER DEFAULT 0,"
-        " cat_l2_id INTEGER DEFAULT 0, category_id INTEGER DEFAULT 0)")
+    conn = _make_conn()
     conn.execute("INSERT INTO skill (skill_name, scope) VALUES ('vod', 'official')")
-    # 只插入 1 个映射里的技能 → 其余 73 个未命中
-    with pytest.raises(RuntimeError, match="挂靠未全命中"):
+    conn.execute(
+        "INSERT INTO skill (skill_name, scope) VALUES ('brand-new-official', 'official')")
+    conn.commit()
+    with pytest.raises(RuntimeError, match="未被映射表覆盖"):
         mod.cutover_official_skills(conn=conn)
+    # raise 先于任何写：已挂靠行不得被更新
+    row = conn.execute(
+        "SELECT cat_l1_id, cat_l2_id FROM skill WHERE skill_name='vod'").fetchone()
+    assert row == (0, 0), f"raise 前不应写入，实际 {row}"
+
+
+def test_fn_warns_and_stamps_when_map_has_extra(monkeypatch):
+    """映射表多于库内（死条目残留）→ 仅 1 条 WARNING、跳过不阻断，正常挂靠盖章。"""
+    import src.domains.runtime.migrations.skill_category_cutover as mod
+    import src.kernel.config as config_mod
+
+    warnings: list = []
+    infos: list = []
+    fake_log = type("_L", (), {
+        "warning": staticmethod(lambda msg: warnings.append(msg)),
+        "info": staticmethod(lambda msg: infos.append(msg)),
+    })
+    monkeypatch.setattr(config_mod, "log", fake_log)
+
+    conn = _make_conn()
+    for name in sorted(REGISTRY_OFFICIAL_SKILLS):
+        conn.execute(
+            "INSERT INTO skill (skill_name, scope) VALUES (?, 'official')", (name,))
+    conn.commit()
+
+    # 不抛异常（死条目 cce-terrapilot / egress-test 未入库也不阻断）
+    mod.cutover_official_skills(conn=conn)
+
+    assert len(warnings) == 1, f"应聚合为 1 条 WARNING，实际 {len(warnings)}"
+    assert "cce-terrapilot" in warnings[0] and "egress-test" in warnings[0]
+    assert len(infos) == 1, f"应仅 1 条 INFO，实际 {len(infos)}"
+    assert f"/{len(REGISTRY_OFFICIAL_SKILLS)}" in infos[0]
+
+    # 交集全部挂靠、无漏网
+    unmapped = conn.execute(
+        "SELECT COUNT(*) FROM skill WHERE scope='official' AND cat_l1_id=0"
+    ).fetchone()[0]
+    assert unmapped == 0, f"仍有 {unmapped} 条 official 未挂靠"
+
+
+def test_fn_idempotent_second_run(monkeypatch):
+    """二次运行幂等：挂靠值已正确时不重复写、不 raise（保留先读终值口径）。"""
+    import src.domains.runtime.migrations.skill_category_cutover as mod
+    import src.kernel.config as config_mod
+
+    fake_log = type("_L", (), {
+        "warning": staticmethod(lambda msg: None),
+        "info": staticmethod(lambda msg: None),
+    })
+    monkeypatch.setattr(config_mod, "log", fake_log)
+
+    conn = _make_conn()
+    for name in sorted(REGISTRY_OFFICIAL_SKILLS):
+        conn.execute(
+            "INSERT INTO skill (skill_name, scope) VALUES (?, 'official')", (name,))
+    conn.commit()
+
+    mod.cutover_official_skills(conn=conn)
+    mod.cutover_official_skills(conn=conn)  # 二次运行不得 raise
+
+    stale = conn.execute(
+        "SELECT COUNT(*) FROM skill WHERE category_id<>0").fetchone()[0]
+    assert stale == 0

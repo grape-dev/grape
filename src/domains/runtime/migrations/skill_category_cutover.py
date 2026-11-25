@@ -10,12 +10,14 @@
 runtime/mgmt 表 = 新增跨域引用，tests/arch/test_foreign_table_refs.py 必红。
 注册仍由 src/api/db_setup.py 引导器做（register_migration(**MIGRATION)）。
 
-失败语义（两轴审查 Spec#2/#3）：
+失败语义（两轴审查 Spec#2/#3；#4421 改双向差集）：
   1. 探测前置到任何写之前：官方技能数为 0（全新库首启、skill sync 未跑）
      时一字节不写、raise 不盖章，等 sync 拉到技能后下次启动整体收敛；
-  2. 挂靠未全命中（skill 名单与映射表漂移）→ raise 不盖章，逼着补
-     _OFFICIAL_SKILL_L2_MAP 再收敛——不允许「部分挂靠却盖章」让漏网技能
-     永久 cat_l1_id=0；
+  2. 双向差集判定（技能名单与映射表漂移分两类，告警/失败彻底分离）：
+     - 库内 official - 映射表 → raise 不盖章（真漏配：库里有技能没被覆盖，
+       不允许「部分挂靠却盖章」让漏网技能永久 cat_l1_id=0）；
+     - 映射表 - 库内 official → 聚合 1 条 WARNING 后跳过、不阻断盖章
+       （映射表残留死条目，需产品决策是否补注册/下线，另单跟踪）；
   3. post_check 断言收敛结果（官方技能全挂靠 + category_id 清零）才盖章。
 
 domains=("runtime",)：三库模式由 runtime 进程执行（进程库即 runtime 库）；
@@ -23,10 +25,13 @@ domains=("runtime",)：三库模式由 runtime 进程执行（进程库即 runti
 """
 from __future__ import annotations
 
-#: 官方技能 → 二级分类 slug 映射（74 条全量）。
+#: 官方技能 → 二级分类 slug 映射（76 条）。
+#: 口径：76 = 映射表基数；74 = 生产注册表内 official 基数。差值 2 条
+#: （cce-terrapilot / egress-test）为 QA B2 dev-only 补录、生产注册表未发布，
+#: 启动时仅聚合告警不阻断盖章（去留需产品决策，另单跟踪，不在此删条目）。
 #: 归属口径 = 用户逐条拍板的《官方技能分类清单》（2026-11-22）：组织仓库 AI 分析
-#: → 测试与质量；分布：工程29 / AI应用14 / 基础设施9 / 内容商品7 / grape平台6 /
-#: 运维观测4 / 个人生活3 / 安全1 / 测试质量1。
+#: → 测试与质量；分布：工程29 / AI应用14 / 基础设施10 / 内容商品7 / grape平台6 /
+#: 运维观测4 / 个人生活3 / 安全1 / 测试质量2。
 #: 单一真源在本模块（tests/api/test_skill_category_cutover.py 直接 import 断言，
 #: 不再从 db_setup.py 正则提取）。
 OFFICIAL_SKILL_L2_MAP = [
@@ -153,29 +158,52 @@ def _resolve_ids() -> tuple[dict, dict]:
 
 
 def cutover_official_skills(conn=None) -> None:
-    """官方技能挂 l1/l2 + 老 category_id 清零（幂等；失败 raise 不盖章）。"""
+    """官方技能挂 l1/l2 + 老 category_id 清零（幂等；失败 raise 不盖章）。
+
+    #4421：判定由「映射表与注册表单向全等 + all-or-nothing」改为双向差集——
+    库内多于映射表才是真漂移（raise），映射表多于库内仅聚合告警后跳过。
+    """
     from src.kernel.config import log
     from src.kernel.session_manager import db, db_lock
 
     if conn is None:
         conn = db
-    # ── 前置探测（先于一切写操作）：官方技能必须已入库 ──
+    map_names = {name for name, _ in OFFICIAL_SKILL_L2_MAP}
+    # ── 前置探测 + 一次性取库内 official 名单（先于一切写操作） ──
     # 全新库首启时本迁移先于首轮 skill sync 执行；此刻一字节不写（Spec#3 半完成态）。
     with db_lock:
         c = conn.cursor()
-        official_n = int(c.execute(
-            "SELECT COUNT(*) FROM skill WHERE scope='official'").fetchone()[0])
-        if official_n == 0:
-            raise RuntimeError(
-                "202611230002 官方技能尚未入库（skill sync 未跑或远程为空）："
-                "不做任何写操作、不盖章，等 sync 拉到技能后下次启动重试")
+        db_official = {
+            r[0] for r in c.execute(
+                "SELECT skill_name FROM skill WHERE scope='official'").fetchall()
+        }
+    if not db_official:
+        raise RuntimeError(
+            "202611230002 官方技能尚未入库（skill sync 未跑或远程为空）："
+            "不做任何写操作、不盖章，等 sync 拉到技能后下次启动重试")
+
+    # 库内有、映射表无 = 真漏配：任何写之前 raise，拒绝部分挂靠盖章（拦截力不降级）。
+    unmapped = sorted(db_official - map_names)
+    if unmapped:
+        raise RuntimeError(
+            f"202611230002 库内 official 技能未被映射表覆盖（{len(unmapped)} 条："
+            f"{unmapped}）——skill 名单与映射表已漂移，不做任何写操作、不盖章，"
+            "请把缺失技能补进 OFFICIAL_SKILL_L2_MAP 后重试（幂等）")
+
+    # 映射表有、库内无 = 死条目残留：聚合为 1 条 WARNING 后跳过，不阻断盖章。
+    residual = sorted(map_names - db_official)
+    if residual:
+        log.warning(
+            f"202611230002 映射表残留 {len(residual)} 条 official 条目未入库"
+            f"（跳过、不阻断盖章，去留待产品决策）：{residual}")
 
     id_by_slug, l1_of_l2 = _resolve_ids()
     mapped = 0
-    missed: list = []
     with db_lock:
         c = conn.cursor()
         for skill_name, l2_slug in OFFICIAL_SKILL_L2_MAP:
+            if skill_name not in db_official:
+                continue
             # QA B1（PR #1955 原子回归）：MySQL 下值未变的 UPDATE rowcount=0（sqlite
             # 为 1），用 rowcount 判「命中」会在二次运行时把全部挂靠行误判成未命中
             # → 永久 raise 不盖章。改为「先读终值、不等才写、命中=行存在且终值正确」，
@@ -184,7 +212,6 @@ def cutover_official_skills(conn=None) -> None:
                 "SELECT cat_l1_id, cat_l2_id FROM skill WHERE skill_name=? AND scope='official'",
                 (skill_name,)).fetchone()
             if row is None:
-                missed.append(skill_name)
                 continue
             want = (int(l1_of_l2.get(l2_slug, 0)), int(id_by_slug[l2_slug]))
             if (int(row[0] or 0), int(row[1] or 0)) != want:
@@ -196,12 +223,9 @@ def cutover_official_skills(conn=None) -> None:
         # 老 category_id 清零与上游 202611210003 幂等重申（存量库可能已清）。
         c.execute("UPDATE skill SET category_id=0 WHERE category_id<>0")
         conn.commit()
-    if missed:
-        raise RuntimeError(
-            f"202611230002 官方技能挂靠未全命中（{len(OFFICIAL_SKILL_L2_MAP)} 条"
-            f"命中 {mapped}，未命中：{missed}）——skill 名单与映射表已漂移，"
-            "请把缺失技能补进 OFFICIAL_SKILL_L2_MAP 后重试（幂等，已挂靠行保持不变）")
-    log.info(f"202611230002 官方技能挂靠完成：{mapped}/{len(OFFICIAL_SKILL_L2_MAP)}")
+    log.info(
+        f"202611230002 官方技能挂靠完成：{mapped}/{len(db_official)}"
+        f"（映射表 {len(map_names)} 条，残留 {len(residual)} 条未入库）")
 
 
 def verify_official_skill_cutover(conn=None) -> None:
