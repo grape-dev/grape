@@ -324,11 +324,15 @@ def terminate_active_agents(grace_seconds: int = 5):
             )
             stale_tasks = c.fetchall()
             _remote_pending = 0
+            # Issue #4340：真实失败数（DIRECT 分支 UPDATE 实际命中行数）。
+            # 旧汇总行用 len(stale_tasks) 候选总数冒充失败数：REMOTE 任务走
+            # pending_self_report 不计失败，REMOTE-only 窗口会虚报（生产 9/9 全 REMOTE、
+            # 真实 failed=0），污染失败率与复盘结论。
+            _failed_direct = 0
             for task_id, event_seq, runtime_id, cred_id in stale_tasks:
                 # REMOTE 任务：进程在 worker 上活着 → 置 pending_self_report 等自报
                 # （不释放 busy 槽——任务仍占 worker 引擎槽；事件保持 running 等自报收口）
                 if runtime_id and cred_id and cred_id > 0:
-                    _remote_pending += 1
                     try:
                         # pending_since 用带时区 ISO-8601 UTC（+00:00）；Issue #588/#9495 教训：
                         # 无偏移的 gmtime() 值在 MySQL 后端会被 parse_dt 按 CST(+08:00) 解释，
@@ -339,19 +343,36 @@ def terminate_active_agents(grace_seconds: int = 5):
                             "pending_since=? WHERE id=? AND status IN ('running','dispatched')",
                             (_now_iso, task_id)
                         )
-                        log.info(f"terminate_active_agents: REMOTE task {task_id} "
-                                 f"(runtime={runtime_id}) -> pending_self_report "
-                                 f"(worker-owned, awaiting self-report)")
+                        # 只在真正切到 pending_self_report 时计数（并发自报已终态 → 0 行不计，
+                        # 与 failed_direct 同口径：汇总数字对应 DB 实况）
+                        if int(c.rowcount or 0) > 0:
+                            _remote_pending += 1
+                            log.info(f"terminate_active_agents: REMOTE task {task_id} "
+                                     f"(runtime={runtime_id}) -> pending_self_report "
+                                     f"(worker-owned, awaiting self-report)")
+                        else:
+                            log.info(f"terminate_active_agents: REMOTE task {task_id} "
+                                     f"(runtime={runtime_id}) no longer running/dispatched, skip")
                     except Exception as e:
                         log.warning(f"terminate_active_agents: mark pending_self_report "
                                     f"failed for task {task_id}: {e}")
                     continue
                 try:
+                    # Issue #4340：补 status 守卫，使 rowcount 反映真实判死条数——
+                    # 并发自报把任务推进到终态时命中 0 行，不得计入 failed_direct，
+                    # 也不得把已终态任务覆写成 failed。
                     c.execute(
                         "UPDATE agent_tasks SET status='failed', exit_code=-1, "
-                        "completed_at=?, stream_ended=1, self_reported=1, errors=? WHERE id=?",
+                        "completed_at=?, stream_ended=1, self_reported=1, errors=? "
+                        "WHERE id=? AND status IN ('running','dispatched')",
                         (_now, _SHUTDOWN_TASK_REASON, task_id)
                     )
+                    # MySQL 驱动 rowcount 可能为 None，按 0 计
+                    if int(c.rowcount or 0) <= 0:
+                        log.info(f"terminate_active_agents: stale DIRECT task {task_id} "
+                                 f"(seq={event_seq}) no longer running/dispatched, skip force-fail")
+                        continue
+                    _failed_direct += 1
                     if event_seq:
                         # Issue #369：完整回写事件诊断字段（result/exit_code/completed_at），
                         # 对齐 event_pipeline._fail_event 语义；终态保护天然幂等（双主安全）。
@@ -380,7 +401,12 @@ def terminate_active_agents(grace_seconds: int = 5):
                 log.info(f"terminate_active_agents: {_remote_pending} REMOTE task(s) "
                          f"-> pending_self_report (worker-owned, awaiting self-report)")
         if stale_tasks:
-            log.info(f"terminate_active_agents: marked {len(stale_tasks)} stale task(s) as failed")
+            # Issue #4340：中性三字段汇总（候选数 / 真实失败数 / 等待自报数），
+            # 仅凭本行即可读出实况，无需回查 agent_tasks；REMOTE-only 窗口不再出现 "as failed"。
+            log.info(f"terminate_active_agents: shutdown sweep candidates={len(stale_tasks)} "
+                     f"failed_direct={_failed_direct} pending_self_report={_remote_pending}")
+            if _failed_direct:
+                log.info(f"terminate_active_agents: marked {_failed_direct} stale task(s) as failed")
     except Exception as e:
         log.warning(f"terminate_active_agents: stale task cleanup failed: {e}")
 
