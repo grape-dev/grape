@@ -2981,8 +2981,8 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             raise HTTPException(status_code=500, detail={"code": 500, "message": "清除 Bot Token 失败"})
         # R15.5.5: best-effort 移除旧 bot 协作者身份
         _remove_old_bot_collaborator(repo_key, owner, repo_name, _provider_str, user)
-        # Issue #4301 第二批：Bot 撤了，能力行必须一起清——否则诊断会继续按
-        # 已不存在的 Bot 能力判定（假阴性/假阳性）。
+        # Issue #4301: the bot is gone, so its capability row goes too - otherwise the diagnosis
+        # keeps judging by a capability whose bot no longer exists.
         try:
             from src.domains.insight.public import delete_repo_credential_value as _rc_del
             _rc_del(repo_key, "workflows_write")
@@ -3023,10 +3023,10 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             "message": "Bot Token 无效，请检查后重试"
         })
 
-    # Issue #4301 第二批（2026-11-25 负责人拍板）：仓库级 Bot 是**推送链首**凭据，
-    # 绑定期必须预检 workflow 写能力——否则含 .github/workflows 的推送会被平台拒，
-    # 而用户在这里看不到任何提示。能力落 rc 单表（cred_type='workflows_write'，
-    # 数据行、无 DDL），未知（细粒度 PAT 无 scope 响应头）不落键、只提示。
+    # Issue #4301, second batch (owner decision 2026-11-25): the repo-level bot is the FIRST
+    # credential in the push chain, so binding must precheck workflow write capability -
+    # otherwise the refusal happens upstream with nothing shown here. Known capability lands
+    # in the rc table (cred_type='workflows_write', data row, no DDL); unknown persists nothing.
     _wf_cap = None
     _wf_warnings: list[str] = []
     from src.domains.mgmt.user.repo_manager import (
@@ -3119,8 +3119,8 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
     if repo_bot_username:
         update_managed_repo_bot_username(repo_key, repo_bot_username)
 
-    # Issue #4301 第二批：能力落 rc 单表（仅在与实际写入分离的「已知」态落键；
-    # 未知不落键 = 不阻断、下次绑定再探）。写失败只记日志，不影响绑定结果。
+    # Issue #4301: persist the capability in the rc table (known state only;
+    # unknown persists nothing = no blocking, re-probed on the next bind); write failures log only.
     if _wf_cap is not None:
         try:
             from datetime import datetime, timezone

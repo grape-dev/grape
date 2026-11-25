@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""GitHub OAuth scope 契约：repo（列仓/读私仓）+ workflow（推 .github/workflows）。
+"""GitHub OAuth scope contract: repo (list/read private repos) + workflow (push .github/workflows).
 
 实测（grapedev-test / gt-load-1304 私仓案例）：
 scope 只有 read:user user:email 时，GitHub 对 /user/repos 返回空、
 对私仓按 404 处理（不泄露存在性）——登录建号正常，但仓库页永远为空，
 用户表现为「登录了却一个仓库都看不到」。
 
-workflow 缺失（Issue #4301）：任何含 .github/workflows/*.yml 的 push 被拒
-（refusing to allow ... without workflow scope），Coding Agent 只能把工作流
-塞进 ci/ 并等人工补交。2026-11-25 负责人拍板把 workflow/admin:repo_hook 加回
-登录渠道；此用例锁死该决定，防止下一次「最小权限」收敛把它静默删掉。
+Missing workflow (Issue #4301): any push containing .github/workflows/*.yml is refused
+(refusing to allow ... without workflow scope), and the Coding Agent can only park workflows
+under ci/ for manual hand-in. The 2026-11-25 owner decision added workflow/admin:repo_hook back
+to the login channel; this case pins that decision against the next minimal-scope sweep.
 """
 import json
 from pathlib import Path
@@ -47,5 +47,5 @@ def test_github_scope_includes_repo_hook_admin(path):
         f"{path}: github OAuth scope 缺 admin:repo_hook → webhook 建/改失败。"
         f"当前 scope={scope!r}")
 
-# 注：offline_access 不锁「必须缺」——它只影响 refresh_token 签发（长期令牌），
-# 与仓库写无关；若将来某次决策要求开启 expiring tokens + 刷新链，再加不迟。
+# Note: offline_access is not pinned as "must be absent" - it only enables refresh-token issuance,
+# unrelated to repo writes; add it if a future decision enables expiring tokens + refresh.

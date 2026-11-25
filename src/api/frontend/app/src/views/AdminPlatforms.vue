@@ -556,7 +556,7 @@ async function saveBot(p) {
     st.username = ''
     st.token = ''
     error.value = ''
-    // Issue #4301：绑定期 workflow 能力预检结果（缺权限/细粒度未知）直接展示
+    // Issue #4301: show the binding-time workflow precheck result (missing or unknown scope).
     const warn = (res && res.scope_warnings) || []
     notice.value = warn.length ? warn.join('\n') : ''
   } catch (e) {

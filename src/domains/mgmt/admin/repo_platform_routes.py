@@ -235,9 +235,9 @@ def set_platform_bot(provider: str, body: BotBody, admin: dict = Depends(require
                 "code": 400, "error_code": "TOKEN_INVALID",
                 "message": f"{provider} 令牌校验失败（无法确认所属账号）: {e}",
             }) from e
-        # Issue #4301 第二批（2026-11-25 负责人拍板）：平台 Bot 也在推送链上
-        # （仓库无 bot 时落到全局 bot），绑定期预检 workflow 能力并落 meta，
-        # 供 spec 阶段诊断按真实档位判定。
+        # Issue #4301, second batch (owner decision 2026-11-25): the platform bot is also in the push chain
+        # (used when the repo has none), so binding prechecks its capability and persists it
+        # in meta for the level-aware spec-stage diagnosis.
         from src.domains.mgmt.user.repo_manager import workflows_probe_supported as _wf_probe_ok
         if _wf_probe_ok(provider):
             _wf_cap = None if _bot_scopes is None else ("workflow" in _bot_scopes)
@@ -323,7 +323,7 @@ def clear_platform_bot(provider: str, admin: dict = Depends(require_admin)):
     uow_write(_do)
     if not hit.get("ok"):
         raise not_found("repo-platforms", provider)
-    # Issue #4301 第二批：Bot 撤了，能力标记一起清（否则诊断按已不存在的 Bot 判定）。
+    # Issue #4301: the bot is cleared, so its capability flag is cleared too.
     try:
         from src.domains.mgmt.user.db import set_meta_value as _set_meta
         _set_meta(f"global_bot_{provider}_workflows_write", "")

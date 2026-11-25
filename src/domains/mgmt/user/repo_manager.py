@@ -802,8 +802,8 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
                 source_repo or clone_url, workdir, tmp, bot_token or user_token)
 
         # D105-17：目标 host 已从平台卡派生（见函数头部 fail-closed 前置校验）
-        # D105-18：workflows 目录处理按【凭据能力】三态判定——
-        # True=声明有权限（不删）；False=声明受限（删）；None=未声明 → **保留**
+        # D105-18: .github/workflows handling follows the credential capability (three states):
+        # True = declared capable (keep); False = declared restricted (delete); None = **keep**
         # Owner decision A (2026-11-25, #4301): the unknown case no longer falls
         # back to the platform-card default (github card = false -> delete).
         # Silent file loss was worse than an explicit failure; if the kept

@@ -1059,23 +1059,23 @@ def _build_plugin_capability_section(repo_key: str, agent_type: str = "",
     return "\n".join(lines)
 
 
-# Issue #4301（Spec AC5）：任务文本里出现 .github/workflows 即视为「涉及工作流」。
-# 少数派路径写法（Windows 分隔符）一并收纳；非工作流任务零注入。
+# Issue #4301 (Spec AC5): a task touching .github/workflows counts as workflow work.
+# The minority spelling (Windows separators) is covered too; unrelated tasks inject nothing.
 _WORKFLOWS_TASK_RE = re.compile(r"\.github\s*[/\\]\s*workflows", re.IGNORECASE)
-# 产出 Spec/方案 的 agent 才需要在「动手前」拿到阻断提示（AC5 的 spec 阶段）。
+# Only agents that produce the Spec/plan need the blocker before acting (AC5 spec stage).
 _SPEC_STAGE_AGENT_TYPES = ("issue", "coding")
 
 
 def _build_workflows_blocker_section(repo_key: str, agent_type: str = "",
                                      task_text: str = "") -> str:
-    """Issue #4301 Spec AC5：spec/方案组装阶段注入 workflows 权限阻断提示。
+    """Issue #4301 Spec AC5: inject the workflow capability blocker while assembling the spec.
 
-    消费 ``repo_manager.workflows_capability_blocker``（经 ``repos`` 端口，
-    kernel 不直接 import domains）：仅当
-      ① 产出 Spec/方案 的 agent（issue / coding）；
-      ② 任务文本涉及 ``.github/workflows``；
-      ③ 仓库绑定用户的凭据域**明确**无 workflow 写权限（三态 False）
-    时返回阻断段；其余（有权限 / 未知 / 无绑定 / 读失败）返回空串，不阻断。
+    Consumes ``repo_manager.workflows_capability_blocker`` through the ``repos`` port
+    (kernel never imports domains) and only when:
+      1) the agent produces the Spec/plan (issue / coding);
+      2) the task text mentions ``.github/workflows``;
+      3) the bound user's credential domain EXPLICITLY lacks workflow write (three-state False).
+    Otherwise (capable / unknown / unbound / read failure) it returns an empty string.
     """
     if agent_type not in _SPEC_STAGE_AGENT_TYPES:
         return ""
@@ -1087,11 +1087,11 @@ def _build_workflows_blocker_section(repo_key: str, agent_type: str = "",
         from src.kernel.repo_key import parse_repo_key
         provider = parse_repo_key(repo_key)[0]
         user_id = str(_tokens.get_host_user_id(repo_key) or "")
-        # 0/'' = 该仓库未绑定托管用户 → 无凭据域可查（不阻断）
+        # 0/'' = no bound host user for this repo -> nothing to read (no blocker)
         if user_id in ("", "0"):
             return ""
-        # Issue #4301 第二批（2026-11-25 拍板）：把 repo_key 传进去，让诊断按真实
-        # 推送凭据链（仓库 Bot → 全局 Bot → PAT → 登录渠道 scope）判定，而不是只看 PAT。
+        # Issue #4301, second batch (owner decision 2026-11-25): pass repo_key so the verdict follows
+        # the real push chain (repo bot -> global bot -> PAT -> login channel scope), not just the PAT.
         blocker = _repos.workflows_capability_blocker(user_id, provider, True, repo_key)
     except Exception as _e:
         _log_safe("debug", f"prompt_builder: workflows blocker probe failed: {_e}")
@@ -1124,7 +1124,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
                       ensure_ascii=False)
     parts = []
     evt_type = evt.get("type", "event")
-    # Issue #4301（Spec AC5）：任务文本原文（未截断的 body 也参与 workflows 判定）
+    # Issue #4301 (Spec AC5): raw task text (the untruncated body also feeds the check)
     _wf_text_parts = [str(issue_data.get("title", "") or ""),
                        str(issue_data.get("body", issue_data.get("description", "")) or "")]
 
@@ -1371,8 +1371,8 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             except Exception:
                 pass
 
-    # Issue #4301（Spec AC5）：spec/方案组装阶段注入 workflows 能力阻断提示。
-    # 只看 evt 自带 repo_key（A2A 事件 source='a2a' 时拼接键会指向错误仓库）。
+    # Issue #4301 (Spec AC5): inject the workflow blocker while assembling the spec/plan.
+    # Only the repo_key carried by evt is used (a spliced key points at the wrong repo).
     _wf_section = _build_workflows_blocker_section(
         _rk, agent_type=agent_type, task_text=" ".join(_wf_text_parts))
     if _wf_section:

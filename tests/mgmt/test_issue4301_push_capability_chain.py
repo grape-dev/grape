@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Issue #4301 第二批（2026-11-25 负责人拍板）：把 workflow 预检/诊断补到
-Bot 与登录渠道两条通道上。
+"""Issue #4301, second batch (owner decision 2026-11-25): workflow precheck/diagnosis extended to
+the bot channels and the login channel.
 
-覆盖面（与实现一一对应）：
+Coverage (one block per implementation point):
   1. ``push_workflows_capability`` 按**真实推送链档位**判定（rc_bot/repo_bot →
      全局 bot → PAT → 登录渠道 scope），未知态一律 None（不阻断）；
   2. ``workflows_capability_blocker`` 的阻断文案随档位变化（同一故障不同补救动作）；
@@ -51,7 +51,7 @@ def _cleanup():
 
 
 def _seed_repo(rk: str, host_user_id: str = "1"):
-    """显式按给定 repo_key（含 provider 前缀）播种——不能用 resolve_managed_repo_key
+    """Seed by the explicit repo_key (provider prefix included); resolve_managed_repo_key
     反推，它对不存在的仓库恒回落 gitcode 前缀，会把 github 用例悄悄变成 gitcode。"""
     from src.domains.mgmt.user.db import add_managed_repo
 
@@ -60,7 +60,7 @@ def _seed_repo(rk: str, host_user_id: str = "1"):
 
 
 class _Level:
-    """resolve_exec_token 的替身（只要 level）。"""
+    """Stand-in for resolve_exec_token (level only)."""
 
     def __init__(self, level):
         self.level = level
@@ -76,10 +76,10 @@ def set_level(monkeypatch):
     return _set
 
 
-# ── 1. 能力链档位判定 ────────────────────────────────────────────────
+# ── 1. capability verdict per chain level ────────────────────────────
 
 def test_capability_follows_repo_bot_level(set_level):
-    """仓库 Bot 档：能力取 rc 单表 cred_type='workflows_write'。"""
+    """Repo bot level: capability comes from the rc table cred_type='workflows_write'."""
     import src.domains.mgmt.user.repo_manager as rm
     from src.domains.insight.public import upsert_repo_credential_value as up
 
@@ -93,7 +93,7 @@ def test_capability_follows_repo_bot_level(set_level):
 
 
 def test_capability_follows_global_bot_level(set_level):
-    """全局 Bot 档：能力取 meta global_bot_<p>_workflows_write。"""
+    """Global bot level: capability comes from meta global_bot_<p>_workflows_write."""
     import src.domains.mgmt.user.repo_manager as rm
     from src.domains.mgmt.user.db import set_meta_value
 
@@ -106,7 +106,7 @@ def test_capability_follows_global_bot_level(set_level):
 
 
 def test_capability_user_pat_preferred_over_login_channel(set_level):
-    """用户档：PAT 显式声明优先，登录渠道 scope 不得覆盖它。"""
+    """User level: an explicit PAT declaration wins; the login channel scope must not override it."""
     import src.domains.mgmt.user.repo_manager as rm
     from src.domains.mgmt.user.db import set_credential
 
@@ -120,7 +120,7 @@ def test_capability_user_pat_preferred_over_login_channel(set_level):
 
 
 def test_capability_login_channel_without_workflow_is_false(set_level, monkeypatch):
-    """用户档 + PAT 未声明：登录渠道 scope 不含 workflow → 明确 False（可诊断）。"""
+    """User level, no PAT declaration: channel scope without workflow -> definite False."""
     import src.domains.mgmt.user.repo_manager as rm
 
     rk = _rk()
@@ -133,7 +133,7 @@ def test_capability_login_channel_without_workflow_is_false(set_level, monkeypat
 
 
 def test_capability_login_channel_with_workflow_stays_unknown(set_level, monkeypatch):
-    """渠道 scope 含 workflow → 仍返回 None（老令牌可能是升级前签发的，不假阳性阻断）。"""
+    """Channel scope has workflow -> still None (old tokens may predate the change; no false positive)."""
     import src.domains.mgmt.user.repo_manager as rm
 
     rk = _rk()
@@ -146,7 +146,7 @@ def test_capability_login_channel_with_workflow_stays_unknown(set_level, monkeyp
     assert got == {"capability": None, "source": "login_channel"}, got
 
 
-# ── 2. 阻断文案随档位变化 ────────────────────────────────────────────
+# ── 2. blocker wording per level ─────────────────────────────────────
 
 @pytest.mark.parametrize("source,marker", [
     ("repo_bot", "仓库级 Bot"),
@@ -162,12 +162,12 @@ def test_blocker_wording_matches_source(source, marker):
 
 
 def test_blocker_uses_chain_when_repo_key_given(monkeypatch):
-    """传 repo_key 时按链档位判定（此处模拟仓库 Bot 缺权限）。"""
+    """With repo_key the verdict follows the chain level (repo bot lacking permission here)."""
     import src.domains.mgmt.user.repo_manager as rm
 
     monkeypatch.setattr(rm, "push_workflows_capability",
                         lambda rk: {"capability": False, "source": "repo_bot"})
-    # 用户 PAT 明确有权限：若仍只看 PAT 会漏判 → 本用例锁死「走链」
+    # User PAT is explicitly capable: judging by PAT alone would miss it -> this pins the chain walk
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: True)
     text = rm.workflows_capability_blocker(f"{NS}u1", "github", True, "github:o/r")
     assert "仓库级 Bot" in text, f"未按链判定: {text!r}"
@@ -182,7 +182,7 @@ def test_blocker_empty_when_task_unrelated_or_unknown(monkeypatch):
     assert rm.workflows_capability_blocker(f"{NS}u1", "github", False, "github:o/r") == ""
 
 
-# ── 3. 仓库 Bot 设置页快路径：落键 + 告警（与 /repos/bot-token 同口径） ──
+# ── 3. repo bot settings fast path: persist + warn (same as /repos/bot-token) ──
 
 class _FakeProvider:
     """Mirrors the baseline provider API: verify_token_with_headers -> (info, headers)."""
@@ -202,7 +202,7 @@ class _FakeProvider:
 
 
 def _put_repo_bot(monkeypatch, scopes):
-    """调真实路由函数（免 HTTP）：PUT /settings/gitcode-repo 的 bot_token 分支。"""
+    """Call the real route function (no HTTP): the bot_token branch of PUT /settings/gitcode-repo."""
     from src.domains.mgmt.routes import settings as st
 
     holder = {"p": _FakeProvider(scopes)}
@@ -221,7 +221,7 @@ def test_repo_bot_without_workflow_persists_false_and_warns(monkeypatch):
     try:
         resp = _put_repo_bot(monkeypatch, "repo, admin:repo_hook")
         assert repo_credential_value(rk, "workflows_write") == "false", \
-            "仓库 Bot 缺 workflow 时应落 rc 行（诊断要用）"
+            "a repo bot without workflow must persist the rc row (the diagnosis needs it)"
         warns = resp.get("scope_warnings") or []
         assert any("workflow" in w for w in warns), f"响应缺告警: {resp}"
     finally:
@@ -253,7 +253,7 @@ def _put_repo_bot_with(monkeypatch, scopes, repo_name):
 
 
 def test_repo_bot_finegrained_unknown_no_key_but_warns(monkeypatch):
-    """无 scope 响应头（细粒度 PAT）→ 不落 rc 键，但给权限清单提示。"""
+    """No scope header (fine-grained PAT) -> no rc key, but the checklist warning is returned."""
     from src.domains.insight.public import repo_credential_value
 
     rk = f"github:{NS}/reponame3"
@@ -267,7 +267,7 @@ def test_repo_bot_finegrained_unknown_no_key_but_warns(monkeypatch):
         _clean(rk)
 
 
-# ── 4. 平台 Bot：能力落 meta ─────────────────────────────────────────
+# ── 4. platform bot: capability persists in meta ─────────────────────
 
 def test_platform_bot_persists_capability_meta(monkeypatch):
     from src.domains.mgmt.user.db import get_meta_value
@@ -295,7 +295,7 @@ def test_platform_bot_persists_capability_meta(monkeypatch):
         set_meta_value_safe.set_meta_value("global_bot_github_workflows_write", "")
 
 
-# ── 5. verify_token_scopes 复用单次 /user 响应头 ──────────────────────
+# ── 5. verify_token_with_scopes reuses the single /user reply ────────
 
 def test_config_store_verify_token_with_scopes_single_roundtrip(monkeypatch):
     from src.domains.mgmt.admin import config_store as cs

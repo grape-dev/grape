@@ -1,6 +1,6 @@
-"""Issue #4301：GitHub 凭据 workflow 权限预检与早期诊断。
+"""Issue #4301: GitHub credential workflow precheck and early diagnosis.
 
-PR#2135 复审后口径：
+Semantics agreed after the PR#2135 review:
   - 两路入口（legacy ``github_token`` / 泛型 ``platform_tokens``）共用同一
     scope 解析器 ``workflows_write_from_scopes``，语义等价（D102-P）：
     含 workflow=True / 不含=False / 无响应头=None（细粒度 PAT，不落键，
@@ -36,7 +36,7 @@ def _clean():
 
 
 class _FakeProvider:
-    """verify_token_scopes 形态的假 provider（真实 provider 经 TokenCapability
+    """Fake provider shaped like verify_token_with_headers (the real one gets the same
     默认实现拿到同一语义）：scopes 由测试注入，verify 调用次数可断言。"""
 
     def __init__(self, scopes):
@@ -57,7 +57,7 @@ class _FakeProvider:
 
 @pytest.fixture
 def fake_verify(monkeypatch):
-    """可配置 scopes 的假 provider；返回 provider 实例供测试断言调用次数。"""
+    """Fake provider with configurable scopes; returned so call counts can be asserted."""
     holder = {"provider": _FakeProvider("repo, admin:repo_hook, workflow")}
     monkeypatch.setattr(
         "src.domains.mgmt.vcs.create_provider",
@@ -71,7 +71,7 @@ def _save(platform, value, user_id=f"{NS}u1"):
 
 
 class _FakeResp:
-    """requests.Response 替身（legacy github_token 入口内联 requests.get 用）。"""
+    """requests.Response stand-in (the legacy github_token entry calls requests.get inline)."""
 
     def __init__(self, headers=None, payload=None, status=200):
         self.headers = headers if headers is not None else {}
@@ -83,7 +83,7 @@ class _FakeResp:
 
 
 def _save_legacy(resp, user_id=f"{NS}u2", monkeypatch=None):
-    """legacy 专用 github_token 入口：mock requests.get（/user + FR-4 探活）。"""
+    """Legacy github_token entry: mock requests.get (/user plus the FR-4 probe)."""
 
     def _fake_get(url, **kwargs):
         if url == "https://api.github.com/user":
@@ -95,14 +95,14 @@ def _save_legacy(resp, user_id=f"{NS}u2", monkeypatch=None):
     return update_credentials(body, user={"id": user_id, "username": user_id})
 
 
-# ---------- 纯函数：scope 解析三态（两路共用唯一实现） ----------
+# ---------- pure function: three-state scope parsing (one shared implementation) ----------
 
 def test_scope_parse_three_states():
     import src.domains.mgmt.user.repo_manager as rm
     assert rm.workflows_write_from_scopes("repo, admin:repo_hook, workflow") is True
     assert rm.workflows_write_from_scopes("repo, admin:repo_hook") is False
     assert rm.workflows_write_from_scopes(None) is None, "无响应头（细粒度 PAT）= 未知"
-    # 空 scopes（响应头存在但为空）→ 确认无权限，而非未知
+    # empty scopes (header present but blank) -> confirmed absent permission, not unknown
     assert rm.workflows_write_from_scopes("") is False
 
 
@@ -112,7 +112,7 @@ def test_scope_platforms_only_github():
     assert rm.workflows_probe_supported("gitcode") is False
 
 
-# ---------- Agent spec 阶段诊断 ----------
+# ---------- agent spec-stage diagnosis ----------
 
 def test_blocker_blocks_only_when_explicitly_forbidden():
     import src.domains.mgmt.user.repo_manager as rm
@@ -129,7 +129,7 @@ def test_blocker_blocks_only_when_explicitly_forbidden():
     assert not rm.workflows_capability_blocker(f"{NS}unk", "github", True)
 
 
-# ---------- Spec AC5：阻断提示接入 spec/方案汇编（PR#2135 复审 Required） ----------
+# ---------- Spec AC5: blocker wired into the spec/plan assembly (PR#2135 Required) ----------
 
 def _spec_evt(body: str) -> dict:
     return {
@@ -145,14 +145,14 @@ def _spec_evt(body: str) -> dict:
 
 
 def _bind_repo_user(monkeypatch, user_id=f"{NS}repo"):
-    """把 repo_key 的绑定用户指到测试凭据域（真实链路 = managed_repos.host_user_id）。"""
+    """Point the repo_key at the test credential domain (real chain: managed_repos.host_user_id)."""
     monkeypatch.setattr("src.kernel.ports.tokens.get_host_user_id",
                         lambda rk: user_id)
     return user_id
 
 
 def test_spec_prompt_injects_blocker_for_workflow_task(monkeypatch):
-    """凭据明确无 workflow 权限 + 任务涉及 .github/workflows → spec 阶段提示进 prompt。"""
+    """Credential explicitly lacks workflow and the task touches .github/workflows -> blocked in prompt."""
     from src.kernel import prompt_builder as pb
     uid = _bind_repo_user(monkeypatch)
     set_credential(uid, "github_pat", {"token": "t", "login": "l",
@@ -164,7 +164,7 @@ def test_spec_prompt_injects_blocker_for_workflow_task(monkeypatch):
 
     assert "## Spec Stage Capability Blocker (workflows)" in prompt
     assert "缺少 workflow 权限" in prompt
-    # 提示须落在 Role Definition 之前（spec/方案阶段的早期诊断，不混进角色段）
+    # the blocker must precede Role Definition (early spec-stage signal, not part of the role block)
     assert prompt.index("Spec Stage Capability Blocker") < prompt.index("## Role Definition")
 
 
@@ -190,13 +190,13 @@ def test_spec_prompt_no_blocker_when_task_unrelated(monkeypatch):
 
 
 def test_spec_prompt_no_blocker_for_unknown_or_unbound(monkeypatch):
-    """未知态（细粒度 PAT 不落键）/ 仓库未绑定用户 → 不阻断。"""
+    """Unknown state (fine-grained PAT persists nothing) or unbound repo -> no blocking."""
     from src.kernel import prompt_builder as pb
     uid = _bind_repo_user(monkeypatch)
     set_credential(uid, "github_pat", {"token": "t", "login": "l"})
     assert not pb._build_workflows_blocker_section(
         "github:owner/repo", "issue", ".github/workflows/x.yml")
-    # 未绑定（0 哨兵）
+    # unbound (0 sentinel)
     monkeypatch.setattr("src.kernel.ports.tokens.get_host_user_id", lambda rk: 0)
     set_credential(f"{NS}repo2", "github_pat", {"token": "t", "login": "l",
                                                 "workflows_write": False})
@@ -205,7 +205,7 @@ def test_spec_prompt_no_blocker_for_unknown_or_unbound(monkeypatch):
 
 
 def test_blocker_section_scoped_to_spec_stage_agents(monkeypatch):
-    """只有产出 Spec/方案 的 agent 注入；无前缀 repo_key 不猜平台。"""
+    """Only agents that emit the Spec/plan get it injected; an unprefixed repo_key never guesses a platform."""
     from src.kernel import prompt_builder as pb
     uid = _bind_repo_user(monkeypatch)
     set_credential(uid, "github_pat", {"token": "t", "login": "l",

@@ -101,7 +101,7 @@ def test_false_declared_removes_workflows(push_env, monkeypatch):
 
 
 def test_undeclared_github_keeps_workflows(push_env, monkeypatch):
-    """未声明 + github → 保留（2026-11-25 拍板 A：不再按平台卡 false 静默删）。"""
+    """Undeclared + github -> keep (decision A, 2026-11-25: no longer deleted by the card default)."""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w3"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
@@ -119,7 +119,7 @@ def test_undeclared_gitcode_falls_back_to_keep(push_env, monkeypatch):
 
 
 def test_oauth_path_keeps_workflows(push_env, monkeypatch):
-    """OAuth 路径（无 <p>_pat 声明）→ None → 保留（拍板 A；与未声明同档）。"""
+    """OAuth path (no <p>_pat) -> None -> keep (decision A; same tier as undeclared)."""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w5"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
@@ -128,7 +128,7 @@ def test_oauth_path_keeps_workflows(push_env, monkeypatch):
 
 
 def test_workflow_scope_rejection_maps_to_actionable_error(push_env, monkeypatch):
-    """保留目录的代价：真被平台拒时要给出可执行报错（拍板 A 的配套，不许抛原文）。"""
+    """Cost of keeping the directory: a real refusal must yield an actionable error, not the raw text."""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w6"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: None)
@@ -153,7 +153,7 @@ def test_workflow_scope_rejection_maps_to_actionable_error(push_env, monkeypatch
 
 
 def test_unrelated_push_error_not_relabelled(push_env, monkeypatch):
-    """非 workflow 的 push 失败必须原样上抛，不许被误包装成权限提示。"""
+    """Non-workflow push failures must surface unchanged, never relabelled as a permission hint."""
     import src.domains.mgmt.user.repo_manager as rm
     uid = f"{NS}w7"
     monkeypatch.setattr(rm, "credential_workflows_write", lambda u, p: True)
