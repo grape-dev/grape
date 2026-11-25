@@ -74,8 +74,8 @@ def test_gitcode_403_logs_event_and_reason(monkeypatch, caplog):
     assert "token mismatch" in text
     assert "event=Push Hook" in text
     assert "reason=mismatch" in text
-    assert W._token_fingerprint(EXPECTED) in text
-    assert W._token_fingerprint(WRONG) in text
+    assert f"token_fp={W._token_fingerprint(WRONG)}" in text, "字段名须对齐 #3750 验收"
+    assert f"expected_fp={W._token_fingerprint(EXPECTED)}" in text
     assert EXPECTED not in text and WRONG not in text
 
 
@@ -133,6 +133,7 @@ def test_github_token_403_also_recorded(monkeypatch, caplog):
     assert r.status_code == 403
     assert "event=push" in caplog.text
     assert "reason=mismatch" in caplog.text
+    assert "expected_fp=" in caplog.text and "token_fp=" in caplog.text
     wr.flush(timeout=3.0)
     rows = _rows(f"github:{REPO}")
     assert len(rows) == 1, rows

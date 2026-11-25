@@ -1134,10 +1134,12 @@ async def gitcode_webhook(request: Request):
         # Issue #3750：再补 event/reason（absent=平台没带 token，mismatch=Secret 不一致），
         # 并落一条拒绝事实（速率告警 + (ip, token_fp) 反查残留旧 secret）。
         _reason = _reject_reason(token)
+        # 字段名对齐 Issue #3750 验收（token_fp=实收 / expected_fp=期望）；值仍是
+        # #3897 的 `sha256:<12>` 短指纹（不可逆、不含任何前缀）。
         log.warning(f"Webhook rejected: token mismatch for repo={repo} "
                     f"event={event_header} "
-                    f"expected={_token_fingerprint(expected)} "
-                    f"actual={_token_fingerprint(token)} "
+                    f"token_fp={_token_fingerprint(token)} "
+                    f"expected_fp={_token_fingerprint(expected)} "
                     f"reason={_reason} "
                     f"ip={client_host} xff={xff or 'none'}")
         _record_webhook_reject(repo, "gitcode", event_header, client_host, token, expected)
@@ -1228,8 +1230,8 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
             _reason = _reject_reason(token_header)
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo} "
                         f"event={event_header} "
-                        f"expected={_token_fingerprint(expected)} "
-                        f"actual={_token_fingerprint(token_header)} "
+                        f"token_fp={_token_fingerprint(token_header)} "
+                        f"expected_fp={_token_fingerprint(expected)} "
                         f"reason={_reason}")
             _record_webhook_reject(repo, "github", event_header, client_host,
                                    token_header, expected)
