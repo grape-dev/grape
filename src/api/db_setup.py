@@ -12092,6 +12092,31 @@ register_migration(
     post_check=_post_acp_state_db_metrics_columns,
 )
 
+# ===== Issue #3877：events 级联补偿五列（存量 runtime 库仍缺列，1054 持续）=====
+# 背景：`cascade_reason` / `report_missing` / `triggered_by` / `cascade_task_status` /
+# `cascade_prev_event_status` 此前只登记在
+#   · `runtime/schema_ddl.py::_EVENTS_TABLE_DDL`（只服务新装库的 CREATE TABLE）；
+#   · `runtime/migrations_ddl.py::ALTERS_SESSION_EVENT_COLUMNS`（只被
+#     `_migrate_tables()` 消费，而它属**已冻结的 legacy 轨道**）。
+# 已盖 legacy-stamp（202610300001）的存量库启动时老轨整段不执行 → 五列永远不存在 →
+# `_cascade_event_terminal()` 的终态收敛 UPDATE 每条都 1054，事件终态不收敛、
+# event_active_guard 只能等 TTL（Issue #3877 生产证据：72 小时 54 次）。
+# 修法同 #3731/#3773：改成注册式迁移（kind=safe + post_check，五列在才盖章）。
+# version/name/kind 用字面量登记（不用 `**_MIGRATION`），否则
+# tests/api/test_migration_track_guard.py 的版本号唯一性/格式守卫解析不出该条。
+from src.domains.runtime.migrations.events_cascade_columns import (
+    add_events_cascade_columns as _fn_events_cascade_columns,
+    verify_events_cascade_columns as _post_events_cascade_columns,
+)
+register_migration(
+    version="202611250001",
+    name="events-cascade-compensation-columns",
+    kind="safe",
+    fn=_fn_events_cascade_columns,
+    domains=("runtime",),
+    post_check=_post_events_cascade_columns,
+)
+
 # ============================================================================
 # Issue #3740：bot 凭据回填（managed_repos 历史列 → grape_t_repo_credentials）
 #
