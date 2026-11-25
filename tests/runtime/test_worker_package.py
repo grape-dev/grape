@@ -147,6 +147,9 @@ class TestWorkerPackage:
             # src.service_diagnostics 导入；此前的闭包只导 config/agent/otel，
             # 漏列 service_diagnostics 不会被任何用例拦住（worker 侧静默降级）。
             "import src.kernel.prompt_builder\n"
+            # Issue #3414：engine_model 随包下发且符号须齐套——自部署陈旧部署曾
+            # 「模块在、缺 detect_engine_model」，agent-runtimes 500 派单链路断裂。
+            "from src.domains.runtime.engine.engine_model import detect_engine_model\n"
             "print('IMPORT_CLOSURE_OK')\n"
         )
         r = subprocess.run(

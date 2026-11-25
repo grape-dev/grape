@@ -13,6 +13,7 @@ from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE
 from src.kernel.token_service import is_auth_401_error
 from src.kernel.owner_db import db_pair
 from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
+from src.kernel.user_ids import norm_uid
 
 # 本文件属 runtime 域，但 VOD IM 引擎由 mgmt 进程启动执行；devops_agent_session /
 # vod_conversations / agent_runtimes 都是 runtime 基表，进程本域连接会 1146。
@@ -22,6 +23,12 @@ db, db_lock = db_pair("runtime")
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
+
+
+def _usage_user_id(value) -> int | str:
+    """用量采集 user_id 归一：数字→int，UUID 原样 str（Issue #3510）。"""
+    return norm_uid(value or 0)
+
 
 _VOD_ROLE_DEFINITION = """
 你是项目的公共反馈入口，部署在飞书群中供所有成员提交建议和反馈。
@@ -380,7 +387,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                         attr={"repo_key": repo_key,
                               "scene_id": evt.get("payload", {}).get("im_chat_id", "") or "",
                               "agent_type": "vod",
-                              "user_id": int(agent_session.get("user_id") or 0),
+                              "user_id": _usage_user_id(agent_session.get("user_id")),
                               "engine_id": int(engine_id or 0)})
         _mu.start()
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,

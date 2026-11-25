@@ -2672,8 +2672,13 @@ def _sweep_pending_self_report_timeouts() -> int:
                                    cascade_trigger="sweeper")
                 if evt_seq:
                     try:
-                        update_event_complete(evt_seq, "failed", exit_code=-1,
-                                              completed_at=_now, result=_why[:200])
+                        from src.domains.runtime.agents.failure_info import build_failure_info
+                        update_event_complete(
+                            evt_seq, "failed", exit_code=-1,
+                            completed_at=_now, result=_why[:200],
+                            failure_info=build_failure_info(
+                                error_type="TimeoutError", phase="timeout",
+                                message=_why, exit_code=-1))
                     except Exception as _ee:
                         log.warning(f"pending timeout: event sync failed seq={evt_seq}: {_ee}")
                     try:

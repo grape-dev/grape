@@ -2756,11 +2756,19 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if _num and task.get("issue_session_id"):
+        # Issue #3375：PR 维度工位清理与派发侧同构（issue-less PR / 同 Issue 多 PR）
+        from src.kernel.pr_scope import pr_number_from_env_extra
+        _pr = pr_number_from_env_extra(env)
+        if not _pr:
+            _pr = pr_number_from_env_extra(task.get("env_extra"))
+        # Issue #3375：关联 Issue 的 PR 任务即使缺 issue_session_id 也须按
+        # issues/<n>/pr-<p> 清理（否则落入 elif _pr 只清 prs/<pr>，路径不匹配残留）。
+        if _num and (task.get("issue_session_id") or _pr):
             # Issue #2514：终态清理传 task_id（证据存档文件名 workspace-<task_id>*.patch）
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=_get_task_token(task), task_id=task.get("id") or "")
+                _num, token=_get_task_token(task), task_id=task.get("id") or "",
+                pr_number=_pr)
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -2776,9 +2784,15 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
                                     token=_get_task_token(task),
-                                    task_id=task.get("id") or "")
+                                    task_id=task.get("id") or "", pr_number=_pr)
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
+        elif _pr:
+            # Issue #3375：issue-less PR 无 Issue 号 → 清理 prs/<pr>/<agent> 工位
+            repogit.cleanup_pr_worktree(
+                task.get("repo_key") or "", task.get("agent_type") or "", _pr,
+                token=_get_task_token(task), task_id=task.get("id") or "",
+                reason="task_terminal")
     except Exception as e:
         log.warning(f"workdir cleanup failed for task {task.get('id')}: {e}")
     # 连空 cwd 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）
@@ -3241,6 +3255,189 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
         write_skill_fallback(skill_dir, task.get("skill") or "",
                              f"materialize exception: {e}", stage="exception")
     return prompt
+
+
+# Issue #4186：prompt 技能路径与实际物化目录同源化（可单测）。
+# 反馈 1304：prompt 提示 issues/<n>/issue/.skills（按 agent 类型构造的路径），
+# 而任务工作区实际物化在 issues/<n>/sre/.skills（按路由命名的 cwd），Agent 按提示
+# 路径 read SKILL.md → File not found，只能靠 DEVOPS_SKILLS_DIR 兜底试错。
+# 修复口径（Spec #4186）：
+#   1) prompt 注入的技能目录从「实际物化结果」单一来源派生（同源化）；
+#   2) DEVOPS_SKILLS_DIR 可读时优先注入其可读路径；
+#   3) 物化降级/目录缺失时显式标注 degraded 并给出回退路径。
+_SKILL_FILE_LINE_RE = re.compile(r"(Skill file:\s*)(\S+?)/SKILL\.md")
+_SKILL_SAME_DIR_RE = re.compile(r"(same directory as\s+)(\S+?)(?=[;\s])")
+
+
+def _skill_root_readable(root: str, skill_name: str) -> bool:
+    return bool(root) and bool(skill_name) and os.path.isfile(
+        os.path.join(root, skill_name, "SKILL.md"))
+
+
+def _resolve_prompt_skill_root(env: dict, skill_dir: str, skill_name: str,
+                               env_dir: str | None = None) -> str:
+    """解析 prompt 应注入的权威技能根目录（单一来源，Issue #4186）。
+
+    优先级（Spec「注入优先级」）：DEVOPS_SKILLS_DIR 可读路径 > cwd 物化目录。
+    两者均不可读 → 空串（调用方按 degraded 标注）。
+    env_dir 传入时复用（避免重复读取），缺省自行从 env 解析。
+    """
+    if env_dir is None:
+        env_dir = str((env or {}).get("DEVOPS_SKILLS_DIR") or "").strip()
+    if _skill_root_readable(env_dir, skill_name):
+        return env_dir
+    if _skill_root_readable(skill_dir, skill_name):
+        return skill_dir
+    return ""
+
+
+def _effective_prompt_skill_name(task: dict, env: dict, skill_dir: str,
+                                  skill_name: str, env_dir: str) -> str:
+    """Issue #4186 review：解析 prompt 应注入的有效技能名（含异名官方检查器回退）。
+
+    绑定名在权威根目录可读 → 绑定名；否则若 task.skill_fallback（#617/#887，
+    _materialize_worker_skill 物化名≠绑定名时回写）指定的检查器名可读 → 检查器名。
+    两者均不可读 → 空串（调用方按 degraded 标注）。
+    """
+    if _resolve_prompt_skill_root(env, skill_dir, skill_name, env_dir=env_dir):
+        return skill_name
+    _fb_name = str(((task or {}).get("skill_fallback") or {}).get("skill_name")
+                   or "").strip()
+    if _fb_name and _fb_name != skill_name and \
+            _resolve_prompt_skill_root(env, skill_dir, _fb_name, env_dir=env_dir):
+        return _fb_name
+    return ""
+
+
+def _prompt_referenced_skill_roots(prompt: str) -> list:
+    """提取 prompt 已引用的技能根目录（Skill file: 行 + same directory as 行）。
+
+    Skill file 行捕获的是 `<root>/<skill>`（到 /SKILL.md 之前），取 dirname
+    归一为根目录，与 same directory as 行同口径。
+    """
+    _roots = []
+    for _m in _SKILL_FILE_LINE_RE.finditer(prompt or ""):
+        _p = os.path.dirname(_m.group(2) or "")
+        if _p and _p not in _roots:
+            _roots.append(_p)
+    for _m in _SKILL_SAME_DIR_RE.finditer(prompt or ""):
+        _p = _m.group(2)
+        if _p and _p not in _roots:
+            _roots.append(_p)
+    return _roots
+
+
+def _normalize_prompt_skill_path(task: dict, env: dict, prompt: str,
+                                 skill_dir: str) -> str:
+    """Issue #4186：物化后对 prompt 技能路径做存在性探测 + 同源化重写（可单测）。
+
+    - 有效技能名（绑定名，或绑定名不可读时 task.skill_fallback 的异名官方
+      检查器名）在权威路径可读（DEVOPS_SKILLS_DIR 优先）且 prompt 引用了
+      其它不可读路径（路由名 ≠ agent 类型的错配形态）→ 把 Skill file /
+      same directory as 两处路径重写为「权威路径 + 有效技能名」。
+    - 权威路径可读且 prompt 引用一致 → 幂等零改动（正常同源路径不注入噪声）。
+    - 重写后追加 aligned 说明，但若 _materialize_worker_skill 已追加过
+      [Skill Materialization Notice]（fallback/degraded 等）则不再追加
+      —— 通知单一出口，避免同一 prompt 出现多段同类 Notice。
+    - 无任何可读 SKILL.md → 追加 degraded 说明，给出回退路径
+      （DEVOPS_SKILLS_DIR/cwd 物化目录 + `grape skills detail`）。
+    - 异常分支不静默：显式追加 degraded 说明（normalize 失败原因）后返回。
+    """
+    try:
+        _skill_name = str(task.get("skill") or "").strip()
+        if not prompt or not _skill_name:
+            return prompt
+        _env_dir = str((env or {}).get("DEVOPS_SKILLS_DIR") or "").strip()
+        _eff_name = _effective_prompt_skill_name(
+            task, env, skill_dir, _skill_name, _env_dir)
+        if _eff_name:
+            _authoritative_root = _resolve_prompt_skill_root(
+                env, skill_dir, _eff_name, env_dir=_env_dir)
+            _rewrote = False
+            for _ref in _prompt_referenced_skill_roots(prompt):
+                if _ref == _authoritative_root:
+                    if _eff_name == _skill_name:
+                        continue
+                    # 权威根目录但行内仍为绑定名（异名回退）→ 落入重写
+                elif _skill_root_readable(_ref, _skill_name) or \
+                        _skill_root_readable(_ref, _eff_name):
+                    continue  # 引用路径本身可读（多技能共存），不动
+                # 仅重写引用根目录 == _ref 且技能名 != 有效名的 Skill file 行
+                # （含 _ref == 权威根目录但行内仍为绑定名的异名回退形态）
+                def _repl(m, _r=_ref):
+                    _p = m.group(2) or ""
+                    if os.path.dirname(_p) == _r and (
+                            _r != _authoritative_root
+                            or os.path.basename(_p) != _eff_name):
+                        return (f"{m.group(1)}{_authoritative_root}/"
+                                f"{_eff_name}/SKILL.md")
+                    return m.group(0)
+                _new_prompt = _SKILL_FILE_LINE_RE.sub(_repl, prompt)
+                if _ref != _authoritative_root:
+                    # 带边界正则替换（QA review：裸 str.replace 会误伤前缀相近
+                    # 根目录，如 /a/.skills 与 /a/.skills2）；(?![\w./-])
+                    # 保证只匹配完整路径。
+                    _same_dir_re = re.compile(
+                        rf"(same directory as ){re.escape(_ref)}(?![\w./-])")
+                    _new_prompt = _same_dir_re.sub(
+                        lambda m, _a=_authoritative_root: f"{m.group(1)}{_a}",
+                        _new_prompt)
+                if _eff_name != _skill_name:
+                    # 异名回退：layout 行的相对技能名也重写为有效名
+                    _layout_re = re.compile(
+                        rf"(layout: ){re.escape(_skill_name)}(/SKILL\.md \(main\) "
+                        rf"plus ){re.escape(_skill_name)}(/references/)")
+                    _new_prompt = _layout_re.sub(
+                        lambda m: (f"{m.group(1)}{_eff_name}{m.group(2)}"
+                                   f"{_eff_name}{m.group(3)}"),
+                        _new_prompt)
+                if _new_prompt != prompt:
+                    prompt = _new_prompt
+                    _rewrote = True
+                    log.warning(
+                        f"[skill] #4186 prompt skill path realigned: "
+                        f"'{_ref}' not readable, rewritten to "
+                        f"'{_authoritative_root}' (skill '{_eff_name}') "
+                        f"(route name != agent type)")
+            if _rewrote and "[Skill Materialization Notice]" not in prompt:
+                # 通知单一出口：_materialize_worker_skill 已追加 Notice 时不再重复
+                prompt += (
+                    f"\n\n[Skill Materialization Notice] "
+                    f"DEVOPS_SKILLS_DIR={_authoritative_root} "
+                    f"(aligned): the skill path previously injected into this prompt "
+                    f"did not match the actually materialized workspace directory; "
+                    f"it has been rewritten to the readable path above. Read "
+                    f"{_authoritative_root}/{_eff_name}/SKILL.md directly.")
+            return prompt
+        # 无可读 SKILL.md：显式 degraded + 回退路径（Spec 验收 3）
+        _fallback_dir = _env_dir or skill_dir
+        prompt += (
+            f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={_fallback_dir} "
+            f"(degraded): skill '{_skill_name}' SKILL.md is not readable under the "
+            f"injected skill path or DEVOPS_SKILLS_DIR on this worker; the injected "
+            f"path may point to a directory that was never materialized here. "
+            f"Fetch the skill via `grape skills detail` or the platform skills API "
+            f"before proceeding.")
+        log.warning(f"[skill] #4186 no readable SKILL.md for '{_skill_name}' "
+                    f"(skill_dir={skill_dir}, DEVOPS_SKILLS_DIR={_env_dir or 'unset'})")
+        return prompt
+    except Exception as _e:
+        # QA review：异常分支不静默返回原 prompt——补显式 degraded 标注，
+        # 避免 Agent 按可能不可读的注入路径取技能且无回退提示。
+        log.warning(f"[skill] #4186 prompt skill path normalize failed: {_e}")
+        try:
+            _exc_dir = str((env or {}).get("DEVOPS_SKILLS_DIR") or "").strip() \
+                or skill_dir
+            if "[Skill Materialization Notice]" not in prompt:
+                prompt += (
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={_exc_dir} "
+                    f"(degraded): prompt skill path normalization failed "
+                    f"({_e}); the injected skill path may be unreadable. "
+                    f"Fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+        except Exception as _e2:
+            log.warning(f"[skill] #4186 degraded note append failed: {_e2}")
+        return prompt
 
 
 async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, _res,
@@ -3776,6 +3973,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 task.get("repo_key") or "", task.get("agent_type") or "",
                 _num, token=_get_task_token(task),
                 work_branch=_wb, task_id=tid,
+                pr_number=env.get("PR_NUMBER", ""),
                 strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
             # Issue #3713：建树没成且凭据侧不可用 → 把 stage 带进 task errors 并阻断，
             # 不再放任 agent 以「git 元数据只读」自述降级、零交付仍 completed。
@@ -3844,7 +4042,8 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 # Issue #2514：关联仓基线分叉按仓降级（repogit 内记 baseline_blocked_linked）
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task), env=env, task_id=tid)
+                    token=_get_task_token(task), env=env, task_id=tid,
+                    pr_number=env.get("PR_NUMBER", ""))
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -3900,6 +4099,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)
+    # Issue #4186：物化后对 prompt 注入的技能路径做存在性探测 + 同源化重写
+    # （DEVOPS_SKILLS_DIR 可读路径优先；无任何可读 SKILL.md 时 degraded 标注
+    # + 回退路径），消除「issue/.skills 提示 vs sre/ 实际物化」的错配。
+    prompt = _normalize_prompt_skill_path(task, env, prompt, skill_dir)
     # Issue #887：执行前技能一致性硬校验（fail-fast）+ 来源日志标注——绑定 skill 未物化
     # 而本地缓存存在其它技能时拒绝执行（events seq=46108：绑定 caserun-prep 实际执行
     # casegen-prep，静默跑错流程并跳过环境硬校验）。扫描范围含引擎原生技能目录，

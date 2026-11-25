@@ -1863,6 +1863,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         "agent_engines": agent_engines,
         "scene_nodes": scene_nodes,
         "host_status": host_status,
+        # Issue #3354: 透出失败步骤与可读原因，供前端「托管失败，点击重试」展示
+        "host_step": _host_detail.get("step", ""),
+        "host_error": _host_detail.get("error", ""),
     }
 
 import re

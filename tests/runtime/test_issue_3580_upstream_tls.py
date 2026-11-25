@@ -84,7 +84,9 @@ def test_all_upstream_call_sites_use_the_policy_entry():
     from src.domains.runtime.vcs import api_client
     from src.kernel import vcs_gitlab_hooks
 
-    for fn in (vcs_base.GenericVcsProvider._http,
+    # Issue #3386 复审：_http 拆出 _http_with_headers（响应头复用），
+    # 统一入口落在 _http_with_headers；_http 是其零逻辑委托包装。
+    for fn in (vcs_base.GenericVcsProvider._http_with_headers,
                api_client.VcsApiClient._do_request,
                vcs_gitlab_hooks._request):
         assert "open_with_policy" in inspect.getsource(fn), f"{fn} 未走上游统一入口"

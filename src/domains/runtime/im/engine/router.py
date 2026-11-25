@@ -91,6 +91,7 @@ class Router:
         bindings,
         dedup: InboundDedup,
         replier,
+        unbound_card: Optional[Callable[[InboundMessage], Awaitable[None]]] = None,
         append_message: Callable[..., Awaitable[None]] = _noop,
         parse_command: Optional[Callable[[str], Optional[Any]]] = None,
         apply_command: Optional[Callable[..., Awaitable[Optional[Exception]]]] = None,
@@ -105,6 +106,7 @@ class Router:
         self._bindings = bindings
         self._dedup = dedup
         self._replier = replier
+        self._unbound_card = unbound_card
         self._append_message = append_message
         self._parse_command = parse_command or _no_command
         self._apply_command = apply_command
@@ -153,7 +155,11 @@ class Router:
                 self._dedup.mark(inst.installation_id, msg)
                 return None
             self.calls.append(("binding_card", msg.event_id))
-            await self._replier.send_binding_card(msg)
+            if self._unbound_card is not None:
+                # 渠道给了带按钮的引导卡就走它；否则退回纯文本引导（旧行为）
+                await self._unbound_card(msg)
+            else:
+                await self._replier.send_binding_card(msg)
             self._dedup.mark(inst.installation_id, msg)
             return None
 

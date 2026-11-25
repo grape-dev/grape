@@ -414,8 +414,12 @@ def _start_active_user_tracker_task():
                     _purge_i = 0
                     from src.kernel.auth_sdk.auth_token import purge_expired_session_tokens
                     await asyncio.to_thread(purge_expired_session_tokens)
-                    from src.api.event_store import purge_stale_event_guards
+                    from src.api.event_store import (
+                        purge_stale_comment_dispatch_guards,
+                        purge_stale_event_guards,
+                    )
                     await asyncio.to_thread(purge_stale_event_guards)
+                    await asyncio.to_thread(purge_stale_comment_dispatch_guards)
             except Exception as e:
                 log.warning(f"Session token purge failed: {e}")
 
@@ -785,6 +789,7 @@ app.include_router(observability.router)
 
 app.include_router(patrol.router)
 
+# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
 
 app.openapi = lambda: custom_openapi(app)
@@ -824,9 +829,6 @@ from src.api.middleware import install_request_middleware
 
 # /api/ping（Issue #596 P1：随 health_endpoints 安装，含 /health /healthz /readyz /health/realtime）
 from src.api.health_endpoints import install_health_endpoints
-
-# ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
-from src.api.openapi import custom_openapi
 
 # ===== Issue #596 P1：静态资源 + SPA 路由抽至 src/api/spa.py（A 进程复用）=====
 from src.api.spa import install_spa_routes

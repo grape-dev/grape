@@ -145,7 +145,10 @@ def test_hook_entry_code_fail_open_with_repair_hint_when_lock_missing(tmp_path):
     assert r.returncode == 0, r.stderr          # push 不被阻断
     assert "[branch-guard] WARNING" in r.stderr
     assert "fail-open" in r.stderr
-    assert "cannot import name 'lock'" in r.stderr
+    # Issue #2923：只给可读中文结论，原始 ImportError 文案不得回流 stderr。
+    assert "守卫自身异常" in r.stderr
+    assert "cannot import name 'lock'" not in r.stderr
+    assert "ImportError" not in r.stderr
     # 修复指引：指名重装/升级 worker 包，而不是只给裸 traceback
     assert "install-worker" in r.stderr or "升级" in r.stderr
     assert "Traceback" not in r.stderr           # 不给裸栈
@@ -163,7 +166,9 @@ def test_hook_main_fail_open_on_kernel_lock_import_error(monkeypatch, capsys):
     assert bg.hook_main([REPO_KEY]) == 0
     err = capsys.readouterr().err
     assert "[branch-guard] WARNING" in err and "fail-open" in err
-    assert "src.kernel.lock" in err
+    # Issue #2923：只给可读中文结论，不回传模块名/异常原文。
+    assert "分支守卫运行异常" in err
+    assert "src.kernel.lock" not in err
 
 
 def test_hook_main_missing_dependency_reports_repair_hint(monkeypatch, capsys):
@@ -179,7 +184,9 @@ def test_hook_main_missing_dependency_reports_repair_hint(monkeypatch, capsys):
     monkeypatch.setattr(bg.sys, "stdin", io.StringIO(_ref_line()))
     assert bg.hook_main([REPO_KEY]) == 0
     err = capsys.readouterr().err
-    assert "src.kernel.lock" in err and "fail-open" in err
+    # Issue #2923：只给可读中文结论，不回传模块名/ImportError 原文。
+    assert "分支守卫依赖缺失" in err and "fail-open" in err
+    assert "src.kernel.lock" not in err
     assert "install-worker" in err or "升级" in err
 
 
@@ -207,7 +214,9 @@ def test_hook_entry_code_fail_open_on_tree_missing_kernel_lock(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "[branch-guard] WARNING" in r.stderr
     assert "fail-open" in r.stderr
-    assert "src.kernel.lock" in r.stderr            # 告警指名缺失模块
+    # Issue #2923：告警只给可读中文结论，原始模块名/异常原文不得回流。
+    assert "分支守卫依赖缺失" in r.stderr
+    assert "src.kernel.lock" not in r.stderr
     assert "install-worker" in r.stderr or "升级" in r.stderr   # 可执行修复指引
 
 
@@ -242,13 +251,13 @@ def test_install_worker_smoke_checks_lock_alias_and_branch_guard():
     """冒烟 import 列表覆盖 canonical lock、旧别名 src.lock 与新布局守卫。"""
     with open(_INSTALL_SCRIPT, encoding="utf-8") as f:
         text = f.read()
-    assert "import src.kernel.lock" in text
-    assert "import src.domains.runtime.engine.branch_guard" in text
-    assert "from src import lock" in text, "旧别名 src.lock 仍需可导入（存量导入方）"
+    assert '"src.kernel.lock"' in text
+    assert '"src.domains.runtime.engine.branch_guard"' in text
+    assert '"src.lock"' in text, "旧别名 src.lock 仍需可导入（存量导入方）"
     # 诊断路径必须指向真实存在的 canonical otel 模块（src/observability 不存在；
     # insight 域内同名模块只是转发薄壳，安装期优先校验内核路径）
     assert "src.observability.otel" not in text
-    assert "import src.kernel.otel" in text
+    assert '"src.kernel.otel"' in text
 
 
 def _smoke_func_source():
@@ -293,6 +302,13 @@ def _write_pkg_skeleton(install_dir):
     with open(real_init, encoding="utf-8") as f:
         (src / "__init__.py").write_text(f.read(), encoding="utf-8")
     (src / "kernel" / "config.py").write_text("X = 1\n", encoding="utf-8")
+    # Issue #2923 起冒烟自检逐模块覆盖 session_manager / otel / vcs.api_client。
+    (src / "kernel" / "session_manager.py").write_text("X = 1\n", encoding="utf-8")
+    (src / "kernel" / "otel.py").write_text("X = 1\n", encoding="utf-8")
+    vcs = src / "domains" / "runtime" / "vcs"
+    vcs.mkdir(parents=True, exist_ok=True)
+    (vcs / "__init__.py").write_text("", encoding="utf-8")
+    (vcs / "api_client.py").write_text("X = 1\n", encoding="utf-8")
     for rel in ("domains", "domains/runtime", "domains/runtime/engine"):
         (src / rel / "__init__.py").write_text("", encoding="utf-8")
     (engine / "agent.py").write_text("X = 1\n", encoding="utf-8")

@@ -540,22 +540,56 @@ rm -f "$TMP_PKG"
 # 冒烟失败 → fail 并保留旧代码不动（第 6 步还没执行，旧进程仍在运行），
 # worker 继续用旧版本心跳，等下一个修复版本——零中断。
 # 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
+# Issue #2923：自检覆盖 branch guard PR 查询依赖（vcs）与 lock 别名入口；
+# 旧实现只 import config/agent，缺 src.vcs 的坏包仍能通过自检，运行期才在
+# push 时抛 ModuleNotFoundError。这里逐模块 import，缺任一即判定坏包。
+# 自检模块必须能在 worker 最小依赖（WORKER_DEPS，见第 4 节）下 import：自检在
+# 建 venv + 安装依赖之后执行，此时 aiohttp/requests 等 worker 依赖已就绪。
+# worker 不装 prometheus_client 等服务端专属依赖，若自检 import 了转发壳
+# src.domains.insight.observability.otel（其父包会触发 GSB 指标注册），
+# 依赖就绪的 worker venv 仍会 ModuleNotFoundError，导致全新安装/存量升级被误拒。
+# 埋点请用零第三方依赖的 canonical 入口 src.kernel.otel。
 _smoke_check() {
-  [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
+[ -x "$VENV/bin/python" ] || return 0   # 防御：venv 不可用时跳过（正常调用点已后移至建 venv + 装依赖之后，见第 4 节末尾）
   # Issue #2292（issue #2147 同根因）：pre-push 分支守卫在**钩子进程**里懒加载
   # src.kernel.lock / branch_guard，顶层 import agent 察觉不到缺这两个模块——
   # 坏包装上后所有 grape git push 都会 ImportError 被阻断（用户只能 --no-verify）。
   # 冒烟因此显式校验：canonical lock、存量别名 src.lock（老导入方）、新布局守卫。
-  _smoke_imports="import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent; import src.kernel.lock; from src import lock; import src.domains.runtime.engine.branch_guard"
-  if "$VENV/bin/python" -c "$_smoke_imports" >/dev/null 2>&1; then
+  if _smoke_err="$("$VENV/bin/python" - "$INSTALL_DIR" 2>&1 <<'PY'
+import importlib
+import sys
+
+install_dir = sys.argv[1]
+sys.path.insert(0, install_dir)
+modules = (
+    "src.kernel.config",
+    "src.kernel.lock",                       # branch_guard 租约依赖（Issue #2028）
+    "src.lock",                              # 存量别名入口（老导入方，Issue #2292）
+    "src.kernel.session_manager",
+    "src.domains.runtime.engine.agent",
+    "src.domains.runtime.engine.branch_guard",
+    "src.domains.runtime.vcs.api_client",    # PR 查询依赖（Issue #2923）
+    "src.kernel.otel",                       # worker 侧埋点依赖（零第三方依赖，canonical 入口）
+)
+missing = []
+for name in modules:
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        missing.append("%s (%s: %s)" % (name, exc.__class__.__name__, exc))
+if missing:
+    print("; ".join(missing))
+    raise SystemExit(1)
+PY
+  )"; then
     log "New code import smoke check passed"
+    _version_consistency_check
     return 0
   else
     # worker 侧埋点依赖 otel：缺包直接中止升级（架构守护 BLOCKED-1）。
-    # 诊断 import 列表与主检查保持一致（否则报错指向无关模块）；otel 优先校验
+    # 诊断 import 列表与主检查保持一致（否则报错指向无关模块）；otel 统一校验
     # canonical src/kernel/otel.py（域内 src.domains.insight.observability.otel
     # 只是转发薄壳，安装期不额外耦合 insight 域；src/observability 不存在，旧写法恒误报）。
-    _smoke_err="$("$VENV/bin/python" -c "$_smoke_imports; import src.kernel.otel" 2>&1 | tail -1)"
 
     # Issue #2292：告警给出可执行修复动作，而不是只留裸栈让运维/Agent 猜。
     log "!!! New code import smoke check failed: $_smoke_err"
@@ -564,7 +598,27 @@ _smoke_check() {
     return 1
   fi
 }
-_smoke_check || fail "New worker package import smoke check failed (bad package); upgrade aborted, old code untouched"
+
+# Issue #2923：校验安装包 VERSION 与解压后 src/ 运行时指纹一致，
+# 提前发现"安装包与运行时代码不一致"（缺模块/半旧包）导致的隐性降级。
+_version_consistency_check() {
+  [ -f "$INSTALL_DIR/VERSION" ] || return 0
+  _pkg_ver="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)"
+  _rt_ver="$("$VENV/bin/python" - "$INSTALL_DIR" 2>/dev/null <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from src.kernel.worker_package import worker_code_version
+print(worker_code_version())
+PY
+)" || _rt_ver=""
+  if [ -z "$_pkg_ver" ] || [ -z "$_rt_ver" ]; then
+    log "Warning: worker version consistency check skipped (version unavailable)"
+  elif [ "$_pkg_ver" != "$_rt_ver" ]; then
+    log "Warning: worker package VERSION ($_pkg_ver) != runtime src fingerprint ($_rt_ver); package may be stale or modified in place, please reinstall a fresh package"
+  else
+    log "Worker package and runtime src version match ($_pkg_ver)"
+  fi
+}
 
 # ===== 3.6 启动路径自检（--self-check，2026-11-19 Windows 升级即离线事故）=====
 # import 冒烟只覆盖 import 期；__main__ 块里的平台差异看不到。
@@ -839,6 +893,11 @@ if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
     "$PIP_CMD" list --format=freeze 2>/dev/null | grep -iE '^(aiohttp|bcrypt|click|httpx|cubesandbox|requests|cryptography|fastapi|grape)==?' | sed 's/^/    /' || true
   fi
 fi
+
+# Issue #2923：自检放在建 venv + 安装依赖之后，覆盖全新安装与升级两条路径。
+# 旧实现调用点在 venv 创建之前，首次安装因 `[ -x "$VENV/bin/python" ]` 直接跳过，
+# 装出缺模块的坏包仍会成功（AC4 仅覆盖升级）。此时尚未停旧进程，失败可安全中止。
+_smoke_check || fail "New worker package import smoke check failed (bad package); install/upgrade aborted, old code untouched"
 
 # ===== 4.5 安装 grape CLI（独立项目 grape-cli；优先随包离线 wheel，失败回退在线）=====
 _install_grape_online() {

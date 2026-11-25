@@ -53,7 +53,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     （如 runtime_instance_name / skill 加载 / stream_agent 启动前崩溃）。
     """
     from src.domains.runtime.pipeline.event_pipeline import (
-        _cleanup_direct_workdir, _update_direct_task,
+        _cleanup_direct_workdir, _update_direct_task, _pr_num_for_evt,
     )
     from src.domains.runtime.engine.repogit import WorkspaceBaselineError
     try:
@@ -84,9 +84,11 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         from datetime import datetime, timezone
         try:
             from src.api.event_store import update_event_complete
+            from src.domains.runtime.agents.failure_info import failure_info_from_exception
             update_event_complete(seq, "failed", exit_code=1,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=f"执行崩溃：{e}")
+                                  result=f"执行崩溃：{e}",
+                                  failure_info=failure_info_from_exception(e, _tb))
             if task_id:
                 from src.domains.runtime.engine.service import update_task_status
                 update_task_status(task_id, "failed", exit_code=1, result_text=f"执行崩溃：{e}")
@@ -110,6 +112,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
                 repo_key, agent_type,
                 evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or "",
                 task_id=task_id,
+                pr_number=_pr_num_for_evt(evt),
             )
         except Exception:
             pass
@@ -282,6 +285,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _sync_issue_comments_to_conversation, _update_direct_task, get_agent_display_name,
         resolve_actor_account,
         get_agent_workdir, register_scene_deploy_url, register_sre_deploy_url,
+        _pr_num_for_evt,
     )
     from src.domains.runtime.engine.executor import stream_devops_agent
     from src.kernel.prompt_builder import build_devops_agent_prompt
@@ -315,7 +319,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     from src.kernel.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
     issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
-    ws = get_agent_workdir(repo_key, agent_type, issue_id)
+    _pr_num = _pr_num_for_evt(evt)
+    ws = get_agent_workdir(repo_key, agent_type, issue_id, _pr_num)
     os.makedirs(ws, exist_ok=True)
 
     # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
@@ -328,7 +333,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         if _has_issue:
             from src.api.session_store import get_or_create_issue_session, guard_issue_session_pointer
-            _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+            # Issue #3375：会话按 PR 维度隔离（同 Issue 多 PR 不共享 oc_session_id）
+            _isess = get_or_create_issue_session(repo_key, agent_type, issue_id, _pr_num)
             issue_session_id = _isess.get("id") or ""
             # session 引擎守卫：backend 即本次引擎名，跨引擎指针弃用（防 hermes resume
             # opencode 会话号静默挂死）；引擎未知 → 放行。
@@ -476,7 +482,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         pass
     # Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）；
     # direct 路径 agent_name 参数仍同步传 stream_devops_agent（幂等同值）。
-    _inject_bot_agent_env(env_extra, repo_key, agent_type)
+    # Issue #3348：BOT_USERNAME 注入前平台校验，来源写入事件 agent_logs。
+    _inject_bot_agent_env(env_extra, repo_key, agent_type, agent_logs=agent_logs)
     # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):
@@ -508,7 +515,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 task_id=task_id,
                 strict_override=env_extra.get("GRAPE_WORKSPACE_STRICT"),
                 delivery_branch=f"feat/issue-{_gnum}" if _is_inspector else "",
-                delivery_info=_delivery_info if _is_inspector else None)
+                delivery_info=_delivery_info if _is_inspector else None,
+                pr_number=_pr_num)
             if _is_inspector and _wt:
                 # Issue #1954：direct 路径与 worker 路径一致，注入 CASE_DIR/交付 ref/sha/产出方工作区
                 try:
@@ -632,7 +640,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list_dr, agent_type, _gnum_lr,
-                    token=repo_gitcode_token, env=env_extra, task_id=task_id)
+                    token=repo_gitcode_token, env=env_extra, task_id=task_id,
+                    pr_number=_pr_num)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -899,6 +908,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # exit_code < 0 表示进程被信号终止（如 -15=SIGTERM, -9=SIGKILL），
     # 但 has_output=True 说明 Agent 已完成业务产出（PR/测试/评论/结构化 conclusion），
     # 信号终止常发生在引擎完成输出后的进程清理阶段，不应判为失败。
+    _fake_completion = False
     if exit_code == 0 or (has_output and exit_code < 0):
         new_status = "completed"
         # R21.7.1: agent 完成后立即更新 devops_agent_session status='idle'
@@ -948,6 +958,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         break
             if not (_self_ok or _write_action):
                 new_status = "failed"
+                _fake_completion = True
                 log.warning(f"Exec agent: seq={seq} exit_code=0 but no verified output "
                             f"(self_reported={_self_ok}, write_action={_write_action}), "
                             f"demoting to failed (fake completion guard)")
@@ -1036,6 +1047,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _fail_errors_json = json.dumps(_merged)
         except Exception as _e:
             log.warning(f"Exec agent: errors merge for seq={seq} failed: {_e}")
+    from src.domains.runtime.agents.failure_info import failure_info_for_stream
+    _failure_info_arg = failure_info_for_stream(
+        new_status, _exec_done_errors, result_text, exit_code,
+        fake_completion=_fake_completion)
     if task_id:
         from src.domains.runtime.engine.service import update_task_status
         if _fail_errors_json is not None:
@@ -1049,7 +1064,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text,
-                          task_id=task_id or "")
+                          task_id=task_id or "", failure_info=_failure_info_arg)
     log.info(f"Exec agent: seq={seq} -> {new_status}, duration={duration}s, logs={len(agent_logs)}, result={result_text[:80]}\n")
 
     # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（direct 模式）

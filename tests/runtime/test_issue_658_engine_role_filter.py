@@ -44,6 +44,8 @@ def _clean_tables(monkeypatch):
             except Exception:
                 pass
         db.commit()
+    # Issue #3584：同负载并列按进程内轮转序号取模，复位保证多引擎断言（min id）确定
+    es._PICK_ROTATION_POOL.reset()
     yield
     with db_lock:
         for s in _sql:

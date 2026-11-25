@@ -725,13 +725,14 @@ def check_repo_access(user: dict, repo_key: str) -> None:
     uid = str(user.get("id") or "")
     if not uid or not repo_key:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})
-    from src.kernel.repo_key import to_repo_key, repo_key_candidates
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates, repo_key_casefold
     rk = to_repo_key(repo_key)
     # D16/S25：候选集由平台卡清单派生（新平台自动加入，修复双前缀功能 bug）
-    candidates = set(repo_key_candidates(rk))
+    candidates = {repo_key_casefold(c) for c in repo_key_candidates(rk)}
+    # Issue #3397：仓库归属比对大小写不敏感（登记写法与请求路径大小写可能不一致）。
     repos = user_db.get_managed_repos(uid)
     for r in repos:
-        if r["repo_key"] in candidates:
+        if repo_key_casefold(r["repo_key"]) in candidates:
             return  # 用户有权访问
     raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})
 

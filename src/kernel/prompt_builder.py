@@ -130,12 +130,14 @@ def _resolve_business_server_url(runtime_id: int = 0) -> str:
     （issues / git-repo 等全量 261 端点），worker runtime / A2A 回连基址改由
     `RUNTIME_SERVER_URL`（见 `_resolve_server_url`）独立承载。
 
-    Issue #1731：本机 runtime 分支不再直接返回回环地址，而是对业务端口候选做
-    可用性探测；探测失败跳过并回退 `server_base_url`（再次探测），仍不可用则
-    末尾兜底并记 warning。来源优先级：`task_business_api_url` 显式配置（不探测）
-    > 本机业务端口（探测通过）> `server_base_url`（探测通过）> 兜底。
-    远程 runtime 沿用 `server_base_url`（`get_business_api_url`），行为不变。
-    单地址部署时 `worker_connect_url` 回退 `server_base_url`，与改造前等价。
+    Issue #3766：业务 API 注入前统一走校验+候选链——不再对「显式配置
+    `task_business_api_url` / 远程 runtime」跳过探测（它们同样可能被网关转到
+    admin 前端）。默认按候选链 `task_business_api_url` → 本机业务端口 →
+    `server_base_url` 逐个做业务 API 可达性探测（health → openapi 业务路由族 →
+    `/api/issues/mine`），返回首个通过者；全部候选均不可用时回退到显式配置/
+    `server_base_url`（运维声明意图）并 `error` 告警，`GRAPE_BUSINESS_API_GUARD=strict`
+    时直接阻断注入；`=off` 保留 Issue #1731 旧语义（显式配置最高优先且不探测、
+    远程直接用对外基址）。求值异常时仍先探测本机业务端口再兜底。
     """
     url, _source = _resolve_business_base(runtime_id)
     return url
@@ -198,6 +200,15 @@ _KNOWLEDGE_INJECT_MAX_CHARS = 8000
 _COMMENT_BODY_CHAR_LIMIT = 4000
 
 _COMMENT_QUOTE_EXCERPT_CHARS = 300
+
+# Issue #3375：PR 类事件（实体为 pull_request）——Issue Pipeline 摘要注入时
+# 必须按关联 Issue 号排除，且只看 issue 实体事件（不把其他 PR 的评审结论带进来）。
+# kernel 不能反向 import domains，故本地镜像 domains.vcs.event_types.ALL_PR_EVENTS；
+# 一致性由 tests/runtime/test_issue_3375_cleanup.py::TestPrEventTypesParity 守卫。
+_PR_EVENT_TYPES = frozenset({
+    "note_hook_pr", "pull_request_opened", "pull_request_updated",
+    "pull_request_closed", "pull_request_merged", "pull_request_review",
+})
 
 _QUOTE_NOISE_RE = re.compile(r"^\[@[^\]]+\]\([^)]*\)\s*$")
 
@@ -704,6 +715,33 @@ def extract_event_number(payload):
         return payload["number"]
     return None
 
+def _pr_number_from_event(evt):
+    """note_hook_pr 的 PR 号（Issue #3375）。
+
+    优先使用事件构建期已解析值 evt._pr_number；其次结构化 payload
+    （pull_request / merge_request），再退 object_attributes.noteable_iid
+    （noteable_type=Issue 时该字段是 Issue 号，不作 PR 号）。
+    不复用 extract_event_number 的 object_attributes.iid/id——Note Hook 中
+    它们可能是评论自身 id，误当 PR 号会写出错误作用域声明。非法/为 0 返回空串。
+    """
+    from src.kernel.pr_scope import normalize_pr_number
+    _n = normalize_pr_number(evt.get("_pr_number"))
+    if _n:
+        return _n
+    payload = evt.get("payload") or {}
+    for key in ("pull_request", "merge_request"):
+        obj = payload.get(key)
+        if isinstance(obj, dict):
+            for field in ("number", "iid"):
+                v = normalize_pr_number(obj.get(field))
+                if v:
+                    return v
+    oa = payload.get("object_attributes")
+    if isinstance(oa, dict) and oa.get("noteable_type") != "Issue":
+        v = normalize_pr_number(oa.get("noteable_iid"))
+        if v:
+            return v
+
 def _build_output_contract(repo_key: str = "") -> str:
     """处理记录输出要求 + 行为约束（所有 DevOps agent 共用，见 agent-runtime-event-full-design.md §8）。
 
@@ -1089,6 +1127,46 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append("  Note: even without the number, you MUST reply to the comment - do not skip it silently.")
         parts.append("\nYou MUST reply to this comment: use POST /git-repo/{owner}/{repo}/issues/{n}/comments; start the body with the comment prefix required by your skill, and quote the user's original comment.")
         parts.append("\n⚠️ **Issue comment format (MUST FOLLOW)**: the comment body MUST start with `[Role Agent]` as a prefix (e.g. `[Coding Agent]`, `[QA Agent]`, `[SRE Agent]`, `[Issue Agent]`, `[VOD Agent]`), with the role name capitalized. **Do NOT** use the skill name, repository name, or any other custom prefix.")
+    elif evt_type == "note_hook_pr":
+        # Issue #3375：note_hook_pr 专属分支——输出 PR 号、本次 diff 文件清单与
+        # 显式作用域声明，禁止引用非本次 diff 的 PR/评审内容（跨 PR 片段污染源 B1）。
+        _pr_num = _pr_number_from_event(evt)
+        _pr_label = f"PR #{_pr_num}" if _pr_num else "PR (number unresolved)"
+        parts.append(f"Event: note_hook_pr on {repo} — {_pr_label}")
+        if title != '""':
+            parts.append(f"Title: {title}")
+        if body != '""':
+            parts.append(f"Body: {body}")
+        _note = ""
+        if isinstance(payload.get("object_attributes"), dict):
+            _note = payload["object_attributes"].get("note", "") or ""
+        if _note:
+            _quote_excerpt, _comment_body = _split_leading_quote_block(_note)
+            if _quote_excerpt:
+                parts.append(f"(User quoted earlier content: {_quote_excerpt})")
+            parts.append(
+                f'Comment: {json.dumps(_clip_raw_text(_comment_body, _COMMENT_BODY_CHAR_LIMIT), ensure_ascii=False)}')
+        _diff_files = evt.get("_pr_diff_files")
+        _diff_truncated = bool(evt.get("_pr_diff_truncated"))
+        parts.append("\n## PR Change Scope (MUST FOLLOW)")
+        parts.append(f"- Current PR: {_pr_label}")
+        parts.append(f"- Repository: {repo}")
+        if isinstance(_diff_files, (list, tuple)) and len(_diff_files) > 0:
+            _shown = list(_diff_files)[:200]
+            parts.append(f"- Files in this PR diff ({len(_diff_files)}{'+ (truncated)' if _diff_truncated or len(_diff_files) > len(_shown) else ''}):")
+            for _p in _shown:
+                parts.append(f"  - {_p}")
+            if len(_diff_files) > len(_shown):
+                parts.append(f"  - ... ({len(_diff_files) - len(_shown)} more files omitted)")
+        else:
+            parts.append("- Files in this PR diff: (unavailable — use the VCS API `grape git-repo pulls files` to list this PR's changed files before judging)")
+        parts.append(
+            "- Scope constraint: the gate conclusion and any comment body MUST be based ONLY on this PR's diff "
+            "(the files listed above) and this run's command output. Do NOT quote, merge, or re-use review/gate text "
+            "from other Issues or PRs — another PR's findings must not appear in this PR's result.\n"
+            "- If referencing another Issue/PR is genuinely necessary, put it in a separate `## 关联参考 #N` section "
+            "with the source number explicitly stated; never mix it into the current result body."
+        )
     elif evt_type == "vod_signal":
         user_msg = payload.get("user_message", "")
         user_name = evt.get("actor", "unknown user")
@@ -1130,8 +1208,21 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     try:
         from src.api.event_store import get_issue_summary
         repo_key = f"{evt['source']}:{evt['repository']}"
-        _current_issue = str(evt.get("issue_id") or number or "").lstrip("#")
-        issue_summary = get_issue_summary(repo_key, exclude_issue=_current_issue)
+        # Issue #3375（B2）：PR 类事件的排除键必须用「关联 Issue 号」，不能用 PR 号——
+        # PR 号的命名空间与 Issue 不同，按 PR 号排除必然不命中，导致仓库内其他
+        # Issue/PR 的「最新结论」（正是评审原文）被整段注入本 PR 的 prompt。
+        # 无关联 Issue 的 PR 事件直接跳过该段注入（宁缺勿污染）。
+        _is_pr_event = evt_type in _PR_EVENT_TYPES
+        _issue_summary_text = ""
+        if _is_pr_event:
+            _linked_issue = str(evt.get("issue_id") or "").lstrip("#")
+            if _linked_issue.isdigit() and _linked_issue != "0":
+                _issue_summary_text = get_issue_summary(
+                    repo_key, exclude_issue=_linked_issue, entity_type="issue")
+        else:
+            _current_issue = str(evt.get("issue_id") or number or "").lstrip("#")
+            _issue_summary_text = get_issue_summary(repo_key, exclude_issue=_current_issue)
+        issue_summary = _issue_summary_text
         if issue_summary:
             if _user_selected_scene:
                 parts.append(issue_summary)
@@ -1707,7 +1798,7 @@ def build_scene_recommender_prompt(evt, repo_key: str) -> str:
 
     return "\n".join(parts)
 
-import json, os, re, sys, threading, time, urllib.request
+import json, os, re, sys, threading, time, urllib.error, urllib.request
 
 from src.kernel.service_diagnostics import (
     SERVICE_BASE_ENV_KEYS as _SERVICE_BASE_ENV_KEYS,
@@ -1767,10 +1858,70 @@ def _http_get_json(url: str, timeout: float):
     except Exception:
         return None
 
+def _http_json_status(url: str, timeout: float) -> tuple[int, dict | None]:
+    """GET 并返回 (状态码, JSON)；非 2xx 也读取响应体，超时/断连返回 (0, None)。
+
+    Issue #3766：业务 API 可达性校验需要区分「401/403 鉴权挑战（端点存在）」与
+    「301/302/404（落到 admin 前端等非业务服务）」，旧的 `_http_get_json` 只认 200
+    会把前者误判为不可达、后者无法解释，故新增状态码感知的探测原语。
+    """
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        status = int(getattr(exc, "code", 0) or 0)
+        try:
+            raw = exc.read()
+        except Exception:
+            raw = b""
+    except Exception:
+        return 0, None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:
+        payload = None
+    return status, payload
+
+
 def _probe_health(base_url: str, timeout: float) -> bool:
     """`/api/health` 探测：业务 API 返回 server=ok；runtime 网关无此端点即 404。"""
     payload = _http_get_json(base_url.rstrip("/") + "/api/health", timeout)
     return isinstance(payload, dict) and payload.get("server") == "ok"
+
+
+def _probe_business_issues(base_url: str, timeout: float) -> bool:
+    """`/api/issues/mine` 探测：直接验证 Skill 实际调用的业务端点族（Issue #3766）。
+
+    探测端点必须是业务 router 真实注册的路由：`/api/issues` 裸路径未注册（业务
+    router 只有 `/{owner}/{repo}`、`/mine`、`/{issue_id}/...`），请求会落到路由外的
+    404，无法区分「业务 API 缺 token」与「前端接管」。`/api/issues/mine` 真实存在，
+    未授权即返回 401×JSON 鉴权挑战，是可靠的可用性判据。
+
+    判定口径：
+    - 2xx + JSON → 业务 API 可达；
+    - 401/403 + JSON 鉴权/错误结构（`auth_code`/`error_code`/`detail`）→ 端点存在，
+      仅缺 token，属业务 API；
+    - 301/302/307/308/404/405、5xx 或 HTML → 视为被网关/前端接管（典型 admin
+      前端 301→404），不是业务 API。
+    """
+    status, payload = _http_json_status(
+        base_url.rstrip("/") + _BUSINESS_ISSUES_PROBE_PATH, timeout)
+    if status == 0 or status >= 500 or status in (301, 302, 307, 308, 404, 405):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if 200 <= status < 300:
+        return True
+    if status in (401, 403):
+        detail = payload.get("detail")
+        if isinstance(detail, dict) and ("auth_code" in detail or "error_code" in detail):
+            return True
+        if isinstance(detail, str) and detail.strip():
+            return True
+        return any(k in payload for k in ("auth_code", "error_code", "detail"))
+    return False
 
 def _probe_openapi_family(base_url: str, timeout: float) -> bool:
     """`/openapi.json` 端点族探测：含业务路由前缀才视为业务 API。
@@ -1805,8 +1956,10 @@ def _remember_probe_result(base: str, ok: bool) -> None:
             _business_probe_cache.pop(oldest, None)
 
 def _probe_business_api(base_url: str) -> bool:
-    """探测候选基址是否承载业务 API（health 优先，失败再探 openapi 端点族）。
+    """探测候选基址是否承载业务 API（health → openapi 端点族 → `/api/issues/mine`）。
 
+    Issue #3766：health/openapi 均不可用时，再用业务 router 真实注册的
+    `/api/issues/mine` 端点确认（未授权 401 视为业务 API，301/404/HTML 视为前端接管）。
     结果按基址进程内缓存（TTL 默认 60s），同一任务/多次派发不重复探测。
     """
     base = (base_url or "").strip().rstrip("/")
@@ -1824,6 +1977,12 @@ def _probe_business_api(base_url: str) -> bool:
         remaining = deadline - time.monotonic()
         if remaining >= 0.05:
             ok = _probe_openapi_family(base, remaining)
+    if not ok:
+        # Issue #3766：health/openapi 均被 admin 前端拦截时，再用 Skill 真实调用的
+        # `/api/issues/mine` 端点确认，301→404 等前端接管签名判为不可用。
+        remaining = deadline - time.monotonic()
+        if remaining >= 0.05:
+            ok = _probe_business_issues(base, remaining)
     _remember_probe_result(base, ok)
     return ok
 
@@ -1857,6 +2016,34 @@ def _redact_url(url: str) -> str:
     except Exception:
         return "***"
 
+_BUSINESS_API_GUARD_ENV = "GRAPE_BUSINESS_API_GUARD"
+_BUSINESS_API_GUARD_OFF_VALUES = ("off", "0", "false", "no", "disabled")
+_BUSINESS_API_GUARD_STRICT_VALUES = ("strict", "block")
+
+
+class BusinessApiGuardError(RuntimeError):
+    """严格模式下注入地址未通过业务 API 可达性校验（Issue #3766）。"""
+
+
+def _business_api_guard_mode() -> str:
+    """业务 API 注入守护模式：warn（默认，探测+回退+告警）/ off / strict（阻断）。
+
+    Issue #3766：注入地址可能被网关转到 admin 前端（`/api/issues` 301→404）。
+    默认 `warn` 优先回退到可验证的候选并告警，避免静默坏地址；`strict` 在无可用
+    候选时直接抛错阻断注入（高风险环境显式启用）；`off` 保留 Issue #1731 旧行为。
+    """
+    value = (os.environ.get(_BUSINESS_API_GUARD_ENV) or "").strip().lower()
+    if value in _BUSINESS_API_GUARD_OFF_VALUES:
+        return "off"
+    if value in _BUSINESS_API_GUARD_STRICT_VALUES:
+        return "strict"
+    return "warn"
+
+
+def _norm_business_base(url: str) -> str:
+    return (url or "").strip().rstrip("/")
+
+
 def _select_local_business_base(public_url: str) -> tuple[str, str]:
     """本机/未知 locality 的候选链求值：本机业务端口 → server_base_url → 兜底。
 
@@ -1882,20 +2069,95 @@ def _select_local_business_base(public_url: str) -> tuple[str, str]:
         return public_url, "unreachable_fallback"
     return local_base, "unreachable_fallback"
 
-def _resolve_business_base(runtime_id: int = 0) -> tuple[str, str]:
-    """求值业务 API 基址并返回 (基址, 命中来源分支)。"""
+
+def _business_candidate_chain(runtime_id: int, explicit: str,
+                              server_url: str) -> tuple[list[tuple[str, str]], bool | None]:
+    """业务 API 候选链（有序、去重）：显式配置 → 本机业务端口 → server_base_url → 回连地址。
+
+    Issue #3766：`server_base_url` 候选必须取自独立的 `get_server_base_url()`，
+    不能用 `get_business_api_url()`——后者在显式 `task_business_api_url` 存在时
+    直接返回显式值，会让真正的 server_base_url 被去重丢弃，显式误配为 admin
+    前端时永远无法回退到可达的对外基址。
+
+    远程 runtime 只信任显式配置与对外基址（含回连地址），绝不注入本机回环；
+    本机/未知 locality 才追加本机业务端口候选。
+    """
+    local = _runtime_is_local(runtime_id)
+    chain = []
+    if explicit:
+        chain.append((_norm_business_base(explicit), "explicit_config"))
+    if local is not False:
+        chain.append((_norm_business_base(_local_business_base()), "local_business_port"))
+    if server_url:
+        chain.append((_norm_business_base(server_url), "server_base_url"))
     try:
-        # 显式配置体现运维意图，保持最高优先级且不做网络探测。
-        explicit = _tokens.get_business_api_url_explicit()
-        if explicit:
-            return explicit, "explicit_config"
-        public_url = (_tokens.get_business_api_url() or "").strip().rstrip("/")
-        local = _runtime_is_local(runtime_id)
+        worker_url = _norm_business_base(_tokens.get_worker_connect_url())
+        # 仅在显式配置了 worker_connect_url（与 server_base_url 不同）时追加候选；
+        # 未配置时 getter 回退 server_base_url，不重复探测。
+        if worker_url and worker_url != _norm_business_base(server_url):
+            chain.append((worker_url, "worker_connect_url"))
+    except Exception as e:  # noqa: BLE001 - 取不到回连地址只丢该候选
+        _log_safe("debug", f"business candidate worker_connect_url skipped: {e}")
+    seen = set()
+    deduped = []
+    for url, source in chain:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append((url, source))
+    return deduped, local
+
+
+def _resolve_business_base(runtime_id: int = 0) -> tuple[str, str]:
+    """求值业务 API 基址并返回 (基址, 命中来源分支)。
+
+    Issue #3766：不再对「显式配置 / 远程 runtime」跳过校验——它们同样可能被
+    网关转到 admin 前端。默认按候选链逐个做业务 API 可达性探测，返回首个通过者；
+    全部失败时回退到显式配置/server_base_url 并告警（strict 模式直接阻断）。
+    """
+    mode = _business_api_guard_mode()
+    try:
+        explicit = _norm_business_base(_tokens.get_business_api_url_explicit())
+        public_url = _norm_business_base(_tokens.get_business_api_url())
+        # server_base_url 候选必须独立取值：get_business_api_url 在显式配置存在时
+        # 返回显式值，若复用之会丢掉真正的对外基址（Issue #3766 QA 复审）。
+        server_url = _norm_business_base(_tokens.get_server_base_url())
+        candidates, local = _business_candidate_chain(runtime_id, explicit, server_url)
+        if mode == "off":
+            # Issue #1731 旧行为：显式配置最高优先且不探测；远程直接使用对外基址。
+            if explicit:
+                return explicit, "explicit_config"
+            if local is False:
+                return public_url, "server_base_url"
+            return _select_local_business_base(public_url)
+        for url, source in candidates:
+            if _probe_business_api(url):
+                return url, source
+        # 没有任何候选通过探测：优先保留显式配置/server_base_url（运维声明的意图）。
+        preferred = next(
+            ((url, source) for url, source in candidates
+             if source in ("explicit_config", "server_base_url")),
+            candidates[0] if candidates else ("", ""),
+        )
+        if preferred[0]:
+            message = (
+                "prompt_builder: business API injection guard failed — no reachable "
+                "business API candidate (checked: "
+                + ", ".join(f"{_redact_url(u)}({s})" for u, s in candidates)
+                + f"); falling back to {_redact_url(preferred[0])} ({preferred[1]}). "
+                "Fix task_business_api_url / gateway routing so /api/issues no longer "
+                "returns 301→404 (Issue #3766)."
+            )
+            if mode == "strict":
+                raise BusinessApiGuardError(message)
+            _log_safe("error", message)
+            return preferred[0], "unreachable_fallback"
+        # 无任何候选（极端配置缺失）：远程 runtime 不得注入本机回环。
         if local is False:
-            return public_url, "server_base_url"
-        # local=True（本机）与 local=None（locality 查询异常，未知）都先探测本机候选，
-        # 避免未知分支直接落到 runtime 网关端口。
-        return _select_local_business_base(public_url)
+            return "", "unreachable_fallback"
+        return _norm_business_base(_local_business_base()), "unreachable_fallback"
+    except BusinessApiGuardError:
+        raise
     except Exception:
         pass
     # 求值异常时仍先探测本机业务端口，避免直接落到 runtime 网关（Issue #1731）。
@@ -2112,6 +2374,11 @@ _business_probe_lock = threading.Lock()
 # 业务 API 端点族前缀（Issue #1731）：只认主控业务路由，显式排除 `/api/runtime/...`
 # 等 runtime 网关路径（后者天然含 `/issues` 字样，不能作为业务 API 判据）。
 _BUSINESS_API_PATH_PREFIXES = ("/api/issues", "/api/git-repo")
+
+# 业务 API 可用性探测端点（Issue #3766）：必须是业务 router 真实注册的路径。
+# 裸 `/api/issues` 未注册（只有 `/{owner}/{repo}`、`/mine`、`/{issue_id}/...`），
+# 会返回路由外 404；`/mine` 未授权返回 401×JSON，可稳定区分业务 API 与前端接管。
+_BUSINESS_ISSUES_PROBE_PATH = "/api/issues/mine"
 
 # ===== Issue #1858：按服务基址（业务 VCS/Issue 与控制面 A2A）=====
 # 默认按服务注入；可选聚合网关按前缀路由。三面来源均单独记录，不借用

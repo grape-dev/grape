@@ -88,16 +88,24 @@ class GitCodeBackend(VcsBackend):
         }
 
     def _extract_repo(self, payload: dict) -> str:
-        if "project" in payload:
-            p = payload["project"]
-            if isinstance(p, dict):
-                return p.get("path_with_namespace", p.get("full_name", p.get("name", "")))
-        if "repository" in payload:
-            r = payload["repository"]
-            if isinstance(r, dict):
-                return r.get("full_name", r.get("name", ""))
-            elif isinstance(r, str):
-                return r
+        # Issue #3397：VCS 实际路径（repository.full_name）是大小写权威口径，
+        # 优先于 project.path_with_namespace（webhook 该字段可能被归一为全小写）。
+        repo_obj = payload.get("repository")
+        full_name = repo_obj.get("full_name", "") if isinstance(repo_obj, dict) else ""
+        project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
+        project_path = project.get("path_with_namespace", project.get("full_name", project.get("name", "")))
+        if full_name and project_path and full_name.casefold() != project_path.casefold():
+            log.warning(f"GitCode webhook repo path case mismatch: "
+                        f"repository.full_name={full_name!r} project.path_with_namespace={project_path!r}; "
+                        f"using repository.full_name")
+        if full_name:
+            return full_name
+        if project_path:
+            return project_path
+        if isinstance(repo_obj, dict):
+            return repo_obj.get("name", "")
+        if isinstance(repo_obj, str):
+            return repo_obj
         return ""
 
     def _extract_actor(self, payload: dict) -> str:

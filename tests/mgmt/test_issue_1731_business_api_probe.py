@@ -7,9 +7,9 @@
 覆盖：
 - 业务端口显式配置（task_business_api_port / GRAPE_BUSINESS_PORT）
 - 本机 runtime + 非业务端口：探测通过则用业务端口，失败回退 server_base_url
-- 显式 task_business_api_url 仍最高优先且不探测
+- 显式 task_business_api_url 校验后仍最高优先（Issue #3766 起不再免探测）
 - 远程 runtime 行为不变、单地址部署等价
-- 探测 health 优先 / openapi 兜底 / 进程内缓存
+- 探测 health 优先 / openapi 兜底 / `/api/issues/mine` 末级兜底 / 进程内缓存
 - resolve_task_server_env 审计日志（地址 + 来源，不含 token）
 """
 import logging
@@ -67,6 +67,7 @@ class TestLocalRuntimeProbeAndFallback:
         prompt_builder._clear_business_probe_cache()
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_url", return_value=public_url), \
+             patch("src.domains.mgmt.user.db.get_server_base_url", return_value=public_url), \
              patch("src.domains.mgmt.user.db.get_business_api_port", return_value=business_port), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_local_port", return_value=local_port), \
@@ -96,28 +97,34 @@ class TestLocalRuntimeProbeAndFallback:
         assert url == "https://api.grape.example.com"
         assert probe.call_count == 2
 
-    def test_explicit_business_api_url_wins_without_probe(self):
+    def test_explicit_business_api_url_is_guarded_and_wins(self):
+        """Issue #3766：显式配置不再免检，通过业务 API 探测后仍最高优先。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit",
                    return_value="https://biz.explicit.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
-             patch.object(prompt_builder, "_probe_business_api") as probe:
+             patch.object(prompt_builder, "_probe_business_api", return_value=True) as probe:
             url = prompt_builder._resolve_business_server_url(3)
         assert url == "https://biz.explicit.example.com"
-        probe.assert_not_called()
+        probe.assert_called_once_with("https://biz.explicit.example.com")
 
-    def test_remote_runtime_keeps_business_base_without_probe(self):
+    def test_remote_runtime_business_base_is_guarded(self):
+        """Issue #3766：远程 runtime 同样校验业务 API，通过后保持原基址。"""
         from src import prompt_builder
         prompt_builder._clear_business_probe_cache()
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_url",
                    return_value="https://api.grape.example.com"), \
+             patch("src.domains.mgmt.user.db.get_server_base_url",
+                   return_value="https://api.grape.example.com"), \
+             patch("src.domains.mgmt.user.db.get_worker_connect_url",
+                   return_value="https://api.grape.example.com"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=False), \
-             patch.object(prompt_builder, "_probe_business_api") as probe:
+             patch.object(prompt_builder, "_probe_business_api", return_value=True) as probe:
             url = prompt_builder._resolve_business_server_url(7)
         assert url == "https://api.grape.example.com"
-        probe.assert_not_called()
+        probe.assert_called_once_with("https://api.grape.example.com")
 
     def test_single_address_deployment_equivalent(self):
         """单地址部署：业务基址与 runtime 基址取值等价改造前行为。"""
@@ -161,6 +168,7 @@ class TestAuditSourceAccuracy:
         prompt_builder._clear_business_probe_cache()
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_url", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_server_base_url", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \
              patch.object(prompt_builder, "_probe_business_api", return_value=False):
@@ -173,6 +181,8 @@ class TestAuditSourceAccuracy:
         prompt_builder._clear_business_probe_cache()
         with patch("src.domains.mgmt.user.db.get_business_api_url_explicit", return_value=""), \
              patch("src.domains.mgmt.user.db.get_business_api_url",
+                   return_value="https://api.grape.example.com"), \
+             patch("src.domains.mgmt.user.db.get_server_base_url",
                    return_value="https://api.grape.example.com"), \
              patch("src.domains.mgmt.user.db.get_business_api_port", return_value="8081"), \
              patch.object(prompt_builder, "_runtime_is_local", return_value=True), \

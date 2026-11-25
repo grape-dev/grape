@@ -7,7 +7,7 @@
     IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
 
-from src.kernel.user_ids import has_user_id
+from src.kernel.user_ids import has_user_id, norm_uid
 import re, os, asyncio, time, json, uuid
 
 from datetime import datetime
@@ -46,6 +46,97 @@ db, db_lock = db_pair("runtime")
 
 if TYPE_CHECKING:
     from src.domains.runtime.im.feishu_async import BotContext, FeishuAsync
+
+
+def _usage_user_id(value) -> int | str:
+    """用量采集 user_id 归一：数字→int，UUID 原样 str（Issue #3510）。"""
+    return norm_uid(value or 0)
+
+# 渠道展示名（Issue #3475）：绑定回执、用户信息注入与配置提示按当前 channel_type 渲染，
+# 避免非飞书渠道复用 handler 后文案/身份列被误写成飞书。
+_CHANNEL_DISPLAY_NAMES = {
+    "feishu": "飞书",
+    "wechat": "微信",
+    "wecom": "企业微信",
+    "dingtalk": "钉钉",
+    "slack": "Slack",
+    "telegram": "Telegram",
+}
+
+
+def _channel_type_of(parsed: dict | None = None) -> str:
+    """解析当前消息渠道类型：parsed 显式字段优先，缺省按飞书兼容存量路径。
+
+    （Issue #3475 复审：BotContext 无 channel_type 属性，原先的 ctx 回退是幻影契约，
+    已移除——真实命令路径由 engine_wiring.apply_command 透传 channel_type。）
+    """
+    value = (parsed or {}).get("channel_type")
+    return str(value).strip().lower() if value else "feishu"
+
+
+def _is_feishu_channel(channel_type: str) -> bool:
+    return str(channel_type or "").strip().lower() in ("", "feishu")
+
+
+def _channel_display_name(channel_type: str) -> str:
+    # 未知渠道回退为渠道标识本身，避免「当前当前渠道账号」这类重复文案
+    key = str(channel_type or "").strip().lower()
+    return _CHANNEL_DISPLAY_NAMES.get(key, key or "当前渠道")
+
+
+def _unbound_user_hint(channel_type: str) -> str:
+    """未找到关联平台用户时的配置提示：飞书保持原文，其他渠道指向 IM 渠道配置。"""
+    if _is_feishu_channel(channel_type):
+        return "请在 Chat Agent 页配置飞书。"
+    return f"请在 IM 渠道配置中绑定{_channel_display_name(channel_type)}账号。"
+
+
+def _sender_identity_user(app_id: str, sender_id: str) -> str:
+    """非飞书渠道已绑定的发送者身份（grape_t_channel_sender_identity）；无映射返回空串。
+
+    复用 get_user_id_by_app_id 的第一跳（发送者身份表），不回退安装 owner——
+    多用户渠道下任意私聊者不能被误认成 bot owner（Issue #3475 复审中风险项）。
+    """
+    return _sender_identity_uid(app_id, sender_id)
+
+
+def _bind_sender_identity(app_id: str, sender_id: str, stable_id: str = "",
+                           channel_type: str = "") -> bool:
+    """非飞书渠道 p2p 确认绑定：写 grape_t_channel_sender_identity，不触碰飞书身份列。
+
+    Issue #3475 复审修复：installation_list_all 按 updated_at 倒序，同一 app 可能
+    同时存在 repo 轨与 user 轨安装行——repo 行（或无 owner 的行）不匹配时必须
+    `continue` 扫描下一行，而不是 `return False`；并校验安装行 channel_type 与
+    当前渠道一致，避免跨渠道串绑。绑定动作复用 engine_wiring._bind_identity_sync。
+    """
+    if not app_id or not sender_id:
+        return False
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        from src.domains.runtime.im.engine_wiring import _bind_identity_sync
+        for row in _mgmt_public.installation_list_any():
+            # (id, channel_type, scope, owner_user_id, repo_key, config, status, updated_at)
+            if str(row[6]) != "active":
+                continue
+            if channel_type and str(row[1] or "").strip().lower() != channel_type:
+                continue
+            try:
+                config = json.loads(row[5] or "{}")
+            except Exception:
+                config = {}
+            if str(config.get("app_id") or "") != app_id:
+                continue
+            # repo 轨 / 无 owner 的行跳过，继续找同 app 的 user 轨安装
+            if str(row[2]) != "user" or not str(row[3] or ""):
+                continue
+            uid = _bind_identity_sync(
+                "", str(row[0]), str(row[2]), str(row[3] or ""), str(sender_id),
+                str(stable_id or ""))
+            return bool(uid)
+    except Exception as exc:  # noqa: BLE001 - 绑定失败仅告警，下一轮消息可重试
+        log.warning(f"[im] bind sender identity failed app={app_id}: {exc}")
+    return False
+
 
 # p2p 首次消息待确认绑定：{app_id: {username: {"open_id", "gitcode_nickname", "expires"}}}
 # 用户确认后才写入 unified_user_mapping，防止错误绑定。
@@ -342,6 +433,18 @@ def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: str) -> str:
         log.warning(f"_resolve_feishu_exec_repo failed: {e} (keep {repo_key})")
     return repo_key
 
+def _sender_identity_uid(app_id: str, sender_id: str) -> str:
+    """新引擎发送者身份表第一跳（app + 平台用户 → user_id）；失败/未绑定返回空串。"""
+    if not app_id or not sender_id:
+        return ""
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        return _mgmt_public.sender_identity_user_by_app_any(app_id, str(sender_id)) or ""
+    except Exception as exc:  # noqa: BLE001 - 身份反查失败按未绑定处理
+        log.debug(f"[im] sender identity lookup failed app={app_id}: {exc}")
+        return ""
+
+
 def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
     """通过 im_app_id 查找关联的 user_id。
 
@@ -353,19 +456,17 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
 
     SQL 归属：两跳都读 mgmt 域的表（渠道身份 + 渠道安装），语句已在 mgmt public 里
     登记为任意拓扑原语；本函数只负责「先精确、后兜底」的顺序与异常降级。
-    """
-    from src.domains.mgmt import public as _mgmt_public
 
+    注意（Issue #3475）：需要「仅发送者身份、不回退 owner」语义时用
+    `_sender_identity_uid`（如非飞书渠道的用户信息注入）。
+    """
     # 新引擎：发送者身份绑定（需要 sender_id）
-    if sender_id:
-        try:
-            _uid = _mgmt_public.sender_identity_user_by_app_any(app_id, str(sender_id))
-            if _uid:
-                return _uid
-        except Exception as exc:  # noqa: BLE001 - 身份反查失败走下一跳
-            log.debug(f"[im] sender identity lookup failed app={app_id}: {exc}")
+    _uid = _sender_identity_uid(app_id, sender_id)
+    if _uid:
+        return _uid
     # 新引擎：user 轨安装的归属者（单用户 bot 兜底）
     try:
+        from src.domains.mgmt import public as _mgmt_public
         _owner = _mgmt_public.installation_owner_by_app_any(app_id)
         if _owner:
             return _owner  # D105：uuid 字符串保形
@@ -625,7 +726,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
                                 text: str, chat_id: str, sender_id: str, db,
                                 account: str = "", msg_id: str = "",
                                 sender_open_id: str = "", card_value: dict | None = None,
-                                action_token: str = "") -> str:
+                                action_token: str = "", channel_type: str = "") -> str:
     """异步命令处理（卡片化导航 feishu-repo-navigation-commands-design.md）。
 
     新命令 /repo /chat /task /new /where /cancel /help 用 reply_card 回复并返回空串（调用方跳过文本回复）；
@@ -639,13 +740,15 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
     if not parts:
         return ""
     cmd = parts[0].lower()
+    _ctype = _channel_type_of({"channel_type": channel_type})
+    _unbound_hint = _unbound_user_hint(_ctype)
     # 身份解析带上发送者：钉钉等新引擎渠道只有 grape_t_channel_sender_identity / installation owner，
     # 不带 sender_id 会退化成"未找到关联平台用户"（2026-11-05）。
     uid = get_user_id_by_app_id(account, sender_id or sender_open_id) or 0
 
     if cmd == "/repo":
         if not uid:
-            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            return f"❌ 未找到关联平台用户（{_unbound_hint}）"
         page = max(1, int(parts[1])) if len(parts) >= 2 and parts[1].isdigit() else 1
         state = await _send_repo_card(ctx, egress, chat_id, msg_id, uid, account, page)
         if state == "sent":
@@ -657,7 +760,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
 
     if cmd == "/chat":
         if not uid:
-            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            return f"❌ 未找到关联平台用户（{_unbound_hint}）"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
             await _send_card_reply(ctx, egress, msg_id, _no_repo_card())
@@ -690,7 +793,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
 
     if cmd == "/task":
         if not uid:
-            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            return f"❌ 未找到关联平台用户（{_unbound_hint}）"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
             await _send_card_reply(ctx, egress, msg_id, _no_repo_card())
@@ -720,7 +823,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
 
     if cmd == "/new":
         if not uid:
-            return "❌ 未找到关联平台用户（请在 Chat Agent 页配置飞书）。"
+            return f"❌ 未找到关联平台用户（{_unbound_hint}）"
         bound = _current_bound_repo(chat_id, account, db)
         if not bound:
             await _send_card_reply(ctx, egress, msg_id, _no_repo_card())
@@ -728,7 +831,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
         from src.kernel.session_manager import create_conversation, join_feishu_chat
         cid = create_conversation(uid, bound)
         if cid and join_feishu_chat(chat_id, cid, uid):
-            await egress.reply_card(ctx, msg_id, f"**✅ 已新建并加入对话**\n`{bound}` · 新对话\n后续飞书消息将进入该对话。")
+            await egress.reply_card(ctx, msg_id, f"**✅ 已新建并加入对话**\n`{bound}` · 新对话\n后续{_channel_display_name(_ctype)}消息将进入该对话。")
         else:
             await egress.reply_card(ctx, msg_id, "**❌ 新建对话失败**")
         return ""
@@ -807,7 +910,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
             return ""
         if not uid:
             await _send_card_reply(ctx, egress, msg_id, simple_card(
-                "❌ 未关联用户", "**❌ 未找到关联平台用户**\n请在 Chat Agent 页配置飞书。",
+                "❌ 未关联用户", f"**❌ 未找到关联平台用户**\n{_unbound_hint}",
                 Tone.DANGER))
             return ""
         from src.kernel.session_manager import join_feishu_chat, create_conversation, get_conversation
@@ -926,7 +1029,7 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
         if not _exec_id:
             return ""
         if not uid:
-            await egress.reply_card(ctx, msg_id, "**未关联平台用户，请在 Chat Agent 页配置飞书**")
+            await egress.reply_card(ctx, msg_id, f"**未关联平台用户，{_unbound_hint}**")
             return ""
         await _autopilot_finding_list_card(ctx, egress, msg_id, uid, int(_exec_id),
                                            action_token=action_token)
@@ -1366,8 +1469,13 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
 
         # p2p 私聊身份绑定：仅私聊场景处理。首次消息发确认询问，用户确认后才写入映射。
         # 群聊不处理（可能是别人与 bot 对话）；已有映射不覆盖（以用户确认为准）。
+        # Issue #3475：渠道感知——飞书继续写 unified_user_mapping 飞书身份列；
+        # 其他渠道确认后写 grape_t_channel_sender_identity，回执按当前渠道渲染。
         sender_open_id = parsed.get("sender_open_id", "")
         chat_type = parsed.get("chat_type", "")
+        channel_type = _channel_type_of(parsed)
+        channel_name = _channel_display_name(channel_type)
+        is_feishu = _is_feishu_channel(channel_type)
         if sender_open_id and chat_type == "p2p":
             try:
                 from src.kernel.session_manager import bind_feishu_identity, get_feishu_open_id
@@ -1379,7 +1487,9 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
                         nickname = user_row.get("nickname", "") or ""
-                        existing = get_feishu_open_id(username, app_id=ctx.app_id)
+                        existing = (get_feishu_open_id(username, app_id=ctx.app_id)
+                                    if is_feishu
+                                    else _sender_identity_user(ctx.app_id, sender_open_id))
                         if existing:
                             # 已绑定，无需处理
                             pass
@@ -1395,22 +1505,32 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                 # 有待确认项：判断用户回复是确认还是否认
                                 if _CONFIRM_RE.match(text.strip()):
                                     bind_open_id = pending.get("open_id") or sender_open_id
-                                    # 优先以 open_id 取发送者飞书昵称（open_id 与 feishu_name 天然匹配，
-                                    # feishu-app-scoped-openid-fix.md §2.4）；拿不到则留空由 sync 兜底
-                                    feishu_name = ""
-                                    try:
-                                        _n = await egress.get_user_name(
-                                            ctx, bind_open_id, user_id_type="open_id")
-                                        if _n and isinstance(_n, str):
-                                            feishu_name = _n
-                                    except Exception:
-                                        pass
-                                    # FR-18.7: 注册名语境——走 bind_feishu_identity 只写飞书三列，不碰平台列
-                                    bind_feishu_identity(uid, bind_open_id, feishu_name=feishu_name,
-                                                          app_id=ctx.app_id)
+                                    if is_feishu:
+                                        # 优先以 open_id 取发送者飞书昵称（open_id 与 feishu_name 天然匹配，
+                                        # feishu-app-scoped-openid-fix.md §2.4）；拿不到则留空由 sync 兜底
+                                        feishu_name = ""
+                                        try:
+                                            _n = await egress.get_user_name(
+                                                ctx, bind_open_id, user_id_type="open_id")
+                                            if _n and isinstance(_n, str):
+                                                feishu_name = _n
+                                        except Exception:
+                                            pass
+                                        # FR-18.7: 注册名语境——走 bind_feishu_identity 只写飞书三列，不碰平台列
+                                        bind_feishu_identity(uid, bind_open_id, feishu_name=feishu_name,
+                                                              app_id=ctx.app_id)
+                                    else:
+                                        # 非飞书渠道：写发送者身份表，禁止把渠道 sender id 写入飞书身份列
+                                        if not _bind_sender_identity(
+                                                ctx.app_id, bind_open_id,
+                                                parsed.get("sender_union_id", ""),
+                                                channel_type=channel_type):
+                                            await egress.reply_text(
+                                                ctx, msg_id, "❌ 绑定失败，请稍后重试。")
+                                            return
                                     _pending_binds.pop(key, None)
-                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 Grape 账号「{username}」已绑定当前飞书账号。")
-                                    log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")
+                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 Grape 账号「{username}」已绑定当前{channel_name}账号。")
+                                    log.info(f"Chat: confirmed {channel_type} mapping for {username} (app={ctx.app_id[:20]})")
                                     return
                                 elif _DENY_RE.match(text.strip()):
                                     _pending_binds.pop(key, None)
@@ -1430,16 +1550,16 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                 await egress.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 Grape 账号，请确认：\n你的 Grape 账号昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
                                 return
             except Exception as e:
-                log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
+                log.warning(f"Chat: auto-bind {channel_type} mapping failed: {e}")
 
         if detect_clean_intent(text):
-            result = await process_command_async(ctx, egress, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""))
+            result = await process_command_async(ctx, egress, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""), channel_type=channel_type)
             if result:
                 await egress.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = await process_command_async(ctx, egress, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""))
+            result = await process_command_async(ctx, egress, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""), channel_type=channel_type)
             if result:
                 await egress.reply_text(ctx, msg_id, result)
             return
@@ -1577,6 +1697,9 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
     exec_account: 用于 workspace history / agent 执行（= 仓库全名 owner/repo）
     conv_id/conv: 当前 conversation（与 web 同源，用其 runtime_session_id 复用 opencode 会话）
     """
+    _chat_channel_type = _channel_type_of(parsed)
+    _chat_channel_name = _channel_display_name(_chat_channel_type)
+    _chat_is_feishu = _is_feishu_channel(_chat_channel_type)
     try:
         # 获取当前 conversation（飞书 与 web 共源；用于复制 runtime_session_id 复用 opencode 会话）
         if not conv:
@@ -1601,14 +1724,24 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                 gitcode_login = None
                 nick_name = ""
                 gitcode_nickname = ""
-                # S99/D74：open_id 反查收敛 channel_directory
-                from src.domains.runtime.im.channel_directory import reverse_lookup_by_open_id as _rlo
-                row = _rlo(open_id)
-                if row["user_id"] is not None:
-                    gitcode_login = row["gitcode_user"]
-                    nick_name = row["feishu_name"]
-                    gitcode_nickname = row["gitcode_nickname"]
-                # 飞书昵称 DB 为空 → 用 open_id 调飞书 API 兜底
+                if _chat_is_feishu:
+                    # S99/D74：飞书 open_id 反查收敛 channel_directory
+                    from src.domains.runtime.im.channel_directory import reverse_lookup_by_open_id as _rlo
+                    row = _rlo(open_id)
+                    if row["user_id"] is not None:
+                        gitcode_login = row["gitcode_user"]
+                        nick_name = row["feishu_name"]
+                        gitcode_nickname = row["gitcode_nickname"]
+                else:
+                    # 非飞书渠道：仅按发送者身份映射解析用户，不回退安装 owner——
+                    # 多用户渠道下未绑定的私聊者不能被误认成 bot owner（Issue #3475）
+                    _info_uid = _sender_identity_uid(ctx.app_id, sender_id or open_id)
+                    if _info_uid:
+                        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                        _info_acc = get_grape_account_by_id(_info_uid) or {}
+                        gitcode_login = _info_acc.get("username") or None
+                        gitcode_nickname = _info_acc.get("nickname") or ""
+                # 昵称 DB 为空 → 用平台用户 id 调当前渠道 API 兜底
                 if not nick_name and open_id:
                     try:
                         nick_name = await egress.get_user_name(ctx, open_id, user_id_type="open_id") or ""
@@ -1619,7 +1752,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     if gitcode_nickname and gitcode_nickname != gitcode_login:
                         user_info += f"  GitCode 昵称: {gitcode_nickname}\n"
                     if nick_name and nick_name != gitcode_login:
-                        user_info += f"  飞书 昵称：{nick_name}\n"
+                        user_info += f"  {_chat_channel_name} 昵称：{nick_name}\n"
             except Exception as e:
                 log.warning(f"Failed to resolve GitCode login: {e}")
 
@@ -1847,7 +1980,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                 _mu = master_run("im", new_run_id("im"), engine=backend, cwd=wsd,
                                 session_id=oc_sid,
                                 attr={"repo_key": repo_key, "scene_id": chat_id or "",
-                                      "agent_type": "chat", "user_id": int(user_id or 0),
+                                      "agent_type": "chat", "user_id": _usage_user_id(user_id),
                                       "engine_id": int(_rid or 0)})
                 _mu.start()
                 try:
