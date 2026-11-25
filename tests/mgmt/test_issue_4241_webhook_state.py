@@ -124,6 +124,21 @@ class TestAuthoritySource:
         assert get_webhook_url() == "https://seed.example.com"
         assert get_meta_value("webhook_url") == "https://seed.example.com"
 
+    def test_divergence_between_meta_and_server_config_warns_once(self, monkeypatch, caplog):
+        """QA Notice：meta 与 server-config 并存且不同 → 只告警一次，仍以 meta 为准。"""
+        import logging
+        from src.domains.mgmt.user.db import get_webhook_url
+        monkeypatch.setattr("src.domains.mgmt.user.db._WEBHOOK_URL_DIVERGENCE_CHECKED", False)
+        monkeypatch.setattr(
+            "src.kernel.config.read_server_config",
+            lambda *a, **k: {"webhook_url": "https://old-tunnel.example.net"})
+        with caplog.at_level(logging.WARNING):
+            assert get_webhook_url() == AUTHORITY
+            assert get_webhook_url() == AUTHORITY
+        _warns = [r for r in caplog.records
+                  if r.levelno == logging.WARNING and "server-config.json" in r.getMessage()]
+        assert len(_warns) == 1
+
 
 class TestManagedReposListOutput:
     def test_list_reports_three_state_fields(self):
@@ -164,6 +179,56 @@ class TestManagedReposListOutput:
         assert row["webhook_ok"] is True
         assert row["webhook_stale"] is False
         assert row["webhook_state"] == "unknown"
+
+
+def test_member_filter_repos_exposes_state_value_domain():
+    """`_filter_repos`（`/repos/member`，ReposView 数据源）值域契约固化。
+
+    QA R1：前端按 `webhook_state` 渲染徽标/修复入口，值域必须固定为
+    ok/stale/absent/unknown（托管行）与 ""（未托管行），且 stale 行必须
+    同时 is_hosted=true —— 否则「需修复托管」入口在列表路径不可达。
+    """
+    from src.domains.mgmt.routes.repos import _filter_repos
+    from src.domains.mgmt.user.db import add_managed_repo
+    ok_rk, stale_rk, legacy_rk, plain_rk = (
+        "gitcode:wh4241/ok", "gitcode:wh4241/stale",
+        "gitcode:wh4241/legacy", "gitcode:wh4241/plain")
+    add_managed_repo(ok_rk, "wh4241", "ok", webhook_id=424101,
+                     webhook_url=AUTHORITY + "/webhook/gitcode")
+    add_managed_repo(stale_rk, "wh4241", "stale", webhook_id=424102,
+                     webhook_url="https://old-tunnel.example.net/webhook/gitcode")
+    add_managed_repo(legacy_rk, "wh4241", "legacy", webhook_id=424103)
+    repos = [
+        {"repo_key": ok_rk, "full_name": "wh4241/ok", "is_admin": True},
+        {"repo_key": stale_rk, "full_name": "wh4241/stale", "is_admin": True},
+        {"repo_key": legacy_rk, "full_name": "wh4241/legacy", "is_admin": True},
+        {"repo_key": plain_rk, "full_name": "wh4241/plain", "is_admin": True},
+    ]
+    rows = {r["repo_key"]: r for r in _filter_repos(940244, repos)}
+    assert rows[ok_rk]["webhook_state"] == "ok"
+    assert rows[stale_rk]["webhook_state"] == "stale"
+    assert rows[stale_rk]["is_hosted"] is True
+    assert rows[legacy_rk]["webhook_state"] == "unknown"
+    assert rows[plain_rk]["webhook_state"] == ""
+    assert rows[plain_rk]["is_hosted"] is False
+    # 值域封闭：新增状态必须同步前端（ReposView 只认 stale）
+    assert {r["webhook_state"] for r in rows.values()} <= {
+        "ok", "stale", "absent", "unknown", ""}
+
+
+def test_repos_view_consumes_bare_stale_literal():
+    """前端字面量与后端值域一致（R1 回归守卫）。
+
+    后端 `webhook_state` 从不输出 `webhook_stale`（那是 dashboard 的
+    `host_status` 值），ReposView 若误用该字面量，徽标与修复按钮恒不渲染。
+    """
+    _root = os.path.join(os.path.dirname(__file__), "..", "..")
+    _vue = os.path.join(_root, "src", "api", "frontend", "app", "src",
+                        "views", "ReposView.vue")
+    with open(_vue, encoding="utf-8") as _f:
+        _src = _f.read()
+    assert "r.webhook_state === 'stale'" in _src
+    assert "r.webhook_state === 'webhook_stale'" not in _src
 
 
 class TestDashboardHostStatus:

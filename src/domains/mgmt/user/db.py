@@ -3552,15 +3552,33 @@ def get_webhook_url() -> str:
       configs/server-config.json 作**种子**播种进 meta 并返回 → 空串。
       运行时权威是 DB meta（可在线修改、多进程一致）；server-config.json 只在
       meta 为空时提供一次初始值，避免「文件与 DB 双源漂移」导致 webhook 状态误判。
+      两源并存且取值不同时，首个读取点输出一次 WARN（meta 与新值都打印），提示
+      「运行时以 Admin 控制台为准、改文件不再生效」。
       不设 localhost 兜底，让 repos.py「未配置即拒（422）」的守卫生效。
     - 与 `get_server_base_url()` 同一事实的两个键：后者优先 server_base_url、并会把本键
       剥掉 `/webhook/*` 后缀使用；两个键目前并存（合并成单一键会影响 6 个读取点与自动探测
       落库路径，2026-11-15 裁定暂不合并，只在本注释与配置示例里写明口径）。
     """
-    global _WEBHOOK_URL_SEEDED
+    global _WEBHOOK_URL_SEEDED, _WEBHOOK_URL_DIVERGENCE_CHECKED
     try:
         _wh = (get_meta_value("webhook_url") or "").strip()
         if _wh:
+            # Issue #4241（QA Notice）：meta 与 server-config.json 并存且取值不同时，
+            # 运行时沿用 meta（Admin 控制台）——首个读取点输出一次 WARN，避免升级后
+            # 「改文件不再生效」被静默吞掉（只做一次比对，不在热路径重复读文件）。
+            if not _WEBHOOK_URL_DIVERGENCE_CHECKED:
+                _WEBHOOK_URL_DIVERGENCE_CHECKED = True
+                try:
+                    from src.kernel.config import read_server_config
+                    _file_wh = (read_server_config().get("webhook_url") or "").strip()
+                except Exception:
+                    _file_wh = ""
+                if _file_wh and (normalize_webhook_address(_file_wh)
+                                 != normalize_webhook_address(_wh)):
+                    log.warning(
+                        "get_webhook_url: meta.webhook_url 与 configs/server-config.json "
+                        f"不一致（meta={_wh}, server-config={_file_wh}），"
+                        "运行时以 meta（Admin 控制台）为准；修改 server-config.json 不再生效")
             return _wh
     except Exception:
         pass
@@ -3584,6 +3602,10 @@ def get_webhook_url() -> str:
 
 # 进程内一次性播种标记（meta 已写入后即不再写；重跑无副作用）
 _WEBHOOK_URL_SEEDED = False
+
+# Issue #4241：进程内一次性的「meta vs server-config.json 不一致」比对标记
+# （只告警一次，避免热路径反复读配置文件）
+_WEBHOOK_URL_DIVERGENCE_CHECKED = False
 
 
 def normalize_webhook_address(url: str) -> str:

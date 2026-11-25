@@ -197,7 +197,7 @@
                   <div class="project-card-actions">
                     <!-- Issue #4241：webhook 地址漂移 → 一键修复托管（回写实际注册地址后自愈） -->
                     <button
-                      v-if="r.is_hosted && r.webhook_state === 'webhook_stale'"
+                      v-if="r.is_hosted && r.webhook_state === 'stale'"
                       class="project-card-btn project-card-btn-warn"
                       :disabled="repairingRepo === r.full_name"
                       @click.stop="repairHostFor(r, $event)"
@@ -908,16 +908,18 @@ function hostNoPermission() {
 }
 
 // ── Issue #4241：托管三态徽标 + webhook 地址漂移一键修复 ──
-// 后端 /repos/member 每行带 webhook_state（ok/stale/absent/unknown，纯本地比对），
-// stale = 实际注册地址与当前权威 webhook_url 不一致 → 显示「需修复托管」。
+// 后端 /repos/member 每行带 webhook_state，值域固定为 ok/stale/absent/unknown
+// （webhook_state_for_row 生成，纯本地比对）。注意与 host_status 的 'webhook_stale'
+// 区分：本字段不含 webhook_ 前缀，stale = 实际注册地址与当前权威 webhook_url 不一致
+// → 显示「需修复托管」。
 function repoStatusClass(r) {
   if (!r || !r.is_hosted) return 'project-card-status-none'
-  if (r.webhook_state === 'webhook_stale') return 'project-card-status-stale'
+  if (r.webhook_state === 'stale') return 'project-card-status-stale'
   return 'project-card-status-hosted'
 }
 function repoStatusText(r) {
   if (!r || !r.is_hosted) return t('repos.card.status_not_joined')
-  if (r.webhook_state === 'webhook_stale') return t('repos.card.status_webhook_stale')
+  if (r.webhook_state === 'stale') return t('repos.card.status_webhook_stale')
   return t('repos.card.status_hosted')
 }
 function repairHostFor(r) {

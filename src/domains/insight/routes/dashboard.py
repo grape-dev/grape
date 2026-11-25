@@ -1480,7 +1480,8 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     _A2A_PROBE_CACHE["payload"] = result
     return result
 
-def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
+def _check_host_status(owner: str, repo: str, repo_key: str,
+                       webhook_state: str = None) -> str:
     """方案 X（F-2 落地）：纯本地判定托管状态，零 GitCode API 调用。
 
     - webhook 检测：读本地 managed_repos.webhook_id，>0 即视为存在；Issue #4241 起
@@ -1491,6 +1492,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     - Issue #2126: partial 超过 30 分钟仍在复查时按诊断步骤重新判定——bot 相关步骤收敛为 bot_missing，
       仅 webhook 相关步骤且 webhook 已存在才收敛为完整；空/未知时间不做回收（视为未知）。
     - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
+    - `webhook_state` 由调用方传入时复用（同一请求只读一次三态，QA Notice）；None 时自行读取。
     """
     from src.kernel.config import log as _log
     try:
@@ -1509,8 +1511,11 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
         # → webhook_stale（前端显示「需修复托管」，复用 repair-host 回写后自愈）。
         # 仅在本状态无更具体的失败诊断（partial/bot_missing）时接管，避免覆盖 #2126 诊断。
         if cur not in ("partial", "bot_missing"):
-            from src.domains.mgmt.public import webhook_state as _webhook_state
-            if _webhook_state(repo_key) == "stale":
+            _ws = webhook_state
+            if _ws is None:
+                from src.domains.mgmt.public import webhook_state as _webhook_state
+                _ws = _webhook_state(repo_key)
+            if _ws == "stale":
                 if cur != "webhook_stale":
                     _log.info(f"Dashboard: webhook address drifted for {repo_key}")
                     set_host_status(repo_key, "webhook_stale", "configure_webhook_url",
@@ -1847,12 +1852,17 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     metrics["active_agents"] = sum(1 for a in agent_sessions if a["status"] == "running")
 
     # 方案 F-2：实时复查托管状态（bot 是否维护者 + webhook 是否存在），更新 host_status
-    host_status = _check_host_status(owner, repo, _actual_repo_key)
-    # Issue #4241：webhook 三态透出，供前端替换「Webhook 正常」静态标签（stale 时不能再显示正常）
+    # Issue #4241：webhook 三态本请求只读一次——既作为 _check_host_status 的漂移判据，
+    # 也透出给前端替换「Webhook 正常」静态标签（stale 时不能再显示正常）。
+    _webhook_state_value = None
     try:
         from src.domains.mgmt.public import webhook_state as _webhook_state_read
         _webhook_state_value = _webhook_state_read(_actual_repo_key)
     except Exception:
+        _webhook_state_value = None
+    host_status = _check_host_status(owner, repo, _actual_repo_key,
+                                     webhook_state=_webhook_state_value)
+    if _webhook_state_value is None:
         _webhook_state_value = ""
     # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
     try:
