@@ -82,11 +82,18 @@ def _seed_org(*, is_personal: int = 0, description: str = "原始描述") -> str
     return str(org["id"])
 
 
-def test_clear_description_via_api(client):
+def test_clear_description_requires_explicit_flag(client):
+    """A14：空串保持旧语义“不修改”，清空必须显式 clear_description。"""
     org_id = _seed_org(description="需要被清空的描述")
 
     r = client.put(f"/api/orgs/{org_id}", json={"description": ""})
+    assert r.status_code == 200, r.text
+    assert get_org(org_id)["description"] == "需要被清空的描述"
 
+    r = client.put(
+        f"/api/orgs/{org_id}",
+        json={"description": "", "clear_description": True},
+    )
     assert r.status_code == 200, r.text
     assert get_org(org_id)["description"] == ""
 
@@ -146,6 +153,9 @@ def test_update_org_none_means_unchanged():
     assert get_org(org_id)["description"] == "保留我"
 
     assert update_org(org_id, description="") is True
+    assert get_org(org_id)["description"] == "保留我"
+
+    assert update_org(org_id, clear_description=True) is True
     assert get_org(org_id)["description"] == ""
 
 

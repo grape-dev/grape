@@ -213,11 +213,12 @@ def update_org(org_id: str, name: str | None = None,
                description: str | None = None,
                avatar_url: str | None = None, settings: str | None = None,
                max_members: int | None = None, max_workers: int | None = None,
-               max_repos: int | None = None) -> bool:
+               max_repos: int | None = None, clear_description: bool = False) -> bool:
     """更新组织信息。
 
     字段语义：
-    - ``None`` = 不修改；``description`` 传空字符串 = 清空（Issue #编辑组织）。
+    - ``None`` = 不修改；空字符串 = 历史“不修改”，避免旧客户端整包 PUT 时清空描述；
+      显式清空必须传 ``clear_description=True``（A14 兼容面）。
     - 上限字段 ``None``/``0`` = 不修改；``0`` 保留历史语义，避免旧客户端把额度误改为 0。
     - 组织存在但本次没有字段变化 → 返回 True，不能再用 ``rowcount=0`` 判成“组织不存在”
       （MySQL 下同值 UPDATE 的 affected rows 为 0，会误报 404）。
@@ -227,7 +228,10 @@ def update_org(org_id: str, name: str | None = None,
     if name:
         sets.append("name=?")
         params.append(name)
-    if description is not None:
+    if clear_description:
+        sets.append("description=?")
+        params.append("")
+    elif description is not None and description != "":
         sets.append("description=?")
         params.append(description)
     if avatar_url:

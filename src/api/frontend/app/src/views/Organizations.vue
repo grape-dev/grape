@@ -1914,7 +1914,12 @@ function openEdit() {
 
 function saveEdit() {
   if (!editForm.name.trim()) return G.app.showToast(t('create.name_required') || '名称不能为空')
-  const payload = { name: editForm.name.trim(), description: editForm.description.trim() }
+  const desc = editForm.description.trim()
+  const payload = { name: editForm.name.trim(), description: desc }
+  // A14：空串默认表示“不修改”，只有用户确实要清空时才显式声明。
+  if (!desc && String(detail.value.description || '').trim()) {
+    payload.clear_description = true
+  }
   if (!editForm.isPersonal) {
     // Worker 上限暂不在编辑组织弹窗中开放（后端仍保留字段，其他入口可继续使用）。
     // 0 保留历史“不限”语义，后端把 0 视为不修改；空值回退默认 50/20。

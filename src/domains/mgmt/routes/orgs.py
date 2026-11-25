@@ -49,8 +49,9 @@ class CreateOrgBody(BaseModel):
 
 class UpdateOrgBody(BaseModel):
     name: str = ""
-    # None = 不修改；"" = 清空描述（显式清空必须能和“未提交该字段”区分开）。
+    # None/空串 = 不修改（兼容旧客户端）；显式清空走 clear_description。
     description: str | None = None
+    clear_description: bool = False
     avatar_url: str = ""
     # None = 不修改；0 保留历史语义（不修改），避免旧客户端误把额度改成 0。
     max_members: int | None = None
@@ -482,9 +483,11 @@ def update_organization(org_id: str, body: UpdateOrgBody,
         body.max_members = None
         body.max_workers = None
         body.max_repos = None
-    ok = update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
+    ok = update_org(org_id, name=body.name, description=body.description,
+                    avatar_url=body.avatar_url,
                     max_members=body.max_members, max_workers=body.max_workers,
-                    max_repos=body.max_repos)
+                    max_repos=body.max_repos,
+                    clear_description=body.clear_description)
     if not ok:
         # update_org 影响行数为 0（Organization not found）→ 不得报成功
         raise HTTPException(status_code=404, detail={"code": 404, "message": "Organization not found"})

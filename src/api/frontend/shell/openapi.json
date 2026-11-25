@@ -35086,6 +35086,11 @@
             ],
             "title": "Description"
           },
+          "clear_description": {
+            "type": "boolean",
+            "title": "Clear Description",
+            "default": false
+          },
           "avatar_url": {
             "type": "string",
             "title": "Avatar Url",
@@ -36261,7 +36266,6 @@
     "task",
     "tasks"
   ],
-  "x-source-commit": "64239f60f",
-  "x-generated-at": "2026-11-25T05:23:25.332307+00:00",
-  "tags": []
+  "x-source-commit": "acc8c9322",
+  "x-generated-at": "2026-11-25T05:46:00.265737+00:00"
 }
