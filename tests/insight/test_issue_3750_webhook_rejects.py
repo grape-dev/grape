@@ -162,6 +162,41 @@ class TestCountRecent:
             assert wr.count_recent(db.cursor(), window_sec=60) == {}
 
 
+class TestCountRecentSplit:
+    """一条条件聚合同时给出「存在期内的仓库」与「窗口内计数」（告警求值单次查询）。"""
+
+    def setup_method(self):
+        _clean()
+
+    def teardown_method(self):
+        _clean()
+
+    def test_presence_dimension_with_zero_window_count(self):
+        now = datetime.now(timezone.utc)
+        _insert(REPO, now.isoformat())
+        # 窗口外（2 分钟前）、存在期（15 分钟）内 → 维度保留但计数为 0（走 resolved 分支）
+        _insert(OTHER, (now - timedelta(minutes=2)).isoformat())
+        # 存在期外（20 分钟前）→ 维度整体消失
+        _insert("gitcode:grape-dev/old", (now - timedelta(minutes=20)).isoformat())
+
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            counts = wr.count_recent_split(db.cursor(), window_sec=60, presence_sec=900)
+        assert counts == {REPO: 1, OTHER: 0}, counts
+
+    def test_single_query_matches_count_recent_when_window_is_presence(self):
+        now = datetime.now(timezone.utc)
+        _insert(REPO, now.isoformat())
+        _insert(REPO, (now - timedelta(seconds=30)).isoformat())
+        _insert(OTHER, (now - timedelta(minutes=5)).isoformat())
+
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            assert wr.count_recent_split(c, window_sec=60, presence_sec=60) == \
+                wr.count_recent(c, window_sec=60) == {REPO: 2}
+
+
 class TestRetention:
     def setup_method(self):
         _clean()
@@ -202,10 +237,14 @@ class TestSchemaRegistration:
         from src.kernel import table_ownership as own
         assert own.owner_of("obs_webhook_rejects") == "insight"
 
-    def test_index_covers_repo_and_time(self):
+    def test_index_covers_time_range_then_repo(self):
+        """窗口计数与留存清理都是 `WHERE created_at >= / <`（不带 repo_key 等值），
+        故索引首列必须是 created_at；(repo_key, created_at) 反序对这类查询用不上索引。"""
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-                " AND name='idx_obs_webhook_rejects_repo_time'").fetchall()
-        assert rows, "缺 (repo_key, created_at) 索引：窗口计数会全表扫"
+                "SELECT name, sql FROM sqlite_master WHERE type='index'"
+                " AND name='idx_obs_webhook_rejects_time_repo'").fetchall()
+        assert rows, "缺 (created_at, repo_key) 索引：窗口计数会全表扫"
+        sql = (rows[0][1] or "").replace(" ", "").lower()
+        assert "(created_at,repo_key)" in sql, sql

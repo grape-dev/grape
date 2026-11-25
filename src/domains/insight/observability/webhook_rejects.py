@@ -239,20 +239,37 @@ def stats() -> Dict[str, int]:
         "queued": 0, "written": 0, "dropped": 0, "failed": 0}
 
 
-def count_recent(cursor, window_sec: float = 60.0) -> Dict[str, int]:
-    """近 `window_sec` 秒内按仓库的拒绝计数 `{repo_key: n}`。
+def count_recent_split(cursor, window_sec: float = 60.0,
+                       presence_sec: float = 900.0) -> Dict[str, int]:
+    """近 `presence_sec` 秒内有拒绝的仓库 → 其在近 `window_sec` 秒内的计数。
 
-    供 `alerts._repo_metrics` 的 `webhook_token_mismatch` 指标使用：调用方持有 insight 域
-    游标（同连接、同锁），SQL 留在属主模块。时间比较用 ISO 字符串（写入方统一 ISO(UTC)）。
+    **一条 SQL 同时回答两个问题**：「哪些仓库仍处于维度存在期内」与「各自窗口内多少次」。
+    存在期内但窗口内为 0 的仓库同样出现在结果里（value=0）：告警求值据此走 resolved
+    分支，而不是把维度从本轮集合里摘掉（摘掉后已 firing 的事件永远等不到恢复）。
+
+    存在期必须 ≥ 统计窗口（`alerts.WEBHOOK_REJECT_PRESENCE_SEC` 900s > 窗口 60s）。
+    时间比较用 ISO 字符串（写入方统一 ISO(UTC)）。
     """
-    cutoff = _iso_before(seconds=window_sec)
-    cursor.execute("SELECT repo_key, COUNT(*) FROM obs_webhook_rejects"
-                   " WHERE created_at >= ? GROUP BY repo_key", (cutoff,))
+    window_cutoff = _iso_before(seconds=window_sec)
+    presence_cutoff = _iso_before(seconds=presence_sec)
+    cursor.execute("SELECT repo_key,"
+                   " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END)"
+                   " FROM obs_webhook_rejects"
+                   " WHERE created_at >= ? GROUP BY repo_key",
+                   (window_cutoff, presence_cutoff))
     out: Dict[str, int] = {}
     for row in cursor.fetchall() or []:
-        # COUNT(*) 是整型聚合：row[1] 只可能是 int/None，无需防御性异常分支
+        # SUM/COUNT 是整型聚合：row[1] 只可能是 int/None，无需防御性异常分支
         out[str(row[0] or "")] = int(row[1] or 0)
     return out
+
+
+def count_recent(cursor, window_sec: float = 60.0) -> Dict[str, int]:
+    """近 `window_sec` 秒内按仓库的拒绝计数 `{repo_key: n}`（窗口即存在期）。
+
+    `count_recent_split` 在「存在期 = 窗口」时的退化形态：只返回窗口内有行的仓库。
+    """
+    return count_recent_split(cursor, window_sec=window_sec, presence_sec=window_sec)
 
 
 _last_cleanup = 0.0

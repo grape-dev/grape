@@ -468,14 +468,17 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
             # 保留维度、指标值取 60s 计数（0 = 已恢复 → 正常走 resolved 分支）。
             try:
                 from src.domains.insight.observability import webhook_rejects as _wr
-                _present = _wr.count_recent(c, WEBHOOK_REJECT_PRESENCE_SEC)
-                _counts = _wr.count_recent(c, WEBHOOK_REJECT_WINDOW_SEC)
-                for repo_key in set(_present) | set(_counts):
+                # 一次条件聚合同时回答「哪些仓库仍在存在期内」与「各窗口内计数」：
+                # 原实现对 15 分钟/60 秒窗口各发一条全表范围扫描，两遍读同一批行。
+                # 结果里的每个 key 都处于存在期内，value=0 即「已恢复」→ 走 resolved 分支。
+                _split = _wr.count_recent_split(c, WEBHOOK_REJECT_WINDOW_SEC,
+                                                WEBHOOK_REJECT_PRESENCE_SEC)
+                for repo_key, _n in _split.items():
                     m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                                   "_done": 0.0, "_bad": 0.0,
                                                   "_mut0_tot": 0.0, "_mut0_bad": 0.0,
                                                   "_mut1_tot": 0.0, "_mut1_bad": 0.0})
-                    m["webhook_token_mismatch"] = float(_counts.get(repo_key) or 0)
+                    m["webhook_token_mismatch"] = float(_n or 0)
             except Exception as _e:
                 log.warning(f"obs webhook reject metrics skipped: {_e}")
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数

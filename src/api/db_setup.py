@@ -1125,9 +1125,12 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_latency_log_path ON api_latency_log(path)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_duration ON api_latency_log(duration_ms)",
         "CREATE INDEX IF NOT EXISTS idx_latency_log_source ON api_latency_log(source)",
-        # Issue #3750: webhook 验签拒绝按仓库 + 时间窗口计数（告警求值/反查残留旧 secret）
-        "CREATE INDEX IF NOT EXISTS idx_obs_webhook_rejects_repo_time "
-        "ON obs_webhook_rejects(repo_key, created_at)",
+        # Issue #3750: webhook 验签拒绝按**时间窗口**计数（告警求值 + 14 天留存清理都是
+        # `WHERE created_at >= ?` / `< ?` 且不带 repo_key 等值，故 created_at 必须在前；
+        # repo_key 作覆盖列供 GROUP BY / 反查，放第二列不参与范围裁剪。反序
+        # (repo_key, created_at) 对这种查询用不上索引，只能全表扫）
+        "CREATE INDEX IF NOT EXISTS idx_obs_webhook_rejects_time_repo "
+        "ON obs_webhook_rejects(created_at, repo_key)",
         # ===== Issue #103: 知识写入队列索引 =====
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
