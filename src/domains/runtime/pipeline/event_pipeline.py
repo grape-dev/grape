@@ -6963,22 +6963,28 @@ def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) 
     if not owner or not rname or not num:
         return ("unknown", {})
     # Issue #3759：仓库级熔断——上游已确认该仓库不存在时，逐 issue 读直接短路为
-    # missing（0 上游请求），避免孤儿仓库卡的 404 轮询无限放大；退避到点自动放行一次。
+    # missing（0 上游请求），避免孤儿仓库卡的 404 轮询无限放大；退避到点由
+    # `allow_read` 原子占位，只放行一个调用方去探测（8 并发批量复核不会整批打上游）。
+    # 该链路读与探测用同一平台仓储凭据，因此「读不到 issue」与「看不到仓库」同源，
+    # 结论写仓库级台账才成立（QA 复审 Required 1/2）。
+    #
+    # ⚠️ 顺序：先解析凭据再判熔断。无 token 是「无法核实」（unknown，调用方 fail-open），
+    # 不能被熔断改写成 missing——熔断只替代**真的会打上游**的那次读。
+    if client is None:
+        tok = _resolve_issue_read_token(_rk)
+        if not tok:
+            return ("unknown", {})
+        client = _build_issue_read_client(_rk, tok)
     from src.domains.runtime.vcs import issue_poll_breaker as _breaker
     try:
-        _blocked, _st = _breaker.blocked(_rk)
+        _allowed, _st = _breaker.allow_read(_rk)
     except Exception:  # noqa: BLE001 - 熔断层读失败一律 fail-open（不短路）
-        _blocked, _st = False, {}
-    if _blocked:
+        _allowed, _st = True, {}
+    if not _allowed:
         log.debug(f"_vcs_get_issue: {_rk}#{num} short-circuited "
                   f"(vcs_missing since {_st.get('vcs_missing_since') or '?'})")
         return ("missing", {})
     try:
-        if client is None:
-            tok = _resolve_issue_read_token(_rk)
-            if not tok:
-                return ("unknown", {})
-            client = _build_issue_read_client(_rk, tok)
         d = client.get_issue(_native_issue_number(num), timeout=timeout)
         if isinstance(d, dict) and "error" not in d:
             try:
@@ -6992,8 +6998,9 @@ def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) 
             except Exception:  # noqa: BLE001
                 pass
             return ("missing", {})
-        # 401/403 等同为不可自愈的归属/权限错配，仍按「未知」返回（调用方 fail-open），
-        # 但要落一次永久失败台账，让仓库卡可见并可被运维处置。
+        # 401/403 等同为不可自愈的归属/权限错配，仍按「未知」返回（调用方 fail-open）；
+        # 台账只记「最近错误码/时间」供运维定位，不探测、不置仓库级 vcs_missing
+        # （403 只说明这一方凭据没有权限，不构成仓库不存在的事实）。
         _code = d.get("status_code") if isinstance(d, dict) else None
         try:
             if _breaker.is_permanent_status(_code):

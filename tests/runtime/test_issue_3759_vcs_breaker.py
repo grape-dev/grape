@@ -244,6 +244,176 @@ class TestReadPathShortCircuit:
         assert store.rows[RK]["vcs_status"] == "ok"
 
 
+class TestCredentialDecoupling:
+    """QA 复审 Required 1：仓库级事实只接受「404/410 + 平台凭据」。"""
+
+    @pytest.mark.parametrize("code", [400, 401, 403, 422, 451])
+    def test_caller_scoped_4xx_never_probes_or_fuses(self, store, probe_calls, code):
+        st = br.note_permanent_failure(RK, code, operation="issues/62", now=T0)
+        assert probe_calls == []
+        assert store.writes == []
+        assert st.get("vcs_status") != "vcs_missing"
+        assert not st.get("vcs_next_probe_at")
+
+    def test_caller_credential_404_does_not_fuse_repo(self, store, probe_calls):
+        """调用方凭据的 404 可能只是「机器人/该用户看不到私有仓」，不得熔断全仓。"""
+        st = br.note_permanent_failure(RK, 404, operation="issues/62", now=T0,
+                                      credential=br.CREDENTIAL_CALLER)
+        assert probe_calls == []
+        assert store.writes == []
+        assert st.get("vcs_status") != "vcs_missing"
+        assert br.blocked(RK, now=T0)[0] is False
+
+    def test_user_path_404_keeps_upstream_contract_and_ledger_untouched(self, store, probe_calls, monkeypatch):
+        """用户态 GET 404：状态码透传不变，且零仓库级写入（不再产生合成 404 的前置条件）。"""
+        from fastapi import HTTPException
+        from src.api import git_repo_api as api
+
+        def _raise(*a, **kw):
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "Project not found"})
+
+        monkeypatch.setattr(api, "_vcs_req", _raise)
+        monkeypatch.setattr(api, "_repo_token", lambda *a, **kw: "tk")
+        with pytest.raises(HTTPException) as exc:
+            api.get_issue("huaweicloud-mate", "repository-requests", 62,
+                          user={"id": 1}, p="gitcode")
+        assert exc.value.status_code == 404
+        assert store.writes == []
+        assert probe_calls == []
+        assert br.blocked(RK, now=datetime.now(timezone.utc))[0] is False
+
+
+class TestProbeRelease:
+    """QA 复审 Required 2：到点只放行一次 + unknown 不解除已确认熔断。"""
+
+    def test_concurrent_release_allows_exactly_one_probe(self, store, probe_calls):
+        import threading
+        br.note_permanent_failure(RK, 404, operation="issues/62", now=T0)
+        due = T0 + timedelta(seconds=300)
+        allowed: list[bool] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def _worker():
+            barrier.wait()
+            ok, _st = br.allow_read(RK, now=due)
+            with lock:
+                allowed.append(ok)
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert allowed.count(True) == 1
+        assert allowed.count(False) == 7
+
+    def test_release_pushes_next_probe_at_by_lease(self, store, probe_calls):
+        br.note_permanent_failure(RK, 404, operation="issues/62", now=T0)
+        due = T0 + timedelta(seconds=300)
+        ok, st = br.allow_read(RK, now=due)
+        assert ok is True
+        assert datetime.fromisoformat(st["vcs_next_probe_at"]) == \
+            due + timedelta(seconds=br.PROBE_LEASE_SECONDS)
+        assert datetime.fromisoformat(store.rows[RK]["vcs_next_probe_at"]) == \
+            due + timedelta(seconds=br.PROBE_LEASE_SECONDS)
+        # 租约未到期 → 其它并发读继续短路
+        assert br.blocked(RK, now=due + timedelta(seconds=10))[0] is True
+
+    def test_unknown_probe_keeps_confirmed_fuse(self, store, probe_calls, monkeypatch):
+        """一次 5s 探测超时不得把已确认的 vcs_missing 洗白（Required 2-②）。"""
+        br.note_permanent_failure(RK, 404, operation="issues/62", now=T0)
+        assert store.rows[RK]["vcs_status"] == "vcs_missing"
+        missing_since = store.rows[RK]["vcs_missing_since"]
+        monkeypatch.setattr(br, "probe_repo", lambda repo_key, *, client=None: "unknown")
+        due = T0 + timedelta(seconds=300)
+        st = br.note_permanent_failure(RK, 404, operation="issues/63", now=due)
+        assert st["vcs_status"] == "vcs_missing"
+        assert st["vcs_missing_since"] == missing_since
+        assert datetime.fromisoformat(st["vcs_next_probe_at"]) == \
+            due + timedelta(seconds=900)  # fail_count=2 → 15min
+        assert br.blocked(RK, now=due + timedelta(seconds=1))[0] is True
+
+    def test_unknown_probe_on_healthy_repo_stays_ok(self, store, monkeypatch):
+        monkeypatch.setattr(br, "probe_repo", lambda repo_key, *, client=None: "unknown")
+        st = br.note_permanent_failure(RK, 404, operation="issues/62", now=T0)
+        assert st["vcs_status"] == "ok"
+        assert not st.get("vcs_next_probe_at")
+
+
+class TestConfirmMissingFailsOpen:
+    """QA 复审 Required 1 影响链：熔断期的合成 missing 不得软删 issue 卡。"""
+
+    def test_fused_repo_keeps_candidates_unresolved(self, store, probe_calls, monkeypatch):
+        from src.api import issue_vcs_index as idx
+
+        br.note_permanent_failure(RK, 404, now=datetime.now(timezone.utc))
+
+        def _boom(*a, **kw):  # pragma: no cover - 不应被调用
+            raise AssertionError("fused repo must not be re-confirmed as missing")
+
+        from src.domains.runtime.pipeline import event_pipeline as _ep
+        monkeypatch.setattr(_ep, "fetch_issue_via_vcs", _boom)
+        confirmed, unresolved = idx._confirm_missing(RK, [62, 63])
+        assert confirmed == set()
+        assert unresolved == {62, 63}
+
+    def test_healthy_repo_still_confirms_real_404(self, store, probe_calls, monkeypatch):
+        from src.api import issue_vcs_index as idx
+        from src.domains.runtime.pipeline import event_pipeline as _ep
+
+        monkeypatch.setattr(_ep, "fetch_issue_via_vcs", lambda rk, num: ("missing", {}))
+        confirmed, unresolved = idx._confirm_missing(RK, [62, 63])
+        assert confirmed == {62, 63}
+        assert unresolved == set()
+
+
+class TestRecoveryCache:
+    """QA 复审 Optional：成功读不再逐条查库（97 条 ≈ 97 次 SELECT）。"""
+
+    def test_healthy_repo_recovery_reads_ledger_once_then_cache(self, store, monkeypatch):
+        reads: list[str] = []
+        original = br._read_state_db
+
+        def _counting(repo_key):
+            reads.append(repo_key)
+            return original(repo_key)
+
+        monkeypatch.setattr(br, "_read_state_db", _counting)
+        for _ in range(5):
+            assert br.note_recovery(RK) is False
+        assert len(reads) == 1  # 首条填缓存，其余命中 30s 缓存
+
+    def test_dirty_state_is_rechecked_before_write(self, store, probe_calls):
+        br.note_permanent_failure(RK, 404, now=T0)
+        assert br.note_recovery(RK) is True
+        assert br.state(RK, fresh=True)["vcs_status"] == "ok"
+
+
+class TestApiClientLogDedupe:
+    """QA 复审 Optional：api_client 侧日志折叠有用例看护。"""
+
+    def test_error_log_key_folds_issue_numbers(self):
+        from src.domains.runtime.vcs import api_client as ac
+        assert ac._error_log_key("https://x/api/v5/repos/o/r/issues/62", 404) == \
+            ac._error_log_key("https://x/api/v5/repos/o/r/issues/63", 404)
+        assert ac._error_log_key("https://x/api/v5/repos/o/r/issues/62", 404) != \
+            ac._error_log_key("https://x/api/v5/repos/o/r/issues/62", 403)
+
+    def test_error_log_deduper_folds_within_window(self):
+        from src.kernel.log_dedupe import WindowDeduper
+        clock = {"t": 0.0}
+        d = WindowDeduper(60.0, clock=lambda: clock["t"])
+        first = d.note("o/r:404")
+        assert first.emit_full is True
+        folded = [d.note("o/r:404") for _ in range(4)]
+        assert all(x.emit_full is False for x in folded)
+        assert folded[-1].folded == 4
+        clock["t"] = 61.0
+        rolled = d.note("o/r:404")
+        assert rolled.emit_full is True and rolled.folded == 4
+
+
 class TestUpstreamReqDedupe:
     def test_repeated_404_logs_once_per_window(self, monkeypatch, caplog):
         from src.api import git_repo_api as api

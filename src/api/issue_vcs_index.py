@@ -228,6 +228,19 @@ def _confirm_missing(repo_key: str, numbers: list[int]) -> tuple[set[int], set[i
         return set(), set(numbers)
     confirmed: set[int] = set()
     unresolved: set[int] = set()
+    # Issue #3759 复审（QA Required 1 影响链）：熔断期 `fetch_issue_via_vcs` 返回的
+    # missing 是**合成结论**（一个上游请求都没发），不能当作「Issue 已删除」的证据去
+    # 软删卡片。熔断中整体 fail-open：候选全部 unresolved，等熔断解除后下一轮再复核。
+    breaker = None
+    try:
+        from src.domains.runtime.vcs import issue_poll_breaker as _breaker
+        breaker = _breaker
+        if breaker.blocked(repo_key)[0]:
+            log.info(f"issue_vcs_index: {repo_key} vcs breaker active, "
+                     f"{len(numbers)} candidates stay unresolved (fail-open, no soft delete)")
+            return set(), set(numbers)
+    except Exception as exc:  # noqa: BLE001 - 熔断层故障按「可复核」处理（不软删）
+        log.debug(f"issue_vcs_index: breaker check skipped for {repo_key}: {exc}")
     try:
         from src.domains.runtime.pipeline.event_pipeline import fetch_issue_via_vcs
     except Exception as exc:
@@ -235,6 +248,14 @@ def _confirm_missing(repo_key: str, numbers: list[int]) -> tuple[set[int], set[i
         return set(), set(numbers)
 
     def _one(num: int):
+        # 逐条复核期间可能被前一条的 404 重新熔断：此时后续 missing 同样是合成结论，
+        # 按 unknown（不确认删除）处理，避免「一次真实探测 + N 次合成 missing」批量软删。
+        if breaker is not None:
+            try:
+                if breaker.blocked(repo_key)[0]:
+                    return num, "unknown"
+            except Exception:  # noqa: BLE001
+                pass
         try:
             state, _ = fetch_issue_via_vcs(repo_key, num)
         except Exception:

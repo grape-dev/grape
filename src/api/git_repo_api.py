@@ -1348,39 +1348,25 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
 @router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
 def get_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
               p: str = Depends(_provider)):
-    # Issue #3759：孤儿仓库卡（上游已确认不存在）在熔断期内直接返回同一 404 语义，
-    # 不再逐 issue 打上游（此前一小时 76 条 404 WARNING、永不收敛）。
-    from src.domains.runtime.vcs import issue_poll_breaker as _breaker
-    from src.kernel.repo_key import to_repo_key
-    _rk = to_repo_key(f"{owner}/{repo}", p)
-    try:
-        _blocked, _st = _breaker.blocked(_rk)
-    except Exception:  # noqa: BLE001 - 熔断层故障一律 fail-open（继续打上游，不改 404 语义）
-        _blocked, _st = False, {}
-    if _blocked:
-        raise HTTPException(status_code=404, detail={
-            "code": 404,
-            "message": f"仓库 {owner}/{repo} 在上游不存在（vcs_missing，熔断中），"
-                       f"Issue #{number} 无法读取；恢复上游或重绑 provider 后自动恢复",
-            "vcs_status": "vcs_missing",
-            "vcs_missing_since": _st.get("vcs_missing_since") or "",
-            "vcs_next_probe_at": _st.get("vcs_next_probe_at") or "",
-            "breaker": True,
-        })
+    # Issue #3759 复审（QA Required 1）：用户态读路径**不写**仓库级 VCS 台账、也**不**
+    # 按仓库级熔断短路。原因：调用方凭据与平台仓储读 token 的可见性相互独立（私有仓/
+    # 机器人失可见性时上游 /repos 同样返 404），用调用方的 400/401/403/422/404 写仓库级
+    # `vcs_missing` 会把健康仓库判死，让有权限的调用方吃到合成 404、并连带让
+    # issue 卡被 `_confirm_missing` 软删。仓库级事实只由平台凭据的读路径
+    # （`event_pipeline._vcs_get_issue`）落账；此处仅保持上游状态码透传（#549/#558）与
+    # 日志窗口聚合。
     try:
         resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
     except HTTPException as _exc:
-        if _breaker.is_permanent_status(_exc.status_code):
+        if _is_permanent_upstream_status(_exc.status_code):
             try:
-                _breaker.note_permanent_failure(_rk, _exc.status_code,
-                                                operation=f"issues/{number}")
+                from src.domains.runtime.vcs import issue_poll_breaker as _breaker
+                from src.kernel.repo_key import to_repo_key as _trk
+                _breaker.note_caller_error(_trk(f"{owner}/{repo}", p), _exc.status_code,
+                                           operation=f"issues/{number}")
             except Exception:  # noqa: BLE001 - 台账写失败不得改变 404/403 契约
                 pass
         raise
-    try:
-        _breaker.note_recovery(_rk, operation=f"issues/{number}")
-    except Exception:  # noqa: BLE001
-        pass
     # Issue #1005：回显的 milestone 同样补 id（供 QA 断言），state 归一与列表口径一致。
     return _normalize_issue_milestone(resp)
 

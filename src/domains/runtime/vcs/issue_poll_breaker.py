@@ -12,9 +12,14 @@ not found`），但平台台账里仍留有仓库卡与 Issue 62/63。巡检每�
 2. **仓库级存在性探测**：首次永久失败时探测一次 `/repos/{owner}/{repo}`，
    得出 missing/exists/unknown 并落仓库卡台账——这样「仓库不存在」这一事实
    只需一次上游请求，不随 issue 数线性增长；
+   ⚠️ **只有 404/410 + 平台仓储凭据**才能构成仓库级事实（`CREDENTIAL_REPO`）。
+   400/401/403/422 与任何来自调用方凭据的失败只走 `note_caller_error`（零写库）：
+   私有仓/机器人失可见性时上游 `/repos` 同样返 404，用调用方凭据落台账会把健康
+   仓库判死、并让用户态 GET 吃到合成 404；
 3. **退避放行**：探测结论 missing → `vcs_missing`，熔断期间该仓库的逐 issue 读
-   直接短路（0 上游请求），只在 `vcs_next_probe_at` 到点后放行一次探测；
-   退避档位 5min → 15min → 60min 封顶（上限依据验收项「≤1 次/小时」）；
+   直接短路（0 上游请求），只在 `vcs_next_probe_at` 到点后由 `allow_read` **原子
+   占位**放行一次（8 并发批量复核不会整批打上游）；退避档位 5min → 15min → 60min
+   封顶（上限依据验收项「≤1 次/小时」）；探测结论 unknown **不解除**已确认的熔断；
 4. **自动恢复**：探测结论 exists、或熔断外的正常读成功 → 清除 `vcs_missing`，
    订阅读路径自动恢复；
 5. **运维入口**：`reset()` 一键清除（重绑 provider / 人工处置后调用）。
@@ -39,6 +44,19 @@ VCS_STATUS_MISSING = "vcs_missing"
 #: 退避档位（秒）：5min → 15min → 60min 封顶。封顶 1h 即验收项「≤1 次/小时」。
 PERMANENT_BACKOFF_SECONDS = (300, 900, 3600)
 
+#: 只有「资源在给定 URL 上不存在」的 404/410 才可能构成**仓库级**事实。400/401/403/422
+#: 是「这一次请求/这一方凭据」的问题（非法编号、token 过期、无权限、参数不合法），
+#: 既不能证明仓库已删，也不能代表其它调用方——QA 复审 Required 1 的口径。
+REPO_ABSENCE_STATUSES = frozenset({404, 410})
+
+#: 台账写入的凭据主体：
+#: - ``CREDENTIAL_REPO``：平台仓储读 token（巡检/订阅读路径），探测与读用同一凭据，
+#:   「读不到 issue」与「看不到仓库」同源，结论对这条链路可信；
+#: - ``CREDENTIAL_CALLER``：调用方自带凭据（用户态 API）。它对仓库的可见性与平台凭据
+#:   无关（私有仓/机器人失可见性时上游 /repos 同样返 404），**不得写仓库级台账**。
+CREDENTIAL_REPO = "repo"
+CREDENTIAL_CALLER = "caller"
+
 #: 探测上游仓库的单请求超时（探测失败按 unknown fail-open，不误熔断）。
 PROBE_TIMEOUT_SECONDS = 5
 
@@ -51,8 +69,15 @@ STATE_CACHE_TTL_SECONDS = 30.0
 #: 用注入的 now（逻辑时间）判定，测试可精确构造。
 NOTE_MIN_INTERVAL_SECONDS = 30.0
 
+#: 放行一次探测后的**租约**：占位期间同一仓库的其它并发读一律继续短路（0 上游）。
+#: 8 并发批量复核在同一个 due 时点只允许 1 个线程走出熔断；租约短于最小退避档位
+#: （300s），到期仍未落新状态时允许下一个线程再放行一次。
+PROBE_LEASE_SECONDS = 60.0
+
 _STATE_CACHE: dict[str, tuple[float, dict]] = {}
 _LAST_NOTE_AT: dict[str, datetime] = {}
+#: repo_key -> 探测租约到期时刻（time.monotonic）
+_PROBE_LEASES: dict[str, float] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -61,15 +86,29 @@ def clear_cache() -> None:
     with _CACHE_LOCK:
         _STATE_CACHE.clear()
         _LAST_NOTE_AT.clear()
+        _PROBE_LEASES.clear()
 
 
 def is_permanent_status(status: Any) -> bool:
-    """上游状态码是否属「永久失败」：4xx 除 429（限流可重试）。"""
+    """上游状态码是否属「永久失败」：4xx 除 429（限流可重试）。
+
+    仅用于「日志分类 / 不再按可重试重试」的判定；**不等于可以写仓库级台账**——
+    写台账的门槛见 :func:`is_repo_absence_status`。
+    """
     try:
         code = int(status)
     except (TypeError, ValueError):
         return False
     return 400 <= code < 500 and code != 429
+
+
+def is_repo_absence_status(status: Any) -> bool:
+    """状态码是否足以作为「该仓库在当前凭据下不存在」的证据（仅 404/410）。"""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    return code in REPO_ABSENCE_STATUSES
 
 
 def backoff_seconds(fail_count: int) -> int:
@@ -245,11 +284,12 @@ def _probe_due(st: dict, now: datetime) -> bool:
 # ---------------------------------------------------------------- 对外判定
 
 def blocked(repo_key: str, *, now: Optional[datetime] = None) -> tuple[bool, dict]:
-    """该仓库的逐 issue 读是否应短路：返回 (是否熔断生效, 台账状态)。
+    """只读判定：该仓库当前是否处于熔断（不占位、不放行）。
 
     熔断生效 = 台账 `vcs_status == vcs_missing` 且未到 `vcs_next_probe_at`。
-    到点放行一次探测（放行后本次读会真的打上游，探测/读成功即自愈）。
     台账读不到（含无卡/DB 不可用）→ 一律不熔断（fail-open）。
+    仅供「不该放行探测」的旁路查询（如批量复核前判断是否可信）；真正要走一次
+    上游读的调用方必须用 :func:`allow_read`（到点会原子占位，只放行一次）。
     """
     st = state(repo_key)
     if not st or st.get("vcs_status") != VCS_STATUS_MISSING:
@@ -262,24 +302,98 @@ def blocked(repo_key: str, *, now: Optional[datetime] = None) -> tuple[bool, dic
     return True, st
 
 
-def note_permanent_failure(repo_key: str, status_code: Any, *,
-                           operation: str = "", now: Optional[datetime] = None) -> dict:
-    """记录一次永久失败：累积计数 → 必要时做一次仓库级探测 → 落熔断状态。
+def allow_read(repo_key: str, *, now: Optional[datetime] = None) -> tuple[bool, dict]:
+    """该仓库的逐 issue 读是否放行上游：返回 (是否放行, 台账状态)。
 
-    探测只在「首次失败」或「退避到点」时发生，因此首次 404 只多一次上游请求，
-    后续同仓库 issue 的读在熔断期内 0 上游请求。
+    - 未熔断 / 台账读不到 → ``(True, st)``（fail-open，正常打上游）；
+    - 熔断中且未到点 → ``(False, st)``（短路，0 上游）；
+    - 熔断且到点 → **原子占位**后 ``(True, st)``：进程内按 repo 单飞 + 把
+      `vcs_next_probe_at` 前移一个租约，8 并发批量复核在同一 due 时点只有 1 个
+      线程走出熔断，其余继续短路（QA 复审 Required 2-①）。
+    """
+    st = state(repo_key)
+    if not st or st.get("vcs_status") != VCS_STATUS_MISSING:
+        return True, st
+    due_at = _parse_iso(st.get("vcs_next_probe_at"))
+    if due_at is None:
+        return True, st
+    _now_dt = _now(now)
+    if _now_dt < due_at:
+        return False, st
+    rk = to_repo_key(repo_key)
+    lease_until = _now_dt + timedelta(seconds=PROBE_LEASE_SECONDS)
+    with _CACHE_LOCK:
+        # 单次持锁完成「判断 + 置位」：并发线程里只有一个能看到未占位状态。
+        existing = _PROBE_LEASES.get(rk)
+        if existing is not None and time.monotonic() < existing:
+            return False, st
+        _PROBE_LEASES[rk] = time.monotonic() + PROBE_LEASE_SECONDS
+    # 占位同时前移台账时间：其它进程/其它副本从 DB 也看到「已放行一次」。
+    try:
+        _update_state(rk, {"vcs_next_probe_at": _iso(lease_until)})
+    except Exception as exc:  # noqa: BLE001 - 占位写失败只退回进程内单飞
+        log.debug(f"issue_poll_breaker: probe lease not persisted {rk}: {exc}")
+    log.info(f"issue_poll_breaker: repo {rk} released for one probe attempt "
+             f"(previous next_probe_at={_iso(due_at)})")
+    st = dict(st)
+    st.update({"vcs_next_probe_at": _iso(lease_until)})
+    return True, st
+
+
+def _throttle_note(rk: str, now_dt: datetime) -> bool:
+    """同仓库「永久失败记账」节流：返回 True 表示本次应跳过。
+
+    「判断 + 置位」在**同一次持锁**内完成（QA 复审 Optional：原实现分两次取锁，
+    并发首次失败会各探测一次）。
+    """
+    with _CACHE_LOCK:
+        _last = _LAST_NOTE_AT.get(rk)
+        if _last is not None and (now_dt - _last).total_seconds() < NOTE_MIN_INTERVAL_SECONDS:
+            return True
+        _LAST_NOTE_AT[rk] = now_dt
+        return False
+
+
+def note_caller_error(repo_key: str, status_code: Any, *,
+                      operation: str = "", now: Optional[datetime] = None) -> dict:
+    """记录一次**调用方层面**的永久失败（凭据/请求错误）：只留日志，不碰台账。
+
+    QA 复审 Required 1 的解耦落点：400/401/403/422 以及任何来自调用方凭据的失败，
+    只说明「这一方凭据/这一次请求」有问题，既不能证明仓库已删，也不代表其它调用方。
+    因此这里**零写库**（仓库卡是仓库级事实源，不能挂上某个人过期 token 的错误码），
+    只返回当前台账状态供调用方继续走状态码透传；告警仍由日志层的窗口聚合给出。
     """
     rk = to_repo_key(repo_key)
     if not rk or not is_permanent_status(status_code):
         return state(rk)
+    log.info(f"issue_poll_breaker: caller-scoped permanent failure {rk} "
+             f"(status={status_code} on {operation or 'read'}); "
+             f"repo ledger untouched (credential/request error, not repo absence)")
+    return state(rk)
+
+
+def note_permanent_failure(repo_key: str, status_code: Any, *,
+                           operation: str = "", now: Optional[datetime] = None,
+                           credential: str = CREDENTIAL_REPO) -> dict:
+    """记录一次永久失败：累积计数 → 必要时做一次仓库级探测 → 落熔断状态。
+
+    探测只在「首次失败」或「退避到点」时发生，因此首次 404 只多一次上游请求，
+    后续同仓库 issue 的读在熔断期内 0 上游请求。
+
+    写仓库级台账需要两个前提（QA 复审 Required 1）：
+    1. `status_code` 属 :data:`REPO_ABSENCE_STATUSES`（404/410）；
+    2. `credential == CREDENTIAL_REPO`（探测与读用同一平台凭据）。
+    任一不满足 → 退化为 :func:`note_caller_error`（只记错误码）。
+    """
+    rk = to_repo_key(repo_key)
+    if not rk or not is_permanent_status(status_code):
+        return state(rk)
+    if credential != CREDENTIAL_REPO or not is_repo_absence_status(status_code):
+        return note_caller_error(rk, status_code, operation=operation, now=now)
     _now_dt = _now(now)
-    with _CACHE_LOCK:
-        _last = _LAST_NOTE_AT.get(rk)
-    if _last is not None and (_now_dt - _last).total_seconds() < NOTE_MIN_INTERVAL_SECONDS:
+    if _throttle_note(rk, _now_dt):
         # 同仓库短时间内的重复失败：不重复读库/写台账（告警量也不放大）。
         return state(rk)
-    with _CACHE_LOCK:
-        _LAST_NOTE_AT[rk] = _now_dt
     st = state(rk, fresh=True)
     fail_count = int(st.get("vcs_fail_count") or 0) + 1
     fields: dict[str, Any] = {
@@ -302,33 +416,56 @@ def note_permanent_failure(repo_key: str, status_code: Any, *,
                 f"probe=missing, fail_count={fail_count}, "
                 f"next_probe={fields['vcs_next_probe_at']}); per-issue VCS reads "
                 f"are short-circuited until then")
-        else:
-            # 仓库确实存在 → 只是这条 issue 不在上游（或探测不确定）：不熔断仓库。
+        elif result == "exists":
+            # 仓库确实存在 → 只是这条 issue 不在上游：不熔断仓库，并清除既有熔断。
             fields["vcs_status"] = VCS_STATUS_OK
             fields["vcs_missing_since"] = ""
             fields["vcs_next_probe_at"] = ""
+        else:
+            # 探测不确定（无 token/超时/401/403）：**不得**据此解除已确认的熔断
+            # （QA 复审 Required 2-②：一次 5s 超时就把已确认的 vcs_missing 洗白）。
+            # 未熔断时保持 ok；已熔断时保持 vcs_missing 并把探测时间再推迟一档。
+            if st.get("vcs_status") == VCS_STATUS_MISSING:
+                fields["vcs_status"] = VCS_STATUS_MISSING
+                fields["vcs_missing_since"] = st.get("vcs_missing_since") or _iso(_now_dt)
+                fields["vcs_next_probe_at"] = _iso(
+                    _now_dt + timedelta(seconds=backoff_seconds(fail_count)))
+                log.info(f"issue_poll_breaker: repo {rk} probe=unknown during "
+                         f"{VCS_STATUS_MISSING}, fuse kept, next_probe="
+                         f"{fields['vcs_next_probe_at']}")
+            else:
+                fields["vcs_status"] = VCS_STATUS_OK
+                fields["vcs_next_probe_at"] = ""
     return _update_state(rk, fields)
+
+
+def _state_is_dirty(st: dict) -> bool:
+    """台账是否有「需要清除」的痕迹（熔断中 / 失败计数 / 错误码 / 探测点）。"""
+    return bool(st.get("vcs_status") == VCS_STATUS_MISSING
+                or int(st.get("vcs_fail_count") or 0)
+                or st.get("vcs_last_error_code")
+                or st.get("vcs_next_probe_at"))
 
 
 def note_recovery(repo_key: str, *, operation: str = "",
                   now: Optional[datetime] = None) -> bool:
     """上游读成功 → 清除熔断状态（自动恢复）；返回是否真的清除了状态。
 
-    只在「确有状态要清」时才写库（熔断中 / 有失败计数 / 有错误码）：否则健康仓库
-    每次读都会产生一次跨域写。已 ok 且无失败痕迹 → 直接返回 False（零写）。
+    读路径是批量的（一次列表要复核几十上百条 issue），因此**先用 30s 缓存判定
+    环境卫生**：缓存显示无脏状态 → 直接返回，不查库（QA 复审 Optional：原实现
+    每次成功读都 `fresh=True` 查一次库，97 条 ≈ 97 次 SELECT）。缓存脏时才做一次
+    fresh 复查（防其它副本/其它进程已恢复），确认仍脏才写库。
     """
     rk = to_repo_key(repo_key)
     if not rk:
         return False
+    st = state(rk)
+    if not st or not _state_is_dirty(st):
+        return False
     st = state(rk, fresh=True)
-    if not st:
+    if not st or not _state_is_dirty(st):
         return False
     was_missing = st.get("vcs_status") == VCS_STATUS_MISSING
-    dirty = bool(was_missing or int(st.get("vcs_fail_count") or 0)
-                 or st.get("vcs_last_error_code")
-                 or st.get("vcs_next_probe_at"))
-    if not dirty:
-        return False
     _update_state(rk, {
         "vcs_status": VCS_STATUS_OK,
         "vcs_missing_since": "",
@@ -336,10 +473,27 @@ def note_recovery(repo_key: str, *, operation: str = "",
         "vcs_next_probe_at": "",
         "vcs_fail_count": 0,
     })
+    with _CACHE_LOCK:
+        _PROBE_LEASES.pop(rk, None)
     if was_missing:
         log.info(f"issue_poll_breaker: repo {rk} recovered (operation={operation or 'read'}), "
                  f"{VCS_STATUS_MISSING} cleared; subscription reads resumed")
     return was_missing
+
+
+def drop_cache(repo_key: str) -> None:
+    """只清本进程的台账缓存/租约/节流（不写库）。
+
+    供 mgmt 侧直接写台账后（如运维 reset）让本进程立刻看到新值，避免 30s 缓存
+    让「已清除」看起来没生效；写语义本身由调用方在归属域完成（不做跨域写）。
+    """
+    rk = to_repo_key(repo_key)
+    if not rk:
+        return
+    with _CACHE_LOCK:
+        _STATE_CACHE.pop(rk, None)
+        _LAST_NOTE_AT.pop(rk, None)
+        _PROBE_LEASES.pop(rk, None)
 
 
 def reset(repo_key: str, *, reason: str = "ops_reset",
@@ -350,6 +504,7 @@ def reset(repo_key: str, *, reason: str = "ops_reset",
         return {}
     with _CACHE_LOCK:
         _LAST_NOTE_AT.pop(rk, None)
+        _PROBE_LEASES.pop(rk, None)
     _update_state(rk, {
         "vcs_status": VCS_STATUS_OK,
         "vcs_missing_since": "",
