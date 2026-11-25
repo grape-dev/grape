@@ -1130,9 +1130,9 @@ def _create_indexes():
         # Issue #3750: webhook 验签拒绝按**时间窗口**计数（告警求值 + 14 天留存清理都是
         # `WHERE created_at >= ?` / `< ?` 且不带 repo_key 等值，故 created_at 必须在前；
         # repo_key 作覆盖列供 GROUP BY / 反查，放第二列不参与范围裁剪。反序
-        # (repo_key, created_at) 对这种查询用不上索引，只能全表扫）
-        "CREATE INDEX IF NOT EXISTS idx_obs_webhook_rejects_time_repo "
-        "ON obs_webhook_rejects(created_at, repo_key)",
+        # (repo_key, created_at) 对这种查询用不上索引，只能全表扫）。
+        # ⚠️ 索引本身已改注册式迁移 202611250006（PR #2157 门禁复审：写在这里的索引
+        # 存量库永不执行 → 生产仍全表扫）。仅保留本注释指向迁移，不再在此建索引。
         # ===== Issue #103: 知识写入队列索引 =====
         "CREATE INDEX IF NOT EXISTS idx_kwq_status_retry ON knowledge_write_queue(queue_status, next_retry_at)",
         "CREATE INDEX IF NOT EXISTS idx_kwq_dim_created ON knowledge_write_queue(repo_key, scope, agent_type, issue_num, created_at)",
@@ -12696,3 +12696,64 @@ register_migration(
     post_check=_postcheck_create_autopilot_payload_guard_table,
 )
 
+
+# ===== Issue #3750：obs_webhook_rejects(created_at, repo_key) 时间窗索引 =====
+# 该索引此前只写在**冻结老轨** `_create_indexes()` 里：存量库已盖 legacy-stamp
+# 202610300001，启动时不跑老轨，于是 #3750 的「按时间窗计数」（告警求值 + 14 天
+# 留存清理都是 `WHERE created_at >= ?`）在生产实际仍是全表扫 —— 正是
+# tests/api/test_migration_track_guard.py::test_legacy_index_ddl_is_frozen 恒红的
+# 原因（该守卫禁止往老轨新增索引）。改注册式迁移后，存量库下次启动即补齐并盖章
+# （先探测再建，幂等；三库模式下切到 insight 域连接）。
+# 版本号 202611250006：202611250001..005 已被本批迁移占用（见上面各条注释）。
+_OBS_WEBHOOK_REJECTS_TIME_INDEX = "idx_obs_webhook_rejects_time_repo"
+
+
+def _fn_obs_webhook_rejects_time_index() -> None:
+    """Issue #3750：补 webhook 验签拒绝台账的时间窗索引（幂等）。"""
+    from src.kernel.session_manager import db as _db, db_lock
+
+    conn = _migration_conn("insight", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if _index_present(c, "obs_webhook_rejects", _OBS_WEBHOOK_REJECTS_TIME_INDEX):
+            return
+        if _mysql_backend():
+            # repo_key / created_at 是 TEXT，MySQL 建索引必须带前缀（1170）；迁移走
+            # db_registry._CompatCursor，mysql_compat「自动补 (191)」的特判不生效。
+            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
+                   "ON obs_webhook_rejects(created_at(191), repo_key(191))")
+        else:
+            ddl = (f"CREATE INDEX {_OBS_WEBHOOK_REJECTS_TIME_INDEX} "
+                   "ON obs_webhook_rejects(created_at, repo_key)")
+        try:
+            c.execute(ddl)
+        except Exception as e:  # noqa: BLE001
+            if "1061" in str(e) or "already exists" in str(e).lower():
+                log.info(f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 已存在（1061），视为建成")
+            else:
+                conn.rollback()
+                raise
+        conn.commit()
+
+
+def _postcheck_obs_webhook_rejects_time_index() -> None:
+    """post_check：索引在位才盖章（不在位 raise，不盖章、下次启动重试）。"""
+    from src.kernel.session_manager import db as _db, db_lock
+
+    conn = _migration_conn("insight", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        if not _index_present(c, "obs_webhook_rejects",
+                              _OBS_WEBHOOK_REJECTS_TIME_INDEX):
+            raise RuntimeError(
+                f"{_OBS_WEBHOOK_REJECTS_TIME_INDEX} 缺失（索引未建成，不盖章，下次启动重试）")
+
+
+register_migration(
+    version="202611250006",
+    name="obs-webhook-rejects-time-repo-index",
+    kind="safe",
+    domains=("insight",),
+    fn=_fn_obs_webhook_rejects_time_index,
+    post_check=_postcheck_obs_webhook_rejects_time_index,
+)
