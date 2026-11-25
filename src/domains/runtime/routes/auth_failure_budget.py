@@ -19,8 +19,9 @@
 
 阈值按进程分摊说明：多 worker/多进程部署时各进程独立计数（Spec 已声明，
 重启退化为重新计数，代价可接受）。内存上界 `RUNTIME_AUTH_FAIL_MAX_IPS`
-（默认 10000）：超出时先清理过期条目，仍超则整体重置（fail-open：宁可重置
-计数，也不让鉴权主链路因计数器内存被拒）。
+（默认 10000）：超出时先清理过期条目，仍满则按最久未见优先逐条淘汰（活跃封禁
+排在最后，仅在全是活跃封禁时才淘汰最早的封禁），避免一次性清空计数与封禁
+（fail-open：宁可淘汰少量条目，也不让鉴权主链路因计数器内存被拒）。
 """
 
 import os
@@ -230,14 +231,44 @@ class AuthFailureBudget:
         return log_line
 
     def _evict_if_full(self, now: float) -> None:
-        """条目数达上界：先清过期项，仍满则整体重置（fail-open，保鉴权主链路）。"""
-        if len(self._states) < _max_ips():
+        """条目数达上界：先清过期项，仍满则按最久未见逐条淘汰，保留活跃封禁。"""
+        cap = _max_ips()
+        if len(self._states) < cap:
             return
         for _ip in [k for k, v in self._states.items() if v.stale(now)]:
             del self._states[_ip]
-        if len(self._states) >= _max_ips():
-            log.warning(f"auth failure budget: tracked ips reached cap, reset counters (fail-open)")
-            self._states.clear()
+        if len(self._states) < cap:
+            return
+
+        def _last_seen(st: "_IpFailState") -> float:
+            if st.minute:
+                return st.minute[-1]
+            if st.hour:
+                return st.hour[-1]
+            return st.banned_until
+
+        need = len(self._states) - cap + 1
+        # 先淘汰未处于封禁期的条目（最久未见优先），活跃封禁不因计数清理失效。
+        evictable = sorted(
+            (ip for ip, st in self._states.items()
+             if not (st.banned_until and now < st.banned_until)),
+            key=lambda ip: _last_seen(self._states[ip]))
+        for _ip in evictable[:need]:
+            del self._states[_ip]
+        dropped = min(need, len(evictable))
+        if len(self._states) < cap:
+            if dropped:
+                log.warning(
+                    f"auth failure budget: tracked ips reached cap, evicted {dropped} least-recent entries")
+            return
+
+        # 全是活跃封禁：仅在无可淘汰的非封禁条目时，淘汰最早到期的封禁以控内存。
+        need = len(self._states) - cap + 1
+        by_expiry = sorted(self._states, key=lambda ip: self._states[ip].banned_until)
+        for _ip in by_expiry[:need]:
+            del self._states[_ip]
+        log.warning(
+            f"auth failure budget: tracked ips reached cap with only active bans, evicted {need} earliest bans")
 
     def reset(self) -> None:
         """清空全部状态（测试用）。"""
