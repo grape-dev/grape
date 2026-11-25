@@ -45,6 +45,11 @@ class FakeApi:
         self.closed = True
 
 
+async def _settle_api_close() -> None:
+    """等待所有调度出去的关闭 task 完成（确定性等待，不用 sleep 猜时序）。"""
+    await asyncio.gather(*list(engine_wiring._api_close_tasks), return_exceptions=True)
+
+
 # ---------------------------------------------------------------- 引擎 stop 收尾
 
 async def test_engine_stop_closes_cached_feishu_sessions(tmp_path, monkeypatch):
@@ -79,6 +84,22 @@ async def test_engine_stop_is_idempotent_for_api_close(tmp_path):
     assert api.close_calls == 1
 
 
+async def test_feishu_api_rebuilds_after_engine_stop(tmp_path, monkeypatch):
+    """进程级缓存被 stop 清空后，下一次 feishu_api() 懒建新客户端（不返回死句柄）。"""
+    engine = _engine(tmp_path)
+    shared = FeishuAsync()
+    session = await shared._get_session()
+    monkeypatch.setitem(engine_wiring._feishu_api_cache, "cli_rebuild", shared)
+
+    await engine.stop()
+    assert session.closed is True
+
+    fresh = engine_wiring.feishu_api("cli_rebuild")
+    assert fresh is not shared
+    assert engine_wiring._feishu_api_cache["cli_rebuild"] is fresh
+    engine_wiring._feishu_api_cache.pop("cli_rebuild", None)
+
+
 async def test_engine_stop_survives_api_close_failure(tmp_path, caplog):
     """关闭失败只 WARNING（带 app_id），stop 正常完成并清空缓存。"""
     engine = _engine(tmp_path)
@@ -103,7 +124,7 @@ async def test_prune_built_apps_closes_api_of_departed_channel(tmp_path):
     engine._ctx_cache["cli_gone"] = (SimpleNamespace(app_id="cli_gone"), api)
 
     engine._prune_built_apps()
-    await asyncio.sleep(0.01)          # 关闭以 task 异步执行，不阻塞装配
+    await _settle_api_close()          # 关闭以 task 异步执行，不阻塞装配
 
     assert "cli_gone" not in engine._built_apps
     assert "cli_gone" not in engine._ctx_cache
@@ -119,7 +140,7 @@ async def test_prune_built_apps_keeps_live_channel_api(tmp_path):
     engine._ctx_cache["cli_live"] = (SimpleNamespace(app_id="cli_live"), api)
 
     engine._prune_built_apps()
-    await asyncio.sleep(0.01)
+    await _settle_api_close()
 
     assert engine._ctx_cache["cli_live"][1] is api
     assert api.close_calls == 0
@@ -132,7 +153,7 @@ async def test_drop_cached_ctx_closes_previous_api(tmp_path):
     engine._ctx_cache["cli_x"] = (SimpleNamespace(app_id="cli_x"), api)
 
     engine._drop_cached_ctx("cli_x")
-    await asyncio.sleep(0.01)
+    await _settle_api_close()
 
     assert "cli_x" not in engine._ctx_cache
     assert api.closed is True
@@ -140,6 +161,30 @@ async def test_drop_cached_ctx_closes_previous_api(tmp_path):
     # 幂等：条目已不存在时不再重复关闭
     engine._drop_cached_ctx("cli_x")
     assert api.close_calls == 1
+
+
+async def test_drop_without_running_loop_defers_close_to_stop(tmp_path):
+    """无运行 loop（UI 线程直改缓存）→ 关闭挂起保留，由 stop() 收尾（契约 1）。
+
+    旧实现无 loop 时直接返回：pair 已从 `_ctx_cache` pop，stop() 再也找不到该 api，
+    session 只能等 GC —— 丢弃但永不关闭，与契约 1 冲突。
+    """
+    engine = _engine(tmp_path)
+    api = FakeApi()
+    engine._ctx_cache["cli_noloop"] = (SimpleNamespace(app_id="cli_noloop"), api)
+
+    # 在线程里调用 = 真实的"无运行 loop"场景（该线程没有 event loop）
+    await asyncio.to_thread(engine._drop_cached_ctx, "cli_noloop")
+
+    assert "cli_noloop" not in engine._ctx_cache
+    assert api.close_calls == 0              # 不当场跨 loop await
+    assert any(pair[0] is api for pair in engine_wiring._pending_api_closes)
+
+    await engine.stop()                      # 由 stop 在其 loop 上收尾
+
+    assert api.closed is True
+    assert api.close_calls == 1
+    assert not any(pair[0] is api for pair in engine_wiring._pending_api_closes)
 
 
 # ---------------------------------------------------------------- endpoint 客户端
@@ -162,6 +207,25 @@ def test_endpoint_close_failure_keeps_result(monkeypatch):
     assert asyncio.run(
         feishu_channel._default_endpoint_fetcher("cli_x", "secret")
     ) == ("wss://example.invalid/ws", 0)
+
+
+def test_endpoint_close_failure_keeps_original_error(monkeypatch):
+    """get_ws_endpoint 抛错 + close 也抛 → 向上抛的是原异常，不是 close 异常。"""
+
+    class BoomApi:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def get_ws_endpoint(self, ctx):
+            raise RuntimeError("endpoint boom")
+
+        async def close(self):
+            raise RuntimeError("close boom")
+
+    monkeypatch.setattr(feishu_async, "FeishuAsync", BoomApi)
+
+    with pytest.raises(RuntimeError, match="endpoint boom"):
+        asyncio.run(feishu_channel._default_endpoint_fetcher("cli_x", "secret"))
 
 
 # ---------------------------------------------------------------- 契约守卫

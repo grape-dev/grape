@@ -9,6 +9,8 @@
 | 5 | `_default_endpoint_fetcher` 的 `finally` 关闭失败仅 WARNING（带 app_id），不覆盖返回值/原异常 | `src/domains/runtime/im/adapters/feishu/channel.py` | 单测：close 失败仍返回原 `(url, code)` |
 | 6 | 回归守卫：`FeishuChannel` 实例不持有 `FeishuAsync`（session 只属于短生命周期客户端/装配层） | `tests/runtime/im/test_issue_3735_feishu_session_lifecycle.py` | 单测断言 |
 | 7 | 回归：现有 IM 测试 + lint + 架构检查 | — | `pytest tests/runtime/im -q` / `make lint` / `check-arch.py` |
+| 8 | 新增回归套件接入 CI 门禁（PR #2158 复审 Required） | `.github/workflows/lint.yml` | lint job 内含 3735 + 3897 两条套件的 pytest 步骤 |
+| 9 | 复审 Optional 收口：无 loop 不丢 api（`_pending_api_closes` + stop drain）、关闭 task 持引用、进程级缓存语义注释、测试去 sleep、close 失败保留原异常用例 | `engine_wiring.py` / 测试 | 单测：无 loop 挂起→stop 关闭；原异常不被覆盖 |
 
 ## 顺序（TDD）
 

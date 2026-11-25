@@ -51,6 +51,9 @@ Issue 正文的三条根因中，**渠道内 `api = FeishuAsync()` 挂闭包那�
 
 1. **收尾关闭**：装配层丢弃 `(ctx, api)` 对时，若 `api` 提供 `close()`，必须调用（可 await
    则 await）；重复调用幂等（`FeishuAsync.close()` 自带 `_own_session` 判定）。
+   同步装配点无运行 loop 时**不得丢弃**：挂进 `_pending_api_closes` 保留引用，由
+   `ImEngine.stop()` 在其 loop 上收尾（`_drain_pending_api_closes`）——pair 已从缓存 pop，
+   丢弃即等于永不关闭。
 2. **失败降级**：关闭异常只记 WARNING（含 app_id），不向上抛，不影响渠道切换/引擎 stop。
 3. **不阻塞装配**：同步装配点（渠道工厂）以 task 形式异步关闭，不 await。
 4. **渠道不持 session**：`FeishuChannel` 实例不得持有 `FeishuAsync` 字段（回归守卫）。
@@ -63,7 +66,10 @@ Issue 正文的三条根因中，**渠道内 `api = FeishuAsync()` 挂闭包那�
       被关闭并移出缓存。
 - [ ] 装配覆盖（`_drop_cached_ctx`）时旧 api 被关闭。
 - [ ] api.close 抛异常 → 只产生 WARNING（含 app_id），stop/prune 正常完成。
-- [ ] `_default_endpoint_fetcher` 在 close 失败时仍返回原 `(url, code)` / 抛原异常。
+- [ ] `_default_endpoint_fetcher` 在 close 失败时仍返回原 `(url, code)` / 抛原异常
+      （两条路径均有用例：close 失败不覆盖返回值、get_ws_endpoint 抛错时 close 失败不覆盖原异常）。
+- [ ] 新增回归套件接入 CI：`.github/workflows/lint.yml` 的 lint job 跑
+      `test_issue_3735_feishu_session_lifecycle.py` + `test_issue_3897_feishu_endpoint_session.py`。
 - [ ] 真实 `aiohttp.ClientSession` 断言：`stop()` 后 `api._session.closed is True`。
 - [ ] 现有 `tests/runtime/im/` 全绿；`make lint` 通过。
 
@@ -72,5 +78,7 @@ Issue 正文的三条根因中，**渠道内 `api = FeishuAsync()` 挂闭包那�
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 关闭正在被 in-flight handler 使用的 session | 低（该渠道已断连/让渡） | 关闭以 task 异步执行；`_get_session` 对已关闭 session 会重建 |
-| 跨事件循环 close（UI 线程/无 loop） | 中 | 仅在运行中的 loop 上调度；无 loop 时留给 stop() 收尾 |
+| 跨事件循环 close（UI 线程/无 loop） | 中 | 仅在运行中的 loop 上调度；无 loop 时挂进 `_pending_api_closes` 保留引用，由 stop() 收尾（不丢弃） |
+| 关闭 task 未保留引用被 GC（关闭静默丢失） | 低 | `_api_close_tasks` 持引用 + `add_done_callback(discard)`，同时作为测试的确定性等待点 |
+| stop 清空进程级 `_feishu_api_cache` 波及通知侧 | 低 | 使用方约定只经 `feishu_api()` 取用、不跨引擎生命周期持有实例；清空后懒建绑定当前 loop 的新客户端（回归用例覆盖） |
 | 误关注入的共享 session | 高 | 依赖 `FeishuAsync._own_session` 语义，只关自有 session |

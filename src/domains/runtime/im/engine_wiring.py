@@ -483,6 +483,14 @@ def _legacy_installation_key(scope: str, owner_user_id: str, repo_key: str) -> s
 
 _feishu_api_cache: dict = {}
 
+# Issue #3735：无运行 loop 时不能当场调度关闭的 api 暂存于此，由 `ImEngine.stop()`
+# 统一收尾——调用点已经把它从缓存 pop 掉了，直接丢弃 = session 永久泄漏（契约 1）。
+_pending_api_closes: list = []
+
+# 调度出去的关闭 task 必须保留引用：否则可能在跑完前被 GC（关闭静默丢失、只剩
+# Unclosed warning），同时给测试提供确定性等待点（不必 sleep 猜时序）。
+_api_close_tasks: set = set()
+
 
 async def _close_api_quietly(api, app_id: str = "") -> None:
     """关闭装配层持有的平台 api（FeishuAsync 等）——失败只 WARNING，绝不抛。
@@ -505,16 +513,28 @@ async def _close_api_quietly(api, app_id: str = "") -> None:
 def _schedule_api_close(api, app_id: str = "") -> None:
     """在运行中的 loop 上异步关闭 api（同步装配点用，不阻塞扫描/建连）。
 
-    无运行 loop（如 UI 线程直改缓存）→ 不调度：跨 loop await aiohttp session 会报
-    "attached to a different loop"，此时留给 `ImEngine.stop()` 统一收尾。
+    无运行 loop（如 UI 线程直改缓存）→ 不在此处 await（跨 loop await aiohttp session
+    会报 "attached to a different loop"），但**保留引用**挂进 `_pending_api_closes`，
+    由 `ImEngine.stop()` 在其自己的 loop 上收尾（契约 1：丢弃即必须关闭）。
     """
     if api is None or getattr(api, "close", None) is None:
         return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        _pending_api_closes.append((api, app_id))
         return
-    loop.create_task(_close_api_quietly(api, app_id))
+    task = loop.create_task(_close_api_quietly(api, app_id))
+    _api_close_tasks.add(task)
+    task.add_done_callback(_api_close_tasks.discard)
+
+
+async def _drain_pending_api_closes() -> None:
+    """把无 loop 时暂存的 api 在 stop 所在 loop 上收尾关闭（契约 1）。"""
+    pending = list(_pending_api_closes)
+    _pending_api_closes.clear()
+    for api, app_id in pending:
+        await _close_api_quietly(api, app_id)
 
 
 def feishu_api(app_id: str = ""):
@@ -1296,9 +1316,15 @@ class ImEngine:
     async def _close_cached_apis(self) -> None:
         """关闭并清空装配层缓存的所有平台 api（Issue #3735 生命周期收尾）。
 
-        覆盖两处缓存：`_ctx_cache`（handler 出站/媒体用的 ctx/api 对，api 可能是
-        FeishuAsync）与进程级 `_feishu_api_cache`（通知/推送共享客户端）。
-        逐个 await 关闭——关闭失败由 `_close_api_quietly` 降级 WARNING，不阻断 stop。
+        覆盖三处：`_ctx_cache`（handler 出站/媒体用的 ctx/api 对，api 可能是
+        FeishuAsync）、进程级 `_feishu_api_cache`（通知/推送共享客户端）、以及无运行
+        loop 时挂起的 `_pending_api_closes`。逐个 await 关闭——关闭失败由
+        `_close_api_quietly` 降级 WARNING，不阻断 stop。
+
+        进程级缓存一并关闭是刻意的：它属于**引擎生命周期**（session 绑定建连时的
+        loop，引擎停后旧 loop 上的 session 再被复用会 `attached to a different
+        loop`）。使用方约定只经 `feishu_api(app_id)` 取用、**不跨引擎生命周期持有实例**
+        ——缓存清空后下一次调用会懒建绑定当前 loop 的新客户端，不会拿到已关闭死句柄。
         """
         pairs = list(self._ctx_cache.values())
         self._ctx_cache.clear()
@@ -1310,6 +1336,8 @@ class ImEngine:
         for app_id, api in list(_feishu_api_cache.items()):
             _feishu_api_cache.pop(app_id, None)
             await _close_api_quietly(api, app_id)
+        # 无运行 loop 的装配点（UI 线程直改缓存）无法当场调度，挂起到这里收尾。
+        await _drain_pending_api_closes()
 
     def _drop_cached_ctx(self, app_id: str) -> None:
         """丢掉某 app 的 (ctx, api) 缓存并收尾关闭其 session（Issue #3735）。
