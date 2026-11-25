@@ -37,7 +37,7 @@ VERIFY_SKILL = "atomcode-bug-fix"
 
 # ===== 工具：假 VCS client（三种场景：无 PR / 查询失败 / 有 PR） =====
 
-class _FakeVcsClient:
+class _StubVcsClient:
     def __init__(self, prs=None, error=None, boom=False):
         self._prs = prs if prs is not None else []
         self._error = error
@@ -69,7 +69,7 @@ def _vcs(monkeypatch):
     def _factory(repo_key, prs=None, error=None, boom=False, none=False):
         def _client(rk):
             state["n"] += 1
-            return None if none else _FakeVcsClient(prs, error, boom)
+            return None if none else _StubVcsClient(prs, error, boom)
         monkeypatch.setattr(issues_center, "_pr_vcs_client", _client)
         return state
     return _factory
