@@ -899,6 +899,11 @@ async def start_insight_tasks(app, include_table_maintenance: bool = True) -> di
                     if _nc:
                         log.info(f"Observability logs cleaned: {_nc} rows")
                         _obs_loops.beat("obs_log_cleanup")
+                    # Issue #3750：webhook 验签拒绝事实留存（14 天，模块内小时级限流）
+                    from src.domains.insight.observability import webhook_rejects as _obs_rejects
+                    _nrc = await asyncio.to_thread(_obs_rejects.maybe_cleanup)
+                    if _nrc:
+                        log.info(f"Observability webhook rejects cleaned: {_nrc} rows")
                     _obs_loops.beat("obs_sample")
                 except Exception as e:
                     _obs_loops.fail("obs_sample", e)

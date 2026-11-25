@@ -153,6 +153,18 @@ SEED_RULES: List[Dict[str, Any]] = [
         "description": "agent_tasks 表体积超过 2GB"
                        "（Issue #463：7 天置空大字段 + 90 天删行后应回落）",
     },
+    # Issue #3750：同仓库 webhook 验签 token 不匹配速率——被 403 丢弃的事件**不会重放**
+    # （Push Hook 丢失 → PR 关联/事件驱动会话/巡检 pipeline 漏事件），必须显式告警，
+    # 否则「多条 hook 残留旧 secret」可以长期静默丢事件。阈值 10/min + 持续 5 分钟，
+    # 与 deploy/alerts.yml 的 GrapeWebhookTokenMismatch 对齐（warning 级不阻断业务）。
+    {
+        "name": "webhook_token_mismatch_rate", "kind": "metric", "level": "user",
+        "metric": "webhook_token_mismatch",
+        "comparator": "gt", "threshold": 10, "window_sec": 60, "for_sec": 300,
+        "severity": "warning", "seed_source": "GrapeWebhookTokenMismatch",
+        "description": "同仓库 webhook token 不匹配近 60s 超 10 次并持续 5 分钟"
+                       "（多为该仓库残留旧 secret / 测试 hook 仍在发事件，事件已被 403 丢弃）",
+    },
 ]
 
 _COMPARATORS = {
@@ -177,6 +189,13 @@ MUTATION_MIN_SAMPLES = 3
 #: Issue #3822：模型配置故障告警窗口——与 `transient_retry.MODEL_CONFIG_ALERT_WINDOW_SEC`
 #: （24h 累计窗口）保持一致；改一处必须同步另一处。
 MODEL_CONFIG_ALERT_WINDOW_SEC = 24 * 3600
+#: Issue #3750：webhook 验签拒绝速率的统计窗口（与种子规则 window_sec 一致）。
+#: 取值 60s：mismatch 是「配置错配」的持续信号，1 分钟粒度足以区分持续错配与偶发抖动。
+WEBHOOK_REJECT_WINDOW_SEC = 60
+#: Issue #3750：拒绝仓库的「维度存在期」——比统计窗口长 15 倍。求值器只遍历本轮有指标的
+#: 仓库，若拒绝归零就摘掉维度，已 firing 的事件永远等不到 resolved（删掉旧 hook 后看不到恢复）。
+#: 存在期内指标按 60s 计数求值（0 → 条件不满足 → 正常 resolved）。
+WEBHOOK_REJECT_PRESENCE_SEC = 900
 
 
 def _event_source(rule: Dict[str, Any]) -> str:
@@ -439,6 +458,26 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
                                               "_mut1_tot": 0.0, "_mut1_bad": 0.0})
                 m["task_model_config_alert"] = m.get("task_model_config_alert", 0.0) + float(n or 0)
+            # ②d Issue #3750：webhook 验签拒绝（近 60s 按仓库计数）——按仓库维度记账，
+            # 全局计数会被正常 webhook 流量稀释导致漏报。**独立 try/except**：旧库未建表
+            # 或查询失败只丢这一项指标，绝不能连带其它七项指标一起变空。
+            #
+            # 维度存在期（PRESENCE）比统计窗口长：本求值器只遍历「本轮有指标的仓库」，
+            # 若拒绝一到 0 就把仓库从维度集合里摘掉，已 firing 的事件永远等不到 resolved
+            # ——「把旧 secret 的 hook 删掉」这个修好动作反而看不到恢复。故按 15 分钟存在期
+            # 保留维度、指标值取 60s 计数（0 = 已恢复 → 正常走 resolved 分支）。
+            try:
+                from src.domains.insight.observability import webhook_rejects as _wr
+                _present = _wr.count_recent(c, WEBHOOK_REJECT_PRESENCE_SEC)
+                _counts = _wr.count_recent(c, WEBHOOK_REJECT_WINDOW_SEC)
+                for repo_key in set(_present) | set(_counts):
+                    m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
+                                                  "_done": 0.0, "_bad": 0.0,
+                                                  "_mut0_tot": 0.0, "_mut0_bad": 0.0,
+                                                  "_mut1_tot": 0.0, "_mut1_bad": 0.0})
+                    m["webhook_token_mismatch"] = float(_counts.get(repo_key) or 0)
+            except Exception as _e:
+                log.warning(f"obs webhook reject metrics skipped: {_e}")
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
             for repo_key, status, n0, n1 in _rt_alerts.alerts_task_mutation(mut0_cutoff, mut1_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,

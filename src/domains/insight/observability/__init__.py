@@ -383,6 +383,17 @@ REPO_DISPATCH_BUSY = Counter(
     registry=registry,
 )
 
+# Issue #3750：webhook 验签拒绝计数（token 不匹配 / 未带 token），按仓库一维。
+# 语义：一次 403 拒绝 = 一次自增；与落库 `obs_webhook_rejects` 同源不同路
+# （落库失败仍计数，指标反映真实拒绝量）。deploy/alerts.yml 的
+# GrapeWebhookTokenMismatch 消费本指标；应用内按仓库速率规则见 alerts.SEED_RULES。
+WEBHOOK_TOKEN_MISMATCH_TOTAL = Counter(
+    "grape_webhook_token_mismatch_total",
+    "Webhook requests rejected because the provided token did not match the managed repo secret.",
+    ["repo"],
+    registry=registry,
+)
+
 TASK_RUN_SECONDS = Histogram(
     "grape_agent_task_run_seconds",
     "Time agent tasks spent running before a terminal state.",

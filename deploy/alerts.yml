@@ -353,3 +353,18 @@ groups:
         annotations:
           summary: "Worker process RSS keeps growing ({{ $labels.process }})"
           description: "RSS of process {{ $labels.process }} grew by more than 512MiB over the last 30 minutes with a consistently positive slope — memory leak or runaway task suspected. Correlate with grape_engine_child_rss_bytes per engine and long-running agent tasks. See Issue #4203."
+
+      # Issue #3750：同仓库 webhook 验签 token 不匹配速率 > 10/min 且持续 5 分钟。
+      # 被 403 丢弃的 webhook **不会重放**（Push Hook 丢失 → PR 关联 / push 触发 / 巡检 pipeline
+      # 漏事件且无补偿），典型成因是该仓库残留旧 secret / 测试 hook / 镜像 hook 仍在投递。
+      # 定位：grape-webhook 日志 `Webhook rejected: token mismatch for repo=... event=...
+      # expected=sha256:xxx actual=sha256:yyy reason=mismatch ip=...`，或按 (ip, token_fp)
+      # 反查 obs_webhook_rejects；处置：核查 GitCode 仓库 webhook 列表，删除/统一旧 secret。
+      - alert: GrapeWebhookTokenMismatch
+        expr: sum by (repo) (increase(grape_webhook_token_mismatch_total[1m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook token mismatch for {{ $labels.repo }} (>10/min)"
+          description: "More than 10 webhook requests per minute for repo {{ $labels.repo }} were rejected with a token mismatch for 5 minutes. Those events were dropped and will not be replayed. Correlate `expected=`/`actual=` fingerprints in the webhook log or look up `obs_webhook_rejects` by (ip, token_fp), then remove the stale webhook secret on the platform side. See Issue #3750."
