@@ -27,3 +27,9 @@
 
 `tests/runtime/test_issue_3818_payload_guard.py`：规则命中/绕行变体、脱敏与元信息、同键校验、
 熔断阈值/配置/开关/故障降级、调度闸门、入库拒绝、读侧 dispatchable、环境性失败排除。
+
+## 待决策（数值证据，B2 五源闸门）
+
+| 数值 | 位置 | 缺哪种测量 | 现状 |
+|---|---|---|---|
+| `DEFAULT_LIMIT = 3`（同载荷连续失败阈值） | `src/domains/runtime/engine/payload_dispatch_guard.py` | 同载荷重复投递的失败间隔分布（P50/P95）与误熔断率 | 设计默认 3，`GRAPE_AUTOPILOT_PAYLOAD_DISPATCH_LIMIT` 可覆盖；未实测，登记为待决策 |

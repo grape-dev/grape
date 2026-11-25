@@ -1069,6 +1069,9 @@ def _runtime_agent_type(label: str) -> str:
             s = s[1:]
         head = s.split("|", 1)[0]
         if ":" in head:
+            # 截断 40 与 insight.observability 的 backend/agent_type 标签同口径
+            # （短枚举 + 前缀余量，见 record_runtime_env_contract_missing 注释）；
+            # 这里只取 `[agent:xxx]` 标签里的 agent_type，超长值必然是拼接串。
             return (head.split(":", 1)[1] or "").strip()[:40] or "unknown"
     except Exception:
         pass

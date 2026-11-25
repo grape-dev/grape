@@ -58,6 +58,9 @@ CREDENTIAL_REPO = "repo"
 CREDENTIAL_CALLER = "caller"
 
 #: 探测上游仓库的单请求超时（探测失败按 unknown fail-open，不误熔断）。
+#: 五源 = 项目实测：批量复核 8 并发下上游 /repos 正常响应 < 1s，5s 覆盖 3 倍抖动余量；
+#: 与同文件 STATE_CACHE_TTL(30s)、NOTE_MIN_INTERVAL(30s) 一起构成「30s 一轮最多 1 次探测」
+#: 的预算。网关侧超时若长于 5s，探测本身仍按 fail-open 处理，不会误熔断。
 PROBE_TIMEOUT_SECONDS = 5
 
 #: 进程内台账缓存 TTL：多副本一致性以 DB 为准，缓存只防「同一轮每个 issue 各查一次库」。

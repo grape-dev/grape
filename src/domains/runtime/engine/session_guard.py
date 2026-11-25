@@ -40,6 +40,15 @@ ENGINE_MISCONFIGURED = "ENGINE_MISCONFIGURED"      # 引擎返回 No LLM provide
 SESSION_STAGE = "session/new"
 
 # ===== 默认阈值（调用期读 env，运行期可调）=====
+# 五源说明（B2）：本组阈值是 2026-11 会话熔断事故复盘的取值，域内可 env 覆盖；
+# 实测已覆盖「连续超时 → 熔断」链路（tests/runtime 的 session_guard 用例逐阈值构造），
+# 生产分布（各引擎超时率 / 恢复时长）尚未取到 → 标注为待决策，不做静默定值：
+# · STREAK=3：单次超时多为引擎冷启动抖动，两次仍可能同源；三次即稳定不可用。
+# · CIRCUIT=600s：覆盖一次引擎重启 + 探活的最坏耗时（心跳周期 15s × 多轮探测）。
+# · COOLDOWN=60s：保证重试能换到另一个引擎（本地引擎池轮转周期 < 60s）。
+# · MAX_RETRY=1：只换一次引擎；再失败按熔断处理，避免整轮任务串行拖长。
+# · MISCONFIG=3600s：配置类错误需人工重新注册，1h 内不反复撞击。
+# <undecided: 各引擎超时率与熔断后恢复时长 P50/P95 实测>
 _DEFAULT_STREAK = 3          # 连续 N 次超时 → 熔断
 _DEFAULT_CIRCUIT_SECONDS = 600   # 熔断窗口（10min）
 _DEFAULT_RETRY_COOLDOWN = 60     # 单次超时的短冷却（保证重试换引擎）

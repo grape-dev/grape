@@ -806,6 +806,13 @@ RUNTIME_ENV_CONTRACT_MISSING = Counter(
 def record_runtime_env_contract_missing(backend: str = "", agent_type: str = "",
                                         var: str = ""):
     """记一次契约变量缺失（维度缺省归 unknown；名字不在契约内也照记，不丢数）。"""
+    # 标签值截断（B2 五源 = 规范/契约）：Prometheus 标签值无长度上限，但每个唯一值都是
+    # 一条独立时间序列；这里取「够放已知取值 + 留前缀余量」的长度——
+    # · 40：backend / agent_type 为短枚举（backend ≤10、agent_type ≤12，实测见
+    #   prompt_builder 的角色表），40 留 3 倍余量且能吃下 `[opencode] ` 这类前缀拼接；
+    # · 48：契约变量名按 `GRAPE_` + 全大写蛇形命名（最长实测 `GRAPE_WORK_BRANCH` 18 字符），
+    #   48 覆盖未来同类变量而不引入超长脏值。
+    # 截断只影响指标维度，不影响日志原文（原文按 backend/agent_type 原样记录）。
     b = (backend or "").strip().lower()[:40] or "unknown"
     a = (agent_type or "").strip().lower()[:40] or "unknown"
     v = (var or "").strip().upper()[:48] or "UNKNOWN"
