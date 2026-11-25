@@ -549,9 +549,12 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     with db_lock:
         c = db.cursor()
         c.execute(
+            # #3733 三列：MySQL strict 模式下 TEXT NOT NULL 无默认值时，不给值直接 500
+            # （Field 'dispatch_state' doesn't have a default value）——建单必须显式写空串，
+            # 状态由调度器按指令是否为空回填。
             "INSERT INTO autopilot_tasks "
-            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids, dispatch_state, dispatch_state_reason, dispatch_state_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '')",
             (body.name, body.repo_key, _FIXED_AGENT_TYPE, body.instruction, body.skill_name,
              body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0,
              engine_ids_json, custom_fields_json, body.work_branch or "", engine_uids_json)

@@ -9827,6 +9827,27 @@ register_migration(
 )
 
 
+def _migration_202611240011_autopilot_state_column_defaults() -> None:
+    """存量库修列：三列 TEXT NOT NULL 无默认 → VARCHAR(255) NOT NULL DEFAULT ''。
+
+    2026-11-25 部署验证实测：`TEXT NOT NULL DEFAULT ''` 在 MySQL 8.0 落地为
+    `text NOT NULL DEFAULT NULL`，建单 INSERT 不给值即 1364，POST /api/autopilot/tasks
+    直接 500。列已存在时 `_ensure_column` 不改类型/默认，需独立迁移补一刀（幂等 MODIFY）。
+    """
+    from src.domains.mgmt.migrations.autopilot_dispatch_state import ensure_state_column_defaults
+
+    ensure_state_column_defaults()
+
+
+register_migration(
+    version="202611240011",
+    name="autopilot-state-column-defaults",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_migration_202611240011_autopilot_state_column_defaults,
+)
+
+
 # ======================================================================
 # ===== 沙箱控制面 schema（feat/devbox-sandbox-integration7 移植，2026-11-10）=====
 # ===== i7 侧原注册于 202611040005-009（毒号段），此处以新号 202611100001 重注册，

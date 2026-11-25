@@ -199,3 +199,26 @@ def test_trigger_empty_instruction_returns_explicit_409(env, monkeypatch):
 
     assert ei.value.status_code == 409
     assert ei.value.detail["message"] == AUTOPILOT_EMPTY_INSTRUCTION_REASON
+
+def test_create_task_insert_supplies_state_columns():
+    """MySQL strict：三列 TEXT NOT NULL 无默认值时，建单必须显式写空串（否则 1364 → 500）。
+
+    2026-11-25 部署验证实测：POST /api/autopilot/tasks 返回
+    `OperationalError: (1364, "Field 'dispatch_state' doesn't have a default value")`。
+    """
+    import inspect
+
+    from src.domains.mgmt.routes import autopilot as ap_routes
+
+    src = inspect.getsource(ap_routes.create_task)
+    for col in ("dispatch_state", "dispatch_state_reason", "dispatch_state_at"):
+        assert col in src, f"建单 INSERT 未写 {col} —— MySQL strict 下会 1364"
+
+
+def test_state_column_ddl_uses_varchar_with_default():
+    """列 DDL 不能再用 TEXT DEFAULT ''（8.0 落地成 DEFAULT NULL，strict 下 1364）。"""
+    from src.domains.mgmt.migrations import autopilot_dispatch_state as mig
+
+    for col, ddl in mig.STATE_COLUMNS:
+        assert ddl.upper().startswith("VARCHAR"), f"{col} 应为 VARCHAR: {ddl}"
+        assert "NOT NULL" in ddl.upper() and "DEFAULT ''" in ddl, f"{col} 缺默认值: {ddl}"

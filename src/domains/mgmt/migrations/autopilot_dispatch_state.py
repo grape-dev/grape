@@ -28,10 +28,13 @@ TABLE = "autopilot_tasks"
 
 #: （列名, DDL）：TEXT 带非 NULL DEFAULT 在 MySQL 上走不了 INSTANT/INPLACE，
 #: 补列时必须传 allow_copy=True（autopilot_tasks 是小表，COPY 安全）。
+#: VARCHAR 而非 TEXT：MySQL 8.0.13 之前 TEXT 不支持 DEFAULT，且本仓实测该 DDL 落地后
+#: 列变成 `text NOT NULL DEFAULT NULL`（strict 下任何不给值的 INSERT 直接 1364）——
+#: 建单接口就是被这个打成 500 的。三列都是短码/时间戳，VARCHAR(255) 足够。
 STATE_COLUMNS = (
-    ("dispatch_state", "TEXT NOT NULL DEFAULT ''"),
-    ("dispatch_state_reason", "TEXT NOT NULL DEFAULT ''"),
-    ("dispatch_state_at", "TEXT NOT NULL DEFAULT ''"),
+    ("dispatch_state", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("dispatch_state_reason", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("dispatch_state_at", "VARCHAR(255) NOT NULL DEFAULT ''"),
 )
 
 
@@ -93,3 +96,38 @@ def run(conn: Any = None) -> int:
         log.info(f"Autopilot: {marked} enabled task(s) marked as not dispatchable "
                  f"(empty instruction, Issue #3733)")
     return marked
+
+
+def ensure_state_column_defaults(conn: Any = None) -> int:
+    """把三列从「TEXT NOT NULL 无默认」修正为 `VARCHAR(255) NOT NULL DEFAULT ''`。
+
+    背景（2026-11-25 部署验证实测）：#3733 首版 DDL 用 `TEXT NOT NULL DEFAULT ''`，
+    MySQL 8.0 上落地结果是 `text NOT NULL DEFAULT NULL` —— strict 模式下任何不显式
+    给值的 INSERT 直接 1364 `Field 'dispatch_state' doesn't have a default value`，
+    建单接口 500。列已存在时 `_ensure_column` 不会改类型/默认值，所以需要本迁移补一刀。
+
+    幂等：MODIFY 重复执行结果相同；SQLite 走同语义的 TEXT 列（DEFAULT '' 已生效）直接跳过。
+    返回修正的列数。
+    """
+    from src.api import db_setup as _ds
+
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        is_mysql = False
+    if not is_mysql:
+        return 0
+    target = _ds.db if conn is None else conn
+    fixed = 0
+    with _ds.db_lock:
+        cursor = target.cursor()
+        try:
+            for col, ddl in STATE_COLUMNS:
+                cursor.execute(f"ALTER TABLE {TABLE} MODIFY COLUMN {col} {ddl}")
+                fixed += 1
+            target.commit()
+        finally:
+            cursor.close()
+    log.info(f"Autopilot: normalized {fixed} dispatch_state column default(s) (Issue #3733)")
+    return fixed
