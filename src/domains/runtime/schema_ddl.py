@@ -345,6 +345,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择 / directed=engine_config.runtime_id 定向锁定 / scene_missing=场景未在仓内 scene pool 登记（Issue #3790，与 agent_tasks 降级判别、事件 payload 共用，local-claimer 设计 + Issue #2791）
     engine_priorities  TEXT DEFAULT '',           -- Issue #3564：实例绑定优先级映射（JSON {"<engine_id>":1..9}，1 最高；空=未配置=旧行为）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
+    session_retry_count INTEGER DEFAULT 0,   -- Issue #4346：session/new 超时「换引擎重试」专用计数（与 #403 瞬时重试共用的 attempts 解耦，历史 attempts 不再吞掉重试）
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
     errors            MEDIUMTEXT DEFAULT '',

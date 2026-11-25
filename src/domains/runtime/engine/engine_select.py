@@ -624,7 +624,9 @@ def _backend_claimable_map(runtime_ids: list) -> dict | None:
             c.execute(
                 "SELECT id, COALESCE(backend_status,''), COALESCE(circuit_open_until,''), "
                 "COALESCE(circuit_half_open,0), COALESCE(session_circuit_until,''), "
-                "COALESCE(session_circuit_half_open,0), COALESCE(llm_provider_ok,1) "
+                "COALESCE(session_circuit_half_open,0), COALESCE(llm_provider_ok,1), "
+                "(SELECT COUNT(*) FROM agent_tasks t WHERE t.runtime_id=agent_runtimes.id "
+                " AND t.status IN ('dispatched','running')) "
                 "FROM agent_runtimes "
                 f"WHERE id IN ({ph})", tuple(ids))
             rows = c.fetchall()
@@ -636,7 +638,7 @@ def _backend_claimable_map(runtime_ids: list) -> dict | None:
     now = _time.time()
     return {
         int(r[0]): (claim_eligible(r[1], r[2], r[3], now)
-                    and session_eligible(r[4], r[5], r[6], now))
+                    and session_eligible(r[4], r[5], r[6], now, active=r[7]))
         for r in rows
     }
 

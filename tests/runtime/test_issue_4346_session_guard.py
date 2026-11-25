@@ -9,6 +9,7 @@
 - 无 LLM provider 引擎注册期被拦截（llm_provider_ok=0 不进池）；
 - #423 解析侧 10 行上限不得被重新引入。
 """
+import contextlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -41,15 +42,17 @@ def _insert_credential():
     return cid
 
 
-def _insert_runtime(cid, name, healthy=1, tag="all"):
+def _insert_runtime(cid, name, healthy=1, tag="all", status="online", probe_status="ok",
+                    worker_version="w-4346", backend_status="available", installed=1):
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO agent_runtimes (credential_id, name, status, healthy, installed, "
             "scope, last_seen_at, probe_status, worker_version, backend_status) "
-            "VALUES (?, ?, 'online', ?, 1, 'global', ?, 'ok', 'w-4346', 'available')",
-            (cid, name, healthy, now))
+            "VALUES (?, ?, ?, ?, ?, 'global', ?, ?, ?, ?)",
+            (cid, name, status, healthy, installed, now, probe_status, worker_version,
+             backend_status))
         rid = c.lastrowid
         c.execute(
             "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled) "
@@ -58,16 +61,20 @@ def _insert_runtime(cid, name, healthy=1, tag="all"):
     return rid
 
 
-def _insert_task(runtime_id, status="running", attempts=0, repo="issue4346", tag="all"):
+def _insert_task(runtime_id, status="running", attempts=0, repo="issue4346", tag="all",
+                 session_retry_count=None):
     tid = f"t_4346_{uuid.uuid4().hex[:10]}"
     now = datetime.now(timezone.utc).isoformat()
+    cols = ("id, agent_session_id, runtime_id, repo_key, agent_type, skill, prompt, status, "
+            "pool_tag, pool_agent_type, attempts, started_at, created_at")
+    vals = [tid, f"sess-{tid}", runtime_id, f"gitcode:{repo}/repo", "qa", "qa", "p",
+            status, tag, "qa", attempts, now, now]
+    if session_retry_count is not None:
+        cols += ", session_retry_count"
+        vals.append(session_retry_count)
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, repo_key, agent_type, "
-            "skill, prompt, status, pool_tag, pool_agent_type, attempts, started_at, created_at) "
-            "VALUES (?, ?, ?, ?, 'qa', 'qa', 'p', ?, ?, 'qa', ?, ?, ?)",
-            (tid, f"sess-{tid}", runtime_id, f"gitcode:{repo}/repo", status, tag, attempts, now, now))
+        c.execute(f"INSERT INTO agent_tasks ({cols}) VALUES ({','.join('?' * len(vals))})", vals)
         db.commit()
     return tid
 
@@ -85,6 +92,43 @@ def _cleanup(cid, repo="issue4346"):
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         c.execute("DELETE FROM grape_t_engine_lifecycle_audit WHERE runtime_name LIKE ?",
                   (f"%4346%",))
+        db.commit()
+
+
+@contextlib.contextmanager
+def _pool_isolated():
+    """临时禁用仓内其它引擎的 ``tag='all'`` 能力，让池判定只看到本用例的引擎。
+
+    ``has_other_session_engine`` 走真实 SQL（``ec.tag=? OR ec.tag='all'``），而测试库是
+    进程共享的：别的用例遗留的 ``tag='all'`` 引擎会串进来。这里只隔离**数据**，不替换
+    被测函数（复审要求：不得 monkeypatch 绕过 SQL 口径）。退出时无条件恢复。
+    """
+    disabled: list = []
+    with db_lock:
+        c = db.cursor()
+        disabled = [r[0] for r in c.execute(
+            "SELECT id FROM engine_capabilities WHERE tag='all' AND enabled=1").fetchall()]
+        if disabled:
+            c.execute(f"UPDATE engine_capabilities SET enabled=0 WHERE id IN "
+                      f"({','.join('?' * len(disabled))})", disabled)
+        db.commit()
+    try:
+        yield
+    finally:
+        if disabled:
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"UPDATE engine_capabilities SET enabled=1 WHERE id IN "
+                          f"({','.join('?' * len(disabled))})", disabled)
+                db.commit()
+
+
+def _expire_session_window(rid):
+    """把 session 熔断窗口拨到过去（模拟「窗口已过期 → 进入半开」）。"""
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE agent_runtimes SET session_circuit_until=? WHERE id=?", (past, rid))
         db.commit()
 
 
@@ -193,24 +237,97 @@ class TestSessionCircuit:
             session_guard.note_session_failure(rid, session_guard.SESSION_CREATE_BLOCKED)
             assert session_guard.session_claim_allowed(rid) is False
             # 熔断窗口结束（时钟前移）
-            past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE agent_runtimes SET session_circuit_until=? WHERE id=?",
-                          (past, rid))
-                db.commit()
+            _expire_session_window(rid)
             assert session_guard.session_claim_allowed(rid) is True
+            # 真实认领顺序：任务先绑定到引擎（dispatched/running），再置半开占位
+            tid = _insert_task(rid, status="running")
             with db_lock:
                 c = db.cursor()
                 session_guard.note_session_probe_started(c, rid)
                 db.commit()
             assert session_guard.session_claim_allowed(rid) is False, "半开只放行一次探测"
-            session_guard.note_session_success(rid)
+            service.update_task_status(tid, "completed")
             assert session_guard.session_claim_allowed(rid) is True
             _healthy, streak, _total, until, half, _code, _llm = _runtime_session_row(rid)
             assert streak == 0 and until == "" and half == 0
         finally:
             _cleanup(cid)
+
+    # ── Issue #4346 复审 Critical：半开占位必须有释放路径 ──
+
+    def test_half_open_released_when_probe_task_cancelled(self, monkeypatch):
+        """半开探测以「任务取消」收尾 → 占位必须释放，引擎恢复可认领。"""
+        rid, tid = self._probe_in_flight(monkeypatch, "hermes-4346-r1")
+        try:
+            assert session_guard.session_claim_allowed(rid) is False
+            service.cancel_task(tid)
+            _healthy, _streak, _total, _until, half, _code, _llm = _runtime_session_row(rid)
+            assert half == 0, "取消收尾后半开占位必须释放（否则永久挡门）"
+            assert session_guard.session_claim_allowed(rid) is True
+            assert session_guard.session_state(rid)["session_circuit_half_open"] is False
+        finally:
+            _cleanup(self._cid)
+
+    def test_half_open_released_on_non_session_business_failure(self, monkeypatch):
+        """半开探测以 exit!=0 的业务失败（非 session 类）收尾 → 同样必须释放。"""
+        rid, tid = self._probe_in_flight(monkeypatch, "hermes-4346-r2")
+        try:
+            assert session_guard.session_claim_allowed(rid) is False
+            service.update_task_status(tid, "failed",
+                                       errors=json.dumps([{"error_code": "EXIT_NONZERO"}]))
+            _healthy, _streak, _total, _until, half, _code, _llm = _runtime_session_row(rid)
+            assert half == 0, "非 session 失败收尾后半开占位不得残留"
+            assert session_guard.session_claim_allowed(rid) is True
+            # 闸门与看板口径必须一致：显示未熔断 ⇒ 必须真的可认领
+            state = session_guard.session_state(rid)
+            assert state["session_circuit_open"] is False
+            assert state["session_circuit_half_open"] is False
+        finally:
+            _cleanup(self._cid)
+
+    def test_half_open_kept_while_probe_still_running(self, monkeypatch):
+        """探测确实在飞（引擎上有 running 任务）→ 维持「只放行一次」语义。"""
+        rid, tid = self._probe_in_flight(monkeypatch, "hermes-4346-r3")
+        try:
+            assert session_guard.session_claim_allowed(rid) is False
+            _healthy, _streak, _total, _until, half, _code, _llm = _runtime_session_row(rid)
+            assert half == 1
+        finally:
+            _cleanup(self._cid)
+
+    def test_orphaned_half_open_self_heals_without_active_task(self, monkeypatch):
+        """占位残留但引擎上已无在飞任务（如被 stale/requeue 收回）→ 闸门自动释放。"""
+        monkeypatch.setenv("RUNTIME_SESSION_TIMEOUT_STREAK", "1")
+        cid = _insert_credential()
+        rid = _insert_runtime(cid, "hermes-4346-r4")
+        try:
+            session_guard.note_session_failure(rid, session_guard.SESSION_CREATE_BLOCKED)
+            _expire_session_window(rid)
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE agent_runtimes SET session_circuit_half_open=1 WHERE id=?",
+                          (rid,))
+                db.commit()
+            assert session_guard.session_claim_allowed(rid) is True
+            _healthy, _streak, _total, _until, half, _code, _llm = _runtime_session_row(rid)
+            assert half == 0
+        finally:
+            _cleanup(cid)
+
+    def _probe_in_flight(self, monkeypatch, name):
+        """构造「熔断窗口已过 + 已认领探测任务 + 半开占位在位」的真实状态。"""
+        monkeypatch.setenv("RUNTIME_SESSION_TIMEOUT_STREAK", "1")
+        self._cid = _insert_credential()
+        rid = _insert_runtime(self._cid, name)
+        session_guard.note_session_failure(rid, session_guard.SESSION_CREATE_BLOCKED)
+        _expire_session_window(rid)
+        assert session_guard.session_claim_allowed(rid) is True
+        tid = _insert_task(rid, status="running")
+        with db_lock:
+            c = db.cursor()
+            session_guard.note_session_probe_started(c, rid)
+            db.commit()
+        return rid, tid
 
     def test_dispatch_candidate_map_excludes_circuit_open_engine(self, monkeypatch):
         from src.domains.runtime.engine.engine_select import _backend_claimable_map
@@ -278,32 +395,59 @@ class TestSessionRetry:
         bad = _insert_runtime(cid, "hermes-4346-h")
         _insert_runtime(cid, "hermes-4346-i")
         try:
-            tid = _insert_task(bad, attempts=1)
+            # 专用计数已用满 1 次（session_retry_count=1）→ 判死
+            tid = _insert_task(bad, session_retry_count=1)
             out = session_guard.handle_task_failure(
                 tid, service.get_task(tid), SESSION_TIMEOUT_TEXT, -1)
             assert out == "exhausted", "重试耗尽必须回落判死，不得原地挂起"
             st, rid, _attempts, errors = _task_row(tid)
             assert st == "running" and rid == bad
             assert "SESSION_CREATE_BLOCKED_EXHAUSTED" in (errors or "")
+            assert "session_retry_count" in (errors or "")
+        finally:
+            _cleanup(cid)
+
+    def test_historical_attempts_do_not_skip_session_retry(self, monkeypatch):
+        """复审 Required：attempts 被 #403/#537 历史轮次用过，不得吞掉 session 换引擎重试。"""
+        monkeypatch.setenv("RUNTIME_SESSION_MAX_RETRY", "1")
+        cid = _insert_credential()
+        bad = _insert_runtime(cid, "hermes-4346-h2")
+        _insert_runtime(cid, "hermes-4346-i2")
+        try:
+            tid = _insert_task(bad, attempts=3, session_retry_count=0)
+            out = session_guard.handle_task_failure(
+                tid, service.get_task(tid), SESSION_TIMEOUT_TEXT, -1)
+            assert out == "requeued", "历史 attempts 已 +1 不得跳过换引擎重试（spec 至少重试 1 次）"
+            _st, _rid, attempts, errors = _task_row(tid)
+            assert attempts == 4, "#403 的 attempts 口径不受影响（仍由 _do_requeue 累加）"
+            with db_lock:
+                cnt = db.cursor().execute(
+                    "SELECT COALESCE(session_retry_count,0) FROM agent_tasks WHERE id=?",
+                    (tid,)).fetchone()[0]
+            assert cnt == 1, "session 专用计数必须独立累加"
+            entries = json.loads(errors or "[]")
+            retry = next(e for e in entries if isinstance(e, dict)
+                         and e.get("error_code") == "SESSION_RETRY")
+            assert retry["counter"] == "session_retry_count" and retry["attempt"] == 1
         finally:
             _cleanup(cid)
 
     def test_no_other_engine_fails_fast(self, monkeypatch):
+        """池内只有故障引擎 → 直接判死（走真实池查询，不替换被测函数）。"""
         monkeypatch.setenv("RUNTIME_SESSION_MAX_RETRY", "1")
-        # 池判定置为「无其它引擎」：真实 SQL 会命中其它用例遗留的 tag='all' 引擎，
-        # 单测只验本分支的收口语义（requeue 路径由 test_timeout_requeues_to_another_engine 覆盖）
-        monkeypatch.setattr(session_guard, "has_other_session_engine", lambda *a, **k: False)
         cid = _insert_credential()
-        only = _insert_runtime(cid, "hermes-4346-j")
-        try:
-            tid = _insert_task(only)
-            out = session_guard.handle_task_failure(
-                tid, service.get_task(tid), SESSION_TIMEOUT_TEXT, -1)
-            assert out == "exhausted"
-            _st, _rid, _a, errors = _task_row(tid)
-            assert "NO_SESSION_ENGINE_AVAILABLE" in (errors or "")
-        finally:
-            _cleanup(cid)
+        tag = f"t4346pool-{uuid.uuid4().hex[:8]}"
+        with _pool_isolated():
+            only = _insert_runtime(cid, "hermes-4346-j", tag=tag)
+            try:
+                tid = _insert_task(only, tag=tag)
+                out = session_guard.handle_task_failure(
+                    tid, service.get_task(tid), SESSION_TIMEOUT_TEXT, -1)
+                assert out == "exhausted"
+                _st, _rid, _a, errors = _task_row(tid)
+                assert "NO_SESSION_ENGINE_AVAILABLE" in (errors or "")
+            finally:
+                _cleanup(cid)
 
     def test_unreachable_is_observed_not_requeued(self, monkeypatch):
         cid = _insert_credential()
@@ -349,16 +493,98 @@ class TestSessionRetry:
             _cleanup(cid)
 
 
-# ── 5. 健康分 completed 复位熔断 ──
+# ── 5. 池可达性：has_other_session_engine 必须与认领闸门同一把尺子 ──
+
+class TestOtherEngineAvailability:
+    """复审 Required：真实 SQL 口径（不 monkeypatch 被测函数）。
+
+    旧实现自造第三把尺（``healthy=1`` + ``credential_id>0`` 时 ``status=='online'``），
+    与 ``claim_by_tag`` 的准入脱钩，两个方向都会错——把 ``probe_status=fail`` /
+    ``backend_status=unavailable`` 的引擎算成可用（requeue 后无人认领，白等 600s 判死），
+    又把 ``status`` 非 online 但探活正常的引擎算成不可用（直接 failed，丢掉重试）。
+    """
+
+    def _setup(self, name):
+        cid = _insert_credential()
+        tag = f"t4346pool-{uuid.uuid4().hex[:8]}"
+        return cid, tag
+
+    def test_probe_failed_engine_is_not_counted(self):
+        cid, tag = self._setup("probe-fail")
+        with _pool_isolated():
+            failing = _insert_runtime(cid, "hermes-4346-q1", tag=tag)
+            dead = _insert_runtime(cid, "hermes-4346-q2", tag=tag, probe_status="fail")
+            try:
+                assert session_guard.has_other_session_engine(
+                    {"pool_tag": tag}, failing) is False
+            finally:
+                _cleanup(cid)
+
+    def test_backend_unavailable_engine_is_not_counted(self):
+        cid, tag = self._setup("backend-unavailable")
+        with _pool_isolated():
+            failing = _insert_runtime(cid, "hermes-4346-q3", tag=tag)
+            dead = _insert_runtime(cid, "hermes-4346-q4", tag=tag, healthy=0,
+                                   backend_status="unavailable")
+            try:
+                assert session_guard.has_other_session_engine(
+                    {"pool_tag": tag}, failing) is False
+            finally:
+                _cleanup(cid)
+
+    def test_session_circuit_open_engine_is_not_counted(self):
+        cid, tag = self._setup("session-circuit")
+        with _pool_isolated():
+            failing = _insert_runtime(cid, "hermes-4346-q5", tag=tag)
+            cooling = _insert_runtime(cid, "hermes-4346-q6", tag=tag)
+            try:
+                session_guard.note_session_failure(
+                    cooling, session_guard.SESSION_CREATE_BLOCKED)
+                assert session_guard.session_claim_allowed(cooling) is False
+                assert session_guard.has_other_session_engine(
+                    {"pool_tag": tag}, failing) is False
+            finally:
+                _cleanup(cid)
+
+    def test_verified_engine_with_non_online_status_is_counted(self):
+        """探活正常但 ``status`` 非 online → 认领闸门放行，池判定也必须算可用。"""
+        cid, tag = self._setup("non-online")
+        with _pool_isolated():
+            failing = _insert_runtime(cid, "hermes-4346-q7", tag=tag)
+            idle = _insert_runtime(cid, "hermes-4346-q8", tag=tag, status="idle")
+            try:
+                assert backend_health.claim_allowed(idle) is True
+                assert session_guard.has_other_session_engine(
+                    {"pool_tag": tag}, failing) is True
+            finally:
+                _cleanup(cid)
+
+    def test_healthy_verified_engine_is_counted(self):
+        cid, tag = self._setup("healthy")
+        with _pool_isolated():
+            failing = _insert_runtime(cid, "hermes-4346-q9", tag=tag)
+            good = _insert_runtime(cid, "hermes-4346-q10", tag=tag)
+            try:
+                assert session_guard.has_other_session_engine(
+                    {"pool_tag": tag}, failing) is True
+                # 与认领闸门口径一致：可认领 ⇒ 池判定为可用
+                assert backend_health.claim_allowed(good) is True
+            finally:
+                _cleanup(cid)
+
+
+# ── 6. 健康分 completed 复位熔断 ──
 
 def test_completed_task_clears_session_circuit(monkeypatch):
+    """completed = 建会话成功的强证据 → 终态收口完整复位熔断（走真实终态入口）。"""
     monkeypatch.setenv("RUNTIME_SESSION_TIMEOUT_STREAK", "1")
     cid = _insert_credential()
     rid = _insert_runtime(cid, "hermes-4346-n")
     try:
+        tid = _insert_task(rid)
         session_guard.note_session_failure(rid, session_guard.SESSION_CREATE_BLOCKED)
         assert session_guard.session_circuit_open(rid) is True
-        health_scorer.record_task_completion(rid, "completed")
+        service.update_task_status(tid, "completed")
         assert session_guard.session_circuit_open(rid) is False
         assert session_guard.session_claim_allowed(rid) is True
     finally:

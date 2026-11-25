@@ -799,17 +799,14 @@ def record_task_completion(runtime_id: int, status: str):
     runtime_health_scores 表，增强健康度分析的及时性。
     不改变广播/分发语义——仅在任务终态后异步刷新。
 
-    Issue #4346：任务 `completed` 是「建会话成功」的强证据 → 复位 session 熔断
-    （连续超时 streak 清零、半开探测关闭）。failed 不复位——失败原因可能是
-    session 本身，复位会掩盖连续超时（session 失败由 `service.fail_task` 收口）。
+    Issue #4346（复审 R1）：session 熔断/半开的收口**不在这里**。它必须覆盖全部终态
+    （取消 / exit!=0 业务失败 / 超时判死），而本函数只拿得到「是 completed 就复位」这
+    一半语义；收口点已统一到 `service.update_task_status` 终态事务内的
+    `session_guard.note_claim_outcome(c, runtime_id, status)`（方案 §4 的
+    note_claim_outcome 落点）。这里只做健康分重算，避免两处口径再分叉。
+    ``status`` 保留形参仅供调用方兼容（健康分只看终态事实，不再据此改 session 状态）。
     """
     if runtime_id:
-        try:
-            if (status or "").lower() == "completed":
-                from src.domains.runtime.engine import session_guard
-                session_guard.note_session_success(runtime_id)
-        except Exception as e:
-            log.debug(f"health_scorer: session success reset failed for runtime={runtime_id}: {e}")
         try:
             _compute_and_persist(runtime_id)
         except Exception as e:

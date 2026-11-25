@@ -3961,6 +3961,19 @@ def update_task_status(task_id, status, **kw):
         # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态（含 timeout_failed），且任务已绑定引擎 → busy_slots-1
         if status in TASK_TERMINAL_STATUSES and row[1] and row[1] > 0:
             release_busy_slot(row[1], cursor=c)
+        # Issue #4346（复审 Critical）：终态是「认领收口」的唯一必经点——任何终态
+        # （completed / failed / cancelled / timeout_failed）都必须结算 session 半开
+        # 占位。旧实现只在 completed（note_session_success）与 session 类失败
+        # （_write_failure）复位，取消 / exit!=0 业务失败 / 超时判死全漏 → 占位恒为 1
+        # 而 session_circuit_until 已过期 → 引擎被永久挡在认领闸门外（看板却显示
+        # 未熔断）。同事务内收口，与任务终态原子提交。
+        if status in TASK_TERMINAL_STATUSES and row[1] and row[1] > 0:
+            try:
+                from src.domains.runtime.engine import session_guard as _sg_out
+                _sg_out.note_claim_outcome(c, int(row[1]), status=status)
+            except Exception as _sge:
+                log.debug(f"update_task_status: session claim outcome hook failed "
+                          f"for task {task_id}: {_sge}")
         # Issue #587：任务终态 → 事件级联收敛（事务内兜底）。
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的

@@ -18,6 +18,9 @@
   `backend_status` / `circuit_*` 列由 `backend_health` 独占）；本模块只写
   `session_*` / `llm_provider_*` 列。
 - 所有读路径 fail-open：存量库缺列 / 查询异常 → 不拦截（迁移幂等补列）。
+- 半开占位必须**有释放路径**：认领设置了占位，就一定要在「认领收口」时结算——否
+  则窗口过期后闸门永久关闭、看板却显示未熔断（只能手工改库）。收口点见
+  `note_claim_outcome`（任务终态事务内）与认领闸门的孤儿占位自愈。
 - 模块 import 期只用 stdlib（worker 侧 ACP 文案格式化也会 import 本模块）。
 """
 from __future__ import annotations
@@ -237,12 +240,19 @@ def _ts(value):
     return parse_dt(value)
 
 
-def session_eligible(until: str, half, llm_ok, now: float | None = None) -> bool:
+def session_eligible(until: str, half, llm_ok, now: float | None = None,
+                     active=None) -> bool:
     """session 通道准入纯判定（认领/派发/池可达共用一把尺子）。
 
     - ``llm_provider_ok=0`` → 永不放行（配置类错误必须重新注册修配置）；
     - 熔断窗口内 → 拒绝；
-    - 窗口结束且无在飞半开探测（``half=0``）→ 放行一次探测；有在飞探测 → 拒绝。
+    - 窗口结束、无半开占位（``half=0``）→ 放行一次探测；
+    - 窗口结束、占位在位：只有「占位已成孤儿」才放行——``active=0`` 表示该引擎上
+      已无 ``dispatched/running`` 任务，即那次探测早已收尾（任务取消 / 非 session
+      失败判死 / 被 requeue 走别的引擎），占位必须自动失效；否则引擎被永久挡在
+      认领闸门外，而 ``session_circuit_until`` 早已过期、``_circuit_open_now``
+      返回 False（看板显示「未熔断」却不可用，只能手工改库）。
+      ``active=None`` = 调用方拿不到在飞状态 → 保守拒绝（与旧行为一致）。
     """
     if llm_ok is not None and int(llm_ok or 0) == 0:
         return False
@@ -254,7 +264,66 @@ def session_eligible(until: str, half, llm_ok, now: float | None = None) -> bool
         return True
     if until_ts > now_ts:
         return False
-    return int(half or 0) == 0
+    if int(half or 0) == 0:
+        return True
+    if active is None:
+        return False
+    return int(active or 0) == 0
+
+
+def _active_task_count(c, runtime_id: int) -> int | None:
+    """该引擎上在飞任务数（``dispatched/running``）；读不到 → None（不判定）。"""
+    try:
+        row = c.execute(
+            "SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=? "
+            "AND status IN ('dispatched','running')", (int(runtime_id),)).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.debug(f"session_guard: active task probe skipped (runtime={runtime_id}): {e}")
+        return None
+
+
+def _release_half_open(c, runtime_id: int, reason: str, detail: dict | None = None) -> None:
+    """只清半开占位（不动 streak / 不改写熔断窗口）。
+
+    占位代表「冷却后放行的那一次探测」，探测已经收尾就必须释放——留着等于认领
+    闸门永久关闭。探测结果未知时不清 streak（真实 session 失败证据由
+    ``_write_failure`` 记账），也不新开冷却（窗口早已过期，让引擎立刻回到池内
+    由下一次真实失败重新定档）。
+    """
+    rid = int(runtime_id or 0)
+    if not rid:
+        return
+    c.execute("UPDATE agent_runtimes SET session_circuit_half_open=0 WHERE id=?", (rid,))
+    log.warning(f"ENGINE_SESSION_PROBE_RELEASED: runtime_id={rid} engine="
+                f"{_runtime_name(rid) or '-'} reason={reason} "
+                f"(stale half-open placeholder cleared, engine back in claim pool)")
+    _audit(c, rid, "", "session_probe_released",
+           dict(detail or {}, reason=reason))
+
+
+def _claim_allowed_cursor(c, runtime_id: int, row, now: float | None = None):
+    """认领闸门（游标内）：返回 ``(可认领, 本次是否释放了孤儿占位)``。
+
+    孤儿释放只在本引擎「无在飞任务」时发生——探测任务已结束时占位必然是残留，
+    不释放就是永久挡门（Issue #4346 复审 Critical）。
+    """
+    rid = int(runtime_id or 0)
+    if not row:
+        return True, False
+    _streak, _total, until, half, _code, _fat, _sat, llm_ok, _lpreason = row
+    if session_eligible(until, half, llm_ok, now):
+        return True, False
+    if int(half or 0) == 0:
+        return False, False
+    if not session_eligible(until, 0, llm_ok, now):
+        return False, False  # 窗口内或 provider 缺失：与半开占位无关
+    active = _active_task_count(c, rid)
+    if active is None or active > 0:
+        return False, False  # 读不到 / 探测确实在飞：维持单探测语义
+    _release_half_open(c, rid, "orphaned_probe_no_active_task",
+                       {"session_circuit_half_open": int(half or 0)})
+    return True, True
 
 
 def session_claim_allowed(runtime_id: int, now: float | None = None, cursor=None) -> bool:
@@ -262,18 +331,24 @@ def session_claim_allowed(runtime_id: int, now: float | None = None, cursor=None
     rid = int(runtime_id or 0)
     if not rid:
         return True
-    try:
-        if cursor is not None:
+    if cursor is not None:
+        try:
             row = _session_row(cursor, rid)
-        else:
-            with _lock():
-                row = _session_row(_db().cursor(), rid)
+        except Exception:
+            return True
+        ok, _released = _claim_allowed_cursor(cursor, rid, row, now)
+        return ok
+    try:
+        with _lock():
+            d = _db()
+            c = d.cursor()
+            row = _session_row(c, rid)
+            ok, released = _claim_allowed_cursor(c, rid, row, now)
+            if released:
+                d.commit()  # 只有「本次释放了占位」才有写入需要提交
+        return ok
     except Exception:
         return True
-    if not row:
-        return True
-    _streak, _total, until, half, _code, _fat, _sat, llm_ok, _lpreason = row
-    return session_eligible(until, half, llm_ok, now)
 
 
 def _circuit_open_now(until: str, streak, code: str = "", now: float | None = None) -> bool:
@@ -473,6 +548,11 @@ def note_session_success_cursor(c, runtime_id: int) -> None:
 
 
 def note_session_success(runtime_id: int) -> None:
+    """自带事务的 session 成功复位（等价 ``note_session_success_cursor``）。
+
+    认领收口请走 `note_claim_outcome`（终态事务内一次结算，含非 session 终态），
+    本函数只服务「没有现成游标/事务」的直接调用方。
+    """
     rid = int(runtime_id or 0)
     if not rid:
         return
@@ -484,6 +564,44 @@ def note_session_success(runtime_id: int) -> None:
             d.commit()
     except Exception as e:
         log.debug(f"session_guard: note_session_success failed (runtime={rid}): {e}")
+
+
+def note_claim_outcome(c, runtime_id: int, status: str = "") -> dict:
+    """认领收口（Issue #4346 复审 Critical）：**任何终局**都必须结算 session 半开占位。
+
+    方案 §4 原设计就是 ``note_claim_outcome(executed=...)`` 收口，旧实现把复位挂在
+    「completed → note_session_success」与「session 类失败 → _write_failure」两处，
+    中间地带全部漏掉：任务取消、``exit!=0`` 的业务失败（最常见）、超时判死、
+    被 requeue 换引擎……都不触碰 ``session_circuit_half_open``。后果是占位恒为 1 而
+    ``session_circuit_until`` 早已过期 → ``session_eligible`` 永久拒绝认领，引擎被
+    静默移出池；``_circuit_open_now`` 却返回 False（看板显示未熔断），无日志无指标，
+    只能手工改库。这里按终态语义分档收口：
+
+    - ``completed``：建会话成功的强证据 → 完整复位（等价 ``note_session_success``）；
+    - 其它终态（failed/cancelled/timeout_failed…）：只释放占位（不动 streak、不新开
+      冷却）——探测结果未知，是否真的坏由下一次真实失败重新定档，但闸门必须立刻恢复。
+
+    返回结构化事件（供日志/测试断言；无写入时为空 dict）。
+    """
+    rid = int(runtime_id or 0)
+    if not rid:
+        return {}
+    row = _session_row(c, rid)
+    if not row:
+        return {}
+    streak, _total, until, half, _code, _fat, _sat, _llm, _lpreason = row
+    _status = (status or "").strip().lower()
+    if _status == "completed":
+        note_session_success_cursor(c, rid)
+        return {"runtime_id": rid, "status": _status, "released": "",
+                "session_fail_streak": 0, "session_circuit_until": ""}
+    if int(half or 0) == 0:
+        return {}  # 无占位：不需要收口（避免每次终态都写库）
+    _release_half_open(c, rid, f"claim_outcome:{_status or 'unknown'}",
+                       {"status": _status, "session_fail_streak": int(streak or 0),
+                        "session_circuit_until": until or ""})
+    return {"runtime_id": rid, "status": _status, "released": "half_open",
+            "session_fail_streak": int(streak or 0), "session_circuit_until": until or ""}
 
 
 def note_session_probe_started(c, runtime_id: int) -> None:
@@ -547,9 +665,21 @@ def _merge_event_payload(event_seq, payload: dict) -> None:
 
 
 def has_other_session_engine(task: dict, exclude_runtime_id: int) -> bool:
-    """池内是否还有可用的**其它**引擎（排除熔断/配置错误/离线实例）。
+    """池内是否还有**能真正认领到任务**的其它引擎（与认领闸门同一把尺子）。
 
-    查询失败 → True（fail-open：宁可 requeue 交给既有回收链，也不误判「无引擎」）。
+    Issue #4346 复审 Required：旧实现自造了第三把尺（``healthy=1`` + ``credential_id>0``
+    时 ``status=='online'`` + ``session_eligible``），与 `service.claim_by_tag` 的准入
+    完全脱钩，两个方向都错：
+
+    - `probe_status=fail` / `backend_status=unavailable` 的引擎被判「可用」→ requeue 后
+      谁也认领不到，白等到 stale 回收（600s）才 failed；
+    - 反例：``status`` 非 online 但探活 ok 的引擎被判「不可用」→ 直接 failed，丢掉
+      本可成功的换引擎重试。
+
+    现在逐引擎复用认领口径：``backend_health.claim_eligible``（#3928 冷却/半开）∧
+    ``session_eligible``（session 熔断/半开，含孤儿占位）→ 再过
+    `service._has_verified_executor`（幽灵引擎/探活失败/缺执行器）。查询失败 → True
+    （fail-open：宁可交给既有回收链，也不误判「无引擎」直接判死）。
     """
     pool_tag = (task.get("pool_tag") or task.get("agent_type") or "").strip()
     if not pool_tag:
@@ -557,9 +687,14 @@ def has_other_session_engine(task: dict, exclude_runtime_id: int) -> bool:
     try:
         with _lock():
             rows = _db().cursor().execute(
-                "SELECT ar.id, COALESCE(ar.healthy,0), COALESCE(ar.status,''), "
-                "COALESCE(ar.credential_id,0), COALESCE(ar.session_circuit_until,''), "
-                "COALESCE(ar.session_circuit_half_open,0), COALESCE(ar.llm_provider_ok,1) "
+                "SELECT ar.id, COALESCE(ar.probe_status,''), COALESCE(ar.worker_version,''), "
+                "COALESCE(ar.credential_id,0), COALESCE(ar.installed,0), "
+                "COALESCE(ar.healthy,0), COALESCE(ar.backend_status,''), "
+                "COALESCE(ar.circuit_open_until,''), COALESCE(ar.circuit_half_open,0), "
+                "COALESCE(ar.session_circuit_until,''), "
+                "COALESCE(ar.session_circuit_half_open,0), COALESCE(ar.llm_provider_ok,1), "
+                "(SELECT COUNT(*) FROM agent_tasks t WHERE t.runtime_id=ar.id "
+                " AND t.status IN ('dispatched','running')) "
                 "FROM agent_runtimes ar WHERE ar.id<>? AND EXISTS ("
                 "SELECT 1 FROM engine_capabilities ec WHERE ec.runtime_id=ar.id "
                 "AND ec.enabled=1 AND (ec.tag=? OR ec.tag='all'))",
@@ -567,16 +702,56 @@ def has_other_session_engine(task: dict, exclude_runtime_id: int) -> bool:
     except Exception as e:
         log.debug(f"session_guard: other-engine probe failed (fail-open): {e}")
         return True
+    from src.domains.runtime.engine.backend_health import claim_eligible
+    from src.domains.runtime.engine.service import _has_verified_executor
     now = datetime.now(timezone.utc).timestamp()
-    for rid, healthy, status, cred_id, until, half, llm_ok in rows or []:
-        if int(healthy or 0) != 1:
+    for (rid, probe_status, worker_version, cred_id, installed, healthy, backend_status,
+         circuit_until, circuit_half, session_until, session_half, llm_ok,
+         active) in rows or []:
+        if not claim_eligible(backend_status or "", circuit_until or "", circuit_half, now):
             continue
-        if int(cred_id or 0) > 0 and (status or "") != "online":
+        if not session_eligible(session_until or "", session_half, llm_ok, now, active=active):
             continue
-        if not session_eligible(until or "", half, llm_ok, now):
+        if not _has_verified_executor(
+                probe_status or "", worker_version or "",
+                credential_id=int(cred_id or 0), installed=bool(installed),
+                healthy=bool(healthy), backend_status=backend_status or "",
+                cooldown_gate_passed=True):
             continue
         return True
     return False
+
+
+def _session_retry_count(c, task_id: str):
+    """读 session 换引擎重试计数：``(count, column_available)``。
+
+    Issue #4346 复审 Required：复用 ``agent_tasks.attempts`` 会让「超时后至少重试 1 次」
+    在这条路径上不成立——``attempts`` 是 #403 瞬时重试与 #537 回炉共用的历史计数，
+    任意一轮 `+1` 过之后再遇到 session 超时就必然 ``attempts>=max_retry`` → 直接判死，
+    换引擎重试被静默跳过。改用专用列 ``session_retry_count``，只由本模块累加。
+
+    缺列（存量库尚未迁移）→ ``(0, False)``：调用方退回 ``attempts`` 口径，绝不因
+    缺列把重试整段取消（宁可保守按老口径，也不静默丢掉最关键的换引擎重试）。
+    """
+    try:
+        row = c.execute(
+            "SELECT COALESCE(session_retry_count,0) FROM agent_tasks WHERE id=?",
+            (task_id,)).fetchone()
+        return (int(row[0] or 0) if row else 0), True
+    except Exception as e:
+        log.debug(f"session_guard: session_retry_count unavailable (task={task_id}): {e}")
+        return 0, False
+
+
+def _bump_session_retry(c, task_id: str) -> bool:
+    """session 换引擎重试计数 +1（缺列 → 跳过并返回 False，不阻断 requeue）。"""
+    try:
+        c.execute("UPDATE agent_tasks SET session_retry_count="
+                  "COALESCE(session_retry_count,0)+1 WHERE id=?", (task_id,))
+        return True
+    except Exception as e:
+        log.debug(f"session_guard: session_retry_count bump skipped (task={task_id}): {e}")
+        return False
 
 
 def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) -> str:
@@ -620,8 +795,10 @@ def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) ->
 
     try:
         with _lock():
-            row = _db().cursor().execute(
+            c = _db().cursor()
+            row = c.execute(
                 "SELECT status, attempts FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            retry_count, retry_column = _session_retry_count(c, task_id)
     except Exception as e:
         log.warning(f"session_guard: load task {task_id} failed: {e}")
         return "observed"
@@ -634,10 +811,13 @@ def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) ->
         return "observed"
 
     max_retry = session_max_retry()
-    if attempts >= max_retry:
+    # 专用计数优先（与 #403 的 attempts 解耦）；缺列才退回历史 attempts 口径。
+    used = retry_count if retry_column else attempts
+    counter = "session_retry_count" if retry_column else "attempts(legacy)"
+    if used >= max_retry:
         _append_error(task_id, {
             "error_code": f"{code}_EXHAUSTED",
-            "attempts": attempts, "max": max_retry,
+            "attempts": used, "max": max_retry, "counter": counter,
             "engine_id": payload["engine_id"], "engine": payload["engine"],
             "queue_depth": payload["queue_depth"],
             "disk_avail_bytes": payload["disk_avail_bytes"],
@@ -645,7 +825,7 @@ def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) ->
             "note": "session retry attempts exhausted; task will be failed",
         })
         log.warning(f"SESSION_RETRY_EXHAUSTED: task_id={task_id} code={code} "
-                    f"engine_id={rid} attempts={attempts}/{max_retry}")
+                    f"engine_id={rid} {counter}={used}/{max_retry}")
         return "exhausted"
 
     if not has_other_session_engine(task, rid):
@@ -673,10 +853,19 @@ def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) ->
             return "observed"
     except Exception as _vq:
         log.debug(f"session_guard: requeue status verify failed (task={task_id}): {_vq}")
+    if retry_column:
+        try:
+            with _lock():
+                d = _db()
+                c2 = d.cursor()
+                if _bump_session_retry(c2, task_id):
+                    d.commit()
+        except Exception as _be:
+            log.debug(f"session_guard: session retry counter bump failed (task={task_id}): {_be}")
     _append_error(task_id, {
         "error_code": "SESSION_RETRY",
         "failed_error_code": code,
-        "attempt": attempts + 1, "max": max_retry,
+        "attempt": used + 1, "max": max_retry, "counter": counter,
         "engine_id": payload["engine_id"], "engine": payload["engine"],
         "queue_depth": payload["queue_depth"],
         "disk_avail_bytes": payload["disk_avail_bytes"],
@@ -684,5 +873,5 @@ def handle_task_failure(task_id: str, task: dict | None, error, exit_code=-1) ->
         "note": "requeued to another healthy engine (same engine session-cooled)",
     })
     log.info(f"SESSION_RETRY_REQUEUE: task_id={task_id} code={code} "
-             f"excluded_runtime={rid} attempt={attempts + 1}/{max_retry}")
+             f"excluded_runtime={rid} {counter}={used + 1}/{max_retry}")
     return "requeued"
