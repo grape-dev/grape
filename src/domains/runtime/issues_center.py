@@ -109,6 +109,7 @@ _rt_db = _DomainDbProxy()
 
 
 from src.kernel.session_manager import db, db_lock, get_chat_config, create_conversation, add_message
+from src.kernel.db_lock_metrics import foreground_lock_budget
 
 def _require_session_repo_token(request: Request, repo_key: str, *, scene=None) -> dict:
     """notify 等 agent 动作端点鉴权：仅接受 `tk_` 会话 token；**作用域按场景判定**。
@@ -658,12 +659,16 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             set_issue_stage(repo_key, _issue_id, "pending_review", "issue_closed")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
-        # Issue #2419 修复项 2：Issue 关闭兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
-        if _promoted_review > 0:
-            maybe_notify_review_point_status(
-                repo_key, issue_number, "pending_review",
-                "VCS Issue 已关闭，关联任务转入待审核，请确认是否完结")
-        return c.rowcount
+        _affected = c.rowcount
+    # Issue #4295：通知投递必须在 db_lock **之外**。maybe_notify_review_point_status
+    # 内部要解析通知目标（issue 行 → conv 兜底建/复用 → open_id → 本人 bot ctx/api → cfg），
+    # 属于"锁内做外部 IO + 多次 DB 往返"，会把前台请求的临界区越滚越大（顶到 99.9s）。
+    # 状态判定与 UPDATE 仍全在锁内（_promoted_review/_affected 已在锁内定格）。
+    if _promoted_review > 0:
+        maybe_notify_review_point_status(
+            repo_key, issue_number, "pending_review",
+            "VCS Issue 已关闭，关联任务转入待审核，请确认是否完结")
+    return _affected
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
     """换人：不再把需求标完成（reassigned 语义错位，见 reassign-takeover-no-complete-design.md）。
@@ -716,12 +721,14 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
             set_issue_stage(repo_key, _issue_id, "pending_review", "bot_takeover")
         # else: 有 agent 在运行 → 不修改 stage，等 agent 完成后再判定
         _rt_db.commit()
-        # Issue #2419 修复项 2：bot 接管兜底转待审核 = 审核点状态变化，须推 🔎 待审核通知
-        if _promoted_review > 0:
-            maybe_notify_review_point_status(
-                repo_key, issue_number, "pending_review",
-                "任务已被 bot 接管并转入待审核，请确认后续处理方式")
-        return c.rowcount
+        _affected = c.rowcount
+    # Issue #4295：同 close_issue_tasks ——通知投递移出 db_lock（目标解析含多次 DB 往返
+    # 与本人 bot 凭证解析，锁内执行等同把外部 IO 拉进临界区）。
+    if _promoted_review > 0:
+        maybe_notify_review_point_status(
+            repo_key, issue_number, "pending_review",
+            "任务已被 bot 接管并转入待审核，请确认后续处理方式")
+    return _affected
 
 # ===== Issue #4170：交付终态（PR merged + Issue closed）判定（单点，派发/复位共用）=====
 
@@ -2030,6 +2037,43 @@ async def _run_pending_review_notify(ctx, api, user_id: str, conv_id: str, open_
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
 
+# 派生通知任务强引用：asyncio 只弱引用 Task，不留引用会被 GC 掉；异常则只剩
+# "Task exception was never retrieved" 一行，投递是否成功无法复盘（Issue #4295 复审）。
+_NOTIFY_TASKS: set = set()
+
+
+async def _notify_without_foreground_budget(coro):
+    """派生通知任务：显式关闭前台 db_lock 等锁预算（Issue #4295 第 2 轮复审 Required）。
+
+    ``asyncio.Task`` 在创建时**复制当前 ContextVars**，所以在 HTTP 请求里派生的通知
+    任务会继承 ``path_var`` → ``acquire_budget_s()`` 给它的 db_lock 等锁套上
+    ``DB_LOCK_ACQUIRE_TIMEOUT_S``（默认 5s）。而通知投递本身要做多次 DB 往返（目标
+    解析 / conv 兜底建 / 本人 bot 凭证 / 写 outbox），拥塞窗口里超预算是常态；此时
+    响应早已发出（进不了 503 处理器）、任务又无人回收异常 → 审核点通知**静默丢失**。
+
+    本包装在任务自己的 context 里把预算关掉：``foreground_lock_budget(0)`` 只写任务
+    复制出来的那份 ContextVar（await 不跨 context），等待真实持锁方即可 —— 与 #4295
+    把通知移出 ``with db_lock`` 之前的「同线程无界等锁」语义一致。三条派发路径
+    （``create_task`` / ``run_coroutine_threadsafe`` / ``asyncio.run``）都先过这一层。
+    """
+    with foreground_lock_budget(0):
+        return await coro
+
+
+def _reap_notify_task(task) -> None:
+    """通知任务收尾：解除强引用；未预期异常显式记日志（不再只剩 never-retrieved）。"""
+    _NOTIFY_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except Exception as e:  # pragma: no cover - 任务未结束时取异常会抛
+        log.warning(f"[im-notify] background notify state unreadable: {e}")
+        return
+    if exc is not None:
+        log.warning(f"[im-notify] background notify failed: {exc}")
+
+
 def _fire_notify_coro(coro) -> None:
     """通知协程 fire-and-forget 调度：有事件循环 → create_task（不阻塞端点）；
     无（worker 线程/同步上下文）→ run_coroutine_threadsafe 投递回主 loop 执行。
@@ -2038,26 +2082,36 @@ def _fire_notify_coro(coro) -> None:
     → 跨 loop 抛 "Timeout context manager should be used inside a task"（token
     获取失败 → no token available → 卡片静默丢失）。与 chat.py
     _dispatch_push_to_main_loop 同款修复：投递回 BotManager 保存的主 loop。
-    无主 loop（测试/启动异常）→ 兜底本线程 asyncio.run（同步可断言）。"""
+    无主 loop（测试/启动异常）→ 兜底本线程 asyncio.run（同步可断言）。
+
+    无论走哪条路径，载荷都先包进 ``_notify_without_foreground_budget``：派生任务不得
+    继承请求线程的 db_lock 等锁预算（见该函数 docstring）。"""
+    coro = _notify_without_foreground_budget(coro)
     try:
-        asyncio.get_running_loop().create_task(coro)
+        running_loop = asyncio.get_running_loop()
     except RuntimeError:
-        from src import api as _api_pkg
-        bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
-        loop = getattr(bm, "loop", None)
-        if loop is not None and loop.is_running():
-            try:
-                fut = asyncio.run_coroutine_threadsafe(coro, loop)
-                fut.add_done_callback(
-                    lambda f: log.warning(f"[im-notify] background notify failed: {f.exception()}")
-                    if not f.cancelled() and f.exception() else None)
-                return
-            except Exception as e:
-                log.warning(f"[im-notify] notify dispatch to main loop failed: {e}")
+        running_loop = None
+    if running_loop is not None:
+        task = running_loop.create_task(coro)
+        _NOTIFY_TASKS.add(task)
+        task.add_done_callback(_reap_notify_task)
+        return
+    from src import api as _api_pkg
+    bm = getattr(getattr(_api_pkg, "main", None), "bot_manager", None)
+    loop = getattr(bm, "loop", None)
+    if loop is not None and loop.is_running():
         try:
-            asyncio.run(coro)
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            fut.add_done_callback(
+                lambda f: log.warning(f"[im-notify] background notify failed: {f.exception()}")
+                if not f.cancelled() and f.exception() else None)
+            return
         except Exception as e:
-            log.warning(f"[im-notify] background notify run failed: {e}")
+            log.warning(f"[im-notify] notify dispatch to main loop failed: {e}")
+    try:
+        asyncio.run(coro)
+    except Exception as e:
+        log.warning(f"[im-notify] background notify run failed: {e}")
 
 
 def _issue_status_by_tag(repo_key: str, issue_id: str) -> str:
