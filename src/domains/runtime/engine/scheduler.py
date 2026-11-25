@@ -40,7 +40,13 @@ from src.kernel.session_manager import db, db_lock
 from src.domains.mgmt.autopilot_state import (  # noqa: E402
     AUTOPILOT_EMPTY_INSTRUCTION_REASON as _MGMT_EMPTY_INSTRUCTION_REASON,
     AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION as _MGMT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+    AUTOPILOT_STATE_BLOCKED_PAYLOAD as _MGMT_STATE_BLOCKED_PAYLOAD,
+    AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT as _MGMT_STATE_BLOCKED_PAYLOAD_REPEAT,
 )
+
+# Issue #3818：派发前载荷审查（规则/脱敏）与同载荷重复投递熔断台账。
+from src.domains.runtime.engine import payload_guard as _payload_guard  # noqa: E402
+from src.domains.runtime.engine import payload_dispatch_guard as _payload_guard_ledger  # noqa: E402
 
 # autopilot_executions 归 runtime 域（configs/table_ownership.json）。三库拓扑下
 # 手动触发跑在 mgmt 进程（grape-server），进程库（session_manager.db）是 mgmt 库，
@@ -1990,6 +1996,61 @@ def _scan_task_once(task: dict, last_run: str) -> str:
     log.info(f"Autopilot: cron due for task {task_id} ('{task.get('name')}')")
     return "dispatch"
 
+def _payload_scan_state(task: dict) -> tuple[str, str]:
+    """指令载荷静态审查（不写库）。
+
+    返回 ``(state, reason)``：命中高危规则 → blocked_payload；否则空串。
+    ``reason`` 是稳定 code（规则名逗号分隔，不含指令原文），供出参与审计。
+    """
+    _instr = task.get("instruction") or ""
+    _kinds = _payload_guard.blocked_kinds(_instr)
+    if not _kinds:
+        return ("", "")
+    return (_MGMT_STATE_BLOCKED_PAYLOAD, "payload_rejected:" + ",".join(_kinds))
+
+
+def _payload_dispatch_gate(task: dict) -> dict:
+    """派发前的载荷审查 + 同载荷重复投递熔断（Issue #3818）。
+
+    在建 execution 之前调用：命中任一条件即返回拦截状态，调用方**不得**建 exec。
+    台账故障按 Spec fail-open（不阻断正常派发），但审查命中一律硬拒。
+    """
+    _state, _reason = _payload_scan_state(task)
+    if _state:
+        return {"state": _state, "reason": _reason,
+                "payload_hash": _payload_guard.payload_hash_prefix(task.get("instruction") or ""),
+                "dispatch_count": 0}
+    _instr = task.get("instruction") or ""
+    _decision = _payload_guard_ledger.record_dispatch(
+        _payload_guard.payload_hash(_instr),
+        task_id=task.get("id") or 0, repo_key=task.get("repo_key") or "")
+    if _decision.get("allowed", True):
+        return {}
+    return {"state": _MGMT_STATE_BLOCKED_PAYLOAD_REPEAT,
+            "reason": _decision.get("reason") or _payload_guard_ledger.REASON_REPEAT_REJECTION,
+            "payload_hash": _payload_guard.payload_hash_prefix(_instr),
+            "dispatch_count": int(_decision.get("dispatch_count") or 0)}
+
+
+def _refuse_payload_task(task: dict, gate: dict) -> None:
+    """拦截派发：写不可派发状态（库内跨进程权威）+ 一次性结构化告警。"""
+    task_id = task.get("id") or 0
+    _state = gate.get("state") or _MGMT_STATE_BLOCKED_PAYLOAD
+    _reason = gate.get("reason") or "payload_rejected"
+    changed = _mark_not_dispatchable(
+        task_id, _state, _reason, task.get("dispatch_state") or "")
+    log.error(
+        f"[autopilot-alert] task={task_id} code=AUTOPILOT_PAYLOAD_BLOCKED "
+        f"state={_state} reason={_reason} repo_key={task.get('repo_key') or ''} "
+        f"payload_hash={gate.get('payload_hash') or ''} "
+        f"dispatch_count={gate.get('dispatch_count') or 0} "
+        f"changed={int(bool(changed))}")
+    if changed:
+        log.warning(
+            f"Autopilot: task {task_id} refused by payload guard ({_state}/{_reason})"
+            f"（已标记为不可派发；修改指令即换新 payload hash 恢复派发）")
+
+
 _AGENT_TASK_SELECT = "id, status, result_text, exit_code, skill, env_extra, runtime_id"
 
 def _agent_task_view(row):
@@ -2233,6 +2294,12 @@ async def _execute_task(task: dict):
         return
     if task_id in _RUNNING_TASKS:
         log.info(f"Autopilot: task {task_id} already running, skip")
+        return
+    # Issue #3818：派发前载荷闸门必须早于 `_create_execution`（含重试循环的每一次
+    # 建 exec）——熔断台账只在真正要投递时累加，撞上「已在运行」不计次数。
+    _gate = _payload_dispatch_gate(task)
+    if _gate:
+        _refuse_payload_task(task, _gate)
         return
     _RUNNING_TASKS.add(task_id)
     # 触发即写 last_run_at/next_run_at（防执行窗口内主控重启导致 cron 重新判定到期：
@@ -3524,6 +3591,15 @@ async def trigger_task_now(task_id: int, params: dict | None = None) -> dict:
                 f"Autopilot: task {task['id']} has empty instruction, refuse manual trigger"
                 f"（已标记为不可派发，补齐指令即恢复）")
         return {"ok": False, "message": _MGMT_EMPTY_INSTRUCTION_REASON}
+    _scan_state, _scan_reason = _payload_scan_state(task)
+    if _scan_state:
+        # Issue #3818：手动触发同一道载荷闸门（只审查、不累计投递次数——计数在
+        # `_execute_task` 内做，避免一次触发算两次）。命中即拒绝，不建 execution。
+        _gate = {"state": _scan_state, "reason": _scan_reason,
+                 "payload_hash": _payload_guard.payload_hash_prefix(task["instruction"] or ""),
+                 "dispatch_count": 0}
+        _refuse_payload_task(task, _gate)
+        return {"ok": False, "message": _scan_reason}
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}
     task["_run_params"] = dict(params or {})

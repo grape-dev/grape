@@ -32,8 +32,11 @@ from src.domains.runtime import public as _rt_ap
 # Issue #3733：不可派发状态口径（状态值 + 原因文案单一事实源，与调度器共用同一份）
 from src.domains.mgmt.autopilot_state import (
     AUTOPILOT_STATE_BLOCKED_EMPTY_INSTRUCTION,
+    AUTOPILOT_STATE_BLOCKED_PAYLOAD,
+    AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT,
     AUTOPILOT_STATE_OK,
     dispatch_reason,
+    reason_for_state,
 )
 
 # 执行记录→任务行解析走 owner 域 public（原 import runtime.engine.scheduler 内部函数，
@@ -238,6 +241,35 @@ def _validate_custom_fields(fields) -> None:
         })
 
 
+_MGMT_STATE_BLOCKED_PAYLOAD = AUTOPILOT_STATE_BLOCKED_PAYLOAD
+_MGMT_STATE_BLOCKED_PAYLOAD_REPEAT = AUTOPILOT_STATE_BLOCKED_PAYLOAD_REPEAT
+
+
+def _payload_rejection(instruction: str, action: str, task_id: int = 0,
+                       username: str = "") -> dict | None:
+    """入库侧载荷审查（Issue #3818）：命中高危规则 → 返回 400 出参，否则 None。
+
+    审查只看归一化文本，**审计日志只落规则名与载荷 hash 前缀**，绝不落指令原文
+    （否则等于把「凭据入日志」换个地方重演）。规则/脱敏与调度器共用
+    `src.domains.runtime.engine.payload_guard`，避免两套口径漂移。
+    """
+    from src.domains.runtime.engine import payload_guard as _pg
+
+    _kinds = _pg.blocked_kinds(instruction)
+    if not _kinds:
+        return None
+    log.error(
+        f"[autopilot-payload-blocked] action={action} task={task_id} "
+        f"user={username or ''} kinds={','.join(_kinds)} "
+        f"payload_hash={_pg.payload_hash_prefix(instruction)}")
+    return {
+        "code": 400,
+        "message": "指令命中凭据外传载荷审查，已拒绝入库",
+        "reason_code": "payload_rejected",
+        "findings": _kinds,
+    }
+
+
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
     import json as _json
@@ -280,7 +312,11 @@ def _row_to_task(row) -> dict:
     dispatch_state_reason = (row[19] if len(row) > 19 else "") or ""
     dispatch_state_at = (row[20] if len(row) > 20 else "") or ""
     _instr = row[4] or ""
-    _dispatchable = bool(_instr.strip())
+    # Issue #3818：载荷审查/熔断拦截是「有指令但不可派发」——不能只看指令是否为空，
+    # 否则界面显示 dispatchable=true 而调度器一直拒绝，等于出参说谎。
+    _payload_blocked = dispatch_state in (
+        _MGMT_STATE_BLOCKED_PAYLOAD, _MGMT_STATE_BLOCKED_PAYLOAD_REPEAT)
+    _dispatchable = bool(_instr.strip()) and not _payload_blocked
     # 派发能力以**当前指令**为准，不依赖调度器是否已经跑过一次扫描：用户刚清空指令、
     # 或迁移尚未执行时，库内 dispatch_state 可能还是空串，接口不能因此说谎。
     # 读侧归一化（复审 Optional）：指令经非 PUT 路径补齐（直接改库、旧版本回滚后写入、
@@ -290,6 +326,8 @@ def _row_to_task(row) -> dict:
     # 库内残留值仍由调度器/迁移当作判重依据，读侧只负责出参不说谎。
     if _dispatchable:
         dispatch_state = dispatch_state_reason = dispatch_state_at = ""
+    elif _payload_blocked:
+        dispatch_state_reason = dispatch_state_reason or reason_for_state(dispatch_state)
     _dispatch_reason = dispatch_reason(_instr, dispatch_state) or dispatch_state_reason
     return {
         "id": row[0],
@@ -536,6 +574,10 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     _validate_engine_runtime_uids(user, body.repo_key or "", body.engine_runtime_uids or [])
     # Issue #4066：custom_fields 写侧校验（保留前缀/非法名 400，禁止落库）
     _validate_custom_fields(body.custom_fields)
+    _payload_detail = _payload_rejection(
+        body.instruction, "create", 0, str(user.get("username") or ""))
+    if _payload_detail:
+        raise HTTPException(status_code=400, detail=_payload_detail)
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
     engine_ids_json = ""
@@ -590,6 +632,12 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
     if body.custom_fields is not None:
         _validate_custom_fields(body.custom_fields)
     updates = body.model_dump(exclude_none=True)
+    if (updates.get("instruction") or "").strip():
+        _payload_detail = _payload_rejection(
+            updates["instruction"], "update", task_id,
+            str(user.get("username") or ""))
+        if _payload_detail:
+            raise HTTPException(status_code=400, detail=_payload_detail)
     for key, val in updates.items():
         if key == "enabled":
             fields.append("enabled=?")
