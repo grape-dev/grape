@@ -395,6 +395,12 @@ def analysis_docs(org_id: str) -> dict:
             "repo_key": item["repo_key"],
             "full_name": item["full_name"],
             "purpose": item.get("purpose") or m.get("purpose") or "",
+            "core_functions": item.get("core_functions") or m.get("core_functions") or [],
+            "core_responsibilities": (item.get("core_responsibilities")
+                                      or m.get("core_responsibilities") or {}),
+            "other_capabilities": (item.get("other_capabilities")
+                                   or m.get("other_capabilities") or []),
+            "routing": item.get("routing") or m.get("routing") or {},
             "domains": item.get("domains") or [],
             "keywords": item.get("keywords") or [],
             "interfaces": item.get("interfaces") or [],

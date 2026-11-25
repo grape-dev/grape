@@ -226,8 +226,163 @@ def mark_ai_status(org_id: str, repo_key: str, status: str, *,
         db.commit()
 
 
+def _text_list(value, limit: int = 0) -> list[str]:
+    """把字符串/数组（含 {name, description} 对象）归一成去重的短文本列表。"""
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        raw = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            text = str(item.get("name") or item.get("title")
+                       or item.get("description") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _core_functions(result: dict) -> list[dict]:
+    """核心功能：优先 schema v3，其次兼容 v2 capabilities / v1 features。
+
+    除名称/描述外，保留路由判别字段：典型任务、不适用任务、拥有实体、变更类型。
+    这些字段不进入人类可读正文，但决定「任务该派给哪个仓」。
+    """
+    out: list[dict] = []
+
+    def _append(item, name: str, desc: str) -> None:
+        if not name:
+            return
+        out.append({
+            "name": name[:80],
+            "description": desc[:240],
+            "keywords": _text_list(item.get("keywords"), limit=12)
+                        if isinstance(item, dict) else [],
+            "task_examples": _text_list(
+                item.get("task_examples") or item.get("examples"), limit=6)
+                             if isinstance(item, dict) else [],
+            "not_for": _text_list(
+                item.get("not_for") or item.get("anti_examples"), limit=5)
+                       if isinstance(item, dict) else [],
+            "owned_entities": _text_list(
+                item.get("owned_entities") or item.get("entities"), limit=8)
+                              if isinstance(item, dict) else [],
+            "change_types": _text_list(item.get("change_types"), limit=6)
+                            if isinstance(item, dict) else [],
+        })
+
+    raw = result.get("core_functions")
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                name = str(item.get("name") or item.get("title") or "").strip()
+                desc = str(item.get("description") or item.get("summary") or "").strip()
+            else:
+                name, desc = str(item or "").strip(), ""
+            _append(item, name, desc)
+    if not out:
+        for item in (result.get("capabilities") or []):
+            if isinstance(item, dict):
+                name = str(item.get("name") or item.get("title") or "").strip()
+                desc = str(item.get("description") or item.get("summary") or "").strip()
+                _append(item, name, desc)
+    if not out:
+        for name in _text_list(result.get("features"), limit=6):
+            _append({}, name, "")
+    return out[:6]
+
+
+def _core_responsibilities(result: dict) -> dict:
+    """核心职责：组织角色 + 负责 / 不负责边界；兼容 v1 只有 not_owns。"""
+    raw = result.get("core_responsibilities")
+    role = ""
+    owns: list[str] = []
+    not_owns: list[str] = []
+    if isinstance(raw, dict):
+        role = str(raw.get("role") or raw.get("summary") or "").strip()
+        owns = _text_list(raw.get("owns") or raw.get("responsible_for"), limit=8)
+        not_owns = _text_list(raw.get("not_owns") or raw.get("does_not_own"), limit=8)
+    if not not_owns:
+        not_owns = _text_list(result.get("not_owns"), limit=8)
+    return {"role": role[:300], "owns": owns, "not_owns": not_owns}
+
+
+def _other_capabilities(result: dict, core: list[dict]) -> list[str]:
+    """其他能力的概括列表：只保留名称，不展开接口/文件。"""
+    out = _text_list(result.get("other_capabilities"), limit=10)
+    if out:
+        return out
+    core_names = {str(x.get("name") or "").strip().lower() for x in core}
+    out = []
+    seen = set(core_names)
+    for item in (result.get("capabilities") or []):
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("title") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        out.append(name)
+        if len(out) >= 10:
+            break
+    if len(out) < 10:
+        for name in _text_list(result.get("features")):
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            out.append(name)
+            if len(out) >= 10:
+                break
+    return out
+
+
+def _routing_profile(result: dict) -> dict:
+    """任务路由判别字段：正向/负向关键词与典型请求，供召回与下派使用。"""
+    raw = result.get("routing")
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "include_keywords": _text_list(
+            raw.get("include_keywords") or result.get("include_keywords"), limit=20),
+        "exclude_keywords": _text_list(
+            raw.get("exclude_keywords") or result.get("exclude_keywords"), limit=20),
+        "typical_requests": _text_list(
+            raw.get("typical_requests") or raw.get("task_examples"), limit=10),
+    }
+
+
+def _presentation_fields(result: dict) -> dict:
+    """面向前端/摘要的结构化展示字段（不含接口与文件路径）。"""
+    if not isinstance(result, dict):
+        return {}
+    core = _core_functions(result)
+    return {
+        "core_functions": core,
+        "core_responsibilities": _core_responsibilities(result),
+        "other_capabilities": _other_capabilities(result, core),
+        "routing": _routing_profile(result),
+    }
+
+
 def _render_ai_summary(result: dict) -> str:
-    """把 AI 结构化结果渲染成组织仓库分支上的 Markdown。"""
+    """把 AI 结构化结果渲染成组织仓库分支上的 Markdown。
+
+    展示顺序固定为：一句话定位 → 核心功能 → 核心职责 → 其他能力。
+    接口、依赖清单、文件路径属于机器/审计信息，不进入人类可读正文。
+    """
     def _list(name: str) -> list:
         raw = result.get(name)
         if isinstance(raw, str):
@@ -239,9 +394,12 @@ def _render_ai_summary(result: dict) -> str:
         confidence = round(max(0.0, min(1.0, float(confidence))), 2)
     except (TypeError, ValueError):
         confidence = 0.0
+    core = _core_functions(result)
+    responsibilities = _core_responsibilities(result)
+    other = _other_capabilities(result, core)
     lines = [
         "---",
-        "schema_version: 1",
+        "schema_version: 3",
         f"repo_key: {result.get('repo_key') or ''}",
         f"full_name: {result.get('full_name') or ''}",
         "generated_by: org-repo-analyzer",
@@ -254,30 +412,31 @@ def _render_ai_summary(result: dict) -> str:
         "",
         f"> {result.get('purpose') or '（模型未给出定位）'}",
         "",
-        "## 负责的功能",
+        "## 核心功能",
     ]
-    caps = result.get("capabilities") or []
-    if isinstance(caps, list) and caps:
-        for c in caps:
-            if isinstance(c, dict):
-                name = str(c.get("name") or "").strip()
-                desc = str(c.get("description") or "").strip()
-                paths = c.get("paths") or []
-                if name:
-                    lines.append(f"- **{name}**" + (f"：{desc}" if desc else ""))
-                    if paths:
-                        lines.append(f"  - 证据：{', '.join(f'`{p}`' for p in paths[:8])}")
-    if not lines or lines[-1] == "## 负责的功能":
-        lines += [f"- {x}" for x in _list("features")] or ["- （模型未提供功能列表）"]
-    lines += ["", "## 对外接口"]
-    lines += [f"- `{x}`" for x in _list("interfaces")] or ["- （未发现显式接口）"]
-    lines += ["", "## 依赖 / 被依赖"]
-    lines += [f"- {x}" for x in _list("depends_on")] or ["- （未发现显式依赖）"]
-    lines += ["", "## 不负责什么"]
-    lines += [f"- {x}" for x in _list("not_owns")] or ["- （未填写）"]
-    lines += ["", "## 关键词", ", ".join(_list("keywords")) or "（无）"]
-    lines += ["", "## 证据"]
-    lines += [f"- {x}" for x in _list("evidence")] or ["- （模型未给出证据）"]
+    if core:
+        for item in core:
+            desc = item.get("description") or ""
+            lines.append(f"- **{item['name']}**" + (f"：{desc}" if desc else ""))
+            examples = item.get("task_examples") or []
+            if examples:
+                lines.append("  - 典型任务：" + "；".join(examples[:2]))
+    else:
+        lines.append("- （模型未给出核心功能，建议重新分析）")
+
+    lines += ["", "## 核心职责"]
+    risk_lines = []
+    if responsibilities["owns"]:
+        risk_lines.append("- **负责**：" + "、".join(responsibilities["owns"]))
+    if responsibilities["not_owns"]:
+        risk_lines.append("- **不负责**：" + "、".join(responsibilities["not_owns"]))
+    if responsibilities["role"]:
+        risk_lines.append("- **组织角色**：" + responsibilities["role"])
+    lines += risk_lines or ["- （模型未给出职责边界，建议重新分析）"]
+
+    if other:
+        suffix = " 等。" if len(other) >= 10 else "。"
+        lines += ["", "## 其他能力", "、".join(other) + suffix]
     risks = _list("risks")
     if risks:
         lines += ["", "## 风险 / 待确认"] + [f"- {x}" for x in risks]
@@ -353,7 +512,7 @@ def save_ai_result(org_id: str, repo_key: str, result: dict, *,
     return get_map(str(org_id), str(repo_key))
 
 
-def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 60000) -> dict:
+def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 80000) -> dict:
     """构建给 AI 分析引擎的上下文包（不暴露平台 token）。"""
     org = get_org(str(org_id)) or {}
     row = None
@@ -377,15 +536,26 @@ def analysis_context(org_id: str, repo_key: str, *, max_chars: int = 60000) -> d
         "org_context": str(sources.get("org_context") or ""),
         "source_commit": str(sources.get("source_commit") or ""),
     }
-    # 总体截断，避免 prompt 爆炸
+    # 按证据优先级分配预算：代码生成物优先，README 兜底，避免单个大 README
+    # 把 capabilities/graph 挤掉（分析变浅的常见原因）。
+    field_caps = {
+        "description": 2000,
+        "repo_map_doc": 18000,
+        "capabilities": 18000,
+        "graph": 18000,
+        "readme": 18000,
+        "org_context": 8000,
+    }
     total = 0
-    for k in ("description", "readme", "repo_map_doc", "capabilities", "graph", "org_context"):
+    for k in ("description", "repo_map_doc", "capabilities", "graph", "readme", "org_context"):
         val = str(bundle.get(k) or "")
         remain = max(0, max_chars - total)
-        if remain <= 0:
+        limit = min(field_caps.get(k, remain), remain)
+        if limit <= 0:
             bundle[k] = ""
-        elif len(val) > remain:
-            bundle[k] = val[:remain] + "\n\n> （内容过长，已截断）"
+        elif len(val) > limit:
+            suffix = "\n\n> （内容过长，已截断）"
+            bundle[k] = val[:max(0, limit - len(suffix))] + suffix
         total += len(bundle[k] or "")
     return bundle
 
@@ -420,6 +590,26 @@ def _cursor_description():
     return _org_db.db.cursor().description or []
 
 
+def _ai_result_for(org_id: str, repo_key: str) -> dict:
+    """读取最近一次 AI 原始结果（用于展示字段归一，不用于地图主字段）。"""
+    try:
+        ensure_ai_table()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT result_json FROM grape_t_org_repo_ai WHERE org_id=? AND repo_key=?",
+                (str(org_id), str(repo_key)),
+            )
+            row = c.fetchone()
+        if not row or not row[0]:
+            return {}
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001 - 缺表/历史脏数据时退回地图字段
+        log.debug(f"org_repo_map ai result unavailable org={org_id} repo={repo_key}: {exc}")
+        return {}
+
+
 def get_map(org_id: str, repo_key: str) -> dict | None:
     ensure_table()
     with db_lock:
@@ -435,7 +625,9 @@ def get_map(org_id: str, repo_key: str) -> dict | None:
         if not row:
             return None
         cols = [d[0] for d in c.description]
-    return _row_to_map_from_cols(cols, row)
+    data = _row_to_map_from_cols(cols, row)
+    data.update(_presentation_fields(_ai_result_for(org_id, repo_key)))
+    return data
 
 
 def _row_to_map_from_cols(cols, row) -> dict:
@@ -815,7 +1007,7 @@ def _build_summary(org: dict, row: dict, sources: dict) -> dict:
     now = _utc_now()
     fm = [
         "---",
-        "schema_version: 1",
+        "schema_version: 2",
         f"repo_key: {row.get('repo_key') or ''}",
         f"full_name: {row.get('full_name') or ''}",
         f"purpose: {json.dumps(purpose, ensure_ascii=False)}",
@@ -831,32 +1023,22 @@ def _build_summary(org: dict, row: dict, sources: dict) -> dict:
         "",
         f"# {name}",
         "",
-        "## 一句话定位",
-        purpose,
+        f"> {purpose}",
         "",
-        "## 负责的功能",
+        "## 核心功能",
     ]
-    fm += [f"- {x}" for x in features] or ["- （README / project-info 未提供明确功能列表）"]
-    fm += ["", "## 对外接口"]
-    fm += [f"- `{x}`" for x in interfaces] or ["- （未发现显式 HTTP 接口）"]
-    fm += ["", "## 依赖 / 被依赖"]
-    fm += [f"- {x}" for x in depends_on] or ["- （未发现显式仓库依赖）"]
-    fm += ["", "## 不负责什么"]
-    fm += [f"- {x}" for x in not_owns] or ["- （未填写）"]
-    fm += ["", "## 关键词", ", ".join(keywords) or "（无）"]
-    fm += ["", "## 证据"]
-    evidence = []
-    if doc:
-        evidence.append("- REPO_MAP.md / CAPABILITIES.md / docs/*capabilities*.md")
-    if readme:
-        evidence.append("- README.md")
-    if caps and "N/A" not in caps[:400]:
-        evidence.append("- project-info/project-capabilities.md")
-    if graph:
-        evidence.append("- project-info/project-graph.md")
-    if context_md:
-        evidence.append("- org-context/repos/.../context.md")
-    fm += evidence or ["- （暂无）"]
+    core = features[:4]
+    fm += [f"- {x}" for x in core] or ["- （README / project-info 未提供明确功能列表）"]
+    fm += ["", "## 核心职责"]
+    if core:
+        fm.append("- **负责**：" + "、".join(core))
+    if not_owns:
+        fm.append("- **不负责**：" + "、".join(not_owns))
+    if not core and not not_owns:
+        fm.append("- （README / project-info 未提供职责边界）")
+    other = features[4:]
+    if other:
+        fm += ["", "## 其他能力", "、".join(other) + "。"]
     fm += ["", "> 由 Grape 仓库地图自动生成；可直接编辑本文件或点击「重新分析」刷新。"]
 
     return {
@@ -985,22 +1167,29 @@ def analyze_all(org_id: str, *, actor_id: str = "") -> dict:
 
 
 def _ai_status_map(org_id: str) -> dict[str, dict]:
-    """repo_key -> AI 台账（状态/错误/时间），供组织详情页展示 AI 进度。"""
+    """repo_key -> AI 台账（状态/错误/时间/展示字段），供组织详情页与汇总使用。"""
     try:
         ensure_ai_table()
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT repo_key, status, error, analyzed_at FROM grape_t_org_repo_ai "
-                "WHERE org_id=?",
+                "SELECT repo_key, status, error, analyzed_at, result_json "
+                "FROM grape_t_org_repo_ai WHERE org_id=?",
                 (str(org_id),),
             )
             rows = c.fetchall()
-        return {
-            str(r[0]): {"status": str(r[1] or ""), "error": str(r[2] or ""),
-                        "analyzed_at": str(r[3] or "")}
-            for r in rows
-        }
+        out: dict[str, dict] = {}
+        for r in rows:
+            meta = {"status": str(r[1] or ""), "error": str(r[2] or ""),
+                    "analyzed_at": str(r[3] or "")}
+            try:
+                parsed = json.loads(r[4] or "{}")
+                if isinstance(parsed, dict):
+                    meta.update(_presentation_fields(parsed))
+            except Exception:
+                pass
+            out[str(r[0])] = meta
+        return out
     except Exception as exc:  # noqa: BLE001 - 缺表/分库时退回纯地图视图
         log.debug(f"org_repo_map ai status unavailable org={org_id}: {exc}")
         return {}
@@ -1088,12 +1277,19 @@ def _build_repo_map_summary(org_id: str, data: dict) -> dict:
             str(item.get("status") or "none"))
         lines.append(f"- 状态：{status}")
         lines.append(f"- 一句话定位：{item.get('purpose') or '尚未分析，可点击生成地图补齐。'}")
+        core = item.get("core_functions") or []
+        core_names = [str(x.get("name") or "").strip() for x in core
+                      if isinstance(x, dict) and str(x.get("name") or "").strip()]
+        lines.append(f"- 核心功能：{'、'.join(core_names[:6]) or '（待分析）'}")
+        responsibilities = item.get("core_responsibilities") or {}
+        owns = "、".join((responsibilities.get("owns") or [])[:5])
+        not_owns = "、".join((responsibilities.get("not_owns") or [])[:5])
+        if owns:
+            lines.append(f"- 核心职责：负责 {owns}" + (f"；不负责 {not_owns}" if not_owns else ""))
+        elif not_owns:
+            lines.append(f"- 核心职责：不负责 {not_owns}")
         domains = "、".join((item.get("domains") or [])[:12]) or "（无）"
         lines.append(f"- 主要领域：{domains}")
-        interfaces = "、".join(f"`{x}`" for x in (item.get("interfaces") or [])[:12])
-        lines.append(f"- 对外接口：{interfaces or '（未识别）'}")
-        depends = "、".join((item.get("depends_on") or [])[:12]) or "（未识别）"
-        lines.append(f"- 依赖仓库：{depends}")
         if item.get("analyzed_at"):
             lines.append(f"- 最近分析：{str(item.get('analyzed_at'))[:16].replace('T', ' ')}")
         summary_path = str(item.get("summary_path") or "")
@@ -1140,6 +1336,7 @@ def list_repo_map(org_id: str) -> dict:
             continue
         key = str(row.get("repo_key") or "")
         m = maps.get(key) or {}
+        ai = ai_status.get(key) or {}
         summary_path = _repo_summary_path(key) if m.get("summary_md") else ""
         out.append({
             "repo_key": key,
@@ -1152,6 +1349,9 @@ def list_repo_map(org_id: str) -> dict:
             "interfaces": m.get("interfaces") or [],
             "depends_on": m.get("depends_on") or [],
             "not_owns": m.get("not_owns") or [],
+            "core_functions": ai.get("core_functions") or [],
+            "core_responsibilities": ai.get("core_responsibilities") or {},
+            "other_capabilities": ai.get("other_capabilities") or [],
             "confidence": m.get("confidence") or 0,
             "source_commit": m.get("source_commit") or "",
             "error": m.get("error") or "",
@@ -1161,9 +1361,9 @@ def list_repo_map(org_id: str) -> dict:
             "summary_branch": ORG_REPO_COMBINED_BRANCH if summary_path else "",
             "summary_url": (_repo_file_url(org_repo_key, summary_path, ORG_REPO_COMBINED_BRANCH)
                             if summary_path else ""),
-            "ai_status": (ai_status.get(key) or {}).get("status", ""),
-            "ai_error": (ai_status.get(key) or {}).get("error", ""),
-            "ai_analyzed_at": (ai_status.get(key) or {}).get("analyzed_at", ""),
+            "ai_status": ai.get("status", ""),
+            "ai_error": ai.get("error", ""),
+            "ai_analyzed_at": ai.get("analyzed_at", ""),
         })
     out.sort(key=lambda x: (0 if x["is_org_repo"] else 1, x["full_name"] or x["repo_key"]))
     ready = sum(1 for x in out if x["status"] == "ready")
@@ -1197,6 +1397,10 @@ def repo_map_markdown_files(org_id: str) -> dict[str, str]:
             "domains": item["domains"],
             "keywords": item["keywords"],
             "interfaces": item["interfaces"],
+            "core_functions": item.get("core_functions") or [],
+            "core_responsibilities": item.get("core_responsibilities") or {},
+            "other_capabilities": item.get("other_capabilities") or [],
+            "routing": item.get("routing") or {},
             "confidence": item["confidence"],
             "status": item["status"],
             "analyzed_at": item["analyzed_at"],
@@ -1212,12 +1416,18 @@ def repo_map_markdown_files(org_id: str) -> dict[str, str]:
         f"覆盖：{len(index_items)}/{data['summary']['total']}", "",
     ]
     for item in index_items:
+        core = item.get("core_functions") or []
+        core_names = [str(x.get("name") or "").strip() for x in core
+                      if isinstance(x, dict) and str(x.get("name") or "").strip()]
+        responsibilities = item.get("core_responsibilities") or {}
+        owns = "、".join((responsibilities.get("owns") or [])[:5])
         lines += [
             f"## {item['full_name'] or item['repo_key']}"
             + ("（组织仓库）" if item["is_org_repo"] else ""),
             f"- 定位：{item['purpose'] or '（未填写）'}",
+            f"- 核心功能：{'、'.join(core_names[:6]) or '（待分析）'}",
+            f"- 核心职责：{owns or '（待分析）'}",
             f"- 领域：{', '.join(item['domains']) or '（无）'}",
-            f"- 关键词：{', '.join(item['keywords'][:12]) or '（无）'}",
             f"- 置信度：{item['confidence']} · 状态：{item['status']} · 更新时间：{item['analyzed_at'] or '—'}",
             f"- 详情：`{item['path']}`", "",
         ]
@@ -1270,6 +1480,17 @@ def _value_hit(token: str, values) -> tuple[int, str]:
     return 0, ""
 
 
+def _phrase_hit(tokens: list[str], text: str) -> int:
+    """任务示例/反例与需求的短语命中分：奖励更长、更多的词命中。"""
+    body = str(text or "").strip().lower()
+    if not body:
+        return 0
+    hits = [t for t in tokens if len(t) >= 2 and t in body]
+    if not hits:
+        return 0
+    return min(8, max(len(t) for t in hits) + len(hits) // 2)
+
+
 def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
     """按仓库地图召回目标仓库（全自动派发用）。
 
@@ -1283,6 +1504,7 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
     except (TypeError, ValueError):
         limit = max(1, min(DEFAULT_RECALL_LIMIT, 20))
     maps = {m["repo_key"]: m for m in list_maps(org_id) if m.get("status") == "ready"}
+    ai_profiles = _ai_status_map(org_id)
     repos = [r for r in (list_org_repos(org_id) or []) if r.get("repo_key")]
     candidates = []
     # “不涉及/不负责/排除”后面的是负向约束：不参与正向命中，也不触发 not_owns 排除，
@@ -1303,12 +1525,17 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
         keywords = [str(x) for x in (m.get("keywords") or [])]
         interfaces = [str(x) for x in (m.get("interfaces") or [])]
         not_owns = " ".join(str(x) for x in (m.get("not_owns") or [])).lower()
+        ai = ai_profiles.get(key) or {}
+        core = ai.get("core_functions") or []
+        routing = ai.get("routing") or {}
         _provider, _owner, name = parse_repo_key(key)
         short = str(name or "").lower()
         full = str(row.get("full_name") or m.get("full_name") or "").lower()
         score = 0
         matched: list[str] = []
         excluded: list[str] = []
+        matched_capability = ""
+        matched_examples: list[str] = []
         for token in tokens:
             # not_owns 是软边界：命中“不负责”的词做降权而不是整仓排除。多域需求
             # 经常同时提到“用户登录”和“库存锁定”，不能因为库存仓不负责登录就把
@@ -1335,9 +1562,75 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
                 if key not in matched:
                     matched.append(key)
             score += hit
+
+        # 能力卡判别：把 task_examples / not_for / owned_entities 纳入召回。
+        # 目标不是「关键词出现过」，而是「这个任务像不像该仓的核心能力」。
+        best_cap_score = 0
+        best_cap_examples: list[str] = []
+        best_cap_excluded: list[str] = []
+        for fn in core:
+            if not isinstance(fn, dict):
+                continue
+            terms = ([fn.get("name")] + list(fn.get("keywords") or [])
+                     + list(fn.get("owned_entities") or []))
+            cap_score = 0
+            cap_terms: list[str] = []
+            cap_examples: list[str] = []
+            cap_excluded: list[str] = []
+            for token in tokens:
+                s, v = _value_hit(token, terms)
+                if s:
+                    cap_score += s * 2
+                    cap_terms.append(v)
+            for example in (fn.get("task_examples") or []):
+                hit = _phrase_hit(tokens, example)
+                if hit:
+                    cap_score += hit
+                    cap_examples.append(example)
+            for anti in (fn.get("not_for") or []):
+                hit = _phrase_hit(tokens, anti)
+                if hit:
+                    cap_score -= hit
+                    cap_excluded.append(anti)
+            if cap_score > best_cap_score:
+                best_cap_score = cap_score
+                matched_capability = str(fn.get("name") or "")
+                best_cap_examples = cap_examples[:3]
+                best_cap_excluded = cap_excluded[:3]
+                for v in cap_terms:
+                    if v not in matched:
+                        matched.append(v)
+        score += best_cap_score
+        for example in best_cap_examples:
+            if example not in matched_examples:
+                matched_examples.append(example)
+        for anti in best_cap_excluded:
+            if anti not in excluded:
+                excluded.append(anti)
+
+        for token in tokens:
+            s, v = _value_hit(token, routing.get("include_keywords") or [])
+            if s:
+                score += s * 2
+                if v not in matched:
+                    matched.append(v)
+            s, v = _value_hit(token, routing.get("exclude_keywords") or [])
+            if s:
+                score -= s * 2
+                if v not in excluded:
+                    excluded.append(v)
+        for example in (routing.get("typical_requests") or []):
+            hit = _phrase_hit(tokens, example)
+            if hit:
+                score += hit // 2
+                if example not in matched_examples:
+                    matched_examples.append(example)
+
         if score < _MIN_RECALL_SCORE:
             continue
         reason = "命中：" + ", ".join(dict.fromkeys(matched))[:200]
+        if matched_capability:
+            reason += f"；最匹配能力：{matched_capability}"[:320]
         if excluded:
             reason += "；排除项降权：" + ", ".join(dict.fromkeys(excluded))[:120]
         candidates.append({
@@ -1348,6 +1641,10 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
             "confidence": round(min(0.95, 0.45 + score / 40.0), 2),
             "purpose": m.get("purpose") or "",
             "matched": list(dict.fromkeys(matched)),
+            "matched_capability": matched_capability,
+            "task_examples": matched_examples[:3],
+            "core_functions": [str(x.get("name") or "") for x in core
+                               if isinstance(x, dict) and str(x.get("name") or "")][:6],
         })
     candidates.sort(key=lambda x: (-x["score"], -(x.get("confidence") or 0),
                                    x["repo_key"]))
@@ -1368,6 +1665,9 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
                     "confidence": (maps.get(str(row.get("repo_key") or "")) or {}).get("confidence") or 0,
                     "purpose": (maps.get(str(row.get("repo_key") or "")) or {}).get("purpose") or "",
                     "matched": [],
+                    "matched_capability": "",
+                    "task_examples": [],
+                    "core_functions": [],
                 })
         elif _RECALL_FALLBACK == "top1":
             fallback = True
@@ -1390,6 +1690,9 @@ def recall_targets(org_id: str, query: str, *, limit: int = 3) -> dict:
                     "confidence": (maps.get(key) or {}).get("confidence") or 0,
                     "purpose": (maps.get(key) or {}).get("purpose") or "",
                     "matched": [],
+                    "matched_capability": "",
+                    "task_examples": [],
+                    "core_functions": [],
                 }]
             else:
                 needs_review = True

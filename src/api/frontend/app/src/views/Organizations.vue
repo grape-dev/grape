@@ -681,49 +681,52 @@
           </div>
         </div>
 
-        <section v-if="mapSummaryCapabilities.length" class="org-cap__section">
+        <section v-if="mapCoreFunctions.length" class="org-cap__section">
           <div class="org-cap__label">{{ ct('organizations.workbench.map_summary.capabilities') }}</div>
           <ul class="org-cap__list">
-            <li v-for="item in mapSummaryCapabilities" :key="'cap-' + item">{{ item }}</li>
+            <li v-for="item in mapCoreFunctions" :key="'cap-' + item.name">
+              <strong>{{ item.name }}</strong>
+              <template v-if="item.description">：{{ item.description }}</template>
+              <div v-if="item.task_examples && item.task_examples.length" class="org-cap__hint">
+                {{ ct('organizations.workbench.map_summary.typical_tasks') }}：{{
+                  item.task_examples.slice(0, 2).join('；')
+                }}
+              </div>
+            </li>
           </ul>
         </section>
 
-        <section v-if="mapSummaryInterfaces.length" class="org-cap__section">
-          <div class="org-cap__label">{{ ct('organizations.workbench.map_summary.interfaces') }}</div>
-          <div class="org-cap__chips">
-            <code v-for="item in mapSummaryInterfaces" :key="'if-' + item">{{ item }}</code>
+        <section v-if="mapResponsibilitiesVisible" class="org-cap__section">
+          <div class="org-cap__label">
+            {{ ct('organizations.workbench.map_summary.responsibilities') }}
           </div>
-        </section>
-
-        <section v-if="mapSummaryDepends.length" class="org-cap__section">
-          <div class="org-cap__label">{{ ct('organizations.workbench.map_summary.depends') }}</div>
-          <div class="org-cap__chips">
-            <span v-for="item in mapSummaryDepends" :key="'dep-' + item">{{
-              shortRepo(item)
-            }}</span>
-          </div>
-        </section>
-
-        <section v-if="mapSummaryNotOwns.length" class="org-cap__section">
-          <div class="org-cap__label">{{ ct('organizations.workbench.map_summary.not_owns') }}</div>
-          <ul class="org-cap__list org-cap__list--muted">
-            <li v-for="item in mapSummaryNotOwns" :key="'no-' + item">{{ item }}</li>
+          <ul class="org-cap__list">
+            <li v-if="mapCoreResponsibilities.owns.length">
+              <strong>{{ ct('organizations.workbench.map_summary.owns') }}：</strong
+              >{{ mapCoreResponsibilities.owns.join('、') }}
+            </li>
+            <li v-if="mapCoreResponsibilities.notOwns.length">
+              <strong>{{ ct('organizations.workbench.map_summary.not_owns') }}：</strong
+              >{{ mapCoreResponsibilities.notOwns.join('、') }}
+            </li>
+            <li v-if="mapCoreResponsibilities.role">
+              <strong>{{ ct('organizations.workbench.map_summary.role') }}：</strong
+              >{{ mapCoreResponsibilities.role }}
+            </li>
           </ul>
         </section>
 
-        <section v-if="mapSummaryTags.length" class="org-cap__section">
-          <div class="org-cap__label">{{ ct('organizations.workbench.map_summary.keywords') }}</div>
+        <section v-if="mapOtherCapabilities.length" class="org-cap__section">
+          <div class="org-cap__label">
+            {{ ct('organizations.workbench.map_summary.other_capabilities') }}
+          </div>
           <div class="org-cap__chips">
-            <span v-for="item in mapSummaryTags" :key="'tag-' + item">{{ item }}</span>
+            <span v-for="item in mapOtherCapabilities" :key="'other-' + item">{{ item }}</span>
           </div>
         </section>
 
         <div
-          v-if="
-            !mapSummaryCapabilities.length &&
-            !mapSummaryInterfaces.length &&
-            !mapSummaryNotOwns.length
-          "
+          v-if="!mapCoreFunctions.length && !mapResponsibilitiesVisible"
           class="org-cap__empty"
         >
           {{ ct('organizations.workbench.map_summary.empty') }}
@@ -782,12 +785,15 @@
             <div class="org-summary__repo-purpose">
               {{ item.purpose || t('detail.repo_map_no_purpose') }}
             </div>
-            <div v-if="(item.domains || []).length" class="org-cap__chips">
-              <span
-                v-for="d in (item.domains || []).slice(0, 8)"
-                :key="'summary-tag-' + item.repo_key + '-' + d"
-                >{{ d }}</span
-              >
+            <div v-if="summaryCoreNames(item).length" class="org-summary__repo-purpose">
+              {{ ct('organizations.workbench.map_summary.capabilities') }}：{{
+                summaryCoreNames(item).join('、')
+              }}
+            </div>
+            <div v-if="summaryResponsibilityText(item)" class="org-summary__repo-purpose">
+              {{ ct('organizations.workbench.map_summary.responsibilities') }}：{{
+                summaryResponsibilityText(item)
+              }}
             </div>
           </div>
         </div>
@@ -966,9 +972,6 @@ const filteredBindRepos = computed(() => {
   })
 })
 
-function shortRepo(key) {
-  return String(key || '').replace(/^[^:]+:/, '')
-}
 function _summarySection(md, title) {
   const text = String(md || '')
   const head = text.search(new RegExp('^##[ \\t]*' + title + '[ \\t]*$', 'm'))
@@ -977,40 +980,116 @@ function _summarySection(md, title) {
   const next = after.search(/^##[ \t]+/m)
   return next >= 0 ? after.slice(0, next) : after
 }
-const mapSummaryCapabilities = computed(() => {
-  const body = _summarySection(mapSummary.value.summary_md, '负责的功能')
-  const items = String(body || '')
-    .split('\n')
-    .map((line) => line.replace(/^[-*+]\s*/, '').trim())
-    .filter((line) => line && !/^（.*）$/.test(line))
-  if (items.length) return items.slice(0, 12)
-  return (mapSummary.value.domains || []).filter(Boolean).slice(0, 6)
-})
-const mapSummaryInterfaces = computed(() =>
-  (mapSummary.value.interfaces || []).filter(Boolean).slice(0, 12)
-)
-const mapSummaryDepends = computed(() =>
-  (mapSummary.value.depends_on || [])
-    .filter((item) => item && !['n/a', 'none'].includes(String(item).toLowerCase()))
-    .slice(0, 10)
-)
-const mapSummaryNotOwns = computed(() =>
-  (mapSummary.value.not_owns || []).filter(Boolean).slice(0, 10)
-)
-const mapSummaryTags = computed(() => {
-  const out = []
-  const seen = new Set()
-  for (const item of [
-    ...(mapSummary.value.domains || []),
-    ...(mapSummary.value.keywords || []),
-  ]) {
-    const text = String(item || '').trim()
-    if (!text || text.length > 14 || seen.has(text)) continue
-    seen.add(text)
-    out.push(text)
-    if (out.length >= 12) break
+function _parseFunctionBullet(line) {
+  let text = String(line || '')
+    .replace(/^[-*+]\s*/, '')
+    .trim()
+  if (!text || /^（.*）$/.test(text)) return null
+  const matched = text.match(/^\*\*(.+?)\*\*\s*[：:]\s*(.*)$/)
+  if (matched) {
+    return { name: matched[1].trim(), description: matched[2].trim() }
   }
-  return out
+  text = text.replace(/[*_`]/g, '').trim()
+  return text ? { name: text, description: '' } : null
+}
+const mapCoreFunctions = computed(() => {
+  const structured = Array.isArray(mapSummary.value.core_functions)
+    ? mapSummary.value.core_functions
+    : []
+  if (structured.length) {
+    return structured
+      .map((item) => {
+        if (typeof item === 'string') return { name: item, description: '' }
+        const name = String(item?.name || item?.title || '').trim()
+        return {
+          name,
+          description: String(item?.description || item?.summary || '').trim(),
+        }
+      })
+      .filter((item) => item.name)
+      .slice(0, 6)
+  }
+  const body =
+    _summarySection(mapSummary.value.summary_md, '核心功能') ||
+    _summarySection(mapSummary.value.summary_md, '负责的功能')
+  return String(body || '')
+    .split('\n')
+    .map(_parseFunctionBullet)
+    .filter(Boolean)
+    .slice(0, 6)
+})
+const mapCoreResponsibilities = computed(() => {
+  const structured = mapSummary.value.core_responsibilities || {}
+  let role = String(structured.role || structured.summary || '').trim()
+  let owns = (structured.owns || structured.responsible_for || [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+  let notOwns = (structured.not_owns || structured.does_not_own || [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+  if (!notOwns.length) {
+    notOwns = (mapSummary.value.not_owns || [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  }
+  if (!role || (!owns.length && !notOwns.length)) {
+    const body = _summarySection(mapSummary.value.summary_md, '核心职责')
+    for (const raw of String(body || '').split('\n')) {
+      const line = raw.replace(/^[-*+]\s*/, '').trim()
+      if (!line || /^（.*）$/.test(line)) continue
+      const matched = line.match(/^\*{0,2}(负责|不负责|组织角色)\*{0,2}\s*[：:]\s*(.*)$/)
+      if (!matched) continue
+      const value = matched[2].replace(/[*_`]/g, '').trim()
+      if (!value) continue
+      if (matched[1] === '负责') {
+        owns = value
+          .split(/[、,，]/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      } else if (matched[1] === '不负责') {
+        notOwns = value
+          .split(/[、,，]/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      } else if (!role) {
+        role = value
+      }
+    }
+  }
+  return {
+    role: role.slice(0, 300),
+    owns: owns.slice(0, 8),
+    notOwns: notOwns.slice(0, 8),
+  }
+})
+const mapResponsibilitiesVisible = computed(
+  () =>
+    !!mapCoreResponsibilities.value.role ||
+    !!mapCoreResponsibilities.value.owns.length ||
+    !!mapCoreResponsibilities.value.notOwns.length
+)
+const mapOtherCapabilities = computed(() => {
+  const structured = Array.isArray(mapSummary.value.other_capabilities)
+    ? mapSummary.value.other_capabilities
+    : []
+  if (structured.length) {
+    return structured
+      .map((item) => {
+        if (typeof item === 'string') return item.trim()
+        return String(item?.name || item?.title || item?.description || '').trim()
+      })
+      .filter(Boolean)
+      .slice(0, 10)
+  }
+  const body = _summarySection(mapSummary.value.summary_md, '其他能力')
+  return String(body || '')
+    .split('\n')
+    .map((line) => line.replace(/^[-*+]\s*/, '').replace(/[。.]$/, '').trim())
+    .filter((line) => line && !/^（.*）$/.test(line))
+    .flatMap((line) => line.split(/[、,，]/))
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 10)
 })
 const mapConfidencePct = computed(() =>
   Math.round(Number(mapSummary.value.confidence || 0) * 100)
@@ -1344,6 +1423,24 @@ function summaryRepoStatus(item) {
     failed: 'failed',
   }
   return mapped[raw] || String((item && item.status) || 'none')
+}
+function summaryCoreNames(item) {
+  return (item?.core_functions || [])
+    .map((x) => (typeof x === 'string' ? x : String(x?.name || x?.title || '')))
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .slice(0, 5)
+}
+function summaryResponsibilityText(item) {
+  const raw = item?.core_responsibilities || {}
+  const owns = (raw.owns || []).filter(Boolean).slice(0, 4)
+  const notOwns = (raw.not_owns || item?.not_owns || []).filter(Boolean).slice(0, 4)
+  const parts = []
+  if (owns.length) parts.push(`${ct('organizations.workbench.map_summary.owns')} ${owns.join('、')}`)
+  if (notOwns.length) {
+    parts.push(`${ct('organizations.workbench.map_summary.not_owns')} ${notOwns.join('、')}`)
+  }
+  return parts.join('；')
 }
 let _mapPollTimer = null
 function _stopMapPoll() {
@@ -2651,6 +2748,12 @@ if (props.initialCreate && !props.initialDetailId) {
 }
 .org-cap__list--muted li::before {
   background: var(--c-text-3);
+}
+.org-cap__hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--c-text-3);
+  line-height: 1.5;
 }
 .org-cap__chips {
   display: flex;

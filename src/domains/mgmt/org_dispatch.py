@@ -529,15 +529,21 @@ def _target_scope_md(org_id: str, repo_key: str) -> str:
         "## 本仓职责（仓库地图）",
         f"- 定位：{m.get('purpose') or '（未填写）'}",
     ]
-    if m.get("interfaces"):
-        lines.append("- 对外接口：" + ", ".join(
-            f"`{x}`" for x in (m.get("interfaces") or [])[:8]))
-    if m.get("not_owns"):
-        lines.append("- 不负责：" + "、".join(
-            str(x) for x in (m.get("not_owns") or [])[:6]))
-    if m.get("keywords"):
-        lines.append("- 能力关键词：" + "、".join(
-            str(x) for x in (m.get("keywords") or [])[:10]))
+    core = [str(x.get("name") or "").strip() for x in (m.get("core_functions") or [])
+            if isinstance(x, dict) and str(x.get("name") or "").strip()]
+    if core:
+        lines.append("- 核心功能：" + "、".join(core[:5]))
+    responsibilities = m.get("core_responsibilities") or {}
+    owns = [str(x) for x in (responsibilities.get("owns") or []) if str(x).strip()]
+    not_owns = [str(x) for x in (responsibilities.get("not_owns")
+                                 or m.get("not_owns") or []) if str(x).strip()]
+    role = str(responsibilities.get("role") or "").strip()
+    if owns:
+        lines.append("- 负责：" + "、".join(owns[:5]))
+    if not_owns:
+        lines.append("- 不负责：" + "、".join(not_owns[:6]))
+    if role:
+        lines.append("- 组织角色：" + role[:300])
     lines.append("- 只改本仓职责内的部分；跨仓依赖通过组织上下文协调，不要越界修改其他仓库。")
     return "\n".join(lines)
 
