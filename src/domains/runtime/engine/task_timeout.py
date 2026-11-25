@@ -58,10 +58,16 @@ DEFAULT_NO_PROGRESS_RETRIES = 1
 #: Issue #2793：无进展自愈总开关（false = 整体回滚，仅留诊断不重派）。
 DEFAULT_NO_PROGRESS_ENABLED = True
 
+#: Issue #3741：连续相同 tool+input 指纹的步数阈值（0 = 关闭指纹判据）。
+#: 实测死循环表现为同一条 `sleep 115; tail ...; pgrep ...` 重复 43 次（约 115s/次），
+#: 8 步（约 15 分钟内）足以识别空转，又不至于把「正常重试同一命令两三次」误判。
+DEFAULT_NO_PROGRESS_REPEAT_STEPS = 8
+
 #: Issue #2793：无进展阈值/重派次数的任务级显式 env（手动调参，最高优先）。
 _NO_PROGRESS_TIMEOUT_ENV = "RUNTIME_NO_PROGRESS_TIMEOUT"
 _NO_PROGRESS_RETRIES_ENV = "RUNTIME_NO_PROGRESS_RETRIES"
 _NO_PROGRESS_ENABLED_ENV = "RUNTIME_NO_PROGRESS_ENABLED"
+_NO_PROGRESS_REPEAT_STEPS_ENV = "RUNTIME_NO_PROGRESS_REPEAT_STEPS"
 
 #: 超时 fail 消息签名（PR #722 审查建议集中定义）：worker 侧超时 kill 上报
 #: `task timed out after {N}s`，alerts.py / metric_rollup.py 的 M3 观测按此
@@ -257,7 +263,7 @@ def retry_backoff_sec(cfg: Optional[Dict[str, Any]] = None) -> float:
 # ── Issue #2793：无进展（假死）自愈配置链 ────────────────────────────────
 #
 # 优先级（高 → 低）：
-#   1. 任务级 env_extra（RUNTIME_NO_PROGRESS_TIMEOUT / _RETRIES / _ENABLED）
+#   1. 任务级 env_extra（RUNTIME_NO_PROGRESS_TIMEOUT / _RETRIES / _ENABLED / _REPEAT_STEPS）
 #   2. per_skill[skill] 的 dict 条目字段（no_progress_timeout_sec 等）
 #   3. per_repo[repo_key] 的 dict 条目字段
 #   4. 配置文件顶层 no_progress_timeout_sec / no_progress_retries / no_progress_enabled
@@ -348,6 +354,36 @@ def no_progress_retries(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = No
     if v is not None:
         return v
     return DEFAULT_NO_PROGRESS_RETRIES
+
+
+def no_progress_repeat_steps(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> int:
+    """Issue #3741：解析「连续相同 tool+input 指纹」判据的步数阈值（0 = 关闭）。
+
+    与 no_progress_retries 同一条配置链，0 是**合法值**（显式关闭指纹判据、只保留
+    #2793 的活跃度判据）；负数/非法字符串视为未配置，继续回退下一层。
+    """
+    if cfg is None:
+        cfg = load_timeout_config()
+    tenv = _task_env(task)
+    v = _non_negative_int(tenv.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
+    if v is not None:
+        return v
+
+    skill = str(task.get("skill") or "").strip()
+    repo = str(task.get("repo_key") or "").strip()
+    for section, key in (("per_skill", skill), ("per_repo", repo)):
+        entry = _section_entry(cfg, section, key)
+        v = _non_negative_int(_no_progress_field_from_entry(entry, "no_progress_repeat_steps"))
+        if v is not None:
+            return v
+
+    v = _non_negative_int(cfg.get("no_progress_repeat_steps"))
+    if v is not None:
+        return v
+    v = _non_negative_int(os.environ.get(_NO_PROGRESS_REPEAT_STEPS_ENV))
+    if v is not None:
+        return v
+    return DEFAULT_NO_PROGRESS_REPEAT_STEPS
 
 
 def no_progress_enabled(task: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> bool:
