@@ -664,6 +664,47 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+def merge_event_payload(seq: int, extra: dict) -> bool:
+    """Issue #3790：合并事件 payload 字段（读-改-写短事务），供派发门禁回填结构化来源。
+
+    派发门禁（_scene_pool_gate → get_scene_pool_engine_ids）在事件 INSERT 之后才解析出
+    `pool_engine_source`，需要把 scene_missing 等来源回填到事件 payload，事件中心才能
+    按该字段筛选/区分「场景未注册」与「引擎离线」。旧行 payload 非法 JSON 时以新值重建。
+
+    返回 True=已写入或已是目标值；False=事件不存在/写入失败（不抛，派发不因此失败）。
+    """
+    if not seq or not isinstance(extra, dict) or not extra:
+        return False
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute("SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
+            if not row:
+                return False
+            current = {}
+            if row[0]:
+                try:
+                    current = json.loads(row[0])
+                except Exception:
+                    current = {}
+            if not isinstance(current, dict):
+                current = {}
+            if all(current.get(k) == v for k, v in extra.items()):
+                return True
+            current.update(extra)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(current, ensure_ascii=False), int(seq)))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"merge_event_payload failed seq={seq}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
+
+
 # ====== Issue #2508：终态 a2a 事件投递去重 ======
 def _non_replayable_task_statuses() -> tuple:
     """不可重放的任务终态：以 ``service.TASK_TERMINAL_STATUSES`` 为单源，
