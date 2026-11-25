@@ -78,6 +78,64 @@ def test_gate_ignores_local_only_and_plain_db_calls():
     assert scanner.violations == [], "纯 DB/白名单调用不得被误报（否则门禁会被放宽到失效）"
 
 
+def test_gate_detects_violation_in_acquire_release_block():
+    """``acquired = db_lock.acquire(...)`` + try/finally release 形态也要被扫出来。"""
+    gate = _load_gate_module()
+    source = (
+        "def bad(repo_key):\n"
+        "    acquired = db_lock.acquire(timeout=30)\n"
+        "    try:\n"
+        "        client.fetch_issue(repo_key)\n"
+        "        maybe_notify_review_point_status(repo_key, 1, 'pending_review')\n"
+        "        c = db.cursor()\n"
+        "        c.execute('SELECT 1')\n"
+        "    finally:\n"
+        "        if acquired:\n"
+        "            db_lock.release()\n"
+    )
+    calls = {v["call"] for v in gate.scan_source("src/synthetic.py", source)}
+    assert "client.fetch_issue" in calls, "锁内远程调用必须被抓到（acquire/release 形态）"
+    assert "maybe_notify_review_point_status" in calls
+    assert "c.execute" not in calls, "DB 本地方法不得误报"
+
+
+def test_gate_acquire_release_ignores_pure_db_block():
+    """acquire/release 包裹的纯 DB 块不误报（pipeline_config._get_scene_columns 的真实形态）。"""
+    gate = _load_gate_module()
+    source = (
+        "def ok():\n"
+        "    db, lock = _db()\n"
+        "    acquired = lock.acquire(timeout=30)\n"
+        "    try:\n"
+        "        if acquired:\n"
+        "            c = db.cursor()\n"
+        "            c.execute('SHOW COLUMNS FROM devpipe')\n"
+        "            cols = {r[0] for r in c.fetchall()}\n"
+        "    finally:\n"
+        "        if acquired:\n"
+        "            lock.release()\n"
+    )
+    # 该文件登记了 `lock` 别名（db, lock = _db()）；纯 DB 调用应为 0 命中
+    rel = "src/domains/mgmt/pipeline_config.py"
+    assert "lock" in gate._file_lock_aliases(ast.parse(source), rel)
+    assert gate.scan_source(rel, source) == []
+
+
+def test_gate_acquire_release_requires_the_registered_lock():
+    """用户级 threading.Lock 的 acquire/release 不算 db_lock 临界区。"""
+    gate = _load_gate_module()
+    source = (
+        "def refresh(user_id):\n"
+        "    lock = _get_user_refresh_lock(user_id)\n"
+        "    acquired = lock.acquire(timeout=5)\n"
+        "    try:\n"
+        "        return user_db.refresh_gitcode_oauth_token(user_id)\n"
+        "    finally:\n"
+        "        lock.release()\n"
+    )
+    assert gate.scan_source("src/api/deps.py", source) == []
+
+
 def test_gate_does_not_treat_user_level_threading_lock_as_db_lock():
     """``with lock:`` 若是用户级 threading.Lock，不得算 db_lock 临界区。"""
     gate = _load_gate_module()

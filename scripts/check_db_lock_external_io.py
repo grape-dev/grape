@@ -9,18 +9,28 @@
 ``POST /api/repos/host`` 两条 502（47.9s / 56.2s）。
 
 本脚本把「锁内不许做外部 IO」变成提交前就能失败的**门禁**，而不是等下一次 100s
-卡顿再抓 py-spy：
+卡顿再抓 py-spy。两种临界区形态都要扫（含 ``db_lock`` 别名）：
 
-  while 遍历全部 ``with db_lock:``（含 ``db_lock`` 别名 ``_lock``/``lock``），
-  块体内**不跨嵌套函数**地收集调用名，命中外部 IO 名单即报违规。
+  1. ``with db_lock:`` 块体；
+  2. ``acquired = db_lock.acquire(timeout=...)`` 之后紧跟
+     ``try/except/finally: db_lock.release()`` 的显式形态
+     （如 ``src/domains/mgmt/pipeline_config.py:_get_scene_columns``）。
+
+块体内**不跨嵌套函数**地收集调用名，命中外部 IO 名单即报违规。
 
 判定名单是高精度的（只报确定的远程/进程外调用）：函数名或属性名包含
 ``notify`` / ``vcs`` / ``gitcode`` / ``github`` / ``gitlab`` / ``feishu`` /
 ``dingtalk`` / ``wecom`` / ``slack`` / ``telegram`` / ``webhook`` /
 ``urlopen`` / ``requests`` / ``httpx`` / ``aiohttp`` / ``subprocess`` / ``_client``。
 
+已知局限（有意为之，宁漏不误报）：只做语句级结构分析，**不跨函数调用边界**追踪——
+「持锁后调用一个内部会做远程 IO 的普通 helper」不会被判违规（该 helper 若不自己
+持锁也不会被单独扫描到）。这类遗漏靠代码评审兜底，不靠放宽 token 名单。
+
 棘轮：存量违规记在 ``configs/db_lock_external_io_baseline.json``。新增即失败；
 清理后用 ``--update-baseline`` 收紧（与 ``scripts/check_async_blocking.py`` 同款做法）。
+本 PR 落地时整棵 ``src/`` 上是 **0 命中**，因此该基线文件**不存在、也不需要存在**；
+``--update-baseline`` 只在存量需要登记时生成它（0 命中不必提交一个空基线）。
 
 用法：
   python3 scripts/check_db_lock_external_io.py                  # 检查（棘轮）
@@ -155,13 +165,15 @@ def _file_io_aliases(tree: ast.AST) -> frozenset[str]:
 
 
 class _Scanner(ast.NodeVisitor):
-    """收集每个 ``with db_lock:`` 块体内的外部 IO 调用。"""
+    """收集 ``with db_lock:``（及 ``acquire()``+``try/finally`` 形态）块体内的外部 IO 调用。"""
 
     def __init__(self, path: str, lock_aliases: set[str],
-                 io_vars: frozenset[str] = IO_VAR_NAMES) -> None:
+                 io_vars: frozenset[str] = IO_VAR_NAMES,
+                 stmt_pos: dict[int, tuple[list, int]] | None = None) -> None:
         self.path = path
         self.lock_aliases = lock_aliases
         self.io_vars = io_vars
+        self.stmt_pos = stmt_pos or {}
         self.scope: list[str] = []
         self.violations: list[dict] = []
 
@@ -185,15 +197,46 @@ class _Scanner(ast.NodeVisitor):
             body_calls: list[tuple[str, int]] = []
             for stmt in node.body:
                 self._collect(stmt, body_calls)
-            for name, lineno in body_calls:
-                if _is_external_io(name, self.io_vars):
-                    self.violations.append({
-                        "file": self.path,
-                        "function": self.scope[-1] if self.scope else "<module>",
-                        "lineno": lineno,
-                        "call": name,
-                    })
+            self._report(body_calls)
         self.generic_visit(node)
+
+    def visit_Try(self, node: ast.Try) -> None:  # noqa: N802
+        """``acquired = lock.acquire(...)`` + ``try/except/finally: lock.release()`` 形态。
+
+        ``src/domains/mgmt/pipeline_config.py:_get_scene_columns`` 就是这种写法（显式
+        timeout=30 的 acquire + try/finally release），只认 ``with`` 会把这类临界区漏掉。
+        判定：同一语句块里**先**出现 ``<lock>.acquire(...)``，随后紧跟 ``try`` 且其
+        ``finally`` 里 ``<lock>.release()`` → 该 try 的 body/orelse/handlers 都在锁内。
+        """
+        released = _released_aliases(node.finalbody, self.lock_aliases)
+        if released:
+            armed: set[str] = set()
+            pos = self.stmt_pos.get(id(node))
+            if pos is not None:
+                block, idx = pos
+                for prev in block[:idx]:
+                    armed |= _acquire_aliases(prev, released)
+            for stmt in node.body:  # 也接受 acquire 写在 try body 开头的形态
+                armed |= _acquire_aliases(stmt, released)
+            if armed:
+                body_calls: list[tuple[str, int]] = []
+                for stmt in list(node.body) + list(node.orelse):
+                    self._collect(stmt, body_calls)
+                for handler in node.handlers:
+                    for stmt in handler.body:
+                        self._collect(stmt, body_calls)
+                self._report(body_calls)
+        self.generic_visit(node)
+
+    def _report(self, body_calls: list[tuple[str, int]]) -> None:
+        for name, lineno in body_calls:
+            if _is_external_io(name, self.io_vars):
+                self.violations.append({
+                    "file": self.path,
+                    "function": self.scope[-1] if self.scope else "<module>",
+                    "lineno": lineno,
+                    "call": name,
+                })
 
     def _collect(self, node: ast.AST, out: list[tuple[str, int]]) -> None:
         """块体内收集调用名；不跨嵌套 def/async def（它们是独立函数，各自判定）。"""
@@ -209,16 +252,81 @@ class _Scanner(ast.NodeVisitor):
             stack.extend(ast.iter_child_nodes(cur))
 
 
+def _statement_blocks(tree: ast.AST) -> dict[int, tuple[list, int]]:
+    """每条语句 → (所在语句列表, 下标)，用于判定「acquire 出现在 try 之前」。"""
+    pos: dict[int, tuple[list, int]] = {}
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and all(isinstance(s, ast.stmt) for s in block):
+                for idx, stmt in enumerate(block):
+                    pos[id(stmt)] = (block, idx)
+    return pos
+
+
+def _lock_receiver(func: ast.expr, aliases: set[str]) -> str:
+    """``X.acquire()``/``X.release()`` 里 X 的别名（不在 aliases 里则空串）。"""
+    if not isinstance(func, ast.Attribute):
+        return ""
+    base = func.value
+    if isinstance(base, ast.Name) and base.id in aliases:
+        return base.id
+    if isinstance(base, ast.Attribute) and base.attr in aliases:
+        return base.attr
+    return ""
+
+
+def _acquire_aliases(node: ast.AST, aliases: set[str]) -> set[str]:
+    out: set[str] = set()
+    for cur in ast.walk(node):
+        if isinstance(cur, ast.Call) and getattr(cur.func, "attr", "") == "acquire":
+            name = _lock_receiver(cur.func, aliases)
+            if name:
+                out.add(name)
+    return out
+
+
+def _released_aliases(stmts: list[ast.stmt], aliases: set[str]) -> set[str]:
+    out: set[str] = set()
+    for stmt in stmts:
+        for cur in ast.walk(stmt):
+            if isinstance(cur, ast.Call) and getattr(cur.func, "attr", "") == "release":
+                name = _lock_receiver(cur.func, aliases)
+                if name:
+                    out.add(name)
+    return out
+
+
+def _dedupe(violations: list[dict]) -> list[dict]:
+    """同一行同一调用可能同时被 ``with`` 与 ``try/finally`` 两条判定命中，去重后上报。"""
+    seen: set[tuple[int, str]] = set()
+    out: list[dict] = []
+    for v in violations:
+        key = (int(v.get("lineno") or 0), str(v.get("call") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+    return out
+
+
+def scan_source(rel: str, source: str) -> list[dict]:
+    """扫描一段源码（测试用同一入口，保证 `_Scanner` 的两种判定形态都被覆盖）。"""
+    tree = ast.parse(source)
+    scanner = _Scanner(rel, _file_lock_aliases(tree, rel), _file_io_aliases(tree),
+                       _statement_blocks(tree))
+    scanner.visit(tree)
+    return _dedupe(scanner.violations)
+
+
 def scan_file(path: Path) -> list[dict]:
     rel = path.relative_to(REPO).as_posix()
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        return scan_source(rel, source)
     except (SyntaxError, UnicodeDecodeError) as e:  # pragma: no cover - 语法错误另有门禁
         print(f"[skip] {rel}: {e}", file=sys.stderr)
         return []
-    scanner = _Scanner(rel, _file_lock_aliases(tree, rel), _file_io_aliases(tree))
-    scanner.visit(tree)
-    return scanner.violations
 
 
 def scan_tree(root: Path = SRC) -> list[dict]:
